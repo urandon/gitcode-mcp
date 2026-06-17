@@ -1,0 +1,11 @@
+.DS_Store
+ai/
+.cache/
+bin/
+*.test
+*.out
+.env
+.env.*
+local/
+cache/
+exports/
