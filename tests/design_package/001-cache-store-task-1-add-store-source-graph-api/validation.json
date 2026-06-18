@@ -1,0 +1,26 @@
+{
+  "covered_outcome_ids": [
+    "outcome-2",
+    "outcome-6",
+    "outcome-9"
+  ],
+  "covered_decommission_ids": [
+    "decommission-4"
+  ],
+  "product_surfaces": [
+    "internal/cache.Store",
+    "internal/cache.SQLiteStore",
+    "internal/cache.UpsertSourceGraph",
+    "internal/cache.GetBacklinks",
+    "internal/cache.GetIdentityMap",
+    "internal/cache.ResolveAlias",
+    "internal/cache.GetChunks",
+    "internal/cache.GetSyncStatus",
+    "internal/cache.GetConflicts",
+    "go test ./... package graph"
+  ],
+  "evidence_type": "offline executable CLI command",
+  "freshness": "current source build",
+  "mocks_used": "none",
+  "production_files_modified": []
+}
