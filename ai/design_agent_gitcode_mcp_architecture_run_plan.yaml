@@ -6,11 +6,12 @@ metadata:
 spec:
   workflow: triborg-design-agent-ywd
   workflow_id_prefix: gitcode-mcp-design-agent
-  path_aliases:
-    repo: "@plan_dir/.."
-    ai: "@repo/ai"
-    artifacts: "@ai/artifacts"
-  artifact_root: "@artifacts/design_agent_gitcode_mcp_architecture"
+  runtime:
+    path_aliases:
+      repo: "@plan_dir/.."
+      ai: "@repo/ai"
+      artifacts: "@ai/artifacts"
+    artifacts_root: "@artifacts"
   cases:
     - run_label: gitcode_mcp_cache_first_architecture
       input:
@@ -26,6 +27,7 @@ spec:
           - The first useful product slice should be read-first: source ingest, local cache, search/get/backlinks/resolve/sync-status, deterministic export/diff, then MCP read tools.
           - Writes to GitCode should be explicit, idempotent, logged, and optional; routine reads must not require live GitCode access.
           - The end-state should replace the current ad-hoc agent knowledge layer where an agent walks a plaintext repo, uses `find`, `rg --files`, `rg -n`, `sed`, and hand-maintained markdown indexes to orient itself.
+          - RAG is useful for coordinator work, but it is not the first implementation slice. The first slice must be RAG-ready by preserving source identity, chunks, offsets, metadata, backlinks, and citation anchors so semantic retrieval can be added later without a cache migration.
           - Source-analysis expectations:
             - Treat GitCode official docs as primary web/API evidence, especially `https://docs.gitcode.com/docs/apis/` for `/api/v5`, auth, status codes, rate limits, issues, repositories, search, and pull requests.
             - Treat cloneable reference repositories under `competitors[].source_url` as source-code evidence that the flow may clone into the run artifacts automatically.
@@ -42,6 +44,7 @@ spec:
           7. Define public-safe fixture strategy: sanitized GitCode responses, no credentials, no internal URLs, no non-public source names.
           8. Define testing strategy: unit tests for cache/index/link resolution, golden exports, adapter contract tests over fixtures, MCP tool tests, and integration tests gated behind explicit credentials.
           9. Produce a one-week implementation plan with milestones that gives us a useful first version without broad migration work.
+          10. Define the RAG readiness boundary: what must be stored and exposed now for future semantic retrieval, and what should remain a later optional extension.
 
           Knowledge-layer replacement requirements:
           - Model the current agent read path explicitly: start from repo map, read agent guide, read live coordinator/status surfaces, inspect backlog, inspect track/source indexes, then open task/source/handoff files by stable id.
@@ -105,6 +108,35 @@ spec:
           - Include migration semantics for replacing clickable local markdown links with GitCode issue/wiki links while preserving local cache links and bidirectional alias maps.
           - Include a "minimum replacement bar": an agent should be able to perform a coordinator intake, task lookup, handoff review, stale pointer search, and source citation using only `gitcode-mcp` cache/MCP reads when the network is offline.
 
+          RAG-ready substrate requirements:
+          - Treat RAG as a later query consumer over the local cache, not as the first product slice or the source of truth.
+          - Build a hybrid retrieval foundation now: exact ID lookup, metadata filters, BM25/literal search, backlinks, and snippets must work before embeddings.
+          - Store raw documents separately from derived projections and future embedding records.
+          - Define a stable chunk model:
+            - chunk id;
+            - source id;
+            - source revision/content hash;
+            - byte offsets;
+            - line start/end;
+            - heading path;
+            - text;
+            - normalized text;
+            - metadata inherited from the source;
+            - outbound links and resolved aliases.
+          - Preserve citation fidelity for every chunk: future semantic answers must cite source id/path/wiki URL plus line/snippet, not only vector ids.
+          - Keep chunking deterministic and re-runnable from raw cache records; embeddings, if added later, are disposable derived artifacts.
+          - Add a corpus export boundary so external RAG/indexing tools can consume the cache without depending on GitCode network access.
+          - Define enough metadata to support coordinator retrieval:
+            - kind, status, track, topic, task id, source id, GitCode issue id, wiki page id, repo, branch, workflow id, run id, author/owner, created/updated timestamps, accepted/stale/superseded/review labels.
+          - Defer these until after the read-first cache/search slice:
+            - embedding provider integration;
+            - vector database selection;
+            - reranking;
+            - semantic answer generation;
+            - chat memory over tracker/wiki;
+            - model-specific retrieval tuning.
+          - State explicitly how a later RAG layer would compose with existing tools: semantic search proposes candidate chunks, but `resolve_id`, `get_source`, `get_snippet`, backlinks, and sync status remain authoritative for citation and freshness.
+
           Required output shape:
           - Executive architecture summary.
           - Component diagram in Mermaid.
@@ -113,6 +145,7 @@ spec:
           - CLI command contract table.
           - MCP tool contract table.
           - Derived index/build pipeline design.
+          - RAG readiness boundary: required source/chunk/provenance model now, deferred vector/embedding work later.
           - Cache/sync state machine.
           - Failure-mode table for poor network availability.
           - Security/public-safety notes.
@@ -170,6 +203,13 @@ spec:
                 walking and grep: frontmatter, headings, ids, statuses, links,
                 backlinks, snippets, derived rows, stale-index detection, and
                 citation anchors.
+            - id: rag-ready-corpus
+              name: RAG-Ready Corpus Boundary
+              prompt: >-
+                Define the source/chunk/provenance/export model that makes the
+                cache usable by a later semantic retrieval or RAG layer without
+                putting embeddings, vector storage, reranking, or generated
+                answers into the first implementation slice.
             - id: agent-query-surface
               name: Agent Query Surface
               prompt: >-
@@ -197,9 +237,9 @@ spec:
               prompt: Define config, credential handling, redaction, audit logs, telemetry, error diagnostics, and public-safe repository practices.
           search:
             provider: exa
-            max_queries: 8
-            max_results: 10
-            max_sources: 20
+            max_queries: 20
+            max_results: 50
+            max_sources: 100
             gap_fill_enabled: false
             fallback_queries:
               - query: GitCode OpenAPI /api/v5 issues repositories search authentication rate limits docs.gitcode.com
@@ -225,6 +265,9 @@ spec:
                 priority: medium
               - query: cache-first CLI offline sync local index MCP server Go architecture
                 intent: Find adjacent implementation patterns for local cache/search/sync tooling.
+                priority: medium
+              - query: RAG retrieval chunk provenance citation anchors local document cache BM25 vector hybrid search architecture
+                intent: Find design evidence for making a local document cache RAG-ready while preserving exact citations.
                 priority: medium
           runtime:
             max_parallel_research: 3
