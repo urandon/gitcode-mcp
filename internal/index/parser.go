@@ -20,7 +20,7 @@ func ParseSource(source SourceRecord) ParsedSource {
 	lineStarts := computeLineStarts(source.Body)
 	frontmatter, bodyStart, fmDiagnostics := parseFrontmatter(source, normalized, lineStarts)
 	diagnostics = append(diagnostics, fmDiagnostics...)
-	parsed := ParsedSource{SourceID: source.ID, ContentHash: ContentHash(source.Body), Frontmatter: frontmatter, Diagnostics: diagnostics, LineStarts: lineStarts, NormalizedBody: normalized}
+	parsed := ParsedSource{SourceID: source.ID, ContentHash: ContentHash(source.Body), Frontmatter: frontmatter, FrontmatterEnd: bodyStart, Diagnostics: diagnostics, LineStarts: lineStarts, NormalizedBody: normalized}
 	metadata := mergeMetadata(source.Metadata, frontmatter.Values)
 	parsed.Aliases = aliasesFromMetadata(metadata)
 	lines := splitNormalizedLines(normalized)

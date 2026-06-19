@@ -216,6 +216,6 @@ func lineFor(body, needle string) int {
 }
 
 func deterministicChunkID(chunk Chunk) string {
-	sum := sha256.Sum256([]byte(chunk.SourceID + chunk.ContentHash + strconv.Itoa(chunk.ByteStart)))
+	sum := sha256.Sum256([]byte(chunk.SourceID + "\x00" + chunk.ContentHash + "\x00" + strconv.Itoa(chunk.ByteStart)))
 	return hex.EncodeToString(sum[:])
 }

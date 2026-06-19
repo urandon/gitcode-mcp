@@ -59,17 +59,18 @@ type SourceDerived struct {
 }
 
 type ParsedSource struct {
-	SourceID       string
-	ContentHash    string
-	Frontmatter    Frontmatter
-	Headings       []Heading
-	Links          []Link
-	StableIDs      []StableID
-	Aliases        []Alias
-	Statuses       []Status
-	Diagnostics    []CollisionDiagnostic
-	LineStarts     []int
-	NormalizedBody string
+	SourceID        string
+	ContentHash     string
+	Frontmatter     Frontmatter
+	FrontmatterEnd  int
+	Headings        []Heading
+	Links           []Link
+	StableIDs       []StableID
+	Aliases         []Alias
+	Statuses        []Status
+	Diagnostics     []CollisionDiagnostic
+	LineStarts      []int
+	NormalizedBody  string
 }
 
 type Frontmatter struct {
@@ -210,6 +211,7 @@ type Chunk struct {
 	InheritedMetadata map[string]string
 	OutboundLinks     []string
 	ResolvedAliases   map[string]string
+	Embedding         []byte
 	CitationAnchorID  string
 }
 

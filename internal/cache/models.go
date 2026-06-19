@@ -96,6 +96,7 @@ type Chunk struct {
 	InheritedMetadata map[string]string
 	OutboundLinks     []string
 	ResolvedAliases   map[string]string
+	Embedding         []byte
 }
 
 type SyncEvent struct {

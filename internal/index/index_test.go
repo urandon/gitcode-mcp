@@ -67,7 +67,8 @@ func TestIndexPipeline(t *testing.T) {
 }
 
 func TestChunkDeterminism(t *testing.T) {
-	source := fixtureSource("DOC-123", "doc", "docs/design.md", "Design", "ready", "---\ncomponent: knowledge-indexer\n---\n# Alpha\nText with [task](TASK-001).\n## Beta\nMore text.\n")
+	body := "---\ncomponent: knowledge-indexer\nalias: ALIAS-1\n---\npre heading text\n# Alpha\nText with [task](TASK-001) and DOC-999.\n```\nDo  NOT   Collapse\n```\n## Beta\nMore\ttext.\n"
+	source := fixtureSource("DOC-123", "doc", "docs/design.md", "Design", "ready", body)
 	parsed := ParseSource(source)
 	chunks := ChunkSource(source, parsed)
 	again := ChunkSource(source, parsed)
@@ -75,21 +76,49 @@ func TestChunkDeterminism(t *testing.T) {
 		t.Fatalf("chunks differ across runs\nfirst:  %+v\nsecond: %+v", chunks, again)
 	}
 	if len(chunks) != 3 {
-		t.Fatalf("chunk count = %d, want 3", len(chunks))
+		t.Fatalf("chunk count = %d, want 3: %+v", len(chunks), chunks)
 	}
-	if chunks[1].ByteStart != strings.Index(source.Body, "# Alpha") || chunks[1].LineStart != 4 || !reflect.DeepEqual(chunks[1].HeadingPath, []string{"Alpha"}) {
-		t.Fatalf("heading chunk = %+v, want Alpha at original offset/line", chunks[1])
-	}
-	if len(chunks[1].OutboundLinks) != 1 || chunks[1].OutboundLinks[0] != "TASK-001" {
-		t.Fatalf("chunk outbound links = %+v, want TASK-001", chunks[1].OutboundLinks)
-	}
-	if chunks[1].InheritedMetadata["component"] != "knowledge-indexer" || chunks[1].InheritedMetadata["source_id"] != "DOC-123" {
-		t.Fatalf("chunk metadata = %+v", chunks[1].InheritedMetadata)
-	}
+	frontmatterEnd := strings.Index(source.Body, "pre heading text")
 	for _, chunk := range chunks {
-		if chunk.ID == "" || chunk.CitationAnchorID == "" || chunk.NormalizedText == "" {
+		if chunk.ByteStart < frontmatterEnd {
+			t.Fatalf("chunk overlaps frontmatter: %+v", chunk)
+		}
+		if chunk.Text != source.Body[chunk.ByteStart:chunk.ByteEnd] {
+			t.Fatalf("chunk text is not source byte slice: %+v", chunk)
+		}
+		if snippet := source.Body[chunk.ByteStart:chunk.ByteEnd]; snippet != chunk.Text {
+			t.Fatalf("snippet mismatch = %q, want %q", snippet, chunk.Text)
+		}
+		if chunk.ID != chunkID(source.ID, parsed.ContentHash, chunk.ByteStart) || chunk.CitationAnchorID == "" || chunk.NormalizedText == "" {
 			t.Fatalf("chunk missing deterministic id/anchor/text: %+v", chunk)
 		}
+		if _, ok := chunk.InheritedMetadata["---"]; ok {
+			t.Fatalf("frontmatter bytes leaked into metadata: %+v", chunk.InheritedMetadata)
+		}
+	}
+	if chunks[0].ByteStart != frontmatterEnd || chunks[0].LineStart != 5 || len(chunks[0].HeadingPath) != 0 {
+		t.Fatalf("pre-heading chunk = %+v, want body start line 5 with empty heading path", chunks[0])
+	}
+	if chunks[1].ByteStart != strings.Index(source.Body, "# Alpha") || chunks[1].LineStart != 6 || !reflect.DeepEqual(chunks[1].HeadingPath, []string{"Alpha"}) {
+		t.Fatalf("heading chunk = %+v, want Alpha at original offset/line", chunks[1])
+	}
+	if !reflect.DeepEqual(chunks[2].HeadingPath, []string{"Alpha", "Beta"}) || chunks[2].LineStart != 11 || chunks[2].LineEnd != 12 {
+		t.Fatalf("nested heading chunk = %+v", chunks[2])
+	}
+	if !reflect.DeepEqual(chunks[1].OutboundLinks, []string{"DOC-999", "TASK-001"}) {
+		t.Fatalf("chunk outbound links = %+v, want sorted stable ids", chunks[1].OutboundLinks)
+	}
+	if chunks[1].ResolvedAliases["[task](TASK-001)"] != "TASK-001" || chunks[1].ResolvedAliases["DOC-999"] != "DOC-999" {
+		t.Fatalf("resolved aliases = %+v", chunks[1].ResolvedAliases)
+	}
+	if chunks[1].InheritedMetadata["component"] != "knowledge-indexer" || chunks[1].InheritedMetadata["alias"] != "ALIAS-1" || chunks[1].InheritedMetadata["source_id"] != "DOC-123" {
+		t.Fatalf("chunk metadata = %+v", chunks[1].InheritedMetadata)
+	}
+	if !strings.Contains(chunks[1].NormalizedText, "do  not   collapse") {
+		t.Fatalf("fenced code whitespace was collapsed: %q", chunks[1].NormalizedText)
+	}
+	if chunks[2].NormalizedText != "## beta more text." {
+		t.Fatalf("normalized text = %q, want collapsed ASCII-lower text", chunks[2].NormalizedText)
 	}
 }
 

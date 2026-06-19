@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -35,6 +36,71 @@ func TestBacklinks(t *testing.T) {
 	}
 	if len(source.Aliases) != 2 {
 		t.Fatalf("GetSource aliases = %d, want 2", len(source.Aliases))
+	}
+}
+
+func TestChunkSchemaEmbeddingColumn(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+
+	var columnType string
+	var defaultValue sql.NullString
+	var found bool
+	rows, err := store.db.QueryContext(ctx, `PRAGMA table_info(chunks)`)
+	if err != nil {
+		t.Fatalf("PRAGMA table_info returned error: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name string
+		var notNull int
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatalf("scan table_info: %v", err)
+		}
+		if name == "embedding" {
+			found = true
+			if columnType != "BLOB" || (defaultValue.Valid && defaultValue.String != "NULL") || notNull != 0 {
+				t.Fatalf("embedding column type/default/notnull = %q/%v/%d, want BLOB/NULL/0", columnType, defaultValue, notNull)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("table_info rows error: %v", err)
+	}
+	if !found {
+		t.Fatalf("chunks table missing embedding column")
+	}
+
+	contentHash := "hash-doc-123"
+	mustUpsertGraph(t, ctx, store, SourceGraph{Source: testSourceWithHash("DOC-123", "doc", "Design Doc", contentHash)})
+	first := Chunk{SourceID: "DOC-123", ContentHash: contentHash, ByteStart: 0, ByteEnd: 20, LineStart: 1, LineEnd: 2, HeadingPath: []string{"Design"}, Text: "first chunk", NormalizedText: "first chunk"}
+	second := Chunk{SourceID: "DOC-123", ContentHash: contentHash, ByteStart: 21, ByteEnd: 40, LineStart: 3, LineEnd: 4, HeadingPath: []string{"Design", "Details"}, Text: "second chunk", NormalizedText: "second chunk"}
+	if _, err := store.UpsertChunk(ctx, first); err != nil {
+		t.Fatalf("UpsertChunk first returned error: %v", err)
+	}
+	if _, err := store.UpsertChunk(ctx, second); err != nil {
+		t.Fatalf("UpsertChunk second returned error: %v", err)
+	}
+	chunks, err := store.GetChunks(ctx, "DOC-123")
+	if err != nil {
+		t.Fatalf("GetChunks returned error: %v", err)
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("GetChunks returned %d records, want 2", len(chunks))
+	}
+	for _, chunk := range chunks {
+		if chunk.Embedding != nil {
+			t.Fatalf("chunk embedding = %v, want nil", chunk.Embedding)
+		}
+	}
+	duplicate := first
+	duplicate.ID = "different-id"
+	duplicate.ByteEnd = 30
+	if _, err := store.UpsertChunk(ctx, duplicate); err == nil {
+		t.Fatalf("duplicate source_id/content_hash/byte_start was accepted")
 	}
 }
 

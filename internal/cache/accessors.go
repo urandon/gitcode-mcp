@@ -127,15 +127,15 @@ func upsertChunkTx(ctx context.Context, tx *sql.Tx, chunk Chunk) (Chunk, error) 
 	if err != nil {
 		return Chunk{}, err
 	}
-	err = execTx(ctx, tx, `INSERT INTO chunks (id, source_id, content_hash, byte_start, byte_end, line_start, line_end, heading_path, text, normalized_text, inherited_metadata, outbound_links, resolved_aliases)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(id) DO UPDATE SET byte_end = excluded.byte_end, line_start = excluded.line_start, line_end = excluded.line_end, heading_path = excluded.heading_path, text = excluded.text, normalized_text = excluded.normalized_text, inherited_metadata = excluded.inherited_metadata, outbound_links = excluded.outbound_links, resolved_aliases = excluded.resolved_aliases`,
-		chunk.ID, chunk.SourceID, chunk.ContentHash, chunk.ByteStart, chunk.ByteEnd, chunk.LineStart, chunk.LineEnd, headingPath, chunk.Text, chunk.NormalizedText, metadata, outboundLinks, resolvedAliases)
+	err = execTx(ctx, tx, `INSERT INTO chunks (id, source_id, content_hash, byte_start, byte_end, line_start, line_end, heading_path, text, normalized_text, inherited_metadata, outbound_links, resolved_aliases, embedding)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET byte_end = excluded.byte_end, line_start = excluded.line_start, line_end = excluded.line_end, heading_path = excluded.heading_path, text = excluded.text, normalized_text = excluded.normalized_text, inherited_metadata = excluded.inherited_metadata, outbound_links = excluded.outbound_links, resolved_aliases = excluded.resolved_aliases, embedding = excluded.embedding`,
+		chunk.ID, chunk.SourceID, chunk.ContentHash, chunk.ByteStart, chunk.ByteEnd, chunk.LineStart, chunk.LineEnd, headingPath, chunk.Text, chunk.NormalizedText, metadata, outboundLinks, resolvedAliases, chunk.Embedding)
 	return chunk, err
 }
 
 func (s *SQLiteStore) GetChunks(ctx context.Context, sourceID string) ([]Chunk, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, source_id, content_hash, byte_start, byte_end, line_start, line_end, heading_path, text, normalized_text, inherited_metadata, outbound_links, resolved_aliases FROM chunks WHERE source_id = ? ORDER BY byte_start`, sourceID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, source_id, content_hash, byte_start, byte_end, line_start, line_end, heading_path, text, normalized_text, inherited_metadata, outbound_links, resolved_aliases, embedding FROM chunks WHERE source_id = ? ORDER BY byte_start`, sourceID)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +144,7 @@ func (s *SQLiteStore) GetChunks(ctx context.Context, sourceID string) ([]Chunk, 
 	for rows.Next() {
 		var chunk Chunk
 		var headingPath, metadata, outboundLinks, resolvedAliases string
-		if err := rows.Scan(&chunk.ID, &chunk.SourceID, &chunk.ContentHash, &chunk.ByteStart, &chunk.ByteEnd, &chunk.LineStart, &chunk.LineEnd, &headingPath, &chunk.Text, &chunk.NormalizedText, &metadata, &outboundLinks, &resolvedAliases); err != nil {
+		if err := rows.Scan(&chunk.ID, &chunk.SourceID, &chunk.ContentHash, &chunk.ByteStart, &chunk.ByteEnd, &chunk.LineStart, &chunk.LineEnd, &headingPath, &chunk.Text, &chunk.NormalizedText, &metadata, &outboundLinks, &resolvedAliases, &chunk.Embedding); err != nil {
 			return nil, err
 		}
 		if chunk.HeadingPath, err = unmarshalJSON[[]string](headingPath); err != nil {

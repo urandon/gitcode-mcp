@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS chunks (
 	inherited_metadata TEXT NOT NULL,
 	outbound_links TEXT NOT NULL,
 	resolved_aliases TEXT NOT NULL,
+	embedding BLOB DEFAULT NULL,
 	UNIQUE(source_id, content_hash, byte_start)
 );
 
