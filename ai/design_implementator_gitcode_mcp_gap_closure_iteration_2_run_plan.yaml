@@ -1,0 +1,96 @@
+apiVersion: triborg.dev/v0alpha1
+kind: WorkflowRunPlan
+metadata:
+  id: gitcode-mcp-gap-closure-iteration-2-design-implementator-run-plan
+  title: GitCode MCP gap-closure iteration 2 design implementation run
+spec:
+  workflow: triborg-design-implementator-v2-ywd
+  workflow_id_prefix: gitcode-mcp-gap-closure-design-implementator
+  runtime:
+    path_aliases:
+      repo: "@plan_dir/.."
+      ai: "@repo/ai"
+      artifacts: "@ai/artifacts"
+    artifacts_root: "@artifacts"
+  cases:
+    - run_label: gitcode_mcp_gap_closure_iteration_2_implementation
+      input:
+        design_package_zip_path: "@ai/design-package-iteration-2.zip"
+        target_repo_path: "@repo"
+        target_branch: feat/ai/gitcode-mcp-gap-closure-iteration-2
+        max_task_iterations: 35
+        live_validation_enabled: false
+        device_validation_enabled: false
+        runner_runtime: worker
+        implementation_constraints: |
+          - Treat `ai/design-package-iteration-2.zip` as the primary design package for this run.
+          - The iteration 1 docs have already been moved to `docs/triborg/design-package-iteration-1` in this branch. Do not move them again, copy them elsewhere, or delete them.
+          - It is acceptable and expected for the implementator to create a fresh `docs/triborg/design-package` for the iteration 2 package output.
+          - Do not copy, rename, replace, or back up the existing `ai/design-package.zip` as part of this run plan. The old zip stays as it was; the new iteration zip is the separate `ai/design-package-iteration-2.zip`.
+          - Implement this as a gap-closure iteration over the existing GitCode MCP codebase, not as a blank-slate rewrite. Preserve working cache-first MCP/CLI behavior while replacing stubs and closing the package requirements.
+          - Keep the repository standalone and public-safe: do not commit private repository names, internal URLs, raw credentials, cookies, bearer tokens, unsanitized API responses, or source-system-specific tracker/wiki names.
+          - Make repository binding a first-class model. A configured repository must have a stable local repo id, API base URL, owner/namespace, repository name, enabled scopes, and optional branch/project metadata when needed.
+          - Scope aliases, remote issue ids, wiki/page ids, source ids, sync logs, snapshots, conflicts, and diagnostics by repository. `issue:42` or `wiki:Home` from two repositories must not collide.
+          - Preserve cache-first/offline-first reads. Routine CLI and MCP reads must work from the local cache without live GitCode network access.
+          - Keep live GitCode API access behind explicit sync/bootstrap/write commands, with clear config and credential handling. Default validation must not require a real token.
+          - Support both stdio and HTTP/SSE MCP transports through shared internal services so local agents and remote-hosted agents can use the same cache-backed surface.
+          - Replace fake-success write paths with explicit dry-run/apply semantics, idempotency keys, conflict reporting, and reviewable sync evidence.
+          - Keep CLI and MCP surfaces aligned around the core user path: install/configure, bind repository, sync tracker/wiki data, index/cache it, search/get/resolve/export/diff offline, and perform explicit writes when requested.
+          - Keep prompt and runner payloads compact. Prefer package paths, artifact references, and source ids over copying large design-package documents inline.
+          - Preserve tests as live tests under their normal Go package paths. Do not archive old tests under `docs/`, do not move them out of `go test ./...`, and do not delete previous-iteration contract tests just because a new design package adds more scenarios.
+          - When a new test contract would collide with an existing test name or fixture name, add a new file or rename the new test function with an iteration-specific/scenario-specific suffix inside the same package. Existing tests should keep running unless the product contract is intentionally superseded and documented.
+          - Do not resurrect the removed duplicate `docs/design/` tree. Durable implementation docs should stay under the existing docs/project structure, `docs/triborg/design-package`, or the explicit iteration 1 docs path.
+          - If the implementation needs to raise the Go version or add dependencies, make that an explicit source change and keep local validation runnable with the selected toolchain.
+        validation_constraints: |
+          - Default validation must be offline, deterministic, and runnable without GitCode credentials.
+          - Network/API integration tests must skip cleanly unless explicit live-test environment variables and a sanitized test repository are configured.
+          - Sanitized fixtures must not contain Authorization headers, bearer tokens, cookies, internal hostnames, private repository names, or unsanitized tracker/wiki payloads.
+          - The final repository state must not expose scaffold-only `not implemented yet` behavior as the main CLI or MCP product surface.
+          - The implementation must leave an operator-facing setup path for configuration, token/keychain usage, repository binding, first sync, cache inspection, and MCP registration.
+          - The implementation must include tests or fixtures for repository-scoped identity collisions across at least two repositories.
+        final_validation_command:
+          script:
+            text: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              export GOCACHE="${GOCACHE:-$PWD/.cache/go-build}"
+              mkdir -p "$GOCACHE"
+
+              test -s go.mod
+              test -s cmd/gitcode-mcp/main.go
+              test -s ai/design-package-iteration-2.zip
+              test -s ai/design_implementator_gitcode_mcp_gap_closure_iteration_2_run_plan.yaml
+              test -s docs/triborg/design-package-iteration-1/architecture.md
+              test -s docs/triborg/design-package-iteration-1/tasks.json
+              test -s docs/triborg/design-package-iteration-1/outcome-contract.json
+              test -s internal/service/testdata/golden_export.md
+
+              grep -q 'design_package_zip_path: "@ai/design-package-iteration-2.zip"' ai/design_implementator_gitcode_mcp_gap_closure_iteration_2_run_plan.yaml
+              grep -q 'design-package-iteration-1' ai/design_implementator_gitcode_mcp_gap_closure_iteration_2_run_plan.yaml
+
+              ./scripts/check.sh
+
+              go run ./cmd/gitcode-mcp --help >/tmp/gitcode-mcp-help.txt
+              go run ./cmd/gitcode-mcp --version >/tmp/gitcode-mcp-version.txt
+              grep -q "gitcode-mcp" /tmp/gitcode-mcp-help.txt
+              grep -q "gitcode-mcp" /tmp/gitcode-mcp-version.txt
+
+              grep -Eq 'config|auth|repo|sync|index|search|get|resolve|backlinks|export|diff|mcp' /tmp/gitcode-mcp-help.txt
+
+              if grep -RIn 'not implemented yet' cmd internal; then
+                echo "CLI or MCP still exposes scaffold-only command behavior" >&2
+                exit 65
+              fi
+
+              if grep -RInE '(Authorization:|Bearer[[:space:]]+[A-Za-z0-9._-]{16,}|Cookie:|Set-Cookie:|sk-[A-Za-z0-9_-]{16,}|GITCODE_TOKEN[[:space:]]*=)' . \
+                --exclude-dir=.git \
+                --exclude-dir=.cache \
+                --exclude-dir=ai \
+                --exclude='*.zip'; then
+                echo "repository contains secret-like or unsanitized fixture material" >&2
+                exit 66
+              fi
+          expected_exit_codes: [0]
+          policy:
+            validation_scope: final_offline_gates
