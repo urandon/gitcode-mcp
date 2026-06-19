@@ -1,0 +1,751 @@
+{
+  "created_at": "2026-06-19T21:20:17+00:00",
+  "revision": 4,
+  "run_id": "gitcode-mcp-gap-closure-design-agent-20260619T191521Z-gitcode_mcp_gap_closure_iteration_2",
+  "task_count": 22,
+  "tasks": [
+    {
+      "base_task_id": "config-credential-task-1-configcommands-add-redacted-ux",
+      "change_type": "add",
+      "component_id": "config-credential",
+      "component_name": "Config & Credential",
+      "component_order": 0,
+      "decommission_ids": [
+        "decommission-7"
+      ],
+      "delta_ids": [
+        "config-credential-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-3"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 3"
+      ],
+      "sequence": 1,
+      "source": "components/config-credential.md#task-1-configcommands-add-redacted-ux",
+      "source_anchor": "task-1-configcommands-add-redacted-ux",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/config-credential.md",
+      "source_order": 0,
+      "supporting_only": false,
+      "task_id": "001-config-credential-task-1-configcommands-add-redacted-ux",
+      "task_number": 1,
+      "title": "ConfigCommands add redacted UX"
+    },
+    {
+      "base_task_id": "repo-binding-task-1-repo-registry-add",
+      "change_type": "add",
+      "component_id": "repo-binding",
+      "component_name": "Repository Binding",
+      "component_order": 1,
+      "decommission_ids": [
+        "decommission-6"
+      ],
+      "delta_ids": [
+        "repo-binding-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-2"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 2"
+      ],
+      "sequence": 2,
+      "source": "components/repo-binding.md#task-1-repo-registry-add",
+      "source_anchor": "task-1-repo-registry-add",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/repo-binding.md",
+      "source_order": 2,
+      "supporting_only": false,
+      "task_id": "002-repo-binding-task-1-repo-registry-add",
+      "task_number": 1,
+      "title": "Repo Registry Add"
+    },
+    {
+      "base_task_id": "repo-binding-task-2-repo-scope-resolver-change",
+      "change_type": "change",
+      "component_id": "repo-binding",
+      "component_name": "Repository Binding",
+      "component_order": 1,
+      "decommission_ids": [
+        "decommission-6"
+      ],
+      "delta_ids": [
+        "repo-binding-delta-2"
+      ],
+      "dependency_task_ids": [
+        "repo-binding-task-1-repo-registry-add"
+      ],
+      "dependency_titles": [
+        "Repo Registry Add"
+      ],
+      "outcome_ids": [
+        "outcome-2",
+        "outcome-6",
+        "outcome-11"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 2",
+        "Task 6",
+        "Task 11"
+      ],
+      "sequence": 3,
+      "source": "components/repo-binding.md#task-2-repo-scope-resolver-change",
+      "source_anchor": "task-2-repo-scope-resolver-change",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/repo-binding.md",
+      "source_order": 3,
+      "supporting_only": false,
+      "task_id": "003-repo-binding-task-2-repo-scope-resolver-change",
+      "task_number": 2,
+      "title": "Repo Scope Resolver Change"
+    },
+    {
+      "base_task_id": "cache-sync-task-1-repo-scoped-cache-schema-migration",
+      "change_type": "add",
+      "component_id": "cache-sync",
+      "component_name": "Cache & Sync Bootstrap",
+      "component_order": 2,
+      "decommission_ids": [
+        "decommission-4",
+        "decommission-6"
+      ],
+      "delta_ids": [
+        "cache-sync-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-2",
+        "outcome-4",
+        "outcome-8",
+        "outcome-10",
+        "outcome-11"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 2",
+        "Task 4",
+        "Task 8",
+        "Task 10",
+        "Task 11"
+      ],
+      "sequence": 4,
+      "source": "components/cache-sync.md#task-1-repo-scoped-cache-schema-migration",
+      "source_anchor": "task-1-repo-scoped-cache-schema-migration",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/cache-sync.md",
+      "source_order": 4,
+      "supporting_only": false,
+      "task_id": "004-cache-sync-task-1-repo-scoped-cache-schema-migration",
+      "task_number": 1,
+      "title": "Repo-scoped cache schema migration"
+    },
+    {
+      "base_task_id": "cache-sync-task-2-sync-graph-upsert-workflow",
+      "change_type": "add",
+      "component_id": "cache-sync",
+      "component_name": "Cache & Sync Bootstrap",
+      "component_order": 2,
+      "decommission_ids": [
+        "decommission-4"
+      ],
+      "delta_ids": [
+        "cache-sync-delta-2"
+      ],
+      "dependency_task_ids": [
+        "cache-sync-task-1-repo-scoped-cache-schema-migration"
+      ],
+      "dependency_titles": [
+        "Repo-scoped cache schema migration"
+      ],
+      "outcome_ids": [
+        "outcome-4",
+        "outcome-10"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 4",
+        "Task 10"
+      ],
+      "sequence": 5,
+      "source": "components/cache-sync.md#task-2-sync-graph-upsert-workflow",
+      "source_anchor": "task-2-sync-graph-upsert-workflow",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/cache-sync.md",
+      "source_order": 5,
+      "supporting_only": false,
+      "task_id": "005-cache-sync-task-2-sync-graph-upsert-workflow",
+      "task_number": 2,
+      "title": "Sync graph upsert workflow"
+    },
+    {
+      "base_task_id": "cache-sync-task-3-wal-writer-ownership-runtime",
+      "change_type": "add",
+      "component_id": "cache-sync",
+      "component_name": "Cache & Sync Bootstrap",
+      "component_order": 2,
+      "decommission_ids": [],
+      "delta_ids": [
+        "cache-sync-delta-3"
+      ],
+      "dependency_task_ids": [
+        "cache-sync-task-1-repo-scoped-cache-schema-migration"
+      ],
+      "dependency_titles": [
+        "Repo-scoped cache schema migration"
+      ],
+      "outcome_ids": [
+        "outcome-8"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 8"
+      ],
+      "sequence": 6,
+      "source": "components/cache-sync.md#task-3-wal-writer-ownership-runtime",
+      "source_anchor": "task-3-wal-writer-ownership-runtime",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/cache-sync.md",
+      "source_order": 6,
+      "supporting_only": false,
+      "task_id": "006-cache-sync-task-3-wal-writer-ownership-runtime",
+      "task_number": 3,
+      "title": "WAL writer ownership runtime"
+    },
+    {
+      "base_task_id": "gitcode-adapter-task-1-provider-seam-add",
+      "change_type": "add",
+      "component_id": "gitcode-adapter",
+      "component_name": "GitCode Adapter",
+      "component_order": 3,
+      "decommission_ids": [],
+      "delta_ids": [
+        "gitcode-adapter-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-13"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 13"
+      ],
+      "sequence": 7,
+      "source": "components/gitcode-adapter.md#task-1-provider-seam-add",
+      "source_anchor": "task-1-provider-seam-add",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/gitcode-adapter.md",
+      "source_order": 7,
+      "supporting_only": false,
+      "task_id": "007-gitcode-adapter-task-1-provider-seam-add",
+      "task_number": 1,
+      "title": "Provider seam add"
+    },
+    {
+      "base_task_id": "gitcode-adapter-task-2-write-confirmation-add",
+      "change_type": "add",
+      "component_id": "gitcode-adapter",
+      "component_name": "GitCode Adapter",
+      "component_order": 3,
+      "decommission_ids": [
+        "decommission-2"
+      ],
+      "delta_ids": [
+        "gitcode-adapter-delta-2"
+      ],
+      "dependency_task_ids": [
+        "gitcode-adapter-task-1-provider-seam-add"
+      ],
+      "dependency_titles": [
+        "Provider seam add"
+      ],
+      "outcome_ids": [
+        "outcome-9"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 9"
+      ],
+      "sequence": 8,
+      "source": "components/gitcode-adapter.md#task-2-write-confirmation-add",
+      "source_anchor": "task-2-write-confirmation-add",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/gitcode-adapter.md",
+      "source_order": 8,
+      "supporting_only": false,
+      "task_id": "008-gitcode-adapter-task-2-write-confirmation-add",
+      "task_number": 2,
+      "title": "Write confirmation add"
+    },
+    {
+      "base_task_id": "index-chunking-task-1-chunkpolicy-and-query-api",
+      "change_type": "add",
+      "component_id": "index-chunking",
+      "component_name": "Index & Chunking",
+      "component_order": 4,
+      "decommission_ids": [],
+      "delta_ids": [
+        "index-chunking-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-12"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 12"
+      ],
+      "sequence": 9,
+      "source": "components/index-chunking.md#task-1-chunkpolicy-and-query-api",
+      "source_anchor": "task-1-chunkpolicy-and-query-api",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/index-chunking.md",
+      "source_order": 9,
+      "supporting_only": false,
+      "task_id": "009-index-chunking-task-1-chunkpolicy-and-query-api",
+      "task_number": 1,
+      "title": "ChunkPolicy and Query API"
+    },
+    {
+      "base_task_id": "index-chunking-task-2-indexfreshness-warnings",
+      "change_type": "add",
+      "component_id": "index-chunking",
+      "component_name": "Index & Chunking",
+      "component_order": 4,
+      "decommission_ids": [
+        "decommission-8"
+      ],
+      "delta_ids": [
+        "index-chunking-delta-2"
+      ],
+      "dependency_task_ids": [
+        "index-chunking-task-1-chunkpolicy-and-query-api"
+      ],
+      "dependency_titles": [
+        "ChunkPolicy and Query API"
+      ],
+      "outcome_ids": [
+        "outcome-1",
+        "outcome-5",
+        "outcome-6",
+        "outcome-11"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 1",
+        "Task 5",
+        "Task 6",
+        "Task 11"
+      ],
+      "sequence": 10,
+      "source": "components/index-chunking.md#task-2-indexfreshness-warnings",
+      "source_anchor": "task-2-indexfreshness-warnings",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/index-chunking.md",
+      "source_order": 10,
+      "supporting_only": false,
+      "task_id": "010-index-chunking-task-2-indexfreshness-warnings",
+      "task_number": 2,
+      "title": "IndexFreshness warnings"
+    },
+    {
+      "base_task_id": "config-credential-task-2-runtimeauditconfig-emit-report",
+      "change_type": "add",
+      "component_id": "config-credential",
+      "component_name": "Config & Credential",
+      "component_order": 0,
+      "decommission_ids": [],
+      "delta_ids": [
+        "config-credential-delta-2"
+      ],
+      "dependency_task_ids": [
+        "config-credential-task-1-configcommands-add-redacted-ux",
+        "index-chunking-task-2-indexfreshness-warnings"
+      ],
+      "dependency_titles": [
+        "ConfigCommands add redacted UX"
+      ],
+      "outcome_ids": [
+        "outcome-1"
+      ],
+      "outcome_role": "supporting_evidence",
+      "request_tasks": [
+        "Task 1"
+      ],
+      "sequence": 11,
+      "source": "components/config-credential.md#task-2-runtimeauditconfig-emit-report",
+      "source_anchor": "task-2-runtimeauditconfig-emit-report",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/config-credential.md",
+      "source_order": 1,
+      "supporting_only": true,
+      "task_id": "011-config-credential-task-2-runtimeauditconfig-emit-report",
+      "task_number": 2,
+      "title": "RuntimeAuditConfig emit report"
+    },
+    {
+      "base_task_id": "cli-read-task-1-complete-cli-read-handlers",
+      "change_type": "add",
+      "component_id": "cli-read",
+      "component_name": "CLI Read Surface",
+      "component_order": 5,
+      "decommission_ids": [],
+      "delta_ids": [
+        "cli-read-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-5"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 5"
+      ],
+      "sequence": 12,
+      "source": "components/cli-read.md#task-1-complete-cli-read-handlers",
+      "source_anchor": "task-1-complete-cli-read-handlers",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/cli-read.md",
+      "source_order": 11,
+      "supporting_only": false,
+      "task_id": "012-cli-read-task-1-complete-cli-read-handlers",
+      "task_number": 1,
+      "title": "Complete CLI read handlers"
+    },
+    {
+      "base_task_id": "cli-write-task-1-gate-writeexecutor-live-writes",
+      "change_type": "add",
+      "component_id": "cli-write",
+      "component_name": "CLI Write Surface",
+      "component_order": 6,
+      "decommission_ids": [
+        "decommission-2"
+      ],
+      "delta_ids": [
+        "cli-write-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-9"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 9"
+      ],
+      "sequence": 13,
+      "source": "components/cli-write.md#task-1-gate-writeexecutor-live-writes",
+      "source_anchor": "task-1-gate-writeexecutor-live-writes",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/cli-write.md",
+      "source_order": 13,
+      "supporting_only": false,
+      "task_id": "013-cli-write-task-1-gate-writeexecutor-live-writes",
+      "task_number": 1,
+      "title": "Gate WriteExecutor Live Writes"
+    },
+    {
+      "base_task_id": "mcp-server-task-1-tool-registry-parity",
+      "change_type": "add",
+      "component_id": "mcp-server",
+      "component_name": "MCP Server & Transport",
+      "component_order": 7,
+      "decommission_ids": [
+        "decommission-1"
+      ],
+      "delta_ids": [
+        "mcp-server-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-6"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 6"
+      ],
+      "sequence": 14,
+      "source": "components/mcp-server.md#task-1-tool-registry-parity",
+      "source_anchor": "task-1-tool-registry-parity",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/mcp-server.md",
+      "source_order": 14,
+      "supporting_only": false,
+      "task_id": "014-mcp-server-task-1-tool-registry-parity",
+      "task_number": 1,
+      "title": "Tool registry parity"
+    },
+    {
+      "base_task_id": "cli-read-task-2-share-read-parity-payloads",
+      "change_type": "change",
+      "component_id": "cli-read",
+      "component_name": "CLI Read Surface",
+      "component_order": 5,
+      "decommission_ids": [
+        "decommission-1"
+      ],
+      "delta_ids": [
+        "cli-read-delta-2"
+      ],
+      "dependency_task_ids": [
+        "cli-read-task-1-complete-cli-read-handlers",
+        "repo-binding-task-2-repo-scope-resolver-change",
+        "index-chunking-task-2-indexfreshness-warnings",
+        "mcp-server-task-1-tool-registry-parity"
+      ],
+      "dependency_titles": [
+        "Complete CLI read handlers"
+      ],
+      "outcome_ids": [
+        "outcome-6"
+      ],
+      "outcome_role": "supporting_evidence",
+      "request_tasks": [
+        "Task 6"
+      ],
+      "sequence": 15,
+      "source": "components/cli-read.md#task-2-share-read-parity-payloads",
+      "source_anchor": "task-2-share-read-parity-payloads",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/cli-read.md",
+      "source_order": 12,
+      "supporting_only": true,
+      "task_id": "015-cli-read-task-2-share-read-parity-payloads",
+      "task_number": 2,
+      "title": "Share read parity payloads"
+    },
+    {
+      "base_task_id": "mcp-server-task-2-httpsse-session-transport",
+      "change_type": "add",
+      "component_id": "mcp-server",
+      "component_name": "MCP Server & Transport",
+      "component_order": 7,
+      "decommission_ids": [
+        "decommission-5"
+      ],
+      "delta_ids": [
+        "mcp-server-delta-2"
+      ],
+      "dependency_task_ids": [
+        "mcp-server-task-1-tool-registry-parity"
+      ],
+      "dependency_titles": [
+        "Tool registry parity"
+      ],
+      "outcome_ids": [
+        "outcome-7"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 7"
+      ],
+      "sequence": 16,
+      "source": "components/mcp-server.md#task-2-httpsse-session-transport",
+      "source_anchor": "task-2-httpsse-session-transport",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/mcp-server.md",
+      "source_order": 15,
+      "supporting_only": false,
+      "task_id": "016-mcp-server-task-2-httpsse-session-transport",
+      "task_number": 2,
+      "title": "HTTPSSE session transport"
+    },
+    {
+      "base_task_id": "mcp-server-task-3-runtime-cache-readiness",
+      "change_type": "change",
+      "component_id": "mcp-server",
+      "component_name": "MCP Server & Transport",
+      "component_order": 7,
+      "decommission_ids": [
+        "decommission-5"
+      ],
+      "delta_ids": [
+        "mcp-server-delta-3"
+      ],
+      "dependency_task_ids": [
+        "mcp-server-task-2-httpsse-session-transport"
+      ],
+      "dependency_titles": [
+        "HTTPSSE session transport"
+      ],
+      "outcome_ids": [
+        "outcome-7",
+        "outcome-8"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 7",
+        "Task 8"
+      ],
+      "sequence": 17,
+      "source": "components/mcp-server.md#task-3-runtime-cache-readiness",
+      "source_anchor": "task-3-runtime-cache-readiness",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/mcp-server.md",
+      "source_order": 16,
+      "supporting_only": false,
+      "task_id": "017-mcp-server-task-3-runtime-cache-readiness",
+      "task_number": 3,
+      "title": "Runtime cache readiness"
+    },
+    {
+      "base_task_id": "snapshot-diff-task-1-snapshotstore-stored-diff",
+      "change_type": "add",
+      "component_id": "snapshot-diff",
+      "component_name": "Snapshot & Diff",
+      "component_order": 8,
+      "decommission_ids": [
+        "decommission-3",
+        "decommission-8"
+      ],
+      "delta_ids": [
+        "snapshot-diff-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-11"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 11"
+      ],
+      "sequence": 18,
+      "source": "components/snapshot-diff.md#task-1-snapshotstore-stored-diff",
+      "source_anchor": "task-1-snapshotstore-stored-diff",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/snapshot-diff.md",
+      "source_order": 17,
+      "supporting_only": false,
+      "task_id": "018-snapshot-diff-task-1-snapshotstore-stored-diff",
+      "task_number": 1,
+      "title": "SnapshotStore stored diff"
+    },
+    {
+      "base_task_id": "docs-dogfood-task-1-docs-smoke-package-add",
+      "change_type": "add",
+      "component_id": "docs-dogfood",
+      "component_name": "Docs & Dogfood Feedback",
+      "component_order": 9,
+      "decommission_ids": [],
+      "delta_ids": [
+        "docs-dogfood-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-14"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 14"
+      ],
+      "sequence": 19,
+      "source": "components/docs-dogfood.md#task-1-docs-smoke-package-add",
+      "source_anchor": "task-1-docs-smoke-package-add",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/docs-dogfood.md",
+      "source_order": 18,
+      "supporting_only": false,
+      "task_id": "019-docs-dogfood-task-1-docs-smoke-package-add",
+      "task_number": 1,
+      "title": "Docs Smoke Package Add"
+    },
+    {
+      "base_task_id": "docs-dogfood-task-2-fixture-validation-gate-add",
+      "change_type": "validate",
+      "component_id": "docs-dogfood",
+      "component_name": "Docs & Dogfood Feedback",
+      "component_order": 9,
+      "decommission_ids": [],
+      "delta_ids": [
+        "docs-dogfood-delta-4"
+      ],
+      "dependency_task_ids": [
+        "docs-dogfood-task-1-docs-smoke-package-add",
+        "gitcode-adapter-task-1-provider-seam-add"
+      ],
+      "dependency_titles": [
+        "Docs Smoke Package Add"
+      ],
+      "outcome_ids": [
+        "outcome-13"
+      ],
+      "outcome_role": "supporting_evidence",
+      "request_tasks": [
+        "Task 13"
+      ],
+      "sequence": 20,
+      "source": "components/docs-dogfood.md#task-2-fixture-validation-gate-add",
+      "source_anchor": "task-2-fixture-validation-gate-add",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/docs-dogfood.md",
+      "source_order": 19,
+      "supporting_only": true,
+      "task_id": "020-docs-dogfood-task-2-fixture-validation-gate-add",
+      "task_number": 2,
+      "title": "Fixture Validation Gate Add"
+    },
+    {
+      "base_task_id": "docs-dogfood-task-3-dogfood-checklist-add",
+      "change_type": "add",
+      "component_id": "docs-dogfood",
+      "component_name": "Docs & Dogfood Feedback",
+      "component_order": 9,
+      "decommission_ids": [],
+      "delta_ids": [
+        "docs-dogfood-delta-2"
+      ],
+      "dependency_task_ids": [
+        "docs-dogfood-task-1-docs-smoke-package-add",
+        "docs-dogfood-task-2-fixture-validation-gate-add"
+      ],
+      "dependency_titles": [
+        "Docs Smoke Package Add",
+        "Fixture Validation Gate Add"
+      ],
+      "outcome_ids": [
+        "outcome-15"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 15"
+      ],
+      "sequence": 21,
+      "source": "components/docs-dogfood.md#task-3-dogfood-checklist-add",
+      "source_anchor": "task-3-dogfood-checklist-add",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/docs-dogfood.md",
+      "source_order": 20,
+      "supporting_only": false,
+      "task_id": "021-docs-dogfood-task-3-dogfood-checklist-add",
+      "task_number": 3,
+      "title": "Dogfood Checklist Add"
+    },
+    {
+      "base_task_id": "docs-dogfood-task-4-feedback-validator-add",
+      "change_type": "add",
+      "component_id": "docs-dogfood",
+      "component_name": "Docs & Dogfood Feedback",
+      "component_order": 9,
+      "decommission_ids": [],
+      "delta_ids": [
+        "docs-dogfood-delta-3"
+      ],
+      "dependency_task_ids": [
+        "docs-dogfood-task-3-dogfood-checklist-add"
+      ],
+      "dependency_titles": [
+        "Dogfood Checklist Add"
+      ],
+      "outcome_ids": [
+        "outcome-16"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 16"
+      ],
+      "sequence": 22,
+      "source": "components/docs-dogfood.md#task-4-feedback-validator-add",
+      "source_anchor": "task-4-feedback-validator-add",
+      "source_artifact_path": "component_design/revisions/component-design-v4/components/docs-dogfood.md",
+      "source_order": 21,
+      "supporting_only": false,
+      "task_id": "022-docs-dogfood-task-4-feedback-validator-add",
+      "task_number": 4,
+      "title": "Feedback Validator Add"
+    }
+  ]
+}

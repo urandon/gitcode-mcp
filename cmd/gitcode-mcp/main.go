@@ -74,6 +74,9 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 		fmt.Fprintf(stdout, "gitcode-mcp %s\n", version)
 		return 0
 	}
+	if len(rest) > 0 && (rest[0] == "config" || rest[0] == "auth") {
+		return cli.ExecuteWithSource(rest, stdout, stderr, src)
+	}
 
 	cfg, err := config.Load(src, opts.overrides)
 	if err != nil {

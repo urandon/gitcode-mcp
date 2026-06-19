@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/service"
 )
 
@@ -41,6 +42,8 @@ var commands = []string{
 	"update-page",
 	"add-comment",
 	"add-label",
+	"config",
+	"auth",
 }
 
 type queryService interface {
@@ -68,6 +71,11 @@ type queryService interface {
 
 type serviceFactory func(context.Context, string) (queryService, func() error, error)
 
+type localCommandDeps struct {
+	Source             config.Source
+	CredentialReporter config.CredentialStatusReporter
+}
+
 type options struct {
 	format         string
 	kind           string
@@ -92,17 +100,28 @@ type options struct {
 	title          string
 	body           string
 	state          string
-	label          string
-	labels         string
-	idempotencyKey string
+		label          string
+		labels         string
+		idempotencyKey string
+		overwrite      bool
+		redacted       bool
 }
+
 
 // Execute runs the gitcode-mcp CLI.
 func Execute(args []string, stdout io.Writer, stderr io.Writer) int {
 	return executeWithFactory(args, stdout, stderr, defaultServiceFactory)
 }
 
+func ExecuteWithSource(args []string, stdout io.Writer, stderr io.Writer, src config.Source) int {
+	return executeWithFactoryAndDeps(args, stdout, stderr, defaultServiceFactory, localCommandDeps{Source: src})
+}
+
 func executeWithFactory(args []string, stdout io.Writer, stderr io.Writer, factory serviceFactory) int {
+	return executeWithFactoryAndDeps(args, stdout, stderr, factory, localCommandDeps{Source: config.OSSource{}})
+}
+
+func executeWithFactoryAndDeps(args []string, stdout io.Writer, stderr io.Writer, factory serviceFactory, deps localCommandDeps) int {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		printHelp(stdout)
 		return 0
@@ -110,6 +129,9 @@ func executeWithFactory(args []string, stdout io.Writer, stderr io.Writer, facto
 	if args[0] == "--version" || args[0] == "version" {
 		fmt.Fprintf(stdout, "gitcode-mcp %s\n", version)
 		return 0
+	}
+	if args[0] == "config" || args[0] == "auth" {
+		return executeLocalCommand(args, stdout, stderr, deps)
 	}
 	if !isKnownCommand(args[0]) {
 		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
@@ -189,6 +211,8 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.label, "label", "", "label")
 	flags.StringVar(&opts.labels, "labels", "", "comma-separated labels")
 	flags.StringVar(&opts.idempotencyKey, "idempotency-key", "", "idempotency key")
+	flags.BoolVar(&opts.overwrite, "overwrite", false, "overwrite existing file")
+	flags.BoolVar(&opts.redacted, "redacted", false, "redact secret values")
 	if err := flags.Parse(reorderFlags(args)); err != nil {
 		return opts, nil, service.ErrInvalidQuery{Field: "flags", Message: err.Error()}
 	}
@@ -204,9 +228,9 @@ func reorderFlags(args []string) []string {
 	positionals := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if strings.HasPrefix(arg, "--") {
+			if strings.HasPrefix(arg, "--") {
 			flags = append(flags, arg)
-			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" {
+			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--overwrite" || arg == "--redacted" {
 				continue
 			}
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
@@ -218,6 +242,77 @@ func reorderFlags(args []string) []string {
 		positionals = append(positionals, arg)
 	}
 	return append(flags, positionals...)
+}
+
+func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+	if deps.Source == nil {
+		deps.Source = config.OSSource{}
+	}
+	if deps.CredentialReporter == nil {
+		provider := config.DefaultCredentialProvider(deps.Source)
+		deps.CredentialReporter = provider
+	}
+	command := args[0]
+	subArgs := []string{}
+	if len(args) > 1 {
+		subArgs = args[1:]
+	}
+	opts, rest, err := parseOptions(command, subArgs)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	sub, ok := firstArg(rest)
+	if !ok {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: command, Message: "subcommand is required"})
+	}
+	switch command + " " + sub {
+	case "config init":
+		loc := config.Locate(deps.Source)
+		if err := config.InitYAMLConfig(loc.Path, opts.overwrite); err != nil {
+			fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), deps.Source))
+			return 1
+		}
+		fmt.Fprintf(stdout, "config_path: %s\nconfig_format: yaml\ncreated: true\n", loc.Path)
+		return 0
+	case "config locate":
+		loc := config.Locate(deps.Source)
+		return render(stdout, opts.format, loc, func(w io.Writer, v config.ConfigLocation) {
+			fmt.Fprintf(w, "config_path: %s\nconfig_source: %s\nconfig_format: %s\nconfig_exists: %t\n", cliEmptyAsNone(v.Path), v.Source, v.Format, v.Exists)
+		})
+	case "config show":
+		if !opts.redacted {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "redacted", Message: "config show requires --redacted"})
+		}
+		eff, err := config.LoadEffective(deps.Source, config.Overrides{})
+		if err != nil {
+			fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), deps.Source))
+			return 1
+		}
+		status := deps.CredentialReporter.Status(context.Background(), eff)
+		if opts.format == "json" {
+			payload := struct {
+				Effective  config.EffectiveConfig   `json:"effective"`
+				Credential config.CredentialStatus `json:"credential"`
+			}{Effective: eff, Credential: status}
+			return render(stdout, opts.format, payload, nil)
+		}
+		fmt.Fprint(stdout, config.RenderRedactedEffectiveConfig(eff, status))
+		return 0
+	case "auth status":
+		eff, err := config.LoadEffective(deps.Source, config.Overrides{})
+		if err != nil {
+			fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), deps.Source))
+			return 1
+		}
+		status := deps.CredentialReporter.Status(context.Background(), eff)
+		if opts.format == "json" {
+			return render(stdout, opts.format, status, nil)
+		}
+		fmt.Fprint(stdout, config.RenderCredentialStatus(status))
+		return 0
+	default:
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: command, Message: "unknown subcommand"})
+	}
 }
 
 func dispatch(ctx context.Context, svc queryService, command string, args []string, opts options, stdout io.Writer, stderr io.Writer) int {
@@ -417,6 +512,13 @@ func writeRequest(opts options) service.WriteCommandRequest {
 		}
 	}
 	return service.WriteCommandRequest{Owner: opts.owner, Repo: opts.repo, ID: opts.id, Number: opts.number, Slug: opts.slug, Title: opts.title, Body: opts.body, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
+}
+
+func cliEmptyAsNone(value string) string {
+	if value == "" {
+		return "none"
+	}
+	return value
 }
 
 func render[T any](stdout io.Writer, format string, value T, text func(io.Writer, T)) int {

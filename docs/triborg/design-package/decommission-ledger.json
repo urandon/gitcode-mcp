@@ -1,0 +1,104 @@
+{
+  "created_at": "2026-06-19T19:17:59+00:00",
+  "decommission_ids": [
+    "decommission-1",
+    "decommission-2",
+    "decommission-3",
+    "decommission-4",
+    "decommission-5",
+    "decommission-6",
+    "decommission-7",
+    "decommission-8"
+  ],
+  "items": [
+    {
+      "action": "replace",
+      "allowlist": [],
+      "category": "surface",
+      "id": "decommission-1",
+      "keep_reason": "",
+      "request_task_id": 6,
+      "source": "runner",
+      "target": "Coordinator shell-only read workflow for snippets, recent changes, link checks, stale-index reports, cache status, chunks, backlinks, and sync status",
+      "verification": "MCP JSON-RPC/server tests show equivalent read results through MCP tools without requiring shell-only coordinator commands for the covered queries"
+    },
+    {
+      "action": "replace",
+      "allowlist": [],
+      "category": "state_contract",
+      "id": "decommission-2",
+      "keep_reason": "",
+      "request_task_id": 9,
+      "source": "runner",
+      "target": "Fake-success or stub-like remote write contract for issue/wiki operations",
+      "verification": "CLI/API tests prove unavailable write adapters return actionable errors and cannot persist successful audit events"
+    },
+    {
+      "action": "replace",
+      "allowlist": [],
+      "category": "state_contract",
+      "id": "decommission-3",
+      "keep_reason": "",
+      "request_task_id": 11,
+      "source": "runner",
+      "target": "diff_snapshot behavior that compares current/current for arbitrary unresolved snapshot ids",
+      "verification": "Snapshot tests prove unknown base_id or head_id returns not-found instead of changed:false"
+    },
+    {
+      "action": "replace",
+      "allowlist": [],
+      "category": "state_contract",
+      "id": "decommission-4",
+      "keep_reason": "",
+      "request_task_id": 4,
+      "source": "runner",
+      "target": "Fixture-only active cache bootstrap that leaves real coordinator queries returning cache_empty",
+      "verification": "Fixture-backed and optional live sync tests prove configured issue/wiki records populate cache and offline reads return nonempty results"
+    },
+    {
+      "action": "replace",
+      "allowlist": [],
+      "category": "surface",
+      "id": "decommission-5",
+      "keep_reason": "",
+      "request_task_id": 7,
+      "source": "runner",
+      "target": "Stdio-only MCP runtime as the sole product transport",
+      "verification": "Runtime transport tests prove both stdio and HTTP/SSE server mode are available, with shared-cache multi-client reads over HTTP/SSE"
+    },
+    {
+      "action": "replace",
+      "allowlist": [],
+      "category": "state_contract",
+      "id": "decommission-6",
+      "keep_reason": "",
+      "request_task_id": 2,
+      "source": "runner",
+      "target": "Unscoped remote aliases such as issue:42 and wiki:Home as globally unique identities",
+      "verification": "Two-repository fixture tests prove alias collisions are rejected or disambiguated by repo_id"
+    },
+    {
+      "action": "replace",
+      "allowlist": [],
+      "category": "surface",
+      "id": "decommission-7",
+      "keep_reason": "",
+      "request_task_id": 3,
+      "source": "runner",
+      "target": "Opaque config discovery that requires reading source code to know active paths and overrides",
+      "verification": "CLI tests prove config locate and config show --redacted expose active config and precedence without secret disclosure"
+    },
+    {
+      "action": "replace",
+      "allowlist": [],
+      "category": "state_contract",
+      "id": "decommission-8",
+      "keep_reason": "",
+      "request_task_id": 11,
+      "source": "runner",
+      "target": "export_snapshot output that silently omits chunks or citable ranges when indexing has not run",
+      "verification": "Export tests prove missing index state produces explicit warnings and indexed state includes chunks and citation ranges"
+    }
+  ],
+  "schema_version": "triborg.decommission-ledger.v1"
+}
