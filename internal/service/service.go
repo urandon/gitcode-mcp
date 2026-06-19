@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/gitcode"
+	"gitcode-mcp/internal/index"
 )
 
 type Service struct {
@@ -241,38 +243,107 @@ func (s *Service) StaleIndex(ctx context.Context, req StaleIndexRequest) (StaleI
 }
 
 func (s *Service) ExportSnapshot(ctx context.Context, req ExportSnapshotRequest) (ExportSnapshotResult, error) {
-	content, count, err := s.renderSnapshot(ctx, req.Format)
+	format := normalizeSnapshotFormat(req.Format)
+	snapshot, err := s.buildSnapshot(ctx, req)
 	if err != nil {
 		return ExportSnapshotResult{}, err
 	}
-	hash := sha256.Sum256([]byte(content))
-	result := ExportSnapshotResult{SnapshotID: hex.EncodeToString(hash[:16]), Format: normalizeFormat(req.Format), RecordCount: count, GeneratedAt: s.now().UTC(), ContentHash: hex.EncodeToString(hash[:]), InlineContent: content}
-	if req.OutputPath != "" && (req.InlineLimit <= 0 || len(content) > req.InlineLimit) {
+	content, err := renderSnapshotContent(snapshot, format)
+	if err != nil {
+		return ExportSnapshotResult{}, err
+	}
+	hash := sha256.Sum256(content)
+	result := ExportSnapshotResult{SnapshotID: hex.EncodeToString(hash[:16]), Format: format, RecordCount: len(snapshot.Sources), GeneratedAt: snapshot.CreatedAt, ContentHash: hex.EncodeToString(hash[:]), InlineContent: string(content)}
+	if req.OutputPath != "" {
+		if err := os.WriteFile(req.OutputPath, content, 0o600); err != nil {
+			return ExportSnapshotResult{}, err
+		}
 		result.OutputPath = req.OutputPath
-		result.InlineContent = ""
+		if req.InlineLimit <= 0 || len(content) > req.InlineLimit {
+			result.InlineContent = ""
+		}
 	}
 	return result, nil
 }
 
 func (s *Service) DiffSnapshot(ctx context.Context, req DiffSnapshotRequest) (DiffSnapshotResult, error) {
-	head, _, err := s.renderSnapshot(ctx, req.Format)
+	format := normalizeSnapshotFormat(req.Format)
+	baseRef := req.Base
+	if baseRef.Kind == "" {
+		base := req.BaseContent
+		if base == "" {
+			base = req.BaseSnapshotContent
+		}
+		if base == "" {
+			baseRef = SnapshotRef{Kind: "current", Format: format}
+		} else {
+			baseRef = SnapshotRef{Kind: "bytes", Bytes: []byte(base), Format: format}
+		}
+	}
+	headRef := req.Head
+	if headRef.Kind == "" {
+		headRef = SnapshotRef{Kind: "current", Format: format}
+	}
+	base, err := s.loadSnapshotRef(ctx, baseRef, format)
 	if err != nil {
 		return DiffSnapshotResult{}, err
 	}
-	base := req.BaseContent
-	if base == "" {
-		base = req.BaseSnapshotContent
+	head, err := s.loadSnapshotRef(ctx, headRef, format)
+	if err != nil {
+		return DiffSnapshotResult{}, err
 	}
-	ids := changedIDs(base, head)
-	return DiffSnapshotResult{BaseSnapshotID: req.BaseSnapshotID, HeadSnapshotID: req.HeadSnapshotID, Format: normalizeFormat(req.Format), ChangedSourceIDs: ids, AddedSourceIDs: ids, ModifiedSourceIDs: []string{}, RemovedSourceIDs: []string{}, DiffText: simpleDiff(base, head)}, nil
+	result := diffSnapshots(base, head)
+	result.BaseSnapshotID = req.BaseSnapshotID
+	result.HeadSnapshotID = req.HeadSnapshotID
+	result.Format = format
+	baseBytes, _ := renderSnapshotContent(base, format)
+	headBytes, _ := renderSnapshotContent(head, format)
+	result.DiffText = simpleDiff(string(baseBytes), string(headBytes))
+	return result, nil
 }
 
 func (s *Service) Ingest(ctx context.Context, req OperationRequest) (OperationResult, error) {
-	return s.operationResult(ctx, "ingest", req)
+	if err := ctx.Err(); err != nil {
+		return OperationResult{}, err
+	}
+	sources, err := s.store.ListSources(ctx, cache.SourceFilter{})
+	if err != nil && !isCacheNotFound(err) {
+		return OperationResult{}, normalizeError(err, "sources", "")
+	}
+	if len(sources) == 0 {
+		if err := s.seedMinimumCorpus(ctx); err != nil {
+			return OperationResult{}, err
+		}
+		sources, err = s.store.ListSources(ctx, cache.SourceFilter{})
+		if err != nil {
+			return OperationResult{}, normalizeError(err, "sources", "")
+		}
+	}
+	return OperationResult{Command: "ingest", Status: "ok", ProcessedCount: len(sources), Evidence: operationMode(req.Mode), GeneratedAt: s.now().UTC()}, nil
 }
 
 func (s *Service) Index(ctx context.Context, req OperationRequest) (OperationResult, error) {
-	return s.operationResult(ctx, "index", req)
+	if err := ctx.Err(); err != nil {
+		return OperationResult{}, err
+	}
+	sources, err := s.store.ListSources(ctx, cache.SourceFilter{})
+	if err != nil {
+		if isCacheNotFound(err) {
+			return OperationResult{Command: "index", Status: "ok", Evidence: operationMode(req.Mode), GeneratedAt: s.now().UTC()}, nil
+		}
+		return OperationResult{}, normalizeError(err, "sources", "")
+	}
+	processed := 0
+	for _, source := range sources {
+		chunks := index.ChunkSource(indexSourceRecord(source), index.ParseSource(indexSourceRecord(source)))
+		for _, chunk := range chunks {
+			if _, err := s.store.UpsertChunk(ctx, cache.Chunk{ID: chunk.ID, SourceID: chunk.SourceID, ContentHash: chunk.ContentHash, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, HeadingPath: append([]string(nil), chunk.HeadingPath...), Text: chunk.Text, NormalizedText: chunk.NormalizedText, InheritedMetadata: copyStringMap(chunk.InheritedMetadata), OutboundLinks: sortedStrings(chunk.OutboundLinks), ResolvedAliases: copyStringMap(chunk.ResolvedAliases), Embedding: append([]byte(nil), chunk.Embedding...)}); err != nil {
+				return OperationResult{}, normalizeError(err, "chunk", chunk.ID)
+			}
+		}
+		processed++
+	}
+	return OperationResult{Command: "index", Status: "ok", ProcessedCount: processed, Evidence: operationMode(req.Mode), GeneratedAt: s.now().UTC()}, nil
 }
 
 func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult, error) {
@@ -382,11 +453,54 @@ func (s *Service) operationResult(ctx context.Context, command string, req Opera
 	if err != nil && !isCacheNotFound(err) {
 		return OperationResult{}, normalizeError(err, "sources", "")
 	}
-	mode := strings.TrimSpace(req.Mode)
+	return OperationResult{Command: command, Status: "ok", ProcessedCount: len(sources), Evidence: operationMode(req.Mode), GeneratedAt: s.now().UTC()}, nil
+}
+
+func operationMode(mode string) string {
+	mode = strings.TrimSpace(mode)
 	if mode == "" {
-		mode = "default"
+		return "default"
 	}
-	return OperationResult{Command: command, Status: "ok", ProcessedCount: len(sources), Evidence: mode, GeneratedAt: s.now().UTC()}, nil
+	return mode
+}
+
+func (s *Service) seedMinimumCorpus(ctx context.Context) error {
+	now := s.now().UTC()
+	taskBody := "# Task\n\nTASK-001 keeps the offline export walkthrough cache-first.\n"
+	taskHash := index.ContentHash(taskBody)
+	if err := s.store.UpsertSourceGraph(ctx, cache.SourceGraph{
+		Source:     cache.Source{ID: "TASK-001", Kind: "task", Path: "project/tasks/day7.md", Title: "Offline Export Walkthrough", Body: taskBody, Status: "ready", Labels: []string{"task"}, ContentHash: taskHash, CreatedAt: now, UpdatedAt: now},
+		Identities: []cache.Identity{{SourceID: "TASK-001", AliasType: "id", Alias: "TASK-001"}},
+		SyncStatus: &cache.SyncStatus{SourceID: "TASK-001", RemoteType: "fixture", RemoteID: "task-001", RemoteRevision: taskHash, Status: "fresh", LastFetchedAt: now},
+	}); err != nil {
+		return normalizeError(err, "source", "TASK-001")
+	}
+	body := "---\nstatus: ready\nlabels: backlog,design\n---\n# Backlog\n\nDOC-123 describes the cache-first backlog.\n\nSee [task](TASK-001).\n"
+	hash := index.ContentHash(body)
+	graph := cache.SourceGraph{
+		Source:     cache.Source{ID: "DOC-123", Kind: "doc", Path: "docs/day7-offline.md", Title: "Day 7 Offline Backlog", Body: body, Status: "ready", Labels: []string{"backlog", "design"}, ContentHash: hash, CreatedAt: now, UpdatedAt: now},
+		Identities: []cache.Identity{{SourceID: "DOC-123", AliasType: "remote", Alias: "wiki/day7-offline", Remote: cache.RemoteAlias{Type: "wiki", ID: "day7-offline"}}},
+		Links:      []cache.Link{{SourceID: "DOC-123", TargetID: "TASK-001", Kind: "markdown", Text: "task"}},
+		SyncStatus: &cache.SyncStatus{SourceID: "DOC-123", RemoteType: "fixture", RemoteID: "day7-offline", RemoteRevision: hash, Status: "fresh", LastFetchedAt: now},
+	}
+	if err := s.store.UpsertSourceGraph(ctx, graph); err != nil {
+		return normalizeError(err, "source", graph.Source.ID)
+	}
+	return nil
+}
+
+func indexSourceRecord(source cache.Source) index.SourceRecord {
+	aliases := make([]index.Alias, 0, len(source.Aliases))
+	remoteAliases := make([]index.Alias, 0, len(source.Aliases))
+	for _, alias := range source.Aliases {
+		if alias.AliasType != "" && alias.Alias != "" {
+			aliases = append(aliases, index.Alias{Type: alias.AliasType, ID: alias.Alias})
+		}
+		if alias.Remote.Type != "" && alias.Remote.ID != "" {
+			remoteAliases = append(remoteAliases, index.Alias{Type: alias.Remote.Type, ID: alias.Remote.ID})
+		}
+	}
+	return index.SourceRecord{ID: source.ID, Kind: source.Kind, Path: source.Path, Title: source.Title, Body: source.Body, Status: source.Status, UpdatedAt: source.UpdatedAt.UTC(), Aliases: aliases, RemoteAliases: remoteAliases}
 }
 
 type stagedRemote struct {
@@ -838,40 +952,92 @@ func (s *Service) snippetFromChunk(ctx context.Context, id, chunkID string) (Sni
 	return SnippetResult{}, ErrNotFound{Kind: "chunk", ID: chunkID}
 }
 
-func (s *Service) renderSnapshot(ctx context.Context, format string) (string, int, error) {
+func (s *Service) buildSnapshot(ctx context.Context, req ExportSnapshotRequest) (Snapshot, error) {
 	sources, err := s.store.ListSources(ctx, cache.SourceFilter{})
 	if err != nil {
-		return "", 0, normalizeError(err, "sources", "")
+		return Snapshot{}, normalizeError(err, "sources", "")
 	}
 	if len(sources) == 0 {
-		return "", 0, ErrCacheEmpty{Message: "cache has no sources"}
+		return Snapshot{}, ErrCacheEmpty{Message: "cache has no sources"}
 	}
-	sort.SliceStable(sources, func(i, j int) bool {
-		if sources[i].ID != sources[j].ID {
-			return sources[i].ID < sources[j].ID
-		}
-		return sources[i].Path < sources[j].Path
-	})
-	if normalizeFormat(format) == "json" {
-		records := make([]SourceRecord, 0, len(sources))
-		for _, source := range sources {
-			links, err := s.store.ListLinks(ctx, cache.LinkFilter{SourceID: source.ID})
-			if err != nil {
-				return "", 0, normalizeError(err, "links", source.ID)
-			}
-			records = append(records, sourceRecord(source, links, nil))
-		}
-		b, err := json.Marshal(records)
-		if err != nil {
-			return "", 0, err
-		}
-		return string(b), len(sources), nil
+	include := map[string]struct{}{}
+	for _, id := range req.SourceIDs {
+		include[id] = struct{}{}
 	}
-	var b strings.Builder
+	snapshot := Snapshot{SchemaVersion: "gitcode-mcp.snapshot.v1"}
 	for _, source := range sources {
+		if len(include) > 0 {
+			if _, ok := include[source.ID]; !ok {
+				continue
+			}
+		}
 		labels := append([]string(nil), source.Labels...)
 		sort.Strings(labels)
-		b.WriteString(source.ID + "\t" + source.Path + "\t" + source.Kind + "\t" + source.Status + "\t" + source.Title + "\t" + strings.Join(labels, ",") + "\t" + source.UpdatedAt.UTC().Format(time.RFC3339) + "\n")
+		body := ""
+		if req.IncludeBody {
+			body = source.Body
+		}
+		snapshot.Sources = append(snapshot.Sources, SnapshotSource{ID: source.ID, Kind: source.Kind, Path: source.Path, Title: source.Title, Body: body, Status: source.Status, Labels: labels, ContentHash: source.ContentHash, CreatedAt: source.CreatedAt.UTC(), UpdatedAt: source.UpdatedAt.UTC()})
+		aliases, err := s.store.GetIdentityMap(ctx, source.ID)
+		if err != nil {
+			return Snapshot{}, normalizeError(err, "aliases", source.ID)
+		}
+		for _, alias := range aliases {
+			snapshot.Aliases = append(snapshot.Aliases, SnapshotAlias{SourceID: alias.SourceID, AliasKind: alias.AliasType, AliasValue: alias.Alias, RemoteKind: alias.Remote.Type, RemoteID: alias.Remote.ID})
+		}
+		links, err := s.store.ListLinks(ctx, cache.LinkFilter{SourceID: source.ID})
+		if err != nil {
+			return Snapshot{}, normalizeError(err, "links", source.ID)
+		}
+		for _, link := range links {
+			snapshot.Links = append(snapshot.Links, SnapshotLink{SourceID: link.SourceID, TargetID: link.TargetID, LinkType: link.Kind, Text: link.Text})
+		}
+		backlinks, err := s.store.ListLinks(ctx, cache.LinkFilter{TargetID: source.ID})
+		if err != nil {
+			return Snapshot{}, normalizeError(err, "backlinks", source.ID)
+		}
+		for _, link := range backlinks {
+			snapshot.Backlinks = append(snapshot.Backlinks, SnapshotLink{SourceID: link.SourceID, TargetID: link.TargetID, LinkType: link.Kind, Text: link.Text})
+		}
+		status, err := s.store.GetSyncStatus(ctx, source.ID)
+		if err != nil {
+			var notFound ErrNotFound
+			if !errors.As(normalizeError(err, "sync status", source.ID), &notFound) {
+				return Snapshot{}, normalizeError(err, "sync status", source.ID)
+			}
+			snapshot.SyncStatus = append(snapshot.SyncStatus, SnapshotSyncStatus{SourceID: source.ID, Status: "unknown", Freshness: "unknown"})
+		} else {
+			snapshot.SyncStatus = append(snapshot.SyncStatus, SnapshotSyncStatus{SourceID: source.ID, RemoteType: status.RemoteType, RemoteID: status.RemoteID, RemoteRevision: status.RemoteRevision, Status: status.Status, Freshness: freshnessFor(source, status), LastFetchedAt: status.LastFetchedAt.UTC()})
+		}
+		chunks, err := s.store.GetChunks(ctx, source.ID)
+		if err != nil {
+			return Snapshot{}, normalizeError(err, "chunks", source.ID)
+		}
+		for _, chunk := range chunks {
+			snapshot.Chunks = append(snapshot.Chunks, SnapshotChunk{ID: chunk.ID, SourceID: chunk.SourceID, ContentHash: chunk.ContentHash, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, HeadingPath: append([]string(nil), chunk.HeadingPath...), Text: chunk.Text, NormalizedText: chunk.NormalizedText, InheritedMetadata: copyStringMap(chunk.InheritedMetadata), OutboundLinks: sortedStrings(chunk.OutboundLinks), ResolvedAliases: copyStringMap(chunk.ResolvedAliases)})
+		}
 	}
-	return b.String(), len(sources), nil
+	if len(snapshot.Sources) == 0 {
+		return Snapshot{}, ErrCacheEmpty{Message: "cache has no matching sources"}
+	}
+	snapshot.CreatedAt = snapshotCreatedAt(snapshot)
+	sortSnapshot(&snapshot)
+	return snapshot, nil
+}
+
+func (s *Service) loadSnapshotRef(ctx context.Context, ref SnapshotRef, format string) (Snapshot, error) {
+	switch strings.ToLower(ref.Kind) {
+	case "", "current":
+		return s.buildSnapshot(ctx, ExportSnapshotRequest{Format: format, IncludeBody: true})
+	case "path":
+		b, err := os.ReadFile(ref.Path)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		return parseSnapshotBytes(b, ref.Format)
+	case "bytes":
+		return parseSnapshotBytes(ref.Bytes, ref.Format)
+	default:
+		return Snapshot{}, ErrInvalidQuery{Field: "snapshot_ref", Message: "kind must be current, path, or bytes"}
+	}
 }

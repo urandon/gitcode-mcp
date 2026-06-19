@@ -214,9 +214,11 @@ type StaleIndexResult struct {
 }
 
 type ExportSnapshotRequest struct {
-	Format      string `json:"format,omitempty"`
-	OutputPath  string `json:"output_path,omitempty"`
-	InlineLimit int    `json:"inline_limit,omitempty"`
+	Format      string   `json:"format,omitempty"`
+	IncludeBody bool     `json:"include_body,omitempty"`
+	SourceIDs   []string `json:"source_ids,omitempty"`
+	OutputPath  string   `json:"output_path,omitempty"`
+	InlineLimit int      `json:"inline_limit,omitempty"`
 }
 
 type ExportSnapshotResult struct {
@@ -230,24 +232,115 @@ type ExportSnapshotResult struct {
 	Warnings      []string  `json:"warnings,omitempty"`
 }
 
+type SnapshotRef struct {
+	Kind   string `json:"kind"`
+	Path   string `json:"path,omitempty"`
+	Bytes  []byte `json:"bytes,omitempty"`
+	Format string `json:"format,omitempty"`
+}
+
+type Snapshot struct {
+	SchemaVersion string               `json:"schema_version"`
+	CreatedAt     time.Time            `json:"created_at"`
+	Sources       []SnapshotSource     `json:"sources"`
+	Aliases       []SnapshotAlias      `json:"aliases"`
+	Links         []SnapshotLink       `json:"links"`
+	Backlinks     []SnapshotLink       `json:"backlinks"`
+	SyncStatus    []SnapshotSyncStatus `json:"sync_status"`
+	Chunks        []SnapshotChunk      `json:"chunks"`
+}
+
+type SnapshotSource struct {
+	ID          string    `json:"id"`
+	Kind        string    `json:"kind"`
+	Path        string    `json:"path"`
+	Title       string    `json:"title"`
+	Body        string    `json:"body,omitempty"`
+	Status      string    `json:"status"`
+	Labels      []string  `json:"labels,omitempty"`
+	ContentHash string    `json:"content_hash"`
+	CreatedAt   time.Time `json:"created_at,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+}
+
+type SnapshotAlias struct {
+	SourceID   string `json:"source_id"`
+	AliasKind  string `json:"alias_kind"`
+	AliasValue string `json:"alias_value"`
+	RemoteKind string `json:"remote_kind,omitempty"`
+	RemoteID   string `json:"remote_id,omitempty"`
+}
+
+type SnapshotLink struct {
+	SourceID string `json:"source_id"`
+	TargetID string `json:"target_id"`
+	LinkType string `json:"link_type"`
+	Text     string `json:"text,omitempty"`
+}
+
+type SnapshotSyncStatus struct {
+	SourceID       string    `json:"source_id"`
+	RemoteType     string    `json:"remote_type,omitempty"`
+	RemoteID       string    `json:"remote_id,omitempty"`
+	RemoteRevision string    `json:"remote_revision,omitempty"`
+	Status         string    `json:"status"`
+	Freshness      string    `json:"freshness"`
+	LastFetchedAt  time.Time `json:"last_fetched_at,omitempty"`
+}
+
+type SnapshotChunk struct {
+	ID                string            `json:"id"`
+	SourceID          string            `json:"source_id"`
+	ContentHash       string            `json:"content_hash"`
+	ByteStart         int               `json:"byte_start"`
+	ByteEnd           int               `json:"byte_end"`
+	LineStart         int               `json:"line_start"`
+	LineEnd           int               `json:"line_end"`
+	HeadingPath       []string          `json:"heading_path"`
+	Text              string            `json:"text,omitempty"`
+	NormalizedText    string            `json:"normalized_text,omitempty"`
+	InheritedMetadata map[string]string `json:"inherited_metadata,omitempty"`
+	OutboundLinks     []string          `json:"outbound_links,omitempty"`
+	ResolvedAliases   map[string]string `json:"resolved_aliases,omitempty"`
+}
+
 type DiffSnapshotRequest struct {
-	BaseSnapshotID      string `json:"base_snapshot_id,omitempty"`
-	HeadSnapshotID      string `json:"head_snapshot_id,omitempty"`
-	BaseContent         string `json:"base_content,omitempty"`
-	BaseSnapshotContent string `json:"base_snapshot_content,omitempty"`
-	Format              string `json:"format,omitempty"`
+	BaseSnapshotID      string      `json:"base_snapshot_id,omitempty"`
+	HeadSnapshotID      string      `json:"head_snapshot_id,omitempty"`
+	BaseContent         string      `json:"base_content,omitempty"`
+	BaseSnapshotContent string      `json:"base_snapshot_content,omitempty"`
+	Base                SnapshotRef `json:"base,omitempty"`
+	Head                SnapshotRef `json:"head,omitempty"`
+	Format              string      `json:"format,omitempty"`
+}
+
+type SnapshotRecordChange struct {
+	ID                string   `json:"id"`
+	BeforeContentHash string   `json:"before_content_hash,omitempty"`
+	AfterContentHash  string   `json:"after_content_hash,omitempty"`
+	ChangedFields     []string `json:"changed_fields,omitempty"`
 }
 
 type DiffSnapshotResult struct {
-	BaseSnapshotID    string   `json:"base_snapshot_id"`
-	HeadSnapshotID    string   `json:"head_snapshot_id"`
-	Format            string   `json:"format"`
-	ChangedSourceIDs  []string `json:"changed_source_ids"`
-	AddedSourceIDs    []string `json:"added_source_ids"`
-	RemovedSourceIDs  []string `json:"removed_source_ids"`
-	ModifiedSourceIDs []string `json:"modified_source_ids"`
-	DiffText          string   `json:"diff_text"`
-	Warnings          []string `json:"warnings,omitempty"`
+	BaseSnapshotID    string                 `json:"base_snapshot_id"`
+	HeadSnapshotID    string                 `json:"head_snapshot_id"`
+	Format            string                 `json:"format"`
+	AddedSources      []SnapshotSource       `json:"added_sources,omitempty"`
+	RemovedSources    []SnapshotSource       `json:"removed_sources,omitempty"`
+	ChangedSources    []SnapshotRecordChange `json:"changed_sources,omitempty"`
+	AddedChunks       []SnapshotChunk        `json:"added_chunks,omitempty"`
+	RemovedChunks     []SnapshotChunk        `json:"removed_chunks,omitempty"`
+	ChangedChunks     []SnapshotRecordChange `json:"changed_chunks,omitempty"`
+	AddedLinks        []SnapshotLink         `json:"added_links,omitempty"`
+	RemovedLinks      []SnapshotLink         `json:"removed_links,omitempty"`
+	ChangedAliases    []SnapshotRecordChange `json:"changed_aliases,omitempty"`
+	ChangedSyncStatus []SnapshotRecordChange `json:"changed_sync_status,omitempty"`
+	ChangedSourceIDs  []string               `json:"changed_source_ids"`
+	AddedSourceIDs    []string               `json:"added_source_ids"`
+	RemovedSourceIDs  []string               `json:"removed_source_ids"`
+	ModifiedSourceIDs []string               `json:"modified_source_ids"`
+	DiffText          string                 `json:"diff_text"`
+	Warnings          []string               `json:"warnings,omitempty"`
 }
 
 type LinkResult struct {

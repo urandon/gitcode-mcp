@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -79,6 +81,55 @@ func TestGetSource(t *testing.T) {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("get output missing %q in %q", want, stdout.String())
 		}
+	}
+}
+
+func TestExportJSONDeterministic(t *testing.T) {
+	factory := cacheBackedFactory(t)
+	var firstOut bytes.Buffer
+	var firstErr bytes.Buffer
+	if code := executeWithFactory([]string{"export", "--format", "json"}, &firstOut, &firstErr, factory); code != 0 {
+		t.Fatalf("first export code=%d stderr=%q", code, firstErr.String())
+	}
+	var secondOut bytes.Buffer
+	var secondErr bytes.Buffer
+	if code := executeWithFactory([]string{"export", "--format", "json"}, &secondOut, &secondErr, factory); code != 0 {
+		t.Fatalf("second export code=%d stderr=%q", code, secondErr.String())
+	}
+	if firstOut.String() != secondOut.String() {
+		t.Fatalf("export output not deterministic")
+	}
+	var snapshot service.Snapshot
+	if err := json.Unmarshal(firstOut.Bytes(), &snapshot); err != nil {
+		t.Fatalf("invalid snapshot json: %v", err)
+	}
+	if len(snapshot.Sources) == 0 || len(snapshot.Chunks) != 0 {
+		t.Fatalf("unexpected snapshot content: %#v", snapshot)
+	}
+}
+
+func TestDiffLoadsSnapshotPaths(t *testing.T) {
+	factory := cacheBackedFactory(t)
+	basePath := filepath.Join(t.TempDir(), "base.json")
+	var exportOut bytes.Buffer
+	var exportErr bytes.Buffer
+	if code := executeWithFactory([]string{"export", "--format", "json", "--output", basePath}, &exportOut, &exportErr, factory); code != 0 {
+		t.Fatalf("export code=%d stderr=%q", code, exportErr.String())
+	}
+	if _, err := os.Stat(basePath); err != nil {
+		t.Fatalf("base snapshot not written: %v", err)
+	}
+	var diffOut bytes.Buffer
+	var diffErr bytes.Buffer
+	if code := executeWithFactory([]string{"diff", "--format", "json", "--base", basePath}, &diffOut, &diffErr, factory); code != 0 {
+		t.Fatalf("diff code=%d stderr=%q", code, diffErr.String())
+	}
+	var result service.DiffSnapshotResult
+	if err := json.Unmarshal(diffOut.Bytes(), &result); err != nil {
+		t.Fatalf("invalid diff json: %v", err)
+	}
+	if result.BaseSnapshotID != basePath {
+		t.Fatalf("base id=%q want %q", result.BaseSnapshotID, basePath)
 	}
 }
 

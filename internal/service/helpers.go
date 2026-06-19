@@ -87,6 +87,9 @@ func normalizeFormat(format string) string {
 	if strings.EqualFold(format, "json") {
 		return "json"
 	}
+	if strings.EqualFold(format, "markdown") || strings.EqualFold(format, "md") {
+		return "markdown"
+	}
 	return "text"
 }
 

@@ -163,7 +163,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	opts := options{format: "text"}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	flags.StringVar(&opts.format, "format", "text", "text or json")
+	flags.StringVar(&opts.format, "format", "text", "text, markdown, or json")
 	flags.StringVar(&opts.kind, "kind", "", "source kind")
 	flags.StringVar(&opts.status, "status", "", "source status")
 	flags.IntVar(&opts.limit, "limit", 0, "result limit")
@@ -193,8 +193,8 @@ func parseOptions(command string, args []string) (options, []string, error) {
 		return opts, nil, service.ErrInvalidQuery{Field: "flags", Message: err.Error()}
 	}
 	opts.format = strings.ToLower(opts.format)
-	if opts.format != "text" && opts.format != "json" {
-		return opts, nil, service.ErrInvalidQuery{Field: "format", Message: "format must be text or json"}
+	if opts.format != "text" && opts.format != "markdown" && opts.format != "json" {
+		return opts, nil, service.ErrInvalidQuery{Field: "format", Message: "format must be text, markdown, or json"}
 	}
 	return opts, flags.Args(), nil
 }
@@ -356,13 +356,17 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		}
 		return render(stdout, opts.format, result, renderSyncText)
 	case "export":
-		result, err := svc.ExportSnapshot(ctx, service.ExportSnapshotRequest{Format: opts.format, OutputPath: opts.output})
+		result, err := svc.ExportSnapshot(ctx, service.ExportSnapshotRequest{Format: opts.format, OutputPath: opts.output, IncludeBody: true})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
+		if opts.format == "json" {
+			fmt.Fprint(stdout, result.InlineContent)
+			return 0
+		}
 		return render(stdout, opts.format, result, renderExportText)
 	case "diff":
-		result, err := svc.DiffSnapshot(ctx, service.DiffSnapshotRequest{BaseSnapshotID: opts.base, HeadSnapshotID: opts.head, Format: opts.format})
+		result, err := svc.DiffSnapshot(ctx, service.DiffSnapshotRequest{BaseSnapshotID: opts.base, HeadSnapshotID: opts.head, Base: snapshotRefFromPath(opts.base, opts.format), Head: snapshotRefFromPathOrCurrent(opts.head, opts.format), Format: opts.format})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
@@ -390,6 +394,17 @@ func dispatchWrite(ctx context.Context, handler func(context.Context, service.Wr
 		return writeError(stderr, opts.format, err)
 	}
 	return render(stdout, opts.format, result, renderWriteText)
+}
+
+func snapshotRefFromPath(path string, format string) service.SnapshotRef {
+	if strings.TrimSpace(path) == "" {
+		return service.SnapshotRef{Kind: "current", Format: format}
+	}
+	return service.SnapshotRef{Kind: "path", Path: path, Format: format}
+}
+
+func snapshotRefFromPathOrCurrent(path string, format string) service.SnapshotRef {
+	return snapshotRefFromPath(path, format)
 }
 
 func writeRequest(opts options) service.WriteCommandRequest {

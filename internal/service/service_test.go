@@ -2,9 +2,11 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -431,14 +433,75 @@ func TestExportSnapshot(t *testing.T) {
 	}
 }
 
+func TestExportDeterminism(t *testing.T) {
+	ctx := context.Background()
+	svc := seededService(t, ctx)
+	svc.now = func() time.Time { return time.Unix(100, 0).UTC() }
+	jsonFirst, err := svc.ExportSnapshot(ctx, ExportSnapshotRequest{Format: "json", IncludeBody: true})
+	if err != nil {
+		t.Fatalf("ExportSnapshot json returned error: %v", err)
+	}
+	jsonSecond, err := svc.ExportSnapshot(ctx, ExportSnapshotRequest{Format: "json", IncludeBody: true})
+	if err != nil {
+		t.Fatalf("ExportSnapshot json second returned error: %v", err)
+	}
+	markdownFirst, err := svc.ExportSnapshot(ctx, ExportSnapshotRequest{Format: "markdown", IncludeBody: true})
+	if err != nil {
+		t.Fatalf("ExportSnapshot markdown returned error: %v", err)
+	}
+	markdownSecond, err := svc.ExportSnapshot(ctx, ExportSnapshotRequest{Format: "markdown", IncludeBody: true})
+	if err != nil {
+		t.Fatalf("ExportSnapshot markdown second returned error: %v", err)
+	}
+	if jsonFirst.InlineContent != jsonSecond.InlineContent || markdownFirst.InlineContent != markdownSecond.InlineContent {
+		t.Fatalf("exports are not byte-identical")
+	}
+}
+
+func TestExportIncludesChunkProvenance(t *testing.T) {
+	ctx := context.Background()
+	svc := seededService(t, ctx)
+	result, err := svc.ExportSnapshot(ctx, ExportSnapshotRequest{Format: "json", IncludeBody: true})
+	if err != nil {
+		t.Fatalf("ExportSnapshot returned error: %v", err)
+	}
+	var snapshot Snapshot
+	if err := json.Unmarshal([]byte(result.InlineContent), &snapshot); err != nil {
+		t.Fatalf("snapshot json invalid: %v", err)
+	}
+	if len(snapshot.Chunks) == 0 {
+		t.Fatalf("snapshot has no chunks: %#v", snapshot)
+	}
+	chunk := snapshot.Chunks[0]
+	if chunk.ID == "" || chunk.SourceID == "" || chunk.ContentHash == "" || chunk.ByteStart < 0 || chunk.ByteEnd == 0 || chunk.LineStart == 0 || chunk.LineEnd == 0 || chunk.Text == "" {
+		t.Fatalf("chunk missing provenance: %#v", chunk)
+	}
+	if chunk.InheritedMetadata["owner"] != "docs" || len(chunk.OutboundLinks) == 0 || chunk.ResolvedAliases["TASK-001"] != "task:1" {
+		t.Fatalf("chunk missing nested provenance: %#v", chunk)
+	}
+}
+
 func TestDiffSnapshot(t *testing.T) {
 	ctx := context.Background()
 	svc := seededService(t, ctx)
-	diff, err := svc.DiffSnapshot(ctx, DiffSnapshotRequest{BaseContent: "DOC-123\tdocs/design.md\tdoc\tready\tDesign Doc\tdesign\t2026-01-01T00:00:00Z\n", Format: "text"})
+	base, err := svc.ExportSnapshot(ctx, ExportSnapshotRequest{Format: "json", IncludeBody: true})
+	if err != nil {
+		t.Fatalf("base export returned error: %v", err)
+	}
+	if err := svc.store.UpsertSource(ctx, cache.Source{ID: "TASK-001", Kind: "task", Path: "project/tasks/task.md", Title: "Task Backlog Changed", Body: "task changed", Status: "ready", Labels: []string{"task"}, ContentHash: "hash-task-2", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), UpdatedAt: time.Date(2026, 1, 1, 2, 0, 0, 0, time.UTC)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.UpsertSourceGraph(ctx, cache.SourceGraph{Source: cache.Source{ID: "DOC-999", Kind: "doc", Path: "docs/new.md", Title: "New", Body: "new", Status: "ready", ContentHash: "hash-new"}, Chunks: []cache.Chunk{{ID: "chunk-new", SourceID: "DOC-999", ContentHash: "hash-new", ByteStart: 0, ByteEnd: 3, LineStart: 1, LineEnd: 1, Text: "new"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.store.UpsertChunk(ctx, cache.Chunk{ID: "chunk-doc", SourceID: "DOC-123", ContentHash: "hash-doc", ByteStart: 0, ByteEnd: 14, LineStart: 2, LineEnd: 2, HeadingPath: []string{"Design"}, Text: "backlog chunk!", NormalizedText: "backlog chunk", InheritedMetadata: map[string]string{"owner": "docs"}, OutboundLinks: []string{"TASK-001"}, ResolvedAliases: map[string]string{"TASK-001": "task:1"}}); err != nil {
+		t.Fatal(err)
+	}
+	diff, err := svc.DiffSnapshot(ctx, DiffSnapshotRequest{Base: SnapshotRef{Kind: "bytes", Bytes: []byte(base.InlineContent), Format: "json"}, Head: SnapshotRef{Kind: "current", Format: "json"}, Format: "json"})
 	if err != nil {
 		t.Fatalf("DiffSnapshot returned error: %v", err)
 	}
-	if len(diff.ChangedSourceIDs) == 0 || diff.DiffText == "" {
+	if len(diff.AddedSources) == 0 || len(diff.ChangedSources) == 0 || len(diff.AddedChunks) == 0 || len(diff.ChangedChunks) == 0 || !strings.Contains(strings.Join(diff.ChangedSources[0].ChangedFields, ","), "content_hash") {
 		t.Fatalf("DiffSnapshot = %#v", diff)
 	}
 }
@@ -558,7 +621,7 @@ func seedStore(t *testing.T, ctx context.Context, store cache.Store) {
 		Source:     cache.Source{ID: "DOC-123", Kind: "doc", Path: "docs/design.md", Title: "Design Doc", Body: "intro same\nbacklog design same\nfinal", Status: "ready", Labels: []string{"zeta", "design"}, ContentHash: "hash-doc", CreatedAt: base, UpdatedAt: base},
 		Identities: []cache.Identity{{AliasType: "path", Alias: "docs/design.md", Remote: cache.RemoteAlias{Type: "remote", ID: "wiki/design"}}},
 		Links:      []cache.Link{{TargetID: "TASK-001", Kind: "mentions", Text: "task"}},
-		Chunks:     []cache.Chunk{{ID: "chunk-doc", ContentHash: "hash-doc", ByteStart: 0, ByteEnd: 13, LineStart: 2, LineEnd: 2, Text: "backlog chunk", NormalizedText: "backlog chunk"}},
+		Chunks:     []cache.Chunk{{ID: "chunk-doc", ContentHash: "hash-doc", ByteStart: 0, ByteEnd: 13, LineStart: 2, LineEnd: 2, HeadingPath: []string{"Design"}, Text: "backlog chunk", NormalizedText: "backlog chunk", InheritedMetadata: map[string]string{"owner": "docs"}, OutboundLinks: []string{"TASK-001"}, ResolvedAliases: map[string]string{"TASK-001": "task:1"}}},
 		SyncStatus: &cache.SyncStatus{RemoteType: "remote", RemoteID: "wiki/design", RemoteRevision: "rev-1", Status: "fresh", LastFetchedAt: base},
 	})
 	if err != nil {
