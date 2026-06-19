@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,9 @@ func (s *SQLiteStore) UpsertSourceGraph(ctx context.Context, graph SourceGraph) 
 	}
 	defer txRollbackOnError(tx, &err)
 	if err = upsertSourceTx(ctx, tx, graph.Source); err != nil {
+		return err
+	}
+	if err = upsertSearchProjectionTx(ctx, tx, graph.Source, s.useFTS); err != nil {
 		return err
 	}
 	for _, identity := range graph.Identities {
@@ -80,6 +84,9 @@ func (s *SQLiteStore) UpsertSource(ctx context.Context, source Source) (err erro
 	if err = upsertSourceTx(ctx, tx, source); err != nil {
 		return err
 	}
+	if err = upsertSearchProjectionTx(ctx, tx, source, s.useFTS); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -100,6 +107,16 @@ func upsertSourceTx(ctx context.Context, tx *sql.Tx, source Source) error {
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, path = excluded.path, title = excluded.title, body = excluded.body, status = excluded.status, labels = excluded.labels, content_hash = excluded.content_hash, updated_at = excluded.updated_at`,
 		source.ID, source.Kind, source.Path, source.Title, source.Body, source.Status, labels, source.ContentHash, createdAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
+}
+
+func upsertSearchProjectionTx(ctx context.Context, tx *sql.Tx, source Source, useFTS bool) error {
+	if !useFTS {
+		return nil
+	}
+	if err := execTx(ctx, tx, `DELETE FROM fts_index WHERE source_id = ?`, source.ID); err != nil {
+		return err
+	}
+	return execTx(ctx, tx, `INSERT INTO fts_index (source_id, path, title, body) VALUES (?, ?, ?, ?)`, source.ID, source.Path, source.Title, source.Body)
 }
 
 func (s *SQLiteStore) GetSource(ctx context.Context, id string) (Source, error) {
@@ -167,24 +184,88 @@ func scanSources(rows *sql.Rows) ([]Source, error) {
 }
 
 func (s *SQLiteStore) SearchSources(ctx context.Context, query SearchQuery) ([]SearchResult, error) {
-	needle := strings.ToLower(query.Query)
-	rows, err := s.db.QueryContext(ctx, `SELECT id, path, title, body FROM sources WHERE (? = '' OR kind = ?) AND (lower(title) LIKE ? OR lower(body) LIKE ?) ORDER BY id`, query.Kind, query.Kind, "%"+needle+"%", "%"+needle+"%")
+	if s.useFTS {
+		return s.searchSourcesFTS(ctx, query)
+	}
+	return s.searchSourcesFallback(ctx, query)
+}
+
+func (s *SQLiteStore) searchSourcesFallback(ctx context.Context, query SearchQuery) ([]SearchResult, error) {
+	needle := normalizeSearchQuery(query.Query)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, path, title, body FROM sources WHERE (? = '' OR kind = ?) AND (lower(title) LIKE ? OR lower(body) LIKE ?) ORDER BY id, path`, query.Kind, query.Kind, "%"+needle+"%", "%"+needle+"%")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanSearchResults(rows, needle, query.Limit)
+}
+
+func (s *SQLiteStore) searchSourcesFTS(ctx context.Context, query SearchQuery) ([]SearchResult, error) {
+	needle := normalizeSearchQuery(query.Query)
+	match := ftsMatchQuery(needle)
+	rows, err := s.db.QueryContext(ctx, `SELECT s.id, s.path, s.title, s.body
+FROM fts_index f
+JOIN sources s ON s.id = f.source_id
+WHERE (? = '' OR s.kind = ?) AND fts_index MATCH ?
+ORDER BY s.id, s.path`, query.Kind, query.Kind, match)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSearchResults(rows, needle, query.Limit)
+}
+
+func scanSearchResults(rows *sql.Rows, needle string, limit int) ([]SearchResult, error) {
 	var results []SearchResult
 	for rows.Next() {
 		var id, path, title, body string
 		if err := rows.Scan(&id, &path, &title, &body); err != nil {
 			return nil, err
 		}
-		results = append(results, SearchResult{ID: id, Path: path, Title: title, Snippet: snippet(title+"\n"+body, needle), Score: 1, Line: lineFor(body, needle)})
-		if query.Limit > 0 && len(results) >= query.Limit {
-			break
-		}
+		results = append(results, SearchResult{ID: id, Path: path, Title: title, Snippet: snippet(title+"\n"+body, needle), Score: searchScore(title, body, needle), Line: lineFor(body, needle)})
 	}
-	return results, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+		if results[i].ID != results[j].ID {
+			return results[i].ID < results[j].ID
+		}
+		return results[i].Path < results[j].Path
+	})
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
+	}
+	return results, nil
+}
+
+func normalizeSearchQuery(query string) string {
+	return strings.ToLower(strings.TrimSpace(query))
+}
+
+func ftsMatchQuery(query string) string {
+	parts := strings.Fields(query)
+	if len(parts) == 0 {
+		return `""`
+	}
+	for i, part := range parts {
+		parts[i] = `"` + strings.ReplaceAll(part, `"`, `""`) + `"`
+	}
+	return strings.Join(parts, " AND ")
+}
+
+func searchScore(title, body, needle string) float64 {
+	titleLower := strings.ToLower(title)
+	bodyLower := strings.ToLower(body)
+	score := 0.0
+	if strings.Contains(titleLower, needle) {
+		score += 10
+	}
+	score += float64(strings.Count(titleLower, needle) + strings.Count(bodyLower, needle))
+	return score
 }
 
 func snippet(text, needle string) string {

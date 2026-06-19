@@ -11,7 +11,9 @@ import (
 )
 
 type SQLiteStore struct {
-	db *sql.DB
+	db         *sql.DB
+	useFTS     bool
+	forceNoFTS bool
 }
 
 type LockHandle struct {
@@ -20,20 +22,24 @@ type LockHandle struct {
 }
 
 func NewSQLiteStore(ctx context.Context, dataSourceName string) (*SQLiteStore, error) {
+	return newSQLiteStore(ctx, dataSourceName, false)
+}
+
+func newSQLiteStore(ctx context.Context, dataSourceName string, forceNoFTS bool) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite", dataSourceName)
 	if err != nil {
 		return nil, err
 	}
-	store := &SQLiteStore{db: db}
 	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
-	if _, err := db.ExecContext(ctx, initialSchema); err != nil {
+	useFTS := !forceNoFTS && detectFTS5(ctx, db)
+	if err := runMigrations(ctx, db, useFTS); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
-	return store, nil
+	return &SQLiteStore{db: db, useFTS: useFTS, forceNoFTS: forceNoFTS}, nil
 }
 
 func NewInMemorySQLiteStore(ctx context.Context) (*SQLiteStore, error) {
