@@ -8,10 +8,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"gitcode-mcp/internal/testnet"
 )
 
 func TestContract(t *testing.T) {
@@ -260,6 +263,21 @@ func TestFailureModes(t *testing.T) {
 		var target ErrPayloadTooLarge
 		assertAs(t, err, &target)
 	})
+}
+
+func TestIntegrationLiveGitCodeGate(t *testing.T) {
+	testnet.RequireLiveIntegration(t)
+	token := os.Getenv("GITCODE_TEST_TOKEN")
+	client, err := NewHTTPClient(Config{Token: token, Timeout: 10 * time.Second})
+	if err != nil {
+		t.Fatalf("NewHTTPClient: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err = client.Search(ctx, SearchRequest{Query: "cache-first", Owner: "example-owner", Repo: "example-repo"})
+	if err != nil {
+		t.Fatalf("live Search returned error: %v", err)
+	}
 }
 
 func TestEndpointsTemplate(t *testing.T) {

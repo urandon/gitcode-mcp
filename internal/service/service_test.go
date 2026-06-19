@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -455,6 +456,38 @@ func TestExportDeterminism(t *testing.T) {
 	}
 	if jsonFirst.InlineContent != jsonSecond.InlineContent || markdownFirst.InlineContent != markdownSecond.InlineContent {
 		t.Fatalf("exports are not byte-identical")
+	}
+}
+
+func TestGoldenExport(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := store.UpsertSourceGraph(ctx, cache.SourceGraph{
+		Source:     cache.Source{ID: "DOC-123", Kind: "doc", Path: "docs/design.md", Title: "Design Doc", Body: "body", Status: "ready", Labels: []string{"zeta", "design"}, ContentHash: "hash-doc", CreatedAt: base, UpdatedAt: base},
+		Identities: []cache.Identity{{AliasType: "path", Alias: "docs/design.md", Remote: cache.RemoteAlias{Type: "remote", ID: "wiki/design"}}},
+		Links:      []cache.Link{{TargetID: "DOC-123", Kind: "mentions", Text: "doc"}},
+		Chunks:     []cache.Chunk{{ID: "chunk-doc", ContentHash: "hash-doc", ByteStart: 0, ByteEnd: 4, LineStart: 1, LineEnd: 1, HeadingPath: []string{"Design"}, Text: "body", NormalizedText: "body"}},
+		SyncStatus: &cache.SyncStatus{RemoteType: "remote", RemoteID: "wiki/design", RemoteRevision: "rev-1", Status: "fresh", LastFetchedAt: base},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := New(store)
+	svc.now = func() time.Time { return base }
+	result, err := svc.ExportSnapshot(ctx, ExportSnapshotRequest{Format: "markdown", IncludeBody: true})
+	if err != nil {
+		t.Fatalf("ExportSnapshot markdown returned error: %v", err)
+	}
+	want, err := os.ReadFile("testdata/golden_export.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.InlineContent != string(want) {
+		t.Fatalf("golden export mismatch\n got: %q\nwant: %q", result.InlineContent, string(want))
 	}
 }
 
