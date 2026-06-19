@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -215,6 +216,90 @@ func TestSourceGraphRollback(t *testing.T) {
 	if len(backlinks) != 0 {
 		t.Fatalf("backlinks after rollback = %d, want none", len(backlinks))
 	}
+}
+
+func TestLockContention(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	lockPath := filepath.Join(t.TempDir(), "cache.lock")
+
+	first, err := store.AcquireLock(ctx, lockPath)
+	if err != nil {
+		t.Fatalf("AcquireLock first returned error: %v", err)
+	}
+	second, err := store.AcquireLock(ctx, lockPath)
+	if err == nil {
+		_ = store.ReleaseLock(ctx, second)
+		t.Fatalf("AcquireLock second succeeded, want ErrLockContention")
+	}
+	var contention ErrLockContention
+	if !errors.As(err, &contention) {
+		t.Fatalf("AcquireLock second error = %T %[1]v, want ErrLockContention", err)
+	}
+	if contention.Path != lockPath {
+		t.Fatalf("ErrLockContention path = %q, want %q", contention.Path, lockPath)
+	}
+	if err := store.ReleaseLock(ctx, first); err != nil {
+		t.Fatalf("ReleaseLock first returned error: %v", err)
+	}
+	if err := store.ReleaseLock(ctx, first); err != nil {
+		t.Fatalf("ReleaseLock second returned error: %v", err)
+	}
+	reacquired, err := store.AcquireLock(ctx, lockPath)
+	if err != nil {
+		t.Fatalf("AcquireLock after release returned error: %v", err)
+	}
+	if err := store.ReleaseLock(ctx, reacquired); err != nil {
+		t.Fatalf("ReleaseLock reacquired returned error: %v", err)
+	}
+	if err := store.ReleaseLock(ctx, nil); err != nil {
+		t.Fatalf("ReleaseLock nil returned error: %v", err)
+	}
+}
+
+func TestLockContentionBlocksSimulatedSync(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	lockPath := filepath.Join(t.TempDir(), "cache.lock")
+
+	held, err := store.AcquireLock(ctx, lockPath)
+	if err != nil {
+		t.Fatalf("AcquireLock held returned error: %v", err)
+	}
+	defer store.ReleaseLock(ctx, held)
+
+	called := false
+	err = simulateLockBeforeMutate(ctx, store, lockPath, func() error {
+		called = true
+		return store.UpsertSourceGraph(ctx, SourceGraph{
+			Source:     testSource("DOC-LOCK", "doc", "Should Not Write"),
+			SyncStatus: &SyncStatus{RemoteType: "wiki", RemoteID: "lock", RemoteRevision: "rev-lock", Status: "fresh"},
+		})
+	})
+	var contention ErrLockContention
+	if !errors.As(err, &contention) {
+		t.Fatalf("simulateLockBeforeMutate error = %T %[1]v, want ErrLockContention", err)
+	}
+	if called {
+		t.Fatalf("mutation was called while lock contention was active")
+	}
+	if sources, err := store.ListSources(ctx, SourceFilter{}); err != nil || len(sources) != 0 {
+		t.Fatalf("sources after contention = %v, %v; want none", sources, err)
+	}
+	if _, err := store.GetSyncStatus(ctx, "DOC-LOCK"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetSyncStatus after contention error = %v, want ErrNotFound", err)
+	}
+}
+
+func simulateLockBeforeMutate(ctx context.Context, store *SQLiteStore, lockPath string, mutate func() error) error {
+	lock, err := store.AcquireLock(ctx, lockPath)
+	if err != nil {
+		return err
+	}
+	defer store.ReleaseLock(ctx, lock)
+	return mutate()
 }
 
 func newTestStore(t *testing.T, ctx context.Context) *SQLiteStore {

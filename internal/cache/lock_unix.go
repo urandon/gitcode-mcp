@@ -18,7 +18,7 @@ func (s *SQLiteStore) AcquireLock(ctx context.Context, lockPath string) (*LockHa
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = file.Close()
 		if err == syscall.EWOULDBLOCK || err == syscall.EAGAIN {
-			return nil, ErrLockContention{Path: lockPath}
+			return nil, ErrLockContention{Path: lockPath, HolderHint: "another process holds the cache lock"}
 		}
 		return nil, err
 	}
@@ -26,18 +26,17 @@ func (s *SQLiteStore) AcquireLock(ctx context.Context, lockPath string) (*LockHa
 }
 
 func (s *SQLiteStore) ReleaseLock(ctx context.Context, handle *LockHandle) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
+	_ = ctx
 	if handle == nil || handle.file == nil {
 		return nil
 	}
-	if err := syscall.Flock(int(handle.file.Fd()), syscall.LOCK_UN); err != nil {
-		return err
-	}
-	err := handle.file.Close()
+	file := handle.file
 	handle.file = nil
-	return err
+	unlockErr := syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+	closeErr := file.Close()
+	if unlockErr != nil {
+		return unlockErr
+	}
+	return closeErr
+
 }
