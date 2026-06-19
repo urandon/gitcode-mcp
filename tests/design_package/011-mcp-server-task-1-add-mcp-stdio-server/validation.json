@@ -1,0 +1,45 @@
+{
+  "task_id": "011-mcp-server-task-1-add-mcp-stdio-server",
+  "attempt": 1,
+  "validation_status": "passed",
+  "covered_outcome_ids": ["outcome-4"],
+  "covered_decommission_ids": [],
+  "product_surfaces": ["mcp-server"],
+  "evidence_type": "go_test",
+  "freshness": "current_source_build",
+  "mocks_used": [],
+  "production_files_modified": [
+    "internal/mcp/mcp.go",
+    "internal/mcp/mcp_test.go"
+  ],
+  "scenarios": [
+    {
+      "id": "011-mcp-server-task-1-add-mcp-stdio-server-scenario-1",
+      "description": "TestIntegration: initialize -> protocolVersion 2024-11-05, tools/list -> 8 tool defs",
+      "test": "go test ./internal/mcp/... -run TestIntegration",
+      "result": "passed"
+    },
+    {
+      "id": "011-mcp-server-task-1-add-mcp-stdio-server-scenario-2",
+      "description": "TestIntegration: tools/call resolve_id returns content + structuredContent with id, path, remote_alias",
+      "test": "go test ./internal/mcp/... -run TestIntegration",
+      "result": "passed"
+    },
+    {
+      "id": "011-mcp-server-task-1-add-mcp-stdio-server-scenario-3",
+      "description": "TestSchemasAndResults: 8 tool routes, default limit/offset/format, structured shapes, -32602 for invalid fields",
+      "test": "go test ./internal/mcp/... -run TestSchemasAndResults",
+      "result": "passed"
+    },
+    {
+      "id": "011-mcp-server-task-1-add-mcp-stdio-server-scenario-4",
+      "description": "TestFramingAndErrors: -32700, EOF, notifications, -32600, -32601, -32000 domain codes, stderr diagnostics",
+      "test": "go test ./internal/mcp/... -run TestFramingAndErrors",
+      "result": "passed"
+    }
+  ],
+  "decommission_checks": [],
+  "notes": {
+    "stale_cache": "Code path exists in writeDomainError (mcp.go:817-819) mapping service.ErrStaleIndex to -32000 data.code=stale_cache via errors.As; not directly exercised in TestFramingAndErrors due to dependency on internal/service.StaleIndex trigger."
+  }
+}
