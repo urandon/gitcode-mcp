@@ -44,6 +44,7 @@ var commands = []string{
 	"add-label",
 	"config",
 	"auth",
+	"repo",
 }
 
 type queryService interface {
@@ -61,6 +62,8 @@ type queryService interface {
 	SyncToCache(context.Context, service.SyncRequest) (service.SyncResult, error)
 	ExportSnapshot(context.Context, service.ExportSnapshotRequest) (service.ExportSnapshotResult, error)
 	DiffSnapshot(context.Context, service.DiffSnapshotRequest) (service.DiffSnapshotResult, error)
+	AddRepository(context.Context, service.AddRepositoryRequest) (service.RepositoryBinding, error)
+	RepositoryStatus(context.Context, service.RepositoryStatusRequest) (service.RepositoryStatus, error)
 	CreateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	CreatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
@@ -94,6 +97,7 @@ type options struct {
 	output         string
 	owner          string
 	repo           string
+	name           string
 	id             string
 	number         int
 	slug           string
@@ -105,6 +109,18 @@ type options struct {
 		idempotencyKey string
 		overwrite      bool
 		redacted       bool
+		apiBaseURL     string
+		scopes         string
+		alias          multiFlag
+		displayName    string
+}
+
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(value string) error {
+	*m = append(*m, value)
+	return nil
 }
 
 
@@ -202,6 +218,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.output, "output", "", "output path")
 	flags.StringVar(&opts.owner, "owner", "", "repository owner")
 	flags.StringVar(&opts.repo, "repo", "", "repository name")
+	flags.StringVar(&opts.name, "name", "", "repository name")
 	flags.StringVar(&opts.id, "id", "", "record id")
 	flags.IntVar(&opts.number, "number", 0, "issue number")
 	flags.StringVar(&opts.slug, "slug", "", "page slug")
@@ -213,6 +230,10 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.idempotencyKey, "idempotency-key", "", "idempotency key")
 	flags.BoolVar(&opts.overwrite, "overwrite", false, "overwrite existing file")
 	flags.BoolVar(&opts.redacted, "redacted", false, "redact secret values")
+	flags.StringVar(&opts.apiBaseURL, "api-base-url", "", "repository API base URL")
+	flags.StringVar(&opts.scopes, "scopes", "", "comma-separated repository scopes")
+	flags.Var(&opts.alias, "alias", "repository alias")
+	flags.StringVar(&opts.displayName, "display-name", "", "repository display name")
 	if err := flags.Parse(reorderFlags(args)); err != nil {
 		return opts, nil, service.ErrInvalidQuery{Field: "flags", Message: err.Error()}
 	}
@@ -466,6 +487,27 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, renderDiffText)
+	case "repo":
+		sub, ok := firstArg(args)
+		if !ok {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "repo", Message: "subcommand is required"})
+		}
+		switch sub {
+		case "add":
+			result, err := svc.AddRepository(ctx, service.AddRepositoryRequest{RepoID: opts.repo, Owner: opts.owner, Name: opts.name, APIBaseURL: opts.apiBaseURL, Scopes: []string{opts.scopes}, DisplayName: opts.displayName, Aliases: []string(opts.alias)})
+			if err != nil {
+				return writeError(stderr, opts.format, err)
+			}
+			return render(stdout, opts.format, result, renderRepositoryBindingText)
+		case "status":
+			result, err := svc.RepositoryStatus(ctx, service.RepositoryStatusRequest{RepoID: opts.repo})
+			if err != nil {
+				return writeError(stderr, opts.format, err)
+			}
+			return render(stdout, opts.format, result, renderRepositoryStatusText)
+		default:
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "repo", Message: "unknown subcommand"})
+		}
 	case "create-issue":
 		return dispatchWrite(ctx, svc.CreateIssue, command, opts, stdout, stderr)
 	case "update-issue":
@@ -619,14 +661,60 @@ func renderWriteText(w io.Writer, result service.WriteCommandResult) {
 	fmt.Fprintf(w, "%s: %s id=%s idempotency_key=%s evidence=%s\n", result.Command, result.Status, result.ID, result.IdempotencyKey, result.Evidence)
 }
 
+func renderRepositoryBindingText(w io.Writer, result service.RepositoryBinding) {
+	fmt.Fprintf(w, "repo_id: %s\nowner: %s\nname: %s\napi_base_url: %s\nscopes: %s\ndisplay_name: %s\naliases: %s\n", result.RepoID, result.Owner, result.Name, result.APIBaseURL, joinRepositoryScopes(result.Scopes), result.DisplayName, strings.Join(result.Aliases, ","))
+}
+
+func renderRepositoryStatusText(w io.Writer, result service.RepositoryStatus) {
+	fmt.Fprintf(w, "repo_id: %s\nowner: %s\nname: %s\napi_base_url: %s\nscopes: %s\ndisplay_name: %s\naliases: %s\nbinding_state: %s\nalias_conflict_state: %s\ncache_state: %s\nindex_state: %s\n", result.RepoID, result.Owner, result.Name, result.APIBaseURL, joinRepositoryScopes(result.Scopes), result.DisplayName, strings.Join(result.Aliases, ","), result.BindingState, result.AliasConflictState, result.CacheState, result.IndexState)
+	if result.FailureClass != "" {
+		fmt.Fprintf(w, "failure_class: %s\n", result.FailureClass)
+	}
+}
+
+func joinRepositoryScopes(scopes []service.RepositoryScope) string {
+	parts := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		parts = append(parts, string(scope))
+	}
+	return strings.Join(parts, ",")
+}
+
 func writeError(stderr io.Writer, format string, err error) int {
 	code := exitCode(err)
+	failureClass := failureClass(err)
 	if format == "json" {
-		_ = json.NewEncoder(stderr).Encode(map[string]any{"error": err.Error(), "exit_code": code})
+		_ = json.NewEncoder(stderr).Encode(map[string]any{"error": err.Error(), "exit_code": code, "failure_class": failureClass})
 		return code
 	}
 	fmt.Fprintln(stderr, err.Error())
+	if failureClass != "" {
+		fmt.Fprintf(stderr, "failure_class: %s\n", failureClass)
+	}
 	return code
+}
+
+func failureClass(err error) string {
+	var cacheEmpty service.ErrCacheEmpty
+	if errors.As(err, &cacheEmpty) {
+		return "cache_empty"
+	}
+	var notFound service.ErrNotFound
+	if errors.As(err, &notFound) {
+		return "not_found"
+	}
+	var invalid service.ErrInvalidQuery
+	if errors.As(err, &invalid) {
+		return "invalid_query"
+	}
+	var conflict service.ErrConflict
+	if errors.As(err, &conflict) {
+		return "conflict"
+	}
+	if isStrictFinding(err) {
+		return "validation_failed"
+	}
+	return "internal_error"
 }
 
 func exitCode(err error) int {
@@ -641,6 +729,10 @@ func exitCode(err error) int {
 	var invalid service.ErrInvalidQuery
 	if errors.As(err, &invalid) {
 		return 4
+	}
+	var conflict service.ErrConflict
+	if errors.As(err, &conflict) {
+		return 6
 	}
 	if isStrictFinding(err) {
 		return 5
@@ -697,7 +789,8 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --strict")
 	fmt.Fprintln(w, "  --full | --incremental")
 	fmt.Fprintln(w, "  --input PATH --output PATH")
-	fmt.Fprintln(w, "  --owner OWNER --repo REPO --number N --id ID --slug SLUG")
+	fmt.Fprintln(w, "  --owner OWNER --repo REPO --name NAME --api-base-url URL --scopes issues,wiki --alias ALIAS")
+	fmt.Fprintln(w, "  --number N --id ID --slug SLUG")
 	fmt.Fprintln(w, "  --title TITLE --body BODY --label LABEL --labels A,B")
 	fmt.Fprintln(w, "  --idempotency-key KEY")
 	fmt.Fprintln(w)

@@ -2,6 +2,54 @@ package service
 
 import "time"
 
+type RepositoryScope string
+
+const (
+	RepositoryScopeIssues RepositoryScope = "issues"
+	RepositoryScopeWiki   RepositoryScope = "wiki"
+)
+
+type RepositoryBinding struct {
+	RepoID     string            `json:"repo_id"`
+	Owner      string            `json:"owner"`
+	Name       string            `json:"name"`
+	APIBaseURL string            `json:"api_base_url"`
+	Scopes     []RepositoryScope `json:"scopes"`
+	DisplayName string           `json:"display_name,omitempty"`
+	Aliases    []string          `json:"aliases"`
+	CreatedAt  time.Time         `json:"created_at"`
+	UpdatedAt  time.Time         `json:"updated_at"`
+}
+
+type AddRepositoryRequest struct {
+	RepoID     string   `json:"repo_id"`
+	Owner      string   `json:"owner"`
+	Name       string   `json:"name"`
+	APIBaseURL string   `json:"api_base_url"`
+	Scopes     []string `json:"scopes"`
+	DisplayName string  `json:"display_name,omitempty"`
+	Aliases    []string `json:"aliases"`
+}
+
+type RepositoryStatusRequest struct {
+	RepoID string `json:"repo_id"`
+}
+
+type RepositoryStatus struct {
+	RepoID             string            `json:"repo_id"`
+	Owner              string            `json:"owner"`
+	Name               string            `json:"name"`
+	APIBaseURL          string            `json:"api_base_url"`
+	Scopes             []RepositoryScope `json:"scopes"`
+	DisplayName        string            `json:"display_name,omitempty"`
+	Aliases            []string          `json:"aliases"`
+	BindingState       string            `json:"binding_state"`
+	AliasConflictState string            `json:"alias_conflict_state"`
+	CacheState         string            `json:"cache_state"`
+	IndexState         string            `json:"index_state"`
+	FailureClass       string            `json:"failure_class,omitempty"`
+}
+
 type SearchSourcesRequest struct {
 	Query  string `json:"query"`
 	Kind   string `json:"kind,omitempty"`

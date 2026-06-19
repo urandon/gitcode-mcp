@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -33,6 +34,126 @@ func NewWithClient(store cache.Store, client gitcode.Client) *Service {
 	svc := New(store)
 	svc.client = client
 	return svc
+}
+
+func (s *Service) AddRepository(ctx context.Context, req AddRepositoryRequest) (RepositoryBinding, error) {
+	repo, err := normalizeRepositoryRequest(req, s.now())
+	if err != nil {
+		return RepositoryBinding{}, err
+	}
+	cacheRepo := cache.RepositoryBinding{RepoID: repo.RepoID, Owner: repo.Owner, Name: repo.Name, APIBaseURL: repo.APIBaseURL, DisplayName: repo.DisplayName, CreatedAt: repo.CreatedAt, UpdatedAt: repo.UpdatedAt, Aliases: repo.Aliases}
+	for _, scope := range repo.Scopes {
+		cacheRepo.Scopes = append(cacheRepo.Scopes, cache.RepositoryScope(scope))
+	}
+	if err := s.store.AddRepository(ctx, cacheRepo); err != nil {
+		if cache.IsConstraintError(err) {
+			return RepositoryBinding{}, ErrConflict{Kind: "repository", ID: repo.RepoID, Message: "repo_id or repository alias already exists"}
+		}
+		return RepositoryBinding{}, err
+	}
+	return repo, nil
+}
+
+func (s *Service) RepositoryStatus(ctx context.Context, req RepositoryStatusRequest) (RepositoryStatus, error) {
+	repoID := strings.TrimSpace(req.RepoID)
+	if repoID == "" {
+		return RepositoryStatus{}, ErrInvalidQuery{Field: "repo", Message: "repo is required"}
+	}
+	repo, err := s.store.GetRepository(ctx, repoID)
+	if err != nil {
+		return RepositoryStatus{}, normalizeError(err, "repository", repoID)
+	}
+	status := RepositoryStatus{RepoID: repo.RepoID, Owner: repo.Owner, Name: repo.Name, APIBaseURL: sanitizeAPIBaseURL(repo.APIBaseURL), DisplayName: repo.DisplayName, Aliases: append([]string(nil), repo.Aliases...), BindingState: "ready", AliasConflictState: "none", CacheState: "unknown", IndexState: "unknown"}
+	for _, scope := range repo.Scopes {
+		status.Scopes = append(status.Scopes, RepositoryScope(scope))
+	}
+	return status, nil
+}
+
+func normalizeRepositoryRequest(req AddRepositoryRequest, now time.Time) (RepositoryBinding, error) {
+	repo := RepositoryBinding{RepoID: strings.TrimSpace(req.RepoID), Owner: strings.TrimSpace(req.Owner), Name: strings.TrimSpace(req.Name), APIBaseURL: strings.TrimSpace(req.APIBaseURL), DisplayName: strings.TrimSpace(req.DisplayName), CreatedAt: now.UTC(), UpdatedAt: now.UTC()}
+	if repo.RepoID == "" {
+		return RepositoryBinding{}, ErrInvalidQuery{Field: "repo", Message: "repo is required"}
+	}
+	if repo.Owner == "" {
+		return RepositoryBinding{}, ErrInvalidQuery{Field: "owner", Message: "owner is required"}
+	}
+	if repo.Name == "" {
+		return RepositoryBinding{}, ErrInvalidQuery{Field: "name", Message: "name is required"}
+	}
+	parsed, err := url.Parse(repo.APIBaseURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return RepositoryBinding{}, ErrInvalidQuery{Field: "api-base-url", Message: "valid api base url is required"}
+	}
+	parsed.User = nil
+	repo.APIBaseURL = sanitizeAPIBaseURL(parsed.String())
+	scopes, err := normalizeRepositoryScopes(req.Scopes)
+	if err != nil {
+		return RepositoryBinding{}, err
+	}
+	repo.Scopes = scopes
+	repo.Aliases = normalizeAliases(req.Aliases)
+	return repo, nil
+}
+
+func normalizeRepositoryScopes(raw []string) ([]RepositoryScope, error) {
+	seen := map[RepositoryScope]bool{}
+	for _, value := range raw {
+		for _, part := range strings.Split(value, ",") {
+			scope := RepositoryScope(strings.ToLower(strings.TrimSpace(part)))
+			if scope == "" {
+				continue
+			}
+			if scope != RepositoryScopeIssues && scope != RepositoryScopeWiki {
+				return nil, ErrInvalidQuery{Field: "scopes", Message: "scopes must contain issues or wiki"}
+			}
+			seen[scope] = true
+		}
+	}
+	if len(seen) == 0 {
+		return nil, ErrInvalidQuery{Field: "scopes", Message: "at least one scope is required"}
+	}
+	out := []RepositoryScope{}
+	for _, scope := range []RepositoryScope{RepositoryScopeIssues, RepositoryScopeWiki} {
+		if seen[scope] {
+			out = append(out, scope)
+		}
+	}
+	return out, nil
+}
+
+func normalizeAliases(raw []string) []string {
+	seen := map[string]bool{}
+	aliases := []string{}
+	for _, value := range raw {
+		for _, part := range strings.Split(value, ",") {
+			alias := strings.TrimSpace(part)
+			if alias == "" || seen[alias] {
+				continue
+			}
+			seen[alias] = true
+			aliases = append(aliases, alias)
+		}
+	}
+	sort.Strings(aliases)
+	return aliases
+}
+
+func sanitizeAPIBaseURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	parsed.User = nil
+	query := parsed.Query()
+	for key := range query {
+		lower := strings.ToLower(key)
+		if strings.Contains(lower, "token") || strings.Contains(lower, "secret") || strings.Contains(lower, "key") || strings.Contains(lower, "auth") {
+			query.Del(key)
+		}
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) ([]SearchSourceResult, error) {

@@ -142,6 +142,19 @@ type ErrInvalidQuery struct {
 	Message string
 }
 
+type ErrConflict struct {
+	Kind    string
+	ID      string
+	Message string
+}
+
+func (e ErrConflict) Error() string {
+	if e.Message != "" {
+		return "service: conflict " + e.Kind + " " + e.ID + ": " + e.Message
+	}
+	return "service: conflict " + e.Kind + " " + e.ID
+}
+
 func (e ErrInvalidQuery) Error() string {
 	if e.Field == "" {
 		return "service: invalid query: " + e.Message

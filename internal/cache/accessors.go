@@ -3,8 +3,126 @@ package cache
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"strings"
 	"time"
 )
+
+func (s *SQLiteStore) AddRepository(ctx context.Context, repo RepositoryBinding) (err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer txRollbackOnError(tx, &err)
+	createdAt := repo.CreatedAt
+	updatedAt := repo.UpdatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Unix(0, 0).UTC()
+	}
+	if updatedAt.IsZero() {
+		updatedAt = createdAt
+	}
+	scopes, err := marshalJSON(repo.Scopes)
+	if err != nil {
+		return err
+	}
+	if err = execTx(ctx, tx, `INSERT INTO repos (repo_id, owner, name, api_base_url, scopes, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, repo.RepoID, repo.Owner, repo.Name, repo.APIBaseURL, scopes, repo.DisplayName, createdAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	for _, alias := range repo.Aliases {
+		if err = execTx(ctx, tx, `INSERT INTO repo_aliases (alias, repo_id, created_at) VALUES (?, ?, ?)`, alias, repo.RepoID, createdAt.Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *SQLiteStore) GetRepository(ctx context.Context, repoID string) (RepositoryBinding, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, owner, name, api_base_url, scopes, display_name, created_at, updated_at FROM repos WHERE repo_id = ?`, repoID)
+	if err != nil {
+		return RepositoryBinding{}, err
+	}
+	defer rows.Close()
+	repos, err := scanRepositories(rows)
+	if err != nil {
+		return RepositoryBinding{}, err
+	}
+	if len(repos) == 0 {
+		return RepositoryBinding{}, notFoundErr("repository", repoID)
+	}
+	aliases, err := s.repositoryAliases(ctx, repoID)
+	if err != nil {
+		return RepositoryBinding{}, err
+	}
+	repos[0].Aliases = aliases
+	return repos[0], nil
+}
+
+func (s *SQLiteStore) ListRepositories(ctx context.Context) ([]RepositoryBinding, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, owner, name, api_base_url, scopes, display_name, created_at, updated_at FROM repos ORDER BY repo_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	repos, err := scanRepositories(rows)
+	if err != nil {
+		return nil, err
+	}
+	for i := range repos {
+		repos[i].Aliases, err = s.repositoryAliases(ctx, repos[i].RepoID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return repos, nil
+}
+
+func scanRepositories(rows *sql.Rows) ([]RepositoryBinding, error) {
+	var repos []RepositoryBinding
+	for rows.Next() {
+		var repo RepositoryBinding
+		var scopesRaw, createdRaw, updatedRaw string
+		if err := rows.Scan(&repo.RepoID, &repo.Owner, &repo.Name, &repo.APIBaseURL, &scopesRaw, &repo.DisplayName, &createdRaw, &updatedRaw); err != nil {
+			return nil, err
+		}
+		scopes, err := unmarshalJSON[[]RepositoryScope](scopesRaw)
+		if err != nil {
+			return nil, err
+		}
+		repo.Scopes = scopes
+		repo.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdRaw)
+		repo.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedRaw)
+		repos = append(repos, repo)
+	}
+	return repos, rows.Err()
+}
+
+func (s *SQLiteStore) repositoryAliases(ctx context.Context, repoID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT alias FROM repo_aliases WHERE repo_id = ? ORDER BY alias`, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var aliases []string
+	for rows.Next() {
+		var alias string
+		if err := rows.Scan(&alias); err != nil {
+			return nil, err
+		}
+		aliases = append(aliases, alias)
+	}
+	return aliases, rows.Err()
+}
+
+func IsConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "constraint")
+}
 
 func (s *SQLiteStore) UpsertIdentity(ctx context.Context, identity Identity) (err error) {
 	tx, err := s.db.BeginTx(ctx, nil)

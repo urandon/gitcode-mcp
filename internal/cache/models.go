@@ -6,6 +6,9 @@ import (
 )
 
 type Store interface {
+	AddRepository(context.Context, RepositoryBinding) error
+	GetRepository(context.Context, string) (RepositoryBinding, error)
+	ListRepositories(context.Context) ([]RepositoryBinding, error)
 	UpsertSourceGraph(context.Context, SourceGraph) error
 	UpsertSource(context.Context, Source) error
 	GetSource(context.Context, string) (Source, error)
@@ -28,6 +31,25 @@ type Store interface {
 	AcquireLock(context.Context, string) (*LockHandle, error)
 	ReleaseLock(context.Context, *LockHandle) error
 	Close() error
+}
+
+type RepositoryScope string
+
+const (
+	RepositoryScopeIssues RepositoryScope = "issues"
+	RepositoryScopeWiki   RepositoryScope = "wiki"
+)
+
+type RepositoryBinding struct {
+	RepoID     string
+	Owner      string
+	Name       string
+	APIBaseURL string
+	Scopes     []RepositoryScope
+	DisplayName string
+	Aliases    []string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 type Source struct {

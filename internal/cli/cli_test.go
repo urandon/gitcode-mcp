@@ -243,11 +243,57 @@ func TestQueryCommandErrors(t *testing.T) {
 	}
 }
 
+func TestRepoRegistryCLI(t *testing.T) {
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	factory := func(ctx context.Context, path string) (queryService, func() error, error) {
+		store, err := cache.NewSQLiteStore(ctx, path)
+		if err != nil {
+			return nil, nil, err
+		}
+		return service.New(store), store.Close, nil
+	}
+	var addOut, addErr bytes.Buffer
+	code := executeWithFactory([]string{"repo", "add", "--cache-path", cachePath, "--repo", "fixture-a", "--owner", "owner-a", "--name", "repo-a", "--api-base-url", "https://user:pass@example.invalid/api?access_token=secret&safe=1", "--scopes", "issues,wiki,issues", "--alias", "proj"}, &addOut, &addErr, factory)
+	if code != 0 {
+		t.Fatalf("repo add code=%d stderr=%q", code, addErr.String())
+	}
+	var statusOut, statusErr bytes.Buffer
+	code = executeWithFactory([]string{"repo", "status", "--cache-path", cachePath, "--repo", "fixture-a"}, &statusOut, &statusErr, factory)
+	if code != 0 {
+		t.Fatalf("repo status code=%d stderr=%q", code, statusErr.String())
+	}
+	out := statusOut.String()
+	for _, want := range []string{"repo_id: fixture-a", "owner: owner-a", "name: repo-a", "api_base_url: https://example.invalid/api?safe=1", "scopes: issues,wiki", "aliases: proj", "binding_state: ready", "alias_conflict_state: none", "cache_state: unknown", "index_state: unknown"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("status output missing %q in %q", want, out)
+		}
+	}
+	if strings.Contains(out, "secret") || strings.Contains(out, "user:pass") {
+		t.Fatalf("status output leaked sensitive URL parts: %q", out)
+	}
+	var dupOut, dupErr bytes.Buffer
+	code = executeWithFactory([]string{"repo", "add", "--cache-path", cachePath, "--repo", "fixture-a", "--owner", "owner-a", "--name", "repo-a", "--api-base-url", "https://example.invalid/api", "--scopes", "issues"}, &dupOut, &dupErr, factory)
+	if code == 0 || !strings.Contains(dupErr.String(), "conflict") {
+		t.Fatalf("duplicate repo code=%d stderr=%q", code, dupErr.String())
+	}
+	var aliasOut, aliasErr bytes.Buffer
+	code = executeWithFactory([]string{"repo", "add", "--cache-path", cachePath, "--repo", "fixture-b", "--owner", "owner-b", "--name", "repo-b", "--api-base-url", "https://example.invalid/api", "--scopes", "issues", "--alias", "proj"}, &aliasOut, &aliasErr, factory)
+	if code == 0 || !strings.Contains(aliasErr.String(), "conflict") {
+		t.Fatalf("alias conflict code=%d stderr=%q", code, aliasErr.String())
+	}
+	var missingOut, missingErr bytes.Buffer
+	code = executeWithFactory([]string{"repo", "status", "--cache-path", cachePath, "--repo", "missing-repo"}, &missingOut, &missingErr, factory)
+	if code != 3 || !strings.Contains(missingErr.String(), "repository") || !strings.Contains(missingErr.String(), "not found") {
+		t.Fatalf("missing status code=%d stderr=%q", code, missingErr.String())
+	}
+}
+
 func TestQueryCommandsUseServiceOnly(t *testing.T) {
 	spy := &spyService{}
 	factory := func(context.Context, string) (queryService, func() error, error) { return spy, nil, nil }
 	commands := [][]string{
-		{"ingest"}, {"index", "--full"}, {"search_sources", "backlog"}, {"list_sources"}, {"get_source", "DOC-123"}, {"source_backlinks", "DOC-123"}, {"get_snippet", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"sync_status", "DOC-123"}, {"recent"}, {"link-check"}, {"stale-index"}, {"sync"}, {"export"}, {"diff"}, {"create-issue", "--title", "t"}, {"update-issue", "--number", "1"}, {"create-page", "--title", "t", "--body", "b"}, {"update-page", "--slug", "s"}, {"add-comment", "--number", "1", "--body", "b"}, {"add-label", "--number", "1", "--label", "l"},
+		{"ingest"}, {"index", "--full"}, {"search_sources", "backlog"}, {"list_sources"}, {"get_source", "DOC-123"}, {"source_backlinks", "DOC-123"}, {"get_snippet", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"sync_status", "DOC-123"}, {"recent"}, {"link-check"}, {"stale-index"}, {"sync"}, {"export"}, {"diff"}, {"repo", "add", "--repo", "fixture-a", "--owner", "owner", "--name", "repo", "--api-base-url", "https://example.invalid/api", "--scopes", "issues"}, {"repo", "status", "--repo", "fixture-a"}, {"create-issue", "--title", "t"}, {"update-issue", "--number", "1"}, {"create-page", "--title", "t", "--body", "b"}, {"update-page", "--slug", "s"}, {"add-comment", "--number", "1", "--body", "b"}, {"add-label", "--number", "1", "--label", "l"},
 	}
 	for _, args := range commands {
 		var stdout bytes.Buffer
@@ -256,7 +302,7 @@ func TestQueryCommandsUseServiceOnly(t *testing.T) {
 			t.Fatalf("%v code=%d stderr=%q", args, code, stderr.String())
 		}
 	}
-	for _, method := range []string{"Ingest", "Index", "SearchSources", "ListSources", "GetSource", "GetBacklinks", "GetSnippet", "GetSyncStatus", "RecentChanges", "LinkCheck", "StaleIndex", "SyncToCache", "ExportSnapshot", "DiffSnapshot", "CreateIssue", "UpdateIssue", "CreatePage", "UpdatePage", "AddComment", "AddLabel"} {
+	for _, method := range []string{"Ingest", "Index", "SearchSources", "ListSources", "GetSource", "GetBacklinks", "GetSnippet", "GetSyncStatus", "RecentChanges", "LinkCheck", "StaleIndex", "SyncToCache", "ExportSnapshot", "DiffSnapshot", "AddRepository", "RepositoryStatus", "CreateIssue", "UpdateIssue", "CreatePage", "UpdatePage", "AddComment", "AddLabel"} {
 		if spy.calls[method] != 1 {
 			t.Fatalf("%s calls=%d want 1", method, spy.calls[method])
 		}
@@ -373,6 +419,14 @@ func (s *spyService) ExportSnapshot(context.Context, service.ExportSnapshotReque
 func (s *spyService) DiffSnapshot(context.Context, service.DiffSnapshotRequest) (service.DiffSnapshotResult, error) {
 	s.called("DiffSnapshot")
 	return service.DiffSnapshotResult{BaseSnapshotID: "base", HeadSnapshotID: "head", Format: "text", ChangedSourceIDs: []string{"DOC-123"}, DiffText: "changed\n"}, nil
+}
+func (s *spyService) AddRepository(context.Context, service.AddRepositoryRequest) (service.RepositoryBinding, error) {
+	s.called("AddRepository")
+	return service.RepositoryBinding{RepoID: "fixture-a", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []service.RepositoryScope{service.RepositoryScopeIssues}}, nil
+}
+func (s *spyService) RepositoryStatus(context.Context, service.RepositoryStatusRequest) (service.RepositoryStatus, error) {
+	s.called("RepositoryStatus")
+	return service.RepositoryStatus{RepoID: "fixture-a", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []service.RepositoryScope{service.RepositoryScopeIssues}, BindingState: "ready", AliasConflictState: "none", CacheState: "unknown", IndexState: "unknown"}, nil
 }
 func (s *spyService) CreateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error) {
 	s.called("CreateIssue")

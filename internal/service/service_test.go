@@ -15,6 +15,45 @@ import (
 	"gitcode-mcp/internal/gitcode"
 )
 
+func TestRepositoryRegistry(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	svc := New(store)
+	svc.now = func() time.Time { return time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC) }
+	repo, err := svc.AddRepository(ctx, AddRepositoryRequest{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://user:pass@example.invalid/api?token=secret&safe=1", Scopes: []string{"issues,wiki", "issues"}, DisplayName: "Fixture A", Aliases: []string{"proj", "proj"}})
+	if err != nil {
+		t.Fatalf("AddRepository returned error: %v", err)
+	}
+	if repo.RepoID != "fixture-a" || !reflect.DeepEqual(repo.Scopes, []RepositoryScope{RepositoryScopeIssues, RepositoryScopeWiki}) || !reflect.DeepEqual(repo.Aliases, []string{"proj"}) {
+		t.Fatalf("repo = %#v", repo)
+	}
+	status, err := svc.RepositoryStatus(ctx, RepositoryStatusRequest{RepoID: "fixture-a"})
+	if err != nil {
+		t.Fatalf("RepositoryStatus returned error: %v", err)
+	}
+	if status.APIBaseURL != "https://example.invalid/api?safe=1" || status.BindingState != "ready" || status.CacheState != "unknown" || status.IndexState != "unknown" {
+		t.Fatalf("status = %#v", status)
+	}
+	_, err = svc.AddRepository(ctx, AddRepositoryRequest{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []string{"issues"}})
+	var conflict ErrConflict
+	if !errors.As(err, &conflict) {
+		t.Fatalf("duplicate err=%v want ErrConflict", err)
+	}
+	_, err = svc.AddRepository(ctx, AddRepositoryRequest{RepoID: "fixture-b", Owner: "owner-b", Name: "repo-b", APIBaseURL: "https://example.invalid/api", Scopes: []string{"issues"}, Aliases: []string{"proj"}})
+	if !errors.As(err, &conflict) {
+		t.Fatalf("alias err=%v want ErrConflict", err)
+	}
+	_, err = svc.RepositoryStatus(ctx, RepositoryStatusRequest{RepoID: "missing-repo"})
+	var notFound ErrNotFound
+	if !errors.As(err, &notFound) || notFound.Kind != "repository" {
+		t.Fatalf("missing err=%v want repository ErrNotFound", err)
+	}
+}
+
 func TestSearchSources(t *testing.T) {
 	ctx := context.Background()
 	svc := seededService(t, ctx)
@@ -768,6 +807,13 @@ func fakeBrokenStore() *brokenStore {
 	return &brokenStore{sources: map[string]cache.Source{"DOC-1": {ID: "DOC-1", Kind: "doc", Path: "doc.md", Title: "Doc", Body: "body", Status: "ready", UpdatedAt: now}}, links: []cache.Link{{SourceID: "DOC-1", TargetID: "MISSING-1", Kind: "mentions", Text: "missing"}}}
 }
 
+func (f *brokenStore) AddRepository(context.Context, cache.RepositoryBinding) error { return nil }
+func (f *brokenStore) GetRepository(context.Context, string) (cache.RepositoryBinding, error) {
+	return cache.RepositoryBinding{}, cache.ErrNotFound
+}
+func (f *brokenStore) ListRepositories(context.Context) ([]cache.RepositoryBinding, error) {
+	return nil, nil
+}
 func (f *brokenStore) UpsertSourceGraph(context.Context, cache.SourceGraph) error { return nil }
 func (f *brokenStore) UpsertSource(context.Context, cache.Source) error           { return nil }
 func (f *brokenStore) GetSource(_ context.Context, id string) (cache.Source, error) {

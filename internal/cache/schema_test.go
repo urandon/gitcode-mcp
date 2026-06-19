@@ -39,7 +39,7 @@ func TestInitialMigration(t *testing.T) {
 	defer store.Close()
 
 	tables := tableNames(t, ctx, store.db)
-	for _, want := range []string{"schema_version", "sources", "identity_map", "links", "remote_revisions", "sync_events", "conflicts", "chunks"} {
+	for _, want := range []string{"schema_version", "repos", "repo_aliases", "sources", "identity_map", "links", "remote_revisions", "sync_events", "conflicts", "chunks"} {
 		if !tables[want] {
 			t.Fatalf("missing table %s; tables=%v", want, tables)
 		}
@@ -48,7 +48,7 @@ func TestInitialMigration(t *testing.T) {
 		t.Fatalf("FTS enabled store missing fts_index table")
 	}
 	indexes := indexNames(t, ctx, store.db)
-	for _, want := range []string{"idx_sources_kind_status", "idx_identity_source", "idx_identity_remote", "idx_links_target", "idx_sync_events_source", "idx_chunks_source"} {
+	for _, want := range []string{"idx_repo_aliases_repo", "idx_sources_kind_status", "idx_identity_source", "idx_identity_remote", "idx_links_target", "idx_sync_events_source", "idx_chunks_source"} {
 		if !indexes[want] {
 			t.Fatalf("missing index %s; indexes=%v", want, indexes)
 		}

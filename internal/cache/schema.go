@@ -76,6 +76,22 @@ func schemaVersion(ctx context.Context, db *sql.DB) (int, error) {
 
 func applyInitialMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
 	statements := []string{
+		`CREATE TABLE IF NOT EXISTS repos (
+	repo_id TEXT PRIMARY KEY,
+	owner TEXT NOT NULL,
+	name TEXT NOT NULL,
+	api_base_url TEXT NOT NULL,
+	scopes TEXT NOT NULL,
+	display_name TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+)`,
+		`CREATE TABLE IF NOT EXISTS repo_aliases (
+	alias TEXT PRIMARY KEY,
+	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+	created_at TEXT NOT NULL
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_repo_aliases_repo ON repo_aliases(repo_id)`,
 		`CREATE TABLE IF NOT EXISTS sources (
 	id TEXT PRIMARY KEY,
 	kind TEXT NOT NULL,
