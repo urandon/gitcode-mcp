@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -150,9 +151,21 @@ func TestFailureModes(t *testing.T) {
 		check  func(*testing.T, error)
 	}{
 		{"auth", 401, `{"message":"expired"}`, func(t *testing.T, err error) { var target ErrAuthExpired; assertAs(t, err, &target) }},
-		{"forbidden", 403, `{"message":"permission denied"}`, func(t *testing.T, err error) { var target ErrForbidden; assertAs(t, err, &target); if strings.Contains(target.Recovery, "retry") { t.Fatalf("forbidden recovery suggests retry: %s", target.Recovery) } }},
+		{"forbidden", 403, `{"message":"permission denied"}`, func(t *testing.T, err error) {
+			var target ErrForbidden
+			assertAs(t, err, &target)
+			if strings.Contains(target.Recovery, "retry") {
+				t.Fatalf("forbidden recovery suggests retry: %s", target.Recovery)
+			}
+		}},
 		{"not-found", 404, `{"message":"missing"}`, func(t *testing.T, err error) { var target ErrNotFound; assertAs(t, err, &target) }},
-		{"conflict", 409, `{"message":"conflict","remote":"value"}`, func(t *testing.T, err error) { var target ErrConflict; assertAs(t, err, &target); if len(target.RemotePayload) == 0 { t.Fatalf("missing remote payload") } }},
+		{"conflict", 409, `{"message":"conflict","remote":"value"}`, func(t *testing.T, err error) {
+			var target ErrConflict
+			assertAs(t, err, &target)
+			if len(target.RemotePayload) == 0 {
+				t.Fatalf("missing remote payload")
+			}
+		}},
 		{"server-error", 500, `{"message":"down"}`, func(t *testing.T, err error) { var target ErrNetworkUnavailable; assertAs(t, err, &target) }},
 	}
 	for _, tt := range tests {
@@ -209,6 +222,133 @@ func TestFailureModes(t *testing.T) {
 		var target ErrPayloadTooLarge
 		assertAs(t, err, &target)
 	})
+}
+
+func TestEndpointsTemplate(t *testing.T) {
+	if got := getIssueEndpoint("example-owner", "example-repo", 42); got != "/api/v5/repos/example-owner/example-repo/issues/42" {
+		t.Fatalf("unexpected issue endpoint %s", got)
+	}
+	if got := getWikiPageEndpoint("example owner", "repo/name", "Release Notes"); got != "/api/v5/repos/example%20owner/repo%2Fname/wiki/Release%20Notes" {
+		t.Fatalf("unexpected escaped wiki endpoint %s", got)
+	}
+	if got := listIssueCommentsEndpoint("example-owner", "example-repo", 42); got != "/api/v5/repos/example-owner/example-repo/issues/42/comments" {
+		t.Fatalf("unexpected comments endpoint %s", got)
+	}
+	if got := searchIssuesEndpoint(); got != "/api/v5/search" {
+		t.Fatalf("unexpected search endpoint %s", got)
+	}
+}
+
+func TestAttachmentEndpointsTemplate(t *testing.T) {
+	if got := issueAttachmentsEndpoint("example-owner", "example-repo", 42); got != "/api/v5/repos/example-owner/example-repo/issues/42/attachments" {
+		t.Fatalf("unexpected attachment list endpoint %s", got)
+	}
+	if got := attachmentEndpoint("example owner", "example/repo", 42, "ATT 1/2"); got != "/api/v5/repos/example%20owner/example%2Frepo/issues/42/attachments/ATT%201%2F2" {
+		t.Fatalf("unexpected attachment endpoint %s", got)
+	}
+}
+
+func TestWriteEndpointsTemplate(t *testing.T) {
+	tests := map[string]string{
+		"create issue": createIssueEndpoint("example-owner", "example-repo"),
+		"update issue": updateIssueEndpoint("example-owner", "example-repo", 42),
+		"comment":      createIssueCommentEndpoint("example-owner", "example-repo", 42),
+		"create wiki":  createWikiPageEndpoint("example-owner", "example-repo"),
+		"update wiki":  updateWikiPageEndpoint("example-owner", "example-repo", "Home"),
+		"add label":    addLabelEndpoint("example-owner", "example-repo", 42),
+		"remove label": removeLabelEndpoint("example-owner", "example-repo", 42, "needs triage"),
+	}
+	expected := map[string]string{
+		"create issue": "/api/v5/repos/example-owner/example-repo/issues",
+		"update issue": "/api/v5/repos/example-owner/example-repo/issues/42",
+		"comment":      "/api/v5/repos/example-owner/example-repo/issues/42/comments",
+		"create wiki":  "/api/v5/repos/example-owner/example-repo/wiki",
+		"update wiki":  "/api/v5/repos/example-owner/example-repo/wiki/Home",
+		"add label":    "/api/v5/repos/example-owner/example-repo/issues/42/labels",
+		"remove label": "/api/v5/repos/example-owner/example-repo/issues/42/labels/needs%20triage",
+	}
+	for name, got := range tests {
+		if got != expected[name] {
+			t.Fatalf("%s endpoint: got %s want %s", name, got, expected[name])
+		}
+	}
+}
+
+func TestPaginationSwappable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v5/repos/example-owner/example-repo/issues" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		switch {
+		case r.URL.Query().Get("page") == "1":
+			w.Header().Set("X-Next-Page", "2")
+			fmt.Fprint(w, `[{"id":"ISSUE-1","number":1,"title":"first"}]`)
+		case r.URL.Query().Get("page") == "2":
+			fmt.Fprint(w, `[{"id":"ISSUE-2","number":2,"title":"second"}]`)
+		case r.URL.Query().Get("cursor") == "":
+			w.Header().Set("X-Next-Cursor", "next")
+			fmt.Fprint(w, `[{"id":"ISSUE-1","number":1,"title":"first"}]`)
+		case r.URL.Query().Get("cursor") == "next":
+			fmt.Fprint(w, `[{"id":"ISSUE-2","number":2,"title":"second"}]`)
+		default:
+			t.Fatalf("unexpected query %s", r.URL.RawQuery)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, Config{Pagination: PaginationConfig{PerPage: 1}})
+	page, err := client.ListIssues(context.Background(), IssueListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if err != nil {
+		t.Fatalf("ListIssues page pagination returned error: %v", err)
+	}
+	if len(page.Items) != 2 || page.Items[0].ID != "ISSUE-1" || page.Items[1].ID != "ISSUE-2" {
+		t.Fatalf("unexpected page pagination items: %+v", page.Items)
+	}
+
+	cursorClient := newTestClient(t, server.URL, Config{Pagination: PaginationConfig{Strategy: testCursorStrategy{}}})
+	cursorPage, err := cursorClient.ListIssues(context.Background(), IssueListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if err != nil {
+		t.Fatalf("ListIssues cursor pagination returned error: %v", err)
+	}
+	if len(cursorPage.Items) != 2 || cursorPage.Items[0].ID != "ISSUE-1" || cursorPage.Items[1].ID != "ISSUE-2" {
+		t.Fatalf("unexpected cursor pagination items: %+v", cursorPage.Items)
+	}
+}
+
+func TestPaginationLaterPageFailureReturnsNoRecords(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "1" {
+			w.Header().Set("X-Next-Page", "2")
+			fmt.Fprint(w, `[{"id":"ISSUE-1","number":1,"title":"first"}]`)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"message":"down"}`)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	page, err := client.ListIssues(context.Background(), IssueListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if len(page.Items) != 0 {
+		t.Fatalf("expected no partial records, got %+v", page.Items)
+	}
+	var unavailable ErrNetworkUnavailable
+	assertAs(t, err, &unavailable)
+}
+
+type testCursorStrategy struct{}
+
+func (testCursorStrategy) Apply(values url.Values, state PageState) {
+	if state.Cursor != "" {
+		values.Set("cursor", state.Cursor)
+	}
+}
+
+func (testCursorStrategy) Next(headers http.Header, currentCount int) (PageState, bool) {
+	cursor := headers.Get("X-Next-Cursor")
+	if cursor == "" {
+		return PageState{}, false
+	}
+	return PageState{Cursor: cursor}, true
 }
 
 func newTestClient(t *testing.T, baseURL string, cfg Config) *HTTPClient {

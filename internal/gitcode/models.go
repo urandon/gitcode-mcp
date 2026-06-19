@@ -12,9 +12,9 @@ type IssueListRequest struct {
 }
 
 type IssueRequest struct {
-	Owner           string
-	Repo            string
-	Number          int
+	Owner            string
+	Repo             string
+	Number           int
 	KnownRemoteAlias bool
 	RemoteAlias      string
 }

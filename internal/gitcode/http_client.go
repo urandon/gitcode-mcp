@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -52,18 +51,17 @@ func NewHTTPClient(cfg Config) (*HTTPClient, error) {
 }
 
 func (c *HTTPClient) ListIssues(ctx context.Context, req IssueListRequest) (Page[IssueSummary], error) {
-	var items []IssueSummary
-	endpoint := c.path("/api/v5/repos/%s/%s/issues", req.Owner, req.Repo)
-	err := c.getJSON(ctx, endpoint, issueListQuery(req), &items)
+	endpoint := listIssuesEndpoint(req.Owner, req.Repo)
+	items, page, err := getPaged[IssueSummary](ctx, c, endpoint, issueListQuery(req), PageState{Page: req.Page, PerPage: req.PerPage})
 	if err != nil {
 		return Page[IssueSummary]{}, err
 	}
-	return Page[IssueSummary]{Items: items, Page: firstPositive(req.Page, c.pagination.Page, 1), PerPage: firstPositive(req.PerPage, c.pagination.PerPage, len(items))}, nil
+	return Page[IssueSummary]{Items: items, Page: page.Page, PerPage: page.PerPage}, nil
 }
 
 func (c *HTTPClient) GetIssue(ctx context.Context, req IssueRequest) (Issue, error) {
 	var issue Issue
-	endpoint := c.path("/api/v5/repos/%s/%s/issues/%d", req.Owner, req.Repo, req.Number)
+	endpoint := getIssueEndpoint(req.Owner, req.Repo, req.Number)
 	err := c.getJSONWithOptions(ctx, endpoint, nil, &issue, requestOptions{knownRemoteAlias: req.KnownRemoteAlias, remoteAlias: req.RemoteAlias})
 	if err != nil {
 		return Issue{}, err
@@ -72,18 +70,17 @@ func (c *HTTPClient) GetIssue(ctx context.Context, req IssueRequest) (Issue, err
 }
 
 func (c *HTTPClient) ListIssueComments(ctx context.Context, req IssueRequest) (Page[Comment], error) {
-	var items []Comment
-	endpoint := c.path("/api/v5/repos/%s/%s/issues/%d/comments", req.Owner, req.Repo, req.Number)
-	err := c.getJSON(ctx, endpoint, nil, &items)
+	endpoint := listIssueCommentsEndpoint(req.Owner, req.Repo, req.Number)
+	items, page, err := getPaged[Comment](ctx, c, endpoint, nil, PageState{})
 	if err != nil {
 		return Page[Comment]{}, err
 	}
-	return Page[Comment]{Items: items}, nil
+	return Page[Comment]{Items: items, Page: page.Page, PerPage: page.PerPage}, nil
 }
 
 func (c *HTTPClient) GetWikiPage(ctx context.Context, req WikiPageRequest) (WikiPage, error) {
 	var page WikiPage
-	endpoint := c.path("/api/v5/repos/%s/%s/wiki/%s", req.Owner, req.Repo, req.Slug)
+	endpoint := getWikiPageEndpoint(req.Owner, req.Repo, req.Slug)
 	err := c.getJSON(ctx, endpoint, nil, &page)
 	if err != nil {
 		return WikiPage{}, err
@@ -92,19 +89,15 @@ func (c *HTTPClient) GetWikiPage(ctx context.Context, req WikiPageRequest) (Wiki
 }
 
 func (c *HTTPClient) ListWikiPages(ctx context.Context, req WikiListRequest) (Page[WikiPage], error) {
-	var items []WikiPage
-	endpoint := c.path("/api/v5/repos/%s/%s/wiki", req.Owner, req.Repo)
-	values := url.Values{}
-	addPage(values, firstPositive(req.Page, c.pagination.Page, 0), firstPositive(req.PerPage, c.pagination.PerPage, 0))
-	err := c.getJSON(ctx, endpoint, values, &items)
+	endpoint := listWikiPagesEndpoint(req.Owner, req.Repo)
+	items, page, err := getPaged[WikiPage](ctx, c, endpoint, nil, PageState{Page: req.Page, PerPage: req.PerPage})
 	if err != nil {
 		return Page[WikiPage]{}, err
 	}
-	return Page[WikiPage]{Items: items}, nil
+	return Page[WikiPage]{Items: items, Page: page.Page, PerPage: page.PerPage}, nil
 }
 
 func (c *HTTPClient) Search(ctx context.Context, req SearchRequest) (Page[SearchResult], error) {
-	var items []SearchResult
 	values := url.Values{}
 	values.Set("q", req.Query)
 	if req.Owner != "" {
@@ -116,26 +109,24 @@ func (c *HTTPClient) Search(ctx context.Context, req SearchRequest) (Page[Search
 	if req.Type != "" {
 		values.Set("type", req.Type)
 	}
-	addPage(values, firstPositive(req.Page, c.pagination.Page, 0), firstPositive(req.PerPage, c.pagination.PerPage, 0))
-	err := c.getJSON(ctx, "/api/v5/search", values, &items)
+	items, page, err := getPaged[SearchResult](ctx, c, searchIssuesEndpoint(), values, PageState{Page: req.Page, PerPage: req.PerPage})
 	if err != nil {
 		return Page[SearchResult]{}, err
 	}
-	return Page[SearchResult]{Items: items}, nil
+	return Page[SearchResult]{Items: items, Page: page.Page, PerPage: page.PerPage}, nil
 }
 
 func (c *HTTPClient) ListIssueAttachments(ctx context.Context, req IssueRequest) (Page[AttachmentSummary], error) {
-	var items []AttachmentSummary
-	endpoint := c.path("/api/v5/repos/%s/%s/issues/%d/attachments", req.Owner, req.Repo, req.Number)
-	err := c.getJSON(ctx, endpoint, nil, &items)
+	endpoint := issueAttachmentsEndpoint(req.Owner, req.Repo, req.Number)
+	items, page, err := getPaged[AttachmentSummary](ctx, c, endpoint, nil, PageState{})
 	if err != nil {
 		return Page[AttachmentSummary]{}, err
 	}
-	return Page[AttachmentSummary]{Items: items}, nil
+	return Page[AttachmentSummary]{Items: items, Page: page.Page, PerPage: page.PerPage}, nil
 }
 
 func (c *HTTPClient) GetAttachment(ctx context.Context, req AttachmentRequest) (AttachmentBody, error) {
-	endpoint := c.path("/api/v5/repos/%s/%s/issues/%d/attachments/%s", req.Owner, req.Repo, req.IssueNumber, req.AttachmentID)
+	endpoint := attachmentEndpoint(req.Owner, req.Repo, req.IssueNumber, req.AttachmentID)
 	body, headers, err := c.getBytes(ctx, endpoint, nil)
 	if err != nil {
 		return AttachmentBody{}, err
@@ -161,6 +152,43 @@ func (c *HTTPClient) getJSONWithOptions(ctx context.Context, endpoint string, va
 	if err != nil {
 		return err
 	}
+	return decodeJSON(endpoint, body, out)
+}
+
+func getPaged[T any](ctx context.Context, c *HTTPClient, endpoint string, baseValues url.Values, initial PageState) ([]T, PageState, error) {
+	strategy := paginationStrategy(c.pagination)
+	state := initial
+	if state.Page == 0 {
+		state.Page = c.pagination.Page
+	}
+	if state.PerPage == 0 {
+		state.PerPage = c.pagination.PerPage
+	}
+	var items []T
+	for {
+		values := cloneValues(baseValues)
+		strategy.Apply(values, state)
+		body, headers, err := c.getBytes(ctx, endpoint, values)
+		if err != nil {
+			return nil, PageState{}, err
+		}
+		var pageItems []T
+		if err := decodeJSON(endpoint, body, &pageItems); err != nil {
+			return nil, PageState{}, err
+		}
+		items = append(items, pageItems...)
+		next, ok := strategy.Next(headers, len(pageItems))
+		if !ok {
+			if state.Page == 0 {
+				state.Page = firstPositive(c.pagination.Page, 1)
+			}
+			return items, state, nil
+		}
+		state = next
+	}
+}
+
+func decodeJSON(endpoint string, body []byte, out any) error {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	if err := dec.Decode(out); err != nil {
 		return ErrPartialResponse{Endpoint: endpoint, Got: int64(len(body)), Cause: err, Message: decodeMessage(err)}
@@ -280,19 +308,6 @@ func (c *HTTPClient) statusError(status int, endpoint string, body []byte, opts 
 	}
 }
 
-func (c *HTTPClient) path(format string, args ...any) string {
-	escaped := make([]any, len(args))
-	for i, arg := range args {
-		switch v := arg.(type) {
-		case string:
-			escaped[i] = url.PathEscape(v)
-		default:
-			escaped[i] = v
-		}
-	}
-	return fmt.Sprintf(format, escaped...)
-}
-
 func issueListQuery(req IssueListRequest) url.Values {
 	values := url.Values{}
 	if req.State != "" {
@@ -301,17 +316,15 @@ func issueListQuery(req IssueListRequest) url.Values {
 	for _, label := range req.Labels {
 		values.Add("labels", label)
 	}
-	addPage(values, req.Page, req.PerPage)
 	return values
 }
 
-func addPage(values url.Values, page, perPage int) {
-	if page > 0 {
-		values.Set("page", strconv.Itoa(page))
+func cloneValues(values url.Values) url.Values {
+	clone := url.Values{}
+	for key, value := range values {
+		clone[key] = append([]string(nil), value...)
 	}
-	if perPage > 0 {
-		values.Set("per_page", strconv.Itoa(perPage))
-	}
+	return clone
 }
 
 func firstPositive(values ...int) int {

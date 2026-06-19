@@ -27,6 +27,7 @@ type Config struct {
 }
 
 type PaginationConfig struct {
-	Page    int
-	PerPage int
+	Page     int
+	PerPage  int
+	Strategy PaginationStrategy
 }
