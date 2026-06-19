@@ -130,3 +130,61 @@ type AttachmentBody struct {
 	SourceEndpoint string
 	Checksum       string
 }
+
+type WriteOptions struct {
+	IdempotencyKey   string
+	IdempotencyNonce string
+}
+
+type WriteResult[T any] struct {
+	Record         T
+	IdempotencyKey string
+}
+
+type CreateIssueRequest struct {
+	Owner  string   `json:"-"`
+	Repo   string   `json:"-"`
+	Title  string   `json:"title"`
+	Body   string   `json:"body,omitempty"`
+	Labels []string `json:"labels,omitempty"`
+}
+
+type UpdateIssueRequest struct {
+	Owner  string   `json:"-"`
+	Repo   string   `json:"-"`
+	Number int      `json:"-"`
+	Title  string   `json:"title,omitempty"`
+	Body   string   `json:"body,omitempty"`
+	State  string   `json:"state,omitempty"`
+	Labels []string `json:"labels,omitempty"`
+}
+
+type CreateIssueCommentRequest struct {
+	Owner  string `json:"-"`
+	Repo   string `json:"-"`
+	Number int    `json:"-"`
+	Body   string `json:"body"`
+}
+
+type CreateWikiPageRequest struct {
+	Owner string `json:"-"`
+	Repo  string `json:"-"`
+	Slug  string `json:"slug,omitempty"`
+	Title string `json:"title"`
+	Body  string `json:"body"`
+}
+
+type UpdateWikiPageRequest struct {
+	Owner string `json:"-"`
+	Repo  string `json:"-"`
+	Slug  string `json:"-"`
+	Title string `json:"title,omitempty"`
+	Body  string `json:"body,omitempty"`
+}
+
+type LabelRequest struct {
+	Owner  string `json:"-"`
+	Repo   string `json:"-"`
+	Number int    `json:"-"`
+	Label  string `json:"label"`
+}

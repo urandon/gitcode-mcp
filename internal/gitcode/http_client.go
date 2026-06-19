@@ -3,6 +3,8 @@ package gitcode
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,6 +17,7 @@ import (
 )
 
 const defaultMaxResponseSize int64 = 10 << 20
+const defaultIdempotencyKeyLength = 32
 
 type HTTPClient struct {
 	baseURL         *url.URL
@@ -138,9 +141,39 @@ func (c *HTTPClient) GetAttachment(ctx context.Context, req AttachmentRequest) (
 	return AttachmentBody{ID: req.AttachmentID, Name: name, ContentType: headers.Get("Content-Type"), Size: int64(len(body)), Body: body, SourceEndpoint: endpoint, Checksum: headers.Get("X-Checksum-Sha256")}, nil
 }
 
+func (c *HTTPClient) CreateIssue(ctx context.Context, req CreateIssueRequest, opts WriteOptions) (WriteResult[Issue], error) {
+	return writeJSON[Issue](ctx, c, http.MethodPost, createIssueEndpoint(req.Owner, req.Repo), "CreateIssue", req.Owner+"/"+req.Repo, req, opts)
+}
+
+func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, opts WriteOptions) (WriteResult[Issue], error) {
+	return writeJSON[Issue](ctx, c, http.MethodPatch, updateIssueEndpoint(req.Owner, req.Repo, req.Number), "UpdateIssue", req.Owner+"/"+req.Repo+"/"+strconv.Itoa(req.Number), req, opts)
+}
+
+func (c *HTTPClient) CreateIssueComment(ctx context.Context, req CreateIssueCommentRequest, opts WriteOptions) (WriteResult[Comment], error) {
+	return writeJSON[Comment](ctx, c, http.MethodPost, createIssueCommentEndpoint(req.Owner, req.Repo, req.Number), "CreateIssueComment", req.Owner+"/"+req.Repo+"/"+strconv.Itoa(req.Number), req, opts)
+}
+
+func (c *HTTPClient) CreateWikiPage(ctx context.Context, req CreateWikiPageRequest, opts WriteOptions) (WriteResult[WikiPage], error) {
+	return writeJSON[WikiPage](ctx, c, http.MethodPost, createWikiPageEndpoint(req.Owner, req.Repo), "CreateWikiPage", req.Owner+"/"+req.Repo, req, opts)
+}
+
+func (c *HTTPClient) UpdateWikiPage(ctx context.Context, req UpdateWikiPageRequest, opts WriteOptions) (WriteResult[WikiPage], error) {
+	return writeJSON[WikiPage](ctx, c, http.MethodPut, updateWikiPageEndpoint(req.Owner, req.Repo, req.Slug), "UpdateWikiPage", req.Owner+"/"+req.Repo+"/"+req.Slug, req, opts)
+}
+
+func (c *HTTPClient) AddLabel(ctx context.Context, req LabelRequest, opts WriteOptions) (WriteResult[Issue], error) {
+	return writeJSON[Issue](ctx, c, http.MethodPost, addLabelEndpoint(req.Owner, req.Repo, req.Number), "AddLabel", req.Owner+"/"+req.Repo+"/"+strconv.Itoa(req.Number), req, opts)
+}
+
+func (c *HTTPClient) RemoveLabel(ctx context.Context, req LabelRequest, opts WriteOptions) (WriteResult[Issue], error) {
+	return writeJSON[Issue](ctx, c, http.MethodDelete, removeLabelEndpoint(req.Owner, req.Repo, req.Number, req.Label), "RemoveLabel", req.Owner+"/"+req.Repo+"/"+strconv.Itoa(req.Number)+"/"+req.Label, req, opts)
+}
+
 type requestOptions struct {
 	knownRemoteAlias bool
 	remoteAlias      string
+	idempotencyKey   string
+	localPayload     []byte
 }
 
 func (c *HTTPClient) getJSON(ctx context.Context, endpoint string, values url.Values, out any) error {
@@ -200,7 +233,53 @@ func (c *HTTPClient) getBytes(ctx context.Context, endpoint string, values url.V
 	return c.getBytesWithOptions(ctx, endpoint, values, requestOptions{})
 }
 
+func writeJSON[T any](ctx context.Context, c *HTTPClient, method, endpoint, operation, target string, payload any, opts WriteOptions) (WriteResult[T], error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return WriteResult[T]{}, err
+	}
+	key := opts.IdempotencyKey
+	if key == "" {
+		key = GenerateIdempotencyKey(operation, target, payload, opts)
+	}
+	respBody, _, err := c.bytesWithOptions(ctx, method, endpoint, nil, body, requestOptions{idempotencyKey: key, localPayload: body})
+	if err != nil {
+		return WriteResult[T]{}, err
+	}
+	var record T
+	if err := decodeJSON(endpoint, respBody, &record); err != nil {
+		return WriteResult[T]{}, err
+	}
+	return WriteResult[T]{Record: record, IdempotencyKey: key}, nil
+}
+
+func GenerateIdempotencyKey(operation, target string, payload any, opts WriteOptions) string {
+	if opts.IdempotencyKey != "" {
+		return opts.IdempotencyKey
+	}
+	nonce := opts.IdempotencyNonce
+	if nonce == "" {
+		nonce = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	encoded, _ := json.Marshal(struct {
+		Operation string `json:"operation"`
+		Target    string `json:"target"`
+		Payload   any    `json:"payload"`
+		Nonce     string `json:"nonce"`
+	}{Operation: operation, Target: target, Payload: payload, Nonce: nonce})
+	sum := sha256.Sum256(encoded)
+	key := hex.EncodeToString(sum[:])
+	if len(key) > defaultIdempotencyKeyLength {
+		return key[:defaultIdempotencyKeyLength]
+	}
+	return key
+}
+
 func (c *HTTPClient) getBytesWithOptions(ctx context.Context, endpoint string, values url.Values, opts requestOptions) ([]byte, http.Header, error) {
+	return c.bytesWithOptions(ctx, http.MethodGet, endpoint, values, nil, opts)
+}
+
+func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint string, values url.Values, requestBody []byte, opts requestOptions) ([]byte, http.Header, error) {
 	attempts := c.maxRetries + 1
 	if attempts < 1 {
 		attempts = 1
@@ -211,7 +290,7 @@ func (c *HTTPClient) getBytesWithOptions(ctx context.Context, endpoint string, v
 		if err := ctx.Err(); err != nil {
 			return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempt - 1, Cause: err}
 		}
-		resp, err := c.do(ctx, http.MethodGet, endpoint, values, nil)
+		resp, err := c.do(ctx, method, endpoint, values, bytes.NewReader(requestBody), opts)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempt, Cause: ctx.Err()}
@@ -251,7 +330,7 @@ func (c *HTTPClient) getBytesWithOptions(ctx context.Context, endpoint string, v
 	return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempts}
 }
 
-func (c *HTTPClient) do(ctx context.Context, method, endpoint string, values url.Values, body io.Reader) (*http.Response, error) {
+func (c *HTTPClient) do(ctx context.Context, method, endpoint string, values url.Values, body io.Reader, opts requestOptions) (*http.Response, error) {
 	u := c.baseURL.ResolveReference(&url.URL{Path: endpoint})
 	if values != nil {
 		u.RawQuery = values.Encode()
@@ -264,6 +343,12 @@ func (c *HTTPClient) do(ctx context.Context, method, endpoint string, values url
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	req.Header.Set("Accept", "application/json")
+	if body != nil && method != http.MethodGet {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if opts.idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", opts.idempotencyKey)
+	}
 	req.Header.Set("User-Agent", c.userAgent)
 	return c.client.Do(req)
 }
@@ -302,7 +387,7 @@ func (c *HTTPClient) statusError(status int, endpoint string, body []byte, opts 
 		}
 		return ErrNotFound{Endpoint: endpoint, Message: msg}
 	case http.StatusConflict:
-		return ErrConflict{Endpoint: endpoint, Status: status, RemotePayload: append([]byte(nil), body...), Message: msg}
+		return ErrConflict{Endpoint: endpoint, Status: status, LocalPayload: append([]byte(nil), opts.localPayload...), RemotePayload: append([]byte(nil), body...), Message: msg}
 	default:
 		return ErrNetworkUnavailable{Endpoint: endpoint, Status: status, Attempts: 1}
 	}

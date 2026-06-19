@@ -2,6 +2,7 @@ package gitcode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -271,6 +272,104 @@ func TestWriteEndpointsTemplate(t *testing.T) {
 		if got != expected[name] {
 			t.Fatalf("%s endpoint: got %s want %s", name, got, expected[name])
 		}
+	}
+}
+
+func TestWriteIdempotency(t *testing.T) {
+	t.Run("sends idempotency key and JSON payload", func(t *testing.T) {
+		var sawPayload bool
+		var sawKey string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != "/api/v5/repos/example-owner/example-repo/issues" {
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+			sawKey = r.Header.Get("Idempotency-Key")
+			var payload CreateIssueRequest
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			sawPayload = payload.Title == "idempotent write" && payload.Body == "safe body"
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":"ISSUE-42","number":42,"title":"idempotent write","body":"safe body"}`)
+		}))
+		defer server.Close()
+		client := newTestClient(t, server.URL, Config{})
+		result, err := client.CreateIssue(context.Background(), CreateIssueRequest{Owner: "example-owner", Repo: "example-repo", Title: "idempotent write", Body: "safe body"}, WriteOptions{IdempotencyNonce: "nonce-1"})
+		if err != nil {
+			t.Fatalf("CreateIssue returned error: %v", err)
+		}
+		if sawKey == "" || result.IdempotencyKey != sawKey || len(sawKey) != defaultIdempotencyKeyLength {
+			t.Fatalf("unexpected idempotency key request=%q result=%q", sawKey, result.IdempotencyKey)
+		}
+		if !sawPayload || result.Record.ID != "ISSUE-42" {
+			t.Fatalf("unexpected write result payload=%v result=%+v", sawPayload, result)
+		}
+	})
+
+	t.Run("conflict returns local and remote payloads", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusConflict)
+			fmt.Fprint(w, `{"message":"conflict","remote":"existing"}`)
+		}))
+		defer server.Close()
+		client := newTestClient(t, server.URL, Config{})
+		_, err := client.CreateIssue(context.Background(), CreateIssueRequest{Owner: "example-owner", Repo: "example-repo", Title: "local title"}, WriteOptions{IdempotencyKey: "replay-key"})
+		var conflict ErrConflict
+		assertAs(t, err, &conflict)
+		if !strings.Contains(string(conflict.LocalPayload), "local title") || !strings.Contains(string(conflict.RemotePayload), "existing") {
+			t.Fatalf("conflict payloads missing local or remote evidence: %+v", conflict)
+		}
+	})
+
+	t.Run("retry preserves key and replay option", func(t *testing.T) {
+		var attempts atomic.Int32
+		var firstKey string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			key := r.Header.Get("Idempotency-Key")
+			if key != "fixed-replay-key" {
+				t.Fatalf("unexpected replay key %q", key)
+			}
+			if attempts.Add(1) == 1 {
+				firstKey = key
+				w.Header().Set("Retry-After", "0")
+				w.WriteHeader(http.StatusTooManyRequests)
+				fmt.Fprint(w, `{"message":"retry"}`)
+				return
+			}
+			if key != firstKey {
+				t.Fatalf("key changed across retry: %q then %q", firstKey, key)
+			}
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":"ISSUE-99","number":99,"title":"created"}`)
+		}))
+		defer server.Close()
+		client := newTestClient(t, server.URL, Config{MaxRetries: 1})
+		result, err := client.CreateIssue(context.Background(), CreateIssueRequest{Owner: "example-owner", Repo: "example-repo", Title: "created"}, WriteOptions{IdempotencyKey: "fixed-replay-key"})
+		if err != nil {
+			t.Fatalf("CreateIssue retry returned error: %v", err)
+		}
+		if result.Record.ID != "ISSUE-99" || result.IdempotencyKey != "fixed-replay-key" || attempts.Load() != 2 {
+			t.Fatalf("unexpected retry result: attempts=%d result=%+v", attempts.Load(), result)
+		}
+	})
+}
+
+func TestWriteUsesEndpointBuilders(t *testing.T) {
+	seen := map[string]bool{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen[r.Method+" "+r.URL.Path] = true
+		fmt.Fprint(w, `{"id":"OK","number":42,"title":"ok"}`)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	if _, err := client.CreateIssue(context.Background(), CreateIssueRequest{Owner: "example-owner", Repo: "example-repo", Title: "ok"}, WriteOptions{IdempotencyKey: "k1"}); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if _, err := client.AddLabel(context.Background(), LabelRequest{Owner: "example-owner", Repo: "example-repo", Number: 42, Label: "triage"}, WriteOptions{IdempotencyKey: "k2"}); err != nil {
+		t.Fatalf("AddLabel: %v", err)
+	}
+	if !seen["POST "+createIssueEndpoint("example-owner", "example-repo")] || !seen["POST "+addLabelEndpoint("example-owner", "example-repo", 42)] {
+		t.Fatalf("write methods did not use endpoint builders: %+v", seen)
 	}
 }
 

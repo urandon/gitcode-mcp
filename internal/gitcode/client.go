@@ -14,6 +14,13 @@ type Client interface {
 	Search(context.Context, SearchRequest) (Page[SearchResult], error)
 	ListIssueAttachments(context.Context, IssueRequest) (Page[AttachmentSummary], error)
 	GetAttachment(context.Context, AttachmentRequest) (AttachmentBody, error)
+	CreateIssue(context.Context, CreateIssueRequest, WriteOptions) (WriteResult[Issue], error)
+	UpdateIssue(context.Context, UpdateIssueRequest, WriteOptions) (WriteResult[Issue], error)
+	CreateIssueComment(context.Context, CreateIssueCommentRequest, WriteOptions) (WriteResult[Comment], error)
+	CreateWikiPage(context.Context, CreateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
+	UpdateWikiPage(context.Context, UpdateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
+	AddLabel(context.Context, LabelRequest, WriteOptions) (WriteResult[Issue], error)
+	RemoveLabel(context.Context, LabelRequest, WriteOptions) (WriteResult[Issue], error)
 }
 
 type Config struct {
