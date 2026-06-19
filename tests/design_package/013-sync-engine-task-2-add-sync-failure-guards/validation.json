@@ -1,0 +1,65 @@
+{
+  "task_id": "013-sync-engine-task-2-add-sync-failure-guards",
+  "attempt": 1,
+  "validation_status": "materialized",
+  "covered_outcome_ids": ["outcome-13"],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "internal/service.SyncToCache",
+    "internal/service.ErrSyncFailure",
+    "internal/gitcode typed sync errors",
+    "internal/cache.ErrLockContention",
+    "internal/cache.ErrCacheCorruption",
+    "internal/cache sync_events",
+    "internal/cache source, identity, remote revision, and conflict state"
+  ],
+  "evidence_type": "go_test",
+  "freshness": "current_source_build",
+  "mocks_used": [
+    "fake GitCode client test double for external GitCode adapter dependency only; service SyncToCache and real cache behavior remain on the product path"
+  ],
+  "production_files_modified": [],
+  "scenarios": [
+    {
+      "id": "013-sync-engine-task-2-add-sync-failure-guards-scenario-1",
+      "description": "TestFailureModes runs the service failure suite through SyncToCache and verifies typed errors, visible messages, recovery guidance, failed event evidence, and cache-state guarantees for all required scenarios.",
+      "test": "go test ./internal/service/... -run '^TestFailureModes$' -count=1",
+      "result": "materialized"
+    },
+    {
+      "id": "013-sync-engine-task-2-add-sync-failure-guards-scenario-2",
+      "description": "The failure-timeout-network-unavailable subtest verifies ErrNetworkUnavailable with DOC-123 retry guidance, failed sync-event evidence, and unchanged source/version/conflict cache state.",
+      "test": "go test ./internal/service/... -run '^TestFailureModes$/^failure-timeout-network-unavailable$' -count=1",
+      "result": "materialized"
+    },
+    {
+      "id": "013-sync-engine-task-2-add-sync-failure-guards-scenario-3",
+      "description": "The failure-rate-limited-retry-after subtest verifies ErrRateLimited RetryAfter propagation, visible retry-after message, failed event evidence, and no partial writes; TestSyncRetry supports retry-delay behavior before a successful final commit.",
+      "test": "go test ./internal/service/... -run '^TestFailureModes$/^failure-rate-limited-retry-after$' -count=1 && go test ./internal/service/... -run '^TestSyncRetry$' -count=1",
+      "result": "materialized"
+    },
+    {
+      "id": "013-sync-engine-task-2-add-sync-failure-guards-scenario-4",
+      "description": "TestFailureModes includes partial response, auth expiry, remote id collision, cache corruption, lock contention, missing remote record, and oversized payload subtests, each with SyncToCache typed-error and executable cache-state assertions.",
+      "test": "go test ./internal/service/... -run '^TestFailureModes$' -count=1",
+      "result": "materialized"
+    }
+  ],
+  "scenario_subtests": [
+    "failure-timeout-network-unavailable",
+    "failure-rate-limited-retry-after",
+    "failure-partial-response",
+    "failure-auth-expired",
+    "failure-remote-id-collision",
+    "failure-cache-corruption",
+    "failure-lock-contention",
+    "failure-missing-remote-record",
+    "failure-oversized-payload"
+  ],
+  "decommission_checks": [],
+  "notes": {
+    "offline": "Validation uses local Go commands and in-memory/cache-local test state only; live GitCode network validation remains disabled.",
+    "target_product_path": "The run script exercises production service behavior by running Go tests that call SyncToCache against real cache accessors, with only the external GitCode dependency stubbed.",
+    "failure_behavior": "If any required failure guard is missing or mutates cache state incorrectly, the service tests or this run script fail non-zero."
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "covered_outcome_ids": [
+    "outcome-1"
+  ],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "internal/config.Load",
+    "internal/config.Token",
+    "internal/config.RedactDiagnostic",
+    "internal/config.Overrides",
+    "cmd/gitcode-mcp CLI override input contract"
+  ],
+  "evidence_type": "CLI command",
+  "freshness": "current source build and test run",
+  "mocks_used": "No external-service mocks. Tests use an in-memory Source implementation to avoid real user config, credentials, filesystem state, and network access while exercising the production internal/config API.",
+  "production_files_modified": []
+}

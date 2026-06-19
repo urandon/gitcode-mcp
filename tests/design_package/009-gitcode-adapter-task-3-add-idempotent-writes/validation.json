@@ -1,0 +1,23 @@
+{
+  "covered_outcome_ids": [
+    "outcome-12"
+  ],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "internal/gitcode Client.CreateIssue",
+    "internal/gitcode HTTPClient.CreateIssue",
+    "internal/gitcode WriteOptions.IdempotencyKey",
+    "internal/gitcode WriteOptions.IdempotencyNonce",
+    "internal/gitcode WriteResult idempotency evidence",
+    "internal/gitcode createIssueEndpoint",
+    "internal/gitcode addLabelEndpoint",
+    "internal/gitcode ErrConflict",
+    "internal/gitcode write retry executor"
+  ],
+  "evidence_type": "CLI command",
+  "freshness": "current source build",
+  "mocks_used": [
+    "httptest.Server for external GitCode API dependency in package tests"
+  ],
+  "production_files_modified": []
+}

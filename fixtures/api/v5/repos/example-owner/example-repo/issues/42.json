@@ -1,0 +1,12 @@
+{
+  "id": "ISSUE-42",
+  "number": 42,
+  "title": "Cache first adapter",
+  "body": "Structured body for example-project using https://api.example.com/api/v5 evidence.",
+  "status": "open",
+  "state": "open",
+  "labels": ["adapter", "offline"],
+  "author": "example-owner",
+  "created_at": "2026-06-18T10:00:00Z",
+  "updated_at": "2026-06-18T11:00:00Z"
+}

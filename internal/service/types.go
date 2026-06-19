@@ -1,0 +1,389 @@
+package service
+
+import "time"
+
+type SearchSourcesRequest struct {
+	Query  string `json:"query"`
+	Kind   string `json:"kind,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+	Offset int    `json:"offset,omitempty"`
+}
+
+type SearchSourceResult struct {
+	ID        string  `json:"id"`
+	Path      string  `json:"path"`
+	Title     string  `json:"title"`
+	Kind      string  `json:"kind"`
+	Status    string  `json:"status"`
+	Snippet   string  `json:"snippet"`
+	LineStart *int    `json:"line_start"`
+	LineEnd   *int    `json:"line_end"`
+	Score     float64 `json:"score"`
+}
+
+type GetSourceRequest struct {
+	ID        string `json:"id,omitempty"`
+	AliasType string `json:"alias_type,omitempty"`
+	AliasID   string `json:"alias_id,omitempty"`
+}
+
+type SourceRecord struct {
+	ID          string           `json:"id"`
+	Path        string           `json:"path"`
+	RemoteAlias string           `json:"remote_alias"`
+	Kind        string           `json:"kind"`
+	Title       string           `json:"title"`
+	Body        string           `json:"body"`
+	Status      string           `json:"status"`
+	Labels      []string         `json:"labels"`
+	Links       []LinkResult     `json:"links"`
+	Backlinks   []BacklinkResult `json:"backlinks,omitempty"`
+	UpdatedAt   time.Time        `json:"updated_at"`
+}
+
+type ListSourcesRequest struct {
+	Kind   string `json:"kind,omitempty"`
+	Status string `json:"status,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+	Offset int    `json:"offset,omitempty"`
+}
+
+func (r ListSourcesRequest) limitPlusOffset() int {
+	if r.Limit <= 0 {
+		return 0
+	}
+	return r.Limit + r.Offset
+}
+
+type SourceSummary struct {
+	ID          string    `json:"id"`
+	Path        string    `json:"path"`
+	RemoteAlias string    `json:"remote_alias,omitempty"`
+	Kind        string    `json:"kind"`
+	Title       string    `json:"title"`
+	Status      string    `json:"status"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type GetBacklinksRequest struct {
+	ID        string `json:"id,omitempty"`
+	AliasType string `json:"alias_type,omitempty"`
+	AliasID   string `json:"alias_id,omitempty"`
+}
+
+type BacklinkResult struct {
+	SourceSummary
+	TargetID string `json:"target_id"`
+}
+
+type ResolveIDRequest struct {
+	ID        string `json:"id,omitempty"`
+	AliasType string `json:"alias_type,omitempty"`
+	AliasID   string `json:"alias_id,omitempty"`
+}
+
+type ResolvedID struct {
+	ID          string `json:"id"`
+	Path        string `json:"path"`
+	RemoteAlias string `json:"remote_alias"`
+	Kind        string `json:"kind"`
+	Title       string `json:"title"`
+}
+
+type SnippetRequest struct {
+	ID        string `json:"id,omitempty"`
+	AliasType string `json:"alias_type,omitempty"`
+	AliasID   string `json:"alias_id,omitempty"`
+	LineStart int    `json:"line_start,omitempty"`
+	LineEnd   int    `json:"line_end,omitempty"`
+	ChunkID   string `json:"chunk_id,omitempty"`
+}
+
+type SnippetResult struct {
+	ID        string   `json:"id"`
+	Path      string   `json:"path"`
+	Text      string   `json:"text"`
+	LineStart int      `json:"line_start"`
+	LineEnd   int      `json:"line_end"`
+	ChunkID   string   `json:"chunk_id,omitempty"`
+	Warnings  []string `json:"warnings,omitempty"`
+}
+
+type SyncStatusRequest struct {
+	ID        string `json:"id,omitempty"`
+	AliasType string `json:"alias_type,omitempty"`
+	AliasID   string `json:"alias_id,omitempty"`
+}
+
+type SyncStatusResult struct {
+	SourceID       string    `json:"source_id"`
+	RemoteType     string    `json:"remote_type"`
+	RemoteID       string    `json:"remote_id"`
+	RemoteRevision string    `json:"remote_revision"`
+	Status         string    `json:"status"`
+	Freshness      string    `json:"freshness"`
+	LocalUpdatedAt time.Time `json:"local_updated_at"`
+	LastFetchedAt  time.Time `json:"last_fetched_at"`
+}
+
+type FreshnessState = string
+
+const (
+	FreshnessFresh         FreshnessState = "fresh"
+	FreshnessStale         FreshnessState = "stale"
+	FreshnessMissingRemote FreshnessState = "missing_remote"
+	FreshnessUnknown       FreshnessState = "unknown"
+)
+
+type SyncRequest struct {
+	Source         string `json:"source,omitempty"`
+	TrackerID      string `json:"tracker_id,omitempty"`
+	StableID       string `json:"stable_id,omitempty"`
+	RemoteAlias    string `json:"remote_alias,omitempty"`
+	AliasType      string `json:"alias_type,omitempty"`
+	AliasID        string `json:"alias_id,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	MaxAttempts    int    `json:"max_attempts,omitempty"`
+	BackoffBase    string `json:"backoff_base,omitempty"`
+	BackoffMax     string `json:"backoff_max,omitempty"`
+	Timeout        string `json:"timeout,omitempty"`
+	MaxSize        int64  `json:"max_size,omitempty"`
+}
+
+type SyncCounts struct {
+	Fetched   int `json:"fetched"`
+	Skipped   int `json:"skipped"`
+	Updated   int `json:"updated"`
+	Conflicts int `json:"conflicts"`
+	Inserted  int `json:"inserted"`
+}
+
+type SyncResult struct {
+	IdempotencyKey string     `json:"idempotency_key"`
+	Status         string     `json:"status"`
+	Counts         SyncCounts `json:"counts"`
+	Replayed       bool       `json:"replayed"`
+	SyncEventID    string     `json:"sync_event_id"`
+	Freshness      string     `json:"freshness"`
+	GeneratedAt    time.Time  `json:"generated_at"`
+}
+
+type RecentChangesRequest struct {
+	Kind   string `json:"kind,omitempty"`
+	Status string `json:"status,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+	Offset int    `json:"offset,omitempty"`
+}
+
+type RecentChangeResult struct {
+	ID        string    `json:"id"`
+	Path      string    `json:"path"`
+	Title     string    `json:"title"`
+	Kind      string    `json:"kind"`
+	Status    string    `json:"status"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type LinkCheckRequest struct {
+	Strict bool `json:"strict,omitempty"`
+}
+
+type LinkCheckResult struct {
+	CheckedCount     int                 `json:"checked_count"`
+	BrokenCount      int                 `json:"broken_count"`
+	BrokenLinks      []BrokenLinkResult  `json:"broken_links"`
+	SuggestedAliases map[string][]string `json:"suggested_aliases"`
+}
+
+type BrokenLinkResult struct {
+	SourceID string `json:"source_id"`
+	TargetID string `json:"target_id"`
+	Kind     string `json:"kind"`
+	Text     string `json:"text"`
+}
+
+type StaleIndexRequest struct {
+	Strict bool `json:"strict,omitempty"`
+}
+
+type StaleIndexResult struct {
+	StaleCount        int       `json:"stale_count"`
+	AffectedSourceIDs []string  `json:"affected_source_ids"`
+	MissingTargetIDs  []string  `json:"missing_target_ids"`
+	LastIndexedAt     time.Time `json:"last_indexed_at"`
+}
+
+type ExportSnapshotRequest struct {
+	Format      string   `json:"format,omitempty"`
+	IncludeBody bool     `json:"include_body,omitempty"`
+	SourceIDs   []string `json:"source_ids,omitempty"`
+	OutputPath  string   `json:"output_path,omitempty"`
+	InlineLimit int      `json:"inline_limit,omitempty"`
+}
+
+type ExportSnapshotResult struct {
+	SnapshotID    string    `json:"snapshot_id"`
+	Format        string    `json:"format"`
+	RecordCount   int       `json:"record_count"`
+	GeneratedAt   time.Time `json:"generated_at"`
+	ContentHash   string    `json:"content_hash"`
+	InlineContent string    `json:"inline_content,omitempty"`
+	OutputPath    string    `json:"output_path,omitempty"`
+	Warnings      []string  `json:"warnings,omitempty"`
+}
+
+type SnapshotRef struct {
+	Kind   string `json:"kind"`
+	Path   string `json:"path,omitempty"`
+	Bytes  []byte `json:"bytes,omitempty"`
+	Format string `json:"format,omitempty"`
+}
+
+type Snapshot struct {
+	SchemaVersion string               `json:"schema_version"`
+	CreatedAt     time.Time            `json:"created_at"`
+	Sources       []SnapshotSource     `json:"sources"`
+	Aliases       []SnapshotAlias      `json:"aliases"`
+	Links         []SnapshotLink       `json:"links"`
+	Backlinks     []SnapshotLink       `json:"backlinks"`
+	SyncStatus    []SnapshotSyncStatus `json:"sync_status"`
+	Chunks        []SnapshotChunk      `json:"chunks"`
+}
+
+type SnapshotSource struct {
+	ID          string    `json:"id"`
+	Kind        string    `json:"kind"`
+	Path        string    `json:"path"`
+	Title       string    `json:"title"`
+	Body        string    `json:"body,omitempty"`
+	Status      string    `json:"status"`
+	Labels      []string  `json:"labels,omitempty"`
+	ContentHash string    `json:"content_hash"`
+	CreatedAt   time.Time `json:"created_at,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+}
+
+type SnapshotAlias struct {
+	SourceID   string `json:"source_id"`
+	AliasKind  string `json:"alias_kind"`
+	AliasValue string `json:"alias_value"`
+	RemoteKind string `json:"remote_kind,omitempty"`
+	RemoteID   string `json:"remote_id,omitempty"`
+}
+
+type SnapshotLink struct {
+	SourceID string `json:"source_id"`
+	TargetID string `json:"target_id"`
+	LinkType string `json:"link_type"`
+	Text     string `json:"text,omitempty"`
+}
+
+type SnapshotSyncStatus struct {
+	SourceID       string    `json:"source_id"`
+	RemoteType     string    `json:"remote_type,omitempty"`
+	RemoteID       string    `json:"remote_id,omitempty"`
+	RemoteRevision string    `json:"remote_revision,omitempty"`
+	Status         string    `json:"status"`
+	Freshness      string    `json:"freshness"`
+	LastFetchedAt  time.Time `json:"last_fetched_at,omitempty"`
+}
+
+type SnapshotChunk struct {
+	ID                string            `json:"id"`
+	SourceID          string            `json:"source_id"`
+	ContentHash       string            `json:"content_hash"`
+	ByteStart         int               `json:"byte_start"`
+	ByteEnd           int               `json:"byte_end"`
+	LineStart         int               `json:"line_start"`
+	LineEnd           int               `json:"line_end"`
+	HeadingPath       []string          `json:"heading_path"`
+	Text              string            `json:"text,omitempty"`
+	NormalizedText    string            `json:"normalized_text,omitempty"`
+	InheritedMetadata map[string]string `json:"inherited_metadata,omitempty"`
+	OutboundLinks     []string          `json:"outbound_links,omitempty"`
+	ResolvedAliases   map[string]string `json:"resolved_aliases,omitempty"`
+}
+
+type DiffSnapshotRequest struct {
+	BaseSnapshotID      string      `json:"base_snapshot_id,omitempty"`
+	HeadSnapshotID      string      `json:"head_snapshot_id,omitempty"`
+	BaseContent         string      `json:"base_content,omitempty"`
+	BaseSnapshotContent string      `json:"base_snapshot_content,omitempty"`
+	Base                SnapshotRef `json:"base,omitempty"`
+	Head                SnapshotRef `json:"head,omitempty"`
+	Format              string      `json:"format,omitempty"`
+}
+
+type SnapshotRecordChange struct {
+	ID                string   `json:"id"`
+	BeforeContentHash string   `json:"before_content_hash,omitempty"`
+	AfterContentHash  string   `json:"after_content_hash,omitempty"`
+	ChangedFields     []string `json:"changed_fields,omitempty"`
+}
+
+type DiffSnapshotResult struct {
+	BaseSnapshotID    string                 `json:"base_snapshot_id"`
+	HeadSnapshotID    string                 `json:"head_snapshot_id"`
+	Format            string                 `json:"format"`
+	AddedSources      []SnapshotSource       `json:"added_sources,omitempty"`
+	RemovedSources    []SnapshotSource       `json:"removed_sources,omitempty"`
+	ChangedSources    []SnapshotRecordChange `json:"changed_sources,omitempty"`
+	AddedChunks       []SnapshotChunk        `json:"added_chunks,omitempty"`
+	RemovedChunks     []SnapshotChunk        `json:"removed_chunks,omitempty"`
+	ChangedChunks     []SnapshotRecordChange `json:"changed_chunks,omitempty"`
+	AddedLinks        []SnapshotLink         `json:"added_links,omitempty"`
+	RemovedLinks      []SnapshotLink         `json:"removed_links,omitempty"`
+	ChangedAliases    []SnapshotRecordChange `json:"changed_aliases,omitempty"`
+	ChangedSyncStatus []SnapshotRecordChange `json:"changed_sync_status,omitempty"`
+	ChangedSourceIDs  []string               `json:"changed_source_ids"`
+	AddedSourceIDs    []string               `json:"added_source_ids"`
+	RemovedSourceIDs  []string               `json:"removed_source_ids"`
+	ModifiedSourceIDs []string               `json:"modified_source_ids"`
+	DiffText          string                 `json:"diff_text"`
+	Warnings          []string               `json:"warnings,omitempty"`
+}
+
+type LinkResult struct {
+	SourceID string `json:"source_id"`
+	TargetID string `json:"target_id"`
+	Kind     string `json:"kind"`
+	Text     string `json:"text"`
+}
+
+type OperationRequest struct {
+	Mode       string `json:"mode,omitempty"`
+	InputPath  string `json:"input_path,omitempty"`
+	OutputPath string `json:"output_path,omitempty"`
+	Strict     bool   `json:"strict,omitempty"`
+}
+
+type OperationResult struct {
+	Command        string    `json:"command"`
+	Status         string    `json:"status"`
+	ProcessedCount int       `json:"processed_count,omitempty"`
+	Evidence       string    `json:"evidence,omitempty"`
+	GeneratedAt    time.Time `json:"generated_at"`
+}
+
+type WriteCommandRequest struct {
+	Owner          string   `json:"owner,omitempty"`
+	Repo           string   `json:"repo,omitempty"`
+	ID             string   `json:"id,omitempty"`
+	Number         int      `json:"number,omitempty"`
+	Slug           string   `json:"slug,omitempty"`
+	Title          string   `json:"title,omitempty"`
+	Body           string   `json:"body,omitempty"`
+	State          string   `json:"state,omitempty"`
+	Label          string   `json:"label,omitempty"`
+	Labels         []string `json:"labels,omitempty"`
+	IdempotencyKey string   `json:"idempotency_key,omitempty"`
+}
+
+type WriteCommandResult struct {
+	Command        string    `json:"command"`
+	Status         string    `json:"status"`
+	ID             string    `json:"id,omitempty"`
+	IdempotencyKey string    `json:"idempotency_key"`
+	Evidence       string    `json:"evidence,omitempty"`
+	GeneratedAt    time.Time `json:"generated_at"`
+}

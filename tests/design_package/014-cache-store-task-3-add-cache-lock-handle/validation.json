@@ -1,0 +1,46 @@
+{
+  "task_id": "014-cache-store-task-3-add-cache-lock-handle",
+  "attempt": 1,
+  "validation_status": "materialized",
+  "covered_outcome_ids": ["outcome-6", "outcome-13"],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "internal/cache.Store.AcquireLock",
+    "internal/cache.Store.ReleaseLock",
+    "internal/cache.LockHandle",
+    "internal/cache.ErrLockContention",
+    "internal/cache.UpsertSourceGraph",
+    "internal/cache.GetSyncStatus",
+    "internal/cache.ListSources"
+  ],
+  "evidence_type": "go_test",
+  "freshness": "current_source_build",
+  "mocks_used": [],
+  "production_files_modified": [],
+  "scenarios": [
+    {
+      "id": "014-cache-store-task-3-add-cache-lock-handle-scenario-1",
+      "description": "TestLockContention exercises the real cache lock API by acquiring a lock file, verifying second acquisition returns typed ErrLockContention with the lock path, releasing safely, and acquiring again.",
+      "test": "go test ./internal/cache/... -run '^TestLockContention$' -count=1",
+      "result": "materialized"
+    },
+    {
+      "id": "014-cache-store-task-3-add-cache-lock-handle-scenario-2",
+      "description": "TestLockContentionBlocksSimulatedSync holds the lock, runs a service-style lock-before-mutate path, verifies UpsertSourceGraph is not called during contention, and confirms no source or sync-status rows were written.",
+      "test": "go test ./internal/cache/... -run '^TestLockContentionBlocksSimulatedSync$' -count=1",
+      "result": "materialized"
+    },
+    {
+      "id": "014-cache-store-task-3-add-cache-lock-handle-scenario-3",
+      "description": "The run script executes only local cache Go tests and deterministic compile/whitespace checks; no live network, external-provider, credentials, or device validation is required.",
+      "test": "bash tests/design_package/014-cache-store-task-3-add-cache-lock-handle/run.sh",
+      "result": "materialized"
+    }
+  ],
+  "decommission_checks": [],
+  "notes": {
+    "offline": "Validation uses local Go commands, temporary lock files, and in-memory SQLite/cache-local test state only; live GitCode network validation remains disabled.",
+    "target_product_path": "The run script exercises production cache behavior through Go tests that call Store.AcquireLock, Store.ReleaseLock, UpsertSourceGraph, GetSyncStatus, and ListSources on the real cache implementation.",
+    "failure_behavior": "If lock acquisition blocks, returns an untyped error, omits the lock path, fails to release, calls mutation during contention, or writes partial cache rows, the cache tests or this run script fail non-zero."
+  }
+}

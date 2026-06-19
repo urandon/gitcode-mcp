@@ -1,0 +1,18 @@
+{
+  "covered_outcome_ids": [
+    "outcome-8"
+  ],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "go test ./... -short offline validation path",
+    "internal/testnet NoExternalNetwork sentinel guard and loopback allowance",
+    "internal/gitcode credential-gated live Integration test surface",
+    "internal/mcp local stdio Integration test surface",
+    "internal/service TestGoldenExport deterministic golden export surface",
+    "repository-wide Go test runtime for cache/index/service/adapter/MCP tests"
+  ],
+  "evidence_type": "offline executable validation script plus Go runtime tests",
+  "freshness": "current source build",
+  "mocks_used": "external_dependencies_only: sanitized fixtures and local httptest.Server replace external GitCode API during offline validation; live GitCode execution is not run because live validation is disabled",
+  "production_files_modified": []
+}

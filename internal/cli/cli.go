@@ -1,58 +1,603 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
+
+	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/service"
 )
 
 const version = "0.1.0"
 
 var commands = []string{
-	"sync",
-	"search",
-	"get",
+	"ingest",
+	"index",
+	"search_sources", "search",
+	"list_sources", "list",
+	"get_source", "get",
+	"source_backlinks", "backlinks",
+	"get_snippet", "snippet",
+	"sync_status", "sync-status",
+	"tasks",
+	"tracks",
+	"recent",
 	"link-check",
+	"stale-index",
+	"sync",
 	"export",
 	"diff",
+	"create-issue",
+	"update-issue",
+	"create-page",
+	"update-page",
+	"add-comment",
+	"add-label",
+}
+
+type queryService interface {
+	Ingest(context.Context, service.OperationRequest) (service.OperationResult, error)
+	Index(context.Context, service.OperationRequest) (service.OperationResult, error)
+	SearchSources(context.Context, service.SearchSourcesRequest) ([]service.SearchSourceResult, error)
+	ListSources(context.Context, service.ListSourcesRequest) ([]service.SourceSummary, error)
+	GetSource(context.Context, service.GetSourceRequest) (service.SourceRecord, error)
+	GetBacklinks(context.Context, service.GetBacklinksRequest) ([]service.BacklinkResult, error)
+	GetSnippet(context.Context, service.SnippetRequest) (service.SnippetResult, error)
+	GetSyncStatus(context.Context, service.SyncStatusRequest) (service.SyncStatusResult, error)
+	RecentChanges(context.Context, service.RecentChangesRequest) ([]service.RecentChangeResult, error)
+	LinkCheck(context.Context, service.LinkCheckRequest) (service.LinkCheckResult, error)
+	StaleIndex(context.Context, service.StaleIndexRequest) (service.StaleIndexResult, error)
+	SyncToCache(context.Context, service.SyncRequest) (service.SyncResult, error)
+	ExportSnapshot(context.Context, service.ExportSnapshotRequest) (service.ExportSnapshotResult, error)
+	DiffSnapshot(context.Context, service.DiffSnapshotRequest) (service.DiffSnapshotResult, error)
+	CreateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	UpdateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	CreatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	UpdatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	AddComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	AddLabel(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+}
+
+type serviceFactory func(context.Context, string) (queryService, func() error, error)
+
+type options struct {
+	format         string
+	kind           string
+	status         string
+	limit          int
+	offset         int
+	lineStart      int
+	lineEnd        int
+	cachePath      string
+	strict         bool
+	base           string
+	head           string
+	full           bool
+	incremental    bool
+	input          string
+	output         string
+	owner          string
+	repo           string
+	id             string
+	number         int
+	slug           string
+	title          string
+	body           string
+	state          string
+	label          string
+	labels         string
+	idempotencyKey string
 }
 
 // Execute runs the gitcode-mcp CLI.
 func Execute(args []string, stdout io.Writer, stderr io.Writer) int {
+	return executeWithFactory(args, stdout, stderr, defaultServiceFactory)
+}
+
+func executeWithFactory(args []string, stdout io.Writer, stderr io.Writer, factory serviceFactory) int {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		printHelp(stdout)
 		return 0
 	}
-
 	if args[0] == "--version" || args[0] == "version" {
 		fmt.Fprintf(stdout, "gitcode-mcp %s\n", version)
 		return 0
 	}
-
-	if isKnownCommand(args[0]) {
-		fmt.Fprintf(
-			stdout,
-			"%s: not implemented yet. See project/tasks/backlog.md for the current implementation plan.\n",
-			args[0],
-		)
+	if !isKnownCommand(args[0]) {
+		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
+		printHelp(stderr)
 		return 2
 	}
 
-	fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
-	printHelp(stderr)
-	return 2
+	command := args[0]
+	opts, rest, err := parseOptions(command, args[1:])
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	svc, cleanup, err := factory(context.Background(), opts.cachePath)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+	return dispatch(context.Background(), svc, command, rest, opts, stdout, stderr)
+}
+
+func defaultServiceFactory(ctx context.Context, cachePath string) (queryService, func() error, error) {
+	path, err := resolvedCachePath(cachePath)
+	if err != nil {
+		return nil, nil, err
+	}
+	store, err := cache.NewSQLiteStore(ctx, path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return service.New(store), store.Close, nil
+}
+
+func resolvedCachePath(path string) (string, error) {
+	if path != "" {
+		return path, nil
+	}
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	dir = filepath.Join(dir, "gitcode-mcp")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "cache.db"), nil
+}
+
+func parseOptions(command string, args []string) (options, []string, error) {
+	opts := options{format: "text"}
+	flags := flag.NewFlagSet(command, flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	flags.StringVar(&opts.format, "format", "text", "text, markdown, or json")
+	flags.StringVar(&opts.kind, "kind", "", "source kind")
+	flags.StringVar(&opts.status, "status", "", "source status")
+	flags.IntVar(&opts.limit, "limit", 0, "result limit")
+	flags.IntVar(&opts.offset, "offset", 0, "result offset")
+	flags.IntVar(&opts.lineStart, "line-start", 0, "snippet start line")
+	flags.IntVar(&opts.lineEnd, "line-end", 0, "snippet end line")
+	flags.StringVar(&opts.cachePath, "cache-path", "", "cache database path")
+	flags.BoolVar(&opts.strict, "strict", false, "exit non-zero on findings")
+	flags.StringVar(&opts.base, "base", "", "base snapshot")
+	flags.StringVar(&opts.head, "head", "", "head snapshot")
+	flags.BoolVar(&opts.full, "full", false, "run full index")
+	flags.BoolVar(&opts.incremental, "incremental", false, "run incremental index")
+	flags.StringVar(&opts.input, "input", "", "input path")
+	flags.StringVar(&opts.output, "output", "", "output path")
+	flags.StringVar(&opts.owner, "owner", "", "repository owner")
+	flags.StringVar(&opts.repo, "repo", "", "repository name")
+	flags.StringVar(&opts.id, "id", "", "record id")
+	flags.IntVar(&opts.number, "number", 0, "issue number")
+	flags.StringVar(&opts.slug, "slug", "", "page slug")
+	flags.StringVar(&opts.title, "title", "", "title")
+	flags.StringVar(&opts.body, "body", "", "body")
+	flags.StringVar(&opts.state, "state", "", "state")
+	flags.StringVar(&opts.label, "label", "", "label")
+	flags.StringVar(&opts.labels, "labels", "", "comma-separated labels")
+	flags.StringVar(&opts.idempotencyKey, "idempotency-key", "", "idempotency key")
+	if err := flags.Parse(reorderFlags(args)); err != nil {
+		return opts, nil, service.ErrInvalidQuery{Field: "flags", Message: err.Error()}
+	}
+	opts.format = strings.ToLower(opts.format)
+	if opts.format != "text" && opts.format != "markdown" && opts.format != "json" {
+		return opts, nil, service.ErrInvalidQuery{Field: "format", Message: "format must be text, markdown, or json"}
+	}
+	return opts, flags.Args(), nil
+}
+
+func reorderFlags(args []string) []string {
+	flags := make([]string, 0, len(args))
+	positionals := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "--") {
+			flags = append(flags, arg)
+			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" {
+				continue
+			}
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
+				flags = append(flags, args[i+1])
+				i++
+			}
+			continue
+		}
+		positionals = append(positionals, arg)
+	}
+	return append(flags, positionals...)
+}
+
+func dispatch(ctx context.Context, svc queryService, command string, args []string, opts options, stdout io.Writer, stderr io.Writer) int {
+	switch command {
+	case "ingest":
+		result, err := svc.Ingest(ctx, service.OperationRequest{InputPath: opts.input, OutputPath: opts.output, Strict: opts.strict})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, renderOperationText)
+	case "index":
+		mode := ""
+		if opts.full {
+			mode = "full"
+		}
+		if opts.incremental {
+			mode = "incremental"
+		}
+		result, err := svc.Index(ctx, service.OperationRequest{Mode: mode, Strict: opts.strict})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, renderOperationText)
+	case "search_sources", "search":
+		if len(args) == 0 {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "query", Message: "query is required"})
+		}
+		results, err := svc.SearchSources(ctx, service.SearchSourcesRequest{Query: strings.Join(args, " "), Kind: opts.kind, Limit: opts.limit, Offset: opts.offset})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, results, renderSearchText)
+	case "list_sources", "list":
+		results, err := svc.ListSources(ctx, service.ListSourcesRequest{Kind: opts.kind, Status: opts.status, Limit: opts.limit, Offset: opts.offset})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, results, renderListText)
+	case "get_source", "get":
+		id, ok := firstArg(args)
+		if !ok {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "id", Message: "id is required"})
+		}
+		result, err := svc.GetSource(ctx, service.GetSourceRequest{ID: id})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, renderGetText)
+	case "source_backlinks", "backlinks":
+		id, ok := firstArg(args)
+		if !ok {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "id", Message: "id is required"})
+		}
+		results, err := svc.GetBacklinks(ctx, service.GetBacklinksRequest{ID: id})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, results, renderBacklinksText)
+	case "get_snippet", "snippet":
+		id, ok := firstArg(args)
+		if !ok {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "id", Message: "id is required"})
+		}
+		result, err := svc.GetSnippet(ctx, service.SnippetRequest{ID: id, LineStart: opts.lineStart, LineEnd: opts.lineEnd})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		if opts.format == "text" {
+			fmt.Fprintln(stdout, result.Text)
+			for _, warning := range result.Warnings {
+				fmt.Fprintln(stderr, warning)
+			}
+			return 0
+		}
+		return renderJSON(stdout, result)
+	case "tasks":
+		results, err := svc.ListSources(ctx, service.ListSourcesRequest{Kind: "task", Status: opts.status, Limit: opts.limit, Offset: opts.offset})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, results, renderListText)
+	case "tracks":
+		results, err := svc.ListSources(ctx, service.ListSourcesRequest{Kind: "track", Status: opts.status, Limit: opts.limit, Offset: opts.offset})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, results, renderListText)
+	case "sync_status", "sync-status":
+		id, ok := firstArg(args)
+		if !ok {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "id", Message: "id is required"})
+		}
+		result, err := svc.GetSyncStatus(ctx, service.SyncStatusRequest{ID: id})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, renderSyncStatusText)
+	case "recent":
+		results, err := svc.RecentChanges(ctx, service.RecentChangesRequest{Kind: opts.kind, Status: opts.status, Limit: opts.limit, Offset: opts.offset})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, results, renderRecentText)
+	case "link-check":
+		result, err := svc.LinkCheck(ctx, service.LinkCheckRequest{Strict: opts.strict})
+		if opts.format == "json" {
+			renderJSON(stdout, result)
+		} else {
+			renderLinkCheckText(stdout, result)
+		}
+		if err != nil {
+			if isStrictFinding(err) {
+				return 5
+			}
+			return writeError(stderr, opts.format, err)
+		}
+		return 0
+	case "stale-index":
+		result, err := svc.StaleIndex(ctx, service.StaleIndexRequest{Strict: opts.strict})
+		if opts.format == "json" {
+			renderJSON(stdout, result)
+		} else {
+			renderStaleIndexText(stdout, result)
+		}
+		if err != nil {
+			if isStrictFinding(err) {
+				return 5
+			}
+			return writeError(stderr, opts.format, err)
+		}
+		return 0
+	case "sync":
+		result, err := svc.SyncToCache(ctx, service.SyncRequest{StableID: opts.id, RemoteAlias: opts.input, IdempotencyKey: opts.idempotencyKey})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, renderSyncText)
+	case "export":
+		result, err := svc.ExportSnapshot(ctx, service.ExportSnapshotRequest{Format: opts.format, OutputPath: opts.output, IncludeBody: true})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		if opts.format == "json" {
+			fmt.Fprint(stdout, result.InlineContent)
+			return 0
+		}
+		return render(stdout, opts.format, result, renderExportText)
+	case "diff":
+		result, err := svc.DiffSnapshot(ctx, service.DiffSnapshotRequest{BaseSnapshotID: opts.base, HeadSnapshotID: opts.head, Base: snapshotRefFromPath(opts.base, opts.format), Head: snapshotRefFromPathOrCurrent(opts.head, opts.format), Format: opts.format})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, renderDiffText)
+	case "create-issue":
+		return dispatchWrite(ctx, svc.CreateIssue, command, opts, stdout, stderr)
+	case "update-issue":
+		return dispatchWrite(ctx, svc.UpdateIssue, command, opts, stdout, stderr)
+	case "create-page":
+		return dispatchWrite(ctx, svc.CreatePage, command, opts, stdout, stderr)
+	case "update-page":
+		return dispatchWrite(ctx, svc.UpdatePage, command, opts, stdout, stderr)
+	case "add-comment":
+		return dispatchWrite(ctx, svc.AddComment, command, opts, stdout, stderr)
+	case "add-label":
+		return dispatchWrite(ctx, svc.AddLabel, command, opts, stdout, stderr)
+	default:
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "command", Message: command + " is not a query command"})
+	}
+}
+
+func dispatchWrite(ctx context.Context, handler func(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error), command string, opts options, stdout io.Writer, stderr io.Writer) int {
+	result, err := handler(ctx, writeRequest(opts))
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	return render(stdout, opts.format, result, renderWriteText)
+}
+
+func snapshotRefFromPath(path string, format string) service.SnapshotRef {
+	if strings.TrimSpace(path) == "" {
+		return service.SnapshotRef{Kind: "current", Format: format}
+	}
+	return service.SnapshotRef{Kind: "path", Path: path, Format: format}
+}
+
+func snapshotRefFromPathOrCurrent(path string, format string) service.SnapshotRef {
+	return snapshotRefFromPath(path, format)
+}
+
+func writeRequest(opts options) service.WriteCommandRequest {
+	labels := []string{}
+	if opts.labels != "" {
+		for _, label := range strings.Split(opts.labels, ",") {
+			if trimmed := strings.TrimSpace(label); trimmed != "" {
+				labels = append(labels, trimmed)
+			}
+		}
+	}
+	return service.WriteCommandRequest{Owner: opts.owner, Repo: opts.repo, ID: opts.id, Number: opts.number, Slug: opts.slug, Title: opts.title, Body: opts.body, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
+}
+
+func render[T any](stdout io.Writer, format string, value T, text func(io.Writer, T)) int {
+	if format == "json" {
+		return renderJSON(stdout, value)
+	}
+	text(stdout, value)
+	return 0
+}
+
+func renderJSON(w io.Writer, value any) int {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(value); err != nil {
+		fmt.Fprintf(w, "encoding error: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func renderSearchText(w io.Writer, results []service.SearchSourceResult) {
+	for _, result := range results {
+		line := 0
+		if result.LineStart != nil {
+			line = *result.LineStart
+		}
+		fmt.Fprintf(w, "%s:%d:%s\n", result.Path, line, result.Snippet)
+	}
+}
+
+func renderListText(w io.Writer, results []service.SourceSummary) {
+	for _, result := range results {
+		fmt.Fprintf(w, "%s %s %s %s %s\n", result.ID, result.Kind, result.Status, result.Path, result.Title)
+	}
+}
+
+func renderGetText(w io.Writer, result service.SourceRecord) {
+	fmt.Fprintf(w, "id: %s\npath: %s\nremote_alias: %s\ntitle: %s\nstatus: %s\nbody:\n%s\n", result.ID, result.Path, result.RemoteAlias, result.Title, result.Status, result.Body)
+}
+
+func renderBacklinksText(w io.Writer, results []service.BacklinkResult) {
+	for _, result := range results {
+		fmt.Fprintf(w, "%s %s %s %s\n", result.ID, result.Path, result.Title, result.TargetID)
+	}
+}
+
+func renderSyncStatusText(w io.Writer, result service.SyncStatusResult) {
+	fmt.Fprintf(w, "%s %s %s %s %s\n", result.SourceID, result.Status, result.RemoteType, result.RemoteID, result.LastFetchedAt.Format(time.RFC3339))
+}
+
+func renderRecentText(w io.Writer, results []service.RecentChangeResult) {
+	for _, result := range results {
+		fmt.Fprintf(w, "%s %s %s %s\n", result.UpdatedAt.UTC().Format(time.RFC3339), result.ID, result.Path, result.Title)
+	}
+}
+
+func renderLinkCheckText(w io.Writer, result service.LinkCheckResult) {
+	for _, broken := range result.BrokenLinks {
+		fmt.Fprintf(w, "%s -> %s %s %s\n", broken.SourceID, broken.TargetID, broken.Kind, broken.Text)
+	}
+}
+
+func renderStaleIndexText(w io.Writer, result service.StaleIndexResult) {
+	fmt.Fprintf(w, "stale_count: %d\n", result.StaleCount)
+	if len(result.AffectedSourceIDs) > 0 {
+		fmt.Fprintf(w, "affected_source_ids: %s\n", strings.Join(result.AffectedSourceIDs, ","))
+	}
+	if len(result.MissingTargetIDs) > 0 {
+		fmt.Fprintf(w, "missing_target_ids: %s\n", strings.Join(result.MissingTargetIDs, ","))
+	}
+}
+
+func renderOperationText(w io.Writer, result service.OperationResult) {
+	fmt.Fprintf(w, "%s: %s processed=%d evidence=%s\n", result.Command, result.Status, result.ProcessedCount, result.Evidence)
+}
+
+func renderSyncText(w io.Writer, result service.SyncResult) {
+	fmt.Fprintf(w, "sync: %s fetched=%d updated=%d inserted=%d skipped=%d conflicts=%d idempotency_key=%s replayed=%t\n", result.Status, result.Counts.Fetched, result.Counts.Updated, result.Counts.Inserted, result.Counts.Skipped, result.Counts.Conflicts, result.IdempotencyKey, result.Replayed)
+}
+
+func renderExportText(w io.Writer, result service.ExportSnapshotResult) {
+	if result.InlineContent != "" {
+		fmt.Fprint(w, result.InlineContent)
+		return
+	}
+	fmt.Fprintf(w, "%s %s records=%d hash=%s\n", result.SnapshotID, result.Format, result.RecordCount, result.ContentHash)
+}
+
+func renderDiffText(w io.Writer, result service.DiffSnapshotResult) {
+	if result.DiffText != "" {
+		fmt.Fprint(w, result.DiffText)
+		return
+	}
+	fmt.Fprintf(w, "changed_source_ids: %s\n", strings.Join(result.ChangedSourceIDs, ","))
+}
+
+func renderWriteText(w io.Writer, result service.WriteCommandResult) {
+	fmt.Fprintf(w, "%s: %s id=%s idempotency_key=%s evidence=%s\n", result.Command, result.Status, result.ID, result.IdempotencyKey, result.Evidence)
+}
+
+func writeError(stderr io.Writer, format string, err error) int {
+	code := exitCode(err)
+	if format == "json" {
+		_ = json.NewEncoder(stderr).Encode(map[string]any{"error": err.Error(), "exit_code": code})
+		return code
+	}
+	fmt.Fprintln(stderr, err.Error())
+	return code
+}
+
+func exitCode(err error) int {
+	var cacheEmpty service.ErrCacheEmpty
+	if errors.As(err, &cacheEmpty) {
+		return 2
+	}
+	var notFound service.ErrNotFound
+	if errors.As(err, &notFound) {
+		return 3
+	}
+	var invalid service.ErrInvalidQuery
+	if errors.As(err, &invalid) {
+		return 4
+	}
+	if isStrictFinding(err) {
+		return 5
+	}
+	return 1
+}
+
+func isStrictFinding(err error) bool {
+	var stale service.ErrStaleIndex
+	if errors.As(err, &stale) {
+		return true
+	}
+	var link service.ErrLinkCheckFailed
+	return errors.As(err, &link)
+}
+
+func firstArg(args []string) (string, bool) {
+	if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
+		return "", false
+	}
+	return args[0], true
 }
 
 func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "gitcode-mcp - cache-first GitCode MCP and CLI tooling")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  gitcode-mcp [command]")
+	fmt.Fprintln(w, "  gitcode-mcp [command] [flags]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	for _, command := range commands {
 		fmt.Fprintf(w, "  %s\n", command)
 	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Shell-equivalent query mapping:")
+	fmt.Fprintln(w, "  find -> list_sources")
+	fmt.Fprintln(w, "  rg -n -> search_sources")
+	fmt.Fprintln(w, "  rg --files -> list_sources")
+	fmt.Fprintln(w, "  sed -n -> get_snippet")
+	fmt.Fprintln(w, "  handoff/review inspection -> recent")
+	fmt.Fprintln(w, "  broken pointer search -> link-check")
+	fmt.Fprintln(w, "  stale derived data search -> stale-index")
+	fmt.Fprintln(w, "  minimum replacement sequence: ingest -> search_sources -> list_sources -> get_source -> source_backlinks -> sync_status")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Global query flags:")
+	fmt.Fprintln(w, "  --format text|json")
+	fmt.Fprintln(w, "  --kind KIND")
+	fmt.Fprintln(w, "  --status STATUS")
+	fmt.Fprintln(w, "  --limit N")
+	fmt.Fprintln(w, "  --offset N")
+	fmt.Fprintln(w, "  --line-start N")
+	fmt.Fprintln(w, "  --line-end N")
+	fmt.Fprintln(w, "  --cache-path PATH")
+	fmt.Fprintln(w, "  --strict")
+	fmt.Fprintln(w, "  --full | --incremental")
+	fmt.Fprintln(w, "  --input PATH --output PATH")
+	fmt.Fprintln(w, "  --owner OWNER --repo REPO --number N --id ID --slug SLUG")
+	fmt.Fprintln(w, "  --title TITLE --body BODY --label LABEL --labels A,B")
+	fmt.Fprintln(w, "  --idempotency-key KEY")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Global options:")
 	fmt.Fprintln(w, "  -h, --help     Show help")

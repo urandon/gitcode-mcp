@@ -1,0 +1,10 @@
+[
+  {
+    "id": "COMMENT-1",
+    "issue_id": "ISSUE-42",
+    "body": "Fixture-backed comment for example-project.",
+    "author": "example-owner",
+    "created_at": "2026-06-18T10:15:00Z",
+    "updated_at": "2026-06-18T10:15:00Z"
+  }
+]
