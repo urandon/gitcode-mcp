@@ -1,0 +1,44 @@
+{
+  "covered_outcome_ids": [
+    "outcome-4",
+    "outcome-5",
+    "outcome-10"
+  ],
+  "covered_decommission_ids": [
+    "decommission-1",
+    "decommission-3"
+  ],
+  "product_surfaces": [
+    "internal/service.Service cache-first query API",
+    "internal/service SearchSources, GetSource, ListSources, GetBacklinks, ResolveID, GetSnippet, GetSyncStatus, RecentChanges, LinkCheck, StaleIndex, ExportSnapshot, and DiffSnapshot methods",
+    "internal/service DTOs consumed by the approved first-slice MCP tools search_sources, get_source, list_sources, source_backlinks, resolve_id, sync_status, export_snapshot, and diff_snapshot",
+    "internal/cache.Store-backed in-memory SQLite source, identity, link, chunk, sync-status, snapshot, and diff reads",
+    "service typed errors and warning fields for cache-empty, not-found, invalid-query, clamped range, stale-index, and link-check findings"
+  ],
+  "scenario_bindings": {
+    "005-agent-query-surface-task-1-add-service-query-api-scenario-1": {
+      "command": "go test ./internal/service/... -run 'Test(SearchSources|GetSource|ListSources|GetBacklinks|ResolveID|GetSnippet|GetSyncStatus|RecentChanges|LinkCheck|StaleIndex|ExportSnapshot|DiffSnapshot)' -count=1",
+      "product_surface": "internal/service.Service query methods over populated in-memory cache data and cache/index projections",
+      "acceptance_evidence": "stable ids, paths, titles, snippets, backlinks, resolved remote aliases, clamped snippets, sync freshness, recent changes, broken links, stale-index reports, and deterministic snapshot/diff DTOs are returned without network access"
+    },
+    "005-agent-query-surface-task-1-add-service-query-api-scenario-2": {
+      "command": "go test ./internal/service/... -run TestMCPToolDTOContract -count=1",
+      "product_surface": "internal/service DTO contract for the eight approved first-slice MCP query tools",
+      "acceptance_evidence": "service calls for search_sources, get_source, list_sources, source_backlinks, resolve_id, sync_status, export_snapshot, and diff_snapshot return structured DTOs while recent/link_check/stale_index MCP exposure remains out of scope"
+    },
+    "005-agent-query-surface-task-1-add-service-query-api-scenario-3": {
+      "command": "go test ./internal/service/... -run TestQueryEdgeCases -count=1",
+      "product_surface": "internal/service typed error normalization, deterministic ordering, and warning/report DTO behavior",
+      "acceptance_evidence": "cache-empty, not-found, invalid query, equal-score search ordering, stale projection, and broken-link cases map to service errors or deterministic cache-backed reports"
+    },
+    "005-agent-query-surface-task-1-add-service-query-api-scenario-4": {
+      "command": "go test ./internal/service/... -run TestQueryMethodsDoNotUseLiveNetwork -count=1",
+      "product_surface": "internal/service routine query methods constructed with only a cache.Store and no GitCode client",
+      "acceptance_evidence": "all routine query reads complete with GitCode credential environment variables unset and no live network dependency configured"
+    }
+  },
+  "evidence_type": "offline executable CLI command",
+  "freshness": "current source build",
+  "mocks_used": "local in-memory SQLite cache store and service-local fake cache store for broken-link/stale-index projections only; no external provider or live network mocks",
+  "production_files_modified": []
+}

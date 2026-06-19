@@ -15,6 +15,7 @@ type Store interface {
 	GetIdentityMap(context.Context, string) ([]Identity, error)
 	ResolveAlias(context.Context, RemoteAlias) (Identity, error)
 	UpsertLink(context.Context, Link) error
+	ListLinks(context.Context, LinkFilter) ([]Link, error)
 	GetBacklinks(context.Context, string) ([]Source, error)
 	UpsertChunk(context.Context, Chunk) (Chunk, error)
 	GetChunks(context.Context, string) ([]Chunk, error)
@@ -80,6 +81,11 @@ type Link struct {
 	TargetID string
 	Kind     string
 	Text     string
+}
+
+type LinkFilter struct {
+	SourceID string
+	TargetID string
 }
 
 type Chunk struct {

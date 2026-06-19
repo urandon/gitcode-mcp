@@ -74,6 +74,23 @@ func upsertLinkTx(ctx context.Context, tx *sql.Tx, link Link) error {
 	return execTx(ctx, tx, `INSERT INTO links (source_id, target_id, kind, text) VALUES (?, ?, ?, ?) ON CONFLICT(source_id, target_id, kind, text) DO NOTHING`, link.SourceID, link.TargetID, link.Kind, link.Text)
 }
 
+func (s *SQLiteStore) ListLinks(ctx context.Context, filter LinkFilter) ([]Link, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT source_id, target_id, kind, text FROM links WHERE (? = '' OR source_id = ?) AND (? = '' OR target_id = ?) ORDER BY source_id, target_id, kind, text`, filter.SourceID, filter.SourceID, filter.TargetID, filter.TargetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var links []Link
+	for rows.Next() {
+		var link Link
+		if err := rows.Scan(&link.SourceID, &link.TargetID, &link.Kind, &link.Text); err != nil {
+			return nil, err
+		}
+		links = append(links, link)
+	}
+	return links, rows.Err()
+}
+
 func (s *SQLiteStore) GetBacklinks(ctx context.Context, targetID string) ([]Source, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT s.id, s.kind, s.path, s.title, s.body, s.status, s.labels, s.content_hash, s.created_at, s.updated_at FROM sources s JOIN links l ON l.source_id = s.id WHERE l.target_id = ? ORDER BY s.id`, targetID)
 	if err != nil {
