@@ -311,9 +311,9 @@ func (s *spyService) StaleIndex(_ context.Context, req service.StaleIndexRequest
 	}
 	return result, nil
 }
-func (s *spyService) SyncToCache(context.Context, service.OperationRequest) (service.OperationResult, error) {
+func (s *spyService) SyncToCache(context.Context, service.SyncRequest) (service.SyncResult, error) {
 	s.called("SyncToCache")
-	return service.OperationResult{Command: "sync", Status: "ok", ProcessedCount: 1, GeneratedAt: time.Now()}, nil
+	return service.SyncResult{Status: "succeeded", Counts: service.SyncCounts{Fetched: 1}, IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
 }
 func (s *spyService) ExportSnapshot(context.Context, service.ExportSnapshotRequest) (service.ExportSnapshotResult, error) {
 	s.called("ExportSnapshot")

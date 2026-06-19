@@ -200,6 +200,20 @@ func recordSyncEventTx(ctx context.Context, tx *sql.Tx, event SyncEvent) error {
 	return execTx(ctx, tx, `INSERT INTO sync_events (id, source_id, remote_type, remote_id, remote_revision, status, idempotency_key, message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status = excluded.status, message = excluded.message`, event.ID, event.SourceID, event.RemoteType, event.RemoteID, event.RemoteRevision, event.Status, event.IdempotencyKey, event.Message, event.CreatedAt.Format(time.RFC3339Nano))
 }
 
+func (s *SQLiteStore) GetSyncEventByKey(ctx context.Context, key string) (*SyncEvent, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, source_id, remote_type, remote_id, remote_revision, status, idempotency_key, message, created_at FROM sync_events WHERE idempotency_key = ? ORDER BY created_at DESC LIMIT 1`, key)
+	var event SyncEvent
+	var createdRaw string
+	if err := row.Scan(&event.ID, &event.SourceID, &event.RemoteType, &event.RemoteID, &event.RemoteRevision, &event.Status, &event.IdempotencyKey, &event.Message, &createdRaw); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	event.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdRaw)
+	return &event, nil
+}
+
 func (s *SQLiteStore) GetSyncStatus(ctx context.Context, sourceID string) (SyncStatus, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT source_id, remote_type, remote_id, remote_revision, status, last_fetched_at FROM remote_revisions WHERE source_id = ?`, sourceID)
 	var status SyncStatus

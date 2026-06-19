@@ -66,6 +66,32 @@ func (e ErrLinkCheckFailed) Error() string {
 	return fmt.Sprintf("service: link check found %d broken link(s)", e.BrokenCount)
 }
 
+type ErrSyncInProgress struct {
+	EventID        string
+	IdempotencyKey string
+}
+
+func (e ErrSyncInProgress) Error() string {
+	return fmt.Sprintf("sync: idempotency key %s is already in progress as event %s", e.IdempotencyKey, e.EventID)
+}
+
+type ErrSyncStagingLimit struct {
+	Limit int64
+	Size  int64
+}
+
+func (e ErrSyncStagingLimit) Error() string {
+	return fmt.Sprintf("sync: staged remote data exceeds maximum size %d bytes", e.Limit)
+}
+
+type ErrSyncNoRemoteAlias struct {
+	Target string
+}
+
+func (e ErrSyncNoRemoteAlias) Error() string {
+	return fmt.Sprintf("sync: no remote alias available for %s", e.Target)
+}
+
 func IsNotFound(err error) bool {
 	var target ErrNotFound
 	return errors.As(err, &target)

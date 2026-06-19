@@ -3,11 +3,13 @@ package service
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/gitcode"
 )
 
 func TestSearchSources(t *testing.T) {
@@ -101,6 +103,157 @@ func TestGetSyncStatus(t *testing.T) {
 	}
 	if status.Status != "fresh" || status.RemoteID != "wiki/design" {
 		t.Fatalf("GetSyncStatus = %#v", status)
+	}
+}
+
+func TestSyncStateMachine(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := store.UpsertSourceGraph(ctx, cache.SourceGraph{Source: cache.Source{ID: "DOC-123", Kind: "wiki", Path: "wiki/design.md", Title: "Old", Body: "old", Status: "fresh", ContentHash: "old-hash", CreatedAt: base, UpdatedAt: base.Add(time.Hour)}, Identities: []cache.Identity{{AliasType: "remote", Alias: "wiki/design", Remote: cache.RemoteAlias{Type: "remote", ID: "wiki/design"}}}, SyncStatus: &cache.SyncStatus{RemoteType: "remote", RemoteID: "wiki/design", RemoteRevision: "old", Status: "fresh", LastFetchedAt: base}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, &fakeGitCodeClient{wiki: gitcode.WikiPage{Slug: "wiki/design", Title: "Design", Body: "new body", Revision: "rev-2", CreatedAt: base, UpdatedAt: base.Add(2 * time.Hour)}})
+	svc.lockPath = filepath.Join(t.TempDir(), "sync.lock")
+	before, err := svc.GetSyncStatus(ctx, SyncStatusRequest{ID: "DOC-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Freshness != FreshnessStale {
+		t.Fatalf("before freshness=%s want stale", before.Freshness)
+	}
+	result, err := svc.SyncToCache(ctx, SyncRequest{StableID: "DOC-123", IdempotencyKey: "sync-key"})
+	if err != nil {
+		t.Fatalf("SyncToCache returned error: %v", err)
+	}
+	if result.Status != "succeeded" || result.IdempotencyKey != "sync-key" || result.Counts.Updated != 1 {
+		t.Fatalf("SyncToCache result = %#v", result)
+	}
+	after, err := svc.GetSyncStatus(ctx, SyncStatusRequest{ID: "DOC-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Freshness != FreshnessFresh || after.RemoteRevision != "rev-2" {
+		t.Fatalf("after status = %#v", after)
+	}
+	event, err := store.GetSyncEventByKey(ctx, "sync-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event == nil || event.Status != "succeeded" || event.IdempotencyKey != "sync-key" || event.Message == "" {
+		t.Fatalf("sync event = %#v", event)
+	}
+	source, err := store.GetSource(ctx, "DOC-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.Body != "new body" || source.Title != "Design" {
+		t.Fatalf("source not updated: %#v", source)
+	}
+}
+
+func TestSyncLockContention(t *testing.T) {
+	ctx := context.Background()
+	svc := seededSyncService(t, ctx, nil)
+	svc.lockPath = filepath.Join(t.TempDir(), "sync.lock")
+	lock, err := svc.store.AcquireLock(ctx, svc.lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.store.ReleaseLock(ctx, lock)
+	client := &fakeGitCodeClient{wiki: gitcode.WikiPage{Slug: "wiki/design", Title: "Design", Body: "new"}}
+	svc.client = client
+	_, err = svc.SyncToCache(ctx, SyncRequest{StableID: "DOC-123", IdempotencyKey: "lock-key"})
+	var contention cache.ErrLockContention
+	if !errors.As(err, &contention) {
+		t.Fatalf("error=%v want ErrLockContention", err)
+	}
+	if client.wikiCalls != 0 {
+		t.Fatalf("remote calls=%d want 0", client.wikiCalls)
+	}
+	source, err := svc.store.GetSource(ctx, "DOC-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.Body != "intro same\nbacklog design same\nfinal" {
+		t.Fatalf("source mutated during lock contention: %#v", source)
+	}
+}
+
+func TestSyncIdempotencyReplay(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeGitCodeClient{wiki: gitcode.WikiPage{Slug: "wiki/design", Title: "Design", Body: "new body", Revision: "rev-2", UpdatedAt: time.Now().UTC()}}
+	svc := seededSyncService(t, ctx, client)
+	svc.lockPath = filepath.Join(t.TempDir(), "sync.lock")
+	first, err := svc.SyncToCache(ctx, SyncRequest{StableID: "DOC-123", IdempotencyKey: "replay-key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := svc.store.AcquireLock(ctx, svc.lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.store.ReleaseLock(ctx, lock)
+	second, err := svc.SyncToCache(ctx, SyncRequest{StableID: "DOC-123", IdempotencyKey: "replay-key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.Replayed || second.SyncEventID != first.SyncEventID {
+		t.Fatalf("replay result=%#v first=%#v", second, first)
+	}
+	if client.wikiCalls != 1 {
+		t.Fatalf("remote calls=%d want 1", client.wikiCalls)
+	}
+}
+
+func TestSyncBoundedStaging(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeGitCodeClient{wiki: gitcode.WikiPage{Slug: "wiki/design", Title: "Design", Body: "body too large for limit", Revision: "rev-2"}}
+	svc := seededSyncService(t, ctx, client)
+	svc.lockPath = filepath.Join(t.TempDir(), "sync.lock")
+	_, err := svc.SyncToCache(ctx, SyncRequest{StableID: "DOC-123", IdempotencyKey: "large-key", MaxSize: 5})
+	var staging ErrSyncStagingLimit
+	if !errors.As(err, &staging) {
+		t.Fatalf("error=%v want ErrSyncStagingLimit", err)
+	}
+	source, err := svc.store.GetSource(ctx, "DOC-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.Body != "intro same\nbacklog design same\nfinal" || source.ContentHash != "hash-doc" {
+		t.Fatalf("source mutated after staging failure: %#v", source)
+	}
+	event, err := svc.store.GetSyncEventByKey(ctx, "large-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event == nil || event.Status != "failed" {
+		t.Fatalf("failed event = %#v", event)
+	}
+}
+
+func TestSyncRetry(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeGitCodeClient{wiki: gitcode.WikiPage{Slug: "wiki/design", Title: "Design", Body: "new body", Revision: "rev-2", UpdatedAt: time.Now().UTC()}, errors: []error{gitcode.ErrRateLimited{RetryAfter: time.Nanosecond, Endpoint: "/wiki", Attempts: 1}}}
+	svc := seededSyncService(t, ctx, client)
+	svc.lockPath = filepath.Join(t.TempDir(), "sync.lock")
+	result, err := svc.SyncToCache(ctx, SyncRequest{StableID: "DOC-123", IdempotencyKey: "retry-key", MaxAttempts: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "succeeded" || client.wikiCalls != 2 || result.Counts.Updated != 1 {
+		t.Fatalf("result=%#v calls=%d", result, client.wikiCalls)
+	}
+	event, err := svc.store.GetSyncEventByKey(ctx, "retry-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event == nil || event.Status != "succeeded" {
+		t.Fatalf("event=%#v", event)
 	}
 }
 
@@ -306,6 +459,90 @@ func seedStore(t *testing.T, ctx context.Context, store cache.Store) {
 	}
 }
 
+func seededSyncService(t *testing.T, ctx context.Context, client gitcode.Client) *Service {
+	t.Helper()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	seedStore(t, ctx, store)
+	return NewWithClient(store, client)
+}
+
+type fakeGitCodeClient struct {
+	wiki       gitcode.WikiPage
+	issue      gitcode.Issue
+	errors     []error
+	wikiCalls  int
+	issueCalls int
+}
+
+func (f *fakeGitCodeClient) nextError() error {
+	if len(f.errors) == 0 {
+		return nil
+	}
+	err := f.errors[0]
+	f.errors = f.errors[1:]
+	return err
+}
+
+func (f *fakeGitCodeClient) ListIssues(context.Context, gitcode.IssueListRequest) (gitcode.Page[gitcode.IssueSummary], error) {
+	return gitcode.Page[gitcode.IssueSummary]{}, nil
+}
+func (f *fakeGitCodeClient) GetIssue(context.Context, gitcode.IssueRequest) (gitcode.Issue, error) {
+	f.issueCalls++
+	if err := f.nextError(); err != nil {
+		return gitcode.Issue{}, err
+	}
+	return f.issue, nil
+}
+func (f *fakeGitCodeClient) ListIssueComments(context.Context, gitcode.IssueRequest) (gitcode.Page[gitcode.Comment], error) {
+	return gitcode.Page[gitcode.Comment]{}, nil
+}
+func (f *fakeGitCodeClient) GetWikiPage(context.Context, gitcode.WikiPageRequest) (gitcode.WikiPage, error) {
+	f.wikiCalls++
+	if err := f.nextError(); err != nil {
+		return gitcode.WikiPage{}, err
+	}
+	return f.wiki, nil
+}
+func (f *fakeGitCodeClient) ListWikiPages(context.Context, gitcode.WikiListRequest) (gitcode.Page[gitcode.WikiPage], error) {
+	return gitcode.Page[gitcode.WikiPage]{}, nil
+}
+func (f *fakeGitCodeClient) Search(context.Context, gitcode.SearchRequest) (gitcode.Page[gitcode.SearchResult], error) {
+	return gitcode.Page[gitcode.SearchResult]{}, nil
+}
+func (f *fakeGitCodeClient) ListIssueAttachments(context.Context, gitcode.IssueRequest) (gitcode.Page[gitcode.AttachmentSummary], error) {
+	return gitcode.Page[gitcode.AttachmentSummary]{}, nil
+}
+func (f *fakeGitCodeClient) GetAttachment(context.Context, gitcode.AttachmentRequest) (gitcode.AttachmentBody, error) {
+	return gitcode.AttachmentBody{}, nil
+}
+func (f *fakeGitCodeClient) CreateIssue(context.Context, gitcode.CreateIssueRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
+	return gitcode.WriteResult[gitcode.Issue]{}, nil
+}
+func (f *fakeGitCodeClient) UpdateIssue(context.Context, gitcode.UpdateIssueRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
+	return gitcode.WriteResult[gitcode.Issue]{}, nil
+}
+func (f *fakeGitCodeClient) CreateIssueComment(context.Context, gitcode.CreateIssueCommentRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Comment], error) {
+	return gitcode.WriteResult[gitcode.Comment]{}, nil
+}
+func (f *fakeGitCodeClient) CreateWikiPage(context.Context, gitcode.CreateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
+	return gitcode.WriteResult[gitcode.WikiPage]{}, nil
+}
+func (f *fakeGitCodeClient) UpdateWikiPage(context.Context, gitcode.UpdateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
+	return gitcode.WriteResult[gitcode.WikiPage]{}, nil
+}
+func (f *fakeGitCodeClient) AddLabel(context.Context, gitcode.LabelRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
+	return gitcode.WriteResult[gitcode.Issue]{}, nil
+}
+func (f *fakeGitCodeClient) RemoveLabel(context.Context, gitcode.LabelRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
+	return gitcode.WriteResult[gitcode.Issue]{}, nil
+}
+
+var _ gitcode.Client = (*fakeGitCodeClient)(nil)
+
 type brokenStore struct {
 	sources map[string]cache.Source
 	links   []cache.Link
@@ -351,6 +588,9 @@ func (f *brokenStore) UpsertChunk(context.Context, cache.Chunk) (cache.Chunk, er
 }
 func (f *brokenStore) GetChunks(context.Context, string) ([]cache.Chunk, error) { return nil, nil }
 func (f *brokenStore) RecordSyncEvent(context.Context, cache.SyncEvent) error   { return nil }
+func (f *brokenStore) GetSyncEventByKey(ctx context.Context, key string) (*cache.SyncEvent, error) {
+	return nil, nil
+}
 func (f *brokenStore) GetSyncStatus(context.Context, string) (cache.SyncStatus, error) {
 	return cache.SyncStatus{}, nil
 }

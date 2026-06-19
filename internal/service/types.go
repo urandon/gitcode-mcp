@@ -121,7 +121,51 @@ type SyncStatusResult struct {
 	RemoteID       string    `json:"remote_id"`
 	RemoteRevision string    `json:"remote_revision"`
 	Status         string    `json:"status"`
+	Freshness      string    `json:"freshness"`
+	LocalUpdatedAt time.Time `json:"local_updated_at"`
 	LastFetchedAt  time.Time `json:"last_fetched_at"`
+}
+
+type FreshnessState = string
+
+const (
+	FreshnessFresh         FreshnessState = "fresh"
+	FreshnessStale         FreshnessState = "stale"
+	FreshnessMissingRemote FreshnessState = "missing_remote"
+	FreshnessUnknown       FreshnessState = "unknown"
+)
+
+type SyncRequest struct {
+	Source         string `json:"source,omitempty"`
+	TrackerID      string `json:"tracker_id,omitempty"`
+	StableID       string `json:"stable_id,omitempty"`
+	RemoteAlias    string `json:"remote_alias,omitempty"`
+	AliasType      string `json:"alias_type,omitempty"`
+	AliasID        string `json:"alias_id,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	MaxAttempts    int    `json:"max_attempts,omitempty"`
+	BackoffBase    string `json:"backoff_base,omitempty"`
+	BackoffMax     string `json:"backoff_max,omitempty"`
+	Timeout        string `json:"timeout,omitempty"`
+	MaxSize        int64  `json:"max_size,omitempty"`
+}
+
+type SyncCounts struct {
+	Fetched   int `json:"fetched"`
+	Skipped   int `json:"skipped"`
+	Updated   int `json:"updated"`
+	Conflicts int `json:"conflicts"`
+	Inserted  int `json:"inserted"`
+}
+
+type SyncResult struct {
+	IdempotencyKey string     `json:"idempotency_key"`
+	Status         string     `json:"status"`
+	Counts         SyncCounts `json:"counts"`
+	Replayed       bool       `json:"replayed"`
+	SyncEventID    string     `json:"sync_event_id"`
+	Freshness      string     `json:"freshness"`
+	GeneratedAt    time.Time  `json:"generated_at"`
 }
 
 type RecentChangesRequest struct {

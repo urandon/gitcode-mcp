@@ -5,21 +5,32 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/gitcode"
 )
 
 type Service struct {
-	store cache.Store
-	now   func() time.Time
+	store    cache.Store
+	client   gitcode.Client
+	now      func() time.Time
+	lockPath string
 }
 
 func New(store cache.Store) *Service {
-	return &Service{store: store, now: func() time.Time { return time.Now().UTC() }}
+	return &Service{store: store, now: func() time.Time { return time.Now().UTC() }, lockPath: "gitcode-mcp-sync.lock"}
+}
+
+func NewWithClient(store cache.Store, client gitcode.Client) *Service {
+	svc := New(store)
+	svc.client = client
+	return svc
 }
 
 func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) ([]SearchSourceResult, error) {
@@ -149,11 +160,16 @@ func (s *Service) GetSyncStatus(ctx context.Context, req SyncStatusRequest) (Syn
 	if err != nil {
 		return SyncStatusResult{}, err
 	}
+	source, err := s.store.GetSource(ctx, id)
+	if err != nil {
+		return SyncStatusResult{}, normalizeError(err, "source", id)
+	}
 	status, err := s.store.GetSyncStatus(ctx, id)
 	if err != nil {
 		return SyncStatusResult{}, normalizeError(err, "sync status", id)
 	}
-	return SyncStatusResult{SourceID: status.SourceID, RemoteType: status.RemoteType, RemoteID: status.RemoteID, RemoteRevision: status.RemoteRevision, Status: status.Status, LastFetchedAt: status.LastFetchedAt.UTC()}, nil
+	freshness := freshnessFor(source, status)
+	return SyncStatusResult{SourceID: status.SourceID, RemoteType: status.RemoteType, RemoteID: status.RemoteID, RemoteRevision: status.RemoteRevision, Status: status.Status, Freshness: freshness, LocalUpdatedAt: source.UpdatedAt.UTC(), LastFetchedAt: status.LastFetchedAt.UTC()}, nil
 }
 
 func (s *Service) RecentChanges(ctx context.Context, req RecentChangesRequest) ([]RecentChangeResult, error) {
@@ -259,8 +275,56 @@ func (s *Service) Index(ctx context.Context, req OperationRequest) (OperationRes
 	return s.operationResult(ctx, "index", req)
 }
 
-func (s *Service) SyncToCache(ctx context.Context, req OperationRequest) (OperationResult, error) {
-	return s.operationResult(ctx, "sync", req)
+func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult, error) {
+	if err := ctx.Err(); err != nil {
+		return SyncResult{}, err
+	}
+	key := strings.TrimSpace(req.IdempotencyKey)
+	if key == "" {
+		key = s.syncIdempotencyKey(req)
+	}
+	if event, err := s.store.GetSyncEventByKey(ctx, key); err != nil {
+		return SyncResult{}, err
+	} else if event != nil {
+		switch event.Status {
+		case "succeeded":
+			result := syncResultFromEvent(*event, s.now().UTC())
+			result.Replayed = true
+			return result, nil
+		case "in_progress":
+			return SyncResult{}, ErrSyncInProgress{EventID: event.ID, IdempotencyKey: key}
+		}
+	}
+	lock, err := s.store.AcquireLock(ctx, s.lockPath)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	defer s.store.ReleaseLock(context.Background(), lock)
+	remoteType, remoteID, err := s.syncTarget(ctx, req)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	eventID := syncEventID(key)
+	now := s.now().UTC()
+	inProgress := cache.SyncEvent{ID: eventID, SourceID: s.syncEventSourceID(ctx, req, remoteType, remoteID), RemoteType: remoteType, RemoteID: remoteID, Status: "in_progress", IdempotencyKey: key, Message: "sync started", CreatedAt: now}
+	if err := s.store.RecordSyncEvent(ctx, inProgress); err != nil {
+		return SyncResult{}, err
+	}
+	if err := s.store.IntegrityCheck(ctx); err != nil {
+		_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, err, s.now().UTC()))
+		return SyncResult{}, err
+	}
+	graph, counts, err := s.fetchAndStage(ctx, req, remoteType, remoteID)
+	if err != nil {
+		_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, err, s.now().UTC()))
+		return SyncResult{}, err
+	}
+	graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: graph.SyncStatus.RemoteRevision, Status: "succeeded", IdempotencyKey: key, Message: syncEventMessage(counts), CreatedAt: now})
+	if err := s.store.UpsertSourceGraph(ctx, graph); err != nil {
+		_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, err, s.now().UTC()))
+		return SyncResult{}, err
+	}
+	return SyncResult{IdempotencyKey: key, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), GeneratedAt: s.now().UTC()}, nil
 }
 
 func (s *Service) CreateIssue(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
@@ -318,6 +382,286 @@ func (s *Service) operationResult(ctx context.Context, command string, req Opera
 		mode = "default"
 	}
 	return OperationResult{Command: command, Status: "ok", ProcessedCount: len(sources), Evidence: mode, GeneratedAt: s.now().UTC()}, nil
+}
+
+type stagedRemote struct {
+	source       cache.Source
+	identity     cache.Identity
+	syncStatus   cache.SyncStatus
+	remoteType   string
+	remoteID     string
+	revision     string
+	contentBytes int64
+}
+
+func (s *Service) syncIdempotencyKey(req SyncRequest) string {
+	payload := strings.Join([]string{"sync", req.Source, req.TrackerID, req.StableID, req.RemoteAlias, req.AliasType, req.AliasID, s.now().UTC().Format(time.RFC3339Nano)}, "|")
+	sum := sha256.Sum256([]byte(payload))
+	return hex.EncodeToString(sum[:])[:32]
+}
+
+func syncEventID(key string) string {
+	sum := sha256.Sum256([]byte("sync-event|" + key))
+	return hex.EncodeToString(sum[:])[:32]
+}
+
+func (s *Service) syncEventSourceID(ctx context.Context, req SyncRequest, remoteType, remoteID string) string {
+	if req.StableID != "" {
+		return req.StableID
+	}
+	identity, err := s.store.ResolveAlias(ctx, cache.RemoteAlias{Type: remoteType, ID: remoteID})
+	if err == nil && identity.SourceID != "" {
+		return identity.SourceID
+	}
+	return fallbackSourceID(remoteType, remoteID)
+}
+
+func (s *Service) syncTarget(ctx context.Context, req SyncRequest) (string, string, error) {
+	if req.AliasType != "" || req.AliasID != "" {
+		if req.AliasType == "" || req.AliasID == "" {
+			return "", "", ErrInvalidQuery{Field: "alias", Message: "alias type and id are required together"}
+		}
+		return req.AliasType, req.AliasID, nil
+	}
+	if req.RemoteAlias != "" {
+		parts := strings.SplitN(req.RemoteAlias, ":", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return "", "", ErrInvalidQuery{Field: "remote_alias", Message: "remote alias must be type:id"}
+		}
+		return parts[0], parts[1], nil
+	}
+	if req.StableID != "" {
+		source, err := s.store.GetSource(ctx, req.StableID)
+		if err != nil {
+			return "", "", normalizeError(err, "source", req.StableID)
+		}
+		for _, identity := range source.Aliases {
+			if identity.Remote.Type != "" && identity.Remote.ID != "" {
+				return identity.Remote.Type, identity.Remote.ID, nil
+			}
+		}
+		status, err := s.store.GetSyncStatus(ctx, req.StableID)
+		if err == nil && status.RemoteType != "" && status.RemoteID != "" {
+			return status.RemoteType, status.RemoteID, nil
+		}
+		return "", "", ErrSyncNoRemoteAlias{Target: req.StableID}
+	}
+	return "", "", ErrInvalidQuery{Field: "sync target", Message: "stable id or remote alias is required"}
+}
+
+func (s *Service) fetchAndStage(ctx context.Context, req SyncRequest, remoteType, remoteID string) (cache.SourceGraph, SyncCounts, error) {
+	if s.client == nil {
+		return cache.SourceGraph{}, SyncCounts{}, ErrInvalidQuery{Field: "client", Message: "sync requires a GitCode client"}
+	}
+	attempts := req.MaxAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	var graph cache.SourceGraph
+	var counts SyncCounts
+	var err error
+	for attempt := 0; attempt < attempts; attempt++ {
+		graph, counts, err = s.fetchOnce(ctx, req, remoteType, remoteID)
+		if err == nil {
+			return graph, counts, nil
+		}
+		if attempt == attempts-1 || !isRetryableSyncError(err) {
+			return cache.SourceGraph{}, SyncCounts{}, err
+		}
+		if wait := retryDelay(err); wait > 0 {
+			if deadline, ok := ctx.Deadline(); ok && time.Now().Add(wait).After(deadline) {
+				return cache.SourceGraph{}, SyncCounts{}, err
+			}
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return cache.SourceGraph{}, SyncCounts{}, ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	return cache.SourceGraph{}, SyncCounts{}, err
+}
+
+func (s *Service) fetchOnce(ctx context.Context, req SyncRequest, remoteType, remoteID string) (cache.SourceGraph, SyncCounts, error) {
+	switch remoteType {
+	case "issue", "issues":
+		number, err := strconv.Atoi(remoteID)
+		if err != nil {
+			return cache.SourceGraph{}, SyncCounts{}, ErrInvalidQuery{Field: "remote_id", Message: "issue remote id must be numeric"}
+		}
+		issue, err := s.client.GetIssue(ctx, gitcode.IssueRequest{Number: number, KnownRemoteAlias: true, RemoteAlias: remoteID})
+		if err != nil {
+			return cache.SourceGraph{}, SyncCounts{}, err
+		}
+		return s.stageIssue(ctx, req, remoteType, remoteID, issue)
+	case "wiki", "page", "remote":
+		page, err := s.client.GetWikiPage(ctx, gitcode.WikiPageRequest{Slug: remoteID})
+		if err != nil {
+			return cache.SourceGraph{}, SyncCounts{}, err
+		}
+		return s.stageWiki(ctx, req, remoteType, remoteID, page)
+	default:
+		return cache.SourceGraph{}, SyncCounts{}, ErrInvalidQuery{Field: "remote_type", Message: "unsupported remote type " + remoteType}
+	}
+}
+
+func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, remoteID string, issue gitcode.Issue) (cache.SourceGraph, SyncCounts, error) {
+	body := issue.Body
+	if req.MaxSize > 0 && int64(len(body)+len(issue.Title)) > req.MaxSize {
+		return cache.SourceGraph{}, SyncCounts{}, ErrSyncStagingLimit{Limit: req.MaxSize, Size: int64(len(body) + len(issue.Title))}
+	}
+	stableID := req.StableID
+	if stableID == "" {
+		stableID = resolveOrFallback(ctx, s.store, remoteType, remoteID, fallbackSourceID(remoteType, remoteID))
+	}
+	now := s.now().UTC()
+	updated := issue.UpdatedAt.UTC()
+	if updated.IsZero() {
+		updated = now
+	}
+	created := issue.CreatedAt.UTC()
+	if created.IsZero() {
+		created = updated
+	}
+	hash := contentHash(issue.Title, body, issue.State, issue.Labels)
+	existing, err := s.store.GetSource(ctx, stableID)
+	counts := SyncCounts{Fetched: 1}
+	if err == nil && existing.ContentHash == hash {
+		counts.Skipped = 1
+	} else if err == nil {
+		counts.Updated = 1
+	} else if isCacheNotFound(err) {
+		counts.Inserted = 1
+	} else {
+		return cache.SourceGraph{}, SyncCounts{}, err
+	}
+	status := issue.State
+	if status == "" {
+		status = issue.Status
+	}
+	if status == "" {
+		status = "open"
+	}
+	graph := cache.SourceGraph{Source: cache.Source{ID: stableID, Kind: "issue", Path: "issues/" + remoteID + ".md", Title: issue.Title, Body: body, Status: status, Labels: issue.Labels, ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, SyncStatus: &cache.SyncStatus{SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: hash, Status: "fresh", LastFetchedAt: now}}
+	return graph, counts, nil
+}
+
+func (s *Service) stageWiki(ctx context.Context, req SyncRequest, remoteType, remoteID string, page gitcode.WikiPage) (cache.SourceGraph, SyncCounts, error) {
+	body := page.Body
+	if req.MaxSize > 0 && int64(len(body)+len(page.Title)) > req.MaxSize {
+		return cache.SourceGraph{}, SyncCounts{}, ErrSyncStagingLimit{Limit: req.MaxSize, Size: int64(len(body) + len(page.Title))}
+	}
+	stableID := req.StableID
+	if stableID == "" {
+		stableID = resolveOrFallback(ctx, s.store, remoteType, remoteID, fallbackSourceID(remoteType, remoteID))
+	}
+	now := s.now().UTC()
+	updated := page.UpdatedAt.UTC()
+	if updated.IsZero() {
+		updated = now
+	}
+	created := page.CreatedAt.UTC()
+	if created.IsZero() {
+		created = updated
+	}
+	revision := page.Revision
+	if revision == "" {
+		revision = contentHash(page.Title, body)
+	}
+	hash := contentHash(page.Title, body, revision)
+	existing, err := s.store.GetSource(ctx, stableID)
+	counts := SyncCounts{Fetched: 1}
+	if err == nil && existing.ContentHash == hash {
+		counts.Skipped = 1
+	} else if err == nil {
+		counts.Updated = 1
+	} else if isCacheNotFound(err) {
+		counts.Inserted = 1
+	} else {
+		return cache.SourceGraph{}, SyncCounts{}, err
+	}
+	graph := cache.SourceGraph{Source: cache.Source{ID: stableID, Kind: "wiki", Path: "wiki/" + remoteID + ".md", Title: page.Title, Body: body, Status: "fresh", ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, SyncStatus: &cache.SyncStatus{SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}
+	return graph, counts, nil
+}
+
+func resolveOrFallback(ctx context.Context, store cache.Store, remoteType, remoteID, fallback string) string {
+	identity, err := store.ResolveAlias(ctx, cache.RemoteAlias{Type: remoteType, ID: remoteID})
+	if err == nil && identity.SourceID != "" {
+		return identity.SourceID
+	}
+	return fallback
+}
+
+func fallbackSourceID(remoteType, remoteID string) string {
+	clean := strings.NewReplacer("/", "-", " ", "-", ":", "-").Replace(strings.ToUpper(remoteID))
+	switch remoteType {
+	case "issue", "issues":
+		return "ISSUE-" + clean
+	case "wiki", "page", "remote":
+		return "WIKI-" + clean
+	default:
+		return "REMOTE-" + clean
+	}
+}
+
+func contentHash(parts ...any) string {
+	b, _ := json.Marshal(parts)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+func syncEventMessage(counts SyncCounts) string {
+	b, _ := json.Marshal(counts)
+	return string(b)
+}
+
+func syncResultFromEvent(event cache.SyncEvent, generated time.Time) SyncResult {
+	var counts SyncCounts
+	_ = json.Unmarshal([]byte(event.Message), &counts)
+	freshness := string(FreshnessFresh)
+	if event.Status != "succeeded" {
+		freshness = string(FreshnessUnknown)
+	}
+	return SyncResult{IdempotencyKey: event.IdempotencyKey, Status: event.Status, Counts: counts, SyncEventID: event.ID, Freshness: freshness, GeneratedAt: generated}
+}
+
+func failedSyncEvent(event cache.SyncEvent, cause error, at time.Time) cache.SyncEvent {
+	event.Status = "failed"
+	event.Message = cause.Error()
+	event.CreatedAt = at
+	return event
+}
+
+func isRetryableSyncError(err error) bool {
+	var network gitcode.ErrNetworkUnavailable
+	if errors.As(err, &network) {
+		return true
+	}
+	var rate gitcode.ErrRateLimited
+	return errors.As(err, &rate)
+}
+
+func retryDelay(err error) time.Duration {
+	var rate gitcode.ErrRateLimited
+	if errors.As(err, &rate) {
+		return rate.RetryAfter
+	}
+	return 0
+}
+
+func freshnessFor(source cache.Source, status cache.SyncStatus) string {
+	if status.Status == "missing_remote" || status.Status == "not_found" {
+		return string(FreshnessMissingRemote)
+	}
+	if status.LastFetchedAt.IsZero() || source.UpdatedAt.IsZero() {
+		return string(FreshnessUnknown)
+	}
+	if source.UpdatedAt.After(status.LastFetchedAt) {
+		return string(FreshnessStale)
+	}
+	return string(FreshnessFresh)
 }
 
 func (s *Service) writeResult(ctx context.Context, command string, req WriteCommandRequest) (WriteCommandResult, error) {

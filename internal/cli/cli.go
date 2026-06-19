@@ -55,7 +55,7 @@ type queryService interface {
 	RecentChanges(context.Context, service.RecentChangesRequest) ([]service.RecentChangeResult, error)
 	LinkCheck(context.Context, service.LinkCheckRequest) (service.LinkCheckResult, error)
 	StaleIndex(context.Context, service.StaleIndexRequest) (service.StaleIndexResult, error)
-	SyncToCache(context.Context, service.OperationRequest) (service.OperationResult, error)
+	SyncToCache(context.Context, service.SyncRequest) (service.SyncResult, error)
 	ExportSnapshot(context.Context, service.ExportSnapshotRequest) (service.ExportSnapshotResult, error)
 	DiffSnapshot(context.Context, service.DiffSnapshotRequest) (service.DiffSnapshotResult, error)
 	CreateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
@@ -350,11 +350,11 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		}
 		return 0
 	case "sync":
-		result, err := svc.SyncToCache(ctx, service.OperationRequest{Mode: "explicit", InputPath: opts.input, Strict: opts.strict})
+		result, err := svc.SyncToCache(ctx, service.SyncRequest{StableID: opts.id, RemoteAlias: opts.input, IdempotencyKey: opts.idempotencyKey})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
-		return render(stdout, opts.format, result, renderOperationText)
+		return render(stdout, opts.format, result, renderSyncText)
 	case "export":
 		result, err := svc.ExportSnapshot(ctx, service.ExportSnapshotRequest{Format: opts.format, OutputPath: opts.output})
 		if err != nil {
@@ -476,6 +476,10 @@ func renderStaleIndexText(w io.Writer, result service.StaleIndexResult) {
 
 func renderOperationText(w io.Writer, result service.OperationResult) {
 	fmt.Fprintf(w, "%s: %s processed=%d evidence=%s\n", result.Command, result.Status, result.ProcessedCount, result.Evidence)
+}
+
+func renderSyncText(w io.Writer, result service.SyncResult) {
+	fmt.Fprintf(w, "sync: %s fetched=%d updated=%d inserted=%d skipped=%d conflicts=%d idempotency_key=%s replayed=%t\n", result.Status, result.Counts.Fetched, result.Counts.Updated, result.Counts.Inserted, result.Counts.Skipped, result.Counts.Conflicts, result.IdempotencyKey, result.Replayed)
 }
 
 func renderExportText(w io.Writer, result service.ExportSnapshotResult) {

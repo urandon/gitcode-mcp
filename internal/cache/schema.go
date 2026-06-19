@@ -146,6 +146,7 @@ func applyInitialMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) e
 	created_at TEXT NOT NULL
 )`,
 		`CREATE INDEX IF NOT EXISTS idx_sync_events_source ON sync_events(source_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_sync_events_idempotency_key ON sync_events(idempotency_key)`,
 		`CREATE TABLE IF NOT EXISTS conflicts (
 	id TEXT PRIMARY KEY,
 	source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,

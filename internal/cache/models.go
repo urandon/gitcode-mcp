@@ -20,6 +20,7 @@ type Store interface {
 	UpsertChunk(context.Context, Chunk) (Chunk, error)
 	GetChunks(context.Context, string) ([]Chunk, error)
 	RecordSyncEvent(context.Context, SyncEvent) error
+	GetSyncEventByKey(context.Context, string) (*SyncEvent, error)
 	GetSyncStatus(context.Context, string) (SyncStatus, error)
 	UpsertConflict(context.Context, Conflict) error
 	GetConflicts(context.Context, string) ([]Conflict, error)
