@@ -218,6 +218,133 @@ func TestSourceGraphRollback(t *testing.T) {
 	}
 }
 
+func TestMinimumReplacementCacheState(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+
+	createdAt := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	updatedAt := time.Date(2026, 6, 18, 12, 30, 0, 0, time.UTC)
+	fetchedAt := time.Date(2026, 6, 18, 13, 0, 0, 0, time.UTC)
+
+	mustUpsertGraph(t, ctx, store, SourceGraph{
+		Source: Source{
+			ID:          "DOC-123",
+			Kind:        "doc",
+			Path:        "docs/DOC-123.md",
+			Title:       "Coordinator Backlog Guide",
+			Body:        "Coordinator intake uses the backlog cache state for task lookup and handoff review.",
+			Status:      "current",
+			Labels:      []string{"coordinator", "backlog"},
+			ContentHash: "hash-doc-123-minimum",
+			CreatedAt:   createdAt,
+			UpdatedAt:   updatedAt,
+		},
+		Identities: []Identity{
+			{AliasType: "path", Alias: "docs/DOC-123.md", Remote: RemoteAlias{Type: "wiki", ID: "DOC-123"}},
+			{AliasType: "remote", Alias: "wiki/DOC-123", Remote: RemoteAlias{Type: "wiki", ID: "DOC-123"}},
+		},
+		SyncStatus: &SyncStatus{RemoteType: "wiki", RemoteID: "DOC-123", RemoteRevision: "rev-doc-123", Status: "fresh", LastFetchedAt: fetchedAt},
+		SyncEvents: []SyncEvent{{ID: "sync-doc-123", RemoteType: "wiki", RemoteID: "DOC-123", RemoteRevision: "rev-doc-123", Status: "fresh", IdempotencyKey: "minimum-doc-123", Message: "fixture ingest", CreatedAt: fetchedAt}},
+	})
+	mustUpsertGraph(t, ctx, store, SourceGraph{
+		Source: Source{
+			ID:          "TASK-015",
+			Kind:        "task",
+			Path:        "project/tasks/TASK-015.md",
+			Title:       "Add minimum cache state test",
+			Body:        "Ready task for coordinator intake references DOC-123 without querying markdown indexes.",
+			Status:      "ready",
+			Labels:      []string{"cache-store", "day-7"},
+			ContentHash: "hash-task-015-minimum",
+			CreatedAt:   createdAt,
+			UpdatedAt:   updatedAt,
+		},
+		Identities: []Identity{{AliasType: "path", Alias: "project/tasks/TASK-015.md", Remote: RemoteAlias{Type: "issue", ID: "15"}}},
+		Links:      []Link{{TargetID: "DOC-123", Kind: "references", Text: "DOC-123"}},
+		SyncStatus: &SyncStatus{RemoteType: "issue", RemoteID: "15", RemoteRevision: "rev-task-015", Status: "fresh", LastFetchedAt: fetchedAt},
+	})
+	mustUpsertGraph(t, ctx, store, SourceGraph{
+		Source: Source{
+			ID:          "HANDOFF-001",
+			Kind:        "handoff",
+			Path:        "project/handoffs/HANDOFF-001.md",
+			Title:       "Cache handoff review",
+			Body:        "Handoff review confirms the Day 7 route remains offline after ingest.",
+			Status:      "accepted",
+			Labels:      []string{"handoff"},
+			ContentHash: "hash-handoff-001-minimum",
+			CreatedAt:   createdAt,
+			UpdatedAt:   updatedAt,
+		},
+		Links: []Link{{TargetID: "DOC-123", Kind: "reviews", Text: "DOC-123"}},
+	})
+
+	results, err := store.SearchSources(ctx, SearchQuery{Query: "backlog", Limit: 5})
+	if err != nil {
+		t.Fatalf("SearchSources returned error: %v", err)
+	}
+	if len(results) == 0 || results[0].ID != "DOC-123" || results[0].Path != "docs/DOC-123.md" || results[0].Title != "Coordinator Backlog Guide" || results[0].Snippet == "" {
+		t.Fatalf("SearchSources(backlog) = %#v, want DOC-123 with path/title/snippet", results)
+	}
+
+	readyTasks, err := store.ListSources(ctx, SourceFilter{Kind: "task", Status: "ready"})
+	if err != nil {
+		t.Fatalf("ListSources ready tasks returned error: %v", err)
+	}
+	if len(readyTasks) != 1 || readyTasks[0].ID != "TASK-015" || readyTasks[0].Path != "project/tasks/TASK-015.md" {
+		t.Fatalf("ListSources ready tasks = %#v, want TASK-015", readyTasks)
+	}
+
+	doc, err := store.GetSource(ctx, "DOC-123")
+	if err != nil {
+		t.Fatalf("GetSource(DOC-123) returned error: %v", err)
+	}
+	if doc.Kind != "doc" || doc.Body == "" || doc.ContentHash != "hash-doc-123-minimum" || len(doc.Labels) != 2 || !doc.CreatedAt.Equal(createdAt) || !doc.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("GetSource(DOC-123) = %#v, want persisted metadata/body/hash/timestamps", doc)
+	}
+	if len(doc.Aliases) != 2 {
+		t.Fatalf("GetSource(DOC-123) aliases = %d, want 2", len(doc.Aliases))
+	}
+
+	resolved, err := store.ResolveAlias(ctx, RemoteAlias{Type: "wiki", ID: "DOC-123"})
+	if err != nil {
+		t.Fatalf("ResolveAlias(wiki:DOC-123) returned error: %v", err)
+	}
+	if resolved.SourceID != "DOC-123" {
+		t.Fatalf("ResolveAlias(wiki:DOC-123) = %q, want DOC-123", resolved.SourceID)
+	}
+
+	links, err := store.ListLinks(ctx, LinkFilter{TargetID: "DOC-123"})
+	if err != nil {
+		t.Fatalf("ListLinks(DOC-123) returned error: %v", err)
+	}
+	if len(links) != 2 {
+		t.Fatalf("ListLinks(DOC-123) = %#v, want two stable-id links", links)
+	}
+	for _, link := range links {
+		if link.TargetID != "DOC-123" {
+			t.Fatalf("link target = %q, want stable id DOC-123", link.TargetID)
+		}
+	}
+
+	backlinks, err := store.GetBacklinks(ctx, "DOC-123")
+	if err != nil {
+		t.Fatalf("GetBacklinks(DOC-123) returned error: %v", err)
+	}
+	if len(backlinks) != 2 || backlinks[0].ID != "HANDOFF-001" || backlinks[1].ID != "TASK-015" {
+		t.Fatalf("GetBacklinks(DOC-123) = %#v, want HANDOFF-001 and TASK-015", backlinks)
+	}
+
+	syncStatus, err := store.GetSyncStatus(ctx, "DOC-123")
+	if err != nil {
+		t.Fatalf("GetSyncStatus(DOC-123) returned error: %v", err)
+	}
+	if syncStatus.RemoteType != "wiki" || syncStatus.RemoteID != "DOC-123" || syncStatus.RemoteRevision != "rev-doc-123" || syncStatus.Status != "fresh" || !syncStatus.LastFetchedAt.Equal(fetchedAt) {
+		t.Fatalf("GetSyncStatus(DOC-123) = %#v, want persisted fresh wiki status", syncStatus)
+	}
+}
+
 func TestLockContention(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)

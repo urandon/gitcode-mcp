@@ -1,0 +1,53 @@
+{
+  "task_id": "015-cache-store-task-4-add-minimum-cache-state-test",
+  "attempt": 1,
+  "validation_status": "materialized",
+  "covered_outcome_ids": ["outcome-14"],
+  "covered_decommission_ids": ["decommission-14"],
+  "product_surfaces": [
+    "internal/cache.Store.UpsertSourceGraph",
+    "internal/cache.Store.SearchSources",
+    "internal/cache.Store.ListSources",
+    "internal/cache.Store.GetSource",
+    "internal/cache.Store.ResolveAlias",
+    "internal/cache.Store.ListLinks",
+    "internal/cache.Store.GetBacklinks",
+    "internal/cache.Store.GetSyncStatus"
+  ],
+  "evidence_type": "go_test",
+  "freshness": "current_source_build",
+  "mocks_used": [],
+  "production_files_modified": [],
+  "scenarios": [
+    {
+      "id": "015-cache-store-task-4-add-minimum-cache-state-test-scenario-1",
+      "description": "TestMinimumReplacementCacheState ingests fixture-like source graphs into the real in-memory SQLite cache store, searches for backlog, lists ready tasks, retrieves DOC-123, resolves aliases/backlinks, and reads sync status without network access.",
+      "test": "go test ./internal/cache/... -run '^TestMinimumReplacementCacheState$' -count=1",
+      "result": "materialized"
+    },
+    {
+      "id": "015-cache-store-task-4-add-minimum-cache-state-test-scenario-2",
+      "description": "The focused cache scenario asserts the Day 7 visible state through Store calls and stable-id link rows, while the composition command reruns backlink and identity tests to fail regressions toward shell-readable markdown indexes as backlink keys.",
+      "test": "go test ./internal/cache/... -run 'TestBacklinks|TestIdentityResolution|TestMinimumReplacementCacheState' -count=1",
+      "result": "materialized"
+    },
+    {
+      "id": "015-cache-store-task-4-add-minimum-cache-state-test-scenario-3",
+      "description": "The broader short suite is executed so the minimum replacement cache scenario participates in current-source offline Day 7 walkthrough evidence.",
+      "test": "go test ./... -short -count=1",
+      "result": "materialized"
+    }
+  ],
+  "decommission_checks": [
+    {
+      "id": "decommission-14",
+      "description": "Replaces the legacy shell-readable markdown index route for the minimum Day 7 walkthrough with executable cache-table reads after ingest-like UpsertSourceGraph calls.",
+      "test": "TestMinimumReplacementCacheState asserts links target stable id DOC-123 and reads search/list/get/resolve/backlinks/sync-status through Store APIs."
+    }
+  ],
+  "notes": {
+    "offline": "Validation uses local Go commands and in-memory SQLite/cache test state only; live GitCode network and device validation remain disabled.",
+    "target_product_path": "The run script exercises production cache behavior through Go tests that call the real Store implementation rather than grep-only checks or documentation inventory.",
+    "failure_behavior": "If ingest-like graph upsert, search, ready task listing, source retrieval, alias resolution, stable-id backlinks, sync status, or short-suite inclusion is missing or path-index-dependent, the cache tests or this run script fail non-zero."
+  }
+}
