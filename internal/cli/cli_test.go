@@ -35,11 +35,11 @@ func TestMinimumReplacementBar(t *testing.T) {
 	factory := cacheBackedFactory(t)
 	cases := [][]string{
 		{"ingest"},
-		{"search_sources", "backlog"},
-		{"list_sources", "--kind", "task", "--status", "ready"},
-		{"get_source", "DOC-123"},
-		{"source_backlinks", "DOC-123"},
-		{"sync_status", "DOC-123"},
+		{"search_sources", "--repo", "fixture-a", "backlog"},
+		{"list_sources", "--repo", "fixture-a", "--kind", "task", "--status", "ready"},
+		{"get_source", "--repo", "fixture-a", "DOC-123"},
+		{"source_backlinks", "--repo", "fixture-a", "DOC-123"},
+		{"sync_status", "--repo", "fixture-a", "DOC-123"},
 	}
 	for _, args := range cases {
 		var stdout bytes.Buffer
@@ -54,10 +54,44 @@ func TestMinimumReplacementBar(t *testing.T) {
 	}
 }
 
+func TestCLIRepoScopedDuplicateAlias(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-b", Owner: "owner-b", Name: "repo-b", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertSourceGraph(ctx, cache.SourceGraph{Source: cache.Source{RepoID: "fixture-a", ID: "ISSUE-42", Kind: "issue", Path: "fixture-a/issues/42.md", Title: "Fixture A", Body: "fixture-a scoped body", Status: "open", ContentHash: "a42"}, Identities: []cache.Identity{{RepoID: "fixture-a", AliasType: "issue", Alias: "42", Remote: cache.RemoteAlias{Type: "issue", ID: "42"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertSourceGraph(ctx, cache.SourceGraph{Source: cache.Source{RepoID: "fixture-b", ID: "ISSUE-42", Kind: "issue", Path: "fixture-b/issues/42.md", Title: "Fixture B", Body: "fixture-b scoped body", Status: "open", ContentHash: "b42"}, Identities: []cache.Identity{{RepoID: "fixture-b", AliasType: "issue", Alias: "42", Remote: cache.RemoteAlias{Type: "issue", ID: "42"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	factory := func(context.Context, string) (queryService, func() error, error) { return service.New(store), nil, nil }
+	var outA, errA bytes.Buffer
+	if code := executeWithFactory([]string{"get", "--repo", "fixture-a", "issue:42"}, &outA, &errA, factory); code != 0 {
+		t.Fatalf("fixture-a code=%d err=%q", code, errA.String())
+	}
+	var outB, errB bytes.Buffer
+	if code := executeWithFactory([]string{"get", "--repo", "fixture-b", "issue:42"}, &outB, &errB, factory); code != 0 {
+		t.Fatalf("fixture-b code=%d err=%q", code, errB.String())
+	}
+	if !strings.Contains(outA.String(), "repo_id: fixture-a") || strings.Contains(outA.String(), "fixture-b scoped body") {
+		t.Fatalf("fixture-a output crossed scope: %q", outA.String())
+	}
+	if !strings.Contains(outB.String(), "repo_id: fixture-b") || strings.Contains(outB.String(), "fixture-a scoped body") {
+		t.Fatalf("fixture-b output crossed scope: %q", outB.String())
+	}
+	var unscopedOut, unscopedErr bytes.Buffer
+	if code := executeWithFactory([]string{"get", "issue:42"}, &unscopedOut, &unscopedErr, factory); code != 4 || !strings.Contains(unscopedErr.String(), "repo_required") {
+		t.Fatalf("unscoped code=%d err=%q", code, unscopedErr.String())
+	}
+}
+
 func TestSearchJSON(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := executeWithFactory([]string{"search_sources", "backlog", "--format", "json"}, &stdout, &stderr, cacheBackedFactory(t))
+	code := executeWithFactory([]string{"search_sources", "--repo", "fixture-a", "backlog", "--format", "json"}, &stdout, &stderr, cacheBackedFactory(t))
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
@@ -73,7 +107,7 @@ func TestSearchJSON(t *testing.T) {
 func TestGetSource(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := executeWithFactory([]string{"get", "DOC-123"}, &stdout, &stderr, cacheBackedFactory(t))
+	code := executeWithFactory([]string{"get", "--repo", "fixture-a", "DOC-123"}, &stdout, &stderr, cacheBackedFactory(t))
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
@@ -88,12 +122,12 @@ func TestExportJSONDeterministic(t *testing.T) {
 	factory := cacheBackedFactory(t)
 	var firstOut bytes.Buffer
 	var firstErr bytes.Buffer
-	if code := executeWithFactory([]string{"export", "--format", "json"}, &firstOut, &firstErr, factory); code != 0 {
+	if code := executeWithFactory([]string{"export", "--repo", "fixture-a", "--format", "json"}, &firstOut, &firstErr, factory); code != 0 {
 		t.Fatalf("first export code=%d stderr=%q", code, firstErr.String())
 	}
 	var secondOut bytes.Buffer
 	var secondErr bytes.Buffer
-	if code := executeWithFactory([]string{"export", "--format", "json"}, &secondOut, &secondErr, factory); code != 0 {
+	if code := executeWithFactory([]string{"export", "--repo", "fixture-a", "--format", "json"}, &secondOut, &secondErr, factory); code != 0 {
 		t.Fatalf("second export code=%d stderr=%q", code, secondErr.String())
 	}
 	if firstOut.String() != secondOut.String() {
@@ -113,7 +147,7 @@ func TestDiffLoadsSnapshotPaths(t *testing.T) {
 	basePath := filepath.Join(t.TempDir(), "base.json")
 	var exportOut bytes.Buffer
 	var exportErr bytes.Buffer
-	if code := executeWithFactory([]string{"export", "--format", "json", "--output", basePath}, &exportOut, &exportErr, factory); code != 0 {
+	if code := executeWithFactory([]string{"export", "--repo", "fixture-a", "--format", "json", "--output", basePath}, &exportOut, &exportErr, factory); code != 0 {
 		t.Fatalf("export code=%d stderr=%q", code, exportErr.String())
 	}
 	if _, err := os.Stat(basePath); err != nil {
@@ -121,7 +155,7 @@ func TestDiffLoadsSnapshotPaths(t *testing.T) {
 	}
 	var diffOut bytes.Buffer
 	var diffErr bytes.Buffer
-	if code := executeWithFactory([]string{"diff", "--format", "json", "--base", basePath}, &diffOut, &diffErr, factory); code != 0 {
+	if code := executeWithFactory([]string{"diff", "--repo", "fixture-a", "--format", "json", "--base", basePath}, &diffOut, &diffErr, factory); code != 0 {
 		t.Fatalf("diff code=%d stderr=%q", code, diffErr.String())
 	}
 	var result service.DiffSnapshotResult
@@ -150,7 +184,7 @@ func TestAllCommandsRegistered(t *testing.T) {
 func TestRecentJSON(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := executeWithFactory([]string{"recent", "--format", "json"}, &stdout, &stderr, cacheBackedFactory(t))
+	code := executeWithFactory([]string{"recent", "--repo", "fixture-a", "--format", "json"}, &stdout, &stderr, cacheBackedFactory(t))
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
@@ -166,7 +200,7 @@ func TestRecentJSON(t *testing.T) {
 func TestLinkCheckJSON(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := executeWithFactory([]string{"link-check", "--format", "json"}, &stdout, &stderr, spyFactory())
+	code := executeWithFactory([]string{"link-check", "--repo", "fixture-a", "--format", "json"}, &stdout, &stderr, spyFactory())
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
@@ -182,7 +216,7 @@ func TestLinkCheckJSON(t *testing.T) {
 func TestStaleIndexJSON(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := executeWithFactory([]string{"stale-index", "--format", "json"}, &stdout, &stderr, spyFactory())
+	code := executeWithFactory([]string{"stale-index", "--repo", "fixture-a", "--format", "json"}, &stdout, &stderr, spyFactory())
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
@@ -215,12 +249,12 @@ func TestQueryCommandErrors(t *testing.T) {
 		args []string
 		want int
 	}{
-		{"empty cache", []string{"list_sources"}, 2},
-		{"not found", []string{"get_source", "MISSING"}, 3},
-		{"invalid snippet", []string{"get_snippet", "--line-start", "5", "--line-end", "1", "DOC-123"}, 4},
-		{"clamped snippet", []string{"get_snippet", "--line-start", "1", "--line-end", "50", "DOC-123"}, 0},
-		{"stale strict", []string{"stale-index", "--strict"}, 5},
-		{"link strict", []string{"link-check", "--strict"}, 5},
+		{"empty cache", []string{"list_sources", "--repo", "fixture-a"}, 2},
+		{"not found", []string{"get_source", "--repo", "fixture-a", "MISSING"}, 3},
+		{"invalid snippet", []string{"get_snippet", "--repo", "fixture-a", "--line-start", "5", "--line-end", "1", "DOC-123"}, 4},
+		{"clamped snippet", []string{"get_snippet", "--repo", "fixture-a", "--line-start", "1", "--line-end", "50", "DOC-123"}, 0},
+		{"stale strict", []string{"stale-index", "--repo", "fixture-a", "--strict"}, 5},
+		{"link strict", []string{"link-check", "--repo", "fixture-a", "--strict"}, 5},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout bytes.Buffer
@@ -293,7 +327,7 @@ func TestQueryCommandsUseServiceOnly(t *testing.T) {
 	spy := &spyService{}
 	factory := func(context.Context, string) (queryService, func() error, error) { return spy, nil, nil }
 	commands := [][]string{
-		{"ingest"}, {"index", "--full"}, {"search_sources", "backlog"}, {"list_sources"}, {"get_source", "DOC-123"}, {"source_backlinks", "DOC-123"}, {"get_snippet", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"sync_status", "DOC-123"}, {"recent"}, {"link-check"}, {"stale-index"}, {"sync"}, {"export"}, {"diff"}, {"repo", "add", "--repo", "fixture-a", "--owner", "owner", "--name", "repo", "--api-base-url", "https://example.invalid/api", "--scopes", "issues"}, {"repo", "status", "--repo", "fixture-a"}, {"create-issue", "--title", "t"}, {"update-issue", "--number", "1"}, {"create-page", "--title", "t", "--body", "b"}, {"update-page", "--slug", "s"}, {"add-comment", "--number", "1", "--body", "b"}, {"add-label", "--number", "1", "--label", "l"},
+		{"ingest"}, {"index", "--repo", "fixture-a", "--full"}, {"search_sources", "--repo", "fixture-a", "backlog"}, {"list_sources", "--repo", "fixture-a"}, {"get_source", "--repo", "fixture-a", "DOC-123"}, {"source_backlinks", "--repo", "fixture-a", "DOC-123"}, {"get_snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"sync_status", "--repo", "fixture-a", "DOC-123"}, {"recent", "--repo", "fixture-a"}, {"link-check", "--repo", "fixture-a"}, {"stale-index", "--repo", "fixture-a"}, {"sync", "--repo", "fixture-a"}, {"export", "--repo", "fixture-a"}, {"diff", "--repo", "fixture-a"}, {"repo", "add", "--repo", "fixture-a", "--owner", "owner", "--name", "repo", "--api-base-url", "https://example.invalid/api", "--scopes", "issues"}, {"repo", "status", "--repo", "fixture-a"}, {"create-issue", "--repo", "fixture-a", "--title", "t"}, {"update-issue", "--repo", "fixture-a", "--number", "1"}, {"create-page", "--repo", "fixture-a", "--title", "t", "--body", "b"}, {"update-page", "--repo", "fixture-a", "--slug", "s"}, {"add-comment", "--repo", "fixture-a", "--number", "1", "--body", "b"}, {"add-label", "--repo", "fixture-a", "--number", "1", "--label", "l"},
 	}
 	for _, args := range commands {
 		var stdout bytes.Buffer
@@ -324,6 +358,9 @@ func emptyFactory(t *testing.T) serviceFactory {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+			t.Fatal(err)
+		}
 		return service.New(store), store.Close, nil
 	}
 }
@@ -335,9 +372,12 @@ func populatedStore(t *testing.T) *cache.SQLiteStore {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
 	graphs := []cache.SourceGraph{
-		{Source: cache.Source{ID: "DOC-123", Kind: "doc", Path: "docs/backlog.md", Title: "Backlog", Body: "backlog overview\nready task details\nmore context", Status: "active", Labels: []string{"knowledge"}, ContentHash: "h1", CreatedAt: now, UpdatedAt: now}, SyncStatus: &cache.SyncStatus{RemoteType: "issue", RemoteID: "100", RemoteRevision: "r1", Status: "fresh", LastFetchedAt: now}},
-		{Source: cache.Source{ID: "TASK-1", Kind: "task", Path: "project/tasks/task-1.md", Title: "Ready Task", Body: "task references DOC-123", Status: "ready", ContentHash: "h2", CreatedAt: now.Add(time.Minute), UpdatedAt: now.Add(time.Minute)}, Links: []cache.Link{{TargetID: "DOC-123", Kind: "mentions", Text: "DOC-123"}}},
+		{Source: cache.Source{RepoID: "fixture-a", ID: "DOC-123", Kind: "doc", Path: "docs/backlog.md", Title: "Backlog", Body: "backlog overview\nready task details\nmore context", Status: "active", Labels: []string{"knowledge"}, ContentHash: "h1", CreatedAt: now, UpdatedAt: now}, SyncStatus: &cache.SyncStatus{RepoID: "fixture-a", RemoteType: "issue", RemoteID: "100", RemoteRevision: "r1", Status: "fresh", LastFetchedAt: now}},
+		{Source: cache.Source{RepoID: "fixture-a", ID: "TASK-1", Kind: "task", Path: "project/tasks/task-1.md", Title: "Ready Task", Body: "task references DOC-123", Status: "ready", ContentHash: "h2", CreatedAt: now.Add(time.Minute), UpdatedAt: now.Add(time.Minute)}, Links: []cache.Link{{RepoID: "fixture-a", TargetID: "DOC-123", Kind: "mentions", Text: "DOC-123"}}},
 	}
 	for _, graph := range graphs {
 		if err := store.UpsertSourceGraph(context.Background(), graph); err != nil {

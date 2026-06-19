@@ -65,6 +65,7 @@ func TestSearchFallbackParity(t *testing.T) {
 		t.Fatalf("new fallback store returned error: %v", err)
 	}
 	defer fallbackStore.Close()
+	mustAddTestRepo(t, ctx, fallbackStore, "fixture-a")
 
 	graphs := []SourceGraph{
 		{Source: Source{ID: "DOC-001", Kind: "doc", Path: "docs/doc-001.md", Title: "Backlog Architecture", Body: "Cache-first backlog source.\nMore cache text.", Status: "ready", Labels: []string{"cache"}, ContentHash: "hash-1"}},

@@ -68,9 +68,9 @@ type toolDefinition struct {
 }
 
 type inputSchema struct {
-	Type       string                   `json:"type"`
-	Properties map[string]schemaProp    `json:"properties"`
-	Required   []string                 `json:"required,omitempty"`
+	Type       string                `json:"type"`
+	Properties map[string]schemaProp `json:"properties"`
+	Required   []string              `json:"required,omitempty"`
 }
 
 type schemaProp struct {
@@ -122,13 +122,13 @@ type toolContentItem struct {
 }
 
 type aggregateSyncStatus struct {
-	FreshCount  int    `json:"fresh_count"`
-	StaleCount  int    `json:"stale_count"`
-	LastSyncAt  string `json:"last_sync_at"`
-	CacheEmpty  bool   `json:"cache_empty"`
+	FreshCount int    `json:"fresh_count"`
+	StaleCount int    `json:"stale_count"`
+	LastSyncAt string `json:"last_sync_at"`
+	CacheEmpty bool   `json:"cache_empty"`
 }
 
-func intPtr(v int) *int       { return &v }
+func intPtr(v int) *int             { return &v }
 func float64Ptr(v float64) *float64 { return &v }
 
 var toolDefs = []toolDefinition{
@@ -138,12 +138,13 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{
 			Type: "object",
 			Properties: map[string]schemaProp{
-				"query":  {Type: "string", Description: "Search query text.", MinLength: 1},
-				"kind":   {Type: "string", Description: "Source kind filter.", Enum: []string{"source", "task", "page", "decision", "handoff"}},
-				"limit":  {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 20.0},
-				"offset": {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
+				"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1},
+				"query":   {Type: "string", Description: "Search query text.", MinLength: 1},
+				"kind":    {Type: "string", Description: "Source kind filter.", Enum: []string{"source", "task", "page", "decision", "handoff"}},
+				"limit":   {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 20.0},
+				"offset":  {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
 			},
-			Required: []string{"query"},
+			Required: []string{"repo_id", "query"},
 		},
 	},
 	{
@@ -152,9 +153,10 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{
 			Type: "object",
 			Properties: map[string]schemaProp{
-				"id": {Type: "string", Description: "Stable source id.", MinLength: 1},
+				"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1},
+				"id":      {Type: "string", Description: "Stable source id or record alias.", MinLength: 1},
 			},
-			Required: []string{"id"},
+			Required: []string{"repo_id", "id"},
 		},
 	},
 	{
@@ -163,11 +165,13 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{
 			Type: "object",
 			Properties: map[string]schemaProp{
-				"kind":   {Type: "string", Description: "Source kind filter.", Enum: []string{"source", "task", "page", "decision", "handoff"}},
-				"status": {Type: "string", Description: "Source status filter."},
-				"limit":  {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 20.0},
-				"offset": {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
+				"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1},
+				"kind":    {Type: "string", Description: "Source kind filter.", Enum: []string{"source", "task", "page", "decision", "handoff"}},
+				"status":  {Type: "string", Description: "Source status filter."},
+				"limit":   {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 20.0},
+				"offset":  {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
 			},
+			Required: []string{"repo_id"},
 		},
 	},
 	{
@@ -176,11 +180,12 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{
 			Type: "object",
 			Properties: map[string]schemaProp{
-				"id":     {Type: "string", Description: "Target source id.", MinLength: 1},
-				"limit":  {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(200), Default: 50.0},
-				"offset": {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
+				"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1},
+				"id":      {Type: "string", Description: "Target source id or record alias.", MinLength: 1},
+				"limit":   {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(200), Default: 50.0},
+				"offset":  {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
 			},
-			Required: []string{"id"},
+			Required: []string{"repo_id", "id"},
 		},
 	},
 	{
@@ -189,9 +194,10 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{
 			Type: "object",
 			Properties: map[string]schemaProp{
-				"id": {Type: "string", Description: "Stable id or alias to resolve.", MinLength: 1},
+				"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1},
+				"id":      {Type: "string", Description: "Stable id or alias to resolve.", MinLength: 1},
 			},
-			Required: []string{"id"},
+			Required: []string{"repo_id", "id"},
 		},
 	},
 	{
@@ -200,8 +206,10 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{
 			Type: "object",
 			Properties: map[string]schemaProp{
-				"id": {Type: "string", Description: "Source id. Omit for aggregate cache status."},
+				"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1},
+				"id":      {Type: "string", Description: "Source id. Omit for aggregate cache status."},
 			},
+			Required: []string{"repo_id"},
 		},
 	},
 	{
@@ -210,9 +218,11 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{
 			Type: "object",
 			Properties: map[string]schemaProp{
-				"format": {Type: "string", Description: "Export format.", Enum: []string{"json", "markdown"}, Default: "json"},
-				"inline": {Type: "boolean", Description: "Return inline content.", Default: true},
+				"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1},
+				"format":  {Type: "string", Description: "Export format.", Enum: []string{"json", "markdown"}, Default: "json"},
+				"inline":  {Type: "boolean", Description: "Return inline content.", Default: true},
 			},
+			Required: []string{"repo_id"},
 		},
 	},
 	{
@@ -221,11 +231,12 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{
 			Type: "object",
 			Properties: map[string]schemaProp{
+				"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1},
 				"base_id": {Type: "string", Description: "Base snapshot id.", MinLength: 1},
 				"head_id": {Type: "string", Description: "Head snapshot id.", MinLength: 1},
 				"format":  {Type: "string", Description: "Diff format.", Enum: []string{"text", "json"}, Default: "text"},
 			},
-			Required: []string{"base_id", "head_id"},
+			Required: []string{"repo_id", "base_id", "head_id"},
 		},
 	},
 }
@@ -360,6 +371,7 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 }
 
 type searchSourcesArgs struct {
+	RepoID string `json:"repo_id"`
 	Query  string `json:"query"`
 	Kind   string `json:"kind,omitempty"`
 	Limit  *int   `json:"limit,omitempty"`
@@ -375,6 +387,10 @@ func (s *Server) callSearchSources(ctx context.Context, id *json.RawMessage, arg
 	var a searchSourcesArgs
 	if err := json.Unmarshal(args, &a); err != nil {
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if a.RepoID == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
 		return
 	}
 	if a.Query == "" {
@@ -412,6 +428,7 @@ func (s *Server) callSearchSources(ctx context.Context, id *json.RawMessage, arg
 	}
 
 	results, err := s.svc.SearchSources(ctx, service.SearchSourcesRequest{
+		RepoID: a.RepoID,
 		Query:  a.Query,
 		Kind:   a.Kind,
 		Limit:  limit,
@@ -439,7 +456,8 @@ func (s *Server) callSearchSources(ctx context.Context, id *json.RawMessage, arg
 }
 
 type getSourceArgs struct {
-	ID string `json:"id"`
+	RepoID string `json:"repo_id"`
+	ID     string `json:"id"`
 }
 
 func (s *Server) callGetSource(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
@@ -448,12 +466,16 @@ func (s *Server) callGetSource(ctx context.Context, id *json.RawMessage, args js
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
 		return
 	}
+	if a.RepoID == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+		return
+	}
 	if a.ID == "" {
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "id is required"})
 		return
 	}
 
-	result, err := s.svc.GetSource(ctx, service.GetSourceRequest{ID: a.ID})
+	result, err := s.svc.GetSource(ctx, service.GetSourceRequest{RepoID: a.RepoID, ID: a.ID})
 	if err != nil {
 		s.writeDomainError(id, err)
 		return
@@ -471,6 +493,7 @@ func (s *Server) callGetSource(ctx context.Context, id *json.RawMessage, args js
 }
 
 type listSourcesArgs struct {
+	RepoID string `json:"repo_id"`
 	Kind   string `json:"kind,omitempty"`
 	Status string `json:"status,omitempty"`
 	Limit  *int   `json:"limit,omitempty"`
@@ -486,6 +509,10 @@ func (s *Server) callListSources(ctx context.Context, id *json.RawMessage, args 
 	var a listSourcesArgs
 	if err := json.Unmarshal(args, &a); err != nil {
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if a.RepoID == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
 		return
 	}
 	limit := 20
@@ -519,6 +546,7 @@ func (s *Server) callListSources(ctx context.Context, id *json.RawMessage, args 
 	}
 
 	results, err := s.svc.ListSources(ctx, service.ListSourcesRequest{
+		RepoID: a.RepoID,
 		Kind:   a.Kind,
 		Status: a.Status,
 		Limit:  limit,
@@ -541,21 +569,26 @@ func (s *Server) callListSources(ctx context.Context, id *json.RawMessage, args 
 }
 
 type sourceBacklinksArgs struct {
+	RepoID string `json:"repo_id"`
 	ID     string `json:"id"`
 	Limit  *int   `json:"limit,omitempty"`
 	Offset *int   `json:"offset,omitempty"`
 }
 type sourceBacklinksSResult struct {
-	ID        string                  `json:"id"`
+	ID        string                   `json:"id"`
 	Backlinks []service.BacklinkResult `json:"backlinks"`
-	Limit     int                     `json:"limit"`
-	Offset    int                     `json:"offset"`
+	Limit     int                      `json:"limit"`
+	Offset    int                      `json:"offset"`
 }
 
 func (s *Server) callSourceBacklinks(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	var a sourceBacklinksArgs
 	if err := json.Unmarshal(args, &a); err != nil {
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if a.RepoID == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
 		return
 	}
 	if a.ID == "" {
@@ -579,7 +612,7 @@ func (s *Server) callSourceBacklinks(ctx context.Context, id *json.RawMessage, a
 		return
 	}
 
-	results, err := s.svc.GetBacklinks(ctx, service.GetBacklinksRequest{ID: a.ID})
+	results, err := s.svc.GetBacklinks(ctx, service.GetBacklinksRequest{RepoID: a.RepoID, ID: a.ID})
 	if err != nil {
 		s.writeDomainError(id, err)
 		return
@@ -604,7 +637,8 @@ func (s *Server) callSourceBacklinks(ctx context.Context, id *json.RawMessage, a
 }
 
 type resolveIDArgs struct {
-	ID string `json:"id"`
+	RepoID string `json:"repo_id"`
+	ID     string `json:"id"`
 }
 
 func (s *Server) callResolveID(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
@@ -618,7 +652,11 @@ func (s *Server) callResolveID(ctx context.Context, id *json.RawMessage, args js
 		return
 	}
 
-	result, err := s.svc.ResolveID(ctx, service.ResolveIDRequest{ID: a.ID})
+	if a.RepoID == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+		return
+	}
+	result, err := s.svc.ResolveID(ctx, service.ResolveIDRequest{RepoID: a.RepoID, ID: a.ID})
 	if err != nil {
 		s.writeDomainError(id, err)
 		return
@@ -633,7 +671,8 @@ func (s *Server) callResolveID(ctx context.Context, id *json.RawMessage, args js
 }
 
 type syncStatusArgs struct {
-	ID string `json:"id,omitempty"`
+	RepoID string `json:"repo_id"`
+	ID     string `json:"id,omitempty"`
 }
 
 func (s *Server) callSyncStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
@@ -643,8 +682,12 @@ func (s *Server) callSyncStatus(ctx context.Context, id *json.RawMessage, args j
 		return
 	}
 
+	if a.RepoID == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+		return
+	}
 	if a.ID == "" {
-		sources, err := s.svc.ListSources(ctx, service.ListSourcesRequest{Limit: 1})
+		sources, err := s.svc.ListSources(ctx, service.ListSourcesRequest{RepoID: a.RepoID, Limit: 1})
 		if err != nil {
 			if service.IsCacheEmpty(err) {
 				result := aggregateSyncStatus{CacheEmpty: true}
@@ -665,7 +708,7 @@ func (s *Server) callSyncStatus(ctx context.Context, id *json.RawMessage, args j
 		return
 	}
 
-	status, err := s.svc.GetSyncStatus(ctx, service.SyncStatusRequest{ID: a.ID})
+	status, err := s.svc.GetSyncStatus(ctx, service.SyncStatusRequest{RepoID: a.RepoID, ID: a.ID})
 	if err != nil {
 		s.writeDomainError(id, err)
 		return
@@ -676,31 +719,36 @@ func (s *Server) callSyncStatus(ctx context.Context, id *json.RawMessage, args j
 	s.writeToolResult(id, toolCallResult{
 		Content: []toolContentItem{{Type: "text", Text: text}},
 		StructuredContent: map[string]any{
-			"id":               status.SourceID,
-			"fresh":            status.Status == "fresh",
-			"stale":            status.Status != "fresh",
-			"last_fetched_at":  status.LastFetchedAt,
+			"id":                status.SourceID,
+			"fresh":             status.Status == "fresh",
+			"stale":             status.Status != "fresh",
+			"last_fetched_at":   status.LastFetchedAt,
 			"remote_updated_at": status.LastFetchedAt,
-			"reason":           status.Status,
+			"reason":            status.Status,
 		},
 	})
 }
 
 type exportSnapshotArgs struct {
+	RepoID string `json:"repo_id"`
 	Format string `json:"format,omitempty"`
 	Inline *bool  `json:"inline,omitempty"`
 }
 type exportSnapshotSResult struct {
-	Format        string `json:"format"`
-	Content       string `json:"content"`
-	Path          string `json:"path,omitempty"`
-	ContentHash   string `json:"content_hash"`
+	Format      string `json:"format"`
+	Content     string `json:"content"`
+	Path        string `json:"path,omitempty"`
+	ContentHash string `json:"content_hash"`
 }
 
 func (s *Server) callExportSnapshot(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	var a exportSnapshotArgs
 	if err := json.Unmarshal(args, &a); err != nil {
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if a.RepoID == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
 		return
 	}
 	format := "json"
@@ -716,7 +764,7 @@ func (s *Server) callExportSnapshot(ctx context.Context, id *json.RawMessage, ar
 		inline = *a.Inline
 	}
 
-	result, err := s.svc.ExportSnapshot(ctx, service.ExportSnapshotRequest{Format: format})
+	result, err := s.svc.ExportSnapshot(ctx, service.ExportSnapshotRequest{RepoID: a.RepoID, Format: format})
 	if err != nil {
 		s.writeDomainError(id, err)
 		return
@@ -744,6 +792,7 @@ func (s *Server) callExportSnapshot(ctx context.Context, id *json.RawMessage, ar
 }
 
 type diffSnapshotArgs struct {
+	RepoID string `json:"repo_id"`
 	BaseID string `json:"base_id"`
 	HeadID string `json:"head_id"`
 	Format string `json:"format,omitempty"`
@@ -760,6 +809,10 @@ func (s *Server) callDiffSnapshot(ctx context.Context, id *json.RawMessage, args
 	var a diffSnapshotArgs
 	if err := json.Unmarshal(args, &a); err != nil {
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if a.RepoID == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
 		return
 	}
 	if a.BaseID == "" {
@@ -780,6 +833,7 @@ func (s *Server) callDiffSnapshot(ctx context.Context, id *json.RawMessage, args
 	}
 
 	result, err := s.svc.DiffSnapshot(ctx, service.DiffSnapshotRequest{
+		RepoID:         a.RepoID,
 		BaseSnapshotID: a.BaseID,
 		HeadSnapshotID: a.HeadID,
 		Format:         format,

@@ -10,25 +10,25 @@ const (
 )
 
 type RepositoryBinding struct {
-	RepoID     string            `json:"repo_id"`
-	Owner      string            `json:"owner"`
-	Name       string            `json:"name"`
-	APIBaseURL string            `json:"api_base_url"`
-	Scopes     []RepositoryScope `json:"scopes"`
-	DisplayName string           `json:"display_name,omitempty"`
-	Aliases    []string          `json:"aliases"`
-	CreatedAt  time.Time         `json:"created_at"`
-	UpdatedAt  time.Time         `json:"updated_at"`
+	RepoID      string            `json:"repo_id"`
+	Owner       string            `json:"owner"`
+	Name        string            `json:"name"`
+	APIBaseURL  string            `json:"api_base_url"`
+	Scopes      []RepositoryScope `json:"scopes"`
+	DisplayName string            `json:"display_name,omitempty"`
+	Aliases     []string          `json:"aliases"`
+	CreatedAt   time.Time         `json:"created_at"`
+	UpdatedAt   time.Time         `json:"updated_at"`
 }
 
 type AddRepositoryRequest struct {
-	RepoID     string   `json:"repo_id"`
-	Owner      string   `json:"owner"`
-	Name       string   `json:"name"`
-	APIBaseURL string   `json:"api_base_url"`
-	Scopes     []string `json:"scopes"`
-	DisplayName string  `json:"display_name,omitempty"`
-	Aliases    []string `json:"aliases"`
+	RepoID      string   `json:"repo_id"`
+	Owner       string   `json:"owner"`
+	Name        string   `json:"name"`
+	APIBaseURL  string   `json:"api_base_url"`
+	Scopes      []string `json:"scopes"`
+	DisplayName string   `json:"display_name,omitempty"`
+	Aliases     []string `json:"aliases"`
 }
 
 type RepositoryStatusRequest struct {
@@ -39,7 +39,7 @@ type RepositoryStatus struct {
 	RepoID             string            `json:"repo_id"`
 	Owner              string            `json:"owner"`
 	Name               string            `json:"name"`
-	APIBaseURL          string            `json:"api_base_url"`
+	APIBaseURL         string            `json:"api_base_url"`
 	Scopes             []RepositoryScope `json:"scopes"`
 	DisplayName        string            `json:"display_name,omitempty"`
 	Aliases            []string          `json:"aliases"`
@@ -50,7 +50,16 @@ type RepositoryStatus struct {
 	FailureClass       string            `json:"failure_class,omitempty"`
 }
 
+type RepositoryRoute struct {
+	RepoID     string            `json:"repo_id"`
+	Owner      string            `json:"owner"`
+	Name       string            `json:"name"`
+	APIBaseURL string            `json:"api_base_url"`
+	Scopes     []RepositoryScope `json:"scopes"`
+}
+
 type SearchSourcesRequest struct {
+	RepoID string `json:"repo_id"`
 	Query  string `json:"query"`
 	Kind   string `json:"kind,omitempty"`
 	Limit  int    `json:"limit,omitempty"`
@@ -58,6 +67,7 @@ type SearchSourcesRequest struct {
 }
 
 type SearchSourceResult struct {
+	RepoID    string  `json:"repo_id"`
 	ID        string  `json:"id"`
 	Path      string  `json:"path"`
 	Title     string  `json:"title"`
@@ -70,12 +80,14 @@ type SearchSourceResult struct {
 }
 
 type GetSourceRequest struct {
+	RepoID    string `json:"repo_id"`
 	ID        string `json:"id,omitempty"`
 	AliasType string `json:"alias_type,omitempty"`
 	AliasID   string `json:"alias_id,omitempty"`
 }
 
 type SourceRecord struct {
+	RepoID      string           `json:"repo_id"`
 	ID          string           `json:"id"`
 	Path        string           `json:"path"`
 	RemoteAlias string           `json:"remote_alias"`
@@ -90,6 +102,7 @@ type SourceRecord struct {
 }
 
 type ListSourcesRequest struct {
+	RepoID string `json:"repo_id"`
 	Kind   string `json:"kind,omitempty"`
 	Status string `json:"status,omitempty"`
 	Limit  int    `json:"limit,omitempty"`
@@ -104,6 +117,7 @@ func (r ListSourcesRequest) limitPlusOffset() int {
 }
 
 type SourceSummary struct {
+	RepoID      string    `json:"repo_id"`
 	ID          string    `json:"id"`
 	Path        string    `json:"path"`
 	RemoteAlias string    `json:"remote_alias,omitempty"`
@@ -114,6 +128,7 @@ type SourceSummary struct {
 }
 
 type GetBacklinksRequest struct {
+	RepoID    string `json:"repo_id"`
 	ID        string `json:"id,omitempty"`
 	AliasType string `json:"alias_type,omitempty"`
 	AliasID   string `json:"alias_id,omitempty"`
@@ -125,12 +140,14 @@ type BacklinkResult struct {
 }
 
 type ResolveIDRequest struct {
+	RepoID    string `json:"repo_id"`
 	ID        string `json:"id,omitempty"`
 	AliasType string `json:"alias_type,omitempty"`
 	AliasID   string `json:"alias_id,omitempty"`
 }
 
 type ResolvedID struct {
+	RepoID      string `json:"repo_id"`
 	ID          string `json:"id"`
 	Path        string `json:"path"`
 	RemoteAlias string `json:"remote_alias"`
@@ -139,6 +156,7 @@ type ResolvedID struct {
 }
 
 type SnippetRequest struct {
+	RepoID    string `json:"repo_id"`
 	ID        string `json:"id,omitempty"`
 	AliasType string `json:"alias_type,omitempty"`
 	AliasID   string `json:"alias_id,omitempty"`
@@ -148,6 +166,7 @@ type SnippetRequest struct {
 }
 
 type SnippetResult struct {
+	RepoID    string   `json:"repo_id"`
 	ID        string   `json:"id"`
 	Path      string   `json:"path"`
 	Text      string   `json:"text"`
@@ -158,12 +177,14 @@ type SnippetResult struct {
 }
 
 type SyncStatusRequest struct {
+	RepoID    string `json:"repo_id"`
 	ID        string `json:"id,omitempty"`
 	AliasType string `json:"alias_type,omitempty"`
 	AliasID   string `json:"alias_id,omitempty"`
 }
 
 type SyncStatusResult struct {
+	RepoID         string    `json:"repo_id"`
 	SourceID       string    `json:"source_id"`
 	RemoteType     string    `json:"remote_type"`
 	RemoteID       string    `json:"remote_id"`
@@ -184,6 +205,7 @@ const (
 )
 
 type SyncRequest struct {
+	RepoID         string `json:"repo_id"`
 	Source         string `json:"source,omitempty"`
 	TrackerID      string `json:"tracker_id,omitempty"`
 	StableID       string `json:"stable_id,omitempty"`
@@ -217,6 +239,7 @@ type SyncResult struct {
 }
 
 type RecentChangesRequest struct {
+	RepoID string `json:"repo_id"`
 	Kind   string `json:"kind,omitempty"`
 	Status string `json:"status,omitempty"`
 	Limit  int    `json:"limit,omitempty"`
@@ -224,6 +247,7 @@ type RecentChangesRequest struct {
 }
 
 type RecentChangeResult struct {
+	RepoID    string    `json:"repo_id"`
 	ID        string    `json:"id"`
 	Path      string    `json:"path"`
 	Title     string    `json:"title"`
@@ -233,7 +257,8 @@ type RecentChangeResult struct {
 }
 
 type LinkCheckRequest struct {
-	Strict bool `json:"strict,omitempty"`
+	RepoID string `json:"repo_id"`
+	Strict bool   `json:"strict,omitempty"`
 }
 
 type LinkCheckResult struct {
@@ -244,6 +269,7 @@ type LinkCheckResult struct {
 }
 
 type BrokenLinkResult struct {
+	RepoID   string `json:"repo_id"`
 	SourceID string `json:"source_id"`
 	TargetID string `json:"target_id"`
 	Kind     string `json:"kind"`
@@ -251,7 +277,8 @@ type BrokenLinkResult struct {
 }
 
 type StaleIndexRequest struct {
-	Strict bool `json:"strict,omitempty"`
+	RepoID string `json:"repo_id"`
+	Strict bool   `json:"strict,omitempty"`
 }
 
 type StaleIndexResult struct {
@@ -262,6 +289,7 @@ type StaleIndexResult struct {
 }
 
 type ExportSnapshotRequest struct {
+	RepoID      string   `json:"repo_id"`
 	Format      string   `json:"format,omitempty"`
 	IncludeBody bool     `json:"include_body,omitempty"`
 	SourceIDs   []string `json:"source_ids,omitempty"`
@@ -289,6 +317,7 @@ type SnapshotRef struct {
 
 type Snapshot struct {
 	SchemaVersion string               `json:"schema_version"`
+	RepoID        string               `json:"repo_id,omitempty"`
 	CreatedAt     time.Time            `json:"created_at"`
 	Sources       []SnapshotSource     `json:"sources"`
 	Aliases       []SnapshotAlias      `json:"aliases"`
@@ -299,6 +328,7 @@ type Snapshot struct {
 }
 
 type SnapshotSource struct {
+	RepoID      string    `json:"repo_id"`
 	ID          string    `json:"id"`
 	Kind        string    `json:"kind"`
 	Path        string    `json:"path"`
@@ -312,6 +342,7 @@ type SnapshotSource struct {
 }
 
 type SnapshotAlias struct {
+	RepoID     string `json:"repo_id"`
 	SourceID   string `json:"source_id"`
 	AliasKind  string `json:"alias_kind"`
 	AliasValue string `json:"alias_value"`
@@ -320,6 +351,7 @@ type SnapshotAlias struct {
 }
 
 type SnapshotLink struct {
+	RepoID   string `json:"repo_id"`
 	SourceID string `json:"source_id"`
 	TargetID string `json:"target_id"`
 	LinkType string `json:"link_type"`
@@ -327,6 +359,7 @@ type SnapshotLink struct {
 }
 
 type SnapshotSyncStatus struct {
+	RepoID         string    `json:"repo_id"`
 	SourceID       string    `json:"source_id"`
 	RemoteType     string    `json:"remote_type,omitempty"`
 	RemoteID       string    `json:"remote_id,omitempty"`
@@ -337,6 +370,7 @@ type SnapshotSyncStatus struct {
 }
 
 type SnapshotChunk struct {
+	RepoID            string            `json:"repo_id"`
 	ID                string            `json:"id"`
 	SourceID          string            `json:"source_id"`
 	ContentHash       string            `json:"content_hash"`
@@ -353,6 +387,7 @@ type SnapshotChunk struct {
 }
 
 type DiffSnapshotRequest struct {
+	RepoID              string      `json:"repo_id"`
 	BaseSnapshotID      string      `json:"base_snapshot_id,omitempty"`
 	HeadSnapshotID      string      `json:"head_snapshot_id,omitempty"`
 	BaseContent         string      `json:"base_content,omitempty"`
@@ -399,6 +434,7 @@ type LinkResult struct {
 }
 
 type OperationRequest struct {
+	RepoID     string `json:"repo_id"`
 	Mode       string `json:"mode,omitempty"`
 	InputPath  string `json:"input_path,omitempty"`
 	OutputPath string `json:"output_path,omitempty"`

@@ -435,14 +435,59 @@ func newTestStore(t *testing.T, ctx context.Context) *SQLiteStore {
 	if err != nil {
 		t.Fatalf("NewSQLiteStore returned error: %v", err)
 	}
+	mustAddTestRepo(t, ctx, store, "fixture-a")
 	return store
+}
+
+func mustAddTestRepo(t *testing.T, ctx context.Context, store *SQLiteStore, repoID string) {
+	t.Helper()
+	err := store.AddRepository(ctx, RepositoryBinding{RepoID: repoID, Owner: "owner", Name: repoID, APIBaseURL: "https://example.invalid/api", Scopes: []RepositoryScope{RepositoryScopeIssues, RepositoryScopeWiki}, DisplayName: repoID})
+	if err != nil {
+		t.Fatalf("AddRepository returned error: %v", err)
+	}
 }
 
 func mustUpsertGraph(t *testing.T, ctx context.Context, store *SQLiteStore, graph SourceGraph) {
 	t.Helper()
+	graph = withTestRepo(graph)
 	if err := store.UpsertSourceGraph(ctx, graph); err != nil {
 		t.Fatalf("UpsertSourceGraph returned error: %v", err)
 	}
+}
+
+func withTestRepo(graph SourceGraph) SourceGraph {
+	if graph.Source.RepoID == "" {
+		graph.Source.RepoID = "fixture-a"
+	}
+	for i := range graph.Identities {
+		if graph.Identities[i].RepoID == "" {
+			graph.Identities[i].RepoID = graph.Source.RepoID
+		}
+	}
+	for i := range graph.Links {
+		if graph.Links[i].RepoID == "" {
+			graph.Links[i].RepoID = graph.Source.RepoID
+		}
+	}
+	for i := range graph.Chunks {
+		if graph.Chunks[i].RepoID == "" {
+			graph.Chunks[i].RepoID = graph.Source.RepoID
+		}
+	}
+	if graph.SyncStatus != nil && graph.SyncStatus.RepoID == "" {
+		graph.SyncStatus.RepoID = graph.Source.RepoID
+	}
+	for i := range graph.SyncEvents {
+		if graph.SyncEvents[i].RepoID == "" {
+			graph.SyncEvents[i].RepoID = graph.Source.RepoID
+		}
+	}
+	for i := range graph.Conflicts {
+		if graph.Conflicts[i].RepoID == "" {
+			graph.Conflicts[i].RepoID = graph.Source.RepoID
+		}
+	}
+	return graph
 }
 
 func testSource(id string, kind string, title string) Source {
@@ -455,6 +500,7 @@ func testSourceWithHash(id string, kind string, title string, contentHash string
 		path = "project/task-001.md"
 	}
 	return Source{
+		RepoID:      "fixture-a",
 		ID:          id,
 		Kind:        kind,
 		Title:       title,

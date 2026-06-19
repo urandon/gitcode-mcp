@@ -125,7 +125,7 @@ func TestEntrypointCLICompatibility(t *testing.T) {
 	if strings.Contains(stderr.String(), "unknown command") {
 		t.Fatalf("did not reach CLI route: exit=%d stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "no cached search results") {
+	if !strings.Contains(stderr.String(), "repo_required") {
 		t.Fatalf("unexpected CLI compatibility result: exit=%d stderr=%q", code, stderr.String())
 	}
 }

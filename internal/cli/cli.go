@@ -104,15 +104,15 @@ type options struct {
 	title          string
 	body           string
 	state          string
-		label          string
-		labels         string
-		idempotencyKey string
-		overwrite      bool
-		redacted       bool
-		apiBaseURL     string
-		scopes         string
-		alias          multiFlag
-		displayName    string
+	label          string
+	labels         string
+	idempotencyKey string
+	overwrite      bool
+	redacted       bool
+	apiBaseURL     string
+	scopes         string
+	alias          multiFlag
+	displayName    string
 }
 
 type multiFlag []string
@@ -122,7 +122,6 @@ func (m *multiFlag) Set(value string) error {
 	*m = append(*m, value)
 	return nil
 }
-
 
 // Execute runs the gitcode-mcp CLI.
 func Execute(args []string, stdout io.Writer, stderr io.Writer) int {
@@ -217,7 +216,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.input, "input", "", "input path")
 	flags.StringVar(&opts.output, "output", "", "output path")
 	flags.StringVar(&opts.owner, "owner", "", "repository owner")
-	flags.StringVar(&opts.repo, "repo", "", "repository name")
+	flags.StringVar(&opts.repo, "repo", "", "configured repository id")
 	flags.StringVar(&opts.name, "name", "", "repository name")
 	flags.StringVar(&opts.id, "id", "", "record id")
 	flags.IntVar(&opts.number, "number", 0, "issue number")
@@ -249,7 +248,7 @@ func reorderFlags(args []string) []string {
 	positionals := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-			if strings.HasPrefix(arg, "--") {
+		if strings.HasPrefix(arg, "--") {
 			flags = append(flags, arg)
 			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--overwrite" || arg == "--redacted" {
 				continue
@@ -312,7 +311,7 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 		status := deps.CredentialReporter.Status(context.Background(), eff)
 		if opts.format == "json" {
 			payload := struct {
-				Effective  config.EffectiveConfig   `json:"effective"`
+				Effective  config.EffectiveConfig  `json:"effective"`
 				Credential config.CredentialStatus `json:"credential"`
 			}{Effective: eff, Credential: status}
 			return render(stdout, opts.format, payload, nil)
@@ -352,7 +351,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		if opts.incremental {
 			mode = "incremental"
 		}
-		result, err := svc.Index(ctx, service.OperationRequest{Mode: mode, Strict: opts.strict})
+		result, err := svc.Index(ctx, service.OperationRequest{RepoID: opts.repo, Mode: mode, Strict: opts.strict})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
@@ -361,13 +360,13 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		if len(args) == 0 {
 			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "query", Message: "query is required"})
 		}
-		results, err := svc.SearchSources(ctx, service.SearchSourcesRequest{Query: strings.Join(args, " "), Kind: opts.kind, Limit: opts.limit, Offset: opts.offset})
+		results, err := svc.SearchSources(ctx, service.SearchSourcesRequest{RepoID: opts.repo, Query: strings.Join(args, " "), Kind: opts.kind, Limit: opts.limit, Offset: opts.offset})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, results, renderSearchText)
 	case "list_sources", "list":
-		results, err := svc.ListSources(ctx, service.ListSourcesRequest{Kind: opts.kind, Status: opts.status, Limit: opts.limit, Offset: opts.offset})
+		results, err := svc.ListSources(ctx, service.ListSourcesRequest{RepoID: opts.repo, Kind: opts.kind, Status: opts.status, Limit: opts.limit, Offset: opts.offset})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
@@ -377,7 +376,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		if !ok {
 			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "id", Message: "id is required"})
 		}
-		result, err := svc.GetSource(ctx, service.GetSourceRequest{ID: id})
+		result, err := svc.GetSource(ctx, service.GetSourceRequest{RepoID: opts.repo, ID: id})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
@@ -387,7 +386,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		if !ok {
 			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "id", Message: "id is required"})
 		}
-		results, err := svc.GetBacklinks(ctx, service.GetBacklinksRequest{ID: id})
+		results, err := svc.GetBacklinks(ctx, service.GetBacklinksRequest{RepoID: opts.repo, ID: id})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
@@ -397,7 +396,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		if !ok {
 			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "id", Message: "id is required"})
 		}
-		result, err := svc.GetSnippet(ctx, service.SnippetRequest{ID: id, LineStart: opts.lineStart, LineEnd: opts.lineEnd})
+		result, err := svc.GetSnippet(ctx, service.SnippetRequest{RepoID: opts.repo, ID: id, LineStart: opts.lineStart, LineEnd: opts.lineEnd})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
@@ -410,13 +409,13 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		}
 		return renderJSON(stdout, result)
 	case "tasks":
-		results, err := svc.ListSources(ctx, service.ListSourcesRequest{Kind: "task", Status: opts.status, Limit: opts.limit, Offset: opts.offset})
+		results, err := svc.ListSources(ctx, service.ListSourcesRequest{RepoID: opts.repo, Kind: "task", Status: opts.status, Limit: opts.limit, Offset: opts.offset})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, results, renderListText)
 	case "tracks":
-		results, err := svc.ListSources(ctx, service.ListSourcesRequest{Kind: "track", Status: opts.status, Limit: opts.limit, Offset: opts.offset})
+		results, err := svc.ListSources(ctx, service.ListSourcesRequest{RepoID: opts.repo, Kind: "track", Status: opts.status, Limit: opts.limit, Offset: opts.offset})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
@@ -426,19 +425,19 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		if !ok {
 			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "id", Message: "id is required"})
 		}
-		result, err := svc.GetSyncStatus(ctx, service.SyncStatusRequest{ID: id})
+		result, err := svc.GetSyncStatus(ctx, service.SyncStatusRequest{RepoID: opts.repo, ID: id})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, renderSyncStatusText)
 	case "recent":
-		results, err := svc.RecentChanges(ctx, service.RecentChangesRequest{Kind: opts.kind, Status: opts.status, Limit: opts.limit, Offset: opts.offset})
+		results, err := svc.RecentChanges(ctx, service.RecentChangesRequest{RepoID: opts.repo, Kind: opts.kind, Status: opts.status, Limit: opts.limit, Offset: opts.offset})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, results, renderRecentText)
 	case "link-check":
-		result, err := svc.LinkCheck(ctx, service.LinkCheckRequest{Strict: opts.strict})
+		result, err := svc.LinkCheck(ctx, service.LinkCheckRequest{RepoID: opts.repo, Strict: opts.strict})
 		if opts.format == "json" {
 			renderJSON(stdout, result)
 		} else {
@@ -452,7 +451,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		}
 		return 0
 	case "stale-index":
-		result, err := svc.StaleIndex(ctx, service.StaleIndexRequest{Strict: opts.strict})
+		result, err := svc.StaleIndex(ctx, service.StaleIndexRequest{RepoID: opts.repo, Strict: opts.strict})
 		if opts.format == "json" {
 			renderJSON(stdout, result)
 		} else {
@@ -466,13 +465,13 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		}
 		return 0
 	case "sync":
-		result, err := svc.SyncToCache(ctx, service.SyncRequest{StableID: opts.id, RemoteAlias: opts.input, IdempotencyKey: opts.idempotencyKey})
+		result, err := svc.SyncToCache(ctx, service.SyncRequest{RepoID: opts.repo, StableID: opts.id, RemoteAlias: opts.input, IdempotencyKey: opts.idempotencyKey})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, renderSyncText)
 	case "export":
-		result, err := svc.ExportSnapshot(ctx, service.ExportSnapshotRequest{Format: opts.format, OutputPath: opts.output, IncludeBody: true})
+		result, err := svc.ExportSnapshot(ctx, service.ExportSnapshotRequest{RepoID: opts.repo, Format: opts.format, OutputPath: opts.output, IncludeBody: true})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
@@ -482,7 +481,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		}
 		return render(stdout, opts.format, result, renderExportText)
 	case "diff":
-		result, err := svc.DiffSnapshot(ctx, service.DiffSnapshotRequest{BaseSnapshotID: opts.base, HeadSnapshotID: opts.head, Base: snapshotRefFromPath(opts.base, opts.format), Head: snapshotRefFromPathOrCurrent(opts.head, opts.format), Format: opts.format})
+		result, err := svc.DiffSnapshot(ctx, service.DiffSnapshotRequest{RepoID: opts.repo, BaseSnapshotID: opts.base, HeadSnapshotID: opts.head, Base: snapshotRefFromPath(opts.base, opts.format), Head: snapshotRefFromPathOrCurrent(opts.head, opts.format), Format: opts.format})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
@@ -587,18 +586,18 @@ func renderSearchText(w io.Writer, results []service.SearchSourceResult) {
 		if result.LineStart != nil {
 			line = *result.LineStart
 		}
-		fmt.Fprintf(w, "%s:%d:%s\n", result.Path, line, result.Snippet)
+		fmt.Fprintf(w, "%s %s:%d:%s\n", result.RepoID, result.Path, line, result.Snippet)
 	}
 }
 
 func renderListText(w io.Writer, results []service.SourceSummary) {
 	for _, result := range results {
-		fmt.Fprintf(w, "%s %s %s %s %s\n", result.ID, result.Kind, result.Status, result.Path, result.Title)
+		fmt.Fprintf(w, "%s %s %s %s %s %s\n", result.RepoID, result.ID, result.Kind, result.Status, result.Path, result.Title)
 	}
 }
 
 func renderGetText(w io.Writer, result service.SourceRecord) {
-	fmt.Fprintf(w, "id: %s\npath: %s\nremote_alias: %s\ntitle: %s\nstatus: %s\nbody:\n%s\n", result.ID, result.Path, result.RemoteAlias, result.Title, result.Status, result.Body)
+	fmt.Fprintf(w, "repo_id: %s\nid: %s\npath: %s\nremote_alias: %s\ntitle: %s\nstatus: %s\nbody:\n%s\n", result.RepoID, result.ID, result.Path, result.RemoteAlias, result.Title, result.Status, result.Body)
 }
 
 func renderBacklinksText(w io.Writer, results []service.BacklinkResult) {
@@ -608,12 +607,12 @@ func renderBacklinksText(w io.Writer, results []service.BacklinkResult) {
 }
 
 func renderSyncStatusText(w io.Writer, result service.SyncStatusResult) {
-	fmt.Fprintf(w, "%s %s %s %s %s\n", result.SourceID, result.Status, result.RemoteType, result.RemoteID, result.LastFetchedAt.Format(time.RFC3339))
+	fmt.Fprintf(w, "%s %s %s %s %s %s\n", result.RepoID, result.SourceID, result.Status, result.RemoteType, result.RemoteID, result.LastFetchedAt.Format(time.RFC3339))
 }
 
 func renderRecentText(w io.Writer, results []service.RecentChangeResult) {
 	for _, result := range results {
-		fmt.Fprintf(w, "%s %s %s %s\n", result.UpdatedAt.UTC().Format(time.RFC3339), result.ID, result.Path, result.Title)
+		fmt.Fprintf(w, "%s %s %s %s %s\n", result.UpdatedAt.UTC().Format(time.RFC3339), result.RepoID, result.ID, result.Path, result.Title)
 	}
 }
 
@@ -703,6 +702,14 @@ func failureClass(err error) string {
 	if errors.As(err, &notFound) {
 		return "not_found"
 	}
+	var repoRequired service.ErrRepoRequired
+	if errors.As(err, &repoRequired) {
+		return "repo_required"
+	}
+	var ambiguous service.ErrAmbiguousAlias
+	if errors.As(err, &ambiguous) {
+		return "ambiguous_alias"
+	}
 	var invalid service.ErrInvalidQuery
 	if errors.As(err, &invalid) {
 		return "invalid_query"
@@ -725,6 +732,14 @@ func exitCode(err error) int {
 	var notFound service.ErrNotFound
 	if errors.As(err, &notFound) {
 		return 3
+	}
+	var repoRequired service.ErrRepoRequired
+	if errors.As(err, &repoRequired) {
+		return 4
+	}
+	var ambiguous service.ErrAmbiguousAlias
+	if errors.As(err, &ambiguous) {
+		return 4
 	}
 	var invalid service.ErrInvalidQuery
 	if errors.As(err, &invalid) {

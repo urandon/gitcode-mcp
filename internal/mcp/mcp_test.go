@@ -15,6 +15,55 @@ import (
 	"gitcode-mcp/internal/service"
 )
 
+func TestMCPRepoScopedDuplicateAlias(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-b", Owner: "owner-b", Name: "repo-b", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, repoID := range []string{"fixture-a", "fixture-b"} {
+		if err := store.UpsertSourceGraph(ctx, cache.SourceGraph{Source: cache.Source{RepoID: repoID, ID: "ISSUE-42", Kind: "issue", Path: repoID + "/issues/42.md", Title: repoID, Body: repoID + " body", Status: "open", ContentHash: repoID + "42"}, Identities: []cache.Identity{{RepoID: repoID, AliasType: "issue", Alias: "42", Remote: cache.RemoteAlias{Type: "issue", ID: "42"}}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := service.New(store)
+	srv, r, w, stderr := newPipeServer(svc)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); _ = srv.Serve() }()
+	call := func(repoID string) service.SourceRecord {
+		req := map[string]any{"jsonrpc": "2.0", "id": repoID, "method": "tools/call", "params": map[string]any{"name": "get_source", "arguments": map[string]any{"repo_id": repoID, "id": "issue:42"}}}
+		b, _ := json.Marshal(req)
+		_, _ = r.Write(append(b, '\n'))
+		line, err := readLine(w)
+		if err != nil {
+			t.Fatalf("read response: %v (stderr: %s)", err, stderr.String())
+		}
+		var resp response
+		if err := json.Unmarshal(line, &resp); err != nil || resp.Error != nil {
+			t.Fatalf("response=%s err=%v", string(line), err)
+		}
+		var tc toolCallResult
+		if err := json.Unmarshal(resp.Result, &tc); err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(tc.StructuredContent)
+		var record service.SourceRecord
+		if err := json.Unmarshal(raw, &record); err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	a := call("fixture-a")
+	b := call("fixture-b")
+	if a.RepoID != "fixture-a" || b.RepoID != "fixture-b" || a.Body == b.Body {
+		t.Fatalf("scoped MCP records crossed repos: a=%#v b=%#v", a, b)
+	}
+	r.Close()
+	wg.Wait()
+}
+
 func TestIntegration(t *testing.T) {
 	store := populatedStore(t)
 	svc := service.New(store)
@@ -92,7 +141,7 @@ func TestIntegration(t *testing.T) {
 		"method":  "tools/call",
 		"params": map[string]any{
 			"name":      "resolve_id",
-			"arguments": map[string]any{"id": "DOC-123"},
+			"arguments": map[string]any{"repo_id": "fixture-a", "id": "DOC-123"},
 		},
 	}
 	resolveResp := sendAndRecv(t, resolveReq)
@@ -169,7 +218,7 @@ func TestSchemasAndResults(t *testing.T) {
 	t.Run("search_sources defaults", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 10, "method": "tools/call",
-			"params": map[string]any{"name": "search_sources", "arguments": map[string]any{"query": "backlog"}},
+			"params": map[string]any{"name": "search_sources", "arguments": map[string]any{"repo_id": "fixture-a", "query": "backlog"}},
 		})
 		tc, err := callResponse(recv())
 		if err != nil {
@@ -192,7 +241,7 @@ func TestSchemasAndResults(t *testing.T) {
 	t.Run("list_sources defaults", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 11, "method": "tools/call",
-			"params": map[string]any{"name": "list_sources", "arguments": map[string]any{}},
+			"params": map[string]any{"name": "list_sources", "arguments": map[string]any{"repo_id": "fixture-a"}},
 		})
 		tc, err := callResponse(recv())
 		if err != nil {
@@ -215,7 +264,7 @@ func TestSchemasAndResults(t *testing.T) {
 	t.Run("get_source", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 12, "method": "tools/call",
-			"params": map[string]any{"name": "get_source", "arguments": map[string]any{"id": "DOC-123"}},
+			"params": map[string]any{"name": "get_source", "arguments": map[string]any{"repo_id": "fixture-a", "id": "DOC-123"}},
 		})
 		tc, err := callResponse(recv())
 		if err != nil {
@@ -232,7 +281,7 @@ func TestSchemasAndResults(t *testing.T) {
 	t.Run("source_backlinks", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 13, "method": "tools/call",
-			"params": map[string]any{"name": "source_backlinks", "arguments": map[string]any{"id": "DOC-123"}},
+			"params": map[string]any{"name": "source_backlinks", "arguments": map[string]any{"repo_id": "fixture-a", "id": "DOC-123"}},
 		})
 		tc, err := callResponse(recv())
 		if err != nil {
@@ -249,7 +298,7 @@ func TestSchemasAndResults(t *testing.T) {
 	t.Run("resolve_id", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 14, "method": "tools/call",
-			"params": map[string]any{"name": "resolve_id", "arguments": map[string]any{"id": "DOC-123"}},
+			"params": map[string]any{"name": "resolve_id", "arguments": map[string]any{"repo_id": "fixture-a", "id": "DOC-123"}},
 		})
 		tc, err := callResponse(recv())
 		if err != nil {
@@ -266,7 +315,7 @@ func TestSchemasAndResults(t *testing.T) {
 	t.Run("sync_status per-record", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 15, "method": "tools/call",
-			"params": map[string]any{"name": "sync_status", "arguments": map[string]any{"id": "DOC-123"}},
+			"params": map[string]any{"name": "sync_status", "arguments": map[string]any{"repo_id": "fixture-a", "id": "DOC-123"}},
 		})
 		tc, err := callResponse(recv())
 		if err != nil {
@@ -283,7 +332,7 @@ func TestSchemasAndResults(t *testing.T) {
 	t.Run("sync_status aggregate", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 16, "method": "tools/call",
-			"params": map[string]any{"name": "sync_status", "arguments": map[string]any{}},
+			"params": map[string]any{"name": "sync_status", "arguments": map[string]any{"repo_id": "fixture-a"}},
 		})
 		tc, err := callResponse(recv())
 		if err != nil {
@@ -300,7 +349,7 @@ func TestSchemasAndResults(t *testing.T) {
 	t.Run("export_snapshot defaults", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 17, "method": "tools/call",
-			"params": map[string]any{"name": "export_snapshot", "arguments": map[string]any{}},
+			"params": map[string]any{"name": "export_snapshot", "arguments": map[string]any{"repo_id": "fixture-a"}},
 		})
 		tc, err := callResponse(recv())
 		if err != nil {
@@ -320,7 +369,7 @@ func TestSchemasAndResults(t *testing.T) {
 	t.Run("diff_snapshot", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 18, "method": "tools/call",
-			"params": map[string]any{"name": "diff_snapshot", "arguments": map[string]any{"base_id": "abc", "head_id": "def"}},
+			"params": map[string]any{"name": "diff_snapshot", "arguments": map[string]any{"repo_id": "fixture-a", "base_id": "abc", "head_id": "def"}},
 		})
 		tc, err := callResponse(recv())
 		if err != nil {
@@ -361,7 +410,7 @@ func TestSchemasAndResults(t *testing.T) {
 	t.Run("missing query returns -32602", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 21, "method": "tools/call",
-			"params": map[string]any{"name": "search_sources", "arguments": map[string]any{}},
+			"params": map[string]any{"name": "search_sources", "arguments": map[string]any{"repo_id": "fixture-a"}},
 		})
 		var r response
 		json.Unmarshal(recv(), &r)
@@ -505,7 +554,7 @@ func TestFramingAndErrors(t *testing.T) {
 		}
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 50, "method": "tools/call",
-			"params": map[string]any{"name": "nonexistent_tool", "arguments": map[string]any{}},
+			"params": map[string]any{"name": "nonexistent_tool", "arguments": map[string]any{"repo_id": "fixture-a"}},
 		})
 		line, _ := readLine(w)
 		var resp response
@@ -548,7 +597,7 @@ func TestFramingAndErrors(t *testing.T) {
 		}
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 60, "method": "tools/call",
-			"params": map[string]any{"name": "get_source", "arguments": map[string]any{"id": "NONEXISTENT"}},
+			"params": map[string]any{"name": "get_source", "arguments": map[string]any{"repo_id": "fixture-a", "id": "NONEXISTENT"}},
 		})
 		line, _ := readLine(w)
 		var resp response
@@ -570,6 +619,9 @@ func TestFramingAndErrors(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer emptyStore.Close()
+		if err := emptyStore.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+			t.Fatal(err)
+		}
 		emptySvc := service.New(emptyStore)
 
 		srv, r, w, _ := newPipeServer(emptySvc)
@@ -583,7 +635,7 @@ func TestFramingAndErrors(t *testing.T) {
 		}
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 61, "method": "tools/call",
-			"params": map[string]any{"name": "list_sources", "arguments": map[string]any{}},
+			"params": map[string]any{"name": "list_sources", "arguments": map[string]any{"repo_id": "fixture-a"}},
 		})
 		line, _ := readLine(w)
 		var resp response
@@ -605,7 +657,7 @@ func TestFramingAndErrors(t *testing.T) {
 		wg.Add(1)
 		go func() { defer wg.Done(); _ = srv.Serve() }()
 
-		_, _ = r.Write([]byte(`{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"get_source","arguments":{"id":"NONEXISTENT"}}}` + "\n"))
+		_, _ = r.Write([]byte(`{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"get_source","arguments":{"repo_id":"fixture-a","id":"NONEXISTENT"}}}` + "\n"))
 		line, _ := readLine(w)
 		if !strings.Contains(string(line), "jsonrpc") {
 			t.Fatalf("stdout response missing jsonrpc field: %s", string(line))
@@ -674,14 +726,17 @@ func populatedStore(t *testing.T) cache.Store {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
 	graphs := []cache.SourceGraph{
 		{
-			Source:     cache.Source{ID: "DOC-123", Kind: "doc", Path: "docs/backlog.md", Title: "Backlog", Body: "backlog overview\nready task details\nmore context", Status: "active", Labels: []string{"knowledge"}, ContentHash: "h1", CreatedAt: now, UpdatedAt: now},
-			SyncStatus: &cache.SyncStatus{SourceID: "DOC-123", RemoteType: "issue", RemoteID: "100", RemoteRevision: "r1", Status: "fresh", LastFetchedAt: now},
+			Source:     cache.Source{RepoID: "fixture-a", ID: "DOC-123", Kind: "doc", Path: "docs/backlog.md", Title: "Backlog", Body: "backlog overview\nready task details\nmore context", Status: "active", Labels: []string{"knowledge"}, ContentHash: "h1", CreatedAt: now, UpdatedAt: now},
+			SyncStatus: &cache.SyncStatus{RepoID: "fixture-a", SourceID: "DOC-123", RemoteType: "issue", RemoteID: "100", RemoteRevision: "r1", Status: "fresh", LastFetchedAt: now},
 		},
 		{
-			Source: cache.Source{ID: "TASK-1", Kind: "task", Path: "project/tasks/task-1.md", Title: "Ready Task", Body: "task references DOC-123", Status: "ready", ContentHash: "h2", CreatedAt: now.Add(time.Minute), UpdatedAt: now.Add(time.Minute)},
-			Links:  []cache.Link{{SourceID: "TASK-1", TargetID: "DOC-123", Kind: "mentions", Text: "see DOC-123"}},
+			Source: cache.Source{RepoID: "fixture-a", ID: "TASK-1", Kind: "task", Path: "project/tasks/task-1.md", Title: "Ready Task", Body: "task references DOC-123", Status: "ready", ContentHash: "h2", CreatedAt: now.Add(time.Minute), UpdatedAt: now.Add(time.Minute)},
+			Links:  []cache.Link{{RepoID: "fixture-a", SourceID: "TASK-1", TargetID: "DOC-123", Kind: "mentions", Text: "see DOC-123"}},
 		},
 	}
 	for _, graph := range graphs {

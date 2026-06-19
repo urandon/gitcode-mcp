@@ -124,7 +124,25 @@ func IsConstraintError(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "constraint")
 }
 
+func (s *SQLiteStore) repoIDForSource(ctx context.Context, sourceID string) (string, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT repo_id FROM sources WHERE id = ? ORDER BY repo_id LIMIT 1`, sourceID)
+	var repoID string
+	if err := row.Scan(&repoID); err != nil {
+		if err == sql.ErrNoRows {
+			return "", notFoundErr("source", sourceID)
+		}
+		return "", err
+	}
+	return repoID, nil
+}
+
 func (s *SQLiteStore) UpsertIdentity(ctx context.Context, identity Identity) (err error) {
+	if identity.RepoID == "" && identity.SourceID != "" {
+		identity.RepoID, err = s.repoIDForSource(ctx, identity.SourceID)
+		if err != nil {
+			return err
+		}
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -137,14 +155,23 @@ func (s *SQLiteStore) UpsertIdentity(ctx context.Context, identity Identity) (er
 }
 
 func upsertIdentityTx(ctx context.Context, tx *sql.Tx, identity Identity) error {
-	return execTx(ctx, tx, `INSERT INTO identity_map (source_id, alias_type, alias, remote_type, remote_id)
-VALUES (?, ?, ?, ?, ?)
-ON CONFLICT(alias_type, alias) DO UPDATE SET source_id = excluded.source_id, remote_type = excluded.remote_type, remote_id = excluded.remote_id`,
-		identity.SourceID, identity.AliasType, identity.Alias, identity.Remote.Type, identity.Remote.ID)
+	return execTx(ctx, tx, `INSERT INTO identity_map (repo_id, source_id, alias_type, alias, remote_type, remote_id)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(repo_id, alias_type, alias) DO UPDATE SET source_id = excluded.source_id, remote_type = excluded.remote_type, remote_id = excluded.remote_id`,
+		identity.RepoID, identity.SourceID, identity.AliasType, identity.Alias, identity.Remote.Type, identity.Remote.ID)
 }
 
 func (s *SQLiteStore) GetIdentityMap(ctx context.Context, sourceID string) ([]Identity, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT source_id, alias_type, alias, remote_type, remote_id FROM identity_map WHERE source_id = ? ORDER BY alias_type, alias`, sourceID)
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, source_id, alias_type, alias, remote_type, remote_id FROM identity_map WHERE source_id = ? ORDER BY repo_id, alias_type, alias`, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanIdentities(rows)
+}
+
+func (s *SQLiteStore) GetIdentityMapScoped(ctx context.Context, repoID, sourceID string) ([]Identity, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, source_id, alias_type, alias, remote_type, remote_id FROM identity_map WHERE repo_id = ? AND source_id = ? ORDER BY alias_type, alias`, repoID, sourceID)
 	if err != nil {
 		return nil, err
 	}
@@ -153,9 +180,9 @@ func (s *SQLiteStore) GetIdentityMap(ctx context.Context, sourceID string) ([]Id
 }
 
 func (s *SQLiteStore) ResolveAlias(ctx context.Context, alias RemoteAlias) (Identity, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT source_id, alias_type, alias, remote_type, remote_id FROM identity_map WHERE (alias_type = ? AND alias = ?) OR (remote_type = ? AND remote_id = ?) ORDER BY source_id LIMIT 1`, alias.Type, alias.ID, alias.Type, alias.ID)
+	row := s.db.QueryRowContext(ctx, `SELECT repo_id, source_id, alias_type, alias, remote_type, remote_id FROM identity_map WHERE (alias_type = ? AND alias = ?) OR (remote_type = ? AND remote_id = ?) ORDER BY repo_id, source_id LIMIT 1`, alias.Type, alias.ID, alias.Type, alias.ID)
 	var identity Identity
-	if err := row.Scan(&identity.SourceID, &identity.AliasType, &identity.Alias, &identity.Remote.Type, &identity.Remote.ID); err != nil {
+	if err := row.Scan(&identity.RepoID, &identity.SourceID, &identity.AliasType, &identity.Alias, &identity.Remote.Type, &identity.Remote.ID); err != nil {
 		if err == sql.ErrNoRows {
 			return Identity{}, notFoundErr("alias", alias.Type+":"+alias.ID)
 		}
@@ -164,11 +191,32 @@ func (s *SQLiteStore) ResolveAlias(ctx context.Context, alias RemoteAlias) (Iden
 	return identity, nil
 }
 
+func (s *SQLiteStore) ResolveAliasScoped(ctx context.Context, repoID string, alias RemoteAlias) (Identity, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT repo_id, source_id, alias_type, alias, remote_type, remote_id FROM identity_map WHERE repo_id = ? AND ((alias_type = ? AND alias = ?) OR (remote_type = ? AND remote_id = ?)) ORDER BY source_id LIMIT 1`, repoID, alias.Type, alias.ID, alias.Type, alias.ID)
+	var identity Identity
+	if err := row.Scan(&identity.RepoID, &identity.SourceID, &identity.AliasType, &identity.Alias, &identity.Remote.Type, &identity.Remote.ID); err != nil {
+		if err == sql.ErrNoRows {
+			return Identity{}, notFoundErr("alias", alias.Type+":"+alias.ID)
+		}
+		return Identity{}, err
+	}
+	return identity, nil
+}
+
+func (s *SQLiteStore) DiagnoseAlias(ctx context.Context, alias RemoteAlias) ([]Identity, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, source_id, alias_type, alias, remote_type, remote_id FROM identity_map WHERE (alias_type = ? AND alias = ?) OR (remote_type = ? AND remote_id = ?) ORDER BY repo_id, source_id`, alias.Type, alias.ID, alias.Type, alias.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanIdentities(rows)
+}
+
 func scanIdentities(rows *sql.Rows) ([]Identity, error) {
 	var identities []Identity
 	for rows.Next() {
 		var identity Identity
-		if err := rows.Scan(&identity.SourceID, &identity.AliasType, &identity.Alias, &identity.Remote.Type, &identity.Remote.ID); err != nil {
+		if err := rows.Scan(&identity.RepoID, &identity.SourceID, &identity.AliasType, &identity.Alias, &identity.Remote.Type, &identity.Remote.ID); err != nil {
 			return nil, err
 		}
 		identities = append(identities, identity)
@@ -177,6 +225,12 @@ func scanIdentities(rows *sql.Rows) ([]Identity, error) {
 }
 
 func (s *SQLiteStore) UpsertLink(ctx context.Context, link Link) (err error) {
+	if link.RepoID == "" && link.SourceID != "" {
+		link.RepoID, err = s.repoIDForSource(ctx, link.SourceID)
+		if err != nil {
+			return err
+		}
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -189,11 +243,11 @@ func (s *SQLiteStore) UpsertLink(ctx context.Context, link Link) (err error) {
 }
 
 func upsertLinkTx(ctx context.Context, tx *sql.Tx, link Link) error {
-	return execTx(ctx, tx, `INSERT INTO links (source_id, target_id, kind, text) VALUES (?, ?, ?, ?) ON CONFLICT(source_id, target_id, kind, text) DO NOTHING`, link.SourceID, link.TargetID, link.Kind, link.Text)
+	return execTx(ctx, tx, `INSERT INTO links (repo_id, source_id, target_id, kind, text) VALUES (?, ?, ?, ?, ?) ON CONFLICT(repo_id, source_id, target_id, kind, text) DO NOTHING`, link.RepoID, link.SourceID, link.TargetID, link.Kind, link.Text)
 }
 
 func (s *SQLiteStore) ListLinks(ctx context.Context, filter LinkFilter) ([]Link, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT source_id, target_id, kind, text FROM links WHERE (? = '' OR source_id = ?) AND (? = '' OR target_id = ?) ORDER BY source_id, target_id, kind, text`, filter.SourceID, filter.SourceID, filter.TargetID, filter.TargetID)
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, source_id, target_id, kind, text FROM links WHERE (? = '' OR repo_id = ?) AND (? = '' OR source_id = ?) AND (? = '' OR target_id = ?) ORDER BY repo_id, source_id, target_id, kind, text`, filter.RepoID, filter.RepoID, filter.SourceID, filter.SourceID, filter.TargetID, filter.TargetID)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +255,7 @@ func (s *SQLiteStore) ListLinks(ctx context.Context, filter LinkFilter) ([]Link,
 	var links []Link
 	for rows.Next() {
 		var link Link
-		if err := rows.Scan(&link.SourceID, &link.TargetID, &link.Kind, &link.Text); err != nil {
+		if err := rows.Scan(&link.RepoID, &link.SourceID, &link.TargetID, &link.Kind, &link.Text); err != nil {
 			return nil, err
 		}
 		links = append(links, link)
@@ -210,7 +264,7 @@ func (s *SQLiteStore) ListLinks(ctx context.Context, filter LinkFilter) ([]Link,
 }
 
 func (s *SQLiteStore) GetBacklinks(ctx context.Context, targetID string) ([]Source, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT s.id, s.kind, s.path, s.title, s.body, s.status, s.labels, s.content_hash, s.created_at, s.updated_at FROM sources s JOIN links l ON l.source_id = s.id WHERE l.target_id = ? ORDER BY s.id`, targetID)
+	rows, err := s.db.QueryContext(ctx, `SELECT s.repo_id, s.id, s.kind, s.path, s.title, s.body, s.status, s.labels, s.content_hash, s.created_at, s.updated_at FROM sources s JOIN links l ON l.repo_id = s.repo_id AND l.source_id = s.id WHERE l.target_id = ? ORDER BY s.repo_id, s.id`, targetID)
 	if err != nil {
 		return nil, err
 	}
@@ -220,7 +274,27 @@ func (s *SQLiteStore) GetBacklinks(ctx context.Context, targetID string) ([]Sour
 		return nil, err
 	}
 	for i := range sources {
-		aliases, err := s.GetIdentityMap(ctx, sources[i].ID)
+		aliases, err := s.GetIdentityMapScoped(ctx, sources[i].RepoID, sources[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		sources[i].Aliases = aliases
+	}
+	return sources, nil
+}
+
+func (s *SQLiteStore) GetBacklinksScoped(ctx context.Context, repoID, targetID string) ([]Source, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT s.repo_id, s.id, s.kind, s.path, s.title, s.body, s.status, s.labels, s.content_hash, s.created_at, s.updated_at FROM sources s JOIN links l ON l.repo_id = s.repo_id AND l.source_id = s.id WHERE l.repo_id = ? AND l.target_id = ? ORDER BY s.id`, repoID, targetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	sources, err := scanSources(rows)
+	if err != nil {
+		return nil, err
+	}
+	for i := range sources {
+		aliases, err := s.GetIdentityMapScoped(ctx, repoID, sources[i].ID)
 		if err != nil {
 			return nil, err
 		}
@@ -230,6 +304,13 @@ func (s *SQLiteStore) GetBacklinks(ctx context.Context, targetID string) ([]Sour
 }
 
 func (s *SQLiteStore) UpsertChunk(ctx context.Context, chunk Chunk) (Chunk, error) {
+	if chunk.RepoID == "" && chunk.SourceID != "" {
+		repoID, err := s.repoIDForSource(ctx, chunk.SourceID)
+		if err != nil {
+			return Chunk{}, err
+		}
+		chunk.RepoID = repoID
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Chunk{}, err
@@ -262,24 +343,38 @@ func upsertChunkTx(ctx context.Context, tx *sql.Tx, chunk Chunk) (Chunk, error) 
 	if err != nil {
 		return Chunk{}, err
 	}
-	err = execTx(ctx, tx, `INSERT INTO chunks (id, source_id, content_hash, byte_start, byte_end, line_start, line_end, heading_path, text, normalized_text, inherited_metadata, outbound_links, resolved_aliases, embedding)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(id) DO UPDATE SET byte_end = excluded.byte_end, line_start = excluded.line_start, line_end = excluded.line_end, heading_path = excluded.heading_path, text = excluded.text, normalized_text = excluded.normalized_text, inherited_metadata = excluded.inherited_metadata, outbound_links = excluded.outbound_links, resolved_aliases = excluded.resolved_aliases, embedding = excluded.embedding`,
-		chunk.ID, chunk.SourceID, chunk.ContentHash, chunk.ByteStart, chunk.ByteEnd, chunk.LineStart, chunk.LineEnd, headingPath, chunk.Text, chunk.NormalizedText, metadata, outboundLinks, resolvedAliases, chunk.Embedding)
+	err = execTx(ctx, tx, `INSERT INTO chunks (repo_id, id, source_id, content_hash, byte_start, byte_end, line_start, line_end, heading_path, text, normalized_text, inherited_metadata, outbound_links, resolved_aliases, embedding)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(repo_id, id) DO UPDATE SET byte_end = excluded.byte_end, line_start = excluded.line_start, line_end = excluded.line_end, heading_path = excluded.heading_path, text = excluded.text, normalized_text = excluded.normalized_text, inherited_metadata = excluded.inherited_metadata, outbound_links = excluded.outbound_links, resolved_aliases = excluded.resolved_aliases, embedding = excluded.embedding`,
+		chunk.RepoID, chunk.ID, chunk.SourceID, chunk.ContentHash, chunk.ByteStart, chunk.ByteEnd, chunk.LineStart, chunk.LineEnd, headingPath, chunk.Text, chunk.NormalizedText, metadata, outboundLinks, resolvedAliases, chunk.Embedding)
 	return chunk, err
 }
 
 func (s *SQLiteStore) GetChunks(ctx context.Context, sourceID string) ([]Chunk, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, source_id, content_hash, byte_start, byte_end, line_start, line_end, heading_path, text, normalized_text, inherited_metadata, outbound_links, resolved_aliases, embedding FROM chunks WHERE source_id = ? ORDER BY byte_start`, sourceID)
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, id, source_id, content_hash, byte_start, byte_end, line_start, line_end, heading_path, text, normalized_text, inherited_metadata, outbound_links, resolved_aliases, embedding FROM chunks WHERE source_id = ? ORDER BY repo_id, byte_start`, sourceID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanChunks(rows)
+}
+
+func (s *SQLiteStore) GetChunksScoped(ctx context.Context, repoID, sourceID string) ([]Chunk, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, id, source_id, content_hash, byte_start, byte_end, line_start, line_end, heading_path, text, normalized_text, inherited_metadata, outbound_links, resolved_aliases, embedding FROM chunks WHERE repo_id = ? AND source_id = ? ORDER BY byte_start`, repoID, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanChunks(rows)
+}
+
+func scanChunks(rows *sql.Rows) ([]Chunk, error) {
 	var chunks []Chunk
 	for rows.Next() {
+		var err error
 		var chunk Chunk
 		var headingPath, metadata, outboundLinks, resolvedAliases string
-		if err := rows.Scan(&chunk.ID, &chunk.SourceID, &chunk.ContentHash, &chunk.ByteStart, &chunk.ByteEnd, &chunk.LineStart, &chunk.LineEnd, &headingPath, &chunk.Text, &chunk.NormalizedText, &metadata, &outboundLinks, &resolvedAliases, &chunk.Embedding); err != nil {
+		if err := rows.Scan(&chunk.RepoID, &chunk.ID, &chunk.SourceID, &chunk.ContentHash, &chunk.ByteStart, &chunk.ByteEnd, &chunk.LineStart, &chunk.LineEnd, &headingPath, &chunk.Text, &chunk.NormalizedText, &metadata, &outboundLinks, &resolvedAliases, &chunk.Embedding); err != nil {
 			return nil, err
 		}
 		if chunk.HeadingPath, err = unmarshalJSON[[]string](headingPath); err != nil {
@@ -300,6 +395,12 @@ func (s *SQLiteStore) GetChunks(ctx context.Context, sourceID string) ([]Chunk, 
 }
 
 func (s *SQLiteStore) RecordSyncEvent(ctx context.Context, event SyncEvent) (err error) {
+	if event.RepoID == "" && event.SourceID != "" {
+		event.RepoID, err = s.repoIDForSource(ctx, event.SourceID)
+		if err != nil {
+			return err
+		}
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -315,14 +416,14 @@ func recordSyncEventTx(ctx context.Context, tx *sql.Tx, event SyncEvent) error {
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Unix(0, 0).UTC()
 	}
-	return execTx(ctx, tx, `INSERT INTO sync_events (id, source_id, remote_type, remote_id, remote_revision, status, idempotency_key, message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status = excluded.status, message = excluded.message`, event.ID, event.SourceID, event.RemoteType, event.RemoteID, event.RemoteRevision, event.Status, event.IdempotencyKey, event.Message, event.CreatedAt.Format(time.RFC3339Nano))
+	return execTx(ctx, tx, `INSERT INTO sync_events (repo_id, id, source_id, remote_type, remote_id, remote_revision, status, idempotency_key, message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, id) DO UPDATE SET status = excluded.status, message = excluded.message`, event.RepoID, event.ID, event.SourceID, event.RemoteType, event.RemoteID, event.RemoteRevision, event.Status, event.IdempotencyKey, event.Message, event.CreatedAt.Format(time.RFC3339Nano))
 }
 
 func (s *SQLiteStore) GetSyncEventByKey(ctx context.Context, key string) (*SyncEvent, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, source_id, remote_type, remote_id, remote_revision, status, idempotency_key, message, created_at FROM sync_events WHERE idempotency_key = ? ORDER BY created_at DESC LIMIT 1`, key)
+	row := s.db.QueryRowContext(ctx, `SELECT repo_id, id, source_id, remote_type, remote_id, remote_revision, status, idempotency_key, message, created_at FROM sync_events WHERE idempotency_key = ? ORDER BY created_at DESC LIMIT 1`, key)
 	var event SyncEvent
 	var createdRaw string
-	if err := row.Scan(&event.ID, &event.SourceID, &event.RemoteType, &event.RemoteID, &event.RemoteRevision, &event.Status, &event.IdempotencyKey, &event.Message, &createdRaw); err != nil {
+	if err := row.Scan(&event.RepoID, &event.ID, &event.SourceID, &event.RemoteType, &event.RemoteID, &event.RemoteRevision, &event.Status, &event.IdempotencyKey, &event.Message, &createdRaw); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -333,10 +434,19 @@ func (s *SQLiteStore) GetSyncEventByKey(ctx context.Context, key string) (*SyncE
 }
 
 func (s *SQLiteStore) GetSyncStatus(ctx context.Context, sourceID string) (SyncStatus, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT source_id, remote_type, remote_id, remote_revision, status, last_fetched_at FROM remote_revisions WHERE source_id = ?`, sourceID)
+	row := s.db.QueryRowContext(ctx, `SELECT repo_id, source_id, remote_type, remote_id, remote_revision, status, last_fetched_at FROM remote_revisions WHERE source_id = ? ORDER BY repo_id LIMIT 1`, sourceID)
+	return scanSyncStatus(row, sourceID)
+}
+
+func (s *SQLiteStore) GetSyncStatusScoped(ctx context.Context, repoID, sourceID string) (SyncStatus, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT repo_id, source_id, remote_type, remote_id, remote_revision, status, last_fetched_at FROM remote_revisions WHERE repo_id = ? AND source_id = ?`, repoID, sourceID)
+	return scanSyncStatus(row, sourceID)
+}
+
+func scanSyncStatus(row *sql.Row, sourceID string) (SyncStatus, error) {
 	var status SyncStatus
 	var lastFetched string
-	if err := row.Scan(&status.SourceID, &status.RemoteType, &status.RemoteID, &status.RemoteRevision, &status.Status, &lastFetched); err != nil {
+	if err := row.Scan(&status.RepoID, &status.SourceID, &status.RemoteType, &status.RemoteID, &status.RemoteRevision, &status.Status, &lastFetched); err != nil {
 		if err == sql.ErrNoRows {
 			return SyncStatus{}, notFoundErr("sync status", sourceID)
 		}
@@ -350,10 +460,16 @@ func upsertSyncStatusTx(ctx context.Context, tx *sql.Tx, status SyncStatus) erro
 	if status.LastFetchedAt.IsZero() {
 		status.LastFetchedAt = time.Unix(0, 0).UTC()
 	}
-	return execTx(ctx, tx, `INSERT INTO remote_revisions (source_id, remote_type, remote_id, remote_revision, status, last_fetched_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(source_id) DO UPDATE SET remote_type = excluded.remote_type, remote_id = excluded.remote_id, remote_revision = excluded.remote_revision, status = excluded.status, last_fetched_at = excluded.last_fetched_at`, status.SourceID, status.RemoteType, status.RemoteID, status.RemoteRevision, status.Status, status.LastFetchedAt.Format(time.RFC3339Nano))
+	return execTx(ctx, tx, `INSERT INTO remote_revisions (repo_id, source_id, remote_type, remote_id, remote_revision, status, last_fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, source_id) DO UPDATE SET remote_type = excluded.remote_type, remote_id = excluded.remote_id, remote_revision = excluded.remote_revision, status = excluded.status, last_fetched_at = excluded.last_fetched_at`, status.RepoID, status.SourceID, status.RemoteType, status.RemoteID, status.RemoteRevision, status.Status, status.LastFetchedAt.Format(time.RFC3339Nano))
 }
 
 func (s *SQLiteStore) UpsertConflict(ctx context.Context, conflict Conflict) (err error) {
+	if conflict.RepoID == "" && conflict.SourceID != "" {
+		conflict.RepoID, err = s.repoIDForSource(ctx, conflict.SourceID)
+		if err != nil {
+			return err
+		}
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -369,11 +485,11 @@ func upsertConflictTx(ctx context.Context, tx *sql.Tx, conflict Conflict) error 
 	if conflict.CreatedAt.IsZero() {
 		conflict.CreatedAt = time.Unix(0, 0).UTC()
 	}
-	return execTx(ctx, tx, `INSERT INTO conflicts (id, source_id, kind, local_payload, remote_payload, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, local_payload = excluded.local_payload, remote_payload = excluded.remote_payload`, conflict.ID, conflict.SourceID, conflict.Kind, conflict.LocalPayload, conflict.RemotePayload, conflict.CreatedAt.Format(time.RFC3339Nano))
+	return execTx(ctx, tx, `INSERT INTO conflicts (repo_id, id, source_id, kind, local_payload, remote_payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, id) DO UPDATE SET kind = excluded.kind, local_payload = excluded.local_payload, remote_payload = excluded.remote_payload`, conflict.RepoID, conflict.ID, conflict.SourceID, conflict.Kind, conflict.LocalPayload, conflict.RemotePayload, conflict.CreatedAt.Format(time.RFC3339Nano))
 }
 
 func (s *SQLiteStore) GetConflicts(ctx context.Context, sourceID string) ([]Conflict, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, source_id, kind, local_payload, remote_payload, created_at FROM conflicts WHERE source_id = ? ORDER BY id`, sourceID)
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, id, source_id, kind, local_payload, remote_payload, created_at FROM conflicts WHERE source_id = ? ORDER BY repo_id, id`, sourceID)
 	if err != nil {
 		return nil, err
 	}
@@ -382,7 +498,7 @@ func (s *SQLiteStore) GetConflicts(ctx context.Context, sourceID string) ([]Conf
 	for rows.Next() {
 		var conflict Conflict
 		var created string
-		if err := rows.Scan(&conflict.ID, &conflict.SourceID, &conflict.Kind, &conflict.LocalPayload, &conflict.RemotePayload, &created); err != nil {
+		if err := rows.Scan(&conflict.RepoID, &conflict.ID, &conflict.SourceID, &conflict.Kind, &conflict.LocalPayload, &conflict.RemotePayload, &created); err != nil {
 			return nil, err
 		}
 		conflict.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)

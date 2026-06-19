@@ -12,19 +12,26 @@ type Store interface {
 	UpsertSourceGraph(context.Context, SourceGraph) error
 	UpsertSource(context.Context, Source) error
 	GetSource(context.Context, string) (Source, error)
+	GetSourceScoped(context.Context, string, string) (Source, error)
 	ListSources(context.Context, SourceFilter) ([]Source, error)
 	SearchSources(context.Context, SearchQuery) ([]SearchResult, error)
 	UpsertIdentity(context.Context, Identity) error
 	GetIdentityMap(context.Context, string) ([]Identity, error)
+	GetIdentityMapScoped(context.Context, string, string) ([]Identity, error)
 	ResolveAlias(context.Context, RemoteAlias) (Identity, error)
+	ResolveAliasScoped(context.Context, string, RemoteAlias) (Identity, error)
+	DiagnoseAlias(context.Context, RemoteAlias) ([]Identity, error)
 	UpsertLink(context.Context, Link) error
 	ListLinks(context.Context, LinkFilter) ([]Link, error)
 	GetBacklinks(context.Context, string) ([]Source, error)
+	GetBacklinksScoped(context.Context, string, string) ([]Source, error)
 	UpsertChunk(context.Context, Chunk) (Chunk, error)
 	GetChunks(context.Context, string) ([]Chunk, error)
+	GetChunksScoped(context.Context, string, string) ([]Chunk, error)
 	RecordSyncEvent(context.Context, SyncEvent) error
 	GetSyncEventByKey(context.Context, string) (*SyncEvent, error)
 	GetSyncStatus(context.Context, string) (SyncStatus, error)
+	GetSyncStatusScoped(context.Context, string, string) (SyncStatus, error)
 	UpsertConflict(context.Context, Conflict) error
 	GetConflicts(context.Context, string) ([]Conflict, error)
 	IntegrityCheck(context.Context) error
@@ -41,18 +48,19 @@ const (
 )
 
 type RepositoryBinding struct {
-	RepoID     string
-	Owner      string
-	Name       string
-	APIBaseURL string
-	Scopes     []RepositoryScope
+	RepoID      string
+	Owner       string
+	Name        string
+	APIBaseURL  string
+	Scopes      []RepositoryScope
 	DisplayName string
-	Aliases    []string
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	Aliases     []string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 type Source struct {
+	RepoID      string
 	ID          string
 	Kind        string
 	Path        string
@@ -67,18 +75,21 @@ type Source struct {
 }
 
 type SourceFilter struct {
+	RepoID string
 	Kind   string
 	Status string
 	Limit  int
 }
 
 type SearchQuery struct {
-	Query string
-	Kind  string
-	Limit int
+	RepoID string
+	Query  string
+	Kind   string
+	Limit  int
 }
 
 type SearchResult struct {
+	RepoID  string
 	ID      string
 	Path    string
 	Title   string
@@ -88,6 +99,7 @@ type SearchResult struct {
 }
 
 type Identity struct {
+	RepoID    string
 	SourceID  string
 	AliasType string
 	Alias     string
@@ -100,6 +112,7 @@ type RemoteAlias struct {
 }
 
 type Link struct {
+	RepoID   string
 	SourceID string
 	TargetID string
 	Kind     string
@@ -107,11 +120,13 @@ type Link struct {
 }
 
 type LinkFilter struct {
+	RepoID   string
 	SourceID string
 	TargetID string
 }
 
 type Chunk struct {
+	RepoID            string
 	ID                string
 	SourceID          string
 	ContentHash       string
@@ -129,6 +144,7 @@ type Chunk struct {
 }
 
 type SyncEvent struct {
+	RepoID         string
 	ID             string
 	SourceID       string
 	RemoteType     string
@@ -141,6 +157,7 @@ type SyncEvent struct {
 }
 
 type SyncStatus struct {
+	RepoID         string
 	SourceID       string
 	RemoteType     string
 	RemoteID       string
@@ -150,6 +167,7 @@ type SyncStatus struct {
 }
 
 type Conflict struct {
+	RepoID        string
 	ID            string
 	SourceID      string
 	Kind          string

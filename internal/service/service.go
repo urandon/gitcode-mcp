@@ -157,10 +157,14 @@ func sanitizeAPIBaseURL(raw string) string {
 }
 
 func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) ([]SearchSourceResult, error) {
+	repoID, err := s.requireRepo(ctx, req.RepoID, "search")
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(req.Query) == "" {
 		return nil, ErrInvalidQuery{Field: "query", Message: "query is required"}
 	}
-	results, err := s.store.SearchSources(ctx, cache.SearchQuery{Query: req.Query, Kind: req.Kind, Limit: req.Limit})
+	results, err := s.store.SearchSources(ctx, cache.SearchQuery{RepoID: repoID, Query: req.Query, Kind: req.Kind, Limit: req.Limit})
 	if err != nil {
 		return nil, normalizeError(err, "search", req.Query)
 	}
@@ -170,13 +174,13 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 	out := make([]SearchSourceResult, 0, len(results))
 	updated := map[string]time.Time{}
 	for _, result := range results {
-		source, err := s.store.GetSource(ctx, result.ID)
+		source, err := s.store.GetSourceScoped(ctx, repoID, result.ID)
 		if err != nil {
 			return nil, normalizeError(err, "source", result.ID)
 		}
 		updated[result.ID] = source.UpdatedAt.UTC()
 		line := nullableLine(result.Line)
-		out = append(out, SearchSourceResult{ID: result.ID, Path: result.Path, Title: result.Title, Kind: source.Kind, Status: source.Status, Snippet: result.Snippet, LineStart: line, LineEnd: line, Score: result.Score})
+		out = append(out, SearchSourceResult{RepoID: source.RepoID, ID: result.ID, Path: result.Path, Title: result.Title, Kind: source.Kind, Status: source.Status, Snippet: result.Snippet, LineStart: line, LineEnd: line, Score: result.Score})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Score != out[j].Score {
@@ -194,19 +198,23 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 }
 
 func (s *Service) GetSource(ctx context.Context, req GetSourceRequest) (SourceRecord, error) {
-	id, err := s.resolveStableID(ctx, req.ID, req.AliasType, req.AliasID)
+	repoID, err := s.requireRepo(ctx, req.RepoID, "get")
 	if err != nil {
 		return SourceRecord{}, err
 	}
-	source, err := s.store.GetSource(ctx, id)
+	id, err := s.resolveScopedStableID(ctx, repoID, req.ID, req.AliasType, req.AliasID)
+	if err != nil {
+		return SourceRecord{}, err
+	}
+	source, err := s.store.GetSourceScoped(ctx, repoID, id)
 	if err != nil {
 		return SourceRecord{}, normalizeError(err, "source", id)
 	}
-	links, err := s.store.ListLinks(ctx, cache.LinkFilter{SourceID: source.ID})
+	links, err := s.store.ListLinks(ctx, cache.LinkFilter{RepoID: repoID, SourceID: source.ID})
 	if err != nil {
 		return SourceRecord{}, normalizeError(err, "links", source.ID)
 	}
-	backlinks, err := s.GetBacklinks(ctx, GetBacklinksRequest{ID: source.ID})
+	backlinks, err := s.GetBacklinks(ctx, GetBacklinksRequest{RepoID: repoID, ID: source.ID})
 	if err != nil && !IsCacheEmpty(err) {
 		return SourceRecord{}, err
 	}
@@ -214,7 +222,11 @@ func (s *Service) GetSource(ctx context.Context, req GetSourceRequest) (SourceRe
 }
 
 func (s *Service) ListSources(ctx context.Context, req ListSourcesRequest) ([]SourceSummary, error) {
-	sources, err := s.store.ListSources(ctx, cache.SourceFilter{Kind: req.Kind, Status: req.Status, Limit: req.limitPlusOffset()})
+	repoID, err := s.requireRepo(ctx, req.RepoID, "list")
+	if err != nil {
+		return nil, err
+	}
+	sources, err := s.store.ListSources(ctx, cache.SourceFilter{RepoID: repoID, Kind: req.Kind, Status: req.Status, Limit: req.limitPlusOffset()})
 	if err != nil {
 		return nil, normalizeError(err, "sources", "")
 	}
@@ -236,11 +248,15 @@ func (s *Service) ListSources(ctx context.Context, req ListSourcesRequest) ([]So
 }
 
 func (s *Service) GetBacklinks(ctx context.Context, req GetBacklinksRequest) ([]BacklinkResult, error) {
-	id, err := s.resolveStableID(ctx, req.ID, req.AliasType, req.AliasID)
+	repoID, err := s.requireRepo(ctx, req.RepoID, "backlinks")
 	if err != nil {
 		return nil, err
 	}
-	backlinks, err := s.store.GetBacklinks(ctx, id)
+	id, err := s.resolveScopedStableID(ctx, repoID, req.ID, req.AliasType, req.AliasID)
+	if err != nil {
+		return nil, err
+	}
+	backlinks, err := s.store.GetBacklinksScoped(ctx, repoID, id)
 	if err != nil {
 		return nil, normalizeError(err, "backlinks", id)
 	}
@@ -253,50 +269,66 @@ func (s *Service) GetBacklinks(ctx context.Context, req GetBacklinksRequest) ([]
 }
 
 func (s *Service) ResolveID(ctx context.Context, req ResolveIDRequest) (ResolvedID, error) {
-	id, err := s.resolveStableID(ctx, req.ID, req.AliasType, req.AliasID)
+	repoID, err := s.requireRepo(ctx, req.RepoID, "resolve")
 	if err != nil {
 		return ResolvedID{}, err
 	}
-	source, err := s.store.GetSource(ctx, id)
+	id, err := s.resolveScopedStableID(ctx, repoID, req.ID, req.AliasType, req.AliasID)
+	if err != nil {
+		return ResolvedID{}, err
+	}
+	source, err := s.store.GetSourceScoped(ctx, repoID, id)
 	if err != nil {
 		return ResolvedID{}, normalizeError(err, "source", id)
 	}
-	return ResolvedID{ID: source.ID, Path: source.Path, RemoteAlias: remoteAlias(source.Aliases), Kind: source.Kind, Title: source.Title}, nil
+	return ResolvedID{RepoID: source.RepoID, ID: source.ID, Path: source.Path, RemoteAlias: remoteAlias(source.Aliases), Kind: source.Kind, Title: source.Title}, nil
 }
 
 func (s *Service) GetSnippet(ctx context.Context, req SnippetRequest) (SnippetResult, error) {
-	id, err := s.resolveStableID(ctx, req.ID, req.AliasType, req.AliasID)
+	repoID, err := s.requireRepo(ctx, req.RepoID, "snippet")
+	if err != nil {
+		return SnippetResult{}, err
+	}
+	id, err := s.resolveScopedStableID(ctx, repoID, req.ID, req.AliasType, req.AliasID)
 	if err != nil {
 		return SnippetResult{}, err
 	}
 	if req.LineStart > 0 || req.LineEnd > 0 {
-		return s.snippetFromLines(ctx, id, req.LineStart, req.LineEnd)
+		return s.snippetFromLines(ctx, repoID, id, req.LineStart, req.LineEnd)
 	}
 	if req.ChunkID != "" {
-		return s.snippetFromChunk(ctx, id, req.ChunkID)
+		return s.snippetFromChunk(ctx, repoID, id, req.ChunkID)
 	}
 	return SnippetResult{}, ErrInvalidQuery{Field: "range", Message: "line range or chunk id is required"}
 }
 
 func (s *Service) GetSyncStatus(ctx context.Context, req SyncStatusRequest) (SyncStatusResult, error) {
-	id, err := s.resolveStableID(ctx, req.ID, req.AliasType, req.AliasID)
+	repoID, err := s.requireRepo(ctx, req.RepoID, "sync-status")
 	if err != nil {
 		return SyncStatusResult{}, err
 	}
-	source, err := s.store.GetSource(ctx, id)
+	id, err := s.resolveScopedStableID(ctx, repoID, req.ID, req.AliasType, req.AliasID)
+	if err != nil {
+		return SyncStatusResult{}, err
+	}
+	source, err := s.store.GetSourceScoped(ctx, repoID, id)
 	if err != nil {
 		return SyncStatusResult{}, normalizeError(err, "source", id)
 	}
-	status, err := s.store.GetSyncStatus(ctx, id)
+	status, err := s.store.GetSyncStatusScoped(ctx, repoID, id)
 	if err != nil {
 		return SyncStatusResult{}, normalizeError(err, "sync status", id)
 	}
 	freshness := freshnessFor(source, status)
-	return SyncStatusResult{SourceID: status.SourceID, RemoteType: status.RemoteType, RemoteID: status.RemoteID, RemoteRevision: status.RemoteRevision, Status: status.Status, Freshness: freshness, LocalUpdatedAt: source.UpdatedAt.UTC(), LastFetchedAt: status.LastFetchedAt.UTC()}, nil
+	return SyncStatusResult{RepoID: status.RepoID, SourceID: status.SourceID, RemoteType: status.RemoteType, RemoteID: status.RemoteID, RemoteRevision: status.RemoteRevision, Status: status.Status, Freshness: freshness, LocalUpdatedAt: source.UpdatedAt.UTC(), LastFetchedAt: status.LastFetchedAt.UTC()}, nil
 }
 
 func (s *Service) RecentChanges(ctx context.Context, req RecentChangesRequest) ([]RecentChangeResult, error) {
-	sources, err := s.store.ListSources(ctx, cache.SourceFilter{Kind: req.Kind, Status: req.Status})
+	repoID, err := s.requireRepo(ctx, req.RepoID, "recent")
+	if err != nil {
+		return nil, err
+	}
+	sources, err := s.store.ListSources(ctx, cache.SourceFilter{RepoID: repoID, Kind: req.Kind, Status: req.Status})
 	if err != nil {
 		return nil, normalizeError(err, "sources", "")
 	}
@@ -312,21 +344,25 @@ func (s *Service) RecentChanges(ctx context.Context, req RecentChangesRequest) (
 	sources = sliceSources(sources, req.Offset, req.Limit)
 	out := make([]RecentChangeResult, 0, len(sources))
 	for _, source := range sources {
-		out = append(out, RecentChangeResult{ID: source.ID, Path: source.Path, Title: source.Title, Kind: source.Kind, Status: source.Status, UpdatedAt: source.UpdatedAt.UTC()})
+		out = append(out, RecentChangeResult{RepoID: source.RepoID, ID: source.ID, Path: source.Path, Title: source.Title, Kind: source.Kind, Status: source.Status, UpdatedAt: source.UpdatedAt.UTC()})
 	}
 	return out, nil
 }
 
 func (s *Service) LinkCheck(ctx context.Context, req LinkCheckRequest) (LinkCheckResult, error) {
-	links, err := s.store.ListLinks(ctx, cache.LinkFilter{})
+	repoID, err := s.requireRepo(ctx, req.RepoID, "link-check")
+	if err != nil {
+		return LinkCheckResult{}, err
+	}
+	links, err := s.store.ListLinks(ctx, cache.LinkFilter{RepoID: repoID})
 	if err != nil {
 		return LinkCheckResult{}, normalizeError(err, "links", "")
 	}
 	result := LinkCheckResult{CheckedCount: len(links), SuggestedAliases: map[string][]string{}}
 	for _, link := range links {
-		if _, err := s.store.GetSource(ctx, link.TargetID); err != nil {
+		if _, err := s.store.GetSourceScoped(ctx, repoID, link.TargetID); err != nil {
 			if isCacheNotFound(err) {
-				result.BrokenLinks = append(result.BrokenLinks, BrokenLinkResult{SourceID: link.SourceID, TargetID: link.TargetID, Kind: link.Kind, Text: link.Text})
+				result.BrokenLinks = append(result.BrokenLinks, BrokenLinkResult{RepoID: link.RepoID, SourceID: link.SourceID, TargetID: link.TargetID, Kind: link.Kind, Text: link.Text})
 				continue
 			}
 			return LinkCheckResult{}, normalizeError(err, "source", link.TargetID)
@@ -340,14 +376,18 @@ func (s *Service) LinkCheck(ctx context.Context, req LinkCheckRequest) (LinkChec
 }
 
 func (s *Service) StaleIndex(ctx context.Context, req StaleIndexRequest) (StaleIndexResult, error) {
-	links, err := s.store.ListLinks(ctx, cache.LinkFilter{})
+	repoID, err := s.requireRepo(ctx, req.RepoID, "stale-index")
+	if err != nil {
+		return StaleIndexResult{}, err
+	}
+	links, err := s.store.ListLinks(ctx, cache.LinkFilter{RepoID: repoID})
 	if err != nil {
 		return StaleIndexResult{}, normalizeError(err, "links", "")
 	}
 	missing := map[string]struct{}{}
 	affected := map[string]struct{}{}
 	for _, link := range links {
-		if _, err := s.store.GetSource(ctx, link.TargetID); err != nil {
+		if _, err := s.store.GetSourceScoped(ctx, repoID, link.TargetID); err != nil {
 			if isCacheNotFound(err) {
 				missing[link.TargetID] = struct{}{}
 				affected[link.SourceID] = struct{}{}
@@ -405,11 +445,11 @@ func (s *Service) DiffSnapshot(ctx context.Context, req DiffSnapshotRequest) (Di
 	if headRef.Kind == "" {
 		headRef = SnapshotRef{Kind: "current", Format: format}
 	}
-	base, err := s.loadSnapshotRef(ctx, baseRef, format)
+	base, err := s.loadSnapshotRef(ctx, req.RepoID, baseRef, format)
 	if err != nil {
 		return DiffSnapshotResult{}, err
 	}
-	head, err := s.loadSnapshotRef(ctx, headRef, format)
+	head, err := s.loadSnapshotRef(ctx, req.RepoID, headRef, format)
 	if err != nil {
 		return DiffSnapshotResult{}, err
 	}
@@ -447,7 +487,11 @@ func (s *Service) Index(ctx context.Context, req OperationRequest) (OperationRes
 	if err := ctx.Err(); err != nil {
 		return OperationResult{}, err
 	}
-	sources, err := s.store.ListSources(ctx, cache.SourceFilter{})
+	repoID, err := s.requireRepo(ctx, req.RepoID, "index")
+	if err != nil {
+		return OperationResult{}, err
+	}
+	sources, err := s.store.ListSources(ctx, cache.SourceFilter{RepoID: repoID})
 	if err != nil {
 		if isCacheNotFound(err) {
 			return OperationResult{Command: "index", Status: "ok", Evidence: operationMode(req.Mode), GeneratedAt: s.now().UTC()}, nil
@@ -458,7 +502,7 @@ func (s *Service) Index(ctx context.Context, req OperationRequest) (OperationRes
 	for _, source := range sources {
 		chunks := index.ChunkSource(indexSourceRecord(source), index.ParseSource(indexSourceRecord(source)))
 		for _, chunk := range chunks {
-			if _, err := s.store.UpsertChunk(ctx, cache.Chunk{ID: chunk.ID, SourceID: chunk.SourceID, ContentHash: chunk.ContentHash, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, HeadingPath: append([]string(nil), chunk.HeadingPath...), Text: chunk.Text, NormalizedText: chunk.NormalizedText, InheritedMetadata: copyStringMap(chunk.InheritedMetadata), OutboundLinks: sortedStrings(chunk.OutboundLinks), ResolvedAliases: copyStringMap(chunk.ResolvedAliases), Embedding: append([]byte(nil), chunk.Embedding...)}); err != nil {
+			if _, err := s.store.UpsertChunk(ctx, cache.Chunk{RepoID: source.RepoID, ID: chunk.ID, SourceID: chunk.SourceID, ContentHash: chunk.ContentHash, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, HeadingPath: append([]string(nil), chunk.HeadingPath...), Text: chunk.Text, NormalizedText: chunk.NormalizedText, InheritedMetadata: copyStringMap(chunk.InheritedMetadata), OutboundLinks: sortedStrings(chunk.OutboundLinks), ResolvedAliases: copyStringMap(chunk.ResolvedAliases), Embedding: append([]byte(nil), chunk.Embedding...)}); err != nil {
 				return OperationResult{}, normalizeError(err, "chunk", chunk.ID)
 			}
 		}
@@ -471,6 +515,11 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 	if err := ctx.Err(); err != nil {
 		return SyncResult{}, err
 	}
+	repoID, err := s.requireRepo(ctx, req.RepoID, "sync")
+	if err != nil {
+		return SyncResult{}, err
+	}
+	req.RepoID = repoID
 	key := strings.TrimSpace(req.IdempotencyKey)
 	if key == "" {
 		key = s.syncIdempotencyKey(req)
@@ -496,9 +545,12 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 	if err != nil {
 		return SyncResult{}, err
 	}
+	if err := s.validateRepoScope(ctx, repoID, remoteType); err != nil {
+		return SyncResult{}, err
+	}
 	eventID := syncEventID(key)
 	now := s.now().UTC()
-	inProgress := cache.SyncEvent{ID: eventID, SourceID: s.syncEventSourceID(ctx, req, remoteType, remoteID), RemoteType: remoteType, RemoteID: remoteID, Status: "in_progress", IdempotencyKey: key, Message: "sync started", CreatedAt: now}
+	inProgress := cache.SyncEvent{RepoID: repoID, ID: eventID, SourceID: s.syncEventSourceID(ctx, req, remoteType, remoteID), RemoteType: remoteType, RemoteID: remoteID, Status: "in_progress", IdempotencyKey: key, Message: "sync started", CreatedAt: now}
 	if err := s.store.RecordSyncEvent(ctx, inProgress); err != nil {
 		return SyncResult{}, err
 	}
@@ -525,6 +577,9 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 }
 
 func (s *Service) CreateIssue(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if err := s.validateWriteScope(ctx, req, RepositoryScopeIssues); err != nil {
+		return WriteCommandResult{}, err
+	}
 	if strings.TrimSpace(req.Title) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "title", Message: "title is required"}
 	}
@@ -532,6 +587,9 @@ func (s *Service) CreateIssue(ctx context.Context, req WriteCommandRequest) (Wri
 }
 
 func (s *Service) UpdateIssue(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if err := s.validateWriteScope(ctx, req, RepositoryScopeIssues); err != nil {
+		return WriteCommandResult{}, err
+	}
 	if req.Number == 0 && strings.TrimSpace(req.ID) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "issue", Message: "number or id is required"}
 	}
@@ -539,6 +597,9 @@ func (s *Service) UpdateIssue(ctx context.Context, req WriteCommandRequest) (Wri
 }
 
 func (s *Service) CreatePage(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if err := s.validateWriteScope(ctx, req, RepositoryScopeWiki); err != nil {
+		return WriteCommandResult{}, err
+	}
 	if strings.TrimSpace(req.Title) == "" || strings.TrimSpace(req.Body) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "page", Message: "title and body are required"}
 	}
@@ -546,6 +607,9 @@ func (s *Service) CreatePage(ctx context.Context, req WriteCommandRequest) (Writ
 }
 
 func (s *Service) UpdatePage(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if err := s.validateWriteScope(ctx, req, RepositoryScopeWiki); err != nil {
+		return WriteCommandResult{}, err
+	}
 	if strings.TrimSpace(req.Slug) == "" && strings.TrimSpace(req.ID) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "page", Message: "slug or id is required"}
 	}
@@ -553,6 +617,9 @@ func (s *Service) UpdatePage(ctx context.Context, req WriteCommandRequest) (Writ
 }
 
 func (s *Service) AddComment(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if err := s.validateWriteScope(ctx, req, RepositoryScopeIssues); err != nil {
+		return WriteCommandResult{}, err
+	}
 	if (req.Number == 0 && strings.TrimSpace(req.ID) == "") || strings.TrimSpace(req.Body) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "comment", Message: "issue and body are required"}
 	}
@@ -560,6 +627,9 @@ func (s *Service) AddComment(ctx context.Context, req WriteCommandRequest) (Writ
 }
 
 func (s *Service) AddLabel(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if err := s.validateWriteScope(ctx, req, RepositoryScopeIssues); err != nil {
+		return WriteCommandResult{}, err
+	}
 	if (req.Number == 0 && strings.TrimSpace(req.ID) == "") || strings.TrimSpace(req.Label) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "label", Message: "issue and label are required"}
 	}
@@ -649,7 +719,7 @@ func (s *Service) syncEventSourceID(ctx context.Context, req SyncRequest, remote
 	if req.StableID != "" {
 		return req.StableID
 	}
-	identity, err := s.store.ResolveAlias(ctx, cache.RemoteAlias{Type: remoteType, ID: remoteID})
+	identity, err := s.store.ResolveAliasScoped(ctx, req.RepoID, cache.RemoteAlias{Type: remoteType, ID: remoteID})
 	if err == nil && identity.SourceID != "" {
 		return identity.SourceID
 	}
@@ -671,7 +741,7 @@ func (s *Service) syncTarget(ctx context.Context, req SyncRequest) (string, stri
 		return parts[0], parts[1], nil
 	}
 	if req.StableID != "" {
-		source, err := s.store.GetSource(ctx, req.StableID)
+		source, err := s.store.GetSourceScoped(ctx, req.RepoID, req.StableID)
 		if err != nil {
 			return "", "", normalizeError(err, "source", req.StableID)
 		}
@@ -754,9 +824,9 @@ func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, r
 	}
 	stableID := req.StableID
 	if stableID == "" {
-		stableID = resolveOrFallback(ctx, s.store, remoteType, remoteID, fallbackSourceID(remoteType, remoteID))
+		stableID = s.resolveOrFallback(ctx, req.RepoID, remoteType, remoteID, fallbackSourceID(remoteType, remoteID))
 	}
-	if err := s.guardRemoteAlias(ctx, remoteType, remoteID, stableID); err != nil {
+	if err := s.guardRemoteAlias(ctx, req.RepoID, remoteType, remoteID, stableID); err != nil {
 		return cache.SourceGraph{}, SyncCounts{}, err
 	}
 	now := s.now().UTC()
@@ -769,7 +839,7 @@ func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, r
 		created = updated
 	}
 	hash := contentHash(issue.Title, body, issue.State, issue.Labels)
-	existing, err := s.store.GetSource(ctx, stableID)
+	existing, err := s.store.GetSourceScoped(ctx, req.RepoID, stableID)
 	counts := SyncCounts{Fetched: 1}
 	if err == nil && existing.ContentHash == hash {
 		counts.Skipped = 1
@@ -787,7 +857,7 @@ func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, r
 	if status == "" {
 		status = "open"
 	}
-	graph := cache.SourceGraph{Source: cache.Source{ID: stableID, Kind: "issue", Path: "issues/" + remoteID + ".md", Title: issue.Title, Body: body, Status: status, Labels: issue.Labels, ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, SyncStatus: &cache.SyncStatus{SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: hash, Status: "fresh", LastFetchedAt: now}}
+	graph := cache.SourceGraph{Source: cache.Source{RepoID: req.RepoID, ID: stableID, Kind: "issue", Path: "issues/" + remoteID + ".md", Title: issue.Title, Body: body, Status: status, Labels: issue.Labels, ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{RepoID: req.RepoID, SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, SyncStatus: &cache.SyncStatus{RepoID: req.RepoID, SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: hash, Status: "fresh", LastFetchedAt: now}}
 	return graph, counts, nil
 }
 
@@ -798,9 +868,9 @@ func (s *Service) stageWiki(ctx context.Context, req SyncRequest, remoteType, re
 	}
 	stableID := req.StableID
 	if stableID == "" {
-		stableID = resolveOrFallback(ctx, s.store, remoteType, remoteID, fallbackSourceID(remoteType, remoteID))
+		stableID = s.resolveOrFallback(ctx, req.RepoID, remoteType, remoteID, fallbackSourceID(remoteType, remoteID))
 	}
-	if err := s.guardRemoteAlias(ctx, remoteType, remoteID, stableID); err != nil {
+	if err := s.guardRemoteAlias(ctx, req.RepoID, remoteType, remoteID, stableID); err != nil {
 		return cache.SourceGraph{}, SyncCounts{}, err
 	}
 	now := s.now().UTC()
@@ -817,7 +887,7 @@ func (s *Service) stageWiki(ctx context.Context, req SyncRequest, remoteType, re
 		revision = contentHash(page.Title, body)
 	}
 	hash := contentHash(page.Title, body, revision)
-	existing, err := s.store.GetSource(ctx, stableID)
+	existing, err := s.store.GetSourceScoped(ctx, req.RepoID, stableID)
 	counts := SyncCounts{Fetched: 1}
 	if err == nil && existing.ContentHash == hash {
 		counts.Skipped = 1
@@ -828,12 +898,42 @@ func (s *Service) stageWiki(ctx context.Context, req SyncRequest, remoteType, re
 	} else {
 		return cache.SourceGraph{}, SyncCounts{}, err
 	}
-	graph := cache.SourceGraph{Source: cache.Source{ID: stableID, Kind: "wiki", Path: "wiki/" + remoteID + ".md", Title: page.Title, Body: body, Status: "fresh", ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, SyncStatus: &cache.SyncStatus{SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}
+	graph := cache.SourceGraph{Source: cache.Source{RepoID: req.RepoID, ID: stableID, Kind: "wiki", Path: "wiki/" + remoteID + ".md", Title: page.Title, Body: body, Status: "fresh", ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{RepoID: req.RepoID, SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, SyncStatus: &cache.SyncStatus{RepoID: req.RepoID, SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}
 	return graph, counts, nil
 }
 
-func (s *Service) guardRemoteAlias(ctx context.Context, remoteType, remoteID, stableID string) error {
-	identity, err := s.store.ResolveAlias(ctx, cache.RemoteAlias{Type: remoteType, ID: remoteID})
+func (s *Service) BuildAdapterRoute(ctx context.Context, repoID string, requestedScope RepositoryScope) (RepositoryRoute, error) {
+	repoID, err := s.requireRepo(ctx, repoID, "route")
+	if err != nil {
+		return RepositoryRoute{}, err
+	}
+	repo, err := s.store.GetRepository(ctx, repoID)
+	if err != nil {
+		return RepositoryRoute{}, normalizeError(err, "repository", repoID)
+	}
+	for _, scope := range repo.Scopes {
+		if RepositoryScope(scope) == requestedScope {
+			route := RepositoryRoute{RepoID: repo.RepoID, Owner: repo.Owner, Name: repo.Name, APIBaseURL: repo.APIBaseURL}
+			for _, configured := range repo.Scopes {
+				route.Scopes = append(route.Scopes, RepositoryScope(configured))
+			}
+			return route, nil
+		}
+	}
+	return RepositoryRoute{}, ErrInvalidQuery{Field: "scope", Message: string(requestedScope) + " scope is not enabled for repo " + repoID}
+}
+
+func (s *Service) validateRepoScope(ctx context.Context, repoID, remoteType string) error {
+	want := RepositoryScopeIssues
+	if remoteType == "wiki" || remoteType == "page" || remoteType == "remote" {
+		want = RepositoryScopeWiki
+	}
+	_, err := s.BuildAdapterRoute(ctx, repoID, want)
+	return err
+}
+
+func (s *Service) guardRemoteAlias(ctx context.Context, repoID, remoteType, remoteID, stableID string) error {
+	identity, err := s.store.ResolveAliasScoped(ctx, repoID, cache.RemoteAlias{Type: remoteType, ID: remoteID})
 	if err == nil && identity.SourceID != "" && identity.SourceID != stableID {
 		return gitcode.ErrRemoteCollision{Alias: remoteType + ":" + remoteID, ExistingID: identity.SourceID, NewID: stableID}
 	}
@@ -843,8 +943,8 @@ func (s *Service) guardRemoteAlias(ctx context.Context, remoteType, remoteID, st
 	return nil
 }
 
-func resolveOrFallback(ctx context.Context, store cache.Store, remoteType, remoteID, fallback string) string {
-	identity, err := store.ResolveAlias(ctx, cache.RemoteAlias{Type: remoteType, ID: remoteID})
+func (s *Service) resolveOrFallback(ctx context.Context, repoID, remoteType, remoteID, fallback string) string {
+	identity, err := s.store.ResolveAliasScoped(ctx, repoID, cache.RemoteAlias{Type: remoteType, ID: remoteID})
 	if err == nil && identity.SourceID != "" {
 		return identity.SourceID
 	}
@@ -954,11 +1054,11 @@ func (s *Service) markMissingRemote(ctx context.Context, event cache.SyncEvent, 
 	if !errors.As(failure, &syncFailure) || syncFailure.Mode != "remote_not_found" || event.SourceID == "" {
 		return nil
 	}
-	source, err := s.store.GetSource(ctx, event.SourceID)
+	source, err := s.store.GetSourceScoped(ctx, event.RepoID, event.SourceID)
 	if err != nil {
 		return failure
 	}
-	graph := cache.SourceGraph{Source: source, SyncStatus: &cache.SyncStatus{SourceID: event.SourceID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: event.RemoteRevision, Status: "not_found", LastFetchedAt: s.now().UTC()}}
+	graph := cache.SourceGraph{Source: source, SyncStatus: &cache.SyncStatus{RepoID: event.RepoID, SourceID: event.SourceID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: event.RemoteRevision, Status: "not_found", LastFetchedAt: s.now().UTC()}}
 	if err := s.store.UpsertSourceGraph(ctx, graph); err != nil {
 		return err
 	}
@@ -995,6 +1095,19 @@ func freshnessFor(source cache.Source, status cache.SyncStatus) string {
 	return string(FreshnessFresh)
 }
 
+func (s *Service) validateWriteScope(ctx context.Context, req WriteCommandRequest, scope RepositoryScope) error {
+	repoID, err := s.requireRepo(ctx, req.Repo, "write")
+	if err != nil {
+		return err
+	}
+	req.Repo = repoID
+	remoteType := "issue"
+	if scope == RepositoryScopeWiki {
+		remoteType = "wiki"
+	}
+	return s.validateRepoScope(ctx, repoID, remoteType)
+}
+
 func (s *Service) writeResult(ctx context.Context, command string, req WriteCommandRequest) (WriteCommandResult, error) {
 	if err := ctx.Err(); err != nil {
 		return WriteCommandResult{}, err
@@ -1011,19 +1124,34 @@ func (s *Service) writeResult(ctx context.Context, command string, req WriteComm
 	return WriteCommandResult{Command: command, Status: "queued", ID: id, IdempotencyKey: key, Evidence: "explicit CLI write command", GeneratedAt: s.now().UTC()}, nil
 }
 
-func (s *Service) resolveStableID(ctx context.Context, id, aliasType, aliasID string) (string, error) {
+func (s *Service) requireRepo(ctx context.Context, repoID, operation string) (string, error) {
+	repoID = strings.TrimSpace(repoID)
+	if repoID == "" {
+		return "", ErrRepoRequired{Operation: operation}
+	}
+	if _, err := s.store.GetRepository(ctx, repoID); err != nil {
+		return "", normalizeError(err, "repository", repoID)
+	}
+	return repoID, nil
+}
+
+func (s *Service) resolveScopedStableID(ctx context.Context, repoID, id, aliasType, aliasID string) (string, error) {
 	if id != "" {
-		if _, err := s.store.GetSource(ctx, id); err == nil {
-			return id, nil
-		} else if !isCacheNotFound(err) {
-			return "", normalizeError(err, "source", id)
+		if aliasType == "" && aliasID == "" {
+			if parsedType, parsedID, ok := parseRecordRef(id); ok {
+				aliasType, aliasID = parsedType, parsedID
+			} else if _, err := s.store.GetSourceScoped(ctx, repoID, id); err == nil {
+				return id, nil
+			} else if !isCacheNotFound(err) {
+				return "", normalizeError(err, "source", id)
+			}
 		}
 	}
 	if aliasType != "" || aliasID != "" {
 		if aliasType == "" || aliasID == "" {
 			return "", ErrInvalidQuery{Field: "alias", Message: "alias type and id are required together"}
 		}
-		identity, err := s.store.ResolveAlias(ctx, cache.RemoteAlias{Type: aliasType, ID: aliasID})
+		identity, err := s.store.ResolveAliasScoped(ctx, repoID, cache.RemoteAlias{Type: aliasType, ID: aliasID})
 		if err != nil {
 			return "", normalizeError(err, "alias", aliasType+":"+aliasID)
 		}
@@ -1035,11 +1163,37 @@ func (s *Service) resolveStableID(ctx context.Context, id, aliasType, aliasID st
 	return "", ErrNotFound{Kind: "source", ID: id}
 }
 
-func (s *Service) snippetFromLines(ctx context.Context, id string, start, end int) (SnippetResult, error) {
+func parseRecordRef(ref string) (string, string, bool) {
+	parts := strings.SplitN(strings.TrimSpace(ref), ":", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+func (s *Service) DiagnoseUnscopedAlias(ctx context.Context, aliasType, aliasID string) error {
+	identities, err := s.store.DiagnoseAlias(ctx, cache.RemoteAlias{Type: aliasType, ID: aliasID})
+	if err != nil {
+		return normalizeError(err, "alias", aliasType+":"+aliasID)
+	}
+	if len(identities) == 0 {
+		return ErrNotFound{Kind: "alias", ID: aliasType + ":" + aliasID}
+	}
+	repos := map[string]struct{}{}
+	for _, identity := range identities {
+		repos[identity.RepoID] = struct{}{}
+	}
+	if len(repos) > 1 {
+		return ErrAmbiguousAlias{Alias: aliasType + ":" + aliasID, Repos: sortedKeys(repos)}
+	}
+	return ErrRepoRequired{Operation: "alias lookup"}
+}
+
+func (s *Service) snippetFromLines(ctx context.Context, repoID, id string, start, end int) (SnippetResult, error) {
 	if start <= 0 || end <= 0 || end < start {
 		return SnippetResult{}, ErrInvalidQuery{Field: "line range", Message: "line_start and line_end must be positive and ordered"}
 	}
-	source, err := s.store.GetSource(ctx, id)
+	source, err := s.store.GetSourceScoped(ctx, repoID, id)
 	if err != nil {
 		return SnippetResult{}, normalizeError(err, "source", id)
 	}
@@ -1053,28 +1207,32 @@ func (s *Service) snippetFromLines(ctx context.Context, id string, start, end in
 		actualEnd = len(lines)
 		warnings = append(warnings, ErrRangeClamped{RequestedStart: start, RequestedEnd: end, ActualStart: start, ActualEnd: actualEnd}.Error())
 	}
-	return SnippetResult{ID: source.ID, Path: source.Path, Text: strings.Join(lines[start-1:actualEnd], "\n"), LineStart: start, LineEnd: actualEnd, Warnings: warnings}, nil
+	return SnippetResult{RepoID: source.RepoID, ID: source.ID, Path: source.Path, Text: strings.Join(lines[start-1:actualEnd], "\n"), LineStart: start, LineEnd: actualEnd, Warnings: warnings}, nil
 }
 
-func (s *Service) snippetFromChunk(ctx context.Context, id, chunkID string) (SnippetResult, error) {
-	chunks, err := s.store.GetChunks(ctx, id)
+func (s *Service) snippetFromChunk(ctx context.Context, repoID, id, chunkID string) (SnippetResult, error) {
+	chunks, err := s.store.GetChunksScoped(ctx, repoID, id)
 	if err != nil {
 		return SnippetResult{}, normalizeError(err, "chunks", id)
 	}
 	for _, chunk := range chunks {
 		if chunk.ID == chunkID {
-			source, err := s.store.GetSource(ctx, id)
+			source, err := s.store.GetSourceScoped(ctx, repoID, id)
 			if err != nil {
 				return SnippetResult{}, normalizeError(err, "source", id)
 			}
-			return SnippetResult{ID: id, Path: source.Path, Text: chunk.Text, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, ChunkID: chunk.ID}, nil
+			return SnippetResult{RepoID: source.RepoID, ID: id, Path: source.Path, Text: chunk.Text, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, ChunkID: chunk.ID}, nil
 		}
 	}
 	return SnippetResult{}, ErrNotFound{Kind: "chunk", ID: chunkID}
 }
 
 func (s *Service) buildSnapshot(ctx context.Context, req ExportSnapshotRequest) (Snapshot, error) {
-	sources, err := s.store.ListSources(ctx, cache.SourceFilter{})
+	repoID, err := s.requireRepo(ctx, req.RepoID, "export")
+	if err != nil {
+		return Snapshot{}, err
+	}
+	sources, err := s.store.ListSources(ctx, cache.SourceFilter{RepoID: repoID})
 	if err != nil {
 		return Snapshot{}, normalizeError(err, "sources", "")
 	}
@@ -1085,7 +1243,7 @@ func (s *Service) buildSnapshot(ctx context.Context, req ExportSnapshotRequest) 
 	for _, id := range req.SourceIDs {
 		include[id] = struct{}{}
 	}
-	snapshot := Snapshot{SchemaVersion: "gitcode-mcp.snapshot.v1"}
+	snapshot := Snapshot{SchemaVersion: "gitcode-mcp.snapshot.v1", RepoID: repoID}
 	for _, source := range sources {
 		if len(include) > 0 {
 			if _, ok := include[source.ID]; !ok {
@@ -1098,44 +1256,44 @@ func (s *Service) buildSnapshot(ctx context.Context, req ExportSnapshotRequest) 
 		if req.IncludeBody {
 			body = source.Body
 		}
-		snapshot.Sources = append(snapshot.Sources, SnapshotSource{ID: source.ID, Kind: source.Kind, Path: source.Path, Title: source.Title, Body: body, Status: source.Status, Labels: labels, ContentHash: source.ContentHash, CreatedAt: source.CreatedAt.UTC(), UpdatedAt: source.UpdatedAt.UTC()})
-		aliases, err := s.store.GetIdentityMap(ctx, source.ID)
+		snapshot.Sources = append(snapshot.Sources, SnapshotSource{RepoID: source.RepoID, ID: source.ID, Kind: source.Kind, Path: source.Path, Title: source.Title, Body: body, Status: source.Status, Labels: labels, ContentHash: source.ContentHash, CreatedAt: source.CreatedAt.UTC(), UpdatedAt: source.UpdatedAt.UTC()})
+		aliases, err := s.store.GetIdentityMapScoped(ctx, repoID, source.ID)
 		if err != nil {
 			return Snapshot{}, normalizeError(err, "aliases", source.ID)
 		}
 		for _, alias := range aliases {
-			snapshot.Aliases = append(snapshot.Aliases, SnapshotAlias{SourceID: alias.SourceID, AliasKind: alias.AliasType, AliasValue: alias.Alias, RemoteKind: alias.Remote.Type, RemoteID: alias.Remote.ID})
+			snapshot.Aliases = append(snapshot.Aliases, SnapshotAlias{RepoID: alias.RepoID, SourceID: alias.SourceID, AliasKind: alias.AliasType, AliasValue: alias.Alias, RemoteKind: alias.Remote.Type, RemoteID: alias.Remote.ID})
 		}
-		links, err := s.store.ListLinks(ctx, cache.LinkFilter{SourceID: source.ID})
+		links, err := s.store.ListLinks(ctx, cache.LinkFilter{RepoID: repoID, SourceID: source.ID})
 		if err != nil {
 			return Snapshot{}, normalizeError(err, "links", source.ID)
 		}
 		for _, link := range links {
-			snapshot.Links = append(snapshot.Links, SnapshotLink{SourceID: link.SourceID, TargetID: link.TargetID, LinkType: link.Kind, Text: link.Text})
+			snapshot.Links = append(snapshot.Links, SnapshotLink{RepoID: link.RepoID, SourceID: link.SourceID, TargetID: link.TargetID, LinkType: link.Kind, Text: link.Text})
 		}
-		backlinks, err := s.store.ListLinks(ctx, cache.LinkFilter{TargetID: source.ID})
+		backlinks, err := s.store.ListLinks(ctx, cache.LinkFilter{RepoID: repoID, TargetID: source.ID})
 		if err != nil {
 			return Snapshot{}, normalizeError(err, "backlinks", source.ID)
 		}
 		for _, link := range backlinks {
-			snapshot.Backlinks = append(snapshot.Backlinks, SnapshotLink{SourceID: link.SourceID, TargetID: link.TargetID, LinkType: link.Kind, Text: link.Text})
+			snapshot.Backlinks = append(snapshot.Backlinks, SnapshotLink{RepoID: link.RepoID, SourceID: link.SourceID, TargetID: link.TargetID, LinkType: link.Kind, Text: link.Text})
 		}
-		status, err := s.store.GetSyncStatus(ctx, source.ID)
+		status, err := s.store.GetSyncStatusScoped(ctx, repoID, source.ID)
 		if err != nil {
 			var notFound ErrNotFound
 			if !errors.As(normalizeError(err, "sync status", source.ID), &notFound) {
 				return Snapshot{}, normalizeError(err, "sync status", source.ID)
 			}
-			snapshot.SyncStatus = append(snapshot.SyncStatus, SnapshotSyncStatus{SourceID: source.ID, Status: "unknown", Freshness: "unknown"})
+			snapshot.SyncStatus = append(snapshot.SyncStatus, SnapshotSyncStatus{RepoID: source.RepoID, SourceID: source.ID, Status: "unknown", Freshness: "unknown"})
 		} else {
-			snapshot.SyncStatus = append(snapshot.SyncStatus, SnapshotSyncStatus{SourceID: source.ID, RemoteType: status.RemoteType, RemoteID: status.RemoteID, RemoteRevision: status.RemoteRevision, Status: status.Status, Freshness: freshnessFor(source, status), LastFetchedAt: status.LastFetchedAt.UTC()})
+			snapshot.SyncStatus = append(snapshot.SyncStatus, SnapshotSyncStatus{RepoID: status.RepoID, SourceID: source.ID, RemoteType: status.RemoteType, RemoteID: status.RemoteID, RemoteRevision: status.RemoteRevision, Status: status.Status, Freshness: freshnessFor(source, status), LastFetchedAt: status.LastFetchedAt.UTC()})
 		}
-		chunks, err := s.store.GetChunks(ctx, source.ID)
+		chunks, err := s.store.GetChunksScoped(ctx, repoID, source.ID)
 		if err != nil {
 			return Snapshot{}, normalizeError(err, "chunks", source.ID)
 		}
 		for _, chunk := range chunks {
-			snapshot.Chunks = append(snapshot.Chunks, SnapshotChunk{ID: chunk.ID, SourceID: chunk.SourceID, ContentHash: chunk.ContentHash, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, HeadingPath: append([]string(nil), chunk.HeadingPath...), Text: chunk.Text, NormalizedText: chunk.NormalizedText, InheritedMetadata: copyStringMap(chunk.InheritedMetadata), OutboundLinks: sortedStrings(chunk.OutboundLinks), ResolvedAliases: copyStringMap(chunk.ResolvedAliases)})
+			snapshot.Chunks = append(snapshot.Chunks, SnapshotChunk{RepoID: chunk.RepoID, ID: chunk.ID, SourceID: chunk.SourceID, ContentHash: chunk.ContentHash, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, HeadingPath: append([]string(nil), chunk.HeadingPath...), Text: chunk.Text, NormalizedText: chunk.NormalizedText, InheritedMetadata: copyStringMap(chunk.InheritedMetadata), OutboundLinks: sortedStrings(chunk.OutboundLinks), ResolvedAliases: copyStringMap(chunk.ResolvedAliases)})
 		}
 	}
 	if len(snapshot.Sources) == 0 {
@@ -1146,10 +1304,10 @@ func (s *Service) buildSnapshot(ctx context.Context, req ExportSnapshotRequest) 
 	return snapshot, nil
 }
 
-func (s *Service) loadSnapshotRef(ctx context.Context, ref SnapshotRef, format string) (Snapshot, error) {
+func (s *Service) loadSnapshotRef(ctx context.Context, repoID string, ref SnapshotRef, format string) (Snapshot, error) {
 	switch strings.ToLower(ref.Kind) {
 	case "", "current":
-		return s.buildSnapshot(ctx, ExportSnapshotRequest{Format: format, IncludeBody: true})
+		return s.buildSnapshot(ctx, ExportSnapshotRequest{RepoID: repoID, Format: format, IncludeBody: true})
 	case "path":
 		b, err := os.ReadFile(ref.Path)
 		if err != nil {

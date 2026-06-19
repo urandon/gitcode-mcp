@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gitcode-mcp/internal/cache"
@@ -140,6 +141,26 @@ func (e ErrCacheEmpty) Error() string {
 type ErrInvalidQuery struct {
 	Field   string
 	Message string
+}
+
+type ErrRepoRequired struct {
+	Operation string
+}
+
+func (e ErrRepoRequired) Error() string {
+	if e.Operation == "" {
+		return "service: repo_required: --repo is required"
+	}
+	return "service: repo_required: --repo is required for " + e.Operation
+}
+
+type ErrAmbiguousAlias struct {
+	Alias string
+	Repos []string
+}
+
+func (e ErrAmbiguousAlias) Error() string {
+	return fmt.Sprintf("service: ambiguous_alias %s is present in repositories %s", e.Alias, strings.Join(e.Repos, ","))
 }
 
 type ErrConflict struct {
