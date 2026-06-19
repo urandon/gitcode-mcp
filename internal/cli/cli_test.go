@@ -88,6 +88,36 @@ func TestCLIRepoScopedDuplicateAlias(t *testing.T) {
 	}
 }
 
+func TestCacheStatusJSON(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	now := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	if err := store.UpsertRecordGraph(context.Background(), cache.RecordGraph{
+		Record:     cache.Record{RepoID: "fixture-a", ID: "ISSUE-1", Type: "issue", Path: "issues/1.md", Title: "Issue", Body: "body", Status: "open", ContentHash: "h", Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: "1", CreatedAt: now, UpdatedAt: now},
+		Comments:   []cache.RecordComment{{CommentID: "c1", Author: "fixture-user", Body: "comment", ContentHash: "hc", CreatedAt: now, UpdatedAt: now}},
+		Identities: []cache.Identity{{AliasType: "issue", Alias: "1", Remote: cache.RemoteAlias{Type: "issue", ID: "1"}}},
+		SyncEvents: []cache.SyncEvent{{ID: "sync-1", RemoteType: "issue", RemoteID: "1", RemoteRevision: "r1", Status: "fresh", IdempotencyKey: "sync-1", Message: "fixture", CreatedAt: now}},
+		AuditTrail: []cache.AuditTrailEntry{{ID: "audit-1", Operation: "sync", Status: "success", CreatedAt: now}},
+		Snapshots:  []cache.Snapshot{{ID: "snap-1", Format: "json", ContentHash: "sh", RecordCount: 1, CreatedAt: now, Chunks: []cache.SnapshotChunk{{ChunkID: "chunk-1", RecordID: "ISSUE-1", LineStart: 1, LineEnd: 1}}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	factory := func(context.Context, string) (queryService, func() error, error) { return service.New(store), nil, nil }
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := executeWithFactory([]string{"cache-status", "--repo", "fixture-a", "--format", "json"}, &stdout, &stderr, factory)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	var result service.CacheStatusResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if !result.WALCapable || result.Records != 1 || result.Comments != 1 || result.IdentityAliases != 1 || result.SyncEvents != 1 || result.AuditRows != 1 || result.Snapshots != 1 || result.SnapshotChunks != 1 {
+		t.Fatalf("cache-status result = %#v", result)
+	}
+}
+
 func TestSearchJSON(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -327,7 +357,7 @@ func TestQueryCommandsUseServiceOnly(t *testing.T) {
 	spy := &spyService{}
 	factory := func(context.Context, string) (queryService, func() error, error) { return spy, nil, nil }
 	commands := [][]string{
-		{"ingest"}, {"index", "--repo", "fixture-a", "--full"}, {"search_sources", "--repo", "fixture-a", "backlog"}, {"list_sources", "--repo", "fixture-a"}, {"get_source", "--repo", "fixture-a", "DOC-123"}, {"source_backlinks", "--repo", "fixture-a", "DOC-123"}, {"get_snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"sync_status", "--repo", "fixture-a", "DOC-123"}, {"recent", "--repo", "fixture-a"}, {"link-check", "--repo", "fixture-a"}, {"stale-index", "--repo", "fixture-a"}, {"sync", "--repo", "fixture-a"}, {"export", "--repo", "fixture-a"}, {"diff", "--repo", "fixture-a"}, {"repo", "add", "--repo", "fixture-a", "--owner", "owner", "--name", "repo", "--api-base-url", "https://example.invalid/api", "--scopes", "issues"}, {"repo", "status", "--repo", "fixture-a"}, {"create-issue", "--repo", "fixture-a", "--title", "t"}, {"update-issue", "--repo", "fixture-a", "--number", "1"}, {"create-page", "--repo", "fixture-a", "--title", "t", "--body", "b"}, {"update-page", "--repo", "fixture-a", "--slug", "s"}, {"add-comment", "--repo", "fixture-a", "--number", "1", "--body", "b"}, {"add-label", "--repo", "fixture-a", "--number", "1", "--label", "l"},
+		{"ingest"}, {"index", "--repo", "fixture-a", "--full"}, {"search_sources", "--repo", "fixture-a", "backlog"}, {"list_sources", "--repo", "fixture-a"}, {"get_source", "--repo", "fixture-a", "DOC-123"}, {"source_backlinks", "--repo", "fixture-a", "DOC-123"}, {"get_snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"sync_status", "--repo", "fixture-a", "DOC-123"}, {"recent", "--repo", "fixture-a"}, {"link-check", "--repo", "fixture-a"}, {"stale-index", "--repo", "fixture-a"}, {"sync", "--repo", "fixture-a"}, {"cache-status", "--repo", "fixture-a"}, {"export", "--repo", "fixture-a"}, {"diff", "--repo", "fixture-a"}, {"repo", "add", "--repo", "fixture-a", "--owner", "owner", "--name", "repo", "--api-base-url", "https://example.invalid/api", "--scopes", "issues"}, {"repo", "status", "--repo", "fixture-a"}, {"create-issue", "--repo", "fixture-a", "--title", "t"}, {"update-issue", "--repo", "fixture-a", "--number", "1"}, {"create-page", "--repo", "fixture-a", "--title", "t", "--body", "b"}, {"update-page", "--repo", "fixture-a", "--slug", "s"}, {"add-comment", "--repo", "fixture-a", "--number", "1", "--body", "b"}, {"add-label", "--repo", "fixture-a", "--number", "1", "--label", "l"},
 	}
 	for _, args := range commands {
 		var stdout bytes.Buffer
@@ -336,7 +366,7 @@ func TestQueryCommandsUseServiceOnly(t *testing.T) {
 			t.Fatalf("%v code=%d stderr=%q", args, code, stderr.String())
 		}
 	}
-	for _, method := range []string{"Ingest", "Index", "SearchSources", "ListSources", "GetSource", "GetBacklinks", "GetSnippet", "GetSyncStatus", "RecentChanges", "LinkCheck", "StaleIndex", "SyncToCache", "ExportSnapshot", "DiffSnapshot", "AddRepository", "RepositoryStatus", "CreateIssue", "UpdateIssue", "CreatePage", "UpdatePage", "AddComment", "AddLabel"} {
+	for _, method := range []string{"Ingest", "Index", "SearchSources", "ListSources", "GetSource", "GetBacklinks", "GetSnippet", "GetSyncStatus", "RecentChanges", "LinkCheck", "StaleIndex", "SyncToCache", "CacheStatus", "ExportSnapshot", "DiffSnapshot", "AddRepository", "RepositoryStatus", "CreateIssue", "UpdateIssue", "CreatePage", "UpdatePage", "AddComment", "AddLabel"} {
 		if spy.calls[method] != 1 {
 			t.Fatalf("%s calls=%d want 1", method, spy.calls[method])
 		}
@@ -451,6 +481,10 @@ func (s *spyService) StaleIndex(_ context.Context, req service.StaleIndexRequest
 func (s *spyService) SyncToCache(context.Context, service.SyncRequest) (service.SyncResult, error) {
 	s.called("SyncToCache")
 	return service.SyncResult{Status: "succeeded", Counts: service.SyncCounts{Fetched: 1}, IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
+}
+func (s *spyService) CacheStatus(context.Context, service.CacheStatusRequest) (service.CacheStatusResult, error) {
+	s.called("CacheStatus")
+	return service.CacheStatusResult{RepoID: "fixture-a", WALCapable: true, JournalMode: "wal", Records: 1}, nil
 }
 func (s *spyService) ExportSnapshot(context.Context, service.ExportSnapshotRequest) (service.ExportSnapshotResult, error) {
 	s.called("ExportSnapshot")

@@ -159,19 +159,93 @@ func TestIdentityResolution(t *testing.T) {
 	if len(identities) != 2 {
 		t.Fatalf("GetIdentityMap returned %d identities, want 2", len(identities))
 	}
-	resolved, err := store.ResolveAlias(ctx, RemoteAlias{Type: "path", ID: "docs/design.md"})
+	resolved, err := store.ResolveAliasScoped(ctx, "fixture-a", RemoteAlias{Type: "path", ID: "docs/design.md"})
 	if err != nil {
-		t.Fatalf("ResolveAlias(path) returned error: %v", err)
+		t.Fatalf("ResolveAliasScoped(path) returned error: %v", err)
 	}
 	if resolved.SourceID != "DOC-123" {
-		t.Fatalf("ResolveAlias(path) = %q, want DOC-123", resolved.SourceID)
+		t.Fatalf("ResolveAliasScoped(path) = %q, want DOC-123", resolved.SourceID)
 	}
-	resolved, err = store.ResolveAlias(ctx, RemoteAlias{Type: "remote", ID: "wiki/design-doc"})
+	resolved, err = store.ResolveAliasScoped(ctx, "fixture-a", RemoteAlias{Type: "remote", ID: "wiki/design-doc"})
 	if err != nil {
-		t.Fatalf("ResolveAlias(remote) returned error: %v", err)
+		t.Fatalf("ResolveAliasScoped(remote) returned error: %v", err)
 	}
 	if resolved.SourceID != "DOC-123" {
-		t.Fatalf("ResolveAlias(remote) = %q, want DOC-123", resolved.SourceID)
+		t.Fatalf("ResolveAliasScoped(remote) = %q, want DOC-123", resolved.SourceID)
+	}
+	if _, err := store.ResolveAlias(ctx, RemoteAlias{Type: "remote", ID: "wiki/design-doc"}); err == nil {
+		t.Fatalf("ResolveAlias(remote) succeeded without repo_id")
+	}
+}
+
+func TestRepoScopedRecordGraphCountsSnapshotsAndAliases(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	mustAddTestRepo(t, ctx, store, "fixture-b")
+	now := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+
+	if err := store.UpsertRecordGraph(ctx, RecordGraph{
+		Record:          Record{RepoID: "fixture-a", ID: "ISSUE-42", Type: "issue", Path: "issues/42.md", Title: "Issue A", Body: "remote issue body", Status: "open", ContentHash: "ha", Provenance: ProvenanceRemote, RemoteType: "issue", RemoteID: "42", RemoteRevision: "r1", CreatedAt: now, UpdatedAt: now},
+		Comments:        []RecordComment{{CommentID: "c1", Author: "fixture-user", Body: "comment", ContentHash: "hc", CreatedAt: now, UpdatedAt: now}},
+		Identities:      []Identity{{AliasType: "issue", Alias: "42", Remote: RemoteAlias{Type: "issue", ID: "42"}}},
+		RemoteRevisions: []RemoteRevision{{RemoteType: "issue", RemoteID: "42", RemoteRevision: "r1", Status: "fresh", LastFetchedAt: now}},
+		SyncEvents:      []SyncEvent{{ID: "sync-42", RemoteType: "issue", RemoteID: "42", RemoteRevision: "r1", Status: "fresh", IdempotencyKey: "sync-a-42", Message: "fixture", CreatedAt: now}},
+		AuditTrail:      []AuditTrailEntry{{ID: "audit-42", Operation: "sync", Status: "success", Message: "fixture", CreatedAt: now}},
+		Snapshots:       []Snapshot{{ID: "snap-1", Format: "json", ContentHash: "snap-h", RecordCount: 1, CreatedAt: now, Chunks: []SnapshotChunk{{ChunkID: "chunk-1", RecordID: "ISSUE-42", ByteStart: 0, ByteEnd: 5, LineStart: 1, LineEnd: 1, Citation: "issues/42.md:1", ContentHash: "chunk-h"}}}},
+	}); err != nil {
+		t.Fatalf("UpsertRecordGraph fixture-a returned error: %v", err)
+	}
+	if err := store.UpsertRecordGraph(ctx, RecordGraph{Record: Record{RepoID: "fixture-b", ID: "ISSUE-42", Type: "issue", Path: "issues/42.md", Title: "Issue B", Body: "other repo", Status: "open", ContentHash: "hb", Provenance: ProvenanceRemote, RemoteType: "issue", RemoteID: "42"}, Identities: []Identity{{AliasType: "issue", Alias: "42", Remote: RemoteAlias{Type: "issue", ID: "42"}}}}); err != nil {
+		t.Fatalf("UpsertRecordGraph fixture-b returned error: %v", err)
+	}
+
+	identityA, err := store.ResolveRepoAlias(ctx, "fixture-a", RemoteAlias{Type: "issue", ID: "42"})
+	if err != nil || identityA.RepoID != "fixture-a" || identityA.SourceID != "ISSUE-42" {
+		t.Fatalf("ResolveRepoAlias fixture-a = %#v, %v", identityA, err)
+	}
+	if _, err := store.ResolveAlias(ctx, RemoteAlias{Type: "issue", ID: "42"}); err == nil {
+		t.Fatalf("unscoped ResolveAlias succeeded for colliding issue:42")
+	} else {
+		var conflict ErrAliasConflict
+		if !errors.As(err, &conflict) {
+			t.Fatalf("unscoped ResolveAlias error = %T %[1]v, want ErrAliasConflict", err)
+		}
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", "ISSUE-42")
+	if err != nil || record.Provenance != ProvenanceRemote || len(record.Comments) != 1 || len(record.Aliases) != 1 {
+		t.Fatalf("GetRecord = %#v, %v", record, err)
+	}
+	counts, err := store.RecordCounts(ctx, "fixture-a")
+	if err != nil {
+		t.Fatalf("RecordCounts returned error: %v", err)
+	}
+	if counts.Records != 1 || counts.Comments != 1 || counts.IdentityAliases != 1 || counts.SyncEvents != 1 || counts.AuditRows != 1 || counts.Snapshots != 1 || counts.SnapshotChunks != 1 || counts.RemoteRevisions != 1 {
+		t.Fatalf("RecordCounts = %#v", counts)
+	}
+	chunks, err := store.ListSnapshotChunks(ctx, "fixture-a", "snap-1")
+	if err != nil || len(chunks) != 1 || chunks[0].Citation != "issues/42.md:1" {
+		t.Fatalf("ListSnapshotChunks = %#v, %v", chunks, err)
+	}
+}
+
+func TestRecordProvenanceRemoteCanonical(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+
+	if err := store.UpsertRecordGraph(ctx, RecordGraph{Record: Record{RepoID: "fixture-a", ID: "DOC-1", Type: "wiki", Path: "wiki/doc-1.md", Title: "Remote", Body: "remote", Status: "current", ContentHash: "remote", Provenance: ProvenanceRemote, RemoteType: "wiki", RemoteID: "DOC-1"}}); err != nil {
+		t.Fatalf("remote upsert returned error: %v", err)
+	}
+	if err := store.UpsertRecordGraph(ctx, RecordGraph{Record: Record{RepoID: "fixture-a", ID: "DOC-1", Type: "wiki", Path: "wiki/doc-1.md", Title: "Projection", Body: "projection", Status: "current", ContentHash: "projection", Provenance: ProvenanceProjection, RemoteType: "", RemoteID: ""}}); err != nil {
+		t.Fatalf("projection upsert returned error: %v", err)
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", "DOC-1")
+	if err != nil {
+		t.Fatalf("GetRecord returned error: %v", err)
+	}
+	if record.Provenance != ProvenanceRemote || record.RemoteType != "wiki" || record.RemoteID != "DOC-1" {
+		t.Fatalf("remote identity was overwritten by projection: %#v", record)
 	}
 }
 
@@ -307,12 +381,12 @@ func TestMinimumReplacementCacheState(t *testing.T) {
 		t.Fatalf("GetSource(DOC-123) aliases = %d, want 2", len(doc.Aliases))
 	}
 
-	resolved, err := store.ResolveAlias(ctx, RemoteAlias{Type: "wiki", ID: "DOC-123"})
+	resolved, err := store.ResolveAliasScoped(ctx, "fixture-a", RemoteAlias{Type: "wiki", ID: "DOC-123"})
 	if err != nil {
-		t.Fatalf("ResolveAlias(wiki:DOC-123) returned error: %v", err)
+		t.Fatalf("ResolveAliasScoped(wiki:DOC-123) returned error: %v", err)
 	}
 	if resolved.SourceID != "DOC-123" {
-		t.Fatalf("ResolveAlias(wiki:DOC-123) = %q, want DOC-123", resolved.SourceID)
+		t.Fatalf("ResolveAliasScoped(wiki:DOC-123) = %q, want DOC-123", resolved.SourceID)
 	}
 
 	links, err := store.ListLinks(ctx, LinkFilter{TargetID: "DOC-123"})

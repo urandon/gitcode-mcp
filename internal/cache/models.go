@@ -7,19 +7,26 @@ import (
 
 type Store interface {
 	AddRepository(context.Context, RepositoryBinding) error
+	UpsertRepo(context.Context, RepositoryBinding) error
 	GetRepository(context.Context, string) (RepositoryBinding, error)
+	GetRepo(context.Context, string) (RepositoryBinding, error)
 	ListRepositories(context.Context) ([]RepositoryBinding, error)
 	UpsertSourceGraph(context.Context, SourceGraph) error
+	UpsertRecordGraph(context.Context, RecordGraph) error
 	UpsertSource(context.Context, Source) error
 	GetSource(context.Context, string) (Source, error)
 	GetSourceScoped(context.Context, string, string) (Source, error)
 	ListSources(context.Context, SourceFilter) ([]Source, error)
 	SearchSources(context.Context, SearchQuery) ([]SearchResult, error)
+	GetRecord(context.Context, string, string) (Record, error)
+	ListRecords(context.Context, RecordFilter) ([]Record, error)
+	SearchRecords(context.Context, SearchQuery) ([]SearchResult, error)
 	UpsertIdentity(context.Context, Identity) error
 	GetIdentityMap(context.Context, string) ([]Identity, error)
 	GetIdentityMapScoped(context.Context, string, string) ([]Identity, error)
 	ResolveAlias(context.Context, RemoteAlias) (Identity, error)
 	ResolveAliasScoped(context.Context, string, RemoteAlias) (Identity, error)
+	ResolveRepoAlias(context.Context, string, RemoteAlias) (Identity, error)
 	DiagnoseAlias(context.Context, RemoteAlias) ([]Identity, error)
 	UpsertLink(context.Context, Link) error
 	ListLinks(context.Context, LinkFilter) ([]Link, error)
@@ -34,6 +41,10 @@ type Store interface {
 	GetSyncStatusScoped(context.Context, string, string) (SyncStatus, error)
 	UpsertConflict(context.Context, Conflict) error
 	GetConflicts(context.Context, string) ([]Conflict, error)
+	RecordCounts(context.Context, string) (RecordCounts, error)
+	WALCapable(context.Context) (bool, string, error)
+	UpsertSnapshot(context.Context, Snapshot) error
+	ListSnapshotChunks(context.Context, string, string) ([]SnapshotChunk, error)
 	IntegrityCheck(context.Context) error
 	AcquireLock(context.Context, string) (*LockHandle, error)
 	ReleaseLock(context.Context, *LockHandle) error
@@ -57,6 +68,129 @@ type RepositoryBinding struct {
 	Aliases     []string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+}
+
+type Repo = RepositoryBinding
+
+type Provenance string
+
+const (
+	ProvenanceRemote     Provenance = "remote"
+	ProvenanceProjection Provenance = "projection"
+	ProvenanceBridge     Provenance = "bridge"
+)
+
+type Record struct {
+	RepoID         string
+	ID             string
+	Type           string
+	Path           string
+	Title          string
+	Body           string
+	Status         string
+	Labels         []string
+	ContentHash    string
+	Provenance     Provenance
+	RemoteType     string
+	RemoteID       string
+	RemoteRevision string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	Aliases        []Identity
+	Comments       []RecordComment
+}
+
+type RecordComment struct {
+	RepoID         string
+	RecordID       string
+	CommentID      string
+	Author         string
+	Body           string
+	ContentHash    string
+	RemoteRevision string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+type IdentityAlias = Identity
+
+type RemoteRevision struct {
+	RepoID         string
+	RecordID       string
+	RemoteType     string
+	RemoteID       string
+	RemoteRevision string
+	Status         string
+	LastFetchedAt  time.Time
+}
+
+type AuditTrailEntry struct {
+	RepoID         string
+	ID             string
+	Operation      string
+	RecordID       string
+	RemoteType     string
+	RemoteID       string
+	IdempotencyKey string
+	Status         string
+	Message        string
+	PayloadHash    string
+	CreatedAt      time.Time
+}
+
+type Snapshot struct {
+	RepoID      string
+	ID          string
+	Format      string
+	ContentHash string
+	RecordCount int
+	CreatedAt   time.Time
+	Metadata    map[string]string
+	Chunks      []SnapshotChunk
+}
+
+type SnapshotChunk struct {
+	RepoID      string
+	SnapshotID  string
+	ChunkID     string
+	RecordID    string
+	ByteStart   int
+	ByteEnd     int
+	LineStart   int
+	LineEnd     int
+	Citation    string
+	ContentHash string
+}
+
+type RecordCounts struct {
+	RepoID          string
+	Records         int
+	Comments        int
+	IdentityAliases int
+	SyncEvents      int
+	AuditRows       int
+	Snapshots       int
+	SnapshotChunks  int
+	Chunks          int
+	RemoteRevisions int
+}
+
+type RecordFilter struct {
+	RepoID string
+	Type   string
+	Status string
+	Limit  int
+}
+
+type RecordGraph struct {
+	Record          Record
+	Comments        []RecordComment
+	Identities      []Identity
+	Links           []Link
+	RemoteRevisions []RemoteRevision
+	SyncEvents      []SyncEvent
+	AuditTrail      []AuditTrailEntry
+	Snapshots       []Snapshot
 }
 
 type Source struct {

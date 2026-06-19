@@ -37,6 +37,14 @@ func (s *SQLiteStore) AddRepository(ctx context.Context, repo RepositoryBinding)
 	return tx.Commit()
 }
 
+func (s *SQLiteStore) UpsertRepo(ctx context.Context, repo RepositoryBinding) error {
+	return s.AddRepository(ctx, repo)
+}
+
+func (s *SQLiteStore) GetRepo(ctx context.Context, repoID string) (RepositoryBinding, error) {
+	return s.GetRepository(ctx, repoID)
+}
+
 func (s *SQLiteStore) GetRepository(ctx context.Context, repoID string) (RepositoryBinding, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, owner, name, api_base_url, scopes, display_name, created_at, updated_at FROM repos WHERE repo_id = ?`, repoID)
 	if err != nil {
@@ -180,15 +188,25 @@ func (s *SQLiteStore) GetIdentityMapScoped(ctx context.Context, repoID, sourceID
 }
 
 func (s *SQLiteStore) ResolveAlias(ctx context.Context, alias RemoteAlias) (Identity, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT repo_id, source_id, alias_type, alias, remote_type, remote_id FROM identity_map WHERE (alias_type = ? AND alias = ?) OR (remote_type = ? AND remote_id = ?) ORDER BY repo_id, source_id LIMIT 1`, alias.Type, alias.ID, alias.Type, alias.ID)
-	var identity Identity
-	if err := row.Scan(&identity.RepoID, &identity.SourceID, &identity.AliasType, &identity.Alias, &identity.Remote.Type, &identity.Remote.ID); err != nil {
-		if err == sql.ErrNoRows {
-			return Identity{}, notFoundErr("alias", alias.Type+":"+alias.ID)
-		}
+	identities, err := s.DiagnoseAlias(ctx, alias)
+	if err != nil {
 		return Identity{}, err
 	}
-	return identity, nil
+	if len(identities) == 0 {
+		return Identity{}, notFoundErr("alias", alias.Type+":"+alias.ID)
+	}
+	repos := map[string]struct{}{}
+	for _, identity := range identities {
+		repos[identity.RepoID] = struct{}{}
+	}
+	if len(repos) > 1 {
+		repoIDs := make([]string, 0, len(repos))
+		for repoID := range repos {
+			repoIDs = append(repoIDs, repoID)
+		}
+		return Identity{}, ErrAliasConflict{Alias: alias.Type + ":" + alias.ID, Repos: repoIDs}
+	}
+	return Identity{}, ErrUnscopedAliasResolution{Alias: alias.Type + ":" + alias.ID}
 }
 
 func (s *SQLiteStore) ResolveAliasScoped(ctx context.Context, repoID string, alias RemoteAlias) (Identity, error) {
@@ -201,6 +219,10 @@ func (s *SQLiteStore) ResolveAliasScoped(ctx context.Context, repoID string, ali
 		return Identity{}, err
 	}
 	return identity, nil
+}
+
+func (s *SQLiteStore) ResolveRepoAlias(ctx context.Context, repoID string, alias RemoteAlias) (Identity, error) {
+	return s.ResolveAliasScoped(ctx, repoID, alias)
 }
 
 func (s *SQLiteStore) DiagnoseAlias(ctx context.Context, alias RemoteAlias) ([]Identity, error) {

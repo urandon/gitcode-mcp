@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 type migration struct {
 	version int
@@ -15,6 +15,7 @@ type migration struct {
 
 var migrations = []migration{
 	{version: 1, apply: applyInitialMigration},
+	{version: 2, apply: applyRepoScopedCacheMigration},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB, ftsAvailable bool) error {
@@ -194,6 +195,95 @@ func applyInitialMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) e
 	}
 	if ftsAvailable {
 		statements = append(statements, `CREATE VIRTUAL TABLE IF NOT EXISTS fts_index USING fts5(repo_id UNINDEXED, source_id UNINDEXED, path UNINDEXED, title, body)`)
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyRepoScopedCacheMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS records (
+	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+	record_id TEXT NOT NULL,
+	record_type TEXT NOT NULL,
+	path TEXT NOT NULL,
+	title TEXT NOT NULL,
+	body TEXT NOT NULL,
+	status TEXT NOT NULL,
+	labels TEXT NOT NULL,
+	content_hash TEXT NOT NULL,
+	provenance TEXT NOT NULL CHECK(provenance IN ('remote', 'projection', 'bridge')),
+	remote_type TEXT NOT NULL DEFAULT '',
+	remote_id TEXT NOT NULL DEFAULT '',
+	remote_revision TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, record_id)
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_records_type_status ON records(repo_id, record_type, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_records_remote ON records(repo_id, remote_type, remote_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_records_remote_unique ON records(repo_id, remote_type, remote_id) WHERE remote_type <> '' AND remote_id <> ''`,
+		`CREATE TABLE IF NOT EXISTS record_comments (
+	repo_id TEXT NOT NULL,
+	record_id TEXT NOT NULL,
+	comment_id TEXT NOT NULL,
+	author TEXT NOT NULL,
+	body TEXT NOT NULL,
+	content_hash TEXT NOT NULL,
+	remote_revision TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, record_id, comment_id),
+	FOREIGN KEY(repo_id, record_id) REFERENCES records(repo_id, record_id) ON DELETE CASCADE
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_record_comments_record ON record_comments(repo_id, record_id)`,
+		`CREATE TABLE IF NOT EXISTS audit_trail (
+	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+	id TEXT NOT NULL,
+	operation TEXT NOT NULL,
+	record_id TEXT NOT NULL DEFAULT '',
+	remote_type TEXT NOT NULL DEFAULT '',
+	remote_id TEXT NOT NULL DEFAULT '',
+	idempotency_key TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL,
+	message TEXT NOT NULL DEFAULT '',
+	payload_hash TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, id)
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_trail_record ON audit_trail(repo_id, record_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_trail_idempotency ON audit_trail(repo_id, idempotency_key)`,
+		`CREATE TABLE IF NOT EXISTS snapshots (
+	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+	snapshot_id TEXT NOT NULL,
+	format TEXT NOT NULL,
+	content_hash TEXT NOT NULL,
+	record_count INTEGER NOT NULL,
+	created_at TEXT NOT NULL,
+	metadata TEXT NOT NULL DEFAULT '{}',
+	PRIMARY KEY(repo_id, snapshot_id)
+)`,
+		`CREATE TABLE IF NOT EXISTS snapshot_chunks (
+	repo_id TEXT NOT NULL,
+	snapshot_id TEXT NOT NULL,
+	chunk_id TEXT NOT NULL,
+	record_id TEXT NOT NULL,
+	byte_start INTEGER NOT NULL,
+	byte_end INTEGER NOT NULL,
+	line_start INTEGER NOT NULL,
+	line_end INTEGER NOT NULL,
+	citation TEXT NOT NULL DEFAULT '',
+	content_hash TEXT NOT NULL DEFAULT '',
+	PRIMARY KEY(repo_id, snapshot_id, chunk_id),
+	FOREIGN KEY(repo_id, snapshot_id) REFERENCES snapshots(repo_id, snapshot_id) ON DELETE CASCADE
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_snapshot_chunks_record ON snapshot_chunks(repo_id, record_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_revisions_remote_unique ON remote_revisions(repo_id, remote_type, remote_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_events_idempotency_unique ON sync_events(repo_id, idempotency_key)`,
 	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {

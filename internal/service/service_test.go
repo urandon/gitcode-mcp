@@ -725,20 +725,38 @@ func TestQueryMethodsDoNotUseLiveNetwork(t *testing.T) {
 	ctx := context.Background()
 	svc := seededService(t, ctx)
 	calls := []func() error{
-		func() error { _, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: "backlog"}); return err },
-		func() error { _, err := svc.GetSource(ctx, GetSourceRequest{RepoID: "fixture-a", ID: "DOC-123"}); return err },
+		func() error {
+			_, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: "backlog"})
+			return err
+		},
+		func() error {
+			_, err := svc.GetSource(ctx, GetSourceRequest{RepoID: "fixture-a", ID: "DOC-123"})
+			return err
+		},
 		func() error { _, err := svc.ListSources(ctx, ListSourcesRequest{RepoID: "fixture-a"}); return err },
-		func() error { _, err := svc.GetBacklinks(ctx, GetBacklinksRequest{RepoID: "fixture-a", ID: "DOC-123"}); return err },
-		func() error { _, err := svc.ResolveID(ctx, ResolveIDRequest{RepoID: "fixture-a", ID: "DOC-123"}); return err },
+		func() error {
+			_, err := svc.GetBacklinks(ctx, GetBacklinksRequest{RepoID: "fixture-a", ID: "DOC-123"})
+			return err
+		},
+		func() error {
+			_, err := svc.ResolveID(ctx, ResolveIDRequest{RepoID: "fixture-a", ID: "DOC-123"})
+			return err
+		},
 		func() error {
 			_, err := svc.GetSnippet(ctx, SnippetRequest{RepoID: "fixture-a", ID: "DOC-123", LineStart: 1, LineEnd: 1})
 			return err
 		},
-		func() error { _, err := svc.GetSyncStatus(ctx, SyncStatusRequest{RepoID: "fixture-a", ID: "DOC-123"}); return err },
+		func() error {
+			_, err := svc.GetSyncStatus(ctx, SyncStatusRequest{RepoID: "fixture-a", ID: "DOC-123"})
+			return err
+		},
 		func() error { _, err := svc.RecentChanges(ctx, RecentChangesRequest{RepoID: "fixture-a"}); return err },
 		func() error { _, err := svc.LinkCheck(ctx, LinkCheckRequest{RepoID: "fixture-a"}); return err },
 		func() error { _, err := svc.StaleIndex(ctx, StaleIndexRequest{RepoID: "fixture-a"}); return err },
-		func() error { _, err := svc.ExportSnapshot(ctx, ExportSnapshotRequest{RepoID: "fixture-a"}); return err },
+		func() error {
+			_, err := svc.ExportSnapshot(ctx, ExportSnapshotRequest{RepoID: "fixture-a"})
+			return err
+		},
 		func() error { _, err := svc.DiffSnapshot(ctx, DiffSnapshotRequest{RepoID: "fixture-a"}); return err },
 	}
 	for i, call := range calls {
@@ -892,13 +910,18 @@ func fakeBrokenStore() *brokenStore {
 }
 
 func (f *brokenStore) AddRepository(context.Context, cache.RepositoryBinding) error { return nil }
+func (f *brokenStore) UpsertRepo(context.Context, cache.RepositoryBinding) error    { return nil }
 func (f *brokenStore) GetRepository(context.Context, string) (cache.RepositoryBinding, error) {
 	return cache.RepositoryBinding{RepoID: "fixture-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}, nil
+}
+func (f *brokenStore) GetRepo(ctx context.Context, repoID string) (cache.RepositoryBinding, error) {
+	return f.GetRepository(ctx, repoID)
 }
 func (f *brokenStore) ListRepositories(context.Context) ([]cache.RepositoryBinding, error) {
 	return nil, nil
 }
 func (f *brokenStore) UpsertSourceGraph(context.Context, cache.SourceGraph) error { return nil }
+func (f *brokenStore) UpsertRecordGraph(context.Context, cache.RecordGraph) error { return nil }
 func (f *brokenStore) UpsertSource(context.Context, cache.Source) error           { return nil }
 func (f *brokenStore) GetSource(_ context.Context, id string) (cache.Source, error) {
 	if source, ok := f.sources[id]; ok {
@@ -922,6 +945,15 @@ func (f *brokenStore) ListSources(context.Context, cache.SourceFilter) ([]cache.
 func (f *brokenStore) SearchSources(context.Context, cache.SearchQuery) ([]cache.SearchResult, error) {
 	return nil, nil
 }
+func (f *brokenStore) GetRecord(context.Context, string, string) (cache.Record, error) {
+	return cache.Record{}, cache.ErrNotFound
+}
+func (f *brokenStore) ListRecords(context.Context, cache.RecordFilter) ([]cache.Record, error) {
+	return nil, nil
+}
+func (f *brokenStore) SearchRecords(context.Context, cache.SearchQuery) ([]cache.SearchResult, error) {
+	return nil, nil
+}
 func (f *brokenStore) UpsertIdentity(context.Context, cache.Identity) error { return nil }
 func (f *brokenStore) GetIdentityMap(context.Context, string) ([]cache.Identity, error) {
 	return nil, nil
@@ -933,6 +965,9 @@ func (f *brokenStore) ResolveAlias(context.Context, cache.RemoteAlias) (cache.Id
 	return cache.Identity{}, cache.ErrNotFound
 }
 func (f *brokenStore) ResolveAliasScoped(context.Context, string, cache.RemoteAlias) (cache.Identity, error) {
+	return cache.Identity{}, cache.ErrNotFound
+}
+func (f *brokenStore) ResolveRepoAlias(context.Context, string, cache.RemoteAlias) (cache.Identity, error) {
 	return cache.Identity{}, cache.ErrNotFound
 }
 func (f *brokenStore) DiagnoseAlias(context.Context, cache.RemoteAlias) ([]cache.Identity, error) {
@@ -965,6 +1000,14 @@ func (f *brokenStore) GetSyncStatusScoped(context.Context, string, string) (cach
 }
 func (f *brokenStore) UpsertConflict(context.Context, cache.Conflict) error { return nil }
 func (f *brokenStore) GetConflicts(context.Context, string) ([]cache.Conflict, error) {
+	return nil, nil
+}
+func (f *brokenStore) RecordCounts(context.Context, string) (cache.RecordCounts, error) {
+	return cache.RecordCounts{}, nil
+}
+func (f *brokenStore) WALCapable(context.Context) (bool, string, error)     { return true, "memory", nil }
+func (f *brokenStore) UpsertSnapshot(context.Context, cache.Snapshot) error { return nil }
+func (f *brokenStore) ListSnapshotChunks(context.Context, string, string) ([]cache.SnapshotChunk, error) {
 	return nil, nil
 }
 func (f *brokenStore) IntegrityCheck(context.Context) error { return nil }

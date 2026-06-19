@@ -34,6 +34,16 @@ func newSQLiteStore(ctx context.Context, dataSourceName string, forceNoFTS bool)
 		_ = db.Close()
 		return nil, err
 	}
+	if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout = 5000"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if dataSourceName != ":memory:" {
+		if _, err := db.ExecContext(ctx, "PRAGMA journal_mode = WAL"); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
 	useFTS := !forceNoFTS && detectFTS5(ctx, db)
 	if err := runMigrations(ctx, db, useFTS); err != nil {
 		_ = db.Close()

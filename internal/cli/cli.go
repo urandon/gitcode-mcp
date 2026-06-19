@@ -34,6 +34,7 @@ var commands = []string{
 	"link-check",
 	"stale-index",
 	"sync",
+	"cache-status",
 	"export",
 	"diff",
 	"create-issue",
@@ -60,6 +61,7 @@ type queryService interface {
 	LinkCheck(context.Context, service.LinkCheckRequest) (service.LinkCheckResult, error)
 	StaleIndex(context.Context, service.StaleIndexRequest) (service.StaleIndexResult, error)
 	SyncToCache(context.Context, service.SyncRequest) (service.SyncResult, error)
+	CacheStatus(context.Context, service.CacheStatusRequest) (service.CacheStatusResult, error)
 	ExportSnapshot(context.Context, service.ExportSnapshotRequest) (service.ExportSnapshotResult, error)
 	DiffSnapshot(context.Context, service.DiffSnapshotRequest) (service.DiffSnapshotResult, error)
 	AddRepository(context.Context, service.AddRepositoryRequest) (service.RepositoryBinding, error)
@@ -470,6 +472,12 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, renderSyncText)
+	case "cache-status":
+		result, err := svc.CacheStatus(ctx, service.CacheStatusRequest{RepoID: opts.repo})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, renderCacheStatusText)
 	case "export":
 		result, err := svc.ExportSnapshot(ctx, service.ExportSnapshotRequest{RepoID: opts.repo, Format: opts.format, OutputPath: opts.output, IncludeBody: true})
 		if err != nil {
@@ -640,6 +648,10 @@ func renderSyncText(w io.Writer, result service.SyncResult) {
 	fmt.Fprintf(w, "sync: %s fetched=%d updated=%d inserted=%d skipped=%d conflicts=%d idempotency_key=%s replayed=%t\n", result.Status, result.Counts.Fetched, result.Counts.Updated, result.Counts.Inserted, result.Counts.Skipped, result.Counts.Conflicts, result.IdempotencyKey, result.Replayed)
 }
 
+func renderCacheStatusText(w io.Writer, result service.CacheStatusResult) {
+	fmt.Fprintf(w, "repo_id: %s\nwal_capable: %t\njournal_mode: %s\nrecords: %d\ncomments: %d\nidentity_aliases: %d\nsync_events: %d\naudit_rows: %d\nsnapshots: %d\nsnapshot_chunks: %d\nchunks: %d\nremote_revisions: %d\n", result.RepoID, result.WALCapable, result.JournalMode, result.Records, result.Comments, result.IdentityAliases, result.SyncEvents, result.AuditRows, result.Snapshots, result.SnapshotChunks, result.Chunks, result.RemoteRevisions)
+}
+
 func renderExportText(w io.Writer, result service.ExportSnapshotResult) {
 	if result.InlineContent != "" {
 		fmt.Fprint(w, result.InlineContent)
@@ -790,6 +802,7 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  handoff/review inspection -> recent")
 	fmt.Fprintln(w, "  broken pointer search -> link-check")
 	fmt.Fprintln(w, "  stale derived data search -> stale-index")
+	fmt.Fprintln(w, "  cache health inspection -> cache-status")
 	fmt.Fprintln(w, "  minimum replacement sequence: ingest -> search_sources -> list_sources -> get_source -> source_backlinks -> sync_status")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Global query flags:")

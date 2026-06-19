@@ -54,6 +54,22 @@ func (s *Service) AddRepository(ctx context.Context, req AddRepositoryRequest) (
 	return repo, nil
 }
 
+func (s *Service) CacheStatus(ctx context.Context, req CacheStatusRequest) (CacheStatusResult, error) {
+	repoID, err := s.requireRepo(ctx, req.RepoID, "cache-status")
+	if err != nil {
+		return CacheStatusResult{}, err
+	}
+	counts, err := s.store.RecordCounts(ctx, repoID)
+	if err != nil {
+		return CacheStatusResult{}, normalizeError(err, "cache", repoID)
+	}
+	walCapable, journalMode, err := s.store.WALCapable(ctx)
+	if err != nil {
+		return CacheStatusResult{}, normalizeError(err, "cache", repoID)
+	}
+	return CacheStatusResult{RepoID: repoID, WALCapable: walCapable, JournalMode: journalMode, Records: counts.Records, Comments: counts.Comments, IdentityAliases: counts.IdentityAliases, SyncEvents: counts.SyncEvents, AuditRows: counts.AuditRows, Snapshots: counts.Snapshots, SnapshotChunks: counts.SnapshotChunks, Chunks: counts.Chunks, RemoteRevisions: counts.RemoteRevisions}, nil
+}
+
 func (s *Service) RepositoryStatus(ctx context.Context, req RepositoryStatusRequest) (RepositoryStatus, error) {
 	repoID := strings.TrimSpace(req.RepoID)
 	if repoID == "" {

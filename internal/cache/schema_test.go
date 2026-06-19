@@ -39,7 +39,7 @@ func TestInitialMigration(t *testing.T) {
 	defer store.Close()
 
 	tables := tableNames(t, ctx, store.db)
-	for _, want := range []string{"schema_version", "repos", "repo_aliases", "sources", "identity_map", "links", "remote_revisions", "sync_events", "conflicts", "chunks"} {
+	for _, want := range []string{"schema_version", "repos", "repo_aliases", "sources", "identity_map", "links", "remote_revisions", "sync_events", "conflicts", "chunks", "records", "record_comments", "audit_trail", "snapshots", "snapshot_chunks"} {
 		if !tables[want] {
 			t.Fatalf("missing table %s; tables=%v", want, tables)
 		}
@@ -48,12 +48,29 @@ func TestInitialMigration(t *testing.T) {
 		t.Fatalf("FTS enabled store missing fts_index table")
 	}
 	indexes := indexNames(t, ctx, store.db)
-	for _, want := range []string{"idx_repo_aliases_repo", "idx_sources_kind_status", "idx_identity_source", "idx_identity_remote", "idx_links_target", "idx_sync_events_source", "idx_chunks_source"} {
+	for _, want := range []string{"idx_repo_aliases_repo", "idx_sources_kind_status", "idx_identity_source", "idx_identity_remote", "idx_links_target", "idx_sync_events_source", "idx_chunks_source", "idx_records_type_status", "idx_records_remote", "idx_records_remote_unique", "idx_record_comments_record", "idx_audit_trail_record", "idx_snapshot_chunks_record"} {
 		if !indexes[want] {
 			t.Fatalf("missing index %s; indexes=%v", want, indexes)
 		}
 	}
 	assertEmbeddingNullable(t, ctx, store.db)
+}
+
+func TestRepoScopedCacheMigrationConstraints(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+
+	if err := store.UpsertRecordGraph(ctx, RecordGraph{Record: Record{RepoID: "fixture-a", ID: "BAD", Type: "issue", Path: "issues/bad.md", Title: "Bad", Body: "bad", Status: "open", ContentHash: "bad", Provenance: "invalid"}}); err == nil {
+		t.Fatalf("invalid provenance was accepted")
+	}
+
+	if err := store.UpsertRecordGraph(ctx, RecordGraph{Record: Record{RepoID: "fixture-a", ID: "ISSUE-1", Type: "issue", Path: "issues/1.md", Title: "Issue", Body: "body", Status: "open", ContentHash: "h1", Provenance: ProvenanceRemote, RemoteType: "issue", RemoteID: "1"}}); err != nil {
+		t.Fatalf("UpsertRecordGraph remote returned error: %v", err)
+	}
+	if err := store.UpsertRecordGraph(ctx, RecordGraph{Record: Record{RepoID: "fixture-a", ID: "ISSUE-1-DUP", Type: "issue", Path: "issues/1-dup.md", Title: "Issue dup", Body: "body", Status: "open", ContentHash: "h2", Provenance: ProvenanceRemote, RemoteType: "issue", RemoteID: "1"}}); err == nil {
+		t.Fatalf("duplicate remote identity was accepted")
+	}
 }
 
 func TestSearchFallbackParity(t *testing.T) {
