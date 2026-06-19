@@ -311,13 +311,18 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 		return SyncResult{}, err
 	}
 	if err := s.store.IntegrityCheck(ctx); err != nil {
-		_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, err, s.now().UTC()))
-		return SyncResult{}, err
+		failure := s.normalizeSyncFailure(err, req, remoteType, remoteID)
+		_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, failure, s.now().UTC()))
+		return SyncResult{}, failure
 	}
 	graph, counts, err := s.fetchAndStage(ctx, req, remoteType, remoteID)
 	if err != nil {
-		_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, err, s.now().UTC()))
-		return SyncResult{}, err
+		failure := s.normalizeSyncFailure(err, req, remoteType, remoteID)
+		_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, failure, s.now().UTC()))
+		if markErr := s.markMissingRemote(ctx, inProgress, failure, remoteType, remoteID); markErr != nil {
+			return SyncResult{}, markErr
+		}
+		return SyncResult{}, failure
 	}
 	graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: graph.SyncStatus.RemoteRevision, Status: "succeeded", IdempotencyKey: key, Message: syncEventMessage(counts), CreatedAt: now})
 	if err := s.store.UpsertSourceGraph(ctx, graph); err != nil {
@@ -510,11 +515,14 @@ func (s *Service) fetchOnce(ctx context.Context, req SyncRequest, remoteType, re
 func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, remoteID string, issue gitcode.Issue) (cache.SourceGraph, SyncCounts, error) {
 	body := issue.Body
 	if req.MaxSize > 0 && int64(len(body)+len(issue.Title)) > req.MaxSize {
-		return cache.SourceGraph{}, SyncCounts{}, ErrSyncStagingLimit{Limit: req.MaxSize, Size: int64(len(body) + len(issue.Title))}
+		return cache.SourceGraph{}, SyncCounts{}, gitcode.ErrPayloadTooLarge{Endpoint: remoteID, Limit: req.MaxSize, Size: int64(len(body) + len(issue.Title))}
 	}
 	stableID := req.StableID
 	if stableID == "" {
 		stableID = resolveOrFallback(ctx, s.store, remoteType, remoteID, fallbackSourceID(remoteType, remoteID))
+	}
+	if err := s.guardRemoteAlias(ctx, remoteType, remoteID, stableID); err != nil {
+		return cache.SourceGraph{}, SyncCounts{}, err
 	}
 	now := s.now().UTC()
 	updated := issue.UpdatedAt.UTC()
@@ -551,11 +559,14 @@ func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, r
 func (s *Service) stageWiki(ctx context.Context, req SyncRequest, remoteType, remoteID string, page gitcode.WikiPage) (cache.SourceGraph, SyncCounts, error) {
 	body := page.Body
 	if req.MaxSize > 0 && int64(len(body)+len(page.Title)) > req.MaxSize {
-		return cache.SourceGraph{}, SyncCounts{}, ErrSyncStagingLimit{Limit: req.MaxSize, Size: int64(len(body) + len(page.Title))}
+		return cache.SourceGraph{}, SyncCounts{}, gitcode.ErrPayloadTooLarge{Endpoint: remoteID, Limit: req.MaxSize, Size: int64(len(body) + len(page.Title))}
 	}
 	stableID := req.StableID
 	if stableID == "" {
 		stableID = resolveOrFallback(ctx, s.store, remoteType, remoteID, fallbackSourceID(remoteType, remoteID))
+	}
+	if err := s.guardRemoteAlias(ctx, remoteType, remoteID, stableID); err != nil {
+		return cache.SourceGraph{}, SyncCounts{}, err
 	}
 	now := s.now().UTC()
 	updated := page.UpdatedAt.UTC()
@@ -584,6 +595,17 @@ func (s *Service) stageWiki(ctx context.Context, req SyncRequest, remoteType, re
 	}
 	graph := cache.SourceGraph{Source: cache.Source{ID: stableID, Kind: "wiki", Path: "wiki/" + remoteID + ".md", Title: page.Title, Body: body, Status: "fresh", ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, SyncStatus: &cache.SyncStatus{SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}
 	return graph, counts, nil
+}
+
+func (s *Service) guardRemoteAlias(ctx context.Context, remoteType, remoteID, stableID string) error {
+	identity, err := s.store.ResolveAlias(ctx, cache.RemoteAlias{Type: remoteType, ID: remoteID})
+	if err == nil && identity.SourceID != "" && identity.SourceID != stableID {
+		return gitcode.ErrRemoteCollision{Alias: remoteType + ":" + remoteID, ExistingID: identity.SourceID, NewID: stableID}
+	}
+	if err != nil && !isCacheNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 func resolveOrFallback(ctx context.Context, store cache.Store, remoteType, remoteID, fallback string) string {
@@ -632,6 +654,80 @@ func failedSyncEvent(event cache.SyncEvent, cause error, at time.Time) cache.Syn
 	event.Message = cause.Error()
 	event.CreatedAt = at
 	return event
+}
+
+func (s *Service) normalizeSyncFailure(err error, req SyncRequest, remoteType, remoteID string) error {
+	target := syncFailureTarget(req, remoteType, remoteID)
+	var network gitcode.ErrNetworkUnavailable
+	if errors.As(err, &network) {
+		return ErrSyncFailure{Mode: "network_timeout", Target: target, Endpoint: network.Endpoint, RecoveryAction: "retry with --timeout to increase deadline or check connectivity", Cause: err}
+	}
+	var rate gitcode.ErrRateLimited
+	if errors.As(err, &rate) {
+		return ErrSyncFailure{Mode: "rate_limited", Target: target, Endpoint: rate.Endpoint, RetryAfter: rate.RetryAfter, RecoveryAction: fmt.Sprintf("wait %s before retrying sync", rate.RetryAfter), Cause: err}
+	}
+	var partial gitcode.ErrPartialResponse
+	if errors.As(err, &partial) {
+		return ErrSyncFailure{Mode: "partial_response", Target: target, Endpoint: partial.Endpoint, ExpectedBytes: partial.Expected, GotBytes: partial.Got, RecoveryAction: "run sync again to resume", Cause: err}
+	}
+	var auth gitcode.ErrAuthExpired
+	if errors.As(err, &auth) {
+		return ErrSyncFailure{Mode: "auth_expired", Target: target, Endpoint: auth.Endpoint, RecoveryAction: "renew GITCODE_TOKEN and retry sync", Cause: err}
+	}
+	var collision gitcode.ErrRemoteCollision
+	if errors.As(err, &collision) {
+		return ErrSyncFailure{Mode: "remote_collision", Target: target, Endpoint: collision.Endpoint, Alias: collision.Alias, ExistingID: collision.ExistingID, NewID: collision.NewID, RecoveryAction: "run link-check for guidance", Cause: err}
+	}
+	var corruption cache.ErrCacheCorruption
+	if errors.As(err, &corruption) {
+		return ErrSyncFailure{Mode: "cache_corruption", Target: target, Endpoint: corruption.Path, RecoveryAction: "recover from backup or re-ingest with gitcode-mcp sync --full", Cause: err}
+	}
+	var missing gitcode.ErrRemoteNotFound
+	if errors.As(err, &missing) {
+		alias := missing.Alias
+		if alias == "" {
+			alias = remoteType + ":" + remoteID
+		}
+		return ErrSyncFailure{Mode: "remote_not_found", Target: target, Endpoint: missing.Endpoint, Alias: alias, RecoveryAction: "run link-check to find affected references", Cause: err}
+	}
+	var tooLarge gitcode.ErrPayloadTooLarge
+	if errors.As(err, &tooLarge) {
+		return ErrSyncFailure{Mode: "payload_too_large", Target: target, Endpoint: tooLarge.Endpoint, LimitBytes: tooLarge.Limit, SizeBytes: tooLarge.Size, RecoveryAction: "increase --max-size or skip with --skip-large", Cause: err}
+	}
+	var conflict gitcode.ErrConflict
+	if errors.As(err, &conflict) {
+		return ErrSyncFailure{Mode: "conflict", Target: target, Endpoint: conflict.Endpoint, LocalPayload: append([]byte(nil), conflict.LocalPayload...), RemotePayload: append([]byte(nil), conflict.RemotePayload...), RecoveryAction: "resolve local and remote payloads manually", Cause: err}
+	}
+	return err
+}
+
+func syncFailureTarget(req SyncRequest, remoteType, remoteID string) string {
+	if req.StableID != "" {
+		return req.StableID
+	}
+	if req.RemoteAlias != "" {
+		return req.RemoteAlias
+	}
+	if remoteType != "" || remoteID != "" {
+		return remoteType + ":" + remoteID
+	}
+	return req.Source
+}
+
+func (s *Service) markMissingRemote(ctx context.Context, event cache.SyncEvent, failure error, remoteType, remoteID string) error {
+	var syncFailure ErrSyncFailure
+	if !errors.As(failure, &syncFailure) || syncFailure.Mode != "remote_not_found" || event.SourceID == "" {
+		return nil
+	}
+	source, err := s.store.GetSource(ctx, event.SourceID)
+	if err != nil {
+		return failure
+	}
+	graph := cache.SourceGraph{Source: source, SyncStatus: &cache.SyncStatus{SourceID: event.SourceID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: event.RemoteRevision, Status: "not_found", LastFetchedAt: s.now().UTC()}}
+	if err := s.store.UpsertSourceGraph(ctx, graph); err != nil {
+		return err
+	}
+	return nil
 }
 
 func isRetryableSyncError(err error) bool {

@@ -216,9 +216,9 @@ func TestSyncBoundedStaging(t *testing.T) {
 	svc := seededSyncService(t, ctx, client)
 	svc.lockPath = filepath.Join(t.TempDir(), "sync.lock")
 	_, err := svc.SyncToCache(ctx, SyncRequest{StableID: "DOC-123", IdempotencyKey: "large-key", MaxSize: 5})
-	var staging ErrSyncStagingLimit
-	if !errors.As(err, &staging) {
-		t.Fatalf("error=%v want ErrSyncStagingLimit", err)
+	var tooLarge gitcode.ErrPayloadTooLarge
+	if !errors.As(err, &tooLarge) {
+		t.Fatalf("error=%v want ErrPayloadTooLarge", err)
 	}
 	source, err := svc.store.GetSource(ctx, "DOC-123")
 	if err != nil {
@@ -254,6 +254,117 @@ func TestSyncRetry(t *testing.T) {
 	}
 	if event == nil || event.Status != "succeeded" {
 		t.Fatalf("event=%#v", event)
+	}
+}
+
+func TestFailureModes(t *testing.T) {
+	ctx := context.Background()
+	baseWiki := gitcode.WikiPage{Slug: "wiki/design", Title: "Design", Body: "new body", Revision: "rev-2", UpdatedAt: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)}
+	tests := []struct {
+		name         string
+		client       *fakeGitCodeClient
+		request      SyncRequest
+		prelock      bool
+		corrupt      bool
+		wantMode     string
+		wantErrAs    func(error) bool
+		wantMessage  string
+		wantRemote   int
+		wantNotFound bool
+	}{
+		{name: "failure-timeout-network-unavailable", client: &fakeGitCodeClient{errors: []error{gitcode.ErrNetworkUnavailable{Endpoint: "/wiki", Attempts: 1}}}, request: SyncRequest{StableID: "DOC-123", IdempotencyKey: "failure-timeout-network-unavailable"}, wantMode: "network_timeout", wantErrAs: func(err error) bool { var target gitcode.ErrNetworkUnavailable; return errors.As(err, &target) }, wantMessage: "sync: network timeout for record DOC-123: retry with --timeout to increase deadline or check connectivity", wantRemote: 1},
+		{name: "failure-rate-limited-retry-after", client: &fakeGitCodeClient{errors: []error{gitcode.ErrRateLimited{RetryAfter: time.Second, Endpoint: "/wiki", Attempts: 1}}}, request: SyncRequest{StableID: "DOC-123", IdempotencyKey: "failure-rate-limited-retry-after", MaxAttempts: 1}, wantMode: "rate_limited", wantErrAs: func(err error) bool {
+			var target gitcode.ErrRateLimited
+			return errors.As(err, &target) && target.RetryAfter == time.Second
+		}, wantMessage: "sync: rate limited. Retry after 1 seconds.", wantRemote: 1},
+		{name: "failure-partial-response", client: &fakeGitCodeClient{errors: []error{gitcode.ErrPartialResponse{Endpoint: "/wiki", Expected: 100, Got: 40}}}, request: SyncRequest{StableID: "DOC-123", IdempotencyKey: "failure-partial-response"}, wantMode: "partial_response", wantErrAs: func(err error) bool { var target gitcode.ErrPartialResponse; return errors.As(err, &target) }, wantMessage: "sync: received partial response for /wiki: expected 100 bytes, got 40 bytes. Run sync again to resume.", wantRemote: 1},
+		{name: "failure-auth-expired", client: &fakeGitCodeClient{errors: []error{gitcode.ErrAuthExpired{Endpoint: "/wiki", Status: 401}}}, request: SyncRequest{StableID: "DOC-123", IdempotencyKey: "failure-auth-expired"}, wantMode: "auth_expired", wantErrAs: func(err error) bool { var target gitcode.ErrAuthExpired; return errors.As(err, &target) }, wantMessage: "sync: authentication expired. Renew your GITCODE_TOKEN and try again.", wantRemote: 1},
+		{name: "failure-remote-id-collision", client: &fakeGitCodeClient{wiki: baseWiki}, request: SyncRequest{StableID: "TASK-001", RemoteAlias: "remote:wiki/design", IdempotencyKey: "failure-remote-id-collision"}, wantMode: "remote_collision", wantErrAs: func(err error) bool {
+			var target gitcode.ErrRemoteCollision
+			return errors.As(err, &target) && target.ExistingID == "DOC-123" && target.NewID == "TASK-001"
+		}, wantMessage: "sync: remote id remote:wiki/design already maps to local id DOC-123; cannot map to TASK-001. Run link-check for guidance.", wantRemote: 1},
+		{name: "failure-cache-corruption", client: &fakeGitCodeClient{wiki: baseWiki}, request: SyncRequest{StableID: "DOC-123", IdempotencyKey: "failure-cache-corruption"}, corrupt: true, wantMode: "cache_corruption", wantErrAs: func(err error) bool { var target cache.ErrCacheCorruption; return errors.As(err, &target) }, wantMessage: "cache: integrity check failed at memory. Recover from backup or re-ingest with gitcode-mcp sync --full.", wantRemote: 0},
+		{name: "failure-lock-contention", client: &fakeGitCodeClient{wiki: baseWiki}, request: SyncRequest{StableID: "DOC-123", IdempotencyKey: "failure-lock-contention"}, prelock: true, wantErrAs: func(err error) bool { var target cache.ErrLockContention; return errors.As(err, &target) }, wantRemote: 0},
+		{name: "failure-missing-remote-record", client: &fakeGitCodeClient{errors: []error{gitcode.ErrRemoteNotFound{Endpoint: "/wiki", Alias: "remote:wiki/design"}}}, request: SyncRequest{StableID: "DOC-123", IdempotencyKey: "failure-missing-remote-record"}, wantMode: "remote_not_found", wantErrAs: func(err error) bool { var target gitcode.ErrRemoteNotFound; return errors.As(err, &target) }, wantMessage: "sync: remote record for alias remote:wiki/design not found. It may have been deleted or moved. Run link-check to find affected references.", wantRemote: 1, wantNotFound: true},
+		{name: "failure-oversized-payload", client: &fakeGitCodeClient{errors: []error{gitcode.ErrPayloadTooLarge{Endpoint: "/wiki", Limit: 5, Size: 50}}}, request: SyncRequest{StableID: "DOC-123", IdempotencyKey: "failure-oversized-payload"}, wantMode: "payload_too_large", wantErrAs: func(err error) bool {
+			var target gitcode.ErrPayloadTooLarge
+			return errors.As(err, &target) && target.Limit == 5
+		}, wantMessage: "sync: record DOC-123 exceeds maximum size 5 bytes. Use --max-size to increase limit or skip with --skip-large.", wantRemote: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := seededSyncService(t, ctx, tt.client)
+			svc.lockPath = filepath.Join(t.TempDir(), "sync.lock")
+			if tt.corrupt {
+				svc.store = corruptingStore{Store: svc.store}
+			}
+			var lock *cache.LockHandle
+			if tt.prelock {
+				var err error
+				lock, err = svc.store.AcquireLock(ctx, svc.lockPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer svc.store.ReleaseLock(ctx, lock)
+			}
+			_, err := svc.SyncToCache(ctx, tt.request)
+			if err == nil {
+				t.Fatal("SyncToCache succeeded, want failure")
+			}
+			if !tt.wantErrAs(err) {
+				t.Fatalf("error=%T %[1]v did not match typed expectation", err)
+			}
+			if tt.wantMode != "" {
+				var failure ErrSyncFailure
+				if !errors.As(err, &failure) || failure.Mode != tt.wantMode || failure.RecoveryAction == "" {
+					t.Fatalf("failure=%#v err=%v", failure, err)
+				}
+			}
+			if tt.wantMessage != "" && err.Error() != tt.wantMessage {
+				t.Fatalf("message=%q want %q", err.Error(), tt.wantMessage)
+			}
+			if tt.client.wikiCalls != tt.wantRemote {
+				t.Fatalf("remote calls=%d want %d", tt.client.wikiCalls, tt.wantRemote)
+			}
+			source, err := svc.store.GetSource(ctx, "DOC-123")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if source.Body != "intro same\nbacklog design same\nfinal" || source.ContentHash != "hash-doc" {
+				t.Fatalf("source mutated after failure: %#v", source)
+			}
+			if tt.prelock {
+				if event, err := svc.store.GetSyncEventByKey(ctx, tt.request.IdempotencyKey); err != nil || event != nil {
+					t.Fatalf("lock contention event=%#v err=%v", event, err)
+				}
+				return
+			}
+			event, err := svc.store.GetSyncEventByKey(ctx, tt.request.IdempotencyKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if event == nil || event.Status != "failed" || event.Message == "" {
+				t.Fatalf("failed event=%#v", event)
+			}
+			status, err := svc.store.GetSyncStatus(ctx, "DOC-123")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantNotFound {
+				if status.Status != "not_found" {
+					t.Fatalf("status=%#v want not_found", status)
+				}
+			} else if status.RemoteRevision != "rev-1" || status.Status != "fresh" {
+				t.Fatalf("sync status mutated after failure: %#v", status)
+			}
+			conflicts, err := svc.store.GetConflicts(ctx, "DOC-123")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(conflicts) != 0 {
+				t.Fatalf("conflicts written after failure: %#v", conflicts)
+			}
+		})
 	}
 }
 
@@ -542,6 +653,14 @@ func (f *fakeGitCodeClient) RemoveLabel(context.Context, gitcode.LabelRequest, g
 }
 
 var _ gitcode.Client = (*fakeGitCodeClient)(nil)
+
+type corruptingStore struct {
+	cache.Store
+}
+
+func (s corruptingStore) IntegrityCheck(context.Context) error {
+	return cache.ErrCacheCorruption{Path: "memory", Detail: "test corruption"}
+}
 
 type brokenStore struct {
 	sources map[string]cache.Source

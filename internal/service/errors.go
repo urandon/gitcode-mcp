@@ -3,9 +3,119 @@ package service
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/gitcode"
 )
+
+type ErrSyncFailure struct {
+	Mode           string
+	Target         string
+	Endpoint       string
+	RetryAfter     time.Duration
+	ExpectedBytes  int64
+	GotBytes       int64
+	LimitBytes     int64
+	SizeBytes      int64
+	Alias          string
+	ExistingID     string
+	NewID          string
+	LocalPayload   []byte
+	RemotePayload  []byte
+	RecoveryAction string
+	Cause          error
+}
+
+func (e ErrSyncFailure) Error() string {
+	switch e.Mode {
+	case "network_timeout":
+		return fmt.Sprintf("sync: network timeout for record %s: retry with --timeout to increase deadline or check connectivity", e.Target)
+	case "rate_limited":
+		return fmt.Sprintf("sync: rate limited. Retry after %d seconds.", int(e.RetryAfter.Seconds()))
+	case "partial_response":
+		return fmt.Sprintf("sync: received partial response for %s: expected %d bytes, got %d bytes. Run sync again to resume.", e.Endpoint, e.ExpectedBytes, e.GotBytes)
+	case "auth_expired":
+		return "sync: authentication expired. Renew your GITCODE_TOKEN and try again."
+	case "remote_collision":
+		return fmt.Sprintf("sync: remote id %s already maps to local id %s; cannot map to %s. Run link-check for guidance.", e.Alias, e.ExistingID, e.NewID)
+	case "cache_corruption":
+		return fmt.Sprintf("cache: integrity check failed at %s. Recover from backup or re-ingest with gitcode-mcp sync --full.", e.Endpoint)
+	case "remote_not_found":
+		return fmt.Sprintf("sync: remote record for alias %s not found. It may have been deleted or moved. Run link-check to find affected references.", e.Alias)
+	case "payload_too_large":
+		return fmt.Sprintf("sync: record %s exceeds maximum size %d bytes. Use --max-size to increase limit or skip with --skip-large.", e.Target, e.LimitBytes)
+	case "conflict":
+		return fmt.Sprintf("sync: conflict for record %s. Resolve local and remote payloads manually.", e.Target)
+	default:
+		if e.Cause != nil {
+			return e.Cause.Error()
+		}
+		return "sync: failed"
+	}
+}
+
+func (e ErrSyncFailure) Unwrap() error { return e.Cause }
+
+func (e ErrSyncFailure) As(target any) bool {
+	switch t := target.(type) {
+	case *gitcode.ErrNetworkUnavailable:
+		var v gitcode.ErrNetworkUnavailable
+		if errors.As(e.Cause, &v) {
+			*t = v
+			return true
+		}
+	case *gitcode.ErrRateLimited:
+		var v gitcode.ErrRateLimited
+		if errors.As(e.Cause, &v) {
+			*t = v
+			return true
+		}
+	case *gitcode.ErrAuthExpired:
+		var v gitcode.ErrAuthExpired
+		if errors.As(e.Cause, &v) {
+			*t = v
+			return true
+		}
+	case *gitcode.ErrPartialResponse:
+		var v gitcode.ErrPartialResponse
+		if errors.As(e.Cause, &v) {
+			*t = v
+			return true
+		}
+	case *gitcode.ErrRemoteCollision:
+		var v gitcode.ErrRemoteCollision
+		if errors.As(e.Cause, &v) {
+			*t = v
+			return true
+		}
+	case *gitcode.ErrRemoteNotFound:
+		var v gitcode.ErrRemoteNotFound
+		if errors.As(e.Cause, &v) {
+			*t = v
+			return true
+		}
+	case *gitcode.ErrPayloadTooLarge:
+		var v gitcode.ErrPayloadTooLarge
+		if errors.As(e.Cause, &v) {
+			*t = v
+			return true
+		}
+	case *gitcode.ErrConflict:
+		var v gitcode.ErrConflict
+		if errors.As(e.Cause, &v) {
+			*t = v
+			return true
+		}
+	case *cache.ErrCacheCorruption:
+		var v cache.ErrCacheCorruption
+		if errors.As(e.Cause, &v) {
+			*t = v
+			return true
+		}
+	}
+	return false
+}
 
 type ErrNotFound struct {
 	Kind string
