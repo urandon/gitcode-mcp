@@ -16,25 +16,62 @@ import (
 
 func TestContract(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v5/repos/example-owner/example-repo/issues/42" {
-			t.Fatalf("unexpected path %s", r.URL.Path)
-		}
 		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
 			t.Fatalf("auth header not applied")
 		}
-		fmt.Fprint(w, `{"id":"ISSUE-42","number":42,"title":"Cache first adapter","body":"structured body","status":"open","labels":["adapter","offline"],"created_at":"2026-06-18T10:00:00Z","updated_at":"2026-06-18T11:00:00Z"}`)
+		path := "../../fixtures" + r.URL.Path + ".json"
+		if r.URL.Path == "/api/v5/repos/example-owner/example-repo/wiki" {
+			path = "../../fixtures/api/v5/repos/example-owner/example-repo/wiki/pages.json"
+		}
+		http.ServeFile(w, r, path)
 	}))
 	defer server.Close()
 	client := newTestClient(t, server.URL, Config{Token: "test-token"})
+
+	issues, err := client.ListIssues(context.Background(), IssueListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if err != nil {
+		t.Fatalf("ListIssues returned error: %v", err)
+	}
+	if len(issues.Items) != 2 || issues.Items[1].ID != "ISSUE-42" || issues.Items[1].Title != "Cache first adapter" || issues.Items[1].Status != "open" || issues.Items[1].State != "open" {
+		t.Fatalf("unexpected issue list: %+v", issues.Items)
+	}
+	if len(issues.Items[1].Labels) != 2 || issues.Items[1].Labels[0] != "adapter" || issues.Items[1].CreatedAt.IsZero() || issues.Items[1].UpdatedAt.IsZero() {
+		t.Fatalf("unexpected issue list fields: %+v", issues.Items[1])
+	}
+
 	issue, err := client.GetIssue(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42})
 	if err != nil {
 		t.Fatalf("GetIssue returned error: %v", err)
 	}
-	if issue.ID != "ISSUE-42" || issue.Title != "Cache first adapter" || issue.Body != "structured body" || issue.Status != "open" {
+	if issue.ID != "ISSUE-42" || issue.Title != "Cache first adapter" || !strings.Contains(issue.Body, "Structured body") || issue.Status != "open" || issue.State != "open" {
 		t.Fatalf("unexpected issue: %+v", issue)
 	}
 	if len(issue.Labels) != 2 || issue.Labels[0] != "adapter" || issue.CreatedAt.IsZero() || issue.UpdatedAt.IsZero() {
 		t.Fatalf("unexpected issue fields: %+v", issue)
+	}
+
+	comments, err := client.ListIssueComments(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42})
+	if err != nil {
+		t.Fatalf("ListIssueComments returned error: %v", err)
+	}
+	if len(comments.Items) != 1 || comments.Items[0].ID != "COMMENT-1" || comments.Items[0].IssueID != "ISSUE-42" || comments.Items[0].Author != "example-owner" || comments.Items[0].CreatedAt.IsZero() {
+		t.Fatalf("unexpected comments: %+v", comments.Items)
+	}
+
+	wikiPages, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if err != nil {
+		t.Fatalf("ListWikiPages returned error: %v", err)
+	}
+	if len(wikiPages.Items) != 2 || wikiPages.Items[0].ID != "WIKI-HOME" || wikiPages.Items[0].Slug != "Home" || wikiPages.Items[0].Revision != "rev-home-1" || wikiPages.Items[0].UpdatedAt.IsZero() {
+		t.Fatalf("unexpected wiki pages: %+v", wikiPages.Items)
+	}
+
+	wikiPage, err := client.GetWikiPage(context.Background(), WikiPageRequest{Owner: "example-owner", Repo: "example-repo", Slug: "Home"})
+	if err != nil {
+		t.Fatalf("GetWikiPage returned error: %v", err)
+	}
+	if wikiPage.ID != "WIKI-HOME" || wikiPage.Title != "Example Project Home" || !strings.Contains(wikiPage.Body, "api.example.com") || wikiPage.CreatedAt.IsZero() || wikiPage.UpdatedAt.IsZero() {
+		t.Fatalf("unexpected wiki page: %+v", wikiPage)
 	}
 }
 

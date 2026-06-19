@@ -1,0 +1,18 @@
+{
+  "covered_outcome_ids": [
+    "outcome-3",
+    "outcome-7"
+  ],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "internal/gitcode production HTTP client exercised by adapter contract tests",
+    "internal/gitcode TestContract over local httptest.Server",
+    "internal/gitcode TestTimeout typed ErrNetworkUnavailable evidence",
+    "internal/gitcode TestSanitizedFixtures public-safety guard",
+    "fixtures/api/v5/repos/example-owner/example-repo sanitized JSON fixture corpus"
+  ],
+  "evidence_type": "offline executable validation script plus Go adapter runtime tests",
+  "freshness": "current source build",
+  "mocks_used": "external_dependencies_only: local httptest.Server replaces the GitCode API",
+  "production_files_modified": []
+}
