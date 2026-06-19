@@ -1,0 +1,229 @@
+package gitcode
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func TestContract(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v5/repos/example-owner/example-repo/issues/42" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("auth header not applied")
+		}
+		fmt.Fprint(w, `{"id":"ISSUE-42","number":42,"title":"Cache first adapter","body":"structured body","status":"open","labels":["adapter","offline"],"created_at":"2026-06-18T10:00:00Z","updated_at":"2026-06-18T11:00:00Z"}`)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{Token: "test-token"})
+	issue, err := client.GetIssue(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42})
+	if err != nil {
+		t.Fatalf("GetIssue returned error: %v", err)
+	}
+	if issue.ID != "ISSUE-42" || issue.Title != "Cache first adapter" || issue.Body != "structured body" || issue.Status != "open" {
+		t.Fatalf("unexpected issue: %+v", issue)
+	}
+	if len(issue.Labels) != 2 || issue.Labels[0] != "adapter" || issue.CreatedAt.IsZero() || issue.UpdatedAt.IsZero() {
+		t.Fatalf("unexpected issue fields: %+v", issue)
+	}
+}
+
+func TestAttachmentContract(t *testing.T) {
+	var oversized bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo/issues/42/attachments":
+			fmt.Fprint(w, `[{"id":"ATT-1","name":"evidence.txt","content_type":"text/plain","size":8,"checksum":"sha256:abc"}]`)
+		case "/api/v5/repos/example-owner/example-repo/issues/42/attachments/ATT-1":
+			w.Header().Set("Content-Type", "text/plain")
+			w.Header().Set("X-Checksum-Sha256", "sha256:abc")
+			if oversized {
+				fmt.Fprint(w, "01234567890123456789")
+				return
+			}
+			fmt.Fprint(w, "evidence")
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{MaxResponseSize: 256})
+	page, err := client.ListIssueAttachments(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42})
+	if err != nil {
+		t.Fatalf("ListIssueAttachments returned error: %v", err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ID != "ATT-1" || page.Items[0].Name != "evidence.txt" {
+		t.Fatalf("unexpected attachment metadata: %+v", page.Items)
+	}
+	body, err := client.GetAttachment(context.Background(), AttachmentRequest{Owner: "example-owner", Repo: "example-repo", IssueNumber: 42, AttachmentID: "ATT-1", Name: "evidence.txt"})
+	if err != nil {
+		t.Fatalf("GetAttachment returned error: %v", err)
+	}
+	if string(body.Body) != "evidence" || body.ContentType != "text/plain" || body.Checksum != "sha256:abc" {
+		t.Fatalf("unexpected attachment body: %+v", body)
+	}
+	oversized = true
+	smallClient := newTestClient(t, server.URL, Config{MaxResponseSize: 12})
+	_, err = smallClient.GetAttachment(context.Background(), AttachmentRequest{Owner: "example-owner", Repo: "example-repo", IssueNumber: 42, AttachmentID: "ATT-1"})
+	var tooLarge ErrPayloadTooLarge
+	if !errors.As(err, &tooLarge) {
+		t.Fatalf("expected ErrPayloadTooLarge, got %T %v", err, err)
+	}
+}
+
+func TestReadRetry(t *testing.T) {
+	var issueAttempts atomic.Int32
+	var listAttempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo/issues/42":
+			if issueAttempts.Add(1) == 1 {
+				w.Header().Set("Retry-After", "0")
+				w.WriteHeader(http.StatusTooManyRequests)
+				fmt.Fprint(w, `{"message":"slow down"}`)
+				return
+			}
+			fmt.Fprint(w, `{"id":"ISSUE-42","number":42,"title":"retried"}`)
+		case "/api/v5/repos/example-owner/example-repo/issues":
+			listAttempts.Add(1)
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprint(w, `{"message":"rate limited"}`)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{MaxRetries: 1})
+	issue, err := client.GetIssue(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42})
+	if err != nil {
+		t.Fatalf("retrying GetIssue returned error: %v", err)
+	}
+	if issue.Title != "retried" || issueAttempts.Load() != 2 {
+		t.Fatalf("retry did not produce expected issue")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	page, err := client.ListIssues(ctx, IssueListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if len(page.Items) != 0 {
+		t.Fatalf("expected no partial records, got %+v", page.Items)
+	}
+	var limited ErrRateLimited
+	var unavailable ErrNetworkUnavailable
+	if !errors.As(err, &limited) && !errors.As(err, &unavailable) {
+		t.Fatalf("expected ErrRateLimited or context bounded ErrNetworkUnavailable, got %T %v", err, err)
+	}
+}
+
+func TestTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		fmt.Fprint(w, `{}`)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	_, err := client.GetIssue(ctx, IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42})
+	var unavailable ErrNetworkUnavailable
+	if !errors.As(err, &unavailable) {
+		t.Fatalf("expected ErrNetworkUnavailable, got %T %v", err, err)
+	}
+	if !strings.Contains(unavailable.Endpoint, "/issues/42") || !strings.Contains(unavailable.Error(), "retry") {
+		t.Fatalf("missing endpoint or retry guidance: %+v", unavailable)
+	}
+}
+
+func TestFailureModes(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		check  func(*testing.T, error)
+	}{
+		{"auth", 401, `{"message":"expired"}`, func(t *testing.T, err error) { var target ErrAuthExpired; assertAs(t, err, &target) }},
+		{"forbidden", 403, `{"message":"permission denied"}`, func(t *testing.T, err error) { var target ErrForbidden; assertAs(t, err, &target); if strings.Contains(target.Recovery, "retry") { t.Fatalf("forbidden recovery suggests retry: %s", target.Recovery) } }},
+		{"not-found", 404, `{"message":"missing"}`, func(t *testing.T, err error) { var target ErrNotFound; assertAs(t, err, &target) }},
+		{"conflict", 409, `{"message":"conflict","remote":"value"}`, func(t *testing.T, err error) { var target ErrConflict; assertAs(t, err, &target); if len(target.RemotePayload) == 0 { t.Fatalf("missing remote payload") } }},
+		{"server-error", 500, `{"message":"down"}`, func(t *testing.T, err error) { var target ErrNetworkUnavailable; assertAs(t, err, &target) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.status)
+				fmt.Fprint(w, tt.body)
+			}))
+			defer server.Close()
+			client := newTestClient(t, server.URL, Config{})
+			_, err := client.GetIssue(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42})
+			tt.check(t, err)
+		})
+	}
+	t.Run("remote-not-found", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"message":"gone"}`)
+		}))
+		defer server.Close()
+		client := newTestClient(t, server.URL, Config{})
+		_, err := client.GetIssue(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42, KnownRemoteAlias: true, RemoteAlias: "gitcode:42"})
+		var target ErrRemoteNotFound
+		assertAs(t, err, &target)
+	})
+	t.Run("invalid-retry-after", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Retry-After", "not-a-date")
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprint(w, `{"message":"rate limited"}`)
+		}))
+		defer server.Close()
+		client := newTestClient(t, server.URL, Config{})
+		_, err := client.GetIssue(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42})
+		var target ErrRateLimited
+		assertAs(t, err, &target)
+		if target.RawRetryAfter != "not-a-date" {
+			t.Fatalf("raw retry-after not preserved")
+		}
+	})
+	t.Run("malformed-json", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"id":`) }))
+		defer server.Close()
+		client := newTestClient(t, server.URL, Config{})
+		_, err := client.GetIssue(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42})
+		var target ErrPartialResponse
+		assertAs(t, err, &target)
+	})
+	t.Run("max-size", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"id":"0123456789"}`) }))
+		defer server.Close()
+		client := newTestClient(t, server.URL, Config{MaxResponseSize: 5})
+		_, err := client.GetIssue(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42})
+		var target ErrPayloadTooLarge
+		assertAs(t, err, &target)
+	})
+}
+
+func newTestClient(t *testing.T, baseURL string, cfg Config) *HTTPClient {
+	t.Helper()
+	cfg.BaseURL = baseURL
+	client, err := NewHTTPClient(cfg)
+	if err != nil {
+		t.Fatalf("NewHTTPClient: %v", err)
+	}
+	return client
+}
+
+func assertAs[T error](t *testing.T, err error, target *T) {
+	t.Helper()
+	if !errors.As(err, target) {
+		t.Fatalf("expected %T, got %T %v", *target, err, err)
+	}
+}

@@ -1,0 +1,25 @@
+{
+  "covered_outcome_ids": [
+    "outcome-3",
+    "outcome-13"
+  ],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "internal/gitcode.Client.GetIssue",
+    "internal/gitcode.Client.ListIssueAttachments",
+    "internal/gitcode.Client.GetAttachment",
+    "internal/gitcode.Client.ListIssues",
+    "internal/gitcode.HTTPClient",
+    "internal/gitcode typed error family"
+  ],
+  "evidence_type": "CLI command",
+  "freshness": "current source build",
+  "mocks_used": [
+    {
+      "name": "httptest.Server",
+      "scope": "external GitCode API dependency only",
+      "policy": "offline deterministic stubbed external provider"
+    }
+  ],
+  "production_files_modified": []
+}
