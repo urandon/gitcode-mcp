@@ -212,3 +212,41 @@ type LinkResult struct {
 	Kind     string `json:"kind"`
 	Text     string `json:"text"`
 }
+
+type OperationRequest struct {
+	Mode       string `json:"mode,omitempty"`
+	InputPath  string `json:"input_path,omitempty"`
+	OutputPath string `json:"output_path,omitempty"`
+	Strict     bool   `json:"strict,omitempty"`
+}
+
+type OperationResult struct {
+	Command        string    `json:"command"`
+	Status         string    `json:"status"`
+	ProcessedCount int       `json:"processed_count,omitempty"`
+	Evidence       string    `json:"evidence,omitempty"`
+	GeneratedAt    time.Time `json:"generated_at"`
+}
+
+type WriteCommandRequest struct {
+	Owner          string   `json:"owner,omitempty"`
+	Repo           string   `json:"repo,omitempty"`
+	ID             string   `json:"id,omitempty"`
+	Number         int      `json:"number,omitempty"`
+	Slug           string   `json:"slug,omitempty"`
+	Title          string   `json:"title,omitempty"`
+	Body           string   `json:"body,omitempty"`
+	State          string   `json:"state,omitempty"`
+	Label          string   `json:"label,omitempty"`
+	Labels         []string `json:"labels,omitempty"`
+	IdempotencyKey string   `json:"idempotency_key,omitempty"`
+}
+
+type WriteCommandResult struct {
+	Command        string    `json:"command"`
+	Status         string    `json:"status"`
+	ID             string    `json:"id,omitempty"`
+	IdempotencyKey string    `json:"idempotency_key"`
+	Evidence       string    `json:"evidence,omitempty"`
+	GeneratedAt    time.Time `json:"generated_at"`
+}

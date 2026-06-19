@@ -32,6 +32,7 @@ func TestHelpReturnsSuccess(t *testing.T) {
 func TestMinimumReplacementBar(t *testing.T) {
 	factory := cacheBackedFactory(t)
 	cases := [][]string{
+		{"ingest"},
 		{"search_sources", "backlog"},
 		{"list_sources", "--kind", "task", "--status", "ready"},
 		{"get_source", "DOC-123"},
@@ -51,7 +52,7 @@ func TestMinimumReplacementBar(t *testing.T) {
 	}
 }
 
-func TestSearchSourcesJSON(t *testing.T) {
+func TestSearchJSON(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := executeWithFactory([]string{"search_sources", "backlog", "--format", "json"}, &stdout, &stderr, cacheBackedFactory(t))
@@ -64,6 +65,34 @@ func TestSearchSourcesJSON(t *testing.T) {
 	}
 	if len(results) == 0 || results[0].ID == "" || results[0].Path == "" || results[0].Title == "" || results[0].Snippet == "" {
 		t.Fatalf("missing fields: %#v", results)
+	}
+}
+
+func TestGetSource(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := executeWithFactory([]string{"get", "DOC-123"}, &stdout, &stderr, cacheBackedFactory(t))
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	for _, want := range []string{"id: DOC-123", "path: docs/backlog.md", "title: Backlog", "body:", "status: active"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("get output missing %q in %q", want, stdout.String())
+		}
+	}
+}
+
+func TestAllCommandsRegistered(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Execute([]string{"--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	for _, want := range []string{"ingest", "index", "search", "search_sources", "list", "list_sources", "get", "get_source", "snippet", "get_snippet", "backlinks", "source_backlinks", "tasks", "tracks", "link-check", "stale-index", "recent", "sync-status", "sync_status", "sync", "export", "diff", "create-issue", "update-issue", "create-page", "update-page", "add-comment", "add-label"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("help missing command %q in %q", want, stdout.String())
+		}
 	}
 }
 
@@ -167,7 +196,7 @@ func TestQueryCommandsUseServiceOnly(t *testing.T) {
 	spy := &spyService{}
 	factory := func(context.Context, string) (queryService, func() error, error) { return spy, nil, nil }
 	commands := [][]string{
-		{"search_sources", "backlog"}, {"list_sources"}, {"get_source", "DOC-123"}, {"source_backlinks", "DOC-123"}, {"get_snippet", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"sync_status", "DOC-123"}, {"recent"}, {"link-check"}, {"stale-index"},
+		{"ingest"}, {"index", "--full"}, {"search_sources", "backlog"}, {"list_sources"}, {"get_source", "DOC-123"}, {"source_backlinks", "DOC-123"}, {"get_snippet", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"sync_status", "DOC-123"}, {"recent"}, {"link-check"}, {"stale-index"}, {"sync"}, {"export"}, {"diff"}, {"create-issue", "--title", "t"}, {"update-issue", "--number", "1"}, {"create-page", "--title", "t", "--body", "b"}, {"update-page", "--slug", "s"}, {"add-comment", "--number", "1", "--body", "b"}, {"add-label", "--number", "1", "--label", "l"},
 	}
 	for _, args := range commands {
 		var stdout bytes.Buffer
@@ -176,7 +205,7 @@ func TestQueryCommandsUseServiceOnly(t *testing.T) {
 			t.Fatalf("%v code=%d stderr=%q", args, code, stderr.String())
 		}
 	}
-	for _, method := range []string{"SearchSources", "ListSources", "GetSource", "GetBacklinks", "GetSnippet", "GetSyncStatus", "RecentChanges", "LinkCheck", "StaleIndex"} {
+	for _, method := range []string{"Ingest", "Index", "SearchSources", "ListSources", "GetSource", "GetBacklinks", "GetSnippet", "GetSyncStatus", "RecentChanges", "LinkCheck", "StaleIndex", "SyncToCache", "ExportSnapshot", "DiffSnapshot", "CreateIssue", "UpdateIssue", "CreatePage", "UpdatePage", "AddComment", "AddLabel"} {
 		if spy.calls[method] != 1 {
 			t.Fatalf("%s calls=%d want 1", method, spy.calls[method])
 		}
@@ -229,6 +258,14 @@ func (s *spyService) called(name string) {
 	}
 	s.calls[name]++
 }
+func (s *spyService) Ingest(context.Context, service.OperationRequest) (service.OperationResult, error) {
+	s.called("Ingest")
+	return service.OperationResult{Command: "ingest", Status: "ok", ProcessedCount: 1, GeneratedAt: time.Now()}, nil
+}
+func (s *spyService) Index(context.Context, service.OperationRequest) (service.OperationResult, error) {
+	s.called("Index")
+	return service.OperationResult{Command: "index", Status: "ok", ProcessedCount: 1, GeneratedAt: time.Now()}, nil
+}
 func (s *spyService) SearchSources(context.Context, service.SearchSourcesRequest) ([]service.SearchSourceResult, error) {
 	s.called("SearchSources")
 	line := 1
@@ -273,6 +310,42 @@ func (s *spyService) StaleIndex(_ context.Context, req service.StaleIndexRequest
 		return result, service.ErrStaleIndex{StaleCount: 1}
 	}
 	return result, nil
+}
+func (s *spyService) SyncToCache(context.Context, service.OperationRequest) (service.OperationResult, error) {
+	s.called("SyncToCache")
+	return service.OperationResult{Command: "sync", Status: "ok", ProcessedCount: 1, GeneratedAt: time.Now()}, nil
+}
+func (s *spyService) ExportSnapshot(context.Context, service.ExportSnapshotRequest) (service.ExportSnapshotResult, error) {
+	s.called("ExportSnapshot")
+	return service.ExportSnapshotResult{SnapshotID: "snap", Format: "text", RecordCount: 1, GeneratedAt: time.Now(), ContentHash: "hash", InlineContent: "DOC-123\n"}, nil
+}
+func (s *spyService) DiffSnapshot(context.Context, service.DiffSnapshotRequest) (service.DiffSnapshotResult, error) {
+	s.called("DiffSnapshot")
+	return service.DiffSnapshotResult{BaseSnapshotID: "base", HeadSnapshotID: "head", Format: "text", ChangedSourceIDs: []string{"DOC-123"}, DiffText: "changed\n"}, nil
+}
+func (s *spyService) CreateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	s.called("CreateIssue")
+	return service.WriteCommandResult{Command: "create-issue", Status: "queued", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
+}
+func (s *spyService) UpdateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	s.called("UpdateIssue")
+	return service.WriteCommandResult{Command: "update-issue", Status: "queued", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
+}
+func (s *spyService) CreatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	s.called("CreatePage")
+	return service.WriteCommandResult{Command: "create-page", Status: "queued", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
+}
+func (s *spyService) UpdatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	s.called("UpdatePage")
+	return service.WriteCommandResult{Command: "update-page", Status: "queued", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
+}
+func (s *spyService) AddComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	s.called("AddComment")
+	return service.WriteCommandResult{Command: "add-comment", Status: "queued", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
+}
+func (s *spyService) AddLabel(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	s.called("AddLabel")
+	return service.WriteCommandResult{Command: "add-label", Status: "queued", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
 }
 
 func spyFactory() serviceFactory {

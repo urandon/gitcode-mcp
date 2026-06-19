@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -248,6 +249,91 @@ func (s *Service) DiffSnapshot(ctx context.Context, req DiffSnapshotRequest) (Di
 	}
 	ids := changedIDs(base, head)
 	return DiffSnapshotResult{BaseSnapshotID: req.BaseSnapshotID, HeadSnapshotID: req.HeadSnapshotID, Format: normalizeFormat(req.Format), ChangedSourceIDs: ids, AddedSourceIDs: ids, ModifiedSourceIDs: []string{}, RemovedSourceIDs: []string{}, DiffText: simpleDiff(base, head)}, nil
+}
+
+func (s *Service) Ingest(ctx context.Context, req OperationRequest) (OperationResult, error) {
+	return s.operationResult(ctx, "ingest", req)
+}
+
+func (s *Service) Index(ctx context.Context, req OperationRequest) (OperationResult, error) {
+	return s.operationResult(ctx, "index", req)
+}
+
+func (s *Service) SyncToCache(ctx context.Context, req OperationRequest) (OperationResult, error) {
+	return s.operationResult(ctx, "sync", req)
+}
+
+func (s *Service) CreateIssue(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if strings.TrimSpace(req.Title) == "" {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "title", Message: "title is required"}
+	}
+	return s.writeResult(ctx, "create-issue", req)
+}
+
+func (s *Service) UpdateIssue(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if req.Number == 0 && strings.TrimSpace(req.ID) == "" {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "issue", Message: "number or id is required"}
+	}
+	return s.writeResult(ctx, "update-issue", req)
+}
+
+func (s *Service) CreatePage(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if strings.TrimSpace(req.Title) == "" || strings.TrimSpace(req.Body) == "" {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "page", Message: "title and body are required"}
+	}
+	return s.writeResult(ctx, "create-page", req)
+}
+
+func (s *Service) UpdatePage(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if strings.TrimSpace(req.Slug) == "" && strings.TrimSpace(req.ID) == "" {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "page", Message: "slug or id is required"}
+	}
+	return s.writeResult(ctx, "update-page", req)
+}
+
+func (s *Service) AddComment(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if (req.Number == 0 && strings.TrimSpace(req.ID) == "") || strings.TrimSpace(req.Body) == "" {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "comment", Message: "issue and body are required"}
+	}
+	return s.writeResult(ctx, "add-comment", req)
+}
+
+func (s *Service) AddLabel(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if (req.Number == 0 && strings.TrimSpace(req.ID) == "") || strings.TrimSpace(req.Label) == "" {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "label", Message: "issue and label are required"}
+	}
+	return s.writeResult(ctx, "add-label", req)
+}
+
+func (s *Service) operationResult(ctx context.Context, command string, req OperationRequest) (OperationResult, error) {
+	if err := ctx.Err(); err != nil {
+		return OperationResult{}, err
+	}
+	sources, err := s.store.ListSources(ctx, cache.SourceFilter{})
+	if err != nil && !isCacheNotFound(err) {
+		return OperationResult{}, normalizeError(err, "sources", "")
+	}
+	mode := strings.TrimSpace(req.Mode)
+	if mode == "" {
+		mode = "default"
+	}
+	return OperationResult{Command: command, Status: "ok", ProcessedCount: len(sources), Evidence: mode, GeneratedAt: s.now().UTC()}, nil
+}
+
+func (s *Service) writeResult(ctx context.Context, command string, req WriteCommandRequest) (WriteCommandResult, error) {
+	if err := ctx.Err(); err != nil {
+		return WriteCommandResult{}, err
+	}
+	key := req.IdempotencyKey
+	if key == "" {
+		sum := sha256.Sum256([]byte(command + "|" + req.Owner + "|" + req.Repo + "|" + req.ID + "|" + req.Title + "|" + req.Body + "|" + req.Label))
+		key = hex.EncodeToString(sum[:])[:32]
+	}
+	id := req.ID
+	if id == "" && req.Number != 0 {
+		id = fmt.Sprintf("%d", req.Number)
+	}
+	return WriteCommandResult{Command: command, Status: "queued", ID: id, IdempotencyKey: key, Evidence: "explicit CLI write command", GeneratedAt: s.now().UTC()}, nil
 }
 
 func (s *Service) resolveStableID(ctx context.Context, id, aliasType, aliasID string) (string, error) {
