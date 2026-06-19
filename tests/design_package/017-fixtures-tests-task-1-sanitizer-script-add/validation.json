@@ -1,0 +1,15 @@
+{
+  "covered_outcome_ids": [
+    "outcome-7"
+  ],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "scripts/sanitize-fixtures.sh",
+    "fixtures/api/v5/",
+    "internal/gitcode/TestSanitizedFixtures"
+  ],
+  "evidence_type": "offline executable validation script plus Go runtime test",
+  "freshness": "current source build",
+  "mocks_used": "none",
+  "production_files_modified": []
+}
