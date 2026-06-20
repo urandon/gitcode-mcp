@@ -47,6 +47,7 @@ var commands = []string{
 	"add-label",
 	"config",
 	"auth",
+	"doctor",
 	"repo",
 }
 
@@ -119,6 +120,7 @@ type options struct {
 	idempotencyKey string
 	overwrite      bool
 	redacted       bool
+	runtimeAudit   bool
 	apiBaseURL     string
 	scopes         string
 	alias          multiFlag
@@ -160,7 +162,7 @@ func executeWithFactoryAndDeps(args []string, stdout io.Writer, stderr io.Writer
 		fmt.Fprintf(stdout, "gitcode-mcp %s\n", version)
 		return 0
 	}
-	if args[0] == "config" || args[0] == "auth" {
+	if args[0] == "config" || args[0] == "auth" || args[0] == "doctor" {
 		return executeLocalCommand(args, stdout, stderr, deps)
 	}
 	if !isKnownCommand(args[0]) {
@@ -247,6 +249,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.idempotencyKey, "idempotency-key", "", "idempotency key")
 	flags.BoolVar(&opts.overwrite, "overwrite", false, "overwrite existing file")
 	flags.BoolVar(&opts.redacted, "redacted", false, "redact secret values")
+	flags.BoolVar(&opts.runtimeAudit, "runtime-audit", false, "emit runtime audit report")
 	flags.StringVar(&opts.apiBaseURL, "api-base-url", "", "repository API base URL")
 	flags.StringVar(&opts.scopes, "scopes", "", "comma-separated repository scopes")
 	flags.Var(&opts.alias, "alias", "repository alias")
@@ -273,7 +276,7 @@ func reorderFlags(args []string) []string {
 		arg := args[i]
 		if strings.HasPrefix(arg, "--") {
 			flags = append(flags, arg)
-			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--index" || arg == "--overwrite" || arg == "--redacted" {
+			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--index" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" {
 				continue
 			}
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
@@ -303,6 +306,15 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 	opts, rest, err := parseOptions(command, subArgs)
 	if err != nil {
 		return writeError(stderr, opts.format, err)
+	}
+	if command == "doctor" && opts.runtimeAudit {
+		report := config.BuildRuntimeAuditConfigReport(deps.Source, config.Overrides{}, deps.CredentialReporter, version)
+		payload := runtimeAuditPayload{RepoID: opts.repo, Config: report}
+		if opts.format == "json" {
+			return renderJSON(stdout, payload)
+		}
+		renderRuntimeAuditText(stdout, payload)
+		return 0
 	}
 	sub, ok := firstArg(rest)
 	if !ok {
@@ -661,6 +673,41 @@ func renderJSON(w io.Writer, value any) int {
 		return 1
 	}
 	return 0
+}
+
+type runtimeAuditPayload struct {
+	RepoID string                          `json:"repo_id,omitempty"`
+	Config config.RuntimeAuditConfigReport `json:"config"`
+	Cache  string                          `json:"cache,omitempty"`
+	Repo   string                          `json:"repo,omitempty"`
+	MCP    string                          `json:"mcp,omitempty"`
+	Index  string                          `json:"index,omitempty"`
+}
+
+func renderRuntimeAuditText(w io.Writer, result runtimeAuditPayload) {
+	fmt.Fprintf(w, "repo_id: %s\n", cliEmptyAsNone(result.RepoID))
+	fmt.Fprintln(w, "config:")
+	fmt.Fprintf(w, "  version: %s\n", result.Config.Version)
+	fmt.Fprintf(w, "  config_path: %s\n", cliEmptyAsNone(result.Config.ConfigPath))
+	fmt.Fprintf(w, "  config_source: %s\n", result.Config.ConfigSource)
+	fmt.Fprintf(w, "  config_format: %s\n", result.Config.ConfigFormat)
+	fmt.Fprintf(w, "  config_exists: %t\n", result.Config.ConfigExists)
+	fmt.Fprintf(w, "  cache_path: %s\n", result.Config.CachePath)
+	fmt.Fprintf(w, "  cache_path_source: %s\n", result.Config.CachePathSource)
+	fmt.Fprintf(w, "  credential_source: %s\n", cliEmptyAsNone(result.Config.CredentialSource))
+	fmt.Fprintf(w, "  token_present: %t\n", result.Config.TokenPresent)
+	fmt.Fprintf(w, "  credential_store_mode: %s\n", result.Config.CredentialStoreMode)
+	fmt.Fprintf(w, "  failure_classes: %s\n", strings.Join(result.Config.FailureClasses, ","))
+	for _, remediation := range result.Config.Remediation {
+		fmt.Fprintf(w, "  remediation: %s\n", remediation)
+	}
+	fmt.Fprintln(w, "  handoff_fields:")
+	fmt.Fprintf(w, "    resolved_config_path: %s\n", cliEmptyAsNone(result.Config.HandoffFields.ResolvedConfigPath))
+	fmt.Fprintf(w, "    resolved_cache_path: %s\n", result.Config.HandoffFields.ResolvedCachePath)
+	fmt.Fprintln(w, "cache: not_reported_by_owner")
+	fmt.Fprintln(w, "repo: not_reported_by_owner")
+	fmt.Fprintln(w, "mcp: not_reported_by_owner")
+	fmt.Fprintln(w, "index: not_reported_by_owner")
 }
 
 func renderSearchText(w io.Writer, results []service.SearchSourceResult) {

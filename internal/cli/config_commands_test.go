@@ -138,6 +138,53 @@ func TestConfigAuthCommandsRedactedUX(t *testing.T) {
 	})
 }
 
+func TestRuntimeAuditDoctorCommand(t *testing.T) {
+	t.Run("SCN-RUNTIME-AUDIT-CLI-TEXT", func(t *testing.T) {
+		src := newCLIConfigSource(t)
+		path := filepath.Join(t.TempDir(), "active.yaml")
+		if err := os.WriteFile(path, []byte("cache_path: /tmp/runtime-cache.db\ncredential:\n  store: env\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		src.env[config.EnvMCPConfigPath] = path
+		src.env[config.EnvToken] = "secret-token-value"
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps([]string{"doctor", "--runtime-audit", "--repo", "fixture-repo"}, &stdout, &stderr, nil, localCommandDeps{Source: src})
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		out := stdout.String() + stderr.String()
+		for _, want := range []string{"repo_id: fixture-repo", "config:", "version: 0.1.0", "config_source: explicit-yaml", "config_format: yaml", "config_exists: true", "cache_path: /tmp/runtime-cache.db", "credential_source: env:GITCODE_TOKEN", "token_present: true", "handoff_fields:", "cache: not_reported_by_owner", "repo: not_reported_by_owner", "mcp: not_reported_by_owner", "index: not_reported_by_owner"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("doctor output missing %q in %q", want, out)
+			}
+		}
+		if strings.Contains(out, "secret-token-value") || strings.Contains(out, "cache: ok") || strings.Contains(out, "repo: ok") || strings.Contains(out, "mcp: ok") || strings.Contains(out, "index: ok") {
+			t.Fatalf("doctor output leaked or synthesized success: %q", out)
+		}
+	})
+
+	t.Run("SCN-RUNTIME-AUDIT-CLI-JSON", func(t *testing.T) {
+		src := newCLIConfigSource(t)
+		reporter := statusReporter{status: config.CredentialStatus{Source: "keyring", Present: false, StoreMode: "auto", ErrorClass: "credential-store-unavailable", Remediation: "Use GITCODE_TOKEN or credential.store env."}}
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps([]string{"doctor", "--runtime-audit", "--repo", "fixture-repo", "--format", "json"}, &stdout, &stderr, nil, localCommandDeps{Source: src, CredentialReporter: reporter})
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		out := stdout.String()
+		for _, want := range []string{"\"repo_id\": \"fixture-repo\"", "\"config\"", "\"handoff_fields\"", "\"credential-store-unavailable\"", "\"token_present\": false"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("doctor json missing %q in %q", want, out)
+			}
+		}
+		for _, forbidden := range []string{"\"cache\":", "\"repo\":", "\"mcp\":", "\"index\":", "raw dbus failure details"} {
+			if strings.Contains(out, forbidden) {
+				t.Fatalf("doctor json contained forbidden %q in %q", forbidden, out)
+			}
+		}
+	})
+}
+
 func TestConfigCommandDoesNotOpenService(t *testing.T) {
 	src := newCLIConfigSource(t)
 	called := false
@@ -149,6 +196,12 @@ func TestConfigCommandDoesNotOpenService(t *testing.T) {
 	code := executeWithFactoryAndDeps([]string{"auth", "status"}, &stdout, &stderr, factory, localCommandDeps{Source: src})
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = executeWithFactoryAndDeps([]string{"doctor", "--runtime-audit", "--repo", "fixture-repo"}, &stdout, &stderr, factory, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("doctor code=%d stderr=%q", code, stderr.String())
 	}
 	if called {
 		t.Fatalf("local command opened service")
