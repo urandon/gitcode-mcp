@@ -752,63 +752,42 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 }
 
 func (s *Service) CreateIssue(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
-	if err := s.validateWriteScope(ctx, req, RepositoryScopeIssues); err != nil {
-		return WriteCommandResult{}, err
-	}
 	if strings.TrimSpace(req.Title) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "title", Message: "title is required"}
 	}
-	return s.writeResult(ctx, "create-issue", req)
+	return s.executeWrite(ctx, "create-issue", req, RepositoryScopeIssues)
 }
 
 func (s *Service) UpdateIssue(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
-	if err := s.validateWriteScope(ctx, req, RepositoryScopeIssues); err != nil {
-		return WriteCommandResult{}, err
-	}
 	if req.Number == 0 && strings.TrimSpace(req.ID) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "issue", Message: "number or id is required"}
 	}
-	return s.writeResult(ctx, "update-issue", req)
+	return s.executeWrite(ctx, "update-issue", req, RepositoryScopeIssues)
 }
 
 func (s *Service) CreatePage(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
-	if err := s.validateWriteScope(ctx, req, RepositoryScopeWiki); err != nil {
-		return WriteCommandResult{}, err
-	}
 	if strings.TrimSpace(req.Title) == "" || strings.TrimSpace(req.Body) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "page", Message: "title and body are required"}
 	}
-	return s.writeResult(ctx, "create-page", req)
+	return s.executeWrite(ctx, "create-page", req, RepositoryScopeWiki)
 }
 
 func (s *Service) UpdatePage(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
-	if err := s.validateWriteScope(ctx, req, RepositoryScopeWiki); err != nil {
-		return WriteCommandResult{}, err
-	}
 	if strings.TrimSpace(req.Slug) == "" && strings.TrimSpace(req.ID) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "page", Message: "slug or id is required"}
 	}
-	return s.writeResult(ctx, "update-page", req)
+	return s.executeWrite(ctx, "update-page", req, RepositoryScopeWiki)
 }
 
 func (s *Service) AddComment(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
-	if err := s.validateWriteScope(ctx, req, RepositoryScopeIssues); err != nil {
-		return WriteCommandResult{}, err
-	}
 	if (req.Number == 0 && strings.TrimSpace(req.ID) == "") || strings.TrimSpace(req.Body) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "comment", Message: "issue and body are required"}
 	}
-	return s.writeResult(ctx, "add-comment", req)
+	return s.executeWrite(ctx, "add-comment", req, RepositoryScopeIssues)
 }
 
 func (s *Service) AddLabel(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
-	if err := s.validateWriteScope(ctx, req, RepositoryScopeIssues); err != nil {
-		return WriteCommandResult{}, err
-	}
-	if (req.Number == 0 && strings.TrimSpace(req.ID) == "") || strings.TrimSpace(req.Label) == "" {
-		return WriteCommandResult{}, ErrInvalidQuery{Field: "label", Message: "issue and label are required"}
-	}
-	return s.writeResult(ctx, "add-label", req)
+	return WriteCommandResult{}, ErrWriteFailure{Code: "write_unsupported_deferred", RepoID: firstNonEmptyString(req.RepoID, req.Repo)}
 }
 
 func (s *Service) operationResult(ctx context.Context, command string, req OperationRequest) (OperationResult, error) {
@@ -1331,33 +1310,299 @@ func freshnessFor(source cache.Source, status cache.SyncStatus) string {
 	return string(FreshnessFresh)
 }
 
-func (s *Service) validateWriteScope(ctx context.Context, req WriteCommandRequest, scope RepositoryScope) error {
-	repoID, err := s.requireRepo(ctx, req.Repo, "write")
-	if err != nil {
-		return err
-	}
-	req.Repo = repoID
-	remoteType := "issue"
-	if scope == RepositoryScopeWiki {
-		remoteType = "wiki"
-	}
-	return s.validateRepoScope(ctx, repoID, remoteType)
-}
-
-func (s *Service) writeResult(ctx context.Context, command string, req WriteCommandRequest) (WriteCommandResult, error) {
+func (s *Service) executeWrite(ctx context.Context, command string, req WriteCommandRequest, scope RepositoryScope) (WriteCommandResult, error) {
 	if err := ctx.Err(); err != nil {
 		return WriteCommandResult{}, err
 	}
-	key := req.IdempotencyKey
-	if key == "" {
-		sum := sha256.Sum256([]byte(command + "|" + req.Owner + "|" + req.Repo + "|" + req.ID + "|" + req.Title + "|" + req.Body + "|" + req.Label))
-		key = hex.EncodeToString(sum[:])[:32]
+	repoID := firstNonEmptyString(req.RepoID, req.Repo)
+	route, err := s.BuildAdapterRoute(ctx, repoID, scope)
+	if err != nil {
+		return WriteCommandResult{}, err
 	}
-	id := req.ID
-	if id == "" && req.Number != 0 {
-		id = fmt.Sprintf("%d", req.Number)
+	req.RepoID = route.RepoID
+	req.Repo = route.RepoID
+	if req.Mode != WriteModeDryRun && req.Mode != WriteModeLive {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "write_mode", Message: "exactly one of dry_run or live is required"}
 	}
-	return WriteCommandResult{Command: command, Status: "queued", ID: id, IdempotencyKey: key, Evidence: "explicit CLI write command", GeneratedAt: s.now().UTC()}, nil
+	key, fingerprint := writeIdempotency(command, req)
+	base := WriteCommandResult{Command: command, RepoID: route.RepoID, Status: "dry_run_valid", ID: writeTargetID(req), IdempotencyKey: key, SourceFingerprint: fingerprint, Evidence: "validated write command", GeneratedAt: s.now().UTC()}
+	if req.Mode == WriteModeDryRun {
+		return base, nil
+	}
+	if strings.TrimSpace(os.Getenv("GITCODE_TOKEN")) == "" {
+		return WriteCommandResult{}, ErrWriteFailure{Code: "write_missing_credential", RepoID: route.RepoID, IdempotencyKey: key}
+	}
+	prior, err := s.store.GetAuditEventByKey(ctx, route.RepoID, key)
+	if err != nil {
+		return WriteCommandResult{}, err
+	}
+	if prior != nil {
+		if prior.PayloadHash != "" && prior.PayloadHash != fingerprint {
+			return WriteCommandResult{}, ErrWriteFailure{Code: "write_idempotency_conflict", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
+		}
+		switch prior.Status {
+		case "succeeded":
+			return replayWriteResult(command, *prior, fingerprint, s.now().UTC()), nil
+		case "remote_confirmed_cache_refresh_failed":
+			graph, err := s.replayWriteGraph(ctx, command, route.RepoID, req, *prior)
+			if err != nil {
+				return WriteCommandResult{}, err
+			}
+			if err := s.store.UpsertRecordGraph(ctx, graph); err != nil {
+				_ = s.store.RecordAuditEvent(ctx, cache.AuditTrailEntry{RepoID: route.RepoID, ID: prior.ID, Operation: command, RecordID: prior.RecordID, RemoteType: prior.RemoteType, RemoteID: prior.RemoteID, IdempotencyKey: key, Status: "remote_confirmed_cache_refresh_failed", Message: err.Error(), PayloadHash: fingerprint, CreatedAt: s.now().UTC()})
+				return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key, Cause: err}
+			}
+			completed := cache.AuditTrailEntry{RepoID: route.RepoID, ID: prior.ID, Operation: command, RecordID: graph.Record.ID, RemoteType: graph.Record.RemoteType, RemoteID: prior.RemoteID, IdempotencyKey: key, Status: "succeeded", Message: "cache refresh replay completed", PayloadHash: fingerprint, CreatedAt: s.now().UTC()}
+			if err := s.store.RecordAuditEvent(ctx, completed); err != nil {
+				return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key, Cause: err}
+			}
+			return replayWriteResult(command, completed, fingerprint, s.now().UTC()), nil
+		case "remote_confirmed_audit_failed":
+			return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
+		}
+	}
+	confirmed, graph, err := s.callWriteAdapter(ctx, command, route, req, key)
+	if err != nil {
+		return WriteCommandResult{}, ErrWriteFailure{Code: writeErrorCode(err), RepoID: route.RepoID, IdempotencyKey: key, Cause: err}
+	}
+	if !confirmed.confirmed || confirmed.remoteID == "" {
+		return WriteCommandResult{}, ErrWriteFailure{Code: "write_unconfirmed_remote", RepoID: route.RepoID, IdempotencyKey: key}
+	}
+	audit := cache.AuditTrailEntry{RepoID: route.RepoID, ID: "write-" + key, Operation: command, RecordID: graph.Record.ID, RemoteType: graph.Record.RemoteType, RemoteID: confirmed.remoteID, IdempotencyKey: key, Status: "succeeded", Message: confirmed.message, PayloadHash: fingerprint, CreatedAt: confirmed.completedAt}
+	if err := s.store.RecordAuditEvent(ctx, audit); err != nil {
+		_ = s.store.RecordAuditEvent(ctx, cache.AuditTrailEntry{RepoID: route.RepoID, ID: "write-" + key, Operation: command, RecordID: graph.Record.ID, RemoteType: graph.Record.RemoteType, RemoteID: confirmed.remoteID, IdempotencyKey: key, Status: "remote_confirmed_audit_failed", Message: err.Error(), PayloadHash: fingerprint, CreatedAt: s.now().UTC()})
+		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
+	}
+	if err := s.store.UpsertRecordGraph(ctx, graph); err != nil {
+		_ = s.store.RecordAuditEvent(ctx, cache.AuditTrailEntry{RepoID: route.RepoID, ID: "write-" + key, Operation: command, RecordID: graph.Record.ID, RemoteType: graph.Record.RemoteType, RemoteID: confirmed.remoteID, IdempotencyKey: key, Status: "remote_confirmed_cache_refresh_failed", Message: err.Error(), PayloadHash: fingerprint, CreatedAt: s.now().UTC()})
+		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
+	}
+	base.Status = "succeeded"
+	base.ID = graph.Record.ID
+	base.RemoteID = confirmed.remoteID
+	base.RemoteNumber = confirmed.remoteNumber
+	base.RemoteSlug = confirmed.remoteSlug
+	base.RemoteRevision = confirmed.remoteRevision
+	base.Evidence = "adapter-confirmed write with audit and cache refresh"
+	return base, nil
+}
+
+type writeConfirmation struct {
+	confirmed      bool
+	remoteID       string
+	remoteNumber   int
+	remoteSlug     string
+	remoteRevision string
+	message        string
+	completedAt    time.Time
+}
+
+func (s *Service) callWriteAdapter(ctx context.Context, command string, route RepositoryRoute, req WriteCommandRequest, key string) (writeConfirmation, cache.RecordGraph, error) {
+	opts := gitcode.WriteOptions{IdempotencyKey: key}
+	now := s.now().UTC()
+	switch command {
+	case "create-issue":
+		result, err := s.client.CreateIssue(ctx, gitcode.CreateIssueRequest{Owner: route.Owner, Repo: route.Name, Title: strings.TrimSpace(req.Title), Body: req.Body, Labels: req.Labels}, opts)
+		if err != nil {
+			return writeConfirmation{}, cache.RecordGraph{}, err
+		}
+		confirmation, graph := s.issueWriteGraph(route.RepoID, result.Record, result, now)
+		return confirmation, graph, nil
+	case "update-issue":
+		result, err := s.client.UpdateIssue(ctx, gitcode.UpdateIssueRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, Title: req.Title, Body: req.Body, State: req.State, Labels: req.Labels}, opts)
+		if err != nil {
+			return writeConfirmation{}, cache.RecordGraph{}, err
+		}
+		confirmation, graph := s.issueWriteGraph(route.RepoID, result.Record, result, now)
+		return confirmation, graph, nil
+	case "add-comment":
+		result, err := s.client.CreateIssueComment(ctx, gitcode.CreateIssueCommentRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, Body: req.Body}, opts)
+		if err != nil {
+			return writeConfirmation{}, cache.RecordGraph{}, err
+		}
+		return s.commentWriteGraph(ctx, route.RepoID, req.Number, result.Record, result, now)
+	case "create-page":
+		result, err := s.client.CreateWikiPage(ctx, gitcode.CreateWikiPageRequest{Owner: route.Owner, Repo: route.Name, Slug: req.Slug, Title: strings.TrimSpace(req.Title), Body: req.Body}, opts)
+		if err != nil {
+			return writeConfirmation{}, cache.RecordGraph{}, err
+		}
+		confirmation, graph := s.wikiWriteGraph(route.RepoID, result.Record, result, now)
+		return confirmation, graph, nil
+	case "update-page":
+		result, err := s.client.UpdateWikiPage(ctx, gitcode.UpdateWikiPageRequest{Owner: route.Owner, Repo: route.Name, Slug: firstNonEmptyString(req.Slug, req.ID), Title: req.Title, Body: req.Body}, opts)
+		if err != nil {
+			return writeConfirmation{}, cache.RecordGraph{}, err
+		}
+		confirmation, graph := s.wikiWriteGraph(route.RepoID, result.Record, result, now)
+		return confirmation, graph, nil
+	default:
+		return writeConfirmation{}, cache.RecordGraph{}, ErrWriteFailure{Code: "write_unsupported_deferred", RepoID: route.RepoID}
+	}
+}
+
+func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID string, req WriteCommandRequest, prior cache.AuditTrailEntry) (cache.RecordGraph, error) {
+	now := s.now().UTC()
+	switch command {
+	case "create-issue", "update-issue":
+		number, _ := strconv.Atoi(prior.RemoteID)
+		issue := gitcode.Issue{ID: prior.RemoteID, Number: number, Title: strings.TrimSpace(req.Title), Body: req.Body, State: firstNonEmptyString(req.State, "open"), CreatedAt: now, UpdatedAt: now}
+		if issue.Title == "" {
+			issue.Title = "Issue " + prior.RemoteID
+		}
+		result := gitcode.WriteResult[gitcode.Issue]{Record: issue, Confirmed: true, RemoteID: prior.RemoteID, RemoteNumber: number, RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
+		_, graph := s.issueWriteGraph(repoID, issue, result, now)
+		return graph, nil
+	case "add-comment":
+		number := req.Number
+		if number == 0 {
+			number, _ = strconv.Atoi(prior.RecordID)
+		}
+		comment := gitcode.Comment{ID: prior.RemoteID, Body: req.Body, CreatedAt: now, UpdatedAt: now}
+		result := gitcode.WriteResult[gitcode.Comment]{Record: comment, Confirmed: true, RemoteID: prior.RemoteID, ParentIssueNumber: number, ParentIssueID: prior.RecordID, RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
+		_, graph, err := s.commentWriteGraph(ctx, repoID, number, comment, result, now)
+		return graph, err
+	case "create-page", "update-page":
+		page := gitcode.WikiPage{ID: prior.RemoteID, Slug: firstNonEmptyString(req.Slug, req.ID, prior.RemoteID), Title: req.Title, Body: req.Body, Revision: firstNonEmptyString(prior.Message, prior.PayloadHash), CreatedAt: now, UpdatedAt: now}
+		if page.Title == "" {
+			page.Title = page.Slug
+		}
+		result := gitcode.WriteResult[gitcode.WikiPage]{Record: page, Confirmed: true, RemoteID: prior.RemoteID, RemoteSlug: page.Slug, RemoteRevision: page.Revision, ConfirmedAt: now}
+		_, graph := s.wikiWriteGraph(repoID, page, result, now)
+		return graph, nil
+	default:
+		return cache.RecordGraph{}, ErrWriteFailure{Code: "write_unsupported_deferred", RepoID: repoID, RemoteID: prior.RemoteID, IdempotencyKey: prior.IdempotencyKey}
+	}
+}
+
+func (s *Service) issueWriteGraph(repoID string, issue gitcode.Issue, result gitcode.WriteResult[gitcode.Issue], now time.Time) (writeConfirmation, cache.RecordGraph) {
+	remoteID := firstNonEmptyString(result.RemoteID, issue.ID, strconv.Itoa(firstNonZeroInt(result.RemoteNumber, issue.Number)))
+	issue.Number = firstNonZeroInt(issue.Number, result.RemoteNumber)
+	stableID := fallbackSourceID("issue", remoteID)
+	status := firstNonEmptyString(issue.State, issue.Status, "open")
+	updated := issue.UpdatedAt.UTC()
+	if updated.IsZero() {
+		updated = now
+	}
+	created := issue.CreatedAt.UTC()
+	if created.IsZero() {
+		created = updated
+	}
+	revision := firstNonEmptyString(result.RemoteRevision, result.ResponseHash, contentHash(issue.Title, issue.Body, status, issue.Labels))
+	record := cache.Record{RepoID: repoID, ID: stableID, Type: "issue", Path: "issues/" + remoteID + ".md", Title: issue.Title, Body: issue.Body, Status: status, Labels: issue.Labels, ContentHash: contentHash(issue.Title, issue.Body, status, issue.Labels), Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: remoteID, RemoteRevision: revision, CreatedAt: created, UpdatedAt: updated}
+	graph := cache.RecordGraph{Record: record, Identities: []cache.Identity{{RepoID: repoID, SourceID: stableID, AliasType: "issue", Alias: remoteID, Remote: cache.RemoteAlias{Type: "issue", ID: remoteID}}}, RemoteRevisions: []cache.RemoteRevision{{RepoID: repoID, RecordID: stableID, RemoteType: "issue", RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}}
+	return writeConfirmation{confirmed: result.Confirmed, remoteID: remoteID, remoteNumber: issue.Number, remoteRevision: revision, message: result.Operation, completedAt: firstNonZeroTime(result.ConfirmedAt, now)}, graph
+}
+
+func (s *Service) wikiWriteGraph(repoID string, page gitcode.WikiPage, result gitcode.WriteResult[gitcode.WikiPage], now time.Time) (writeConfirmation, cache.RecordGraph) {
+	remoteID := firstNonEmptyString(result.RemoteSlug, page.Slug, result.RemoteID, page.ID)
+	stableID := fallbackSourceID("wiki", remoteID)
+	updated := page.UpdatedAt.UTC()
+	if updated.IsZero() {
+		updated = now
+	}
+	created := page.CreatedAt.UTC()
+	if created.IsZero() {
+		created = updated
+	}
+	revision := firstNonEmptyString(result.RemoteRevision, page.Revision, result.ResponseHash, contentHash(page.Title, page.Body))
+	record := cache.Record{RepoID: repoID, ID: stableID, Type: "wiki", Path: "wiki/" + remoteID + ".md", Title: page.Title, Body: page.Body, Status: "fresh", ContentHash: contentHash(page.Title, page.Body, revision), Provenance: cache.ProvenanceRemote, RemoteType: "wiki", RemoteID: remoteID, RemoteRevision: revision, CreatedAt: created, UpdatedAt: updated}
+	graph := cache.RecordGraph{Record: record, Identities: []cache.Identity{{RepoID: repoID, SourceID: stableID, AliasType: "wiki", Alias: remoteID, Remote: cache.RemoteAlias{Type: "wiki", ID: remoteID}}}, RemoteRevisions: []cache.RemoteRevision{{RepoID: repoID, RecordID: stableID, RemoteType: "wiki", RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}}
+	return writeConfirmation{confirmed: result.Confirmed, remoteID: remoteID, remoteSlug: remoteID, remoteRevision: revision, message: result.Operation, completedAt: firstNonZeroTime(result.ConfirmedAt, now)}, graph
+}
+
+func (s *Service) commentWriteGraph(ctx context.Context, repoID string, number int, comment gitcode.Comment, result gitcode.WriteResult[gitcode.Comment], now time.Time) (writeConfirmation, cache.RecordGraph, error) {
+	remoteID := firstNonEmptyString(result.ParentIssueID, comment.IssueID, strconv.Itoa(firstNonZeroInt(result.ParentIssueNumber, number)))
+	stableID := s.resolveOrFallback(ctx, repoID, "issue", remoteID, fallbackSourceID("issue", remoteID))
+	record, err := s.store.GetRecord(ctx, repoID, stableID)
+	if err != nil {
+		record = cache.Record{RepoID: repoID, ID: stableID, Type: "issue", Path: "issues/" + remoteID + ".md", Title: "Issue " + remoteID, Status: "open", ContentHash: contentHash(remoteID), Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: remoteID, CreatedAt: now, UpdatedAt: now}
+	}
+	commentID := firstNonEmptyString(result.RemoteID, comment.ID, contentHash(remoteID, comment.Body, now))
+	created := firstNonZeroTime(comment.CreatedAt.UTC(), now)
+	updated := firstNonZeroTime(comment.UpdatedAt.UTC(), created)
+	graph := cache.RecordGraph{Record: record, Comments: []cache.RecordComment{{RepoID: repoID, RecordID: stableID, CommentID: commentID, Author: comment.Author, Body: comment.Body, ContentHash: contentHash(commentID, comment.Body), RemoteRevision: firstNonEmptyString(result.RemoteRevision, result.ResponseHash), CreatedAt: created, UpdatedAt: updated}}}
+	return writeConfirmation{confirmed: result.Confirmed, remoteID: commentID, remoteNumber: firstNonZeroInt(result.ParentIssueNumber, number), remoteRevision: result.RemoteRevision, message: result.Operation, completedAt: firstNonZeroTime(result.ConfirmedAt, now)}, graph, nil
+}
+
+func writeIdempotency(command string, req WriteCommandRequest) (string, string) {
+	payload, _ := json.Marshal(struct {
+		Command string
+		RepoID  string
+		ID      string
+		Number  int
+		Slug    string
+		Title   string
+		Body    string
+		State   string
+		Labels  []string
+	}{command, req.RepoID, req.ID, req.Number, req.Slug, strings.TrimSpace(req.Title), req.Body, req.State, req.Labels})
+	sum := sha256.Sum256(payload)
+	fingerprint := hex.EncodeToString(sum[:])
+	if strings.TrimSpace(req.IdempotencyKey) != "" {
+		return strings.TrimSpace(req.IdempotencyKey), fingerprint
+	}
+	return fingerprint[:32], fingerprint
+}
+
+func writeTargetID(req WriteCommandRequest) string {
+	if req.ID != "" {
+		return req.ID
+	}
+	if req.Number != 0 {
+		return strconv.Itoa(req.Number)
+	}
+	return req.Slug
+}
+
+func replayWriteResult(command string, entry cache.AuditTrailEntry, fingerprint string, now time.Time) WriteCommandResult {
+	return WriteCommandResult{Command: command, Status: "succeeded", RepoID: entry.RepoID, ID: entry.RecordID, RemoteID: entry.RemoteID, IdempotencyKey: entry.IdempotencyKey, SourceFingerprint: fingerprint, Replayed: true, Evidence: "replayed from audit_trail", GeneratedAt: now}
+}
+
+func writeErrorCode(err error) string {
+	var conflict gitcode.ErrConflict
+	if errors.As(err, &conflict) {
+		return "write_conflict"
+	}
+	var auth gitcode.ErrAuthExpired
+	if errors.As(err, &auth) {
+		return "write_unauthorized"
+	}
+	var limited gitcode.ErrRateLimited
+	if errors.As(err, &limited) {
+		return "write_rate_limited"
+	}
+	var network gitcode.ErrNetworkUnavailable
+	if errors.As(err, &network) {
+		return "write_network_unavailable"
+	}
+	return "write_provider_error"
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func firstNonZeroInt(values ...int) int {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func firstNonZeroTime(values ...time.Time) time.Time {
+	for _, value := range values {
+		if !value.IsZero() {
+			return value
+		}
+	}
+	return time.Time{}
 }
 
 func (s *Service) requireRepo(ctx context.Context, repoID, operation string) (string, error) {

@@ -115,6 +115,8 @@ type options struct {
 	label          string
 	labels         string
 	idempotencyKey string
+	dryRun         bool
+	live           bool
 	overwrite      bool
 	redacted       bool
 	runtimeAudit   bool
@@ -244,6 +246,8 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.label, "label", "", "label")
 	flags.StringVar(&opts.labels, "labels", "", "comma-separated labels")
 	flags.StringVar(&opts.idempotencyKey, "idempotency-key", "", "idempotency key")
+	flags.BoolVar(&opts.dryRun, "dry-run", false, "validate write without mutation")
+	flags.BoolVar(&opts.live, "live", false, "execute live write")
 	flags.BoolVar(&opts.overwrite, "overwrite", false, "overwrite existing file")
 	flags.BoolVar(&opts.redacted, "redacted", false, "redact secret values")
 	flags.BoolVar(&opts.runtimeAudit, "runtime-audit", false, "emit runtime audit report")
@@ -273,7 +277,7 @@ func reorderFlags(args []string) []string {
 		arg := args[i]
 		if strings.HasPrefix(arg, "--") {
 			flags = append(flags, arg)
-			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--index" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" {
+			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--index" || arg == "--dry-run" || arg == "--live" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" {
 				continue
 			}
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
@@ -597,11 +601,27 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 }
 
 func dispatchWrite(ctx context.Context, handler func(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error), command string, opts options, stdout io.Writer, stderr io.Writer) int {
+	if err := validateWriteOptions(command, opts); err != nil {
+		return writeError(stderr, opts.format, err)
+	}
 	result, err := handler(ctx, writeRequest(opts))
 	if err != nil {
 		return writeError(stderr, opts.format, err)
 	}
 	return render(stdout, opts.format, result, renderWriteText)
+}
+
+func validateWriteOptions(command string, opts options) error {
+	if strings.TrimSpace(opts.repo) == "" {
+		return service.ErrRepoRequired{Operation: command}
+	}
+	if strings.TrimSpace(opts.owner) != "" || strings.TrimSpace(opts.name) != "" || strings.TrimSpace(opts.apiBaseURL) != "" {
+		return service.ErrInvalidQuery{Field: "write_scope", Message: "write commands accept only --repo configured repo id"}
+	}
+	if opts.dryRun == opts.live {
+		return service.ErrInvalidQuery{Field: "write_mode", Message: "exactly one of --dry-run or --live is required"}
+	}
+	return nil
 }
 
 func snapshotRefFromPath(path string, format string) service.SnapshotRef {
@@ -631,7 +651,11 @@ func writeRequest(opts options) service.WriteCommandRequest {
 			}
 		}
 	}
-	return service.WriteCommandRequest{Owner: opts.owner, Repo: opts.repo, ID: opts.id, Number: opts.number, Slug: opts.slug, Title: opts.title, Body: opts.body, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
+	mode := service.WriteModeDryRun
+	if opts.live {
+		mode = service.WriteModeLive
+	}
+	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, Number: opts.number, Slug: opts.slug, Title: opts.title, Body: opts.body, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
 }
 
 func cliEmptyAsNone(value string) string {

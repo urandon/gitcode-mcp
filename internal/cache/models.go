@@ -39,6 +39,8 @@ type Store interface {
 	ListChunks(context.Context, ChunkFilter) ([]Chunk, error)
 	RecordSyncEvent(context.Context, SyncEvent) error
 	GetSyncEventByKey(context.Context, string) (*SyncEvent, error)
+	RecordAuditEvent(context.Context, AuditTrailEntry) error
+	GetAuditEventByKey(context.Context, string, string) (*AuditTrailEntry, error)
 	GetSyncStatus(context.Context, string) (SyncStatus, error)
 	GetSyncStatusScoped(context.Context, string, string) (SyncStatus, error)
 	UpsertConflict(context.Context, Conflict) error

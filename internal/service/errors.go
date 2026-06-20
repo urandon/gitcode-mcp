@@ -210,6 +210,33 @@ func (e ErrLinkCheckFailed) Error() string {
 	return fmt.Sprintf("service: link check found %d broken link(s)", e.BrokenCount)
 }
 
+type ErrWriteFailure struct {
+	Code           string
+	RepoID         string
+	RemoteID       string
+	IdempotencyKey string
+	Cause          error
+}
+
+func (e ErrWriteFailure) Error() string {
+	msg := "write: " + e.Code
+	if e.RepoID != "" {
+		msg += " repo_id=" + e.RepoID
+	}
+	if e.RemoteID != "" {
+		msg += " remote_id=" + e.RemoteID
+	}
+	if e.IdempotencyKey != "" {
+		msg += " idempotency_key=" + e.IdempotencyKey
+	}
+	if e.Cause != nil {
+		msg += ": " + e.Cause.Error()
+	}
+	return msg
+}
+
+func (e ErrWriteFailure) Unwrap() error { return e.Cause }
+
 type ErrSyncInProgress struct {
 	EventID        string
 	IdempotencyKey string

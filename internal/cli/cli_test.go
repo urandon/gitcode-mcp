@@ -400,7 +400,7 @@ func TestQueryCommandsUseServiceOnly(t *testing.T) {
 	spy := &spyService{}
 	factory := func(context.Context, string) (queryService, func() error, error) { return spy, nil, nil }
 	commands := [][]string{
-		{"ingest"}, {"index", "--repo", "fixture-a", "--full"}, {"search", "--repo", "fixture-a", "backlog"}, {"list", "--repo", "fixture-a"}, {"get", "--repo", "fixture-a", "DOC-123"}, {"backlinks", "--repo", "fixture-a", "DOC-123"}, {"get-snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"snippets", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"list-chunks", "--repo", "fixture-a"}, {"recent", "--repo", "fixture-a"}, {"link-check", "--repo", "fixture-a"}, {"stale-index", "--repo", "fixture-a"}, {"sync", "--repo", "fixture-a"}, {"cache-status", "--repo", "fixture-a"}, {"export", "--repo", "fixture-a"}, {"diff", "--repo", "fixture-a"}, {"repo", "add", "--repo", "fixture-a", "--owner", "owner", "--name", "repo", "--api-base-url", "https://example.invalid/api", "--scopes", "issues"}, {"repo", "status", "--repo", "fixture-a"}, {"create-issue", "--repo", "fixture-a", "--title", "t"}, {"update-issue", "--repo", "fixture-a", "--number", "1"}, {"create-page", "--repo", "fixture-a", "--title", "t", "--body", "b"}, {"update-page", "--repo", "fixture-a", "--slug", "s"}, {"add-comment", "--repo", "fixture-a", "--number", "1", "--body", "b"}, {"add-label", "--repo", "fixture-a", "--number", "1", "--label", "l"},
+		{"ingest"}, {"index", "--repo", "fixture-a", "--full"}, {"search", "--repo", "fixture-a", "backlog"}, {"list", "--repo", "fixture-a"}, {"get", "--repo", "fixture-a", "DOC-123"}, {"backlinks", "--repo", "fixture-a", "DOC-123"}, {"get-snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"snippets", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"list-chunks", "--repo", "fixture-a"}, {"recent", "--repo", "fixture-a"}, {"link-check", "--repo", "fixture-a"}, {"stale-index", "--repo", "fixture-a"}, {"sync", "--repo", "fixture-a"}, {"cache-status", "--repo", "fixture-a"}, {"export", "--repo", "fixture-a"}, {"diff", "--repo", "fixture-a"}, {"repo", "add", "--repo", "fixture-a", "--owner", "owner", "--name", "repo", "--api-base-url", "https://example.invalid/api", "--scopes", "issues"}, {"repo", "status", "--repo", "fixture-a"}, {"create-issue", "--repo", "fixture-a", "--title", "t", "--dry-run"}, {"update-issue", "--repo", "fixture-a", "--number", "1", "--dry-run"}, {"create-page", "--repo", "fixture-a", "--title", "t", "--body", "b", "--dry-run"}, {"update-page", "--repo", "fixture-a", "--slug", "s", "--dry-run"}, {"add-comment", "--repo", "fixture-a", "--number", "1", "--body", "b", "--dry-run"}, {"add-label", "--repo", "fixture-a", "--number", "1", "--label", "l", "--dry-run"},
 	}
 	for _, args := range commands {
 		var stdout bytes.Buffer
@@ -559,27 +559,27 @@ func (s *spyService) RepositoryStatus(context.Context, service.RepositoryStatusR
 }
 func (s *spyService) CreateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error) {
 	s.called("CreateIssue")
-	return service.WriteCommandResult{Command: "create-issue", Status: "queued", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
+	return service.WriteCommandResult{Command: "create-issue", Status: "dry_run_valid", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
 }
 func (s *spyService) UpdateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error) {
 	s.called("UpdateIssue")
-	return service.WriteCommandResult{Command: "update-issue", Status: "queued", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
+	return service.WriteCommandResult{Command: "update-issue", Status: "dry_run_valid", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
 }
 func (s *spyService) CreatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error) {
 	s.called("CreatePage")
-	return service.WriteCommandResult{Command: "create-page", Status: "queued", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
+	return service.WriteCommandResult{Command: "create-page", Status: "dry_run_valid", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
 }
 func (s *spyService) UpdatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error) {
 	s.called("UpdatePage")
-	return service.WriteCommandResult{Command: "update-page", Status: "queued", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
+	return service.WriteCommandResult{Command: "update-page", Status: "dry_run_valid", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
 }
 func (s *spyService) AddComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error) {
 	s.called("AddComment")
-	return service.WriteCommandResult{Command: "add-comment", Status: "queued", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
+	return service.WriteCommandResult{Command: "add-comment", Status: "dry_run_valid", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
 }
 func (s *spyService) AddLabel(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error) {
 	s.called("AddLabel")
-	return service.WriteCommandResult{Command: "add-label", Status: "queued", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
+	return service.WriteCommandResult{Command: "add-label", Status: "dry_run_valid", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
 }
 
 func spyFactory() serviceFactory {

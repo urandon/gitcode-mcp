@@ -54,6 +54,114 @@ func TestRepositoryRegistry(t *testing.T) {
 	}
 }
 
+func TestWriteDryRunNoMutation(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{}
+	svc := NewWithClient(store, client)
+	result, err := svc.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeDryRun, Title: "T", Body: "B"})
+	if err != nil {
+		t.Fatalf("CreateIssue dry-run returned error: %v", err)
+	}
+	if result.Status != "dry_run_valid" || result.RepoID != "fixture-a" || result.IdempotencyKey == "" || client.createIssueCalls != 0 {
+		t.Fatalf("dry-run result=%#v calls=%d", result, client.createIssueCalls)
+	}
+	counts, err := store.RecordCounts(ctx, "fixture-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.AuditRows != 0 {
+		t.Fatalf("audit rows=%d want 0", counts.AuditRows)
+	}
+}
+
+func TestWriteLiveSuccessAuditCacheAndReplay(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{createIssueResult: gitcode.WriteResult[gitcode.Issue]{Record: gitcode.Issue{ID: "remote-42", Number: 42, Title: "T", Body: "B", State: "open"}, Confirmed: true, Operation: "CreateIssue", RemoteID: "42", RemoteNumber: 42, ConfirmedAt: time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)}}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	request := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "T", Body: "B", IdempotencyKey: "key-1"}
+	result, err := svc.CreateIssue(ctx, request)
+	if err != nil {
+		t.Fatalf("CreateIssue live returned error: %v", err)
+	}
+	if result.Status != "succeeded" || result.RemoteID != "42" || result.ID != "ISSUE-42" || client.createIssueCalls != 1 {
+		t.Fatalf("live result=%#v calls=%d", result, client.createIssueCalls)
+	}
+	counts, err := store.RecordCounts(ctx, "fixture-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.AuditRows != 1 {
+		t.Fatalf("audit rows=%d want 1", counts.AuditRows)
+	}
+	if _, err := store.GetRecord(ctx, "fixture-a", "ISSUE-42"); err != nil {
+		t.Fatalf("refreshed record missing: %v", err)
+	}
+	replay, err := svc.CreateIssue(ctx, request)
+	if err != nil {
+		t.Fatalf("CreateIssue replay returned error: %v", err)
+	}
+	if !replay.Replayed || client.createIssueCalls != 1 {
+		t.Fatalf("replay=%#v calls=%d", replay, client.createIssueCalls)
+	}
+}
+
+func TestWritePartialCacheRefreshRetryUsesAuditWithoutSecondAdapterCall(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	wrapped := &writeRefreshFailStore{Store: store, failNextRefresh: true}
+	client := &fakeGitCodeClient{createIssueResult: gitcode.WriteResult[gitcode.Issue]{Record: gitcode.Issue{ID: "remote-45", Number: 45, Title: "T", Body: "B", State: "open"}, Confirmed: true, Operation: "CreateIssue", RemoteID: "45", RemoteNumber: 45, RemoteRevision: "rev-45", ConfirmedAt: time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)}}
+	svc := NewWithClient(wrapped, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "T", Body: "B", IdempotencyKey: "partial-cache"}
+	_, err = svc.CreateIssue(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_partial_cache_refresh_failed" {
+		t.Fatalf("first write err=%v want partial cache failure", err)
+	}
+	result, err := svc.CreateIssue(ctx, req)
+	if err != nil {
+		t.Fatalf("retry returned error: %v", err)
+	}
+	if result.Status != "succeeded" || !result.Replayed || client.createIssueCalls != 1 {
+		t.Fatalf("retry result=%#v calls=%d want replay success without adapter", result, client.createIssueCalls)
+	}
+	if _, err := store.GetRecord(ctx, "fixture-a", "ISSUE-45"); err != nil {
+		t.Fatalf("retry did not refresh record: %v", err)
+	}
+}
+
+func TestWriteLiveMissingTokenAndAddLabelUnsupported(t *testing.T) {
+	ctx := context.Background()
+	svc := seededSyncService(t, ctx, &fakeGitCodeClient{})
+	_, err := svc.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "T"})
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_missing_credential" {
+		t.Fatalf("missing token err=%v", err)
+	}
+	_, err = svc.AddLabel(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 1, Label: "bug"})
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_unsupported_deferred" {
+		t.Fatalf("add-label err=%v", err)
+	}
+}
+
 func TestSearchSources(t *testing.T) {
 	ctx := context.Background()
 	svc := seededService(t, ctx)
@@ -931,13 +1039,15 @@ func seededSyncService(t *testing.T, ctx context.Context, client gitcode.Client)
 }
 
 type fakeGitCodeClient struct {
-	wiki         gitcode.WikiPage
-	issue        gitcode.Issue
-	comments     []gitcode.Comment
-	errors       []error
-	wikiCalls    int
-	issueCalls   int
-	commentCalls int
+	wiki              gitcode.WikiPage
+	issue             gitcode.Issue
+	comments          []gitcode.Comment
+	errors            []error
+	wikiCalls         int
+	issueCalls        int
+	commentCalls      int
+	createIssueCalls  int
+	createIssueResult gitcode.WriteResult[gitcode.Issue]
 }
 
 func (f *fakeGitCodeClient) nextError() error {
@@ -983,7 +1093,11 @@ func (f *fakeGitCodeClient) GetAttachment(context.Context, gitcode.AttachmentReq
 	return gitcode.AttachmentBody{}, nil
 }
 func (f *fakeGitCodeClient) CreateIssue(context.Context, gitcode.CreateIssueRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
-	return gitcode.WriteResult[gitcode.Issue]{}, nil
+	f.createIssueCalls++
+	if err := f.nextError(); err != nil {
+		return gitcode.WriteResult[gitcode.Issue]{}, err
+	}
+	return f.createIssueResult, nil
 }
 func (f *fakeGitCodeClient) UpdateIssue(context.Context, gitcode.UpdateIssueRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
 	return gitcode.WriteResult[gitcode.Issue]{}, nil
@@ -1005,6 +1119,19 @@ func (f *fakeGitCodeClient) RemoveLabel(context.Context, gitcode.LabelRequest, g
 }
 
 var _ gitcode.Client = (*fakeGitCodeClient)(nil)
+
+type writeRefreshFailStore struct {
+	cache.Store
+	failNextRefresh bool
+}
+
+func (s *writeRefreshFailStore) UpsertRecordGraph(ctx context.Context, graph cache.RecordGraph) error {
+	if s.failNextRefresh {
+		s.failNextRefresh = false
+		return errors.New("injected cache refresh failure")
+	}
+	return s.Store.UpsertRecordGraph(ctx, graph)
+}
 
 type corruptingStore struct {
 	cache.Store
@@ -1109,6 +1236,10 @@ func (f *brokenStore) ListChunks(context.Context, cache.ChunkFilter) ([]cache.Ch
 }
 func (f *brokenStore) RecordSyncEvent(context.Context, cache.SyncEvent) error { return nil }
 func (f *brokenStore) GetSyncEventByKey(ctx context.Context, key string) (*cache.SyncEvent, error) {
+	return nil, nil
+}
+func (f *brokenStore) RecordAuditEvent(context.Context, cache.AuditTrailEntry) error { return nil }
+func (f *brokenStore) GetAuditEventByKey(context.Context, string, string) (*cache.AuditTrailEntry, error) {
 	return nil, nil
 }
 func (f *brokenStore) GetSyncStatus(context.Context, string) (cache.SyncStatus, error) {

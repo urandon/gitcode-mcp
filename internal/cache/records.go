@@ -252,6 +252,36 @@ func insertAuditTrailTx(ctx context.Context, tx *sql.Tx, entry AuditTrailEntry) 
 	return execTx(ctx, tx, `INSERT INTO audit_trail (repo_id, id, operation, record_id, remote_type, remote_id, idempotency_key, status, message, payload_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, id) DO UPDATE SET status = excluded.status, message = excluded.message`, entry.RepoID, entry.ID, entry.Operation, entry.RecordID, entry.RemoteType, entry.RemoteID, entry.IdempotencyKey, entry.Status, entry.Message, entry.PayloadHash, entry.CreatedAt.Format(time.RFC3339Nano))
 }
 
+func (s *SQLiteStore) RecordAuditEvent(ctx context.Context, entry AuditTrailEntry) error {
+	if entry.CreatedAt.IsZero() {
+		entry.CreatedAt = time.Unix(0, 0).UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO audit_trail (repo_id, id, operation, record_id, remote_type, remote_id, idempotency_key, status, message, payload_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, id) DO UPDATE SET status = excluded.status, message = excluded.message`, entry.RepoID, entry.ID, entry.Operation, entry.RecordID, entry.RemoteType, entry.RemoteID, entry.IdempotencyKey, entry.Status, entry.Message, entry.PayloadHash, entry.CreatedAt.Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *SQLiteStore) GetAuditEventByKey(ctx context.Context, repoID, key string) (*AuditTrailEntry, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT repo_id, id, operation, record_id, remote_type, remote_id, idempotency_key, status, message, payload_hash, created_at FROM audit_trail WHERE repo_id = ? AND idempotency_key = ? ORDER BY created_at DESC LIMIT 1`, repoID, key)
+	entry, err := scanAuditTrailRow(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &entry, nil
+}
+
+func scanAuditTrailRow(row interface{ Scan(dest ...any) error }) (AuditTrailEntry, error) {
+	var entry AuditTrailEntry
+	var createdRaw string
+	if err := row.Scan(&entry.RepoID, &entry.ID, &entry.Operation, &entry.RecordID, &entry.RemoteType, &entry.RemoteID, &entry.IdempotencyKey, &entry.Status, &entry.Message, &entry.PayloadHash, &createdRaw); err != nil {
+		return AuditTrailEntry{}, err
+	}
+	entry.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdRaw)
+	return entry, nil
+}
+
 func (s *SQLiteStore) GetRecord(ctx context.Context, repoID, recordID string) (Record, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, record_id, record_type, path, title, body, status, labels, content_hash, provenance, remote_type, remote_id, remote_revision, created_at, updated_at FROM records WHERE repo_id = ? AND record_id = ?`, repoID, recordID)
 	if err != nil {

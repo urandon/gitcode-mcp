@@ -1,0 +1,24 @@
+{
+  "covered_outcome_ids": [
+    "outcome-9"
+  ],
+  "covered_decommission_ids": [
+    "decommission-2"
+  ],
+  "product_surfaces": [
+    "production service WriteExecutor path for create-issue dry-run and live execution",
+    "production service WriteExecutor idempotency/audit/cache replay path",
+    "production service WriteExecutor typed provider, credential, partial audit, and partial cache error paths",
+    "production CLI write command validation path for update-issue, add-comment, create-page, and update-page",
+    "production add-label unsupported/deferred write path"
+  ],
+  "evidence_type": [
+    "API test",
+    "CLI command test",
+    "runtime/compiler test",
+    "stubbed-external-provider scenario"
+  ],
+  "freshness": "current source/build/runtime evidence required; run.sh copies the repository to a temporary workspace, injects offline validation tests only in the temporary copy, and runs targeted Go tests against production packages",
+  "mocks_used": "External GitCode provider behavior is stubbed only at the gitcode.Client seam; the production CLI parser, service WriteExecutor, SQLite cache, audit trail, and cache refresh paths are exercised.",
+  "production_files_modified": []
+}

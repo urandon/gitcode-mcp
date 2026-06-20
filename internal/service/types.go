@@ -495,25 +495,41 @@ type OperationResult struct {
 	GeneratedAt    time.Time `json:"generated_at"`
 }
 
+type WriteMode string
+
+const (
+	WriteModeDryRun WriteMode = "dry_run"
+	WriteModeLive   WriteMode = "live"
+)
+
 type WriteCommandRequest struct {
-	Owner          string   `json:"owner,omitempty"`
-	Repo           string   `json:"repo,omitempty"`
-	ID             string   `json:"id,omitempty"`
-	Number         int      `json:"number,omitempty"`
-	Slug           string   `json:"slug,omitempty"`
-	Title          string   `json:"title,omitempty"`
-	Body           string   `json:"body,omitempty"`
-	State          string   `json:"state,omitempty"`
-	Label          string   `json:"label,omitempty"`
-	Labels         []string `json:"labels,omitempty"`
-	IdempotencyKey string   `json:"idempotency_key,omitempty"`
+	Owner          string    `json:"owner,omitempty"`
+	Repo           string    `json:"repo,omitempty"`
+	RepoID         string    `json:"repo_id,omitempty"`
+	Mode           WriteMode `json:"write_mode,omitempty"`
+	ID             string    `json:"id,omitempty"`
+	Number         int       `json:"number,omitempty"`
+	Slug           string    `json:"slug,omitempty"`
+	Title          string    `json:"title,omitempty"`
+	Body           string    `json:"body,omitempty"`
+	State          string    `json:"state,omitempty"`
+	Label          string    `json:"label,omitempty"`
+	Labels         []string  `json:"labels,omitempty"`
+	IdempotencyKey string    `json:"idempotency_key,omitempty"`
 }
 
 type WriteCommandResult struct {
-	Command        string    `json:"command"`
-	Status         string    `json:"status"`
-	ID             string    `json:"id,omitempty"`
-	IdempotencyKey string    `json:"idempotency_key"`
-	Evidence       string    `json:"evidence,omitempty"`
-	GeneratedAt    time.Time `json:"generated_at"`
+	Command           string    `json:"command"`
+	Status            string    `json:"status"`
+	RepoID            string    `json:"repo_id,omitempty"`
+	ID                string    `json:"id,omitempty"`
+	RemoteID          string    `json:"remote_id,omitempty"`
+	RemoteNumber      int       `json:"remote_number,omitempty"`
+	RemoteSlug        string    `json:"remote_slug,omitempty"`
+	RemoteRevision    string    `json:"remote_revision,omitempty"`
+	IdempotencyKey    string    `json:"idempotency_key"`
+	SourceFingerprint string    `json:"source_fingerprint,omitempty"`
+	Replayed          bool      `json:"replayed,omitempty"`
+	Evidence          string    `json:"evidence,omitempty"`
+	GeneratedAt       time.Time `json:"generated_at"`
 }
