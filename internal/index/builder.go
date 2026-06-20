@@ -133,7 +133,7 @@ func (b Builder) deriveSource(source SourceRecord, parsed ParsedSource, aliasInd
 		TrackRows:         trackRows(source, parsed, anchors),
 		AcceptanceRows:    acceptanceRows(source, parsed, anchors),
 		OpenQuestionRows:  openQuestionRows(source, parsed, anchors),
-		IndexState:        IndexState{SourceID: source.ID, ContentHash: parsed.ContentHash, IndexedAt: time.Now().UTC()},
+		IndexState:        IndexState{RepoID: source.RepoID, SourceID: source.ID, RecordID: sourceRecordID(source), SnapshotID: source.SnapshotID, ContentHash: parsed.ContentHash, RemoteRevision: source.RemoteRevision, SyncRevision: source.SyncRevision, SyncEventID: source.SyncEventID, SourceUpdatedAt: source.UpdatedAt.UTC(), Policy: b.options.Policy, IndexedAt: time.Now().UTC(), ChunkCount: len(chunks), CitationCount: len(anchors)},
 		Diagnostics:       parsed.Diagnostics,
 		RewrittenRowCount: 1 + len(links) + len(broken) + len(anchors) + len(chunks),
 	}

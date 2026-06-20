@@ -26,6 +26,7 @@ type serviceInterface interface {
 	ListChunks(context.Context, service.ChunkQuery) (service.ChunkQueryResult, error)
 	SearchChunks(context.Context, service.ChunkSearchQuery) (service.ChunkQueryResult, error)
 	GetChunkSnippet(context.Context, service.SnippetQuery) (service.ChunkQueryResult, error)
+	StaleIndex(context.Context, service.StaleIndexRequest) (service.StaleIndexResult, error)
 }
 
 type Server struct {
@@ -210,6 +211,11 @@ var toolDefs = []toolDefinition{
 		Name:        "get_snippet",
 		Description: "Get a cached chunk snippet through the shared chunk query result model.",
 		InputSchema: inputSchema{Type: "object", Properties: chunkSchemaProps(false), Required: []string{"repo_id"}},
+	},
+	{
+		Name:        "stale_index_report",
+		Description: "Report missing or stale index state with freshness warning metadata.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "strict": {Type: "boolean", Description: "Return stale-index errors when findings exist."}}, Required: []string{"repo_id"}},
 	},
 	{
 		Name:        "source_backlinks",
@@ -398,6 +404,8 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 		s.callSearchChunks(ctx, req.ID, args)
 	case "get_snippet":
 		s.callGetSnippet(ctx, req.ID, args)
+	case "stale_index_report":
+		s.callStaleIndexReport(ctx, req.ID, args)
 	case "source_backlinks":
 		s.callSourceBacklinks(ctx, req.ID, args)
 	case "resolve_id":
@@ -715,6 +723,36 @@ func valueOr(value *int, fallback int) int {
 		return fallback
 	}
 	return *value
+}
+
+type staleIndexArgs struct {
+	RepoID string `json:"repo_id"`
+	Strict bool   `json:"strict,omitempty"`
+}
+
+func (s *Server) callStaleIndexReport(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a staleIndexArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if a.RepoID == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+		return
+	}
+	result, err := s.svc.StaleIndex(ctx, service.StaleIndexRequest{RepoID: a.RepoID, Strict: a.Strict})
+	if err != nil {
+		var staleErr service.ErrStaleIndex
+		if !errors.As(err, &staleErr) {
+			s.writeDomainError(id, err)
+			return
+		}
+	}
+	text := fmt.Sprintf("stale_count=%d", result.StaleCount)
+	for _, warning := range result.Warnings {
+		text += fmt.Sprintf("\n%s %s %s", warning.Code, warning.State, warning.SourceID)
+	}
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 }
 
 type sourceBacklinksArgs struct {

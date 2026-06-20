@@ -59,18 +59,20 @@ type CacheStatusRequest struct {
 }
 
 type CacheStatusResult struct {
-	RepoID          string `json:"repo_id"`
-	WALCapable      bool   `json:"wal_capable"`
-	JournalMode     string `json:"journal_mode"`
-	Records         int    `json:"records"`
-	Comments        int    `json:"comments"`
-	IdentityAliases int    `json:"identity_aliases"`
-	SyncEvents      int    `json:"sync_events"`
-	AuditRows       int    `json:"audit_rows"`
-	Snapshots       int    `json:"snapshots"`
-	SnapshotChunks  int    `json:"snapshot_chunks"`
-	Chunks          int    `json:"chunks"`
-	RemoteRevisions int    `json:"remote_revisions"`
+	RepoID                  string         `json:"repo_id"`
+	WALCapable              bool           `json:"wal_capable"`
+	JournalMode             string         `json:"journal_mode"`
+	Records                 int            `json:"records"`
+	Comments                int            `json:"comments"`
+	IdentityAliases         int            `json:"identity_aliases"`
+	SyncEvents              int            `json:"sync_events"`
+	AuditRows               int            `json:"audit_rows"`
+	Snapshots               int            `json:"snapshots"`
+	SnapshotChunks          int            `json:"snapshot_chunks"`
+	Chunks                  int            `json:"chunks"`
+	RemoteRevisions         int            `json:"remote_revisions"`
+	IndexFreshnessWarnings  int            `json:"index_freshness_warnings"`
+	IndexFreshnessByWarning map[string]int `json:"index_freshness_by_warning,omitempty"`
 }
 
 type RepositoryRoute struct {
@@ -319,10 +321,12 @@ type StaleIndexRequest struct {
 }
 
 type StaleIndexResult struct {
-	StaleCount        int       `json:"stale_count"`
-	AffectedSourceIDs []string  `json:"affected_source_ids"`
-	MissingTargetIDs  []string  `json:"missing_target_ids"`
-	LastIndexedAt     time.Time `json:"last_indexed_at"`
+	StaleCount        int                          `json:"stale_count"`
+	AffectedSourceIDs []string                     `json:"affected_source_ids"`
+	MissingTargetIDs  []string                     `json:"missing_target_ids"`
+	LastIndexedAt     time.Time                    `json:"last_indexed_at"`
+	Warnings          []IndexWarning               `json:"warnings"`
+	Records           []index.IndexFreshnessRecord `json:"records,omitempty"`
 }
 
 type ExportSnapshotRequest struct {
@@ -362,6 +366,7 @@ type Snapshot struct {
 	Backlinks     []SnapshotLink       `json:"backlinks"`
 	SyncStatus    []SnapshotSyncStatus `json:"sync_status"`
 	Chunks        []SnapshotChunk      `json:"chunks"`
+	Warnings      []IndexWarning       `json:"warnings"`
 }
 
 type SnapshotSource struct {

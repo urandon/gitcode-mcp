@@ -67,6 +67,12 @@ func renderSnapshotMarkdown(snapshot Snapshot) []byte {
 	for _, chunk := range snapshot.Chunks {
 		b.WriteString(fmt.Sprintf("- %s %s %d-%d lines=%d-%d hash=%s heading=%s\n", chunk.ID, chunk.SourceID, chunk.ByteStart, chunk.ByteEnd, chunk.LineStart, chunk.LineEnd, chunk.ContentHash, strings.Join(chunk.HeadingPath, " > ")))
 	}
+	if len(snapshot.Warnings) > 0 {
+		b.WriteString("\n## Warnings\n\n")
+		for _, warning := range snapshot.Warnings {
+			b.WriteString(fmt.Sprintf("- %s %s %s %s\n", warning.Code, warning.State, warning.SourceID, warning.Message))
+		}
+	}
 	return []byte(b.String())
 }
 
@@ -120,6 +126,19 @@ func sortSnapshot(snapshot *Snapshot) {
 	sort.SliceStable(snapshot.Links, func(i, j int) bool { return linkKey(snapshot.Links[i]) < linkKey(snapshot.Links[j]) })
 	sort.SliceStable(snapshot.Backlinks, func(i, j int) bool { return linkKey(snapshot.Backlinks[i]) < linkKey(snapshot.Backlinks[j]) })
 	sort.SliceStable(snapshot.SyncStatus, func(i, j int) bool { return snapshot.SyncStatus[i].SourceID < snapshot.SyncStatus[j].SourceID })
+	sort.SliceStable(snapshot.Warnings, func(i, j int) bool {
+		a, b := snapshot.Warnings[i], snapshot.Warnings[j]
+		if a.RepoID != b.RepoID {
+			return a.RepoID < b.RepoID
+		}
+		if a.SourceID != b.SourceID {
+			return a.SourceID < b.SourceID
+		}
+		if a.RecordID != b.RecordID {
+			return a.RecordID < b.RecordID
+		}
+		return a.Code < b.Code
+	})
 	sort.SliceStable(snapshot.Chunks, func(i, j int) bool {
 		a, c := snapshot.Chunks[i], snapshot.Chunks[j]
 		if a.SourceID != c.SourceID {

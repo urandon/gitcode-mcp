@@ -139,7 +139,15 @@ func (s *Service) CacheStatus(ctx context.Context, req CacheStatusRequest) (Cach
 	if err != nil {
 		return CacheStatusResult{}, normalizeError(err, "cache", repoID)
 	}
-	return CacheStatusResult{RepoID: repoID, WALCapable: walCapable, JournalMode: journalMode, Records: counts.Records, Comments: counts.Comments, IdentityAliases: counts.IdentityAliases, SyncEvents: counts.SyncEvents, AuditRows: counts.AuditRows, Snapshots: counts.Snapshots, SnapshotChunks: counts.SnapshotChunks, Chunks: counts.Chunks, RemoteRevisions: counts.RemoteRevisions}, nil
+	freshness, err := s.freshnessReport(ctx, repoID, index.ChunkQuery{RepoID: repoID})
+	if err != nil {
+		return CacheStatusResult{}, err
+	}
+	byWarning := map[string]int{}
+	for _, warning := range freshness.Warnings {
+		byWarning[warning.Code]++
+	}
+	return CacheStatusResult{RepoID: repoID, WALCapable: walCapable, JournalMode: journalMode, Records: counts.Records, Comments: counts.Comments, IdentityAliases: counts.IdentityAliases, SyncEvents: counts.SyncEvents, AuditRows: counts.AuditRows, Snapshots: counts.Snapshots, SnapshotChunks: counts.SnapshotChunks, Chunks: counts.Chunks, RemoteRevisions: counts.RemoteRevisions, IndexFreshnessWarnings: len(freshness.Warnings), IndexFreshnessByWarning: byWarning}, nil
 }
 
 func (s *Service) RepositoryStatus(ctx context.Context, req RepositoryStatusRequest) (RepositoryStatus, error) {
@@ -400,7 +408,11 @@ func (s *Service) ListChunks(ctx context.Context, req ChunkQuery) (ChunkQueryRes
 	if err != nil {
 		return ChunkQueryResult{}, normalizeError(err, "chunks", req.SourceID)
 	}
-	return index.NewMemoryChunkIndex(indexChunks(chunks)).ListChunks(ctx, req)
+	freshness, err := s.freshnessReport(ctx, repoID, req)
+	if err != nil {
+		return ChunkQueryResult{}, err
+	}
+	return index.NewMemoryChunkIndex(indexChunks(chunks)).ListChunksWithWarnings(ctx, req, freshness.Warnings)
 }
 
 func (s *Service) SearchChunks(ctx context.Context, req ChunkSearchQuery) (ChunkQueryResult, error) {
@@ -413,7 +425,11 @@ func (s *Service) SearchChunks(ctx context.Context, req ChunkSearchQuery) (Chunk
 	if err != nil {
 		return ChunkQueryResult{}, normalizeError(err, "chunks", req.SourceID)
 	}
-	return index.NewMemoryChunkIndex(indexChunks(chunks)).SearchChunks(ctx, req)
+	freshness, err := s.freshnessReport(ctx, repoID, req.ChunkQuery)
+	if err != nil {
+		return ChunkQueryResult{}, err
+	}
+	return index.NewMemoryChunkIndex(indexChunks(chunks)).SearchChunksWithWarnings(ctx, req, freshness.Warnings)
 }
 
 func (s *Service) GetChunkSnippet(ctx context.Context, req SnippetQuery) (ChunkQueryResult, error) {
@@ -426,7 +442,12 @@ func (s *Service) GetChunkSnippet(ctx context.Context, req SnippetQuery) (ChunkQ
 	if err != nil {
 		return ChunkQueryResult{}, normalizeError(err, "chunks", req.SourceID)
 	}
-	return index.NewMemoryChunkIndex(indexChunks(chunks)).GetSnippet(ctx, req)
+	freshnessQuery := index.ChunkQuery{RepoID: req.RepoID, SourceID: req.SourceID, RecordID: req.RecordID, SnapshotID: req.SnapshotID, Policy: req.Policy}
+	freshness, err := s.freshnessReport(ctx, repoID, freshnessQuery)
+	if err != nil {
+		return ChunkQueryResult{}, err
+	}
+	return index.NewMemoryChunkIndex(indexChunks(chunks)).GetSnippetWithWarnings(ctx, req, freshness.Warnings)
 }
 
 func (s *Service) GetSyncStatus(ctx context.Context, req SyncStatusRequest) (SyncStatusResult, error) {
@@ -507,23 +528,26 @@ func (s *Service) StaleIndex(ctx context.Context, req StaleIndexRequest) (StaleI
 	if err != nil {
 		return StaleIndexResult{}, err
 	}
-	links, err := s.store.ListLinks(ctx, cache.LinkFilter{RepoID: repoID})
+	report, err := s.freshnessReport(ctx, repoID, index.ChunkQuery{RepoID: repoID})
 	if err != nil {
-		return StaleIndexResult{}, normalizeError(err, "links", "")
+		return StaleIndexResult{}, err
 	}
-	missing := map[string]struct{}{}
 	affected := map[string]struct{}{}
-	for _, link := range links {
-		if _, err := s.store.GetSourceScoped(ctx, repoID, link.TargetID); err != nil {
-			if isCacheNotFound(err) {
-				missing[link.TargetID] = struct{}{}
-				affected[link.SourceID] = struct{}{}
-				continue
-			}
-			return StaleIndexResult{}, normalizeError(err, "source", link.TargetID)
+	missing := map[string]struct{}{}
+	var lastIndexed time.Time
+	for _, record := range report.Records {
+		if !record.IndexedAt.IsZero() && record.IndexedAt.After(lastIndexed) {
+			lastIndexed = record.IndexedAt
+		}
+		if record.WarningCode == "" {
+			continue
+		}
+		affected[record.SourceID] = struct{}{}
+		for _, target := range record.MissingTargetIDs {
+			missing[target] = struct{}{}
 		}
 	}
-	result := StaleIndexResult{StaleCount: len(missing), AffectedSourceIDs: sortedKeys(affected), MissingTargetIDs: sortedKeys(missing)}
+	result := StaleIndexResult{StaleCount: len(report.Warnings), AffectedSourceIDs: sortedKeys(affected), MissingTargetIDs: sortedKeys(missing), LastIndexedAt: lastIndexed.UTC(), Warnings: report.Warnings, Records: report.Records}
 	if req.Strict && result.StaleCount > 0 {
 		return result, ErrStaleIndex{StaleCount: result.StaleCount}
 	}
@@ -541,7 +565,7 @@ func (s *Service) ExportSnapshot(ctx context.Context, req ExportSnapshotRequest)
 		return ExportSnapshotResult{}, err
 	}
 	hash := sha256.Sum256(content)
-	result := ExportSnapshotResult{SnapshotID: hex.EncodeToString(hash[:16]), Format: format, RecordCount: len(snapshot.Sources), GeneratedAt: snapshot.CreatedAt, ContentHash: hex.EncodeToString(hash[:]), InlineContent: string(content)}
+	result := ExportSnapshotResult{SnapshotID: hex.EncodeToString(hash[:16]), Format: format, RecordCount: len(snapshot.Sources), GeneratedAt: snapshot.CreatedAt, ContentHash: hex.EncodeToString(hash[:]), InlineContent: string(content), Warnings: warningCodes(snapshot.Warnings)}
 	if req.OutputPath != "" {
 		if err := os.WriteFile(req.OutputPath, content, 0o600); err != nil {
 			return ExportSnapshotResult{}, err
@@ -864,7 +888,7 @@ func indexSourceRecord(source cache.Source) index.SourceRecord {
 			remoteAliases = append(remoteAliases, index.Alias{Type: alias.Remote.Type, ID: alias.Remote.ID})
 		}
 	}
-	return index.SourceRecord{RepoID: source.RepoID, ID: source.ID, RecordID: source.ID, Kind: source.Kind, Path: source.Path, Title: source.Title, Body: source.Body, Status: source.Status, UpdatedAt: source.UpdatedAt.UTC(), Aliases: aliases, RemoteAliases: remoteAliases}
+	return index.SourceRecord{RepoID: source.RepoID, ID: source.ID, RecordID: source.ID, Kind: source.Kind, Path: source.Path, Title: source.Title, Body: source.Body, Metadata: map[string]string{"content_hash": source.ContentHash, "source_updated_at": source.UpdatedAt.UTC().Format(time.RFC3339Nano)}, Status: source.Status, UpdatedAt: source.UpdatedAt.UTC(), Aliases: aliases, RemoteAliases: remoteAliases}
 }
 
 type stagedRemote struct {
@@ -1404,6 +1428,10 @@ func (s *Service) snippetFromLines(ctx context.Context, repoID, id string, start
 	if start <= 0 || end <= 0 || end < start {
 		return SnippetResult{}, ErrInvalidQuery{Field: "line range", Message: "line_start and line_end must be positive and ordered"}
 	}
+	freshness, err := s.freshnessReport(ctx, repoID, index.ChunkQuery{RepoID: repoID, SourceID: id})
+	if err != nil {
+		return SnippetResult{}, err
+	}
 	source, err := s.store.GetSourceScoped(ctx, repoID, id)
 	if err != nil {
 		return SnippetResult{}, normalizeError(err, "source", id)
@@ -1412,7 +1440,7 @@ func (s *Service) snippetFromLines(ctx context.Context, repoID, id string, start
 	if start > len(lines) {
 		return SnippetResult{}, ErrInvalidQuery{Field: "line_start", Message: "line_start is beyond source body"}
 	}
-	warnings := []string{}
+	warnings := warningCodes(freshness.Warnings)
 	actualEnd := end
 	if actualEnd > len(lines) {
 		actualEnd = len(lines)
@@ -1421,7 +1449,98 @@ func (s *Service) snippetFromLines(ctx context.Context, repoID, id string, start
 	return SnippetResult{RepoID: source.RepoID, ID: source.ID, Path: source.Path, Text: strings.Join(lines[start-1:actualEnd], "\n"), LineStart: start, LineEnd: actualEnd, Warnings: warnings}, nil
 }
 
+func (s *Service) freshnessReport(ctx context.Context, repoID string, query index.ChunkQuery) (index.IndexFreshnessReport, error) {
+	sources, err := s.indexSources(ctx, repoID)
+	if err != nil {
+		return index.IndexFreshnessReport{}, err
+	}
+	chunks, err := s.store.ListChunks(ctx, cache.ChunkFilter{RepoID: query.RepoID, SourceID: query.SourceID, RecordID: query.RecordID, SnapshotID: query.SnapshotID, Policy: string(query.Policy)})
+	if err != nil {
+		return index.IndexFreshnessReport{}, normalizeError(err, "chunks", query.SourceID)
+	}
+	links, err := s.store.ListLinks(ctx, cache.LinkFilter{RepoID: repoID})
+	if err != nil {
+		return index.IndexFreshnessReport{}, normalizeError(err, "links", "")
+	}
+	linkReport := linkStaleReport(sources, links)
+	return index.BuildFreshnessReport(ctx, sources, nil, indexChunks(chunks), nil, linkReport, query), nil
+}
+
+func (s *Service) indexSources(ctx context.Context, repoID string) ([]index.SourceRecord, error) {
+	sources, err := s.store.ListSources(ctx, cache.SourceFilter{RepoID: repoID})
+	if err != nil {
+		return nil, normalizeError(err, "sources", "")
+	}
+	out := make([]index.SourceRecord, 0, len(sources))
+	for _, source := range sources {
+		record := indexSourceRecord(source)
+		if status, err := s.store.GetSyncStatusScoped(ctx, repoID, source.ID); err == nil {
+			record.RemoteRevision = status.RemoteRevision
+			record.SyncRevision = status.RemoteRevision
+		}
+		out = append(out, record)
+	}
+	return out, nil
+}
+
+func linkStaleReport(sources []index.SourceRecord, links []cache.Link) index.StaleReport {
+	sourceIDs := map[string]struct{}{}
+	for _, source := range sources {
+		sourceIDs[source.ID] = struct{}{}
+	}
+	affected := map[string]bool{}
+	missing := map[string]bool{}
+	for _, link := range links {
+		if _, ok := sourceIDs[link.TargetID]; !ok {
+			affected[link.SourceID] = true
+			missing[link.TargetID] = true
+		}
+	}
+	return index.StaleReport{TotalStaleBacklinks: len(missing), AffectedSourceIDs: indexSortedKeys(affected), UnresolvedTargets: indexSortedKeys(missing)}
+}
+
+func warningCodes(warnings []IndexWarning) []string {
+	out := make([]string, 0, len(warnings))
+	seen := map[string]bool{}
+	for _, warning := range warnings {
+		if warning.Code == "" || seen[warning.Code] {
+			continue
+		}
+		seen[warning.Code] = true
+		out = append(out, warning.Code)
+	}
+	return out
+}
+
+func indexSortedKeys(values map[string]bool) []string {
+	keys := []string{}
+	for key := range values {
+		if key != "" {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func filterWarningsForSources(warnings []IndexWarning, include map[string]struct{}) []IndexWarning {
+	if len(include) == 0 {
+		return append([]IndexWarning(nil), warnings...)
+	}
+	out := make([]IndexWarning, 0, len(warnings))
+	for _, warning := range warnings {
+		if _, ok := include[warning.SourceID]; ok {
+			out = append(out, warning)
+		}
+	}
+	return out
+}
+
 func (s *Service) snippetFromChunk(ctx context.Context, repoID, id, chunkID string) (SnippetResult, error) {
+	freshness, err := s.freshnessReport(ctx, repoID, index.ChunkQuery{RepoID: repoID, SourceID: id})
+	if err != nil {
+		return SnippetResult{}, err
+	}
 	chunks, err := s.store.GetChunksScoped(ctx, repoID, id)
 	if err != nil {
 		return SnippetResult{}, normalizeError(err, "chunks", id)
@@ -1432,8 +1551,15 @@ func (s *Service) snippetFromChunk(ctx context.Context, repoID, id, chunkID stri
 			if err != nil {
 				return SnippetResult{}, normalizeError(err, "source", id)
 			}
-			return SnippetResult{RepoID: source.RepoID, ID: id, Path: source.Path, Text: chunk.Text, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, ChunkID: chunk.ID}, nil
+			return SnippetResult{RepoID: source.RepoID, ID: id, Path: source.Path, Text: chunk.Text, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, ChunkID: chunk.ID, Warnings: warningCodes(freshness.Warnings)}, nil
 		}
+	}
+	if len(freshness.Warnings) > 0 {
+		source, err := s.store.GetSourceScoped(ctx, repoID, id)
+		if err != nil {
+			return SnippetResult{}, normalizeError(err, "source", id)
+		}
+		return SnippetResult{RepoID: source.RepoID, ID: id, Path: source.Path, Warnings: warningCodes(freshness.Warnings)}, nil
 	}
 	return SnippetResult{}, ErrNotFound{Kind: "chunk", ID: chunkID}
 }
@@ -1454,7 +1580,17 @@ func (s *Service) buildSnapshot(ctx context.Context, req ExportSnapshotRequest) 
 	for _, id := range req.SourceIDs {
 		include[id] = struct{}{}
 	}
-	snapshot := Snapshot{SchemaVersion: "gitcode-mcp.snapshot.v1", RepoID: repoID}
+	freshnessQuery := index.ChunkQuery{RepoID: repoID}
+	if len(include) == 1 {
+		for id := range include {
+			freshnessQuery.SourceID = id
+		}
+	}
+	freshness, err := s.freshnessReport(ctx, repoID, freshnessQuery)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	snapshot := Snapshot{SchemaVersion: "gitcode-mcp.snapshot.v1", RepoID: repoID, Warnings: filterWarningsForSources(freshness.Warnings, include)}
 	for _, source := range sources {
 		if len(include) > 0 {
 			if _, ok := include[source.ID]; !ok {

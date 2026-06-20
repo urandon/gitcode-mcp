@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -256,6 +257,18 @@ func inheritedMetadata(source SourceRecord, parsed ParsedSource) map[string]stri
 	}
 	if source.SnapshotID != "" {
 		metadata["snapshot_id"] = source.SnapshotID
+	}
+	if source.RemoteRevision != "" {
+		metadata["remote_revision"] = source.RemoteRevision
+	}
+	if source.SyncRevision != "" {
+		metadata["sync_revision"] = source.SyncRevision
+	}
+	if source.SyncEventID != "" {
+		metadata["sync_event_id"] = source.SyncEventID
+	}
+	if !source.UpdatedAt.IsZero() {
+		metadata["source_updated_at"] = source.UpdatedAt.UTC().Format(time.RFC3339Nano)
 	}
 	return metadata
 }

@@ -37,7 +37,7 @@ var commands = []string{
 	"stale-index",
 	"sync",
 	"cache-status",
-	"export",
+	"export", "export-snapshot",
 	"diff",
 	"create-issue",
 	"update-issue",
@@ -546,7 +546,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, renderCacheStatusText)
-	case "export":
+	case "export", "export-snapshot":
 		result, err := svc.ExportSnapshot(ctx, service.ExportSnapshotRequest{RepoID: opts.repo, Format: opts.format, OutputPath: opts.output, IncludeBody: true})
 		if err != nil {
 			return writeError(stderr, opts.format, err)

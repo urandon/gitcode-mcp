@@ -580,13 +580,66 @@ func TestStaleIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StaleIndex returned error: %v", err)
 	}
-	if result.StaleCount != 1 || result.AffectedSourceIDs[0] != "DOC-1" || result.MissingTargetIDs[0] != "MISSING-1" {
+	if result.StaleCount != 1 || result.AffectedSourceIDs[0] != "DOC-1" || result.MissingTargetIDs[0] != "MISSING-1" || result.Warnings[0].Code != "missing_index" {
 		t.Fatalf("StaleIndex = %#v", result)
 	}
 	_, err = svc.StaleIndex(ctx, StaleIndexRequest{RepoID: "fixture-a", Strict: true})
 	var stale ErrStaleIndex
 	if !errors.As(err, &stale) {
 		t.Fatalf("StaleIndex strict error = %v, want ErrStaleIndex", err)
+	}
+}
+
+func TestIndexFreshnessWarningsOnReadSurfaces(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	source := cache.Source{RepoID: "fixture-a", ID: "DOC-MISSING", Kind: "doc", Path: "docs/missing.md", Title: "Missing", Body: "body", Status: "ready", ContentHash: "hash-missing", CreatedAt: base, UpdatedAt: base}
+	if err := store.UpsertSourceGraph(ctx, cache.SourceGraph{Source: source, SyncStatus: &cache.SyncStatus{RepoID: "fixture-a", SourceID: "DOC-MISSING", RemoteType: "wiki", RemoteID: "missing", RemoteRevision: "rev-1", Status: "fresh", LastFetchedAt: base}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := New(store)
+	lineSnippet, err := svc.GetSnippet(ctx, SnippetRequest{RepoID: "fixture-a", ID: "DOC-MISSING", LineStart: 1, LineEnd: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lineSnippet.Warnings) != 1 || lineSnippet.Warnings[0] != "missing_index" {
+		t.Fatalf("GetSnippet line warnings = %+v", lineSnippet)
+	}
+	chunks, err := svc.GetChunkSnippet(ctx, SnippetQuery{RepoID: "fixture-a", SourceID: "DOC-MISSING"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chunks.Total != 0 || len(chunks.Warnings) != 1 || chunks.Warnings[0].Code != "missing_index" {
+		t.Fatalf("GetChunkSnippet warnings = %+v", chunks)
+	}
+	status, err := svc.CacheStatus(ctx, CacheStatusRequest{RepoID: "fixture-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.IndexFreshnessWarnings != 1 || status.IndexFreshnessByWarning["missing_index"] != 1 {
+		t.Fatalf("CacheStatus = %+v", status)
+	}
+	export, err := svc.ExportSnapshot(ctx, ExportSnapshotRequest{RepoID: "fixture-a", Format: "json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(export.InlineContent, "missing_index") || len(export.Warnings) != 1 || export.Warnings[0] != "missing_index" {
+		t.Fatalf("ExportSnapshot warnings missing: %+v", export)
+	}
+	filtered, err := svc.ExportSnapshot(ctx, ExportSnapshotRequest{RepoID: "fixture-a", SourceIDs: []string{"DOC-MISSING"}, Format: "json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(filtered.InlineContent, "missing_index") || len(filtered.Warnings) != 1 || filtered.Warnings[0] != "missing_index" {
+		t.Fatalf("filtered ExportSnapshot warnings missing: %+v", filtered)
 	}
 }
 

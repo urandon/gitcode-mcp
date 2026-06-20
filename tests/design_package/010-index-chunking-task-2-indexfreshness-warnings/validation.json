@@ -1,0 +1,30 @@
+{
+  "covered_outcome_ids": [
+    "outcome-1",
+    "outcome-5",
+    "outcome-6",
+    "outcome-11"
+  ],
+  "covered_decommission_ids": [
+    "decommission-8"
+  ],
+  "product_surfaces": [
+    "index runtime freshness tests",
+    "CLI stale-index",
+    "CLI cache-status",
+    "CLI get-snippet",
+    "MCP JSON-RPC get_snippet",
+    "MCP JSON-RPC stale_index_report",
+    "CLI export-snapshot",
+    "CLI export snapshot compatibility surface"
+  ],
+  "evidence_type": [
+    "runtime/compiler test",
+    "CLI integration test",
+    "MCP JSON-RPC test",
+    "snapshot export test"
+  ],
+  "freshness": "current source/build/runtime evidence required; offline deterministic fixture cache is created at validation runtime",
+  "mocks_used": "none for product surfaces; external GitCode network/provider access is disabled and not required",
+  "production_files_modified": []
+}

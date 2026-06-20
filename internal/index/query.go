@@ -17,27 +17,40 @@ func NewMemoryChunkIndex(chunks []Chunk) MemoryChunkIndex {
 }
 
 func (idx MemoryChunkIndex) ListChunks(ctx context.Context, query ChunkQuery) (ChunkQueryResult, error) {
+	return idx.ListChunksWithWarnings(ctx, query, nil)
+}
+
+func (idx MemoryChunkIndex) ListChunksWithWarnings(ctx context.Context, query ChunkQuery, warnings []IndexWarning) (ChunkQueryResult, error) {
 	if err := ctx.Err(); err != nil {
 		return ChunkQueryResult{}, err
 	}
 	matches := idx.filter(query, "")
-	return chunkQueryResult(matches, query.Limit, query.Offset, nil), nil
+	return chunkQueryResult(matches, query.Limit, query.Offset, filterWarnings(warnings, query)), nil
 }
 
 func (idx MemoryChunkIndex) SearchChunks(ctx context.Context, query ChunkSearchQuery) (ChunkQueryResult, error) {
+	return idx.SearchChunksWithWarnings(ctx, query, nil)
+}
+
+func (idx MemoryChunkIndex) SearchChunksWithWarnings(ctx context.Context, query ChunkSearchQuery, warnings []IndexWarning) (ChunkQueryResult, error) {
 	if err := ctx.Err(); err != nil {
 		return ChunkQueryResult{}, err
 	}
 	needle := normalizeChunkText(query.Query)
 	matches := idx.filter(query.ChunkQuery, needle)
-	return chunkQueryResult(matches, query.Limit, query.Offset, nil), nil
+	return chunkQueryResult(matches, query.Limit, query.Offset, filterWarnings(warnings, query.ChunkQuery)), nil
 }
 
 func (idx MemoryChunkIndex) GetSnippet(ctx context.Context, query SnippetQuery) (ChunkQueryResult, error) {
+	return idx.GetSnippetWithWarnings(ctx, query, nil)
+}
+
+func (idx MemoryChunkIndex) GetSnippetWithWarnings(ctx context.Context, query SnippetQuery, warnings []IndexWarning) (ChunkQueryResult, error) {
 	if err := ctx.Err(); err != nil {
 		return ChunkQueryResult{}, err
 	}
 	base := ChunkQuery{RepoID: query.RepoID, SourceID: query.SourceID, RecordID: query.RecordID, SnapshotID: query.SnapshotID, Policy: query.Policy}
+	warnings = filterWarnings(warnings, base)
 	matches := idx.filter(base, "")
 	var out []Chunk
 	for _, chunk := range matches {
@@ -64,7 +77,7 @@ func (idx MemoryChunkIndex) GetSnippet(ctx context.Context, query SnippetQuery) 
 		}
 		out = append(out, chunk)
 	}
-	result := chunkQueryResult(out, 1, 0, nil)
+	result := chunkQueryResult(out, 1, 0, warnings)
 	for i := range result.Chunks {
 		result.Chunks[i].SnippetText = result.Chunks[i].Text
 	}
@@ -94,6 +107,29 @@ func (idx MemoryChunkIndex) filter(query ChunkQuery, needle string) []Chunk {
 			continue
 		}
 		out = append(out, chunk)
+	}
+	return out
+}
+
+func filterWarnings(warnings []IndexWarning, query ChunkQuery) []IndexWarning {
+	out := make([]IndexWarning, 0, len(warnings))
+	for _, warning := range warnings {
+		if query.RepoID != "" && warning.RepoID != "" && warning.RepoID != query.RepoID {
+			continue
+		}
+		if query.SourceID != "" && warning.SourceID != "" && warning.SourceID != query.SourceID {
+			continue
+		}
+		if query.RecordID != "" && warning.RecordID != "" && warning.RecordID != query.RecordID {
+			continue
+		}
+		if query.SnapshotID != "" && warning.SnapshotID != "" && warning.SnapshotID != query.SnapshotID {
+			continue
+		}
+		if query.Policy != "" && warning.Policy != "" && warning.Policy != query.Policy {
+			continue
+		}
+		out = append(out, warning)
 	}
 	return out
 }
