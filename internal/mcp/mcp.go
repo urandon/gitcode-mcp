@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 
+	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/service"
 )
 
@@ -27,6 +28,9 @@ type serviceInterface interface {
 	SearchChunks(context.Context, service.ChunkSearchQuery) (service.ChunkQueryResult, error)
 	GetChunkSnippet(context.Context, service.SnippetQuery) (service.ChunkQueryResult, error)
 	StaleIndex(context.Context, service.StaleIndexRequest) (service.StaleIndexResult, error)
+	RecentChanges(context.Context, service.RecentChangesRequest) ([]service.RecentChangeResult, error)
+	LinkCheck(context.Context, service.LinkCheckRequest) (service.LinkCheckResult, error)
+	CacheStatus(context.Context, service.CacheStatusRequest) (service.CacheStatusResult, error)
 }
 
 type Server struct {
@@ -126,6 +130,7 @@ type toolContentItem struct {
 }
 
 type aggregateSyncStatus struct {
+	RepoID     string `json:"repo_id"`
 	FreshCount int    `json:"fresh_count"`
 	StaleCount int    `json:"stale_count"`
 	LastSyncAt string `json:"last_sync_at"`
@@ -153,6 +158,15 @@ func chunkSchemaProps(includeQuery bool) map[string]schemaProp {
 	}
 	return props
 }
+
+type toolHandler func(context.Context, *json.RawMessage, json.RawMessage)
+
+type registeredTool struct {
+	definition toolDefinition
+	handler    toolHandler
+}
+
+type toolRegistry map[string]registeredTool
 
 var toolDefs = []toolDefinition{
 	{
@@ -216,6 +230,31 @@ var toolDefs = []toolDefinition{
 		Name:        "stale_index_report",
 		Description: "Report missing or stale index state with freshness warning metadata.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "strict": {Type: "boolean", Description: "Return stale-index errors when findings exist."}}, Required: []string{"repo_id"}},
+	},
+	{
+		Name:        "recent_changes",
+		Description: "List recently updated cached sources.",
+		InputSchema: inputSchema{
+			Type: "object",
+			Properties: map[string]schemaProp{
+				"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1},
+				"kind":    {Type: "string", Description: "Source kind filter.", Enum: []string{"source", "task", "page", "decision", "handoff"}},
+				"status":  {Type: "string", Description: "Source status filter."},
+				"limit":   {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 20.0},
+				"offset":  {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
+			},
+			Required: []string{"repo_id"},
+		},
+	},
+	{
+		Name:        "link_check",
+		Description: "Check cached source links for unresolved targets.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "strict": {Type: "boolean", Description: "Return link-check errors when findings exist."}}, Required: []string{"repo_id"}},
+	},
+	{
+		Name:        "cache_status",
+		Description: "Report cache storage, WAL, count, and index-warning status.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}}, Required: []string{"repo_id"}},
 	},
 	{
 		Name:        "source_backlinks",
@@ -367,7 +406,16 @@ func (s *Server) init(req request) {
 }
 
 func (s *Server) toolsList(req request) {
-	b, _ := json.Marshal(toolsListResult{Tools: toolDefs})
+	registry := s.toolRegistry()
+	tools := make([]toolDefinition, 0, len(toolDefs))
+	for _, def := range toolDefs {
+		tool, ok := registry[def.Name]
+		if !ok {
+			continue
+		}
+		tools = append(tools, tool.definition)
+	}
+	b, _ := json.Marshal(toolsListResult{Tools: tools})
 	s.writeResponse(req.ID, b)
 }
 
@@ -391,33 +439,31 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 		args = json.RawMessage("{}")
 	}
 
-	switch params.Name {
-	case "search_sources":
-		s.callSearchSources(ctx, req.ID, args)
-	case "get_source":
-		s.callGetSource(ctx, req.ID, args)
-	case "list_sources":
-		s.callListSources(ctx, req.ID, args)
-	case "list_chunks":
-		s.callListChunks(ctx, req.ID, args)
-	case "search_chunks":
-		s.callSearchChunks(ctx, req.ID, args)
-	case "get_snippet":
-		s.callGetSnippet(ctx, req.ID, args)
-	case "stale_index_report":
-		s.callStaleIndexReport(ctx, req.ID, args)
-	case "source_backlinks":
-		s.callSourceBacklinks(ctx, req.ID, args)
-	case "resolve_id":
-		s.callResolveID(ctx, req.ID, args)
-	case "sync_status":
-		s.callSyncStatus(ctx, req.ID, args)
-	case "export_snapshot":
-		s.callExportSnapshot(ctx, req.ID, args)
-	case "diff_snapshot":
-		s.callDiffSnapshot(ctx, req.ID, args)
-	default:
+	tool, ok := s.toolRegistry()[params.Name]
+	if !ok {
 		s.writeError(req.ID, -32601, "Method not found", &errorData{Code: "unknown_tool", Message: fmt.Sprintf("unknown tool %q", params.Name)})
+		return
+	}
+	tool.handler(ctx, req.ID, args)
+}
+
+func (s *Server) toolRegistry() toolRegistry {
+	return toolRegistry{
+		"search_sources":     {definition: toolDefs[0], handler: s.callSearchSources},
+		"get_source":         {definition: toolDefs[1], handler: s.callGetSource},
+		"list_sources":       {definition: toolDefs[2], handler: s.callListSources},
+		"list_chunks":        {definition: toolDefs[3], handler: s.callListChunks},
+		"search_chunks":      {definition: toolDefs[4], handler: s.callSearchChunks},
+		"get_snippet":        {definition: toolDefs[5], handler: s.callGetSnippet},
+		"stale_index_report": {definition: toolDefs[6], handler: s.callStaleIndexReport},
+		"recent_changes":     {definition: toolDefs[7], handler: s.callRecentChanges},
+		"link_check":         {definition: toolDefs[8], handler: s.callLinkCheck},
+		"cache_status":       {definition: toolDefs[9], handler: s.callCacheStatus},
+		"source_backlinks":   {definition: toolDefs[10], handler: s.callSourceBacklinks},
+		"resolve_id":         {definition: toolDefs[11], handler: s.callResolveID},
+		"sync_status":        {definition: toolDefs[12], handler: s.callSyncStatus},
+		"export_snapshot":    {definition: toolDefs[13], handler: s.callExportSnapshot},
+		"diff_snapshot":      {definition: toolDefs[14], handler: s.callDiffSnapshot},
 	}
 }
 
@@ -429,6 +475,7 @@ type searchSourcesArgs struct {
 	Offset *int   `json:"offset,omitempty"`
 }
 type searchSourcesSResult struct {
+	RepoID  string                       `json:"repo_id"`
 	Results []service.SearchSourceResult `json:"results"`
 	Limit   int                          `json:"limit"`
 	Offset  int                          `json:"offset"`
@@ -464,18 +511,9 @@ func (s *Server) callSearchSources(ctx context.Context, id *json.RawMessage, arg
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "offset must be non-negative"})
 		return
 	}
-	if a.Kind != "" {
-		valid := false
-		for _, k := range []string{"source", "task", "page", "decision", "handoff"} {
-			if a.Kind == k {
-				valid = true
-				break
-			}
-		}
-		if !valid {
-			s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "kind must be one of: source, task, page, decision, handoff"})
-			return
-		}
+	if a.Kind != "" && !validKind(a.Kind) {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "kind must be one of: source, task, page, decision, handoff"})
+		return
 	}
 
 	results, err := s.svc.SearchSources(ctx, service.SearchSourcesRequest{
@@ -502,7 +540,7 @@ func (s *Server) callSearchSources(ctx context.Context, id *json.RawMessage, arg
 
 	s.writeToolResult(id, toolCallResult{
 		Content:           []toolContentItem{{Type: "text", Text: text}},
-		StructuredContent: searchSourcesSResult{Results: all, Limit: limit, Offset: offset},
+		StructuredContent: searchSourcesSResult{RepoID: a.RepoID, Results: all, Limit: limit, Offset: offset},
 	})
 }
 
@@ -551,6 +589,7 @@ type listSourcesArgs struct {
 	Offset *int   `json:"offset,omitempty"`
 }
 type listSourcesSResult struct {
+	RepoID  string                  `json:"repo_id"`
 	Results []service.SourceSummary `json:"results"`
 	Limit   int                     `json:"limit"`
 	Offset  int                     `json:"offset"`
@@ -582,18 +621,9 @@ func (s *Server) callListSources(ctx context.Context, id *json.RawMessage, args 
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "offset must be non-negative"})
 		return
 	}
-	if a.Kind != "" {
-		valid := false
-		for _, k := range []string{"source", "task", "page", "decision", "handoff"} {
-			if a.Kind == k {
-				valid = true
-				break
-			}
-		}
-		if !valid {
-			s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "kind must be one of: source, task, page, decision, handoff"})
-			return
-		}
+	if a.Kind != "" && !validKind(a.Kind) {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "kind must be one of: source, task, page, decision, handoff"})
+		return
 	}
 
 	results, err := s.svc.ListSources(ctx, service.ListSourcesRequest{
@@ -615,7 +645,7 @@ func (s *Server) callListSources(ctx context.Context, id *json.RawMessage, args 
 
 	s.writeToolResult(id, toolCallResult{
 		Content:           []toolContentItem{{Type: "text", Text: text}},
-		StructuredContent: listSourcesSResult{Results: results, Limit: limit, Offset: offset},
+		StructuredContent: listSourcesSResult{RepoID: a.RepoID, Results: results, Limit: limit, Offset: offset},
 	})
 }
 
@@ -699,6 +729,18 @@ func (s *Server) parseChunkArgs(id *json.RawMessage, args json.RawMessage, requi
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "limit/offset out of range"})
 		return chunkArgs{}, false
 	}
+	if a.LineStart != nil && *a.LineStart < 1 {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "line_start must be positive"})
+		return chunkArgs{}, false
+	}
+	if a.LineEnd != nil && *a.LineEnd < 1 {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "line_end must be positive"})
+		return chunkArgs{}, false
+	}
+	if a.LineStart != nil && a.LineEnd != nil && *a.LineStart > *a.LineEnd {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "line_start must be less than or equal to line_end"})
+		return chunkArgs{}, false
+	}
 	return a, true
 }
 
@@ -723,6 +765,15 @@ func valueOr(value *int, fallback int) int {
 		return fallback
 	}
 	return *value
+}
+
+func validKind(kind string) bool {
+	for _, value := range []string{"source", "task", "page", "decision", "handoff"} {
+		if kind == value {
+			return true
+		}
+	}
+	return false
 }
 
 type staleIndexArgs struct {
@@ -755,6 +806,111 @@ func (s *Server) callStaleIndexReport(ctx context.Context, id *json.RawMessage, 
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 }
 
+type recentChangesArgs struct {
+	RepoID string `json:"repo_id"`
+	Kind   string `json:"kind,omitempty"`
+	Status string `json:"status,omitempty"`
+	Limit  *int   `json:"limit,omitempty"`
+	Offset *int   `json:"offset,omitempty"`
+}
+
+type recentChangesSResult struct {
+	RepoID  string                       `json:"repo_id"`
+	Results []service.RecentChangeResult `json:"results"`
+	Limit   int                          `json:"limit"`
+	Offset  int                          `json:"offset"`
+}
+
+func (s *Server) callRecentChanges(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a recentChangesArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if a.RepoID == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+		return
+	}
+	limit := valueOr(a.Limit, 20)
+	offset := valueOr(a.Offset, 0)
+	if limit < 1 || limit > 100 {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "limit must be between 1 and 100"})
+		return
+	}
+	if offset < 0 {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "offset must be non-negative"})
+		return
+	}
+	if a.Kind != "" && !validKind(a.Kind) {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "kind must be one of: source, task, page, decision, handoff"})
+		return
+	}
+
+	results, err := s.svc.RecentChanges(ctx, service.RecentChangesRequest{RepoID: a.RepoID, Kind: a.Kind, Status: a.Status, Limit: limit, Offset: offset})
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	text := ""
+	for _, result := range results {
+		text += fmt.Sprintf("%s %s %s %s\n", result.RepoID, result.ID, result.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"), result.Title)
+	}
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: recentChangesSResult{RepoID: a.RepoID, Results: results, Limit: limit, Offset: offset}})
+}
+
+type linkCheckArgs struct {
+	RepoID string `json:"repo_id"`
+	Strict bool   `json:"strict,omitempty"`
+}
+
+func (s *Server) callLinkCheck(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a linkCheckArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if a.RepoID == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+		return
+	}
+	result, err := s.svc.LinkCheck(ctx, service.LinkCheckRequest{RepoID: a.RepoID, Strict: a.Strict})
+	if err != nil {
+		var linkErr service.ErrLinkCheckFailed
+		if !errors.As(err, &linkErr) {
+			s.writeDomainError(id, err)
+			return
+		}
+	}
+	text := fmt.Sprintf("checked=%d broken=%d", result.CheckedCount, result.BrokenCount)
+	for _, broken := range result.BrokenLinks {
+		text += fmt.Sprintf("\n%s %s %s", broken.SourceID, broken.TargetID, broken.Kind)
+	}
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+type cacheStatusArgs struct {
+	RepoID string `json:"repo_id"`
+}
+
+func (s *Server) callCacheStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a cacheStatusArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if a.RepoID == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+		return
+	}
+	result, err := s.svc.CacheStatus(ctx, service.CacheStatusRequest{RepoID: a.RepoID})
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	text := fmt.Sprintf("repo_id=%s records=%d chunks=%d journal=%s", result.RepoID, result.Records, result.Chunks, result.JournalMode)
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
 type sourceBacklinksArgs struct {
 	RepoID string `json:"repo_id"`
 	ID     string `json:"id"`
@@ -762,6 +918,7 @@ type sourceBacklinksArgs struct {
 	Offset *int   `json:"offset,omitempty"`
 }
 type sourceBacklinksSResult struct {
+	RepoID    string                   `json:"repo_id"`
 	ID        string                   `json:"id"`
 	Backlinks []service.BacklinkResult `json:"backlinks"`
 	Limit     int                      `json:"limit"`
@@ -819,7 +976,7 @@ func (s *Server) callSourceBacklinks(ctx context.Context, id *json.RawMessage, a
 
 	s.writeToolResult(id, toolCallResult{
 		Content:           []toolContentItem{{Type: "text", Text: text}},
-		StructuredContent: sourceBacklinksSResult{ID: a.ID, Backlinks: results, Limit: limit, Offset: offset},
+		StructuredContent: sourceBacklinksSResult{RepoID: a.RepoID, ID: a.ID, Backlinks: results, Limit: limit, Offset: offset},
 	})
 }
 
@@ -877,7 +1034,7 @@ func (s *Server) callSyncStatus(ctx context.Context, id *json.RawMessage, args j
 		sources, err := s.svc.ListSources(ctx, service.ListSourcesRequest{RepoID: a.RepoID, Limit: 1})
 		if err != nil {
 			if service.IsCacheEmpty(err) {
-				result := aggregateSyncStatus{CacheEmpty: true}
+				result := aggregateSyncStatus{RepoID: a.RepoID, CacheEmpty: true}
 				s.writeToolResult(id, toolCallResult{
 					Content:           []toolContentItem{{Type: "text", Text: "cache is empty"}},
 					StructuredContent: result,
@@ -887,7 +1044,7 @@ func (s *Server) callSyncStatus(ctx context.Context, id *json.RawMessage, args j
 			s.writeDomainError(id, err)
 			return
 		}
-		result := aggregateSyncStatus{FreshCount: len(sources), CacheEmpty: len(sources) == 0}
+		result := aggregateSyncStatus{RepoID: a.RepoID, FreshCount: len(sources), CacheEmpty: len(sources) == 0}
 		s.writeToolResult(id, toolCallResult{
 			Content:           []toolContentItem{{Type: "text", Text: fmt.Sprintf("fresh=%d stale=%d cache_empty=%v", result.FreshCount, result.StaleCount, result.CacheEmpty)}},
 			StructuredContent: result,
@@ -906,9 +1063,17 @@ func (s *Server) callSyncStatus(ctx context.Context, id *json.RawMessage, args j
 	s.writeToolResult(id, toolCallResult{
 		Content: []toolContentItem{{Type: "text", Text: text}},
 		StructuredContent: map[string]any{
+			"repo_id":           status.RepoID,
 			"id":                status.SourceID,
+			"source_id":         status.SourceID,
+			"remote_type":       status.RemoteType,
+			"remote_id":         status.RemoteID,
+			"remote_revision":   status.RemoteRevision,
+			"status":            status.Status,
+			"freshness":         status.Freshness,
 			"fresh":             status.Status == "fresh",
 			"stale":             status.Status != "fresh",
+			"local_updated_at":  status.LocalUpdatedAt,
 			"last_fetched_at":   status.LastFetchedAt,
 			"remote_updated_at": status.LastFetchedAt,
 			"reason":            status.Status,
@@ -922,10 +1087,14 @@ type exportSnapshotArgs struct {
 	Inline *bool  `json:"inline,omitempty"`
 }
 type exportSnapshotSResult struct {
-	Format      string `json:"format"`
-	Content     string `json:"content"`
-	Path        string `json:"path,omitempty"`
-	ContentHash string `json:"content_hash"`
+	RepoID      string   `json:"repo_id"`
+	SnapshotID  string   `json:"snapshot_id"`
+	Format      string   `json:"format"`
+	Content     string   `json:"content"`
+	Path        string   `json:"path,omitempty"`
+	ContentHash string   `json:"content_hash"`
+	RecordCount int      `json:"record_count"`
+	Warnings    []string `json:"warnings,omitempty"`
 }
 
 func (s *Server) callExportSnapshot(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
@@ -958,8 +1127,12 @@ func (s *Server) callExportSnapshot(ctx context.Context, id *json.RawMessage, ar
 	}
 
 	resultData := exportSnapshotSResult{
+		RepoID:      result.RepoID,
+		SnapshotID:  result.SnapshotID,
 		Format:      format,
 		ContentHash: result.ContentHash,
+		RecordCount: result.RecordCount,
+		Warnings:    result.Warnings,
 	}
 	if inline {
 		resultData.Content = result.InlineContent
@@ -985,11 +1158,13 @@ type diffSnapshotArgs struct {
 	Format string `json:"format,omitempty"`
 }
 type diffSnapshotSResult struct {
-	BaseID  string `json:"base_id"`
-	HeadID  string `json:"head_id"`
-	Format  string `json:"format"`
-	Diff    string `json:"diff"`
-	Changed bool   `json:"changed"`
+	RepoID   string   `json:"repo_id"`
+	BaseID   string   `json:"base_id"`
+	HeadID   string   `json:"head_id"`
+	Format   string   `json:"format"`
+	Diff     string   `json:"diff"`
+	Changed  bool     `json:"changed"`
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 func (s *Server) callDiffSnapshot(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
@@ -1033,11 +1208,13 @@ func (s *Server) callDiffSnapshot(ctx context.Context, id *json.RawMessage, args
 	s.writeToolResult(id, toolCallResult{
 		Content: []toolContentItem{{Type: "text", Text: result.DiffText}},
 		StructuredContent: diffSnapshotSResult{
-			BaseID:  a.BaseID,
-			HeadID:  a.HeadID,
-			Format:  format,
-			Diff:    result.DiffText,
-			Changed: len(result.ChangedSourceIDs) > 0,
+			RepoID:   result.RepoID,
+			BaseID:   a.BaseID,
+			HeadID:   a.HeadID,
+			Format:   format,
+			Diff:     result.DiffText,
+			Changed:  len(result.ChangedSourceIDs) > 0,
+			Warnings: result.Warnings,
 		},
 	})
 }
@@ -1055,15 +1232,39 @@ func (s *Server) writeDomainError(id *json.RawMessage, err error) {
 	case service.IsCacheEmpty(err):
 		data = &errorData{Code: "cache_empty", Message: err.Error()}
 	default:
+		var invalid service.ErrInvalidQuery
+		var repoRequired service.ErrRepoRequired
 		var staleErr service.ErrStaleIndex
-		if errors.As(err, &staleErr) {
-			data = &errorData{Code: "stale_cache", Message: err.Error()}
-		} else {
+		var linkErr service.ErrLinkCheckFailed
+		var lockErr cache.ErrLockContention
+		switch {
+		case errors.As(err, &invalid):
+			data = &errorData{Code: "invalid_query", Message: err.Error()}
+		case errors.As(err, &repoRequired):
+			data = &errorData{Code: "repo_required", Message: err.Error()}
+		case errors.As(err, &staleErr):
+			data = &errorData{Code: "stale_index", Message: err.Error()}
+		case errors.As(err, &linkErr):
+			data = &errorData{Code: "link_check_failed", Message: err.Error()}
+		case errors.As(err, &lockErr):
+			data = &errorData{Code: cacheLockErrorCode(lockErr), Message: err.Error()}
+		default:
 			data = &errorData{Code: "sync_required", Message: err.Error()}
 		}
 	}
 
 	s.writeError(id, -32000, "Server error", data)
+}
+
+func cacheLockErrorCode(err cache.ErrLockContention) string {
+	switch err.Operation {
+	case "migration":
+		return "migration_blocked"
+	case "sync", "index", "write":
+		return "cache_owned"
+	default:
+		return "busy"
+	}
 }
 
 func (s *Server) writeResponse(id *json.RawMessage, result json.RawMessage) {

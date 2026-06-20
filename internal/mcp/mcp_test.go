@@ -125,13 +125,25 @@ func TestIntegration(t *testing.T) {
 	if err := json.Unmarshal(toolsR.Result, &tls); err != nil {
 		t.Fatalf("decode tools/list result: %v", err)
 	}
-	if len(tls.Tools) != 12 {
-		t.Fatalf("tools count = %d, want 12: %+v", len(tls.Tools), tls.Tools)
+	if len(tls.Tools) != 15 {
+		t.Fatalf("tools count = %d, want 15: %+v", len(tls.Tools), tls.Tools)
 	}
-	expectedNames := []string{"search_sources", "get_source", "list_sources", "list_chunks", "search_chunks", "get_snippet", "stale_index_report", "source_backlinks", "resolve_id", "sync_status", "export_snapshot", "diff_snapshot"}
+	expectedNames := []string{"search_sources", "get_source", "list_sources", "list_chunks", "search_chunks", "get_snippet", "stale_index_report", "recent_changes", "link_check", "cache_status", "source_backlinks", "resolve_id", "sync_status", "export_snapshot", "diff_snapshot"}
+	registry := srv.toolRegistry()
+	if len(registry) != len(tls.Tools) {
+		t.Fatalf("registry count = %d, listed tools = %d", len(registry), len(tls.Tools))
+	}
+	seen := map[string]bool{}
 	for i, want := range expectedNames {
 		if tls.Tools[i].Name != want {
 			t.Fatalf("tool[%d].Name = %q, want %q", i, tls.Tools[i].Name, want)
+		}
+		if seen[tls.Tools[i].Name] {
+			t.Fatalf("duplicate tool listed: %s", tls.Tools[i].Name)
+		}
+		seen[tls.Tools[i].Name] = true
+		if _, ok := registry[tls.Tools[i].Name]; !ok {
+			t.Fatalf("listed tool %q is not callable", tls.Tools[i].Name)
 		}
 	}
 
@@ -227,6 +239,9 @@ func TestSchemasAndResults(t *testing.T) {
 		var sres searchSourcesSResult
 		scRaw, _ := json.Marshal(tc.StructuredContent)
 		json.Unmarshal(scRaw, &sres)
+		if sres.RepoID != "fixture-a" {
+			t.Fatalf("repo_id = %q, want fixture-a", sres.RepoID)
+		}
 		if sres.Limit != 20 {
 			t.Fatalf("limit = %d, want 20", sres.Limit)
 		}
@@ -250,6 +265,9 @@ func TestSchemasAndResults(t *testing.T) {
 		var lres listSourcesSResult
 		scRaw, _ := json.Marshal(tc.StructuredContent)
 		json.Unmarshal(scRaw, &lres)
+		if lres.RepoID != "fixture-a" {
+			t.Fatalf("repo_id = %q, want fixture-a", lres.RepoID)
+		}
 		if lres.Limit != 20 {
 			t.Fatalf("limit = %d, want 20", lres.Limit)
 		}
@@ -278,9 +296,60 @@ func TestSchemasAndResults(t *testing.T) {
 		}
 	})
 
-	t.Run("source_backlinks", func(t *testing.T) {
+	t.Run("recent_changes", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 13, "method": "tools/call",
+			"params": map[string]any{"name": "recent_changes", "arguments": map[string]any{"repo_id": "fixture-a", "limit": 1}},
+		})
+		tc, err := callResponse(recv())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var recent recentChangesSResult
+		scRaw, _ := json.Marshal(tc.StructuredContent)
+		json.Unmarshal(scRaw, &recent)
+		if recent.RepoID != "fixture-a" || recent.Limit != 1 || len(recent.Results) != 1 || recent.Results[0].RepoID != "fixture-a" {
+			t.Fatalf("recent_changes missing scoped payload: %+v", recent)
+		}
+	})
+
+	t.Run("link_check", func(t *testing.T) {
+		send(map[string]any{
+			"jsonrpc": "2.0", "id": 22, "method": "tools/call",
+			"params": map[string]any{"name": "link_check", "arguments": map[string]any{"repo_id": "fixture-a", "strict": true}},
+		})
+		tc, err := callResponse(recv())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var link service.LinkCheckResult
+		scRaw, _ := json.Marshal(tc.StructuredContent)
+		json.Unmarshal(scRaw, &link)
+		if link.RepoID != "fixture-a" || link.CheckedCount == 0 || link.BrokenCount != 0 || link.SuggestedAliases == nil {
+			t.Fatalf("link_check missing scoped payload: %+v", link)
+		}
+	})
+
+	t.Run("cache_status", func(t *testing.T) {
+		send(map[string]any{
+			"jsonrpc": "2.0", "id": 23, "method": "tools/call",
+			"params": map[string]any{"name": "cache_status", "arguments": map[string]any{"repo_id": "fixture-a"}},
+		})
+		tc, err := callResponse(recv())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var status service.CacheStatusResult
+		scRaw, _ := json.Marshal(tc.StructuredContent)
+		json.Unmarshal(scRaw, &status)
+		if status.RepoID != "fixture-a" || !status.WALCapable || status.JournalMode == "" || status.IndexFreshnessWarnings == 0 {
+			t.Fatalf("cache_status missing fields: %+v", status)
+		}
+	})
+
+	t.Run("source_backlinks", func(t *testing.T) {
+		send(map[string]any{
+			"jsonrpc": "2.0", "id": 24, "method": "tools/call",
 			"params": map[string]any{"name": "source_backlinks", "arguments": map[string]any{"repo_id": "fixture-a", "id": "DOC-123"}},
 		})
 		tc, err := callResponse(recv())
@@ -290,8 +359,8 @@ func TestSchemasAndResults(t *testing.T) {
 		var blres sourceBacklinksSResult
 		scRaw, _ := json.Marshal(tc.StructuredContent)
 		json.Unmarshal(scRaw, &blres)
-		if blres.ID != "DOC-123" {
-			t.Fatalf("backlinks id = %q, want DOC-123", blres.ID)
+		if blres.RepoID != "fixture-a" || blres.ID != "DOC-123" {
+			t.Fatalf("backlinks scope/id mismatch: %+v", blres)
 		}
 	})
 
@@ -341,8 +410,8 @@ func TestSchemasAndResults(t *testing.T) {
 		var agg aggregateSyncStatus
 		scRaw, _ := json.Marshal(tc.StructuredContent)
 		json.Unmarshal(scRaw, &agg)
-		if agg.CacheEmpty {
-			t.Fatalf("aggregate sync_status reports empty cache with seeded data")
+		if agg.RepoID != "fixture-a" || agg.CacheEmpty {
+			t.Fatalf("aggregate sync_status scope/cache mismatch: %+v", agg)
 		}
 	})
 
@@ -358,11 +427,11 @@ func TestSchemasAndResults(t *testing.T) {
 		var exp exportSnapshotSResult
 		scRaw, _ := json.Marshal(tc.StructuredContent)
 		json.Unmarshal(scRaw, &exp)
-		if exp.Format != "json" {
-			t.Fatalf("format = %q, want json", exp.Format)
+		if exp.RepoID != "fixture-a" || exp.Format != "json" {
+			t.Fatalf("export scope/format mismatch: %+v", exp)
 		}
-		if exp.ContentHash == "" {
-			t.Fatalf("content_hash is empty")
+		if exp.ContentHash == "" || exp.SnapshotID == "" {
+			t.Fatalf("export identifiers missing: %+v", exp)
 		}
 	})
 
@@ -378,8 +447,8 @@ func TestSchemasAndResults(t *testing.T) {
 		var diff diffSnapshotSResult
 		scRaw, _ := json.Marshal(tc.StructuredContent)
 		json.Unmarshal(scRaw, &diff)
-		if diff.BaseID != "abc" || diff.HeadID != "def" {
-			t.Fatalf("diff base/head mismatch: %+v", diff)
+		if diff.RepoID != "fixture-a" || diff.BaseID != "abc" || diff.HeadID != "def" {
+			t.Fatalf("diff scope/base/head mismatch: %+v", diff)
 		}
 	})
 
@@ -416,6 +485,44 @@ func TestSchemasAndResults(t *testing.T) {
 		json.Unmarshal(recv(), &r)
 		if r.Error == nil || r.Error.Code != -32602 {
 			t.Fatalf("expected -32602, got %+v", r.Error)
+		}
+	})
+
+	t.Run("missing repo_id returns -32602", func(t *testing.T) {
+		send(map[string]any{
+			"jsonrpc": "2.0", "id": 25, "method": "tools/call",
+			"params": map[string]any{"name": "cache_status", "arguments": map[string]any{}},
+		})
+		var r response
+		json.Unmarshal(recv(), &r)
+		if r.Error == nil || r.Error.Code != -32602 || r.Error.Data == nil || r.Error.Data.Code != "invalid_arguments" {
+			t.Fatalf("expected invalid_arguments, got %+v", r.Error)
+		}
+	})
+
+	t.Run("invalid snippet range returns -32602", func(t *testing.T) {
+		send(map[string]any{
+			"jsonrpc": "2.0", "id": 26, "method": "tools/call",
+			"params": map[string]any{"name": "get_snippet", "arguments": map[string]any{"repo_id": "fixture-a", "line_start": 5, "line_end": 2}},
+		})
+		var r response
+		json.Unmarshal(recv(), &r)
+		if r.Error == nil || r.Error.Code != -32602 {
+			t.Fatalf("expected -32602, got %+v", r.Error)
+		}
+	})
+
+	t.Run("mutation tools are not registered", func(t *testing.T) {
+		for i, name := range []string{"create_issue", "update_issue", "sync", "migrate"} {
+			send(map[string]any{
+				"jsonrpc": "2.0", "id": 27 + i, "method": "tools/call",
+				"params": map[string]any{"name": name, "arguments": map[string]any{"repo_id": "fixture-a"}},
+			})
+			var r response
+			json.Unmarshal(recv(), &r)
+			if r.Error == nil || r.Error.Code != -32601 || r.Error.Data == nil || r.Error.Data.Code != "unknown_tool" {
+				t.Fatalf("%s: expected unknown_tool, got %+v", name, r.Error)
+			}
 		}
 	})
 
