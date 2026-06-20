@@ -301,6 +301,7 @@ type LinkCheckRequest struct {
 }
 
 type LinkCheckResult struct {
+	RepoID           string              `json:"repo_id"`
 	CheckedCount     int                 `json:"checked_count"`
 	BrokenCount      int                 `json:"broken_count"`
 	BrokenLinks      []BrokenLinkResult  `json:"broken_links"`
@@ -321,6 +322,7 @@ type StaleIndexRequest struct {
 }
 
 type StaleIndexResult struct {
+	RepoID            string                       `json:"repo_id"`
 	StaleCount        int                          `json:"stale_count"`
 	AffectedSourceIDs []string                     `json:"affected_source_ids"`
 	MissingTargetIDs  []string                     `json:"missing_target_ids"`
@@ -339,6 +341,7 @@ type ExportSnapshotRequest struct {
 }
 
 type ExportSnapshotResult struct {
+	RepoID        string    `json:"repo_id"`
 	SnapshotID    string    `json:"snapshot_id"`
 	Format        string    `json:"format"`
 	RecordCount   int       `json:"record_count"`
@@ -447,6 +450,7 @@ type SnapshotRecordChange struct {
 }
 
 type DiffSnapshotResult struct {
+	RepoID            string                 `json:"repo_id"`
 	BaseSnapshotID    string                 `json:"base_snapshot_id"`
 	HeadSnapshotID    string                 `json:"head_snapshot_id"`
 	Format            string                 `json:"format"`

@@ -171,11 +171,17 @@ func sortChunks(chunks []Chunk) {
 		if chunks[i].SourceID != chunks[j].SourceID {
 			return chunks[i].SourceID < chunks[j].SourceID
 		}
+		if chunks[i].RecordID != chunks[j].RecordID {
+			return chunks[i].RecordID < chunks[j].RecordID
+		}
 		if chunks[i].Policy != chunks[j].Policy {
 			return chunks[i].Policy < chunks[j].Policy
 		}
 		if chunks[i].ByteStart != chunks[j].ByteStart {
 			return chunks[i].ByteStart < chunks[j].ByteStart
+		}
+		if chunks[i].LineStart != chunks[j].LineStart {
+			return chunks[i].LineStart < chunks[j].LineStart
 		}
 		return chunks[i].ID < chunks[j].ID
 	})

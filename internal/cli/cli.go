@@ -23,21 +23,18 @@ const version = "0.1.0"
 var commands = []string{
 	"ingest",
 	"index",
-	"search_sources", "search",
-	"list_sources", "list",
-	"get_source", "get",
-	"source_backlinks", "backlinks",
-	"get_snippet", "get-snippet", "snippet",
-	"list-chunks", "list_chunks", "search-chunks", "search_chunks",
-	"sync_status", "sync-status",
-	"tasks",
-	"tracks",
+	"search",
+	"list",
+	"get",
+	"backlinks",
+	"get-snippet", "snippet", "snippets",
+	"list-chunks",
 	"recent",
 	"link-check",
 	"stale-index",
 	"sync",
 	"cache-status",
-	"export", "export-snapshot",
+	"export",
 	"diff",
 	"create-issue",
 	"update-issue",
@@ -391,7 +388,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, renderOperationText)
-	case "search_sources", "search":
+	case "search":
 		if len(args) == 0 {
 			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "query", Message: "query is required"})
 		}
@@ -400,13 +397,13 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, results, renderSearchText)
-	case "list_sources", "list":
+	case "list":
 		results, err := svc.ListSources(ctx, service.ListSourcesRequest{RepoID: opts.repo, Kind: opts.kind, Status: opts.status, Limit: opts.limit, Offset: opts.offset})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, results, renderListText)
-	case "get_source", "get":
+	case "get":
 		id, ok := firstArg(args)
 		if !ok {
 			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "id", Message: "id is required"})
@@ -416,7 +413,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, renderGetText)
-	case "source_backlinks", "backlinks":
+	case "backlinks":
 		id, ok := firstArg(args)
 		if !ok {
 			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "id", Message: "id is required"})
@@ -426,10 +423,16 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, results, renderBacklinksText)
-	case "get_snippet", "get-snippet", "snippet":
+	case "get-snippet", "snippet", "snippets":
 		id, _ := firstArg(args)
-		if opts.chunkID != "" || opts.sourceID != "" || opts.recordID != "" || opts.snapshotID != "" || opts.policy != "" {
-			query := service.SnippetQuery{RepoID: opts.repo, SourceID: firstNonEmpty(opts.sourceID, id), RecordID: opts.recordID, SnapshotID: opts.snapshotID, Policy: indexPolicy(opts.policy), ChunkID: opts.chunkID, LineStart: opts.lineStart, LineEnd: opts.lineEnd}
+		if opts.chunkID != "" {
+			if opts.lineStart > 0 || opts.lineEnd > 0 {
+				return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "address", Message: "chunk-id and line range are mutually exclusive"})
+			}
+			query := service.SnippetQuery{RepoID: opts.repo, SourceID: firstNonEmpty(opts.sourceID, id), RecordID: opts.recordID, SnapshotID: opts.snapshotID, Policy: indexPolicy(opts.policy), ChunkID: opts.chunkID}
+			if query.SourceID == "" && query.RecordID == "" && query.SnapshotID == "" {
+				return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "address", Message: "source id, record id, or snapshot id is required with chunk-id"})
+			}
 			result, err := svc.GetChunkSnippet(ctx, query)
 			if err != nil {
 				return writeError(stderr, opts.format, err)
@@ -451,17 +454,8 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return 0
 		}
 		return renderJSON(stdout, result)
-	case "list-chunks", "list_chunks":
+	case "list-chunks":
 		result, err := svc.ListChunks(ctx, service.ChunkQuery{RepoID: opts.repo, SourceID: opts.sourceID, RecordID: opts.recordID, SnapshotID: opts.snapshotID, Policy: indexPolicy(opts.policy), Limit: opts.limit, Offset: opts.offset})
-		if err != nil {
-			return writeError(stderr, opts.format, err)
-		}
-		return render(stdout, opts.format, result, renderChunkQueryText)
-	case "search-chunks", "search_chunks":
-		if len(args) == 0 {
-			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "query", Message: "query is required"})
-		}
-		result, err := svc.SearchChunks(ctx, service.ChunkSearchQuery{ChunkQuery: service.ChunkQuery{RepoID: opts.repo, SourceID: opts.sourceID, RecordID: opts.recordID, SnapshotID: opts.snapshotID, Policy: indexPolicy(opts.policy), Limit: opts.limit, Offset: opts.offset}, Query: strings.Join(args, " ")})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
@@ -478,16 +472,6 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, results, renderListText)
-	case "sync_status", "sync-status":
-		id, ok := firstArg(args)
-		if !ok {
-			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "id", Message: "id is required"})
-		}
-		result, err := svc.GetSyncStatus(ctx, service.SyncStatusRequest{RepoID: opts.repo, ID: id})
-		if err != nil {
-			return writeError(stderr, opts.format, err)
-		}
-		return render(stdout, opts.format, result, renderSyncStatusText)
 	case "recent":
 		results, err := svc.RecentChanges(ctx, service.RecentChangesRequest{RepoID: opts.repo, Kind: opts.kind, Status: opts.status, Limit: opts.limit, Offset: opts.offset})
 		if err != nil {
@@ -558,7 +542,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, renderCacheStatusText)
-	case "export", "export-snapshot":
+	case "export":
 		result, err := svc.ExportSnapshot(ctx, service.ExportSnapshotRequest{RepoID: opts.repo, Format: opts.format, OutputPath: opts.output, IncludeBody: true})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
@@ -943,15 +927,15 @@ func printHelp(w io.Writer) {
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Shell-equivalent query mapping:")
-	fmt.Fprintln(w, "  find -> list_sources")
-	fmt.Fprintln(w, "  rg -n -> search_sources")
-	fmt.Fprintln(w, "  rg --files -> list_sources")
-	fmt.Fprintln(w, "  sed -n -> get_snippet")
+	fmt.Fprintln(w, "  find -> list")
+	fmt.Fprintln(w, "  rg -n -> search")
+	fmt.Fprintln(w, "  rg --files -> list")
+	fmt.Fprintln(w, "  sed -n -> get-snippet")
 	fmt.Fprintln(w, "  handoff/review inspection -> recent")
 	fmt.Fprintln(w, "  broken pointer search -> link-check")
 	fmt.Fprintln(w, "  stale derived data search -> stale-index")
 	fmt.Fprintln(w, "  cache health inspection -> cache-status")
-	fmt.Fprintln(w, "  minimum replacement sequence: ingest -> search_sources -> list_sources -> get_source -> source_backlinks -> sync_status")
+	fmt.Fprintln(w, "  minimum replacement sequence: sync -> search -> list -> get -> backlinks")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Global query flags:")
 	fmt.Fprintln(w, "  --format text|json")

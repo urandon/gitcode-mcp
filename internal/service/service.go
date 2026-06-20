@@ -506,7 +506,7 @@ func (s *Service) LinkCheck(ctx context.Context, req LinkCheckRequest) (LinkChec
 	if err != nil {
 		return LinkCheckResult{}, normalizeError(err, "links", "")
 	}
-	result := LinkCheckResult{CheckedCount: len(links), SuggestedAliases: map[string][]string{}}
+	result := LinkCheckResult{RepoID: repoID, CheckedCount: len(links), SuggestedAliases: map[string][]string{}}
 	for _, link := range links {
 		if _, err := s.store.GetSourceScoped(ctx, repoID, link.TargetID); err != nil {
 			if isCacheNotFound(err) {
@@ -547,7 +547,7 @@ func (s *Service) StaleIndex(ctx context.Context, req StaleIndexRequest) (StaleI
 			missing[target] = struct{}{}
 		}
 	}
-	result := StaleIndexResult{StaleCount: len(report.Warnings), AffectedSourceIDs: sortedKeys(affected), MissingTargetIDs: sortedKeys(missing), LastIndexedAt: lastIndexed.UTC(), Warnings: report.Warnings, Records: report.Records}
+	result := StaleIndexResult{RepoID: repoID, StaleCount: len(report.Warnings), AffectedSourceIDs: sortedKeys(affected), MissingTargetIDs: sortedKeys(missing), LastIndexedAt: lastIndexed.UTC(), Warnings: report.Warnings, Records: report.Records}
 	if req.Strict && result.StaleCount > 0 {
 		return result, ErrStaleIndex{StaleCount: result.StaleCount}
 	}
@@ -565,7 +565,7 @@ func (s *Service) ExportSnapshot(ctx context.Context, req ExportSnapshotRequest)
 		return ExportSnapshotResult{}, err
 	}
 	hash := sha256.Sum256(content)
-	result := ExportSnapshotResult{SnapshotID: hex.EncodeToString(hash[:16]), Format: format, RecordCount: len(snapshot.Sources), GeneratedAt: snapshot.CreatedAt, ContentHash: hex.EncodeToString(hash[:]), InlineContent: string(content), Warnings: warningCodes(snapshot.Warnings)}
+	result := ExportSnapshotResult{RepoID: snapshot.RepoID, SnapshotID: hex.EncodeToString(hash[:16]), Format: format, RecordCount: len(snapshot.Sources), GeneratedAt: snapshot.CreatedAt, ContentHash: hex.EncodeToString(hash[:]), InlineContent: string(content), Warnings: warningCodes(snapshot.Warnings)}
 	if req.OutputPath != "" {
 		if err := os.WriteFile(req.OutputPath, content, 0o600); err != nil {
 			return ExportSnapshotResult{}, err
@@ -605,6 +605,7 @@ func (s *Service) DiffSnapshot(ctx context.Context, req DiffSnapshotRequest) (Di
 		return DiffSnapshotResult{}, err
 	}
 	result := diffSnapshots(base, head)
+	result.RepoID = req.RepoID
 	result.BaseSnapshotID = req.BaseSnapshotID
 	result.HeadSnapshotID = req.HeadSnapshotID
 	result.Format = format

@@ -34,12 +34,18 @@ func TestHelpReturnsSuccess(t *testing.T) {
 func TestMinimumReplacementBar(t *testing.T) {
 	factory := cacheBackedFactory(t)
 	cases := [][]string{
-		{"ingest"},
-		{"search_sources", "--repo", "fixture-a", "backlog"},
-		{"list_sources", "--repo", "fixture-a", "--kind", "task", "--status", "ready"},
-		{"get_source", "--repo", "fixture-a", "DOC-123"},
-		{"source_backlinks", "--repo", "fixture-a", "DOC-123"},
-		{"sync_status", "--repo", "fixture-a", "DOC-123"},
+		{"search", "--repo", "fixture-a", "backlog"},
+		{"list", "--repo", "fixture-a", "--kind", "task", "--status", "ready"},
+		{"get", "--repo", "fixture-a", "DOC-123"},
+		{"backlinks", "--repo", "fixture-a", "DOC-123"},
+		{"get-snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"},
+		{"list-chunks", "--repo", "fixture-a"},
+		{"recent", "--repo", "fixture-a"},
+		{"link-check", "--repo", "fixture-a"},
+		{"stale-index", "--repo", "fixture-a"},
+		{"cache-status", "--repo", "fixture-a"},
+		{"export", "--repo", "fixture-a"},
+		{"diff", "--repo", "fixture-a"},
 	}
 	for _, args := range cases {
 		var stdout bytes.Buffer
@@ -48,7 +54,7 @@ func TestMinimumReplacementBar(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("%v code = %d stderr=%q stdout=%q", args, code, stderr.String(), stdout.String())
 		}
-		if stdout.Len() == 0 {
+		if stdout.Len() == 0 && args[0] != "link-check" {
 			t.Fatalf("%v produced no output", args)
 		}
 	}
@@ -121,7 +127,7 @@ func TestCacheStatusJSON(t *testing.T) {
 func TestSearchJSON(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	code := executeWithFactory([]string{"search_sources", "--repo", "fixture-a", "backlog", "--format", "json"}, &stdout, &stderr, cacheBackedFactory(t))
+	code := executeWithFactory([]string{"search", "--repo", "fixture-a", "backlog", "--format", "json"}, &stdout, &stderr, cacheBackedFactory(t))
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
@@ -145,6 +151,34 @@ func TestGetSource(t *testing.T) {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("get output missing %q in %q", want, stdout.String())
 		}
+	}
+}
+
+func TestSnippetAliasesMatchCanonical(t *testing.T) {
+	factory := cacheBackedFactory(t)
+	var canonical bytes.Buffer
+	var canonicalErr bytes.Buffer
+	if code := executeWithFactory([]string{"get-snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1", "--format", "json"}, &canonical, &canonicalErr, factory); code != 0 {
+		t.Fatalf("canonical code=%d stderr=%q", code, canonicalErr.String())
+	}
+	for _, command := range []string{"snippet", "snippets"} {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		if code := executeWithFactory([]string{command, "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1", "--format", "json"}, &stdout, &stderr, factory); code != 0 {
+			t.Fatalf("%s code=%d stderr=%q", command, code, stderr.String())
+		}
+		if stdout.String() != canonical.String() {
+			t.Fatalf("%s output differs\n got: %q\nwant: %q", command, stdout.String(), canonical.String())
+		}
+	}
+}
+
+func TestSnippetRejectsChunkAndLineAddressing(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := executeWithFactory([]string{"get-snippet", "--repo", "fixture-a", "DOC-123", "--chunk-id", "chunk-1", "--line-start", "1", "--format", "json"}, &stdout, &stderr, spyFactory())
+	if code != 4 || !strings.Contains(stderr.String(), "invalid_query") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
 
@@ -204,7 +238,7 @@ func TestAllCommandsRegistered(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d", code)
 	}
-	for _, want := range []string{"ingest", "index", "search", "search_sources", "list", "list_sources", "get", "get_source", "snippet", "get_snippet", "backlinks", "source_backlinks", "tasks", "tracks", "link-check", "stale-index", "recent", "sync-status", "sync_status", "sync", "export", "diff", "create-issue", "update-issue", "create-page", "update-page", "add-comment", "add-label"} {
+	for _, want := range []string{"ingest", "index", "search", "list", "get", "get-snippet", "snippet", "snippets", "backlinks", "list-chunks", "link-check", "stale-index", "recent", "cache-status", "sync", "export", "diff", "create-issue", "update-issue", "create-page", "update-page", "add-comment", "add-label"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("help missing command %q in %q", want, stdout.String())
 		}
@@ -266,10 +300,19 @@ func TestHelpDocumentsShellMapping(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d", code)
 	}
-	for _, want := range []string{"find -> list_sources", "rg -n -> search_sources", "rg --files -> list_sources", "sed -n -> get_snippet", "handoff/review inspection -> recent", "broken pointer search -> link-check", "stale derived data search -> stale-index", "ingest -> search_sources -> list_sources -> get_source -> source_backlinks -> sync_status"} {
+	for _, want := range []string{"find -> list", "rg -n -> search", "rg --files -> list", "sed -n -> get-snippet", "handoff/review inspection -> recent", "broken pointer search -> link-check", "stale derived data search -> stale-index", "sync -> search -> list -> get -> backlinks"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("help missing %q in %q", want, stdout.String())
 		}
+	}
+}
+
+func TestUnknownRepoIsNotFound(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := executeWithFactory([]string{"list", "--repo", "missing-repo", "--format", "json"}, &stdout, &stderr, cacheBackedFactory(t))
+	if code != 3 || !strings.Contains(stderr.String(), "not_found") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
 
@@ -279,10 +322,10 @@ func TestQueryCommandErrors(t *testing.T) {
 		args []string
 		want int
 	}{
-		{"empty cache", []string{"list_sources", "--repo", "fixture-a"}, 2},
-		{"not found", []string{"get_source", "--repo", "fixture-a", "MISSING"}, 3},
-		{"invalid snippet", []string{"get_snippet", "--repo", "fixture-a", "--line-start", "5", "--line-end", "1", "DOC-123"}, 4},
-		{"clamped snippet", []string{"get_snippet", "--repo", "fixture-a", "--line-start", "1", "--line-end", "50", "DOC-123"}, 0},
+		{"empty cache", []string{"list", "--repo", "fixture-a"}, 2},
+		{"not found", []string{"get", "--repo", "fixture-a", "MISSING"}, 3},
+		{"invalid snippet", []string{"get-snippet", "--repo", "fixture-a", "--line-start", "5", "--line-end", "1", "DOC-123"}, 4},
+		{"clamped snippet", []string{"get-snippet", "--repo", "fixture-a", "--line-start", "1", "--line-end", "50", "DOC-123"}, 0},
 		{"stale strict", []string{"stale-index", "--repo", "fixture-a", "--strict"}, 5},
 		{"link strict", []string{"link-check", "--repo", "fixture-a", "--strict"}, 5},
 	} {
@@ -357,7 +400,7 @@ func TestQueryCommandsUseServiceOnly(t *testing.T) {
 	spy := &spyService{}
 	factory := func(context.Context, string) (queryService, func() error, error) { return spy, nil, nil }
 	commands := [][]string{
-		{"ingest"}, {"index", "--repo", "fixture-a", "--full"}, {"search_sources", "--repo", "fixture-a", "backlog"}, {"list_sources", "--repo", "fixture-a"}, {"get_source", "--repo", "fixture-a", "DOC-123"}, {"source_backlinks", "--repo", "fixture-a", "DOC-123"}, {"get_snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"sync_status", "--repo", "fixture-a", "DOC-123"}, {"recent", "--repo", "fixture-a"}, {"link-check", "--repo", "fixture-a"}, {"stale-index", "--repo", "fixture-a"}, {"sync", "--repo", "fixture-a"}, {"cache-status", "--repo", "fixture-a"}, {"export", "--repo", "fixture-a"}, {"diff", "--repo", "fixture-a"}, {"repo", "add", "--repo", "fixture-a", "--owner", "owner", "--name", "repo", "--api-base-url", "https://example.invalid/api", "--scopes", "issues"}, {"repo", "status", "--repo", "fixture-a"}, {"create-issue", "--repo", "fixture-a", "--title", "t"}, {"update-issue", "--repo", "fixture-a", "--number", "1"}, {"create-page", "--repo", "fixture-a", "--title", "t", "--body", "b"}, {"update-page", "--repo", "fixture-a", "--slug", "s"}, {"add-comment", "--repo", "fixture-a", "--number", "1", "--body", "b"}, {"add-label", "--repo", "fixture-a", "--number", "1", "--label", "l"},
+		{"ingest"}, {"index", "--repo", "fixture-a", "--full"}, {"search", "--repo", "fixture-a", "backlog"}, {"list", "--repo", "fixture-a"}, {"get", "--repo", "fixture-a", "DOC-123"}, {"backlinks", "--repo", "fixture-a", "DOC-123"}, {"get-snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"snippets", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"list-chunks", "--repo", "fixture-a"}, {"recent", "--repo", "fixture-a"}, {"link-check", "--repo", "fixture-a"}, {"stale-index", "--repo", "fixture-a"}, {"sync", "--repo", "fixture-a"}, {"cache-status", "--repo", "fixture-a"}, {"export", "--repo", "fixture-a"}, {"diff", "--repo", "fixture-a"}, {"repo", "add", "--repo", "fixture-a", "--owner", "owner", "--name", "repo", "--api-base-url", "https://example.invalid/api", "--scopes", "issues"}, {"repo", "status", "--repo", "fixture-a"}, {"create-issue", "--repo", "fixture-a", "--title", "t"}, {"update-issue", "--repo", "fixture-a", "--number", "1"}, {"create-page", "--repo", "fixture-a", "--title", "t", "--body", "b"}, {"update-page", "--repo", "fixture-a", "--slug", "s"}, {"add-comment", "--repo", "fixture-a", "--number", "1", "--body", "b"}, {"add-label", "--repo", "fixture-a", "--number", "1", "--label", "l"},
 	}
 	for _, args := range commands {
 		var stdout bytes.Buffer
@@ -366,7 +409,7 @@ func TestQueryCommandsUseServiceOnly(t *testing.T) {
 			t.Fatalf("%v code=%d stderr=%q", args, code, stderr.String())
 		}
 	}
-	for _, method := range []string{"Ingest", "Index", "SearchSources", "ListSources", "GetSource", "GetBacklinks", "GetSnippet", "GetSyncStatus", "RecentChanges", "LinkCheck", "StaleIndex", "SyncToCache", "CacheStatus", "ExportSnapshot", "DiffSnapshot", "AddRepository", "RepositoryStatus", "CreateIssue", "UpdateIssue", "CreatePage", "UpdatePage", "AddComment", "AddLabel"} {
+	for _, method := range []string{"Ingest", "Index", "SearchSources", "ListSources", "GetSource", "GetBacklinks", "ListChunks", "RecentChanges", "LinkCheck", "StaleIndex", "SyncToCache", "CacheStatus", "ExportSnapshot", "DiffSnapshot", "AddRepository", "RepositoryStatus", "CreateIssue", "UpdateIssue", "CreatePage", "UpdatePage", "AddComment", "AddLabel"} {
 		if spy.calls[method] != 1 {
 			t.Fatalf("%s calls=%d want 1", method, spy.calls[method])
 		}
