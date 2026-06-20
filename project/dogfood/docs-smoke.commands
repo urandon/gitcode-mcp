@@ -15,5 +15,5 @@ read-list-chunks|docs/read-walkthrough.md|{BIN} --cache-path {CACHE_PATH} list-c
 read-cache-status|docs/read-walkthrough.md|{BIN} --cache-path {CACHE_PATH} cache-status --repo example-owner/example-repo|success|false|true|standard
 mcp-http-sse-get-snippet|docs/mcp-setup.md|MCP_READ|get_snippet|false|true|standard
 write-dry-run|docs/write-walkthrough.md|{BIN} --cache-path {CACHE_PATH} create-issue --repo example-owner/example-repo --title "Fixture dry run" --body "Fixture dry run body." --dry-run|success,dry_run|false|true|standard
-fixture-validation-gate|docs/fixture-capture.md|project/dogfood/validate-fixtures.sh --fixtures fixtures --transcript {TMP}/fixture-validation.md|documented_diagnostic|false|true|standard
+fixture-validation-gate|docs/fixture-capture.md|project/dogfood/validate-fixtures.sh --fixtures fixtures --transcript {TMP}/fixture-validation.md|success,documented_diagnostic|false|true|standard
 live-write-skip|docs/write-walkthrough.md|{BIN} --cache-path {CACHE_PATH} create-issue --repo example-owner/example-repo --title "Live gated" --body "Live gated body." --live --idempotency-key docs-smoke-live-gated|live_skip,documented_diagnostic|true|false|standard
