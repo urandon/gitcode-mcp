@@ -993,6 +993,102 @@ func TestHTTPSSETransportSessionFlow(t *testing.T) {
 	}
 }
 
+func TestMCPRuntimeLockContentionErrorMapping(t *testing.T) {
+	started := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	lockErr := cache.ErrLockContention{Path: "redacted.lock", Operation: "sync-index", RepoID: "fixture-a", StartedAt: started, PID: 42, CachePath: ":memory:"}
+	store := populatedStore(t)
+	defer store.Close()
+	svc := &lockContentionService{serviceInterface: service.New(store), err: lockErr}
+
+	srv, r, w, stderr := newPipeServer(svc)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); _ = srv.Serve() }()
+	req := map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "list_sources", "arguments": map[string]any{"repo_id": "fixture-a"}}}
+	b, _ := json.Marshal(req)
+	_, _ = r.Write(append(b, '\n'))
+	line, err := readLine(w)
+	if err != nil {
+		t.Fatalf("read response: %v (stderr: %s)", err, stderr.String())
+	}
+	var resp response
+	if err := json.Unmarshal(line, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Error == nil || resp.Error.Data == nil || resp.Error.Data.Code != "cache_owned" || resp.Error.Data.Operation != "sync-index" || resp.Error.Data.RepoID != "fixture-a" || resp.Error.Data.PID != 42 || resp.Error.Data.StartedAt == "" || resp.Error.Data.CachePath != ":memory:" {
+		t.Fatalf("lock error response = %+v", resp.Error)
+	}
+	_ = r.Close()
+	wg.Wait()
+}
+
+func TestHTTPSSEReadinessLockContention(t *testing.T) {
+	lockErr := cache.ErrLockContention{Path: "redacted.lock", Operation: "migration", StartedAt: time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC), PID: 42, CachePath: ":memory:"}
+	store := populatedStore(t)
+	defer store.Close()
+	transport := NewHTTPSSETransport(NewRPCHandler(service.New(store)), ServerConfig{ReadinessProbe: func(context.Context) Readiness { return LockContentionReadiness(lockErr) }})
+	server := httptest.NewServer(transport.Handler())
+	defer server.Close()
+
+	healthResp, err := http.Get(server.URL + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if healthResp.StatusCode != http.StatusOK {
+		t.Fatalf("health status=%d", healthResp.StatusCode)
+	}
+	_ = healthResp.Body.Close()
+
+	readyResp, err := http.Get(server.URL + "/ready")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readyResp.Body.Close()
+	var ready Readiness
+	if err := json.NewDecoder(readyResp.Body).Decode(&ready); err != nil {
+		t.Fatal(err)
+	}
+	if readyResp.StatusCode != http.StatusServiceUnavailable || ready.Code != "migration_blocked" || ready.ErrorData == nil || ready.ErrorData.Code != "migration_blocked" {
+		t.Fatalf("ready status=%d body=%+v", readyResp.StatusCode, ready)
+	}
+}
+
+func TestHTTPSSECancelledSessionDoesNotBlockOtherClient(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	ids := []string{"session-cancel", "session-live"}
+	transport := NewHTTPSSETransport(NewRPCHandler(service.New(store)), ServerConfig{SessionID: func() string {
+		id := ids[0]
+		ids = ids[1:]
+		return id
+	}})
+	server := httptest.NewServer(transport.Handler())
+	defer server.Close()
+
+	sseCancel, endpointCancel, eventsCancel := openSSE(t, server.URL+"/sse")
+	sseLive, endpointLive, eventsLive := openSSE(t, server.URL+"/sse")
+	defer sseLive.Body.Close()
+	_ = sseCancel.Body.Close()
+	time.Sleep(20 * time.Millisecond)
+	closed := postJSONStatus(t, server.URL+endpointCancel, map[string]any{"jsonrpc": "2.0", "id": "cancelled", "method": "tools/call", "params": map[string]any{"name": "list_sources", "arguments": map[string]any{"repo_id": "fixture-a"}}})
+	if closed != http.StatusNotFound {
+		t.Fatalf("closed post status=%d", closed)
+	}
+	select {
+	case resp, ok := <-eventsCancel:
+		if ok {
+			t.Fatalf("cancelled session received response: %+v", resp)
+		}
+	default:
+	}
+
+	postJSON(t, server.URL+endpointLive, map[string]any{"jsonrpc": "2.0", "id": "live", "method": "tools/call", "params": map[string]any{"name": "list_sources", "arguments": map[string]any{"repo_id": "fixture-a"}}})
+	liveResp := readSSEMessage(t, eventsLive)
+	if liveResp.ID == nil || string(*liveResp.ID) != `"live"` || liveResp.Error != nil {
+		t.Fatalf("live response = %+v", liveResp)
+	}
+}
+
 func TestHTTPSSETransportSessionErrorsAndMultiClient(t *testing.T) {
 	store := populatedStore(t)
 	defer store.Close()
@@ -1054,6 +1150,15 @@ func TestHTTPSSETransportSessionErrorsAndMultiClient(t *testing.T) {
 	if closed != http.StatusNotFound {
 		t.Fatalf("closed session status=%d", closed)
 	}
+}
+
+type lockContentionService struct {
+	serviceInterface
+	err error
+}
+
+func (s *lockContentionService) ListSources(context.Context, service.ListSourcesRequest) (service.ListSourcesResult, error) {
+	return service.ListSourcesResult{}, s.err
 }
 
 func populatedStore(t *testing.T) cache.Store {

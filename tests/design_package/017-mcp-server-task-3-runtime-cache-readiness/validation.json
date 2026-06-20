@@ -1,0 +1,18 @@
+{
+  "covered_outcome_ids": ["outcome-7", "outcome-8"],
+  "covered_decommission_ids": ["decommission-5"],
+  "product_surfaces": [
+    "MCP HTTP/SSE GET /health",
+    "MCP HTTP/SSE GET /ready",
+    "MCP HTTP/SSE GET /sse session stream",
+    "MCP HTTP/SSE POST /message?session_id=<id>",
+    "MCP tools/call list_sources read path",
+    "MCP stdio JSON-RPC tools/call error mapping",
+    "SQLite cache temporary WAL/writer ownership runtime",
+    "MCP HTTP/SSE request cancellation and session queue cleanup"
+  ],
+  "evidence_type": "runtime/compiler test",
+  "freshness": "current source/build/runtime evidence required; run.sh copies the repository to a temporary directory, injects offline Go runtime tests, runs focused MCP design validation, go test ./..., and git diff --check",
+  "mocks_used": false,
+  "production_files_modified": []
+}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -328,6 +329,10 @@ func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind
 	transport := mcp.NewHTTPSSETransport(mcp.NewRPCHandler(svc), mcp.ServerConfig{BindAddress: bind, ReadinessProbe: func(ctx context.Context) mcp.Readiness {
 		repos, err := store.ListRepositories(ctx)
 		if err != nil {
+			var lockErr cache.ErrLockContention
+			if errors.As(err, &lockErr) {
+				return mcp.LockContentionReadiness(lockErr)
+			}
 			return mcp.Readiness{Ready: false, Code: "cache_unreadable", Message: err.Error()}
 		}
 		if len(repos) == 0 {

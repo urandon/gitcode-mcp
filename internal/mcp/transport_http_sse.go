@@ -18,9 +18,10 @@ import (
 type ReadinessProbe func(context.Context) Readiness
 
 type Readiness struct {
-	Ready   bool   `json:"ready"`
-	Code    string `json:"code,omitempty"`
-	Message string `json:"message,omitempty"`
+	Ready     bool       `json:"ready"`
+	Code      string     `json:"code,omitempty"`
+	Message   string     `json:"message,omitempty"`
+	ErrorData *errorData `json:"error_data,omitempty"`
 }
 
 type ServerConfig struct {
@@ -215,6 +216,10 @@ func (t *HTTPSSETransport) message(w http.ResponseWriter, r *http.Request) {
 	}()
 	defer close(done)
 	resp, emit := t.handler.Handle(ctx, req)
+	if ctx.Err() != nil || r.Context().Err() != nil || session.isClosed() {
+		t.config.Logger.Printf("request_id=%s route=/message session_id=%s status=cancelled", reqID, sessionID)
+		return
+	}
 	if emit && resp != nil {
 		if ok := session.enqueue(ctx, *resp); !ok {
 			if ctx.Err() != nil {

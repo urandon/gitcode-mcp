@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
+	"time"
 
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/service"
@@ -93,8 +95,13 @@ type rpcError struct {
 }
 
 type errorData struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	Operation string `json:"operation,omitempty"`
+	RepoID    string `json:"repo_id,omitempty"`
+	StartedAt string `json:"started_at,omitempty"`
+	PID       int    `json:"pid,omitempty"`
+	CachePath string `json:"cache_path,omitempty"`
 }
 
 type toolDefinition struct {
@@ -1207,7 +1214,7 @@ func (s *Server) writeDomainError(id *json.RawMessage, err error) {
 		case errors.As(err, &linkErr):
 			data = &errorData{Code: "link_check_failed", Message: err.Error()}
 		case errors.As(err, &lockErr):
-			data = &errorData{Code: cacheLockErrorCode(lockErr), Message: err.Error()}
+			data = cacheLockErrorData(lockErr, err.Error())
 		default:
 			data = &errorData{Code: "sync_required", Message: err.Error()}
 		}
@@ -1216,11 +1223,27 @@ func (s *Server) writeDomainError(id *json.RawMessage, err error) {
 	s.writeError(id, -32000, "Server error", data)
 }
 
+func LockContentionReadiness(err cache.ErrLockContention) Readiness {
+	data := cacheLockErrorData(err, err.Error())
+	return Readiness{Ready: false, Code: data.Code, Message: data.Message, ErrorData: data}
+}
+
+func cacheLockErrorData(err cache.ErrLockContention, message string) *errorData {
+	data := &errorData{Code: cacheLockErrorCode(err), Message: message, Operation: strings.TrimSpace(err.Operation), RepoID: strings.TrimSpace(err.RepoID), PID: err.PID}
+	if !err.StartedAt.IsZero() {
+		data.StartedAt = err.StartedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if strings.HasPrefix(err.CachePath, ":memory:") || strings.HasPrefix(err.CachePath, "file:") {
+		data.CachePath = err.CachePath
+	}
+	return data
+}
+
 func cacheLockErrorCode(err cache.ErrLockContention) string {
 	switch err.Operation {
 	case "migration":
 		return "migration_blocked"
-	case "sync", "index", "write":
+	case "sync", "index", "write", "sync-index":
 		return "cache_owned"
 	default:
 		return "busy"
