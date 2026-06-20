@@ -34,15 +34,42 @@ type serviceInterface interface {
 	CacheStatus(context.Context, service.CacheStatusRequest) (service.CacheStatusResult, error)
 }
 
+type RPCHandler struct {
+	svc serviceInterface
+}
+
 type Server struct {
-	reader io.Reader
-	writer io.Writer
-	stderr io.Writer
-	svc    serviceInterface
+	reader  io.Reader
+	writer  io.Writer
+	stderr  io.Writer
+	handler *RPCHandler
+	svc     serviceInterface
+}
+
+func NewRPCHandler(svc serviceInterface) *RPCHandler {
+	return &RPCHandler{svc: svc}
 }
 
 func New(r io.Reader, w io.Writer, stderr io.Writer, svc serviceInterface) *Server {
-	return &Server{reader: r, writer: w, stderr: stderr, svc: svc}
+	return &Server{reader: r, writer: w, stderr: stderr, handler: NewRPCHandler(svc), svc: svc}
+}
+
+func (h *RPCHandler) Handle(ctx context.Context, req request) (*response, bool) {
+	if req.JSONRPC != "2.0" || req.Method == "" {
+		return &response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32600, Message: "Invalid request"}}, true
+	}
+	var buf bytes.Buffer
+	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc}
+	server.handle(ctx, req, req.ID == nil)
+	line := bytes.TrimSpace(buf.Bytes())
+	if len(line) == 0 {
+		return nil, false
+	}
+	var resp response
+	if err := json.Unmarshal(line, &resp); err != nil {
+		return &response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32000, Message: "Server error", Data: &errorData{Code: "internal_error", Message: err.Error()}}}, true
+	}
+	return &resp, true
 }
 
 type request struct {
@@ -341,12 +368,10 @@ func (s *Server) Serve() error {
 			continue
 		}
 
-		if req.JSONRPC != "2.0" || req.Method == "" {
-			s.writeError(req.ID, -32600, "Invalid request", nil)
-			continue
+		if resp, ok := s.handler.Handle(ctx, req); ok {
+			b, _ := json.Marshal(resp)
+			fmt.Fprintln(s.writer, string(b))
 		}
-		isNotification := req.ID == nil
-		s.handle(ctx, req, isNotification)
 	}
 }
 

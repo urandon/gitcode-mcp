@@ -1,11 +1,15 @@
 package mcp
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -811,6 +815,101 @@ func (c *pipeConn) Close() error {
 	return nil
 }
 
+func openSSE(t *testing.T, url string) (*http.Response, string, <-chan response) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("sse status=%d content_type=%q", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	scanner := bufio.NewScanner(resp.Body)
+	var endpoint string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") {
+			endpoint = strings.TrimPrefix(line, "data: ")
+		}
+		if line == "" && endpoint != "" {
+			break
+		}
+	}
+	if endpoint == "" {
+		t.Fatal("missing endpoint event")
+	}
+	events := make(chan response, 8)
+	go func() {
+		var data string
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "data: ") {
+				data = strings.TrimPrefix(line, "data: ")
+			}
+			if line == "" && data != "" {
+				var resp response
+				if err := json.Unmarshal([]byte(data), &resp); err == nil {
+					events <- resp
+				}
+				data = ""
+			}
+		}
+		close(events)
+	}()
+	return resp, endpoint, events
+}
+
+func readSSEMessage(t *testing.T, events <-chan response) response {
+	t.Helper()
+	select {
+	case resp, ok := <-events:
+		if !ok {
+			t.Fatal("sse stream closed")
+		}
+		return resp
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for sse message")
+	}
+	return response{}
+}
+
+func postJSON(t *testing.T, url string, body any) {
+	t.Helper()
+	if status := postJSONStatus(t, url, body); status != http.StatusAccepted {
+		t.Fatalf("post status=%d", status)
+	}
+}
+
+func postJSONStatus(t *testing.T, url string, body any) int {
+	t.Helper()
+	status, _ := postJSONTransportError(t, url, body)
+	return status
+}
+
+func postJSONTransportError(t *testing.T, url string, body any) (int, transportError) {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	return postRaw(t, url, string(b))
+}
+
+func postRaw(t *testing.T, url string, body string) (int, transportError) {
+	t.Helper()
+	resp, err := http.Post(url, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var terr transportError
+	if resp.StatusCode != http.StatusAccepted {
+		_ = json.NewDecoder(resp.Body).Decode(&terr)
+	}
+	return resp.StatusCode, terr
+}
+
+func logWriter(w io.Writer) *log.Logger {
+	return log.New(w, "", 0)
+}
+
 func readLine(r io.Reader) (json.RawMessage, error) {
 	buf := make([]byte, 0, 4096)
 	for {
@@ -823,6 +922,137 @@ func readLine(r io.Reader) (json.RawMessage, error) {
 			return json.RawMessage(buf), nil
 		}
 		buf = append(buf, b[0])
+	}
+}
+
+func TestHTTPSSETransportSessionFlow(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	var logs bytes.Buffer
+	transport := NewHTTPSSETransport(NewRPCHandler(service.New(store)), ServerConfig{
+		ReadinessProbe: func(context.Context) Readiness { return Readiness{Ready: true} },
+		Logger:         logWriter(&logs),
+		RequestID:      func() string { return "generated-request" },
+		SessionID:      func() string { return "session-a" },
+	})
+	server := httptest.NewServer(transport.Handler())
+	defer server.Close()
+
+	healthReq, _ := http.NewRequest(http.MethodGet, server.URL+"/health", nil)
+	healthReq.Header.Set("X-Request-ID", "health-id")
+	healthResp, err := http.DefaultClient.Do(healthReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if healthResp.StatusCode != http.StatusOK || healthResp.Header.Get("X-Request-ID") != "health-id" {
+		t.Fatalf("health status=%d request_id=%q", healthResp.StatusCode, healthResp.Header.Get("X-Request-ID"))
+	}
+	_ = healthResp.Body.Close()
+
+	readyResp, err := http.Get(server.URL + "/ready")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readyResp.StatusCode != http.StatusOK || readyResp.Header.Get("X-Request-ID") != "generated-request" {
+		t.Fatalf("ready status=%d request_id=%q", readyResp.StatusCode, readyResp.Header.Get("X-Request-ID"))
+	}
+	_ = readyResp.Body.Close()
+
+	badMethodResp, err := http.Post(server.URL+"/sse", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if badMethodResp.StatusCode != http.StatusMethodNotAllowed || badMethodResp.Header.Get("X-Request-ID") != "generated-request" {
+		t.Fatalf("sse bad method status=%d request_id=%q", badMethodResp.StatusCode, badMethodResp.Header.Get("X-Request-ID"))
+	}
+	_ = badMethodResp.Body.Close()
+
+	sseResp, endpoint, events := openSSE(t, server.URL+"/sse")
+	defer sseResp.Body.Close()
+	if endpoint != "/message?session_id=session-a" {
+		t.Fatalf("endpoint = %q", endpoint)
+	}
+
+	postJSON(t, server.URL+endpoint, map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+	resp := readSSEMessage(t, events)
+	if resp.ID == nil || string(*resp.ID) != "1" || resp.Error != nil {
+		t.Fatalf("initialize response = %+v", resp)
+	}
+	var init initResult
+	if err := json.Unmarshal(resp.Result, &init); err != nil || init.ServerInfo.Name != "gitcode-mcp" {
+		t.Fatalf("init result=%s err=%v", string(resp.Result), err)
+	}
+
+	postJSON(t, server.URL+endpoint, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": map[string]any{"name": "get_source", "arguments": map[string]any{"repo_id": "fixture-a", "id": "DOC-123"}}})
+	toolResp := readSSEMessage(t, events)
+	if toolResp.ID == nil || string(*toolResp.ID) != "2" || toolResp.Error != nil {
+		t.Fatalf("tool response = %+v", toolResp)
+	}
+	if !strings.Contains(logs.String(), "request_id=health-id") {
+		t.Fatalf("logs missing request id: %q", logs.String())
+	}
+}
+
+func TestHTTPSSETransportSessionErrorsAndMultiClient(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	ids := []string{"session-a", "session-b"}
+	transport := NewHTTPSSETransport(NewRPCHandler(service.New(store)), ServerConfig{
+		SessionID: func() string {
+			id := ids[0]
+			ids = ids[1:]
+			return id
+		},
+	})
+	server := httptest.NewServer(transport.Handler())
+	defer server.Close()
+
+	missing, missingErr := postJSONTransportError(t, server.URL+"/message", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+	if missing != http.StatusBadRequest || missingErr.Error.Code != "missing_session" {
+		t.Fatalf("missing session status=%d error=%+v", missing, missingErr)
+	}
+	unknown, unknownErr := postJSONTransportError(t, server.URL+"/message?session_id=missing", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+	if unknown != http.StatusNotFound || unknownErr.Error.Code != "unknown_session" {
+		t.Fatalf("unknown session status=%d error=%+v", unknown, unknownErr)
+	}
+
+	sseA, endpointA, eventsA := openSSE(t, server.URL+"/sse")
+	defer sseA.Body.Close()
+	sseB, endpointB, eventsB := openSSE(t, server.URL+"/sse")
+	defer sseB.Body.Close()
+	if endpointA == endpointB {
+		t.Fatalf("duplicate endpoints: %q", endpointA)
+	}
+	duplicateBodyStatus, duplicateBodyErr := postRaw(t, server.URL+endpointA, `{"jsonrpc":"2.0","id":7,"method":"initialize"} {"jsonrpc":"2.0","id":8,"method":"initialize"}`)
+	if duplicateBodyStatus != http.StatusBadRequest || duplicateBodyErr.Error.Code != "invalid_json" {
+		t.Fatalf("duplicate body status=%d error=%+v", duplicateBodyStatus, duplicateBodyErr)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		postJSON(t, server.URL+endpointA, map[string]any{"jsonrpc": "2.0", "id": "a", "method": "tools/call", "params": map[string]any{"name": "list_sources", "arguments": map[string]any{"repo_id": "fixture-a"}}})
+	}()
+	go func() {
+		defer wg.Done()
+		postJSON(t, server.URL+endpointB, map[string]any{"jsonrpc": "2.0", "id": "b", "method": "tools/call", "params": map[string]any{"name": "tools/list"}})
+	}()
+	wg.Wait()
+	respA := readSSEMessage(t, eventsA)
+	respB := readSSEMessage(t, eventsB)
+	if respA.ID == nil || string(*respA.ID) != `"a"` {
+		t.Fatalf("session a response crossed: %+v", respA)
+	}
+	if respB.ID == nil || string(*respB.ID) != `"b"` {
+		t.Fatalf("session b response crossed: %+v", respB)
+	}
+
+	_ = sseA.Body.Close()
+	time.Sleep(20 * time.Millisecond)
+	closed := postJSONStatus(t, server.URL+endpointA, map[string]any{"jsonrpc": "2.0", "id": 3, "method": "initialize"})
+	if closed != http.StatusNotFound {
+		t.Fatalf("closed session status=%d", closed)
 	}
 }
 
