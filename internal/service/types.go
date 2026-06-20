@@ -91,6 +91,14 @@ type SearchSourcesRequest struct {
 	Offset int    `json:"offset,omitempty"`
 }
 
+type SearchSourcesResult struct {
+	RepoID  string               `json:"repo_id"`
+	Query   string               `json:"query"`
+	Results []SearchSourceResult `json:"results"`
+	Limit   int                  `json:"limit"`
+	Offset  int                  `json:"offset"`
+}
+
 type SearchSourceResult struct {
 	RepoID    string  `json:"repo_id"`
 	ID        string  `json:"id"`
@@ -141,6 +149,13 @@ func (r ListSourcesRequest) limitPlusOffset() int {
 	return r.Limit + r.Offset
 }
 
+type ListSourcesResult struct {
+	RepoID  string          `json:"repo_id"`
+	Results []SourceSummary `json:"results"`
+	Limit   int             `json:"limit"`
+	Offset  int             `json:"offset"`
+}
+
 type SourceSummary struct {
 	RepoID      string    `json:"repo_id"`
 	ID          string    `json:"id"`
@@ -157,6 +172,16 @@ type GetBacklinksRequest struct {
 	ID        string `json:"id,omitempty"`
 	AliasType string `json:"alias_type,omitempty"`
 	AliasID   string `json:"alias_id,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+	Offset    int    `json:"offset,omitempty"`
+}
+
+type BacklinksResult struct {
+	RepoID    string           `json:"repo_id"`
+	ID        string           `json:"id"`
+	Backlinks []BacklinkResult `json:"backlinks"`
+	Limit     int              `json:"limit"`
+	Offset    int              `json:"offset"`
 }
 
 type BacklinkResult struct {
@@ -234,6 +259,18 @@ type SyncStatusResult struct {
 	LastFetchedAt  time.Time `json:"last_fetched_at"`
 }
 
+type SyncStatusSummaryResult struct {
+	RepoID     string             `json:"repo_id"`
+	Results    []SyncStatusResult `json:"results"`
+	FreshCount int                `json:"fresh_count"`
+	StaleCount int                `json:"stale_count"`
+	LastSyncAt time.Time          `json:"last_sync_at"`
+	CacheEmpty bool               `json:"cache_empty"`
+	Limit      int                `json:"limit"`
+	Offset     int                `json:"offset"`
+	Warnings   []string           `json:"warnings,omitempty"`
+}
+
 type FreshnessState = string
 
 const (
@@ -283,6 +320,13 @@ type RecentChangesRequest struct {
 	Status string `json:"status,omitempty"`
 	Limit  int    `json:"limit,omitempty"`
 	Offset int    `json:"offset,omitempty"`
+}
+
+type RecentChangesResult struct {
+	RepoID  string               `json:"repo_id"`
+	Results []RecentChangeResult `json:"results"`
+	Limit   int                  `json:"limit"`
+	Offset  int                  `json:"offset"`
 }
 
 type RecentChangeResult struct {

@@ -236,7 +236,7 @@ func TestSchemasAndResults(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var sres searchSourcesSResult
+		var sres service.SearchSourcesResult
 		scRaw, _ := json.Marshal(tc.StructuredContent)
 		json.Unmarshal(scRaw, &sres)
 		if sres.RepoID != "fixture-a" {
@@ -262,7 +262,7 @@ func TestSchemasAndResults(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var lres listSourcesSResult
+		var lres service.ListSourcesResult
 		scRaw, _ := json.Marshal(tc.StructuredContent)
 		json.Unmarshal(scRaw, &lres)
 		if lres.RepoID != "fixture-a" {
@@ -305,7 +305,7 @@ func TestSchemasAndResults(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var recent recentChangesSResult
+		var recent service.RecentChangesResult
 		scRaw, _ := json.Marshal(tc.StructuredContent)
 		json.Unmarshal(scRaw, &recent)
 		if recent.RepoID != "fixture-a" || recent.Limit != 1 || len(recent.Results) != 1 || recent.Results[0].RepoID != "fixture-a" {
@@ -356,7 +356,7 @@ func TestSchemasAndResults(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var blres sourceBacklinksSResult
+		var blres service.BacklinksResult
 		scRaw, _ := json.Marshal(tc.StructuredContent)
 		json.Unmarshal(scRaw, &blres)
 		if blres.RepoID != "fixture-a" || blres.ID != "DOC-123" {
@@ -390,11 +390,11 @@ func TestSchemasAndResults(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var status map[string]any
+		var status service.SyncStatusResult
 		scRaw, _ := json.Marshal(tc.StructuredContent)
 		json.Unmarshal(scRaw, &status)
-		if status["id"] != "DOC-123" {
-			t.Fatalf("sync_status id = %v, want DOC-123", status["id"])
+		if status.SourceID != "DOC-123" {
+			t.Fatalf("sync_status source_id = %v, want DOC-123", status.SourceID)
 		}
 	})
 
@@ -407,7 +407,7 @@ func TestSchemasAndResults(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var agg aggregateSyncStatus
+		var agg service.SyncStatusSummaryResult
 		scRaw, _ := json.Marshal(tc.StructuredContent)
 		json.Unmarshal(scRaw, &agg)
 		if agg.RepoID != "fixture-a" || agg.CacheEmpty {

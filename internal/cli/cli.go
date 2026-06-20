@@ -34,6 +34,7 @@ var commands = []string{
 	"stale-index",
 	"sync",
 	"cache-status",
+	"sync-status", "sync_status",
 	"export",
 	"diff",
 	"create-issue",
@@ -51,16 +52,17 @@ var commands = []string{
 type queryService interface {
 	Ingest(context.Context, service.OperationRequest) (service.OperationResult, error)
 	Index(context.Context, service.OperationRequest) (service.OperationResult, error)
-	SearchSources(context.Context, service.SearchSourcesRequest) ([]service.SearchSourceResult, error)
-	ListSources(context.Context, service.ListSourcesRequest) ([]service.SourceSummary, error)
+	SearchSources(context.Context, service.SearchSourcesRequest) (service.SearchSourcesResult, error)
+	ListSources(context.Context, service.ListSourcesRequest) (service.ListSourcesResult, error)
 	GetSource(context.Context, service.GetSourceRequest) (service.SourceRecord, error)
-	GetBacklinks(context.Context, service.GetBacklinksRequest) ([]service.BacklinkResult, error)
+	GetBacklinks(context.Context, service.GetBacklinksRequest) (service.BacklinksResult, error)
 	GetSnippet(context.Context, service.SnippetRequest) (service.SnippetResult, error)
 	ListChunks(context.Context, service.ChunkQuery) (service.ChunkQueryResult, error)
 	SearchChunks(context.Context, service.ChunkSearchQuery) (service.ChunkQueryResult, error)
 	GetChunkSnippet(context.Context, service.SnippetQuery) (service.ChunkQueryResult, error)
 	GetSyncStatus(context.Context, service.SyncStatusRequest) (service.SyncStatusResult, error)
-	RecentChanges(context.Context, service.RecentChangesRequest) ([]service.RecentChangeResult, error)
+	SyncStatus(context.Context, service.ListSourcesRequest) (service.SyncStatusSummaryResult, error)
+	RecentChanges(context.Context, service.RecentChangesRequest) (service.RecentChangesResult, error)
 	LinkCheck(context.Context, service.LinkCheckRequest) (service.LinkCheckResult, error)
 	StaleIndex(context.Context, service.StaleIndexRequest) (service.StaleIndexResult, error)
 	SyncToCache(context.Context, service.SyncRequest) (service.SyncResult, error)
@@ -422,7 +424,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		if !ok {
 			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "id", Message: "id is required"})
 		}
-		results, err := svc.GetBacklinks(ctx, service.GetBacklinksRequest{RepoID: opts.repo, ID: id})
+		results, err := svc.GetBacklinks(ctx, service.GetBacklinksRequest{RepoID: opts.repo, ID: id, Limit: opts.limit, Offset: opts.offset})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
@@ -546,6 +548,20 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, renderCacheStatusText)
+	case "sync-status", "sync_status":
+		id, _ := firstArg(args)
+		if id != "" {
+			result, err := svc.GetSyncStatus(ctx, service.SyncStatusRequest{RepoID: opts.repo, ID: id})
+			if err != nil {
+				return writeError(stderr, opts.format, err)
+			}
+			return render(stdout, opts.format, result, renderSyncStatusText)
+		}
+		result, err := svc.SyncStatus(ctx, service.ListSourcesRequest{RepoID: opts.repo, Kind: opts.kind, Status: opts.status, Limit: opts.limit, Offset: opts.offset})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, renderSyncStatusSummaryText)
 	case "export":
 		result, err := svc.ExportSnapshot(ctx, service.ExportSnapshotRequest{RepoID: opts.repo, Format: opts.format, OutputPath: opts.output, IncludeBody: true})
 		if err != nil {
@@ -718,19 +734,19 @@ func renderRuntimeAuditText(w io.Writer, result runtimeAuditPayload) {
 	fmt.Fprintln(w, "index: not_reported_by_owner")
 }
 
-func renderSearchText(w io.Writer, results []service.SearchSourceResult) {
-	for _, result := range results {
+func renderSearchText(w io.Writer, result service.SearchSourcesResult) {
+	for _, item := range result.Results {
 		line := 0
-		if result.LineStart != nil {
-			line = *result.LineStart
+		if item.LineStart != nil {
+			line = *item.LineStart
 		}
-		fmt.Fprintf(w, "%s %s %s:%d:%s\n", result.RepoID, result.ID, result.Path, line, result.Snippet)
+		fmt.Fprintf(w, "%s %s %s:%d:%s\n", item.RepoID, item.ID, item.Path, line, item.Snippet)
 	}
 }
 
-func renderListText(w io.Writer, results []service.SourceSummary) {
-	for _, result := range results {
-		fmt.Fprintf(w, "%s %s %s %s %s %s\n", result.RepoID, result.ID, result.Kind, result.Status, result.Path, result.Title)
+func renderListText(w io.Writer, result service.ListSourcesResult) {
+	for _, item := range result.Results {
+		fmt.Fprintf(w, "%s %s %s %s %s %s\n", item.RepoID, item.ID, item.Kind, item.Status, item.Path, item.Title)
 	}
 }
 
@@ -738,9 +754,9 @@ func renderGetText(w io.Writer, result service.SourceRecord) {
 	fmt.Fprintf(w, "repo_id: %s\nid: %s\nkind: %s\npath: %s\nremote_alias: %s\ntitle: %s\nstatus: %s\nbody:\n%s\n", result.RepoID, result.ID, result.Kind, result.Path, result.RemoteAlias, result.Title, result.Status, result.Body)
 }
 
-func renderBacklinksText(w io.Writer, results []service.BacklinkResult) {
-	for _, result := range results {
-		fmt.Fprintf(w, "%s %s %s %s\n", result.ID, result.Path, result.Title, result.TargetID)
+func renderBacklinksText(w io.Writer, result service.BacklinksResult) {
+	for _, item := range result.Backlinks {
+		fmt.Fprintf(w, "%s %s %s %s\n", item.ID, item.Path, item.Title, item.TargetID)
 	}
 }
 
@@ -761,9 +777,13 @@ func renderSyncStatusText(w io.Writer, result service.SyncStatusResult) {
 	fmt.Fprintf(w, "%s %s %s %s %s %s\n", result.RepoID, result.SourceID, result.Status, result.RemoteType, result.RemoteID, result.LastFetchedAt.Format(time.RFC3339))
 }
 
-func renderRecentText(w io.Writer, results []service.RecentChangeResult) {
-	for _, result := range results {
-		fmt.Fprintf(w, "%s %s %s %s %s\n", result.UpdatedAt.UTC().Format(time.RFC3339), result.RepoID, result.ID, result.Path, result.Title)
+func renderSyncStatusSummaryText(w io.Writer, result service.SyncStatusSummaryResult) {
+	fmt.Fprintf(w, "repo_id: %s\nfresh_count: %d\nstale_count: %d\ncache_empty: %t\n", result.RepoID, result.FreshCount, result.StaleCount, result.CacheEmpty)
+}
+
+func renderRecentText(w io.Writer, result service.RecentChangesResult) {
+	for _, item := range result.Results {
+		fmt.Fprintf(w, "%s %s %s %s %s\n", item.UpdatedAt.UTC().Format(time.RFC3339), item.RepoID, item.ID, item.Path, item.Title)
 	}
 }
 

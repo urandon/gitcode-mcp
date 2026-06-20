@@ -252,27 +252,27 @@ func sanitizeAPIBaseURL(raw string) string {
 	return parsed.String()
 }
 
-func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) ([]SearchSourceResult, error) {
+func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (SearchSourcesResult, error) {
 	repoID, err := s.requireRepo(ctx, req.RepoID, "search")
 	if err != nil {
-		return nil, err
+		return SearchSourcesResult{}, err
 	}
 	if strings.TrimSpace(req.Query) == "" {
-		return nil, ErrInvalidQuery{Field: "query", Message: "query is required"}
+		return SearchSourcesResult{}, ErrInvalidQuery{Field: "query", Message: "query is required"}
 	}
 	results, err := s.store.SearchSources(ctx, cache.SearchQuery{RepoID: repoID, Query: req.Query, Kind: req.Kind, Limit: req.Limit})
 	if err != nil {
-		return nil, normalizeError(err, "search", req.Query)
+		return SearchSourcesResult{}, normalizeError(err, "search", req.Query)
 	}
 	if len(results) == 0 {
-		return nil, ErrCacheEmpty{Message: "no cached search results"}
+		return SearchSourcesResult{}, ErrCacheEmpty{Message: "no cached search results"}
 	}
 	out := make([]SearchSourceResult, 0, len(results))
 	updated := map[string]time.Time{}
 	for _, result := range results {
 		source, err := s.store.GetSourceScoped(ctx, repoID, result.ID)
 		if err != nil {
-			return nil, normalizeError(err, "source", result.ID)
+			return SearchSourcesResult{}, normalizeError(err, "source", result.ID)
 		}
 		updated[result.ID] = source.UpdatedAt.UTC()
 		line := nullableLine(result.Line)
@@ -290,7 +290,7 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 		}
 		return out[i].Path < out[j].Path
 	})
-	return out, nil
+	return SearchSourcesResult{RepoID: repoID, Query: req.Query, Results: out, Limit: req.Limit, Offset: req.Offset}, nil
 }
 
 func (s *Service) GetSource(ctx context.Context, req GetSourceRequest) (SourceRecord, error) {
@@ -314,20 +314,20 @@ func (s *Service) GetSource(ctx context.Context, req GetSourceRequest) (SourceRe
 	if err != nil && !IsCacheEmpty(err) {
 		return SourceRecord{}, err
 	}
-	return sourceRecord(source, links, backlinks), nil
+	return sourceRecord(source, links, backlinks.Backlinks), nil
 }
 
-func (s *Service) ListSources(ctx context.Context, req ListSourcesRequest) ([]SourceSummary, error) {
+func (s *Service) ListSources(ctx context.Context, req ListSourcesRequest) (ListSourcesResult, error) {
 	repoID, err := s.requireRepo(ctx, req.RepoID, "list")
 	if err != nil {
-		return nil, err
+		return ListSourcesResult{}, err
 	}
 	sources, err := s.store.ListSources(ctx, cache.SourceFilter{RepoID: repoID, Kind: req.Kind, Status: req.Status, Limit: req.limitPlusOffset()})
 	if err != nil {
-		return nil, normalizeError(err, "sources", "")
+		return ListSourcesResult{}, normalizeError(err, "sources", "")
 	}
 	if len(sources) == 0 {
-		return nil, ErrCacheEmpty{Message: "cache has no sources"}
+		return ListSourcesResult{}, ErrCacheEmpty{Message: "cache has no sources"}
 	}
 	sort.SliceStable(sources, func(i, j int) bool {
 		if sources[i].ID != sources[j].ID {
@@ -340,28 +340,28 @@ func (s *Service) ListSources(ctx context.Context, req ListSourcesRequest) ([]So
 	for _, source := range sources {
 		out = append(out, sourceSummary(source))
 	}
-	return out, nil
+	return ListSourcesResult{RepoID: repoID, Results: out, Limit: req.Limit, Offset: req.Offset}, nil
 }
 
-func (s *Service) GetBacklinks(ctx context.Context, req GetBacklinksRequest) ([]BacklinkResult, error) {
+func (s *Service) GetBacklinks(ctx context.Context, req GetBacklinksRequest) (BacklinksResult, error) {
 	repoID, err := s.requireRepo(ctx, req.RepoID, "backlinks")
 	if err != nil {
-		return nil, err
+		return BacklinksResult{}, err
 	}
 	id, err := s.resolveScopedStableID(ctx, repoID, req.ID, req.AliasType, req.AliasID)
 	if err != nil {
-		return nil, err
+		return BacklinksResult{}, err
 	}
 	backlinks, err := s.store.GetBacklinksScoped(ctx, repoID, id)
 	if err != nil {
-		return nil, normalizeError(err, "backlinks", id)
+		return BacklinksResult{}, normalizeError(err, "backlinks", id)
 	}
 	out := make([]BacklinkResult, 0, len(backlinks))
 	for _, source := range backlinks {
 		out = append(out, BacklinkResult{SourceSummary: sourceSummary(source), TargetID: id})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out, nil
+	return BacklinksResult{RepoID: repoID, ID: id, Backlinks: out, Limit: req.Limit, Offset: req.Offset}, nil
 }
 
 func (s *Service) ResolveID(ctx context.Context, req ResolveIDRequest) (ResolvedID, error) {
@@ -471,17 +471,54 @@ func (s *Service) GetSyncStatus(ctx context.Context, req SyncStatusRequest) (Syn
 	return SyncStatusResult{RepoID: status.RepoID, SourceID: status.SourceID, RemoteType: status.RemoteType, RemoteID: status.RemoteID, RemoteRevision: status.RemoteRevision, Status: status.Status, Freshness: freshness, LocalUpdatedAt: source.UpdatedAt.UTC(), LastFetchedAt: status.LastFetchedAt.UTC()}, nil
 }
 
-func (s *Service) RecentChanges(ctx context.Context, req RecentChangesRequest) ([]RecentChangeResult, error) {
+func (s *Service) SyncStatus(ctx context.Context, req ListSourcesRequest) (SyncStatusSummaryResult, error) {
+	repoID, err := s.requireRepo(ctx, req.RepoID, "sync-status")
+	if err != nil {
+		return SyncStatusSummaryResult{}, err
+	}
+	listed, err := s.ListSources(ctx, req)
+	if err != nil {
+		if IsCacheEmpty(err) {
+			return SyncStatusSummaryResult{RepoID: repoID, CacheEmpty: true, Limit: req.Limit, Offset: req.Offset}, nil
+		}
+		return SyncStatusSummaryResult{}, err
+	}
+	result := SyncStatusSummaryResult{RepoID: repoID, Limit: req.Limit, Offset: req.Offset, Results: []SyncStatusResult{}}
+	for _, source := range listed.Results {
+		status, err := s.GetSyncStatus(ctx, SyncStatusRequest{RepoID: repoID, ID: source.ID})
+		if err != nil {
+			if IsNotFound(err) {
+				result.Warnings = append(result.Warnings, "sync_status_missing:"+source.ID)
+				result.StaleCount++
+				continue
+			}
+			return SyncStatusSummaryResult{}, err
+		}
+		result.Results = append(result.Results, status)
+		if status.Freshness == FreshnessFresh || status.Status == "fresh" {
+			result.FreshCount++
+		} else {
+			result.StaleCount++
+		}
+		if status.LastFetchedAt.After(result.LastSyncAt) {
+			result.LastSyncAt = status.LastFetchedAt.UTC()
+		}
+	}
+	result.CacheEmpty = len(result.Results) == 0 && len(result.Warnings) == 0
+	return result, nil
+}
+
+func (s *Service) RecentChanges(ctx context.Context, req RecentChangesRequest) (RecentChangesResult, error) {
 	repoID, err := s.requireRepo(ctx, req.RepoID, "recent")
 	if err != nil {
-		return nil, err
+		return RecentChangesResult{}, err
 	}
 	sources, err := s.store.ListSources(ctx, cache.SourceFilter{RepoID: repoID, Kind: req.Kind, Status: req.Status})
 	if err != nil {
-		return nil, normalizeError(err, "sources", "")
+		return RecentChangesResult{}, normalizeError(err, "sources", "")
 	}
 	if len(sources) == 0 {
-		return nil, ErrCacheEmpty{Message: "cache has no sources"}
+		return RecentChangesResult{}, ErrCacheEmpty{Message: "cache has no sources"}
 	}
 	sort.SliceStable(sources, func(i, j int) bool {
 		if !sources[i].UpdatedAt.Equal(sources[j].UpdatedAt) {
@@ -494,7 +531,7 @@ func (s *Service) RecentChanges(ctx context.Context, req RecentChangesRequest) (
 	for _, source := range sources {
 		out = append(out, RecentChangeResult{RepoID: source.RepoID, ID: source.ID, Path: source.Path, Title: source.Title, Kind: source.Kind, Status: source.Status, UpdatedAt: source.UpdatedAt.UTC()})
 	}
-	return out, nil
+	return RecentChangesResult{RepoID: repoID, Results: out, Limit: req.Limit, Offset: req.Offset}, nil
 }
 
 func (s *Service) LinkCheck(ctx context.Context, req LinkCheckRequest) (LinkCheckResult, error) {

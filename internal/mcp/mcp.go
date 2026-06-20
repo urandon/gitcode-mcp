@@ -16,19 +16,20 @@ const protocolVersion = "2024-11-05"
 const serverVersion = "0.1.0"
 
 type serviceInterface interface {
-	SearchSources(context.Context, service.SearchSourcesRequest) ([]service.SearchSourceResult, error)
+	SearchSources(context.Context, service.SearchSourcesRequest) (service.SearchSourcesResult, error)
 	GetSource(context.Context, service.GetSourceRequest) (service.SourceRecord, error)
-	ListSources(context.Context, service.ListSourcesRequest) ([]service.SourceSummary, error)
-	GetBacklinks(context.Context, service.GetBacklinksRequest) ([]service.BacklinkResult, error)
+	ListSources(context.Context, service.ListSourcesRequest) (service.ListSourcesResult, error)
+	GetBacklinks(context.Context, service.GetBacklinksRequest) (service.BacklinksResult, error)
 	ResolveID(context.Context, service.ResolveIDRequest) (service.ResolvedID, error)
 	GetSyncStatus(context.Context, service.SyncStatusRequest) (service.SyncStatusResult, error)
+	SyncStatus(context.Context, service.ListSourcesRequest) (service.SyncStatusSummaryResult, error)
 	ExportSnapshot(context.Context, service.ExportSnapshotRequest) (service.ExportSnapshotResult, error)
 	DiffSnapshot(context.Context, service.DiffSnapshotRequest) (service.DiffSnapshotResult, error)
 	ListChunks(context.Context, service.ChunkQuery) (service.ChunkQueryResult, error)
 	SearchChunks(context.Context, service.ChunkSearchQuery) (service.ChunkQueryResult, error)
 	GetChunkSnippet(context.Context, service.SnippetQuery) (service.ChunkQueryResult, error)
 	StaleIndex(context.Context, service.StaleIndexRequest) (service.StaleIndexResult, error)
-	RecentChanges(context.Context, service.RecentChangesRequest) ([]service.RecentChangeResult, error)
+	RecentChanges(context.Context, service.RecentChangesRequest) (service.RecentChangesResult, error)
 	LinkCheck(context.Context, service.LinkCheckRequest) (service.LinkCheckResult, error)
 	CacheStatus(context.Context, service.CacheStatusRequest) (service.CacheStatusResult, error)
 }
@@ -127,14 +128,6 @@ type toolCallResult struct {
 type toolContentItem struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
-}
-
-type aggregateSyncStatus struct {
-	RepoID     string `json:"repo_id"`
-	FreshCount int    `json:"fresh_count"`
-	StaleCount int    `json:"stale_count"`
-	LastSyncAt string `json:"last_sync_at"`
-	CacheEmpty bool   `json:"cache_empty"`
 }
 
 func intPtr(v int) *int             { return &v }
@@ -474,12 +467,6 @@ type searchSourcesArgs struct {
 	Limit  *int   `json:"limit,omitempty"`
 	Offset *int   `json:"offset,omitempty"`
 }
-type searchSourcesSResult struct {
-	RepoID  string                       `json:"repo_id"`
-	Results []service.SearchSourceResult `json:"results"`
-	Limit   int                          `json:"limit"`
-	Offset  int                          `json:"offset"`
-}
 
 func (s *Server) callSearchSources(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	var a searchSourcesArgs
@@ -528,19 +515,14 @@ func (s *Server) callSearchSources(ctx context.Context, id *json.RawMessage, arg
 		return
 	}
 
-	all := results
-	if len(all) > limit {
-		all = all[:limit]
-	}
-
 	var text string
-	for _, r := range all {
+	for _, r := range results.Results {
 		text += fmt.Sprintf("%s:%s\n", r.Path, r.Snippet)
 	}
 
 	s.writeToolResult(id, toolCallResult{
 		Content:           []toolContentItem{{Type: "text", Text: text}},
-		StructuredContent: searchSourcesSResult{RepoID: a.RepoID, Results: all, Limit: limit, Offset: offset},
+		StructuredContent: results,
 	})
 }
 
@@ -588,12 +570,6 @@ type listSourcesArgs struct {
 	Limit  *int   `json:"limit,omitempty"`
 	Offset *int   `json:"offset,omitempty"`
 }
-type listSourcesSResult struct {
-	RepoID  string                  `json:"repo_id"`
-	Results []service.SourceSummary `json:"results"`
-	Limit   int                     `json:"limit"`
-	Offset  int                     `json:"offset"`
-}
 
 func (s *Server) callListSources(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	var a listSourcesArgs
@@ -639,13 +615,13 @@ func (s *Server) callListSources(ctx context.Context, id *json.RawMessage, args 
 	}
 
 	var text string
-	for _, r := range results {
+	for _, r := range results.Results {
 		text += fmt.Sprintf("%s %s %s\n", r.ID, r.Path, r.Title)
 	}
 
 	s.writeToolResult(id, toolCallResult{
 		Content:           []toolContentItem{{Type: "text", Text: text}},
-		StructuredContent: listSourcesSResult{RepoID: a.RepoID, Results: results, Limit: limit, Offset: offset},
+		StructuredContent: results,
 	})
 }
 
@@ -814,13 +790,6 @@ type recentChangesArgs struct {
 	Offset *int   `json:"offset,omitempty"`
 }
 
-type recentChangesSResult struct {
-	RepoID  string                       `json:"repo_id"`
-	Results []service.RecentChangeResult `json:"results"`
-	Limit   int                          `json:"limit"`
-	Offset  int                          `json:"offset"`
-}
-
 func (s *Server) callRecentChanges(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	var a recentChangesArgs
 	if err := json.Unmarshal(args, &a); err != nil {
@@ -852,10 +821,10 @@ func (s *Server) callRecentChanges(ctx context.Context, id *json.RawMessage, arg
 		return
 	}
 	text := ""
-	for _, result := range results {
+	for _, result := range results.Results {
 		text += fmt.Sprintf("%s %s %s %s\n", result.RepoID, result.ID, result.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"), result.Title)
 	}
-	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: recentChangesSResult{RepoID: a.RepoID, Results: results, Limit: limit, Offset: offset}})
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: results})
 }
 
 type linkCheckArgs struct {
@@ -917,13 +886,6 @@ type sourceBacklinksArgs struct {
 	Limit  *int   `json:"limit,omitempty"`
 	Offset *int   `json:"offset,omitempty"`
 }
-type sourceBacklinksSResult struct {
-	RepoID    string                   `json:"repo_id"`
-	ID        string                   `json:"id"`
-	Backlinks []service.BacklinkResult `json:"backlinks"`
-	Limit     int                      `json:"limit"`
-	Offset    int                      `json:"offset"`
-}
 
 func (s *Server) callSourceBacklinks(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	var a sourceBacklinksArgs
@@ -956,27 +918,20 @@ func (s *Server) callSourceBacklinks(ctx context.Context, id *json.RawMessage, a
 		return
 	}
 
-	results, err := s.svc.GetBacklinks(ctx, service.GetBacklinksRequest{RepoID: a.RepoID, ID: a.ID})
+	results, err := s.svc.GetBacklinks(ctx, service.GetBacklinksRequest{RepoID: a.RepoID, ID: a.ID, Limit: limit, Offset: offset})
 	if err != nil {
 		s.writeDomainError(id, err)
 		return
 	}
 
-	if offset > 0 && offset < len(results) {
-		results = results[offset:]
-	}
-	if limit > 0 && len(results) > limit {
-		results = results[:limit]
-	}
-
 	var text string
-	for _, r := range results {
+	for _, r := range results.Backlinks {
 		text += fmt.Sprintf("%s %s %s\n", r.ID, r.Path, r.Kind)
 	}
 
 	s.writeToolResult(id, toolCallResult{
 		Content:           []toolContentItem{{Type: "text", Text: text}},
-		StructuredContent: sourceBacklinksSResult{RepoID: a.RepoID, ID: a.ID, Backlinks: results, Limit: limit, Offset: offset},
+		StructuredContent: results,
 	})
 }
 
@@ -1031,22 +986,17 @@ func (s *Server) callSyncStatus(ctx context.Context, id *json.RawMessage, args j
 		return
 	}
 	if a.ID == "" {
-		sources, err := s.svc.ListSources(ctx, service.ListSourcesRequest{RepoID: a.RepoID, Limit: 1})
+		result, err := s.svc.SyncStatus(ctx, service.ListSourcesRequest{RepoID: a.RepoID})
 		if err != nil {
-			if service.IsCacheEmpty(err) {
-				result := aggregateSyncStatus{RepoID: a.RepoID, CacheEmpty: true}
-				s.writeToolResult(id, toolCallResult{
-					Content:           []toolContentItem{{Type: "text", Text: "cache is empty"}},
-					StructuredContent: result,
-				})
-				return
-			}
 			s.writeDomainError(id, err)
 			return
 		}
-		result := aggregateSyncStatus{RepoID: a.RepoID, FreshCount: len(sources), CacheEmpty: len(sources) == 0}
+		text := fmt.Sprintf("fresh=%d stale=%d cache_empty=%v", result.FreshCount, result.StaleCount, result.CacheEmpty)
+		if result.CacheEmpty {
+			text = "cache is empty"
+		}
 		s.writeToolResult(id, toolCallResult{
-			Content:           []toolContentItem{{Type: "text", Text: fmt.Sprintf("fresh=%d stale=%d cache_empty=%v", result.FreshCount, result.StaleCount, result.CacheEmpty)}},
+			Content:           []toolContentItem{{Type: "text", Text: text}},
 			StructuredContent: result,
 		})
 		return
@@ -1061,23 +1011,8 @@ func (s *Server) callSyncStatus(ctx context.Context, id *json.RawMessage, args j
 	text := fmt.Sprintf("%s %s %s", status.SourceID, status.Status, status.RemoteRevision)
 
 	s.writeToolResult(id, toolCallResult{
-		Content: []toolContentItem{{Type: "text", Text: text}},
-		StructuredContent: map[string]any{
-			"repo_id":           status.RepoID,
-			"id":                status.SourceID,
-			"source_id":         status.SourceID,
-			"remote_type":       status.RemoteType,
-			"remote_id":         status.RemoteID,
-			"remote_revision":   status.RemoteRevision,
-			"status":            status.Status,
-			"freshness":         status.Freshness,
-			"fresh":             status.Status == "fresh",
-			"stale":             status.Status != "fresh",
-			"local_updated_at":  status.LocalUpdatedAt,
-			"last_fetched_at":   status.LastFetchedAt,
-			"remote_updated_at": status.LastFetchedAt,
-			"reason":            status.Status,
-		},
+		Content:           []toolContentItem{{Type: "text", Text: text}},
+		StructuredContent: status,
 	})
 }
 

@@ -169,11 +169,11 @@ func TestSearchSources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SearchSources returned error: %v", err)
 	}
-	if len(results) != 2 {
-		t.Fatalf("SearchSources returned %d results, want 2", len(results))
+	if len(results.Results) != 2 {
+		t.Fatalf("SearchSources returned %d results, want 2", len(results.Results))
 	}
-	if results[0].ID == "" || results[0].Path == "" || results[0].Title == "" || results[0].Kind == "" || results[0].Status == "" || results[0].Snippet == "" || results[0].LineStart == nil || results[0].LineEnd == nil {
-		t.Fatalf("SearchSources result missing contract fields: %#v", results[0])
+	if results.RepoID != "fixture-a" || results.Query != "backlog" || results.Results[0].ID == "" || results.Results[0].Path == "" || results.Results[0].Title == "" || results.Results[0].Kind == "" || results.Results[0].Status == "" || results.Results[0].Snippet == "" || results.Results[0].LineStart == nil || results.Results[0].LineEnd == nil {
+		t.Fatalf("SearchSources result missing contract fields: %#v", results)
 	}
 }
 
@@ -196,7 +196,7 @@ func TestListSources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSources returned error: %v", err)
 	}
-	if len(results) != 1 || results[0].ID != "TASK-001" {
+	if len(results.Results) != 1 || results.Results[0].ID != "TASK-001" || results.RepoID != "fixture-a" {
 		t.Fatalf("ListSources = %#v, want TASK-001", results)
 	}
 }
@@ -208,7 +208,7 @@ func TestGetBacklinks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetBacklinks returned error: %v", err)
 	}
-	if len(results) != 1 || results[0].ID != "TASK-001" || results[0].TargetID != "DOC-123" {
+	if len(results.Backlinks) != 1 || results.Backlinks[0].ID != "TASK-001" || results.Backlinks[0].TargetID != "DOC-123" || results.ID != "DOC-123" {
 		t.Fatalf("GetBacklinks = %#v", results)
 	}
 }
@@ -348,7 +348,7 @@ func TestSyncGraphFixtureOfflineReadsIssueWikiCommentsAndChunks(t *testing.T) {
 		t.Fatalf("wiki sync returned error: %v", err)
 	}
 	results, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: "remote"})
-	if err != nil || len(results) < 2 {
+	if err != nil || len(results.Results) < 2 {
 		t.Fatalf("search results = %#v, %v", results, err)
 	}
 	issue, err := svc.GetSource(ctx, GetSourceRequest{RepoID: "fixture-a", ID: "ISSUE-42"})
@@ -659,7 +659,7 @@ func TestRecentChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecentChanges returned error: %v", err)
 	}
-	if len(recent) != 2 || recent[0].ID != "TASK-001" {
+	if len(recent.Results) != 2 || recent.Results[0].ID != "TASK-001" || recent.RepoID != "fixture-a" {
 		t.Fatalf("RecentChanges = %#v", recent)
 	}
 }
@@ -935,7 +935,7 @@ func TestQueryEdgeCases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ids := []string{results[0].ID, results[1].ID}
+	ids := []string{results.Results[0].ID, results.Results[1].ID}
 	if !reflect.DeepEqual(ids, []string{"DOC-123", "TASK-001"}) {
 		t.Fatalf("equal score ordering ids = %v", ids)
 	}

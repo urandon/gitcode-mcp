@@ -131,11 +131,11 @@ func TestSearchJSON(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
-	var results []service.SearchSourceResult
+	var results service.SearchSourcesResult
 	if err := json.Unmarshal(stdout.Bytes(), &results); err != nil {
 		t.Fatalf("invalid json: %v: %q", err, stdout.String())
 	}
-	if len(results) == 0 || results[0].ID == "" || results[0].Path == "" || results[0].Title == "" || results[0].Snippet == "" {
+	if results.RepoID != "fixture-a" || results.Query != "backlog" || len(results.Results) == 0 || results.Results[0].ID == "" || results.Results[0].Path == "" || results.Results[0].Title == "" || results.Results[0].Snippet == "" {
 		t.Fatalf("missing fields: %#v", results)
 	}
 }
@@ -238,7 +238,7 @@ func TestAllCommandsRegistered(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d", code)
 	}
-	for _, want := range []string{"ingest", "index", "search", "list", "get", "get-snippet", "snippet", "snippets", "backlinks", "list-chunks", "link-check", "stale-index", "recent", "cache-status", "sync", "export", "diff", "create-issue", "update-issue", "create-page", "update-page", "add-comment", "add-label"} {
+	for _, want := range []string{"ingest", "index", "search", "list", "get", "get-snippet", "snippet", "snippets", "backlinks", "list-chunks", "link-check", "stale-index", "recent", "cache-status", "sync-status", "sync_status", "sync", "export", "diff", "create-issue", "update-issue", "create-page", "update-page", "add-comment", "add-label"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("help missing command %q in %q", want, stdout.String())
 		}
@@ -252,12 +252,40 @@ func TestRecentJSON(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
-	var results []service.RecentChangeResult
+	var results service.RecentChangesResult
 	if err := json.Unmarshal(stdout.Bytes(), &results); err != nil {
 		t.Fatalf("invalid json: %v", err)
 	}
-	if len(results) == 0 || results[0].UpdatedAt.IsZero() {
+	if results.RepoID != "fixture-a" || len(results.Results) == 0 || results.Results[0].UpdatedAt.IsZero() {
 		t.Fatalf("missing recent fields: %#v", results)
+	}
+}
+
+func TestSyncStatusJSONAndAlias(t *testing.T) {
+	factory := cacheBackedFactory(t)
+	var perRecord bytes.Buffer
+	var perRecordErr bytes.Buffer
+	if code := executeWithFactory([]string{"sync-status", "--repo", "fixture-a", "DOC-123", "--format", "json"}, &perRecord, &perRecordErr, factory); code != 0 {
+		t.Fatalf("sync-status per-record code=%d stderr=%q", code, perRecordErr.String())
+	}
+	var status service.SyncStatusResult
+	if err := json.Unmarshal(perRecord.Bytes(), &status); err != nil {
+		t.Fatalf("invalid per-record json: %v", err)
+	}
+	if status.RepoID != "fixture-a" || status.SourceID != "DOC-123" || status.Freshness != service.FreshnessFresh {
+		t.Fatalf("sync-status per-record = %#v", status)
+	}
+	var aggregate bytes.Buffer
+	var aggregateErr bytes.Buffer
+	if code := executeWithFactory([]string{"sync_status", "--repo", "fixture-a", "--format", "json"}, &aggregate, &aggregateErr, factory); code != 0 {
+		t.Fatalf("sync_status aggregate code=%d stderr=%q", code, aggregateErr.String())
+	}
+	var summary service.SyncStatusSummaryResult
+	if err := json.Unmarshal(aggregate.Bytes(), &summary); err != nil {
+		t.Fatalf("invalid aggregate json: %v", err)
+	}
+	if summary.RepoID != "fixture-a" || summary.FreshCount != 1 || summary.CacheEmpty || len(summary.Results) != 1 {
+		t.Fatalf("sync-status aggregate = %#v", summary)
 	}
 }
 
@@ -400,7 +428,7 @@ func TestQueryCommandsUseServiceOnly(t *testing.T) {
 	spy := &spyService{}
 	factory := func(context.Context, string) (queryService, func() error, error) { return spy, nil, nil }
 	commands := [][]string{
-		{"ingest"}, {"index", "--repo", "fixture-a", "--full"}, {"search", "--repo", "fixture-a", "backlog"}, {"list", "--repo", "fixture-a"}, {"get", "--repo", "fixture-a", "DOC-123"}, {"backlinks", "--repo", "fixture-a", "DOC-123"}, {"get-snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"snippets", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"list-chunks", "--repo", "fixture-a"}, {"recent", "--repo", "fixture-a"}, {"link-check", "--repo", "fixture-a"}, {"stale-index", "--repo", "fixture-a"}, {"sync", "--repo", "fixture-a"}, {"cache-status", "--repo", "fixture-a"}, {"export", "--repo", "fixture-a"}, {"diff", "--repo", "fixture-a"}, {"repo", "add", "--repo", "fixture-a", "--owner", "owner", "--name", "repo", "--api-base-url", "https://example.invalid/api", "--scopes", "issues"}, {"repo", "status", "--repo", "fixture-a"}, {"create-issue", "--repo", "fixture-a", "--title", "t", "--dry-run"}, {"update-issue", "--repo", "fixture-a", "--number", "1", "--dry-run"}, {"create-page", "--repo", "fixture-a", "--title", "t", "--body", "b", "--dry-run"}, {"update-page", "--repo", "fixture-a", "--slug", "s", "--dry-run"}, {"add-comment", "--repo", "fixture-a", "--number", "1", "--body", "b", "--dry-run"}, {"add-label", "--repo", "fixture-a", "--number", "1", "--label", "l", "--dry-run"},
+		{"ingest"}, {"index", "--repo", "fixture-a", "--full"}, {"search", "--repo", "fixture-a", "backlog"}, {"list", "--repo", "fixture-a"}, {"get", "--repo", "fixture-a", "DOC-123"}, {"backlinks", "--repo", "fixture-a", "DOC-123"}, {"get-snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"snippets", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"list-chunks", "--repo", "fixture-a"}, {"recent", "--repo", "fixture-a"}, {"link-check", "--repo", "fixture-a"}, {"stale-index", "--repo", "fixture-a"}, {"sync", "--repo", "fixture-a"}, {"cache-status", "--repo", "fixture-a"}, {"sync-status", "--repo", "fixture-a", "DOC-123"}, {"sync_status", "--repo", "fixture-a"}, {"export", "--repo", "fixture-a"}, {"diff", "--repo", "fixture-a"}, {"repo", "add", "--repo", "fixture-a", "--owner", "owner", "--name", "repo", "--api-base-url", "https://example.invalid/api", "--scopes", "issues"}, {"repo", "status", "--repo", "fixture-a"}, {"create-issue", "--repo", "fixture-a", "--title", "t", "--dry-run"}, {"update-issue", "--repo", "fixture-a", "--number", "1", "--dry-run"}, {"create-page", "--repo", "fixture-a", "--title", "t", "--body", "b", "--dry-run"}, {"update-page", "--repo", "fixture-a", "--slug", "s", "--dry-run"}, {"add-comment", "--repo", "fixture-a", "--number", "1", "--body", "b", "--dry-run"}, {"add-label", "--repo", "fixture-a", "--number", "1", "--label", "l", "--dry-run"},
 	}
 	for _, args := range commands {
 		var stdout bytes.Buffer
@@ -409,9 +437,10 @@ func TestQueryCommandsUseServiceOnly(t *testing.T) {
 			t.Fatalf("%v code=%d stderr=%q", args, code, stderr.String())
 		}
 	}
-	for _, method := range []string{"Ingest", "Index", "SearchSources", "ListSources", "GetSource", "GetBacklinks", "ListChunks", "RecentChanges", "LinkCheck", "StaleIndex", "SyncToCache", "CacheStatus", "ExportSnapshot", "DiffSnapshot", "AddRepository", "RepositoryStatus", "CreateIssue", "UpdateIssue", "CreatePage", "UpdatePage", "AddComment", "AddLabel"} {
-		if spy.calls[method] != 1 {
-			t.Fatalf("%s calls=%d want 1", method, spy.calls[method])
+	wantCalls := map[string]int{"Ingest": 1, "Index": 1, "SearchSources": 1, "ListSources": 1, "GetSource": 1, "GetBacklinks": 1, "GetSnippet": 3, "ListChunks": 1, "RecentChanges": 1, "LinkCheck": 1, "StaleIndex": 1, "SyncToCache": 1, "CacheStatus": 1, "GetSyncStatus": 1, "SyncStatus": 1, "ExportSnapshot": 1, "DiffSnapshot": 1, "AddRepository": 1, "RepositoryStatus": 1, "CreateIssue": 1, "UpdateIssue": 1, "CreatePage": 1, "UpdatePage": 1, "AddComment": 1, "AddLabel": 1}
+	for method, want := range wantCalls {
+		if spy.calls[method] != want {
+			t.Fatalf("%s calls=%d want %d", method, spy.calls[method], want)
 		}
 	}
 }
@@ -476,22 +505,22 @@ func (s *spyService) Index(context.Context, service.OperationRequest) (service.O
 	s.called("Index")
 	return service.OperationResult{Command: "index", Status: "ok", ProcessedCount: 1, GeneratedAt: time.Now()}, nil
 }
-func (s *spyService) SearchSources(context.Context, service.SearchSourcesRequest) ([]service.SearchSourceResult, error) {
+func (s *spyService) SearchSources(context.Context, service.SearchSourcesRequest) (service.SearchSourcesResult, error) {
 	s.called("SearchSources")
 	line := 1
-	return []service.SearchSourceResult{{ID: "DOC-123", Path: "docs/backlog.md", Title: "Backlog", Kind: "doc", Status: "active", Snippet: "backlog", LineStart: &line, LineEnd: &line, Score: 1}}, nil
+	return service.SearchSourcesResult{RepoID: "fixture-a", Query: "backlog", Results: []service.SearchSourceResult{{ID: "DOC-123", Path: "docs/backlog.md", Title: "Backlog", Kind: "doc", Status: "active", Snippet: "backlog", LineStart: &line, LineEnd: &line, Score: 1}}}, nil
 }
-func (s *spyService) ListSources(context.Context, service.ListSourcesRequest) ([]service.SourceSummary, error) {
+func (s *spyService) ListSources(context.Context, service.ListSourcesRequest) (service.ListSourcesResult, error) {
 	s.called("ListSources")
-	return []service.SourceSummary{{ID: "DOC-123", Path: "docs/backlog.md", Title: "Backlog"}}, nil
+	return service.ListSourcesResult{RepoID: "fixture-a", Results: []service.SourceSummary{{ID: "DOC-123", Path: "docs/backlog.md", Title: "Backlog"}}}, nil
 }
 func (s *spyService) GetSource(context.Context, service.GetSourceRequest) (service.SourceRecord, error) {
 	s.called("GetSource")
 	return service.SourceRecord{ID: "DOC-123", Path: "docs/backlog.md", Title: "Backlog", Body: "body"}, nil
 }
-func (s *spyService) GetBacklinks(context.Context, service.GetBacklinksRequest) ([]service.BacklinkResult, error) {
+func (s *spyService) GetBacklinks(context.Context, service.GetBacklinksRequest) (service.BacklinksResult, error) {
 	s.called("GetBacklinks")
-	return []service.BacklinkResult{{SourceSummary: service.SourceSummary{ID: "TASK-1", Path: "project/tasks/task-1.md"}, TargetID: "DOC-123"}}, nil
+	return service.BacklinksResult{RepoID: "fixture-a", ID: "DOC-123", Backlinks: []service.BacklinkResult{{SourceSummary: service.SourceSummary{ID: "TASK-1", Path: "project/tasks/task-1.md"}, TargetID: "DOC-123"}}}, nil
 }
 func (s *spyService) GetSnippet(context.Context, service.SnippetRequest) (service.SnippetResult, error) {
 	s.called("GetSnippet")
@@ -511,11 +540,15 @@ func (s *spyService) GetChunkSnippet(context.Context, service.SnippetQuery) (ser
 }
 func (s *spyService) GetSyncStatus(context.Context, service.SyncStatusRequest) (service.SyncStatusResult, error) {
 	s.called("GetSyncStatus")
-	return service.SyncStatusResult{SourceID: "DOC-123", Status: "fresh", LastFetchedAt: time.Now()}, nil
+	return service.SyncStatusResult{RepoID: "fixture-a", SourceID: "DOC-123", Status: "fresh", LastFetchedAt: time.Now()}, nil
 }
-func (s *spyService) RecentChanges(context.Context, service.RecentChangesRequest) ([]service.RecentChangeResult, error) {
+func (s *spyService) SyncStatus(context.Context, service.ListSourcesRequest) (service.SyncStatusSummaryResult, error) {
+	s.called("SyncStatus")
+	return service.SyncStatusSummaryResult{RepoID: "fixture-a", FreshCount: 1, Results: []service.SyncStatusResult{{RepoID: "fixture-a", SourceID: "DOC-123", Status: "fresh", LastFetchedAt: time.Now()}}}, nil
+}
+func (s *spyService) RecentChanges(context.Context, service.RecentChangesRequest) (service.RecentChangesResult, error) {
 	s.called("RecentChanges")
-	return []service.RecentChangeResult{{ID: "DOC-123", Path: "docs/backlog.md", UpdatedAt: time.Now()}}, nil
+	return service.RecentChangesResult{RepoID: "fixture-a", Results: []service.RecentChangeResult{{ID: "DOC-123", Path: "docs/backlog.md", UpdatedAt: time.Now()}}}, nil
 }
 func (s *spyService) LinkCheck(_ context.Context, req service.LinkCheckRequest) (service.LinkCheckResult, error) {
 	s.called("LinkCheck")
