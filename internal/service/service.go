@@ -593,7 +593,7 @@ func (s *Service) StaleIndex(ctx context.Context, req StaleIndexRequest) (StaleI
 
 func (s *Service) ExportSnapshot(ctx context.Context, req ExportSnapshotRequest) (ExportSnapshotResult, error) {
 	format := normalizeSnapshotFormat(req.Format)
-	snapshot, err := s.buildSnapshot(ctx, req)
+	snapshot, err := s.storedSnapshot(ctx, req)
 	if err != nil {
 		return ExportSnapshotResult{}, err
 	}
@@ -602,7 +602,13 @@ func (s *Service) ExportSnapshot(ctx context.Context, req ExportSnapshotRequest)
 		return ExportSnapshotResult{}, err
 	}
 	hash := sha256.Sum256(content)
-	result := ExportSnapshotResult{RepoID: snapshot.RepoID, SnapshotID: hex.EncodeToString(hash[:16]), Format: format, RecordCount: len(snapshot.Sources), GeneratedAt: snapshot.CreatedAt, ContentHash: hex.EncodeToString(hash[:]), InlineContent: string(content), Warnings: warningCodes(snapshot.Warnings)}
+	result := ExportSnapshotResult{RepoID: snapshot.RepoID, SnapshotID: req.SnapshotID, Format: format, RecordCount: len(snapshot.Sources), GeneratedAt: snapshot.CreatedAt, ContentHash: hex.EncodeToString(hash[:]), InlineContent: string(content), Warnings: warningCodes(snapshot.Warnings)}
+	if result.SnapshotID == "" {
+		result.SnapshotID = snapshot.ManifestHash
+		if len(result.SnapshotID) > 32 {
+			result.SnapshotID = result.SnapshotID[:32]
+		}
+	}
 	if req.OutputPath != "" {
 		if err := os.WriteFile(req.OutputPath, content, 0o600); err != nil {
 			return ExportSnapshotResult{}, err
@@ -617,28 +623,68 @@ func (s *Service) ExportSnapshot(ctx context.Context, req ExportSnapshotRequest)
 
 func (s *Service) DiffSnapshot(ctx context.Context, req DiffSnapshotRequest) (DiffSnapshotResult, error) {
 	format := normalizeSnapshotFormat(req.Format)
-	baseRef := req.Base
-	if baseRef.Kind == "" {
-		base := req.BaseContent
-		if base == "" {
-			base = req.BaseSnapshotContent
+	if req.BaseSnapshotID == "" || req.HeadSnapshotID == "" {
+		if req.Base.Kind != "" || req.Head.Kind != "" || req.BaseContent != "" || req.BaseSnapshotContent != "" {
+			baseRef := req.Base
+			if baseRef.Kind == "" {
+				base := req.BaseContent
+				if base == "" {
+					base = req.BaseSnapshotContent
+				}
+				if base == "" {
+					baseRef = SnapshotRef{Kind: "current", Format: format}
+				} else {
+					baseRef = SnapshotRef{Kind: "bytes", Bytes: []byte(base), Format: format}
+				}
+			}
+			headRef := req.Head
+			if headRef.Kind == "" {
+				headRef = SnapshotRef{Kind: "current", Format: format}
+			}
+			base, err := s.loadSnapshotRef(ctx, req.RepoID, baseRef, format)
+			if err != nil {
+				return DiffSnapshotResult{}, err
+			}
+			head, err := s.loadSnapshotRef(ctx, req.RepoID, headRef, format)
+			if err != nil {
+				return DiffSnapshotResult{}, err
+			}
+			result := diffSnapshots(base, head)
+			result.RepoID = req.RepoID
+			result.BaseSnapshotID = req.BaseSnapshotID
+			result.HeadSnapshotID = req.HeadSnapshotID
+			if result.BaseSnapshotID == "" {
+				result.BaseSnapshotID = req.Base.Path
+			}
+			if result.HeadSnapshotID == "" {
+				result.HeadSnapshotID = req.Head.Path
+			}
+			result.Format = format
+
+			baseBytes, _ := renderSnapshotContent(base, format)
+			headBytes, _ := renderSnapshotContent(head, format)
+			result.DiffText = simpleDiff(string(baseBytes), string(headBytes))
+			return result, nil
 		}
-		if base == "" {
-			baseRef = SnapshotRef{Kind: "current", Format: format}
-		} else {
-			baseRef = SnapshotRef{Kind: "bytes", Bytes: []byte(base), Format: format}
+		current, err := s.createStoredSnapshot(ctx, req.RepoID, ExportSnapshotRequest{RepoID: req.RepoID, Format: format, IncludeBody: true})
+		if err != nil {
+			return DiffSnapshotResult{}, err
 		}
+		req.BaseSnapshotID = current.ID
+		req.HeadSnapshotID = current.ID
 	}
-	headRef := req.Head
-	if headRef.Kind == "" {
-		headRef = SnapshotRef{Kind: "current", Format: format}
-	}
-	base, err := s.loadSnapshotRef(ctx, req.RepoID, baseRef, format)
+	base, err := s.storedSnapshot(ctx, ExportSnapshotRequest{RepoID: req.RepoID, SnapshotID: req.BaseSnapshotID, Format: format, IncludeBody: true})
 	if err != nil {
+		if IsNotFound(err) {
+			return DiffSnapshotResult{}, ErrNotFound{Kind: "base_id", ID: req.BaseSnapshotID}
+		}
 		return DiffSnapshotResult{}, err
 	}
-	head, err := s.loadSnapshotRef(ctx, req.RepoID, headRef, format)
+	head, err := s.storedSnapshot(ctx, ExportSnapshotRequest{RepoID: req.RepoID, SnapshotID: req.HeadSnapshotID, Format: format, IncludeBody: true})
 	if err != nil {
+		if IsNotFound(err) {
+			return DiffSnapshotResult{}, ErrNotFound{Kind: "head_id", ID: req.HeadSnapshotID}
+		}
 		return DiffSnapshotResult{}, err
 	}
 	result := diffSnapshots(base, head)
@@ -697,7 +743,11 @@ func (s *Service) Index(ctx context.Context, req OperationRequest) (OperationRes
 		}
 		processed++
 	}
-	return OperationResult{Command: "index", Status: "ok", ProcessedCount: processed, Evidence: operationMode(req.Mode), GeneratedAt: s.now().UTC()}, nil
+	stored, err := s.createStoredSnapshot(ctx, repoID, ExportSnapshotRequest{RepoID: repoID, Format: "json", IncludeBody: true})
+	if err != nil {
+		return OperationResult{}, err
+	}
+	return OperationResult{Command: "index", Status: "ok", ProcessedCount: processed, Evidence: "snapshot_id=" + stored.ID, GeneratedAt: s.now().UTC()}, nil
 }
 
 func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult, error) {
@@ -1847,6 +1897,94 @@ func (s *Service) snippetFromChunk(ctx context.Context, repoID, id, chunkID stri
 	return SnippetResult{}, ErrNotFound{Kind: "chunk", ID: chunkID}
 }
 
+func (s *Service) storedSnapshot(ctx context.Context, req ExportSnapshotRequest) (Snapshot, error) {
+	if strings.TrimSpace(req.SnapshotID) == "" {
+		stored, err := s.createStoredSnapshot(ctx, req.RepoID, req)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		req.SnapshotID = stored.ID
+	}
+	repoID, err := s.requireRepo(ctx, req.RepoID, "export-snapshot")
+	if err != nil {
+		return Snapshot{}, err
+	}
+	stored, err := s.store.GetSnapshot(ctx, repoID, req.SnapshotID)
+	if err != nil {
+		return Snapshot{}, normalizeError(err, "snapshot", req.SnapshotID)
+	}
+	chunks, err := s.store.ListSnapshotChunks(ctx, repoID, req.SnapshotID)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if stored.ChunkCount != len(chunks) {
+		return Snapshot{}, ErrSnapshotConsistency{RepoID: repoID, SnapshotID: req.SnapshotID, Expectation: "chunk_count"}
+	}
+	if stored.ChunkSetHash != "" {
+		recomputed, err := snapshotHash(snapshotChunkHashRows(chunks))
+		if err != nil {
+			return Snapshot{}, err
+		}
+		if recomputed != stored.ChunkSetHash {
+			return Snapshot{}, ErrSnapshotConsistency{RepoID: repoID, SnapshotID: req.SnapshotID, Expectation: "chunk_set_hash"}
+		}
+	}
+	var snapshot Snapshot
+	if err := json.Unmarshal([]byte(stored.ManifestJSON), &snapshot); err != nil {
+		return Snapshot{}, err
+	}
+	if stored.ManifestHash != "" {
+		recomputedManifest, err := snapshotHash(snapshotManifest(snapshot))
+		if err != nil {
+			return Snapshot{}, err
+		}
+		if recomputedManifest != stored.ManifestHash {
+			return Snapshot{}, ErrSnapshotConsistency{RepoID: repoID, SnapshotID: req.SnapshotID, Expectation: "manifest_hash"}
+		}
+	}
+	if stored.WarningsJSON != "" {
+		_ = json.Unmarshal([]byte(stored.WarningsJSON), &snapshot.Warnings)
+	}
+	snapshot.Chunks = snapshotChunksFromCache(chunks)
+	snapshot.ManifestHash = stored.ManifestHash
+	snapshot.ChunkSetHash = stored.ChunkSetHash
+	sortSnapshot(&snapshot)
+	return snapshot, nil
+}
+
+func (s *Service) createStoredSnapshot(ctx context.Context, repoID string, req ExportSnapshotRequest) (cache.Snapshot, error) {
+	snapshot, err := s.buildSnapshot(ctx, req)
+	if err != nil {
+		return cache.Snapshot{}, err
+	}
+	manifestHash, err := snapshotHash(snapshotManifest(snapshot))
+	if err != nil {
+		return cache.Snapshot{}, err
+	}
+	snapshotID := manifestHash
+	if len(snapshotID) > 32 {
+		snapshotID = snapshotID[:32]
+	}
+	chunks := cacheSnapshotChunks(snapshot, snapshotID)
+	chunkSetHash, err := snapshotHash(snapshotChunkHashRows(chunks))
+	if err != nil {
+		return cache.Snapshot{}, err
+	}
+	manifestJSON, err := json.Marshal(snapshot)
+	if err != nil {
+		return cache.Snapshot{}, err
+	}
+	warningsJSON, err := json.Marshal(snapshot.Warnings)
+	if err != nil {
+		return cache.Snapshot{}, err
+	}
+	stored := cache.Snapshot{RepoID: snapshot.RepoID, ID: snapshotID, Format: normalizeSnapshotFormat(req.Format), ContentHash: manifestHash, RecordCount: len(snapshot.Sources), CreatedAt: snapshot.CreatedAt, SchemaVersion: snapshot.SchemaVersion, ManifestHash: manifestHash, ChunkSetHash: chunkSetHash, ChunkCount: len(chunks), ManifestJSON: string(manifestJSON), WarningsJSON: string(warningsJSON), Metadata: map[string]string{"schema_version": snapshot.SchemaVersion}, Chunks: chunks}
+	if err := s.store.UpsertSnapshot(ctx, stored); err != nil {
+		return cache.Snapshot{}, err
+	}
+	return stored, nil
+}
+
 func (s *Service) buildSnapshot(ctx context.Context, req ExportSnapshotRequest) (Snapshot, error) {
 	repoID, err := s.requireRepo(ctx, req.RepoID, "export")
 	if err != nil {
@@ -1922,8 +2060,17 @@ func (s *Service) buildSnapshot(ctx context.Context, req ExportSnapshotRequest) 
 		if err != nil {
 			return Snapshot{}, normalizeError(err, "chunks", source.ID)
 		}
+		if len(chunks) == 0 {
+			snapshot.Warnings = append(snapshot.Warnings, IndexWarning{RepoID: repoID, SourceID: source.ID, RecordID: source.ID, Code: "missing_index", State: "missing_index", Message: "source has no indexed chunks"})
+		}
 		for _, chunk := range chunks {
-			snapshot.Chunks = append(snapshot.Chunks, SnapshotChunk{RepoID: chunk.RepoID, ID: chunk.ID, SourceID: chunk.SourceID, ContentHash: chunk.ContentHash, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, HeadingPath: append([]string(nil), chunk.HeadingPath...), Text: chunk.Text, NormalizedText: chunk.NormalizedText, InheritedMetadata: copyStringMap(chunk.InheritedMetadata), OutboundLinks: sortedStrings(chunk.OutboundLinks), ResolvedAliases: copyStringMap(chunk.ResolvedAliases)})
+			if chunk.ContentHash != source.ContentHash {
+				snapshot.Warnings = append(snapshot.Warnings, IndexWarning{RepoID: repoID, SourceID: source.ID, RecordID: source.ID, Code: "stale_index", State: "stale_index", Message: "chunk content hash differs from source content hash"})
+			}
+			if chunk.LineStart <= 0 || chunk.LineEnd <= 0 || chunk.ByteEnd <= chunk.ByteStart {
+				snapshot.Warnings = append(snapshot.Warnings, IndexWarning{RepoID: repoID, SourceID: source.ID, RecordID: source.ID, Code: "missing_citation", State: "missing_citation", Message: "chunk citation range is unavailable"})
+			}
+			snapshot.Chunks = append(snapshot.Chunks, SnapshotChunk{RepoID: chunk.RepoID, ID: chunk.ID, SourceID: chunk.SourceID, RecordID: chunk.RecordID, ContentHash: chunk.ContentHash, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, HeadingPath: append([]string(nil), chunk.HeadingPath...), Text: chunk.Text, NormalizedText: chunk.NormalizedText, InheritedMetadata: copyStringMap(chunk.InheritedMetadata), OutboundLinks: sortedStrings(chunk.OutboundLinks), ResolvedAliases: copyStringMap(chunk.ResolvedAliases), SourceRevisionHash: source.ContentHash, IndexBuildID: chunk.SnapshotID})
 		}
 	}
 	if len(snapshot.Sources) == 0 {

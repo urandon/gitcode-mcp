@@ -127,6 +127,16 @@ func (e ErrNotFound) Error() string {
 	return fmt.Sprintf("service: %s %q not found", e.Kind, e.ID)
 }
 
+type ErrSnapshotConsistency struct {
+	RepoID      string
+	SnapshotID  string
+	Expectation string
+}
+
+func (e ErrSnapshotConsistency) Error() string {
+	return fmt.Sprintf("service: snapshot %q consistency error: %s", e.SnapshotID, e.Expectation)
+}
+
 type ErrCacheEmpty struct {
 	Message string
 }

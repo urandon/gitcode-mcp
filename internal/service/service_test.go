@@ -876,6 +876,46 @@ func TestDiffSnapshot(t *testing.T) {
 	}
 }
 
+func TestStoredSnapshotDiffNotFoundNoFallback(t *testing.T) {
+	ctx := context.Background()
+	svc := seededService(t, ctx)
+	head, err := svc.ExportSnapshot(ctx, ExportSnapshotRequest{RepoID: "fixture-a", Format: "json", IncludeBody: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.DiffSnapshot(ctx, DiffSnapshotRequest{RepoID: "fixture-a", BaseSnapshotID: "missing", HeadSnapshotID: head.SnapshotID, Format: "json"})
+	var notFound ErrNotFound
+	if !errors.As(err, &notFound) || notFound.Kind != "base_id" {
+		t.Fatalf("diff error = %#v, want base_id not found", err)
+	}
+}
+
+func TestStoredSnapshotDiffUsesStoredRowsOnly(t *testing.T) {
+	ctx := context.Background()
+	svc := seededService(t, ctx)
+	base, err := svc.ExportSnapshot(ctx, ExportSnapshotRequest{RepoID: "fixture-a", Format: "json", IncludeBody: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.UpsertSource(ctx, cache.Source{RepoID: "fixture-a", ID: "DOC-123", Kind: "doc", Path: "docs/design.md", Title: "Changed", Body: "changed", Status: "ready", ContentHash: "hash-doc-current", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), UpdatedAt: time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)}); err != nil {
+		t.Fatal(err)
+	}
+	head, err := svc.ExportSnapshot(ctx, ExportSnapshotRequest{RepoID: "fixture-a", Format: "json", IncludeBody: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.store.UpsertSource(ctx, cache.Source{RepoID: "fixture-a", ID: "DOC-123", Kind: "doc", Path: "docs/design.md", Title: "Current Mutation", Body: "current", Status: "ready", ContentHash: "hash-doc-later", CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), UpdatedAt: time.Date(2026, 1, 1, 4, 0, 0, 0, time.UTC)}); err != nil {
+		t.Fatal(err)
+	}
+	diff, err := svc.DiffSnapshot(ctx, DiffSnapshotRequest{RepoID: "fixture-a", BaseSnapshotID: base.SnapshotID, HeadSnapshotID: head.SnapshotID, Format: "json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diff.ChangedSources) == 0 || diff.ChangedSources[0].AfterContentHash != "hash-doc-current" {
+		t.Fatalf("diff used current cache or missed stored change: %#v", diff)
+	}
+}
+
 func TestMCPToolDTOContract(t *testing.T) {
 	ctx := context.Background()
 	svc := seededService(t, ctx)
@@ -1257,6 +1297,9 @@ func (f *brokenStore) RecordCounts(context.Context, string) (cache.RecordCounts,
 }
 func (f *brokenStore) WALCapable(context.Context) (bool, string, error)     { return true, "memory", nil }
 func (f *brokenStore) UpsertSnapshot(context.Context, cache.Snapshot) error { return nil }
+func (f *brokenStore) GetSnapshot(context.Context, string, string) (cache.Snapshot, error) {
+	return cache.Snapshot{}, cache.ErrNotFound
+}
 func (f *brokenStore) ListSnapshotChunks(context.Context, string, string) ([]cache.SnapshotChunk, error) {
 	return nil, nil
 }

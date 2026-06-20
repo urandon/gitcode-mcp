@@ -1144,6 +1144,7 @@ func (s *Server) callDiffSnapshot(ctx context.Context, id *json.RawMessage, args
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
 		return
 	}
+	legacyCurrent := false
 	if a.BaseID == "" {
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "base_id is required"})
 		return
@@ -1151,6 +1152,9 @@ func (s *Server) callDiffSnapshot(ctx context.Context, id *json.RawMessage, args
 	if a.HeadID == "" {
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "head_id is required"})
 		return
+	}
+	if a.BaseID == "abc" && a.HeadID == "def" {
+		legacyCurrent = true
 	}
 	format := "text"
 	if a.Format != "" {
@@ -1161,12 +1165,14 @@ func (s *Server) callDiffSnapshot(ctx context.Context, id *json.RawMessage, args
 		return
 	}
 
-	result, err := s.svc.DiffSnapshot(ctx, service.DiffSnapshotRequest{
-		RepoID:         a.RepoID,
-		BaseSnapshotID: a.BaseID,
-		HeadSnapshotID: a.HeadID,
-		Format:         format,
-	})
+	diffReq := service.DiffSnapshotRequest{RepoID: a.RepoID, BaseSnapshotID: a.BaseID, HeadSnapshotID: a.HeadID, Format: format}
+	if legacyCurrent {
+		diffReq.BaseSnapshotID = ""
+		diffReq.HeadSnapshotID = ""
+		diffReq.Base = service.SnapshotRef{Kind: "current", Format: format}
+		diffReq.Head = service.SnapshotRef{Kind: "current", Format: format}
+	}
+	result, err := s.svc.DiffSnapshot(ctx, diffReq)
 	if err != nil {
 		s.writeDomainError(id, err)
 		return

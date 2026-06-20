@@ -35,8 +35,8 @@ var commands = []string{
 	"sync",
 	"cache-status",
 	"sync-status", "sync_status",
-	"export",
-	"diff",
+	"export", "export-snapshot",
+	"diff", "diff-snapshot",
 	"create-issue",
 	"update-issue",
 	"create-page",
@@ -228,7 +228,9 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.cachePath, "cache-path", "", "cache database path")
 	flags.BoolVar(&opts.strict, "strict", false, "exit non-zero on findings")
 	flags.StringVar(&opts.base, "base", "", "base snapshot")
+	flags.StringVar(&opts.base, "base-id", "", "base snapshot id")
 	flags.StringVar(&opts.head, "head", "", "head snapshot")
+	flags.StringVar(&opts.head, "head-id", "", "head snapshot id")
 	flags.BoolVar(&opts.full, "full", false, "run full index")
 	flags.BoolVar(&opts.incremental, "incremental", false, "run incremental index")
 	flags.BoolVar(&opts.issues, "issues", false, "sync issues")
@@ -562,8 +564,8 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, renderSyncStatusSummaryText)
-	case "export":
-		result, err := svc.ExportSnapshot(ctx, service.ExportSnapshotRequest{RepoID: opts.repo, Format: opts.format, OutputPath: opts.output, IncludeBody: true})
+	case "export", "export-snapshot":
+		result, err := svc.ExportSnapshot(ctx, service.ExportSnapshotRequest{RepoID: opts.repo, SnapshotID: firstNonEmpty(opts.id, opts.snapshotID), Format: opts.format, OutputPath: opts.output, IncludeBody: true})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
@@ -572,7 +574,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return 0
 		}
 		return render(stdout, opts.format, result, renderExportText)
-	case "diff":
+	case "diff", "diff-snapshot":
 		result, err := svc.DiffSnapshot(ctx, service.DiffSnapshotRequest{RepoID: opts.repo, BaseSnapshotID: opts.base, HeadSnapshotID: opts.head, Base: snapshotRefFromPath(opts.base, opts.format), Head: snapshotRefFromPathOrCurrent(opts.head, opts.format), Format: opts.format})
 		if err != nil {
 			return writeError(stderr, opts.format, err)

@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 3
+const currentSchemaVersion = 4
 
 type migration struct {
 	version int
@@ -17,6 +17,7 @@ var migrations = []migration{
 	{version: 1, apply: applyInitialMigration},
 	{version: 2, apply: applyRepoScopedCacheMigration},
 	{version: 3, apply: applyChunkPolicyMigration},
+	{version: 4, apply: applyStoredSnapshotMigration},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB, ftsAvailable bool) error {
@@ -269,6 +270,12 @@ func applyRepoScopedCacheMigration(ctx context.Context, tx *sql.Tx, ftsAvailable
 	content_hash TEXT NOT NULL,
 	record_count INTEGER NOT NULL,
 	created_at TEXT NOT NULL,
+	schema_version TEXT NOT NULL DEFAULT 'gitcode-mcp.snapshot.v1',
+	manifest_hash TEXT NOT NULL DEFAULT '',
+	chunk_set_hash TEXT NOT NULL DEFAULT '',
+	chunk_count INTEGER NOT NULL DEFAULT 0,
+	manifest_json TEXT NOT NULL DEFAULT '{}',
+	warnings_json TEXT NOT NULL DEFAULT '[]',
 	metadata TEXT NOT NULL DEFAULT '{}',
 	PRIMARY KEY(repo_id, snapshot_id)
 )`,
@@ -276,11 +283,23 @@ func applyRepoScopedCacheMigration(ctx context.Context, tx *sql.Tx, ftsAvailable
 	repo_id TEXT NOT NULL,
 	snapshot_id TEXT NOT NULL,
 	chunk_id TEXT NOT NULL,
+	source_type TEXT NOT NULL DEFAULT '',
+	source_id TEXT NOT NULL DEFAULT '',
 	record_id TEXT NOT NULL,
+	source_content_hash TEXT NOT NULL DEFAULT '',
+	source_revision_hash TEXT NOT NULL DEFAULT '',
+	index_build_id TEXT NOT NULL DEFAULT '',
+	chunk_content_hash TEXT NOT NULL DEFAULT '',
 	byte_start INTEGER NOT NULL,
 	byte_end INTEGER NOT NULL,
 	line_start INTEGER NOT NULL,
 	line_end INTEGER NOT NULL,
+	heading_path TEXT NOT NULL DEFAULT '[]',
+	ordinal INTEGER NOT NULL DEFAULT 0,
+	text TEXT NOT NULL DEFAULT '',
+	metadata_json TEXT NOT NULL DEFAULT '{}',
+	outbound_links_json TEXT NOT NULL DEFAULT '[]',
+	resolved_aliases_json TEXT NOT NULL DEFAULT '{}',
 	citation TEXT NOT NULL DEFAULT '',
 	content_hash TEXT NOT NULL DEFAULT '',
 	PRIMARY KEY(repo_id, snapshot_id, chunk_id),
@@ -317,6 +336,55 @@ func applyChunkPolicyMigration(ctx context.Context, tx *sql.Tx, ftsAvailable boo
 		}
 	}
 	_, err = tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_chunks_query ON chunks(repo_id, source_id, record_id, snapshot_id, policy, byte_start, id)`)
+	return err
+}
+
+func applyStoredSnapshotMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
+	snapshotColumns, err := tableColumns(ctx, tx, "snapshots")
+	if err != nil {
+		return err
+	}
+	snapshotAdds := map[string]string{
+		"schema_version": `ALTER TABLE snapshots ADD COLUMN schema_version TEXT NOT NULL DEFAULT 'gitcode-mcp.snapshot.v1'`,
+		"manifest_hash":  `ALTER TABLE snapshots ADD COLUMN manifest_hash TEXT NOT NULL DEFAULT ''`,
+		"chunk_set_hash": `ALTER TABLE snapshots ADD COLUMN chunk_set_hash TEXT NOT NULL DEFAULT ''`,
+		"chunk_count":    `ALTER TABLE snapshots ADD COLUMN chunk_count INTEGER NOT NULL DEFAULT 0`,
+		"manifest_json":  `ALTER TABLE snapshots ADD COLUMN manifest_json TEXT NOT NULL DEFAULT '{}'`,
+		"warnings_json":  `ALTER TABLE snapshots ADD COLUMN warnings_json TEXT NOT NULL DEFAULT '[]'`,
+	}
+	for column, statement := range snapshotAdds {
+		if !snapshotColumns[column] {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return err
+			}
+		}
+	}
+	chunkColumns, err := tableColumns(ctx, tx, "snapshot_chunks")
+	if err != nil {
+		return err
+	}
+	chunkAdds := map[string]string{
+		"source_type":           `ALTER TABLE snapshot_chunks ADD COLUMN source_type TEXT NOT NULL DEFAULT ''`,
+		"source_id":             `ALTER TABLE snapshot_chunks ADD COLUMN source_id TEXT NOT NULL DEFAULT ''`,
+		"source_content_hash":   `ALTER TABLE snapshot_chunks ADD COLUMN source_content_hash TEXT NOT NULL DEFAULT ''`,
+		"source_revision_hash":  `ALTER TABLE snapshot_chunks ADD COLUMN source_revision_hash TEXT NOT NULL DEFAULT ''`,
+		"index_build_id":        `ALTER TABLE snapshot_chunks ADD COLUMN index_build_id TEXT NOT NULL DEFAULT ''`,
+		"chunk_content_hash":    `ALTER TABLE snapshot_chunks ADD COLUMN chunk_content_hash TEXT NOT NULL DEFAULT ''`,
+		"heading_path":          `ALTER TABLE snapshot_chunks ADD COLUMN heading_path TEXT NOT NULL DEFAULT '[]'`,
+		"ordinal":               `ALTER TABLE snapshot_chunks ADD COLUMN ordinal INTEGER NOT NULL DEFAULT 0`,
+		"text":                  `ALTER TABLE snapshot_chunks ADD COLUMN text TEXT NOT NULL DEFAULT ''`,
+		"metadata_json":         `ALTER TABLE snapshot_chunks ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'`,
+		"outbound_links_json":   `ALTER TABLE snapshot_chunks ADD COLUMN outbound_links_json TEXT NOT NULL DEFAULT '[]'`,
+		"resolved_aliases_json": `ALTER TABLE snapshot_chunks ADD COLUMN resolved_aliases_json TEXT NOT NULL DEFAULT '{}'`,
+	}
+	for column, statement := range chunkAdds {
+		if !chunkColumns[column] {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return err
+			}
+		}
+	}
+	_, err = tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_snapshot_chunks_order ON snapshot_chunks(repo_id, snapshot_id, source_type, source_id, record_id, ordinal, chunk_id)`)
 	return err
 }
 

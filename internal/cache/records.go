@@ -439,7 +439,22 @@ func upsertSnapshotTx(ctx context.Context, tx *sql.Tx, snapshot Snapshot) error 
 	if err != nil {
 		return err
 	}
-	if err = execTx(ctx, tx, `INSERT INTO snapshots (repo_id, snapshot_id, format, content_hash, record_count, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, snapshot_id) DO UPDATE SET format = excluded.format, content_hash = excluded.content_hash, record_count = excluded.record_count, metadata = excluded.metadata`, snapshot.RepoID, snapshot.ID, snapshot.Format, snapshot.ContentHash, snapshot.RecordCount, snapshot.CreatedAt.Format(time.RFC3339Nano), metadata); err != nil {
+	if snapshot.SchemaVersion == "" {
+		snapshot.SchemaVersion = "gitcode-mcp.snapshot.v1"
+	}
+	if snapshot.ChunkCount == 0 {
+		snapshot.ChunkCount = len(snapshot.Chunks)
+	}
+	if snapshot.WarningsJSON == "" {
+		snapshot.WarningsJSON = "[]"
+	}
+	if snapshot.ManifestJSON == "" {
+		snapshot.ManifestJSON = "{}"
+	}
+	if err = execTx(ctx, tx, `INSERT INTO snapshots (repo_id, snapshot_id, format, content_hash, record_count, created_at, schema_version, manifest_hash, chunk_set_hash, chunk_count, manifest_json, warnings_json, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, snapshot_id) DO UPDATE SET format = excluded.format, content_hash = excluded.content_hash, record_count = excluded.record_count, schema_version = excluded.schema_version, manifest_hash = excluded.manifest_hash, chunk_set_hash = excluded.chunk_set_hash, chunk_count = excluded.chunk_count, manifest_json = excluded.manifest_json, warnings_json = excluded.warnings_json, metadata = excluded.metadata`, snapshot.RepoID, snapshot.ID, snapshot.Format, snapshot.ContentHash, snapshot.RecordCount, snapshot.CreatedAt.Format(time.RFC3339Nano), snapshot.SchemaVersion, snapshot.ManifestHash, snapshot.ChunkSetHash, snapshot.ChunkCount, snapshot.ManifestJSON, snapshot.WarningsJSON, metadata); err != nil {
+		return err
+	}
+	if err = execTx(ctx, tx, `DELETE FROM snapshot_chunks WHERE repo_id = ? AND snapshot_id = ?`, snapshot.RepoID, snapshot.ID); err != nil {
 		return err
 	}
 	for _, chunk := range snapshot.Chunks {
@@ -449,15 +464,40 @@ func upsertSnapshotTx(ctx context.Context, tx *sql.Tx, snapshot Snapshot) error 
 		if chunk.SnapshotID == "" {
 			chunk.SnapshotID = snapshot.ID
 		}
-		if err = execTx(ctx, tx, `INSERT INTO snapshot_chunks (repo_id, snapshot_id, chunk_id, record_id, byte_start, byte_end, line_start, line_end, citation, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, snapshot_id, chunk_id) DO UPDATE SET record_id = excluded.record_id, byte_start = excluded.byte_start, byte_end = excluded.byte_end, line_start = excluded.line_start, line_end = excluded.line_end, citation = excluded.citation, content_hash = excluded.content_hash`, chunk.RepoID, chunk.SnapshotID, chunk.ChunkID, chunk.RecordID, chunk.ByteStart, chunk.ByteEnd, chunk.LineStart, chunk.LineEnd, chunk.Citation, chunk.ContentHash); err != nil {
+		if chunk.SourceID == "" {
+			chunk.SourceID = chunk.RecordID
+		}
+		if chunk.ChunkContentHash == "" {
+			chunk.ChunkContentHash = chunk.ContentHash
+		}
+		if chunk.HeadingPathJSON == "" {
+			chunk.HeadingPathJSON = "[]"
+		}
+		if err = execTx(ctx, tx, `INSERT INTO snapshot_chunks (repo_id, snapshot_id, chunk_id, source_type, source_id, record_id, source_content_hash, source_revision_hash, index_build_id, chunk_content_hash, byte_start, byte_end, line_start, line_end, heading_path, ordinal, text, metadata_json, outbound_links_json, resolved_aliases_json, citation, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, snapshot_id, chunk_id) DO UPDATE SET source_type = excluded.source_type, source_id = excluded.source_id, record_id = excluded.record_id, source_content_hash = excluded.source_content_hash, source_revision_hash = excluded.source_revision_hash, index_build_id = excluded.index_build_id, chunk_content_hash = excluded.chunk_content_hash, byte_start = excluded.byte_start, byte_end = excluded.byte_end, line_start = excluded.line_start, line_end = excluded.line_end, heading_path = excluded.heading_path, ordinal = excluded.ordinal, text = excluded.text, metadata_json = excluded.metadata_json, outbound_links_json = excluded.outbound_links_json, resolved_aliases_json = excluded.resolved_aliases_json, citation = excluded.citation, content_hash = excluded.content_hash`, chunk.RepoID, chunk.SnapshotID, chunk.ChunkID, chunk.SourceType, chunk.SourceID, chunk.RecordID, chunk.SourceContentHash, chunk.SourceRevisionHash, chunk.IndexBuildID, chunk.ChunkContentHash, chunk.ByteStart, chunk.ByteEnd, chunk.LineStart, chunk.LineEnd, chunk.HeadingPathJSON, chunk.Ordinal, chunk.Text, chunk.MetadataJSON, chunk.OutboundLinksJSON, chunk.ResolvedAliasesJSON, chunk.Citation, chunk.ContentHash); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+func (s *SQLiteStore) GetSnapshot(ctx context.Context, repoID, snapshotID string) (Snapshot, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT repo_id, snapshot_id, format, content_hash, record_count, created_at, schema_version, manifest_hash, chunk_set_hash, chunk_count, manifest_json, warnings_json, metadata FROM snapshots WHERE repo_id = ? AND snapshot_id = ?`, repoID, snapshotID)
+	var snapshot Snapshot
+	var createdRaw, metadata string
+	if err := row.Scan(&snapshot.RepoID, &snapshot.ID, &snapshot.Format, &snapshot.ContentHash, &snapshot.RecordCount, &createdRaw, &snapshot.SchemaVersion, &snapshot.ManifestHash, &snapshot.ChunkSetHash, &snapshot.ChunkCount, &snapshot.ManifestJSON, &snapshot.WarningsJSON, &metadata); err != nil {
+		if err == sql.ErrNoRows {
+			return Snapshot{}, ErrNotFound
+		}
+		return Snapshot{}, err
+	}
+	snapshot.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdRaw)
+	snapshot.Metadata, _ = unmarshalJSON[map[string]string](metadata)
+	snapshot.Chunks, _ = s.ListSnapshotChunks(ctx, repoID, snapshotID)
+	return snapshot, nil
+}
+
 func (s *SQLiteStore) ListSnapshotChunks(ctx context.Context, repoID, snapshotID string) ([]SnapshotChunk, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, snapshot_id, chunk_id, record_id, byte_start, byte_end, line_start, line_end, citation, content_hash FROM snapshot_chunks WHERE repo_id = ? AND snapshot_id = ? ORDER BY chunk_id`, repoID, snapshotID)
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, snapshot_id, chunk_id, source_type, source_id, record_id, source_content_hash, source_revision_hash, index_build_id, chunk_content_hash, byte_start, byte_end, line_start, line_end, heading_path, ordinal, text, metadata_json, outbound_links_json, resolved_aliases_json, citation, content_hash FROM snapshot_chunks WHERE repo_id = ? AND snapshot_id = ? ORDER BY source_type, source_id, record_id, ordinal, chunk_id`, repoID, snapshotID)
 	if err != nil {
 		return nil, err
 	}
@@ -465,7 +505,7 @@ func (s *SQLiteStore) ListSnapshotChunks(ctx context.Context, repoID, snapshotID
 	chunks := []SnapshotChunk{}
 	for rows.Next() {
 		var chunk SnapshotChunk
-		if err := rows.Scan(&chunk.RepoID, &chunk.SnapshotID, &chunk.ChunkID, &chunk.RecordID, &chunk.ByteStart, &chunk.ByteEnd, &chunk.LineStart, &chunk.LineEnd, &chunk.Citation, &chunk.ContentHash); err != nil {
+		if err := rows.Scan(&chunk.RepoID, &chunk.SnapshotID, &chunk.ChunkID, &chunk.SourceType, &chunk.SourceID, &chunk.RecordID, &chunk.SourceContentHash, &chunk.SourceRevisionHash, &chunk.IndexBuildID, &chunk.ChunkContentHash, &chunk.ByteStart, &chunk.ByteEnd, &chunk.LineStart, &chunk.LineEnd, &chunk.HeadingPathJSON, &chunk.Ordinal, &chunk.Text, &chunk.MetadataJSON, &chunk.OutboundLinksJSON, &chunk.ResolvedAliasesJSON, &chunk.Citation, &chunk.ContentHash); err != nil {
 			return nil, err
 		}
 		chunks = append(chunks, chunk)

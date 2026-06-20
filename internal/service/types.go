@@ -377,6 +377,7 @@ type StaleIndexResult struct {
 
 type ExportSnapshotRequest struct {
 	RepoID      string   `json:"repo_id"`
+	SnapshotID  string   `json:"snapshot_id,omitempty"`
 	Format      string   `json:"format,omitempty"`
 	IncludeBody bool     `json:"include_body,omitempty"`
 	SourceIDs   []string `json:"source_ids,omitempty"`
@@ -414,6 +415,8 @@ type Snapshot struct {
 	SyncStatus    []SnapshotSyncStatus `json:"sync_status"`
 	Chunks        []SnapshotChunk      `json:"chunks"`
 	Warnings      []IndexWarning       `json:"warnings"`
+	ManifestHash  string               `json:"manifest_hash,omitempty"`
+	ChunkSetHash  string               `json:"chunk_set_hash,omitempty"`
 }
 
 type SnapshotSource struct {
@@ -459,20 +462,24 @@ type SnapshotSyncStatus struct {
 }
 
 type SnapshotChunk struct {
-	RepoID            string            `json:"repo_id"`
-	ID                string            `json:"id"`
-	SourceID          string            `json:"source_id"`
-	ContentHash       string            `json:"content_hash"`
-	ByteStart         int               `json:"byte_start"`
-	ByteEnd           int               `json:"byte_end"`
-	LineStart         int               `json:"line_start"`
-	LineEnd           int               `json:"line_end"`
-	HeadingPath       []string          `json:"heading_path"`
-	Text              string            `json:"text,omitempty"`
-	NormalizedText    string            `json:"normalized_text,omitempty"`
-	InheritedMetadata map[string]string `json:"inherited_metadata,omitempty"`
-	OutboundLinks     []string          `json:"outbound_links,omitempty"`
-	ResolvedAliases   map[string]string `json:"resolved_aliases,omitempty"`
+	RepoID             string            `json:"repo_id"`
+	ID                 string            `json:"id"`
+	SourceID           string            `json:"source_id"`
+	ContentHash        string            `json:"content_hash"`
+	ByteStart          int               `json:"byte_start"`
+	ByteEnd            int               `json:"byte_end"`
+	LineStart          int               `json:"line_start"`
+	LineEnd            int               `json:"line_end"`
+	HeadingPath        []string          `json:"heading_path"`
+	Text               string            `json:"text,omitempty"`
+	NormalizedText     string            `json:"normalized_text,omitempty"`
+	InheritedMetadata  map[string]string `json:"inherited_metadata,omitempty"`
+	OutboundLinks      []string          `json:"outbound_links,omitempty"`
+	ResolvedAliases    map[string]string `json:"resolved_aliases,omitempty"`
+	RecordID           string            `json:"record_id,omitempty"`
+	SourceRevisionHash string            `json:"source_revision_hash,omitempty"`
+	IndexBuildID       string            `json:"index_build_id,omitempty"`
+	Ordinal            int               `json:"ordinal,omitempty"`
 }
 
 type DiffSnapshotRequest struct {

@@ -48,6 +48,7 @@ type Store interface {
 	RecordCounts(context.Context, string) (RecordCounts, error)
 	WALCapable(context.Context) (bool, string, error)
 	UpsertSnapshot(context.Context, Snapshot) error
+	GetSnapshot(context.Context, string, string) (Snapshot, error)
 	ListSnapshotChunks(context.Context, string, string) ([]SnapshotChunk, error)
 	IntegrityCheck(context.Context) error
 	AcquireLock(context.Context, string) (*LockHandle, error)
@@ -146,27 +147,45 @@ type AuditTrailEntry struct {
 }
 
 type Snapshot struct {
-	RepoID      string
-	ID          string
-	Format      string
-	ContentHash string
-	RecordCount int
-	CreatedAt   time.Time
-	Metadata    map[string]string
-	Chunks      []SnapshotChunk
+	RepoID        string
+	ID            string
+	Format        string
+	ContentHash   string
+	RecordCount   int
+	CreatedAt     time.Time
+	SchemaVersion string
+	ManifestHash  string
+	ChunkSetHash  string
+	ChunkCount    int
+	ManifestJSON  string
+	WarningsJSON  string
+	Metadata      map[string]string
+	Chunks        []SnapshotChunk
 }
 
 type SnapshotChunk struct {
-	RepoID      string
-	SnapshotID  string
-	ChunkID     string
-	RecordID    string
-	ByteStart   int
-	ByteEnd     int
-	LineStart   int
-	LineEnd     int
-	Citation    string
-	ContentHash string
+	RepoID              string
+	SnapshotID          string
+	ChunkID             string
+	SourceType          string
+	SourceID            string
+	RecordID            string
+	SourceContentHash   string
+	SourceRevisionHash  string
+	IndexBuildID        string
+	ChunkContentHash    string
+	ByteStart           int
+	ByteEnd             int
+	LineStart           int
+	LineEnd             int
+	HeadingPathJSON     string
+	Ordinal             int
+	Text                string
+	MetadataJSON        string
+	OutboundLinksJSON   string
+	ResolvedAliasesJSON string
+	Citation            string
+	ContentHash         string
 }
 
 type RecordCounts struct {
