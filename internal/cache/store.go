@@ -24,6 +24,9 @@ func (s *SQLiteStore) UpsertSourceGraph(ctx context.Context, graph SourceGraph) 
 		return err
 	}
 	for _, identity := range graph.Identities {
+		if identity.RepoID == "" {
+			identity.RepoID = graph.Source.RepoID
+		}
 		if identity.SourceID == "" {
 			identity.SourceID = graph.Source.ID
 		}
@@ -32,6 +35,9 @@ func (s *SQLiteStore) UpsertSourceGraph(ctx context.Context, graph SourceGraph) 
 		}
 	}
 	for _, link := range graph.Links {
+		if link.RepoID == "" {
+			link.RepoID = graph.Source.RepoID
+		}
 		if link.SourceID == "" {
 			link.SourceID = graph.Source.ID
 		}
@@ -40,6 +46,9 @@ func (s *SQLiteStore) UpsertSourceGraph(ctx context.Context, graph SourceGraph) 
 		}
 	}
 	for _, chunk := range graph.Chunks {
+		if chunk.RepoID == "" {
+			chunk.RepoID = graph.Source.RepoID
+		}
 		if chunk.SourceID == "" {
 			chunk.SourceID = graph.Source.ID
 		}
@@ -49,6 +58,9 @@ func (s *SQLiteStore) UpsertSourceGraph(ctx context.Context, graph SourceGraph) 
 	}
 	if graph.SyncStatus != nil {
 		status := *graph.SyncStatus
+		if status.RepoID == "" {
+			status.RepoID = graph.Source.RepoID
+		}
 		if status.SourceID == "" {
 			status.SourceID = graph.Source.ID
 		}
@@ -57,6 +69,9 @@ func (s *SQLiteStore) UpsertSourceGraph(ctx context.Context, graph SourceGraph) 
 		}
 	}
 	for _, event := range graph.SyncEvents {
+		if event.RepoID == "" {
+			event.RepoID = graph.Source.RepoID
+		}
 		if event.SourceID == "" {
 			event.SourceID = graph.Source.ID
 		}
@@ -65,6 +80,9 @@ func (s *SQLiteStore) UpsertSourceGraph(ctx context.Context, graph SourceGraph) 
 		}
 	}
 	for _, conflict := range graph.Conflicts {
+		if conflict.RepoID == "" {
+			conflict.RepoID = graph.Source.RepoID
+		}
 		if conflict.SourceID == "" {
 			conflict.SourceID = graph.Source.ID
 		}
@@ -103,28 +121,41 @@ func upsertSourceTx(ctx context.Context, tx *sql.Tx, source Source) error {
 	if updatedAt.IsZero() {
 		updatedAt = createdAt
 	}
-	return execTx(ctx, tx, `INSERT INTO sources (id, kind, path, title, body, status, labels, content_hash, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, path = excluded.path, title = excluded.title, body = excluded.body, status = excluded.status, labels = excluded.labels, content_hash = excluded.content_hash, updated_at = excluded.updated_at`,
-		source.ID, source.Kind, source.Path, source.Title, source.Body, source.Status, labels, source.ContentHash, createdAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
+	return execTx(ctx, tx, `INSERT INTO sources (repo_id, id, kind, path, title, body, status, labels, content_hash, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(repo_id, id) DO UPDATE SET kind = excluded.kind, path = excluded.path, title = excluded.title, body = excluded.body, status = excluded.status, labels = excluded.labels, content_hash = excluded.content_hash, updated_at = excluded.updated_at`,
+		source.RepoID, source.ID, source.Kind, source.Path, source.Title, source.Body, source.Status, labels, source.ContentHash, createdAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
 }
 
 func upsertSearchProjectionTx(ctx context.Context, tx *sql.Tx, source Source, useFTS bool) error {
 	if !useFTS {
 		return nil
 	}
-	if err := execTx(ctx, tx, `DELETE FROM fts_index WHERE source_id = ?`, source.ID); err != nil {
+	if err := execTx(ctx, tx, `DELETE FROM fts_index WHERE repo_id = ? AND source_id = ?`, source.RepoID, source.ID); err != nil {
 		return err
 	}
-	return execTx(ctx, tx, `INSERT INTO fts_index (source_id, path, title, body) VALUES (?, ?, ?, ?)`, source.ID, source.Path, source.Title, source.Body)
+	return execTx(ctx, tx, `INSERT INTO fts_index (repo_id, source_id, path, title, body) VALUES (?, ?, ?, ?, ?)`, source.RepoID, source.ID, source.Path, source.Title, source.Body)
 }
 
 func (s *SQLiteStore) GetSource(ctx context.Context, id string) (Source, error) {
-	source, err := s.scanSource(ctx, `SELECT id, kind, path, title, body, status, labels, content_hash, created_at, updated_at FROM sources WHERE id = ?`, id)
+	source, err := s.scanSource(ctx, `SELECT repo_id, id, kind, path, title, body, status, labels, content_hash, created_at, updated_at FROM sources WHERE id = ? ORDER BY repo_id LIMIT 1`, id)
 	if err != nil {
 		return Source{}, err
 	}
-	aliases, err := s.GetIdentityMap(ctx, id)
+	aliases, err := s.GetIdentityMapScoped(ctx, source.RepoID, id)
+	if err != nil {
+		return Source{}, err
+	}
+	source.Aliases = aliases
+	return source, nil
+}
+
+func (s *SQLiteStore) GetSourceScoped(ctx context.Context, repoID, id string) (Source, error) {
+	source, err := s.scanSource(ctx, `SELECT repo_id, id, kind, path, title, body, status, labels, content_hash, created_at, updated_at FROM sources WHERE repo_id = ? AND id = ?`, repoID, id)
+	if err != nil {
+		return Source{}, err
+	}
+	aliases, err := s.GetIdentityMapScoped(ctx, repoID, id)
 	if err != nil {
 		return Source{}, err
 	}
@@ -133,8 +164,8 @@ func (s *SQLiteStore) GetSource(ctx context.Context, id string) (Source, error) 
 }
 
 func (s *SQLiteStore) ListSources(ctx context.Context, filter SourceFilter) ([]Source, error) {
-	query := `SELECT id, kind, path, title, body, status, labels, content_hash, created_at, updated_at FROM sources WHERE (? = '' OR kind = ?) AND (? = '' OR status = ?) ORDER BY id`
-	args := []any{filter.Kind, filter.Kind, filter.Status, filter.Status}
+	query := `SELECT repo_id, id, kind, path, title, body, status, labels, content_hash, created_at, updated_at FROM sources WHERE (? = '' OR repo_id = ?) AND (? = '' OR kind = ?) AND (? = '' OR status = ?) ORDER BY repo_id, id`
+	args := []any{filter.RepoID, filter.RepoID, filter.Kind, filter.Kind, filter.Status, filter.Status}
 	if filter.Limit > 0 {
 		query += ` LIMIT ?`
 		args = append(args, filter.Limit)
@@ -168,7 +199,7 @@ func scanSources(rows *sql.Rows) ([]Source, error) {
 	for rows.Next() {
 		var source Source
 		var labelsRaw, createdRaw, updatedRaw string
-		if err := rows.Scan(&source.ID, &source.Kind, &source.Path, &source.Title, &source.Body, &source.Status, &labelsRaw, &source.ContentHash, &createdRaw, &updatedRaw); err != nil {
+		if err := rows.Scan(&source.RepoID, &source.ID, &source.Kind, &source.Path, &source.Title, &source.Body, &source.Status, &labelsRaw, &source.ContentHash, &createdRaw, &updatedRaw); err != nil {
 			return nil, err
 		}
 		labels, err := unmarshalJSON[[]string](labelsRaw)
@@ -192,7 +223,7 @@ func (s *SQLiteStore) SearchSources(ctx context.Context, query SearchQuery) ([]S
 
 func (s *SQLiteStore) searchSourcesFallback(ctx context.Context, query SearchQuery) ([]SearchResult, error) {
 	needle := normalizeSearchQuery(query.Query)
-	rows, err := s.db.QueryContext(ctx, `SELECT id, path, title, body FROM sources WHERE (? = '' OR kind = ?) AND (lower(title) LIKE ? OR lower(body) LIKE ?) ORDER BY id, path`, query.Kind, query.Kind, "%"+needle+"%", "%"+needle+"%")
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, id, path, title, body FROM sources WHERE (? = '' OR repo_id = ?) AND (? = '' OR kind = ?) AND (lower(title) LIKE ? OR lower(body) LIKE ?) ORDER BY repo_id, id, path`, query.RepoID, query.RepoID, query.Kind, query.Kind, "%"+needle+"%", "%"+needle+"%")
 	if err != nil {
 		return nil, err
 	}
@@ -203,11 +234,11 @@ func (s *SQLiteStore) searchSourcesFallback(ctx context.Context, query SearchQue
 func (s *SQLiteStore) searchSourcesFTS(ctx context.Context, query SearchQuery) ([]SearchResult, error) {
 	needle := normalizeSearchQuery(query.Query)
 	match := ftsMatchQuery(needle)
-	rows, err := s.db.QueryContext(ctx, `SELECT s.id, s.path, s.title, s.body
+	rows, err := s.db.QueryContext(ctx, `SELECT s.repo_id, s.id, s.path, s.title, s.body
 FROM fts_index f
-JOIN sources s ON s.id = f.source_id
-WHERE (? = '' OR s.kind = ?) AND fts_index MATCH ?
-ORDER BY s.id, s.path`, query.Kind, query.Kind, match)
+JOIN sources s ON s.repo_id = f.repo_id AND s.id = f.source_id
+WHERE (? = '' OR s.repo_id = ?) AND (? = '' OR s.kind = ?) AND fts_index MATCH ?
+ORDER BY s.repo_id, s.id, s.path`, query.RepoID, query.RepoID, query.Kind, query.Kind, match)
 	if err != nil {
 		return nil, err
 	}
@@ -218,11 +249,11 @@ ORDER BY s.id, s.path`, query.Kind, query.Kind, match)
 func scanSearchResults(rows *sql.Rows, needle string, limit int) ([]SearchResult, error) {
 	var results []SearchResult
 	for rows.Next() {
-		var id, path, title, body string
-		if err := rows.Scan(&id, &path, &title, &body); err != nil {
+		var repoID, id, path, title, body string
+		if err := rows.Scan(&repoID, &id, &path, &title, &body); err != nil {
 			return nil, err
 		}
-		results = append(results, SearchResult{ID: id, Path: path, Title: title, Snippet: snippet(title+"\n"+body, needle), Score: searchScore(title, body, needle), Line: lineFor(body, needle)})
+		results = append(results, SearchResult{RepoID: repoID, ID: id, Path: path, Title: title, Snippet: snippet(title+"\n"+body, needle), Score: searchScore(title, body, needle), Line: lineFor(body, needle)})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

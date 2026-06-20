@@ -4,167 +4,191 @@ Schema Version: `triborg.outcome-contract.v1`
 
 ## outcome-1
 - Request Task: 1
-- Role: `primary_product`
-- Request Item: Propose a Go package/module layout that can grow from the current scaffold without overengineering
-- Target Surface: Go module packages under internal/
-- Actor/Trigger: Developer runs go build ./... from repo root
-- Expected Outcome: All packages compile cleanly without circular imports
+- Role: `supporting_evidence`
+- Request Item: Runtime gap audit across current scaffold, docs, implemented runtime behavior, and installed MCP surface.
+- Target Surface: CLI command gitcode-mcp doctor --runtime-audit --repo <repo_id>
+- Actor/Trigger: Developer runs runtime audit against a configured test repository
+- Expected Outcome: CLI reports installed version, active config, repository binding, cache state, MCP surfaces, sync/index readiness, and actionable failure classes
 - Evidence Type: CLI command
-- Freshness: current source build
-- Mock Policy: no_mocks
+- Freshness: current source/build/runtime evidence required
+- Mock Policy: external_dependencies_only
 
 
 ## outcome-2
 - Request Task: 2
 - Role: `supporting_evidence`
-- Request Item: Define the cache model: records, identity map, source aliases, local paths, remote ids, backlinks, full-text/search index, sync status, conflicts, and deterministic export snapshots
-- Target Surface: SQLite schema and in-memory record model in internal/cache/
-- Actor/Trigger: Developer runs Go test that opens in-memory SQLite, inserts source/task/link records, queries backlinks
-- Expected Outcome: Backlink query returns correct source record; chunk insert verifies source_id + content_hash uniqueness
+- Request Item: Repository binding and repo-scoped identity model.
+- Target Surface: CLI repo commands and MCP repo-aware filters
+- Actor/Trigger: Developer configures two repositories and reads by repo_id
+- Expected Outcome: Reads are scoped to the configured repository and colliding aliases are rejected or disambiguated
 - Evidence Type: CLI command
-- Freshness: current source build
-- Mock Policy: no_mocks
+- Freshness: current source/build/runtime evidence required
+- Mock Policy: external_dependencies_only
 
 
 ## outcome-3
 - Request Task: 3
 - Role: `supporting_evidence`
-- Request Item: Define the GitCode adapter boundary for tracker/wiki API discovery, auth, pagination, comments, attachments, wiki pages, issue CRUD, rate limits, and failure modes under bad network conditions
-- Target Surface: internal/gitcode/ adapter interface
-- Actor/Trigger: Developer runs contract test against sanitized HTTP fixtures
-- Expected Outcome: Adapter returns structured issue records matching fixture fields; timeout test returns typed ErrNetworkUnavailable
+- Request Item: Installation, active-config discovery, secrets, credential stores, wrappers, doctor/auth/config commands, and public-safe docs.
+- Target Surface: CLI config/auth/doctor commands
+- Actor/Trigger: Developer initializes config and checks redacted auth/config state
+- Expected Outcome: CLI shows active config path, override sources, token presence without secret value, cache path resolution, and platform-specific next steps
 - Evidence Type: CLI command
-- Freshness: current source build
+- Freshness: current source/build/runtime evidence required
 - Mock Policy: external_dependencies_only
 
 
 ## outcome-4
 - Request Task: 4
 - Role: `supporting_evidence`
-- Request Item: Define the MCP server boundary and read-first tool surface
-- Target Surface: MCP server JSON-RPC transport (stdio/HTTP)
-- Actor/Trigger: Developer runs MCP server integration test sending tools/list and tools/call for resolve_id
-- Expected Outcome: tools/list returns all eight tool definitions; resolve_id returns correct local record with id, path, remote alias
+- Request Item: Cache bootstrap and exact read path from GitCode/test fixtures through indexing to offline CLI/MCP reads.
+- Target Surface: CLI sync/index workflow
+- Actor/Trigger: Developer syncs issues and wiki for a configured repository
+- Expected Outcome: Cache stores issue and wiki records, sync events, index chunks, and offline reads succeed after network is disabled
 - Evidence Type: CLI command
-- Freshness: current source build
-- Mock Policy: no_mocks
+- Freshness: current source/build/runtime evidence required
+- Mock Policy: external_dependencies_only
 
 
 ## outcome-5
 - Request Task: 5
 - Role: `supporting_evidence`
-- Request Item: Define CLI commands and how they map to the same internal services as MCP
-- Target Surface: CLI surface: gitcode-mcp search, get, snippet, backlinks, tasks, tracks, link-check, stale-index, recent, sync-status
-- Actor/Trigger: Developer runs gitcode-mcp search "backlog" --format json with cache data present
-- Expected Outcome: Valid JSON output with result records containing id, path, title, snippet
+- Request Item: Read path treated as a first-class product contract with deterministic CLI reads.
+- Target Surface: CLI read commands
+- Actor/Trigger: Developer runs offline CLI read commands after fixture sync/index
+- Expected Outcome: Commands return repo-scoped deterministic output with issue/wiki coverage and clear stale or missing-index warnings
 - Evidence Type: CLI command
-- Freshness: current source build
+- Freshness: current source/build/runtime evidence required
 - Mock Policy: no_mocks
 
 
 ## outcome-6
 - Request Task: 6
 - Role: `supporting_evidence`
-- Request Item: Define cache freshness and sync semantics for offline-first operation
-- Target Surface: sync_status and sync commands, lock file mechanism, sync events table
-- Actor/Trigger: Developer runs sync test: insert stale record, call sync_status, run sync with fixture data, call sync_status again
-- Expected Outcome: sync_status reports stale then fresh; sync event logged with idempotency key; concurrent sync exits with lock-contention error
-- Evidence Type: CLI command
-- Freshness: current source build
-- Mock Policy: external_dependencies_only
+- Request Item: MCP query parity for coordinator usage: snippets, recent changes, link checks, stale-index reports, cache status, chunks, backlinks, and sync status.
+- Target Surface: MCP JSON-RPC tools
+- Actor/Trigger: MCP client invokes existing and new read tools with repo_id filters
+- Expected Outcome: MCP responses match equivalent CLI reads for issue/wiki records and cache/index status
+- Evidence Type: API test
+- Freshness: current source/build/runtime evidence required
+- Mock Policy: no_mocks
 
 
 ## outcome-7
 - Request Task: 7
 - Role: `supporting_evidence`
-- Request Item: Define public-safe fixture strategy: sanitized GitCode responses, no credentials, no internal URLs, no non-public source names
-- Target Surface: fixtures/ directory, scripts/sanitize-fixtures.sh, adapter contract tests
-- Actor/Trigger: Developer runs go test ./... and sanitize-fixtures.sh
-- Expected Outcome: All adapter contract tests pass using only fixture files; no sanitized fixture contains Authorization, internal hostname, or non-public project name
-- Evidence Type: CLI command
-- Freshness: current source build
+- Request Item: Shared HTTP SSE MCP server transport for multiple clients, while keeping stdio as local compatibility mode.
+- Target Surface: MCP stdio and HTTP/SSE runtime routes
+- Actor/Trigger: Developer starts HTTP/SSE MCP server and connects two clients
+- Expected Outcome: Two clients query the same cache concurrently, stdio remains available, health/readiness report ready state, and request logs include correlation IDs
+- Evidence Type: runtime/compiler test
+- Freshness: current source/build/runtime evidence required
 - Mock Policy: no_mocks
 
 
 ## outcome-8
 - Request Task: 8
 - Role: `supporting_evidence`
-- Request Item: Define testing strategy: unit tests for cache/index/link resolution, golden exports, adapter contract tests over fixtures, MCP tool tests, integration tests gated behind explicit credentials
-- Target Surface: go test ./... -short and go test ./... -run Integration
-- Actor/Trigger: Developer runs go test ./... -short and go test ./... -run Integration with and without GITCODE_TEST_TOKEN
-- Expected Outcome: Short tests pass in under 10s with no network; Integration tests skip cleanly when token unset, run live when set
-- Evidence Type: CLI command
-- Freshness: current source build
-- Mock Policy: external_dependencies_only
+- Request Item: Database concurrency and lock ownership for one cache database shared by multiple agents and clients.
+- Target Surface: SQLite cache runtime and lock manager
+- Actor/Trigger: Concurrent clients read while sync/index holds writer ownership
+- Expected Outcome: Safe reads continue, conflicting writers receive typed busy/owned errors, and migrations are blocked under ownership conflict
+- Evidence Type: runtime/compiler test
+- Freshness: current source/build/runtime evidence required
+- Mock Policy: no_mocks
 
 
 ## outcome-9
 - Request Task: 9
 - Role: `supporting_evidence`
-- Request Item: Define the RAG readiness boundary: what must be stored and exposed now for future semantic retrieval
-- Target Surface: Chunk model in internal/cache/, corpus export boundary
-- Actor/Trigger: Developer runs chunking test: ingest markdown source, produce deterministic chunks, re-run chunking on same source
-- Expected Outcome: Identical chunk ids on re-run; chunk table schema supports future embedding column without migration of existing rows
-- Evidence Type: CLI command
-- Freshness: current source build
-- Mock Policy: no_mocks
+- Request Item: Real GitCode write operations for issues, comments, and wiki pages, including safety and idempotency.
+- Target Surface: CLI write commands and GitCode adapter API routes
+- Actor/Trigger: Developer runs dry-run and stubbed-provider write commands
+- Expected Outcome: Dry run performs no mutation, successful writes persist audit/cache state, conflicts return actionable errors, and unavailable adapters cannot report success
+- Evidence Type: API test
+- Freshness: current source/build/runtime evidence required
+- Mock Policy: external_dependencies_only
 
 
 ## outcome-10
 - Request Task: 10
 - Role: `supporting_evidence`
-- Request Item: Model the current agent read path and define shell-equivalent query mapping
-- Target Surface: gitcode-mcp ingest, search_sources, list_sources, get_source, source_backlinks commands
-- Actor/Trigger: Developer runs documented walkthrough: ingest fixtures, then run search_sources, list_sources, get_source, source_backlinks offline
-- Expected Outcome: Each command produces output semantically equivalent to the shell workflow it replaces; all complete without network
+- Request Item: GitCode tracker/wiki source-of-truth model with local markdown/cache projections.
+- Target Surface: CLI import/sync/cache workflow
+- Actor/Trigger: Developer imports local markdown projection and then syncs from GitCode
+- Expected Outcome: GitCode issue/wiki identities remain canonical, projection provenance is separate, and projection-only aliases are not treated as remote truth
 - Evidence Type: CLI command
-- Freshness: current source build
-- Mock Policy: no_mocks
+- Freshness: current source/build/runtime evidence required
+- Mock Policy: external_dependencies_only
 
 
 ## outcome-11
 - Request Task: 11
 - Role: `supporting_evidence`
-- Request Item: Define derived index/build pipeline: incremental indexing, content hash, frontmatter parse, heading parse, backlinks, stale detection
-- Target Surface: gitcode-mcp index --full, gitcode-mcp index --incremental, gitcode-mcp stale-index commands
-- Actor/Trigger: Developer runs index --full on populated cache, then stale-index, then index --incremental on unchanged sources
-- Expected Outcome: index --full exits 0; stale-index reports stale backlink count and affected ids; index --incremental completes without rewriting unchanged records and reports zero new stale items
+- Request Item: Snapshot, diff, chunk, citation, corpus export, and deterministic validation integrity.
+- Target Surface: CLI index/export-snapshot/diff-snapshot commands
+- Actor/Trigger: Developer indexes, exports snapshots, and diffs stored snapshot ids
+- Expected Outcome: Exports include chunks and citations or explicit warnings; valid ids resolve; unknown ids return not-found errors
 - Evidence Type: CLI command
-- Freshness: current source build
+- Freshness: current source/build/runtime evidence required
 - Mock Policy: no_mocks
 
 
 ## outcome-12
 - Request Task: 12
 - Role: `supporting_evidence`
-- Request Item: Define GitCode write semantics: explicit, idempotent, logged, optional; define idempotency key generation, conflict detection, retry
-- Target Surface: GitCode adapter write methods, write-ahead log/sync_events table
-- Actor/Trigger: Developer runs test calling adapter write method with mock HTTP server; sends create-issue, server returns 409 Conflict
-- Expected Outcome: HTTP request includes Idempotency-Key header; adapter returns typed ErrConflict with local and remote payloads, no automatic overwrite
-- Evidence Type: CLI command
-- Freshness: current source build
-- Mock Policy: external_dependencies_only
+- Request Item: Extensible chunking policies: heading-delimited default, max-size fallback, and sliding-window option.
+- Target Surface: Indexing runtime, CLI and MCP chunk/snippet surfaces
+- Actor/Trigger: Developer indexes fixtures with default and sliding-window chunking policies
+- Expected Outcome: Chunks are deterministic, cite source ranges, respect max-size settings, and are queryable through CLI and MCP
+- Evidence Type: runtime/compiler test
+- Freshness: current source/build/runtime evidence required
+- Mock Policy: no_mocks
 
 
 ## outcome-13
 - Request Task: 13
 - Role: `supporting_evidence`
-- Request Item: Define failure-mode table for poor network availability and define error types, user-visible messages, cache state, recovery actions
-- Target Surface: Adapter error types (ErrNetworkUnavailable, ErrRateLimited, ErrConflict, etc.), cache integrity after each failure mode
-- Actor/Trigger: Developer runs test suite exercising each failure mode against adapter and cache layers
-- Expected Outcome: Network timeout: cache unchanged, error includes record id and retry suggestion. Rate-limit: error includes Retry-After, no partial data written to cache
-- Evidence Type: CLI command
-- Freshness: current source build
+- Request Item: Sanitized fixtures and optional credential-gated live validation against a test GitCode repository.
+- Target Surface: Fixture validation and optional live API test commands
+- Actor/Trigger: Maintainer runs offline fixture validation and optional credential-gated live validation
+- Expected Outcome: Offline fixture tests pass, live tests are skipped unless explicitly enabled, and live responses are redacted before durable writes
+- Evidence Type: local command
+- Freshness: current source/build/runtime evidence required
 - Mock Policy: external_dependencies_only
 
 
 ## outcome-14
 - Request Task: 14
-- Role: `primary_product`
-- Request Item: Produce a one-week implementation plan with milestones that gives a useful first version
-- Target Surface: Day-by-day verification commands: go test, go run, gitcode-mcp CLI commands
-- Actor/Trigger: Developer executes each day's verification commands sequentially
-- Expected Outcome: Each day's verification command passes; Day 7 walkthrough exercises ingest -> search_sources -> get_source -> source_backlinks -> sync_status offline for coordinator intake, task lookup, handoff review
-- Evidence Type: CLI command
-- Freshness: current source build
+- Role: `supporting_evidence`
+- Request Item: Documentation deliverables for install, config, repository binding, secrets, MCP setup, walkthroughs, troubleshooting, and fixture capture.
+- Target Surface: Public documentation and documented CLI/MCP workflow
+- Actor/Trigger: New developer follows docs from install through CLI and MCP reads
+- Expected Outcome: Every documented command succeeds or returns documented diagnostics without exposing private paths or secrets
+- Evidence Type: local command
+- Freshness: current source/build/runtime evidence required
 - Mock Policy: external_dependencies_only
+
+
+## outcome-15
+- Request Task: 15
+- Role: `supporting_evidence`
+- Request Item: One-week implementation plan with tasks ordered for dogfood value.
+- Target Surface: Implementation workflow and executable product checks
+- Actor/Trigger: Follow-up implementer executes the ordered one-week plan
+- Expected Outcome: Each day has an executable product check, ending with offline CLI and MCP reads for one issue and one wiki page
+- Evidence Type: local command
+- Freshness: current source/build/runtime evidence required
+- Mock Policy: external_dependencies_only
+
+
+## outcome-16
+- Request Task: 16
+- Role: `supporting_evidence`
+- Request Item: Dogfood observations that should feed back into Triborg/Runa/design-agent configuration.
+- Target Surface: Public-safe feedback artifact and validation command
+- Actor/Trigger: Coordinator records dogfood feedback after running the slice
+- Expected Outcome: Feedback captures friction and prompt/config improvements without private paths, secrets, or private tracker/wiki names
+- Evidence Type: local command
+- Freshness: current source/build/runtime evidence required
+- Mock Policy: no_mocks

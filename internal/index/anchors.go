@@ -7,26 +7,87 @@ import (
 
 func BuildCitationAnchors(source SourceRecord, parsed ParsedSource) []CitationAnchor {
 	var anchors []CitationAnchor
+	base := CitationAnchor{RepoID: source.RepoID, SourceID: source.ID, RecordID: sourceRecordID(source), SnapshotID: source.SnapshotID, ContentHash: parsed.ContentHash}
 	for _, heading := range parsed.Headings {
-		anchors = append(anchors, CitationAnchor{ID: anchorID(source.ID, parsed.ContentHash, heading.ByteStart, "heading"), SourceID: source.ID, ContentHash: parsed.ContentHash, ByteStart: heading.ByteStart, ByteEnd: heading.ByteEnd, LineStart: heading.LineStart, LineEnd: heading.LineEnd, HeadingPath: heading.HeadingPath, Kind: "heading", Title: heading.Title})
+		anchor := base
+		anchor.ID = anchorID(source.ID, parsed.ContentHash, heading.ByteStart, "heading")
+		anchor.ByteStart = heading.ByteStart
+		anchor.ByteEnd = heading.ByteEnd
+		anchor.LineStart = heading.LineStart
+		anchor.LineEnd = heading.LineEnd
+		anchor.HeadingPath = heading.HeadingPath
+		anchor.Kind = "heading"
+		anchor.Title = heading.Title
+		anchors = append(anchors, anchor)
 	}
 	for _, status := range parsed.Statuses {
-		anchors = append(anchors, CitationAnchor{ID: anchorID(source.ID, parsed.ContentHash, status.ByteStart, "task_status"), SourceID: source.ID, ContentHash: parsed.ContentHash, ByteStart: status.ByteStart, ByteEnd: status.ByteEnd, LineStart: status.LineStart, LineEnd: status.LineEnd, HeadingPath: status.HeadingPath, Kind: "task_status", Title: status.Value, DerivedRowID: source.ID})
+		anchor := base
+		anchor.ID = anchorID(source.ID, parsed.ContentHash, status.ByteStart, "task_status")
+		anchor.ByteStart = status.ByteStart
+		anchor.ByteEnd = status.ByteEnd
+		anchor.LineStart = status.LineStart
+		anchor.LineEnd = status.LineEnd
+		anchor.HeadingPath = status.HeadingPath
+		anchor.Kind = "task_status"
+		anchor.Title = status.Value
+		anchor.DerivedRowID = source.ID
+		anchors = append(anchors, anchor)
 	}
 	for _, link := range parsed.Links {
-		anchors = append(anchors, CitationAnchor{ID: anchorID(source.ID, parsed.ContentHash, link.ByteStart, "link_target"), SourceID: source.ID, ContentHash: parsed.ContentHash, ByteStart: link.ByteStart, ByteEnd: link.ByteEnd, LineStart: link.LineStart, LineEnd: link.LineEnd, HeadingPath: headingAtLine(parsed.Headings, link.LineStart), Kind: "link_target", Title: link.Text})
+		anchor := base
+		anchor.ID = anchorID(source.ID, parsed.ContentHash, link.ByteStart, "link_target")
+		anchor.ByteStart = link.ByteStart
+		anchor.ByteEnd = link.ByteEnd
+		anchor.LineStart = link.LineStart
+		anchor.LineEnd = link.LineEnd
+		anchor.HeadingPath = headingAtLine(parsed.Headings, link.LineStart)
+		anchor.Kind = "link_target"
+		anchor.Title = link.Text
+		anchors = append(anchors, anchor)
 	}
 	for _, heading := range parsed.Headings {
 		lower := strings.ToLower(heading.Title)
 		if strings.Contains(lower, "acceptance") {
-			anchors = append(anchors, CitationAnchor{ID: anchorID(source.ID, parsed.ContentHash, heading.ByteStart, "acceptance"), SourceID: source.ID, ContentHash: parsed.ContentHash, ByteStart: heading.ByteStart, ByteEnd: heading.ByteEnd, LineStart: heading.LineStart, LineEnd: heading.LineEnd, HeadingPath: heading.HeadingPath, Kind: "acceptance", Title: heading.Title, DerivedRowID: source.ID + ":acceptance"})
+			anchor := base
+			anchor.ID = anchorID(source.ID, parsed.ContentHash, heading.ByteStart, "acceptance")
+			anchor.ByteStart = heading.ByteStart
+			anchor.ByteEnd = heading.ByteEnd
+			anchor.LineStart = heading.LineStart
+			anchor.LineEnd = heading.LineEnd
+			anchor.HeadingPath = heading.HeadingPath
+			anchor.Kind = "acceptance"
+			anchor.Title = heading.Title
+			anchor.DerivedRowID = source.ID + ":acceptance"
+			anchors = append(anchors, anchor)
 		}
 		if strings.Contains(lower, "question") {
-			anchors = append(anchors, CitationAnchor{ID: anchorID(source.ID, parsed.ContentHash, heading.ByteStart, "open_question"), SourceID: source.ID, ContentHash: parsed.ContentHash, ByteStart: heading.ByteStart, ByteEnd: heading.ByteEnd, LineStart: heading.LineStart, LineEnd: heading.LineEnd, HeadingPath: heading.HeadingPath, Kind: "open_question", Title: heading.Title, DerivedRowID: source.ID + ":question"})
+			anchor := base
+			anchor.ID = anchorID(source.ID, parsed.ContentHash, heading.ByteStart, "open_question")
+			anchor.ByteStart = heading.ByteStart
+			anchor.ByteEnd = heading.ByteEnd
+			anchor.LineStart = heading.LineStart
+			anchor.LineEnd = heading.LineEnd
+			anchor.HeadingPath = heading.HeadingPath
+			anchor.Kind = "open_question"
+			anchor.Title = heading.Title
+			anchor.DerivedRowID = source.ID + ":question"
+			anchors = append(anchors, anchor)
 		}
 	}
 	for _, chunk := range ChunkSource(source, parsed) {
-		anchors = append(anchors, CitationAnchor{ID: chunk.CitationAnchorID, SourceID: source.ID, ContentHash: parsed.ContentHash, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, HeadingPath: chunk.HeadingPath, Kind: "chunk", Title: "chunk " + strconv.Itoa(chunk.LineStart)})
+		anchor := base
+		anchor.ID = chunk.CitationAnchorID
+		anchor.RecordID = chunk.RecordID
+		anchor.SnapshotID = chunk.SnapshotID
+		anchor.Policy = chunk.Policy
+		anchor.ByteStart = chunk.ByteStart
+		anchor.ByteEnd = chunk.ByteEnd
+		anchor.LineStart = chunk.LineStart
+		anchor.LineEnd = chunk.LineEnd
+		anchor.HeadingPath = chunk.HeadingPath
+		anchor.Kind = "chunk"
+		anchor.Title = "chunk " + strconv.Itoa(chunk.LineStart)
+		anchors = append(anchors, anchor)
 	}
 	return dedupeAnchors(anchors)
 }

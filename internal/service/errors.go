@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gitcode-mcp/internal/cache"
@@ -126,6 +127,16 @@ func (e ErrNotFound) Error() string {
 	return fmt.Sprintf("service: %s %q not found", e.Kind, e.ID)
 }
 
+type ErrSnapshotConsistency struct {
+	RepoID      string
+	SnapshotID  string
+	Expectation string
+}
+
+func (e ErrSnapshotConsistency) Error() string {
+	return fmt.Sprintf("service: snapshot %q consistency error: %s", e.SnapshotID, e.Expectation)
+}
+
 type ErrCacheEmpty struct {
 	Message string
 }
@@ -140,6 +151,39 @@ func (e ErrCacheEmpty) Error() string {
 type ErrInvalidQuery struct {
 	Field   string
 	Message string
+}
+
+type ErrRepoRequired struct {
+	Operation string
+}
+
+func (e ErrRepoRequired) Error() string {
+	if e.Operation == "" {
+		return "service: repo_required: --repo is required"
+	}
+	return "service: repo_required: --repo is required for " + e.Operation
+}
+
+type ErrAmbiguousAlias struct {
+	Alias string
+	Repos []string
+}
+
+func (e ErrAmbiguousAlias) Error() string {
+	return fmt.Sprintf("service: ambiguous_alias %s is present in repositories %s", e.Alias, strings.Join(e.Repos, ","))
+}
+
+type ErrConflict struct {
+	Kind    string
+	ID      string
+	Message string
+}
+
+func (e ErrConflict) Error() string {
+	if e.Message != "" {
+		return "service: conflict " + e.Kind + " " + e.ID + ": " + e.Message
+	}
+	return "service: conflict " + e.Kind + " " + e.ID
 }
 
 func (e ErrInvalidQuery) Error() string {
@@ -175,6 +219,33 @@ type ErrLinkCheckFailed struct {
 func (e ErrLinkCheckFailed) Error() string {
 	return fmt.Sprintf("service: link check found %d broken link(s)", e.BrokenCount)
 }
+
+type ErrWriteFailure struct {
+	Code           string
+	RepoID         string
+	RemoteID       string
+	IdempotencyKey string
+	Cause          error
+}
+
+func (e ErrWriteFailure) Error() string {
+	msg := "write: " + e.Code
+	if e.RepoID != "" {
+		msg += " repo_id=" + e.RepoID
+	}
+	if e.RemoteID != "" {
+		msg += " remote_id=" + e.RemoteID
+	}
+	if e.IdempotencyKey != "" {
+		msg += " idempotency_key=" + e.IdempotencyKey
+	}
+	if e.Cause != nil {
+		msg += ": " + e.Cause.Error()
+	}
+	return msg
+}
+
+func (e ErrWriteFailure) Unwrap() error { return e.Cause }
 
 type ErrSyncInProgress struct {
 	EventID        string

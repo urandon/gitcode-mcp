@@ -1,0 +1,22 @@
+{
+  "covered_outcome_ids": [
+    "outcome-3"
+  ],
+  "covered_decommission_ids": [
+    "decommission-7"
+  ],
+  "product_surfaces": [
+    "gitcode-mcp config init",
+    "gitcode-mcp config locate",
+    "gitcode-mcp config show --redacted",
+    "gitcode-mcp auth status",
+    "internal CLI route tests for config/auth commands"
+  ],
+  "evidence_type": "offline executable CLI validation",
+  "freshness": "current source/build/runtime evidence required; run tests/design_package/001-config-credential-task-1-configcommands-add-redacted-ux/run.sh against the working tree",
+  "mocks_used": [
+    "Go CLI unit tests use in-process mock config sources and credential reporters for external OS credential-provider states",
+    "run.sh uses isolated temporary HOME/XDG directories and environment variables; no live GitCode network, real OS keyring, or device validation"
+  ],
+  "production_files_modified": []
+}

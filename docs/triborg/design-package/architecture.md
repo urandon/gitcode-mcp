@@ -5,174 +5,184 @@ This file is copied from the approved Triborg design package during implementato
 # Architecture
 
 ## Need
-The architecture delivers a cache-first Go CLI and MCP server that ingests local markdown sources (agent knowledge layer) and GitCode tracker/wiki data into a SQLite cache, exposes read operations through a unified service layer, and gates all writes behind explicit commands with idempotency keys. Every routine read completes without network access; MCP and CLI share the same internal service layer so agent workflows map directly to cache reads.
+This architecture closes the gap between the current scaffold and a minimum dogfood slice by establishing repository-scoped identity, an explicit sync/bootstrap-to-index pipeline, deterministic read contracts for CLI and MCP, shared SQLite cache concurrency, GitCode write-path safety, snapshot/chunk integrity, public-safe docs, and credential-gated live-validation seams. Every component owns a cache-first contract, and every live network surface is gated behind explicit sync or write commands.
 
-- Replace shell-based agent read workflows (`find`, `rg`, `sed`) with structured cache-first CLI/MCP tools that produce semantically equivalent output offline.
-- Define a SQLite schema that stores normalized source records, links/backlinks, identity map, remote revisions, sync events, conflicts, and deterministic chunks with byte offsets and heading paths.
-- Expose the same read operations through both CLI commands and MCP JSON-RPC tools, with identical structured output contracts.
-- Provide an explicit sync command that ingests remote GitCode data (and local file sources) into cache with idempotency keys, lock files, and audit logs, never overwriting local-only data.
-- Define a chunk/provenance model (byte offsets, line ranges, heading paths, content hash, inherited metadata) so a future RAG layer can compose over the same authoritative cache without migration.
-- Define typed error contracts for every degraded-network failure mode (timeout, rate limit, auth expiry, conflict, partial response, corruption, collision) with cache-safety guarantees.
+- Provide a `repo_id`-first scoping model so all cache, read, write, and MCP operations are bounded to configured GitCode repositories.
+- Define the sync→cache→index→export pipeline with deterministic chunking and citation tracking.
+- Deliver archive-only parity between CLI reads and MCP tool reads for coordinator usage.
+- Enable shared-cache multi-client HTTP/SSE MCP serving with correlation diagnostics.
+- Guarantee idempotent, auditable write paths that never report fake success.
+- Keep all config, credentials, docs, fixtures, and diagnostics public-safe.
+- Tag live GitCode API validation as optional, explicit, and credential-gated.
 
-- Multi-instance GitCode federation — assumption §9 explicitly scopes the first version to a single instance.
-- HTTP/SSE MCP transport — assumption §3 defers this; stdio transport is the initial target.
-- Write operations over MCP in the first slice — writes are CLI-only initially; MCP write tools are deferred to a later version.
-- Embedding provider integration, vector database selection, reranking, semantic answer generation, chat memory, model-specific tuning — all deferred per Task 9.
-- Real-time or push-based sync — sync is explicitly triggered by the user; no persistent daemon or watcher.
-- Migration from another language — assumption §1 confirms Go is the starting point.
+- RAG embeddings, vector DB, reranking — deferred; architecture makes chunk/citation data RAG-ready but does not add retrieval pipelines.
+- Replacing `modernc.org/sqlite` with a file-per-document store — SQLite remains the sole cache engine.
+- Network-tolerant background daemon sync — sync remains explicit CLI invocation; HTTP/SSE serves reads only from the live process.
+- Replicating full GitCode UI features (attachments, labels, custom fields) — initial scope is issue body/comments and wiki page body/sections.
+- OAuth device flow or browser-based token acquisition — token is provided via env or credential store; browser flows are follow-up work.
 
 ## Approach
 ### Overview
-### Layered Dependency Direction
+The system is composed of eight subsystems and two externals:
 
-```
-cmd/gitcode-mcp          (entry point: wires services, dispatches CLI or MCP)
-        |
-internal/service         (unified read/write service layer — all business logic)
-   /       |       \
-cache   gitcode   index   (data access, remote adapter, derived projections)
-```
+1. **Config & Credential Subsystem** — sources config from disk (YAML), environment variables, and platform credential stores (macOS Keychain, Linux D-Bus Secret Service, Windows Credential Manager). Provides a `locate`, `show --redacted`, and `doctor` surface. Token values are never logged or cached in plaintext.
 
-Dependencies flow strictly downward: `cmd` → `service` → `cache|gitcode|index`. No package imports upward. `cache`, `gitcode`, and `index` are peers that never import each other; `service` orchestrates cross-cutting operations.
+2. **Repository Binding Model** — `repo_id` is the master scope key. A `repos` table stores repository metadata (owner, name, API base URL, enabled issue/wiki scopes, display name, aliases). All cache records, sync events, snapshots, and API calls carry `repo_id`. Alias collisions across repos are rejected at bind/read time.
 
-### Key Component Contracts
+3. **GitCode Adapter Seam** — an interface/port behind which live API calls are isolated. Two implementations: a live HTTP adapter (gated by credentials and `--live` flag) and a fixture adapter (reads from sanitized JSON files). Mocks for write-path tests live behind the same seam.
 
-**`internal/cache`** — owns the SQLite schema, record accessors, and a `Store` interface. Exposes typed methods: `UpsertSource`, `GetSource`, `ListSources`, `UpsertLink`, `GetBacklinks`, `GetIdentityMap`, `UpsertChunk`, `GetChunks`, `RecordSyncEvent`, `GetSyncStatus`, `UpsertConflict`, `GetConflicts`, `AcquireLock`, `ReleaseLock`. The store is the sole writer to the SQLite database; all other packages read and write through the store.
+4. **Cache & Sync Bootstrap Subsystem** — a pure-Go SQLite database with WAL mode and busy timeout. Tables: `records` (issue/wiki body + metadata), `record_comments`, `identity_map`, `links`, `remote_revisions`, `sync_events`, `snapshots`, `snapshot_chunks`, and `audit_trail`. The `sync` command populates cache from the adapter, records sync events with idempotency keys, and triggers index population. Imported markdown projections are stored with a `provenance=projection` tag distinct from `provenance=remote`.
 
-**`internal/gitcode`** — owns the HTTP adapter to GitCode `/api/v5`. Exposes a `Client` interface with methods for issue CRUD, wiki page CRUD, search, comments, and attachments. Every method accepts a context.Context and returns structured data plus a typed error from the `Err*` family (details in API Interoperability Contract). This package never touches `cache` or `service` types directly.
+5. **Index & Chunking Subsystem** — consumes cache records and produces deterministic chunk sets. Default heading-delimited markdown chunker runs first; sliding-window chunker is an optional policy for changelogs/non-heading documents. Chunks carry source range, record id, repo id, snapshot id, and content hash. Missing-index state is surfaced as explicit warnings, never silently omitted.
 
-**`internal/index`** — owns derived-index computation and staleness detection. Exposes `FullBuild` and `IncrementalBuild` methods that read sources from cache, parse frontmatter/headings/links, compute derived projections, and write back-derived indexes. `StaleCheck` compares content hashes to detect out-of-date derived records without rebuilding.
+6. **CLI Read/Write Surface** — provides explicit commands for list, search, get, snippets, backlinks, recent changes, link-check, stale-index, cache-status, list-chunks, export-snapshot, diff-snapshot, sync, and write operations (issue create/update, wiki page create/update, comment add). All reads are cache-first; writes require explicit `--dry-run` vs `--live` choice.
 
-**`internal/service`** — owns the business-logic layer. Exposes methods like `SearchSources`, `GetSource`, `ListSources`, `GetBacklinks`, `ResolveID`, `GetSyncStatus`, `SyncToCache`, `ExportSnapshot`, `DiffSnapshot`, `GetSnippet`. Each method dispatches to the necessary `cache` and `gitcode` (and optionally `index`) primitives. The MCP server and CLI call this same layer.
+7. **MCP Server & Transport Subsystem** — exposes MCP resources and tools mirroring CLI read semantics. Two transports: stdio (single-client, local) and HTTP/SSE (multi-client, shared cache). The HTTP/SSE server binds to `localhost` by default, serves `/health`, `/ready`, `/sse` (SSE endpoint), and `/message` (JSON-RPC). Request correlation IDs are assigned and logged. The server holds a single reader/writer lock on the cache.
 
-**`internal/mcp`** — owns the JSON-RPC server lifecycle over stdio transport. Reads stdin for requests, dispatches to `service` methods, writes JSON-RPC responses to stdout. Defines the MCP tool definitions as data and maps each `tools/call` method name to a `service` call.
+8. **Snapshot & Diff Subsystem** — stores indexed snapshots keyed by snapshot id. `export-snapshot` emits chunks and citations or explicit missing-index warnings. `diff-snapshot` resolves stored IDs and rejects unknown IDs with not-found errors.
 
-**`internal/cli`** — owns the CLI command tree, flag parsing, output formatting (human `path:line:snippet` and machine JSON), and main dispatch loop. Maps each subcommand (`search`, `get`, `backlinks`, etc.) to `service` method calls with the same signatures used by the MCP server.
+9. **Docs & Dogfood Feedback Subsystem** — public-safe Markdown docs under `docs/` covering install, config, repo binding, sync, CLI reads, MCP setup, troubleshooting. A dogfood checklist ties each day-slice to a product check. Feedback is captured in a sanitized artifact with lint rules preventing secret/private-path leakage.
 
-### Invariants
-- Routine reads (search, get, backlinks, resolve, export, diff, sync-status) never touch the network. Only explicit `sync`, `ingest` (when network sources are requested), and write commands (create/update issue/wiki) access the GitCode adapter.
-- The cache is the single source of truth for local operations. Remote data is ingested into the cache; no live API call substitutes for a missing cache record during read operations.
-- Stable source ids (`DOC-123`, `TASK-0202`) are primary keys in the identity map. Remote GitCode issue/wiki ids are aliases that resolve through the identity map.
-- Writes to GitCode are never triggered by reads. The `sync` command is the only automated writer; `create-issue`, `update-issue`, `create-page`, etc. are explicit subcommands.
+### Overall Invariants
+
+- Every cache row and read response carries `repo_id`.
+- No remote API call occurs without explicit user command (`sync`, write with `--live`, `doctor --live`, live validation).
+- CLI read commands do not require network.
+- Any MCP tool response for a read query is byte-identical to the equivalent CLI read for the same snapshot.
+- Write operations either produce a durable audit row on success or return a typed error; the system cannot report success for a write that did not reach the remote adapter.
+- The SQLite cache uses WAL mode; concurrent readers are always safe; writers serialize on a per-process lock.
 
 ### Architecture Diagram
 ```mermaid
 flowchart TD
     subgraph External["External Systems"]
-        GitCodeAPI[("GitCode /api/v5<br>Issues, Wiki, Search")]
-        User[("User / Agent<br>CLI invocations")]
+        User[User / Agent / MCP Client]
+        GitCodeAPI[GitCode API]
+        CredStore[OS Credential Store<br/>Keychain / D-Bus / WinCred]
     end
 
-    subgraph Runtime["Process Boundary"]
-        EntryPoint["cmd/gitcode-mcp<br>Entry Point: CLI mode or MCP mode"]
+    subgraph Runtime["GitCode MCP Runtime"]
+        ConfigCred[Config & Credential<br/>a1: YAML + env + credential-store<br/>locate / show --redacted / doctor]
+        RepoBind[Repository Binding<br/>a2: repo_id master scope<br/>alias collision rejection]
+
+        subgraph CacheLayer["Cache & Storage Layer"]
+            CacheSync[Cache & Sync Bootstrap<br/>a3: SQLite WAL<br/>provenance tags / sync events / audit]
+            IndexChunk[Index & Chunking<br/>a5: heading-delimited + sliding-window<br/>deterministic chunks with source ranges]
+            SnapshotDiff[Snapshot & Diff<br/>a9: export with citations<br/>diff by stored IDs]
+        end
+
+        Adapter[GitCode Adapter Seam<br/>a4: live HTTP & fixture adapters<br/>redaction pipeline]
+
+        CLIRead[CLI Read Surface<br/>a6: get / search / snippets / backlinks<br/>cache-first, no network]
+        CLIWrite[CLI Write Surface<br/>a7: --dry-run / --live gating<br/>audit-gated success]
+
+        MCPServer[MCP Server & Transport<br/>a8: stdio + HTTP/SSE<br/>health / ready / correlation IDs]
     end
 
-    subgraph Transport["Transport Adapters"]
-        CLI["internal/cli<br>CLI commands, flags,<br>text/JSON output"]
-        MCP["internal/mcp<br>MCP server lifecycle<br>stdio JSON-RPC 2.0"]
-    end
+    DocsDogfood[Docs & Dogfood<br/>a10: public-safe docs, checklist<br/>feedback artifact with lint]
 
-    subgraph Core["Shared Service Layer"]
-        Service["internal/service<br>SearchSources, GetSource,<br>SyncToCache, ExportSnapshot,<br>GetBacklinks, ResolveID"]
-    end
+    ConfigCred -->|read scoped repos| RepoBind
+    ConfigCred -->|token lookup| CredStore
 
-    subgraph Data["Data Access Layer"]
-        Cache["internal/cache<br>SQLite store, schema,<br>lock files, identity map"]
-        GitCodeAdapter["internal/gitcode<br>HTTP adapter, typed errors,<br>idempotency keys"]
-        Index["internal/index<br>Full/incremental builds,<br>chunking, stale detection"]
-    end
+    RepoBind -->|repo_id filter on all queries| CacheLayer
 
-    subgraph Local["Local Storage"]
-        CacheDB[("~/.cache/gitcode-mcp/cache.db<br>sources, links, chunks,<br>fts_index, sync_events")]
-        Fixtures[("fixtures/api/v5/<br>Sanitized API responses")]
-    end
+    Adapter -->|live API calls (credential-gated)| GitCodeAPI
+    Adapter -->|fixture responses (no network)| CacheSync
 
-    EntryPoint -->|"dispatches mode"| CLI
-    EntryPoint -->|"dispatches mode"| MCP
-    CLI -->|"read/write calls"| Service
-    MCP -->|"read-only call"| Service
+    User -->|sync / write --live| CLIWrite
+    User -->|sync --issues --wiki| CacheSync
+    User -->|read commands| CLIRead
+    User -->|MCP JSON-RPC (stdio or HTTP/SSE)| MCPServer
 
-    Service -->|"read/write data"| Cache
-    Service -->|"sync + write (network)"| GitCodeAdapter
-    Service -->|"trigger build"| Index
+    CLIWrite -->|dry-run or live call| Adapter
+    CLIWrite -->|audit row + cache refresh| CacheSync
 
-    Cache -->|"reads & writes"| CacheDB
-    GitCodeAdapter -->|"HTTP read/write"| GitCodeAPI
-    GitCodeAdapter -->|"contract tests read"| Fixtures
-    Index -->|"reads sources, writes derived"| Cache
+    CacheSync -->|populate records + events| IndexChunk
+    IndexChunk -->|chunks + citations| SnapshotDiff
+
+    CLIRead -->|cache-first queries| CacheSync
+    CLIRead -->|chunk/snippet lookups| IndexChunk
+    CLIRead -->|export / diff| SnapshotDiff
+
+    MCPServer -->|tool call → cache query| CacheSync
+    MCPServer -->|tool call → chunk query| IndexChunk
+    MCPServer -->|sync_status| CacheSync
+
+    CacheSync -->|health / readiness| MCPServer
+    ConfigCred -->|doctor --runtime-audit| CacheSync
+    ConfigCred -->|doctor --runtime-audit| MCPServer
+    ConfigCred -->|doctor --runtime-audit| IndexChunk
+
+    User -->|doc smoke test / feedback| DocsDogfood
+    MCPServer -->|tool surface documented in| DocsDogfood
+    CLIRead -->|command tour documented in| DocsDogfood
 ```
 
 ### Components
-- `internal/cache` — Owns SQLite schema, record accessors, lock-file acquisition, and cache integrity. Sole writer to the database.
-- `internal/gitcode` — Owns GitCode `/api/v5` HTTP adapter with typed error family and pagination. Never imports cache or service types.
-- `internal/index` — Owns derived-index computation: full/incremental builds, chunking, stale detection. Reads cache, writes derived records.
-- `internal/service` — Owns business-logic orchestration layer. SearchSources, GetSource, SyncToCache, ExportSnapshot, etc. Unified API for CLI and MCP.
-- `internal/mcp` — Owns MCP server lifecycle over stdio transport, JSON-RPC 2.0 framing, tool definitions.
-- `internal/cli` — Owns CLI command tree, flag parsing, output formatting (human/JSON).
-- `cmd/gitcode-mcp` — Entry point. Selects CLI mode or MCP mode (`--mcp`).
+- `config_credential` — Config discovery, YAML+env+credential-store precedence, redacted display, auth status, diagnostics
+- `repo_binding` — `repo_id` master scope key, repos table, alias collision rejection, scope-gated filters
+- `cache_sync` — SQLite WAL cache, sync bootstrap, provenance tagging, idempotency keys, sync events, audit trail, concurrency ownership
+- `gitcode_adapter` — Adapter seam for live HTTP and fixture adapters; write-path safety, redaction, optional live validation
+- `index_chunking` — Deterministic chunking with heading-delimited default and sliding-window optional; chunk schema with source ranges
+- `cli_read` — Cache-first CLI read commands (list, search, get, snippets, backlinks, recent, link-check, stale-index, cache-status, list-chunks, export, diff)
+- `cli_write` — Write commands with `--dry-run`/`--live` gating, audit persistence, idempotency
+- `mcp_server` — MCP tool parity, stdio and HTTP/SSE transports, health/readiness, correlation IDs, multi-client reads
+- `snapshot_diff` — Snapshot storage, export with citations/warnings, diff by stored IDs, not-found on unknown
+- `docs_dogfood` — Public-safe docs, dogfood checklist, feedback artifact, lint/validation
 
 ### Requirement Coverage
 | Request Task | Architecture Resolution | Components | Interfaces / Flow | Risk | Validation |
 |---|---|---|---|---|---|
-| Task 1 | Define package layout with `cmd/gitcode-mcp` → `internal/service` → `internal/{cache,gitcode,index,mcp,cli}`. Strict downward dependency; no circular imports. `go build ./...` compiles all packages. | `cmd/gitcode-mcp`, `internal/service`, `internal/cache`, `internal/gitcode`, `internal/index`, `internal/mcp`, `internal/cli` | `cmd` imports `cli` and `mcp`, each imports `service`, which imports `cache`, `gitcode`, `index` (peers). | None. Layout follows standard Go `internal/` conventions. | `go build ./...` from repo root; every package compiles without circular imports. |
-| Task 2 | SQLite schema with tables: `sources`, `fts_index` (FTS5 virtual table), `identity_map`, `links`, `remote_revisions`, `sync_events`, `conflicts`, `chunks`. Chunk uniqueness constraint on `(source_id, content_hash)`. Backlink query: `SELECT s.* FROM sources s JOIN links l ON s.id = l.source_id WHERE l.target_id = ?`. | `internal/cache` | `Store` interface methods: `UpsertSource`, `GetSource`, `ListSources`, `UpsertLink`, `GetBacklinks`, `UpsertChunk`, `GetChunks`, etc. In-memory SQLite for tests. | Schema migration errors; FTS5 requires SQLite compiled with FTS5 support (confirmed in `modernc.org/sqlite`). | Go test opens in-memory SQLite, inserts source + task + link, queries backlinks → correct source; inserts chunk, verifies `(source_id, content_hash)` uniqueness. |
-| Task 3 | GitCode adapter interface with methods for issue/wiki CRUD, comments, search, and attachments. Typed error family: `ErrNetworkUnavailable`, `ErrRateLimited` (with `RetryAfter`), `ErrAuthExpired`, `ErrNotFound`, `ErrConflict` (with local and remote payloads), `ErrPartialResponse`. Contract tests serve sanitized fixtures over `httptest.Server`. | `internal/gitcode` | `Client` interface; each method accepts `context.Context`. HTTP client with configurable timeout. Fixture-based contract tests. | API docs (`docs.gitcode.com/docs/apis/`) confirm `Issues` and `Search` endpoints but lack wiki/page/attachment shape. Pending fixture capture. | Contract test serves fixture JSON over local HTTP, calls `GetIssue`, asserts structured record matches expected fields. Timeout test verifies `ErrNetworkUnavailable` when upstream doesn't respond within deadline. |
-| Task 4 | MCP server reads stdin/stdout JSON-RPC. `tools/list` returns eight tool definitions. `tools/call` maps tool name to `service` method. Integration test starts server on stdio, sends `tools/list` → eight tools; sends `tools/call resolve_id` → correct record. | `internal/mcp`, `internal/service` | MCP server dispatches to `service.ResolveID`, `service.SearchSources`, etc. Stdio transport with JSON-RPC 2.0 framing. | MCP protocol version compatibility (target `2024-11-05`). | Integration test: start server on stdio transport, send `tools/list` → 8 tool defs; send `tools/call resolve_id` → `{id, path, remote_alias}`. |
-| Task 5 | CLI commands: `search`, `get`, `snippet`, `backlinks`, `tasks`, `tracks`, `link-check`, `stale-index`, `recent`, `sync-status`. Each command maps to `service` method. Output modes: `--format text` (default, `path:line:snippet`) and `--format json`. | `internal/cli`, `internal/service` | CLI → `service.SearchSources(query)`; `service.GetSource(id)`; `service.GetSnippet(id, offset, limit)`; `service.GetBacklinks(id)`. | Flag/arg ergonomics for compound filters (e.g., `--kind task --status ready --limit 20`). | `gitcode-mcp search "backlog" --format json` → valid JSON with `id, path, title, snippet`. `gitcode-mcp get DOC-123` → record with id, path, title, body, status. |
-| Task 6 | Sync state machine: `sync_status` checks `remote_revisions.last_fetched_at` vs. `sources.updated_at`; stale if remote version is newer. `sync` acquires lock file (via `AcquireLock`), fetches remote data, compares content hashes, upserts cache, records sync event with idempotency key, releases lock. Lock contention exits with typed error without corrupting cache. | `internal/cache`, `internal/gitcode`, `internal/service` | `SyncToCache` orchestrates: lock → fetch → compare → upsert → log → unlock. `GetSyncStatus` reads `remote_revisions` and `sources` tables. | Concurrent `sync` from two processes must not corrupt cache; lock contention test. | Insert stale record, `sync_status` reports stale, `sync` with fixture data updates it, sync event logged, `sync_status` reports fresh. Concurrent `sync` exits with lock-contention error, cache intact. |
-| Task 7 | Fixture directory: `fixtures/api/v5/issues/issues.json`, `fixtures/api/v5/wiki/pages.json`, etc. Sanitization script `scripts/sanitize-fixtures.sh` redacts `Authorization` header, hostnames (replaced with `api.example.com`), and non-public project names (replaced with `example-project`). Test verifies no sanitized fixture contains raw credentials or internal identifiers. | `internal/gitcode` (tests), `scripts/sanitize-fixtures.sh`, `fixtures/` | Adapter contract tests read from `fixtures/`, serve via `httptest.Server`. Sanitization is a pre-commit or manual step before committing fixtures. | Accidental leakage of credentials or internal identifiers in fixture capture. Mitigated by the verification test that scans every fixture file. | `go test ./...` passes using only `fixtures/`. `scripts/sanitize-fixtures.sh` runs against raw captures → redacted copies. Test verifies no sanitized fixture contains `Authorization`, internal hostname, or non-public project name. |
-| Task 8 | Test pyramid: unit tests for `cache`, `index`, `service` (in-memory SQLite, no network); golden export tests (byte-identical output); adapter contract tests over sanitized fixtures; MCP integration tests (local stdio transport); live integration tests gated on `GITCODE_TEST_TOKEN` env var (skip if unset). `go test ./... -short` targets <10s. `go test ./... -run Integration` skips cleanly without token. | All packages (test files) | `_test.go` files per package. `testing.T` standard library; `httptest.Server` for adapter tests; golden files in `testdata/` per package. | Integration tests must never run in CI without explicit opt-in. Gate: `if os.Getenv("GITCODE_TEST_TOKEN") == "" { t.Skip(...) }`. | `go test ./... -short` passes all unit, contract, golden tests in <10s, no network. `go test ./... -run Integration` with token set exercises live API; without token, skips cleanly. |
-| Task 9 | Chunk table schema: `id`, `source_id`, `content_hash` (of parent version), `byte_start`, `byte_end`, `line_start`, `line_end`, `heading_path` (e.g. `["Architecture", "Components"]`), `text`, `normalized_text`, `inherited_metadata` (JSON), `outbound_links` (JSON array), `resolved_aliases` (JSON object). Future `embedding` column (nullable, default NULL) added after initial deploy. Chunk ids are deterministic (SHA-256 of `source_id + content_hash + byte_start`). Re-chunking same source → identical ids. Deferred: embedding provider, vector DB, reranking, answer generation. | `internal/cache` (chunks table), `internal/index` (chunking logic in index build) | `UpsertChunk`, `GetChunks`. Chunking triggered during `FullBuild`/`IncrementalBuild`. Future RAG layer queries `chunks` table for candidates, then uses `service.GetSource` + `service.GetSnippet` for authoritative citation. | Embedding column addition is a straight `ALTER TABLE ADD COLUMN` migration; no existing-row migration needed. | Chunking test: ingest markdown source, produce chunks with correct byte offsets, line numbers, heading paths, inherited metadata. Re-chunk same source → identical chunk ids. Schema supports future `embedding NULL` column. |
-| Task 10 | Shell-equivalent mapping: `find` → `list_sources --kind <kind>`; `rg -n "pattern"` → `search_sources "pattern"`; `rg --files` → `list_sources`; `sed -n "M,Np" file` → `get_snippet <id> --offset <M> --limit <N-M>`. Minimum replacement bar: `ingest` → `search_sources "backlog"` → `get_source DOC-123` → `source_backlinks DOC-123` → `sync_status DOC-123` completes offline. | `internal/cli`, `internal/service`, `internal/mcp` | Every shell workflow maps to a single CLI command or MCP tool. The agent plaintext read path is fully replaced when all commands complete offline with semantically equivalent output. | The AGENTS.md file and tool descriptions must document the mapping so agents know which tool replaces which shell command. | Documented walkthrough: cold cache, `ingest` fixtures, run `search_sources`, `list_sources`, `get_source`, `source_backlinks` offline. Each produces output semantically equivalent to the shell workflow it replaces. All complete without network. |
-| Task 11 | Incremental indexing pipeline: on `index --full`, compute content hash, parse frontmatter, extract headings, extract outbound links, resolve id aliases, extract status, write derived projections (source ledger, track index, task backlog, acceptance ledger, open questions, backlink graph, broken-link report). On `index --incremental`, only process sources with changed content hash. `stale-index` compares backlink targets against current source records; returns count and affected ids. | `internal/index`, `internal/cache` | `FullBuild(ctx, store)` → processes all sources → writes derived indexes. `IncrementalBuild(ctx, store)` → processes only changed sources. `StaleCheck(ctx, store)` → scans links for missing/removed targets. | Large corpora (100k+ sources) may make full builds slow; incremental builds mitigate this. | `gitcode-mcp index --full` → exit 0. `gitcode-mcp stale-index` → JSON with stale backlink count and affected ids. `gitcode-mcp index --incremental` on unchanged sources → no rewrites, zero new stale items. |
-| Task 12 | Write commands: `create-issue`, `update-issue`, `create-page`, `update-page`, `add-comment`, `add-label`. Each generates an idempotency key (SHA-256 of command + args + timestamp truncated to first collision-detectable prefix). Adapter sends `Idempotency-Key` header. On 409 Conflict, returns `ErrConflict{LocalPayload, RemotePayload}`; no automatic resolution. Write-ahead log via `sync_events` table (idempotency key, command, status, evidence). | `internal/gitcode` (adapter write methods), `internal/cache` (sync_events table), `internal/cli` (CLI write commands) | Write flow: CLI → service → gitcode adapter → HTTP POST/PATCH/PUT with idempotency key → on success: cache updated, sync event logged. On conflict: `ErrConflict` returned. | Idempotency key collision probability must be negligible for practical command volumes; SHA-256 prefix provides sufficient uniqueness. | Mock HTTP server test: send create-issue, verify `Idempotency-Key` header present. Server returns 409 → adapter returns `ErrConflict` with local and remote payloads, no automatic overwrite. |
-| Task 13 | Failure-mode table defined in the architecture as a cross-cutting contract. Each mode has a typed error (`Err*` struct) with user-visible message, cache-state guarantee, and recovery action. Adapter and cache test suites exercise each mode. | `internal/gitcode` (error types), `internal/cache` (integrity after failures), `internal/service` (error translation) | See failure-mode table in the architecture body below. | Coverage: all 9 failure modes must have a test. Rate-limited and timeout modes are most critical for offline-first operation. | Test suite exercises each failure mode. Network timeout: cache unchanged, error includes record id + retry suggestion. Rate limit: error includes `Retry-After`, no partial data in cache. |
-| Task 14 | Seven-day implementation plan with daily milestones and verification commands, culminating in Day 7 minimum-replacement-bar walkthrough (ingest → search → get → backlinks → sync_status offline for coordinator intake, task lookup, handoff review). | All components | Sequential day-by-day delivery. Each day's artifact is a working slice that builds on prior days. | Days 1–3 are critical path (cache + ingest + CLI read) and must be stable before Day 4 (MCP). | Each day's verification command passes. Day 7 walkthrough exercises the minimum replacement bar end-to-end offline. |
-
-#### Failure-Mode Table (Task 13)
-
-| Failure Mode | Error Type | User-Visible Message | Cache State After Failure | Recovery Action |
-|---|---|---|---|---|
-| Network timeout during sync | `ErrNetworkUnavailable` | `sync: network timeout for record <id> (deadline <t>): retry with --timeout to increase deadline or check connectivity` | Unchanged; no partial data written | Retry `sync` with `--timeout` flag or resolve network issue |
-| Partial response (truncated JSON) | `ErrPartialResponse` | `sync: received partial response for <endpoint>: expected <n> bytes, got <m> bytes. Run sync again to resume.` | Unchanged; no records inserted for the incomplete page | Retry `sync` (idempotent) |
-| Rate-limit hit (429) | `ErrRateLimited` with `RetryAfter` field | `sync: rate limited. Retry after <RetryAfter> seconds.` | Unchanged; no partial data written | Wait for `Retry-After` duration, then retry `sync` |
-| Auth expiry (401) | `ErrAuthExpired` | `sync: authentication expired. Renew your GITCODE_TOKEN and try again.` | Unchanged | Renew token via GitCode settings, retry `sync` |
-| Remote id collision (same alias maps to two different local ids) | `ErrRemoteCollision` | `sync: remote id <alias> already maps to local id <existing_id>; cannot map to <new_id>. Run link-check for guidance.` | Unchanged; collision is detected and blocked before any write | Manually resolve via `link-check` output, re-ingest with corrected aliases |
-| Local cache corruption (SQLite integrity check failure) | `ErrCacheCorruption` | `cache: integrity check failed at <path>. Recover from backup or re-ingest with gitcode-mcp sync --full.` | Original file unchanged; error prevents further writes | Restore from last `export_snapshot` or re-run `sync --full` |
-| Concurrent write conflict (lock file held) | `ErrLockContention` | `sync: another process holds the cache lock at <lockfile_path>. Wait for it to complete or remove the lock file if the process has terminated.` | Unchanged | Wait for lock release or manually remove stale lock file after confirming no active process |
-| Missing remote record (404 during sync of known alias) | `ErrRemoteNotFound` | `sync: remote record for alias <alias> not found. It may have been deleted or moved. Run link-check to find affected references.` | Local record remains; remote version marked as "not found" with timestamp | Review affected references via `link-check`; decide to keep local copy or remove |
-| Oversized attachment (response body exceeds configurable limit) | `ErrPayloadTooLarge` | `sync: record <id> exceeds maximum size <limit> bytes. Use --max-size to increase limit or skip with --skip-large.` | Record skipped; logged in sync event as "too large" | Increase `--max-size` or retrieve the attachment separately |
+| Task 1 | `doctor --runtime-audit` surfaces version, config, repo binding, cache state, MCP surface, sync/index readiness, and failure classes | Config, Cache, MCP Server | CLI → config loader → cache inspect → MCP transport check | Config/cache mismatch in dev | CLI test: `doctor --runtime-audit --repo <repo_id>` against fixture cache; verify output includes version, config path, cache row counts, MCP tool list, sync/index status, and actionable failure classes |
+| Task 2 | `repo_id` as master scope key in repos table, identity_map, records, sync_events, snapshots; alias collision rejection at bind+read time | Repository Binding, Cache | repo add/status CLI → repos table → all cache queries filter by repo_id | Multi-repo alias collision edge cases | CLI integration test: add two repos with overlapping aliases; verify get by alias is disambiguated or rejected |
+| Task 3 | Config sourced from YAML + env + credential store; `config init`, `config locate`, `config show --redacted`, `auth status`, `doctor` surface | Config & Credential | CLI → config loader → env/keyring sources → redacted display | Keyring unavailable on headless/CI | CLI tests with temporary config homes and mocked credential store; verify redacted output shows token presence without value |
+| Task 4 | Sync command populates cache via adapter seam; idempotency via sync_event key; index build triggered on sync completion; projection import stores provenance tag | Cache & Sync Bootstrap, GitCode Adapter, Index | sync CLI → adapter fetch → cache upsert → index build → sync_event insert | Adapter failure mid-sync | Fixture-backed integration test: sync --issues --wiki --index; verify records, sync event, index chunks present; offline get/search/snippet succeed |
+| Task 5 | CLI read commands: list, search, get, snippets, backlinks, recent, link-check, stale-index, cache-status, list-chunks, export, diff; all cache-first | CLI Read Surface, Index, Snapshot | CLI → cache/index query → deterministic JSON/Markdown output | Missing-index state unreported | CLI integration test over fixture cache with network disabled; verify each command returns repo-scoped output with stale/missing-index warnings where applicable |
+| Task 6 | MCP tools mirror CLI read semantics; `get_snippet`, `recent_changes`, `link_check`, `stale_index_report`, `cache_status`, `search_chunks`, `list_chunks`, `sync_status` exposed | MCP Server, Index | MCP tool call → cache/index query → JSON-RPC response; output matches CLI equivalent byte-for-byte | Tool schema drift from CLI output | MCP JSON-RPC test over fixture cache; compare tool responses against CLI read output for matching queries |
+| Task 7 | HTTP/SSE server on 127.0.0.1 bind, stdio mode for single client; `/health`, `/ready`, `/sse`, `/message` endpoints; correlation IDs via X-Request-ID | MCP Server, Cache Concurrency | HTTP/SSE transport → cache reader → concurrent client reads; stdio stdin/stdout for local mode | SSE reconnection and client tracking | Runtime test: start HTTP/SSE server, connect two clients, execute concurrent reads; verify both succeed, health/ready return 200, correlation IDs in logs |
+| Task 8 | SQLite WAL mode with busy timeout; per-process writer lock (one sync/write at a time); unlimited concurrent readers; migration blocked under lock conflict | Cache Concurrency | WAL writer → exclusive lock → sync/index; readers → shared WAL readers; migration → lock check → retry/error | WAL file growth under sustained read load | Go concurrency test: shared cache, two concurrent readers + one writer; verify readers succeed, writer gets busy error, migration blocked |
+| Task 9 | Write commands with `--dry-run` (no mutation) and `--live` (adapter call → audit row → cache refresh); idempotency via source fingerprint; conflict detection; no adapter = no success | GitCode Adapter, CLI Write Surface | write CLI → validate → dry-run OR adapter call → audit_trail insert → cache upsert | Partial success after adapter call but before audit write | Mock adapter test: dry-run yields no mutation; live with unavailable adapter returns typed error; successful write produces audit row and cache update |
+| Task 10 | records.provenance column: `remote` (canonical), `projection` (local import), `bridge` (markdown export re-import); remote truth never overridden by projection sync; projection-only aliases not promoted to remote identity | Cache & Sync Bootstrap | import CLI → projection provenance tag; sync CLI → remote provenance tag; identity resolution prefers remote over projection for same canonical id | Ambiguous projection aliases | CLI test: import projection, then sync remote; verify remote records tagged as canonical, projection provenance preserved, projection-only alias not resolved as remote |
+| Task 11 | snapshots and snapshot_chunks tables; export-snapshot emits chunks+citations or missing-index warning; diff-snapshot resolves stored IDs and rejects unknown with not-found | Snapshot & Diff, Index | index → snapshot→snapshot_chunks insert; export → snapshot lookup → chunk emission; diff → two snapshot id lookups → comparison | Expired/missing snapshot ids | CLI test: index, export-snapshot via valid ID, diff-snapshot with valid IDs, diff-snapshot with unknown ID returns not-found; verify export warns on missing index |
+| Task 12 | Default heading-delimited chunker; max-section fallback at paragraph/line boundaries; sliding-window chunker as optional policy; chunk schema: source range, content hash, repo_id, record_id, snapshot_id | Index & Chunking | index CLI → policy selection → chunk generation → chunk table insert; CLI/MCP query → chunk table → result with source ranges | Sliding-window boundary alignment with citation ranges | Local indexing test: index fixture docs with both policies; verify determinism, max-size compliance, source range validity; CLI/MCP read returns chunk data |
+| Task 13 | Sanitized fixture adapter for offline tests; live adapter gated by `GITCODE_LIVE_TEST=1` env + token; responses redacted before durable artifact write | GitCode Adapter, Docs & Dogfood | fixture tests → fixture adapter → no network; live tests → env check → live adapter → redacted response capture | Accidental secret capture in redaction | Local test: `go test ./...` passes offline with fixtures; `GITCODE_LIVE_TEST=1 go test -run Live` skips or runs with redacted output |
+| Task 14 | Docs under `docs/`: install, config-reference, repo-binding, secrets, mcp-setup, read-walkthrough, write-walkthrough, troubleshooting, fixture-capture, dogfood-checklist | Docs & Dogfood Feedback | Reader follows doc steps → commands succeed or return documented diagnostic | Doc drift from actual CLI behavior | Doc smoke test: run each documented command against fixture cache; verify output matches documented expectations |
+| Task 15 | Day-slice ordering: Day1=config/repo bind, Day2=fixture sync/index, Day3=CLI reads, Day4=MCP parity+transport, Day5=concurrency+write safety, Day6=snapshot integrity, Day7=docs+live validation+dogfood feedback | All subsystems | Each day's work produces an executable product check; final day verifies offline CLI and MCP reads for one issue and one wiki page | Task dependency chain breaks mid-week | Checklist: for each day, run the target command(s) against fixture cache; verify each day-slice gate passes before proceeding |
+| Task 16 | Dogfood feedback artifact under `project/dogfood/feedback.md` with lint rules preventing secret/path leakage; validator command `check-dogfood-feedback` | Docs & Dogfood Feedback | Coordinator records friction observations, missing metadata, design-agent prompt improvements → artifact written → lint check passes | Accidental private data in feedback | Run lint/check command; verify zero findings for secrets, private paths, tracker/wiki names |
 
 ### Risks And Validation
-- **GitCode API undocumented or unstable endpoints (wiki, attachments, pagination envelope)** — mitigation: the adapter interface is designed to swap pagination strategy (page/per_page vs. cursor) and endpoint paths without changing the `Client` interface. API-discovery fixture capture provides evidence of actual behavior; the adapter package includes a `endpoints.go` file with all URL templates for easy adjustment. — severity: medium
-- **SQLite FTS5 not available in all `modernc.org/sqlite` builds** — mitigation: verify FTS5 support in the go.sum dependency; the cache store checks for FTS5 availability at startup and falls back to a LIKE-based search with a warning if FTS5 is unavailable. — severity: low
-- **Lock-file mechanism not portable to Windows** — mitigation: assumption §8 notes that cross-platform lock behavior is acceptable for a developer tool; Windows support is deferred. If needed later, use a platform-specific lock abstraction with a `flock` (unix) / `LockFileEx` (windows) switch. — severity: low
-- **Large corpus ingest (100k+ sources) may make full index builds slow** — mitigation: incremental indexing processes only sources with changed content hashes. The first full build is a one-time cost. The chunk table uses byte-offset storage so re-chunking a single source does not require re-reading the entire corpus. — severity: medium
-- **Deterministic chunk ids depend on stable SHA-256 of source content + hash + byte offset; changes to the chunking algorithm would break id stability** — mitigation: the chunk version is stored in the chunks table schema metadata; a chunk version bump triggers re-chunking that updates chunk ids atomically with source content hash comparison. — severity: low
+- SQLite WAL file growth under sustained MCP read load — mitigation: periodic WAL checkpoint on sync completion and optional checkpoint on server shutdown; severity: low
+- Adapter seam abstraction leaks GitCode-specific behavior — mitigation: sanitized fixture capture of live responses; adapter interface defined by domain operations, not HTTP details; severity: medium
+- Chunking policy mismatch with real GitCode wiki formatting — mitigation: sliding-window policy as fallback; fixture capture includes real wiki pages; severity: medium
+- HTTP/SSE multi-client state drift when one client triggers sync — mitigation: sync is explicit CLI-only, never triggered by MCP client; read-only MCP tool set prevents accidental mutation; severity: low
+- Public-safety breach from misconfigured fixture capture — mitigation: fixtures live under `testdata/` with redaction CI check; live-capture command enforces redaction before write; severity: medium
 
-- **Package compilation** — `go build ./...` from repo root; verifies all 7 packages compile cleanly without circular imports. Proves Task 1.
-- **Cache backlink/chunk test** — `go test ./internal/cache/... -run TestBacklinks` opens in-memory SQLite, inserts source/task/link records, queries backlinks, verifies correct source; `TestChunkUniqueness` inserts chunks and verifies (source_id, content_hash) uniqueness constraint. Proves Task 2.
-- **GitCode adapter contract test** — `go test ./internal/gitcode/... -run TestContract` serves fixture JSON over `httptest.Server`, calls `GetIssue`, asserts structured fields match; `TestTimeout` verifies `ErrNetworkUnavailable` on expired context deadline. Proves Task 3.
-- **MCP tools/list and resolve_id test** — `go test ./internal/mcp/... -run TestIntegration` starts MCP server on stdio pipes, sends `tools/list` request → asserts 8 tools in response; sends `tools/call resolve_id` → asserts `{id, path, remote_alias}` fields populated. Proves Task 4.
-- **CLI search/get output test** — `go test ./internal/cli/... -run TestSearchJSON` populates cache, runs `search "backlog" --format json`, asserts valid JSON with `id, path, title, snippet`; `get DOC-123` asserts `id, path, title, body, status`. Proves Task 5.
-- **Sync state machine test** — `go test ./internal/service/... -run TestSync` inserts stale record, calls `sync_status` → stale, runs `sync` with fixture remote data → record fresh, sync event logged with idempotency key; concurrent `sync` → `ErrLockContention`, cache intact. Proves Task 6.
-- **Fixture sanitization test** — `go test ./internal/gitcode/... -run TestSanitizedFixtures` scans every file under `fixtures/`, fails if any contains `Authorization`, internal hostname, or non-public project name. Proves Task 7.
-- **Short test suite** — `go test ./... -short` runs all unit, contract, and golden tests in <10s with no network; `go test ./... -run Integration` skips cleanly without `GITCODE_TEST_TOKEN`, runs live when set. Proves Task 8.
-- **Chunking determinism test** — `go test ./internal/index/... -run TestChunking` ingests markdown source, produces chunks with byte offsets/line numbers/heading paths; re-runs chunking on same source → identical chunk ids. Schema check verifies `embedding` column exists as nullable default NULL. Proves Task 9.
-- **Shell-equivalent walkthrough** — `go test ./internal/cli/... -run TestMinimumReplacementBar` runs cold-cache `ingest`, then `search_sources`, `list_sources`, `get_source`, `source_backlinks`; asserts output semantically equivalent to shell workflow, all complete without network. Proves Task 10.
-- **Index pipeline test** — `go test ./internal/index/... -run TestIndexPipeline` runs `index --full` → exit 0; `stale-index` → JSON with count and affected ids; `index --incremental` on unchanged → no rewrites, zero new stale items. Proves Task 11.
-- **Write conflict test** — `go test ./internal/gitcode/... -run TestWriteIdempotency` sends create-issue with mock HTTP server, verifies `Idempotency-Key` header; server returns 409 → adapter returns `ErrConflict` with local and remote payloads, no automatic overwrite. Proves Task 12.
-- **Failure-mode suite** — `go test ./internal/gitcode/... -run TestFailureModes` exercises 9 modes; network timeout → cache unchanged, error includes record id + retry suggestion; rate limit → error includes `Retry-After`, no partial data in cache. Proves Task 13.
-- **Day 7 walkthrough** — `go test ./... -run TestDay7Walkthrough` runs the full sequence: `ingest` → `search_sources "backlog"` → `get_source DOC-123` → `source_backlinks DOC-123` → `sync_status DOC-123` all offline, producing correct output for coordinator intake, task lookup, and handoff review. Proves Task 14.
+- `doctor --runtime-audit --repo <repo_id>` CLI test against fixture cache — verifies version, config path, repo binding, cache row counts, MCP tool list, sync/index readiness, and failure classes are reported (proves outcome-1, task-1).
+- Two-repo fixture integration test: add repos with overlapping aliases, run `get` by alias — verifies scoping or collision rejection (proves outcome-2, task-2).
+- CLI test with temporary config home and mocked credential store: `config init`, `config locate`, `config show --redacted`, `auth status` — verifies active path, precedence, token presence without value (proves outcome-3, task-3).
+- Fixture-backed `sync --repo <repo_id> --issues --wiki --index` followed by offline `get`, `search`, `get-snippet` — verifies cache populated, index built, offline reads succeed (proves outcome-4, task-4).
+- Offline CLI read command suite over fixture cache — verifies each command returns repo-scoped deterministic output with stale/missing-index warnings (proves outcome-5, task-5).
+- MCP JSON-RPC test over fixture cache: invoke each tool and compare response against equivalent CLI read — verifies byte-equivalent parity (proves outcome-6, task-6).
+- Runtime transport test: start HTTP/SSE server, two MCP clients connect and read concurrently, verify `GET /health` and `GET /ready` return 200, request logs include correlation IDs (proves outcome-7, task-7).
+- Go concurrency test with shared SQLite cache: two concurrent readers + one writer — verifies readers succeed, writer gets busy/owned error, migration blocked (proves outcome-8, task-8).
+- Mock adapter write test: `write issue create --dry-run` (no mutation), `--live` with error-injecting mock (typed error, no audit row), `--live` with success mock (audit row + cache refresh) (proves outcome-9, task-9).
+- CLI import-then-sync test: import projection, sync remote, verify provenance tags and identity resolution (proves outcome-10, task-10).
+- CLI snapshot test: index, export-snapshot via valid ID (chunks+citations), export without index (warning), diff-snapshot with valid IDs, diff-snapshot with unknown ID (not-found) (proves outcome-11, task-11).
+- Local index+read test with both heading-delimited and sliding-window policies — verifies determinism, source ranges, max-size compliance, CLI/MCP queryability (proves outcome-12, task-12).
+- `go test ./...` without credentials (offline pass), `GITCODE_LIVE_TEST=1 go test -run Live` without token (skip), with token (run with redaction) (proves outcome-13, task-13).
+- Doc smoke test: execute each documented command against fixture cache and verify output matches expectations (proves outcome-14, task-14).
+- Day-slice checklist execution: verify each day's product check produces expected result; final day verifies offline CLI+MCP reads (proves outcome-15, task-15).
+- `check-dogfood-feedback` validator run against feedback artifact — verifies zero secrets, private paths, tracker/wiki names (proves outcome-16, task-16).
 
 ## Benefits
-- **Zero-network routine reads**: Agents performing coordinator intake, task lookup, handoff review, stale pointer search, and source citation complete all queries without any network access. This eliminates latency and availability dependency on GitCode infrastructure for the common agent workflow path.
-- **Single service layer for CLI and MCP**: The same `service.SearchSources` powers both `gitcode-mcp search --format json` and the MCP `search_sources` tool, guaranteeing behavioral equivalence between agent-facing and human-facing surfaces.
-- **Deterministic exports for review**: `export_snapshot` produces byte-identical output on repeated runs, enabling git-diffable audit trails of cache state.
-- **Explicit write safety**: No write to GitCode is triggered by a read operation. All writes carry idempotency keys and produce audit-log entries. Conflict detection returns both sides without automatic resolution.
-- **RAG-ready without migration**: Chunks are stored with byte offsets, line ranges, heading paths, and content hashes during the initial ingest. A future `embedding` column can be added without migrating existing rows. The chunk model is complete for semantic retrieval composition.
+- Eliminates network dependency for every routine agent read; after a single sync, all CLI and MCP reads work offline.
+- Shared SQLite cache serves multiple MCP clients concurrently via HTTP/SSE, reducing duplicate sync overhead.
+- Deterministic chunking and snapshot exports enable reviewable, diffable artifact generation for CI/audit pipelines.
+- Idempotent write paths with audit trails prevent silent data loss without requiring a full platform migration.
+- Public-safe by construction: token stored only in OS credential store, fixtures sanitized, live validation opt-in.
 
 ## Competition / Alternatives
-- **Model Context Protocol (MCP)** — The MCP specification defines JSON-RPC transport, `tools/list`, and `tools/call` methods but provides no domain-specific tools for tracker/wiki data or cache-first semantics. This architecture adopts the MCP protocol envelope and extends it with domain-specific tools backed by a durable local cache, a capability absent from vanilla MCP servers.
-- **GitHub CLI (gh)** — `gh` provides live-API-first issue/search commands and reads directly from the GitHub API for every invocation. It has no offline mode, no durable local cache, and no MCP server integration. This architecture's cache-first design makes it the superior choice for poor-network environments; `gh` cannot complete a query when the upstream is unreachable.
-- **GitLab CLI (glab)** — Similarly live-API-bound, `glab` offers no local cache, no deterministic exports, and no MCP surface. This architecture additionally formalizes link/backlink tracking and stale-pointer detection, which neither `glab` nor `gh` provides as a first-class feature.
+- `mcp` — The Model Context Protocol specifies JSON-RPC over stdio and SSE, which this architecture directly adopts for MCP tool surfaces; we extend with shared-cache multi-client HTTP/SSE serving.
+- `gh-cli` — GitHub CLI provides repo-scoped issue/wiki reads and writes with credential sourcing; this architecture matches the repo-scoping and credential-store pattern while adding offline cache-first semantics.
+- `git-credential-manager` — GCM sources credentials from platform-native stores with env fallback; our config_credential subsystem adopts the same layered sourcing pattern with redacted display and doctor diagnostics.
+- `go-keyring` / `keyring` — Go keyring libraries provide cross-platform credential-store access (macOS Keychain, D-Bus, WinCred); this architecture wraps them for token retrieval with graceful degraded-to-env fallback for CI.

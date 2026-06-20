@@ -59,6 +59,13 @@ func Load(src Source, overrides Overrides) (Config, error) {
 	if src == nil {
 		src = OSSource{}
 	}
+	if src.Env(EnvMCPConfigPath) != "" || src.Env(EnvMCPCacheDir) != "" || src.Env(EnvAPIURL) != "" {
+		eff, err := LoadEffective(src, overrides)
+		if err != nil {
+			return Config{}, err
+		}
+		return eff.Config, nil
+	}
 	cfg := defaultWithSource(src)
 	path, explicit := configPath(src)
 	if path != "" {

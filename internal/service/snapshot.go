@@ -2,12 +2,30 @@ package service
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
+
+	"gitcode-mcp/internal/cache"
 )
+
+func snapshotHash(value any) (string, error) {
+	b, err := marshalCanonicalJSON(value)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func snapshotManifest(snapshot Snapshot) Snapshot {
+	snapshot.Chunks = nil
+	return snapshot
+}
 
 func renderSnapshotContent(snapshot Snapshot, format string) ([]byte, error) {
 	sortSnapshot(&snapshot)
@@ -67,6 +85,12 @@ func renderSnapshotMarkdown(snapshot Snapshot) []byte {
 	for _, chunk := range snapshot.Chunks {
 		b.WriteString(fmt.Sprintf("- %s %s %d-%d lines=%d-%d hash=%s heading=%s\n", chunk.ID, chunk.SourceID, chunk.ByteStart, chunk.ByteEnd, chunk.LineStart, chunk.LineEnd, chunk.ContentHash, strings.Join(chunk.HeadingPath, " > ")))
 	}
+	if len(snapshot.Warnings) > 0 {
+		b.WriteString("\n## Warnings\n\n")
+		for _, warning := range snapshot.Warnings {
+			b.WriteString(fmt.Sprintf("- %s %s %s %s\n", warning.Code, warning.State, warning.SourceID, warning.Message))
+		}
+	}
 	return []byte(b.String())
 }
 
@@ -120,6 +144,19 @@ func sortSnapshot(snapshot *Snapshot) {
 	sort.SliceStable(snapshot.Links, func(i, j int) bool { return linkKey(snapshot.Links[i]) < linkKey(snapshot.Links[j]) })
 	sort.SliceStable(snapshot.Backlinks, func(i, j int) bool { return linkKey(snapshot.Backlinks[i]) < linkKey(snapshot.Backlinks[j]) })
 	sort.SliceStable(snapshot.SyncStatus, func(i, j int) bool { return snapshot.SyncStatus[i].SourceID < snapshot.SyncStatus[j].SourceID })
+	sort.SliceStable(snapshot.Warnings, func(i, j int) bool {
+		a, b := snapshot.Warnings[i], snapshot.Warnings[j]
+		if a.RepoID != b.RepoID {
+			return a.RepoID < b.RepoID
+		}
+		if a.SourceID != b.SourceID {
+			return a.SourceID < b.SourceID
+		}
+		if a.RecordID != b.RecordID {
+			return a.RecordID < b.RecordID
+		}
+		return a.Code < b.Code
+	})
 	sort.SliceStable(snapshot.Chunks, func(i, j int) bool {
 		a, c := snapshot.Chunks[i], snapshot.Chunks[j]
 		if a.SourceID != c.SourceID {
@@ -141,6 +178,81 @@ func sortSnapshot(snapshot *Snapshot) {
 		snapshot.Chunks[i].InheritedMetadata = copyStringMap(snapshot.Chunks[i].InheritedMetadata)
 		snapshot.Chunks[i].ResolvedAliases = copyStringMap(snapshot.Chunks[i].ResolvedAliases)
 	}
+}
+
+func cacheSnapshotChunks(snapshot Snapshot, snapshotID string) []cache.SnapshotChunk {
+	chunks := make([]cache.SnapshotChunk, 0, len(snapshot.Chunks))
+	for i, chunk := range snapshot.Chunks {
+		heading, _ := json.Marshal(chunk.HeadingPath)
+		revision := chunk.SourceRevisionHash
+		if revision == "" {
+			for _, status := range snapshot.SyncStatus {
+				if status.SourceID == chunk.SourceID {
+					revision = status.RemoteRevision
+					break
+				}
+			}
+		}
+		metadata, _ := json.Marshal(chunk.InheritedMetadata)
+		links, _ := json.Marshal(chunk.OutboundLinks)
+		aliases, _ := json.Marshal(chunk.ResolvedAliases)
+		chunks = append(chunks, cache.SnapshotChunk{RepoID: snapshot.RepoID, SnapshotID: snapshotID, ChunkID: chunk.ID, SourceType: sourceKind(snapshot.Sources, chunk.SourceID), SourceID: chunk.SourceID, RecordID: firstNonEmptyString(chunk.RecordID, chunk.SourceID), SourceContentHash: chunk.ContentHash, SourceRevisionHash: revision, IndexBuildID: firstNonEmptyString(chunk.IndexBuildID, snapshotID), ChunkContentHash: chunk.ContentHash, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, HeadingPathJSON: string(heading), Ordinal: i, Text: chunk.Text, MetadataJSON: string(metadata), OutboundLinksJSON: string(links), ResolvedAliasesJSON: string(aliases), Citation: fmt.Sprintf("%s:%d-%d", chunk.SourceID, chunk.LineStart, chunk.LineEnd), ContentHash: chunk.ContentHash})
+	}
+	return chunks
+}
+
+func snapshotChunksFromCache(chunks []cache.SnapshotChunk) []SnapshotChunk {
+	out := make([]SnapshotChunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		var heading []string
+		_ = json.Unmarshal([]byte(chunk.HeadingPathJSON), &heading)
+		metadata := map[string]string{}
+		links := []string{}
+		aliases := map[string]string{}
+		_ = json.Unmarshal([]byte(chunk.MetadataJSON), &metadata)
+		_ = json.Unmarshal([]byte(chunk.OutboundLinksJSON), &links)
+		_ = json.Unmarshal([]byte(chunk.ResolvedAliasesJSON), &aliases)
+		out = append(out, SnapshotChunk{RepoID: chunk.RepoID, ID: chunk.ChunkID, SourceID: chunk.SourceID, RecordID: chunk.RecordID, ContentHash: firstNonEmptyString(chunk.ChunkContentHash, chunk.ContentHash), ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, HeadingPath: heading, Text: chunk.Text, InheritedMetadata: metadata, OutboundLinks: links, ResolvedAliases: aliases, SourceRevisionHash: chunk.SourceRevisionHash, IndexBuildID: chunk.IndexBuildID, Ordinal: chunk.Ordinal})
+	}
+	return out
+}
+
+func snapshotChunkHashRows(chunks []cache.SnapshotChunk) []map[string]any {
+	chunks = append([]cache.SnapshotChunk(nil), chunks...)
+	sort.SliceStable(chunks, func(i, j int) bool {
+		if chunks[i].SourceType != chunks[j].SourceType {
+			return chunks[i].SourceType < chunks[j].SourceType
+		}
+		if chunks[i].SourceID != chunks[j].SourceID {
+			return chunks[i].SourceID < chunks[j].SourceID
+		}
+		if chunks[i].RecordID != chunks[j].RecordID {
+			return chunks[i].RecordID < chunks[j].RecordID
+		}
+		if chunks[i].Ordinal != chunks[j].Ordinal {
+			return chunks[i].Ordinal < chunks[j].Ordinal
+		}
+		return chunks[i].ChunkID < chunks[j].ChunkID
+	})
+	rows := make([]map[string]any, 0, len(chunks))
+	for _, chunk := range chunks {
+		rows = append(rows, map[string]any{"chunk_id": chunk.ChunkID, "source_type": chunk.SourceType, "source_id": chunk.SourceID, "record_id": chunk.RecordID, "source_content_hash": chunk.SourceContentHash, "source_revision_hash": chunk.SourceRevisionHash, "index_build_id": chunk.IndexBuildID, "chunk_content_hash": chunk.ChunkContentHash, "byte_start": chunk.ByteStart, "byte_end": chunk.ByteEnd, "line_start": chunk.LineStart, "line_end": chunk.LineEnd, "heading_path": chunk.HeadingPathJSON, "ordinal": chunk.Ordinal, "text_hash": textHash(chunk.Text), "metadata_json": chunk.MetadataJSON, "outbound_links_json": chunk.OutboundLinksJSON, "resolved_aliases_json": chunk.ResolvedAliasesJSON})
+	}
+	return rows
+}
+
+func sourceKind(sources []SnapshotSource, sourceID string) string {
+	for _, source := range sources {
+		if source.ID == sourceID {
+			return source.Kind
+		}
+	}
+	return ""
+}
+
+func textHash(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
 }
 
 func diffSnapshots(base, head Snapshot) DiffSnapshotResult {
@@ -338,14 +450,24 @@ func changedChunkFields(a, b SnapshotChunk) []string {
 	if a.ContentHash != b.ContentHash {
 		fields = append(fields, "content_hash")
 	}
-	if a.ByteStart != b.ByteStart || a.ByteEnd != b.ByteEnd {
-		fields = append(fields, "byte_range")
-	}
-	if a.LineStart != b.LineStart || a.LineEnd != b.LineEnd {
-		fields = append(fields, "line_range")
+	if (a.ByteStart != b.ByteStart || a.ByteEnd != b.ByteEnd || a.LineStart != b.LineStart || a.LineEnd != b.LineEnd) && a.ContentHash == b.ContentHash {
+		fields = append(fields, "citation_range_changed")
+	} else {
+		if a.ByteStart != b.ByteStart || a.ByteEnd != b.ByteEnd {
+			fields = append(fields, "byte_range")
+		}
+		if a.LineStart != b.LineStart || a.LineEnd != b.LineEnd {
+			fields = append(fields, "line_range")
+		}
 	}
 	if strings.Join(a.HeadingPath, "\x00") != strings.Join(b.HeadingPath, "\x00") {
 		fields = append(fields, "heading_path")
+	}
+	if a.SourceRevisionHash != b.SourceRevisionHash {
+		fields = append(fields, "source_revision_hash")
+	}
+	if a.IndexBuildID != b.IndexBuildID {
+		fields = append(fields, "index_build_id")
 	}
 	if a.Text != b.Text {
 		fields = append(fields, "text")

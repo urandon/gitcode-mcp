@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -39,18 +40,24 @@ type GitCodeStartup struct {
 }
 
 type startupOptions struct {
-	mcp       bool
-	help      bool
-	version   bool
-	overrides config.Overrides
+	mcp          bool
+	help         bool
+	version      bool
+	mcpServe     bool
+	mcpTransport string
+	mcpBind      string
+	overrides    config.Overrides
 }
 
 type cliRouteFunc func(context.Context, []string, io.Writer, io.Writer, StartupDeps) int
 
 type mcpRouteFunc func(context.Context, io.Reader, io.Writer, io.Writer, StartupDeps) int
 
+type mcpServeRouteFunc func(context.Context, io.Reader, io.Writer, io.Writer, StartupDeps, string, string) int
+
 var cliRoute cliRouteFunc = runCLICompatibility
 var mcpRoute mcpRouteFunc = runMCPStdio
+var mcpServeRoute mcpServeRouteFunc = runMCPServe
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, config.OSSource{}))
@@ -63,6 +70,10 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 		return 2
 	}
 	if opts.help {
+		if opts.mcpServe {
+			printMCPServeHelp(stdout)
+			return 0
+		}
 		if opts.mcp {
 			printMCPHelp(stderr)
 			return 0
@@ -74,6 +85,9 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 		fmt.Fprintf(stdout, "gitcode-mcp %s\n", version)
 		return 0
 	}
+	if len(rest) > 0 && (rest[0] == "config" || rest[0] == "auth") {
+		return cli.ExecuteWithSource(rest, stdout, stderr, src)
+	}
 
 	cfg, err := config.Load(src, opts.overrides)
 	if err != nil {
@@ -81,6 +95,9 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 		return 1
 	}
 	deps := buildStartupDeps(cfg, config.Token(src))
+	if opts.mcpServe {
+		return mcpServeRoute(context.Background(), stdin, stdout, stderr, deps, opts.mcpTransport, opts.mcpBind)
+	}
 	if opts.mcp {
 		return mcpRoute(context.Background(), stdin, stdout, stderr, deps)
 	}
@@ -102,6 +119,9 @@ func buildStartupDeps(cfg config.Config, token string) StartupDeps {
 }
 
 func parseStartupArgs(args []string) (startupOptions, []string, error) {
+	if len(args) >= 2 && args[0] == "mcp" && args[1] == "serve" {
+		return parseMCPServeArgs(args[2:])
+	}
 	var opts startupOptions
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -196,6 +216,50 @@ func parseStartupArgs(args []string) (startupOptions, []string, error) {
 	return opts, nil, nil
 }
 
+func parseMCPServeArgs(args []string) (startupOptions, []string, error) {
+	opts := startupOptions{mcpServe: true, mcpTransport: "stdio", mcpBind: "127.0.0.1:0"}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help":
+			opts.help = true
+		case strings.HasPrefix(arg, "--transport="):
+			opts.mcpTransport = strings.TrimPrefix(arg, "--transport=")
+		case arg == "--transport":
+			value, next, err := startupValue(args, i, arg)
+			if err != nil {
+				return opts, nil, err
+			}
+			opts.mcpTransport = value
+			i = next
+		case strings.HasPrefix(arg, "--bind="):
+			opts.mcpBind = strings.TrimPrefix(arg, "--bind=")
+		case arg == "--bind":
+			value, next, err := startupValue(args, i, arg)
+			if err != nil {
+				return opts, nil, err
+			}
+			opts.mcpBind = value
+			i = next
+		case strings.HasPrefix(arg, "--cache-path="):
+			opts.overrides.CachePath = strings.TrimPrefix(arg, "--cache-path=")
+		case arg == "--cache-path":
+			value, next, err := startupValue(args, i, arg)
+			if err != nil {
+				return opts, nil, err
+			}
+			opts.overrides.CachePath = value
+			i = next
+		default:
+			return opts, nil, fmt.Errorf("startup: unknown mcp serve flag %s", arg)
+		}
+	}
+	if opts.mcpTransport != "stdio" && opts.mcpTransport != "http-sse" {
+		return opts, nil, fmt.Errorf("startup: invalid --transport %s", opts.mcpTransport)
+	}
+	return opts, nil, nil
+}
+
 func startupValue(args []string, index int, flag string) (string, int, error) {
 	if index+1 >= len(args) || args[index+1] == "" {
 		return "", index, fmt.Errorf("startup: %s requires a value", flag)
@@ -224,6 +288,13 @@ func hasCLIFlag(args []string, name string) bool {
 	return false
 }
 
+func runMCPServe(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, deps StartupDeps, transport string, bind string) int {
+	if transport == "stdio" {
+		return runMCPStdio(ctx, stdin, stdout, stderr, deps)
+	}
+	return runMCPHTTPSSE(ctx, stderr, deps, bind)
+}
+
 func runMCPStdio(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, deps StartupDeps) int {
 	if err := ensureParentDir(deps.Config.CachePath); err != nil {
 		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
@@ -237,6 +308,39 @@ func runMCPStdio(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr 
 	defer store.Close()
 	server := mcp.New(stdin, stdout, stderr, service.New(store))
 	if err := server.Serve(); err != nil {
+		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
+		return 1
+	}
+	return 0
+}
+
+func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind string) int {
+	if err := ensureParentDir(deps.Config.CachePath); err != nil {
+		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
+		return 1
+	}
+	store, err := cache.NewSQLiteStore(ctx, deps.Config.CachePath)
+	if err != nil {
+		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
+		return 1
+	}
+	defer store.Close()
+	svc := service.New(store)
+	transport := mcp.NewHTTPSSETransport(mcp.NewRPCHandler(svc), mcp.ServerConfig{BindAddress: bind, ReadinessProbe: func(ctx context.Context) mcp.Readiness {
+		repos, err := store.ListRepositories(ctx)
+		if err != nil {
+			var lockErr cache.ErrLockContention
+			if errors.As(err, &lockErr) {
+				return mcp.LockContentionReadiness(lockErr)
+			}
+			return mcp.Readiness{Ready: false, Code: "cache_unreadable", Message: err.Error()}
+		}
+		if len(repos) == 0 {
+			return mcp.Readiness{Ready: false, Code: "repo_unavailable", Message: "no repositories configured"}
+		}
+		return mcp.Readiness{Ready: true}
+	}})
+	if err := transport.Serve(ctx); err != nil {
 		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
 		return 1
 	}
@@ -259,6 +363,7 @@ func printStartupHelp(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Global flags:")
 	fmt.Fprintln(w, "  --mcp                 run stdio MCP server")
+	fmt.Fprintln(w, "  mcp serve             run MCP server with stdio or HTTP/SSE transport")
 	fmt.Fprintln(w, "  --cache-path PATH     cache database path")
 	fmt.Fprintln(w, "  --timeout DURATION    startup default timeout")
 	fmt.Fprintln(w, "  --max-size BYTES      maximum GitCode response size")
@@ -271,4 +376,10 @@ func printMCPHelp(w io.Writer) {
 	fmt.Fprintln(w, "Usage: gitcode-mcp --mcp [global flags]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Starts stdio MCP mode. stdout is reserved for JSON-RPC frames.")
+}
+
+func printMCPServeHelp(w io.Writer) {
+	fmt.Fprintln(w, "Usage: gitcode-mcp mcp serve --transport stdio|http-sse [--bind 127.0.0.1:PORT]")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Starts MCP mode over stdio or HTTP/SSE.")
 }

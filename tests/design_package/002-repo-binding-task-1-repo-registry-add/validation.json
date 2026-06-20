@@ -1,0 +1,22 @@
+{
+  "covered_outcome_ids": [
+    "outcome-2"
+  ],
+  "covered_decommission_ids": [
+    "decommission-6"
+  ],
+  "product_surfaces": [
+    "gitcode-mcp repo add",
+    "gitcode-mcp repo status --repo <repo_id>",
+    "repository alias collision handling",
+    "repository not-found diagnostics",
+    "public-safe repository status rendering"
+  ],
+  "evidence_type": "offline executable CLI integration validation",
+  "freshness": "current source/build/runtime evidence required; run tests/design_package/002-repo-binding-task-1-repo-registry-add/run.sh against the working tree",
+  "mocks_used": [
+    "No external-provider mocks are used; run.sh builds and executes the real CLI binary against isolated temporary config/cache state",
+    "Temporary HOME/XDG/cache paths and sanitized fixture repository identifiers are used; no live GitCode network, credentials, OS keyring, or device validation"
+  ],
+  "production_files_modified": []
+}

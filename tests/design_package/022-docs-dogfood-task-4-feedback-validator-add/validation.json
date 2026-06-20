@@ -1,0 +1,16 @@
+{
+  "covered_outcome_ids": ["outcome-16"],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "project/dogfood/feedback.md",
+    "project/dogfood/check-dogfood-feedback",
+    "project/dogfood/testdata/feedback-pass.md",
+    "project/dogfood/testdata/feedback-fail.md",
+    "project/dogfood/fixture-allowlist.txt",
+    "project/dogfood/lib/safety.sh"
+  ],
+  "evidence_type": "local command",
+  "freshness": "current source/build/runtime evidence required",
+  "mocks_used": false,
+  "production_files_modified": []
+}

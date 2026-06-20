@@ -3,50 +3,80 @@
 Schema Version: `triborg.decommission-ledger.v1`
 
 ## decommission-1
-- Request Task: 10
-- Target: Shell-based agent knowledge layer: find, rg --files, rg -n, sed -n, hand-maintained markdown indexes for source discovery
+- Request Task: 6
+- Target: Coordinator shell-only read workflow for snippets, recent changes, link checks, stale-index reports, cache status, chunks, backlinks, and sync status
 - Category: surface
 - Action: `replace`
-- Verification: Run gitcode-mcp search_sources, list_sources, get_source, and get_snippet commands offline on ingested fixture data; confirm each produces output semantically equivalent to the replaced shell workflow without invoking find/rg/sed.
+- Verification: MCP JSON-RPC/server tests show equivalent read results through MCP tools without requiring shell-only coordinator commands for the covered queries
 - Allowlist: none
 - Keep Reason: n/a
 
 
 ## decommission-2
-- Request Task: 10
-- Target: Hand-maintained markdown indexes: source ledger, track index, task backlog, acceptance ledger, open questions index, backlink graph, broken-link report (plaintext files)
+- Request Task: 9
+- Target: Fake-success or stub-like remote write contract for issue/wiki operations
 - Category: state_contract
 - Action: `replace`
-- Verification: Run gitcode-mcp index --full on ingested fixture sources; verify that gitcode-mcp tasks, gitcode-mcp tracks, gitcode-mcp stale-index, and gitcode-mcp link-check produce JSON output with equivalent data to the replaced plaintext indexes without requiring a human to edit a markdown index file.
+- Verification: CLI/API tests prove unavailable write adapters return actionable errors and cannot persist successful audit events
 - Allowlist: none
 - Keep Reason: n/a
 
 
 ## decommission-3
-- Request Task: 10
-- Target: Agent shell workflow for coordinator intake: manually reading AGENTS.md, README, backlog, track indexes, and handoff files by path
-- Category: surface
+- Request Task: 11
+- Target: diff_snapshot behavior that compares current/current for arbitrary unresolved snapshot ids
+- Category: state_contract
 - Action: `replace`
-- Verification: Run the minimum-replacement-bar walkthrough: ingest, search_sources, get_source, source_backlinks, sync_status all complete offline and produce correct output for a coordinator intake, task lookup, and handoff review scenario.
+- Verification: Snapshot tests prove unknown base_id or head_id returns not-found instead of changed:false
 - Allowlist: none
 - Keep Reason: n/a
 
 
 ## decommission-4
-- Request Task: 10
-- Target: Clickable local markdown links (relative file paths in markdown) as the primary cross-reference mechanism; replaced by bidirectional alias maps with GitCode issue/wiki link generation
-- Category: surface
+- Request Task: 4
+- Target: Fixture-only active cache bootstrap that leaves real coordinator queries returning cache_empty
+- Category: state_contract
 - Action: `replace`
-- Verification: Run gitcode-mcp get_source and verify the output includes both a local cache path and a resolved remote alias; run gitcode-mcp link-check and confirm that broken local-path links are flagged with suggested alias resolutions.
+- Verification: Fixture-backed and optional live sync tests prove configured issue/wiki records populate cache and offline reads return nonempty results
 - Allowlist: none
 - Keep Reason: n/a
 
 
-## decommission-14
-- Request Task: 14
-- Target: legacy surface referenced by request task 14: Define one-week implementation plan
-- Category: unspecified
+## decommission-5
+- Request Task: 7
+- Target: Stdio-only MCP runtime as the sole product transport
+- Category: surface
 - Action: `replace`
-- Verification: At the end of each simulated day, the documented verification command passes. The Day 7 walkthrough exercises the minimum replacement bar: `ingest` → `search_sources` → `get_source` → `source_backlinks` → `sync_status` all complete offline and produce correct output for a coordinator intake, task lookup, and handoff review scenario described in the plan.
+- Verification: Runtime transport tests prove both stdio and HTTP/SSE server mode are available, with shared-cache multi-client reads over HTTP/SSE
+- Allowlist: none
+- Keep Reason: n/a
+
+
+## decommission-6
+- Request Task: 2
+- Target: Unscoped remote aliases such as issue:42 and wiki:Home as globally unique identities
+- Category: state_contract
+- Action: `replace`
+- Verification: Two-repository fixture tests prove alias collisions are rejected or disambiguated by repo_id
+- Allowlist: none
+- Keep Reason: n/a
+
+
+## decommission-7
+- Request Task: 3
+- Target: Opaque config discovery that requires reading source code to know active paths and overrides
+- Category: surface
+- Action: `replace`
+- Verification: CLI tests prove config locate and config show --redacted expose active config and precedence without secret disclosure
+- Allowlist: none
+- Keep Reason: n/a
+
+
+## decommission-8
+- Request Task: 11
+- Target: export_snapshot output that silently omits chunks or citable ranges when indexing has not run
+- Category: state_contract
+- Action: `replace`
+- Verification: Export tests prove missing index state produces explicit warnings and indexed state includes chunks and citation ranges
 - Allowlist: none
 - Keep Reason: n/a

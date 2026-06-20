@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 1
+const currentSchemaVersion = 4
 
 type migration struct {
 	version int
@@ -15,6 +15,9 @@ type migration struct {
 
 var migrations = []migration{
 	{version: 1, apply: applyInitialMigration},
+	{version: 2, apply: applyRepoScopedCacheMigration},
+	{version: 3, apply: applyChunkPolicyMigration},
+	{version: 4, apply: applyStoredSnapshotMigration},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB, ftsAvailable bool) error {
@@ -76,8 +79,25 @@ func schemaVersion(ctx context.Context, db *sql.DB) (int, error) {
 
 func applyInitialMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
 	statements := []string{
+		`CREATE TABLE IF NOT EXISTS repos (
+	repo_id TEXT PRIMARY KEY,
+	owner TEXT NOT NULL,
+	name TEXT NOT NULL,
+	api_base_url TEXT NOT NULL,
+	scopes TEXT NOT NULL,
+	display_name TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+)`,
+		`CREATE TABLE IF NOT EXISTS repo_aliases (
+	alias TEXT PRIMARY KEY,
+	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+	created_at TEXT NOT NULL
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_repo_aliases_repo ON repo_aliases(repo_id)`,
 		`CREATE TABLE IF NOT EXISTS sources (
-	id TEXT PRIMARY KEY,
+	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+	id TEXT NOT NULL,
 	kind TEXT NOT NULL,
 	path TEXT NOT NULL,
 	title TEXT NOT NULL,
@@ -86,31 +106,40 @@ func applyInitialMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) e
 	labels TEXT NOT NULL,
 	content_hash TEXT NOT NULL,
 	created_at TEXT NOT NULL,
-	updated_at TEXT NOT NULL
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, id)
 )`,
-		`CREATE INDEX IF NOT EXISTS idx_sources_kind_status ON sources(kind, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_sources_kind_status ON sources(repo_id, kind, status)`,
 		`CREATE TABLE IF NOT EXISTS identity_map (
-	source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+	repo_id TEXT NOT NULL,
+	source_id TEXT NOT NULL,
 	alias_type TEXT NOT NULL,
 	alias TEXT NOT NULL,
 	remote_type TEXT NOT NULL DEFAULT '',
 	remote_id TEXT NOT NULL DEFAULT '',
-	PRIMARY KEY(alias_type, alias),
-	UNIQUE(source_id, alias_type, alias)
+	PRIMARY KEY(repo_id, alias_type, alias),
+	UNIQUE(repo_id, source_id, alias_type, alias),
+	FOREIGN KEY(repo_id, source_id) REFERENCES sources(repo_id, id) ON DELETE CASCADE
 )`,
-		`CREATE INDEX IF NOT EXISTS idx_identity_source ON identity_map(source_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_identity_remote ON identity_map(remote_type, remote_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_identity_source ON identity_map(repo_id, source_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_identity_remote ON identity_map(repo_id, remote_type, remote_id)`,
 		`CREATE TABLE IF NOT EXISTS links (
-	source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-	target_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+	repo_id TEXT NOT NULL,
+	source_id TEXT NOT NULL,
+	target_id TEXT NOT NULL,
 	kind TEXT NOT NULL,
 	text TEXT NOT NULL,
-	PRIMARY KEY(source_id, target_id, kind, text)
+	PRIMARY KEY(repo_id, source_id, target_id, kind, text),
+	FOREIGN KEY(repo_id, source_id) REFERENCES sources(repo_id, id) ON DELETE CASCADE,
+	FOREIGN KEY(repo_id, target_id) REFERENCES sources(repo_id, id) ON DELETE CASCADE
 )`,
-		`CREATE INDEX IF NOT EXISTS idx_links_target ON links(target_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_links_target ON links(repo_id, target_id)`,
 		`CREATE TABLE IF NOT EXISTS chunks (
-	id TEXT PRIMARY KEY,
-	source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+	repo_id TEXT NOT NULL,
+	id TEXT NOT NULL,
+	source_id TEXT NOT NULL,
+	record_id TEXT NOT NULL DEFAULT '',
+	snapshot_id TEXT NOT NULL DEFAULT '',
 	content_hash TEXT NOT NULL,
 	byte_start INTEGER NOT NULL,
 	byte_end INTEGER NOT NULL,
@@ -123,42 +152,55 @@ func applyInitialMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) e
 	outbound_links TEXT NOT NULL,
 	resolved_aliases TEXT NOT NULL,
 	embedding BLOB DEFAULT NULL,
-	UNIQUE(source_id, content_hash, byte_start)
+	policy TEXT NOT NULL DEFAULT 'heading',
+	PRIMARY KEY(repo_id, id),
+	UNIQUE(repo_id, source_id, content_hash, byte_start, policy, snapshot_id),
+	FOREIGN KEY(repo_id, source_id) REFERENCES sources(repo_id, id) ON DELETE CASCADE
 )`,
-		`CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(repo_id, source_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_chunks_query ON chunks(repo_id, source_id, record_id, snapshot_id, policy, byte_start, id)`,
 		`CREATE TABLE IF NOT EXISTS remote_revisions (
-	source_id TEXT PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+	repo_id TEXT NOT NULL,
+	source_id TEXT NOT NULL,
 	remote_type TEXT NOT NULL,
 	remote_id TEXT NOT NULL,
 	remote_revision TEXT NOT NULL,
 	status TEXT NOT NULL,
-	last_fetched_at TEXT NOT NULL
+	last_fetched_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, source_id),
+	FOREIGN KEY(repo_id, source_id) REFERENCES sources(repo_id, id) ON DELETE CASCADE
 )`,
 		`CREATE TABLE IF NOT EXISTS sync_events (
-	id TEXT PRIMARY KEY,
-	source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+	repo_id TEXT NOT NULL,
+	id TEXT NOT NULL,
+	source_id TEXT NOT NULL,
 	remote_type TEXT NOT NULL,
 	remote_id TEXT NOT NULL,
 	remote_revision TEXT NOT NULL,
 	status TEXT NOT NULL,
 	idempotency_key TEXT NOT NULL,
 	message TEXT NOT NULL,
-	created_at TEXT NOT NULL
+	created_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, id),
+	FOREIGN KEY(repo_id, source_id) REFERENCES sources(repo_id, id) ON DELETE CASCADE
 )`,
-		`CREATE INDEX IF NOT EXISTS idx_sync_events_source ON sync_events(source_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_sync_events_idempotency_key ON sync_events(idempotency_key)`,
+		`CREATE INDEX IF NOT EXISTS idx_sync_events_source ON sync_events(repo_id, source_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_sync_events_idempotency_key ON sync_events(repo_id, idempotency_key)`,
 		`CREATE TABLE IF NOT EXISTS conflicts (
-	id TEXT PRIMARY KEY,
-	source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+	repo_id TEXT NOT NULL,
+	id TEXT NOT NULL,
+	source_id TEXT NOT NULL,
 	kind TEXT NOT NULL,
 	local_payload TEXT NOT NULL,
 	remote_payload TEXT NOT NULL,
-	created_at TEXT NOT NULL
+	created_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, id),
+	FOREIGN KEY(repo_id, source_id) REFERENCES sources(repo_id, id) ON DELETE CASCADE
 )`,
-		`CREATE INDEX IF NOT EXISTS idx_conflicts_source ON conflicts(source_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_conflicts_source ON conflicts(repo_id, source_id)`,
 	}
 	if ftsAvailable {
-		statements = append(statements, `CREATE VIRTUAL TABLE IF NOT EXISTS fts_index USING fts5(source_id UNINDEXED, path UNINDEXED, title, body)`)
+		statements = append(statements, `CREATE VIRTUAL TABLE IF NOT EXISTS fts_index USING fts5(repo_id UNINDEXED, source_id UNINDEXED, path UNINDEXED, title, body)`)
 	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
@@ -166,6 +208,205 @@ func applyInitialMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) e
 		}
 	}
 	return nil
+}
+
+func applyRepoScopedCacheMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS records (
+	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+	record_id TEXT NOT NULL,
+	record_type TEXT NOT NULL,
+	path TEXT NOT NULL,
+	title TEXT NOT NULL,
+	body TEXT NOT NULL,
+	status TEXT NOT NULL,
+	labels TEXT NOT NULL,
+	content_hash TEXT NOT NULL,
+	provenance TEXT NOT NULL CHECK(provenance IN ('remote', 'projection', 'bridge')),
+	remote_type TEXT NOT NULL DEFAULT '',
+	remote_id TEXT NOT NULL DEFAULT '',
+	remote_revision TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, record_id)
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_records_type_status ON records(repo_id, record_type, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_records_remote ON records(repo_id, remote_type, remote_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_records_remote_unique ON records(repo_id, remote_type, remote_id) WHERE remote_type <> '' AND remote_id <> ''`,
+		`CREATE TABLE IF NOT EXISTS record_comments (
+	repo_id TEXT NOT NULL,
+	record_id TEXT NOT NULL,
+	comment_id TEXT NOT NULL,
+	author TEXT NOT NULL,
+	body TEXT NOT NULL,
+	content_hash TEXT NOT NULL,
+	remote_revision TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, record_id, comment_id),
+	FOREIGN KEY(repo_id, record_id) REFERENCES records(repo_id, record_id) ON DELETE CASCADE
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_record_comments_record ON record_comments(repo_id, record_id)`,
+		`CREATE TABLE IF NOT EXISTS audit_trail (
+	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+	id TEXT NOT NULL,
+	operation TEXT NOT NULL,
+	record_id TEXT NOT NULL DEFAULT '',
+	remote_type TEXT NOT NULL DEFAULT '',
+	remote_id TEXT NOT NULL DEFAULT '',
+	idempotency_key TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL,
+	message TEXT NOT NULL DEFAULT '',
+	payload_hash TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, id)
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_trail_record ON audit_trail(repo_id, record_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_trail_idempotency ON audit_trail(repo_id, idempotency_key)`,
+		`CREATE TABLE IF NOT EXISTS snapshots (
+	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+	snapshot_id TEXT NOT NULL,
+	format TEXT NOT NULL,
+	content_hash TEXT NOT NULL,
+	record_count INTEGER NOT NULL,
+	created_at TEXT NOT NULL,
+	schema_version TEXT NOT NULL DEFAULT 'gitcode-mcp.snapshot.v1',
+	manifest_hash TEXT NOT NULL DEFAULT '',
+	chunk_set_hash TEXT NOT NULL DEFAULT '',
+	chunk_count INTEGER NOT NULL DEFAULT 0,
+	manifest_json TEXT NOT NULL DEFAULT '{}',
+	warnings_json TEXT NOT NULL DEFAULT '[]',
+	metadata TEXT NOT NULL DEFAULT '{}',
+	PRIMARY KEY(repo_id, snapshot_id)
+)`,
+		`CREATE TABLE IF NOT EXISTS snapshot_chunks (
+	repo_id TEXT NOT NULL,
+	snapshot_id TEXT NOT NULL,
+	chunk_id TEXT NOT NULL,
+	source_type TEXT NOT NULL DEFAULT '',
+	source_id TEXT NOT NULL DEFAULT '',
+	record_id TEXT NOT NULL,
+	source_content_hash TEXT NOT NULL DEFAULT '',
+	source_revision_hash TEXT NOT NULL DEFAULT '',
+	index_build_id TEXT NOT NULL DEFAULT '',
+	chunk_content_hash TEXT NOT NULL DEFAULT '',
+	byte_start INTEGER NOT NULL,
+	byte_end INTEGER NOT NULL,
+	line_start INTEGER NOT NULL,
+	line_end INTEGER NOT NULL,
+	heading_path TEXT NOT NULL DEFAULT '[]',
+	ordinal INTEGER NOT NULL DEFAULT 0,
+	text TEXT NOT NULL DEFAULT '',
+	metadata_json TEXT NOT NULL DEFAULT '{}',
+	outbound_links_json TEXT NOT NULL DEFAULT '[]',
+	resolved_aliases_json TEXT NOT NULL DEFAULT '{}',
+	citation TEXT NOT NULL DEFAULT '',
+	content_hash TEXT NOT NULL DEFAULT '',
+	PRIMARY KEY(repo_id, snapshot_id, chunk_id),
+	FOREIGN KEY(repo_id, snapshot_id) REFERENCES snapshots(repo_id, snapshot_id) ON DELETE CASCADE
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_snapshot_chunks_record ON snapshot_chunks(repo_id, record_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_revisions_remote_unique ON remote_revisions(repo_id, remote_type, remote_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_events_idempotency_unique ON sync_events(repo_id, idempotency_key)`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyChunkPolicyMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
+	columns, err := tableColumns(ctx, tx, "chunks")
+	if err != nil {
+		return err
+	}
+	addColumns := map[string]string{
+		"record_id":   `ALTER TABLE chunks ADD COLUMN record_id TEXT NOT NULL DEFAULT ''`,
+		"snapshot_id": `ALTER TABLE chunks ADD COLUMN snapshot_id TEXT NOT NULL DEFAULT ''`,
+		"policy":      `ALTER TABLE chunks ADD COLUMN policy TEXT NOT NULL DEFAULT 'heading'`,
+	}
+	for column, statement := range addColumns {
+		if columns[column] {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	_, err = tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_chunks_query ON chunks(repo_id, source_id, record_id, snapshot_id, policy, byte_start, id)`)
+	return err
+}
+
+func applyStoredSnapshotMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
+	snapshotColumns, err := tableColumns(ctx, tx, "snapshots")
+	if err != nil {
+		return err
+	}
+	snapshotAdds := map[string]string{
+		"schema_version": `ALTER TABLE snapshots ADD COLUMN schema_version TEXT NOT NULL DEFAULT 'gitcode-mcp.snapshot.v1'`,
+		"manifest_hash":  `ALTER TABLE snapshots ADD COLUMN manifest_hash TEXT NOT NULL DEFAULT ''`,
+		"chunk_set_hash": `ALTER TABLE snapshots ADD COLUMN chunk_set_hash TEXT NOT NULL DEFAULT ''`,
+		"chunk_count":    `ALTER TABLE snapshots ADD COLUMN chunk_count INTEGER NOT NULL DEFAULT 0`,
+		"manifest_json":  `ALTER TABLE snapshots ADD COLUMN manifest_json TEXT NOT NULL DEFAULT '{}'`,
+		"warnings_json":  `ALTER TABLE snapshots ADD COLUMN warnings_json TEXT NOT NULL DEFAULT '[]'`,
+	}
+	for column, statement := range snapshotAdds {
+		if !snapshotColumns[column] {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return err
+			}
+		}
+	}
+	chunkColumns, err := tableColumns(ctx, tx, "snapshot_chunks")
+	if err != nil {
+		return err
+	}
+	chunkAdds := map[string]string{
+		"source_type":           `ALTER TABLE snapshot_chunks ADD COLUMN source_type TEXT NOT NULL DEFAULT ''`,
+		"source_id":             `ALTER TABLE snapshot_chunks ADD COLUMN source_id TEXT NOT NULL DEFAULT ''`,
+		"source_content_hash":   `ALTER TABLE snapshot_chunks ADD COLUMN source_content_hash TEXT NOT NULL DEFAULT ''`,
+		"source_revision_hash":  `ALTER TABLE snapshot_chunks ADD COLUMN source_revision_hash TEXT NOT NULL DEFAULT ''`,
+		"index_build_id":        `ALTER TABLE snapshot_chunks ADD COLUMN index_build_id TEXT NOT NULL DEFAULT ''`,
+		"chunk_content_hash":    `ALTER TABLE snapshot_chunks ADD COLUMN chunk_content_hash TEXT NOT NULL DEFAULT ''`,
+		"heading_path":          `ALTER TABLE snapshot_chunks ADD COLUMN heading_path TEXT NOT NULL DEFAULT '[]'`,
+		"ordinal":               `ALTER TABLE snapshot_chunks ADD COLUMN ordinal INTEGER NOT NULL DEFAULT 0`,
+		"text":                  `ALTER TABLE snapshot_chunks ADD COLUMN text TEXT NOT NULL DEFAULT ''`,
+		"metadata_json":         `ALTER TABLE snapshot_chunks ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'`,
+		"outbound_links_json":   `ALTER TABLE snapshot_chunks ADD COLUMN outbound_links_json TEXT NOT NULL DEFAULT '[]'`,
+		"resolved_aliases_json": `ALTER TABLE snapshot_chunks ADD COLUMN resolved_aliases_json TEXT NOT NULL DEFAULT '{}'`,
+	}
+	for column, statement := range chunkAdds {
+		if !chunkColumns[column] {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return err
+			}
+		}
+	}
+	_, err = tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_snapshot_chunks_order ON snapshot_chunks(repo_id, snapshot_id, source_type, source_id, record_id, ordinal, chunk_id)`)
+	return err
+}
+
+func tableColumns(ctx context.Context, tx *sql.Tx, table string) (map[string]bool, error) {
+	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return nil, err
+		}
+		columns[name] = true
+	}
+	return columns, rows.Err()
 }
 
 func detectFTS5(ctx context.Context, db *sql.DB) bool {

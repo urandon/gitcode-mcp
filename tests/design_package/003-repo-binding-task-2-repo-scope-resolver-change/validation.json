@@ -1,0 +1,33 @@
+{
+  "task_id": "003-repo-binding-task-2-repo-scope-resolver-change",
+  "covered_outcome_ids": [
+    "outcome-2",
+    "outcome-6",
+    "outcome-11"
+  ],
+  "covered_decommission_ids": [
+    "decommission-6"
+  ],
+  "product_surfaces": [
+    "CLI repo-scoped get read path",
+    "service repo-scoped alias resolver",
+    "MCP JSON-RPC tools/call read path",
+    "snapshot/export source selection",
+    "sync/write repository route validation before adapter handoff"
+  ],
+  "evidence_type": [
+    "CLI command runtime test",
+    "API test",
+    "service/runtime compiler test",
+    "stubbed-external-provider zero-invocation test"
+  ],
+  "freshness": "current source/build/runtime evidence required; run.sh executes targeted Go tests, full go test ./..., and git diff --check from the current checkout",
+  "mocks_used": [
+    {
+      "name": "fakeGitCodeClient",
+      "scope": "external dependency sentinel only",
+      "reason": "proves disabled wiki-scope sync/write route rejects before any live adapter invocation while exercising production service routing"
+    }
+  ],
+  "production_files_modified": []
+}

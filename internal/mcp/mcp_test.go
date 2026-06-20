@@ -1,11 +1,15 @@
 package mcp
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +18,55 @@ import (
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/service"
 )
+
+func TestMCPRepoScopedDuplicateAlias(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-b", Owner: "owner-b", Name: "repo-b", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, repoID := range []string{"fixture-a", "fixture-b"} {
+		if err := store.UpsertSourceGraph(ctx, cache.SourceGraph{Source: cache.Source{RepoID: repoID, ID: "ISSUE-42", Kind: "issue", Path: repoID + "/issues/42.md", Title: repoID, Body: repoID + " body", Status: "open", ContentHash: repoID + "42"}, Identities: []cache.Identity{{RepoID: repoID, AliasType: "issue", Alias: "42", Remote: cache.RemoteAlias{Type: "issue", ID: "42"}}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := service.New(store)
+	srv, r, w, stderr := newPipeServer(svc)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); _ = srv.Serve() }()
+	call := func(repoID string) service.SourceRecord {
+		req := map[string]any{"jsonrpc": "2.0", "id": repoID, "method": "tools/call", "params": map[string]any{"name": "get_source", "arguments": map[string]any{"repo_id": repoID, "id": "issue:42"}}}
+		b, _ := json.Marshal(req)
+		_, _ = r.Write(append(b, '\n'))
+		line, err := readLine(w)
+		if err != nil {
+			t.Fatalf("read response: %v (stderr: %s)", err, stderr.String())
+		}
+		var resp response
+		if err := json.Unmarshal(line, &resp); err != nil || resp.Error != nil {
+			t.Fatalf("response=%s err=%v", string(line), err)
+		}
+		var tc toolCallResult
+		if err := json.Unmarshal(resp.Result, &tc); err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(tc.StructuredContent)
+		var record service.SourceRecord
+		if err := json.Unmarshal(raw, &record); err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	a := call("fixture-a")
+	b := call("fixture-b")
+	if a.RepoID != "fixture-a" || b.RepoID != "fixture-b" || a.Body == b.Body {
+		t.Fatalf("scoped MCP records crossed repos: a=%#v b=%#v", a, b)
+	}
+	r.Close()
+	wg.Wait()
+}
 
 func TestIntegration(t *testing.T) {
 	store := populatedStore(t)
@@ -76,13 +129,25 @@ func TestIntegration(t *testing.T) {
 	if err := json.Unmarshal(toolsR.Result, &tls); err != nil {
 		t.Fatalf("decode tools/list result: %v", err)
 	}
-	if len(tls.Tools) != 8 {
-		t.Fatalf("tools count = %d, want 8: %+v", len(tls.Tools), tls.Tools)
+	if len(tls.Tools) != 15 {
+		t.Fatalf("tools count = %d, want 15: %+v", len(tls.Tools), tls.Tools)
 	}
-	expectedNames := []string{"search_sources", "get_source", "list_sources", "source_backlinks", "resolve_id", "sync_status", "export_snapshot", "diff_snapshot"}
+	expectedNames := []string{"search_sources", "get_source", "list_sources", "list_chunks", "search_chunks", "get_snippet", "stale_index_report", "recent_changes", "link_check", "cache_status", "source_backlinks", "resolve_id", "sync_status", "export_snapshot", "diff_snapshot"}
+	registry := srv.toolRegistry()
+	if len(registry) != len(tls.Tools) {
+		t.Fatalf("registry count = %d, listed tools = %d", len(registry), len(tls.Tools))
+	}
+	seen := map[string]bool{}
 	for i, want := range expectedNames {
 		if tls.Tools[i].Name != want {
 			t.Fatalf("tool[%d].Name = %q, want %q", i, tls.Tools[i].Name, want)
+		}
+		if seen[tls.Tools[i].Name] {
+			t.Fatalf("duplicate tool listed: %s", tls.Tools[i].Name)
+		}
+		seen[tls.Tools[i].Name] = true
+		if _, ok := registry[tls.Tools[i].Name]; !ok {
+			t.Fatalf("listed tool %q is not callable", tls.Tools[i].Name)
 		}
 	}
 
@@ -92,7 +157,7 @@ func TestIntegration(t *testing.T) {
 		"method":  "tools/call",
 		"params": map[string]any{
 			"name":      "resolve_id",
-			"arguments": map[string]any{"id": "DOC-123"},
+			"arguments": map[string]any{"repo_id": "fixture-a", "id": "DOC-123"},
 		},
 	}
 	resolveResp := sendAndRecv(t, resolveReq)
@@ -169,15 +234,18 @@ func TestSchemasAndResults(t *testing.T) {
 	t.Run("search_sources defaults", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 10, "method": "tools/call",
-			"params": map[string]any{"name": "search_sources", "arguments": map[string]any{"query": "backlog"}},
+			"params": map[string]any{"name": "search_sources", "arguments": map[string]any{"repo_id": "fixture-a", "query": "backlog"}},
 		})
 		tc, err := callResponse(recv())
 		if err != nil {
 			t.Fatal(err)
 		}
-		var sres searchSourcesSResult
+		var sres service.SearchSourcesResult
 		scRaw, _ := json.Marshal(tc.StructuredContent)
 		json.Unmarshal(scRaw, &sres)
+		if sres.RepoID != "fixture-a" {
+			t.Fatalf("repo_id = %q, want fixture-a", sres.RepoID)
+		}
 		if sres.Limit != 20 {
 			t.Fatalf("limit = %d, want 20", sres.Limit)
 		}
@@ -192,15 +260,18 @@ func TestSchemasAndResults(t *testing.T) {
 	t.Run("list_sources defaults", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 11, "method": "tools/call",
-			"params": map[string]any{"name": "list_sources", "arguments": map[string]any{}},
+			"params": map[string]any{"name": "list_sources", "arguments": map[string]any{"repo_id": "fixture-a"}},
 		})
 		tc, err := callResponse(recv())
 		if err != nil {
 			t.Fatal(err)
 		}
-		var lres listSourcesSResult
+		var lres service.ListSourcesResult
 		scRaw, _ := json.Marshal(tc.StructuredContent)
 		json.Unmarshal(scRaw, &lres)
+		if lres.RepoID != "fixture-a" {
+			t.Fatalf("repo_id = %q, want fixture-a", lres.RepoID)
+		}
 		if lres.Limit != 20 {
 			t.Fatalf("limit = %d, want 20", lres.Limit)
 		}
@@ -215,7 +286,7 @@ func TestSchemasAndResults(t *testing.T) {
 	t.Run("get_source", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 12, "method": "tools/call",
-			"params": map[string]any{"name": "get_source", "arguments": map[string]any{"id": "DOC-123"}},
+			"params": map[string]any{"name": "get_source", "arguments": map[string]any{"repo_id": "fixture-a", "id": "DOC-123"}},
 		})
 		tc, err := callResponse(recv())
 		if err != nil {
@@ -229,27 +300,78 @@ func TestSchemasAndResults(t *testing.T) {
 		}
 	})
 
-	t.Run("source_backlinks", func(t *testing.T) {
+	t.Run("recent_changes", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 13, "method": "tools/call",
-			"params": map[string]any{"name": "source_backlinks", "arguments": map[string]any{"id": "DOC-123"}},
+			"params": map[string]any{"name": "recent_changes", "arguments": map[string]any{"repo_id": "fixture-a", "limit": 1}},
 		})
 		tc, err := callResponse(recv())
 		if err != nil {
 			t.Fatal(err)
 		}
-		var blres sourceBacklinksSResult
+		var recent service.RecentChangesResult
+		scRaw, _ := json.Marshal(tc.StructuredContent)
+		json.Unmarshal(scRaw, &recent)
+		if recent.RepoID != "fixture-a" || recent.Limit != 1 || len(recent.Results) != 1 || recent.Results[0].RepoID != "fixture-a" {
+			t.Fatalf("recent_changes missing scoped payload: %+v", recent)
+		}
+	})
+
+	t.Run("link_check", func(t *testing.T) {
+		send(map[string]any{
+			"jsonrpc": "2.0", "id": 22, "method": "tools/call",
+			"params": map[string]any{"name": "link_check", "arguments": map[string]any{"repo_id": "fixture-a", "strict": true}},
+		})
+		tc, err := callResponse(recv())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var link service.LinkCheckResult
+		scRaw, _ := json.Marshal(tc.StructuredContent)
+		json.Unmarshal(scRaw, &link)
+		if link.RepoID != "fixture-a" || link.CheckedCount == 0 || link.BrokenCount != 0 || link.SuggestedAliases == nil {
+			t.Fatalf("link_check missing scoped payload: %+v", link)
+		}
+	})
+
+	t.Run("cache_status", func(t *testing.T) {
+		send(map[string]any{
+			"jsonrpc": "2.0", "id": 23, "method": "tools/call",
+			"params": map[string]any{"name": "cache_status", "arguments": map[string]any{"repo_id": "fixture-a"}},
+		})
+		tc, err := callResponse(recv())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var status service.CacheStatusResult
+		scRaw, _ := json.Marshal(tc.StructuredContent)
+		json.Unmarshal(scRaw, &status)
+		if status.RepoID != "fixture-a" || !status.WALCapable || status.JournalMode == "" || status.IndexFreshnessWarnings == 0 {
+			t.Fatalf("cache_status missing fields: %+v", status)
+		}
+	})
+
+	t.Run("source_backlinks", func(t *testing.T) {
+		send(map[string]any{
+			"jsonrpc": "2.0", "id": 24, "method": "tools/call",
+			"params": map[string]any{"name": "source_backlinks", "arguments": map[string]any{"repo_id": "fixture-a", "id": "DOC-123"}},
+		})
+		tc, err := callResponse(recv())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var blres service.BacklinksResult
 		scRaw, _ := json.Marshal(tc.StructuredContent)
 		json.Unmarshal(scRaw, &blres)
-		if blres.ID != "DOC-123" {
-			t.Fatalf("backlinks id = %q, want DOC-123", blres.ID)
+		if blres.RepoID != "fixture-a" || blres.ID != "DOC-123" {
+			t.Fatalf("backlinks scope/id mismatch: %+v", blres)
 		}
 	})
 
 	t.Run("resolve_id", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 14, "method": "tools/call",
-			"params": map[string]any{"name": "resolve_id", "arguments": map[string]any{"id": "DOC-123"}},
+			"params": map[string]any{"name": "resolve_id", "arguments": map[string]any{"repo_id": "fixture-a", "id": "DOC-123"}},
 		})
 		tc, err := callResponse(recv())
 		if err != nil {
@@ -266,41 +388,41 @@ func TestSchemasAndResults(t *testing.T) {
 	t.Run("sync_status per-record", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 15, "method": "tools/call",
-			"params": map[string]any{"name": "sync_status", "arguments": map[string]any{"id": "DOC-123"}},
+			"params": map[string]any{"name": "sync_status", "arguments": map[string]any{"repo_id": "fixture-a", "id": "DOC-123"}},
 		})
 		tc, err := callResponse(recv())
 		if err != nil {
 			t.Fatal(err)
 		}
-		var status map[string]any
+		var status service.SyncStatusResult
 		scRaw, _ := json.Marshal(tc.StructuredContent)
 		json.Unmarshal(scRaw, &status)
-		if status["id"] != "DOC-123" {
-			t.Fatalf("sync_status id = %v, want DOC-123", status["id"])
+		if status.SourceID != "DOC-123" {
+			t.Fatalf("sync_status source_id = %v, want DOC-123", status.SourceID)
 		}
 	})
 
 	t.Run("sync_status aggregate", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 16, "method": "tools/call",
-			"params": map[string]any{"name": "sync_status", "arguments": map[string]any{}},
+			"params": map[string]any{"name": "sync_status", "arguments": map[string]any{"repo_id": "fixture-a"}},
 		})
 		tc, err := callResponse(recv())
 		if err != nil {
 			t.Fatal(err)
 		}
-		var agg aggregateSyncStatus
+		var agg service.SyncStatusSummaryResult
 		scRaw, _ := json.Marshal(tc.StructuredContent)
 		json.Unmarshal(scRaw, &agg)
-		if agg.CacheEmpty {
-			t.Fatalf("aggregate sync_status reports empty cache with seeded data")
+		if agg.RepoID != "fixture-a" || agg.CacheEmpty {
+			t.Fatalf("aggregate sync_status scope/cache mismatch: %+v", agg)
 		}
 	})
 
 	t.Run("export_snapshot defaults", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 17, "method": "tools/call",
-			"params": map[string]any{"name": "export_snapshot", "arguments": map[string]any{}},
+			"params": map[string]any{"name": "export_snapshot", "arguments": map[string]any{"repo_id": "fixture-a"}},
 		})
 		tc, err := callResponse(recv())
 		if err != nil {
@@ -309,18 +431,18 @@ func TestSchemasAndResults(t *testing.T) {
 		var exp exportSnapshotSResult
 		scRaw, _ := json.Marshal(tc.StructuredContent)
 		json.Unmarshal(scRaw, &exp)
-		if exp.Format != "json" {
-			t.Fatalf("format = %q, want json", exp.Format)
+		if exp.RepoID != "fixture-a" || exp.Format != "json" {
+			t.Fatalf("export scope/format mismatch: %+v", exp)
 		}
-		if exp.ContentHash == "" {
-			t.Fatalf("content_hash is empty")
+		if exp.ContentHash == "" || exp.SnapshotID == "" {
+			t.Fatalf("export identifiers missing: %+v", exp)
 		}
 	})
 
 	t.Run("diff_snapshot", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 18, "method": "tools/call",
-			"params": map[string]any{"name": "diff_snapshot", "arguments": map[string]any{"base_id": "abc", "head_id": "def"}},
+			"params": map[string]any{"name": "diff_snapshot", "arguments": map[string]any{"repo_id": "fixture-a", "base_id": "abc", "head_id": "def"}},
 		})
 		tc, err := callResponse(recv())
 		if err != nil {
@@ -329,8 +451,8 @@ func TestSchemasAndResults(t *testing.T) {
 		var diff diffSnapshotSResult
 		scRaw, _ := json.Marshal(tc.StructuredContent)
 		json.Unmarshal(scRaw, &diff)
-		if diff.BaseID != "abc" || diff.HeadID != "def" {
-			t.Fatalf("diff base/head mismatch: %+v", diff)
+		if diff.RepoID != "fixture-a" || diff.BaseID != "abc" || diff.HeadID != "def" {
+			t.Fatalf("diff scope/base/head mismatch: %+v", diff)
 		}
 	})
 
@@ -361,12 +483,50 @@ func TestSchemasAndResults(t *testing.T) {
 	t.Run("missing query returns -32602", func(t *testing.T) {
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 21, "method": "tools/call",
-			"params": map[string]any{"name": "search_sources", "arguments": map[string]any{}},
+			"params": map[string]any{"name": "search_sources", "arguments": map[string]any{"repo_id": "fixture-a"}},
 		})
 		var r response
 		json.Unmarshal(recv(), &r)
 		if r.Error == nil || r.Error.Code != -32602 {
 			t.Fatalf("expected -32602, got %+v", r.Error)
+		}
+	})
+
+	t.Run("missing repo_id returns -32602", func(t *testing.T) {
+		send(map[string]any{
+			"jsonrpc": "2.0", "id": 25, "method": "tools/call",
+			"params": map[string]any{"name": "cache_status", "arguments": map[string]any{}},
+		})
+		var r response
+		json.Unmarshal(recv(), &r)
+		if r.Error == nil || r.Error.Code != -32602 || r.Error.Data == nil || r.Error.Data.Code != "invalid_arguments" {
+			t.Fatalf("expected invalid_arguments, got %+v", r.Error)
+		}
+	})
+
+	t.Run("invalid snippet range returns -32602", func(t *testing.T) {
+		send(map[string]any{
+			"jsonrpc": "2.0", "id": 26, "method": "tools/call",
+			"params": map[string]any{"name": "get_snippet", "arguments": map[string]any{"repo_id": "fixture-a", "line_start": 5, "line_end": 2}},
+		})
+		var r response
+		json.Unmarshal(recv(), &r)
+		if r.Error == nil || r.Error.Code != -32602 {
+			t.Fatalf("expected -32602, got %+v", r.Error)
+		}
+	})
+
+	t.Run("mutation tools are not registered", func(t *testing.T) {
+		for i, name := range []string{"create_issue", "update_issue", "sync", "migrate"} {
+			send(map[string]any{
+				"jsonrpc": "2.0", "id": 27 + i, "method": "tools/call",
+				"params": map[string]any{"name": name, "arguments": map[string]any{"repo_id": "fixture-a"}},
+			})
+			var r response
+			json.Unmarshal(recv(), &r)
+			if r.Error == nil || r.Error.Code != -32601 || r.Error.Data == nil || r.Error.Data.Code != "unknown_tool" {
+				t.Fatalf("%s: expected unknown_tool, got %+v", name, r.Error)
+			}
 		}
 	})
 
@@ -505,7 +665,7 @@ func TestFramingAndErrors(t *testing.T) {
 		}
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 50, "method": "tools/call",
-			"params": map[string]any{"name": "nonexistent_tool", "arguments": map[string]any{}},
+			"params": map[string]any{"name": "nonexistent_tool", "arguments": map[string]any{"repo_id": "fixture-a"}},
 		})
 		line, _ := readLine(w)
 		var resp response
@@ -548,7 +708,7 @@ func TestFramingAndErrors(t *testing.T) {
 		}
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 60, "method": "tools/call",
-			"params": map[string]any{"name": "get_source", "arguments": map[string]any{"id": "NONEXISTENT"}},
+			"params": map[string]any{"name": "get_source", "arguments": map[string]any{"repo_id": "fixture-a", "id": "NONEXISTENT"}},
 		})
 		line, _ := readLine(w)
 		var resp response
@@ -570,6 +730,9 @@ func TestFramingAndErrors(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer emptyStore.Close()
+		if err := emptyStore.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+			t.Fatal(err)
+		}
 		emptySvc := service.New(emptyStore)
 
 		srv, r, w, _ := newPipeServer(emptySvc)
@@ -583,7 +746,7 @@ func TestFramingAndErrors(t *testing.T) {
 		}
 		send(map[string]any{
 			"jsonrpc": "2.0", "id": 61, "method": "tools/call",
-			"params": map[string]any{"name": "list_sources", "arguments": map[string]any{}},
+			"params": map[string]any{"name": "list_sources", "arguments": map[string]any{"repo_id": "fixture-a"}},
 		})
 		line, _ := readLine(w)
 		var resp response
@@ -605,7 +768,7 @@ func TestFramingAndErrors(t *testing.T) {
 		wg.Add(1)
 		go func() { defer wg.Done(); _ = srv.Serve() }()
 
-		_, _ = r.Write([]byte(`{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"get_source","arguments":{"id":"NONEXISTENT"}}}` + "\n"))
+		_, _ = r.Write([]byte(`{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"get_source","arguments":{"repo_id":"fixture-a","id":"NONEXISTENT"}}}` + "\n"))
 		line, _ := readLine(w)
 		if !strings.Contains(string(line), "jsonrpc") {
 			t.Fatalf("stdout response missing jsonrpc field: %s", string(line))
@@ -652,6 +815,101 @@ func (c *pipeConn) Close() error {
 	return nil
 }
 
+func openSSE(t *testing.T, url string) (*http.Response, string, <-chan response) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("sse status=%d content_type=%q", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	scanner := bufio.NewScanner(resp.Body)
+	var endpoint string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") {
+			endpoint = strings.TrimPrefix(line, "data: ")
+		}
+		if line == "" && endpoint != "" {
+			break
+		}
+	}
+	if endpoint == "" {
+		t.Fatal("missing endpoint event")
+	}
+	events := make(chan response, 8)
+	go func() {
+		var data string
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "data: ") {
+				data = strings.TrimPrefix(line, "data: ")
+			}
+			if line == "" && data != "" {
+				var resp response
+				if err := json.Unmarshal([]byte(data), &resp); err == nil {
+					events <- resp
+				}
+				data = ""
+			}
+		}
+		close(events)
+	}()
+	return resp, endpoint, events
+}
+
+func readSSEMessage(t *testing.T, events <-chan response) response {
+	t.Helper()
+	select {
+	case resp, ok := <-events:
+		if !ok {
+			t.Fatal("sse stream closed")
+		}
+		return resp
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for sse message")
+	}
+	return response{}
+}
+
+func postJSON(t *testing.T, url string, body any) {
+	t.Helper()
+	if status := postJSONStatus(t, url, body); status != http.StatusAccepted {
+		t.Fatalf("post status=%d", status)
+	}
+}
+
+func postJSONStatus(t *testing.T, url string, body any) int {
+	t.Helper()
+	status, _ := postJSONTransportError(t, url, body)
+	return status
+}
+
+func postJSONTransportError(t *testing.T, url string, body any) (int, transportError) {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	return postRaw(t, url, string(b))
+}
+
+func postRaw(t *testing.T, url string, body string) (int, transportError) {
+	t.Helper()
+	resp, err := http.Post(url, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var terr transportError
+	if resp.StatusCode != http.StatusAccepted {
+		_ = json.NewDecoder(resp.Body).Decode(&terr)
+	}
+	return resp.StatusCode, terr
+}
+
+func logWriter(w io.Writer) *log.Logger {
+	return log.New(w, "", 0)
+}
+
 func readLine(r io.Reader) (json.RawMessage, error) {
 	buf := make([]byte, 0, 4096)
 	for {
@@ -667,6 +925,242 @@ func readLine(r io.Reader) (json.RawMessage, error) {
 	}
 }
 
+func TestHTTPSSETransportSessionFlow(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	var logs bytes.Buffer
+	transport := NewHTTPSSETransport(NewRPCHandler(service.New(store)), ServerConfig{
+		ReadinessProbe: func(context.Context) Readiness { return Readiness{Ready: true} },
+		Logger:         logWriter(&logs),
+		RequestID:      func() string { return "generated-request" },
+		SessionID:      func() string { return "session-a" },
+	})
+	server := httptest.NewServer(transport.Handler())
+	defer server.Close()
+
+	healthReq, _ := http.NewRequest(http.MethodGet, server.URL+"/health", nil)
+	healthReq.Header.Set("X-Request-ID", "health-id")
+	healthResp, err := http.DefaultClient.Do(healthReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if healthResp.StatusCode != http.StatusOK || healthResp.Header.Get("X-Request-ID") != "health-id" {
+		t.Fatalf("health status=%d request_id=%q", healthResp.StatusCode, healthResp.Header.Get("X-Request-ID"))
+	}
+	_ = healthResp.Body.Close()
+
+	readyResp, err := http.Get(server.URL + "/ready")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readyResp.StatusCode != http.StatusOK || readyResp.Header.Get("X-Request-ID") != "generated-request" {
+		t.Fatalf("ready status=%d request_id=%q", readyResp.StatusCode, readyResp.Header.Get("X-Request-ID"))
+	}
+	_ = readyResp.Body.Close()
+
+	badMethodResp, err := http.Post(server.URL+"/sse", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if badMethodResp.StatusCode != http.StatusMethodNotAllowed || badMethodResp.Header.Get("X-Request-ID") != "generated-request" {
+		t.Fatalf("sse bad method status=%d request_id=%q", badMethodResp.StatusCode, badMethodResp.Header.Get("X-Request-ID"))
+	}
+	_ = badMethodResp.Body.Close()
+
+	sseResp, endpoint, events := openSSE(t, server.URL+"/sse")
+	defer sseResp.Body.Close()
+	if endpoint != "/message?session_id=session-a" {
+		t.Fatalf("endpoint = %q", endpoint)
+	}
+
+	postJSON(t, server.URL+endpoint, map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+	resp := readSSEMessage(t, events)
+	if resp.ID == nil || string(*resp.ID) != "1" || resp.Error != nil {
+		t.Fatalf("initialize response = %+v", resp)
+	}
+	var init initResult
+	if err := json.Unmarshal(resp.Result, &init); err != nil || init.ServerInfo.Name != "gitcode-mcp" {
+		t.Fatalf("init result=%s err=%v", string(resp.Result), err)
+	}
+
+	postJSON(t, server.URL+endpoint, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": map[string]any{"name": "get_source", "arguments": map[string]any{"repo_id": "fixture-a", "id": "DOC-123"}}})
+	toolResp := readSSEMessage(t, events)
+	if toolResp.ID == nil || string(*toolResp.ID) != "2" || toolResp.Error != nil {
+		t.Fatalf("tool response = %+v", toolResp)
+	}
+	if !strings.Contains(logs.String(), "request_id=health-id") {
+		t.Fatalf("logs missing request id: %q", logs.String())
+	}
+}
+
+func TestMCPRuntimeLockContentionErrorMapping(t *testing.T) {
+	started := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	lockErr := cache.ErrLockContention{Path: "redacted.lock", Operation: "sync-index", RepoID: "fixture-a", StartedAt: started, PID: 42, CachePath: ":memory:"}
+	store := populatedStore(t)
+	defer store.Close()
+	svc := &lockContentionService{serviceInterface: service.New(store), err: lockErr}
+
+	srv, r, w, stderr := newPipeServer(svc)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); _ = srv.Serve() }()
+	req := map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "list_sources", "arguments": map[string]any{"repo_id": "fixture-a"}}}
+	b, _ := json.Marshal(req)
+	_, _ = r.Write(append(b, '\n'))
+	line, err := readLine(w)
+	if err != nil {
+		t.Fatalf("read response: %v (stderr: %s)", err, stderr.String())
+	}
+	var resp response
+	if err := json.Unmarshal(line, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Error == nil || resp.Error.Data == nil || resp.Error.Data.Code != "cache_owned" || resp.Error.Data.Operation != "sync-index" || resp.Error.Data.RepoID != "fixture-a" || resp.Error.Data.PID != 42 || resp.Error.Data.StartedAt == "" || resp.Error.Data.CachePath != ":memory:" {
+		t.Fatalf("lock error response = %+v", resp.Error)
+	}
+	_ = r.Close()
+	wg.Wait()
+}
+
+func TestHTTPSSEReadinessLockContention(t *testing.T) {
+	lockErr := cache.ErrLockContention{Path: "redacted.lock", Operation: "migration", StartedAt: time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC), PID: 42, CachePath: ":memory:"}
+	store := populatedStore(t)
+	defer store.Close()
+	transport := NewHTTPSSETransport(NewRPCHandler(service.New(store)), ServerConfig{ReadinessProbe: func(context.Context) Readiness { return LockContentionReadiness(lockErr) }})
+	server := httptest.NewServer(transport.Handler())
+	defer server.Close()
+
+	healthResp, err := http.Get(server.URL + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if healthResp.StatusCode != http.StatusOK {
+		t.Fatalf("health status=%d", healthResp.StatusCode)
+	}
+	_ = healthResp.Body.Close()
+
+	readyResp, err := http.Get(server.URL + "/ready")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readyResp.Body.Close()
+	var ready Readiness
+	if err := json.NewDecoder(readyResp.Body).Decode(&ready); err != nil {
+		t.Fatal(err)
+	}
+	if readyResp.StatusCode != http.StatusServiceUnavailable || ready.Code != "migration_blocked" || ready.ErrorData == nil || ready.ErrorData.Code != "migration_blocked" {
+		t.Fatalf("ready status=%d body=%+v", readyResp.StatusCode, ready)
+	}
+}
+
+func TestHTTPSSECancelledSessionDoesNotBlockOtherClient(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	ids := []string{"session-cancel", "session-live"}
+	transport := NewHTTPSSETransport(NewRPCHandler(service.New(store)), ServerConfig{SessionID: func() string {
+		id := ids[0]
+		ids = ids[1:]
+		return id
+	}})
+	server := httptest.NewServer(transport.Handler())
+	defer server.Close()
+
+	sseCancel, endpointCancel, eventsCancel := openSSE(t, server.URL+"/sse")
+	sseLive, endpointLive, eventsLive := openSSE(t, server.URL+"/sse")
+	defer sseLive.Body.Close()
+	_ = sseCancel.Body.Close()
+	time.Sleep(20 * time.Millisecond)
+	closed := postJSONStatus(t, server.URL+endpointCancel, map[string]any{"jsonrpc": "2.0", "id": "cancelled", "method": "tools/call", "params": map[string]any{"name": "list_sources", "arguments": map[string]any{"repo_id": "fixture-a"}}})
+	if closed != http.StatusNotFound {
+		t.Fatalf("closed post status=%d", closed)
+	}
+	select {
+	case resp, ok := <-eventsCancel:
+		if ok {
+			t.Fatalf("cancelled session received response: %+v", resp)
+		}
+	default:
+	}
+
+	postJSON(t, server.URL+endpointLive, map[string]any{"jsonrpc": "2.0", "id": "live", "method": "tools/call", "params": map[string]any{"name": "list_sources", "arguments": map[string]any{"repo_id": "fixture-a"}}})
+	liveResp := readSSEMessage(t, eventsLive)
+	if liveResp.ID == nil || string(*liveResp.ID) != `"live"` || liveResp.Error != nil {
+		t.Fatalf("live response = %+v", liveResp)
+	}
+}
+
+func TestHTTPSSETransportSessionErrorsAndMultiClient(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	ids := []string{"session-a", "session-b"}
+	transport := NewHTTPSSETransport(NewRPCHandler(service.New(store)), ServerConfig{
+		SessionID: func() string {
+			id := ids[0]
+			ids = ids[1:]
+			return id
+		},
+	})
+	server := httptest.NewServer(transport.Handler())
+	defer server.Close()
+
+	missing, missingErr := postJSONTransportError(t, server.URL+"/message", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+	if missing != http.StatusBadRequest || missingErr.Error.Code != "missing_session" {
+		t.Fatalf("missing session status=%d error=%+v", missing, missingErr)
+	}
+	unknown, unknownErr := postJSONTransportError(t, server.URL+"/message?session_id=missing", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+	if unknown != http.StatusNotFound || unknownErr.Error.Code != "unknown_session" {
+		t.Fatalf("unknown session status=%d error=%+v", unknown, unknownErr)
+	}
+
+	sseA, endpointA, eventsA := openSSE(t, server.URL+"/sse")
+	defer sseA.Body.Close()
+	sseB, endpointB, eventsB := openSSE(t, server.URL+"/sse")
+	defer sseB.Body.Close()
+	if endpointA == endpointB {
+		t.Fatalf("duplicate endpoints: %q", endpointA)
+	}
+	duplicateBodyStatus, duplicateBodyErr := postRaw(t, server.URL+endpointA, `{"jsonrpc":"2.0","id":7,"method":"initialize"} {"jsonrpc":"2.0","id":8,"method":"initialize"}`)
+	if duplicateBodyStatus != http.StatusBadRequest || duplicateBodyErr.Error.Code != "invalid_json" {
+		t.Fatalf("duplicate body status=%d error=%+v", duplicateBodyStatus, duplicateBodyErr)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		postJSON(t, server.URL+endpointA, map[string]any{"jsonrpc": "2.0", "id": "a", "method": "tools/call", "params": map[string]any{"name": "list_sources", "arguments": map[string]any{"repo_id": "fixture-a"}}})
+	}()
+	go func() {
+		defer wg.Done()
+		postJSON(t, server.URL+endpointB, map[string]any{"jsonrpc": "2.0", "id": "b", "method": "tools/call", "params": map[string]any{"name": "tools/list"}})
+	}()
+	wg.Wait()
+	respA := readSSEMessage(t, eventsA)
+	respB := readSSEMessage(t, eventsB)
+	if respA.ID == nil || string(*respA.ID) != `"a"` {
+		t.Fatalf("session a response crossed: %+v", respA)
+	}
+	if respB.ID == nil || string(*respB.ID) != `"b"` {
+		t.Fatalf("session b response crossed: %+v", respB)
+	}
+
+	_ = sseA.Body.Close()
+	time.Sleep(20 * time.Millisecond)
+	closed := postJSONStatus(t, server.URL+endpointA, map[string]any{"jsonrpc": "2.0", "id": 3, "method": "initialize"})
+	if closed != http.StatusNotFound {
+		t.Fatalf("closed session status=%d", closed)
+	}
+}
+
+type lockContentionService struct {
+	serviceInterface
+	err error
+}
+
+func (s *lockContentionService) ListSources(context.Context, service.ListSourcesRequest) (service.ListSourcesResult, error) {
+	return service.ListSourcesResult{}, s.err
+}
+
 func populatedStore(t *testing.T) cache.Store {
 	t.Helper()
 	store, err := cache.NewInMemorySQLiteStore(context.Background())
@@ -674,14 +1168,17 @@ func populatedStore(t *testing.T) cache.Store {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
 	graphs := []cache.SourceGraph{
 		{
-			Source:     cache.Source{ID: "DOC-123", Kind: "doc", Path: "docs/backlog.md", Title: "Backlog", Body: "backlog overview\nready task details\nmore context", Status: "active", Labels: []string{"knowledge"}, ContentHash: "h1", CreatedAt: now, UpdatedAt: now},
-			SyncStatus: &cache.SyncStatus{SourceID: "DOC-123", RemoteType: "issue", RemoteID: "100", RemoteRevision: "r1", Status: "fresh", LastFetchedAt: now},
+			Source:     cache.Source{RepoID: "fixture-a", ID: "DOC-123", Kind: "doc", Path: "docs/backlog.md", Title: "Backlog", Body: "backlog overview\nready task details\nmore context", Status: "active", Labels: []string{"knowledge"}, ContentHash: "h1", CreatedAt: now, UpdatedAt: now},
+			SyncStatus: &cache.SyncStatus{RepoID: "fixture-a", SourceID: "DOC-123", RemoteType: "issue", RemoteID: "100", RemoteRevision: "r1", Status: "fresh", LastFetchedAt: now},
 		},
 		{
-			Source: cache.Source{ID: "TASK-1", Kind: "task", Path: "project/tasks/task-1.md", Title: "Ready Task", Body: "task references DOC-123", Status: "ready", ContentHash: "h2", CreatedAt: now.Add(time.Minute), UpdatedAt: now.Add(time.Minute)},
-			Links:  []cache.Link{{SourceID: "TASK-1", TargetID: "DOC-123", Kind: "mentions", Text: "see DOC-123"}},
+			Source: cache.Source{RepoID: "fixture-a", ID: "TASK-1", Kind: "task", Path: "project/tasks/task-1.md", Title: "Ready Task", Body: "task references DOC-123", Status: "ready", ContentHash: "h2", CreatedAt: now.Add(time.Minute), UpdatedAt: now.Add(time.Minute)},
+			Links:  []cache.Link{{RepoID: "fixture-a", SourceID: "TASK-1", TargetID: "DOC-123", Kind: "mentions", Text: "see DOC-123"}},
 		},
 	}
 	for _, graph := range graphs {

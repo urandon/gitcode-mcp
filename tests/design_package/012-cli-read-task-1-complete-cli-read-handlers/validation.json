@@ -1,0 +1,23 @@
+{
+  "covered_outcome_ids": [
+    "outcome-5"
+  ],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "production CLI entrypoint cmd/gitcode-mcp canonical read commands with --repo fixture-a --format json",
+    "production CLI entrypoint cmd/gitcode-mcp canonical read commands with deterministic text rendering",
+    "Task 5 snippet aliases snippet and snippets through production CLI entrypoint",
+    "offline SQLite fixture cache with issue/wiki records, links, chunks, sync metadata, and cross-repo alias collision",
+    "missing-index fixture cache warning behavior",
+    "export stored snapshot file and diff against stored snapshot path"
+  ],
+  "evidence_type": [
+    "CLI command",
+    "CLI integration test",
+    "runtime/compiler test",
+    "stubbed-external-provider scenario"
+  ],
+  "freshness": "current source/build/runtime evidence required; run.sh generates temporary sanitized offline fixture caches and invokes go run ./cmd/gitcode-mcp",
+  "mocks_used": "No mocks for product code. External GitCode network/provider access is disabled by empty token and invalid offline API URL while exercising the production CLI entrypoint against local SQLite fixtures.",
+  "production_files_modified": []
+}

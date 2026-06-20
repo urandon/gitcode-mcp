@@ -1,0 +1,19 @@
+{
+  "covered_outcome_ids": [
+    "outcome-8"
+  ],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "SQLite cache runtime NewSQLiteStore file-backed initialization",
+    "SQLite WAL/busy-timeout runtime behavior",
+    "cache.WriterAdmission AcquireWriter/ReleaseWriter",
+    "cache.ErrLockContention typed busy/owned error metadata",
+    "cache migration/open path writer ownership exclusion",
+    "cache.Checkpoint runtime hook",
+    "service.SyncToCache writer lock contention path"
+  ],
+  "evidence_type": "runtime/compiler test",
+  "freshness": "current source/build/runtime evidence required; run.sh executes targeted Go runtime tests, go test ./..., and git diff --check offline",
+  "mocks_used": false,
+  "production_files_modified": []
+}

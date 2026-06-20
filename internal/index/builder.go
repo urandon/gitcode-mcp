@@ -9,25 +9,39 @@ import (
 	"time"
 )
 
-type Builder struct{}
+type Builder struct {
+	options ChunkOptions
+}
+
+func NewBuilder(options ChunkOptions) Builder {
+	return Builder{options: normalizeChunkOptions(options)}
+}
 
 func FullBuild(ctx context.Context, reader SourceReader, writer DerivedWriter) (BuildReport, error) {
-	return Builder{}.FullBuild(ctx, reader, writer)
+	return NewBuilder(ChunkOptions{}).FullBuild(ctx, reader, writer)
+}
+
+func FullBuildWithOptions(ctx context.Context, reader SourceReader, writer DerivedWriter, options ChunkOptions) (BuildReport, error) {
+	return NewBuilder(options).FullBuild(ctx, reader, writer)
 }
 
 func IncrementalBuild(ctx context.Context, reader SourceReader, writer DerivedWriter) (BuildReport, error) {
-	return Builder{}.IncrementalBuild(ctx, reader, writer)
+	return NewBuilder(ChunkOptions{}).IncrementalBuild(ctx, reader, writer)
 }
 
-func (Builder) FullBuild(ctx context.Context, reader SourceReader, writer DerivedWriter) (BuildReport, error) {
-	return build(ctx, reader, writer, false)
+func IncrementalBuildWithOptions(ctx context.Context, reader SourceReader, writer DerivedWriter, options ChunkOptions) (BuildReport, error) {
+	return NewBuilder(options).IncrementalBuild(ctx, reader, writer)
 }
 
-func (Builder) IncrementalBuild(ctx context.Context, reader SourceReader, writer DerivedWriter) (BuildReport, error) {
-	return build(ctx, reader, writer, true)
+func (b Builder) FullBuild(ctx context.Context, reader SourceReader, writer DerivedWriter) (BuildReport, error) {
+	return b.build(ctx, reader, writer, false)
 }
 
-func build(ctx context.Context, reader SourceReader, writer DerivedWriter, incremental bool) (BuildReport, error) {
+func (b Builder) IncrementalBuild(ctx context.Context, reader SourceReader, writer DerivedWriter) (BuildReport, error) {
+	return b.build(ctx, reader, writer, true)
+}
+
+func (b Builder) build(ctx context.Context, reader SourceReader, writer DerivedWriter, incremental bool) (BuildReport, error) {
 	sources, err := reader.ListSources(ctx)
 	if err != nil {
 		return BuildReport{}, err
@@ -55,7 +69,7 @@ func build(ctx context.Context, reader SourceReader, writer DerivedWriter, incre
 			report.Diagnostics = append(report.Diagnostics, parsed.Diagnostics...)
 			continue
 		}
-		derived := deriveSource(source, parsed, aliasIndex)
+		derived := b.deriveSource(source, parsed, aliasIndex)
 		if err := writer.ReplaceSourceDerived(ctx, derived); err != nil {
 			return report, err
 		}
@@ -67,9 +81,9 @@ func build(ctx context.Context, reader SourceReader, writer DerivedWriter, incre
 	return report, nil
 }
 
-func deriveSource(source SourceRecord, parsed ParsedSource, aliasIndex map[string][]string) SourceDerived {
+func (b Builder) deriveSource(source SourceRecord, parsed ParsedSource, aliasIndex map[string][]string) SourceDerived {
 	anchors := BuildCitationAnchors(source, parsed)
-	chunks := ChunkSource(source, parsed)
+	chunks := ChunkSourceWithOptions(source, parsed, b.options)
 	anchorByStart := map[int]string{}
 	for _, anchor := range anchors {
 		anchorByStart[anchor.ByteStart] = anchor.ID
@@ -119,7 +133,7 @@ func deriveSource(source SourceRecord, parsed ParsedSource, aliasIndex map[strin
 		TrackRows:         trackRows(source, parsed, anchors),
 		AcceptanceRows:    acceptanceRows(source, parsed, anchors),
 		OpenQuestionRows:  openQuestionRows(source, parsed, anchors),
-		IndexState:        IndexState{SourceID: source.ID, ContentHash: parsed.ContentHash, IndexedAt: time.Now().UTC()},
+		IndexState:        IndexState{RepoID: source.RepoID, SourceID: source.ID, RecordID: sourceRecordID(source), SnapshotID: source.SnapshotID, ContentHash: parsed.ContentHash, RemoteRevision: source.RemoteRevision, SyncRevision: source.SyncRevision, SyncEventID: source.SyncEventID, SourceUpdatedAt: source.UpdatedAt.UTC(), Policy: b.options.Policy, IndexedAt: time.Now().UTC(), ChunkCount: len(chunks), CitationCount: len(anchors)},
 		Diagnostics:       parsed.Diagnostics,
 		RewrittenRowCount: 1 + len(links) + len(broken) + len(anchors) + len(chunks),
 	}

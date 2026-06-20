@@ -1,0 +1,19 @@
+# id|doc_path|command|allowed_outcomes|requires_network|fixture_only|redaction_profile
+install-version|docs/install.md|{BIN} --version|success|false|true|standard
+install-help|docs/install.md|{BIN} --help|success|false|true|standard
+config-locate|docs/config-reference.md|{BIN} config locate|success|false|true|paths
+config-show-redacted|docs/config-reference.md|{BIN} config show --redacted|success|false|true|paths
+secrets-auth-status|docs/secrets.md|{BIN} auth status|success|false|true|standard
+repo-add|docs/repo-binding.md|{BIN} --cache-path {CACHE_PATH} repo add --repo example-owner/example-repo --owner example-owner --name example-repo --scopes issues,wiki --api-base-url https://api.gitcode.com/api/v5 --display-name "Example Repository" --alias example|success|false|true|standard
+repo-status|docs/repo-binding.md|{BIN} --cache-path {CACHE_PATH} repo status --repo example-owner/example-repo|success|false|true|standard
+fixture-sync-index|docs/read-walkthrough.md|{BIN} --cache-path {CACHE_PATH} sync --repo example-owner/example-repo --issues --wiki --index|success|false|true|standard
+read-list|docs/read-walkthrough.md|{BIN} --cache-path {CACHE_PATH} list --repo example-owner/example-repo|success|false|true|standard
+read-get-issue|docs/read-walkthrough.md|{BIN} --cache-path {CACHE_PATH} get --repo example-owner/example-repo issue:42|success|false|true|standard
+read-get-wiki|docs/read-walkthrough.md|{BIN} --cache-path {CACHE_PATH} get --repo example-owner/example-repo wiki:Home|success|false|true|standard
+read-snippet|docs/read-walkthrough.md|{BIN} --cache-path {CACHE_PATH} get-snippet --repo example-owner/example-repo issue:42 --line-start 1 --line-end 3|success|false|true|standard
+read-list-chunks|docs/read-walkthrough.md|{BIN} --cache-path {CACHE_PATH} list-chunks --repo example-owner/example-repo|success|false|true|standard
+read-cache-status|docs/read-walkthrough.md|{BIN} --cache-path {CACHE_PATH} cache-status --repo example-owner/example-repo|success|false|true|standard
+mcp-http-sse-get-snippet|docs/mcp-setup.md|MCP_READ|get_snippet|false|true|standard
+write-dry-run|docs/write-walkthrough.md|{BIN} --cache-path {CACHE_PATH} create-issue --repo example-owner/example-repo --title "Fixture dry run" --body "Fixture dry run body." --dry-run|success,dry_run|false|true|standard
+fixture-validation-gate|docs/fixture-capture.md|project/dogfood/validate-fixtures.sh --fixtures fixtures --transcript {TMP}/fixture-validation.md|success,documented_diagnostic|false|true|standard
+live-write-skip|docs/write-walkthrough.md|{BIN} --cache-path {CACHE_PATH} create-issue --repo example-owner/example-repo --title "Live gated" --body "Live gated body." --live --idempotency-key docs-smoke-live-gated|live_skip,documented_diagnostic|true|false|standard

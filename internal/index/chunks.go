@@ -5,26 +5,39 @@ import (
 	"encoding/hex"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 )
 
 const chunkSoftLimitBytes = 4 * 1024
 
 func ChunkSource(source SourceRecord, parsed ParsedSource) []Chunk {
+	return ChunkSourceWithOptions(source, parsed, ChunkOptions{})
+}
+
+func ChunkSourceWithOptions(source SourceRecord, parsed ParsedSource, options ChunkOptions) []Chunk {
+	options = normalizeChunkOptions(options)
 	body := source.Body
 	if body == "" {
 		return nil
 	}
-	blocks := chunkBlocks(body, parsed)
+	blocks := chunkBlocksWithOptions(body, parsed, options)
 	var chunks []Chunk
 	for _, block := range blocks {
 		if block.start >= block.end {
 			continue
 		}
 		text := body[block.start:block.end]
+		normalizedText := normalizeChunkText(text)
+		if normalizedText == "" {
+			continue
+		}
 		outbound, resolved := linksInRange(parsed.Links, parsed.StableIDs, block.start, block.end)
 		chunk := Chunk{
+			RepoID:            source.RepoID,
 			SourceID:          source.ID,
+			RecordID:          sourceRecordID(source),
+			SnapshotID:        source.SnapshotID,
 			ContentHash:       parsed.ContentHash,
 			ByteStart:         block.start,
 			ByteEnd:           block.end,
@@ -32,12 +45,13 @@ func ChunkSource(source SourceRecord, parsed ParsedSource) []Chunk {
 			LineEnd:           lineForOffset(parsed.LineStarts, maxInt(block.start, block.end-1)),
 			HeadingPath:       headingAtLine(parsed.Headings, lineForOffset(parsed.LineStarts, block.start)),
 			Text:              text,
-			NormalizedText:    normalizeChunkText(text),
+			NormalizedText:    normalizedText,
 			InheritedMetadata: inheritedMetadata(source, parsed),
 			OutboundLinks:     uniqueStrings(outbound),
 			ResolvedAliases:   resolved,
+			Policy:            options.Policy,
 		}
-		chunk.ID = chunkID(source.ID, parsed.ContentHash, block.start)
+		chunk.ID = chunkIDWithOptions(source.ID, parsed.ContentHash, block.start, source.SnapshotID, options)
 		chunk.CitationAnchorID = anchorID(source.ID, parsed.ContentHash, block.start, "chunk")
 		chunks = append(chunks, chunk)
 	}
@@ -49,7 +63,37 @@ type chunkBlock struct {
 	end   int
 }
 
+func normalizeChunkOptions(options ChunkOptions) ChunkOptions {
+	if options.Policy == "" {
+		options.Policy = ChunkPolicyHeading
+	}
+	if options.MaxBytes <= 0 {
+		options.MaxBytes = chunkSoftLimitBytes
+	}
+	if options.WindowBytes <= 0 {
+		options.WindowBytes = options.MaxBytes
+	}
+	if options.OverlapBytes < 0 {
+		options.OverlapBytes = 0
+	}
+	if options.OverlapBytes >= options.WindowBytes {
+		options.OverlapBytes = options.WindowBytes / 4
+	}
+	return options
+}
+
+func chunkBlocksWithOptions(body string, parsed ParsedSource, options ChunkOptions) []chunkBlock {
+	if options.Policy == ChunkPolicySlidingWindow {
+		return slidingWindowBlocks(body, parsed, options)
+	}
+	return headingBlocks(body, parsed, options.MaxBytes)
+}
+
 func chunkBlocks(body string, parsed ParsedSource) []chunkBlock {
+	return headingBlocks(body, parsed, chunkSoftLimitBytes)
+}
+
+func headingBlocks(body string, parsed ParsedSource, maxBytes int) []chunkBlock {
 	lines := sourceLines(body)
 	startLine := 0
 	if parsed.Frontmatter.Valid && parsed.FrontmatterEnd > 0 {
@@ -72,8 +116,8 @@ func chunkBlocks(body string, parsed ParsedSource) []chunkBlock {
 		}
 		lineStartsFence := fenceLine(line.text)
 		lineEndsFence := lineStartsFence && inFence
-		if !inFence && line.start > chunkStart && line.end-chunkStart > chunkSoftLimitBytes {
-			blocks = append(blocks, chunkBlock{start: chunkStart, end: chunkEnd})
+		if !inFence && line.start > chunkStart && line.end-chunkStart > maxBytes {
+			blocks = append(blocks, splitOversizedBlock(lines, chunkStart, chunkEnd, maxBytes)...)
 			chunkStart = line.start
 		}
 		chunkEnd = line.end
@@ -86,7 +130,74 @@ func chunkBlocks(body string, parsed ParsedSource) []chunkBlock {
 		}
 	}
 	if chunkStart >= 0 && chunkStart < chunkEnd {
-		blocks = append(blocks, chunkBlock{start: chunkStart, end: chunkEnd})
+		blocks = append(blocks, splitOversizedBlock(lines, chunkStart, chunkEnd, maxBytes)...)
+	}
+	return blocks
+}
+
+func splitOversizedBlock(lines []sourceLine, start, end, maxBytes int) []chunkBlock {
+	if maxBytes <= 0 || end-start <= maxBytes {
+		return []chunkBlock{{start: start, end: end}}
+	}
+	var blocks []chunkBlock
+	blockStart := start
+	blockEnd := start
+	inFence := false
+	lastParagraphEnd := -1
+	for _, line := range lines {
+		if line.end <= start || line.start >= end {
+			continue
+		}
+		if fenceLine(line.text) {
+			inFence = !inFence
+		}
+		if strings.TrimSpace(line.text) == "" && !inFence {
+			lastParagraphEnd = line.end
+		}
+		if line.end-blockStart > maxBytes && line.start > blockStart {
+			splitEnd := blockEnd
+			if lastParagraphEnd > blockStart && lastParagraphEnd < line.end {
+				splitEnd = lastParagraphEnd
+			}
+			blocks = append(blocks, chunkBlock{start: blockStart, end: splitEnd})
+			blockStart = splitEnd
+		}
+		blockEnd = line.end
+	}
+	if blockStart < end {
+		blocks = append(blocks, chunkBlock{start: blockStart, end: end})
+	}
+	return blocks
+}
+
+func slidingWindowBlocks(body string, parsed ParsedSource, options ChunkOptions) []chunkBlock {
+	lines := sourceLines(body)
+	startLine := 0
+	if parsed.Frontmatter.Valid && parsed.FrontmatterEnd > 0 {
+		startLine = lineIndexForOffset(lines, parsed.FrontmatterEnd)
+	}
+	var blocks []chunkBlock
+	for i := startLine; i < len(lines); {
+		start := lines[i].start
+		end := lines[i].end
+		j := i + 1
+		for j < len(lines) && lines[j].end-start <= options.WindowBytes {
+			end = lines[j].end
+			j++
+		}
+		blocks = append(blocks, chunkBlock{start: start, end: end})
+		if j >= len(lines) {
+			break
+		}
+		nextStart := maxInt(start+1, end-options.OverlapBytes)
+		next := j
+		for next > startLine && lines[next-1].start >= nextStart {
+			next--
+		}
+		if next <= i {
+			next = i + 1
+		}
+		i = next
 	}
 	return blocks
 }
@@ -138,7 +249,35 @@ func inheritedMetadata(source SourceRecord, parsed ParsedSource) map[string]stri
 	metadata["source_id"] = source.ID
 	metadata["kind"] = source.Kind
 	metadata["path"] = source.Path
+	if source.RepoID != "" {
+		metadata["repo_id"] = source.RepoID
+	}
+	if recordID := sourceRecordID(source); recordID != "" {
+		metadata["record_id"] = recordID
+	}
+	if source.SnapshotID != "" {
+		metadata["snapshot_id"] = source.SnapshotID
+	}
+	if source.RemoteRevision != "" {
+		metadata["remote_revision"] = source.RemoteRevision
+	}
+	if source.SyncRevision != "" {
+		metadata["sync_revision"] = source.SyncRevision
+	}
+	if source.SyncEventID != "" {
+		metadata["sync_event_id"] = source.SyncEventID
+	}
+	if !source.UpdatedAt.IsZero() {
+		metadata["source_updated_at"] = source.UpdatedAt.UTC().Format(time.RFC3339Nano)
+	}
 	return metadata
+}
+
+func sourceRecordID(source SourceRecord) string {
+	if source.RecordID != "" {
+		return source.RecordID
+	}
+	return source.ID
 }
 
 func linksInRange(links []Link, stableIDs []StableID, start, end int) ([]string, map[string]string) {
@@ -212,7 +351,12 @@ func lowerASCII(text string) string {
 }
 
 func chunkID(sourceID, contentHash string, byteStart int) string {
-	sum := sha256.Sum256([]byte(sourceID + "\x00" + contentHash + "\x00" + strconv.Itoa(byteStart)))
+	return chunkIDWithOptions(sourceID, contentHash, byteStart, "", ChunkOptions{})
+}
+
+func chunkIDWithOptions(sourceID, contentHash string, byteStart int, snapshotID string, options ChunkOptions) string {
+	options = normalizeChunkOptions(options)
+	sum := sha256.Sum256([]byte(strings.Join([]string{sourceID, contentHash, string(options.Policy), strconv.Itoa(byteStart), strconv.Itoa(options.MaxBytes), strconv.Itoa(options.WindowBytes), strconv.Itoa(options.OverlapBytes), snapshotID}, "\x00")))
 	return hex.EncodeToString(sum[:])
 }
 

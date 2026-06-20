@@ -125,7 +125,7 @@ func TestEntrypointCLICompatibility(t *testing.T) {
 	if strings.Contains(stderr.String(), "unknown command") {
 		t.Fatalf("did not reach CLI route: exit=%d stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "no cached search results") {
+	if !strings.Contains(stderr.String(), "repo_required") {
 		t.Fatalf("unexpected CLI compatibility result: exit=%d stderr=%q", code, stderr.String())
 	}
 }
@@ -155,6 +155,26 @@ func TestEntrypointMCPInitialize(t *testing.T) {
 	}
 	if resp.JSONRPC != "2.0" || resp.Result.ServerInfo.Name != "gitcode-mcp" {
 		t.Fatalf("unexpected initialize response: %#v", resp)
+	}
+}
+
+func TestEntrypointMCPServeRouting(t *testing.T) {
+	src := newTestSource(t)
+	old := mcpServeRoute
+	defer func() { mcpServeRoute = old }()
+	var gotTransport, gotBind string
+	mcpServeRoute = func(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, deps StartupDeps, transport string, bind string) int {
+		gotTransport = transport
+		gotBind = bind
+		return 0
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"mcp", "serve", "--transport", "http-sse", "--bind", "127.0.0.1:9234", "--cache-path", filepath.Join(t.TempDir(), "cache.db")}, strings.NewReader(""), &stdout, &stderr, src)
+	if code != 0 {
+		t.Fatalf("exit = %d stderr=%q", code, stderr.String())
+	}
+	if gotTransport != "http-sse" || gotBind != "127.0.0.1:9234" {
+		t.Fatalf("route transport=%q bind=%q", gotTransport, gotBind)
 	}
 }
 

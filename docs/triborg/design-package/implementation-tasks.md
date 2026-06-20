@@ -4,109 +4,114 @@ This file is copied from the approved Triborg design package during implementato
 
 # Implementation Tasks
 
-Run ID: gitcode-mcp-design-agent-20260618T135558Z-gitcode_mcp_cache_first_architecture
+Run ID: gitcode-mcp-gap-closure-design-agent-20260619T191521Z-gitcode_mcp_gap_closure_iteration_2
 
-1. [ ] Add Store source graph API (`001-cache-store-task-1-add-store-source-graph-api`)
-   - Component: `cache-store`
+1. [ ] ConfigCommands add redacted UX (`001-config-credential-task-1-configcommands-add-redacted-ux`)
+   - Component: `config-credential`
    - Change Type: add
-   - Source: `components/cache-store.md#task-1-add-store-source-graph-api`
+   - Source: `components/config-credential.md#task-1-configcommands-add-redacted-ux`
 
-2. [ ] Add index builder entities (`002-knowledge-indexer-task-1-add-index-builder-entities`)
-   - Component: `knowledge-indexer`
+2. [ ] Repo Registry Add (`002-repo-binding-task-1-repo-registry-add`)
+   - Component: `repo-binding`
    - Change Type: add
-   - Source: `components/knowledge-indexer.md#task-1-add-index-builder-entities`
+   - Source: `components/repo-binding.md#task-1-repo-registry-add`
 
-3. [ ] Add chunk provenance schema (`003-rag-ready-corpus-task-1-add-chunk-provenance-schema`)
-   - Component: `rag-ready-corpus`
-   - Change Type: add
-   - Source: `components/rag-ready-corpus.md#task-1-add-chunk-provenance-schema`
-
-4. [ ] Add schema and search migration (`004-cache-store-task-2-add-schema-and-search-migration`)
-   - Component: `cache-store`
-   - Change Type: add
-   - Source: `components/cache-store.md#task-2-add-schema-and-search-migration`
-
-5. [ ] Add service query API (`005-agent-query-surface-task-1-add-service-query-api`)
-   - Component: `agent-query-surface`
-   - Change Type: add
-   - Source: `components/agent-query-surface.md#task-1-add-service-query-api`
-
-6. [ ] Add CLI query mapping (`006-agent-query-surface-task-2-add-cli-query-mapping`)
-   - Component: `agent-query-surface`
-   - Change Type: add
-   - Source: `components/agent-query-surface.md#task-2-add-cli-query-mapping`
-
-7. [ ] Add Client and error types (`007-gitcode-adapter-task-1-add-client-and-error-types`)
-   - Component: `gitcode-adapter`
-   - Change Type: add
-   - Source: `components/gitcode-adapter.md#task-1-add-client-and-error-types`
-
-8. [ ] Add endpoints and pagination (`008-gitcode-adapter-task-2-add-endpoints-and-pagination`)
-   - Component: `gitcode-adapter`
-   - Change Type: add
-   - Source: `components/gitcode-adapter.md#task-2-add-endpoints-and-pagination`
-
-9. [ ] Add idempotent writes (`009-gitcode-adapter-task-3-add-idempotent-writes`)
-   - Component: `gitcode-adapter`
-   - Change Type: add
-   - Source: `components/gitcode-adapter.md#task-3-add-idempotent-writes`
-
-10. [ ] Command tree implements service dispatch (`010-cli-surface-task-1-command-tree-implements-service-dispatch`)
-   - Component: `cli-surface`
+3. [ ] Repo Scope Resolver Change (`003-repo-binding-task-2-repo-scope-resolver-change`)
+   - Component: `repo-binding`
    - Change Type: change
-   - Source: `components/cli-surface.md#task-1-command-tree-implements-service-dispatch`
+   - Source: `components/repo-binding.md#task-2-repo-scope-resolver-change`
 
-11. [ ] Add MCP stdio server (`011-mcp-server-task-1-add-mcp-stdio-server`)
+4. [ ] Repo-scoped cache schema migration (`004-cache-sync-task-1-repo-scoped-cache-schema-migration`)
+   - Component: `cache-sync`
+   - Change Type: add
+   - Source: `components/cache-sync.md#task-1-repo-scoped-cache-schema-migration`
+
+5. [ ] Sync graph upsert workflow (`005-cache-sync-task-2-sync-graph-upsert-workflow`)
+   - Component: `cache-sync`
+   - Change Type: add
+   - Source: `components/cache-sync.md#task-2-sync-graph-upsert-workflow`
+
+6. [ ] WAL writer ownership runtime (`006-cache-sync-task-3-wal-writer-ownership-runtime`)
+   - Component: `cache-sync`
+   - Change Type: add
+   - Source: `components/cache-sync.md#task-3-wal-writer-ownership-runtime`
+
+7. [ ] Provider seam add (`007-gitcode-adapter-task-1-provider-seam-add`)
+   - Component: `gitcode-adapter`
+   - Change Type: add
+   - Source: `components/gitcode-adapter.md#task-1-provider-seam-add`
+
+8. [ ] Write confirmation add (`008-gitcode-adapter-task-2-write-confirmation-add`)
+   - Component: `gitcode-adapter`
+   - Change Type: add
+   - Source: `components/gitcode-adapter.md#task-2-write-confirmation-add`
+
+9. [ ] ChunkPolicy and Query API (`009-index-chunking-task-1-chunkpolicy-and-query-api`)
+   - Component: `index-chunking`
+   - Change Type: add
+   - Source: `components/index-chunking.md#task-1-chunkpolicy-and-query-api`
+
+10. [ ] IndexFreshness warnings (`010-index-chunking-task-2-indexfreshness-warnings`)
+   - Component: `index-chunking`
+   - Change Type: add
+   - Source: `components/index-chunking.md#task-2-indexfreshness-warnings`
+
+11. [ ] RuntimeAuditConfig emit report (`011-config-credential-task-2-runtimeauditconfig-emit-report`)
+   - Component: `config-credential`
+   - Change Type: add
+   - Source: `components/config-credential.md#task-2-runtimeauditconfig-emit-report`
+
+12. [ ] Complete CLI read handlers (`012-cli-read-task-1-complete-cli-read-handlers`)
+   - Component: `cli-read`
+   - Change Type: add
+   - Source: `components/cli-read.md#task-1-complete-cli-read-handlers`
+
+13. [ ] Gate WriteExecutor Live Writes (`013-cli-write-task-1-gate-writeexecutor-live-writes`)
+   - Component: `cli-write`
+   - Change Type: add
+   - Source: `components/cli-write.md#task-1-gate-writeexecutor-live-writes`
+
+14. [ ] Tool registry parity (`014-mcp-server-task-1-tool-registry-parity`)
    - Component: `mcp-server`
    - Change Type: add
-   - Source: `components/mcp-server.md#task-1-add-mcp-stdio-server`
+   - Source: `components/mcp-server.md#task-1-tool-registry-parity`
 
-12. [ ] Add SyncToCache state machine (`012-sync-engine-task-1-add-synctocache-state-machine`)
-   - Component: `sync-engine`
-   - Change Type: add
-   - Source: `components/sync-engine.md#task-1-add-synctocache-state-machine`
-
-13. [ ] Add sync failure guards (`013-sync-engine-task-2-add-sync-failure-guards`)
-   - Component: `sync-engine`
-   - Change Type: add
-   - Source: `components/sync-engine.md#task-2-add-sync-failure-guards`
-
-14. [ ] Add cache lock handle (`014-cache-store-task-3-add-cache-lock-handle`)
-   - Component: `cache-store`
-   - Change Type: add
-   - Source: `components/cache-store.md#task-3-add-cache-lock-handle`
-
-15. [ ] Add minimum cache state test (`015-cache-store-task-4-add-minimum-cache-state-test`)
-   - Component: `cache-store`
-   - Change Type: remove
-   - Source: `components/cache-store.md#task-4-add-minimum-cache-state-test`
-
-16. [ ] Add corpus snapshot APIs (`016-rag-ready-corpus-task-2-add-corpus-snapshot-apis`)
-   - Component: `rag-ready-corpus`
-   - Change Type: add
-   - Source: `components/rag-ready-corpus.md#task-2-add-corpus-snapshot-apis`
-
-17. [ ] Sanitizer Script Add (`017-fixtures-tests-task-1-sanitizer-script-add`)
-   - Component: `fixtures-tests`
-   - Change Type: add
-   - Source: `components/fixtures-tests.md#task-1-sanitizer-script-add`
-
-18. [ ] API Fixtures Contract Add (`018-fixtures-tests-task-2-api-fixtures-contract-add`)
-   - Component: `fixtures-tests`
-   - Change Type: add
-   - Source: `components/fixtures-tests.md#task-2-api-fixtures-contract-add`
-
-19. [ ] Test Pyramid Add (`019-fixtures-tests-task-3-test-pyramid-add`)
-   - Component: `fixtures-tests`
-   - Change Type: add
-   - Source: `components/fixtures-tests.md#task-3-test-pyramid-add`
-
-20. [ ] Add config startup API (`020-operations-security-task-1-add-config-startup-api`)
-   - Component: `operations-security`
-   - Change Type: add
-   - Source: `components/operations-security.md#task-1-add-config-startup-api`
-
-21. [ ] Change entrypoint dependency handoff (`021-operations-security-task-2-change-entrypoint-dependency-handoff`)
-   - Component: `operations-security`
+15. [ ] Share read parity payloads (`015-cli-read-task-2-share-read-parity-payloads`)
+   - Component: `cli-read`
    - Change Type: change
-   - Source: `components/operations-security.md#task-2-change-entrypoint-dependency-handoff`
+   - Source: `components/cli-read.md#task-2-share-read-parity-payloads`
+
+16. [ ] HTTPSSE session transport (`016-mcp-server-task-2-httpsse-session-transport`)
+   - Component: `mcp-server`
+   - Change Type: add
+   - Source: `components/mcp-server.md#task-2-httpsse-session-transport`
+
+17. [ ] Runtime cache readiness (`017-mcp-server-task-3-runtime-cache-readiness`)
+   - Component: `mcp-server`
+   - Change Type: change
+   - Source: `components/mcp-server.md#task-3-runtime-cache-readiness`
+
+18. [ ] SnapshotStore stored diff (`018-snapshot-diff-task-1-snapshotstore-stored-diff`)
+   - Component: `snapshot-diff`
+   - Change Type: add
+   - Source: `components/snapshot-diff.md#task-1-snapshotstore-stored-diff`
+
+19. [ ] Docs Smoke Package Add (`019-docs-dogfood-task-1-docs-smoke-package-add`)
+   - Component: `docs-dogfood`
+   - Change Type: add
+   - Source: `components/docs-dogfood.md#task-1-docs-smoke-package-add`
+
+20. [ ] Fixture Validation Gate Add (`020-docs-dogfood-task-2-fixture-validation-gate-add`)
+   - Component: `docs-dogfood`
+   - Change Type: validate
+   - Source: `components/docs-dogfood.md#task-2-fixture-validation-gate-add`
+
+21. [ ] Dogfood Checklist Add (`021-docs-dogfood-task-3-dogfood-checklist-add`)
+   - Component: `docs-dogfood`
+   - Change Type: add
+   - Source: `components/docs-dogfood.md#task-3-dogfood-checklist-add`
+
+22. [ ] Feedback Validator Add (`022-docs-dogfood-task-4-feedback-validator-add`)
+   - Component: `docs-dogfood`
+   - Change Type: add
+   - Source: `components/docs-dogfood.md#task-4-feedback-validator-add`

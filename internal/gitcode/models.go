@@ -137,8 +137,21 @@ type WriteOptions struct {
 }
 
 type WriteResult[T any] struct {
-	Record         T
-	IdempotencyKey string
+	Record                     T
+	Confirmed                  bool
+	Operation                  string
+	Target                     string
+	ProviderStatus             string
+	RemoteID                   string
+	RemoteNumber               int
+	RemoteSlug                 string
+	RemoteRevision             string
+	ParentIssueNumber          int
+	ParentIssueID              string
+	IdempotencyKey             string
+	ResponseHash               string
+	ConfirmedAt                time.Time
+	ProviderPayloadFingerprint string
 }
 
 type CreateIssueRequest struct {

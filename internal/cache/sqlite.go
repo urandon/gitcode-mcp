@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -14,11 +17,33 @@ type SQLiteStore struct {
 	db         *sql.DB
 	useFTS     bool
 	forceNoFTS bool
+	cachePath  string
+	lockPath   string
 }
 
 type LockHandle struct {
-	file *os.File
-	path string
+	file  *os.File
+	path  string
+	owner WriterOwner
+}
+
+type WriterOwner struct {
+	Operation string    `json:"operation"`
+	RepoID     string    `json:"repo_id,omitempty"`
+	StartedAt time.Time `json:"started_at"`
+	PID       int       `json:"pid"`
+	CachePath string    `json:"cache_path"`
+}
+
+type WriterLease struct {
+	lock *LockHandle
+	Owner WriterOwner
+}
+
+type WriterRequest struct {
+	Operation string
+	RepoID     string
+	LockPath   string
 }
 
 func NewSQLiteStore(ctx context.Context, dataSourceName string) (*SQLiteStore, error) {
@@ -30,20 +55,70 @@ func newSQLiteStore(ctx context.Context, dataSourceName string, forceNoFTS bool)
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(4)
+	cachePath := cachePathForDataSource(dataSourceName)
+	lockPath := writerLockPath(cachePath)
+	store := &SQLiteStore{db: db, forceNoFTS: forceNoFTS, cachePath: cachePath, lockPath: lockPath}
 	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
-	useFTS := !forceNoFTS && detectFTS5(ctx, db)
-	if err := runMigrations(ctx, db, useFTS); err != nil {
+	if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout = 5000"); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
-	return &SQLiteStore{db: db, useFTS: useFTS, forceNoFTS: forceNoFTS}, nil
+	if dataSourceName != ":memory:" {
+		if _, err := db.ExecContext(ctx, "PRAGMA journal_mode = WAL"); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
+	useFTS := !forceNoFTS && detectFTS5(ctx, db)
+	store.useFTS = useFTS
+	if dataSourceName == ":memory:" {
+		if err := runMigrations(ctx, db, useFTS); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+		return store, nil
+	}
+	lease, err := store.AcquireWriter(ctx, WriterRequest{Operation: "migration"})
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := runMigrations(ctx, db, useFTS); err != nil {
+		_ = store.ReleaseWriter(context.Background(), lease)
+		_ = db.Close()
+		return nil, err
+	}
+	if err := store.ReleaseWriter(context.Background(), lease); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return store, nil
 }
 
 func NewInMemorySQLiteStore(ctx context.Context) (*SQLiteStore, error) {
 	return NewSQLiteStore(ctx, ":memory:")
+}
+
+func cachePathForDataSource(dataSourceName string) string {
+	if dataSourceName == ":memory:" || strings.HasPrefix(dataSourceName, "file:") {
+		return dataSourceName
+	}
+	if abs, err := filepath.Abs(dataSourceName); err == nil {
+		return abs
+	}
+	return dataSourceName
+}
+
+func writerLockPath(cachePath string) string {
+	if cachePath == "" || cachePath == ":memory:" || strings.HasPrefix(cachePath, "file:") {
+		return filepath.Join(os.TempDir(), "gitcode-mcp-cache-writer.lock")
+	}
+	return cachePath + ".writer.lock"
 }
 
 func (s *SQLiteStore) Close() error {
@@ -87,6 +162,18 @@ func (s *SQLiteStore) IntegrityCheck(ctx context.Context) error {
 	}
 	if result != "ok" {
 		return ErrCacheCorruption{Path: "sqlite", Detail: result}
+	}
+	return nil
+}
+
+func (s *SQLiteStore) Checkpoint(ctx context.Context, reason string) error {
+	_ = reason
+	var busy, logFrames, checkpointed int
+	if err := s.db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &logFrames, &checkpointed); err != nil {
+		return err
+	}
+	if busy != 0 {
+		return ErrLockContention{Path: s.cachePath, HolderHint: "sqlite checkpoint busy"}
 	}
 	return nil
 }

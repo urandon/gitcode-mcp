@@ -5,6 +5,10 @@ import (
 	"net/url"
 )
 
+func getRepoEndpoint(owner, repo string) string {
+	return endpointPath("/api/v5/repos/%s/%s", owner, repo)
+}
+
 func listIssuesEndpoint(owner, repo string) string {
 	return endpointPath("/api/v5/repos/%s/%s/issues", owner, repo)
 }

@@ -1,0 +1,21 @@
+{
+  "covered_outcome_ids": [
+    "outcome-12"
+  ],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "internal/index chunking runtime",
+    "SQLite cache chunk persistence",
+    "CLI list-chunks",
+    "CLI search-chunks",
+    "CLI get-snippet",
+    "MCP list_chunks",
+    "MCP search_chunks",
+    "MCP get_snippet",
+    "shared ChunkQueryResult payload"
+  ],
+  "evidence_type": "runtime/compiler test",
+  "freshness": "current source/build/runtime evidence required",
+  "mocks_used": false,
+  "production_files_modified": []
+}
