@@ -3,6 +3,7 @@ package cache
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 var ErrNotFound = errors.New("cache: not found")
@@ -33,6 +34,11 @@ func (e ErrAliasConflict) Error() string {
 type ErrLockContention struct {
 	Path       string
 	HolderHint string
+	Operation  string
+	RepoID     string
+	StartedAt  time.Time
+	PID        int
+	CachePath  string
 }
 
 func (e ErrLockContention) Error() string {

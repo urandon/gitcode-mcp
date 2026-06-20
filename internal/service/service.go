@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,7 +28,7 @@ type Service struct {
 }
 
 func New(store cache.Store) *Service {
-	return &Service{store: store, client: sanitizedFixtureClient{}, now: func() time.Time { return time.Now().UTC() }, lockPath: "gitcode-mcp-sync.lock"}
+	return &Service{store: store, client: sanitizedFixtureClient{}, now: func() time.Time { return time.Now().UTC() }, lockPath: filepath.Join(os.TempDir(), "gitcode-mcp-sync.lock")}
 }
 
 func NewWithClient(store cache.Store, client gitcode.Client) *Service {
@@ -623,11 +624,11 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 			return SyncResult{}, ErrSyncInProgress{EventID: event.ID, IdempotencyKey: key}
 		}
 	}
-	lock, err := s.store.AcquireLock(ctx, s.lockPath)
+	lease, err := s.store.AcquireWriter(ctx, cache.WriterRequest{Operation: "sync", RepoID: repoID, LockPath: s.lockPath})
 	if err != nil {
 		return SyncResult{}, err
 	}
-	defer s.store.ReleaseLock(context.Background(), lock)
+	defer s.store.ReleaseWriter(context.Background(), lease)
 	remoteType, remoteID, err := s.syncTarget(ctx, req)
 	if err != nil {
 		return SyncResult{}, err
@@ -672,6 +673,12 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 	}
 	graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "succeeded", IdempotencyKey: key, Message: syncEventMessage(counts), CreatedAt: now})
 	if err := s.store.UpsertSyncGraph(ctx, syncGraphFromSourceGraph(req.RepoID, graph)); err != nil {
+		if inProgressRecorded {
+			_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, err, s.now().UTC()))
+		}
+		return SyncResult{}, err
+	}
+	if err := s.store.Checkpoint(ctx, "sync-complete"); err != nil {
 		if inProgressRecorded {
 			_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, err, s.now().UTC()))
 		}

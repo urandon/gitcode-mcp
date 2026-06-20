@@ -49,6 +49,9 @@ type Store interface {
 	IntegrityCheck(context.Context) error
 	AcquireLock(context.Context, string) (*LockHandle, error)
 	ReleaseLock(context.Context, *LockHandle) error
+	AcquireWriter(context.Context, WriterRequest) (*WriterLease, error)
+	ReleaseWriter(context.Context, *WriterLease) error
+	Checkpoint(context.Context, string) error
 	Close() error
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -498,6 +499,108 @@ func TestLockContention(t *testing.T) {
 	}
 	if err := store.ReleaseLock(ctx, nil); err != nil {
 		t.Fatalf("ReleaseLock nil returned error: %v", err)
+	}
+}
+
+func TestWriterAdmissionWALOwnershipRuntime(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "cache.db")
+	store, err := NewSQLiteStore(ctx, path)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore returned error: %v", err)
+	}
+	defer store.Close()
+	mustAddTestRepo(t, ctx, store, "fixture-a")
+	mustUpsertGraph(t, ctx, store, SourceGraph{Source: testSource("DOC-WAL", "doc", "WAL Doc")})
+
+	readerOne, err := NewSQLiteStore(ctx, path)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore readerOne returned error: %v", err)
+	}
+	defer readerOne.Close()
+	readerTwo, err := NewSQLiteStore(ctx, path)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore readerTwo returned error: %v", err)
+	}
+	defer readerTwo.Close()
+
+	lease, err := store.AcquireWriter(ctx, WriterRequest{Operation: "sync-index", RepoID: "fixture-a"})
+	if err != nil {
+		t.Fatalf("AcquireWriter returned error: %v", err)
+	}
+	defer store.ReleaseWriter(ctx, lease)
+
+	for i, reader := range []*SQLiteStore{readerOne, readerTwo} {
+		source, err := reader.GetSourceScoped(ctx, "fixture-a", "DOC-WAL")
+		if err != nil {
+			t.Fatalf("reader %d GetSourceScoped returned error: %v", i+1, err)
+		}
+		if source.RepoID != "fixture-a" || source.ID != "DOC-WAL" {
+			t.Fatalf("reader %d source = %#v", i+1, source)
+		}
+	}
+
+	_, err = readerOne.AcquireWriter(ctx, WriterRequest{Operation: "sync", RepoID: "fixture-a"})
+	var contention ErrLockContention
+	if !errors.As(err, &contention) {
+		t.Fatalf("second AcquireWriter error = %T %[1]v, want ErrLockContention", err)
+	}
+	if contention.Operation != "sync-index" || contention.StartedAt.IsZero() || contention.PID == 0 {
+		t.Fatalf("contention metadata = %#v", contention)
+	}
+
+	migrationStore, err := NewSQLiteStore(ctx, path)
+	if err == nil {
+		_ = migrationStore.Close()
+		t.Fatalf("NewSQLiteStore migration succeeded while writer lease held")
+	}
+	if !errors.As(err, &contention) {
+		t.Fatalf("migration open error = %T %[1]v, want ErrLockContention", err)
+	}
+
+	if err := store.ReleaseWriter(ctx, lease); err != nil {
+		t.Fatalf("ReleaseWriter returned error: %v", err)
+	}
+	lease = nil
+	reacquired, err := readerTwo.AcquireWriter(ctx, WriterRequest{Operation: "sync", RepoID: "fixture-a"})
+	if err != nil {
+		t.Fatalf("AcquireWriter after release returned error: %v", err)
+	}
+	if err := readerTwo.ReleaseWriter(ctx, reacquired); err != nil {
+		t.Fatalf("ReleaseWriter reacquired returned error: %v", err)
+	}
+	migrationStore, err = NewSQLiteStore(ctx, path)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore after release returned error: %v", err)
+	}
+	_ = migrationStore.Close()
+}
+
+func TestCheckpointAfterWriteHeavySync(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "cache.db")
+	store, err := NewSQLiteStore(ctx, path)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore returned error: %v", err)
+	}
+	defer store.Close()
+	mustAddTestRepo(t, ctx, store, "fixture-a")
+	for i := 0; i < 25; i++ {
+		mustUpsertGraph(t, ctx, store, SourceGraph{Source: testSource(fmt.Sprintf("DOC-CP-%02d", i), "doc", "Checkpoint Doc")})
+	}
+	if err := store.Checkpoint(ctx, "sync-complete"); err != nil {
+		var contention ErrLockContention
+		if !errors.As(err, &contention) {
+			t.Fatalf("Checkpoint returned error = %T %[1]v, want nil or ErrLockContention", err)
+		}
+	}
+	reader, err := NewSQLiteStore(ctx, path)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore reader returned error: %v", err)
+	}
+	defer reader.Close()
+	if _, err := reader.GetSourceScoped(ctx, "fixture-a", "DOC-CP-00"); err != nil {
+		t.Fatalf("reader GetSourceScoped after checkpoint returned error: %v", err)
 	}
 }
 

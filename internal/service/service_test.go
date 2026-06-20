@@ -1078,4 +1078,9 @@ func (f *brokenStore) AcquireLock(context.Context, string) (*cache.LockHandle, e
 	return nil, nil
 }
 func (f *brokenStore) ReleaseLock(context.Context, *cache.LockHandle) error { return nil }
-func (f *brokenStore) Close() error                                         { return nil }
+func (f *brokenStore) AcquireWriter(context.Context, cache.WriterRequest) (*cache.WriterLease, error) {
+	return nil, nil
+}
+func (f *brokenStore) ReleaseWriter(context.Context, *cache.WriterLease) error { return nil }
+func (f *brokenStore) Checkpoint(context.Context, string) error                { return nil }
+func (f *brokenStore) Close() error                                            { return nil }
