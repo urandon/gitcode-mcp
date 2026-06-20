@@ -1,6 +1,10 @@
 package service
 
-import "time"
+import (
+	"time"
+
+	"gitcode-mcp/internal/index"
+)
 
 type RepositoryScope string
 
@@ -173,6 +177,20 @@ type ResolvedID struct {
 	Kind        string `json:"kind"`
 	Title       string `json:"title"`
 }
+
+type ChunkPolicy = index.ChunkPolicy
+
+type ChunkQuery = index.ChunkQuery
+
+type ChunkSearchQuery = index.ChunkSearchQuery
+
+type SnippetQuery = index.SnippetQuery
+
+type ChunkQueryResult = index.ChunkQueryResult
+
+type ChunkResult = index.ChunkResult
+
+type IndexWarning = index.IndexWarning
 
 type SnippetRequest struct {
 	RepoID    string `json:"repo_id"`

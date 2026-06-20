@@ -390,6 +390,45 @@ func (s *Service) GetSnippet(ctx context.Context, req SnippetRequest) (SnippetRe
 	return SnippetResult{}, ErrInvalidQuery{Field: "range", Message: "line range or chunk id is required"}
 }
 
+func (s *Service) ListChunks(ctx context.Context, req ChunkQuery) (ChunkQueryResult, error) {
+	repoID, err := s.requireRepo(ctx, req.RepoID, "list-chunks")
+	if err != nil {
+		return ChunkQueryResult{}, err
+	}
+	req.RepoID = repoID
+	chunks, err := s.store.ListChunks(ctx, cache.ChunkFilter{RepoID: req.RepoID, SourceID: req.SourceID, RecordID: req.RecordID, SnapshotID: req.SnapshotID, Policy: string(req.Policy)})
+	if err != nil {
+		return ChunkQueryResult{}, normalizeError(err, "chunks", req.SourceID)
+	}
+	return index.NewMemoryChunkIndex(indexChunks(chunks)).ListChunks(ctx, req)
+}
+
+func (s *Service) SearchChunks(ctx context.Context, req ChunkSearchQuery) (ChunkQueryResult, error) {
+	repoID, err := s.requireRepo(ctx, req.RepoID, "search-chunks")
+	if err != nil {
+		return ChunkQueryResult{}, err
+	}
+	req.RepoID = repoID
+	chunks, err := s.store.ListChunks(ctx, cache.ChunkFilter{RepoID: req.RepoID, SourceID: req.SourceID, RecordID: req.RecordID, SnapshotID: req.SnapshotID, Policy: string(req.Policy)})
+	if err != nil {
+		return ChunkQueryResult{}, normalizeError(err, "chunks", req.SourceID)
+	}
+	return index.NewMemoryChunkIndex(indexChunks(chunks)).SearchChunks(ctx, req)
+}
+
+func (s *Service) GetChunkSnippet(ctx context.Context, req SnippetQuery) (ChunkQueryResult, error) {
+	repoID, err := s.requireRepo(ctx, req.RepoID, "get-snippet")
+	if err != nil {
+		return ChunkQueryResult{}, err
+	}
+	req.RepoID = repoID
+	chunks, err := s.store.ListChunks(ctx, cache.ChunkFilter{RepoID: req.RepoID, SourceID: req.SourceID, RecordID: req.RecordID, SnapshotID: req.SnapshotID, Policy: string(req.Policy)})
+	if err != nil {
+		return ChunkQueryResult{}, normalizeError(err, "chunks", req.SourceID)
+	}
+	return index.NewMemoryChunkIndex(indexChunks(chunks)).GetSnippet(ctx, req)
+}
+
 func (s *Service) GetSyncStatus(ctx context.Context, req SyncStatusRequest) (SyncStatusResult, error) {
 	repoID, err := s.requireRepo(ctx, req.RepoID, "sync-status")
 	if err != nil {
@@ -590,7 +629,7 @@ func (s *Service) Index(ctx context.Context, req OperationRequest) (OperationRes
 	for _, source := range sources {
 		chunks := index.ChunkSource(indexSourceRecord(source), index.ParseSource(indexSourceRecord(source)))
 		for _, chunk := range chunks {
-			if _, err := s.store.UpsertChunk(ctx, cache.Chunk{RepoID: source.RepoID, ID: chunk.ID, SourceID: chunk.SourceID, ContentHash: chunk.ContentHash, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, HeadingPath: append([]string(nil), chunk.HeadingPath...), Text: chunk.Text, NormalizedText: chunk.NormalizedText, InheritedMetadata: copyStringMap(chunk.InheritedMetadata), OutboundLinks: sortedStrings(chunk.OutboundLinks), ResolvedAliases: copyStringMap(chunk.ResolvedAliases), Embedding: append([]byte(nil), chunk.Embedding...)}); err != nil {
+			if _, err := s.store.UpsertChunk(ctx, cacheChunk(chunk)); err != nil {
 				return OperationResult{}, normalizeError(err, "chunk", chunk.ID)
 			}
 		}
@@ -797,7 +836,19 @@ func chunksForSource(source cache.Source) []cache.Chunk {
 	chunks := index.ChunkSource(idxSource, parsed)
 	out := make([]cache.Chunk, 0, len(chunks))
 	for _, chunk := range chunks {
-		out = append(out, cache.Chunk{RepoID: source.RepoID, ID: chunk.ID, SourceID: chunk.SourceID, ContentHash: chunk.ContentHash, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, HeadingPath: append([]string(nil), chunk.HeadingPath...), Text: chunk.Text, NormalizedText: chunk.NormalizedText, InheritedMetadata: copyStringMap(chunk.InheritedMetadata), OutboundLinks: sortedStrings(chunk.OutboundLinks), ResolvedAliases: copyStringMap(chunk.ResolvedAliases)})
+		out = append(out, cacheChunk(chunk))
+	}
+	return out
+}
+
+func cacheChunk(chunk index.Chunk) cache.Chunk {
+	return cache.Chunk{RepoID: chunk.RepoID, ID: chunk.ID, SourceID: chunk.SourceID, RecordID: chunk.RecordID, SnapshotID: chunk.SnapshotID, ContentHash: chunk.ContentHash, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, HeadingPath: append([]string(nil), chunk.HeadingPath...), Text: chunk.Text, NormalizedText: chunk.NormalizedText, InheritedMetadata: copyStringMap(chunk.InheritedMetadata), OutboundLinks: sortedStrings(chunk.OutboundLinks), ResolvedAliases: copyStringMap(chunk.ResolvedAliases), Embedding: append([]byte(nil), chunk.Embedding...), Policy: string(chunk.Policy)}
+}
+
+func indexChunks(chunks []cache.Chunk) []index.Chunk {
+	out := make([]index.Chunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		out = append(out, index.Chunk{RepoID: chunk.RepoID, ID: chunk.ID, SourceID: chunk.SourceID, RecordID: chunk.RecordID, SnapshotID: chunk.SnapshotID, ContentHash: chunk.ContentHash, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, HeadingPath: append([]string(nil), chunk.HeadingPath...), Text: chunk.Text, NormalizedText: chunk.NormalizedText, InheritedMetadata: copyStringMap(chunk.InheritedMetadata), OutboundLinks: sortedStrings(chunk.OutboundLinks), ResolvedAliases: copyStringMap(chunk.ResolvedAliases), Embedding: append([]byte(nil), chunk.Embedding...), Policy: index.ChunkPolicy(chunk.Policy)})
 	}
 	return out
 }
@@ -813,7 +864,7 @@ func indexSourceRecord(source cache.Source) index.SourceRecord {
 			remoteAliases = append(remoteAliases, index.Alias{Type: alias.Remote.Type, ID: alias.Remote.ID})
 		}
 	}
-	return index.SourceRecord{ID: source.ID, Kind: source.Kind, Path: source.Path, Title: source.Title, Body: source.Body, Status: source.Status, UpdatedAt: source.UpdatedAt.UTC(), Aliases: aliases, RemoteAliases: remoteAliases}
+	return index.SourceRecord{RepoID: source.RepoID, ID: source.ID, RecordID: source.ID, Kind: source.Kind, Path: source.Path, Title: source.Title, Body: source.Body, Status: source.Status, UpdatedAt: source.UpdatedAt.UTC(), Aliases: aliases, RemoteAliases: remoteAliases}
 }
 
 type stagedRemote struct {

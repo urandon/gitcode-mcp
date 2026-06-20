@@ -21,7 +21,10 @@ type DerivedLinkReader interface {
 }
 
 type SourceRecord struct {
+	RepoID                   string
 	ID                       string
+	RecordID                 string
+	SnapshotID               string
 	Kind                     string
 	Path                     string
 	Title                    string
@@ -59,18 +62,18 @@ type SourceDerived struct {
 }
 
 type ParsedSource struct {
-	SourceID        string
-	ContentHash     string
-	Frontmatter     Frontmatter
-	FrontmatterEnd  int
-	Headings        []Heading
-	Links           []Link
-	StableIDs       []StableID
-	Aliases         []Alias
-	Statuses        []Status
-	Diagnostics     []CollisionDiagnostic
-	LineStarts      []int
-	NormalizedBody  string
+	SourceID       string
+	ContentHash    string
+	Frontmatter    Frontmatter
+	FrontmatterEnd int
+	Headings       []Heading
+	Links          []Link
+	StableIDs      []StableID
+	Aliases        []Alias
+	Statuses       []Status
+	Diagnostics    []CollisionDiagnostic
+	LineStarts     []int
+	NormalizedBody string
 }
 
 type Frontmatter struct {
@@ -197,9 +200,26 @@ type CitationAnchor struct {
 	DerivedRowID string
 }
 
+type ChunkPolicy string
+
+const (
+	ChunkPolicyHeading       ChunkPolicy = "heading"
+	ChunkPolicySlidingWindow ChunkPolicy = "sliding_window"
+)
+
+type ChunkOptions struct {
+	Policy       ChunkPolicy
+	MaxBytes     int
+	WindowBytes  int
+	OverlapBytes int
+}
+
 type Chunk struct {
 	ID                string
+	RepoID            string
 	SourceID          string
+	RecordID          string
+	SnapshotID        string
 	ContentHash       string
 	ByteStart         int
 	ByteEnd           int
@@ -213,6 +233,7 @@ type Chunk struct {
 	ResolvedAliases   map[string]string
 	Embedding         []byte
 	CitationAnchorID  string
+	Policy            ChunkPolicy
 }
 
 type SourceLedgerRow struct {
@@ -268,4 +289,78 @@ type BuildReport struct {
 	CollisionCount    int
 	BrokenLinkCount   int
 	Diagnostics       []CollisionDiagnostic
+}
+
+type ChunkQuery struct {
+	RepoID     string
+	SourceID   string
+	RecordID   string
+	SnapshotID string
+	Policy     ChunkPolicy
+	Limit      int
+	Offset     int
+}
+
+type ChunkSearchQuery struct {
+	ChunkQuery
+	Query string
+}
+
+type SnippetQuery struct {
+	RepoID     string
+	SourceID   string
+	RecordID   string
+	SnapshotID string
+	Policy     ChunkPolicy
+	ChunkID    string
+	ByteOffset int
+	ByteLength int
+	LineStart  int
+	LineEnd    int
+}
+
+type IndexWarning struct {
+	RepoID     string      `json:"repo_id,omitempty"`
+	SourceID   string      `json:"source_id,omitempty"`
+	RecordID   string      `json:"record_id,omitempty"`
+	SnapshotID string      `json:"snapshot_id,omitempty"`
+	Policy     ChunkPolicy `json:"policy,omitempty"`
+	Code       string      `json:"code"`
+	Message    string      `json:"message"`
+}
+
+type ChunkResult struct {
+	ID                string            `json:"id"`
+	RepoID            string            `json:"repo_id,omitempty"`
+	SourceID          string            `json:"source_id"`
+	RecordID          string            `json:"record_id,omitempty"`
+	SnapshotID        string            `json:"snapshot_id,omitempty"`
+	Policy            ChunkPolicy       `json:"policy"`
+	ContentHash       string            `json:"content_hash"`
+	ByteStart         int               `json:"byte_start"`
+	ByteEnd           int               `json:"byte_end"`
+	LineStart         int               `json:"line_start"`
+	LineEnd           int               `json:"line_end"`
+	HeadingPath       []string          `json:"heading_path"`
+	Text              string            `json:"text,omitempty"`
+	SnippetText       string            `json:"snippet_text,omitempty"`
+	NormalizedText    string            `json:"normalized_text,omitempty"`
+	CitationAnchorID  string            `json:"citation_anchor_id,omitempty"`
+	InheritedMetadata map[string]string `json:"inherited_metadata,omitempty"`
+	OutboundLinks     []string          `json:"outbound_links,omitempty"`
+	ResolvedAliases   map[string]string `json:"resolved_aliases,omitempty"`
+}
+
+type ChunkQueryResult struct {
+	Chunks   []ChunkResult  `json:"chunks"`
+	Limit    int            `json:"limit"`
+	Offset   int            `json:"offset"`
+	Total    int            `json:"total"`
+	Warnings []IndexWarning `json:"warnings"`
+}
+
+type ChunkIndexReader interface {
+	ListChunks(context.Context, ChunkQuery) (ChunkQueryResult, error)
+	SearchChunks(context.Context, ChunkSearchQuery) (ChunkQueryResult, error)
+	GetSnippet(context.Context, SnippetQuery) (ChunkQueryResult, error)
 }

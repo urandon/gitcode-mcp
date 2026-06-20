@@ -23,6 +23,9 @@ type serviceInterface interface {
 	GetSyncStatus(context.Context, service.SyncStatusRequest) (service.SyncStatusResult, error)
 	ExportSnapshot(context.Context, service.ExportSnapshotRequest) (service.ExportSnapshotResult, error)
 	DiffSnapshot(context.Context, service.DiffSnapshotRequest) (service.DiffSnapshotResult, error)
+	ListChunks(context.Context, service.ChunkQuery) (service.ChunkQueryResult, error)
+	SearchChunks(context.Context, service.ChunkSearchQuery) (service.ChunkQueryResult, error)
+	GetChunkSnippet(context.Context, service.SnippetQuery) (service.ChunkQueryResult, error)
 }
 
 type Server struct {
@@ -131,6 +134,25 @@ type aggregateSyncStatus struct {
 func intPtr(v int) *int             { return &v }
 func float64Ptr(v float64) *float64 { return &v }
 
+func chunkSchemaProps(includeQuery bool) map[string]schemaProp {
+	props := map[string]schemaProp{
+		"repo_id":     {Type: "string", Description: "Configured repository id.", MinLength: 1},
+		"source_id":   {Type: "string", Description: "Source id filter."},
+		"record_id":   {Type: "string", Description: "Record id filter."},
+		"snapshot_id": {Type: "string", Description: "Snapshot id filter."},
+		"policy":      {Type: "string", Description: "Chunk policy.", Enum: []string{"heading", "sliding_window"}},
+		"chunk_id":    {Type: "string", Description: "Chunk id."},
+		"line_start":  {Type: "integer", Description: "Start line.", Minimum: float64Ptr(1)},
+		"line_end":    {Type: "integer", Description: "End line.", Minimum: float64Ptr(1)},
+		"limit":       {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(200), Default: 50.0},
+		"offset":      {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
+	}
+	if includeQuery {
+		props["query"] = schemaProp{Type: "string", Description: "Normalized chunk query text.", MinLength: 1}
+	}
+	return props
+}
+
 var toolDefs = []toolDefinition{
 	{
 		Name:        "search_sources",
@@ -173,6 +195,21 @@ var toolDefs = []toolDefinition{
 			},
 			Required: []string{"repo_id"},
 		},
+	},
+	{
+		Name:        "list_chunks",
+		Description: "List cached index chunks through the shared chunk query result model.",
+		InputSchema: inputSchema{Type: "object", Properties: chunkSchemaProps(false), Required: []string{"repo_id"}},
+	},
+	{
+		Name:        "search_chunks",
+		Description: "Search cached index chunks through the shared chunk query result model.",
+		InputSchema: inputSchema{Type: "object", Properties: chunkSchemaProps(true), Required: []string{"repo_id", "query"}},
+	},
+	{
+		Name:        "get_snippet",
+		Description: "Get a cached chunk snippet through the shared chunk query result model.",
+		InputSchema: inputSchema{Type: "object", Properties: chunkSchemaProps(false), Required: []string{"repo_id"}},
 	},
 	{
 		Name:        "source_backlinks",
@@ -355,6 +392,12 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 		s.callGetSource(ctx, req.ID, args)
 	case "list_sources":
 		s.callListSources(ctx, req.ID, args)
+	case "list_chunks":
+		s.callListChunks(ctx, req.ID, args)
+	case "search_chunks":
+		s.callSearchChunks(ctx, req.ID, args)
+	case "get_snippet":
+		s.callGetSnippet(ctx, req.ID, args)
 	case "source_backlinks":
 		s.callSourceBacklinks(ctx, req.ID, args)
 	case "resolve_id":
@@ -566,6 +609,112 @@ func (s *Server) callListSources(ctx context.Context, id *json.RawMessage, args 
 		Content:           []toolContentItem{{Type: "text", Text: text}},
 		StructuredContent: listSourcesSResult{Results: results, Limit: limit, Offset: offset},
 	})
+}
+
+type chunkArgs struct {
+	RepoID     string `json:"repo_id"`
+	SourceID   string `json:"source_id,omitempty"`
+	RecordID   string `json:"record_id,omitempty"`
+	SnapshotID string `json:"snapshot_id,omitempty"`
+	Policy     string `json:"policy,omitempty"`
+	ChunkID    string `json:"chunk_id,omitempty"`
+	Query      string `json:"query,omitempty"`
+	LineStart  *int   `json:"line_start,omitempty"`
+	LineEnd    *int   `json:"line_end,omitempty"`
+	Limit      *int   `json:"limit,omitempty"`
+	Offset     *int   `json:"offset,omitempty"`
+}
+
+func (s *Server) callListChunks(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	a, ok := s.parseChunkArgs(id, args, false)
+	if !ok {
+		return
+	}
+	result, err := s.svc.ListChunks(ctx, service.ChunkQuery{RepoID: a.RepoID, SourceID: a.SourceID, RecordID: a.RecordID, SnapshotID: a.SnapshotID, Policy: servicePolicy(a.Policy), Limit: valueOr(a.Limit, 50), Offset: valueOr(a.Offset, 0)})
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	s.writeChunkToolResult(id, result)
+}
+
+func (s *Server) callSearchChunks(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	a, ok := s.parseChunkArgs(id, args, true)
+	if !ok {
+		return
+	}
+	result, err := s.svc.SearchChunks(ctx, service.ChunkSearchQuery{ChunkQuery: service.ChunkQuery{RepoID: a.RepoID, SourceID: a.SourceID, RecordID: a.RecordID, SnapshotID: a.SnapshotID, Policy: servicePolicy(a.Policy), Limit: valueOr(a.Limit, 50), Offset: valueOr(a.Offset, 0)}, Query: a.Query})
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	s.writeChunkToolResult(id, result)
+}
+
+func (s *Server) callGetSnippet(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	a, ok := s.parseChunkArgs(id, args, false)
+	if !ok {
+		return
+	}
+	query := service.SnippetQuery{RepoID: a.RepoID, SourceID: a.SourceID, RecordID: a.RecordID, SnapshotID: a.SnapshotID, Policy: servicePolicy(a.Policy), ChunkID: a.ChunkID}
+	if a.LineStart != nil {
+		query.LineStart = *a.LineStart
+	}
+	if a.LineEnd != nil {
+		query.LineEnd = *a.LineEnd
+	}
+	result, err := s.svc.GetChunkSnippet(ctx, query)
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	s.writeChunkToolResult(id, result)
+}
+
+func (s *Server) parseChunkArgs(id *json.RawMessage, args json.RawMessage, requireQuery bool) (chunkArgs, bool) {
+	var a chunkArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return chunkArgs{}, false
+	}
+	if a.RepoID == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+		return chunkArgs{}, false
+	}
+	if requireQuery && a.Query == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "query is required"})
+		return chunkArgs{}, false
+	}
+	limit := valueOr(a.Limit, 50)
+	offset := valueOr(a.Offset, 0)
+	if limit < 1 || limit > 200 || offset < 0 {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "limit/offset out of range"})
+		return chunkArgs{}, false
+	}
+	return a, true
+}
+
+func (s *Server) writeChunkToolResult(id *json.RawMessage, result service.ChunkQueryResult) {
+	text := ""
+	for _, chunk := range result.Chunks {
+		body := chunk.SnippetText
+		if body == "" {
+			body = chunk.Text
+		}
+		text += fmt.Sprintf("%s %s %s %s %d-%d %s\n", chunk.RepoID, chunk.SourceID, chunk.ID, chunk.Policy, chunk.ByteStart, chunk.ByteEnd, body)
+	}
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func servicePolicy(policy string) service.ChunkPolicy {
+	return service.ChunkPolicy(policy)
+}
+
+func valueOr(value *int, fallback int) int {
+	if value == nil {
+		return fallback
+	}
+	return *value
 }
 
 type sourceBacklinksArgs struct {

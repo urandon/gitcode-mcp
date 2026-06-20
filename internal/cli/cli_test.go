@@ -454,6 +454,18 @@ func (s *spyService) GetSnippet(context.Context, service.SnippetRequest) (servic
 	s.called("GetSnippet")
 	return service.SnippetResult{ID: "DOC-123", Path: "docs/backlog.md", Text: "body", LineStart: 1, LineEnd: 1}, nil
 }
+func (s *spyService) ListChunks(context.Context, service.ChunkQuery) (service.ChunkQueryResult, error) {
+	s.called("ListChunks")
+	return service.ChunkQueryResult{Chunks: []service.ChunkResult{{ID: "chunk-1", SourceID: "DOC-123", Policy: "heading", Text: "body"}}, Total: 1}, nil
+}
+func (s *spyService) SearchChunks(context.Context, service.ChunkSearchQuery) (service.ChunkQueryResult, error) {
+	s.called("SearchChunks")
+	return service.ChunkQueryResult{Chunks: []service.ChunkResult{{ID: "chunk-1", SourceID: "DOC-123", Policy: "heading", Text: "body"}}, Total: 1}, nil
+}
+func (s *spyService) GetChunkSnippet(context.Context, service.SnippetQuery) (service.ChunkQueryResult, error) {
+	s.called("GetChunkSnippet")
+	return service.ChunkQueryResult{Chunks: []service.ChunkResult{{ID: "chunk-1", SourceID: "DOC-123", Policy: "heading", SnippetText: "body"}}, Total: 1}, nil
+}
 func (s *spyService) GetSyncStatus(context.Context, service.SyncStatusRequest) (service.SyncStatusResult, error) {
 	s.called("GetSyncStatus")
 	return service.SyncStatusResult{SourceID: "DOC-123", Status: "fresh", LastFetchedAt: time.Now()}, nil

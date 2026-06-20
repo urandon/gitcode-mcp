@@ -125,10 +125,10 @@ func TestIntegration(t *testing.T) {
 	if err := json.Unmarshal(toolsR.Result, &tls); err != nil {
 		t.Fatalf("decode tools/list result: %v", err)
 	}
-	if len(tls.Tools) != 8 {
-		t.Fatalf("tools count = %d, want 8: %+v", len(tls.Tools), tls.Tools)
+	if len(tls.Tools) != 11 {
+		t.Fatalf("tools count = %d, want 11: %+v", len(tls.Tools), tls.Tools)
 	}
-	expectedNames := []string{"search_sources", "get_source", "list_sources", "source_backlinks", "resolve_id", "sync_status", "export_snapshot", "diff_snapshot"}
+	expectedNames := []string{"search_sources", "get_source", "list_sources", "list_chunks", "search_chunks", "get_snippet", "source_backlinks", "resolve_id", "sync_status", "export_snapshot", "diff_snapshot"}
 	for i, want := range expectedNames {
 		if tls.Tools[i].Name != want {
 			t.Fatalf("tool[%d].Name = %q, want %q", i, tls.Tools[i].Name, want)

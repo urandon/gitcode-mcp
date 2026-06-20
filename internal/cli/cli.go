@@ -14,6 +14,7 @@ import (
 
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/index"
 	"gitcode-mcp/internal/service"
 )
 
@@ -27,6 +28,7 @@ var commands = []string{
 	"get_source", "get",
 	"source_backlinks", "backlinks",
 	"get_snippet", "get-snippet", "snippet",
+	"list-chunks", "list_chunks", "search-chunks", "search_chunks",
 	"sync_status", "sync-status",
 	"tasks",
 	"tracks",
@@ -56,6 +58,9 @@ type queryService interface {
 	GetSource(context.Context, service.GetSourceRequest) (service.SourceRecord, error)
 	GetBacklinks(context.Context, service.GetBacklinksRequest) ([]service.BacklinkResult, error)
 	GetSnippet(context.Context, service.SnippetRequest) (service.SnippetResult, error)
+	ListChunks(context.Context, service.ChunkQuery) (service.ChunkQueryResult, error)
+	SearchChunks(context.Context, service.ChunkSearchQuery) (service.ChunkQueryResult, error)
+	GetChunkSnippet(context.Context, service.SnippetQuery) (service.ChunkQueryResult, error)
 	GetSyncStatus(context.Context, service.SyncStatusRequest) (service.SyncStatusResult, error)
 	RecentChanges(context.Context, service.RecentChangesRequest) ([]service.RecentChangeResult, error)
 	LinkCheck(context.Context, service.LinkCheckRequest) (service.LinkCheckResult, error)
@@ -118,6 +123,11 @@ type options struct {
 	scopes         string
 	alias          multiFlag
 	displayName    string
+	policy         string
+	chunkID        string
+	sourceID       string
+	recordID       string
+	snapshotID     string
 }
 
 type multiFlag []string
@@ -241,6 +251,11 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.scopes, "scopes", "", "comma-separated repository scopes")
 	flags.Var(&opts.alias, "alias", "repository alias")
 	flags.StringVar(&opts.displayName, "display-name", "", "repository display name")
+	flags.StringVar(&opts.policy, "policy", "", "chunk policy")
+	flags.StringVar(&opts.chunkID, "chunk-id", "", "chunk id")
+	flags.StringVar(&opts.sourceID, "source-id", "", "source id")
+	flags.StringVar(&opts.recordID, "record-id", "", "record id")
+	flags.StringVar(&opts.snapshotID, "snapshot-id", "", "snapshot id")
 	if err := flags.Parse(reorderFlags(args)); err != nil {
 		return opts, nil, service.ErrInvalidQuery{Field: "flags", Message: err.Error()}
 	}
@@ -400,8 +415,16 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		}
 		return render(stdout, opts.format, results, renderBacklinksText)
 	case "get_snippet", "get-snippet", "snippet":
-		id, ok := firstArg(args)
-		if !ok {
+		id, _ := firstArg(args)
+		if opts.chunkID != "" || opts.sourceID != "" || opts.recordID != "" || opts.snapshotID != "" || opts.policy != "" {
+			query := service.SnippetQuery{RepoID: opts.repo, SourceID: firstNonEmpty(opts.sourceID, id), RecordID: opts.recordID, SnapshotID: opts.snapshotID, Policy: indexPolicy(opts.policy), ChunkID: opts.chunkID, LineStart: opts.lineStart, LineEnd: opts.lineEnd}
+			result, err := svc.GetChunkSnippet(ctx, query)
+			if err != nil {
+				return writeError(stderr, opts.format, err)
+			}
+			return render(stdout, opts.format, result, renderChunkQueryText)
+		}
+		if id == "" {
 			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "id", Message: "id is required"})
 		}
 		result, err := svc.GetSnippet(ctx, service.SnippetRequest{RepoID: opts.repo, ID: id, LineStart: opts.lineStart, LineEnd: opts.lineEnd})
@@ -416,6 +439,21 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return 0
 		}
 		return renderJSON(stdout, result)
+	case "list-chunks", "list_chunks":
+		result, err := svc.ListChunks(ctx, service.ChunkQuery{RepoID: opts.repo, SourceID: opts.sourceID, RecordID: opts.recordID, SnapshotID: opts.snapshotID, Policy: indexPolicy(opts.policy), Limit: opts.limit, Offset: opts.offset})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, renderChunkQueryText)
+	case "search-chunks", "search_chunks":
+		if len(args) == 0 {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "query", Message: "query is required"})
+		}
+		result, err := svc.SearchChunks(ctx, service.ChunkSearchQuery{ChunkQuery: service.ChunkQuery{RepoID: opts.repo, SourceID: opts.sourceID, RecordID: opts.recordID, SnapshotID: opts.snapshotID, Policy: indexPolicy(opts.policy), Limit: opts.limit, Offset: opts.offset}, Query: strings.Join(args, " ")})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, renderChunkQueryText)
 	case "tasks":
 		results, err := svc.ListSources(ctx, service.ListSourcesRequest{RepoID: opts.repo, Kind: "task", Status: opts.status, Limit: opts.limit, Offset: opts.offset})
 		if err != nil {
@@ -651,6 +689,19 @@ func renderBacklinksText(w io.Writer, results []service.BacklinkResult) {
 	}
 }
 
+func renderChunkQueryText(w io.Writer, result service.ChunkQueryResult) {
+	for _, chunk := range result.Chunks {
+		text := chunk.SnippetText
+		if text == "" {
+			text = chunk.Text
+		}
+		fmt.Fprintf(w, "%s %s %s %s %d-%d %s\n", chunk.RepoID, chunk.SourceID, chunk.ID, chunk.Policy, chunk.ByteStart, chunk.ByteEnd, strings.TrimSpace(text))
+	}
+	for _, warning := range result.Warnings {
+		fmt.Fprintf(w, "warning: %s %s\n", warning.Code, warning.Message)
+	}
+}
+
 func renderSyncStatusText(w io.Writer, result service.SyncStatusResult) {
 	fmt.Fprintf(w, "%s %s %s %s %s %s\n", result.RepoID, result.SourceID, result.Status, result.RemoteType, result.RemoteID, result.LastFetchedAt.Format(time.RFC3339))
 }
@@ -811,6 +862,19 @@ func isStrictFinding(err error) bool {
 	}
 	var link service.ErrLinkCheckFailed
 	return errors.As(err, &link)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func indexPolicy(policy string) index.ChunkPolicy {
+	return index.ChunkPolicy(policy)
 }
 
 func firstArg(args []string) (string, bool) {

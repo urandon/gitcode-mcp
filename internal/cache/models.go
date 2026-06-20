@@ -36,6 +36,7 @@ type Store interface {
 	UpsertChunk(context.Context, Chunk) (Chunk, error)
 	GetChunks(context.Context, string) ([]Chunk, error)
 	GetChunksScoped(context.Context, string, string) ([]Chunk, error)
+	ListChunks(context.Context, ChunkFilter) ([]Chunk, error)
 	RecordSyncEvent(context.Context, SyncEvent) error
 	GetSyncEventByKey(context.Context, string) (*SyncEvent, error)
 	GetSyncStatus(context.Context, string) (SyncStatus, error)
@@ -274,10 +275,20 @@ type LinkFilter struct {
 	TargetID string
 }
 
+type ChunkFilter struct {
+	RepoID     string
+	SourceID   string
+	RecordID   string
+	SnapshotID string
+	Policy     string
+}
+
 type Chunk struct {
 	RepoID            string
 	ID                string
 	SourceID          string
+	RecordID          string
+	SnapshotID        string
 	ContentHash       string
 	ByteStart         int
 	ByteEnd           int
@@ -290,6 +301,7 @@ type Chunk struct {
 	OutboundLinks     []string
 	ResolvedAliases   map[string]string
 	Embedding         []byte
+	Policy            string
 }
 
 type SyncEvent struct {

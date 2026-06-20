@@ -984,8 +984,8 @@ func (f *brokenStore) ListRepositories(context.Context) ([]cache.RepositoryBindi
 }
 func (f *brokenStore) UpsertSourceGraph(context.Context, cache.SourceGraph) error { return nil }
 func (f *brokenStore) UpsertRecordGraph(context.Context, cache.RecordGraph) error { return nil }
-func (f *brokenStore) UpsertSyncGraph(context.Context, cache.SyncGraph) error { return nil }
-func (f *brokenStore) UpsertSource(context.Context, cache.Source) error { return nil }
+func (f *brokenStore) UpsertSyncGraph(context.Context, cache.SyncGraph) error     { return nil }
+func (f *brokenStore) UpsertSource(context.Context, cache.Source) error           { return nil }
 func (f *brokenStore) GetSource(_ context.Context, id string) (cache.Source, error) {
 	if source, ok := f.sources[id]; ok {
 		return source, nil
@@ -1049,6 +1049,9 @@ func (f *brokenStore) UpsertChunk(context.Context, cache.Chunk) (cache.Chunk, er
 }
 func (f *brokenStore) GetChunks(context.Context, string) ([]cache.Chunk, error) { return nil, nil }
 func (f *brokenStore) GetChunksScoped(context.Context, string, string) ([]cache.Chunk, error) {
+	return nil, nil
+}
+func (f *brokenStore) ListChunks(context.Context, cache.ChunkFilter) ([]cache.Chunk, error) {
 	return nil, nil
 }
 func (f *brokenStore) RecordSyncEvent(context.Context, cache.SyncEvent) error { return nil }

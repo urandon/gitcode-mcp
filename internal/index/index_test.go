@@ -89,7 +89,7 @@ func TestChunkDeterminism(t *testing.T) {
 		if snippet := source.Body[chunk.ByteStart:chunk.ByteEnd]; snippet != chunk.Text {
 			t.Fatalf("snippet mismatch = %q, want %q", snippet, chunk.Text)
 		}
-		if chunk.ID != chunkID(source.ID, parsed.ContentHash, chunk.ByteStart) || chunk.CitationAnchorID == "" || chunk.NormalizedText == "" {
+		if chunk.ID != chunkIDWithOptions(source.ID, parsed.ContentHash, chunk.ByteStart, "", ChunkOptions{}) || chunk.CitationAnchorID == "" || chunk.NormalizedText == "" {
 			t.Fatalf("chunk missing deterministic id/anchor/text: %+v", chunk)
 		}
 		if _, ok := chunk.InheritedMetadata["---"]; ok {

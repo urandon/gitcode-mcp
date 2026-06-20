@@ -365,15 +365,21 @@ func upsertChunkTx(ctx context.Context, tx *sql.Tx, chunk Chunk) (Chunk, error) 
 	if err != nil {
 		return Chunk{}, err
 	}
-	err = execTx(ctx, tx, `INSERT INTO chunks (repo_id, id, source_id, content_hash, byte_start, byte_end, line_start, line_end, heading_path, text, normalized_text, inherited_metadata, outbound_links, resolved_aliases, embedding)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(repo_id, id) DO UPDATE SET byte_end = excluded.byte_end, line_start = excluded.line_start, line_end = excluded.line_end, heading_path = excluded.heading_path, text = excluded.text, normalized_text = excluded.normalized_text, inherited_metadata = excluded.inherited_metadata, outbound_links = excluded.outbound_links, resolved_aliases = excluded.resolved_aliases, embedding = excluded.embedding`,
-		chunk.RepoID, chunk.ID, chunk.SourceID, chunk.ContentHash, chunk.ByteStart, chunk.ByteEnd, chunk.LineStart, chunk.LineEnd, headingPath, chunk.Text, chunk.NormalizedText, metadata, outboundLinks, resolvedAliases, chunk.Embedding)
+	if chunk.RecordID == "" {
+		chunk.RecordID = chunk.SourceID
+	}
+	if chunk.Policy == "" {
+		chunk.Policy = "heading"
+	}
+	err = execTx(ctx, tx, `INSERT INTO chunks (repo_id, id, source_id, record_id, snapshot_id, content_hash, byte_start, byte_end, line_start, line_end, heading_path, text, normalized_text, inherited_metadata, outbound_links, resolved_aliases, embedding, policy)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(repo_id, id) DO UPDATE SET record_id = excluded.record_id, snapshot_id = excluded.snapshot_id, byte_end = excluded.byte_end, line_start = excluded.line_start, line_end = excluded.line_end, heading_path = excluded.heading_path, text = excluded.text, normalized_text = excluded.normalized_text, inherited_metadata = excluded.inherited_metadata, outbound_links = excluded.outbound_links, resolved_aliases = excluded.resolved_aliases, embedding = excluded.embedding, policy = excluded.policy`,
+		chunk.RepoID, chunk.ID, chunk.SourceID, chunk.RecordID, chunk.SnapshotID, chunk.ContentHash, chunk.ByteStart, chunk.ByteEnd, chunk.LineStart, chunk.LineEnd, headingPath, chunk.Text, chunk.NormalizedText, metadata, outboundLinks, resolvedAliases, chunk.Embedding, chunk.Policy)
 	return chunk, err
 }
 
 func (s *SQLiteStore) GetChunks(ctx context.Context, sourceID string) ([]Chunk, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, id, source_id, content_hash, byte_start, byte_end, line_start, line_end, heading_path, text, normalized_text, inherited_metadata, outbound_links, resolved_aliases, embedding FROM chunks WHERE source_id = ? ORDER BY repo_id, byte_start`, sourceID)
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, id, source_id, record_id, snapshot_id, content_hash, byte_start, byte_end, line_start, line_end, heading_path, text, normalized_text, inherited_metadata, outbound_links, resolved_aliases, embedding, policy FROM chunks WHERE source_id = ? ORDER BY repo_id, source_id, policy, byte_start, id`, sourceID)
 	if err != nil {
 		return nil, err
 	}
@@ -382,7 +388,16 @@ func (s *SQLiteStore) GetChunks(ctx context.Context, sourceID string) ([]Chunk, 
 }
 
 func (s *SQLiteStore) GetChunksScoped(ctx context.Context, repoID, sourceID string) ([]Chunk, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, id, source_id, content_hash, byte_start, byte_end, line_start, line_end, heading_path, text, normalized_text, inherited_metadata, outbound_links, resolved_aliases, embedding FROM chunks WHERE repo_id = ? AND source_id = ? ORDER BY byte_start`, repoID, sourceID)
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, id, source_id, record_id, snapshot_id, content_hash, byte_start, byte_end, line_start, line_end, heading_path, text, normalized_text, inherited_metadata, outbound_links, resolved_aliases, embedding, policy FROM chunks WHERE repo_id = ? AND source_id = ? ORDER BY source_id, policy, byte_start, id`, repoID, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanChunks(rows)
+}
+
+func (s *SQLiteStore) ListChunks(ctx context.Context, filter ChunkFilter) ([]Chunk, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, id, source_id, record_id, snapshot_id, content_hash, byte_start, byte_end, line_start, line_end, heading_path, text, normalized_text, inherited_metadata, outbound_links, resolved_aliases, embedding, policy FROM chunks WHERE (? = '' OR repo_id = ?) AND (? = '' OR source_id = ?) AND (? = '' OR record_id = ?) AND (? = '' OR snapshot_id = ?) AND (? = '' OR policy = ?) ORDER BY repo_id, source_id, policy, byte_start, id`, filter.RepoID, filter.RepoID, filter.SourceID, filter.SourceID, filter.RecordID, filter.RecordID, filter.SnapshotID, filter.SnapshotID, filter.Policy, filter.Policy)
 	if err != nil {
 		return nil, err
 	}
@@ -396,7 +411,7 @@ func scanChunks(rows *sql.Rows) ([]Chunk, error) {
 		var err error
 		var chunk Chunk
 		var headingPath, metadata, outboundLinks, resolvedAliases string
-		if err := rows.Scan(&chunk.RepoID, &chunk.ID, &chunk.SourceID, &chunk.ContentHash, &chunk.ByteStart, &chunk.ByteEnd, &chunk.LineStart, &chunk.LineEnd, &headingPath, &chunk.Text, &chunk.NormalizedText, &metadata, &outboundLinks, &resolvedAliases, &chunk.Embedding); err != nil {
+		if err := rows.Scan(&chunk.RepoID, &chunk.ID, &chunk.SourceID, &chunk.RecordID, &chunk.SnapshotID, &chunk.ContentHash, &chunk.ByteStart, &chunk.ByteEnd, &chunk.LineStart, &chunk.LineEnd, &headingPath, &chunk.Text, &chunk.NormalizedText, &metadata, &outboundLinks, &resolvedAliases, &chunk.Embedding, &chunk.Policy); err != nil {
 			return nil, err
 		}
 		if chunk.HeadingPath, err = unmarshalJSON[[]string](headingPath); err != nil {

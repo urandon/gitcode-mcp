@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
 
 type migration struct {
 	version int
@@ -16,6 +16,7 @@ type migration struct {
 var migrations = []migration{
 	{version: 1, apply: applyInitialMigration},
 	{version: 2, apply: applyRepoScopedCacheMigration},
+	{version: 3, apply: applyChunkPolicyMigration},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB, ftsAvailable bool) error {
@@ -136,6 +137,8 @@ func applyInitialMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) e
 	repo_id TEXT NOT NULL,
 	id TEXT NOT NULL,
 	source_id TEXT NOT NULL,
+	record_id TEXT NOT NULL DEFAULT '',
+	snapshot_id TEXT NOT NULL DEFAULT '',
 	content_hash TEXT NOT NULL,
 	byte_start INTEGER NOT NULL,
 	byte_end INTEGER NOT NULL,
@@ -148,11 +151,13 @@ func applyInitialMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) e
 	outbound_links TEXT NOT NULL,
 	resolved_aliases TEXT NOT NULL,
 	embedding BLOB DEFAULT NULL,
+	policy TEXT NOT NULL DEFAULT 'heading',
 	PRIMARY KEY(repo_id, id),
-	UNIQUE(repo_id, source_id, content_hash, byte_start),
+	UNIQUE(repo_id, source_id, content_hash, byte_start, policy, snapshot_id),
 	FOREIGN KEY(repo_id, source_id) REFERENCES sources(repo_id, id) ON DELETE CASCADE
 )`,
 		`CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(repo_id, source_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_chunks_query ON chunks(repo_id, source_id, record_id, snapshot_id, policy, byte_start, id)`,
 		`CREATE TABLE IF NOT EXISTS remote_revisions (
 	repo_id TEXT NOT NULL,
 	source_id TEXT NOT NULL,
@@ -291,6 +296,49 @@ func applyRepoScopedCacheMigration(ctx context.Context, tx *sql.Tx, ftsAvailable
 		}
 	}
 	return nil
+}
+
+func applyChunkPolicyMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
+	columns, err := tableColumns(ctx, tx, "chunks")
+	if err != nil {
+		return err
+	}
+	addColumns := map[string]string{
+		"record_id":   `ALTER TABLE chunks ADD COLUMN record_id TEXT NOT NULL DEFAULT ''`,
+		"snapshot_id": `ALTER TABLE chunks ADD COLUMN snapshot_id TEXT NOT NULL DEFAULT ''`,
+		"policy":      `ALTER TABLE chunks ADD COLUMN policy TEXT NOT NULL DEFAULT 'heading'`,
+	}
+	for column, statement := range addColumns {
+		if columns[column] {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	_, err = tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_chunks_query ON chunks(repo_id, source_id, record_id, snapshot_id, policy, byte_start, id)`)
+	return err
+}
+
+func tableColumns(ctx context.Context, tx *sql.Tx, table string) (map[string]bool, error) {
+	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return nil, err
+		}
+		columns[name] = true
+	}
+	return columns, rows.Err()
 }
 
 func detectFTS5(ctx context.Context, db *sql.DB) bool {
