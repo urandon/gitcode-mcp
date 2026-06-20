@@ -1,0 +1,16 @@
+{
+  "covered_outcome_ids": ["outcome-13"],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "project/dogfood/validate-fixtures.sh",
+    "docs/fixture-capture.md",
+    "project/dogfood/docs-smoke.commands"
+  ],
+  "evidence_type": "local command",
+  "freshness": "current source/build/runtime",
+  "mocks_used": false,
+  "production_files_modified": [
+    "project/dogfood/validate-fixtures.sh",
+    "project/dogfood/docs-smoke.commands"
+  ]
+}
