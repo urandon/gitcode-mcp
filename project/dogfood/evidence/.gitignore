@@ -1,0 +1,6 @@
+# Generated dogfood checklist evidence transcripts are local-only.
+# The template and sanitized examples remain repo-owned.
+# Commit only redacted, public-safe transcripts that have passed
+# assert_public_safe_transcript validation.
+*
+!.gitignore
