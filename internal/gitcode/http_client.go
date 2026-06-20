@@ -188,39 +188,6 @@ func (c *HTTPClient) getJSONWithOptions(ctx context.Context, endpoint string, va
 	return decodeJSON(endpoint, body, out)
 }
 
-func getPaged[T any](ctx context.Context, c *HTTPClient, endpoint string, baseValues url.Values, initial PageState) ([]T, PageState, error) {
-	strategy := paginationStrategy(c.pagination)
-	state := initial
-	if state.Page == 0 {
-		state.Page = c.pagination.Page
-	}
-	if state.PerPage == 0 {
-		state.PerPage = c.pagination.PerPage
-	}
-	var items []T
-	for {
-		values := cloneValues(baseValues)
-		strategy.Apply(values, state)
-		body, headers, err := c.getBytes(ctx, endpoint, values)
-		if err != nil {
-			return nil, PageState{}, err
-		}
-		var pageItems []T
-		if err := decodeJSON(endpoint, body, &pageItems); err != nil {
-			return nil, PageState{}, err
-		}
-		items = append(items, pageItems...)
-		next, ok := strategy.Next(headers, len(pageItems))
-		if !ok {
-			if state.Page == 0 {
-				state.Page = firstPositive(c.pagination.Page, 1)
-			}
-			return items, state, nil
-		}
-		state = next
-	}
-}
-
 func decodeJSON(endpoint string, body []byte, out any) error {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	if err := dec.Decode(out); err != nil {

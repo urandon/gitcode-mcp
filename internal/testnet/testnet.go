@@ -49,7 +49,17 @@ func RequireLiveIntegration(t testing.TB) {
 	if testing.Short() {
 		t.Skip("live integration skipped in short mode")
 	}
-	if os.Getenv("GITCODE_TEST_TOKEN") == "" {
-		t.Skip("live integration skipped: GITCODE_TEST_TOKEN unset")
+	if os.Getenv("GITCODE_LIVE_TEST") != "1" {
+		t.Skip("live integration skipped: GITCODE_LIVE_TEST=1 unset")
 	}
+	if strings.TrimSpace(os.Getenv("GITCODE_LIVE_TOKEN")) == "" && strings.TrimSpace(os.Getenv("GITCODE_TEST_TOKEN")) == "" {
+		t.Skip("live integration skipped: GITCODE_LIVE_TOKEN unset")
+	}
+}
+
+func LiveToken() string {
+	if token := strings.TrimSpace(os.Getenv("GITCODE_LIVE_TOKEN")); token != "" {
+		return token
+	}
+	return strings.TrimSpace(os.Getenv("GITCODE_TEST_TOKEN"))
 }

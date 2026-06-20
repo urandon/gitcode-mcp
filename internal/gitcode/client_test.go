@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -267,7 +266,7 @@ func TestFailureModes(t *testing.T) {
 
 func TestIntegrationLiveGitCodeGate(t *testing.T) {
 	testnet.RequireLiveIntegration(t)
-	token := os.Getenv("GITCODE_TEST_TOKEN")
+	token := testnet.LiveToken()
 	client, err := NewHTTPClient(Config{Token: token, Timeout: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("NewHTTPClient: %v", err)

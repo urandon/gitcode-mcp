@@ -1,0 +1,22 @@
+{
+  "covered_outcome_ids": [
+    "outcome-13"
+  ],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "internal/gitcode.Provider contract through NewFixtureProvider",
+    "internal/gitcode.NewLiveProvider live admission boundary",
+    "internal/gitcode.ErrProviderUnavailable admission failures",
+    "internal/gitcode fixture auth/repo/issues/comments/wiki/search responses",
+    "internal/gitcode fixture auth-error/conflict/rate-limit typed failures",
+    "internal/gitcode pagination malformed and loop guard behavior",
+    "internal/gitcode RequireLiveProviderForTest credential gate",
+    "internal/gitcode RedactedCapture construction and sanitization",
+    "internal/gitcode sanitized fixture validation",
+    "internal/testnet external network guard and live integration skip helper"
+  ],
+  "evidence_type": "runtime/compiler test",
+  "freshness": "current source/build/runtime evidence required; run.sh executes targeted Go adapter/testnet tests, go test ./internal/gitcode ./internal/testnet, go test ./..., and git diff --check offline",
+  "mocks_used": "external_dependencies_only: fixture provider and HTTP-construction sentinel are used only to replace live GitCode/network construction while exercising the production provider seam and admission path",
+  "production_files_modified": []
+}
