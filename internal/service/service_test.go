@@ -220,6 +220,54 @@ func TestDisabledWikiScopeRejectedBeforeClient(t *testing.T) {
 	}
 }
 
+func TestSyncGraphFixtureOfflineReadsIssueWikiCommentsAndChunks(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	svc := NewWithClient(store, &fakeGitCodeClient{issue: gitcode.Issue{Number: 42, Title: "Fixture Issue", Body: "# Issue\n\nremote issue body", State: "open", CreatedAt: base, UpdatedAt: base}, comments: []gitcode.Comment{{ID: "c1", Author: "fixture-user", Body: "comment", CreatedAt: base, UpdatedAt: base}}, wiki: gitcode.WikiPage{Slug: "Home", Title: "Fixture Wiki", Body: "# Wiki\n\nremote wiki body", Revision: "rev-home", CreatedAt: base, UpdatedAt: base}})
+	svc.lockPath = filepath.Join(t.TempDir(), "sync.lock")
+	if _, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "fixture-a", RemoteAlias: "issue:42", IdempotencyKey: "sync-issue-42"}); err != nil {
+		t.Fatalf("issue sync returned error: %v", err)
+	}
+	if _, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "fixture-a", RemoteAlias: "wiki:Home", IdempotencyKey: "sync-wiki-home"}); err != nil {
+		t.Fatalf("wiki sync returned error: %v", err)
+	}
+	results, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: "remote"})
+	if err != nil || len(results) < 2 {
+		t.Fatalf("search results = %#v, %v", results, err)
+	}
+	issue, err := svc.GetSource(ctx, GetSourceRequest{RepoID: "fixture-a", ID: "ISSUE-42"})
+	if err != nil || issue.Kind != "issue" {
+		t.Fatalf("issue get = %#v, %v", issue, err)
+	}
+	wiki, err := svc.GetSource(ctx, GetSourceRequest{RepoID: "fixture-a", ID: "WIKI-HOME"})
+	if err != nil || wiki.Kind != "wiki" {
+		t.Fatalf("wiki get = %#v, %v", wiki, err)
+	}
+	snippet, err := svc.GetSnippet(ctx, SnippetRequest{RepoID: "fixture-a", ID: "ISSUE-42", LineStart: 1, LineEnd: 2})
+	if err != nil || snippet.Text == "" {
+		t.Fatalf("snippet = %#v, %v", snippet, err)
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", "ISSUE-42")
+	if err != nil || record.Provenance != cache.ProvenanceRemote || len(record.Comments) != 1 {
+		t.Fatalf("record = %#v, %v", record, err)
+	}
+	counts, err := store.RecordCounts(ctx, "fixture-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Records != 2 || counts.Comments != 1 || counts.SyncEvents != 2 || counts.RemoteRevisions != 2 || counts.Chunks == 0 {
+		t.Fatalf("counts = %#v", counts)
+	}
+}
+
 func TestSyncStateMachine(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)
@@ -270,6 +318,17 @@ func TestSyncStateMachine(t *testing.T) {
 	}
 	if source.Body != "new body" || source.Title != "Design" {
 		t.Fatalf("source not updated: %#v", source)
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", "DOC-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Provenance != cache.ProvenanceRemote || record.RemoteType != "remote" || record.RemoteID != "wiki/design" {
+		t.Fatalf("record = %#v", record)
+	}
+	chunks, err := store.GetChunksScoped(ctx, "fixture-a", "DOC-123")
+	if err != nil || len(chunks) == 0 {
+		t.Fatalf("chunks = %#v, %v", chunks, err)
 	}
 }
 
@@ -819,11 +878,13 @@ func seededSyncService(t *testing.T, ctx context.Context, client gitcode.Client)
 }
 
 type fakeGitCodeClient struct {
-	wiki       gitcode.WikiPage
-	issue      gitcode.Issue
-	errors     []error
-	wikiCalls  int
-	issueCalls int
+	wiki         gitcode.WikiPage
+	issue        gitcode.Issue
+	comments     []gitcode.Comment
+	errors       []error
+	wikiCalls    int
+	issueCalls   int
+	commentCalls int
 }
 
 func (f *fakeGitCodeClient) nextError() error {
@@ -846,7 +907,8 @@ func (f *fakeGitCodeClient) GetIssue(context.Context, gitcode.IssueRequest) (git
 	return f.issue, nil
 }
 func (f *fakeGitCodeClient) ListIssueComments(context.Context, gitcode.IssueRequest) (gitcode.Page[gitcode.Comment], error) {
-	return gitcode.Page[gitcode.Comment]{}, nil
+	f.commentCalls++
+	return gitcode.Page[gitcode.Comment]{Items: f.comments}, nil
 }
 func (f *fakeGitCodeClient) GetWikiPage(context.Context, gitcode.WikiPageRequest) (gitcode.WikiPage, error) {
 	f.wikiCalls++
@@ -922,7 +984,8 @@ func (f *brokenStore) ListRepositories(context.Context) ([]cache.RepositoryBindi
 }
 func (f *brokenStore) UpsertSourceGraph(context.Context, cache.SourceGraph) error { return nil }
 func (f *brokenStore) UpsertRecordGraph(context.Context, cache.RecordGraph) error { return nil }
-func (f *brokenStore) UpsertSource(context.Context, cache.Source) error           { return nil }
+func (f *brokenStore) UpsertSyncGraph(context.Context, cache.SyncGraph) error { return nil }
+func (f *brokenStore) UpsertSource(context.Context, cache.Source) error { return nil }
 func (f *brokenStore) GetSource(_ context.Context, id string) (cache.Source, error) {
 	if source, ok := f.sources[id]; ok {
 		return source, nil

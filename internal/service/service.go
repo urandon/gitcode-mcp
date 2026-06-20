@@ -27,13 +27,84 @@ type Service struct {
 }
 
 func New(store cache.Store) *Service {
-	return &Service{store: store, now: func() time.Time { return time.Now().UTC() }, lockPath: "gitcode-mcp-sync.lock"}
+	return &Service{store: store, client: sanitizedFixtureClient{}, now: func() time.Time { return time.Now().UTC() }, lockPath: "gitcode-mcp-sync.lock"}
 }
 
 func NewWithClient(store cache.Store, client gitcode.Client) *Service {
 	svc := New(store)
 	svc.client = client
 	return svc
+}
+
+type sanitizedFixtureClient struct{}
+
+func (sanitizedFixtureClient) ListIssues(context.Context, gitcode.IssueListRequest) (gitcode.Page[gitcode.IssueSummary], error) {
+	now := fixtureNow()
+	return gitcode.Page[gitcode.IssueSummary]{Items: []gitcode.IssueSummary{{Number: 42, Title: "Fixture Issue", State: "open", CreatedAt: now, UpdatedAt: now}}, Page: 1, PerPage: 1, TotalCount: 1}, nil
+}
+
+func (sanitizedFixtureClient) GetIssue(context.Context, gitcode.IssueRequest) (gitcode.Issue, error) {
+	now := fixtureNow()
+	return gitcode.Issue{Number: 42, Title: "Fixture Issue", Body: "# Issue\n\nremote issue body", State: "open", CreatedAt: now, UpdatedAt: now}, nil
+}
+
+func (sanitizedFixtureClient) ListIssueComments(context.Context, gitcode.IssueRequest) (gitcode.Page[gitcode.Comment], error) {
+	now := fixtureNow()
+	return gitcode.Page[gitcode.Comment]{Items: []gitcode.Comment{{ID: "c1", Author: "fixture-user", Body: "comment", CreatedAt: now, UpdatedAt: now}}, Page: 1, PerPage: 1, TotalCount: 1}, nil
+}
+
+func (sanitizedFixtureClient) GetWikiPage(context.Context, gitcode.WikiPageRequest) (gitcode.WikiPage, error) {
+	now := fixtureNow()
+	return gitcode.WikiPage{Slug: "Home", Title: "Fixture Wiki", Body: "# Wiki\n\nremote wiki body", Revision: "rev-home", CreatedAt: now, UpdatedAt: now}, nil
+}
+
+func (sanitizedFixtureClient) ListWikiPages(context.Context, gitcode.WikiListRequest) (gitcode.Page[gitcode.WikiPage], error) {
+	now := fixtureNow()
+	return gitcode.Page[gitcode.WikiPage]{Items: []gitcode.WikiPage{{Slug: "Home", Title: "Fixture Wiki", Body: "# Wiki\n\nremote wiki body", Revision: "rev-home", CreatedAt: now, UpdatedAt: now}}, Page: 1, PerPage: 1, TotalCount: 1}, nil
+}
+
+func (sanitizedFixtureClient) Search(context.Context, gitcode.SearchRequest) (gitcode.Page[gitcode.SearchResult], error) {
+	return gitcode.Page[gitcode.SearchResult]{}, nil
+}
+
+func (sanitizedFixtureClient) ListIssueAttachments(context.Context, gitcode.IssueRequest) (gitcode.Page[gitcode.AttachmentSummary], error) {
+	return gitcode.Page[gitcode.AttachmentSummary]{}, nil
+}
+
+func (sanitizedFixtureClient) GetAttachment(context.Context, gitcode.AttachmentRequest) (gitcode.AttachmentBody, error) {
+	return gitcode.AttachmentBody{}, ErrInvalidQuery{Field: "attachment", Message: "fixture attachment is unavailable"}
+}
+
+func (sanitizedFixtureClient) CreateIssue(context.Context, gitcode.CreateIssueRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
+	return gitcode.WriteResult[gitcode.Issue]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+}
+
+func (sanitizedFixtureClient) UpdateIssue(context.Context, gitcode.UpdateIssueRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
+	return gitcode.WriteResult[gitcode.Issue]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+}
+
+func (sanitizedFixtureClient) CreateIssueComment(context.Context, gitcode.CreateIssueCommentRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Comment], error) {
+	return gitcode.WriteResult[gitcode.Comment]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+}
+
+func (sanitizedFixtureClient) CreateWikiPage(context.Context, gitcode.CreateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
+	return gitcode.WriteResult[gitcode.WikiPage]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+}
+
+func (sanitizedFixtureClient) UpdateWikiPage(context.Context, gitcode.UpdateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
+	return gitcode.WriteResult[gitcode.WikiPage]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+}
+
+func (sanitizedFixtureClient) AddLabel(context.Context, gitcode.LabelRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
+	return gitcode.WriteResult[gitcode.Issue]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+}
+
+func (sanitizedFixtureClient) RemoveLabel(context.Context, gitcode.LabelRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
+	return gitcode.WriteResult[gitcode.Issue]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+}
+
+func fixtureNow() time.Time {
+	return time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
 }
 
 func (s *Service) AddRepository(ctx context.Context, req AddRepositoryRequest) (RepositoryBinding, error) {
@@ -567,26 +638,43 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 	eventID := syncEventID(key)
 	now := s.now().UTC()
 	inProgress := cache.SyncEvent{RepoID: repoID, ID: eventID, SourceID: s.syncEventSourceID(ctx, req, remoteType, remoteID), RemoteType: remoteType, RemoteID: remoteID, Status: "in_progress", IdempotencyKey: key, Message: "sync started", CreatedAt: now}
-	if err := s.store.RecordSyncEvent(ctx, inProgress); err != nil {
+	inProgressRecorded := true
+	if _, err := s.store.GetSourceScoped(ctx, repoID, inProgress.SourceID); err == nil {
+		if err := s.store.RecordSyncEvent(ctx, inProgress); err != nil {
+			return SyncResult{}, err
+		}
+	} else if isCacheNotFound(err) {
+		inProgressRecorded = false
+	} else {
 		return SyncResult{}, err
 	}
 	if err := s.store.IntegrityCheck(ctx); err != nil {
 		failure := s.normalizeSyncFailure(err, req, remoteType, remoteID)
-		_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, failure, s.now().UTC()))
+		if inProgressRecorded {
+			_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, failure, s.now().UTC()))
+		}
 		return SyncResult{}, failure
 	}
 	graph, counts, err := s.fetchAndStage(ctx, req, remoteType, remoteID)
 	if err != nil {
 		failure := s.normalizeSyncFailure(err, req, remoteType, remoteID)
-		_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, failure, s.now().UTC()))
+		if inProgressRecorded {
+			_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, failure, s.now().UTC()))
+		}
 		if markErr := s.markMissingRemote(ctx, inProgress, failure, remoteType, remoteID); markErr != nil {
 			return SyncResult{}, markErr
 		}
 		return SyncResult{}, failure
 	}
-	graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: graph.SyncStatus.RemoteRevision, Status: "succeeded", IdempotencyKey: key, Message: syncEventMessage(counts), CreatedAt: now})
-	if err := s.store.UpsertSourceGraph(ctx, graph); err != nil {
-		_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, err, s.now().UTC()))
+	revision := ""
+	if graph.SyncStatus != nil {
+		revision = graph.SyncStatus.RemoteRevision
+	}
+	graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "succeeded", IdempotencyKey: key, Message: syncEventMessage(counts), CreatedAt: now})
+	if err := s.store.UpsertSyncGraph(ctx, syncGraphFromSourceGraph(req.RepoID, graph)); err != nil {
+		if inProgressRecorded {
+			_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, err, s.now().UTC()))
+		}
 		return SyncResult{}, err
 	}
 	return SyncResult{IdempotencyKey: key, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), GeneratedAt: s.now().UTC()}, nil
@@ -694,6 +782,17 @@ func (s *Service) seedMinimumCorpus(ctx context.Context) error {
 		return normalizeError(err, "source", graph.Source.ID)
 	}
 	return nil
+}
+
+func chunksForSource(source cache.Source) []cache.Chunk {
+	idxSource := indexSourceRecord(source)
+	parsed := index.ParseSource(idxSource)
+	chunks := index.ChunkSource(idxSource, parsed)
+	out := make([]cache.Chunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		out = append(out, cache.Chunk{RepoID: source.RepoID, ID: chunk.ID, SourceID: chunk.SourceID, ContentHash: chunk.ContentHash, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, HeadingPath: append([]string(nil), chunk.HeadingPath...), Text: chunk.Text, NormalizedText: chunk.NormalizedText, InheritedMetadata: copyStringMap(chunk.InheritedMetadata), OutboundLinks: sortedStrings(chunk.OutboundLinks), ResolvedAliases: copyStringMap(chunk.ResolvedAliases)})
+	}
+	return out
 }
 
 func indexSourceRecord(source cache.Source) index.SourceRecord {
@@ -833,6 +932,23 @@ func (s *Service) fetchOnce(ctx context.Context, req SyncRequest, remoteType, re
 	}
 }
 
+func syncGraphFromSourceGraph(repoID string, graph cache.SourceGraph) cache.SyncGraph {
+	revision := ""
+	if graph.SyncStatus != nil {
+		revision = graph.SyncStatus.RemoteRevision
+	}
+	record := cache.Record{RepoID: repoID, ID: graph.Source.ID, Type: graph.Source.Kind, Path: graph.Source.Path, Title: graph.Source.Title, Body: graph.Source.Body, Status: graph.Source.Status, Labels: graph.Source.Labels, ContentHash: graph.Source.ContentHash, Provenance: cache.ProvenanceRemote, CreatedAt: graph.Source.CreatedAt, UpdatedAt: graph.Source.UpdatedAt, RemoteRevision: revision}
+	if graph.SyncStatus != nil {
+		record.RemoteType = graph.SyncStatus.RemoteType
+		record.RemoteID = graph.SyncStatus.RemoteID
+	}
+	revisions := []cache.RemoteRevision{}
+	if graph.SyncStatus != nil {
+		revisions = append(revisions, cache.RemoteRevision{RepoID: repoID, RecordID: graph.Source.ID, RemoteType: graph.SyncStatus.RemoteType, RemoteID: graph.SyncStatus.RemoteID, RemoteRevision: graph.SyncStatus.RemoteRevision, Status: graph.SyncStatus.Status, LastFetchedAt: graph.SyncStatus.LastFetchedAt})
+	}
+	return cache.SyncGraph{RepoID: repoID, Record: record, Comments: graph.Comments, Identities: graph.Identities, Links: graph.Links, Chunks: graph.Chunks, RemoteRevisions: revisions, SyncEvents: graph.SyncEvents}
+}
+
 func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, remoteID string, issue gitcode.Issue) (cache.SourceGraph, SyncCounts, error) {
 	body := issue.Body
 	if req.MaxSize > 0 && int64(len(body)+len(issue.Title)) > req.MaxSize {
@@ -874,6 +990,26 @@ func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, r
 		status = "open"
 	}
 	graph := cache.SourceGraph{Source: cache.Source{RepoID: req.RepoID, ID: stableID, Kind: "issue", Path: "issues/" + remoteID + ".md", Title: issue.Title, Body: body, Status: status, Labels: issue.Labels, ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{RepoID: req.RepoID, SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, SyncStatus: &cache.SyncStatus{RepoID: req.RepoID, SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: hash, Status: "fresh", LastFetchedAt: now}}
+	comments, err := s.client.ListIssueComments(ctx, gitcode.IssueRequest{Number: issue.Number, KnownRemoteAlias: true, RemoteAlias: remoteID})
+	if err != nil {
+		return cache.SourceGraph{}, SyncCounts{}, err
+	}
+	for _, comment := range comments.Items {
+		commentID := comment.ID
+		if commentID == "" {
+			commentID = contentHash(remoteID, comment.Author, comment.Body, comment.CreatedAt)
+		}
+		commentUpdated := comment.UpdatedAt.UTC()
+		if commentUpdated.IsZero() {
+			commentUpdated = now
+		}
+		commentCreated := comment.CreatedAt.UTC()
+		if commentCreated.IsZero() {
+			commentCreated = commentUpdated
+		}
+		graph.Comments = append(graph.Comments, cache.RecordComment{RepoID: req.RepoID, RecordID: stableID, CommentID: commentID, Author: comment.Author, Body: comment.Body, ContentHash: contentHash(commentID, comment.Author, comment.Body), RemoteRevision: contentHash(commentUpdated), CreatedAt: commentCreated, UpdatedAt: commentUpdated})
+	}
+	graph.Chunks = chunksForSource(graph.Source)
 	return graph, counts, nil
 }
 
@@ -915,6 +1051,7 @@ func (s *Service) stageWiki(ctx context.Context, req SyncRequest, remoteType, re
 		return cache.SourceGraph{}, SyncCounts{}, err
 	}
 	graph := cache.SourceGraph{Source: cache.Source{RepoID: req.RepoID, ID: stableID, Kind: "wiki", Path: "wiki/" + remoteID + ".md", Title: page.Title, Body: body, Status: "fresh", ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{RepoID: req.RepoID, SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, SyncStatus: &cache.SyncStatus{RepoID: req.RepoID, SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}
+	graph.Chunks = chunksForSource(graph.Source)
 	return graph, counts, nil
 }
 

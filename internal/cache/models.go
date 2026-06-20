@@ -13,6 +13,7 @@ type Store interface {
 	ListRepositories(context.Context) ([]RepositoryBinding, error)
 	UpsertSourceGraph(context.Context, SourceGraph) error
 	UpsertRecordGraph(context.Context, RecordGraph) error
+	UpsertSyncGraph(context.Context, SyncGraph) error
 	UpsertSource(context.Context, Source) error
 	GetSource(context.Context, string) (Source, error)
 	GetSourceScoped(context.Context, string, string) (Source, error)
@@ -193,6 +194,17 @@ type RecordGraph struct {
 	Snapshots       []Snapshot
 }
 
+type SyncGraph struct {
+	RepoID          string
+	Record          Record
+	Comments        []RecordComment
+	Identities      []Identity
+	Links           []Link
+	Chunks          []Chunk
+	RemoteRevisions []RemoteRevision
+	SyncEvents      []SyncEvent
+}
+
 type Source struct {
 	RepoID      string
 	ID          string
@@ -312,6 +324,7 @@ type Conflict struct {
 
 type SourceGraph struct {
 	Source     Source
+	Comments   []RecordComment
 	Identities []Identity
 	Links      []Link
 	Chunks     []Chunk

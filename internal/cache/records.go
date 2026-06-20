@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 )
 
@@ -85,6 +86,115 @@ func (s *SQLiteStore) UpsertRecordGraph(ctx context.Context, graph RecordGraph) 
 		}
 	}
 	return tx.Commit()
+}
+
+func (s *SQLiteStore) UpsertSyncGraph(ctx context.Context, graph SyncGraph) (err error) {
+	repoID := strings.TrimSpace(graph.RepoID)
+	if repoID == "" {
+		repoID = graph.Record.RepoID
+	}
+	if repoID == "" {
+		return notFoundErr("repository", "")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer txRollbackOnError(tx, &err)
+	if err = requireRepoTx(ctx, tx, repoID); err != nil {
+		return err
+	}
+	graph.Record.RepoID = repoID
+	if graph.Record.Provenance == "" {
+		graph.Record.Provenance = ProvenanceRemote
+	}
+	if err = upsertSourceTx(ctx, tx, sourceFromRecord(graph.Record)); err != nil {
+		return err
+	}
+	if err = upsertSearchProjectionTx(ctx, tx, sourceFromRecord(graph.Record), s.useFTS); err != nil {
+		return err
+	}
+	if err = upsertRecordTx(ctx, tx, graph.Record); err != nil {
+		return err
+	}
+	for _, comment := range graph.Comments {
+		if comment.RepoID == "" {
+			comment.RepoID = repoID
+		}
+		if comment.RecordID == "" {
+			comment.RecordID = graph.Record.ID
+		}
+		if err = upsertRecordCommentTx(ctx, tx, comment); err != nil {
+			return err
+		}
+	}
+	for _, identity := range graph.Identities {
+		if identity.RepoID == "" {
+			identity.RepoID = repoID
+		}
+		if identity.SourceID == "" {
+			identity.SourceID = graph.Record.ID
+		}
+		if err = upsertIdentityTx(ctx, tx, identity); err != nil {
+			return err
+		}
+	}
+	for _, link := range graph.Links {
+		if link.RepoID == "" {
+			link.RepoID = repoID
+		}
+		if link.SourceID == "" {
+			link.SourceID = graph.Record.ID
+		}
+		if err = upsertLinkTx(ctx, tx, link); err != nil {
+			return err
+		}
+	}
+	for _, revision := range graph.RemoteRevisions {
+		if revision.RepoID == "" {
+			revision.RepoID = repoID
+		}
+		if revision.RecordID == "" {
+			revision.RecordID = graph.Record.ID
+		}
+		if err = upsertRemoteRevisionTx(ctx, tx, revision); err != nil {
+			return err
+		}
+	}
+	for _, chunk := range graph.Chunks {
+		if chunk.RepoID == "" {
+			chunk.RepoID = repoID
+		}
+		if chunk.SourceID == "" {
+			chunk.SourceID = graph.Record.ID
+		}
+		if _, err = upsertChunkTx(ctx, tx, chunk); err != nil {
+			return err
+		}
+	}
+	for _, event := range graph.SyncEvents {
+		if event.RepoID == "" {
+			event.RepoID = repoID
+		}
+		if event.SourceID == "" {
+			event.SourceID = graph.Record.ID
+		}
+		if err = recordSyncEventTx(ctx, tx, event); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func requireRepoTx(ctx context.Context, tx *sql.Tx, repoID string) error {
+	var id string
+	if err := tx.QueryRowContext(ctx, `SELECT repo_id FROM repos WHERE repo_id = ?`, repoID).Scan(&id); err != nil {
+		if err == sql.ErrNoRows {
+			return notFoundErr("repository", repoID)
+		}
+		return err
+	}
+	return nil
 }
 
 func sourceFromRecord(record Record) Source {

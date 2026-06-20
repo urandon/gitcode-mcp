@@ -1,0 +1,29 @@
+{
+  "task_id": "005-cache-sync-task-2-sync-graph-upsert-workflow",
+  "covered_outcome_ids": [
+    "outcome-4",
+    "outcome-10"
+  ],
+  "covered_decommission_ids": [
+    "decommission-4"
+  ],
+  "product_surfaces": [
+    "CLI repo add command over a temporary SQLite cache",
+    "CLI sync command acceptance surface: gitcode-mcp sync --repo <repo_id> --issues --wiki --index",
+    "CLI offline read commands: search, get, get-snippet",
+    "CLI cache-status JSON command over synced cache",
+    "SQLite sync graph persistence for records, comments, aliases, sync events, remote revisions, and chunks",
+    "targeted service/cache Go tests for offline sync reads, idempotency replay, and provenance preservation"
+  ],
+  "evidence_type": [
+    "CLI command integration test",
+    "fixture-backed offline product scenario",
+    "runtime/compiler test",
+    "offline Go test suite"
+  ],
+  "freshness": "current source/build/runtime evidence required; run.sh creates a new temporary SQLite cache, executes the real gitcode-mcp CLI commands from the current checkout, runs targeted Go tests, go test ./..., and git diff --check",
+  "mocks_used": [
+    "sanitized fixture/external-provider data only; live GitCode network and credentials disabled"
+  ],
+  "production_files_modified": []
+}

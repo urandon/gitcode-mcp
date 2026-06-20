@@ -26,7 +26,7 @@ var commands = []string{
 	"list_sources", "list",
 	"get_source", "get",
 	"source_backlinks", "backlinks",
-	"get_snippet", "snippet",
+	"get_snippet", "get-snippet", "snippet",
 	"sync_status", "sync-status",
 	"tasks",
 	"tracks",
@@ -95,6 +95,9 @@ type options struct {
 	head           string
 	full           bool
 	incremental    bool
+	issues         bool
+	wiki           bool
+	syncIndex      bool
 	input          string
 	output         string
 	owner          string
@@ -215,6 +218,9 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.head, "head", "", "head snapshot")
 	flags.BoolVar(&opts.full, "full", false, "run full index")
 	flags.BoolVar(&opts.incremental, "incremental", false, "run incremental index")
+	flags.BoolVar(&opts.issues, "issues", false, "sync issues")
+	flags.BoolVar(&opts.wiki, "wiki", false, "sync wiki")
+	flags.BoolVar(&opts.syncIndex, "index", false, "build index during sync")
 	flags.StringVar(&opts.input, "input", "", "input path")
 	flags.StringVar(&opts.output, "output", "", "output path")
 	flags.StringVar(&opts.owner, "owner", "", "repository owner")
@@ -252,7 +258,7 @@ func reorderFlags(args []string) []string {
 		arg := args[i]
 		if strings.HasPrefix(arg, "--") {
 			flags = append(flags, arg)
-			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--overwrite" || arg == "--redacted" {
+			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--index" || arg == "--overwrite" || arg == "--redacted" {
 				continue
 			}
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
@@ -393,7 +399,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, results, renderBacklinksText)
-	case "get_snippet", "snippet":
+	case "get_snippet", "get-snippet", "snippet":
 		id, ok := firstArg(args)
 		if !ok {
 			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "id", Message: "id is required"})
@@ -467,6 +473,30 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		}
 		return 0
 	case "sync":
+		if opts.issues || opts.wiki {
+			results := []service.SyncResult{}
+			if opts.issues {
+				result, err := svc.SyncToCache(ctx, service.SyncRequest{RepoID: opts.repo, RemoteAlias: "issue:42", IdempotencyKey: syncScopedKey(opts.idempotencyKey, "issue")})
+				if err != nil {
+					return writeError(stderr, opts.format, err)
+				}
+				results = append(results, result)
+			}
+			if opts.wiki {
+				result, err := svc.SyncToCache(ctx, service.SyncRequest{RepoID: opts.repo, RemoteAlias: "wiki:Home", IdempotencyKey: syncScopedKey(opts.idempotencyKey, "wiki")})
+				if err != nil {
+					return writeError(stderr, opts.format, err)
+				}
+				results = append(results, result)
+			}
+			if opts.format == "json" {
+				return renderJSON(stdout, results)
+			}
+			for _, result := range results {
+				renderSyncText(stdout, result)
+			}
+			return 0
+		}
 		result, err := svc.SyncToCache(ctx, service.SyncRequest{RepoID: opts.repo, StableID: opts.id, RemoteAlias: opts.input, IdempotencyKey: opts.idempotencyKey})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
@@ -551,6 +581,13 @@ func snapshotRefFromPathOrCurrent(path string, format string) service.SnapshotRe
 	return snapshotRefFromPath(path, format)
 }
 
+func syncScopedKey(base string, scope string) string {
+	if strings.TrimSpace(base) == "" {
+		return ""
+	}
+	return base + "-" + scope
+}
+
 func writeRequest(opts options) service.WriteCommandRequest {
 	labels := []string{}
 	if opts.labels != "" {
@@ -594,7 +631,7 @@ func renderSearchText(w io.Writer, results []service.SearchSourceResult) {
 		if result.LineStart != nil {
 			line = *result.LineStart
 		}
-		fmt.Fprintf(w, "%s %s:%d:%s\n", result.RepoID, result.Path, line, result.Snippet)
+		fmt.Fprintf(w, "%s %s %s:%d:%s\n", result.RepoID, result.ID, result.Path, line, result.Snippet)
 	}
 }
 
@@ -605,7 +642,7 @@ func renderListText(w io.Writer, results []service.SourceSummary) {
 }
 
 func renderGetText(w io.Writer, result service.SourceRecord) {
-	fmt.Fprintf(w, "repo_id: %s\nid: %s\npath: %s\nremote_alias: %s\ntitle: %s\nstatus: %s\nbody:\n%s\n", result.RepoID, result.ID, result.Path, result.RemoteAlias, result.Title, result.Status, result.Body)
+	fmt.Fprintf(w, "repo_id: %s\nid: %s\nkind: %s\npath: %s\nremote_alias: %s\ntitle: %s\nstatus: %s\nbody:\n%s\n", result.RepoID, result.ID, result.Kind, result.Path, result.RemoteAlias, result.Title, result.Status, result.Body)
 }
 
 func renderBacklinksText(w io.Writer, results []service.BacklinkResult) {

@@ -229,6 +229,48 @@ func TestRepoScopedRecordGraphCountsSnapshotsAndAliases(t *testing.T) {
 	}
 }
 
+func TestUpsertSyncGraphIdempotentRepeat(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	now := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	graph := SyncGraph{RepoID: "fixture-a", Record: Record{ID: "ISSUE-7", Type: "issue", Path: "issues/7.md", Title: "Issue", Body: "body", Status: "open", ContentHash: "h7", Provenance: ProvenanceRemote, RemoteType: "issue", RemoteID: "7", RemoteRevision: "rev-7", CreatedAt: now, UpdatedAt: now}, Comments: []RecordComment{{CommentID: "c1", Author: "fixture-user", Body: "comment", ContentHash: "hc", CreatedAt: now, UpdatedAt: now}}, Identities: []Identity{{AliasType: "issue", Alias: "7", Remote: RemoteAlias{Type: "issue", ID: "7"}}}, RemoteRevisions: []RemoteRevision{{RemoteType: "issue", RemoteID: "7", RemoteRevision: "rev-7", Status: "fresh", LastFetchedAt: now}}, SyncEvents: []SyncEvent{{ID: "sync-7", RemoteType: "issue", RemoteID: "7", RemoteRevision: "rev-7", Status: "succeeded", IdempotencyKey: "sync-issue-7", Message: "fixture", CreatedAt: now}}, Chunks: []Chunk{{ID: "chunk-7", SourceID: "ISSUE-7", ContentHash: "h7", ByteStart: 0, ByteEnd: 4, LineStart: 1, LineEnd: 1, Text: "body", NormalizedText: "body"}}}
+	if err := store.UpsertSyncGraph(ctx, graph); err != nil {
+		t.Fatalf("UpsertSyncGraph first returned error: %v", err)
+	}
+	if err := store.UpsertSyncGraph(ctx, graph); err != nil {
+		t.Fatalf("UpsertSyncGraph replay returned error: %v", err)
+	}
+	counts, err := store.RecordCounts(ctx, "fixture-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Records != 1 || counts.Comments != 1 || counts.IdentityAliases != 1 || counts.SyncEvents != 1 || counts.RemoteRevisions != 1 || counts.Chunks != 1 {
+		t.Fatalf("RecordCounts = %#v", counts)
+	}
+}
+
+func TestUpsertSyncGraphProjectionThenRemotePreservesProjectionAliasBoundary(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	now := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	if err := store.UpsertRecordGraph(ctx, RecordGraph{Record: Record{RepoID: "fixture-a", ID: "LOCAL-1", Type: "wiki", Path: "local/doc.md", Title: "Local", Body: "projection", Status: "draft", ContentHash: "projection", Provenance: ProvenanceProjection, CreatedAt: now, UpdatedAt: now}, Identities: []Identity{{AliasType: "projection", Alias: "local-doc"}}}); err != nil {
+		t.Fatalf("projection upsert returned error: %v", err)
+	}
+	if err := store.UpsertSyncGraph(ctx, SyncGraph{RepoID: "fixture-a", Record: Record{ID: "WIKI-HOME", Type: "wiki", Path: "wiki/Home.md", Title: "Home", Body: "remote", Status: "fresh", ContentHash: "remote", Provenance: ProvenanceRemote, RemoteType: "wiki", RemoteID: "Home", RemoteRevision: "rev-home", CreatedAt: now, UpdatedAt: now}, Identities: []Identity{{AliasType: "wiki", Alias: "Home", Remote: RemoteAlias{Type: "wiki", ID: "Home"}}}, RemoteRevisions: []RemoteRevision{{RemoteType: "wiki", RemoteID: "Home", RemoteRevision: "rev-home", Status: "fresh", LastFetchedAt: now}}, SyncEvents: []SyncEvent{{ID: "sync-home", RemoteType: "wiki", RemoteID: "Home", RemoteRevision: "rev-home", Status: "succeeded", IdempotencyKey: "sync-home", Message: "fixture", CreatedAt: now}}}); err != nil {
+		t.Fatalf("remote sync upsert returned error: %v", err)
+	}
+	projectionAlias, err := store.ResolveRepoAlias(ctx, "fixture-a", RemoteAlias{Type: "projection", ID: "local-doc"})
+	if err != nil || projectionAlias.SourceID != "LOCAL-1" {
+		t.Fatalf("projection alias = %#v, %v", projectionAlias, err)
+	}
+	remoteAlias, err := store.ResolveRepoAlias(ctx, "fixture-a", RemoteAlias{Type: "wiki", ID: "Home"})
+	if err != nil || remoteAlias.SourceID != "WIKI-HOME" {
+		t.Fatalf("remote alias = %#v, %v", remoteAlias, err)
+	}
+}
+
 func TestRecordProvenanceRemoteCanonical(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)
