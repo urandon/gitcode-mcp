@@ -102,6 +102,33 @@ func TestLiveProviderAdmission(t *testing.T) {
 	}
 }
 
+func TestProviderWriteUnavailableDoesNotConfirm(t *testing.T) {
+	providers := map[string]Provider{
+		"fixture":     mustFixtureProvider(t),
+		"unavailable": NewUnavailableProvider("write disabled"),
+	}
+	for name, provider := range providers {
+		t.Run(name, func(t *testing.T) {
+			result, err := provider.CreateIssue(context.Background(), CreateIssueRequest{Owner: "example-owner", Repo: "example-repo", Title: "blocked"}, WriteOptions{IdempotencyKey: "key"})
+			if !IsProviderUnavailable(err) {
+				t.Fatalf("expected provider unavailable, got %T %v", err, err)
+			}
+			if result.Confirmed || result.IdempotencyKey != "" || result.ResponseHash != "" || !result.ConfirmedAt.IsZero() {
+				t.Fatalf("unavailable provider returned success-shaped metadata: %+v", result)
+			}
+		})
+	}
+}
+
+func mustFixtureProvider(t *testing.T) Provider {
+	t.Helper()
+	provider, err := NewFixtureProvider(FixtureConfig{})
+	if err != nil {
+		t.Fatalf("NewFixtureProvider: %v", err)
+	}
+	return provider
+}
+
 func TestProviderPaginationGuards(t *testing.T) {
 	t.Run("malformed fixture", func(t *testing.T) {
 		provider, err := NewFixtureProvider(FixtureConfig{Scenario: "malformed-page"})

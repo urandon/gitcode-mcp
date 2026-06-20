@@ -355,7 +355,7 @@ func TestWriteIdempotency(t *testing.T) {
 		if sawKey == "" || result.IdempotencyKey != sawKey || len(sawKey) != defaultIdempotencyKeyLength {
 			t.Fatalf("unexpected idempotency key request=%q result=%q", sawKey, result.IdempotencyKey)
 		}
-		if !sawPayload || result.Record.ID != "ISSUE-42" {
+		if !sawPayload || result.Record.ID != "ISSUE-42" || !result.Confirmed || result.Operation != "CreateIssue" || result.Target != "example-owner/example-repo" || result.ProviderStatus != "201" || result.RemoteID != "ISSUE-42" || result.RemoteNumber != 42 || result.ResponseHash == "" || result.ConfirmedAt.IsZero() {
 			t.Fatalf("unexpected write result payload=%v result=%+v", sawPayload, result)
 		}
 	})
@@ -370,8 +370,8 @@ func TestWriteIdempotency(t *testing.T) {
 		_, err := client.CreateIssue(context.Background(), CreateIssueRequest{Owner: "example-owner", Repo: "example-repo", Title: "local title"}, WriteOptions{IdempotencyKey: "replay-key"})
 		var conflict ErrConflict
 		assertAs(t, err, &conflict)
-		if !strings.Contains(string(conflict.LocalPayload), "local title") || !strings.Contains(string(conflict.RemotePayload), "existing") {
-			t.Fatalf("conflict payloads missing local or remote evidence: %+v", conflict)
+		if !strings.Contains(string(conflict.LocalPayload), "local title") || !strings.Contains(string(conflict.RemotePayload), "existing") || strings.Contains(string(conflict.RemotePayload), "example-owner") {
+			t.Fatalf("conflict payloads missing local or remote evidence or leaked sensitive data: %+v", conflict)
 		}
 	})
 
@@ -402,7 +402,7 @@ func TestWriteIdempotency(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateIssue retry returned error: %v", err)
 		}
-		if result.Record.ID != "ISSUE-99" || result.IdempotencyKey != "fixed-replay-key" || attempts.Load() != 2 {
+		if result.Record.ID != "ISSUE-99" || !result.Confirmed || result.IdempotencyKey != "fixed-replay-key" || attempts.Load() != 2 {
 			t.Fatalf("unexpected retry result: attempts=%d result=%+v", attempts.Load(), result)
 		}
 	})
@@ -424,6 +424,166 @@ func TestWriteUsesEndpointBuilders(t *testing.T) {
 	}
 	if !seen["POST "+createIssueEndpoint("example-owner", "example-repo")] || !seen["POST "+addLabelEndpoint("example-owner", "example-repo", 42)] {
 		t.Fatalf("write methods did not use endpoint builders: %+v", seen)
+	}
+}
+
+func TestConfirmedWriteOperations(t *testing.T) {
+	tests := []struct {
+		name      string
+		method    string
+		path      string
+		body      string
+		invoke    func(*HTTPClient) (WriteResult[any], error)
+		assertion func(t *testing.T, result WriteResult[any])
+	}{
+		{
+			name:   "write-confirm-create-issue",
+			method: http.MethodPost,
+			path:   createIssueEndpoint("example-owner", "example-repo"),
+			body:   `{"id":"ISSUE-101","number":101,"title":"created"}`,
+			invoke: func(client *HTTPClient) (WriteResult[any], error) {
+				result, err := client.CreateIssue(context.Background(), CreateIssueRequest{Owner: "example-owner", Repo: "example-repo", Title: "created"}, WriteOptions{IdempotencyKey: "key-create-issue"})
+				return anyWriteResult(result), err
+			},
+			assertion: func(t *testing.T, result WriteResult[any]) {
+				if result.RemoteID != "ISSUE-101" || result.RemoteNumber != 101 {
+					t.Fatalf("missing issue identity: %+v", result)
+				}
+			},
+		},
+		{
+			name:   "write-confirm-update-issue",
+			method: http.MethodPatch,
+			path:   updateIssueEndpoint("example-owner", "example-repo", 42),
+			body:   `{"id":"ISSUE-42","number":42,"title":"updated"}`,
+			invoke: func(client *HTTPClient) (WriteResult[any], error) {
+				result, err := client.UpdateIssue(context.Background(), UpdateIssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42, Title: "updated"}, WriteOptions{IdempotencyKey: "key-update-issue"})
+				return anyWriteResult(result), err
+			},
+			assertion: func(t *testing.T, result WriteResult[any]) {
+				if result.RemoteID != "ISSUE-42" || result.RemoteNumber != 42 {
+					t.Fatalf("missing issue identity: %+v", result)
+				}
+			},
+		},
+		{
+			name:   "write-confirm-create-comment",
+			method: http.MethodPost,
+			path:   createIssueCommentEndpoint("example-owner", "example-repo", 42),
+			body:   `{"id":"COMMENT-1","issue_id":"ISSUE-42","body":"comment"}`,
+			invoke: func(client *HTTPClient) (WriteResult[any], error) {
+				result, err := client.CreateIssueComment(context.Background(), CreateIssueCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 42, Body: "comment"}, WriteOptions{IdempotencyKey: "key-create-comment"})
+				return anyWriteResult(result), err
+			},
+			assertion: func(t *testing.T, result WriteResult[any]) {
+				if result.RemoteID != "COMMENT-1" || result.ParentIssueNumber != 42 || result.ParentIssueID != "ISSUE-42" {
+					t.Fatalf("missing comment identity: %+v", result)
+				}
+			},
+		},
+		{
+			name:   "write-confirm-create-wiki",
+			method: http.MethodPost,
+			path:   createWikiPageEndpoint("example-owner", "example-repo"),
+			body:   `{"id":"WIKI-1","slug":"Home","title":"Home","revision":"rev1"}`,
+			invoke: func(client *HTTPClient) (WriteResult[any], error) {
+				result, err := client.CreateWikiPage(context.Background(), CreateWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Title: "Home", Body: "body"}, WriteOptions{IdempotencyKey: "key-create-wiki"})
+				return anyWriteResult(result), err
+			},
+			assertion: func(t *testing.T, result WriteResult[any]) {
+				if result.RemoteID != "WIKI-1" || result.RemoteSlug != "Home" || result.RemoteRevision != "rev1" {
+					t.Fatalf("missing wiki identity: %+v", result)
+				}
+			},
+		},
+		{
+			name:   "write-confirm-update-wiki",
+			method: http.MethodPut,
+			path:   updateWikiPageEndpoint("example-owner", "example-repo", "Home"),
+			body:   `{"id":"WIKI-1","slug":"Home","title":"Home","revision":"rev2"}`,
+			invoke: func(client *HTTPClient) (WriteResult[any], error) {
+				result, err := client.UpdateWikiPage(context.Background(), UpdateWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Slug: "Home", Body: "body"}, WriteOptions{IdempotencyKey: "key-update-wiki"})
+				return anyWriteResult(result), err
+			},
+			assertion: func(t *testing.T, result WriteResult[any]) {
+				if result.RemoteID != "WIKI-1" || result.RemoteSlug != "Home" || result.RemoteRevision != "rev2" {
+					t.Fatalf("missing wiki identity: %+v", result)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != tt.method || r.URL.Path != tt.path {
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+				if r.Header.Get("Idempotency-Key") == "" {
+					t.Fatalf("missing idempotency key")
+				}
+				w.WriteHeader(http.StatusCreated)
+				fmt.Fprint(w, tt.body)
+			}))
+			defer server.Close()
+			result, err := tt.invoke(newTestClient(t, server.URL, Config{}))
+			if err != nil {
+				t.Fatalf("write returned error: %v", err)
+			}
+			if !result.Confirmed || result.Operation == "" || result.Target == "" || result.ProviderStatus != "201" || result.IdempotencyKey == "" || result.ResponseHash == "" || result.ConfirmedAt.IsZero() || result.ProviderPayloadFingerprint == "" {
+				t.Fatalf("missing confirmation metadata: %+v", result)
+			}
+			tt.assertion(t, result)
+		})
+	}
+}
+
+func anyWriteResult[T any](result WriteResult[T]) WriteResult[any] {
+	return WriteResult[any]{Record: result.Record, Confirmed: result.Confirmed, Operation: result.Operation, Target: result.Target, ProviderStatus: result.ProviderStatus, RemoteID: result.RemoteID, RemoteNumber: result.RemoteNumber, RemoteSlug: result.RemoteSlug, RemoteRevision: result.RemoteRevision, ParentIssueNumber: result.ParentIssueNumber, ParentIssueID: result.ParentIssueID, IdempotencyKey: result.IdempotencyKey, ResponseHash: result.ResponseHash, ConfirmedAt: result.ConfirmedAt, ProviderPayloadFingerprint: result.ProviderPayloadFingerprint}
+}
+
+func TestWriteNegativeScenariosDoNotConfirm(t *testing.T) {
+	t.Run("write-validation-failed", func(t *testing.T) {
+		client := newTestClient(t, "http://127.0.0.1", Config{})
+		result, err := client.CreateIssue(context.Background(), CreateIssueRequest{Owner: "example-owner", Repo: "example-repo"}, WriteOptions{IdempotencyKey: "key"})
+		var target ErrValidationFailed
+		if !errors.As(err, &target) || result.Confirmed {
+			t.Fatalf("expected validation failure without confirmation: result=%+v err=%T %v", result, err, err)
+		}
+	})
+
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		check  func(error) bool
+	}{
+		{"write-conflict-redacted", http.StatusConflict, `{"message":"conflict","owner":"example-owner","remote":"existing"}`, func(err error) bool {
+			var target ErrConflict
+			return errors.As(err, &target) && strings.Contains(string(target.RemotePayload), "existing") && !strings.Contains(string(target.RemotePayload), "example-owner")
+		}},
+		{"write-auth-expired", http.StatusUnauthorized, `{"message":"expired"}`, func(err error) bool { var target ErrAuthExpired; return errors.As(err, &target) }},
+		{"write-forbidden", http.StatusForbidden, `{"message":"denied"}`, func(err error) bool { var target ErrForbidden; return errors.As(err, &target) }},
+		{"write-rate-limited", http.StatusTooManyRequests, `{"message":"slow"}`, func(err error) bool { var target ErrRateLimited; return errors.As(err, &target) }},
+		{"write-network-unavailable", http.StatusInternalServerError, `{"message":"down"}`, func(err error) bool { var target ErrNetworkUnavailable; return errors.As(err, &target) }},
+		{"write-malformed-success", http.StatusCreated, `{"id":"ISSUE-1","number":`, func(err error) bool { var target ErrPartialResponse; return errors.As(err, &target) }},
+		{"write-malformed-minima", http.StatusCreated, `{"id":"ISSUE-1","number":0}`, func(err error) bool { var target ErrValidationFailed; return errors.As(err, &target) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tt.status == http.StatusTooManyRequests {
+					w.Header().Set("Retry-After", "0")
+				}
+				w.WriteHeader(tt.status)
+				fmt.Fprint(w, tt.body)
+			}))
+			defer server.Close()
+			client := newTestClient(t, server.URL, Config{})
+			result, err := client.CreateIssue(context.Background(), CreateIssueRequest{Owner: "example-owner", Repo: "example-repo", Title: "created"}, WriteOptions{IdempotencyKey: "key"})
+			if !tt.check(err) || result.Confirmed || result.IdempotencyKey != "" || result.ResponseHash != "" || !result.ConfirmedAt.IsZero() {
+				t.Fatalf("expected typed error without confirmation: result=%+v err=%T %v", result, err, err)
+			}
+		})
 	}
 }
 

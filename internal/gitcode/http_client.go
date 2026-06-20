@@ -142,23 +142,86 @@ func (c *HTTPClient) GetAttachment(ctx context.Context, req AttachmentRequest) (
 }
 
 func (c *HTTPClient) CreateIssue(ctx context.Context, req CreateIssueRequest, opts WriteOptions) (WriteResult[Issue], error) {
-	return writeJSON[Issue](ctx, c, http.MethodPost, createIssueEndpoint(req.Owner, req.Repo), "CreateIssue", req.Owner+"/"+req.Repo, req, opts)
+	if err := validateCreateIssue(req); err != nil {
+		return WriteResult[Issue]{}, err
+	}
+	target := req.Owner + "/" + req.Repo
+	return writeConfirmedJSON[Issue](ctx, c, http.MethodPost, createIssueEndpoint(req.Owner, req.Repo), "CreateIssue", target, req, opts, func(result WriteResult[Issue]) (WriteResult[Issue], error) {
+		issue := result.Record
+		if strings.TrimSpace(issue.ID) == "" || issue.Number <= 0 {
+			return WriteResult[Issue]{}, ErrValidationFailed{Field: "response", Message: "issue create confirmation requires id and number"}
+		}
+		result.RemoteID = issue.ID
+		result.RemoteNumber = issue.Number
+		return result, nil
+	})
 }
 
 func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, opts WriteOptions) (WriteResult[Issue], error) {
-	return writeJSON[Issue](ctx, c, http.MethodPatch, updateIssueEndpoint(req.Owner, req.Repo, req.Number), "UpdateIssue", req.Owner+"/"+req.Repo+"/"+strconv.Itoa(req.Number), req, opts)
+	if err := validateUpdateIssue(req); err != nil {
+		return WriteResult[Issue]{}, err
+	}
+	target := req.Owner + "/" + req.Repo + "/" + strconv.Itoa(req.Number)
+	return writeConfirmedJSON[Issue](ctx, c, http.MethodPatch, updateIssueEndpoint(req.Owner, req.Repo, req.Number), "UpdateIssue", target, req, opts, func(result WriteResult[Issue]) (WriteResult[Issue], error) {
+		issue := result.Record
+		if strings.TrimSpace(issue.ID) == "" || issue.Number != req.Number {
+			return WriteResult[Issue]{}, ErrValidationFailed{Field: "response", Message: "issue update confirmation requires id and matching number"}
+		}
+		result.RemoteID = issue.ID
+		result.RemoteNumber = issue.Number
+		return result, nil
+	})
 }
 
 func (c *HTTPClient) CreateIssueComment(ctx context.Context, req CreateIssueCommentRequest, opts WriteOptions) (WriteResult[Comment], error) {
-	return writeJSON[Comment](ctx, c, http.MethodPost, createIssueCommentEndpoint(req.Owner, req.Repo, req.Number), "CreateIssueComment", req.Owner+"/"+req.Repo+"/"+strconv.Itoa(req.Number), req, opts)
+	if err := validateCreateIssueComment(req); err != nil {
+		return WriteResult[Comment]{}, err
+	}
+	target := req.Owner + "/" + req.Repo + "/" + strconv.Itoa(req.Number)
+	return writeConfirmedJSON[Comment](ctx, c, http.MethodPost, createIssueCommentEndpoint(req.Owner, req.Repo, req.Number), "CreateIssueComment", target, req, opts, func(result WriteResult[Comment]) (WriteResult[Comment], error) {
+		comment := result.Record
+		if strings.TrimSpace(comment.ID) == "" {
+			return WriteResult[Comment]{}, ErrValidationFailed{Field: "response", Message: "comment confirmation requires id"}
+		}
+		result.RemoteID = comment.ID
+		result.ParentIssueNumber = req.Number
+		result.ParentIssueID = comment.IssueID
+		return result, nil
+	})
 }
 
 func (c *HTTPClient) CreateWikiPage(ctx context.Context, req CreateWikiPageRequest, opts WriteOptions) (WriteResult[WikiPage], error) {
-	return writeJSON[WikiPage](ctx, c, http.MethodPost, createWikiPageEndpoint(req.Owner, req.Repo), "CreateWikiPage", req.Owner+"/"+req.Repo, req, opts)
+	if err := validateCreateWikiPage(req); err != nil {
+		return WriteResult[WikiPage]{}, err
+	}
+	target := req.Owner + "/" + req.Repo
+	return writeConfirmedJSON[WikiPage](ctx, c, http.MethodPost, createWikiPageEndpoint(req.Owner, req.Repo), "CreateWikiPage", target, req, opts, func(result WriteResult[WikiPage]) (WriteResult[WikiPage], error) {
+		page := result.Record
+		if strings.TrimSpace(page.Slug) == "" || (strings.TrimSpace(page.ID) == "" && strings.TrimSpace(page.Revision) == "") {
+			return WriteResult[WikiPage]{}, ErrValidationFailed{Field: "response", Message: "wiki create confirmation requires slug and id or revision"}
+		}
+		result.RemoteID = page.ID
+		result.RemoteSlug = page.Slug
+		result.RemoteRevision = page.Revision
+		return result, nil
+	})
 }
 
 func (c *HTTPClient) UpdateWikiPage(ctx context.Context, req UpdateWikiPageRequest, opts WriteOptions) (WriteResult[WikiPage], error) {
-	return writeJSON[WikiPage](ctx, c, http.MethodPut, updateWikiPageEndpoint(req.Owner, req.Repo, req.Slug), "UpdateWikiPage", req.Owner+"/"+req.Repo+"/"+req.Slug, req, opts)
+	if err := validateUpdateWikiPage(req); err != nil {
+		return WriteResult[WikiPage]{}, err
+	}
+	target := req.Owner + "/" + req.Repo + "/" + req.Slug
+	return writeConfirmedJSON[WikiPage](ctx, c, http.MethodPut, updateWikiPageEndpoint(req.Owner, req.Repo, req.Slug), "UpdateWikiPage", target, req, opts, func(result WriteResult[WikiPage]) (WriteResult[WikiPage], error) {
+		page := result.Record
+		if strings.TrimSpace(page.Slug) != req.Slug || (strings.TrimSpace(page.ID) == "" && strings.TrimSpace(page.Revision) == "") {
+			return WriteResult[WikiPage]{}, ErrValidationFailed{Field: "response", Message: "wiki update confirmation requires matching slug and id or revision"}
+		}
+		result.RemoteID = page.ID
+		result.RemoteSlug = page.Slug
+		result.RemoteRevision = page.Revision
+		return result, nil
+	})
 }
 
 func (c *HTTPClient) AddLabel(ctx context.Context, req LabelRequest, opts WriteOptions) (WriteResult[Issue], error) {
@@ -201,6 +264,12 @@ func (c *HTTPClient) getBytes(ctx context.Context, endpoint string, values url.V
 }
 
 func writeJSON[T any](ctx context.Context, c *HTTPClient, method, endpoint, operation, target string, payload any, opts WriteOptions) (WriteResult[T], error) {
+	return writeConfirmedJSON[T](ctx, c, method, endpoint, operation, target, payload, opts, func(result WriteResult[T]) (WriteResult[T], error) {
+		return result, nil
+	})
+}
+
+func writeConfirmedJSON[T any](ctx context.Context, c *HTTPClient, method, endpoint, operation, target string, payload any, opts WriteOptions, confirm func(WriteResult[T]) (WriteResult[T], error)) (WriteResult[T], error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return WriteResult[T]{}, err
@@ -209,7 +278,10 @@ func writeJSON[T any](ctx context.Context, c *HTTPClient, method, endpoint, oper
 	if key == "" {
 		key = GenerateIdempotencyKey(operation, target, payload, opts)
 	}
-	respBody, _, err := c.bytesWithOptions(ctx, method, endpoint, nil, body, requestOptions{idempotencyKey: key, localPayload: body})
+	if strings.TrimSpace(key) == "" {
+		return WriteResult[T]{}, ErrValidationFailed{Field: "idempotency_key", Message: "idempotency key is required"}
+	}
+	respBody, headers, err := c.bytesWithOptions(ctx, method, endpoint, nil, body, requestOptions{idempotencyKey: key, localPayload: body})
 	if err != nil {
 		return WriteResult[T]{}, err
 	}
@@ -217,7 +289,87 @@ func writeJSON[T any](ctx context.Context, c *HTTPClient, method, endpoint, oper
 	if err := decodeJSON(endpoint, respBody, &record); err != nil {
 		return WriteResult[T]{}, err
 	}
-	return WriteResult[T]{Record: record, IdempotencyKey: key}, nil
+	hash := sha256.Sum256(respBody)
+	result := WriteResult[T]{Record: record, Confirmed: true, Operation: operation, Target: target, ProviderStatus: headers.Get("Status"), IdempotencyKey: key, ResponseHash: hex.EncodeToString(hash[:]), ConfirmedAt: time.Now().UTC()}
+	if result.ProviderStatus == "" {
+		result.ProviderStatus = "2xx"
+	}
+	fingerprint := sha256.Sum256(RedactJSONBody(respBody, target))
+	result.ProviderPayloadFingerprint = hex.EncodeToString(fingerprint[:])
+	result, err = confirm(result)
+	if err != nil {
+		return WriteResult[T]{}, err
+	}
+	if !result.Confirmed || result.Operation == "" || result.Target == "" || result.ProviderStatus == "" || result.IdempotencyKey == "" || result.ResponseHash == "" || result.ConfirmedAt.IsZero() {
+		return WriteResult[T]{}, ErrValidationFailed{Field: "response", Message: "write confirmation metadata incomplete"}
+	}
+	return result, nil
+}
+
+func validateWriteRepo(owner, repo string) error {
+	if strings.TrimSpace(owner) == "" {
+		return ErrValidationFailed{Field: "owner", Message: "owner is required"}
+	}
+	if strings.TrimSpace(repo) == "" {
+		return ErrValidationFailed{Field: "repo", Message: "repo is required"}
+	}
+	return nil
+}
+
+func validateCreateIssue(req CreateIssueRequest) error {
+	if err := validateWriteRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if strings.TrimSpace(req.Title) == "" {
+		return ErrValidationFailed{Field: "title", Message: "title is required"}
+	}
+	return nil
+}
+
+func validateUpdateIssue(req UpdateIssueRequest) error {
+	if err := validateWriteRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if req.Number <= 0 {
+		return ErrValidationFailed{Field: "number", Message: "positive issue number is required"}
+	}
+	return nil
+}
+
+func validateCreateIssueComment(req CreateIssueCommentRequest) error {
+	if err := validateWriteRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if req.Number <= 0 {
+		return ErrValidationFailed{Field: "number", Message: "positive issue number is required"}
+	}
+	if strings.TrimSpace(req.Body) == "" {
+		return ErrValidationFailed{Field: "body", Message: "comment body is required"}
+	}
+	return nil
+}
+
+func validateCreateWikiPage(req CreateWikiPageRequest) error {
+	if err := validateWriteRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if strings.TrimSpace(req.Title) == "" {
+		return ErrValidationFailed{Field: "title", Message: "wiki title is required"}
+	}
+	if strings.TrimSpace(req.Body) == "" {
+		return ErrValidationFailed{Field: "body", Message: "wiki body is required"}
+	}
+	return nil
+}
+
+func validateUpdateWikiPage(req UpdateWikiPageRequest) error {
+	if err := validateWriteRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if strings.TrimSpace(req.Slug) == "" {
+		return ErrValidationFailed{Field: "slug", Message: "wiki slug is required"}
+	}
+	return nil
 }
 
 func GenerateIdempotencyKey(operation, target string, payload any, opts WriteOptions) string {
@@ -274,7 +426,9 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 		}
 		switch {
 		case resp.StatusCode >= 200 && resp.StatusCode <= 299:
-			return body, resp.Header, nil
+			headers := resp.Header.Clone()
+			headers.Set("Status", strconv.Itoa(resp.StatusCode))
+			return body, headers, nil
 		case resp.StatusCode == http.StatusTooManyRequests:
 			rawRetryAfter = resp.Header.Get("Retry-After")
 			lastRetryAfter = parseRetryAfter(rawRetryAfter, time.Now())
@@ -354,7 +508,7 @@ func (c *HTTPClient) statusError(status int, endpoint string, body []byte, opts 
 		}
 		return ErrNotFound{Endpoint: endpoint, Message: msg}
 	case http.StatusConflict:
-		return ErrConflict{Endpoint: endpoint, Status: status, LocalPayload: append([]byte(nil), opts.localPayload...), RemotePayload: append([]byte(nil), body...), Message: msg}
+		return ErrConflict{Endpoint: endpoint, Status: status, LocalPayload: append([]byte(nil), opts.localPayload...), RemotePayload: RedactJSONBody(body), Message: msg}
 	default:
 		return ErrNetworkUnavailable{Endpoint: endpoint, Status: status, Attempts: 1}
 	}
