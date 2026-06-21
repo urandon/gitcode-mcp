@@ -620,3 +620,163 @@ func spyFactory() serviceFactory {
 }
 
 var _ queryService = (*spyService)(nil)
+
+func TestCommandHelpExitsZero(t *testing.T) {
+	commands := []string{
+		"sync", "index", "search", "list", "get",
+		"get-snippet", "snippet", "snippets", "backlinks", "list-chunks",
+		"recent", "link-check", "stale-index", "cache-status",
+		"sync-status", "sync_status", "export", "export-snapshot",
+		"diff", "diff-snapshot",
+		"create-issue", "update-issue", "create-page", "update-page",
+		"add-comment", "add-label",
+		"ingest",
+	}
+	for _, command := range commands {
+		t.Run(command+" --help", func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Execute([]string{command, "--help"}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), command) {
+				t.Fatalf("help output missing command name %q in %q", command, stdout.String())
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr must be empty, got %q", stderr.String())
+			}
+			if strings.Contains(stdout.String(), "invalid_query") {
+				t.Fatalf("help output contains invalid_query: %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestCommandHelpShortForm(t *testing.T) {
+	commands := []string{"sync", "index", "search"}
+	for _, command := range commands {
+		t.Run(command+" -h", func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Execute([]string{command, "-h"}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), command) {
+				t.Fatalf("help output missing command name %q in %q", command, stdout.String())
+			}
+		})
+	}
+}
+
+func TestLocalCommandHelpExitsZero(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"auth --help", []string{"auth", "--help"}},
+		{"auth -h", []string{"auth", "-h"}},
+		{"config --help", []string{"config", "--help"}},
+		{"doctor --help", []string{"doctor", "--help"}},
+		{"migrate-cache --help", []string{"migrate-cache", "--help"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Execute(tc.args, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), tc.args[0]) {
+				t.Fatalf("help output missing command name %q in %q", tc.args[0], stdout.String())
+			}
+		})
+	}
+}
+
+func TestLocalSubcommandHelpExitsZero(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"config init --help", []string{"config", "init", "--help"}},
+		{"config locate --help", []string{"config", "locate", "--help"}},
+		{"config show --help", []string{"config", "show", "--help"}},
+		{"auth status --help", []string{"auth", "status", "--help"}},
+		{"repo add --help", []string{"repo", "add", "--help"}},
+		{"repo status --help", []string{"repo", "status", "--help"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Execute(tc.args, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "Usage") {
+				t.Fatalf("help output missing Usage line in %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestAliasCommandHelpExitsZero(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"snippet --help", []string{"snippet", "--help"}},
+		{"sync_status --help", []string{"sync_status", "--help"}},
+		{"export-snapshot --help", []string{"export-snapshot", "--help"}},
+		{"diff-snapshot --help", []string{"diff-snapshot", "--help"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Execute(tc.args, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			if stdout.Len() == 0 {
+				t.Fatalf("empty help output")
+			}
+		})
+	}
+}
+
+func TestHelpDoesNotCreateService(t *testing.T) {
+	factoryCalls := 0
+	factory := func(ctx context.Context, path string) (queryService, func() error, error) {
+		factoryCalls++
+		return &spyService{}, nil, nil
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"sync --help", []string{"sync", "--help"}},
+		{"index --help", []string{"index", "--help"}},
+		{"search --help", []string{"search", "--help"}},
+		{"list --help", []string{"list", "--help"}},
+		{"get --help", []string{"get", "--help"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			factoryCalls = 0
+			var stdout, stderr bytes.Buffer
+			code := executeWithFactory(tc.args, &stdout, &stderr, factory)
+			if code != 0 {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			if factoryCalls != 0 {
+				t.Fatalf("service factory was called %d times, want 0", factoryCalls)
+			}
+		})
+	}
+}
+
+func TestUnknownCommandErrors(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"nonexistent", "--help"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("code=%d want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "unknown command") {
+		t.Fatalf("expected unknown command error, got stderr=%q", stderr.String())
+	}
+}
