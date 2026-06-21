@@ -1,5 +1,6 @@
 .DS_Store
-ai/
+ai/artifacts
+ai/research-repos
 .cache/
 bin/
 *.test
