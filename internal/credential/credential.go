@@ -2,8 +2,10 @@ package credential
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"gitcode-mcp/internal/config"
 )
@@ -20,6 +22,54 @@ type Status struct {
 type ResolvedToken struct {
 	Value string
 	Salt  string
+}
+
+func (rt ResolvedToken) RedactToken() string {
+	if rt.Salt != "" {
+		return rt.Salt
+	}
+	v := strings.TrimSpace(rt.Value)
+	if v == "" {
+		return ""
+	}
+	if utf8.RuneCountInString(v) < 8 {
+		return "***"
+	}
+	prefixLen := 3
+	suffixLen := 3
+	runes := []rune(v)
+	return string(runes[:prefixLen]) + "***" + string(runes[len(runes)-suffixLen:])
+}
+
+type TokenDiagnostic struct {
+	Valid  bool     `json:"valid"`
+	Issues []string `json:"issues,omitempty"`
+}
+
+func ValidateTokenFormat(token string) TokenDiagnostic {
+	v := strings.TrimSpace(token)
+	if v == "" {
+		return TokenDiagnostic{Valid: false, Issues: []string{"empty"}}
+	}
+	if utf8.RuneCountInString(v) < 8 {
+		return TokenDiagnostic{Valid: false, Issues: []string{"too_short"}}
+	}
+	return TokenDiagnostic{Valid: true}
+}
+
+type AuthFailure interface {
+	AuthFailure() bool
+}
+
+func ClassifyAuthError(err error) (bool, string) {
+	if err == nil {
+		return false, ""
+	}
+	var af AuthFailure
+	if errors.As(err, &af) {
+		return true, err.Error()
+	}
+	return false, ""
 }
 
 type Provider interface {
@@ -83,6 +133,12 @@ func (p *Pipeline) Status(ctx context.Context) AuthStatus {
 		AvailableSource: results,
 	}
 
+	if foundPresent {
+		status.RedactedToken = resolvedToken.RedactToken()
+		diag := ValidateTokenFormat(resolvedToken.Value)
+		status.TokenDiagnostic = &diag
+	}
+
 	if p.prober != nil && foundPresent && resolvedToken.Value != "" {
 		ok, msg := p.prober(ctx, resolvedToken.Value, "")
 		status.AuthProbe = &AuthProbeResult{
@@ -105,6 +161,8 @@ func (p *Pipeline) StatusReporter(ctx context.Context, eff config.EffectiveConfi
 
 type AuthStatus struct {
 	TokenPresent    bool             `json:"token_present"`
+	RedactedToken   string           `json:"redacted_token,omitempty"`
+	TokenDiagnostic *TokenDiagnostic `json:"token_diagnostic,omitempty"`
 	AvailableSource []SourceStatus   `json:"available_sources"`
 	FailureClass    string           `json:"failure_class,omitempty"`
 	Remediation     string           `json:"remediation,omitempty"`
@@ -192,6 +250,15 @@ func (as AuthStatus) RenderText() string {
 	}
 
 	fmt.Fprintf(&b, "token_present: %t\n", as.TokenPresent)
+	if as.RedactedToken != "" {
+		fmt.Fprintf(&b, "redacted_token: %s\n", as.RedactedToken)
+	}
+	if as.TokenDiagnostic != nil {
+		fmt.Fprintf(&b, "token_valid: %t\n", as.TokenDiagnostic.Valid)
+		for _, issue := range as.TokenDiagnostic.Issues {
+			fmt.Fprintf(&b, "token_issue: %s\n", issue)
+		}
+	}
 	if as.FailureClass != "" {
 		fmt.Fprintf(&b, "failure_class: %s\n", as.FailureClass)
 	}

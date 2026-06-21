@@ -2,6 +2,8 @@ package credential
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"gitcode-mcp/internal/config"
@@ -310,4 +312,255 @@ func contains(slice []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestRedactedTokenPreview(t *testing.T) {
+	tests := []struct {
+		name  string
+		token ResolvedToken
+		want  string
+	}{
+		{
+			name:  "well-formed token",
+			token: ResolvedToken{Value: "glpat-abc123xyz"},
+			want:  "glp***xyz",
+		},
+		{
+			name:  "salt takes precedence",
+			token: ResolvedToken{Value: "glpat-abc123xyz", Salt: "custom-salt"},
+			want:  "custom-salt",
+		},
+		{
+			name:  "short token all redacted",
+			token: ResolvedToken{Value: "ab"},
+			want:  "***",
+		},
+		{
+			name:  "exactly 8 chars",
+			token: ResolvedToken{Value: "abcdefgh"},
+			want:  "abc***fgh",
+		},
+		{
+			name:  "empty token",
+			token: ResolvedToken{Value: ""},
+			want:  "",
+		},
+		{
+			name:  "long token with special chars",
+			token: ResolvedToken{Value: "glpat-QWxpY2U-2024-token-secret"},
+			want:  "glp***ret",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.token.RedactToken()
+			if got != tt.want {
+				t.Fatalf("RedactToken() = %q, want %q", got, tt.want)
+			}
+			if tt.token.Value != "" && strings.Contains(got, tt.token.Value) {
+				t.Fatalf("RedactToken() = %q contains full token %q", got, tt.token.Value)
+			}
+		})
+	}
+}
+
+func TestValidateTokenFormat_WellFormed(t *testing.T) {
+	tests := []string{
+		"glpat-abcdef123456",
+		"GITCODE-PAT-12345678",
+		"12345678",
+	}
+	for _, token := range tests {
+		t.Run(token, func(t *testing.T) {
+			diag := ValidateTokenFormat(token)
+			if !diag.Valid {
+				t.Fatalf("ValidateTokenFormat(%q).Valid = false, want true", token)
+			}
+			if len(diag.Issues) != 0 {
+				t.Fatalf("ValidateTokenFormat(%q).Issues = %v, want []", token, diag.Issues)
+			}
+		})
+	}
+}
+
+func TestValidateTokenFormat_Empty(t *testing.T) {
+	diag := ValidateTokenFormat("")
+	if diag.Valid {
+		t.Fatal("ValidateTokenFormat(\"\").Valid = true, want false")
+	}
+	if !contains(diag.Issues, "empty") {
+		t.Fatalf("ValidateTokenFormat(\"\").Issues = %v, want [empty]", diag.Issues)
+	}
+}
+
+func TestValidateTokenFormat_TooShort(t *testing.T) {
+	diag := ValidateTokenFormat("ab")
+	if diag.Valid {
+		t.Fatal("ValidateTokenFormat(\"ab\").Valid = true, want false")
+	}
+	if !contains(diag.Issues, "too_short") {
+		t.Fatalf("ValidateTokenFormat(\"ab\").Issues = %v, want [too_short]", diag.Issues)
+	}
+}
+
+func TestValidateTokenFormat_WhitespaceTrimmed(t *testing.T) {
+	diag := ValidateTokenFormat("  glpat-abcdef123456  ")
+	if !diag.Valid {
+		t.Fatal("ValidateTokenFormat with whitespace: Valid = false, want true")
+	}
+}
+
+func TestRenderText_IncludesRedactedToken(t *testing.T) {
+	as := AuthStatus{
+		TokenPresent:  true,
+		RedactedToken: "glp***xyz",
+		TokenDiagnostic: &TokenDiagnostic{Valid: true},
+		AvailableSource: []SourceStatus{
+			{Name: "env:GITCODE_TOKEN", Available: true, Credentials: Status{Source: "env:GITCODE_TOKEN", Present: true, StoreMode: "auto"}},
+		},
+	}
+	text := as.RenderText()
+	if !strings.Contains(text, "redacted_token: glp***xyz") {
+		t.Fatalf("RenderText missing redacted_token line:\n%s", text)
+	}
+	if !strings.Contains(text, "token_valid: true") {
+		t.Fatalf("RenderText missing token_valid line:\n%s", text)
+	}
+}
+
+func TestRenderText_NoToken(t *testing.T) {
+	as := AuthStatus{
+		TokenPresent: false,
+		AvailableSource: []SourceStatus{
+			{Name: "env:GITCODE_TOKEN", Available: true, Credentials: Status{Source: "env:GITCODE_TOKEN", Present: false, StoreMode: "auto", ErrorClass: "token-missing"}},
+		},
+	}
+	text := as.RenderText()
+	if strings.Contains(text, "redacted_token:") {
+		t.Fatalf("RenderText should not contain redacted_token when no token:\n%s", text)
+	}
+}
+
+func TestRenderText_InvalidTokenDiagnostic(t *testing.T) {
+	as := AuthStatus{
+		TokenPresent:    true,
+		RedactedToken:   "***",
+		TokenDiagnostic: &TokenDiagnostic{Valid: false, Issues: []string{"too_short"}},
+		AvailableSource: []SourceStatus{
+			{Name: "env:GITCODE_TOKEN", Available: true, Credentials: Status{Source: "env:GITCODE_TOKEN", Present: true, StoreMode: "auto"}},
+		},
+	}
+	text := as.RenderText()
+	if !strings.Contains(text, "token_valid: false") {
+		t.Fatalf("RenderText missing token_valid: false:\n%s", text)
+	}
+	if !strings.Contains(text, "token_issue: too_short") {
+		t.Fatalf("RenderText missing token_issue line:\n%s", text)
+	}
+}
+
+func TestPipelineStatusPopulatesRedactedToken(t *testing.T) {
+	src := &memSource{env: map[string]string{EnvToken: "glpat-abcdef123456"}}
+	p := DefaultPipeline(src)
+	status := p.Status(context.Background())
+	if !status.TokenPresent {
+		t.Fatal("expected TokenPresent=true")
+	}
+	if status.RedactedToken == "" {
+		t.Fatal("expected RedactedToken to be set")
+	}
+	if status.RedactedToken == "glpat-abcdef123456" {
+		t.Fatal("RedactedToken must not be the full token")
+	}
+	if strings.Contains(status.RedactedToken, "glpat-abcdef123456") {
+		t.Fatalf("RedactedToken=%q must not contain the full token", status.RedactedToken)
+	}
+	if status.TokenDiagnostic == nil {
+		t.Fatal("expected TokenDiagnostic to be set")
+	}
+	if !status.TokenDiagnostic.Valid {
+		t.Fatal("expected TokenDiagnostic.Valid=true")
+	}
+}
+
+func TestPipelineStatusNoTokenNoRedacted(t *testing.T) {
+	src := &memSource{env: map[string]string{}}
+	p := DefaultPipeline(src)
+	status := p.Status(context.Background())
+	if status.TokenPresent {
+		t.Fatal("expected TokenPresent=false")
+	}
+	if status.RedactedToken != "" {
+		t.Fatalf("expected RedactedToken empty, got %q", status.RedactedToken)
+	}
+	if status.TokenDiagnostic != nil {
+		t.Fatal("expected TokenDiagnostic to be nil when no token")
+	}
+}
+
+func TestPipelineStatusWithProbeAndAuthFailureClass(t *testing.T) {
+	src := &memSource{env: map[string]string{EnvToken: "glpat-invalid_token"}}
+	p := DefaultPipeline(src)
+	p.WithProbe(func(ctx context.Context, token string, baseURL string) (bool, string) {
+		return false, "expired token"
+	})
+
+	status := p.Status(context.Background())
+	if !status.TokenPresent {
+		t.Fatal("expected TokenPresent=true")
+	}
+	if status.RedactedToken == "" {
+		t.Fatal("expected RedactedToken set even when probe fails")
+	}
+	if status.FailureClass != "auth-failure" {
+		t.Fatalf("got FailureClass=%q, want auth-failure", status.FailureClass)
+	}
+}
+
+type testAuthFailureError struct {
+	msg string
+}
+
+func (e testAuthFailureError) Error() string     { return e.msg }
+func (e testAuthFailureError) AuthFailure() bool { return true }
+
+func TestClassifyAuthError_AuthFailure(t *testing.T) {
+	err := testAuthFailureError{msg: "expired token"}
+	isAuth, msg := ClassifyAuthError(err)
+	if !isAuth {
+		t.Fatal("expected isAuth=true")
+	}
+	if msg != "expired token" {
+		t.Fatalf("got msg=%q, want 'expired token'", msg)
+	}
+}
+
+func TestClassifyAuthError_WrappedAuthFailure(t *testing.T) {
+	inner := testAuthFailureError{msg: "forbidden"}
+	err := fmt.Errorf("sync failed: %w", inner)
+	isAuth, msg := ClassifyAuthError(err)
+	if !isAuth {
+		t.Fatal("expected isAuth=true for wrapped auth error")
+	}
+	if msg != "sync failed: forbidden" {
+		t.Fatalf("got msg=%q, want 'sync failed: forbidden'", msg)
+	}
+}
+
+func TestClassifyAuthError_NonAuthError(t *testing.T) {
+	err := fmt.Errorf("network timeout")
+	isAuth, _ := ClassifyAuthError(err)
+	if isAuth {
+		t.Fatal("expected isAuth=false for non-auth error")
+	}
+}
+
+func TestClassifyAuthError_Nil(t *testing.T) {
+	isAuth, msg := ClassifyAuthError(nil)
+	if isAuth {
+		t.Fatal("expected isAuth=false for nil")
+	}
+	if msg != "" {
+		t.Fatalf("expected empty msg for nil, got %q", msg)
+	}
 }
