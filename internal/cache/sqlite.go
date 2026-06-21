@@ -29,21 +29,21 @@ type LockHandle struct {
 
 type WriterOwner struct {
 	Operation string    `json:"operation"`
-	RepoID     string    `json:"repo_id,omitempty"`
+	RepoID    string    `json:"repo_id,omitempty"`
 	StartedAt time.Time `json:"started_at"`
 	PID       int       `json:"pid"`
 	CachePath string    `json:"cache_path"`
 }
 
 type WriterLease struct {
-	lock *LockHandle
+	lock  *LockHandle
 	Owner WriterOwner
 }
 
 type WriterRequest struct {
 	Operation string
-	RepoID     string
-	LockPath   string
+	RepoID    string
+	LockPath  string
 }
 
 func NewSQLiteStore(ctx context.Context, dataSourceName string) (*SQLiteStore, error) {
@@ -83,6 +83,15 @@ func newSQLiteStore(ctx context.Context, dataSourceName string, forceNoFTS bool)
 		}
 		return store, nil
 	}
+	compat, err := CheckVersionCompatibility(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if !compat.PermitWrites {
+		_ = db.Close()
+		return nil, &SchemaVersionError{Compat: compat}
+	}
 	lease, err := store.AcquireWriter(ctx, WriterRequest{Operation: "migration"})
 	if err != nil {
 		_ = db.Close()
@@ -118,6 +127,15 @@ func NewSQLiteReadOnlyStore(ctx context.Context, dataSourceName string) (*SQLite
 	if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout = 5000"); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	compat, err := CheckVersionCompatibility(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if !compat.PermitWrites {
+		_ = db.Close()
+		return nil, &SchemaVersionError{Compat: compat}
 	}
 	useFTS := detectFTS5(ctx, db)
 	return &SQLiteStore{db: db, useFTS: useFTS, forceNoFTS: false, cachePath: dataSourceName, lockPath: ""}, nil

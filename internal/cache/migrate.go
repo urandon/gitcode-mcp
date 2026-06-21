@@ -8,9 +8,10 @@ import (
 )
 
 type MigrateCacheResult struct {
-	FromVersion int
-	ToVersion   int
-	Applied     []int
+	FromVersion   int
+	ToVersion     int
+	Applied       []int
+	Compatibility VersionCompatibility
 }
 
 func MigrateCache(ctx context.Context, dataSourceName string, forceNoFTS bool) (*MigrateCacheResult, error) {
@@ -44,29 +45,18 @@ func MigrateCache(ctx context.Context, dataSourceName string, forceNoFTS bool) (
 		_ = store.ReleaseWriter(context.Background(), lease)
 	}()
 
-	hasVersionTable, err := hasSchemaVersionTable(ctx, db)
+	compat, err := CheckVersionCompatibility(ctx, db)
 	if err != nil {
 		return nil, err
 	}
-	if !hasVersionTable {
-		return &MigrateCacheResult{FromVersion: 1, ToVersion: currentSchemaVersion, Applied: nil}, nil
-	}
+	beforeVersion := compat.DetectedVersion
 
-	beforeVersion, err := schemaVersion(ctx, db)
-	if err != nil {
-		return nil, err
-	}
-
-	if beforeVersion > currentSchemaVersion {
-		return &MigrateCacheResult{FromVersion: beforeVersion, ToVersion: currentSchemaVersion, Applied: nil}, nil
+	if !compat.Compatible || beforeVersion <= 1 {
+		return &MigrateCacheResult{FromVersion: beforeVersion, ToVersion: currentSchemaVersion, Applied: nil, Compatibility: compat}, nil
 	}
 
 	if beforeVersion == currentSchemaVersion {
-		return &MigrateCacheResult{FromVersion: beforeVersion, ToVersion: currentSchemaVersion, Applied: nil}, nil
-	}
-
-	if beforeVersion <= 1 {
-		return &MigrateCacheResult{FromVersion: beforeVersion, ToVersion: currentSchemaVersion, Applied: nil}, nil
+		return &MigrateCacheResult{FromVersion: beforeVersion, ToVersion: currentSchemaVersion, Applied: nil, Compatibility: compat}, nil
 	}
 
 	useFTS := !forceNoFTS && detectFTS5(ctx, db)
@@ -99,7 +89,7 @@ func MigrateCache(ctx context.Context, dataSourceName string, forceNoFTS bool) (
 		applied = append(applied, m.version)
 	}
 
-	return &MigrateCacheResult{FromVersion: beforeVersion, ToVersion: currentSchemaVersion, Applied: applied}, nil
+	return &MigrateCacheResult{FromVersion: beforeVersion, ToVersion: currentSchemaVersion, Applied: applied, Compatibility: compat}, nil
 }
 
 func hasSchemaVersionTable(ctx context.Context, db *sql.DB) (bool, error) {
@@ -109,4 +99,13 @@ func hasSchemaVersionTable(ctx context.Context, db *sql.DB) (bool, error) {
 		return false, err
 	}
 	return count > 0, nil
+}
+
+func isEmptyDatabase(ctx context.Context, db *sql.DB) (bool, error) {
+	var count int
+	err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type IN ('table', 'view', 'index', 'trigger') AND name NOT LIKE 'sqlite_%'`).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count == 0, nil
 }

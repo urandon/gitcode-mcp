@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -30,6 +33,141 @@ func TestSchemaVersion(t *testing.T) {
 	}
 	if version != currentSchemaVersion {
 		t.Fatalf("schema version after rerun = %d, want %d", version, currentSchemaVersion)
+	}
+}
+
+func TestCheckVersionCompatibilityCurrent(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+
+	compat, err := CheckVersionCompatibility(ctx, store.db)
+	if err != nil {
+		t.Fatalf("CheckVersionCompatibility returned error: %v", err)
+	}
+	if !compat.Compatible {
+		t.Fatalf("compat.Compatible = false, want true: %#v", compat)
+	}
+	if !compat.PermitWrites {
+		t.Fatalf("compat.PermitWrites = false, want true: %#v", compat)
+	}
+	if compat.DetectedVersion != currentSchemaVersion || compat.ExpectedVersion != currentSchemaVersion {
+		t.Fatalf("versions = detected %d expected %d, want %d", compat.DetectedVersion, compat.ExpectedVersion, currentSchemaVersion)
+	}
+}
+
+func TestCheckVersionCompatibilityFuture(t *testing.T) {
+	ctx := context.Background()
+	db := openTempSchemaDB(t, ctx)
+	defer db.Close()
+	setSchemaVersion(t, ctx, db, currentSchemaVersion+1)
+
+	compat, err := CheckVersionCompatibility(ctx, db)
+	if err != nil {
+		t.Fatalf("CheckVersionCompatibility returned error: %v", err)
+	}
+	if compat.Compatible {
+		t.Fatalf("compat.Compatible = true, want false: %#v", compat)
+	}
+	if compat.PermitWrites {
+		t.Fatalf("compat.PermitWrites = true, want false: %#v", compat)
+	}
+	if !strings.Contains(compat.Message, "newer than supported") || !strings.Contains(compat.Remediation, "upgrade") {
+		t.Fatalf("future compatibility message/remediation not actionable: %#v", compat)
+	}
+}
+
+func TestCheckVersionCompatibilityPreSchemaVersion(t *testing.T) {
+	ctx := context.Background()
+	db := openTempSchemaDB(t, ctx)
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, `CREATE TABLE legacy_sources (id TEXT PRIMARY KEY)`); err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+
+	compat, err := CheckVersionCompatibility(ctx, db)
+	if err != nil {
+		t.Fatalf("CheckVersionCompatibility returned error: %v", err)
+	}
+	if compat.Compatible {
+		t.Fatalf("compat.Compatible = true, want false: %#v", compat)
+	}
+	if compat.PermitWrites {
+		t.Fatalf("compat.PermitWrites = true, want false: %#v", compat)
+	}
+	if !strings.Contains(compat.Message, "pre-schema-versioning") || !strings.Contains(compat.Remediation, "re-initialize") {
+		t.Fatalf("pre-version compatibility message/remediation not actionable: %#v", compat)
+	}
+}
+
+func TestNewSQLiteStoreFutureSchemaBlocked(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "future.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open temp db: %v", err)
+	}
+	setSchemaVersion(t, ctx, db, currentSchemaVersion+1)
+	if err := db.Close(); err != nil {
+		t.Fatalf("close temp db: %v", err)
+	}
+
+	store, err := NewSQLiteStore(ctx, path)
+	if err == nil {
+		store.Close()
+		t.Fatalf("NewSQLiteStore returned nil error for future schema")
+	}
+	if !errors.Is(err, ErrSchemaVersionIncompatible) {
+		t.Fatalf("NewSQLiteStore error = %v, want ErrSchemaVersionIncompatible", err)
+	}
+	if !strings.Contains(err.Error(), "binary") && !strings.Contains(err.Error(), "upgrade") {
+		t.Fatalf("NewSQLiteStore error is not actionable: %v", err)
+	}
+}
+
+func TestNewSQLiteStoreVersionTwoBlockedWithMigrateHint(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "version-two.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open temp db: %v", err)
+	}
+	setSchemaVersion(t, ctx, db, 2)
+	if err := db.Close(); err != nil {
+		t.Fatalf("close temp db: %v", err)
+	}
+
+	store, err := NewSQLiteStore(ctx, path)
+	if err == nil {
+		store.Close()
+		t.Fatalf("NewSQLiteStore returned nil error for version 2 schema")
+	}
+	if !errors.Is(err, ErrSchemaVersionIncompatible) {
+		t.Fatalf("NewSQLiteStore error = %v, want ErrSchemaVersionIncompatible", err)
+	}
+	if !strings.Contains(err.Error(), "detected=2") || !strings.Contains(err.Error(), "expected=4") || !strings.Contains(err.Error(), "migrate-cache") {
+		t.Fatalf("NewSQLiteStore error is not actionable: %v", err)
+	}
+}
+
+func TestCheckVersionCompatibilityVersionTwoSuggestsMigration(t *testing.T) {
+	ctx := context.Background()
+	db := openTempSchemaDB(t, ctx)
+	defer db.Close()
+	setSchemaVersion(t, ctx, db, 2)
+
+	compat, err := CheckVersionCompatibility(ctx, db)
+	if err != nil {
+		t.Fatalf("CheckVersionCompatibility returned error: %v", err)
+	}
+	if !compat.Compatible {
+		t.Fatalf("compat.Compatible = false, want true: %#v", compat)
+	}
+	if compat.PermitWrites {
+		t.Fatalf("compat.PermitWrites = true, want false before migration: %#v", compat)
+	}
+	if !strings.Contains(compat.Remediation, "migrate-cache") {
+		t.Fatalf("compat.Remediation = %q, want migrate-cache hint", compat.Remediation)
 	}
 }
 
@@ -140,6 +278,33 @@ func TestFTSAvailability(t *testing.T) {
 	}
 	if tableNames(t, ctx, fallbackStore.db)["fts_index"] {
 		t.Fatalf("forced fallback store should not create fts_index")
+	}
+}
+
+func openTempSchemaDB(t *testing.T, ctx context.Context) *sql.DB {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "schema.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open temp schema db: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
+		_ = db.Close()
+		t.Fatalf("enable foreign keys: %v", err)
+	}
+	return db
+}
+
+func setSchemaVersion(t *testing.T, ctx context.Context, db *sql.DB, version int) {
+	t.Helper()
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`); err != nil {
+		t.Fatalf("create schema_version: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM schema_version`); err != nil {
+		t.Fatalf("clear schema_version: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO schema_version (version) VALUES (?)`, version); err != nil {
+		t.Fatalf("insert schema_version: %v", err)
 	}
 }
 

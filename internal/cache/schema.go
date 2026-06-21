@@ -3,10 +3,120 @@ package cache
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
 const currentSchemaVersion = 4
+
+type VersionCompatibility struct {
+	DetectedVersion int
+	ExpectedVersion int
+	Compatible      bool
+	PermitWrites    bool
+	Message         string
+	Remediation     string
+}
+
+var ErrSchemaVersionIncompatible = errors.New("cache: schema version is incompatible")
+
+type SchemaVersionError struct {
+	Compat VersionCompatibility
+}
+
+func (e *SchemaVersionError) Error() string {
+	if e == nil {
+		return ErrSchemaVersionIncompatible.Error()
+	}
+	if e.Compat.Remediation == "" {
+		return fmt.Sprintf("%s: detected=%d expected=%d: %s", ErrSchemaVersionIncompatible, e.Compat.DetectedVersion, e.Compat.ExpectedVersion, e.Compat.Message)
+	}
+	return fmt.Sprintf("%s: detected=%d expected=%d: %s; %s", ErrSchemaVersionIncompatible, e.Compat.DetectedVersion, e.Compat.ExpectedVersion, e.Compat.Message, e.Compat.Remediation)
+}
+
+func (e *SchemaVersionError) Unwrap() error {
+	return ErrSchemaVersionIncompatible
+}
+
+func CheckVersionCompatibility(ctx context.Context, db *sql.DB) (VersionCompatibility, error) {
+	expected := currentSchemaVersion
+
+	hasTable, err := hasSchemaVersionTable(ctx, db)
+	if err != nil {
+		return VersionCompatibility{}, err
+	}
+	if !hasTable {
+		empty, err := isEmptyDatabase(ctx, db)
+		if err != nil {
+			return VersionCompatibility{}, err
+		}
+		if empty {
+			return VersionCompatibility{
+				DetectedVersion: 0,
+				ExpectedVersion: expected,
+				Compatible:      true,
+				PermitWrites:    true,
+				Message:         "cache database is uninitialized",
+				Remediation:     "",
+			}, nil
+		}
+		return VersionCompatibility{
+			DetectedVersion: 0,
+			ExpectedVersion: expected,
+			Compatible:      false,
+			PermitWrites:    false,
+			Message:         "cache database was created by a pre-schema-versioning binary (iteration 1 equivalent)",
+			Remediation:     "re-initialize the cache with 'gitcode-mcp reinit-cache' or delete the cache file and re-sync",
+		}, nil
+	}
+
+	detected, err := schemaVersion(ctx, db)
+	if err != nil {
+		return VersionCompatibility{}, err
+	}
+
+	if detected == 0 {
+		return VersionCompatibility{
+			DetectedVersion: 0,
+			ExpectedVersion: expected,
+			Compatible:      false,
+			PermitWrites:    false,
+			Message:         "cache database contains an empty schema_version table (iteration 1 equivalent)",
+			Remediation:     "re-initialize the cache with 'gitcode-mcp reinit-cache' or delete the cache file and re-sync",
+		}, nil
+	}
+
+	if detected > expected {
+		return VersionCompatibility{
+			DetectedVersion: detected,
+			ExpectedVersion: expected,
+			Compatible:      false,
+			PermitWrites:    false,
+			Message:         fmt.Sprintf("cache schema version %d is newer than supported version %d", detected, expected),
+			Remediation:     "upgrade the gitcode-mcp binary to a version that supports this schema, or downgrade the cache",
+		}, nil
+	}
+
+	if detected < expected {
+		return VersionCompatibility{
+			DetectedVersion: detected,
+			ExpectedVersion: expected,
+			Compatible:      true,
+			PermitWrites:    false,
+			Message:         fmt.Sprintf("cache schema version %d is older than expected version %d; writes are blocked until migration completes", detected, expected),
+			Remediation:     fmt.Sprintf("run 'gitcode-mcp migrate-cache' to upgrade the schema from version %d to version %d", detected, expected),
+		}, nil
+	}
+
+	return VersionCompatibility{
+		DetectedVersion: detected,
+		ExpectedVersion: expected,
+		Compatible:      true,
+		PermitWrites:    true,
+		Message:         "cache schema is up to date",
+		Remediation:     "",
+	}, nil
+}
 
 type migration struct {
 	version int
