@@ -1,0 +1,21 @@
+{
+  "covered_outcome_ids": ["outcome-1"],
+  "covered_decommission_ids": ["decommission-1"],
+  "product_surfaces": [
+    "internal/service/service.go",
+    "internal/service/types.go",
+    "internal/service/service_test.go"
+  ],
+  "evidence_type": "go_test",
+  "freshness": "current_binary",
+  "mocks_used": [
+    "fakeGitCodeClient (internal service test helper, mocks gitcode.Client)",
+    "httptest.Server (external HTTP endpoint for live mode test)",
+    "cache.NewInMemorySQLiteStore (in-memory store, no disk)"
+  ],
+  "production_files_modified": [
+    "internal/service/service.go",
+    "internal/service/types.go",
+    "internal/service/service_test.go"
+  ]
+}

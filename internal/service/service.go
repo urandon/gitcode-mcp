@@ -21,20 +21,88 @@ import (
 )
 
 type Service struct {
-	store    cache.Store
-	client   gitcode.Client
-	now      func() time.Time
-	lockPath string
+	store        cache.Store
+	client       gitcode.Client
+	now          func() time.Time
+	lockPath     string
+	providerMode gitcode.ProviderMode
 }
 
 func New(store cache.Store) *Service {
-	return &Service{store: store, client: sanitizedFixtureClient{}, now: func() time.Time { return time.Now().UTC() }, lockPath: filepath.Join(os.TempDir(), "gitcode-mcp-sync.lock")}
+	svc, err := NewWithMode(store, gitcode.ProviderModeFixture, "", ServiceConfig{})
+	if err != nil {
+		return &Service{store: store, client: sanitizedFixtureClient{}, now: func() time.Time { return time.Now().UTC() }, lockPath: filepath.Join(os.TempDir(), "gitcode-mcp-sync.lock"), providerMode: gitcode.ProviderModeFixture}
+	}
+	return svc
 }
 
 func NewWithClient(store cache.Store, client gitcode.Client) *Service {
 	svc := New(store)
 	svc.client = client
+	svc.providerMode = gitcode.ProviderMode("custom")
 	return svc
+}
+
+func (s *Service) ProviderMode() gitcode.ProviderMode {
+	if s.providerMode == "" {
+		return gitcode.ProviderModeFixture
+	}
+	return s.providerMode
+}
+
+func NewWithMode(store cache.Store, mode gitcode.ProviderMode, token string, cfg ServiceConfig) (*Service, error) {
+	switch mode {
+	case gitcode.ProviderModeFixture:
+		return &Service{
+			store:        store,
+			client:       sanitizedFixtureClient{},
+			now:          func() time.Time { return time.Now().UTC() },
+			lockPath:     filepath.Join(os.TempDir(), "gitcode-mcp-sync.lock"),
+			providerMode: gitcode.ProviderModeFixture,
+		}, nil
+	case gitcode.ProviderModeLive:
+		token = strings.TrimSpace(token)
+		if token == "" {
+			return nil, gitcode.ErrProviderUnavailable{Reason: "live provider requires a token"}
+		}
+		baseURL := strings.TrimSpace(cfg.BaseURL)
+		if baseURL == "" {
+			baseURL = "https://gitcode.com"
+		}
+		timeout := cfg.Timeout
+		maxResponseSize := cfg.MaxResponseSize
+		if maxResponseSize <= 0 {
+			maxResponseSize = 10 << 20
+		}
+		maxRetries := cfg.MaxRetries
+		userAgent := cfg.UserAgent
+		if userAgent == "" {
+			userAgent = "gitcode-mcp"
+		}
+		client, err := gitcode.NewHTTPClient(gitcode.Config{
+			BaseURL:         baseURL,
+			Token:           token,
+			Timeout:         timeout,
+			MaxResponseSize: maxResponseSize,
+			MaxRetries:      maxRetries,
+			UserAgent:       userAgent,
+			Pagination:      cfg.Pagination,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &Service{
+			store:        store,
+			client:       gitcode.Client(client),
+			now:          func() time.Time { return time.Now().UTC() },
+			lockPath:     filepath.Join(os.TempDir(), "gitcode-mcp-sync.lock"),
+			providerMode: gitcode.ProviderModeLive,
+		}, nil
+	case gitcode.ProviderModeUnavailable:
+		return nil, gitcode.ErrProviderUnavailable{Reason: "provider unavailable"}
+	default:
+		return nil, gitcode.ErrProviderUnavailable{Reason: "unknown provider mode " + string(mode)}
+	}
 }
 
 type sanitizedFixtureClient struct{}
@@ -1064,17 +1132,25 @@ func (s *Service) fetchAndStage(ctx context.Context, req SyncRequest, remoteType
 func (s *Service) fetchOnce(ctx context.Context, req SyncRequest, remoteType, remoteID string) (cache.SourceGraph, SyncCounts, error) {
 	switch remoteType {
 	case "issue", "issues":
+		route, err := s.BuildAdapterRoute(ctx, req.RepoID, RepositoryScopeIssues)
+		if err != nil {
+			return cache.SourceGraph{}, SyncCounts{}, err
+		}
 		number, err := strconv.Atoi(remoteID)
 		if err != nil {
 			return cache.SourceGraph{}, SyncCounts{}, ErrInvalidQuery{Field: "remote_id", Message: "issue remote id must be numeric"}
 		}
-		issue, err := s.client.GetIssue(ctx, gitcode.IssueRequest{Number: number, KnownRemoteAlias: true, RemoteAlias: remoteID})
+		issue, err := s.client.GetIssue(ctx, gitcode.IssueRequest{Owner: route.Owner, Repo: route.Name, Number: number, KnownRemoteAlias: true, RemoteAlias: remoteID})
 		if err != nil {
 			return cache.SourceGraph{}, SyncCounts{}, err
 		}
 		return s.stageIssue(ctx, req, remoteType, remoteID, issue)
 	case "wiki", "page", "remote":
-		page, err := s.client.GetWikiPage(ctx, gitcode.WikiPageRequest{Slug: remoteID})
+		route, err := s.BuildAdapterRoute(ctx, req.RepoID, RepositoryScopeWiki)
+		if err != nil {
+			return cache.SourceGraph{}, SyncCounts{}, err
+		}
+		page, err := s.client.GetWikiPage(ctx, gitcode.WikiPageRequest{Owner: route.Owner, Repo: route.Name, Slug: remoteID})
 		if err != nil {
 			return cache.SourceGraph{}, SyncCounts{}, err
 		}
@@ -1142,7 +1218,11 @@ func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, r
 		status = "open"
 	}
 	graph := cache.SourceGraph{Source: cache.Source{RepoID: req.RepoID, ID: stableID, Kind: "issue", Path: "issues/" + remoteID + ".md", Title: issue.Title, Body: body, Status: status, Labels: issue.Labels, ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{RepoID: req.RepoID, SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, SyncStatus: &cache.SyncStatus{RepoID: req.RepoID, SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: hash, Status: "fresh", LastFetchedAt: now}}
-	comments, err := s.client.ListIssueComments(ctx, gitcode.IssueRequest{Number: issue.Number, KnownRemoteAlias: true, RemoteAlias: remoteID})
+	route, err := s.BuildAdapterRoute(ctx, req.RepoID, RepositoryScopeIssues)
+	if err != nil {
+		return cache.SourceGraph{}, SyncCounts{}, err
+	}
+	comments, err := s.client.ListIssueComments(ctx, gitcode.IssueRequest{Owner: route.Owner, Repo: route.Name, Number: issue.Number, KnownRemoteAlias: true, RemoteAlias: remoteID})
 	if err != nil {
 		return cache.SourceGraph{}, SyncCounts{}, err
 	}

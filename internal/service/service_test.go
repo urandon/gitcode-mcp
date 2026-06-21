@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,6 +16,128 @@ import (
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/gitcode"
 )
+
+func TestNewDelegatesToFixture(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	svc := New(store)
+	if got := svc.ProviderMode(); got != gitcode.ProviderModeFixture {
+		t.Fatalf("ProviderMode() = %q, want %q", got, gitcode.ProviderModeFixture)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "fixture-a", RemoteAlias: "issue:42", IdempotencyKey: "new-fixture-sync"}); err != nil {
+		t.Fatalf("SyncToCache returned error: %v", err)
+	}
+	if _, err := store.GetSourceScoped(ctx, "fixture-a", "ISSUE-42"); err != nil {
+		t.Fatalf("fixture source missing: %v", err)
+	}
+}
+
+func TestNewWithModeFixture(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	svc, err := NewWithMode(store, gitcode.ProviderModeFixture, "", ServiceConfig{})
+	if err != nil {
+		t.Fatalf("NewWithMode fixture returned error: %v", err)
+	}
+	if got := svc.ProviderMode(); got != gitcode.ProviderModeFixture {
+		t.Fatalf("ProviderMode() = %q, want %q", got, gitcode.ProviderModeFixture)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "fixture-a", RemoteAlias: "wiki:Home", IdempotencyKey: "mode-fixture-sync"}); err != nil {
+		t.Fatalf("SyncToCache returned error: %v", err)
+	}
+	if _, err := store.GetSourceScoped(ctx, "fixture-a", "WIKI-HOME"); err != nil {
+		t.Fatalf("fixture wiki source missing: %v", err)
+	}
+}
+
+func TestNewWithModeLive(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	base := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			http.Error(w, "missing authorization", http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/api/v5/repos/owner-a/repo-a/issues/42":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"remote-42","number":42,"title":"Live Issue","body":"live issue body","state":"open","created_at":"` + base.Format(time.RFC3339) + `","updated_at":"` + base.Format(time.RFC3339) + `"}`))
+		case "/api/v5/repos/owner-a/repo-a/issues/42/comments":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			http.Error(w, "unexpected path", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: server.URL, Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := NewWithMode(store, gitcode.ProviderModeLive, "test-token", ServiceConfig{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewWithMode live returned error: %v", err)
+	}
+	if got := svc.ProviderMode(); got != gitcode.ProviderModeLive {
+		t.Fatalf("ProviderMode() = %q, want %q", got, gitcode.ProviderModeLive)
+	}
+	if _, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "fixture-a", RemoteAlias: "issue:42", IdempotencyKey: "mode-live-sync"}); err != nil {
+		t.Fatalf("SyncToCache returned error: %v", err)
+	}
+	source, err := store.GetSourceScoped(ctx, "fixture-a", "ISSUE-42")
+	if err != nil {
+		t.Fatalf("live source missing: %v", err)
+	}
+	if source.Title != "Live Issue" {
+		t.Fatalf("source title = %q, want Live Issue", source.Title)
+	}
+}
+
+func TestNewWithModeUnavailable(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if svc, err := NewWithMode(store, gitcode.ProviderModeUnavailable, "", ServiceConfig{}); svc != nil || !gitcode.IsProviderUnavailable(err) {
+		t.Fatalf("NewWithMode unavailable svc=%#v err=%v, want provider unavailable", svc, err)
+	}
+	if svc, err := NewWithMode(store, gitcode.ProviderModeLive, "", ServiceConfig{}); svc != nil || !gitcode.IsProviderUnavailable(err) {
+		t.Fatalf("NewWithMode live without token svc=%#v err=%v, want provider unavailable", svc, err)
+	}
+}
+
+func TestNewWithClientSetsProviderMode(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	svc := NewWithClient(store, &fakeGitCodeClient{})
+	if got := svc.ProviderMode(); got != gitcode.ProviderMode("custom") {
+		t.Fatalf("ProviderMode() = %q, want custom", got)
+	}
+}
 
 func TestRepositoryRegistry(t *testing.T) {
 	ctx := context.Background()

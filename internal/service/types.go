@@ -3,8 +3,18 @@ package service
 import (
 	"time"
 
+	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
 )
+
+type ServiceConfig struct {
+	BaseURL         string
+	Timeout         time.Duration
+	MaxResponseSize int64
+	MaxRetries      int
+	UserAgent       string
+	Pagination      gitcode.PaginationConfig
+}
 
 type RepositoryScope string
 
