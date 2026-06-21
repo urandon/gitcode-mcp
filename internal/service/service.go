@@ -874,7 +874,10 @@ func (s *Service) AddComment(ctx context.Context, req WriteCommandRequest) (Writ
 }
 
 func (s *Service) AddLabel(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
-	return WriteCommandResult{}, ErrWriteFailure{Code: "write_unsupported_deferred", RepoID: firstNonEmptyString(req.RepoID, req.Repo)}
+	if (req.Number == 0 && strings.TrimSpace(req.ID) == "") || strings.TrimSpace(req.Label) == "" {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "label", Message: "issue and label are required"}
+	}
+	return s.executeWrite(ctx, "add-label", req, RepositoryScopeIssues)
 }
 
 func (s *Service) operationResult(ctx context.Context, command string, req OperationRequest) (OperationResult, error) {
@@ -1508,6 +1511,13 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
 		return s.commentWriteGraph(ctx, route.RepoID, req.Number, result.Record, result, now)
+	case "add-label":
+		result, err := s.client.AddLabel(ctx, gitcode.LabelRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, Label: strings.TrimSpace(req.Label)}, opts)
+		if err != nil {
+			return writeConfirmation{}, cache.RecordGraph{}, err
+		}
+		confirmation, graph := s.issueWriteGraph(route.RepoID, result.Record, result, now)
+		return confirmation, graph, nil
 	case "create-page":
 		result, err := s.client.CreateWikiPage(ctx, gitcode.CreateWikiPageRequest{Owner: route.Owner, Repo: route.Name, Slug: req.Slug, Title: strings.TrimSpace(req.Title), Body: req.Body}, opts)
 		if err != nil {
@@ -1530,11 +1540,14 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID string, req WriteCommandRequest, prior cache.AuditTrailEntry) (cache.RecordGraph, error) {
 	now := s.now().UTC()
 	switch command {
-	case "create-issue", "update-issue":
+	case "create-issue", "update-issue", "add-label":
 		number, _ := strconv.Atoi(prior.RemoteID)
 		issue := gitcode.Issue{ID: prior.RemoteID, Number: number, Title: strings.TrimSpace(req.Title), Body: req.Body, State: firstNonEmptyString(req.State, "open"), CreatedAt: now, UpdatedAt: now}
 		if issue.Title == "" {
 			issue.Title = "Issue " + prior.RemoteID
+		}
+		if command == "add-label" && strings.TrimSpace(req.Label) != "" {
+			issue.Labels = append(issue.Labels, strings.TrimSpace(req.Label))
 		}
 		result := gitcode.WriteResult[gitcode.Issue]{Record: issue, Confirmed: true, RemoteID: prior.RemoteID, RemoteNumber: number, RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
 		_, graph := s.issueWriteGraph(repoID, issue, result, now)
@@ -1621,8 +1634,9 @@ func writeIdempotency(command string, req WriteCommandRequest) (string, string) 
 		Title   string
 		Body    string
 		State   string
+		Label   string
 		Labels  []string
-	}{command, req.RepoID, req.ID, req.Number, req.Slug, strings.TrimSpace(req.Title), req.Body, req.State, req.Labels})
+	}{command, req.RepoID, req.ID, req.Number, req.Slug, strings.TrimSpace(req.Title), req.Body, req.State, strings.TrimSpace(req.Label), req.Labels})
 	sum := sha256.Sum256(payload)
 	fingerprint := hex.EncodeToString(sum[:])
 	if strings.TrimSpace(req.IdempotencyKey) != "" {

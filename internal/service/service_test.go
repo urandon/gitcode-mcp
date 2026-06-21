@@ -148,7 +148,7 @@ func TestWritePartialCacheRefreshRetryUsesAuditWithoutSecondAdapterCall(t *testi
 	}
 }
 
-func TestWriteLiveMissingTokenAndAddLabelUnsupported(t *testing.T) {
+func TestWriteLiveMissingToken(t *testing.T) {
 	ctx := context.Background()
 	svc := seededSyncService(t, ctx, &fakeGitCodeClient{})
 	_, err := svc.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "T"})
@@ -156,9 +156,91 @@ func TestWriteLiveMissingTokenAndAddLabelUnsupported(t *testing.T) {
 	if !errors.As(err, &writeErr) || writeErr.Code != "write_missing_credential" {
 		t.Fatalf("missing token err=%v", err)
 	}
-	_, err = svc.AddLabel(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 1, Label: "bug"})
-	if !errors.As(err, &writeErr) || writeErr.Code != "write_unsupported_deferred" {
-		t.Fatalf("add-label err=%v", err)
+}
+
+func TestAddLabelDryRunNoMutation(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{}
+	svc := NewWithClient(store, client)
+	result, err := svc.AddLabel(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeDryRun, Number: 1, Label: "bug"})
+	if err != nil {
+		t.Fatalf("AddLabel dry-run returned error: %v", err)
+	}
+	if result.Status != "dry_run_valid" || result.Command != "add-label" || client.addLabelCalls != 0 {
+		t.Fatalf("dry-run result=%#v calls=%d", result, client.addLabelCalls)
+	}
+	counts, err := store.RecordCounts(ctx, "fixture-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.AuditRows != 0 {
+		t.Fatalf("audit rows=%d want 0", counts.AuditRows)
+	}
+}
+
+func TestAddLabelLiveSuccessAuditCacheAndReplay(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{addLabelResult: gitcode.WriteResult[gitcode.Issue]{Record: gitcode.Issue{ID: "remote-1", Number: 1, Title: "Issue 1", Body: "B", State: "open", Labels: []string{"bug"}}, Confirmed: true, Operation: "AddLabel", RemoteID: "1", RemoteNumber: 1, ConfirmedAt: time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)}}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	request := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 1, Label: "bug", IdempotencyKey: "label-key-1"}
+	result, err := svc.AddLabel(ctx, request)
+	if err != nil {
+		t.Fatalf("AddLabel live returned error: %v", err)
+	}
+	if result.Status != "succeeded" || result.RemoteID != "1" || result.ID != "ISSUE-1" || client.addLabelCalls != 1 {
+		t.Fatalf("live result=%#v calls=%d", result, client.addLabelCalls)
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", "ISSUE-1")
+	if err != nil {
+		t.Fatalf("refreshed record missing: %v", err)
+	}
+	if len(record.Labels) != 1 || record.Labels[0] != "bug" {
+		t.Fatalf("labels=%#v want bug", record.Labels)
+	}
+	replay, err := svc.AddLabel(ctx, request)
+	if err != nil {
+		t.Fatalf("AddLabel replay returned error: %v", err)
+	}
+	if !replay.Replayed || client.addLabelCalls != 1 {
+		t.Fatalf("replay=%#v calls=%d", replay, client.addLabelCalls)
+	}
+}
+
+func TestWriteIdempotencyConflictDetection(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{createIssueResult: gitcode.WriteResult[gitcode.Issue]{Record: gitcode.Issue{ID: "remote-42", Number: 42, Title: "T", Body: "B", State: "open"}, Confirmed: true, Operation: "CreateIssue", RemoteID: "42", RemoteNumber: 42, ConfirmedAt: time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)}}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	_, err = svc.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "T", Body: "B", IdempotencyKey: "same-key"})
+	if err != nil {
+		t.Fatalf("CreateIssue live returned error: %v", err)
+	}
+	_, err = svc.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "Different", Body: "B", IdempotencyKey: "same-key"})
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_idempotency_conflict" {
+		t.Fatalf("conflict err=%v", err)
+	}
+	if client.createIssueCalls != 1 {
+		t.Fatalf("calls=%d want 1", client.createIssueCalls)
 	}
 }
 
@@ -1087,7 +1169,9 @@ type fakeGitCodeClient struct {
 	issueCalls        int
 	commentCalls      int
 	createIssueCalls  int
+	addLabelCalls     int
 	createIssueResult gitcode.WriteResult[gitcode.Issue]
+	addLabelResult    gitcode.WriteResult[gitcode.Issue]
 }
 
 func (f *fakeGitCodeClient) nextError() error {
@@ -1152,7 +1236,11 @@ func (f *fakeGitCodeClient) UpdateWikiPage(context.Context, gitcode.UpdateWikiPa
 	return gitcode.WriteResult[gitcode.WikiPage]{}, nil
 }
 func (f *fakeGitCodeClient) AddLabel(context.Context, gitcode.LabelRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
-	return gitcode.WriteResult[gitcode.Issue]{}, nil
+	f.addLabelCalls++
+	if err := f.nextError(); err != nil {
+		return gitcode.WriteResult[gitcode.Issue]{}, err
+	}
+	return f.addLabelResult, nil
 }
 func (f *fakeGitCodeClient) RemoveLabel(context.Context, gitcode.LabelRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
 	return gitcode.WriteResult[gitcode.Issue]{}, nil
