@@ -22,3 +22,7 @@ func (p *KeychainProvider) Probe(ctx context.Context) Status {
 		Available:   false,
 	}
 }
+
+func (p *KeychainProvider) Token(ctx context.Context) ResolvedToken {
+	return ResolvedToken{}
+}

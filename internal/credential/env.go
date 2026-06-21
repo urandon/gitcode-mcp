@@ -42,3 +42,11 @@ func (p *EnvProvider) Probe(ctx context.Context) Status {
 		Available: true,
 	}
 }
+
+func (p *EnvProvider) Token(ctx context.Context) ResolvedToken {
+	src := p.Source
+	if src == nil {
+		src = config.OSSource{}
+	}
+	return ResolvedToken{Value: strings.TrimSpace(src.Env(EnvToken))}
+}

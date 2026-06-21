@@ -17,8 +17,14 @@ type Status struct {
 	Available   bool   `json:"available"`
 }
 
+type ResolvedToken struct {
+	Value string
+	Salt  string
+}
+
 type Provider interface {
 	Probe(ctx context.Context) Status
+	Token(ctx context.Context) ResolvedToken
 	Name() string
 }
 
@@ -38,9 +44,26 @@ func (p *Pipeline) WithProbe(prober ProbeFunc) *Pipeline {
 	return p
 }
 
+func (p *Pipeline) Resolve(ctx context.Context) (ResolvedToken, SourceStatus, bool) {
+	for _, provider := range p.providers {
+		st := provider.Probe(ctx)
+		if st.Present {
+			token := provider.Token(ctx)
+			src := SourceStatus{
+				Name:        provider.Name(),
+				Available:   st.Available,
+				Credentials: st,
+			}
+			return token, src, true
+		}
+	}
+	return ResolvedToken{}, SourceStatus{}, false
+}
+
 func (p *Pipeline) Status(ctx context.Context) AuthStatus {
 	var results []SourceStatus
 	var foundPresent bool
+	var resolvedToken ResolvedToken
 
 	for _, provider := range p.providers {
 		st := provider.Probe(ctx)
@@ -51,6 +74,7 @@ func (p *Pipeline) Status(ctx context.Context) AuthStatus {
 		})
 		if st.Present {
 			foundPresent = true
+			resolvedToken = provider.Token(ctx)
 		}
 	}
 
@@ -59,30 +83,24 @@ func (p *Pipeline) Status(ctx context.Context) AuthStatus {
 		AvailableSource: results,
 	}
 
-	if p.prober != nil && foundPresent {
-		for _, r := range results {
-			if r.Credentials.Present && r.Credentials.Source == "env:GITCODE_TOKEN" {
-				token, sourceName := resolveTokenFromResults(results, r)
-				_ = sourceName
-				ok, msg := p.prober(ctx, token, "")
-				status.AuthProbe = &AuthProbeResult{
-					Success: ok,
-					Message: msg,
-				}
-				if !ok {
-					status.FailureClass = "auth-failure"
-					status.Remediation = msg
-				}
-				break
-			}
+	if p.prober != nil && foundPresent && resolvedToken.Value != "" {
+		ok, msg := p.prober(ctx, resolvedToken.Value, "")
+		status.AuthProbe = &AuthProbeResult{
+			Success: ok,
+			Message: msg,
+		}
+		if !ok {
+			status.FailureClass = "auth-failure"
+			status.Remediation = msg
 		}
 	}
 
 	return status
 }
 
-func resolveTokenFromResults(results []SourceStatus, matched SourceStatus) (string, string) {
-	return "", matched.Name
+func (p *Pipeline) StatusReporter(ctx context.Context, eff config.EffectiveConfig) config.CredentialStatus {
+	_ = eff
+	return p.Status(ctx).ToCredentialStatus()
 }
 
 type AuthStatus struct {
