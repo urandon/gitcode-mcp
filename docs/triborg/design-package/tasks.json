@@ -1,0 +1,1095 @@
+{
+  "created_at": "2026-06-21T20:14:20+00:00",
+  "revision": 11,
+  "run_id": "gitcode-mcp-live-readiness-design-agent-20260621T160404Z-gitcode_mcp_live_readiness_iteration_3",
+  "task_count": 33,
+  "tasks": [
+    {
+      "base_task_id": "cmd-gitcode-mcp-task-1-add-cli-provider-mode-resolution-via---live-flag-a",
+      "change_type": "add",
+      "component_id": "cmd-gitcode-mcp",
+      "component_name": "CLI Entrypoint",
+      "component_order": 0,
+      "decommission_ids": [
+        "decommission-1",
+        "decommission-2"
+      ],
+      "delta_ids": [
+        "cmd-gitcode-mcp-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-1"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 1"
+      ],
+      "sequence": 1,
+      "source": "components/cmd-gitcode-mcp.md#task-1-add-cli-provider-mode-resolution-via---live-flag-a",
+      "source_anchor": "task-1-add-cli-provider-mode-resolution-via---live-flag-a",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/cmd-gitcode-mcp.md",
+      "source_order": 0,
+      "supporting_only": false,
+      "task_id": "001-cmd-gitcode-mcp-task-1-add-cli-provider-mode-resolution-via---live-flag-a",
+      "task_number": 1,
+      "title": "Add CLI provider mode resolution via --live flag a"
+    },
+    {
+      "base_task_id": "cmd-gitcode-mcp-task-2-add-auth-status-cli-command",
+      "change_type": "add",
+      "component_id": "cmd-gitcode-mcp",
+      "component_name": "CLI Entrypoint",
+      "component_order": 0,
+      "decommission_ids": [
+        "decommission-3"
+      ],
+      "delta_ids": [
+        "cmd-gitcode-mcp-delta-2"
+      ],
+      "dependency_task_ids": [
+        "cmd-gitcode-mcp-task-1-add-cli-provider-mode-resolution-via---live-flag-a"
+      ],
+      "dependency_titles": [
+        "Task 1"
+      ],
+      "outcome_ids": [
+        "outcome-2"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 2"
+      ],
+      "sequence": 2,
+      "source": "components/cmd-gitcode-mcp.md#task-2-add-auth-status-cli-command",
+      "source_anchor": "task-2-add-auth-status-cli-command",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/cmd-gitcode-mcp.md",
+      "source_order": 1,
+      "supporting_only": false,
+      "task_id": "002-cmd-gitcode-mcp-task-2-add-auth-status-cli-command",
+      "task_number": 2,
+      "title": "Add auth status CLI command"
+    },
+    {
+      "base_task_id": "cmd-gitcode-mcp-task-3-add-live-write-commands-create-issue-create-comm",
+      "change_type": "add",
+      "component_id": "cmd-gitcode-mcp",
+      "component_name": "CLI Entrypoint",
+      "component_order": 0,
+      "decommission_ids": [
+        "decommission-5"
+      ],
+      "delta_ids": [
+        "cmd-gitcode-mcp-delta-3"
+      ],
+      "dependency_task_ids": [
+        "cmd-gitcode-mcp-task-2-add-auth-status-cli-command"
+      ],
+      "dependency_titles": [
+        "Task 2"
+      ],
+      "outcome_ids": [
+        "outcome-4"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 4"
+      ],
+      "sequence": 3,
+      "source": "components/cmd-gitcode-mcp.md#task-3-add-live-write-commands-create-issue-create-comm",
+      "source_anchor": "task-3-add-live-write-commands-create-issue-create-comm",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/cmd-gitcode-mcp.md",
+      "source_order": 2,
+      "supporting_only": false,
+      "task_id": "003-cmd-gitcode-mcp-task-3-add-live-write-commands-create-issue-create-comm",
+      "task_number": 3,
+      "title": "Add Live write commands (create-issue, create-comm"
+    },
+    {
+      "base_task_id": "cmd-gitcode-mcp-task-4-add-doctor-command",
+      "change_type": "add",
+      "component_id": "cmd-gitcode-mcp",
+      "component_name": "CLI Entrypoint",
+      "component_order": 0,
+      "decommission_ids": [
+        "decommission-11"
+      ],
+      "delta_ids": [
+        "cmd-gitcode-mcp-delta-4"
+      ],
+      "dependency_task_ids": [
+        "cmd-gitcode-mcp-task-3-add-live-write-commands-create-issue-create-comm"
+      ],
+      "dependency_titles": [
+        "Task 3"
+      ],
+      "outcome_ids": [
+        "outcome-11"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 11"
+      ],
+      "sequence": 4,
+      "source": "components/cmd-gitcode-mcp.md#task-4-add-doctor-command",
+      "source_anchor": "task-4-add-doctor-command",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/cmd-gitcode-mcp.md",
+      "source_order": 3,
+      "supporting_only": false,
+      "task_id": "004-cmd-gitcode-mcp-task-4-add-doctor-command",
+      "task_number": 4,
+      "title": "Add doctor command"
+    },
+    {
+      "base_task_id": "cmd-gitcode-mcp-task-5-add-migrate-cache-cli-command",
+      "change_type": "add",
+      "component_id": "cmd-gitcode-mcp",
+      "component_name": "CLI Entrypoint",
+      "component_order": 0,
+      "decommission_ids": [
+        "decommission-10"
+      ],
+      "delta_ids": [
+        "cmd-gitcode-mcp-delta-5"
+      ],
+      "dependency_task_ids": [
+        "cmd-gitcode-mcp-task-4-add-doctor-command"
+      ],
+      "dependency_titles": [
+        "Task 4"
+      ],
+      "outcome_ids": [
+        "outcome-10"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 10"
+      ],
+      "sequence": 5,
+      "source": "components/cmd-gitcode-mcp.md#task-5-add-migrate-cache-cli-command",
+      "source_anchor": "task-5-add-migrate-cache-cli-command",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/cmd-gitcode-mcp.md",
+      "source_order": 4,
+      "supporting_only": false,
+      "task_id": "005-cmd-gitcode-mcp-task-5-add-migrate-cache-cli-command",
+      "task_number": 5,
+      "title": "Add migrate-cache CLI command"
+    },
+    {
+      "base_task_id": "cmd-gitcode-mcp-task-6-change-cli-help-wiring-for-all-subcommands",
+      "change_type": "change",
+      "component_id": "cmd-gitcode-mcp",
+      "component_name": "CLI Entrypoint",
+      "component_order": 0,
+      "decommission_ids": [
+        "decommission-9"
+      ],
+      "delta_ids": [
+        "cmd-gitcode-mcp-delta-6"
+      ],
+      "dependency_task_ids": [
+        "cmd-gitcode-mcp-task-5-add-migrate-cache-cli-command"
+      ],
+      "dependency_titles": [
+        "Task 5"
+      ],
+      "outcome_ids": [
+        "outcome-9"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 9"
+      ],
+      "sequence": 6,
+      "source": "components/cmd-gitcode-mcp.md#task-6-change-cli-help-wiring-for-all-subcommands",
+      "source_anchor": "task-6-change-cli-help-wiring-for-all-subcommands",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/cmd-gitcode-mcp.md",
+      "source_order": 5,
+      "supporting_only": false,
+      "task_id": "006-cmd-gitcode-mcp-task-6-change-cli-help-wiring-for-all-subcommands",
+      "task_number": 6,
+      "title": "Change CLI help wiring for all subcommands"
+    },
+    {
+      "base_task_id": "internal-service-task-1-service-factory-selects-provider-mode",
+      "change_type": "change",
+      "component_id": "internal-service",
+      "component_name": "Service Factory",
+      "component_order": 1,
+      "decommission_ids": [
+        "decommission-1"
+      ],
+      "delta_ids": [
+        "internal-service-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-1"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 1"
+      ],
+      "sequence": 7,
+      "source": "components/internal-service.md#task-1-service-factory-selects-provider-mode",
+      "source_anchor": "task-1-service-factory-selects-provider-mode",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-service.md",
+      "source_order": 7,
+      "supporting_only": false,
+      "task_id": "007-internal-service-task-1-service-factory-selects-provider-mode",
+      "task_number": 1,
+      "title": "Service factory selects provider mode"
+    },
+    {
+      "base_task_id": "internal-provider-task-1-add-providermode-enum-and-provider-factory-dispatc",
+      "change_type": "add",
+      "component_id": "internal-provider",
+      "component_name": "Provider Interface and Dispatch",
+      "component_order": 2,
+      "decommission_ids": [
+        "decommission-1",
+        "decommission-2"
+      ],
+      "delta_ids": [
+        "internal-provider-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-1"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 1"
+      ],
+      "sequence": 8,
+      "source": "components/internal-provider.md#task-1-add-providermode-enum-and-provider-factory-dispatc",
+      "source_anchor": "task-1-add-providermode-enum-and-provider-factory-dispatc",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-provider.md",
+      "source_order": 8,
+      "supporting_only": false,
+      "task_id": "008-internal-provider-task-1-add-providermode-enum-and-provider-factory-dispatc",
+      "task_number": 1,
+      "title": "Add ProviderMode enum and provider factory dispatc"
+    },
+    {
+      "base_task_id": "internal-provider-live-task-1-add-live-gitcode-rest-api-adapter-package",
+      "change_type": "add",
+      "component_id": "internal-provider-live",
+      "component_name": "Live GitCode Adapter",
+      "component_order": 3,
+      "decommission_ids": [
+        "decommission-4",
+        "decommission-5"
+      ],
+      "delta_ids": [
+        "internal-provider-live-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-3",
+        "outcome-4"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 3",
+        "Task 4"
+      ],
+      "sequence": 9,
+      "source": "components/internal-provider-live.md#task-1-add-live-gitcode-rest-api-adapter-package",
+      "source_anchor": "task-1-add-live-gitcode-rest-api-adapter-package",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-provider-live.md",
+      "source_order": 9,
+      "supporting_only": false,
+      "task_id": "009-internal-provider-live-task-1-add-live-gitcode-rest-api-adapter-package",
+      "task_number": 1,
+      "title": "Add Live GitCode REST API adapter package"
+    },
+    {
+      "base_task_id": "internal-credential-task-1-add-credential-pipeline-with-env-keychain-none-fal",
+      "change_type": "add",
+      "component_id": "internal-credential",
+      "component_name": "Credential Pipeline",
+      "component_order": 4,
+      "decommission_ids": [
+        "decommission-3"
+      ],
+      "delta_ids": [
+        "internal-credential-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-2"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 2"
+      ],
+      "sequence": 10,
+      "source": "components/internal-credential.md#task-1-add-credential-pipeline-with-env-keychain-none-fal",
+      "source_anchor": "task-1-add-credential-pipeline-with-env-keychain-none-fal",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-credential.md",
+      "source_order": 12,
+      "supporting_only": false,
+      "task_id": "010-internal-credential-task-1-add-credential-pipeline-with-env-keychain-none-fal",
+      "task_number": 1,
+      "title": "Add Credential pipeline with env\u2192keychain\u2192none fal"
+    },
+    {
+      "base_task_id": "internal-credential-task-2-add-auth-status-reporting-and-invalid-token-diagno",
+      "change_type": "add",
+      "component_id": "internal-credential",
+      "component_name": "Credential Pipeline",
+      "component_order": 4,
+      "decommission_ids": [
+        "decommission-3"
+      ],
+      "delta_ids": [
+        "internal-credential-delta-2"
+      ],
+      "dependency_task_ids": [
+        "internal-credential-task-1-add-credential-pipeline-with-env-keychain-none-fal",
+        "cmd-gitcode-mcp-task-2-add-auth-status-cli-command"
+      ],
+      "dependency_titles": [
+        "Task 1"
+      ],
+      "outcome_ids": [
+        "outcome-2"
+      ],
+      "outcome_role": "supporting_evidence",
+      "request_tasks": [
+        "Task 2"
+      ],
+      "sequence": 11,
+      "source": "components/internal-credential.md#task-2-add-auth-status-reporting-and-invalid-token-diagno",
+      "source_anchor": "task-2-add-auth-status-reporting-and-invalid-token-diagno",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-credential.md",
+      "source_order": 13,
+      "supporting_only": true,
+      "task_id": "011-internal-credential-task-2-add-auth-status-reporting-and-invalid-token-diagno",
+      "task_number": 2,
+      "title": "Add Auth status reporting and invalid-token diagno"
+    },
+    {
+      "base_task_id": "internal-cache-task-1-add-schema-version-detection-and-compatibility-che",
+      "change_type": "add",
+      "component_id": "internal-cache",
+      "component_name": "Cache Storage",
+      "component_order": 5,
+      "decommission_ids": [
+        "decommission-10"
+      ],
+      "delta_ids": [
+        "internal-cache-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-10"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 10"
+      ],
+      "sequence": 12,
+      "source": "components/internal-cache.md#task-1-add-schema-version-detection-and-compatibility-che",
+      "source_anchor": "task-1-add-schema-version-detection-and-compatibility-che",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-cache.md",
+      "source_order": 14,
+      "supporting_only": false,
+      "task_id": "012-internal-cache-task-1-add-schema-version-detection-and-compatibility-che",
+      "task_number": 1,
+      "title": "Add Schema version detection and compatibility che"
+    },
+    {
+      "base_task_id": "internal-cache-task-2-add-version-2-to-version-3-cache-schema-migration",
+      "change_type": "add",
+      "component_id": "internal-cache",
+      "component_name": "Cache Storage",
+      "component_order": 5,
+      "decommission_ids": [
+        "decommission-10"
+      ],
+      "delta_ids": [
+        "internal-cache-delta-2"
+      ],
+      "dependency_task_ids": [
+        "internal-cache-task-1-add-schema-version-detection-and-compatibility-che",
+        "cmd-gitcode-mcp-task-5-add-migrate-cache-cli-command"
+      ],
+      "dependency_titles": [
+        "Task 1"
+      ],
+      "outcome_ids": [
+        "outcome-10"
+      ],
+      "outcome_role": "supporting_evidence",
+      "request_tasks": [
+        "Task 10"
+      ],
+      "sequence": 13,
+      "source": "components/internal-cache.md#task-2-add-version-2-to-version-3-cache-schema-migration",
+      "source_anchor": "task-2-add-version-2-to-version-3-cache-schema-migration",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-cache.md",
+      "source_order": 15,
+      "supporting_only": true,
+      "task_id": "013-internal-cache-task-2-add-version-2-to-version-3-cache-schema-migration",
+      "task_number": 2,
+      "title": "Add Version-2-to-version-3 cache schema migration"
+    },
+    {
+      "base_task_id": "internal-sync-task-1-add-syncresources-for-partial-failure-collection",
+      "change_type": "add",
+      "component_id": "internal-sync",
+      "component_name": "Sync Engine",
+      "component_order": 6,
+      "decommission_ids": [
+        "decommission-4"
+      ],
+      "delta_ids": [
+        "internal-sync-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-3"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 3"
+      ],
+      "sequence": 14,
+      "source": "components/internal-sync.md#task-1-add-syncresources-for-partial-failure-collection",
+      "source_anchor": "task-1-add-syncresources-for-partial-failure-collection",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-sync.md",
+      "source_order": 16,
+      "supporting_only": false,
+      "task_id": "014-internal-sync-task-1-add-syncresources-for-partial-failure-collection",
+      "task_number": 1,
+      "title": "Add SyncResources for partial-failure collection"
+    },
+    {
+      "base_task_id": "internal-sync-task-2-add-startedat-completedat-to-syncevent",
+      "change_type": "change",
+      "component_id": "internal-sync",
+      "component_name": "Sync Engine",
+      "component_order": 6,
+      "decommission_ids": [
+        "decommission-4"
+      ],
+      "delta_ids": [
+        "internal-sync-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-3"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 3"
+      ],
+      "sequence": 15,
+      "source": "components/internal-sync.md#task-2-add-startedat-completedat-to-syncevent",
+      "source_anchor": "task-2-add-startedat-completedat-to-syncevent",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-sync.md",
+      "source_order": 17,
+      "supporting_only": false,
+      "task_id": "015-internal-sync-task-2-add-startedat-completedat-to-syncevent",
+      "task_number": 2,
+      "title": "Add StartedAt/CompletedAt to SyncEvent"
+    },
+    {
+      "base_task_id": "internal-sync-task-3-add-zerodelta-to-syncresult-with-persistent-event",
+      "change_type": "add",
+      "component_id": "internal-sync",
+      "component_name": "Sync Engine",
+      "component_order": 6,
+      "decommission_ids": [
+        "decommission-4"
+      ],
+      "delta_ids": [
+        "internal-sync-delta-1"
+      ],
+      "dependency_task_ids": [
+        "internal-sync-task-2-add-startedat-completedat-to-syncevent"
+      ],
+      "dependency_titles": [
+        "Task 2"
+      ],
+      "outcome_ids": [
+        "outcome-3"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 3"
+      ],
+      "sequence": 16,
+      "source": "components/internal-sync.md#task-3-add-zerodelta-to-syncresult-with-persistent-event",
+      "source_anchor": "task-3-add-zerodelta-to-syncresult-with-persistent-event",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-sync.md",
+      "source_order": 18,
+      "supporting_only": false,
+      "task_id": "016-internal-sync-task-3-add-zerodelta-to-syncresult-with-persistent-event",
+      "task_number": 3,
+      "title": "Add ZeroDelta to SyncResult with persistent event"
+    },
+    {
+      "base_task_id": "internal-provider-live-task-2-add-live-sync-pagination-partial-failure-collect",
+      "change_type": "add",
+      "component_id": "internal-provider-live",
+      "component_name": "Live GitCode Adapter",
+      "component_order": 3,
+      "decommission_ids": [
+        "decommission-4"
+      ],
+      "delta_ids": [
+        "internal-provider-live-delta-2"
+      ],
+      "dependency_task_ids": [
+        "internal-provider-live-task-1-add-live-gitcode-rest-api-adapter-package",
+        "internal-sync-task-1-add-syncresources-for-partial-failure-collection",
+        "internal-sync-task-2-add-startedat-completedat-to-syncevent",
+        "internal-sync-task-3-add-zerodelta-to-syncresult-with-persistent-event"
+      ],
+      "dependency_titles": [
+        "Task 1"
+      ],
+      "outcome_ids": [
+        "outcome-3"
+      ],
+      "outcome_role": "supporting_evidence",
+      "request_tasks": [
+        "Task 3"
+      ],
+      "sequence": 17,
+      "source": "components/internal-provider-live.md#task-2-add-live-sync-pagination-partial-failure-collect",
+      "source_anchor": "task-2-add-live-sync-pagination-partial-failure-collect",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-provider-live.md",
+      "source_order": 10,
+      "supporting_only": true,
+      "task_id": "017-internal-provider-live-task-2-add-live-sync-pagination-partial-failure-collect",
+      "task_number": 2,
+      "title": "Add Live sync: pagination, partial failure collect"
+    },
+    {
+      "base_task_id": "internal-provider-live-task-3-add-live-write-idempotency-gate-and-conflict-dete",
+      "change_type": "add",
+      "component_id": "internal-provider-live",
+      "component_name": "Live GitCode Adapter",
+      "component_order": 3,
+      "decommission_ids": [
+        "decommission-5"
+      ],
+      "delta_ids": [
+        "internal-provider-live-delta-3"
+      ],
+      "dependency_task_ids": [
+        "internal-provider-live-task-2-add-live-sync-pagination-partial-failure-collect",
+        "cmd-gitcode-mcp-task-3-add-live-write-commands-create-issue-create-comm",
+        "internal-provider-live-task-1-add-live-gitcode-rest-api-adapter-package"
+      ],
+      "dependency_titles": [
+        "Task 2"
+      ],
+      "outcome_ids": [
+        "outcome-4"
+      ],
+      "outcome_role": "supporting_evidence",
+      "request_tasks": [
+        "Task 4"
+      ],
+      "sequence": 18,
+      "source": "components/internal-provider-live.md#task-3-add-live-write-idempotency-gate-and-conflict-dete",
+      "source_anchor": "task-3-add-live-write-idempotency-gate-and-conflict-dete",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-provider-live.md",
+      "source_order": 11,
+      "supporting_only": true,
+      "task_id": "018-internal-provider-live-task-3-add-live-write-idempotency-gate-and-conflict-dete",
+      "task_number": 3,
+      "title": "Add Live write: idempotency gate and conflict dete"
+    },
+    {
+      "base_task_id": "internal-index-task-1-use-body-hash-for-staleness-in-freshness",
+      "change_type": "change",
+      "component_id": "internal-index",
+      "component_name": "Index Engine",
+      "component_order": 7,
+      "decommission_ids": [
+        "decommission-6"
+      ],
+      "delta_ids": [
+        "internal-index-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-6"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 6"
+      ],
+      "sequence": 19,
+      "source": "components/internal-index.md#task-1-use-body-hash-for-staleness-in-freshness",
+      "source_anchor": "task-1-use-body-hash-for-staleness-in-freshness",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-index.md",
+      "source_order": 19,
+      "supporting_only": false,
+      "task_id": "019-internal-index-task-1-use-body-hash-for-staleness-in-freshness",
+      "task_number": 1,
+      "title": "Use body hash for staleness in freshness"
+    },
+    {
+      "base_task_id": "internal-index-task-2-write-indexed_at-into-chunk-metadata",
+      "change_type": "change",
+      "component_id": "internal-index",
+      "component_name": "Index Engine",
+      "component_order": 7,
+      "decommission_ids": [
+        "decommission-6"
+      ],
+      "delta_ids": [
+        "internal-index-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-6"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 6"
+      ],
+      "sequence": 20,
+      "source": "components/internal-index.md#task-2-write-indexed_at-into-chunk-metadata",
+      "source_anchor": "task-2-write-indexed_at-into-chunk-metadata",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-index.md",
+      "source_order": 20,
+      "supporting_only": false,
+      "task_id": "020-internal-index-task-2-write-indexed_at-into-chunk-metadata",
+      "task_number": 2,
+      "title": "Write indexed_at into chunk metadata"
+    },
+    {
+      "base_task_id": "internal-search-task-1-change-search_sources-fts-query-routing-and-empty",
+      "change_type": "change",
+      "component_id": "internal-search",
+      "component_name": "Search Engine",
+      "component_order": 8,
+      "decommission_ids": [
+        "decommission-7"
+      ],
+      "delta_ids": [
+        "internal-search-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-7"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 7"
+      ],
+      "sequence": 21,
+      "source": "components/internal-search.md#task-1-change-search_sources-fts-query-routing-and-empty",
+      "source_anchor": "task-1-change-search_sources-fts-query-routing-and-empty",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-search.md",
+      "source_order": 21,
+      "supporting_only": false,
+      "task_id": "021-internal-search-task-1-change-search_sources-fts-query-routing-and-empty",
+      "task_number": 1,
+      "title": "Change search_sources FTS query routing and empty-"
+    },
+    {
+      "base_task_id": "cmd-gitcode-mcp-task-7-change-search_sources-cli-command-handler",
+      "change_type": "change",
+      "component_id": "cmd-gitcode-mcp",
+      "component_name": "CLI Entrypoint",
+      "component_order": 0,
+      "decommission_ids": [
+        "decommission-7"
+      ],
+      "delta_ids": [
+        "cmd-gitcode-mcp-delta-7"
+      ],
+      "dependency_task_ids": [
+        "cmd-gitcode-mcp-task-6-change-cli-help-wiring-for-all-subcommands",
+        "internal-search-task-1-change-search_sources-fts-query-routing-and-empty"
+      ],
+      "dependency_titles": [
+        "Task 6"
+      ],
+      "outcome_ids": [
+        "outcome-7"
+      ],
+      "outcome_role": "supporting_evidence",
+      "request_tasks": [
+        "Task 7"
+      ],
+      "sequence": 22,
+      "source": "components/cmd-gitcode-mcp.md#task-7-change-search_sources-cli-command-handler",
+      "source_anchor": "task-7-change-search_sources-cli-command-handler",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/cmd-gitcode-mcp.md",
+      "source_order": 6,
+      "supporting_only": true,
+      "task_id": "022-cmd-gitcode-mcp-task-7-change-search_sources-cli-command-handler",
+      "task_number": 7,
+      "title": "Change search_sources CLI command handler"
+    },
+    {
+      "base_task_id": "internal-audit-task-1-add-audit-trail-with-idempotency-key-storage-and-w",
+      "change_type": "add",
+      "component_id": "internal-audit",
+      "component_name": "Audit Trail",
+      "component_order": 9,
+      "decommission_ids": [
+        "decommission-5"
+      ],
+      "delta_ids": [
+        "internal-audit-delta-1"
+      ],
+      "dependency_task_ids": [
+        "cmd-gitcode-mcp-task-3-add-live-write-commands-create-issue-create-comm",
+        "internal-provider-live-task-1-add-live-gitcode-rest-api-adapter-package"
+      ],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-4"
+      ],
+      "outcome_role": "supporting_evidence",
+      "request_tasks": [
+        "Task 4"
+      ],
+      "sequence": 23,
+      "source": "components/internal-audit.md#task-1-add-audit-trail-with-idempotency-key-storage-and-w",
+      "source_anchor": "task-1-add-audit-trail-with-idempotency-key-storage-and-w",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-audit.md",
+      "source_order": 22,
+      "supporting_only": true,
+      "task_id": "023-internal-audit-task-1-add-audit-trail-with-idempotency-key-storage-and-w",
+      "task_number": 1,
+      "title": "Add Audit trail with idempotency key storage and w"
+    },
+    {
+      "base_task_id": "internal-doctor-task-1-add-doctor-aggregator-with-subsystem-introspection",
+      "change_type": "add",
+      "component_id": "internal-doctor",
+      "component_name": "Doctor Aggregator",
+      "component_order": 11,
+      "decommission_ids": [
+        "decommission-11"
+      ],
+      "delta_ids": [
+        "internal-doctor-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-11"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 11"
+      ],
+      "sequence": 24,
+      "source": "components/internal-doctor.md#task-1-add-doctor-aggregator-with-subsystem-introspection",
+      "source_anchor": "task-1-add-doctor-aggregator-with-subsystem-introspection",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-doctor.md",
+      "source_order": 24,
+      "supporting_only": false,
+      "task_id": "024-internal-doctor-task-1-add-doctor-aggregator-with-subsystem-introspection",
+      "task_number": 1,
+      "title": "Add Doctor aggregator with subsystem introspection"
+    },
+    {
+      "base_task_id": "internal-mcp-task-1-change-mcp-server-tool-registration-and-parity-val",
+      "change_type": "change",
+      "component_id": "internal-mcp",
+      "component_name": "MCP Server",
+      "component_order": 12,
+      "decommission_ids": [
+        "decommission-12"
+      ],
+      "delta_ids": [
+        "internal-mcp-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-12"
+      ],
+      "outcome_role": "supporting_evidence",
+      "request_tasks": [
+        "Task 12"
+      ],
+      "sequence": 25,
+      "source": "components/internal-mcp.md#task-1-change-mcp-server-tool-registration-and-parity-val",
+      "source_anchor": "task-1-change-mcp-server-tool-registration-and-parity-val",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-mcp.md",
+      "source_order": 25,
+      "supporting_only": true,
+      "task_id": "025-internal-mcp-task-1-change-mcp-server-tool-registration-and-parity-val",
+      "task_number": 1,
+      "title": "Change MCP server tool registration and parity val"
+    },
+    {
+      "base_task_id": "internal-mcp-tools-task-1-change-mcp-tool-schemas-with-corrected-kind-enums",
+      "change_type": "change",
+      "component_id": "internal-mcp-tools",
+      "component_name": "MCP Tool Schemas",
+      "component_order": 13,
+      "decommission_ids": [
+        "decommission-8"
+      ],
+      "delta_ids": [
+        "internal-mcp-tools-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-8"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 8"
+      ],
+      "sequence": 26,
+      "source": "components/internal-mcp-tools.md#task-1-change-mcp-tool-schemas-with-corrected-kind-enums",
+      "source_anchor": "task-1-change-mcp-tool-schemas-with-corrected-kind-enums",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-mcp-tools.md",
+      "source_order": 26,
+      "supporting_only": false,
+      "task_id": "026-internal-mcp-tools-task-1-change-mcp-tool-schemas-with-corrected-kind-enums",
+      "task_number": 1,
+      "title": "Change MCP tool schemas with corrected kind enums"
+    },
+    {
+      "base_task_id": "internal-mcp-transport-task-1-add-http-sse-transport-handler-with-health-readine",
+      "change_type": "add",
+      "component_id": "internal-mcp-transport",
+      "component_name": "MCP Transport Layer",
+      "component_order": 14,
+      "decommission_ids": [
+        "decommission-12"
+      ],
+      "delta_ids": [
+        "internal-mcp-transport-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-12"
+      ],
+      "outcome_role": "supporting_evidence",
+      "request_tasks": [
+        "Task 12"
+      ],
+      "sequence": 27,
+      "source": "components/internal-mcp-transport.md#task-1-add-http-sse-transport-handler-with-health-readine",
+      "source_anchor": "task-1-add-http-sse-transport-handler-with-health-readine",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-mcp-transport.md",
+      "source_order": 27,
+      "supporting_only": true,
+      "task_id": "027-internal-mcp-transport-task-1-add-http-sse-transport-handler-with-health-readine",
+      "task_number": 1,
+      "title": "Add HTTP/SSE transport handler with health/readine"
+    },
+    {
+      "base_task_id": "internal-e2e-task-1-add-two-cache-live-e2e-test-harness",
+      "change_type": "add",
+      "component_id": "internal-e2e",
+      "component_name": "E2E Test Harness",
+      "component_order": 15,
+      "decommission_ids": [],
+      "delta_ids": [
+        "internal-e2e-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-5"
+      ],
+      "outcome_role": "primary_product",
+      "request_tasks": [
+        "Task 5"
+      ],
+      "sequence": 28,
+      "source": "components/internal-e2e.md#task-1-add-two-cache-live-e2e-test-harness",
+      "source_anchor": "task-1-add-two-cache-live-e2e-test-harness",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-e2e.md",
+      "source_order": 28,
+      "supporting_only": false,
+      "task_id": "028-internal-e2e-task-1-add-two-cache-live-e2e-test-harness",
+      "task_number": 1,
+      "title": "Add two-cache live e2e test harness"
+    },
+    {
+      "base_task_id": "internal-diagnostics-task-1-add-redaction-filter-for-log-print-output-intercep",
+      "change_type": "add",
+      "component_id": "internal-diagnostics",
+      "component_name": "Redaction Filter",
+      "component_order": 10,
+      "decommission_ids": [
+        "decommission-3"
+      ],
+      "delta_ids": [
+        "internal-diagnostics-delta-1"
+      ],
+      "dependency_task_ids": [
+        "cmd-gitcode-mcp-task-2-add-auth-status-cli-command",
+        "internal-credential-task-1-add-credential-pipeline-with-env-keychain-none-fal",
+        "internal-e2e-task-1-add-two-cache-live-e2e-test-harness"
+      ],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-2",
+        "outcome-5"
+      ],
+      "outcome_role": "supporting_evidence",
+      "request_tasks": [
+        "Task 2",
+        "Task 5"
+      ],
+      "sequence": 29,
+      "source": "components/internal-diagnostics.md#task-1-add-redaction-filter-for-log-print-output-intercep",
+      "source_anchor": "task-1-add-redaction-filter-for-log-print-output-intercep",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/internal-diagnostics.md",
+      "source_order": 23,
+      "supporting_only": true,
+      "task_id": "029-internal-diagnostics-task-1-add-redaction-filter-for-log-print-output-intercep",
+      "task_number": 1,
+      "title": "Add Redaction filter for log/print/output intercep"
+    },
+    {
+      "base_task_id": "docs-task-1-create-live-readiness-operator-guide",
+      "change_type": "add",
+      "component_id": "docs",
+      "component_name": "Documentation",
+      "component_order": 16,
+      "decommission_ids": [
+        "decommission-13"
+      ],
+      "delta_ids": [
+        "docs-delta-1"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-13"
+      ],
+      "outcome_role": "supporting_evidence",
+      "request_tasks": [
+        "Task 13"
+      ],
+      "sequence": 30,
+      "source": "components/docs.md#task-1-create-live-readiness-operator-guide",
+      "source_anchor": "task-1-create-live-readiness-operator-guide",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/docs.md",
+      "source_order": 29,
+      "supporting_only": true,
+      "task_id": "030-docs-task-1-create-live-readiness-operator-guide",
+      "task_number": 1,
+      "title": "Create live-readiness operator guide"
+    },
+    {
+      "base_task_id": "docs-task-2-document-provider-and-credential-flow",
+      "change_type": "change",
+      "component_id": "docs",
+      "component_name": "Documentation",
+      "component_order": 16,
+      "decommission_ids": [
+        "decommission-13"
+      ],
+      "delta_ids": [
+        "docs-delta-2"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-13"
+      ],
+      "outcome_role": "supporting_evidence",
+      "request_tasks": [
+        "Task 13"
+      ],
+      "sequence": 31,
+      "source": "components/docs.md#task-2-document-provider-and-credential-flow",
+      "source_anchor": "task-2-document-provider-and-credential-flow",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/docs.md",
+      "source_order": 30,
+      "supporting_only": true,
+      "task_id": "031-docs-task-2-document-provider-and-credential-flow",
+      "task_number": 2,
+      "title": "Document provider and credential flow"
+    },
+    {
+      "base_task_id": "docs-task-3-document-sync-and-migration-policy",
+      "change_type": "change",
+      "component_id": "docs",
+      "component_name": "Documentation",
+      "component_order": 16,
+      "decommission_ids": [
+        "decommission-13"
+      ],
+      "delta_ids": [
+        "docs-delta-3"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-13"
+      ],
+      "outcome_role": "supporting_evidence",
+      "request_tasks": [
+        "Task 13"
+      ],
+      "sequence": 32,
+      "source": "components/docs.md#task-3-document-sync-and-migration-policy",
+      "source_anchor": "task-3-document-sync-and-migration-policy",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/docs.md",
+      "source_order": 31,
+      "supporting_only": true,
+      "task_id": "032-docs-task-3-document-sync-and-migration-policy",
+      "task_number": 3,
+      "title": "Document sync and migration policy"
+    },
+    {
+      "base_task_id": "docs-task-4-create-sanitization-rules-document",
+      "change_type": "add",
+      "component_id": "docs",
+      "component_name": "Documentation",
+      "component_order": 16,
+      "decommission_ids": [
+        "decommission-13"
+      ],
+      "delta_ids": [
+        "docs-delta-4"
+      ],
+      "dependency_task_ids": [],
+      "dependency_titles": [],
+      "outcome_ids": [
+        "outcome-13"
+      ],
+      "outcome_role": "supporting_evidence",
+      "request_tasks": [
+        "Task 13"
+      ],
+      "sequence": 33,
+      "source": "components/docs.md#task-4-create-sanitization-rules-document",
+      "source_anchor": "task-4-create-sanitization-rules-document",
+      "source_artifact_path": "component_design/revisions/component-design-v11/components/docs.md",
+      "source_order": 32,
+      "supporting_only": true,
+      "task_id": "033-docs-task-4-create-sanitization-rules-document",
+      "task_number": 4,
+      "title": "Create sanitization rules document"
+    }
+  ]
+}

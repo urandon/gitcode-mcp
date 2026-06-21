@@ -14,6 +14,7 @@ import (
 
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
 	"gitcode-mcp/internal/service"
 )
@@ -148,6 +149,20 @@ func Execute(args []string, stdout io.Writer, stderr io.Writer) int {
 
 func ExecuteWithSource(args []string, stdout io.Writer, stderr io.Writer, src config.Source) int {
 	return executeWithFactoryAndDeps(args, stdout, stderr, defaultServiceFactory, localCommandDeps{Source: src})
+}
+
+func ExecuteWithClient(args []string, stdout io.Writer, stderr io.Writer, client gitcode.Client) int {
+	return executeWithFactory(args, stdout, stderr, func(ctx context.Context, cachePath string) (queryService, func() error, error) {
+		path, err := resolvedCachePath(cachePath)
+		if err != nil {
+			return nil, nil, err
+		}
+		store, err := cache.NewSQLiteStore(ctx, path)
+		if err != nil {
+			return nil, nil, err
+		}
+		return service.NewWithClient(store, client), store.Close, nil
+	})
 }
 
 func executeWithFactory(args []string, stdout io.Writer, stderr io.Writer, factory serviceFactory) int {

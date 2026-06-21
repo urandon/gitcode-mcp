@@ -5,6 +5,7 @@ ai/research-repos
 bin/
 *.test
 *.out
+/gitcode-mcp
 .env
 .env.*
 local/
