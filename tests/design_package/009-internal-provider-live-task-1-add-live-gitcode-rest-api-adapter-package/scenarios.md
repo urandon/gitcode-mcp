@@ -1,5 +1,9 @@
 # Scenario 009: Live GitCode REST API adapter package
 
+## 009-internal-provider-live-task-1-add-live-gitcode-rest-api-adapter-package-scenario-1
+
+Materialized through the concrete offline scenarios below: live adapter construction, issue/wiki/comment reads, create-issue live write path, typed 429/401/403 diagnostics, decommission of fixture-only live sync and read-only fixture live write behavior.
+
 ## SC-009-01: Adapter package compiles and exports contract types
 - **Given** the `internal/provider/live/` package exists at architecture-specified location
 - **When** `go build ./internal/provider/live/...` is executed
