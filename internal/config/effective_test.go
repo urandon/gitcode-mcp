@@ -82,4 +82,22 @@ func TestEffectiveConfigScenarios(t *testing.T) {
 			t.Fatalf("status=%#v", status)
 		}
 	})
+
+	t.Run("SCN-AUTH-DEFAULT-CHAIN-LISTS-SOURCES", func(t *testing.T) {
+		src := newMemorySource(t)
+		eff, err := LoadEffective(src, Overrides{})
+		if err != nil {
+			t.Fatalf("LoadEffective returned error: %v", err)
+		}
+		status := DefaultCredentialProvider(src).Status(context.Background(), eff)
+		if status.Present || status.ErrorClass != "token-missing" || status.Source != "missing" {
+			t.Fatalf("status=%#v", status)
+		}
+		rendered := RenderCredentialStatus(status)
+		for _, want := range []string{"available_sources:", "env:GITCODE_TOKEN", "keychain"} {
+			if !strings.Contains(rendered, want) {
+				t.Fatalf("rendered missing %q in %q", want, rendered)
+			}
+		}
+	})
 }

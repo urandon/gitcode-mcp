@@ -120,6 +120,25 @@ func TestEntrypointDefaultModeDependencyHandoff(t *testing.T) {
 	}
 }
 
+func TestEntrypointAuthStatusGlobalLiveRouting(t *testing.T) {
+	src := newTestSource(t)
+	src.env[config.EnvToken] = "sentinel-token"
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--live", "auth", "status"}, strings.NewReader(""), &stdout, &stderr, src)
+	if code != 0 {
+		t.Fatalf("exit = %d stderr=%q", code, stderr.String())
+	}
+	out := stdout.String() + stderr.String()
+	for _, want := range []string{"credential_source: env:GITCODE_TOKEN", "auth_probe_status: skipped"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("auth status missing %q in %q", want, out)
+		}
+	}
+	if strings.Contains(out, "sentinel-token") {
+		t.Fatalf("token emitted stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
 func TestEntrypointLiveModeDependencyHandoff(t *testing.T) {
 	src := newTestSource(t)
 	src.env[config.EnvToken] = "sentinel-token"

@@ -1,0 +1,41 @@
+{
+  "schema_version": "triborg.validation-result.v1",
+  "task_id": "002-cmd-gitcode-mcp-task-2-add-auth-status-cli-command",
+  "covered_outcome_ids": ["outcome-2"],
+  "covered_decommission_ids": ["decommission-3"],
+  "product_surfaces": [
+    "cmd/gitcode-mcp/main.go — startup routing: auth subcommands routed via ExecuteWithSource at line 92-97; global --live flag forwarding for auth path; TestEntrypointAuthStatusGlobalLiveRouting test",
+    "cmd/gitcode-mcp/main_test.go — TestEntrypointAuthStatusGlobalLiveRouting validates global --live + auth status routing with redaction",
+    "internal/cli/cli.go — executeLocalCommand: auth status subcommand dispatch at 'case \"auth status\"'; probeAuthStatus for live auth probe; parseOptions includes --live, --owner, --repo flags; executeWithFactoryAndDeps wires localCommandDeps with CredentialStatusReporter",
+    "internal/cli/config_commands_test.go — TestConfigAuthCommandsRedactedUX with SCN-AUTH-STATUS-ENV, SCN-AUTH-STATUS-NO-TOKEN, SCN-AUTH-KEYRING-UNAVAILABLE, SCN-AUTH-STATUS-JSON subtests; TestConfigCommandDoesNotOpenService verifies auth doesn't open cache",
+    "internal/config/effective.go — DefaultCredentialProvider chain includes EnvCredentialProvider + KeychainCredentialProvider; ChainCredentialProvider.Status enumerates available sources; CredentialStatus struct with AvailableSources and AuthProbe fields; RenderCredentialStatus renders auth diagnostics; providerStatusSource maps providers to source labels; missingCredentialStatus with token-missing error class",
+    "internal/config/keychain_darwin.go — build-tag-gated (//go:build darwin) KeychainCredentialProvider stub returning credential-store-unavailable with macOS remediation",
+    "internal/config/keychain_other.go — build-tag-gated (//go:build !darwin) KeychainCredentialProvider stub returning credential-store-unavailable with platform remediation",
+    "internal/credential/ — credential package with Pipeline, EnvProvider, KeychainProvider, AuthStatus, SourceStatus, AuthProbeResult, RenderText, ToCredentialStatus conversion"
+  ],
+  "evidence_type": "CLI_command",
+  "freshness": "Current binary built in task directory, no live env vars for offline validation, go test ./... deterministic, no keychain runtime dependency",
+  "mocks_used": {
+    "testSource": "in-memory test config source (map-based env/files, no real OS calls) in cmd/gitcode-mcp/main_test.go",
+    "cliConfigSource": "in-memory test config source in internal/cli/config_commands_test.go",
+    "statusReporter": "mock CredentialStatusReporter returning synthetic CredentialStatus for SCN-AUTH-KEYRING-UNAVAILABLE test"
+  },
+  "production_files_modified": {
+    "cmd/gitcode-mcp/main.go": "auth routing at startup level, --live forwarding to auth subcommand, TestEntrypointAuthStatusGlobalLiveRouting",
+    "cmd/gitcode-mcp/main_test.go": "TestEntrypointAuthStatusGlobalLiveRouting test",
+    "internal/cli/cli.go": "auth status dispatch in executeLocalCommand, probeAuthStatus function, --live flag in parseOptions, localCommandDeps.CredentialReporter wiring",
+    "internal/cli/config_commands_test.go": "SCN-AUTH-STATUS-ENV, SCN-AUTH-STATUS-NO-TOKEN, SCN-AUTH-KEYRING-UNAVAILABLE, SCN-AUTH-STATUS-JSON subtests",
+    "internal/config/effective.go": "DefaultCredentialProvider with KeychainCredentialProvider, ChainCredentialProvider.Status with AvailableSources, CredentialStatus.AvailableSources and AuthProbe fields, RenderCredentialStatus, providerStatusSource keychain mapping",
+    "internal/config/keychain_darwin.go": "new — build-tag-gated darwin KeychainCredentialProvider stub",
+    "internal/config/keychain_other.go": "new — build-tag-gated non-darwin KeychainCredentialProvider stub",
+    "internal/credential/defaults.go": "DefaultPipeline with EnvProvider and KeychainProvider",
+    "internal/credential/credential.go": "Pipeline, AuthStatus, AuthProbeResult, SourceStatus, ToCredentialStatus, RenderText",
+    "internal/credential/env.go": "EnvProvider with Probe and Name methods"
+  },
+  "validation_scope": "All validation artifacts written only under tests/design_package/002-cmd-gitcode-mcp-task-2-add-auth-status-cli-command/. Binary built inside task directory, not at repo root.",
+  "live_validation": {
+    "enabled": false,
+    "reason": "Live validation disabled in task config. Requires GITCODE_LIVE_TEST=1 and GITCODE_TOKEN.",
+    "gated_by": ["GITCODE_LIVE_TEST=1", "GITCODE_TOKEN"]
+  }
+}

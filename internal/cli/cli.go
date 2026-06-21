@@ -380,14 +380,62 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 			return 1
 		}
 		status := deps.CredentialReporter.Status(context.Background(), eff)
+		if opts.live {
+			status = probeAuthStatus(context.Background(), deps.Source, eff, opts, status)
+		}
 		if opts.format == "json" {
-			return render(stdout, opts.format, status, nil)
+			code := render(stdout, opts.format, status, nil)
+			if status.AuthProbe != nil && status.AuthProbe.FailureClass == "auth-failure" {
+				return 1
+			}
+			return code
 		}
 		fmt.Fprint(stdout, config.RenderCredentialStatus(status))
+		if status.AuthProbe != nil && status.AuthProbe.FailureClass == "auth-failure" {
+			return 1
+		}
 		return 0
 	default:
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: command, Message: "unknown subcommand"})
 	}
+}
+
+func probeAuthStatus(ctx context.Context, src config.Source, eff config.EffectiveConfig, opts options, status config.CredentialStatus) config.CredentialStatus {
+	if !status.Present {
+		status.AuthProbe = &config.CredentialAuthProbe{Status: "skipped", FailureClass: "token-missing", Message: "auth probe requires a token"}
+		return status
+	}
+	token := strings.TrimSpace(src.Env(config.EnvToken))
+	if token == "" {
+		status.AuthProbe = &config.CredentialAuthProbe{Status: "skipped", FailureClass: "token-missing", Message: "auth probe requires GITCODE_TOKEN"}
+		return status
+	}
+	owner := strings.TrimSpace(opts.owner)
+	repo := strings.TrimSpace(opts.repo)
+	if owner == "" || repo == "" {
+		status.AuthProbe = &config.CredentialAuthProbe{Status: "skipped", Message: "auth probe requires --owner and --repo"}
+		return status
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	provider, err := gitcode.NewLiveProvider(gitcode.ProviderConfig{Mode: gitcode.ProviderModeLive, LiveAllowed: true, BaseURL: eff.Config.GitCodeBaseURL, Token: token, Timeout: eff.Config.DefaultTimeout, MaxResponseSize: eff.Config.MaxResponseSize, MaxRetries: eff.Config.MaxRetries})
+	if err != nil {
+		status.AuthProbe = &config.CredentialAuthProbe{Status: "failed", FailureClass: "auth-failure", Message: "auth-failure: unable to initialize live auth probe"}
+		return status
+	}
+	_, err = provider.ProbeAuth(probeCtx, gitcode.AuthProbeRequest{Owner: owner, Repo: repo})
+	if err != nil {
+		failureClass := "auth-probe-failed"
+		var authErr gitcode.ErrAuthExpired
+		var forbiddenErr gitcode.ErrForbidden
+		if errors.As(err, &authErr) || errors.As(err, &forbiddenErr) {
+			failureClass = "auth-failure"
+		}
+		status.AuthProbe = &config.CredentialAuthProbe{Status: "failed", FailureClass: failureClass, Message: config.RedactDiagnostic(err.Error(), src)}
+		return status
+	}
+	status.AuthProbe = &config.CredentialAuthProbe{Status: "ok"}
+	return status
 }
 
 func dispatch(ctx context.Context, svc queryService, command string, args []string, opts options, stdout io.Writer, stderr io.Writer) int {

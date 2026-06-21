@@ -90,7 +90,11 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 		return 0
 	}
 	if len(rest) > 0 && (rest[0] == "config" || rest[0] == "auth") {
-		return cli.ExecuteWithSource(rest, stdout, stderr, src)
+		localArgs := append([]string(nil), rest...)
+		if rest[0] == "auth" && opts.live && !hasCLIFlag(localArgs[1:], "--live") {
+			localArgs = append(localArgs, "--live")
+		}
+		return cli.ExecuteWithSource(localArgs, stdout, stderr, src)
 	}
 
 	cfg, err := config.Load(src, opts.overrides)

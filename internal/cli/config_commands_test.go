@@ -136,6 +136,59 @@ func TestConfigAuthCommandsRedactedUX(t *testing.T) {
 			t.Fatalf("raw provider error leaked: %q", out)
 		}
 	})
+
+	t.Run("SCN-AUTH-STATUS-ENV", func(t *testing.T) {
+		src := newCLIConfigSource(t)
+		src.env[config.EnvToken] = "secret-token-value"
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps([]string{"auth", "status"}, &stdout, &stderr, nil, localCommandDeps{Source: src})
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		out := stdout.String() + stderr.String()
+		for _, want := range []string{"credential_source: env:GITCODE_TOKEN", "token_present: true", "available_sources: env:GITCODE_TOKEN"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("auth missing %q in %q", want, out)
+			}
+		}
+		if strings.Contains(out, "secret-token-value") {
+			t.Fatalf("auth status leaked token: %q", out)
+		}
+	})
+
+	t.Run("SCN-AUTH-STATUS-NO-TOKEN", func(t *testing.T) {
+		src := newCLIConfigSource(t)
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps([]string{"auth", "status"}, &stdout, &stderr, nil, localCommandDeps{Source: src})
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		out := stdout.String() + stderr.String()
+		for _, want := range []string{"credential_source: missing", "token_present: false", "available_sources:", "env:GITCODE_TOKEN", "keychain", "credential_error_class: token-missing"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("auth missing %q in %q", want, out)
+			}
+		}
+	})
+
+	t.Run("SCN-AUTH-STATUS-JSON", func(t *testing.T) {
+		src := newCLIConfigSource(t)
+		src.env[config.EnvToken] = "secret-token-value"
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps([]string{"auth", "status", "--format", "json"}, &stdout, &stderr, nil, localCommandDeps{Source: src})
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		out := stdout.String() + stderr.String()
+		for _, want := range []string{"\"source\": \"env:GITCODE_TOKEN\"", "\"present\": true", "\"available_sources\""} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("auth json missing %q in %q", want, out)
+			}
+		}
+		if strings.Contains(out, "secret-token-value") {
+			t.Fatalf("auth json leaked token: %q", out)
+		}
+	})
 }
 
 func TestRuntimeAuditDoctorCommand(t *testing.T) {
