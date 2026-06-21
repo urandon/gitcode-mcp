@@ -89,10 +89,13 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 		fmt.Fprintf(stdout, "gitcode-mcp %s\n", version)
 		return 0
 	}
-	if len(rest) > 0 && (rest[0] == "config" || rest[0] == "auth") {
+	if len(rest) > 0 && (rest[0] == "config" || rest[0] == "auth" || rest[0] == "doctor") {
 		localArgs := append([]string(nil), rest...)
 		if rest[0] == "auth" && opts.live && !hasCLIFlag(localArgs[1:], "--live") {
 			localArgs = append(localArgs, "--live")
+		}
+		if opts.overrides.CachePath != "" && !hasCLIFlag(localArgs[1:], "--cache-path") {
+			localArgs = append(localArgs, "--cache-path", opts.overrides.CachePath)
 		}
 		return cli.ExecuteWithSource(localArgs, stdout, stderr, src)
 	}

@@ -100,6 +100,33 @@ func newSQLiteStore(ctx context.Context, dataSourceName string, forceNoFTS bool)
 	return store, nil
 }
 
+func NewSQLiteReadOnlyStore(ctx context.Context, dataSourceName string) (*SQLiteStore, error) {
+	if _, err := os.Stat(dataSourceName); err != nil {
+		return nil, fmt.Errorf("cache: cannot open read-only store: %w", err)
+	}
+	dsn := dataSourceName + "?mode=ro&_journal_mode=WAL"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout = 5000"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	useFTS := detectFTS5(ctx, db)
+	return &SQLiteStore{db: db, useFTS: useFTS, forceNoFTS: false, cachePath: dataSourceName, lockPath: ""}, nil
+}
+
+func (s *SQLiteStore) SchemaVersion(ctx context.Context) (int, error) {
+	return schemaVersion(ctx, s.db)
+}
+
 func NewInMemorySQLiteStore(ctx context.Context) (*SQLiteStore, error) {
 	return NewSQLiteStore(ctx, ":memory:")
 }

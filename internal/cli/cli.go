@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -335,6 +336,9 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 		}
 		renderRuntimeAuditText(stdout, payload)
 		return 0
+	}
+	if command == "doctor" {
+		return executeDoctorCommand(context.Background(), opts, stdout, stderr, deps)
 	}
 	sub, ok := firstArg(rest)
 	if !ok {
@@ -1022,6 +1026,353 @@ func firstArg(args []string) (string, bool) {
 		return "", false
 	}
 	return args[0], true
+}
+
+type doctorReport struct {
+	Version      string                     `json:"version"`
+	Config       doctorConfigSection        `json:"config"`
+	Cache        doctorCacheSection         `json:"cache"`
+	Repo         doctorRepoSection          `json:"repo"`
+	Credential   doctorCredentialSection    `json:"credential"`
+	Sync         doctorSyncSection          `json:"sync"`
+	Index        doctorIndexSection         `json:"index"`
+	MCP          doctorMCPSection           `json:"mcp"`
+	LiveProvider doctorLiveProviderSection  `json:"live_provider"`
+	AuthProbe    doctorAuthProbeSection     `json:"auth_probe"`
+}
+
+type doctorConfigSection struct {
+	Path      string `json:"path"`
+	Source    string `json:"source"`
+	Format    string `json:"format"`
+	Exists    bool   `json:"exists"`
+	CachePath string `json:"cache_path"`
+}
+
+type doctorCacheSection struct {
+	Path          string `json:"path"`
+	Status        string `json:"status"`
+	SchemaVersion string `json:"schema_version"`
+	Records       int    `json:"records"`
+	Chunks        int    `json:"chunks"`
+	SyncEvents    int    `json:"sync_events"`
+}
+
+type doctorRepoSection struct {
+	Status   string `json:"status"`
+	RepoID   string `json:"repo_id"`
+	Owner    string `json:"owner"`
+	Name     string `json:"name"`
+	Scopes   string `json:"scopes"`
+	BindHint string `json:"bind_hint,omitempty"`
+}
+
+type doctorCredentialSection struct {
+	Status           string   `json:"status"`
+	Source           string   `json:"source"`
+	TokenPresent     bool     `json:"token_present"`
+	StoreMode        string   `json:"store_mode"`
+	AvailableSources []string `json:"available_sources,omitempty"`
+	Remediation      string   `json:"remediation,omitempty"`
+}
+
+type doctorSyncSection struct {
+	Status     string `json:"status"`
+	LastSyncAt string `json:"last_sync_at"`
+	FreshCount int    `json:"fresh_count"`
+	StaleCount int    `json:"stale_count"`
+	CacheEmpty bool   `json:"cache_empty"`
+}
+
+type doctorIndexSection struct {
+	Status        string `json:"status"`
+	StaleCount    int    `json:"stale_count"`
+	LastIndexedAt string `json:"last_indexed_at"`
+}
+
+type doctorMCPSection struct {
+	Status         string `json:"status"`
+	TransportStdio string `json:"transport_stdio"`
+	TransportHTTP  string `json:"transport_http"`
+	ServerVersion  string `json:"server_version"`
+}
+
+type doctorLiveProviderSection struct {
+	Status      string `json:"status"`
+	Reachable   string `json:"reachable"`
+	ProviderMode string `json:"provider_mode"`
+	Remediation string `json:"remediation,omitempty"`
+}
+
+type doctorAuthProbeSection struct {
+	Status      string `json:"status"`
+	ProbeResult string `json:"probe_result"`
+	Remediation string `json:"remediation,omitempty"`
+}
+
+func executeDoctorCommand(ctx context.Context, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+	if deps.Source == nil {
+		deps.Source = config.OSSource{}
+	}
+	if deps.CredentialReporter == nil {
+		provider := config.DefaultCredentialProvider(deps.Source)
+		deps.CredentialReporter = provider
+	}
+
+	eff, configLoadErr := config.LoadEffective(deps.Source, config.Overrides{})
+	if configLoadErr != nil {
+		eff = config.EffectiveConfig{
+			Config:           config.Config{CachePath: ""},
+			Location:         config.Locate(deps.Source),
+			CredentialPolicy: config.CredentialConfig{Store: "auto"},
+		}
+	}
+
+	credStatus := deps.CredentialReporter.Status(ctx, eff)
+	credStatus.Source = config.RedactDiagnostic(credStatus.Source, deps.Source)
+	credStatus.ErrorClass = config.RedactDiagnostic(credStatus.ErrorClass, deps.Source)
+	credStatus.Remediation = config.RedactDiagnostic(credStatus.Remediation, deps.Source)
+
+	report := doctorReport{Version: version}
+
+	report.Config = doctorConfigSection{
+		Path:      eff.Location.Path,
+		Source:    eff.Location.Source,
+		Format:    eff.Location.Format,
+		Exists:    eff.Location.Exists,
+		CachePath: eff.Config.CachePath,
+	}
+	if report.Config.Path == "" {
+		loc := config.Locate(deps.Source)
+		report.Config.Path = loc.Path
+		report.Config.Source = loc.Source
+		report.Config.Format = loc.Format
+		report.Config.Exists = loc.Exists
+	}
+
+	report.Credential = doctorCredentialSection{
+		Source:           cliEmptyAsNone(credStatus.Source),
+		TokenPresent:     credStatus.Present,
+		StoreMode:        credStatus.StoreMode,
+		AvailableSources: credStatus.AvailableSources,
+		Remediation:      credStatus.Remediation,
+	}
+	if credStatus.Present {
+		report.Credential.Status = "token_configured"
+	} else {
+		report.Credential.Status = "no_token_configured"
+	}
+
+	cachePath := eff.Config.CachePath
+	if opts.cachePath != "" {
+		cachePath = opts.cachePath
+	}
+	if cachePath == "" {
+		cachePath = resolvedCachePathDefault()
+	}
+	report.Cache.Path = cachePath
+	report.Cache.Status = "not_probed"
+	report.Cache.SchemaVersion = "unknown"
+
+	report.Repo.Status = "no_repo_bound"
+	report.Repo.BindHint = "run 'gitcode-mcp repo add --repo <id> --owner <owner> --name <name> --api-base-url <url> --scopes issues,wiki'"
+	report.Sync.Status = "no_repo_bound"
+	report.Index.Status = "no_repo_bound"
+	report.MCP.Status = "available"
+	report.MCP.TransportStdio = "supported"
+	report.MCP.TransportHTTP = "supported"
+	report.MCP.ServerVersion = "0.1.0"
+
+	report.LiveProvider.Status = "skipped"
+	report.LiveProvider.Reachable = "not_configured"
+	report.LiveProvider.ProviderMode = "offline"
+	report.LiveProvider.Remediation = "set GITCODE_TOKEN and use --live to enable live provider"
+
+	report.AuthProbe.Status = "skipped"
+	report.AuthProbe.ProbeResult = "not_probed"
+	report.AuthProbe.Remediation = "set GITCODE_TOKEN to enable authentication probing"
+
+	hasToken := credStatus.Present
+	if opts.live {
+		report.LiveProvider.ProviderMode = "live"
+		if hasToken {
+			report.LiveProvider.Status = "configured"
+			report.LiveProvider.Reachable = "skipped"
+		} else {
+			report.LiveProvider.Status = "error"
+			report.LiveProvider.Reachable = "not_configured"
+			report.LiveProvider.Remediation = "GITCODE_TOKEN not set; live provider requires a token"
+		}
+		if hasToken {
+			report.AuthProbe.Status = "configured"
+			report.AuthProbe.ProbeResult = "skipped"
+		} else {
+			report.AuthProbe.Status = "skipped"
+			report.AuthProbe.ProbeResult = "not_probed"
+			report.AuthProbe.Remediation = "GITCODE_TOKEN not set; set token to enable authentication probing"
+		}
+	}
+
+	store, storeErr := openReadOnlyStore(ctx, cachePath)
+	if storeErr == nil {
+		defer store.Close()
+		report.Cache.Status = "available"
+		report.Cache.SchemaVersion = cacheSchemaVersion(ctx, store)
+
+		repos, repoErr := store.ListRepositories(ctx)
+		if repoErr == nil && len(repos) > 0 {
+			repo := repos[0]
+			report.Repo.Status = "ready"
+			report.Repo.RepoID = repo.RepoID
+			report.Repo.Owner = repo.Owner
+			report.Repo.Name = repo.Name
+			scopes := make([]string, 0, len(repo.Scopes))
+			for _, scope := range repo.Scopes {
+				scopes = append(scopes, string(scope))
+			}
+			report.Repo.Scopes = strings.Join(scopes, ",")
+
+			svc := service.New(store)
+			cacheStatus, cacheErr := svc.CacheStatus(ctx, service.CacheStatusRequest{RepoID: repo.RepoID})
+			if cacheErr == nil {
+				report.Cache.Records = cacheStatus.Records
+				report.Cache.Chunks = cacheStatus.Chunks
+				report.Cache.SyncEvents = cacheStatus.SyncEvents
+			}
+
+			syncSummary, syncErr := svc.SyncStatus(ctx, service.ListSourcesRequest{RepoID: repo.RepoID})
+			if syncErr == nil {
+				report.Sync.Status = "available"
+				report.Sync.FreshCount = syncSummary.FreshCount
+				report.Sync.StaleCount = syncSummary.StaleCount
+				report.Sync.CacheEmpty = syncSummary.CacheEmpty
+				if !syncSummary.LastSyncAt.IsZero() {
+					report.Sync.LastSyncAt = syncSummary.LastSyncAt.UTC().Format(time.RFC3339)
+				}
+			} else {
+				report.Sync.Status = "error"
+			}
+
+			staleResult, staleErr := svc.StaleIndex(ctx, service.StaleIndexRequest{RepoID: repo.RepoID})
+			if staleErr == nil {
+				report.Index.Status = "available"
+				report.Index.StaleCount = staleResult.StaleCount
+				if !staleResult.LastIndexedAt.IsZero() {
+					report.Index.LastIndexedAt = staleResult.LastIndexedAt.UTC().Format(time.RFC3339)
+				}
+			} else {
+				report.Index.Status = "error"
+			}
+		} else {
+			report.Cache.Records = 0
+			report.Cache.Chunks = 0
+			report.Cache.SyncEvents = 0
+		}
+	} else {
+		report.Cache.Status = "not_available"
+	}
+
+	if opts.format == "json" {
+		return renderJSON(stdout, report)
+	}
+	renderDoctorText(stdout, report)
+	return 0
+}
+
+func resolvedCachePathDefault() string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return "unknown"
+	}
+	dir = filepath.Join(dir, "gitcode-mcp")
+	return filepath.Join(dir, "cache.db")
+}
+
+func openReadOnlyStore(ctx context.Context, path string) (cache.Store, error) {
+	return cache.NewSQLiteReadOnlyStore(ctx, path)
+}
+
+func cacheSchemaVersion(ctx context.Context, store cache.Store) string {
+	sv, ok := store.(interface{ SchemaVersion(context.Context) (int, error) })
+	if !ok {
+		return "unknown"
+	}
+	version, err := sv.SchemaVersion(ctx)
+	if err != nil {
+		return "unknown"
+	}
+	return strconv.Itoa(version)
+}
+
+func renderDoctorText(w io.Writer, report doctorReport) {
+	fmt.Fprintf(w, "version: %s\n", report.Version)
+	fmt.Fprintln(w, "config:")
+	fmt.Fprintf(w, "  path: %s\n", cliEmptyAsNone(report.Config.Path))
+	fmt.Fprintf(w, "  source: %s\n", report.Config.Source)
+	fmt.Fprintf(w, "  format: %s\n", report.Config.Format)
+	fmt.Fprintf(w, "  exists: %t\n", report.Config.Exists)
+	fmt.Fprintf(w, "  cache_path: %s\n", report.Config.CachePath)
+	fmt.Fprintln(w, "cache:")
+	fmt.Fprintf(w, "  path: %s\n", report.Cache.Path)
+	fmt.Fprintf(w, "  status: %s\n", report.Cache.Status)
+	fmt.Fprintf(w, "  schema_version: %s\n", report.Cache.SchemaVersion)
+	fmt.Fprintf(w, "  records: %d\n", report.Cache.Records)
+	fmt.Fprintf(w, "  chunks: %d\n", report.Cache.Chunks)
+	fmt.Fprintf(w, "  sync_events: %d\n", report.Cache.SyncEvents)
+	fmt.Fprintln(w, "credential:")
+	fmt.Fprintf(w, "  status: %s\n", report.Credential.Status)
+	fmt.Fprintf(w, "  source: %s\n", report.Credential.Source)
+	fmt.Fprintf(w, "  token_present: %t\n", report.Credential.TokenPresent)
+	fmt.Fprintf(w, "  store_mode: %s\n", report.Credential.StoreMode)
+	if len(report.Credential.AvailableSources) > 0 {
+		fmt.Fprintf(w, "  available_sources: %s\n", strings.Join(report.Credential.AvailableSources, ","))
+	}
+	if report.Credential.Remediation != "" {
+		fmt.Fprintf(w, "  remediation: %s\n", report.Credential.Remediation)
+	}
+	fmt.Fprintln(w, "repo:")
+	fmt.Fprintf(w, "  status: %s\n", report.Repo.Status)
+	if report.Repo.RepoID != "" {
+		fmt.Fprintf(w, "  repo_id: %s\n", report.Repo.RepoID)
+		fmt.Fprintf(w, "  owner: %s\n", report.Repo.Owner)
+		fmt.Fprintf(w, "  name: %s\n", report.Repo.Name)
+		fmt.Fprintf(w, "  scopes: %s\n", report.Repo.Scopes)
+	}
+	if report.Repo.BindHint != "" {
+		fmt.Fprintf(w, "  bind_hint: %s\n", report.Repo.BindHint)
+	}
+	fmt.Fprintln(w, "sync:")
+	fmt.Fprintf(w, "  status: %s\n", report.Sync.Status)
+	if report.Sync.LastSyncAt != "" {
+		fmt.Fprintf(w, "  last_sync_at: %s\n", report.Sync.LastSyncAt)
+	}
+	fmt.Fprintf(w, "  fresh_count: %d\n", report.Sync.FreshCount)
+	fmt.Fprintf(w, "  stale_count: %d\n", report.Sync.StaleCount)
+	fmt.Fprintf(w, "  cache_empty: %t\n", report.Sync.CacheEmpty)
+	fmt.Fprintln(w, "index:")
+	fmt.Fprintf(w, "  status: %s\n", report.Index.Status)
+	fmt.Fprintf(w, "  stale_count: %d\n", report.Index.StaleCount)
+	if report.Index.LastIndexedAt != "" {
+		fmt.Fprintf(w, "  last_indexed_at: %s\n", report.Index.LastIndexedAt)
+	}
+	fmt.Fprintln(w, "mcp:")
+	fmt.Fprintf(w, "  status: %s\n", report.MCP.Status)
+	fmt.Fprintf(w, "  transport_stdio: %s\n", report.MCP.TransportStdio)
+	fmt.Fprintf(w, "  transport_http: %s\n", report.MCP.TransportHTTP)
+	fmt.Fprintf(w, "  server_version: %s\n", report.MCP.ServerVersion)
+	fmt.Fprintln(w, "live_provider:")
+	fmt.Fprintf(w, "  status: %s\n", report.LiveProvider.Status)
+	fmt.Fprintf(w, "  reachable: %s\n", report.LiveProvider.Reachable)
+	fmt.Fprintf(w, "  provider_mode: %s\n", report.LiveProvider.ProviderMode)
+	if report.LiveProvider.Remediation != "" {
+		fmt.Fprintf(w, "  remediation: %s\n", report.LiveProvider.Remediation)
+	}
+	fmt.Fprintln(w, "auth_probe:")
+	fmt.Fprintf(w, "  status: %s\n", report.AuthProbe.Status)
+	fmt.Fprintf(w, "  probe_result: %s\n", report.AuthProbe.ProbeResult)
+	if report.AuthProbe.Remediation != "" {
+		fmt.Fprintf(w, "  remediation: %s\n", report.AuthProbe.Remediation)
+	}
 }
 
 func printHelp(w io.Writer) {
