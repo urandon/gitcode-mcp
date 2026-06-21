@@ -48,6 +48,7 @@ var commands = []string{
 	"config",
 	"auth",
 	"doctor",
+	"migrate-cache",
 	"repo",
 }
 
@@ -179,7 +180,7 @@ func executeWithFactoryAndDeps(args []string, stdout io.Writer, stderr io.Writer
 		fmt.Fprintf(stdout, "gitcode-mcp %s\n", version)
 		return 0
 	}
-	if args[0] == "config" || args[0] == "auth" || args[0] == "doctor" {
+	if args[0] == "config" || args[0] == "auth" || args[0] == "doctor" || args[0] == "migrate-cache" {
 		return executeLocalCommand(args, stdout, stderr, deps)
 	}
 	if !isKnownCommand(args[0]) {
@@ -339,6 +340,9 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 	}
 	if command == "doctor" {
 		return executeDoctorCommand(context.Background(), opts, stdout, stderr, deps)
+	}
+	if command == "migrate-cache" {
+		return executeMigrateCacheCommand(context.Background(), opts, stdout, stderr, deps)
 	}
 	sub, ok := firstArg(rest)
 	if !ok {
@@ -1029,16 +1033,16 @@ func firstArg(args []string) (string, bool) {
 }
 
 type doctorReport struct {
-	Version      string                     `json:"version"`
-	Config       doctorConfigSection        `json:"config"`
-	Cache        doctorCacheSection         `json:"cache"`
-	Repo         doctorRepoSection          `json:"repo"`
-	Credential   doctorCredentialSection    `json:"credential"`
-	Sync         doctorSyncSection          `json:"sync"`
-	Index        doctorIndexSection         `json:"index"`
-	MCP          doctorMCPSection           `json:"mcp"`
-	LiveProvider doctorLiveProviderSection  `json:"live_provider"`
-	AuthProbe    doctorAuthProbeSection     `json:"auth_probe"`
+	Version      string                    `json:"version"`
+	Config       doctorConfigSection       `json:"config"`
+	Cache        doctorCacheSection        `json:"cache"`
+	Repo         doctorRepoSection         `json:"repo"`
+	Credential   doctorCredentialSection   `json:"credential"`
+	Sync         doctorSyncSection         `json:"sync"`
+	Index        doctorIndexSection        `json:"index"`
+	MCP          doctorMCPSection          `json:"mcp"`
+	LiveProvider doctorLiveProviderSection `json:"live_provider"`
+	AuthProbe    doctorAuthProbeSection    `json:"auth_probe"`
 }
 
 type doctorConfigSection struct {
@@ -1098,10 +1102,10 @@ type doctorMCPSection struct {
 }
 
 type doctorLiveProviderSection struct {
-	Status      string `json:"status"`
-	Reachable   string `json:"reachable"`
+	Status       string `json:"status"`
+	Reachable    string `json:"reachable"`
 	ProviderMode string `json:"provider_mode"`
-	Remediation string `json:"remediation,omitempty"`
+	Remediation  string `json:"remediation,omitempty"`
 }
 
 type doctorAuthProbeSection struct {
@@ -1279,6 +1283,79 @@ func executeDoctorCommand(ctx context.Context, opts options, stdout io.Writer, s
 	return 0
 }
 
+type migrateCacheResult struct {
+	CachePath   string `json:"cache_path"`
+	FromVersion int    `json:"from_version"`
+	ToVersion   int    `json:"to_version"`
+	Status      string `json:"status"`
+	Applied     []int  `json:"applied,omitempty"`
+	Remediation string `json:"remediation,omitempty"`
+}
+
+func executeMigrateCacheCommand(ctx context.Context, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+	cachePath := opts.cachePath
+	if cachePath == "" {
+		cachePath = resolvedCachePathDefault()
+	}
+
+	result, err := cache.MigrateCache(ctx, cachePath, false)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+
+	mr := migrateCacheResult{
+		CachePath:   cachePath,
+		FromVersion: result.FromVersion,
+		ToVersion:   result.ToVersion,
+		Applied:     result.Applied,
+	}
+
+	if result.FromVersion == 0 {
+		mr.Status = "no_cache"
+		mr.Remediation = "no initialized cache found; re-initialize the cache before migrating"
+	} else if result.FromVersion <= 1 {
+		mr.Status = "incompatible"
+		mr.Remediation = fmt.Sprintf("cache schema version %d is incompatible with in-place migration; re-initialize the cache", result.FromVersion)
+	} else if result.FromVersion > result.ToVersion {
+		mr.Status = "incompatible"
+		mr.Remediation = fmt.Sprintf("cache schema version %d is newer than the supported version %d; upgrade gitcode-mcp binary or re-initialize the cache", result.FromVersion, result.ToVersion)
+	} else if result.FromVersion == result.ToVersion {
+		mr.Status = "up_to_date"
+	} else {
+		mr.Status = "migrated"
+	}
+
+	if opts.format == "json" {
+		code := renderJSON(stdout, mr)
+		if mr.Status == "incompatible" {
+			return 1
+		}
+		return code
+	}
+	renderMigrateCacheText(stdout, mr)
+	if mr.Status == "incompatible" {
+		return 1
+	}
+	return 0
+}
+
+func renderMigrateCacheText(w io.Writer, mr migrateCacheResult) {
+	fmt.Fprintf(w, "cache_path: %s\n", mr.CachePath)
+	fmt.Fprintf(w, "from_version: %d\n", mr.FromVersion)
+	fmt.Fprintf(w, "to_version: %d\n", mr.ToVersion)
+	fmt.Fprintf(w, "status: %s\n", mr.Status)
+	if len(mr.Applied) > 0 {
+		fmt.Fprintf(w, "applied_migrations:")
+		for _, v := range mr.Applied {
+			fmt.Fprintf(w, " %d", v)
+		}
+		fmt.Fprintln(w)
+	}
+	if mr.Remediation != "" {
+		fmt.Fprintf(w, "remediation: %s\n", mr.Remediation)
+	}
+}
+
 func resolvedCachePathDefault() string {
 	dir, err := os.UserCacheDir()
 	if err != nil {
@@ -1293,7 +1370,9 @@ func openReadOnlyStore(ctx context.Context, path string) (cache.Store, error) {
 }
 
 func cacheSchemaVersion(ctx context.Context, store cache.Store) string {
-	sv, ok := store.(interface{ SchemaVersion(context.Context) (int, error) })
+	sv, ok := store.(interface {
+		SchemaVersion(context.Context) (int, error)
+	})
 	if !ok {
 		return "unknown"
 	}
