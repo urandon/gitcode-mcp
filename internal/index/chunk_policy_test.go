@@ -16,12 +16,16 @@ func TestChunkPolicyDeterminismAndMetadata(t *testing.T) {
 	parsed := ParseSource(source)
 	heading := ChunkSourceWithOptions(source, parsed, ChunkOptions{})
 	headingAgain := ChunkSourceWithOptions(source, parsed, ChunkOptions{})
-	if !reflect.DeepEqual(heading, headingAgain) {
+	assertChunksIndexedAt(t, heading)
+	assertChunksIndexedAt(t, headingAgain)
+	if !reflect.DeepEqual(chunksWithoutIndexedAt(heading), chunksWithoutIndexedAt(headingAgain)) {
 		t.Fatalf("heading chunks not deterministic")
 	}
 	sliding := ChunkSourceWithOptions(source, parsed, ChunkOptions{Policy: ChunkPolicySlidingWindow, WindowBytes: 40, OverlapBytes: 10})
 	slidingAgain := ChunkSourceWithOptions(source, parsed, ChunkOptions{Policy: ChunkPolicySlidingWindow, WindowBytes: 40, OverlapBytes: 10})
-	if !reflect.DeepEqual(sliding, slidingAgain) {
+	assertChunksIndexedAt(t, sliding)
+	assertChunksIndexedAt(t, slidingAgain)
+	if !reflect.DeepEqual(chunksWithoutIndexedAt(sliding), chunksWithoutIndexedAt(slidingAgain)) {
 		t.Fatalf("sliding chunks not deterministic")
 	}
 	ids := map[string]bool{}
@@ -33,6 +37,9 @@ func TestChunkPolicyDeterminismAndMetadata(t *testing.T) {
 			ids[chunk.ID] = true
 			if chunk.RepoID != "fixture-a" || chunk.RecordID != "REC-1" || chunk.SnapshotID != "snap-1" || chunk.Policy == "" || chunk.ContentHash == "" || chunk.ByteEnd <= chunk.ByteStart || chunk.LineStart <= 0 || chunk.NormalizedText == "" {
 				t.Fatalf("chunk missing metadata: %+v", chunk)
+			}
+			if chunk.InheritedMetadata["indexed_at"] == "" {
+				t.Fatalf("chunk missing indexed_at metadata: %+v", chunk.InheritedMetadata)
 			}
 		}
 	}

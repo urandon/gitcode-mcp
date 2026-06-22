@@ -49,10 +49,7 @@ func TestIndexPipeline(t *testing.T) {
 	if stale.TotalStaleBacklinks == 0 || !contains(stale.AffectedSourceIDs, "DOC-123") {
 		t.Fatalf("stale report = %+v, want DOC-123 stale broken-link evidence", stale)
 	}
-	unchanged := memoryReader{sources: []SourceRecord{
-		withPreviousHash(reader.sources[0]),
-		withPreviousHash(reader.sources[1]),
-	}}
+	unchanged := memoryReader{sources: append([]SourceRecord(nil), reader.sources...)}
 	beforeWrites := writer.replaceCalls
 	incremental, err := IncrementalBuild(ctx, unchanged, writer)
 	if err != nil {
@@ -72,7 +69,9 @@ func TestChunkDeterminism(t *testing.T) {
 	parsed := ParseSource(source)
 	chunks := ChunkSource(source, parsed)
 	again := ChunkSource(source, parsed)
-	if !reflect.DeepEqual(chunks, again) {
+	assertChunksIndexedAt(t, chunks)
+	assertChunksIndexedAt(t, again)
+	if !reflect.DeepEqual(chunksWithoutIndexedAt(chunks), chunksWithoutIndexedAt(again)) {
 		t.Fatalf("chunks differ across runs\nfirst:  %+v\nsecond: %+v", chunks, again)
 	}
 	if len(chunks) != 3 {
@@ -193,11 +192,6 @@ func fixtureSource(id, kind, path, title, status, body string) SourceRecord {
 	return SourceRecord{ID: id, Kind: kind, Path: path, Title: title, Status: status, Body: body, UpdatedAt: time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)}
 }
 
-func withPreviousHash(source SourceRecord) SourceRecord {
-	source.PreviousIndexedHash = ContentHash(source.Body)
-	return source
-}
-
 type memoryReader struct{ sources []SourceRecord }
 
 func (m memoryReader) ListSources(context.Context) ([]SourceRecord, error) {
@@ -208,6 +202,17 @@ type memoryWriter struct {
 	derived      map[string]SourceDerived
 	diagnostics  []CollisionDiagnostic
 	replaceCalls int
+}
+
+func (m *memoryWriter) ListIndexStates(_ context.Context, query ChunkQuery) ([]IndexState, error) {
+	var states []IndexState
+	for _, derived := range m.derived {
+		if !stateMatchesQuery(derived.IndexState, query) {
+			continue
+		}
+		states = append(states, derived.IndexState)
+	}
+	return states, nil
 }
 
 func (m *memoryWriter) ReplaceSourceDerived(_ context.Context, derived SourceDerived) error {
@@ -246,6 +251,35 @@ func (m *memoryWriter) ListCitationAnchors(context.Context) ([]CitationAnchor, e
 		anchors = append(anchors, derived.CitationAnchors...)
 	}
 	return anchors, nil
+}
+
+func assertChunksIndexedAt(t *testing.T, chunks []Chunk) {
+	t.Helper()
+	for _, chunk := range chunks {
+		indexedAt, ok := chunk.InheritedMetadata["indexed_at"]
+		if !ok || indexedAt == "" {
+			t.Fatalf("chunk missing indexed_at metadata: %+v", chunk)
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, indexedAt)
+		if err != nil || parsed.IsZero() {
+			t.Fatalf("chunk indexed_at = %q, parsed=%v err=%v", indexedAt, parsed, err)
+		}
+	}
+}
+
+func chunksWithoutIndexedAt(chunks []Chunk) []Chunk {
+	cloned := make([]Chunk, len(chunks))
+	copy(cloned, chunks)
+	for i := range cloned {
+		metadata := make(map[string]string, len(cloned[i].InheritedMetadata))
+		for key, value := range cloned[i].InheritedMetadata {
+			if key != "indexed_at" {
+				metadata[key] = value
+			}
+		}
+		cloned[i].InheritedMetadata = metadata
+	}
+	return cloned
 }
 
 func contains(values []string, want string) bool {

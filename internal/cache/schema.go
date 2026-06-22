@@ -3,10 +3,120 @@ package cache
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
-const currentSchemaVersion = 4
+const currentSchemaVersion = 7
+
+type VersionCompatibility struct {
+	DetectedVersion int
+	ExpectedVersion int
+	Compatible      bool
+	PermitWrites    bool
+	Message         string
+	Remediation     string
+}
+
+var ErrSchemaVersionIncompatible = errors.New("cache: schema version is incompatible")
+
+type SchemaVersionError struct {
+	Compat VersionCompatibility
+}
+
+func (e *SchemaVersionError) Error() string {
+	if e == nil {
+		return ErrSchemaVersionIncompatible.Error()
+	}
+	if e.Compat.Remediation == "" {
+		return fmt.Sprintf("%s: detected=%d expected=%d: %s", ErrSchemaVersionIncompatible, e.Compat.DetectedVersion, e.Compat.ExpectedVersion, e.Compat.Message)
+	}
+	return fmt.Sprintf("%s: detected=%d expected=%d: %s; %s", ErrSchemaVersionIncompatible, e.Compat.DetectedVersion, e.Compat.ExpectedVersion, e.Compat.Message, e.Compat.Remediation)
+}
+
+func (e *SchemaVersionError) Unwrap() error {
+	return ErrSchemaVersionIncompatible
+}
+
+func CheckVersionCompatibility(ctx context.Context, db *sql.DB) (VersionCompatibility, error) {
+	expected := currentSchemaVersion
+
+	hasTable, err := hasSchemaVersionTable(ctx, db)
+	if err != nil {
+		return VersionCompatibility{}, err
+	}
+	if !hasTable {
+		empty, err := isEmptyDatabase(ctx, db)
+		if err != nil {
+			return VersionCompatibility{}, err
+		}
+		if empty {
+			return VersionCompatibility{
+				DetectedVersion: 0,
+				ExpectedVersion: expected,
+				Compatible:      true,
+				PermitWrites:    true,
+				Message:         "cache database is uninitialized",
+				Remediation:     "",
+			}, nil
+		}
+		return VersionCompatibility{
+			DetectedVersion: 0,
+			ExpectedVersion: expected,
+			Compatible:      false,
+			PermitWrites:    false,
+			Message:         "cache database was created by a pre-schema-versioning binary (iteration 1 equivalent)",
+			Remediation:     "re-initialize the cache with 'gitcode-mcp reinit-cache' or delete the cache file and re-sync",
+		}, nil
+	}
+
+	detected, err := schemaVersion(ctx, db)
+	if err != nil {
+		return VersionCompatibility{}, err
+	}
+
+	if detected == 0 {
+		return VersionCompatibility{
+			DetectedVersion: 0,
+			ExpectedVersion: expected,
+			Compatible:      false,
+			PermitWrites:    false,
+			Message:         "cache database contains an empty schema_version table (iteration 1 equivalent)",
+			Remediation:     "re-initialize the cache with 'gitcode-mcp reinit-cache' or delete the cache file and re-sync",
+		}, nil
+	}
+
+	if detected > expected {
+		return VersionCompatibility{
+			DetectedVersion: detected,
+			ExpectedVersion: expected,
+			Compatible:      false,
+			PermitWrites:    false,
+			Message:         fmt.Sprintf("cache schema version %d is newer than supported version %d", detected, expected),
+			Remediation:     "upgrade the gitcode-mcp binary to a version that supports this schema, or downgrade the cache",
+		}, nil
+	}
+
+	if detected < expected {
+		return VersionCompatibility{
+			DetectedVersion: detected,
+			ExpectedVersion: expected,
+			Compatible:      true,
+			PermitWrites:    false,
+			Message:         fmt.Sprintf("cache schema version %d is older than expected version %d; writes are blocked until migration completes", detected, expected),
+			Remediation:     fmt.Sprintf("run 'gitcode-mcp migrate-cache' to upgrade the schema from version %d to version %d", detected, expected),
+		}, nil
+	}
+
+	return VersionCompatibility{
+		DetectedVersion: detected,
+		ExpectedVersion: expected,
+		Compatible:      true,
+		PermitWrites:    true,
+		Message:         "cache schema is up to date",
+		Remediation:     "",
+	}, nil
+}
 
 type migration struct {
 	version int
@@ -18,6 +128,9 @@ var migrations = []migration{
 	{version: 2, apply: applyRepoScopedCacheMigration},
 	{version: 3, apply: applyChunkPolicyMigration},
 	{version: 4, apply: applyStoredSnapshotMigration},
+	{version: 5, apply: applySyncEventTimestampsMigration},
+	{version: 6, apply: applySyncEventZeroDeltaMigration},
+	{version: 7, apply: applyAuditIdempotencyMigration},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB, ftsAvailable bool) error {
@@ -181,6 +294,9 @@ func applyInitialMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) e
 	idempotency_key TEXT NOT NULL,
 	message TEXT NOT NULL,
 	created_at TEXT NOT NULL,
+	started_at TEXT NOT NULL DEFAULT '',
+	completed_at TEXT NOT NULL DEFAULT '',
+	zero_delta INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY(repo_id, id),
 	FOREIGN KEY(repo_id, source_id) REFERENCES sources(repo_id, id) ON DELETE CASCADE
 )`,
@@ -263,6 +379,7 @@ func applyRepoScopedCacheMigration(ctx context.Context, tx *sql.Tx, ftsAvailable
 )`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_trail_record ON audit_trail(repo_id, record_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_trail_idempotency ON audit_trail(repo_id, idempotency_key)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_trail_idempotency_unique ON audit_trail(repo_id, idempotency_key) WHERE idempotency_key <> ''`,
 		`CREATE TABLE IF NOT EXISTS snapshots (
 	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
 	snapshot_id TEXT NOT NULL,
@@ -385,6 +502,43 @@ func applyStoredSnapshotMigration(ctx context.Context, tx *sql.Tx, ftsAvailable 
 		}
 	}
 	_, err = tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_snapshot_chunks_order ON snapshot_chunks(repo_id, snapshot_id, source_type, source_id, record_id, ordinal, chunk_id)`)
+	return err
+}
+
+func applySyncEventTimestampsMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
+	columns, err := tableColumns(ctx, tx, "sync_events")
+	if err != nil {
+		return err
+	}
+	addColumns := map[string]string{
+		"started_at":   `ALTER TABLE sync_events ADD COLUMN started_at TEXT NOT NULL DEFAULT ''`,
+		"completed_at": `ALTER TABLE sync_events ADD COLUMN completed_at TEXT NOT NULL DEFAULT ''`,
+	}
+	for column, statement := range addColumns {
+		if columns[column] {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applySyncEventZeroDeltaMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
+	columns, err := tableColumns(ctx, tx, "sync_events")
+	if err != nil {
+		return err
+	}
+	if columns["zero_delta"] {
+		return nil
+	}
+	_, err = tx.ExecContext(ctx, `ALTER TABLE sync_events ADD COLUMN zero_delta INTEGER NOT NULL DEFAULT 0`)
+	return err
+}
+
+func applyAuditIdempotencyMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
+	_, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_trail_idempotency_unique ON audit_trail(repo_id, idempotency_key) WHERE idempotency_key <> ''`)
 	return err
 }
 

@@ -1,0 +1,50 @@
+{
+  "schema_version": "triborg.validation-result.v1",
+  "task_id": "003-cmd-gitcode-mcp-task-3-add-live-write-commands-create-issue-create-comm",
+  "covered_outcome_ids": ["outcome-4"],
+  "covered_decommission_ids": ["decommission-5"],
+  "product_surfaces": [
+    "internal/service/service.go — executeWrite orchestration (1403-1478): builds adapter route, validates mode, generates idempotency fingerprint, dry-run short-circuit, GITCODE_TOKEN credential check, audit trail replay (idempotency/conflict detection), adapter call, audit recording, cache refresh",
+    "internal/service/service.go — Service.AddLabel (876-881): replaced write_unsupported_deferred stub with executeWrite dispatch, validates issue target + label",
+    "internal/service/service.go — callWriteAdapter (1490-1538): switch over command dispatching to s.client.{CreateIssue,UpdateIssue,CreateIssueComment,AddLabel,CreateWikiPage,UpdateWikiPage}",
+    "internal/service/service.go — replayWriteGraph (1540-1575): reconstructs cache records from audit trail entries for replay after partial failure; add-label case included",
+    "internal/service/service.go — issueWriteGraph (1577-1583): constructs cache.RecordGraph from gitcode.Issue write result",
+    "internal/service/service.go — writeIdempotency: generates idempotency key and SourceFingerprint hash for conflict detection",
+    "internal/service/types.go — WriteCommandRequest (556-570): Mode, Number, Slug, Title, Body, State, Label, Labels, IdempotencyKey fields",
+    "internal/service/types.go — WriteCommandResult (572-586): Status, RemoteID, RemoteNumber, Replayed, IdempotencyKey, SourceFingerprint fields",
+    "internal/service/types.go — WriteMode (549-554): dry_run and live constants",
+    "internal/cli/cli.go — executeQueryOrWrite dispatch (667-678): create-issue → dispatchWrite(CreateIssue), update-issue → dispatchWrite(UpdateIssue), create-page → dispatchWrite(CreatePage), update-page → dispatchWrite(UpdatePage), add-comment → dispatchWrite(AddComment), add-label → dispatchWrite(AddLabel)",
+    "internal/cli/cli.go — dispatchWrite (684-693): validates write options, calls handler(ctx, writeRequest(opts)), renders result via renderWriteText",
+    "internal/cli/cli.go — validateWriteOptions (695-706): enforces --repo, rejects --owner/--name/--api-base-url on writes, requires exactly one of --dry-run or --live",
+    "internal/cli/cli.go — writeRequest (726-740): maps CLI options to service.WriteCommandRequest with Mode, Label, Labels, IdempotencyKey",
+    "internal/cli/cli.go — renderWriteText (899-901): renders WriteCommandResult with command, status, id, idempotency_key, evidence",
+    "internal/cli/cli.go — writeError (922-934): renders errors with failure_class annotation",
+    "internal/gitcode/client.go — Client interface (17-23): CreateIssue, UpdateIssue, CreateIssueComment, CreateWikiPage, UpdateWikiPage, AddLabel, RemoveLabel write methods",
+    "internal/service/service_test.go — TestWriteDryRunNoMutation (57-81): create-issue dry-run → dry_run_valid, audit rows=0, client calls=0",
+    "internal/service/service_test.go — TestWriteLiveSuccessAuditCacheAndReplay (83-119): create-issue live → succeeded, RemoteID=42, ISSUE-42 cached, audit=1 row, replay → Replayed=true, calls=1",
+    "internal/service/service_test.go — TestWritePartialCacheRefreshRetryUsesAuditWithoutSecondAdapterCall (121-149): first write cache refresh fails → write_partial_cache_refresh_failed; retry replay succeeds without adapter call",
+    "internal/service/service_test.go — TestWriteLiveMissingToken (151-159): create-issue live without GITCODE_TOKEN → write_missing_credential",
+    "internal/service/service_test.go — TestAddLabelDryRunNoMutation (161-185): add-label dry-run → dry_run_valid, Command=add-label, calls=0, audit rows=0",
+    "internal/service/service_test.go — TestAddLabelLiveSuccessAuditCacheAndReplay (187-220): add-label live → succeeded, RemoteID=1, ISSUE-1 cached with labels=[bug], replay → Replayed=true, calls=1",
+    "internal/service/service_test.go — TestWriteIdempotencyConflictDetection (222-245): same key, different payload → write_idempotency_conflict error, calls=1"
+  ],
+  "evidence_type": "Go_test_assertions",
+  "freshness": "Current binary at HEAD (commit pending: M internal/service/service.go, M internal/service/service_test.go). All validation is offline and deterministic — no live GitCode API calls, no GITCODE_TOKEN required, no keychain dependency. All 7 write-related service tests pass deterministically using in-memory SQLite and fakeGitCodeClient.",
+  "mocks_used": {
+    "fakeGitCodeClient": "In-memory mock implementing gitcode.Client with configurable WriteResult returns and call counters. Used in all write tests to verify adapter call counts and result shapes without live network.",
+    "writeRefreshFailStore": "Decorator over in-memory SQLite store that injects UpsertRecordGraph failure to exercise partial cache refresh + replay path.",
+    "cache.NewInMemorySQLiteStore": "Deterministic in-memory SQLite store used as the cache backend for all write tests.",
+    "seedStore": "Helper that seeds a minimum fixture corpus with a bound repository (fixture-a, owner-a, repo-a) and required schema for write tests."
+  },
+  "production_files_modified": {
+    "internal/service/service.go": "Replaced Service.AddLabel write_unsupported_deferred stub (line 876-878) with real executeWrite dispatch (876-881). Added validation requiring issue target and label. Added add-label case to callWriteAdapter (1514-1520) dispatching to s.client.AddLabel with issueWriteGraph. Added add-label case to replayWriteGraph (1543) including label reconstruction from audit trail. Added Label field to idempotency fingerprint for conflict detection (via writeIdempotency).",
+    "internal/service/service_test.go": "Updated TestWriteLiveMissingTokenAndAddLabelUnsupported → TestWriteLiveMissingToken (151-159). Added TestAddLabelDryRunNoMutation (161-185): verifies add-label --dry-run returns dry_run_valid with no remote call. Added TestAddLabelLiveSuccessAuditCacheAndReplay (187-220): verifies add-label live creates cache record with correct labels and replays correctly. Added TestWriteIdempotencyConflictDetection (222-245): verifies different payload with same key produces write_idempotency_conflict error."
+  },
+  "validation_scope": "All validation artifacts written only under tests/design_package/003-cmd-gitcode-mcp-task-3-add-live-write-commands-create-issue-create-comm/. Binary built inside task directory, not at repo root. No production source, docs, or configuration files modified during validation.",
+  "live_validation": {
+    "enabled": false,
+    "reason": "Live validation disabled in task config. Requires GITCODE_LIVE_TEST=1, GITCODE_TOKEN, and bound live repository (GITCODE_E2E_REPO_ID).",
+    "gated_by": ["GITCODE_LIVE_TEST=1", "GITCODE_TOKEN", "GITCODE_E2E_REPO_ID or configured repo binding"],
+    "offline_coverage": "All 7 acceptance criteria scenarios are covered by deterministic offline tests: TestWriteLiveSuccessAuditCacheAndReplay (S-1 create + S-2 replay), TestWriteDryRunNoMutation (S-3 dry-run), TestAddLabelDryRunNoMutation (S-6 add-label dry-run), TestWriteIdempotencyConflictDetection (S-4 conflict), TestAddLabelLiveSuccessAuditCacheAndReplay (S-5 add-label live), TestWriteLiveMissingToken (credential check), TestWritePartialCacheRefreshRetryUsesAuditWithoutSecondAdapterCall (partial failure replay)."
+  }
+}

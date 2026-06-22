@@ -157,6 +157,7 @@ spec:
           project:
             workspace_root: "@repo"
             runs_dir: "@artifacts"
+            competitor_repo_cache_root: "@ai/research-repos"
             target_vm_repo: "@repo"
             target_vm_name: GitCode MCP cache-first tooling
             managed_language_name: Go

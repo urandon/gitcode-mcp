@@ -62,6 +62,9 @@ func TestEntrypointHelpRouting(t *testing.T) {
 		if !strings.Contains(stdout.String(), "--mcp") {
 			t.Fatalf("help missing --mcp: %q", stdout.String())
 		}
+		if !strings.Contains(stdout.String(), "--live") {
+			t.Fatalf("help missing --live: %q", stdout.String())
+		}
 		if stderr.Len() != 0 {
 			t.Fatalf("stderr = %q", stderr.String())
 		}
@@ -114,6 +117,65 @@ func TestEntrypointDefaultModeDependencyHandoff(t *testing.T) {
 	}
 	if gotDeps.Config.Format != "json" {
 		t.Fatalf("format = %q", gotDeps.Config.Format)
+	}
+}
+
+func TestEntrypointAuthStatusGlobalLiveRouting(t *testing.T) {
+	src := newTestSource(t)
+	src.env[config.EnvToken] = "sentinel-token"
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--live", "auth", "status"}, strings.NewReader(""), &stdout, &stderr, src)
+	if code != 0 {
+		t.Fatalf("exit = %d stderr=%q", code, stderr.String())
+	}
+	out := stdout.String() + stderr.String()
+	for _, want := range []string{"credential_source: env:GITCODE_TOKEN", "auth_probe_status: skipped"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("auth status missing %q in %q", want, out)
+		}
+	}
+	if strings.Contains(out, "sentinel-token") {
+		t.Fatalf("token emitted stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestEntrypointLiveModeDependencyHandoff(t *testing.T) {
+	src := newTestSource(t)
+	src.env[config.EnvToken] = "sentinel-token"
+	old := cliRoute
+	defer func() { cliRoute = old }()
+	var gotDeps StartupDeps
+	cliRoute = func(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps StartupDeps) int {
+		gotDeps = deps
+		return 0
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--live", "--cache-path", "/tmp/live-cache.db", "sync"}, strings.NewReader(""), &stdout, &stderr, src)
+	if code != 0 {
+		t.Fatalf("exit = %d stderr=%q", code, stderr.String())
+	}
+	if !gotDeps.GitCode.Live {
+		t.Fatalf("live mode not handed off: %#v", gotDeps.GitCode)
+	}
+	if gotDeps.GitCode.Token != "sentinel-token" {
+		t.Fatalf("token not handed off")
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "sentinel-token") {
+		t.Fatalf("token emitted stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestEntrypointLiveModeRequiresToken(t *testing.T) {
+	src := newTestSource(t)
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--live", "--cache-path", cachePath, "search", "test"}, strings.NewReader(""), &stdout, &stderr, src)
+	if code == 0 {
+		t.Fatal("exit = 0")
+	}
+	if !strings.Contains(stderr.String(), "GITCODE_TOKEN") {
+		t.Fatalf("stderr missing token diagnostic: %q", stderr.String())
 	}
 }
 
@@ -175,6 +237,26 @@ func TestEntrypointMCPServeRouting(t *testing.T) {
 	}
 	if gotTransport != "http-sse" || gotBind != "127.0.0.1:9234" {
 		t.Fatalf("route transport=%q bind=%q", gotTransport, gotBind)
+	}
+}
+
+func TestEntrypointMCPServeLiveFlagRouting(t *testing.T) {
+	src := newTestSource(t)
+	src.env[config.EnvToken] = "sentinel-token"
+	old := mcpServeRoute
+	defer func() { mcpServeRoute = old }()
+	var got StartupDeps
+	mcpServeRoute = func(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, deps StartupDeps, transport string, bind string) int {
+		got = deps
+		return 0
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--live", "mcp", "serve", "--transport", "stdio", "--cache-path", filepath.Join(t.TempDir(), "cache.db")}, strings.NewReader(""), &stdout, &stderr, src)
+	if code != 0 {
+		t.Fatalf("exit = %d stderr=%q", code, stderr.String())
+	}
+	if !got.GitCode.Live {
+		t.Fatalf("live mode not handed off: %#v", got.GitCode)
 	}
 }
 

@@ -118,7 +118,7 @@ func (t *HTTPSSETransport) Serve(ctx context.Context) error {
 func (t *HTTPSSETransport) health(w http.ResponseWriter, r *http.Request) {
 	reqID := t.requestID(w, r)
 	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, transportError{Error: errorData{Code: "method_not_allowed", Message: "GET is required"}})
+		t.writeTransportError(w, reqID, "/health", "", http.StatusMethodNotAllowed, "method_not_allowed", "GET is required")
 		return
 	}
 	t.config.Logger.Printf("request_id=%s route=/health status=200", reqID)
@@ -128,7 +128,7 @@ func (t *HTTPSSETransport) health(w http.ResponseWriter, r *http.Request) {
 func (t *HTTPSSETransport) ready(w http.ResponseWriter, r *http.Request) {
 	reqID := t.requestID(w, r)
 	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, transportError{Error: errorData{Code: "method_not_allowed", Message: "GET is required"}})
+		t.writeTransportError(w, reqID, "/ready", "", http.StatusMethodNotAllowed, "method_not_allowed", "GET is required")
 		return
 	}
 	ready := t.config.ReadinessProbe(r.Context())
@@ -144,12 +144,12 @@ func (t *HTTPSSETransport) ready(w http.ResponseWriter, r *http.Request) {
 func (t *HTTPSSETransport) sse(w http.ResponseWriter, r *http.Request) {
 	reqID := t.requestID(w, r)
 	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, transportError{Error: errorData{Code: "method_not_allowed", Message: "GET is required"}})
+		t.writeTransportError(w, reqID, "/sse", "", http.StatusMethodNotAllowed, "method_not_allowed", "GET is required")
 		return
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		writeJSON(w, http.StatusInternalServerError, transportError{Error: errorData{Code: "sse_unsupported", Message: "streaming is not supported"}})
+		t.writeTransportError(w, reqID, "/sse", "", http.StatusInternalServerError, "sse_unsupported", "streaming is not supported")
 		return
 	}
 	session := t.registry.create(r.Context(), t.config.SessionID(), t.config.PerSessionQueue)
@@ -180,28 +180,28 @@ func (t *HTTPSSETransport) sse(w http.ResponseWriter, r *http.Request) {
 func (t *HTTPSSETransport) message(w http.ResponseWriter, r *http.Request) {
 	reqID := t.requestID(w, r)
 	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, transportError{Error: errorData{Code: "method_not_allowed", Message: "POST is required"}})
+		t.writeTransportError(w, reqID, "/message", "", http.StatusMethodNotAllowed, "method_not_allowed", "POST is required")
 		return
 	}
 	sessionID := r.URL.Query().Get("session_id")
 	if sessionID == "" {
-		writeJSON(w, http.StatusBadRequest, transportError{Error: errorData{Code: "missing_session", Message: "session_id is required"}})
+		t.writeTransportError(w, reqID, "/message", "", http.StatusBadRequest, "missing_session", "session_id is required")
 		return
 	}
 	session, ok := t.registry.get(sessionID)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, transportError{Error: errorData{Code: "unknown_session", Message: "session is not live"}})
+		t.writeTransportError(w, reqID, "/message", sessionID, http.StatusNotFound, "unknown_session", "session is not live")
 		return
 	}
 	defer r.Body.Close()
 	var req request
 	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
 	if err := dec.Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, transportError{Error: errorData{Code: "invalid_json", Message: err.Error()}})
+		t.writeTransportError(w, reqID, "/message", sessionID, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
 	if err := ensureSingleJSONValue(dec); err != nil {
-		writeJSON(w, http.StatusBadRequest, transportError{Error: errorData{Code: "invalid_json", Message: err.Error()}})
+		t.writeTransportError(w, reqID, "/message", sessionID, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
 	ctx, cancel := context.WithCancel(session.ctx)
@@ -226,7 +226,7 @@ func (t *HTTPSSETransport) message(w http.ResponseWriter, r *http.Request) {
 				t.config.Logger.Printf("request_id=%s route=/message session_id=%s status=cancelled", reqID, sessionID)
 				return
 			}
-			writeJSON(w, http.StatusTooManyRequests, transportError{Error: errorData{Code: "session_queue_full", Message: "session response queue is full"}})
+			t.writeTransportError(w, reqID, "/message", sessionID, http.StatusTooManyRequests, "session_queue_full", "session response queue is full")
 			return
 		}
 	}
@@ -244,12 +244,32 @@ func (t *HTTPSSETransport) requestID(w http.ResponseWriter, r *http.Request) str
 	return reqID
 }
 
+func (t *HTTPSSETransport) writeTransportError(w http.ResponseWriter, reqID string, route string, sessionID string, status int, code string, message string) {
+	if sessionID == "" {
+		t.config.Logger.Printf("request_id=%s route=%s status=%d code=%s", reqID, route, status, code)
+	} else {
+		t.config.Logger.Printf("request_id=%s route=%s session_id=%s status=%d code=%s", reqID, route, sessionID, status, code)
+	}
+	writeJSON(w, status, transportError{Error: errorData{Code: code, Message: message}})
+}
+
 func (r *sessionRegistry) create(parent context.Context, id string, queue int) *ClientSession {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	baseID := strings.TrimSpace(id)
+	if baseID == "" {
+		baseID = randomID()
+	}
+	uniqueID := baseID
+	for i := 2; ; i++ {
+		if _, exists := r.sessions[uniqueID]; !exists {
+			break
+		}
+		uniqueID = fmt.Sprintf("%s-%d", baseID, i)
+	}
 	ctx, cancel := context.WithCancel(parent)
-	s := &ClientSession{id: id, ctx: ctx, cancel: cancel, out: make(chan response, queue), lastActivity: time.Now().UTC()}
-	r.sessions[id] = s
+	s := &ClientSession{id: uniqueID, ctx: ctx, cancel: cancel, out: make(chan response, queue), lastActivity: time.Now().UTC()}
+	r.sessions[uniqueID] = s
 	return s
 }
 

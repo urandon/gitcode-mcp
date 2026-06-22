@@ -1,10 +1,21 @@
 package service
 
 import (
+	"fmt"
 	"time"
 
+	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
 )
+
+type ServiceConfig struct {
+	BaseURL         string
+	Timeout         time.Duration
+	MaxResponseSize int64
+	MaxRetries      int
+	UserAgent       string
+	Pagination      gitcode.PaginationConfig
+}
 
 type RepositoryScope string
 
@@ -260,15 +271,18 @@ type SyncStatusResult struct {
 }
 
 type SyncStatusSummaryResult struct {
-	RepoID     string             `json:"repo_id"`
-	Results    []SyncStatusResult `json:"results"`
-	FreshCount int                `json:"fresh_count"`
-	StaleCount int                `json:"stale_count"`
-	LastSyncAt time.Time          `json:"last_sync_at"`
-	CacheEmpty bool               `json:"cache_empty"`
-	Limit      int                `json:"limit"`
-	Offset     int                `json:"offset"`
-	Warnings   []string           `json:"warnings,omitempty"`
+	RepoID              string             `json:"repo_id"`
+	Results             []SyncStatusResult `json:"results"`
+	FreshCount          int                `json:"fresh_count"`
+	StaleCount          int                `json:"stale_count"`
+	LastSyncAt          time.Time          `json:"last_sync_at"`
+	LastSyncStartedAt   time.Time          `json:"last_sync_started_at"`
+	LastSyncCompletedAt time.Time          `json:"last_sync_completed_at"`
+	ZeroDelta           bool               `json:"zero_delta"`
+	CacheEmpty          bool               `json:"cache_empty"`
+	Limit               int                `json:"limit"`
+	Offset              int                `json:"offset"`
+	Warnings            []string           `json:"warnings,omitempty"`
 }
 
 type FreshnessState = string
@@ -312,6 +326,37 @@ type SyncResult struct {
 	SyncEventID    string     `json:"sync_event_id"`
 	Freshness      string     `json:"freshness"`
 	GeneratedAt    time.Time  `json:"generated_at"`
+	StartedAt      time.Time  `json:"started_at"`
+	CompletedAt    time.Time  `json:"completed_at"`
+	ZeroDelta      bool       `json:"zero_delta"`
+}
+
+type SyncResourcesResult struct {
+	Results      []SyncResult    `json:"results"`
+	SuccessCount int             `json:"success_count"`
+	FailureCount int             `json:"failure_count"`
+	Failures     []ResourceError `json:"failures,omitempty"`
+}
+
+type ResourceError struct {
+	SourceID   string `json:"source_id"`
+	RemoteType string `json:"remote_type"`
+	Err        error  `json:"-"`
+	Message    string `json:"message"`
+}
+
+func (e ResourceError) Error() string {
+	return e.Message
+}
+
+type PartialSyncError struct {
+	Errors       []ResourceError `json:"errors"`
+	SuccessCount int             `json:"success_count"`
+	FailureCount int             `json:"failure_count"`
+}
+
+func (e PartialSyncError) Error() string {
+	return fmt.Sprintf("sync: %d succeeded, %d failed", e.SuccessCount, e.FailureCount)
 }
 
 type RecentChangesRequest struct {
@@ -583,4 +628,22 @@ type WriteCommandResult struct {
 	Replayed          bool      `json:"replayed,omitempty"`
 	Evidence          string    `json:"evidence,omitempty"`
 	GeneratedAt       time.Time `json:"generated_at"`
+}
+
+type BulkSyncScope string
+
+const (
+	BulkSyncScopeIssues BulkSyncScope = "issues"
+	BulkSyncScopeWiki   BulkSyncScope = "wiki"
+	BulkSyncScopeAll    BulkSyncScope = "all"
+)
+
+type BulkSyncRequest struct {
+	RepoID         string        `json:"repo_id"`
+	Scope          BulkSyncScope `json:"scope"`
+	IdempotencyKey string        `json:"idempotency_key,omitempty"`
+	MaxAttempts    int           `json:"max_attempts,omitempty"`
+	MaxSize        int64         `json:"max_size,omitempty"`
+	Page           int           `json:"page,omitempty"`
+	PerPage        int           `json:"per_page,omitempty"`
 }

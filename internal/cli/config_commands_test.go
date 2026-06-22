@@ -136,6 +136,81 @@ func TestConfigAuthCommandsRedactedUX(t *testing.T) {
 			t.Fatalf("raw provider error leaked: %q", out)
 		}
 	})
+
+	t.Run("SCN-AUTH-STATUS-ENV", func(t *testing.T) {
+		src := newCLIConfigSource(t)
+		src.env[config.EnvToken] = "secret-token-value"
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps([]string{"auth", "status"}, &stdout, &stderr, nil, localCommandDeps{Source: src})
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		out := stdout.String() + stderr.String()
+		for _, want := range []string{"credential_source: env:GITCODE_TOKEN", "token_present: true", "available_sources: env:GITCODE_TOKEN"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("auth missing %q in %q", want, out)
+			}
+		}
+		if strings.Contains(out, "secret-token-value") {
+			t.Fatalf("auth status leaked token: %q", out)
+		}
+	})
+
+	t.Run("SCN-AUTH-STATUS-REDACTS-DIAGNOSTIC-SURFACES", func(t *testing.T) {
+		src := newCLIConfigSource(t)
+		src.env[config.EnvToken] = "secret-token-value"
+		src.env["GITCODE_E2E_OWNER"] = "private-owner"
+		src.env["GITCODE_E2E_REPO"] = "private-repo"
+		reporter := statusReporter{status: config.CredentialStatus{Source: "env:GITCODE_TOKEN", Present: true, StoreMode: "env", Remediation: "Authorization: Bearer secret-token-value for private-owner/private-repo"}}
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps([]string{"auth", "status"}, &stdout, &stderr, nil, localCommandDeps{Source: src, CredentialReporter: reporter})
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		out := stdout.String() + stderr.String()
+		for _, forbidden := range []string{"secret-token-value", "private-owner", "private-repo", "Bearer secret-token-value"} {
+			if strings.Contains(out, forbidden) {
+				t.Fatalf("auth status leaked %q: %q", forbidden, out)
+			}
+		}
+		if !strings.Contains(out, "[REDACTED]") {
+			t.Fatalf("auth status missing redaction marker: %q", out)
+		}
+	})
+
+	t.Run("SCN-AUTH-STATUS-NO-TOKEN", func(t *testing.T) {
+		src := newCLIConfigSource(t)
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps([]string{"auth", "status"}, &stdout, &stderr, nil, localCommandDeps{Source: src})
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		out := stdout.String() + stderr.String()
+		for _, want := range []string{"credential_source: missing", "token_present: false", "available_sources:", "env:GITCODE_TOKEN", "keychain", "credential_error_class: token-missing"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("auth missing %q in %q", want, out)
+			}
+		}
+	})
+
+	t.Run("SCN-AUTH-STATUS-JSON", func(t *testing.T) {
+		src := newCLIConfigSource(t)
+		src.env[config.EnvToken] = "secret-token-value"
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps([]string{"auth", "status", "--format", "json"}, &stdout, &stderr, nil, localCommandDeps{Source: src})
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		out := stdout.String() + stderr.String()
+		for _, want := range []string{"\"source\": \"env:GITCODE_TOKEN\"", "\"present\": true", "\"available_sources\""} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("auth json missing %q in %q", want, out)
+			}
+		}
+		if strings.Contains(out, "secret-token-value") {
+			t.Fatalf("auth json leaked token: %q", out)
+		}
+	})
 }
 
 func TestRuntimeAuditDoctorCommand(t *testing.T) {
@@ -206,4 +281,137 @@ func TestConfigCommandDoesNotOpenService(t *testing.T) {
 	if called {
 		t.Fatalf("local command opened service")
 	}
+}
+
+func TestDoctorCommandFull(t *testing.T) {
+	t.Run("SCN-004-001-json-empty-cache", func(t *testing.T) {
+		src := newCLIConfigSource(t)
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps([]string{"doctor", "--format", "json"}, &stdout, &stderr, nil, localCommandDeps{Source: src})
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		out := stdout.String()
+		for _, want := range []string{`"version"`, `"config"`, `"cache"`, `"credential"`, `"repo"`, `"sync"`, `"index"`, `"mcp"`, `"live_provider"`, `"auth_probe"`} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("doctor json missing %q in %q", want, out)
+			}
+		}
+	})
+
+	t.Run("SCN-004-002-no-binding", func(t *testing.T) {
+		src := newCLIConfigSource(t)
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps([]string{"doctor"}, &stdout, &stderr, nil, localCommandDeps{Source: src})
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		out := stdout.String() + stderr.String()
+		if !strings.Contains(out, "no_repo_bound") {
+			t.Fatalf("doctor missing no_repo_bound in %q", out)
+		}
+		if !strings.Contains(out, "bind_hint") {
+			t.Fatalf("doctor missing bind_hint in %q", out)
+		}
+	})
+
+	t.Run("SCN-004-003-no-token", func(t *testing.T) {
+		src := newCLIConfigSource(t)
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps([]string{"doctor"}, &stdout, &stderr, nil, localCommandDeps{Source: src})
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		out := stdout.String() + stderr.String()
+		if !strings.Contains(out, "no_token_configured") {
+			t.Fatalf("doctor missing no_token_configured in %q", out)
+		}
+		if !strings.Contains(out, "available_sources") {
+			t.Fatalf("doctor missing available_sources in %q", out)
+		}
+	})
+
+	t.Run("SCN-004-004-token-redacted", func(t *testing.T) {
+		src := newCLIConfigSource(t)
+		src.env[config.EnvToken] = "secret-token-value"
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps([]string{"doctor", "--format", "json"}, &stdout, &stderr, nil, localCommandDeps{Source: src})
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		out := stdout.String()
+		if !strings.Contains(out, `"token_present": true`) {
+			t.Fatalf("doctor json missing token_present in %q", out)
+		}
+		if !strings.Contains(out, `"status": "token_configured"`) {
+			t.Fatalf("doctor json missing token_configured in %q", out)
+		}
+		if strings.Contains(out, "secret-token-value") {
+			t.Fatalf("doctor leaked token value: %q", out)
+		}
+	})
+
+	t.Run("SCN-004-005-runtime-audit-compat", func(t *testing.T) {
+		src := newCLIConfigSource(t)
+		src.env[config.EnvToken] = "secret-token-value"
+		path := filepath.Join(t.TempDir(), "active.yaml")
+		if err := os.WriteFile(path, []byte("cache_path: /tmp/runtime-cache.db\ncredential:\n  store: env\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		src.env[config.EnvMCPConfigPath] = path
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps([]string{"doctor", "--runtime-audit", "--repo", "fixture-repo"}, &stdout, &stderr, nil, localCommandDeps{Source: src})
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		out := stdout.String() + stderr.String()
+		for _, want := range []string{"repo_id: fixture-repo", "version: 0.1.0", "token_present: true", "cache: not_reported_by_owner", "repo: not_reported_by_owner", "mcp: not_reported_by_owner", "index: not_reported_by_owner"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("doctor --runtime-audit missing %q in %q", want, out)
+			}
+		}
+		if strings.Contains(out, "secret-token-value") {
+			t.Fatalf("doctor --runtime-audit leaked token: %q", out)
+		}
+	})
+
+	t.Run("SCN-004-006-full-text-output", func(t *testing.T) {
+		src := newCLIConfigSource(t)
+		src.env[config.EnvToken] = "secret-token-value"
+		path := filepath.Join(t.TempDir(), "active.yaml")
+		if err := os.WriteFile(path, []byte("cache_path: /tmp/full-doctor-cache.db\ncredential:\n  store: env\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		src.env[config.EnvMCPConfigPath] = path
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps([]string{"doctor"}, &stdout, &stderr, nil, localCommandDeps{Source: src})
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		out := stdout.String() + stderr.String()
+		for _, want := range []string{
+			"version: 0.1.0",
+			"config:",
+			"cache:",
+			"credential:",
+			"repo:",
+			"sync:",
+			"index:",
+			"mcp:",
+			"live_provider:",
+			"auth_probe:",
+			"status:",
+			"token_configured",
+			"transport_stdio: supported",
+			"transport_http: supported",
+			"server_version: 0.1.0",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("doctor text missing %q in %q", want, out)
+			}
+		}
+		if strings.Contains(out, "secret-token-value") {
+			t.Fatalf("doctor leaked token: %q", out)
+		}
+	})
 }

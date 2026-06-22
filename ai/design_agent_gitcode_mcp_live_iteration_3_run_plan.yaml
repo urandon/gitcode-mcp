@@ -1,0 +1,189 @@
+apiVersion: triborg.dev/v0alpha1
+kind: WorkflowRunPlan
+metadata:
+  id: gitcode-mcp-live-readiness-iteration-3-design-run-plan
+  title: GitCode MCP live-readiness iteration 3 design run
+spec:
+  workflow: triborg-design-agent-ywd
+  workflow_id_prefix: gitcode-mcp-live-readiness-design-agent
+  runtime:
+    path_aliases:
+      repo: "@plan_dir/.."
+      ai: "@repo/ai"
+      artifacts: "@ai/artifacts"
+    artifacts_root: "@artifacts"
+  cases:
+    - run_label: gitcode_mcp_live_readiness_iteration_3
+      input:
+        task_markdown: |
+          Design the third implementation iteration for `gitcode-mcp`.
+
+          The target outcome is no longer fixture-only dogfood. After this iteration, an operator should be able to use a real GitCode test repository with `gitcode-mcp` through CLI and MCP:
+
+          - configure a repository binding without committing private coordinates;
+          - supply a token safely through env or an OS credential store path;
+          - run live sync against GitCode issues and wiki pages;
+          - perform at least one gated live write with idempotency;
+          - read the synced cache through CLI and connected MCP tools;
+          - repeat sync from a second empty cache database to prove the remote, not fixtures, is the source of truth.
+
+          Repository safety:
+          - This repository is public-safe. Durable output must not contain private repository URLs, private owner/repo names, tokens, cookies, raw Authorization headers, raw API responses, or unsanitized transcripts.
+          - Live test repository coordinates must be represented as placeholders or operator-local environment variables such as `GITCODE_E2E_REPO_ID`, `GITCODE_E2E_OWNER`, and `GITCODE_E2E_REPO`.
+          - The private polygon itself may be used by an operator during validation, but only redacted summaries and sanitized fixtures may be committed.
+
+          Current baseline from iteration 2:
+          - `main` contains repo-scoped cache schema, repository binding, fixture-backed sync/index, CLI read handlers, write command gates, runtime audit config, MCP read tools, HTTP/SSE transport, docs smoke, fixture validation, and dogfood feedback tooling.
+          - `docs/triborg/design-package-iteration-1` preserves the first design package.
+          - `docs/triborg/design-package-iteration-2` preserves the second design package. Do not move it again, copy it elsewhere, or delete it.
+          - A future design/implementator run may create a fresh `docs/triborg/design-package` for iteration 3 output.
+          - `ai/design-package-iteration-2.zip` remains the iteration 2 implementator input. Do not rename or rewrite prior zip artifacts as part of this design run.
+
+          Evidence from live/operator testing after iteration 2:
+          1. The Codex MCP server can be launched through the local macOS Keychain wrapper when `GITCODE_MCP_CACHE_DIR` points at a fresh cache directory.
+          2. The wrapper reaches `gitcode-mcp --mcp`; the earlier token failure was a sandbox/environment symptom, not the current product blocker.
+          3. Connected MCP tools work for cache reads after repo binding and sync: `cache_status`, `list_sources`, `get_source`, `sync_status`, `list_chunks`, and `search_chunks`.
+          4. Repo binding and sync can populate records, comments, identities, sync events, remote revisions, and chunks in the fresh cache.
+          5. The populated records are still fixture-shaped (`ISSUE-42`, `WIKI-HOME`, fixture body text), proving that live GitCode provider wiring is not active in normal runtime.
+          6. `create-issue --live` with a token and idempotency key fails with `fixture client is read-only`; `service.New` still installs `sanitizedFixtureClient`.
+          7. Fresh chunks are immediately reported as `stale_index` with `indexed_at` at zero time and mismatched indexed/current content hashes.
+          8. `search_chunks` returns indexed chunk matches, but `search_sources` returns `cache_empty` after the same sync/index.
+          9. MCP source kind schemas still expose legacy `source/task/page/decision/handoff` enums while actual records are `issue` and `wiki`.
+          10. Several subcommand `--help` paths still return invalid-query diagnostics.
+          11. The current credential layer reports env/token status, but native Keychain/credential-store resolution is not implemented. The local wrapper remains useful but should become optional product scaffolding, not the only safe path.
+          12. Runtime audit reports config and credential status, but does not yet provide enough repo/cache/index/MCP readiness detail to guide live setup without an agent.
+
+          Goals for this design run:
+          1. Produce a focused live-readiness design package for iteration 3, suitable for a follow-up implementator run.
+          2. Define the runtime wiring that selects a live GitCode provider for explicit sync/write/live-validation paths while preserving fixture/offline defaults for routine tests.
+          3. Define credential handling for the third iteration: env token as the portable baseline, optional native macOS Keychain credential provider, wrapper compatibility, `auth status`/preflight behavior, and public-safe diagnostics.
+          4. Define live sync behavior for configured GitCode repositories: issues, comments, wiki pages, pagination, auth failure, rate limit, not found, conflicts, and partial sync failure handling.
+          5. Define live write behavior for issue create/update, comments, wiki page create/update, and labels if supported by current GitCode API evidence, with explicit `--live`, dry-run, idempotency keys, audit rows, replay, and cache refresh.
+          6. Define a redacted two-cache e2e harness that proves remote write -> sync/index -> CLI/MCP read from cache A -> sync/index/read from cache B.
+          7. Fix the post-sync index freshness contract so a fresh `sync --index` or `index --full` reports zero stale-index warnings unless source content actually changed.
+          8. Fix source search so `search_sources` works after sync/index or is explicitly redefined to query the right cache/FTS source.
+          9. Fix MCP tool schemas and docs so kind filters include real repo source kinds such as `issue` and `wiki`.
+          10. Fix CLI help and command discovery so agents can learn valid subcommands without tripping invalid-query errors.
+          11. Define cache migration/opening behavior for old iteration 1/2 cache DBs, including actionable stale-schema diagnostics or automatic migrations.
+          12. Define readiness and doctor output that lets an operator answer: binary version, active config, cache path, schema version, repo binding, token source, live provider availability, GitCode auth probe, endpoint reachability, last sync, index freshness, MCP transport health.
+          13. Keep the design public-safe and implementation-scoped; do not request broad product rewrites or unrelated RAG/vector work.
+
+          Required output shape:
+          - Executive summary: why iteration 3 exists and what "live GitCode usable" means.
+          - Current-state vs target-state table grounded in iteration 2 live/MCP observations.
+          - Component catalog for the minimal live-readiness slice.
+          - Runtime provider selection design: fixture provider, unavailable provider, live provider, config/token flow, and test gates.
+          - Credential and secret handling design: env baseline, macOS Keychain/native provider option, wrapper compatibility, `auth status`, no-token diagnostics, redaction policy, and CI/headless behavior.
+          - Live sync design: repo binding, API route construction, pagination, comments/wiki support, sync event semantics, cache refresh, partial failure behavior, retry/rate-limit/auth handling.
+          - Live write design: dry-run/live split, idempotency, replay, audit trail, remote confirmation, cache refresh, conflicts, and supported issue/wiki/comment/label operations.
+          - Two-cache e2e plan with sanitized placeholders and redacted transcript requirements.
+          - MCP parity plan: tool schemas, kind enums, connected-client read parity, HTTP/SSE validation, and stdio wrapper validation.
+          - Index/search correctness plan: stale-index false positive fix, source search vs chunk search behavior, tests, and expected warnings.
+          - CLI/help/discoverability plan.
+          - Cache schema compatibility and migration/open diagnostics plan.
+          - Doctor/readiness plan for operator self-service setup.
+          - Documentation updates needed after iteration 3.
+          - Public-safety requirements and fixture/live transcript sanitization rules.
+          - Ordered implementation tasks with acceptance criteria, dependencies, and validation commands.
+          - Explicit non-goals and deferred work.
+
+          Acceptance target for the implementator that will consume this design:
+          - Default `go test ./...` remains offline and deterministic.
+          - A credential-gated e2e run, when the operator provides sanitized live repo coordinates and a token, proves real GitCode issue/wiki sync and at least one live write.
+          - Connected MCP tools can read the live-synced cache without shell access.
+          - No token, private URL, private owner/repo name, raw API payload, cookie, or Authorization header appears in tracked files or redacted transcripts.
+        require_clarification_stages: []
+        design_agent:
+          project:
+            workspace_root: "@repo"
+            runs_dir: "@artifacts"
+            competitor_repo_cache_root: "@ai/research-repos"
+            target_vm_repo: "@repo"
+            target_vm_name: GitCode MCP live-readiness iteration
+            managed_language_name: Go
+            language_spec_files:
+              - "@repo/README.md"
+              - "@repo/AGENTS.md"
+              - "@repo/project/tasks/backlog.md"
+              - "@repo/docs/architecture.md"
+              - "@repo/docs/cache-and-sync-model.md"
+              - "@repo/docs/gitcode-api-discovery.md"
+              - "@repo/docs/config-reference.md"
+              - "@repo/docs/secrets.md"
+              - "@repo/docs/mcp-setup.md"
+              - "@repo/docs/read-walkthrough.md"
+              - "@repo/docs/write-walkthrough.md"
+              - "@repo/docs/troubleshooting.md"
+              - "@repo/docs/operations/mcp-installation-and-secrets.md"
+              - "@repo/project/handoffs/HANDOFF_2026-06-20_E2E_PRIVATE_POLYGON_EXPANSION.md"
+              - "@repo/docs/triborg/design-package-iteration-2/architecture.md"
+              - "@repo/docs/triborg/design-package-iteration-2/tasks.json"
+              - "@repo/docs/triborg/design-package-iteration-2/outcome-contract.json"
+          competitors:
+            - id: mcp
+              name: Model Context Protocol
+              source_url: https://github.com/modelcontextprotocol/modelcontextprotocol
+              language: Protocol/tooling
+              runtime: JSON-RPC tool protocol, stdio transport, and HTTP/SSE or streamable HTTP compatibility evidence.
+            - id: gh-cli
+              name: GitHub CLI
+              source_url: https://github.com/cli/cli
+              language: Go
+              runtime: Reference for auth status, token storage UX, command help, and hosted repository workflows.
+            - id: git-credential-manager
+              name: Git Credential Manager
+              source_url: https://github.com/git-ecosystem/git-credential-manager
+              language: C#
+              runtime: Reference for cross-platform credential-store UX and diagnostics.
+            - id: go-keyring
+              name: go-keyring
+              source_url: https://github.com/zalando/go-keyring
+              language: Go
+              runtime: Reference for Go access to OS credential stores.
+            - id: keyring
+              name: 99designs keyring
+              source_url: https://github.com/99designs/keyring
+              language: Go
+              runtime: Reference for cross-platform secret storage abstraction tradeoffs.
+          components: []
+          search:
+            provider: exa
+            max_queries: 18
+            max_results: 50
+            max_sources: 100
+            gap_fill_enabled: true
+            fallback_queries:
+              - query: GitCode API v5 issues comments wiki create update authentication token pagination rate limit
+                intent: Verify live GitCode API routes and failure modes for sync/write support.
+                priority: high
+              - query: GitCode API repository owner repo namespace wiki issue comment docs.gitcode.com
+                intent: Verify repo binding fields and route construction for live repositories.
+                priority: high
+              - query: Model Context Protocol streamable HTTP SSE stdio server tools list schema
+                intent: Verify current MCP transport and schema expectations for connected clients.
+                priority: medium
+              - query: Go keychain macOS Keychain Linux Secret Service Windows Credential Manager library credential provider
+                intent: Compare native credential-store implementation options.
+                priority: high
+              - query: GitHub CLI auth status login token keyring Go implementation
+                intent: Use mature Go CLI auth/config UX as reference for iteration 3.
+                priority: medium
+              - query: SQLite FTS5 contentless external content table update delete rebuild stale index
+                intent: Diagnose source search and stale index design choices.
+                priority: high
+              - query: SQLite schema migration user_version Go application startup compatibility
+                intent: Design old-cache migration/open diagnostics.
+                priority: medium
+              - query: Go CLI command help subcommand flag parsing pflag flag package usage
+                intent: Fix discoverability and help behavior.
+                priority: medium
+          runtime:
+            max_auto_top_level_architecture_review_iterations: 3
+            max_auto_component_review_iterations: 10
+            enable_clarifications: true
+            allow_network_for_research: true
+            allow_network_for_plan: true
+            allow_network_for_component_design: true
+            fail_fast: false
+            top_level_architecture_approval_mode: auto
+            top_level_retry_exhausted_policy: human_review

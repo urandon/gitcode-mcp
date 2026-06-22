@@ -1,0 +1,28 @@
+{
+  "covered_outcome_ids": ["outcome-1"],
+  "covered_decommission_ids": ["decommission-1", "decommission-2"],
+  "product_surfaces": [
+    "internal/gitcode/provider.go",
+    "internal/gitcode/fixture_provider.go",
+    "internal/gitcode/provider_errors.go",
+    "internal/gitcode/provider_test.go",
+    "internal/service/service.go",
+    "internal/service/service_test.go"
+  ],
+  "evidence_type": "go_test",
+  "freshness": "current_binary",
+  "mocks_used": [
+    "newHTTPClientForProvider (function variable override for NewLiveProvider admission test)",
+    "httptest.Server (external HTTP endpoint for live mode dispatch test in service layer)",
+    "cache.NewInMemorySQLiteStore (in-memory store, no disk)",
+    "fakeGitCodeClient (internal service test helper)"
+  ],
+  "production_files_modified": [
+    "internal/gitcode/provider.go",
+    "internal/gitcode/fixture_provider.go",
+    "internal/gitcode/provider_errors.go",
+    "internal/gitcode/provider_test.go",
+    "internal/service/service.go",
+    "internal/service/service_test.go"
+  ]
+}

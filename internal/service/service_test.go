@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,7 +15,230 @@ import (
 
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/gitcode"
+	"gitcode-mcp/internal/index"
 )
+
+func TestNewDelegatesToFixture(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	svc := New(store)
+	if got := svc.ProviderMode(); got != gitcode.ProviderModeFixture {
+		t.Fatalf("ProviderMode() = %q, want %q", got, gitcode.ProviderModeFixture)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "fixture-a", RemoteAlias: "issue:42", IdempotencyKey: "new-fixture-sync"}); err != nil {
+		t.Fatalf("SyncToCache returned error: %v", err)
+	}
+	if _, err := store.GetSourceScoped(ctx, "fixture-a", "ISSUE-42"); err != nil {
+		t.Fatalf("fixture source missing: %v", err)
+	}
+}
+
+func TestNewWithModeFixture(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	svc, err := NewWithMode(store, gitcode.ProviderModeFixture, "", ServiceConfig{})
+	if err != nil {
+		t.Fatalf("NewWithMode fixture returned error: %v", err)
+	}
+	if got := svc.ProviderMode(); got != gitcode.ProviderModeFixture {
+		t.Fatalf("ProviderMode() = %q, want %q", got, gitcode.ProviderModeFixture)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "fixture-a", RemoteAlias: "wiki:Home", IdempotencyKey: "mode-fixture-sync"}); err != nil {
+		t.Fatalf("SyncToCache returned error: %v", err)
+	}
+	if _, err := store.GetSourceScoped(ctx, "fixture-a", "WIKI-HOME"); err != nil {
+		t.Fatalf("fixture wiki source missing: %v", err)
+	}
+	if _, err := svc.Index(ctx, OperationRequest{RepoID: "fixture-a", Mode: "full"}); err != nil {
+		t.Fatalf("Index returned error: %v", err)
+	}
+	results, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: "test", Limit: 20})
+	if err != nil {
+		t.Fatalf("fixture search_sources test returned error: %v", err)
+	}
+	if len(results.Results) == 0 {
+		t.Fatalf("fixture search_sources test returned no results")
+	}
+}
+
+func TestNewWithModeLive(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	base := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			http.Error(w, "missing authorization", http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/api/v5/repos/owner-a/repo-a/issues/42":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"remote-42","number":42,"title":"Live Issue","body":"live issue body","state":"open","created_at":"` + base.Format(time.RFC3339) + `","updated_at":"` + base.Format(time.RFC3339) + `"}`))
+		case "/api/v5/repos/owner-a/repo-a/issues/42/comments":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			http.Error(w, "unexpected path", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: server.URL, Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := NewWithMode(store, gitcode.ProviderModeLive, "test-token", ServiceConfig{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewWithMode live returned error: %v", err)
+	}
+	if got := svc.ProviderMode(); got != gitcode.ProviderModeLive {
+		t.Fatalf("ProviderMode() = %q, want %q", got, gitcode.ProviderModeLive)
+	}
+	if _, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "fixture-a", RemoteAlias: "issue:42", IdempotencyKey: "mode-live-sync"}); err != nil {
+		t.Fatalf("SyncToCache returned error: %v", err)
+	}
+	source, err := store.GetSourceScoped(ctx, "fixture-a", "ISSUE-42")
+	if err != nil {
+		t.Fatalf("live source missing: %v", err)
+	}
+	if source.Title != "Live Issue" {
+		t.Fatalf("source title = %q, want Live Issue", source.Title)
+	}
+}
+
+func TestS018LiveWriteUsesConstructedLiveClientWithoutEnv(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v5/repos/owner-a/repo-a/issues" {
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer live-token" || r.Header.Get("Idempotency-Key") != "live-key-1" {
+			http.Error(w, "missing live headers", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"remote-77","number":77,"title":"Live Create","body":"body","state":"open"}`))
+	}))
+	defer server.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: server.URL, Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GITCODE_TOKEN", "")
+	svc, err := NewWithMode(store, gitcode.ProviderModeLive, "live-token", ServiceConfig{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewWithMode live returned error: %v", err)
+	}
+	result, err := svc.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "Live Create", Body: "body", IdempotencyKey: "live-key-1"})
+	if err != nil {
+		t.Fatalf("CreateIssue live returned error: %v", err)
+	}
+	if result.Status != "succeeded" || result.RemoteID != "remote-77" || requests != 1 {
+		t.Fatalf("result=%#v requests=%d", result, requests)
+	}
+	if _, err := store.GetRecord(ctx, "fixture-a", "ISSUE-REMOTE-77"); err != nil {
+		if _, fallbackErr := store.GetRecord(ctx, "fixture-a", "ISSUE-77"); fallbackErr != nil {
+			t.Fatalf("live write did not refresh cache: %v", err)
+		}
+	}
+}
+
+func TestS018LiveWriteConflictMaps409(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"message":"conflict","remote":"existing"}`))
+	}))
+	defer server.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: server.URL, Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := NewWithMode(store, gitcode.ProviderModeLive, "live-token", ServiceConfig{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewWithMode live returned error: %v", err)
+	}
+	_, err = svc.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "Conflict", IdempotencyKey: "conflict-key-1"})
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_conflict" {
+		t.Fatalf("err=%v want write_conflict", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests=%d want 1", requests)
+	}
+	counts, err := store.RecordCounts(ctx, "fixture-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.AuditRows != 1 {
+		t.Fatalf("audit rows=%d want 1", counts.AuditRows)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", "conflict-key-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry == nil || entry.Status != "failed" || entry.Message != "write_conflict" {
+		t.Fatalf("audit entry=%#v", entry)
+	}
+}
+
+func TestNewWithModeUnavailable(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if svc, err := NewWithMode(store, gitcode.ProviderModeUnavailable, "", ServiceConfig{}); svc != nil || !gitcode.IsProviderUnavailable(err) {
+		t.Fatalf("NewWithMode unavailable svc=%#v err=%v, want provider unavailable", svc, err)
+	}
+	if svc, err := NewWithMode(store, gitcode.ProviderModeLive, "", ServiceConfig{}); svc != nil || !gitcode.IsProviderUnavailable(err) {
+		t.Fatalf("NewWithMode live without token svc=%#v err=%v, want provider unavailable", svc, err)
+	}
+}
+
+func TestNewWithClientSetsProviderMode(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	svc := NewWithClient(store, &fakeGitCodeClient{})
+	if got := svc.ProviderMode(); got != gitcode.ProviderMode("custom") {
+		t.Fatalf("ProviderMode() = %q, want custom", got)
+	}
+}
 
 func TestRepositoryRegistry(t *testing.T) {
 	ctx := context.Background()
@@ -113,7 +338,7 @@ func TestWriteLiveSuccessAuditCacheAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateIssue replay returned error: %v", err)
 	}
-	if !replay.Replayed || client.createIssueCalls != 1 {
+	if replay.Status != "already_applied" || !replay.Replayed || client.createIssueCalls != 1 {
 		t.Fatalf("replay=%#v calls=%d", replay, client.createIssueCalls)
 	}
 }
@@ -148,7 +373,7 @@ func TestWritePartialCacheRefreshRetryUsesAuditWithoutSecondAdapterCall(t *testi
 	}
 }
 
-func TestWriteLiveMissingTokenAndAddLabelUnsupported(t *testing.T) {
+func TestWriteLiveMissingToken(t *testing.T) {
 	ctx := context.Background()
 	svc := seededSyncService(t, ctx, &fakeGitCodeClient{})
 	_, err := svc.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "T"})
@@ -156,9 +381,226 @@ func TestWriteLiveMissingTokenAndAddLabelUnsupported(t *testing.T) {
 	if !errors.As(err, &writeErr) || writeErr.Code != "write_missing_credential" {
 		t.Fatalf("missing token err=%v", err)
 	}
-	_, err = svc.AddLabel(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 1, Label: "bug"})
-	if !errors.As(err, &writeErr) || writeErr.Code != "write_unsupported_deferred" {
-		t.Fatalf("add-label err=%v", err)
+}
+
+func TestAddLabelDryRunNoMutation(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{}
+	svc := NewWithClient(store, client)
+	result, err := svc.AddLabel(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeDryRun, Number: 1, Label: "bug"})
+	if err != nil {
+		t.Fatalf("AddLabel dry-run returned error: %v", err)
+	}
+	if result.Status != "dry_run_valid" || result.Command != "add-label" || client.addLabelCalls != 0 {
+		t.Fatalf("dry-run result=%#v calls=%d", result, client.addLabelCalls)
+	}
+	counts, err := store.RecordCounts(ctx, "fixture-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.AuditRows != 0 {
+		t.Fatalf("audit rows=%d want 0", counts.AuditRows)
+	}
+}
+
+func TestAddLabelLiveSuccessAuditCacheAndReplay(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{addLabelResult: gitcode.WriteResult[gitcode.Issue]{Record: gitcode.Issue{ID: "remote-1", Number: 1, Title: "Issue 1", Body: "B", State: "open", Labels: []string{"bug"}}, Confirmed: true, Operation: "AddLabel", RemoteID: "1", RemoteNumber: 1, ConfirmedAt: time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)}}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	request := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 1, Label: "bug", IdempotencyKey: "label-key-1"}
+	result, err := svc.AddLabel(ctx, request)
+	if err != nil {
+		t.Fatalf("AddLabel live returned error: %v", err)
+	}
+	if result.Status != "succeeded" || result.RemoteID != "1" || result.ID != "ISSUE-1" || client.addLabelCalls != 1 {
+		t.Fatalf("live result=%#v calls=%d", result, client.addLabelCalls)
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", "ISSUE-1")
+	if err != nil {
+		t.Fatalf("refreshed record missing: %v", err)
+	}
+	if len(record.Labels) != 1 || record.Labels[0] != "bug" {
+		t.Fatalf("labels=%#v want bug", record.Labels)
+	}
+	replay, err := svc.AddLabel(ctx, request)
+	if err != nil {
+		t.Fatalf("AddLabel replay returned error: %v", err)
+	}
+	if replay.Status != "already_applied" || !replay.Replayed || client.addLabelCalls != 1 {
+		t.Fatalf("replay=%#v calls=%d", replay, client.addLabelCalls)
+	}
+}
+
+func TestS018LiveWriteConfirmedRefreshesCommentAndWiki(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{
+		createIssueCommentResult: gitcode.WriteResult[gitcode.Comment]{Record: gitcode.Comment{ID: "comment-9", IssueID: "42", Body: "confirmed comment"}, Confirmed: true, Operation: "CreateIssueComment", RemoteID: "comment-9", ParentIssueNumber: 42, ParentIssueID: "42", ConfirmedAt: time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)},
+		createWikiPageResult:     gitcode.WriteResult[gitcode.WikiPage]{Record: gitcode.WikiPage{ID: "wiki-9", Slug: "Home", Title: "Home", Body: "confirmed wiki", Revision: "rev-9"}, Confirmed: true, Operation: "CreateWikiPage", RemoteID: "wiki-9", RemoteSlug: "Home", RemoteRevision: "rev-9", ConfirmedAt: time.Date(2026, 6, 20, 12, 1, 0, 0, time.UTC)},
+	}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	comment, err := svc.AddComment(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 42, Body: "confirmed comment", IdempotencyKey: "comment-key-1"})
+	if err != nil {
+		t.Fatalf("AddComment live returned error: %v", err)
+	}
+	wiki, err := svc.CreatePage(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "Home", Body: "confirmed wiki", IdempotencyKey: "wiki-key-1"})
+	if err != nil {
+		t.Fatalf("CreatePage live returned error: %v", err)
+	}
+	if comment.Status != "succeeded" || wiki.Status != "succeeded" || client.createIssueCommentCalls != 1 || client.createWikiPageCalls != 1 {
+		t.Fatalf("comment=%#v wiki=%#v client=%#v", comment, wiki, client)
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", comment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(record.Comments) != 1 || record.Comments[0].CommentID != "comment-9" {
+		t.Fatalf("comments=%#v", record.Comments)
+	}
+	if _, err := store.GetRecord(ctx, "fixture-a", wiki.ID); err != nil {
+		t.Fatalf("wiki cache refresh missing: %v", err)
+	}
+}
+
+func TestWriteIdempotencyConflictDetection(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{createIssueResult: gitcode.WriteResult[gitcode.Issue]{Record: gitcode.Issue{ID: "remote-42", Number: 42, Title: "T", Body: "B", State: "open"}, Confirmed: true, Operation: "CreateIssue", RemoteID: "42", RemoteNumber: 42, ConfirmedAt: time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)}}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	_, err = svc.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "T", Body: "B", IdempotencyKey: "same-key"})
+	if err != nil {
+		t.Fatalf("CreateIssue live returned error: %v", err)
+	}
+	_, err = svc.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "Different", Body: "B", IdempotencyKey: "same-key"})
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_idempotency_conflict" {
+		t.Fatalf("conflict err=%v", err)
+	}
+	if client.createIssueCalls != 1 {
+		t.Fatalf("calls=%d want 1", client.createIssueCalls)
+	}
+}
+
+func TestWriteFailureAuditAllowsRetry(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{errors: []error{gitcode.ErrNetworkUnavailable{Endpoint: "/issues", Attempts: 1}}, createIssueResult: gitcode.WriteResult[gitcode.Issue]{Record: gitcode.Issue{ID: "remote-43", Number: 43, Title: "T", Body: "B", State: "open"}, Confirmed: true, Operation: "CreateIssue", RemoteID: "43", RemoteNumber: 43, ConfirmedAt: time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)}}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "T", Body: "B", IdempotencyKey: "retry-key"}
+	_, err = svc.CreateIssue(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_network_unavailable" {
+		t.Fatalf("first err=%v want write_network_unavailable", err)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", "retry-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry == nil || entry.Status != "failed" || entry.PayloadHash == "" || entry.RemoteID != "" || entry.Message != "write_network_unavailable" {
+		t.Fatalf("failure audit entry=%#v", entry)
+	}
+	result, err := svc.CreateIssue(ctx, req)
+	if err != nil {
+		t.Fatalf("retry returned error: %v", err)
+	}
+	if result.Status != "succeeded" || result.RemoteID != "43" || client.createIssueCalls != 2 {
+		t.Fatalf("retry result=%#v calls=%d", result, client.createIssueCalls)
+	}
+}
+
+func TestWriteUnconfirmedRemoteAuditAllowsRetry(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{createIssueResults: []gitcode.WriteResult[gitcode.Issue]{
+		{Record: gitcode.Issue{ID: "remote-43", Number: 43, Title: "T", Body: "B", State: "open"}, Confirmed: false, Operation: "CreateIssue"},
+		{Record: gitcode.Issue{ID: "remote-43", Number: 43, Title: "T", Body: "B", State: "open"}, Confirmed: true, Operation: "CreateIssue", RemoteID: "43", RemoteNumber: 43, ConfirmedAt: time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)},
+	}}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "T", Body: "B", IdempotencyKey: "unconfirmed-key"}
+	_, err = svc.CreateIssue(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_unconfirmed_remote" {
+		t.Fatalf("first err=%v want write_unconfirmed_remote", err)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", "unconfirmed-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry == nil || entry.Status != "failed" || entry.Message != "write_unconfirmed_remote" || entry.RemoteID != "" {
+		t.Fatalf("unconfirmed audit entry=%#v", entry)
+	}
+	result, err := svc.CreateIssue(ctx, req)
+	if err != nil {
+		t.Fatalf("retry returned error: %v", err)
+	}
+	if result.Status != "succeeded" || result.RemoteID != "43" || client.createIssueCalls != 2 {
+		t.Fatalf("retry result=%#v calls=%d", result, client.createIssueCalls)
+	}
+}
+
+func TestWriteIdempotencyScopedByRepo(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-b", Owner: "owner-b", Name: "repo-b", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}, DisplayName: "Fixture B", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeGitCodeClient{createIssueResult: gitcode.WriteResult[gitcode.Issue]{Record: gitcode.Issue{ID: "remote-44", Number: 44, Title: "T", Body: "B", State: "open"}, Confirmed: true, Operation: "CreateIssue", RemoteID: "44", RemoteNumber: 44, ConfirmedAt: time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)}}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	if _, err := svc.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "T", Body: "B", IdempotencyKey: "shared-key"}); err != nil {
+		t.Fatal(err)
+	}
+	client.createIssueResult.Record.ID = "remote-45"
+	client.createIssueResult.Record.Number = 45
+	client.createIssueResult.RemoteID = "45"
+	client.createIssueResult.RemoteNumber = 45
+	if _, err := svc.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-b", Mode: WriteModeLive, Title: "T", Body: "B", IdempotencyKey: "shared-key"}); err != nil {
+		t.Fatal(err)
+	}
+	if client.createIssueCalls != 2 {
+		t.Fatalf("calls=%d want 2", client.createIssueCalls)
 	}
 }
 
@@ -174,6 +616,14 @@ func TestSearchSources(t *testing.T) {
 	}
 	if results.RepoID != "fixture-a" || results.Query != "backlog" || results.Results[0].ID == "" || results.Results[0].Path == "" || results.Results[0].Title == "" || results.Results[0].Kind == "" || results.Results[0].Status == "" || results.Results[0].Snippet == "" || results.Results[0].LineStart == nil || results.Results[0].LineEnd == nil {
 		t.Fatalf("SearchSources result missing contract fields: %#v", results)
+	}
+
+	missing, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: "NONEXISTENT", Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchSources missing query returned error: %v", err)
+	}
+	if len(missing.Results) != 0 {
+		t.Fatalf("SearchSources missing query returned %d results, want 0", len(missing.Results))
 	}
 }
 
@@ -508,7 +958,7 @@ func TestSyncBoundedStaging(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if source.Body != "intro same\nbacklog design same\nfinal" || source.ContentHash != "hash-doc" {
+	if source.Body != "intro same\nbacklog design same\nfinal" || source.ContentHash != index.ContentHash(source.Body) {
 		t.Fatalf("source mutated after staging failure: %#v", source)
 	}
 	event, err := svc.store.GetSyncEventByKey(ctx, "large-key")
@@ -614,7 +1064,7 @@ func TestFailureModes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if source.Body != "intro same\nbacklog design same\nfinal" || source.ContentHash != "hash-doc" {
+			if source.Body != "intro same\nbacklog design same\nfinal" || source.ContentHash != index.ContentHash(source.Body) {
 				t.Fatalf("source mutated after failure: %#v", source)
 			}
 			if tt.prelock {
@@ -804,11 +1254,12 @@ func TestGoldenExport(t *testing.T) {
 	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
 		t.Fatal(err)
 	}
+	bodyHash := index.ContentHash("body")
 	if err := store.UpsertSourceGraph(ctx, cache.SourceGraph{
-		Source:     cache.Source{RepoID: "fixture-a", ID: "DOC-123", Kind: "doc", Path: "docs/design.md", Title: "Design Doc", Body: "body", Status: "ready", Labels: []string{"zeta", "design"}, ContentHash: "hash-doc", CreatedAt: base, UpdatedAt: base},
+		Source:     cache.Source{RepoID: "fixture-a", ID: "DOC-123", Kind: "doc", Path: "docs/design.md", Title: "Design Doc", Body: "body", Status: "ready", Labels: []string{"zeta", "design"}, ContentHash: bodyHash, CreatedAt: base, UpdatedAt: base},
 		Identities: []cache.Identity{{RepoID: "fixture-a", AliasType: "path", Alias: "docs/design.md", Remote: cache.RemoteAlias{Type: "remote", ID: "wiki/design"}}},
 		Links:      []cache.Link{{RepoID: "fixture-a", TargetID: "DOC-123", Kind: "mentions", Text: "doc"}},
-		Chunks:     []cache.Chunk{{RepoID: "fixture-a", ID: "chunk-doc", ContentHash: "hash-doc", ByteStart: 0, ByteEnd: 4, LineStart: 1, LineEnd: 1, HeadingPath: []string{"Design"}, Text: "body", NormalizedText: "body"}},
+		Chunks:     []cache.Chunk{{RepoID: "fixture-a", ID: "chunk-doc", ContentHash: bodyHash, ByteStart: 0, ByteEnd: 4, LineStart: 1, LineEnd: 1, HeadingPath: []string{"Design"}, Text: "body", NormalizedText: "body"}},
 		SyncStatus: &cache.SyncStatus{RepoID: "fixture-a", RemoteType: "remote", RemoteID: "wiki/design", RemoteRevision: "rev-1", Status: "fresh", LastFetchedAt: base},
 	}); err != nil {
 		t.Fatal(err)
@@ -966,6 +1417,13 @@ func TestQueryEdgeCases(t *testing.T) {
 	if !errors.As(err, &notFound) {
 		t.Fatalf("not found error = %v, want ErrNotFound", err)
 	}
+	search, err := New(empty).SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: "backlog"})
+	if err != nil {
+		t.Fatalf("empty cache search error = %v, want nil", err)
+	}
+	if len(search.Results) != 0 {
+		t.Fatalf("empty cache search results = %d, want 0", len(search.Results))
+	}
 	_, err = svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a"})
 	var invalid ErrInvalidQuery
 	if !errors.As(err, &invalid) {
@@ -1043,19 +1501,23 @@ func seedStore(t *testing.T, ctx context.Context, store cache.Store) {
 	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
 		t.Fatal(err)
 	}
-	err := store.UpsertSource(ctx, cache.Source{RepoID: "fixture-a", ID: "DOC-123", Kind: "doc", Path: "docs/design.md", Title: "Design Doc", Body: "intro same\nbacklog design same\nfinal", Status: "ready", Labels: []string{"zeta", "design"}, ContentHash: "hash-doc", CreatedAt: base, UpdatedAt: base})
+	docBody := "intro same\nbacklog design same\nfinal"
+	docHash := index.ContentHash(docBody)
+	taskBody := "task same\nbacklog item same"
+	taskHash := index.ContentHash(taskBody)
+	err := store.UpsertSource(ctx, cache.Source{RepoID: "fixture-a", ID: "DOC-123", Kind: "doc", Path: "docs/design.md", Title: "Design Doc", Body: docBody, Status: "ready", Labels: []string{"zeta", "design"}, ContentHash: docHash, CreatedAt: base, UpdatedAt: base})
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = store.UpsertSource(ctx, cache.Source{RepoID: "fixture-a", ID: "TASK-001", Kind: "task", Path: "project/tasks/task.md", Title: "Task Backlog", Body: "task same\nbacklog item same", Status: "ready", Labels: []string{"task"}, ContentHash: "hash-task", CreatedAt: base, UpdatedAt: base.Add(time.Hour)})
+	err = store.UpsertSource(ctx, cache.Source{RepoID: "fixture-a", ID: "TASK-001", Kind: "task", Path: "project/tasks/task.md", Title: "Task Backlog", Body: taskBody, Status: "ready", Labels: []string{"task"}, ContentHash: taskHash, CreatedAt: base, UpdatedAt: base.Add(time.Hour)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	err = store.UpsertSourceGraph(ctx, cache.SourceGraph{
-		Source:     cache.Source{RepoID: "fixture-a", ID: "DOC-123", Kind: "doc", Path: "docs/design.md", Title: "Design Doc", Body: "intro same\nbacklog design same\nfinal", Status: "ready", Labels: []string{"zeta", "design"}, ContentHash: "hash-doc", CreatedAt: base, UpdatedAt: base},
+		Source:     cache.Source{RepoID: "fixture-a", ID: "DOC-123", Kind: "doc", Path: "docs/design.md", Title: "Design Doc", Body: docBody, Status: "ready", Labels: []string{"zeta", "design"}, ContentHash: docHash, CreatedAt: base, UpdatedAt: base},
 		Identities: []cache.Identity{{RepoID: "fixture-a", AliasType: "path", Alias: "docs/design.md", Remote: cache.RemoteAlias{Type: "remote", ID: "wiki/design"}}},
 		Links:      []cache.Link{{RepoID: "fixture-a", TargetID: "TASK-001", Kind: "mentions", Text: "task"}},
-		Chunks:     []cache.Chunk{{RepoID: "fixture-a", ID: "chunk-doc", ContentHash: "hash-doc", ByteStart: 0, ByteEnd: 13, LineStart: 2, LineEnd: 2, HeadingPath: []string{"Design"}, Text: "backlog chunk", NormalizedText: "backlog chunk", InheritedMetadata: map[string]string{"owner": "docs"}, OutboundLinks: []string{"TASK-001"}, ResolvedAliases: map[string]string{"TASK-001": "task:1"}}},
+		Chunks:     []cache.Chunk{{RepoID: "fixture-a", ID: "chunk-doc", ContentHash: docHash, ByteStart: 0, ByteEnd: 13, LineStart: 2, LineEnd: 2, HeadingPath: []string{"Design"}, Text: "backlog chunk", NormalizedText: "backlog chunk", InheritedMetadata: map[string]string{"owner": "docs"}, OutboundLinks: []string{"TASK-001"}, ResolvedAliases: map[string]string{"TASK-001": "task:1"}}},
 		SyncStatus: &cache.SyncStatus{RepoID: "fixture-a", RemoteType: "remote", RemoteID: "wiki/design", RemoteRevision: "rev-1", Status: "fresh", LastFetchedAt: base},
 	})
 	if err != nil {
@@ -1064,6 +1526,403 @@ func seedStore(t *testing.T, ctx context.Context, store cache.Store) {
 	err = store.UpsertLink(ctx, cache.Link{RepoID: "fixture-a", SourceID: "TASK-001", TargetID: "DOC-123", Kind: "mentions", Text: "doc"})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSyncResourcesAllSuccess(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		issue:    gitcode.Issue{Number: 42, Title: "Test Issue", Body: "issue body", State: "open", CreatedAt: base, UpdatedAt: base},
+		comments: []gitcode.Comment{{ID: "c1", Author: "author", Body: "comment", CreatedAt: base, UpdatedAt: base}},
+		wiki:     gitcode.WikiPage{Slug: "Home", Title: "Home", Body: "wiki body", Revision: "rev-1", CreatedAt: base, UpdatedAt: base},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "sync-resources-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	reqs := []SyncRequest{
+		{RepoID: "sync-resources-a", RemoteAlias: "issue:42", IdempotencyKey: "all-success-issue"},
+		{RepoID: "sync-resources-a", RemoteAlias: "wiki:Home", IdempotencyKey: "all-success-wiki"},
+	}
+	result, err := svc.SyncResources(ctx, reqs)
+	if err != nil {
+		t.Fatalf("SyncResources returned unexpected error: %v", err)
+	}
+	if result.SuccessCount != 2 {
+		t.Fatalf("SuccessCount = %d, want 2", result.SuccessCount)
+	}
+	if result.FailureCount != 0 {
+		t.Fatalf("FailureCount = %d, want 0", result.FailureCount)
+	}
+	if len(result.Failures) != 0 {
+		t.Fatalf("Failures length = %d, want 0", len(result.Failures))
+	}
+	if len(result.Results) != 2 {
+		t.Fatalf("Results length = %d, want 2", len(result.Results))
+	}
+	if result.Results[0].Counts.Fetched <= 0 {
+		t.Fatalf("Results[0].Counts.Fetched = %d, want > 0", result.Results[0].Counts.Fetched)
+	}
+	if result.Results[1].Counts.Fetched <= 0 {
+		t.Fatalf("Results[1].Counts.Fetched = %d, want > 0", result.Results[1].Counts.Fetched)
+	}
+	if _, err := store.GetSourceScoped(ctx, "sync-resources-a", "ISSUE-42"); err != nil {
+		t.Fatalf("issue source not committed to cache: %v", err)
+	}
+	if _, err := store.GetSourceScoped(ctx, "sync-resources-a", "WIKI-HOME"); err != nil {
+		t.Fatalf("wiki source not committed to cache: %v", err)
+	}
+}
+
+func TestSyncResourcesPartialFailure(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		issue:    gitcode.Issue{Number: 42, Title: "Test Issue", Body: "issue body", State: "open", CreatedAt: base, UpdatedAt: base},
+		comments: []gitcode.Comment{{ID: "c1", Author: "author", Body: "comment", CreatedAt: base, UpdatedAt: base}},
+		errors:   []error{nil, gitcode.ErrNotFound{Endpoint: "/wiki", ID: "Home", Message: "not found"}},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "sync-resources-b", Owner: "owner-b", Name: "repo-b", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	reqs := []SyncRequest{
+		{RepoID: "sync-resources-b", RemoteAlias: "issue:42", IdempotencyKey: "partial-issue"},
+		{RepoID: "sync-resources-b", RemoteAlias: "wiki:Home", IdempotencyKey: "partial-wiki"},
+	}
+	result, err := svc.SyncResources(ctx, reqs)
+	if err == nil {
+		t.Fatal("SyncResources expected PartialSyncError, got nil")
+	}
+	var partial *PartialSyncError
+	if !errors.As(err, &partial) {
+		t.Fatalf("SyncResources error is not *PartialSyncError: %T %v", err, err)
+	}
+	if result.SuccessCount != 1 {
+		t.Fatalf("SuccessCount = %d, want 1", result.SuccessCount)
+	}
+	if result.FailureCount != 1 {
+		t.Fatalf("FailureCount = %d, want 1", result.FailureCount)
+	}
+	if len(result.Failures) != 1 {
+		t.Fatalf("Failures length = %d, want 1", len(result.Failures))
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("Results length = %d, want 1", len(result.Results))
+	}
+	if result.Results[0].Counts.Fetched <= 0 {
+		t.Fatalf("Results[0].Counts.Fetched = %d, want > 0", result.Results[0].Counts.Fetched)
+	}
+	if result.Failures[0].Err == nil {
+		t.Fatal("Failures[0].Err is nil")
+	}
+	if !strings.Contains(partial.Error(), "1 succeeded") || !strings.Contains(partial.Error(), "1 failed") {
+		t.Fatalf("PartialSyncError.Error() = %q, want contains success/failure counts", partial.Error())
+	}
+	if _, err := store.GetSourceScoped(ctx, "sync-resources-b", "ISSUE-42"); err != nil {
+		t.Fatalf("issue source not committed to cache: %v", err)
+	}
+}
+
+func TestSyncResourcesAllFailure(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeGitCodeClient{
+		errors: []error{
+			gitcode.ErrNotFound{Endpoint: "/issue", ID: "42", Message: "not found"},
+			gitcode.ErrNotFound{Endpoint: "/wiki", ID: "Home", Message: "not found"},
+		},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "sync-resources-c", Owner: "owner-c", Name: "repo-c", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	reqs := []SyncRequest{
+		{RepoID: "sync-resources-c", RemoteAlias: "issue:42", IdempotencyKey: "all-fail-issue"},
+		{RepoID: "sync-resources-c", RemoteAlias: "wiki:Home", IdempotencyKey: "all-fail-wiki"},
+	}
+	result, err := svc.SyncResources(ctx, reqs)
+	if err == nil {
+		t.Fatal("SyncResources expected PartialSyncError, got nil")
+	}
+	var partial *PartialSyncError
+	if !errors.As(err, &partial) {
+		t.Fatalf("SyncResources error is not *PartialSyncError: %T %v", err, err)
+	}
+	if result.SuccessCount != 0 {
+		t.Fatalf("SuccessCount = %d, want 0", result.SuccessCount)
+	}
+	if result.FailureCount != 2 {
+		t.Fatalf("FailureCount = %d, want 2", result.FailureCount)
+	}
+	if len(result.Failures) != 2 {
+		t.Fatalf("Failures length = %d, want 2", len(result.Failures))
+	}
+	if len(result.Results) != 0 {
+		t.Fatalf("Results length = %d, want 0", len(result.Results))
+	}
+}
+
+func TestZeroDeltaPersistentEvent(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 22, 13, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		issue:    gitcode.Issue{Number: 42, Title: "Zero Delta Issue", Body: "unchanged body", State: "open", CreatedAt: base, UpdatedAt: base},
+		comments: []gitcode.Comment{{ID: "c1", Author: "author", Body: "comment", CreatedAt: base, UpdatedAt: base}},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "zero-delta", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	first, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "zero-delta", RemoteAlias: "issue:42", IdempotencyKey: "zero-delta-first"})
+	if err != nil {
+		t.Fatalf("first SyncToCache returned error: %v", err)
+	}
+	if first.ZeroDelta {
+		t.Fatal("first SyncToCache ZeroDelta = true, want false")
+	}
+	second, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "zero-delta", RemoteAlias: "issue:42", IdempotencyKey: "zero-delta-second"})
+	if err != nil {
+		t.Fatalf("second SyncToCache returned error: %v", err)
+	}
+	if !second.ZeroDelta {
+		t.Fatal("second SyncToCache ZeroDelta = false, want true")
+	}
+	if second.Counts.Fetched == 0 || second.Counts.Skipped != second.Counts.Fetched {
+		t.Fatalf("second counts = %#v, want fetched > 0 and skipped == fetched", second.Counts)
+	}
+	if second.Counts.Updated != 0 || second.Counts.Inserted != 0 || second.Counts.Conflicts != 0 {
+		t.Fatalf("second counts = %#v, want no mutations", second.Counts)
+	}
+	stored, err := store.GetSyncEventByKey(ctx, "zero-delta-second")
+	if err != nil {
+		t.Fatalf("GetSyncEventByKey returned error: %v", err)
+	}
+	if stored == nil || !stored.ZeroDelta {
+		t.Fatalf("stored zero-delta event = %#v, want ZeroDelta true", stored)
+	}
+	var storedCounts SyncCounts
+	if err := json.Unmarshal([]byte(stored.Message), &storedCounts); err != nil {
+		t.Fatalf("stored sync event counts JSON invalid: %v", err)
+	}
+	if storedCounts.Fetched != second.Counts.Fetched || storedCounts.Skipped != second.Counts.Skipped {
+		t.Fatalf("stored counts = %#v, want %#v", storedCounts, second.Counts)
+	}
+	events, err := store.ListCompletedSyncEventsScoped(ctx, "zero-delta")
+	if err != nil {
+		t.Fatalf("ListCompletedSyncEventsScoped returned error: %v", err)
+	}
+	completedForSource := 0
+	for _, event := range events {
+		if event.SourceID == "ISSUE-42" && event.Status == "succeeded" {
+			completedForSource++
+		}
+	}
+	if completedForSource != 2 {
+		t.Fatalf("completed sync events for ISSUE-42 = %d, want 2", completedForSource)
+	}
+	replayed, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "zero-delta", RemoteAlias: "issue:42", IdempotencyKey: "zero-delta-second"})
+	if err != nil {
+		t.Fatalf("replayed SyncToCache returned error: %v", err)
+	}
+	if !replayed.Replayed || !replayed.ZeroDelta {
+		t.Fatalf("replayed result = %#v, want replayed zero-delta", replayed)
+	}
+	summary, err := svc.SyncStatus(ctx, ListSourcesRequest{RepoID: "zero-delta"})
+	if err != nil {
+		t.Fatalf("SyncStatus returned error: %v", err)
+	}
+	if !summary.ZeroDelta {
+		t.Fatalf("SyncStatus ZeroDelta = false, want true: %#v", summary)
+	}
+}
+
+func TestZeroDeltaFalseWhenContentChanges(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 22, 14, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{issue: gitcode.Issue{Number: 42, Title: "Changing Issue", Body: "first body", State: "open", CreatedAt: base, UpdatedAt: base}}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "zero-delta-change", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	if _, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "zero-delta-change", RemoteAlias: "issue:42", IdempotencyKey: "zero-delta-change-first"}); err != nil {
+		t.Fatalf("first SyncToCache returned error: %v", err)
+	}
+	client.issue.Body = "second body"
+	client.issue.UpdatedAt = base.Add(time.Minute)
+	result, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "zero-delta-change", RemoteAlias: "issue:42", IdempotencyKey: "zero-delta-change-second"})
+	if err != nil {
+		t.Fatalf("second SyncToCache returned error: %v", err)
+	}
+	if result.ZeroDelta {
+		t.Fatalf("ZeroDelta = true, want false for changed content: %#v", result)
+	}
+	if result.Counts.Updated != 1 {
+		t.Fatalf("counts = %#v, want Updated 1", result.Counts)
+	}
+}
+
+func TestSyncEventTimestamps(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 22, 10, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		issue:    gitcode.Issue{Number: 42, Title: "Timestamp Issue", Body: "issue body", State: "open", CreatedAt: base, UpdatedAt: base},
+		comments: []gitcode.Comment{{ID: "c1", Author: "author", Body: "comment", CreatedAt: base, UpdatedAt: base}},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "sync-timestamps", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	times := []time.Time{base, base.Add(time.Second), base.Add(2 * time.Second)}
+	next := 0
+	svc.now = func() time.Time {
+		if next >= len(times) {
+			return times[len(times)-1]
+		}
+		t := times[next]
+		next++
+		return t
+	}
+	result, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "sync-timestamps", RemoteAlias: "issue:42", IdempotencyKey: "sync-timestamps-key"})
+	if err != nil {
+		t.Fatalf("SyncToCache returned error: %v", err)
+	}
+	if result.StartedAt.IsZero() {
+		t.Fatal("SyncResult.StartedAt is zero")
+	}
+	if result.CompletedAt.IsZero() {
+		t.Fatal("SyncResult.CompletedAt is zero")
+	}
+	if !result.CompletedAt.After(result.StartedAt) {
+		t.Fatalf("CompletedAt = %s, want after StartedAt = %s", result.CompletedAt, result.StartedAt)
+	}
+	stored, err := store.GetSyncEventByKey(ctx, "sync-timestamps-key")
+	if err != nil {
+		t.Fatalf("GetSyncEventByKey returned error: %v", err)
+	}
+	if stored == nil || stored.StartedAt.IsZero() || stored.CompletedAt.IsZero() {
+		t.Fatalf("stored sync event timestamps not populated: %#v", stored)
+	}
+}
+
+func TestSyncEventTimestampsFailure(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 22, 11, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{errors: []error{gitcode.ErrNotFound{Endpoint: "/issues/42", ID: "42", Message: "not found"}}}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "sync-timestamps-failure", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertSource(ctx, cache.Source{RepoID: "sync-timestamps-failure", ID: "ISSUE-42", Kind: "issue", Path: "issues/42.md", Title: "Issue", Body: "body", Status: "open", ContentHash: "old", CreatedAt: base, UpdatedAt: base}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	times := []time.Time{base, base.Add(time.Second)}
+	next := 0
+	svc.now = func() time.Time {
+		if next >= len(times) {
+			return times[len(times)-1]
+		}
+		t := times[next]
+		next++
+		return t
+	}
+	_, err = svc.SyncToCache(ctx, SyncRequest{RepoID: "sync-timestamps-failure", RemoteAlias: "issue:42", IdempotencyKey: "sync-timestamps-failure-key"})
+	if err == nil {
+		t.Fatal("SyncToCache returned nil error, want failure")
+	}
+	stored, err := store.GetSyncEventByKey(ctx, "sync-timestamps-failure-key")
+	if err != nil {
+		t.Fatalf("GetSyncEventByKey returned error: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("failed sync event was not persisted")
+	}
+	if stored.Status != "failed" {
+		t.Fatalf("Status = %q, want failed", stored.Status)
+	}
+	if !stored.StartedAt.Equal(base) {
+		t.Fatalf("StartedAt = %s, want %s", stored.StartedAt, base)
+	}
+	if !stored.CompletedAt.Equal(base.Add(time.Second)) {
+		t.Fatalf("CompletedAt = %s, want %s", stored.CompletedAt, base.Add(time.Second))
+	}
+}
+
+func TestSyncStatusSummaryCompletedAt(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "sync-status-completed", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	graph := cache.SourceGraph{
+		Source:     cache.Source{RepoID: "sync-status-completed", ID: "ISSUE-42", Kind: "issue", Path: "issues/42.md", Title: "Issue", Body: "body", Status: "open", ContentHash: "hash", CreatedAt: base, UpdatedAt: base},
+		SyncStatus: &cache.SyncStatus{RepoID: "sync-status-completed", SourceID: "ISSUE-42", RemoteType: "issue", RemoteID: "42", RemoteRevision: "rev", Status: "fresh", LastFetchedAt: base},
+	}
+	if err := store.UpsertSourceGraph(ctx, graph); err != nil {
+		t.Fatal(err)
+	}
+	incompleteStarted := base.Add(time.Hour)
+	if err := store.RecordSyncEvent(ctx, cache.SyncEvent{RepoID: "sync-status-completed", ID: "incomplete", SourceID: "ISSUE-42", RemoteType: "issue", RemoteID: "42", Status: "in_progress", IdempotencyKey: "incomplete", Message: "sync started", CreatedAt: incompleteStarted, StartedAt: incompleteStarted}); err != nil {
+		t.Fatal(err)
+	}
+	completedStarted := base.Add(10 * time.Minute)
+	completedAt := base.Add(11 * time.Minute)
+	if err := store.RecordSyncEvent(ctx, cache.SyncEvent{RepoID: "sync-status-completed", ID: "completed", SourceID: "ISSUE-42", RemoteType: "issue", RemoteID: "42", Status: "succeeded", IdempotencyKey: "completed", Message: "{}", CreatedAt: completedAt, StartedAt: completedStarted, CompletedAt: completedAt}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, &fakeGitCodeClient{})
+	result, err := svc.SyncStatus(ctx, ListSourcesRequest{RepoID: "sync-status-completed"})
+	if err != nil {
+		t.Fatalf("SyncStatus returned error: %v", err)
+	}
+	if !result.LastSyncStartedAt.Equal(completedStarted) {
+		t.Fatalf("LastSyncStartedAt = %s, want %s", result.LastSyncStartedAt, completedStarted)
+	}
+	if !result.LastSyncCompletedAt.Equal(completedAt) {
+		t.Fatalf("LastSyncCompletedAt = %s, want %s", result.LastSyncCompletedAt, completedAt)
+	}
+	if result.LastSyncCompletedAt.Equal(incompleteStarted) {
+		t.Fatal("incomplete sync event was selected as completed")
 	}
 }
 
@@ -1079,15 +1938,29 @@ func seededSyncService(t *testing.T, ctx context.Context, client gitcode.Client)
 }
 
 type fakeGitCodeClient struct {
-	wiki              gitcode.WikiPage
-	issue             gitcode.Issue
-	comments          []gitcode.Comment
-	errors            []error
-	wikiCalls         int
-	issueCalls        int
-	commentCalls      int
-	createIssueCalls  int
-	createIssueResult gitcode.WriteResult[gitcode.Issue]
+	wiki                     gitcode.WikiPage
+	issue                    gitcode.Issue
+	comments                 []gitcode.Comment
+	errors                   []error
+	wikiCalls                int
+	issueCalls               int
+	commentCalls             int
+	createIssueCalls         int
+	createIssueCommentCalls  int
+	createWikiPageCalls      int
+	addLabelCalls            int
+	createIssueResult        gitcode.WriteResult[gitcode.Issue]
+	createIssueResults       []gitcode.WriteResult[gitcode.Issue]
+	createIssueCommentResult gitcode.WriteResult[gitcode.Comment]
+	createWikiPageResult     gitcode.WriteResult[gitcode.WikiPage]
+	addLabelResult           gitcode.WriteResult[gitcode.Issue]
+	listIssuesPages          []gitcode.Page[gitcode.IssueSummary]
+	listIssuesErrors         []error
+	listWikiPages            []gitcode.Page[gitcode.WikiPage]
+	listWikiErrors           []error
+	issuesByNumber           map[int]gitcode.Issue
+	wikiBySlug               map[string]gitcode.WikiPage
+	commentsByIssue          map[int][]gitcode.Comment
 }
 
 func (f *fakeGitCodeClient) nextError() error {
@@ -1100,27 +1973,60 @@ func (f *fakeGitCodeClient) nextError() error {
 }
 
 func (f *fakeGitCodeClient) ListIssues(context.Context, gitcode.IssueListRequest) (gitcode.Page[gitcode.IssueSummary], error) {
+	if len(f.listIssuesErrors) > 0 {
+		err := f.listIssuesErrors[0]
+		f.listIssuesErrors = f.listIssuesErrors[1:]
+		return gitcode.Page[gitcode.IssueSummary]{}, err
+	}
+	if len(f.listIssuesPages) > 0 {
+		page := f.listIssuesPages[0]
+		f.listIssuesPages = f.listIssuesPages[1:]
+		return page, nil
+	}
 	return gitcode.Page[gitcode.IssueSummary]{}, nil
 }
-func (f *fakeGitCodeClient) GetIssue(context.Context, gitcode.IssueRequest) (gitcode.Issue, error) {
+func (f *fakeGitCodeClient) GetIssue(_ context.Context, req gitcode.IssueRequest) (gitcode.Issue, error) {
 	f.issueCalls++
 	if err := f.nextError(); err != nil {
 		return gitcode.Issue{}, err
 	}
+	if f.issuesByNumber != nil {
+		if issue, ok := f.issuesByNumber[req.Number]; ok {
+			return issue, nil
+		}
+	}
 	return f.issue, nil
 }
-func (f *fakeGitCodeClient) ListIssueComments(context.Context, gitcode.IssueRequest) (gitcode.Page[gitcode.Comment], error) {
+func (f *fakeGitCodeClient) ListIssueComments(_ context.Context, req gitcode.IssueRequest) (gitcode.Page[gitcode.Comment], error) {
 	f.commentCalls++
+	if f.commentsByIssue != nil {
+		return gitcode.Page[gitcode.Comment]{Items: f.commentsByIssue[req.Number]}, nil
+	}
 	return gitcode.Page[gitcode.Comment]{Items: f.comments}, nil
 }
-func (f *fakeGitCodeClient) GetWikiPage(context.Context, gitcode.WikiPageRequest) (gitcode.WikiPage, error) {
+func (f *fakeGitCodeClient) GetWikiPage(_ context.Context, req gitcode.WikiPageRequest) (gitcode.WikiPage, error) {
 	f.wikiCalls++
 	if err := f.nextError(); err != nil {
 		return gitcode.WikiPage{}, err
 	}
+	if f.wikiBySlug != nil {
+		if page, ok := f.wikiBySlug[req.Slug]; ok {
+			return page, nil
+		}
+	}
 	return f.wiki, nil
 }
 func (f *fakeGitCodeClient) ListWikiPages(context.Context, gitcode.WikiListRequest) (gitcode.Page[gitcode.WikiPage], error) {
+	if len(f.listWikiErrors) > 0 {
+		err := f.listWikiErrors[0]
+		f.listWikiErrors = f.listWikiErrors[1:]
+		return gitcode.Page[gitcode.WikiPage]{}, err
+	}
+	if len(f.listWikiPages) > 0 {
+		page := f.listWikiPages[0]
+		f.listWikiPages = f.listWikiPages[1:]
+		return page, nil
+	}
 	return gitcode.Page[gitcode.WikiPage]{}, nil
 }
 func (f *fakeGitCodeClient) Search(context.Context, gitcode.SearchRequest) (gitcode.Page[gitcode.SearchResult], error) {
@@ -1137,22 +2043,39 @@ func (f *fakeGitCodeClient) CreateIssue(context.Context, gitcode.CreateIssueRequ
 	if err := f.nextError(); err != nil {
 		return gitcode.WriteResult[gitcode.Issue]{}, err
 	}
+	if len(f.createIssueResults) > 0 {
+		result := f.createIssueResults[0]
+		f.createIssueResults = f.createIssueResults[1:]
+		return result, nil
+	}
 	return f.createIssueResult, nil
 }
 func (f *fakeGitCodeClient) UpdateIssue(context.Context, gitcode.UpdateIssueRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
 	return gitcode.WriteResult[gitcode.Issue]{}, nil
 }
 func (f *fakeGitCodeClient) CreateIssueComment(context.Context, gitcode.CreateIssueCommentRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Comment], error) {
-	return gitcode.WriteResult[gitcode.Comment]{}, nil
+	f.createIssueCommentCalls++
+	if err := f.nextError(); err != nil {
+		return gitcode.WriteResult[gitcode.Comment]{}, err
+	}
+	return f.createIssueCommentResult, nil
 }
 func (f *fakeGitCodeClient) CreateWikiPage(context.Context, gitcode.CreateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
-	return gitcode.WriteResult[gitcode.WikiPage]{}, nil
+	f.createWikiPageCalls++
+	if err := f.nextError(); err != nil {
+		return gitcode.WriteResult[gitcode.WikiPage]{}, err
+	}
+	return f.createWikiPageResult, nil
 }
 func (f *fakeGitCodeClient) UpdateWikiPage(context.Context, gitcode.UpdateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
 	return gitcode.WriteResult[gitcode.WikiPage]{}, nil
 }
 func (f *fakeGitCodeClient) AddLabel(context.Context, gitcode.LabelRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
-	return gitcode.WriteResult[gitcode.Issue]{}, nil
+	f.addLabelCalls++
+	if err := f.nextError(); err != nil {
+		return gitcode.WriteResult[gitcode.Issue]{}, err
+	}
+	return f.addLabelResult, nil
 }
 func (f *fakeGitCodeClient) RemoveLabel(context.Context, gitcode.LabelRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
 	return gitcode.WriteResult[gitcode.Issue]{}, nil
@@ -1276,6 +2199,9 @@ func (f *brokenStore) ListChunks(context.Context, cache.ChunkFilter) ([]cache.Ch
 }
 func (f *brokenStore) RecordSyncEvent(context.Context, cache.SyncEvent) error { return nil }
 func (f *brokenStore) GetSyncEventByKey(ctx context.Context, key string) (*cache.SyncEvent, error) {
+	return nil, nil
+}
+func (f *brokenStore) ListCompletedSyncEventsScoped(context.Context, string) ([]cache.SyncEvent, error) {
 	return nil, nil
 }
 func (f *brokenStore) RecordAuditEvent(context.Context, cache.AuditTrailEntry) error { return nil }

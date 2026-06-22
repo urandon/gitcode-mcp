@@ -1,0 +1,24 @@
+{
+  "covered_outcome_ids": [
+    "outcome-5"
+  ],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "go test -run TestE2ELiveTwoCache -tags=e2e ./internal/e2e/",
+    "internal/e2e TestE2ELiveTwoCache build-tag-gated e2e binary",
+    "internal/gitcode HTTPClient REST calls for list/get/create issue, issue comments, and wiki pages",
+    "internal/service Service SyncToCache and CreateIssue live write paths",
+    "internal/cache SQLiteStore independent cache databases, record digests, and comment counts",
+    "internal/gitcode redaction of emitted e2e log/error messages"
+  ],
+  "evidence_type": "offline API test using stubbed external GitCode HTTP provider plus e2e skip-path runtime check",
+  "freshness": "current working tree; deterministic offline execution; live network disabled; no real GitCode credentials, OS keychain, or device required",
+  "mocks_used": [
+    {
+      "name": "local httptest GitCode-compatible API server",
+      "scope": "external GitCode REST API only",
+      "purpose": "serve deterministic issue, comment, wiki, and create-issue responses while exercising production HTTP client, service, and SQLite cache paths through the e2e test binary"
+    }
+  ],
+  "production_files_modified": []
+}

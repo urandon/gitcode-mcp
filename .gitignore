@@ -1,9 +1,11 @@
 .DS_Store
-ai/
+ai/artifacts
+ai/research-repos
 .cache/
 bin/
 *.test
 *.out
+/gitcode-mcp
 .env
 .env.*
 local/

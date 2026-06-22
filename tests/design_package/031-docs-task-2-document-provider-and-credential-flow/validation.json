@@ -1,0 +1,20 @@
+{
+  "covered_outcome_ids": [
+    "outcome-13"
+  ],
+  "covered_decommission_ids": [
+    "decommission-13"
+  ],
+  "product_surfaces": [
+    "docs/architecture.md: Provider Selection and Credential Pipeline sections",
+    "cmd/gitcode-mcp: sync --help runtime output from freshly built CLI",
+    "cmd/gitcode-mcp: auth status --help runtime output from freshly built CLI",
+    "internal/provider: documented fixture/live/unavailable provider-selection behavior as surfaced through sync help",
+    "internal/credential: documented env/keychain/none source chain as surfaced through auth status help",
+    "repository test suite: go test ./... with live credential variables unset"
+  ],
+  "evidence_type": "offline local command validation using a freshly built gitcode-mcp CLI, docs-to-help stdout comparison, go test ./... with GITCODE_TOKEN and live env vars unset, and git diff --check",
+  "freshness": "current working tree production docs and freshly built cmd/gitcode-mcp binary; deterministic offline validation with live validation disabled and credential variables unset",
+  "mocks_used": "none; validation runs the real compiled CLI and real repository test suite against local filesystem state only",
+  "production_files_modified": []
+}

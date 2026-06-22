@@ -1,0 +1,32 @@
+{
+  "covered_outcome_ids": ["outcome-3"],
+  "covered_decommission_ids": ["decommission-4"],
+  "product_surfaces": [
+    "internal/service/service.go:SyncToCache",
+    "internal/service/service.go:SyncStatus",
+    "internal/service/service.go:syncResultFromEvent",
+    "internal/service/types.go:SyncResult",
+    "internal/service/types.go:SyncStatusSummaryResult",
+    "internal/cache/models.go:SyncEvent",
+    "internal/cache/schema.go:sync_events DDL",
+    "internal/cache/schema.go:applySyncEventZeroDeltaMigration",
+    "internal/cache/accessors.go:recordSyncEventTx",
+    "internal/cache/accessors.go:GetSyncEventByKey",
+    "internal/cache/accessors.go:ListCompletedSyncEventsScoped",
+    "internal/cli/cli.go:renderSyncText",
+    "internal/cli/cli.go:renderSyncStatusSummaryText"
+  ],
+  "evidence_type": "go_test",
+  "freshness": "current_binary_offline",
+  "mocks_used": [
+    "fakeGitCodeClient (internal test mock for gitcode.Client)"
+  ],
+  "production_files_modified": [
+    "internal/service/types.go",
+    "internal/service/service.go",
+    "internal/cache/models.go",
+    "internal/cache/schema.go",
+    "internal/cache/accessors.go",
+    "internal/cli/cli.go"
+  ]
+}

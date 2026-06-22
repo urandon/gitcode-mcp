@@ -14,6 +14,9 @@ import (
 
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/credential"
+	"gitcode-mcp/internal/doctor"
+	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
 	"gitcode-mcp/internal/service"
 )
@@ -23,7 +26,7 @@ const version = "0.1.0"
 var commands = []string{
 	"ingest",
 	"index",
-	"search",
+	"search", "search_sources",
 	"list",
 	"get",
 	"backlinks",
@@ -46,7 +49,9 @@ var commands = []string{
 	"config",
 	"auth",
 	"doctor",
+	"migrate-cache",
 	"repo",
+	"bind",
 }
 
 type queryService interface {
@@ -66,6 +71,10 @@ type queryService interface {
 	LinkCheck(context.Context, service.LinkCheckRequest) (service.LinkCheckResult, error)
 	StaleIndex(context.Context, service.StaleIndexRequest) (service.StaleIndexResult, error)
 	SyncToCache(context.Context, service.SyncRequest) (service.SyncResult, error)
+	SyncResources(context.Context, []service.SyncRequest) (*service.SyncResourcesResult, error)
+	BulkSyncIssues(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	BulkSyncWiki(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	BulkSyncAll(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	CacheStatus(context.Context, service.CacheStatusRequest) (service.CacheStatusResult, error)
 	ExportSnapshot(context.Context, service.ExportSnapshotRequest) (service.ExportSnapshotResult, error)
 	DiffSnapshot(context.Context, service.DiffSnapshotRequest) (service.DiffSnapshotResult, error)
@@ -131,6 +140,8 @@ type options struct {
 	sourceID       string
 	recordID       string
 	snapshotID     string
+	confirm        bool
+	helpRequested  bool
 }
 
 type multiFlag []string
@@ -150,6 +161,20 @@ func ExecuteWithSource(args []string, stdout io.Writer, stderr io.Writer, src co
 	return executeWithFactoryAndDeps(args, stdout, stderr, defaultServiceFactory, localCommandDeps{Source: src})
 }
 
+func ExecuteWithClient(args []string, stdout io.Writer, stderr io.Writer, client gitcode.Client) int {
+	return executeWithFactory(args, stdout, stderr, func(ctx context.Context, cachePath string) (queryService, func() error, error) {
+		path, err := resolvedCachePath(cachePath)
+		if err != nil {
+			return nil, nil, err
+		}
+		store, err := cache.NewSQLiteStore(ctx, path)
+		if err != nil {
+			return nil, nil, err
+		}
+		return service.NewWithClient(store, client), store.Close, nil
+	})
+}
+
 func executeWithFactory(args []string, stdout io.Writer, stderr io.Writer, factory serviceFactory) int {
 	return executeWithFactoryAndDeps(args, stdout, stderr, factory, localCommandDeps{Source: config.OSSource{}})
 }
@@ -163,7 +188,7 @@ func executeWithFactoryAndDeps(args []string, stdout io.Writer, stderr io.Writer
 		fmt.Fprintf(stdout, "gitcode-mcp %s\n", version)
 		return 0
 	}
-	if args[0] == "config" || args[0] == "auth" || args[0] == "doctor" {
+	if args[0] == "config" || args[0] == "auth" || args[0] == "doctor" || args[0] == "migrate-cache" || args[0] == "bind" {
 		return executeLocalCommand(args, stdout, stderr, deps)
 	}
 	if !isKnownCommand(args[0]) {
@@ -176,6 +201,10 @@ func executeWithFactoryAndDeps(args []string, stdout io.Writer, stderr io.Writer
 	opts, rest, err := parseOptions(command, args[1:])
 	if err != nil {
 		return writeError(stderr, opts.format, err)
+	}
+	if opts.helpRequested {
+		printCommandHelp(command, stdout)
+		return 0
 	}
 	svc, cleanup, err := factory(context.Background(), opts.cachePath)
 	if err != nil {
@@ -264,6 +293,9 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.sourceID, "source-id", "", "source id")
 	flags.StringVar(&opts.recordID, "record-id", "", "record id")
 	flags.StringVar(&opts.snapshotID, "snapshot-id", "", "snapshot id")
+	flags.BoolVar(&opts.helpRequested, "help", false, "show help for command")
+	flags.BoolVar(&opts.helpRequested, "h", false, "show help for command")
+	flags.BoolVar(&opts.confirm, "confirm", false, "confirm migration without interactive prompt")
 	if err := flags.Parse(reorderFlags(args)); err != nil {
 		return opts, nil, service.ErrInvalidQuery{Field: "flags", Message: err.Error()}
 	}
@@ -281,7 +313,7 @@ func reorderFlags(args []string) []string {
 		arg := args[i]
 		if strings.HasPrefix(arg, "--") {
 			flags = append(flags, arg)
-			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--index" || arg == "--dry-run" || arg == "--live" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" {
+			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--index" || arg == "--dry-run" || arg == "--live" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" {
 				continue
 			}
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
@@ -312,6 +344,24 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 	if err != nil {
 		return writeError(stderr, opts.format, err)
 	}
+	if opts.helpRequested {
+		sub, _ := firstArg(rest)
+		if sub != "" && (command == "config" || command == "auth" || command == "repo") {
+			switch command + " " + sub {
+			case "config init", "config locate", "config show":
+				printLocalSubcommandHelp(command, sub, stdout)
+			case "auth status":
+				printLocalSubcommandHelp(command, sub, stdout)
+			case "repo add", "repo status":
+				printLocalSubcommandHelp(command, sub, stdout)
+			default:
+				printCommandHelp(command, stdout)
+			}
+			return 0
+		}
+		printCommandHelp(command, stdout)
+		return 0
+	}
 	if command == "doctor" && opts.runtimeAudit {
 		report := config.BuildRuntimeAuditConfigReport(deps.Source, config.Overrides{}, deps.CredentialReporter, version)
 		payload := runtimeAuditPayload{RepoID: opts.repo, Config: report}
@@ -320,6 +370,15 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 		}
 		renderRuntimeAuditText(stdout, payload)
 		return 0
+	}
+	if command == "doctor" {
+		return executeDoctorCommand(context.Background(), opts, stdout, stderr, deps)
+	}
+	if command == "migrate-cache" {
+		return executeMigrateCacheCommand(context.Background(), opts, stdout, stderr, deps)
+	}
+	if command == "bind" {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "bind", Message: "use repo add to create repository bindings"})
 	}
 	sub, ok := firstArg(rest)
 	if !ok {
@@ -365,14 +424,84 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 			return 1
 		}
 		status := deps.CredentialReporter.Status(context.Background(), eff)
-		if opts.format == "json" {
-			return render(stdout, opts.format, status, nil)
+		if opts.live {
+			status = probeAuthStatus(context.Background(), deps.Source, eff, opts, status)
 		}
-		fmt.Fprint(stdout, config.RenderCredentialStatus(status))
+		sanitizedStatus := sanitizeCredentialStatus(status, deps.Source)
+		if opts.format == "json" {
+			code := render(stdout, opts.format, sanitizedStatus, nil)
+			if status.AuthProbe != nil && status.AuthProbe.FailureClass == "auth-failure" {
+				return 1
+			}
+			return code
+		}
+		fmt.Fprint(stdout, config.RedactDiagnostic(config.RenderCredentialStatus(sanitizedStatus), deps.Source))
+		if status.AuthProbe != nil && status.AuthProbe.FailureClass == "auth-failure" {
+			return 1
+		}
 		return 0
 	default:
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: command, Message: "unknown subcommand"})
 	}
+}
+
+func probeAuthStatus(ctx context.Context, src config.Source, eff config.EffectiveConfig, opts options, status config.CredentialStatus) config.CredentialStatus {
+	if !status.Present {
+		status.AuthProbe = &config.CredentialAuthProbe{Status: "skipped", FailureClass: "token-missing", Message: "auth probe requires a token"}
+		return status
+	}
+	token := strings.TrimSpace(src.Env(config.EnvToken))
+	if token == "" {
+		status.AuthProbe = &config.CredentialAuthProbe{Status: "skipped", FailureClass: "token-missing", Message: "auth probe requires GITCODE_TOKEN"}
+		return status
+	}
+	owner := strings.TrimSpace(opts.owner)
+	repo := strings.TrimSpace(opts.repo)
+	if owner == "" || repo == "" {
+		status.AuthProbe = &config.CredentialAuthProbe{Status: "skipped", Message: "auth probe requires --owner and --repo"}
+		return status
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	provider, err := gitcode.NewLiveProvider(gitcode.ProviderConfig{Mode: gitcode.ProviderModeLive, LiveAllowed: true, BaseURL: eff.Config.GitCodeBaseURL, Token: token, Timeout: eff.Config.DefaultTimeout, MaxResponseSize: eff.Config.MaxResponseSize, MaxRetries: eff.Config.MaxRetries})
+	if err != nil {
+		status.AuthProbe = &config.CredentialAuthProbe{Status: "failed", FailureClass: "auth-failure", Message: "auth-failure: unable to initialize live auth probe"}
+		return status
+	}
+	_, err = provider.ProbeAuth(probeCtx, gitcode.AuthProbeRequest{Owner: owner, Repo: repo})
+	if err != nil {
+		failureClass := "auth-probe-failed"
+		var authErr gitcode.ErrAuthExpired
+		var forbiddenErr gitcode.ErrForbidden
+		if errors.As(err, &authErr) || errors.As(err, &forbiddenErr) {
+			failureClass = "auth-failure"
+		}
+		status.AuthProbe = &config.CredentialAuthProbe{Status: "failed", FailureClass: failureClass, Message: config.RedactDiagnostic(err.Error(), src)}
+		return status
+	}
+	status.AuthProbe = &config.CredentialAuthProbe{Status: "ok"}
+	return status
+}
+
+func sanitizeCredentialStatus(status config.CredentialStatus, src config.Source) config.CredentialStatus {
+	status.Source = config.RedactDiagnostic(status.Source, src)
+	status.ErrorClass = config.RedactDiagnostic(status.ErrorClass, src)
+	status.Remediation = config.RedactDiagnostic(status.Remediation, src)
+	status.RedactedToken = config.RedactDiagnostic(status.RedactedToken, src)
+	if status.Present && status.RedactedToken == "" {
+		status.RedactedToken = credential.ResolvedToken{Value: config.Token(src)}.RedactToken()
+	}
+	for i := range status.AvailableSources {
+		status.AvailableSources[i] = config.RedactDiagnostic(status.AvailableSources[i], src)
+	}
+	if status.AuthProbe != nil {
+		probe := *status.AuthProbe
+		probe.Status = config.RedactDiagnostic(probe.Status, src)
+		probe.FailureClass = config.RedactDiagnostic(probe.FailureClass, src)
+		probe.Message = config.RedactDiagnostic(probe.Message, src)
+		status.AuthProbe = &probe
+	}
+	return status
 }
 
 func dispatch(ctx context.Context, svc queryService, command string, args []string, opts options, stdout io.Writer, stderr io.Writer) int {
@@ -396,7 +525,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, renderOperationText)
-	case "search":
+	case "search", "search_sources":
 		if len(args) == 0 {
 			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "query", Message: "query is required"})
 		}
@@ -515,29 +644,19 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		}
 		return 0
 	case "sync":
-		if opts.issues || opts.wiki {
-			results := []service.SyncResult{}
-			if opts.issues {
-				result, err := svc.SyncToCache(ctx, service.SyncRequest{RepoID: opts.repo, RemoteAlias: "issue:42", IdempotencyKey: syncScopedKey(opts.idempotencyKey, "issue")})
-				if err != nil {
-					return writeError(stderr, opts.format, err)
-				}
-				results = append(results, result)
+		if opts.issues || opts.wiki || (opts.id == "" && opts.input == "") {
+			req := service.BulkSyncRequest{RepoID: opts.repo, IdempotencyKey: opts.idempotencyKey, PerPage: 100}
+			var result *service.SyncResourcesResult
+			var syncErr error
+			switch {
+			case opts.issues && !opts.wiki:
+				result, syncErr = svc.BulkSyncIssues(ctx, req)
+			case opts.wiki && !opts.issues:
+				result, syncErr = svc.BulkSyncWiki(ctx, req)
+			default:
+				result, syncErr = svc.BulkSyncAll(ctx, req)
 			}
-			if opts.wiki {
-				result, err := svc.SyncToCache(ctx, service.SyncRequest{RepoID: opts.repo, RemoteAlias: "wiki:Home", IdempotencyKey: syncScopedKey(opts.idempotencyKey, "wiki")})
-				if err != nil {
-					return writeError(stderr, opts.format, err)
-				}
-				results = append(results, result)
-			}
-			if opts.format == "json" {
-				return renderJSON(stdout, results)
-			}
-			for _, result := range results {
-				renderSyncText(stdout, result)
-			}
-			return 0
+			return renderSyncResources(stdout, stderr, opts.format, result, syncErr)
 		}
 		result, err := svc.SyncToCache(ctx, service.SyncRequest{RepoID: opts.repo, StableID: opts.id, RemoteAlias: opts.input, IdempotencyKey: opts.idempotencyKey})
 		if err != nil {
@@ -660,6 +779,41 @@ func syncScopedKey(base string, scope string) string {
 	return base + "-" + scope
 }
 
+func renderSyncResources(stdout, stderr io.Writer, format string, result *service.SyncResourcesResult, syncErr error) int {
+	if syncErr != nil {
+		if partial, ok := syncErr.(*service.PartialSyncError); ok {
+			if result != nil && len(result.Results) > 0 {
+				if format == "json" {
+					_ = renderJSON(stdout, result)
+				} else {
+					for _, r := range result.Results {
+						renderSyncText(stdout, r)
+					}
+				}
+			}
+			if result != nil && len(result.Failures) > 0 {
+				for _, f := range result.Failures {
+					fmt.Fprintf(stderr, "sync: %s failed: %s\n", f.SourceID, f.Message)
+				}
+			}
+			if result == nil || result.SuccessCount == 0 {
+				return writeError(stderr, format, partial)
+			}
+			return 1
+		}
+		return writeError(stderr, format, syncErr)
+	}
+	if result != nil {
+		if format == "json" {
+			return renderJSON(stdout, result)
+		}
+		for _, r := range result.Results {
+			renderSyncText(stdout, r)
+		}
+	}
+	return 0
+}
+
 func writeRequest(opts options) service.WriteCommandRequest {
 	labels := []string{}
 	if opts.labels != "" {
@@ -780,7 +934,7 @@ func renderSyncStatusText(w io.Writer, result service.SyncStatusResult) {
 }
 
 func renderSyncStatusSummaryText(w io.Writer, result service.SyncStatusSummaryResult) {
-	fmt.Fprintf(w, "repo_id: %s\nfresh_count: %d\nstale_count: %d\ncache_empty: %t\n", result.RepoID, result.FreshCount, result.StaleCount, result.CacheEmpty)
+	fmt.Fprintf(w, "repo_id: %s\nfresh_count: %d\nstale_count: %d\ncache_empty: %t\nzero_delta: %t\n", result.RepoID, result.FreshCount, result.StaleCount, result.CacheEmpty, result.ZeroDelta)
 }
 
 func renderRecentText(w io.Writer, result service.RecentChangesResult) {
@@ -810,7 +964,7 @@ func renderOperationText(w io.Writer, result service.OperationResult) {
 }
 
 func renderSyncText(w io.Writer, result service.SyncResult) {
-	fmt.Fprintf(w, "sync: %s fetched=%d updated=%d inserted=%d skipped=%d conflicts=%d idempotency_key=%s replayed=%t\n", result.Status, result.Counts.Fetched, result.Counts.Updated, result.Counts.Inserted, result.Counts.Skipped, result.Counts.Conflicts, result.IdempotencyKey, result.Replayed)
+	fmt.Fprintf(w, "sync: %s fetched=%d updated=%d inserted=%d skipped=%d conflicts=%d idempotency_key=%s replayed=%t zero_delta=%t\n", result.Status, result.Counts.Fetched, result.Counts.Updated, result.Counts.Inserted, result.Counts.Skipped, result.Counts.Conflicts, result.IdempotencyKey, result.Replayed, result.ZeroDelta)
 }
 
 func renderCacheStatusText(w io.Writer, result service.CacheStatusResult) {
@@ -859,11 +1013,12 @@ func joinRepositoryScopes(scopes []service.RepositoryScope) string {
 func writeError(stderr io.Writer, format string, err error) int {
 	code := exitCode(err)
 	failureClass := failureClass(err)
+	message := config.RedactDiagnostic(err.Error(), config.OSSource{})
 	if format == "json" {
-		_ = json.NewEncoder(stderr).Encode(map[string]any{"error": err.Error(), "exit_code": code, "failure_class": failureClass})
+		_ = json.NewEncoder(stderr).Encode(map[string]any{"error": message, "exit_code": code, "failure_class": failureClass})
 		return code
 	}
-	fmt.Fprintln(stderr, err.Error())
+	fmt.Fprintln(stderr, message)
 	if failureClass != "" {
 		fmt.Fprintf(stderr, "failure_class: %s\n", failureClass)
 	}
@@ -961,6 +1116,107 @@ func firstArg(args []string) (string, bool) {
 	return args[0], true
 }
 
+func executeDoctorCommand(ctx context.Context, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+	_ = stderr
+	cachePath := opts.cachePath
+	report, err := doctor.Build(ctx, doctor.Request{Version: version, Source: deps.Source, CredentialReporter: deps.CredentialReporter, CachePath: cachePath, Live: opts.live})
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	if opts.format == "json" {
+		return renderJSON(stdout, report)
+	}
+	doctor.RenderText(stdout, report)
+	return 0
+}
+
+type migrateCacheResult struct {
+	CachePath   string `json:"cache_path"`
+	FromVersion int    `json:"from_version"`
+	ToVersion   int    `json:"to_version"`
+	Status      string `json:"status"`
+	Applied     []int  `json:"applied,omitempty"`
+	BackupPath  string `json:"backup_path,omitempty"`
+	Remediation string `json:"remediation,omitempty"`
+}
+
+func executeMigrateCacheCommand(ctx context.Context, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+	cachePath := opts.cachePath
+	if cachePath == "" {
+		if deps.Source == nil {
+			deps.Source = config.OSSource{}
+		}
+		cachePath = doctor.DefaultCachePath(deps.Source)
+	}
+
+	result, err := cache.MigrateCacheWithConfirm(ctx, cachePath, false, cache.Confirmation{Confirmed: opts.confirm})
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+
+	mr := migrateCacheResult{
+		CachePath:   cachePath,
+		FromVersion: result.FromVersion,
+		ToVersion:   result.ToVersion,
+		Applied:     result.Applied,
+		BackupPath:  result.BackupPath,
+	}
+
+	if !result.Compatibility.Compatible && result.Compatibility.Remediation != "" {
+		mr.Status = "incompatible"
+		mr.Remediation = result.Compatibility.Remediation
+	} else if result.FromVersion == 0 {
+		mr.Status = "no_cache"
+		mr.Remediation = "no initialized cache found; re-initialize the cache before migrating"
+	} else if result.FromVersion <= 1 {
+		mr.Status = "incompatible"
+		mr.Remediation = fmt.Sprintf("cache schema version %d is incompatible with in-place migration; re-initialize the cache", result.FromVersion)
+	} else if result.FromVersion > result.ToVersion {
+		mr.Status = "incompatible"
+		mr.Remediation = fmt.Sprintf("cache schema version %d is newer than the supported version %d; upgrade gitcode-mcp binary or re-initialize the cache", result.FromVersion, result.ToVersion)
+	} else if result.FromVersion == result.ToVersion {
+		mr.Status = "up_to_date"
+	} else if len(result.Applied) == 0 && !opts.confirm {
+		mr.Status = "confirmation_required"
+		mr.Remediation = fmt.Sprintf("to migrate from schema version %d to %d, re-run with --confirm", result.FromVersion, result.ToVersion)
+	} else {
+		mr.Status = "migrated"
+	}
+
+	if opts.format == "json" {
+		code := renderJSON(stdout, mr)
+		if mr.Status == "incompatible" || mr.Status == "confirmation_required" {
+			return 1
+		}
+		return code
+	}
+	renderMigrateCacheText(stdout, mr)
+	if mr.Status == "incompatible" || mr.Status == "confirmation_required" {
+		return 1
+	}
+	return 0
+}
+
+func renderMigrateCacheText(w io.Writer, mr migrateCacheResult) {
+	fmt.Fprintf(w, "cache_path: %s\n", mr.CachePath)
+	fmt.Fprintf(w, "from_version: %d\n", mr.FromVersion)
+	fmt.Fprintf(w, "to_version: %d\n", mr.ToVersion)
+	fmt.Fprintf(w, "status: %s\n", mr.Status)
+	if len(mr.Applied) > 0 {
+		fmt.Fprintf(w, "applied_migrations:")
+		for _, v := range mr.Applied {
+			fmt.Fprintf(w, " %d", v)
+		}
+		fmt.Fprintln(w)
+	}
+	if mr.BackupPath != "" {
+		fmt.Fprintf(w, "backup_path: %s\n", mr.BackupPath)
+	}
+	if mr.Remediation != "" {
+		fmt.Fprintf(w, "remediation: %s\n", mr.Remediation)
+	}
+}
+
 func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "gitcode-mcp - cache-first GitCode MCP and CLI tooling")
 	fmt.Fprintln(w)
@@ -1012,4 +1268,364 @@ func isKnownCommand(candidate string) bool {
 		}
 	}
 	return false
+}
+
+func printCommandHelp(command string, w io.Writer) {
+	switch command {
+	case "ingest":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --input PATH [--output PATH] [--strict]\n\n", command)
+		fmt.Fprintln(w, "Ingest source documents into the cache from a file path.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --input PATH      input file path (required)")
+		fmt.Fprintln(w, "  --output PATH     output report path")
+		fmt.Fprintln(w, "  --strict          exit non-zero on findings")
+		fmt.Fprintln(w, "  --cache-path PATH cache database path")
+		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
+	case "index":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO [--full | --incremental] [--strict]\n\n", command)
+		fmt.Fprintln(w, "Build or update the text index for cached sources.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO       repository id")
+		fmt.Fprintln(w, "  --full            run full index rebuild")
+		fmt.Fprintln(w, "  --incremental     run incremental index")
+		fmt.Fprintln(w, "  --strict          exit non-zero on findings")
+		fmt.Fprintln(w, "  --cache-path PATH cache database path")
+		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
+	case "search", "search_sources":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO QUERY [--kind KIND] [--limit N] [--offset N]\n\n", command)
+		fmt.Fprintln(w, "Search cached sources with full-text matching.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO       repository id")
+		fmt.Fprintln(w, "  --kind KIND       filter by source kind (issue, wiki, doc, task)")
+		fmt.Fprintln(w, "  --limit N         maximum results")
+		fmt.Fprintln(w, "  --offset N        result offset")
+		fmt.Fprintln(w, "  --cache-path PATH cache database path")
+		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
+	case "list":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO [--kind KIND] [--status STATUS] [--limit N] [--offset N]\n\n", command)
+		fmt.Fprintln(w, "List cached sources with optional filters.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO       repository id")
+		fmt.Fprintln(w, "  --kind KIND       filter by source kind")
+		fmt.Fprintln(w, "  --status STATUS   filter by status")
+		fmt.Fprintln(w, "  --limit N         maximum results")
+		fmt.Fprintln(w, "  --offset N        result offset")
+		fmt.Fprintln(w, "  --cache-path PATH cache database path")
+		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
+	case "get":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO ID\n\n", command)
+		fmt.Fprintln(w, "Retrieve a full source record by id.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO       repository id")
+		fmt.Fprintln(w, "  --cache-path PATH cache database path")
+		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
+	case "backlinks":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO ID [--limit N] [--offset N]\n\n", command)
+		fmt.Fprintln(w, "List sources that link to the given id.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO       repository id")
+		fmt.Fprintln(w, "  --limit N         maximum results")
+		fmt.Fprintln(w, "  --offset N        result offset")
+		fmt.Fprintln(w, "  --cache-path PATH cache database path")
+		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
+	case "get-snippet", "snippet", "snippets":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO ID [--line-start N] [--line-end N]\n", command)
+		fmt.Fprintf(w, "       gitcode-mcp %s --repo REPO [--source-id ID] [--record-id ID] [--snapshot-id ID] --chunk-id ID\n\n", command)
+		fmt.Fprintln(w, "Retrieve a line range or chunk snippet from a source.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO       repository id")
+		fmt.Fprintln(w, "  --line-start N    start line (1-indexed)")
+		fmt.Fprintln(w, "  --line-end N      end line (1-indexed)")
+		fmt.Fprintln(w, "  --source-id ID    source id for chunk addressing")
+		fmt.Fprintln(w, "  --record-id ID    record id for chunk addressing")
+		fmt.Fprintln(w, "  --snapshot-id ID  snapshot id for chunk addressing")
+		fmt.Fprintln(w, "  --chunk-id ID     chunk id")
+		fmt.Fprintln(w, "  --policy POLICY   chunk policy (heading)")
+		fmt.Fprintln(w, "  --cache-path PATH cache database path")
+		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
+	case "list-chunks":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO [--source-id ID] [--record-id ID] [--snapshot-id ID] [--policy POLICY] [--limit N] [--offset N]\n\n", command)
+		fmt.Fprintln(w, "List index chunks for cached sources.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO       repository id")
+		fmt.Fprintln(w, "  --source-id ID    filter by source id")
+		fmt.Fprintln(w, "  --record-id ID    filter by record id")
+		fmt.Fprintln(w, "  --snapshot-id ID  filter by snapshot id")
+		fmt.Fprintln(w, "  --policy POLICY   filter by chunk policy")
+		fmt.Fprintln(w, "  --limit N         maximum results")
+		fmt.Fprintln(w, "  --offset N        result offset")
+		fmt.Fprintln(w, "  --cache-path PATH cache database path")
+		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
+	case "recent":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO [--kind KIND] [--status STATUS] [--limit N] [--offset N]\n\n", command)
+		fmt.Fprintln(w, "List recently changed sources from cache.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO       repository id")
+		fmt.Fprintln(w, "  --kind KIND       filter by source kind")
+		fmt.Fprintln(w, "  --status STATUS   filter by status")
+		fmt.Fprintln(w, "  --limit N         maximum results")
+		fmt.Fprintln(w, "  --offset N        result offset")
+		fmt.Fprintln(w, "  --cache-path PATH cache database path")
+		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
+	case "link-check":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO [--strict]\n\n", command)
+		fmt.Fprintln(w, "Scan cached sources for broken cross-reference links.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO       repository id")
+		fmt.Fprintln(w, "  --strict          exit non-zero on findings")
+		fmt.Fprintln(w, "  --cache-path PATH cache database path")
+		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
+	case "stale-index":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO [--strict]\n\n", command)
+		fmt.Fprintln(w, "Detect index entries with stale content hashes.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO       repository id")
+		fmt.Fprintln(w, "  --strict          exit non-zero on findings")
+		fmt.Fprintln(w, "  --cache-path PATH cache database path")
+		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
+	case "sync":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s [--live] --repo REPO [--issues] [--wiki] [--index] [--id ID] [--input REMOTE_ALIAS] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintln(w, "Synchronize cached records with the configured provider.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --live              use live GitCode API provider for sync")
+		fmt.Fprintln(w, "  --repo REPO         repository id")
+		fmt.Fprintln(w, "  --issues            sync issue records")
+		fmt.Fprintln(w, "  --wiki              sync wiki records")
+		fmt.Fprintln(w, "  --index             build index after sync")
+		fmt.Fprintln(w, "  --id ID             stable record id")
+		fmt.Fprintln(w, "  --input ALIAS       remote alias for single-record sync")
+		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "cache-status":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO\n\n", command)
+		fmt.Fprintln(w, "Report cache storage health and record counts.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO       repository id")
+		fmt.Fprintln(w, "  --cache-path PATH cache database path")
+		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
+	case "sync-status", "sync_status":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO [ID] [--kind KIND] [--status STATUS] [--limit N] [--offset N]\n\n", command)
+		fmt.Fprintln(w, "Report sync freshness for cached sources.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO       repository id")
+		fmt.Fprintln(w, "  --kind KIND       filter by source kind")
+		fmt.Fprintln(w, "  --status STATUS   filter by status")
+		fmt.Fprintln(w, "  --limit N         maximum results")
+		fmt.Fprintln(w, "  --offset N        result offset")
+		fmt.Fprintln(w, "  --cache-path PATH cache database path")
+		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
+	case "export", "export-snapshot":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO [--id ID | --snapshot-id ID] [--output PATH]\n\n", command)
+		fmt.Fprintln(w, "Export a deterministic snapshot of cached sources.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO       repository id")
+		fmt.Fprintln(w, "  --id ID           snapshot id")
+		fmt.Fprintln(w, "  --snapshot-id ID  snapshot id")
+		fmt.Fprintln(w, "  --output PATH     output file path")
+		fmt.Fprintln(w, "  --cache-path PATH cache database path")
+		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
+	case "diff", "diff-snapshot":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO [--base ID|PATH] [--head ID|PATH]\n\n", command)
+		fmt.Fprintln(w, "Diff two snapshots or the current cache state.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO       repository id")
+		fmt.Fprintln(w, "  --base ID|PATH    base snapshot id or path")
+		fmt.Fprintln(w, "  --head ID|PATH    head snapshot id or path")
+		fmt.Fprintln(w, "  --cache-path PATH cache database path")
+		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
+	case "create-issue":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --title TITLE [--body BODY] [--state STATE] [--labels A,B] [--idempotency-key KEY] (--dry-run | --live)\n\n", command)
+		fmt.Fprintln(w, "Create a new issue. Requires exactly one of --dry-run or --live.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --title TITLE       issue title (required)")
+		fmt.Fprintln(w, "  --body BODY         issue body")
+		fmt.Fprintln(w, "  --state STATE       issue state")
+		fmt.Fprintln(w, "  --labels A,B        comma-separated labels")
+		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
+		fmt.Fprintln(w, "  --dry-run           validate without mutation")
+		fmt.Fprintln(w, "  --live              execute live write")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "update-issue":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --number N [--title TITLE] [--body BODY] [--state STATE] [--labels A,B] [--idempotency-key KEY] (--dry-run | --live)\n\n", command)
+		fmt.Fprintln(w, "Update an existing issue. Requires exactly one of --dry-run or --live.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --number N          issue number (required)")
+		fmt.Fprintln(w, "  --title TITLE       updated title")
+		fmt.Fprintln(w, "  --body BODY         updated body")
+		fmt.Fprintln(w, "  --state STATE       updated state")
+		fmt.Fprintln(w, "  --labels A,B        comma-separated labels")
+		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
+		fmt.Fprintln(w, "  --dry-run           validate without mutation")
+		fmt.Fprintln(w, "  --live              execute live write")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "create-page":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --title TITLE --body BODY [--slug SLUG] [--idempotency-key KEY] (--dry-run | --live)\n\n", command)
+		fmt.Fprintln(w, "Create a new wiki page. Requires exactly one of --dry-run or --live.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --title TITLE       page title (required)")
+		fmt.Fprintln(w, "  --body BODY         page body (required)")
+		fmt.Fprintln(w, "  --slug SLUG         page slug")
+		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
+		fmt.Fprintln(w, "  --dry-run           validate without mutation")
+		fmt.Fprintln(w, "  --live              execute live write")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "update-page":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --slug SLUG [--title TITLE] [--body BODY] [--idempotency-key KEY] (--dry-run | --live)\n\n", command)
+		fmt.Fprintln(w, "Update an existing wiki page. Requires exactly one of --dry-run or --live.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --slug SLUG         page slug (required)")
+		fmt.Fprintln(w, "  --title TITLE       updated title")
+		fmt.Fprintln(w, "  --body BODY         updated body")
+		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
+		fmt.Fprintln(w, "  --dry-run           validate without mutation")
+		fmt.Fprintln(w, "  --live              execute live write")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "add-comment":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --number N --body BODY [--idempotency-key KEY] (--dry-run | --live)\n\n", command)
+		fmt.Fprintln(w, "Add a comment to an issue. Requires exactly one of --dry-run or --live.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --number N          issue number (required)")
+		fmt.Fprintln(w, "  --body BODY         comment body (required)")
+		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
+		fmt.Fprintln(w, "  --dry-run           validate without mutation")
+		fmt.Fprintln(w, "  --live              execute live write")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "add-label":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --number N --label LABEL [--idempotency-key KEY] (--dry-run | --live)\n\n", command)
+		fmt.Fprintln(w, "Add a label to an issue. Requires exactly one of --dry-run or --live.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --number N          issue number (required)")
+		fmt.Fprintln(w, "  --label LABEL       label to add (required)")
+		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
+		fmt.Fprintln(w, "  --dry-run           validate without mutation")
+		fmt.Fprintln(w, "  --live              execute live write")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "config":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s SUBCOMMAND\n\n", command)
+		fmt.Fprintln(w, "Manage gitcode-mcp configuration.")
+		fmt.Fprintln(w, "Subcommands:")
+		fmt.Fprintln(w, "  init        create default config file")
+		fmt.Fprintln(w, "  locate      show config file location")
+		fmt.Fprintln(w, "  show        display effective config (requires --redacted)")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Run gitcode-mcp config SUBCOMMAND --help for details.")
+	case "auth":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s SUBCOMMAND\n\n", command)
+		fmt.Fprintln(w, "Inspect authentication state.")
+		fmt.Fprintln(w, "Subcommands:")
+		fmt.Fprintln(w, "  status      report token source and credential state")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Run gitcode-mcp auth SUBCOMMAND --help for details.")
+	case "doctor":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s [--repo REPO] [--live] [--runtime-audit] [--cache-path PATH]\n\n", command)
+		fmt.Fprintln(w, "Aggregate subsystem diagnostics with public-safe output.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id")
+		fmt.Fprintln(w, "  --live              include live provider checks")
+		fmt.Fprintln(w, "  --runtime-audit     emit runtime audit report")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "migrate-cache":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --confirm [--cache-path PATH]\n\n", command)
+		fmt.Fprintln(w, "Run cache schema migration from supported older versions.")
+		fmt.Fprintln(w, "A backup is created before migration at {cache-path}.backup-{timestamp}.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --confirm           required to apply migration")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "repo":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s SUBCOMMAND\n\n", command)
+		fmt.Fprintln(w, "Manage GitCode repository bindings.")
+		fmt.Fprintln(w, "Subcommands:")
+		fmt.Fprintln(w, "  add         bind a GitCode repository to the cache")
+		fmt.Fprintln(w, "  status      show repository binding status")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Run gitcode-mcp repo SUBCOMMAND --help for details.")
+	case "bind":
+		fmt.Fprintln(w, "Usage: gitcode-mcp bind --repo-owner OWNER --repo REPO")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Bind a GitCode repository to the cache. This compatibility help surface maps to repo add.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo-owner OWNER  repository owner (required)")
+		fmt.Fprintln(w, "  --repo REPO         repository name (required)")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	default:
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s [flags]\n\n", command)
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --cache-path PATH cache database path")
+		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
+		fmt.Fprintln(w, "  -h, --help        show help")
+	}
+}
+
+func printLocalSubcommandHelp(command, sub string, w io.Writer) {
+	switch command + " " + sub {
+	case "config init":
+		fmt.Fprintln(w, "Usage: gitcode-mcp config init [--overwrite]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Create a default gitcode-mcp configuration file at the standard location.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --overwrite         overwrite existing config file")
+	case "config locate":
+		fmt.Fprintln(w, "Usage: gitcode-mcp config locate [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Show the config file path, source, format, and existence.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "config show":
+		fmt.Fprintln(w, "Usage: gitcode-mcp config show --redacted [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Display the effective configuration with credential status (public-safe).")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --redacted          required safety flag (MUST be set)")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "auth status":
+		fmt.Fprintln(w, "Usage: gitcode-mcp auth status [--live] [--owner OWNER] [--repo REPO] [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Report token source, credential state, and optional auth probe.")
+		fmt.Fprintln(w, "Credential sources are checked in order: env GITCODE_TOKEN, keychain, none.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --live              probe GitCode API with token")
+		fmt.Fprintln(w, "  --owner OWNER       repository owner (for auth probe)")
+		fmt.Fprintln(w, "  --repo REPO         repository id (for auth probe)")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "repo add":
+		fmt.Fprintln(w, "Usage: gitcode-mcp repo add --repo REPO --owner OWNER --name NAME --api-base-url URL --scopes SCOPES [--alias ALIAS] [--display-name NAME]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Bind a GitCode repository to the cache.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --owner OWNER       repository owner (required)")
+		fmt.Fprintln(w, "  --name NAME         repository name (required)")
+		fmt.Fprintln(w, "  --api-base-url URL  API base URL (required)")
+		fmt.Fprintln(w, "  --scopes SCOPES     comma-separated scopes (issues, wiki)")
+		fmt.Fprintln(w, "  --alias ALIAS       repository alias (repeatable)")
+		fmt.Fprintln(w, "  --display-name NAME human-readable display name")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "repo status":
+		fmt.Fprintln(w, "Usage: gitcode-mcp repo status --repo REPO [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Show repository binding status.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	default:
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s %s [flags]\n\n", command, sub)
+	}
 }

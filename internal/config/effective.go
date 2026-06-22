@@ -39,11 +39,20 @@ type EffectiveConfig struct {
 }
 
 type CredentialStatus struct {
-	Source      string `json:"source"`
-	Present     bool   `json:"present"`
-	StoreMode   string `json:"store_mode"`
-	ErrorClass  string `json:"error_class,omitempty"`
-	Remediation string `json:"remediation,omitempty"`
+	Source           string               `json:"source"`
+	Present          bool                 `json:"present"`
+	StoreMode        string               `json:"store_mode"`
+	RedactedToken    string               `json:"redacted_token,omitempty"`
+	ErrorClass       string               `json:"error_class,omitempty"`
+	Remediation      string               `json:"remediation,omitempty"`
+	AvailableSources []string             `json:"available_sources,omitempty"`
+	AuthProbe        *CredentialAuthProbe `json:"auth_probe,omitempty"`
+}
+
+type CredentialAuthProbe struct {
+	Status       string `json:"status"`
+	FailureClass string `json:"failure_class,omitempty"`
+	Message      string `json:"message,omitempty"`
 }
 
 type SecretString struct {
@@ -129,7 +138,7 @@ type ChainCredentialProvider struct {
 }
 
 func DefaultCredentialProvider(src Source) ChainCredentialProvider {
-	return ChainCredentialProvider{Providers: []CredentialProvider{EnvCredentialProvider{Source: src}}}
+	return ChainCredentialProvider{Providers: []CredentialProvider{EnvCredentialProvider{Source: src}, KeychainCredentialProvider{}}}
 }
 
 func (p ChainCredentialProvider) Resolve(ctx context.Context, eff EffectiveConfig) (SecretString, CredentialStatus, error) {
@@ -151,11 +160,29 @@ func (p ChainCredentialProvider) Resolve(ctx context.Context, eff EffectiveConfi
 }
 
 func (p ChainCredentialProvider) Status(ctx context.Context, eff EffectiveConfig) CredentialStatus {
-	_, status, err := p.Resolve(ctx, eff)
-	if err != nil && status.ErrorClass == "" {
-		status.ErrorClass = "credential-store-unavailable"
-		status.Remediation = "Use GITCODE_TOKEN or configure credential.store: env."
+	available := make([]string, 0, len(p.Providers))
+	var last CredentialStatus
+	for _, provider := range p.Providers {
+		_, status, err := provider.Resolve(ctx, eff)
+		if source := providerStatusSource(provider, status); source != "" {
+			available = append(available, source)
+		}
+		if err != nil && status.ErrorClass == "" {
+			status.ErrorClass = "credential-store-unavailable"
+			status.Remediation = "Use GITCODE_TOKEN or configure credential.store: env."
+		}
+		last = status
+		if status.Present {
+			status.AvailableSources = uniqueStrings(available)
+			return status
+		}
 	}
+	status := missingCredentialStatus(eff.CredentialPolicy.Store)
+	if last.StoreMode != "" {
+		status.StoreMode = last.StoreMode
+	}
+	available = append(available, "none")
+	status.AvailableSources = uniqueStrings(available)
 	return status
 }
 
@@ -249,11 +276,26 @@ func RenderCredentialStatus(status CredentialStatus) string {
 	fmt.Fprintf(&b, "credential_source: %s\n", emptyAsNone(status.Source))
 	fmt.Fprintf(&b, "token_present: %t\n", status.Present)
 	fmt.Fprintf(&b, "credential_store_mode: %s\n", status.StoreMode)
+	if len(status.AvailableSources) > 0 {
+		fmt.Fprintf(&b, "available_sources: %s\n", strings.Join(status.AvailableSources, ","))
+	}
+	if status.RedactedToken != "" {
+		fmt.Fprintf(&b, "redacted_token: %s\n", status.RedactedToken)
+	}
 	if status.ErrorClass != "" {
 		fmt.Fprintf(&b, "credential_error_class: %s\n", status.ErrorClass)
 	}
 	if status.Remediation != "" {
 		fmt.Fprintf(&b, "remediation: %s\n", status.Remediation)
+	}
+	if status.AuthProbe != nil {
+		fmt.Fprintf(&b, "auth_probe_status: %s\n", status.AuthProbe.Status)
+		if status.AuthProbe.FailureClass != "" {
+			fmt.Fprintf(&b, "auth_probe_failure_class: %s\n", status.AuthProbe.FailureClass)
+		}
+		if status.AuthProbe.Message != "" {
+			fmt.Fprintf(&b, "auth_probe_message: %s\n", status.AuthProbe.Message)
+		}
 	}
 	return b.String()
 }
@@ -365,13 +407,13 @@ func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, er
 
 func defaultFieldSources() map[string]string {
 	return map[string]string{
-		"cache_path":         "default",
-		"lock_path":          "default",
-		"gitcode_base_url":   "default",
-		"default_timeout":    "default",
-		"max_response_size":  "default",
-		"max_retries":        "default",
-		"format":             "default",
+		"cache_path":        "default",
+		"lock_path":         "default",
+		"gitcode_base_url":  "default",
+		"default_timeout":   "default",
+		"max_response_size": "default",
+		"max_retries":       "default",
+		"format":            "default",
 	}
 }
 
@@ -449,6 +491,30 @@ func missingCredentialStatus(store string) CredentialStatus {
 		store = "auto"
 	}
 	return CredentialStatus{Source: "missing", Present: false, StoreMode: store, ErrorClass: "token-missing", Remediation: "Set GITCODE_TOKEN or configure a credential store."}
+}
+
+func providerStatusSource(provider CredentialProvider, status CredentialStatus) string {
+	if _, ok := provider.(EnvCredentialProvider); ok {
+		return "env:" + EnvToken
+	}
+	if _, ok := provider.(KeychainCredentialProvider); ok {
+		return "keychain"
+	}
+	return status.Source
+}
+
+func uniqueStrings(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 func emptyAsNone(value string) string {

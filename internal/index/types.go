@@ -37,7 +37,6 @@ type SourceRecord struct {
 	SyncEventID              string
 	Aliases                  []Alias
 	RemoteAliases            []Alias
-	PreviousIndexedHash      string
 	PreviousAnchorReferences []string
 }
 

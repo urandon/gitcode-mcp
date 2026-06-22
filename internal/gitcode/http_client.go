@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"gitcode-mcp/internal/diagnostics"
 )
 
 const defaultMaxResponseSize int64 = 10 << 20
@@ -496,7 +498,7 @@ func (c *HTTPClient) readBounded(resp *http.Response, endpoint string) ([]byte, 
 }
 
 func (c *HTTPClient) statusError(status int, endpoint string, body []byte, opts requestOptions) error {
-	msg := responseMessage(body)
+	msg := responseMessage(status, body)
 	switch status {
 	case http.StatusUnauthorized:
 		return ErrAuthExpired{Endpoint: endpoint, Status: status, Message: msg}
@@ -542,18 +544,11 @@ func firstPositive(values ...int) int {
 	return 0
 }
 
-func responseMessage(body []byte) string {
-	var payload struct {
-		Message string `json:"message"`
-		Error   string `json:"error"`
+func responseMessage(status int, body []byte) string {
+	if len(body) == 0 {
+		return http.StatusText(status)
 	}
-	if json.Unmarshal(body, &payload) == nil {
-		if payload.Message != "" {
-			return payload.Message
-		}
-		return payload.Error
-	}
-	return ""
+	return diagnostics.NewFilter().RawAPIResponseSummary(status, body)
 }
 
 func decodeMessage(err error) string {

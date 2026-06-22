@@ -270,6 +270,7 @@ func inheritedMetadata(source SourceRecord, parsed ParsedSource) map[string]stri
 	if !source.UpdatedAt.IsZero() {
 		metadata["source_updated_at"] = source.UpdatedAt.UTC().Format(time.RFC3339Nano)
 	}
+	metadata["indexed_at"] = time.Now().UTC().Format(time.RFC3339Nano)
 	return metadata
 }
 

@@ -39,6 +39,7 @@ type Store interface {
 	ListChunks(context.Context, ChunkFilter) ([]Chunk, error)
 	RecordSyncEvent(context.Context, SyncEvent) error
 	GetSyncEventByKey(context.Context, string) (*SyncEvent, error)
+	ListCompletedSyncEventsScoped(context.Context, string) ([]SyncEvent, error)
 	RecordAuditEvent(context.Context, AuditTrailEntry) error
 	GetAuditEventByKey(context.Context, string, string) (*AuditTrailEntry, error)
 	GetSyncStatus(context.Context, string) (SyncStatus, error)
@@ -336,6 +337,9 @@ type SyncEvent struct {
 	IdempotencyKey string
 	Message        string
 	CreatedAt      time.Time
+	StartedAt      time.Time
+	CompletedAt    time.Time
+	ZeroDelta      bool
 }
 
 type SyncStatus struct {

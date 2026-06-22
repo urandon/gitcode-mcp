@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -38,6 +39,46 @@ func TestBacklinks(t *testing.T) {
 	}
 	if len(source.Aliases) != 2 {
 		t.Fatalf("GetSource aliases = %d, want 2", len(source.Aliases))
+	}
+}
+
+func TestRecordSyncEventTimestamps(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+
+	mustUpsertGraph(t, ctx, store, SourceGraph{Source: testSource("DOC-123", "doc", "Design Doc")})
+	startedAt := time.Date(2026, 6, 22, 10, 0, 0, 0, time.UTC)
+	completedAt := startedAt.Add(2 * time.Second)
+	event := SyncEvent{
+		RepoID:         "fixture-a",
+		ID:             "sync-event-timestamps",
+		SourceID:       "DOC-123",
+		RemoteType:     "issue",
+		RemoteID:       "123",
+		RemoteRevision: "rev-1",
+		Status:         "succeeded",
+		IdempotencyKey: "sync-event-timestamps-key",
+		Message:        "{}",
+		CreatedAt:      completedAt,
+		StartedAt:      startedAt,
+		CompletedAt:    completedAt,
+	}
+	if err := store.RecordSyncEvent(ctx, event); err != nil {
+		t.Fatalf("RecordSyncEvent returned error: %v", err)
+	}
+	got, err := store.GetSyncEventByKey(ctx, "sync-event-timestamps-key")
+	if err != nil {
+		t.Fatalf("GetSyncEventByKey returned error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetSyncEventByKey returned nil")
+	}
+	if !got.StartedAt.Equal(startedAt) {
+		t.Fatalf("StartedAt = %s, want %s", got.StartedAt, startedAt)
+	}
+	if !got.CompletedAt.Equal(completedAt) {
+		t.Fatalf("CompletedAt = %s, want %s", got.CompletedAt, completedAt)
 	}
 }
 
@@ -403,6 +444,41 @@ func TestMinimumReplacementCacheState(t *testing.T) {
 	}
 	if len(results) == 0 || results[0].ID != "DOC-123" || results[0].Path != "docs/DOC-123.md" || results[0].Title != "Coordinator Backlog Guide" || results[0].Snippet == "" {
 		t.Fatalf("SearchSources(backlog) = %#v, want DOC-123 with path/title/snippet", results)
+	}
+	missing, err := store.SearchSources(ctx, SearchQuery{Query: "NONEXISTENT", Limit: 5})
+	if err != nil {
+		t.Fatalf("SearchSources(NONEXISTENT) returned error: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("SearchSources(NONEXISTENT) returned %d results, want 0", len(missing))
+	}
+	if store.useFTS {
+		fallbackStore, err := newSQLiteStore(ctx, ":memory:", true)
+		if err != nil {
+			t.Fatalf("new fallback store returned error: %v", err)
+		}
+		defer fallbackStore.Close()
+		mustAddTestRepo(t, ctx, fallbackStore, "fixture-a")
+		mustUpsertGraph(t, ctx, fallbackStore, SourceGraph{Source: Source{ID: "DOC-123", Kind: "doc", Path: "docs/DOC-123.md", Title: "Coordinator Backlog Guide", Body: "Coordinator intake uses the backlog cache state for task lookup and handoff review.", Status: "current", Labels: []string{"coordinator", "backlog"}, ContentHash: "hash-doc-123-minimum", CreatedAt: createdAt, UpdatedAt: updatedAt}})
+		mustUpsertGraph(t, ctx, fallbackStore, SourceGraph{Source: Source{ID: "TASK-015", Kind: "task", Path: "project/tasks/TASK-015.md", Title: "Add minimum cache state test", Body: "Ready task for coordinator intake references DOC-123 without querying markdown indexes.", Status: "ready", Labels: []string{"cache-store", "day-7"}, ContentHash: "hash-task-015-minimum", CreatedAt: createdAt, UpdatedAt: updatedAt}})
+		mustUpsertGraph(t, ctx, fallbackStore, SourceGraph{Source: Source{ID: "HANDOFF-001", Kind: "handoff", Path: "project/handoffs/HANDOFF-001.md", Title: "Cache handoff review", Body: "Handoff review confirms the Day 7 route remains offline after ingest.", Status: "accepted", Labels: []string{"handoff"}, ContentHash: "hash-handoff-001-minimum", CreatedAt: createdAt, UpdatedAt: updatedAt}})
+		fallbackResults, err := fallbackStore.SearchSources(ctx, SearchQuery{Query: "backlog", Limit: 5})
+		if err != nil {
+			t.Fatalf("fallback SearchSources returned error: %v", err)
+		}
+		if !reflect.DeepEqual(visibleSearchResults(results), visibleSearchResults(fallbackResults)) {
+			t.Fatalf("visible search results differ\nfts=%#v\nfallback=%#v", visibleSearchResults(results), visibleSearchResults(fallbackResults))
+		}
+		if _, err := store.db.ExecContext(ctx, `DELETE FROM fts_index WHERE repo_id = ?`, "fixture-a"); err != nil {
+			t.Fatalf("delete fts_index returned error: %v", err)
+		}
+		repaired, err := store.SearchSources(ctx, SearchQuery{Query: "backlog", Limit: 5})
+		if err != nil {
+			t.Fatalf("repaired SearchSources returned error: %v", err)
+		}
+		if !reflect.DeepEqual(visibleSearchResults(results), visibleSearchResults(repaired)) {
+			t.Fatalf("repaired visible search results differ\nbefore=%#v\nafter=%#v", visibleSearchResults(results), visibleSearchResults(repaired))
+		}
 	}
 
 	readyTasks, err := store.ListSources(ctx, SourceFilter{Kind: "task", Status: "ready"})

@@ -1,0 +1,25 @@
+{
+  "schema_version": "triborg.validation-result.v1",
+  "task_id": "005-cmd-gitcode-mcp-task-5-add-migrate-cache-cli-command",
+  "covered_outcome_ids": ["outcome-10"],
+  "covered_decommission_ids": ["decommission-10"],
+  "product_surfaces": [
+    "cmd/gitcode-mcp/main.go — CLI binary entrypoint routes migrate-cache as a local command",
+    "internal/cli/cli.go — migrate-cache command routing, JSON/text rendering, cache path resolution, and status semantics",
+    "internal/cache/migrate.go — cache migration API using schema_version table and writer lock",
+    "internal/cache/schema.go — existing schema migrations and currentSchemaVersion target reused by migrate-cache"
+  ],
+  "evidence_type": "CLI_command",
+  "freshness": "Current binary built from ./cmd/gitcode-mcp into the validation task directory; offline deterministic run with temporary SQLite cache files",
+  "mocks_used": {
+    "external_dependencies": "None. Validation uses local SQLite caches only and does not access network services or credentials.",
+    "fixtures": "Temporary cache files are created under mktemp by the validation script and removed on exit."
+  },
+  "production_files_modified": {},
+  "validation_scope": "Validation artifacts are limited to tests/design_package/005-cmd-gitcode-mcp-task-5-add-migrate-cache-cli-command/. The script builds a local binary in that directory and writes temporary runtime files under mktemp only.",
+  "live_validation": {
+    "enabled": false,
+    "reason": "Cache migration is an offline local database operation and must not require live GitCode access, credentials, or network availability.",
+    "gated_by": []
+  }
+}

@@ -14,6 +14,7 @@ import (
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/cli"
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/mcp"
 	"gitcode-mcp/internal/service"
 )
@@ -36,6 +37,8 @@ type GitCodeStartup struct {
 	DefaultTimeout  time.Duration
 	MaxResponseSize int64
 	MaxRetries      int
+	Live            bool
+	Token           string
 	token           string
 }
 
@@ -46,6 +49,7 @@ type startupOptions struct {
 	mcpServe     bool
 	mcpTransport string
 	mcpBind      string
+	live         bool
 	overrides    config.Overrides
 }
 
@@ -85,8 +89,15 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 		fmt.Fprintf(stdout, "gitcode-mcp %s\n", version)
 		return 0
 	}
-	if len(rest) > 0 && (rest[0] == "config" || rest[0] == "auth") {
-		return cli.ExecuteWithSource(rest, stdout, stderr, src)
+	if len(rest) > 0 && (rest[0] == "config" || rest[0] == "auth" || rest[0] == "doctor" || rest[0] == "migrate-cache") {
+		localArgs := append([]string(nil), rest...)
+		if rest[0] == "auth" && opts.live && !hasCLIFlag(localArgs[1:], "--live") {
+			localArgs = append(localArgs, "--live")
+		}
+		if opts.overrides.CachePath != "" && !hasCLIFlag(localArgs[1:], "--cache-path") {
+			localArgs = append(localArgs, "--cache-path", opts.overrides.CachePath)
+		}
+		return cli.ExecuteWithSource(localArgs, stdout, stderr, src)
 	}
 
 	cfg, err := config.Load(src, opts.overrides)
@@ -94,7 +105,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), src))
 		return 1
 	}
-	deps := buildStartupDeps(cfg, config.Token(src))
+	deps := buildStartupDeps(cfg, config.Token(src), opts.live)
 	if opts.mcpServe {
 		return mcpServeRoute(context.Background(), stdin, stdout, stderr, deps, opts.mcpTransport, opts.mcpBind)
 	}
@@ -104,7 +115,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 	return cliRoute(context.Background(), rest, stdout, stderr, deps)
 }
 
-func buildStartupDeps(cfg config.Config, token string) StartupDeps {
+func buildStartupDeps(cfg config.Config, token string, live bool) StartupDeps {
 	return StartupDeps{
 		Config: cfg,
 		Cache:  CacheStartup{CachePath: cfg.CachePath, LockPath: cfg.LockPath},
@@ -113,6 +124,8 @@ func buildStartupDeps(cfg config.Config, token string) StartupDeps {
 			DefaultTimeout:  cfg.DefaultTimeout,
 			MaxResponseSize: cfg.MaxResponseSize,
 			MaxRetries:      cfg.MaxRetries,
+			Live:            live,
+			Token:           token,
 			token:           token,
 		},
 	}
@@ -208,12 +221,50 @@ func parseStartupArgs(args []string) (startupOptions, []string, error) {
 			i = next
 			continue
 		}
+		if arg == "--live" {
+			opts.live = true
+			continue
+		}
 		if strings.HasPrefix(arg, "-") {
 			return opts, nil, fmt.Errorf("startup: unknown global flag %s", arg)
+		}
+		if arg == "mcp" && i+1 < len(args) && args[i+1] == "serve" {
+			serveOpts, rest, err := parseMCPServeArgs(args[i+2:])
+			if err != nil {
+				return opts, nil, err
+			}
+			serveOpts.live = opts.live || serveOpts.live
+			serveOpts.overrides = mergeStartupOverrides(opts.overrides, serveOpts.overrides)
+			return serveOpts, rest, nil
 		}
 		return opts, args[i:], nil
 	}
 	return opts, nil, nil
+}
+
+func mergeStartupOverrides(base config.Overrides, override config.Overrides) config.Overrides {
+	if override.CachePath != "" {
+		base.CachePath = override.CachePath
+	}
+	if override.LockPath != "" {
+		base.LockPath = override.LockPath
+	}
+	if override.GitCodeBaseURL != "" {
+		base.GitCodeBaseURL = override.GitCodeBaseURL
+	}
+	if override.DefaultTimeout != 0 {
+		base.DefaultTimeout = override.DefaultTimeout
+	}
+	if override.MaxResponseSize != 0 {
+		base.MaxResponseSize = override.MaxResponseSize
+	}
+	if override.MaxRetries != nil {
+		base.MaxRetries = override.MaxRetries
+	}
+	if override.Format != "" {
+		base.Format = override.Format
+	}
+	return base
 }
 
 func parseMCPServeArgs(args []string) (startupOptions, []string, error) {
@@ -223,6 +274,8 @@ func parseMCPServeArgs(args []string) (startupOptions, []string, error) {
 		switch {
 		case arg == "-h" || arg == "--help":
 			opts.help = true
+		case arg == "--live":
+			opts.live = true
 		case strings.HasPrefix(arg, "--transport="):
 			opts.mcpTransport = strings.TrimPrefix(arg, "--transport=")
 		case arg == "--transport":
@@ -267,6 +320,45 @@ func startupValue(args []string, index int, flag string) (string, int, error) {
 	return args[index+1], index + 1, nil
 }
 
+func resolveLiveClient(deps StartupDeps) (gitcode.Client, error) {
+	gc := deps.GitCode
+	if !gc.Live {
+		return nil, nil
+	}
+	token := strings.TrimSpace(gc.Token)
+	if token == "" {
+		return nil, fmt.Errorf("live provider requires GITCODE_TOKEN (set GITCODE_TOKEN or remove --live)")
+	}
+	provider, err := gitcode.NewLiveProvider(gitcode.ProviderConfig{
+		Mode:            gitcode.ProviderModeLive,
+		LiveAllowed:     true,
+		BaseURL:         gc.BaseURL,
+		Token:           token,
+		Timeout:         gc.DefaultTimeout,
+		MaxResponseSize: gc.MaxResponseSize,
+		MaxRetries:      gc.MaxRetries,
+	})
+	if err != nil {
+		return nil, err
+	}
+	client, ok := provider.(gitcode.Client)
+	if !ok {
+		return nil, fmt.Errorf("live provider does not implement GitCode client")
+	}
+	return client, nil
+}
+
+func resolveService(store cache.Store, deps StartupDeps) (*service.Service, error) {
+	liveClient, err := resolveLiveClient(deps)
+	if err != nil {
+		return nil, err
+	}
+	if liveClient == nil {
+		return service.New(store), nil
+	}
+	return service.NewWithClient(store, liveClient), nil
+}
+
 func runCLICompatibility(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps StartupDeps) int {
 	cliArgs := append([]string(nil), args...)
 	if len(cliArgs) > 0 && deps.Config.CachePath != "" && !hasCLIFlag(cliArgs[1:], "--cache-path") {
@@ -275,7 +367,15 @@ func runCLICompatibility(ctx context.Context, args []string, stdout io.Writer, s
 	if len(cliArgs) > 0 && deps.Config.Format != "" && !hasCLIFlag(cliArgs[1:], "--format") {
 		cliArgs = append(cliArgs, "--format", deps.Config.Format)
 	}
+	liveClient, err := resolveLiveClient(deps)
+	if err != nil {
+		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
+		return 1
+	}
 	_ = ctx
+	if liveClient != nil {
+		return cli.ExecuteWithClient(cliArgs, stdout, stderr, liveClient)
+	}
 	return cli.Execute(cliArgs, stdout, stderr)
 }
 
@@ -306,7 +406,12 @@ func runMCPStdio(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr 
 		return 1
 	}
 	defer store.Close()
-	server := mcp.New(stdin, stdout, stderr, service.New(store))
+	svc, err := resolveService(store, deps)
+	if err != nil {
+		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
+		return 1
+	}
+	server := mcp.New(stdin, stdout, stderr, svc)
 	if err := server.Serve(); err != nil {
 		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
 		return 1
@@ -325,7 +430,11 @@ func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind
 		return 1
 	}
 	defer store.Close()
-	svc := service.New(store)
+	svc, err := resolveService(store, deps)
+	if err != nil {
+		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
+		return 1
+	}
 	transport := mcp.NewHTTPSSETransport(mcp.NewRPCHandler(svc), mcp.ServerConfig{BindAddress: bind, ReadinessProbe: func(ctx context.Context) mcp.Readiness {
 		repos, err := store.ListRepositories(ctx)
 		if err != nil {
@@ -362,6 +471,7 @@ func printStartupHelp(w io.Writer) {
 	fmt.Fprintln(w, "Usage: gitcode-mcp [global flags] <command> [args]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Global flags:")
+	fmt.Fprintln(w, "  --live                enable live GitCode API provider (requires GITCODE_TOKEN)")
 	fmt.Fprintln(w, "  --mcp                 run stdio MCP server")
 	fmt.Fprintln(w, "  mcp serve             run MCP server with stdio or HTTP/SSE transport")
 	fmt.Fprintln(w, "  --cache-path PATH     cache database path")

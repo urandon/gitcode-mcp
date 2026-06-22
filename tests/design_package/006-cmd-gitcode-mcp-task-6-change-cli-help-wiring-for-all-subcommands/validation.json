@@ -1,0 +1,23 @@
+{
+  "schema_version": "triborg.validation-result.v1",
+  "task_id": "006-cmd-gitcode-mcp-task-6-change-cli-help-wiring-for-all-subcommands",
+  "covered_outcome_ids": ["outcome-9"],
+  "covered_decommission_ids": ["decommission-9"],
+  "product_surfaces": [
+    "internal/cli/cli.go — options.helpRequested field captures --help/-h flag; parseOptions registers -h/--help BoolVar on per-command FlagSet; executeWithFactoryAndDeps checks helpRequested before service dispatch, calls printCommandHelp; executeLocalCommand checks helpRequested and dispatches printCommandHelp/printLocalSubcommandHelp; printHelp lists all registered commands; printCommandHelp renders per-command help for all 30+ commands; printLocalSubcommandHelp renders help for config init/locate/show, auth status, repo add/status",
+    "internal/cli/cli_test.go — TestCommandHelpExitsZero tests all service-backed commands --help exit 0; TestCommandHelpShortForm tests -h short form; TestLocalCommandHelpExitsZero tests local commands; TestLocalSubcommandHelpExitsZero tests subcommand-level help; TestAliasCommandHelpExitsZero tests alias commands; TestHelpDoesNotCreateService verifies no service factory call on --help; TestUnknownCommandErrors verifies unknown commands still error; TestAllCommandsRegistered verifies root --help lists all commands",
+    "cmd/gitcode-mcp/main.go — parseStartupArgs handles -h/--help at startup level, prints printStartupHelp; config/auth/doctor/migrate-cache local commands routed to cli.ExecuteWithSource"
+  ],
+  "evidence_type": "CLI_command",
+  "freshness": "Current binary built in task directory, no live env vars, deterministic offline validation",
+  "mocks_used": {},
+  "production_files_modified": {
+    "internal/cli/cli.go": "options.helpRequested field; -h/--help flag registration in parseOptions; executeWithFactoryAndDeps helpRequested check; executeLocalCommand helpRequested check with local subcommand routing; printCommandHelp function covering all commands; printLocalSubcommandHelp function covering config/auth/repo subcommands",
+    "internal/cli/cli_test.go": "TestCommandHelpExitsZero, TestCommandHelpShortForm, TestLocalCommandHelpExitsZero, TestLocalSubcommandHelpExitsZero, TestAliasCommandHelpExitsZero, TestHelpDoesNotCreateService, TestUnknownCommandErrors, TestAllCommandsRegistered"
+  },
+  "validation_scope": "All validation artifacts written only under tests/design_package/006-cmd-gitcode-mcp-task-6-change-cli-help-wiring-for-all-subcommands/. Binary built inside task directory, not at repo root.",
+  "live_validation": {
+    "enabled": false,
+    "reason": "CLI help is always offline; no live validation needed"
+  }
+}

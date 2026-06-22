@@ -29,21 +29,21 @@ type LockHandle struct {
 
 type WriterOwner struct {
 	Operation string    `json:"operation"`
-	RepoID     string    `json:"repo_id,omitempty"`
+	RepoID    string    `json:"repo_id,omitempty"`
 	StartedAt time.Time `json:"started_at"`
 	PID       int       `json:"pid"`
 	CachePath string    `json:"cache_path"`
 }
 
 type WriterLease struct {
-	lock *LockHandle
+	lock  *LockHandle
 	Owner WriterOwner
 }
 
 type WriterRequest struct {
 	Operation string
-	RepoID     string
-	LockPath   string
+	RepoID    string
+	LockPath  string
 }
 
 func NewSQLiteStore(ctx context.Context, dataSourceName string) (*SQLiteStore, error) {
@@ -83,6 +83,15 @@ func newSQLiteStore(ctx context.Context, dataSourceName string, forceNoFTS bool)
 		}
 		return store, nil
 	}
+	compat, err := CheckVersionCompatibility(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if !compat.PermitWrites {
+		_ = db.Close()
+		return nil, &SchemaVersionError{Compat: compat}
+	}
 	lease, err := store.AcquireWriter(ctx, WriterRequest{Operation: "migration"})
 	if err != nil {
 		_ = db.Close()
@@ -98,6 +107,42 @@ func newSQLiteStore(ctx context.Context, dataSourceName string, forceNoFTS bool)
 		return nil, err
 	}
 	return store, nil
+}
+
+func NewSQLiteReadOnlyStore(ctx context.Context, dataSourceName string) (*SQLiteStore, error) {
+	if _, err := os.Stat(dataSourceName); err != nil {
+		return nil, fmt.Errorf("cache: cannot open read-only store: %w", err)
+	}
+	dsn := dataSourceName + "?mode=ro&_journal_mode=WAL"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout = 5000"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	compat, err := CheckVersionCompatibility(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if !compat.Compatible {
+		_ = db.Close()
+		return nil, &SchemaVersionError{Compat: compat}
+	}
+	useFTS := detectFTS5(ctx, db)
+	return &SQLiteStore{db: db, useFTS: useFTS, forceNoFTS: false, cachePath: dataSourceName, lockPath: ""}, nil
+}
+
+func (s *SQLiteStore) SchemaVersion(ctx context.Context) (int, error) {
+	return schemaVersion(ctx, s.db)
 }
 
 func NewInMemorySQLiteStore(ctx context.Context) (*SQLiteStore, error) {

@@ -15,26 +15,97 @@ import (
 	"strings"
 	"time"
 
+	"gitcode-mcp/internal/audit"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
 )
 
 type Service struct {
-	store    cache.Store
-	client   gitcode.Client
-	now      func() time.Time
-	lockPath string
+	store                  cache.Store
+	client                 gitcode.Client
+	now                    func() time.Time
+	lockPath               string
+	providerMode           gitcode.ProviderMode
+	writeCredentialPresent bool
 }
 
 func New(store cache.Store) *Service {
-	return &Service{store: store, client: sanitizedFixtureClient{}, now: func() time.Time { return time.Now().UTC() }, lockPath: filepath.Join(os.TempDir(), "gitcode-mcp-sync.lock")}
+	svc, err := NewWithMode(store, gitcode.ProviderModeFixture, "", ServiceConfig{})
+	if err != nil {
+		return &Service{store: store, client: sanitizedFixtureClient{}, now: func() time.Time { return time.Now().UTC() }, lockPath: filepath.Join(os.TempDir(), "gitcode-mcp-sync.lock"), providerMode: gitcode.ProviderModeFixture}
+	}
+	return svc
 }
 
 func NewWithClient(store cache.Store, client gitcode.Client) *Service {
 	svc := New(store)
 	svc.client = client
+	svc.providerMode = gitcode.ProviderMode("custom")
 	return svc
+}
+
+func (s *Service) ProviderMode() gitcode.ProviderMode {
+	if s.providerMode == "" {
+		return gitcode.ProviderModeFixture
+	}
+	return s.providerMode
+}
+
+func NewWithMode(store cache.Store, mode gitcode.ProviderMode, token string, cfg ServiceConfig) (*Service, error) {
+	switch mode {
+	case gitcode.ProviderModeFixture:
+		return &Service{
+			store:        store,
+			client:       sanitizedFixtureClient{},
+			now:          func() time.Time { return time.Now().UTC() },
+			lockPath:     filepath.Join(os.TempDir(), "gitcode-mcp-sync.lock"),
+			providerMode: gitcode.ProviderModeFixture,
+		}, nil
+	case gitcode.ProviderModeLive:
+		token = strings.TrimSpace(token)
+		if token == "" {
+			return nil, gitcode.ErrProviderUnavailable{Reason: "live provider requires a token"}
+		}
+		baseURL := strings.TrimSpace(cfg.BaseURL)
+		if baseURL == "" {
+			baseURL = "https://gitcode.com"
+		}
+		timeout := cfg.Timeout
+		maxResponseSize := cfg.MaxResponseSize
+		if maxResponseSize <= 0 {
+			maxResponseSize = 10 << 20
+		}
+		maxRetries := cfg.MaxRetries
+		userAgent := cfg.UserAgent
+		if userAgent == "" {
+			userAgent = "gitcode-mcp"
+		}
+		client, err := gitcode.NewHTTPClient(gitcode.Config{
+			BaseURL:         baseURL,
+			Token:           token,
+			Timeout:         timeout,
+			MaxResponseSize: maxResponseSize,
+			MaxRetries:      maxRetries,
+			UserAgent:       userAgent,
+			Pagination:      cfg.Pagination,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &Service{
+			store:                  store,
+			client:                 gitcode.Client(client),
+			now:                    func() time.Time { return time.Now().UTC() },
+			lockPath:               filepath.Join(os.TempDir(), "gitcode-mcp-sync.lock"),
+			providerMode:           gitcode.ProviderModeLive,
+			writeCredentialPresent: true,
+		}, nil
+	case gitcode.ProviderModeUnavailable:
+		return nil, gitcode.ErrProviderUnavailable{Reason: "provider unavailable"}
+	default:
+		return nil, gitcode.ErrProviderUnavailable{Reason: "unknown provider mode " + string(mode)}
+	}
 }
 
 type sanitizedFixtureClient struct{}
@@ -46,7 +117,7 @@ func (sanitizedFixtureClient) ListIssues(context.Context, gitcode.IssueListReque
 
 func (sanitizedFixtureClient) GetIssue(context.Context, gitcode.IssueRequest) (gitcode.Issue, error) {
 	now := fixtureNow()
-	return gitcode.Issue{Number: 42, Title: "Fixture Issue", Body: "# Issue\n\nremote issue body", State: "open", CreatedAt: now, UpdatedAt: now}, nil
+	return gitcode.Issue{Number: 42, Title: "Fixture Issue", Body: "# Issue\n\nremote fixture issue body for offline search test", State: "open", CreatedAt: now, UpdatedAt: now}, nil
 }
 
 func (sanitizedFixtureClient) ListIssueComments(context.Context, gitcode.IssueRequest) (gitcode.Page[gitcode.Comment], error) {
@@ -56,12 +127,12 @@ func (sanitizedFixtureClient) ListIssueComments(context.Context, gitcode.IssueRe
 
 func (sanitizedFixtureClient) GetWikiPage(context.Context, gitcode.WikiPageRequest) (gitcode.WikiPage, error) {
 	now := fixtureNow()
-	return gitcode.WikiPage{Slug: "Home", Title: "Fixture Wiki", Body: "# Wiki\n\nremote wiki body", Revision: "rev-home", CreatedAt: now, UpdatedAt: now}, nil
+	return gitcode.WikiPage{Slug: "Home", Title: "Fixture Wiki", Body: "# Wiki\n\nremote fixture wiki body for offline search test", Revision: "rev-home", CreatedAt: now, UpdatedAt: now}, nil
 }
 
 func (sanitizedFixtureClient) ListWikiPages(context.Context, gitcode.WikiListRequest) (gitcode.Page[gitcode.WikiPage], error) {
 	now := fixtureNow()
-	return gitcode.Page[gitcode.WikiPage]{Items: []gitcode.WikiPage{{Slug: "Home", Title: "Fixture Wiki", Body: "# Wiki\n\nremote wiki body", Revision: "rev-home", CreatedAt: now, UpdatedAt: now}}, Page: 1, PerPage: 1, TotalCount: 1}, nil
+	return gitcode.Page[gitcode.WikiPage]{Items: []gitcode.WikiPage{{Slug: "Home", Title: "Fixture Wiki", Body: "# Wiki\n\nremote fixture wiki body for offline search test", Revision: "rev-home", CreatedAt: now, UpdatedAt: now}}, Page: 1, PerPage: 1, TotalCount: 1}, nil
 }
 
 func (sanitizedFixtureClient) Search(context.Context, gitcode.SearchRequest) (gitcode.Page[gitcode.SearchResult], error) {
@@ -263,9 +334,6 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 	results, err := s.store.SearchSources(ctx, cache.SearchQuery{RepoID: repoID, Query: req.Query, Kind: req.Kind, Limit: req.Limit})
 	if err != nil {
 		return SearchSourcesResult{}, normalizeError(err, "search", req.Query)
-	}
-	if len(results) == 0 {
-		return SearchSourcesResult{}, ErrCacheEmpty{Message: "no cached search results"}
 	}
 	out := make([]SearchSourceResult, 0, len(results))
 	updated := map[string]time.Time{}
@@ -483,7 +551,19 @@ func (s *Service) SyncStatus(ctx context.Context, req ListSourcesRequest) (SyncS
 		}
 		return SyncStatusSummaryResult{}, err
 	}
+	completedEvents, err := s.store.ListCompletedSyncEventsScoped(ctx, repoID)
+	if err != nil {
+		return SyncStatusSummaryResult{}, err
+	}
+	sourceToLatestCompleted := map[string]cache.SyncEvent{}
+	for _, event := range completedEvents {
+		existing, ok := sourceToLatestCompleted[event.SourceID]
+		if !ok || event.CompletedAt.After(existing.CompletedAt) {
+			sourceToLatestCompleted[event.SourceID] = event
+		}
+	}
 	result := SyncStatusSummaryResult{RepoID: repoID, Limit: req.Limit, Offset: req.Offset, Results: []SyncStatusResult{}}
+	var latestCompleted cache.SyncEvent
 	for _, source := range listed.Results {
 		status, err := s.GetSyncStatus(ctx, SyncStatusRequest{RepoID: repoID, ID: source.ID})
 		if err != nil {
@@ -503,7 +583,17 @@ func (s *Service) SyncStatus(ctx context.Context, req ListSourcesRequest) (SyncS
 		if status.LastFetchedAt.After(result.LastSyncAt) {
 			result.LastSyncAt = status.LastFetchedAt.UTC()
 		}
+		if event, ok := sourceToLatestCompleted[source.ID]; ok && event.CompletedAt.After(latestCompleted.CompletedAt) {
+			latestCompleted = event
+		}
 	}
+	if !latestCompleted.StartedAt.IsZero() {
+		result.LastSyncStartedAt = latestCompleted.StartedAt.UTC()
+	}
+	if !latestCompleted.CompletedAt.IsZero() {
+		result.LastSyncCompletedAt = latestCompleted.CompletedAt.UTC()
+	}
+	result.ZeroDelta = latestCompleted.ZeroDelta
 	result.CacheEmpty = len(result.Results) == 0 && len(result.Warnings) == 0
 	return result, nil
 }
@@ -788,8 +878,8 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 		return SyncResult{}, err
 	}
 	eventID := syncEventID(key)
-	now := s.now().UTC()
-	inProgress := cache.SyncEvent{RepoID: repoID, ID: eventID, SourceID: s.syncEventSourceID(ctx, req, remoteType, remoteID), RemoteType: remoteType, RemoteID: remoteID, Status: "in_progress", IdempotencyKey: key, Message: "sync started", CreatedAt: now}
+	syncStartedAt := s.now().UTC()
+	inProgress := cache.SyncEvent{RepoID: repoID, ID: eventID, SourceID: s.syncEventSourceID(ctx, req, remoteType, remoteID), RemoteType: remoteType, RemoteID: remoteID, Status: "in_progress", IdempotencyKey: key, Message: "sync started", CreatedAt: syncStartedAt, StartedAt: syncStartedAt}
 	inProgressRecorded := true
 	if _, err := s.store.GetSourceScoped(ctx, repoID, inProgress.SourceID); err == nil {
 		if err := s.store.RecordSyncEvent(ctx, inProgress); err != nil {
@@ -818,11 +908,13 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 		}
 		return SyncResult{}, failure
 	}
+	syncCompletedAt := s.now().UTC()
 	revision := ""
 	if graph.SyncStatus != nil {
 		revision = graph.SyncStatus.RemoteRevision
 	}
-	graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "succeeded", IdempotencyKey: key, Message: syncEventMessage(counts), CreatedAt: now})
+	zeroDelta := counts.Fetched > 0 && counts.Skipped == counts.Fetched && counts.Updated == 0 && counts.Inserted == 0 && counts.Conflicts == 0
+	graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "succeeded", IdempotencyKey: key, Message: syncEventMessage(counts), CreatedAt: syncCompletedAt, StartedAt: syncStartedAt, CompletedAt: syncCompletedAt, ZeroDelta: zeroDelta})
 	if err := s.store.UpsertSyncGraph(ctx, syncGraphFromSourceGraph(req.RepoID, graph)); err != nil {
 		if inProgressRecorded {
 			_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, err, s.now().UTC()))
@@ -835,7 +927,199 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 		}
 		return SyncResult{}, err
 	}
-	return SyncResult{IdempotencyKey: key, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), GeneratedAt: s.now().UTC()}, nil
+	return SyncResult{IdempotencyKey: key, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), GeneratedAt: syncCompletedAt, StartedAt: syncStartedAt, CompletedAt: syncCompletedAt, ZeroDelta: zeroDelta}, nil
+}
+
+// SyncResources processes multiple SyncRequest values independently via SyncToCache.
+// Each resource is synced atomically; failures do not short-circuit remaining resources.
+// On any failure, the returned (*SyncResourcesResult, error) pair carries a PartialSyncError
+// with structured per-resource failure details. Results always contains entries from
+// successful SyncToCache calls; Failures contains entries from failed calls.
+// Callers should check PartialSyncError before using the result.
+func (s *Service) SyncResources(ctx context.Context, reqs []SyncRequest) (*SyncResourcesResult, error) {
+	result := &SyncResourcesResult{
+		Results:  make([]SyncResult, 0, len(reqs)),
+		Failures: make([]ResourceError, 0),
+	}
+	var partial *PartialSyncError
+	for i, req := range reqs {
+		if err := ctx.Err(); err != nil {
+			re := ResourceError{
+				SourceID:   req.StableID,
+				RemoteType: "",
+				Err:        err,
+				Message:    fmt.Sprintf("sync resources: context cancelled at request %d", i),
+			}
+			result.Failures = append(result.Failures, re)
+			continue
+		}
+		syncResult, err := s.SyncToCache(ctx, req)
+		if err != nil {
+			remoteType := ""
+			if req.AliasType != "" {
+				remoteType = req.AliasType
+			}
+			sourceID := req.StableID
+			if sourceID == "" {
+				sourceID = req.RemoteAlias
+			}
+			re := ResourceError{
+				SourceID:   sourceID,
+				RemoteType: remoteType,
+				Err:        err,
+				Message:    err.Error(),
+			}
+			result.Failures = append(result.Failures, re)
+			continue
+		}
+		result.Results = append(result.Results, syncResult)
+	}
+	result.SuccessCount = len(result.Results)
+	result.FailureCount = len(result.Failures)
+	if result.FailureCount > 0 {
+		partial = &PartialSyncError{
+			Errors:       result.Failures,
+			SuccessCount: result.SuccessCount,
+			FailureCount: result.FailureCount,
+		}
+	}
+	if partial != nil {
+		return result, partial
+	}
+	return result, nil
+}
+
+func (s *Service) BulkSyncIssues(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	repoID, err := s.requireRepo(ctx, req.RepoID, "bulk-sync-issues")
+	if err != nil {
+		return nil, err
+	}
+	req.RepoID = repoID
+	if err := s.validateRepoScope(ctx, repoID, "issues"); err != nil {
+		return nil, err
+	}
+	route, err := s.BuildAdapterRoute(ctx, repoID, RepositoryScopeIssues)
+	if err != nil {
+		return nil, err
+	}
+	page, err := s.client.ListIssues(ctx, gitcode.IssueListRequest{Owner: route.Owner, Repo: route.Name, Page: req.Page, PerPage: req.PerPage})
+	if err != nil {
+		return bulkSyncFailureResult(s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "issue:*"}, "issues", "*"), "issue:*", "issues")
+	}
+	reqs := make([]SyncRequest, 0, len(page.Items))
+	for _, summary := range page.Items {
+		reqs = append(reqs, SyncRequest{
+			RepoID:         req.RepoID,
+			AliasType:      "issue",
+			AliasID:        strconv.Itoa(summary.Number),
+			IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "issue", strconv.Itoa(summary.Number)),
+			MaxAttempts:    req.MaxAttempts,
+			MaxSize:        req.MaxSize,
+		})
+	}
+	return s.SyncResources(ctx, reqs)
+}
+
+func (s *Service) BulkSyncWiki(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	repoID, err := s.requireRepo(ctx, req.RepoID, "bulk-sync-wiki")
+	if err != nil {
+		return nil, err
+	}
+	req.RepoID = repoID
+	if err := s.validateRepoScope(ctx, repoID, "wiki"); err != nil {
+		return nil, err
+	}
+	route, err := s.BuildAdapterRoute(ctx, repoID, RepositoryScopeWiki)
+	if err != nil {
+		return nil, err
+	}
+	page, err := s.client.ListWikiPages(ctx, gitcode.WikiListRequest{Owner: route.Owner, Repo: route.Name, Page: req.Page, PerPage: req.PerPage})
+	if err != nil {
+		return bulkSyncFailureResult(s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "wiki:*"}, "wiki", "*"), "wiki:*", "wiki")
+	}
+	reqs := make([]SyncRequest, 0, len(page.Items))
+	for _, wp := range page.Items {
+		reqs = append(reqs, SyncRequest{
+			RepoID:         req.RepoID,
+			AliasType:      "wiki",
+			AliasID:        wp.Slug,
+			IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "wiki", wp.Slug),
+			MaxAttempts:    req.MaxAttempts,
+			MaxSize:        req.MaxSize,
+		})
+	}
+	return s.SyncResources(ctx, reqs)
+}
+
+func (s *Service) BulkSyncAll(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	repoID, err := s.requireRepo(ctx, req.RepoID, "bulk-sync-all")
+	if err != nil {
+		return nil, err
+	}
+	req.RepoID = repoID
+	var issuesResult, wikiResult *SyncResourcesResult
+	var issuesErr, wikiErr error
+
+	if err := s.validateRepoScope(ctx, repoID, "issues"); err == nil {
+		issuesResult, issuesErr = s.BulkSyncIssues(ctx, req)
+	}
+
+	if err := s.validateRepoScope(ctx, repoID, "wiki"); err == nil {
+		wikiResult, wikiErr = s.BulkSyncWiki(ctx, req)
+	}
+
+	aggregated := &SyncResourcesResult{
+		Results:  make([]SyncResult, 0),
+		Failures: make([]ResourceError, 0),
+	}
+	if issuesResult != nil {
+		aggregated.Results = append(aggregated.Results, issuesResult.Results...)
+		aggregated.Failures = append(aggregated.Failures, issuesResult.Failures...)
+	}
+	if wikiResult != nil {
+		aggregated.Results = append(aggregated.Results, wikiResult.Results...)
+		aggregated.Failures = append(aggregated.Failures, wikiResult.Failures...)
+	}
+	aggregated.SuccessCount = len(aggregated.Results)
+	aggregated.FailureCount = len(aggregated.Failures)
+
+	if issuesErr != nil || wikiErr != nil {
+		return aggregated, &PartialSyncError{
+			Errors:       aggregated.Failures,
+			SuccessCount: aggregated.SuccessCount,
+			FailureCount: aggregated.FailureCount,
+		}
+	}
+	if aggregated.FailureCount > 0 {
+		return aggregated, &PartialSyncError{
+			Errors:       aggregated.Failures,
+			SuccessCount: aggregated.SuccessCount,
+			FailureCount: aggregated.FailureCount,
+		}
+	}
+	return aggregated, nil
+}
+
+func bulkSyncFailureResult(err error, sourceID, remoteType string) (*SyncResourcesResult, error) {
+	re := ResourceError{SourceID: sourceID, RemoteType: remoteType, Err: err, Message: err.Error()}
+	result := &SyncResourcesResult{Failures: []ResourceError{re}, FailureCount: 1}
+	return result, &PartialSyncError{Errors: result.Failures, FailureCount: 1}
+}
+
+func scopedBulkSyncKey(base, scope, id string) string {
+	if strings.TrimSpace(base) == "" {
+		return ""
+	}
+	return base + "-" + scope + "-" + id
 }
 
 func (s *Service) CreateIssue(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
@@ -874,7 +1158,10 @@ func (s *Service) AddComment(ctx context.Context, req WriteCommandRequest) (Writ
 }
 
 func (s *Service) AddLabel(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
-	return WriteCommandResult{}, ErrWriteFailure{Code: "write_unsupported_deferred", RepoID: firstNonEmptyString(req.RepoID, req.Repo)}
+	if (req.Number == 0 && strings.TrimSpace(req.ID) == "") || strings.TrimSpace(req.Label) == "" {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "label", Message: "issue and label are required"}
+	}
+	return s.executeWrite(ctx, "add-label", req, RepositoryScopeIssues)
 }
 
 func (s *Service) operationResult(ctx context.Context, command string, req OperationRequest) (OperationResult, error) {
@@ -1061,17 +1348,25 @@ func (s *Service) fetchAndStage(ctx context.Context, req SyncRequest, remoteType
 func (s *Service) fetchOnce(ctx context.Context, req SyncRequest, remoteType, remoteID string) (cache.SourceGraph, SyncCounts, error) {
 	switch remoteType {
 	case "issue", "issues":
+		route, err := s.BuildAdapterRoute(ctx, req.RepoID, RepositoryScopeIssues)
+		if err != nil {
+			return cache.SourceGraph{}, SyncCounts{}, err
+		}
 		number, err := strconv.Atoi(remoteID)
 		if err != nil {
 			return cache.SourceGraph{}, SyncCounts{}, ErrInvalidQuery{Field: "remote_id", Message: "issue remote id must be numeric"}
 		}
-		issue, err := s.client.GetIssue(ctx, gitcode.IssueRequest{Number: number, KnownRemoteAlias: true, RemoteAlias: remoteID})
+		issue, err := s.client.GetIssue(ctx, gitcode.IssueRequest{Owner: route.Owner, Repo: route.Name, Number: number, KnownRemoteAlias: true, RemoteAlias: remoteID})
 		if err != nil {
 			return cache.SourceGraph{}, SyncCounts{}, err
 		}
 		return s.stageIssue(ctx, req, remoteType, remoteID, issue)
 	case "wiki", "page", "remote":
-		page, err := s.client.GetWikiPage(ctx, gitcode.WikiPageRequest{Slug: remoteID})
+		route, err := s.BuildAdapterRoute(ctx, req.RepoID, RepositoryScopeWiki)
+		if err != nil {
+			return cache.SourceGraph{}, SyncCounts{}, err
+		}
+		page, err := s.client.GetWikiPage(ctx, gitcode.WikiPageRequest{Owner: route.Owner, Repo: route.Name, Slug: remoteID})
 		if err != nil {
 			return cache.SourceGraph{}, SyncCounts{}, err
 		}
@@ -1139,7 +1434,11 @@ func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, r
 		status = "open"
 	}
 	graph := cache.SourceGraph{Source: cache.Source{RepoID: req.RepoID, ID: stableID, Kind: "issue", Path: "issues/" + remoteID + ".md", Title: issue.Title, Body: body, Status: status, Labels: issue.Labels, ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{RepoID: req.RepoID, SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, SyncStatus: &cache.SyncStatus{RepoID: req.RepoID, SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: hash, Status: "fresh", LastFetchedAt: now}}
-	comments, err := s.client.ListIssueComments(ctx, gitcode.IssueRequest{Number: issue.Number, KnownRemoteAlias: true, RemoteAlias: remoteID})
+	route, err := s.BuildAdapterRoute(ctx, req.RepoID, RepositoryScopeIssues)
+	if err != nil {
+		return cache.SourceGraph{}, SyncCounts{}, err
+	}
+	comments, err := s.client.ListIssueComments(ctx, gitcode.IssueRequest{Owner: route.Owner, Repo: route.Name, Number: issue.Number, KnownRemoteAlias: true, RemoteAlias: remoteID})
 	if err != nil {
 		return cache.SourceGraph{}, SyncCounts{}, err
 	}
@@ -1283,13 +1582,14 @@ func syncResultFromEvent(event cache.SyncEvent, generated time.Time) SyncResult 
 	if event.Status != "succeeded" {
 		freshness = string(FreshnessUnknown)
 	}
-	return SyncResult{IdempotencyKey: event.IdempotencyKey, Status: event.Status, Counts: counts, SyncEventID: event.ID, Freshness: freshness, GeneratedAt: generated}
+	return SyncResult{IdempotencyKey: event.IdempotencyKey, Status: event.Status, Counts: counts, SyncEventID: event.ID, Freshness: freshness, GeneratedAt: generated, StartedAt: event.StartedAt, CompletedAt: event.CompletedAt, ZeroDelta: event.ZeroDelta}
 }
 
 func failedSyncEvent(event cache.SyncEvent, cause error, at time.Time) cache.SyncEvent {
 	event.Status = "failed"
 	event.Message = cause.Error()
 	event.CreatedAt = at
+	event.CompletedAt = at
 	return event
 }
 
@@ -1416,52 +1716,58 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	if req.Mode == WriteModeDryRun {
 		return base, nil
 	}
-	if strings.TrimSpace(os.Getenv("GITCODE_TOKEN")) == "" {
+	if !s.hasWriteCredential() {
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_missing_credential", RepoID: route.RepoID, IdempotencyKey: key}
 	}
-	prior, err := s.store.GetAuditEventByKey(ctx, route.RepoID, key)
+	lookup, err := audit.LookupIdempotency(ctx, s.store, route.RepoID, key, fingerprint)
 	if err != nil {
 		return WriteCommandResult{}, err
 	}
-	if prior != nil {
-		if prior.PayloadHash != "" && prior.PayloadHash != fingerprint {
+	if lookup.Entry != nil {
+		prior := *lookup.Entry
+		if lookup.Conflict {
 			return WriteCommandResult{}, ErrWriteFailure{Code: "write_idempotency_conflict", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
 		}
-		switch prior.Status {
-		case "succeeded":
-			return replayWriteResult(command, *prior, fingerprint, s.now().UTC()), nil
-		case "remote_confirmed_cache_refresh_failed":
-			graph, err := s.replayWriteGraph(ctx, command, route.RepoID, req, *prior)
+		if lookup.Replay {
+			return replayWriteResult(command, prior, fingerprint, s.now().UTC()), nil
+		}
+		if lookup.Partial {
+			graph, err := s.replayWriteGraph(ctx, command, route.RepoID, req, prior)
 			if err != nil {
 				return WriteCommandResult{}, err
 			}
 			if err := s.store.UpsertRecordGraph(ctx, graph); err != nil {
-				_ = s.store.RecordAuditEvent(ctx, cache.AuditTrailEntry{RepoID: route.RepoID, ID: prior.ID, Operation: command, RecordID: prior.RecordID, RemoteType: prior.RemoteType, RemoteID: prior.RemoteID, IdempotencyKey: key, Status: "remote_confirmed_cache_refresh_failed", Message: err.Error(), PayloadHash: fingerprint, CreatedAt: s.now().UTC()})
+				_ = s.store.RecordAuditEvent(ctx, audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, prior.RecordID, prior.RemoteType, prior.RemoteID, fingerprint, err.Error(), s.now().UTC()))
 				return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key, Cause: err}
 			}
-			completed := cache.AuditTrailEntry{RepoID: route.RepoID, ID: prior.ID, Operation: command, RecordID: graph.Record.ID, RemoteType: graph.Record.RemoteType, RemoteID: prior.RemoteID, IdempotencyKey: key, Status: "succeeded", Message: "cache refresh replay completed", PayloadHash: fingerprint, CreatedAt: s.now().UTC()}
+			completed := audit.Success(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, prior.RemoteID, fingerprint, "cache refresh replay completed", s.now().UTC())
 			if err := s.store.RecordAuditEvent(ctx, completed); err != nil {
 				return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key, Cause: err}
 			}
-			return replayWriteResult(command, completed, fingerprint, s.now().UTC()), nil
-		case "remote_confirmed_audit_failed":
+			result := replayWriteResult(command, completed, fingerprint, s.now().UTC())
+			result.Status = "succeeded"
+			return result, nil
+		}
+		if prior.Status == audit.StatusRemoteConfirmedAuditFailed {
 			return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
 		}
 	}
 	confirmed, graph, err := s.callWriteAdapter(ctx, command, route, req, key)
 	if err != nil {
+		_ = s.store.RecordAuditEvent(ctx, audit.Failure(route.RepoID, key, command, fingerprint, writeErrorCode(err), s.now().UTC()))
 		return WriteCommandResult{}, ErrWriteFailure{Code: writeErrorCode(err), RepoID: route.RepoID, IdempotencyKey: key, Cause: err}
 	}
 	if !confirmed.confirmed || confirmed.remoteID == "" {
+		_ = s.store.RecordAuditEvent(ctx, audit.Failure(route.RepoID, key, command, fingerprint, "write_unconfirmed_remote", s.now().UTC()))
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_unconfirmed_remote", RepoID: route.RepoID, IdempotencyKey: key}
 	}
-	audit := cache.AuditTrailEntry{RepoID: route.RepoID, ID: "write-" + key, Operation: command, RecordID: graph.Record.ID, RemoteType: graph.Record.RemoteType, RemoteID: confirmed.remoteID, IdempotencyKey: key, Status: "succeeded", Message: confirmed.message, PayloadHash: fingerprint, CreatedAt: confirmed.completedAt}
-	if err := s.store.RecordAuditEvent(ctx, audit); err != nil {
-		_ = s.store.RecordAuditEvent(ctx, cache.AuditTrailEntry{RepoID: route.RepoID, ID: "write-" + key, Operation: command, RecordID: graph.Record.ID, RemoteType: graph.Record.RemoteType, RemoteID: confirmed.remoteID, IdempotencyKey: key, Status: "remote_confirmed_audit_failed", Message: err.Error(), PayloadHash: fingerprint, CreatedAt: s.now().UTC()})
+	auditEntry := audit.Success(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, confirmed.message, confirmed.completedAt)
+	if err := s.store.RecordAuditEvent(ctx, auditEntry); err != nil {
+		_ = s.store.RecordAuditEvent(ctx, audit.RemoteConfirmedAuditFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()))
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
 	}
 	if err := s.store.UpsertRecordGraph(ctx, graph); err != nil {
-		_ = s.store.RecordAuditEvent(ctx, cache.AuditTrailEntry{RepoID: route.RepoID, ID: "write-" + key, Operation: command, RecordID: graph.Record.ID, RemoteType: graph.Record.RemoteType, RemoteID: confirmed.remoteID, IdempotencyKey: key, Status: "remote_confirmed_cache_refresh_failed", Message: err.Error(), PayloadHash: fingerprint, CreatedAt: s.now().UTC()})
+		_ = s.store.RecordAuditEvent(ctx, audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()))
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
 	}
 	base.Status = "succeeded"
@@ -1482,6 +1788,10 @@ type writeConfirmation struct {
 	remoteRevision string
 	message        string
 	completedAt    time.Time
+}
+
+func (s *Service) hasWriteCredential() bool {
+	return s.providerMode == gitcode.ProviderModeLive && s.writeCredentialPresent || strings.TrimSpace(os.Getenv("GITCODE_TOKEN")) != ""
 }
 
 func (s *Service) callWriteAdapter(ctx context.Context, command string, route RepositoryRoute, req WriteCommandRequest, key string) (writeConfirmation, cache.RecordGraph, error) {
@@ -1508,6 +1818,13 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
 		return s.commentWriteGraph(ctx, route.RepoID, req.Number, result.Record, result, now)
+	case "add-label":
+		result, err := s.client.AddLabel(ctx, gitcode.LabelRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, Label: strings.TrimSpace(req.Label)}, opts)
+		if err != nil {
+			return writeConfirmation{}, cache.RecordGraph{}, err
+		}
+		confirmation, graph := s.issueWriteGraph(route.RepoID, result.Record, result, now)
+		return confirmation, graph, nil
 	case "create-page":
 		result, err := s.client.CreateWikiPage(ctx, gitcode.CreateWikiPageRequest{Owner: route.Owner, Repo: route.Name, Slug: req.Slug, Title: strings.TrimSpace(req.Title), Body: req.Body}, opts)
 		if err != nil {
@@ -1530,11 +1847,14 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID string, req WriteCommandRequest, prior cache.AuditTrailEntry) (cache.RecordGraph, error) {
 	now := s.now().UTC()
 	switch command {
-	case "create-issue", "update-issue":
+	case "create-issue", "update-issue", "add-label":
 		number, _ := strconv.Atoi(prior.RemoteID)
 		issue := gitcode.Issue{ID: prior.RemoteID, Number: number, Title: strings.TrimSpace(req.Title), Body: req.Body, State: firstNonEmptyString(req.State, "open"), CreatedAt: now, UpdatedAt: now}
 		if issue.Title == "" {
 			issue.Title = "Issue " + prior.RemoteID
+		}
+		if command == "add-label" && strings.TrimSpace(req.Label) != "" {
+			issue.Labels = append(issue.Labels, strings.TrimSpace(req.Label))
 		}
 		result := gitcode.WriteResult[gitcode.Issue]{Record: issue, Confirmed: true, RemoteID: prior.RemoteID, RemoteNumber: number, RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
 		_, graph := s.issueWriteGraph(repoID, issue, result, now)
@@ -1621,8 +1941,9 @@ func writeIdempotency(command string, req WriteCommandRequest) (string, string) 
 		Title   string
 		Body    string
 		State   string
+		Label   string
 		Labels  []string
-	}{command, req.RepoID, req.ID, req.Number, req.Slug, strings.TrimSpace(req.Title), req.Body, req.State, req.Labels})
+	}{command, req.RepoID, req.ID, req.Number, req.Slug, strings.TrimSpace(req.Title), req.Body, req.State, strings.TrimSpace(req.Label), req.Labels})
 	sum := sha256.Sum256(payload)
 	fingerprint := hex.EncodeToString(sum[:])
 	if strings.TrimSpace(req.IdempotencyKey) != "" {
@@ -1642,7 +1963,7 @@ func writeTargetID(req WriteCommandRequest) string {
 }
 
 func replayWriteResult(command string, entry cache.AuditTrailEntry, fingerprint string, now time.Time) WriteCommandResult {
-	return WriteCommandResult{Command: command, Status: "succeeded", RepoID: entry.RepoID, ID: entry.RecordID, RemoteID: entry.RemoteID, IdempotencyKey: entry.IdempotencyKey, SourceFingerprint: fingerprint, Replayed: true, Evidence: "replayed from audit_trail", GeneratedAt: now}
+	return WriteCommandResult{Command: command, Status: "already_applied", RepoID: entry.RepoID, ID: entry.RecordID, RemoteID: entry.RemoteID, IdempotencyKey: entry.IdempotencyKey, SourceFingerprint: fingerprint, Replayed: true, Evidence: "replayed from audit_trail", GeneratedAt: now}
 }
 
 func writeErrorCode(err error) string {
