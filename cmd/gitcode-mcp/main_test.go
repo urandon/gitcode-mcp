@@ -369,12 +369,55 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 			t.Fatalf("doctor leaked token or contacted server; requests=%d out=%q", requests.Load(), out)
 		}
 	})
+
+	t.Run("SCN-CLI-LIVE-BINDING-INVALID-URL-NO-HTTP", func(t *testing.T) {
+		var requests atomic.Int64
+		server := newStartupLiveMockServer(t, &requests)
+		defer server.Close()
+		cachePath := filepath.Join(t.TempDir(), "cache.db")
+		src := newTestSource(t)
+		src.env[config.EnvToken] = "test-token"
+		addRepoForStartupTest(t, cachePath, "ftp://example.invalid/api")
+
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"sync", "--live", "--cache-path", cachePath, "--repo", "fixture-a"}, strings.NewReader(""), &stdout, &stderr, src)
+		if code == 0 {
+			t.Fatalf("code=0 stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "api_base_url") || requests.Load() != 0 {
+			t.Fatalf("stderr=%q requests=%d", stderr.String(), requests.Load())
+		}
+	})
+
+	t.Run("SCN-CLI-LIVE-BINDING-DISABLED-SCOPE-NO-HTTP", func(t *testing.T) {
+		var requests atomic.Int64
+		server := newStartupLiveMockServer(t, &requests)
+		defer server.Close()
+		cachePath := filepath.Join(t.TempDir(), "cache.db")
+		src := newTestSource(t)
+		src.env[config.EnvToken] = "test-token"
+		addRepoForStartupTestWithScopes(t, cachePath, server.URL, "issues")
+
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"sync", "--live", "--wiki", "--cache-path", cachePath, "--repo", "fixture-a"}, strings.NewReader(""), &stdout, &stderr, src)
+		if code == 0 {
+			t.Fatalf("code=0 stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "scope") || requests.Load() != 0 {
+			t.Fatalf("stderr=%q requests=%d", stderr.String(), requests.Load())
+		}
+	})
 }
 
 func addRepoForStartupTest(t *testing.T, cachePath, baseURL string) {
 	t.Helper()
+	addRepoForStartupTestWithScopes(t, cachePath, baseURL, "issues,wiki")
+}
+
+func addRepoForStartupTestWithScopes(t *testing.T, cachePath, baseURL, scopes string) {
+	t.Helper()
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"repo", "add", "--cache-path", cachePath, "--repo", "fixture-a", "--owner", "owner-a", "--name", "repo-a", "--api-base-url", baseURL, "--scopes", "issues,wiki"}, strings.NewReader(""), &stdout, &stderr, newTestSource(t))
+	code := run([]string{"repo", "add", "--cache-path", cachePath, "--repo", "fixture-a", "--owner", "owner-a", "--name", "repo-a", "--api-base-url", baseURL, "--scopes", scopes}, strings.NewReader(""), &stdout, &stderr, newTestSource(t))
 	if code != 0 {
 		t.Fatalf("repo add code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}

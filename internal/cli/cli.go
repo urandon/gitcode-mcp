@@ -96,15 +96,16 @@ type localCommandDeps struct {
 }
 
 type startupPlan struct {
-	Command              string
-	ProviderMode         string
-	CachePath            string
-	RepoID               string
-	APIBaseURL           string
-	CredentialStatus     config.CredentialStatus
-	CredentialResolution config.CredentialResolutionResult
-	Token                config.SecretString
-	ServiceConfig        service.ServiceConfig
+	Command               string
+	ProviderMode          string
+	CachePath             string
+	RepoID                string
+	APIBaseURL            string
+	LiveRepositoryBinding service.LiveRepositoryBinding
+	CredentialStatus      config.CredentialStatus
+	CredentialResolution  config.CredentialResolutionResult
+	Token                 config.SecretString
+	ServiceConfig         service.ServiceConfig
 }
 
 type options struct {
@@ -262,12 +263,13 @@ func buildStartupPlan(ctx context.Context, command string, opts options, deps lo
 		return plan, config.MissingCredentialError{Status: resolution.Status()}
 	}
 	plan.Token = resolution.Token
-	baseURL, err := liveAPIBaseURL(ctx, plan.CachePath, opts.repo, eff.Config.GitCodeBaseURL)
+	binding, err := resolveStartupLiveRepositoryBinding(ctx, plan.CachePath, opts.repo, liveRequestedScope(command, opts), eff.Config.GitCodeBaseURL)
 	if err != nil {
 		return plan, err
 	}
-	plan.APIBaseURL = baseURL
-	plan.ServiceConfig = service.ServiceConfig{BaseURL: baseURL, Timeout: eff.Config.DefaultTimeout, MaxResponseSize: eff.Config.MaxResponseSize, MaxRetries: eff.Config.MaxRetries}
+	plan.LiveRepositoryBinding = binding
+	plan.APIBaseURL = binding.APIBaseURL
+	plan.ServiceConfig = service.ServiceConfig{BaseURL: binding.APIBaseURL, Timeout: eff.Config.DefaultTimeout, MaxResponseSize: eff.Config.MaxResponseSize, MaxRetries: eff.Config.MaxRetries}
 	return plan, nil
 }
 
@@ -301,26 +303,26 @@ func isLiveStartupCommand(command string) bool {
 	}
 }
 
-func liveAPIBaseURL(ctx context.Context, cachePath, repoID, fallback string) (string, error) {
-	selected := strings.TrimSpace(fallback)
-	if strings.TrimSpace(repoID) != "" {
-		store, err := cache.NewSQLiteReadOnlyStore(ctx, cachePath)
-		if err != nil {
-			return "", err
-		}
-		defer store.Close()
-		repo, err := store.GetRepository(ctx, repoID)
-		if err != nil {
-			return "", err
-		}
-		if strings.TrimSpace(repo.APIBaseURL) != "" {
-			selected = repo.APIBaseURL
+func resolveStartupLiveRepositoryBinding(ctx context.Context, cachePath, repoID string, requestedScope service.RepositoryScope, fallback string) (service.LiveRepositoryBinding, error) {
+	store, err := cache.NewSQLiteReadOnlyStore(ctx, cachePath)
+	if err != nil {
+		return service.LiveRepositoryBinding{}, err
+	}
+	defer store.Close()
+	svc := service.New(store)
+	return svc.ResolveLiveRepositoryBinding(ctx, service.LiveRepositoryBindingRequest{RepoID: repoID, RequestedScope: requestedScope, CachePath: cachePath, AuditPath: cachePath, FallbackAPIBaseURL: fallback})
+}
+
+func liveRequestedScope(command string, opts options) service.RepositoryScope {
+	switch command {
+	case "create-page", "update-page":
+		return service.RepositoryScopeWiki
+	case "sync":
+		if opts.wiki && !opts.issues {
+			return service.RepositoryScopeWiki
 		}
 	}
-	if strings.TrimSpace(selected) == "" {
-		return "", service.ErrInvalidQuery{Field: "api_base_url", Message: "live provider requires api_base_url"}
-	}
-	return selected, nil
+	return service.RepositoryScopeIssues
 }
 
 func serviceFromStartupPlan(ctx context.Context, plan startupPlan, factory serviceFactory) (queryService, func() error, error) {
@@ -1264,7 +1266,7 @@ func executeDoctorCommand(ctx context.Context, opts options, plan startupPlan, s
 		status := plan.CredentialStatus
 		cred = &status
 	}
-	report, err := doctor.Build(ctx, doctor.Request{Version: version, Source: deps.Source, CredentialReporter: deps.CredentialReporter, CredentialStatus: cred, CachePath: cachePath, Live: opts.live, ProviderMode: plan.ProviderMode, APIBaseURL: plan.APIBaseURL, RepoID: opts.repo})
+	report, err := doctor.Build(ctx, doctor.Request{Version: version, Source: deps.Source, CredentialReporter: deps.CredentialReporter, CredentialStatus: cred, CachePath: cachePath, Live: opts.live, ProviderMode: plan.ProviderMode, APIBaseURL: plan.APIBaseURL, RepoID: opts.repo, LiveBinding: plan.LiveRepositoryBinding})
 	if err != nil {
 		return writeError(stderr, opts.format, err)
 	}
@@ -1756,7 +1758,7 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --owner OWNER       repository owner (required)")
 		fmt.Fprintln(w, "  --name NAME         repository name (required)")
-		fmt.Fprintln(w, "  --api-base-url URL  API base URL (required)")
+		fmt.Fprintln(w, "  --api-base-url URL  authoritative live API base URL (required)")
 		fmt.Fprintln(w, "  --scopes SCOPES     comma-separated scopes (issues, wiki)")
 		fmt.Fprintln(w, "  --alias ALIAS       repository alias (repeatable)")
 		fmt.Fprintln(w, "  --display-name NAME human-readable display name")

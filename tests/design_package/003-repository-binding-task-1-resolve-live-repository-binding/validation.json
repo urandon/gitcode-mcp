@@ -1,0 +1,28 @@
+{
+  "schema_version": "triborg.validation-result.v1",
+  "task_id": "003-repository-binding-task-1-resolve-live-repository-binding",
+  "covered_outcome_ids": ["outcome-8", "outcome-9"],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "cmd/gitcode-mcp/main_test.go::TestCLIStartupPlanSelectsLiveProvider/SCN-CLI-LIVE-API-BASE-AUTHORITY exercises the real CLI startup route for gitcode-mcp sync --live with repository binding api_base_url set to selected httptest.Server A and GITCODE_API_URL set to non-authoritative httptest.Server B, asserting only server A receives requests.",
+    "cmd/gitcode-mcp/main_test.go::TestCLIStartupPlanSelectsLiveProvider/SCN-CLI-DOCTOR-LIVE-JSON-STARTUP-SNAPSHOT exercises the real CLI doctor --live --format json route with the same effective repository binding snapshot, asserting provider_mode live-http, credential source, effective cache path, selected api_base_url, no token leakage, and zero server requests.",
+    "cmd/gitcode-mcp/main_test.go::TestCLIStartupPlanSelectsLiveProvider/SCN-CLI-LIVE-BINDING-INVALID-URL-NO-HTTP exercises the real CLI startup route for gitcode-mcp sync --live with an invalid repository api_base_url, asserting a configuration diagnostic before live HTTP construction and zero mock-server requests.",
+    "go test ./... is run by run.sh as the offline acceptance gate so these CLI integration scenarios remain executable under the repository-wide test command."
+  ],
+  "evidence_type": "offline_cli_integration_go_test",
+  "freshness": "Current target runtime at validation execution time with fresh temporary config/cache paths created by Go tests and no live GitCode credentials, live network access, real device access, or OS Keychain access.",
+  "mocks_used": {
+    "httptest.Server": "Mocks only external GitCode-compatible HTTP endpoints and records selected/non-selected request counts while exercising production CLI startup, repository binding, live provider routing, sync, and doctor routes.",
+    "environment isolation": "run.sh unsets GITCODE_TOKEN, GITCODE_MCP_TEST_KEYCHAIN_TOKEN, and GITCODE_API_URL before invoking Go tests so each scenario uses only its explicit test setup."
+  },
+  "production_files_modified": {},
+  "validation_scope": "Validation artifacts are limited to tests/design_package/003-repository-binding-task-1-resolve-live-repository-binding/. No production source, production docs, runtime code, server code, app code, root AGENTS.md, or product configuration is modified by this validation materialization.",
+  "live_validation": {
+    "enabled": false,
+    "reason": "Live validation is disabled for this task. All evidence is deterministic offline validation using stubbed external dependencies only."
+  },
+  "device_validation": {
+    "enabled": false,
+    "reason": "Device validation is disabled for this task."
+  }
+}

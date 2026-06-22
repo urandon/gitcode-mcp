@@ -94,6 +94,25 @@ type RepositoryRoute struct {
 	Scopes     []RepositoryScope `json:"scopes"`
 }
 
+type LiveRepositoryBinding struct {
+	RepoID        string            `json:"repo_id"`
+	Owner         string            `json:"owner"`
+	Name          string            `json:"name"`
+	APIBaseURL    string            `json:"api_base_url"`
+	Scopes        []RepositoryScope `json:"scopes"`
+	CachePath     string            `json:"cache_path"`
+	AuditPath     string            `json:"audit_path"`
+	BaseURLSource string            `json:"base_url_source"`
+}
+
+type LiveRepositoryBindingRequest struct {
+	RepoID             string          `json:"repo_id"`
+	RequestedScope     RepositoryScope `json:"requested_scope"`
+	CachePath          string          `json:"cache_path"`
+	AuditPath          string          `json:"audit_path"`
+	FallbackAPIBaseURL string          `json:"fallback_api_base_url,omitempty"`
+}
+
 type SearchSourcesRequest struct {
 	RepoID string `json:"repo_id"`
 	Query  string `json:"query"`

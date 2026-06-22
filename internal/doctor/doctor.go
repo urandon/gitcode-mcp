@@ -43,6 +43,7 @@ type Request struct {
 	ProviderMode       string
 	APIBaseURL         string
 	RepoID             string
+	LiveBinding        service.LiveRepositoryBinding
 	OpenStore          OpenStoreFunc
 	NewService         NewServiceFunc
 }
@@ -200,7 +201,7 @@ func Build(ctx context.Context, req Request) (Report, error) {
 
 	if req.Live {
 		report.LiveProvider.ProviderMode = firstNonEmpty(req.ProviderMode, "live-http")
-		report.LiveProvider.APIBaseURL = req.APIBaseURL
+		report.LiveProvider.APIBaseURL = firstNonEmpty(req.APIBaseURL, req.LiveBinding.APIBaseURL)
 		if cred.Present {
 			report.LiveProvider.Status = "configured"
 			report.LiveProvider.Reachable = "skipped"

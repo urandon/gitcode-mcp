@@ -1508,20 +1508,66 @@ func (s *Service) BuildAdapterRoute(ctx context.Context, repoID string, requeste
 	if err != nil {
 		return RepositoryRoute{}, err
 	}
+	repo, err := s.repositoryWithScope(ctx, repoID, requestedScope)
+	if err != nil {
+		return RepositoryRoute{}, err
+	}
+	route := RepositoryRoute{RepoID: repo.RepoID, Owner: repo.Owner, Name: repo.Name, APIBaseURL: repo.APIBaseURL}
+	for _, configured := range repo.Scopes {
+		route.Scopes = append(route.Scopes, RepositoryScope(configured))
+	}
+	return route, nil
+}
+
+func (s *Service) ResolveLiveRepositoryBinding(ctx context.Context, req LiveRepositoryBindingRequest) (LiveRepositoryBinding, error) {
+	repoID, err := s.requireRepo(ctx, req.RepoID, "live repository binding")
+	if err != nil {
+		return LiveRepositoryBinding{}, err
+	}
+	repo, err := s.repositoryWithScope(ctx, repoID, req.RequestedScope)
+	if err != nil {
+		return LiveRepositoryBinding{}, err
+	}
+	selected := strings.TrimSpace(repo.APIBaseURL)
+	if selected == "" {
+		return LiveRepositoryBinding{}, ErrInvalidQuery{Field: "api_base_url", Message: "live repository binding requires api_base_url"}
+	}
+	baseURL, err := normalizeLiveAPIBaseURL(selected)
+	if err != nil {
+		return LiveRepositoryBinding{}, err
+	}
+	binding := LiveRepositoryBinding{RepoID: repo.RepoID, Owner: repo.Owner, Name: repo.Name, APIBaseURL: baseURL, CachePath: strings.TrimSpace(req.CachePath), AuditPath: strings.TrimSpace(req.AuditPath), BaseURLSource: "repository_binding"}
+	for _, configured := range repo.Scopes {
+		binding.Scopes = append(binding.Scopes, RepositoryScope(configured))
+	}
+	return binding, nil
+}
+
+func (s *Service) repositoryWithScope(ctx context.Context, repoID string, requestedScope RepositoryScope) (cache.RepositoryBinding, error) {
 	repo, err := s.store.GetRepository(ctx, repoID)
 	if err != nil {
-		return RepositoryRoute{}, normalizeError(err, "repository", repoID)
+		return cache.RepositoryBinding{}, normalizeError(err, "repository", repoID)
 	}
 	for _, scope := range repo.Scopes {
 		if RepositoryScope(scope) == requestedScope {
-			route := RepositoryRoute{RepoID: repo.RepoID, Owner: repo.Owner, Name: repo.Name, APIBaseURL: repo.APIBaseURL}
-			for _, configured := range repo.Scopes {
-				route.Scopes = append(route.Scopes, RepositoryScope(configured))
-			}
-			return route, nil
+			return repo, nil
 		}
 	}
-	return RepositoryRoute{}, ErrInvalidQuery{Field: "scope", Message: string(requestedScope) + " scope is not enabled for repo " + repoID}
+	return cache.RepositoryBinding{}, ErrInvalidQuery{Field: "scope", Message: string(requestedScope) + " scope is not enabled for repo " + repoID}
+}
+
+func normalizeLiveAPIBaseURL(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", ErrInvalidQuery{Field: "api_base_url", Message: "valid absolute http(s) api_base_url is required for live mode"}
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", ErrInvalidQuery{Field: "api_base_url", Message: "api_base_url must use http or https for live mode"}
+	}
+	if parsed.User != nil {
+		return "", ErrInvalidQuery{Field: "api_base_url", Message: "api_base_url must not contain credentials"}
+	}
+	return sanitizeAPIBaseURL(parsed.String()), nil
 }
 
 func (s *Service) validateRepoScope(ctx context.Context, repoID, remoteType string) error {
