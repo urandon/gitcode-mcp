@@ -90,12 +90,14 @@ type RepoSection struct {
 }
 
 type CredentialSection struct {
-	Status           string   `json:"status"`
-	Source           string   `json:"source"`
-	TokenPresent     bool     `json:"token_present"`
-	StoreMode        string   `json:"store_mode"`
-	AvailableSources []string `json:"available_sources,omitempty"`
-	Remediation      string   `json:"remediation,omitempty"`
+	Status             string   `json:"status"`
+	Source             string   `json:"source"`
+	TokenPresent       bool     `json:"token_present"`
+	StoreMode          string   `json:"store_mode"`
+	AttemptedSources   []string `json:"attempted_sources,omitempty"`
+	AvailableSources   []string `json:"available_sources,omitempty"`
+	UnavailableSources []string `json:"unavailable_sources,omitempty"`
+	Remediation        string   `json:"remediation,omitempty"`
 }
 
 type SyncSection struct {
@@ -188,7 +190,7 @@ func Build(ctx context.Context, req Request) (Report, error) {
 	report.LiveProvider = LiveProviderSection{Status: "skipped", Reachable: "not_configured", ProviderMode: "fixture", Remediation: "set GITCODE_TOKEN and use --live to enable live provider"}
 	report.AuthProbe = AuthProbeSection{Status: "skipped", ProbeResult: "not_probed", Remediation: "set GITCODE_TOKEN to enable authentication probing"}
 
-	report.Credential = CredentialSection{Source: emptyAsNone(cred.Source), TokenPresent: cred.Present, StoreMode: cred.StoreMode, AvailableSources: append([]string(nil), cred.AvailableSources...), Remediation: cred.Remediation}
+	report.Credential = CredentialSection{Source: emptyAsNone(cred.Source), TokenPresent: cred.Present, StoreMode: cred.StoreMode, AttemptedSources: append([]string(nil), cred.AttemptedSources...), AvailableSources: append([]string(nil), cred.AvailableSources...), UnavailableSources: append([]string(nil), cred.UnavailableSources...), Remediation: cred.Remediation}
 	if cred.Present {
 		report.Credential.Status = "token_configured"
 	} else {

@@ -1791,7 +1791,10 @@ type writeConfirmation struct {
 }
 
 func (s *Service) hasWriteCredential() bool {
-	return s.providerMode == gitcode.ProviderModeLive && s.writeCredentialPresent || strings.TrimSpace(os.Getenv("GITCODE_TOKEN")) != ""
+	if s.providerMode == gitcode.ProviderModeLive {
+		return s.writeCredentialPresent
+	}
+	return strings.TrimSpace(os.Getenv("GITCODE_TOKEN")) != ""
 }
 
 func (s *Service) callWriteAdapter(ctx context.Context, command string, route RepositoryRoute, req WriteCommandRequest, key string) (writeConfirmation, cache.RecordGraph, error) {

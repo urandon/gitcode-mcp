@@ -71,6 +71,9 @@ func BuildRuntimeAuditConfigReport(src Source, overrides Overrides, reporter Cre
 	status.ErrorClass = RedactDiagnostic(status.ErrorClass, src)
 	status.Remediation = RedactDiagnostic(status.Remediation, src)
 	report.CredentialSource = status.Source
+	if !status.Present && status.ErrorClass == "token-missing" {
+		report.CredentialSource = "missing"
+	}
 	report.TokenPresent = status.Present
 	report.CredentialStoreMode = status.StoreMode
 	if status.ErrorClass != "" {

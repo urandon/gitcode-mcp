@@ -318,6 +318,57 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 			t.Fatalf("doctor leaked token or contacted server; requests=%d out=%q", requests.Load(), out)
 		}
 	})
+
+	t.Run("SCN-CRED-LIVE-WRITE-MOCK-KEYCHAIN", func(t *testing.T) {
+		var requests atomic.Int64
+		server := newStartupLiveMockServer(t, &requests)
+		defer server.Close()
+		cachePath := filepath.Join(t.TempDir(), "cache.db")
+		src := newTestSource(t)
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		src.files[configPath] = []byte("credential:\n  store: auto\n")
+		src.env[config.EnvMCPConfigPath] = configPath
+		src.env["GITCODE_MCP_TEST_KEYCHAIN_TOKEN"] = "test-token"
+		addRepoForStartupTest(t, cachePath, server.URL)
+
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"create-issue", "--live", "--cache-path", cachePath, "--repo", "fixture-a", "--title", "Mock Created", "--body", "created by mock keychain", "--idempotency-key", "cred-write-1"}, strings.NewReader(""), &stdout, &stderr, src)
+		if code != 0 {
+			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+		}
+		if requests.Load() == 0 {
+			t.Fatalf("mock server requests=0, want authenticated create request")
+		}
+		out := stdout.String() + stderr.String()
+		if strings.Contains(out, "fixture client is read-only") || strings.Contains(out, "test-token") {
+			t.Fatalf("write output invalid: %q", out)
+		}
+	})
+
+	t.Run("SCN-CRED-DOCTOR-LIVE-MOCK-KEYCHAIN", func(t *testing.T) {
+		var requests atomic.Int64
+		server := newStartupLiveMockServer(t, &requests)
+		defer server.Close()
+		cachePath := filepath.Join(t.TempDir(), "cache.db")
+		src := newTestSource(t)
+		src.env["GITCODE_MCP_TEST_KEYCHAIN_TOKEN"] = "test-token"
+		addRepoForStartupTest(t, cachePath, server.URL)
+
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"doctor", "--live", "--format", "json", "--cache-path", cachePath, "--repo", "fixture-a"}, strings.NewReader(""), &stdout, &stderr, src)
+		if code != 0 {
+			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+		}
+		out := stdout.String()
+		for _, want := range []string{"\"provider_mode\": \"live-http\"", "\"source\": \"mock-keychain\"", fmt.Sprintf("\"path\": \"%s\"", cachePath), fmt.Sprintf("\"api_base_url\": \"%s\"", server.URL)} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("doctor output missing %q in %q", want, out)
+			}
+		}
+		if strings.Contains(out, "test-token") || requests.Load() != 0 {
+			t.Fatalf("doctor leaked token or contacted server; requests=%d out=%q", requests.Load(), out)
+		}
+	})
 }
 
 func addRepoForStartupTest(t *testing.T, cachePath, baseURL string) {
@@ -340,6 +391,10 @@ func newStartupLiveMockServer(t *testing.T, requests *atomic.Int64) *httptest.Se
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/v5/repos/owner-a/repo-a/issues":
+			if r.Method == http.MethodPost {
+				fmt.Fprint(w, `{"id":"issue-created","number":8,"title":"Mock Created","state":"open","body":"created by mock keychain","created_at":"2026-06-22T00:00:00Z","updated_at":"2026-06-22T00:00:00Z"}`)
+				return
+			}
 			fmt.Fprint(w, `[{"id":"issue-7","number":7,"title":"Mock Issue","state":"open","body":"mock issue body","created_at":"2026-06-22T00:00:00Z","updated_at":"2026-06-22T00:00:00Z"}]`)
 		case "/api/v5/repos/owner-a/repo-a/issues/7":
 			fmt.Fprint(w, `{"id":"issue-7","number":7,"title":"Mock Issue","state":"open","body":"mock issue body","created_at":"2026-06-22T00:00:00Z","updated_at":"2026-06-22T00:00:00Z"}`)

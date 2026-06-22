@@ -96,25 +96,15 @@ type localCommandDeps struct {
 }
 
 type startupPlan struct {
-	Command          string
-	ProviderMode     string
-	CachePath        string
-	RepoID           string
-	APIBaseURL       string
-	CredentialStatus config.CredentialStatus
-	Token            config.SecretString
-	ServiceConfig    service.ServiceConfig
-}
-
-type missingCredentialError struct {
-	Source string
-}
-
-func (e missingCredentialError) Error() string {
-	if strings.TrimSpace(e.Source) == "" {
-		return "missing_credential: live provider requires GITCODE_TOKEN or configured credential"
-	}
-	return "missing_credential: live provider requires GITCODE_TOKEN or configured credential; credential_source=" + e.Source
+	Command              string
+	ProviderMode         string
+	CachePath            string
+	RepoID               string
+	APIBaseURL           string
+	CredentialStatus     config.CredentialStatus
+	CredentialResolution config.CredentialResolutionResult
+	Token                config.SecretString
+	ServiceConfig        service.ServiceConfig
 }
 
 type options struct {
@@ -262,19 +252,16 @@ func buildStartupPlan(ctx context.Context, command string, opts options, deps lo
 	if plan.ProviderMode != "live-http" {
 		return plan, nil
 	}
-	provider, ok := deps.CredentialReporter.(config.CredentialProvider)
-	if !ok {
-		provider = config.DefaultCredentialProvider(deps.Source)
-	}
-	secret, status, err := provider.Resolve(ctx, eff)
+	resolution, err := resolveLiveCredential(ctx, eff, deps)
+	plan.CredentialResolution = resolution
+	plan.CredentialStatus = resolution.Status()
 	if err != nil {
 		return plan, err
 	}
-	plan.CredentialStatus = status
-	if !status.Present || strings.TrimSpace(secret.Value()) == "" {
-		return plan, missingCredentialError{Source: status.Source}
+	if !resolution.Present || strings.TrimSpace(resolution.Token.Value()) == "" {
+		return plan, config.MissingCredentialError{Status: resolution.Status()}
 	}
-	plan.Token = secret
+	plan.Token = resolution.Token
 	baseURL, err := liveAPIBaseURL(ctx, plan.CachePath, opts.repo, eff.Config.GitCodeBaseURL)
 	if err != nil {
 		return plan, err
@@ -282,6 +269,27 @@ func buildStartupPlan(ctx context.Context, command string, opts options, deps lo
 	plan.APIBaseURL = baseURL
 	plan.ServiceConfig = service.ServiceConfig{BaseURL: baseURL, Timeout: eff.Config.DefaultTimeout, MaxResponseSize: eff.Config.MaxResponseSize, MaxRetries: eff.Config.MaxRetries}
 	return plan, nil
+}
+
+func resolveLiveCredential(ctx context.Context, eff config.EffectiveConfig, deps localCommandDeps) (config.CredentialResolutionResult, error) {
+	if resolver, ok := deps.CredentialReporter.(interface {
+		ResolveLiveCredential(context.Context, config.EffectiveConfig) (config.CredentialResolutionResult, error)
+	}); ok {
+		return resolver.ResolveLiveCredential(ctx, eff)
+	}
+	if provider, ok := deps.CredentialReporter.(config.CredentialProvider); ok {
+		secret, status, err := provider.Resolve(ctx, eff)
+		result := config.CredentialResolutionResult{Present: status.Present && strings.TrimSpace(secret.Value()) != "", Token: secret, Source: status.Source, StoreMode: status.StoreMode, AttemptedSources: append([]string(nil), status.AttemptedSources...), AvailableSources: append([]string(nil), status.AvailableSources...), UnavailableSources: append([]string(nil), status.UnavailableSources...), ErrorClass: status.ErrorClass, Remediation: status.Remediation}
+		if err != nil {
+			return result, err
+		}
+		if !result.Present {
+			return result, config.MissingCredentialError{Status: result.Status()}
+		}
+		return result, nil
+	}
+	provider := config.DefaultCredentialProvider(deps.Source)
+	return provider.ResolveLiveCredential(ctx, eff)
 }
 
 func isLiveStartupCommand(command string) bool {
@@ -551,7 +559,9 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 		}
 		status := deps.CredentialReporter.Status(context.Background(), eff)
 		if opts.live {
-			status = probeAuthStatus(context.Background(), deps.Source, eff, opts, status)
+			resolution, _ := resolveLiveCredential(context.Background(), eff, deps)
+			status = resolution.Status()
+			status = probeAuthStatus(context.Background(), deps.Source, eff, opts, status, resolution.Token)
 		}
 		sanitizedStatus := sanitizeCredentialStatus(status, deps.Source)
 		if opts.format == "json" {
@@ -571,16 +581,12 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 	}
 }
 
-func probeAuthStatus(ctx context.Context, src config.Source, eff config.EffectiveConfig, opts options, status config.CredentialStatus) config.CredentialStatus {
-	if !status.Present {
+func probeAuthStatus(ctx context.Context, src config.Source, eff config.EffectiveConfig, opts options, status config.CredentialStatus, secret config.SecretString) config.CredentialStatus {
+	if !status.Present || strings.TrimSpace(secret.Value()) == "" {
 		status.AuthProbe = &config.CredentialAuthProbe{Status: "skipped", FailureClass: "token-missing", Message: "auth probe requires a token"}
 		return status
 	}
-	token := strings.TrimSpace(src.Env(config.EnvToken))
-	if token == "" {
-		status.AuthProbe = &config.CredentialAuthProbe{Status: "skipped", FailureClass: "token-missing", Message: "auth probe requires GITCODE_TOKEN"}
-		return status
-	}
+	token := strings.TrimSpace(secret.Value())
 	owner := strings.TrimSpace(opts.owner)
 	repo := strings.TrimSpace(opts.repo)
 	if owner == "" || repo == "" {
@@ -1168,7 +1174,7 @@ func failureClass(err error) string {
 	if errors.As(err, &ambiguous) {
 		return "ambiguous_alias"
 	}
-	var missing missingCredentialError
+	var missing config.MissingCredentialError
 	if errors.As(err, &missing) {
 		return "missing_credential"
 	}
@@ -1203,7 +1209,7 @@ func exitCode(err error) int {
 	if errors.As(err, &ambiguous) {
 		return 4
 	}
-	var missing missingCredentialError
+	var missing config.MissingCredentialError
 	if errors.As(err, &missing) {
 		return 1
 	}
