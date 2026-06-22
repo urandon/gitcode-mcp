@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -534,25 +535,22 @@ func TestSchemasAndResults(t *testing.T) {
 	wg.Wait()
 }
 
-func TestMCPToolKindSchemaIncludesGitCodeKinds(t *testing.T) {
+func TestMCPToolKindSchemaIncludesOnlyGitCodeKinds(t *testing.T) {
 	store := populatedStore(t)
 	defer store.Close()
 	srv := New(io.Reader(strings.NewReader("")), io.Discard, io.Discard, service.New(store))
 	registry := srv.toolRegistry()
-	for _, name := range []string{"list_sources", "search_sources", "search_chunks", "recent_changes"} {
+	for _, name := range []string{"list_sources", "search_sources", "search_chunks"} {
 		tool, ok := registry[name]
 		if !ok {
 			t.Fatalf("tool %s is not registered", name)
 		}
 		prop, ok := tool.definition.InputSchema.Properties["kind"]
-		if !ok && name == "search_chunks" {
-			continue
-		}
 		if !ok {
 			t.Fatalf("tool %s missing kind schema", name)
 		}
-		if !containsString(prop.Enum, "issue") || !containsString(prop.Enum, "wiki") {
-			t.Fatalf("tool %s kind enum = %#v, want issue and wiki", name, prop.Enum)
+		if !reflect.DeepEqual(prop.Enum, []string{"issue", "wiki"}) {
+			t.Fatalf("tool %s kind enum = %#v, want [issue wiki]", name, prop.Enum)
 		}
 	}
 }

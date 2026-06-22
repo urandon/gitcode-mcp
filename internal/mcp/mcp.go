@@ -164,7 +164,7 @@ type toolContentItem struct {
 	Text string `json:"text"`
 }
 
-var sourceKindEnums = []string{"issue", "wiki", "source", "task", "page", "decision", "handoff"}
+var sourceKindEnums = []string{"issue", "wiki"}
 
 func intPtr(v int) *int             { return &v }
 func float64Ptr(v float64) *float64 { return &v }
@@ -187,6 +187,7 @@ func chunkSchemaProps(includeQuery bool) map[string]schemaProp {
 	}
 	if includeQuery {
 		props["query"] = schemaProp{Type: "string", Description: "Normalized chunk query text.", MinLength: 1}
+		props["kind"] = schemaProp{Type: "string", Description: "Source kind filter.", Enum: sourceKindEnums}
 	}
 	return props
 }
@@ -668,6 +669,7 @@ type chunkArgs struct {
 	RecordID   string `json:"record_id,omitempty"`
 	SnapshotID string `json:"snapshot_id,omitempty"`
 	Policy     string `json:"policy,omitempty"`
+	Kind       string `json:"kind,omitempty"`
 	ChunkID    string `json:"chunk_id,omitempty"`
 	Query      string `json:"query,omitempty"`
 	LineStart  *int   `json:"line_start,omitempty"`
@@ -752,6 +754,10 @@ func (s *Server) parseChunkArgs(id *json.RawMessage, args json.RawMessage, requi
 	}
 	if a.LineStart != nil && a.LineEnd != nil && *a.LineStart > *a.LineEnd {
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "line_start must be less than or equal to line_end"})
+		return chunkArgs{}, false
+	}
+	if a.Kind != "" && !validKind(a.Kind) {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: kindValidationMessage()})
 		return chunkArgs{}, false
 	}
 	return a, true
