@@ -1242,12 +1242,40 @@ func TestHTTPSSECancelledSessionDoesNotBlockOtherClient(t *testing.T) {
 	}
 }
 
+func TestHTTPSSETransportDeduplicatesSessionIDs(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	transport := NewHTTPSSETransport(NewRPCHandler(service.New(store)), ServerConfig{SessionID: func() string { return "same-session" }})
+	server := httptest.NewServer(transport.Handler())
+	defer server.Close()
+
+	sseA, endpointA, eventsA := openSSE(t, server.URL+"/sse")
+	defer sseA.Body.Close()
+	sseB, endpointB, eventsB := openSSE(t, server.URL+"/sse")
+	defer sseB.Body.Close()
+	if endpointA != "/message?session_id=same-session" || endpointB != "/message?session_id=same-session-2" {
+		t.Fatalf("endpoints = %q %q", endpointA, endpointB)
+	}
+	postJSON(t, server.URL+endpointA, map[string]any{"jsonrpc": "2.0", "id": "a", "method": "initialize"})
+	postJSON(t, server.URL+endpointB, map[string]any{"jsonrpc": "2.0", "id": "b", "method": "initialize"})
+	respA := readSSEMessage(t, eventsA)
+	respB := readSSEMessage(t, eventsB)
+	if respA.ID == nil || string(*respA.ID) != `"a"` || respB.ID == nil || string(*respB.ID) != `"b"` {
+		t.Fatalf("responses crossed: %+v %+v", respA, respB)
+	}
+}
+
 func TestHTTPSSETransportSessionErrorsAndMultiClient(t *testing.T) {
 	store := populatedStore(t)
 	defer store.Close()
 	ids := []string{"session-a", "session-b"}
+	var idMu sync.Mutex
+	var logs bytes.Buffer
 	transport := NewHTTPSSETransport(NewRPCHandler(service.New(store)), ServerConfig{
+		Logger: logWriter(&logs),
 		SessionID: func() string {
+			idMu.Lock()
+			defer idMu.Unlock()
 			id := ids[0]
 			ids = ids[1:]
 			return id
@@ -1263,6 +1291,9 @@ func TestHTTPSSETransportSessionErrorsAndMultiClient(t *testing.T) {
 	unknown, unknownErr := postJSONTransportError(t, server.URL+"/message?session_id=missing", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize"})
 	if unknown != http.StatusNotFound || unknownErr.Error.Code != "unknown_session" {
 		t.Fatalf("unknown session status=%d error=%+v", unknown, unknownErr)
+	}
+	if !strings.Contains(logs.String(), "code=missing_session") || !strings.Contains(logs.String(), "session_id=missing") || !strings.Contains(logs.String(), "code=unknown_session") {
+		t.Fatalf("logs missing transport errors: %q", logs.String())
 	}
 
 	sseA, endpointA, eventsA := openSSE(t, server.URL+"/sse")
