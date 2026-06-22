@@ -41,6 +41,46 @@ func TestBacklinks(t *testing.T) {
 	}
 }
 
+func TestRecordSyncEventTimestamps(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+
+	mustUpsertGraph(t, ctx, store, SourceGraph{Source: testSource("DOC-123", "doc", "Design Doc")})
+	startedAt := time.Date(2026, 6, 22, 10, 0, 0, 0, time.UTC)
+	completedAt := startedAt.Add(2 * time.Second)
+	event := SyncEvent{
+		RepoID:         "fixture-a",
+		ID:             "sync-event-timestamps",
+		SourceID:       "DOC-123",
+		RemoteType:     "issue",
+		RemoteID:       "123",
+		RemoteRevision: "rev-1",
+		Status:         "succeeded",
+		IdempotencyKey: "sync-event-timestamps-key",
+		Message:        "{}",
+		CreatedAt:      completedAt,
+		StartedAt:      startedAt,
+		CompletedAt:    completedAt,
+	}
+	if err := store.RecordSyncEvent(ctx, event); err != nil {
+		t.Fatalf("RecordSyncEvent returned error: %v", err)
+	}
+	got, err := store.GetSyncEventByKey(ctx, "sync-event-timestamps-key")
+	if err != nil {
+		t.Fatalf("GetSyncEventByKey returned error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetSyncEventByKey returned nil")
+	}
+	if !got.StartedAt.Equal(startedAt) {
+		t.Fatalf("StartedAt = %s, want %s", got.StartedAt, startedAt)
+	}
+	if !got.CompletedAt.Equal(completedAt) {
+		t.Fatalf("CompletedAt = %s, want %s", got.CompletedAt, completedAt)
+	}
+}
+
 func TestChunkSchemaEmbeddingColumn(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)

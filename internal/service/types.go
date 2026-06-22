@@ -271,15 +271,17 @@ type SyncStatusResult struct {
 }
 
 type SyncStatusSummaryResult struct {
-	RepoID     string             `json:"repo_id"`
-	Results    []SyncStatusResult `json:"results"`
-	FreshCount int                `json:"fresh_count"`
-	StaleCount int                `json:"stale_count"`
-	LastSyncAt time.Time          `json:"last_sync_at"`
-	CacheEmpty bool               `json:"cache_empty"`
-	Limit      int                `json:"limit"`
-	Offset     int                `json:"offset"`
-	Warnings   []string           `json:"warnings,omitempty"`
+	RepoID              string             `json:"repo_id"`
+	Results             []SyncStatusResult `json:"results"`
+	FreshCount          int                `json:"fresh_count"`
+	StaleCount          int                `json:"stale_count"`
+	LastSyncAt          time.Time          `json:"last_sync_at"`
+	LastSyncStartedAt   time.Time          `json:"last_sync_started_at"`
+	LastSyncCompletedAt time.Time          `json:"last_sync_completed_at"`
+	CacheEmpty          bool               `json:"cache_empty"`
+	Limit               int                `json:"limit"`
+	Offset              int                `json:"offset"`
+	Warnings            []string           `json:"warnings,omitempty"`
 }
 
 type FreshnessState = string
@@ -323,12 +325,14 @@ type SyncResult struct {
 	SyncEventID    string     `json:"sync_event_id"`
 	Freshness      string     `json:"freshness"`
 	GeneratedAt    time.Time  `json:"generated_at"`
+	StartedAt      time.Time  `json:"started_at"`
+	CompletedAt    time.Time  `json:"completed_at"`
 }
 
 type SyncResourcesResult struct {
-	Results      []SyncResult   `json:"results"`
-	SuccessCount int            `json:"success_count"`
-	FailureCount int            `json:"failure_count"`
+	Results      []SyncResult    `json:"results"`
+	SuccessCount int             `json:"success_count"`
+	FailureCount int             `json:"failure_count"`
 	Failures     []ResourceError `json:"failures,omitempty"`
 }
 

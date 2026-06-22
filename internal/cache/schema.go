@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 4
+const currentSchemaVersion = 5
 
 type VersionCompatibility struct {
 	DetectedVersion int
@@ -128,6 +128,7 @@ var migrations = []migration{
 	{version: 2, apply: applyRepoScopedCacheMigration},
 	{version: 3, apply: applyChunkPolicyMigration},
 	{version: 4, apply: applyStoredSnapshotMigration},
+	{version: 5, apply: applySyncEventTimestampsMigration},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB, ftsAvailable bool) error {
@@ -291,6 +292,8 @@ func applyInitialMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) e
 	idempotency_key TEXT NOT NULL,
 	message TEXT NOT NULL,
 	created_at TEXT NOT NULL,
+	started_at TEXT NOT NULL DEFAULT '',
+	completed_at TEXT NOT NULL DEFAULT '',
 	PRIMARY KEY(repo_id, id),
 	FOREIGN KEY(repo_id, source_id) REFERENCES sources(repo_id, id) ON DELETE CASCADE
 )`,
@@ -496,6 +499,26 @@ func applyStoredSnapshotMigration(ctx context.Context, tx *sql.Tx, ftsAvailable 
 	}
 	_, err = tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_snapshot_chunks_order ON snapshot_chunks(repo_id, snapshot_id, source_type, source_id, record_id, ordinal, chunk_id)`)
 	return err
+}
+
+func applySyncEventTimestampsMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
+	columns, err := tableColumns(ctx, tx, "sync_events")
+	if err != nil {
+		return err
+	}
+	addColumns := map[string]string{
+		"started_at":   `ALTER TABLE sync_events ADD COLUMN started_at TEXT NOT NULL DEFAULT ''`,
+		"completed_at": `ALTER TABLE sync_events ADD COLUMN completed_at TEXT NOT NULL DEFAULT ''`,
+	}
+	for column, statement := range addColumns {
+		if columns[column] {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func tableColumns(ctx context.Context, tx *sql.Tx, table string) (map[string]bool, error) {

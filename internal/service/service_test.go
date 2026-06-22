@@ -1422,6 +1422,145 @@ func TestSyncResourcesAllFailure(t *testing.T) {
 	}
 }
 
+func TestSyncEventTimestamps(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 22, 10, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		issue:    gitcode.Issue{Number: 42, Title: "Timestamp Issue", Body: "issue body", State: "open", CreatedAt: base, UpdatedAt: base},
+		comments: []gitcode.Comment{{ID: "c1", Author: "author", Body: "comment", CreatedAt: base, UpdatedAt: base}},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "sync-timestamps", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	times := []time.Time{base, base.Add(time.Second), base.Add(2 * time.Second)}
+	next := 0
+	svc.now = func() time.Time {
+		if next >= len(times) {
+			return times[len(times)-1]
+		}
+		t := times[next]
+		next++
+		return t
+	}
+	result, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "sync-timestamps", RemoteAlias: "issue:42", IdempotencyKey: "sync-timestamps-key"})
+	if err != nil {
+		t.Fatalf("SyncToCache returned error: %v", err)
+	}
+	if result.StartedAt.IsZero() {
+		t.Fatal("SyncResult.StartedAt is zero")
+	}
+	if result.CompletedAt.IsZero() {
+		t.Fatal("SyncResult.CompletedAt is zero")
+	}
+	if !result.CompletedAt.After(result.StartedAt) {
+		t.Fatalf("CompletedAt = %s, want after StartedAt = %s", result.CompletedAt, result.StartedAt)
+	}
+	stored, err := store.GetSyncEventByKey(ctx, "sync-timestamps-key")
+	if err != nil {
+		t.Fatalf("GetSyncEventByKey returned error: %v", err)
+	}
+	if stored == nil || stored.StartedAt.IsZero() || stored.CompletedAt.IsZero() {
+		t.Fatalf("stored sync event timestamps not populated: %#v", stored)
+	}
+}
+
+func TestSyncEventTimestampsFailure(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 22, 11, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{errors: []error{gitcode.ErrNotFound{Endpoint: "/issues/42", ID: "42", Message: "not found"}}}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "sync-timestamps-failure", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertSource(ctx, cache.Source{RepoID: "sync-timestamps-failure", ID: "ISSUE-42", Kind: "issue", Path: "issues/42.md", Title: "Issue", Body: "body", Status: "open", ContentHash: "old", CreatedAt: base, UpdatedAt: base}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	times := []time.Time{base, base.Add(time.Second)}
+	next := 0
+	svc.now = func() time.Time {
+		if next >= len(times) {
+			return times[len(times)-1]
+		}
+		t := times[next]
+		next++
+		return t
+	}
+	_, err = svc.SyncToCache(ctx, SyncRequest{RepoID: "sync-timestamps-failure", RemoteAlias: "issue:42", IdempotencyKey: "sync-timestamps-failure-key"})
+	if err == nil {
+		t.Fatal("SyncToCache returned nil error, want failure")
+	}
+	stored, err := store.GetSyncEventByKey(ctx, "sync-timestamps-failure-key")
+	if err != nil {
+		t.Fatalf("GetSyncEventByKey returned error: %v", err)
+	}
+	if stored == nil {
+		t.Fatal("failed sync event was not persisted")
+	}
+	if stored.Status != "failed" {
+		t.Fatalf("Status = %q, want failed", stored.Status)
+	}
+	if !stored.StartedAt.Equal(base) {
+		t.Fatalf("StartedAt = %s, want %s", stored.StartedAt, base)
+	}
+	if !stored.CompletedAt.Equal(base.Add(time.Second)) {
+		t.Fatalf("CompletedAt = %s, want %s", stored.CompletedAt, base.Add(time.Second))
+	}
+}
+
+func TestSyncStatusSummaryCompletedAt(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "sync-status-completed", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	graph := cache.SourceGraph{
+		Source:     cache.Source{RepoID: "sync-status-completed", ID: "ISSUE-42", Kind: "issue", Path: "issues/42.md", Title: "Issue", Body: "body", Status: "open", ContentHash: "hash", CreatedAt: base, UpdatedAt: base},
+		SyncStatus: &cache.SyncStatus{RepoID: "sync-status-completed", SourceID: "ISSUE-42", RemoteType: "issue", RemoteID: "42", RemoteRevision: "rev", Status: "fresh", LastFetchedAt: base},
+	}
+	if err := store.UpsertSourceGraph(ctx, graph); err != nil {
+		t.Fatal(err)
+	}
+	incompleteStarted := base.Add(time.Hour)
+	if err := store.RecordSyncEvent(ctx, cache.SyncEvent{RepoID: "sync-status-completed", ID: "incomplete", SourceID: "ISSUE-42", RemoteType: "issue", RemoteID: "42", Status: "in_progress", IdempotencyKey: "incomplete", Message: "sync started", CreatedAt: incompleteStarted, StartedAt: incompleteStarted}); err != nil {
+		t.Fatal(err)
+	}
+	completedStarted := base.Add(10 * time.Minute)
+	completedAt := base.Add(11 * time.Minute)
+	if err := store.RecordSyncEvent(ctx, cache.SyncEvent{RepoID: "sync-status-completed", ID: "completed", SourceID: "ISSUE-42", RemoteType: "issue", RemoteID: "42", Status: "succeeded", IdempotencyKey: "completed", Message: "{}", CreatedAt: completedAt, StartedAt: completedStarted, CompletedAt: completedAt}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, &fakeGitCodeClient{})
+	result, err := svc.SyncStatus(ctx, ListSourcesRequest{RepoID: "sync-status-completed"})
+	if err != nil {
+		t.Fatalf("SyncStatus returned error: %v", err)
+	}
+	if !result.LastSyncStartedAt.Equal(completedStarted) {
+		t.Fatalf("LastSyncStartedAt = %s, want %s", result.LastSyncStartedAt, completedStarted)
+	}
+	if !result.LastSyncCompletedAt.Equal(completedAt) {
+		t.Fatalf("LastSyncCompletedAt = %s, want %s", result.LastSyncCompletedAt, completedAt)
+	}
+	if result.LastSyncCompletedAt.Equal(incompleteStarted) {
+		t.Fatal("incomplete sync event was selected as completed")
+	}
+}
+
 func seededSyncService(t *testing.T, ctx context.Context, client gitcode.Client) *Service {
 	t.Helper()
 	store, err := cache.NewInMemorySQLiteStore(ctx)
@@ -1637,6 +1776,9 @@ func (f *brokenStore) ListChunks(context.Context, cache.ChunkFilter) ([]cache.Ch
 }
 func (f *brokenStore) RecordSyncEvent(context.Context, cache.SyncEvent) error { return nil }
 func (f *brokenStore) GetSyncEventByKey(ctx context.Context, key string) (*cache.SyncEvent, error) {
+	return nil, nil
+}
+func (f *brokenStore) ListCompletedSyncEventsScoped(context.Context, string) ([]cache.SyncEvent, error) {
 	return nil, nil
 }
 func (f *brokenStore) RecordAuditEvent(context.Context, cache.AuditTrailEntry) error { return nil }

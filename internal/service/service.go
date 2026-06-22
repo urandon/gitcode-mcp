@@ -551,7 +551,19 @@ func (s *Service) SyncStatus(ctx context.Context, req ListSourcesRequest) (SyncS
 		}
 		return SyncStatusSummaryResult{}, err
 	}
+	completedEvents, err := s.store.ListCompletedSyncEventsScoped(ctx, repoID)
+	if err != nil {
+		return SyncStatusSummaryResult{}, err
+	}
+	sourceToLatestCompleted := map[string]cache.SyncEvent{}
+	for _, event := range completedEvents {
+		existing, ok := sourceToLatestCompleted[event.SourceID]
+		if !ok || event.CompletedAt.After(existing.CompletedAt) {
+			sourceToLatestCompleted[event.SourceID] = event
+		}
+	}
 	result := SyncStatusSummaryResult{RepoID: repoID, Limit: req.Limit, Offset: req.Offset, Results: []SyncStatusResult{}}
+	var latestCompleted cache.SyncEvent
 	for _, source := range listed.Results {
 		status, err := s.GetSyncStatus(ctx, SyncStatusRequest{RepoID: repoID, ID: source.ID})
 		if err != nil {
@@ -571,6 +583,15 @@ func (s *Service) SyncStatus(ctx context.Context, req ListSourcesRequest) (SyncS
 		if status.LastFetchedAt.After(result.LastSyncAt) {
 			result.LastSyncAt = status.LastFetchedAt.UTC()
 		}
+		if event, ok := sourceToLatestCompleted[source.ID]; ok && event.CompletedAt.After(latestCompleted.CompletedAt) {
+			latestCompleted = event
+		}
+	}
+	if !latestCompleted.StartedAt.IsZero() {
+		result.LastSyncStartedAt = latestCompleted.StartedAt.UTC()
+	}
+	if !latestCompleted.CompletedAt.IsZero() {
+		result.LastSyncCompletedAt = latestCompleted.CompletedAt.UTC()
 	}
 	result.CacheEmpty = len(result.Results) == 0 && len(result.Warnings) == 0
 	return result, nil
@@ -856,8 +877,8 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 		return SyncResult{}, err
 	}
 	eventID := syncEventID(key)
-	now := s.now().UTC()
-	inProgress := cache.SyncEvent{RepoID: repoID, ID: eventID, SourceID: s.syncEventSourceID(ctx, req, remoteType, remoteID), RemoteType: remoteType, RemoteID: remoteID, Status: "in_progress", IdempotencyKey: key, Message: "sync started", CreatedAt: now}
+	syncStartedAt := s.now().UTC()
+	inProgress := cache.SyncEvent{RepoID: repoID, ID: eventID, SourceID: s.syncEventSourceID(ctx, req, remoteType, remoteID), RemoteType: remoteType, RemoteID: remoteID, Status: "in_progress", IdempotencyKey: key, Message: "sync started", CreatedAt: syncStartedAt, StartedAt: syncStartedAt}
 	inProgressRecorded := true
 	if _, err := s.store.GetSourceScoped(ctx, repoID, inProgress.SourceID); err == nil {
 		if err := s.store.RecordSyncEvent(ctx, inProgress); err != nil {
@@ -886,11 +907,12 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 		}
 		return SyncResult{}, failure
 	}
+	syncCompletedAt := s.now().UTC()
 	revision := ""
 	if graph.SyncStatus != nil {
 		revision = graph.SyncStatus.RemoteRevision
 	}
-	graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "succeeded", IdempotencyKey: key, Message: syncEventMessage(counts), CreatedAt: now})
+	graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "succeeded", IdempotencyKey: key, Message: syncEventMessage(counts), CreatedAt: syncCompletedAt, StartedAt: syncStartedAt, CompletedAt: syncCompletedAt})
 	if err := s.store.UpsertSyncGraph(ctx, syncGraphFromSourceGraph(req.RepoID, graph)); err != nil {
 		if inProgressRecorded {
 			_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, err, s.now().UTC()))
@@ -903,7 +925,7 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 		}
 		return SyncResult{}, err
 	}
-	return SyncResult{IdempotencyKey: key, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), GeneratedAt: s.now().UTC()}, nil
+	return SyncResult{IdempotencyKey: key, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), GeneratedAt: syncCompletedAt, StartedAt: syncStartedAt, CompletedAt: syncCompletedAt}, nil
 }
 
 // SyncResources processes multiple SyncRequest values independently via SyncToCache.
@@ -914,7 +936,7 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 // Callers should check PartialSyncError before using the result.
 func (s *Service) SyncResources(ctx context.Context, reqs []SyncRequest) (*SyncResourcesResult, error) {
 	result := &SyncResourcesResult{
-		Results: make([]SyncResult, 0, len(reqs)),
+		Results:  make([]SyncResult, 0, len(reqs)),
 		Failures: make([]ResourceError, 0),
 	}
 	var partial *PartialSyncError
@@ -1425,13 +1447,14 @@ func syncResultFromEvent(event cache.SyncEvent, generated time.Time) SyncResult 
 	if event.Status != "succeeded" {
 		freshness = string(FreshnessUnknown)
 	}
-	return SyncResult{IdempotencyKey: event.IdempotencyKey, Status: event.Status, Counts: counts, SyncEventID: event.ID, Freshness: freshness, GeneratedAt: generated}
+	return SyncResult{IdempotencyKey: event.IdempotencyKey, Status: event.Status, Counts: counts, SyncEventID: event.ID, Freshness: freshness, GeneratedAt: generated, StartedAt: event.StartedAt, CompletedAt: event.CompletedAt}
 }
 
 func failedSyncEvent(event cache.SyncEvent, cause error, at time.Time) cache.SyncEvent {
 	event.Status = "failed"
 	event.Message = cause.Error()
 	event.CreatedAt = at
+	event.CompletedAt = at
 	return event
 }
 

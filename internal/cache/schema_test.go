@@ -145,7 +145,7 @@ func TestNewSQLiteStoreVersionTwoBlockedWithMigrateHint(t *testing.T) {
 	if !errors.Is(err, ErrSchemaVersionIncompatible) {
 		t.Fatalf("NewSQLiteStore error = %v, want ErrSchemaVersionIncompatible", err)
 	}
-	if !strings.Contains(err.Error(), "detected=2") || !strings.Contains(err.Error(), "expected=4") || !strings.Contains(err.Error(), "migrate-cache") {
+	if !strings.Contains(err.Error(), "detected=2") || !strings.Contains(err.Error(), "expected=5") || !strings.Contains(err.Error(), "migrate-cache") {
 		t.Fatalf("NewSQLiteStore error is not actionable: %v", err)
 	}
 }

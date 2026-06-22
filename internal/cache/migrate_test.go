@@ -157,18 +157,22 @@ func TestMigrateFromVersion2ToVersion4(t *testing.T) {
 	if result.FromVersion != 2 {
 		t.Fatalf("FromVersion = %d, want 2", result.FromVersion)
 	}
-	if result.ToVersion != 4 {
-		t.Fatalf("ToVersion = %d, want 4", result.ToVersion)
+	if result.ToVersion != currentSchemaVersion {
+		t.Fatalf("ToVersion = %d, want %d", result.ToVersion, currentSchemaVersion)
 	}
 
 	foundV3 := false
 	foundV4 := false
+	foundV5 := false
 	for _, v := range result.Applied {
 		if v == 3 {
 			foundV3 = true
 		}
 		if v == 4 {
 			foundV4 = true
+		}
+		if v == 5 {
+			foundV5 = true
 		}
 	}
 	if !foundV3 {
@@ -177,6 +181,9 @@ func TestMigrateFromVersion2ToVersion4(t *testing.T) {
 	if !foundV4 {
 		t.Fatalf("Migration version 4 was not applied; Applied=%v", result.Applied)
 	}
+	if !foundV5 {
+		t.Fatalf("Migration version 5 was not applied; Applied=%v", result.Applied)
+	}
 	if result.BackupPath == "" {
 		t.Fatalf("BackupPath is empty; backup should have been created")
 	}
@@ -184,7 +191,7 @@ func TestMigrateFromVersion2ToVersion4(t *testing.T) {
 		t.Fatalf("backup file does not exist at %s: %v", result.BackupPath, err)
 	}
 
-	assertSchemaVersion(t, ctx, path, 4)
+	assertSchemaVersion(t, ctx, path, currentSchemaVersion)
 	assertV2DataPreserved(t, path)
 	assertV4SchemaTables(t, ctx, path)
 }
