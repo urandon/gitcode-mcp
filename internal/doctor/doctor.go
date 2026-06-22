@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -49,17 +50,18 @@ type Request struct {
 }
 
 type Report struct {
-	Version      string              `json:"version"`
-	Config       ConfigSection       `json:"config"`
-	Cache        CacheSection        `json:"cache"`
-	Repo         RepoSection         `json:"repo"`
-	Credential   CredentialSection   `json:"credential"`
-	Sync         SyncSection         `json:"sync"`
-	Index        IndexSection        `json:"index"`
-	MCP          MCPSection          `json:"mcp"`
-	LiveProvider LiveProviderSection `json:"live_provider"`
-	AuthProbe    AuthProbeSection    `json:"auth_probe"`
-	Diagnostics  []string            `json:"diagnostics,omitempty"`
+	Version       string                `json:"version"`
+	Config        ConfigSection         `json:"config"`
+	Cache         CacheSection          `json:"cache"`
+	Repo          RepoSection           `json:"repo"`
+	Credential    CredentialSection     `json:"credential"`
+	Sync          SyncSection           `json:"sync"`
+	Index         IndexSection          `json:"index"`
+	MCP           MCPSection            `json:"mcp"`
+	LiveProvider  LiveProviderSection   `json:"live_provider"`
+	LiveReadiness LiveReadinessSnapshot `json:"live_readiness,omitempty"`
+	AuthProbe     AuthProbeSection      `json:"auth_probe"`
+	Diagnostics   []string              `json:"diagnostics,omitempty"`
 }
 
 type ConfigSection struct {
@@ -126,11 +128,24 @@ type MCPSection struct {
 }
 
 type LiveProviderSection struct {
-	Status       string `json:"status"`
-	Reachable    string `json:"reachable"`
-	ProviderMode string `json:"provider_mode"`
-	APIBaseURL   string `json:"api_base_url,omitempty"`
-	Remediation  string `json:"remediation,omitempty"`
+	Status           string `json:"status"`
+	Reachable        string `json:"reachable"`
+	ProviderMode     string `json:"provider_mode"`
+	APIBaseURL       string `json:"api_base_url,omitempty"`
+	APIBaseURLSource string `json:"api_base_url_source,omitempty"`
+	ReadinessStatus  string `json:"readiness_status,omitempty"`
+	Remediation      string `json:"remediation,omitempty"`
+}
+
+type LiveReadinessSnapshot struct {
+	ProviderMode      string   `json:"provider_mode"`
+	CredentialSource  string   `json:"credential_source"`
+	CredentialPresent bool     `json:"credential_present"`
+	CachePath         string   `json:"cache_path"`
+	APIBaseURL        string   `json:"api_base_url,omitempty"`
+	APIBaseURLSource  string   `json:"api_base_url_source,omitempty"`
+	ReadinessStatus   string   `json:"readiness_status"`
+	Diagnostics       []string `json:"diagnostics,omitempty"`
 }
 
 type AuthProbeSection struct {
@@ -200,20 +215,7 @@ func Build(ctx context.Context, req Request) (Report, error) {
 	}
 
 	if req.Live {
-		report.LiveProvider.ProviderMode = firstNonEmpty(req.ProviderMode, "live-http")
-		report.LiveProvider.APIBaseURL = firstNonEmpty(req.APIBaseURL, req.LiveBinding.APIBaseURL)
-		if cred.Present {
-			report.LiveProvider.Status = "configured"
-			report.LiveProvider.Reachable = "skipped"
-			report.LiveProvider.Remediation = ""
-			report.AuthProbe.Status = authProbeStatus(cred.AuthProbe)
-			report.AuthProbe.ProbeResult = authProbeMessage(cred.AuthProbe)
-			report.AuthProbe.Remediation = cred.Remediation
-		} else {
-			report.LiveProvider.Status = "error"
-			report.LiveProvider.Remediation = "missing_credential: live provider requires a token"
-			report.AuthProbe.Remediation = "missing_credential: set a token to enable authentication probing"
-		}
+		initializeLiveReadiness(&report, req, cred, cachePath, "")
 	}
 
 	store, err := req.OpenStore(ctx, cachePath)
@@ -234,20 +236,18 @@ func Build(ctx context.Context, req Request) (Report, error) {
 	repos, err := store.ListRepositories(ctx)
 	if err != nil || len(repos) == 0 {
 		report.Diagnostics = append(report.Diagnostics, "no repo bound; add a repository binding before live readiness checks")
+		if req.Live {
+			finalizeLiveReadiness(&report, req, cred, cachePath, cache.RepositoryBinding{}, false, "")
+		}
 		return redactReport(report, req.Source), nil
 	}
-	sort.Slice(repos, func(i, j int) bool { return repos[i].RepoID < repos[j].RepoID })
-	repo := repos[0]
-	if req.RepoID != "" {
-		for _, candidate := range repos {
-			if candidate.RepoID == req.RepoID {
-				repo = candidate
-				break
-			}
-		}
+	repo, repoFound := selectRepositoryBinding(repos, req.RepoID, req.LiveBinding)
+	if req.Live {
+		finalizeLiveReadiness(&report, req, cred, cachePath, repo, repoFound, "")
 	}
-	if req.Live && report.LiveProvider.APIBaseURL == "" {
-		report.LiveProvider.APIBaseURL = repo.APIBaseURL
+	if !repoFound {
+		report.Diagnostics = append(report.Diagnostics, "selected repo binding not found")
+		return redactReport(report, req.Source), nil
 	}
 	report.Repo = RepoSection{Status: "ready", RepoID: repo.RepoID, Owner: "[REDACTED]", Name: "[REDACTED]", Scopes: scopesText(repo.Scopes)}
 
@@ -270,6 +270,95 @@ func Build(ctx context.Context, req Request) (Report, error) {
 	applySync(ctx, svc, repo.RepoID, &report)
 	applyIndex(ctx, svc, repo.RepoID, &report)
 	return redactReport(report, req.Source), nil
+}
+
+func selectRepositoryBinding(repos []cache.RepositoryBinding, repoID string, liveBinding service.LiveRepositoryBinding) (cache.RepositoryBinding, bool) {
+	sort.Slice(repos, func(i, j int) bool { return repos[i].RepoID < repos[j].RepoID })
+	if strings.TrimSpace(repoID) != "" {
+		for _, candidate := range repos {
+			if candidate.RepoID == repoID {
+				return candidate, true
+			}
+		}
+		return cache.RepositoryBinding{}, false
+	}
+	if strings.TrimSpace(liveBinding.RepoID) != "" {
+		for _, candidate := range repos {
+			if candidate.RepoID == liveBinding.RepoID {
+				return candidate, true
+			}
+		}
+	}
+	return repos[0], true
+}
+
+func initializeLiveReadiness(report *Report, req Request, cred config.CredentialStatus, cachePath, cacheDiagnostic string) {
+	finalizeLiveReadiness(report, req, cred, cachePath, cache.RepositoryBinding{}, false, cacheDiagnostic)
+}
+
+func finalizeLiveReadiness(report *Report, req Request, cred config.CredentialStatus, cachePath string, repo cache.RepositoryBinding, repoFound bool, cacheDiagnostic string) {
+	providerMode := firstNonEmpty(req.ProviderMode, "live-http")
+	apiBaseURL, apiBaseURLSource := effectiveAPIBaseURL(req, repo, repoFound)
+	status, diagnostics := liveReadinessStatus(repoFound, apiBaseURL, cred.Present, cacheDiagnostic)
+	report.LiveReadiness = LiveReadinessSnapshot{ProviderMode: providerMode, CredentialSource: emptyAsNone(cred.Source), CredentialPresent: cred.Present, CachePath: cachePath, APIBaseURL: apiBaseURL, APIBaseURLSource: apiBaseURLSource, ReadinessStatus: status, Diagnostics: diagnostics}
+	report.LiveProvider.ProviderMode = providerMode
+	report.LiveProvider.APIBaseURL = apiBaseURL
+	report.LiveProvider.APIBaseURLSource = apiBaseURLSource
+	report.LiveProvider.ReadinessStatus = status
+	report.LiveProvider.Reachable = "skipped"
+	if status == "ready" || status == "configuration_warning" {
+		report.LiveProvider.Status = "configured"
+		report.LiveProvider.Remediation = ""
+		report.AuthProbe.Status = authProbeStatus(cred.AuthProbe)
+		report.AuthProbe.ProbeResult = authProbeMessage(cred.AuthProbe)
+		report.AuthProbe.Remediation = cred.Remediation
+		return
+	}
+	report.LiveProvider.Status = "error"
+	report.LiveProvider.Remediation = strings.Join(diagnostics, "; ")
+	if status == "missing_credential" {
+		report.AuthProbe.Remediation = "missing_credential: set a token to enable authentication probing"
+	}
+}
+
+func effectiveAPIBaseURL(req Request, repo cache.RepositoryBinding, repoFound bool) (string, string) {
+	if repoFound && strings.TrimSpace(repo.APIBaseURL) != "" {
+		return strings.TrimSpace(repo.APIBaseURL), "repository_binding.api_base_url"
+	}
+	if strings.TrimSpace(req.LiveBinding.APIBaseURL) != "" {
+		return strings.TrimSpace(req.LiveBinding.APIBaseURL), firstNonEmpty(req.LiveBinding.BaseURLSource, "repository_binding.api_base_url")
+	}
+	if strings.TrimSpace(req.APIBaseURL) != "" {
+		return strings.TrimSpace(req.APIBaseURL), "startup.api_base_url"
+	}
+	return "", ""
+}
+
+func liveReadinessStatus(repoFound bool, apiBaseURL string, credentialPresent bool, cacheDiagnostic string) (string, []string) {
+	if !repoFound {
+		return "configuration_error", []string{"missing_repository_binding"}
+	}
+	if strings.TrimSpace(apiBaseURL) == "" {
+		return "configuration_error", []string{"missing_api_base_url"}
+	}
+	if !validAPIBaseURL(apiBaseURL) {
+		return "configuration_error", []string{"invalid_api_base_url"}
+	}
+	if !credentialPresent {
+		return "missing_credential", []string{"missing_credential"}
+	}
+	if cacheDiagnostic != "" {
+		return "configuration_warning", []string{cacheDiagnostic}
+	}
+	return "ready", nil
+}
+
+func validAPIBaseURL(value string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" {
+		return false
+	}
+	return parsed.Scheme == "http" || parsed.Scheme == "https"
 }
 
 func applySync(ctx context.Context, svc Service, repoID string, report *Report) {
@@ -454,8 +543,34 @@ func RenderText(w io.Writer, report Report) {
 	fmt.Fprintf(w, "  status: %s\n", report.LiveProvider.Status)
 	fmt.Fprintf(w, "  reachable: %s\n", report.LiveProvider.Reachable)
 	fmt.Fprintf(w, "  provider_mode: %s\n", report.LiveProvider.ProviderMode)
+	if report.LiveProvider.APIBaseURL != "" {
+		fmt.Fprintf(w, "  api_base_url: %s\n", report.LiveProvider.APIBaseURL)
+	}
+	if report.LiveProvider.APIBaseURLSource != "" {
+		fmt.Fprintf(w, "  api_base_url_source: %s\n", report.LiveProvider.APIBaseURLSource)
+	}
+	if report.LiveProvider.ReadinessStatus != "" {
+		fmt.Fprintf(w, "  readiness_status: %s\n", report.LiveProvider.ReadinessStatus)
+	}
 	if report.LiveProvider.Remediation != "" {
 		fmt.Fprintf(w, "  remediation: %s\n", report.LiveProvider.Remediation)
+	}
+	if report.LiveReadiness.ProviderMode != "" {
+		fmt.Fprintln(w, "live_readiness:")
+		fmt.Fprintf(w, "  provider_mode: %s\n", report.LiveReadiness.ProviderMode)
+		fmt.Fprintf(w, "  credential_source: %s\n", report.LiveReadiness.CredentialSource)
+		fmt.Fprintf(w, "  credential_present: %t\n", report.LiveReadiness.CredentialPresent)
+		fmt.Fprintf(w, "  cache_path: %s\n", report.LiveReadiness.CachePath)
+		if report.LiveReadiness.APIBaseURL != "" {
+			fmt.Fprintf(w, "  api_base_url: %s\n", report.LiveReadiness.APIBaseURL)
+		}
+		if report.LiveReadiness.APIBaseURLSource != "" {
+			fmt.Fprintf(w, "  api_base_url_source: %s\n", report.LiveReadiness.APIBaseURLSource)
+		}
+		fmt.Fprintf(w, "  readiness_status: %s\n", report.LiveReadiness.ReadinessStatus)
+		if len(report.LiveReadiness.Diagnostics) > 0 {
+			fmt.Fprintf(w, "  diagnostics: %s\n", strings.Join(report.LiveReadiness.Diagnostics, ","))
+		}
 	}
 	fmt.Fprintln(w, "auth_probe:")
 	fmt.Fprintf(w, "  status: %s\n", report.AuthProbe.Status)

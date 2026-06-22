@@ -314,8 +314,66 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 				t.Fatalf("doctor output missing %q in %q", want, out)
 			}
 		}
-		if strings.Contains(out, "test-token") || requests.Load() != 0 {
-			t.Fatalf("doctor leaked token or contacted server; requests=%d out=%q", requests.Load(), out)
+		for _, want := range []string{"\"api_base_url_source\": \"repository_binding.api_base_url\"", "\"readiness_status\": \"ready\""} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("doctor output missing %q in %q", want, out)
+			}
+		}
+		if strings.Contains(out, "test-token") || strings.Contains(out, "Authorization") || requests.Load() != 0 {
+			t.Fatalf("doctor leaked secret or contacted server; requests=%d out=%q", requests.Load(), out)
+		}
+	})
+
+	t.Run("SCN-CLI-DOCTOR-LIVE-JSON-SELECTED-VS-NON-SELECTED", func(t *testing.T) {
+		var selectedRequests, alternateRequests atomic.Int64
+		selected := newStartupLiveMockServer(t, &selectedRequests)
+		defer selected.Close()
+		alternate := newStartupLiveMockServer(t, &alternateRequests)
+		defer alternate.Close()
+		cachePath := filepath.Join(t.TempDir(), "cache.db")
+		src := newTestSource(t)
+		src.env[config.EnvToken] = "test-token"
+		addRepoForStartupTest(t, cachePath, selected.URL)
+		addNamedRepoForStartupTest(t, cachePath, "fixture-b", alternate.URL)
+
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"doctor", "--live", "--format", "json", "--cache-path", cachePath, "--repo", "fixture-b"}, strings.NewReader(""), &stdout, &stderr, src)
+		if code != 0 {
+			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+		}
+		out := stdout.String()
+		if !strings.Contains(out, fmt.Sprintf("\"api_base_url\": \"%s\"", alternate.URL)) || strings.Contains(out, fmt.Sprintf("\"api_base_url\": \"%s\"", selected.URL)) {
+			t.Fatalf("doctor did not switch effective base URL: %q", out)
+		}
+		if !strings.Contains(out, "\"readiness_status\": \"ready\"") || selectedRequests.Load() != 0 || alternateRequests.Load() != 0 {
+			t.Fatalf("doctor readiness/request mismatch selected=%d alternate=%d out=%q", selectedRequests.Load(), alternateRequests.Load(), out)
+		}
+	})
+
+	t.Run("SCN-CLI-DOCTOR-LIVE-JSON-MISSING-CREDENTIAL-NO-HTTP", func(t *testing.T) {
+		var requests atomic.Int64
+		server := newStartupLiveMockServer(t, &requests)
+		defer server.Close()
+		cachePath := filepath.Join(t.TempDir(), "cache.db")
+		src := newTestSource(t)
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		src.files[configPath] = []byte("credential:\n  store: env\n")
+		src.env[config.EnvMCPConfigPath] = configPath
+		addRepoForStartupTest(t, cachePath, server.URL)
+
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"doctor", "--live", "--format", "json", "--cache-path", cachePath, "--repo", "fixture-a"}, strings.NewReader(""), &stdout, &stderr, src)
+		if code != 0 {
+			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+		}
+		out := stdout.String()
+		for _, want := range []string{fmt.Sprintf("\"api_base_url\": \"%s\"", server.URL), "\"readiness_status\": \"missing_credential\"", "\"missing_credential\""} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("doctor output missing %q in %q", want, out)
+			}
+		}
+		if requests.Load() != 0 {
+			t.Fatalf("doctor contacted server; requests=%d out=%q", requests.Load(), out)
 		}
 	})
 
@@ -416,8 +474,24 @@ func addRepoForStartupTest(t *testing.T, cachePath, baseURL string) {
 
 func addRepoForStartupTestWithScopes(t *testing.T, cachePath, baseURL, scopes string) {
 	t.Helper()
+	addNamedRepoForStartupTestWithScopes(t, cachePath, "fixture-a", baseURL, scopes)
+}
+
+func addNamedRepoForStartupTest(t *testing.T, cachePath, repoID, baseURL string) {
+	t.Helper()
+	addNamedRepoForStartupTestWithScopes(t, cachePath, repoID, baseURL, "issues,wiki")
+}
+
+func addNamedRepoForStartupTestWithScopes(t *testing.T, cachePath, repoID, baseURL, scopes string) {
+	t.Helper()
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"repo", "add", "--cache-path", cachePath, "--repo", "fixture-a", "--owner", "owner-a", "--name", "repo-a", "--api-base-url", baseURL, "--scopes", scopes}, strings.NewReader(""), &stdout, &stderr, newTestSource(t))
+	owner := "owner-" + repoID
+	name := "repo-" + repoID
+	if repoID == "fixture-a" {
+		owner = "owner-a"
+		name = "repo-a"
+	}
+	code := run([]string{"repo", "add", "--cache-path", cachePath, "--repo", repoID, "--owner", owner, "--name", name, "--api-base-url", baseURL, "--scopes", scopes}, strings.NewReader(""), &stdout, &stderr, newTestSource(t))
 	if code != 0 {
 		t.Fatalf("repo add code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}

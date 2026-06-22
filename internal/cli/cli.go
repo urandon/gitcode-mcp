@@ -504,10 +504,7 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 		return 0
 	}
 	if command == "doctor" {
-		plan, planErr := buildStartupPlan(context.Background(), command, opts, deps)
-		if planErr != nil && opts.live {
-			return writeError(stderr, opts.format, planErr)
-		}
+		plan, _ := buildStartupPlan(context.Background(), command, opts, deps)
 		return executeDoctorCommand(context.Background(), opts, plan, stdout, stderr, deps)
 	}
 	if command == "migrate-cache" {
