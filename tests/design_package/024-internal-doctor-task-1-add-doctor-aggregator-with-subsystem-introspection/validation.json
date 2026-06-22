@@ -1,0 +1,18 @@
+{
+  "covered_outcome_ids": [
+    "outcome-11"
+  ],
+  "covered_decommission_ids": [
+    "decommission-11"
+  ],
+  "product_surfaces": [
+    "CLI command: go run ./cmd/gitcode-mcp doctor --format json",
+    "CLI command: go run ./cmd/gitcode-mcp repo add --format json"
+  ],
+  "evidence_type": "CLI command",
+  "freshness": "current binary via go run ./cmd/gitcode-mcp; deterministic offline temporary caches",
+  "mocks_used": [
+    "none; external GitCode/live provider, network, device, and keychain checks are disabled"
+  ],
+  "production_files_modified": []
+}
