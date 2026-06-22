@@ -82,6 +82,27 @@ func TestRecordSyncEventTimestamps(t *testing.T) {
 	}
 }
 
+func TestScenario009AuditConfirmationPersistsInspectableMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	now := time.Date(2026, 6, 23, 11, 0, 0, 0, time.UTC)
+	entry := AuditTrailEntry{RepoID: "fixture-a", ID: "write-scenario-009-key", Operation: "create-issue", Command: "create-issue", Mode: "live", RecordID: "ISSUE-100", RemoteType: "issue", RemoteID: "100", IdempotencyKey: "scenario-009-key", Status: "succeeded", PayloadHash: "payload-hash", RequestMetadata: map[string]string{"method": "POST", "remote_alias": "100", "source_fingerprint": "payload-hash"}, CreatedAt: now}
+	if err := store.RecordAuditEvent(ctx, entry); err != nil {
+		t.Fatalf("RecordAuditEvent returned error: %v", err)
+	}
+	got, err := store.GetAuditEventByKey(ctx, "fixture-a", "scenario-009-key")
+	if err != nil {
+		t.Fatalf("GetAuditEventByKey returned error: %v", err)
+	}
+	if got == nil || got.Command != "create-issue" || got.Mode != "live" || got.RemoteID != "100" || got.PayloadHash != "payload-hash" || !got.CreatedAt.Equal(now) {
+		t.Fatalf("audit entry=%#v", got)
+	}
+	if got.RequestMetadata["method"] != "POST" || got.RequestMetadata["remote_alias"] != "100" || got.RequestMetadata["source_fingerprint"] != "payload-hash" {
+		t.Fatalf("metadata=%#v", got.RequestMetadata)
+	}
+}
+
 func TestScenario008CacheConfirmationIdempotentUpsert(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)

@@ -251,19 +251,27 @@ func insertAuditTrailTx(ctx context.Context, tx *sql.Tx, entry AuditTrailEntry) 
 	if entry.CreatedAt.IsZero() {
 		entry.CreatedAt = time.Unix(0, 0).UTC()
 	}
-	return execTx(ctx, tx, `INSERT INTO audit_trail (repo_id, id, operation, record_id, remote_type, remote_id, idempotency_key, status, message, payload_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, id) DO UPDATE SET operation = excluded.operation, record_id = excluded.record_id, remote_type = excluded.remote_type, remote_id = excluded.remote_id, idempotency_key = excluded.idempotency_key, status = excluded.status, message = excluded.message, payload_hash = excluded.payload_hash`, entry.RepoID, entry.ID, entry.Operation, entry.RecordID, entry.RemoteType, entry.RemoteID, entry.IdempotencyKey, entry.Status, entry.Message, entry.PayloadHash, entry.CreatedAt.Format(time.RFC3339Nano))
+	metadata, err := marshalJSON(entry.RequestMetadata)
+	if err != nil {
+		return err
+	}
+	return execTx(ctx, tx, `INSERT INTO audit_trail (repo_id, id, operation, command, mode, record_id, remote_type, remote_id, idempotency_key, status, message, payload_hash, request_metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, id) DO UPDATE SET operation = excluded.operation, command = excluded.command, mode = excluded.mode, record_id = excluded.record_id, remote_type = excluded.remote_type, remote_id = excluded.remote_id, idempotency_key = excluded.idempotency_key, status = excluded.status, message = excluded.message, payload_hash = excluded.payload_hash, request_metadata = excluded.request_metadata`, entry.RepoID, entry.ID, entry.Operation, entry.Command, entry.Mode, entry.RecordID, entry.RemoteType, entry.RemoteID, entry.IdempotencyKey, entry.Status, entry.Message, entry.PayloadHash, metadata, entry.CreatedAt.Format(time.RFC3339Nano))
 }
 
 func (s *SQLiteStore) RecordAuditEvent(ctx context.Context, entry AuditTrailEntry) error {
 	if entry.CreatedAt.IsZero() {
 		entry.CreatedAt = time.Unix(0, 0).UTC()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO audit_trail (repo_id, id, operation, record_id, remote_type, remote_id, idempotency_key, status, message, payload_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, id) DO UPDATE SET operation = excluded.operation, record_id = excluded.record_id, remote_type = excluded.remote_type, remote_id = excluded.remote_id, idempotency_key = excluded.idempotency_key, status = excluded.status, message = excluded.message, payload_hash = excluded.payload_hash`, entry.RepoID, entry.ID, entry.Operation, entry.RecordID, entry.RemoteType, entry.RemoteID, entry.IdempotencyKey, entry.Status, entry.Message, entry.PayloadHash, entry.CreatedAt.Format(time.RFC3339Nano))
+	metadata, err := marshalJSON(entry.RequestMetadata)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO audit_trail (repo_id, id, operation, command, mode, record_id, remote_type, remote_id, idempotency_key, status, message, payload_hash, request_metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, id) DO UPDATE SET operation = excluded.operation, command = excluded.command, mode = excluded.mode, record_id = excluded.record_id, remote_type = excluded.remote_type, remote_id = excluded.remote_id, idempotency_key = excluded.idempotency_key, status = excluded.status, message = excluded.message, payload_hash = excluded.payload_hash, request_metadata = excluded.request_metadata`, entry.RepoID, entry.ID, entry.Operation, entry.Command, entry.Mode, entry.RecordID, entry.RemoteType, entry.RemoteID, entry.IdempotencyKey, entry.Status, entry.Message, entry.PayloadHash, metadata, entry.CreatedAt.Format(time.RFC3339Nano))
 	return err
 }
 
 func (s *SQLiteStore) GetAuditEventByKey(ctx context.Context, repoID, key string) (*AuditTrailEntry, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT repo_id, id, operation, record_id, remote_type, remote_id, idempotency_key, status, message, payload_hash, created_at FROM audit_trail WHERE repo_id = ? AND idempotency_key = ? ORDER BY created_at DESC LIMIT 1`, repoID, key)
+	row := s.db.QueryRowContext(ctx, `SELECT repo_id, id, operation, command, mode, record_id, remote_type, remote_id, idempotency_key, status, message, payload_hash, request_metadata, created_at FROM audit_trail WHERE repo_id = ? AND idempotency_key = ? ORDER BY created_at DESC LIMIT 1`, repoID, key)
 	entry, err := scanAuditTrailRow(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -336,10 +344,16 @@ func scanCacheConfirmationRow(row interface{ Scan(dest ...any) error }) (CacheCo
 
 func scanAuditTrailRow(row interface{ Scan(dest ...any) error }) (AuditTrailEntry, error) {
 	var entry AuditTrailEntry
+	var metadataRaw string
 	var createdRaw string
-	if err := row.Scan(&entry.RepoID, &entry.ID, &entry.Operation, &entry.RecordID, &entry.RemoteType, &entry.RemoteID, &entry.IdempotencyKey, &entry.Status, &entry.Message, &entry.PayloadHash, &createdRaw); err != nil {
+	if err := row.Scan(&entry.RepoID, &entry.ID, &entry.Operation, &entry.Command, &entry.Mode, &entry.RecordID, &entry.RemoteType, &entry.RemoteID, &entry.IdempotencyKey, &entry.Status, &entry.Message, &entry.PayloadHash, &metadataRaw, &createdRaw); err != nil {
 		return AuditTrailEntry{}, err
 	}
+	metadata, err := unmarshalJSON[map[string]string](metadataRaw)
+	if err != nil {
+		return AuditTrailEntry{}, err
+	}
+	entry.RequestMetadata = metadata
 	entry.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdRaw)
 	return entry, nil
 }

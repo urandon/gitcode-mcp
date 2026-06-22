@@ -1925,6 +1925,14 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_unconfirmed_remote", RepoID: route.RepoID, IdempotencyKey: key}
 	}
 	auditEntry := audit.Success(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, confirmed.message, confirmed.completedAt)
+	if command == "create-issue" {
+		entry, err := audit.LiveCreateIssueConfirmation(audit.ConfirmationInput{RepoID: route.RepoID, Key: key, Command: command, Mode: string(req.Mode), RecordID: graph.Record.ID, RemoteType: graph.Record.RemoteType, RemoteID: confirmed.remoteID, PayloadHash: fingerprint, Message: confirmed.message, RequestMetadata: writeAuditMetadata(command, key, fingerprint, graph.Record.RemoteType, confirmed), CreatedAt: confirmed.completedAt})
+		if err != nil {
+			_ = s.store.RecordAuditEvent(ctx, audit.Failure(route.RepoID, key, command, fingerprint, "write_unconfirmed_remote", s.now().UTC()))
+			return WriteCommandResult{}, ErrWriteFailure{Code: "write_unconfirmed_remote", RepoID: route.RepoID, IdempotencyKey: key}
+		}
+		auditEntry = entry
+	}
 	if err := s.store.RecordAuditEvent(ctx, auditEntry); err != nil {
 		_ = s.store.RecordAuditEvent(ctx, audit.RemoteConfirmedAuditFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()))
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
@@ -1955,6 +1963,26 @@ type writeConfirmation struct {
 	remoteRevision string
 	message        string
 	completedAt    time.Time
+}
+
+func writeAuditMetadata(command, key, fingerprint, remoteType string, confirmed writeConfirmation) map[string]string {
+	metadata := map[string]string{
+		"method":             "POST",
+		"idempotency_key":    key,
+		"remote_type":        remoteType,
+		"provider_mode":      string(gitcode.ProviderModeLive),
+		"source_fingerprint": fingerprint,
+	}
+	if confirmed.remoteID != "" {
+		metadata["remote_alias"] = confirmed.remoteID
+	}
+	if confirmed.remoteNumber > 0 {
+		metadata["remote_number"] = strconv.Itoa(confirmed.remoteNumber)
+	}
+	if command != "" {
+		metadata["provider"] = "gitcode-http"
+	}
+	return metadata
 }
 
 func (s *Service) recordCacheConfirmation(ctx context.Context, command, repoID, key, fingerprint string, graph cache.RecordGraph, remoteID, status string, createdAt time.Time) error {

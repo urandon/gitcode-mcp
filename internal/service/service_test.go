@@ -382,8 +382,11 @@ func TestScenario007WriteLiveCreateAuditCacheConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if entry == nil || entry.Status != "succeeded" || entry.RemoteID != "remote-77" || strings.Contains(entry.Message, "test-token") {
+	if entry == nil || entry.Status != "succeeded" || entry.Command != "create-issue" || entry.Mode != "live" || entry.RemoteID != "remote-77" || entry.PayloadHash == "" || strings.Contains(entry.Message, "test-token") {
 		t.Fatalf("audit entry=%#v", entry)
+	}
+	if entry.RequestMetadata["method"] != "POST" || entry.RequestMetadata["provider_mode"] != "live" || entry.RequestMetadata["idempotency_key"] != "scenario-007-key" {
+		t.Fatalf("audit metadata=%#v", entry.RequestMetadata)
 	}
 	confirmation, err := store.GetCacheConfirmationByKey(ctx, "fixture-a", "scenario-007-key")
 	if err != nil {

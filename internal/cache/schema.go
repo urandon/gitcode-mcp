@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 8
+const currentSchemaVersion = 9
 
 type VersionCompatibility struct {
 	DetectedVersion int
@@ -132,6 +132,7 @@ var migrations = []migration{
 	{version: 6, apply: applySyncEventZeroDeltaMigration},
 	{version: 7, apply: applyAuditIdempotencyMigration},
 	{version: 8, apply: applyCacheConfirmationsMigration},
+	{version: 9, apply: applyAuditConfirmationsMigration},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB, ftsAvailable bool) error {
@@ -375,6 +376,9 @@ func applyRepoScopedCacheMigration(ctx context.Context, tx *sql.Tx, ftsAvailable
 	status TEXT NOT NULL,
 	message TEXT NOT NULL DEFAULT '',
 	payload_hash TEXT NOT NULL DEFAULT '',
+	command TEXT NOT NULL DEFAULT '',
+	mode TEXT NOT NULL DEFAULT '',
+	request_metadata TEXT NOT NULL DEFAULT '{}',
 	created_at TEXT NOT NULL,
 	PRIMARY KEY(repo_id, id)
 )`,
@@ -565,6 +569,27 @@ func applyCacheConfirmationsMigration(ctx context.Context, tx *sql.Tx, ftsAvaila
 		`CREATE INDEX IF NOT EXISTS idx_cache_confirmations_remote ON cache_confirmations(repo_id, remote_type, remote_id)`,
 	}
 	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyAuditConfirmationsMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
+	columns, err := tableColumns(ctx, tx, "audit_trail")
+	if err != nil {
+		return err
+	}
+	addColumns := map[string]string{
+		"command":          `ALTER TABLE audit_trail ADD COLUMN command TEXT NOT NULL DEFAULT ''`,
+		"mode":             `ALTER TABLE audit_trail ADD COLUMN mode TEXT NOT NULL DEFAULT ''`,
+		"request_metadata": `ALTER TABLE audit_trail ADD COLUMN request_metadata TEXT NOT NULL DEFAULT '{}'`,
+	}
+	for column, statement := range addColumns {
+		if columns[column] {
+			continue
+		}
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return err
 		}

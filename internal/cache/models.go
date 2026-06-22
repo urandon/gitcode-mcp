@@ -136,17 +136,20 @@ type RemoteRevision struct {
 }
 
 type AuditTrailEntry struct {
-	RepoID         string
-	ID             string
-	Operation      string
-	RecordID       string
-	RemoteType     string
-	RemoteID       string
-	IdempotencyKey string
-	Status         string
-	Message        string
-	PayloadHash    string
-	CreatedAt      time.Time
+	RepoID          string
+	ID              string
+	Operation       string
+	Command         string
+	Mode            string
+	RecordID        string
+	RemoteType      string
+	RemoteID        string
+	IdempotencyKey  string
+	Status          string
+	Message         string
+	PayloadHash     string
+	RequestMetadata map[string]string
+	CreatedAt       time.Time
 }
 
 type CacheConfirmationRecord struct {

@@ -57,3 +57,51 @@ func TestEntryHelpersAvoidRawPayloadStorage(t *testing.T) {
 		t.Fatalf("failure=%#v", failure)
 	}
 }
+
+func TestScenario009LiveCreateIssueConfirmationSanitizesMetadata(t *testing.T) {
+	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	entry, err := LiveCreateIssueConfirmation(ConfirmationInput{
+		RepoID:      "repo",
+		Key:         " scenario-009-key ",
+		Command:     " Create-Issue ",
+		Mode:        "live",
+		RecordID:    "ISSUE-100",
+		RemoteType:  "issue",
+		RemoteID:    "100",
+		PayloadHash: "payload-hash",
+		Message:     "created",
+		RequestMetadata: map[string]string{
+			"method":             "POST",
+			"remote_alias":       "100",
+			"source_fingerprint": "payload-hash",
+			"authorization":      "Bearer secret",
+			"token":              "secret",
+			"cookie":             "session=secret",
+			"raw_body":           "{secret}",
+			"endpoint_url":       "https://private.example/api",
+		},
+		CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("LiveCreateIssueConfirmation returned error: %v", err)
+	}
+	if entry.Command != "create-issue" || entry.Operation != "create-issue" || entry.Mode != "live" || entry.IdempotencyKey != "scenario-009-key" || entry.RemoteID != "100" || entry.Status != StatusSucceeded || entry.PayloadHash != "payload-hash" || entry.CreatedAt != now {
+		t.Fatalf("entry=%#v", entry)
+	}
+	for _, forbidden := range []string{"authorization", "token", "cookie", "raw_body", "endpoint_url"} {
+		if _, ok := entry.RequestMetadata[forbidden]; ok {
+			t.Fatalf("forbidden metadata %q persisted: %#v", forbidden, entry.RequestMetadata)
+		}
+	}
+}
+
+func TestScenario009LiveCreateIssueConfirmationRejectsUnconfirmedRemote(t *testing.T) {
+	_, err := LiveCreateIssueConfirmation(ConfirmationInput{RepoID: "repo", Key: "key", Command: "create-issue", Mode: "live", RecordID: "ISSUE-100", RemoteType: "issue", PayloadHash: "hash", CreatedAt: time.Now().UTC()})
+	if err == nil {
+		t.Fatalf("LiveCreateIssueConfirmation accepted missing remote identity")
+	}
+	_, err = LiveCreateIssueConfirmation(ConfirmationInput{RepoID: "repo", Key: "key", Command: "create-issue", Mode: "dry_run", RecordID: "ISSUE-100", RemoteType: "issue", RemoteID: "100", PayloadHash: "hash", CreatedAt: time.Now().UTC()})
+	if err == nil {
+		t.Fatalf("LiveCreateIssueConfirmation accepted non-live mode")
+	}
+}
