@@ -200,8 +200,15 @@ func TestS018LiveWriteConflictMaps409(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts.AuditRows != 0 {
-		t.Fatalf("audit rows=%d want 0", counts.AuditRows)
+	if counts.AuditRows != 1 {
+		t.Fatalf("audit rows=%d want 1", counts.AuditRows)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", "conflict-key-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry == nil || entry.Status != "failed" || entry.Message != "write_conflict" {
+		t.Fatalf("audit entry=%#v", entry)
 	}
 }
 
@@ -331,7 +338,7 @@ func TestWriteLiveSuccessAuditCacheAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateIssue replay returned error: %v", err)
 	}
-	if !replay.Replayed || client.createIssueCalls != 1 {
+	if replay.Status != "already_applied" || !replay.Replayed || client.createIssueCalls != 1 {
 		t.Fatalf("replay=%#v calls=%d", replay, client.createIssueCalls)
 	}
 }
@@ -432,7 +439,7 @@ func TestAddLabelLiveSuccessAuditCacheAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddLabel replay returned error: %v", err)
 	}
-	if !replay.Replayed || client.addLabelCalls != 1 {
+	if replay.Status != "already_applied" || !replay.Replayed || client.addLabelCalls != 1 {
 		t.Fatalf("replay=%#v calls=%d", replay, client.addLabelCalls)
 	}
 }
@@ -496,6 +503,104 @@ func TestWriteIdempotencyConflictDetection(t *testing.T) {
 	}
 	if client.createIssueCalls != 1 {
 		t.Fatalf("calls=%d want 1", client.createIssueCalls)
+	}
+}
+
+func TestWriteFailureAuditAllowsRetry(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{errors: []error{gitcode.ErrNetworkUnavailable{Endpoint: "/issues", Attempts: 1}}, createIssueResult: gitcode.WriteResult[gitcode.Issue]{Record: gitcode.Issue{ID: "remote-43", Number: 43, Title: "T", Body: "B", State: "open"}, Confirmed: true, Operation: "CreateIssue", RemoteID: "43", RemoteNumber: 43, ConfirmedAt: time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)}}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "T", Body: "B", IdempotencyKey: "retry-key"}
+	_, err = svc.CreateIssue(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_network_unavailable" {
+		t.Fatalf("first err=%v want write_network_unavailable", err)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", "retry-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry == nil || entry.Status != "failed" || entry.PayloadHash == "" || entry.RemoteID != "" || entry.Message != "write_network_unavailable" {
+		t.Fatalf("failure audit entry=%#v", entry)
+	}
+	result, err := svc.CreateIssue(ctx, req)
+	if err != nil {
+		t.Fatalf("retry returned error: %v", err)
+	}
+	if result.Status != "succeeded" || result.RemoteID != "43" || client.createIssueCalls != 2 {
+		t.Fatalf("retry result=%#v calls=%d", result, client.createIssueCalls)
+	}
+}
+
+func TestWriteUnconfirmedRemoteAuditAllowsRetry(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{createIssueResults: []gitcode.WriteResult[gitcode.Issue]{
+		{Record: gitcode.Issue{ID: "remote-43", Number: 43, Title: "T", Body: "B", State: "open"}, Confirmed: false, Operation: "CreateIssue"},
+		{Record: gitcode.Issue{ID: "remote-43", Number: 43, Title: "T", Body: "B", State: "open"}, Confirmed: true, Operation: "CreateIssue", RemoteID: "43", RemoteNumber: 43, ConfirmedAt: time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)},
+	}}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "T", Body: "B", IdempotencyKey: "unconfirmed-key"}
+	_, err = svc.CreateIssue(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_unconfirmed_remote" {
+		t.Fatalf("first err=%v want write_unconfirmed_remote", err)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", "unconfirmed-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry == nil || entry.Status != "failed" || entry.Message != "write_unconfirmed_remote" || entry.RemoteID != "" {
+		t.Fatalf("unconfirmed audit entry=%#v", entry)
+	}
+	result, err := svc.CreateIssue(ctx, req)
+	if err != nil {
+		t.Fatalf("retry returned error: %v", err)
+	}
+	if result.Status != "succeeded" || result.RemoteID != "43" || client.createIssueCalls != 2 {
+		t.Fatalf("retry result=%#v calls=%d", result, client.createIssueCalls)
+	}
+}
+
+func TestWriteIdempotencyScopedByRepo(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-b", Owner: "owner-b", Name: "repo-b", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}, DisplayName: "Fixture B", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeGitCodeClient{createIssueResult: gitcode.WriteResult[gitcode.Issue]{Record: gitcode.Issue{ID: "remote-44", Number: 44, Title: "T", Body: "B", State: "open"}, Confirmed: true, Operation: "CreateIssue", RemoteID: "44", RemoteNumber: 44, ConfirmedAt: time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)}}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	if _, err := svc.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "T", Body: "B", IdempotencyKey: "shared-key"}); err != nil {
+		t.Fatal(err)
+	}
+	client.createIssueResult.Record.ID = "remote-45"
+	client.createIssueResult.Record.Number = 45
+	client.createIssueResult.RemoteID = "45"
+	client.createIssueResult.RemoteNumber = 45
+	if _, err := svc.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-b", Mode: WriteModeLive, Title: "T", Body: "B", IdempotencyKey: "shared-key"}); err != nil {
+		t.Fatal(err)
+	}
+	if client.createIssueCalls != 2 {
+		t.Fatalf("calls=%d want 2", client.createIssueCalls)
 	}
 }
 
@@ -1845,6 +1950,7 @@ type fakeGitCodeClient struct {
 	createWikiPageCalls      int
 	addLabelCalls            int
 	createIssueResult        gitcode.WriteResult[gitcode.Issue]
+	createIssueResults       []gitcode.WriteResult[gitcode.Issue]
 	createIssueCommentResult gitcode.WriteResult[gitcode.Comment]
 	createWikiPageResult     gitcode.WriteResult[gitcode.WikiPage]
 	addLabelResult           gitcode.WriteResult[gitcode.Issue]
@@ -1936,6 +2042,11 @@ func (f *fakeGitCodeClient) CreateIssue(context.Context, gitcode.CreateIssueRequ
 	f.createIssueCalls++
 	if err := f.nextError(); err != nil {
 		return gitcode.WriteResult[gitcode.Issue]{}, err
+	}
+	if len(f.createIssueResults) > 0 {
+		result := f.createIssueResults[0]
+		f.createIssueResults = f.createIssueResults[1:]
+		return result, nil
 	}
 	return f.createIssueResult, nil
 }

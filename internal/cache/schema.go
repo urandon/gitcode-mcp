@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 6
+const currentSchemaVersion = 7
 
 type VersionCompatibility struct {
 	DetectedVersion int
@@ -130,6 +130,7 @@ var migrations = []migration{
 	{version: 4, apply: applyStoredSnapshotMigration},
 	{version: 5, apply: applySyncEventTimestampsMigration},
 	{version: 6, apply: applySyncEventZeroDeltaMigration},
+	{version: 7, apply: applyAuditIdempotencyMigration},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB, ftsAvailable bool) error {
@@ -378,6 +379,7 @@ func applyRepoScopedCacheMigration(ctx context.Context, tx *sql.Tx, ftsAvailable
 )`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_trail_record ON audit_trail(repo_id, record_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_trail_idempotency ON audit_trail(repo_id, idempotency_key)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_trail_idempotency_unique ON audit_trail(repo_id, idempotency_key) WHERE idempotency_key <> ''`,
 		`CREATE TABLE IF NOT EXISTS snapshots (
 	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
 	snapshot_id TEXT NOT NULL,
@@ -532,6 +534,11 @@ func applySyncEventZeroDeltaMigration(ctx context.Context, tx *sql.Tx, ftsAvaila
 		return nil
 	}
 	_, err = tx.ExecContext(ctx, `ALTER TABLE sync_events ADD COLUMN zero_delta INTEGER NOT NULL DEFAULT 0`)
+	return err
+}
+
+func applyAuditIdempotencyMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
+	_, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_trail_idempotency_unique ON audit_trail(repo_id, idempotency_key) WHERE idempotency_key <> ''`)
 	return err
 }
 

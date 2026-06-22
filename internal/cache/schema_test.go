@@ -145,7 +145,7 @@ func TestNewSQLiteStoreVersionTwoBlockedWithMigrateHint(t *testing.T) {
 	if !errors.Is(err, ErrSchemaVersionIncompatible) {
 		t.Fatalf("NewSQLiteStore error = %v, want ErrSchemaVersionIncompatible", err)
 	}
-	if !strings.Contains(err.Error(), "detected=2") || !strings.Contains(err.Error(), "expected=6") || !strings.Contains(err.Error(), "migrate-cache") {
+	if !strings.Contains(err.Error(), "detected=2") || !strings.Contains(err.Error(), "expected=7") || !strings.Contains(err.Error(), "migrate-cache") {
 		t.Fatalf("NewSQLiteStore error is not actionable: %v", err)
 	}
 }
@@ -186,7 +186,7 @@ func TestInitialMigration(t *testing.T) {
 		t.Fatalf("FTS enabled store missing fts_index table")
 	}
 	indexes := indexNames(t, ctx, store.db)
-	for _, want := range []string{"idx_repo_aliases_repo", "idx_sources_kind_status", "idx_identity_source", "idx_identity_remote", "idx_links_target", "idx_sync_events_source", "idx_chunks_source", "idx_records_type_status", "idx_records_remote", "idx_records_remote_unique", "idx_record_comments_record", "idx_audit_trail_record", "idx_snapshot_chunks_record"} {
+	for _, want := range []string{"idx_repo_aliases_repo", "idx_sources_kind_status", "idx_identity_source", "idx_identity_remote", "idx_links_target", "idx_sync_events_source", "idx_chunks_source", "idx_records_type_status", "idx_records_remote", "idx_records_remote_unique", "idx_record_comments_record", "idx_audit_trail_record", "idx_audit_trail_idempotency_unique", "idx_snapshot_chunks_record"} {
 		if !indexes[want] {
 			t.Fatalf("missing index %s; indexes=%v", want, indexes)
 		}

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"gitcode-mcp/internal/audit"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
@@ -1718,49 +1719,55 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	if !s.hasWriteCredential() {
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_missing_credential", RepoID: route.RepoID, IdempotencyKey: key}
 	}
-	prior, err := s.store.GetAuditEventByKey(ctx, route.RepoID, key)
+	lookup, err := audit.LookupIdempotency(ctx, s.store, route.RepoID, key, fingerprint)
 	if err != nil {
 		return WriteCommandResult{}, err
 	}
-	if prior != nil {
-		if prior.PayloadHash != "" && prior.PayloadHash != fingerprint {
+	if lookup.Entry != nil {
+		prior := *lookup.Entry
+		if lookup.Conflict {
 			return WriteCommandResult{}, ErrWriteFailure{Code: "write_idempotency_conflict", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
 		}
-		switch prior.Status {
-		case "succeeded":
-			return replayWriteResult(command, *prior, fingerprint, s.now().UTC()), nil
-		case "remote_confirmed_cache_refresh_failed":
-			graph, err := s.replayWriteGraph(ctx, command, route.RepoID, req, *prior)
+		if lookup.Replay {
+			return replayWriteResult(command, prior, fingerprint, s.now().UTC()), nil
+		}
+		if lookup.Partial {
+			graph, err := s.replayWriteGraph(ctx, command, route.RepoID, req, prior)
 			if err != nil {
 				return WriteCommandResult{}, err
 			}
 			if err := s.store.UpsertRecordGraph(ctx, graph); err != nil {
-				_ = s.store.RecordAuditEvent(ctx, cache.AuditTrailEntry{RepoID: route.RepoID, ID: prior.ID, Operation: command, RecordID: prior.RecordID, RemoteType: prior.RemoteType, RemoteID: prior.RemoteID, IdempotencyKey: key, Status: "remote_confirmed_cache_refresh_failed", Message: err.Error(), PayloadHash: fingerprint, CreatedAt: s.now().UTC()})
+				_ = s.store.RecordAuditEvent(ctx, audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, prior.RecordID, prior.RemoteType, prior.RemoteID, fingerprint, err.Error(), s.now().UTC()))
 				return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key, Cause: err}
 			}
-			completed := cache.AuditTrailEntry{RepoID: route.RepoID, ID: prior.ID, Operation: command, RecordID: graph.Record.ID, RemoteType: graph.Record.RemoteType, RemoteID: prior.RemoteID, IdempotencyKey: key, Status: "succeeded", Message: "cache refresh replay completed", PayloadHash: fingerprint, CreatedAt: s.now().UTC()}
+			completed := audit.Success(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, prior.RemoteID, fingerprint, "cache refresh replay completed", s.now().UTC())
 			if err := s.store.RecordAuditEvent(ctx, completed); err != nil {
 				return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key, Cause: err}
 			}
-			return replayWriteResult(command, completed, fingerprint, s.now().UTC()), nil
-		case "remote_confirmed_audit_failed":
+			result := replayWriteResult(command, completed, fingerprint, s.now().UTC())
+			result.Status = "succeeded"
+			return result, nil
+		}
+		if prior.Status == audit.StatusRemoteConfirmedAuditFailed {
 			return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
 		}
 	}
 	confirmed, graph, err := s.callWriteAdapter(ctx, command, route, req, key)
 	if err != nil {
+		_ = s.store.RecordAuditEvent(ctx, audit.Failure(route.RepoID, key, command, fingerprint, writeErrorCode(err), s.now().UTC()))
 		return WriteCommandResult{}, ErrWriteFailure{Code: writeErrorCode(err), RepoID: route.RepoID, IdempotencyKey: key, Cause: err}
 	}
 	if !confirmed.confirmed || confirmed.remoteID == "" {
+		_ = s.store.RecordAuditEvent(ctx, audit.Failure(route.RepoID, key, command, fingerprint, "write_unconfirmed_remote", s.now().UTC()))
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_unconfirmed_remote", RepoID: route.RepoID, IdempotencyKey: key}
 	}
-	audit := cache.AuditTrailEntry{RepoID: route.RepoID, ID: "write-" + key, Operation: command, RecordID: graph.Record.ID, RemoteType: graph.Record.RemoteType, RemoteID: confirmed.remoteID, IdempotencyKey: key, Status: "succeeded", Message: confirmed.message, PayloadHash: fingerprint, CreatedAt: confirmed.completedAt}
-	if err := s.store.RecordAuditEvent(ctx, audit); err != nil {
-		_ = s.store.RecordAuditEvent(ctx, cache.AuditTrailEntry{RepoID: route.RepoID, ID: "write-" + key, Operation: command, RecordID: graph.Record.ID, RemoteType: graph.Record.RemoteType, RemoteID: confirmed.remoteID, IdempotencyKey: key, Status: "remote_confirmed_audit_failed", Message: err.Error(), PayloadHash: fingerprint, CreatedAt: s.now().UTC()})
+	auditEntry := audit.Success(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, confirmed.message, confirmed.completedAt)
+	if err := s.store.RecordAuditEvent(ctx, auditEntry); err != nil {
+		_ = s.store.RecordAuditEvent(ctx, audit.RemoteConfirmedAuditFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()))
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
 	}
 	if err := s.store.UpsertRecordGraph(ctx, graph); err != nil {
-		_ = s.store.RecordAuditEvent(ctx, cache.AuditTrailEntry{RepoID: route.RepoID, ID: "write-" + key, Operation: command, RecordID: graph.Record.ID, RemoteType: graph.Record.RemoteType, RemoteID: confirmed.remoteID, IdempotencyKey: key, Status: "remote_confirmed_cache_refresh_failed", Message: err.Error(), PayloadHash: fingerprint, CreatedAt: s.now().UTC()})
+		_ = s.store.RecordAuditEvent(ctx, audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()))
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
 	}
 	base.Status = "succeeded"
@@ -1956,7 +1963,7 @@ func writeTargetID(req WriteCommandRequest) string {
 }
 
 func replayWriteResult(command string, entry cache.AuditTrailEntry, fingerprint string, now time.Time) WriteCommandResult {
-	return WriteCommandResult{Command: command, Status: "succeeded", RepoID: entry.RepoID, ID: entry.RecordID, RemoteID: entry.RemoteID, IdempotencyKey: entry.IdempotencyKey, SourceFingerprint: fingerprint, Replayed: true, Evidence: "replayed from audit_trail", GeneratedAt: now}
+	return WriteCommandResult{Command: command, Status: "already_applied", RepoID: entry.RepoID, ID: entry.RecordID, RemoteID: entry.RemoteID, IdempotencyKey: entry.IdempotencyKey, SourceFingerprint: fingerprint, Replayed: true, Evidence: "replayed from audit_trail", GeneratedAt: now}
 }
 
 func writeErrorCode(err error) string {

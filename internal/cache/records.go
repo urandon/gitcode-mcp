@@ -249,14 +249,14 @@ func insertAuditTrailTx(ctx context.Context, tx *sql.Tx, entry AuditTrailEntry) 
 	if entry.CreatedAt.IsZero() {
 		entry.CreatedAt = time.Unix(0, 0).UTC()
 	}
-	return execTx(ctx, tx, `INSERT INTO audit_trail (repo_id, id, operation, record_id, remote_type, remote_id, idempotency_key, status, message, payload_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, id) DO UPDATE SET status = excluded.status, message = excluded.message`, entry.RepoID, entry.ID, entry.Operation, entry.RecordID, entry.RemoteType, entry.RemoteID, entry.IdempotencyKey, entry.Status, entry.Message, entry.PayloadHash, entry.CreatedAt.Format(time.RFC3339Nano))
+	return execTx(ctx, tx, `INSERT INTO audit_trail (repo_id, id, operation, record_id, remote_type, remote_id, idempotency_key, status, message, payload_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, id) DO UPDATE SET operation = excluded.operation, record_id = excluded.record_id, remote_type = excluded.remote_type, remote_id = excluded.remote_id, idempotency_key = excluded.idempotency_key, status = excluded.status, message = excluded.message, payload_hash = excluded.payload_hash`, entry.RepoID, entry.ID, entry.Operation, entry.RecordID, entry.RemoteType, entry.RemoteID, entry.IdempotencyKey, entry.Status, entry.Message, entry.PayloadHash, entry.CreatedAt.Format(time.RFC3339Nano))
 }
 
 func (s *SQLiteStore) RecordAuditEvent(ctx context.Context, entry AuditTrailEntry) error {
 	if entry.CreatedAt.IsZero() {
 		entry.CreatedAt = time.Unix(0, 0).UTC()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO audit_trail (repo_id, id, operation, record_id, remote_type, remote_id, idempotency_key, status, message, payload_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, id) DO UPDATE SET status = excluded.status, message = excluded.message`, entry.RepoID, entry.ID, entry.Operation, entry.RecordID, entry.RemoteType, entry.RemoteID, entry.IdempotencyKey, entry.Status, entry.Message, entry.PayloadHash, entry.CreatedAt.Format(time.RFC3339Nano))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO audit_trail (repo_id, id, operation, record_id, remote_type, remote_id, idempotency_key, status, message, payload_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, id) DO UPDATE SET operation = excluded.operation, record_id = excluded.record_id, remote_type = excluded.remote_type, remote_id = excluded.remote_id, idempotency_key = excluded.idempotency_key, status = excluded.status, message = excluded.message, payload_hash = excluded.payload_hash`, entry.RepoID, entry.ID, entry.Operation, entry.RecordID, entry.RemoteType, entry.RemoteID, entry.IdempotencyKey, entry.Status, entry.Message, entry.PayloadHash, entry.CreatedAt.Format(time.RFC3339Nano))
 	return err
 }
 
