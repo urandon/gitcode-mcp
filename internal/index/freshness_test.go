@@ -16,6 +16,7 @@ func TestFreshnessReportClassifications(t *testing.T) {
 		freshnessSource("fixture-a", "DOC-REV", "revision body", "rev-2", base.Add(time.Hour)),
 		freshnessSource("fixture-a", "DOC-LINK", "link body", "rev-1", base),
 	}
+	sources[2].Metadata["content_hash"] = "old-hash"
 	chunks := []Chunk{
 		freshnessChunk(sources[0], ContentHash(sources[0].Body), "rev-1", base),
 		freshnessChunk(sources[2], "old-hash", "rev-1", base),
@@ -31,6 +32,9 @@ func TestFreshnessReportClassifications(t *testing.T) {
 	assertFreshness(t, states["DOC-FRESH"], IndexFreshnessFresh, "")
 	assertFreshness(t, states["DOC-MISSING"], IndexFreshnessMissingIndex, WarningMissingIndex)
 	assertFreshness(t, states["DOC-CONTENT"], IndexFreshnessStaleByContent, WarningStaleIndex)
+	if states["DOC-CONTENT"].CurrentContentHash != ContentHash(sources[2].Body) {
+		t.Fatalf("current hash = %s, want body hash %s", states["DOC-CONTENT"].CurrentContentHash, ContentHash(sources[2].Body))
+	}
 	assertFreshness(t, states["DOC-REV"], IndexFreshnessStaleByRevision, WarningStaleIndexRevision)
 	assertFreshness(t, states["DOC-LINK"], IndexFreshnessLinkStaleOnly, WarningLinkStaleOnly)
 	if len(report.Warnings) != 4 {

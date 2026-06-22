@@ -138,12 +138,9 @@ func BuildFreshnessReport(ctx context.Context, sources []SourceRecord, states []
 		if state.CitationCount == 0 {
 			state.CitationCount = citationCounts[key]
 		}
-		currentHash := source.Metadata["content_hash"]
-		if currentHash == "" {
-			currentHash = ContentHash(source.Body)
-		}
-		if source.PreviousIndexedHash != "" {
-			state.ContentHash = source.PreviousIndexedHash
+		currentHash := ContentHash(source.Body)
+		if source.Body == "" {
+			currentHash = source.Metadata["content_hash"]
 		}
 		record := IndexFreshnessRecord{RepoID: source.RepoID, SourceID: source.ID, RecordID: recordID, SnapshotID: source.SnapshotID, Policy: policy, CurrentContentHash: currentHash, IndexedContentHash: state.ContentHash, CurrentRemoteRevision: source.RemoteRevision, IndexedRemoteRevision: state.RemoteRevision, CurrentSyncRevision: source.SyncRevision, IndexedSyncRevision: state.SyncRevision, CurrentSyncEventID: source.SyncEventID, IndexedSyncEventID: state.SyncEventID, CurrentUpdatedAt: source.UpdatedAt.UTC(), IndexedUpdatedAt: state.SourceUpdatedAt.UTC(), IndexedAt: state.IndexedAt.UTC(), ChunkCount: state.ChunkCount, CitationCount: state.CitationCount}
 		if affected[source.ID] {

@@ -15,6 +15,7 @@ import (
 
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/gitcode"
+	"gitcode-mcp/internal/index"
 )
 
 func TestNewDelegatesToFixture(t *testing.T) {
@@ -834,7 +835,7 @@ func TestSyncBoundedStaging(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if source.Body != "intro same\nbacklog design same\nfinal" || source.ContentHash != "hash-doc" {
+	if source.Body != "intro same\nbacklog design same\nfinal" || source.ContentHash != index.ContentHash(source.Body) {
 		t.Fatalf("source mutated after staging failure: %#v", source)
 	}
 	event, err := svc.store.GetSyncEventByKey(ctx, "large-key")
@@ -940,7 +941,7 @@ func TestFailureModes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if source.Body != "intro same\nbacklog design same\nfinal" || source.ContentHash != "hash-doc" {
+			if source.Body != "intro same\nbacklog design same\nfinal" || source.ContentHash != index.ContentHash(source.Body) {
 				t.Fatalf("source mutated after failure: %#v", source)
 			}
 			if tt.prelock {
@@ -1130,11 +1131,12 @@ func TestGoldenExport(t *testing.T) {
 	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
 		t.Fatal(err)
 	}
+	bodyHash := index.ContentHash("body")
 	if err := store.UpsertSourceGraph(ctx, cache.SourceGraph{
-		Source:     cache.Source{RepoID: "fixture-a", ID: "DOC-123", Kind: "doc", Path: "docs/design.md", Title: "Design Doc", Body: "body", Status: "ready", Labels: []string{"zeta", "design"}, ContentHash: "hash-doc", CreatedAt: base, UpdatedAt: base},
+		Source:     cache.Source{RepoID: "fixture-a", ID: "DOC-123", Kind: "doc", Path: "docs/design.md", Title: "Design Doc", Body: "body", Status: "ready", Labels: []string{"zeta", "design"}, ContentHash: bodyHash, CreatedAt: base, UpdatedAt: base},
 		Identities: []cache.Identity{{RepoID: "fixture-a", AliasType: "path", Alias: "docs/design.md", Remote: cache.RemoteAlias{Type: "remote", ID: "wiki/design"}}},
 		Links:      []cache.Link{{RepoID: "fixture-a", TargetID: "DOC-123", Kind: "mentions", Text: "doc"}},
-		Chunks:     []cache.Chunk{{RepoID: "fixture-a", ID: "chunk-doc", ContentHash: "hash-doc", ByteStart: 0, ByteEnd: 4, LineStart: 1, LineEnd: 1, HeadingPath: []string{"Design"}, Text: "body", NormalizedText: "body"}},
+		Chunks:     []cache.Chunk{{RepoID: "fixture-a", ID: "chunk-doc", ContentHash: bodyHash, ByteStart: 0, ByteEnd: 4, LineStart: 1, LineEnd: 1, HeadingPath: []string{"Design"}, Text: "body", NormalizedText: "body"}},
 		SyncStatus: &cache.SyncStatus{RepoID: "fixture-a", RemoteType: "remote", RemoteID: "wiki/design", RemoteRevision: "rev-1", Status: "fresh", LastFetchedAt: base},
 	}); err != nil {
 		t.Fatal(err)
@@ -1369,19 +1371,23 @@ func seedStore(t *testing.T, ctx context.Context, store cache.Store) {
 	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
 		t.Fatal(err)
 	}
-	err := store.UpsertSource(ctx, cache.Source{RepoID: "fixture-a", ID: "DOC-123", Kind: "doc", Path: "docs/design.md", Title: "Design Doc", Body: "intro same\nbacklog design same\nfinal", Status: "ready", Labels: []string{"zeta", "design"}, ContentHash: "hash-doc", CreatedAt: base, UpdatedAt: base})
+	docBody := "intro same\nbacklog design same\nfinal"
+	docHash := index.ContentHash(docBody)
+	taskBody := "task same\nbacklog item same"
+	taskHash := index.ContentHash(taskBody)
+	err := store.UpsertSource(ctx, cache.Source{RepoID: "fixture-a", ID: "DOC-123", Kind: "doc", Path: "docs/design.md", Title: "Design Doc", Body: docBody, Status: "ready", Labels: []string{"zeta", "design"}, ContentHash: docHash, CreatedAt: base, UpdatedAt: base})
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = store.UpsertSource(ctx, cache.Source{RepoID: "fixture-a", ID: "TASK-001", Kind: "task", Path: "project/tasks/task.md", Title: "Task Backlog", Body: "task same\nbacklog item same", Status: "ready", Labels: []string{"task"}, ContentHash: "hash-task", CreatedAt: base, UpdatedAt: base.Add(time.Hour)})
+	err = store.UpsertSource(ctx, cache.Source{RepoID: "fixture-a", ID: "TASK-001", Kind: "task", Path: "project/tasks/task.md", Title: "Task Backlog", Body: taskBody, Status: "ready", Labels: []string{"task"}, ContentHash: taskHash, CreatedAt: base, UpdatedAt: base.Add(time.Hour)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	err = store.UpsertSourceGraph(ctx, cache.SourceGraph{
-		Source:     cache.Source{RepoID: "fixture-a", ID: "DOC-123", Kind: "doc", Path: "docs/design.md", Title: "Design Doc", Body: "intro same\nbacklog design same\nfinal", Status: "ready", Labels: []string{"zeta", "design"}, ContentHash: "hash-doc", CreatedAt: base, UpdatedAt: base},
+		Source:     cache.Source{RepoID: "fixture-a", ID: "DOC-123", Kind: "doc", Path: "docs/design.md", Title: "Design Doc", Body: docBody, Status: "ready", Labels: []string{"zeta", "design"}, ContentHash: docHash, CreatedAt: base, UpdatedAt: base},
 		Identities: []cache.Identity{{RepoID: "fixture-a", AliasType: "path", Alias: "docs/design.md", Remote: cache.RemoteAlias{Type: "remote", ID: "wiki/design"}}},
 		Links:      []cache.Link{{RepoID: "fixture-a", TargetID: "TASK-001", Kind: "mentions", Text: "task"}},
-		Chunks:     []cache.Chunk{{RepoID: "fixture-a", ID: "chunk-doc", ContentHash: "hash-doc", ByteStart: 0, ByteEnd: 13, LineStart: 2, LineEnd: 2, HeadingPath: []string{"Design"}, Text: "backlog chunk", NormalizedText: "backlog chunk", InheritedMetadata: map[string]string{"owner": "docs"}, OutboundLinks: []string{"TASK-001"}, ResolvedAliases: map[string]string{"TASK-001": "task:1"}}},
+		Chunks:     []cache.Chunk{{RepoID: "fixture-a", ID: "chunk-doc", ContentHash: docHash, ByteStart: 0, ByteEnd: 13, LineStart: 2, LineEnd: 2, HeadingPath: []string{"Design"}, Text: "backlog chunk", NormalizedText: "backlog chunk", InheritedMetadata: map[string]string{"owner": "docs"}, OutboundLinks: []string{"TASK-001"}, ResolvedAliases: map[string]string{"TASK-001": "task:1"}}},
 		SyncStatus: &cache.SyncStatus{RepoID: "fixture-a", RemoteType: "remote", RemoteID: "wiki/design", RemoteRevision: "rev-1", Status: "fresh", LastFetchedAt: base},
 	})
 	if err != nil {

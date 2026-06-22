@@ -49,10 +49,7 @@ func TestIndexPipeline(t *testing.T) {
 	if stale.TotalStaleBacklinks == 0 || !contains(stale.AffectedSourceIDs, "DOC-123") {
 		t.Fatalf("stale report = %+v, want DOC-123 stale broken-link evidence", stale)
 	}
-	unchanged := memoryReader{sources: []SourceRecord{
-		withPreviousHash(reader.sources[0]),
-		withPreviousHash(reader.sources[1]),
-	}}
+	unchanged := memoryReader{sources: append([]SourceRecord(nil), reader.sources...)}
 	beforeWrites := writer.replaceCalls
 	incremental, err := IncrementalBuild(ctx, unchanged, writer)
 	if err != nil {
@@ -193,11 +190,6 @@ func fixtureSource(id, kind, path, title, status, body string) SourceRecord {
 	return SourceRecord{ID: id, Kind: kind, Path: path, Title: title, Status: status, Body: body, UpdatedAt: time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)}
 }
 
-func withPreviousHash(source SourceRecord) SourceRecord {
-	source.PreviousIndexedHash = ContentHash(source.Body)
-	return source
-}
-
 type memoryReader struct{ sources []SourceRecord }
 
 func (m memoryReader) ListSources(context.Context) ([]SourceRecord, error) {
@@ -208,6 +200,17 @@ type memoryWriter struct {
 	derived      map[string]SourceDerived
 	diagnostics  []CollisionDiagnostic
 	replaceCalls int
+}
+
+func (m *memoryWriter) ListIndexStates(_ context.Context, query ChunkQuery) ([]IndexState, error) {
+	var states []IndexState
+	for _, derived := range m.derived {
+		if !stateMatchesQuery(derived.IndexState, query) {
+			continue
+		}
+		states = append(states, derived.IndexState)
+	}
+	return states, nil
 }
 
 func (m *memoryWriter) ReplaceSourceDerived(_ context.Context, derived SourceDerived) error {

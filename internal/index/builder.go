@@ -13,6 +13,10 @@ type Builder struct {
 	options ChunkOptions
 }
 
+type previousIndexStateReader interface {
+	ListIndexStates(context.Context, ChunkQuery) ([]IndexState, error)
+}
+
 func NewBuilder(options ChunkOptions) Builder {
 	return Builder{options: normalizeChunkOptions(options)}
 }
@@ -52,13 +56,17 @@ func (b Builder) build(ctx context.Context, reader SourceReader, writer DerivedW
 			return BuildReport{}, err
 		}
 	}
+	previousHashes := map[string]string{}
+	if incremental {
+		previousHashes = previousIndexStateHashes(ctx, writer, b.options.Policy)
+	}
 	report := BuildReport{Diagnostics: diagnostics, CollisionCount: len(diagnostics)}
 	for _, source := range sources {
 		if err := ctx.Err(); err != nil {
 			return report, err
 		}
 		contentHash := ContentHash(source.Body)
-		if incremental && source.PreviousIndexedHash == contentHash {
+		if incremental && previousHashes[indexStateHashKey(source.RepoID, source.ID, sourceRecordID(source), source.SnapshotID, b.options.Policy)] == contentHash {
 			report.SkippedCount++
 			continue
 		}
@@ -79,6 +87,29 @@ func (b Builder) build(ctx context.Context, reader SourceReader, writer DerivedW
 		report.Diagnostics = append(report.Diagnostics, parsed.Diagnostics...)
 	}
 	return report, nil
+}
+
+func previousIndexStateHashes(ctx context.Context, reader any, policy ChunkPolicy) map[string]string {
+	stateReader, ok := reader.(previousIndexStateReader)
+	if !ok {
+		return map[string]string{}
+	}
+	states, err := stateReader.ListIndexStates(ctx, ChunkQuery{Policy: policy})
+	if err != nil {
+		return map[string]string{}
+	}
+	hashes := map[string]string{}
+	for _, state := range states {
+		hashes[indexStateHashKey(state.RepoID, state.SourceID, state.RecordID, state.SnapshotID, state.Policy)] = state.ContentHash
+	}
+	return hashes
+}
+
+func indexStateHashKey(repoID, sourceID, recordID, snapshotID string, policy ChunkPolicy) string {
+	if policy == "" {
+		policy = ChunkPolicyHeading
+	}
+	return repoID + "\x00" + sourceID + "\x00" + recordID + "\x00" + snapshotID + "\x00" + string(policy)
 }
 
 func (b Builder) deriveSource(source SourceRecord, parsed ParsedSource, aliasIndex map[string][]string) SourceDerived {

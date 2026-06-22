@@ -1,0 +1,20 @@
+{
+  "covered_outcome_ids": [
+    "outcome-6"
+  ],
+  "covered_decommission_ids": [
+    "decommission-6"
+  ],
+  "product_surfaces": [
+    "internal/index/stale.go:BuildFreshnessReport",
+    "internal/index/types.go:SourceRecord",
+    "internal/index/freshness_test.go:TestFreshnessReportClassifications",
+    "go test -run '^TestFreshnessReportClassifications$' ./internal/index/",
+    "go test ./internal/index/",
+    "runtime/compiler reflection check for index.SourceRecord.PreviousIndexedHash absence"
+  ],
+  "evidence_type": "offline executable Go tests via bash run.sh",
+  "freshness": "current working tree binary/source; deterministic offline validation",
+  "mocks_used": [],
+  "production_files_modified": []
+}

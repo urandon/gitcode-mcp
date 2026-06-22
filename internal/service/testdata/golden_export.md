@@ -11,7 +11,7 @@ created_at: 2026-01-01T00:00:00Z
 - kind: doc
 - status: ready
 - title: Design Doc
-- content_hash: hash-doc
+- content_hash: 230d8358dc8e8890b4c58deeb62912ee2f20357ae92a5cc861b98e68fe31acb5
 - labels: design,zeta
 
 ```
@@ -32,4 +32,4 @@ body
 
 ## Chunks
 
-- chunk-doc DOC-123 0-4 lines=1-1 hash=hash-doc heading=Design
+- chunk-doc DOC-123 0-4 lines=1-1 hash=230d8358dc8e8890b4c58deeb62912ee2f20357ae92a5cc861b98e68fe31acb5 heading=Design
