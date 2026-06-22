@@ -1913,8 +1913,9 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	}
 	confirmed, graph, err := s.callWriteAdapter(ctx, command, route, req, key)
 	if err != nil {
-		_ = s.store.RecordAuditEvent(ctx, audit.Failure(route.RepoID, key, command, fingerprint, writeErrorCode(err), s.now().UTC()))
-		return WriteCommandResult{}, ErrWriteFailure{Code: writeErrorCode(err), RepoID: route.RepoID, IdempotencyKey: key, Cause: err}
+		code := s.writeAdapterErrorCode(req.Mode, err)
+		_ = s.store.RecordAuditEvent(ctx, audit.Failure(route.RepoID, key, command, fingerprint, code, s.now().UTC()))
+		return WriteCommandResult{}, ErrWriteFailure{Code: code, RepoID: route.RepoID, IdempotencyKey: key, Cause: writeFailureCause(code, err)}
 	}
 	if !confirmed.confirmed || confirmed.remoteID == "" {
 		_ = s.store.RecordAuditEvent(ctx, audit.Failure(route.RepoID, key, command, fingerprint, "write_unconfirmed_remote", s.now().UTC()))
@@ -2128,6 +2129,13 @@ func replayWriteResult(command string, entry cache.AuditTrailEntry, fingerprint 
 	return WriteCommandResult{Command: command, Status: "already_applied", RepoID: entry.RepoID, ID: entry.RecordID, RemoteID: entry.RemoteID, IdempotencyKey: entry.IdempotencyKey, SourceFingerprint: fingerprint, Replayed: true, Evidence: "replayed from audit_trail", GeneratedAt: now}
 }
 
+func (s *Service) writeAdapterErrorCode(mode WriteMode, err error) string {
+	if mode == WriteModeLive && gitcode.IsFixtureReadOnly(err) {
+		return "write_fixture_fallback_detected"
+	}
+	return writeErrorCode(err)
+}
+
 func writeErrorCode(err error) string {
 	var conflict gitcode.ErrConflict
 	if errors.As(err, &conflict) {
@@ -2146,6 +2154,13 @@ func writeErrorCode(err error) string {
 		return "write_network_unavailable"
 	}
 	return "write_provider_error"
+}
+
+func writeFailureCause(code string, err error) error {
+	if code == "write_fixture_fallback_detected" {
+		return nil
+	}
+	return err
 }
 
 func firstNonEmptyString(values ...string) string {
