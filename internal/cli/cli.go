@@ -25,7 +25,7 @@ const version = "0.1.0"
 var commands = []string{
 	"ingest",
 	"index",
-	"search",
+	"search", "search_sources",
 	"list",
 	"get",
 	"backlinks",
@@ -498,7 +498,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, renderOperationText)
-	case "search":
+	case "search", "search_sources":
 		if len(args) == 0 {
 			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "query", Message: "query is required"})
 		}
@@ -1595,7 +1595,7 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --strict          exit non-zero on findings")
 		fmt.Fprintln(w, "  --cache-path PATH cache database path")
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
-	case "search":
+	case "search", "search_sources":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO QUERY [--kind KIND] [--limit N] [--offset N]\n\n", command)
 		fmt.Fprintln(w, "Search cached sources with full-text matching.")
 		fmt.Fprintln(w, "Flags:")
