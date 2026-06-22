@@ -629,3 +629,21 @@ type WriteCommandResult struct {
 	Evidence          string    `json:"evidence,omitempty"`
 	GeneratedAt       time.Time `json:"generated_at"`
 }
+
+type BulkSyncScope string
+
+const (
+	BulkSyncScopeIssues BulkSyncScope = "issues"
+	BulkSyncScopeWiki   BulkSyncScope = "wiki"
+	BulkSyncScopeAll    BulkSyncScope = "all"
+)
+
+type BulkSyncRequest struct {
+	RepoID         string        `json:"repo_id"`
+	Scope          BulkSyncScope `json:"scope"`
+	IdempotencyKey string        `json:"idempotency_key,omitempty"`
+	MaxAttempts    int           `json:"max_attempts,omitempty"`
+	MaxSize        int64         `json:"max_size,omitempty"`
+	Page           int           `json:"page,omitempty"`
+	PerPage        int           `json:"per_page,omitempty"`
+}

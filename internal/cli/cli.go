@@ -70,6 +70,9 @@ type queryService interface {
 	StaleIndex(context.Context, service.StaleIndexRequest) (service.StaleIndexResult, error)
 	SyncToCache(context.Context, service.SyncRequest) (service.SyncResult, error)
 	SyncResources(context.Context, []service.SyncRequest) (*service.SyncResourcesResult, error)
+	BulkSyncIssues(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	BulkSyncWiki(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	BulkSyncAll(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	CacheStatus(context.Context, service.CacheStatusRequest) (service.CacheStatusResult, error)
 	ExportSnapshot(context.Context, service.ExportSnapshotRequest) (service.ExportSnapshotResult, error)
 	DiffSnapshot(context.Context, service.DiffSnapshotRequest) (service.DiffSnapshotResult, error)
@@ -614,47 +617,19 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		}
 		return 0
 	case "sync":
-		if opts.issues || opts.wiki {
-			var reqs []service.SyncRequest
-			if opts.issues {
-				reqs = append(reqs, service.SyncRequest{RepoID: opts.repo, RemoteAlias: "issue:42", IdempotencyKey: syncScopedKey(opts.idempotencyKey, "issue")})
+		if opts.issues || opts.wiki || (opts.id == "" && opts.input == "") {
+			req := service.BulkSyncRequest{RepoID: opts.repo, IdempotencyKey: opts.idempotencyKey, PerPage: 100}
+			var result *service.SyncResourcesResult
+			var syncErr error
+			switch {
+			case opts.issues && !opts.wiki:
+				result, syncErr = svc.BulkSyncIssues(ctx, req)
+			case opts.wiki && !opts.issues:
+				result, syncErr = svc.BulkSyncWiki(ctx, req)
+			default:
+				result, syncErr = svc.BulkSyncAll(ctx, req)
 			}
-			if opts.wiki {
-				reqs = append(reqs, service.SyncRequest{RepoID: opts.repo, RemoteAlias: "wiki:Home", IdempotencyKey: syncScopedKey(opts.idempotencyKey, "wiki")})
-			}
-			result, syncErr := svc.SyncResources(ctx, reqs)
-			if syncErr != nil {
-				if partial, ok := syncErr.(*service.PartialSyncError); ok {
-					if result != nil && len(result.Results) > 0 {
-						if opts.format == "json" {
-							_ = renderJSON(stdout, result)
-						} else {
-							for _, r := range result.Results {
-								renderSyncText(stdout, r)
-							}
-						}
-					}
-					if result != nil && len(result.Failures) > 0 {
-						for _, f := range result.Failures {
-							fmt.Fprintf(stderr, "sync: %s failed: %s\n", f.SourceID, f.Message)
-						}
-					}
-					if result.SuccessCount == 0 {
-						return writeError(stderr, opts.format, partial)
-					}
-					return 1
-				}
-				return writeError(stderr, opts.format, syncErr)
-			}
-			if result != nil {
-				if opts.format == "json" {
-					return renderJSON(stdout, result)
-				}
-				for _, r := range result.Results {
-					renderSyncText(stdout, r)
-				}
-			}
-			return 0
+			return renderSyncResources(stdout, stderr, opts.format, result, syncErr)
 		}
 		result, err := svc.SyncToCache(ctx, service.SyncRequest{RepoID: opts.repo, StableID: opts.id, RemoteAlias: opts.input, IdempotencyKey: opts.idempotencyKey})
 		if err != nil {
@@ -775,6 +750,41 @@ func syncScopedKey(base string, scope string) string {
 		return ""
 	}
 	return base + "-" + scope
+}
+
+func renderSyncResources(stdout, stderr io.Writer, format string, result *service.SyncResourcesResult, syncErr error) int {
+	if syncErr != nil {
+		if partial, ok := syncErr.(*service.PartialSyncError); ok {
+			if result != nil && len(result.Results) > 0 {
+				if format == "json" {
+					_ = renderJSON(stdout, result)
+				} else {
+					for _, r := range result.Results {
+						renderSyncText(stdout, r)
+					}
+				}
+			}
+			if result != nil && len(result.Failures) > 0 {
+				for _, f := range result.Failures {
+					fmt.Fprintf(stderr, "sync: %s failed: %s\n", f.SourceID, f.Message)
+				}
+			}
+			if result == nil || result.SuccessCount == 0 {
+				return writeError(stderr, format, partial)
+			}
+			return 1
+		}
+		return writeError(stderr, format, syncErr)
+	}
+	if result != nil {
+		if format == "json" {
+			return renderJSON(stdout, result)
+		}
+		for _, r := range result.Results {
+			renderSyncText(stdout, r)
+		}
+	}
+	return 0
 }
 
 func writeRequest(opts options) service.WriteCommandRequest {

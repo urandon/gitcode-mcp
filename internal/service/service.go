@@ -989,6 +989,139 @@ func (s *Service) SyncResources(ctx context.Context, reqs []SyncRequest) (*SyncR
 	return result, nil
 }
 
+func (s *Service) BulkSyncIssues(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	repoID, err := s.requireRepo(ctx, req.RepoID, "bulk-sync-issues")
+	if err != nil {
+		return nil, err
+	}
+	req.RepoID = repoID
+	if err := s.validateRepoScope(ctx, repoID, "issues"); err != nil {
+		return nil, err
+	}
+	route, err := s.BuildAdapterRoute(ctx, repoID, RepositoryScopeIssues)
+	if err != nil {
+		return nil, err
+	}
+	page, err := s.client.ListIssues(ctx, gitcode.IssueListRequest{Owner: route.Owner, Repo: route.Name, Page: req.Page, PerPage: req.PerPage})
+	if err != nil {
+		return bulkSyncFailureResult(s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "issue:*"}, "issues", "*"), "issue:*", "issues")
+	}
+	reqs := make([]SyncRequest, 0, len(page.Items))
+	for _, summary := range page.Items {
+		reqs = append(reqs, SyncRequest{
+			RepoID:         req.RepoID,
+			AliasType:      "issue",
+			AliasID:        strconv.Itoa(summary.Number),
+			IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "issue", strconv.Itoa(summary.Number)),
+			MaxAttempts:    req.MaxAttempts,
+			MaxSize:        req.MaxSize,
+		})
+	}
+	return s.SyncResources(ctx, reqs)
+}
+
+func (s *Service) BulkSyncWiki(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	repoID, err := s.requireRepo(ctx, req.RepoID, "bulk-sync-wiki")
+	if err != nil {
+		return nil, err
+	}
+	req.RepoID = repoID
+	if err := s.validateRepoScope(ctx, repoID, "wiki"); err != nil {
+		return nil, err
+	}
+	route, err := s.BuildAdapterRoute(ctx, repoID, RepositoryScopeWiki)
+	if err != nil {
+		return nil, err
+	}
+	page, err := s.client.ListWikiPages(ctx, gitcode.WikiListRequest{Owner: route.Owner, Repo: route.Name, Page: req.Page, PerPage: req.PerPage})
+	if err != nil {
+		return bulkSyncFailureResult(s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "wiki:*"}, "wiki", "*"), "wiki:*", "wiki")
+	}
+	reqs := make([]SyncRequest, 0, len(page.Items))
+	for _, wp := range page.Items {
+		reqs = append(reqs, SyncRequest{
+			RepoID:         req.RepoID,
+			AliasType:      "wiki",
+			AliasID:        wp.Slug,
+			IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "wiki", wp.Slug),
+			MaxAttempts:    req.MaxAttempts,
+			MaxSize:        req.MaxSize,
+		})
+	}
+	return s.SyncResources(ctx, reqs)
+}
+
+func (s *Service) BulkSyncAll(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	repoID, err := s.requireRepo(ctx, req.RepoID, "bulk-sync-all")
+	if err != nil {
+		return nil, err
+	}
+	req.RepoID = repoID
+	var issuesResult, wikiResult *SyncResourcesResult
+	var issuesErr, wikiErr error
+
+	if err := s.validateRepoScope(ctx, repoID, "issues"); err == nil {
+		issuesResult, issuesErr = s.BulkSyncIssues(ctx, req)
+	}
+
+	if err := s.validateRepoScope(ctx, repoID, "wiki"); err == nil {
+		wikiResult, wikiErr = s.BulkSyncWiki(ctx, req)
+	}
+
+	aggregated := &SyncResourcesResult{
+		Results:  make([]SyncResult, 0),
+		Failures: make([]ResourceError, 0),
+	}
+	if issuesResult != nil {
+		aggregated.Results = append(aggregated.Results, issuesResult.Results...)
+		aggregated.Failures = append(aggregated.Failures, issuesResult.Failures...)
+	}
+	if wikiResult != nil {
+		aggregated.Results = append(aggregated.Results, wikiResult.Results...)
+		aggregated.Failures = append(aggregated.Failures, wikiResult.Failures...)
+	}
+	aggregated.SuccessCount = len(aggregated.Results)
+	aggregated.FailureCount = len(aggregated.Failures)
+
+	if issuesErr != nil || wikiErr != nil {
+		return aggregated, &PartialSyncError{
+			Errors:       aggregated.Failures,
+			SuccessCount: aggregated.SuccessCount,
+			FailureCount: aggregated.FailureCount,
+		}
+	}
+	if aggregated.FailureCount > 0 {
+		return aggregated, &PartialSyncError{
+			Errors:       aggregated.Failures,
+			SuccessCount: aggregated.SuccessCount,
+			FailureCount: aggregated.FailureCount,
+		}
+	}
+	return aggregated, nil
+}
+
+func bulkSyncFailureResult(err error, sourceID, remoteType string) (*SyncResourcesResult, error) {
+	re := ResourceError{SourceID: sourceID, RemoteType: remoteType, Err: err, Message: err.Error()}
+	result := &SyncResourcesResult{Failures: []ResourceError{re}, FailureCount: 1}
+	return result, &PartialSyncError{Errors: result.Failures, FailureCount: 1}
+}
+
+func scopedBulkSyncKey(base, scope, id string) string {
+	if strings.TrimSpace(base) == "" {
+		return ""
+	}
+	return base + "-" + scope + "-" + id
+}
+
 func (s *Service) CreateIssue(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
 	if strings.TrimSpace(req.Title) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "title", Message: "title is required"}

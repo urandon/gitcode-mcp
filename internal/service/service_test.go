@@ -1693,6 +1693,13 @@ type fakeGitCodeClient struct {
 	addLabelCalls     int
 	createIssueResult gitcode.WriteResult[gitcode.Issue]
 	addLabelResult    gitcode.WriteResult[gitcode.Issue]
+	listIssuesPages   []gitcode.Page[gitcode.IssueSummary]
+	listIssuesErrors  []error
+	listWikiPages     []gitcode.Page[gitcode.WikiPage]
+	listWikiErrors    []error
+	issuesByNumber    map[int]gitcode.Issue
+	wikiBySlug        map[string]gitcode.WikiPage
+	commentsByIssue   map[int][]gitcode.Comment
 }
 
 func (f *fakeGitCodeClient) nextError() error {
@@ -1705,27 +1712,60 @@ func (f *fakeGitCodeClient) nextError() error {
 }
 
 func (f *fakeGitCodeClient) ListIssues(context.Context, gitcode.IssueListRequest) (gitcode.Page[gitcode.IssueSummary], error) {
+	if len(f.listIssuesErrors) > 0 {
+		err := f.listIssuesErrors[0]
+		f.listIssuesErrors = f.listIssuesErrors[1:]
+		return gitcode.Page[gitcode.IssueSummary]{}, err
+	}
+	if len(f.listIssuesPages) > 0 {
+		page := f.listIssuesPages[0]
+		f.listIssuesPages = f.listIssuesPages[1:]
+		return page, nil
+	}
 	return gitcode.Page[gitcode.IssueSummary]{}, nil
 }
-func (f *fakeGitCodeClient) GetIssue(context.Context, gitcode.IssueRequest) (gitcode.Issue, error) {
+func (f *fakeGitCodeClient) GetIssue(_ context.Context, req gitcode.IssueRequest) (gitcode.Issue, error) {
 	f.issueCalls++
 	if err := f.nextError(); err != nil {
 		return gitcode.Issue{}, err
 	}
+	if f.issuesByNumber != nil {
+		if issue, ok := f.issuesByNumber[req.Number]; ok {
+			return issue, nil
+		}
+	}
 	return f.issue, nil
 }
-func (f *fakeGitCodeClient) ListIssueComments(context.Context, gitcode.IssueRequest) (gitcode.Page[gitcode.Comment], error) {
+func (f *fakeGitCodeClient) ListIssueComments(_ context.Context, req gitcode.IssueRequest) (gitcode.Page[gitcode.Comment], error) {
 	f.commentCalls++
+	if f.commentsByIssue != nil {
+		return gitcode.Page[gitcode.Comment]{Items: f.commentsByIssue[req.Number]}, nil
+	}
 	return gitcode.Page[gitcode.Comment]{Items: f.comments}, nil
 }
-func (f *fakeGitCodeClient) GetWikiPage(context.Context, gitcode.WikiPageRequest) (gitcode.WikiPage, error) {
+func (f *fakeGitCodeClient) GetWikiPage(_ context.Context, req gitcode.WikiPageRequest) (gitcode.WikiPage, error) {
 	f.wikiCalls++
 	if err := f.nextError(); err != nil {
 		return gitcode.WikiPage{}, err
 	}
+	if f.wikiBySlug != nil {
+		if page, ok := f.wikiBySlug[req.Slug]; ok {
+			return page, nil
+		}
+	}
 	return f.wiki, nil
 }
 func (f *fakeGitCodeClient) ListWikiPages(context.Context, gitcode.WikiListRequest) (gitcode.Page[gitcode.WikiPage], error) {
+	if len(f.listWikiErrors) > 0 {
+		err := f.listWikiErrors[0]
+		f.listWikiErrors = f.listWikiErrors[1:]
+		return gitcode.Page[gitcode.WikiPage]{}, err
+	}
+	if len(f.listWikiPages) > 0 {
+		page := f.listWikiPages[0]
+		f.listWikiPages = f.listWikiPages[1:]
+		return page, nil
+	}
 	return gitcode.Page[gitcode.WikiPage]{}, nil
 }
 func (f *fakeGitCodeClient) Search(context.Context, gitcode.SearchRequest) (gitcode.Page[gitcode.SearchResult], error) {
