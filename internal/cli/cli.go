@@ -15,6 +15,7 @@ import (
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/credential"
+	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/doctor"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
@@ -228,16 +229,16 @@ func executeWithFactoryAndDeps(args []string, stdout io.Writer, stderr io.Writer
 	}
 	plan, planErr := buildStartupPlan(context.Background(), command, opts, deps)
 	if planErr != nil {
-		return writeError(stderr, opts.format, planErr)
+		return writeCommandError(stderr, opts.format, plan, planErr)
 	}
 	svc, cleanup, err := serviceFromStartupPlan(context.Background(), plan, factory)
 	if err != nil {
-		return writeError(stderr, opts.format, err)
+		return writeCommandError(stderr, opts.format, plan, err)
 	}
 	if cleanup != nil {
 		defer cleanup()
 	}
-	return dispatch(context.Background(), svc, command, rest, opts, stdout, stderr)
+	return dispatch(context.Background(), svc, command, rest, opts, stdout, stderr, plan)
 }
 
 func buildStartupPlan(ctx context.Context, command string, opts options, deps localCommandDeps) (startupPlan, error) {
@@ -635,7 +636,7 @@ func sanitizeCredentialStatus(status config.CredentialStatus, src config.Source)
 	return status
 }
 
-func dispatch(ctx context.Context, svc queryService, command string, args []string, opts options, stdout io.Writer, stderr io.Writer) int {
+func dispatch(ctx context.Context, svc queryService, command string, args []string, opts options, stdout io.Writer, stderr io.Writer, plan startupPlan) int {
 	switch command {
 	case "ingest":
 		result, err := svc.Ingest(ctx, service.OperationRequest{InputPath: opts.input, OutputPath: opts.output, Strict: opts.strict})
@@ -787,7 +788,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			default:
 				result, syncErr = svc.BulkSyncAll(ctx, req)
 			}
-			return renderSyncResources(stdout, stderr, opts.format, result, syncErr)
+			return renderSyncResources(stdout, stderr, opts.format, result, syncErr, plan)
 		}
 		result, err := svc.SyncToCache(ctx, service.SyncRequest{RepoID: opts.repo, StableID: opts.id, RemoteAlias: opts.input, IdempotencyKey: opts.idempotencyKey})
 		if err != nil {
@@ -852,29 +853,29 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "repo", Message: "unknown subcommand"})
 		}
 	case "create-issue":
-		return dispatchWrite(ctx, svc.CreateIssue, command, opts, stdout, stderr)
+		return dispatchWrite(ctx, svc.CreateIssue, command, opts, stdout, stderr, plan)
 	case "update-issue":
-		return dispatchWrite(ctx, svc.UpdateIssue, command, opts, stdout, stderr)
+		return dispatchWrite(ctx, svc.UpdateIssue, command, opts, stdout, stderr, plan)
 	case "create-page":
-		return dispatchWrite(ctx, svc.CreatePage, command, opts, stdout, stderr)
+		return dispatchWrite(ctx, svc.CreatePage, command, opts, stdout, stderr, plan)
 	case "update-page":
-		return dispatchWrite(ctx, svc.UpdatePage, command, opts, stdout, stderr)
+		return dispatchWrite(ctx, svc.UpdatePage, command, opts, stdout, stderr, plan)
 	case "add-comment":
-		return dispatchWrite(ctx, svc.AddComment, command, opts, stdout, stderr)
+		return dispatchWrite(ctx, svc.AddComment, command, opts, stdout, stderr, plan)
 	case "add-label":
-		return dispatchWrite(ctx, svc.AddLabel, command, opts, stdout, stderr)
+		return dispatchWrite(ctx, svc.AddLabel, command, opts, stdout, stderr, plan)
 	default:
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "command", Message: command + " is not a query command"})
 	}
 }
 
-func dispatchWrite(ctx context.Context, handler func(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error), command string, opts options, stdout io.Writer, stderr io.Writer) int {
+func dispatchWrite(ctx context.Context, handler func(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error), command string, opts options, stdout io.Writer, stderr io.Writer, plan startupPlan) int {
 	if err := validateWriteOptions(command, opts); err != nil {
-		return writeError(stderr, opts.format, err)
+		return writeCommandError(stderr, opts.format, plan, err)
 	}
 	result, err := handler(ctx, writeRequest(opts))
 	if err != nil {
-		return writeError(stderr, opts.format, err)
+		return writeCommandError(stderr, opts.format, plan, err)
 	}
 	return render(stdout, opts.format, result, renderWriteText)
 }
@@ -910,7 +911,7 @@ func syncScopedKey(base string, scope string) string {
 	return base + "-" + scope
 }
 
-func renderSyncResources(stdout, stderr io.Writer, format string, result *service.SyncResourcesResult, syncErr error) int {
+func renderSyncResources(stdout, stderr io.Writer, format string, result *service.SyncResourcesResult, syncErr error, plan startupPlan) int {
 	if syncErr != nil {
 		if partial, ok := syncErr.(*service.PartialSyncError); ok {
 			if result != nil && len(result.Results) > 0 {
@@ -928,11 +929,11 @@ func renderSyncResources(stdout, stderr io.Writer, format string, result *servic
 				}
 			}
 			if result == nil || result.SuccessCount == 0 {
-				return writeError(stderr, format, partial)
+				return writeCommandError(stderr, format, plan, partial)
 			}
 			return 1
 		}
-		return writeError(stderr, format, syncErr)
+		return writeCommandError(stderr, format, plan, syncErr)
 	}
 	if result != nil {
 		if format == "json" {
@@ -1142,18 +1143,55 @@ func joinRepositoryScopes(scopes []service.RepositoryScope) string {
 }
 
 func writeError(stderr io.Writer, format string, err error) int {
+	return writeCommandError(stderr, format, startupPlan{}, err)
+}
+
+func writeCommandError(stderr io.Writer, format string, plan startupPlan, err error) int {
 	code := exitCode(err)
 	failureClass := failureClass(err)
 	message := config.RedactDiagnostic(err.Error(), config.OSSource{})
+	var diagnostic diagnostics.Diagnostic
+	if plan.ProviderMode == "live-http" {
+		diagnostic = diagnostics.Classify(err, diagnosticContext(plan, err))
+		failureClass = string(diagnostic.Code)
+		message = diagnostic.Message
+	}
 	if format == "json" {
-		_ = json.NewEncoder(stderr).Encode(map[string]any{"error": message, "exit_code": code, "failure_class": failureClass})
+		payload := map[string]any{"error": message, "exit_code": code, "failure_class": failureClass}
+		if diagnostic.Code != "" {
+			payload["http_attempted"] = diagnostic.HTTPAttempted
+			payload["retryable"] = diagnostic.Retryable
+			if len(diagnostic.Context) > 0 {
+				payload["context"] = diagnostic.Context
+			}
+		}
+		_ = json.NewEncoder(stderr).Encode(payload)
 		return code
 	}
 	fmt.Fprintln(stderr, message)
 	if failureClass != "" {
 		fmt.Fprintf(stderr, "failure_class: %s\n", failureClass)
 	}
+	if diagnostic.Code != "" {
+		fmt.Fprintf(stderr, "http_attempted: %t\n", diagnostic.HTTPAttempted)
+	}
 	return code
+}
+
+func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {
+	ctx := diagnostics.CommandContext{ProviderMode: plan.ProviderMode, Command: plan.Command, SelectedAPIBaseURL: plan.APIBaseURL, RepositoryBindingID: plan.LiveRepositoryBinding.RepoID, CachePathPresent: strings.TrimSpace(plan.CachePath) != "", AuditPathPresent: strings.TrimSpace(plan.LiveRepositoryBinding.AuditPath) != ""}
+	var writeErr service.ErrWriteFailure
+	if errors.As(err, &writeErr) {
+		ctx.HTTPAttempted = writeErr.Code == "write_unauthorized" || writeErr.Code == "write_network_unavailable" || writeErr.Code == "write_provider_error" || writeErr.Code == "write_conflict"
+		ctx.FixtureFallbackSentinel = writeErr.Code == "write_fixture_fallback_detected"
+		ctx.MissingCredential = writeErr.Code == "write_missing_credential"
+	}
+	var syncErr service.ErrSyncFailure
+	if errors.As(err, &syncErr) {
+		ctx.HTTPAttempted = syncErr.Mode == "live_auth_failure" || syncErr.Mode == "network_timeout" || syncErr.Mode == "rate_limited" || syncErr.Mode == "partial_response" || syncErr.Mode == "live_graph_invalid"
+		ctx.UnsupportedPayload = syncErr.Mode == "live_graph_invalid"
+	}
+	return ctx
 }
 
 func failureClass(err error) string {

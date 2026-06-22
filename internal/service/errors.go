@@ -28,6 +28,8 @@ type ErrSyncFailure struct {
 	Cause          error
 }
 
+func (e ErrSyncFailure) DiagnosticCode() string { return e.Mode }
+
 func (e ErrSyncFailure) Error() string {
 	switch e.Mode {
 	case "network_timeout":
@@ -171,6 +173,8 @@ func (e ErrRepoRequired) Error() string {
 	return "service: repo_required: --repo is required for " + e.Operation
 }
 
+func (e ErrRepoRequired) DiagnosticCode() string { return "repo_required" }
+
 type ErrAmbiguousAlias struct {
 	Alias string
 	Repos []string
@@ -198,6 +202,13 @@ func (e ErrInvalidQuery) Error() string {
 		return "service: invalid query: " + e.Message
 	}
 	return "service: invalid query " + e.Field + ": " + e.Message
+}
+
+func (e ErrInvalidQuery) DiagnosticCode() string {
+	if e.Field == "api_base_url" {
+		return "invalid_api_base_url"
+	}
+	return "invalid_query"
 }
 
 type ErrRangeClamped struct {
@@ -253,6 +264,8 @@ func (e ErrWriteFailure) Error() string {
 }
 
 func (e ErrWriteFailure) Unwrap() error { return e.Cause }
+
+func (e ErrWriteFailure) DiagnosticCode() string { return e.Code }
 
 type ErrSyncInProgress struct {
 	EventID        string

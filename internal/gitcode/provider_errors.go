@@ -27,6 +27,8 @@ func (e ErrFixtureReadOnly) Error() string {
 	return fmt.Sprintf("gitcode: fixture client is read-only for %s", e.Operation)
 }
 
+func (e ErrFixtureReadOnly) DiagnosticCode() string { return "fixture_read_only" }
+
 func FixtureReadOnlyError(operation string) error {
 	return ErrFixtureReadOnly{Operation: operation}
 }
@@ -50,6 +52,8 @@ func (e ErrValidationFailed) Error() string {
 	}
 	return fmt.Sprintf("gitcode: validation failed for %s: %s", e.Field, e.Message)
 }
+
+func (e ErrValidationFailed) DiagnosticCode() string { return "validation_failed" }
 
 type ErrPaginationMalformed struct {
 	Endpoint string
