@@ -399,6 +399,19 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 		src.env["GITCODE_MCP_TEST_KEYCHAIN_TOKEN"] = "test-token"
 		addRepoForStartupTest(t, cachePath, server.BaseURL())
 
+		var authStdout, authStderr bytes.Buffer
+		authCode := run([]string{"auth", "status", "--live", "--cache-path", cachePath, "--repo", "fixture-a"}, strings.NewReader(""), &authStdout, &authStderr, src)
+		if authCode != 0 {
+			t.Fatalf("auth code=%d stdout=%q stderr=%q", authCode, authStdout.String(), authStderr.String())
+		}
+		authOut := authStdout.String() + authStderr.String()
+		if !strings.Contains(authOut, "credential_source: mock-keychain") || strings.Contains(authOut, "test-token") {
+			t.Fatalf("auth status output invalid: %q", authOut)
+		}
+		if counts := server.Counts(); counts.TotalRequests != 0 {
+			t.Fatalf("auth status contacted server; counts=%#v", counts)
+		}
+
 		var stdout, stderr bytes.Buffer
 		code := run([]string{"create-issue", "--live", "--cache-path", cachePath, "--repo", "fixture-a", "--title", "Mock Created", "--body", "created by mock keychain", "--idempotency-key", "cred-write-1"}, strings.NewReader(""), &stdout, &stderr, src)
 		if code != 0 {

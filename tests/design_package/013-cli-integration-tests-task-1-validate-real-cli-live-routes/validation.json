@@ -1,0 +1,54 @@
+{
+  "covered_outcome_ids": [
+    "outcome-1",
+    "outcome-2",
+    "outcome-3",
+    "outcome-4",
+    "outcome-5",
+    "outcome-6",
+    "outcome-7",
+    "outcome-8",
+    "outcome-9",
+    "outcome-10"
+  ],
+  "covered_decommission_ids": [
+    "decommission-1",
+    "decommission-2",
+    "decommission-3",
+    "decommission-4"
+  ],
+  "product_surfaces": [
+    "gitcode-mcp sync --live through cmd/gitcode-mcp real startup run seam",
+    "gitcode-mcp create-issue --live through cmd/gitcode-mcp real startup run seam",
+    "gitcode-mcp auth status through cmd/gitcode-mcp real startup run seam",
+    "gitcode-mcp sync default non-live route through cmd/gitcode-mcp real startup run seam",
+    "gitcode-mcp doctor --live --format json through cmd/gitcode-mcp real startup run seam",
+    "credential resolution with environment and mocked keychain-equivalent source",
+    "repository binding api_base_url authority selection",
+    "live provider HTTP route classification and auth failure diagnostics",
+    "cache runtime issue/wiki/comment and create-confirmation inspection",
+    "audit runtime non-secret create-confirmation inspection",
+    "full Go package suite via go test ./..."
+  ],
+  "evidence_type": "stubbed-external-provider Go CLI integration validation using httptest.Server plus full offline go test suite",
+  "freshness": "current source tree under focused cmd/gitcode-mcp real-startup integration subtests and go test ./... with fresh temporary config, cache, audit, home, and httptest server state",
+  "mocks_used": [
+    {
+      "name": "MockGitCodeAPI httptest server",
+      "scope": "external GitCode-compatible HTTP dependency only; target CLI startup, live provider construction, cache, audit, diagnostics, repository binding, credential resolution, and doctor runtime remain production paths"
+    },
+    {
+      "name": "MockGitCodeAPIPair selected/non-selected httptest servers",
+      "scope": "external endpoint routing evidence for repository binding api_base_url authority using request counters"
+    },
+    {
+      "name": "GITCODE_MCP_TEST_KEYCHAIN_TOKEN mock-keychain source",
+      "scope": "explicit Keychain-equivalent credential source for offline credential propagation without OS Keychain access"
+    },
+    {
+      "name": "test Source and temporary filesystem paths",
+      "scope": "local command environment, config, cache, audit, and home isolation only"
+    }
+  ],
+  "production_files_modified": []
+}
