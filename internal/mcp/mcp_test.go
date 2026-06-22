@@ -534,6 +534,161 @@ func TestSchemasAndResults(t *testing.T) {
 	wg.Wait()
 }
 
+func TestMCPToolKindSchemaIncludesGitCodeKinds(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	srv := New(io.Reader(strings.NewReader("")), io.Discard, io.Discard, service.New(store))
+	registry := srv.toolRegistry()
+	for _, name := range []string{"list_sources", "search_sources", "search_chunks", "recent_changes"} {
+		tool, ok := registry[name]
+		if !ok {
+			t.Fatalf("tool %s is not registered", name)
+		}
+		prop, ok := tool.definition.InputSchema.Properties["kind"]
+		if !ok && name == "search_chunks" {
+			continue
+		}
+		if !ok {
+			t.Fatalf("tool %s missing kind schema", name)
+		}
+		if !containsString(prop.Enum, "issue") || !containsString(prop.Enum, "wiki") {
+			t.Fatalf("tool %s kind enum = %#v, want issue and wiki", name, prop.Enum)
+		}
+	}
+}
+
+func TestMCPReadToolParityOverStdio(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	srv, r, w, stderr := newPipeServer(service.New(store))
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = srv.Serve()
+	}()
+	call := func(name string, args map[string]any) toolCallResult {
+		t.Helper()
+		req := map[string]any{"jsonrpc": "2.0", "id": name, "method": "tools/call", "params": map[string]any{"name": name, "arguments": args}}
+		b, _ := json.Marshal(req)
+		_, _ = r.Write(append(b, '\n'))
+		line, err := readLine(w)
+		if err != nil {
+			t.Fatalf("read %s response: %v (stderr: %s)", name, err, stderr.String())
+		}
+		return decodeToolCallResult(t, line)
+	}
+	assertReadToolParity(t, call)
+	_ = r.Close()
+	wg.Wait()
+}
+
+func TestMCPReadToolParityOverHTTPSSE(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	transport := NewHTTPSSETransport(NewRPCHandler(service.New(store)), ServerConfig{ReadinessProbe: func(context.Context) Readiness { return Readiness{Ready: true} }, SessionID: func() string { return "parity-session" }})
+	server := httptest.NewServer(transport.Handler())
+	defer server.Close()
+	sseResp, endpoint, events := openSSE(t, server.URL+"/sse")
+	defer sseResp.Body.Close()
+	call := func(name string, args map[string]any) toolCallResult {
+		t.Helper()
+		postJSON(t, server.URL+endpoint, map[string]any{"jsonrpc": "2.0", "id": name, "method": "tools/call", "params": map[string]any{"name": name, "arguments": args}})
+		resp := readSSEMessage(t, events)
+		if resp.Error != nil {
+			t.Fatalf("%s returned error: %+v", name, resp.Error)
+		}
+		line, _ := json.Marshal(resp)
+		return decodeToolCallResult(t, line)
+	}
+	assertReadToolParity(t, call)
+}
+
+func assertReadToolParity(t *testing.T, call func(string, map[string]any) toolCallResult) {
+	t.Helper()
+	cacheStatus := call("cache_status", map[string]any{"repo_id": "fixture-a"})
+	var status service.CacheStatusResult
+	decodeStructured(t, cacheStatus, &status)
+	if status.RepoID != "fixture-a" || status.Chunks < 2 || status.SyncEvents < 2 {
+		t.Fatalf("cache_status parity mismatch: %+v", status)
+	}
+	listed := call("list_sources", map[string]any{"repo_id": "fixture-a", "kind": "issue"})
+	var sources service.ListSourcesResult
+	decodeStructured(t, listed, &sources)
+	if len(sources.Results) == 0 || sources.Results[0].Kind != "issue" {
+		t.Fatalf("list_sources parity mismatch: %+v", sources)
+	}
+	got := call("get_source", map[string]any{"repo_id": "fixture-a", "id": "issue:42"})
+	var record service.SourceRecord
+	decodeStructured(t, got, &record)
+	if record.ID != "ISSUE-42" || record.Kind != "issue" {
+		t.Fatalf("get_source parity mismatch: %+v", record)
+	}
+	syncStatus := call("sync_status", map[string]any{"repo_id": "fixture-a"})
+	var syncSummary service.SyncStatusSummaryResult
+	decodeStructured(t, syncStatus, &syncSummary)
+	if syncSummary.RepoID != "fixture-a" || syncSummary.FreshCount == 0 || syncSummary.CacheEmpty {
+		t.Fatalf("sync_status parity mismatch: %+v", syncSummary)
+	}
+	chunks := call("list_chunks", map[string]any{"repo_id": "fixture-a", "source_id": "ISSUE-42"})
+	var listedChunks service.ChunkQueryResult
+	decodeStructured(t, chunks, &listedChunks)
+	if len(listedChunks.Chunks) == 0 || listedChunks.Chunks[0].SourceID != "ISSUE-42" {
+		t.Fatalf("list_chunks parity mismatch: %+v", listedChunks)
+	}
+	searchedChunks := call("search_chunks", map[string]any{"repo_id": "fixture-a", "query": "parity"})
+	var chunkSearch service.ChunkQueryResult
+	decodeStructured(t, searchedChunks, &chunkSearch)
+	if len(chunkSearch.Chunks) == 0 {
+		t.Fatalf("search_chunks parity mismatch: %+v", chunkSearch)
+	}
+	searchedSources := call("search_sources", map[string]any{"repo_id": "fixture-a", "query": "parity", "kind": "wiki"})
+	var sourceSearch service.SearchSourcesResult
+	decodeStructured(t, searchedSources, &sourceSearch)
+	if len(sourceSearch.Results) == 0 || sourceSearch.Results[0].Kind != "wiki" {
+		t.Fatalf("search_sources parity mismatch: %+v", sourceSearch)
+	}
+}
+
+func decodeToolCallResult(t *testing.T, line json.RawMessage) toolCallResult {
+	t.Helper()
+	var resp response
+	if err := json.Unmarshal(line, &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("tool returned error: %+v", resp.Error)
+	}
+	var result toolCallResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("decode tool result: %v", err)
+	}
+	if len(result.Content) == 0 {
+		t.Fatalf("tool result missing content: %+v", result)
+	}
+	return result
+}
+
+func decodeStructured(t *testing.T, result toolCallResult, target any) {
+	t.Helper()
+	raw, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, target); err != nil {
+		t.Fatalf("decode structured content: %v", err)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestFramingAndErrors(t *testing.T) {
 	store := populatedStore(t)
 	svc := service.New(store)
@@ -1175,14 +1330,36 @@ func populatedStore(t *testing.T) cache.Store {
 		{
 			Source:     cache.Source{RepoID: "fixture-a", ID: "DOC-123", Kind: "doc", Path: "docs/backlog.md", Title: "Backlog", Body: "backlog overview\nready task details\nmore context", Status: "active", Labels: []string{"knowledge"}, ContentHash: "h1", CreatedAt: now, UpdatedAt: now},
 			SyncStatus: &cache.SyncStatus{RepoID: "fixture-a", SourceID: "DOC-123", RemoteType: "issue", RemoteID: "100", RemoteRevision: "r1", Status: "fresh", LastFetchedAt: now},
+			Chunks:     []cache.Chunk{{RepoID: "fixture-a", ID: "chunk-doc-123", SourceID: "DOC-123", RecordID: "DOC-123", ContentHash: "h1", ByteStart: 0, ByteEnd: 16, LineStart: 1, LineEnd: 1, Text: "backlog overview", NormalizedText: "backlog overview"}},
 		},
 		{
-			Source: cache.Source{RepoID: "fixture-a", ID: "TASK-1", Kind: "task", Path: "project/tasks/task-1.md", Title: "Ready Task", Body: "task references DOC-123", Status: "ready", ContentHash: "h2", CreatedAt: now.Add(time.Minute), UpdatedAt: now.Add(time.Minute)},
+			Source:     cache.Source{RepoID: "fixture-a", ID: "ISSUE-42", Kind: "issue", Path: "issues/42.md", Title: "Live-shaped issue", Body: "parity issue body for connected client reads", Status: "open", ContentHash: "h-issue-42", CreatedAt: now.Add(time.Minute), UpdatedAt: now.Add(time.Minute)},
+			SyncStatus: &cache.SyncStatus{RepoID: "fixture-a", SourceID: "ISSUE-42", RemoteType: "issue", RemoteID: "42", RemoteRevision: "issue-r42", Status: "fresh", LastFetchedAt: now.Add(time.Minute)},
+			Identities: []cache.Identity{{RepoID: "fixture-a", AliasType: "issue", Alias: "42", Remote: cache.RemoteAlias{Type: "issue", ID: "42"}}},
+			Chunks:     []cache.Chunk{{RepoID: "fixture-a", ID: "chunk-issue-42", SourceID: "ISSUE-42", RecordID: "ISSUE-42", ContentHash: "h-issue-42", ByteStart: 0, ByteEnd: 18, LineStart: 1, LineEnd: 1, Text: "parity issue body", NormalizedText: "parity issue body"}},
+		},
+		{
+			Source:     cache.Source{RepoID: "fixture-a", ID: "WIKI-7", Kind: "wiki", Path: "wiki/live-readiness.md", Title: "Live Readiness Wiki", Body: "parity wiki body for connected client reads", Status: "published", ContentHash: "h-wiki-7", CreatedAt: now.Add(2 * time.Minute), UpdatedAt: now.Add(2 * time.Minute)},
+			SyncStatus: &cache.SyncStatus{RepoID: "fixture-a", SourceID: "WIKI-7", RemoteType: "wiki", RemoteID: "7", RemoteRevision: "wiki-r7", Status: "fresh", LastFetchedAt: now.Add(2 * time.Minute)},
+			Identities: []cache.Identity{{RepoID: "fixture-a", AliasType: "wiki", Alias: "7", Remote: cache.RemoteAlias{Type: "wiki", ID: "7"}}},
+			Chunks:     []cache.Chunk{{RepoID: "fixture-a", ID: "chunk-wiki-7", SourceID: "WIKI-7", RecordID: "WIKI-7", ContentHash: "h-wiki-7", ByteStart: 0, ByteEnd: 17, LineStart: 1, LineEnd: 1, Text: "parity wiki body", NormalizedText: "parity wiki body"}},
+		},
+		{
+			Source: cache.Source{RepoID: "fixture-a", ID: "TASK-1", Kind: "task", Path: "project/tasks/task-1.md", Title: "Ready Task", Body: "task references DOC-123", Status: "ready", ContentHash: "h2", CreatedAt: now.Add(3 * time.Minute), UpdatedAt: now.Add(3 * time.Minute)},
 			Links:  []cache.Link{{RepoID: "fixture-a", SourceID: "TASK-1", TargetID: "DOC-123", Kind: "mentions", Text: "see DOC-123"}},
 		},
 	}
 	for _, graph := range graphs {
 		if err := store.UpsertSourceGraph(context.Background(), graph); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, event := range []cache.SyncEvent{
+		{RepoID: "fixture-a", ID: "sync-doc-123", SourceID: "DOC-123", RemoteType: "issue", RemoteID: "100", RemoteRevision: "r1", Status: "succeeded", IdempotencyKey: "sync-doc-123", CreatedAt: now, StartedAt: now, CompletedAt: now},
+		{RepoID: "fixture-a", ID: "sync-issue-42", SourceID: "ISSUE-42", RemoteType: "issue", RemoteID: "42", RemoteRevision: "issue-r42", Status: "succeeded", IdempotencyKey: "sync-issue-42", CreatedAt: now.Add(time.Minute), StartedAt: now.Add(time.Minute), CompletedAt: now.Add(time.Minute)},
+		{RepoID: "fixture-a", ID: "sync-wiki-7", SourceID: "WIKI-7", RemoteType: "wiki", RemoteID: "7", RemoteRevision: "wiki-r7", Status: "succeeded", IdempotencyKey: "sync-wiki-7", CreatedAt: now.Add(2 * time.Minute), StartedAt: now.Add(2 * time.Minute), CompletedAt: now.Add(2 * time.Minute)},
+	} {
+		if err := store.RecordSyncEvent(context.Background(), event); err != nil {
 			t.Fatal(err)
 		}
 	}

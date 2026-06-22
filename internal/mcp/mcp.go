@@ -164,8 +164,13 @@ type toolContentItem struct {
 	Text string `json:"text"`
 }
 
+var sourceKindEnums = []string{"issue", "wiki", "source", "task", "page", "decision", "handoff"}
+
 func intPtr(v int) *int             { return &v }
 func float64Ptr(v float64) *float64 { return &v }
+func kindValidationMessage() string {
+	return "kind must be one of: " + strings.Join(sourceKindEnums, ", ")
+}
 
 func chunkSchemaProps(includeQuery bool) map[string]schemaProp {
 	props := map[string]schemaProp{
@@ -204,7 +209,7 @@ var toolDefs = []toolDefinition{
 			Properties: map[string]schemaProp{
 				"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1},
 				"query":   {Type: "string", Description: "Search query text.", MinLength: 1},
-				"kind":    {Type: "string", Description: "Source kind filter.", Enum: []string{"source", "task", "page", "decision", "handoff"}},
+				"kind":    {Type: "string", Description: "Source kind filter.", Enum: sourceKindEnums},
 				"limit":   {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 20.0},
 				"offset":  {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
 			},
@@ -230,7 +235,7 @@ var toolDefs = []toolDefinition{
 			Type: "object",
 			Properties: map[string]schemaProp{
 				"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1},
-				"kind":    {Type: "string", Description: "Source kind filter.", Enum: []string{"source", "task", "page", "decision", "handoff"}},
+				"kind":    {Type: "string", Description: "Source kind filter.", Enum: sourceKindEnums},
 				"status":  {Type: "string", Description: "Source status filter."},
 				"limit":   {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 20.0},
 				"offset":  {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
@@ -265,7 +270,7 @@ var toolDefs = []toolDefinition{
 			Type: "object",
 			Properties: map[string]schemaProp{
 				"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1},
-				"kind":    {Type: "string", Description: "Source kind filter.", Enum: []string{"source", "task", "page", "decision", "handoff"}},
+				"kind":    {Type: "string", Description: "Source kind filter.", Enum: sourceKindEnums},
 				"status":  {Type: "string", Description: "Source status filter."},
 				"limit":   {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 20.0},
 				"offset":  {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
@@ -531,7 +536,7 @@ func (s *Server) callSearchSources(ctx context.Context, id *json.RawMessage, arg
 		return
 	}
 	if a.Kind != "" && !validKind(a.Kind) {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "kind must be one of: source, task, page, decision, handoff"})
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: kindValidationMessage()})
 		return
 	}
 
@@ -630,7 +635,7 @@ func (s *Server) callListSources(ctx context.Context, id *json.RawMessage, args 
 		return
 	}
 	if a.Kind != "" && !validKind(a.Kind) {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "kind must be one of: source, task, page, decision, handoff"})
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: kindValidationMessage()})
 		return
 	}
 
@@ -776,7 +781,7 @@ func valueOr(value *int, fallback int) int {
 }
 
 func validKind(kind string) bool {
-	for _, value := range []string{"source", "task", "page", "decision", "handoff"} {
+	for _, value := range sourceKindEnums {
 		if kind == value {
 			return true
 		}
@@ -843,7 +848,7 @@ func (s *Server) callRecentChanges(ctx context.Context, id *json.RawMessage, arg
 		return
 	}
 	if a.Kind != "" && !validKind(a.Kind) {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "kind must be one of: source, task, page, decision, handoff"})
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: kindValidationMessage()})
 		return
 	}
 
