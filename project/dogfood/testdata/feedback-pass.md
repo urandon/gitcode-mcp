@@ -53,7 +53,7 @@
 
 - [x] No bearer tokens or API keys present
 - [x] No `Authorization:` headers present
-- [x] No `Cookie:` / `Set-Cookie:` headers present
+- [x] No cookie or set-cookie header values present
 - [x] No token-like high-entropy strings present
 - [x] No absolute user paths present
 - [x] No private/internal hostnames present

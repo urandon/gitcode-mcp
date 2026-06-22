@@ -42,6 +42,7 @@ type CredentialStatus struct {
 	Source           string               `json:"source"`
 	Present          bool                 `json:"present"`
 	StoreMode        string               `json:"store_mode"`
+	RedactedToken    string               `json:"redacted_token,omitempty"`
 	ErrorClass       string               `json:"error_class,omitempty"`
 	Remediation      string               `json:"remediation,omitempty"`
 	AvailableSources []string             `json:"available_sources,omitempty"`
@@ -277,6 +278,9 @@ func RenderCredentialStatus(status CredentialStatus) string {
 	fmt.Fprintf(&b, "credential_store_mode: %s\n", status.StoreMode)
 	if len(status.AvailableSources) > 0 {
 		fmt.Fprintf(&b, "available_sources: %s\n", strings.Join(status.AvailableSources, ","))
+	}
+	if status.RedactedToken != "" {
+		fmt.Fprintf(&b, "redacted_token: %s\n", status.RedactedToken)
 	}
 	if status.ErrorClass != "" {
 		fmt.Fprintf(&b, "credential_error_class: %s\n", status.ErrorClass)

@@ -6,7 +6,7 @@ The mission is to make GitCode usable for agents and humans even when live acces
 
 This repository is a standalone, public-safe tooling project. It owns implementation issues, code, tests, fixtures, CLI/MCP implementation, development handoffs, and repository-local engineering notes.
 
-Source repositories, trackers, and wikis are external inputs. Keep examples sanitized and avoid committing non-public source names, credentials, cookies, internal URLs, or raw API responses.
+Source repositories, trackers, and wikis are external inputs. Keep examples sanitized and avoid committing non-public source names, credentials, cookies, internal URLs, or raw API responses; see [Sanitization Rules](docs/sanitization.md) for the full public-safety contract.
 
 ## Current Shape
 

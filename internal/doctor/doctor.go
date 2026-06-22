@@ -226,7 +226,7 @@ func Build(ctx context.Context, req Request) (Report, error) {
 	}
 	sort.Slice(repos, func(i, j int) bool { return repos[i].RepoID < repos[j].RepoID })
 	repo := repos[0]
-	report.Repo = RepoSection{Status: "ready", RepoID: repo.RepoID, Owner: repo.Owner, Name: repo.Name, Scopes: scopesText(repo.Scopes)}
+	report.Repo = RepoSection{Status: "ready", RepoID: repo.RepoID, Owner: "[REDACTED]", Name: "[REDACTED]", Scopes: scopesText(repo.Scopes)}
 
 	svc := req.NewService(store)
 	if svc == nil {

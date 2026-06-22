@@ -14,6 +14,7 @@ import (
 
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/credential"
 	"gitcode-mcp/internal/doctor"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
@@ -426,14 +427,15 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 		if opts.live {
 			status = probeAuthStatus(context.Background(), deps.Source, eff, opts, status)
 		}
+		sanitizedStatus := sanitizeCredentialStatus(status, deps.Source)
 		if opts.format == "json" {
-			code := render(stdout, opts.format, sanitizeCredentialStatus(status, deps.Source), nil)
+			code := render(stdout, opts.format, sanitizedStatus, nil)
 			if status.AuthProbe != nil && status.AuthProbe.FailureClass == "auth-failure" {
 				return 1
 			}
 			return code
 		}
-		fmt.Fprint(stdout, config.RedactDiagnostic(config.RenderCredentialStatus(status), deps.Source))
+		fmt.Fprint(stdout, config.RedactDiagnostic(config.RenderCredentialStatus(sanitizedStatus), deps.Source))
 		if status.AuthProbe != nil && status.AuthProbe.FailureClass == "auth-failure" {
 			return 1
 		}
@@ -485,6 +487,10 @@ func sanitizeCredentialStatus(status config.CredentialStatus, src config.Source)
 	status.Source = config.RedactDiagnostic(status.Source, src)
 	status.ErrorClass = config.RedactDiagnostic(status.ErrorClass, src)
 	status.Remediation = config.RedactDiagnostic(status.Remediation, src)
+	status.RedactedToken = config.RedactDiagnostic(status.RedactedToken, src)
+	if status.Present && status.RedactedToken == "" {
+		status.RedactedToken = credential.ResolvedToken{Value: config.Token(src)}.RedactToken()
+	}
 	for i := range status.AvailableSources {
 		status.AvailableSources[i] = config.RedactDiagnostic(status.AvailableSources[i], src)
 	}
