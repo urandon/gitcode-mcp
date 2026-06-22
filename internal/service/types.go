@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"time"
 
 	"gitcode-mcp/internal/gitcode"
@@ -322,6 +323,34 @@ type SyncResult struct {
 	SyncEventID    string     `json:"sync_event_id"`
 	Freshness      string     `json:"freshness"`
 	GeneratedAt    time.Time  `json:"generated_at"`
+}
+
+type SyncResourcesResult struct {
+	Results      []SyncResult   `json:"results"`
+	SuccessCount int            `json:"success_count"`
+	FailureCount int            `json:"failure_count"`
+	Failures     []ResourceError `json:"failures,omitempty"`
+}
+
+type ResourceError struct {
+	SourceID   string `json:"source_id"`
+	RemoteType string `json:"remote_type"`
+	Err        error  `json:"-"`
+	Message    string `json:"message"`
+}
+
+func (e ResourceError) Error() string {
+	return e.Message
+}
+
+type PartialSyncError struct {
+	Errors       []ResourceError `json:"errors"`
+	SuccessCount int             `json:"success_count"`
+	FailureCount int             `json:"failure_count"`
+}
+
+func (e PartialSyncError) Error() string {
+	return fmt.Sprintf("sync: %d succeeded, %d failed", e.SuccessCount, e.FailureCount)
 }
 
 type RecentChangesRequest struct {

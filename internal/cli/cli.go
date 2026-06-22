@@ -69,6 +69,7 @@ type queryService interface {
 	LinkCheck(context.Context, service.LinkCheckRequest) (service.LinkCheckResult, error)
 	StaleIndex(context.Context, service.StaleIndexRequest) (service.StaleIndexResult, error)
 	SyncToCache(context.Context, service.SyncRequest) (service.SyncResult, error)
+	SyncResources(context.Context, []service.SyncRequest) (*service.SyncResourcesResult, error)
 	CacheStatus(context.Context, service.CacheStatusRequest) (service.CacheStatusResult, error)
 	ExportSnapshot(context.Context, service.ExportSnapshotRequest) (service.ExportSnapshotResult, error)
 	DiffSnapshot(context.Context, service.DiffSnapshotRequest) (service.DiffSnapshotResult, error)
@@ -614,26 +615,44 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		return 0
 	case "sync":
 		if opts.issues || opts.wiki {
-			results := []service.SyncResult{}
+			var reqs []service.SyncRequest
 			if opts.issues {
-				result, err := svc.SyncToCache(ctx, service.SyncRequest{RepoID: opts.repo, RemoteAlias: "issue:42", IdempotencyKey: syncScopedKey(opts.idempotencyKey, "issue")})
-				if err != nil {
-					return writeError(stderr, opts.format, err)
-				}
-				results = append(results, result)
+				reqs = append(reqs, service.SyncRequest{RepoID: opts.repo, RemoteAlias: "issue:42", IdempotencyKey: syncScopedKey(opts.idempotencyKey, "issue")})
 			}
 			if opts.wiki {
-				result, err := svc.SyncToCache(ctx, service.SyncRequest{RepoID: opts.repo, RemoteAlias: "wiki:Home", IdempotencyKey: syncScopedKey(opts.idempotencyKey, "wiki")})
-				if err != nil {
-					return writeError(stderr, opts.format, err)
+				reqs = append(reqs, service.SyncRequest{RepoID: opts.repo, RemoteAlias: "wiki:Home", IdempotencyKey: syncScopedKey(opts.idempotencyKey, "wiki")})
+			}
+			result, syncErr := svc.SyncResources(ctx, reqs)
+			if syncErr != nil {
+				if partial, ok := syncErr.(*service.PartialSyncError); ok {
+					if result != nil && len(result.Results) > 0 {
+						if opts.format == "json" {
+							_ = renderJSON(stdout, result)
+						} else {
+							for _, r := range result.Results {
+								renderSyncText(stdout, r)
+							}
+						}
+					}
+					if result != nil && len(result.Failures) > 0 {
+						for _, f := range result.Failures {
+							fmt.Fprintf(stderr, "sync: %s failed: %s\n", f.SourceID, f.Message)
+						}
+					}
+					if result.SuccessCount == 0 {
+						return writeError(stderr, opts.format, partial)
+					}
+					return 1
 				}
-				results = append(results, result)
+				return writeError(stderr, opts.format, syncErr)
 			}
-			if opts.format == "json" {
-				return renderJSON(stdout, results)
-			}
-			for _, result := range results {
-				renderSyncText(stdout, result)
+			if result != nil {
+				if opts.format == "json" {
+					return renderJSON(stdout, result)
+				}
+				for _, r := range result.Results {
+					renderSyncText(stdout, r)
+				}
 			}
 			return 0
 		}

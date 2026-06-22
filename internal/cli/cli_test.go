@@ -570,6 +570,14 @@ func (s *spyService) SyncToCache(context.Context, service.SyncRequest) (service.
 	s.called("SyncToCache")
 	return service.SyncResult{Status: "succeeded", Counts: service.SyncCounts{Fetched: 1}, IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
 }
+func (s *spyService) SyncResources(_ context.Context, reqs []service.SyncRequest) (*service.SyncResourcesResult, error) {
+	s.called("SyncResources")
+	results := make([]service.SyncResult, len(reqs))
+	for i := range results {
+		results[i] = service.SyncResult{Status: "succeeded", Counts: service.SyncCounts{Fetched: 1}, IdempotencyKey: reqs[i].IdempotencyKey, GeneratedAt: time.Now()}
+	}
+	return &service.SyncResourcesResult{Results: results, SuccessCount: len(results)}, nil
+}
 func (s *spyService) CacheStatus(context.Context, service.CacheStatusRequest) (service.CacheStatusResult, error) {
 	s.called("CacheStatus")
 	return service.CacheStatusResult{RepoID: "fixture-a", WALCapable: true, JournalMode: "wal", Records: 1}, nil

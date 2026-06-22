@@ -1,0 +1,22 @@
+{
+  "covered_outcome_ids": ["outcome-3"],
+  "covered_decommission_ids": ["decommission-4"],
+  "product_surfaces": [
+    "internal/service/service.go — SyncResources method on *Service",
+    "internal/service/types.go — SyncResourcesResult, ResourceError, PartialSyncError structs",
+    "internal/service/service_test.go — TestSyncResourcesAllSuccess, TestSyncResourcesPartialFailure, TestSyncResourcesAllFailure",
+    "internal/cli/cli.go — sync command handler using SyncResources"
+  ],
+  "evidence_type": "go_test",
+  "freshness": "offline_mock_client",
+  "mocks_used": [
+    "fakeGitCodeClient (internal/service/service_test.go:1436) — mock gitcode.Client",
+    "cache.NewInMemorySQLiteStore — in-memory SQLite cache store"
+  ],
+  "production_files_modified": [
+    "internal/service/service.go",
+    "internal/service/types.go",
+    "internal/service/service_test.go",
+    "internal/cli/cli.go"
+  ]
+}

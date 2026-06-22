@@ -1273,6 +1273,155 @@ func seedStore(t *testing.T, ctx context.Context, store cache.Store) {
 	}
 }
 
+func TestSyncResourcesAllSuccess(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		issue:    gitcode.Issue{Number: 42, Title: "Test Issue", Body: "issue body", State: "open", CreatedAt: base, UpdatedAt: base},
+		comments: []gitcode.Comment{{ID: "c1", Author: "author", Body: "comment", CreatedAt: base, UpdatedAt: base}},
+		wiki:     gitcode.WikiPage{Slug: "Home", Title: "Home", Body: "wiki body", Revision: "rev-1", CreatedAt: base, UpdatedAt: base},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "sync-resources-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	reqs := []SyncRequest{
+		{RepoID: "sync-resources-a", RemoteAlias: "issue:42", IdempotencyKey: "all-success-issue"},
+		{RepoID: "sync-resources-a", RemoteAlias: "wiki:Home", IdempotencyKey: "all-success-wiki"},
+	}
+	result, err := svc.SyncResources(ctx, reqs)
+	if err != nil {
+		t.Fatalf("SyncResources returned unexpected error: %v", err)
+	}
+	if result.SuccessCount != 2 {
+		t.Fatalf("SuccessCount = %d, want 2", result.SuccessCount)
+	}
+	if result.FailureCount != 0 {
+		t.Fatalf("FailureCount = %d, want 0", result.FailureCount)
+	}
+	if len(result.Failures) != 0 {
+		t.Fatalf("Failures length = %d, want 0", len(result.Failures))
+	}
+	if len(result.Results) != 2 {
+		t.Fatalf("Results length = %d, want 2", len(result.Results))
+	}
+	if result.Results[0].Counts.Fetched <= 0 {
+		t.Fatalf("Results[0].Counts.Fetched = %d, want > 0", result.Results[0].Counts.Fetched)
+	}
+	if result.Results[1].Counts.Fetched <= 0 {
+		t.Fatalf("Results[1].Counts.Fetched = %d, want > 0", result.Results[1].Counts.Fetched)
+	}
+	if _, err := store.GetSourceScoped(ctx, "sync-resources-a", "ISSUE-42"); err != nil {
+		t.Fatalf("issue source not committed to cache: %v", err)
+	}
+	if _, err := store.GetSourceScoped(ctx, "sync-resources-a", "WIKI-HOME"); err != nil {
+		t.Fatalf("wiki source not committed to cache: %v", err)
+	}
+}
+
+func TestSyncResourcesPartialFailure(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		issue:    gitcode.Issue{Number: 42, Title: "Test Issue", Body: "issue body", State: "open", CreatedAt: base, UpdatedAt: base},
+		comments: []gitcode.Comment{{ID: "c1", Author: "author", Body: "comment", CreatedAt: base, UpdatedAt: base}},
+		errors:   []error{nil, gitcode.ErrNotFound{Endpoint: "/wiki", ID: "Home", Message: "not found"}},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "sync-resources-b", Owner: "owner-b", Name: "repo-b", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	reqs := []SyncRequest{
+		{RepoID: "sync-resources-b", RemoteAlias: "issue:42", IdempotencyKey: "partial-issue"},
+		{RepoID: "sync-resources-b", RemoteAlias: "wiki:Home", IdempotencyKey: "partial-wiki"},
+	}
+	result, err := svc.SyncResources(ctx, reqs)
+	if err == nil {
+		t.Fatal("SyncResources expected PartialSyncError, got nil")
+	}
+	var partial *PartialSyncError
+	if !errors.As(err, &partial) {
+		t.Fatalf("SyncResources error is not *PartialSyncError: %T %v", err, err)
+	}
+	if result.SuccessCount != 1 {
+		t.Fatalf("SuccessCount = %d, want 1", result.SuccessCount)
+	}
+	if result.FailureCount != 1 {
+		t.Fatalf("FailureCount = %d, want 1", result.FailureCount)
+	}
+	if len(result.Failures) != 1 {
+		t.Fatalf("Failures length = %d, want 1", len(result.Failures))
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("Results length = %d, want 1", len(result.Results))
+	}
+	if result.Results[0].Counts.Fetched <= 0 {
+		t.Fatalf("Results[0].Counts.Fetched = %d, want > 0", result.Results[0].Counts.Fetched)
+	}
+	if result.Failures[0].Err == nil {
+		t.Fatal("Failures[0].Err is nil")
+	}
+	if !strings.Contains(partial.Error(), "1 succeeded") || !strings.Contains(partial.Error(), "1 failed") {
+		t.Fatalf("PartialSyncError.Error() = %q, want contains success/failure counts", partial.Error())
+	}
+	if _, err := store.GetSourceScoped(ctx, "sync-resources-b", "ISSUE-42"); err != nil {
+		t.Fatalf("issue source not committed to cache: %v", err)
+	}
+}
+
+func TestSyncResourcesAllFailure(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeGitCodeClient{
+		errors: []error{
+			gitcode.ErrNotFound{Endpoint: "/issue", ID: "42", Message: "not found"},
+			gitcode.ErrNotFound{Endpoint: "/wiki", ID: "Home", Message: "not found"},
+		},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "sync-resources-c", Owner: "owner-c", Name: "repo-c", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	reqs := []SyncRequest{
+		{RepoID: "sync-resources-c", RemoteAlias: "issue:42", IdempotencyKey: "all-fail-issue"},
+		{RepoID: "sync-resources-c", RemoteAlias: "wiki:Home", IdempotencyKey: "all-fail-wiki"},
+	}
+	result, err := svc.SyncResources(ctx, reqs)
+	if err == nil {
+		t.Fatal("SyncResources expected PartialSyncError, got nil")
+	}
+	var partial *PartialSyncError
+	if !errors.As(err, &partial) {
+		t.Fatalf("SyncResources error is not *PartialSyncError: %T %v", err, err)
+	}
+	if result.SuccessCount != 0 {
+		t.Fatalf("SuccessCount = %d, want 0", result.SuccessCount)
+	}
+	if result.FailureCount != 2 {
+		t.Fatalf("FailureCount = %d, want 2", result.FailureCount)
+	}
+	if len(result.Failures) != 2 {
+		t.Fatalf("Failures length = %d, want 2", len(result.Failures))
+	}
+	if len(result.Results) != 0 {
+		t.Fatalf("Results length = %d, want 0", len(result.Results))
+	}
+}
+
 func seededSyncService(t *testing.T, ctx context.Context, client gitcode.Client) *Service {
 	t.Helper()
 	store, err := cache.NewInMemorySQLiteStore(ctx)

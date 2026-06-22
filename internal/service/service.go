@@ -906,6 +906,65 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 	return SyncResult{IdempotencyKey: key, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), GeneratedAt: s.now().UTC()}, nil
 }
 
+// SyncResources processes multiple SyncRequest values independently via SyncToCache.
+// Each resource is synced atomically; failures do not short-circuit remaining resources.
+// On any failure, the returned (*SyncResourcesResult, error) pair carries a PartialSyncError
+// with structured per-resource failure details. Results always contains entries from
+// successful SyncToCache calls; Failures contains entries from failed calls.
+// Callers should check PartialSyncError before using the result.
+func (s *Service) SyncResources(ctx context.Context, reqs []SyncRequest) (*SyncResourcesResult, error) {
+	result := &SyncResourcesResult{
+		Results: make([]SyncResult, 0, len(reqs)),
+		Failures: make([]ResourceError, 0),
+	}
+	var partial *PartialSyncError
+	for i, req := range reqs {
+		if err := ctx.Err(); err != nil {
+			re := ResourceError{
+				SourceID:   req.StableID,
+				RemoteType: "",
+				Err:        err,
+				Message:    fmt.Sprintf("sync resources: context cancelled at request %d", i),
+			}
+			result.Failures = append(result.Failures, re)
+			continue
+		}
+		syncResult, err := s.SyncToCache(ctx, req)
+		if err != nil {
+			remoteType := ""
+			if req.AliasType != "" {
+				remoteType = req.AliasType
+			}
+			sourceID := req.StableID
+			if sourceID == "" {
+				sourceID = req.RemoteAlias
+			}
+			re := ResourceError{
+				SourceID:   sourceID,
+				RemoteType: remoteType,
+				Err:        err,
+				Message:    err.Error(),
+			}
+			result.Failures = append(result.Failures, re)
+			continue
+		}
+		result.Results = append(result.Results, syncResult)
+	}
+	result.SuccessCount = len(result.Results)
+	result.FailureCount = len(result.Failures)
+	if result.FailureCount > 0 {
+		partial = &PartialSyncError{
+			Errors:       result.Failures,
+			SuccessCount: result.SuccessCount,
+			FailureCount: result.FailureCount,
+		}
+	}
+	if partial != nil {
+		return result, partial
+	}
+	return result, nil
+}
+
 func (s *Service) CreateIssue(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
 	if strings.TrimSpace(req.Title) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "title", Message: "title is required"}
