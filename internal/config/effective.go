@@ -180,6 +180,7 @@ func (p ChainCredentialProvider) Status(ctx context.Context, eff EffectiveConfig
 	if last.StoreMode != "" {
 		status.StoreMode = last.StoreMode
 	}
+	available = append(available, "none")
 	status.AvailableSources = uniqueStrings(available)
 	return status
 }

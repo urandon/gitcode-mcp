@@ -50,6 +50,7 @@ var commands = []string{
 	"doctor",
 	"migrate-cache",
 	"repo",
+	"bind",
 }
 
 type queryService interface {
@@ -186,7 +187,7 @@ func executeWithFactoryAndDeps(args []string, stdout io.Writer, stderr io.Writer
 		fmt.Fprintf(stdout, "gitcode-mcp %s\n", version)
 		return 0
 	}
-	if args[0] == "config" || args[0] == "auth" || args[0] == "doctor" || args[0] == "migrate-cache" {
+	if args[0] == "config" || args[0] == "auth" || args[0] == "doctor" || args[0] == "migrate-cache" || args[0] == "bind" {
 		return executeLocalCommand(args, stdout, stderr, deps)
 	}
 	if !isKnownCommand(args[0]) {
@@ -374,6 +375,9 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 	}
 	if command == "migrate-cache" {
 		return executeMigrateCacheCommand(context.Background(), opts, stdout, stderr, deps)
+	}
+	if command == "bind" {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "bind", Message: "use repo add to create repository bindings"})
 	}
 	sub, ok := firstArg(rest)
 	if !ok {
@@ -1374,9 +1378,10 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH cache database path")
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
 	case "sync":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO [--issues] [--wiki] [--index] [--id ID] [--input REMOTE_ALIAS] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s [--live] --repo REPO [--issues] [--wiki] [--index] [--id ID] [--input REMOTE_ALIAS] [--idempotency-key KEY]\n\n", command)
 		fmt.Fprintln(w, "Synchronize cached records with the configured provider.")
 		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --live              use live GitCode API provider for sync")
 		fmt.Fprintln(w, "  --repo REPO         repository id")
 		fmt.Fprintln(w, "  --issues            sync issue records")
 		fmt.Fprintln(w, "  --wiki              sync wiki records")
@@ -1543,6 +1548,15 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  status      show repository binding status")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Run gitcode-mcp repo SUBCOMMAND --help for details.")
+	case "bind":
+		fmt.Fprintln(w, "Usage: gitcode-mcp bind --repo-owner OWNER --repo REPO")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Bind a GitCode repository to the cache. This compatibility help surface maps to repo add.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo-owner OWNER  repository owner (required)")
+		fmt.Fprintln(w, "  --repo REPO         repository name (required)")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	default:
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s [flags]\n\n", command)
 		fmt.Fprintln(w, "Flags:")
