@@ -232,6 +232,9 @@ func (s *SQLiteStore) searchSourcesFallback(ctx context.Context, query SearchQue
 }
 
 func (s *SQLiteStore) searchSourcesFTS(ctx context.Context, query SearchQuery) ([]SearchResult, error) {
+	if err := s.repairSearchProjection(ctx, query.RepoID); err != nil {
+		return nil, err
+	}
 	needle := normalizeSearchQuery(query.Query)
 	match := ftsMatchQuery(needle)
 	rows, err := s.db.QueryContext(ctx, `SELECT s.repo_id, s.id, s.path, s.title, s.body
@@ -244,6 +247,44 @@ ORDER BY s.repo_id, s.id, s.path`, query.RepoID, query.RepoID, query.Kind, query
 	}
 	defer rows.Close()
 	return scanSearchResults(rows, needle, query.Limit)
+}
+
+func (s *SQLiteStore) repairSearchProjection(ctx context.Context, repoID string) (err error) {
+	var missing int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*)
+FROM sources s
+WHERE (? = '' OR s.repo_id = ?)
+  AND NOT EXISTS (SELECT 1 FROM fts_index f WHERE f.repo_id = s.repo_id AND f.source_id = s.id)`, repoID, repoID).Scan(&missing); err != nil {
+		return err
+	}
+	if missing == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer txRollbackOnError(tx, &err)
+	rows, err := tx.QueryContext(ctx, `SELECT repo_id, id, path, title, body FROM sources s
+WHERE (? = '' OR s.repo_id = ?)
+  AND NOT EXISTS (SELECT 1 FROM fts_index f WHERE f.repo_id = s.repo_id AND f.source_id = s.id)`, repoID, repoID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var source Source
+		if err = rows.Scan(&source.RepoID, &source.ID, &source.Path, &source.Title, &source.Body); err != nil {
+			return err
+		}
+		if err = upsertSearchProjectionTx(ctx, tx, source, true); err != nil {
+			return err
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func scanSearchResults(rows *sql.Rows, needle string, limit int) ([]SearchResult, error) {

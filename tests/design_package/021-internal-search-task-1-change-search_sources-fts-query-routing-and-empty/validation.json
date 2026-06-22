@@ -1,0 +1,17 @@
+{
+  "covered_outcome_ids": [
+    "outcome-7"
+  ],
+  "covered_decommission_ids": [
+    "decommission-7"
+  ],
+  "product_surfaces": [
+    "internal/cache.SQLiteStore.SearchSources",
+    "internal/service.Service.SearchSources",
+    "internal/mcp search_sources tool over stdio JSON-RPC"
+  ],
+  "evidence_type": "offline Go package/runtime tests plus repository diff whitespace check",
+  "freshness": "current working tree binary/test packages with fixture-synced cache data; live validation disabled",
+  "mocks_used": false,
+  "production_files_modified": []
+}

@@ -355,7 +355,7 @@ func (s *Server) Serve() error {
 	buf := make([]byte, 0, 4096)
 	for {
 		line, err := readLineFrom(s.reader, buf[:0])
-		if err == io.EOF {
+		if err == io.EOF || errors.Is(err, io.ErrClosedPipe) {
 			return nil
 		}
 		if err != nil {

@@ -63,6 +63,16 @@ func TestNewWithModeFixture(t *testing.T) {
 	if _, err := store.GetSourceScoped(ctx, "fixture-a", "WIKI-HOME"); err != nil {
 		t.Fatalf("fixture wiki source missing: %v", err)
 	}
+	if _, err := svc.Index(ctx, OperationRequest{RepoID: "fixture-a", Mode: "full"}); err != nil {
+		t.Fatalf("Index returned error: %v", err)
+	}
+	results, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: "test", Limit: 20})
+	if err != nil {
+		t.Fatalf("fixture search_sources test returned error: %v", err)
+	}
+	if len(results.Results) == 0 {
+		t.Fatalf("fixture search_sources test returned no results")
+	}
 }
 
 func TestNewWithModeLive(t *testing.T) {
@@ -501,6 +511,14 @@ func TestSearchSources(t *testing.T) {
 	}
 	if results.RepoID != "fixture-a" || results.Query != "backlog" || results.Results[0].ID == "" || results.Results[0].Path == "" || results.Results[0].Title == "" || results.Results[0].Kind == "" || results.Results[0].Status == "" || results.Results[0].Snippet == "" || results.Results[0].LineStart == nil || results.Results[0].LineEnd == nil {
 		t.Fatalf("SearchSources result missing contract fields: %#v", results)
+	}
+
+	missing, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: "NONEXISTENT", Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchSources missing query returned error: %v", err)
+	}
+	if len(missing.Results) != 0 {
+		t.Fatalf("SearchSources missing query returned %d results, want 0", len(missing.Results))
 	}
 }
 
@@ -1293,6 +1311,13 @@ func TestQueryEdgeCases(t *testing.T) {
 	var notFound ErrNotFound
 	if !errors.As(err, &notFound) {
 		t.Fatalf("not found error = %v, want ErrNotFound", err)
+	}
+	search, err := New(empty).SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: "backlog"})
+	if err != nil {
+		t.Fatalf("empty cache search error = %v, want nil", err)
+	}
+	if len(search.Results) != 0 {
+		t.Fatalf("empty cache search results = %d, want 0", len(search.Results))
 	}
 	_, err = svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a"})
 	var invalid ErrInvalidQuery

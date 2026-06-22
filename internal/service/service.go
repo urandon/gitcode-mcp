@@ -116,7 +116,7 @@ func (sanitizedFixtureClient) ListIssues(context.Context, gitcode.IssueListReque
 
 func (sanitizedFixtureClient) GetIssue(context.Context, gitcode.IssueRequest) (gitcode.Issue, error) {
 	now := fixtureNow()
-	return gitcode.Issue{Number: 42, Title: "Fixture Issue", Body: "# Issue\n\nremote issue body", State: "open", CreatedAt: now, UpdatedAt: now}, nil
+	return gitcode.Issue{Number: 42, Title: "Fixture Issue", Body: "# Issue\n\nremote fixture issue body for offline search test", State: "open", CreatedAt: now, UpdatedAt: now}, nil
 }
 
 func (sanitizedFixtureClient) ListIssueComments(context.Context, gitcode.IssueRequest) (gitcode.Page[gitcode.Comment], error) {
@@ -126,12 +126,12 @@ func (sanitizedFixtureClient) ListIssueComments(context.Context, gitcode.IssueRe
 
 func (sanitizedFixtureClient) GetWikiPage(context.Context, gitcode.WikiPageRequest) (gitcode.WikiPage, error) {
 	now := fixtureNow()
-	return gitcode.WikiPage{Slug: "Home", Title: "Fixture Wiki", Body: "# Wiki\n\nremote wiki body", Revision: "rev-home", CreatedAt: now, UpdatedAt: now}, nil
+	return gitcode.WikiPage{Slug: "Home", Title: "Fixture Wiki", Body: "# Wiki\n\nremote fixture wiki body for offline search test", Revision: "rev-home", CreatedAt: now, UpdatedAt: now}, nil
 }
 
 func (sanitizedFixtureClient) ListWikiPages(context.Context, gitcode.WikiListRequest) (gitcode.Page[gitcode.WikiPage], error) {
 	now := fixtureNow()
-	return gitcode.Page[gitcode.WikiPage]{Items: []gitcode.WikiPage{{Slug: "Home", Title: "Fixture Wiki", Body: "# Wiki\n\nremote wiki body", Revision: "rev-home", CreatedAt: now, UpdatedAt: now}}, Page: 1, PerPage: 1, TotalCount: 1}, nil
+	return gitcode.Page[gitcode.WikiPage]{Items: []gitcode.WikiPage{{Slug: "Home", Title: "Fixture Wiki", Body: "# Wiki\n\nremote fixture wiki body for offline search test", Revision: "rev-home", CreatedAt: now, UpdatedAt: now}}, Page: 1, PerPage: 1, TotalCount: 1}, nil
 }
 
 func (sanitizedFixtureClient) Search(context.Context, gitcode.SearchRequest) (gitcode.Page[gitcode.SearchResult], error) {
@@ -333,9 +333,6 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 	results, err := s.store.SearchSources(ctx, cache.SearchQuery{RepoID: repoID, Query: req.Query, Kind: req.Kind, Limit: req.Limit})
 	if err != nil {
 		return SearchSourcesResult{}, normalizeError(err, "search", req.Query)
-	}
-	if len(results) == 0 {
-		return SearchSourcesResult{}, ErrCacheEmpty{Message: "no cached search results"}
 	}
 	out := make([]SearchSourceResult, 0, len(results))
 	updated := map[string]time.Time{}
