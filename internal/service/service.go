@@ -593,6 +593,7 @@ func (s *Service) SyncStatus(ctx context.Context, req ListSourcesRequest) (SyncS
 	if !latestCompleted.CompletedAt.IsZero() {
 		result.LastSyncCompletedAt = latestCompleted.CompletedAt.UTC()
 	}
+	result.ZeroDelta = latestCompleted.ZeroDelta
 	result.CacheEmpty = len(result.Results) == 0 && len(result.Warnings) == 0
 	return result, nil
 }
@@ -912,7 +913,8 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 	if graph.SyncStatus != nil {
 		revision = graph.SyncStatus.RemoteRevision
 	}
-	graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "succeeded", IdempotencyKey: key, Message: syncEventMessage(counts), CreatedAt: syncCompletedAt, StartedAt: syncStartedAt, CompletedAt: syncCompletedAt})
+	zeroDelta := counts.Fetched > 0 && counts.Skipped == counts.Fetched && counts.Updated == 0 && counts.Inserted == 0 && counts.Conflicts == 0
+	graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "succeeded", IdempotencyKey: key, Message: syncEventMessage(counts), CreatedAt: syncCompletedAt, StartedAt: syncStartedAt, CompletedAt: syncCompletedAt, ZeroDelta: zeroDelta})
 	if err := s.store.UpsertSyncGraph(ctx, syncGraphFromSourceGraph(req.RepoID, graph)); err != nil {
 		if inProgressRecorded {
 			_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, err, s.now().UTC()))
@@ -925,7 +927,7 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 		}
 		return SyncResult{}, err
 	}
-	return SyncResult{IdempotencyKey: key, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), GeneratedAt: syncCompletedAt, StartedAt: syncStartedAt, CompletedAt: syncCompletedAt}, nil
+	return SyncResult{IdempotencyKey: key, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), GeneratedAt: syncCompletedAt, StartedAt: syncStartedAt, CompletedAt: syncCompletedAt, ZeroDelta: zeroDelta}, nil
 }
 
 // SyncResources processes multiple SyncRequest values independently via SyncToCache.
@@ -1447,7 +1449,7 @@ func syncResultFromEvent(event cache.SyncEvent, generated time.Time) SyncResult 
 	if event.Status != "succeeded" {
 		freshness = string(FreshnessUnknown)
 	}
-	return SyncResult{IdempotencyKey: event.IdempotencyKey, Status: event.Status, Counts: counts, SyncEventID: event.ID, Freshness: freshness, GeneratedAt: generated, StartedAt: event.StartedAt, CompletedAt: event.CompletedAt}
+	return SyncResult{IdempotencyKey: event.IdempotencyKey, Status: event.Status, Counts: counts, SyncEventID: event.ID, Freshness: freshness, GeneratedAt: generated, StartedAt: event.StartedAt, CompletedAt: event.CompletedAt, ZeroDelta: event.ZeroDelta}
 }
 
 func failedSyncEvent(event cache.SyncEvent, cause error, at time.Time) cache.SyncEvent {

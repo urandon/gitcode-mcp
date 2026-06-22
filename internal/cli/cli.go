@@ -897,7 +897,7 @@ func renderSyncStatusText(w io.Writer, result service.SyncStatusResult) {
 }
 
 func renderSyncStatusSummaryText(w io.Writer, result service.SyncStatusSummaryResult) {
-	fmt.Fprintf(w, "repo_id: %s\nfresh_count: %d\nstale_count: %d\ncache_empty: %t\n", result.RepoID, result.FreshCount, result.StaleCount, result.CacheEmpty)
+	fmt.Fprintf(w, "repo_id: %s\nfresh_count: %d\nstale_count: %d\ncache_empty: %t\nzero_delta: %t\n", result.RepoID, result.FreshCount, result.StaleCount, result.CacheEmpty, result.ZeroDelta)
 }
 
 func renderRecentText(w io.Writer, result service.RecentChangesResult) {
@@ -927,7 +927,7 @@ func renderOperationText(w io.Writer, result service.OperationResult) {
 }
 
 func renderSyncText(w io.Writer, result service.SyncResult) {
-	fmt.Fprintf(w, "sync: %s fetched=%d updated=%d inserted=%d skipped=%d conflicts=%d idempotency_key=%s replayed=%t\n", result.Status, result.Counts.Fetched, result.Counts.Updated, result.Counts.Inserted, result.Counts.Skipped, result.Counts.Conflicts, result.IdempotencyKey, result.Replayed)
+	fmt.Fprintf(w, "sync: %s fetched=%d updated=%d inserted=%d skipped=%d conflicts=%d idempotency_key=%s replayed=%t zero_delta=%t\n", result.Status, result.Counts.Fetched, result.Counts.Updated, result.Counts.Inserted, result.Counts.Skipped, result.Counts.Conflicts, result.IdempotencyKey, result.Replayed, result.ZeroDelta)
 }
 
 func renderCacheStatusText(w io.Writer, result service.CacheStatusResult) {

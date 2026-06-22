@@ -145,7 +145,7 @@ func TestNewSQLiteStoreVersionTwoBlockedWithMigrateHint(t *testing.T) {
 	if !errors.Is(err, ErrSchemaVersionIncompatible) {
 		t.Fatalf("NewSQLiteStore error = %v, want ErrSchemaVersionIncompatible", err)
 	}
-	if !strings.Contains(err.Error(), "detected=2") || !strings.Contains(err.Error(), "expected=5") || !strings.Contains(err.Error(), "migrate-cache") {
+	if !strings.Contains(err.Error(), "detected=2") || !strings.Contains(err.Error(), "expected=6") || !strings.Contains(err.Error(), "migrate-cache") {
 		t.Fatalf("NewSQLiteStore error is not actionable: %v", err)
 	}
 }
@@ -192,6 +192,47 @@ func TestInitialMigration(t *testing.T) {
 		}
 	}
 	assertEmbeddingNullable(t, ctx, store.db)
+}
+
+func TestMigrationZeroDelta(t *testing.T) {
+	ctx := context.Background()
+	db := openTempSchemaDB(t, ctx)
+	defer db.Close()
+	for _, m := range migrations {
+		if m.version > 5 {
+			break
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("begin migration v%d: %v", m.version, err)
+		}
+		if err := m.apply(ctx, tx, true); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("apply migration v%d: %v", m.version, err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit migration v%d: %v", m.version, err)
+		}
+	}
+	setSchemaVersion(t, ctx, db, 5)
+	if err := runMigrations(ctx, db, true); err != nil {
+		t.Fatalf("runMigrations returned error: %v", err)
+	}
+	columns := syncEventColumns(t, ctx, db)
+	column, ok := columns["zero_delta"]
+	if !ok {
+		t.Fatalf("zero_delta column missing; columns=%v", columns)
+	}
+	if column.notNull != 1 || column.defaultValue != "0" {
+		t.Fatalf("zero_delta notNull/default = %d/%q, want 1/0", column.notNull, column.defaultValue)
+	}
+	version, err := schemaVersion(ctx, db)
+	if err != nil {
+		t.Fatalf("schemaVersion returned error: %v", err)
+	}
+	if version != currentSchemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, currentSchemaVersion)
+	}
 }
 
 func TestRepoScopedCacheMigrationConstraints(t *testing.T) {
@@ -348,6 +389,41 @@ func indexNames(t *testing.T, ctx context.Context, db *sql.DB) map[string]bool {
 		t.Fatalf("index rows: %v", err)
 	}
 	return names
+}
+
+type tableColumn struct {
+	columnType   string
+	notNull      int
+	defaultValue string
+	pk           int
+}
+
+func syncEventColumns(t *testing.T, ctx context.Context, db *sql.DB) map[string]tableColumn {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(sync_events)`)
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(sync_events) returned error: %v", err)
+	}
+	defer rows.Close()
+	columns := map[string]tableColumn{}
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, pk int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatalf("scan table_info: %v", err)
+		}
+		column := tableColumn{columnType: columnType, notNull: notNull, pk: pk}
+		if defaultValue.Valid {
+			column.defaultValue = defaultValue.String
+		}
+		columns[name] = column
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("table_info rows error: %v", err)
+	}
+	return columns
 }
 
 func assertEmbeddingNullable(t *testing.T, ctx context.Context, db *sql.DB) {

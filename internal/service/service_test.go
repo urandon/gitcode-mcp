@@ -1422,6 +1422,115 @@ func TestSyncResourcesAllFailure(t *testing.T) {
 	}
 }
 
+func TestZeroDeltaPersistentEvent(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 22, 13, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		issue:    gitcode.Issue{Number: 42, Title: "Zero Delta Issue", Body: "unchanged body", State: "open", CreatedAt: base, UpdatedAt: base},
+		comments: []gitcode.Comment{{ID: "c1", Author: "author", Body: "comment", CreatedAt: base, UpdatedAt: base}},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "zero-delta", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	first, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "zero-delta", RemoteAlias: "issue:42", IdempotencyKey: "zero-delta-first"})
+	if err != nil {
+		t.Fatalf("first SyncToCache returned error: %v", err)
+	}
+	if first.ZeroDelta {
+		t.Fatal("first SyncToCache ZeroDelta = true, want false")
+	}
+	second, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "zero-delta", RemoteAlias: "issue:42", IdempotencyKey: "zero-delta-second"})
+	if err != nil {
+		t.Fatalf("second SyncToCache returned error: %v", err)
+	}
+	if !second.ZeroDelta {
+		t.Fatal("second SyncToCache ZeroDelta = false, want true")
+	}
+	if second.Counts.Fetched == 0 || second.Counts.Skipped != second.Counts.Fetched {
+		t.Fatalf("second counts = %#v, want fetched > 0 and skipped == fetched", second.Counts)
+	}
+	if second.Counts.Updated != 0 || second.Counts.Inserted != 0 || second.Counts.Conflicts != 0 {
+		t.Fatalf("second counts = %#v, want no mutations", second.Counts)
+	}
+	stored, err := store.GetSyncEventByKey(ctx, "zero-delta-second")
+	if err != nil {
+		t.Fatalf("GetSyncEventByKey returned error: %v", err)
+	}
+	if stored == nil || !stored.ZeroDelta {
+		t.Fatalf("stored zero-delta event = %#v, want ZeroDelta true", stored)
+	}
+	var storedCounts SyncCounts
+	if err := json.Unmarshal([]byte(stored.Message), &storedCounts); err != nil {
+		t.Fatalf("stored sync event counts JSON invalid: %v", err)
+	}
+	if storedCounts.Fetched != second.Counts.Fetched || storedCounts.Skipped != second.Counts.Skipped {
+		t.Fatalf("stored counts = %#v, want %#v", storedCounts, second.Counts)
+	}
+	events, err := store.ListCompletedSyncEventsScoped(ctx, "zero-delta")
+	if err != nil {
+		t.Fatalf("ListCompletedSyncEventsScoped returned error: %v", err)
+	}
+	completedForSource := 0
+	for _, event := range events {
+		if event.SourceID == "ISSUE-42" && event.Status == "succeeded" {
+			completedForSource++
+		}
+	}
+	if completedForSource != 2 {
+		t.Fatalf("completed sync events for ISSUE-42 = %d, want 2", completedForSource)
+	}
+	replayed, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "zero-delta", RemoteAlias: "issue:42", IdempotencyKey: "zero-delta-second"})
+	if err != nil {
+		t.Fatalf("replayed SyncToCache returned error: %v", err)
+	}
+	if !replayed.Replayed || !replayed.ZeroDelta {
+		t.Fatalf("replayed result = %#v, want replayed zero-delta", replayed)
+	}
+	summary, err := svc.SyncStatus(ctx, ListSourcesRequest{RepoID: "zero-delta"})
+	if err != nil {
+		t.Fatalf("SyncStatus returned error: %v", err)
+	}
+	if !summary.ZeroDelta {
+		t.Fatalf("SyncStatus ZeroDelta = false, want true: %#v", summary)
+	}
+}
+
+func TestZeroDeltaFalseWhenContentChanges(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 22, 14, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{issue: gitcode.Issue{Number: 42, Title: "Changing Issue", Body: "first body", State: "open", CreatedAt: base, UpdatedAt: base}}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "zero-delta-change", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	if _, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "zero-delta-change", RemoteAlias: "issue:42", IdempotencyKey: "zero-delta-change-first"}); err != nil {
+		t.Fatalf("first SyncToCache returned error: %v", err)
+	}
+	client.issue.Body = "second body"
+	client.issue.UpdatedAt = base.Add(time.Minute)
+	result, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "zero-delta-change", RemoteAlias: "issue:42", IdempotencyKey: "zero-delta-change-second"})
+	if err != nil {
+		t.Fatalf("second SyncToCache returned error: %v", err)
+	}
+	if result.ZeroDelta {
+		t.Fatalf("ZeroDelta = true, want false for changed content: %#v", result)
+	}
+	if result.Counts.Updated != 1 {
+		t.Fatalf("counts = %#v, want Updated 1", result.Counts)
+	}
+}
+
 func TestSyncEventTimestamps(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 6, 22, 10, 0, 0, 0, time.UTC)

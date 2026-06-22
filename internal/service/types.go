@@ -278,6 +278,7 @@ type SyncStatusSummaryResult struct {
 	LastSyncAt          time.Time          `json:"last_sync_at"`
 	LastSyncStartedAt   time.Time          `json:"last_sync_started_at"`
 	LastSyncCompletedAt time.Time          `json:"last_sync_completed_at"`
+	ZeroDelta           bool               `json:"zero_delta"`
 	CacheEmpty          bool               `json:"cache_empty"`
 	Limit               int                `json:"limit"`
 	Offset              int                `json:"offset"`
@@ -327,6 +328,7 @@ type SyncResult struct {
 	GeneratedAt    time.Time  `json:"generated_at"`
 	StartedAt      time.Time  `json:"started_at"`
 	CompletedAt    time.Time  `json:"completed_at"`
+	ZeroDelta      bool       `json:"zero_delta"`
 }
 
 type SyncResourcesResult struct {

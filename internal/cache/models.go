@@ -339,6 +339,7 @@ type SyncEvent struct {
 	CreatedAt      time.Time
 	StartedAt      time.Time
 	CompletedAt    time.Time
+	ZeroDelta      bool
 }
 
 type SyncStatus struct {

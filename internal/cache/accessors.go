@@ -455,14 +455,19 @@ func recordSyncEventTx(ctx context.Context, tx *sql.Tx, event SyncEvent) error {
 	}
 	startedRaw := formatTimeOrEmpty(event.StartedAt)
 	completedRaw := formatTimeOrEmpty(event.CompletedAt)
-	return execTx(ctx, tx, `INSERT INTO sync_events (repo_id, id, source_id, remote_type, remote_id, remote_revision, status, idempotency_key, message, created_at, started_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, id) DO UPDATE SET status = excluded.status, message = excluded.message, started_at = excluded.started_at, completed_at = excluded.completed_at`, event.RepoID, event.ID, event.SourceID, event.RemoteType, event.RemoteID, event.RemoteRevision, event.Status, event.IdempotencyKey, event.Message, event.CreatedAt.Format(time.RFC3339Nano), startedRaw, completedRaw)
+	zeroDelta := 0
+	if event.ZeroDelta {
+		zeroDelta = 1
+	}
+	return execTx(ctx, tx, `INSERT INTO sync_events (repo_id, id, source_id, remote_type, remote_id, remote_revision, status, idempotency_key, message, created_at, started_at, completed_at, zero_delta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, id) DO UPDATE SET status = excluded.status, message = excluded.message, started_at = excluded.started_at, completed_at = excluded.completed_at, zero_delta = excluded.zero_delta`, event.RepoID, event.ID, event.SourceID, event.RemoteType, event.RemoteID, event.RemoteRevision, event.Status, event.IdempotencyKey, event.Message, event.CreatedAt.Format(time.RFC3339Nano), startedRaw, completedRaw, zeroDelta)
 }
 
 func (s *SQLiteStore) GetSyncEventByKey(ctx context.Context, key string) (*SyncEvent, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT repo_id, id, source_id, remote_type, remote_id, remote_revision, status, idempotency_key, message, created_at, started_at, completed_at FROM sync_events WHERE idempotency_key = ? ORDER BY created_at DESC LIMIT 1`, key)
+	row := s.db.QueryRowContext(ctx, `SELECT repo_id, id, source_id, remote_type, remote_id, remote_revision, status, idempotency_key, message, created_at, started_at, completed_at, zero_delta FROM sync_events WHERE idempotency_key = ? ORDER BY created_at DESC LIMIT 1`, key)
 	var event SyncEvent
 	var createdRaw, startedRaw, completedRaw string
-	if err := row.Scan(&event.RepoID, &event.ID, &event.SourceID, &event.RemoteType, &event.RemoteID, &event.RemoteRevision, &event.Status, &event.IdempotencyKey, &event.Message, &createdRaw, &startedRaw, &completedRaw); err != nil {
+	var zeroDelta int
+	if err := row.Scan(&event.RepoID, &event.ID, &event.SourceID, &event.RemoteType, &event.RemoteID, &event.RemoteRevision, &event.Status, &event.IdempotencyKey, &event.Message, &createdRaw, &startedRaw, &completedRaw, &zeroDelta); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -471,11 +476,12 @@ func (s *SQLiteStore) GetSyncEventByKey(ctx context.Context, key string) (*SyncE
 	event.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdRaw)
 	event.StartedAt = parseTimeOrZero(startedRaw)
 	event.CompletedAt = parseTimeOrZero(completedRaw)
+	event.ZeroDelta = zeroDelta != 0
 	return &event, nil
 }
 
 func (s *SQLiteStore) ListCompletedSyncEventsScoped(ctx context.Context, repoID string) ([]SyncEvent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, id, source_id, remote_type, remote_id, remote_revision, status, idempotency_key, message, created_at, started_at, completed_at FROM sync_events WHERE repo_id = ? AND completed_at != '' ORDER BY completed_at ASC`, repoID)
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, id, source_id, remote_type, remote_id, remote_revision, status, idempotency_key, message, created_at, started_at, completed_at, zero_delta FROM sync_events WHERE repo_id = ? AND completed_at != '' ORDER BY completed_at ASC`, repoID)
 	if err != nil {
 		return nil, err
 	}
@@ -484,12 +490,14 @@ func (s *SQLiteStore) ListCompletedSyncEventsScoped(ctx context.Context, repoID 
 	for rows.Next() {
 		var event SyncEvent
 		var createdRaw, startedRaw, completedRaw string
-		if err := rows.Scan(&event.RepoID, &event.ID, &event.SourceID, &event.RemoteType, &event.RemoteID, &event.RemoteRevision, &event.Status, &event.IdempotencyKey, &event.Message, &createdRaw, &startedRaw, &completedRaw); err != nil {
+		var zeroDelta int
+		if err := rows.Scan(&event.RepoID, &event.ID, &event.SourceID, &event.RemoteType, &event.RemoteID, &event.RemoteRevision, &event.Status, &event.IdempotencyKey, &event.Message, &createdRaw, &startedRaw, &completedRaw, &zeroDelta); err != nil {
 			return nil, err
 		}
 		event.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdRaw)
 		event.StartedAt = parseTimeOrZero(startedRaw)
 		event.CompletedAt = parseTimeOrZero(completedRaw)
+		event.ZeroDelta = zeroDelta != 0
 		events = append(events, event)
 	}
 	return events, rows.Err()

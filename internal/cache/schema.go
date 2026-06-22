@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 5
+const currentSchemaVersion = 6
 
 type VersionCompatibility struct {
 	DetectedVersion int
@@ -129,6 +129,7 @@ var migrations = []migration{
 	{version: 3, apply: applyChunkPolicyMigration},
 	{version: 4, apply: applyStoredSnapshotMigration},
 	{version: 5, apply: applySyncEventTimestampsMigration},
+	{version: 6, apply: applySyncEventZeroDeltaMigration},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB, ftsAvailable bool) error {
@@ -294,6 +295,7 @@ func applyInitialMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) e
 	created_at TEXT NOT NULL,
 	started_at TEXT NOT NULL DEFAULT '',
 	completed_at TEXT NOT NULL DEFAULT '',
+	zero_delta INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY(repo_id, id),
 	FOREIGN KEY(repo_id, source_id) REFERENCES sources(repo_id, id) ON DELETE CASCADE
 )`,
@@ -519,6 +521,18 @@ func applySyncEventTimestampsMigration(ctx context.Context, tx *sql.Tx, ftsAvail
 		}
 	}
 	return nil
+}
+
+func applySyncEventZeroDeltaMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
+	columns, err := tableColumns(ctx, tx, "sync_events")
+	if err != nil {
+		return err
+	}
+	if columns["zero_delta"] {
+		return nil
+	}
+	_, err = tx.ExecContext(ctx, `ALTER TABLE sync_events ADD COLUMN zero_delta INTEGER NOT NULL DEFAULT 0`)
+	return err
 }
 
 func tableColumns(ctx context.Context, tx *sql.Tx, table string) (map[string]bool, error) {
