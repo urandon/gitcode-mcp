@@ -1,0 +1,34 @@
+{
+  "schema_version": "triborg.validation-result.v1",
+  "task_id": "006-sync-service-task-1-syncgraph-live-reconciliation",
+  "covered_outcome_ids": ["outcome-1", "outcome-4", "outcome-5", "outcome-7"],
+  "covered_decommission_ids": ["decommission-1", "decommission-2", "decommission-3"],
+  "product_surfaces": [
+    "cmd/gitcode-mcp/main_test.go::TestCLIStartupPlanSelectsLiveProvider/SCN-CLI-LIVE-SYNC-USES-LIVE-PROVIDER exercises the real CLI startup route for gitcode-mcp sync --live with a mocked GitCode-compatible httptest.Server and asserts the mock server is reached while fixture markers ISSUE-42 and WIKI-HOME do not leak into live command output.",
+    "internal/service/service_test.go::TestScenario006LiveGraphValidStagesIssueWikiComments exercises the sync-service live issue/wiki/comment staging path and cache runtime, asserting MOCK-COMMENT-1 is committed on the MOCK-ISSUE-100 issue graph, MOCK-WIKI-LIVE is committed, and fixture records are absent.",
+    "cmd/gitcode-mcp/main_test.go::TestCLIStartupPlanSelectsLiveProvider/SCN-CLI-LIVE-SYNC-INVALID-TOKEN-AUTH-FAILURE is required by run.sh to exercise invalid-token sync --live through the real CLI and mocked HTTP provider, proving live_auth_failure and request count greater than zero; if absent or failing, validation fails as a product gap.",
+    "internal/service/service_test.go::TestScenario006LiveAuthFailureNormalized exercises sync-service failure normalization for live provider 401/403 errors and requires ErrSyncFailure mode live_auth_failure.",
+    "internal/service/service_test.go::TestScenario006LiveGraphInvalidRejectedBeforeCommit exercises live graph validation for missing comment provider ID, unreconciled parent, and forbidden fixture markers, asserting structured live_graph_invalid failure and no cache records/comments committed.",
+    "cmd/gitcode-mcp/main_test.go::TestCLIStartupPlanSelectsLiveProvider/SCN-CLI-OFFLINE-SYNC-NO-HTTP exercises default gitcode-mcp sync without --live through the real CLI startup path with an available mock server and asserts request count remains zero.",
+    "internal/service/service_test.go::TestSyncResourcesCachesFixtureRecords exercises the fixture-mode sync service/cache runtime path to prove existing default fixture-backed behavior remains intact.",
+    "internal/service/*::TestScenario006BulkLiveSyncPartialAtomicity is required by run.sh to exercise bulk live issue/wiki sync through SyncResources with partial structured failures and per-resource atomic cache commits; if absent or failing, validation fails as a product gap.",
+    "go test ./... is run by run.sh as the offline acceptance gate so the materialized scenarios remain executable under the repository-wide test command."
+  ],
+  "evidence_type": "offline_cli_integration_and_runtime_go_test",
+  "freshness": "Current target repository source and current Go test binary at validation execution time with fresh temporary cache/config paths and no live GitCode credentials, live network access, real device access, or OS Keychain access.",
+  "mocks_used": {
+    "httptest.Server": "Mocks only the external GitCode-compatible HTTP server and records request counts while exercising production CLI startup, credential resolution, repository binding, live provider routing, sync service, diagnostics, and cache runtime.",
+    "stubbed live provider payloads": "Used only inside service/runtime tests to replace external GitCode API responses while exercising production sync-service graph validation and cache commit paths.",
+    "environment isolation": "run.sh unsets GITCODE_TOKEN, GITCODE_MCP_TEST_KEYCHAIN_TOKEN, and GITCODE_API_URL before invoking Go tests so validation is deterministic and offline by default."
+  },
+  "production_files_modified": {},
+  "validation_scope": "Validation artifacts are limited to tests/design_package/006-sync-service-task-1-syncgraph-live-reconciliation/. No production source, production docs, runtime code, server code, app code, root AGENTS.md, or product configuration is modified by this validation materialization.",
+  "live_validation": {
+    "enabled": false,
+    "reason": "Live validation is disabled for this task. All evidence is deterministic offline validation using stubbed external dependencies only."
+  },
+  "device_validation": {
+    "enabled": false,
+    "reason": "Device validation is disabled for this task."
+  }
+}

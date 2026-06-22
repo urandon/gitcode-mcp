@@ -89,13 +89,34 @@ func TestScenario005ServiceSanitizedFixtureBoundary(t *testing.T) {
 		name string
 		run  func() error
 	}{
-		{name: "create-issue", run: func() error { _, err := client.CreateIssue(ctx, gitcode.CreateIssueRequest{}, gitcode.WriteOptions{}); return err }},
-		{name: "update-issue", run: func() error { _, err := client.UpdateIssue(ctx, gitcode.UpdateIssueRequest{}, gitcode.WriteOptions{}); return err }},
-		{name: "create-comment", run: func() error { _, err := client.CreateIssueComment(ctx, gitcode.CreateIssueCommentRequest{}, gitcode.WriteOptions{}); return err }},
-		{name: "create-wiki", run: func() error { _, err := client.CreateWikiPage(ctx, gitcode.CreateWikiPageRequest{}, gitcode.WriteOptions{}); return err }},
-		{name: "update-wiki", run: func() error { _, err := client.UpdateWikiPage(ctx, gitcode.UpdateWikiPageRequest{}, gitcode.WriteOptions{}); return err }},
-		{name: "add-label", run: func() error { _, err := client.AddLabel(ctx, gitcode.LabelRequest{}, gitcode.WriteOptions{}); return err }},
-		{name: "remove-label", run: func() error { _, err := client.RemoveLabel(ctx, gitcode.LabelRequest{}, gitcode.WriteOptions{}); return err }},
+		{name: "create-issue", run: func() error {
+			_, err := client.CreateIssue(ctx, gitcode.CreateIssueRequest{}, gitcode.WriteOptions{})
+			return err
+		}},
+		{name: "update-issue", run: func() error {
+			_, err := client.UpdateIssue(ctx, gitcode.UpdateIssueRequest{}, gitcode.WriteOptions{})
+			return err
+		}},
+		{name: "create-comment", run: func() error {
+			_, err := client.CreateIssueComment(ctx, gitcode.CreateIssueCommentRequest{}, gitcode.WriteOptions{})
+			return err
+		}},
+		{name: "create-wiki", run: func() error {
+			_, err := client.CreateWikiPage(ctx, gitcode.CreateWikiPageRequest{}, gitcode.WriteOptions{})
+			return err
+		}},
+		{name: "update-wiki", run: func() error {
+			_, err := client.UpdateWikiPage(ctx, gitcode.UpdateWikiPageRequest{}, gitcode.WriteOptions{})
+			return err
+		}},
+		{name: "add-label", run: func() error {
+			_, err := client.AddLabel(ctx, gitcode.LabelRequest{}, gitcode.WriteOptions{})
+			return err
+		}},
+		{name: "remove-label", run: func() error {
+			_, err := client.RemoveLabel(ctx, gitcode.LabelRequest{}, gitcode.WriteOptions{})
+			return err
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -144,7 +165,7 @@ func TestNewWithModeLive(t *testing.T) {
 	if _, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "fixture-a", RemoteAlias: "issue:42", IdempotencyKey: "mode-live-sync"}); err != nil {
 		t.Fatalf("SyncToCache returned error: %v", err)
 	}
-	source, err := store.GetSourceScoped(ctx, "fixture-a", "ISSUE-42")
+	source, err := store.GetSourceScoped(ctx, "fixture-a", "ISSUE-REMOTE-42")
 	if err != nil {
 		t.Fatalf("live source missing: %v", err)
 	}
@@ -854,6 +875,106 @@ func TestSyncGraphFixtureOfflineReadsIssueWikiCommentsAndChunks(t *testing.T) {
 	}
 	if counts.Records != 2 || counts.Comments != 1 || counts.SyncEvents != 2 || counts.RemoteRevisions != 2 || counts.Chunks == 0 {
 		t.Fatalf("counts = %#v", counts)
+	}
+}
+
+func TestScenario006LiveGraphValidStagesIssueWikiComments(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "live-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	svc := NewWithClient(store, &fakeGitCodeClient{
+		issue:    gitcode.Issue{ID: "MOCK-ISSUE-100", Number: 100, Title: "Mock Issue", Body: "mock issue body", State: "open", CreatedAt: base, UpdatedAt: base},
+		comments: []gitcode.Comment{{ID: "MOCK-COMMENT-1", IssueID: "MOCK-ISSUE-100", Author: "mock-user", Body: "mock comment", CreatedAt: base, UpdatedAt: base}},
+		wiki:     gitcode.WikiPage{ID: "MOCK-WIKI-LIVE", Slug: "Live", Title: "Mock Wiki", Body: "mock wiki body", Revision: "rev-live", CreatedAt: base, UpdatedAt: base},
+	})
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.lockPath = filepath.Join(t.TempDir(), "sync.lock")
+	if _, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "live-a", RemoteAlias: "issue:100", IdempotencyKey: "sc-006-live-issue"}); err != nil {
+		t.Fatalf("live issue sync returned error: %v", err)
+	}
+	if _, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "live-a", RemoteAlias: "wiki:Live", IdempotencyKey: "sc-006-live-wiki"}); err != nil {
+		t.Fatalf("live wiki sync returned error: %v", err)
+	}
+	issue, err := store.GetRecord(ctx, "live-a", "ISSUE-MOCK-ISSUE-100")
+	if err != nil || len(issue.Comments) != 1 || issue.Comments[0].CommentID != "MOCK-COMMENT-1" {
+		t.Fatalf("live issue record = %#v err=%v", issue, err)
+	}
+	if _, err := store.GetRecord(ctx, "live-a", "WIKI-MOCK-WIKI-LIVE"); err != nil {
+		t.Fatalf("live wiki missing: %v", err)
+	}
+	if _, err := store.GetRecord(ctx, "live-a", "ISSUE-42"); err == nil {
+		t.Fatal("fixture issue marker committed in live sync")
+	}
+	if _, err := store.GetRecord(ctx, "live-a", "WIKI-HOME"); err == nil {
+		t.Fatal("fixture wiki marker committed in live sync")
+	}
+}
+
+func TestScenario006LiveGraphInvalidRejectedBeforeCommit(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "live-invalid", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name     string
+		issue    gitcode.Issue
+		comments []gitcode.Comment
+	}{
+		{name: "missing-comment-id", issue: gitcode.Issue{ID: "MOCK-ISSUE-100", Number: 100, Title: "Mock Issue", Body: "body", State: "open", CreatedAt: base, UpdatedAt: base}, comments: []gitcode.Comment{{IssueID: "MOCK-ISSUE-100", Body: "comment", CreatedAt: base, UpdatedAt: base}}},
+		{name: "unreconciled-parent", issue: gitcode.Issue{ID: "MOCK-ISSUE-100", Number: 100, Title: "Mock Issue", Body: "body", State: "open", CreatedAt: base, UpdatedAt: base}, comments: []gitcode.Comment{{ID: "MOCK-COMMENT-1", IssueID: "OTHER-ISSUE", Body: "comment", CreatedAt: base, UpdatedAt: base}}},
+		{name: "fixture-marker", issue: gitcode.Issue{ID: "42", Number: 42, Title: "Fixture Issue", Body: "body", State: "open", CreatedAt: base, UpdatedAt: base}, comments: []gitcode.Comment{{ID: "MOCK-COMMENT-1", IssueID: "42", Body: "comment", CreatedAt: base, UpdatedAt: base}}},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := NewWithClient(store, &fakeGitCodeClient{issue: tt.issue, comments: tt.comments})
+			svc.providerMode = gitcode.ProviderModeLive
+			svc.lockPath = filepath.Join(t.TempDir(), "sync.lock")
+			_, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "live-invalid", RemoteAlias: "issue:42", IdempotencyKey: "sc-006-" + tt.name})
+			var failure ErrSyncFailure
+			if !errors.As(err, &failure) || failure.Mode != "live_graph_invalid" {
+				t.Fatalf("error = %T %v, want live_graph_invalid", err, err)
+			}
+		})
+	}
+	counts, err := store.RecordCounts(ctx, "live-invalid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Records != 0 || counts.Comments != 0 {
+		t.Fatalf("invalid live graph committed counts = %#v", counts)
+	}
+}
+
+func TestScenario006LiveAuthFailureNormalized(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "live-auth", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, &fakeGitCodeClient{errors: []error{gitcode.ErrAuthExpired{Endpoint: "/issues/100", Status: 401, Message: "invalid token"}}})
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.lockPath = filepath.Join(t.TempDir(), "sync.lock")
+	_, err = svc.SyncToCache(ctx, SyncRequest{RepoID: "live-auth", RemoteAlias: "issue:100", IdempotencyKey: "sc-006-auth"})
+	var failure ErrSyncFailure
+	if !errors.As(err, &failure) || failure.Mode != "live_auth_failure" {
+		t.Fatalf("error = %T %v, want live_auth_failure", err, err)
 	}
 }
 

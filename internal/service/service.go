@@ -916,6 +916,13 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 		}
 		return SyncResult{}, failure
 	}
+	if err := s.validateLiveSourceGraph(graph); err != nil {
+		failure := s.normalizeSyncFailure(err, req, remoteType, remoteID)
+		if inProgressRecorded {
+			_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, failure, s.now().UTC()))
+		}
+		return SyncResult{}, failure
+	}
 	syncCompletedAt := s.now().UTC()
 	revision := ""
 	if graph.SyncStatus != nil {
@@ -1406,9 +1413,13 @@ func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, r
 	if req.MaxSize > 0 && int64(len(body)+len(issue.Title)) > req.MaxSize {
 		return cache.SourceGraph{}, SyncCounts{}, gitcode.ErrPayloadTooLarge{Endpoint: remoteID, Limit: req.MaxSize, Size: int64(len(body) + len(issue.Title))}
 	}
+	providerID := strings.TrimSpace(issue.ID)
+	if s.syncProviderMode() == gitcode.ProviderModeLive && providerID == "" {
+		return cache.SourceGraph{}, SyncCounts{}, s.liveGraphError("issue missing provider id")
+	}
 	stableID := req.StableID
 	if stableID == "" {
-		stableID = s.resolveOrFallback(ctx, req.RepoID, remoteType, remoteID, fallbackSourceID(remoteType, remoteID))
+		stableID = s.resolveOrFallback(ctx, req.RepoID, remoteType, remoteID, liveFallbackSourceID(s.syncProviderMode(), remoteType, remoteID, providerID))
 	}
 	if err := s.guardRemoteAlias(ctx, req.RepoID, remoteType, remoteID, stableID); err != nil {
 		return cache.SourceGraph{}, SyncCounts{}, err
@@ -1442,6 +1453,9 @@ func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, r
 		status = "open"
 	}
 	graph := cache.SourceGraph{Source: cache.Source{RepoID: req.RepoID, ID: stableID, Kind: "issue", Path: "issues/" + remoteID + ".md", Title: issue.Title, Body: body, Status: status, Labels: issue.Labels, ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{RepoID: req.RepoID, SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, SyncStatus: &cache.SyncStatus{RepoID: req.RepoID, SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: hash, Status: "fresh", LastFetchedAt: now}}
+	if providerID != "" && providerID != remoteID {
+		graph.Identities = append(graph.Identities, cache.Identity{RepoID: req.RepoID, SourceID: stableID, AliasType: "gitcode_issue_id", Alias: providerID, Remote: cache.RemoteAlias{Type: "gitcode_issue_id", ID: providerID}})
+	}
 	route, err := s.BuildAdapterRoute(ctx, req.RepoID, RepositoryScopeIssues)
 	if err != nil {
 		return cache.SourceGraph{}, SyncCounts{}, err
@@ -1451,7 +1465,15 @@ func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, r
 		return cache.SourceGraph{}, SyncCounts{}, err
 	}
 	for _, comment := range comments.Items {
-		commentID := comment.ID
+		commentID := strings.TrimSpace(comment.ID)
+		if s.syncProviderMode() == gitcode.ProviderModeLive {
+			if commentID == "" {
+				return cache.SourceGraph{}, SyncCounts{}, s.liveGraphError("comment missing provider id")
+			}
+			if !s.liveCommentParentReconciles(comment, remoteID, providerID) {
+				return cache.SourceGraph{}, SyncCounts{}, s.liveGraphError("comment parent issue id is unreconciled")
+			}
+		}
 		if commentID == "" {
 			commentID = contentHash(remoteID, comment.Author, comment.Body, comment.CreatedAt)
 		}
@@ -1474,9 +1496,13 @@ func (s *Service) stageWiki(ctx context.Context, req SyncRequest, remoteType, re
 	if req.MaxSize > 0 && int64(len(body)+len(page.Title)) > req.MaxSize {
 		return cache.SourceGraph{}, SyncCounts{}, gitcode.ErrPayloadTooLarge{Endpoint: remoteID, Limit: req.MaxSize, Size: int64(len(body) + len(page.Title))}
 	}
+	providerID := strings.TrimSpace(page.ID)
+	if s.syncProviderMode() == gitcode.ProviderModeLive && providerID == "" {
+		return cache.SourceGraph{}, SyncCounts{}, s.liveGraphError("wiki missing provider id")
+	}
 	stableID := req.StableID
 	if stableID == "" {
-		stableID = s.resolveOrFallback(ctx, req.RepoID, remoteType, remoteID, fallbackSourceID(remoteType, remoteID))
+		stableID = s.resolveOrFallback(ctx, req.RepoID, remoteType, remoteID, liveFallbackSourceID(s.syncProviderMode(), remoteType, remoteID, providerID))
 	}
 	if err := s.guardRemoteAlias(ctx, req.RepoID, remoteType, remoteID, stableID); err != nil {
 		return cache.SourceGraph{}, SyncCounts{}, err
@@ -1507,6 +1533,9 @@ func (s *Service) stageWiki(ctx context.Context, req SyncRequest, remoteType, re
 		return cache.SourceGraph{}, SyncCounts{}, err
 	}
 	graph := cache.SourceGraph{Source: cache.Source{RepoID: req.RepoID, ID: stableID, Kind: "wiki", Path: "wiki/" + remoteID + ".md", Title: page.Title, Body: body, Status: "fresh", ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{RepoID: req.RepoID, SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, SyncStatus: &cache.SyncStatus{RepoID: req.RepoID, SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}
+	if providerID != "" && providerID != remoteID {
+		graph.Identities = append(graph.Identities, cache.Identity{RepoID: req.RepoID, SourceID: stableID, AliasType: "gitcode_wiki_id", Alias: providerID, Remote: cache.RemoteAlias{Type: "gitcode_wiki_id", ID: providerID}})
+	}
 	graph.Chunks = chunksForSource(graph.Source)
 	return graph, counts, nil
 }
@@ -1587,6 +1616,10 @@ func (s *Service) validateRepoScope(ctx context.Context, repoID, remoteType stri
 	return err
 }
 
+func (s *Service) syncProviderMode() gitcode.ProviderMode {
+	return s.ProviderMode()
+}
+
 func (s *Service) guardRemoteAlias(ctx context.Context, repoID, remoteType, remoteID, stableID string) error {
 	identity, err := s.store.ResolveAliasScoped(ctx, repoID, cache.RemoteAlias{Type: remoteType, ID: remoteID})
 	if err == nil && identity.SourceID != "" && identity.SourceID != stableID {
@@ -1606,6 +1639,13 @@ func (s *Service) resolveOrFallback(ctx context.Context, repoID, remoteType, rem
 	return fallback
 }
 
+func liveFallbackSourceID(mode gitcode.ProviderMode, remoteType, remoteID, providerID string) string {
+	if mode == gitcode.ProviderModeLive && strings.TrimSpace(providerID) != "" {
+		return fallbackSourceID(remoteType, providerID)
+	}
+	return fallbackSourceID(remoteType, remoteID)
+}
+
 func fallbackSourceID(remoteType, remoteID string) string {
 	clean := strings.NewReplacer("/", "-", " ", "-", ":", "-").Replace(strings.ToUpper(remoteID))
 	switch remoteType {
@@ -1616,6 +1656,57 @@ func fallbackSourceID(remoteType, remoteID string) string {
 	default:
 		return "REMOTE-" + clean
 	}
+}
+
+func (s *Service) validateLiveSourceGraph(graph cache.SourceGraph) error {
+	if s.syncProviderMode() != gitcode.ProviderModeLive {
+		return nil
+	}
+	if gitcode.IsFixtureBoundary(s.client) {
+		return s.liveGraphError("fixture provider is forbidden in live graph")
+	}
+	for _, marker := range gitcode.FixtureMarkerIDs() {
+		if graph.Source.ID == marker {
+			return s.liveGraphError("fixture marker " + marker + " is forbidden in live graph")
+		}
+		if graph.SyncStatus != nil && graph.SyncStatus.RemoteID == marker {
+			return s.liveGraphError("fixture remote marker " + marker + " is forbidden in live graph")
+		}
+		for _, identity := range graph.Identities {
+			if identity.SourceID == marker || identity.Alias == marker || identity.Remote.ID == marker {
+				return s.liveGraphError("fixture identity marker " + marker + " is forbidden in live graph")
+			}
+		}
+		for _, comment := range graph.Comments {
+			if comment.RecordID == marker || comment.CommentID == marker {
+				return s.liveGraphError("fixture comment marker " + marker + " is forbidden in live graph")
+			}
+		}
+	}
+	if graph.Source.ID == "" {
+		return s.liveGraphError("source id is required")
+	}
+	if graph.SyncStatus == nil || strings.TrimSpace(graph.SyncStatus.RemoteID) == "" {
+		return s.liveGraphError("remote id is required")
+	}
+	for _, comment := range graph.Comments {
+		if strings.TrimSpace(comment.CommentID) == "" {
+			return s.liveGraphError("comment provider id is required")
+		}
+		if comment.RecordID != graph.Source.ID {
+			return s.liveGraphError("comment parent record is unreconciled")
+		}
+	}
+	return nil
+}
+
+func (s *Service) liveCommentParentReconciles(comment gitcode.Comment, remoteID, providerID string) bool {
+	parent := strings.TrimSpace(comment.IssueID)
+	return parent == "" || parent == strings.TrimSpace(remoteID) || parent == strings.TrimSpace(providerID)
+}
+
+func (s *Service) liveGraphError(message string) error {
+	return ErrSyncFailure{Mode: "live_graph_invalid", Cause: ErrInvalidQuery{Field: "live_graph", Message: message}}
 }
 
 func contentHash(parts ...any) string {
@@ -1663,7 +1754,21 @@ func (s *Service) normalizeSyncFailure(err error, req SyncRequest, remoteType, r
 	}
 	var auth gitcode.ErrAuthExpired
 	if errors.As(err, &auth) {
-		return ErrSyncFailure{Mode: "auth_expired", Target: target, Endpoint: auth.Endpoint, RecoveryAction: "renew GITCODE_TOKEN and retry sync", Cause: err}
+		mode := "auth_expired"
+		if s.syncProviderMode() == gitcode.ProviderModeLive && (auth.Status == 401 || auth.Status == 403) {
+			mode = "live_auth_failure"
+		}
+		return ErrSyncFailure{Mode: mode, Target: target, Endpoint: auth.Endpoint, RecoveryAction: "renew GITCODE_TOKEN and retry sync", Cause: err}
+	}
+	var forbidden gitcode.ErrForbidden
+	if errors.As(err, &forbidden) {
+		if s.syncProviderMode() == gitcode.ProviderModeLive && (forbidden.Status == 401 || forbidden.Status == 403) {
+			return ErrSyncFailure{Mode: "live_auth_failure", Target: target, Endpoint: forbidden.Endpoint, RecoveryAction: "renew GITCODE_TOKEN and retry sync", Cause: err}
+		}
+	}
+	var alreadySync ErrSyncFailure
+	if errors.As(err, &alreadySync) {
+		return err
 	}
 	var collision gitcode.ErrRemoteCollision
 	if errors.As(err, &collision) {

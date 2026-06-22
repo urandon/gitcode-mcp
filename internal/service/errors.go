@@ -38,6 +38,13 @@ func (e ErrSyncFailure) Error() string {
 		return fmt.Sprintf("sync: received partial response for %s: expected %d bytes, got %d bytes. Run sync again to resume.", e.Endpoint, e.ExpectedBytes, e.GotBytes)
 	case "auth_expired":
 		return "sync: authentication expired. Renew your GITCODE_TOKEN and try again."
+	case "live_auth_failure":
+		return "sync: live_auth_failure: live provider rejected credentials. Renew your GITCODE_TOKEN and try again."
+	case "live_graph_invalid":
+		if e.Cause != nil {
+			return "sync: live_graph_invalid: " + e.Cause.Error()
+		}
+		return "sync: live_graph_invalid"
 	case "remote_collision":
 		return fmt.Sprintf("sync: remote id %s already maps to local id %s; cannot map to %s. Run link-check for guidance.", e.Alias, e.ExistingID, e.NewID)
 	case "cache_corruption":

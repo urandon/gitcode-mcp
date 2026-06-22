@@ -16,12 +16,12 @@ func TestBulkSyncIssuesSyncsListedIssuesAndZeroDeltaOnResync(t *testing.T) {
 	base := time.Date(2026, 6, 22, 14, 0, 0, 0, time.UTC)
 	client := &fakeGitCodeClient{
 		listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{
-			{Items: []gitcode.IssueSummary{{Number: 1, Title: "First", State: "open"}, {Number: 2, Title: "Second", State: "open"}}, Page: 1, PerPage: 100},
-			{Items: []gitcode.IssueSummary{{Number: 1, Title: "First", State: "open"}, {Number: 2, Title: "Second", State: "open"}}, Page: 1, PerPage: 100},
+			{Items: []gitcode.IssueSummary{{ID: "1", Number: 1, Title: "First", State: "open"}, {ID: "2", Number: 2, Title: "Second", State: "open"}}, Page: 1, PerPage: 100},
+			{Items: []gitcode.IssueSummary{{ID: "1", Number: 1, Title: "First", State: "open"}, {ID: "2", Number: 2, Title: "Second", State: "open"}}, Page: 1, PerPage: 100},
 		},
 		issuesByNumber: map[int]gitcode.Issue{
-			1: {Number: 1, Title: "First", Body: "first body", State: "open", CreatedAt: base, UpdatedAt: base},
-			2: {Number: 2, Title: "Second", Body: "second body", State: "open", CreatedAt: base, UpdatedAt: base},
+			1: {ID: "1", Number: 1, Title: "First", Body: "first body", State: "open", CreatedAt: base, UpdatedAt: base},
+			2: {ID: "2", Number: 2, Title: "Second", Body: "second body", State: "open", CreatedAt: base, UpdatedAt: base},
 		},
 		commentsByIssue: map[int][]gitcode.Comment{
 			1: {{ID: "c1", Author: "author", Body: "comment one", CreatedAt: base, UpdatedAt: base}},
