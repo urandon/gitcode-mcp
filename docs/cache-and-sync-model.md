@@ -33,3 +33,71 @@ Candidate tables:
 - Every sync creates reviewable evidence.
 - Remote ids are aliases. Legacy ids remain stable migration keys.
 - Failed writes stay visible until retried or deliberately dismissed.
+
+## Live Sync Semantics
+
+`gitcode-mcp sync` keeps the fixture/offline provider as the default. `gitcode-mcp sync --live` opts into the live GitCode provider for the configured repository and uses the current cache as the durable local source for later reads.
+
+The sync command supports these live sync selectors:
+
+- `--repo REPO` selects the configured repository binding.
+- `--issues` bulk-syncs issue records.
+- `--wiki` bulk-syncs wiki records.
+- `--id ID` and `--input ALIAS` sync one stable record or remote alias.
+- `--index` builds the local index after sync.
+- `--idempotency-key KEY` supplies a deterministic sync event key.
+
+Bulk issue and wiki sync list remote resources independently, then sync each returned resource through the same atomic single-resource path. Issue sync covers issue data and comments as part of the source graph for that issue; wiki sync covers wiki page data. Live adapter route construction stays behind the provider boundary, and operator docs should use sanitized placeholders rather than real repository coordinates.
+
+Each successful resource sync records a `SyncEvent` with:
+
+- `started_at` and `completed_at` timestamps;
+- `remote_revision` when the provider exposes one;
+- count metadata for fetched, inserted, updated, skipped, and conflict totals;
+- `zero_delta` when a re-sync fetched records but all fetched content was unchanged.
+
+Re-syncing unchanged content records a zero-delta event instead of duplicating cached records. `gitcode-mcp sync_status` reports cache freshness from the stored source records and latest completed sync events; the command help describes the query surface, while the model above defines the event fields persisted by sync.
+
+## Partial Failure Handling
+
+Bulk sync treats each listed issue or wiki page as an independent resource. A failure for one resource does not roll back resources that already synced successfully and does not prevent later resources from being attempted.
+
+When any resource fails, the service returns `PartialSyncError` with:
+
+- `success_count` for resources committed successfully;
+- `failure_count` for resources that failed;
+- per-resource details including source id or remote alias, remote type, and diagnostic message.
+
+Successful resources remain committed to the cache. Failed resources are reported to the caller and can be retried with the same repository, selector, and idempotency key strategy.
+
+Actionable failure classes include:
+
+- authentication or authorization failures from the live provider;
+- rate-limit responses;
+- network, timeout, and context-cancellation failures;
+- partial or oversized provider responses;
+- missing remote resources;
+- cache integrity, write, or lock failures.
+
+The CLI renders the aggregate success and failure counts and resource details. Diagnostics must stay public-safe: tokens, Authorization headers, cookies, private repository coordinates, and raw API bodies are not printed.
+
+## Cache Migration
+
+The implemented cache schema version is `7`, matching `currentSchemaVersion` in `internal/cache/schema.go`.
+
+The primary version source is the SQLite `schema_version` table. Migrations also update `PRAGMA user_version` as an additive SQLite diagnostic bridge, but cache compatibility decisions use `schema_version`.
+
+Compatibility policy:
+
+| Detected version | Behavior | Operator action |
+| --- | --- | --- |
+| New empty cache | Initialize normally at schema version 7 | None |
+| 7 | Open normally; reads and writes are allowed | None |
+| 2-6 | Open read-compatible but writes are blocked until migration | Run `gitcode-mcp migrate-cache --confirm` |
+| 1 | Block migration as pre-supported/iteration-1-equivalent | Reinitialize with `gitcode-mcp reinit-cache` or delete the cache and re-sync |
+| 0, missing, or empty `schema_version` in a non-empty cache | Block as pre-schema-versioning or unknown | Reinitialize with `gitcode-mcp reinit-cache` or delete the cache and re-sync |
+| Greater than 7 | Block as newer than this binary supports | Upgrade `gitcode-mcp` to a binary that supports the schema |
+
+`gitcode-mcp migrate-cache --confirm` runs supported older-version migrations in place from the detected version to version 7. It creates a backup at `{cache-path}.backup-{timestamp}` before applying changes. Each migration step runs in a transaction and advances both `schema_version` and `PRAGMA user_version` only after that step succeeds.
+
+Opening an older compatible cache without migration is read-compatible but write-blocked so operators can inspect the cache and run diagnostics before applying the migration. New caches are initialized directly at the current schema version.
