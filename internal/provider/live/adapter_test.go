@@ -11,6 +11,7 @@ func TestAdapterPackageExports(t *testing.T) {
 	cfg := Config{
 		Mode:        "live",
 		LiveAllowed: true,
+		BaseURL:     "https://selected.example.test",
 		Token:       "test-token",
 	}
 	provider, err := NewLiveProvider(cfg)
@@ -27,6 +28,7 @@ func TestNewLiveProviderRejectsWithoutLiveAllowed(t *testing.T) {
 	cfg := Config{
 		Mode:        "live",
 		LiveAllowed: false,
+		BaseURL:     "https://selected.example.test",
 		Token:       "test-token",
 	}
 	_, err := NewLiveProvider(cfg)
@@ -39,6 +41,7 @@ func TestNewLiveProviderRejectsEmptyToken(t *testing.T) {
 	cfg := Config{
 		Mode:        "live",
 		LiveAllowed: true,
+		BaseURL:     "https://selected.example.test",
 		Token:       "",
 	}
 	_, err := NewLiveProvider(cfg)
@@ -51,11 +54,24 @@ func TestNewLiveProviderRejectsNonLiveMode(t *testing.T) {
 	cfg := Config{
 		Mode:        "fixture",
 		LiveAllowed: true,
+		BaseURL:     "https://selected.example.test",
 		Token:       "test-token",
 	}
 	_, err := NewLiveProvider(cfg)
 	if !IsProviderUnavailable(err) {
 		t.Fatalf("expected IsProviderUnavailable for non-live mode, got %T %v", err, err)
+	}
+}
+
+func TestScenario004NewLiveProviderRejectsEmptyBaseURL(t *testing.T) {
+	cfg := Config{
+		Mode:        "live",
+		LiveAllowed: true,
+		Token:       "test-token",
+	}
+	_, err := NewLiveProvider(cfg)
+	if !IsProviderUnavailable(err) {
+		t.Fatalf("expected IsProviderUnavailable for empty base URL, got %T %v", err, err)
 	}
 }
 
@@ -86,9 +102,9 @@ func TestNewHTTPClientRejectsEmptyBaseURL(t *testing.T) {
 }
 
 func TestTypeAliasCompilation(t *testing.T) {
-	var _ Client    = &gitcode.HTTPClient{}
-	var _ Provider  = gitcode.NewUnavailableProvider("test")
-	var _ Config    = gitcode.ProviderConfig{}
+	var _ Client = &gitcode.HTTPClient{}
+	var _ Provider = gitcode.NewUnavailableProvider("test")
+	var _ Config = gitcode.ProviderConfig{}
 	var _ ErrProviderUnavailable = gitcode.ErrProviderUnavailable{}
 }
 

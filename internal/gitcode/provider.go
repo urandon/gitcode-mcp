@@ -3,6 +3,7 @@ package gitcode
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -93,14 +94,30 @@ type RedactedCapture struct {
 var newHTTPClientForProvider = NewHTTPClient
 
 func NewLiveProvider(cfg ProviderConfig) (Provider, error) {
-	if cfg.Mode != ProviderModeLive || !cfg.LiveAllowed || strings.TrimSpace(cfg.Token) == "" {
-		return nil, ErrProviderUnavailable{Reason: "live provider requires live mode, explicit live allowance, and token"}
+	baseURL, err := validateLiveProviderConfig(cfg)
+	if err != nil {
+		return nil, err
 	}
-	client, err := newHTTPClientForProvider(Config{BaseURL: cfg.BaseURL, Token: cfg.Token, Timeout: cfg.Timeout, MaxResponseSize: cfg.MaxResponseSize, MaxRetries: cfg.MaxRetries, UserAgent: cfg.UserAgent, Pagination: cfg.Pagination})
+	client, err := newHTTPClientForProvider(Config{BaseURL: baseURL, Token: cfg.Token, Timeout: cfg.Timeout, MaxResponseSize: cfg.MaxResponseSize, MaxRetries: cfg.MaxRetries, UserAgent: cfg.UserAgent, Pagination: cfg.Pagination})
 	if err != nil {
 		return nil, err
 	}
 	return liveProvider{HTTPClient: client}, nil
+}
+
+func validateLiveProviderConfig(cfg ProviderConfig) (string, error) {
+	if cfg.Mode != ProviderModeLive || !cfg.LiveAllowed || strings.TrimSpace(cfg.Token) == "" {
+		return "", ErrProviderUnavailable{Reason: "live provider requires live mode, explicit live allowance, and token"}
+	}
+	base := strings.TrimSpace(cfg.BaseURL)
+	if base == "" {
+		return "", ErrProviderUnavailable{Reason: "live provider requires selected absolute http or https base URL"}
+	}
+	parsed, err := url.Parse(base)
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return "", ErrProviderUnavailable{Reason: "live provider requires selected absolute http or https base URL"}
+	}
+	return parsed.String(), nil
 }
 
 func NewUnavailableProvider(reason string) Provider {

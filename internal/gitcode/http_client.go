@@ -56,6 +56,9 @@ func NewHTTPClient(cfg Config) (*HTTPClient, error) {
 }
 
 func (c *HTTPClient) ListIssues(ctx context.Context, req IssueListRequest) (Page[IssueSummary], error) {
+	if err := validateReadRepo(req.Owner, req.Repo); err != nil {
+		return Page[IssueSummary]{}, err
+	}
 	endpoint := listIssuesEndpoint(req.Owner, req.Repo)
 	items, page, err := getPaged[IssueSummary](ctx, c, endpoint, issueListQuery(req), PageState{Page: req.Page, PerPage: req.PerPage})
 	if err != nil {
@@ -65,6 +68,9 @@ func (c *HTTPClient) ListIssues(ctx context.Context, req IssueListRequest) (Page
 }
 
 func (c *HTTPClient) GetIssue(ctx context.Context, req IssueRequest) (Issue, error) {
+	if err := validateIssueRequest(req); err != nil {
+		return Issue{}, err
+	}
 	var issue Issue
 	endpoint := getIssueEndpoint(req.Owner, req.Repo, req.Number)
 	err := c.getJSONWithOptions(ctx, endpoint, nil, &issue, requestOptions{knownRemoteAlias: req.KnownRemoteAlias, remoteAlias: req.RemoteAlias})
@@ -75,6 +81,9 @@ func (c *HTTPClient) GetIssue(ctx context.Context, req IssueRequest) (Issue, err
 }
 
 func (c *HTTPClient) ListIssueComments(ctx context.Context, req IssueRequest) (Page[Comment], error) {
+	if err := validateIssueRequest(req); err != nil {
+		return Page[Comment]{}, err
+	}
 	endpoint := listIssueCommentsEndpoint(req.Owner, req.Repo, req.Number)
 	items, page, err := getPaged[Comment](ctx, c, endpoint, nil, PageState{})
 	if err != nil {
@@ -84,6 +93,9 @@ func (c *HTTPClient) ListIssueComments(ctx context.Context, req IssueRequest) (P
 }
 
 func (c *HTTPClient) GetWikiPage(ctx context.Context, req WikiPageRequest) (WikiPage, error) {
+	if err := validateWikiPageRequest(req); err != nil {
+		return WikiPage{}, err
+	}
 	var page WikiPage
 	endpoint := getWikiPageEndpoint(req.Owner, req.Repo, req.Slug)
 	err := c.getJSON(ctx, endpoint, nil, &page)
@@ -94,6 +106,9 @@ func (c *HTTPClient) GetWikiPage(ctx context.Context, req WikiPageRequest) (Wiki
 }
 
 func (c *HTTPClient) ListWikiPages(ctx context.Context, req WikiListRequest) (Page[WikiPage], error) {
+	if err := validateReadRepo(req.Owner, req.Repo); err != nil {
+		return Page[WikiPage]{}, err
+	}
 	endpoint := listWikiPagesEndpoint(req.Owner, req.Repo)
 	items, page, err := getPaged[WikiPage](ctx, c, endpoint, nil, PageState{Page: req.Page, PerPage: req.PerPage})
 	if err != nil {
@@ -308,7 +323,7 @@ func writeConfirmedJSON[T any](ctx context.Context, c *HTTPClient, method, endpo
 	return result, nil
 }
 
-func validateWriteRepo(owner, repo string) error {
+func validateReadRepo(owner, repo string) error {
 	if strings.TrimSpace(owner) == "" {
 		return ErrValidationFailed{Field: "owner", Message: "owner is required"}
 	}
@@ -316,6 +331,30 @@ func validateWriteRepo(owner, repo string) error {
 		return ErrValidationFailed{Field: "repo", Message: "repo is required"}
 	}
 	return nil
+}
+
+func validateIssueRequest(req IssueRequest) error {
+	if err := validateReadRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if req.Number <= 0 {
+		return ErrValidationFailed{Field: "number", Message: "positive issue number is required"}
+	}
+	return nil
+}
+
+func validateWikiPageRequest(req WikiPageRequest) error {
+	if err := validateReadRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if strings.TrimSpace(req.Slug) == "" {
+		return ErrValidationFailed{Field: "slug", Message: "wiki slug is required"}
+	}
+	return nil
+}
+
+func validateWriteRepo(owner, repo string) error {
+	return validateReadRepo(owner, repo)
 }
 
 func validateCreateIssue(req CreateIssueRequest) error {
@@ -454,6 +493,12 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 }
 
 func (c *HTTPClient) do(ctx context.Context, method, endpoint string, values url.Values, body io.Reader, opts requestOptions) (*http.Response, error) {
+	if endpoint == "" || strings.HasPrefix(endpoint, "//") {
+		return nil, ErrValidationFailed{Field: "endpoint", Message: "relative endpoint path is required"}
+	}
+	if parsed, err := url.Parse(endpoint); err != nil || parsed.IsAbs() || parsed.Host != "" {
+		return nil, ErrValidationFailed{Field: "endpoint", Message: "relative endpoint path is required"}
+	}
 	u := c.baseURL.ResolveReference(&url.URL{Path: endpoint})
 	if values != nil {
 		u.RawQuery = values.Encode()

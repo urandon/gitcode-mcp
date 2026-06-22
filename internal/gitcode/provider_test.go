@@ -74,27 +74,48 @@ func TestFixtureProviderScenarios(t *testing.T) {
 	}
 }
 
-func TestLiveProviderAdmission(t *testing.T) {
+func TestScenario004LiveProviderAdmission(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  ProviderConfig
+	}{
+		{name: "non-live-mode", cfg: ProviderConfig{Mode: ProviderModeFixture, LiveAllowed: true, Token: "token", BaseURL: "https://selected.example.test"}},
+		{name: "missing-live-allowed", cfg: ProviderConfig{Mode: ProviderModeLive, Token: "token", BaseURL: "https://selected.example.test"}},
+		{name: "missing-token", cfg: ProviderConfig{Mode: ProviderModeLive, LiveAllowed: true, BaseURL: "https://selected.example.test"}},
+		{name: "empty-base-url", cfg: ProviderConfig{Mode: ProviderModeLive, LiveAllowed: true, Token: "token"}},
+		{name: "relative-base-url", cfg: ProviderConfig{Mode: ProviderModeLive, LiveAllowed: true, Token: "token", BaseURL: "/api/v5"}},
+		{name: "malformed-base-url", cfg: ProviderConfig{Mode: ProviderModeLive, LiveAllowed: true, Token: "token", BaseURL: "http://[::1"}},
+		{name: "unsupported-scheme", cfg: ProviderConfig{Mode: ProviderModeLive, LiveAllowed: true, Token: "token", BaseURL: "file:///tmp/gitcode"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			old := newHTTPClientForProvider
+			newHTTPClientForProvider = func(Config) (*HTTPClient, error) {
+				called = true
+				return &HTTPClient{}, nil
+			}
+			defer func() { newHTTPClientForProvider = old }()
+			if _, err := NewLiveProvider(tt.cfg); !IsProviderUnavailable(err) {
+				t.Fatalf("expected unavailable, got %T %v", err, err)
+			}
+			if called {
+				t.Fatalf("HTTP client constructed for invalid live provider")
+			}
+		})
+	}
+
 	called := false
 	old := newHTTPClientForProvider
-	newHTTPClientForProvider = func(Config) (*HTTPClient, error) {
+	newHTTPClientForProvider = func(cfg Config) (*HTTPClient, error) {
 		called = true
+		if cfg.BaseURL != "https://selected.example.test" || cfg.Token != "token" {
+			t.Fatalf("unexpected provider config: %+v", cfg)
+		}
 		return &HTTPClient{}, nil
 	}
 	defer func() { newHTTPClientForProvider = old }()
-	if _, err := NewLiveProvider(ProviderConfig{Mode: ProviderModeLive, Token: "token"}); !IsProviderUnavailable(err) {
-		t.Fatalf("expected unavailable without live allowance, got %T %v", err, err)
-	}
-	if called {
-		t.Fatalf("HTTP client constructed for disallowed live provider")
-	}
-	if _, err := NewLiveProvider(ProviderConfig{Mode: ProviderModeLive, LiveAllowed: true}); !IsProviderUnavailable(err) {
-		t.Fatalf("expected unavailable without token, got %T %v", err, err)
-	}
-	if called {
-		t.Fatalf("HTTP client constructed without token")
-	}
-	if _, err := NewLiveProvider(ProviderConfig{Mode: ProviderModeLive, LiveAllowed: true, Token: "token"}); err != nil {
+	if _, err := NewLiveProvider(ProviderConfig{Mode: ProviderModeLive, LiveAllowed: true, Token: "token", BaseURL: "https://selected.example.test"}); err != nil {
 		t.Fatalf("expected admitted live provider: %v", err)
 	}
 	if !called {
