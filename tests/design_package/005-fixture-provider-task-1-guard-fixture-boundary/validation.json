@@ -1,0 +1,31 @@
+{
+  "schema_version": "triborg.validation-result.v1",
+  "task_id": "005-fixture-provider-task-1-guard-fixture-boundary",
+  "covered_outcome_ids": ["outcome-1", "outcome-6", "outcome-7"],
+  "covered_decommission_ids": ["decommission-1", "decommission-4"],
+  "product_surfaces": [
+    "cmd/gitcode-mcp/main_test.go::TestCLIStartupPlanSelectsLiveProvider/SCN-CLI-OFFLINE-SYNC-NO-HTTP exercises the real CLI startup route for gitcode-mcp sync without --live with a configured repository and available httptest.Server, asserting default fixture-backed sync succeeds and the server request count remains zero.",
+    "internal/service/service_test.go::TestSyncResourcesCachesFixtureRecords exercises the sync service/cache runtime path for fixture-backed records and asserts deterministic fixture records ISSUE-42 and WIKI-HOME are present in the configured cache.",
+    "cmd/gitcode-mcp/main_test.go::TestCLIStartupPlanSelectsLiveProvider/SCN-CLI-LIVE-SYNC-USES-LIVE-PROVIDER exercises the real CLI startup route for gitcode-mcp sync --live with a mocked GitCode-compatible httptest.Server, asserting the mock server is reached and fixture marker IDs ISSUE-42 and WIKI-HOME do not appear in live command output.",
+    "cmd/gitcode-mcp/main_test.go::TestCLIStartupPlanSelectsLiveProvider/SCN-CRED-LIVE-WRITE-MOCK-KEYCHAIN exercises the real CLI startup route for gitcode-mcp create-issue --live with a test keychain-equivalent credential source and mocked GitCode-compatible httptest.Server, asserting the mock server is reached and fixture client is read-only does not reach the live product surface.",
+    "internal/gitcode/provider_test.go::TestScenario005FixtureBoundaryContract and TestScenario005FixtureReadOnlyTyped exercise the fixture-provider boundary contract and typed read-only classification used by product tests to classify accidental live-route fixture fallback.",
+    "go test ./... is run by run.sh as the offline acceptance gate so these CLI integration and fixture-boundary scenarios remain executable under the repository-wide test command."
+  ],
+  "evidence_type": "offline_cli_integration_go_test",
+  "freshness": "Current target runtime at validation execution time with fresh temporary cache/config paths created by Go tests and no live GitCode credentials, live network access, real device access, or OS Keychain access.",
+  "mocks_used": {
+    "httptest.Server": "Mocks only external GitCode-compatible HTTP endpoints and records request counts while exercising production CLI startup, repository binding, live provider routing, sync, create-issue, and cache/runtime paths.",
+    "test keychain-equivalent credential source": "Supplies a deterministic in-memory test token for the live create scenario without using OS Keychain or real credentials.",
+    "environment isolation": "run.sh unsets GITCODE_TOKEN, GITCODE_MCP_TEST_KEYCHAIN_TOKEN, and GITCODE_API_URL before invoking Go tests so each scenario uses only its explicit test setup."
+  },
+  "production_files_modified": {},
+  "validation_scope": "Validation artifacts are limited to tests/design_package/005-fixture-provider-task-1-guard-fixture-boundary/. No production source, production docs, runtime code, server code, app code, root AGENTS.md, or product configuration is modified by this validation materialization.",
+  "live_validation": {
+    "enabled": false,
+    "reason": "Live validation is disabled for this task. All evidence is deterministic offline validation using stubbed external dependencies only."
+  },
+  "device_validation": {
+    "enabled": false,
+    "reason": "Device validation is disabled for this task."
+  }
+}

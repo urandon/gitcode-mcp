@@ -110,6 +110,14 @@ func NewWithMode(store cache.Store, mode gitcode.ProviderMode, token string, cfg
 
 type sanitizedFixtureClient struct{}
 
+func (sanitizedFixtureClient) FixtureBoundaryMode() string {
+	return gitcode.FixtureBoundaryMode
+}
+
+func (sanitizedFixtureClient) FixtureMarkerIDs() []string {
+	return gitcode.FixtureMarkerIDs()
+}
+
 func (sanitizedFixtureClient) ListIssues(context.Context, gitcode.IssueListRequest) (gitcode.Page[gitcode.IssueSummary], error) {
 	now := fixtureNow()
 	return gitcode.Page[gitcode.IssueSummary]{Items: []gitcode.IssueSummary{{Number: 42, Title: "Fixture Issue", State: "open", CreatedAt: now, UpdatedAt: now}}, Page: 1, PerPage: 1, TotalCount: 1}, nil
@@ -148,31 +156,31 @@ func (sanitizedFixtureClient) GetAttachment(context.Context, gitcode.AttachmentR
 }
 
 func (sanitizedFixtureClient) CreateIssue(context.Context, gitcode.CreateIssueRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
-	return gitcode.WriteResult[gitcode.Issue]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+	return gitcode.WriteResult[gitcode.Issue]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
 func (sanitizedFixtureClient) UpdateIssue(context.Context, gitcode.UpdateIssueRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
-	return gitcode.WriteResult[gitcode.Issue]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+	return gitcode.WriteResult[gitcode.Issue]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
 func (sanitizedFixtureClient) CreateIssueComment(context.Context, gitcode.CreateIssueCommentRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Comment], error) {
-	return gitcode.WriteResult[gitcode.Comment]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+	return gitcode.WriteResult[gitcode.Comment]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
 func (sanitizedFixtureClient) CreateWikiPage(context.Context, gitcode.CreateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
-	return gitcode.WriteResult[gitcode.WikiPage]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+	return gitcode.WriteResult[gitcode.WikiPage]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
 func (sanitizedFixtureClient) UpdateWikiPage(context.Context, gitcode.UpdateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
-	return gitcode.WriteResult[gitcode.WikiPage]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+	return gitcode.WriteResult[gitcode.WikiPage]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
 func (sanitizedFixtureClient) AddLabel(context.Context, gitcode.LabelRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
-	return gitcode.WriteResult[gitcode.Issue]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+	return gitcode.WriteResult[gitcode.Issue]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
 func (sanitizedFixtureClient) RemoveLabel(context.Context, gitcode.LabelRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
-	return gitcode.WriteResult[gitcode.Issue]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+	return gitcode.WriteResult[gitcode.Issue]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
 func fixtureNow() time.Time {

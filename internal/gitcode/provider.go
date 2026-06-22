@@ -33,6 +33,26 @@ const (
 	ProviderModeUnavailable ProviderMode = "unavailable"
 )
 
+const (
+	FixtureBoundaryMode = "offline-fixture"
+	FixtureIssueMarker  = "ISSUE-42"
+	FixtureWikiMarker   = "WIKI-HOME"
+)
+
+type FixtureBoundary interface {
+	FixtureBoundaryMode() string
+	FixtureMarkerIDs() []string
+}
+
+func IsFixtureBoundary(v any) bool {
+	boundary, ok := v.(FixtureBoundary)
+	return ok && boundary.FixtureBoundaryMode() == FixtureBoundaryMode
+}
+
+func FixtureMarkerIDs() []string {
+	return []string{FixtureIssueMarker, FixtureWikiMarker}
+}
+
 type ProviderConfig struct {
 	Mode            ProviderMode
 	LiveAllowed     bool

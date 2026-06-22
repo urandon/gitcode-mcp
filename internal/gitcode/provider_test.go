@@ -125,7 +125,6 @@ func TestScenario004LiveProviderAdmission(t *testing.T) {
 
 func TestProviderWriteUnavailableDoesNotConfirm(t *testing.T) {
 	providers := map[string]Provider{
-		"fixture":     mustFixtureProvider(t),
 		"unavailable": NewUnavailableProvider("write disabled"),
 	}
 	for name, provider := range providers {
@@ -136,6 +135,47 @@ func TestProviderWriteUnavailableDoesNotConfirm(t *testing.T) {
 			}
 			if result.Confirmed || result.IdempotencyKey != "" || result.ResponseHash != "" || !result.ConfirmedAt.IsZero() {
 				t.Fatalf("unavailable provider returned success-shaped metadata: %+v", result)
+			}
+		})
+	}
+}
+
+func TestScenario005FixtureBoundaryContract(t *testing.T) {
+	provider := mustFixtureProvider(t)
+	if !IsFixtureBoundary(provider) {
+		t.Fatalf("fixture provider does not expose fixture boundary")
+	}
+	boundary := provider.(FixtureBoundary)
+	markers := boundary.FixtureMarkerIDs()
+	if len(markers) != 2 || markers[0] != FixtureIssueMarker || markers[1] != FixtureWikiMarker {
+		t.Fatalf("fixture markers = %#v", markers)
+	}
+}
+
+func TestScenario005FixtureReadOnlyTyped(t *testing.T) {
+	provider := mustFixtureProvider(t)
+	ctx := context.Background()
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "create-issue", run: func() error { _, err := provider.CreateIssue(ctx, CreateIssueRequest{}, WriteOptions{}); return err }},
+		{name: "update-issue", run: func() error { _, err := provider.UpdateIssue(ctx, UpdateIssueRequest{}, WriteOptions{}); return err }},
+		{name: "create-comment", run: func() error { _, err := provider.CreateIssueComment(ctx, CreateIssueCommentRequest{}, WriteOptions{}); return err }},
+		{name: "create-wiki", run: func() error { _, err := provider.CreateWikiPage(ctx, CreateWikiPageRequest{}, WriteOptions{}); return err }},
+		{name: "update-wiki", run: func() error { _, err := provider.UpdateWikiPage(ctx, UpdateWikiPageRequest{}, WriteOptions{}); return err }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.run()
+			if !IsFixtureReadOnly(err) {
+				t.Fatalf("expected fixture read-only classification, got %T %v", err, err)
+			}
+			if IsProviderUnavailable(err) {
+				t.Fatalf("fixture read-only should not be provider unavailable")
+			}
+			if !strings.Contains(err.Error(), "fixture client is read-only") {
+				t.Fatalf("read-only message changed: %v", err)
 			}
 		})
 	}

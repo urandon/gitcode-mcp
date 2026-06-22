@@ -75,6 +75,37 @@ func TestNewWithModeFixture(t *testing.T) {
 	}
 }
 
+func TestScenario005ServiceSanitizedFixtureBoundary(t *testing.T) {
+	client := sanitizedFixtureClient{}
+	if !gitcode.IsFixtureBoundary(client) {
+		t.Fatalf("sanitized fixture client does not expose fixture boundary")
+	}
+	markers := client.FixtureMarkerIDs()
+	if len(markers) != 2 || markers[0] != gitcode.FixtureIssueMarker || markers[1] != gitcode.FixtureWikiMarker {
+		t.Fatalf("fixture markers = %#v", markers)
+	}
+	ctx := context.Background()
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "create-issue", run: func() error { _, err := client.CreateIssue(ctx, gitcode.CreateIssueRequest{}, gitcode.WriteOptions{}); return err }},
+		{name: "update-issue", run: func() error { _, err := client.UpdateIssue(ctx, gitcode.UpdateIssueRequest{}, gitcode.WriteOptions{}); return err }},
+		{name: "create-comment", run: func() error { _, err := client.CreateIssueComment(ctx, gitcode.CreateIssueCommentRequest{}, gitcode.WriteOptions{}); return err }},
+		{name: "create-wiki", run: func() error { _, err := client.CreateWikiPage(ctx, gitcode.CreateWikiPageRequest{}, gitcode.WriteOptions{}); return err }},
+		{name: "update-wiki", run: func() error { _, err := client.UpdateWikiPage(ctx, gitcode.UpdateWikiPageRequest{}, gitcode.WriteOptions{}); return err }},
+		{name: "add-label", run: func() error { _, err := client.AddLabel(ctx, gitcode.LabelRequest{}, gitcode.WriteOptions{}); return err }},
+		{name: "remove-label", run: func() error { _, err := client.RemoveLabel(ctx, gitcode.LabelRequest{}, gitcode.WriteOptions{}); return err }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.run(); !gitcode.IsFixtureReadOnly(err) {
+				t.Fatalf("expected fixture read-only classification, got %T %v", err, err)
+			}
+		})
+	}
+}
+
 func TestNewWithModeLive(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)

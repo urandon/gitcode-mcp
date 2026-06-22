@@ -1,6 +1,9 @@
 package gitcode
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 type ErrProviderUnavailable struct {
 	Reason string
@@ -11,6 +14,26 @@ func (e ErrProviderUnavailable) Error() string {
 		e.Reason = "provider unavailable"
 	}
 	return "gitcode: " + e.Reason
+}
+
+type ErrFixtureReadOnly struct {
+	Operation string
+}
+
+func (e ErrFixtureReadOnly) Error() string {
+	if e.Operation == "" {
+		return "gitcode: fixture client is read-only"
+	}
+	return fmt.Sprintf("gitcode: fixture client is read-only for %s", e.Operation)
+}
+
+func FixtureReadOnlyError(operation string) error {
+	return ErrFixtureReadOnly{Operation: operation}
+}
+
+func IsFixtureReadOnly(err error) bool {
+	var target ErrFixtureReadOnly
+	return errors.As(err, &target)
 }
 
 type ErrValidationFailed struct {

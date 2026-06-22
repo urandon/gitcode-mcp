@@ -97,6 +97,14 @@ func readFixture(path string, out any) error {
 	return json.Unmarshal(body, out)
 }
 
+func (p *fixtureProvider) FixtureBoundaryMode() string {
+	return FixtureBoundaryMode
+}
+
+func (p *fixtureProvider) FixtureMarkerIDs() []string {
+	return FixtureMarkerIDs()
+}
+
 func (p *fixtureProvider) ProbeAuth(context.Context, AuthProbeRequest) (AuthProbeResult, error) {
 	if err := p.scenarioError("auth"); err != nil {
 		return AuthProbeResult{}, err
@@ -173,23 +181,23 @@ func (p *fixtureProvider) Search(ctx context.Context, req SearchRequest) (Page[S
 }
 
 func (p *fixtureProvider) CreateIssue(context.Context, CreateIssueRequest, WriteOptions) (WriteResult[Issue], error) {
-	return WriteResult[Issue]{}, ErrProviderUnavailable{Reason: "fixture provider is read-only"}
+	return WriteResult[Issue]{}, FixtureReadOnlyError("CreateIssue")
 }
 
 func (p *fixtureProvider) UpdateIssue(context.Context, UpdateIssueRequest, WriteOptions) (WriteResult[Issue], error) {
-	return WriteResult[Issue]{}, ErrProviderUnavailable{Reason: "fixture provider is read-only"}
+	return WriteResult[Issue]{}, FixtureReadOnlyError("UpdateIssue")
 }
 
 func (p *fixtureProvider) CreateIssueComment(context.Context, CreateIssueCommentRequest, WriteOptions) (WriteResult[Comment], error) {
-	return WriteResult[Comment]{}, ErrProviderUnavailable{Reason: "fixture provider is read-only"}
+	return WriteResult[Comment]{}, FixtureReadOnlyError("CreateIssueComment")
 }
 
 func (p *fixtureProvider) CreateWikiPage(context.Context, CreateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error) {
-	return WriteResult[WikiPage]{}, ErrProviderUnavailable{Reason: "fixture provider is read-only"}
+	return WriteResult[WikiPage]{}, FixtureReadOnlyError("CreateWikiPage")
 }
 
 func (p *fixtureProvider) UpdateWikiPage(context.Context, UpdateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error) {
-	return WriteResult[WikiPage]{}, ErrProviderUnavailable{Reason: "fixture provider is read-only"}
+	return WriteResult[WikiPage]{}, FixtureReadOnlyError("UpdateWikiPage")
 }
 
 func (p *fixtureProvider) scenarioError(endpoint string) error {
