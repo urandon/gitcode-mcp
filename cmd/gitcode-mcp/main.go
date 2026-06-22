@@ -25,6 +25,7 @@ type StartupDeps struct {
 	Config  config.Config
 	Cache   CacheStartup
 	GitCode GitCodeStartup
+	Source  config.Source
 }
 
 type CacheStartup struct {
@@ -91,7 +92,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 	}
 	if len(rest) > 0 && (rest[0] == "config" || rest[0] == "auth" || rest[0] == "doctor" || rest[0] == "migrate-cache") {
 		localArgs := append([]string(nil), rest...)
-		if rest[0] == "auth" && opts.live && !hasCLIFlag(localArgs[1:], "--live") {
+		if (rest[0] == "auth" || rest[0] == "doctor") && opts.live && !hasCLIFlag(localArgs[1:], "--live") {
 			localArgs = append(localArgs, "--live")
 		}
 		if opts.overrides.CachePath != "" && !hasCLIFlag(localArgs[1:], "--cache-path") {
@@ -106,6 +107,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 		return 1
 	}
 	deps := buildStartupDeps(cfg, config.Token(src), opts.live)
+	deps.Source = src
 	if opts.mcpServe {
 		return mcpServeRoute(context.Background(), stdin, stdout, stderr, deps, opts.mcpTransport, opts.mcpBind)
 	}
@@ -128,6 +130,7 @@ func buildStartupDeps(cfg config.Config, token string, live bool) StartupDeps {
 			Token:           token,
 			token:           token,
 		},
+		Source: config.OSSource{},
 	}
 }
 
@@ -367,16 +370,11 @@ func runCLICompatibility(ctx context.Context, args []string, stdout io.Writer, s
 	if len(cliArgs) > 0 && deps.Config.Format != "" && !hasCLIFlag(cliArgs[1:], "--format") {
 		cliArgs = append(cliArgs, "--format", deps.Config.Format)
 	}
-	liveClient, err := resolveLiveClient(deps)
-	if err != nil {
-		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
-		return 1
+	if len(cliArgs) > 0 && deps.GitCode.Live && !hasCLIFlag(cliArgs[1:], "--live") {
+		cliArgs = append(cliArgs, "--live")
 	}
 	_ = ctx
-	if liveClient != nil {
-		return cli.ExecuteWithClient(cliArgs, stdout, stderr, liveClient)
-	}
-	return cli.Execute(cliArgs, stdout, stderr)
+	return cli.ExecuteWithSource(cliArgs, stdout, stderr, deps.Source)
 }
 
 func hasCLIFlag(args []string, name string) bool {

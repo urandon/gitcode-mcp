@@ -13,15 +13,35 @@ type memSource struct {
 	env map[string]string
 }
 
-func (s *memSource) Env(key string) string              { return s.env[key] }
-func (s *memSource) UserHomeDir() (string, error)       { return "/home/test", nil }
-func (s *memSource) UserConfigDir() (string, error)     { return "/home/test/.config", nil }
-func (s *memSource) UserCacheDir() (string, error)      { return "/home/test/.cache", nil }
+func (s *memSource) Env(key string) string                { return s.env[key] }
+func (s *memSource) UserHomeDir() (string, error)         { return "/home/test", nil }
+func (s *memSource) UserConfigDir() (string, error)       { return "/home/test/.config", nil }
+func (s *memSource) UserCacheDir() (string, error)        { return "/home/test/.cache", nil }
 func (s *memSource) ReadFile(path string) ([]byte, error) { return nil, nil }
+
+func defaultTestPipeline(src config.Source) *Pipeline {
+	return NewPipeline([]Provider{
+		&EnvProvider{Source: src},
+		&testKeychainProvider{},
+		&NoneProvider{},
+	})
+}
+
+type testKeychainProvider struct{}
+
+func (p *testKeychainProvider) Name() string { return "keychain" }
+
+func (p *testKeychainProvider) Probe(ctx context.Context) Status {
+	return Status{Source: "keychain", Present: false, StoreMode: "keychain", Available: true, ErrorClass: "credential-store-unavailable"}
+}
+
+func (p *testKeychainProvider) Token(ctx context.Context) ResolvedToken {
+	return ResolvedToken{}
+}
 
 func TestPipelineResolveEnvToken(t *testing.T) {
 	src := &memSource{env: map[string]string{EnvToken: "test-token-xxx"}}
-	p := DefaultPipeline(src)
+	p := defaultTestPipeline(src)
 
 	token, sourceStatus, found := p.Resolve(context.Background())
 	if !found {
@@ -40,7 +60,7 @@ func TestPipelineResolveEnvToken(t *testing.T) {
 
 func TestPipelineResolveNone(t *testing.T) {
 	src := &memSource{env: map[string]string{}}
-	p := DefaultPipeline(src)
+	p := defaultTestPipeline(src)
 
 	_, _, found := p.Resolve(context.Background())
 	if found {
@@ -50,7 +70,7 @@ func TestPipelineResolveNone(t *testing.T) {
 
 func TestPipelineStatusEnvPresent(t *testing.T) {
 	src := &memSource{env: map[string]string{EnvToken: "test-token-xxx"}}
-	p := DefaultPipeline(src)
+	p := defaultTestPipeline(src)
 
 	status := p.Status(context.Background())
 	if !status.TokenPresent {
@@ -71,7 +91,7 @@ func TestPipelineStatusEnvPresent(t *testing.T) {
 
 func TestPipelineStatusNone(t *testing.T) {
 	src := &memSource{env: map[string]string{}}
-	p := DefaultPipeline(src)
+	p := defaultTestPipeline(src)
 
 	status := p.Status(context.Background())
 	if status.TokenPresent {
@@ -95,7 +115,7 @@ func TestPipelineStatusNone(t *testing.T) {
 
 func TestPipelineStatusKeychainInChain(t *testing.T) {
 	src := &memSource{env: map[string]string{}}
-	p := DefaultPipeline(src)
+	p := defaultTestPipeline(src)
 
 	status := p.Status(context.Background())
 	if len(status.AvailableSource) != 3 {
@@ -113,7 +133,7 @@ func TestPipelineStatusKeychainInChain(t *testing.T) {
 
 func TestPipelineStatusReporter(t *testing.T) {
 	src := &memSource{env: map[string]string{EnvToken: "test-token-xxx"}}
-	p := DefaultPipeline(src)
+	p := defaultTestPipeline(src)
 
 	cs := p.StatusReporter(context.Background(), config.EffectiveConfig{})
 	if cs.Source != "env:GITCODE_TOKEN" {
@@ -129,7 +149,7 @@ func TestPipelineStatusReporter(t *testing.T) {
 
 func TestPipelineStatusReporterNone(t *testing.T) {
 	src := &memSource{env: map[string]string{}}
-	p := DefaultPipeline(src)
+	p := defaultTestPipeline(src)
 
 	cs := p.StatusReporter(context.Background(), config.EffectiveConfig{})
 	if cs.Source != "missing" {
@@ -151,7 +171,7 @@ func TestPipelineStatusReporterNone(t *testing.T) {
 
 func TestPipelineStatusWithProbe(t *testing.T) {
 	src := &memSource{env: map[string]string{EnvToken: "test-token-xxx"}}
-	p := DefaultPipeline(src)
+	p := defaultTestPipeline(src)
 	p.WithProbe(func(ctx context.Context, token string, baseURL string) (bool, string) {
 		if token == "test-token-xxx" {
 			return true, "success"
@@ -170,7 +190,7 @@ func TestPipelineStatusWithProbe(t *testing.T) {
 
 func TestPipelineStatusWithFailingProbe(t *testing.T) {
 	src := &memSource{env: map[string]string{EnvToken: "test-token-xxx"}}
-	p := DefaultPipeline(src)
+	p := defaultTestPipeline(src)
 	p.WithProbe(func(ctx context.Context, token string, baseURL string) (bool, string) {
 		return false, "invalid credentials"
 	})
@@ -192,7 +212,7 @@ func TestPipelineStatusWithFailingProbe(t *testing.T) {
 
 func TestPipelineNoProbeWhenTokenMissing(t *testing.T) {
 	src := &memSource{env: map[string]string{}}
-	p := DefaultPipeline(src)
+	p := defaultTestPipeline(src)
 	p.WithProbe(func(ctx context.Context, token string, baseURL string) (bool, string) {
 		t.Fatal("probe should not be called when no token is present")
 		return false, ""
@@ -412,8 +432,8 @@ func TestValidateTokenFormat_WhitespaceTrimmed(t *testing.T) {
 
 func TestRenderText_IncludesRedactedToken(t *testing.T) {
 	as := AuthStatus{
-		TokenPresent:  true,
-		RedactedToken: "glp***xyz",
+		TokenPresent:    true,
+		RedactedToken:   "glp***xyz",
 		TokenDiagnostic: &TokenDiagnostic{Valid: true},
 		AvailableSource: []SourceStatus{
 			{Name: "env:GITCODE_TOKEN", Available: true, Credentials: Status{Source: "env:GITCODE_TOKEN", Present: true, StoreMode: "auto"}},
@@ -461,7 +481,7 @@ func TestRenderText_InvalidTokenDiagnostic(t *testing.T) {
 
 func TestPipelineStatusPopulatesRedactedToken(t *testing.T) {
 	src := &memSource{env: map[string]string{EnvToken: "glpat-abcdef123456"}}
-	p := DefaultPipeline(src)
+	p := defaultTestPipeline(src)
 	status := p.Status(context.Background())
 	if !status.TokenPresent {
 		t.Fatal("expected TokenPresent=true")
@@ -485,7 +505,7 @@ func TestPipelineStatusPopulatesRedactedToken(t *testing.T) {
 
 func TestPipelineStatusNoTokenNoRedacted(t *testing.T) {
 	src := &memSource{env: map[string]string{}}
-	p := DefaultPipeline(src)
+	p := defaultTestPipeline(src)
 	status := p.Status(context.Background())
 	if status.TokenPresent {
 		t.Fatal("expected TokenPresent=false")
@@ -500,7 +520,7 @@ func TestPipelineStatusNoTokenNoRedacted(t *testing.T) {
 
 func TestPipelineStatusWithProbeAndAuthFailureClass(t *testing.T) {
 	src := &memSource{env: map[string]string{EnvToken: "glpat-invalid_token"}}
-	p := DefaultPipeline(src)
+	p := defaultTestPipeline(src)
 	p.WithProbe(func(ctx context.Context, token string, baseURL string) (bool, string) {
 		return false, "expired token"
 	})

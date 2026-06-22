@@ -142,8 +142,12 @@ func DefaultCredentialProvider(src Source) ChainCredentialProvider {
 }
 
 func (p ChainCredentialProvider) Resolve(ctx context.Context, eff EffectiveConfig) (SecretString, CredentialStatus, error) {
+	providers := p.Providers
+	if eff.CredentialPolicy.Store == "env" && len(providers) > 0 {
+		providers = providers[:1]
+	}
 	var last CredentialStatus
-	for _, provider := range p.Providers {
+	for _, provider := range providers {
 		secret, status, err := provider.Resolve(ctx, eff)
 		if err != nil {
 			return SecretString{}, status, err
@@ -160,9 +164,13 @@ func (p ChainCredentialProvider) Resolve(ctx context.Context, eff EffectiveConfi
 }
 
 func (p ChainCredentialProvider) Status(ctx context.Context, eff EffectiveConfig) CredentialStatus {
-	available := make([]string, 0, len(p.Providers))
+	providers := p.Providers
+	if eff.CredentialPolicy.Store == "env" && len(providers) > 0 {
+		providers = providers[:1]
+	}
+	available := make([]string, 0, len(providers))
 	var last CredentialStatus
-	for _, provider := range p.Providers {
+	for _, provider := range providers {
 		_, status, err := provider.Resolve(ctx, eff)
 		if source := providerStatusSource(provider, status); source != "" {
 			available = append(available, source)

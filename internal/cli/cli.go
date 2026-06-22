@@ -95,6 +95,28 @@ type localCommandDeps struct {
 	CredentialReporter config.CredentialStatusReporter
 }
 
+type startupPlan struct {
+	Command          string
+	ProviderMode     string
+	CachePath        string
+	RepoID           string
+	APIBaseURL       string
+	CredentialStatus config.CredentialStatus
+	Token            config.SecretString
+	ServiceConfig    service.ServiceConfig
+}
+
+type missingCredentialError struct {
+	Source string
+}
+
+func (e missingCredentialError) Error() string {
+	if strings.TrimSpace(e.Source) == "" {
+		return "missing_credential: live provider requires GITCODE_TOKEN or configured credential"
+	}
+	return "missing_credential: live provider requires GITCODE_TOKEN or configured credential; credential_source=" + e.Source
+}
+
 type options struct {
 	format         string
 	kind           string
@@ -180,6 +202,13 @@ func executeWithFactory(args []string, stdout io.Writer, stderr io.Writer, facto
 }
 
 func executeWithFactoryAndDeps(args []string, stdout io.Writer, stderr io.Writer, factory serviceFactory, deps localCommandDeps) int {
+	if deps.Source == nil {
+		deps.Source = config.OSSource{}
+	}
+	if deps.CredentialReporter == nil {
+		provider := config.DefaultCredentialProvider(deps.Source)
+		deps.CredentialReporter = provider
+	}
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		printHelp(stdout)
 		return 0
@@ -206,7 +235,11 @@ func executeWithFactoryAndDeps(args []string, stdout io.Writer, stderr io.Writer
 		printCommandHelp(command, stdout)
 		return 0
 	}
-	svc, cleanup, err := factory(context.Background(), opts.cachePath)
+	plan, planErr := buildStartupPlan(context.Background(), command, opts, deps)
+	if planErr != nil {
+		return writeError(stderr, opts.format, planErr)
+	}
+	svc, cleanup, err := serviceFromStartupPlan(context.Background(), plan, factory)
 	if err != nil {
 		return writeError(stderr, opts.format, err)
 	}
@@ -214,6 +247,95 @@ func executeWithFactoryAndDeps(args []string, stdout io.Writer, stderr io.Writer
 		defer cleanup()
 	}
 	return dispatch(context.Background(), svc, command, rest, opts, stdout, stderr)
+}
+
+func buildStartupPlan(ctx context.Context, command string, opts options, deps localCommandDeps) (startupPlan, error) {
+	plan := startupPlan{Command: command, ProviderMode: "offline-fixture", CachePath: opts.cachePath, RepoID: opts.repo}
+	if opts.live && isLiveStartupCommand(command) {
+		plan.ProviderMode = "live-http"
+	}
+	eff, err := config.LoadEffective(deps.Source, config.Overrides{CachePath: opts.cachePath})
+	if err != nil {
+		return plan, err
+	}
+	plan.CachePath = firstNonEmpty(opts.cachePath, eff.Config.CachePath)
+	if plan.ProviderMode != "live-http" {
+		return plan, nil
+	}
+	provider, ok := deps.CredentialReporter.(config.CredentialProvider)
+	if !ok {
+		provider = config.DefaultCredentialProvider(deps.Source)
+	}
+	secret, status, err := provider.Resolve(ctx, eff)
+	if err != nil {
+		return plan, err
+	}
+	plan.CredentialStatus = status
+	if !status.Present || strings.TrimSpace(secret.Value()) == "" {
+		return plan, missingCredentialError{Source: status.Source}
+	}
+	plan.Token = secret
+	baseURL, err := liveAPIBaseURL(ctx, plan.CachePath, opts.repo, eff.Config.GitCodeBaseURL)
+	if err != nil {
+		return plan, err
+	}
+	plan.APIBaseURL = baseURL
+	plan.ServiceConfig = service.ServiceConfig{BaseURL: baseURL, Timeout: eff.Config.DefaultTimeout, MaxResponseSize: eff.Config.MaxResponseSize, MaxRetries: eff.Config.MaxRetries}
+	return plan, nil
+}
+
+func isLiveStartupCommand(command string) bool {
+	switch command {
+	case "sync", "create-issue", "update-issue", "create-page", "update-page", "add-comment", "add-label", "doctor":
+		return true
+	default:
+		return false
+	}
+}
+
+func liveAPIBaseURL(ctx context.Context, cachePath, repoID, fallback string) (string, error) {
+	selected := strings.TrimSpace(fallback)
+	if strings.TrimSpace(repoID) != "" {
+		store, err := cache.NewSQLiteReadOnlyStore(ctx, cachePath)
+		if err != nil {
+			return "", err
+		}
+		defer store.Close()
+		repo, err := store.GetRepository(ctx, repoID)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(repo.APIBaseURL) != "" {
+			selected = repo.APIBaseURL
+		}
+	}
+	if strings.TrimSpace(selected) == "" {
+		return "", service.ErrInvalidQuery{Field: "api_base_url", Message: "live provider requires api_base_url"}
+	}
+	return selected, nil
+}
+
+func serviceFromStartupPlan(ctx context.Context, plan startupPlan, factory serviceFactory) (queryService, func() error, error) {
+	if plan.ProviderMode != "live-http" {
+		if factory == nil {
+			factory = defaultServiceFactory
+		}
+		return factory(ctx, plan.CachePath)
+	}
+	path, err := resolvedCachePath(plan.CachePath)
+	if err != nil {
+		return nil, nil, err
+	}
+	store, err := cache.NewSQLiteStore(ctx, path)
+	if err != nil {
+		return nil, nil, err
+	}
+	svc, err := service.NewWithMode(store, gitcode.ProviderModeLive, plan.Token.Value(), plan.ServiceConfig)
+	if err != nil {
+		_ = store.Close()
+		return nil, nil, err
+	}
+	return svc, store.Close, nil
 }
 
 func defaultServiceFactory(ctx context.Context, cachePath string) (queryService, func() error, error) {
@@ -372,7 +494,11 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 		return 0
 	}
 	if command == "doctor" {
-		return executeDoctorCommand(context.Background(), opts, stdout, stderr, deps)
+		plan, planErr := buildStartupPlan(context.Background(), command, opts, deps)
+		if planErr != nil && opts.live {
+			return writeError(stderr, opts.format, planErr)
+		}
+		return executeDoctorCommand(context.Background(), opts, plan, stdout, stderr, deps)
 	}
 	if command == "migrate-cache" {
 		return executeMigrateCacheCommand(context.Background(), opts, stdout, stderr, deps)
@@ -1042,6 +1168,10 @@ func failureClass(err error) string {
 	if errors.As(err, &ambiguous) {
 		return "ambiguous_alias"
 	}
+	var missing missingCredentialError
+	if errors.As(err, &missing) {
+		return "missing_credential"
+	}
 	var invalid service.ErrInvalidQuery
 	if errors.As(err, &invalid) {
 		return "invalid_query"
@@ -1072,6 +1202,10 @@ func exitCode(err error) int {
 	var ambiguous service.ErrAmbiguousAlias
 	if errors.As(err, &ambiguous) {
 		return 4
+	}
+	var missing missingCredentialError
+	if errors.As(err, &missing) {
+		return 1
 	}
 	var invalid service.ErrInvalidQuery
 	if errors.As(err, &invalid) {
@@ -1116,10 +1250,15 @@ func firstArg(args []string) (string, bool) {
 	return args[0], true
 }
 
-func executeDoctorCommand(ctx context.Context, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+func executeDoctorCommand(ctx context.Context, opts options, plan startupPlan, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
 	_ = stderr
-	cachePath := opts.cachePath
-	report, err := doctor.Build(ctx, doctor.Request{Version: version, Source: deps.Source, CredentialReporter: deps.CredentialReporter, CachePath: cachePath, Live: opts.live})
+	cachePath := firstNonEmpty(plan.CachePath, opts.cachePath)
+	var cred *config.CredentialStatus
+	if plan.CredentialStatus.Source != "" || plan.CredentialStatus.Present {
+		status := plan.CredentialStatus
+		cred = &status
+	}
+	report, err := doctor.Build(ctx, doctor.Request{Version: version, Source: deps.Source, CredentialReporter: deps.CredentialReporter, CredentialStatus: cred, CachePath: cachePath, Live: opts.live, ProviderMode: plan.ProviderMode, APIBaseURL: plan.APIBaseURL, RepoID: opts.repo})
 	if err != nil {
 		return writeError(stderr, opts.format, err)
 	}

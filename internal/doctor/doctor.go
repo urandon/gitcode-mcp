@@ -37,8 +37,12 @@ type Request struct {
 	Version            string
 	Source             config.Source
 	CredentialReporter config.CredentialStatusReporter
+	CredentialStatus   *config.CredentialStatus
 	CachePath          string
 	Live               bool
+	ProviderMode       string
+	APIBaseURL         string
+	RepoID             string
 	OpenStore          OpenStoreFunc
 	NewService         NewServiceFunc
 }
@@ -122,6 +126,7 @@ type LiveProviderSection struct {
 	Status       string `json:"status"`
 	Reachable    string `json:"reachable"`
 	ProviderMode string `json:"provider_mode"`
+	APIBaseURL   string `json:"api_base_url,omitempty"`
 	Remediation  string `json:"remediation,omitempty"`
 }
 
@@ -158,6 +163,9 @@ func Build(ctx context.Context, req Request) (Report, error) {
 	}
 
 	cred := req.CredentialReporter.Status(ctx, eff)
+	if req.CredentialStatus != nil {
+		cred = *req.CredentialStatus
+	}
 	cred.Source = config.RedactDiagnostic(cred.Source, req.Source)
 	cred.ErrorClass = config.RedactDiagnostic(cred.ErrorClass, req.Source)
 	cred.Remediation = config.RedactDiagnostic(cred.Remediation, req.Source)
@@ -189,7 +197,8 @@ func Build(ctx context.Context, req Request) (Report, error) {
 	}
 
 	if req.Live {
-		report.LiveProvider.ProviderMode = "live"
+		report.LiveProvider.ProviderMode = firstNonEmpty(req.ProviderMode, "live-http")
+		report.LiveProvider.APIBaseURL = req.APIBaseURL
 		if cred.Present {
 			report.LiveProvider.Status = "configured"
 			report.LiveProvider.Reachable = "skipped"
@@ -199,8 +208,8 @@ func Build(ctx context.Context, req Request) (Report, error) {
 			report.AuthProbe.Remediation = cred.Remediation
 		} else {
 			report.LiveProvider.Status = "error"
-			report.LiveProvider.Remediation = "GITCODE_TOKEN not set; live provider requires a token"
-			report.AuthProbe.Remediation = "GITCODE_TOKEN not set; set token to enable authentication probing"
+			report.LiveProvider.Remediation = "missing_credential: live provider requires a token"
+			report.AuthProbe.Remediation = "missing_credential: set a token to enable authentication probing"
 		}
 	}
 
@@ -226,6 +235,17 @@ func Build(ctx context.Context, req Request) (Report, error) {
 	}
 	sort.Slice(repos, func(i, j int) bool { return repos[i].RepoID < repos[j].RepoID })
 	repo := repos[0]
+	if req.RepoID != "" {
+		for _, candidate := range repos {
+			if candidate.RepoID == req.RepoID {
+				repo = candidate
+				break
+			}
+		}
+	}
+	if req.Live && report.LiveProvider.APIBaseURL == "" {
+		report.LiveProvider.APIBaseURL = repo.APIBaseURL
+	}
 	report.Repo = RepoSection{Status: "ready", RepoID: repo.RepoID, Owner: "[REDACTED]", Name: "[REDACTED]", Scopes: scopesText(repo.Scopes)}
 
 	svc := req.NewService(store)
@@ -334,6 +354,15 @@ func emptyAsNone(value string) string {
 		return "none"
 	}
 	return value
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func redactReport(report Report, src config.Source) Report {
