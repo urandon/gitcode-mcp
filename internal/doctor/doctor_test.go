@@ -132,11 +132,12 @@ func TestBuildNoToken(t *testing.T) {
 }
 
 func TestBuildRedactsOutput(t *testing.T) {
-	src := fakeSource{env: map[string]string{config.EnvToken: "secret-token-value"}, files: map[string][]byte{}, home: "/home/test", cfgDir: "/cfg", cacheDir: "/cache"}
+	src := fakeSource{env: map[string]string{config.EnvToken: "secret-token-value", "GITCODE_E2E_OWNER": "private-owner", "GITCODE_E2E_REPO": "private-repo"}, files: map[string][]byte{}, home: "/home/test", cfgDir: "/cfg", cacheDir: "/cache"}
 	report, err := Build(context.Background(), Request{
 		Version:            "test-version",
 		Source:             src,
-		CredentialReporter: fakeCredentialReporter{status: config.CredentialStatus{Source: "env", Present: true, StoreMode: "env", Remediation: "do not print secret-token-value"}},
+		Live:               true,
+		CredentialReporter: fakeCredentialReporter{status: config.CredentialStatus{Source: "env", Present: true, StoreMode: "env", Remediation: "Authorization: Bearer secret-token-value for private-owner/private-repo"}},
 		CachePath:          "/cache/db.sqlite",
 		OpenStore:          func(context.Context, string) (Store, error) { return &fakeStore{version: 7}, nil },
 	})
@@ -145,7 +146,12 @@ func TestBuildRedactsOutput(t *testing.T) {
 	}
 	var b strings.Builder
 	RenderText(&b, report)
-	if strings.Contains(b.String(), "secret-token-value") || strings.Contains(report.Credential.Remediation, "secret-token-value") {
-		t.Fatalf("doctor leaked token: %#v text=%q", report, b.String())
+	for _, forbidden := range []string{"secret-token-value", "private-owner", "private-repo", "Bearer secret-token-value"} {
+		if strings.Contains(b.String(), forbidden) || strings.Contains(report.Credential.Remediation, forbidden) {
+			t.Fatalf("doctor leaked %q: %#v text=%q", forbidden, report, b.String())
+		}
+	}
+	if !strings.Contains(b.String(), "[REDACTED]") {
+		t.Fatalf("doctor output missing redaction marker: %q", b.String())
 	}
 }

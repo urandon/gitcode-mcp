@@ -156,6 +156,28 @@ func TestConfigAuthCommandsRedactedUX(t *testing.T) {
 		}
 	})
 
+	t.Run("SCN-AUTH-STATUS-REDACTS-DIAGNOSTIC-SURFACES", func(t *testing.T) {
+		src := newCLIConfigSource(t)
+		src.env[config.EnvToken] = "secret-token-value"
+		src.env["GITCODE_E2E_OWNER"] = "private-owner"
+		src.env["GITCODE_E2E_REPO"] = "private-repo"
+		reporter := statusReporter{status: config.CredentialStatus{Source: "env:GITCODE_TOKEN", Present: true, StoreMode: "env", Remediation: "Authorization: Bearer secret-token-value for private-owner/private-repo"}}
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps([]string{"auth", "status"}, &stdout, &stderr, nil, localCommandDeps{Source: src, CredentialReporter: reporter})
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		out := stdout.String() + stderr.String()
+		for _, forbidden := range []string{"secret-token-value", "private-owner", "private-repo", "Bearer secret-token-value"} {
+			if strings.Contains(out, forbidden) {
+				t.Fatalf("auth status leaked %q: %q", forbidden, out)
+			}
+		}
+		if !strings.Contains(out, "[REDACTED]") {
+			t.Fatalf("auth status missing redaction marker: %q", out)
+		}
+	})
+
 	t.Run("SCN-AUTH-STATUS-NO-TOKEN", func(t *testing.T) {
 		src := newCLIConfigSource(t)
 		var stdout, stderr bytes.Buffer

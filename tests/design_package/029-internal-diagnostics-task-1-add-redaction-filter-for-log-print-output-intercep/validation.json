@@ -1,0 +1,21 @@
+{
+  "covered_outcome_ids": [
+    "outcome-2",
+    "outcome-5"
+  ],
+  "covered_decommission_ids": [
+    "decommission-3"
+  ],
+  "product_surfaces": [
+    "internal/diagnostics/redaction.go: Filter.RedactText, RedactBytes, RedactHeaders, RedactURL, RedactJSONBody, RawAPIResponseSummary, and RedactedWriter",
+    "internal/config/config.go: RedactDiagnostic shared diagnostic redaction boundary for env token, e2e repo coordinates, base URLs, config paths, and local filesystem paths",
+    "internal/cli/cli.go: auth status rendering, doctor command rendering, live auth probe failure diagnostics, and generic writeError error rendering",
+    "internal/doctor/doctor.go: doctor report construction and redacted text/JSON rendering through CLI command path",
+    "internal/gitcode/redaction.go: compatibility wrappers for redacted live-provider captures",
+    "internal/e2e/two_cache_test.go: TestE2ELiveTwoCache testLogger output redaction and no-live skip path"
+  ],
+  "evidence_type": "offline Go package tests plus compiled CLI runtime commands against a local loopback HTTP 401 stub exercising auth status, doctor JSON, live auth-probe error diagnostics, diagnostics writer/header/url/body redaction, and e2e test binary build/skip behavior",
+  "freshness": "current working tree Go packages and freshly built cmd/gitcode-mcp binary; deterministic fake secrets and loopback stub only; live validation disabled",
+  "mocks_used": "external dependencies only: GitCode live API is replaced by a local loopback HTTP stub returning deterministic 401 responses with fake sensitive headers/body so the real CLI live diagnostic path runs offline",
+  "production_files_modified": []
+}

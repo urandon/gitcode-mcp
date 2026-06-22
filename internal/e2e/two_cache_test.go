@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/service"
 )
@@ -48,9 +49,10 @@ func (lg *testLogger) fatalf(format string, args ...any) {
 
 func (lg *testLogger) emit(write func(string), format string, args ...any) {
 	raw := fmt.Sprintf(format, args...)
-	redacted := gitcode.RedactText(raw, lg.token, lg.owner, lg.repo)
+	filter := diagnostics.NewFilter(lg.token, lg.owner, lg.repo, os.Getenv("GITCODE_E2E_REPO_ID"), os.Getenv("GITCODE_E2E_API_BASE_URL"), os.Getenv("GITCODE_E2E_BASE_URL"))
+	redacted := filter.RedactText(raw)
 	lg.mu.Lock()
-	lg.messages = append(lg.messages, raw)
+	lg.messages = append(lg.messages, redacted)
 	lg.mu.Unlock()
 	write(redacted)
 }

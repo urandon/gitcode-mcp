@@ -423,13 +423,13 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 			status = probeAuthStatus(context.Background(), deps.Source, eff, opts, status)
 		}
 		if opts.format == "json" {
-			code := render(stdout, opts.format, status, nil)
+			code := render(stdout, opts.format, sanitizeCredentialStatus(status, deps.Source), nil)
 			if status.AuthProbe != nil && status.AuthProbe.FailureClass == "auth-failure" {
 				return 1
 			}
 			return code
 		}
-		fmt.Fprint(stdout, config.RenderCredentialStatus(status))
+		fmt.Fprint(stdout, config.RedactDiagnostic(config.RenderCredentialStatus(status), deps.Source))
 		if status.AuthProbe != nil && status.AuthProbe.FailureClass == "auth-failure" {
 			return 1
 		}
@@ -474,6 +474,23 @@ func probeAuthStatus(ctx context.Context, src config.Source, eff config.Effectiv
 		return status
 	}
 	status.AuthProbe = &config.CredentialAuthProbe{Status: "ok"}
+	return status
+}
+
+func sanitizeCredentialStatus(status config.CredentialStatus, src config.Source) config.CredentialStatus {
+	status.Source = config.RedactDiagnostic(status.Source, src)
+	status.ErrorClass = config.RedactDiagnostic(status.ErrorClass, src)
+	status.Remediation = config.RedactDiagnostic(status.Remediation, src)
+	for i := range status.AvailableSources {
+		status.AvailableSources[i] = config.RedactDiagnostic(status.AvailableSources[i], src)
+	}
+	if status.AuthProbe != nil {
+		probe := *status.AuthProbe
+		probe.Status = config.RedactDiagnostic(probe.Status, src)
+		probe.FailureClass = config.RedactDiagnostic(probe.FailureClass, src)
+		probe.Message = config.RedactDiagnostic(probe.Message, src)
+		status.AuthProbe = &probe
+	}
 	return status
 }
 
@@ -986,11 +1003,12 @@ func joinRepositoryScopes(scopes []service.RepositoryScope) string {
 func writeError(stderr io.Writer, format string, err error) int {
 	code := exitCode(err)
 	failureClass := failureClass(err)
+	message := config.RedactDiagnostic(err.Error(), config.OSSource{})
 	if format == "json" {
-		_ = json.NewEncoder(stderr).Encode(map[string]any{"error": err.Error(), "exit_code": code, "failure_class": failureClass})
+		_ = json.NewEncoder(stderr).Encode(map[string]any{"error": message, "exit_code": code, "failure_class": failureClass})
 		return code
 	}
-	fmt.Fprintln(stderr, err.Error())
+	fmt.Fprintln(stderr, message)
 	if failureClass != "" {
 		fmt.Fprintf(stderr, "failure_class: %s\n", failureClass)
 	}

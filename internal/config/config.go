@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
+
+	"gitcode-mcp/internal/diagnostics"
 )
 
 const (
@@ -93,8 +94,7 @@ func RedactDiagnostic(message string, src Source) string {
 	if src == nil {
 		src = OSSource{}
 	}
-	redacted := message
-	values := []string{src.Env(EnvToken), src.Env(EnvConfigPath)}
+	values := []string{src.Env(EnvToken), src.Env(EnvConfigPath), src.Env("GITCODE_E2E_REPO_ID"), src.Env("GITCODE_E2E_OWNER"), src.Env("GITCODE_E2E_REPO"), src.Env("GITCODE_E2E_API_BASE_URL"), src.Env("GITCODE_E2E_BASE_URL")}
 	if path, _ := defaultConfigPath(src); path != "" {
 		values = append(values, path)
 	}
@@ -110,13 +110,7 @@ func RedactDiagnostic(message string, src Source) string {
 	if dir, err := src.UserCacheDir(); err == nil {
 		values = append(values, dir)
 	}
-	for _, value := range values {
-		if value == "" {
-			continue
-		}
-		redacted = strings.ReplaceAll(redacted, value, "[REDACTED]")
-	}
-	return redacted
+	return diagnostics.RedactText(message, values...)
 }
 
 type fileConfig struct {
