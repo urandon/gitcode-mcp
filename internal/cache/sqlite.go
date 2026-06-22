@@ -133,7 +133,7 @@ func NewSQLiteReadOnlyStore(ctx context.Context, dataSourceName string) (*SQLite
 		_ = db.Close()
 		return nil, err
 	}
-	if !compat.PermitWrites {
+	if !compat.Compatible {
 		_ = db.Close()
 		return nil, &SchemaVersionError{Compat: compat}
 	}

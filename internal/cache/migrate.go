@@ -4,17 +4,29 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
+	"time"
 )
+
+type Confirmation struct {
+	Confirmed bool
+}
 
 type MigrateCacheResult struct {
 	FromVersion   int
 	ToVersion     int
 	Applied       []int
+	BackupPath    string
 	Compatibility VersionCompatibility
 }
 
 func MigrateCache(ctx context.Context, dataSourceName string, forceNoFTS bool) (*MigrateCacheResult, error) {
+	return MigrateCacheWithConfirm(ctx, dataSourceName, forceNoFTS, Confirmation{Confirmed: true})
+}
+
+func MigrateCacheWithConfirm(ctx context.Context, dataSourceName string, forceNoFTS bool, confirm Confirmation) (*MigrateCacheResult, error) {
 	if _, err := os.Stat(dataSourceName); err != nil {
 		if os.IsNotExist(err) {
 			return &MigrateCacheResult{FromVersion: 0, ToVersion: currentSchemaVersion, Applied: nil}, nil
@@ -59,6 +71,20 @@ func MigrateCache(ctx context.Context, dataSourceName string, forceNoFTS bool) (
 		return &MigrateCacheResult{FromVersion: beforeVersion, ToVersion: currentSchemaVersion, Applied: nil, Compatibility: compat}, nil
 	}
 
+	if !confirm.Confirmed {
+		return &MigrateCacheResult{
+			FromVersion:   beforeVersion,
+			ToVersion:     currentSchemaVersion,
+			Applied:       nil,
+			Compatibility: compat,
+		}, nil
+	}
+
+	backupPath, err := backupCache(dataSourceName)
+	if err != nil {
+		return nil, fmt.Errorf("cache: failed to create backup before migration: %w", err)
+	}
+
 	useFTS := !forceNoFTS && detectFTS5(ctx, db)
 
 	applied := make([]int, 0)
@@ -83,13 +109,57 @@ func MigrateCache(ctx context.Context, dataSourceName string, forceNoFTS bool) (
 			_ = tx.Rollback()
 			return nil, err
 		}
+		if _, err = tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", m.version)); err != nil {
+			_ = tx.Rollback()
+			return nil, err
+		}
 		if err = tx.Commit(); err != nil {
 			return nil, err
 		}
 		applied = append(applied, m.version)
 	}
 
-	return &MigrateCacheResult{FromVersion: beforeVersion, ToVersion: currentSchemaVersion, Applied: applied, Compatibility: compat}, nil
+	return &MigrateCacheResult{
+		FromVersion:   beforeVersion,
+		ToVersion:     currentSchemaVersion,
+		Applied:       applied,
+		BackupPath:    backupPath,
+		Compatibility: compat,
+	}, nil
+}
+
+func backupCache(sourcePath string) (string, error) {
+	timestamp := time.Now().UTC().Format("20060102T150405Z")
+	backupPath := sourcePath + ".backup-" + timestamp
+
+	src, err := os.Open(sourcePath)
+	if err != nil {
+		return "", fmt.Errorf("open source for backup: %w", err)
+	}
+	defer src.Close()
+
+	dir := filepath.Dir(backupPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create backup directory: %w", err)
+	}
+
+	dst, err := os.OpenFile(backupPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("create backup file: %w", err)
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, src); err != nil {
+		os.Remove(backupPath)
+		return "", fmt.Errorf("copy backup: %w", err)
+	}
+
+	if err := dst.Sync(); err != nil {
+		os.Remove(backupPath)
+		return "", fmt.Errorf("sync backup: %w", err)
+	}
+
+	return backupPath, nil
 }
 
 func hasSchemaVersionTable(ctx context.Context, db *sql.DB) (bool, error) {

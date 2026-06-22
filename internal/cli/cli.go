@@ -134,6 +134,7 @@ type options struct {
 	sourceID       string
 	recordID       string
 	snapshotID     string
+	confirm        bool
 	helpRequested  bool
 }
 
@@ -288,6 +289,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.snapshotID, "snapshot-id", "", "snapshot id")
 	flags.BoolVar(&opts.helpRequested, "help", false, "show help for command")
 	flags.BoolVar(&opts.helpRequested, "h", false, "show help for command")
+	flags.BoolVar(&opts.confirm, "confirm", false, "confirm migration without interactive prompt")
 	if err := flags.Parse(reorderFlags(args)); err != nil {
 		return opts, nil, service.ErrInvalidQuery{Field: "flags", Message: err.Error()}
 	}
@@ -305,7 +307,7 @@ func reorderFlags(args []string) []string {
 		arg := args[i]
 		if strings.HasPrefix(arg, "--") {
 			flags = append(flags, arg)
-			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--index" || arg == "--dry-run" || arg == "--live" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" {
+			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--index" || arg == "--dry-run" || arg == "--live" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" {
 				continue
 			}
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
@@ -1314,6 +1316,7 @@ type migrateCacheResult struct {
 	ToVersion   int    `json:"to_version"`
 	Status      string `json:"status"`
 	Applied     []int  `json:"applied,omitempty"`
+	BackupPath  string `json:"backup_path,omitempty"`
 	Remediation string `json:"remediation,omitempty"`
 }
 
@@ -1323,7 +1326,7 @@ func executeMigrateCacheCommand(ctx context.Context, opts options, stdout io.Wri
 		cachePath = resolvedCachePathDefault()
 	}
 
-	result, err := cache.MigrateCache(ctx, cachePath, false)
+	result, err := cache.MigrateCacheWithConfirm(ctx, cachePath, false, cache.Confirmation{Confirmed: opts.confirm})
 	if err != nil {
 		return writeError(stderr, opts.format, err)
 	}
@@ -1333,9 +1336,13 @@ func executeMigrateCacheCommand(ctx context.Context, opts options, stdout io.Wri
 		FromVersion: result.FromVersion,
 		ToVersion:   result.ToVersion,
 		Applied:     result.Applied,
+		BackupPath:  result.BackupPath,
 	}
 
-	if result.FromVersion == 0 {
+	if !result.Compatibility.Compatible && result.Compatibility.Remediation != "" {
+		mr.Status = "incompatible"
+		mr.Remediation = result.Compatibility.Remediation
+	} else if result.FromVersion == 0 {
 		mr.Status = "no_cache"
 		mr.Remediation = "no initialized cache found; re-initialize the cache before migrating"
 	} else if result.FromVersion <= 1 {
@@ -1346,19 +1353,22 @@ func executeMigrateCacheCommand(ctx context.Context, opts options, stdout io.Wri
 		mr.Remediation = fmt.Sprintf("cache schema version %d is newer than the supported version %d; upgrade gitcode-mcp binary or re-initialize the cache", result.FromVersion, result.ToVersion)
 	} else if result.FromVersion == result.ToVersion {
 		mr.Status = "up_to_date"
+	} else if len(result.Applied) == 0 && !opts.confirm {
+		mr.Status = "confirmation_required"
+		mr.Remediation = fmt.Sprintf("to migrate from schema version %d to %d, re-run with --confirm", result.FromVersion, result.ToVersion)
 	} else {
 		mr.Status = "migrated"
 	}
 
 	if opts.format == "json" {
 		code := renderJSON(stdout, mr)
-		if mr.Status == "incompatible" {
+		if mr.Status == "incompatible" || mr.Status == "confirmation_required" {
 			return 1
 		}
 		return code
 	}
 	renderMigrateCacheText(stdout, mr)
-	if mr.Status == "incompatible" {
+	if mr.Status == "incompatible" || mr.Status == "confirmation_required" {
 		return 1
 	}
 	return 0
@@ -1375,6 +1385,9 @@ func renderMigrateCacheText(w io.Writer, mr migrateCacheResult) {
 			fmt.Fprintf(w, " %d", v)
 		}
 		fmt.Fprintln(w)
+	}
+	if mr.BackupPath != "" {
+		fmt.Fprintf(w, "backup_path: %s\n", mr.BackupPath)
 	}
 	if mr.Remediation != "" {
 		fmt.Fprintf(w, "remediation: %s\n", mr.Remediation)
@@ -1800,9 +1813,11 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "migrate-cache":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s [--cache-path PATH]\n\n", command)
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --confirm [--cache-path PATH]\n\n", command)
 		fmt.Fprintln(w, "Run cache schema migration from supported older versions.")
+		fmt.Fprintln(w, "A backup is created before migration at {cache-path}.backup-{timestamp}.")
 		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --confirm           required to apply migration")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "repo":
