@@ -30,6 +30,9 @@ func TestFreshnessReportClassifications(t *testing.T) {
 		states[record.SourceID] = record
 	}
 	assertFreshness(t, states["DOC-FRESH"], IndexFreshnessFresh, "")
+	if states["DOC-FRESH"].IndexedAt.IsZero() {
+		t.Fatalf("DOC-FRESH indexed_at is zero: %+v", states["DOC-FRESH"])
+	}
 	assertFreshness(t, states["DOC-MISSING"], IndexFreshnessMissingIndex, WarningMissingIndex)
 	assertFreshness(t, states["DOC-CONTENT"], IndexFreshnessStaleByContent, WarningStaleIndex)
 	if states["DOC-CONTENT"].CurrentContentHash != ContentHash(sources[2].Body) {
@@ -95,7 +98,7 @@ func freshnessSource(repoID, sourceID, body, revision string, updated time.Time)
 }
 
 func freshnessChunk(source SourceRecord, hash, revision string, updated time.Time) Chunk {
-	return Chunk{ID: "chunk-" + source.ID, RepoID: source.RepoID, SourceID: source.ID, RecordID: source.RecordID, ContentHash: hash, ByteStart: 0, ByteEnd: len(source.Body), LineStart: 1, LineEnd: 1, Text: source.Body, NormalizedText: normalizeChunkText(source.Body), Policy: ChunkPolicyHeading, InheritedMetadata: map[string]string{"remote_revision": revision, "sync_revision": revision, "source_updated_at": updated.Format(time.RFC3339Nano)}}
+	return Chunk{ID: "chunk-" + source.ID, RepoID: source.RepoID, SourceID: source.ID, RecordID: source.RecordID, ContentHash: hash, ByteStart: 0, ByteEnd: len(source.Body), LineStart: 1, LineEnd: 1, Text: source.Body, NormalizedText: normalizeChunkText(source.Body), Policy: ChunkPolicyHeading, InheritedMetadata: map[string]string{"remote_revision": revision, "sync_revision": revision, "source_updated_at": updated.Format(time.RFC3339Nano), "indexed_at": updated.Add(time.Minute).Format(time.RFC3339Nano)}}
 }
 
 func assertFreshness(t *testing.T, record IndexFreshnessRecord, state IndexFreshnessState, warning string) {
