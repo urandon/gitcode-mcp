@@ -21,11 +21,12 @@ import (
 )
 
 type Service struct {
-	store        cache.Store
-	client       gitcode.Client
-	now          func() time.Time
-	lockPath     string
-	providerMode gitcode.ProviderMode
+	store                  cache.Store
+	client                 gitcode.Client
+	now                    func() time.Time
+	lockPath               string
+	providerMode           gitcode.ProviderMode
+	writeCredentialPresent bool
 }
 
 func New(store cache.Store) *Service {
@@ -92,11 +93,12 @@ func NewWithMode(store cache.Store, mode gitcode.ProviderMode, token string, cfg
 			return nil, err
 		}
 		return &Service{
-			store:        store,
-			client:       gitcode.Client(client),
-			now:          func() time.Time { return time.Now().UTC() },
-			lockPath:     filepath.Join(os.TempDir(), "gitcode-mcp-sync.lock"),
-			providerMode: gitcode.ProviderModeLive,
+			store:                  store,
+			client:                 gitcode.Client(client),
+			now:                    func() time.Time { return time.Now().UTC() },
+			lockPath:               filepath.Join(os.TempDir(), "gitcode-mcp-sync.lock"),
+			providerMode:           gitcode.ProviderModeLive,
+			writeCredentialPresent: true,
 		}, nil
 	case gitcode.ProviderModeUnavailable:
 		return nil, gitcode.ErrProviderUnavailable{Reason: "provider unavailable"}
@@ -1716,7 +1718,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	if req.Mode == WriteModeDryRun {
 		return base, nil
 	}
-	if strings.TrimSpace(os.Getenv("GITCODE_TOKEN")) == "" {
+	if !s.hasWriteCredential() {
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_missing_credential", RepoID: route.RepoID, IdempotencyKey: key}
 	}
 	prior, err := s.store.GetAuditEventByKey(ctx, route.RepoID, key)
@@ -1782,6 +1784,10 @@ type writeConfirmation struct {
 	remoteRevision string
 	message        string
 	completedAt    time.Time
+}
+
+func (s *Service) hasWriteCredential() bool {
+	return s.providerMode == gitcode.ProviderModeLive && s.writeCredentialPresent || strings.TrimSpace(os.Getenv("GITCODE_TOKEN")) != ""
 }
 
 func (s *Service) callWriteAdapter(ctx context.Context, command string, route RepositoryRoute, req WriteCommandRequest, key string) (writeConfirmation, cache.RecordGraph, error) {

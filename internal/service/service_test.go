@@ -111,6 +111,89 @@ func TestNewWithModeLive(t *testing.T) {
 	}
 }
 
+func TestS018LiveWriteUsesConstructedLiveClientWithoutEnv(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v5/repos/owner-a/repo-a/issues" {
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer live-token" || r.Header.Get("Idempotency-Key") != "live-key-1" {
+			http.Error(w, "missing live headers", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"remote-77","number":77,"title":"Live Create","body":"body","state":"open"}`))
+	}))
+	defer server.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: server.URL, Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GITCODE_TOKEN", "")
+	svc, err := NewWithMode(store, gitcode.ProviderModeLive, "live-token", ServiceConfig{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewWithMode live returned error: %v", err)
+	}
+	result, err := svc.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "Live Create", Body: "body", IdempotencyKey: "live-key-1"})
+	if err != nil {
+		t.Fatalf("CreateIssue live returned error: %v", err)
+	}
+	if result.Status != "succeeded" || result.RemoteID != "remote-77" || requests != 1 {
+		t.Fatalf("result=%#v requests=%d", result, requests)
+	}
+	if _, err := store.GetRecord(ctx, "fixture-a", "ISSUE-REMOTE-77"); err != nil {
+		if _, fallbackErr := store.GetRecord(ctx, "fixture-a", "ISSUE-77"); fallbackErr != nil {
+			t.Fatalf("live write did not refresh cache: %v", err)
+		}
+	}
+}
+
+func TestS018LiveWriteConflictMaps409(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"message":"conflict","remote":"existing"}`))
+	}))
+	defer server.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: server.URL, Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := NewWithMode(store, gitcode.ProviderModeLive, "live-token", ServiceConfig{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewWithMode live returned error: %v", err)
+	}
+	_, err = svc.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "Conflict", IdempotencyKey: "conflict-key-1"})
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_conflict" {
+		t.Fatalf("err=%v want write_conflict", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests=%d want 1", requests)
+	}
+	counts, err := store.RecordCounts(ctx, "fixture-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.AuditRows != 0 {
+		t.Fatalf("audit rows=%d want 0", counts.AuditRows)
+	}
+}
+
 func TestNewWithModeUnavailable(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)
@@ -340,6 +423,43 @@ func TestAddLabelLiveSuccessAuditCacheAndReplay(t *testing.T) {
 	}
 	if !replay.Replayed || client.addLabelCalls != 1 {
 		t.Fatalf("replay=%#v calls=%d", replay, client.addLabelCalls)
+	}
+}
+
+func TestS018LiveWriteConfirmedRefreshesCommentAndWiki(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{
+		createIssueCommentResult: gitcode.WriteResult[gitcode.Comment]{Record: gitcode.Comment{ID: "comment-9", IssueID: "42", Body: "confirmed comment"}, Confirmed: true, Operation: "CreateIssueComment", RemoteID: "comment-9", ParentIssueNumber: 42, ParentIssueID: "42", ConfirmedAt: time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)},
+		createWikiPageResult:     gitcode.WriteResult[gitcode.WikiPage]{Record: gitcode.WikiPage{ID: "wiki-9", Slug: "Home", Title: "Home", Body: "confirmed wiki", Revision: "rev-9"}, Confirmed: true, Operation: "CreateWikiPage", RemoteID: "wiki-9", RemoteSlug: "Home", RemoteRevision: "rev-9", ConfirmedAt: time.Date(2026, 6, 20, 12, 1, 0, 0, time.UTC)},
+	}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	comment, err := svc.AddComment(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 42, Body: "confirmed comment", IdempotencyKey: "comment-key-1"})
+	if err != nil {
+		t.Fatalf("AddComment live returned error: %v", err)
+	}
+	wiki, err := svc.CreatePage(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "Home", Body: "confirmed wiki", IdempotencyKey: "wiki-key-1"})
+	if err != nil {
+		t.Fatalf("CreatePage live returned error: %v", err)
+	}
+	if comment.Status != "succeeded" || wiki.Status != "succeeded" || client.createIssueCommentCalls != 1 || client.createWikiPageCalls != 1 {
+		t.Fatalf("comment=%#v wiki=%#v client=%#v", comment, wiki, client)
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", comment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(record.Comments) != 1 || record.Comments[0].CommentID != "comment-9" {
+		t.Fatalf("comments=%#v", record.Comments)
+	}
+	if _, err := store.GetRecord(ctx, "fixture-a", wiki.ID); err != nil {
+		t.Fatalf("wiki cache refresh missing: %v", err)
 	}
 }
 
@@ -1682,24 +1802,28 @@ func seededSyncService(t *testing.T, ctx context.Context, client gitcode.Client)
 }
 
 type fakeGitCodeClient struct {
-	wiki              gitcode.WikiPage
-	issue             gitcode.Issue
-	comments          []gitcode.Comment
-	errors            []error
-	wikiCalls         int
-	issueCalls        int
-	commentCalls      int
-	createIssueCalls  int
-	addLabelCalls     int
-	createIssueResult gitcode.WriteResult[gitcode.Issue]
-	addLabelResult    gitcode.WriteResult[gitcode.Issue]
-	listIssuesPages   []gitcode.Page[gitcode.IssueSummary]
-	listIssuesErrors  []error
-	listWikiPages     []gitcode.Page[gitcode.WikiPage]
-	listWikiErrors    []error
-	issuesByNumber    map[int]gitcode.Issue
-	wikiBySlug        map[string]gitcode.WikiPage
-	commentsByIssue   map[int][]gitcode.Comment
+	wiki                     gitcode.WikiPage
+	issue                    gitcode.Issue
+	comments                 []gitcode.Comment
+	errors                   []error
+	wikiCalls                int
+	issueCalls               int
+	commentCalls             int
+	createIssueCalls         int
+	createIssueCommentCalls  int
+	createWikiPageCalls      int
+	addLabelCalls            int
+	createIssueResult        gitcode.WriteResult[gitcode.Issue]
+	createIssueCommentResult gitcode.WriteResult[gitcode.Comment]
+	createWikiPageResult     gitcode.WriteResult[gitcode.WikiPage]
+	addLabelResult           gitcode.WriteResult[gitcode.Issue]
+	listIssuesPages          []gitcode.Page[gitcode.IssueSummary]
+	listIssuesErrors         []error
+	listWikiPages            []gitcode.Page[gitcode.WikiPage]
+	listWikiErrors           []error
+	issuesByNumber           map[int]gitcode.Issue
+	wikiBySlug               map[string]gitcode.WikiPage
+	commentsByIssue          map[int][]gitcode.Comment
 }
 
 func (f *fakeGitCodeClient) nextError() error {
@@ -1788,10 +1912,18 @@ func (f *fakeGitCodeClient) UpdateIssue(context.Context, gitcode.UpdateIssueRequ
 	return gitcode.WriteResult[gitcode.Issue]{}, nil
 }
 func (f *fakeGitCodeClient) CreateIssueComment(context.Context, gitcode.CreateIssueCommentRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Comment], error) {
-	return gitcode.WriteResult[gitcode.Comment]{}, nil
+	f.createIssueCommentCalls++
+	if err := f.nextError(); err != nil {
+		return gitcode.WriteResult[gitcode.Comment]{}, err
+	}
+	return f.createIssueCommentResult, nil
 }
 func (f *fakeGitCodeClient) CreateWikiPage(context.Context, gitcode.CreateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
-	return gitcode.WriteResult[gitcode.WikiPage]{}, nil
+	f.createWikiPageCalls++
+	if err := f.nextError(); err != nil {
+		return gitcode.WriteResult[gitcode.WikiPage]{}, err
+	}
+	return f.createWikiPageResult, nil
 }
 func (f *fakeGitCodeClient) UpdateWikiPage(context.Context, gitcode.UpdateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
 	return gitcode.WriteResult[gitcode.WikiPage]{}, nil
