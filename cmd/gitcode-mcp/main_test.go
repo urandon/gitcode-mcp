@@ -7,15 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
+	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
 )
 
@@ -201,107 +199,123 @@ func TestEntrypointCLICompatibility(t *testing.T) {
 }
 
 func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
-	t.Run("SCN-CLI-LIVE-SYNC-USES-LIVE-PROVIDER", func(t *testing.T) {
-		var requests atomic.Int64
-		server := newStartupLiveMockServer(t, &requests)
+	t.Run("SCN-MOCKAPI-LIVE-SYNC-VALID", func(t *testing.T) {
+		server := NewMockGitCodeAPI(t)
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)
 		src.env[config.EnvToken] = "test-token"
-		addRepoForStartupTest(t, cachePath, server.URL)
+		addRepoForStartupTest(t, cachePath, server.BaseURL())
 
 		var stdout, stderr bytes.Buffer
 		code := run([]string{"sync", "--live", "--cache-path", cachePath, "--repo", "fixture-a"}, strings.NewReader(""), &stdout, &stderr, src)
 		if code != 0 {
 			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 		}
-		if requests.Load() == 0 {
-			t.Fatalf("mock server was not reached")
+		counts := server.Counts()
+		if counts.ListIssues == 0 || counts.ListWikiPages == 0 || counts.ListComments == 0 || counts.UnexpectedRequests != 0 {
+			t.Fatalf("mock counts = %#v", counts)
 		}
 		out := stdout.String() + stderr.String()
 		if strings.Contains(out, "ISSUE-42") || strings.Contains(out, "WIKI-HOME") {
 			t.Fatalf("fixture identifiers leaked: %q", out)
 		}
+		assertStartupCacheHasLiveMockRecords(t, cachePath)
 	})
 
-	t.Run("SCN-CLI-LIVE-SYNC-MISSING-CREDENTIAL", func(t *testing.T) {
-		var requests atomic.Int64
-		server := newStartupLiveMockServer(t, &requests)
+	t.Run("SCN-MOCKAPI-LIVE-SYNC-MISSING-CREDENTIAL", func(t *testing.T) {
+		server := NewMockGitCodeAPI(t)
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)
 		configPath := filepath.Join(t.TempDir(), "config.yaml")
 		src.files[configPath] = []byte("credential:\n  store: env\n")
 		src.env[config.EnvMCPConfigPath] = configPath
-		addRepoForStartupTest(t, cachePath, server.URL)
+		addRepoForStartupTest(t, cachePath, server.BaseURL())
 
 		var stdout, stderr bytes.Buffer
 		code := run([]string{"sync", "--live", "--cache-path", cachePath, "--repo", "fixture-a"}, strings.NewReader(""), &stdout, &stderr, src)
 		if code == 0 {
 			t.Fatalf("code=0 stdout=%q", stdout.String())
 		}
-		if requests.Load() != 0 {
-			t.Fatalf("mock server requests=%d, want 0", requests.Load())
+		if counts := server.Counts(); counts.TotalRequests != 0 {
+			t.Fatalf("mock counts=%#v, want zero", counts)
 		}
 		if !strings.Contains(stderr.String(), "missing_credential") {
 			t.Fatalf("stderr missing typed diagnostic: %q", stderr.String())
 		}
 	})
 
-	t.Run("SCN-CLI-OFFLINE-SYNC-NO-HTTP", func(t *testing.T) {
-		var requests atomic.Int64
-		server := newStartupLiveMockServer(t, &requests)
+	t.Run("SCN-MOCKAPI-LIVE-SYNC-INVALID-TOKEN-401", func(t *testing.T) {
+		server := NewMockGitCodeAPI(t, MockGitCodeAPIAuthMode(mockGitCodeAPIAuthReject401))
+		defer server.Close()
+		cachePath := filepath.Join(t.TempDir(), "cache.db")
+		src := newTestSource(t)
+		src.env[config.EnvToken] = "invalid-test-token"
+		addRepoForStartupTest(t, cachePath, server.BaseURL())
+
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"sync", "--live", "--cache-path", cachePath, "--repo", "fixture-a"}, strings.NewReader(""), &stdout, &stderr, src)
+		if code == 0 {
+			t.Fatalf("code=0 stdout=%q", stdout.String())
+		}
+		counts := server.Counts()
+		if counts.TotalRequests == 0 || counts.AuthFailures == 0 {
+			t.Fatalf("mock counts=%#v, want auth failure after request", counts)
+		}
+		out := stdout.String() + stderr.String()
+		if !strings.Contains(out, "live_auth_failure") || strings.Contains(out, "ISSUE-42") || strings.Contains(out, "WIKI-HOME") {
+			t.Fatalf("invalid-token output = %q", out)
+		}
+	})
+
+	t.Run("SCN-MOCKAPI-OFFLINE-SYNC-NO-HTTP", func(t *testing.T) {
+		server := NewMockGitCodeAPI(t)
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)
 		configPath := filepath.Join(t.TempDir(), "config.yaml")
 		src.files[configPath] = []byte("credential:\n  store: env\n")
 		src.env[config.EnvMCPConfigPath] = configPath
-		addRepoForStartupTest(t, cachePath, server.URL)
+		addRepoForStartupTest(t, cachePath, server.BaseURL())
 
 		var stdout, stderr bytes.Buffer
 		code := run([]string{"sync", "--cache-path", cachePath, "--repo", "fixture-a"}, strings.NewReader(""), &stdout, &stderr, src)
 		if code != 0 {
 			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 		}
-		if requests.Load() != 0 {
-			t.Fatalf("mock server requests=%d, want 0", requests.Load())
+		if counts := server.Counts(); counts.TotalRequests != 0 {
+			t.Fatalf("mock counts=%#v, want zero", counts)
 		}
 	})
 
-	t.Run("SCN-CLI-LIVE-API-BASE-AUTHORITY", func(t *testing.T) {
-		var selectedRequests, alternateRequests atomic.Int64
-		selected := newStartupLiveMockServer(t, &selectedRequests)
-		defer selected.Close()
-		alternate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			alternateRequests.Add(1)
-			http.Error(w, "wrong server", http.StatusTeapot)
-		}))
-		defer alternate.Close()
+	t.Run("SCN-MOCKAPI-API-BASE-AUTHORITY", func(t *testing.T) {
+		pair := NewMockGitCodeAPIPair(t)
+		defer pair.Selected.Close()
+		defer pair.NonSelected.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)
 		src.env[config.EnvToken] = "test-token"
-		src.env[config.EnvAPIURL] = alternate.URL
-		addRepoForStartupTest(t, cachePath, selected.URL)
+		src.env[config.EnvAPIURL] = pair.NonSelected.BaseURL()
+		addRepoForStartupTest(t, cachePath, pair.Selected.BaseURL())
 
 		var stdout, stderr bytes.Buffer
 		code := run([]string{"sync", "--live", "--cache-path", cachePath, "--repo", "fixture-a"}, strings.NewReader(""), &stdout, &stderr, src)
 		if code != 0 {
 			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 		}
-		if selectedRequests.Load() == 0 || alternateRequests.Load() != 0 {
-			t.Fatalf("selected=%d alternate=%d", selectedRequests.Load(), alternateRequests.Load())
+		if selected, nonSelected := pair.Selected.Counts(), pair.NonSelected.Counts(); selected.TotalRequests == 0 || nonSelected.TotalRequests != 0 {
+			t.Fatalf("selected=%#v nonSelected=%#v", selected, nonSelected)
 		}
 	})
 
 	t.Run("SCN-CLI-DOCTOR-LIVE-JSON-STARTUP-SNAPSHOT", func(t *testing.T) {
-		var requests atomic.Int64
-		server := newStartupLiveMockServer(t, &requests)
+		server := NewMockGitCodeAPI(t)
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)
 		src.env[config.EnvToken] = "test-token"
-		addRepoForStartupTest(t, cachePath, server.URL)
+		addRepoForStartupTest(t, cachePath, server.BaseURL())
 
 		var stdout, stderr bytes.Buffer
 		code := run([]string{"doctor", "--live", "--format", "json", "--cache-path", cachePath, "--repo", "fixture-a"}, strings.NewReader(""), &stdout, &stderr, src)
@@ -309,7 +323,7 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 		}
 		out := stdout.String()
-		for _, want := range []string{"\"provider_mode\": \"live-http\"", "\"source\": \"env:GITCODE_TOKEN\"", fmt.Sprintf("\"path\": \"%s\"", cachePath), fmt.Sprintf("\"api_base_url\": \"%s\"", server.URL)} {
+		for _, want := range []string{"\"provider_mode\": \"live-http\"", "\"source\": \"env:GITCODE_TOKEN\"", fmt.Sprintf("\"path\": \"%s\"", cachePath), fmt.Sprintf("\"api_base_url\": \"%s\"", server.BaseURL())} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("doctor output missing %q in %q", want, out)
 			}
@@ -319,22 +333,20 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 				t.Fatalf("doctor output missing %q in %q", want, out)
 			}
 		}
-		if strings.Contains(out, "test-token") || strings.Contains(out, "Authorization") || requests.Load() != 0 {
-			t.Fatalf("doctor leaked secret or contacted server; requests=%d out=%q", requests.Load(), out)
+		if counts := server.Counts(); strings.Contains(out, "test-token") || strings.Contains(out, "Authorization") || counts.TotalRequests != 0 {
+			t.Fatalf("doctor leaked secret or contacted server; counts=%#v out=%q", counts, out)
 		}
 	})
 
 	t.Run("SCN-CLI-DOCTOR-LIVE-JSON-SELECTED-VS-NON-SELECTED", func(t *testing.T) {
-		var selectedRequests, alternateRequests atomic.Int64
-		selected := newStartupLiveMockServer(t, &selectedRequests)
-		defer selected.Close()
-		alternate := newStartupLiveMockServer(t, &alternateRequests)
-		defer alternate.Close()
+		pair := NewMockGitCodeAPIPair(t)
+		defer pair.Selected.Close()
+		defer pair.NonSelected.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)
 		src.env[config.EnvToken] = "test-token"
-		addRepoForStartupTest(t, cachePath, selected.URL)
-		addNamedRepoForStartupTest(t, cachePath, "fixture-b", alternate.URL)
+		addRepoForStartupTest(t, cachePath, pair.Selected.BaseURL())
+		addNamedRepoForStartupTest(t, cachePath, "fixture-b", pair.NonSelected.BaseURL())
 
 		var stdout, stderr bytes.Buffer
 		code := run([]string{"doctor", "--live", "--format", "json", "--cache-path", cachePath, "--repo", "fixture-b"}, strings.NewReader(""), &stdout, &stderr, src)
@@ -342,24 +354,23 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 		}
 		out := stdout.String()
-		if !strings.Contains(out, fmt.Sprintf("\"api_base_url\": \"%s\"", alternate.URL)) || strings.Contains(out, fmt.Sprintf("\"api_base_url\": \"%s\"", selected.URL)) {
+		if !strings.Contains(out, fmt.Sprintf("\"api_base_url\": \"%s\"", pair.NonSelected.BaseURL())) || strings.Contains(out, fmt.Sprintf("\"api_base_url\": \"%s\"", pair.Selected.BaseURL())) {
 			t.Fatalf("doctor did not switch effective base URL: %q", out)
 		}
-		if !strings.Contains(out, "\"readiness_status\": \"ready\"") || selectedRequests.Load() != 0 || alternateRequests.Load() != 0 {
-			t.Fatalf("doctor readiness/request mismatch selected=%d alternate=%d out=%q", selectedRequests.Load(), alternateRequests.Load(), out)
+		if selected, nonSelected := pair.Selected.Counts(), pair.NonSelected.Counts(); !strings.Contains(out, "\"readiness_status\": \"ready\"") || selected.TotalRequests != 0 || nonSelected.TotalRequests != 0 {
+			t.Fatalf("doctor readiness/request mismatch selected=%#v nonSelected=%#v out=%q", selected, nonSelected, out)
 		}
 	})
 
 	t.Run("SCN-CLI-DOCTOR-LIVE-JSON-MISSING-CREDENTIAL-NO-HTTP", func(t *testing.T) {
-		var requests atomic.Int64
-		server := newStartupLiveMockServer(t, &requests)
+		server := NewMockGitCodeAPI(t)
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)
 		configPath := filepath.Join(t.TempDir(), "config.yaml")
 		src.files[configPath] = []byte("credential:\n  store: env\n")
 		src.env[config.EnvMCPConfigPath] = configPath
-		addRepoForStartupTest(t, cachePath, server.URL)
+		addRepoForStartupTest(t, cachePath, server.BaseURL())
 
 		var stdout, stderr bytes.Buffer
 		code := run([]string{"doctor", "--live", "--format", "json", "--cache-path", cachePath, "--repo", "fixture-a"}, strings.NewReader(""), &stdout, &stderr, src)
@@ -367,19 +378,18 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 		}
 		out := stdout.String()
-		for _, want := range []string{fmt.Sprintf("\"api_base_url\": \"%s\"", server.URL), "\"readiness_status\": \"missing_credential\"", "\"missing_credential\""} {
+		for _, want := range []string{fmt.Sprintf("\"api_base_url\": \"%s\"", server.BaseURL()), "\"readiness_status\": \"missing_credential\"", "\"missing_credential\""} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("doctor output missing %q in %q", want, out)
 			}
 		}
-		if requests.Load() != 0 {
-			t.Fatalf("doctor contacted server; requests=%d out=%q", requests.Load(), out)
+		if counts := server.Counts(); counts.TotalRequests != 0 {
+			t.Fatalf("doctor contacted server; counts=%#v out=%q", counts, out)
 		}
 	})
 
-	t.Run("SCN-CRED-LIVE-WRITE-MOCK-KEYCHAIN", func(t *testing.T) {
-		var requests atomic.Int64
-		server := newStartupLiveMockServer(t, &requests)
+	t.Run("SCN-MOCKAPI-LIVE-CREATE-ISSUE", func(t *testing.T) {
+		server := NewMockGitCodeAPI(t)
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)
@@ -387,30 +397,31 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 		src.files[configPath] = []byte("credential:\n  store: auto\n")
 		src.env[config.EnvMCPConfigPath] = configPath
 		src.env["GITCODE_MCP_TEST_KEYCHAIN_TOKEN"] = "test-token"
-		addRepoForStartupTest(t, cachePath, server.URL)
+		addRepoForStartupTest(t, cachePath, server.BaseURL())
 
 		var stdout, stderr bytes.Buffer
 		code := run([]string{"create-issue", "--live", "--cache-path", cachePath, "--repo", "fixture-a", "--title", "Mock Created", "--body", "created by mock keychain", "--idempotency-key", "cred-write-1"}, strings.NewReader(""), &stdout, &stderr, src)
 		if code != 0 {
 			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 		}
-		if requests.Load() == 0 {
-			t.Fatalf("mock server requests=0, want authenticated create request")
+		creates := server.CapturedCreateRequests()
+		if len(creates) != 1 || !creates[0].AuthorizationOK || creates[0].IdempotencyKey != "cred-write-1" {
+			t.Fatalf("create requests = %#v", creates)
 		}
 		out := stdout.String() + stderr.String()
 		if strings.Contains(out, "fixture client is read-only") || strings.Contains(out, "test-token") {
 			t.Fatalf("write output invalid: %q", out)
 		}
+		assertStartupCreateConfirmation(t, cachePath, "cred-write-1")
 	})
 
 	t.Run("SCN-CRED-DOCTOR-LIVE-MOCK-KEYCHAIN", func(t *testing.T) {
-		var requests atomic.Int64
-		server := newStartupLiveMockServer(t, &requests)
+		server := NewMockGitCodeAPI(t)
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)
 		src.env["GITCODE_MCP_TEST_KEYCHAIN_TOKEN"] = "test-token"
-		addRepoForStartupTest(t, cachePath, server.URL)
+		addRepoForStartupTest(t, cachePath, server.BaseURL())
 
 		var stdout, stderr bytes.Buffer
 		code := run([]string{"doctor", "--live", "--format", "json", "--cache-path", cachePath, "--repo", "fixture-a"}, strings.NewReader(""), &stdout, &stderr, src)
@@ -418,19 +429,18 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 		}
 		out := stdout.String()
-		for _, want := range []string{"\"provider_mode\": \"live-http\"", "\"source\": \"mock-keychain\"", fmt.Sprintf("\"path\": \"%s\"", cachePath), fmt.Sprintf("\"api_base_url\": \"%s\"", server.URL)} {
+		for _, want := range []string{"\"provider_mode\": \"live-http\"", "\"source\": \"mock-keychain\"", fmt.Sprintf("\"path\": \"%s\"", cachePath), fmt.Sprintf("\"api_base_url\": \"%s\"", server.BaseURL())} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("doctor output missing %q in %q", want, out)
 			}
 		}
-		if strings.Contains(out, "test-token") || requests.Load() != 0 {
-			t.Fatalf("doctor leaked token or contacted server; requests=%d out=%q", requests.Load(), out)
+		if counts := server.Counts(); strings.Contains(out, "test-token") || counts.TotalRequests != 0 {
+			t.Fatalf("doctor leaked token or contacted server; counts=%#v out=%q", counts, out)
 		}
 	})
 
 	t.Run("SCN-CLI-LIVE-BINDING-INVALID-URL-NO-HTTP", func(t *testing.T) {
-		var requests atomic.Int64
-		server := newStartupLiveMockServer(t, &requests)
+		server := NewMockGitCodeAPI(t)
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)
@@ -442,27 +452,26 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 		if code == 0 {
 			t.Fatalf("code=0 stdout=%q stderr=%q", stdout.String(), stderr.String())
 		}
-		if !strings.Contains(stderr.String(), "api_base_url") || requests.Load() != 0 {
-			t.Fatalf("stderr=%q requests=%d", stderr.String(), requests.Load())
+		if counts := server.Counts(); !strings.Contains(stderr.String(), "api_base_url") || counts.TotalRequests != 0 {
+			t.Fatalf("stderr=%q counts=%#v", stderr.String(), counts)
 		}
 	})
 
 	t.Run("SCN-CLI-LIVE-BINDING-DISABLED-SCOPE-NO-HTTP", func(t *testing.T) {
-		var requests atomic.Int64
-		server := newStartupLiveMockServer(t, &requests)
+		server := NewMockGitCodeAPI(t)
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)
 		src.env[config.EnvToken] = "test-token"
-		addRepoForStartupTestWithScopes(t, cachePath, server.URL, "issues")
+		addRepoForStartupTestWithScopes(t, cachePath, server.BaseURL(), "issues")
 
 		var stdout, stderr bytes.Buffer
 		code := run([]string{"sync", "--live", "--wiki", "--cache-path", cachePath, "--repo", "fixture-a"}, strings.NewReader(""), &stdout, &stderr, src)
 		if code == 0 {
 			t.Fatalf("code=0 stdout=%q stderr=%q", stdout.String(), stderr.String())
 		}
-		if !strings.Contains(stderr.String(), "scope") || requests.Load() != 0 {
-			t.Fatalf("stderr=%q requests=%d", stderr.String(), requests.Load())
+		if counts := server.Counts(); !strings.Contains(stderr.String(), "scope") || counts.TotalRequests != 0 {
+			t.Fatalf("stderr=%q counts=%#v", stderr.String(), counts)
 		}
 	})
 }
@@ -497,34 +506,42 @@ func addNamedRepoForStartupTestWithScopes(t *testing.T, cachePath, repoID, baseU
 	}
 }
 
-func newStartupLiveMockServer(t *testing.T, requests *atomic.Int64) *httptest.Server {
+func assertStartupCacheHasLiveMockRecords(t *testing.T, cachePath string) {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
-			http.Error(w, "missing authorization", http.StatusUnauthorized)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/api/v5/repos/owner-a/repo-a/issues":
-			if r.Method == http.MethodPost {
-				fmt.Fprint(w, `{"id":"issue-created","number":8,"title":"Mock Created","state":"open","body":"created by mock keychain","created_at":"2026-06-22T00:00:00Z","updated_at":"2026-06-22T00:00:00Z"}`)
-				return
-			}
-			fmt.Fprint(w, `[{"id":"issue-7","number":7,"title":"Mock Issue","state":"open","body":"mock issue body","created_at":"2026-06-22T00:00:00Z","updated_at":"2026-06-22T00:00:00Z"}]`)
-		case "/api/v5/repos/owner-a/repo-a/issues/7":
-			fmt.Fprint(w, `{"id":"issue-7","number":7,"title":"Mock Issue","state":"open","body":"mock issue body","created_at":"2026-06-22T00:00:00Z","updated_at":"2026-06-22T00:00:00Z"}`)
-		case "/api/v5/repos/owner-a/repo-a/issues/7/comments":
-			fmt.Fprint(w, `[{"id":"comment-7","author":"mock-user","body":"mock comment","created_at":"2026-06-22T00:00:00Z","updated_at":"2026-06-22T00:00:00Z"}]`)
-		case "/api/v5/repos/owner-a/repo-a/wiki":
-			fmt.Fprint(w, `[{"id":"wiki-guide","slug":"Guide","title":"Mock Guide","body":"mock wiki body","revision":"rev-1","created_at":"2026-06-22T00:00:00Z","updated_at":"2026-06-22T00:00:00Z"}]`)
-		case "/api/v5/repos/owner-a/repo-a/wiki/Guide":
-			fmt.Fprint(w, `{"id":"wiki-guide","slug":"Guide","title":"Mock Guide","body":"mock wiki body","revision":"rev-1","created_at":"2026-06-22T00:00:00Z","updated_at":"2026-06-22T00:00:00Z"}`)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
+	store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+	if err != nil {
+		t.Fatalf("open cache: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.GetSourceScoped(context.Background(), "fixture-a", "ISSUE-MOCK-ISSUE-100"); err != nil {
+		t.Fatalf("mock issue missing: %v", err)
+	}
+	if _, err := store.GetSourceScoped(context.Background(), "fixture-a", "WIKI-MOCK-WIKI-LIVE"); err != nil {
+		t.Fatalf("mock wiki missing: %v", err)
+	}
+	if _, err := store.GetSourceScoped(context.Background(), "fixture-a", "ISSUE-42"); err == nil {
+		t.Fatalf("fixture issue leaked into live cache")
+	}
+	if _, err := store.GetSourceScoped(context.Background(), "fixture-a", "WIKI-HOME"); err == nil {
+		t.Fatalf("fixture wiki leaked into live cache")
+	}
+}
+
+func assertStartupCreateConfirmation(t *testing.T, cachePath, idempotencyKey string) {
+	t.Helper()
+	store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+	if err != nil {
+		t.Fatalf("open cache: %v", err)
+	}
+	defer store.Close()
+	confirmation, err := store.GetCacheConfirmationByKey(context.Background(), "fixture-a", idempotencyKey)
+	if err != nil || confirmation == nil || confirmation.RecordID != "ISSUE-MOCK-CREATED-ISSUE" || confirmation.RemoteID != "MOCK-CREATED-ISSUE" {
+		t.Fatalf("cache confirmation = %#v err=%v", confirmation, err)
+	}
+	auditEvent, err := store.GetAuditEventByKey(context.Background(), "fixture-a", idempotencyKey)
+	if err != nil || auditEvent == nil || auditEvent.RemoteID != "MOCK-CREATED-ISSUE" || auditEvent.RequestMetadata["method"] != "POST" {
+		t.Fatalf("audit event = %#v err=%v", auditEvent, err)
+	}
 }
 
 func TestEntrypointMCPInitialize(t *testing.T) {
