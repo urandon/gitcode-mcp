@@ -2,7 +2,9 @@ package cache
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"strings"
 	"time"
 )
@@ -270,6 +272,66 @@ func (s *SQLiteStore) GetAuditEventByKey(ctx context.Context, repoID, key string
 		return nil, err
 	}
 	return &entry, nil
+}
+
+func (s *SQLiteStore) RecordCacheConfirmation(ctx context.Context, confirmation CacheConfirmationRecord) error {
+	if err := validateCacheConfirmation(confirmation); err != nil {
+		return err
+	}
+	if confirmation.ID == "" {
+		confirmation.ID = cacheConfirmationID(confirmation.RepoID, confirmation.IdempotencyKey)
+	}
+	if confirmation.CreatedAt.IsZero() {
+		confirmation.CreatedAt = time.Unix(0, 0).UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO cache_confirmations (repo_id, id, command, record_id, record_type, remote_type, remote_id, idempotency_key, status, source_fingerprint, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, idempotency_key) DO UPDATE SET id = excluded.id, command = excluded.command, record_id = excluded.record_id, record_type = excluded.record_type, remote_type = excluded.remote_type, remote_id = excluded.remote_id, status = excluded.status, source_fingerprint = excluded.source_fingerprint, created_at = excluded.created_at`, confirmation.RepoID, confirmation.ID, confirmation.Command, confirmation.RecordID, confirmation.RecordType, confirmation.RemoteType, confirmation.RemoteID, confirmation.IdempotencyKey, confirmation.Status, confirmation.SourceFingerprint, confirmation.CreatedAt.Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *SQLiteStore) GetCacheConfirmationByKey(ctx context.Context, repoID, key string) (*CacheConfirmationRecord, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT repo_id, id, command, record_id, record_type, remote_type, remote_id, idempotency_key, status, source_fingerprint, created_at FROM cache_confirmations WHERE repo_id = ? AND idempotency_key = ?`, repoID, key)
+	confirmation, err := scanCacheConfirmationRow(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &confirmation, nil
+}
+
+func validateCacheConfirmation(confirmation CacheConfirmationRecord) error {
+	if strings.TrimSpace(confirmation.RepoID) == "" {
+		return notFoundErr("repository", "")
+	}
+	if strings.TrimSpace(confirmation.RecordID) == "" {
+		return notFoundErr("record", "")
+	}
+	if strings.TrimSpace(confirmation.RemoteType) == "" {
+		return notFoundErr("remote_type", "")
+	}
+	if strings.TrimSpace(confirmation.RemoteID) == "" {
+		return notFoundErr("remote_id", "")
+	}
+	if strings.TrimSpace(confirmation.IdempotencyKey) == "" {
+		return notFoundErr("idempotency_key", "")
+	}
+	return nil
+}
+
+func cacheConfirmationID(repoID, key string) string {
+	sum := sha256.Sum256([]byte(repoID + "|" + key))
+	return hex.EncodeToString(sum[:])[:32]
+}
+
+func scanCacheConfirmationRow(row interface{ Scan(dest ...any) error }) (CacheConfirmationRecord, error) {
+	var confirmation CacheConfirmationRecord
+	var createdRaw string
+	if err := row.Scan(&confirmation.RepoID, &confirmation.ID, &confirmation.Command, &confirmation.RecordID, &confirmation.RecordType, &confirmation.RemoteType, &confirmation.RemoteID, &confirmation.IdempotencyKey, &confirmation.Status, &confirmation.SourceFingerprint, &createdRaw); err != nil {
+		return CacheConfirmationRecord{}, err
+	}
+	confirmation.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdRaw)
+	return confirmation, nil
 }
 
 func scanAuditTrailRow(row interface{ Scan(dest ...any) error }) (AuditTrailEntry, error) {

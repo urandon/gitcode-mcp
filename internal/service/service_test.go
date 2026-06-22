@@ -385,6 +385,13 @@ func TestScenario007WriteLiveCreateAuditCacheConfirmation(t *testing.T) {
 	if entry == nil || entry.Status != "succeeded" || entry.RemoteID != "remote-77" || strings.Contains(entry.Message, "test-token") {
 		t.Fatalf("audit entry=%#v", entry)
 	}
+	confirmation, err := store.GetCacheConfirmationByKey(ctx, "fixture-a", "scenario-007-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmation == nil || confirmation.RecordID != "ISSUE-REMOTE-77" || confirmation.RemoteID != "remote-77" || confirmation.IdempotencyKey != "scenario-007-key" {
+		t.Fatalf("cache confirmation=%#v", confirmation)
+	}
 	if _, err := store.GetRecord(ctx, "fixture-a", "ISSUE-REMOTE-77"); err != nil {
 		t.Fatalf("cache confirmation missing: %v", err)
 	}
@@ -410,6 +417,13 @@ func TestScenario007WriteLiveCreateIdempotentReplay(t *testing.T) {
 	}
 	if replay.Status != "already_applied" || !replay.Replayed || client.createIssueCalls != 1 {
 		t.Fatalf("replay=%#v calls=%d", replay, client.createIssueCalls)
+	}
+	confirmation, err := store.GetCacheConfirmationByKey(ctx, "fixture-a", "scenario-007-replay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmation == nil || confirmation.RecordID != "ISSUE-78" || confirmation.RemoteID != "78" {
+		t.Fatalf("cache confirmation=%#v", confirmation)
 	}
 }
 
@@ -484,6 +498,13 @@ func TestWriteLiveSuccessAuditCacheAndReplay(t *testing.T) {
 	}
 	if counts.AuditRows != 1 {
 		t.Fatalf("audit rows=%d want 1", counts.AuditRows)
+	}
+	confirmation, err := store.GetCacheConfirmationByKey(ctx, "fixture-a", "key-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmation == nil || confirmation.RecordID != "ISSUE-42" || confirmation.RemoteID != "42" {
+		t.Fatalf("cache confirmation=%#v", confirmation)
 	}
 	if _, err := store.GetRecord(ctx, "fixture-a", "ISSUE-42"); err != nil {
 		t.Fatalf("refreshed record missing: %v", err)
@@ -2215,8 +2236,8 @@ type fakeGitCodeClient struct {
 	issuesByNumber           map[int]gitcode.Issue
 	wikiBySlug               map[string]gitcode.WikiPage
 	commentsByIssue          map[int][]gitcode.Comment
-	lastCreateIssueRequest  gitcode.CreateIssueRequest
-	lastWriteOptions        gitcode.WriteOptions
+	lastCreateIssueRequest   gitcode.CreateIssueRequest
+	lastWriteOptions         gitcode.WriteOptions
 }
 
 func (f *fakeGitCodeClient) nextError() error {
@@ -2464,6 +2485,12 @@ func (f *brokenStore) ListCompletedSyncEventsScoped(context.Context, string) ([]
 }
 func (f *brokenStore) RecordAuditEvent(context.Context, cache.AuditTrailEntry) error { return nil }
 func (f *brokenStore) GetAuditEventByKey(context.Context, string, string) (*cache.AuditTrailEntry, error) {
+	return nil, nil
+}
+func (f *brokenStore) RecordCacheConfirmation(context.Context, cache.CacheConfirmationRecord) error {
+	return nil
+}
+func (f *brokenStore) GetCacheConfirmationByKey(context.Context, string, string) (*cache.CacheConfirmationRecord, error) {
 	return nil, nil
 }
 func (f *brokenStore) GetSyncStatus(context.Context, string) (cache.SyncStatus, error) {

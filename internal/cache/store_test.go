@@ -82,6 +82,97 @@ func TestRecordSyncEventTimestamps(t *testing.T) {
 	}
 }
 
+func TestScenario008CacheConfirmationIdempotentUpsert(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	now := time.Date(2026, 6, 23, 10, 0, 0, 0, time.UTC)
+	record := Record{RepoID: "fixture-a", ID: "ISSUE-100", Type: "issue", Path: "issues/100.md", Title: "Live mock", Body: "body", Status: "open", ContentHash: "hash-100", Provenance: ProvenanceRemote, RemoteType: "issue", RemoteID: "100", RemoteRevision: "rev-100", CreatedAt: now, UpdatedAt: now}
+	if err := store.UpsertRecordGraph(ctx, RecordGraph{Record: record}); err != nil {
+		t.Fatalf("UpsertRecordGraph returned error: %v", err)
+	}
+	first := CacheConfirmationRecord{RepoID: "fixture-a", Command: "create-issue", RecordID: "ISSUE-100", RecordType: "issue", RemoteType: "issue", RemoteID: "100", IdempotencyKey: "scenario-008-key", Status: "succeeded", SourceFingerprint: "fingerprint-1", CreatedAt: now}
+	if err := store.RecordCacheConfirmation(ctx, first); err != nil {
+		t.Fatalf("RecordCacheConfirmation first returned error: %v", err)
+	}
+	second := first
+	second.ID = "custom-confirmation-id"
+	second.SourceFingerprint = "fingerprint-2"
+	if err := store.RecordCacheConfirmation(ctx, second); err != nil {
+		t.Fatalf("RecordCacheConfirmation second returned error: %v", err)
+	}
+	got, err := store.GetCacheConfirmationByKey(ctx, "fixture-a", "scenario-008-key")
+	if err != nil {
+		t.Fatalf("GetCacheConfirmationByKey returned error: %v", err)
+	}
+	if got == nil || got.ID != "custom-confirmation-id" || got.RemoteID != "100" || got.SourceFingerprint != "fingerprint-2" {
+		t.Fatalf("confirmation=%#v", got)
+	}
+	var count int
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM cache_confirmations WHERE repo_id = ? AND idempotency_key = ?`, "fixture-a", "scenario-008-key").Scan(&count); err != nil {
+		t.Fatalf("count cache confirmations: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("confirmation rows=%d want 1", count)
+	}
+}
+
+func TestScenario008CacheConfirmationRequiresRecord(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	base := CacheConfirmationRecord{RepoID: "fixture-a", Command: "create-issue", RecordID: "ISSUE-404", RecordType: "issue", RemoteType: "issue", RemoteID: "404", IdempotencyKey: "missing-record", Status: "succeeded", CreatedAt: time.Date(2026, 6, 23, 10, 0, 0, 0, time.UTC)}
+	if err := store.RecordCacheConfirmation(ctx, base); err == nil {
+		t.Fatalf("missing record confirmation was accepted")
+	}
+	for name, mutate := range map[string]func(*CacheConfirmationRecord){
+		"repo_id":         func(c *CacheConfirmationRecord) { c.RepoID = "" },
+		"record_id":       func(c *CacheConfirmationRecord) { c.RecordID = "" },
+		"remote_type":     func(c *CacheConfirmationRecord) { c.RemoteType = "" },
+		"remote_id":       func(c *CacheConfirmationRecord) { c.RemoteID = "" },
+		"idempotency_key": func(c *CacheConfirmationRecord) { c.IdempotencyKey = "" },
+	} {
+		confirmation := base
+		mutate(&confirmation)
+		if err := store.RecordCacheConfirmation(ctx, confirmation); err == nil {
+			t.Fatalf("%s empty confirmation was accepted", name)
+		}
+	}
+}
+
+func TestScenario008LiveSyncCacheEvidence(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	now := time.Date(2026, 6, 23, 10, 0, 0, 0, time.UTC)
+	graph := SyncGraph{RepoID: "fixture-a", Record: Record{ID: "ISSUE-MOCK-100", Type: "issue", Path: "issues/100.md", Title: "Mock issue", Body: "mock body", Status: "open", ContentHash: "hash-mock-100", Provenance: ProvenanceRemote, RemoteType: "issue", RemoteID: "100", RemoteRevision: "rev-100", CreatedAt: now, UpdatedAt: now}, Comments: []RecordComment{{CommentID: "comment-100", Author: "mock-user", Body: "mock comment", ContentHash: "hash-comment", RemoteRevision: "comment-rev", CreatedAt: now, UpdatedAt: now}}, Identities: []Identity{{AliasType: "issue", Alias: "100", Remote: RemoteAlias{Type: "issue", ID: "100"}}}, RemoteRevisions: []RemoteRevision{{RemoteType: "issue", RemoteID: "100", RemoteRevision: "rev-100", Status: "fresh", LastFetchedAt: now}}, SyncEvents: []SyncEvent{{ID: "sync-mock-100", RemoteType: "issue", RemoteID: "100", RemoteRevision: "rev-100", Status: "succeeded", IdempotencyKey: "scenario-008-sync", Message: "mock sync", CreatedAt: now, StartedAt: now, CompletedAt: now}}}
+	if err := store.UpsertSyncGraph(ctx, graph); err != nil {
+		t.Fatalf("UpsertSyncGraph returned error: %v", err)
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", "ISSUE-MOCK-100")
+	if err != nil {
+		t.Fatalf("GetRecord returned error: %v", err)
+	}
+	if record.Provenance != ProvenanceRemote || record.RemoteID != "100" || len(record.Comments) != 1 || len(record.Aliases) != 1 {
+		t.Fatalf("record=%#v", record)
+	}
+	if event, err := store.GetSyncEventByKey(ctx, "scenario-008-sync"); err != nil || event == nil {
+		t.Fatalf("sync event=%#v err=%v", event, err)
+	}
+	counts, err := store.RecordCounts(ctx, "fixture-a")
+	if err != nil {
+		t.Fatalf("RecordCounts returned error: %v", err)
+	}
+	if counts.RemoteRevisions != 1 || counts.Comments != 1 || counts.IdentityAliases != 1 || counts.SyncEvents != 1 {
+		t.Fatalf("counts=%#v", counts)
+	}
+	for _, id := range []string{"ISSUE-42", "WIKI-HOME"} {
+		if _, err := store.GetRecord(ctx, "fixture-a", id); err == nil {
+			t.Fatalf("fixture record %s present in live cache evidence", id)
+		}
+	}
+}
+
 func TestChunkSchemaEmbeddingColumn(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)

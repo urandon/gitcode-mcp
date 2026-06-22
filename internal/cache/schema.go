@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 7
+const currentSchemaVersion = 8
 
 type VersionCompatibility struct {
 	DetectedVersion int
@@ -131,6 +131,7 @@ var migrations = []migration{
 	{version: 5, apply: applySyncEventTimestampsMigration},
 	{version: 6, apply: applySyncEventZeroDeltaMigration},
 	{version: 7, apply: applyAuditIdempotencyMigration},
+	{version: 8, apply: applyCacheConfirmationsMigration},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB, ftsAvailable bool) error {
@@ -540,6 +541,35 @@ func applySyncEventZeroDeltaMigration(ctx context.Context, tx *sql.Tx, ftsAvaila
 func applyAuditIdempotencyMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
 	_, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_trail_idempotency_unique ON audit_trail(repo_id, idempotency_key) WHERE idempotency_key <> ''`)
 	return err
+}
+
+func applyCacheConfirmationsMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS cache_confirmations (
+	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+	id TEXT NOT NULL,
+	command TEXT NOT NULL,
+	record_id TEXT NOT NULL,
+	record_type TEXT NOT NULL DEFAULT '',
+	remote_type TEXT NOT NULL,
+	remote_id TEXT NOT NULL,
+	idempotency_key TEXT NOT NULL,
+	status TEXT NOT NULL,
+	source_fingerprint TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, id),
+	UNIQUE(repo_id, idempotency_key),
+	FOREIGN KEY(repo_id, record_id) REFERENCES records(repo_id, record_id) ON DELETE CASCADE
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_cache_confirmations_record ON cache_confirmations(repo_id, record_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_cache_confirmations_remote ON cache_confirmations(repo_id, remote_type, remote_id)`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func tableColumns(ctx context.Context, tx *sql.Tx, table string) (map[string]bool, error) {

@@ -40,6 +40,8 @@ type Store interface {
 	RecordSyncEvent(context.Context, SyncEvent) error
 	GetSyncEventByKey(context.Context, string) (*SyncEvent, error)
 	ListCompletedSyncEventsScoped(context.Context, string) ([]SyncEvent, error)
+	RecordCacheConfirmation(context.Context, CacheConfirmationRecord) error
+	GetCacheConfirmationByKey(context.Context, string, string) (*CacheConfirmationRecord, error)
 	RecordAuditEvent(context.Context, AuditTrailEntry) error
 	GetAuditEventByKey(context.Context, string, string) (*AuditTrailEntry, error)
 	GetSyncStatus(context.Context, string) (SyncStatus, error)
@@ -145,6 +147,20 @@ type AuditTrailEntry struct {
 	Message        string
 	PayloadHash    string
 	CreatedAt      time.Time
+}
+
+type CacheConfirmationRecord struct {
+	RepoID            string
+	ID                string
+	Command           string
+	RecordID          string
+	RecordType        string
+	RemoteType        string
+	RemoteID          string
+	IdempotencyKey    string
+	Status            string
+	SourceFingerprint string
+	CreatedAt         time.Time
 }
 
 type Snapshot struct {

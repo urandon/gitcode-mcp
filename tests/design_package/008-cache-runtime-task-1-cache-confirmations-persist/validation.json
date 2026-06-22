@@ -1,0 +1,31 @@
+{
+  "schema_version": "triborg.validation-result.v1",
+  "task_id": "008-cache-runtime-task-1-cache-confirmations-persist",
+  "covered_outcome_ids": ["outcome-1", "outcome-5", "outcome-6", "outcome-10"],
+  "covered_decommission_ids": ["decommission-3", "decommission-4"],
+  "product_surfaces": [
+    "cmd/gitcode-mcp/main_test.go::TestCLIStartupPlanSelectsLiveProvider/SCN-CLI-LIVE-SYNC-USES-LIVE-PROVIDER exercises the real gitcode-mcp sync --live CLI startup path against an httptest.Server external GitCode provider, asserting mock requests occur and fixture identifiers do not leak through live CLI output.",
+    "internal/cache/store_test.go::TestScenario008LiveSyncCacheEvidence exercises cache-runtime UpsertSyncGraph and GetRecord/RecordCounts/GetSyncEventByKey surfaces, asserting mock remote-provenance issue state, comment, identity alias, remote revision, sync event, and absence of ISSUE-42 and WIKI-HOME for the live repo evidence set.",
+    "cmd/gitcode-mcp/main_test.go::TestCLIStartupPlanSelectsLiveProvider/SCN-CRED-LIVE-WRITE-MOCK-KEYCHAIN exercises the real gitcode-mcp create-issue --live CLI startup route with GITCODE_TOKEN unset, a mocked Keychain-equivalent credential source, and an httptest.Server external GitCode provider.",
+    "internal/service/service_test.go::TestScenario007WriteLiveCreateAuditCacheConfirmation exercises Service.CreateIssue in live mode, asserting provider create confirmation, refreshed remote-provenance cache record, GetCacheConfirmationByKey result with idempotency key and mock remote id, and GetRecord for the refreshed issue.",
+    "internal/service/service_test.go::TestScenario007WriteLiveCreateIdempotentReplay exercises live create replay with the same idempotency key and payload, asserting no duplicate provider create side effect and durable cache confirmation lookup.",
+    "internal/cache/store_test.go::TestScenario008CacheConfirmationIdempotentUpsert exercises cache-runtime RecordCacheConfirmation and GetCacheConfirmationByKey idempotent upsert behavior, asserting one cache_confirmations row for a repeated repo/idempotency key.",
+    "internal/cache/store_test.go::TestScenario008CacheConfirmationRequiresRecord exercises cache-runtime validation for required fields and rejection of confirmations that do not point at an existing repository-local record graph.",
+    "internal/cache/schema_test.go::TestInitialMigration exercises the SQLite schema migration surface and asserts cache_confirmations plus its record and remote indexes exist in a fresh migrated cache.",
+    "go test ./... is run by run.sh with live credential/API environment variables unset as the repository-wide offline acceptance gate."
+  ],
+  "evidence_type": "offline_cli_service_and_cache_go_test",
+  "freshness": "Current target source tree and Go test binary at validation execution time with fresh temporary cache paths or in-memory SQLite stores, no real GitCode credentials, no live network, and no OS Keychain access.",
+  "mocks_used": {
+    "httptest.Server": "Mocks only the external GitCode-compatible HTTP provider while exercising production CLI startup, live sync, and live create command paths.",
+    "GITCODE_MCP_TEST_KEYCHAIN_TOKEN": "Test-only mocked Keychain-equivalent credential source for the CLI live create scenario; GITCODE_TOKEN is unset by run.sh unless an individual test source injects a sanitized test token.",
+    "fakeGitCodeClient": "Service-level test double for the external GitCode write provider used to assert create request count, replay behavior, refreshed record persistence, and cache confirmation state while exercising Service.CreateIssue.",
+    "in_memory_sqlite": "Fresh runtime SQLite cache store used by cache-runtime and service tests to validate schema, migration, graph upsert, confirmation persistence, and idempotency without external dependencies."
+  },
+  "production_files_modified": {},
+  "validation_scope": "Validation artifacts are limited to tests/design_package/008-cache-runtime-task-1-cache-confirmations-persist/. No production source, production docs, runtime code, app code, server code, root AGENTS.md, or product configuration is modified by this validation materialization.",
+  "live_validation": {
+    "enabled": false,
+    "reason": "Live validation is disabled for this task. All evidence is deterministic offline validation using stubbed external dependencies only."
+  }
+}
