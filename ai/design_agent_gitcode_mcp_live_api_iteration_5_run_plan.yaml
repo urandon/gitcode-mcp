@@ -1,0 +1,162 @@
+apiVersion: triborg.dev/v0alpha1
+kind: WorkflowRunPlan
+metadata:
+  id: gitcode-mcp-live-api-coverage-iteration-5-design-run-plan
+  title: GitCode MCP live API coverage iteration 5 design run
+spec:
+  workflow: triborg-design-agent-ywd
+  workflow_id_prefix: gitcode-mcp-live-api-design-agent
+  runtime:
+    path_aliases:
+      repo: "@plan_dir/.."
+      ai: "@repo/ai"
+      artifacts: "@ai/artifacts"
+    artifacts_root: "@artifacts"
+  cases:
+    - run_label: gitcode_mcp_live_api_iteration_5
+      input:
+        task_markdown: |
+          Design the fifth implementation iteration for `gitcode-mcp`.
+
+          Use `project/tasks/TASK-0006-live-api-coverage-iteration-5.md` as the scoped repo-local task brief. This run plan adds design-agent context and output requirements; it does not supersede the task.
+
+          This is not another provider-wiring iteration. Iteration 4 proved that Keychain-backed live issue commands and connected MCP cache reads can reach the real service, but it did not complete the API-shape fixes. Iteration 5 must close the live API coverage and schema gaps found by live testing against the dedicated GitCode test polygon.
+
+          Primary evidence to read:
+          - `project/tasks/TASK-0006-live-api-coverage-iteration-5.md`
+          - `project/handoffs/2026-06-23-live-provider-iteration-4-polygon-smoke.md`
+          - `project/tasks/TASK-0005-live-provider-wiring-iteration-4.md`
+          - `docs/gitcode-api-discovery.md`
+          - `docs/live-readiness.md`
+          - `docs/cache-and-sync-model.md`
+          - `docs/repo-binding.md`
+          - `docs/secrets.md`
+
+          Current live findings:
+          - Issue live paths reached the real service, but the implementation must still tolerate GitCode response shapes such as numeric `id` and string `number`.
+          - Labels remain implementation work. GitCode accepted `labels` as a JSON string in create/update issue payloads, rejected `labels` as a JSON array, and returned labels as objects with fields like `id`, `name`, `color`, `created_at`, and `updated_at`.
+          - The current `add-label` route `/api/v5/repos/{owner}/{repo}/issues/{number}/labels` did not match observed GitCode behavior.
+          - Current error classification can report 400/schema/decode failures as `live_transport_failure` or configuration failure, which misleads operators.
+          - Milestones are documented in GitCode OpenAPI but are not implemented as live provider coverage.
+          - Pull Requests and comments are documented or expected surfaces but are not implemented as live sync/read coverage yet.
+          - Wiki is not documented as a GitCode OpenAPI REST namespace. The UI exposes `/wiki/*.md` and `{repo}.wiki.git`. SSH clone works for the operator. The current token works for normal HTTPS git but not for HTTPS wiki git. Treat wiki as an explicit design decision, not as a silent REST endpoint guess.
+          - Connected MCP tools are read/cache oriented. Decide whether write tools belong in this slice or should remain CLI-only with clear documentation.
+          - Fixture and live records can still share a cache repo namespace. The design needs a provenance or reset/isolation story.
+
+          Required design outcomes:
+          1. Produce a route/schema matrix for Issues, Labels, Milestones, Pull Requests, Comments, and Wiki.
+          2. Specify label request and response models that match GitCode, including normalization into cache source labels.
+          3. Decide whether `add-label` is corrected, removed/deprecated, or implemented via issue update.
+          4. Specify milestone adapter/cache behavior or explicitly defer it with documented rationale.
+          5. Specify PR/comment adapter/cache behavior or explicitly defer it with documented rationale.
+          6. Decide wiki strategy:
+             - token-compatible REST/raw route if discovered;
+             - git-backed wiki provider if token-compatible git access can be made to work;
+             - or explicit unsupported diagnostic with a follow-up credential/discovery track.
+          7. Specify error classification cleanup for 400 responses, malformed JSON, schema mismatches, and partial response diagnostics.
+          8. Specify cache provenance or live-cache reset/isolation behavior for fixture-to-live transition.
+          9. Decide MCP write exposure for issue create/update/labels, or keep MCP read-only and document CLI writes as the supported mutation path.
+
+          Public-safety constraints:
+          - Do not commit private repository coordinates, personal paths, raw credentials, cookies, bearer tokens, raw Authorization headers, internal URLs, SSH key material, or unsanitized API/browser responses.
+          - Use sanitized placeholders and sanitized live-shaped fixtures only.
+          - Do not move, rename, rewrite, or unpack prior zip artifacts.
+          - Keep historical design package directories under `docs/triborg/design-package-iteration-*` as archives.
+
+          Required output shape:
+          - Brief executive summary.
+          - Evidence summary from the iteration 4 polygon smoke.
+          - Route/schema matrix with evidence source for each row: OpenAPI, live probe, or deferred.
+          - Component impact list.
+          - Label model and command design.
+          - Milestone design or explicit deferral.
+          - PR/comment design or explicit deferral.
+          - Wiki decision record and diagnostic design.
+          - Error classification design.
+          - Cache provenance/reset design.
+          - MCP write exposure decision.
+          - Ordered implementation tasks with concise acceptance criteria.
+          - Offline validation plan.
+          - Optional live smoke plan.
+          - Explicit non-goals.
+
+          Acceptance target for the implementator:
+          - `go test ./...` passes without real credentials, network, SSH agent, or OS Keychain access.
+          - New mocked live tests fail if label payloads or label response objects regress to GitHub-like assumptions.
+          - New mocked live tests fail if 400/schema/decode errors are reported as network outages.
+          - Wiki live sync does not silently claim support unless a token-compatible route/provider is proven.
+          - Optional real-live smoke remains credential-gated and redacted.
+        require_clarification_stages: []
+        design_agent:
+          project:
+            workspace_root: "@repo"
+            runs_dir: "@artifacts"
+            competitor_repo_cache_root: "@ai/research-repos"
+            target_vm_repo: "@repo"
+            target_vm_name: GitCode MCP live API coverage iteration 5
+            managed_language_name: Go
+            language_spec_files:
+              - "@repo/README.md"
+              - "@repo/AGENTS.md"
+              - "@repo/project/tasks/backlog.md"
+              - "@repo/project/tasks/TASK-0006-live-api-coverage-iteration-5.md"
+              - "@repo/project/tasks/TASK-0005-live-provider-wiring-iteration-4.md"
+              - "@repo/project/handoffs/2026-06-23-live-provider-iteration-4-polygon-smoke.md"
+              - "@repo/docs/architecture.md"
+              - "@repo/docs/cache-and-sync-model.md"
+              - "@repo/docs/gitcode-api-discovery.md"
+              - "@repo/docs/live-readiness.md"
+              - "@repo/docs/repo-binding.md"
+              - "@repo/docs/secrets.md"
+              - "@repo/docs/operations/mcp-installation-and-secrets.md"
+          competitors:
+            - id: github-wiki-model
+              name: GitHub wiki git-backed model
+              source_url: https://docs.github.com/en/communities/documenting-your-project-with-wikis/adding-or-editing-wiki-pages
+              language: Documentation
+              runtime: Reference for git-backed wiki model and token-auth expectations; do not assume GitCode matches without evidence.
+            - id: gh-cli
+              name: GitHub CLI
+              source_url: https://github.com/cli/cli
+              language: Go
+              runtime: Reference for Go CLI API modeling, labels/milestones/PR ergonomics, and error reporting.
+            - id: gitlab-api
+              name: GitLab API
+              source_url: https://docs.gitlab.com/api/
+              language: Documentation
+              runtime: Reference only for issue labels, milestones, merge requests, and wiki API contrasts.
+          components: []
+          search:
+            provider: exa
+            max_queries: 10
+            max_results: 40
+            max_sources: 60
+            gap_fill_enabled: true
+            fallback_queries:
+              - query: GitCode OpenAPI labels milestones pull requests comments api v5
+                intent: Find documented GitCode routes and request/response shapes for labels, milestones, PRs, and comments.
+                priority: high
+              - query: GitCode wiki API .wiki.git token clone
+                intent: Find whether GitCode exposes wiki content through REST/raw routes or token-compatible git access.
+                priority: high
+              - query: GitCode issues labels payload string labels array objects
+                intent: Validate observed label payload/response shape against public or community evidence.
+                priority: medium
+              - query: GitHub wiki git repository REST API comparison
+                intent: Establish a reference model for git-backed wiki behavior without assuming GitCode parity.
+                priority: medium
+          runtime:
+            max_auto_top_level_architecture_review_iterations: 2
+            max_auto_component_review_iterations: 6
+            enable_clarifications: true
+            allow_network_for_research: true
+            allow_network_for_plan: true
+            allow_network_for_component_design: true
+            fail_fast: false
+            top_level_architecture_approval_mode: auto
+            top_level_retry_exhausted_policy: human_review
+          output:
+            write_design_package: true
+            design_package_path: "@artifacts/gitcode_mcp_live_api_iteration_5_design_package.zip"
+            report_path: "@artifacts/gitcode_mcp_live_api_iteration_5_report.md"
+            public_safe: true
