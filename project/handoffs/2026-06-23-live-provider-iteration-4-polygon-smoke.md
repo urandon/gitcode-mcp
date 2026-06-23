@@ -292,18 +292,81 @@ Additional live probes:
 
 Documentation discovery:
 
+- The official GitCode API docs root is `https://docs.gitcode.com/docs/apis/`.
+- The official GitCode wiki product documentation is `https://docs.gitcode.com/en/docs/help/home/org_project/wiki/wiki-intro`. It documents wiki as a repository-integrated documentation feature with `Home`, `_Sidebar.md`, `_Footer.md`, supported renderable document formats, and clone behavior for the Wiki repository. It does not document REST/API endpoints.
+- GitCode-owned source references are available at `https://gitcode.com/GitCode/GitCode-Docs` and `https://gitcode.com/GitCode/gitcode-skills`; both public repositories responded to `git ls-remote` with a HEAD revision.
+- A shallow read of `GitCode-Docs` showed the ordinary repository contains README links pointing at GitCode wiki pages, but the linked wiki markdown pages are not present in the ordinary repository clone. That supports the product model that wiki content is stored in a separate wiki surface/repository.
+- A shallow read of `gitcode-skills` showed a GitCode skill built around `/api/v5`, `GITCODE_TOKEN`, token validation through `/api/v5/user`, and file-content endpoints such as `/repos/{owner}/{repo}/contents/{path}` and `/repos/{owner}/{repo}/raw/{path}`. It exposes `--no-wiki` as a repository creation option but does not document wiki list/read/create/update/delete API endpoints.
+- GitCode's privacy policy is available at `https://gitcode.com/GitCode/GitCode-Docs/blob/main/用户协议/隐私政策.md`. Use it as compliance context for any browser-session/cookie/token bridge design; do not treat it as an API contract.
+- Official `/api/v5` docs pages were found for issue creation, repository labels, milestones, and pull requests:
+  - `https://docs.gitcode.com/docs/apis/post-api-v-5-repos-owner-issues`
+  - `https://docs.gitcode.com/docs/apis/put-api-v-5-repos-owner-repo-project-labels`
+  - `https://docs.gitcode.com/docs/apis/get-api-v-5-repos-owner-repo-milestones`
+  - `https://docs.gitcode.com/docs/apis/get-api-v-5-repos-owner-repo-pulls`
+- An official OAuth overview page exists at `https://docs.gitcode.com/docs/apis/oauth`, but no official page was found for the browser-observed `web-api.gitcode.com/uc/api/v1/user/oauth/token` route.
 - GitCode's older public OpenAPI index lists repository APIs for Branch, Commit, Tag, Issues, Pull Requests, Labels, Milestone, Release, Webhooks, and Member, but no Wiki namespace was found.
 - GitCode's newer API docs expose the `/api/v5` base and issues routes, but no useful wiki page/list route or response schema was found.
+- Direct probes for obvious wiki/project/repository API docs slugs such as `/docs/apis/wiki`, `/docs/apis/projects`, and `/docs/apis/repositories` returned docs-site 404 pages.
 - Chinese-language searches for `GitCode wiki API 文档`, `GitCode Wiki 克隆 .wiki.git token`, `GitCode 项目 Wiki 接口`, `GitCode 项目Wiki`, `GitCode WikiFiles`, and related variants did not reveal a documented REST/wiki API or token-compatible wiki clone recipe.
 - GitHub uses a similar git-backed wiki model: `https://github.com/{owner}/{repo}.wiki.git`, with wiki edits performed through UI or git clone/push rather than a first-class wiki-pages REST API.
 - The important difference from GitHub is that GitHub PAT-style HTTPS git access normally works for `repo.wiki.git`, while GitCode live probes showed the current token works for the normal repo git endpoint but not for the wiki git endpoint.
 
+Browser network evidence:
+
+- GitCode's web UI reads wiki page detail through a browser-facing endpoint shaped like `GET https://web-api.gitcode.com/api/v2/projects/wiki/detail`.
+- The sanitized detail query shape includes `repo_path` and `file_path`.
+- GitCode's web UI lists wiki repository files through a browser-facing endpoint shaped like `GET https://web-api.gitcode.com/api/v2/projects/{owner}%2F{repo}.wiki/repository/file_list`.
+- The sanitized file-list query shape includes `repoId` for the encoded `{owner}/{repo}.wiki` repository and `ref_name`.
+- GitCode's web UI creates wiki pages through a browser-facing endpoint shaped like `POST https://web-api.gitcode.com/api/v2/projects/wiki/create`.
+- GitCode's web UI updates wiki pages through a browser-facing endpoint shaped like `PUT https://web-api.gitcode.com/api/v2/projects/wiki/update`.
+- GitCode's web UI deletes wiki pages through a browser-facing endpoint shaped like `DELETE https://web-api.gitcode.com/api/v2/projects/wiki/delete`.
+- The sanitized create JSON payload shape includes `repo_path`, `name`, `file_path`, `commit_message`, `content`, and `currUserId`.
+- The sanitized update JSON payload shape includes `repo_path`, `name`, `file_path`, `commit_message`, and `content`.
+- The sanitized delete JSON payload shape includes `repo_path` and `file_path`.
+- The browser request carries both `Authorization: Bearer <token>` and web/session-specific headers/cookies, plus page context headers such as `page-repo-id`, `page-uri`, and `page-ref`.
+- Browser network evidence also shows a session-backed token bridge shaped like `GET https://web-api.gitcode.com/uc/api/v1/user/oauth/token`. The captured request depends on browser cookies and page context; no raw cookie or token values should be recorded.
+- This endpoint is useful discovery evidence, but it is not yet proven to be stable/public API. It must not be copied into docs or fixtures with raw cookies, personal repo paths, page ids, access tokens, refresh tokens, or unsanitized browser headers.
+- The next design pass should decide whether `web-api.gitcode.com/api/v2/projects/wiki/*` can be supported as a token-compatible wiki provider, or whether it must remain an unsupported internal browser API.
+
+`/api/v5` wiki-as-repository evidence:
+
+- The `gitcode-skills` endpoint reference documents repository file APIs under `/api/v5`: `GET /repos/{owner}/{repo}/contents/{path}` and `GET /repos/{owner}/{repo}/raw/{path}`.
+- Applying those documented file-content routes to a `.wiki` repository works.
+- Public probe: `GET /api/v5/repos/{owner}/{repo}.wiki/contents/{path}` and `GET /api/v5/repos/{owner}/{repo}.wiki/raw/{path}` returned wiki markdown for a public GitCode docs wiki page.
+- Private test-repository probe: `GET /api/v5/repos/{owner}/{repo}.wiki/contents/Home.md` returned a base64 file JSON payload, and `GET /api/v5/repos/{owner}/{repo}.wiki/raw/Home.md` returned raw markdown content.
+- Private test-repository probe: nested wiki page paths under a directory also worked through both `contents/{path}` and `raw/{path}`.
+- Private test-repository probe: `GET /api/v5/repos/{owner}/{repo}.wiki/contents` and `GET /api/v5/repos/{owner}/{repo}.wiki/contents/{directory}` returned directory listing arrays with file and directory entries.
+- The configured keychain token worked for this `/api/v5` wiki read/list path with `Authorization: Bearer`, `private-token`, and `access_token` query placement. Prefer the existing project credential model and avoid documenting query-token usage unless needed for compatibility tests.
+- Full private test-repository CRUD smoke also works through the same `/api/v5` wiki-as-repository file API:
+  - `POST /api/v5/repos/{owner}/{repo}.wiki/contents/{path}` creates a wiki file.
+  - `GET /api/v5/repos/{owner}/{repo}.wiki/raw/{path}` reads raw markdown.
+  - `GET /api/v5/repos/{owner}/{repo}.wiki/contents/{path}` returns file metadata and `sha`.
+  - `PUT /api/v5/repos/{owner}/{repo}.wiki/contents/{path}` updates the wiki file when supplied with the current `sha`.
+  - `DELETE /api/v5/repos/{owner}/{repo}.wiki/contents/{path}` deletes the wiki file when supplied with the current `sha`.
+- The `content` request field for create/update must be base64-encoded. A plain markdown `content` value produced an empty blob, which was cleaned up during the smoke test.
+- After delete, raw read returned a not-found response.
+- This is now the strongest token-compatible candidate for wiki live read/sync and write support. Browser `web-api` wiki routes should move to fallback/discovery status unless `/api/v5` lacks a required wiki-specific feature.
+
+Token-only web-api smoke:
+
+- `gitcode-mcp doctor --live` confirmed the configured keychain token and `/api/v5` live provider are ready for the test repository.
+- Calling `GET /api/v2/projects/wiki/detail` with the configured token, minimal non-cookie headers, and the observed `repo_path`/`file_path` query shape returned `403 WIKE_FORBIDDEN_ERROR`.
+- Calling `GET /api/v2/projects/{owner}%2F{repo}.wiki/repository/file_list` with the configured token and no cookies returned `403`.
+- Repeating `detail` and `file_list` with browser-like non-cookie headers, including page context headers, still returned `403`.
+- Calling `POST /api/v2/projects/wiki/create` with browser-like non-cookie headers and a throwaway smoke page payload returned `400 TOKEN_INVALID_ERROR`.
+- Alternate token placements for `detail` (`Authorization: Bearer`, `token`, `x-auth-token`, `PRIVATE-TOKEN`, and query token) all returned `403`.
+- Calling `GET /uc/api/v1/user/oauth/token` without cookies returned `200` with an empty body.
+- Calling `GET /uc/api/v1/user/oauth/token` with only the configured keychain token placed as `GITCODE_ACCESS_TOKEN` cookie also returned `200` with an empty body.
+- Current evidence therefore says the configured GitCode PAT/keychain token is valid for `/api/v5`, but it is not accepted as a standalone credential for `web-api.gitcode.com` wiki routes. The browser-captured `Authorization: Bearer` token appears to be a different browser session credential, or the route additionally depends on session state.
+
 Implication:
 
 - wiki live support should be redesigned as either a git-backed wiki fetch path or a separate GitCode web/API discovery path;
-- the current token is sufficient for normal HTTPS git access but not sufficient, not scoped, or not routed correctly for the wiki git repository;
+- the current token is sufficient for `/api/v5` wiki-as-repository reads via `{repo}.wiki`, but not sufficient, not scoped, or not routed correctly for the wiki HTTPS git repository;
 - SSH clone of the wiki repo works for the operator, so the wiki data exists and the issue is specifically token-compatible non-interactive wiki access;
-- the implementation needs an explicit wiki auth story before live wiki sync can be considered ready.
+- the implementation can avoid browser-session auth for wiki read/sync and basic CRUD by using `/api/v5` file-content routes against `{repo}.wiki`, pending mocked tests and product decisions about supported wiki file formats;
+- the browser `web-api` wiki routes should not be treated as implementation-ready until a non-cookie credential path is proven.
+- the observed OAuth token bridge is browser-session-backed discovery evidence, not a direct replacement for the existing keychain PAT/token model.
 
 ### P1: live response schema drift was not covered by mock tests
 

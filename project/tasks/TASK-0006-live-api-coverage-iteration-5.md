@@ -13,6 +13,7 @@ Iteration 5 should be evidence-led. Do not extend mocked GitHub-like assumptions
 Primary evidence:
 
 - `project/handoffs/2026-06-23-live-provider-iteration-4-polygon-smoke.md`
+- `project/research/gitcode-wiki-api-v5-repository-model-2026-06-23.md`
 - `project/tasks/TASK-0005-live-provider-wiring-iteration-4.md`
 - `docs/gitcode-api-discovery.md`
 - `docs/live-readiness.md`
@@ -29,9 +30,14 @@ Known live findings:
   - 400/schema failures are currently surfaced as confusing transport/configuration failures.
 - Wiki is not available through the assumed REST route `/api/v5/repos/{owner}/{repo}/wiki`.
 - GitCode UI exposes wiki as `/wiki/*.md` plus `{repo}.wiki.git`.
+- Browser network evidence shows wiki page-detail read traffic through `GET https://web-api.gitcode.com/api/v2/projects/wiki/detail`, wiki tree/list traffic through `GET https://web-api.gitcode.com/api/v2/projects/{owner}%2F{repo}.wiki/repository/file_list`, create traffic through `POST https://web-api.gitcode.com/api/v2/projects/wiki/create`, update traffic through `PUT https://web-api.gitcode.com/api/v2/projects/wiki/update`, and delete traffic through `DELETE https://web-api.gitcode.com/api/v2/projects/wiki/delete`; detail query parameters include `repo_path` and `file_path`; file-list query parameters include `repoId` for the encoded `{owner}/{repo}.wiki` repository and `ref_name`; create payload includes `repo_path`, `name`, `file_path`, `commit_message`, `content`, and `currUserId`; update payload includes `repo_path`, `name`, `file_path`, `commit_message`, and `content`; delete payload includes `repo_path` and `file_path`. These routes are not yet proven stable/public API and must be treated as discovery evidence only.
+- Follow-up token-only smoke showed the configured keychain/PAT token is valid for the `/api/v5` live provider but is not accepted as a standalone credential for the observed `web-api.gitcode.com` wiki routes: `detail` and `file_list` returned 403 without cookies, `create` returned `TOKEN_INVALID_ERROR`, browser-like non-cookie headers did not help, and alternate token header/query placements did not make `detail` pass.
+- Browser network evidence also shows `GET https://web-api.gitcode.com/uc/api/v1/user/oauth/token` as a likely session-cookie token bridge. A no-cookie smoke, and a smoke with only the configured keychain token as `GITCODE_ACCESS_TOKEN` cookie, both returned `200` with an empty body, so this route is not currently a proven MCP credential path.
+- New `/api/v5` wiki-as-repository smoke found a stronger token-compatible read/list path: `GET /api/v5/repos/{owner}/{repo}.wiki/contents`, `GET /api/v5/repos/{owner}/{repo}.wiki/contents/{path}`, and `GET /api/v5/repos/{owner}/{repo}.wiki/raw/{path}` work for both a public GitCode docs wiki and the private test wiki. Directory listing returns file/dir arrays, `contents/{path}` returns base64 file JSON, and `raw/{path}` returns markdown. The configured keychain token worked with `Authorization: Bearer`, `private-token`, and `access_token` query placement.
+- Full `/api/v5` wiki-as-repository CRUD smoke on a throwaway private wiki page succeeded: `POST contents/{path}` creates, `GET raw/{path}` reads markdown, `GET contents/{path}` returns `sha`, `PUT contents/{path}` updates with current `sha`, and `DELETE contents/{path}` deletes with current `sha`. Create/update `content` must be base64-encoded; plain markdown content produced an empty blob.
 - SSH clone of the wiki repo works for the operator.
-- The current token works for normal HTTPS git repo access but not for HTTPS wiki git access.
-- GitCode OpenAPI covers Issues, Pull Requests, Labels, and Milestone, but no Wiki REST namespace was found.
+- The current token works for normal HTTPS git repo access and `/api/v5` wiki-as-repository reads, but not for HTTPS wiki git access.
+- GitCode official API docs cover Issues, Pull Requests, Labels, Milestone, and OAuth overview pages under `https://docs.gitcode.com/docs/apis/`. GitCode official wiki product docs at `https://docs.gitcode.com/en/docs/help/home/org_project/wiki/wiki-intro` describe wiki behavior, page conventions, supported renderable formats, and clone behavior, but no Wiki REST namespace or documentation for the observed browser `web-api` wiki/OAuth-token routes was found. GitCode-owned source references are available at `https://gitcode.com/GitCode/GitCode-Docs` and `https://gitcode.com/GitCode/gitcode-skills`; a shallow read showed `GitCode-Docs` links to wiki pages that are not present in the ordinary repo clone, and `gitcode-skills` documents `/api/v5`, token validation, and file-content APIs but no wiki CRUD/list API. GitCode's privacy policy is compliance context for any browser-session/cookie approach, not an API contract.
 - Pull requests, milestones, and comments are not yet covered as live surfaces.
 - Cache provenance still allows fixture and live records to appear in the same repo namespace.
 
@@ -42,7 +48,8 @@ Known live findings:
 3. Add or correct live adapter methods for labels and milestones.
 4. Add live read/sync coverage for PRs and comments if the documented routes are sufficient.
 5. Decide the wiki strategy:
-   - token-compatible raw/API route if one is found;
+   - prefer the token-compatible `/api/v5/repos/{owner}/{repo}.wiki/contents|raw` route if mocked tests can cover directory traversal, file decoding, path encoding, create/update/delete base64 content semantics, `sha` handling, and error handling;
+   - browser `web-api.gitcode.com/api/v2/projects/wiki/*` route only as fallback discovery unless a non-cookie credential path can be proven stable, token-compatible, and public-safe enough for MCP use;
    - otherwise git-backed wiki provider with an explicit non-goal or separate credential story for SSH/git auth.
 6. Improve error classification for 400/schema/decode failures so they do not look like network outages.
 7. Add cache provenance or an operator-safe live-cache reset/isolation story.
@@ -51,13 +58,17 @@ Known live findings:
 ## Required Design Questions
 
 - Which GitCode OpenAPI routes are authoritative for labels, milestones, pull requests, and comments?
+- Which of the official `/api/v5` docs pages should be treated as implementation authority, and which live-probed `web-api` findings must remain discovery-only because no docs were found?
 - What exact request shape should `create-issue --labels` and `update-issue --labels` use?
 - What exact response model should normalize label objects into cache source labels?
 - Should `add-label` be removed, re-routed to documented label APIs, or implemented as issue update with string labels?
 - What milestone fields need to enter cache records, if any, versus staying as issue metadata?
 - Are PRs modeled as a distinct source kind, issue-like records, or out of scope for this iteration?
 - Are issue comments and PR comments stored as child records, source body appendices, or cache comments only?
-- Is wiki sync viable with the current token-only model?
+- Is wiki sync viable through `/api/v5/repos/{owner}/{repo}.wiki/contents|raw` using the current token model, and what path filtering/format filtering rules should decide which wiki files become cache records?
+- Are the observed `web-api.gitcode.com/api/v2/projects/wiki/detail`, `/create`, `/update`, `/delete`, and wiki repository `/repository/file_list` routes usable outside the browser session with an MCP-appropriate credential? The current keychain/PAT token-only smoke failed, so any design using these routes must explain the credential model rather than assuming `/api/v5` auth carries over.
+- Can the observed `web-api.gitcode.com/uc/api/v1/user/oauth/token` route be used without browser cookies, or is it explicitly out of scope because it requires browser session credentials?
+- Which wiki write operations should iteration 5 expose now that `/api/v5/repos/{owner}/{repo}.wiki/contents/{path}` create/update/delete has passed live smoke, and how should idempotency keys, commit messages, current `sha`, and base64 content encoding be modeled?
 - If wiki requires SSH/git credentials, is that acceptable for this product slice, or should wiki remain blocked with clear diagnostics?
 - Should live commands default to the only bound repo, or should `--repo` remain mandatory for now?
 
