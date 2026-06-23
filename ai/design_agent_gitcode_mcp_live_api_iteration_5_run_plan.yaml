@@ -121,11 +121,6 @@ spec:
               source_url: https://github.com/cli/cli
               language: Go
               runtime: Reference for Go CLI API modeling, labels/milestones/PR ergonomics, and error reporting.
-            - id: gitlab-api
-              name: GitLab API
-              source_url: https://docs.gitlab.com/api/
-              language: Documentation
-              runtime: Reference only for issue labels, milestones, merge requests, and wiki API contrasts.
           components: []
           search:
             provider: exa
