@@ -2,6 +2,7 @@ package gitcode
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,15 +29,19 @@ func TestScenario004ReadRouteContract(t *testing.T) {
 		}
 		switch r.URL.Path {
 		case "/api/v5/repos/example-owner/example-repo/issues":
-			fmt.Fprint(w, `[{"id":"MOCK-ISSUE-7","number":7,"title":"mock issue"}]`)
+			fmt.Fprint(w, `[{"id":"MOCK-ISSUE-7","number":7,"title":"mock issue"},{"id":8,"number":"8","title":"numeric id issue"}]`)
 		case "/api/v5/repos/example-owner/example-repo/issues/7":
 			fmt.Fprint(w, `{"id":"MOCK-ISSUE-7","number":7,"title":"mock issue","body":"mock body"}`)
+		case "/api/v5/repos/example-owner/example-repo/issues/8":
+			fmt.Fprint(w, `{"id":8,"number":"8","title":"numeric id issue","body":"numeric body"}`)
 		case "/api/v5/repos/example-owner/example-repo/issues/7/comments":
 			fmt.Fprint(w, `[{"id":"MOCK-COMMENT-1","issue_id":"MOCK-ISSUE-7","body":"mock comment"}]`)
-		case "/api/v5/repos/example-owner/example-repo/wiki":
-			fmt.Fprint(w, `[{"id":"MOCK-WIKI-1","slug":"MockHome","title":"Mock Home","revision":"mock-rev-1"}]`)
-		case "/api/v5/repos/example-owner/example-repo/wiki/MockHome":
-			fmt.Fprint(w, `{"id":"MOCK-WIKI-1","slug":"MockHome","title":"Mock Home","body":"mock wiki","revision":"mock-rev-1"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents":
+			fmt.Fprint(w, `[{"path":"MockHome.md","type":"file","sha":"mock-rev-1"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/MockHome.md":
+			fmt.Fprint(w, `{"path":"MockHome.md","type":"file","sha":"mock-rev-1"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/MockHome.md":
+			fmt.Fprint(w, `mock wiki`)
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
@@ -44,23 +49,33 @@ func TestScenario004ReadRouteContract(t *testing.T) {
 	defer server.Close()
 	client := newTestClient(t, server.URL, Config{Token: "selected-token"})
 	issues, err := client.ListIssues(context.Background(), IssueListRequest{Owner: "example-owner", Repo: "example-repo"})
-	if err != nil || len(issues.Items) != 1 || issues.Items[0].ID != "MOCK-ISSUE-7" {
+	if err != nil || len(issues.Items) != 2 {
 		t.Fatalf("unexpected issues page=%+v err=%v", issues, err)
+	}
+	if issues.Items[0].ID != "MOCK-ISSUE-7" || issues.Items[0].Number != 7 {
+		t.Fatalf("unexpected string-id issue: id=%q number=%d", issues.Items[0].ID, issues.Items[0].Number)
+	}
+	if issues.Items[1].ID != "8" || issues.Items[1].Number != 8 || issues.Items[1].Title != "numeric id issue" {
+		t.Fatalf("unexpected numeric-id issue: id=%q number=%d title=%q", issues.Items[1].ID, issues.Items[1].Number, issues.Items[1].Title)
 	}
 	issue, err := client.GetIssue(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 7})
 	if err != nil || issue.ID != "MOCK-ISSUE-7" {
 		t.Fatalf("unexpected issue=%+v err=%v", issue, err)
+	}
+	numericIssue, err := client.GetIssue(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 8})
+	if err != nil || numericIssue.ID != "8" || numericIssue.Number != 8 || numericIssue.Title != "numeric id issue" {
+		t.Fatalf("unexpected numeric issue=%+v err=%v", numericIssue, err)
 	}
 	comments, err := client.ListIssueComments(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 7})
 	if err != nil || len(comments.Items) != 1 || comments.Items[0].ID != "MOCK-COMMENT-1" || comments.Items[0].IssueID != "MOCK-ISSUE-7" {
 		t.Fatalf("unexpected comments=%+v err=%v", comments, err)
 	}
 	wikis, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo"})
-	if err != nil || len(wikis.Items) != 1 || wikis.Items[0].ID != "MOCK-WIKI-1" || wikis.Items[0].Slug != "MockHome" {
+	if err != nil || len(wikis.Items) != 1 || wikis.Items[0].ID != "MockHome.md" || wikis.Items[0].Slug != "MockHome.md" {
 		t.Fatalf("unexpected wikis=%+v err=%v", wikis, err)
 	}
-	wiki, err := client.GetWikiPage(context.Background(), WikiPageRequest{Owner: "example-owner", Repo: "example-repo", Slug: "MockHome"})
-	if err != nil || wiki.ID != "MOCK-WIKI-1" || wiki.Slug != "MockHome" {
+	wiki, err := client.GetWikiPage(context.Background(), WikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "MockHome.md"})
+	if err != nil || wiki.ID != "MockHome.md" || wiki.Slug != "MockHome.md" {
 		t.Fatalf("unexpected wiki=%+v err=%v", wiki, err)
 	}
 	joined := strings.Join(paths, " ")
@@ -74,10 +89,24 @@ func TestContract(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
 			t.Fatalf("auth header not applied")
 		}
-		path := "../../fixtures" + r.URL.Path + ".json"
-		if r.URL.Path == "/api/v5/repos/example-owner/example-repo/wiki" {
-			path = "../../fixtures/api/v5/repos/example-owner/example-repo/wiki/pages.json"
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents":
+			fmt.Fprint(w, `[{"path":"Home.md","type":"file","sha":"rev-home-1"},{"path":"Guide.md","type":"file","sha":"rev-guide-1"}]`)
+			return
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/Home.md":
+			fmt.Fprint(w, `{"path":"Home.md","type":"file","sha":"rev-home-1"}`)
+			return
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/Home.md":
+			fmt.Fprint(w, `Example Project Home api.example.com`)
+			return
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/Guide.md":
+			fmt.Fprint(w, `{"path":"Guide.md","type":"file","sha":"rev-guide-1"}`)
+			return
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/Guide.md":
+			fmt.Fprint(w, `Guide`)
+			return
 		}
+		path := "../../fixtures" + r.URL.Path + ".json"
 		http.ServeFile(w, r, path)
 	}))
 	defer server.Close()
@@ -117,15 +146,15 @@ func TestContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListWikiPages returned error: %v", err)
 	}
-	if len(wikiPages.Items) != 2 || wikiPages.Items[0].ID != "WIKI-HOME" || wikiPages.Items[0].Slug != "Home" || wikiPages.Items[0].Revision != "rev-home-1" || wikiPages.Items[0].UpdatedAt.IsZero() {
+	if len(wikiPages.Items) != 2 || wikiPages.Items[0].ID != "Guide.md" || wikiPages.Items[0].Slug != "Guide.md" || wikiPages.Items[0].Revision != "rev-guide-1" || wikiPages.Items[0].UpdatedAt.IsZero() {
 		t.Fatalf("unexpected wiki pages: %+v", wikiPages.Items)
 	}
 
-	wikiPage, err := client.GetWikiPage(context.Background(), WikiPageRequest{Owner: "example-owner", Repo: "example-repo", Slug: "Home"})
+	wikiPage, err := client.GetWikiPage(context.Background(), WikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "Home.md"})
 	if err != nil {
 		t.Fatalf("GetWikiPage returned error: %v", err)
 	}
-	if wikiPage.ID != "WIKI-HOME" || wikiPage.Title != "Example Project Home" || !strings.Contains(wikiPage.Body, "api.example.com") || wikiPage.CreatedAt.IsZero() || wikiPage.UpdatedAt.IsZero() {
+	if wikiPage.ID != "Home.md" || wikiPage.Title != "Home" || !strings.Contains(wikiPage.Body, "api.example.com") || wikiPage.UpdatedAt.IsZero() {
 		t.Fatalf("unexpected wiki page: %+v", wikiPage)
 	}
 }
@@ -197,6 +226,9 @@ func TestAttachmentContract(t *testing.T) {
 	var tooLarge ErrPayloadTooLarge
 	if !errors.As(err, &tooLarge) {
 		t.Fatalf("expected ErrPayloadTooLarge, got %T %v", err, err)
+	}
+	if tooLarge.Source != "remote_status" {
+		t.Fatalf("source=%q want remote_status", tooLarge.Source)
 	}
 }
 
@@ -372,12 +404,32 @@ func TestFailureModes(t *testing.T) {
 		assertAs(t, err, &target)
 	})
 	t.Run("max-size", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"id":"0123456789"}`) }))
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.(http.Flusher).Flush()
+			fmt.Fprint(w, `{"id":"0123456789"}`)
+		}))
 		defer server.Close()
 		client := newTestClient(t, server.URL, Config{MaxResponseSize: 5})
 		_, err := client.GetIssue(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42})
 		var target ErrPayloadTooLarge
 		assertAs(t, err, &target)
+		if target.Source != "local_body_limit" {
+			t.Fatalf("source=%q want local_body_limit", target.Source)
+		}
+	})
+	t.Run("remote-413", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			fmt.Fprint(w, strings.Repeat("x", 32))
+		}))
+		defer server.Close()
+		client := newTestClient(t, server.URL, Config{MaxResponseSize: 5})
+		_, err := client.GetIssue(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42})
+		var target ErrPayloadTooLarge
+		assertAs(t, err, &target)
+		if target.Source != "remote_status" {
+			t.Fatalf("source=%q want remote_status", target.Source)
+		}
 	})
 }
 
@@ -400,7 +452,7 @@ func TestEndpointsTemplate(t *testing.T) {
 	if got := getIssueEndpoint("example-owner", "example-repo", 42); got != "/api/v5/repos/example-owner/example-repo/issues/42" {
 		t.Fatalf("unexpected issue endpoint %s", got)
 	}
-	if got := getWikiPageEndpoint("example owner", "repo/name", "Release Notes"); got != "/api/v5/repos/example%20owner/repo%2Fname/wiki/Release%20Notes" {
+	if got := getWikiPageEndpoint("example owner", "repo/name", "Release Notes/June + #1.md"); got != "/api/v5/repos/example%20owner/repo%2Fname.wiki/contents/Release%20Notes/June%20+%20%231.md" {
 		t.Fatalf("unexpected escaped wiki endpoint %s", got)
 	}
 	if got := listIssueCommentsEndpoint("example-owner", "example-repo", 42); got != "/api/v5/repos/example-owner/example-repo/issues/42/comments" {
@@ -434,8 +486,8 @@ func TestWriteEndpointsTemplate(t *testing.T) {
 		"create issue": "/api/v5/repos/example-owner/example-repo/issues",
 		"update issue": "/api/v5/repos/example-owner/example-repo/issues/42",
 		"comment":      "/api/v5/repos/example-owner/example-repo/issues/42/comments",
-		"create wiki":  "/api/v5/repos/example-owner/example-repo/wiki",
-		"update wiki":  "/api/v5/repos/example-owner/example-repo/wiki/Home",
+		"create wiki":  "/api/v5/repos/example-owner/example-repo.wiki/contents",
+		"update wiki":  "/api/v5/repos/example-owner/example-repo.wiki/contents/Home",
 		"add label":    "/api/v5/repos/example-owner/example-repo/issues/42/labels",
 		"remove label": "/api/v5/repos/example-owner/example-repo/issues/42/labels/needs%20triage",
 	}
@@ -632,14 +684,14 @@ func TestConfirmedWriteOperations(t *testing.T) {
 		{
 			name:   "write-confirm-create-wiki",
 			method: http.MethodPost,
-			path:   createWikiPageEndpoint("example-owner", "example-repo"),
-			body:   `{"id":"WIKI-1","slug":"Home","title":"Home","revision":"rev1"}`,
+			path:   updateWikiPageEndpoint("example-owner", "example-repo", "Home.md"),
+			body:   `{"path":"Home.md","type":"file","sha":"rev1"}`,
 			invoke: func(client *HTTPClient) (WriteResult[any], error) {
-				result, err := client.CreateWikiPage(context.Background(), CreateWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Title: "Home", Body: "body"}, WriteOptions{IdempotencyKey: "key-create-wiki"})
+				result, err := client.CreateWikiPage(context.Background(), CreateWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "Home.md", Title: "Home", Body: "body"}, WriteOptions{IdempotencyKey: "key-create-wiki"})
 				return anyWriteResult(result), err
 			},
 			assertion: func(t *testing.T, result WriteResult[any]) {
-				if result.RemoteID != "WIKI-1" || result.RemoteSlug != "Home" || result.RemoteRevision != "rev1" {
+				if result.RemoteID != "Home.md" || result.RemoteSlug != "Home.md" || result.RemoteRevision != "rev1" {
 					t.Fatalf("missing wiki identity: %+v", result)
 				}
 			},
@@ -647,14 +699,14 @@ func TestConfirmedWriteOperations(t *testing.T) {
 		{
 			name:   "write-confirm-update-wiki",
 			method: http.MethodPut,
-			path:   updateWikiPageEndpoint("example-owner", "example-repo", "Home"),
-			body:   `{"id":"WIKI-1","slug":"Home","title":"Home","revision":"rev2"}`,
+			path:   updateWikiPageEndpoint("example-owner", "example-repo", "Home.md"),
+			body:   `{"path":"Home.md","type":"file","sha":"rev2"}`,
 			invoke: func(client *HTTPClient) (WriteResult[any], error) {
-				result, err := client.UpdateWikiPage(context.Background(), UpdateWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Slug: "Home", Body: "body"}, WriteOptions{IdempotencyKey: "key-update-wiki"})
+				result, err := client.UpdateWikiPage(context.Background(), UpdateWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "Home.md", Body: "body", Sha: "rev1"}, WriteOptions{IdempotencyKey: "key-update-wiki"})
 				return anyWriteResult(result), err
 			},
 			assertion: func(t *testing.T, result WriteResult[any]) {
-				if result.RemoteID != "WIKI-1" || result.RemoteSlug != "Home" || result.RemoteRevision != "rev2" {
+				if result.RemoteID != "Home.md" || result.RemoteSlug != "Home.md" || result.RemoteRevision != "rev2" {
 					t.Fatalf("missing wiki identity: %+v", result)
 				}
 			},
@@ -861,5 +913,717 @@ func assertAs[T error](t *testing.T, err error, target *T) {
 	t.Helper()
 	if !errors.As(err, target) {
 		t.Fatalf("expected %T, got %T %v", *target, err, err)
+	}
+}
+
+func TestScenario001WikiContentsRootTraversal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents":
+			fmt.Fprint(w, `[{"path":"README.md","type":"file","sha":"rev-home"},{"path":"assets/logo.png","type":"file","sha":"rev-logo"},{"path":"tasks","type":"dir"},{"path":"dir","type":"dir"},{"path":"ignored.txt","type":"file","sha":"rev-txt"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dir":
+			fmt.Fprint(w, `[{"path":"dir/Sub.md","type":"file","sha":"rev-sub"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/tasks":
+			fmt.Fprint(w, `[{"path":"tasks/Task.md","type":"file","sha":"rev-task"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/README.md":
+			fmt.Fprint(w, `{"path":"README.md","type":"file","sha":"rev-home"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/README.md":
+			fmt.Fprint(w, "# Introduction\n\nHome page.")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dir/Sub.md":
+			fmt.Fprint(w, `{"path":"dir/Sub.md","type":"file","sha":"rev-sub"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dir/Sub.md":
+			fmt.Fprint(w, "## Sub page")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/tasks/Task.md":
+			fmt.Fprint(w, `{"path":"tasks/Task.md","type":"file","sha":"rev-task"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/tasks/Task.md":
+			fmt.Fprint(w, "## Task page")
+		default:
+			t.Fatalf("unexpected wiki path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	wikis, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if err != nil {
+		t.Fatalf("ListWikiPages returned error: %v", err)
+	}
+	if len(wikis.Items) != 3 {
+		t.Fatalf("expected 3 markdown pages, got %d: %+v", len(wikis.Items), wikis.Items)
+	}
+	ordered := []string{"dir/Sub.md", "tasks/Task.md", "README.md"}
+	for i, item := range wikis.Items {
+		if item.Slug != ordered[i] {
+			t.Fatalf("expected ordered[%d] = %q, got %q", i, ordered[i], item.Slug)
+		}
+	}
+	for _, item := range wikis.Items {
+		if item.Slug == "logo.png" {
+			t.Fatalf("unsupported file logo.png was synced: %+v", item)
+		}
+	}
+	if wikis.Items[0].ID != "dir/Sub.md" || wikis.Items[0].Title != "Sub" || wikis.Items[0].Revision != "rev-sub" {
+		t.Fatalf("unexpected dir/Sub.md page: %+v", wikis.Items[0])
+	}
+	if wikis.Items[1].ID != "tasks/Task.md" || wikis.Items[1].Revision != "rev-task" {
+		t.Fatalf("unexpected tasks/Task.md page: %+v", wikis.Items[1])
+	}
+}
+
+func TestScenario002WikiMalformedEntrySchemaDecode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents":
+			fmt.Fprint(w, `[{"path":"","type":"file"},{"path":"ok.md","type":"","sha":"rev-ok"}]`)
+		default:
+			t.Fatalf("unexpected wiki path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	_, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo"})
+	var partial ErrPartialResponse
+	if !errors.As(err, &partial) {
+		t.Fatalf("expected ErrPartialResponse, got %T %v", err, err)
+	}
+}
+
+func TestScenario003WikiDuplicatePathDedup(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents":
+			fmt.Fprint(w, `[{"path":"dup.md","type":"file","sha":"rev1"},{"path":"dup.md","type":"file","sha":"rev2"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dup.md":
+			fmt.Fprint(w, `{"path":"dup.md","type":"file","sha":"rev1"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dup.md":
+			fmt.Fprint(w, "body")
+		default:
+			t.Fatalf("unexpected wiki path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	_, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo"})
+	var partial ErrPartialResponse
+	if !errors.As(err, &partial) || !strings.Contains(partial.Message, "duplicate") {
+		t.Fatalf("expected duplicate ErrPartialResponse, got %T %v", err, err)
+	}
+}
+
+func TestScenario004WikiNestingLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents":
+			fmt.Fprint(w, `[{"path":"deep","type":"dir"}]`)
+		case strings.Contains(r.URL.Path, "/contents/deep"):
+			prefix := strings.TrimPrefix(r.URL.Path, "/api/v5/repos/example-owner/example-repo.wiki/contents/")
+			next := prefix + "/deeper"
+			fmt.Fprintf(w, `[{"path":%q,"type":"dir"}]`, next)
+		default:
+			t.Fatalf("unexpected wiki path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	_, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo"})
+	var partial ErrPartialResponse
+	if !errors.As(err, &partial) || !strings.Contains(partial.Message, "64") {
+		t.Fatalf("expected nesting limit ErrPartialResponse, got %T %v", err, err)
+	}
+}
+
+func TestScenario005WikiRawReadBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/Design/Architecture.md":
+			fmt.Fprint(w, `{"path":"Design/Architecture.md","type":"file","sha":"rev-arch"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/Design/Architecture.md":
+			fmt.Fprint(w, "# Architecture\n\nSystem overview")
+		default:
+			t.Fatalf("unexpected wiki path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	wiki, err := client.GetWikiPage(context.Background(), WikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "Design/Architecture.md"})
+	if err != nil {
+		t.Fatalf("GetWikiPage returned error: %v", err)
+	}
+	if wiki.ID != "Design/Architecture.md" || wiki.Slug != "Design/Architecture.md" || wiki.Title != "Architecture" || wiki.Revision != "rev-arch" || wiki.Body != "# Architecture\n\nSystem overview" {
+		t.Fatalf("unexpected wiki page: %+v", wiki)
+	}
+}
+
+func TestScenario006WikiCreateBase64NoSha(t *testing.T) {
+	var sawBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/NewPage.md" {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"message":"not found"}`)
+			return
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v5/repos/example-owner/example-repo.wiki/contents/NewPage.md" {
+			t.Fatalf("unexpected create request %s %s", r.Method, r.URL.Path)
+		}
+		var payload WikiContentWriteRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		sawBody = payload.Content
+		if payload.Sha != "" {
+			t.Fatalf("create must not send sha, got %q", payload.Sha)
+		}
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"path":"NewPage.md","type":"file","sha":"rev-new","content":"...","encoding":"base64"}`)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	result, err := client.CreateWikiPage(context.Background(), CreateWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "NewPage.md", Title: "New Page", Body: "# New Page\n\nContent", Message: "create new page"}, WriteOptions{IdempotencyKey: "key-create"})
+	if err != nil {
+		t.Fatalf("CreateWikiPage returned error: %v", err)
+	}
+	if result.RemoteID != "NewPage.md" || result.RemoteSlug != "NewPage.md" || result.RemoteRevision != "rev-new" || !result.Confirmed {
+		t.Fatalf("unexpected create result: %+v", result)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(sawBody)
+	if err != nil {
+		t.Fatalf("payload not valid base64: %v", err)
+	}
+	if string(decoded) != "# New Page\n\nContent" {
+		t.Fatalf("unexpected body: %q", string(decoded))
+	}
+}
+
+func TestScenario007WikiUpdateShaAutoresolve(t *testing.T) {
+	var sawSha string
+	var sawMethod string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/Existing.md":
+			fmt.Fprint(w, `{"path":"Existing.md","type":"file","sha":"current-sha-123"}`)
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/Existing.md":
+			sawMethod = r.Method
+			var payload WikiContentWriteRequest
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode payload: %v", err)
+			}
+			sawSha = payload.Sha
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `{"path":"Existing.md","type":"file","sha":"new-sha-456"}`)
+		default:
+			t.Fatalf("unexpected update request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	result, err := client.UpdateWikiPage(context.Background(), UpdateWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "Existing.md", Body: "updated body"}, WriteOptions{IdempotencyKey: "key-update"})
+	if err != nil {
+		t.Fatalf("UpdateWikiPage returned error: %v", err)
+	}
+	if sawSha != "current-sha-123" || sawMethod != "PUT" {
+		t.Fatalf("auto-resolved sha=%q method=%q", sawSha, sawMethod)
+	}
+	if result.RemoteID != "Existing.md" || result.RemoteRevision != "new-sha-456" || !result.Confirmed {
+		t.Fatalf("unexpected update result: %+v", result)
+	}
+}
+
+func TestScenario008WikiUpdateExplicitSha(t *testing.T) {
+	var sawSha string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			t.Fatalf("GET must not be called when sha is explicit")
+		}
+		if r.Method != http.MethodPut || r.URL.Path != "/api/v5/repos/example-owner/example-repo.wiki/contents/Explicit.md" {
+			t.Fatalf("unexpected update request %s %s", r.Method, r.URL.Path)
+		}
+		var payload WikiContentWriteRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		sawSha = payload.Sha
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"path":"Explicit.md","type":"file","sha":"explicit-result"}`)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	result, err := client.UpdateWikiPage(context.Background(), UpdateWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "Explicit.md", Body: "updated body", Sha: "caller-supplied-sha"}, WriteOptions{IdempotencyKey: "key-explicit"})
+	if err != nil {
+		t.Fatalf("UpdateWikiPage returned error: %v", err)
+	}
+	if sawSha != "caller-supplied-sha" {
+		t.Fatalf("explicit sha=%q", sawSha)
+	}
+	if result.RemoteRevision != "explicit-result" || !result.Confirmed {
+		t.Fatalf("unexpected explicit result: %+v", result)
+	}
+}
+
+func TestScenario009WikiDeleteStaleSha409(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/Stale.md":
+			fmt.Fprint(w, `{"path":"Stale.md","type":"file","sha":"auto-sha"}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/Stale.md":
+			w.WriteHeader(http.StatusConflict)
+			fmt.Fprint(w, `{"message":"stale sha"}`)
+		default:
+			t.Fatalf("unexpected delete request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	_, err := client.DeleteWikiPage(context.Background(), DeleteWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "Stale.md"}, WriteOptions{IdempotencyKey: "key-delete"})
+	var conflict ErrConflict
+	if !errors.As(err, &conflict) {
+		t.Fatalf("expected ErrConflict for stale sha, got %T %v", err, err)
+	}
+}
+
+func TestScenario010BrowserRouteExclusion(t *testing.T) {
+	var webAPIHits int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.Host, "web-api.gitcode.com") || strings.Contains(r.URL.Path, "/api/v2/projects/wiki") {
+			webAPIHits++
+			t.Fatalf("browser web-api route was called: %s", r.URL.Path)
+		}
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents":
+			fmt.Fprint(w, `[{"path":"Home.md","type":"file","sha":"rev-home"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/Home.md":
+			fmt.Fprint(w, `{"path":"Home.md","type":"file","sha":"rev-home"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/Home.md":
+			fmt.Fprint(w, "# Home")
+		default:
+			t.Fatalf("unexpected wiki path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	wikis, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if err != nil || len(wikis.Items) != 1 {
+		t.Fatalf("ListWikiPages wikis=%+v err=%v", wikis, err)
+	}
+	wiki, err := client.GetWikiPage(context.Background(), WikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "Home.md"})
+	if err != nil || wiki.ID != "Home.md" {
+		t.Fatalf("GetWikiPage wiki=%+v err=%v", wiki, err)
+	}
+	if webAPIHits > 0 {
+		t.Fatalf("browser web-api routes were hit %d times", webAPIHits)
+	}
+}
+
+func TestLabel010IssueResponseObjects(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues" {
+			fmt.Fprint(w, `[{"id":"1","number":1,"title":"Test","labels":[{"id":1,"name":"bug","color":"#FF0000"},{"id":2,"name":"enhancement","color":"#00FF00"}]}]`)
+			return
+		}
+		t.Fatalf("unexpected path %s", r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	issues, err := client.ListIssues(context.Background(), IssueListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if err != nil {
+		t.Fatalf("ListIssues error: %v", err)
+	}
+	if len(issues.Items) != 1 {
+		t.Fatalf("expected 1 issue, got %d", len(issues.Items))
+	}
+	issue := issues.Items[0]
+	if len(issue.Labels) != 2 || issue.Labels[0] != "bug" || issue.Labels[1] != "enhancement" {
+		t.Fatalf("Labels: got %v, want [bug enhancement]", issue.Labels)
+	}
+	if len(issue.GitCodeLabels) != 2 || issue.GitCodeLabels[0].ID != 1 || issue.GitCodeLabels[0].Name != "bug" {
+		t.Fatalf("GitCodeLabels: got %+v", issue.GitCodeLabels)
+	}
+}
+
+func TestLabel011CreateRequestLabelString(t *testing.T) {
+	var sawLabelsRaw json.RawMessage
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues" {
+			var raw struct {
+				Labels json.RawMessage `json:"labels"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			sawLabelsRaw = raw.Labels
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":"ISSUE-100","number":100,"title":"created"}`)
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	encodedLabels := EncodeIssueLabels([]string{"bug", "enhancement"})
+	result, err := client.CreateIssue(context.Background(), CreateIssueRequest{
+		Owner:  "example-owner",
+		Repo:   "example-repo",
+		Title:  "Test Issue",
+		Labels: encodedLabels,
+	}, WriteOptions{IdempotencyKey: "key-011"})
+	if err != nil {
+		t.Fatalf("CreateIssue error: %v", err)
+	}
+	if !result.Confirmed {
+		t.Fatal("expected confirmed result")
+	}
+	if len(sawLabelsRaw) == 0 {
+		t.Fatal("labels field not found in request body")
+	}
+	if sawLabelsRaw[0] != '[' {
+		t.Fatalf("labels is not a JSON array: %s", string(sawLabelsRaw))
+	}
+	var decoded []string
+	if err := json.Unmarshal(sawLabelsRaw, &decoded); err != nil {
+		t.Fatalf("labels is not a valid JSON array: %s, err=%v", string(sawLabelsRaw), err)
+	}
+	if len(decoded) != 2 || decoded[0] != "bug" || decoded[1] != "enhancement" {
+		t.Fatalf("labels content: got %v, want [bug enhancement]", decoded)
+	}
+}
+
+func TestLabel012CreateRequestEmptyLabels(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues" {
+			var raw struct {
+				Labels json.RawMessage `json:"labels"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			if len(raw.Labels) > 0 && string(raw.Labels) != "[]" {
+				t.Fatalf("empty labels: expected [], got %s", string(raw.Labels))
+			}
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":"ISSUE-200","number":200,"title":"no labels"}`)
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	encodedLabels := EncodeIssueLabels([]string{})
+	result, err := client.CreateIssue(context.Background(), CreateIssueRequest{
+		Owner:  "example-owner",
+		Repo:   "example-repo",
+		Title:  "No Labels",
+		Labels: encodedLabels,
+	}, WriteOptions{IdempotencyKey: "key-012"})
+	if err != nil {
+		t.Fatalf("CreateIssue error: %v", err)
+	}
+	if !result.Confirmed {
+		t.Fatal("expected confirmed result")
+	}
+}
+
+func TestLabel013ArrayLabelsAccepted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues" {
+			var raw struct {
+				Labels json.RawMessage `json:"labels"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			if len(raw.Labels) > 0 && raw.Labels[0] == '[' {
+				w.WriteHeader(http.StatusCreated)
+				fmt.Fprint(w, `{"id":"ISSUE-300","number":300,"title":"accepted","labels":[{"id":1,"name":"bug","color":"#FF0000"}]}`)
+				return
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"message":"labels must be a JSON array, not a string"}`)
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+
+	t.Run("array labels via DTO accepted", func(t *testing.T) {
+		encoded := EncodeIssueLabels([]string{"bug"})
+		result, err := client.CreateIssue(context.Background(), CreateIssueRequest{
+			Owner:  "example-owner",
+			Repo:   "example-repo",
+			Title:  "Good Labels",
+			Labels: encoded,
+		}, WriteOptions{IdempotencyKey: "key-013-arr"})
+		if err != nil {
+			t.Fatalf("CreateIssue with native array labels failed: %v", err)
+		}
+		if !result.Confirmed {
+			t.Fatal("expected confirmed result for native array labels")
+		}
+	})
+
+	t.Run("double-encoded string labels rejected", func(t *testing.T) {
+		body := map[string]interface{}{
+			"title":  "Bad Labels",
+			"labels": `["bug"]`,
+			"owner":  "example-owner",
+			"repo":   "example-repo",
+		}
+		bodyBytes, _ := json.Marshal(body)
+		req, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v5/repos/example-owner/example-repo/issues", strings.NewReader(string(bodyBytes)))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("http request failed: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400 for double-encoded string labels, got %d", resp.StatusCode)
+		}
+	})
+}
+
+func TestScenario013001CreateIssueLabelsAsNativeJSONArray(t *testing.T) {
+	var sawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues" {
+			buf := make([]byte, 4096)
+			n, _ := r.Body.Read(buf)
+			sawBody = buf[:n]
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":"1","number":1,"title":"Test","labels":[{"id":1,"name":"bug","color":"#FF0000"},{"id":2,"name":"enhancement","color":"#00FF00"}]}`)
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	result, err := client.CreateIssue(context.Background(), CreateIssueRequest{
+		Owner:  "example-owner",
+		Repo:   "example-repo",
+		Title:  "Test",
+		Labels: EncodeIssueLabels([]string{"bug", "enhancement"}),
+	}, WriteOptions{IdempotencyKey: "key-013-001"})
+	if err != nil {
+		t.Fatalf("CreateIssue error: %v", err)
+	}
+	if !result.Confirmed {
+		t.Fatal("expected confirmed result")
+	}
+	var raw struct {
+		Labels json.RawMessage `json:"labels"`
+	}
+	if err := json.Unmarshal(sawBody, &raw); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	if len(raw.Labels) == 0 {
+		t.Fatal("labels field not found in request body")
+	}
+	if raw.Labels[0] != '[' {
+		t.Fatalf("labels is not a JSON array: %s", string(raw.Labels))
+	}
+	var decoded []string
+	if err := json.Unmarshal(raw.Labels, &decoded); err != nil {
+		t.Fatalf("labels is not a valid JSON array: %s, err=%v", string(raw.Labels), err)
+	}
+	if len(decoded) != 2 || decoded[0] != "bug" || decoded[1] != "enhancement" {
+		t.Fatalf("labels: got %v, want [bug enhancement]", decoded)
+	}
+}
+
+func TestScenario013002UpdateIssueLabelsAsNativeJSONArray(t *testing.T) {
+	var sawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues/42" {
+			buf := make([]byte, 4096)
+			n, _ := r.Body.Read(buf)
+			sawBody = buf[:n]
+			fmt.Fprint(w, `{"id":"42","number":42,"title":"Updated","labels":[{"id":1,"name":"bug","color":"#FF0000"}]}`)
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	result, err := client.UpdateIssue(context.Background(), UpdateIssueRequest{
+		Owner:  "example-owner",
+		Repo:   "example-repo",
+		Number: 42,
+		Labels: EncodeIssueLabels([]string{"bug"}),
+	}, WriteOptions{IdempotencyKey: "key-013-002"})
+	if err != nil {
+		t.Fatalf("UpdateIssue error: %v", err)
+	}
+	if !result.Confirmed {
+		t.Fatal("expected confirmed result")
+	}
+	var raw struct {
+		Labels json.RawMessage `json:"labels"`
+	}
+	if err := json.Unmarshal(sawBody, &raw); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	if len(raw.Labels) == 0 {
+		t.Fatal("labels field not found in request body")
+	}
+	if raw.Labels[0] != '[' {
+		t.Fatalf("labels is not a JSON array: %s", string(raw.Labels))
+	}
+	var decoded []string
+	if err := json.Unmarshal(raw.Labels, &decoded); err != nil {
+		t.Fatalf("labels is not a valid JSON array: %s, err=%v", string(raw.Labels), err)
+	}
+	if len(decoded) != 1 || decoded[0] != "bug" {
+		t.Fatalf("labels: got %v, want [bug]", decoded)
+	}
+}
+
+func TestScenario013003CreateIssueNoLabelsOmitsField(t *testing.T) {
+	var sawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues" {
+			buf := make([]byte, 4096)
+			n, _ := r.Body.Read(buf)
+			sawBody = buf[:n]
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":"1","number":1,"title":"No Labels"}`)
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	result, err := client.CreateIssue(context.Background(), CreateIssueRequest{
+		Owner: "example-owner",
+		Repo:  "example-repo",
+		Title: "No Labels",
+	}, WriteOptions{IdempotencyKey: "key-013-003"})
+	if err != nil {
+		t.Fatalf("CreateIssue error: %v", err)
+	}
+	if !result.Confirmed {
+		t.Fatal("expected confirmed result")
+	}
+	var raw struct {
+		Labels json.RawMessage `json:"labels"`
+	}
+	if err := json.Unmarshal(sawBody, &raw); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	if len(raw.Labels) > 0 {
+		t.Fatalf("labels field should be omitted, got %s", string(raw.Labels))
+	}
+	var bodyMap map[string]interface{}
+	if err := json.Unmarshal(sawBody, &bodyMap); err != nil {
+		t.Fatalf("unmarshal body map: %v", err)
+	}
+	if _, ok := bodyMap["labels"]; ok {
+		t.Fatal("labels key should be absent from serialized JSON")
+	}
+}
+
+func TestScenario013004AddLabelReturnsUnsupportedCapability(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/labels") {
+			t.Fatal("add-label endpoint should not be called by live provider")
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{}`)
+	}))
+	defer server.Close()
+	provider, err := NewLiveProvider(ProviderConfig{
+		Mode:        ProviderModeLive,
+		LiveAllowed: true,
+		Token:       "test-token",
+		BaseURL:     server.URL,
+		Timeout:     2 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lp, ok := provider.(liveProvider)
+	if !ok {
+		t.Fatal("expected liveProvider")
+	}
+	_, err = lp.AddLabel(context.Background(), LabelRequest{
+		Owner:  "example-owner",
+		Repo:   "example-repo",
+		Number: 42,
+		Label:  "bug",
+	}, WriteOptions{IdempotencyKey: "key-013-004"})
+	if err == nil {
+		t.Fatal("liveProvider.AddLabel: expected error, got nil")
+	}
+	if !IsUnsupportedCapability(err) {
+		t.Fatalf("liveProvider.AddLabel: expected ErrUnsupportedCapability, got %T: %v", err, err)
+	}
+}
+
+func TestScenario013006AddLabelEndpointAbsentFromProvider(t *testing.T) {
+	provider, err := NewLiveProvider(ProviderConfig{
+		Mode:        ProviderModeLive,
+		LiveAllowed: true,
+		Token:       "test-token",
+		BaseURL:     "http://127.0.0.1:1",
+		Timeout:     1 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lp, ok := provider.(liveProvider)
+	if !ok {
+		t.Fatal("expected liveProvider")
+	}
+	_, err = lp.AddLabel(context.Background(), LabelRequest{
+		Owner:  "example-owner",
+		Repo:   "example-repo",
+		Number: 42,
+		Label:  "bug",
+	}, WriteOptions{})
+	if err == nil {
+		t.Fatal("liveProvider.AddLabel: expected error, got nil")
+	}
+	if !IsUnsupportedCapability(err) {
+		t.Fatalf("liveProvider.AddLabel: expected ErrUnsupportedCapability, got %T: %v", err, err)
+	}
+}
+
+func TestScenario013007CreateIssueWithLabelsNormalizedInResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"id":"1","number":1,"title":"Test","labels":[{"id":1,"name":"bug","color":"#FF0000"},{"id":2,"name":"enhancement","color":"#00FF00"}]}`)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	result, err := client.CreateIssue(context.Background(), CreateIssueRequest{
+		Owner:  "example-owner",
+		Repo:   "example-repo",
+		Title:  "Test",
+		Labels: EncodeIssueLabels([]string{"bug", "enhancement"}),
+	}, WriteOptions{IdempotencyKey: "key-013-007"})
+	if err != nil {
+		t.Fatalf("CreateIssue error: %v", err)
+	}
+	if !result.Confirmed {
+		t.Fatal("expected confirmed result")
+	}
+	if len(result.Record.Labels) != 2 || result.Record.Labels[0] != "bug" || result.Record.Labels[1] != "enhancement" {
+		t.Fatalf("normalized labels: got %v, want [bug enhancement]", result.Record.Labels)
+	}
+}
+
+func TestScenario013008EncodeIssueLabelsOutputIsJSONArray(t *testing.T) {
+	result := EncodeIssueLabels([]string{"bug", "enhancement"})
+	if len(result) == 0 || result[0] != '[' {
+		t.Fatalf("EncodeIssueLabels: output is not a JSON array literal: %s", string(result))
+	}
+	var decoded []string
+	if err := json.Unmarshal(result, &decoded); err != nil {
+		t.Fatalf("EncodeIssueLabels: output is not valid JSON array: %s, err=%v", string(result), err)
+	}
+	if len(decoded) != 2 || decoded[0] != "bug" || decoded[1] != "enhancement" {
+		t.Fatalf("EncodeIssueLabels: got %v, want [bug enhancement]", decoded)
+	}
+
+	empty := EncodeIssueLabels([]string{})
+	if string(empty) != "[]" {
+		t.Fatalf("EncodeIssueLabels empty: got %s, want []", string(empty))
 	}
 }

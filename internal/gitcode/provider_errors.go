@@ -38,6 +38,25 @@ func IsFixtureReadOnly(err error) bool {
 	return errors.As(err, &target)
 }
 
+type ErrUnsupportedCapability struct {
+	CapabilityKey string
+	Message       string
+}
+
+func (e ErrUnsupportedCapability) Error() string {
+	if e.Message == "" {
+		e.Message = "capability not supported"
+	}
+	return fmt.Sprintf("gitcode: unsupported capability %q: %s", e.CapabilityKey, e.Message)
+}
+
+func (e ErrUnsupportedCapability) DiagnosticCode() string { return "unsupported_capability" }
+
+func IsUnsupportedCapability(err error) bool {
+	var target ErrUnsupportedCapability
+	return errors.As(err, &target)
+}
+
 type ErrValidationFailed struct {
 	Field   string
 	Message string
@@ -54,6 +73,30 @@ func (e ErrValidationFailed) Error() string {
 }
 
 func (e ErrValidationFailed) DiagnosticCode() string { return "validation_failed" }
+
+type ErrSchemaDecode struct {
+	Field    string
+	Expected string
+	Received string
+	Message  string
+}
+
+func (e ErrSchemaDecode) Error() string {
+	msg := e.Message
+	if msg == "" {
+		msg = "schema decode failure"
+	}
+	if e.Field == "" {
+		return "gitcode: " + msg
+	}
+	result := fmt.Sprintf("gitcode: schema decode failure for %s", e.Field)
+	if e.Expected != "" && e.Received != "" {
+		result += fmt.Sprintf(": expected %s, received %s", e.Expected, e.Received)
+	}
+	return result
+}
+
+func (e ErrSchemaDecode) DiagnosticCode() string { return "schema_decode" }
 
 type ErrPaginationMalformed struct {
 	Endpoint string

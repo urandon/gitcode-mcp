@@ -73,8 +73,14 @@ func (p *fixtureProvider) load() error {
 		var full WikiPage
 		if err := readFixture(filepath.Join(base, "wiki", page.Slug+".json"), &full); err == nil {
 			p.wiki[full.Slug] = full
+			if full.ID != "" {
+				p.wiki[full.ID] = full
+			}
 		} else if errors.Is(err, os.ErrNotExist) {
 			p.wiki[page.Slug] = page
+			if page.ID != "" {
+				p.wiki[page.ID] = page
+			}
 		} else {
 			return err
 		}
@@ -156,9 +162,10 @@ func (p *fixtureProvider) GetWikiPage(_ context.Context, req WikiPageRequest) (W
 	if err := p.scenarioError("wiki-page"); err != nil {
 		return WikiPage{}, err
 	}
-	page, ok := p.wiki[req.Slug]
+	wikiPath := wikiRequestPath(req.Path, req.Slug)
+	page, ok := p.wiki[wikiPath]
 	if !ok {
-		return WikiPage{}, ErrNotFound{Endpoint: getWikiPageEndpoint(req.Owner, req.Repo, req.Slug), ID: req.Slug}
+		return WikiPage{}, ErrNotFound{Endpoint: getWikiPageEndpoint(req.Owner, req.Repo, wikiPath), ID: wikiPath}
 	}
 	return page, nil
 }
@@ -198,6 +205,18 @@ func (p *fixtureProvider) CreateWikiPage(context.Context, CreateWikiPageRequest,
 
 func (p *fixtureProvider) UpdateWikiPage(context.Context, UpdateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error) {
 	return WriteResult[WikiPage]{}, FixtureReadOnlyError("UpdateWikiPage")
+}
+
+func (p *fixtureProvider) DeleteWikiPage(context.Context, DeleteWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error) {
+	return WriteResult[WikiPage]{}, FixtureReadOnlyError("DeleteWikiPage")
+}
+
+func (p *fixtureProvider) ListMilestones(context.Context, MilestoneListRequest) (Page[Milestone], error) {
+	return Page[Milestone]{}, FixtureReadOnlyError("ListMilestones")
+}
+
+func (p *fixtureProvider) GetMilestone(context.Context, MilestoneRequest) (Milestone, error) {
+	return Milestone{}, FixtureReadOnlyError("GetMilestone")
 }
 
 func (p *fixtureProvider) scenarioError(endpoint string) error {

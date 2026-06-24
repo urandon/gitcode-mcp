@@ -1,0 +1,114 @@
+{
+  "task_id": "009-error-classifier-task-4-product-path-classifier-tests",
+  "component": "error-classifier",
+  "covered_outcome_ids": ["outcome-7", "outcome-1", "outcome-3", "outcome-5", "outcome-10"],
+  "covered_decommission_ids": ["decommission-4"],
+  "product_surfaces": [
+    "CLI stderr error reporting (writeCommandError -> diagnostics.Classify)",
+    "MCP JSON-RPC error data (writeDomainError -> mcpDiagnostic -> diagnostics.Classify)",
+    "Service error wrapping (ErrSyncFailure, ErrWriteFailure preserving cause/failure-source metadata)",
+    "Diagnostics classifier precedence (classifyCode with live-http ProviderMode)"
+  ],
+  "evidence_type": "cli_command",
+  "freshness": "2026-06-24T10:32:14Z",
+  "mocks_used": [
+    "httptest.Server (MockGitCodeAPI in cmd/gitcode-mcp/mock_gitcode_api_test.go)",
+    "typed error structs (gitcode.ErrAPIValidation, gitcode.ErrNotFound, gitcode.ErrConflict, gitcode.ErrRemoteCollision, gitcode.ErrRemoteNotFound, gitcode.ErrPayloadTooLarge, gitcode.ErrPartialResponse, gitcode.ErrRateLimited, gitcode.ErrAuthExpired, gitcode.ErrNetworkUnavailable, gitcode.ErrUnauthorized, gitcode.ErrSchemaDecode)",
+    "service.ErrSyncFailure and service.ErrWriteFailure wrapper structs with Cause/PayloadSource/Code/Mode fields"
+  ],
+  "production_files_modified": [
+    "internal/diagnostics/classifier.go",
+    "internal/diagnostics/classifier_test.go",
+    "internal/service/errors.go",
+    "internal/service/service_test.go",
+    "internal/mcp/mcp.go",
+    "internal/mcp/mcp_test.go",
+    "internal/gitcode/errors.go",
+    "internal/gitcode/errors_diagnostic_test.go",
+    "cmd/gitcode-mcp/main_test.go",
+    "cmd/gitcode-mcp/mock_gitcode_api_test.go"
+  ],
+  "validation_commands": [
+    "go test ./internal/diagnostics/... -count=1",
+    "go test ./internal/service/... -count=1",
+    "go test ./internal/mcp/... -count=1",
+    "go test ./cmd/gitcode-mcp/... -count=1",
+    "go test ./... -count=1",
+    "git diff --check"
+  ],
+  "scenarios": [
+    {
+      "id": "009-error-classifier-task-4-product-path-classifier-tests-scenario-1",
+      "status": "passed",
+      "description": "All package tests pass offline with no credentials, network, SSH agent, or Keychain; git diff --check passes"
+    },
+    {
+      "id": "009-error-classifier-task-4-product-path-classifier-tests-scenario-2",
+      "status": "passed",
+      "description": "CLI and MCP tests with mocked GitCode responses prove visible failure_classes are exactly api_validation, schema_decode, config_credential, or live_transport_failure; decommissioned classes absent"
+    }
+  ],
+  "scenario_ids_exercised": [
+    "SCN-DIAG-PRODUCT-WRAP-01", "SCN-DIAG-PRODUCT-WRAP-02", "SCN-DIAG-PRODUCT-WRAP-03",
+    "SCN-DIAG-PRODUCT-WRAP-04", "SCN-DIAG-PRODUCT-WRAP-05", "SCN-DIAG-PRODUCT-WRAP-06",
+    "SCN-DIAG-PRODUCT-WRAP-07", "SCN-DIAG-PRODUCT-WRAP-08", "SCN-DIAG-PRODUCT-WRAP-09",
+    "SCN-CLI-ERROR-OUTPUT-400", "SCN-CLI-ERROR-OUTPUT-401", "SCN-CLI-ERROR-OUTPUT-404",
+    "SCN-CLI-ERROR-OUTPUT-409", "SCN-CLI-ERROR-OUTPUT-413", "SCN-CLI-ERROR-OUTPUT-429",
+    "SCN-CLI-ERROR-OUTPUT-MALFORMED-JSON", "SCN-CLI-ERROR-OUTPUT-SCHEMA-MISMATCH",
+    "SCN-CLI-ERROR-OUTPUT-PARTIAL-RESPONSE", "SCN-CLI-ERROR-OUTPUT-TIMEOUT",
+    "SCN-CLI-ERROR-OUTPUT-500",
+    "SCN-MCP-ERROR-OUTPUT-401", "SCN-MCP-ERROR-OUTPUT-400", "SCN-MCP-ERROR-OUTPUT-404",
+    "SCN-MCP-ERROR-OUTPUT-409", "SCN-MCP-ERROR-OUTPUT-413", "SCN-MCP-ERROR-OUTPUT-429",
+    "SCN-MCP-ERROR-OUTPUT-MALFORMED-JSON", "SCN-MCP-ERROR-OUTPUT-SCHEMA-MISMATCH",
+    "SCN-MCP-ERROR-OUTPUT-PARTIAL-RESPONSE", "SCN-MCP-ERROR-OUTPUT-LOCAL-BODY-LIMIT",
+    "SCN-MCP-ERROR-OUTPUT-TIMEOUT", "SCN-MCP-ERROR-OUTPUT-500",
+    "SCN-DIAG-DECOM-01", "SCN-DIAG-DECOM-02", "SCN-DIAG-DECOM-03",
+    "SCN-DIAG-DECOM-04", "SCN-DIAG-DECOM-05",
+    "SCN-DIAG-PRECEDENCE-01", "SCN-DIAG-PRECEDENCE-02", "SCN-DIAG-PRECEDENCE-03",
+    "SCN-DIAG-PRECEDENCE-04", "SCN-DIAG-PRECEDENCE-05", "SCN-DIAG-PRECEDENCE-06",
+    "SCN-DIAG-PRECEDENCE-07", "SCN-DIAG-PRECEDENCE-08", "SCN-DIAG-PRECEDENCE-09",
+    "SCN-DIAG-PRECEDENCE-10", "SCN-DIAG-PRECEDENCE-11", "SCN-DIAG-PRECEDENCE-12",
+    "SCN-DIAG-PRECEDENCE-13", "SCN-DIAG-PRECEDENCE-14", "SCN-DIAG-PRECEDENCE-15",
+    "SCN-DIAG-FAILURE-SOURCE-01", "SCN-DIAG-FAILURE-SOURCE-02",
+    "SCN-DIAG-FAILURE-SOURCE-03", "SCN-DIAG-FAILURE-SOURCE-04",
+    "SCN-DIAG-LEGACY-NORMALIZATION-01", "SCN-DIAG-LEGACY-NORMALIZATION-02",
+    "SCN-DIAG-LEGACY-NORMALIZATION-03", "SCN-DIAG-LEGACY-NORMALIZATION-04",
+    "SCN-DIAG-CODE-GITCODE-01", "SCN-DIAG-CODE-GITCODE-02", "SCN-DIAG-CODE-GITCODE-03",
+    "SCN-DIAG-CODE-GITCODE-04", "SCN-DIAG-CODE-GITCODE-05", "SCN-DIAG-CODE-GITCODE-06",
+    "SCN-DIAG-CODE-GITCODE-07"
+  ],
+  "decommission_verification": {
+    "decommission-4": {
+      "status": "verified",
+      "description": "400/schema/decode failures classified as live_transport_failure or configuration failure",
+      "verification": "CLI tests call assertNoDecommissionedFailureClass for every API/schema/decode failure path. Diagnostics classifier has SCN-DIAG-DECOM-01 through 05 explicitly testing that 400, malformed JSON, schema mismatch, partial response, and local body limit never produce decommissioned codes. MCP error rendering tests assert correct canonical failure_class without decommissioned values."
+    }
+  },
+  "outcome_verification": {
+    "outcome-7": {
+      "status": "verified",
+      "description": "Error classification cleanup: API validation, schema/decode, credential/configuration, and transport failures are visibly distinct",
+      "evidence": "All 12 CLI failure modes and 12 MCP failure modes tested with expected canonical failure_class. Decommission invariant enforced across all API/schema/decode failure paths."
+    },
+    "outcome-1": {
+      "status": "supporting_evidence",
+      "description": "Route/schema matrix exercised through runtime code paths",
+      "evidence": "CLI integration tests exercise live provider through MockGitCodeAPI httptest.Server, exercising route dispatch and error classification integration"
+    },
+    "outcome-3": {
+      "status": "supporting_evidence",
+      "description": "Label encoding and normalization with GitCode-correct shapes",
+      "evidence": "Error classification tests for schema_decode cover malformed label response scenarios"
+    },
+    "outcome-5": {
+      "status": "supporting_evidence",
+      "description": "PR/comment deferred routes return unsupported capability diagnostics",
+      "evidence": "Deferred surfaces produce unsupported_capability diagnostics, not transport failures"
+    },
+    "outcome-10": {
+      "status": "supporting_evidence",
+      "description": "go test ./... passes without real credentials, network, SSH agent, or Keychain",
+      "evidence": "All package tests pass offline; all CLI tests use MockGitCodeAPI httptest.Server; all MCP tests use typed error structs"
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "covered_outcome_ids": [
+    "outcome-7",
+    "outcome-1",
+    "outcome-3",
+    "outcome-5",
+    "outcome-10"
+  ],
+  "covered_decommission_ids": [
+    "decommission-4"
+  ],
+  "product_surfaces": [
+    "internal/diagnostics.Classify live-http failure-source classifier",
+    "internal/gitcode ErrPayloadTooLarge FailureSource metadata",
+    "internal/gitcode ErrPartialResponse diagnostic path",
+    "internal/service ErrSyncFailure PayloadSource wrapper preservation",
+    "internal/service ErrWriteFailure PayloadSource wrapper preservation",
+    "internal/cli diagnostic rendering of wrapped live failures",
+    "internal/mcp diagnostic rendering of wrapped live failures"
+  ],
+  "evidence_type": [
+    "runtime/compiler test",
+    "local command",
+    "stubbed-external-provider scenario"
+  ],
+  "freshness": "Current source and local validation command output from the implementation branch",
+  "mocks_used": "External dependencies are represented by production typed GitCode errors and service wrappers; no live network, credentials, SSH agent, OS Keychain, or external provider is used.",
+  "production_files_modified": []
+}

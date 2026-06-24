@@ -1,0 +1,151 @@
+apiVersion: triborg.dev/v0alpha1
+kind: WorkflowRunPlan
+metadata:
+  id: gitcode-mcp-live-api-coverage-iteration-5-design-implementator-run-plan
+  title: GitCode MCP live API coverage iteration 5 design implementation run
+spec:
+  workflow: triborg-design-implementator-v2-ywd
+  workflow_id_prefix: gitcode-mcp-live-api-design-implementator
+  runtime:
+    path_aliases:
+      repo: "@plan_dir/.."
+      ai: "@repo/ai"
+      artifacts: "@ai/artifacts"
+    artifacts_root: "@artifacts"
+  cases:
+    - run_label: gitcode_mcp_live_api_iteration_5_implementation
+      input:
+        design_package_zip_path: "@ai/design-package-iteration-5.zip"
+        target_repo_path: "@repo"
+        target_branch: feat/live-api-coverage-iteration-5
+        max_task_iterations: 40
+        live_validation_enabled: false
+        device_validation_enabled: false
+        runner_runtime: worker
+        implementation_constraints: |
+          - Treat `ai/design-package-iteration-5.zip` as the primary design package and implementation task source for this run.
+          - Use `project/tasks/TASK-0006-live-api-coverage-iteration-5.md` as the scoped repo-local task brief. The task brief and this run plan override any conflicting generated component wording inside the design package.
+          - This is an evidence-led live API coverage iteration, not a blank-slate rewrite. Preserve cache-first reads, existing CLI/MCP read behavior, repository binding, keychain/env credential resolution, and previous iteration tests unless a stricter replacement is added and documented.
+          - Keep this public repository safe: do not commit private repository coordinates, personal filesystem paths, raw credentials, cookies, bearer tokens, raw Authorization headers, internal URLs, unsanitized API responses, or source-system-specific private tracker/wiki names.
+          - Do not move, rename, rewrite, unpack, or archive prior zip artifacts. `ai/design-package-iteration-1.zip` through `ai/design-package-iteration-5.zip` stay where they are.
+          - Do not move, rename, rewrite, or archive historical design-package directories under `docs/triborg/design-package-iteration-*`.
+          - If the workflow publishes the fresh package to `docs/triborg/design-package`, keep that as generated output for this implementation run. Do not rename the fresh generated directory to `design-package-iteration-5` from inside the implementator run.
+          - Keep tests under normal Go package paths. Do not archive tests under `docs/`, do not delete previous iteration tests, and do not move tests out of `go test ./...`.
+          - Use scenario-specific test names for iteration 5 so mocked live API tests can live beside earlier contract tests without collisions.
+          - Default validation must remain offline and deterministic. Normal `go test ./...` must not require real GitCode network access, real credentials, SSH agent access, or OS Keychain access.
+          - Live real-GitCode smoke is optional and credential-gated only. If not executed, leave a concise handoff under `project/handoffs/` with the skipped opt-in command and environment variables.
+          - Preserve the current API baseline unless sanitized primary evidence proves otherwise: default GitCode API base URL is `https://api.gitcode.com/api/v5`, repository binding `api_base_url` remains authoritative, and the live HTTP adapter uses the existing credential model.
+          - Credential resolution must be consistent across auth/status/read/write commands. A live smoke found `auth status` seeing the Keychain token while `add-comment --live` reported a missing live credential; do not leave write commands on a separate credential path.
+          - Wiki implementation must use the validated token-compatible wiki-as-repository path for already-initialized wikis: `/api/v5/repos/{owner}/{repo}.wiki/contents`, `/contents/{path}`, and `/raw/{path}`. Browser `web-api.gitcode.com/api/v2/projects/wiki/*` routes remain discovery/fallback evidence only and must not be wired into product runtime.
+          - Empty/uninitialized wiki repositories are a separate required state. The `urandon/gitcode-mcp` smoke failed `sync --wiki` and first-page `create-page` attempts with 400 through the v5 wiki-as-repository path. After a manual first page was created in the GitCode UI, `sync --wiki` succeeded, so manual UI bootstrap is a proven temporary workaround, not a product solution. The implementator must either prove and implement a first-page/bootstrap route or return a typed empty/uninitialized wiki diagnostic with concrete remediation.
+          - Initialized wiki sync/write still needs normalization coverage. A manually created `Home.md` cached as `wiki/Home.md.md`, and a post-bootstrap `create-page` attempt failed confirmation decoding because the provider response lacked the expected path/sha shape.
+          - Wiki create/update payload content must be base64 encoded. Update/delete must use caller-supplied sha or auto-resolve current sha through `GET /contents/{path}`. Stubbed tests must cover recursive traversal, path encoding, raw reads, base64 decode, base64 writes, sha conflict/error behavior, and delete.
+          - Issue identity normalization must be end-to-end, not break-then-fix. Accept GitCode numeric `id` and string `number`, derive stable `remote_id` and `source_id`, and update service/cache consumers in the same implementation so live issue sync never writes `ISSUE-0`, alias `"0"`, or path `issues/0.md` for valid issue responses.
+          - Live JSON shape, malformed JSON, partial response, and schema mismatches must surface as `schema_decode`. HTTP 4xx validation/authz failures must surface as `api_validation` or the existing credential/auth equivalent selected by the canonical classifier. Do not classify successful-HTTP decode failures as configuration or transport outages.
+          - Implement exactly one central `RouteSchemaMatrix` contract for issues, labels, milestones, pull requests, comments, and wiki. PR/comment deferral code must consume that central matrix; do not create a second partial matrix or a second source of truth.
+          - Labels must match observed GitCode behavior: issue create/update sends labels as a string value, not a JSON array value; issue/list/get responses normalize GitCode label objects into cache `[]string` label names. Add mocked tests for multi-label payloads and empty-label behavior. If live or documented evidence contradicts JSON-array-as-string for multi-labels, prefer the evidence and document the adjustment.
+          - The old dedicated add-label route `/api/v5/repos/{owner}/{repo}/issues/{number}/labels` must not be a successful product path. `add-label --live` should either use the safe issue-update label path with merge semantics proven from cache/remote state, or return a typed `unsupported_capability` diagnostic.
+          - Milestones are in scope only if implemented through documented `/api/v5` routes with mocked list/get tests and cache projection. If a required response shape is not documented or cannot be proven with sanitized evidence, defer that sub-surface with an explicit `unsupported_capability` diagnostic instead of guessing.
+          - Pull request and comment read/sync surfaces remain deferred for this iteration unless the design package and task brief both give enough route/schema evidence. Deferred PR/comment paths must return `unsupported_capability` before outbound HTTP and must not silently return empty success.
+          - Existing implicit live issue sync must not fail just because comments are deferred. It should cache the issue, skip comment enrichment explicitly, and avoid writing comment records for deferred comments.
+          - MCP remains read/cache-oriented for iteration 5. Do not advertise write tools. Known write tool calls may return `unsupported_capability`, but they must not resolve credentials, hit live network, or mutate cache.
+          - MCP lifecycle gaps must still be addressed explicitly. Agents currently cannot bootstrap or refresh a live cache through MCP because repo binding/status, live sync, index refresh, auth status, doctor/readiness, migration/cache setup diagnostics, and cache path errors have no MCP surface. Either implement the chosen safe lifecycle/readiness tools, or document the CLI-only boundary and expose structured MCP diagnostics so missing lifecycle capability is not confused with an empty repository or missing server.
+          - Be conservative with cache schema. The design package's instruction to replace `records.provenance` values with `fixture/live` is not accepted. Preserve existing `remote`, `projection`, and `bridge` provenance semantics and the existing remote-vs-projection source-of-truth guard.
+          - If fixture/live cache isolation requires storage, implement it as a small additive provider-origin/sync-origin field or side table, or as an operator-safe live reset mechanism that does not remap or delete the existing provenance model. Do not migrate `remote`/`projection`/`bridge` rows into `fixture`; do not remove the guard that prevents projection data from overwriting remote identity fields.
+          - `cache reset --live --repo <repo>` may be implemented only if it can target live-origin records without damaging projection/bridge/source-of-truth provenance. If additive metadata is required, keep the migration narrow and covered by upgrade tests.
+          - Do not satisfy acceptance by weakening tests, deleting earlier contracts, removing command help, or narrowing MCP read schemas.
+        validation_constraints: |
+          - `go test ./...` is the final executable acceptance gate for iteration 5.
+          - `git diff --check` must pass.
+          - New mocked live tests must prove issue sync with GitCode-shaped `{"id": 4109571, "number": "3"}` produces stable cache ids/aliases for issue 3 and never `ISSUE-0`.
+          - New mocked live tests must prove malformed issue identity, malformed label objects, malformed wiki contents, and malformed milestone payloads classify as `schema_decode`.
+          - New mocked live tests must prove empty/uninitialized wiki behavior for both `sync --wiki` and first-page `create-page`: either successful bootstrap through a proven route or an explicit typed diagnostic, not a generic provider failure.
+          - New mocked live tests must prove initialized-wiki `.md` path normalization does not produce local `wiki/<name>.md.md` paths and that wiki write confirmation decoding handles or explicitly rejects the observed missing path/sha response shape.
+          - New mocked live tests must prove 400-class GitCode API responses classify as `api_validation` or the explicit credential/auth class, not `live_transport_failure`.
+          - New mocked live tests must prove wiki runtime does not call browser `web-api.gitcode.com/api/v2/projects/wiki/*`.
+          - New mocked live tests must prove PR/comment deferred paths return `unsupported_capability` without outbound HTTP.
+          - New mocked live tests must prove Keychain-backed credential resolution parity across `auth status`, read/sync probes, and write commands such as `add-comment`.
+          - New mocked MCP tests must prove write tool names are not advertised and known write calls do not perform credential lookup, network I/O, or cache mutation.
+          - New mocked MCP lifecycle/readiness tests must prove the chosen behavior for an empty writable cache, repo binding/status discovery, live or mocked sync refresh, index refresh, and cache startup failures. If any lifecycle action remains CLI-only, the test must prove the MCP diagnostic is explicit.
+          - Cache migration tests must preserve `ProvenanceRemote`, `ProvenanceProjection`, and `ProvenanceBridge` semantics.
+          - The final repository state must not expose tokens, Authorization headers, cookies, raw API responses, private repo coordinates, or browser session material in tracked files, logs, fixtures, snapshots, docs, or handoffs.
+        final_validation_command:
+          script:
+            text: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              export GOCACHE="${GOCACHE:-$PWD/.cache/go-build}"
+              mkdir -p "$GOCACHE"
+
+              test -s go.mod
+              test -s cmd/gitcode-mcp/main.go
+              test -s ai/design-package-iteration-5.zip
+              test -s ai/design_implementator_gitcode_mcp_live_api_iteration_5_run_plan.yaml
+              test -s project/tasks/TASK-0006-live-api-coverage-iteration-5.md
+              test -s project/research/gitcode-wiki-api-v5-repository-model-2026-06-23.md
+
+              grep -q 'design_package_zip_path: "@ai/design-package-iteration-5.zip"' ai/design_implementator_gitcode_mcp_live_api_iteration_5_run_plan.yaml
+              grep -q 'target_branch: feat/live-api-coverage-iteration-5' ai/design_implementator_gitcode_mcp_live_api_iteration_5_run_plan.yaml
+              grep -q 'ProvenanceRemote' internal/cache/models.go
+              grep -q 'ProvenanceProjection' internal/cache/models.go
+              grep -q 'ProvenanceBridge' internal/cache/models.go
+              grep -q 'Authorization", "Bearer "' internal/gitcode/http_client.go
+
+              go test ./...
+              git diff --check
+
+              go run ./cmd/gitcode-mcp --help >/tmp/gitcode-mcp-help.txt
+              go run ./cmd/gitcode-mcp --version >/tmp/gitcode-mcp-version.txt
+              grep -q "gitcode-mcp" /tmp/gitcode-mcp-help.txt
+              grep -q "gitcode-mcp" /tmp/gitcode-mcp-version.txt
+
+              for subcommand in \
+                repo \
+                sync \
+                search \
+                list \
+                get \
+                get-snippet \
+                list-chunks \
+                search-chunks \
+                search_sources \
+                cache-status \
+                sync-status \
+                stale-index \
+                mcp \
+                create-issue \
+                update-issue \
+                add-comment \
+                create-page \
+                update-page \
+                add-label \
+                doctor \
+                auth \
+                migrate-cache; do
+                go run ./cmd/gitcode-mcp "$subcommand" --help >/tmp/gitcode-mcp-help-"$subcommand".txt
+                grep -qiE 'usage|help|gitcode-mcp|'"$subcommand" /tmp/gitcode-mcp-help-"$subcommand".txt
+              done
+
+              if grep -RIn 'web-api.gitcode.com/api/v2/projects/wiki' cmd internal --exclude='*_test.go'; then
+                echo "product runtime must not call browser wiki web-api routes" >&2
+                exit 65
+              fi
+
+              if grep -RInE 'Provenance(Fixture|Live)' internal/cache --exclude='*_test.go'; then
+                echo "records.provenance must preserve remote/projection/bridge semantics; use additive provider-origin metadata instead" >&2
+                exit 66
+              fi
+
+              if grep -RInE '(Authorization:|Bearer[[:space:]]+[A-Za-z0-9._-]{16,}|Cookie:|Set-Cookie:|sk-[A-Za-z0-9_-]{16,}|GITCODE_TOKEN[[:space:]]*=)' . \
+                --exclude-dir=.git \
+                --exclude-dir=.cache \
+                --exclude-dir=ai \
+                --exclude-dir=docs/triborg \
+                --exclude='*.zip'; then
+                echo "repository contains secret-like or unsanitized tracked material" >&2
+                exit 67
+              fi
+            expected_exit_codes: [0]
+            policy:
+              validation_scope: final_offline_gates

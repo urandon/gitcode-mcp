@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 9
+const currentSchemaVersion = 11
 
 type VersionCompatibility struct {
 	DetectedVersion int
@@ -133,6 +133,8 @@ var migrations = []migration{
 	{version: 7, apply: applyAuditIdempotencyMigration},
 	{version: 8, apply: applyCacheConfirmationsMigration},
 	{version: 9, apply: applyAuditConfirmationsMigration},
+	{version: 10, apply: applySourceOriginProvenanceMigration},
+	{version: 11, apply: applyRecordFixtureLiveProvenanceMigration},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB, ftsAvailable bool) error {
@@ -220,6 +222,7 @@ func applyInitialMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) e
 	status TEXT NOT NULL,
 	labels TEXT NOT NULL,
 	content_hash TEXT NOT NULL,
+	provenance TEXT NOT NULL DEFAULT 'fixture' CHECK(provenance IN ('fixture', 'live')),
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
 	PRIMARY KEY(repo_id, id)
@@ -591,6 +594,78 @@ func applyAuditConfirmationsMigration(ctx context.Context, tx *sql.Tx, ftsAvaila
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applySourceOriginProvenanceMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
+	columns, err := tableColumns(ctx, tx, "sources")
+	if err != nil {
+		return err
+	}
+	if columns["provenance"] {
+		return nil
+	}
+	_, err = tx.ExecContext(ctx, `ALTER TABLE sources ADD COLUMN provenance TEXT NOT NULL DEFAULT 'fixture' CHECK(provenance IN ('fixture', 'live'))`)
+	return err
+}
+
+func applyRecordFixtureLiveProvenanceMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
+	// In SQLite we cannot ALTER a CHECK constraint.  Recreate the records
+	// table with the expanded provenance domain, repopulate, and recreate
+	// foreign keys on dependent tables.
+	//
+	// Because record_comments carries FOREIGN KEY REFERENCES records and
+	// SQLite does not support ALTER TABLE ADD CONSTRAINT, disable foreign
+	// key enforcement during the replay window.
+
+	if _, err := tx.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS records_new (
+	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+	record_id TEXT NOT NULL,
+	record_type TEXT NOT NULL,
+	path TEXT NOT NULL,
+	title TEXT NOT NULL,
+	body TEXT NOT NULL,
+	status TEXT NOT NULL,
+	labels TEXT NOT NULL,
+	content_hash TEXT NOT NULL,
+	provenance TEXT NOT NULL CHECK(provenance IN ('remote', 'projection', 'bridge', 'fixture', 'live')),
+	remote_type TEXT NOT NULL DEFAULT '',
+	remote_id TEXT NOT NULL DEFAULT '',
+	remote_revision TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, record_id)
+)`); err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, `INSERT INTO records_new SELECT * FROM records`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE records`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE records_new RENAME TO records`); err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+		return err
+	}
+
+	for _, stmt := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_records_type_status ON records(repo_id, record_type, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_records_remote ON records(repo_id, remote_type, remote_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_records_remote_unique ON records(repo_id, remote_type, remote_id) WHERE remote_type <> '' AND remote_id <> ''`,
+	} {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return err
 		}
 	}

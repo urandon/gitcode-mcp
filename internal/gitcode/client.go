@@ -19,8 +19,11 @@ type Client interface {
 	CreateIssueComment(context.Context, CreateIssueCommentRequest, WriteOptions) (WriteResult[Comment], error)
 	CreateWikiPage(context.Context, CreateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
 	UpdateWikiPage(context.Context, UpdateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
+	DeleteWikiPage(context.Context, DeleteWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
 	AddLabel(context.Context, LabelRequest, WriteOptions) (WriteResult[Issue], error)
 	RemoveLabel(context.Context, LabelRequest, WriteOptions) (WriteResult[Issue], error)
+	ListMilestones(context.Context, MilestoneListRequest) (Page[Milestone], error)
+	GetMilestone(context.Context, MilestoneRequest) (Milestone, error)
 }
 
 type Config struct {

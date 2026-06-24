@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
 )
@@ -571,23 +572,19 @@ func TestAddLabelDryRunNoMutation(t *testing.T) {
 	seedStore(t, ctx, store)
 	client := &fakeGitCodeClient{}
 	svc := NewWithClient(store, client)
-	result, err := svc.AddLabel(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeDryRun, Number: 1, Label: "bug"})
-	if err != nil {
-		t.Fatalf("AddLabel dry-run returned error: %v", err)
+	_, err = svc.AddLabel(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeDryRun, Number: 1, Label: "bug"})
+	if err == nil {
+		t.Fatal("AddLabel dry-run: expected error, got nil")
 	}
-	if result.Status != "dry_run_valid" || result.Command != "add-label" || client.addLabelCalls != 0 {
-		t.Fatalf("dry-run result=%#v calls=%d", result, client.addLabelCalls)
+	if !gitcode.IsUnsupportedCapability(err) {
+		t.Fatalf("AddLabel dry-run: expected ErrUnsupportedCapability, got %T: %v", err, err)
 	}
-	counts, err := store.RecordCounts(ctx, "fixture-a")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if counts.AuditRows != 0 {
-		t.Fatalf("audit rows=%d want 0", counts.AuditRows)
+	if client.addLabelCalls != 0 {
+		t.Fatalf("expected 0 addLabelCalls, got %d", client.addLabelCalls)
 	}
 }
 
-func TestAddLabelLiveSuccessAuditCacheAndReplay(t *testing.T) {
+func TestAddLabelLiveUnsupportedCapability(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)
 	if err != nil {
@@ -599,26 +596,15 @@ func TestAddLabelLiveSuccessAuditCacheAndReplay(t *testing.T) {
 	svc := NewWithClient(store, client)
 	t.Setenv("GITCODE_TOKEN", "test-token")
 	request := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 1, Label: "bug", IdempotencyKey: "label-key-1"}
-	result, err := svc.AddLabel(ctx, request)
-	if err != nil {
-		t.Fatalf("AddLabel live returned error: %v", err)
+	_, err = svc.AddLabel(ctx, request)
+	if err == nil {
+		t.Fatal("AddLabel live: expected error, got nil")
 	}
-	if result.Status != "succeeded" || result.RemoteID != "1" || result.ID != "ISSUE-1" || client.addLabelCalls != 1 {
-		t.Fatalf("live result=%#v calls=%d", result, client.addLabelCalls)
+	if !gitcode.IsUnsupportedCapability(err) {
+		t.Fatalf("AddLabel live: expected ErrUnsupportedCapability, got %T: %v", err, err)
 	}
-	record, err := store.GetRecord(ctx, "fixture-a", "ISSUE-1")
-	if err != nil {
-		t.Fatalf("refreshed record missing: %v", err)
-	}
-	if len(record.Labels) != 1 || record.Labels[0] != "bug" {
-		t.Fatalf("labels=%#v want bug", record.Labels)
-	}
-	replay, err := svc.AddLabel(ctx, request)
-	if err != nil {
-		t.Fatalf("AddLabel replay returned error: %v", err)
-	}
-	if replay.Status != "already_applied" || !replay.Replayed || client.addLabelCalls != 1 {
-		t.Fatalf("replay=%#v calls=%d", replay, client.addLabelCalls)
+	if client.addLabelCalls != 0 {
+		t.Fatalf("expected 0 addLabelCalls, got %d", client.addLabelCalls)
 	}
 }
 
@@ -992,7 +978,7 @@ func TestSyncGraphFixtureOfflineReadsIssueWikiCommentsAndChunks(t *testing.T) {
 		t.Fatalf("snippet = %#v, %v", snippet, err)
 	}
 	record, err := store.GetRecord(ctx, "fixture-a", "ISSUE-42")
-	if err != nil || record.Provenance != cache.ProvenanceRemote || len(record.Comments) != 1 {
+	if err != nil || len(record.Comments) != 1 {
 		t.Fatalf("record = %#v, %v", record, err)
 	}
 	counts, err := store.RecordCounts(ctx, "fixture-a")
@@ -1159,7 +1145,7 @@ func TestSyncStateMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.Provenance != cache.ProvenanceRemote || record.RemoteType != "remote" || record.RemoteID != "wiki/design" {
+	if record.RemoteType != "remote" || record.RemoteID != "wiki/design" {
 		t.Fatalf("record = %#v", record)
 	}
 	chunks, err := store.GetChunksScoped(ctx, "fixture-a", "DOC-123")
@@ -1269,20 +1255,52 @@ func TestSyncRetry(t *testing.T) {
 	}
 }
 
+func TestProductPathWrappedGitCodeErrorsClassify(t *testing.T) {
+	badCodes := map[diagnostics.Code]bool{diagnostics.CodeLiveTransportFailure: true, diagnostics.CodeConfigurationError: true, diagnostics.CodeLiveAPIFailure: true, diagnostics.CodeLiveAuthFailure: true, diagnostics.CodeUnsupportedMockPayload: true}
+	tests := []struct {
+		name string
+		err  error
+		ctx  diagnostics.CommandContext
+		want diagnostics.Code
+	}{
+		{name: "SCN-DIAG-PRODUCT-WRAP-01 direct not found", err: gitcode.ErrNotFound{Endpoint: "/issues/404"}, ctx: diagnostics.CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusNotFound, HTTPAttempted: true}, want: diagnostics.CodeAPIFailure},
+		{name: "SCN-DIAG-PRODUCT-WRAP-02 sync conflict", err: ErrSyncFailure{Mode: "conflict", Target: "issue:7", Endpoint: "/issues/7", Cause: gitcode.ErrConflict{Endpoint: "/issues/7", Status: http.StatusConflict}}, ctx: diagnostics.CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusConflict, HTTPAttempted: true}, want: diagnostics.CodeAPIFailure},
+		{name: "SCN-DIAG-PRODUCT-WRAP-03 sync remote collision", err: ErrSyncFailure{Mode: "remote_collision", Target: "issue:7", Endpoint: "/issues/7", Cause: gitcode.ErrRemoteCollision{Endpoint: "/issues/7", Alias: "issue:7", ExistingID: "ISSUE-7", NewID: "ISSUE-8"}}, ctx: diagnostics.CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusConflict, HTTPAttempted: true}, want: diagnostics.CodeAPIFailure},
+		{name: "SCN-DIAG-PRODUCT-WRAP-04 sync remote not found", err: ErrSyncFailure{Mode: "remote_not_found", Target: "issue:404", Endpoint: "/issues/404", Cause: gitcode.ErrRemoteNotFound{Endpoint: "/issues/404", Alias: "issue:404"}}, ctx: diagnostics.CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusNotFound, HTTPAttempted: true}, want: diagnostics.CodeAPIFailure},
+		{name: "SCN-DIAG-PRODUCT-WRAP-05 sync remote payload too large", err: ErrSyncFailure{Mode: "payload_too_large", Target: "issue:*", Endpoint: "/issues", PayloadSource: "remote_status", Cause: gitcode.ErrPayloadTooLarge{Endpoint: "/issues", Limit: 10, Size: 20, Source: "remote_status"}}, ctx: diagnostics.CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusRequestEntityTooLarge, HTTPAttempted: true, FailureSource: "remote_status"}, want: diagnostics.CodeAPIFailure},
+		{name: "SCN-DIAG-PRODUCT-WRAP-06 sync local payload too large", err: ErrSyncFailure{Mode: "payload_too_large", Target: "issue:*", Endpoint: "/issues", PayloadSource: "local_body_limit", Cause: gitcode.ErrPayloadTooLarge{Endpoint: "/issues", Limit: 10, Size: 20, Source: "local_body_limit"}}, ctx: diagnostics.CommandContext{ProviderMode: "live-http", HTTPAttempted: true, FailureSource: "local_body_limit", LocalPayloadTooLarge: true}, want: diagnostics.CodeSchemaDecode},
+		{name: "SCN-DIAG-PRODUCT-WRAP-07 sync partial response", err: ErrSyncFailure{Mode: "partial_response", Target: "issue:*", Endpoint: "/issues", Cause: gitcode.ErrPartialResponse{Endpoint: "/issues", Expected: 10, Got: 5}}, ctx: diagnostics.CommandContext{ProviderMode: "live-http", HTTPAttempted: true, FailureSource: "partial_response", SchemaDecodeFailure: true}, want: diagnostics.CodeSchemaDecode},
+		{name: "SCN-DIAG-PRODUCT-WRAP-08 sync rate limited", err: ErrSyncFailure{Mode: "rate_limited", Target: "issue:*", Endpoint: "/issues", RetryAfter: time.Second, Cause: gitcode.ErrRateLimited{Endpoint: "/issues", RetryAfter: time.Second, Attempts: 1}}, ctx: diagnostics.CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusTooManyRequests, HTTPAttempted: true}, want: diagnostics.CodeAPIFailure},
+		{name: "SCN-DIAG-PRODUCT-WRAP-09 write local payload too large", err: ErrWriteFailure{Code: "write_provider_error", RepoID: "fixture-a", PayloadSource: "local_body_limit", Cause: gitcode.ErrPayloadTooLarge{Endpoint: "/issues", Limit: 10, Size: 20, Source: "local_body_limit"}}, ctx: diagnostics.CommandContext{ProviderMode: "live-http", HTTPAttempted: true, FailureSource: "local_body_limit", LocalPayloadTooLarge: true}, want: diagnostics.CodeSchemaDecode},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := diagnostics.Classify(tt.err, tt.ctx)
+			if got.Code != tt.want {
+				t.Fatalf("got %s want %s", got.Code, tt.want)
+			}
+			if badCodes[got.Code] && (tt.want == diagnostics.CodeAPIFailure || tt.want == diagnostics.CodeSchemaDecode) {
+				t.Fatalf("decommissioned visible class returned: %s", got.Code)
+			}
+		})
+	}
+}
+
 func TestFailureModes(t *testing.T) {
 	ctx := context.Background()
 	baseWiki := gitcode.WikiPage{Slug: "wiki/design", Title: "Design", Body: "new body", Revision: "rev-2", UpdatedAt: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)}
 	tests := []struct {
-		name         string
-		client       *fakeGitCodeClient
-		request      SyncRequest
-		prelock      bool
-		corrupt      bool
-		wantMode     string
-		wantErrAs    func(error) bool
-		wantMessage  string
-		wantRemote   int
-		wantNotFound bool
+		name              string
+		client            *fakeGitCodeClient
+		request           SyncRequest
+		prelock           bool
+		corrupt           bool
+		wantMode          string
+		wantErrAs         func(error) bool
+		wantMessage       string
+		wantRemote        int
+		wantPayloadSource string
+		wantNotFound      bool
 	}{
 		{name: "failure-timeout-network-unavailable", client: &fakeGitCodeClient{errors: []error{gitcode.ErrNetworkUnavailable{Endpoint: "/wiki", Attempts: 1}}}, request: SyncRequest{RepoID: "fixture-a", StableID: "DOC-123", IdempotencyKey: "failure-timeout-network-unavailable"}, wantMode: "network_timeout", wantErrAs: func(err error) bool { var target gitcode.ErrNetworkUnavailable; return errors.As(err, &target) }, wantMessage: "sync: network timeout for record DOC-123: retry with --timeout to increase deadline or check connectivity", wantRemote: 1},
 		{name: "failure-rate-limited-retry-after", client: &fakeGitCodeClient{errors: []error{gitcode.ErrRateLimited{RetryAfter: time.Second, Endpoint: "/wiki", Attempts: 1}}}, request: SyncRequest{RepoID: "fixture-a", StableID: "DOC-123", IdempotencyKey: "failure-rate-limited-retry-after", MaxAttempts: 1}, wantMode: "rate_limited", wantErrAs: func(err error) bool {
@@ -1298,10 +1316,10 @@ func TestFailureModes(t *testing.T) {
 		{name: "failure-cache-corruption", client: &fakeGitCodeClient{wiki: baseWiki}, request: SyncRequest{RepoID: "fixture-a", StableID: "DOC-123", IdempotencyKey: "failure-cache-corruption"}, corrupt: true, wantMode: "cache_corruption", wantErrAs: func(err error) bool { var target cache.ErrCacheCorruption; return errors.As(err, &target) }, wantMessage: "cache: integrity check failed at memory. Recover from backup or re-ingest with gitcode-mcp sync --full.", wantRemote: 0},
 		{name: "failure-lock-contention", client: &fakeGitCodeClient{wiki: baseWiki}, request: SyncRequest{RepoID: "fixture-a", StableID: "DOC-123", IdempotencyKey: "failure-lock-contention"}, prelock: true, wantErrAs: func(err error) bool { var target cache.ErrLockContention; return errors.As(err, &target) }, wantRemote: 0},
 		{name: "failure-missing-remote-record", client: &fakeGitCodeClient{errors: []error{gitcode.ErrRemoteNotFound{Endpoint: "/wiki", Alias: "remote:wiki/design"}}}, request: SyncRequest{RepoID: "fixture-a", StableID: "DOC-123", IdempotencyKey: "failure-missing-remote-record"}, wantMode: "remote_not_found", wantErrAs: func(err error) bool { var target gitcode.ErrRemoteNotFound; return errors.As(err, &target) }, wantMessage: "sync: remote record for alias remote:wiki/design not found. It may have been deleted or moved. Run link-check to find affected references.", wantRemote: 1, wantNotFound: true},
-		{name: "failure-oversized-payload", client: &fakeGitCodeClient{errors: []error{gitcode.ErrPayloadTooLarge{Endpoint: "/wiki", Limit: 5, Size: 50}}}, request: SyncRequest{RepoID: "fixture-a", StableID: "DOC-123", IdempotencyKey: "failure-oversized-payload"}, wantMode: "payload_too_large", wantErrAs: func(err error) bool {
+		{name: "failure-oversized-payload", client: &fakeGitCodeClient{errors: []error{gitcode.ErrPayloadTooLarge{Endpoint: "/wiki", Limit: 5, Size: 50, Source: "local_body_limit"}}}, request: SyncRequest{RepoID: "fixture-a", StableID: "DOC-123", IdempotencyKey: "failure-oversized-payload"}, wantMode: "payload_too_large", wantErrAs: func(err error) bool {
 			var target gitcode.ErrPayloadTooLarge
-			return errors.As(err, &target) && target.Limit == 5
-		}, wantMessage: "sync: record DOC-123 exceeds maximum size 5 bytes. Use --max-size to increase limit or skip with --skip-large.", wantRemote: 1},
+			return errors.As(err, &target) && target.Limit == 5 && target.Source == "local_body_limit"
+		}, wantMessage: "sync: record DOC-123 exceeds maximum size 5 bytes. Use --max-size to increase limit or skip with --skip-large.", wantRemote: 1, wantPayloadSource: "local_body_limit"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1330,6 +1348,9 @@ func TestFailureModes(t *testing.T) {
 				var failure ErrSyncFailure
 				if !errors.As(err, &failure) || failure.Mode != tt.wantMode || failure.RecoveryAction == "" {
 					t.Fatalf("failure=%#v err=%v", failure, err)
+				}
+				if failure.PayloadSource != tt.wantPayloadSource {
+					t.Fatalf("payload source=%q want %q", failure.PayloadSource, tt.wantPayloadSource)
 				}
 			}
 			if tt.wantMessage != "" && err.Error() != tt.wantMessage {
@@ -2352,6 +2373,9 @@ func (f *fakeGitCodeClient) CreateWikiPage(context.Context, gitcode.CreateWikiPa
 func (f *fakeGitCodeClient) UpdateWikiPage(context.Context, gitcode.UpdateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
 	return gitcode.WriteResult[gitcode.WikiPage]{}, nil
 }
+func (f *fakeGitCodeClient) DeleteWikiPage(context.Context, gitcode.DeleteWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
+	return gitcode.WriteResult[gitcode.WikiPage]{}, nil
+}
 func (f *fakeGitCodeClient) AddLabel(context.Context, gitcode.LabelRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
 	f.addLabelCalls++
 	if err := f.nextError(); err != nil {
@@ -2361,6 +2385,14 @@ func (f *fakeGitCodeClient) AddLabel(context.Context, gitcode.LabelRequest, gitc
 }
 func (f *fakeGitCodeClient) RemoveLabel(context.Context, gitcode.LabelRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
 	return gitcode.WriteResult[gitcode.Issue]{}, nil
+}
+
+func (f *fakeGitCodeClient) ListMilestones(context.Context, gitcode.MilestoneListRequest) (gitcode.Page[gitcode.Milestone], error) {
+	return gitcode.Page[gitcode.Milestone]{}, nil
+}
+
+func (f *fakeGitCodeClient) GetMilestone(context.Context, gitcode.MilestoneRequest) (gitcode.Milestone, error) {
+	return gitcode.Milestone{}, nil
 }
 
 var _ gitcode.Client = (*fakeGitCodeClient)(nil)
@@ -2517,7 +2549,8 @@ func (f *brokenStore) GetSnapshot(context.Context, string, string) (cache.Snapsh
 func (f *brokenStore) ListSnapshotChunks(context.Context, string, string) ([]cache.SnapshotChunk, error) {
 	return nil, nil
 }
-func (f *brokenStore) IntegrityCheck(context.Context) error { return nil }
+func (f *brokenStore) IntegrityCheck(context.Context) error    { return nil }
+func (f *brokenStore) ResetLive(context.Context, string) error { return nil }
 func (f *brokenStore) AcquireLock(context.Context, string) (*cache.LockHandle, error) {
 	return nil, nil
 }
@@ -2528,3 +2561,58 @@ func (f *brokenStore) AcquireWriter(context.Context, cache.WriterRequest) (*cach
 func (f *brokenStore) ReleaseWriter(context.Context, *cache.WriterLease) error { return nil }
 func (f *brokenStore) Checkpoint(context.Context, string) error                { return nil }
 func (f *brokenStore) Close() error                                            { return nil }
+
+func TestScenario013009AddLabelDryRunReturnsUnsupportedDiagnostic(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{}
+	svc := NewWithClient(store, client)
+	_, err = svc.AddLabel(ctx, WriteCommandRequest{
+		RepoID: "fixture-a",
+		Mode:   WriteModeDryRun,
+		Number: 42,
+		Label:  "bug",
+	})
+	if err == nil {
+		t.Fatal("AddLabel dry-run: expected error, got nil")
+	}
+	if !gitcode.IsUnsupportedCapability(err) {
+		t.Fatalf("AddLabel dry-run: expected ErrUnsupportedCapability, got %T: %v", err, err)
+	}
+	if client.addLabelCalls != 0 {
+		t.Fatalf("expected 0 addLabelCalls, got %d", client.addLabelCalls)
+	}
+}
+
+func TestScenario013004AddLabelLiveNoClientCall(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	_, err = svc.AddLabel(ctx, WriteCommandRequest{
+		RepoID: "fixture-a",
+		Mode:   WriteModeLive,
+		Number: 42,
+		Label:  "bug",
+	})
+	if err == nil {
+		t.Fatal("AddLabel live: expected error, got nil")
+	}
+	if !gitcode.IsUnsupportedCapability(err) {
+		t.Fatalf("AddLabel live: expected ErrUnsupportedCapability, got %T: %v", err, err)
+	}
+	if client.addLabelCalls != 0 {
+		t.Fatalf("expected 0 addLabelCalls (old route not called), got %d", client.addLabelCalls)
+	}
+}

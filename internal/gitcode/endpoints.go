@@ -3,6 +3,7 @@ package gitcode
 import (
 	"fmt"
 	"net/url"
+	"strings"
 )
 
 func getRepoEndpoint(owner, repo string) string {
@@ -22,11 +23,23 @@ func listIssueCommentsEndpoint(owner, repo string, number int) string {
 }
 
 func getWikiPageEndpoint(owner, repo, slug string) string {
-	return endpointPath("/api/v5/repos/%s/%s/wiki/%s", owner, repo, slug)
+	return wikiContentsPathEndpoint(owner, repo, slug)
 }
 
 func listWikiPagesEndpoint(owner, repo string) string {
-	return endpointPath("/api/v5/repos/%s/%s/wiki", owner, repo)
+	return wikiContentsRootEndpoint(owner, repo)
+}
+
+func wikiContentsRootEndpoint(owner, repo string) string {
+	return endpointPath("/api/v5/repos/%s/%s/contents", owner, repo+".wiki")
+}
+
+func wikiContentsPathEndpoint(owner, repo, path string) string {
+	return endpointPath("/api/v5/repos/%s/%s/contents", owner, repo+".wiki") + "/" + wikiPathSegments(path)
+}
+
+func wikiRawPathEndpoint(owner, repo, path string) string {
+	return endpointPath("/api/v5/repos/%s/%s/raw", owner, repo+".wiki") + "/" + wikiPathSegments(path)
 }
 
 func searchIssuesEndpoint() string {
@@ -61,8 +74,20 @@ func updateWikiPageEndpoint(owner, repo, slug string) string {
 	return getWikiPageEndpoint(owner, repo, slug)
 }
 
+func deleteWikiPageEndpoint(owner, repo, path string) string {
+	return wikiContentsPathEndpoint(owner, repo, path)
+}
+
 func addLabelEndpoint(owner, repo string, number int) string {
 	return endpointPath("/api/v5/repos/%s/%s/issues/%d/labels", owner, repo, number)
+}
+
+func listMilestonesEndpoint(owner, repo string) string {
+	return endpointPath("/api/v5/repos/%s/%s/milestones", owner, repo)
+}
+
+func getMilestoneEndpoint(owner, repo string, id int) string {
+	return endpointPath("/api/v5/repos/%s/%s/milestones/%d", owner, repo, id)
 }
 
 func removeLabelEndpoint(owner, repo string, number int, label string) string {
@@ -80,4 +105,12 @@ func endpointPath(format string, args ...any) string {
 		}
 	}
 	return fmt.Sprintf(format, escaped...)
+}
+
+func wikiPathSegments(value string) string {
+	parts := strings.Split(normalizeWikiPath(value), "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
 }

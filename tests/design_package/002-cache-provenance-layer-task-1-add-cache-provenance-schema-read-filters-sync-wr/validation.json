@@ -1,0 +1,56 @@
+{
+  "covered_outcome_ids": [
+    "outcome-8",
+    "outcome-10"
+  ],
+  "covered_decommission_ids": [
+    "decommission-5"
+  ],
+  "product_surfaces": [
+    "cache schema/runtime provenance through internal/cache SQLite store (records and sources tables)",
+    "records.provenance CHECK constraint supporting fixture/live values (schema v11 migration)",
+    "fixture sync wiring through service.SyncToCache -> cache.UpsertSyncGraph -> records.provenance=fixture",
+    "live issue sync wiring through service.BulkSyncIssues -> cache.UpsertSyncGraph -> records.provenance=live",
+    "service ListSources exposing both fixture/live provenance in SourceSummary DTOs",
+    "service SearchSources exposing provenance in SearchSourceResult DTOs",
+    "service GetSource exposing provenance in SourceRecord DTO",
+    "service GetSyncStatus exposing provenance in SyncStatusResult DTO",
+    "service SyncStatus (batch) exposing non-empty provenance on every SyncStatusResult entry",
+    "cache.SourceFilter.SetProvenance executable setter with filtered read exercise",
+    "cache.SearchQuery.SetProvenance executable setter",
+    "cache.RecordFilter.Provenance field with executable provenance filter",
+    "cache.ListRecords filtering by provenance via RecordFilter.Provenance",
+    "cache.SearchRecords filtering by provenance via SearchQuery.Provenance",
+    "cache.ResetLive executable product path deleting live-origin records from both sources and records",
+    "post-reset verification: list/search/get/sync-status show only fixture records, live records cleared",
+    "fixture-to-live transition proof: fixture records never report provenance=live across reset",
+    "offline repository validation via go test ./... and git diff --check"
+  ],
+  "evidence_type": "offline executable Go runtime validation with local httptest external-provider mock and full Go test suite; 24 distinct validation steps exercise schema migration, provenance write to both records and sources, read exposure through service DTOs, RecordFilter provenance filtering, SearchRecords provenance filtering, reset semantics, and fixture-live transition proof",
+  "freshness": "current source tree at validation execution time; temporary cache/module; live network, real credentials, SSH agent, OS Keychain, and device checks disabled",
+  "mocks_used": [
+    {
+      "name": "httptest GitCode /api/v5 server",
+      "scope": "external GitCode HTTP API dependency only; service sync, cache writes, read DTOs, filtered reads, and reset/isolation checks exercise target runtime code"
+    },
+    {
+      "name": "temporary SQLite cache and Go validation module",
+      "scope": "local filesystem isolation for deterministic offline validation"
+    }
+  ],
+  "production_files_modified": [
+    "internal/cache/accessors.go",
+    "internal/cache/models.go",
+    "internal/cache/records.go",
+    "internal/cache/schema.go",
+    "internal/cache/schema_test.go",
+    "internal/cache/store.go",
+    "internal/cli/cli.go",
+    "internal/cli/cli_test.go",
+    "internal/gitcode/models.go",
+    "internal/service/helpers.go",
+    "internal/service/service.go",
+    "internal/service/service_test.go",
+    "internal/service/types.go"
+  ]
+}

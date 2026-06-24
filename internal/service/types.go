@@ -69,6 +69,15 @@ type CacheStatusRequest struct {
 	RepoID string `json:"repo_id"`
 }
 
+type ResetLiveCacheRequest struct {
+	RepoID string `json:"repo_id"`
+}
+
+type ResetLiveCacheResult struct {
+	RepoID string `json:"repo_id"`
+	Reset  string `json:"reset"`
+}
+
 type CacheStatusResult struct {
 	RepoID                  string         `json:"repo_id"`
 	WALCapable              bool           `json:"wal_capable"`
@@ -130,16 +139,17 @@ type SearchSourcesResult struct {
 }
 
 type SearchSourceResult struct {
-	RepoID    string  `json:"repo_id"`
-	ID        string  `json:"id"`
-	Path      string  `json:"path"`
-	Title     string  `json:"title"`
-	Kind      string  `json:"kind"`
-	Status    string  `json:"status"`
-	Snippet   string  `json:"snippet"`
-	LineStart *int    `json:"line_start"`
-	LineEnd   *int    `json:"line_end"`
-	Score     float64 `json:"score"`
+	RepoID     string  `json:"repo_id"`
+	ID         string  `json:"id"`
+	Path       string  `json:"path"`
+	Title      string  `json:"title"`
+	Kind       string  `json:"kind"`
+	Status     string  `json:"status"`
+	Provenance string  `json:"provenance"`
+	Snippet    string  `json:"snippet"`
+	LineStart  *int    `json:"line_start"`
+	LineEnd    *int    `json:"line_end"`
+	Score      float64 `json:"score"`
 }
 
 type GetSourceRequest struct {
@@ -158,6 +168,7 @@ type SourceRecord struct {
 	Title       string           `json:"title"`
 	Body        string           `json:"body"`
 	Status      string           `json:"status"`
+	Provenance  string           `json:"provenance"`
 	Labels      []string         `json:"labels"`
 	Links       []LinkResult     `json:"links"`
 	Backlinks   []BacklinkResult `json:"backlinks,omitempty"`
@@ -194,6 +205,7 @@ type SourceSummary struct {
 	Kind        string    `json:"kind"`
 	Title       string    `json:"title"`
 	Status      string    `json:"status"`
+	Provenance  string    `json:"provenance"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
@@ -285,6 +297,7 @@ type SyncStatusResult struct {
 	RemoteRevision string    `json:"remote_revision"`
 	Status         string    `json:"status"`
 	Freshness      string    `json:"freshness"`
+	Provenance     string    `json:"provenance"`
 	LocalUpdatedAt time.Time `json:"local_updated_at"`
 	LastFetchedAt  time.Time `json:"last_fetched_at"`
 }
@@ -338,16 +351,17 @@ type SyncCounts struct {
 }
 
 type SyncResult struct {
-	IdempotencyKey string     `json:"idempotency_key"`
-	Status         string     `json:"status"`
-	Counts         SyncCounts `json:"counts"`
-	Replayed       bool       `json:"replayed"`
-	SyncEventID    string     `json:"sync_event_id"`
-	Freshness      string     `json:"freshness"`
-	GeneratedAt    time.Time  `json:"generated_at"`
-	StartedAt      time.Time  `json:"started_at"`
-	CompletedAt    time.Time  `json:"completed_at"`
-	ZeroDelta      bool       `json:"zero_delta"`
+	IdempotencyKey string        `json:"idempotency_key"`
+	Status         string        `json:"status"`
+	Counts         SyncCounts    `json:"counts"`
+	Replayed       bool          `json:"replayed"`
+	SyncEventID    string        `json:"sync_event_id"`
+	Freshness      string        `json:"freshness"`
+	Record         SourceSummary `json:"record"`
+	GeneratedAt    time.Time     `json:"generated_at"`
+	StartedAt      time.Time     `json:"started_at"`
+	CompletedAt    time.Time     `json:"completed_at"`
+	ZeroDelta      bool          `json:"zero_delta"`
 }
 
 type SyncResourcesResult struct {
@@ -368,6 +382,8 @@ func (e ResourceError) Error() string {
 	return e.Message
 }
 
+func (e ResourceError) Unwrap() error { return e.Err }
+
 type PartialSyncError struct {
 	Errors       []ResourceError `json:"errors"`
 	SuccessCount int             `json:"success_count"`
@@ -376,6 +392,16 @@ type PartialSyncError struct {
 
 func (e PartialSyncError) Error() string {
 	return fmt.Sprintf("sync: %d succeeded, %d failed", e.SuccessCount, e.FailureCount)
+}
+
+func (e PartialSyncError) Unwrap() []error {
+	out := make([]error, 0, len(e.Errors))
+	for _, resourceErr := range e.Errors {
+		if resourceErr.Err != nil {
+			out = append(out, resourceErr.Err)
+		}
+	}
+	return out
 }
 
 type RecentChangesRequest struct {
@@ -625,6 +651,8 @@ type WriteCommandRequest struct {
 	ID             string    `json:"id,omitempty"`
 	Number         int       `json:"number,omitempty"`
 	Slug           string    `json:"slug,omitempty"`
+	Path           string    `json:"path,omitempty"`
+	Sha            string    `json:"sha,omitempty"`
 	Title          string    `json:"title,omitempty"`
 	Body           string    `json:"body,omitempty"`
 	State          string    `json:"state,omitempty"`

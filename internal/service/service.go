@@ -175,12 +175,24 @@ func (sanitizedFixtureClient) UpdateWikiPage(context.Context, gitcode.UpdateWiki
 	return gitcode.WriteResult[gitcode.WikiPage]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
+func (sanitizedFixtureClient) DeleteWikiPage(context.Context, gitcode.DeleteWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
+	return gitcode.WriteResult[gitcode.WikiPage]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
+}
+
 func (sanitizedFixtureClient) AddLabel(context.Context, gitcode.LabelRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
 	return gitcode.WriteResult[gitcode.Issue]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
 func (sanitizedFixtureClient) RemoveLabel(context.Context, gitcode.LabelRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
 	return gitcode.WriteResult[gitcode.Issue]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
+}
+
+func (sanitizedFixtureClient) ListMilestones(context.Context, gitcode.MilestoneListRequest) (gitcode.Page[gitcode.Milestone], error) {
+	return gitcode.Page[gitcode.Milestone]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
+}
+
+func (sanitizedFixtureClient) GetMilestone(context.Context, gitcode.MilestoneRequest) (gitcode.Milestone, error) {
+	return gitcode.Milestone{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
 func fixtureNow() time.Time {
@@ -203,6 +215,17 @@ func (s *Service) AddRepository(ctx context.Context, req AddRepositoryRequest) (
 		return RepositoryBinding{}, err
 	}
 	return repo, nil
+}
+
+func (s *Service) ResetLiveCache(ctx context.Context, req ResetLiveCacheRequest) (ResetLiveCacheResult, error) {
+	repoID, err := s.requireRepo(ctx, req.RepoID, "cache reset live")
+	if err != nil {
+		return ResetLiveCacheResult{}, err
+	}
+	if err := s.store.ResetLive(ctx, repoID); err != nil {
+		return ResetLiveCacheResult{}, normalizeError(err, "cache reset live", repoID)
+	}
+	return ResetLiveCacheResult{RepoID: repoID, Reset: "live"}, nil
 }
 
 func (s *Service) CacheStatus(ctx context.Context, req CacheStatusRequest) (CacheStatusResult, error) {
@@ -352,7 +375,7 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 		}
 		updated[result.ID] = source.UpdatedAt.UTC()
 		line := nullableLine(result.Line)
-		out = append(out, SearchSourceResult{RepoID: source.RepoID, ID: result.ID, Path: result.Path, Title: result.Title, Kind: source.Kind, Status: source.Status, Snippet: result.Snippet, LineStart: line, LineEnd: line, Score: result.Score})
+		out = append(out, SearchSourceResult{RepoID: source.RepoID, ID: result.ID, Path: result.Path, Title: result.Title, Kind: source.Kind, Status: source.Status, Provenance: string(source.Provenance), Snippet: result.Snippet, LineStart: line, LineEnd: line, Score: result.Score})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Score != out[j].Score {
@@ -544,7 +567,7 @@ func (s *Service) GetSyncStatus(ctx context.Context, req SyncStatusRequest) (Syn
 		return SyncStatusResult{}, normalizeError(err, "sync status", id)
 	}
 	freshness := freshnessFor(source, status)
-	return SyncStatusResult{RepoID: status.RepoID, SourceID: status.SourceID, RemoteType: status.RemoteType, RemoteID: status.RemoteID, RemoteRevision: status.RemoteRevision, Status: status.Status, Freshness: freshness, LocalUpdatedAt: source.UpdatedAt.UTC(), LastFetchedAt: status.LastFetchedAt.UTC()}, nil
+	return SyncStatusResult{RepoID: status.RepoID, SourceID: status.SourceID, RemoteType: status.RemoteType, RemoteID: status.RemoteID, RemoteRevision: status.RemoteRevision, Status: status.Status, Freshness: freshness, Provenance: string(source.Provenance), LocalUpdatedAt: source.UpdatedAt.UTC(), LastFetchedAt: status.LastFetchedAt.UTC()}, nil
 }
 
 func (s *Service) SyncStatus(ctx context.Context, req ListSourcesRequest) (SyncStatusSummaryResult, error) {
@@ -930,7 +953,7 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 	}
 	zeroDelta := counts.Fetched > 0 && counts.Skipped == counts.Fetched && counts.Updated == 0 && counts.Inserted == 0 && counts.Conflicts == 0
 	graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "succeeded", IdempotencyKey: key, Message: syncEventMessage(counts), CreatedAt: syncCompletedAt, StartedAt: syncStartedAt, CompletedAt: syncCompletedAt, ZeroDelta: zeroDelta})
-	if err := s.store.UpsertSyncGraph(ctx, syncGraphFromSourceGraph(req.RepoID, graph)); err != nil {
+	if err := s.store.UpsertSyncGraph(ctx, s.syncGraphFromSourceGraph(req.RepoID, graph)); err != nil {
 		if inProgressRecorded {
 			_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, err, s.now().UTC()))
 		}
@@ -942,7 +965,11 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 		}
 		return SyncResult{}, err
 	}
-	return SyncResult{IdempotencyKey: key, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), GeneratedAt: syncCompletedAt, StartedAt: syncStartedAt, CompletedAt: syncCompletedAt, ZeroDelta: zeroDelta}, nil
+	stored, err := s.store.GetSourceScoped(ctx, repoID, graph.Source.ID)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	return SyncResult{IdempotencyKey: key, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), Record: sourceSummary(stored), GeneratedAt: syncCompletedAt, StartedAt: syncStartedAt, CompletedAt: syncCompletedAt, ZeroDelta: zeroDelta}, nil
 }
 
 // SyncResources processes multiple SyncRequest values independently via SyncToCache.
@@ -1024,18 +1051,37 @@ func (s *Service) BulkSyncIssues(ctx context.Context, req BulkSyncRequest) (*Syn
 	if err != nil {
 		return bulkSyncFailureResult(s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "issue:*"}, "issues", "*"), "issue:*", "issues")
 	}
-	reqs := make([]SyncRequest, 0, len(page.Items))
+	result := &SyncResourcesResult{Results: make([]SyncResult, 0, len(page.Items)), Failures: make([]ResourceError, 0)}
 	for _, summary := range page.Items {
-		reqs = append(reqs, SyncRequest{
-			RepoID:         req.RepoID,
-			AliasType:      "issue",
-			AliasID:        strconv.Itoa(summary.Number),
-			IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "issue", strconv.Itoa(summary.Number)),
-			MaxAttempts:    req.MaxAttempts,
-			MaxSize:        req.MaxSize,
-		})
+		remoteID := strconv.Itoa(summary.Number)
+		issue := gitcode.Issue{ID: summary.ID, Number: summary.Number, Title: summary.Title, Body: summary.Body, Status: summary.Status, State: summary.State, Labels: summary.Labels, CreatedAt: summary.CreatedAt, UpdatedAt: summary.UpdatedAt}
+		syncReq := SyncRequest{RepoID: req.RepoID, AliasType: "issue", AliasID: remoteID, IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "issue", remoteID), MaxAttempts: req.MaxAttempts, MaxSize: req.MaxSize}
+		graph, counts, err := s.stageIssue(ctx, syncReq, "issue", remoteID, issue)
+		if err != nil {
+			result.Failures = append(result.Failures, ResourceError{SourceID: remoteID, RemoteType: "issue", Err: err, Message: err.Error()})
+			continue
+		}
+		completedAt := s.now().UTC()
+		eventID := syncEventID(syncReq.IdempotencyKey)
+		zeroDelta := counts.Fetched > 0 && counts.Skipped == counts.Fetched && counts.Updated == 0 && counts.Inserted == 0 && counts.Conflicts == 0
+		graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: "issue", RemoteID: remoteID, RemoteRevision: graph.SyncStatus.RemoteRevision, Status: "succeeded", IdempotencyKey: syncReq.IdempotencyKey, Message: syncEventMessage(counts), CreatedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: zeroDelta})
+		if err := s.store.UpsertSyncGraph(ctx, s.syncGraphFromSourceGraph(req.RepoID, graph)); err != nil {
+			result.Failures = append(result.Failures, ResourceError{SourceID: remoteID, RemoteType: "issue", Err: err, Message: err.Error()})
+			continue
+		}
+		stored, err := s.store.GetSourceScoped(ctx, req.RepoID, graph.Source.ID)
+		if err != nil {
+			result.Failures = append(result.Failures, ResourceError{SourceID: remoteID, RemoteType: "issue", Err: err, Message: err.Error()})
+			continue
+		}
+		result.Results = append(result.Results, SyncResult{IdempotencyKey: syncReq.IdempotencyKey, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), Record: sourceSummary(stored), GeneratedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: zeroDelta})
 	}
-	return s.SyncResources(ctx, reqs)
+	result.SuccessCount = len(result.Results)
+	result.FailureCount = len(result.Failures)
+	if result.FailureCount > 0 {
+		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
+	}
+	return result, nil
 }
 
 func (s *Service) BulkSyncWiki(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
@@ -1152,17 +1198,24 @@ func (s *Service) UpdateIssue(ctx context.Context, req WriteCommandRequest) (Wri
 }
 
 func (s *Service) CreatePage(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
-	if strings.TrimSpace(req.Title) == "" || strings.TrimSpace(req.Body) == "" {
-		return WriteCommandResult{}, ErrInvalidQuery{Field: "page", Message: "title and body are required"}
+	if strings.TrimSpace(req.Body) == "" || strings.TrimSpace(firstNonEmptyString(req.Path, req.Slug, req.Title)) == "" {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "page", Message: "path and body are required"}
 	}
 	return s.executeWrite(ctx, "create-page", req, RepositoryScopeWiki)
 }
 
 func (s *Service) UpdatePage(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
-	if strings.TrimSpace(req.Slug) == "" && strings.TrimSpace(req.ID) == "" {
-		return WriteCommandResult{}, ErrInvalidQuery{Field: "page", Message: "slug or id is required"}
+	if strings.TrimSpace(firstNonEmptyString(req.Path, req.Slug, req.ID)) == "" {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "page", Message: "path or id is required"}
 	}
 	return s.executeWrite(ctx, "update-page", req, RepositoryScopeWiki)
+}
+
+func (s *Service) DeletePage(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if strings.TrimSpace(firstNonEmptyString(req.Path, req.Slug, req.ID)) == "" {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "page", Message: "path or id is required"}
+	}
+	return s.executeWrite(ctx, "delete-page", req, RepositoryScopeWiki)
 }
 
 func (s *Service) AddComment(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
@@ -1391,12 +1444,12 @@ func (s *Service) fetchOnce(ctx context.Context, req SyncRequest, remoteType, re
 	}
 }
 
-func syncGraphFromSourceGraph(repoID string, graph cache.SourceGraph) cache.SyncGraph {
+func (s *Service) syncGraphFromSourceGraph(repoID string, graph cache.SourceGraph) cache.SyncGraph {
 	revision := ""
 	if graph.SyncStatus != nil {
 		revision = graph.SyncStatus.RemoteRevision
 	}
-	record := cache.Record{RepoID: repoID, ID: graph.Source.ID, Type: graph.Source.Kind, Path: graph.Source.Path, Title: graph.Source.Title, Body: graph.Source.Body, Status: graph.Source.Status, Labels: graph.Source.Labels, ContentHash: graph.Source.ContentHash, Provenance: cache.ProvenanceRemote, CreatedAt: graph.Source.CreatedAt, UpdatedAt: graph.Source.UpdatedAt, RemoteRevision: revision}
+	record := cache.Record{RepoID: repoID, ID: graph.Source.ID, Type: graph.Source.Kind, Path: graph.Source.Path, Title: graph.Source.Title, Body: graph.Source.Body, Status: graph.Source.Status, Labels: graph.Source.Labels, ContentHash: graph.Source.ContentHash, CreatedAt: graph.Source.CreatedAt, UpdatedAt: graph.Source.UpdatedAt, RemoteRevision: revision}
 	if graph.SyncStatus != nil {
 		record.RemoteType = graph.SyncStatus.RemoteType
 		record.RemoteID = graph.SyncStatus.RemoteID
@@ -1405,7 +1458,7 @@ func syncGraphFromSourceGraph(repoID string, graph cache.SourceGraph) cache.Sync
 	if graph.SyncStatus != nil {
 		revisions = append(revisions, cache.RemoteRevision{RepoID: repoID, RecordID: graph.Source.ID, RemoteType: graph.SyncStatus.RemoteType, RemoteID: graph.SyncStatus.RemoteID, RemoteRevision: graph.SyncStatus.RemoteRevision, Status: graph.SyncStatus.Status, LastFetchedAt: graph.SyncStatus.LastFetchedAt})
 	}
-	return cache.SyncGraph{RepoID: repoID, Record: record, Comments: graph.Comments, Identities: graph.Identities, Links: graph.Links, Chunks: graph.Chunks, RemoteRevisions: revisions, SyncEvents: graph.SyncEvents}
+	return cache.SyncGraph{RepoID: repoID, Provenance: s.syncOriginProvenance(), Record: record, Comments: graph.Comments, Identities: graph.Identities, Links: graph.Links, Chunks: graph.Chunks, RemoteRevisions: revisions, SyncEvents: graph.SyncEvents}
 }
 
 func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, remoteID string, issue gitcode.Issue) (cache.SourceGraph, SyncCounts, error) {
@@ -1620,6 +1673,13 @@ func (s *Service) syncProviderMode() gitcode.ProviderMode {
 	return s.ProviderMode()
 }
 
+func (s *Service) syncOriginProvenance() cache.Provenance {
+	if s.syncProviderMode() == gitcode.ProviderModeLive {
+		return cache.ProvenanceLive
+	}
+	return cache.ProvenanceFixture
+}
+
 func (s *Service) guardRemoteAlias(ctx context.Context, repoID, remoteType, remoteID, stableID string) error {
 	identity, err := s.store.ResolveAliasScoped(ctx, repoID, cache.RemoteAlias{Type: remoteType, ID: remoteID})
 	if err == nil && identity.SourceID != "" && identity.SourceID != stableID {
@@ -1640,8 +1700,14 @@ func (s *Service) resolveOrFallback(ctx context.Context, repoID, remoteType, rem
 }
 
 func liveFallbackSourceID(mode gitcode.ProviderMode, remoteType, remoteID, providerID string) string {
-	if mode == gitcode.ProviderModeLive && strings.TrimSpace(providerID) != "" {
-		return fallbackSourceID(remoteType, providerID)
+	providerID = strings.TrimSpace(providerID)
+	if mode == gitcode.ProviderModeLive && providerID != "" {
+		if remoteType != "issue" && remoteType != "issues" {
+			return fallbackSourceID(remoteType, providerID)
+		}
+		if _, err := strconv.ParseInt(providerID, 10, 64); err != nil {
+			return fallbackSourceID(remoteType, providerID)
+		}
 	}
 	return fallbackSourceID(remoteType, remoteID)
 }
@@ -1788,7 +1854,7 @@ func (s *Service) normalizeSyncFailure(err error, req SyncRequest, remoteType, r
 	}
 	var tooLarge gitcode.ErrPayloadTooLarge
 	if errors.As(err, &tooLarge) {
-		return ErrSyncFailure{Mode: "payload_too_large", Target: target, Endpoint: tooLarge.Endpoint, LimitBytes: tooLarge.Limit, SizeBytes: tooLarge.Size, RecoveryAction: "increase --max-size or skip with --skip-large", Cause: err}
+		return ErrSyncFailure{Mode: "payload_too_large", Target: target, Endpoint: tooLarge.Endpoint, LimitBytes: tooLarge.Limit, SizeBytes: tooLarge.Size, PayloadSource: tooLarge.Source, RecoveryAction: "increase --max-size or skip with --skip-large", Cause: err}
 	}
 	var conflict gitcode.ErrConflict
 	if errors.As(err, &conflict) {
@@ -1872,6 +1938,12 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	}
 	key, fingerprint := writeIdempotency(command, req)
 	base := WriteCommandResult{Command: command, RepoID: route.RepoID, Status: "dry_run_valid", ID: writeTargetID(req), IdempotencyKey: key, SourceFingerprint: fingerprint, Evidence: "validated write command", GeneratedAt: s.now().UTC()}
+	if command == "add-label" {
+		return WriteCommandResult{}, gitcode.ErrUnsupportedCapability{
+			CapabilityKey: "add_label",
+			Message:       "add-label is not supported: use update-issue --labels instead",
+		}
+	}
 	if req.Mode == WriteModeDryRun {
 		return base, nil
 	}
@@ -1918,7 +1990,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	if err != nil {
 		code := s.writeAdapterErrorCode(req.Mode, err)
 		_ = s.store.RecordAuditEvent(ctx, audit.Failure(route.RepoID, key, command, fingerprint, code, s.now().UTC()))
-		return WriteCommandResult{}, ErrWriteFailure{Code: code, RepoID: route.RepoID, IdempotencyKey: key, Cause: writeFailureCause(code, err)}
+		return WriteCommandResult{}, ErrWriteFailure{Code: code, RepoID: route.RepoID, IdempotencyKey: key, PayloadSource: failureSource(err), Cause: writeFailureCause(code, err)}
 	}
 	if !confirmed.confirmed || confirmed.remoteID == "" {
 		_ = s.store.RecordAuditEvent(ctx, audit.Failure(route.RepoID, key, command, fingerprint, "write_unconfirmed_remote", s.now().UTC()))
@@ -2004,14 +2076,14 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 	now := s.now().UTC()
 	switch command {
 	case "create-issue":
-		result, err := s.client.CreateIssue(ctx, gitcode.CreateIssueRequest{Owner: route.Owner, Repo: route.Name, Title: strings.TrimSpace(req.Title), Body: req.Body, Labels: req.Labels}, opts)
+		result, err := s.client.CreateIssue(ctx, gitcode.CreateIssueRequest{Owner: route.Owner, Repo: route.Name, Title: strings.TrimSpace(req.Title), Body: req.Body, Labels: gitcode.EncodeIssueLabels(req.Labels)}, opts)
 		if err != nil {
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
 		confirmation, graph := s.issueWriteGraph(route.RepoID, result.Record, result, now)
 		return confirmation, graph, nil
 	case "update-issue":
-		result, err := s.client.UpdateIssue(ctx, gitcode.UpdateIssueRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, Title: req.Title, Body: req.Body, State: req.State, Labels: req.Labels}, opts)
+		result, err := s.client.UpdateIssue(ctx, gitcode.UpdateIssueRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, Title: req.Title, Body: req.Body, State: req.State, Labels: gitcode.EncodeIssueLabels(req.Labels)}, opts)
 		if err != nil {
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
@@ -2024,21 +2096,26 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 		}
 		return s.commentWriteGraph(ctx, route.RepoID, req.Number, result.Record, result, now)
 	case "add-label":
-		result, err := s.client.AddLabel(ctx, gitcode.LabelRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, Label: strings.TrimSpace(req.Label)}, opts)
-		if err != nil {
-			return writeConfirmation{}, cache.RecordGraph{}, err
+		return writeConfirmation{}, cache.RecordGraph{}, gitcode.ErrUnsupportedCapability{
+			CapabilityKey: "add_label",
+			Message:       "add-label is not supported: use update-issue --labels instead",
 		}
-		confirmation, graph := s.issueWriteGraph(route.RepoID, result.Record, result, now)
-		return confirmation, graph, nil
 	case "create-page":
-		result, err := s.client.CreateWikiPage(ctx, gitcode.CreateWikiPageRequest{Owner: route.Owner, Repo: route.Name, Slug: req.Slug, Title: strings.TrimSpace(req.Title), Body: req.Body}, opts)
+		result, err := s.client.CreateWikiPage(ctx, gitcode.CreateWikiPageRequest{Owner: route.Owner, Repo: route.Name, Path: firstNonEmptyString(req.Path, req.Slug, req.Title), Slug: req.Slug, Title: strings.TrimSpace(req.Title), Body: req.Body}, opts)
 		if err != nil {
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
 		confirmation, graph := s.wikiWriteGraph(route.RepoID, result.Record, result, now)
 		return confirmation, graph, nil
 	case "update-page":
-		result, err := s.client.UpdateWikiPage(ctx, gitcode.UpdateWikiPageRequest{Owner: route.Owner, Repo: route.Name, Slug: firstNonEmptyString(req.Slug, req.ID), Title: req.Title, Body: req.Body}, opts)
+		result, err := s.client.UpdateWikiPage(ctx, gitcode.UpdateWikiPageRequest{Owner: route.Owner, Repo: route.Name, Path: firstNonEmptyString(req.Path, req.Slug, req.ID), Slug: firstNonEmptyString(req.Slug, req.ID), Title: req.Title, Body: req.Body, Sha: req.Sha}, opts)
+		if err != nil {
+			return writeConfirmation{}, cache.RecordGraph{}, err
+		}
+		confirmation, graph := s.wikiWriteGraph(route.RepoID, result.Record, result, now)
+		return confirmation, graph, nil
+	case "delete-page":
+		result, err := s.client.DeleteWikiPage(ctx, gitcode.DeleteWikiPageRequest{Owner: route.Owner, Repo: route.Name, Path: firstNonEmptyString(req.Path, req.Slug, req.ID), Slug: firstNonEmptyString(req.Slug, req.ID), Sha: req.Sha}, opts)
 		if err != nil {
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
@@ -2073,8 +2150,8 @@ func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID s
 		result := gitcode.WriteResult[gitcode.Comment]{Record: comment, Confirmed: true, RemoteID: prior.RemoteID, ParentIssueNumber: number, ParentIssueID: prior.RecordID, RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
 		_, graph, err := s.commentWriteGraph(ctx, repoID, number, comment, result, now)
 		return graph, err
-	case "create-page", "update-page":
-		page := gitcode.WikiPage{ID: prior.RemoteID, Slug: firstNonEmptyString(req.Slug, req.ID, prior.RemoteID), Title: req.Title, Body: req.Body, Revision: firstNonEmptyString(prior.Message, prior.PayloadHash), CreatedAt: now, UpdatedAt: now}
+	case "create-page", "update-page", "delete-page":
+		page := gitcode.WikiPage{ID: prior.RemoteID, Slug: firstNonEmptyString(req.Path, req.Slug, req.ID, prior.RemoteID), Title: req.Title, Body: req.Body, Revision: firstNonEmptyString(prior.Message, prior.PayloadHash), CreatedAt: now, UpdatedAt: now}
 		if page.Title == "" {
 			page.Title = page.Slug
 		}
@@ -2143,12 +2220,14 @@ func writeIdempotency(command string, req WriteCommandRequest) (string, string) 
 		ID      string
 		Number  int
 		Slug    string
+		Path    string
+		Sha     string
 		Title   string
 		Body    string
 		State   string
 		Label   string
 		Labels  []string
-	}{command, req.RepoID, req.ID, req.Number, req.Slug, strings.TrimSpace(req.Title), req.Body, req.State, strings.TrimSpace(req.Label), req.Labels})
+	}{command, req.RepoID, req.ID, req.Number, req.Slug, req.Path, req.Sha, strings.TrimSpace(req.Title), req.Body, req.State, strings.TrimSpace(req.Label), req.Labels})
 	sum := sha256.Sum256(payload)
 	fingerprint := hex.EncodeToString(sum[:])
 	if strings.TrimSpace(req.IdempotencyKey) != "" {
@@ -2164,7 +2243,7 @@ func writeTargetID(req WriteCommandRequest) string {
 	if req.Number != 0 {
 		return strconv.Itoa(req.Number)
 	}
-	return req.Slug
+	return firstNonEmptyString(req.Path, req.Slug)
 }
 
 func replayWriteResult(command string, entry cache.AuditTrailEntry, fingerprint string, now time.Time) WriteCommandResult {
@@ -2203,6 +2282,18 @@ func writeFailureCause(code string, err error) error {
 		return nil
 	}
 	return err
+}
+
+func failureSource(err error) string {
+	var tooLarge gitcode.ErrPayloadTooLarge
+	if errors.As(err, &tooLarge) {
+		return tooLarge.Source
+	}
+	var partial gitcode.ErrPartialResponse
+	if errors.As(err, &partial) {
+		return "partial_response"
+	}
+	return ""
 }
 
 func firstNonEmptyString(values ...string) string {

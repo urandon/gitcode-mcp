@@ -15,6 +15,7 @@ import (
 
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/diagnostics"
 )
 
 type testSource struct {
@@ -241,12 +242,12 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 		if counts := server.Counts(); counts.TotalRequests != 0 {
 			t.Fatalf("mock counts=%#v, want zero", counts)
 		}
-		if !strings.Contains(stderr.String(), "missing_credential") {
-			t.Fatalf("stderr missing typed diagnostic: %q", stderr.String())
+		if !strings.Contains(stderr.String(), "failure_class: config_credential") {
+			t.Fatalf("stderr missing canonical failure class: %q", stderr.String())
 		}
 	})
 
-	t.Run("SCN-MOCKAPI-LIVE-SYNC-INVALID-TOKEN-401", func(t *testing.T) {
+	t.Run("SCN-MOCKAPI-LIVE-SYNC-INVALID-TOKEN-401 SCN-CLI-ERROR-OUTPUT-401", func(t *testing.T) {
 		server := NewMockGitCodeAPI(t, MockGitCodeAPIAuthMode(mockGitCodeAPIAuthReject401))
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
@@ -264,13 +265,59 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 			t.Fatalf("mock counts=%#v, want auth failure after request", counts)
 		}
 		out := stdout.String() + stderr.String()
-		if !strings.Contains(out, "live_auth_failure") || strings.Contains(out, "ISSUE-42") || strings.Contains(out, "WIKI-HOME") {
+		if !strings.Contains(out, "failure_class: api_validation") || strings.Contains(out, "ISSUE-42") || strings.Contains(out, "WIKI-HOME") {
 			t.Fatalf("invalid-token output = %q", out)
 		}
+		assertNoDecommissionedFailureClass(t, out)
 	})
+
+	for _, tt := range []struct {
+		name string
+		mode mockGitCodeAPIFailureMode
+		want string
+	}{
+		{name: "SCN-CLI-ERROR-OUTPUT-400", mode: mockGitCodeAPIFailure400, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-CLI-ERROR-OUTPUT-404", mode: mockGitCodeAPIFailure404, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-CLI-ERROR-OUTPUT-409", mode: mockGitCodeAPIFailure409, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-CLI-ERROR-OUTPUT-413", mode: mockGitCodeAPIFailure413, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-CLI-ERROR-OUTPUT-429", mode: mockGitCodeAPIFailure429, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-CLI-ERROR-OUTPUT-MALFORMED-JSON", mode: mockGitCodeAPIFailureMalformedJSON, want: string(diagnostics.CodeSchemaDecode)},
+		{name: "SCN-CLI-ERROR-OUTPUT-SCHEMA-MISMATCH", mode: mockGitCodeAPIFailureSchemaMismatch, want: string(diagnostics.CodeSchemaDecode)},
+		{name: "SCN-CLI-ERROR-OUTPUT-PARTIAL-RESPONSE", mode: mockGitCodeAPIFailurePartial, want: string(diagnostics.CodeSchemaDecode)},
+		{name: "SCN-CLI-ERROR-OUTPUT-TIMEOUT", mode: mockGitCodeAPIFailureTimeout, want: string(diagnostics.CodeLiveTransportFailure)},
+		{name: "SCN-CLI-ERROR-OUTPUT-500", mode: mockGitCodeAPIFailure500, want: string(diagnostics.CodeLiveTransportFailure)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := NewMockGitCodeAPI(t, MockGitCodeAPIFailureMode(tt.mode))
+			defer server.Close()
+			cachePath := filepath.Join(t.TempDir(), "cache.db")
+			src := newTestSource(t)
+			src.env[config.EnvToken] = "test-token"
+			if tt.mode == mockGitCodeAPIFailureTimeout {
+				configPath := filepath.Join(t.TempDir(), "config.json")
+				src.env[config.EnvConfigPath] = configPath
+				src.files[configPath] = []byte(`{"default_timeout":"1ms","max_retries":0}`)
+			}
+			addRepoForStartupTest(t, cachePath, server.BaseURL())
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"sync", "--live", "--cache-path", cachePath, "--repo", "fixture-a", "--issues"}, strings.NewReader(""), &stdout, &stderr, src)
+			if code == 0 {
+				t.Fatalf("code=0 stdout=%q", stdout.String())
+			}
+			out := stdout.String() + stderr.String()
+			if !strings.Contains(out, "failure_class: "+tt.want) {
+				t.Fatalf("output missing failure class %s: %q", tt.want, out)
+			}
+			if tt.want == string(diagnostics.CodeAPIFailure) || tt.want == string(diagnostics.CodeSchemaDecode) {
+				assertNoDecommissionedFailureClass(t, out)
+			}
+		})
+	}
 
 	t.Run("SCN-MOCKAPI-OFFLINE-SYNC-NO-HTTP", func(t *testing.T) {
 		server := NewMockGitCodeAPI(t)
+
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)
@@ -529,7 +576,7 @@ func assertStartupCacheHasLiveMockRecords(t *testing.T, cachePath string) {
 	if _, err := store.GetSourceScoped(context.Background(), "fixture-a", "ISSUE-MOCK-ISSUE-100"); err != nil {
 		t.Fatalf("mock issue missing: %v", err)
 	}
-	if _, err := store.GetSourceScoped(context.Background(), "fixture-a", "WIKI-MOCK-WIKI-LIVE"); err != nil {
+	if _, err := store.GetSourceScoped(context.Background(), "fixture-a", "WIKI-LIVEGUIDE.MD"); err != nil {
 		t.Fatalf("mock wiki missing: %v", err)
 	}
 	if _, err := store.GetSourceScoped(context.Background(), "fixture-a", "ISSUE-42"); err == nil {
@@ -602,6 +649,15 @@ func TestEntrypointMCPServeRouting(t *testing.T) {
 	}
 	if gotTransport != "http-sse" || gotBind != "127.0.0.1:9234" {
 		t.Fatalf("route transport=%q bind=%q", gotTransport, gotBind)
+	}
+}
+
+func assertNoDecommissionedFailureClass(t *testing.T, out string) {
+	t.Helper()
+	for _, bad := range []string{"failure_class: live_transport_failure", "failure_class: configuration_error", "failure_class: live_api_failure", "failure_class: live_auth_failure", "failure_class: unsupported_mock_payload"} {
+		if strings.Contains(out, bad) {
+			t.Fatalf("decommissioned failure class %q in output %q", bad, out)
+		}
 	}
 }
 

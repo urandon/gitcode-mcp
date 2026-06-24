@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/diagnostics"
+	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/service"
 )
 
@@ -67,6 +69,45 @@ func TestMCPRepoScopedDuplicateAlias(t *testing.T) {
 	}
 	r.Close()
 	wg.Wait()
+}
+
+func TestMCPErrorOutputCanonicalFailureClass(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "SCN-MCP-ERROR-OUTPUT-401", err: service.ErrSyncFailure{Mode: "live_auth_failure", Target: "issue:*", Cause: gitcode.ErrAuthExpired{Endpoint: "/api/v5/repos/owner/repo/issues", Status: http.StatusUnauthorized}}, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-MCP-ERROR-OUTPUT-400", err: gitcode.ErrAPIValidation{Endpoint: "/api/v5/repos/owner/repo/issues", Status: http.StatusBadRequest}, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-MCP-ERROR-OUTPUT-404", err: service.ErrSyncFailure{Mode: "remote_not_found", Target: "issue:404", Cause: gitcode.ErrRemoteNotFound{Endpoint: "/api/v5/repos/owner/repo/issues/404", Alias: "issue:404"}}, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-MCP-ERROR-OUTPUT-409", err: service.ErrSyncFailure{Mode: "conflict", Target: "issue:7", Cause: gitcode.ErrConflict{Endpoint: "/api/v5/repos/owner/repo/issues/7", Status: http.StatusConflict}}, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-MCP-ERROR-OUTPUT-413", err: service.ErrSyncFailure{Mode: "payload_too_large", Target: "issue:*", PayloadSource: "remote_status", Cause: gitcode.ErrPayloadTooLarge{Endpoint: "/api/v5/repos/owner/repo/issues", Limit: 5, Size: 6, Source: "remote_status"}}, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-MCP-ERROR-OUTPUT-429", err: service.ErrSyncFailure{Mode: "rate_limited", Target: "issue:*", Cause: gitcode.ErrRateLimited{Endpoint: "/api/v5/repos/owner/repo/issues", Attempts: 1}}, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-MCP-ERROR-OUTPUT-MALFORMED-JSON", err: gitcode.ErrPartialResponse{Endpoint: "/api/v5/repos/owner/repo/issues", Message: "malformed JSON"}, want: string(diagnostics.CodeSchemaDecode)},
+		{name: "SCN-MCP-ERROR-OUTPUT-SCHEMA-MISMATCH", err: &gitcode.ErrSchemaDecode{Field: "number", Message: "number is required"}, want: string(diagnostics.CodeSchemaDecode)},
+		{name: "SCN-MCP-ERROR-OUTPUT-PARTIAL-RESPONSE", err: service.ErrSyncFailure{Mode: "partial_response", Target: "issue:*", Cause: gitcode.ErrPartialResponse{Endpoint: "/api/v5/repos/owner/repo/issues", Expected: 10, Got: 5}}, want: string(diagnostics.CodeSchemaDecode)},
+		{name: "SCN-MCP-ERROR-OUTPUT-LOCAL-BODY-LIMIT", err: service.ErrWriteFailure{Code: "write_provider_error", PayloadSource: "local_body_limit", Cause: gitcode.ErrPayloadTooLarge{Endpoint: "/api/v5/repos/owner/repo/issues", Limit: 5, Size: 6, Source: "local_body_limit"}}, want: string(diagnostics.CodeSchemaDecode)},
+		{name: "SCN-MCP-ERROR-OUTPUT-TIMEOUT", err: service.ErrSyncFailure{Mode: "network_timeout", Target: "issue:*", Cause: gitcode.ErrNetworkUnavailable{Endpoint: "/api/v5/repos/owner/repo/issues", Attempts: 1}}, want: string(diagnostics.CodeLiveTransportFailure)},
+		{name: "SCN-MCP-ERROR-OUTPUT-500", err: gitcode.ErrNetworkUnavailable{Endpoint: "/api/v5/repos/owner/repo/issues", Status: http.StatusInternalServerError, Attempts: 1}, want: string(diagnostics.CodeLiveTransportFailure)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			id := json.RawMessage(`"SCN-MCP-ERROR-OUTPUT-01"`)
+			srv := &Server{writer: &out, stderr: io.Discard}
+			srv.writeDomainError(&id, tt.err)
+			var resp response
+			if err := json.Unmarshal(bytesTrimSpace(out.Bytes()), &resp); err != nil {
+				t.Fatalf("decode response: %v body=%q", err, out.String())
+			}
+			if resp.Error == nil || resp.Error.Data == nil {
+				t.Fatalf("response missing error data: %#v", resp)
+			}
+			if resp.Error.Data.FailureClass != tt.want {
+				t.Fatalf("failure_class=%q want %s body=%q", resp.Error.Data.FailureClass, tt.want, out.String())
+			}
+		})
+	}
 }
 
 func TestIntegration(t *testing.T) {
@@ -184,6 +225,131 @@ func TestIntegration(t *testing.T) {
 	if resolved.ID == "" || resolved.Path == "" {
 		t.Fatalf("resolve_id missing fields: %+v", resolved)
 	}
+
+	r.Close()
+	wg.Wait()
+}
+
+func TestMCPBlockedWriteBoundary(t *testing.T) {
+	store := populatedStore(t)
+	svc := service.New(store)
+	defer store.Close()
+
+	srv, r, w, stderr := newPipeServer(svc)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = srv.Serve()
+	}()
+
+	send := func(req map[string]any) {
+		t.Helper()
+		b, _ := json.Marshal(req)
+		_, _ = r.Write(append(b, '\n'))
+	}
+
+	assertError := func(name string, raw json.RawMessage) {
+		t.Helper()
+		var resp response
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			t.Fatalf("%s: decode response: %v", name, err)
+		}
+		if resp.Error == nil {
+			t.Fatalf("%s: expected error, got success", name)
+		}
+		if resp.Error.Code != -32601 {
+			t.Fatalf("%s: error.code = %d, want -32601", name, resp.Error.Code)
+		}
+		if resp.Error.Data == nil {
+			t.Fatalf("%s: error.data is nil", name)
+		}
+		if resp.Error.Data.Code != "unsupported_capability" {
+			t.Fatalf("%s: errorData.Code = %q, want unsupported_capability", name, resp.Error.Data.Code)
+		}
+	}
+
+	// tools/list remains read/cache-only (no write tools advertised)
+	t.Run("tools/list unchanged", func(t *testing.T) {
+		send(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+		line, err := readLine(w)
+		if err != nil {
+			t.Fatalf("read response: %v (stderr: %s)", err, stderr.String())
+		}
+		var resp response
+		if err := json.Unmarshal(line, &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp.Error != nil {
+			t.Fatalf("tools/list error: %+v", resp.Error)
+		}
+		var tls toolsListResult
+		if err := json.Unmarshal(resp.Result, &tls); err != nil {
+			t.Fatal(err)
+		}
+		if len(tls.Tools) != 15 {
+			t.Fatalf("tools count = %d, want 15", len(tls.Tools))
+		}
+		blocked := map[string]bool{
+			"create-issue": false, "update-issue": false, "add-label": false,
+			"create-page": false, "update-page": false,
+		}
+		for _, tool := range tls.Tools {
+			if _, ok := blocked[tool.Name]; ok {
+				t.Fatalf("blocked write tool %q appears in tools/list", tool.Name)
+			}
+		}
+	})
+
+	// scenario blocked-write-canonical-5
+	t.Run("blocked write canonical 5", func(t *testing.T) {
+		canonical := []string{"create-issue", "update-issue", "add-label", "create-page", "update-page"}
+		for i, name := range canonical {
+			send(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      100 + i,
+				"method":  "tools/call",
+				"params":  map[string]any{"name": name, "arguments": map[string]any{"repo_id": "fixture-a"}},
+			})
+			line, err := readLine(w)
+			if err != nil {
+				t.Fatalf("%s: read response: %v", name, err)
+			}
+			assertError(name, line)
+		}
+	})
+
+	// read tool parity — existing read tools still work
+	t.Run("read tool parity", func(t *testing.T) {
+		readCalls := []struct {
+			name string
+			args map[string]any
+		}{
+			{"search_sources", map[string]any{"repo_id": "fixture-a", "query": "parity"}},
+			{"get_source", map[string]any{"repo_id": "fixture-a", "id": "DOC-123"}},
+			{"list_sources", map[string]any{"repo_id": "fixture-a"}},
+		}
+		for _, rc := range readCalls {
+			send(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      rc.name,
+				"method":  "tools/call",
+				"params":  map[string]any{"name": rc.name, "arguments": rc.args},
+			})
+			line, err := readLine(w)
+			if err != nil {
+				t.Fatalf("%s: read response: %v (stderr: %s)", rc.name, err, stderr.String())
+			}
+			var resp response
+			if err := json.Unmarshal(line, &resp); err != nil {
+				t.Fatalf("%s: decode response: %v", rc.name, err)
+			}
+			if resp.Error != nil {
+				t.Fatalf("%s: unexpected error: %+v", rc.name, resp.Error)
+			}
+		}
+	})
 
 	r.Close()
 	wg.Wait()

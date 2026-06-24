@@ -107,13 +107,18 @@ func (s *SQLiteStore) UpsertSyncGraph(ctx context.Context, graph SyncGraph) (err
 		return err
 	}
 	graph.Record.RepoID = repoID
-	if graph.Record.Provenance == "" {
-		graph.Record.Provenance = ProvenanceRemote
+	if graph.Provenance == "" {
+		graph.Provenance = ProvenanceFixture
 	}
-	if err = upsertSourceTx(ctx, tx, sourceFromRecord(graph.Record)); err != nil {
+	if graph.Record.Provenance == "" {
+		graph.Record.Provenance = graph.Provenance
+	}
+	originRecord := graph.Record
+	originRecord.Provenance = graph.Provenance
+	if err = upsertSourceTx(ctx, tx, sourceFromRecord(originRecord)); err != nil {
 		return err
 	}
-	if err = upsertSearchProjectionTx(ctx, tx, sourceFromRecord(graph.Record), s.useFTS); err != nil {
+	if err = upsertSearchProjectionTx(ctx, tx, sourceFromRecord(originRecord), s.useFTS); err != nil {
 		return err
 	}
 	if err = upsertRecordTx(ctx, tx, graph.Record); err != nil {
@@ -200,7 +205,11 @@ func requireRepoTx(ctx context.Context, tx *sql.Tx, repoID string) error {
 }
 
 func sourceFromRecord(record Record) Source {
-	return Source{RepoID: record.RepoID, ID: record.ID, Kind: record.Type, Path: record.Path, Title: record.Title, Body: record.Body, Status: record.Status, Labels: record.Labels, ContentHash: record.ContentHash, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt}
+	provenance := ProvenanceFixture
+	if record.Provenance == ProvenanceLive {
+		provenance = ProvenanceLive
+	}
+	return Source{RepoID: record.RepoID, ID: record.ID, Kind: record.Type, Path: record.Path, Title: record.Title, Body: record.Body, Status: record.Status, Labels: record.Labels, ContentHash: record.ContentHash, Provenance: provenance, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt}
 }
 
 func upsertRecordTx(ctx context.Context, tx *sql.Tx, record Record) error {
@@ -221,7 +230,7 @@ func upsertRecordTx(ctx context.Context, tx *sql.Tx, record Record) error {
 	}
 	return execTx(ctx, tx, `INSERT INTO records (repo_id, record_id, record_type, path, title, body, status, labels, content_hash, provenance, remote_type, remote_id, remote_revision, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(repo_id, record_id) DO UPDATE SET record_type = excluded.record_type, path = excluded.path, title = excluded.title, body = excluded.body, status = excluded.status, labels = excluded.labels, content_hash = excluded.content_hash, provenance = CASE WHEN records.provenance = 'remote' AND excluded.provenance <> 'remote' THEN records.provenance ELSE excluded.provenance END, remote_type = CASE WHEN records.provenance = 'remote' AND excluded.provenance <> 'remote' THEN records.remote_type ELSE excluded.remote_type END, remote_id = CASE WHEN records.provenance = 'remote' AND excluded.provenance <> 'remote' THEN records.remote_id ELSE excluded.remote_id END, remote_revision = excluded.remote_revision, updated_at = excluded.updated_at`,
+ON CONFLICT(repo_id, record_id) DO UPDATE SET record_type = excluded.record_type, path = excluded.path, title = excluded.title, body = excluded.body, status = excluded.status, labels = excluded.labels, content_hash = excluded.content_hash, provenance = CASE WHEN records.provenance IN ('remote', 'fixture', 'live') AND excluded.provenance NOT IN ('remote', 'fixture', 'live') THEN records.provenance ELSE excluded.provenance END, remote_type = CASE WHEN records.provenance IN ('remote', 'fixture', 'live') AND excluded.provenance NOT IN ('remote', 'fixture', 'live') THEN records.remote_type ELSE excluded.remote_type END, remote_id = CASE WHEN records.provenance IN ('remote', 'fixture', 'live') AND excluded.provenance NOT IN ('remote', 'fixture', 'live') THEN records.remote_id ELSE excluded.remote_id END, remote_revision = excluded.remote_revision, updated_at = excluded.updated_at`,
 		record.RepoID, record.ID, record.Type, record.Path, record.Title, record.Body, record.Status, labels, record.ContentHash, string(record.Provenance), record.RemoteType, record.RemoteID, record.RemoteRevision, createdAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
 }
 
@@ -383,8 +392,13 @@ func (s *SQLiteStore) GetRecord(ctx context.Context, repoID, recordID string) (R
 }
 
 func (s *SQLiteStore) ListRecords(ctx context.Context, filter RecordFilter) ([]Record, error) {
-	query := `SELECT repo_id, record_id, record_type, path, title, body, status, labels, content_hash, provenance, remote_type, remote_id, remote_revision, created_at, updated_at FROM records WHERE (? = '' OR repo_id = ?) AND (? = '' OR record_type = ?) AND (? = '' OR status = ?) ORDER BY repo_id, record_id`
+	query := `SELECT repo_id, record_id, record_type, path, title, body, status, labels, content_hash, provenance, remote_type, remote_id, remote_revision, created_at, updated_at FROM records WHERE (? = '' OR repo_id = ?) AND (? = '' OR record_type = ?) AND (? = '' OR status = ?)`
 	args := []any{filter.RepoID, filter.RepoID, filter.Type, filter.Type, filter.Status, filter.Status}
+	if filter.Provenance != "" {
+		query += ` AND (? = '' OR provenance = ?)`
+		args = append(args, string(filter.Provenance), string(filter.Provenance))
+	}
+	query += ` ORDER BY repo_id, record_id`
 	if filter.Limit > 0 {
 		query += ` LIMIT ?`
 		args = append(args, filter.Limit)
@@ -399,7 +413,13 @@ func (s *SQLiteStore) ListRecords(ctx context.Context, filter RecordFilter) ([]R
 
 func (s *SQLiteStore) SearchRecords(ctx context.Context, query SearchQuery) ([]SearchResult, error) {
 	like := "%" + query.Query + "%"
-	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, record_id, path, title, body FROM records WHERE (? = '' OR repo_id = ?) AND (? = '' OR record_type = ?) AND (title LIKE ? OR body LIKE ? OR path LIKE ?) ORDER BY repo_id, record_id`, query.RepoID, query.RepoID, query.Kind, query.Kind, like, like, like)
+	where := `(? = '' OR repo_id = ?) AND (? = '' OR record_type = ?) AND (title LIKE ? OR body LIKE ? OR path LIKE ?)`
+	args := []any{query.RepoID, query.RepoID, query.Kind, query.Kind, like, like, like}
+	if query.Provenance != "" {
+		where += ` AND (? = '' OR provenance = ?)`
+		args = append(args, string(query.Provenance), string(query.Provenance))
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, record_id, path, title, body, provenance FROM records WHERE `+where+` ORDER BY repo_id, record_id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -407,10 +427,11 @@ func (s *SQLiteStore) SearchRecords(ctx context.Context, query SearchQuery) ([]S
 	results := []SearchResult{}
 	for rows.Next() {
 		var result SearchResult
-		var body string
-		if err := rows.Scan(&result.RepoID, &result.ID, &result.Path, &result.Title, &body); err != nil {
+		var body, provenance string
+		if err := rows.Scan(&result.RepoID, &result.ID, &result.Path, &result.Title, &body, &provenance); err != nil {
 			return nil, err
 		}
+		result.Provenance = Provenance(provenance)
 		needle := normalizeSearchQuery(query.Query)
 		result.Snippet = snippet(result.Title+"\n"+body, needle)
 		result.Score = searchScore(result.Title, body, needle)
@@ -461,6 +482,42 @@ func (s *SQLiteStore) recordComments(ctx context.Context, repoID, recordID strin
 		comments = append(comments, comment)
 	}
 	return comments, rows.Err()
+}
+
+func (s *SQLiteStore) ResetLive(ctx context.Context, repoID string) (err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer txRollbackOnError(tx, &err)
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM sources WHERE repo_id = ? AND provenance = 'live'`, repoID)
+	if err != nil {
+		return err
+	}
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err = execTx(ctx, tx, `DELETE FROM records WHERE repo_id = ? AND record_id = ?`, repoID, id); err != nil {
+			return err
+		}
+		if err = execTx(ctx, tx, `DELETE FROM sources WHERE repo_id = ? AND id = ?`, repoID, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *SQLiteStore) RecordCounts(ctx context.Context, repoID string) (RecordCounts, error) {

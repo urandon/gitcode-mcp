@@ -1,0 +1,25 @@
+{
+  "covered_outcome_ids": ["outcome-9", "outcome-10"],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "internal/mcp/mcp.go:Server.toolsCall",
+    "internal/mcp/mcp.go:blockedWriteTools",
+    "internal/mcp/mcp.go:Server.toolsList",
+    "internal/mcp/mcp.go:Server.toolRegistry"
+  ],
+  "evidence_type": "API test",
+  "freshness": "2026-06-24T10:32:14Z",
+  "mocks_used": [
+    "pipeConn (io.Pipe-based MCP transport — no network)",
+    "populatedStore (in-memory SQLite fixture — no external dependencies)",
+    "service.New (business layer with fixture store)"
+  ],
+  "production_files_modified": [
+    "internal/mcp/mcp.go"
+  ],
+  "scenario_results": {
+    "010-mcp-server-write-boundary-task-1-block-mcp-write-calls-scenario-1": "PASS",
+    "010-mcp-server-write-boundary-task-1-block-mcp-write-calls-scenario-2": "PASS",
+    "010-mcp-server-write-boundary-task-1-block-mcp-write-calls-scenario-3": "PASS"
+  }
+}

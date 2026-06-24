@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,7 @@ var commands = []string{
 	"link-check",
 	"stale-index",
 	"sync",
+	"cache",
 	"cache-status",
 	"sync-status", "sync_status",
 	"export", "export-snapshot",
@@ -45,6 +47,7 @@ var commands = []string{
 	"update-issue",
 	"create-page",
 	"update-page",
+	"delete-page",
 	"add-comment",
 	"add-label",
 	"config",
@@ -76,6 +79,7 @@ type queryService interface {
 	BulkSyncIssues(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncWiki(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncAll(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	ResetLiveCache(context.Context, service.ResetLiveCacheRequest) (service.ResetLiveCacheResult, error)
 	CacheStatus(context.Context, service.CacheStatusRequest) (service.CacheStatusResult, error)
 	ExportSnapshot(context.Context, service.ExportSnapshotRequest) (service.ExportSnapshotResult, error)
 	DiffSnapshot(context.Context, service.DiffSnapshotRequest) (service.DiffSnapshotResult, error)
@@ -85,6 +89,7 @@ type queryService interface {
 	UpdateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	CreatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	DeletePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	AddComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	AddLabel(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 }
@@ -134,6 +139,8 @@ type options struct {
 	id             string
 	number         int
 	slug           string
+	path           string
+	sha            string
 	title          string
 	body           string
 	state          string
@@ -297,7 +304,7 @@ func resolveLiveCredential(ctx context.Context, eff config.EffectiveConfig, deps
 
 func isLiveStartupCommand(command string) bool {
 	switch command {
-	case "sync", "create-issue", "update-issue", "create-page", "update-page", "add-comment", "add-label", "doctor":
+	case "sync", "create-issue", "update-issue", "create-page", "update-page", "delete-page", "add-comment", "add-label", "doctor":
 		return true
 	default:
 		return false
@@ -316,7 +323,7 @@ func resolveStartupLiveRepositoryBinding(ctx context.Context, cachePath, repoID 
 
 func liveRequestedScope(command string, opts options) service.RepositoryScope {
 	switch command {
-	case "create-page", "update-page":
+	case "create-page", "update-page", "delete-page":
 		return service.RepositoryScopeWiki
 	case "sync":
 		if opts.wiki && !opts.issues {
@@ -406,6 +413,8 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.id, "id", "", "record id")
 	flags.IntVar(&opts.number, "number", 0, "issue number")
 	flags.StringVar(&opts.slug, "slug", "", "page slug")
+	flags.StringVar(&opts.path, "path", "", "page path")
+	flags.StringVar(&opts.sha, "sha", "", "page sha")
 	flags.StringVar(&opts.title, "title", "", "title")
 	flags.StringVar(&opts.body, "body", "", "body")
 	flags.StringVar(&opts.state, "state", "", "state")
@@ -795,6 +804,24 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, renderSyncText)
+	case "cache":
+		sub, ok := firstArg(args)
+		if !ok {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "cache", Message: "subcommand is required"})
+		}
+		switch sub {
+		case "reset":
+			if !opts.live {
+				return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "live", Message: "cache reset requires --live"})
+			}
+			result, err := svc.ResetLiveCache(ctx, service.ResetLiveCacheRequest{RepoID: opts.repo})
+			if err != nil {
+				return writeError(stderr, opts.format, err)
+			}
+			return render(stdout, opts.format, result, renderResetLiveCacheText)
+		default:
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "cache", Message: "unknown subcommand"})
+		}
 	case "cache-status":
 		result, err := svc.CacheStatus(ctx, service.CacheStatusRequest{RepoID: opts.repo})
 		if err != nil {
@@ -860,6 +887,8 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		return dispatchWrite(ctx, svc.CreatePage, command, opts, stdout, stderr, plan)
 	case "update-page":
 		return dispatchWrite(ctx, svc.UpdatePage, command, opts, stdout, stderr, plan)
+	case "delete-page":
+		return dispatchWrite(ctx, svc.DeletePage, command, opts, stdout, stderr, plan)
 	case "add-comment":
 		return dispatchWrite(ctx, svc.AddComment, command, opts, stdout, stderr, plan)
 	case "add-label":
@@ -959,7 +988,7 @@ func writeRequest(opts options) service.WriteCommandRequest {
 	if opts.live {
 		mode = service.WriteModeLive
 	}
-	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, Number: opts.number, Slug: opts.slug, Title: opts.title, Body: opts.body, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
+	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, Number: opts.number, Slug: opts.slug, Path: opts.path, Sha: opts.sha, Title: opts.title, Body: opts.body, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
 }
 
 func cliEmptyAsNone(value string) string {
@@ -1059,6 +1088,10 @@ func renderChunkQueryText(w io.Writer, result service.ChunkQueryResult) {
 	for _, warning := range result.Warnings {
 		fmt.Fprintf(w, "warning: %s %s\n", warning.Code, warning.Message)
 	}
+}
+
+func renderResetLiveCacheText(w io.Writer, result service.ResetLiveCacheResult) {
+	fmt.Fprintf(w, "repo_id: %s\nreset: %s\n", result.RepoID, result.Reset)
 }
 
 func renderSyncStatusText(w io.Writer, result service.SyncStatusResult) {
@@ -1185,11 +1218,90 @@ func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {
 		ctx.HTTPAttempted = writeErr.Code == "write_unauthorized" || writeErr.Code == "write_network_unavailable" || writeErr.Code == "write_provider_error" || writeErr.Code == "write_conflict"
 		ctx.FixtureFallbackSentinel = writeErr.Code == "write_fixture_fallback_detected"
 		ctx.MissingCredential = writeErr.Code == "write_missing_credential"
+		ctx.UnsupportedPayload = writeErr.Code == "live_graph_invalid" || writeErr.Code == "unsupported_mock_payload"
+		ctx.SchemaDecodeFailure = writeErr.Code == "schema_decode" || writeErr.PayloadSource == "partial_response"
+		ctx.PayloadSource = writeErr.PayloadSource
+		ctx.FailureSource = writeErr.PayloadSource
+		ctx.LocalPayloadTooLarge = writeErr.PayloadSource == "local_body_limit"
 	}
 	var syncErr service.ErrSyncFailure
 	if errors.As(err, &syncErr) {
-		ctx.HTTPAttempted = syncErr.Mode == "live_auth_failure" || syncErr.Mode == "network_timeout" || syncErr.Mode == "rate_limited" || syncErr.Mode == "partial_response" || syncErr.Mode == "live_graph_invalid"
+		ctx.HTTPAttempted = syncErr.Mode == "live_auth_failure" || syncErr.Mode == "network_timeout" || syncErr.Mode == "rate_limited" || syncErr.Mode == "partial_response" || syncErr.Mode == "live_graph_invalid" || syncErr.Mode == "payload_too_large" || syncErr.Mode == "remote_not_found" || syncErr.Mode == "conflict" || syncErr.Mode == "remote_collision"
 		ctx.UnsupportedPayload = syncErr.Mode == "live_graph_invalid"
+		ctx.PayloadSource = syncErr.PayloadSource
+		ctx.FailureSource = syncErr.PayloadSource
+		ctx.LocalPayloadTooLarge = syncErr.Mode == "payload_too_large" && syncErr.PayloadSource == "local_body_limit"
+		ctx.SchemaDecodeFailure = syncErr.Mode == "partial_response" || syncErr.Mode == "schema_decode"
+		if syncErr.Mode == "partial_response" {
+			ctx.FailureSource = "partial_response"
+		}
+	}
+	var apiValidation gitcode.ErrAPIValidation
+	if errors.As(err, &apiValidation) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = apiValidation.Status
+		ctx.APIFailure = true
+	}
+	var network gitcode.ErrNetworkUnavailable
+	if errors.As(err, &network) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = network.Status
+		ctx.TransportFailure = true
+	}
+	var notFound gitcode.ErrNotFound
+	if errors.As(err, &notFound) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = http.StatusNotFound
+	}
+	var conflict gitcode.ErrConflict
+	if errors.As(err, &conflict) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = conflict.Status
+		if ctx.HTTPStatus == 0 {
+			ctx.HTTPStatus = http.StatusConflict
+		}
+	}
+	var remoteCollision gitcode.ErrRemoteCollision
+	if errors.As(err, &remoteCollision) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = http.StatusConflict
+	}
+	var remoteNotFound gitcode.ErrRemoteNotFound
+	if errors.As(err, &remoteNotFound) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = http.StatusNotFound
+	}
+	var rateLimited gitcode.ErrRateLimited
+	if errors.As(err, &rateLimited) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = http.StatusTooManyRequests
+	}
+	var auth gitcode.ErrAuthExpired
+	if errors.As(err, &auth) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = auth.Status
+	}
+	var forbidden gitcode.ErrForbidden
+	if errors.As(err, &forbidden) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = forbidden.Status
+	}
+	var tooLarge gitcode.ErrPayloadTooLarge
+	if errors.As(err, &tooLarge) {
+		ctx.HTTPAttempted = true
+		ctx.FailureSource = tooLarge.Source
+		ctx.LocalPayloadTooLarge = tooLarge.Source == "local_body_limit"
+	}
+	var partial gitcode.ErrPartialResponse
+	if errors.As(err, &partial) {
+		ctx.HTTPAttempted = true
+		ctx.FailureSource = "partial_response"
+		ctx.SchemaDecodeFailure = true
+	}
+	var schema *gitcode.ErrSchemaDecode
+	if errors.As(err, &schema) {
+		ctx.HTTPAttempted = true
+		ctx.SchemaDecodeFailure = true
 	}
 	return ctx
 }
@@ -1579,6 +1691,8 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "cache":
+		fmt.Fprintln(w, "Usage: gitcode-mcp cache reset --live --repo REPO")
 	case "cache-status":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO\n\n", command)
 		fmt.Fprintln(w, "Report cache storage health and record counts.")

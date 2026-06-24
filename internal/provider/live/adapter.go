@@ -35,9 +35,24 @@ type (
 	AuthProbeRequest          = gitcode.AuthProbeRequest
 	AuthProbeResult           = gitcode.AuthProbeResult
 	RedactedCapture           = gitcode.RedactedCapture
+	RouteSchemaMatrix         = gitcode.RouteSchemaMatrix
+	SurfaceSpec               = gitcode.SurfaceSpec
+	UnsupportedDiagnostic     = gitcode.UnsupportedDiagnostic
+	ProductArea               = gitcode.ProductArea
+	SupportStatus             = gitcode.SupportStatus
+	EvidenceClass             = gitcode.EvidenceClass
+	ErrUnsupportedCapability  = gitcode.ErrUnsupportedCapability
 )
 
 func IsProviderUnavailable(err error) bool { return gitcode.IsProviderUnavailable(err) }
+
+func IsUnsupportedCapability(err error) bool { return gitcode.IsUnsupportedCapability(err) }
+
+func WithRouteSchemaMatrix(matrix RouteSchemaMatrix) gitcode.LiveProviderOption {
+	return gitcode.WithRouteSchemaMatrix(matrix)
+}
+
+type LiveProviderOption = gitcode.LiveProviderOption
 
 func NewLiveProvider(cfg Config) (Provider, error) {
 	return gitcode.NewLiveProvider(cfg)

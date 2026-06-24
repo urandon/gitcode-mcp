@@ -7,9 +7,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type mockGitCodeAPIAuthMode string
+
+type mockGitCodeAPIFailureMode string
 
 const (
 	mockGitCodeAPIAuthAccept    mockGitCodeAPIAuthMode = "accept"
@@ -17,10 +20,25 @@ const (
 	mockGitCodeAPIAuthReject403 mockGitCodeAPIAuthMode = "reject403"
 )
 
+const (
+	mockGitCodeAPIFailureNone           mockGitCodeAPIFailureMode = ""
+	mockGitCodeAPIFailure400            mockGitCodeAPIFailureMode = "400"
+	mockGitCodeAPIFailure404            mockGitCodeAPIFailureMode = "404"
+	mockGitCodeAPIFailure409            mockGitCodeAPIFailureMode = "409"
+	mockGitCodeAPIFailure413            mockGitCodeAPIFailureMode = "413"
+	mockGitCodeAPIFailure429            mockGitCodeAPIFailureMode = "429"
+	mockGitCodeAPIFailureMalformedJSON  mockGitCodeAPIFailureMode = "malformed_json"
+	mockGitCodeAPIFailureSchemaMismatch mockGitCodeAPIFailureMode = "schema_mismatch"
+	mockGitCodeAPIFailurePartial        mockGitCodeAPIFailureMode = "partial_response"
+	mockGitCodeAPIFailureTimeout        mockGitCodeAPIFailureMode = "timeout"
+	mockGitCodeAPIFailure500            mockGitCodeAPIFailureMode = "500"
+)
+
 type MockGitCodeAPI struct {
 	server        *httptest.Server
 	expectedToken string
 	authMode      mockGitCodeAPIAuthMode
+	failureMode   mockGitCodeAPIFailureMode
 	owner         string
 	repo          string
 	mu            sync.Mutex
@@ -71,6 +89,10 @@ func MockGitCodeAPIAuthMode(mode mockGitCodeAPIAuthMode) func(*MockGitCodeAPI) {
 	return func(api *MockGitCodeAPI) { api.authMode = mode }
 }
 
+func MockGitCodeAPIFailureMode(mode mockGitCodeAPIFailureMode) func(*MockGitCodeAPI) {
+	return func(api *MockGitCodeAPI) { api.failureMode = mode }
+}
+
 func (api *MockGitCodeAPI) BaseURL() string { return api.server.URL }
 
 func (api *MockGitCodeAPI) Close() { api.server.Close() }
@@ -117,6 +139,9 @@ func (api *MockGitCodeAPI) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "live auth failure", status)
 		return
 	}
+	if api.writeFailure(w, operation) {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	switch operation {
 	case "list_issues":
@@ -126,15 +151,53 @@ func (api *MockGitCodeAPI) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	case "list_comments":
 		fmt.Fprint(w, `[{"id":"MOCK-COMMENT-1","author":"mock-user","body":"mock live comment","created_at":"2026-06-22T00:00:00Z","updated_at":"2026-06-22T00:00:00Z"}]`)
 	case "list_wiki":
-		fmt.Fprint(w, `[{"id":"MOCK-WIKI-LIVE","slug":"LiveGuide","title":"Mock Live Guide","body":"mock live wiki body","revision":"rev-live-1","created_at":"2026-06-22T00:00:00Z","updated_at":"2026-06-22T00:00:00Z"}]`)
+		fmt.Fprint(w, `[{"path":"LiveGuide.md","type":"file","sha":"rev-live-1"}]`)
 	case "get_wiki":
-		fmt.Fprint(w, `{"id":"MOCK-WIKI-LIVE","slug":"LiveGuide","title":"Mock Live Guide","body":"mock live wiki body","revision":"rev-live-1","created_at":"2026-06-22T00:00:00Z","updated_at":"2026-06-22T00:00:00Z"}`)
+		fmt.Fprint(w, `{"path":"LiveGuide.md","type":"file","sha":"rev-live-1"}`)
+	case "raw_wiki":
+		w.Header().Set("Content-Type", "text/markdown")
+		fmt.Fprint(w, `mock live wiki body`)
 	case "create_issue":
 		w.WriteHeader(http.StatusCreated)
 		fmt.Fprint(w, `{"id":"MOCK-CREATED-ISSUE","number":101,"title":"Mock Created","state":"open","body":"created by mock keychain","created_at":"2026-06-22T00:00:00Z","updated_at":"2026-06-22T00:00:00Z"}`)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (api *MockGitCodeAPI) writeFailure(w http.ResponseWriter, operation string) bool {
+	if api.failureMode == mockGitCodeAPIFailureNone || operation != "list_issues" {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	switch api.failureMode {
+	case mockGitCodeAPIFailure400:
+		http.Error(w, "bad request", http.StatusBadRequest)
+	case mockGitCodeAPIFailure404:
+		http.Error(w, "not found", http.StatusNotFound)
+	case mockGitCodeAPIFailure409:
+		http.Error(w, "conflict", http.StatusConflict)
+	case mockGitCodeAPIFailure413:
+		http.Error(w, "too large", http.StatusRequestEntityTooLarge)
+	case mockGitCodeAPIFailure429:
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+	case mockGitCodeAPIFailureMalformedJSON:
+		fmt.Fprint(w, `[{"id":"MOCK-ISSUE-100","number":`)
+	case mockGitCodeAPIFailureSchemaMismatch:
+		fmt.Fprint(w, `[{"id":"MOCK-ISSUE-100","title":"missing number"}]`)
+	case mockGitCodeAPIFailurePartial:
+		w.Header().Set("Content-Length", "100")
+		fmt.Fprint(w, `[{"id":"MOCK-ISSUE-100"`)
+	case mockGitCodeAPIFailureTimeout:
+		time.Sleep(100 * time.Millisecond)
+		fmt.Fprint(w, `[]`)
+	case mockGitCodeAPIFailure500:
+		http.Error(w, "server error", http.StatusInternalServerError)
+	default:
+		return false
+	}
+	return true
 }
 
 func (api *MockGitCodeAPI) operation(r *http.Request) string {
@@ -152,11 +215,15 @@ func (api *MockGitCodeAPI) operation(r *http.Request) string {
 	if path == base+"/issues/100/comments" && r.Method == http.MethodGet {
 		return "list_comments"
 	}
-	if path == base+"/wiki" && r.Method == http.MethodGet {
+	wikiBase := "/api/v5/repos/" + api.owner + "/" + api.repo + ".wiki"
+	if path == wikiBase+"/contents" && r.Method == http.MethodGet {
 		return "list_wiki"
 	}
-	if path == base+"/wiki/LiveGuide" && r.Method == http.MethodGet {
+	if path == wikiBase+"/contents/LiveGuide.md" && r.Method == http.MethodGet {
 		return "get_wiki"
+	}
+	if path == wikiBase+"/raw/LiveGuide.md" && r.Method == http.MethodGet {
+		return "raw_wiki"
 	}
 	if strings.HasPrefix(path, base+"/issues/") && strings.HasSuffix(path, "/comments") && r.Method == http.MethodGet {
 		return "list_comments"

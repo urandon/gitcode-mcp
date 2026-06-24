@@ -7,10 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/diagnostics"
+	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/service"
 )
 
@@ -95,13 +98,14 @@ type rpcError struct {
 }
 
 type errorData struct {
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	Operation string `json:"operation,omitempty"`
-	RepoID    string `json:"repo_id,omitempty"`
-	StartedAt string `json:"started_at,omitempty"`
-	PID       int    `json:"pid,omitempty"`
-	CachePath string `json:"cache_path,omitempty"`
+	Code         string `json:"code"`
+	Message      string `json:"message"`
+	FailureClass string `json:"failure_class,omitempty"`
+	Operation    string `json:"operation,omitempty"`
+	RepoID       string `json:"repo_id,omitempty"`
+	StartedAt    string `json:"started_at,omitempty"`
+	PID          int    `json:"pid,omitempty"`
+	CachePath    string `json:"cache_path,omitempty"`
 }
 
 type toolDefinition struct {
@@ -450,6 +454,14 @@ func (s *Server) toolsList(req request) {
 	s.writeResponse(req.ID, b)
 }
 
+var blockedWriteTools = map[string]bool{
+	"create-issue": true,
+	"update-issue": true,
+	"add-label":    true,
+	"create-page":  true,
+	"update-page":  true,
+}
+
 func (s *Server) toolsCall(ctx context.Context, req request) {
 	if req.Params == nil {
 		s.writeError(req.ID, -32602, "Invalid params", &errorData{Code: "invalid_params", Message: "params is required"})
@@ -462,6 +474,11 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 	}
 	if params.Name == "" {
 		s.writeError(req.ID, -32602, "Invalid params", &errorData{Code: "invalid_params", Message: "name is required"})
+		return
+	}
+
+	if blockedWriteTools[params.Name] {
+		s.writeError(req.ID, -32601, "Method not found", &errorData{Code: "unsupported_capability", Message: fmt.Sprintf("%q is not available: use CLI mutation commands for writes", params.Name)})
 		return
 	}
 
@@ -1208,8 +1225,107 @@ func (s *Server) writeToolResult(id *json.RawMessage, result toolCallResult) {
 	s.writeResponse(id, b)
 }
 
+func mcpDiagnostic(err error) (diagnostics.Diagnostic, bool) {
+	ctx := diagnostics.CommandContext{ProviderMode: "live-http"}
+	var syncErr service.ErrSyncFailure
+	var writeErr service.ErrWriteFailure
+	var apiErr gitcode.ErrAPIValidation
+	var schemaErr *gitcode.ErrSchemaDecode
+	var networkErr gitcode.ErrNetworkUnavailable
+	var notFoundErr gitcode.ErrNotFound
+	var conflictErr gitcode.ErrConflict
+	var remoteCollisionErr gitcode.ErrRemoteCollision
+	var remoteNotFoundErr gitcode.ErrRemoteNotFound
+	var rateLimitedErr gitcode.ErrRateLimited
+	var authErr gitcode.ErrAuthExpired
+	var forbiddenErr gitcode.ErrForbidden
+	var partialErr gitcode.ErrPartialResponse
+	var tooLargeErr gitcode.ErrPayloadTooLarge
+	if errors.As(err, &syncErr) {
+		ctx.HTTPAttempted = syncErr.Mode == "live_auth_failure" || syncErr.Mode == "network_timeout" || syncErr.Mode == "rate_limited" || syncErr.Mode == "partial_response" || syncErr.Mode == "live_graph_invalid" || syncErr.Mode == "payload_too_large" || syncErr.Mode == "remote_not_found" || syncErr.Mode == "conflict" || syncErr.Mode == "remote_collision"
+		ctx.FailureSource = syncErr.PayloadSource
+		ctx.LocalPayloadTooLarge = syncErr.Mode == "payload_too_large" && syncErr.PayloadSource == "local_body_limit"
+		ctx.SchemaDecodeFailure = syncErr.Mode == "partial_response" || syncErr.Mode == "schema_decode"
+		if syncErr.Mode == "partial_response" {
+			ctx.FailureSource = "partial_response"
+		}
+		return diagnostics.Classify(err, ctx), true
+	}
+	if errors.As(err, &writeErr) {
+		ctx.HTTPAttempted = writeErr.Code == "write_unauthorized" || writeErr.Code == "write_network_unavailable" || writeErr.Code == "write_provider_error" || writeErr.Code == "write_conflict"
+		ctx.SchemaDecodeFailure = writeErr.Code == "schema_decode" || writeErr.PayloadSource == "partial_response"
+		ctx.FailureSource = writeErr.PayloadSource
+		ctx.LocalPayloadTooLarge = writeErr.PayloadSource == "local_body_limit"
+		return diagnostics.Classify(err, ctx), true
+	}
+	if errors.As(err, &tooLargeErr) {
+		ctx.HTTPAttempted = true
+		ctx.FailureSource = tooLargeErr.Source
+		ctx.LocalPayloadTooLarge = tooLargeErr.Source == "local_body_limit"
+		return diagnostics.Classify(err, ctx), true
+	}
+	if errors.As(err, &partialErr) || errors.As(err, &schemaErr) {
+		ctx.HTTPAttempted = true
+		ctx.SchemaDecodeFailure = true
+		ctx.FailureSource = "partial_response"
+		return diagnostics.Classify(err, ctx), true
+	}
+	if errors.As(err, &apiErr) {
+		ctx.HTTPAttempted = true
+		ctx.APIFailure = true
+		ctx.HTTPStatus = apiErr.Status
+		return diagnostics.Classify(err, ctx), true
+	}
+	if errors.As(err, &networkErr) {
+		ctx.HTTPAttempted = true
+		ctx.TransportFailure = true
+		ctx.HTTPStatus = networkErr.Status
+		return diagnostics.Classify(err, ctx), true
+	}
+	if errors.As(err, &notFoundErr) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = http.StatusNotFound
+		return diagnostics.Classify(err, ctx), true
+	}
+	if errors.As(err, &conflictErr) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = conflictErr.Status
+		if ctx.HTTPStatus == 0 {
+			ctx.HTTPStatus = http.StatusConflict
+		}
+		return diagnostics.Classify(err, ctx), true
+	}
+	if errors.As(err, &remoteCollisionErr) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = http.StatusConflict
+		return diagnostics.Classify(err, ctx), true
+	}
+	if errors.As(err, &remoteNotFoundErr) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = http.StatusNotFound
+		return diagnostics.Classify(err, ctx), true
+	}
+	if errors.As(err, &rateLimitedErr) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = http.StatusTooManyRequests
+		return diagnostics.Classify(err, ctx), true
+	}
+	if errors.As(err, &authErr) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = authErr.Status
+		return diagnostics.Classify(err, ctx), true
+	}
+	if errors.As(err, &forbiddenErr) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = forbiddenErr.Status
+		return diagnostics.Classify(err, ctx), true
+	}
+	return diagnostics.Diagnostic{}, false
+}
+
 func (s *Server) writeDomainError(id *json.RawMessage, err error) {
 	var data *errorData
+	diagnostic, hasDiagnostic := mcpDiagnostic(err)
 	switch {
 	case service.IsNotFound(err):
 		data = &errorData{Code: "not_found", Message: err.Error()}
@@ -1235,6 +1351,9 @@ func (s *Server) writeDomainError(id *json.RawMessage, err error) {
 		default:
 			data = &errorData{Code: "sync_required", Message: err.Error()}
 		}
+	}
+	if hasDiagnostic && data != nil {
+		data.FailureClass = string(diagnostic.Code)
 	}
 
 	s.writeError(id, -32000, "Server error", data)

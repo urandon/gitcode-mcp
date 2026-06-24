@@ -3,6 +3,7 @@ package gitcode
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"strings"
@@ -23,6 +24,9 @@ type Provider interface {
 	CreateIssueComment(context.Context, CreateIssueCommentRequest, WriteOptions) (WriteResult[Comment], error)
 	CreateWikiPage(context.Context, CreateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
 	UpdateWikiPage(context.Context, UpdateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
+	DeleteWikiPage(context.Context, DeleteWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
+	ListMilestones(context.Context, MilestoneListRequest) (Page[Milestone], error)
+	GetMilestone(context.Context, MilestoneRequest) (Milestone, error)
 }
 
 type ProviderMode string
@@ -113,7 +117,15 @@ type RedactedCapture struct {
 
 var newHTTPClientForProvider = NewHTTPClient
 
-func NewLiveProvider(cfg ProviderConfig) (Provider, error) {
+type LiveProviderOption func(*liveProvider)
+
+func WithRouteSchemaMatrix(matrix RouteSchemaMatrix) LiveProviderOption {
+	return func(lp *liveProvider) {
+		lp.matrix = matrix
+	}
+}
+
+func NewLiveProvider(cfg ProviderConfig, opts ...LiveProviderOption) (Provider, error) {
 	baseURL, err := validateLiveProviderConfig(cfg)
 	if err != nil {
 		return nil, err
@@ -122,7 +134,17 @@ func NewLiveProvider(cfg ProviderConfig) (Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	return liveProvider{HTTPClient: client}, nil
+	lp := liveProvider{HTTPClient: client, matrix: DefaultRouteSchemaMatrix()}
+	for _, opt := range opts {
+		opt(&lp)
+	}
+	if err := lp.matrix.ValidateCoverage([]ProductArea{
+		ProductAreaIssues, ProductAreaLabels, ProductAreaMilestones,
+		ProductAreaPullRequests, ProductAreaComments, ProductAreaWiki,
+	}); err != nil {
+		return nil, fmt.Errorf("gitcode: live provider route schema matrix validation failed: %w", err)
+	}
+	return lp, nil
 }
 
 func validateLiveProviderConfig(cfg ProviderConfig) (string, error) {
@@ -157,6 +179,7 @@ func RequireLiveProviderForTest() (string, bool) {
 
 type liveProvider struct {
 	*HTTPClient
+	matrix RouteSchemaMatrix
 }
 
 func (p liveProvider) ProbeAuth(ctx context.Context, req AuthProbeRequest) (AuthProbeResult, error) {
@@ -183,6 +206,41 @@ func (p liveProvider) GetRepo(ctx context.Context, req RepoRequest) (Repo, error
 		repo.FullName = req.Owner + "/" + req.Repo
 	}
 	return repo, nil
+}
+
+func (p liveProvider) ListIssueComments(ctx context.Context, req IssueRequest) (Page[Comment], error) {
+	if err := p.matrix.Preflight(ProductAreaComments); err != nil {
+		return Page[Comment]{}, err
+	}
+	return p.HTTPClient.ListIssueComments(ctx, req)
+}
+
+func (p liveProvider) CreateIssueComment(ctx context.Context, req CreateIssueCommentRequest, opts WriteOptions) (WriteResult[Comment], error) {
+	if err := p.matrix.Preflight(ProductAreaComments); err != nil {
+		return WriteResult[Comment]{}, err
+	}
+	return p.HTTPClient.CreateIssueComment(ctx, req, opts)
+}
+
+func (p liveProvider) ListMilestones(ctx context.Context, req MilestoneListRequest) (Page[Milestone], error) {
+	if err := p.matrix.Preflight(ProductAreaMilestones); err != nil {
+		return Page[Milestone]{}, err
+	}
+	return p.HTTPClient.ListMilestones(ctx, req)
+}
+
+func (p liveProvider) GetMilestone(ctx context.Context, req MilestoneRequest) (Milestone, error) {
+	if err := p.matrix.Preflight(ProductAreaMilestones); err != nil {
+		return Milestone{}, err
+	}
+	return p.HTTPClient.GetMilestone(ctx, req)
+}
+
+func (p liveProvider) AddLabel(ctx context.Context, req LabelRequest, opts WriteOptions) (WriteResult[Issue], error) {
+	return WriteResult[Issue]{}, ErrUnsupportedCapability{
+		CapabilityKey: "add_label",
+		Message:       "add-label is not supported through the live provider: use update-issue --labels instead",
+	}
 }
 
 type unavailableProvider struct {
@@ -234,6 +292,16 @@ func (p unavailableProvider) CreateWikiPage(context.Context, CreateWikiPageReque
 }
 func (p unavailableProvider) UpdateWikiPage(context.Context, UpdateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error) {
 	return WriteResult[WikiPage]{}, p.err()
+}
+func (p unavailableProvider) DeleteWikiPage(context.Context, DeleteWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error) {
+	return WriteResult[WikiPage]{}, p.err()
+}
+
+func (p unavailableProvider) ListMilestones(context.Context, MilestoneListRequest) (Page[Milestone], error) {
+	return Page[Milestone]{}, p.err()
+}
+func (p unavailableProvider) GetMilestone(context.Context, MilestoneRequest) (Milestone, error) {
+	return Milestone{}, p.err()
 }
 
 func IsProviderUnavailable(err error) bool {
