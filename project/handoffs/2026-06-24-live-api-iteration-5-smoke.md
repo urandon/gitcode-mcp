@@ -18,6 +18,7 @@ Iteration 5 improves live read normalization and live-cache visibility, but it i
 - `list`, `search`, `sync-status`, and positional `get` worked against the live issue cache.
 - Live issue identities looked correct in the cache: `ISSUE-1` through `ISSUE-10`; no `ISSUE-0` identity regression was observed.
 - Cached live records were surfaced as `provenance: live`.
+- After moving the Codex MCP cache to a writable path and seeding it through the CLI, the MCP read tools were callable and could list/search live cached polygon issues.
 
 ## High Priority Gaps
 
@@ -56,7 +57,47 @@ Read-back through `GET /pulls/1/comments` returned a list with `id`, `discussion
 
 This changes the next-iteration recommendation: PR read and PR comments no longer need to remain deferred for lack of route evidence. They still need normal adapter modeling, fixture coverage, cache projection decisions, and public-safe diagnostics.
 
-### 1. Large collection sync is not operationally safe
+### 1. MCP tools are read-only and cannot operate the live lifecycle
+
+The MCP server now exposes cache read tools, but it does not expose the operational tools needed to make a live cache useful from an agent session. The current callable MCP tool list includes search/list/get/snippet/index-health/snapshot operations, but not repository binding, live sync, indexing, migration, doctor/readiness, auth status, repo status, or write operations.
+
+Current MCP tool list:
+
+```text
+search_sources
+get_source
+list_sources
+list_chunks
+search_chunks
+get_snippet
+stale_index_report
+recent_changes
+link_check
+cache_status
+source_backlinks
+resolve_id
+sync_status
+export_snapshot
+diff_snapshot
+```
+
+This means an agent cannot bootstrap or refresh its own cache through MCP. The cache had to be seeded with CLI commands (`repo add`, `sync --live`, `index --full`) before MCP reads became useful. That is acceptable as a temporary boundary only if documented explicitly; it is not enough for a day-to-day agent workflow where Codex should connect to a repository and refresh context without shell fallback.
+
+Additional MCP-specific findings:
+
+- MCP startup is sensitive to cache path write permissions because it opens the cache and writer lock before `tools/list`.
+- `tools/list` works with a writable cache path, but a missing or unwritable cache path makes Codex show no GitCode tools at all.
+- The MCP surface has no `repo_add`, `repo_status`, `sync_live`, `index`, `doctor`, `auth_status`, or `migrate_cache` equivalents.
+- MCP has no write tools by design in iteration 5, but known write calls should return structured `unsupported_capability`; read-side lifecycle operations should not be missing silently.
+
+Expected next behavior:
+
+- Decide which CLI lifecycle commands must become MCP tools now: at minimum repo status/list/bind, cache status, live sync, index, doctor/readiness, and auth status.
+- Keep dangerous mutations behind explicit capability boundaries, but expose safe live refresh/readiness operations to MCP.
+- Make MCP startup degrade gracefully when cache setup fails, ideally with a small `tools/list` surface that can report `cache_path_unwritable` instead of disappearing from Codex.
+- Add an MCP bootstrap smoke test: empty writable cache -> repo binding -> live or mocked sync -> index -> search/list via MCP.
+
+### 2. Large collection sync is not operationally safe
 
 The wiki stress case exposed a broader collection-size problem. `sync --live --wiki` against the polygon repository did not return useful progress and had to be interrupted after a long wait. Retrying with `--timeout 5s` did not bound the whole command.
 
@@ -75,7 +116,7 @@ Expected next behavior:
 - Command-level timeout/cancellation should stop traversal and return a clear retryable diagnostic.
 - Partial progress should not leave the operator guessing whether the command is hung.
 
-### 2. Live issue create/update currently returns GitCode 400
+### 3. Live issue create/update currently returns GitCode 400
 
 The installed iteration 5 binary returned `api_validation` for all tested issue write variants:
 
@@ -96,7 +137,7 @@ Expected next behavior:
 - Verify the exact GitCode payload accepted by live create/update issue endpoints.
 - Keep the fixture tests, but add a live-compatible test case that prevents empty `labels: []` from being sent implicitly.
 
-### 3. Comment write response handling is still not live-compatible
+### 4. Comment write response handling is still not live-compatible
 
 `add-comment --live` attempted the HTTP write, but returned a schema decode failure:
 
@@ -112,7 +153,7 @@ Expected next behavior:
 - Decode the real response shape or classify it as a provider compatibility gap with accurate `http_attempted:true`.
 - Confirm whether the remote comment was created before deciding cache-confirmation behavior on decode failure.
 
-### 4. Cache lock contention appears under parallel reads
+### 5. Cache lock contention appears under parallel reads
 
 Two parallel read-style commands against the same cache path hit:
 
@@ -182,6 +223,7 @@ Passed:
 - `list`, `search`, `sync-status`, and positional `get` work against the live issue cache
 
 Blocking gaps:
+- MCP tools are currently read/cache-only and cannot bootstrap or refresh a live cache. Repo binding, live sync, index, doctor/readiness, auth status, and repo status are missing from MCP, so agents must fall back to CLI before MCP reads are useful.
 - Large collection sync is not operationally safe. Wiki stress data caused long no-progress sync behavior, and `--timeout 5s` did not bound the command. Treat this as a generic collection-size problem, not wiki-specific.
 - Live issue writes now return GitCode 400 for create/update. Likely cause: empty labels are serialized as `labels: []` even when the user did not request label mutation.
 - `add-comment --live` reaches the provider but fails response decoding as malformed JSON; diagnostics incorrectly report `http_attempted:false`.
@@ -196,4 +238,4 @@ UX follow-ups:
 
 ## Acceptance Recommendation
 
-Do not merge iteration 5 as "live ready" until the issue write regression and large collection behavior are fixed. The current branch is useful as read-path progress and as evidence for the next implementation pass.
+Do not merge iteration 5 as "live ready" until the MCP lifecycle gaps, issue write regression, and large collection behavior are fixed. The current branch is useful as read-path progress and as evidence for the next implementation pass.

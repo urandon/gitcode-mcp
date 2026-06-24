@@ -22,6 +22,7 @@ Known live findings:
 
 - Issue create/update/sync can reach the real service through Keychain-backed live CLI paths, but response-shape compatibility is still implementation work.
 - Connected MCP read tools work after syncing live issues into the Codex cache.
+- The connected MCP surface is currently cache-read oriented only. It exposes search/list/get/snippet/status/snapshot tools, but lacks repo binding, repo status, live sync, index, migrate-cache, doctor/readiness, auth status, and live refresh operations. Agents must fall back to CLI to seed or refresh the cache before MCP reads are useful.
 - Issue response fields are not GitHub-shaped: `id` can be numeric and `number` can be a string.
 - Labels are not represented correctly:
   - create/update request payload accepts `labels` as a string, not `[]string`;
@@ -53,7 +54,8 @@ Known live findings:
    - otherwise git-backed wiki provider with an explicit non-goal or separate credential story for SSH/git auth.
 6. Improve error classification for 400/schema/decode failures so they do not look like network outages.
 7. Add cache provenance or an operator-safe live-cache reset/isolation story.
-8. Decide whether write tools belong in MCP now, or keep MCP read-only and document CLI as the write surface.
+8. Decide which live lifecycle operations belong in MCP now. At minimum, explicitly address repo binding/status, live sync, index refresh, auth status, doctor/readiness, migration/cache setup diagnostics, and cache path errors. If any remain CLI-only, document the boundary and expose enough MCP diagnostics that agents know why they cannot proceed.
+9. Decide whether write tools belong in MCP now, or keep MCP read-only and document CLI as the write surface.
 
 ## Required Design Questions
 
@@ -71,6 +73,10 @@ Known live findings:
 - Which wiki write operations should iteration 5 expose now that `/api/v5/repos/{owner}/{repo}.wiki/contents/{path}` create/update/delete has passed live smoke, and how should idempotency keys, commit messages, current `sha`, and base64 content encoding be modeled?
 - If wiki requires SSH/git credentials, is that acceptable for this product slice, or should wiki remain blocked with clear diagnostics?
 - Should live commands default to the only bound repo, or should `--repo` remain mandatory for now?
+- Which CLI lifecycle operations must be callable through MCP for agents to operate without shell fallback: `repo add/status/list`, `sync --live`, `index`, `doctor`, `auth status`, `migrate-cache`, cache reset, or a smaller curated set?
+- Should MCP expose live sync as one tool with explicit booleans (`issues`, `wiki`, `index`) or separate narrow tools such as `sync_issues`, `sync_wiki`, and `index_repo`?
+- How should MCP report cache startup failures such as incompatible schema, unwritable cache path, and lock contention when those failures currently prevent `tools/list` from appearing in Codex?
+- Are MCP write calls intentionally unsupported for iteration 5, and if so which known write tool names must return `unsupported_capability` rather than `unknown_tool`?
 
 ## Required Tests
 
@@ -86,6 +92,8 @@ Add mocked live-provider tests for:
 - PR/comment route tests if included in scope;
 - wiki blocked diagnostics if no token-compatible route is found;
 - fixture/live provenance or cache isolation behavior.
+- MCP lifecycle tool coverage: a writable empty cache can be initialized or diagnosed, a repository binding can be discovered or created through the chosen surface, live/mock sync can populate records, index can be refreshed, and MCP `search_sources`/`list_sources` can read the result without a shell-only bootstrap.
+- MCP startup/cache failure coverage: incompatible schema, unwritable cache path, and writer-lock contention return explicit diagnostics rather than making the GitCode tool namespace disappear silently when practical within MCP protocol limits.
 
 Optional live smoke may run against the dedicated testing polygon only when credentials are available. It must stay redacted and must not become the default test gate.
 
@@ -101,6 +109,7 @@ Optional live smoke may run against the dedicated testing polygon only when cred
 - Wiki has an explicit design decision and operator diagnostic:
   - token-compatible route found and covered by fixtures; or
   - wiki live sync remains unsupported with a clear reason and next credential/discovery step.
+- MCP lifecycle exposure is explicitly decided and tested. Agents can either operate repo binding/sync/index/readiness through MCP, or receive documented `unsupported_capability`/readiness diagnostics explaining the CLI-only boundary.
 - MCP write exposure is explicitly decided, not accidentally absent.
 - A handoff records live smoke results and remaining gaps.
 
