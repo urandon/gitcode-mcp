@@ -625,6 +625,10 @@ func (s *spyService) BulkSyncAll(context.Context, service.BulkSyncRequest) (*ser
 	s.called("BulkSyncAll")
 	return &service.SyncResourcesResult{Results: []service.SyncResult{{Status: "succeeded", Counts: service.SyncCounts{Fetched: 1}, GeneratedAt: time.Now()}}, SuccessCount: 1}, nil
 }
+func (s *spyService) ResetLiveCache(context.Context, service.ResetLiveCacheRequest) (service.ResetLiveCacheResult, error) {
+	s.called("ResetLiveCache")
+	return service.ResetLiveCacheResult{RepoID: "fixture-a", Reset: "live"}, nil
+}
 func (s *spyService) CacheStatus(context.Context, service.CacheStatusRequest) (service.CacheStatusResult, error) {
 	s.called("CacheStatus")
 	return service.CacheStatusResult{RepoID: "fixture-a", WALCapable: true, JournalMode: "wal", Records: 1}, nil

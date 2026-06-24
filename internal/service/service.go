@@ -209,6 +209,17 @@ func (s *Service) AddRepository(ctx context.Context, req AddRepositoryRequest) (
 	return repo, nil
 }
 
+func (s *Service) ResetLiveCache(ctx context.Context, req ResetLiveCacheRequest) (ResetLiveCacheResult, error) {
+	repoID, err := s.requireRepo(ctx, req.RepoID, "cache reset live")
+	if err != nil {
+		return ResetLiveCacheResult{}, err
+	}
+	if err := s.store.ResetLive(ctx, repoID); err != nil {
+		return ResetLiveCacheResult{}, normalizeError(err, "cache reset live", repoID)
+	}
+	return ResetLiveCacheResult{RepoID: repoID, Reset: "live"}, nil
+}
+
 func (s *Service) CacheStatus(ctx context.Context, req CacheStatusRequest) (CacheStatusResult, error) {
 	repoID, err := s.requireRepo(ctx, req.RepoID, "cache-status")
 	if err != nil {
@@ -356,7 +367,7 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 		}
 		updated[result.ID] = source.UpdatedAt.UTC()
 		line := nullableLine(result.Line)
-		out = append(out, SearchSourceResult{RepoID: source.RepoID, ID: result.ID, Path: result.Path, Title: result.Title, Kind: source.Kind, Status: source.Status, Snippet: result.Snippet, LineStart: line, LineEnd: line, Score: result.Score})
+		out = append(out, SearchSourceResult{RepoID: source.RepoID, ID: result.ID, Path: result.Path, Title: result.Title, Kind: source.Kind, Status: source.Status, Provenance: string(source.Provenance), Snippet: result.Snippet, LineStart: line, LineEnd: line, Score: result.Score})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Score != out[j].Score {
@@ -548,7 +559,7 @@ func (s *Service) GetSyncStatus(ctx context.Context, req SyncStatusRequest) (Syn
 		return SyncStatusResult{}, normalizeError(err, "sync status", id)
 	}
 	freshness := freshnessFor(source, status)
-	return SyncStatusResult{RepoID: status.RepoID, SourceID: status.SourceID, RemoteType: status.RemoteType, RemoteID: status.RemoteID, RemoteRevision: status.RemoteRevision, Status: status.Status, Freshness: freshness, LocalUpdatedAt: source.UpdatedAt.UTC(), LastFetchedAt: status.LastFetchedAt.UTC()}, nil
+	return SyncStatusResult{RepoID: status.RepoID, SourceID: status.SourceID, RemoteType: status.RemoteType, RemoteID: status.RemoteID, RemoteRevision: status.RemoteRevision, Status: status.Status, Freshness: freshness, Provenance: string(source.Provenance), LocalUpdatedAt: source.UpdatedAt.UTC(), LastFetchedAt: status.LastFetchedAt.UTC()}, nil
 }
 
 func (s *Service) SyncStatus(ctx context.Context, req ListSourcesRequest) (SyncStatusSummaryResult, error) {
@@ -934,7 +945,7 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 	}
 	zeroDelta := counts.Fetched > 0 && counts.Skipped == counts.Fetched && counts.Updated == 0 && counts.Inserted == 0 && counts.Conflicts == 0
 	graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "succeeded", IdempotencyKey: key, Message: syncEventMessage(counts), CreatedAt: syncCompletedAt, StartedAt: syncStartedAt, CompletedAt: syncCompletedAt, ZeroDelta: zeroDelta})
-	if err := s.store.UpsertSyncGraph(ctx, syncGraphFromSourceGraph(req.RepoID, graph)); err != nil {
+	if err := s.store.UpsertSyncGraph(ctx, s.syncGraphFromSourceGraph(req.RepoID, graph)); err != nil {
 		if inProgressRecorded {
 			_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, err, s.now().UTC()))
 		}
@@ -946,7 +957,11 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 		}
 		return SyncResult{}, err
 	}
-	return SyncResult{IdempotencyKey: key, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), GeneratedAt: syncCompletedAt, StartedAt: syncStartedAt, CompletedAt: syncCompletedAt, ZeroDelta: zeroDelta}, nil
+	stored, err := s.store.GetSourceScoped(ctx, repoID, graph.Source.ID)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	return SyncResult{IdempotencyKey: key, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), Record: sourceSummary(stored), GeneratedAt: syncCompletedAt, StartedAt: syncStartedAt, CompletedAt: syncCompletedAt, ZeroDelta: zeroDelta}, nil
 }
 
 // SyncResources processes multiple SyncRequest values independently via SyncToCache.
@@ -1028,18 +1043,37 @@ func (s *Service) BulkSyncIssues(ctx context.Context, req BulkSyncRequest) (*Syn
 	if err != nil {
 		return bulkSyncFailureResult(s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "issue:*"}, "issues", "*"), "issue:*", "issues")
 	}
-	reqs := make([]SyncRequest, 0, len(page.Items))
+	result := &SyncResourcesResult{Results: make([]SyncResult, 0, len(page.Items)), Failures: make([]ResourceError, 0)}
 	for _, summary := range page.Items {
-		reqs = append(reqs, SyncRequest{
-			RepoID:         req.RepoID,
-			AliasType:      "issue",
-			AliasID:        strconv.Itoa(summary.Number),
-			IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "issue", strconv.Itoa(summary.Number)),
-			MaxAttempts:    req.MaxAttempts,
-			MaxSize:        req.MaxSize,
-		})
+		remoteID := strconv.Itoa(summary.Number)
+		issue := gitcode.Issue{ID: summary.ID, Number: summary.Number, Title: summary.Title, Body: summary.Body, Status: summary.Status, State: summary.State, Labels: summary.Labels, CreatedAt: summary.CreatedAt, UpdatedAt: summary.UpdatedAt}
+		syncReq := SyncRequest{RepoID: req.RepoID, AliasType: "issue", AliasID: remoteID, IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "issue", remoteID), MaxAttempts: req.MaxAttempts, MaxSize: req.MaxSize}
+		graph, counts, err := s.stageIssue(ctx, syncReq, "issue", remoteID, issue)
+		if err != nil {
+			result.Failures = append(result.Failures, ResourceError{SourceID: remoteID, RemoteType: "issue", Err: err, Message: err.Error()})
+			continue
+		}
+		completedAt := s.now().UTC()
+		eventID := syncEventID(syncReq.IdempotencyKey)
+		zeroDelta := counts.Fetched > 0 && counts.Skipped == counts.Fetched && counts.Updated == 0 && counts.Inserted == 0 && counts.Conflicts == 0
+		graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: "issue", RemoteID: remoteID, RemoteRevision: graph.SyncStatus.RemoteRevision, Status: "succeeded", IdempotencyKey: syncReq.IdempotencyKey, Message: syncEventMessage(counts), CreatedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: zeroDelta})
+		if err := s.store.UpsertSyncGraph(ctx, s.syncGraphFromSourceGraph(req.RepoID, graph)); err != nil {
+			result.Failures = append(result.Failures, ResourceError{SourceID: remoteID, RemoteType: "issue", Err: err, Message: err.Error()})
+			continue
+		}
+		stored, err := s.store.GetSourceScoped(ctx, req.RepoID, graph.Source.ID)
+		if err != nil {
+			result.Failures = append(result.Failures, ResourceError{SourceID: remoteID, RemoteType: "issue", Err: err, Message: err.Error()})
+			continue
+		}
+		result.Results = append(result.Results, SyncResult{IdempotencyKey: syncReq.IdempotencyKey, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), Record: sourceSummary(stored), GeneratedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: zeroDelta})
 	}
-	return s.SyncResources(ctx, reqs)
+	result.SuccessCount = len(result.Results)
+	result.FailureCount = len(result.Failures)
+	if result.FailureCount > 0 {
+		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
+	}
+	return result, nil
 }
 
 func (s *Service) BulkSyncWiki(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
@@ -1402,12 +1436,12 @@ func (s *Service) fetchOnce(ctx context.Context, req SyncRequest, remoteType, re
 	}
 }
 
-func syncGraphFromSourceGraph(repoID string, graph cache.SourceGraph) cache.SyncGraph {
+func (s *Service) syncGraphFromSourceGraph(repoID string, graph cache.SourceGraph) cache.SyncGraph {
 	revision := ""
 	if graph.SyncStatus != nil {
 		revision = graph.SyncStatus.RemoteRevision
 	}
-	record := cache.Record{RepoID: repoID, ID: graph.Source.ID, Type: graph.Source.Kind, Path: graph.Source.Path, Title: graph.Source.Title, Body: graph.Source.Body, Status: graph.Source.Status, Labels: graph.Source.Labels, ContentHash: graph.Source.ContentHash, Provenance: cache.ProvenanceRemote, CreatedAt: graph.Source.CreatedAt, UpdatedAt: graph.Source.UpdatedAt, RemoteRevision: revision}
+	record := cache.Record{RepoID: repoID, ID: graph.Source.ID, Type: graph.Source.Kind, Path: graph.Source.Path, Title: graph.Source.Title, Body: graph.Source.Body, Status: graph.Source.Status, Labels: graph.Source.Labels, ContentHash: graph.Source.ContentHash, CreatedAt: graph.Source.CreatedAt, UpdatedAt: graph.Source.UpdatedAt, RemoteRevision: revision}
 	if graph.SyncStatus != nil {
 		record.RemoteType = graph.SyncStatus.RemoteType
 		record.RemoteID = graph.SyncStatus.RemoteID
@@ -1416,7 +1450,7 @@ func syncGraphFromSourceGraph(repoID string, graph cache.SourceGraph) cache.Sync
 	if graph.SyncStatus != nil {
 		revisions = append(revisions, cache.RemoteRevision{RepoID: repoID, RecordID: graph.Source.ID, RemoteType: graph.SyncStatus.RemoteType, RemoteID: graph.SyncStatus.RemoteID, RemoteRevision: graph.SyncStatus.RemoteRevision, Status: graph.SyncStatus.Status, LastFetchedAt: graph.SyncStatus.LastFetchedAt})
 	}
-	return cache.SyncGraph{RepoID: repoID, Record: record, Comments: graph.Comments, Identities: graph.Identities, Links: graph.Links, Chunks: graph.Chunks, RemoteRevisions: revisions, SyncEvents: graph.SyncEvents}
+	return cache.SyncGraph{RepoID: repoID, Provenance: s.syncOriginProvenance(), Record: record, Comments: graph.Comments, Identities: graph.Identities, Links: graph.Links, Chunks: graph.Chunks, RemoteRevisions: revisions, SyncEvents: graph.SyncEvents}
 }
 
 func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, remoteID string, issue gitcode.Issue) (cache.SourceGraph, SyncCounts, error) {
@@ -1631,6 +1665,13 @@ func (s *Service) syncProviderMode() gitcode.ProviderMode {
 	return s.ProviderMode()
 }
 
+func (s *Service) syncOriginProvenance() cache.Provenance {
+	if s.syncProviderMode() == gitcode.ProviderModeLive {
+		return cache.ProvenanceLive
+	}
+	return cache.ProvenanceFixture
+}
+
 func (s *Service) guardRemoteAlias(ctx context.Context, repoID, remoteType, remoteID, stableID string) error {
 	identity, err := s.store.ResolveAliasScoped(ctx, repoID, cache.RemoteAlias{Type: remoteType, ID: remoteID})
 	if err == nil && identity.SourceID != "" && identity.SourceID != stableID {
@@ -1651,8 +1692,14 @@ func (s *Service) resolveOrFallback(ctx context.Context, repoID, remoteType, rem
 }
 
 func liveFallbackSourceID(mode gitcode.ProviderMode, remoteType, remoteID, providerID string) string {
-	if mode == gitcode.ProviderModeLive && strings.TrimSpace(providerID) != "" {
-		return fallbackSourceID(remoteType, providerID)
+	providerID = strings.TrimSpace(providerID)
+	if mode == gitcode.ProviderModeLive && providerID != "" {
+		if remoteType != "issue" && remoteType != "issues" {
+			return fallbackSourceID(remoteType, providerID)
+		}
+		if _, err := strconv.ParseInt(providerID, 10, 64); err != nil {
+			return fallbackSourceID(remoteType, providerID)
+		}
 	}
 	return fallbackSourceID(remoteType, remoteID)
 }

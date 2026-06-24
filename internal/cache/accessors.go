@@ -286,7 +286,7 @@ func (s *SQLiteStore) ListLinks(ctx context.Context, filter LinkFilter) ([]Link,
 }
 
 func (s *SQLiteStore) GetBacklinks(ctx context.Context, targetID string) ([]Source, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT s.repo_id, s.id, s.kind, s.path, s.title, s.body, s.status, s.labels, s.content_hash, s.created_at, s.updated_at FROM sources s JOIN links l ON l.repo_id = s.repo_id AND l.source_id = s.id WHERE l.target_id = ? ORDER BY s.repo_id, s.id`, targetID)
+	rows, err := s.db.QueryContext(ctx, `SELECT s.repo_id, s.id, s.kind, s.path, s.title, s.body, s.status, s.labels, s.content_hash, s.provenance, s.created_at, s.updated_at FROM sources s JOIN links l ON l.repo_id = s.repo_id AND l.source_id = s.id WHERE l.target_id = ? ORDER BY s.repo_id, s.id`, targetID)
 	if err != nil {
 		return nil, err
 	}
@@ -306,7 +306,7 @@ func (s *SQLiteStore) GetBacklinks(ctx context.Context, targetID string) ([]Sour
 }
 
 func (s *SQLiteStore) GetBacklinksScoped(ctx context.Context, repoID, targetID string) ([]Source, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT s.repo_id, s.id, s.kind, s.path, s.title, s.body, s.status, s.labels, s.content_hash, s.created_at, s.updated_at FROM sources s JOIN links l ON l.repo_id = s.repo_id AND l.source_id = s.id WHERE l.repo_id = ? AND l.target_id = ? ORDER BY s.id`, repoID, targetID)
+	rows, err := s.db.QueryContext(ctx, `SELECT s.repo_id, s.id, s.kind, s.path, s.title, s.body, s.status, s.labels, s.content_hash, s.provenance, s.created_at, s.updated_at FROM sources s JOIN links l ON l.repo_id = s.repo_id AND l.source_id = s.id WHERE l.repo_id = ? AND l.target_id = ? ORDER BY s.id`, repoID, targetID)
 	if err != nil {
 		return nil, err
 	}

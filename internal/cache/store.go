@@ -113,6 +113,9 @@ func upsertSourceTx(ctx context.Context, tx *sql.Tx, source Source) error {
 	if err != nil {
 		return err
 	}
+	if source.Provenance == "" {
+		source.Provenance = ProvenanceFixture
+	}
 	createdAt := source.CreatedAt
 	updatedAt := source.UpdatedAt
 	if createdAt.IsZero() {
@@ -121,10 +124,10 @@ func upsertSourceTx(ctx context.Context, tx *sql.Tx, source Source) error {
 	if updatedAt.IsZero() {
 		updatedAt = createdAt
 	}
-	return execTx(ctx, tx, `INSERT INTO sources (repo_id, id, kind, path, title, body, status, labels, content_hash, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(repo_id, id) DO UPDATE SET kind = excluded.kind, path = excluded.path, title = excluded.title, body = excluded.body, status = excluded.status, labels = excluded.labels, content_hash = excluded.content_hash, updated_at = excluded.updated_at`,
-		source.RepoID, source.ID, source.Kind, source.Path, source.Title, source.Body, source.Status, labels, source.ContentHash, createdAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
+	return execTx(ctx, tx, `INSERT INTO sources (repo_id, id, kind, path, title, body, status, labels, content_hash, provenance, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(repo_id, id) DO UPDATE SET kind = excluded.kind, path = excluded.path, title = excluded.title, body = excluded.body, status = excluded.status, labels = excluded.labels, content_hash = excluded.content_hash, provenance = excluded.provenance, updated_at = excluded.updated_at`,
+		source.RepoID, source.ID, source.Kind, source.Path, source.Title, source.Body, source.Status, labels, source.ContentHash, string(source.Provenance), createdAt.Format(time.RFC3339Nano), updatedAt.Format(time.RFC3339Nano))
 }
 
 func upsertSearchProjectionTx(ctx context.Context, tx *sql.Tx, source Source, useFTS bool) error {
@@ -138,7 +141,7 @@ func upsertSearchProjectionTx(ctx context.Context, tx *sql.Tx, source Source, us
 }
 
 func (s *SQLiteStore) GetSource(ctx context.Context, id string) (Source, error) {
-	source, err := s.scanSource(ctx, `SELECT repo_id, id, kind, path, title, body, status, labels, content_hash, created_at, updated_at FROM sources WHERE id = ? ORDER BY repo_id LIMIT 1`, id)
+	source, err := s.scanSource(ctx, `SELECT repo_id, id, kind, path, title, body, status, labels, content_hash, provenance, created_at, updated_at FROM sources WHERE id = ? ORDER BY repo_id LIMIT 1`, id)
 	if err != nil {
 		return Source{}, err
 	}
@@ -151,7 +154,7 @@ func (s *SQLiteStore) GetSource(ctx context.Context, id string) (Source, error) 
 }
 
 func (s *SQLiteStore) GetSourceScoped(ctx context.Context, repoID, id string) (Source, error) {
-	source, err := s.scanSource(ctx, `SELECT repo_id, id, kind, path, title, body, status, labels, content_hash, created_at, updated_at FROM sources WHERE repo_id = ? AND id = ?`, repoID, id)
+	source, err := s.scanSource(ctx, `SELECT repo_id, id, kind, path, title, body, status, labels, content_hash, provenance, created_at, updated_at FROM sources WHERE repo_id = ? AND id = ?`, repoID, id)
 	if err != nil {
 		return Source{}, err
 	}
@@ -164,8 +167,8 @@ func (s *SQLiteStore) GetSourceScoped(ctx context.Context, repoID, id string) (S
 }
 
 func (s *SQLiteStore) ListSources(ctx context.Context, filter SourceFilter) ([]Source, error) {
-	query := `SELECT repo_id, id, kind, path, title, body, status, labels, content_hash, created_at, updated_at FROM sources WHERE (? = '' OR repo_id = ?) AND (? = '' OR kind = ?) AND (? = '' OR status = ?) ORDER BY repo_id, id`
-	args := []any{filter.RepoID, filter.RepoID, filter.Kind, filter.Kind, filter.Status, filter.Status}
+	query := `SELECT repo_id, id, kind, path, title, body, status, labels, content_hash, provenance, created_at, updated_at FROM sources WHERE (? = '' OR repo_id = ?) AND (? = '' OR kind = ?) AND (? = '' OR status = ?) AND (? = '' OR provenance = ?) ORDER BY repo_id, id`
+	args := []any{filter.RepoID, filter.RepoID, filter.Kind, filter.Kind, filter.Status, filter.Status, filter.Provenance, filter.Provenance}
 	if filter.Limit > 0 {
 		query += ` LIMIT ?`
 		args = append(args, filter.Limit)
@@ -198,8 +201,8 @@ func scanSources(rows *sql.Rows) ([]Source, error) {
 	var sources []Source
 	for rows.Next() {
 		var source Source
-		var labelsRaw, createdRaw, updatedRaw string
-		if err := rows.Scan(&source.RepoID, &source.ID, &source.Kind, &source.Path, &source.Title, &source.Body, &source.Status, &labelsRaw, &source.ContentHash, &createdRaw, &updatedRaw); err != nil {
+		var labelsRaw, provenance, createdRaw, updatedRaw string
+		if err := rows.Scan(&source.RepoID, &source.ID, &source.Kind, &source.Path, &source.Title, &source.Body, &source.Status, &labelsRaw, &source.ContentHash, &provenance, &createdRaw, &updatedRaw); err != nil {
 			return nil, err
 		}
 		labels, err := unmarshalJSON[[]string](labelsRaw)
@@ -207,6 +210,7 @@ func scanSources(rows *sql.Rows) ([]Source, error) {
 			return nil, err
 		}
 		source.Labels = labels
+		source.Provenance = Provenance(provenance)
 		source.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdRaw)
 		source.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedRaw)
 		sources = append(sources, source)
@@ -223,7 +227,7 @@ func (s *SQLiteStore) SearchSources(ctx context.Context, query SearchQuery) ([]S
 
 func (s *SQLiteStore) searchSourcesFallback(ctx context.Context, query SearchQuery) ([]SearchResult, error) {
 	needle := normalizeSearchQuery(query.Query)
-	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, id, path, title, body FROM sources WHERE (? = '' OR repo_id = ?) AND (? = '' OR kind = ?) AND (lower(title) LIKE ? OR lower(body) LIKE ?) ORDER BY repo_id, id, path`, query.RepoID, query.RepoID, query.Kind, query.Kind, "%"+needle+"%", "%"+needle+"%")
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, id, path, title, body, provenance FROM sources WHERE (? = '' OR repo_id = ?) AND (? = '' OR kind = ?) AND (? = '' OR provenance = ?) AND (lower(title) LIKE ? OR lower(body) LIKE ?) ORDER BY repo_id, id, path`, query.RepoID, query.RepoID, query.Kind, query.Kind, query.Provenance, query.Provenance, "%"+needle+"%", "%"+needle+"%")
 	if err != nil {
 		return nil, err
 	}
@@ -237,11 +241,11 @@ func (s *SQLiteStore) searchSourcesFTS(ctx context.Context, query SearchQuery) (
 	}
 	needle := normalizeSearchQuery(query.Query)
 	match := ftsMatchQuery(needle)
-	rows, err := s.db.QueryContext(ctx, `SELECT s.repo_id, s.id, s.path, s.title, s.body
+	rows, err := s.db.QueryContext(ctx, `SELECT s.repo_id, s.id, s.path, s.title, s.body, s.provenance
 FROM fts_index f
 JOIN sources s ON s.repo_id = f.repo_id AND s.id = f.source_id
-WHERE (? = '' OR s.repo_id = ?) AND (? = '' OR s.kind = ?) AND fts_index MATCH ?
-ORDER BY s.repo_id, s.id, s.path`, query.RepoID, query.RepoID, query.Kind, query.Kind, match)
+WHERE (? = '' OR s.repo_id = ?) AND (? = '' OR s.kind = ?) AND (? = '' OR s.provenance = ?) AND fts_index MATCH ?
+ORDER BY s.repo_id, s.id, s.path`, query.RepoID, query.RepoID, query.Kind, query.Kind, query.Provenance, query.Provenance, match)
 	if err != nil {
 		return nil, err
 	}
@@ -290,11 +294,11 @@ WHERE (? = '' OR s.repo_id = ?)
 func scanSearchResults(rows *sql.Rows, needle string, limit int) ([]SearchResult, error) {
 	var results []SearchResult
 	for rows.Next() {
-		var repoID, id, path, title, body string
-		if err := rows.Scan(&repoID, &id, &path, &title, &body); err != nil {
+		var repoID, id, path, title, body, provenance string
+		if err := rows.Scan(&repoID, &id, &path, &title, &body, &provenance); err != nil {
 			return nil, err
 		}
-		results = append(results, SearchResult{RepoID: repoID, ID: id, Path: path, Title: title, Snippet: snippet(title+"\n"+body, needle), Score: searchScore(title, body, needle), Line: lineFor(body, needle)})
+		results = append(results, SearchResult{RepoID: repoID, ID: id, Path: path, Title: title, Snippet: snippet(title+"\n"+body, needle), Score: searchScore(title, body, needle), Line: lineFor(body, needle), Provenance: Provenance(provenance)})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

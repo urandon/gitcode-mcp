@@ -1,6 +1,10 @@
 package gitcode
 
-import "time"
+import (
+	"encoding/json"
+	"strconv"
+	"time"
+)
 
 type IssueListRequest struct {
 	Owner   string
@@ -62,11 +66,39 @@ type IssueSummary struct {
 	ID        string    `json:"id"`
 	Number    int       `json:"number"`
 	Title     string    `json:"title"`
+	Body      string    `json:"body"`
 	Status    string    `json:"status"`
 	State     string    `json:"state"`
 	Labels    []string  `json:"labels"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (i *IssueSummary) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ID        any       `json:"id"`
+		Number    any       `json:"number"`
+		Title     string    `json:"title"`
+		Body      string    `json:"body"`
+		Status    string    `json:"status"`
+		State     string    `json:"state"`
+		Labels    []string  `json:"labels"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	i.ID = jsonScalarString(raw.ID)
+	i.Number = jsonScalarInt(raw.Number)
+	i.Title = raw.Title
+	i.Body = raw.Body
+	i.Status = raw.Status
+	i.State = raw.State
+	i.Labels = raw.Labels
+	i.CreatedAt = raw.CreatedAt
+	i.UpdatedAt = raw.UpdatedAt
+	return nil
 }
 
 type Issue struct {
@@ -80,6 +112,60 @@ type Issue struct {
 	Author    string    `json:"author"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (i *Issue) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ID        any       `json:"id"`
+		Number    any       `json:"number"`
+		Title     string    `json:"title"`
+		Body      string    `json:"body"`
+		Status    string    `json:"status"`
+		State     string    `json:"state"`
+		Labels    []string  `json:"labels"`
+		Author    string    `json:"author"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	i.ID = jsonScalarString(raw.ID)
+	i.Number = jsonScalarInt(raw.Number)
+	i.Title = raw.Title
+	i.Body = raw.Body
+	i.Status = raw.Status
+	i.State = raw.State
+	i.Labels = raw.Labels
+	i.Author = raw.Author
+	i.CreatedAt = raw.CreatedAt
+	i.UpdatedAt = raw.UpdatedAt
+	return nil
+}
+
+func jsonScalarString(value any) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case float64:
+		return strconv.FormatInt(int64(v), 10)
+	case nil:
+		return ""
+	default:
+		return ""
+	}
+}
+
+func jsonScalarInt(value any) int {
+	switch v := value.(type) {
+	case float64:
+		return int(v)
+	case string:
+		n, _ := strconv.Atoi(v)
+		return n
+	default:
+		return 0
+	}
 }
 
 type Comment struct {

@@ -37,6 +37,7 @@ var commands = []string{
 	"link-check",
 	"stale-index",
 	"sync",
+	"cache",
 	"cache-status",
 	"sync-status", "sync_status",
 	"export", "export-snapshot",
@@ -77,6 +78,7 @@ type queryService interface {
 	BulkSyncIssues(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncWiki(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncAll(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	ResetLiveCache(context.Context, service.ResetLiveCacheRequest) (service.ResetLiveCacheResult, error)
 	CacheStatus(context.Context, service.CacheStatusRequest) (service.CacheStatusResult, error)
 	ExportSnapshot(context.Context, service.ExportSnapshotRequest) (service.ExportSnapshotResult, error)
 	DiffSnapshot(context.Context, service.DiffSnapshotRequest) (service.DiffSnapshotResult, error)
@@ -801,6 +803,24 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, renderSyncText)
+	case "cache":
+		sub, ok := firstArg(args)
+		if !ok {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "cache", Message: "subcommand is required"})
+		}
+		switch sub {
+		case "reset":
+			if !opts.live {
+				return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "live", Message: "cache reset requires --live"})
+			}
+			result, err := svc.ResetLiveCache(ctx, service.ResetLiveCacheRequest{RepoID: opts.repo})
+			if err != nil {
+				return writeError(stderr, opts.format, err)
+			}
+			return render(stdout, opts.format, result, renderResetLiveCacheText)
+		default:
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "cache", Message: "unknown subcommand"})
+		}
 	case "cache-status":
 		result, err := svc.CacheStatus(ctx, service.CacheStatusRequest{RepoID: opts.repo})
 		if err != nil {
@@ -1067,6 +1087,10 @@ func renderChunkQueryText(w io.Writer, result service.ChunkQueryResult) {
 	for _, warning := range result.Warnings {
 		fmt.Fprintf(w, "warning: %s %s\n", warning.Code, warning.Message)
 	}
+}
+
+func renderResetLiveCacheText(w io.Writer, result service.ResetLiveCacheResult) {
+	fmt.Fprintf(w, "repo_id: %s\nreset: %s\n", result.RepoID, result.Reset)
 }
 
 func renderSyncStatusText(w io.Writer, result service.SyncStatusResult) {
@@ -1587,6 +1611,8 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "cache":
+		fmt.Fprintln(w, "Usage: gitcode-mcp cache reset --live --repo REPO")
 	case "cache-status":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO\n\n", command)
 		fmt.Fprintln(w, "Report cache storage health and record counts.")

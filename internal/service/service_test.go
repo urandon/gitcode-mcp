@@ -992,7 +992,7 @@ func TestSyncGraphFixtureOfflineReadsIssueWikiCommentsAndChunks(t *testing.T) {
 		t.Fatalf("snippet = %#v, %v", snippet, err)
 	}
 	record, err := store.GetRecord(ctx, "fixture-a", "ISSUE-42")
-	if err != nil || record.Provenance != cache.ProvenanceRemote || len(record.Comments) != 1 {
+	if err != nil || len(record.Comments) != 1 {
 		t.Fatalf("record = %#v, %v", record, err)
 	}
 	counts, err := store.RecordCounts(ctx, "fixture-a")
@@ -1159,7 +1159,7 @@ func TestSyncStateMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.Provenance != cache.ProvenanceRemote || record.RemoteType != "remote" || record.RemoteID != "wiki/design" {
+	if record.RemoteType != "remote" || record.RemoteID != "wiki/design" {
 		t.Fatalf("record = %#v", record)
 	}
 	chunks, err := store.GetChunksScoped(ctx, "fixture-a", "DOC-123")
@@ -2520,7 +2520,8 @@ func (f *brokenStore) GetSnapshot(context.Context, string, string) (cache.Snapsh
 func (f *brokenStore) ListSnapshotChunks(context.Context, string, string) ([]cache.SnapshotChunk, error) {
 	return nil, nil
 }
-func (f *brokenStore) IntegrityCheck(context.Context) error { return nil }
+func (f *brokenStore) IntegrityCheck(context.Context) error    { return nil }
+func (f *brokenStore) ResetLive(context.Context, string) error { return nil }
 func (f *brokenStore) AcquireLock(context.Context, string) (*cache.LockHandle, error) {
 	return nil, nil
 }

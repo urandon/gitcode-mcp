@@ -16,13 +16,13 @@ func nullableLine(line int) *int {
 }
 
 func sourceSummary(source cache.Source) SourceSummary {
-	return SourceSummary{RepoID: source.RepoID, ID: source.ID, Path: source.Path, RemoteAlias: remoteAlias(source.Aliases), Kind: source.Kind, Title: source.Title, Status: source.Status, UpdatedAt: source.UpdatedAt.UTC()}
+	return SourceSummary{RepoID: source.RepoID, ID: source.ID, Path: source.Path, RemoteAlias: remoteAlias(source.Aliases), Kind: source.Kind, Title: source.Title, Status: source.Status, Provenance: string(source.Provenance), UpdatedAt: source.UpdatedAt.UTC()}
 }
 
 func sourceRecord(source cache.Source, links []cache.Link, backlinks []BacklinkResult) SourceRecord {
 	labels := append([]string(nil), source.Labels...)
 	sort.Strings(labels)
-	return SourceRecord{RepoID: source.RepoID, ID: source.ID, Path: source.Path, RemoteAlias: remoteAlias(source.Aliases), Kind: source.Kind, Title: source.Title, Body: source.Body, Status: source.Status, Labels: labels, Links: linkResults(links), Backlinks: backlinks, UpdatedAt: source.UpdatedAt.UTC()}
+	return SourceRecord{RepoID: source.RepoID, ID: source.ID, Path: source.Path, RemoteAlias: remoteAlias(source.Aliases), Kind: source.Kind, Title: source.Title, Body: source.Body, Status: source.Status, Provenance: string(source.Provenance), Labels: labels, Links: linkResults(links), Backlinks: backlinks, UpdatedAt: source.UpdatedAt.UTC()}
 }
 
 func linkResults(links []cache.Link) []LinkResult {

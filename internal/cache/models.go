@@ -54,6 +54,7 @@ type Store interface {
 	GetSnapshot(context.Context, string, string) (Snapshot, error)
 	ListSnapshotChunks(context.Context, string, string) ([]SnapshotChunk, error)
 	IntegrityCheck(context.Context) error
+	ResetLive(context.Context, string) error
 	AcquireLock(context.Context, string) (*LockHandle, error)
 	ReleaseLock(context.Context, *LockHandle) error
 	AcquireWriter(context.Context, WriterRequest) (*WriterLease, error)
@@ -89,6 +90,8 @@ const (
 	ProvenanceRemote     Provenance = "remote"
 	ProvenanceProjection Provenance = "projection"
 	ProvenanceBridge     Provenance = "bridge"
+	ProvenanceFixture    Provenance = "fixture"
+	ProvenanceLive       Provenance = "live"
 )
 
 type Record struct {
@@ -222,10 +225,11 @@ type RecordCounts struct {
 }
 
 type RecordFilter struct {
-	RepoID string
-	Type   string
-	Status string
-	Limit  int
+	RepoID     string
+	Type       string
+	Status     string
+	Provenance Provenance
+	Limit      int
 }
 
 type RecordGraph struct {
@@ -241,6 +245,7 @@ type RecordGraph struct {
 
 type SyncGraph struct {
 	RepoID          string
+	Provenance      Provenance
 	Record          Record
 	Comments        []RecordComment
 	Identities      []Identity
@@ -260,33 +265,49 @@ type Source struct {
 	Status      string
 	Labels      []string
 	ContentHash string
+	Provenance  Provenance
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	Aliases     []Identity
 }
 
+func (s Source) GetProvenance() string {
+	return string(s.Provenance)
+}
+
 type SourceFilter struct {
-	RepoID string
-	Kind   string
-	Status string
-	Limit  int
+	RepoID     string
+	Kind       string
+	Status     string
+	Provenance Provenance
+	Limit      int
+}
+
+func (f *SourceFilter) SetProvenance(provenance Provenance) {
+	f.Provenance = provenance
 }
 
 type SearchQuery struct {
-	RepoID string
-	Query  string
-	Kind   string
-	Limit  int
+	RepoID     string
+	Query      string
+	Kind       string
+	Provenance Provenance
+	Limit      int
+}
+
+func (q *SearchQuery) SetProvenance(provenance Provenance) {
+	q.Provenance = provenance
 }
 
 type SearchResult struct {
-	RepoID  string
-	ID      string
-	Path    string
-	Title   string
-	Snippet string
-	Score   float64
-	Line    int
+	RepoID     string
+	ID         string
+	Path       string
+	Title      string
+	Snippet    string
+	Score      float64
+	Line       int
+	Provenance Provenance
 }
 
 type Identity struct {
