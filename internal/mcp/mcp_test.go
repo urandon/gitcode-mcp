@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/service"
 )
@@ -76,8 +77,18 @@ func TestMCPErrorOutputCanonicalFailureClass(t *testing.T) {
 		err  error
 		want string
 	}{
-		{name: "SCN-MCP-ERROR-OUTPUT-01 auth", err: service.ErrSyncFailure{Mode: "live_auth_failure", Target: "issue:*", Cause: gitcode.ErrAuthExpired{Endpoint: "/api/v5/repos/owner/repo/issues", Status: http.StatusUnauthorized}}, want: "api_validation"},
-		{name: "SCN-DIAG-FAILURE-SOURCE-03 write local body limit", err: service.ErrWriteFailure{Code: "write_provider_error", PayloadSource: "local_body_limit", Cause: gitcode.ErrPayloadTooLarge{Endpoint: "/api/v5/repos/owner/repo/issues", Limit: 5, Size: 6, Source: "local_body_limit"}}, want: "schema_decode"},
+		{name: "SCN-MCP-ERROR-OUTPUT-401", err: service.ErrSyncFailure{Mode: "live_auth_failure", Target: "issue:*", Cause: gitcode.ErrAuthExpired{Endpoint: "/api/v5/repos/owner/repo/issues", Status: http.StatusUnauthorized}}, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-MCP-ERROR-OUTPUT-400", err: gitcode.ErrAPIValidation{Endpoint: "/api/v5/repos/owner/repo/issues", Status: http.StatusBadRequest}, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-MCP-ERROR-OUTPUT-404", err: service.ErrSyncFailure{Mode: "remote_not_found", Target: "issue:404", Cause: gitcode.ErrRemoteNotFound{Endpoint: "/api/v5/repos/owner/repo/issues/404", Alias: "issue:404"}}, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-MCP-ERROR-OUTPUT-409", err: service.ErrSyncFailure{Mode: "conflict", Target: "issue:7", Cause: gitcode.ErrConflict{Endpoint: "/api/v5/repos/owner/repo/issues/7", Status: http.StatusConflict}}, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-MCP-ERROR-OUTPUT-413", err: service.ErrSyncFailure{Mode: "payload_too_large", Target: "issue:*", PayloadSource: "remote_status", Cause: gitcode.ErrPayloadTooLarge{Endpoint: "/api/v5/repos/owner/repo/issues", Limit: 5, Size: 6, Source: "remote_status"}}, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-MCP-ERROR-OUTPUT-429", err: service.ErrSyncFailure{Mode: "rate_limited", Target: "issue:*", Cause: gitcode.ErrRateLimited{Endpoint: "/api/v5/repos/owner/repo/issues", Attempts: 1}}, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-MCP-ERROR-OUTPUT-MALFORMED-JSON", err: gitcode.ErrPartialResponse{Endpoint: "/api/v5/repos/owner/repo/issues", Message: "malformed JSON"}, want: string(diagnostics.CodeSchemaDecode)},
+		{name: "SCN-MCP-ERROR-OUTPUT-SCHEMA-MISMATCH", err: &gitcode.ErrSchemaDecode{Field: "number", Message: "number is required"}, want: string(diagnostics.CodeSchemaDecode)},
+		{name: "SCN-MCP-ERROR-OUTPUT-PARTIAL-RESPONSE", err: service.ErrSyncFailure{Mode: "partial_response", Target: "issue:*", Cause: gitcode.ErrPartialResponse{Endpoint: "/api/v5/repos/owner/repo/issues", Expected: 10, Got: 5}}, want: string(diagnostics.CodeSchemaDecode)},
+		{name: "SCN-MCP-ERROR-OUTPUT-LOCAL-BODY-LIMIT", err: service.ErrWriteFailure{Code: "write_provider_error", PayloadSource: "local_body_limit", Cause: gitcode.ErrPayloadTooLarge{Endpoint: "/api/v5/repos/owner/repo/issues", Limit: 5, Size: 6, Source: "local_body_limit"}}, want: string(diagnostics.CodeSchemaDecode)},
+		{name: "SCN-MCP-ERROR-OUTPUT-TIMEOUT", err: service.ErrSyncFailure{Mode: "network_timeout", Target: "issue:*", Cause: gitcode.ErrNetworkUnavailable{Endpoint: "/api/v5/repos/owner/repo/issues", Attempts: 1}}, want: string(diagnostics.CodeLiveTransportFailure)},
+		{name: "SCN-MCP-ERROR-OUTPUT-500", err: gitcode.ErrNetworkUnavailable{Endpoint: "/api/v5/repos/owner/repo/issues", Status: http.StatusInternalServerError, Attempts: 1}, want: string(diagnostics.CodeLiveTransportFailure)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

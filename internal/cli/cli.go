@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1225,7 +1226,7 @@ func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {
 	}
 	var syncErr service.ErrSyncFailure
 	if errors.As(err, &syncErr) {
-		ctx.HTTPAttempted = syncErr.Mode == "live_auth_failure" || syncErr.Mode == "network_timeout" || syncErr.Mode == "rate_limited" || syncErr.Mode == "partial_response" || syncErr.Mode == "live_graph_invalid" || syncErr.Mode == "payload_too_large" || syncErr.Mode == "remote_not_found" || syncErr.Mode == "conflict"
+		ctx.HTTPAttempted = syncErr.Mode == "live_auth_failure" || syncErr.Mode == "network_timeout" || syncErr.Mode == "rate_limited" || syncErr.Mode == "partial_response" || syncErr.Mode == "live_graph_invalid" || syncErr.Mode == "payload_too_large" || syncErr.Mode == "remote_not_found" || syncErr.Mode == "conflict" || syncErr.Mode == "remote_collision"
 		ctx.UnsupportedPayload = syncErr.Mode == "live_graph_invalid"
 		ctx.PayloadSource = syncErr.PayloadSource
 		ctx.FailureSource = syncErr.PayloadSource
@@ -1246,6 +1247,34 @@ func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {
 		ctx.HTTPAttempted = true
 		ctx.HTTPStatus = network.Status
 		ctx.TransportFailure = true
+	}
+	var notFound gitcode.ErrNotFound
+	if errors.As(err, &notFound) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = http.StatusNotFound
+	}
+	var conflict gitcode.ErrConflict
+	if errors.As(err, &conflict) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = conflict.Status
+		if ctx.HTTPStatus == 0 {
+			ctx.HTTPStatus = http.StatusConflict
+		}
+	}
+	var remoteCollision gitcode.ErrRemoteCollision
+	if errors.As(err, &remoteCollision) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = http.StatusConflict
+	}
+	var remoteNotFound gitcode.ErrRemoteNotFound
+	if errors.As(err, &remoteNotFound) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = http.StatusNotFound
+	}
+	var rateLimited gitcode.ErrRateLimited
+	if errors.As(err, &rateLimited) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = http.StatusTooManyRequests
 	}
 	var auth gitcode.ErrAuthExpired
 	if errors.As(err, &auth) {

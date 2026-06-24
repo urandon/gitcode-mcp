@@ -7,9 +7,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type mockGitCodeAPIAuthMode string
+
+type mockGitCodeAPIFailureMode string
 
 const (
 	mockGitCodeAPIAuthAccept    mockGitCodeAPIAuthMode = "accept"
@@ -17,10 +20,25 @@ const (
 	mockGitCodeAPIAuthReject403 mockGitCodeAPIAuthMode = "reject403"
 )
 
+const (
+	mockGitCodeAPIFailureNone           mockGitCodeAPIFailureMode = ""
+	mockGitCodeAPIFailure400            mockGitCodeAPIFailureMode = "400"
+	mockGitCodeAPIFailure404            mockGitCodeAPIFailureMode = "404"
+	mockGitCodeAPIFailure409            mockGitCodeAPIFailureMode = "409"
+	mockGitCodeAPIFailure413            mockGitCodeAPIFailureMode = "413"
+	mockGitCodeAPIFailure429            mockGitCodeAPIFailureMode = "429"
+	mockGitCodeAPIFailureMalformedJSON  mockGitCodeAPIFailureMode = "malformed_json"
+	mockGitCodeAPIFailureSchemaMismatch mockGitCodeAPIFailureMode = "schema_mismatch"
+	mockGitCodeAPIFailurePartial        mockGitCodeAPIFailureMode = "partial_response"
+	mockGitCodeAPIFailureTimeout        mockGitCodeAPIFailureMode = "timeout"
+	mockGitCodeAPIFailure500            mockGitCodeAPIFailureMode = "500"
+)
+
 type MockGitCodeAPI struct {
 	server        *httptest.Server
 	expectedToken string
 	authMode      mockGitCodeAPIAuthMode
+	failureMode   mockGitCodeAPIFailureMode
 	owner         string
 	repo          string
 	mu            sync.Mutex
@@ -71,6 +89,10 @@ func MockGitCodeAPIAuthMode(mode mockGitCodeAPIAuthMode) func(*MockGitCodeAPI) {
 	return func(api *MockGitCodeAPI) { api.authMode = mode }
 }
 
+func MockGitCodeAPIFailureMode(mode mockGitCodeAPIFailureMode) func(*MockGitCodeAPI) {
+	return func(api *MockGitCodeAPI) { api.failureMode = mode }
+}
+
 func (api *MockGitCodeAPI) BaseURL() string { return api.server.URL }
 
 func (api *MockGitCodeAPI) Close() { api.server.Close() }
@@ -117,6 +139,9 @@ func (api *MockGitCodeAPI) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "live auth failure", status)
 		return
 	}
+	if api.writeFailure(w, operation) {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	switch operation {
 	case "list_issues":
@@ -138,6 +163,41 @@ func (api *MockGitCodeAPI) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (api *MockGitCodeAPI) writeFailure(w http.ResponseWriter, operation string) bool {
+	if api.failureMode == mockGitCodeAPIFailureNone || operation != "list_issues" {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	switch api.failureMode {
+	case mockGitCodeAPIFailure400:
+		http.Error(w, "bad request", http.StatusBadRequest)
+	case mockGitCodeAPIFailure404:
+		http.Error(w, "not found", http.StatusNotFound)
+	case mockGitCodeAPIFailure409:
+		http.Error(w, "conflict", http.StatusConflict)
+	case mockGitCodeAPIFailure413:
+		http.Error(w, "too large", http.StatusRequestEntityTooLarge)
+	case mockGitCodeAPIFailure429:
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+	case mockGitCodeAPIFailureMalformedJSON:
+		fmt.Fprint(w, `[{"id":"MOCK-ISSUE-100","number":`)
+	case mockGitCodeAPIFailureSchemaMismatch:
+		fmt.Fprint(w, `[{"id":"MOCK-ISSUE-100","title":"missing number"}]`)
+	case mockGitCodeAPIFailurePartial:
+		w.Header().Set("Content-Length", "100")
+		fmt.Fprint(w, `[{"id":"MOCK-ISSUE-100"`)
+	case mockGitCodeAPIFailureTimeout:
+		time.Sleep(100 * time.Millisecond)
+		fmt.Fprint(w, `[]`)
+	case mockGitCodeAPIFailure500:
+		http.Error(w, "server error", http.StatusInternalServerError)
+	default:
+		return false
+	}
+	return true
 }
 
 func (api *MockGitCodeAPI) operation(r *http.Request) string {

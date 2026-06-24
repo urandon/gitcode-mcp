@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
 )
@@ -1266,6 +1267,37 @@ func TestSyncRetry(t *testing.T) {
 	}
 	if event == nil || event.Status != "succeeded" {
 		t.Fatalf("event=%#v", event)
+	}
+}
+
+func TestProductPathWrappedGitCodeErrorsClassify(t *testing.T) {
+	badCodes := map[diagnostics.Code]bool{diagnostics.CodeLiveTransportFailure: true, diagnostics.CodeConfigurationError: true, diagnostics.CodeLiveAPIFailure: true, diagnostics.CodeLiveAuthFailure: true, diagnostics.CodeUnsupportedMockPayload: true}
+	tests := []struct {
+		name string
+		err  error
+		ctx  diagnostics.CommandContext
+		want diagnostics.Code
+	}{
+		{name: "SCN-DIAG-PRODUCT-WRAP-01 direct not found", err: gitcode.ErrNotFound{Endpoint: "/issues/404"}, ctx: diagnostics.CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusNotFound, HTTPAttempted: true}, want: diagnostics.CodeAPIFailure},
+		{name: "SCN-DIAG-PRODUCT-WRAP-02 sync conflict", err: ErrSyncFailure{Mode: "conflict", Target: "issue:7", Endpoint: "/issues/7", Cause: gitcode.ErrConflict{Endpoint: "/issues/7", Status: http.StatusConflict}}, ctx: diagnostics.CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusConflict, HTTPAttempted: true}, want: diagnostics.CodeAPIFailure},
+		{name: "SCN-DIAG-PRODUCT-WRAP-03 sync remote collision", err: ErrSyncFailure{Mode: "remote_collision", Target: "issue:7", Endpoint: "/issues/7", Cause: gitcode.ErrRemoteCollision{Endpoint: "/issues/7", Alias: "issue:7", ExistingID: "ISSUE-7", NewID: "ISSUE-8"}}, ctx: diagnostics.CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusConflict, HTTPAttempted: true}, want: diagnostics.CodeAPIFailure},
+		{name: "SCN-DIAG-PRODUCT-WRAP-04 sync remote not found", err: ErrSyncFailure{Mode: "remote_not_found", Target: "issue:404", Endpoint: "/issues/404", Cause: gitcode.ErrRemoteNotFound{Endpoint: "/issues/404", Alias: "issue:404"}}, ctx: diagnostics.CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusNotFound, HTTPAttempted: true}, want: diagnostics.CodeAPIFailure},
+		{name: "SCN-DIAG-PRODUCT-WRAP-05 sync remote payload too large", err: ErrSyncFailure{Mode: "payload_too_large", Target: "issue:*", Endpoint: "/issues", PayloadSource: "remote_status", Cause: gitcode.ErrPayloadTooLarge{Endpoint: "/issues", Limit: 10, Size: 20, Source: "remote_status"}}, ctx: diagnostics.CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusRequestEntityTooLarge, HTTPAttempted: true, FailureSource: "remote_status"}, want: diagnostics.CodeAPIFailure},
+		{name: "SCN-DIAG-PRODUCT-WRAP-06 sync local payload too large", err: ErrSyncFailure{Mode: "payload_too_large", Target: "issue:*", Endpoint: "/issues", PayloadSource: "local_body_limit", Cause: gitcode.ErrPayloadTooLarge{Endpoint: "/issues", Limit: 10, Size: 20, Source: "local_body_limit"}}, ctx: diagnostics.CommandContext{ProviderMode: "live-http", HTTPAttempted: true, FailureSource: "local_body_limit", LocalPayloadTooLarge: true}, want: diagnostics.CodeSchemaDecode},
+		{name: "SCN-DIAG-PRODUCT-WRAP-07 sync partial response", err: ErrSyncFailure{Mode: "partial_response", Target: "issue:*", Endpoint: "/issues", Cause: gitcode.ErrPartialResponse{Endpoint: "/issues", Expected: 10, Got: 5}}, ctx: diagnostics.CommandContext{ProviderMode: "live-http", HTTPAttempted: true, FailureSource: "partial_response", SchemaDecodeFailure: true}, want: diagnostics.CodeSchemaDecode},
+		{name: "SCN-DIAG-PRODUCT-WRAP-08 sync rate limited", err: ErrSyncFailure{Mode: "rate_limited", Target: "issue:*", Endpoint: "/issues", RetryAfter: time.Second, Cause: gitcode.ErrRateLimited{Endpoint: "/issues", RetryAfter: time.Second, Attempts: 1}}, ctx: diagnostics.CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusTooManyRequests, HTTPAttempted: true}, want: diagnostics.CodeAPIFailure},
+		{name: "SCN-DIAG-PRODUCT-WRAP-09 write local payload too large", err: ErrWriteFailure{Code: "write_provider_error", RepoID: "fixture-a", PayloadSource: "local_body_limit", Cause: gitcode.ErrPayloadTooLarge{Endpoint: "/issues", Limit: 10, Size: 20, Source: "local_body_limit"}}, ctx: diagnostics.CommandContext{ProviderMode: "live-http", HTTPAttempted: true, FailureSource: "local_body_limit", LocalPayloadTooLarge: true}, want: diagnostics.CodeSchemaDecode},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := diagnostics.Classify(tt.err, tt.ctx)
+			if got.Code != tt.want {
+				t.Fatalf("got %s want %s", got.Code, tt.want)
+			}
+			if badCodes[got.Code] && (tt.want == diagnostics.CodeAPIFailure || tt.want == diagnostics.CodeSchemaDecode) {
+				t.Fatalf("decommissioned visible class returned: %s", got.Code)
+			}
+		})
 	}
 }
 

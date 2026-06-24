@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 
@@ -1218,12 +1219,17 @@ func mcpDiagnostic(err error) (diagnostics.Diagnostic, bool) {
 	var apiErr gitcode.ErrAPIValidation
 	var schemaErr *gitcode.ErrSchemaDecode
 	var networkErr gitcode.ErrNetworkUnavailable
+	var notFoundErr gitcode.ErrNotFound
+	var conflictErr gitcode.ErrConflict
+	var remoteCollisionErr gitcode.ErrRemoteCollision
+	var remoteNotFoundErr gitcode.ErrRemoteNotFound
+	var rateLimitedErr gitcode.ErrRateLimited
 	var authErr gitcode.ErrAuthExpired
 	var forbiddenErr gitcode.ErrForbidden
 	var partialErr gitcode.ErrPartialResponse
 	var tooLargeErr gitcode.ErrPayloadTooLarge
 	if errors.As(err, &syncErr) {
-		ctx.HTTPAttempted = syncErr.Mode == "live_auth_failure" || syncErr.Mode == "network_timeout" || syncErr.Mode == "rate_limited" || syncErr.Mode == "partial_response" || syncErr.Mode == "live_graph_invalid" || syncErr.Mode == "payload_too_large" || syncErr.Mode == "remote_not_found" || syncErr.Mode == "conflict"
+		ctx.HTTPAttempted = syncErr.Mode == "live_auth_failure" || syncErr.Mode == "network_timeout" || syncErr.Mode == "rate_limited" || syncErr.Mode == "partial_response" || syncErr.Mode == "live_graph_invalid" || syncErr.Mode == "payload_too_large" || syncErr.Mode == "remote_not_found" || syncErr.Mode == "conflict" || syncErr.Mode == "remote_collision"
 		ctx.FailureSource = syncErr.PayloadSource
 		ctx.LocalPayloadTooLarge = syncErr.Mode == "payload_too_large" && syncErr.PayloadSource == "local_body_limit"
 		ctx.SchemaDecodeFailure = syncErr.Mode == "partial_response" || syncErr.Mode == "schema_decode"
@@ -1261,6 +1267,34 @@ func mcpDiagnostic(err error) (diagnostics.Diagnostic, bool) {
 		ctx.HTTPAttempted = true
 		ctx.TransportFailure = true
 		ctx.HTTPStatus = networkErr.Status
+		return diagnostics.Classify(err, ctx), true
+	}
+	if errors.As(err, &notFoundErr) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = http.StatusNotFound
+		return diagnostics.Classify(err, ctx), true
+	}
+	if errors.As(err, &conflictErr) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = conflictErr.Status
+		if ctx.HTTPStatus == 0 {
+			ctx.HTTPStatus = http.StatusConflict
+		}
+		return diagnostics.Classify(err, ctx), true
+	}
+	if errors.As(err, &remoteCollisionErr) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = http.StatusConflict
+		return diagnostics.Classify(err, ctx), true
+	}
+	if errors.As(err, &remoteNotFoundErr) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = http.StatusNotFound
+		return diagnostics.Classify(err, ctx), true
+	}
+	if errors.As(err, &rateLimitedErr) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = http.StatusTooManyRequests
 		return diagnostics.Classify(err, ctx), true
 	}
 	if errors.As(err, &authErr) {
