@@ -22,6 +22,8 @@ type Client interface {
 	DeleteWikiPage(context.Context, DeleteWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
 	AddLabel(context.Context, LabelRequest, WriteOptions) (WriteResult[Issue], error)
 	RemoveLabel(context.Context, LabelRequest, WriteOptions) (WriteResult[Issue], error)
+	ListMilestones(context.Context, MilestoneListRequest) (Page[Milestone], error)
+	GetMilestone(context.Context, MilestoneRequest) (Milestone, error)
 }
 
 type Config struct {

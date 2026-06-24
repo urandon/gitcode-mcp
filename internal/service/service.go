@@ -187,6 +187,14 @@ func (sanitizedFixtureClient) RemoveLabel(context.Context, gitcode.LabelRequest,
 	return gitcode.WriteResult[gitcode.Issue]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
+func (sanitizedFixtureClient) ListMilestones(context.Context, gitcode.MilestoneListRequest) (gitcode.Page[gitcode.Milestone], error) {
+	return gitcode.Page[gitcode.Milestone]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
+}
+
+func (sanitizedFixtureClient) GetMilestone(context.Context, gitcode.MilestoneRequest) (gitcode.Milestone, error) {
+	return gitcode.Milestone{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
+}
+
 func fixtureNow() time.Time {
 	return time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
 }

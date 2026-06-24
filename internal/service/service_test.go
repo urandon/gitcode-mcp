@@ -2402,6 +2402,14 @@ func (f *fakeGitCodeClient) RemoveLabel(context.Context, gitcode.LabelRequest, g
 	return gitcode.WriteResult[gitcode.Issue]{}, nil
 }
 
+func (f *fakeGitCodeClient) ListMilestones(context.Context, gitcode.MilestoneListRequest) (gitcode.Page[gitcode.Milestone], error) {
+	return gitcode.Page[gitcode.Milestone]{}, nil
+}
+
+func (f *fakeGitCodeClient) GetMilestone(context.Context, gitcode.MilestoneRequest) (gitcode.Milestone, error) {
+	return gitcode.Milestone{}, nil
+}
+
 var _ gitcode.Client = (*fakeGitCodeClient)(nil)
 
 type writeRefreshFailStore struct {

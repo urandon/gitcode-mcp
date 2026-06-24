@@ -3,6 +3,7 @@ package gitcode
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -400,4 +401,195 @@ type LabelRequest struct {
 	Repo   string `json:"-"`
 	Number int    `json:"-"`
 	Label  string `json:"label"`
+}
+
+type MilestoneListRequest struct {
+	Owner   string
+	Repo    string
+	State   string
+	Page    int
+	PerPage int
+}
+
+type MilestoneRequest struct {
+	Owner string
+	Repo  string
+	ID    int
+}
+
+type Milestone struct {
+	RemoteID  string `json:"-"`
+	SourceID  string `json:"-"`
+	Title     string `json:"-"`
+	Body      string `json:"-"`
+	Status    string `json:"-"`
+	DueOn     string `json:"-"`
+	HTMLURL   string `json:"-"`
+	CreatedAt string `json:"-"`
+	UpdatedAt string `json:"-"`
+}
+
+func (m *Milestone) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ID          any    `json:"id"`
+		Title       string `json:"title"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Body        string `json:"body"`
+		State       string `json:"state"`
+		Status      string `json:"status"`
+		DueOn       string `json:"due_on"`
+		DueDate     string `json:"due_date"`
+		HTMLURL     string `json:"html_url"`
+		CreatedAt   string `json:"created_at"`
+		UpdatedAt   string `json:"updated_at"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	var err error
+	m.RemoteID, err = decodeMilestoneID(raw.ID)
+	if err != nil {
+		m.RemoteID = ""
+		return err
+	}
+	if strings.TrimSpace(raw.Title) == "" {
+		if strings.TrimSpace(raw.Name) != "" {
+			return &ErrSchemaDecode{Field: "milestone.title", Expected: "non-empty string", Received: "missing", Message: "title is required; name alone is not accepted"}
+		}
+		return &ErrSchemaDecode{Field: "milestone.title", Expected: "non-empty string", Received: "missing"}
+	}
+	m.SourceID = "MILESTONE-" + m.RemoteID
+	m.Title = raw.Title
+	if strings.TrimSpace(raw.Description) != "" {
+		m.Body = raw.Description
+	} else {
+		m.Body = raw.Body
+	}
+	switch r := any(raw.Description).(type) {
+	case string:
+		break
+	case nil:
+		break
+	default:
+		return &ErrSchemaDecode{Field: "milestone.description", Expected: "string or absent", Received: fmt.Sprintf("type %T", r)}
+	}
+	switch r := any(raw.Body).(type) {
+	case string:
+		break
+	case nil:
+		break
+	default:
+		return &ErrSchemaDecode{Field: "milestone.body", Expected: "string or absent", Received: fmt.Sprintf("type %T", r)}
+	}
+	m.Status, err = decodeMilestoneStatus(raw.State, raw.Status)
+	if err != nil {
+		return err
+	}
+	m.DueOn, err = decodeMilestoneDate(raw.DueOn, raw.DueDate)
+	if err != nil {
+		return err
+	}
+	if raw.CreatedAt != "" {
+		if !isValidTimestamp(raw.CreatedAt) {
+			return &ErrSchemaDecode{Field: "milestone.created_at", Expected: "RFC3339 timestamp or absent", Received: fmt.Sprintf("%q", raw.CreatedAt)}
+		}
+		m.CreatedAt = raw.CreatedAt
+	}
+	if raw.UpdatedAt != "" {
+		if !isValidTimestamp(raw.UpdatedAt) {
+			return &ErrSchemaDecode{Field: "milestone.updated_at", Expected: "RFC3339 timestamp or absent", Received: fmt.Sprintf("%q", raw.UpdatedAt)}
+		}
+		m.UpdatedAt = raw.UpdatedAt
+	}
+	m.HTMLURL = raw.HTMLURL
+	return nil
+}
+
+func decodeMilestoneID(value any) (string, error) {
+	switch v := value.(type) {
+	case string:
+		if v == "" {
+			return "", &ErrSchemaDecode{Field: "milestone.id", Expected: "non-empty decimal string", Received: "empty string"}
+		}
+		if _, err := strconv.Atoi(v); err != nil {
+			return "", &ErrSchemaDecode{Field: "milestone.id", Expected: "decimal integer string", Received: fmt.Sprintf("%q", v)}
+		}
+		// reject "0" and negative
+		n, _ := strconv.Atoi(v)
+		if n == 0 {
+			return "", &ErrSchemaDecode{Field: "milestone.id", Expected: "positive integer", Received: fmt.Sprintf("%q", v)}
+		}
+		return v, nil
+	case float64:
+		if v == 0 {
+			return "", &ErrSchemaDecode{Field: "milestone.id", Expected: "non-empty positive integer", Received: "zero"}
+		}
+		if v != float64(int64(v)) {
+			return "", &ErrSchemaDecode{Field: "milestone.id", Expected: "integer value", Received: fmt.Sprintf("fractional %.1f", v)}
+		}
+		if v < 0 {
+			return "", &ErrSchemaDecode{Field: "milestone.id", Expected: "positive integer", Received: fmt.Sprintf("%.0f", v)}
+		}
+		return strconv.FormatInt(int64(v), 10), nil
+	case nil:
+		return "", &ErrSchemaDecode{Field: "milestone.id", Expected: "non-empty positive integer", Received: "nil"}
+	default:
+		return "", &ErrSchemaDecode{Field: "milestone.id", Expected: "number or string", Received: fmt.Sprintf("type %T", v)}
+	}
+}
+
+func decodeMilestoneStatus(state, status string) (string, error) {
+	val := strings.ToLower(strings.TrimSpace(state))
+	if val == "" {
+		val = strings.ToLower(strings.TrimSpace(status))
+	}
+	switch val {
+	case "open", "active":
+		return "open", nil
+	case "closed":
+		return "closed", nil
+	case "":
+		return "open", nil
+	default:
+		field := "milestone.state"
+		if strings.TrimSpace(state) == "" {
+			field = "milestone.status"
+		}
+		return "", &ErrSchemaDecode{
+			Field:    field,
+			Expected: "open, active, closed, or absent",
+			Received: fmt.Sprintf("%q", val),
+		}
+	}
+}
+
+func decodeMilestoneDate(dueOn, dueDate string) (string, error) {
+	val := strings.TrimSpace(dueOn)
+	if val == "" {
+		val = strings.TrimSpace(dueDate)
+	}
+	if val == "" {
+		return "", nil
+	}
+	if t, err := time.Parse(time.RFC3339, val); err == nil {
+		return t.Format("2006-01-02"), nil
+	}
+	if t, err := time.Parse("2006-01-02", val); err == nil {
+		return t.Format("2006-01-02"), nil
+	}
+	return "", &ErrSchemaDecode{Field: "milestone.due_on", Expected: "YYYY-MM-DD or RFC3339", Received: fmt.Sprintf("%q", val)}
+}
+
+func isValidTimestamp(val string) bool {
+	_, err := time.Parse(time.RFC3339, val)
+	return err == nil
+}
+
+func milestoneListQuery(req MilestoneListRequest) url.Values {
+	values := url.Values{}
+	if req.State != "" {
+		values.Set("state", req.State)
+	}
+	return values
 }

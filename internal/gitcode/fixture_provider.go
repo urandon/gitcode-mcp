@@ -211,6 +211,14 @@ func (p *fixtureProvider) DeleteWikiPage(context.Context, DeleteWikiPageRequest,
 	return WriteResult[WikiPage]{}, FixtureReadOnlyError("DeleteWikiPage")
 }
 
+func (p *fixtureProvider) ListMilestones(context.Context, MilestoneListRequest) (Page[Milestone], error) {
+	return Page[Milestone]{}, FixtureReadOnlyError("ListMilestones")
+}
+
+func (p *fixtureProvider) GetMilestone(context.Context, MilestoneRequest) (Milestone, error) {
+	return Milestone{}, FixtureReadOnlyError("GetMilestone")
+}
+
 func (p *fixtureProvider) scenarioError(endpoint string) error {
 	switch p.cfg.Scenario {
 	case "auth-error":

@@ -258,6 +258,36 @@ func (c *HTTPClient) RemoveLabel(ctx context.Context, req LabelRequest, opts Wri
 	return writeJSON[Issue](ctx, c, http.MethodDelete, removeLabelEndpoint(req.Owner, req.Repo, req.Number, req.Label), "RemoveLabel", req.Owner+"/"+req.Repo+"/"+strconv.Itoa(req.Number)+"/"+req.Label, req, opts)
 }
 
+func (c *HTTPClient) ListMilestones(ctx context.Context, req MilestoneListRequest) (Page[Milestone], error) {
+	if err := validateReadRepo(req.Owner, req.Repo); err != nil {
+		return Page[Milestone]{}, err
+	}
+	endpoint := listMilestonesEndpoint(req.Owner, req.Repo)
+	items, page, err := getPaged[Milestone](ctx, c, endpoint, milestoneListQuery(req), PageState{Page: req.Page, PerPage: req.PerPage})
+	if err != nil {
+		return Page[Milestone]{}, err
+	}
+	return Page[Milestone]{Items: items, Page: page.Page, PerPage: page.PerPage}, nil
+}
+
+func (c *HTTPClient) GetMilestone(ctx context.Context, req MilestoneRequest) (Milestone, error) {
+	if err := validateMilestoneRequest(req); err != nil {
+		return Milestone{}, err
+	}
+	endpoint := getMilestoneEndpoint(req.Owner, req.Repo, req.ID)
+	var milestone Milestone
+	if err := c.getJSON(ctx, endpoint, nil, &milestone); err != nil {
+		return Milestone{}, err
+	}
+	if milestone.RemoteID == "" {
+		return Milestone{}, &ErrSchemaDecode{Field: "milestone.id", Expected: "non-empty positive integer", Received: "missing"}
+	}
+	if strconv.Itoa(req.ID) != milestone.RemoteID {
+		return Milestone{}, &ErrSchemaDecode{Field: "milestone.id", Expected: strconv.Itoa(req.ID), Received: milestone.RemoteID, Message: "milestone response id does not match route id"}
+	}
+	return milestone, nil
+}
+
 type wikiTraversal struct {
 	client    *HTTPClient
 	owner     string
@@ -461,6 +491,16 @@ func validateReadRepo(owner, repo string) error {
 	}
 	if strings.TrimSpace(repo) == "" {
 		return ErrValidationFailed{Field: "repo", Message: "repo is required"}
+	}
+	return nil
+}
+
+func validateMilestoneRequest(req MilestoneRequest) error {
+	if err := validateReadRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if req.ID <= 0 {
+		return ErrValidationFailed{Field: "milestone.id", Message: "positive milestone id is required"}
 	}
 	return nil
 }

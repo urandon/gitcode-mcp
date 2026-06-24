@@ -82,6 +82,14 @@ func addLabelEndpoint(owner, repo string, number int) string {
 	return endpointPath("/api/v5/repos/%s/%s/issues/%d/labels", owner, repo, number)
 }
 
+func listMilestonesEndpoint(owner, repo string) string {
+	return endpointPath("/api/v5/repos/%s/%s/milestones", owner, repo)
+}
+
+func getMilestoneEndpoint(owner, repo string, id int) string {
+	return endpointPath("/api/v5/repos/%s/%s/milestones/%d", owner, repo, id)
+}
+
 func removeLabelEndpoint(owner, repo string, number int, label string) string {
 	return endpointPath("/api/v5/repos/%s/%s/issues/%d/labels/%s", owner, repo, number, label)
 }

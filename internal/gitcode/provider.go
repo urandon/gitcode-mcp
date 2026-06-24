@@ -25,6 +25,8 @@ type Provider interface {
 	CreateWikiPage(context.Context, CreateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
 	UpdateWikiPage(context.Context, UpdateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
 	DeleteWikiPage(context.Context, DeleteWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
+	ListMilestones(context.Context, MilestoneListRequest) (Page[Milestone], error)
+	GetMilestone(context.Context, MilestoneRequest) (Milestone, error)
 }
 
 type ProviderMode string
@@ -220,6 +222,20 @@ func (p liveProvider) CreateIssueComment(ctx context.Context, req CreateIssueCom
 	return p.HTTPClient.CreateIssueComment(ctx, req, opts)
 }
 
+func (p liveProvider) ListMilestones(ctx context.Context, req MilestoneListRequest) (Page[Milestone], error) {
+	if err := p.matrix.Preflight(ProductAreaMilestones); err != nil {
+		return Page[Milestone]{}, err
+	}
+	return p.HTTPClient.ListMilestones(ctx, req)
+}
+
+func (p liveProvider) GetMilestone(ctx context.Context, req MilestoneRequest) (Milestone, error) {
+	if err := p.matrix.Preflight(ProductAreaMilestones); err != nil {
+		return Milestone{}, err
+	}
+	return p.HTTPClient.GetMilestone(ctx, req)
+}
+
 type unavailableProvider struct {
 	reason string
 }
@@ -272,6 +288,13 @@ func (p unavailableProvider) UpdateWikiPage(context.Context, UpdateWikiPageReque
 }
 func (p unavailableProvider) DeleteWikiPage(context.Context, DeleteWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error) {
 	return WriteResult[WikiPage]{}, p.err()
+}
+
+func (p unavailableProvider) ListMilestones(context.Context, MilestoneListRequest) (Page[Milestone], error) {
+	return Page[Milestone]{}, p.err()
+}
+func (p unavailableProvider) GetMilestone(context.Context, MilestoneRequest) (Milestone, error) {
+	return Milestone{}, p.err()
 }
 
 func IsProviderUnavailable(err error) bool {
