@@ -19,6 +19,7 @@ Iteration 5 improves live read normalization and live-cache visibility, but it i
 - Live issue identities looked correct in the cache: `ISSUE-1` through `ISSUE-10`; no `ISSUE-0` identity regression was observed.
 - Cached live records were surfaced as `provenance: live`.
 - After moving the Codex MCP cache to a writable path and seeding it through the CLI, the MCP read tools were callable and could list/search live cached polygon issues.
+- The private polygon wiki already had content, so previous wiki CRUD smoke only proves behavior for an initialized wiki repository.
 
 ## High Priority Gaps
 
@@ -116,7 +117,33 @@ Expected next behavior:
 - Command-level timeout/cancellation should stop traversal and return a clear retryable diagnostic.
 - Partial progress should not leave the operator guessing whether the command is hung.
 
-### 3. Live issue create/update currently returns GitCode 400
+### 3. Empty wiki initialization is not supported by the current v5 wiki path
+
+`urandon/gitcode-mcp` is the important empty-wiki case. The repository binding has `issues,wiki`, but the wiki repository is not initialized from the API point of view.
+
+Observed live behavior:
+
+- `sync --live --repo urandon/gitcode-mcp --wiki --format json` failed on `GET /api/v5/repos/urandon/gitcode-mcp.wiki/contents` with `400 Bad Request` classified as `api_validation`.
+- `create-page --live --repo urandon/gitcode-mcp --slug codex-mcp-smoke-2026-06-24` failed on `POST /api/v5/repos/urandon/gitcode-mcp.wiki/contents/codex-mcp-smoke-2026-06-24` with `400 Bad Request`.
+- `create-page --live --repo urandon/gitcode-mcp --slug Home` failed on `POST /contents/Home` with `400 Bad Request`.
+- `create-page --live --repo urandon/gitcode-mcp --slug Home.md` failed on `POST /contents/Home.md` with `400 Bad Request`.
+- `git ls-remote https://gitcode.com/urandon/gitcode-mcp.wiki.git` returned 403/project-not-found style output, consistent with the wiki repo not existing yet for HTTPS access.
+- After the operator manually created one wiki page in the GitCode UI, `sync --live --repo urandon/gitcode-mcp --wiki --format json` succeeded and inserted one live wiki record.
+- The inserted manual `Home.md` page normalized to `id: WIKI-HOME.MD`, `remote_alias: wiki:Home.md`, and path `wiki/Home.md.md`, so path extension handling is wrong for `.md` wiki files.
+- After manual initialization, `create-page --live --repo urandon/gitcode-mcp --slug codex-mcp-smoke-2026-06-24` no longer returned the earlier 400. It reached the provider but failed confirmation decoding with `schema_decode`: `wiki write confirmation requires path and sha`. A follow-up sync still listed only `Home.md`, so create is not proven successful.
+
+This means the validated `/api/v5/repos/{owner}/{repo}.wiki/contents` CRUD path is currently proven only for already-initialized wiki repositories, and even there the installed CLI still has a write-confirmation/schema gap. It does not prove first-page creation or reliable page creation from the product runtime.
+
+Expected next behavior:
+
+- Add an explicit empty-wiki state to the route/schema matrix and tests.
+- Decide whether empty wiki initialization must use a GitCode product/browser route, a separate create-wiki endpoint, SSH/git bootstrap, or a documented unsupported diagnostic.
+- `sync --wiki` on an empty wiki should not look like a generic provider failure. It should return a typed empty/uninitialized wiki diagnostic that tells the operator what to do next.
+- `create-page` should either initialize the wiki and create the first page, or fail before misleadingly claiming the normal initialized-wiki CRUD path is enough.
+- Fix wiki path normalization so a remote page path ending in `.md` does not become `wiki/<name>.md.md` locally.
+- Fix initialized-wiki write confirmation decoding, or classify the unsupported response shape without implying success.
+
+### 4. Live issue create/update currently returns GitCode 400
 
 The installed iteration 5 binary returned `api_validation` for all tested issue write variants:
 
@@ -137,7 +164,7 @@ Expected next behavior:
 - Verify the exact GitCode payload accepted by live create/update issue endpoints.
 - Keep the fixture tests, but add a live-compatible test case that prevents empty `labels: []` from being sent implicitly.
 
-### 4. Comment write response handling is still not live-compatible
+### 5. Comment write response handling is still not live-compatible
 
 `add-comment --live` attempted the HTTP write, but returned a schema decode failure:
 
@@ -153,7 +180,7 @@ Expected next behavior:
 - Decode the real response shape or classify it as a provider compatibility gap with accurate `http_attempted:true`.
 - Confirm whether the remote comment was created before deciding cache-confirmation behavior on decode failure.
 
-### 5. Cache lock contention appears under parallel reads
+### 6. Cache lock contention appears under parallel reads
 
 Two parallel read-style commands against the same cache path hit:
 
@@ -225,6 +252,7 @@ Passed:
 Blocking gaps:
 - MCP tools are currently read/cache-only and cannot bootstrap or refresh a live cache. Repo binding, live sync, index, doctor/readiness, auth status, and repo status are missing from MCP, so agents must fall back to CLI before MCP reads are useful.
 - Large collection sync is not operationally safe. Wiki stress data caused long no-progress sync behavior, and `--timeout 5s` did not bound the command. Treat this as a generic collection-size problem, not wiki-specific.
+- Empty wiki initialization is not supported by the currently wired v5 wiki-as-repository path. `urandon/gitcode-mcp` fails sync/create first-page attempts with 400 until a page is created manually in the UI. After manual initialization, sync works but normalizes `Home.md` as `wiki/Home.md.md`, and `create-page` still fails write-confirmation decoding.
 - Live issue writes now return GitCode 400 for create/update. Likely cause: empty labels are serialized as `labels: []` even when the user did not request label mutation.
 - `add-comment --live` reaches the provider but fails response decoding as malformed JSON; diagnostics incorrectly report `http_attempted:false`.
 - Parallel read-style commands on one cache path can hit writer lock contention and surface as `internal_error`, which is risky for MCP tool-call concurrency.
@@ -238,4 +266,4 @@ UX follow-ups:
 
 ## Acceptance Recommendation
 
-Do not merge iteration 5 as "live ready" until the MCP lifecycle gaps, issue write regression, and large collection behavior are fixed. The current branch is useful as read-path progress and as evidence for the next implementation pass.
+Do not merge iteration 5 as "live ready" until the MCP lifecycle gaps, empty-wiki initialization behavior, issue write regression, and large collection behavior are fixed. The current branch is useful as read-path progress and as evidence for the next implementation pass.

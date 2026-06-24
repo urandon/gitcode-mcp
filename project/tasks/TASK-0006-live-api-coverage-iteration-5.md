@@ -35,7 +35,9 @@ Known live findings:
 - Follow-up token-only smoke showed the configured keychain/PAT token is valid for the `/api/v5` live provider but is not accepted as a standalone credential for the observed `web-api.gitcode.com` wiki routes: `detail` and `file_list` returned 403 without cookies, `create` returned `TOKEN_INVALID_ERROR`, browser-like non-cookie headers did not help, and alternate token header/query placements did not make `detail` pass.
 - Browser network evidence also shows `GET https://web-api.gitcode.com/uc/api/v1/user/oauth/token` as a likely session-cookie token bridge. A no-cookie smoke, and a smoke with only the configured keychain token as `GITCODE_ACCESS_TOKEN` cookie, both returned `200` with an empty body, so this route is not currently a proven MCP credential path.
 - New `/api/v5` wiki-as-repository smoke found a stronger token-compatible read/list path: `GET /api/v5/repos/{owner}/{repo}.wiki/contents`, `GET /api/v5/repos/{owner}/{repo}.wiki/contents/{path}`, and `GET /api/v5/repos/{owner}/{repo}.wiki/raw/{path}` work for both a public GitCode docs wiki and the private test wiki. Directory listing returns file/dir arrays, `contents/{path}` returns base64 file JSON, and `raw/{path}` returns markdown. The configured keychain token worked with `Authorization: Bearer`, `private-token`, and `access_token` query placement.
-- Full `/api/v5` wiki-as-repository CRUD smoke on a throwaway private wiki page succeeded: `POST contents/{path}` creates, `GET raw/{path}` reads markdown, `GET contents/{path}` returns `sha`, `PUT contents/{path}` updates with current `sha`, and `DELETE contents/{path}` deletes with current `sha`. Create/update `content` must be base64-encoded; plain markdown content produced an empty blob.
+- Full `/api/v5` wiki-as-repository CRUD smoke on an already-initialized throwaway private wiki page succeeded: `POST contents/{path}` creates, `GET raw/{path}` reads markdown, `GET contents/{path}` returns `sha`, `PUT contents/{path}` updates with current `sha`, and `DELETE contents/{path}` deletes with current `sha`. Create/update `content` must be base64-encoded; plain markdown content produced an empty blob.
+- Empty-wiki initialization is still unresolved. `urandon/gitcode-mcp` started with an empty/uninitialized wiki: `sync --live --wiki` failed on `GET /api/v5/repos/urandon/gitcode-mcp.wiki/contents` with 400, and `create-page --live` failed with 400 for a normal slug, `Home`, and `Home.md`. HTTPS `git ls-remote https://gitcode.com/urandon/gitcode-mcp.wiki.git` also returned project-not-found style output. After the operator manually created one page in the GitCode UI, `sync --wiki` succeeded and cached `Home.md`, proving manual UI bootstrap changes the API state.
+- Initialized-wiki behavior still has product gaps: the manually created `Home.md` page cached as `wiki/Home.md.md`, and `create-page --live` after manual initialization failed response confirmation decoding with `schema_decode` because the provider response did not include the expected path/sha shape. Treat the v5 CRUD evidence as route-level evidence, not as proof that the current installed command handles first-page or follow-up page creation correctly.
 - SSH clone of the wiki repo works for the operator.
 - The current token works for normal HTTPS git repo access and `/api/v5` wiki-as-repository reads, but not for HTTPS wiki git access.
 - GitCode official API docs cover Issues, Pull Requests, Labels, Milestone, and OAuth overview pages under `https://docs.gitcode.com/docs/apis/`. GitCode official wiki product docs at `https://docs.gitcode.com/en/docs/help/home/org_project/wiki/wiki-intro` describe wiki behavior, page conventions, supported renderable formats, and clone behavior, but no Wiki REST namespace or documentation for the observed browser `web-api` wiki/OAuth-token routes was found. GitCode-owned source references are available at `https://gitcode.com/GitCode/GitCode-Docs` and `https://gitcode.com/GitCode/gitcode-skills`; a shallow read showed `GitCode-Docs` links to wiki pages that are not present in the ordinary repo clone, and `gitcode-skills` documents `/api/v5`, token validation, and file-content APIs but no wiki CRUD/list API. GitCode's privacy policy is compliance context for any browser-session/cookie approach, not an API contract.
@@ -50,6 +52,7 @@ Known live findings:
 4. Add live read/sync coverage for PRs and comments if the documented routes are sufficient.
 5. Decide the wiki strategy:
    - prefer the token-compatible `/api/v5/repos/{owner}/{repo}.wiki/contents|raw` route if mocked tests can cover directory traversal, file decoding, path encoding, create/update/delete base64 content semantics, `sha` handling, and error handling;
+   - explicitly handle empty/uninitialized wiki repositories, including first-page creation/bootstrap or a typed unsupported diagnostic;
    - browser `web-api.gitcode.com/api/v2/projects/wiki/*` route only as fallback discovery unless a non-cookie credential path can be proven stable, token-compatible, and public-safe enough for MCP use;
    - otherwise git-backed wiki provider with an explicit non-goal or separate credential story for SSH/git auth.
 6. Improve error classification for 400/schema/decode failures so they do not look like network outages.
@@ -68,6 +71,8 @@ Known live findings:
 - Are PRs modeled as a distinct source kind, issue-like records, or out of scope for this iteration?
 - Are issue comments and PR comments stored as child records, source body appendices, or cache comments only?
 - Is wiki sync viable through `/api/v5/repos/{owner}/{repo}.wiki/contents|raw` using the current token model, and what path filtering/format filtering rules should decide which wiki files become cache records?
+- What is the correct first-page/bootstrap behavior for empty GitCode wikis where `{repo}.wiki` does not yet exist? Can `/api/v5` initialize it, is a separate product/browser route required, or should this be a typed unsupported state?
+- Should manual UI initialization be documented as a temporary operator workaround, or should the product implement an API/bootstrap path before advertising wiki create support?
 - Are the observed `web-api.gitcode.com/api/v2/projects/wiki/detail`, `/create`, `/update`, `/delete`, and wiki repository `/repository/file_list` routes usable outside the browser session with an MCP-appropriate credential? The current keychain/PAT token-only smoke failed, so any design using these routes must explain the credential model rather than assuming `/api/v5` auth carries over.
 - Can the observed `web-api.gitcode.com/uc/api/v1/user/oauth/token` route be used without browser cookies, or is it explicitly out of scope because it requires browser session credentials?
 - Which wiki write operations should iteration 5 expose now that `/api/v5/repos/{owner}/{repo}.wiki/contents/{path}` create/update/delete has passed live smoke, and how should idempotency keys, commit messages, current `sha`, and base64 content encoding be modeled?
@@ -91,6 +96,9 @@ Add mocked live-provider tests for:
 - documented label or milestone routes using sanitized fixture responses;
 - PR/comment route tests if included in scope;
 - wiki blocked diagnostics if no token-compatible route is found;
+- empty/uninitialized wiki diagnostics and first-page creation/bootstrap behavior;
+- wiki path normalization for remote paths that already include `.md`, especially avoiding local `wiki/<name>.md.md` paths;
+- initialized-wiki create confirmation decoding when the provider response lacks the expected path/sha fields;
 - fixture/live provenance or cache isolation behavior.
 - MCP lifecycle tool coverage: a writable empty cache can be initialized or diagnosed, a repository binding can be discovered or created through the chosen surface, live/mock sync can populate records, index can be refreshed, and MCP `search_sources`/`list_sources` can read the result without a shell-only bootstrap.
 - MCP startup/cache failure coverage: incompatible schema, unwritable cache path, and writer-lock contention return explicit diagnostics rather than making the GitCode tool namespace disappear silently when practical within MCP protocol limits.
@@ -109,6 +117,8 @@ Optional live smoke may run against the dedicated testing polygon only when cred
 - Wiki has an explicit design decision and operator diagnostic:
   - token-compatible route found and covered by fixtures; or
   - wiki live sync remains unsupported with a clear reason and next credential/discovery step.
+- Empty wiki behavior is covered. `sync --wiki` and first `create-page` either initialize/read the wiki successfully through a proven route or return a typed empty/uninitialized wiki diagnostic with a concrete remediation.
+- Initialized wiki behavior is covered for `.md` path normalization and write confirmation decoding.
 - MCP lifecycle exposure is explicitly decided and tested. Agents can either operate repo binding/sync/index/readiness through MCP, or receive documented `unsupported_capability`/readiness diagnostics explaining the CLI-only boundary.
 - MCP write exposure is explicitly decided, not accidentally absent.
 - A handoff records live smoke results and remaining gaps.
