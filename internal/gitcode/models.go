@@ -320,21 +320,21 @@ type WriteResult[T any] struct {
 }
 
 type CreateIssueRequest struct {
-	Owner  string `json:"-"`
-	Repo   string `json:"-"`
-	Title  string `json:"title"`
-	Body   string `json:"body,omitempty"`
-	Labels string `json:"labels,omitempty"`
+	Owner  string          `json:"-"`
+	Repo   string          `json:"-"`
+	Title  string          `json:"title"`
+	Body   string          `json:"body,omitempty"`
+	Labels json.RawMessage `json:"labels,omitempty"`
 }
 
 type UpdateIssueRequest struct {
-	Owner  string `json:"-"`
-	Repo   string `json:"-"`
-	Number int    `json:"-"`
-	Title  string `json:"title,omitempty"`
-	Body   string `json:"body,omitempty"`
-	State  string `json:"state,omitempty"`
-	Labels string `json:"labels,omitempty"`
+	Owner  string          `json:"-"`
+	Repo   string          `json:"-"`
+	Number int             `json:"-"`
+	Title  string          `json:"title,omitempty"`
+	Body   string          `json:"body,omitempty"`
+	State  string          `json:"state,omitempty"`
+	Labels json.RawMessage `json:"labels,omitempty"`
 }
 
 type CreateIssueCommentRequest struct {

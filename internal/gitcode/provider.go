@@ -236,6 +236,13 @@ func (p liveProvider) GetMilestone(ctx context.Context, req MilestoneRequest) (M
 	return p.HTTPClient.GetMilestone(ctx, req)
 }
 
+func (p liveProvider) AddLabel(ctx context.Context, req LabelRequest, opts WriteOptions) (WriteResult[Issue], error) {
+	return WriteResult[Issue]{}, ErrUnsupportedCapability{
+		CapabilityKey: "add_label",
+		Message:       "add-label is not supported through the live provider: use update-issue --labels instead",
+	}
+}
+
 type unavailableProvider struct {
 	reason string
 }

@@ -1938,6 +1938,12 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	}
 	key, fingerprint := writeIdempotency(command, req)
 	base := WriteCommandResult{Command: command, RepoID: route.RepoID, Status: "dry_run_valid", ID: writeTargetID(req), IdempotencyKey: key, SourceFingerprint: fingerprint, Evidence: "validated write command", GeneratedAt: s.now().UTC()}
+	if command == "add-label" {
+		return WriteCommandResult{}, gitcode.ErrUnsupportedCapability{
+			CapabilityKey: "add_label",
+			Message:       "add-label is not supported: use update-issue --labels instead",
+		}
+	}
 	if req.Mode == WriteModeDryRun {
 		return base, nil
 	}
@@ -2090,12 +2096,10 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 		}
 		return s.commentWriteGraph(ctx, route.RepoID, req.Number, result.Record, result, now)
 	case "add-label":
-		result, err := s.client.AddLabel(ctx, gitcode.LabelRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, Label: strings.TrimSpace(req.Label)}, opts)
-		if err != nil {
-			return writeConfirmation{}, cache.RecordGraph{}, err
+		return writeConfirmation{}, cache.RecordGraph{}, gitcode.ErrUnsupportedCapability{
+			CapabilityKey: "add_label",
+			Message:       "add-label is not supported: use update-issue --labels instead",
 		}
-		confirmation, graph := s.issueWriteGraph(route.RepoID, result.Record, result, now)
-		return confirmation, graph, nil
 	case "create-page":
 		result, err := s.client.CreateWikiPage(ctx, gitcode.CreateWikiPageRequest{Owner: route.Owner, Repo: route.Name, Path: firstNonEmptyString(req.Path, req.Slug, req.Title), Slug: req.Slug, Title: strings.TrimSpace(req.Title), Body: req.Body}, opts)
 		if err != nil {

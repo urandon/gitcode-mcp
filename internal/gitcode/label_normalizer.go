@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-func EncodeIssueLabels(labels []string) string {
+func EncodeIssueLabels(labels []string) json.RawMessage {
 	var cleaned []string
 	for _, l := range labels {
 		trimmed := strings.TrimSpace(l)
@@ -20,9 +20,9 @@ func EncodeIssueLabels(labels []string) string {
 	}
 	data, err := json.Marshal(cleaned)
 	if err != nil {
-		return "[]"
+		return json.RawMessage(`[]`)
 	}
-	return string(data)
+	return json.RawMessage(data)
 }
 
 func NormalizeLabels(labels []GitCodeLabel) ([]string, error) {
