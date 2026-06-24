@@ -74,27 +74,48 @@ func TestFixtureProviderScenarios(t *testing.T) {
 	}
 }
 
-func TestLiveProviderAdmission(t *testing.T) {
+func TestScenario004LiveProviderAdmission(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  ProviderConfig
+	}{
+		{name: "non-live-mode", cfg: ProviderConfig{Mode: ProviderModeFixture, LiveAllowed: true, Token: "token", BaseURL: "https://selected.example.test"}},
+		{name: "missing-live-allowed", cfg: ProviderConfig{Mode: ProviderModeLive, Token: "token", BaseURL: "https://selected.example.test"}},
+		{name: "missing-token", cfg: ProviderConfig{Mode: ProviderModeLive, LiveAllowed: true, BaseURL: "https://selected.example.test"}},
+		{name: "empty-base-url", cfg: ProviderConfig{Mode: ProviderModeLive, LiveAllowed: true, Token: "token"}},
+		{name: "relative-base-url", cfg: ProviderConfig{Mode: ProviderModeLive, LiveAllowed: true, Token: "token", BaseURL: "/api/v5"}},
+		{name: "malformed-base-url", cfg: ProviderConfig{Mode: ProviderModeLive, LiveAllowed: true, Token: "token", BaseURL: "http://[::1"}},
+		{name: "unsupported-scheme", cfg: ProviderConfig{Mode: ProviderModeLive, LiveAllowed: true, Token: "token", BaseURL: "file:///tmp/gitcode"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			old := newHTTPClientForProvider
+			newHTTPClientForProvider = func(Config) (*HTTPClient, error) {
+				called = true
+				return &HTTPClient{}, nil
+			}
+			defer func() { newHTTPClientForProvider = old }()
+			if _, err := NewLiveProvider(tt.cfg); !IsProviderUnavailable(err) {
+				t.Fatalf("expected unavailable, got %T %v", err, err)
+			}
+			if called {
+				t.Fatalf("HTTP client constructed for invalid live provider")
+			}
+		})
+	}
+
 	called := false
 	old := newHTTPClientForProvider
-	newHTTPClientForProvider = func(Config) (*HTTPClient, error) {
+	newHTTPClientForProvider = func(cfg Config) (*HTTPClient, error) {
 		called = true
+		if cfg.BaseURL != "https://selected.example.test" || cfg.Token != "token" {
+			t.Fatalf("unexpected provider config: %+v", cfg)
+		}
 		return &HTTPClient{}, nil
 	}
 	defer func() { newHTTPClientForProvider = old }()
-	if _, err := NewLiveProvider(ProviderConfig{Mode: ProviderModeLive, Token: "token"}); !IsProviderUnavailable(err) {
-		t.Fatalf("expected unavailable without live allowance, got %T %v", err, err)
-	}
-	if called {
-		t.Fatalf("HTTP client constructed for disallowed live provider")
-	}
-	if _, err := NewLiveProvider(ProviderConfig{Mode: ProviderModeLive, LiveAllowed: true}); !IsProviderUnavailable(err) {
-		t.Fatalf("expected unavailable without token, got %T %v", err, err)
-	}
-	if called {
-		t.Fatalf("HTTP client constructed without token")
-	}
-	if _, err := NewLiveProvider(ProviderConfig{Mode: ProviderModeLive, LiveAllowed: true, Token: "token"}); err != nil {
+	if _, err := NewLiveProvider(ProviderConfig{Mode: ProviderModeLive, LiveAllowed: true, Token: "token", BaseURL: "https://selected.example.test"}); err != nil {
 		t.Fatalf("expected admitted live provider: %v", err)
 	}
 	if !called {
@@ -104,7 +125,6 @@ func TestLiveProviderAdmission(t *testing.T) {
 
 func TestProviderWriteUnavailableDoesNotConfirm(t *testing.T) {
 	providers := map[string]Provider{
-		"fixture":     mustFixtureProvider(t),
 		"unavailable": NewUnavailableProvider("write disabled"),
 	}
 	for name, provider := range providers {
@@ -115,6 +135,47 @@ func TestProviderWriteUnavailableDoesNotConfirm(t *testing.T) {
 			}
 			if result.Confirmed || result.IdempotencyKey != "" || result.ResponseHash != "" || !result.ConfirmedAt.IsZero() {
 				t.Fatalf("unavailable provider returned success-shaped metadata: %+v", result)
+			}
+		})
+	}
+}
+
+func TestScenario005FixtureBoundaryContract(t *testing.T) {
+	provider := mustFixtureProvider(t)
+	if !IsFixtureBoundary(provider) {
+		t.Fatalf("fixture provider does not expose fixture boundary")
+	}
+	boundary := provider.(FixtureBoundary)
+	markers := boundary.FixtureMarkerIDs()
+	if len(markers) != 2 || markers[0] != FixtureIssueMarker || markers[1] != FixtureWikiMarker {
+		t.Fatalf("fixture markers = %#v", markers)
+	}
+}
+
+func TestScenario005FixtureReadOnlyTyped(t *testing.T) {
+	provider := mustFixtureProvider(t)
+	ctx := context.Background()
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "create-issue", run: func() error { _, err := provider.CreateIssue(ctx, CreateIssueRequest{}, WriteOptions{}); return err }},
+		{name: "update-issue", run: func() error { _, err := provider.UpdateIssue(ctx, UpdateIssueRequest{}, WriteOptions{}); return err }},
+		{name: "create-comment", run: func() error { _, err := provider.CreateIssueComment(ctx, CreateIssueCommentRequest{}, WriteOptions{}); return err }},
+		{name: "create-wiki", run: func() error { _, err := provider.CreateWikiPage(ctx, CreateWikiPageRequest{}, WriteOptions{}); return err }},
+		{name: "update-wiki", run: func() error { _, err := provider.UpdateWikiPage(ctx, UpdateWikiPageRequest{}, WriteOptions{}); return err }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.run()
+			if !IsFixtureReadOnly(err) {
+				t.Fatalf("expected fixture read-only classification, got %T %v", err, err)
+			}
+			if IsProviderUnavailable(err) {
+				t.Fatalf("fixture read-only should not be provider unavailable")
+			}
+			if !strings.Contains(err.Error(), "fixture client is read-only") {
+				t.Fatalf("read-only message changed: %v", err)
 			}
 		})
 	}

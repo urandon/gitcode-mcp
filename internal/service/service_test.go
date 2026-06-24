@@ -75,6 +75,58 @@ func TestNewWithModeFixture(t *testing.T) {
 	}
 }
 
+func TestScenario005ServiceSanitizedFixtureBoundary(t *testing.T) {
+	client := sanitizedFixtureClient{}
+	if !gitcode.IsFixtureBoundary(client) {
+		t.Fatalf("sanitized fixture client does not expose fixture boundary")
+	}
+	markers := client.FixtureMarkerIDs()
+	if len(markers) != 2 || markers[0] != gitcode.FixtureIssueMarker || markers[1] != gitcode.FixtureWikiMarker {
+		t.Fatalf("fixture markers = %#v", markers)
+	}
+	ctx := context.Background()
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "create-issue", run: func() error {
+			_, err := client.CreateIssue(ctx, gitcode.CreateIssueRequest{}, gitcode.WriteOptions{})
+			return err
+		}},
+		{name: "update-issue", run: func() error {
+			_, err := client.UpdateIssue(ctx, gitcode.UpdateIssueRequest{}, gitcode.WriteOptions{})
+			return err
+		}},
+		{name: "create-comment", run: func() error {
+			_, err := client.CreateIssueComment(ctx, gitcode.CreateIssueCommentRequest{}, gitcode.WriteOptions{})
+			return err
+		}},
+		{name: "create-wiki", run: func() error {
+			_, err := client.CreateWikiPage(ctx, gitcode.CreateWikiPageRequest{}, gitcode.WriteOptions{})
+			return err
+		}},
+		{name: "update-wiki", run: func() error {
+			_, err := client.UpdateWikiPage(ctx, gitcode.UpdateWikiPageRequest{}, gitcode.WriteOptions{})
+			return err
+		}},
+		{name: "add-label", run: func() error {
+			_, err := client.AddLabel(ctx, gitcode.LabelRequest{}, gitcode.WriteOptions{})
+			return err
+		}},
+		{name: "remove-label", run: func() error {
+			_, err := client.RemoveLabel(ctx, gitcode.LabelRequest{}, gitcode.WriteOptions{})
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.run(); !gitcode.IsFixtureReadOnly(err) {
+				t.Fatalf("expected fixture read-only classification, got %T %v", err, err)
+			}
+		})
+	}
+}
+
 func TestNewWithModeLive(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)
@@ -113,7 +165,7 @@ func TestNewWithModeLive(t *testing.T) {
 	if _, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "fixture-a", RemoteAlias: "issue:42", IdempotencyKey: "mode-live-sync"}); err != nil {
 		t.Fatalf("SyncToCache returned error: %v", err)
 	}
-	source, err := store.GetSourceScoped(ctx, "fixture-a", "ISSUE-42")
+	source, err := store.GetSourceScoped(ctx, "fixture-a", "ISSUE-REMOTE-42")
 	if err != nil {
 		t.Fatalf("live source missing: %v", err)
 	}
@@ -305,6 +357,125 @@ func TestWriteDryRunNoMutation(t *testing.T) {
 	}
 }
 
+func TestScenario007WriteLiveCreateAuditCacheConfirmation(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{createIssueResult: gitcode.WriteResult[gitcode.Issue]{Record: gitcode.Issue{ID: "remote-77", Number: 77, Title: "Live Create", Body: "body", State: "open"}, Confirmed: true, Operation: "CreateIssue", RemoteID: "remote-77", RemoteNumber: 77, ConfirmedAt: time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)}}
+	service := &Service{store: store, client: client, now: func() time.Time { return time.Now().UTC() }, providerMode: gitcode.ProviderModeLive, writeCredentialPresent: true}
+	t.Setenv("GITCODE_TOKEN", "")
+	result, err := service.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "Live Create", Body: "body", IdempotencyKey: "scenario-007-key"})
+	if err != nil {
+		t.Fatalf("CreateIssue live returned error: %v", err)
+	}
+	if result.Status != "succeeded" || result.RemoteID != "remote-77" || client.createIssueCalls != 1 {
+		t.Fatalf("result=%#v calls=%d", result, client.createIssueCalls)
+	}
+	if client.lastCreateIssueRequest.Owner != "owner-a" || client.lastCreateIssueRequest.Repo != "repo-a" || client.lastCreateIssueRequest.Title != "Live Create" || client.lastWriteOptions.IdempotencyKey != "scenario-007-key" {
+		t.Fatalf("request=%#v opts=%#v", client.lastCreateIssueRequest, client.lastWriteOptions)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", "scenario-007-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry == nil || entry.Status != "succeeded" || entry.Command != "create-issue" || entry.Mode != "live" || entry.RemoteID != "remote-77" || entry.PayloadHash == "" || strings.Contains(entry.Message, "test-token") {
+		t.Fatalf("audit entry=%#v", entry)
+	}
+	if entry.RequestMetadata["method"] != "POST" || entry.RequestMetadata["provider_mode"] != "live" || entry.RequestMetadata["idempotency_key"] != "scenario-007-key" {
+		t.Fatalf("audit metadata=%#v", entry.RequestMetadata)
+	}
+	confirmation, err := store.GetCacheConfirmationByKey(ctx, "fixture-a", "scenario-007-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmation == nil || confirmation.RecordID != "ISSUE-REMOTE-77" || confirmation.RemoteID != "remote-77" || confirmation.IdempotencyKey != "scenario-007-key" {
+		t.Fatalf("cache confirmation=%#v", confirmation)
+	}
+	if _, err := store.GetRecord(ctx, "fixture-a", "ISSUE-REMOTE-77"); err != nil {
+		t.Fatalf("cache confirmation missing: %v", err)
+	}
+}
+
+func TestScenario007WriteLiveCreateIdempotentReplay(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{createIssueResult: gitcode.WriteResult[gitcode.Issue]{Record: gitcode.Issue{ID: "remote-78", Number: 78, Title: "Replay", Body: "body", State: "open"}, Confirmed: true, Operation: "CreateIssue", RemoteID: "78", RemoteNumber: 78, ConfirmedAt: time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)}}
+	service := &Service{store: store, client: client, now: func() time.Time { return time.Now().UTC() }, providerMode: gitcode.ProviderModeLive, writeCredentialPresent: true}
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "Replay", Body: "body", IdempotencyKey: "scenario-007-replay"}
+	if _, err := service.CreateIssue(ctx, req); err != nil {
+		t.Fatalf("CreateIssue live returned error: %v", err)
+	}
+	replay, err := service.CreateIssue(ctx, req)
+	if err != nil {
+		t.Fatalf("CreateIssue replay returned error: %v", err)
+	}
+	if replay.Status != "already_applied" || !replay.Replayed || client.createIssueCalls != 1 {
+		t.Fatalf("replay=%#v calls=%d", replay, client.createIssueCalls)
+	}
+	confirmation, err := store.GetCacheConfirmationByKey(ctx, "fixture-a", "scenario-007-replay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmation == nil || confirmation.RecordID != "ISSUE-78" || confirmation.RemoteID != "78" {
+		t.Fatalf("cache confirmation=%#v", confirmation)
+	}
+}
+
+func TestScenario007WriteLiveCreateIdempotencyConflict(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{createIssueResult: gitcode.WriteResult[gitcode.Issue]{Record: gitcode.Issue{ID: "remote-79", Number: 79, Title: "Conflict", Body: "body", State: "open"}, Confirmed: true, Operation: "CreateIssue", RemoteID: "79", RemoteNumber: 79, ConfirmedAt: time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)}}
+	service := &Service{store: store, client: client, now: func() time.Time { return time.Now().UTC() }, providerMode: gitcode.ProviderModeLive, writeCredentialPresent: true}
+	if _, err := service.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "Conflict", Body: "body", IdempotencyKey: "scenario-007-conflict"}); err != nil {
+		t.Fatalf("CreateIssue live returned error: %v", err)
+	}
+	_, err = service.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "Changed", Body: "body", IdempotencyKey: "scenario-007-conflict"})
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_idempotency_conflict" || client.createIssueCalls != 1 {
+		t.Fatalf("err=%v calls=%d", err, client.createIssueCalls)
+	}
+}
+
+func TestScenario007WriteLiveFixtureFallbackDetected(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	service := &Service{store: store, client: sanitizedFixtureClient{}, now: func() time.Time { return time.Now().UTC() }, providerMode: gitcode.ProviderModeLive, writeCredentialPresent: true}
+	_, err = service.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "Fixture fallback", IdempotencyKey: "scenario-007-fixture"})
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_fixture_fallback_detected" {
+		t.Fatalf("err=%v", err)
+	}
+	if strings.Contains(err.Error(), "fixture client is read-only") {
+		t.Fatalf("forbidden fixture text leaked: %v", err)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", "scenario-007-fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry == nil || entry.Message != "write_fixture_fallback_detected" {
+		t.Fatalf("audit entry=%#v", entry)
+	}
+}
+
 func TestWriteLiveSuccessAuditCacheAndReplay(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)
@@ -330,6 +501,13 @@ func TestWriteLiveSuccessAuditCacheAndReplay(t *testing.T) {
 	}
 	if counts.AuditRows != 1 {
 		t.Fatalf("audit rows=%d want 1", counts.AuditRows)
+	}
+	confirmation, err := store.GetCacheConfirmationByKey(ctx, "fixture-a", "key-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmation == nil || confirmation.RecordID != "ISSUE-42" || confirmation.RemoteID != "42" {
+		t.Fatalf("cache confirmation=%#v", confirmation)
 	}
 	if _, err := store.GetRecord(ctx, "fixture-a", "ISSUE-42"); err != nil {
 		t.Fatalf("refreshed record missing: %v", err)
@@ -823,6 +1001,106 @@ func TestSyncGraphFixtureOfflineReadsIssueWikiCommentsAndChunks(t *testing.T) {
 	}
 	if counts.Records != 2 || counts.Comments != 1 || counts.SyncEvents != 2 || counts.RemoteRevisions != 2 || counts.Chunks == 0 {
 		t.Fatalf("counts = %#v", counts)
+	}
+}
+
+func TestScenario006LiveGraphValidStagesIssueWikiComments(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "live-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	svc := NewWithClient(store, &fakeGitCodeClient{
+		issue:    gitcode.Issue{ID: "MOCK-ISSUE-100", Number: 100, Title: "Mock Issue", Body: "mock issue body", State: "open", CreatedAt: base, UpdatedAt: base},
+		comments: []gitcode.Comment{{ID: "MOCK-COMMENT-1", IssueID: "MOCK-ISSUE-100", Author: "mock-user", Body: "mock comment", CreatedAt: base, UpdatedAt: base}},
+		wiki:     gitcode.WikiPage{ID: "MOCK-WIKI-LIVE", Slug: "Live", Title: "Mock Wiki", Body: "mock wiki body", Revision: "rev-live", CreatedAt: base, UpdatedAt: base},
+	})
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.lockPath = filepath.Join(t.TempDir(), "sync.lock")
+	if _, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "live-a", RemoteAlias: "issue:100", IdempotencyKey: "sc-006-live-issue"}); err != nil {
+		t.Fatalf("live issue sync returned error: %v", err)
+	}
+	if _, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "live-a", RemoteAlias: "wiki:Live", IdempotencyKey: "sc-006-live-wiki"}); err != nil {
+		t.Fatalf("live wiki sync returned error: %v", err)
+	}
+	issue, err := store.GetRecord(ctx, "live-a", "ISSUE-MOCK-ISSUE-100")
+	if err != nil || len(issue.Comments) != 1 || issue.Comments[0].CommentID != "MOCK-COMMENT-1" {
+		t.Fatalf("live issue record = %#v err=%v", issue, err)
+	}
+	if _, err := store.GetRecord(ctx, "live-a", "WIKI-MOCK-WIKI-LIVE"); err != nil {
+		t.Fatalf("live wiki missing: %v", err)
+	}
+	if _, err := store.GetRecord(ctx, "live-a", "ISSUE-42"); err == nil {
+		t.Fatal("fixture issue marker committed in live sync")
+	}
+	if _, err := store.GetRecord(ctx, "live-a", "WIKI-HOME"); err == nil {
+		t.Fatal("fixture wiki marker committed in live sync")
+	}
+}
+
+func TestScenario006LiveGraphInvalidRejectedBeforeCommit(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "live-invalid", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name     string
+		issue    gitcode.Issue
+		comments []gitcode.Comment
+	}{
+		{name: "missing-comment-id", issue: gitcode.Issue{ID: "MOCK-ISSUE-100", Number: 100, Title: "Mock Issue", Body: "body", State: "open", CreatedAt: base, UpdatedAt: base}, comments: []gitcode.Comment{{IssueID: "MOCK-ISSUE-100", Body: "comment", CreatedAt: base, UpdatedAt: base}}},
+		{name: "unreconciled-parent", issue: gitcode.Issue{ID: "MOCK-ISSUE-100", Number: 100, Title: "Mock Issue", Body: "body", State: "open", CreatedAt: base, UpdatedAt: base}, comments: []gitcode.Comment{{ID: "MOCK-COMMENT-1", IssueID: "OTHER-ISSUE", Body: "comment", CreatedAt: base, UpdatedAt: base}}},
+		{name: "fixture-marker", issue: gitcode.Issue{ID: "42", Number: 42, Title: "Fixture Issue", Body: "body", State: "open", CreatedAt: base, UpdatedAt: base}, comments: []gitcode.Comment{{ID: "MOCK-COMMENT-1", IssueID: "42", Body: "comment", CreatedAt: base, UpdatedAt: base}}},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := NewWithClient(store, &fakeGitCodeClient{issue: tt.issue, comments: tt.comments})
+			svc.providerMode = gitcode.ProviderModeLive
+			svc.lockPath = filepath.Join(t.TempDir(), "sync.lock")
+			_, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "live-invalid", RemoteAlias: "issue:42", IdempotencyKey: "sc-006-" + tt.name})
+			var failure ErrSyncFailure
+			if !errors.As(err, &failure) || failure.Mode != "live_graph_invalid" {
+				t.Fatalf("error = %T %v, want live_graph_invalid", err, err)
+			}
+		})
+	}
+	counts, err := store.RecordCounts(ctx, "live-invalid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Records != 0 || counts.Comments != 0 {
+		t.Fatalf("invalid live graph committed counts = %#v", counts)
+	}
+}
+
+func TestScenario006LiveAuthFailureNormalized(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "live-auth", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, &fakeGitCodeClient{errors: []error{gitcode.ErrAuthExpired{Endpoint: "/issues/100", Status: 401, Message: "invalid token"}}})
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.lockPath = filepath.Join(t.TempDir(), "sync.lock")
+	_, err = svc.SyncToCache(ctx, SyncRequest{RepoID: "live-auth", RemoteAlias: "issue:100", IdempotencyKey: "sc-006-auth"})
+	var failure ErrSyncFailure
+	if !errors.As(err, &failure) || failure.Mode != "live_auth_failure" {
+		t.Fatalf("error = %T %v, want live_auth_failure", err, err)
 	}
 }
 
@@ -1961,6 +2239,8 @@ type fakeGitCodeClient struct {
 	issuesByNumber           map[int]gitcode.Issue
 	wikiBySlug               map[string]gitcode.WikiPage
 	commentsByIssue          map[int][]gitcode.Comment
+	lastCreateIssueRequest   gitcode.CreateIssueRequest
+	lastWriteOptions         gitcode.WriteOptions
 }
 
 func (f *fakeGitCodeClient) nextError() error {
@@ -2038,8 +2318,10 @@ func (f *fakeGitCodeClient) ListIssueAttachments(context.Context, gitcode.IssueR
 func (f *fakeGitCodeClient) GetAttachment(context.Context, gitcode.AttachmentRequest) (gitcode.AttachmentBody, error) {
 	return gitcode.AttachmentBody{}, nil
 }
-func (f *fakeGitCodeClient) CreateIssue(context.Context, gitcode.CreateIssueRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
+func (f *fakeGitCodeClient) CreateIssue(_ context.Context, req gitcode.CreateIssueRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
 	f.createIssueCalls++
+	f.lastCreateIssueRequest = req
+	f.lastWriteOptions = opts
 	if err := f.nextError(); err != nil {
 		return gitcode.WriteResult[gitcode.Issue]{}, err
 	}
@@ -2206,6 +2488,12 @@ func (f *brokenStore) ListCompletedSyncEventsScoped(context.Context, string) ([]
 }
 func (f *brokenStore) RecordAuditEvent(context.Context, cache.AuditTrailEntry) error { return nil }
 func (f *brokenStore) GetAuditEventByKey(context.Context, string, string) (*cache.AuditTrailEntry, error) {
+	return nil, nil
+}
+func (f *brokenStore) RecordCacheConfirmation(context.Context, cache.CacheConfirmationRecord) error {
+	return nil
+}
+func (f *brokenStore) GetCacheConfirmationByKey(context.Context, string, string) (*cache.CacheConfirmationRecord, error) {
 	return nil, nil
 }
 func (f *brokenStore) GetSyncStatus(context.Context, string) (cache.SyncStatus, error) {

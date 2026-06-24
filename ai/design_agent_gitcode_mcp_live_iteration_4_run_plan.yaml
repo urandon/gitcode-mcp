@@ -1,0 +1,152 @@
+apiVersion: triborg.dev/v0alpha1
+kind: WorkflowRunPlan
+metadata:
+  id: gitcode-mcp-live-readiness-iteration-4-design-run-plan
+  title: GitCode MCP live-readiness iteration 4 design run
+spec:
+  workflow: triborg-design-agent-ywd
+  workflow_id_prefix: gitcode-mcp-live-readiness-design-agent
+  runtime:
+    path_aliases:
+      repo: "@plan_dir/.."
+      ai: "@repo/ai"
+      artifacts: "@ai/artifacts"
+    artifacts_root: "@artifacts"
+  cases:
+    - run_label: gitcode_mcp_live_readiness_iteration_4
+      input:
+        task_markdown: |
+          Design the fourth implementation iteration for `gitcode-mcp`.
+
+          This is a narrow gap-closure design after iteration 3. Do not produce another broad live-readiness rewrite. The goal is to make explicit `--live` paths trustworthy through the same CLI/startup path an operator uses.
+
+          Use `project/tasks/TASK-0005-live-provider-wiring-iteration-4.md` as the scoped repo-local task brief. This run plan adds design-agent context and output requirements; it does not supersede that task.
+
+          Current state:
+          - Iteration 3 fixed several offline/readiness surfaces: search_sources, stale-index freshness on a fresh cache, MCP kind enums, HTTP/SSE MCP transport, auth status surface, dry-run write validation, and sync event timestamps.
+          - The main blocker remains provider wiring. Explicit `sync --live` can still return fixture-shaped results instead of reaching the live provider.
+          - Explicit `create-issue --live` can still route to fixture/read-only behavior or fail the write credential gate before the expected live provider path.
+          - Native Keychain resolution itself works: with `GITCODE_TOKEN` unset, `auth status --format json` can report `source: keychain` and `present: true`.
+          - The remaining credential bug is therefore not "Keychain missing"; it is that live sync/write do not consistently consume the resolved credential pipeline.
+          - The existing code already has mocks and test seams: `httptest.Server` is used in `internal/gitcode` and `internal/service`, and `fakeGitCodeClient` is used through `service.NewWithClient`. The missing proof is an offline test that runs the real CLI/startup live path against a mocked GitCode HTTP API.
+
+          Design target:
+          - Add an offline live-provider integration slice that uses a mocked GitCode-compatible HTTP server.
+          - The mocked server must exercise the real command/startup path, not only `service.NewWithClient`.
+          - The design must define how CLI `--live`, credential resolution, provider construction, repo binding, API base URL selection, service sync/write, audit, and cache refresh fit together.
+          - Real GitCode live e2e remains useful as an optional final smoke, but it must not be the primary proof of provider wiring.
+
+          Required design outcomes:
+          1. `sync --live` with no usable credential fails with typed missing-credential diagnostics and makes no mock-server requests.
+          2. `sync --live` with an invalid token reaches the mocked live provider and reports 401/403 auth failure, not fixture success.
+          3. `sync --live` with a valid test token populates cache from mocked issue/wiki/comment responses and does not produce fixture `ISSUE-42` / `WIKI-HOME` records.
+          4. `create-issue --live` reaches the mocked server, records audit/cache confirmation, and never returns `fixture client is read-only`.
+          5. A mocked credential source equivalent to Keychain can satisfy live write credential checks with `GITCODE_TOKEN` unset.
+          6. Ordinary `sync` without `--live` remains fixture-backed and does not call the mock server.
+          7. `doctor --live` reports effective provider mode, credential source, cache path, and API base URL used by the live client.
+
+          API base URL decision:
+          - Resolve and document one explicit rule. Either live commands use the repository binding `api_base_url` from `repo add --api-base-url`, or they use global `gitcode_base_url` / `GITCODE_API_URL`.
+          - Do not leave both appearing supported while only one actually controls the HTTP client.
+          - Prefer the rule that best fits the existing repo-binding model and testability, but preserve public safety and existing config docs.
+
+          Public-safety constraints:
+          - Do not commit private repository coordinates, personal paths, raw credentials, cookies, bearer tokens, raw Authorization headers, internal URLs, or unsanitized API responses.
+          - Use placeholders and sanitized mock payloads only.
+          - Do not move, rename, rewrite, or unpack prior zip artifacts.
+          - Keep `docs/triborg/design-package-iteration-1`, `docs/triborg/design-package-iteration-2`, and `docs/triborg/design-package-iteration-3` as historical archives.
+
+          Required output shape:
+          - Brief executive summary.
+          - Current gap table focused only on provider wiring, credential injection, API base URL selection, and offline live integration tests.
+          - Minimal component impact list.
+          - CLI/startup live control-flow design.
+          - Credential pipeline integration design, including Keychain-resolved token flow.
+          - Mock GitCode API test design using `httptest.Server`.
+          - API base URL selection decision and acceptance tests.
+          - Write-path design for `create-issue --live` through mock server, audit, cache refresh, and idempotency.
+          - Sync-path design for issues/wiki/comments through mock server.
+          - Doctor/readiness update for effective live configuration.
+          - Ordered implementation tasks with concise acceptance criteria.
+          - Validation commands.
+          - Explicit non-goals.
+
+          Acceptance target for the implementator:
+          - `go test ./...` passes without real credentials, network, or OS Keychain access.
+          - New offline CLI live integration tests fail if explicit `--live` routes to fixtures.
+          - New offline CLI live integration tests fail if `auth status` can see a credential but live write cannot.
+          - Optional real live e2e remains credential-gated and is run only after the mocked live path proves provider wiring.
+        require_clarification_stages: []
+        design_agent:
+          project:
+            workspace_root: "@repo"
+            runs_dir: "@artifacts"
+            competitor_repo_cache_root: "@ai/research-repos"
+            target_vm_repo: "@repo"
+            target_vm_name: GitCode MCP live-readiness iteration 4
+            managed_language_name: Go
+            language_spec_files:
+              - "@repo/README.md"
+              - "@repo/AGENTS.md"
+              - "@repo/project/tasks/backlog.md"
+              - "@repo/project/tasks/TASK-0005-live-provider-wiring-iteration-4.md"
+              - "@repo/docs/architecture.md"
+              - "@repo/docs/cache-and-sync-model.md"
+              - "@repo/docs/config-reference.md"
+              - "@repo/docs/live-readiness.md"
+              - "@repo/docs/repo-binding.md"
+              - "@repo/docs/secrets.md"
+              - "@repo/docs/operations/mcp-installation-and-secrets.md"
+              - "@repo/project/handoffs/2026-06-22-live-readiness-iteration-3-smoke.md"
+              - "@repo/docs/triborg/design-package-iteration-3/architecture.md"
+              - "@repo/docs/triborg/design-package-iteration-3/outcome-contract.json"
+              - "@repo/docs/triborg/design-package-iteration-3/decommission-ledger.json"
+              - "@repo/docs/triborg/design-package-iteration-3/tasks.json"
+          competitors:
+            - id: gh-cli
+              name: GitHub CLI
+              source_url: https://github.com/cli/cli
+              language: Go
+              runtime: Reference for Go CLI auth, config, command ergonomics, and hosted-repo workflows.
+            - id: go-keyring
+              name: go-keyring
+              source_url: https://github.com/zalando/go-keyring
+              language: Go
+              runtime: Reference for testable OS credential store abstractions.
+            - id: mcp
+              name: Model Context Protocol
+              source_url: https://github.com/modelcontextprotocol/modelcontextprotocol
+              language: Protocol/tooling
+              runtime: Reference only for connected-client validation context; do not expand MCP scope unless provider wiring requires it.
+          components: []
+          search:
+            provider: exa
+            max_queries: 8
+            max_results: 30
+            max_sources: 50
+            gap_fill_enabled: false
+            fallback_queries:
+              - query: Go httptest CLI integration test command environment variables fake HTTP API
+                intent: Reference patterns for offline CLI integration tests against mock HTTP services.
+                priority: high
+              - query: GitHub CLI auth token keyring tests Go credential source mock
+                intent: Reference patterns for credential-source tests without real OS keychain dependency.
+                priority: medium
+              - query: Go command line config base URL repository binding API client tests
+                intent: Reference patterns for making API base URL selection explicit and testable.
+                priority: medium
+          runtime:
+            max_auto_top_level_architecture_review_iterations: 2
+            max_auto_component_review_iterations: 6
+            enable_clarifications: true
+            allow_network_for_research: true
+            allow_network_for_plan: true
+            allow_network_for_component_design: true
+            fail_fast: false
+            top_level_architecture_approval_mode: auto
+            top_level_retry_exhausted_policy: human_review
+          output:
+            write_design_package: true
+            design_package_path: "@artifacts/gitcode_mcp_live_readiness_iteration_4_design_package.zip"
+            report_path: "@artifacts/gitcode_mcp_live_readiness_iteration_4_report.md"
+            public_safe: true

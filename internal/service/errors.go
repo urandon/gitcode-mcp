@@ -28,6 +28,8 @@ type ErrSyncFailure struct {
 	Cause          error
 }
 
+func (e ErrSyncFailure) DiagnosticCode() string { return e.Mode }
+
 func (e ErrSyncFailure) Error() string {
 	switch e.Mode {
 	case "network_timeout":
@@ -38,6 +40,13 @@ func (e ErrSyncFailure) Error() string {
 		return fmt.Sprintf("sync: received partial response for %s: expected %d bytes, got %d bytes. Run sync again to resume.", e.Endpoint, e.ExpectedBytes, e.GotBytes)
 	case "auth_expired":
 		return "sync: authentication expired. Renew your GITCODE_TOKEN and try again."
+	case "live_auth_failure":
+		return "sync: live_auth_failure: live provider rejected credentials. Renew your GITCODE_TOKEN and try again."
+	case "live_graph_invalid":
+		if e.Cause != nil {
+			return "sync: live_graph_invalid: " + e.Cause.Error()
+		}
+		return "sync: live_graph_invalid"
 	case "remote_collision":
 		return fmt.Sprintf("sync: remote id %s already maps to local id %s; cannot map to %s. Run link-check for guidance.", e.Alias, e.ExistingID, e.NewID)
 	case "cache_corruption":
@@ -164,6 +173,8 @@ func (e ErrRepoRequired) Error() string {
 	return "service: repo_required: --repo is required for " + e.Operation
 }
 
+func (e ErrRepoRequired) DiagnosticCode() string { return "repo_required" }
+
 type ErrAmbiguousAlias struct {
 	Alias string
 	Repos []string
@@ -191,6 +202,13 @@ func (e ErrInvalidQuery) Error() string {
 		return "service: invalid query: " + e.Message
 	}
 	return "service: invalid query " + e.Field + ": " + e.Message
+}
+
+func (e ErrInvalidQuery) DiagnosticCode() string {
+	if e.Field == "api_base_url" {
+		return "invalid_api_base_url"
+	}
+	return "invalid_query"
 }
 
 type ErrRangeClamped struct {
@@ -246,6 +264,8 @@ func (e ErrWriteFailure) Error() string {
 }
 
 func (e ErrWriteFailure) Unwrap() error { return e.Cause }
+
+func (e ErrWriteFailure) DiagnosticCode() string { return e.Code }
 
 type ErrSyncInProgress struct {
 	EventID        string

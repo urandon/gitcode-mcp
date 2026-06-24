@@ -109,6 +109,12 @@ Observed:
 - remediation points to `GITCODE_TOKEN` or credential store;
 - available sources include env token, keychain, and none.
 
+Follow-up Keychain check:
+
+- with `GITCODE_TOKEN` unset and a token present in the native credential store, `auth status --format json` reported `source: keychain` and `present: true`;
+- this confirms the native Keychain resolver itself works;
+- live write still returned a missing-credential failure in the operator path, which means live sync/write are not consistently consuming the resolved credential pipeline yet.
+
 With an invalid placeholder token set, `doctor --live --runtime-audit --repo <repo-id>` reported:
 
 - `credential_source: env:GITCODE_TOKEN`;
@@ -313,7 +319,8 @@ Expected:
 
 1. Explicit `--live` sync still silently uses fixture/offline behavior.
 2. Explicit `--live` write still reaches `fixture client is read-only`.
-3. Live provider selection is therefore not wired into the real sync/write service path.
+3. Keychain-resolved credentials are visible to `auth status`, but live write can still report missing credentials.
+4. Live provider selection and credential injection are therefore not wired consistently into the real sync/write service path.
 
 ### Secondary gaps
 
@@ -336,4 +343,4 @@ Focus the next implementation slice narrowly on provider wiring:
 
 ## Commands not executed
 
-Credential-gated real live two-cache e2e was not executed in this smoke pass. The environment available to this session did not expose a usable real token through the normal shell path, and the explicit invalid-token tests were sufficient to prove provider selection still routes to fixture behavior.
+Credential-gated real live two-cache e2e was not executed in this smoke pass. A follow-up operator check confirmed that the native Keychain resolver can expose a token to `auth status`, but live write still failed before reaching the expected provider path. The explicit invalid-token and Keychain follow-up checks were sufficient to prove provider selection and credential injection still need wiring work before real live e2e is meaningful.

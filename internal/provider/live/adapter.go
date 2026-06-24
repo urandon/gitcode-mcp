@@ -1,7 +1,6 @@
 package live
 
 import (
-	"strings"
 	"time"
 
 	"gitcode-mcp/internal/gitcode"
@@ -13,37 +12,34 @@ type Config = gitcode.ProviderConfig
 type ErrProviderUnavailable = gitcode.ErrProviderUnavailable
 
 type (
-	Page               = gitcode.Page[any]
-	IssueSummary       = gitcode.IssueSummary
-	Issue              = gitcode.Issue
-	Comment            = gitcode.Comment
-	WikiPage           = gitcode.WikiPage
-	SearchResult       = gitcode.SearchResult
-	WriteResult        = gitcode.WriteResult[any]
-	WriteOptions       = gitcode.WriteOptions
-	IssueListRequest   = gitcode.IssueListRequest
-	IssueRequest       = gitcode.IssueRequest
-	WikiListRequest    = gitcode.WikiListRequest
-	WikiPageRequest    = gitcode.WikiPageRequest
-	CreateIssueRequest = gitcode.CreateIssueRequest
-	UpdateIssueRequest = gitcode.UpdateIssueRequest
+	Page                      = gitcode.Page[any]
+	IssueSummary              = gitcode.IssueSummary
+	Issue                     = gitcode.Issue
+	Comment                   = gitcode.Comment
+	WikiPage                  = gitcode.WikiPage
+	SearchResult              = gitcode.SearchResult
+	WriteResult               = gitcode.WriteResult[any]
+	WriteOptions              = gitcode.WriteOptions
+	IssueListRequest          = gitcode.IssueListRequest
+	IssueRequest              = gitcode.IssueRequest
+	WikiListRequest           = gitcode.WikiListRequest
+	WikiPageRequest           = gitcode.WikiPageRequest
+	CreateIssueRequest        = gitcode.CreateIssueRequest
+	UpdateIssueRequest        = gitcode.UpdateIssueRequest
 	CreateIssueCommentRequest = gitcode.CreateIssueCommentRequest
 	CreateWikiPageRequest     = gitcode.CreateWikiPageRequest
 	UpdateWikiPageRequest     = gitcode.UpdateWikiPageRequest
-	SearchRequest      = gitcode.SearchRequest
-	RepoRequest        = gitcode.RepoRequest
-	Repo               = gitcode.Repo
-	AuthProbeRequest   = gitcode.AuthProbeRequest
-	AuthProbeResult    = gitcode.AuthProbeResult
-	RedactedCapture    = gitcode.RedactedCapture
+	SearchRequest             = gitcode.SearchRequest
+	RepoRequest               = gitcode.RepoRequest
+	Repo                      = gitcode.Repo
+	AuthProbeRequest          = gitcode.AuthProbeRequest
+	AuthProbeResult           = gitcode.AuthProbeResult
+	RedactedCapture           = gitcode.RedactedCapture
 )
 
-func IsProviderUnavailable(err error) bool    { return gitcode.IsProviderUnavailable(err) }
+func IsProviderUnavailable(err error) bool { return gitcode.IsProviderUnavailable(err) }
 
 func NewLiveProvider(cfg Config) (Provider, error) {
-	if cfg.Mode != "live" || !cfg.LiveAllowed || strings.TrimSpace(cfg.Token) == "" {
-		return nil, ErrProviderUnavailable{Reason: "live provider requires live mode, explicit live allowance, and token"}
-	}
 	return gitcode.NewLiveProvider(cfg)
 }
 

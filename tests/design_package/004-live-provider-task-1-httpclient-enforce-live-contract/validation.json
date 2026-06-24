@@ -1,0 +1,33 @@
+{
+  "schema_version": "triborg.validation-result.v1",
+  "task_id": "004-live-provider-task-1-httpclient-enforce-live-contract",
+  "covered_outcome_ids": ["outcome-1", "outcome-3", "outcome-4", "outcome-5", "outcome-6", "outcome-8"],
+  "covered_decommission_ids": ["decommission-1", "decommission-2", "decommission-3", "decommission-4"],
+  "product_surfaces": [
+    "cmd/gitcode-mcp/main_test.go::TestCLIStartupPlanSelectsLiveProvider/SCN-CLI-LIVE-SYNC-USES-LIVE-PROVIDER exercises the real gitcode-mcp sync --live CLI startup route with a repository-selected httptest.Server base URL, valid test token, request count assertion, and fixture identifier rejection.",
+    "cmd/gitcode-mcp/main_test.go::TestCLIStartupPlanSelectsLiveProvider/SCN-CRED-LIVE-WRITE-MOCK-KEYCHAIN exercises the real gitcode-mcp create-issue --live CLI startup route with GITCODE_TOKEN unset and a mocked Keychain-equivalent source, asserting an authenticated live POST and absence of fixture read-only/token leakage.",
+    "cmd/gitcode-mcp/main_test.go::TestCLIStartupPlanSelectsLiveProvider/SCN-CLI-LIVE-API-BASE-AUTHORITY exercises selected-only live API routing through repository binding api_base_url while a non-selected endpoint is configured through environment fallback.",
+    "internal/gitcode/client_test.go::TestScenario004ReadRouteContract exercises live HTTP issue, issue detail, comment, wiki list, and wiki detail requests against httptest.Server, validating Authorization, Accept, endpoint paths, decoded mock records, and no fixture identifiers in live paths.",
+    "internal/gitcode/client_test.go::TestScenario004AuthAfterRequest exercises live HTTP read and write auth failure behavior against 401/403 httptest.Server responses, asserting request counts greater than zero and ErrAuthExpired/ErrForbidden classification after transport.",
+    "internal/gitcode/client_test.go::TestScenario004CreateIssueContract exercises live HTTP create issue behavior, asserting POST method, Authorization, Accept, Idempotency-Key, complete WriteResult confirmation metadata, remote id/number, response hash/fingerprint, and no fixture read-only marker.",
+    "internal/gitcode/client_test.go::TestScenario004SelectedBaseURLOnly exercises live HTTP client base URL selection with selected and fallback httptest.Server counters, proving only the selected authority is used.",
+    "internal/gitcode/provider_test.go::TestScenario004LiveProviderAdmission exercises fail-closed NewLiveProvider admission rules for live mode, LiveAllowed, non-empty token, and absolute http/https selected BaseURL before HTTP client construction.",
+    "go test ./... is run by run.sh as the offline executable acceptance gate so validation remains current against the repository-wide test binary."
+  ],
+  "evidence_type": "offline_cli_integration_and_stubbed_external_provider_go_test",
+  "freshness": "Current target repository source and test binary at validation execution time with fresh temporary cache/config paths, httptest.Server mocks, no live GitCode credentials, no external network requirement, and no OS Keychain dependency.",
+  "mocks_used": {
+    "httptest.Server": "Mocks only the external GitCode-compatible HTTP service, including valid read/write payloads, 401/403 auth failures, and selected/non-selected endpoint counters while exercising production CLI startup and live HTTP client/runtime paths.",
+    "GITCODE_MCP_TEST_KEYCHAIN_TOKEN": "Test-only mocked Keychain-equivalent credential source consumed by the production startup credential pipeline for create-issue --live with GITCODE_TOKEN unset."
+  },
+  "production_files_modified": {},
+  "validation_scope": "Validation artifacts are limited to tests/design_package/004-live-provider-task-1-httpclient-enforce-live-contract/. No production source, production docs, runtime code, server code, app code, root AGENTS.md, or product configuration is modified by this validation materialization.",
+  "live_validation": {
+    "enabled": false,
+    "reason": "Live validation is disabled for this task. All evidence is deterministic offline validation using stubbed external dependencies only."
+  },
+  "device_validation": {
+    "enabled": false,
+    "reason": "Device validation is disabled and not applicable to this offline CLI/provider validation."
+  }
+}

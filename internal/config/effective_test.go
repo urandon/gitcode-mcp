@@ -89,7 +89,8 @@ func TestEffectiveConfigScenarios(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LoadEffective returned error: %v", err)
 		}
-		status := DefaultCredentialProvider(src).Status(context.Background(), eff)
+		provider := ChainCredentialProvider{Providers: []CredentialProvider{EnvCredentialProvider{Source: src}, StaticCredentialProvider{Source: "keychain", StoreMode: "auto", ErrorClass: "token-missing"}}}
+		status := provider.Status(context.Background(), eff)
 		if status.Present || status.ErrorClass != "token-missing" || status.Source != "missing" {
 			t.Fatalf("status=%#v", status)
 		}

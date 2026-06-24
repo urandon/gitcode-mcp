@@ -228,6 +228,7 @@ func (as AuthStatus) ToCredentialStatus() config.CredentialStatus {
 		StoreMode:        storeMode,
 		ErrorClass:       errorClass,
 		Remediation:      remediation,
+		AttemptedSources: append([]string(nil), availableSources...),
 		AvailableSources: availableSources,
 	}
 }

@@ -39,15 +39,46 @@ type EffectiveConfig struct {
 }
 
 type CredentialStatus struct {
-	Source           string               `json:"source"`
-	Present          bool                 `json:"present"`
-	StoreMode        string               `json:"store_mode"`
-	RedactedToken    string               `json:"redacted_token,omitempty"`
-	ErrorClass       string               `json:"error_class,omitempty"`
-	Remediation      string               `json:"remediation,omitempty"`
-	AvailableSources []string             `json:"available_sources,omitempty"`
-	AuthProbe        *CredentialAuthProbe `json:"auth_probe,omitempty"`
+	Source             string               `json:"source"`
+	Present            bool                 `json:"present"`
+	StoreMode          string               `json:"store_mode"`
+	RedactedToken      string               `json:"redacted_token,omitempty"`
+	ErrorClass         string               `json:"error_class,omitempty"`
+	Remediation        string               `json:"remediation,omitempty"`
+	AttemptedSources   []string             `json:"attempted_sources,omitempty"`
+	AvailableSources   []string             `json:"available_sources,omitempty"`
+	UnavailableSources []string             `json:"unavailable_sources,omitempty"`
+	AuthProbe          *CredentialAuthProbe `json:"auth_probe,omitempty"`
 }
+
+type CredentialResolutionResult struct {
+	Present            bool
+	Token              SecretString
+	Source             string
+	StoreMode          string
+	AttemptedSources   []string
+	AvailableSources   []string
+	UnavailableSources []string
+	ErrorClass         string
+	Remediation        string
+}
+
+func (r CredentialResolutionResult) Status() CredentialStatus {
+	return CredentialStatus{Source: r.Source, Present: r.Present, StoreMode: r.StoreMode, AttemptedSources: append([]string(nil), r.AttemptedSources...), AvailableSources: append([]string(nil), r.AvailableSources...), UnavailableSources: append([]string(nil), r.UnavailableSources...), ErrorClass: r.ErrorClass, Remediation: r.Remediation}
+}
+
+type MissingCredentialError struct {
+	Status CredentialStatus
+}
+
+func (e MissingCredentialError) Error() string {
+	if strings.TrimSpace(e.Status.Source) == "" || e.Status.Source == "missing" {
+		return "missing_credential: live provider requires GITCODE_TOKEN or configured credential"
+	}
+	return "missing_credential: live provider requires GITCODE_TOKEN or configured credential; credential_source=" + e.Status.Source
+}
+
+func (e MissingCredentialError) DiagnosticCode() string { return "missing_credential" }
 
 type CredentialAuthProbe struct {
 	Status       string `json:"status"`
@@ -85,11 +116,15 @@ func (p EnvCredentialProvider) Resolve(ctx context.Context, eff EffectiveConfig)
 	if src == nil {
 		src = OSSource{}
 	}
-	value := src.Env(EnvToken)
+	value := strings.TrimSpace(src.Env(EnvToken))
 	if value == "" {
-		return SecretString{}, missingCredentialStatus(eff.CredentialPolicy.Store), nil
+		status := missingCredentialStatus(eff.CredentialPolicy.Store)
+		status.Source = "env:" + EnvToken
+		status.AttemptedSources = []string{"env:" + EnvToken}
+		status.AvailableSources = []string{"env:" + EnvToken}
+		return SecretString{}, status, nil
 	}
-	return SecretString{value: value}, CredentialStatus{Source: "env:" + EnvToken, Present: true, StoreMode: eff.CredentialPolicy.Store}, nil
+	return SecretString{value: value}, CredentialStatus{Source: "env:" + EnvToken, Present: true, StoreMode: eff.CredentialPolicy.Store, AttemptedSources: []string{"env:" + EnvToken}, AvailableSources: []string{"env:" + EnvToken}}, nil
 }
 
 func (p EnvCredentialProvider) Status(ctx context.Context, eff EffectiveConfig) CredentialStatus {
@@ -109,7 +144,7 @@ func (p StaticCredentialProvider) Resolve(ctx context.Context, eff EffectiveConf
 	_ = ctx
 	status := p.Status(ctx, eff)
 	if status.Present {
-		return SecretString{value: p.Token}, status, nil
+		return SecretString{value: strings.TrimSpace(p.Token)}, status, nil
 	}
 	return SecretString{}, status, nil
 }
@@ -120,17 +155,21 @@ func (p StaticCredentialProvider) Status(ctx context.Context, eff EffectiveConfi
 	if store == "" {
 		store = eff.CredentialPolicy.Store
 	}
-	if p.Token != "" {
-		source := p.Source
-		if source == "" {
-			source = "keyring"
-		}
-		return CredentialStatus{Source: source, Present: true, StoreMode: store}
+	source := p.Source
+	if source == "" {
+		source = "keyring"
+	}
+	if strings.TrimSpace(p.Token) != "" {
+		return CredentialStatus{Source: source, Present: true, StoreMode: store, AttemptedSources: []string{source}, AvailableSources: []string{source}}
 	}
 	if p.ErrorClass != "" {
-		return CredentialStatus{Source: p.Source, Present: false, StoreMode: store, ErrorClass: p.ErrorClass, Remediation: p.Remediation}
+		return CredentialStatus{Source: source, Present: false, StoreMode: store, ErrorClass: p.ErrorClass, Remediation: p.Remediation, AttemptedSources: []string{source}, UnavailableSources: []string{source}}
 	}
-	return missingCredentialStatus(store)
+	status := missingCredentialStatus(store)
+	status.Source = source
+	status.AttemptedSources = []string{source}
+	status.AvailableSources = []string{source}
+	return status
 }
 
 type ChainCredentialProvider struct {
@@ -138,52 +177,79 @@ type ChainCredentialProvider struct {
 }
 
 func DefaultCredentialProvider(src Source) ChainCredentialProvider {
-	return ChainCredentialProvider{Providers: []CredentialProvider{EnvCredentialProvider{Source: src}, KeychainCredentialProvider{}}}
+	providers := []CredentialProvider{EnvCredentialProvider{Source: src}}
+	if src != nil {
+		if token := strings.TrimSpace(src.Env("GITCODE_MCP_TEST_KEYCHAIN_TOKEN")); token != "" {
+			providers = append(providers, StaticCredentialProvider{Source: "mock-keychain", Token: token, StoreMode: "keychain"})
+			return ChainCredentialProvider{Providers: providers}
+		}
+	}
+	providers = append(providers, KeychainCredentialProvider{})
+	return ChainCredentialProvider{Providers: providers}
 }
 
 func (p ChainCredentialProvider) Resolve(ctx context.Context, eff EffectiveConfig) (SecretString, CredentialStatus, error) {
-	var last CredentialStatus
-	for _, provider := range p.Providers {
-		secret, status, err := provider.Resolve(ctx, eff)
-		if err != nil {
-			return SecretString{}, status, err
+	result, err := p.ResolveLiveCredential(ctx, eff)
+	if err != nil {
+		var missing MissingCredentialError
+		if errors.As(err, &missing) {
+			return SecretString{}, missing.Status, nil
 		}
-		last = status
-		if status.Present {
-			return secret, status, nil
-		}
+		return SecretString{}, result.Status(), err
 	}
-	if last.Source == "" {
-		last = missingCredentialStatus(eff.CredentialPolicy.Store)
-	}
-	return SecretString{}, last, nil
+	return result.Token, result.Status(), nil
 }
 
-func (p ChainCredentialProvider) Status(ctx context.Context, eff EffectiveConfig) CredentialStatus {
-	available := make([]string, 0, len(p.Providers))
+func (p ChainCredentialProvider) ResolveLiveCredential(ctx context.Context, eff EffectiveConfig) (CredentialResolutionResult, error) {
+	providers := p.Providers
+	if eff.CredentialPolicy.Store == "env" && len(providers) > 0 {
+		providers = providers[:1]
+	}
+	var attempted, available, unavailable []string
 	var last CredentialStatus
-	for _, provider := range p.Providers {
-		_, status, err := provider.Resolve(ctx, eff)
-		if source := providerStatusSource(provider, status); source != "" {
-			available = append(available, source)
+	for _, provider := range providers {
+		secret, status, err := provider.Resolve(ctx, eff)
+		source := providerStatusSource(provider, status)
+		if source != "" {
+			attempted = append(attempted, source)
+			if err != nil || status.ErrorClass == "credential-store-unavailable" {
+				unavailable = append(unavailable, source)
+			} else {
+				available = append(available, source)
+			}
 		}
 		if err != nil && status.ErrorClass == "" {
 			status.ErrorClass = "credential-store-unavailable"
 			status.Remediation = "Use GITCODE_TOKEN or configure credential.store: env."
 		}
+		status.AttemptedSources = uniqueStrings(append(status.AttemptedSources, attempted...))
+		status.AvailableSources = uniqueStrings(append(status.AvailableSources, available...))
+		status.UnavailableSources = uniqueStrings(append(status.UnavailableSources, unavailable...))
 		last = status
-		if status.Present {
-			status.AvailableSources = uniqueStrings(available)
-			return status
+		if status.Present && strings.TrimSpace(secret.Value()) != "" {
+			return CredentialResolutionResult{Present: true, Token: secret, Source: status.Source, StoreMode: status.StoreMode, AttemptedSources: status.AttemptedSources, AvailableSources: status.AvailableSources, UnavailableSources: status.UnavailableSources, ErrorClass: status.ErrorClass, Remediation: status.Remediation}, nil
 		}
 	}
-	status := missingCredentialStatus(eff.CredentialPolicy.Store)
-	if last.StoreMode != "" {
-		status.StoreMode = last.StoreMode
+	last = missingCredentialStatus(eff.CredentialPolicy.Store)
+	last.Present = false
+	last.ErrorClass = firstNonEmpty(last.ErrorClass, "token-missing")
+	last.Remediation = firstNonEmpty(last.Remediation, "Set GITCODE_TOKEN or configure a credential store.")
+	last.AttemptedSources = uniqueStrings(append(last.AttemptedSources, attempted...))
+	last.AvailableSources = uniqueStrings(append(last.AvailableSources, available...))
+	last.UnavailableSources = uniqueStrings(append(last.UnavailableSources, unavailable...))
+	result := CredentialResolutionResult{Present: false, Source: last.Source, StoreMode: last.StoreMode, AttemptedSources: last.AttemptedSources, AvailableSources: last.AvailableSources, UnavailableSources: last.UnavailableSources, ErrorClass: last.ErrorClass, Remediation: last.Remediation}
+	return result, MissingCredentialError{Status: result.Status()}
+}
+
+func (p ChainCredentialProvider) Status(ctx context.Context, eff EffectiveConfig) CredentialStatus {
+	result, err := p.ResolveLiveCredential(ctx, eff)
+	if err != nil {
+		var missing MissingCredentialError
+		if errors.As(err, &missing) {
+			return missing.Status
+		}
 	}
-	available = append(available, "none")
-	status.AvailableSources = uniqueStrings(available)
-	return status
+	return result.Status()
 }
 
 func Locate(src Source) ConfigLocation {
@@ -501,6 +567,15 @@ func providerStatusSource(provider CredentialProvider, status CredentialStatus) 
 		return "keychain"
 	}
 	return status.Source
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func uniqueStrings(values []string) []string {

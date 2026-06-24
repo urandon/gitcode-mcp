@@ -16,6 +16,59 @@ import (
 	"gitcode-mcp/internal/testnet"
 )
 
+func TestScenario004ReadRouteContract(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if got := r.Header.Get("Authorization"); got != "Bearer selected-token" {
+			t.Fatalf("auth header not applied: %q", got)
+		}
+		if got := r.Header.Get("Accept"); got != "application/json" {
+			t.Fatalf("accept header not applied: %q", got)
+		}
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo/issues":
+			fmt.Fprint(w, `[{"id":"MOCK-ISSUE-7","number":7,"title":"mock issue"}]`)
+		case "/api/v5/repos/example-owner/example-repo/issues/7":
+			fmt.Fprint(w, `{"id":"MOCK-ISSUE-7","number":7,"title":"mock issue","body":"mock body"}`)
+		case "/api/v5/repos/example-owner/example-repo/issues/7/comments":
+			fmt.Fprint(w, `[{"id":"MOCK-COMMENT-1","issue_id":"MOCK-ISSUE-7","body":"mock comment"}]`)
+		case "/api/v5/repos/example-owner/example-repo/wiki":
+			fmt.Fprint(w, `[{"id":"MOCK-WIKI-1","slug":"MockHome","title":"Mock Home","revision":"mock-rev-1"}]`)
+		case "/api/v5/repos/example-owner/example-repo/wiki/MockHome":
+			fmt.Fprint(w, `{"id":"MOCK-WIKI-1","slug":"MockHome","title":"Mock Home","body":"mock wiki","revision":"mock-rev-1"}`)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{Token: "selected-token"})
+	issues, err := client.ListIssues(context.Background(), IssueListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if err != nil || len(issues.Items) != 1 || issues.Items[0].ID != "MOCK-ISSUE-7" {
+		t.Fatalf("unexpected issues page=%+v err=%v", issues, err)
+	}
+	issue, err := client.GetIssue(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 7})
+	if err != nil || issue.ID != "MOCK-ISSUE-7" {
+		t.Fatalf("unexpected issue=%+v err=%v", issue, err)
+	}
+	comments, err := client.ListIssueComments(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 7})
+	if err != nil || len(comments.Items) != 1 || comments.Items[0].ID != "MOCK-COMMENT-1" || comments.Items[0].IssueID != "MOCK-ISSUE-7" {
+		t.Fatalf("unexpected comments=%+v err=%v", comments, err)
+	}
+	wikis, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if err != nil || len(wikis.Items) != 1 || wikis.Items[0].ID != "MOCK-WIKI-1" || wikis.Items[0].Slug != "MockHome" {
+		t.Fatalf("unexpected wikis=%+v err=%v", wikis, err)
+	}
+	wiki, err := client.GetWikiPage(context.Background(), WikiPageRequest{Owner: "example-owner", Repo: "example-repo", Slug: "MockHome"})
+	if err != nil || wiki.ID != "MOCK-WIKI-1" || wiki.Slug != "MockHome" {
+		t.Fatalf("unexpected wiki=%+v err=%v", wiki, err)
+	}
+	joined := strings.Join(paths, " ")
+	if strings.Contains(joined, "ISSUE-42") || strings.Contains(joined, "WIKI-HOME") {
+		t.Fatalf("fixture identifiers leaked into live route paths: %s", joined)
+	}
+}
+
 func TestContract(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
@@ -74,6 +127,33 @@ func TestContract(t *testing.T) {
 	}
 	if wikiPage.ID != "WIKI-HOME" || wikiPage.Title != "Example Project Home" || !strings.Contains(wikiPage.Body, "api.example.com") || wikiPage.CreatedAt.IsZero() || wikiPage.UpdatedAt.IsZero() {
 		t.Fatalf("unexpected wiki page: %+v", wikiPage)
+	}
+}
+
+func TestScenario004SelectedBaseURLOnly(t *testing.T) {
+	var selectedHits atomic.Int32
+	selected := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		selectedHits.Add(1)
+		if r.URL.Path != "/api/v5/repos/example-owner/example-repo/issues" {
+			t.Fatalf("unexpected selected path %s", r.URL.Path)
+		}
+		fmt.Fprint(w, `[{"id":"MOCK-SELECTED-1","number":1,"title":"selected"}]`)
+	}))
+	defer selected.Close()
+	var fallbackHits atomic.Int32
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackHits.Add(1)
+		t.Fatalf("fallback endpoint was used: %s", r.URL.Path)
+	}))
+	defer fallback.Close()
+	_ = fallback.URL
+	client := newTestClient(t, selected.URL, Config{Token: "selected-token"})
+	page, err := client.ListIssues(context.Background(), IssueListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if err != nil {
+		t.Fatalf("ListIssues returned error: %v", err)
+	}
+	if selectedHits.Load() == 0 || fallbackHits.Load() != 0 || len(page.Items) != 1 || page.Items[0].ID != "MOCK-SELECTED-1" {
+		t.Fatalf("unexpected routing selected=%d fallback=%d page=%+v", selectedHits.Load(), fallbackHits.Load(), page)
 	}
 }
 
@@ -180,6 +260,43 @@ func TestTimeout(t *testing.T) {
 	}
 	if !strings.Contains(unavailable.Endpoint, "/issues/42") || !strings.Contains(unavailable.Error(), "retry") {
 		t.Fatalf("missing endpoint or retry guidance: %+v", unavailable)
+	}
+}
+
+func TestScenario004AuthAfterRequest(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var reads atomic.Int32
+			var writes atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					writes.Add(1)
+				} else {
+					reads.Add(1)
+				}
+				w.WriteHeader(status)
+				fmt.Fprint(w, `{"message":"auth failed"}`)
+			}))
+			defer server.Close()
+			client := newTestClient(t, server.URL, Config{Token: "invalid-token"})
+			_, readErr := client.ListIssues(context.Background(), IssueListRequest{Owner: "example-owner", Repo: "example-repo"})
+			if reads.Load() == 0 {
+				t.Fatalf("read auth error occurred before HTTP request")
+			}
+			_, writeErr := client.CreateIssue(context.Background(), CreateIssueRequest{Owner: "example-owner", Repo: "example-repo", Title: "created"}, WriteOptions{IdempotencyKey: "key"})
+			if writes.Load() == 0 {
+				t.Fatalf("write auth error occurred before HTTP request")
+			}
+			for _, err := range []error{readErr, writeErr} {
+				if status == http.StatusUnauthorized {
+					var target ErrAuthExpired
+					assertAs(t, err, &target)
+				} else {
+					var target ErrForbidden
+					assertAs(t, err, &target)
+				}
+			}
+		})
 	}
 }
 
@@ -326,6 +443,37 @@ func TestWriteEndpointsTemplate(t *testing.T) {
 		if got != expected[name] {
 			t.Fatalf("%s endpoint: got %s want %s", name, got, expected[name])
 		}
+	}
+}
+
+func TestScenario004CreateIssueContract(t *testing.T) {
+	var sawAuth string
+	var sawAccept string
+	var sawKey string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v5/repos/example-owner/example-repo/issues" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		sawAuth = r.Header.Get("Authorization")
+		sawAccept = r.Header.Get("Accept")
+		sawKey = r.Header.Get("Idempotency-Key")
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"id":"MOCK-CREATED-100","number":100,"title":"created","body":"safe body"}`)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{Token: "resolved-token"})
+	result, err := client.CreateIssue(context.Background(), CreateIssueRequest{Owner: "example-owner", Repo: "example-repo", Title: "created", Body: "safe body"}, WriteOptions{IdempotencyNonce: "nonce-004"})
+	if err != nil {
+		t.Fatalf("CreateIssue returned error: %v", err)
+	}
+	if sawAuth != "Bearer resolved-token" || sawAccept != "application/json" || sawKey == "" {
+		t.Fatalf("missing live request headers auth=%q accept=%q key=%q", sawAuth, sawAccept, sawKey)
+	}
+	if !result.Confirmed || result.Operation != "CreateIssue" || result.Target != "example-owner/example-repo" || result.RemoteID != "MOCK-CREATED-100" || result.RemoteNumber != 100 || result.IdempotencyKey != sawKey || result.ResponseHash == "" || result.ProviderPayloadFingerprint == "" || result.ConfirmedAt.IsZero() {
+		t.Fatalf("incomplete create confirmation: %+v", result)
+	}
+	if strings.Contains(strings.ToLower(result.Operation+result.Target+result.RemoteID), "fixture client is read-only") {
+		t.Fatalf("fixture read-only marker leaked: %+v", result)
 	}
 }
 
@@ -583,6 +731,41 @@ func TestWriteNegativeScenariosDoNotConfirm(t *testing.T) {
 			if !tt.check(err) || result.Confirmed || result.IdempotencyKey != "" || result.ResponseHash != "" || !result.ConfirmedAt.IsZero() {
 				t.Fatalf("expected typed error without confirmation: result=%+v err=%T %v", result, err, err)
 			}
+		})
+	}
+}
+
+func TestScenario004ReadValidation(t *testing.T) {
+	client := newTestClient(t, "http://127.0.0.1", Config{})
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "list-issues-owner", err: func() error {
+			_, err := client.ListIssues(context.Background(), IssueListRequest{Repo: "example-repo"})
+			return err
+		}()},
+		{name: "get-issue-number", err: func() error {
+			_, err := client.GetIssue(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo"})
+			return err
+		}()},
+		{name: "comments-number", err: func() error {
+			_, err := client.ListIssueComments(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo"})
+			return err
+		}()},
+		{name: "list-wikis-repo", err: func() error {
+			_, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner"})
+			return err
+		}()},
+		{name: "get-wiki-slug", err: func() error {
+			_, err := client.GetWikiPage(context.Background(), WikiPageRequest{Owner: "example-owner", Repo: "example-repo"})
+			return err
+		}()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var target ErrValidationFailed
+			assertAs(t, tt.err, &target)
 		})
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/credential"
+	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/doctor"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
@@ -93,6 +94,19 @@ type serviceFactory func(context.Context, string) (queryService, func() error, e
 type localCommandDeps struct {
 	Source             config.Source
 	CredentialReporter config.CredentialStatusReporter
+}
+
+type startupPlan struct {
+	Command               string
+	ProviderMode          string
+	CachePath             string
+	RepoID                string
+	APIBaseURL            string
+	LiveRepositoryBinding service.LiveRepositoryBinding
+	CredentialStatus      config.CredentialStatus
+	CredentialResolution  config.CredentialResolutionResult
+	Token                 config.SecretString
+	ServiceConfig         service.ServiceConfig
 }
 
 type options struct {
@@ -180,6 +194,13 @@ func executeWithFactory(args []string, stdout io.Writer, stderr io.Writer, facto
 }
 
 func executeWithFactoryAndDeps(args []string, stdout io.Writer, stderr io.Writer, factory serviceFactory, deps localCommandDeps) int {
+	if deps.Source == nil {
+		deps.Source = config.OSSource{}
+	}
+	if deps.CredentialReporter == nil {
+		provider := config.DefaultCredentialProvider(deps.Source)
+		deps.CredentialReporter = provider
+	}
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		printHelp(stdout)
 		return 0
@@ -206,14 +227,126 @@ func executeWithFactoryAndDeps(args []string, stdout io.Writer, stderr io.Writer
 		printCommandHelp(command, stdout)
 		return 0
 	}
-	svc, cleanup, err := factory(context.Background(), opts.cachePath)
+	plan, planErr := buildStartupPlan(context.Background(), command, opts, deps)
+	if planErr != nil {
+		return writeCommandError(stderr, opts.format, plan, planErr)
+	}
+	svc, cleanup, err := serviceFromStartupPlan(context.Background(), plan, factory)
 	if err != nil {
-		return writeError(stderr, opts.format, err)
+		return writeCommandError(stderr, opts.format, plan, err)
 	}
 	if cleanup != nil {
 		defer cleanup()
 	}
-	return dispatch(context.Background(), svc, command, rest, opts, stdout, stderr)
+	return dispatch(context.Background(), svc, command, rest, opts, stdout, stderr, plan)
+}
+
+func buildStartupPlan(ctx context.Context, command string, opts options, deps localCommandDeps) (startupPlan, error) {
+	plan := startupPlan{Command: command, ProviderMode: "offline-fixture", CachePath: opts.cachePath, RepoID: opts.repo}
+	if opts.live && isLiveStartupCommand(command) {
+		plan.ProviderMode = "live-http"
+	}
+	eff, err := config.LoadEffective(deps.Source, config.Overrides{CachePath: opts.cachePath})
+	if err != nil {
+		return plan, err
+	}
+	plan.CachePath = firstNonEmpty(opts.cachePath, eff.Config.CachePath)
+	if plan.ProviderMode != "live-http" {
+		return plan, nil
+	}
+	resolution, err := resolveLiveCredential(ctx, eff, deps)
+	plan.CredentialResolution = resolution
+	plan.CredentialStatus = resolution.Status()
+	if err != nil {
+		return plan, err
+	}
+	if !resolution.Present || strings.TrimSpace(resolution.Token.Value()) == "" {
+		return plan, config.MissingCredentialError{Status: resolution.Status()}
+	}
+	plan.Token = resolution.Token
+	binding, err := resolveStartupLiveRepositoryBinding(ctx, plan.CachePath, opts.repo, liveRequestedScope(command, opts), eff.Config.GitCodeBaseURL)
+	if err != nil {
+		return plan, err
+	}
+	plan.LiveRepositoryBinding = binding
+	plan.APIBaseURL = binding.APIBaseURL
+	plan.ServiceConfig = service.ServiceConfig{BaseURL: binding.APIBaseURL, Timeout: eff.Config.DefaultTimeout, MaxResponseSize: eff.Config.MaxResponseSize, MaxRetries: eff.Config.MaxRetries}
+	return plan, nil
+}
+
+func resolveLiveCredential(ctx context.Context, eff config.EffectiveConfig, deps localCommandDeps) (config.CredentialResolutionResult, error) {
+	if resolver, ok := deps.CredentialReporter.(interface {
+		ResolveLiveCredential(context.Context, config.EffectiveConfig) (config.CredentialResolutionResult, error)
+	}); ok {
+		return resolver.ResolveLiveCredential(ctx, eff)
+	}
+	if provider, ok := deps.CredentialReporter.(config.CredentialProvider); ok {
+		secret, status, err := provider.Resolve(ctx, eff)
+		result := config.CredentialResolutionResult{Present: status.Present && strings.TrimSpace(secret.Value()) != "", Token: secret, Source: status.Source, StoreMode: status.StoreMode, AttemptedSources: append([]string(nil), status.AttemptedSources...), AvailableSources: append([]string(nil), status.AvailableSources...), UnavailableSources: append([]string(nil), status.UnavailableSources...), ErrorClass: status.ErrorClass, Remediation: status.Remediation}
+		if err != nil {
+			return result, err
+		}
+		if !result.Present {
+			return result, config.MissingCredentialError{Status: result.Status()}
+		}
+		return result, nil
+	}
+	provider := config.DefaultCredentialProvider(deps.Source)
+	return provider.ResolveLiveCredential(ctx, eff)
+}
+
+func isLiveStartupCommand(command string) bool {
+	switch command {
+	case "sync", "create-issue", "update-issue", "create-page", "update-page", "add-comment", "add-label", "doctor":
+		return true
+	default:
+		return false
+	}
+}
+
+func resolveStartupLiveRepositoryBinding(ctx context.Context, cachePath, repoID string, requestedScope service.RepositoryScope, fallback string) (service.LiveRepositoryBinding, error) {
+	store, err := cache.NewSQLiteReadOnlyStore(ctx, cachePath)
+	if err != nil {
+		return service.LiveRepositoryBinding{}, err
+	}
+	defer store.Close()
+	svc := service.New(store)
+	return svc.ResolveLiveRepositoryBinding(ctx, service.LiveRepositoryBindingRequest{RepoID: repoID, RequestedScope: requestedScope, CachePath: cachePath, AuditPath: cachePath, FallbackAPIBaseURL: fallback})
+}
+
+func liveRequestedScope(command string, opts options) service.RepositoryScope {
+	switch command {
+	case "create-page", "update-page":
+		return service.RepositoryScopeWiki
+	case "sync":
+		if opts.wiki && !opts.issues {
+			return service.RepositoryScopeWiki
+		}
+	}
+	return service.RepositoryScopeIssues
+}
+
+func serviceFromStartupPlan(ctx context.Context, plan startupPlan, factory serviceFactory) (queryService, func() error, error) {
+	if plan.ProviderMode != "live-http" {
+		if factory == nil {
+			factory = defaultServiceFactory
+		}
+		return factory(ctx, plan.CachePath)
+	}
+	path, err := resolvedCachePath(plan.CachePath)
+	if err != nil {
+		return nil, nil, err
+	}
+	store, err := cache.NewSQLiteStore(ctx, path)
+	if err != nil {
+		return nil, nil, err
+	}
+	svc, err := service.NewWithMode(store, gitcode.ProviderModeLive, plan.Token.Value(), plan.ServiceConfig)
+	if err != nil {
+		_ = store.Close()
+		return nil, nil, err
+	}
+	return svc, store.Close, nil
 }
 
 func defaultServiceFactory(ctx context.Context, cachePath string) (queryService, func() error, error) {
@@ -372,7 +505,8 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 		return 0
 	}
 	if command == "doctor" {
-		return executeDoctorCommand(context.Background(), opts, stdout, stderr, deps)
+		plan, _ := buildStartupPlan(context.Background(), command, opts, deps)
+		return executeDoctorCommand(context.Background(), opts, plan, stdout, stderr, deps)
 	}
 	if command == "migrate-cache" {
 		return executeMigrateCacheCommand(context.Background(), opts, stdout, stderr, deps)
@@ -425,7 +559,9 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 		}
 		status := deps.CredentialReporter.Status(context.Background(), eff)
 		if opts.live {
-			status = probeAuthStatus(context.Background(), deps.Source, eff, opts, status)
+			resolution, _ := resolveLiveCredential(context.Background(), eff, deps)
+			status = resolution.Status()
+			status = probeAuthStatus(context.Background(), deps.Source, eff, opts, status, resolution.Token)
 		}
 		sanitizedStatus := sanitizeCredentialStatus(status, deps.Source)
 		if opts.format == "json" {
@@ -445,16 +581,12 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 	}
 }
 
-func probeAuthStatus(ctx context.Context, src config.Source, eff config.EffectiveConfig, opts options, status config.CredentialStatus) config.CredentialStatus {
-	if !status.Present {
+func probeAuthStatus(ctx context.Context, src config.Source, eff config.EffectiveConfig, opts options, status config.CredentialStatus, secret config.SecretString) config.CredentialStatus {
+	if !status.Present || strings.TrimSpace(secret.Value()) == "" {
 		status.AuthProbe = &config.CredentialAuthProbe{Status: "skipped", FailureClass: "token-missing", Message: "auth probe requires a token"}
 		return status
 	}
-	token := strings.TrimSpace(src.Env(config.EnvToken))
-	if token == "" {
-		status.AuthProbe = &config.CredentialAuthProbe{Status: "skipped", FailureClass: "token-missing", Message: "auth probe requires GITCODE_TOKEN"}
-		return status
-	}
+	token := strings.TrimSpace(secret.Value())
 	owner := strings.TrimSpace(opts.owner)
 	repo := strings.TrimSpace(opts.repo)
 	if owner == "" || repo == "" {
@@ -504,7 +636,7 @@ func sanitizeCredentialStatus(status config.CredentialStatus, src config.Source)
 	return status
 }
 
-func dispatch(ctx context.Context, svc queryService, command string, args []string, opts options, stdout io.Writer, stderr io.Writer) int {
+func dispatch(ctx context.Context, svc queryService, command string, args []string, opts options, stdout io.Writer, stderr io.Writer, plan startupPlan) int {
 	switch command {
 	case "ingest":
 		result, err := svc.Ingest(ctx, service.OperationRequest{InputPath: opts.input, OutputPath: opts.output, Strict: opts.strict})
@@ -656,7 +788,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			default:
 				result, syncErr = svc.BulkSyncAll(ctx, req)
 			}
-			return renderSyncResources(stdout, stderr, opts.format, result, syncErr)
+			return renderSyncResources(stdout, stderr, opts.format, result, syncErr, plan)
 		}
 		result, err := svc.SyncToCache(ctx, service.SyncRequest{RepoID: opts.repo, StableID: opts.id, RemoteAlias: opts.input, IdempotencyKey: opts.idempotencyKey})
 		if err != nil {
@@ -721,29 +853,29 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "repo", Message: "unknown subcommand"})
 		}
 	case "create-issue":
-		return dispatchWrite(ctx, svc.CreateIssue, command, opts, stdout, stderr)
+		return dispatchWrite(ctx, svc.CreateIssue, command, opts, stdout, stderr, plan)
 	case "update-issue":
-		return dispatchWrite(ctx, svc.UpdateIssue, command, opts, stdout, stderr)
+		return dispatchWrite(ctx, svc.UpdateIssue, command, opts, stdout, stderr, plan)
 	case "create-page":
-		return dispatchWrite(ctx, svc.CreatePage, command, opts, stdout, stderr)
+		return dispatchWrite(ctx, svc.CreatePage, command, opts, stdout, stderr, plan)
 	case "update-page":
-		return dispatchWrite(ctx, svc.UpdatePage, command, opts, stdout, stderr)
+		return dispatchWrite(ctx, svc.UpdatePage, command, opts, stdout, stderr, plan)
 	case "add-comment":
-		return dispatchWrite(ctx, svc.AddComment, command, opts, stdout, stderr)
+		return dispatchWrite(ctx, svc.AddComment, command, opts, stdout, stderr, plan)
 	case "add-label":
-		return dispatchWrite(ctx, svc.AddLabel, command, opts, stdout, stderr)
+		return dispatchWrite(ctx, svc.AddLabel, command, opts, stdout, stderr, plan)
 	default:
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "command", Message: command + " is not a query command"})
 	}
 }
 
-func dispatchWrite(ctx context.Context, handler func(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error), command string, opts options, stdout io.Writer, stderr io.Writer) int {
+func dispatchWrite(ctx context.Context, handler func(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error), command string, opts options, stdout io.Writer, stderr io.Writer, plan startupPlan) int {
 	if err := validateWriteOptions(command, opts); err != nil {
-		return writeError(stderr, opts.format, err)
+		return writeCommandError(stderr, opts.format, plan, err)
 	}
 	result, err := handler(ctx, writeRequest(opts))
 	if err != nil {
-		return writeError(stderr, opts.format, err)
+		return writeCommandError(stderr, opts.format, plan, err)
 	}
 	return render(stdout, opts.format, result, renderWriteText)
 }
@@ -779,7 +911,7 @@ func syncScopedKey(base string, scope string) string {
 	return base + "-" + scope
 }
 
-func renderSyncResources(stdout, stderr io.Writer, format string, result *service.SyncResourcesResult, syncErr error) int {
+func renderSyncResources(stdout, stderr io.Writer, format string, result *service.SyncResourcesResult, syncErr error, plan startupPlan) int {
 	if syncErr != nil {
 		if partial, ok := syncErr.(*service.PartialSyncError); ok {
 			if result != nil && len(result.Results) > 0 {
@@ -797,11 +929,11 @@ func renderSyncResources(stdout, stderr io.Writer, format string, result *servic
 				}
 			}
 			if result == nil || result.SuccessCount == 0 {
-				return writeError(stderr, format, partial)
+				return writeCommandError(stderr, format, plan, partial)
 			}
 			return 1
 		}
-		return writeError(stderr, format, syncErr)
+		return writeCommandError(stderr, format, plan, syncErr)
 	}
 	if result != nil {
 		if format == "json" {
@@ -1011,18 +1143,55 @@ func joinRepositoryScopes(scopes []service.RepositoryScope) string {
 }
 
 func writeError(stderr io.Writer, format string, err error) int {
+	return writeCommandError(stderr, format, startupPlan{}, err)
+}
+
+func writeCommandError(stderr io.Writer, format string, plan startupPlan, err error) int {
 	code := exitCode(err)
 	failureClass := failureClass(err)
 	message := config.RedactDiagnostic(err.Error(), config.OSSource{})
+	var diagnostic diagnostics.Diagnostic
+	if plan.ProviderMode == "live-http" {
+		diagnostic = diagnostics.Classify(err, diagnosticContext(plan, err))
+		failureClass = string(diagnostic.Code)
+		message = diagnostic.Message
+	}
 	if format == "json" {
-		_ = json.NewEncoder(stderr).Encode(map[string]any{"error": message, "exit_code": code, "failure_class": failureClass})
+		payload := map[string]any{"error": message, "exit_code": code, "failure_class": failureClass}
+		if diagnostic.Code != "" {
+			payload["http_attempted"] = diagnostic.HTTPAttempted
+			payload["retryable"] = diagnostic.Retryable
+			if len(diagnostic.Context) > 0 {
+				payload["context"] = diagnostic.Context
+			}
+		}
+		_ = json.NewEncoder(stderr).Encode(payload)
 		return code
 	}
 	fmt.Fprintln(stderr, message)
 	if failureClass != "" {
 		fmt.Fprintf(stderr, "failure_class: %s\n", failureClass)
 	}
+	if diagnostic.Code != "" {
+		fmt.Fprintf(stderr, "http_attempted: %t\n", diagnostic.HTTPAttempted)
+	}
 	return code
+}
+
+func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {
+	ctx := diagnostics.CommandContext{ProviderMode: plan.ProviderMode, Command: plan.Command, SelectedAPIBaseURL: plan.APIBaseURL, RepositoryBindingID: plan.LiveRepositoryBinding.RepoID, CachePathPresent: strings.TrimSpace(plan.CachePath) != "", AuditPathPresent: strings.TrimSpace(plan.LiveRepositoryBinding.AuditPath) != ""}
+	var writeErr service.ErrWriteFailure
+	if errors.As(err, &writeErr) {
+		ctx.HTTPAttempted = writeErr.Code == "write_unauthorized" || writeErr.Code == "write_network_unavailable" || writeErr.Code == "write_provider_error" || writeErr.Code == "write_conflict"
+		ctx.FixtureFallbackSentinel = writeErr.Code == "write_fixture_fallback_detected"
+		ctx.MissingCredential = writeErr.Code == "write_missing_credential"
+	}
+	var syncErr service.ErrSyncFailure
+	if errors.As(err, &syncErr) {
+		ctx.HTTPAttempted = syncErr.Mode == "live_auth_failure" || syncErr.Mode == "network_timeout" || syncErr.Mode == "rate_limited" || syncErr.Mode == "partial_response" || syncErr.Mode == "live_graph_invalid"
+		ctx.UnsupportedPayload = syncErr.Mode == "live_graph_invalid"
+	}
+	return ctx
 }
 
 func failureClass(err error) string {
@@ -1041,6 +1210,10 @@ func failureClass(err error) string {
 	var ambiguous service.ErrAmbiguousAlias
 	if errors.As(err, &ambiguous) {
 		return "ambiguous_alias"
+	}
+	var missing config.MissingCredentialError
+	if errors.As(err, &missing) {
+		return "missing_credential"
 	}
 	var invalid service.ErrInvalidQuery
 	if errors.As(err, &invalid) {
@@ -1072,6 +1245,10 @@ func exitCode(err error) int {
 	var ambiguous service.ErrAmbiguousAlias
 	if errors.As(err, &ambiguous) {
 		return 4
+	}
+	var missing config.MissingCredentialError
+	if errors.As(err, &missing) {
+		return 1
 	}
 	var invalid service.ErrInvalidQuery
 	if errors.As(err, &invalid) {
@@ -1116,10 +1293,15 @@ func firstArg(args []string) (string, bool) {
 	return args[0], true
 }
 
-func executeDoctorCommand(ctx context.Context, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+func executeDoctorCommand(ctx context.Context, opts options, plan startupPlan, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
 	_ = stderr
-	cachePath := opts.cachePath
-	report, err := doctor.Build(ctx, doctor.Request{Version: version, Source: deps.Source, CredentialReporter: deps.CredentialReporter, CachePath: cachePath, Live: opts.live})
+	cachePath := firstNonEmpty(plan.CachePath, opts.cachePath)
+	var cred *config.CredentialStatus
+	if plan.CredentialStatus.Source != "" || plan.CredentialStatus.Present {
+		status := plan.CredentialStatus
+		cred = &status
+	}
+	report, err := doctor.Build(ctx, doctor.Request{Version: version, Source: deps.Source, CredentialReporter: deps.CredentialReporter, CredentialStatus: cred, CachePath: cachePath, Live: opts.live, ProviderMode: plan.ProviderMode, APIBaseURL: plan.APIBaseURL, RepoID: opts.repo, LiveBinding: plan.LiveRepositoryBinding})
 	if err != nil {
 		return writeError(stderr, opts.format, err)
 	}
@@ -1611,7 +1793,7 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --owner OWNER       repository owner (required)")
 		fmt.Fprintln(w, "  --name NAME         repository name (required)")
-		fmt.Fprintln(w, "  --api-base-url URL  API base URL (required)")
+		fmt.Fprintln(w, "  --api-base-url URL  authoritative live API base URL (required)")
 		fmt.Fprintln(w, "  --scopes SCOPES     comma-separated scopes (issues, wiki)")
 		fmt.Fprintln(w, "  --alias ALIAS       repository alias (repeatable)")
 		fmt.Fprintln(w, "  --display-name NAME human-readable display name")

@@ -22,6 +22,8 @@ func (e ErrNetworkUnavailable) Error() string {
 
 func (e ErrNetworkUnavailable) Unwrap() error { return e.Cause }
 
+func (e ErrNetworkUnavailable) DiagnosticCode() string { return "network_unavailable" }
+
 type ErrRateLimited struct {
 	RetryAfter    time.Duration
 	RawRetryAfter string
@@ -46,6 +48,8 @@ func (e ErrAuthExpired) Error() string {
 	return fmt.Sprintf("gitcode: auth expired for %s: %s", e.Endpoint, e.Message)
 }
 
+func (e ErrAuthExpired) DiagnosticCode() string { return "auth_expired" }
+
 type ErrForbidden struct {
 	Endpoint string
 	Status   int
@@ -62,6 +66,8 @@ func (e ErrForbidden) Error() string {
 	}
 	return fmt.Sprintf("gitcode: forbidden for %s: %s; %s", e.Endpoint, e.Message, e.Recovery)
 }
+
+func (e ErrForbidden) DiagnosticCode() string { return "forbidden" }
 
 type ErrNotFound struct {
 	Endpoint string

@@ -1,0 +1,136 @@
+apiVersion: triborg.dev/v0alpha1
+kind: WorkflowRunPlan
+metadata:
+  id: gitcode-mcp-live-readiness-iteration-4-design-implementator-run-plan
+  title: GitCode MCP live-readiness iteration 4 design implementation run
+spec:
+  workflow: triborg-design-implementator-v2-ywd
+  workflow_id_prefix: gitcode-mcp-live-readiness-design-implementator
+  runtime:
+    path_aliases:
+      repo: "@plan_dir/.."
+      ai: "@repo/ai"
+      artifacts: "@ai/artifacts"
+    artifacts_root: "@artifacts"
+  cases:
+    - run_label: gitcode_mcp_live_readiness_iteration_4_implementation
+      input:
+        design_package_zip_path: "@ai/design-package-iteration-4.zip"
+        target_repo_path: "@repo"
+        target_branch: feat/live-provider-wiring-iteration-4
+        max_task_iterations: 35
+        live_validation_enabled: false
+        device_validation_enabled: false
+        runner_runtime: worker
+        implementation_constraints: |
+          - Treat `ai/design-package-iteration-4.zip` as the primary design package and implementation task source for this run.
+          - This is a narrow provider-wiring gap-closure iteration. Do not perform a broad CLI, cache, MCP, or live-readiness rewrite.
+          - The scoped repo-local task is `project/tasks/TASK-0005-live-provider-wiring-iteration-4.md`; use it as the implementation brief alongside the design package.
+          - Preserve cache-first offline behavior. Ordinary commands without explicit `--live` must remain deterministic and must not require GitCode network access, a real token, or OS Keychain.
+          - Keep this public repository safe: do not commit private repository coordinates, personal filesystem paths, raw credentials, cookies, bearer tokens, raw Authorization headers, internal URLs, unsanitized API responses, or source-system-specific private tracker/wiki names.
+          - Do not move, rename, rewrite, or unpack prior zip artifacts. `ai/design-package-iteration-1.zip`, `ai/design-package-iteration-2.zip`, `ai/design-package-iteration-3.zip`, and `ai/design-package-iteration-4.zip` stay where they are.
+          - Do not move, rename, rewrite, or archive historical design-package docs. `docs/triborg/design-package-iteration-1`, `docs/triborg/design-package-iteration-2`, and `docs/triborg/design-package-iteration-3` are historical archives.
+          - If the workflow publishes the fresh package to `docs/triborg/design-package`, keep that as generated output for this implementation run. Do not rename the fresh generated directory to `design-package-iteration-4` from inside the implementator run.
+          - Keep tests under their normal Go package paths. Do not archive tests under `docs/`, do not delete previous iteration tests, and do not move tests out of `go test ./...`.
+          - Use scenario-specific test names when adding iteration 4 tests so they can live beside earlier contract tests without collisions.
+          - Provider selection must fix the observed live blocker: explicit `sync --live` and `create-issue --live` must construct and use the live GitCode HTTP provider through the same CLI/startup path an operator uses.
+          - Fixture/offline providers remain valid only for non-live default behavior. Explicit live routes must fail tests if they return fixture identifiers such as `ISSUE-42` or `WIKI-HOME`, fixture success after invalid auth, or `fixture client is read-only`.
+          - The primary proof must be offline CLI integration tests using `httptest.Server` as a mocked GitCode-compatible API. Do not rely on provider-only unit tests as acceptance evidence.
+          - The integration tests must exercise operator-style command execution through `cmd/gitcode-mcp/` startup or the repository's equivalent `internal/cli` command wrapper, with isolated config, cache, audit, home, environment, stdin, stdout, and stderr.
+          - `sync --live` with no usable credential must fail with a typed missing-credential diagnostic before any HTTP request. The mock server request count must remain zero.
+          - `sync --live` with a non-empty invalid token must reach the mocked live provider and classify the 401/403 response as live auth failure. It must not silently fall back to fixture success.
+          - `sync --live` with a valid test token must populate the configured cache from mocked issue, wiki, and comment responses. Live cache state must not contain fixture records for the live repository.
+          - `create-issue --live` must reach the mocked server, use the shared resolved credential, preserve idempotency behavior, and record non-secret audit/cache confirmation.
+          - A mocked Keychain-equivalent credential source must satisfy live write credential checks with `GITCODE_TOKEN` unset. Default tests must not call the real OS Keychain.
+          - Use one shared credential resolution pipeline for auth status, doctor, sync admission, write gating, and live provider construction. Remove direct command-local `GITCODE_TOKEN` fallbacks where they create divergent behavior.
+          - Credential resolution must not authenticate token contents. Any non-empty invalid token is present and must be passed to the live provider, where 401/403 is classified.
+          - Repository binding `api_base_url` is the authoritative live API base URL when present. Live provider construction and `doctor --live --format json` must consume the same effective binding snapshot.
+          - Global or default API base URL values may remain documented fallbacks only when repository binding omits `api_base_url`; they must not override repository binding in explicit live tests.
+          - `doctor --live --format json` must report effective provider mode, non-secret credential source metadata, cache path, and selected API base URL without exposing token material.
+          - Be conservative with cache schema changes. Prefer existing cache, audit, sync-event, record, alias, and revision surfaces for acceptance evidence. Add a new cache confirmation table only if existing runtime surfaces cannot prove live create confirmation cleanly.
+          - Preserve the current cache schema mechanism unless a small additive change is truly required. The current implementation uses a `schema_version` table and `currentSchemaVersion`; do not switch to a different migration authority as part of this iteration.
+          - Preserve the current API baseline unless sanitized primary evidence proves otherwise: default GitCode API base URL is `https://api.gitcode.com/api/v5`, and the current HTTP adapter uses `Authorization: Bearer <token>`.
+          - Keep live real GitCode e2e optional and credential-gated. It may be documented or left as a follow-up smoke, but the final acceptance for this run is the offline mocked live path.
+          - If live e2e cannot be executed in the default environment, leave a concise handoff under `project/handoffs/` recording what was validated offline, which real-live checks were skipped, and the exact opt-in variables required.
+        validation_constraints: |
+          - Default validation must be offline, deterministic, and runnable without GitCode credentials, network access, or OS Keychain access.
+          - `go test ./...` is the final executable acceptance gate for iteration 4.
+          - New offline live integration tests must fail if explicit `--live` routes to fixture providers.
+          - New offline live integration tests must fail if `auth status` can see a mocked/keychain-equivalent credential but `create-issue --live` cannot consume the same resolved source.
+          - New offline live integration tests must prove selected-only API base URL routing by mock server request counters.
+          - Live validation against real GitCode must be opt-in only, skipped cleanly when unset, and redacted before any transcript is written under tracked paths.
+          - The final repository state must not expose tokens, Authorization headers, cookies, raw API responses, or private repo coordinates in tracked files, logs, fixtures, snapshots, docs, or handoffs.
+          - The final repository state must not regress cache-first offline reads, existing MCP read tools, root/subcommand help, or existing dry-run behavior.
+          - Do not satisfy acceptance by weakening or deleting earlier tests. Preserve previous iteration contract tests unless the replacement is stricter and documented.
+        final_validation_command:
+          script:
+            text: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              export GOCACHE="${GOCACHE:-$PWD/.cache/go-build}"
+              mkdir -p "$GOCACHE"
+
+              test -s go.mod
+              test -s cmd/gitcode-mcp/main.go
+              test -s ai/design-package-iteration-4.zip
+              test -s ai/design_implementator_gitcode_mcp_live_iteration_4_run_plan.yaml
+              test -s project/tasks/TASK-0005-live-provider-wiring-iteration-4.md
+
+              grep -q 'design_package_zip_path: "@ai/design-package-iteration-4.zip"' ai/design_implementator_gitcode_mcp_live_iteration_4_run_plan.yaml
+              grep -q 'Repository binding `api_base_url` is the authoritative live API base URL' ai/design_implementator_gitcode_mcp_live_iteration_4_run_plan.yaml
+              grep -q 'currentSchemaVersion' internal/cache/schema.go
+              grep -q 'Authorization", "Bearer "' internal/gitcode/http_client.go
+
+              go test ./...
+              git diff --check
+
+              go run ./cmd/gitcode-mcp --help >/tmp/gitcode-mcp-help.txt
+              go run ./cmd/gitcode-mcp --version >/tmp/gitcode-mcp-version.txt
+              grep -q "gitcode-mcp" /tmp/gitcode-mcp-help.txt
+              grep -q "gitcode-mcp" /tmp/gitcode-mcp-version.txt
+
+              for subcommand in \
+                repo \
+                sync \
+                search \
+                list \
+                get \
+                get-snippet \
+                list-chunks \
+                search-chunks \
+                search_sources \
+                cache-status \
+                sync-status \
+                stale-index \
+                mcp \
+                create-issue \
+                update-issue \
+                add-comment \
+                create-page \
+                update-page \
+                add-label \
+                doctor \
+                auth \
+                migrate-cache; do
+                go run ./cmd/gitcode-mcp "$subcommand" --help >/tmp/gitcode-mcp-help-"$subcommand".txt
+                grep -qiE 'usage|help|gitcode-mcp|'"$subcommand" /tmp/gitcode-mcp-help-"$subcommand".txt
+              done
+
+              if grep -RIn 'fixture client is read-only' cmd internal --exclude='*_test.go'; then
+                echo "explicit live write path still exposes fixture-only read-only behavior" >&2
+                exit 65
+              fi
+
+              if grep -RInE '(Authorization:|Bearer[[:space:]]+[A-Za-z0-9._-]{16,}|Cookie:|Set-Cookie:|sk-[A-Za-z0-9_-]{16,}|GITCODE_TOKEN[[:space:]]*=)' . \
+                --exclude-dir=.git \
+                --exclude-dir=.cache \
+                --exclude-dir=ai \
+                --exclude-dir=docs/triborg \
+                --exclude='*.zip'; then
+                echo "repository contains secret-like or unsanitized tracked material" >&2
+                exit 66
+              fi
+          expected_exit_codes: [0]
+          policy:
+            validation_scope: final_offline_gates

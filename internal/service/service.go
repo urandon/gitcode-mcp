@@ -110,6 +110,14 @@ func NewWithMode(store cache.Store, mode gitcode.ProviderMode, token string, cfg
 
 type sanitizedFixtureClient struct{}
 
+func (sanitizedFixtureClient) FixtureBoundaryMode() string {
+	return gitcode.FixtureBoundaryMode
+}
+
+func (sanitizedFixtureClient) FixtureMarkerIDs() []string {
+	return gitcode.FixtureMarkerIDs()
+}
+
 func (sanitizedFixtureClient) ListIssues(context.Context, gitcode.IssueListRequest) (gitcode.Page[gitcode.IssueSummary], error) {
 	now := fixtureNow()
 	return gitcode.Page[gitcode.IssueSummary]{Items: []gitcode.IssueSummary{{Number: 42, Title: "Fixture Issue", State: "open", CreatedAt: now, UpdatedAt: now}}, Page: 1, PerPage: 1, TotalCount: 1}, nil
@@ -148,31 +156,31 @@ func (sanitizedFixtureClient) GetAttachment(context.Context, gitcode.AttachmentR
 }
 
 func (sanitizedFixtureClient) CreateIssue(context.Context, gitcode.CreateIssueRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
-	return gitcode.WriteResult[gitcode.Issue]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+	return gitcode.WriteResult[gitcode.Issue]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
 func (sanitizedFixtureClient) UpdateIssue(context.Context, gitcode.UpdateIssueRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
-	return gitcode.WriteResult[gitcode.Issue]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+	return gitcode.WriteResult[gitcode.Issue]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
 func (sanitizedFixtureClient) CreateIssueComment(context.Context, gitcode.CreateIssueCommentRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Comment], error) {
-	return gitcode.WriteResult[gitcode.Comment]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+	return gitcode.WriteResult[gitcode.Comment]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
 func (sanitizedFixtureClient) CreateWikiPage(context.Context, gitcode.CreateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
-	return gitcode.WriteResult[gitcode.WikiPage]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+	return gitcode.WriteResult[gitcode.WikiPage]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
 func (sanitizedFixtureClient) UpdateWikiPage(context.Context, gitcode.UpdateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
-	return gitcode.WriteResult[gitcode.WikiPage]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+	return gitcode.WriteResult[gitcode.WikiPage]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
 func (sanitizedFixtureClient) AddLabel(context.Context, gitcode.LabelRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
-	return gitcode.WriteResult[gitcode.Issue]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+	return gitcode.WriteResult[gitcode.Issue]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
 func (sanitizedFixtureClient) RemoveLabel(context.Context, gitcode.LabelRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
-	return gitcode.WriteResult[gitcode.Issue]{}, ErrInvalidQuery{Field: "write", Message: "fixture client is read-only"}
+	return gitcode.WriteResult[gitcode.Issue]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
 func fixtureNow() time.Time {
@@ -908,6 +916,13 @@ func (s *Service) SyncToCache(ctx context.Context, req SyncRequest) (SyncResult,
 		}
 		return SyncResult{}, failure
 	}
+	if err := s.validateLiveSourceGraph(graph); err != nil {
+		failure := s.normalizeSyncFailure(err, req, remoteType, remoteID)
+		if inProgressRecorded {
+			_ = s.store.RecordSyncEvent(ctx, failedSyncEvent(inProgress, failure, s.now().UTC()))
+		}
+		return SyncResult{}, failure
+	}
 	syncCompletedAt := s.now().UTC()
 	revision := ""
 	if graph.SyncStatus != nil {
@@ -1398,9 +1413,13 @@ func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, r
 	if req.MaxSize > 0 && int64(len(body)+len(issue.Title)) > req.MaxSize {
 		return cache.SourceGraph{}, SyncCounts{}, gitcode.ErrPayloadTooLarge{Endpoint: remoteID, Limit: req.MaxSize, Size: int64(len(body) + len(issue.Title))}
 	}
+	providerID := strings.TrimSpace(issue.ID)
+	if s.syncProviderMode() == gitcode.ProviderModeLive && providerID == "" {
+		return cache.SourceGraph{}, SyncCounts{}, s.liveGraphError("issue missing provider id")
+	}
 	stableID := req.StableID
 	if stableID == "" {
-		stableID = s.resolveOrFallback(ctx, req.RepoID, remoteType, remoteID, fallbackSourceID(remoteType, remoteID))
+		stableID = s.resolveOrFallback(ctx, req.RepoID, remoteType, remoteID, liveFallbackSourceID(s.syncProviderMode(), remoteType, remoteID, providerID))
 	}
 	if err := s.guardRemoteAlias(ctx, req.RepoID, remoteType, remoteID, stableID); err != nil {
 		return cache.SourceGraph{}, SyncCounts{}, err
@@ -1434,6 +1453,9 @@ func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, r
 		status = "open"
 	}
 	graph := cache.SourceGraph{Source: cache.Source{RepoID: req.RepoID, ID: stableID, Kind: "issue", Path: "issues/" + remoteID + ".md", Title: issue.Title, Body: body, Status: status, Labels: issue.Labels, ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{RepoID: req.RepoID, SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, SyncStatus: &cache.SyncStatus{RepoID: req.RepoID, SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: hash, Status: "fresh", LastFetchedAt: now}}
+	if providerID != "" && providerID != remoteID {
+		graph.Identities = append(graph.Identities, cache.Identity{RepoID: req.RepoID, SourceID: stableID, AliasType: "gitcode_issue_id", Alias: providerID, Remote: cache.RemoteAlias{Type: "gitcode_issue_id", ID: providerID}})
+	}
 	route, err := s.BuildAdapterRoute(ctx, req.RepoID, RepositoryScopeIssues)
 	if err != nil {
 		return cache.SourceGraph{}, SyncCounts{}, err
@@ -1443,7 +1465,15 @@ func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, r
 		return cache.SourceGraph{}, SyncCounts{}, err
 	}
 	for _, comment := range comments.Items {
-		commentID := comment.ID
+		commentID := strings.TrimSpace(comment.ID)
+		if s.syncProviderMode() == gitcode.ProviderModeLive {
+			if commentID == "" {
+				return cache.SourceGraph{}, SyncCounts{}, s.liveGraphError("comment missing provider id")
+			}
+			if !s.liveCommentParentReconciles(comment, remoteID, providerID) {
+				return cache.SourceGraph{}, SyncCounts{}, s.liveGraphError("comment parent issue id is unreconciled")
+			}
+		}
 		if commentID == "" {
 			commentID = contentHash(remoteID, comment.Author, comment.Body, comment.CreatedAt)
 		}
@@ -1466,9 +1496,13 @@ func (s *Service) stageWiki(ctx context.Context, req SyncRequest, remoteType, re
 	if req.MaxSize > 0 && int64(len(body)+len(page.Title)) > req.MaxSize {
 		return cache.SourceGraph{}, SyncCounts{}, gitcode.ErrPayloadTooLarge{Endpoint: remoteID, Limit: req.MaxSize, Size: int64(len(body) + len(page.Title))}
 	}
+	providerID := strings.TrimSpace(page.ID)
+	if s.syncProviderMode() == gitcode.ProviderModeLive && providerID == "" {
+		return cache.SourceGraph{}, SyncCounts{}, s.liveGraphError("wiki missing provider id")
+	}
 	stableID := req.StableID
 	if stableID == "" {
-		stableID = s.resolveOrFallback(ctx, req.RepoID, remoteType, remoteID, fallbackSourceID(remoteType, remoteID))
+		stableID = s.resolveOrFallback(ctx, req.RepoID, remoteType, remoteID, liveFallbackSourceID(s.syncProviderMode(), remoteType, remoteID, providerID))
 	}
 	if err := s.guardRemoteAlias(ctx, req.RepoID, remoteType, remoteID, stableID); err != nil {
 		return cache.SourceGraph{}, SyncCounts{}, err
@@ -1499,6 +1533,9 @@ func (s *Service) stageWiki(ctx context.Context, req SyncRequest, remoteType, re
 		return cache.SourceGraph{}, SyncCounts{}, err
 	}
 	graph := cache.SourceGraph{Source: cache.Source{RepoID: req.RepoID, ID: stableID, Kind: "wiki", Path: "wiki/" + remoteID + ".md", Title: page.Title, Body: body, Status: "fresh", ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{RepoID: req.RepoID, SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, SyncStatus: &cache.SyncStatus{RepoID: req.RepoID, SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}
+	if providerID != "" && providerID != remoteID {
+		graph.Identities = append(graph.Identities, cache.Identity{RepoID: req.RepoID, SourceID: stableID, AliasType: "gitcode_wiki_id", Alias: providerID, Remote: cache.RemoteAlias{Type: "gitcode_wiki_id", ID: providerID}})
+	}
 	graph.Chunks = chunksForSource(graph.Source)
 	return graph, counts, nil
 }
@@ -1508,20 +1545,66 @@ func (s *Service) BuildAdapterRoute(ctx context.Context, repoID string, requeste
 	if err != nil {
 		return RepositoryRoute{}, err
 	}
+	repo, err := s.repositoryWithScope(ctx, repoID, requestedScope)
+	if err != nil {
+		return RepositoryRoute{}, err
+	}
+	route := RepositoryRoute{RepoID: repo.RepoID, Owner: repo.Owner, Name: repo.Name, APIBaseURL: repo.APIBaseURL}
+	for _, configured := range repo.Scopes {
+		route.Scopes = append(route.Scopes, RepositoryScope(configured))
+	}
+	return route, nil
+}
+
+func (s *Service) ResolveLiveRepositoryBinding(ctx context.Context, req LiveRepositoryBindingRequest) (LiveRepositoryBinding, error) {
+	repoID, err := s.requireRepo(ctx, req.RepoID, "live repository binding")
+	if err != nil {
+		return LiveRepositoryBinding{}, err
+	}
+	repo, err := s.repositoryWithScope(ctx, repoID, req.RequestedScope)
+	if err != nil {
+		return LiveRepositoryBinding{}, err
+	}
+	selected := strings.TrimSpace(repo.APIBaseURL)
+	if selected == "" {
+		return LiveRepositoryBinding{}, ErrInvalidQuery{Field: "api_base_url", Message: "live repository binding requires api_base_url"}
+	}
+	baseURL, err := normalizeLiveAPIBaseURL(selected)
+	if err != nil {
+		return LiveRepositoryBinding{}, err
+	}
+	binding := LiveRepositoryBinding{RepoID: repo.RepoID, Owner: repo.Owner, Name: repo.Name, APIBaseURL: baseURL, CachePath: strings.TrimSpace(req.CachePath), AuditPath: strings.TrimSpace(req.AuditPath), BaseURLSource: "repository_binding"}
+	for _, configured := range repo.Scopes {
+		binding.Scopes = append(binding.Scopes, RepositoryScope(configured))
+	}
+	return binding, nil
+}
+
+func (s *Service) repositoryWithScope(ctx context.Context, repoID string, requestedScope RepositoryScope) (cache.RepositoryBinding, error) {
 	repo, err := s.store.GetRepository(ctx, repoID)
 	if err != nil {
-		return RepositoryRoute{}, normalizeError(err, "repository", repoID)
+		return cache.RepositoryBinding{}, normalizeError(err, "repository", repoID)
 	}
 	for _, scope := range repo.Scopes {
 		if RepositoryScope(scope) == requestedScope {
-			route := RepositoryRoute{RepoID: repo.RepoID, Owner: repo.Owner, Name: repo.Name, APIBaseURL: repo.APIBaseURL}
-			for _, configured := range repo.Scopes {
-				route.Scopes = append(route.Scopes, RepositoryScope(configured))
-			}
-			return route, nil
+			return repo, nil
 		}
 	}
-	return RepositoryRoute{}, ErrInvalidQuery{Field: "scope", Message: string(requestedScope) + " scope is not enabled for repo " + repoID}
+	return cache.RepositoryBinding{}, ErrInvalidQuery{Field: "scope", Message: string(requestedScope) + " scope is not enabled for repo " + repoID}
+}
+
+func normalizeLiveAPIBaseURL(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", ErrInvalidQuery{Field: "api_base_url", Message: "valid absolute http(s) api_base_url is required for live mode"}
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", ErrInvalidQuery{Field: "api_base_url", Message: "api_base_url must use http or https for live mode"}
+	}
+	if parsed.User != nil {
+		return "", ErrInvalidQuery{Field: "api_base_url", Message: "api_base_url must not contain credentials"}
+	}
+	return sanitizeAPIBaseURL(parsed.String()), nil
 }
 
 func (s *Service) validateRepoScope(ctx context.Context, repoID, remoteType string) error {
@@ -1531,6 +1614,10 @@ func (s *Service) validateRepoScope(ctx context.Context, repoID, remoteType stri
 	}
 	_, err := s.BuildAdapterRoute(ctx, repoID, want)
 	return err
+}
+
+func (s *Service) syncProviderMode() gitcode.ProviderMode {
+	return s.ProviderMode()
 }
 
 func (s *Service) guardRemoteAlias(ctx context.Context, repoID, remoteType, remoteID, stableID string) error {
@@ -1552,6 +1639,13 @@ func (s *Service) resolveOrFallback(ctx context.Context, repoID, remoteType, rem
 	return fallback
 }
 
+func liveFallbackSourceID(mode gitcode.ProviderMode, remoteType, remoteID, providerID string) string {
+	if mode == gitcode.ProviderModeLive && strings.TrimSpace(providerID) != "" {
+		return fallbackSourceID(remoteType, providerID)
+	}
+	return fallbackSourceID(remoteType, remoteID)
+}
+
 func fallbackSourceID(remoteType, remoteID string) string {
 	clean := strings.NewReplacer("/", "-", " ", "-", ":", "-").Replace(strings.ToUpper(remoteID))
 	switch remoteType {
@@ -1562,6 +1656,57 @@ func fallbackSourceID(remoteType, remoteID string) string {
 	default:
 		return "REMOTE-" + clean
 	}
+}
+
+func (s *Service) validateLiveSourceGraph(graph cache.SourceGraph) error {
+	if s.syncProviderMode() != gitcode.ProviderModeLive {
+		return nil
+	}
+	if gitcode.IsFixtureBoundary(s.client) {
+		return s.liveGraphError("fixture provider is forbidden in live graph")
+	}
+	for _, marker := range gitcode.FixtureMarkerIDs() {
+		if graph.Source.ID == marker {
+			return s.liveGraphError("fixture marker " + marker + " is forbidden in live graph")
+		}
+		if graph.SyncStatus != nil && graph.SyncStatus.RemoteID == marker {
+			return s.liveGraphError("fixture remote marker " + marker + " is forbidden in live graph")
+		}
+		for _, identity := range graph.Identities {
+			if identity.SourceID == marker || identity.Alias == marker || identity.Remote.ID == marker {
+				return s.liveGraphError("fixture identity marker " + marker + " is forbidden in live graph")
+			}
+		}
+		for _, comment := range graph.Comments {
+			if comment.RecordID == marker || comment.CommentID == marker {
+				return s.liveGraphError("fixture comment marker " + marker + " is forbidden in live graph")
+			}
+		}
+	}
+	if graph.Source.ID == "" {
+		return s.liveGraphError("source id is required")
+	}
+	if graph.SyncStatus == nil || strings.TrimSpace(graph.SyncStatus.RemoteID) == "" {
+		return s.liveGraphError("remote id is required")
+	}
+	for _, comment := range graph.Comments {
+		if strings.TrimSpace(comment.CommentID) == "" {
+			return s.liveGraphError("comment provider id is required")
+		}
+		if comment.RecordID != graph.Source.ID {
+			return s.liveGraphError("comment parent record is unreconciled")
+		}
+	}
+	return nil
+}
+
+func (s *Service) liveCommentParentReconciles(comment gitcode.Comment, remoteID, providerID string) bool {
+	parent := strings.TrimSpace(comment.IssueID)
+	return parent == "" || parent == strings.TrimSpace(remoteID) || parent == strings.TrimSpace(providerID)
+}
+
+func (s *Service) liveGraphError(message string) error {
+	return ErrSyncFailure{Mode: "live_graph_invalid", Cause: ErrInvalidQuery{Field: "live_graph", Message: message}}
 }
 
 func contentHash(parts ...any) string {
@@ -1609,7 +1754,21 @@ func (s *Service) normalizeSyncFailure(err error, req SyncRequest, remoteType, r
 	}
 	var auth gitcode.ErrAuthExpired
 	if errors.As(err, &auth) {
-		return ErrSyncFailure{Mode: "auth_expired", Target: target, Endpoint: auth.Endpoint, RecoveryAction: "renew GITCODE_TOKEN and retry sync", Cause: err}
+		mode := "auth_expired"
+		if s.syncProviderMode() == gitcode.ProviderModeLive && (auth.Status == 401 || auth.Status == 403) {
+			mode = "live_auth_failure"
+		}
+		return ErrSyncFailure{Mode: mode, Target: target, Endpoint: auth.Endpoint, RecoveryAction: "renew GITCODE_TOKEN and retry sync", Cause: err}
+	}
+	var forbidden gitcode.ErrForbidden
+	if errors.As(err, &forbidden) {
+		if s.syncProviderMode() == gitcode.ProviderModeLive && (forbidden.Status == 401 || forbidden.Status == 403) {
+			return ErrSyncFailure{Mode: "live_auth_failure", Target: target, Endpoint: forbidden.Endpoint, RecoveryAction: "renew GITCODE_TOKEN and retry sync", Cause: err}
+		}
+	}
+	var alreadySync ErrSyncFailure
+	if errors.As(err, &alreadySync) {
+		return err
 	}
 	var collision gitcode.ErrRemoteCollision
 	if errors.As(err, &collision) {
@@ -1740,6 +1899,9 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 				_ = s.store.RecordAuditEvent(ctx, audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, prior.RecordID, prior.RemoteType, prior.RemoteID, fingerprint, err.Error(), s.now().UTC()))
 				return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key, Cause: err}
 			}
+			if err := s.recordCacheConfirmation(ctx, command, route.RepoID, key, fingerprint, graph, prior.RemoteID, "succeeded", s.now().UTC()); err != nil {
+				return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key, Cause: err}
+			}
 			completed := audit.Success(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, prior.RemoteID, fingerprint, "cache refresh replay completed", s.now().UTC())
 			if err := s.store.RecordAuditEvent(ctx, completed); err != nil {
 				return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key, Cause: err}
@@ -1754,19 +1916,32 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	}
 	confirmed, graph, err := s.callWriteAdapter(ctx, command, route, req, key)
 	if err != nil {
-		_ = s.store.RecordAuditEvent(ctx, audit.Failure(route.RepoID, key, command, fingerprint, writeErrorCode(err), s.now().UTC()))
-		return WriteCommandResult{}, ErrWriteFailure{Code: writeErrorCode(err), RepoID: route.RepoID, IdempotencyKey: key, Cause: err}
+		code := s.writeAdapterErrorCode(req.Mode, err)
+		_ = s.store.RecordAuditEvent(ctx, audit.Failure(route.RepoID, key, command, fingerprint, code, s.now().UTC()))
+		return WriteCommandResult{}, ErrWriteFailure{Code: code, RepoID: route.RepoID, IdempotencyKey: key, Cause: writeFailureCause(code, err)}
 	}
 	if !confirmed.confirmed || confirmed.remoteID == "" {
 		_ = s.store.RecordAuditEvent(ctx, audit.Failure(route.RepoID, key, command, fingerprint, "write_unconfirmed_remote", s.now().UTC()))
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_unconfirmed_remote", RepoID: route.RepoID, IdempotencyKey: key}
 	}
 	auditEntry := audit.Success(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, confirmed.message, confirmed.completedAt)
+	if command == "create-issue" {
+		entry, err := audit.LiveCreateIssueConfirmation(audit.ConfirmationInput{RepoID: route.RepoID, Key: key, Command: command, Mode: string(req.Mode), RecordID: graph.Record.ID, RemoteType: graph.Record.RemoteType, RemoteID: confirmed.remoteID, PayloadHash: fingerprint, Message: confirmed.message, RequestMetadata: writeAuditMetadata(command, key, fingerprint, graph.Record.RemoteType, confirmed), CreatedAt: confirmed.completedAt})
+		if err != nil {
+			_ = s.store.RecordAuditEvent(ctx, audit.Failure(route.RepoID, key, command, fingerprint, "write_unconfirmed_remote", s.now().UTC()))
+			return WriteCommandResult{}, ErrWriteFailure{Code: "write_unconfirmed_remote", RepoID: route.RepoID, IdempotencyKey: key}
+		}
+		auditEntry = entry
+	}
 	if err := s.store.RecordAuditEvent(ctx, auditEntry); err != nil {
 		_ = s.store.RecordAuditEvent(ctx, audit.RemoteConfirmedAuditFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()))
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
 	}
 	if err := s.store.UpsertRecordGraph(ctx, graph); err != nil {
+		_ = s.store.RecordAuditEvent(ctx, audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()))
+		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
+	}
+	if err := s.recordCacheConfirmation(ctx, command, route.RepoID, key, fingerprint, graph, confirmed.remoteID, "succeeded", confirmed.completedAt); err != nil {
 		_ = s.store.RecordAuditEvent(ctx, audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()))
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
 	}
@@ -1790,8 +1965,38 @@ type writeConfirmation struct {
 	completedAt    time.Time
 }
 
+func writeAuditMetadata(command, key, fingerprint, remoteType string, confirmed writeConfirmation) map[string]string {
+	metadata := map[string]string{
+		"method":             "POST",
+		"idempotency_key":    key,
+		"remote_type":        remoteType,
+		"provider_mode":      string(gitcode.ProviderModeLive),
+		"source_fingerprint": fingerprint,
+	}
+	if confirmed.remoteID != "" {
+		metadata["remote_alias"] = confirmed.remoteID
+	}
+	if confirmed.remoteNumber > 0 {
+		metadata["remote_number"] = strconv.Itoa(confirmed.remoteNumber)
+	}
+	if command != "" {
+		metadata["provider"] = "gitcode-http"
+	}
+	return metadata
+}
+
+func (s *Service) recordCacheConfirmation(ctx context.Context, command, repoID, key, fingerprint string, graph cache.RecordGraph, remoteID, status string, createdAt time.Time) error {
+	if command != "create-issue" {
+		return nil
+	}
+	return s.store.RecordCacheConfirmation(ctx, cache.CacheConfirmationRecord{RepoID: repoID, Command: command, RecordID: graph.Record.ID, RecordType: graph.Record.Type, RemoteType: graph.Record.RemoteType, RemoteID: firstNonEmptyString(remoteID, graph.Record.RemoteID), IdempotencyKey: key, Status: status, SourceFingerprint: fingerprint, CreatedAt: createdAt})
+}
+
 func (s *Service) hasWriteCredential() bool {
-	return s.providerMode == gitcode.ProviderModeLive && s.writeCredentialPresent || strings.TrimSpace(os.Getenv("GITCODE_TOKEN")) != ""
+	if s.providerMode == gitcode.ProviderModeLive {
+		return s.writeCredentialPresent
+	}
+	return strings.TrimSpace(os.Getenv("GITCODE_TOKEN")) != ""
 }
 
 func (s *Service) callWriteAdapter(ctx context.Context, command string, route RepositoryRoute, req WriteCommandRequest, key string) (writeConfirmation, cache.RecordGraph, error) {
@@ -1966,6 +2171,13 @@ func replayWriteResult(command string, entry cache.AuditTrailEntry, fingerprint 
 	return WriteCommandResult{Command: command, Status: "already_applied", RepoID: entry.RepoID, ID: entry.RecordID, RemoteID: entry.RemoteID, IdempotencyKey: entry.IdempotencyKey, SourceFingerprint: fingerprint, Replayed: true, Evidence: "replayed from audit_trail", GeneratedAt: now}
 }
 
+func (s *Service) writeAdapterErrorCode(mode WriteMode, err error) string {
+	if mode == WriteModeLive && gitcode.IsFixtureReadOnly(err) {
+		return "write_fixture_fallback_detected"
+	}
+	return writeErrorCode(err)
+}
+
 func writeErrorCode(err error) string {
 	var conflict gitcode.ErrConflict
 	if errors.As(err, &conflict) {
@@ -1984,6 +2196,13 @@ func writeErrorCode(err error) string {
 		return "write_network_unavailable"
 	}
 	return "write_provider_error"
+}
+
+func writeFailureCause(code string, err error) error {
+	if code == "write_fixture_fallback_detected" {
+		return nil
+	}
+	return err
 }
 
 func firstNonEmptyString(values ...string) string {

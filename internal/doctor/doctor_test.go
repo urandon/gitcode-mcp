@@ -131,6 +131,97 @@ func TestBuildNoToken(t *testing.T) {
 	}
 }
 
+func TestLiveReadinessSelectsEffectiveBinding(t *testing.T) {
+	report, err := Build(context.Background(), Request{
+		Version:            "test-version",
+		Source:             fakeSource{env: map[string]string{}, files: map[string][]byte{}, home: "/home/test", cfgDir: "/cfg", cacheDir: "/cache"},
+		Live:               true,
+		ProviderMode:       "live-http",
+		CredentialReporter: fakeCredentialReporter{status: config.CredentialStatus{Source: "mock-keychain", Present: true, StoreMode: "auto"}},
+		CachePath:          "/cache/db.sqlite",
+		LiveBinding:        service.LiveRepositoryBinding{RepoID: "selected", APIBaseURL: "https://selected.example.test", BaseURLSource: "repository_binding.api_base_url"},
+		OpenStore: func(context.Context, string) (Store, error) {
+			return &fakeStore{version: 7, repos: []cache.RepositoryBinding{
+				{RepoID: "alternate", APIBaseURL: "https://alternate.example.test"},
+				{RepoID: "selected", APIBaseURL: "https://selected.example.test"},
+			}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.LiveReadiness.ProviderMode != "live-http" || report.LiveReadiness.APIBaseURL != "https://selected.example.test" || report.LiveReadiness.APIBaseURLSource != "repository_binding.api_base_url" || report.LiveReadiness.ReadinessStatus != "ready" {
+		t.Fatalf("unexpected live readiness: %#v", report.LiveReadiness)
+	}
+}
+
+func TestLiveReadinessRepoSelectorSwitchesBinding(t *testing.T) {
+	report, err := Build(context.Background(), Request{
+		Version:            "test-version",
+		Source:             fakeSource{env: map[string]string{}, files: map[string][]byte{}, home: "/home/test", cfgDir: "/cfg", cacheDir: "/cache"},
+		Live:               true,
+		ProviderMode:       "live-http",
+		RepoID:             "alternate",
+		CredentialReporter: fakeCredentialReporter{status: config.CredentialStatus{Source: "mock-keychain", Present: true, StoreMode: "auto"}},
+		CachePath:          "/cache/db.sqlite",
+		LiveBinding:        service.LiveRepositoryBinding{RepoID: "selected", APIBaseURL: "https://selected.example.test"},
+		OpenStore: func(context.Context, string) (Store, error) {
+			return &fakeStore{version: 7, repos: []cache.RepositoryBinding{
+				{RepoID: "alternate", APIBaseURL: "https://alternate.example.test"},
+				{RepoID: "selected", APIBaseURL: "https://selected.example.test"},
+			}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.LiveReadiness.APIBaseURL != "https://alternate.example.test" || report.Repo.RepoID != "alternate" {
+		t.Fatalf("unexpected selected repo: repo=%#v readiness=%#v", report.Repo, report.LiveReadiness)
+	}
+}
+
+func TestLiveReadinessMissingCredentialPreservesEffectiveValues(t *testing.T) {
+	report, err := Build(context.Background(), Request{
+		Version:            "test-version",
+		Source:             fakeSource{env: map[string]string{}, files: map[string][]byte{}, home: "/home/test", cfgDir: "/cfg", cacheDir: "/cache"},
+		Live:               true,
+		ProviderMode:       "live-http",
+		RepoID:             "selected",
+		CredentialReporter: fakeCredentialReporter{status: config.CredentialStatus{Source: "missing", Present: false, StoreMode: "auto"}},
+		CachePath:          "/cache/db.sqlite",
+		OpenStore: func(context.Context, string) (Store, error) {
+			return &fakeStore{version: 7, repos: []cache.RepositoryBinding{{RepoID: "selected", APIBaseURL: "https://selected.example.test"}}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.LiveReadiness.APIBaseURL != "https://selected.example.test" || report.LiveReadiness.ReadinessStatus != "missing_credential" || len(report.LiveReadiness.Diagnostics) != 1 || report.LiveReadiness.Diagnostics[0] != "missing_credential" {
+		t.Fatalf("unexpected missing credential readiness: %#v", report.LiveReadiness)
+	}
+}
+
+func TestLiveReadinessInvalidAPIBaseURLPrecedesCredential(t *testing.T) {
+	report, err := Build(context.Background(), Request{
+		Version:            "test-version",
+		Source:             fakeSource{env: map[string]string{}, files: map[string][]byte{}, home: "/home/test", cfgDir: "/cfg", cacheDir: "/cache"},
+		Live:               true,
+		ProviderMode:       "live-http",
+		RepoID:             "selected",
+		CredentialReporter: fakeCredentialReporter{status: config.CredentialStatus{Source: "missing", Present: false, StoreMode: "auto"}},
+		CachePath:          "/cache/db.sqlite",
+		OpenStore: func(context.Context, string) (Store, error) {
+			return &fakeStore{version: 7, repos: []cache.RepositoryBinding{{RepoID: "selected", APIBaseURL: "ftp://example.invalid/api"}}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.LiveReadiness.ReadinessStatus != "configuration_error" || len(report.LiveReadiness.Diagnostics) != 1 || report.LiveReadiness.Diagnostics[0] != "invalid_api_base_url" {
+		t.Fatalf("unexpected invalid api readiness: %#v", report.LiveReadiness)
+	}
+}
+
 func TestBuildRedactsOutput(t *testing.T) {
 	src := fakeSource{env: map[string]string{config.EnvToken: "secret-token-value", "GITCODE_E2E_OWNER": "private-owner", "GITCODE_E2E_REPO": "private-repo"}, files: map[string][]byte{}, home: "/home/test", cfgDir: "/cfg", cacheDir: "/cache"}
 	report, err := Build(context.Background(), Request{
