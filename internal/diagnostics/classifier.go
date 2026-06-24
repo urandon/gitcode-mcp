@@ -21,6 +21,7 @@ const (
 	CodeUnsupportedMockPayload  Code = "unsupported_mock_payload"
 	CodeFixtureReadOnly         Code = "fixture_read_only"
 	CodeFixtureFallbackDetected Code = "fixture_fallback_detected"
+	CodeUnsupportedCapability   Code = "unsupported_capability"
 )
 
 type Diagnostic struct {
@@ -122,6 +123,9 @@ func classifyCode(err error, ctx CommandContext) Code {
 	if ctx.FixtureFallbackSentinel || hasCode(err, "fixture_fallback_detected") || hasCode(err, "write_fixture_fallback_detected") || hasCode(err, "fixture_read_only") || hasCode(err, "write_fixture_read_only") {
 		return CodeFixtureFallbackDetected
 	}
+	if hasCode(err, "unsupported_capability") {
+		return CodeUnsupportedCapability
+	}
 	return CodeConfigurationError
 }
 
@@ -146,6 +150,8 @@ func codeFromError(err error) Code {
 			return CodeFixtureReadOnly
 		case "fixture_fallback_detected", "write_fixture_fallback_detected":
 			return CodeFixtureFallbackDetected
+		case "unsupported_capability":
+			return CodeUnsupportedCapability
 		}
 	}
 	return CodeConfigurationError
@@ -218,6 +224,8 @@ func exitClassFor(code Code) string {
 		return "payload"
 	case CodeFixtureFallbackDetected, CodeFixtureReadOnly:
 		return "fixture"
+	case CodeUnsupportedCapability:
+		return "capability"
 	default:
 		return "configuration"
 	}
@@ -244,6 +252,8 @@ func messageFor(code Code, err error) string {
 		base += ": fixture provider is read-only"
 	case CodeFixtureFallbackDetected:
 		base += ": live route reached fixture behavior"
+	case CodeUnsupportedCapability:
+		base += ": requested capability is not supported for this provider"
 	}
 	if err != nil {
 		return base + ": " + err.Error()

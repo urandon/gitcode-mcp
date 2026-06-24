@@ -3,6 +3,7 @@ package gitcode
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"strings"
@@ -114,7 +115,15 @@ type RedactedCapture struct {
 
 var newHTTPClientForProvider = NewHTTPClient
 
-func NewLiveProvider(cfg ProviderConfig) (Provider, error) {
+type LiveProviderOption func(*liveProvider)
+
+func WithRouteSchemaMatrix(matrix RouteSchemaMatrix) LiveProviderOption {
+	return func(lp *liveProvider) {
+		lp.matrix = matrix
+	}
+}
+
+func NewLiveProvider(cfg ProviderConfig, opts ...LiveProviderOption) (Provider, error) {
 	baseURL, err := validateLiveProviderConfig(cfg)
 	if err != nil {
 		return nil, err
@@ -123,7 +132,17 @@ func NewLiveProvider(cfg ProviderConfig) (Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	return liveProvider{HTTPClient: client}, nil
+	lp := liveProvider{HTTPClient: client, matrix: DefaultRouteSchemaMatrix()}
+	for _, opt := range opts {
+		opt(&lp)
+	}
+	if err := lp.matrix.ValidateCoverage([]ProductArea{
+		ProductAreaIssues, ProductAreaLabels, ProductAreaMilestones,
+		ProductAreaPullRequests, ProductAreaComments, ProductAreaWiki,
+	}); err != nil {
+		return nil, fmt.Errorf("gitcode: live provider route schema matrix validation failed: %w", err)
+	}
+	return lp, nil
 }
 
 func validateLiveProviderConfig(cfg ProviderConfig) (string, error) {
@@ -158,6 +177,7 @@ func RequireLiveProviderForTest() (string, bool) {
 
 type liveProvider struct {
 	*HTTPClient
+	matrix RouteSchemaMatrix
 }
 
 func (p liveProvider) ProbeAuth(ctx context.Context, req AuthProbeRequest) (AuthProbeResult, error) {
@@ -184,6 +204,13 @@ func (p liveProvider) GetRepo(ctx context.Context, req RepoRequest) (Repo, error
 		repo.FullName = req.Owner + "/" + req.Repo
 	}
 	return repo, nil
+}
+
+func (p liveProvider) ListIssueComments(ctx context.Context, req IssueRequest) (Page[Comment], error) {
+	if err := p.matrix.Preflight(ProductAreaComments); err != nil {
+		return Page[Comment]{}, err
+	}
+	return p.HTTPClient.ListIssueComments(ctx, req)
 }
 
 type unavailableProvider struct {

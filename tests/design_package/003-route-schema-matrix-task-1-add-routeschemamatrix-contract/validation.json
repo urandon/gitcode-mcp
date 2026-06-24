@@ -1,0 +1,42 @@
+{
+  "covered_outcome_ids": [
+    "outcome-1",
+    "outcome-5",
+    "outcome-10"
+  ],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "internal/gitcode RouteSchemaMatrix DefaultRouteSchemaMatrix() constructor with six per-product-area SurfaceSpec entries (issues/labels/milestones supported OpenAPI, wiki supported live_probe, PR/comments deferred deferred with unsupported_capability diagnostics)",
+    "internal/gitcode RouteSchemaMatrix.Spec() lookup returning SurfaceSpec for declared areas and false for unknown areas",
+    "internal/gitcode RouteSchemaMatrix.RequireDeclared() returning nil for declared areas and error for undeclared areas",
+    "internal/gitcode RouteSchemaMatrix.ValidateCoverage() accepting all six required areas and rejecting missing areas, unknown enums, non-/api/v5 route families, contradictory evidence/status pairings, and deferred/unsupported specs without unsupported_capability diagnostics",
+    "internal/gitcode RouteSchemaMatrix.Preflight() returning nil for supported areas and ErrUnsupportedCapability with correct CapabilityKey for deferred PR/comments",
+    "internal/gitcode NewLiveProvider with DefaultRouteSchemaMatrix() validating all six product areas and returning a usable live provider",
+    "internal/gitcode NewLiveProvider with WithRouteSchemaMatrix option accepting a custom matrix and rejecting matrices with missing areas or bad enums at construction time",
+    "internal/gitcode liveProvider.ListIssueComments() consulting matrix preflight before any HTTP dispatch and returning ErrUnsupportedCapability for deferred comments_ read surface",
+    "internal/gitcode liveProvider.ListIssues() reaching the mocked httptest /api/v5 server successfully through a matrix-equipped live provider",
+    "internal/gitcode ErrUnsupportedCapability error type with DiagnosticCode() returning \"unsupported_capability\", CapabilityKey, and Message fields",
+    "internal/gitcode IsUnsupportedCapability() predicate recognizing ErrUnsupportedCapability errors",
+    "internal/provider/live type aliases for RouteSchemaMatrix, SurfaceSpec, UnsupportedDiagnostic, ProductArea, SupportStatus, EvidenceClass, ErrUnsupportedCapability",
+    "internal/diagnostics CodeUnsupportedCapability constant and classifier wiring through classifyCode, exitClassFor (\"capability\"), httpAttemptedFor (false), retryableFor (false), messageFor",
+    "full Go package suite via go test ./...",
+    "repository whitespace validation via git diff --check"
+  ],
+  "evidence_type": "offline executable Go test runtime validation using httptest.Server for external GitCode-compatible HTTP dependency plus full go test ./... suite and git diff --check; 13 focused matrix scenario tests exercise RouteSchemaMatrix construction, lookup, validation, preflight, live provider integration, and classifier integration through production code paths",
+  "freshness": "current source tree at validation execution time; focused internal/gitcode route_schema_matrix_test.go and client_test.go scenario tests, diagnostics classifier_test.go capability test, go test ./..., and git diff --check with all GitCode credential and network variables unset",
+  "mocks_used": [
+    {
+      "name": "httptest GitCode /api/v5 server",
+      "scope": "external GitCode-compatible HTTP dependency only; target live provider construction, matrix preflight gate, ListIssues dispatch, ListIssueComments deferral, and ErrUnsupportedCapability return paths remain production code"
+    }
+  ],
+  "production_files_modified": [
+    "internal/gitcode/route_schema_matrix.go",
+    "internal/gitcode/route_schema_matrix_test.go",
+    "internal/gitcode/provider_errors.go",
+    "internal/gitcode/provider.go",
+    "internal/gitcode/client_test.go",
+    "internal/provider/live/adapter.go",
+    "internal/diagnostics/classifier.go"
+  ]
+}

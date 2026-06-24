@@ -38,6 +38,25 @@ func IsFixtureReadOnly(err error) bool {
 	return errors.As(err, &target)
 }
 
+type ErrUnsupportedCapability struct {
+	CapabilityKey string
+	Message       string
+}
+
+func (e ErrUnsupportedCapability) Error() string {
+	if e.Message == "" {
+		e.Message = "capability not supported"
+	}
+	return fmt.Sprintf("gitcode: unsupported capability %q: %s", e.CapabilityKey, e.Message)
+}
+
+func (e ErrUnsupportedCapability) DiagnosticCode() string { return "unsupported_capability" }
+
+func IsUnsupportedCapability(err error) bool {
+	var target ErrUnsupportedCapability
+	return errors.As(err, &target)
+}
+
 type ErrValidationFailed struct {
 	Field   string
 	Message string

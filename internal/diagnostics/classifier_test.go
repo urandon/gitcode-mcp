@@ -64,3 +64,23 @@ func mapValues(m map[string]string) []string {
 	}
 	return out
 }
+
+func TestClassifierUnsupportedCapability(t *testing.T) {
+	err := codedError{code: "unsupported_capability", msg: "gitcode: unsupported capability \"comments_read\": deferred for iteration 5"}
+	d := Classify(err, CommandContext{ProviderMode: "live-http"})
+	if d.Code != CodeUnsupportedCapability {
+		t.Fatalf("expected CodeUnsupportedCapability, got %s", d.Code)
+	}
+	if d.ExitClass != "capability" {
+		t.Fatalf("expected exitClass capability, got %s", d.ExitClass)
+	}
+	if d.HTTPAttempted {
+		t.Fatal("expected HTTPAttempted false")
+	}
+	if d.Retryable {
+		t.Fatal("expected Retryable false")
+	}
+	if !strings.Contains(d.Message, "unsupported_capability") {
+		t.Fatalf("expected message to contain unsupported_capability: %s", d.Message)
+	}
+}
