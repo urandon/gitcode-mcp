@@ -130,14 +130,14 @@ func classifyCode(err error, ctx CommandContext) Code {
 	if ctx.FailureSource == "remote_status" && ctx.HTTPAttempted {
 		return CodeAPIFailure
 	}
+	if ctx.LocalPayloadTooLarge || ctx.FailureSource == "local_body_limit" || ctx.FailureSource == "local_decode_boundary" || ctx.FailureSource == "partial_response" || hasCode(err, "partial_response") || hasCode(err, "unsupported_mock_payload") || hasCode(err, "live_graph_invalid") || hasCode(err, "validation_failed") {
+		return CodeSchemaDecode
+	}
 	if (ctx.APIFailure || hasCode(err, "live_api_failure") || hasCode(err, "write_provider_error")) && ctx.HTTPAttempted {
 		return CodeAPIFailure
 	}
 	if (hasCode(err, "api_validation") || hasCode(err, "not_found") || hasCode(err, "remote_conflict") || hasCode(err, "remote_collision") || hasCode(err, "remote_not_found") || hasCode(err, "rate_limited")) && ctx.HTTPAttempted {
 		return CodeAPIFailure
-	}
-	if ctx.LocalPayloadTooLarge || ctx.FailureSource == "local_body_limit" || ctx.FailureSource == "local_decode_boundary" || ctx.FailureSource == "partial_response" || hasCode(err, "partial_response") || hasCode(err, "unsupported_mock_payload") || hasCode(err, "live_graph_invalid") || hasCode(err, "validation_failed") {
-		return CodeSchemaDecode
 	}
 	if ctx.UnsupportedPayload || hasCode(err, "unsupported_mock_payload") || hasCode(err, "live_graph_invalid") || hasCode(err, "validation_failed") {
 		return CodeSchemaDecode

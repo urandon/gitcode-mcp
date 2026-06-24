@@ -669,6 +669,10 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 			}
 			return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempt, Cause: err}
 		}
+		if resp.StatusCode == http.StatusRequestEntityTooLarge {
+			resp.Body.Close()
+			return nil, nil, ErrPayloadTooLarge{Endpoint: endpoint, Limit: c.maxResponseSize, Size: resp.ContentLength, Source: "remote_status"}
+		}
 		body, readErr := c.readBounded(resp, endpoint)
 		resp.Body.Close()
 		if readErr != nil {

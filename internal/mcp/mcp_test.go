@@ -71,19 +71,31 @@ func TestMCPRepoScopedDuplicateAlias(t *testing.T) {
 }
 
 func TestMCPErrorOutputCanonicalFailureClass(t *testing.T) {
-	var out bytes.Buffer
-	id := json.RawMessage(`"SCN-MCP-ERROR-OUTPUT-01"`)
-	srv := &Server{writer: &out, stderr: io.Discard}
-	srv.writeDomainError(&id, service.ErrSyncFailure{Mode: "live_auth_failure", Target: "issue:*", Cause: gitcode.ErrAuthExpired{Endpoint: "/api/v5/repos/owner/repo/issues", Status: http.StatusUnauthorized}})
-	var resp response
-	if err := json.Unmarshal(bytesTrimSpace(out.Bytes()), &resp); err != nil {
-		t.Fatalf("decode response: %v body=%q", err, out.String())
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "SCN-MCP-ERROR-OUTPUT-01 auth", err: service.ErrSyncFailure{Mode: "live_auth_failure", Target: "issue:*", Cause: gitcode.ErrAuthExpired{Endpoint: "/api/v5/repos/owner/repo/issues", Status: http.StatusUnauthorized}}, want: "api_validation"},
+		{name: "SCN-DIAG-FAILURE-SOURCE-03 write local body limit", err: service.ErrWriteFailure{Code: "write_provider_error", PayloadSource: "local_body_limit", Cause: gitcode.ErrPayloadTooLarge{Endpoint: "/api/v5/repos/owner/repo/issues", Limit: 5, Size: 6, Source: "local_body_limit"}}, want: "schema_decode"},
 	}
-	if resp.Error == nil || resp.Error.Data == nil {
-		t.Fatalf("response missing error data: %#v", resp)
-	}
-	if resp.Error.Data.FailureClass != "api_validation" {
-		t.Fatalf("failure_class=%q want api_validation body=%q", resp.Error.Data.FailureClass, out.String())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			id := json.RawMessage(`"SCN-MCP-ERROR-OUTPUT-01"`)
+			srv := &Server{writer: &out, stderr: io.Discard}
+			srv.writeDomainError(&id, tt.err)
+			var resp response
+			if err := json.Unmarshal(bytesTrimSpace(out.Bytes()), &resp); err != nil {
+				t.Fatalf("decode response: %v body=%q", err, out.String())
+			}
+			if resp.Error == nil || resp.Error.Data == nil {
+				t.Fatalf("response missing error data: %#v", resp)
+			}
+			if resp.Error.Data.FailureClass != tt.want {
+				t.Fatalf("failure_class=%q want %s body=%q", resp.Error.Data.FailureClass, tt.want, out.String())
+			}
+		})
 	}
 }
 

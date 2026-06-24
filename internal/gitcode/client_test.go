@@ -227,6 +227,9 @@ func TestAttachmentContract(t *testing.T) {
 	if !errors.As(err, &tooLarge) {
 		t.Fatalf("expected ErrPayloadTooLarge, got %T %v", err, err)
 	}
+	if tooLarge.Source != "remote_status" {
+		t.Fatalf("source=%q want remote_status", tooLarge.Source)
+	}
 }
 
 func TestReadRetry(t *testing.T) {
@@ -401,12 +404,32 @@ func TestFailureModes(t *testing.T) {
 		assertAs(t, err, &target)
 	})
 	t.Run("max-size", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"id":"0123456789"}`) }))
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.(http.Flusher).Flush()
+			fmt.Fprint(w, `{"id":"0123456789"}`)
+		}))
 		defer server.Close()
 		client := newTestClient(t, server.URL, Config{MaxResponseSize: 5})
 		_, err := client.GetIssue(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42})
 		var target ErrPayloadTooLarge
 		assertAs(t, err, &target)
+		if target.Source != "local_body_limit" {
+			t.Fatalf("source=%q want local_body_limit", target.Source)
+		}
+	})
+	t.Run("remote-413", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			fmt.Fprint(w, strings.Repeat("x", 32))
+		}))
+		defer server.Close()
+		client := newTestClient(t, server.URL, Config{MaxResponseSize: 5})
+		_, err := client.GetIssue(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42})
+		var target ErrPayloadTooLarge
+		assertAs(t, err, &target)
+		if target.Source != "remote_status" {
+			t.Fatalf("source=%q want remote_status", target.Source)
+		}
 	})
 }
 

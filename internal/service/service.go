@@ -1976,7 +1976,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	if err != nil {
 		code := s.writeAdapterErrorCode(req.Mode, err)
 		_ = s.store.RecordAuditEvent(ctx, audit.Failure(route.RepoID, key, command, fingerprint, code, s.now().UTC()))
-		return WriteCommandResult{}, ErrWriteFailure{Code: code, RepoID: route.RepoID, IdempotencyKey: key, Cause: writeFailureCause(code, err)}
+		return WriteCommandResult{}, ErrWriteFailure{Code: code, RepoID: route.RepoID, IdempotencyKey: key, PayloadSource: failureSource(err), Cause: writeFailureCause(code, err)}
 	}
 	if !confirmed.confirmed || confirmed.remoteID == "" {
 		_ = s.store.RecordAuditEvent(ctx, audit.Failure(route.RepoID, key, command, fingerprint, "write_unconfirmed_remote", s.now().UTC()))
@@ -2270,6 +2270,18 @@ func writeFailureCause(code string, err error) error {
 		return nil
 	}
 	return err
+}
+
+func failureSource(err error) string {
+	var tooLarge gitcode.ErrPayloadTooLarge
+	if errors.As(err, &tooLarge) {
+		return tooLarge.Source
+	}
+	var partial gitcode.ErrPartialResponse
+	if errors.As(err, &partial) {
+		return "partial_response"
+	}
+	return ""
 }
 
 func firstNonEmptyString(values ...string) string {

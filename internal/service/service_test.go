@@ -1273,16 +1273,17 @@ func TestFailureModes(t *testing.T) {
 	ctx := context.Background()
 	baseWiki := gitcode.WikiPage{Slug: "wiki/design", Title: "Design", Body: "new body", Revision: "rev-2", UpdatedAt: time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)}
 	tests := []struct {
-		name         string
-		client       *fakeGitCodeClient
-		request      SyncRequest
-		prelock      bool
-		corrupt      bool
-		wantMode     string
-		wantErrAs    func(error) bool
-		wantMessage  string
-		wantRemote   int
-		wantNotFound bool
+		name              string
+		client            *fakeGitCodeClient
+		request           SyncRequest
+		prelock           bool
+		corrupt           bool
+		wantMode          string
+		wantErrAs         func(error) bool
+		wantMessage       string
+		wantRemote        int
+		wantPayloadSource string
+		wantNotFound      bool
 	}{
 		{name: "failure-timeout-network-unavailable", client: &fakeGitCodeClient{errors: []error{gitcode.ErrNetworkUnavailable{Endpoint: "/wiki", Attempts: 1}}}, request: SyncRequest{RepoID: "fixture-a", StableID: "DOC-123", IdempotencyKey: "failure-timeout-network-unavailable"}, wantMode: "network_timeout", wantErrAs: func(err error) bool { var target gitcode.ErrNetworkUnavailable; return errors.As(err, &target) }, wantMessage: "sync: network timeout for record DOC-123: retry with --timeout to increase deadline or check connectivity", wantRemote: 1},
 		{name: "failure-rate-limited-retry-after", client: &fakeGitCodeClient{errors: []error{gitcode.ErrRateLimited{RetryAfter: time.Second, Endpoint: "/wiki", Attempts: 1}}}, request: SyncRequest{RepoID: "fixture-a", StableID: "DOC-123", IdempotencyKey: "failure-rate-limited-retry-after", MaxAttempts: 1}, wantMode: "rate_limited", wantErrAs: func(err error) bool {
@@ -1298,10 +1299,10 @@ func TestFailureModes(t *testing.T) {
 		{name: "failure-cache-corruption", client: &fakeGitCodeClient{wiki: baseWiki}, request: SyncRequest{RepoID: "fixture-a", StableID: "DOC-123", IdempotencyKey: "failure-cache-corruption"}, corrupt: true, wantMode: "cache_corruption", wantErrAs: func(err error) bool { var target cache.ErrCacheCorruption; return errors.As(err, &target) }, wantMessage: "cache: integrity check failed at memory. Recover from backup or re-ingest with gitcode-mcp sync --full.", wantRemote: 0},
 		{name: "failure-lock-contention", client: &fakeGitCodeClient{wiki: baseWiki}, request: SyncRequest{RepoID: "fixture-a", StableID: "DOC-123", IdempotencyKey: "failure-lock-contention"}, prelock: true, wantErrAs: func(err error) bool { var target cache.ErrLockContention; return errors.As(err, &target) }, wantRemote: 0},
 		{name: "failure-missing-remote-record", client: &fakeGitCodeClient{errors: []error{gitcode.ErrRemoteNotFound{Endpoint: "/wiki", Alias: "remote:wiki/design"}}}, request: SyncRequest{RepoID: "fixture-a", StableID: "DOC-123", IdempotencyKey: "failure-missing-remote-record"}, wantMode: "remote_not_found", wantErrAs: func(err error) bool { var target gitcode.ErrRemoteNotFound; return errors.As(err, &target) }, wantMessage: "sync: remote record for alias remote:wiki/design not found. It may have been deleted or moved. Run link-check to find affected references.", wantRemote: 1, wantNotFound: true},
-		{name: "failure-oversized-payload", client: &fakeGitCodeClient{errors: []error{gitcode.ErrPayloadTooLarge{Endpoint: "/wiki", Limit: 5, Size: 50}}}, request: SyncRequest{RepoID: "fixture-a", StableID: "DOC-123", IdempotencyKey: "failure-oversized-payload"}, wantMode: "payload_too_large", wantErrAs: func(err error) bool {
+		{name: "failure-oversized-payload", client: &fakeGitCodeClient{errors: []error{gitcode.ErrPayloadTooLarge{Endpoint: "/wiki", Limit: 5, Size: 50, Source: "local_body_limit"}}}, request: SyncRequest{RepoID: "fixture-a", StableID: "DOC-123", IdempotencyKey: "failure-oversized-payload"}, wantMode: "payload_too_large", wantErrAs: func(err error) bool {
 			var target gitcode.ErrPayloadTooLarge
-			return errors.As(err, &target) && target.Limit == 5
-		}, wantMessage: "sync: record DOC-123 exceeds maximum size 5 bytes. Use --max-size to increase limit or skip with --skip-large.", wantRemote: 1},
+			return errors.As(err, &target) && target.Limit == 5 && target.Source == "local_body_limit"
+		}, wantMessage: "sync: record DOC-123 exceeds maximum size 5 bytes. Use --max-size to increase limit or skip with --skip-large.", wantRemote: 1, wantPayloadSource: "local_body_limit"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1330,6 +1331,9 @@ func TestFailureModes(t *testing.T) {
 				var failure ErrSyncFailure
 				if !errors.As(err, &failure) || failure.Mode != tt.wantMode || failure.RecoveryAction == "" {
 					t.Fatalf("failure=%#v err=%v", failure, err)
+				}
+				if failure.PayloadSource != tt.wantPayloadSource {
+					t.Fatalf("payload source=%q want %q", failure.PayloadSource, tt.wantPayloadSource)
 				}
 			}
 			if tt.wantMessage != "" && err.Error() != tt.wantMessage {

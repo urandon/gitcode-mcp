@@ -130,6 +130,7 @@ func TestClassifierFailureSourceMapping(t *testing.T) {
 		{name: "SCN-DIAG-FAILURE-SOURCE-01 remote status payload size api validation", err: codedError{code: "payload_too_large", msg: "too large"}, ctx: CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusRequestEntityTooLarge, HTTPAttempted: true, FailureSource: "remote_status"}, want: CodeAPIFailure},
 		{name: "SCN-DIAG-FAILURE-SOURCE-02 local body limit schema decode", err: codedError{code: "payload_too_large", msg: "too large"}, ctx: CommandContext{ProviderMode: "live-http", HTTPAttempted: true, FailureSource: "local_body_limit"}, want: CodeSchemaDecode},
 		{name: "SCN-DIAG-FAILURE-SOURCE-03 local decode boundary schema decode", err: codedError{code: "partial_response", msg: "partial"}, ctx: CommandContext{ProviderMode: "live-http", HTTPAttempted: true, FailureSource: "local_decode_boundary"}, want: CodeSchemaDecode},
+		{name: "SCN-DIAG-FAILURE-SOURCE-04 write wrapper local body limit beats provider fallback", err: codedError{code: "write_provider_error", msg: "provider"}, ctx: CommandContext{ProviderMode: "live-http", HTTPAttempted: true, FailureSource: "local_body_limit"}, want: CodeSchemaDecode},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

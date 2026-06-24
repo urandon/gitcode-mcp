@@ -1218,7 +1218,10 @@ func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {
 		ctx.FixtureFallbackSentinel = writeErr.Code == "write_fixture_fallback_detected"
 		ctx.MissingCredential = writeErr.Code == "write_missing_credential"
 		ctx.UnsupportedPayload = writeErr.Code == "live_graph_invalid" || writeErr.Code == "unsupported_mock_payload"
-		ctx.SchemaDecodeFailure = writeErr.Code == "schema_decode"
+		ctx.SchemaDecodeFailure = writeErr.Code == "schema_decode" || writeErr.PayloadSource == "partial_response"
+		ctx.PayloadSource = writeErr.PayloadSource
+		ctx.FailureSource = writeErr.PayloadSource
+		ctx.LocalPayloadTooLarge = writeErr.PayloadSource == "local_body_limit"
 	}
 	var syncErr service.ErrSyncFailure
 	if errors.As(err, &syncErr) {

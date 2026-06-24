@@ -244,6 +244,7 @@ type ErrWriteFailure struct {
 	RepoID         string
 	RemoteID       string
 	IdempotencyKey string
+	PayloadSource  string
 	Cause          error
 }
 
