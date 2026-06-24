@@ -21,6 +21,41 @@ Iteration 5 improves live read normalization and live-cache visibility, but it i
 
 ## High Priority Gaps
 
+### 0. Pull Request API is available but not wired into GitCode MCP
+
+After the initial report, a read-only live probe found that GitCode exposes pull requests through the `/api/v5/repos/{owner}/{repo}/pulls` route family. The GitCode UI still names them merge requests, but the token-compatible API route is `pulls`.
+
+Observed live routes:
+
+```text
+GET /api/v5/repos/urandon/gitcode-mcp-testing-polygon/pulls
+GET /api/v5/repos/urandon/gitcode-mcp-testing-polygon/pulls/1
+GET /api/v5/repos/urandon/gitcode-mcp-testing-polygon/pulls/1/comments
+POST /api/v5/repos/urandon/gitcode-mcp-testing-polygon/pulls/1/comments
+```
+
+The following route aliases returned `404` and should not be used as implementation paths:
+
+```text
+/pull_requests
+/merge_requests
+/pulls/{number}/review_comments
+/pulls/{number}/notes
+/pulls/{number}/reviews
+```
+
+Live PR list/detail returned GitCode-shaped PR payloads with fields including `id`, `number`, `html_url`, `state`, `title`, `body`, `user`, `labels`, `base`, `head`, `mergeable`, and `mergeable_state`. A PR comment write on the test polygon returned `201` with:
+
+```text
+id: discussion id string
+note_id: numeric comment id
+body: comment body
+```
+
+Read-back through `GET /pulls/1/comments` returned a list with `id`, `discussion_id`, `body`, `created_at`, `updated_at`, `user`, and `comment_type: pr_comment`.
+
+This changes the next-iteration recommendation: PR read and PR comments no longer need to remain deferred for lack of route evidence. They still need normal adapter modeling, fixture coverage, cache projection decisions, and public-safe diagnostics.
+
 ### 1. Large collection sync is not operationally safe
 
 The wiki stress case exposed a broader collection-size problem. `sync --live --wiki` against the polygon repository did not return useful progress and had to be interrupted after a long wait. Retrying with `--timeout 5s` did not bound the whole command.
