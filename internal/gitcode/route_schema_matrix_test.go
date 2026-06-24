@@ -398,6 +398,32 @@ func TestScenario005RouteSchemaMatrixCommentsPreflightBlocksHTTP(t *testing.T) {
 	}
 }
 
+func TestScenario011CreateIssueCommentPreflightBlocksHTTP(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("no HTTP request expected for deferred comments write, got %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	p, err := NewLiveProvider(ProviderConfig{
+		Mode:        ProviderModeLive,
+		LiveAllowed: true,
+		BaseURL:     server.URL,
+		Token:       "test-token",
+	})
+	if err != nil {
+		t.Fatalf("NewLiveProvider failed: %v", err)
+	}
+
+	_, err = p.CreateIssueComment(context.Background(), CreateIssueCommentRequest{Owner: "o", Repo: "r", Number: 1, Body: "test comment"}, WriteOptions{IdempotencyKey: "test-key"})
+	var capErr ErrUnsupportedCapability
+	if !errors.As(err, &capErr) {
+		t.Fatalf("expected ErrUnsupportedCapability, got %T %v", err, err)
+	}
+	if capErr.CapabilityKey != "comments_read" {
+		t.Fatalf("expected comments_read capability key, got %q", capErr.CapabilityKey)
+	}
+}
+
 func TestScenario005RouteSchemaMatrixIssuesReachesHTTP(t *testing.T) {
 	var hit bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

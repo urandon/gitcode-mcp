@@ -213,6 +213,13 @@ func (p liveProvider) ListIssueComments(ctx context.Context, req IssueRequest) (
 	return p.HTTPClient.ListIssueComments(ctx, req)
 }
 
+func (p liveProvider) CreateIssueComment(ctx context.Context, req CreateIssueCommentRequest, opts WriteOptions) (WriteResult[Comment], error) {
+	if err := p.matrix.Preflight(ProductAreaComments); err != nil {
+		return WriteResult[Comment]{}, err
+	}
+	return p.HTTPClient.CreateIssueComment(ctx, req, opts)
+}
+
 type unavailableProvider struct {
 	reason string
 }

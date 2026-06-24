@@ -1,0 +1,30 @@
+{
+  "covered_outcome_ids": ["outcome-5", "outcome-1", "outcome-7", "outcome-10"],
+  "covered_decommission_ids": ["decommission-4"],
+  "product_surfaces": [
+    "internal/gitcode/provider.go:liveProvider.ListIssueComments",
+    "internal/gitcode/provider.go:liveProvider.CreateIssueComment",
+    "internal/gitcode/route_schema_matrix.go:RouteSchemaMatrix.Preflight",
+    "internal/gitcode/route_schema_matrix.go:DefaultRouteSchemaMatrix",
+    "internal/gitcode/provider_errors.go:ErrUnsupportedCapability",
+    "internal/gitcode/provider_errors.go:ErrSchemaDecode",
+    "internal/gitcode/errors.go:ErrNetworkUnavailable",
+    "internal/gitcode/error_classifier.go"
+  ],
+  "evidence_type": "API test",
+  "freshness": "2026-06-24T10:32:14Z",
+  "mocks_used": [
+    "httptest.Server (tripwire handler for deferred surfaces — no live network)",
+    "httptest.Server (mock GitCode API for supported surfaces — no live network)",
+    "RouteSchemaMatrix.DefaultRouteSchemaMatrix (standard deferred-surface contract)"
+  ],
+  "production_files_modified": [
+    "internal/gitcode/provider.go",
+    "internal/gitcode/route_schema_matrix_test.go"
+  ],
+  "scenario_results": {
+    "011-live-adapter-pr-comment-deferral-task-1-change-live-adapter-pr-comment-deferred-surface-ha-scenario-1": "PASS"
+  },
+  "validation_status": "passed",
+  "validation_summary": "8/8 scenarios passed. Comment read (ListIssueComments) and write (CreateIssueComment) paths return ErrUnsupportedCapability with comments_read key; PR deferral enforced at Preflight level returning pull_requests_read; supported surfaces (Issues) reach HTTP without interference; go test ./... passes all 14 packages offline; git diff --check clean; no live_transport_failure on deferred surfaces; schema_decode errors verified distinct from transport errors per decommission-4."
+}
