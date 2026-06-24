@@ -1,0 +1,39 @@
+{
+  "covered_outcome_ids": [
+    "outcome-6",
+    "outcome-7",
+    "outcome-10"
+  ],
+  "covered_decommission_ids": [
+    "decommission-3"
+  ],
+  "product_surfaces": [
+    "gitcode-mcp sync --live --wiki --repo through cmd/gitcode-mcp real startup run seam",
+    "internal/gitcode live HTTP client ListWikiPages traversal over /api/v5/repos/{owner}/{repo}.wiki/contents and nested /contents/{path}",
+    "internal/gitcode live HTTP client GetWikiPage over /contents/{path} metadata and /raw/{path} body",
+    "internal/gitcode live HTTP client CreateWikiPage POST /contents/{path} base64 payload without sha",
+    "internal/gitcode live HTTP client UpdateWikiPage PUT /contents/{path} with explicit or auto-resolved sha",
+    "internal/gitcode live HTTP client DeleteWikiPage DELETE /contents/{path} with explicit or auto-resolved sha",
+    "schema/decode and API-validation error boundaries for malformed wiki contents, duplicate paths, over-deep traversal, and 409 stale sha",
+    "browser web-api.gitcode.com/api/v2/projects/wiki route exclusion",
+    "full Go package suite via go test ./...",
+    "repository whitespace validation via git diff --check"
+  ],
+  "evidence_type": "stubbed-external-provider Go validation using httptest.Server plus full offline go test suite and git diff --check",
+  "freshness": "current source tree under focused internal/gitcode wiki provider scenario tests, focused cmd/gitcode-mcp real-startup live wiki sync test, go test ./..., and git diff --check with GitCode live credential environment scrubbed",
+  "mocks_used": [
+    {
+      "name": "internal/gitcode httptest wiki content servers",
+      "scope": "external GitCode-compatible HTTP dependency only; target endpoint builders, live HTTP client traversal, metadata/raw reads, write payload construction, sha resolution, and error classification paths remain production code"
+    },
+    {
+      "name": "cmd/gitcode-mcp MockGitCodeAPI httptest server",
+      "scope": "external GitCode-compatible HTTP dependency only; target CLI startup, live provider construction, credential/environment handling, sync service, and cache-visible wiki record path remain production code"
+    },
+    {
+      "name": "temporary filesystem paths",
+      "scope": "local cache/config isolation for offline command validation only"
+    }
+  ],
+  "production_files_modified": []
+}

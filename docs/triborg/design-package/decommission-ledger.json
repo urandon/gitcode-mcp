@@ -1,0 +1,68 @@
+{
+  "created_at": "2026-06-23T16:56:48+00:00",
+  "decommission_ids": [
+    "decommission-1",
+    "decommission-2",
+    "decommission-3",
+    "decommission-4",
+    "decommission-5"
+  ],
+  "items": [
+    {
+      "action": "replace",
+      "allowlist": [],
+      "category": "route",
+      "id": "decommission-1",
+      "keep_reason": "",
+      "request_task_id": 3,
+      "source": "runner",
+      "target": "/api/v5/repos/{owner}/{repo}/issues/{number}/labels add-label route assumption",
+      "verification": "Target CLI add-label tests prove product execution uses the selected issue-update behavior or explicit unsupported diagnostic instead of issuing the old route as a successful mutation path."
+    },
+    {
+      "action": "replace",
+      "allowlist": [],
+      "category": "state_contract",
+      "id": "decommission-2",
+      "keep_reason": "",
+      "request_task_id": 3,
+      "source": "runner",
+      "target": "GitHub-like labels JSON array request contract for GitCode issue create/update",
+      "verification": "Mocked live tests fail when outgoing GitCode issue create/update payloads encode labels as a JSON array rather than the accepted JSON string form."
+    },
+    {
+      "action": "keep_internal",
+      "allowlist": [],
+      "category": "route",
+      "id": "decommission-3",
+      "keep_reason": "Retain only as documented discovery/fallback research until a stable public-safe non-cookie credential path is validated.",
+      "request_task_id": 6,
+      "source": "runner",
+      "target": "browser web-api.gitcode.com/api/v2/projects/wiki/* as default MCP wiki route",
+      "verification": "Target wiki provider tests and route configuration prove default product wiki sync/read/write paths use /api/v5 repos/{owner}/{repo}.wiki routes or unsupported diagnostics, with browser web-api routes unavailable for default MCP execution."
+    },
+    {
+      "action": "replace",
+      "allowlist": [],
+      "category": "state_contract",
+      "id": "decommission-4",
+      "keep_reason": "",
+      "request_task_id": 7,
+      "source": "runner",
+      "target": "400/schema/decode failures classified as live_transport_failure or configuration failure",
+      "verification": "Regression tests trigger 400, malformed JSON, and schema mismatch responses and prove CLI/MCP diagnostics use API validation or schema/decode classifications instead of transport or configuration classifications."
+    },
+    {
+      "action": "replace",
+      "allowlist": [],
+      "category": "state_contract",
+      "id": "decommission-5",
+      "keep_reason": "",
+      "request_task_id": 8,
+      "source": "runner",
+      "target": "shared fixture/live cache namespace without provenance or isolation state",
+      "verification": "Cache transition tests prove fixture-origin records are distinguishable from live-origin records or cleared/isolated before live reads can present them as live GitCode data."
+    }
+  ],
+  "schema_version": "triborg.decommission-ledger.v1"
+}

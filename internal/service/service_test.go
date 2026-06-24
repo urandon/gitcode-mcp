@@ -2352,6 +2352,9 @@ func (f *fakeGitCodeClient) CreateWikiPage(context.Context, gitcode.CreateWikiPa
 func (f *fakeGitCodeClient) UpdateWikiPage(context.Context, gitcode.UpdateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
 	return gitcode.WriteResult[gitcode.WikiPage]{}, nil
 }
+func (f *fakeGitCodeClient) DeleteWikiPage(context.Context, gitcode.DeleteWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
+	return gitcode.WriteResult[gitcode.WikiPage]{}, nil
+}
 func (f *fakeGitCodeClient) AddLabel(context.Context, gitcode.LabelRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
 	f.addLabelCalls++
 	if err := f.nextError(); err != nil {

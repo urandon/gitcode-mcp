@@ -23,6 +23,7 @@ type Provider interface {
 	CreateIssueComment(context.Context, CreateIssueCommentRequest, WriteOptions) (WriteResult[Comment], error)
 	CreateWikiPage(context.Context, CreateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
 	UpdateWikiPage(context.Context, UpdateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
+	DeleteWikiPage(context.Context, DeleteWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
 }
 
 type ProviderMode string
@@ -233,6 +234,9 @@ func (p unavailableProvider) CreateWikiPage(context.Context, CreateWikiPageReque
 	return WriteResult[WikiPage]{}, p.err()
 }
 func (p unavailableProvider) UpdateWikiPage(context.Context, UpdateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error) {
+	return WriteResult[WikiPage]{}, p.err()
+}
+func (p unavailableProvider) DeleteWikiPage(context.Context, DeleteWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error) {
 	return WriteResult[WikiPage]{}, p.err()
 }
 

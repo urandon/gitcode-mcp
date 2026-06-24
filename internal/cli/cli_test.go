@@ -661,6 +661,10 @@ func (s *spyService) UpdatePage(context.Context, service.WriteCommandRequest) (s
 	s.called("UpdatePage")
 	return service.WriteCommandResult{Command: "update-page", Status: "dry_run_valid", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
 }
+func (s *spyService) DeletePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	s.called("DeletePage")
+	return service.WriteCommandResult{Command: "delete-page", Status: "dry_run_valid", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
+}
 func (s *spyService) AddComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error) {
 	s.called("AddComment")
 	return service.WriteCommandResult{Command: "add-comment", Status: "dry_run_valid", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil

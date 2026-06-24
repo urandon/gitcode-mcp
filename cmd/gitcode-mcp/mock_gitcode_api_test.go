@@ -126,9 +126,12 @@ func (api *MockGitCodeAPI) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	case "list_comments":
 		fmt.Fprint(w, `[{"id":"MOCK-COMMENT-1","author":"mock-user","body":"mock live comment","created_at":"2026-06-22T00:00:00Z","updated_at":"2026-06-22T00:00:00Z"}]`)
 	case "list_wiki":
-		fmt.Fprint(w, `[{"id":"MOCK-WIKI-LIVE","slug":"LiveGuide","title":"Mock Live Guide","body":"mock live wiki body","revision":"rev-live-1","created_at":"2026-06-22T00:00:00Z","updated_at":"2026-06-22T00:00:00Z"}]`)
+		fmt.Fprint(w, `[{"path":"LiveGuide.md","type":"file","sha":"rev-live-1"}]`)
 	case "get_wiki":
-		fmt.Fprint(w, `{"id":"MOCK-WIKI-LIVE","slug":"LiveGuide","title":"Mock Live Guide","body":"mock live wiki body","revision":"rev-live-1","created_at":"2026-06-22T00:00:00Z","updated_at":"2026-06-22T00:00:00Z"}`)
+		fmt.Fprint(w, `{"path":"LiveGuide.md","type":"file","sha":"rev-live-1"}`)
+	case "raw_wiki":
+		w.Header().Set("Content-Type", "text/markdown")
+		fmt.Fprint(w, `mock live wiki body`)
 	case "create_issue":
 		w.WriteHeader(http.StatusCreated)
 		fmt.Fprint(w, `{"id":"MOCK-CREATED-ISSUE","number":101,"title":"Mock Created","state":"open","body":"created by mock keychain","created_at":"2026-06-22T00:00:00Z","updated_at":"2026-06-22T00:00:00Z"}`)
@@ -152,11 +155,15 @@ func (api *MockGitCodeAPI) operation(r *http.Request) string {
 	if path == base+"/issues/100/comments" && r.Method == http.MethodGet {
 		return "list_comments"
 	}
-	if path == base+"/wiki" && r.Method == http.MethodGet {
+	wikiBase := "/api/v5/repos/" + api.owner + "/" + api.repo + ".wiki"
+	if path == wikiBase+"/contents" && r.Method == http.MethodGet {
 		return "list_wiki"
 	}
-	if path == base+"/wiki/LiveGuide" && r.Method == http.MethodGet {
+	if path == wikiBase+"/contents/LiveGuide.md" && r.Method == http.MethodGet {
 		return "get_wiki"
+	}
+	if path == wikiBase+"/raw/LiveGuide.md" && r.Method == http.MethodGet {
+		return "raw_wiki"
 	}
 	if strings.HasPrefix(path, base+"/issues/") && strings.HasSuffix(path, "/comments") && r.Method == http.MethodGet {
 		return "list_comments"

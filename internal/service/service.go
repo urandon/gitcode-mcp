@@ -175,6 +175,10 @@ func (sanitizedFixtureClient) UpdateWikiPage(context.Context, gitcode.UpdateWiki
 	return gitcode.WriteResult[gitcode.WikiPage]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
+func (sanitizedFixtureClient) DeleteWikiPage(context.Context, gitcode.DeleteWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
+	return gitcode.WriteResult[gitcode.WikiPage]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
+}
+
 func (sanitizedFixtureClient) AddLabel(context.Context, gitcode.LabelRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
 	return gitcode.WriteResult[gitcode.Issue]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
@@ -1152,17 +1156,24 @@ func (s *Service) UpdateIssue(ctx context.Context, req WriteCommandRequest) (Wri
 }
 
 func (s *Service) CreatePage(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
-	if strings.TrimSpace(req.Title) == "" || strings.TrimSpace(req.Body) == "" {
-		return WriteCommandResult{}, ErrInvalidQuery{Field: "page", Message: "title and body are required"}
+	if strings.TrimSpace(req.Body) == "" || strings.TrimSpace(firstNonEmptyString(req.Path, req.Slug, req.Title)) == "" {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "page", Message: "path and body are required"}
 	}
 	return s.executeWrite(ctx, "create-page", req, RepositoryScopeWiki)
 }
 
 func (s *Service) UpdatePage(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
-	if strings.TrimSpace(req.Slug) == "" && strings.TrimSpace(req.ID) == "" {
-		return WriteCommandResult{}, ErrInvalidQuery{Field: "page", Message: "slug or id is required"}
+	if strings.TrimSpace(firstNonEmptyString(req.Path, req.Slug, req.ID)) == "" {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "page", Message: "path or id is required"}
 	}
 	return s.executeWrite(ctx, "update-page", req, RepositoryScopeWiki)
+}
+
+func (s *Service) DeletePage(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if strings.TrimSpace(firstNonEmptyString(req.Path, req.Slug, req.ID)) == "" {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "page", Message: "path or id is required"}
+	}
+	return s.executeWrite(ctx, "delete-page", req, RepositoryScopeWiki)
 }
 
 func (s *Service) AddComment(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
@@ -2031,14 +2042,21 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 		confirmation, graph := s.issueWriteGraph(route.RepoID, result.Record, result, now)
 		return confirmation, graph, nil
 	case "create-page":
-		result, err := s.client.CreateWikiPage(ctx, gitcode.CreateWikiPageRequest{Owner: route.Owner, Repo: route.Name, Slug: req.Slug, Title: strings.TrimSpace(req.Title), Body: req.Body}, opts)
+		result, err := s.client.CreateWikiPage(ctx, gitcode.CreateWikiPageRequest{Owner: route.Owner, Repo: route.Name, Path: firstNonEmptyString(req.Path, req.Slug, req.Title), Slug: req.Slug, Title: strings.TrimSpace(req.Title), Body: req.Body}, opts)
 		if err != nil {
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
 		confirmation, graph := s.wikiWriteGraph(route.RepoID, result.Record, result, now)
 		return confirmation, graph, nil
 	case "update-page":
-		result, err := s.client.UpdateWikiPage(ctx, gitcode.UpdateWikiPageRequest{Owner: route.Owner, Repo: route.Name, Slug: firstNonEmptyString(req.Slug, req.ID), Title: req.Title, Body: req.Body}, opts)
+		result, err := s.client.UpdateWikiPage(ctx, gitcode.UpdateWikiPageRequest{Owner: route.Owner, Repo: route.Name, Path: firstNonEmptyString(req.Path, req.Slug, req.ID), Slug: firstNonEmptyString(req.Slug, req.ID), Title: req.Title, Body: req.Body, Sha: req.Sha}, opts)
+		if err != nil {
+			return writeConfirmation{}, cache.RecordGraph{}, err
+		}
+		confirmation, graph := s.wikiWriteGraph(route.RepoID, result.Record, result, now)
+		return confirmation, graph, nil
+	case "delete-page":
+		result, err := s.client.DeleteWikiPage(ctx, gitcode.DeleteWikiPageRequest{Owner: route.Owner, Repo: route.Name, Path: firstNonEmptyString(req.Path, req.Slug, req.ID), Slug: firstNonEmptyString(req.Slug, req.ID), Sha: req.Sha}, opts)
 		if err != nil {
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
@@ -2073,8 +2091,8 @@ func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID s
 		result := gitcode.WriteResult[gitcode.Comment]{Record: comment, Confirmed: true, RemoteID: prior.RemoteID, ParentIssueNumber: number, ParentIssueID: prior.RecordID, RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
 		_, graph, err := s.commentWriteGraph(ctx, repoID, number, comment, result, now)
 		return graph, err
-	case "create-page", "update-page":
-		page := gitcode.WikiPage{ID: prior.RemoteID, Slug: firstNonEmptyString(req.Slug, req.ID, prior.RemoteID), Title: req.Title, Body: req.Body, Revision: firstNonEmptyString(prior.Message, prior.PayloadHash), CreatedAt: now, UpdatedAt: now}
+	case "create-page", "update-page", "delete-page":
+		page := gitcode.WikiPage{ID: prior.RemoteID, Slug: firstNonEmptyString(req.Path, req.Slug, req.ID, prior.RemoteID), Title: req.Title, Body: req.Body, Revision: firstNonEmptyString(prior.Message, prior.PayloadHash), CreatedAt: now, UpdatedAt: now}
 		if page.Title == "" {
 			page.Title = page.Slug
 		}
@@ -2143,12 +2161,14 @@ func writeIdempotency(command string, req WriteCommandRequest) (string, string) 
 		ID      string
 		Number  int
 		Slug    string
+		Path    string
+		Sha     string
 		Title   string
 		Body    string
 		State   string
 		Label   string
 		Labels  []string
-	}{command, req.RepoID, req.ID, req.Number, req.Slug, strings.TrimSpace(req.Title), req.Body, req.State, strings.TrimSpace(req.Label), req.Labels})
+	}{command, req.RepoID, req.ID, req.Number, req.Slug, req.Path, req.Sha, strings.TrimSpace(req.Title), req.Body, req.State, strings.TrimSpace(req.Label), req.Labels})
 	sum := sha256.Sum256(payload)
 	fingerprint := hex.EncodeToString(sum[:])
 	if strings.TrimSpace(req.IdempotencyKey) != "" {
@@ -2164,7 +2184,7 @@ func writeTargetID(req WriteCommandRequest) string {
 	if req.Number != 0 {
 		return strconv.Itoa(req.Number)
 	}
-	return req.Slug
+	return firstNonEmptyString(req.Path, req.Slug)
 }
 
 func replayWriteResult(command string, entry cache.AuditTrailEntry, fingerprint string, now time.Time) WriteCommandResult {

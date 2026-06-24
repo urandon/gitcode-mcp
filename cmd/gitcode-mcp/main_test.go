@@ -529,7 +529,7 @@ func assertStartupCacheHasLiveMockRecords(t *testing.T, cachePath string) {
 	if _, err := store.GetSourceScoped(context.Background(), "fixture-a", "ISSUE-MOCK-ISSUE-100"); err != nil {
 		t.Fatalf("mock issue missing: %v", err)
 	}
-	if _, err := store.GetSourceScoped(context.Background(), "fixture-a", "WIKI-MOCK-WIKI-LIVE"); err != nil {
+	if _, err := store.GetSourceScoped(context.Background(), "fixture-a", "WIKI-LIVEGUIDE.MD"); err != nil {
 		t.Fatalf("mock wiki missing: %v", err)
 	}
 	if _, err := store.GetSourceScoped(context.Background(), "fixture-a", "ISSUE-42"); err == nil {

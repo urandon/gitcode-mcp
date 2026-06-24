@@ -23,6 +23,7 @@ type WikiPageRequest struct {
 	Owner string
 	Repo  string
 	Slug  string
+	Path  string
 }
 
 type WikiListRequest struct {
@@ -179,20 +180,56 @@ type CreateIssueCommentRequest struct {
 	Body   string `json:"body"`
 }
 
+type WikiContentsEntry struct {
+	Path string `json:"path"`
+	Type string `json:"type"`
+	Sha  string `json:"sha,omitempty"`
+	Size int64  `json:"size,omitempty"`
+}
+
+type WikiContentsFile struct {
+	Path     string `json:"path"`
+	Type     string `json:"type"`
+	Sha      string `json:"sha"`
+	Content  string `json:"content,omitempty"`
+	Encoding string `json:"encoding,omitempty"`
+	Size     int64  `json:"size,omitempty"`
+}
+
+type WikiContentWriteRequest struct {
+	Content string `json:"content,omitempty"`
+	Message string `json:"message,omitempty"`
+	Sha     string `json:"sha,omitempty"`
+}
+
 type CreateWikiPageRequest struct {
-	Owner string `json:"-"`
-	Repo  string `json:"-"`
-	Slug  string `json:"slug,omitempty"`
-	Title string `json:"title"`
-	Body  string `json:"body"`
+	Owner   string `json:"-"`
+	Repo    string `json:"-"`
+	Slug    string `json:"-"`
+	Path    string `json:"-"`
+	Title   string `json:"-"`
+	Body    string `json:"-"`
+	Message string `json:"-"`
 }
 
 type UpdateWikiPageRequest struct {
-	Owner string `json:"-"`
-	Repo  string `json:"-"`
-	Slug  string `json:"-"`
-	Title string `json:"title,omitempty"`
-	Body  string `json:"body,omitempty"`
+	Owner   string `json:"-"`
+	Repo    string `json:"-"`
+	Slug    string `json:"-"`
+	Path    string `json:"-"`
+	Title   string `json:"-"`
+	Body    string `json:"-"`
+	Sha     string `json:"-"`
+	Message string `json:"-"`
+}
+
+type DeleteWikiPageRequest struct {
+	Owner   string `json:"-"`
+	Repo    string `json:"-"`
+	Slug    string `json:"-"`
+	Path    string `json:"-"`
+	Sha     string `json:"-"`
+	Message string `json:"-"`
 }
 
 type LabelRequest struct {

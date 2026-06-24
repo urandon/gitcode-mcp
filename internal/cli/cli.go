@@ -45,6 +45,7 @@ var commands = []string{
 	"update-issue",
 	"create-page",
 	"update-page",
+	"delete-page",
 	"add-comment",
 	"add-label",
 	"config",
@@ -85,6 +86,7 @@ type queryService interface {
 	UpdateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	CreatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	DeletePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	AddComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	AddLabel(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 }
@@ -134,6 +136,8 @@ type options struct {
 	id             string
 	number         int
 	slug           string
+	path           string
+	sha            string
 	title          string
 	body           string
 	state          string
@@ -297,7 +301,7 @@ func resolveLiveCredential(ctx context.Context, eff config.EffectiveConfig, deps
 
 func isLiveStartupCommand(command string) bool {
 	switch command {
-	case "sync", "create-issue", "update-issue", "create-page", "update-page", "add-comment", "add-label", "doctor":
+	case "sync", "create-issue", "update-issue", "create-page", "update-page", "delete-page", "add-comment", "add-label", "doctor":
 		return true
 	default:
 		return false
@@ -316,7 +320,7 @@ func resolveStartupLiveRepositoryBinding(ctx context.Context, cachePath, repoID 
 
 func liveRequestedScope(command string, opts options) service.RepositoryScope {
 	switch command {
-	case "create-page", "update-page":
+	case "create-page", "update-page", "delete-page":
 		return service.RepositoryScopeWiki
 	case "sync":
 		if opts.wiki && !opts.issues {
@@ -406,6 +410,8 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.id, "id", "", "record id")
 	flags.IntVar(&opts.number, "number", 0, "issue number")
 	flags.StringVar(&opts.slug, "slug", "", "page slug")
+	flags.StringVar(&opts.path, "path", "", "page path")
+	flags.StringVar(&opts.sha, "sha", "", "page sha")
 	flags.StringVar(&opts.title, "title", "", "title")
 	flags.StringVar(&opts.body, "body", "", "body")
 	flags.StringVar(&opts.state, "state", "", "state")
@@ -860,6 +866,8 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		return dispatchWrite(ctx, svc.CreatePage, command, opts, stdout, stderr, plan)
 	case "update-page":
 		return dispatchWrite(ctx, svc.UpdatePage, command, opts, stdout, stderr, plan)
+	case "delete-page":
+		return dispatchWrite(ctx, svc.DeletePage, command, opts, stdout, stderr, plan)
 	case "add-comment":
 		return dispatchWrite(ctx, svc.AddComment, command, opts, stdout, stderr, plan)
 	case "add-label":
@@ -959,7 +967,7 @@ func writeRequest(opts options) service.WriteCommandRequest {
 	if opts.live {
 		mode = service.WriteModeLive
 	}
-	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, Number: opts.number, Slug: opts.slug, Title: opts.title, Body: opts.body, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
+	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, Number: opts.number, Slug: opts.slug, Path: opts.path, Sha: opts.sha, Title: opts.title, Body: opts.body, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
 }
 
 func cliEmptyAsNone(value string) string {

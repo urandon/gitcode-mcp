@@ -141,6 +141,21 @@ func (e ErrRemoteNotFound) Error() string {
 	return fmt.Sprintf("gitcode: %s for alias %s at %s", e.Message, e.Alias, e.Endpoint)
 }
 
+type ErrAPIValidation struct {
+	Endpoint string
+	Status   int
+	Message  string
+}
+
+func (e ErrAPIValidation) Error() string {
+	if e.Message == "" {
+		e.Message = "api validation failed"
+	}
+	return fmt.Sprintf("gitcode: api validation failed for %s: %s", e.Endpoint, e.Message)
+}
+
+func (e ErrAPIValidation) DiagnosticCode() string { return "api_validation" }
+
 type ErrPayloadTooLarge struct {
 	Endpoint string
 	Limit    int64

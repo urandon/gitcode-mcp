@@ -625,6 +625,8 @@ type WriteCommandRequest struct {
 	ID             string    `json:"id,omitempty"`
 	Number         int       `json:"number,omitempty"`
 	Slug           string    `json:"slug,omitempty"`
+	Path           string    `json:"path,omitempty"`
+	Sha            string    `json:"sha,omitempty"`
 	Title          string    `json:"title,omitempty"`
 	Body           string    `json:"body,omitempty"`
 	State          string    `json:"state,omitempty"`
