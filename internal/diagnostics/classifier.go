@@ -22,6 +22,7 @@ const (
 	CodeFixtureReadOnly         Code = "fixture_read_only"
 	CodeFixtureFallbackDetected Code = "fixture_fallback_detected"
 	CodeUnsupportedCapability   Code = "unsupported_capability"
+	CodeSchemaDecode            Code = "schema_decode"
 )
 
 type Diagnostic struct {
@@ -120,6 +121,9 @@ func classifyCode(err error, ctx CommandContext) Code {
 	if ctx.UnsupportedPayload || hasCode(err, "unsupported_mock_payload") || hasCode(err, "live_graph_invalid") || hasCode(err, "validation_failed") {
 		return CodeUnsupportedMockPayload
 	}
+	if hasCode(err, "schema_decode") {
+		return CodeSchemaDecode
+	}
 	if ctx.FixtureFallbackSentinel || hasCode(err, "fixture_fallback_detected") || hasCode(err, "write_fixture_fallback_detected") || hasCode(err, "fixture_read_only") || hasCode(err, "write_fixture_read_only") {
 		return CodeFixtureFallbackDetected
 	}
@@ -152,6 +156,8 @@ func codeFromError(err error) Code {
 			return CodeFixtureFallbackDetected
 		case "unsupported_capability":
 			return CodeUnsupportedCapability
+		case "schema_decode":
+			return CodeSchemaDecode
 		}
 	}
 	return CodeConfigurationError
@@ -226,6 +232,8 @@ func exitClassFor(code Code) string {
 		return "fixture"
 	case CodeUnsupportedCapability:
 		return "capability"
+	case CodeSchemaDecode:
+		return "schema"
 	default:
 		return "configuration"
 	}
@@ -254,6 +262,8 @@ func messageFor(code Code, err error) string {
 		base += ": live route reached fixture behavior"
 	case CodeUnsupportedCapability:
 		base += ": requested capability is not supported for this provider"
+	case CodeSchemaDecode:
+		base += ": response schema decode failure"
 	}
 	if err != nil {
 		return base + ": " + err.Error()

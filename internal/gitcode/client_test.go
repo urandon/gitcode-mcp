@@ -29,9 +29,11 @@ func TestScenario004ReadRouteContract(t *testing.T) {
 		}
 		switch r.URL.Path {
 		case "/api/v5/repos/example-owner/example-repo/issues":
-			fmt.Fprint(w, `[{"id":"MOCK-ISSUE-7","number":7,"title":"mock issue"}]`)
+			fmt.Fprint(w, `[{"id":"MOCK-ISSUE-7","number":7,"title":"mock issue"},{"id":8,"number":"8","title":"numeric id issue"}]`)
 		case "/api/v5/repos/example-owner/example-repo/issues/7":
 			fmt.Fprint(w, `{"id":"MOCK-ISSUE-7","number":7,"title":"mock issue","body":"mock body"}`)
+		case "/api/v5/repos/example-owner/example-repo/issues/8":
+			fmt.Fprint(w, `{"id":8,"number":"8","title":"numeric id issue","body":"numeric body"}`)
 		case "/api/v5/repos/example-owner/example-repo/issues/7/comments":
 			fmt.Fprint(w, `[{"id":"MOCK-COMMENT-1","issue_id":"MOCK-ISSUE-7","body":"mock comment"}]`)
 		case "/api/v5/repos/example-owner/example-repo.wiki/contents":
@@ -47,12 +49,22 @@ func TestScenario004ReadRouteContract(t *testing.T) {
 	defer server.Close()
 	client := newTestClient(t, server.URL, Config{Token: "selected-token"})
 	issues, err := client.ListIssues(context.Background(), IssueListRequest{Owner: "example-owner", Repo: "example-repo"})
-	if err != nil || len(issues.Items) != 1 || issues.Items[0].ID != "MOCK-ISSUE-7" {
+	if err != nil || len(issues.Items) != 2 {
 		t.Fatalf("unexpected issues page=%+v err=%v", issues, err)
+	}
+	if issues.Items[0].ID != "MOCK-ISSUE-7" || issues.Items[0].Number != 7 {
+		t.Fatalf("unexpected string-id issue: id=%q number=%d", issues.Items[0].ID, issues.Items[0].Number)
+	}
+	if issues.Items[1].ID != "8" || issues.Items[1].Number != 8 || issues.Items[1].Title != "numeric id issue" {
+		t.Fatalf("unexpected numeric-id issue: id=%q number=%d title=%q", issues.Items[1].ID, issues.Items[1].Number, issues.Items[1].Title)
 	}
 	issue, err := client.GetIssue(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 7})
 	if err != nil || issue.ID != "MOCK-ISSUE-7" {
 		t.Fatalf("unexpected issue=%+v err=%v", issue, err)
+	}
+	numericIssue, err := client.GetIssue(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 8})
+	if err != nil || numericIssue.ID != "8" || numericIssue.Number != 8 || numericIssue.Title != "numeric id issue" {
+		t.Fatalf("unexpected numeric issue=%+v err=%v", numericIssue, err)
 	}
 	comments, err := client.ListIssueComments(context.Background(), IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 7})
 	if err != nil || len(comments.Items) != 1 || comments.Items[0].ID != "MOCK-COMMENT-1" || comments.Items[0].IssueID != "MOCK-ISSUE-7" {

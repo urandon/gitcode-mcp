@@ -2,6 +2,7 @@ package gitcode
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -99,8 +100,15 @@ func (i *IssueSummary) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	i.ID = jsonScalarString(raw.ID)
-	i.Number = jsonScalarInt(raw.Number)
+	var err error
+	i.ID, err = decodeID(raw.ID)
+	if err != nil {
+		return err
+	}
+	i.Number, err = decodeNumber(raw.Number)
+	if err != nil {
+		return err
+	}
 	i.Title = raw.Title
 	i.Body = raw.Body
 	i.Status = raw.Status
@@ -110,7 +118,6 @@ func (i *IssueSummary) UnmarshalJSON(data []byte) error {
 			if err := json.Unmarshal(raw.Labels, &i.GitCodeLabels); err != nil {
 				return err
 			}
-			var err error
 			i.Labels, err = NormalizeLabels(i.GitCodeLabels)
 			if err != nil {
 				return err
@@ -158,8 +165,15 @@ func (i *Issue) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	i.ID = jsonScalarString(raw.ID)
-	i.Number = jsonScalarInt(raw.Number)
+	var err error
+	i.ID, err = decodeID(raw.ID)
+	if err != nil {
+		return err
+	}
+	i.Number, err = decodeNumber(raw.Number)
+	if err != nil {
+		return err
+	}
 	i.Title = raw.Title
 	i.Body = raw.Body
 	i.Status = raw.Status
@@ -169,7 +183,6 @@ func (i *Issue) UnmarshalJSON(data []byte) error {
 			if err := json.Unmarshal(raw.Labels, &i.GitCodeLabels); err != nil {
 				return err
 			}
-			var err error
 			i.Labels, err = NormalizeLabels(i.GitCodeLabels)
 			if err != nil {
 				return err
@@ -193,28 +206,42 @@ func isLabelObjectArray(raw json.RawMessage) bool {
 	return len(s) >= 2 && s[0] == '[' && s[1] == '{'
 }
 
-func jsonScalarString(value any) string {
+func decodeID(value any) (string, error) {
 	switch v := value.(type) {
 	case string:
-		return v
+		if v == "" || v == "0" {
+			return "", &ErrSchemaDecode{Field: "id", Message: "id must not be empty or zero"}
+		}
+		return v, nil
 	case float64:
-		return strconv.FormatInt(int64(v), 10)
+		if v == 0 {
+			return "", &ErrSchemaDecode{Field: "id", Message: "id must not be empty or zero"}
+		}
+		return strconv.FormatInt(int64(v), 10), nil
 	case nil:
-		return ""
+		return "", &ErrSchemaDecode{Field: "id", Message: "id is required"}
 	default:
-		return ""
+		return "", &ErrSchemaDecode{Field: "id", Message: fmt.Sprintf("unexpected id type %T", v)}
 	}
 }
 
-func jsonScalarInt(value any) int {
+func decodeNumber(value any) (int, error) {
 	switch v := value.(type) {
 	case float64:
-		return int(v)
+		return int(v), nil
 	case string:
-		n, _ := strconv.Atoi(v)
-		return n
+		if v == "" {
+			return 0, &ErrSchemaDecode{Field: "number", Message: "number is required"}
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return 0, &ErrSchemaDecode{Field: "number", Message: fmt.Sprintf("cannot parse number %q: %v", v, err)}
+		}
+		return n, nil
+	case nil:
+		return 0, &ErrSchemaDecode{Field: "number", Message: "number is required"}
 	default:
-		return 0
+		return 0, &ErrSchemaDecode{Field: "number", Message: fmt.Sprintf("unexpected number type %T", v)}
 	}
 }
 
