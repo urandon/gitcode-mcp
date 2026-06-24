@@ -179,6 +179,7 @@ Expected next behavior:
 - Capture a sanitized fixture for the live comment response shape.
 - Decode the real response shape or classify it as a provider compatibility gap with accurate `http_attempted:true`.
 - Confirm whether the remote comment was created before deciding cache-confirmation behavior on decode failure.
+- Fix credential resolution consistency for write commands. In this session `auth status --format json` reported `source: keychain` and `present: true`, but `add-comment --live --repo urandon/gitcode-mcp --number 1 ...` failed before HTTP with `config_credential` / missing `GITCODE_TOKEN or configured credential`. The issue was updated through direct `/api/v5/repos/urandon/gitcode-mcp/issues/1/comments` curl using the same Keychain token, so the credential itself was valid.
 
 ### 6. Cache lock contention appears under parallel reads
 
@@ -255,6 +256,7 @@ Blocking gaps:
 - Empty wiki initialization is not supported by the currently wired v5 wiki-as-repository path. `urandon/gitcode-mcp` fails sync/create first-page attempts with 400 until a page is created manually in the UI. After manual initialization, sync works but normalizes `Home.md` as `wiki/Home.md.md`, and `create-page` still fails write-confirmation decoding.
 - Live issue writes now return GitCode 400 for create/update. Likely cause: empty labels are serialized as `labels: []` even when the user did not request label mutation.
 - `add-comment --live` reaches the provider but fails response decoding as malformed JSON; diagnostics incorrectly report `http_attempted:false`.
+- `add-comment --live` can also fail credential resolution even while `auth status` sees the Keychain token; write commands need the same credential lookup path as auth/status/read probes.
 - Parallel read-style commands on one cache path can hit writer lock contention and surface as `internal_error`, which is risky for MCP tool-call concurrency.
 
 UX follow-ups:
