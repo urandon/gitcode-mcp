@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/service"
 )
 
@@ -67,6 +68,23 @@ func TestMCPRepoScopedDuplicateAlias(t *testing.T) {
 	}
 	r.Close()
 	wg.Wait()
+}
+
+func TestMCPErrorOutputCanonicalFailureClass(t *testing.T) {
+	var out bytes.Buffer
+	id := json.RawMessage(`"SCN-MCP-ERROR-OUTPUT-01"`)
+	srv := &Server{writer: &out, stderr: io.Discard}
+	srv.writeDomainError(&id, service.ErrSyncFailure{Mode: "live_auth_failure", Target: "issue:*", Cause: gitcode.ErrAuthExpired{Endpoint: "/api/v5/repos/owner/repo/issues", Status: http.StatusUnauthorized}})
+	var resp response
+	if err := json.Unmarshal(bytesTrimSpace(out.Bytes()), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%q", err, out.String())
+	}
+	if resp.Error == nil || resp.Error.Data == nil {
+		t.Fatalf("response missing error data: %#v", resp)
+	}
+	if resp.Error.Data.FailureClass != "api_validation" {
+		t.Fatalf("failure_class=%q want api_validation body=%q", resp.Error.Data.FailureClass, out.String())
+	}
 }
 
 func TestIntegration(t *testing.T) {

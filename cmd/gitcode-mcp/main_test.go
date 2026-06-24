@@ -241,12 +241,12 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 		if counts := server.Counts(); counts.TotalRequests != 0 {
 			t.Fatalf("mock counts=%#v, want zero", counts)
 		}
-		if !strings.Contains(stderr.String(), "missing_credential") {
-			t.Fatalf("stderr missing typed diagnostic: %q", stderr.String())
+		if !strings.Contains(stderr.String(), "failure_class: config_credential") {
+			t.Fatalf("stderr missing canonical failure class: %q", stderr.String())
 		}
 	})
 
-	t.Run("SCN-MOCKAPI-LIVE-SYNC-INVALID-TOKEN-401", func(t *testing.T) {
+	t.Run("SCN-MOCKAPI-LIVE-SYNC-INVALID-TOKEN-401 SCN-CLI-ERROR-OUTPUT-01", func(t *testing.T) {
 		server := NewMockGitCodeAPI(t, MockGitCodeAPIAuthMode(mockGitCodeAPIAuthReject401))
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
@@ -264,7 +264,7 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 			t.Fatalf("mock counts=%#v, want auth failure after request", counts)
 		}
 		out := stdout.String() + stderr.String()
-		if !strings.Contains(out, "live_auth_failure") || strings.Contains(out, "ISSUE-42") || strings.Contains(out, "WIKI-HOME") {
+		if !strings.Contains(out, "failure_class: api_validation") || strings.Contains(out, "ISSUE-42") || strings.Contains(out, "WIKI-HOME") {
 			t.Fatalf("invalid-token output = %q", out)
 		}
 	})

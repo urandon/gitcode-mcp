@@ -13,6 +13,7 @@ type Code string
 
 const (
 	CodeMissingCredential       Code = "missing_credential"
+	CodeConfigCredential        Code = "config_credential"
 	CodeLiveAuthFailure         Code = "live_auth_failure"
 	CodeLiveTransportFailure    Code = "live_transport_failure"
 	CodeLiveAPIFailure          Code = "live_api_failure"
@@ -23,6 +24,7 @@ const (
 	CodeFixtureFallbackDetected Code = "fixture_fallback_detected"
 	CodeUnsupportedCapability   Code = "unsupported_capability"
 	CodeSchemaDecode            Code = "schema_decode"
+	CodeAPIFailure              Code = "api_validation"
 )
 
 type Diagnostic struct {
@@ -56,6 +58,10 @@ type CommandContext struct {
 	FixtureReadOnly             bool
 	TransportFailure            bool
 	APIFailure                  bool
+	SchemaDecodeFailure         bool
+	MalformedSuccess            bool
+	LocalPayloadTooLarge        bool
+	FailureSource               string
 }
 
 type Classifier struct {
@@ -101,28 +107,49 @@ func classifyCode(err error, ctx CommandContext) Code {
 		return codeFromError(err)
 	}
 	if ctx.BroaderConfigurationInvalid || hasCode(err, "configuration_error") || isConfigurationInputBug(err) {
-		return CodeConfigurationError
+		return CodeConfigCredential
 	}
 	if ctx.MissingCredential || hasCode(err, "missing_credential") || hasCode(err, "write_missing_credential") {
-		return CodeMissingCredential
+		return CodeConfigCredential
 	}
 	if ctx.InvalidSelectedAPIBaseURL || hasCode(err, "invalid_api_base_url") {
-		return CodeInvalidAPIBaseURL
+		return CodeConfigCredential
 	}
 	if (ctx.HTTPStatus == http.StatusUnauthorized || ctx.HTTPStatus == http.StatusForbidden || hasCode(err, "live_auth_failure") || hasCode(err, "auth_expired") || hasCode(err, "forbidden") || hasCode(err, "write_unauthorized")) && ctx.HTTPAttempted {
-		return CodeLiveAuthFailure
+		return CodeAPIFailure
+	}
+	if hasCode(err, "auth_expired") || hasCode(err, "forbidden") || hasCode(err, "write_unauthorized") || hasCode(err, "live_auth_failure") {
+		return CodeConfigCredential
+	}
+	if ctx.HTTPStatus >= 200 && ctx.HTTPStatus <= 299 && (ctx.SchemaDecodeFailure || ctx.MalformedSuccess || hasCode(err, "schema_decode")) {
+		return CodeSchemaDecode
+	}
+	if ctx.HTTPStatus >= 400 && ctx.HTTPStatus <= 499 && ctx.HTTPStatus != http.StatusUnauthorized && ctx.HTTPStatus != http.StatusForbidden && ctx.HTTPAttempted {
+		return CodeAPIFailure
+	}
+	if ctx.FailureSource == "remote_status" && ctx.HTTPAttempted {
+		return CodeAPIFailure
+	}
+	if (ctx.APIFailure || hasCode(err, "live_api_failure") || hasCode(err, "write_provider_error")) && ctx.HTTPAttempted {
+		return CodeAPIFailure
+	}
+	if hasCode(err, "api_validation") && ctx.HTTPAttempted {
+		return CodeAPIFailure
+	}
+	if ctx.LocalPayloadTooLarge || ctx.FailureSource == "local_body_limit" || ctx.FailureSource == "local_decode_boundary" || ctx.FailureSource == "partial_response" || hasCode(err, "partial_response") || hasCode(err, "unsupported_mock_payload") || hasCode(err, "live_graph_invalid") || hasCode(err, "validation_failed") {
+		return CodeSchemaDecode
+	}
+	if ctx.UnsupportedPayload || hasCode(err, "unsupported_mock_payload") || hasCode(err, "live_graph_invalid") || hasCode(err, "validation_failed") {
+		return CodeSchemaDecode
+	}
+	if hasCode(err, "schema_decode") {
+		return CodeSchemaDecode
 	}
 	if (ctx.TransportFailure || hasCode(err, "live_transport_failure") || hasCode(err, "network_unavailable") || hasCode(err, "write_network_unavailable")) && ctx.HTTPAttempted {
 		return CodeLiveTransportFailure
 	}
-	if (ctx.APIFailure || isNonAuthHTTPStatus(ctx.HTTPStatus) || hasCode(err, "live_api_failure") || hasCode(err, "write_provider_error")) && ctx.HTTPAttempted {
-		return CodeLiveAPIFailure
-	}
-	if ctx.UnsupportedPayload || hasCode(err, "unsupported_mock_payload") || hasCode(err, "live_graph_invalid") || hasCode(err, "validation_failed") {
-		return CodeUnsupportedMockPayload
-	}
-	if hasCode(err, "schema_decode") {
-		return CodeSchemaDecode
+	if ctx.HTTPStatus >= 500 && ctx.HTTPAttempted {
+		return CodeLiveTransportFailure
 	}
 	if ctx.FixtureFallbackSentinel || hasCode(err, "fixture_fallback_detected") || hasCode(err, "write_fixture_fallback_detected") || hasCode(err, "fixture_read_only") || hasCode(err, "write_fixture_read_only") {
 		return CodeFixtureFallbackDetected
@@ -139,17 +166,17 @@ func codeFromError(err error) Code {
 		case "missing_credential":
 			return CodeMissingCredential
 		case "live_auth_failure":
-			return CodeLiveAuthFailure
+			return CodeAPIFailure
 		case "live_transport_failure", "network_unavailable", "write_network_unavailable":
 			return CodeLiveTransportFailure
 		case "live_api_failure", "write_provider_error":
-			return CodeLiveAPIFailure
+			return CodeAPIFailure
 		case "configuration_error":
 			return CodeConfigurationError
 		case "invalid_api_base_url":
 			return CodeInvalidAPIBaseURL
 		case "unsupported_mock_payload", "live_graph_invalid", "validation_failed":
-			return CodeUnsupportedMockPayload
+			return CodeSchemaDecode
 		case "fixture_read_only", "write_fixture_read_only":
 			return CodeFixtureReadOnly
 		case "fixture_fallback_detected", "write_fixture_fallback_detected":
@@ -158,6 +185,8 @@ func codeFromError(err error) Code {
 			return CodeUnsupportedCapability
 		case "schema_decode":
 			return CodeSchemaDecode
+		case "auth_expired", "forbidden", "write_unauthorized":
+			return CodeAPIFailure
 		}
 	}
 	return CodeConfigurationError
@@ -201,14 +230,12 @@ func isConfigurationInputBug(err error) bool {
 	return false
 }
 
-func isNonAuthHTTPStatus(status int) bool {
-	return status >= 400 && status != http.StatusUnauthorized && status != http.StatusForbidden
-}
-
 func httpAttemptedFor(code Code, ctx CommandContext) bool {
 	switch code {
-	case CodeLiveAuthFailure, CodeLiveTransportFailure, CodeLiveAPIFailure:
+	case CodeLiveAuthFailure, CodeLiveTransportFailure, CodeLiveAPIFailure, CodeAPIFailure:
 		return ctx.HTTPAttempted
+	case CodeConfigCredential:
+		return false
 	default:
 		return false
 	}
@@ -222,9 +249,11 @@ func exitClassFor(code Code) string {
 	switch code {
 	case CodeMissingCredential, CodeLiveAuthFailure:
 		return "auth"
+	case CodeConfigCredential:
+		return "configuration"
 	case CodeLiveTransportFailure:
 		return "transport"
-	case CodeLiveAPIFailure:
+	case CodeLiveAPIFailure, CodeAPIFailure:
 		return "provider"
 	case CodeUnsupportedMockPayload:
 		return "payload"
@@ -244,12 +273,16 @@ func messageFor(code Code, err error) string {
 	switch code {
 	case CodeMissingCredential:
 		base += ": live provider requires a configured credential"
+	case CodeConfigCredential:
+		base += ": live provider requires valid configuration and credential"
 	case CodeLiveAuthFailure:
 		base += ": live provider rejected credentials"
 	case CodeLiveTransportFailure:
 		base += ": live provider request failed before a valid API response"
 	case CodeLiveAPIFailure:
 		base += ": live provider returned an API failure"
+	case CodeAPIFailure:
+		base += ": live provider returned an API validation failure"
 	case CodeConfigurationError:
 		base += ": live command configuration is invalid"
 	case CodeInvalidAPIBaseURL:

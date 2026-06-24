@@ -19,6 +19,7 @@ type ErrSyncFailure struct {
 	GotBytes       int64
 	LimitBytes     int64
 	SizeBytes      int64
+	PayloadSource  string
 	Alias          string
 	ExistingID     string
 	NewID          string

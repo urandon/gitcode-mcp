@@ -382,6 +382,8 @@ func (e ResourceError) Error() string {
 	return e.Message
 }
 
+func (e ResourceError) Unwrap() error { return e.Err }
+
 type PartialSyncError struct {
 	Errors       []ResourceError `json:"errors"`
 	SuccessCount int             `json:"success_count"`
@@ -390,6 +392,16 @@ type PartialSyncError struct {
 
 func (e PartialSyncError) Error() string {
 	return fmt.Sprintf("sync: %d succeeded, %d failed", e.SuccessCount, e.FailureCount)
+}
+
+func (e PartialSyncError) Unwrap() []error {
+	out := make([]error, 0, len(e.Errors))
+	for _, resourceErr := range e.Errors {
+		if resourceErr.Err != nil {
+			out = append(out, resourceErr.Err)
+		}
+	}
+	return out
 }
 
 type RecentChangesRequest struct {

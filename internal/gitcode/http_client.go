@@ -732,12 +732,12 @@ func (c *HTTPClient) do(ctx context.Context, method, endpoint string, values url
 
 func (c *HTTPClient) readBounded(resp *http.Response, endpoint string) ([]byte, error) {
 	if resp.ContentLength > c.maxResponseSize {
-		return nil, ErrPayloadTooLarge{Endpoint: endpoint, Limit: c.maxResponseSize, Size: resp.ContentLength}
+		return nil, ErrPayloadTooLarge{Endpoint: endpoint, Limit: c.maxResponseSize, Size: resp.ContentLength, Source: "remote_status"}
 	}
 	limit := c.maxResponseSize + 1
 	body, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if int64(len(body)) > c.maxResponseSize {
-		return nil, ErrPayloadTooLarge{Endpoint: endpoint, Limit: c.maxResponseSize, Size: int64(len(body))}
+		return nil, ErrPayloadTooLarge{Endpoint: endpoint, Limit: c.maxResponseSize, Size: int64(len(body)), Source: "local_body_limit"}
 	}
 	if err != nil {
 		if errors.Is(err, io.ErrUnexpectedEOF) {
@@ -765,6 +765,8 @@ func (c *HTTPClient) statusError(status int, endpoint string, body []byte, opts 
 		return ErrNotFound{Endpoint: endpoint, Message: msg}
 	case http.StatusConflict:
 		return ErrConflict{Endpoint: endpoint, Status: status, LocalPayload: append([]byte(nil), opts.localPayload...), RemotePayload: RedactJSONBody(body), Message: msg}
+	case http.StatusRequestEntityTooLarge:
+		return ErrPayloadTooLarge{Endpoint: endpoint, Limit: c.maxResponseSize, Size: int64(len(body)), Source: "remote_status"}
 	default:
 		if status >= 400 && status <= 499 {
 			return ErrAPIValidation{Endpoint: endpoint, Status: status, Message: msg}

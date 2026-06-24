@@ -1846,7 +1846,7 @@ func (s *Service) normalizeSyncFailure(err error, req SyncRequest, remoteType, r
 	}
 	var tooLarge gitcode.ErrPayloadTooLarge
 	if errors.As(err, &tooLarge) {
-		return ErrSyncFailure{Mode: "payload_too_large", Target: target, Endpoint: tooLarge.Endpoint, LimitBytes: tooLarge.Limit, SizeBytes: tooLarge.Size, RecoveryAction: "increase --max-size or skip with --skip-large", Cause: err}
+		return ErrSyncFailure{Mode: "payload_too_large", Target: target, Endpoint: tooLarge.Endpoint, LimitBytes: tooLarge.Limit, SizeBytes: tooLarge.Size, PayloadSource: tooLarge.Source, RecoveryAction: "increase --max-size or skip with --skip-large", Cause: err}
 	}
 	var conflict gitcode.ErrConflict
 	if errors.As(err, &conflict) {

@@ -160,8 +160,11 @@ type ErrPayloadTooLarge struct {
 	Endpoint string
 	Limit    int64
 	Size     int64
+	Source   string
 }
 
 func (e ErrPayloadTooLarge) Error() string {
 	return fmt.Sprintf("gitcode: response for %s exceeds maximum size %d bytes", e.Endpoint, e.Limit)
 }
+
+func (e ErrPayloadTooLarge) FailureSource() string { return e.Source }

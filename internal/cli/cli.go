@@ -1217,11 +1217,59 @@ func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {
 		ctx.HTTPAttempted = writeErr.Code == "write_unauthorized" || writeErr.Code == "write_network_unavailable" || writeErr.Code == "write_provider_error" || writeErr.Code == "write_conflict"
 		ctx.FixtureFallbackSentinel = writeErr.Code == "write_fixture_fallback_detected"
 		ctx.MissingCredential = writeErr.Code == "write_missing_credential"
+		ctx.UnsupportedPayload = writeErr.Code == "live_graph_invalid" || writeErr.Code == "unsupported_mock_payload"
+		ctx.SchemaDecodeFailure = writeErr.Code == "schema_decode"
 	}
 	var syncErr service.ErrSyncFailure
 	if errors.As(err, &syncErr) {
-		ctx.HTTPAttempted = syncErr.Mode == "live_auth_failure" || syncErr.Mode == "network_timeout" || syncErr.Mode == "rate_limited" || syncErr.Mode == "partial_response" || syncErr.Mode == "live_graph_invalid"
+		ctx.HTTPAttempted = syncErr.Mode == "live_auth_failure" || syncErr.Mode == "network_timeout" || syncErr.Mode == "rate_limited" || syncErr.Mode == "partial_response" || syncErr.Mode == "live_graph_invalid" || syncErr.Mode == "payload_too_large" || syncErr.Mode == "remote_not_found" || syncErr.Mode == "conflict"
 		ctx.UnsupportedPayload = syncErr.Mode == "live_graph_invalid"
+		ctx.PayloadSource = syncErr.PayloadSource
+		ctx.FailureSource = syncErr.PayloadSource
+		ctx.LocalPayloadTooLarge = syncErr.Mode == "payload_too_large" && syncErr.PayloadSource == "local_body_limit"
+		ctx.SchemaDecodeFailure = syncErr.Mode == "partial_response" || syncErr.Mode == "schema_decode"
+		if syncErr.Mode == "partial_response" {
+			ctx.FailureSource = "partial_response"
+		}
+	}
+	var apiValidation gitcode.ErrAPIValidation
+	if errors.As(err, &apiValidation) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = apiValidation.Status
+		ctx.APIFailure = true
+	}
+	var network gitcode.ErrNetworkUnavailable
+	if errors.As(err, &network) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = network.Status
+		ctx.TransportFailure = true
+	}
+	var auth gitcode.ErrAuthExpired
+	if errors.As(err, &auth) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = auth.Status
+	}
+	var forbidden gitcode.ErrForbidden
+	if errors.As(err, &forbidden) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = forbidden.Status
+	}
+	var tooLarge gitcode.ErrPayloadTooLarge
+	if errors.As(err, &tooLarge) {
+		ctx.HTTPAttempted = true
+		ctx.FailureSource = tooLarge.Source
+		ctx.LocalPayloadTooLarge = tooLarge.Source == "local_body_limit"
+	}
+	var partial gitcode.ErrPartialResponse
+	if errors.As(err, &partial) {
+		ctx.HTTPAttempted = true
+		ctx.FailureSource = "partial_response"
+		ctx.SchemaDecodeFailure = true
+	}
+	var schema *gitcode.ErrSchemaDecode
+	if errors.As(err, &schema) {
+		ctx.HTTPAttempted = true
+		ctx.SchemaDecodeFailure = true
 	}
 	return ctx
 }
