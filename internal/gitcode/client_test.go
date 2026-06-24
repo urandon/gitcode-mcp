@@ -1176,3 +1176,175 @@ func TestScenario010BrowserRouteExclusion(t *testing.T) {
 		t.Fatalf("browser web-api routes were hit %d times", webAPIHits)
 	}
 }
+
+func TestLabel010IssueResponseObjects(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues" {
+			fmt.Fprint(w, `[{"id":"1","number":1,"title":"Test","labels":[{"id":1,"name":"bug","color":"#FF0000"},{"id":2,"name":"enhancement","color":"#00FF00"}]}]`)
+			return
+		}
+		t.Fatalf("unexpected path %s", r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	issues, err := client.ListIssues(context.Background(), IssueListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if err != nil {
+		t.Fatalf("ListIssues error: %v", err)
+	}
+	if len(issues.Items) != 1 {
+		t.Fatalf("expected 1 issue, got %d", len(issues.Items))
+	}
+	issue := issues.Items[0]
+	if len(issue.Labels) != 2 || issue.Labels[0] != "bug" || issue.Labels[1] != "enhancement" {
+		t.Fatalf("Labels: got %v, want [bug enhancement]", issue.Labels)
+	}
+	if len(issue.GitCodeLabels) != 2 || issue.GitCodeLabels[0].ID != 1 || issue.GitCodeLabels[0].Name != "bug" {
+		t.Fatalf("GitCodeLabels: got %+v", issue.GitCodeLabels)
+	}
+}
+
+func TestLabel011CreateRequestLabelString(t *testing.T) {
+	var sawLabelsRaw json.RawMessage
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues" {
+			var raw struct {
+				Labels json.RawMessage `json:"labels"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			sawLabelsRaw = raw.Labels
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":"ISSUE-100","number":100,"title":"created"}`)
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	encodedLabels := EncodeIssueLabels([]string{"bug", "enhancement"})
+	result, err := client.CreateIssue(context.Background(), CreateIssueRequest{
+		Owner:  "example-owner",
+		Repo:   "example-repo",
+		Title:  "Test Issue",
+		Labels: encodedLabels,
+	}, WriteOptions{IdempotencyKey: "key-011"})
+	if err != nil {
+		t.Fatalf("CreateIssue error: %v", err)
+	}
+	if !result.Confirmed {
+		t.Fatal("expected confirmed result")
+	}
+	if len(sawLabelsRaw) == 0 {
+		t.Fatal("labels field not found in request body")
+	}
+	if sawLabelsRaw[0] != '"' {
+		t.Fatalf("labels is not a JSON string: %s", string(sawLabelsRaw))
+	}
+	var labelsStr string
+	if err := json.Unmarshal(sawLabelsRaw, &labelsStr); err != nil {
+		t.Fatalf("labels is not a valid JSON string: %s, err=%v", string(sawLabelsRaw), err)
+	}
+	var decoded []string
+	if err := json.Unmarshal([]byte(labelsStr), &decoded); err != nil {
+		t.Fatalf("labels string is not a valid array: %s, err=%v", labelsStr, err)
+	}
+	if len(decoded) != 2 || decoded[0] != "bug" || decoded[1] != "enhancement" {
+		t.Fatalf("labels content: got %v, want [bug enhancement]", decoded)
+	}
+}
+
+func TestLabel012CreateRequestEmptyLabels(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues" {
+			var raw struct {
+				Labels json.RawMessage `json:"labels"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			if len(raw.Labels) > 0 && string(raw.Labels) != `"[]"` {
+				t.Fatalf("empty labels: expected \"[]\", got %s", string(raw.Labels))
+			}
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":"ISSUE-200","number":200,"title":"no labels"}`)
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	encodedLabels := EncodeIssueLabels([]string{})
+	result, err := client.CreateIssue(context.Background(), CreateIssueRequest{
+		Owner:  "example-owner",
+		Repo:   "example-repo",
+		Title:  "No Labels",
+		Labels: encodedLabels,
+	}, WriteOptions{IdempotencyKey: "key-012"})
+	if err != nil {
+		t.Fatalf("CreateIssue error: %v", err)
+	}
+	if !result.Confirmed {
+		t.Fatal("expected confirmed result")
+	}
+}
+
+func TestLabel013ArrayLabelsRejected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues" {
+			var raw struct {
+				Labels json.RawMessage `json:"labels"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			if len(raw.Labels) > 0 && raw.Labels[0] == '[' {
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprint(w, `{"message":"labels must be a JSON string, not an array"}`)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":"ISSUE-300","number":300,"title":"accepted"}`)
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+
+	t.Run("array labels rejected", func(t *testing.T) {
+		body := map[string]interface{}{
+			"title":  "Bad Labels",
+			"labels": []string{"bug"},
+			"owner":  "example-owner",
+			"repo":   "example-repo",
+		}
+		bodyBytes, _ := json.Marshal(body)
+		req, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v5/repos/example-owner/example-repo/issues", strings.NewReader(string(bodyBytes)))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("http request failed: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400 for array labels, got %d", resp.StatusCode)
+		}
+	})
+
+	t.Run("string labels via DTO accepted", func(t *testing.T) {
+		encoded := EncodeIssueLabels([]string{"bug"})
+		result, err := client.CreateIssue(context.Background(), CreateIssueRequest{
+			Owner:  "example-owner",
+			Repo:   "example-repo",
+			Title:  "Good Labels",
+			Labels: encoded,
+		}, WriteOptions{IdempotencyKey: "key-013-str"})
+		if err != nil {
+			t.Fatalf("CreateIssue with string labels failed: %v", err)
+		}
+		if !result.Confirmed {
+			t.Fatal("expected confirmed result for string labels")
+		}
+	})
+}

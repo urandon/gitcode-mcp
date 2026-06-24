@@ -74,6 +74,30 @@ func (e ErrValidationFailed) Error() string {
 
 func (e ErrValidationFailed) DiagnosticCode() string { return "validation_failed" }
 
+type ErrSchemaDecode struct {
+	Field    string
+	Expected string
+	Received string
+	Message  string
+}
+
+func (e ErrSchemaDecode) Error() string {
+	msg := e.Message
+	if msg == "" {
+		msg = "schema decode failure"
+	}
+	if e.Field == "" {
+		return "gitcode: " + msg
+	}
+	result := fmt.Sprintf("gitcode: schema decode failure for %s", e.Field)
+	if e.Expected != "" && e.Received != "" {
+		result += fmt.Sprintf(": expected %s, received %s", e.Expected, e.Received)
+	}
+	return result
+}
+
+func (e ErrSchemaDecode) DiagnosticCode() string { return "schema_decode" }
+
 type ErrPaginationMalformed struct {
 	Endpoint string
 	State    PageState

@@ -3,6 +3,7 @@ package gitcode
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -62,29 +63,38 @@ type Page[T any] struct {
 	NextPage   int
 }
 
+type GitCodeLabel struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Color     string `json:"color"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
 type IssueSummary struct {
-	ID        string    `json:"id"`
-	Number    int       `json:"number"`
-	Title     string    `json:"title"`
-	Body      string    `json:"body"`
-	Status    string    `json:"status"`
-	State     string    `json:"state"`
-	Labels    []string  `json:"labels"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID           string         `json:"id"`
+	Number       int            `json:"number"`
+	Title        string         `json:"title"`
+	Body         string         `json:"body"`
+	Status       string         `json:"status"`
+	State        string         `json:"state"`
+	GitCodeLabels []GitCodeLabel `json:"labels"`
+	Labels       []string       `json:"-"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
 }
 
 func (i *IssueSummary) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		ID        any       `json:"id"`
-		Number    any       `json:"number"`
-		Title     string    `json:"title"`
-		Body      string    `json:"body"`
-		Status    string    `json:"status"`
-		State     string    `json:"state"`
-		Labels    []string  `json:"labels"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
+		ID        any             `json:"id"`
+		Number    any             `json:"number"`
+		Title     string          `json:"title"`
+		Body      string          `json:"body"`
+		Status    string          `json:"status"`
+		State     string          `json:"state"`
+		Labels    json.RawMessage `json:"labels"`
+		CreatedAt time.Time       `json:"created_at"`
+		UpdatedAt time.Time       `json:"updated_at"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -95,37 +105,55 @@ func (i *IssueSummary) UnmarshalJSON(data []byte) error {
 	i.Body = raw.Body
 	i.Status = raw.Status
 	i.State = raw.State
-	i.Labels = raw.Labels
+	if len(raw.Labels) > 0 {
+		if isLabelObjectArray(raw.Labels) {
+			if err := json.Unmarshal(raw.Labels, &i.GitCodeLabels); err != nil {
+				return err
+			}
+			var err error
+			i.Labels, err = NormalizeLabels(i.GitCodeLabels)
+			if err != nil {
+				return err
+			}
+		} else {
+			var strs []string
+			if err := json.Unmarshal(raw.Labels, &strs); err != nil {
+				return err
+			}
+			i.Labels = strs
+		}
+	}
 	i.CreatedAt = raw.CreatedAt
 	i.UpdatedAt = raw.UpdatedAt
 	return nil
 }
 
 type Issue struct {
-	ID        string    `json:"id"`
-	Number    int       `json:"number"`
-	Title     string    `json:"title"`
-	Body      string    `json:"body"`
-	Status    string    `json:"status"`
-	State     string    `json:"state"`
-	Labels    []string  `json:"labels"`
-	Author    string    `json:"author"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID           string         `json:"id"`
+	Number       int            `json:"number"`
+	Title        string         `json:"title"`
+	Body         string         `json:"body"`
+	Status       string         `json:"status"`
+	State        string         `json:"state"`
+	GitCodeLabels []GitCodeLabel `json:"labels"`
+	Labels       []string       `json:"-"`
+	Author       string         `json:"author"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
 }
 
 func (i *Issue) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		ID        any       `json:"id"`
-		Number    any       `json:"number"`
-		Title     string    `json:"title"`
-		Body      string    `json:"body"`
-		Status    string    `json:"status"`
-		State     string    `json:"state"`
-		Labels    []string  `json:"labels"`
-		Author    string    `json:"author"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
+		ID        any             `json:"id"`
+		Number    any             `json:"number"`
+		Title     string          `json:"title"`
+		Body      string          `json:"body"`
+		Status    string          `json:"status"`
+		State     string          `json:"state"`
+		Labels    json.RawMessage `json:"labels"`
+		Author    string          `json:"author"`
+		CreatedAt time.Time       `json:"created_at"`
+		UpdatedAt time.Time       `json:"updated_at"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -136,11 +164,33 @@ func (i *Issue) UnmarshalJSON(data []byte) error {
 	i.Body = raw.Body
 	i.Status = raw.Status
 	i.State = raw.State
-	i.Labels = raw.Labels
+	if len(raw.Labels) > 0 {
+		if isLabelObjectArray(raw.Labels) {
+			if err := json.Unmarshal(raw.Labels, &i.GitCodeLabels); err != nil {
+				return err
+			}
+			var err error
+			i.Labels, err = NormalizeLabels(i.GitCodeLabels)
+			if err != nil {
+				return err
+			}
+		} else {
+			var strs []string
+			if err := json.Unmarshal(raw.Labels, &strs); err != nil {
+				return err
+			}
+			i.Labels = strs
+		}
+	}
 	i.Author = raw.Author
 	i.CreatedAt = raw.CreatedAt
 	i.UpdatedAt = raw.UpdatedAt
 	return nil
+}
+
+func isLabelObjectArray(raw json.RawMessage) bool {
+	s := strings.TrimSpace(string(raw))
+	return len(s) >= 2 && s[0] == '[' && s[1] == '{'
 }
 
 func jsonScalarString(value any) string {
@@ -242,21 +292,21 @@ type WriteResult[T any] struct {
 }
 
 type CreateIssueRequest struct {
-	Owner  string   `json:"-"`
-	Repo   string   `json:"-"`
-	Title  string   `json:"title"`
-	Body   string   `json:"body,omitempty"`
-	Labels []string `json:"labels,omitempty"`
+	Owner  string `json:"-"`
+	Repo   string `json:"-"`
+	Title  string `json:"title"`
+	Body   string `json:"body,omitempty"`
+	Labels string `json:"labels,omitempty"`
 }
 
 type UpdateIssueRequest struct {
-	Owner  string   `json:"-"`
-	Repo   string   `json:"-"`
-	Number int      `json:"-"`
-	Title  string   `json:"title,omitempty"`
-	Body   string   `json:"body,omitempty"`
-	State  string   `json:"state,omitempty"`
-	Labels []string `json:"labels,omitempty"`
+	Owner  string `json:"-"`
+	Repo   string `json:"-"`
+	Number int    `json:"-"`
+	Title  string `json:"title,omitempty"`
+	Body   string `json:"body,omitempty"`
+	State  string `json:"state,omitempty"`
+	Labels string `json:"labels,omitempty"`
 }
 
 type CreateIssueCommentRequest struct {

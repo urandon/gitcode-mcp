@@ -2062,14 +2062,14 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 	now := s.now().UTC()
 	switch command {
 	case "create-issue":
-		result, err := s.client.CreateIssue(ctx, gitcode.CreateIssueRequest{Owner: route.Owner, Repo: route.Name, Title: strings.TrimSpace(req.Title), Body: req.Body, Labels: req.Labels}, opts)
+		result, err := s.client.CreateIssue(ctx, gitcode.CreateIssueRequest{Owner: route.Owner, Repo: route.Name, Title: strings.TrimSpace(req.Title), Body: req.Body, Labels: gitcode.EncodeIssueLabels(req.Labels)}, opts)
 		if err != nil {
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
 		confirmation, graph := s.issueWriteGraph(route.RepoID, result.Record, result, now)
 		return confirmation, graph, nil
 	case "update-issue":
-		result, err := s.client.UpdateIssue(ctx, gitcode.UpdateIssueRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, Title: req.Title, Body: req.Body, State: req.State, Labels: req.Labels}, opts)
+		result, err := s.client.UpdateIssue(ctx, gitcode.UpdateIssueRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, Title: req.Title, Body: req.Body, State: req.State, Labels: gitcode.EncodeIssueLabels(req.Labels)}, opts)
 		if err != nil {
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}

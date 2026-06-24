@@ -1,0 +1,22 @@
+{
+  "task_id": "004-label-normalizer-task-1-add-gitcodelabel-normalizer",
+  "covered_outcome_ids": ["outcome-3", "outcome-7", "outcome-10"],
+  "covered_decommission_ids": ["decommission-2"],
+  "product_surfaces": [
+    "CLI issue create",
+    "CLI issue update",
+    "GitCode live adapter issue sync",
+    "GitCode live adapter issue create"
+  ],
+  "evidence_type": "local command",
+  "freshness": "Current local command output from implementation branch",
+  "mocks_used": ["httptest.Server for GitCode /api/v5 routes"],
+  "production_files_modified": [
+    "internal/gitcode/label_normalizer.go",
+    "internal/gitcode/label_normalizer_test.go",
+    "internal/gitcode/models.go",
+    "internal/gitcode/provider_errors.go",
+    "internal/gitcode/client_test.go",
+    "internal/service/service.go"
+  ]
+}
