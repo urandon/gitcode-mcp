@@ -35,6 +35,8 @@ func (e ErrRateLimited) Error() string {
 	return fmt.Sprintf("gitcode: rate limited for %s after %d attempt(s): retry after %s", e.Endpoint, e.Attempts, e.RetryAfter)
 }
 
+func (e ErrRateLimited) DiagnosticCode() string { return "rate_limited" }
+
 type ErrAuthExpired struct {
 	Endpoint string
 	Status   int
@@ -82,6 +84,8 @@ func (e ErrNotFound) Error() string {
 	return fmt.Sprintf("gitcode: %s at %s", e.Message, e.Endpoint)
 }
 
+func (e ErrNotFound) DiagnosticCode() string { return "not_found" }
+
 type ErrConflict struct {
 	Endpoint      string
 	Status        int
@@ -96,6 +100,8 @@ func (e ErrConflict) Error() string {
 	}
 	return fmt.Sprintf("gitcode: conflict for %s: %s", e.Endpoint, e.Message)
 }
+
+func (e ErrConflict) DiagnosticCode() string { return "remote_conflict" }
 
 type ErrPartialResponse struct {
 	Endpoint string
@@ -117,6 +123,8 @@ func (e ErrPartialResponse) Error() string {
 
 func (e ErrPartialResponse) Unwrap() error { return e.Cause }
 
+func (e ErrPartialResponse) DiagnosticCode() string { return "partial_response" }
+
 type ErrRemoteCollision struct {
 	Alias      string
 	ExistingID string
@@ -127,6 +135,8 @@ type ErrRemoteCollision struct {
 func (e ErrRemoteCollision) Error() string {
 	return fmt.Sprintf("gitcode: remote id %s already maps to %s; cannot map to %s", e.Alias, e.ExistingID, e.NewID)
 }
+
+func (e ErrRemoteCollision) DiagnosticCode() string { return "remote_collision" }
 
 type ErrRemoteNotFound struct {
 	Endpoint string
@@ -140,6 +150,8 @@ func (e ErrRemoteNotFound) Error() string {
 	}
 	return fmt.Sprintf("gitcode: %s for alias %s at %s", e.Message, e.Alias, e.Endpoint)
 }
+
+func (e ErrRemoteNotFound) DiagnosticCode() string { return "remote_not_found" }
 
 type ErrAPIValidation struct {
 	Endpoint string
@@ -166,5 +178,7 @@ type ErrPayloadTooLarge struct {
 func (e ErrPayloadTooLarge) Error() string {
 	return fmt.Sprintf("gitcode: response for %s exceeds maximum size %d bytes", e.Endpoint, e.Limit)
 }
+
+func (e ErrPayloadTooLarge) DiagnosticCode() string { return "payload_too_large" }
 
 func (e ErrPayloadTooLarge) FailureSource() string { return e.Source }

@@ -106,7 +106,7 @@ func classifyCode(err error, ctx CommandContext) Code {
 		}
 		return codeFromError(err)
 	}
-	if ctx.BroaderConfigurationInvalid || hasCode(err, "configuration_error") || isConfigurationInputBug(err) {
+	if ctx.BroaderConfigurationInvalid || hasCode(err, "configuration_error") || (!ctx.HTTPAttempted && isConfigurationInputBug(err)) {
 		return CodeConfigCredential
 	}
 	if ctx.MissingCredential || hasCode(err, "missing_credential") || hasCode(err, "write_missing_credential") {
@@ -133,7 +133,7 @@ func classifyCode(err error, ctx CommandContext) Code {
 	if (ctx.APIFailure || hasCode(err, "live_api_failure") || hasCode(err, "write_provider_error")) && ctx.HTTPAttempted {
 		return CodeAPIFailure
 	}
-	if hasCode(err, "api_validation") && ctx.HTTPAttempted {
+	if (hasCode(err, "api_validation") || hasCode(err, "not_found") || hasCode(err, "remote_conflict") || hasCode(err, "remote_collision") || hasCode(err, "remote_not_found") || hasCode(err, "rate_limited")) && ctx.HTTPAttempted {
 		return CodeAPIFailure
 	}
 	if ctx.LocalPayloadTooLarge || ctx.FailureSource == "local_body_limit" || ctx.FailureSource == "local_decode_boundary" || ctx.FailureSource == "partial_response" || hasCode(err, "partial_response") || hasCode(err, "unsupported_mock_payload") || hasCode(err, "live_graph_invalid") || hasCode(err, "validation_failed") {
@@ -183,9 +183,9 @@ func codeFromError(err error) Code {
 			return CodeFixtureFallbackDetected
 		case "unsupported_capability":
 			return CodeUnsupportedCapability
-		case "schema_decode":
+		case "schema_decode", "partial_response":
 			return CodeSchemaDecode
-		case "auth_expired", "forbidden", "write_unauthorized":
+		case "auth_expired", "forbidden", "write_unauthorized", "not_found", "remote_conflict", "remote_collision", "remote_not_found", "rate_limited":
 			return CodeAPIFailure
 		}
 	}
