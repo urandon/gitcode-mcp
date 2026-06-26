@@ -1,0 +1,17 @@
+{
+  "covered_outcome_ids": ["outcome-9"],
+  "covered_decommission_ids": ["decommission-7"],
+  "product_surfaces": [
+    "internal/cache/sqlite.go: NewSQLiteStore, WAL mode, AcquireWriter, ReleaseWriter",
+    "internal/cache/errors.go: ErrLockContention.DiagnosticCode() -> cache_busy",
+    "internal/cache/schema.go: CheckVersionCompatibility, SchemaVersionError",
+    "internal/cache/store.go: SearchSources, GetSourceScoped, ListSources",
+    "internal/cache/concurrency_test.go: TestConcurrentSearchSources, TestWriterHoldReadersUnblocked, TestTwoWritersContentionCacheBusy, TestThreeRoutinesTwoReadersOneWriter, TestFutureSchemaIncompatibleDiagnostic"
+  ],
+  "evidence_type": "runtime/compiler test",
+  "freshness": "current binary build with mocked Go tests",
+  "mocks_used": false,
+  "production_files_modified": [
+    "internal/cache/concurrency_test.go"
+  ]
+}
