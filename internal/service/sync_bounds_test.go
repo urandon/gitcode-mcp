@@ -303,44 +303,32 @@ func TestBulkSyncIssuesBoundedMaxRecords(t *testing.T) {
 	}
 }
 
-func TestBulkSyncWikiBoundedCancelMidPage(t *testing.T) {
+func TestBulkSyncWikiBoundedPreCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 	base := time.Date(2026, 6, 22, 15, 0, 0, 0, time.UTC)
 	client := &fakeGitCodeClient{
 		listWikiPages: []gitcode.Page[gitcode.WikiPage]{
 			{Items: generateWikiPages(1, 10), Page: 1, PerPage: 10},
-			{Items: generateWikiPages(11, 10), Page: 2, PerPage: 10},
 		},
-		wikiBySlug: buildWikiMap(20, base),
+		wikiBySlug: buildWikiMap(10, base),
 	}
 	store, err := cache.NewInMemorySQLiteStore(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "wiki-cancel", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeWiki}}); err != nil {
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "wiki-precancel", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeWiki}}); err != nil {
 		t.Fatal(err)
 	}
 	svc := NewWithClient(store, client)
 
-	progressChan := make(chan ProgressEvent, 10)
-	go func() {
-		for ev := range progressChan {
-			if ev.Page == 1 {
-				cancel()
-				return
-			}
-		}
-	}()
-
-	result, err := svc.BulkSyncWiki(ctx, BulkSyncRequest{
-		RepoID:  "wiki-cancel",
+	_, err = svc.BulkSyncWiki(ctx, BulkSyncRequest{
+		RepoID:  "wiki-precancel",
 		Page:    1,
 		PerPage: 10,
-		Bounds:  &SyncBounds{MaxRecords: 20, ProgressChan: progressChan},
+		Bounds:  &SyncBounds{MaxRecords: 20},
 	})
-	close(progressChan)
-
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -351,8 +339,74 @@ func TestBulkSyncWikiBoundedCancelMidPage(t *testing.T) {
 	if partial.Diagnostic != SyncDiagnosticCancelled {
 		t.Fatalf("diagnostic = %q, want %q", partial.Diagnostic, SyncDiagnosticCancelled)
 	}
-	if result.SuccessCount != 10 {
-		t.Fatalf("success_count = %d, want 10", result.SuccessCount)
+	if partial.SuccessCount != 0 {
+		t.Fatalf("success_count = %d, want 0", partial.SuccessCount)
+	}
+}
+
+func TestBulkSyncWikiBoundedMaxRecords(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 22, 15, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		listWikiPages: []gitcode.Page[gitcode.WikiPage]{
+			{Items: generateWikiPages(1, 20), Page: 1, PerPage: 100},
+		},
+		wikiBySlug: buildWikiMap(20, base),
+	}
+	store, err := cache.NewInMemorySQLiteStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "wiki-maxrecords", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+
+	result, err := svc.BulkSyncWiki(ctx, BulkSyncRequest{
+		RepoID:  "wiki-maxrecords",
+		Page:    1,
+		PerPage: 100,
+		Bounds:  &SyncBounds{MaxRecords: 5},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.SuccessCount != 5 {
+		t.Fatalf("success_count = %d, want 5", result.SuccessCount)
+	}
+}
+
+func TestBulkSyncWikiBoundedMaxPages(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 22, 15, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		listWikiPages: []gitcode.Page[gitcode.WikiPage]{
+			{Items: generateWikiPages(1, 20), Page: 1, PerPage: 100},
+		},
+		wikiBySlug: buildWikiMap(20, base),
+	}
+	store, err := cache.NewInMemorySQLiteStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "wiki-maxpages", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+
+	result, err := svc.BulkSyncWiki(ctx, BulkSyncRequest{
+		RepoID:  "wiki-maxpages",
+		Page:    1,
+		PerPage: 3,
+		Bounds:  &SyncBounds{MaxPages: 2},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.SuccessCount != 6 {
+		t.Fatalf("success_count = %d, want 6", result.SuccessCount)
 	}
 }
 

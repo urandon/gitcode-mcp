@@ -1627,3 +1627,247 @@ func TestScenario013008EncodeIssueLabelsOutputIsJSONArray(t *testing.T) {
 		t.Fatalf("EncodeIssueLabels empty: got %s, want []", string(empty))
 	}
 }
+
+func TestBoundedWikiTreeTraversalMaxRecords(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents":
+			fmt.Fprint(w, `[{"path":"dirA","type":"dir"},{"path":"dirB","type":"dir"},{"path":"README.md","type":"file","sha":"rev-home"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirA":
+			fmt.Fprint(w, `[{"path":"dirA/A1.md","type":"file","sha":"rev-a1"},{"path":"dirA/A2.md","type":"file","sha":"rev-a2"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirB":
+			fmt.Fprint(w, `[{"path":"dirB/B1.md","type":"file","sha":"rev-b1"},{"path":"dirB/B2.md","type":"file","sha":"rev-b2"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/README.md":
+			fmt.Fprint(w, `{"path":"README.md","type":"file","sha":"rev-home"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/README.md":
+			fmt.Fprint(w, "# Home")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirA/A1.md":
+			fmt.Fprint(w, `{"path":"dirA/A1.md","type":"file","sha":"rev-a1"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dirA/A1.md":
+			fmt.Fprint(w, "# A1")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirA/A2.md":
+			fmt.Fprint(w, `{"path":"dirA/A2.md","type":"file","sha":"rev-a2"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dirA/A2.md":
+			fmt.Fprint(w, "# A2")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirB/B1.md":
+			fmt.Fprint(w, `{"path":"dirB/B1.md","type":"file","sha":"rev-b1"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dirB/B1.md":
+			fmt.Fprint(w, "# B1")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirB/B2.md":
+			fmt.Fprint(w, `{"path":"dirB/B2.md","type":"file","sha":"rev-b2"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dirB/B2.md":
+			fmt.Fprint(w, "# B2")
+		default:
+			t.Fatalf("unexpected wiki path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+
+	req := WikiListRequest{
+		Owner: "example-owner",
+		Repo:  "example-repo",
+		Bounds: &WikiBounds{
+			MaxRecords: 3,
+		},
+	}
+	wikis, err := client.ListWikiPages(context.Background(), req)
+	if err != nil {
+		t.Fatalf("ListWikiPages returned error: %v", err)
+	}
+	if len(wikis.Items) != 3 {
+		t.Fatalf("expected 3 pages (bounded by MaxRecords), got %d", len(wikis.Items))
+	}
+	expectedSlugs := map[string]bool{"dirA/A1.md": true, "dirA/A2.md": true, "dirB/B1.md": true}
+	for _, item := range wikis.Items {
+		if !expectedSlugs[item.Slug] {
+			t.Fatalf("unexpected page slug %q, want one of dirA/A1, dirA/A2, dirB/B1", item.Slug)
+		}
+	}
+}
+
+func TestBoundedWikiTreeTraversalCancelMidTraversal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents":
+			fmt.Fprint(w, `[{"path":"dirA","type":"dir"},{"path":"dirB","type":"dir"},{"path":"README.md","type":"file","sha":"rev-home"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirA":
+			fmt.Fprint(w, `[{"path":"dirA/A1.md","type":"file","sha":"rev-a1"},{"path":"dirA/A2.md","type":"file","sha":"rev-a2"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirB":
+			fmt.Fprint(w, `[{"path":"dirB/B1.md","type":"file","sha":"rev-b1"},{"path":"dirB/B2.md","type":"file","sha":"rev-b2"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirA/A1.md":
+			fmt.Fprint(w, `{"path":"dirA/A1.md","type":"file","sha":"rev-a1"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dirA/A1.md":
+			fmt.Fprint(w, "# A1")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirA/A2.md":
+			fmt.Fprint(w, `{"path":"dirA/A2.md","type":"file","sha":"rev-a2"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dirA/A2.md":
+			fmt.Fprint(w, "# A2")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/README.md":
+			fmt.Fprint(w, `{"path":"README.md","type":"file","sha":"rev-home"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/README.md":
+			fmt.Fprint(w, "# Home")
+		default:
+			t.Fatalf("unexpected wiki path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := WikiListRequest{
+		Owner: "example-owner",
+		Repo:  "example-repo",
+		Bounds: &WikiBounds{
+			MaxRecords: 3,
+		},
+	}
+
+	go func() {
+		cancel()
+	}()
+
+	wikis, err := client.ListWikiPages(ctx, req)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+	}
+	if len(wikis.Items) < 0 {
+		t.Fatalf("expected some committed items on cancellation")
+	}
+}
+
+func TestBoundedWikiTreeTraversalProgressEvents(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents":
+			fmt.Fprint(w, `[{"path":"dirA","type":"dir"},{"path":"dirB","type":"dir"},{"path":"README.md","type":"file","sha":"rev-home"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirA":
+			fmt.Fprint(w, `[{"path":"dirA/A1.md","type":"file","sha":"rev-a1"},{"path":"dirA/A2.md","type":"file","sha":"rev-a2"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirB":
+			fmt.Fprint(w, `[{"path":"dirB/B1.md","type":"file","sha":"rev-b1"},{"path":"dirB/B2.md","type":"file","sha":"rev-b2"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirA/A1.md":
+			fmt.Fprint(w, `{"path":"dirA/A1.md","type":"file","sha":"rev-a1"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dirA/A1.md":
+			fmt.Fprint(w, "# A1")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirA/A2.md":
+			fmt.Fprint(w, `{"path":"dirA/A2.md","type":"file","sha":"rev-a2"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dirA/A2.md":
+			fmt.Fprint(w, "# A2")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirB/B1.md":
+			fmt.Fprint(w, `{"path":"dirB/B1.md","type":"file","sha":"rev-b1"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dirB/B1.md":
+			fmt.Fprint(w, "# B1")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirB/B2.md":
+			fmt.Fprint(w, `{"path":"dirB/B2.md","type":"file","sha":"rev-b2"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dirB/B2.md":
+			fmt.Fprint(w, "# B2")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/README.md":
+			fmt.Fprint(w, `{"path":"README.md","type":"file","sha":"rev-home"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/README.md":
+			fmt.Fprint(w, "# Home")
+		default:
+			t.Fatalf("unexpected wiki path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	progressChan := make(chan WikiProgressEvent, 10)
+	var events []WikiProgressEvent
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for ev := range progressChan {
+			events = append(events, ev)
+		}
+	}()
+	req := WikiListRequest{
+		Owner: "example-owner",
+		Repo:  "example-repo",
+		Bounds: &WikiBounds{
+			ProgressChan: progressChan,
+		},
+	}
+	_, err := client.ListWikiPages(context.Background(), req)
+	close(progressChan)
+	<-done
+	if err != nil {
+		t.Fatalf("ListWikiPages returned error: %v", err)
+	}
+	if len(events) < 3 {
+		t.Fatalf("progress events = %d, want at least 3 (root + dirA + dirB)", len(events))
+	}
+	for i, ev := range events {
+		if ev.RecordsFetched < 0 {
+			t.Fatalf("event[%d].RecordsFetched = %d, want >= 0", i, ev.RecordsFetched)
+		}
+	}
+}
+
+func TestBoundedWikiTreeTraversalUnboundedBackwardCompat(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents":
+			fmt.Fprint(w, `[{"path":"README.md","type":"file","sha":"rev-home"},{"path":"dir","type":"dir"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dir":
+			fmt.Fprint(w, `[{"path":"dir/Sub.md","type":"file","sha":"rev-sub"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/README.md":
+			fmt.Fprint(w, `{"path":"README.md","type":"file","sha":"rev-home"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/README.md":
+			fmt.Fprint(w, "# Home")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dir/Sub.md":
+			fmt.Fprint(w, `{"path":"dir/Sub.md","type":"file","sha":"rev-sub"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dir/Sub.md":
+			fmt.Fprint(w, "## Sub")
+		default:
+			t.Fatalf("unexpected wiki path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	wikis, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if err != nil {
+		t.Fatalf("ListWikiPages (unbounded) returned error: %v", err)
+	}
+	if len(wikis.Items) != 2 {
+		t.Fatalf("expected 2 pages from unbounded traversal, got %d", len(wikis.Items))
+	}
+	ordered := []string{"dir/Sub.md", "README.md"}
+	for i, item := range wikis.Items {
+		if item.Slug != ordered[i] {
+			t.Fatalf("expected ordered[%d] = %q, got %q", i, ordered[i], item.Slug)
+		}
+	}
+}
+
+func TestBoundedWikiTreeTraversalNoOuterLoopPattern(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents":
+			fmt.Fprint(w, `[{"path":"README.md","type":"file","sha":"rev-home"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/README.md":
+			fmt.Fprint(w, `{"path":"README.md","type":"file","sha":"rev-home"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/README.md":
+			fmt.Fprint(w, "# Home")
+		default:
+			t.Fatalf("unexpected wiki path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	req := WikiListRequest{
+		Owner: "example-owner",
+		Repo:  "example-repo",
+		Bounds: &WikiBounds{
+			MaxRecords: 5,
+		},
+	}
+	wikis, err := client.ListWikiPages(context.Background(), req)
+	if err != nil {
+		t.Fatalf("ListWikiPages returned error: %v", err)
+	}
+	if len(wikis.Items) != 1 {
+		t.Fatalf("expected 1 page, got %d", len(wikis.Items))
+	}
+}

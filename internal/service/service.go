@@ -1224,103 +1224,127 @@ func (s *Service) BulkSyncWiki(ctx context.Context, req BulkSyncRequest) (*SyncR
 func (s *Service) bulkSyncWikiBounded(ctx context.Context, req BulkSyncRequest, route RepositoryRoute) (*SyncResourcesResult, error) {
 	bounds := req.Bounds
 	result := &SyncResourcesResult{Results: make([]SyncResult, 0), Failures: make([]ResourceError, 0)}
-	currentPage := req.Page
-	if currentPage < 1 {
-		currentPage = 1
-	}
-	perPage := req.PerPage
-	if perPage < 1 {
-		perPage = 10
-	}
+
+	var wikiBounds *gitcode.WikiBounds
 	totalRequested := bounds.MaxRecords
 	if totalRequested <= 0 && bounds.MaxPages > 0 {
+		perPage := req.PerPage
+		if perPage < 1 {
+			perPage = 10
+		}
 		totalRequested = bounds.MaxPages * perPage
 	}
 
-	for pageNum := 0; ; pageNum++ {
-		if ctx.Err() != nil {
+	wikiBounds = &gitcode.WikiBounds{
+		MaxRecords: totalRequested,
+	}
+	if bounds.ProgressChan != nil {
+		progressCh := make(chan gitcode.WikiProgressEvent, 10)
+		wikiBounds.ProgressChan = progressCh
+		go func() {
+			for ev := range progressCh {
+				emitProgress(bounds.ProgressChan, ProgressEvent{Collection: "wiki", Page: 1, RecordsFetched: ev.RecordsFetched})
+			}
+		}()
+	}
+
+	page, err := s.client.ListWikiPages(ctx, gitcode.WikiListRequest{
+		Owner:   route.Owner,
+		Repo:    route.Name,
+		Page:    req.Page,
+		PerPage: req.PerPage,
+		Bounds:  wikiBounds,
+	})
+	if bounds.ProgressChan != nil {
+		close(wikiBounds.ProgressChan)
+	}
+
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
 			diag := SyncDiagnosticCancelled
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			if errors.Is(ctxErr, context.DeadlineExceeded) {
 				diag = SyncDiagnosticTimeout
 			}
 			result.SuccessCount = len(result.Results)
 			result.FailureCount = len(result.Failures)
 			if result.SuccessCount == 0 && result.FailureCount == 0 {
-				return nil, ctx.Err()
+				return nil, &PartialSyncError{Errors: nil, SuccessCount: 0, FailureCount: 0, Diagnostic: diag, TotalRequested: totalRequested}
 			}
 			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diag, TotalRequested: totalRequested}
 		}
-		if bounds.MaxPages > 0 && pageNum >= bounds.MaxPages {
-			break
+		result.SuccessCount = len(result.Results)
+		result.FailureCount = len(result.Failures)
+		normalized := s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "wiki:*"}, "wiki", "*")
+		re := ResourceError{SourceID: "wiki:*", RemoteType: "wiki", Err: normalized, Message: err.Error()}
+		result.Failures = append(result.Failures, re)
+		result.FailureCount++
+		var sfErr ErrSyncFailure
+		if errors.As(normalized, &sfErr) && sfErr.Mode == "empty_wiki" {
+			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: SyncDiagnosticEmptyWiki, TotalRequested: totalRequested}
 		}
-		if bounds.MaxRecords > 0 && len(result.Results) >= bounds.MaxRecords {
-			break
+		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, TotalRequested: totalRequested}
+	}
+
+	items := page.Items
+	if bounds.MaxPages > 0 {
+		perPage := req.PerPage
+		if perPage < 1 {
+			perPage = 10
 		}
-		page, err := s.client.ListWikiPages(ctx, gitcode.WikiListRequest{Owner: route.Owner, Repo: route.Name, Page: currentPage, PerPage: perPage})
-		if err != nil {
-			result.SuccessCount = len(result.Results)
-			result.FailureCount = len(result.Failures)
-			normalized := s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "wiki:*"}, "wiki", "*")
-			re := ResourceError{SourceID: "wiki:*", RemoteType: "wiki", Err: normalized, Message: err.Error()}
-			result.Failures = append(result.Failures, re)
-			result.FailureCount++
-			var sfErr ErrSyncFailure
-			if errors.As(normalized, &sfErr) && sfErr.Mode == "empty_wiki" {
-				return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: SyncDiagnosticEmptyWiki, TotalRequested: totalRequested}
-			}
-			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, TotalRequested: totalRequested}
+		maxItems := bounds.MaxPages * perPage
+		if len(items) > maxItems {
+			items = items[:maxItems]
 		}
-		items := page.Items
-		if bounds.MaxRecords > 0 {
-			remaining := bounds.MaxRecords - len(result.Results)
-			if remaining <= 0 {
-				break
-			}
-			if len(items) > remaining {
-				items = items[:remaining]
-			}
+	}
+	if bounds.MaxRecords > 0 && len(items) > bounds.MaxRecords {
+		items = items[:bounds.MaxRecords]
+	}
+
+	reqs := make([]SyncRequest, 0, len(items))
+	for _, wp := range items {
+		reqs = append(reqs, SyncRequest{
+			RepoID:         req.RepoID,
+			AliasType:      "wiki",
+			AliasID:        wp.Slug,
+			IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "wiki", wp.Slug),
+			MaxAttempts:    req.MaxAttempts,
+			MaxSize:        req.MaxSize,
+		})
+	}
+	syncResult, syncErr := s.SyncResources(ctx, reqs)
+	if syncResult != nil {
+		result.Results = append(result.Results, syncResult.Results...)
+		result.Failures = append(result.Failures, syncResult.Failures...)
+	}
+
+	if ctx.Err() != nil {
+		diag := SyncDiagnosticCancelled
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			diag = SyncDiagnosticTimeout
 		}
-		reqs := make([]SyncRequest, 0, len(items))
-		for _, wp := range items {
-			reqs = append(reqs, SyncRequest{
-				RepoID:         req.RepoID,
-				AliasType:      "wiki",
-				AliasID:        wp.Slug,
-				IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "wiki", wp.Slug),
-				MaxAttempts:    req.MaxAttempts,
-				MaxSize:        req.MaxSize,
-			})
-		}
-		syncResult, syncErr := s.SyncResources(ctx, reqs)
-		if syncResult != nil {
-			result.Results = append(result.Results, syncResult.Results...)
-			result.Failures = append(result.Failures, syncResult.Failures...)
-		}
-		recordsFetched := len(items)
-		emitProgress(bounds.ProgressChan, ProgressEvent{Collection: "wiki", Page: currentPage, RecordsFetched: recordsFetched})
-		if syncErr != nil {
-			result.SuccessCount = len(result.Results)
-			result.FailureCount = len(result.Failures)
-			var partial *PartialSyncError
-			if errors.As(syncErr, &partial) {
-				var diag SyncDiagnostic
-				if ctx.Err() != nil {
-					diag = SyncDiagnosticCancelled
-					if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-						diag = SyncDiagnosticTimeout
-					}
+		result.SuccessCount = len(result.Results)
+		result.FailureCount = len(result.Failures)
+		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diag, TotalRequested: totalRequested}
+	}
+
+	if syncErr != nil {
+		result.SuccessCount = len(result.Results)
+		result.FailureCount = len(result.Failures)
+		var partial *PartialSyncError
+		if errors.As(syncErr, &partial) {
+			var diag SyncDiagnostic
+			if ctx.Err() != nil {
+				diag = SyncDiagnosticCancelled
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					diag = SyncDiagnosticTimeout
 				}
-				return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diag}
 			}
-			re := ResourceError{SourceID: "wiki:*", RemoteType: "wiki", Err: syncErr, Message: syncErr.Error()}
-			result.Failures = append(result.Failures, re)
-			result.FailureCount++
-			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
+			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diag}
 		}
-		if len(page.Items) < perPage {
-			break
-		}
-		currentPage++
+		re := ResourceError{SourceID: "wiki:*", RemoteType: "wiki", Err: syncErr, Message: syncErr.Error()}
+		result.Failures = append(result.Failures, re)
+		result.FailureCount++
+		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
 	}
 	result.SuccessCount = len(result.Results)
 	result.FailureCount = len(result.Failures)

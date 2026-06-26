@@ -38,6 +38,17 @@ type WikiListRequest struct {
 	Repo    string
 	Page    int
 	PerPage int
+	Bounds  *WikiBounds
+}
+
+type WikiBounds struct {
+	MaxRecords   int
+	ProgressChan chan<- WikiProgressEvent
+}
+
+type WikiProgressEvent struct {
+	Path           string
+	RecordsFetched int
 }
 
 type SearchRequest struct {

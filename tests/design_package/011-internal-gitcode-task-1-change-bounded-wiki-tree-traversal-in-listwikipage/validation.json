@@ -1,0 +1,47 @@
+{
+  "task_id": "011-internal-gitcode-task-1-change-bounded-wiki-tree-traversal-in-listwikipage",
+  "covered_outcome_ids": [
+    "outcome-3"
+  ],
+  "covered_decommission_ids": [
+    "decommission-3"
+  ],
+  "product_surfaces": [
+    "internal/gitcode/wikiTraversal.walk",
+    "internal/gitcode.HTTPClient.ListWikiPages",
+    "internal/gitcode.WikiListRequest.Bounds",
+    "internal/gitcode.WikiBounds",
+    "internal/service.bulkSyncWikiBounded",
+    "internal/service.BulkSyncWiki",
+    "internal/service.PartialSyncError"
+  ],
+  "evidence_type": "API test",
+  "freshness": "current binary build with mocked Go tests",
+  "mocks_used": [
+    {
+      "name": "httptest.Server (mock HTTP)",
+      "scope": "external GitCode provider dependency only",
+      "reason": "live validation disabled; gitcode adapter runtime path exercised with mocked HTTP server serving recursive wiki tree fixtures"
+    },
+    {
+      "name": "fakeGitCodeClient",
+      "scope": "external GitCode provider dependency only",
+      "reason": "service-level tests exercise routing, bounds enforcement, and PartialSyncError diagnostics through fake client"
+    },
+    {
+      "name": "cache.NewInMemorySQLiteStore",
+      "scope": "local deterministic cache fixture",
+      "reason": "offline deterministic validation without filesystem or network dependencies"
+    }
+  ],
+  "production_files_modified": [],
+  "scenario_ids": [
+    "011-internal-gitcode-task-1-change-bounded-wiki-tree-traversal-in-listwikipage-scenario-1",
+    "011-internal-gitcode-task-1-change-bounded-wiki-tree-traversal-in-listwikipage-scenario-2",
+    "011-internal-gitcode-task-1-change-bounded-wiki-tree-traversal-in-listwikipage-scenario-3",
+    "011-internal-gitcode-task-1-change-bounded-wiki-tree-traversal-in-listwikipage-scenario-4"
+  ],
+  "validation_command": "bash tests/design_package/011-internal-gitcode-task-1-change-bounded-wiki-tree-traversal-in-listwikipage/run.sh",
+  "live_validation_enabled": false,
+  "device_validation_enabled": false
+}

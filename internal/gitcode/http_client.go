@@ -106,7 +106,11 @@ func (c *HTTPClient) ListWikiPages(ctx context.Context, req WikiListRequest) (Pa
 	if err := validateReadRepo(req.Owner, req.Repo); err != nil {
 		return Page[WikiPage]{}, err
 	}
-	walker := wikiTraversal{client: c, owner: req.Owner, repo: req.Repo, seenDirs: map[string]bool{}, seenFiles: map[string]bool{}}
+	walker := &wikiTraversal{client: c, owner: req.Owner, repo: req.Repo, seenDirs: map[string]bool{}, seenFiles: map[string]bool{}}
+	if req.Bounds != nil {
+		walker.maxRecords = req.Bounds.MaxRecords
+		walker.progressChan = req.Bounds.ProgressChan
+	}
 	items, err := walker.walk(ctx, "", 0)
 	if err != nil {
 		return Page[WikiPage]{}, err
@@ -289,66 +293,110 @@ func (c *HTTPClient) GetMilestone(ctx context.Context, req MilestoneRequest) (Mi
 }
 
 type wikiTraversal struct {
-	client    *HTTPClient
-	owner     string
-	repo      string
-	seenDirs  map[string]bool
-	seenFiles map[string]bool
+	client       *HTTPClient
+	owner        string
+	repo         string
+	seenDirs     map[string]bool
+	seenFiles    map[string]bool
+	maxRecords   int
+	progressChan chan<- WikiProgressEvent
 }
 
-func (w wikiTraversal) walk(ctx context.Context, dir string, depth int) ([]WikiPage, error) {
-	if depth > 64 {
-		return nil, ErrPartialResponse{Endpoint: wikiContentsPathEndpoint(w.owner, w.repo, dir), Message: "wiki contents nesting exceeds 64 levels"}
-	}
-	normalizedDir := normalizeWikiPath(dir)
-	if w.seenDirs[normalizedDir] {
-		return nil, nil
-	}
-	w.seenDirs[normalizedDir] = true
-	entries, err := w.client.listWikiEntries(ctx, w.owner, w.repo, normalizedDir)
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		left := normalizeWikiPath(entries[i].Path)
-		right := normalizeWikiPath(entries[j].Path)
-		if entries[i].Type != entries[j].Type {
-			return entries[i].Type == "dir"
-		}
-		return left < right
-	})
+type walkStackEntry struct {
+	kind      string // "dir" or "file"
+	dir       string
+	depth     int
+	entryPath string
+	entrySha  string
+}
+
+func (w *wikiTraversal) walk(ctx context.Context, dir string, depth int) ([]WikiPage, error) {
+	stack := []walkStackEntry{{kind: "dir", dir: dir, depth: depth}}
 	var out []WikiPage
-	for _, entry := range entries {
-		entryPath := normalizeWikiPath(entry.Path)
-		if entryPath == "" || strings.TrimSpace(entry.Type) == "" {
-			return nil, ErrPartialResponse{Endpoint: wikiContentsPathEndpoint(w.owner, w.repo, normalizedDir), Message: "wiki contents entry requires path and type"}
+	pageCount := 0
+
+	for len(stack) > 0 {
+		if err := ctx.Err(); err != nil {
+			return out, err
 		}
-		switch strings.ToLower(strings.TrimSpace(entry.Type)) {
-		case "dir", "directory", "tree":
-			pages, err := w.walk(ctx, entryPath, depth+1)
-			if err != nil {
-				return nil, err
+		if w.maxRecords > 0 && len(out) >= w.maxRecords {
+			break
+		}
+
+		current := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		if current.kind == "file" {
+			if strings.TrimSpace(current.entrySha) == "" {
+				return nil, ErrPartialResponse{Endpoint: wikiContentsPathEndpoint(w.owner, w.repo, current.dir), Message: "wiki file entry requires sha"}
 			}
-			out = append(out, pages...)
-		case "file", "blob":
-			if strings.TrimSpace(entry.Sha) == "" {
-				return nil, ErrPartialResponse{Endpoint: wikiContentsPathEndpoint(w.owner, w.repo, normalizedDir), Message: "wiki file entry requires sha"}
+			if w.seenFiles[current.entryPath] {
+				return nil, ErrPartialResponse{Endpoint: wikiContentsPathEndpoint(w.owner, w.repo, current.dir), Message: "duplicate wiki file path " + current.entryPath}
 			}
-			if w.seenFiles[entryPath] {
-				return nil, ErrPartialResponse{Endpoint: wikiContentsPathEndpoint(w.owner, w.repo, normalizedDir), Message: "duplicate wiki file path " + entryPath}
-			}
-			w.seenFiles[entryPath] = true
-			if !isImportableWikiMarkdown(entryPath) {
+			w.seenFiles[current.entryPath] = true
+			if !isImportableWikiMarkdown(current.entryPath) {
 				continue
 			}
-			page, err := w.client.getWikiPageByPath(ctx, w.owner, w.repo, entryPath)
+			page, err := w.client.getWikiPageByPath(ctx, w.owner, w.repo, current.entryPath)
 			if err != nil {
-				return nil, err
+				return out, err
 			}
 			out = append(out, page)
+			continue
 		}
+
+		if current.depth > 64 {
+			return nil, ErrPartialResponse{Endpoint: wikiContentsPathEndpoint(w.owner, w.repo, current.dir), Message: "wiki contents nesting exceeds 64 levels"}
+		}
+		normalizedDir := normalizeWikiPath(current.dir)
+		if w.seenDirs[normalizedDir] {
+			continue
+		}
+		w.seenDirs[normalizedDir] = true
+		entries, err := w.client.listWikiEntries(ctx, w.owner, w.repo, normalizedDir)
+		if err != nil {
+			return out, err
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			left := normalizeWikiPath(entries[i].Path)
+			right := normalizeWikiPath(entries[j].Path)
+			if entries[i].Type != entries[j].Type {
+				return entries[i].Type == "dir"
+			}
+			return left < right
+		})
+
+		startLen := len(out)
+
+		for i := len(entries) - 1; i >= 0; i-- {
+			entry := entries[i]
+			entryPath := normalizeWikiPath(entry.Path)
+			if entryPath == "" || strings.TrimSpace(entry.Type) == "" {
+				return nil, ErrPartialResponse{Endpoint: wikiContentsPathEndpoint(w.owner, w.repo, normalizedDir), Message: "wiki contents entry requires path and type"}
+			}
+			switch strings.ToLower(strings.TrimSpace(entry.Type)) {
+			case "dir", "directory", "tree":
+				stack = append(stack, walkStackEntry{kind: "dir", dir: entryPath, depth: current.depth + 1})
+			case "file", "blob":
+				stack = append(stack, walkStackEntry{kind: "file", dir: current.dir, depth: current.depth, entryPath: entryPath, entrySha: strings.TrimSpace(entry.Sha)})
+			}
+		}
+
+		recordsThisDir := len(out) - startLen
+		pageCount++
+		w.emitProgress(normalizedDir, pageCount, recordsThisDir)
 	}
 	return out, nil
+}
+
+func (w *wikiTraversal) emitProgress(path string, page int, records int) {
+	if w.progressChan == nil {
+		return
+	}
+	select {
+	case w.progressChan <- WikiProgressEvent{Path: path, RecordsFetched: records}:
+	default:
+	}
 }
 
 func (c *HTTPClient) listWikiEntries(ctx context.Context, owner, repo, dir string) ([]WikiContentsEntry, error) {
