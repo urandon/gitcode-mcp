@@ -1,0 +1,25 @@
+{
+  "covered_outcome_ids": ["outcome-2"],
+  "covered_decommission_ids": ["decommission-2-2"],
+  "product_surfaces": [
+    "MCP tools/list endpoint via RPCHandler.Handle()",
+    "MCP doctor tool via RPCHandler.Handle()",
+    "MCP initialize capability block via RPCHandler.Handle()",
+    "internal/mcp/mcp_test.go :: TestStartupDiagnosticInjection",
+    "internal/mcp/mcp_test.go :: TestStartupDiagnosticSchemaIncompatible",
+    "internal/mcp/mcp_test.go :: TestStartupDiagnosticCacheLockContention",
+    "internal/mcp/mcp_test.go :: TestStartupDiagnosticStartupFailure",
+    "internal/mcp/mcp_test.go :: TestStartupDiagnosticAllScenarios",
+    "internal/mcp/mcp_test.go :: TestStartupDiagnosticRemediationText"
+  ],
+  "evidence_type": "API test",
+  "freshness": "current binary build with mocked Go tests",
+  "mocks_used": [
+    "StartupDiagnosticFromError (factory-level classification mock)",
+    "cache.ErrLockContention (value type, no network)",
+    "cache.SchemaVersionError (value type, no network)",
+    "os.ErrPermission (standard library error)",
+    "errors.New(...) (generic error for startup-failure)"
+  ],
+  "production_files_modified": []
+}
