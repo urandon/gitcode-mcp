@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -451,6 +452,141 @@ func TestProgressEventNonBlockingSend(t *testing.T) {
 	emitProgress(ch, ProgressEvent{Collection: "test", Page: 1, RecordsFetched: 5})
 	emitProgress(ch, ProgressEvent{Collection: "test", Page: 2, RecordsFetched: 10})
 }
+
+func TestBulkSyncWikiEmptyWikiDiagnosticUnbounded(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeGitCodeClient{
+		listWikiErrors: []error{&emptyWikiTestError{}},
+	}
+	store, err := cache.NewInMemorySQLiteStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "wiki-empty-unbounded", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+
+	_, err = svc.BulkSyncWiki(ctx, BulkSyncRequest{RepoID: "wiki-empty-unbounded"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var partial *PartialSyncError
+	if !errors.As(err, &partial) {
+		t.Fatalf("error = %T %v, want *PartialSyncError", err, err)
+	}
+	if partial.Diagnostic != SyncDiagnosticEmptyWiki {
+		t.Fatalf("partial.Diagnostic = %q, want %q", partial.Diagnostic, SyncDiagnosticEmptyWiki)
+	}
+	var chainHasEmptyWiki bool
+	for _, re := range partial.Errors {
+		if re.Err != nil && strings.Contains(re.Err.Error(), "empty") {
+			chainHasEmptyWiki = true
+			break
+		}
+	}
+	if !chainHasEmptyWiki {
+		t.Fatalf("error chain should mention empty wiki, got: %v", err)
+	}
+	if errorHasDiagnosticCode(err, "api_validation") {
+		t.Fatal("should not be classified as api_validation")
+	}
+	if errorHasDiagnosticCode(err, "provider_failure") {
+		t.Fatal("should not be classified as provider_failure")
+	}
+}
+
+func TestBulkSyncWikiEmptyWikiDiagnosticBounded(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeGitCodeClient{
+		listWikiErrors: []error{&emptyWikiTestError{}},
+	}
+	store, err := cache.NewInMemorySQLiteStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "wiki-empty-bounded", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+
+	result, err := svc.BulkSyncWiki(ctx, BulkSyncRequest{
+		RepoID:  "wiki-empty-bounded",
+		Page:    1,
+		PerPage: 10,
+		Bounds:  &SyncBounds{MaxPages: 5},
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var partial *PartialSyncError
+	if !errors.As(err, &partial) {
+		t.Fatalf("error = %T %v, want *PartialSyncError", err, err)
+	}
+	if partial.Diagnostic != SyncDiagnosticEmptyWiki {
+		t.Fatalf("partial.Diagnostic = %q, want %q", partial.Diagnostic, SyncDiagnosticEmptyWiki)
+	}
+	if result.SuccessCount != 0 {
+		t.Fatalf("success_count = %d, want 0", result.SuccessCount)
+	}
+	if errorHasDiagnosticCode(err, "api_validation") {
+		t.Fatal("should not be classified as api_validation")
+	}
+	if errorHasDiagnosticCode(err, "provider_failure") {
+		t.Fatal("should not be classified as provider_failure")
+	}
+}
+
+func TestNormalizeSyncFailureMapsEmptyWiki(t *testing.T) {
+	store, err := cache.NewInMemorySQLiteStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	svc := NewWithClient(store, &fakeGitCodeClient{})
+
+	err = svc.normalizeSyncFailure(&emptyWikiTestError{}, SyncRequest{RepoID: "test"}, "wiki", "*")
+	var sfErr ErrSyncFailure
+	if !errors.As(err, &sfErr) {
+		t.Fatalf("normalizeSyncFailure returned %T %v, want ErrSyncFailure", err, err)
+	}
+	if sfErr.Mode != "empty_wiki" {
+		t.Fatalf("sfErr.Mode = %q, want %q", sfErr.Mode, "empty_wiki")
+	}
+	if !strings.Contains(sfErr.Error(), "gitcode-mcp wiki init") {
+		t.Fatalf("error message missing remediation text, got: %v", sfErr.Error())
+	}
+}
+
+func TestErrorHasDiagnosticCode(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		code string
+		want bool
+	}{
+		{"direct match", &emptyWikiTestError{}, "empty_wiki", true},
+		{"direct mismatch", &emptyWikiTestError{}, "api_validation", false},
+		{"wrapped match", fmt.Errorf("wrapped: %w", &emptyWikiTestError{}), "empty_wiki", true},
+		{"wrapped mismatch", fmt.Errorf("wrapped: %w", &emptyWikiTestError{}), "other", false},
+		{"nil error", nil, "empty_wiki", false},
+		{"no DiagnosticCode", errors.New("plain error"), "empty_wiki", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := errorHasDiagnosticCode(tt.err, tt.code); got != tt.want {
+				t.Fatalf("errorHasDiagnosticCode(...) = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+type emptyWikiTestError struct{}
+
+func (e *emptyWikiTestError) Error() string           { return "wiki is empty/uninitialized" }
+func (e *emptyWikiTestError) DiagnosticCode() string  { return "empty_wiki" }
 
 func buildIssueMap(count int, base time.Time) map[int]gitcode.Issue {
 	m := make(map[int]gitcode.Issue, count)

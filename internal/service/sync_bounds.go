@@ -5,6 +5,7 @@ type SyncDiagnostic string
 const (
 	SyncDiagnosticCancelled SyncDiagnostic = "sync_cancelled"
 	SyncDiagnosticTimeout   SyncDiagnostic = "sync_timeout"
+	SyncDiagnosticEmptyWiki SyncDiagnostic = "empty_wiki"
 )
 
 type ProgressEvent struct {

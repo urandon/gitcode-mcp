@@ -1195,7 +1195,14 @@ func (s *Service) BulkSyncWiki(ctx context.Context, req BulkSyncRequest) (*SyncR
 	if req.Bounds == nil {
 		page, err := s.client.ListWikiPages(ctx, gitcode.WikiListRequest{Owner: route.Owner, Repo: route.Name, Page: req.Page, PerPage: req.PerPage})
 		if err != nil {
-			return bulkSyncFailureResult(s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "wiki:*"}, "wiki", "*"), "wiki:*", "wiki")
+			normalized := s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "wiki:*"}, "wiki", "*")
+			var sfErr ErrSyncFailure
+			if errors.As(normalized, &sfErr) && sfErr.Mode == "empty_wiki" {
+				re := ResourceError{SourceID: "wiki:*", RemoteType: "wiki", Err: normalized, Message: normalized.Error()}
+				result := &SyncResourcesResult{Failures: []ResourceError{re}, FailureCount: 1}
+				return result, &PartialSyncError{Errors: result.Failures, FailureCount: 1, Diagnostic: SyncDiagnosticEmptyWiki}
+			}
+			return bulkSyncFailureResult(normalized, "wiki:*", "wiki")
 		}
 		reqs := make([]SyncRequest, 0, len(page.Items))
 		for _, wp := range page.Items {
@@ -1253,9 +1260,14 @@ func (s *Service) bulkSyncWikiBounded(ctx context.Context, req BulkSyncRequest, 
 		if err != nil {
 			result.SuccessCount = len(result.Results)
 			result.FailureCount = len(result.Failures)
-			re := ResourceError{SourceID: "wiki:*", RemoteType: "wiki", Err: s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "wiki:*"}, "wiki", "*"), Message: err.Error()}
+			normalized := s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "wiki:*"}, "wiki", "*")
+			re := ResourceError{SourceID: "wiki:*", RemoteType: "wiki", Err: normalized, Message: err.Error()}
 			result.Failures = append(result.Failures, re)
 			result.FailureCount++
+			var sfErr ErrSyncFailure
+			if errors.As(normalized, &sfErr) && sfErr.Mode == "empty_wiki" {
+				return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: SyncDiagnosticEmptyWiki, TotalRequested: totalRequested}
+			}
 			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, TotalRequested: totalRequested}
 		}
 		items := page.Items
@@ -2080,7 +2092,26 @@ func (s *Service) normalizeSyncFailure(err error, req SyncRequest, remoteType, r
 	if errors.As(err, &conflict) {
 		return ErrSyncFailure{Mode: "conflict", Target: target, Endpoint: conflict.Endpoint, LocalPayload: append([]byte(nil), conflict.LocalPayload...), RemotePayload: append([]byte(nil), conflict.RemotePayload...), RecoveryAction: "resolve local and remote payloads manually", Cause: err}
 	}
+	if errorHasDiagnosticCode(err, "empty_wiki") {
+		return ErrSyncFailure{Mode: "empty_wiki", Target: target, RecoveryAction: "run `gitcode-mcp wiki init --repo ...` or create a page via the GitCode UI", Cause: err}
+	}
 	return err
+}
+
+func errorHasDiagnosticCode(err error, want string) bool {
+	for err != nil {
+		if coded, ok := err.(interface{ DiagnosticCode() string }); ok {
+			if coded.DiagnosticCode() == want {
+				return true
+			}
+		}
+		if unwrapped := errors.Unwrap(err); unwrapped != nil {
+			err = unwrapped
+		} else {
+			break
+		}
+	}
+	return false
 }
 
 func syncFailureTarget(req SyncRequest, remoteType, remoteID string) string {
