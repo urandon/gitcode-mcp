@@ -231,6 +231,13 @@ func TestIntegration(t *testing.T) {
 }
 
 func TestMCPBlockedWriteBoundary(t *testing.T) {
+	providerCalls := 0
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls++
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	defer provider.Close()
+
 	store := populatedStore(t)
 	svc := service.New(store)
 	defer store.Close()
@@ -292,6 +299,8 @@ func TestMCPBlockedWriteBoundary(t *testing.T) {
 			t.Fatalf("tools count = %d, want %d", len(tls.Tools), len(toolListOrder))
 		}
 		blocked := map[string]bool{
+			"create_issue": false, "update_issue": false, "add_comment": false,
+			"create_page": false, "update_page": false,
 			"create-issue": false, "update-issue": false, "add-label": false,
 			"create-page": false, "update-page": false,
 		}
@@ -304,7 +313,8 @@ func TestMCPBlockedWriteBoundary(t *testing.T) {
 
 	// scenario blocked-write-canonical-5
 	t.Run("blocked write canonical 5", func(t *testing.T) {
-		canonical := []string{"create-issue", "update-issue", "add-label", "create-page", "update-page"}
+		canonical := []string{"create_issue", "update_issue", "add_comment", "create_page", "update_page"}
+
 		for i, name := range canonical {
 			send(map[string]any{
 				"jsonrpc": "2.0",
@@ -319,6 +329,10 @@ func TestMCPBlockedWriteBoundary(t *testing.T) {
 			assertError(name, line)
 		}
 	})
+
+	if providerCalls != 0 {
+		t.Fatalf("unsupported write tools made %d provider calls", providerCalls)
+	}
 
 	// read tool parity — existing read tools still work
 	t.Run("read tool parity", func(t *testing.T) {
@@ -684,7 +698,7 @@ func TestSchemasAndResults(t *testing.T) {
 	})
 
 	t.Run("mutation tools are not registered", func(t *testing.T) {
-		for i, name := range []string{"create_issue", "update_issue", "sync", "migrate"} {
+		for i, name := range []string{"sync", "migrate"} {
 			send(map[string]any{
 				"jsonrpc": "2.0", "id": 27 + i, "method": "tools/call",
 				"params": map[string]any{"name": name, "arguments": map[string]any{"repo_id": "fixture-a"}},

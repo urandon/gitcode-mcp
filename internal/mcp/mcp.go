@@ -482,14 +482,6 @@ func (s *Server) toolsList(req request) {
 	s.writeResponse(req.ID, b)
 }
 
-var blockedWriteTools = map[string]bool{
-	"create-issue": true,
-	"update-issue": true,
-	"add-label":    true,
-	"create-page":  true,
-	"update-page":  true,
-}
-
 func (s *Server) toolsCall(ctx context.Context, req request) {
 	if req.Params == nil {
 		s.writeError(req.ID, -32602, "Invalid params", &errorData{Code: "invalid_params", Message: "params is required"})
@@ -505,8 +497,8 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 		return
 	}
 
-	if blockedWriteTools[params.Name] {
-		s.writeError(req.ID, -32601, "Method not found", &errorData{Code: "unsupported_capability", Message: fmt.Sprintf("%q is not available: use CLI mutation commands for writes", params.Name)})
+	if isUnsupportedCapabilityTool(params.Name) {
+		s.unsupportedCapabilityHandler(ctx, req.ID, params.Name)
 		return
 	}
 
