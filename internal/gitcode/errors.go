@@ -182,3 +182,14 @@ func (e ErrPayloadTooLarge) Error() string {
 func (e ErrPayloadTooLarge) DiagnosticCode() string { return "payload_too_large" }
 
 func (e ErrPayloadTooLarge) FailureSource() string { return e.Source }
+
+type ErrEmptyWiki struct {
+	Owner string
+	Repo  string
+}
+
+func (e ErrEmptyWiki) Error() string {
+	return fmt.Sprintf("gitcode: wiki is empty or uninitialized for %s/%s; run `gitcode-mcp wiki init --repo %s/%s` or create a page via the GitCode UI", e.Owner, e.Repo, e.Owner, e.Repo)
+}
+
+func (e ErrEmptyWiki) DiagnosticCode() string { return "empty_wiki" }

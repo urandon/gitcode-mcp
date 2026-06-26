@@ -1,0 +1,17 @@
+{
+  "covered_outcome_ids": ["outcome-4"],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "internal/gitcode/errors.go",
+    "internal/gitcode/http_client.go (listWikiEntries, isWikiEmptyResponse, bytesWithOptions, parseWikiEndpointOwnerRepo)",
+    "internal/gitcode/client_test.go (TestEmptyWikiDetection*, TestCreateWikiPageEmptyWikiDiagnostic*)"
+  ],
+  "evidence_type": "api_test",
+  "freshness": "go_test_mocked_httptest",
+  "mocks_used": ["httptest.NewServer (external HTTP provider)"],
+  "production_files_modified": [
+    "internal/gitcode/errors.go",
+    "internal/gitcode/http_client.go",
+    "internal/gitcode/client_test.go"
+  ]
+}

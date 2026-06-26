@@ -404,11 +404,55 @@ func (c *HTTPClient) listWikiEntries(ctx context.Context, owner, repo, dir strin
 	if dir != "" {
 		endpoint = wikiContentsPathEndpoint(owner, repo, dir)
 	}
+
+	resp, err := c.do(ctx, http.MethodGet, endpoint, nil, nil, requestOptions{})
+	if err != nil {
+		return nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: 1, Cause: err}
+	}
+	defer resp.Body.Close()
+
+	body, readErr := c.readBounded(resp, endpoint)
+	if readErr != nil {
+		return nil, readErr
+	}
+
+	if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+		// Empty array [] is not an empty-wiki condition — the route exists and
+		// returns valid content (just no pages in this directory).
+	} else if isWikiEmptyResponse(resp.StatusCode, body) {
+		return nil, ErrEmptyWiki{Owner: owner, Repo: repo}
+	} else {
+		// Fall through to normal error handling via the existing statusError path.
+		return nil, c.statusError(resp.StatusCode, endpoint, body, requestOptions{})
+	}
+
 	var entries []WikiContentsEntry
-	if err := c.getJSON(ctx, endpoint, nil, &entries); err != nil {
+	if err := decodeJSON(endpoint, body, &entries); err != nil {
 		return nil, err
 	}
 	return entries, nil
+}
+
+func isWikiEmptyResponse(statusCode int, body []byte) bool {
+	if statusCode != http.StatusBadRequest && statusCode != http.StatusNotFound {
+		return false
+	}
+	lower := strings.ToLower(string(body))
+	patterns := []string{
+		"wiki not found",
+		"wiki is empty",
+		"wiki has no pages",
+		"wiki is not initialized",
+		"wiki is uninitialized",
+		"wiki has not been created",
+		"uninitialized wiki",
+	}
+	for _, p := range patterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *HTTPClient) getWikiPageByPath(ctx context.Context, owner, repo, wikiPath string) (WikiPage, error) {
@@ -781,13 +825,16 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 				continue
 			}
 			return nil, nil, ErrRateLimited{RetryAfter: lastRetryAfter, RawRetryAfter: rawRetryAfter, Endpoint: endpoint, Attempts: attempt}
-		case resp.StatusCode >= 500 && resp.StatusCode <= 599:
-			if attempt < attempts {
-				continue
-			}
-			return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Status: resp.StatusCode, Attempts: attempt}
-		default:
-			return nil, nil, c.statusError(resp.StatusCode, endpoint, body, opts)
+	case resp.StatusCode >= 500 && resp.StatusCode <= 599:
+		if attempt < attempts {
+			continue
+		}
+		return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Status: resp.StatusCode, Attempts: attempt}
+	case isWikiEmptyResponse(resp.StatusCode, body):
+		owner, repo := parseWikiEndpointOwnerRepo(endpoint)
+		return nil, nil, ErrEmptyWiki{Owner: owner, Repo: repo}
+	default:
+		return nil, nil, c.statusError(resp.StatusCode, endpoint, body, opts)
 		}
 	}
 	return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempts}
@@ -949,4 +996,16 @@ func isRetryableTransport(err error) bool {
 		return netErr.Timeout() || netErr.Temporary()
 	}
 	return true
+}
+
+func parseWikiEndpointOwnerRepo(endpoint string) (owner, repo string) {
+	trimmed := strings.TrimLeft(endpoint, "/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) < 5 || parts[0] != "api" || parts[1] != "v5" || parts[2] != "repos" {
+		return "", ""
+	}
+	owner = parts[3]
+	repoWithWiki := parts[4]
+	repo = strings.TrimSuffix(repoWithWiki, ".wiki")
+	return owner, repo
 }

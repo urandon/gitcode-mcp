@@ -1871,3 +1871,144 @@ func TestBoundedWikiTreeTraversalNoOuterLoopPattern(t *testing.T) {
 		t.Fatalf("expected 1 page, got %d", len(wikis.Items))
 	}
 }
+
+func TestEmptyWikiDetection400(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents" {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"message":"wiki not found"}`)
+			return
+		}
+		t.Fatalf("unexpected wiki path %s", r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	_, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo"})
+	var emptyWiki ErrEmptyWiki
+	if !errors.As(err, &emptyWiki) {
+		t.Fatalf("expected ErrEmptyWiki, got %T %v", err, err)
+	}
+	if emptyWiki.DiagnosticCode() != "empty_wiki" {
+		t.Fatalf("DiagnosticCode() = %q, want %q", emptyWiki.DiagnosticCode(), "empty_wiki")
+	}
+	if !strings.Contains(emptyWiki.Error(), "empty or uninitialized") {
+		t.Fatalf("ErrEmptyWiki missing remediation text: %s", emptyWiki.Error())
+	}
+	if strings.Contains(emptyWiki.Error(), "api_validation") {
+		t.Fatalf("ErrEmptyWiki should not mention api_validation: %s", emptyWiki.Error())
+	}
+}
+
+func TestEmptyWikiDetection404(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents" {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"message":"wiki is empty"}`)
+			return
+		}
+		t.Fatalf("unexpected wiki path %s", r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	_, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo"})
+	var emptyWiki ErrEmptyWiki
+	if !errors.As(err, &emptyWiki) {
+		t.Fatalf("expected ErrEmptyWiki, got %T %v", err, err)
+	}
+	if emptyWiki.DiagnosticCode() != "empty_wiki" {
+		t.Fatalf("DiagnosticCode() = %q, want %q", emptyWiki.DiagnosticCode(), "empty_wiki")
+	}
+}
+
+func TestEmptyWikiDetection400NonEmptyWiki(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents" {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"message":"invalid repo name"}`)
+			return
+		}
+		t.Fatalf("unexpected wiki path %s", r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	_, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo"})
+	var apiValidation ErrAPIValidation
+	if !errors.As(err, &apiValidation) {
+		t.Fatalf("expected ErrAPIValidation for non-empty-wiki 400, got %T %v", err, err)
+	}
+	if apiValidation.DiagnosticCode() != "api_validation" {
+		t.Fatalf("DiagnosticCode() = %q, want %q", apiValidation.DiagnosticCode(), "api_validation")
+	}
+}
+
+func TestEmptyWikiDetection404UninitializedMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"wiki is not initialized", `{"message":"wiki is not initialized"}`},
+		{"wiki is uninitialized", `{"message":"wiki is uninitialized"}`},
+		{"uninitialized wiki", `{"message":"uninitialized wiki"}`},
+		{"wiki has not been created", `{"message":"wiki has not been created"}`},
+		{"wiki has no pages", `{"message":"wiki has no pages"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				fmt.Fprint(w, tt.body)
+			}))
+			defer server.Close()
+			client := newTestClient(t, server.URL, Config{})
+			_, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo"})
+			var emptyWiki ErrEmptyWiki
+			if !errors.As(err, &emptyWiki) {
+				t.Fatalf("expected ErrEmptyWiki, got %T %v", err, err)
+			}
+		})
+	}
+}
+
+func TestEmptyWikiDetectionEmptyArray200IsOK(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents" {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `[]`)
+			return
+		}
+		t.Fatalf("unexpected wiki path %s", r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	wikis, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if err != nil {
+		t.Fatalf("ListWikiPages with empty [] 200 should not error, got: %v", err)
+	}
+	if len(wikis.Items) != 0 {
+		t.Fatalf("expected 0 pages from empty array, got %d", len(wikis.Items))
+	}
+}
+
+func TestCreateWikiPageEmptyWikiDiagnostic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v5/repos/example-owner/example-repo.wiki/contents/") {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"message":"wiki not found"}`)
+			return
+		}
+		t.Fatalf("unexpected wiki request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	_, err := client.CreateWikiPage(context.Background(), CreateWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "Home.md", Title: "Home", Body: "# Welcome"}, WriteOptions{IdempotencyKey: "key-create-empty"})
+	var emptyWiki ErrEmptyWiki
+	if !errors.As(err, &emptyWiki) {
+		t.Fatalf("expected ErrEmptyWiki from CreateWikiPage against empty wiki, got %T %v", err, err)
+	}
+	if emptyWiki.DiagnosticCode() != "empty_wiki" {
+		t.Fatalf("DiagnosticCode() = %q, want %q", emptyWiki.DiagnosticCode(), "empty_wiki")
+	}
+	if !strings.Contains(emptyWiki.Error(), "empty or uninitialized") {
+		t.Fatalf("ErrEmptyWiki missing remediation text: %s", emptyWiki.Error())
+	}
+}
