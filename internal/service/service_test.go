@@ -608,6 +608,48 @@ func TestAddLabelLiveUnsupportedCapability(t *testing.T) {
 	}
 }
 
+func TestScenario017AddCommentLiveShapeCachesComment(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	created := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		createIssueCommentResult: gitcode.WriteResult[gitcode.Comment]{Record: gitcode.Comment{ID: "2002", Body: "live comment", Author: "commenter", CreatedAt: created}, Confirmed: true, Operation: "CreateIssueComment", RemoteID: "2002", ParentIssueNumber: 42, ConfirmedAt: created},
+	}
+	svc := NewWithClient(store, client)
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.writeCredentialPresent = true
+	result, err := svc.AddComment(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 42, Body: "live comment", IdempotencyKey: "comment-key-live-shape"})
+	if err != nil {
+		t.Fatalf("AddComment live returned error: %v", err)
+	}
+	if result.Status != "succeeded" || result.RemoteID != "2002" || client.createIssueCommentCalls != 1 {
+		t.Fatalf("unexpected result=%+v calls=%d", result, client.createIssueCommentCalls)
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", "ISSUE-42")
+	if err != nil {
+		t.Fatalf("GetRecord: %v", err)
+	}
+	if len(record.Comments) != 1 || record.Comments[0].CommentID != "2002" || record.Comments[0].Author != "commenter" || record.Comments[0].Body != "live comment" {
+		t.Fatalf("comments=%#v", record.Comments)
+	}
+}
+
+func TestScenario017AddCommentMalformedBodyDiagnosticHTTPAttempted(t *testing.T) {
+	err := ErrWriteFailure{Code: "schema_decode", RepoID: "fixture-a", PayloadSource: "schema_decode", Cause: &gitcode.ErrSchemaDecode{Field: "comment", Message: "malformed"}}
+	ctx := diagnostics.CommandContext{ProviderMode: "live-http", HTTPAttempted: err.Code == "schema_decode", SchemaDecodeFailure: true, FailureSource: err.PayloadSource}
+	diagnostic := diagnostics.Classify(err, ctx)
+	if diagnostic.Code != diagnostics.CodeSchemaDecode || !diagnostic.HTTPAttempted {
+		t.Fatalf("diagnostic=%+v", diagnostic)
+	}
+}
+
 func TestS018LiveWriteConfirmedRefreshesCommentAndWiki(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)

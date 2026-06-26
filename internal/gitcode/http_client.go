@@ -196,10 +196,10 @@ func (c *HTTPClient) CreateIssueComment(ctx context.Context, req CreateIssueComm
 		return WriteResult[Comment]{}, err
 	}
 	target := req.Owner + "/" + req.Repo + "/" + strconv.Itoa(req.Number)
-	return writeConfirmedJSON[Comment](ctx, c, http.MethodPost, createIssueCommentEndpoint(req.Owner, req.Repo, req.Number), "CreateIssueComment", target, req, opts, func(result WriteResult[Comment]) (WriteResult[Comment], error) {
+	return writeConfirmedSchemaJSON[Comment](ctx, c, http.MethodPost, createIssueCommentEndpoint(req.Owner, req.Repo, req.Number), "CreateIssueComment", target, req, opts, func(result WriteResult[Comment]) (WriteResult[Comment], error) {
 		comment := result.Record
 		if strings.TrimSpace(comment.ID) == "" {
-			return WriteResult[Comment]{}, ErrValidationFailed{Field: "response", Message: "comment confirmation requires id"}
+			return WriteResult[Comment]{}, &ErrSchemaDecode{Field: "comment.id", Expected: "note_id or id", Received: "missing"}
 		}
 		result.RemoteID = comment.ID
 		result.ParentIssueNumber = req.Number
@@ -567,6 +567,14 @@ func decodeJSON(endpoint string, body []byte, out any) error {
 	return nil
 }
 
+func decodeSchemaJSON(endpoint string, body []byte, out any) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if err := dec.Decode(out); err != nil {
+		return &ErrSchemaDecode{Field: endpoint, Expected: "valid JSON response", Received: decodeMessage(err)}
+	}
+	return nil
+}
+
 func (c *HTTPClient) getBytes(ctx context.Context, endpoint string, values url.Values) ([]byte, http.Header, error) {
 	return c.getBytesWithOptions(ctx, endpoint, values, requestOptions{})
 }
@@ -605,6 +613,14 @@ func updateIssuePayload(req UpdateIssueRequest) any {
 }
 
 func writeConfirmedJSON[T any](ctx context.Context, c *HTTPClient, method, endpoint, operation, target string, payload any, opts WriteOptions, confirm func(WriteResult[T]) (WriteResult[T], error)) (WriteResult[T], error) {
+	return writeConfirmedWithDecoder(ctx, c, method, endpoint, operation, target, payload, opts, decodeJSON, confirm)
+}
+
+func writeConfirmedSchemaJSON[T any](ctx context.Context, c *HTTPClient, method, endpoint, operation, target string, payload any, opts WriteOptions, confirm func(WriteResult[T]) (WriteResult[T], error)) (WriteResult[T], error) {
+	return writeConfirmedWithDecoder(ctx, c, method, endpoint, operation, target, payload, opts, decodeSchemaJSON, confirm)
+}
+
+func writeConfirmedWithDecoder[T any](ctx context.Context, c *HTTPClient, method, endpoint, operation, target string, payload any, opts WriteOptions, decode func(string, []byte, any) error, confirm func(WriteResult[T]) (WriteResult[T], error)) (WriteResult[T], error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return WriteResult[T]{}, err
@@ -621,7 +637,7 @@ func writeConfirmedJSON[T any](ctx context.Context, c *HTTPClient, method, endpo
 		return WriteResult[T]{}, err
 	}
 	var record T
-	if err := decodeJSON(endpoint, respBody, &record); err != nil {
+	if err := decode(endpoint, respBody, &record); err != nil {
 		return WriteResult[T]{}, err
 	}
 	hash := sha256.Sum256(respBody)

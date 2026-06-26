@@ -2550,6 +2550,10 @@ func (s *Service) writeAdapterErrorCode(mode WriteMode, err error) string {
 }
 
 func writeErrorCode(err error) string {
+	var schema *gitcode.ErrSchemaDecode
+	if errors.As(err, &schema) {
+		return "schema_decode"
+	}
 	var conflict gitcode.ErrConflict
 	if errors.As(err, &conflict) {
 		return "write_conflict"
@@ -2580,6 +2584,10 @@ func failureSource(err error) string {
 	var tooLarge gitcode.ErrPayloadTooLarge
 	if errors.As(err, &tooLarge) {
 		return tooLarge.Source
+	}
+	var schema *gitcode.ErrSchemaDecode
+	if errors.As(err, &schema) {
+		return "schema_decode"
 	}
 	var partial gitcode.ErrPartialResponse
 	if errors.As(err, &partial) {

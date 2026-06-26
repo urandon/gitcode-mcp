@@ -266,6 +266,94 @@ type Comment struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+func (c *Comment) UnmarshalJSON(data []byte) error {
+	type rawComment struct {
+		ID        any             `json:"id"`
+		NoteID    any             `json:"note_id"`
+		IssueID   any             `json:"issue_id"`
+		Body      string          `json:"body"`
+		Author    string          `json:"author"`
+		User      json.RawMessage `json:"user"`
+		CreatedAt string          `json:"created_at"`
+		UpdatedAt string          `json:"updated_at"`
+	}
+	var raw rawComment
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	id, err := decodeOptionalID(firstNonNil(raw.NoteID, raw.ID))
+	if err != nil {
+		return err
+	}
+	issueID, err := decodeOptionalID(raw.IssueID)
+	if err != nil {
+		return err
+	}
+	created, err := decodeOptionalTime("comment.created_at", raw.CreatedAt)
+	if err != nil {
+		return err
+	}
+	updated, err := decodeOptionalTime("comment.updated_at", raw.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	*c = Comment{ID: id, IssueID: issueID, Body: raw.Body, Author: firstNonEmpty(raw.Author, decodeCommentUser(raw.User)), CreatedAt: created, UpdatedAt: updated}
+	return nil
+}
+
+func firstNonNil(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func decodeOptionalID(value any) (string, error) {
+	if value == nil {
+		return "", nil
+	}
+	return decodeID(value)
+}
+
+func decodeOptionalTime(field, value string) (time.Time, error) {
+	if strings.TrimSpace(value) == "" {
+		return time.Time{}, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, &ErrSchemaDecode{Field: field, Expected: "RFC3339 timestamp or absent", Received: fmt.Sprintf("%q", value)}
+	}
+	return parsed, nil
+}
+
+func decodeCommentUser(data json.RawMessage) string {
+	if len(data) == 0 || string(data) == "null" {
+		return ""
+	}
+	var user struct {
+		Login    string `json:"login"`
+		Username string `json:"username"`
+		Name     string `json:"name"`
+		ID       any    `json:"id"`
+	}
+	if err := json.Unmarshal(data, &user); err != nil {
+		return ""
+	}
+	id, _ := decodeOptionalID(user.ID)
+	return firstNonEmpty(user.Login, user.Username, user.Name, id)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 type WikiPage struct {
 	ID        string    `json:"id"`
 	Slug      string    `json:"slug"`

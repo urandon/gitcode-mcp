@@ -671,14 +671,33 @@ func TestConfirmedWriteOperations(t *testing.T) {
 			name:   "write-confirm-create-comment",
 			method: http.MethodPost,
 			path:   createIssueCommentEndpoint("example-owner", "example-repo", 42),
-			body:   `{"id":"COMMENT-1","issue_id":"ISSUE-42","body":"comment"}`,
+			body:   `{"id":"LEGACY-COMMENT-1","issue_id":"ISSUE-42","body":"comment"}`,
 			invoke: func(client *HTTPClient) (WriteResult[any], error) {
 				result, err := client.CreateIssueComment(context.Background(), CreateIssueCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 42, Body: "comment"}, WriteOptions{IdempotencyKey: "key-create-comment"})
 				return anyWriteResult(result), err
 			},
 			assertion: func(t *testing.T, result WriteResult[any]) {
-				if result.RemoteID != "COMMENT-1" || result.ParentIssueNumber != 42 || result.ParentIssueID != "ISSUE-42" {
+				if result.RemoteID != "LEGACY-COMMENT-1" || result.ParentIssueNumber != 42 || result.ParentIssueID != "ISSUE-42" {
 					t.Fatalf("missing comment identity: %+v", result)
+				}
+			},
+		},
+		{
+			name:   "SCN-GITCODE-ADD-COMMENT-LIVE-SHAPE-01",
+			method: http.MethodPost,
+			path:   createIssueCommentEndpoint("example-owner", "example-repo", 42),
+			body:   `{"id":1001,"note_id":2002,"body":"comment","created_at":"2026-06-20T12:00:00Z","user":{"login":"commenter"}}`,
+			invoke: func(client *HTTPClient) (WriteResult[any], error) {
+				result, err := client.CreateIssueComment(context.Background(), CreateIssueCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 42, Body: "comment"}, WriteOptions{IdempotencyKey: "key-create-comment"})
+				return anyWriteResult(result), err
+			},
+			assertion: func(t *testing.T, result WriteResult[any]) {
+				comment, ok := result.Record.(Comment)
+				if !ok {
+					t.Fatalf("record type = %T", result.Record)
+				}
+				if result.RemoteID != "2002" || result.ParentIssueNumber != 42 || comment.ID != "2002" || comment.Author != "commenter" || comment.Body != "comment" || comment.CreatedAt.IsZero() {
+					t.Fatalf("unexpected live comment result: result=%+v comment=%+v", result, comment)
 				}
 			},
 		},
@@ -820,6 +839,26 @@ func TestScenario015WikiCreatePageFollowupConfirmationFailure(t *testing.T) {
 
 func anyWriteResult[T any](result WriteResult[T]) WriteResult[any] {
 	return WriteResult[any]{Record: result.Record, Confirmed: result.Confirmed, Operation: result.Operation, Target: result.Target, ProviderStatus: result.ProviderStatus, RemoteID: result.RemoteID, RemoteNumber: result.RemoteNumber, RemoteSlug: result.RemoteSlug, RemoteRevision: result.RemoteRevision, ParentIssueNumber: result.ParentIssueNumber, ParentIssueID: result.ParentIssueID, IdempotencyKey: result.IdempotencyKey, ResponseHash: result.ResponseHash, ConfirmedAt: result.ConfirmedAt, ProviderPayloadFingerprint: result.ProviderPayloadFingerprint}
+}
+
+func TestScenario017AddCommentMalformedBodySchemaDecode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != createIssueCommentEndpoint("example-owner", "example-repo", 42) {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"id":`)
+	}))
+	defer server.Close()
+
+	result, err := newTestClient(t, server.URL, Config{}).CreateIssueComment(context.Background(), CreateIssueCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 42, Body: "comment"}, WriteOptions{IdempotencyKey: "key-create-comment"})
+	var schemaErr *ErrSchemaDecode
+	if !errors.As(err, &schemaErr) || result.Confirmed {
+		t.Fatalf("expected schema decode without confirmation: result=%+v err=%T %v", result, err, err)
+	}
+	if schemaErr.DiagnosticCode() != "schema_decode" {
+		t.Fatalf("diagnostic = %q", schemaErr.DiagnosticCode())
+	}
 }
 
 func TestWriteNegativeScenariosDoNotConfirm(t *testing.T) {

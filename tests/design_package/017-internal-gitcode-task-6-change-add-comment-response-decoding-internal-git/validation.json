@@ -1,0 +1,20 @@
+{
+  "covered_outcome_ids": [
+    "outcome-7"
+  ],
+  "covered_decommission_ids": [
+    "decommission-6"
+  ],
+  "product_surfaces": [
+    "internal/gitcode.HTTPClient.CreateIssueComment POST /api/v5/repos/{owner}/{repo}/issues/{num}/comments response decoding",
+    "internal/service.Service.AddComment live write path comment cache projection",
+    "internal/diagnostics write failure classification for malformed add-comment success responses"
+  ],
+  "evidence_type": "API test",
+  "freshness": "current binary build with mocked Go tests",
+  "mocks_used": [
+    "local httptest HTTP server for external GitCode API dependency only",
+    "service fake GitCode client at the service boundary for cache projection and diagnostic classification evidence"
+  ],
+  "production_files_modified": []
+}
