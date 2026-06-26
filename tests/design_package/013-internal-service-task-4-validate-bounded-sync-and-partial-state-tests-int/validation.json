@@ -1,0 +1,15 @@
+{
+  "covered_outcome_ids": ["outcome-3", "outcome-4"],
+  "covered_decommission_ids": ["decommission-3"],
+  "product_surfaces": [
+    "internal/service/sync_bounds.go",
+    "internal/service/service.go"
+  ],
+  "evidence_type": "API test",
+  "freshness": "current binary build with mocked Go tests",
+  "mocks_used": [
+    "fakeGitCodeClient (mock paginated provider)",
+    "cache.NewInMemorySQLiteStore (in-memory SQLite)"
+  ],
+  "production_files_modified": []
+}
