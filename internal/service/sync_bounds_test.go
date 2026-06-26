@@ -614,6 +614,98 @@ func TestNormalizeSyncFailureMapsEmptyWiki(t *testing.T) {
 	}
 }
 
+func TestBulkSyncWikiBoundedCancelMidSync(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	base := time.Date(2026, 6, 22, 15, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		listWikiPages: []gitcode.Page[gitcode.WikiPage]{
+			{Items: generateWikiPages(1, 20), Page: 1, PerPage: 100},
+		},
+		wikiBySlug: buildWikiMap(20, base),
+	}
+	store, err := cache.NewInMemorySQLiteStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "wiki-cancel-mid", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	result, err := svc.BulkSyncWiki(ctx, BulkSyncRequest{
+		RepoID:  "wiki-cancel-mid",
+		Page:    1,
+		PerPage: 100,
+		Bounds:  &SyncBounds{MaxRecords: 20},
+	})
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var partial *PartialSyncError
+	if !errors.As(err, &partial) {
+		t.Fatalf("error = %T %v, want *PartialSyncError", err, err)
+	}
+	if partial.Diagnostic != SyncDiagnosticCancelled {
+		t.Fatalf("diagnostic = %q, want %q", partial.Diagnostic, SyncDiagnosticCancelled)
+	}
+	if partial.SuccessCount < 1 {
+		t.Fatalf("success_count = %d, want >= 1", partial.SuccessCount)
+	}
+	if result == nil {
+		t.Fatal("result is nil")
+	}
+	if result.SuccessCount < 1 {
+		t.Fatalf("result.success_count = %d, want >= 1", result.SuccessCount)
+	}
+	totalItems := result.SuccessCount + result.FailureCount
+	if totalItems != 20 {
+		t.Fatalf("total items processed = %d, want 20", totalItems)
+	}
+}
+
+func TestBulkSyncWikiBoundedSingleListWikiPagesCall(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 22, 15, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		listWikiPages: []gitcode.Page[gitcode.WikiPage]{
+			{Items: generateWikiPages(1, 20), Page: 1, PerPage: 100},
+		},
+		wikiBySlug: buildWikiMap(20, base),
+	}
+	store, err := cache.NewInMemorySQLiteStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "wiki-single-list", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+
+	result, err := svc.BulkSyncWiki(ctx, BulkSyncRequest{
+		RepoID:  "wiki-single-list",
+		Page:    1,
+		PerPage: 10,
+		Bounds:  &SyncBounds{MaxRecords: 10},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.SuccessCount != 10 {
+		t.Fatalf("success_count = %d, want 10", result.SuccessCount)
+	}
+	if client.listWikiPagesCallCount != 1 {
+		t.Fatalf("ListWikiPages call count = %d, want 1 (bounded wiki sync uses single call, no outer loop)", client.listWikiPagesCallCount)
+	}
+}
+
 func TestErrorHasDiagnosticCode(t *testing.T) {
 	tests := []struct {
 		name string

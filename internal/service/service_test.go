@@ -2257,6 +2257,7 @@ type fakeGitCodeClient struct {
 	listIssuesErrors         []error
 	listWikiPages            []gitcode.Page[gitcode.WikiPage]
 	listWikiErrors           []error
+	listWikiPagesCallCount   int
 	issuesByNumber           map[int]gitcode.Issue
 	wikiBySlug               map[string]gitcode.WikiPage
 	commentsByIssue          map[int][]gitcode.Comment
@@ -2318,6 +2319,7 @@ func (f *fakeGitCodeClient) GetWikiPage(_ context.Context, req gitcode.WikiPageR
 	return f.wiki, nil
 }
 func (f *fakeGitCodeClient) ListWikiPages(context.Context, gitcode.WikiListRequest) (gitcode.Page[gitcode.WikiPage], error) {
+	f.listWikiPagesCallCount++
 	if len(f.listWikiErrors) > 0 {
 		err := f.listWikiErrors[0]
 		f.listWikiErrors = f.listWikiErrors[1:]
