@@ -394,22 +394,8 @@ func runMCPServe(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr 
 }
 
 func runMCPStdio(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, deps StartupDeps) int {
-	if err := ensureParentDir(deps.Config.CachePath); err != nil {
-		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
-		return 1
-	}
-	store, err := cache.NewSQLiteStore(ctx, deps.Config.CachePath)
-	if err != nil {
-		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
-		return 1
-	}
-	defer store.Close()
-	svc, err := resolveService(store, deps)
-	if err != nil {
-		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
-		return 1
-	}
-	server := mcp.New(stdin, stdout, stderr, svc)
+	server, closeStore := newMCPStdioServer(ctx, stdin, stdout, stderr, deps)
+	defer closeStore()
 	if err := server.Serve(); err != nil {
 		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
 		return 1
@@ -417,21 +403,49 @@ func runMCPStdio(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr 
 	return 0
 }
 
-func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind string) int {
+func newMCPStdioServer(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, deps StartupDeps) (*mcp.Server, func()) {
 	if err := ensureParentDir(deps.Config.CachePath); err != nil {
-		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
-		return 1
+		return mcp.NewMinimal(stdin, stdout, stderr, mcp.StartupDiagnosticFromError(err)), func() {}
 	}
 	store, err := cache.NewSQLiteStore(ctx, deps.Config.CachePath)
 	if err != nil {
-		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
-		return 1
+		return mcp.NewMinimal(stdin, stdout, stderr, mcp.StartupDiagnosticFromError(err)), func() {}
+	}
+	svc, err := resolveService(store, deps)
+	if err != nil {
+		_ = store.Close()
+		return mcp.NewMinimal(stdin, stdout, stderr, mcp.StartupDiagnosticFromError(err)), func() {}
+	}
+	return mcp.New(stdin, stdout, stderr, svc), func() { _ = store.Close() }
+}
+
+func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind string) int {
+	if err := ensureParentDir(deps.Config.CachePath); err != nil {
+		transport := mcp.NewHTTPSSETransport(mcp.NewMinimalRPCHandler(mcp.StartupDiagnosticFromError(err)), mcp.ServerConfig{BindAddress: bind})
+		if err := transport.Serve(ctx); err != nil {
+			fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
+			return 1
+		}
+		return 0
+	}
+	store, err := cache.NewSQLiteStore(ctx, deps.Config.CachePath)
+	if err != nil {
+		transport := mcp.NewHTTPSSETransport(mcp.NewMinimalRPCHandler(mcp.StartupDiagnosticFromError(err)), mcp.ServerConfig{BindAddress: bind})
+		if err := transport.Serve(ctx); err != nil {
+			fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
+			return 1
+		}
+		return 0
 	}
 	defer store.Close()
 	svc, err := resolveService(store, deps)
 	if err != nil {
-		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
-		return 1
+		transport := mcp.NewHTTPSSETransport(mcp.NewMinimalRPCHandler(mcp.StartupDiagnosticFromError(err)), mcp.ServerConfig{BindAddress: bind})
+		if err := transport.Serve(ctx); err != nil {
+			fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
+			return 1
+		}
+		return 0
 	}
 	transport := mcp.NewHTTPSSETransport(mcp.NewRPCHandler(svc), mcp.ServerConfig{BindAddress: bind, ReadinessProbe: func(ctx context.Context) mcp.Readiness {
 		repos, err := store.ListRepositories(ctx)

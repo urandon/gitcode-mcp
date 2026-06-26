@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,8 @@ import (
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/diagnostics"
+
+	_ "modernc.org/sqlite"
 )
 
 type testSource struct {
@@ -632,6 +635,44 @@ func TestEntrypointMCPInitialize(t *testing.T) {
 	}
 }
 
+func TestEntrypointMCPStartupFallback(t *testing.T) {
+	t.Run("SCN-MCP-STARTUP-SCHEMA-INCOMPATIBLE", func(t *testing.T) {
+		cachePath := filepath.Join(t.TempDir(), "cache.db")
+		writeSchemaVersion(t, cachePath, 99)
+		stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}` + "\n" + `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"doctor","arguments":{}}}` + "\n")
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"--mcp", "--cache-path", cachePath}, stdin, &stdout, &stderr, newTestSource(t))
+		if code != 0 || stderr.Len() != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		lines := nonEmptyLines(stdout.String())
+		if len(lines) != 2 {
+			t.Fatalf("stdout lines=%d %q", len(lines), stdout.String())
+		}
+		assertStartupToolsList(t, lines[0], "schema_incompatible")
+		assertStartupDoctor(t, lines[1], "schema_incompatible", "upgrade")
+	})
+
+	t.Run("SCN-MCP-STARTUP-INJECTED-CACHE-INIT-FAILURE", func(t *testing.T) {
+		cachePath := filepath.Join(t.TempDir(), "missing", "cache.db")
+		if err := os.WriteFile(filepath.Dir(cachePath), []byte("not a directory"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}` + "\n" + `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"doctor","arguments":{}}}` + "\n")
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"--mcp", "--cache-path", cachePath}, stdin, &stdout, &stderr, newTestSource(t))
+		if code != 0 || stderr.Len() != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		lines := nonEmptyLines(stdout.String())
+		if len(lines) != 2 {
+			t.Fatalf("stdout lines=%d %q", len(lines), stdout.String())
+		}
+		assertStartupToolsList(t, lines[0], "startup-failure")
+		assertStartupDoctor(t, lines[1], "startup-failure", "doctor")
+	})
+}
+
 func TestEntrypointMCPServeRouting(t *testing.T) {
 	src := newTestSource(t)
 	old := mcpServeRoute
@@ -649,6 +690,81 @@ func TestEntrypointMCPServeRouting(t *testing.T) {
 	}
 	if gotTransport != "http-sse" || gotBind != "127.0.0.1:9234" {
 		t.Fatalf("route transport=%q bind=%q", gotTransport, gotBind)
+	}
+}
+
+func nonEmptyLines(out string) []string {
+	var lines []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func assertStartupToolsList(t *testing.T, line string, wantCode string) {
+	t.Helper()
+	var resp struct {
+		Result struct {
+			Tools []struct {
+				Name string `json:"name"`
+			} `json:"tools"`
+			StartupDiagnostic struct {
+				ErrorClass string `json:"error_class"`
+			} `json:"startup_diagnostic"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(line), &resp); err != nil {
+		t.Fatalf("decode tools/list: %v line=%q", err, line)
+	}
+	if len(resp.Result.Tools) != 1 || resp.Result.Tools[0].Name != "doctor" {
+		t.Fatalf("tools/list tools=%+v", resp.Result.Tools)
+	}
+	if resp.Result.StartupDiagnostic.ErrorClass != wantCode {
+		t.Fatalf("diagnostic=%q want %q", resp.Result.StartupDiagnostic.ErrorClass, wantCode)
+	}
+}
+
+func assertStartupDoctor(t *testing.T, line string, wantCode string, wantRemediation string) {
+	t.Helper()
+	var resp struct {
+		Result struct {
+			StructuredContent struct {
+				Status      string `json:"status"`
+				Diagnostics []struct {
+					Code        string `json:"code"`
+					Message     string `json:"message"`
+					Remediation string `json:"remediation"`
+				} `json:"diagnostics"`
+			} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(line), &resp); err != nil {
+		t.Fatalf("decode doctor: %v line=%q", err, line)
+	}
+	if resp.Result.StructuredContent.Status != "degraded" || len(resp.Result.StructuredContent.Diagnostics) != 1 {
+		t.Fatalf("doctor=%+v", resp.Result.StructuredContent)
+	}
+	diagnostic := resp.Result.StructuredContent.Diagnostics[0]
+	if diagnostic.Code != wantCode || diagnostic.Message == "" || !strings.Contains(diagnostic.Remediation, wantRemediation) {
+		t.Fatalf("diagnostic=%+v", diagnostic)
+	}
+}
+
+func writeSchemaVersion(t *testing.T, path string, version int) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE schema_version (version INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_version (version) VALUES (?)`, version); err != nil {
+		t.Fatal(err)
 	}
 }
 

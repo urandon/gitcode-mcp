@@ -43,23 +43,35 @@ type serviceInterface interface {
 }
 
 type RPCHandler struct {
-	svc serviceInterface
+	svc               serviceInterface
+	startupDiagnostic StartupDiagnostic
+	minimal           bool
 }
 
 type Server struct {
-	reader  io.Reader
-	writer  io.Writer
-	stderr  io.Writer
-	handler *RPCHandler
-	svc     serviceInterface
+	reader            io.Reader
+	writer            io.Writer
+	stderr            io.Writer
+	handler           *RPCHandler
+	svc               serviceInterface
+	startupDiagnostic StartupDiagnostic
+	minimal           bool
 }
 
 func NewRPCHandler(svc serviceInterface) *RPCHandler {
 	return &RPCHandler{svc: svc}
 }
 
+func NewMinimalRPCHandler(diagnostic StartupDiagnostic) *RPCHandler {
+	return &RPCHandler{startupDiagnostic: diagnostic, minimal: true}
+}
+
 func New(r io.Reader, w io.Writer, stderr io.Writer, svc serviceInterface) *Server {
 	return &Server{reader: r, writer: w, stderr: stderr, handler: NewRPCHandler(svc), svc: svc}
+}
+
+func NewMinimal(r io.Reader, w io.Writer, stderr io.Writer, diagnostic StartupDiagnostic) *Server {
+	return &Server{reader: r, writer: w, stderr: stderr, handler: NewMinimalRPCHandler(diagnostic), startupDiagnostic: diagnostic, minimal: true}
 }
 
 func (h *RPCHandler) Handle(ctx context.Context, req request) (*response, bool) {
@@ -67,7 +79,7 @@ func (h *RPCHandler) Handle(ctx context.Context, req request) (*response, bool) 
 		return &response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32600, Message: "Invalid request"}}, true
 	}
 	var buf bytes.Buffer
-	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc}
+	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal}
 	server.handle(ctx, req, req.ID == nil)
 	line := bytes.TrimSpace(buf.Bytes())
 	if len(line) == 0 {
@@ -144,7 +156,8 @@ type initCapability struct {
 }
 
 type toolCapability struct {
-	ListChanged bool `json:"listChanged"`
+	ListChanged       bool               `json:"listChanged"`
+	StartupDiagnostic *StartupDiagnostic `json:"startup_diagnostic,omitempty"`
 }
 
 type serverInfo struct {
@@ -153,7 +166,8 @@ type serverInfo struct {
 }
 
 type toolsListResult struct {
-	Tools []toolDefinition `json:"tools"`
+	Tools             []toolDefinition   `json:"tools"`
+	StartupDiagnostic *StartupDiagnostic `json:"startup_diagnostic,omitempty"`
 }
 
 type toolCallParams struct {
@@ -459,9 +473,14 @@ func (s *Server) handle(ctx context.Context, req request, isNotification bool) {
 }
 
 func (s *Server) init(req request) {
+	capability := toolCapability{ListChanged: false}
+	if s.startupDiagnostic.present() {
+		diagnostic := s.startupDiagnostic
+		capability.StartupDiagnostic = &diagnostic
+	}
 	result := initResult{
 		ProtocolVersion: protocolVersion,
-		Capabilities:    initCapability{Tools: toolCapability{ListChanged: false}},
+		Capabilities:    initCapability{Tools: capability},
 		ServerInfo:      serverInfo{Name: "gitcode-mcp", Version: serverVersion},
 	}
 	b, _ := json.Marshal(result)
@@ -478,7 +497,12 @@ func (s *Server) toolsList(req request) {
 		}
 		tools = append(tools, tool.definition)
 	}
-	b, _ := json.Marshal(toolsListResult{Tools: tools})
+	result := toolsListResult{Tools: tools}
+	if s.startupDiagnostic.present() {
+		diagnostic := s.startupDiagnostic
+		result.StartupDiagnostic = &diagnostic
+	}
+	b, _ := json.Marshal(result)
 	s.writeResponse(req.ID, b)
 }
 
@@ -553,6 +577,10 @@ func registerTool(registry toolRegistry, name string, handler toolHandler) {
 
 func (s *Server) toolRegistry() toolRegistry {
 	registry := toolRegistry{}
+	if s.minimal {
+		registerTool(registry, "doctor", s.callDoctor)
+		return registry
+	}
 	registerTool(registry, "search_sources", s.callSearchSources)
 	registerTool(registry, "get_source", s.callGetSource)
 	registerTool(registry, "list_sources", s.callListSources)

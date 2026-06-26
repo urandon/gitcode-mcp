@@ -203,5 +203,11 @@ func (s *Server) callDoctor(_ context.Context, id *json.RawMessage, args json.Ra
 		return
 	}
 	result := doctorResult{Status: "ok", RepoID: a.RepoID, Diagnostics: []lifecycleDiagnostic{}, GeneratedAt: time.Now().UTC()}
-	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: "doctor status=ok"}}, StructuredContent: result})
+	text := "doctor status=ok"
+	if s.startupDiagnostic.present() {
+		result.Status = "degraded"
+		result.Diagnostics = append(result.Diagnostics, lifecycleDiagnostic{Code: s.startupDiagnostic.ErrorClass, Message: s.startupDiagnostic.Message, Remediation: s.startupDiagnostic.Remediation})
+		text = "doctor status=degraded"
+	}
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 }
