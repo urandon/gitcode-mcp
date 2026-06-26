@@ -30,6 +30,9 @@ type serviceInterface interface {
 	SyncStatus(context.Context, service.ListSourcesRequest) (service.SyncStatusSummaryResult, error)
 	ExportSnapshot(context.Context, service.ExportSnapshotRequest) (service.ExportSnapshotResult, error)
 	DiffSnapshot(context.Context, service.DiffSnapshotRequest) (service.DiffSnapshotResult, error)
+	RepositoryStatus(context.Context, service.RepositoryStatusRequest) (service.RepositoryStatus, error)
+	SyncToCache(context.Context, service.SyncRequest) (service.SyncResult, error)
+	Index(context.Context, service.OperationRequest) (service.OperationResult, error)
 	ListChunks(context.Context, service.ChunkQuery) (service.ChunkQueryResult, error)
 	SearchChunks(context.Context, service.ChunkSearchQuery) (service.ChunkQueryResult, error)
 	GetChunkSnippet(context.Context, service.SnippetQuery) (service.ChunkQueryResult, error)
@@ -358,6 +361,31 @@ var toolDefs = []toolDefinition{
 			Required: []string{"repo_id", "base_id", "head_id"},
 		},
 	},
+	{
+		Name:        "repo_status",
+		Description: "Report configured repository binding and cache readiness state.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id. Omit for nothing-bound status."}}},
+	},
+	{
+		Name:        "sync_live",
+		Description: "Synchronize selected live collection records into the cache.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "issues": {Type: "boolean", Description: "Sync issues."}, "wiki": {Type: "boolean", Description: "Sync wiki pages."}, "comments": {Type: "boolean", Description: "Sync comments."}, "pulls": {Type: "boolean", Description: "Sync pull requests."}, "remote_alias": {Type: "string", Description: "Specific remote alias for current sync surface."}, "idempotency_key": {Type: "string", Description: "Idempotency key."}}, Required: []string{"repo_id"}},
+	},
+	{
+		Name:        "index_repo",
+		Description: "Build or refresh the local index for a configured repository.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "mode": {Type: "string", Description: "Index mode.", Default: "full"}, "strict": {Type: "boolean", Description: "Use strict indexing behavior."}}, Required: []string{"repo_id"}},
+	},
+	{
+		Name:        "auth_status",
+		Description: "Report redacted credential presence and source metadata.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{}},
+	},
+	{
+		Name:        "doctor",
+		Description: "Report structured MCP server health diagnostics.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id."}}},
+	},
 }
 
 func (s *Server) Serve() error {
@@ -511,6 +539,11 @@ var toolListOrder = []string{
 	"sync_status",
 	"export_snapshot",
 	"diff_snapshot",
+	"repo_status",
+	"sync_live",
+	"index_repo",
+	"auth_status",
+	"doctor",
 }
 
 func toolDefinitionByName(name string) toolDefinition {
@@ -543,6 +576,11 @@ func (s *Server) toolRegistry() toolRegistry {
 	registerTool(registry, "sync_status", s.callSyncStatus)
 	registerTool(registry, "export_snapshot", s.callExportSnapshot)
 	registerTool(registry, "diff_snapshot", s.callDiffSnapshot)
+	registerTool(registry, "repo_status", s.callRepoStatus)
+	registerTool(registry, "sync_live", s.callSyncLive)
+	registerTool(registry, "index_repo", s.callIndexRepo)
+	registerTool(registry, "auth_status", s.callAuthStatus)
+	registerTool(registry, "doctor", s.callDoctor)
 	return registry
 }
 

@@ -171,10 +171,10 @@ func TestIntegration(t *testing.T) {
 	if err := json.Unmarshal(toolsR.Result, &tls); err != nil {
 		t.Fatalf("decode tools/list result: %v", err)
 	}
-	if len(tls.Tools) != 15 {
-		t.Fatalf("tools count = %d, want 15: %+v", len(tls.Tools), tls.Tools)
+	if len(tls.Tools) != len(toolListOrder) {
+		t.Fatalf("tools count = %d, want %d: %+v", len(tls.Tools), len(toolListOrder), tls.Tools)
 	}
-	expectedNames := []string{"search_sources", "get_source", "list_sources", "list_chunks", "search_chunks", "get_snippet", "stale_index_report", "recent_changes", "link_check", "cache_status", "source_backlinks", "resolve_id", "sync_status", "export_snapshot", "diff_snapshot"}
+	expectedNames := toolListOrder
 	registry := srv.toolRegistry()
 	if len(registry) != len(tls.Tools) {
 		t.Fatalf("registry count = %d, listed tools = %d", len(registry), len(tls.Tools))
@@ -288,8 +288,8 @@ func TestMCPBlockedWriteBoundary(t *testing.T) {
 		if err := json.Unmarshal(resp.Result, &tls); err != nil {
 			t.Fatal(err)
 		}
-		if len(tls.Tools) != 15 {
-			t.Fatalf("tools count = %d, want 15", len(tls.Tools))
+		if len(tls.Tools) != len(toolListOrder) {
+			t.Fatalf("tools count = %d, want %d", len(tls.Tools), len(toolListOrder))
 		}
 		blocked := map[string]bool{
 			"create-issue": false, "update-issue": false, "add-label": false,
@@ -761,6 +761,101 @@ func TestMCPRegistryIsNameBased(t *testing.T) {
 			t.Fatalf("tool[%d].Name = %q, want %q", i, tls.Tools[i].Name, want)
 		}
 	}
+}
+
+func TestMCPLifecycleTools(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "empty-repo", Owner: "owner", Name: "empty", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	srv, r, w, stderr := newPipeServer(service.New(store))
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = srv.Serve()
+	}()
+	call := func(name string, args map[string]any) toolCallResult {
+		t.Helper()
+		req := map[string]any{"jsonrpc": "2.0", "id": name, "method": "tools/call", "params": map[string]any{"name": name, "arguments": args}}
+		b, _ := json.Marshal(req)
+		_, _ = r.Write(append(b, '\n'))
+		line, err := readLine(w)
+		if err != nil {
+			t.Fatalf("read %s response: %v (stderr: %s)", name, err, stderr.String())
+		}
+		return decodeToolCallResult(t, line)
+	}
+
+	listed := map[string]bool{}
+	b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": "tools", "method": "tools/list"})
+	_, _ = r.Write(append(b, '\n'))
+	line, err := readLine(w)
+	if err != nil {
+		t.Fatalf("read tools/list response: %v", err)
+	}
+	var resp response
+	if err := json.Unmarshal(line, &resp); err != nil || resp.Error != nil {
+		t.Fatalf("tools/list response=%s err=%v", string(line), err)
+	}
+	var tls toolsListResult
+	if err := json.Unmarshal(resp.Result, &tls); err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range tls.Tools {
+		listed[tool.Name] = true
+	}
+	for _, name := range []string{"repo_status", "sync_live", "index_repo", "auth_status", "doctor"} {
+		if !listed[name] {
+			t.Fatalf("tools/list missing lifecycle tool %q", name)
+		}
+	}
+
+	statusCall := call("repo_status", map[string]any{})
+	var status repoStatusResult
+	decodeStructured(t, statusCall, &status)
+	if status.BindingState != "nothing_bound" {
+		t.Fatalf("repo_status binding_state=%q", status.BindingState)
+	}
+
+	syncCall := call("sync_live", map[string]any{"repo_id": "fixture-a", "issues": true, "remote_alias": "issue:42", "idempotency_key": "mcp-lifecycle-sync-issue-42"})
+	var syncResult syncLiveResult
+	decodeStructured(t, syncCall, &syncResult)
+	if syncResult.FreshCount == 0 || len(syncResult.Results) == 0 {
+		t.Fatalf("sync_live result=%+v", syncResult)
+	}
+
+	indexCall := call("index_repo", map[string]any{"repo_id": "fixture-a"})
+	var indexResult service.OperationResult
+	decodeStructured(t, indexCall, &indexResult)
+	if indexResult.Command != "index" || indexResult.Status != "ok" {
+		t.Fatalf("index_repo result=%+v", indexResult)
+	}
+
+	authCall := call("auth_status", map[string]any{})
+	var authResult authStatusResult
+	decodeStructured(t, authCall, &authResult)
+	if strings.Contains(fmt.Sprint(authResult), "test-token") {
+		t.Fatalf("auth_status leaked token: %+v", authResult)
+	}
+
+	doctorCall := call("doctor", map[string]any{})
+	var doctor doctorResult
+	decodeStructured(t, doctorCall, &doctor)
+	if doctor.Status != "ok" || doctor.Diagnostics == nil {
+		t.Fatalf("doctor result=%+v", doctor)
+	}
+
+	listedSources := call("list_sources", map[string]any{"repo_id": "fixture-a", "kind": "issue"})
+	var sources service.ListSourcesResult
+	decodeStructured(t, listedSources, &sources)
+	if len(sources.Results) == 0 {
+		t.Fatalf("list_sources after sync returned no records")
+	}
+	_ = r.Close()
+	wg.Wait()
 }
 
 func TestMCPReadToolParityOverStdio(t *testing.T) {
