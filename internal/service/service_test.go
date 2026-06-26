@@ -2618,3 +2618,75 @@ func TestScenario013004AddLabelLiveNoClientCall(t *testing.T) {
 		t.Fatalf("expected 0 addLabelCalls (old route not called), got %d", client.addLabelCalls)
 	}
 }
+
+func TestNormalizeWikiCachePath(t *testing.T) {
+	tests := []struct {
+		name     string
+		remoteID string
+		want     string
+	}{
+		{"slug with .md extension", "Home.md", "wiki/Home.md"},
+		{"slug without extension", "Home", "wiki/Home.md"},
+		{"slug with .markdown extension", "Guide.markdown", "wiki/Guide.md"},
+		{"slug with .mdown extension", "FAQ.mdown", "wiki/FAQ.md"},
+		{"slug with .mkd extension", "README.mkd", "wiki/README.md"},
+		{"nested subdirectory with .md extension", "dir/Sub.md", "wiki/dir/Sub.md"},
+		{"nested subdirectory without extension", "dir/Sub", "wiki/dir/Sub.md"},
+		{"non-markdown extension slug", "README.txt", "wiki/README.txt.md"},
+		{"empty slug", "", "wiki/.md"},
+		{"slug with path separators and extension", "docs/api/Overview.md", "wiki/docs/api/Overview.md"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeWikiCachePath(tt.remoteID)
+			if got != tt.want {
+				t.Errorf("normalizeWikiCachePath(%q) = %q, want %q", tt.remoteID, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWikiPathNormalizationInSync(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 25, 10, 0, 0, 0, time.UTC)
+
+	client := &fakeGitCodeClient{
+		wiki: gitcode.WikiPage{
+			Slug:      "Home.md",
+			Title:     "Home",
+			Body:      "# Home\n\nWelcome to the wiki.",
+			Revision:  "rev-home-v1",
+			CreatedAt: base,
+			UpdatedAt: base,
+		},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{
+		RepoID:    "wiki-path-test",
+		Owner:     "owner",
+		Name:      "repo",
+		APIBaseURL: "https://example.invalid/api",
+		Scopes:    []cache.RepositoryScope{cache.RepositoryScopeWiki},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+
+	result, err := svc.SyncToCache(ctx, SyncRequest{
+		RepoID:    "wiki-path-test",
+		AliasType: "remote",
+		AliasID:   "Home.md",
+	})
+	if err != nil {
+		t.Fatalf("SyncToCache failed: %v", err)
+	}
+
+	if result.Record.Path != "wiki/Home.md" {
+		t.Errorf("cached wiki path = %q, want %q", result.Record.Path, "wiki/Home.md")
+	}
+}

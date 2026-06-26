@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -1841,12 +1842,28 @@ func (s *Service) stageWiki(ctx context.Context, req SyncRequest, remoteType, re
 	} else {
 		return cache.SourceGraph{}, SyncCounts{}, err
 	}
-	graph := cache.SourceGraph{Source: cache.Source{RepoID: req.RepoID, ID: stableID, Kind: "wiki", Path: "wiki/" + remoteID + ".md", Title: page.Title, Body: body, Status: "fresh", ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{RepoID: req.RepoID, SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, SyncStatus: &cache.SyncStatus{RepoID: req.RepoID, SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}
+	graph := cache.SourceGraph{Source: cache.Source{RepoID: req.RepoID, ID: stableID, Kind: "wiki", Path: normalizeWikiCachePath(remoteID), Title: page.Title, Body: body, Status: "fresh", ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{RepoID: req.RepoID, SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, SyncStatus: &cache.SyncStatus{RepoID: req.RepoID, SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}
 	if providerID != "" && providerID != remoteID {
 		graph.Identities = append(graph.Identities, cache.Identity{RepoID: req.RepoID, SourceID: stableID, AliasType: "gitcode_wiki_id", Alias: providerID, Remote: cache.RemoteAlias{Type: "gitcode_wiki_id", ID: providerID}})
 	}
 	graph.Chunks = chunksForSource(graph.Source)
 	return graph, counts, nil
+}
+
+func normalizeWikiCachePath(remoteID string) string {
+	base := path.Base(remoteID)
+	ext := strings.ToLower(path.Ext(base))
+	switch ext {
+	case ".md", ".markdown", ".mdown", ".mkd":
+		dir := path.Dir(remoteID)
+		withoutExt := strings.TrimSuffix(base, ext)
+		if dir != "." {
+			return "wiki/" + dir + "/" + withoutExt + ".md"
+		}
+		return "wiki/" + withoutExt + ".md"
+	default:
+		return "wiki/" + remoteID + ".md"
+	}
 }
 
 func (s *Service) BuildAdapterRoute(ctx context.Context, repoID string, requestedScope RepositoryScope) (RepositoryRoute, error) {
@@ -2469,7 +2486,7 @@ func (s *Service) wikiWriteGraph(repoID string, page gitcode.WikiPage, result gi
 		created = updated
 	}
 	revision := firstNonEmptyString(result.RemoteRevision, page.Revision, result.ResponseHash, contentHash(page.Title, page.Body))
-	record := cache.Record{RepoID: repoID, ID: stableID, Type: "wiki", Path: "wiki/" + remoteID + ".md", Title: page.Title, Body: page.Body, Status: "fresh", ContentHash: contentHash(page.Title, page.Body, revision), Provenance: cache.ProvenanceRemote, RemoteType: "wiki", RemoteID: remoteID, RemoteRevision: revision, CreatedAt: created, UpdatedAt: updated}
+	record := cache.Record{RepoID: repoID, ID: stableID, Type: "wiki", Path: normalizeWikiCachePath(remoteID), Title: page.Title, Body: page.Body, Status: "fresh", ContentHash: contentHash(page.Title, page.Body, revision), Provenance: cache.ProvenanceRemote, RemoteType: "wiki", RemoteID: remoteID, RemoteRevision: revision, CreatedAt: created, UpdatedAt: updated}
 	graph := cache.RecordGraph{Record: record, Identities: []cache.Identity{{RepoID: repoID, SourceID: stableID, AliasType: "wiki", Alias: remoteID, Remote: cache.RemoteAlias{Type: "wiki", ID: remoteID}}}, RemoteRevisions: []cache.RemoteRevision{{RepoID: repoID, RecordID: stableID, RemoteType: "wiki", RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}}
 	return writeConfirmation{confirmed: result.Confirmed, remoteID: remoteID, remoteSlug: remoteID, remoteRevision: revision, message: result.Operation, completedAt: firstNonZeroTime(result.ConfirmedAt, now)}, graph
 }
