@@ -487,11 +487,23 @@ func (c *HTTPClient) getWikiMetadata(ctx context.Context, owner, repo, wikiPath 
 }
 
 func (c *HTTPClient) writeWikiContent(ctx context.Context, method, endpoint, operation, target string, payload WikiContentWriteRequest, opts WriteOptions, owner, repo, wikiPath, body string) (WriteResult[WikiPage], error) {
+	requestPath := normalizeWikiPath(wikiPath)
 	result, err := writeConfirmedJSON[WikiContentsFile](ctx, c, method, endpoint, operation, target, payload, opts, func(result WriteResult[WikiContentsFile]) (WriteResult[WikiContentsFile], error) {
 		if normalizeWikiPath(result.Record.Path) == "" || strings.TrimSpace(result.Record.Sha) == "" {
-			return WriteResult[WikiContentsFile]{}, ErrPartialResponse{Endpoint: endpoint, Message: "wiki write confirmation requires path and sha"}
+			meta, err := c.confirmWikiWrite(ctx, owner, repo, requestPath, body)
+			if err != nil {
+				return WriteResult[WikiContentsFile]{}, err
+			}
+			result.Record = meta
 		}
-		result.RemoteID = normalizeWikiPath(result.Record.Path)
+		confirmedPath := normalizeWikiPath(result.Record.Path)
+		if confirmedPath == "" || strings.TrimSpace(result.Record.Sha) == "" {
+			return WriteResult[WikiContentsFile]{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki write confirmation requires path and sha"}
+		}
+		if confirmedPath != requestPath {
+			return WriteResult[WikiContentsFile]{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki write confirmation path mismatch"}
+		}
+		result.RemoteID = confirmedPath
 		result.RemoteSlug = result.RemoteID
 		result.RemoteRevision = result.Record.Sha
 		return result, nil
@@ -501,6 +513,31 @@ func (c *HTTPClient) writeWikiContent(ctx context.Context, method, endpoint, ope
 	}
 	page := wikiPageFromMetadata(result.Record, body)
 	return WriteResult[WikiPage]{Record: page, Confirmed: result.Confirmed, Operation: result.Operation, Target: result.Target, ProviderStatus: result.ProviderStatus, RemoteID: result.RemoteID, RemoteSlug: result.RemoteSlug, RemoteRevision: result.RemoteRevision, IdempotencyKey: result.IdempotencyKey, ResponseHash: result.ResponseHash, ConfirmedAt: result.ConfirmedAt, ProviderPayloadFingerprint: result.ProviderPayloadFingerprint}, nil
+}
+
+func (c *HTTPClient) confirmWikiWrite(ctx context.Context, owner, repo, wikiPath, body string) (WikiContentsFile, error) {
+	endpoint := wikiContentsPathEndpoint(owner, repo, wikiPath)
+	meta, err := c.getWikiMetadata(ctx, owner, repo, wikiPath)
+	if err != nil {
+		return WikiContentsFile{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki confirmation GET failed", Cause: err}
+	}
+	confirmedPath := normalizeWikiPath(meta.Path)
+	if confirmedPath != normalizeWikiPath(wikiPath) {
+		return WikiContentsFile{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki confirmation path mismatch"}
+	}
+	if strings.TrimSpace(meta.Sha) == "" {
+		return WikiContentsFile{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki confirmation missing sha"}
+	}
+	if strings.TrimSpace(meta.Content) != "" {
+		decoded, err := decodeWikiContent(meta, endpoint)
+		if err != nil {
+			return WikiContentsFile{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki confirmation content decode failed", Cause: err}
+		}
+		if string(decoded) != body {
+			return WikiContentsFile{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki confirmation content mismatch"}
+		}
+	}
+	return meta, nil
 }
 
 type requestOptions struct {
@@ -825,16 +862,16 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 				continue
 			}
 			return nil, nil, ErrRateLimited{RetryAfter: lastRetryAfter, RawRetryAfter: rawRetryAfter, Endpoint: endpoint, Attempts: attempt}
-	case resp.StatusCode >= 500 && resp.StatusCode <= 599:
-		if attempt < attempts {
-			continue
-		}
-		return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Status: resp.StatusCode, Attempts: attempt}
-	case isWikiEmptyResponse(resp.StatusCode, body):
-		owner, repo := parseWikiEndpointOwnerRepo(endpoint)
-		return nil, nil, ErrEmptyWiki{Owner: owner, Repo: repo}
-	default:
-		return nil, nil, c.statusError(resp.StatusCode, endpoint, body, opts)
+		case resp.StatusCode >= 500 && resp.StatusCode <= 599:
+			if attempt < attempts {
+				continue
+			}
+			return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Status: resp.StatusCode, Attempts: attempt}
+		case isWikiEmptyResponse(resp.StatusCode, body):
+			owner, repo := parseWikiEndpointOwnerRepo(endpoint)
+			return nil, nil, ErrEmptyWiki{Owner: owner, Repo: repo}
+		default:
+			return nil, nil, c.statusError(resp.StatusCode, endpoint, body, opts)
 		}
 	}
 	return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempts}

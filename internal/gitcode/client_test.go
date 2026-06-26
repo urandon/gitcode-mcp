@@ -737,6 +737,86 @@ func TestConfirmedWriteOperations(t *testing.T) {
 	}
 }
 
+func TestScenario015WikiCreatePageFollowupConfirmation(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/Home.md":
+			var payload WikiContentWriteRequest
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			if payload.Sha != "" {
+				t.Fatalf("create payload sha = %q, want empty", payload.Sha)
+			}
+			decoded, err := base64.StdEncoding.DecodeString(payload.Content)
+			if err != nil || string(decoded) != "body" {
+				t.Fatalf("create payload content = %q err=%v", decoded, err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/Home.md":
+			fmt.Fprintf(w, `{"path":"Home.md","type":"file","sha":"rev-confirmed","content":%q,"encoding":"base64"}`, base64.StdEncoding.EncodeToString([]byte("body")))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	result, err := newTestClient(t, server.URL, Config{}).CreateWikiPage(context.Background(), CreateWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "Home.md", Body: "body"}, WriteOptions{IdempotencyKey: "key-create-wiki"})
+	if err != nil {
+		t.Fatalf("CreateWikiPage returned error: %v", err)
+	}
+	if !result.Confirmed || result.RemoteID != "Home.md" || result.RemoteSlug != "Home.md" || result.RemoteRevision != "rev-confirmed" || result.Record.Revision != "rev-confirmed" || result.Record.Body != "body" || result.ProviderStatus != "201" {
+		t.Fatalf("unexpected confirmed result: %+v", result)
+	}
+	want := []string{"POST /api/v5/repos/example-owner/example-repo.wiki/contents/Home.md", "GET /api/v5/repos/example-owner/example-repo.wiki/contents/Home.md"}
+	if strings.Join(paths, "|") != strings.Join(want, "|") {
+		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+}
+
+func TestScenario015WikiCreatePageFollowupConfirmationFailure(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "not-found", status: http.StatusNotFound, body: `{"message":"missing"}`},
+		{name: "server-error", status: http.StatusInternalServerError, body: `{"message":"down"}`},
+		{name: "path-mismatch", status: http.StatusOK, body: `{"path":"Other.md","type":"file","sha":"rev-confirmed","content":"Ym9keQ==","encoding":"base64"}`},
+		{name: "missing-sha", status: http.StatusOK, body: `{"path":"Home.md","type":"file","content":"Ym9keQ==","encoding":"base64"}`},
+		{name: "content-mismatch", status: http.StatusOK, body: `{"path":"Home.md","type":"file","sha":"rev-confirmed","content":"b3RoZXI=","encoding":"base64"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/Home.md":
+					w.WriteHeader(http.StatusCreated)
+					fmt.Fprint(w, `{}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/Home.md":
+					w.WriteHeader(tt.status)
+					fmt.Fprint(w, tt.body)
+				default:
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+			}))
+			defer server.Close()
+
+			result, err := newTestClient(t, server.URL, Config{}).CreateWikiPage(context.Background(), CreateWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "Home.md", Body: "body"}, WriteOptions{IdempotencyKey: "key-create-wiki"})
+			var target ErrWriteConfirmationIncomplete
+			if !errors.As(err, &target) || result.Confirmed || result.RemoteRevision != "" {
+				t.Fatalf("expected incomplete confirmation without confirmed result: result=%+v err=%T %v", result, err, err)
+			}
+			if target.DiagnosticCode() != "write_confirmation_incomplete" {
+				t.Fatalf("diagnostic = %q", target.DiagnosticCode())
+			}
+		})
+	}
+}
+
 func anyWriteResult[T any](result WriteResult[T]) WriteResult[any] {
 	return WriteResult[any]{Record: result.Record, Confirmed: result.Confirmed, Operation: result.Operation, Target: result.Target, ProviderStatus: result.ProviderStatus, RemoteID: result.RemoteID, RemoteNumber: result.RemoteNumber, RemoteSlug: result.RemoteSlug, RemoteRevision: result.RemoteRevision, ParentIssueNumber: result.ParentIssueNumber, ParentIssueID: result.ParentIssueID, IdempotencyKey: result.IdempotencyKey, ResponseHash: result.ResponseHash, ConfirmedAt: result.ConfirmedAt, ProviderPayloadFingerprint: result.ProviderPayloadFingerprint}
 }

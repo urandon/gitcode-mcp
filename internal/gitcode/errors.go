@@ -193,3 +193,22 @@ func (e ErrEmptyWiki) Error() string {
 }
 
 func (e ErrEmptyWiki) DiagnosticCode() string { return "empty_wiki" }
+
+type ErrWriteConfirmationIncomplete struct {
+	Endpoint string
+	Message  string
+	Cause    error
+}
+
+func (e ErrWriteConfirmationIncomplete) Error() string {
+	if e.Message == "" {
+		e.Message = "write confirmation incomplete"
+	}
+	return fmt.Sprintf("gitcode: write confirmation incomplete for %s: %s", e.Endpoint, e.Message)
+}
+
+func (e ErrWriteConfirmationIncomplete) Unwrap() error { return e.Cause }
+
+func (e ErrWriteConfirmationIncomplete) DiagnosticCode() string {
+	return "write_confirmation_incomplete"
+}

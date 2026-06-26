@@ -1,0 +1,47 @@
+{
+  "task_id": "015-internal-gitcode-task-4-add-wiki-create-page-write-confirmation-internal",
+  "covered_outcome_ids": [
+    "outcome-5"
+  ],
+  "covered_decommission_ids": [
+    "decommission-4"
+  ],
+  "product_surfaces": [
+    "internal/gitcode/http_client.go (CreateWikiPage, writeWikiContent, confirmWikiWrite, normalizeWikiPath)",
+    "internal/gitcode/errors.go (ErrWriteConfirmationIncomplete diagnostic code)",
+    "internal/gitcode/client_test.go (TestScenario015WikiCreatePageFollowupConfirmation, TestScenario015WikiCreatePageFollowupConfirmationFailure)",
+    "internal/service/service.go (CreatePage live write cache path, wikiWriteGraph)",
+    "internal/service/service_test.go (TestS018LiveWriteConfirmedRefreshesCommentAndWiki)"
+  ],
+  "evidence_type": "API test",
+  "freshness": "current binary build with mocked Go tests",
+  "mocks_used": [
+    {
+      "name": "httptest.Server (mock HTTP)",
+      "scope": "external GitCode provider dependency only",
+      "reason": "adapter tests exercise create-page POST and confirmation GET through real HTTP client paths without live network"
+    },
+    {
+      "name": "cache.NewInMemorySQLiteStore",
+      "scope": "local deterministic cache fixture",
+      "reason": "service-level test exercises confirmed live write cache persistence offline"
+    },
+    {
+      "name": "fakeGitCodeClient",
+      "scope": "external GitCode provider dependency only",
+      "reason": "service-level test isolates GitCode provider while exercising service cache write path"
+    }
+  ],
+  "production_files_modified": [
+    "internal/gitcode/http_client.go",
+    "internal/gitcode/errors.go",
+    "internal/gitcode/client_test.go"
+  ],
+  "scenario_ids": [
+    "015-internal-gitcode-task-4-add-wiki-create-page-write-confirmation-internal-scenario-1",
+    "015-internal-gitcode-task-4-add-wiki-create-page-write-confirmation-internal-scenario-2"
+  ],
+  "validation_command": "bash tests/design_package/015-internal-gitcode-task-4-add-wiki-create-page-write-confirmation-internal/run.sh",
+  "live_validation_enabled": false,
+  "device_validation_enabled": false
+}
