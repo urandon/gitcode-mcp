@@ -233,6 +233,7 @@ func TestIntegration(t *testing.T) {
 }
 
 func TestMCPBlockedWriteBoundary(t *testing.T) {
+	t.Setenv("GITCODE_TOKEN", "")
 	providerCalls := 0
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		providerCalls++
@@ -743,12 +744,13 @@ func TestMCPRegistryIsNameBased(t *testing.T) {
 	for i, j := 0, len(toolDefs)-1; i < j; i, j = i+1, j-1 {
 		toolDefs[i], toolDefs[j] = toolDefs[j], toolDefs[i]
 	}
+	toolDefs = append([]toolDefinition{{Name: "appended_lifecycle_probe", Description: "Probe appended lifecycle tool definition.", InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{}}}}, toolDefs...)
 
 	store := populatedStore(t)
 	defer store.Close()
 	srv := New(io.Reader(strings.NewReader("")), io.Discard, io.Discard, service.New(store))
 	registry := srv.toolRegistry()
-	for _, name := range []string{"search_sources", "get_source", "list_sources", "resolve_id"} {
+	for _, name := range []string{"search_sources", "get_source", "list_sources", "resolve_id", "repo_status", "sync_live", "index_repo", "doctor"} {
 		tool, ok := registry[name]
 		if !ok {
 			t.Fatalf("tool %s is not registered", name)
@@ -828,6 +830,11 @@ func TestMCPLifecycleTools(t *testing.T) {
 			t.Fatalf("tools/list missing lifecycle tool %q", name)
 		}
 	}
+	for _, name := range []string{"create_issue", "update_issue", "add_comment", "create_page", "update_page"} {
+		if listed[name] {
+			t.Fatalf("tools/list advertised write tool %q", name)
+		}
+	}
 
 	statusCall := call("repo_status", map[string]any{})
 	var status repoStatusResult
@@ -839,8 +846,11 @@ func TestMCPLifecycleTools(t *testing.T) {
 	syncCall := call("sync_live", map[string]any{"repo_id": "fixture-a", "issues": true, "remote_alias": "issue:42", "idempotency_key": "mcp-lifecycle-sync-issue-42"})
 	var syncResult syncLiveResult
 	decodeStructured(t, syncCall, &syncResult)
-	if syncResult.FreshCount == 0 || len(syncResult.Results) == 0 {
+	if syncResult.FreshCount == 0 || len(syncResult.Results) == 0 || !containsString(syncResult.Collections, "issues") {
 		t.Fatalf("sync_live result=%+v", syncResult)
+	}
+	if syncResult.Results[0].Record.Kind != "issue" || syncResult.Results[0].Record.ID == "" {
+		t.Fatalf("sync_live record=%+v", syncResult.Results[0].Record)
 	}
 
 	indexCall := call("index_repo", map[string]any{"repo_id": "fixture-a"})
@@ -869,6 +879,12 @@ func TestMCPLifecycleTools(t *testing.T) {
 	decodeStructured(t, listedSources, &sources)
 	if len(sources.Results) == 0 {
 		t.Fatalf("list_sources after sync returned no records")
+	}
+	searchedSources := call("search_sources", map[string]any{"repo_id": "fixture-a", "query": "issue", "kind": "issue"})
+	var searched service.SearchSourcesResult
+	decodeStructured(t, searchedSources, &searched)
+	if len(searched.Results) == 0 {
+		t.Fatalf("search_sources after sync returned no records")
 	}
 	_ = r.Close()
 	wg.Wait()
