@@ -33,6 +33,11 @@ type serviceInterface interface {
 	DiffSnapshot(context.Context, service.DiffSnapshotRequest) (service.DiffSnapshotResult, error)
 	RepositoryStatus(context.Context, service.RepositoryStatusRequest) (service.RepositoryStatus, error)
 	SyncToCache(context.Context, service.SyncRequest) (service.SyncResult, error)
+	BulkSyncIssues(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	BulkSyncWiki(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	BulkSyncPullRequests(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	BulkSyncPRComments(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	BulkSyncAll(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	Index(context.Context, service.OperationRequest) (service.OperationResult, error)
 	ListChunks(context.Context, service.ChunkQuery) (service.ChunkQueryResult, error)
 	SearchChunks(context.Context, service.ChunkSearchQuery) (service.ChunkQueryResult, error)
@@ -44,9 +49,10 @@ type serviceInterface interface {
 }
 
 type RPCHandler struct {
-	svc               serviceInterface
-	startupDiagnostic StartupDiagnostic
-	minimal           bool
+	svc                serviceInterface
+	startupDiagnostic  StartupDiagnostic
+	minimal            bool
+	credentialResolver *auth.CredentialResolver
 }
 
 type Server struct {
@@ -64,12 +70,16 @@ func NewRPCHandler(svc serviceInterface) *RPCHandler {
 	return &RPCHandler{svc: svc}
 }
 
+func NewRPCHandlerWithCredentialResolver(svc serviceInterface, credResolver *auth.CredentialResolver) *RPCHandler {
+	return &RPCHandler{svc: svc, credentialResolver: credResolver}
+}
+
 func NewMinimalRPCHandler(diagnostic StartupDiagnostic) *RPCHandler {
 	return &RPCHandler{startupDiagnostic: diagnostic, minimal: true}
 }
 
 func New(r io.Reader, w io.Writer, stderr io.Writer, svc serviceInterface, credResolver *auth.CredentialResolver) *Server {
-	return &Server{reader: r, writer: w, stderr: stderr, handler: NewRPCHandler(svc), svc: svc, credentialResolver: credResolver}
+	return &Server{reader: r, writer: w, stderr: stderr, handler: NewRPCHandlerWithCredentialResolver(svc, credResolver), svc: svc, credentialResolver: credResolver}
 }
 
 func NewMinimal(r io.Reader, w io.Writer, stderr io.Writer, diagnostic StartupDiagnostic) *Server {
@@ -81,7 +91,7 @@ func (h *RPCHandler) Handle(ctx context.Context, req request) (*response, bool) 
 		return &response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32600, Message: "Invalid request"}}, true
 	}
 	var buf bytes.Buffer
-	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal}
+	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver}
 	server.handle(ctx, req, req.ID == nil)
 	line := bytes.TrimSpace(buf.Bytes())
 	if len(line) == 0 {
@@ -187,7 +197,7 @@ type toolContentItem struct {
 	Text string `json:"text"`
 }
 
-var sourceKindEnums = []string{"issue", "wiki"}
+var sourceKindEnums = []string{"issue", "wiki", "pull_request", "pr_comment"}
 
 func intPtr(v int) *int             { return &v }
 func float64Ptr(v float64) *float64 { return &v }
@@ -385,7 +395,7 @@ var toolDefs = []toolDefinition{
 	{
 		Name:        "sync_live",
 		Description: "Synchronize selected live collection records into the cache.",
-		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "issues": {Type: "boolean", Description: "Sync issues."}, "wiki": {Type: "boolean", Description: "Sync wiki pages."}, "comments": {Type: "boolean", Description: "Sync comments."}, "pulls": {Type: "boolean", Description: "Sync pull requests."}, "remote_alias": {Type: "string", Description: "Specific remote alias for current sync surface."}, "idempotency_key": {Type: "string", Description: "Idempotency key."}}, Required: []string{"repo_id"}},
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "issues": {Type: "boolean", Description: "Sync issues."}, "wiki": {Type: "boolean", Description: "Sync wiki pages."}, "comments": {Type: "boolean", Description: "Sync supported comments."}, "pulls": {Type: "boolean", Description: "Sync pull requests."}, "remote_alias": {Type: "string", Description: "Specific remote alias for current sync surface."}, "idempotency_key": {Type: "string", Description: "Idempotency key."}, "max_pages": {Type: "integer", Description: "Maximum pages to sync.", Minimum: float64Ptr(1)}, "max_records": {Type: "integer", Description: "Maximum records to sync.", Minimum: float64Ptr(1)}, "per_page": {Type: "integer", Description: "Records per page.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 25.0}}, Required: []string{"repo_id"}},
 	},
 	{
 		Name:        "index_repo",

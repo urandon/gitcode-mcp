@@ -8,22 +8,22 @@ import (
 
 func TestLabel001EncodeJSONString(t *testing.T) {
 	result := EncodeIssueLabels([]string{"bug", "enhancement"})
-	if string(result) != `["bug","enhancement"]` {
-		t.Fatalf("EncodeIssueLabels: got %q, want [\"bug\",\"enhancement\"]", result)
+	if string(result) != `"bug,enhancement"` {
+		t.Fatalf("EncodeIssueLabels: got %q, want \"bug,enhancement\"", result)
 	}
 }
 
 func TestLabel002EncodeEmpty(t *testing.T) {
 	result := EncodeIssueLabels([]string{})
-	if string(result) != "[]" {
-		t.Fatalf("EncodeIssueLabels empty: got %q, want []", result)
+	if result != nil {
+		t.Fatalf("EncodeIssueLabels empty: got %q, want nil", result)
 	}
 }
 
 func TestLabel003EncodeTrimDrops(t *testing.T) {
 	result := EncodeIssueLabels([]string{" bug ", "", "enhancement"})
-	if string(result) != `["bug","enhancement"]` {
-		t.Fatalf("EncodeIssueLabels trim/drop: got %q, want [\"bug\",\"enhancement\"]", result)
+	if string(result) != `"bug,enhancement"` {
+		t.Fatalf("EncodeIssueLabels trim/drop: got %q, want \"bug,enhancement\"", result)
 	}
 }
 

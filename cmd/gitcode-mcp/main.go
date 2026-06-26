@@ -103,13 +103,21 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 		return cli.ExecuteWithSource(localArgs, stdout, stderr, src)
 	}
 
-	cfg, err := config.Load(src, opts.overrides)
+	eff, err := config.LoadEffective(src, opts.overrides)
 	if err != nil {
 		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), src))
 		return 1
 	}
-	deps := buildStartupDeps(cfg, config.Token(src), opts.live)
+	cfg := eff.Config
+	credentialResolver := auth.NewCredentialResolver(src)
+	token := config.Token(src)
+	if opts.live {
+		credential := credentialResolver.Resolve(context.Background(), eff)
+		token = credential.Token
+	}
+	deps := buildStartupDeps(cfg, token, opts.live)
 	deps.Source = src
+	deps.CredentialResolver = credentialResolver
 	if opts.mcpServe {
 		return mcpServeRoute(context.Background(), stdin, stdout, stderr, deps, opts.mcpTransport, opts.mcpBind)
 	}
@@ -333,7 +341,7 @@ func resolveLiveClient(deps StartupDeps) (gitcode.Client, error) {
 	}
 	token := strings.TrimSpace(gc.Token)
 	if token == "" {
-		return nil, fmt.Errorf("live provider requires GITCODE_TOKEN (set GITCODE_TOKEN or remove --live)")
+		return nil, fmt.Errorf("live provider requires GITCODE_TOKEN or configured credential (set GITCODE_TOKEN, configure keychain, or remove --live)")
 	}
 	provider, err := gitcode.NewLiveProvider(gitcode.ProviderConfig{
 		Mode:            gitcode.ProviderModeLive,
@@ -355,14 +363,16 @@ func resolveLiveClient(deps StartupDeps) (gitcode.Client, error) {
 }
 
 func resolveService(store cache.Store, deps StartupDeps) (*service.Service, error) {
-	liveClient, err := resolveLiveClient(deps)
-	if err != nil {
-		return nil, err
-	}
-	if liveClient == nil {
+	if !deps.GitCode.Live {
 		return service.New(store), nil
 	}
-	return service.NewWithClient(store, liveClient), nil
+	return service.NewWithMode(store, gitcode.ProviderModeLive, deps.GitCode.Token, service.ServiceConfig{
+		BaseURL:         deps.GitCode.BaseURL,
+		LockPath:        deps.Cache.LockPath,
+		Timeout:         deps.GitCode.DefaultTimeout,
+		MaxResponseSize: deps.GitCode.MaxResponseSize,
+		MaxRetries:      deps.GitCode.MaxRetries,
+	})
 }
 
 func runCLICompatibility(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps StartupDeps) int {
@@ -450,7 +460,7 @@ func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind
 		}
 		return 0
 	}
-	transport := mcp.NewHTTPSSETransport(mcp.NewRPCHandler(svc), mcp.ServerConfig{BindAddress: bind, ReadinessProbe: func(ctx context.Context) mcp.Readiness {
+	transport := mcp.NewHTTPSSETransport(mcp.NewRPCHandlerWithCredentialResolver(svc, deps.CredentialResolver), mcp.ServerConfig{BindAddress: bind, ReadinessProbe: func(ctx context.Context) mcp.Readiness {
 		repos, err := store.ListRepositories(ctx)
 		if err != nil {
 			var lockErr cache.ErrLockContention

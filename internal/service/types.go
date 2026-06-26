@@ -10,6 +10,7 @@ import (
 
 type ServiceConfig struct {
 	BaseURL         string
+	LockPath        string
 	Timeout         time.Duration
 	MaxResponseSize int64
 	MaxRetries      int
@@ -682,9 +683,11 @@ type WriteCommandResult struct {
 type BulkSyncScope string
 
 const (
-	BulkSyncScopeIssues BulkSyncScope = "issues"
-	BulkSyncScopeWiki   BulkSyncScope = "wiki"
-	BulkSyncScopeAll    BulkSyncScope = "all"
+	BulkSyncScopeIssues   BulkSyncScope = "issues"
+	BulkSyncScopeWiki     BulkSyncScope = "wiki"
+	BulkSyncScopePulls    BulkSyncScope = "pulls"
+	BulkSyncScopeComments BulkSyncScope = "comments"
+	BulkSyncScopeAll      BulkSyncScope = "all"
 )
 
 type BulkSyncRequest struct {

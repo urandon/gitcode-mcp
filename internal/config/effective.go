@@ -283,7 +283,7 @@ func LoadEffective(src Source, overrides Overrides) (EffectiveConfig, error) {
 		CredentialPolicy: CredentialConfig{Store: "auto"},
 		CachePathSource:  "default",
 	}
-	if eff.Location.Path != "" && eff.Location.Exists {
+	if eff.Location.Path != "" && (eff.Location.Exists || eff.Location.Explicit) {
 		fileCfg, cred, err := readLocatedConfig(src, eff.Location)
 		if err != nil {
 			return EffectiveConfig{}, errors.New(RedactDiagnostic(err.Error(), src))

@@ -621,6 +621,14 @@ func (s *spyService) BulkSyncWiki(context.Context, service.BulkSyncRequest) (*se
 	s.called("BulkSyncWiki")
 	return &service.SyncResourcesResult{Results: []service.SyncResult{{Status: "succeeded", Counts: service.SyncCounts{Fetched: 1}, GeneratedAt: time.Now()}}, SuccessCount: 1}, nil
 }
+func (s *spyService) BulkSyncPullRequests(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
+	s.called("BulkSyncPullRequests")
+	return &service.SyncResourcesResult{Results: []service.SyncResult{{Status: "succeeded", Counts: service.SyncCounts{Fetched: 1}, GeneratedAt: time.Now()}}, SuccessCount: 1}, nil
+}
+func (s *spyService) BulkSyncPRComments(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
+	s.called("BulkSyncPRComments")
+	return &service.SyncResourcesResult{Results: []service.SyncResult{{Status: "succeeded", Counts: service.SyncCounts{Fetched: 1}, GeneratedAt: time.Now()}}, SuccessCount: 1}, nil
+}
 func (s *spyService) BulkSyncAll(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
 	s.called("BulkSyncAll")
 	return &service.SyncResourcesResult{Results: []service.SyncResult{{Status: "succeeded", Counts: service.SyncCounts{Fetched: 1}, GeneratedAt: time.Now()}}, SuccessCount: 1}, nil

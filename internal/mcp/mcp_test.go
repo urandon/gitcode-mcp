@@ -18,7 +18,9 @@ import (
 	"testing"
 	"time"
 
+	"gitcode-mcp/internal/auth"
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/service"
@@ -732,8 +734,8 @@ func TestMCPToolKindSchemaIncludesOnlyGitCodeKinds(t *testing.T) {
 		if !ok {
 			t.Fatalf("tool %s missing kind schema", name)
 		}
-		if !reflect.DeepEqual(prop.Enum, []string{"issue", "wiki"}) {
-			t.Fatalf("tool %s kind enum = %#v, want [issue wiki]", name, prop.Enum)
+		if !reflect.DeepEqual(prop.Enum, []string{"issue", "wiki", "pull_request", "pr_comment"}) {
+			t.Fatalf("tool %s kind enum = %#v, want [issue wiki pull_request pr_comment]", name, prop.Enum)
 		}
 	}
 }
@@ -853,6 +855,13 @@ func TestMCPLifecycleTools(t *testing.T) {
 		t.Fatalf("sync_live record=%+v", syncResult.Results[0].Record)
 	}
 
+	bulkSyncCall := call("sync_live", map[string]any{"repo_id": "fixture-a", "issues": true, "idempotency_key": "mcp-lifecycle-bulk-issues"})
+	var bulkSyncResult syncLiveResult
+	decodeStructured(t, bulkSyncCall, &bulkSyncResult)
+	if bulkSyncResult.SuccessCount == 0 || bulkSyncResult.FailureCount != 0 || !containsString(bulkSyncResult.Collections, "issues") {
+		t.Fatalf("bulk sync_live result=%+v", bulkSyncResult)
+	}
+
 	indexCall := call("index_repo", map[string]any{"repo_id": "fixture-a"})
 	var indexResult service.OperationResult
 	decodeStructured(t, indexCall, &indexResult)
@@ -873,6 +882,12 @@ func TestMCPLifecycleTools(t *testing.T) {
 	if doctor.Status != "ok" || doctor.Diagnostics == nil {
 		t.Fatalf("doctor result=%+v", doctor)
 	}
+	doctorRepoCall := call("doctor", map[string]any{"repo_id": "fixture-a"})
+	var doctorRepo doctorResult
+	decodeStructured(t, doctorRepoCall, &doctorRepo)
+	if doctorRepo.Repo == nil || doctorRepo.Cache == nil || doctorRepo.Sync == nil || doctorRepo.Index == nil || doctorRepo.Auth == nil {
+		t.Fatalf("repo doctor missing sections: %+v", doctorRepo)
+	}
 
 	listedSources := call("list_sources", map[string]any{"repo_id": "fixture-a", "kind": "issue"})
 	var sources service.ListSourcesResult
@@ -888,6 +903,64 @@ func TestMCPLifecycleTools(t *testing.T) {
 	}
 	_ = r.Close()
 	wg.Wait()
+}
+
+func TestMCPAuthStatusUsesCredentialResolverMockKeychain(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	resolver := auth.NewCredentialResolverWithProvider(config.StaticCredentialProvider{Source: "mock-keychain", Token: "secret-token", StoreMode: "keychain"})
+	var buf bytes.Buffer
+	srv := New(strings.NewReader(""), &buf, io.Discard, service.New(store), resolver)
+	id := json.RawMessage(`"auth"`)
+	srv.callAuthStatus(context.Background(), &id, json.RawMessage(`{}`))
+
+	var resp response
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v body=%q", err, buf.String())
+	}
+	if resp.Error != nil {
+		t.Fatalf("auth_status returned error: %+v", resp.Error)
+	}
+	var callResult toolCallResult
+	if err := json.Unmarshal(resp.Result, &callResult); err != nil {
+		t.Fatalf("unmarshal call result: %v", err)
+	}
+	var status authStatusResult
+	decodeStructured(t, callResult, &status)
+	if !status.Present || status.Source != "mock-keychain" || status.StoreMode != "keychain" {
+		t.Fatalf("auth_status=%+v", status)
+	}
+	if strings.Contains(fmt.Sprint(callResult), "secret-token") {
+		t.Fatalf("auth_status leaked token: %+v", callResult)
+	}
+}
+
+func TestMCPAuthStatusJSONRPCHandlerPreservesCredentialResolver(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	resolver := auth.NewCredentialResolverWithProvider(config.StaticCredentialProvider{Source: "mock-keychain", Token: "secret-token", StoreMode: "keychain"})
+	handler := NewRPCHandlerWithCredentialResolver(service.New(store), resolver)
+	params := json.RawMessage(`{"name":"auth_status","arguments":{}}`)
+	id := json.RawMessage(`"auth"`)
+	resp, ok := handler.Handle(context.Background(), request{JSONRPC: "2.0", ID: &id, Method: "tools/call", Params: &params})
+	if !ok || resp == nil {
+		t.Fatal("auth_status JSON-RPC returned no response")
+	}
+	if resp.Error != nil {
+		t.Fatalf("auth_status returned error: %+v", resp.Error)
+	}
+	var callResult toolCallResult
+	if err := json.Unmarshal(resp.Result, &callResult); err != nil {
+		t.Fatalf("unmarshal call result: %v", err)
+	}
+	var status authStatusResult
+	decodeStructured(t, callResult, &status)
+	if !status.Present || status.Source != "mock-keychain" || status.StoreMode != "keychain" {
+		t.Fatalf("auth_status=%+v", status)
+	}
+	if strings.Contains(fmt.Sprint(callResult), "secret-token") {
+		t.Fatalf("auth_status leaked token: %+v", callResult)
+	}
 }
 
 type indexRepoSpyService struct {

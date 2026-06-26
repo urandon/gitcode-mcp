@@ -12,11 +12,11 @@ import (
 // proves GitCode accepts basic auth.
 
 type Result struct {
-	Present   bool
-	Token     string
-	Source    string
-	StoreMode string
-	ErrorClass string
+	Present     bool
+	Token       string
+	Source      string
+	StoreMode   string
+	ErrorClass  string
 	Remediation string
 }
 
@@ -39,13 +39,14 @@ func (r *CredentialResolver) Resolve(ctx context.Context, eff config.EffectiveCo
 	if r.result != nil {
 		return *r.result
 	}
+	eff = normalizeEffectiveConfig(eff)
 	secret, status, _ := r.provider.Resolve(ctx, eff)
 	result := Result{
-		Present:    status.Present,
-		Token:      secret.Value(),
-		Source:     status.Source,
-		StoreMode:  status.StoreMode,
-		ErrorClass: status.ErrorClass,
+		Present:     status.Present,
+		Token:       secret.Value(),
+		Source:      status.Source,
+		StoreMode:   status.StoreMode,
+		ErrorClass:  status.ErrorClass,
 		Remediation: status.Remediation,
 	}
 	r.result = &result
@@ -54,4 +55,11 @@ func (r *CredentialResolver) Resolve(ctx context.Context, eff config.EffectiveCo
 
 func (r *CredentialResolver) Status(ctx context.Context, eff config.EffectiveConfig) Result {
 	return r.Resolve(ctx, eff)
+}
+
+func normalizeEffectiveConfig(eff config.EffectiveConfig) config.EffectiveConfig {
+	if eff.CredentialPolicy.Store == "" {
+		eff.CredentialPolicy.Store = "auto"
+	}
+	return eff
 }

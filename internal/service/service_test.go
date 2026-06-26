@@ -2300,9 +2300,15 @@ type fakeGitCodeClient struct {
 	listWikiPages            []gitcode.Page[gitcode.WikiPage]
 	listWikiErrors           []error
 	listWikiPagesCallCount   int
+	listPRPages              []gitcode.Page[gitcode.PullRequest]
+	prsByNumber              map[int]gitcode.PullRequest
+	prCommentsByPR           map[int][]gitcode.PRComment
+	listPRCalls              int
+	prCommentCalls           int
 	issuesByNumber           map[int]gitcode.Issue
 	wikiBySlug               map[string]gitcode.WikiPage
 	commentsByIssue          map[int][]gitcode.Comment
+	listIssueCommentsErr     error
 	lastCreateIssueRequest   gitcode.CreateIssueRequest
 	lastWriteOptions         gitcode.WriteOptions
 }
@@ -2343,18 +2349,36 @@ func (f *fakeGitCodeClient) GetIssue(_ context.Context, req gitcode.IssueRequest
 }
 func (f *fakeGitCodeClient) ListIssueComments(_ context.Context, req gitcode.IssueRequest) (gitcode.Page[gitcode.Comment], error) {
 	f.commentCalls++
+	if f.listIssueCommentsErr != nil {
+		return gitcode.Page[gitcode.Comment]{}, f.listIssueCommentsErr
+	}
 	if f.commentsByIssue != nil {
 		return gitcode.Page[gitcode.Comment]{Items: f.commentsByIssue[req.Number]}, nil
 	}
 	return gitcode.Page[gitcode.Comment]{Items: f.comments}, nil
 }
 func (f *fakeGitCodeClient) ListPRs(context.Context, gitcode.PRListRequest) (gitcode.Page[gitcode.PullRequest], error) {
+	f.listPRCalls++
+	if len(f.listPRPages) > 0 {
+		page := f.listPRPages[0]
+		f.listPRPages = f.listPRPages[1:]
+		return page, nil
+	}
 	return gitcode.Page[gitcode.PullRequest]{}, nil
 }
-func (f *fakeGitCodeClient) GetPR(context.Context, gitcode.PRRequest) (gitcode.PullRequest, error) {
+func (f *fakeGitCodeClient) GetPR(_ context.Context, req gitcode.PRRequest) (gitcode.PullRequest, error) {
+	if f.prsByNumber != nil {
+		if pr, ok := f.prsByNumber[req.Number]; ok {
+			return pr, nil
+		}
+	}
 	return gitcode.PullRequest{}, nil
 }
-func (f *fakeGitCodeClient) ListPRComments(context.Context, gitcode.PRRequest) (gitcode.Page[gitcode.PRComment], error) {
+func (f *fakeGitCodeClient) ListPRComments(_ context.Context, req gitcode.PRRequest) (gitcode.Page[gitcode.PRComment], error) {
+	f.prCommentCalls++
+	if f.prCommentsByPR != nil {
+		return gitcode.Page[gitcode.PRComment]{Items: f.prCommentsByPR[req.Number]}, nil
+	}
 	return gitcode.Page[gitcode.PRComment]{}, nil
 }
 func (f *fakeGitCodeClient) GetWikiPage(_ context.Context, req gitcode.WikiPageRequest) (gitcode.WikiPage, error) {
@@ -2687,7 +2711,8 @@ func TestNormalizeWikiCachePath(t *testing.T) {
 		{"nested subdirectory with .md extension", "dir/Sub.md", "wiki/dir/Sub.md"},
 		{"nested subdirectory without extension", "dir/Sub", "wiki/dir/Sub.md"},
 		{"non-markdown extension slug", "README.txt", "wiki/README.txt.md"},
-		{"empty slug", "", "wiki/.md"},
+		{"empty slug", "", "wiki/Home.md"},
+		{"slug with existing wiki prefix", "wiki/Home.md", "wiki/Home.md"},
 		{"slug with path separators and extension", "docs/api/Overview.md", "wiki/docs/api/Overview.md"},
 	}
 

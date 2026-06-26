@@ -1467,15 +1467,15 @@ func TestLabel011CreateRequestLabelString(t *testing.T) {
 	if len(sawLabelsRaw) == 0 {
 		t.Fatal("labels field not found in request body")
 	}
-	if sawLabelsRaw[0] != '[' {
-		t.Fatalf("labels is not a JSON array: %s", string(sawLabelsRaw))
+	if sawLabelsRaw[0] != '"' {
+		t.Fatalf("labels is not a JSON string: %s", string(sawLabelsRaw))
 	}
-	var decoded []string
+	var decoded string
 	if err := json.Unmarshal(sawLabelsRaw, &decoded); err != nil {
-		t.Fatalf("labels is not a valid JSON array: %s, err=%v", string(sawLabelsRaw), err)
+		t.Fatalf("labels is not a valid JSON string: %s, err=%v", string(sawLabelsRaw), err)
 	}
-	if len(decoded) != 2 || decoded[0] != "bug" || decoded[1] != "enhancement" {
-		t.Fatalf("labels content: got %v, want [bug enhancement]", decoded)
+	if decoded != "bug,enhancement" {
+		t.Fatalf("labels content: got %q, want bug,enhancement", decoded)
 	}
 }
 
@@ -1488,8 +1488,8 @@ func TestLabel012CreateRequestEmptyLabels(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 				t.Fatalf("decode request body: %v", err)
 			}
-			if len(raw.Labels) > 0 && string(raw.Labels) != "[]" {
-				t.Fatalf("empty labels: expected [], got %s", string(raw.Labels))
+			if len(raw.Labels) > 0 {
+				t.Fatalf("empty labels should be omitted, got %s", string(raw.Labels))
 			}
 			w.WriteHeader(http.StatusCreated)
 			fmt.Fprint(w, `{"id":"ISSUE-200","number":200,"title":"no labels"}`)
@@ -1514,7 +1514,7 @@ func TestLabel012CreateRequestEmptyLabels(t *testing.T) {
 	}
 }
 
-func TestLabel013ArrayLabelsAccepted(t *testing.T) {
+func TestLabel013StringLabelsAccepted(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues" {
 			var raw struct {
@@ -1523,13 +1523,13 @@ func TestLabel013ArrayLabelsAccepted(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 				t.Fatalf("decode request body: %v", err)
 			}
-			if len(raw.Labels) > 0 && raw.Labels[0] == '[' {
+			if len(raw.Labels) > 0 && raw.Labels[0] == '"' {
 				w.WriteHeader(http.StatusCreated)
 				fmt.Fprint(w, `{"id":"ISSUE-300","number":300,"title":"accepted","labels":[{"id":1,"name":"bug","color":"#FF0000"}]}`)
 				return
 			}
 			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprint(w, `{"message":"labels must be a JSON array, not a string"}`)
+			fmt.Fprint(w, `{"message":"labels must be a comma-separated JSON string, not an array"}`)
 			return
 		}
 		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -1537,7 +1537,7 @@ func TestLabel013ArrayLabelsAccepted(t *testing.T) {
 	defer server.Close()
 	client := newTestClient(t, server.URL, Config{})
 
-	t.Run("array labels via DTO accepted", func(t *testing.T) {
+	t.Run("string labels via DTO accepted", func(t *testing.T) {
 		encoded := EncodeIssueLabels([]string{"bug"})
 		result, err := client.CreateIssue(context.Background(), CreateIssueRequest{
 			Owner:  "example-owner",
@@ -1546,17 +1546,17 @@ func TestLabel013ArrayLabelsAccepted(t *testing.T) {
 			Labels: encoded,
 		}, WriteOptions{IdempotencyKey: "key-013-arr"})
 		if err != nil {
-			t.Fatalf("CreateIssue with native array labels failed: %v", err)
+			t.Fatalf("CreateIssue with string labels failed: %v", err)
 		}
 		if !result.Confirmed {
-			t.Fatal("expected confirmed result for native array labels")
+			t.Fatal("expected confirmed result for string labels")
 		}
 	})
 
-	t.Run("double-encoded string labels rejected", func(t *testing.T) {
+	t.Run("native array labels rejected", func(t *testing.T) {
 		body := map[string]interface{}{
 			"title":  "Bad Labels",
-			"labels": `["bug"]`,
+			"labels": []string{"bug"},
 			"owner":  "example-owner",
 			"repo":   "example-repo",
 		}
@@ -1569,12 +1569,12 @@ func TestLabel013ArrayLabelsAccepted(t *testing.T) {
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("expected 400 for double-encoded string labels, got %d", resp.StatusCode)
+			t.Fatalf("expected 400 for native array labels, got %d", resp.StatusCode)
 		}
 	})
 }
 
-func TestScenario013001CreateIssueLabelsAsNativeJSONArray(t *testing.T) {
+func TestScenario013001CreateIssueLabelsAsJSONString(t *testing.T) {
 	var sawBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues" {
@@ -1610,19 +1610,19 @@ func TestScenario013001CreateIssueLabelsAsNativeJSONArray(t *testing.T) {
 	if len(raw.Labels) == 0 {
 		t.Fatal("labels field not found in request body")
 	}
-	if raw.Labels[0] != '[' {
-		t.Fatalf("labels is not a JSON array: %s", string(raw.Labels))
+	if raw.Labels[0] != '"' {
+		t.Fatalf("labels is not a JSON string: %s", string(raw.Labels))
 	}
-	var decoded []string
+	var decoded string
 	if err := json.Unmarshal(raw.Labels, &decoded); err != nil {
-		t.Fatalf("labels is not a valid JSON array: %s, err=%v", string(raw.Labels), err)
+		t.Fatalf("labels is not a valid JSON string: %s, err=%v", string(raw.Labels), err)
 	}
-	if len(decoded) != 2 || decoded[0] != "bug" || decoded[1] != "enhancement" {
-		t.Fatalf("labels: got %v, want [bug enhancement]", decoded)
+	if decoded != "bug,enhancement" {
+		t.Fatalf("labels: got %q, want bug,enhancement", decoded)
 	}
 }
 
-func TestScenario013002UpdateIssueLabelsAsNativeJSONArray(t *testing.T) {
+func TestScenario013002UpdateIssueLabelsAsJSONString(t *testing.T) {
 	var sawBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPatch && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues/42" {
@@ -1657,15 +1657,15 @@ func TestScenario013002UpdateIssueLabelsAsNativeJSONArray(t *testing.T) {
 	if len(raw.Labels) == 0 {
 		t.Fatal("labels field not found in request body")
 	}
-	if raw.Labels[0] != '[' {
-		t.Fatalf("labels is not a JSON array: %s", string(raw.Labels))
+	if raw.Labels[0] != '"' {
+		t.Fatalf("labels is not a JSON string: %s", string(raw.Labels))
 	}
-	var decoded []string
+	var decoded string
 	if err := json.Unmarshal(raw.Labels, &decoded); err != nil {
-		t.Fatalf("labels is not a valid JSON array: %s, err=%v", string(raw.Labels), err)
+		t.Fatalf("labels is not a valid JSON string: %s, err=%v", string(raw.Labels), err)
 	}
-	if len(decoded) != 1 || decoded[0] != "bug" {
-		t.Fatalf("labels: got %v, want [bug]", decoded)
+	if decoded != "bug" {
+		t.Fatalf("labels: got %q, want bug", decoded)
 	}
 }
 
@@ -1809,8 +1809,8 @@ func TestScenario016ExplicitLabelsPreserved(t *testing.T) {
 	if err := json.Unmarshal(sawBody, &raw); err != nil {
 		t.Fatalf("unmarshal request body: %v", err)
 	}
-	if string(raw.Labels) != `["bug"]` {
-		t.Fatalf("labels: got %s, want [\"bug\"]", string(raw.Labels))
+	if string(raw.Labels) != `"bug"` {
+		t.Fatalf("labels: got %s, want \"bug\"", string(raw.Labels))
 	}
 }
 
@@ -1915,22 +1915,22 @@ func TestScenario013007CreateIssueWithLabelsNormalizedInResponse(t *testing.T) {
 	}
 }
 
-func TestScenario013008EncodeIssueLabelsOutputIsJSONArray(t *testing.T) {
+func TestScenario013008EncodeIssueLabelsOutputIsJSONString(t *testing.T) {
 	result := EncodeIssueLabels([]string{"bug", "enhancement"})
-	if len(result) == 0 || result[0] != '[' {
-		t.Fatalf("EncodeIssueLabels: output is not a JSON array literal: %s", string(result))
+	if len(result) == 0 || result[0] != '"' {
+		t.Fatalf("EncodeIssueLabels: output is not a JSON string literal: %s", string(result))
 	}
-	var decoded []string
+	var decoded string
 	if err := json.Unmarshal(result, &decoded); err != nil {
-		t.Fatalf("EncodeIssueLabels: output is not valid JSON array: %s, err=%v", string(result), err)
+		t.Fatalf("EncodeIssueLabels: output is not valid JSON string: %s, err=%v", string(result), err)
 	}
-	if len(decoded) != 2 || decoded[0] != "bug" || decoded[1] != "enhancement" {
-		t.Fatalf("EncodeIssueLabels: got %v, want [bug enhancement]", decoded)
+	if decoded != "bug,enhancement" {
+		t.Fatalf("EncodeIssueLabels: got %q, want bug,enhancement", decoded)
 	}
 
 	empty := EncodeIssueLabels([]string{})
-	if string(empty) != "[]" {
-		t.Fatalf("EncodeIssueLabels empty: got %s, want []", string(empty))
+	if empty != nil {
+		t.Fatalf("EncodeIssueLabels empty: got %s, want nil", string(empty))
 	}
 }
 
