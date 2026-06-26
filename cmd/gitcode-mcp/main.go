@@ -111,11 +111,17 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 	cfg := eff.Config
 	credentialResolver := auth.NewCredentialResolver(src)
 	token := config.Token(src)
-	if opts.live {
+	live := opts.live
+	if opts.live || opts.mcp || opts.mcpServe {
 		credential := credentialResolver.Resolve(context.Background(), eff)
-		token = credential.Token
+		if strings.TrimSpace(credential.Token) != "" {
+			token = credential.Token
+		}
+		if (opts.mcp || opts.mcpServe) && credential.Present && strings.TrimSpace(credential.Token) != "" {
+			live = true
+		}
 	}
-	deps := buildStartupDeps(cfg, token, opts.live)
+	deps := buildStartupDeps(cfg, token, live)
 	deps.Source = src
 	deps.CredentialResolver = credentialResolver
 	if opts.mcpServe {
@@ -496,7 +502,7 @@ func printStartupHelp(w io.Writer) {
 	fmt.Fprintln(w, "Usage: gitcode-mcp [global flags] <command> [args]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Global flags:")
-	fmt.Fprintln(w, "  --live                enable live GitCode API provider (requires GITCODE_TOKEN)")
+	fmt.Fprintln(w, "  --live                enable live GitCode API provider (requires a configured credential)")
 	fmt.Fprintln(w, "  --mcp                 run stdio MCP server")
 	fmt.Fprintln(w, "  mcp serve             run MCP server with stdio or HTTP/SSE transport")
 	fmt.Fprintln(w, "  --cache-path PATH     cache database path")

@@ -797,6 +797,29 @@ func TestEntrypointMCPServeLiveFlagRouting(t *testing.T) {
 	}
 }
 
+func TestEntrypointMCPAutoLiveWithKeychainCredential(t *testing.T) {
+	src := newTestSource(t)
+	src.env["GITCODE_MCP_TEST_KEYCHAIN_TOKEN"] = "test-token"
+	old := mcpRoute
+	defer func() { mcpRoute = old }()
+	var got StartupDeps
+	mcpRoute = func(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, deps StartupDeps) int {
+		got = deps
+		return 0
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--mcp", "--cache-path", filepath.Join(t.TempDir(), "cache.db")}, strings.NewReader(""), &stdout, &stderr, src)
+	if code != 0 {
+		t.Fatalf("exit = %d stderr=%q", code, stderr.String())
+	}
+	if !got.GitCode.Live || got.GitCode.Token != "test-token" {
+		t.Fatalf("expected MCP auto-live with keychain token, got %#v", got.GitCode)
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "test-token") {
+		t.Fatalf("token emitted stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
 func TestEntrypointMCPDependencyHandoffAndRedaction(t *testing.T) {
 	t.Run("SCN-ENTRYPOINT-MCP-HANDOFF", func(t *testing.T) {
 		src := newTestSource(t)
