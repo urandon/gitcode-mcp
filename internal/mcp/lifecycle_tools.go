@@ -25,6 +25,7 @@ type repoStatusResult struct {
 
 type lifecycleDiagnostic struct {
 	Code        string `json:"code"`
+	ErrorClass  string `json:"error_class,omitempty"`
 	Message     string `json:"message"`
 	Remediation string `json:"remediation,omitempty"`
 }
@@ -206,7 +207,7 @@ func (s *Server) callDoctor(_ context.Context, id *json.RawMessage, args json.Ra
 	text := "doctor status=ok"
 	if s.startupDiagnostic.present() {
 		result.Status = "degraded"
-		result.Diagnostics = append(result.Diagnostics, lifecycleDiagnostic{Code: s.startupDiagnostic.ErrorClass, Message: s.startupDiagnostic.Message, Remediation: s.startupDiagnostic.Remediation})
+		result.Diagnostics = append(result.Diagnostics, lifecycleDiagnostic{Code: s.startupDiagnostic.ErrorClass, ErrorClass: s.startupDiagnostic.ErrorClass, Message: s.startupDiagnostic.Message, Remediation: s.startupDiagnostic.Remediation})
 		text = "doctor status=degraded"
 	}
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})

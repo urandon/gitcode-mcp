@@ -28,11 +28,7 @@ func StartupDiagnosticFromError(err error) StartupDiagnostic {
 	case os.IsPermission(err):
 		return StartupDiagnostic{ErrorClass: "cache_path_unwritable", Message: "cache path is not writable", Remediation: "run chmod on the cache directory or configure a writable --cache-path"}
 	default:
-		msg := strings.TrimSpace(err.Error())
-		if msg == "" {
-			msg = "MCP startup failed before service construction"
-		}
-		return StartupDiagnostic{ErrorClass: "startup-failure", Message: msg, Remediation: "run 'gitcode-mcp doctor' or retry with a writable cache path after fixing the startup error"}
+		return StartupDiagnostic{ErrorClass: "startup-failure", Message: "MCP startup failed before service construction", Remediation: "run 'gitcode-mcp doctor' or retry with a writable cache path after fixing the startup error"}
 	}
 }
 

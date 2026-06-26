@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -870,6 +872,80 @@ func TestMCPLifecycleTools(t *testing.T) {
 	}
 	_ = r.Close()
 	wg.Wait()
+}
+
+func TestStartupDiagnosticInjection(t *testing.T) {
+	diagnostic := StartupDiagnosticFromError(os.ErrPermission)
+	if diagnostic.ErrorClass != "cache_path_unwritable" || !strings.Contains(diagnostic.Remediation, "chmod") || !strings.Contains(diagnostic.Remediation, "--cache-path") {
+		t.Fatalf("cache_path_unwritable diagnostic=%+v", diagnostic)
+	}
+	srv := NewMinimalRPCHandler(diagnostic)
+
+	initReq := request{JSONRPC: "2.0", Method: "initialize"}
+	initID := json.RawMessage(`"init"`)
+	initReq.ID = &initID
+	initResp, ok := srv.Handle(context.Background(), initReq)
+	if !ok || initResp.Error != nil {
+		t.Fatalf("initialize response=%+v ok=%t", initResp, ok)
+	}
+	var init initResult
+	if err := json.Unmarshal(initResp.Result, &init); err != nil {
+		t.Fatal(err)
+	}
+	if init.Capabilities.Tools.StartupDiagnostic == nil || init.Capabilities.Tools.StartupDiagnostic.ErrorClass != "cache_path_unwritable" {
+		t.Fatalf("initialize startup diagnostic=%+v", init.Capabilities.Tools.StartupDiagnostic)
+	}
+
+	listReq := request{JSONRPC: "2.0", Method: "tools/list"}
+	listID := json.RawMessage(`"list"`)
+	listReq.ID = &listID
+	listResp, ok := srv.Handle(context.Background(), listReq)
+	if !ok || listResp.Error != nil {
+		t.Fatalf("tools/list response=%+v ok=%t", listResp, ok)
+	}
+	var list toolsListResult
+	if err := json.Unmarshal(listResp.Result, &list); err != nil {
+		t.Fatal(err)
+	}
+	if list.StartupDiagnostic == nil || list.StartupDiagnostic.ErrorClass == "" || list.StartupDiagnostic.Message == "" || list.StartupDiagnostic.Remediation == "" {
+		t.Fatalf("tools/list startup diagnostic=%+v", list.StartupDiagnostic)
+	}
+	if len(list.Tools) != 1 || list.Tools[0].Name != "doctor" {
+		t.Fatalf("minimal tools/list tools=%+v", list.Tools)
+	}
+
+	doctorParams := json.RawMessage(`{"name":"doctor","arguments":{}}`)
+	doctorID := json.RawMessage(`"doctor"`)
+	doctorReq := request{JSONRPC: "2.0", ID: &doctorID, Method: "tools/call", Params: &doctorParams}
+	doctorResp, ok := srv.Handle(context.Background(), doctorReq)
+	if !ok || doctorResp.Error != nil {
+		t.Fatalf("doctor response=%+v ok=%t", doctorResp, ok)
+	}
+	var callResult toolCallResult
+	if err := json.Unmarshal(doctorResp.Result, &callResult); err != nil {
+		t.Fatal(err)
+	}
+	var doctor doctorResult
+	decodeStructured(t, callResult, &doctor)
+	if doctor.Status != "degraded" || len(doctor.Diagnostics) != 1 {
+		t.Fatalf("doctor result=%+v", doctor)
+	}
+	got := doctor.Diagnostics[0]
+	if got.ErrorClass != "cache_path_unwritable" || got.Message == "" || got.Remediation == "" {
+		t.Fatalf("doctor diagnostic=%+v", got)
+	}
+}
+
+func TestStartupDiagnosticRemediationText(t *testing.T) {
+	schemaDiag := StartupDiagnosticFromError(&cache.SchemaVersionError{Compat: cache.VersionCompatibility{Message: "cache schema is newer than supported", Remediation: "upgrade the gitcode-mcp binary to a version that supports this schema"}})
+	if schemaDiag.ErrorClass != "schema_incompatible" || !strings.Contains(schemaDiag.Remediation, "upgrade") {
+		t.Fatalf("schema diagnostic=%+v", schemaDiag)
+	}
+
+	genericDiag := StartupDiagnosticFromError(errors.New("panic: secret stack trace\n/path/file.go:10"))
+	if genericDiag.ErrorClass != "startup-failure" || strings.Contains(genericDiag.Message, "panic") || strings.Contains(genericDiag.Message, "/path/file.go") || genericDiag.Remediation == "" {
+		t.Fatalf("generic diagnostic leaked raw details=%+v", genericDiag)
+	}
 }
 
 func TestMCPReadToolParityOverStdio(t *testing.T) {
