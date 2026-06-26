@@ -608,6 +608,48 @@ func TestAddLabelLiveUnsupportedCapability(t *testing.T) {
 	}
 }
 
+func TestScenario017AddCommentLiveShapeCachesComment(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	created := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		createIssueCommentResult: gitcode.WriteResult[gitcode.Comment]{Record: gitcode.Comment{ID: "2002", Body: "live comment", Author: "commenter", CreatedAt: created}, Confirmed: true, Operation: "CreateIssueComment", RemoteID: "2002", ParentIssueNumber: 42, ConfirmedAt: created},
+	}
+	svc := NewWithClient(store, client)
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.writeCredentialPresent = true
+	result, err := svc.AddComment(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 42, Body: "live comment", IdempotencyKey: "comment-key-live-shape"})
+	if err != nil {
+		t.Fatalf("AddComment live returned error: %v", err)
+	}
+	if result.Status != "succeeded" || result.RemoteID != "2002" || client.createIssueCommentCalls != 1 {
+		t.Fatalf("unexpected result=%+v calls=%d", result, client.createIssueCommentCalls)
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", "ISSUE-42")
+	if err != nil {
+		t.Fatalf("GetRecord: %v", err)
+	}
+	if len(record.Comments) != 1 || record.Comments[0].CommentID != "2002" || record.Comments[0].Author != "commenter" || record.Comments[0].Body != "live comment" {
+		t.Fatalf("comments=%#v", record.Comments)
+	}
+}
+
+func TestScenario017AddCommentMalformedBodyDiagnosticHTTPAttempted(t *testing.T) {
+	err := ErrWriteFailure{Code: "schema_decode", RepoID: "fixture-a", PayloadSource: "schema_decode", Cause: &gitcode.ErrSchemaDecode{Field: "comment", Message: "malformed"}}
+	ctx := diagnostics.CommandContext{ProviderMode: "live-http", HTTPAttempted: err.Code == "schema_decode", SchemaDecodeFailure: true, FailureSource: err.PayloadSource}
+	diagnostic := diagnostics.Classify(err, ctx)
+	if diagnostic.Code != diagnostics.CodeSchemaDecode || !diagnostic.HTTPAttempted {
+		t.Fatalf("diagnostic=%+v", diagnostic)
+	}
+}
+
 func TestS018LiveWriteConfirmedRefreshesCommentAndWiki(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)
@@ -2257,9 +2299,16 @@ type fakeGitCodeClient struct {
 	listIssuesErrors         []error
 	listWikiPages            []gitcode.Page[gitcode.WikiPage]
 	listWikiErrors           []error
+	listWikiPagesCallCount   int
+	listPRPages              []gitcode.Page[gitcode.PullRequest]
+	prsByNumber              map[int]gitcode.PullRequest
+	prCommentsByPR           map[int][]gitcode.PRComment
+	listPRCalls              int
+	prCommentCalls           int
 	issuesByNumber           map[int]gitcode.Issue
 	wikiBySlug               map[string]gitcode.WikiPage
 	commentsByIssue          map[int][]gitcode.Comment
+	listIssueCommentsErr     error
 	lastCreateIssueRequest   gitcode.CreateIssueRequest
 	lastWriteOptions         gitcode.WriteOptions
 }
@@ -2300,10 +2349,37 @@ func (f *fakeGitCodeClient) GetIssue(_ context.Context, req gitcode.IssueRequest
 }
 func (f *fakeGitCodeClient) ListIssueComments(_ context.Context, req gitcode.IssueRequest) (gitcode.Page[gitcode.Comment], error) {
 	f.commentCalls++
+	if f.listIssueCommentsErr != nil {
+		return gitcode.Page[gitcode.Comment]{}, f.listIssueCommentsErr
+	}
 	if f.commentsByIssue != nil {
 		return gitcode.Page[gitcode.Comment]{Items: f.commentsByIssue[req.Number]}, nil
 	}
 	return gitcode.Page[gitcode.Comment]{Items: f.comments}, nil
+}
+func (f *fakeGitCodeClient) ListPRs(context.Context, gitcode.PRListRequest) (gitcode.Page[gitcode.PullRequest], error) {
+	f.listPRCalls++
+	if len(f.listPRPages) > 0 {
+		page := f.listPRPages[0]
+		f.listPRPages = f.listPRPages[1:]
+		return page, nil
+	}
+	return gitcode.Page[gitcode.PullRequest]{}, nil
+}
+func (f *fakeGitCodeClient) GetPR(_ context.Context, req gitcode.PRRequest) (gitcode.PullRequest, error) {
+	if f.prsByNumber != nil {
+		if pr, ok := f.prsByNumber[req.Number]; ok {
+			return pr, nil
+		}
+	}
+	return gitcode.PullRequest{}, nil
+}
+func (f *fakeGitCodeClient) ListPRComments(_ context.Context, req gitcode.PRRequest) (gitcode.Page[gitcode.PRComment], error) {
+	f.prCommentCalls++
+	if f.prCommentsByPR != nil {
+		return gitcode.Page[gitcode.PRComment]{Items: f.prCommentsByPR[req.Number]}, nil
+	}
+	return gitcode.Page[gitcode.PRComment]{}, nil
 }
 func (f *fakeGitCodeClient) GetWikiPage(_ context.Context, req gitcode.WikiPageRequest) (gitcode.WikiPage, error) {
 	f.wikiCalls++
@@ -2318,6 +2394,7 @@ func (f *fakeGitCodeClient) GetWikiPage(_ context.Context, req gitcode.WikiPageR
 	return f.wiki, nil
 }
 func (f *fakeGitCodeClient) ListWikiPages(context.Context, gitcode.WikiListRequest) (gitcode.Page[gitcode.WikiPage], error) {
+	f.listWikiPagesCallCount++
 	if len(f.listWikiErrors) > 0 {
 		err := f.listWikiErrors[0]
 		f.listWikiErrors = f.listWikiErrors[1:]
@@ -2362,6 +2439,9 @@ func (f *fakeGitCodeClient) CreateIssueComment(context.Context, gitcode.CreateIs
 		return gitcode.WriteResult[gitcode.Comment]{}, err
 	}
 	return f.createIssueCommentResult, nil
+}
+func (f *fakeGitCodeClient) CreatePRComment(context.Context, gitcode.CreatePRCommentRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PRComment], error) {
+	return gitcode.WriteResult[gitcode.PRComment]{}, nil
 }
 func (f *fakeGitCodeClient) CreateWikiPage(context.Context, gitcode.CreateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
 	f.createWikiPageCalls++
@@ -2614,5 +2694,78 @@ func TestScenario013004AddLabelLiveNoClientCall(t *testing.T) {
 	}
 	if client.addLabelCalls != 0 {
 		t.Fatalf("expected 0 addLabelCalls (old route not called), got %d", client.addLabelCalls)
+	}
+}
+
+func TestNormalizeWikiCachePath(t *testing.T) {
+	tests := []struct {
+		name     string
+		remoteID string
+		want     string
+	}{
+		{"slug with .md extension", "Home.md", "wiki/Home.md"},
+		{"slug without extension", "Home", "wiki/Home.md"},
+		{"slug with .markdown extension", "Guide.markdown", "wiki/Guide.md"},
+		{"slug with .mdown extension", "FAQ.mdown", "wiki/FAQ.md"},
+		{"slug with .mkd extension", "README.mkd", "wiki/README.md"},
+		{"nested subdirectory with .md extension", "dir/Sub.md", "wiki/dir/Sub.md"},
+		{"nested subdirectory without extension", "dir/Sub", "wiki/dir/Sub.md"},
+		{"non-markdown extension slug", "README.txt", "wiki/README.txt.md"},
+		{"empty slug", "", "wiki/Home.md"},
+		{"slug with existing wiki prefix", "wiki/Home.md", "wiki/Home.md"},
+		{"slug with path separators and extension", "docs/api/Overview.md", "wiki/docs/api/Overview.md"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeWikiCachePath(tt.remoteID)
+			if got != tt.want {
+				t.Errorf("normalizeWikiCachePath(%q) = %q, want %q", tt.remoteID, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWikiPathNormalizationInSync(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 25, 10, 0, 0, 0, time.UTC)
+
+	client := &fakeGitCodeClient{
+		wiki: gitcode.WikiPage{
+			Slug:      "Home.md",
+			Title:     "Home",
+			Body:      "# Home\n\nWelcome to the wiki.",
+			Revision:  "rev-home-v1",
+			CreatedAt: base,
+			UpdatedAt: base,
+		},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{
+		RepoID:     "wiki-path-test",
+		Owner:      "owner",
+		Name:       "repo",
+		APIBaseURL: "https://example.invalid/api",
+		Scopes:     []cache.RepositoryScope{cache.RepositoryScopeWiki},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+
+	result, err := svc.SyncToCache(ctx, SyncRequest{
+		RepoID:    "wiki-path-test",
+		AliasType: "remote",
+		AliasID:   "Home.md",
+	})
+	if err != nil {
+		t.Fatalf("SyncToCache failed: %v", err)
+	}
+
+	if result.Record.Path != "wiki/Home.md" {
+		t.Errorf("cached wiki path = %q, want %q", result.Record.Path, "wiki/Home.md")
 	}
 }

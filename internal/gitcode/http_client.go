@@ -95,6 +95,48 @@ func (c *HTTPClient) ListIssueComments(ctx context.Context, req IssueRequest) (P
 	return Page[Comment]{Items: items, Page: page.Page, PerPage: page.PerPage}, nil
 }
 
+func (c *HTTPClient) ListPRs(ctx context.Context, req PRListRequest) (Page[PullRequest], error) {
+	if err := validateReadRepo(req.Owner, req.Repo); err != nil {
+		return Page[PullRequest]{}, err
+	}
+	endpoint := listPREndpoint(req.Owner, req.Repo)
+	items, page, err := getPaged[PullRequest](ctx, c, endpoint, prListQuery(req), PageState{Page: req.Page, PerPage: req.PerPage})
+	if err != nil {
+		return Page[PullRequest]{}, err
+	}
+	return Page[PullRequest]{Items: items, Page: page.Page, PerPage: page.PerPage}, nil
+}
+
+func (c *HTTPClient) GetPR(ctx context.Context, req PRRequest) (PullRequest, error) {
+	if err := validatePRRequest(req); err != nil {
+		return PullRequest{}, err
+	}
+	var pr PullRequest
+	endpoint := getPREndpoint(req.Owner, req.Repo, req.Number)
+	if err := c.getJSON(ctx, endpoint, nil, &pr); err != nil {
+		return PullRequest{}, err
+	}
+	return pr, nil
+}
+
+func (c *HTTPClient) ListPRComments(ctx context.Context, req PRRequest) (Page[PRComment], error) {
+	if err := validatePRRequest(req); err != nil {
+		return Page[PRComment]{}, err
+	}
+	endpoint := listPRCommentsEndpoint(req.Owner, req.Repo, req.Number)
+	items, page, err := getPaged[PRComment](ctx, c, endpoint, nil, PageState{})
+	if err != nil {
+		return Page[PRComment]{}, err
+	}
+	for i := range items {
+		items[i].PRNumber = req.Number
+		if items[i].DiscussionID == "" {
+			items[i].DiscussionID = strconv.Itoa(req.Number)
+		}
+	}
+	return Page[PRComment]{Items: items, Page: page.Page, PerPage: page.PerPage}, nil
+}
+
 func (c *HTTPClient) GetWikiPage(ctx context.Context, req WikiPageRequest) (WikiPage, error) {
 	if err := validateWikiPageRequest(req); err != nil {
 		return WikiPage{}, err
@@ -106,7 +148,11 @@ func (c *HTTPClient) ListWikiPages(ctx context.Context, req WikiListRequest) (Pa
 	if err := validateReadRepo(req.Owner, req.Repo); err != nil {
 		return Page[WikiPage]{}, err
 	}
-	walker := wikiTraversal{client: c, owner: req.Owner, repo: req.Repo, seenDirs: map[string]bool{}, seenFiles: map[string]bool{}}
+	walker := &wikiTraversal{client: c, owner: req.Owner, repo: req.Repo, seenDirs: map[string]bool{}, seenFiles: map[string]bool{}}
+	if req.Bounds != nil {
+		walker.maxRecords = req.Bounds.MaxRecords
+		walker.progressChan = req.Bounds.ProgressChan
+	}
 	items, err := walker.walk(ctx, "", 0)
 	if err != nil {
 		return Page[WikiPage]{}, err
@@ -160,7 +206,7 @@ func (c *HTTPClient) CreateIssue(ctx context.Context, req CreateIssueRequest, op
 		return WriteResult[Issue]{}, err
 	}
 	target := req.Owner + "/" + req.Repo
-	return writeConfirmedJSON[Issue](ctx, c, http.MethodPost, createIssueEndpoint(req.Owner, req.Repo), "CreateIssue", target, req, opts, func(result WriteResult[Issue]) (WriteResult[Issue], error) {
+	return writeConfirmedJSON[Issue](ctx, c, http.MethodPost, createIssueEndpoint(req.Owner, req.Repo), "CreateIssue", target, createIssuePayload(req), opts, func(result WriteResult[Issue]) (WriteResult[Issue], error) {
 		issue := result.Record
 		if strings.TrimSpace(issue.ID) == "" || issue.Number <= 0 {
 			return WriteResult[Issue]{}, ErrValidationFailed{Field: "response", Message: "issue create confirmation requires id and number"}
@@ -176,7 +222,7 @@ func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, op
 		return WriteResult[Issue]{}, err
 	}
 	target := req.Owner + "/" + req.Repo + "/" + strconv.Itoa(req.Number)
-	return writeConfirmedJSON[Issue](ctx, c, http.MethodPatch, updateIssueEndpoint(req.Owner, req.Repo, req.Number), "UpdateIssue", target, req, opts, func(result WriteResult[Issue]) (WriteResult[Issue], error) {
+	return writeConfirmedJSON[Issue](ctx, c, http.MethodPatch, updateIssueEndpoint(req.Owner, req.Repo, req.Number), "UpdateIssue", target, updateIssuePayload(req), opts, func(result WriteResult[Issue]) (WriteResult[Issue], error) {
 		issue := result.Record
 		if strings.TrimSpace(issue.ID) == "" || issue.Number != req.Number {
 			return WriteResult[Issue]{}, ErrValidationFailed{Field: "response", Message: "issue update confirmation requires id and matching number"}
@@ -192,14 +238,36 @@ func (c *HTTPClient) CreateIssueComment(ctx context.Context, req CreateIssueComm
 		return WriteResult[Comment]{}, err
 	}
 	target := req.Owner + "/" + req.Repo + "/" + strconv.Itoa(req.Number)
-	return writeConfirmedJSON[Comment](ctx, c, http.MethodPost, createIssueCommentEndpoint(req.Owner, req.Repo, req.Number), "CreateIssueComment", target, req, opts, func(result WriteResult[Comment]) (WriteResult[Comment], error) {
+	return writeConfirmedSchemaJSON[Comment](ctx, c, http.MethodPost, createIssueCommentEndpoint(req.Owner, req.Repo, req.Number), "CreateIssueComment", target, req, opts, func(result WriteResult[Comment]) (WriteResult[Comment], error) {
 		comment := result.Record
 		if strings.TrimSpace(comment.ID) == "" {
-			return WriteResult[Comment]{}, ErrValidationFailed{Field: "response", Message: "comment confirmation requires id"}
+			return WriteResult[Comment]{}, &ErrSchemaDecode{Field: "comment.id", Expected: "note_id or id", Received: "missing"}
 		}
 		result.RemoteID = comment.ID
 		result.ParentIssueNumber = req.Number
 		result.ParentIssueID = comment.IssueID
+		return result, nil
+	})
+}
+
+func (c *HTTPClient) CreatePRComment(ctx context.Context, req CreatePRCommentRequest, opts WriteOptions) (WriteResult[PRComment], error) {
+	if err := validateCreatePRComment(req); err != nil {
+		return WriteResult[PRComment]{}, err
+	}
+	target := req.Owner + "/" + req.Repo + "/pulls/" + strconv.Itoa(req.Number)
+	return writeConfirmedSchemaJSON[PRComment](ctx, c, http.MethodPost, createPRCommentEndpoint(req.Owner, req.Repo, req.Number), "CreatePRComment", target, req, opts, func(result WriteResult[PRComment]) (WriteResult[PRComment], error) {
+		comment := result.Record
+		if strings.TrimSpace(comment.ID) == "" {
+			return WriteResult[PRComment]{}, &ErrSchemaDecode{Field: "pr_comment.id", Expected: "note_id or id", Received: "missing"}
+		}
+		comment.PRNumber = req.Number
+		if comment.DiscussionID == "" {
+			comment.DiscussionID = strconv.Itoa(req.Number)
+		}
+		result.Record = comment
+		result.RemoteID = comment.ID
+		result.ParentIssueNumber = req.Number
+		result.ParentIssueID = comment.DiscussionID
 		return result, nil
 	})
 }
@@ -289,66 +357,110 @@ func (c *HTTPClient) GetMilestone(ctx context.Context, req MilestoneRequest) (Mi
 }
 
 type wikiTraversal struct {
-	client    *HTTPClient
-	owner     string
-	repo      string
-	seenDirs  map[string]bool
-	seenFiles map[string]bool
+	client       *HTTPClient
+	owner        string
+	repo         string
+	seenDirs     map[string]bool
+	seenFiles    map[string]bool
+	maxRecords   int
+	progressChan chan<- WikiProgressEvent
 }
 
-func (w wikiTraversal) walk(ctx context.Context, dir string, depth int) ([]WikiPage, error) {
-	if depth > 64 {
-		return nil, ErrPartialResponse{Endpoint: wikiContentsPathEndpoint(w.owner, w.repo, dir), Message: "wiki contents nesting exceeds 64 levels"}
-	}
-	normalizedDir := normalizeWikiPath(dir)
-	if w.seenDirs[normalizedDir] {
-		return nil, nil
-	}
-	w.seenDirs[normalizedDir] = true
-	entries, err := w.client.listWikiEntries(ctx, w.owner, w.repo, normalizedDir)
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		left := normalizeWikiPath(entries[i].Path)
-		right := normalizeWikiPath(entries[j].Path)
-		if entries[i].Type != entries[j].Type {
-			return entries[i].Type == "dir"
-		}
-		return left < right
-	})
+type walkStackEntry struct {
+	kind      string // "dir" or "file"
+	dir       string
+	depth     int
+	entryPath string
+	entrySha  string
+}
+
+func (w *wikiTraversal) walk(ctx context.Context, dir string, depth int) ([]WikiPage, error) {
+	stack := []walkStackEntry{{kind: "dir", dir: dir, depth: depth}}
 	var out []WikiPage
-	for _, entry := range entries {
-		entryPath := normalizeWikiPath(entry.Path)
-		if entryPath == "" || strings.TrimSpace(entry.Type) == "" {
-			return nil, ErrPartialResponse{Endpoint: wikiContentsPathEndpoint(w.owner, w.repo, normalizedDir), Message: "wiki contents entry requires path and type"}
+	pageCount := 0
+
+	for len(stack) > 0 {
+		if err := ctx.Err(); err != nil {
+			return out, err
 		}
-		switch strings.ToLower(strings.TrimSpace(entry.Type)) {
-		case "dir", "directory", "tree":
-			pages, err := w.walk(ctx, entryPath, depth+1)
-			if err != nil {
-				return nil, err
+		if w.maxRecords > 0 && len(out) >= w.maxRecords {
+			break
+		}
+
+		current := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		if current.kind == "file" {
+			if strings.TrimSpace(current.entrySha) == "" {
+				return nil, ErrPartialResponse{Endpoint: wikiContentsPathEndpoint(w.owner, w.repo, current.dir), Message: "wiki file entry requires sha"}
 			}
-			out = append(out, pages...)
-		case "file", "blob":
-			if strings.TrimSpace(entry.Sha) == "" {
-				return nil, ErrPartialResponse{Endpoint: wikiContentsPathEndpoint(w.owner, w.repo, normalizedDir), Message: "wiki file entry requires sha"}
+			if w.seenFiles[current.entryPath] {
+				return nil, ErrPartialResponse{Endpoint: wikiContentsPathEndpoint(w.owner, w.repo, current.dir), Message: "duplicate wiki file path " + current.entryPath}
 			}
-			if w.seenFiles[entryPath] {
-				return nil, ErrPartialResponse{Endpoint: wikiContentsPathEndpoint(w.owner, w.repo, normalizedDir), Message: "duplicate wiki file path " + entryPath}
-			}
-			w.seenFiles[entryPath] = true
-			if !isImportableWikiMarkdown(entryPath) {
+			w.seenFiles[current.entryPath] = true
+			if !isImportableWikiMarkdown(current.entryPath) {
 				continue
 			}
-			page, err := w.client.getWikiPageByPath(ctx, w.owner, w.repo, entryPath)
+			page, err := w.client.getWikiPageByPath(ctx, w.owner, w.repo, current.entryPath)
 			if err != nil {
-				return nil, err
+				return out, err
 			}
 			out = append(out, page)
+			continue
 		}
+
+		if current.depth > 64 {
+			return nil, ErrPartialResponse{Endpoint: wikiContentsPathEndpoint(w.owner, w.repo, current.dir), Message: "wiki contents nesting exceeds 64 levels"}
+		}
+		normalizedDir := normalizeWikiPath(current.dir)
+		if w.seenDirs[normalizedDir] {
+			continue
+		}
+		w.seenDirs[normalizedDir] = true
+		entries, err := w.client.listWikiEntries(ctx, w.owner, w.repo, normalizedDir)
+		if err != nil {
+			return out, err
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			left := normalizeWikiPath(entries[i].Path)
+			right := normalizeWikiPath(entries[j].Path)
+			if entries[i].Type != entries[j].Type {
+				return entries[i].Type == "dir"
+			}
+			return left < right
+		})
+
+		startLen := len(out)
+
+		for i := len(entries) - 1; i >= 0; i-- {
+			entry := entries[i]
+			entryPath := normalizeWikiPath(entry.Path)
+			if entryPath == "" || strings.TrimSpace(entry.Type) == "" {
+				return nil, ErrPartialResponse{Endpoint: wikiContentsPathEndpoint(w.owner, w.repo, normalizedDir), Message: "wiki contents entry requires path and type"}
+			}
+			switch strings.ToLower(strings.TrimSpace(entry.Type)) {
+			case "dir", "directory", "tree":
+				stack = append(stack, walkStackEntry{kind: "dir", dir: entryPath, depth: current.depth + 1})
+			case "file", "blob":
+				stack = append(stack, walkStackEntry{kind: "file", dir: current.dir, depth: current.depth, entryPath: entryPath, entrySha: strings.TrimSpace(entry.Sha)})
+			}
+		}
+
+		recordsThisDir := len(out) - startLen
+		pageCount++
+		w.emitProgress(normalizedDir, pageCount, recordsThisDir)
 	}
 	return out, nil
+}
+
+func (w *wikiTraversal) emitProgress(path string, page int, records int) {
+	if w.progressChan == nil {
+		return
+	}
+	select {
+	case w.progressChan <- WikiProgressEvent{Path: path, RecordsFetched: records}:
+	default:
+	}
 }
 
 func (c *HTTPClient) listWikiEntries(ctx context.Context, owner, repo, dir string) ([]WikiContentsEntry, error) {
@@ -356,11 +468,55 @@ func (c *HTTPClient) listWikiEntries(ctx context.Context, owner, repo, dir strin
 	if dir != "" {
 		endpoint = wikiContentsPathEndpoint(owner, repo, dir)
 	}
+
+	resp, err := c.do(ctx, http.MethodGet, endpoint, nil, nil, requestOptions{})
+	if err != nil {
+		return nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: 1, Cause: err}
+	}
+	defer resp.Body.Close()
+
+	body, readErr := c.readBounded(resp, endpoint)
+	if readErr != nil {
+		return nil, readErr
+	}
+
+	if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+		// Empty array [] is not an empty-wiki condition — the route exists and
+		// returns valid content (just no pages in this directory).
+	} else if isWikiEmptyResponse(resp.StatusCode, body) {
+		return nil, ErrEmptyWiki{Owner: owner, Repo: repo}
+	} else {
+		// Fall through to normal error handling via the existing statusError path.
+		return nil, c.statusError(resp.StatusCode, endpoint, body, requestOptions{})
+	}
+
 	var entries []WikiContentsEntry
-	if err := c.getJSON(ctx, endpoint, nil, &entries); err != nil {
+	if err := decodeJSON(endpoint, body, &entries); err != nil {
 		return nil, err
 	}
 	return entries, nil
+}
+
+func isWikiEmptyResponse(statusCode int, body []byte) bool {
+	if statusCode != http.StatusBadRequest && statusCode != http.StatusNotFound {
+		return false
+	}
+	lower := strings.ToLower(string(body))
+	patterns := []string{
+		"wiki not found",
+		"wiki is empty",
+		"wiki has no pages",
+		"wiki is not initialized",
+		"wiki is uninitialized",
+		"wiki has not been created",
+		"uninitialized wiki",
+	}
+	for _, p := range patterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *HTTPClient) getWikiPageByPath(ctx context.Context, owner, repo, wikiPath string) (WikiPage, error) {
@@ -395,11 +551,23 @@ func (c *HTTPClient) getWikiMetadata(ctx context.Context, owner, repo, wikiPath 
 }
 
 func (c *HTTPClient) writeWikiContent(ctx context.Context, method, endpoint, operation, target string, payload WikiContentWriteRequest, opts WriteOptions, owner, repo, wikiPath, body string) (WriteResult[WikiPage], error) {
+	requestPath := normalizeWikiPath(wikiPath)
 	result, err := writeConfirmedJSON[WikiContentsFile](ctx, c, method, endpoint, operation, target, payload, opts, func(result WriteResult[WikiContentsFile]) (WriteResult[WikiContentsFile], error) {
 		if normalizeWikiPath(result.Record.Path) == "" || strings.TrimSpace(result.Record.Sha) == "" {
-			return WriteResult[WikiContentsFile]{}, ErrPartialResponse{Endpoint: endpoint, Message: "wiki write confirmation requires path and sha"}
+			meta, err := c.confirmWikiWrite(ctx, owner, repo, requestPath, body)
+			if err != nil {
+				return WriteResult[WikiContentsFile]{}, err
+			}
+			result.Record = meta
 		}
-		result.RemoteID = normalizeWikiPath(result.Record.Path)
+		confirmedPath := normalizeWikiPath(result.Record.Path)
+		if confirmedPath == "" || strings.TrimSpace(result.Record.Sha) == "" {
+			return WriteResult[WikiContentsFile]{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki write confirmation requires path and sha"}
+		}
+		if confirmedPath != requestPath {
+			return WriteResult[WikiContentsFile]{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki write confirmation path mismatch"}
+		}
+		result.RemoteID = confirmedPath
 		result.RemoteSlug = result.RemoteID
 		result.RemoteRevision = result.Record.Sha
 		return result, nil
@@ -409,6 +577,31 @@ func (c *HTTPClient) writeWikiContent(ctx context.Context, method, endpoint, ope
 	}
 	page := wikiPageFromMetadata(result.Record, body)
 	return WriteResult[WikiPage]{Record: page, Confirmed: result.Confirmed, Operation: result.Operation, Target: result.Target, ProviderStatus: result.ProviderStatus, RemoteID: result.RemoteID, RemoteSlug: result.RemoteSlug, RemoteRevision: result.RemoteRevision, IdempotencyKey: result.IdempotencyKey, ResponseHash: result.ResponseHash, ConfirmedAt: result.ConfirmedAt, ProviderPayloadFingerprint: result.ProviderPayloadFingerprint}, nil
+}
+
+func (c *HTTPClient) confirmWikiWrite(ctx context.Context, owner, repo, wikiPath, body string) (WikiContentsFile, error) {
+	endpoint := wikiContentsPathEndpoint(owner, repo, wikiPath)
+	meta, err := c.getWikiMetadata(ctx, owner, repo, wikiPath)
+	if err != nil {
+		return WikiContentsFile{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki confirmation GET failed", Cause: err}
+	}
+	confirmedPath := normalizeWikiPath(meta.Path)
+	if confirmedPath != normalizeWikiPath(wikiPath) {
+		return WikiContentsFile{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki confirmation path mismatch"}
+	}
+	if strings.TrimSpace(meta.Sha) == "" {
+		return WikiContentsFile{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki confirmation missing sha"}
+	}
+	if strings.TrimSpace(meta.Content) != "" {
+		decoded, err := decodeWikiContent(meta, endpoint)
+		if err != nil {
+			return WikiContentsFile{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki confirmation content decode failed", Cause: err}
+		}
+		if string(decoded) != body {
+			return WikiContentsFile{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki confirmation content mismatch"}
+		}
+	}
+	return meta, nil
 }
 
 type requestOptions struct {
@@ -438,6 +631,14 @@ func decodeJSON(endpoint string, body []byte, out any) error {
 	return nil
 }
 
+func decodeSchemaJSON(endpoint string, body []byte, out any) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if err := dec.Decode(out); err != nil {
+		return &ErrSchemaDecode{Field: endpoint, Expected: "valid JSON response", Received: decodeMessage(err)}
+	}
+	return nil
+}
+
 func (c *HTTPClient) getBytes(ctx context.Context, endpoint string, values url.Values) ([]byte, http.Header, error) {
 	return c.getBytesWithOptions(ctx, endpoint, values, requestOptions{})
 }
@@ -448,7 +649,42 @@ func writeJSON[T any](ctx context.Context, c *HTTPClient, method, endpoint, oper
 	})
 }
 
+func createIssuePayload(req CreateIssueRequest) any {
+	payload := struct {
+		Title  string           `json:"title"`
+		Body   string           `json:"body,omitempty"`
+		Labels *json.RawMessage `json:"labels,omitempty"`
+	}{Title: req.Title, Body: req.Body}
+	if len(req.Labels) > 0 {
+		labels := req.Labels
+		payload.Labels = &labels
+	}
+	return payload
+}
+
+func updateIssuePayload(req UpdateIssueRequest) any {
+	payload := struct {
+		Title  string           `json:"title,omitempty"`
+		Body   string           `json:"body,omitempty"`
+		State  string           `json:"state,omitempty"`
+		Labels *json.RawMessage `json:"labels,omitempty"`
+	}{Title: req.Title, Body: req.Body, State: req.State}
+	if len(req.Labels) > 0 {
+		labels := req.Labels
+		payload.Labels = &labels
+	}
+	return payload
+}
+
 func writeConfirmedJSON[T any](ctx context.Context, c *HTTPClient, method, endpoint, operation, target string, payload any, opts WriteOptions, confirm func(WriteResult[T]) (WriteResult[T], error)) (WriteResult[T], error) {
+	return writeConfirmedWithDecoder(ctx, c, method, endpoint, operation, target, payload, opts, decodeJSON, confirm)
+}
+
+func writeConfirmedSchemaJSON[T any](ctx context.Context, c *HTTPClient, method, endpoint, operation, target string, payload any, opts WriteOptions, confirm func(WriteResult[T]) (WriteResult[T], error)) (WriteResult[T], error) {
+	return writeConfirmedWithDecoder(ctx, c, method, endpoint, operation, target, payload, opts, decodeSchemaJSON, confirm)
+}
+
+func writeConfirmedWithDecoder[T any](ctx context.Context, c *HTTPClient, method, endpoint, operation, target string, payload any, opts WriteOptions, decode func(string, []byte, any) error, confirm func(WriteResult[T]) (WriteResult[T], error)) (WriteResult[T], error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return WriteResult[T]{}, err
@@ -465,7 +701,7 @@ func writeConfirmedJSON[T any](ctx context.Context, c *HTTPClient, method, endpo
 		return WriteResult[T]{}, err
 	}
 	var record T
-	if err := decodeJSON(endpoint, respBody, &record); err != nil {
+	if err := decode(endpoint, respBody, &record); err != nil {
 		return WriteResult[T]{}, err
 	}
 	hash := sha256.Sum256(respBody)
@@ -515,6 +751,16 @@ func validateIssueRequest(req IssueRequest) error {
 	return nil
 }
 
+func validatePRRequest(req PRRequest) error {
+	if err := validateReadRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if req.Number <= 0 {
+		return ErrValidationFailed{Field: "number", Message: "positive pull request number is required"}
+	}
+	return nil
+}
+
 func validateWikiPageRequest(req WikiPageRequest) error {
 	if err := validateReadRepo(req.Owner, req.Repo); err != nil {
 		return err
@@ -555,6 +801,19 @@ func validateCreateIssueComment(req CreateIssueCommentRequest) error {
 	}
 	if req.Number <= 0 {
 		return ErrValidationFailed{Field: "number", Message: "positive issue number is required"}
+	}
+	if strings.TrimSpace(req.Body) == "" {
+		return ErrValidationFailed{Field: "body", Message: "comment body is required"}
+	}
+	return nil
+}
+
+func validateCreatePRComment(req CreatePRCommentRequest) error {
+	if err := validateWriteRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if req.Number <= 0 {
+		return ErrValidationFailed{Field: "number", Message: "positive pull request number is required"}
 	}
 	if strings.TrimSpace(req.Body) == "" {
 		return ErrValidationFailed{Field: "body", Message: "comment body is required"}
@@ -738,6 +997,9 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 				continue
 			}
 			return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Status: resp.StatusCode, Attempts: attempt}
+		case isWikiEmptyResponse(resp.StatusCode, body):
+			owner, repo := parseWikiEndpointOwnerRepo(endpoint)
+			return nil, nil, ErrEmptyWiki{Owner: owner, Repo: repo}
 		default:
 			return nil, nil, c.statusError(resp.StatusCode, endpoint, body, opts)
 		}
@@ -901,4 +1163,16 @@ func isRetryableTransport(err error) bool {
 		return netErr.Timeout() || netErr.Temporary()
 	}
 	return true
+}
+
+func parseWikiEndpointOwnerRepo(endpoint string) (owner, repo string) {
+	trimmed := strings.TrimLeft(endpoint, "/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) < 5 || parts[0] != "api" || parts[1] != "v5" || parts[2] != "repos" {
+		return "", ""
+	}
+	owner = parts[3]
+	repoWithWiki := parts[4]
+	repo = strings.TrimSuffix(repoWithWiki, ".wiki")
+	return owner, repo
 }

@@ -78,6 +78,8 @@ type queryService interface {
 	SyncResources(context.Context, []service.SyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncIssues(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncWiki(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	BulkSyncPullRequests(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	BulkSyncPRComments(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncAll(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	ResetLiveCache(context.Context, service.ResetLiveCacheRequest) (service.ResetLiveCacheResult, error)
 	CacheStatus(context.Context, service.CacheStatusRequest) (service.CacheStatusResult, error)
@@ -130,7 +132,12 @@ type options struct {
 	incremental    bool
 	issues         bool
 	wiki           bool
+	pulls          bool
+	comments       bool
 	syncIndex      bool
+	maxPages       int
+	maxRecords     int
+	perPage        int
 	input          string
 	output         string
 	owner          string
@@ -277,7 +284,7 @@ func buildStartupPlan(ctx context.Context, command string, opts options, deps lo
 	}
 	plan.LiveRepositoryBinding = binding
 	plan.APIBaseURL = binding.APIBaseURL
-	plan.ServiceConfig = service.ServiceConfig{BaseURL: binding.APIBaseURL, Timeout: eff.Config.DefaultTimeout, MaxResponseSize: eff.Config.MaxResponseSize, MaxRetries: eff.Config.MaxRetries}
+	plan.ServiceConfig = service.ServiceConfig{BaseURL: binding.APIBaseURL, LockPath: eff.Config.LockPath, Timeout: eff.Config.DefaultTimeout, MaxResponseSize: eff.Config.MaxResponseSize, MaxRetries: eff.Config.MaxRetries}
 	return plan, nil
 }
 
@@ -326,7 +333,7 @@ func liveRequestedScope(command string, opts options) service.RepositoryScope {
 	case "create-page", "update-page", "delete-page":
 		return service.RepositoryScopeWiki
 	case "sync":
-		if opts.wiki && !opts.issues {
+		if opts.wiki && !opts.issues && !opts.pulls && !opts.comments {
 			return service.RepositoryScopeWiki
 		}
 	}
@@ -404,7 +411,12 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.BoolVar(&opts.incremental, "incremental", false, "run incremental index")
 	flags.BoolVar(&opts.issues, "issues", false, "sync issues")
 	flags.BoolVar(&opts.wiki, "wiki", false, "sync wiki")
+	flags.BoolVar(&opts.pulls, "pulls", false, "sync pull requests")
+	flags.BoolVar(&opts.comments, "comments", false, "sync supported comments")
 	flags.BoolVar(&opts.syncIndex, "index", false, "build index during sync")
+	flags.IntVar(&opts.maxPages, "max-pages", 0, "maximum pages to sync")
+	flags.IntVar(&opts.maxRecords, "max-records", 0, "maximum records to sync")
+	flags.IntVar(&opts.perPage, "per-page", 0, "records per page")
 	flags.StringVar(&opts.input, "input", "", "input path")
 	flags.StringVar(&opts.output, "output", "", "output path")
 	flags.StringVar(&opts.owner, "owner", "", "repository owner")
@@ -455,7 +467,7 @@ func reorderFlags(args []string) []string {
 		arg := args[i]
 		if strings.HasPrefix(arg, "--") {
 			flags = append(flags, arg)
-			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--index" || arg == "--dry-run" || arg == "--live" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" {
+			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--index" || arg == "--dry-run" || arg == "--live" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" {
 				continue
 			}
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
@@ -785,17 +797,38 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		}
 		return 0
 	case "sync":
-		if opts.issues || opts.wiki || (opts.id == "" && opts.input == "") {
-			req := service.BulkSyncRequest{RepoID: opts.repo, IdempotencyKey: opts.idempotencyKey, PerPage: 100}
+		if opts.issues || opts.wiki || opts.pulls || opts.comments || (opts.id == "" && opts.input == "") {
+			req := bulkSyncRequest(opts)
 			var result *service.SyncResourcesResult
 			var syncErr error
-			switch {
-			case opts.issues && !opts.wiki:
-				result, syncErr = svc.BulkSyncIssues(ctx, req)
-			case opts.wiki && !opts.issues:
-				result, syncErr = svc.BulkSyncWiki(ctx, req)
-			default:
+			if !opts.issues && !opts.wiki && !opts.pulls && !opts.comments {
 				result, syncErr = svc.BulkSyncAll(ctx, req)
+				return renderSyncResources(stdout, stderr, opts.format, result, syncErr, plan)
+			}
+			aggregate := &service.SyncResourcesResult{Results: []service.SyncResult{}, Failures: []service.ResourceError{}}
+			runBulk := func(fn func(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)) {
+				part, err := fn(ctx, req)
+				mergeSyncResources(aggregate, part)
+				if err != nil {
+					syncErr = mergeSyncError(syncErr, aggregate, err)
+				}
+			}
+			if opts.issues {
+				runBulk(svc.BulkSyncIssues)
+			}
+			if opts.wiki {
+				runBulk(svc.BulkSyncWiki)
+			}
+			if opts.pulls {
+				runBulk(svc.BulkSyncPullRequests)
+			}
+			if opts.comments {
+				runBulk(svc.BulkSyncPRComments)
+			}
+			result = aggregate
+			if result.SuccessCount == 0 && result.FailureCount == 0 {
+				result.SuccessCount = len(result.Results)
+				result.FailureCount = len(result.Failures)
 			}
 			return renderSyncResources(stdout, stderr, opts.format, result, syncErr, plan)
 		}
@@ -938,6 +971,41 @@ func syncScopedKey(base string, scope string) string {
 		return ""
 	}
 	return base + "-" + scope
+}
+
+func bulkSyncRequest(opts options) service.BulkSyncRequest {
+	perPage := opts.perPage
+	if perPage <= 0 {
+		perPage = 100
+	}
+	req := service.BulkSyncRequest{RepoID: opts.repo, IdempotencyKey: opts.idempotencyKey, PerPage: perPage}
+	if opts.maxPages > 0 || opts.maxRecords > 0 {
+		req.Bounds = &service.SyncBounds{MaxPages: opts.maxPages, MaxRecords: opts.maxRecords}
+	}
+	return req
+}
+
+func mergeSyncResources(dst *service.SyncResourcesResult, src *service.SyncResourcesResult) {
+	if dst == nil || src == nil {
+		return
+	}
+	dst.Results = append(dst.Results, src.Results...)
+	dst.Failures = append(dst.Failures, src.Failures...)
+	dst.SuccessCount = len(dst.Results)
+	dst.FailureCount = len(dst.Failures)
+}
+
+func mergeSyncError(existing error, result *service.SyncResourcesResult, err error) error {
+	if err == nil {
+		return existing
+	}
+	if existing == nil {
+		return err
+	}
+	if result == nil {
+		return existing
+	}
+	return &service.PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
 }
 
 func renderSyncResources(stdout, stderr io.Writer, format string, result *service.SyncResourcesResult, syncErr error, plan startupPlan) int {
@@ -1215,7 +1283,7 @@ func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {
 	ctx := diagnostics.CommandContext{ProviderMode: plan.ProviderMode, Command: plan.Command, SelectedAPIBaseURL: plan.APIBaseURL, RepositoryBindingID: plan.LiveRepositoryBinding.RepoID, CachePathPresent: strings.TrimSpace(plan.CachePath) != "", AuditPathPresent: strings.TrimSpace(plan.LiveRepositoryBinding.AuditPath) != ""}
 	var writeErr service.ErrWriteFailure
 	if errors.As(err, &writeErr) {
-		ctx.HTTPAttempted = writeErr.Code == "write_unauthorized" || writeErr.Code == "write_network_unavailable" || writeErr.Code == "write_provider_error" || writeErr.Code == "write_conflict"
+		ctx.HTTPAttempted = writeErr.Code == "write_unauthorized" || writeErr.Code == "write_network_unavailable" || writeErr.Code == "write_provider_error" || writeErr.Code == "write_conflict" || writeErr.Code == "schema_decode"
 		ctx.FixtureFallbackSentinel = writeErr.Code == "write_fixture_fallback_detected"
 		ctx.MissingCredential = writeErr.Code == "write_missing_credential"
 		ctx.UnsupportedPayload = writeErr.Code == "live_graph_invalid" || writeErr.Code == "unsupported_mock_payload"

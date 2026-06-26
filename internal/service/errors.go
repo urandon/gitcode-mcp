@@ -56,6 +56,8 @@ func (e ErrSyncFailure) Error() string {
 		return fmt.Sprintf("sync: remote record for alias %s not found. It may have been deleted or moved. Run link-check to find affected references.", e.Alias)
 	case "payload_too_large":
 		return fmt.Sprintf("sync: record %s exceeds maximum size %d bytes. Use --max-size to increase limit or skip with --skip-large.", e.Target, e.LimitBytes)
+	case "empty_wiki":
+		return "sync: wiki is empty or uninitialized; run `gitcode-mcp wiki init --repo ...` or create a page via the GitCode UI"
 	case "conflict":
 		return fmt.Sprintf("sync: conflict for record %s. Resolve local and remote payloads manually.", e.Target)
 	default:

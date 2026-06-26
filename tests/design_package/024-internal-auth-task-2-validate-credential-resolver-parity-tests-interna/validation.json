@@ -1,0 +1,13 @@
+{
+  "covered_outcome_ids": ["outcome-6"],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "internal/auth/resolver.go: CredentialResolver struct, Resolve(), Status()",
+    "internal/auth/resolver_test.go: TestCredentialResolverEnvTokenPresent, TestCredentialResolverMockKeychain, TestCredentialResolverNoCredential, TestCredentialResolverDeterministic, TestCredentialResolverStatusMatchesResolve, TestCredentialResolverEnvOverKeychain",
+    "internal/config/effective.go: CredentialProvider interface, ChainCredentialProvider, DefaultCredentialProvider, EnvCredentialProvider, StaticCredentialProvider"
+  ],
+  "evidence_type": "runtime/compiler test",
+  "freshness": "current binary build with mocked Go tests",
+  "mocks_used": true,
+  "production_files_modified": []
+}

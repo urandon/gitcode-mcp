@@ -5,18 +5,22 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"gitcode-mcp/internal/auth"
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/service"
@@ -171,10 +175,10 @@ func TestIntegration(t *testing.T) {
 	if err := json.Unmarshal(toolsR.Result, &tls); err != nil {
 		t.Fatalf("decode tools/list result: %v", err)
 	}
-	if len(tls.Tools) != 15 {
-		t.Fatalf("tools count = %d, want 15: %+v", len(tls.Tools), tls.Tools)
+	if len(tls.Tools) != len(toolListOrder) {
+		t.Fatalf("tools count = %d, want %d: %+v", len(tls.Tools), len(toolListOrder), tls.Tools)
 	}
-	expectedNames := []string{"search_sources", "get_source", "list_sources", "list_chunks", "search_chunks", "get_snippet", "stale_index_report", "recent_changes", "link_check", "cache_status", "source_backlinks", "resolve_id", "sync_status", "export_snapshot", "diff_snapshot"}
+	expectedNames := toolListOrder
 	registry := srv.toolRegistry()
 	if len(registry) != len(tls.Tools) {
 		t.Fatalf("registry count = %d, listed tools = %d", len(registry), len(tls.Tools))
@@ -231,6 +235,14 @@ func TestIntegration(t *testing.T) {
 }
 
 func TestMCPBlockedWriteBoundary(t *testing.T) {
+	t.Setenv("GITCODE_TOKEN", "")
+	providerCalls := 0
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls++
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	defer provider.Close()
+
 	store := populatedStore(t)
 	svc := service.New(store)
 	defer store.Close()
@@ -288,10 +300,12 @@ func TestMCPBlockedWriteBoundary(t *testing.T) {
 		if err := json.Unmarshal(resp.Result, &tls); err != nil {
 			t.Fatal(err)
 		}
-		if len(tls.Tools) != 15 {
-			t.Fatalf("tools count = %d, want 15", len(tls.Tools))
+		if len(tls.Tools) != len(toolListOrder) {
+			t.Fatalf("tools count = %d, want %d", len(tls.Tools), len(toolListOrder))
 		}
 		blocked := map[string]bool{
+			"create_issue": false, "update_issue": false, "add_comment": false,
+			"create_page": false, "update_page": false,
 			"create-issue": false, "update-issue": false, "add-label": false,
 			"create-page": false, "update-page": false,
 		}
@@ -304,7 +318,8 @@ func TestMCPBlockedWriteBoundary(t *testing.T) {
 
 	// scenario blocked-write-canonical-5
 	t.Run("blocked write canonical 5", func(t *testing.T) {
-		canonical := []string{"create-issue", "update-issue", "add-label", "create-page", "update-page"}
+		canonical := []string{"create_issue", "update_issue", "add_comment", "create_page", "update_page"}
+
 		for i, name := range canonical {
 			send(map[string]any{
 				"jsonrpc": "2.0",
@@ -319,6 +334,10 @@ func TestMCPBlockedWriteBoundary(t *testing.T) {
 			assertError(name, line)
 		}
 	})
+
+	if providerCalls != 0 {
+		t.Fatalf("unsupported write tools made %d provider calls", providerCalls)
+	}
 
 	// read tool parity — existing read tools still work
 	t.Run("read tool parity", func(t *testing.T) {
@@ -684,7 +703,7 @@ func TestSchemasAndResults(t *testing.T) {
 	})
 
 	t.Run("mutation tools are not registered", func(t *testing.T) {
-		for i, name := range []string{"create_issue", "update_issue", "sync", "migrate"} {
+		for i, name := range []string{"sync", "migrate"} {
 			send(map[string]any{
 				"jsonrpc": "2.0", "id": 27 + i, "method": "tools/call",
 				"params": map[string]any{"name": name, "arguments": map[string]any{"repo_id": "fixture-a"}},
@@ -704,7 +723,7 @@ func TestSchemasAndResults(t *testing.T) {
 func TestMCPToolKindSchemaIncludesOnlyGitCodeKinds(t *testing.T) {
 	store := populatedStore(t)
 	defer store.Close()
-	srv := New(io.Reader(strings.NewReader("")), io.Discard, io.Discard, service.New(store))
+	srv := New(io.Reader(strings.NewReader("")), io.Discard, io.Discard, service.New(store), nil)
 	registry := srv.toolRegistry()
 	for _, name := range []string{"list_sources", "search_sources", "search_chunks"} {
 		tool, ok := registry[name]
@@ -715,9 +734,714 @@ func TestMCPToolKindSchemaIncludesOnlyGitCodeKinds(t *testing.T) {
 		if !ok {
 			t.Fatalf("tool %s missing kind schema", name)
 		}
-		if !reflect.DeepEqual(prop.Enum, []string{"issue", "wiki"}) {
-			t.Fatalf("tool %s kind enum = %#v, want [issue wiki]", name, prop.Enum)
+		if !reflect.DeepEqual(prop.Enum, []string{"issue", "wiki", "pull_request", "pr_comment"}) {
+			t.Fatalf("tool %s kind enum = %#v, want [issue wiki pull_request pr_comment]", name, prop.Enum)
 		}
+	}
+}
+
+func TestMCPRegistryIsNameBased(t *testing.T) {
+	originalDefs := append([]toolDefinition(nil), toolDefs...)
+	defer func() { toolDefs = originalDefs }()
+	for i, j := 0, len(toolDefs)-1; i < j; i, j = i+1, j-1 {
+		toolDefs[i], toolDefs[j] = toolDefs[j], toolDefs[i]
+	}
+	toolDefs = append([]toolDefinition{{Name: "appended_lifecycle_probe", Description: "Probe appended lifecycle tool definition.", InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{}}}}, toolDefs...)
+
+	store := populatedStore(t)
+	defer store.Close()
+	srv := New(io.Reader(strings.NewReader("")), io.Discard, io.Discard, service.New(store), nil)
+	registry := srv.toolRegistry()
+	for _, name := range []string{"search_sources", "get_source", "list_sources", "resolve_id", "repo_status", "sync_live", "index_repo", "doctor"} {
+		tool, ok := registry[name]
+		if !ok {
+			t.Fatalf("tool %s is not registered", name)
+		}
+		if tool.definition.Name != name {
+			t.Fatalf("registry[%q].definition.Name = %q", name, tool.definition.Name)
+		}
+	}
+
+	var out bytes.Buffer
+	srv.writer = &out
+	srv.toolsList(request{JSONRPC: "2.0"})
+	var resp response
+	if err := json.Unmarshal(bytesTrimSpace(out.Bytes()), &resp); err != nil {
+		t.Fatal(err)
+	}
+	var tls toolsListResult
+	if err := json.Unmarshal(resp.Result, &tls); err != nil {
+		t.Fatal(err)
+	}
+	if len(tls.Tools) != len(toolListOrder) {
+		t.Fatalf("tools count = %d, want %d", len(tls.Tools), len(toolListOrder))
+	}
+	for i, want := range toolListOrder {
+		if tls.Tools[i].Name != want {
+			t.Fatalf("tool[%d].Name = %q, want %q", i, tls.Tools[i].Name, want)
+		}
+	}
+}
+
+func TestMCPLifecycleTools(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "empty-repo", Owner: "owner", Name: "empty", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	srv, r, w, stderr := newPipeServer(service.New(store))
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = srv.Serve()
+	}()
+	call := func(name string, args map[string]any) toolCallResult {
+		t.Helper()
+		req := map[string]any{"jsonrpc": "2.0", "id": name, "method": "tools/call", "params": map[string]any{"name": name, "arguments": args}}
+		b, _ := json.Marshal(req)
+		_, _ = r.Write(append(b, '\n'))
+		line, err := readLine(w)
+		if err != nil {
+			t.Fatalf("read %s response: %v (stderr: %s)", name, err, stderr.String())
+		}
+		return decodeToolCallResult(t, line)
+	}
+
+	listed := map[string]bool{}
+	b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": "tools", "method": "tools/list"})
+	_, _ = r.Write(append(b, '\n'))
+	line, err := readLine(w)
+	if err != nil {
+		t.Fatalf("read tools/list response: %v", err)
+	}
+	var resp response
+	if err := json.Unmarshal(line, &resp); err != nil || resp.Error != nil {
+		t.Fatalf("tools/list response=%s err=%v", string(line), err)
+	}
+	var tls toolsListResult
+	if err := json.Unmarshal(resp.Result, &tls); err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range tls.Tools {
+		listed[tool.Name] = true
+	}
+	for _, name := range []string{"repo_status", "sync_live", "index_repo", "auth_status", "doctor"} {
+		if !listed[name] {
+			t.Fatalf("tools/list missing lifecycle tool %q", name)
+		}
+	}
+	for _, name := range []string{"create_issue", "update_issue", "add_comment", "create_page", "update_page"} {
+		if listed[name] {
+			t.Fatalf("tools/list advertised write tool %q", name)
+		}
+	}
+
+	statusCall := call("repo_status", map[string]any{})
+	var status repoStatusResult
+	decodeStructured(t, statusCall, &status)
+	if status.BindingState != "nothing_bound" {
+		t.Fatalf("repo_status binding_state=%q", status.BindingState)
+	}
+
+	syncCall := call("sync_live", map[string]any{"repo_id": "fixture-a", "issues": true, "remote_alias": "issue:42", "idempotency_key": "mcp-lifecycle-sync-issue-42"})
+	var syncResult syncLiveResult
+	decodeStructured(t, syncCall, &syncResult)
+	if syncResult.FreshCount == 0 || len(syncResult.Results) == 0 || !containsString(syncResult.Collections, "issues") {
+		t.Fatalf("sync_live result=%+v", syncResult)
+	}
+	if syncResult.Results[0].Record.Kind != "issue" || syncResult.Results[0].Record.ID == "" {
+		t.Fatalf("sync_live record=%+v", syncResult.Results[0].Record)
+	}
+
+	bulkSyncCall := call("sync_live", map[string]any{"repo_id": "fixture-a", "issues": true, "idempotency_key": "mcp-lifecycle-bulk-issues"})
+	var bulkSyncResult syncLiveResult
+	decodeStructured(t, bulkSyncCall, &bulkSyncResult)
+	if bulkSyncResult.SuccessCount == 0 || bulkSyncResult.FailureCount != 0 || !containsString(bulkSyncResult.Collections, "issues") {
+		t.Fatalf("bulk sync_live result=%+v", bulkSyncResult)
+	}
+
+	indexCall := call("index_repo", map[string]any{"repo_id": "fixture-a"})
+	var indexResult service.OperationResult
+	decodeStructured(t, indexCall, &indexResult)
+	if indexResult.Command != "index" || indexResult.Status != "ok" {
+		t.Fatalf("index_repo result=%+v", indexResult)
+	}
+
+	authCall := call("auth_status", map[string]any{})
+	var authResult authStatusResult
+	decodeStructured(t, authCall, &authResult)
+	if strings.Contains(fmt.Sprint(authResult), "test-token") {
+		t.Fatalf("auth_status leaked token: %+v", authResult)
+	}
+
+	doctorCall := call("doctor", map[string]any{})
+	var doctor doctorResult
+	decodeStructured(t, doctorCall, &doctor)
+	if doctor.Status != "ok" || doctor.Diagnostics == nil {
+		t.Fatalf("doctor result=%+v", doctor)
+	}
+	doctorRepoCall := call("doctor", map[string]any{"repo_id": "fixture-a"})
+	var doctorRepo doctorResult
+	decodeStructured(t, doctorRepoCall, &doctorRepo)
+	if doctorRepo.Repo == nil || doctorRepo.Cache == nil || doctorRepo.Sync == nil || doctorRepo.Index == nil || doctorRepo.Auth == nil {
+		t.Fatalf("repo doctor missing sections: %+v", doctorRepo)
+	}
+
+	listedSources := call("list_sources", map[string]any{"repo_id": "fixture-a", "kind": "issue"})
+	var sources service.ListSourcesResult
+	decodeStructured(t, listedSources, &sources)
+	if len(sources.Results) == 0 {
+		t.Fatalf("list_sources after sync returned no records")
+	}
+	searchedSources := call("search_sources", map[string]any{"repo_id": "fixture-a", "query": "issue", "kind": "issue"})
+	var searched service.SearchSourcesResult
+	decodeStructured(t, searchedSources, &searched)
+	if len(searched.Results) == 0 {
+		t.Fatalf("search_sources after sync returned no records")
+	}
+	_ = r.Close()
+	wg.Wait()
+}
+
+func TestMCPAuthStatusUsesCredentialResolverMockKeychain(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	resolver := auth.NewCredentialResolverWithProvider(config.StaticCredentialProvider{Source: "mock-keychain", Token: "secret-token", StoreMode: "keychain"})
+	var buf bytes.Buffer
+	srv := New(strings.NewReader(""), &buf, io.Discard, service.New(store), resolver)
+	id := json.RawMessage(`"auth"`)
+	srv.callAuthStatus(context.Background(), &id, json.RawMessage(`{}`))
+
+	var resp response
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v body=%q", err, buf.String())
+	}
+	if resp.Error != nil {
+		t.Fatalf("auth_status returned error: %+v", resp.Error)
+	}
+	var callResult toolCallResult
+	if err := json.Unmarshal(resp.Result, &callResult); err != nil {
+		t.Fatalf("unmarshal call result: %v", err)
+	}
+	var status authStatusResult
+	decodeStructured(t, callResult, &status)
+	if !status.Present || status.Source != "mock-keychain" || status.StoreMode != "keychain" {
+		t.Fatalf("auth_status=%+v", status)
+	}
+	if strings.Contains(fmt.Sprint(callResult), "secret-token") {
+		t.Fatalf("auth_status leaked token: %+v", callResult)
+	}
+}
+
+func TestMCPAuthStatusJSONRPCHandlerPreservesCredentialResolver(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	resolver := auth.NewCredentialResolverWithProvider(config.StaticCredentialProvider{Source: "mock-keychain", Token: "secret-token", StoreMode: "keychain"})
+	handler := NewRPCHandlerWithCredentialResolver(service.New(store), resolver)
+	params := json.RawMessage(`{"name":"auth_status","arguments":{}}`)
+	id := json.RawMessage(`"auth"`)
+	resp, ok := handler.Handle(context.Background(), request{JSONRPC: "2.0", ID: &id, Method: "tools/call", Params: &params})
+	if !ok || resp == nil {
+		t.Fatal("auth_status JSON-RPC returned no response")
+	}
+	if resp.Error != nil {
+		t.Fatalf("auth_status returned error: %+v", resp.Error)
+	}
+	var callResult toolCallResult
+	if err := json.Unmarshal(resp.Result, &callResult); err != nil {
+		t.Fatalf("unmarshal call result: %v", err)
+	}
+	var status authStatusResult
+	decodeStructured(t, callResult, &status)
+	if !status.Present || status.Source != "mock-keychain" || status.StoreMode != "keychain" {
+		t.Fatalf("auth_status=%+v", status)
+	}
+	if strings.Contains(fmt.Sprint(callResult), "secret-token") {
+		t.Fatalf("auth_status leaked token: %+v", callResult)
+	}
+}
+
+type indexRepoSpyService struct {
+	serviceInterface
+	indexCalls      []service.OperationRequest
+	staleIndexCalls []service.StaleIndexRequest
+}
+
+func (s *indexRepoSpyService) Index(ctx context.Context, req service.OperationRequest) (service.OperationResult, error) {
+	s.indexCalls = append(s.indexCalls, req)
+	return service.OperationResult{Command: "index", Status: "ok", ProcessedCount: 3, Evidence: "snapshot_id=spy-snapshot", GeneratedAt: time.Date(2026, 6, 26, 10, 0, 0, 0, time.UTC)}, nil
+}
+
+func (s *indexRepoSpyService) StaleIndex(ctx context.Context, req service.StaleIndexRequest) (service.StaleIndexResult, error) {
+	s.staleIndexCalls = append(s.staleIndexCalls, req)
+	return service.StaleIndexResult{RepoID: req.RepoID}, nil
+}
+
+func TestMCPIndexRepoDelegatesServiceIndex(t *testing.T) {
+	spy := &indexRepoSpyService{}
+	srv, r, w, stderr := newPipeServer(spy)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); _ = srv.Serve() }()
+
+	call := func(name string, args map[string]any) toolCallResult {
+		t.Helper()
+		b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": name, "method": "tools/call", "params": map[string]any{"name": name, "arguments": args}})
+		_, _ = r.Write(append(b, '\n'))
+		line, err := readLine(w)
+		if err != nil {
+			t.Fatalf("read %s response: %v (stderr: %s)", name, err, stderr.String())
+		}
+		return decodeToolCallResult(t, line)
+	}
+
+	indexResult := call("index_repo", map[string]any{"repo_id": "fixture-a"})
+	var opResult service.OperationResult
+	decodeStructured(t, indexResult, &opResult)
+
+	if len(spy.indexCalls) != 1 {
+		t.Fatalf("SCN-MCP-INDEX-REPO-DELEGATES-SERVICE-INDEX: Index call count = %d, want 1", len(spy.indexCalls))
+	}
+	if len(spy.staleIndexCalls) != 0 {
+		t.Fatalf("SCN-MCP-INDEX-REPO-DELEGATES-SERVICE-INDEX: StaleIndex call count = %d, want 0", len(spy.staleIndexCalls))
+	}
+	if opResult.Command != "index" {
+		t.Fatalf("SCN-MCP-INDEX-REPO-DELEGATES-SERVICE-INDEX: Command = %q, want index", opResult.Command)
+	}
+	if opResult.Status != "ok" {
+		t.Fatalf("SCN-MCP-INDEX-REPO-DELEGATES-SERVICE-INDEX: Status = %q, want ok", opResult.Status)
+	}
+	if opResult.ProcessedCount != 3 {
+		t.Fatalf("SCN-MCP-INDEX-REPO-DELEGATES-SERVICE-INDEX: ProcessedCount = %d, want 3", opResult.ProcessedCount)
+	}
+
+	_ = r.Close()
+	wg.Wait()
+}
+
+func TestMCPIndexRepoNotStaleDiagnostic(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "index-repo-target", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	graphs := []cache.SourceGraph{
+		{Source: cache.Source{RepoID: "index-repo-target", ID: "ISSUE-1", Kind: "issue", Path: "issues/1.md", Title: "Issue 1", Body: "indexable", Status: "open", ContentHash: "h1", CreatedAt: time.Date(2026, 6, 26, 10, 0, 0, 0, time.UTC), UpdatedAt: time.Date(2026, 6, 26, 10, 0, 0, 0, time.UTC)}},
+		{Source: cache.Source{RepoID: "index-repo-target", ID: "ISSUE-2", Kind: "issue", Path: "issues/2.md", Title: "Issue 2", Body: "also indexable", Status: "open", ContentHash: "h2", CreatedAt: time.Date(2026, 6, 26, 10, 1, 0, 0, time.UTC), UpdatedAt: time.Date(2026, 6, 26, 10, 1, 0, 0, time.UTC)}},
+	}
+	for _, graph := range graphs {
+		if err := store.UpsertSourceGraph(context.Background(), graph); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	srv, r, w, stderr := newPipeServer(service.New(store))
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); _ = srv.Serve() }()
+
+	call := func(name string, args map[string]any) toolCallResult {
+		t.Helper()
+		b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": name, "method": "tools/call", "params": map[string]any{"name": name, "arguments": args}})
+		_, _ = r.Write(append(b, '\n'))
+		line, err := readLine(w)
+		if err != nil {
+			t.Fatalf("read %s response: %v (stderr: %s)", name, err, stderr.String())
+		}
+		return decodeToolCallResult(t, line)
+	}
+
+	indexResult := call("index_repo", map[string]any{"repo_id": "index-repo-target"})
+	var opResult service.OperationResult
+	decodeStructured(t, indexResult, &opResult)
+
+	if opResult.Command != "index" || opResult.Status != "ok" {
+		t.Fatalf("SCN-MCP-INDEX-REPO-NOT-STALE-DIAGNOSTIC: expected index outcome, got command=%q status=%q", opResult.Command, opResult.Status)
+	}
+	if opResult.ProcessedCount <= 0 {
+		t.Fatalf("SCN-MCP-INDEX-REPO-NOT-STALE-DIAGNOSTIC: expected processed_count > 0, got %d", opResult.ProcessedCount)
+	}
+
+	raw, err := json.Marshal(opResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var asMap map[string]any
+	if err := json.Unmarshal(raw, &asMap); err != nil {
+		t.Fatal(err)
+	}
+	for _, staleField := range []string{"stale_count", "affected_source_ids", "missing_target_ids"} {
+		if _, exists := asMap[staleField]; exists {
+			t.Fatalf("SCN-MCP-INDEX-REPO-NOT-STALE-DIAGNOSTIC: index_repo response contains stale-index field %q", staleField)
+		}
+	}
+
+	_ = r.Close()
+	wg.Wait()
+}
+
+func TestStartupDiagnosticInjection(t *testing.T) {
+	diagnostic := StartupDiagnosticFromError(os.ErrPermission)
+	if diagnostic.ErrorClass != "cache_path_unwritable" || !strings.Contains(diagnostic.Remediation, "chmod") || !strings.Contains(diagnostic.Remediation, "--cache-path") {
+		t.Fatalf("cache_path_unwritable diagnostic=%+v", diagnostic)
+	}
+	srv := NewMinimalRPCHandler(diagnostic)
+
+	initReq := request{JSONRPC: "2.0", Method: "initialize"}
+	initID := json.RawMessage(`"init"`)
+	initReq.ID = &initID
+	initResp, ok := srv.Handle(context.Background(), initReq)
+	if !ok || initResp.Error != nil {
+		t.Fatalf("initialize response=%+v ok=%t", initResp, ok)
+	}
+	var init initResult
+	if err := json.Unmarshal(initResp.Result, &init); err != nil {
+		t.Fatal(err)
+	}
+	if init.Capabilities.Tools.StartupDiagnostic == nil || init.Capabilities.Tools.StartupDiagnostic.ErrorClass != "cache_path_unwritable" {
+		t.Fatalf("initialize startup diagnostic=%+v", init.Capabilities.Tools.StartupDiagnostic)
+	}
+
+	listReq := request{JSONRPC: "2.0", Method: "tools/list"}
+	listID := json.RawMessage(`"list"`)
+	listReq.ID = &listID
+	listResp, ok := srv.Handle(context.Background(), listReq)
+	if !ok || listResp.Error != nil {
+		t.Fatalf("tools/list response=%+v ok=%t", listResp, ok)
+	}
+	var list toolsListResult
+	if err := json.Unmarshal(listResp.Result, &list); err != nil {
+		t.Fatal(err)
+	}
+	if list.StartupDiagnostic == nil || list.StartupDiagnostic.ErrorClass == "" || list.StartupDiagnostic.Message == "" || list.StartupDiagnostic.Remediation == "" {
+		t.Fatalf("tools/list startup diagnostic=%+v", list.StartupDiagnostic)
+	}
+	if len(list.Tools) != 1 || list.Tools[0].Name != "doctor" {
+		t.Fatalf("minimal tools/list tools=%+v", list.Tools)
+	}
+
+	doctorParams := json.RawMessage(`{"name":"doctor","arguments":{}}`)
+	doctorID := json.RawMessage(`"doctor"`)
+	doctorReq := request{JSONRPC: "2.0", ID: &doctorID, Method: "tools/call", Params: &doctorParams}
+	doctorResp, ok := srv.Handle(context.Background(), doctorReq)
+	if !ok || doctorResp.Error != nil {
+		t.Fatalf("doctor response=%+v ok=%t", doctorResp, ok)
+	}
+	var callResult toolCallResult
+	if err := json.Unmarshal(doctorResp.Result, &callResult); err != nil {
+		t.Fatal(err)
+	}
+	var doctor doctorResult
+	decodeStructured(t, callResult, &doctor)
+	if doctor.Status != "degraded" || len(doctor.Diagnostics) != 1 {
+		t.Fatalf("doctor result=%+v", doctor)
+	}
+	got := doctor.Diagnostics[0]
+	if got.ErrorClass != "cache_path_unwritable" || got.Message == "" || got.Remediation == "" {
+		t.Fatalf("doctor diagnostic=%+v", got)
+	}
+}
+
+func TestStartupDiagnosticSchemaIncompatible(t *testing.T) {
+	diagnostic := StartupDiagnosticFromError(&cache.SchemaVersionError{Compat: cache.VersionCompatibility{Message: "cache schema is newer than supported", Remediation: "upgrade the gitcode-mcp binary to a version that supports this schema"}})
+	if diagnostic.ErrorClass != "schema_incompatible" || !strings.Contains(diagnostic.Remediation, "upgrade") {
+		t.Fatalf("schema_incompatible diagnostic=%+v", diagnostic)
+	}
+	srv := NewMinimalRPCHandler(diagnostic)
+
+	initReq := request{JSONRPC: "2.0", Method: "initialize"}
+	initID := json.RawMessage(`"init"`)
+	initReq.ID = &initID
+	initResp, ok := srv.Handle(context.Background(), initReq)
+	if !ok || initResp.Error != nil {
+		t.Fatalf("initialize response=%+v ok=%t", initResp, ok)
+	}
+	var init initResult
+	if err := json.Unmarshal(initResp.Result, &init); err != nil {
+		t.Fatal(err)
+	}
+	if init.Capabilities.Tools.StartupDiagnostic == nil || init.Capabilities.Tools.StartupDiagnostic.ErrorClass != "schema_incompatible" {
+		t.Fatalf("initialize startup diagnostic=%+v", init.Capabilities.Tools.StartupDiagnostic)
+	}
+	if !strings.Contains(init.Capabilities.Tools.StartupDiagnostic.Remediation, "upgrade") {
+		t.Fatalf("initialize startup diagnostic missing upgrade remediation: %+v", init.Capabilities.Tools.StartupDiagnostic)
+	}
+
+	listReq := request{JSONRPC: "2.0", Method: "tools/list"}
+	listID := json.RawMessage(`"list"`)
+	listReq.ID = &listID
+	listResp, ok := srv.Handle(context.Background(), listReq)
+	if !ok || listResp.Error != nil {
+		t.Fatalf("tools/list response=%+v ok=%t", listResp, ok)
+	}
+	var list toolsListResult
+	if err := json.Unmarshal(listResp.Result, &list); err != nil {
+		t.Fatal(err)
+	}
+	if list.StartupDiagnostic == nil || list.StartupDiagnostic.ErrorClass != "schema_incompatible" || list.StartupDiagnostic.Message == "" || list.StartupDiagnostic.Remediation == "" {
+		t.Fatalf("tools/list startup diagnostic=%+v", list.StartupDiagnostic)
+	}
+	if len(list.Tools) != 1 || list.Tools[0].Name != "doctor" {
+		t.Fatalf("minimal tools/list tools=%+v", list.Tools)
+	}
+
+	doctorParams := json.RawMessage(`{"name":"doctor","arguments":{}}`)
+	doctorID := json.RawMessage(`"doctor"`)
+	doctorReq := request{JSONRPC: "2.0", ID: &doctorID, Method: "tools/call", Params: &doctorParams}
+	doctorResp, ok := srv.Handle(context.Background(), doctorReq)
+	if !ok || doctorResp.Error != nil {
+		t.Fatalf("doctor response=%+v ok=%t", doctorResp, ok)
+	}
+	var callResult toolCallResult
+	if err := json.Unmarshal(doctorResp.Result, &callResult); err != nil {
+		t.Fatal(err)
+	}
+	var doctor doctorResult
+	decodeStructured(t, callResult, &doctor)
+	if doctor.Status != "degraded" || len(doctor.Diagnostics) != 1 {
+		t.Fatalf("doctor result=%+v", doctor)
+	}
+	got := doctor.Diagnostics[0]
+	if got.ErrorClass != "schema_incompatible" || got.Message == "" || got.Remediation == "" {
+		t.Fatalf("doctor diagnostic=%+v", got)
+	}
+	if !strings.Contains(got.Remediation, "upgrade") {
+		t.Fatalf("doctor diagnostic missing upgrade remediation: %+v", got)
+	}
+}
+
+func TestStartupDiagnosticCacheLockContention(t *testing.T) {
+	lockErr := cache.ErrLockContention{Path: "lock-test.path", Operation: "write", RepoID: "fixture-a", StartedAt: time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC), PID: 42, CachePath: "/tmp/test-cache"}
+	diagnostic := StartupDiagnosticFromError(lockErr)
+	if diagnostic.ErrorClass != "cache_lock_contention" || !strings.Contains(diagnostic.Remediation, "retry") {
+		t.Fatalf("cache_lock_contention diagnostic=%+v", diagnostic)
+	}
+	srv := NewMinimalRPCHandler(diagnostic)
+
+	initReq := request{JSONRPC: "2.0", Method: "initialize"}
+	initID := json.RawMessage(`"init"`)
+	initReq.ID = &initID
+	initResp, ok := srv.Handle(context.Background(), initReq)
+	if !ok || initResp.Error != nil {
+		t.Fatalf("initialize response=%+v ok=%t", initResp, ok)
+	}
+	var init initResult
+	if err := json.Unmarshal(initResp.Result, &init); err != nil {
+		t.Fatal(err)
+	}
+	if init.Capabilities.Tools.StartupDiagnostic == nil || init.Capabilities.Tools.StartupDiagnostic.ErrorClass != "cache_lock_contention" {
+		t.Fatalf("initialize startup diagnostic=%+v", init.Capabilities.Tools.StartupDiagnostic)
+	}
+
+	listReq := request{JSONRPC: "2.0", Method: "tools/list"}
+	listID := json.RawMessage(`"list"`)
+	listReq.ID = &listID
+	listResp, ok := srv.Handle(context.Background(), listReq)
+	if !ok || listResp.Error != nil {
+		t.Fatalf("tools/list response=%+v ok=%t", listResp, ok)
+	}
+	var list toolsListResult
+	if err := json.Unmarshal(listResp.Result, &list); err != nil {
+		t.Fatal(err)
+	}
+	if list.StartupDiagnostic == nil || list.StartupDiagnostic.ErrorClass != "cache_lock_contention" || list.StartupDiagnostic.Message == "" || list.StartupDiagnostic.Remediation == "" {
+		t.Fatalf("tools/list startup diagnostic=%+v", list.StartupDiagnostic)
+	}
+	if len(list.Tools) != 1 || list.Tools[0].Name != "doctor" {
+		t.Fatalf("minimal tools/list tools=%+v", list.Tools)
+	}
+
+	doctorParams := json.RawMessage(`{"name":"doctor","arguments":{}}`)
+	doctorID := json.RawMessage(`"doctor"`)
+	doctorReq := request{JSONRPC: "2.0", ID: &doctorID, Method: "tools/call", Params: &doctorParams}
+	doctorResp, ok := srv.Handle(context.Background(), doctorReq)
+	if !ok || doctorResp.Error != nil {
+		t.Fatalf("doctor response=%+v ok=%t", doctorResp, ok)
+	}
+	var callResult toolCallResult
+	if err := json.Unmarshal(doctorResp.Result, &callResult); err != nil {
+		t.Fatal(err)
+	}
+	var doctor doctorResult
+	decodeStructured(t, callResult, &doctor)
+	if doctor.Status != "degraded" || len(doctor.Diagnostics) != 1 {
+		t.Fatalf("doctor result=%+v", doctor)
+	}
+	got := doctor.Diagnostics[0]
+	if got.ErrorClass != "cache_lock_contention" || got.Message == "" || got.Remediation == "" {
+		t.Fatalf("doctor diagnostic=%+v", got)
+	}
+	if !strings.Contains(got.Remediation, "retry") {
+		t.Fatalf("doctor diagnostic missing retry remediation: %+v", got)
+	}
+}
+
+func TestStartupDiagnosticStartupFailure(t *testing.T) {
+	rawErr := errors.New("panic: secret stack trace\n/path/file.go:10\n\ncaused by: internal config error at /Users/test/.gitcode/config.yaml")
+	diagnostic := StartupDiagnosticFromError(rawErr)
+	if diagnostic.ErrorClass != "startup-failure" || diagnostic.Message == "" || diagnostic.Remediation == "" {
+		t.Fatalf("startup-failure diagnostic=%+v", diagnostic)
+	}
+	if strings.Contains(diagnostic.Message, "panic") || strings.Contains(diagnostic.Message, "/path/file.go") || strings.Contains(diagnostic.Message, "stack trace") {
+		t.Fatalf("startup-failure diagnostic leaked raw details=%+v", diagnostic)
+	}
+	srv := NewMinimalRPCHandler(diagnostic)
+
+	initReq := request{JSONRPC: "2.0", Method: "initialize"}
+	initID := json.RawMessage(`"init"`)
+	initReq.ID = &initID
+	initResp, ok := srv.Handle(context.Background(), initReq)
+	if !ok || initResp.Error != nil {
+		t.Fatalf("initialize response=%+v ok=%t", initResp, ok)
+	}
+	var init initResult
+	if err := json.Unmarshal(initResp.Result, &init); err != nil {
+		t.Fatal(err)
+	}
+	if init.Capabilities.Tools.StartupDiagnostic == nil || init.Capabilities.Tools.StartupDiagnostic.ErrorClass != "startup-failure" {
+		t.Fatalf("initialize startup diagnostic=%+v", init.Capabilities.Tools.StartupDiagnostic)
+	}
+	if init.Capabilities.Tools.StartupDiagnostic.Message == "" || init.Capabilities.Tools.StartupDiagnostic.Remediation == "" {
+		t.Fatalf("initialize startup diagnostic missing message/remediation: %+v", init.Capabilities.Tools.StartupDiagnostic)
+	}
+
+	listReq := request{JSONRPC: "2.0", Method: "tools/list"}
+	listID := json.RawMessage(`"list"`)
+	listReq.ID = &listID
+	listResp, ok := srv.Handle(context.Background(), listReq)
+	if !ok || listResp.Error != nil {
+		t.Fatalf("tools/list response=%+v ok=%t", listResp, ok)
+	}
+	var list toolsListResult
+	if err := json.Unmarshal(listResp.Result, &list); err != nil {
+		t.Fatal(err)
+	}
+	if list.StartupDiagnostic == nil || list.StartupDiagnostic.ErrorClass != "startup-failure" || list.StartupDiagnostic.Message == "" || list.StartupDiagnostic.Remediation == "" {
+		t.Fatalf("tools/list startup diagnostic=%+v", list.StartupDiagnostic)
+	}
+	if len(list.Tools) != 1 || list.Tools[0].Name != "doctor" {
+		t.Fatalf("minimal tools/list tools=%+v", list.Tools)
+	}
+
+	doctorParams := json.RawMessage(`{"name":"doctor","arguments":{}}`)
+	doctorID := json.RawMessage(`"doctor"`)
+	doctorReq := request{JSONRPC: "2.0", ID: &doctorID, Method: "tools/call", Params: &doctorParams}
+	doctorResp, ok := srv.Handle(context.Background(), doctorReq)
+	if !ok || doctorResp.Error != nil {
+		t.Fatalf("doctor response=%+v ok=%t", doctorResp, ok)
+	}
+	var callResult toolCallResult
+	if err := json.Unmarshal(doctorResp.Result, &callResult); err != nil {
+		t.Fatal(err)
+	}
+	var doctor doctorResult
+	decodeStructured(t, callResult, &doctor)
+	if doctor.Status != "degraded" || len(doctor.Diagnostics) != 1 {
+		t.Fatalf("doctor result=%+v", doctor)
+	}
+	got := doctor.Diagnostics[0]
+	if got.ErrorClass != "startup-failure" || got.Message == "" || got.Remediation == "" {
+		t.Fatalf("doctor diagnostic=%+v", got)
+	}
+	if strings.Contains(got.Message, "panic") || strings.Contains(got.Message, "/path/file.go") || strings.Contains(got.Message, "stack trace") || strings.Contains(got.Message, "/Users/test") {
+		t.Fatalf("doctor diagnostic leaked raw details: %+v", got)
+	}
+}
+
+func TestStartupDiagnosticAllScenarios(t *testing.T) {
+	tests := []struct {
+		name        string
+		err         error
+		errorClass  string
+		remediation string
+	}{
+		{name: "SCN-STARTUP-001", err: &cache.SchemaVersionError{Compat: cache.VersionCompatibility{Message: "cache schema is newer than supported", Remediation: "upgrade the gitcode-mcp binary to a version that supports this schema"}}, errorClass: "schema_incompatible", remediation: "upgrade"},
+		{name: "SCN-STARTUP-002", err: cache.ErrLockContention{Path: "lock-test.path", Operation: "write", CachePath: "/tmp/test-cache", PID: 42, StartedAt: time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)}, errorClass: "cache_lock_contention", remediation: "retry"},
+		{name: "SCN-STARTUP-003", err: os.ErrPermission, errorClass: "cache_path_unwritable", remediation: "chmod"},
+		{name: "SCN-STARTUP-004", err: errors.New("internal config error"), errorClass: "startup-failure", remediation: "gitcode-mcp doctor"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			diagnostic := StartupDiagnosticFromError(tt.err)
+			if diagnostic.ErrorClass != tt.errorClass {
+				t.Fatalf("factory errorClass = %q, want %q", diagnostic.ErrorClass, tt.errorClass)
+			}
+			if diagnostic.Message == "" {
+				t.Fatalf("factory message is empty")
+			}
+			if !strings.Contains(diagnostic.Remediation, tt.remediation) {
+				t.Fatalf("factory remediation=%q does not contain %q", diagnostic.Remediation, tt.remediation)
+			}
+			srv := NewMinimalRPCHandler(diagnostic)
+
+			listReq := request{JSONRPC: "2.0", Method: "tools/list"}
+			listID := json.RawMessage(`"list"`)
+			listReq.ID = &listID
+			listResp, ok := srv.Handle(context.Background(), listReq)
+			if !ok || listResp.Error != nil {
+				t.Fatalf("tools/list response=%+v ok=%t", listResp, ok)
+			}
+			var list toolsListResult
+			if err := json.Unmarshal(listResp.Result, &list); err != nil {
+				t.Fatal(err)
+			}
+			if list.StartupDiagnostic == nil || list.StartupDiagnostic.ErrorClass != tt.errorClass {
+				t.Fatalf("tools/list startup diagnostic errorClass=%q", list.StartupDiagnostic.ErrorClass)
+			}
+			if list.StartupDiagnostic.Message == "" {
+				t.Fatalf("tools/list startup diagnostic message is empty")
+			}
+			if !strings.Contains(list.StartupDiagnostic.Remediation, tt.remediation) {
+				t.Fatalf("tools/list startup diagnostic remediation=%q does not contain %q", list.StartupDiagnostic.Remediation, tt.remediation)
+			}
+			if len(list.Tools) != 1 || list.Tools[0].Name != "doctor" {
+				t.Fatalf("minimal tools/list returned tools=%+v", list.Tools)
+			}
+
+			doctorParams := json.RawMessage(`{"name":"doctor","arguments":{}}`)
+			doctorID := json.RawMessage(`"doctor"`)
+			doctorReq := request{JSONRPC: "2.0", ID: &doctorID, Method: "tools/call", Params: &doctorParams}
+			doctorResp, ok := srv.Handle(context.Background(), doctorReq)
+			if !ok || doctorResp.Error != nil {
+				t.Fatalf("doctor response=%+v ok=%t", doctorResp, ok)
+			}
+			var callResult toolCallResult
+			if err := json.Unmarshal(doctorResp.Result, &callResult); err != nil {
+				t.Fatal(err)
+			}
+			var doctor doctorResult
+			decodeStructured(t, callResult, &doctor)
+			if doctor.Status != "degraded" {
+				t.Fatalf("doctor status=%q", doctor.Status)
+			}
+			if len(doctor.Diagnostics) != 1 {
+				t.Fatalf("doctor diagnostics count=%d", len(doctor.Diagnostics))
+			}
+			got := doctor.Diagnostics[0]
+			if got.ErrorClass != tt.errorClass {
+				t.Fatalf("doctor diagnostic errorClass=%q, want %q", got.ErrorClass, tt.errorClass)
+			}
+			if got.Message == "" {
+				t.Fatalf("doctor diagnostic message is empty")
+			}
+			if !strings.Contains(got.Remediation, tt.remediation) {
+				t.Fatalf("doctor diagnostic remediation=%q does not contain %q", got.Remediation, tt.remediation)
+			}
+		})
+	}
+}
+
+func TestStartupDiagnosticRemediationText(t *testing.T) {
+	schemaDiag := StartupDiagnosticFromError(&cache.SchemaVersionError{Compat: cache.VersionCompatibility{Message: "cache schema is newer than supported", Remediation: "upgrade the gitcode-mcp binary to a version that supports this schema"}})
+	if schemaDiag.ErrorClass != "schema_incompatible" || !strings.Contains(schemaDiag.Remediation, "upgrade") {
+		t.Fatalf("schema diagnostic=%+v", schemaDiag)
+	}
+
+	genericDiag := StartupDiagnosticFromError(errors.New("panic: secret stack trace\n/path/file.go:10"))
+	if genericDiag.ErrorClass != "startup-failure" || strings.Contains(genericDiag.Message, "panic") || strings.Contains(genericDiag.Message, "/path/file.go") || genericDiag.Remediation == "" {
+		t.Fatalf("generic diagnostic leaked raw details=%+v", genericDiag)
 	}
 }
 
@@ -1106,7 +1830,7 @@ func newPipeServer(svc serviceInterface) (*Server, io.ReadWriteCloser, io.ReadWr
 	clientR, serverW := io.Pipe()
 	serverR, clientW := io.Pipe()
 	stderr := &bytes.Buffer{}
-	srv := New(serverR, serverW, stderr, svc)
+	srv := New(serverR, serverW, stderr, svc, nil)
 	conn := &pipeConn{Reader: clientR, Writer: clientW}
 	return srv, conn, conn, stderr
 }

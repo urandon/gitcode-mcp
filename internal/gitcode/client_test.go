@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -670,14 +671,33 @@ func TestConfirmedWriteOperations(t *testing.T) {
 			name:   "write-confirm-create-comment",
 			method: http.MethodPost,
 			path:   createIssueCommentEndpoint("example-owner", "example-repo", 42),
-			body:   `{"id":"COMMENT-1","issue_id":"ISSUE-42","body":"comment"}`,
+			body:   `{"id":"LEGACY-COMMENT-1","issue_id":"ISSUE-42","body":"comment"}`,
 			invoke: func(client *HTTPClient) (WriteResult[any], error) {
 				result, err := client.CreateIssueComment(context.Background(), CreateIssueCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 42, Body: "comment"}, WriteOptions{IdempotencyKey: "key-create-comment"})
 				return anyWriteResult(result), err
 			},
 			assertion: func(t *testing.T, result WriteResult[any]) {
-				if result.RemoteID != "COMMENT-1" || result.ParentIssueNumber != 42 || result.ParentIssueID != "ISSUE-42" {
+				if result.RemoteID != "LEGACY-COMMENT-1" || result.ParentIssueNumber != 42 || result.ParentIssueID != "ISSUE-42" {
 					t.Fatalf("missing comment identity: %+v", result)
+				}
+			},
+		},
+		{
+			name:   "SCN-GITCODE-ADD-COMMENT-LIVE-SHAPE-01",
+			method: http.MethodPost,
+			path:   createIssueCommentEndpoint("example-owner", "example-repo", 42),
+			body:   `{"id":1001,"note_id":2002,"body":"comment","created_at":"2026-06-20T12:00:00Z","user":{"login":"commenter"}}`,
+			invoke: func(client *HTTPClient) (WriteResult[any], error) {
+				result, err := client.CreateIssueComment(context.Background(), CreateIssueCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 42, Body: "comment"}, WriteOptions{IdempotencyKey: "key-create-comment"})
+				return anyWriteResult(result), err
+			},
+			assertion: func(t *testing.T, result WriteResult[any]) {
+				comment, ok := result.Record.(Comment)
+				if !ok {
+					t.Fatalf("record type = %T", result.Record)
+				}
+				if result.RemoteID != "2002" || result.ParentIssueNumber != 42 || comment.ID != "2002" || comment.Author != "commenter" || comment.Body != "comment" || comment.CreatedAt.IsZero() {
+					t.Fatalf("unexpected live comment result: result=%+v comment=%+v", result, comment)
 				}
 			},
 		},
@@ -737,8 +757,182 @@ func TestConfirmedWriteOperations(t *testing.T) {
 	}
 }
 
+func TestScenario015WikiCreatePageFollowupConfirmation(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/Home.md":
+			var payload WikiContentWriteRequest
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			if payload.Sha != "" {
+				t.Fatalf("create payload sha = %q, want empty", payload.Sha)
+			}
+			decoded, err := base64.StdEncoding.DecodeString(payload.Content)
+			if err != nil || string(decoded) != "body" {
+				t.Fatalf("create payload content = %q err=%v", decoded, err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/Home.md":
+			fmt.Fprintf(w, `{"path":"Home.md","type":"file","sha":"rev-confirmed","content":%q,"encoding":"base64"}`, base64.StdEncoding.EncodeToString([]byte("body")))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	result, err := newTestClient(t, server.URL, Config{}).CreateWikiPage(context.Background(), CreateWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "Home.md", Body: "body"}, WriteOptions{IdempotencyKey: "key-create-wiki"})
+	if err != nil {
+		t.Fatalf("CreateWikiPage returned error: %v", err)
+	}
+	if !result.Confirmed || result.RemoteID != "Home.md" || result.RemoteSlug != "Home.md" || result.RemoteRevision != "rev-confirmed" || result.Record.Revision != "rev-confirmed" || result.Record.Body != "body" || result.ProviderStatus != "201" {
+		t.Fatalf("unexpected confirmed result: %+v", result)
+	}
+	want := []string{"POST /api/v5/repos/example-owner/example-repo.wiki/contents/Home.md", "GET /api/v5/repos/example-owner/example-repo.wiki/contents/Home.md"}
+	if strings.Join(paths, "|") != strings.Join(want, "|") {
+		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+}
+
+func TestScenario015WikiCreatePageFollowupConfirmationFailure(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "not-found", status: http.StatusNotFound, body: `{"message":"missing"}`},
+		{name: "server-error", status: http.StatusInternalServerError, body: `{"message":"down"}`},
+		{name: "path-mismatch", status: http.StatusOK, body: `{"path":"Other.md","type":"file","sha":"rev-confirmed","content":"Ym9keQ==","encoding":"base64"}`},
+		{name: "missing-sha", status: http.StatusOK, body: `{"path":"Home.md","type":"file","content":"Ym9keQ==","encoding":"base64"}`},
+		{name: "content-mismatch", status: http.StatusOK, body: `{"path":"Home.md","type":"file","sha":"rev-confirmed","content":"b3RoZXI=","encoding":"base64"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/Home.md":
+					w.WriteHeader(http.StatusCreated)
+					fmt.Fprint(w, `{}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/Home.md":
+					w.WriteHeader(tt.status)
+					fmt.Fprint(w, tt.body)
+				default:
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+			}))
+			defer server.Close()
+
+			result, err := newTestClient(t, server.URL, Config{}).CreateWikiPage(context.Background(), CreateWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "Home.md", Body: "body"}, WriteOptions{IdempotencyKey: "key-create-wiki"})
+			var target ErrWriteConfirmationIncomplete
+			if !errors.As(err, &target) || result.Confirmed || result.RemoteRevision != "" {
+				t.Fatalf("expected incomplete confirmation without confirmed result: result=%+v err=%T %v", result, err, err)
+			}
+			if target.DiagnosticCode() != "write_confirmation_incomplete" {
+				t.Fatalf("diagnostic = %q", target.DiagnosticCode())
+			}
+		})
+	}
+}
+
 func anyWriteResult[T any](result WriteResult[T]) WriteResult[any] {
 	return WriteResult[any]{Record: result.Record, Confirmed: result.Confirmed, Operation: result.Operation, Target: result.Target, ProviderStatus: result.ProviderStatus, RemoteID: result.RemoteID, RemoteNumber: result.RemoteNumber, RemoteSlug: result.RemoteSlug, RemoteRevision: result.RemoteRevision, ParentIssueNumber: result.ParentIssueNumber, ParentIssueID: result.ParentIssueID, IdempotencyKey: result.IdempotencyKey, ResponseHash: result.ResponseHash, ConfirmedAt: result.ConfirmedAt, ProviderPayloadFingerprint: result.ProviderPayloadFingerprint}
+}
+
+func TestScenario017AddCommentMalformedBodySchemaDecode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != createIssueCommentEndpoint("example-owner", "example-repo", 42) {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"id":`)
+	}))
+	defer server.Close()
+
+	result, err := newTestClient(t, server.URL, Config{}).CreateIssueComment(context.Background(), CreateIssueCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 42, Body: "comment"}, WriteOptions{IdempotencyKey: "key-create-comment"})
+	var schemaErr *ErrSchemaDecode
+	if !errors.As(err, &schemaErr) || result.Confirmed {
+		t.Fatalf("expected schema decode without confirmation: result=%+v err=%T %v", result, err, err)
+	}
+	if schemaErr.DiagnosticCode() != "schema_decode" {
+		t.Fatalf("diagnostic = %q", schemaErr.DiagnosticCode())
+	}
+}
+
+func TestScenario018PRListDetailCommentsRoutes(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == listPREndpoint("example-owner", "example-repo"):
+			fmt.Fprint(w, `[{"id":101,"number":7,"html_url":"https://example.test/pulls/7","state":"open","title":"Add cache","body":"body","user":{"login":"alice"},"labels":[{"id":1,"name":"feature","color":"blue"}],"base":{"ref":"main"},"head":{"ref":"topic"}}]`)
+		case r.Method == http.MethodGet && r.URL.Path == getPREndpoint("example-owner", "example-repo", 7):
+			fmt.Fprint(w, `{"id":"101","number":"7","html_url":"https://example.test/pulls/7","state":"open","title":"Add cache","body":"body","user":{"login":"alice"},"labels":["feature"],"base":{"ref":"main"},"head":{"ref":"topic"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == listPRCommentsEndpoint("example-owner", "example-repo", 7):
+			fmt.Fprint(w, `[{"id":201,"note_id":301,"body":"looks good","discussion_id":"DISC-7","user":{"login":"bob"}}]`)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, Config{})
+	prs, err := client.ListPRs(context.Background(), PRListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if err != nil {
+		t.Fatalf("ListPRs returned error: %v", err)
+	}
+	if len(prs.Items) != 1 || prs.Items[0].Kind != "pull_request" || prs.Items[0].SourceID != "PR-7" || prs.Items[0].ID != "101" || prs.Items[0].Number != 7 || prs.Items[0].HTMLURL == "" || prs.Items[0].State != "open" || prs.Items[0].Title != "Add cache" || prs.Items[0].Body != "body" || prs.Items[0].User != "alice" || len(prs.Items[0].Labels) != 1 || prs.Items[0].Labels[0] != "feature" || prs.Items[0].Base != "main" || prs.Items[0].Head != "topic" {
+		t.Fatalf("unexpected PR list record: %+v", prs.Items)
+	}
+	pr, err := client.GetPR(context.Background(), PRRequest{Owner: "example-owner", Repo: "example-repo", Number: 7})
+	if err != nil {
+		t.Fatalf("GetPR returned error: %v", err)
+	}
+	if pr.Kind != "pull_request" || pr.SourceID != "PR-7" || pr.Number != 7 || pr.ID != "101" {
+		t.Fatalf("unexpected PR detail record: %+v", pr)
+	}
+	comments, err := client.ListPRComments(context.Background(), PRRequest{Owner: "example-owner", Repo: "example-repo", Number: 7})
+	if err != nil {
+		t.Fatalf("ListPRComments returned error: %v", err)
+	}
+	if len(comments.Items) != 1 || comments.Items[0].Kind != "pr_comment" || comments.Items[0].ID != "301" || comments.Items[0].DiscussionID != "DISC-7" || comments.Items[0].PRNumber != 7 || comments.Items[0].Body != "looks good" || comments.Items[0].Author != "bob" {
+		t.Fatalf("unexpected PR comment records: %+v", comments.Items)
+	}
+	for _, path := range paths {
+		if strings.Contains(path, "pull_requests") || strings.Contains(path, "merge_requests") || strings.Contains(path, "review_comments") {
+			t.Fatalf("deployment-inhibited route called: %s", path)
+		}
+	}
+}
+
+func TestScenario018PRCommentWrite(t *testing.T) {
+	var seenBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != createPRCommentEndpoint("example-owner", "example-repo", 7) {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		seenBody = string(body)
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"id":201,"note_id":301,"body":"posted"}`)
+	}))
+	defer server.Close()
+
+	result, err := newTestClient(t, server.URL, Config{}).CreatePRComment(context.Background(), CreatePRCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, Body: "posted"}, WriteOptions{IdempotencyKey: "key-create-pr-comment"})
+	if err != nil {
+		t.Fatalf("CreatePRComment returned error: %v", err)
+	}
+	if !strings.Contains(seenBody, `"body":"posted"`) {
+		t.Fatalf("request body = %s", seenBody)
+	}
+	if !result.Confirmed || result.ProviderStatus != "201" || result.RemoteID != "301" || result.ParentIssueNumber != 7 || result.ParentIssueID != "7" || result.Record.Kind != "pr_comment" || result.Record.PRNumber != 7 || result.Record.ID != "301" || result.Record.Body != "posted" {
+		t.Fatalf("unexpected PR comment write result: %+v", result)
+	}
 }
 
 func TestWriteNegativeScenariosDoNotConfirm(t *testing.T) {
@@ -1273,15 +1467,15 @@ func TestLabel011CreateRequestLabelString(t *testing.T) {
 	if len(sawLabelsRaw) == 0 {
 		t.Fatal("labels field not found in request body")
 	}
-	if sawLabelsRaw[0] != '[' {
-		t.Fatalf("labels is not a JSON array: %s", string(sawLabelsRaw))
+	if sawLabelsRaw[0] != '"' {
+		t.Fatalf("labels is not a JSON string: %s", string(sawLabelsRaw))
 	}
-	var decoded []string
+	var decoded string
 	if err := json.Unmarshal(sawLabelsRaw, &decoded); err != nil {
-		t.Fatalf("labels is not a valid JSON array: %s, err=%v", string(sawLabelsRaw), err)
+		t.Fatalf("labels is not a valid JSON string: %s, err=%v", string(sawLabelsRaw), err)
 	}
-	if len(decoded) != 2 || decoded[0] != "bug" || decoded[1] != "enhancement" {
-		t.Fatalf("labels content: got %v, want [bug enhancement]", decoded)
+	if decoded != "bug,enhancement" {
+		t.Fatalf("labels content: got %q, want bug,enhancement", decoded)
 	}
 }
 
@@ -1294,8 +1488,8 @@ func TestLabel012CreateRequestEmptyLabels(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 				t.Fatalf("decode request body: %v", err)
 			}
-			if len(raw.Labels) > 0 && string(raw.Labels) != "[]" {
-				t.Fatalf("empty labels: expected [], got %s", string(raw.Labels))
+			if len(raw.Labels) > 0 {
+				t.Fatalf("empty labels should be omitted, got %s", string(raw.Labels))
 			}
 			w.WriteHeader(http.StatusCreated)
 			fmt.Fprint(w, `{"id":"ISSUE-200","number":200,"title":"no labels"}`)
@@ -1320,7 +1514,7 @@ func TestLabel012CreateRequestEmptyLabels(t *testing.T) {
 	}
 }
 
-func TestLabel013ArrayLabelsAccepted(t *testing.T) {
+func TestLabel013StringLabelsAccepted(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues" {
 			var raw struct {
@@ -1329,13 +1523,13 @@ func TestLabel013ArrayLabelsAccepted(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 				t.Fatalf("decode request body: %v", err)
 			}
-			if len(raw.Labels) > 0 && raw.Labels[0] == '[' {
+			if len(raw.Labels) > 0 && raw.Labels[0] == '"' {
 				w.WriteHeader(http.StatusCreated)
 				fmt.Fprint(w, `{"id":"ISSUE-300","number":300,"title":"accepted","labels":[{"id":1,"name":"bug","color":"#FF0000"}]}`)
 				return
 			}
 			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprint(w, `{"message":"labels must be a JSON array, not a string"}`)
+			fmt.Fprint(w, `{"message":"labels must be a comma-separated JSON string, not an array"}`)
 			return
 		}
 		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -1343,7 +1537,7 @@ func TestLabel013ArrayLabelsAccepted(t *testing.T) {
 	defer server.Close()
 	client := newTestClient(t, server.URL, Config{})
 
-	t.Run("array labels via DTO accepted", func(t *testing.T) {
+	t.Run("string labels via DTO accepted", func(t *testing.T) {
 		encoded := EncodeIssueLabels([]string{"bug"})
 		result, err := client.CreateIssue(context.Background(), CreateIssueRequest{
 			Owner:  "example-owner",
@@ -1352,17 +1546,17 @@ func TestLabel013ArrayLabelsAccepted(t *testing.T) {
 			Labels: encoded,
 		}, WriteOptions{IdempotencyKey: "key-013-arr"})
 		if err != nil {
-			t.Fatalf("CreateIssue with native array labels failed: %v", err)
+			t.Fatalf("CreateIssue with string labels failed: %v", err)
 		}
 		if !result.Confirmed {
-			t.Fatal("expected confirmed result for native array labels")
+			t.Fatal("expected confirmed result for string labels")
 		}
 	})
 
-	t.Run("double-encoded string labels rejected", func(t *testing.T) {
+	t.Run("native array labels rejected", func(t *testing.T) {
 		body := map[string]interface{}{
 			"title":  "Bad Labels",
-			"labels": `["bug"]`,
+			"labels": []string{"bug"},
 			"owner":  "example-owner",
 			"repo":   "example-repo",
 		}
@@ -1375,12 +1569,12 @@ func TestLabel013ArrayLabelsAccepted(t *testing.T) {
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("expected 400 for double-encoded string labels, got %d", resp.StatusCode)
+			t.Fatalf("expected 400 for native array labels, got %d", resp.StatusCode)
 		}
 	})
 }
 
-func TestScenario013001CreateIssueLabelsAsNativeJSONArray(t *testing.T) {
+func TestScenario013001CreateIssueLabelsAsJSONString(t *testing.T) {
 	var sawBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues" {
@@ -1416,19 +1610,19 @@ func TestScenario013001CreateIssueLabelsAsNativeJSONArray(t *testing.T) {
 	if len(raw.Labels) == 0 {
 		t.Fatal("labels field not found in request body")
 	}
-	if raw.Labels[0] != '[' {
-		t.Fatalf("labels is not a JSON array: %s", string(raw.Labels))
+	if raw.Labels[0] != '"' {
+		t.Fatalf("labels is not a JSON string: %s", string(raw.Labels))
 	}
-	var decoded []string
+	var decoded string
 	if err := json.Unmarshal(raw.Labels, &decoded); err != nil {
-		t.Fatalf("labels is not a valid JSON array: %s, err=%v", string(raw.Labels), err)
+		t.Fatalf("labels is not a valid JSON string: %s, err=%v", string(raw.Labels), err)
 	}
-	if len(decoded) != 2 || decoded[0] != "bug" || decoded[1] != "enhancement" {
-		t.Fatalf("labels: got %v, want [bug enhancement]", decoded)
+	if decoded != "bug,enhancement" {
+		t.Fatalf("labels: got %q, want bug,enhancement", decoded)
 	}
 }
 
-func TestScenario013002UpdateIssueLabelsAsNativeJSONArray(t *testing.T) {
+func TestScenario013002UpdateIssueLabelsAsJSONString(t *testing.T) {
 	var sawBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPatch && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues/42" {
@@ -1463,15 +1657,15 @@ func TestScenario013002UpdateIssueLabelsAsNativeJSONArray(t *testing.T) {
 	if len(raw.Labels) == 0 {
 		t.Fatal("labels field not found in request body")
 	}
-	if raw.Labels[0] != '[' {
-		t.Fatalf("labels is not a JSON array: %s", string(raw.Labels))
+	if raw.Labels[0] != '"' {
+		t.Fatalf("labels is not a JSON string: %s", string(raw.Labels))
 	}
-	var decoded []string
+	var decoded string
 	if err := json.Unmarshal(raw.Labels, &decoded); err != nil {
-		t.Fatalf("labels is not a valid JSON array: %s, err=%v", string(raw.Labels), err)
+		t.Fatalf("labels is not a valid JSON string: %s, err=%v", string(raw.Labels), err)
 	}
-	if len(decoded) != 1 || decoded[0] != "bug" {
-		t.Fatalf("labels: got %v, want [bug]", decoded)
+	if decoded != "bug" {
+		t.Fatalf("labels: got %q, want bug", decoded)
 	}
 }
 
@@ -1516,6 +1710,118 @@ func TestScenario013003CreateIssueNoLabelsOmitsField(t *testing.T) {
 	}
 	if _, ok := bodyMap["labels"]; ok {
 		t.Fatal("labels key should be absent from serialized JSON")
+	}
+}
+
+func TestScenario016CreateIssueLabelsOmitted(t *testing.T) {
+	var sawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues" {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			sawBody = body
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":"1","number":1,"title":"No Labels"}`)
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	result, err := client.CreateIssue(context.Background(), CreateIssueRequest{
+		Owner: "example-owner",
+		Repo:  "example-repo",
+		Title: "No Labels",
+	}, WriteOptions{IdempotencyKey: "key-016-create-omitted"})
+	if err != nil {
+		t.Fatalf("CreateIssue error: %v", err)
+	}
+	if !result.Confirmed {
+		t.Fatal("expected confirmed result")
+	}
+	assertJSONKeyAbsent(t, sawBody, "labels")
+}
+
+func TestScenario016UpdateIssueTitleOnlyLabelsOmitted(t *testing.T) {
+	var sawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues/42" {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			sawBody = body
+			fmt.Fprint(w, `{"id":"42","number":42,"title":"Updated"}`)
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	result, err := client.UpdateIssue(context.Background(), UpdateIssueRequest{
+		Owner:  "example-owner",
+		Repo:   "example-repo",
+		Number: 42,
+		Title:  "Updated",
+	}, WriteOptions{IdempotencyKey: "key-016-update-omitted"})
+	if err != nil {
+		t.Fatalf("UpdateIssue error: %v", err)
+	}
+	if !result.Confirmed {
+		t.Fatal("expected confirmed result")
+	}
+	assertJSONKeyAbsent(t, sawBody, "labels")
+}
+
+func TestScenario016ExplicitLabelsPreserved(t *testing.T) {
+	var sawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues/42" {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			sawBody = body
+			fmt.Fprint(w, `{"id":"42","number":42,"title":"Updated","labels":[{"id":1,"name":"bug","color":"#FF0000"}]}`)
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	result, err := client.UpdateIssue(context.Background(), UpdateIssueRequest{
+		Owner:  "example-owner",
+		Repo:   "example-repo",
+		Number: 42,
+		Labels: EncodeIssueLabels([]string{"bug"}),
+	}, WriteOptions{IdempotencyKey: "key-016-explicit-labels"})
+	if err != nil {
+		t.Fatalf("UpdateIssue error: %v", err)
+	}
+	if !result.Confirmed {
+		t.Fatal("expected confirmed result")
+	}
+	var raw struct {
+		Labels json.RawMessage `json:"labels"`
+	}
+	if err := json.Unmarshal(sawBody, &raw); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	if string(raw.Labels) != `"bug"` {
+		t.Fatalf("labels: got %s, want \"bug\"", string(raw.Labels))
+	}
+}
+
+func assertJSONKeyAbsent(t *testing.T, body []byte, key string) {
+	t.Helper()
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	if _, ok := raw[key]; ok {
+		t.Fatalf("%s key should be absent from serialized JSON", key)
 	}
 }
 
@@ -1609,21 +1915,406 @@ func TestScenario013007CreateIssueWithLabelsNormalizedInResponse(t *testing.T) {
 	}
 }
 
-func TestScenario013008EncodeIssueLabelsOutputIsJSONArray(t *testing.T) {
+func TestScenario013008EncodeIssueLabelsOutputIsJSONString(t *testing.T) {
 	result := EncodeIssueLabels([]string{"bug", "enhancement"})
-	if len(result) == 0 || result[0] != '[' {
-		t.Fatalf("EncodeIssueLabels: output is not a JSON array literal: %s", string(result))
+	if len(result) == 0 || result[0] != '"' {
+		t.Fatalf("EncodeIssueLabels: output is not a JSON string literal: %s", string(result))
 	}
-	var decoded []string
+	var decoded string
 	if err := json.Unmarshal(result, &decoded); err != nil {
-		t.Fatalf("EncodeIssueLabels: output is not valid JSON array: %s, err=%v", string(result), err)
+		t.Fatalf("EncodeIssueLabels: output is not valid JSON string: %s, err=%v", string(result), err)
 	}
-	if len(decoded) != 2 || decoded[0] != "bug" || decoded[1] != "enhancement" {
-		t.Fatalf("EncodeIssueLabels: got %v, want [bug enhancement]", decoded)
+	if decoded != "bug,enhancement" {
+		t.Fatalf("EncodeIssueLabels: got %q, want bug,enhancement", decoded)
 	}
 
 	empty := EncodeIssueLabels([]string{})
-	if string(empty) != "[]" {
-		t.Fatalf("EncodeIssueLabels empty: got %s, want []", string(empty))
+	if empty != nil {
+		t.Fatalf("EncodeIssueLabels empty: got %s, want nil", string(empty))
+	}
+}
+
+func TestBoundedWikiTreeTraversalMaxRecords(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents":
+			fmt.Fprint(w, `[{"path":"dirA","type":"dir"},{"path":"dirB","type":"dir"},{"path":"README.md","type":"file","sha":"rev-home"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirA":
+			fmt.Fprint(w, `[{"path":"dirA/A1.md","type":"file","sha":"rev-a1"},{"path":"dirA/A2.md","type":"file","sha":"rev-a2"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirB":
+			fmt.Fprint(w, `[{"path":"dirB/B1.md","type":"file","sha":"rev-b1"},{"path":"dirB/B2.md","type":"file","sha":"rev-b2"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/README.md":
+			fmt.Fprint(w, `{"path":"README.md","type":"file","sha":"rev-home"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/README.md":
+			fmt.Fprint(w, "# Home")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirA/A1.md":
+			fmt.Fprint(w, `{"path":"dirA/A1.md","type":"file","sha":"rev-a1"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dirA/A1.md":
+			fmt.Fprint(w, "# A1")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirA/A2.md":
+			fmt.Fprint(w, `{"path":"dirA/A2.md","type":"file","sha":"rev-a2"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dirA/A2.md":
+			fmt.Fprint(w, "# A2")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirB/B1.md":
+			fmt.Fprint(w, `{"path":"dirB/B1.md","type":"file","sha":"rev-b1"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dirB/B1.md":
+			fmt.Fprint(w, "# B1")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirB/B2.md":
+			fmt.Fprint(w, `{"path":"dirB/B2.md","type":"file","sha":"rev-b2"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dirB/B2.md":
+			fmt.Fprint(w, "# B2")
+		default:
+			t.Fatalf("unexpected wiki path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+
+	req := WikiListRequest{
+		Owner: "example-owner",
+		Repo:  "example-repo",
+		Bounds: &WikiBounds{
+			MaxRecords: 3,
+		},
+	}
+	wikis, err := client.ListWikiPages(context.Background(), req)
+	if err != nil {
+		t.Fatalf("ListWikiPages returned error: %v", err)
+	}
+	if len(wikis.Items) != 3 {
+		t.Fatalf("expected 3 pages (bounded by MaxRecords), got %d", len(wikis.Items))
+	}
+	expectedSlugs := map[string]bool{"dirA/A1.md": true, "dirA/A2.md": true, "dirB/B1.md": true}
+	for _, item := range wikis.Items {
+		if !expectedSlugs[item.Slug] {
+			t.Fatalf("unexpected page slug %q, want one of dirA/A1, dirA/A2, dirB/B1", item.Slug)
+		}
+	}
+}
+
+func TestBoundedWikiTreeTraversalCancelMidTraversal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents":
+			fmt.Fprint(w, `[{"path":"dirA","type":"dir"},{"path":"dirB","type":"dir"},{"path":"README.md","type":"file","sha":"rev-home"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirA":
+			fmt.Fprint(w, `[{"path":"dirA/A1.md","type":"file","sha":"rev-a1"},{"path":"dirA/A2.md","type":"file","sha":"rev-a2"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirB":
+			fmt.Fprint(w, `[{"path":"dirB/B1.md","type":"file","sha":"rev-b1"},{"path":"dirB/B2.md","type":"file","sha":"rev-b2"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirA/A1.md":
+			fmt.Fprint(w, `{"path":"dirA/A1.md","type":"file","sha":"rev-a1"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dirA/A1.md":
+			fmt.Fprint(w, "# A1")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirA/A2.md":
+			fmt.Fprint(w, `{"path":"dirA/A2.md","type":"file","sha":"rev-a2"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dirA/A2.md":
+			fmt.Fprint(w, "# A2")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/README.md":
+			fmt.Fprint(w, `{"path":"README.md","type":"file","sha":"rev-home"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/README.md":
+			fmt.Fprint(w, "# Home")
+		default:
+			t.Fatalf("unexpected wiki path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := WikiListRequest{
+		Owner: "example-owner",
+		Repo:  "example-repo",
+		Bounds: &WikiBounds{
+			MaxRecords: 3,
+		},
+	}
+
+	go func() {
+		cancel()
+	}()
+
+	wikis, err := client.ListWikiPages(ctx, req)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+	}
+	if len(wikis.Items) < 0 {
+		t.Fatalf("expected some committed items on cancellation")
+	}
+}
+
+func TestBoundedWikiTreeTraversalProgressEvents(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents":
+			fmt.Fprint(w, `[{"path":"dirA","type":"dir"},{"path":"dirB","type":"dir"},{"path":"README.md","type":"file","sha":"rev-home"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirA":
+			fmt.Fprint(w, `[{"path":"dirA/A1.md","type":"file","sha":"rev-a1"},{"path":"dirA/A2.md","type":"file","sha":"rev-a2"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirB":
+			fmt.Fprint(w, `[{"path":"dirB/B1.md","type":"file","sha":"rev-b1"},{"path":"dirB/B2.md","type":"file","sha":"rev-b2"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirA/A1.md":
+			fmt.Fprint(w, `{"path":"dirA/A1.md","type":"file","sha":"rev-a1"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dirA/A1.md":
+			fmt.Fprint(w, "# A1")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirA/A2.md":
+			fmt.Fprint(w, `{"path":"dirA/A2.md","type":"file","sha":"rev-a2"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dirA/A2.md":
+			fmt.Fprint(w, "# A2")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirB/B1.md":
+			fmt.Fprint(w, `{"path":"dirB/B1.md","type":"file","sha":"rev-b1"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dirB/B1.md":
+			fmt.Fprint(w, "# B1")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dirB/B2.md":
+			fmt.Fprint(w, `{"path":"dirB/B2.md","type":"file","sha":"rev-b2"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dirB/B2.md":
+			fmt.Fprint(w, "# B2")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/README.md":
+			fmt.Fprint(w, `{"path":"README.md","type":"file","sha":"rev-home"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/README.md":
+			fmt.Fprint(w, "# Home")
+		default:
+			t.Fatalf("unexpected wiki path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	progressChan := make(chan WikiProgressEvent, 10)
+	var events []WikiProgressEvent
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for ev := range progressChan {
+			events = append(events, ev)
+		}
+	}()
+	req := WikiListRequest{
+		Owner: "example-owner",
+		Repo:  "example-repo",
+		Bounds: &WikiBounds{
+			ProgressChan: progressChan,
+		},
+	}
+	_, err := client.ListWikiPages(context.Background(), req)
+	close(progressChan)
+	<-done
+	if err != nil {
+		t.Fatalf("ListWikiPages returned error: %v", err)
+	}
+	if len(events) < 3 {
+		t.Fatalf("progress events = %d, want at least 3 (root + dirA + dirB)", len(events))
+	}
+	for i, ev := range events {
+		if ev.RecordsFetched < 0 {
+			t.Fatalf("event[%d].RecordsFetched = %d, want >= 0", i, ev.RecordsFetched)
+		}
+	}
+}
+
+func TestBoundedWikiTreeTraversalUnboundedBackwardCompat(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents":
+			fmt.Fprint(w, `[{"path":"README.md","type":"file","sha":"rev-home"},{"path":"dir","type":"dir"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dir":
+			fmt.Fprint(w, `[{"path":"dir/Sub.md","type":"file","sha":"rev-sub"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/README.md":
+			fmt.Fprint(w, `{"path":"README.md","type":"file","sha":"rev-home"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/README.md":
+			fmt.Fprint(w, "# Home")
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/dir/Sub.md":
+			fmt.Fprint(w, `{"path":"dir/Sub.md","type":"file","sha":"rev-sub"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/dir/Sub.md":
+			fmt.Fprint(w, "## Sub")
+		default:
+			t.Fatalf("unexpected wiki path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	wikis, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if err != nil {
+		t.Fatalf("ListWikiPages (unbounded) returned error: %v", err)
+	}
+	if len(wikis.Items) != 2 {
+		t.Fatalf("expected 2 pages from unbounded traversal, got %d", len(wikis.Items))
+	}
+	ordered := []string{"dir/Sub.md", "README.md"}
+	for i, item := range wikis.Items {
+		if item.Slug != ordered[i] {
+			t.Fatalf("expected ordered[%d] = %q, got %q", i, ordered[i], item.Slug)
+		}
+	}
+}
+
+func TestBoundedWikiTreeTraversalNoOuterLoopPattern(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents":
+			fmt.Fprint(w, `[{"path":"README.md","type":"file","sha":"rev-home"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/README.md":
+			fmt.Fprint(w, `{"path":"README.md","type":"file","sha":"rev-home"}`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/README.md":
+			fmt.Fprint(w, "# Home")
+		default:
+			t.Fatalf("unexpected wiki path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	req := WikiListRequest{
+		Owner: "example-owner",
+		Repo:  "example-repo",
+		Bounds: &WikiBounds{
+			MaxRecords: 5,
+		},
+	}
+	wikis, err := client.ListWikiPages(context.Background(), req)
+	if err != nil {
+		t.Fatalf("ListWikiPages returned error: %v", err)
+	}
+	if len(wikis.Items) != 1 {
+		t.Fatalf("expected 1 page, got %d", len(wikis.Items))
+	}
+}
+
+func TestEmptyWikiDetection400(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents" {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"message":"wiki not found"}`)
+			return
+		}
+		t.Fatalf("unexpected wiki path %s", r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	_, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo"})
+	var emptyWiki ErrEmptyWiki
+	if !errors.As(err, &emptyWiki) {
+		t.Fatalf("expected ErrEmptyWiki, got %T %v", err, err)
+	}
+	if emptyWiki.DiagnosticCode() != "empty_wiki" {
+		t.Fatalf("DiagnosticCode() = %q, want %q", emptyWiki.DiagnosticCode(), "empty_wiki")
+	}
+	if !strings.Contains(emptyWiki.Error(), "empty or uninitialized") {
+		t.Fatalf("ErrEmptyWiki missing remediation text: %s", emptyWiki.Error())
+	}
+	if strings.Contains(emptyWiki.Error(), "api_validation") {
+		t.Fatalf("ErrEmptyWiki should not mention api_validation: %s", emptyWiki.Error())
+	}
+}
+
+func TestEmptyWikiDetection404(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents" {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"message":"wiki is empty"}`)
+			return
+		}
+		t.Fatalf("unexpected wiki path %s", r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	_, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo"})
+	var emptyWiki ErrEmptyWiki
+	if !errors.As(err, &emptyWiki) {
+		t.Fatalf("expected ErrEmptyWiki, got %T %v", err, err)
+	}
+	if emptyWiki.DiagnosticCode() != "empty_wiki" {
+		t.Fatalf("DiagnosticCode() = %q, want %q", emptyWiki.DiagnosticCode(), "empty_wiki")
+	}
+}
+
+func TestEmptyWikiDetection400NonEmptyWiki(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents" {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"message":"invalid repo name"}`)
+			return
+		}
+		t.Fatalf("unexpected wiki path %s", r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	_, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo"})
+	var apiValidation ErrAPIValidation
+	if !errors.As(err, &apiValidation) {
+		t.Fatalf("expected ErrAPIValidation for non-empty-wiki 400, got %T %v", err, err)
+	}
+	if apiValidation.DiagnosticCode() != "api_validation" {
+		t.Fatalf("DiagnosticCode() = %q, want %q", apiValidation.DiagnosticCode(), "api_validation")
+	}
+}
+
+func TestEmptyWikiDetection404UninitializedMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"wiki is not initialized", `{"message":"wiki is not initialized"}`},
+		{"wiki is uninitialized", `{"message":"wiki is uninitialized"}`},
+		{"uninitialized wiki", `{"message":"uninitialized wiki"}`},
+		{"wiki has not been created", `{"message":"wiki has not been created"}`},
+		{"wiki has no pages", `{"message":"wiki has no pages"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				fmt.Fprint(w, tt.body)
+			}))
+			defer server.Close()
+			client := newTestClient(t, server.URL, Config{})
+			_, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo"})
+			var emptyWiki ErrEmptyWiki
+			if !errors.As(err, &emptyWiki) {
+				t.Fatalf("expected ErrEmptyWiki, got %T %v", err, err)
+			}
+		})
+	}
+}
+
+func TestEmptyWikiDetectionEmptyArray200IsOK(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents" {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `[]`)
+			return
+		}
+		t.Fatalf("unexpected wiki path %s", r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	wikis, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if err != nil {
+		t.Fatalf("ListWikiPages with empty [] 200 should not error, got: %v", err)
+	}
+	if len(wikis.Items) != 0 {
+		t.Fatalf("expected 0 pages from empty array, got %d", len(wikis.Items))
+	}
+}
+
+func TestCreateWikiPageEmptyWikiDiagnostic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v5/repos/example-owner/example-repo.wiki/contents/") {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"message":"wiki not found"}`)
+			return
+		}
+		t.Fatalf("unexpected wiki request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	_, err := client.CreateWikiPage(context.Background(), CreateWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "Home.md", Title: "Home", Body: "# Welcome"}, WriteOptions{IdempotencyKey: "key-create-empty"})
+	var emptyWiki ErrEmptyWiki
+	if !errors.As(err, &emptyWiki) {
+		t.Fatalf("expected ErrEmptyWiki from CreateWikiPage against empty wiki, got %T %v", err, err)
+	}
+	if emptyWiki.DiagnosticCode() != "empty_wiki" {
+		t.Fatalf("DiagnosticCode() = %q, want %q", emptyWiki.DiagnosticCode(), "empty_wiki")
+	}
+	if !strings.Contains(emptyWiki.Error(), "empty or uninitialized") {
+		t.Fatalf("ErrEmptyWiki missing remediation text: %s", emptyWiki.Error())
 	}
 }

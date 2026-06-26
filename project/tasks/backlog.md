@@ -12,6 +12,7 @@ Updated: 2026-06-17
 | TASK-0004 | Prototype read-only MCP server over local cache | candidate | Expose search/get/backlinks/resolve/sync-status for GitCode data once cache schema is stable. |
 | TASK-0005 | Live provider wiring iteration 4 | ready | Prove `--live` provider selection through the real CLI/startup path with mocked GitCode HTTP tests before credential-gated real live smoke. |
 | TASK-0006 | Live API coverage iteration 5 | ready | Close live API-shape gaps for labels, milestones, PR/comments, wiki strategy, error classification, and cache provenance using documented or sanitized live evidence. |
+| TASK-0007 | Live operations iteration 6 | ready | Turn the iteration 5 smoke findings into an agent-usable live workflow: MCP lifecycle tools, empty-wiki handling, bounded collection sync, credential parity, and write confirmation fixes. |
 
 ## Done
 

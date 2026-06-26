@@ -26,6 +26,27 @@ type IssueRequest struct {
 	RemoteAlias      string
 }
 
+type PRListRequest struct {
+	Owner   string
+	Repo    string
+	State   string
+	Page    int
+	PerPage int
+}
+
+type PRRequest struct {
+	Owner  string
+	Repo   string
+	Number int
+}
+
+type CreatePRCommentRequest struct {
+	Owner  string `json:"-"`
+	Repo   string `json:"-"`
+	Number int    `json:"-"`
+	Body   string `json:"body"`
+}
+
 type WikiPageRequest struct {
 	Owner string
 	Repo  string
@@ -38,6 +59,17 @@ type WikiListRequest struct {
 	Repo    string
 	Page    int
 	PerPage int
+	Bounds  *WikiBounds
+}
+
+type WikiBounds struct {
+	MaxRecords   int
+	ProgressChan chan<- WikiProgressEvent
+}
+
+type WikiProgressEvent struct {
+	Path           string
+	RecordsFetched int
 }
 
 type SearchRequest struct {
@@ -74,16 +106,16 @@ type GitCodeLabel struct {
 }
 
 type IssueSummary struct {
-	ID           string         `json:"id"`
-	Number       int            `json:"number"`
-	Title        string         `json:"title"`
-	Body         string         `json:"body"`
-	Status       string         `json:"status"`
-	State        string         `json:"state"`
+	ID            string         `json:"id"`
+	Number        int            `json:"number"`
+	Title         string         `json:"title"`
+	Body          string         `json:"body"`
+	Status        string         `json:"status"`
+	State         string         `json:"state"`
 	GitCodeLabels []GitCodeLabel `json:"labels"`
-	Labels       []string       `json:"-"`
-	CreatedAt    time.Time      `json:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at"`
+	Labels        []string       `json:"-"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
 }
 
 func (i *IssueSummary) UnmarshalJSON(data []byte) error {
@@ -137,17 +169,17 @@ func (i *IssueSummary) UnmarshalJSON(data []byte) error {
 }
 
 type Issue struct {
-	ID           string         `json:"id"`
-	Number       int            `json:"number"`
-	Title        string         `json:"title"`
-	Body         string         `json:"body"`
-	Status       string         `json:"status"`
-	State        string         `json:"state"`
+	ID            string         `json:"id"`
+	Number        int            `json:"number"`
+	Title         string         `json:"title"`
+	Body          string         `json:"body"`
+	Status        string         `json:"status"`
+	State         string         `json:"state"`
 	GitCodeLabels []GitCodeLabel `json:"labels"`
-	Labels       []string       `json:"-"`
-	Author       string         `json:"author"`
-	CreatedAt    time.Time      `json:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at"`
+	Labels        []string       `json:"-"`
+	Author        string         `json:"author"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
 }
 
 func (i *Issue) UnmarshalJSON(data []byte) error {
@@ -253,6 +285,242 @@ type Comment struct {
 	Author    string    `json:"author"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (c *Comment) UnmarshalJSON(data []byte) error {
+	type rawComment struct {
+		ID        any             `json:"id"`
+		NoteID    any             `json:"note_id"`
+		IssueID   any             `json:"issue_id"`
+		Body      string          `json:"body"`
+		Author    string          `json:"author"`
+		User      json.RawMessage `json:"user"`
+		CreatedAt string          `json:"created_at"`
+		UpdatedAt string          `json:"updated_at"`
+	}
+	var raw rawComment
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	id, err := decodeOptionalID(firstNonNil(raw.NoteID, raw.ID))
+	if err != nil {
+		return err
+	}
+	issueID, err := decodeOptionalID(raw.IssueID)
+	if err != nil {
+		return err
+	}
+	created, err := decodeOptionalTime("comment.created_at", raw.CreatedAt)
+	if err != nil {
+		return err
+	}
+	updated, err := decodeOptionalTime("comment.updated_at", raw.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	*c = Comment{ID: id, IssueID: issueID, Body: raw.Body, Author: firstNonEmpty(raw.Author, decodeCommentUser(raw.User)), CreatedAt: created, UpdatedAt: updated}
+	return nil
+}
+
+func firstNonNil(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func decodeOptionalID(value any) (string, error) {
+	if value == nil {
+		return "", nil
+	}
+	return decodeID(value)
+}
+
+func decodeOptionalTime(field, value string) (time.Time, error) {
+	if strings.TrimSpace(value) == "" {
+		return time.Time{}, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, &ErrSchemaDecode{Field: field, Expected: "RFC3339 timestamp or absent", Received: fmt.Sprintf("%q", value)}
+	}
+	return parsed, nil
+}
+
+func decodeCommentUser(data json.RawMessage) string {
+	if len(data) == 0 || string(data) == "null" {
+		return ""
+	}
+	var user struct {
+		Login    string `json:"login"`
+		Username string `json:"username"`
+		Name     string `json:"name"`
+		ID       any    `json:"id"`
+	}
+	if err := json.Unmarshal(data, &user); err != nil {
+		return ""
+	}
+	id, _ := decodeOptionalID(user.ID)
+	return firstNonEmpty(user.Login, user.Username, user.Name, id)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+type PullRequest struct {
+	Kind          string         `json:"-"`
+	SourceID      string         `json:"-"`
+	ID            string         `json:"id"`
+	Number        int            `json:"number"`
+	HTMLURL       string         `json:"html_url"`
+	State         string         `json:"state"`
+	Title         string         `json:"title"`
+	Body          string         `json:"body"`
+	User          string         `json:"-"`
+	GitCodeLabels []GitCodeLabel `json:"labels"`
+	Labels        []string       `json:"-"`
+	Base          string         `json:"-"`
+	Head          string         `json:"-"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+}
+
+func (p *PullRequest) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ID        any             `json:"id"`
+		Number    any             `json:"number"`
+		HTMLURL   string          `json:"html_url"`
+		State     string          `json:"state"`
+		Title     string          `json:"title"`
+		Body      string          `json:"body"`
+		User      json.RawMessage `json:"user"`
+		Labels    json.RawMessage `json:"labels"`
+		Base      json.RawMessage `json:"base"`
+		Head      json.RawMessage `json:"head"`
+		CreatedAt time.Time       `json:"created_at"`
+		UpdatedAt time.Time       `json:"updated_at"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	id, err := decodeID(raw.ID)
+	if err != nil {
+		return err
+	}
+	number, err := decodeNumber(raw.Number)
+	if err != nil {
+		return err
+	}
+	p.Kind = "pull_request"
+	p.SourceID = pullRequestSourceID(number)
+	p.ID = id
+	p.Number = number
+	p.HTMLURL = raw.HTMLURL
+	p.State = raw.State
+	p.Title = raw.Title
+	p.Body = raw.Body
+	p.User = decodeActor(raw.User)
+	if len(raw.Labels) > 0 {
+		if isLabelObjectArray(raw.Labels) {
+			if err := json.Unmarshal(raw.Labels, &p.GitCodeLabels); err != nil {
+				return err
+			}
+			p.Labels, err = NormalizeLabels(p.GitCodeLabels)
+			if err != nil {
+				return err
+			}
+		} else {
+			var strs []string
+			if err := json.Unmarshal(raw.Labels, &strs); err != nil {
+				return err
+			}
+			p.Labels = strs
+		}
+	}
+	p.Base = decodeRef(raw.Base)
+	p.Head = decodeRef(raw.Head)
+	p.CreatedAt = raw.CreatedAt
+	p.UpdatedAt = raw.UpdatedAt
+	return nil
+}
+
+type PRComment struct {
+	Kind         string    `json:"-"`
+	ID           string    `json:"id"`
+	Body         string    `json:"body"`
+	Author       string    `json:"author"`
+	DiscussionID string    `json:"discussion_id"`
+	PRNumber     int       `json:"-"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+func (c *PRComment) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ID           any             `json:"id"`
+		NoteID       any             `json:"note_id"`
+		Body         string          `json:"body"`
+		Author       string          `json:"author"`
+		User         json.RawMessage `json:"user"`
+		DiscussionID any             `json:"discussion_id"`
+		CreatedAt    string          `json:"created_at"`
+		UpdatedAt    string          `json:"updated_at"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	id, err := decodeOptionalID(firstNonNil(raw.NoteID, raw.ID))
+	if err != nil {
+		return err
+	}
+	discussionID, err := decodeOptionalID(raw.DiscussionID)
+	if err != nil {
+		return err
+	}
+	created, err := decodeOptionalTime("pr_comment.created_at", raw.CreatedAt)
+	if err != nil {
+		return err
+	}
+	updated, err := decodeOptionalTime("pr_comment.updated_at", raw.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	*c = PRComment{Kind: "pr_comment", ID: id, Body: raw.Body, Author: firstNonEmpty(raw.Author, decodeActor(raw.User)), DiscussionID: discussionID, CreatedAt: created, UpdatedAt: updated}
+	return nil
+}
+
+func pullRequestSourceID(number int) string {
+	return "PR-" + strconv.Itoa(number)
+}
+
+func decodeActor(data json.RawMessage) string {
+	return decodeCommentUser(data)
+}
+
+func decodeRef(data json.RawMessage) string {
+	if len(data) == 0 || string(data) == "null" {
+		return ""
+	}
+	var ref struct {
+		Ref   string `json:"ref"`
+		Label string `json:"label"`
+		Sha   string `json:"sha"`
+		Repo  struct {
+			FullName string `json:"full_name"`
+		} `json:"repo"`
+	}
+	if err := json.Unmarshal(data, &ref); err != nil {
+		return ""
+	}
+	return firstNonEmpty(ref.Ref, ref.Label, ref.Sha, ref.Repo.FullName)
 }
 
 type WikiPage struct {
@@ -587,6 +855,14 @@ func isValidTimestamp(val string) bool {
 }
 
 func milestoneListQuery(req MilestoneListRequest) url.Values {
+	values := url.Values{}
+	if req.State != "" {
+		values.Set("state", req.State)
+	}
+	return values
+}
+
+func prListQuery(req PRListRequest) url.Values {
 	values := url.Values{}
 	if req.State != "" {
 		values.Set("state", req.State)

@@ -1,0 +1,44 @@
+{
+  "task_id": "010-internal-service-task-3-add-empty-wiki-diagnostic-routing-internal-servic",
+  "covered_outcome_ids": [
+    "outcome-4"
+  ],
+  "covered_decommission_ids": [],
+  "product_surfaces": [
+    "internal/service.BulkSyncWiki",
+    "internal/service.bulkSyncWikiBounded",
+    "internal/service.normalizeSyncFailure",
+    "internal/service.PartialSyncError",
+    "internal/service.SyncDiagnostic",
+    "internal/service.ErrSyncFailure",
+    "internal/service.errorHasDiagnosticCode"
+  ],
+  "evidence_type": "API test",
+  "freshness": "current binary build with mocked Go tests",
+  "mocks_used": [
+    {
+      "name": "fakeGitCodeClient",
+      "scope": "external GitCode provider dependency only",
+      "reason": "live validation disabled; service runtime path still exercised with in-memory cache and mocked wiki provider returning 400/404 empty-wiki error"
+    },
+    {
+      "name": "cache.NewInMemorySQLiteStore",
+      "scope": "local deterministic cache fixture",
+      "reason": "offline deterministic validation without filesystem or network dependencies"
+    },
+    {
+      "name": "emptyWikiTestError",
+      "scope": "test-only error type implementing DiagnosticCode() == \"empty_wiki\"",
+      "reason": "simulates the adapter returning an empty-wiki error without depending on the gitcode adapter task 012 implementation"
+    }
+  ],
+  "production_files_modified": [],
+  "scenario_ids": [
+    "010-internal-service-task-3-add-empty-wiki-diagnostic-routing-internal-servic-scenario-1",
+    "010-internal-service-task-3-add-empty-wiki-diagnostic-routing-internal-servic-scenario-2",
+    "010-internal-service-task-3-add-empty-wiki-diagnostic-routing-internal-servic-scenario-3"
+  ],
+  "validation_command": "bash tests/design_package/010-internal-service-task-3-add-empty-wiki-diagnostic-routing-internal-servic/run.sh",
+  "live_validation_enabled": false,
+  "device_validation_enabled": false
+}

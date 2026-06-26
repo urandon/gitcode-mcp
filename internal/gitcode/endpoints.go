@@ -22,6 +22,22 @@ func listIssueCommentsEndpoint(owner, repo string, number int) string {
 	return endpointPath("/api/v5/repos/%s/%s/issues/%d/comments", owner, repo, number)
 }
 
+func listPREndpoint(owner, repo string) string {
+	return endpointPath("/api/v5/repos/%s/%s/pulls", owner, repo)
+}
+
+func getPREndpoint(owner, repo string, number int) string {
+	return endpointPath("/api/v5/repos/%s/%s/pulls/%d", owner, repo, number)
+}
+
+func listPRCommentsEndpoint(owner, repo string, number int) string {
+	return endpointPath("/api/v5/repos/%s/%s/pulls/%d/comments", owner, repo, number)
+}
+
+func createPRCommentEndpoint(owner, repo string, number int) string {
+	return listPRCommentsEndpoint(owner, repo, number)
+}
+
 func getWikiPageEndpoint(owner, repo, slug string) string {
 	return wikiContentsPathEndpoint(owner, repo, slug)
 }

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"gitcode-mcp/internal/auth"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/cli"
 	"gitcode-mcp/internal/config"
@@ -22,10 +23,11 @@ import (
 const version = "0.1.0"
 
 type StartupDeps struct {
-	Config  config.Config
-	Cache   CacheStartup
-	GitCode GitCodeStartup
-	Source  config.Source
+	Config             config.Config
+	Cache              CacheStartup
+	GitCode            GitCodeStartup
+	Source             config.Source
+	CredentialResolver *auth.CredentialResolver
 }
 
 type CacheStartup struct {
@@ -101,13 +103,21 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 		return cli.ExecuteWithSource(localArgs, stdout, stderr, src)
 	}
 
-	cfg, err := config.Load(src, opts.overrides)
+	eff, err := config.LoadEffective(src, opts.overrides)
 	if err != nil {
 		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), src))
 		return 1
 	}
-	deps := buildStartupDeps(cfg, config.Token(src), opts.live)
+	cfg := eff.Config
+	credentialResolver := auth.NewCredentialResolver(src)
+	token := config.Token(src)
+	if opts.live {
+		credential := credentialResolver.Resolve(context.Background(), eff)
+		token = credential.Token
+	}
+	deps := buildStartupDeps(cfg, token, opts.live)
 	deps.Source = src
+	deps.CredentialResolver = credentialResolver
 	if opts.mcpServe {
 		return mcpServeRoute(context.Background(), stdin, stdout, stderr, deps, opts.mcpTransport, opts.mcpBind)
 	}
@@ -130,7 +140,8 @@ func buildStartupDeps(cfg config.Config, token string, live bool) StartupDeps {
 			Token:           token,
 			token:           token,
 		},
-		Source: config.OSSource{},
+		Source:             config.OSSource{},
+		CredentialResolver: auth.NewCredentialResolver(config.OSSource{}),
 	}
 }
 
@@ -330,7 +341,7 @@ func resolveLiveClient(deps StartupDeps) (gitcode.Client, error) {
 	}
 	token := strings.TrimSpace(gc.Token)
 	if token == "" {
-		return nil, fmt.Errorf("live provider requires GITCODE_TOKEN (set GITCODE_TOKEN or remove --live)")
+		return nil, fmt.Errorf("live provider requires GITCODE_TOKEN or configured credential (set GITCODE_TOKEN, configure keychain, or remove --live)")
 	}
 	provider, err := gitcode.NewLiveProvider(gitcode.ProviderConfig{
 		Mode:            gitcode.ProviderModeLive,
@@ -352,14 +363,16 @@ func resolveLiveClient(deps StartupDeps) (gitcode.Client, error) {
 }
 
 func resolveService(store cache.Store, deps StartupDeps) (*service.Service, error) {
-	liveClient, err := resolveLiveClient(deps)
-	if err != nil {
-		return nil, err
-	}
-	if liveClient == nil {
+	if !deps.GitCode.Live {
 		return service.New(store), nil
 	}
-	return service.NewWithClient(store, liveClient), nil
+	return service.NewWithMode(store, gitcode.ProviderModeLive, deps.GitCode.Token, service.ServiceConfig{
+		BaseURL:         deps.GitCode.BaseURL,
+		LockPath:        deps.Cache.LockPath,
+		Timeout:         deps.GitCode.DefaultTimeout,
+		MaxResponseSize: deps.GitCode.MaxResponseSize,
+		MaxRetries:      deps.GitCode.MaxRetries,
+	})
 }
 
 func runCLICompatibility(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps StartupDeps) int {
@@ -394,22 +407,8 @@ func runMCPServe(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr 
 }
 
 func runMCPStdio(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, deps StartupDeps) int {
-	if err := ensureParentDir(deps.Config.CachePath); err != nil {
-		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
-		return 1
-	}
-	store, err := cache.NewSQLiteStore(ctx, deps.Config.CachePath)
-	if err != nil {
-		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
-		return 1
-	}
-	defer store.Close()
-	svc, err := resolveService(store, deps)
-	if err != nil {
-		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
-		return 1
-	}
-	server := mcp.New(stdin, stdout, stderr, svc)
+	server, closeStore := newMCPStdioServer(ctx, stdin, stdout, stderr, deps)
+	defer closeStore()
 	if err := server.Serve(); err != nil {
 		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
 		return 1
@@ -417,23 +416,51 @@ func runMCPStdio(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr 
 	return 0
 }
 
-func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind string) int {
+func newMCPStdioServer(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, deps StartupDeps) (*mcp.Server, func()) {
 	if err := ensureParentDir(deps.Config.CachePath); err != nil {
-		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
-		return 1
+		return mcp.NewMinimal(stdin, stdout, stderr, mcp.StartupDiagnosticFromError(err)), func() {}
 	}
 	store, err := cache.NewSQLiteStore(ctx, deps.Config.CachePath)
 	if err != nil {
-		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
-		return 1
+		return mcp.NewMinimal(stdin, stdout, stderr, mcp.StartupDiagnosticFromError(err)), func() {}
+	}
+	svc, err := resolveService(store, deps)
+	if err != nil {
+		_ = store.Close()
+		return mcp.NewMinimal(stdin, stdout, stderr, mcp.StartupDiagnosticFromError(err)), func() {}
+	}
+	return mcp.New(stdin, stdout, stderr, svc, deps.CredentialResolver), func() { _ = store.Close() }
+}
+
+func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind string) int {
+	if err := ensureParentDir(deps.Config.CachePath); err != nil {
+		transport := mcp.NewHTTPSSETransport(mcp.NewMinimalRPCHandler(mcp.StartupDiagnosticFromError(err)), mcp.ServerConfig{BindAddress: bind})
+		if err := transport.Serve(ctx); err != nil {
+			fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
+			return 1
+		}
+		return 0
+	}
+	store, err := cache.NewSQLiteStore(ctx, deps.Config.CachePath)
+	if err != nil {
+		transport := mcp.NewHTTPSSETransport(mcp.NewMinimalRPCHandler(mcp.StartupDiagnosticFromError(err)), mcp.ServerConfig{BindAddress: bind})
+		if err := transport.Serve(ctx); err != nil {
+			fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
+			return 1
+		}
+		return 0
 	}
 	defer store.Close()
 	svc, err := resolveService(store, deps)
 	if err != nil {
-		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
-		return 1
+		transport := mcp.NewHTTPSSETransport(mcp.NewMinimalRPCHandler(mcp.StartupDiagnosticFromError(err)), mcp.ServerConfig{BindAddress: bind})
+		if err := transport.Serve(ctx); err != nil {
+			fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
+			return 1
+		}
+		return 0
 	}
-	transport := mcp.NewHTTPSSETransport(mcp.NewRPCHandler(svc), mcp.ServerConfig{BindAddress: bind, ReadinessProbe: func(ctx context.Context) mcp.Readiness {
+	transport := mcp.NewHTTPSSETransport(mcp.NewRPCHandlerWithCredentialResolver(svc, deps.CredentialResolver), mcp.ServerConfig{BindAddress: bind, ReadinessProbe: func(ctx context.Context) mcp.Readiness {
 		repos, err := store.ListRepositories(ctx)
 		if err != nil {
 			var lockErr cache.ErrLockContention

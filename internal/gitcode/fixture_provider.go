@@ -151,6 +151,18 @@ func (p *fixtureProvider) ListIssueComments(ctx context.Context, req IssueReques
 	return paginateFixture(ctx, listIssueCommentsEndpoint(req.Owner, req.Repo, req.Number), append([]Comment(nil), p.comments[req.Number]...), PageState{}, p.cfg.Pagination, p.cfg.Scenario)
 }
 
+func (p *fixtureProvider) ListPRs(context.Context, PRListRequest) (Page[PullRequest], error) {
+	return Page[PullRequest]{}, FixtureReadOnlyError("ListPRs")
+}
+
+func (p *fixtureProvider) GetPR(context.Context, PRRequest) (PullRequest, error) {
+	return PullRequest{}, FixtureReadOnlyError("GetPR")
+}
+
+func (p *fixtureProvider) ListPRComments(context.Context, PRRequest) (Page[PRComment], error) {
+	return Page[PRComment]{}, FixtureReadOnlyError("ListPRComments")
+}
+
 func (p *fixtureProvider) ListWikiPages(ctx context.Context, req WikiListRequest) (Page[WikiPage], error) {
 	if err := p.scenarioError("wiki"); err != nil {
 		return Page[WikiPage]{}, err
@@ -197,6 +209,10 @@ func (p *fixtureProvider) UpdateIssue(context.Context, UpdateIssueRequest, Write
 
 func (p *fixtureProvider) CreateIssueComment(context.Context, CreateIssueCommentRequest, WriteOptions) (WriteResult[Comment], error) {
 	return WriteResult[Comment]{}, FixtureReadOnlyError("CreateIssueComment")
+}
+
+func (p *fixtureProvider) CreatePRComment(context.Context, CreatePRCommentRequest, WriteOptions) (WriteResult[PRComment], error) {
+	return WriteResult[PRComment]{}, FixtureReadOnlyError("CreatePRComment")
 }
 
 func (p *fixtureProvider) CreateWikiPage(context.Context, CreateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error) {

@@ -836,6 +836,80 @@ func simulateLockBeforeMutate(ctx context.Context, store *SQLiteStore, lockPath 
 	return mutate()
 }
 
+func TestCacheBusyDiagnosticCodeOnLockContention(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "cache.db")
+	store, err := NewSQLiteStore(ctx, path)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore returned error: %v", err)
+	}
+	defer store.Close()
+	mustAddTestRepo(t, ctx, store, "fixture-a")
+
+	lease, err := store.AcquireWriter(ctx, WriterRequest{Operation: "sync", RepoID: "fixture-a"})
+	if err != nil {
+		t.Fatalf("AcquireWriter returned error: %v", err)
+	}
+	defer store.ReleaseWriter(ctx, lease)
+
+	_, err = store.AcquireWriter(ctx, WriterRequest{Operation: "write", RepoID: "fixture-a"})
+	var contention ErrLockContention
+	if !errors.As(err, &contention) {
+		t.Fatalf("second AcquireWriter error = %T %[1]v, want ErrLockContention", err)
+	}
+	if contention.DiagnosticCode() != "cache_busy" {
+		t.Fatalf("DiagnosticCode() = %q, want cache_busy", contention.DiagnosticCode())
+	}
+}
+
+func TestThreeReadersOneWriterConcurrency(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "cache.db")
+	store, err := NewSQLiteStore(ctx, path)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore returned error: %v", err)
+	}
+	defer store.Close()
+	mustAddTestRepo(t, ctx, store, "fixture-a")
+	mustUpsertGraph(t, ctx, store, SourceGraph{Source: testSource("DOC-R3W1", "doc", "R3W1 Doc")})
+
+	readerOne, err := NewSQLiteStore(ctx, path)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore readerOne returned error: %v", err)
+	}
+	defer readerOne.Close()
+	readerTwo, err := NewSQLiteStore(ctx, path)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore readerTwo returned error: %v", err)
+	}
+	defer readerTwo.Close()
+
+	lease, err := store.AcquireWriter(ctx, WriterRequest{Operation: "sync-index", RepoID: "fixture-a"})
+	if err != nil {
+		t.Fatalf("AcquireWriter returned error: %v", err)
+	}
+	defer store.ReleaseWriter(ctx, lease)
+
+	for i, reader := range []*SQLiteStore{readerOne, readerTwo} {
+		source, err := reader.GetSourceScoped(ctx, "fixture-a", "DOC-R3W1")
+		if err != nil {
+			t.Fatalf("reader %d GetSourceScoped returned error: %v", i+1, err)
+		}
+		if source.RepoID != "fixture-a" || source.ID != "DOC-R3W1" {
+			t.Fatalf("reader %d source = %#v", i+1, source)
+		}
+	}
+
+	_, err = readerOne.AcquireWriter(ctx, WriterRequest{Operation: "sync", RepoID: "fixture-a"})
+	var contention ErrLockContention
+	if !errors.As(err, &contention) {
+		t.Fatalf("second AcquireWriter error = %T %[1]v, want ErrLockContention", err)
+	}
+	if contention.DiagnosticCode() != "cache_busy" {
+		t.Fatalf("DiagnosticCode() = %q, want cache_busy", contention.DiagnosticCode())
+	}
+}
+
 func newTestStore(t *testing.T, ctx context.Context) *SQLiteStore {
 	t.Helper()
 	store, err := NewSQLiteStore(ctx, ":memory:")

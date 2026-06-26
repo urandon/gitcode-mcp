@@ -10,6 +10,7 @@ import (
 
 type ServiceConfig struct {
 	BaseURL         string
+	LockPath        string
 	Timeout         time.Duration
 	MaxResponseSize int64
 	MaxRetries      int
@@ -385,9 +386,11 @@ func (e ResourceError) Error() string {
 func (e ResourceError) Unwrap() error { return e.Err }
 
 type PartialSyncError struct {
-	Errors       []ResourceError `json:"errors"`
-	SuccessCount int             `json:"success_count"`
-	FailureCount int             `json:"failure_count"`
+	Errors         []ResourceError `json:"errors"`
+	SuccessCount   int             `json:"success_count"`
+	FailureCount   int             `json:"failure_count"`
+	Diagnostic     SyncDiagnostic  `json:"diagnostic,omitempty"`
+	TotalRequested int             `json:"total_requested,omitempty"`
 }
 
 func (e PartialSyncError) Error() string {
@@ -680,9 +683,11 @@ type WriteCommandResult struct {
 type BulkSyncScope string
 
 const (
-	BulkSyncScopeIssues BulkSyncScope = "issues"
-	BulkSyncScopeWiki   BulkSyncScope = "wiki"
-	BulkSyncScopeAll    BulkSyncScope = "all"
+	BulkSyncScopeIssues   BulkSyncScope = "issues"
+	BulkSyncScopeWiki     BulkSyncScope = "wiki"
+	BulkSyncScopePulls    BulkSyncScope = "pulls"
+	BulkSyncScopeComments BulkSyncScope = "comments"
+	BulkSyncScopeAll      BulkSyncScope = "all"
 )
 
 type BulkSyncRequest struct {
@@ -693,4 +698,5 @@ type BulkSyncRequest struct {
 	MaxSize        int64         `json:"max_size,omitempty"`
 	Page           int           `json:"page,omitempty"`
 	PerPage        int           `json:"per_page,omitempty"`
+	Bounds         *SyncBounds   `json:"-"`
 }

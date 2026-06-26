@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"gitcode-mcp/internal/auth"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/gitcode"
@@ -30,6 +31,14 @@ type serviceInterface interface {
 	SyncStatus(context.Context, service.ListSourcesRequest) (service.SyncStatusSummaryResult, error)
 	ExportSnapshot(context.Context, service.ExportSnapshotRequest) (service.ExportSnapshotResult, error)
 	DiffSnapshot(context.Context, service.DiffSnapshotRequest) (service.DiffSnapshotResult, error)
+	RepositoryStatus(context.Context, service.RepositoryStatusRequest) (service.RepositoryStatus, error)
+	SyncToCache(context.Context, service.SyncRequest) (service.SyncResult, error)
+	BulkSyncIssues(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	BulkSyncWiki(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	BulkSyncPullRequests(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	BulkSyncPRComments(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	BulkSyncAll(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	Index(context.Context, service.OperationRequest) (service.OperationResult, error)
 	ListChunks(context.Context, service.ChunkQuery) (service.ChunkQueryResult, error)
 	SearchChunks(context.Context, service.ChunkSearchQuery) (service.ChunkQueryResult, error)
 	GetChunkSnippet(context.Context, service.SnippetQuery) (service.ChunkQueryResult, error)
@@ -40,23 +49,41 @@ type serviceInterface interface {
 }
 
 type RPCHandler struct {
-	svc serviceInterface
+	svc                serviceInterface
+	startupDiagnostic  StartupDiagnostic
+	minimal            bool
+	credentialResolver *auth.CredentialResolver
 }
 
 type Server struct {
-	reader  io.Reader
-	writer  io.Writer
-	stderr  io.Writer
-	handler *RPCHandler
-	svc     serviceInterface
+	reader             io.Reader
+	writer             io.Writer
+	stderr             io.Writer
+	handler            *RPCHandler
+	svc                serviceInterface
+	startupDiagnostic  StartupDiagnostic
+	minimal            bool
+	credentialResolver *auth.CredentialResolver
 }
 
 func NewRPCHandler(svc serviceInterface) *RPCHandler {
 	return &RPCHandler{svc: svc}
 }
 
-func New(r io.Reader, w io.Writer, stderr io.Writer, svc serviceInterface) *Server {
-	return &Server{reader: r, writer: w, stderr: stderr, handler: NewRPCHandler(svc), svc: svc}
+func NewRPCHandlerWithCredentialResolver(svc serviceInterface, credResolver *auth.CredentialResolver) *RPCHandler {
+	return &RPCHandler{svc: svc, credentialResolver: credResolver}
+}
+
+func NewMinimalRPCHandler(diagnostic StartupDiagnostic) *RPCHandler {
+	return &RPCHandler{startupDiagnostic: diagnostic, minimal: true}
+}
+
+func New(r io.Reader, w io.Writer, stderr io.Writer, svc serviceInterface, credResolver *auth.CredentialResolver) *Server {
+	return &Server{reader: r, writer: w, stderr: stderr, handler: NewRPCHandlerWithCredentialResolver(svc, credResolver), svc: svc, credentialResolver: credResolver}
+}
+
+func NewMinimal(r io.Reader, w io.Writer, stderr io.Writer, diagnostic StartupDiagnostic) *Server {
+	return &Server{reader: r, writer: w, stderr: stderr, handler: NewMinimalRPCHandler(diagnostic), startupDiagnostic: diagnostic, minimal: true}
 }
 
 func (h *RPCHandler) Handle(ctx context.Context, req request) (*response, bool) {
@@ -64,7 +91,7 @@ func (h *RPCHandler) Handle(ctx context.Context, req request) (*response, bool) 
 		return &response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32600, Message: "Invalid request"}}, true
 	}
 	var buf bytes.Buffer
-	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc}
+	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver}
 	server.handle(ctx, req, req.ID == nil)
 	line := bytes.TrimSpace(buf.Bytes())
 	if len(line) == 0 {
@@ -141,7 +168,8 @@ type initCapability struct {
 }
 
 type toolCapability struct {
-	ListChanged bool `json:"listChanged"`
+	ListChanged       bool               `json:"listChanged"`
+	StartupDiagnostic *StartupDiagnostic `json:"startup_diagnostic,omitempty"`
 }
 
 type serverInfo struct {
@@ -150,7 +178,8 @@ type serverInfo struct {
 }
 
 type toolsListResult struct {
-	Tools []toolDefinition `json:"tools"`
+	Tools             []toolDefinition   `json:"tools"`
+	StartupDiagnostic *StartupDiagnostic `json:"startup_diagnostic,omitempty"`
 }
 
 type toolCallParams struct {
@@ -168,7 +197,7 @@ type toolContentItem struct {
 	Text string `json:"text"`
 }
 
-var sourceKindEnums = []string{"issue", "wiki"}
+var sourceKindEnums = []string{"issue", "wiki", "pull_request", "pr_comment"}
 
 func intPtr(v int) *int             { return &v }
 func float64Ptr(v float64) *float64 { return &v }
@@ -358,6 +387,31 @@ var toolDefs = []toolDefinition{
 			Required: []string{"repo_id", "base_id", "head_id"},
 		},
 	},
+	{
+		Name:        "repo_status",
+		Description: "Report configured repository binding and cache readiness state.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id. Omit for nothing-bound status."}}},
+	},
+	{
+		Name:        "sync_live",
+		Description: "Synchronize selected live collection records into the cache.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "issues": {Type: "boolean", Description: "Sync issues."}, "wiki": {Type: "boolean", Description: "Sync wiki pages."}, "comments": {Type: "boolean", Description: "Sync supported comments."}, "pulls": {Type: "boolean", Description: "Sync pull requests."}, "remote_alias": {Type: "string", Description: "Specific remote alias for current sync surface."}, "idempotency_key": {Type: "string", Description: "Idempotency key."}, "max_pages": {Type: "integer", Description: "Maximum pages to sync.", Minimum: float64Ptr(1)}, "max_records": {Type: "integer", Description: "Maximum records to sync.", Minimum: float64Ptr(1)}, "per_page": {Type: "integer", Description: "Records per page.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 25.0}}, Required: []string{"repo_id"}},
+	},
+	{
+		Name:        "index_repo",
+		Description: "Build or refresh the local index for a configured repository.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "mode": {Type: "string", Description: "Index mode.", Default: "full"}, "strict": {Type: "boolean", Description: "Use strict indexing behavior."}}, Required: []string{"repo_id"}},
+	},
+	{
+		Name:        "auth_status",
+		Description: "Report redacted credential presence and source metadata.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{}},
+	},
+	{
+		Name:        "doctor",
+		Description: "Report structured MCP server health diagnostics.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id."}}},
+	},
 }
 
 func (s *Server) Serve() error {
@@ -431,9 +485,14 @@ func (s *Server) handle(ctx context.Context, req request, isNotification bool) {
 }
 
 func (s *Server) init(req request) {
+	capability := toolCapability{ListChanged: false}
+	if s.startupDiagnostic.present() {
+		diagnostic := s.startupDiagnostic
+		capability.StartupDiagnostic = &diagnostic
+	}
 	result := initResult{
 		ProtocolVersion: protocolVersion,
-		Capabilities:    initCapability{Tools: toolCapability{ListChanged: false}},
+		Capabilities:    initCapability{Tools: capability},
 		ServerInfo:      serverInfo{Name: "gitcode-mcp", Version: serverVersion},
 	}
 	b, _ := json.Marshal(result)
@@ -442,24 +501,21 @@ func (s *Server) init(req request) {
 
 func (s *Server) toolsList(req request) {
 	registry := s.toolRegistry()
-	tools := make([]toolDefinition, 0, len(toolDefs))
-	for _, def := range toolDefs {
-		tool, ok := registry[def.Name]
+	tools := make([]toolDefinition, 0, len(registry))
+	for _, name := range toolListOrder {
+		tool, ok := registry[name]
 		if !ok {
 			continue
 		}
 		tools = append(tools, tool.definition)
 	}
-	b, _ := json.Marshal(toolsListResult{Tools: tools})
+	result := toolsListResult{Tools: tools}
+	if s.startupDiagnostic.present() {
+		diagnostic := s.startupDiagnostic
+		result.StartupDiagnostic = &diagnostic
+	}
+	b, _ := json.Marshal(result)
 	s.writeResponse(req.ID, b)
-}
-
-var blockedWriteTools = map[string]bool{
-	"create-issue": true,
-	"update-issue": true,
-	"add-label":    true,
-	"create-page":  true,
-	"update-page":  true,
 }
 
 func (s *Server) toolsCall(ctx context.Context, req request) {
@@ -477,8 +533,8 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 		return
 	}
 
-	if blockedWriteTools[params.Name] {
-		s.writeError(req.ID, -32601, "Method not found", &errorData{Code: "unsupported_capability", Message: fmt.Sprintf("%q is not available: use CLI mutation commands for writes", params.Name)})
+	if isUnsupportedCapabilityTool(params.Name) {
+		s.unsupportedCapabilityHandler(ctx, req.ID, params.Name)
 		return
 	}
 
@@ -495,24 +551,69 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 	tool.handler(ctx, req.ID, args)
 }
 
-func (s *Server) toolRegistry() toolRegistry {
-	return toolRegistry{
-		"search_sources":     {definition: toolDefs[0], handler: s.callSearchSources},
-		"get_source":         {definition: toolDefs[1], handler: s.callGetSource},
-		"list_sources":       {definition: toolDefs[2], handler: s.callListSources},
-		"list_chunks":        {definition: toolDefs[3], handler: s.callListChunks},
-		"search_chunks":      {definition: toolDefs[4], handler: s.callSearchChunks},
-		"get_snippet":        {definition: toolDefs[5], handler: s.callGetSnippet},
-		"stale_index_report": {definition: toolDefs[6], handler: s.callStaleIndexReport},
-		"recent_changes":     {definition: toolDefs[7], handler: s.callRecentChanges},
-		"link_check":         {definition: toolDefs[8], handler: s.callLinkCheck},
-		"cache_status":       {definition: toolDefs[9], handler: s.callCacheStatus},
-		"source_backlinks":   {definition: toolDefs[10], handler: s.callSourceBacklinks},
-		"resolve_id":         {definition: toolDefs[11], handler: s.callResolveID},
-		"sync_status":        {definition: toolDefs[12], handler: s.callSyncStatus},
-		"export_snapshot":    {definition: toolDefs[13], handler: s.callExportSnapshot},
-		"diff_snapshot":      {definition: toolDefs[14], handler: s.callDiffSnapshot},
+var toolListOrder = []string{
+	"search_sources",
+	"get_source",
+	"list_sources",
+	"list_chunks",
+	"search_chunks",
+	"get_snippet",
+	"stale_index_report",
+	"recent_changes",
+	"link_check",
+	"cache_status",
+	"source_backlinks",
+	"resolve_id",
+	"sync_status",
+	"export_snapshot",
+	"diff_snapshot",
+	"repo_status",
+	"sync_live",
+	"index_repo",
+	"auth_status",
+	"doctor",
+}
+
+func toolDefinitionByName(name string) toolDefinition {
+	for _, def := range toolDefs {
+		if def.Name == name {
+			return def
+		}
 	}
+	return toolDefinition{Name: name, InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{}}}
+}
+
+func registerTool(registry toolRegistry, name string, handler toolHandler) {
+	registry[name] = registeredTool{definition: toolDefinitionByName(name), handler: handler}
+}
+
+func (s *Server) toolRegistry() toolRegistry {
+	registry := toolRegistry{}
+	if s.minimal {
+		registerTool(registry, "doctor", s.callDoctor)
+		return registry
+	}
+	registerTool(registry, "search_sources", s.callSearchSources)
+	registerTool(registry, "get_source", s.callGetSource)
+	registerTool(registry, "list_sources", s.callListSources)
+	registerTool(registry, "list_chunks", s.callListChunks)
+	registerTool(registry, "search_chunks", s.callSearchChunks)
+	registerTool(registry, "get_snippet", s.callGetSnippet)
+	registerTool(registry, "stale_index_report", s.callStaleIndexReport)
+	registerTool(registry, "recent_changes", s.callRecentChanges)
+	registerTool(registry, "link_check", s.callLinkCheck)
+	registerTool(registry, "cache_status", s.callCacheStatus)
+	registerTool(registry, "source_backlinks", s.callSourceBacklinks)
+	registerTool(registry, "resolve_id", s.callResolveID)
+	registerTool(registry, "sync_status", s.callSyncStatus)
+	registerTool(registry, "export_snapshot", s.callExportSnapshot)
+	registerTool(registry, "diff_snapshot", s.callDiffSnapshot)
+	registerTool(registry, "repo_status", s.callRepoStatus)
+	registerTool(registry, "sync_live", s.callSyncLive)
+	registerTool(registry, "index_repo", s.callIndexRepo)
+	registerTool(registry, "auth_status", s.callAuthStatus)
+	registerTool(registry, "doctor", s.callDoctor)
+	return registry
 }
 
 type searchSourcesArgs struct {
@@ -1252,7 +1353,7 @@ func mcpDiagnostic(err error) (diagnostics.Diagnostic, bool) {
 		return diagnostics.Classify(err, ctx), true
 	}
 	if errors.As(err, &writeErr) {
-		ctx.HTTPAttempted = writeErr.Code == "write_unauthorized" || writeErr.Code == "write_network_unavailable" || writeErr.Code == "write_provider_error" || writeErr.Code == "write_conflict"
+		ctx.HTTPAttempted = writeErr.Code == "write_unauthorized" || writeErr.Code == "write_network_unavailable" || writeErr.Code == "write_provider_error" || writeErr.Code == "write_conflict" || writeErr.Code == "schema_decode"
 		ctx.SchemaDecodeFailure = writeErr.Code == "schema_decode" || writeErr.PayloadSource == "partial_response"
 		ctx.FailureSource = writeErr.PayloadSource
 		ctx.LocalPayloadTooLarge = writeErr.PayloadSource == "local_body_limit"
@@ -1382,7 +1483,7 @@ func cacheLockErrorCode(err cache.ErrLockContention) string {
 	case "sync", "index", "write", "sync-index":
 		return "cache_owned"
 	default:
-		return "busy"
+		return "cache_busy"
 	}
 }
 

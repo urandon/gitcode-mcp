@@ -43,7 +43,7 @@ func validSupportStatus(status SupportStatus) bool {
 type EvidenceClass string
 
 const (
-	EvidenceClassOpenAPI  EvidenceClass = "OpenAPI"
+	EvidenceClassOpenAPI   EvidenceClass = "OpenAPI"
 	EvidenceClassLiveProbe EvidenceClass = "live_probe"
 	EvidenceClassDeferred  EvidenceClass = "deferred"
 )
@@ -67,10 +67,10 @@ type UnsupportedDiagnostic struct {
 }
 
 type SurfaceSpec struct {
-	Area      ProductArea
-	Status    SupportStatus
-	Route     RouteFamily
-	Evidence  EvidenceClass
+	Area       ProductArea
+	Status     SupportStatus
+	Route      RouteFamily
+	Evidence   EvidenceClass
 	Diagnostic *UnsupportedDiagnostic
 }
 
@@ -106,20 +106,15 @@ func DefaultRouteSchemaMatrix() RouteSchemaMatrix {
 				Evidence: EvidenceClassLiveProbe,
 			},
 			ProductAreaPullRequests: {
-				Area:    ProductAreaPullRequests,
-				Status:  SupportStatusDeferred,
-				Route:   RouteFamilyAPIV5,
-				Evidence: EvidenceClassDeferred,
-				Diagnostic: &UnsupportedDiagnostic{
-					Code:          "unsupported_capability",
-					CapabilityKey: "pull_requests_read",
-					Message:       "Pull Request reads are deferred for iteration 5 pending live shape validation",
-				},
+				Area:     ProductAreaPullRequests,
+				Status:   SupportStatusSupported,
+				Route:    RouteFamilyAPIV5,
+				Evidence: EvidenceClassOpenAPI,
 			},
 			ProductAreaComments: {
-				Area:    ProductAreaComments,
-				Status:  SupportStatusDeferred,
-				Route:   RouteFamilyAPIV5,
+				Area:     ProductAreaComments,
+				Status:   SupportStatusDeferred,
+				Route:    RouteFamilyAPIV5,
 				Evidence: EvidenceClassDeferred,
 				Diagnostic: &UnsupportedDiagnostic{
 					Code:          "unsupported_capability",

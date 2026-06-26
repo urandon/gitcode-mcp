@@ -1,0 +1,32 @@
+{
+  "covered_outcome_ids": [
+    "outcome-2"
+  ],
+  "covered_decommission_ids": [
+    "decommission-2-2",
+    "decommission-7"
+  ],
+  "product_surfaces": [
+    "internal/cache/schema.go: currentSchemaVersion constant (line 10)",
+    "internal/cache/schema.go: CheckVersionCompatibility function (lines 41-119)",
+    "internal/cache/schema.go: SchemaVersionError type and ErrSchemaVersionIncompatible sentinel (lines 21-39)",
+    "internal/cache/schema.go: runMigrations guard against version > currentSchemaVersion (line 148)",
+    "internal/cache/sqlite.go: newSQLiteStore schema compatibility gate (lines 86-94)",
+    "internal/cache/sqlite.go: NewSQLiteReadOnlyStore schema compatibility gate (lines 131-139)",
+    "internal/mcp/startup_diagnostic.go: StartupDiagnosticFromError maps SchemaVersionError to schema_incompatible (line 25)",
+    "internal/doctor/doctor.go: CacheSection populated from SchemaVersionError for doctor report",
+    "cmd/gitcode-mcp/main.go: MCP server startup diagnostic injection from SchemaVersionError"
+  ],
+  "evidence_type": "runtime/compiler test",
+  "freshness": "current binary build; run.sh executes targeted Go runtime tests (internal/cache, internal/mcp, cmd/gitcode-mcp), go test ./..., and git diff --check offline",
+  "mocks_used": false,
+  "production_files_modified": [
+    "internal/cache/schema.go",
+    "internal/cache/sqlite.go",
+    "internal/cache/schema_test.go",
+    "internal/cache/migrate_test.go",
+    "internal/mcp/startup_diagnostic.go",
+    "internal/mcp/mcp_test.go",
+    "cmd/gitcode-mcp/main_test.go"
+  ]
+}

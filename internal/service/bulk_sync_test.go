@@ -36,12 +36,27 @@ func TestBulkSyncIssuesSyncsListedIssuesAndZeroDeltaOnResync(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := NewWithClient(store, client)
-	first, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "bulk-issues", IdempotencyKey: "bulk-issues-first", PerPage: 100})
+	first, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "bulk-issues", PerPage: 100})
 	if err != nil {
 		t.Fatalf("BulkSyncIssues first returned error: %v", err)
 	}
 	if first.SuccessCount != 2 || first.FailureCount != 0 {
 		t.Fatalf("first counts = success %d failure %d, want 2/0", first.SuccessCount, first.FailureCount)
+	}
+	seenKeys := map[string]bool{}
+	seenEvents := map[string]bool{}
+	for i, result := range first.Results {
+		if result.IdempotencyKey == "" || result.SyncEventID == "" {
+			t.Fatalf("first result %d missing idempotency/event: %+v", i, result)
+		}
+		if seenKeys[result.IdempotencyKey] {
+			t.Fatalf("first result %d duplicate idempotency key %q", i, result.IdempotencyKey)
+		}
+		if seenEvents[result.SyncEventID] {
+			t.Fatalf("first result %d duplicate sync event id %q", i, result.SyncEventID)
+		}
+		seenKeys[result.IdempotencyKey] = true
+		seenEvents[result.SyncEventID] = true
 	}
 	if _, err := store.GetSourceScoped(ctx, "bulk-issues", "ISSUE-1"); err != nil {
 		t.Fatalf("ISSUE-1 missing: %v", err)
@@ -70,6 +85,43 @@ func TestBulkSyncIssuesSyncsListedIssuesAndZeroDeltaOnResync(t *testing.T) {
 	}
 	if len(sources) != 2 {
 		t.Fatalf("issue source count = %d, want 2", len(sources))
+	}
+}
+
+func TestBulkSyncIssuesIgnoresDeferredIssueCommentsRead(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 26, 16, 30, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{
+			{Items: []gitcode.IssueSummary{{ID: "4119847", Number: 16, Title: "Live issue", Body: "live body", State: "open", CreatedAt: base, UpdatedAt: base}}, Page: 1, PerPage: 1},
+		},
+		listIssueCommentsErr: gitcode.ErrUnsupportedCapability{
+			CapabilityKey: "comments_read",
+			Message:       "comments are deferred",
+		},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "bulk-issues-comments-deferred", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	result, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "bulk-issues-comments-deferred", PerPage: 1})
+	if err != nil {
+		t.Fatalf("BulkSyncIssues returned error: %v", err)
+	}
+	if result.SuccessCount != 1 || result.FailureCount != 0 {
+		t.Fatalf("counts = success %d failure %d, want 1/0", result.SuccessCount, result.FailureCount)
+	}
+	source, err := store.GetSourceScoped(ctx, "bulk-issues-comments-deferred", "ISSUE-16")
+	if err != nil {
+		t.Fatalf("ISSUE-16 missing: %v", err)
+	}
+	if source.Title != "Live issue" || source.Body != "live body" {
+		t.Fatalf("source=%+v", source)
 	}
 }
 
@@ -146,6 +198,57 @@ func TestBulkSyncAllAggregatesIssuesAndWiki(t *testing.T) {
 	}
 	if _, err := store.GetSourceScoped(ctx, "bulk-all", "WIKI-HOME"); err != nil {
 		t.Fatalf("WIKI-HOME missing: %v", err)
+	}
+}
+
+func TestBulkSyncPullRequestsAndCommentsCreatesSearchableSources(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		listPRPages: []gitcode.Page[gitcode.PullRequest]{
+			{Items: []gitcode.PullRequest{{ID: "9001", Number: 7, Title: "Add live PR sync", Body: "PR body with search needle", State: "open", Labels: []string{"enhancement"}, Base: "main", Head: "topic", CreatedAt: base, UpdatedAt: base}}, Page: 1, PerPage: 100},
+		},
+		prCommentsByPR: map[int][]gitcode.PRComment{
+			7: {{ID: "301", Body: "review comment needle", Author: "alice", DiscussionID: "D7", PRNumber: 7, CreatedAt: base, UpdatedAt: base}},
+		},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "bulk-pr", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	prResult, err := svc.BulkSyncPullRequests(ctx, BulkSyncRequest{RepoID: "bulk-pr", IdempotencyKey: "bulk-pr", PerPage: 100})
+	if err != nil {
+		t.Fatalf("BulkSyncPullRequests returned error: %v", err)
+	}
+	if prResult.SuccessCount != 1 || prResult.Results[0].Record.ID != "PR-7" || prResult.Results[0].Record.Kind != "pull_request" {
+		t.Fatalf("PR result=%+v", prResult)
+	}
+	commentResult, err := svc.BulkSyncPRComments(ctx, BulkSyncRequest{RepoID: "bulk-pr", IdempotencyKey: "bulk-pr-comments"})
+	if err != nil {
+		t.Fatalf("BulkSyncPRComments returned error: %v", err)
+	}
+	if commentResult.SuccessCount != 1 || commentResult.Results[0].Record.ID != "PRCOMMENT-7-301" || commentResult.Results[0].Record.Kind != "pr_comment" {
+		t.Fatalf("comment result=%+v", commentResult)
+	}
+	pr, err := store.GetSourceScoped(ctx, "bulk-pr", "PR-7")
+	if err != nil || pr.Kind != "pull_request" {
+		t.Fatalf("PR source=%+v err=%v", pr, err)
+	}
+	comment, err := store.GetSourceScoped(ctx, "bulk-pr", "PRCOMMENT-7-301")
+	if err != nil || comment.Kind != "pr_comment" {
+		t.Fatalf("PR comment source=%+v err=%v", comment, err)
+	}
+	search, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "bulk-pr", Query: "needle", Kind: "pr_comment"})
+	if err != nil {
+		t.Fatalf("SearchSources returned error: %v", err)
+	}
+	if len(search.Results) != 1 || search.Results[0].ID != "PRCOMMENT-7-301" {
+		t.Fatalf("search results=%+v", search.Results)
 	}
 }
 

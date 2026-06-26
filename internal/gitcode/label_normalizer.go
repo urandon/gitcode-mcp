@@ -15,12 +15,12 @@ func EncodeIssueLabels(labels []string) json.RawMessage {
 		}
 		cleaned = append(cleaned, trimmed)
 	}
-	if cleaned == nil {
-		cleaned = []string{}
+	if len(cleaned) == 0 {
+		return nil
 	}
-	data, err := json.Marshal(cleaned)
+	data, err := json.Marshal(strings.Join(cleaned, ","))
 	if err != nil {
-		return json.RawMessage(`[]`)
+		return nil
 	}
 	return json.RawMessage(data)
 }

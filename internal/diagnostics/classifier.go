@@ -23,6 +23,7 @@ const (
 	CodeFixtureReadOnly         Code = "fixture_read_only"
 	CodeFixtureFallbackDetected Code = "fixture_fallback_detected"
 	CodeUnsupportedCapability   Code = "unsupported_capability"
+	CodeCacheBusy               Code = "cache_busy"
 	CodeSchemaDecode            Code = "schema_decode"
 	CodeAPIFailure              Code = "api_validation"
 )
@@ -157,6 +158,9 @@ func classifyCode(err error, ctx CommandContext) Code {
 	if hasCode(err, "unsupported_capability") {
 		return CodeUnsupportedCapability
 	}
+	if hasCode(err, "cache_busy") {
+		return CodeCacheBusy
+	}
 	return CodeConfigurationError
 }
 
@@ -183,6 +187,8 @@ func codeFromError(err error) Code {
 			return CodeFixtureFallbackDetected
 		case "unsupported_capability":
 			return CodeUnsupportedCapability
+		case "cache_busy":
+			return CodeCacheBusy
 		case "schema_decode", "partial_response":
 			return CodeSchemaDecode
 		case "auth_expired", "forbidden", "write_unauthorized", "not_found", "remote_conflict", "remote_collision", "remote_not_found", "rate_limited":
@@ -232,7 +238,7 @@ func isConfigurationInputBug(err error) bool {
 
 func httpAttemptedFor(code Code, ctx CommandContext) bool {
 	switch code {
-	case CodeLiveAuthFailure, CodeLiveTransportFailure, CodeLiveAPIFailure, CodeAPIFailure:
+	case CodeLiveAuthFailure, CodeLiveTransportFailure, CodeLiveAPIFailure, CodeAPIFailure, CodeSchemaDecode:
 		return ctx.HTTPAttempted
 	case CodeConfigCredential:
 		return false
@@ -242,7 +248,7 @@ func httpAttemptedFor(code Code, ctx CommandContext) bool {
 }
 
 func retryableFor(code Code) bool {
-	return code == CodeLiveTransportFailure
+	return code == CodeLiveTransportFailure || code == CodeCacheBusy
 }
 
 func exitClassFor(code Code) string {
@@ -263,6 +269,8 @@ func exitClassFor(code Code) string {
 		return "capability"
 	case CodeSchemaDecode:
 		return "schema"
+	case CodeCacheBusy:
+		return "cache"
 	default:
 		return "configuration"
 	}
@@ -297,6 +305,8 @@ func messageFor(code Code, err error) string {
 		base += ": requested capability is not supported for this provider"
 	case CodeSchemaDecode:
 		base += ": response schema decode failure"
+	case CodeCacheBusy:
+		base += ": cache is busy, retry later"
 	}
 	if err != nil {
 		return base + ": " + err.Error()

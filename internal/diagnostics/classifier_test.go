@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"gitcode-mcp/internal/cache"
 )
 
 type codedError struct {
@@ -30,11 +32,11 @@ func TestClassifierLivePrecedenceAndHTTPInvariants(t *testing.T) {
 		{name: "SCN-DIAG-PRECEDENCE-03 invalid base after credential present", err: codedError{code: "invalid_api_base_url", msg: "bad"}, ctx: CommandContext{ProviderMode: "live-http", InvalidSelectedAPIBaseURL: true}, want: CodeConfigCredential, exitClass: "configuration"},
 		{name: "SCN-DIAG-PRECEDENCE-04 remote 401 attempted is api validation", err: codedError{code: "auth_expired", msg: "auth"}, ctx: CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusUnauthorized, HTTPAttempted: true}, want: CodeAPIFailure, http: true, exitClass: "provider"},
 		{name: "SCN-DIAG-PRECEDENCE-05 remote 400 is api validation", err: codedError{code: "api_validation", msg: "bad request"}, ctx: CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusBadRequest, HTTPAttempted: true}, want: CodeAPIFailure, http: true, exitClass: "provider"},
-		{name: "SCN-DIAG-PRECEDENCE-06 malformed 200 json is schema decode", err: codedError{code: "schema_decode", msg: "malformed"}, ctx: CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusOK, HTTPAttempted: true, MalformedSuccess: true}, want: CodeSchemaDecode, exitClass: "schema"},
-		{name: "SCN-DIAG-PRECEDENCE-07 schema mismatch is schema decode", err: codedError{code: "schema_decode", msg: "shape"}, ctx: CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusOK, HTTPAttempted: true, SchemaDecodeFailure: true}, want: CodeSchemaDecode, exitClass: "schema"},
-		{name: "SCN-DIAG-PRECEDENCE-08 local body limit is schema decode", err: codedError{code: "payload_too_large", msg: "large"}, ctx: CommandContext{ProviderMode: "live-http", HTTPAttempted: true, LocalPayloadTooLarge: true, FailureSource: "local_body_limit"}, want: CodeSchemaDecode, exitClass: "schema"},
+		{name: "SCN-DIAG-PRECEDENCE-06 malformed 200 json is schema decode", err: codedError{code: "schema_decode", msg: "malformed"}, ctx: CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusOK, HTTPAttempted: true, MalformedSuccess: true}, want: CodeSchemaDecode, http: true, exitClass: "schema"},
+		{name: "SCN-DIAG-PRECEDENCE-07 schema mismatch is schema decode", err: codedError{code: "schema_decode", msg: "shape"}, ctx: CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusOK, HTTPAttempted: true, SchemaDecodeFailure: true}, want: CodeSchemaDecode, http: true, exitClass: "schema"},
+		{name: "SCN-DIAG-PRECEDENCE-08 local body limit is schema decode", err: codedError{code: "payload_too_large", msg: "large"}, ctx: CommandContext{ProviderMode: "live-http", HTTPAttempted: true, LocalPayloadTooLarge: true, FailureSource: "local_body_limit"}, want: CodeSchemaDecode, http: true, exitClass: "schema"},
 		{name: "SCN-DIAG-PRECEDENCE-09 remote 413 is api validation", err: codedError{code: "payload_too_large", msg: "large"}, ctx: CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusRequestEntityTooLarge, HTTPAttempted: true, FailureSource: "remote_status"}, want: CodeAPIFailure, http: true, exitClass: "provider"},
-		{name: "SCN-DIAG-PRECEDENCE-10 partial response is schema decode", err: codedError{code: "partial_response", msg: "partial"}, ctx: CommandContext{ProviderMode: "live-http", HTTPAttempted: true, FailureSource: "partial_response"}, want: CodeSchemaDecode, exitClass: "schema"},
+		{name: "SCN-DIAG-PRECEDENCE-10 partial response is schema decode", err: codedError{code: "partial_response", msg: "partial"}, ctx: CommandContext{ProviderMode: "live-http", HTTPAttempted: true, FailureSource: "partial_response"}, want: CodeSchemaDecode, http: true, exitClass: "schema"},
 		{name: "SCN-DIAG-PRECEDENCE-11 timeout is transport", err: codedError{code: "network_unavailable", msg: "timeout"}, ctx: CommandContext{ProviderMode: "live-http", HTTPAttempted: true, TransportFailure: true}, want: CodeLiveTransportFailure, http: true, retryable: true, exitClass: "transport"},
 		{name: "SCN-DIAG-PRECEDENCE-12 http 500 is transport", err: codedError{code: "network_unavailable", msg: "server error"}, ctx: CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusInternalServerError, HTTPAttempted: true}, want: CodeLiveTransportFailure, http: true, retryable: true, exitClass: "transport"},
 		{name: "SCN-DIAG-PRECEDENCE-13 401 without attempted is config credential", err: codedError{code: "auth_expired", msg: "auth"}, ctx: CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusUnauthorized}, want: CodeConfigCredential, exitClass: "configuration"},
@@ -160,4 +162,69 @@ func TestClassifierUnsupportedCapability(t *testing.T) {
 	if !strings.Contains(d.Message, "unsupported_capability") {
 		t.Fatalf("expected message to contain unsupported_capability: %s", d.Message)
 	}
+}
+
+func TestClassifierCacheBusy(t *testing.T) {
+	t.Run("live-http-mode", func(t *testing.T) {
+		err := codedError{code: "cache_busy", msg: "cache: lock contention"}
+		d := Classify(err, CommandContext{ProviderMode: "live-http"})
+		if d.Code != CodeCacheBusy {
+			t.Fatalf("expected CodeCacheBusy, got %s", d.Code)
+		}
+		if d.ExitClass != "cache" {
+			t.Fatalf("expected exitClass cache, got %s", d.ExitClass)
+		}
+		if d.HTTPAttempted {
+			t.Fatal("expected HTTPAttempted false")
+		}
+		if !d.Retryable {
+			t.Fatal("expected Retryable true")
+		}
+		if !strings.Contains(d.Message, "cache_busy") {
+			t.Fatalf("expected message to contain cache_busy: %s", d.Message)
+		}
+	})
+
+	t.Run("non-live-mode-code-from-error", func(t *testing.T) {
+		err := codedError{code: "cache_busy", msg: "cache: lock contention"}
+		d := Classify(err, CommandContext{ProviderMode: "offline-fixture"})
+		if d.Code != CodeCacheBusy {
+			t.Fatalf("expected CodeCacheBusy, got %s", d.Code)
+		}
+		if d.ExitClass != "cache" {
+			t.Fatalf("expected exitClass cache, got %s", d.ExitClass)
+		}
+		if !d.Retryable {
+			t.Fatal("expected Retryable true")
+		}
+	})
+
+	t.Run("live-http-no-false-classification-as-configuration-error", func(t *testing.T) {
+		err := codedError{code: "cache_busy", msg: "cache: lock contention"}
+		d := Classify(err, CommandContext{ProviderMode: "live-http"})
+		if d.Code == CodeConfigurationError {
+			t.Fatal("cache_busy must not classify as CodeConfigurationError")
+		}
+	})
+
+	t.Run("ErrLockContention-has-diagnostic-code", func(t *testing.T) {
+		err := cache.ErrLockContention{Path: "test.lock", Operation: "write", RepoID: "fixture-a"}
+		if err.DiagnosticCode() != "cache_busy" {
+			t.Fatalf("DiagnosticCode() = %q, want cache_busy", err.DiagnosticCode())
+		}
+	})
+
+	t.Run("ErrLockContention-classifies-as-cache-busy", func(t *testing.T) {
+		err := cache.ErrLockContention{Path: "test.lock", Operation: "write", RepoID: "fixture-a"}
+		d := Classify(err, CommandContext{ProviderMode: "live-http"})
+		if d.Code != CodeCacheBusy {
+			t.Fatalf("expected CodeCacheBusy, got %s", d.Code)
+		}
+		if !d.Retryable {
+			t.Fatal("expected Retryable true")
+		}
+		if d.ExitClass != "cache" {
+			t.Fatalf("expected exitClass cache, got %s", d.ExitClass)
+		}
+	})
 }
