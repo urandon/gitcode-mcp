@@ -164,7 +164,7 @@ func (c *HTTPClient) CreateIssue(ctx context.Context, req CreateIssueRequest, op
 		return WriteResult[Issue]{}, err
 	}
 	target := req.Owner + "/" + req.Repo
-	return writeConfirmedJSON[Issue](ctx, c, http.MethodPost, createIssueEndpoint(req.Owner, req.Repo), "CreateIssue", target, req, opts, func(result WriteResult[Issue]) (WriteResult[Issue], error) {
+	return writeConfirmedJSON[Issue](ctx, c, http.MethodPost, createIssueEndpoint(req.Owner, req.Repo), "CreateIssue", target, createIssuePayload(req), opts, func(result WriteResult[Issue]) (WriteResult[Issue], error) {
 		issue := result.Record
 		if strings.TrimSpace(issue.ID) == "" || issue.Number <= 0 {
 			return WriteResult[Issue]{}, ErrValidationFailed{Field: "response", Message: "issue create confirmation requires id and number"}
@@ -180,7 +180,7 @@ func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, op
 		return WriteResult[Issue]{}, err
 	}
 	target := req.Owner + "/" + req.Repo + "/" + strconv.Itoa(req.Number)
-	return writeConfirmedJSON[Issue](ctx, c, http.MethodPatch, updateIssueEndpoint(req.Owner, req.Repo, req.Number), "UpdateIssue", target, req, opts, func(result WriteResult[Issue]) (WriteResult[Issue], error) {
+	return writeConfirmedJSON[Issue](ctx, c, http.MethodPatch, updateIssueEndpoint(req.Owner, req.Repo, req.Number), "UpdateIssue", target, updateIssuePayload(req), opts, func(result WriteResult[Issue]) (WriteResult[Issue], error) {
 		issue := result.Record
 		if strings.TrimSpace(issue.ID) == "" || issue.Number != req.Number {
 			return WriteResult[Issue]{}, ErrValidationFailed{Field: "response", Message: "issue update confirmation requires id and matching number"}
@@ -575,6 +575,33 @@ func writeJSON[T any](ctx context.Context, c *HTTPClient, method, endpoint, oper
 	return writeConfirmedJSON[T](ctx, c, method, endpoint, operation, target, payload, opts, func(result WriteResult[T]) (WriteResult[T], error) {
 		return result, nil
 	})
+}
+
+func createIssuePayload(req CreateIssueRequest) any {
+	payload := struct {
+		Title  string           `json:"title"`
+		Body   string           `json:"body,omitempty"`
+		Labels *json.RawMessage `json:"labels,omitempty"`
+	}{Title: req.Title, Body: req.Body}
+	if len(req.Labels) > 0 {
+		labels := req.Labels
+		payload.Labels = &labels
+	}
+	return payload
+}
+
+func updateIssuePayload(req UpdateIssueRequest) any {
+	payload := struct {
+		Title  string           `json:"title,omitempty"`
+		Body   string           `json:"body,omitempty"`
+		State  string           `json:"state,omitempty"`
+		Labels *json.RawMessage `json:"labels,omitempty"`
+	}{Title: req.Title, Body: req.Body, State: req.State}
+	if len(req.Labels) > 0 {
+		labels := req.Labels
+		payload.Labels = &labels
+	}
+	return payload
 }
 
 func writeConfirmedJSON[T any](ctx context.Context, c *HTTPClient, method, endpoint, operation, target string, payload any, opts WriteOptions, confirm func(WriteResult[T]) (WriteResult[T], error)) (WriteResult[T], error) {

@@ -1,0 +1,19 @@
+{
+  "covered_outcome_ids": [
+    "outcome-7"
+  ],
+  "covered_decommission_ids": [
+    "decommission-5"
+  ],
+  "product_surfaces": [
+    "internal/gitcode.HTTPClient.CreateIssue serialized POST /api/v5/repos/{owner}/{repo}/issues body",
+    "internal/gitcode.HTTPClient.UpdateIssue serialized PATCH /api/v5/repos/{owner}/{repo}/issues/{number} body",
+    "internal/gitcode issue label mutation payload preservation"
+  ],
+  "evidence_type": "API test",
+  "freshness": "current binary build with mocked Go tests",
+  "mocks_used": [
+    "local httptest HTTP server for external GitCode API dependency only"
+  ],
+  "production_files_modified": []
+}

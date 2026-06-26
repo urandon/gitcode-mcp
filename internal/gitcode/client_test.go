@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1596,6 +1597,118 @@ func TestScenario013003CreateIssueNoLabelsOmitsField(t *testing.T) {
 	}
 	if _, ok := bodyMap["labels"]; ok {
 		t.Fatal("labels key should be absent from serialized JSON")
+	}
+}
+
+func TestScenario016CreateIssueLabelsOmitted(t *testing.T) {
+	var sawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues" {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			sawBody = body
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":"1","number":1,"title":"No Labels"}`)
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	result, err := client.CreateIssue(context.Background(), CreateIssueRequest{
+		Owner: "example-owner",
+		Repo:  "example-repo",
+		Title: "No Labels",
+	}, WriteOptions{IdempotencyKey: "key-016-create-omitted"})
+	if err != nil {
+		t.Fatalf("CreateIssue error: %v", err)
+	}
+	if !result.Confirmed {
+		t.Fatal("expected confirmed result")
+	}
+	assertJSONKeyAbsent(t, sawBody, "labels")
+}
+
+func TestScenario016UpdateIssueTitleOnlyLabelsOmitted(t *testing.T) {
+	var sawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues/42" {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			sawBody = body
+			fmt.Fprint(w, `{"id":"42","number":42,"title":"Updated"}`)
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	result, err := client.UpdateIssue(context.Background(), UpdateIssueRequest{
+		Owner:  "example-owner",
+		Repo:   "example-repo",
+		Number: 42,
+		Title:  "Updated",
+	}, WriteOptions{IdempotencyKey: "key-016-update-omitted"})
+	if err != nil {
+		t.Fatalf("UpdateIssue error: %v", err)
+	}
+	if !result.Confirmed {
+		t.Fatal("expected confirmed result")
+	}
+	assertJSONKeyAbsent(t, sawBody, "labels")
+}
+
+func TestScenario016ExplicitLabelsPreserved(t *testing.T) {
+	var sawBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues/42" {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			sawBody = body
+			fmt.Fprint(w, `{"id":"42","number":42,"title":"Updated","labels":[{"id":1,"name":"bug","color":"#FF0000"}]}`)
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	result, err := client.UpdateIssue(context.Background(), UpdateIssueRequest{
+		Owner:  "example-owner",
+		Repo:   "example-repo",
+		Number: 42,
+		Labels: EncodeIssueLabels([]string{"bug"}),
+	}, WriteOptions{IdempotencyKey: "key-016-explicit-labels"})
+	if err != nil {
+		t.Fatalf("UpdateIssue error: %v", err)
+	}
+	if !result.Confirmed {
+		t.Fatal("expected confirmed result")
+	}
+	var raw struct {
+		Labels json.RawMessage `json:"labels"`
+	}
+	if err := json.Unmarshal(sawBody, &raw); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	if string(raw.Labels) != `["bug"]` {
+		t.Fatalf("labels: got %s, want [\"bug\"]", string(raw.Labels))
+	}
+}
+
+func assertJSONKeyAbsent(t *testing.T, body []byte, key string) {
+	t.Helper()
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	if _, ok := raw[key]; ok {
+		t.Fatalf("%s key should be absent from serialized JSON", key)
 	}
 }
 
