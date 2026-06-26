@@ -1,0 +1,22 @@
+{
+  "covered_outcome_ids": [
+    "outcome-1"
+  ],
+  "covered_decommission_ids": [
+    "decommission-2"
+  ],
+  "product_surfaces": [
+    "internal/mcp MCP RPC handler tools/call for index_repo lifecycle tool",
+    "internal/service Service.Index method",
+    "internal/service Service.StaleIndex method (verified not called from index_repo path)",
+    "internal/mcp lifecycle_tools.go callIndexRepo handler"
+  ],
+  "evidence_type": "API test",
+  "freshness": "current binary build with mocked Go tests",
+  "mocks_used": [
+    "In-memory cache (populatedStore)",
+    "In-process MCP Server with indexRepoSpyService fake",
+    "No live GitCode API, no real credentials, no network"
+  ],
+  "production_files_modified": []
+}

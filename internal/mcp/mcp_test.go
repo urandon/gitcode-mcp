@@ -890,6 +890,125 @@ func TestMCPLifecycleTools(t *testing.T) {
 	wg.Wait()
 }
 
+type indexRepoSpyService struct {
+	serviceInterface
+	indexCalls      []service.OperationRequest
+	staleIndexCalls []service.StaleIndexRequest
+}
+
+func (s *indexRepoSpyService) Index(ctx context.Context, req service.OperationRequest) (service.OperationResult, error) {
+	s.indexCalls = append(s.indexCalls, req)
+	return service.OperationResult{Command: "index", Status: "ok", ProcessedCount: 3, Evidence: "snapshot_id=spy-snapshot", GeneratedAt: time.Date(2026, 6, 26, 10, 0, 0, 0, time.UTC)}, nil
+}
+
+func (s *indexRepoSpyService) StaleIndex(ctx context.Context, req service.StaleIndexRequest) (service.StaleIndexResult, error) {
+	s.staleIndexCalls = append(s.staleIndexCalls, req)
+	return service.StaleIndexResult{RepoID: req.RepoID}, nil
+}
+
+func TestMCPIndexRepoDelegatesServiceIndex(t *testing.T) {
+	spy := &indexRepoSpyService{}
+	srv, r, w, stderr := newPipeServer(spy)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); _ = srv.Serve() }()
+
+	call := func(name string, args map[string]any) toolCallResult {
+		t.Helper()
+		b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": name, "method": "tools/call", "params": map[string]any{"name": name, "arguments": args}})
+		_, _ = r.Write(append(b, '\n'))
+		line, err := readLine(w)
+		if err != nil {
+			t.Fatalf("read %s response: %v (stderr: %s)", name, err, stderr.String())
+		}
+		return decodeToolCallResult(t, line)
+	}
+
+	indexResult := call("index_repo", map[string]any{"repo_id": "fixture-a"})
+	var opResult service.OperationResult
+	decodeStructured(t, indexResult, &opResult)
+
+	if len(spy.indexCalls) != 1 {
+		t.Fatalf("SCN-MCP-INDEX-REPO-DELEGATES-SERVICE-INDEX: Index call count = %d, want 1", len(spy.indexCalls))
+	}
+	if len(spy.staleIndexCalls) != 0 {
+		t.Fatalf("SCN-MCP-INDEX-REPO-DELEGATES-SERVICE-INDEX: StaleIndex call count = %d, want 0", len(spy.staleIndexCalls))
+	}
+	if opResult.Command != "index" {
+		t.Fatalf("SCN-MCP-INDEX-REPO-DELEGATES-SERVICE-INDEX: Command = %q, want index", opResult.Command)
+	}
+	if opResult.Status != "ok" {
+		t.Fatalf("SCN-MCP-INDEX-REPO-DELEGATES-SERVICE-INDEX: Status = %q, want ok", opResult.Status)
+	}
+	if opResult.ProcessedCount != 3 {
+		t.Fatalf("SCN-MCP-INDEX-REPO-DELEGATES-SERVICE-INDEX: ProcessedCount = %d, want 3", opResult.ProcessedCount)
+	}
+
+	_ = r.Close()
+	wg.Wait()
+}
+
+func TestMCPIndexRepoNotStaleDiagnostic(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "index-repo-target", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	graphs := []cache.SourceGraph{
+		{Source: cache.Source{RepoID: "index-repo-target", ID: "ISSUE-1", Kind: "issue", Path: "issues/1.md", Title: "Issue 1", Body: "indexable", Status: "open", ContentHash: "h1", CreatedAt: time.Date(2026, 6, 26, 10, 0, 0, 0, time.UTC), UpdatedAt: time.Date(2026, 6, 26, 10, 0, 0, 0, time.UTC)}},
+		{Source: cache.Source{RepoID: "index-repo-target", ID: "ISSUE-2", Kind: "issue", Path: "issues/2.md", Title: "Issue 2", Body: "also indexable", Status: "open", ContentHash: "h2", CreatedAt: time.Date(2026, 6, 26, 10, 1, 0, 0, time.UTC), UpdatedAt: time.Date(2026, 6, 26, 10, 1, 0, 0, time.UTC)}},
+	}
+	for _, graph := range graphs {
+		if err := store.UpsertSourceGraph(context.Background(), graph); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	srv, r, w, stderr := newPipeServer(service.New(store))
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); _ = srv.Serve() }()
+
+	call := func(name string, args map[string]any) toolCallResult {
+		t.Helper()
+		b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": name, "method": "tools/call", "params": map[string]any{"name": name, "arguments": args}})
+		_, _ = r.Write(append(b, '\n'))
+		line, err := readLine(w)
+		if err != nil {
+			t.Fatalf("read %s response: %v (stderr: %s)", name, err, stderr.String())
+		}
+		return decodeToolCallResult(t, line)
+	}
+
+	indexResult := call("index_repo", map[string]any{"repo_id": "index-repo-target"})
+	var opResult service.OperationResult
+	decodeStructured(t, indexResult, &opResult)
+
+	if opResult.Command != "index" || opResult.Status != "ok" {
+		t.Fatalf("SCN-MCP-INDEX-REPO-NOT-STALE-DIAGNOSTIC: expected index outcome, got command=%q status=%q", opResult.Command, opResult.Status)
+	}
+	if opResult.ProcessedCount <= 0 {
+		t.Fatalf("SCN-MCP-INDEX-REPO-NOT-STALE-DIAGNOSTIC: expected processed_count > 0, got %d", opResult.ProcessedCount)
+	}
+
+	raw, err := json.Marshal(opResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var asMap map[string]any
+	if err := json.Unmarshal(raw, &asMap); err != nil {
+		t.Fatal(err)
+	}
+	for _, staleField := range []string{"stale_count", "affected_source_ids", "missing_target_ids"} {
+		if _, exists := asMap[staleField]; exists {
+			t.Fatalf("SCN-MCP-INDEX-REPO-NOT-STALE-DIAGNOSTIC: index_repo response contains stale-index field %q", staleField)
+		}
+	}
+
+	_ = r.Close()
+	wg.Wait()
+}
+
 func TestStartupDiagnosticInjection(t *testing.T) {
 	diagnostic := StartupDiagnosticFromError(os.ErrPermission)
 	if diagnostic.ErrorClass != "cache_path_unwritable" || !strings.Contains(diagnostic.Remediation, "chmod") || !strings.Contains(diagnostic.Remediation, "--cache-path") {
