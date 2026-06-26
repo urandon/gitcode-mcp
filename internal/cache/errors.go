@@ -48,6 +48,8 @@ func (e ErrLockContention) Error() string {
 	return fmt.Sprintf("cache: lock contention at %s: %s", e.Path, e.HolderHint)
 }
 
+func (e ErrLockContention) DiagnosticCode() string { return "cache_busy" }
+
 type ErrCacheCorruption struct {
 	Path   string
 	Detail string

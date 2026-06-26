@@ -1471,7 +1471,7 @@ func cacheLockErrorCode(err cache.ErrLockContention) string {
 	case "sync", "index", "write", "sync-index":
 		return "cache_owned"
 	default:
-		return "busy"
+		return "cache_busy"
 	}
 }
 
