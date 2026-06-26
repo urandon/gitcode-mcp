@@ -16,12 +16,16 @@ type Provider interface {
 	ListIssues(context.Context, IssueListRequest) (Page[IssueSummary], error)
 	GetIssue(context.Context, IssueRequest) (Issue, error)
 	ListIssueComments(context.Context, IssueRequest) (Page[Comment], error)
+	ListPRs(context.Context, PRListRequest) (Page[PullRequest], error)
+	GetPR(context.Context, PRRequest) (PullRequest, error)
+	ListPRComments(context.Context, PRRequest) (Page[PRComment], error)
 	ListWikiPages(context.Context, WikiListRequest) (Page[WikiPage], error)
 	GetWikiPage(context.Context, WikiPageRequest) (WikiPage, error)
 	Search(context.Context, SearchRequest) (Page[SearchResult], error)
 	CreateIssue(context.Context, CreateIssueRequest, WriteOptions) (WriteResult[Issue], error)
 	UpdateIssue(context.Context, UpdateIssueRequest, WriteOptions) (WriteResult[Issue], error)
 	CreateIssueComment(context.Context, CreateIssueCommentRequest, WriteOptions) (WriteResult[Comment], error)
+	CreatePRComment(context.Context, CreatePRCommentRequest, WriteOptions) (WriteResult[PRComment], error)
 	CreateWikiPage(context.Context, CreateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
 	UpdateWikiPage(context.Context, UpdateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
 	DeleteWikiPage(context.Context, DeleteWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
@@ -222,6 +226,34 @@ func (p liveProvider) CreateIssueComment(ctx context.Context, req CreateIssueCom
 	return p.HTTPClient.CreateIssueComment(ctx, req, opts)
 }
 
+func (p liveProvider) ListPRs(ctx context.Context, req PRListRequest) (Page[PullRequest], error) {
+	if err := p.matrix.Preflight(ProductAreaPullRequests); err != nil {
+		return Page[PullRequest]{}, err
+	}
+	return p.HTTPClient.ListPRs(ctx, req)
+}
+
+func (p liveProvider) GetPR(ctx context.Context, req PRRequest) (PullRequest, error) {
+	if err := p.matrix.Preflight(ProductAreaPullRequests); err != nil {
+		return PullRequest{}, err
+	}
+	return p.HTTPClient.GetPR(ctx, req)
+}
+
+func (p liveProvider) ListPRComments(ctx context.Context, req PRRequest) (Page[PRComment], error) {
+	if err := p.matrix.Preflight(ProductAreaPullRequests); err != nil {
+		return Page[PRComment]{}, err
+	}
+	return p.HTTPClient.ListPRComments(ctx, req)
+}
+
+func (p liveProvider) CreatePRComment(ctx context.Context, req CreatePRCommentRequest, opts WriteOptions) (WriteResult[PRComment], error) {
+	if err := p.matrix.Preflight(ProductAreaPullRequests); err != nil {
+		return WriteResult[PRComment]{}, err
+	}
+	return p.HTTPClient.CreatePRComment(ctx, req, opts)
+}
+
 func (p liveProvider) ListMilestones(ctx context.Context, req MilestoneListRequest) (Page[Milestone], error) {
 	if err := p.matrix.Preflight(ProductAreaMilestones); err != nil {
 		return Page[Milestone]{}, err
@@ -269,6 +301,15 @@ func (p unavailableProvider) GetIssue(context.Context, IssueRequest) (Issue, err
 func (p unavailableProvider) ListIssueComments(context.Context, IssueRequest) (Page[Comment], error) {
 	return Page[Comment]{}, p.err()
 }
+func (p unavailableProvider) ListPRs(context.Context, PRListRequest) (Page[PullRequest], error) {
+	return Page[PullRequest]{}, p.err()
+}
+func (p unavailableProvider) GetPR(context.Context, PRRequest) (PullRequest, error) {
+	return PullRequest{}, p.err()
+}
+func (p unavailableProvider) ListPRComments(context.Context, PRRequest) (Page[PRComment], error) {
+	return Page[PRComment]{}, p.err()
+}
 func (p unavailableProvider) ListWikiPages(context.Context, WikiListRequest) (Page[WikiPage], error) {
 	return Page[WikiPage]{}, p.err()
 }
@@ -286,6 +327,9 @@ func (p unavailableProvider) UpdateIssue(context.Context, UpdateIssueRequest, Wr
 }
 func (p unavailableProvider) CreateIssueComment(context.Context, CreateIssueCommentRequest, WriteOptions) (WriteResult[Comment], error) {
 	return WriteResult[Comment]{}, p.err()
+}
+func (p unavailableProvider) CreatePRComment(context.Context, CreatePRCommentRequest, WriteOptions) (WriteResult[PRComment], error) {
+	return WriteResult[PRComment]{}, p.err()
 }
 func (p unavailableProvider) CreateWikiPage(context.Context, CreateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error) {
 	return WriteResult[WikiPage]{}, p.err()

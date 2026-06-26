@@ -28,7 +28,7 @@ func TestScenario005RouteSchemaMatrixDefaultShape(t *testing.T) {
 	}
 
 	for _, area := range []ProductArea{
-		ProductAreaIssues, ProductAreaLabels, ProductAreaMilestones, ProductAreaWiki,
+		ProductAreaIssues, ProductAreaLabels, ProductAreaMilestones, ProductAreaPullRequests, ProductAreaWiki,
 	} {
 		spec, ok := m.Spec(area)
 		if !ok {
@@ -54,7 +54,7 @@ func TestScenario005RouteSchemaMatrixDefaultShape(t *testing.T) {
 		}
 	}
 
-	for _, area := range []ProductArea{ProductAreaPullRequests, ProductAreaComments} {
+	for _, area := range []ProductArea{ProductAreaComments} {
 		spec, ok := m.Spec(area)
 		if !ok {
 			t.Fatalf("area %q not found in default matrix", area)
@@ -83,8 +83,8 @@ func TestScenario005RouteSchemaMatrixDefaultShape(t *testing.T) {
 	}
 
 	prSpec, _ := m.Spec(ProductAreaPullRequests)
-	if prSpec.Diagnostic.CapabilityKey != "pull_requests_read" {
-		t.Fatalf("pull_requests capability key = %q, want pull_requests_read", prSpec.Diagnostic.CapabilityKey)
+	if prSpec.Status != SupportStatusSupported || prSpec.Diagnostic != nil {
+		t.Fatalf("pull_requests should be supported without diagnostic: %+v", prSpec)
 	}
 	commentSpec, _ := m.Spec(ProductAreaComments)
 	if commentSpec.Diagnostic.CapabilityKey != "comments_read" {
@@ -203,6 +203,8 @@ func TestScenario005RouteSchemaMatrixValidateCoverageContradictorySpec(t *testin
 	t.Run("deferred without unsupported_capability code", func(t *testing.T) {
 		m := DefaultRouteSchemaMatrix()
 		mutated := m.specs[ProductAreaPullRequests]
+		mutated.Status = SupportStatusDeferred
+		mutated.Evidence = EvidenceClassDeferred
 		mutated.Diagnostic = &UnsupportedDiagnostic{
 			Code:          "other_code",
 			CapabilityKey: "pr_read",
@@ -218,6 +220,8 @@ func TestScenario005RouteSchemaMatrixValidateCoverageContradictorySpec(t *testin
 	t.Run("deferred without diagnostic", func(t *testing.T) {
 		m := DefaultRouteSchemaMatrix()
 		mutated := m.specs[ProductAreaPullRequests]
+		mutated.Status = SupportStatusDeferred
+		mutated.Evidence = EvidenceClassDeferred
 		mutated.Diagnostic = nil
 		m.specs[ProductAreaPullRequests] = mutated
 		err := m.ValidateCoverage([]ProductArea{ProductAreaPullRequests})
@@ -229,6 +233,8 @@ func TestScenario005RouteSchemaMatrixValidateCoverageContradictorySpec(t *testin
 	t.Run("deferred without capability key", func(t *testing.T) {
 		m := DefaultRouteSchemaMatrix()
 		mutated := m.specs[ProductAreaPullRequests]
+		mutated.Status = SupportStatusDeferred
+		mutated.Evidence = EvidenceClassDeferred
 		mutated.Diagnostic = &UnsupportedDiagnostic{
 			Code:          "unsupported_capability",
 			CapabilityKey: "",
@@ -244,6 +250,8 @@ func TestScenario005RouteSchemaMatrixValidateCoverageContradictorySpec(t *testin
 	t.Run("deferred without message", func(t *testing.T) {
 		m := DefaultRouteSchemaMatrix()
 		mutated := m.specs[ProductAreaPullRequests]
+		mutated.Status = SupportStatusDeferred
+		mutated.Evidence = EvidenceClassDeferred
 		mutated.Diagnostic = &UnsupportedDiagnostic{
 			Code:          "unsupported_capability",
 			CapabilityKey: "pr_read",
@@ -280,14 +288,9 @@ func TestScenario005RouteSchemaMatrixPreflight(t *testing.T) {
 		}
 	})
 
-	t.Run("pull_requests deferred returns ErrUnsupportedCapability", func(t *testing.T) {
-		err := m.Preflight(ProductAreaPullRequests)
-		var capErr ErrUnsupportedCapability
-		if !errors.As(err, &capErr) {
-			t.Fatalf("expected ErrUnsupportedCapability, got %T %v", err, err)
-		}
-		if capErr.CapabilityKey != "pull_requests_read" {
-			t.Fatalf("expected capability key pull_requests_read, got %q", capErr.CapabilityKey)
+	t.Run("pull_requests supported", func(t *testing.T) {
+		if err := m.Preflight(ProductAreaPullRequests); err != nil {
+			t.Fatalf("Preflight(pull_requests) should succeed: %v", err)
 		}
 	})
 

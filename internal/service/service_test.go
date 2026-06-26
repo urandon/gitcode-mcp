@@ -2348,6 +2348,15 @@ func (f *fakeGitCodeClient) ListIssueComments(_ context.Context, req gitcode.Iss
 	}
 	return gitcode.Page[gitcode.Comment]{Items: f.comments}, nil
 }
+func (f *fakeGitCodeClient) ListPRs(context.Context, gitcode.PRListRequest) (gitcode.Page[gitcode.PullRequest], error) {
+	return gitcode.Page[gitcode.PullRequest]{}, nil
+}
+func (f *fakeGitCodeClient) GetPR(context.Context, gitcode.PRRequest) (gitcode.PullRequest, error) {
+	return gitcode.PullRequest{}, nil
+}
+func (f *fakeGitCodeClient) ListPRComments(context.Context, gitcode.PRRequest) (gitcode.Page[gitcode.PRComment], error) {
+	return gitcode.Page[gitcode.PRComment]{}, nil
+}
 func (f *fakeGitCodeClient) GetWikiPage(_ context.Context, req gitcode.WikiPageRequest) (gitcode.WikiPage, error) {
 	f.wikiCalls++
 	if err := f.nextError(); err != nil {
@@ -2406,6 +2415,9 @@ func (f *fakeGitCodeClient) CreateIssueComment(context.Context, gitcode.CreateIs
 		return gitcode.WriteResult[gitcode.Comment]{}, err
 	}
 	return f.createIssueCommentResult, nil
+}
+func (f *fakeGitCodeClient) CreatePRComment(context.Context, gitcode.CreatePRCommentRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PRComment], error) {
+	return gitcode.WriteResult[gitcode.PRComment]{}, nil
 }
 func (f *fakeGitCodeClient) CreateWikiPage(context.Context, gitcode.CreateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
 	f.createWikiPageCalls++
@@ -2709,11 +2721,11 @@ func TestWikiPathNormalizationInSync(t *testing.T) {
 	}
 	defer store.Close()
 	if err := store.AddRepository(ctx, cache.RepositoryBinding{
-		RepoID:    "wiki-path-test",
-		Owner:     "owner",
-		Name:      "repo",
+		RepoID:     "wiki-path-test",
+		Owner:      "owner",
+		Name:       "repo",
 		APIBaseURL: "https://example.invalid/api",
-		Scopes:    []cache.RepositoryScope{cache.RepositoryScopeWiki},
+		Scopes:     []cache.RepositoryScope{cache.RepositoryScopeWiki},
 	}); err != nil {
 		t.Fatal(err)
 	}

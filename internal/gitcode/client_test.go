@@ -861,6 +861,80 @@ func TestScenario017AddCommentMalformedBodySchemaDecode(t *testing.T) {
 	}
 }
 
+func TestScenario018PRListDetailCommentsRoutes(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == listPREndpoint("example-owner", "example-repo"):
+			fmt.Fprint(w, `[{"id":101,"number":7,"html_url":"https://example.test/pulls/7","state":"open","title":"Add cache","body":"body","user":{"login":"alice"},"labels":[{"id":1,"name":"feature","color":"blue"}],"base":{"ref":"main"},"head":{"ref":"topic"}}]`)
+		case r.Method == http.MethodGet && r.URL.Path == getPREndpoint("example-owner", "example-repo", 7):
+			fmt.Fprint(w, `{"id":"101","number":"7","html_url":"https://example.test/pulls/7","state":"open","title":"Add cache","body":"body","user":{"login":"alice"},"labels":["feature"],"base":{"ref":"main"},"head":{"ref":"topic"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == listPRCommentsEndpoint("example-owner", "example-repo", 7):
+			fmt.Fprint(w, `[{"id":201,"note_id":301,"body":"looks good","discussion_id":"DISC-7","user":{"login":"bob"}}]`)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, Config{})
+	prs, err := client.ListPRs(context.Background(), PRListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if err != nil {
+		t.Fatalf("ListPRs returned error: %v", err)
+	}
+	if len(prs.Items) != 1 || prs.Items[0].Kind != "pull_request" || prs.Items[0].SourceID != "PR-7" || prs.Items[0].ID != "101" || prs.Items[0].Number != 7 || prs.Items[0].HTMLURL == "" || prs.Items[0].State != "open" || prs.Items[0].Title != "Add cache" || prs.Items[0].Body != "body" || prs.Items[0].User != "alice" || len(prs.Items[0].Labels) != 1 || prs.Items[0].Labels[0] != "feature" || prs.Items[0].Base != "main" || prs.Items[0].Head != "topic" {
+		t.Fatalf("unexpected PR list record: %+v", prs.Items)
+	}
+	pr, err := client.GetPR(context.Background(), PRRequest{Owner: "example-owner", Repo: "example-repo", Number: 7})
+	if err != nil {
+		t.Fatalf("GetPR returned error: %v", err)
+	}
+	if pr.Kind != "pull_request" || pr.SourceID != "PR-7" || pr.Number != 7 || pr.ID != "101" {
+		t.Fatalf("unexpected PR detail record: %+v", pr)
+	}
+	comments, err := client.ListPRComments(context.Background(), PRRequest{Owner: "example-owner", Repo: "example-repo", Number: 7})
+	if err != nil {
+		t.Fatalf("ListPRComments returned error: %v", err)
+	}
+	if len(comments.Items) != 1 || comments.Items[0].Kind != "pr_comment" || comments.Items[0].ID != "301" || comments.Items[0].DiscussionID != "DISC-7" || comments.Items[0].PRNumber != 7 || comments.Items[0].Body != "looks good" || comments.Items[0].Author != "bob" {
+		t.Fatalf("unexpected PR comment records: %+v", comments.Items)
+	}
+	for _, path := range paths {
+		if strings.Contains(path, "pull_requests") || strings.Contains(path, "merge_requests") || strings.Contains(path, "review_comments") {
+			t.Fatalf("deployment-inhibited route called: %s", path)
+		}
+	}
+}
+
+func TestScenario018PRCommentWrite(t *testing.T) {
+	var seenBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != createPRCommentEndpoint("example-owner", "example-repo", 7) {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		seenBody = string(body)
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"id":201,"note_id":301,"body":"posted"}`)
+	}))
+	defer server.Close()
+
+	result, err := newTestClient(t, server.URL, Config{}).CreatePRComment(context.Background(), CreatePRCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, Body: "posted"}, WriteOptions{IdempotencyKey: "key-create-pr-comment"})
+	if err != nil {
+		t.Fatalf("CreatePRComment returned error: %v", err)
+	}
+	if !strings.Contains(seenBody, `"body":"posted"`) {
+		t.Fatalf("request body = %s", seenBody)
+	}
+	if !result.Confirmed || result.ProviderStatus != "201" || result.RemoteID != "301" || result.ParentIssueNumber != 7 || result.ParentIssueID != "7" || result.Record.Kind != "pr_comment" || result.Record.PRNumber != 7 || result.Record.ID != "301" || result.Record.Body != "posted" {
+		t.Fatalf("unexpected PR comment write result: %+v", result)
+	}
+}
+
 func TestWriteNegativeScenariosDoNotConfirm(t *testing.T) {
 	t.Run("write-validation-failed", func(t *testing.T) {
 		client := newTestClient(t, "http://127.0.0.1", Config{})

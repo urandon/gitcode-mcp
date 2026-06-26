@@ -134,6 +134,18 @@ func (sanitizedFixtureClient) ListIssueComments(context.Context, gitcode.IssueRe
 	return gitcode.Page[gitcode.Comment]{Items: []gitcode.Comment{{ID: "c1", Author: "fixture-user", Body: "comment", CreatedAt: now, UpdatedAt: now}}, Page: 1, PerPage: 1, TotalCount: 1}, nil
 }
 
+func (sanitizedFixtureClient) ListPRs(context.Context, gitcode.PRListRequest) (gitcode.Page[gitcode.PullRequest], error) {
+	return gitcode.Page[gitcode.PullRequest]{}, nil
+}
+
+func (sanitizedFixtureClient) GetPR(context.Context, gitcode.PRRequest) (gitcode.PullRequest, error) {
+	return gitcode.PullRequest{}, ErrInvalidQuery{Field: "pull_request", Message: "fixture pull request is unavailable"}
+}
+
+func (sanitizedFixtureClient) ListPRComments(context.Context, gitcode.PRRequest) (gitcode.Page[gitcode.PRComment], error) {
+	return gitcode.Page[gitcode.PRComment]{}, nil
+}
+
 func (sanitizedFixtureClient) GetWikiPage(context.Context, gitcode.WikiPageRequest) (gitcode.WikiPage, error) {
 	now := fixtureNow()
 	return gitcode.WikiPage{Slug: "Home", Title: "Fixture Wiki", Body: "# Wiki\n\nremote fixture wiki body for offline search test", Revision: "rev-home", CreatedAt: now, UpdatedAt: now}, nil
@@ -166,6 +178,10 @@ func (sanitizedFixtureClient) UpdateIssue(context.Context, gitcode.UpdateIssueRe
 
 func (sanitizedFixtureClient) CreateIssueComment(context.Context, gitcode.CreateIssueCommentRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Comment], error) {
 	return gitcode.WriteResult[gitcode.Comment]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
+}
+
+func (sanitizedFixtureClient) CreatePRComment(context.Context, gitcode.CreatePRCommentRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PRComment], error) {
+	return gitcode.WriteResult[gitcode.PRComment]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
 func (sanitizedFixtureClient) CreateWikiPage(context.Context, gitcode.CreateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {

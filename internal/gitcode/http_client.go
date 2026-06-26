@@ -95,6 +95,48 @@ func (c *HTTPClient) ListIssueComments(ctx context.Context, req IssueRequest) (P
 	return Page[Comment]{Items: items, Page: page.Page, PerPage: page.PerPage}, nil
 }
 
+func (c *HTTPClient) ListPRs(ctx context.Context, req PRListRequest) (Page[PullRequest], error) {
+	if err := validateReadRepo(req.Owner, req.Repo); err != nil {
+		return Page[PullRequest]{}, err
+	}
+	endpoint := listPREndpoint(req.Owner, req.Repo)
+	items, page, err := getPaged[PullRequest](ctx, c, endpoint, prListQuery(req), PageState{Page: req.Page, PerPage: req.PerPage})
+	if err != nil {
+		return Page[PullRequest]{}, err
+	}
+	return Page[PullRequest]{Items: items, Page: page.Page, PerPage: page.PerPage}, nil
+}
+
+func (c *HTTPClient) GetPR(ctx context.Context, req PRRequest) (PullRequest, error) {
+	if err := validatePRRequest(req); err != nil {
+		return PullRequest{}, err
+	}
+	var pr PullRequest
+	endpoint := getPREndpoint(req.Owner, req.Repo, req.Number)
+	if err := c.getJSON(ctx, endpoint, nil, &pr); err != nil {
+		return PullRequest{}, err
+	}
+	return pr, nil
+}
+
+func (c *HTTPClient) ListPRComments(ctx context.Context, req PRRequest) (Page[PRComment], error) {
+	if err := validatePRRequest(req); err != nil {
+		return Page[PRComment]{}, err
+	}
+	endpoint := listPRCommentsEndpoint(req.Owner, req.Repo, req.Number)
+	items, page, err := getPaged[PRComment](ctx, c, endpoint, nil, PageState{})
+	if err != nil {
+		return Page[PRComment]{}, err
+	}
+	for i := range items {
+		items[i].PRNumber = req.Number
+		if items[i].DiscussionID == "" {
+			items[i].DiscussionID = strconv.Itoa(req.Number)
+		}
+	}
+	return Page[PRComment]{Items: items, Page: page.Page, PerPage: page.PerPage}, nil
+}
+
 func (c *HTTPClient) GetWikiPage(ctx context.Context, req WikiPageRequest) (WikiPage, error) {
 	if err := validateWikiPageRequest(req); err != nil {
 		return WikiPage{}, err
@@ -204,6 +246,28 @@ func (c *HTTPClient) CreateIssueComment(ctx context.Context, req CreateIssueComm
 		result.RemoteID = comment.ID
 		result.ParentIssueNumber = req.Number
 		result.ParentIssueID = comment.IssueID
+		return result, nil
+	})
+}
+
+func (c *HTTPClient) CreatePRComment(ctx context.Context, req CreatePRCommentRequest, opts WriteOptions) (WriteResult[PRComment], error) {
+	if err := validateCreatePRComment(req); err != nil {
+		return WriteResult[PRComment]{}, err
+	}
+	target := req.Owner + "/" + req.Repo + "/pulls/" + strconv.Itoa(req.Number)
+	return writeConfirmedSchemaJSON[PRComment](ctx, c, http.MethodPost, createPRCommentEndpoint(req.Owner, req.Repo, req.Number), "CreatePRComment", target, req, opts, func(result WriteResult[PRComment]) (WriteResult[PRComment], error) {
+		comment := result.Record
+		if strings.TrimSpace(comment.ID) == "" {
+			return WriteResult[PRComment]{}, &ErrSchemaDecode{Field: "pr_comment.id", Expected: "note_id or id", Received: "missing"}
+		}
+		comment.PRNumber = req.Number
+		if comment.DiscussionID == "" {
+			comment.DiscussionID = strconv.Itoa(req.Number)
+		}
+		result.Record = comment
+		result.RemoteID = comment.ID
+		result.ParentIssueNumber = req.Number
+		result.ParentIssueID = comment.DiscussionID
 		return result, nil
 	})
 }
@@ -687,6 +751,16 @@ func validateIssueRequest(req IssueRequest) error {
 	return nil
 }
 
+func validatePRRequest(req PRRequest) error {
+	if err := validateReadRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if req.Number <= 0 {
+		return ErrValidationFailed{Field: "number", Message: "positive pull request number is required"}
+	}
+	return nil
+}
+
 func validateWikiPageRequest(req WikiPageRequest) error {
 	if err := validateReadRepo(req.Owner, req.Repo); err != nil {
 		return err
@@ -727,6 +801,19 @@ func validateCreateIssueComment(req CreateIssueCommentRequest) error {
 	}
 	if req.Number <= 0 {
 		return ErrValidationFailed{Field: "number", Message: "positive issue number is required"}
+	}
+	if strings.TrimSpace(req.Body) == "" {
+		return ErrValidationFailed{Field: "body", Message: "comment body is required"}
+	}
+	return nil
+}
+
+func validateCreatePRComment(req CreatePRCommentRequest) error {
+	if err := validateWriteRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if req.Number <= 0 {
+		return ErrValidationFailed{Field: "number", Message: "positive pull request number is required"}
 	}
 	if strings.TrimSpace(req.Body) == "" {
 		return ErrValidationFailed{Field: "body", Message: "comment body is required"}
