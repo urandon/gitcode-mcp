@@ -1033,6 +1033,13 @@ func (s *Service) SyncResources(ctx context.Context, reqs []SyncRequest) (*SyncR
 
 func (s *Service) BulkSyncIssues(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
 	if err := ctx.Err(); err != nil {
+		if req.Bounds != nil {
+			diag := SyncDiagnosticCancelled
+			if errors.Is(err, context.DeadlineExceeded) {
+				diag = SyncDiagnosticTimeout
+			}
+			return nil, &PartialSyncError{Errors: nil, SuccessCount: 0, FailureCount: 0, Diagnostic: diag}
+		}
 		return nil, err
 	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "bulk-sync-issues")
@@ -1047,12 +1054,95 @@ func (s *Service) BulkSyncIssues(ctx context.Context, req BulkSyncRequest) (*Syn
 	if err != nil {
 		return nil, err
 	}
-	page, err := s.client.ListIssues(ctx, gitcode.IssueListRequest{Owner: route.Owner, Repo: route.Name, Page: req.Page, PerPage: req.PerPage})
-	if err != nil {
-		return bulkSyncFailureResult(s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "issue:*"}, "issues", "*"), "issue:*", "issues")
+
+	if req.Bounds == nil {
+		page, err := s.client.ListIssues(ctx, gitcode.IssueListRequest{Owner: route.Owner, Repo: route.Name, Page: req.Page, PerPage: req.PerPage})
+		if err != nil {
+			return bulkSyncFailureResult(s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "issue:*"}, "issues", "*"), "issue:*", "issues")
+		}
+		result := &SyncResourcesResult{Results: make([]SyncResult, 0, len(page.Items)), Failures: make([]ResourceError, 0)}
+		s.stageIssuePage(ctx, req, page.Items, result)
+		result.SuccessCount = len(result.Results)
+		result.FailureCount = len(result.Failures)
+		if result.FailureCount > 0 {
+			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
+		}
+		return result, nil
 	}
-	result := &SyncResourcesResult{Results: make([]SyncResult, 0, len(page.Items)), Failures: make([]ResourceError, 0)}
-	for _, summary := range page.Items {
+
+	return s.bulkSyncIssuesBounded(ctx, req, route)
+}
+
+func (s *Service) bulkSyncIssuesBounded(ctx context.Context, req BulkSyncRequest, route RepositoryRoute) (*SyncResourcesResult, error) {
+	bounds := req.Bounds
+	result := &SyncResourcesResult{Results: make([]SyncResult, 0), Failures: make([]ResourceError, 0)}
+	currentPage := req.Page
+	if currentPage < 1 {
+		currentPage = 1
+	}
+	perPage := req.PerPage
+	if perPage < 1 {
+		perPage = 10
+	}
+	totalRequested := bounds.MaxRecords
+	if totalRequested <= 0 && bounds.MaxPages > 0 {
+		totalRequested = bounds.MaxPages * perPage
+	}
+
+	for pageNum := 0; ; pageNum++ {
+		if ctx.Err() != nil {
+			diag := SyncDiagnosticCancelled
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				diag = SyncDiagnosticTimeout
+			}
+			result.SuccessCount = len(result.Results)
+			result.FailureCount = len(result.Failures)
+			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diag, TotalRequested: totalRequested}
+		}
+		if bounds.MaxPages > 0 && pageNum >= bounds.MaxPages {
+			break
+		}
+		if bounds.MaxRecords > 0 && len(result.Results) >= bounds.MaxRecords {
+			break
+		}
+		page, err := s.client.ListIssues(ctx, gitcode.IssueListRequest{Owner: route.Owner, Repo: route.Name, Page: currentPage, PerPage: perPage})
+		if err != nil {
+			result.SuccessCount = len(result.Results)
+			result.FailureCount = len(result.Failures)
+			re := ResourceError{SourceID: "issue:*", RemoteType: "issues", Err: s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "issue:*"}, "issues", "*"), Message: err.Error()}
+			result.Failures = append(result.Failures, re)
+			result.FailureCount++
+			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, TotalRequested: totalRequested}
+		}
+		items := page.Items
+		if bounds.MaxRecords > 0 {
+			remaining := bounds.MaxRecords - len(result.Results)
+			if remaining <= 0 {
+				break
+			}
+			if len(items) > remaining {
+				items = items[:remaining]
+			}
+		}
+		beforeCount := len(result.Results)
+		s.stageIssuePage(ctx, req, items, result)
+		recordsFetched := len(result.Results) - beforeCount
+		emitProgress(bounds.ProgressChan, ProgressEvent{Collection: "issues", Page: currentPage, RecordsFetched: recordsFetched})
+		if len(page.Items) < perPage {
+			break
+		}
+		currentPage++
+	}
+	result.SuccessCount = len(result.Results)
+	result.FailureCount = len(result.Failures)
+	if result.FailureCount > 0 {
+		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
+	}
+	return result, nil
+}
+
+func (s *Service) stageIssuePage(ctx context.Context, req BulkSyncRequest, items []gitcode.IssueSummary, result *SyncResourcesResult) {
+	for _, summary := range items {
 		remoteID := strconv.Itoa(summary.Number)
 		issue := gitcode.Issue{ID: summary.ID, Number: summary.Number, Title: summary.Title, Body: summary.Body, Status: summary.Status, State: summary.State, Labels: summary.Labels, CreatedAt: summary.CreatedAt, UpdatedAt: summary.UpdatedAt}
 		syncReq := SyncRequest{RepoID: req.RepoID, AliasType: "issue", AliasID: remoteID, IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "issue", remoteID), MaxAttempts: req.MaxAttempts, MaxSize: req.MaxSize}
@@ -1076,16 +1166,17 @@ func (s *Service) BulkSyncIssues(ctx context.Context, req BulkSyncRequest) (*Syn
 		}
 		result.Results = append(result.Results, SyncResult{IdempotencyKey: syncReq.IdempotencyKey, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), Record: sourceSummary(stored), GeneratedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: zeroDelta})
 	}
-	result.SuccessCount = len(result.Results)
-	result.FailureCount = len(result.Failures)
-	if result.FailureCount > 0 {
-		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
-	}
-	return result, nil
 }
 
 func (s *Service) BulkSyncWiki(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
 	if err := ctx.Err(); err != nil {
+		if req.Bounds != nil {
+			diag := SyncDiagnosticCancelled
+			if errors.Is(err, context.DeadlineExceeded) {
+				diag = SyncDiagnosticTimeout
+			}
+			return nil, &PartialSyncError{Errors: nil, SuccessCount: 0, FailureCount: 0, Diagnostic: diag}
+		}
 		return nil, err
 	}
 	repoID, err := s.requireRepo(ctx, req.RepoID, "bulk-sync-wiki")
@@ -1100,22 +1191,131 @@ func (s *Service) BulkSyncWiki(ctx context.Context, req BulkSyncRequest) (*SyncR
 	if err != nil {
 		return nil, err
 	}
-	page, err := s.client.ListWikiPages(ctx, gitcode.WikiListRequest{Owner: route.Owner, Repo: route.Name, Page: req.Page, PerPage: req.PerPage})
-	if err != nil {
-		return bulkSyncFailureResult(s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "wiki:*"}, "wiki", "*"), "wiki:*", "wiki")
+
+	if req.Bounds == nil {
+		page, err := s.client.ListWikiPages(ctx, gitcode.WikiListRequest{Owner: route.Owner, Repo: route.Name, Page: req.Page, PerPage: req.PerPage})
+		if err != nil {
+			return bulkSyncFailureResult(s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "wiki:*"}, "wiki", "*"), "wiki:*", "wiki")
+		}
+		reqs := make([]SyncRequest, 0, len(page.Items))
+		for _, wp := range page.Items {
+			reqs = append(reqs, SyncRequest{
+				RepoID:         req.RepoID,
+				AliasType:      "wiki",
+				AliasID:        wp.Slug,
+				IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "wiki", wp.Slug),
+				MaxAttempts:    req.MaxAttempts,
+				MaxSize:        req.MaxSize,
+			})
+		}
+		return s.SyncResources(ctx, reqs)
 	}
-	reqs := make([]SyncRequest, 0, len(page.Items))
-	for _, wp := range page.Items {
-		reqs = append(reqs, SyncRequest{
-			RepoID:         req.RepoID,
-			AliasType:      "wiki",
-			AliasID:        wp.Slug,
-			IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "wiki", wp.Slug),
-			MaxAttempts:    req.MaxAttempts,
-			MaxSize:        req.MaxSize,
-		})
+
+	return s.bulkSyncWikiBounded(ctx, req, route)
+}
+
+func (s *Service) bulkSyncWikiBounded(ctx context.Context, req BulkSyncRequest, route RepositoryRoute) (*SyncResourcesResult, error) {
+	bounds := req.Bounds
+	result := &SyncResourcesResult{Results: make([]SyncResult, 0), Failures: make([]ResourceError, 0)}
+	currentPage := req.Page
+	if currentPage < 1 {
+		currentPage = 1
 	}
-	return s.SyncResources(ctx, reqs)
+	perPage := req.PerPage
+	if perPage < 1 {
+		perPage = 10
+	}
+	totalRequested := bounds.MaxRecords
+	if totalRequested <= 0 && bounds.MaxPages > 0 {
+		totalRequested = bounds.MaxPages * perPage
+	}
+
+	for pageNum := 0; ; pageNum++ {
+		if ctx.Err() != nil {
+			diag := SyncDiagnosticCancelled
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				diag = SyncDiagnosticTimeout
+			}
+			result.SuccessCount = len(result.Results)
+			result.FailureCount = len(result.Failures)
+			if result.SuccessCount == 0 && result.FailureCount == 0 {
+				return nil, ctx.Err()
+			}
+			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diag, TotalRequested: totalRequested}
+		}
+		if bounds.MaxPages > 0 && pageNum >= bounds.MaxPages {
+			break
+		}
+		if bounds.MaxRecords > 0 && len(result.Results) >= bounds.MaxRecords {
+			break
+		}
+		page, err := s.client.ListWikiPages(ctx, gitcode.WikiListRequest{Owner: route.Owner, Repo: route.Name, Page: currentPage, PerPage: perPage})
+		if err != nil {
+			result.SuccessCount = len(result.Results)
+			result.FailureCount = len(result.Failures)
+			re := ResourceError{SourceID: "wiki:*", RemoteType: "wiki", Err: s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "wiki:*"}, "wiki", "*"), Message: err.Error()}
+			result.Failures = append(result.Failures, re)
+			result.FailureCount++
+			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, TotalRequested: totalRequested}
+		}
+		items := page.Items
+		if bounds.MaxRecords > 0 {
+			remaining := bounds.MaxRecords - len(result.Results)
+			if remaining <= 0 {
+				break
+			}
+			if len(items) > remaining {
+				items = items[:remaining]
+			}
+		}
+		reqs := make([]SyncRequest, 0, len(items))
+		for _, wp := range items {
+			reqs = append(reqs, SyncRequest{
+				RepoID:         req.RepoID,
+				AliasType:      "wiki",
+				AliasID:        wp.Slug,
+				IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "wiki", wp.Slug),
+				MaxAttempts:    req.MaxAttempts,
+				MaxSize:        req.MaxSize,
+			})
+		}
+		syncResult, syncErr := s.SyncResources(ctx, reqs)
+		if syncResult != nil {
+			result.Results = append(result.Results, syncResult.Results...)
+			result.Failures = append(result.Failures, syncResult.Failures...)
+		}
+		recordsFetched := len(items)
+		emitProgress(bounds.ProgressChan, ProgressEvent{Collection: "wiki", Page: currentPage, RecordsFetched: recordsFetched})
+		if syncErr != nil {
+			result.SuccessCount = len(result.Results)
+			result.FailureCount = len(result.Failures)
+			var partial *PartialSyncError
+			if errors.As(syncErr, &partial) {
+				var diag SyncDiagnostic
+				if ctx.Err() != nil {
+					diag = SyncDiagnosticCancelled
+					if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+						diag = SyncDiagnosticTimeout
+					}
+				}
+				return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diag}
+			}
+			re := ResourceError{SourceID: "wiki:*", RemoteType: "wiki", Err: syncErr, Message: syncErr.Error()}
+			result.Failures = append(result.Failures, re)
+			result.FailureCount++
+			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
+		}
+		if len(page.Items) < perPage {
+			break
+		}
+		currentPage++
+	}
+	result.SuccessCount = len(result.Results)
+	result.FailureCount = len(result.Failures)
+	if result.FailureCount > 0 {
+		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
+	}
+	return result, nil
 }
 
 func (s *Service) BulkSyncAll(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
@@ -1129,13 +1329,24 @@ func (s *Service) BulkSyncAll(ctx context.Context, req BulkSyncRequest) (*SyncRe
 	req.RepoID = repoID
 	var issuesResult, wikiResult *SyncResourcesResult
 	var issuesErr, wikiErr error
+	var firstDiagnostic SyncDiagnostic
 
 	if err := s.validateRepoScope(ctx, repoID, "issues"); err == nil {
 		issuesResult, issuesErr = s.BulkSyncIssues(ctx, req)
+		if issuesErr != nil {
+			if partial, ok := extractPartialSyncError(issuesErr); ok && partial.Diagnostic != "" {
+				firstDiagnostic = partial.Diagnostic
+			}
+		}
 	}
 
 	if err := s.validateRepoScope(ctx, repoID, "wiki"); err == nil {
 		wikiResult, wikiErr = s.BulkSyncWiki(ctx, req)
+		if wikiErr != nil && firstDiagnostic == "" {
+			if partial, ok := extractPartialSyncError(wikiErr); ok && partial.Diagnostic != "" {
+				firstDiagnostic = partial.Diagnostic
+			}
+		}
 	}
 
 	aggregated := &SyncResourcesResult{
@@ -1158,6 +1369,7 @@ func (s *Service) BulkSyncAll(ctx context.Context, req BulkSyncRequest) (*SyncRe
 			Errors:       aggregated.Failures,
 			SuccessCount: aggregated.SuccessCount,
 			FailureCount: aggregated.FailureCount,
+			Diagnostic:   firstDiagnostic,
 		}
 	}
 	if aggregated.FailureCount > 0 {
@@ -1168,6 +1380,14 @@ func (s *Service) BulkSyncAll(ctx context.Context, req BulkSyncRequest) (*SyncRe
 		}
 	}
 	return aggregated, nil
+}
+
+func extractPartialSyncError(err error) (*PartialSyncError, bool) {
+	var partial *PartialSyncError
+	if errors.As(err, &partial) {
+		return partial, true
+	}
+	return nil, false
 }
 
 func bulkSyncFailureResult(err error, sourceID, remoteType string) (*SyncResourcesResult, error) {

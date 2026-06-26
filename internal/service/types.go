@@ -385,9 +385,11 @@ func (e ResourceError) Error() string {
 func (e ResourceError) Unwrap() error { return e.Err }
 
 type PartialSyncError struct {
-	Errors       []ResourceError `json:"errors"`
-	SuccessCount int             `json:"success_count"`
-	FailureCount int             `json:"failure_count"`
+	Errors         []ResourceError `json:"errors"`
+	SuccessCount   int             `json:"success_count"`
+	FailureCount   int             `json:"failure_count"`
+	Diagnostic     SyncDiagnostic  `json:"diagnostic,omitempty"`
+	TotalRequested int             `json:"total_requested,omitempty"`
 }
 
 func (e PartialSyncError) Error() string {
@@ -693,4 +695,5 @@ type BulkSyncRequest struct {
 	MaxSize        int64         `json:"max_size,omitempty"`
 	Page           int           `json:"page,omitempty"`
 	PerPage        int           `json:"per_page,omitempty"`
+	Bounds         *SyncBounds   `json:"-"`
 }
