@@ -61,6 +61,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Deterministic pre-flight: verify Go toolchain and pre-fetch module dependencies
+# into the isolated GOMODCACHE so that transient module resolution failures
+# surface as explicit run_capture failures rather than Go exit code 65
+# (os.PathError / package not found in GOROOT-like scenarios).
+if ! command -v go >/dev/null 2>&1; then
+  fail "go not found on PATH"
+fi
+
+run_capture cache-mod-download go mod download
+
 # Scenario 1: go test ./internal/cache/... passes.
 run_capture cache-full go test -timeout 60s ./internal/cache/... -count=1
 
