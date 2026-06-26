@@ -848,17 +848,14 @@ func TestMCPLifecycleTools(t *testing.T) {
 	syncCall := call("sync_live", map[string]any{"repo_id": "fixture-a", "issues": true, "remote_alias": "issue:42", "idempotency_key": "mcp-lifecycle-sync-issue-42"})
 	var syncResult syncLiveResult
 	decodeStructured(t, syncCall, &syncResult)
-	if syncResult.FreshCount == 0 || len(syncResult.Results) == 0 || !containsString(syncResult.Collections, "issues") {
+	if syncResult.FreshCount != 0 || len(syncResult.Results) != 0 || !containsString(syncResult.Collections, "issues") || !containsLifecycleDiagnostic(syncResult.Diagnostics, "mcp_live_not_configured") {
 		t.Fatalf("sync_live result=%+v", syncResult)
-	}
-	if syncResult.Results[0].Record.Kind != "issue" || syncResult.Results[0].Record.ID == "" {
-		t.Fatalf("sync_live record=%+v", syncResult.Results[0].Record)
 	}
 
 	bulkSyncCall := call("sync_live", map[string]any{"repo_id": "fixture-a", "issues": true, "idempotency_key": "mcp-lifecycle-bulk-issues"})
 	var bulkSyncResult syncLiveResult
 	decodeStructured(t, bulkSyncCall, &bulkSyncResult)
-	if bulkSyncResult.SuccessCount == 0 || bulkSyncResult.FailureCount != 0 || !containsString(bulkSyncResult.Collections, "issues") {
+	if bulkSyncResult.SuccessCount != 0 || bulkSyncResult.FailureCount != 0 || !containsString(bulkSyncResult.Collections, "issues") || !containsLifecycleDiagnostic(bulkSyncResult.Diagnostics, "mcp_live_not_configured") {
 		t.Fatalf("bulk sync_live result=%+v", bulkSyncResult)
 	}
 
@@ -1571,6 +1568,15 @@ func decodeStructured(t *testing.T, result toolCallResult, target any) {
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsLifecycleDiagnostic(values []lifecycleDiagnostic, code string) bool {
+	for _, value := range values {
+		if value.Code == code {
 			return true
 		}
 	}

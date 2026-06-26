@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/service"
 )
 
@@ -97,6 +98,20 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 	}
 	selected := syncLiveCollections(a)
 	result := syncLiveResult{RepoID: a.RepoID, Collections: selected, GeneratedAt: time.Now().UTC()}
+	if mode, ok := lifecycleProviderMode(s.svc); ok && mode != gitcode.ProviderModeLive {
+		if len(result.Collections) == 0 {
+			result.Collections = []string{"issues", "wiki"}
+		}
+		result.Diagnostics = append(result.Diagnostics, lifecycleDiagnostic{
+			Code:        "mcp_live_not_configured",
+			ErrorClass:  "configuration_error",
+			Message:     "sync_live requires a live GitCode provider, but this MCP server is using " + string(mode),
+			Remediation: "restart the MCP server with live credentials available or pass --live explicitly",
+		})
+		text := fmt.Sprintf("fresh_count=0 collections=%s", strings.Join(result.Collections, ","))
+		s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+		return
+	}
 	if strings.TrimSpace(a.RemoteAlias) != "" {
 		key := strings.TrimSpace(a.IdempotencyKey)
 		if key == "" {
@@ -227,6 +242,19 @@ func syncLiveCollections(a syncLiveArgs) []string {
 		selected = append(selected, "pulls")
 	}
 	return selected
+}
+
+func lifecycleProviderMode(svc serviceInterface) (gitcode.ProviderMode, bool) {
+	if svc == nil {
+		return "", false
+	}
+	provider, ok := svc.(interface {
+		ProviderMode() gitcode.ProviderMode
+	})
+	if !ok {
+		return "", false
+	}
+	return provider.ProviderMode(), true
 }
 
 type indexRepoArgs struct {
