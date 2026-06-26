@@ -721,7 +721,7 @@ func TestSchemasAndResults(t *testing.T) {
 func TestMCPToolKindSchemaIncludesOnlyGitCodeKinds(t *testing.T) {
 	store := populatedStore(t)
 	defer store.Close()
-	srv := New(io.Reader(strings.NewReader("")), io.Discard, io.Discard, service.New(store))
+	srv := New(io.Reader(strings.NewReader("")), io.Discard, io.Discard, service.New(store), nil)
 	registry := srv.toolRegistry()
 	for _, name := range []string{"list_sources", "search_sources", "search_chunks"} {
 		tool, ok := registry[name]
@@ -748,7 +748,7 @@ func TestMCPRegistryIsNameBased(t *testing.T) {
 
 	store := populatedStore(t)
 	defer store.Close()
-	srv := New(io.Reader(strings.NewReader("")), io.Discard, io.Discard, service.New(store))
+	srv := New(io.Reader(strings.NewReader("")), io.Discard, io.Discard, service.New(store), nil)
 	registry := srv.toolRegistry()
 	for _, name := range []string{"search_sources", "get_source", "list_sources", "resolve_id", "repo_status", "sync_live", "index_repo", "doctor"} {
 		tool, ok := registry[name]
@@ -1757,7 +1757,7 @@ func newPipeServer(svc serviceInterface) (*Server, io.ReadWriteCloser, io.ReadWr
 	clientR, serverW := io.Pipe()
 	serverR, clientW := io.Pipe()
 	stderr := &bytes.Buffer{}
-	srv := New(serverR, serverW, stderr, svc)
+	srv := New(serverR, serverW, stderr, svc, nil)
 	conn := &pipeConn{Reader: clientR, Writer: clientW}
 	return srv, conn, conn, stderr
 }

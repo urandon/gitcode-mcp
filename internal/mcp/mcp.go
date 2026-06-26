@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"gitcode-mcp/internal/auth"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/gitcode"
@@ -49,13 +50,14 @@ type RPCHandler struct {
 }
 
 type Server struct {
-	reader            io.Reader
-	writer            io.Writer
-	stderr            io.Writer
-	handler           *RPCHandler
-	svc               serviceInterface
-	startupDiagnostic StartupDiagnostic
-	minimal           bool
+	reader             io.Reader
+	writer             io.Writer
+	stderr             io.Writer
+	handler            *RPCHandler
+	svc                serviceInterface
+	startupDiagnostic  StartupDiagnostic
+	minimal            bool
+	credentialResolver *auth.CredentialResolver
 }
 
 func NewRPCHandler(svc serviceInterface) *RPCHandler {
@@ -66,8 +68,8 @@ func NewMinimalRPCHandler(diagnostic StartupDiagnostic) *RPCHandler {
 	return &RPCHandler{startupDiagnostic: diagnostic, minimal: true}
 }
 
-func New(r io.Reader, w io.Writer, stderr io.Writer, svc serviceInterface) *Server {
-	return &Server{reader: r, writer: w, stderr: stderr, handler: NewRPCHandler(svc), svc: svc}
+func New(r io.Reader, w io.Writer, stderr io.Writer, svc serviceInterface, credResolver *auth.CredentialResolver) *Server {
+	return &Server{reader: r, writer: w, stderr: stderr, handler: NewRPCHandler(svc), svc: svc, credentialResolver: credResolver}
 }
 
 func NewMinimal(r io.Reader, w io.Writer, stderr io.Writer, diagnostic StartupDiagnostic) *Server {

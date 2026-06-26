@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"gitcode-mcp/internal/auth"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/cli"
 	"gitcode-mcp/internal/config"
@@ -22,10 +23,11 @@ import (
 const version = "0.1.0"
 
 type StartupDeps struct {
-	Config  config.Config
-	Cache   CacheStartup
-	GitCode GitCodeStartup
-	Source  config.Source
+	Config             config.Config
+	Cache              CacheStartup
+	GitCode            GitCodeStartup
+	Source             config.Source
+	CredentialResolver *auth.CredentialResolver
 }
 
 type CacheStartup struct {
@@ -130,7 +132,8 @@ func buildStartupDeps(cfg config.Config, token string, live bool) StartupDeps {
 			Token:           token,
 			token:           token,
 		},
-		Source: config.OSSource{},
+		Source:             config.OSSource{},
+		CredentialResolver: auth.NewCredentialResolver(config.OSSource{}),
 	}
 }
 
@@ -416,7 +419,7 @@ func newMCPStdioServer(ctx context.Context, stdin io.Reader, stdout io.Writer, s
 		_ = store.Close()
 		return mcp.NewMinimal(stdin, stdout, stderr, mcp.StartupDiagnosticFromError(err)), func() {}
 	}
-	return mcp.New(stdin, stdout, stderr, svc), func() { _ = store.Close() }
+	return mcp.New(stdin, stdout, stderr, svc, deps.CredentialResolver), func() { _ = store.Close() }
 }
 
 func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind string) int {

@@ -171,18 +171,33 @@ type authStatusResult struct {
 	StoreMode string `json:"store_mode,omitempty"`
 }
 
-func (s *Server) callAuthStatus(_ context.Context, id *json.RawMessage, args json.RawMessage) {
+func (s *Server) callAuthStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	var a map[string]any
 	if err := json.Unmarshal(args, &a); err != nil {
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
 		return
 	}
-	present := strings.TrimSpace(os.Getenv(config.EnvToken)) != ""
-	source := "missing"
-	if present {
-		source = "env:" + config.EnvToken
+	_ = a
+
+	var present bool
+	var source string
+	var storeMode string
+
+	if s.credentialResolver != nil {
+		result := s.credentialResolver.Status(ctx, config.EffectiveConfig{})
+		present = result.Present
+		source = result.Source
+		storeMode = result.StoreMode
+	} else {
+		present = strings.TrimSpace(os.Getenv(config.EnvToken)) != ""
+		source = "missing"
+		if present {
+			source = "env:" + config.EnvToken
+		}
+		storeMode = "env"
 	}
-	result := authStatusResult{Source: source, Present: present, StoreMode: "env"}
+
+	result := authStatusResult{Source: source, Present: present, StoreMode: storeMode}
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: fmt.Sprintf("credential_present=%t source=%s", result.Present, result.Source)}}, StructuredContent: result})
 }
 
