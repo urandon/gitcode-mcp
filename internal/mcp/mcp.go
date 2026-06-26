@@ -442,9 +442,9 @@ func (s *Server) init(req request) {
 
 func (s *Server) toolsList(req request) {
 	registry := s.toolRegistry()
-	tools := make([]toolDefinition, 0, len(toolDefs))
-	for _, def := range toolDefs {
-		tool, ok := registry[def.Name]
+	tools := make([]toolDefinition, 0, len(registry))
+	for _, name := range toolListOrder {
+		tool, ok := registry[name]
 		if !ok {
 			continue
 		}
@@ -495,24 +495,55 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 	tool.handler(ctx, req.ID, args)
 }
 
-func (s *Server) toolRegistry() toolRegistry {
-	return toolRegistry{
-		"search_sources":     {definition: toolDefs[0], handler: s.callSearchSources},
-		"get_source":         {definition: toolDefs[1], handler: s.callGetSource},
-		"list_sources":       {definition: toolDefs[2], handler: s.callListSources},
-		"list_chunks":        {definition: toolDefs[3], handler: s.callListChunks},
-		"search_chunks":      {definition: toolDefs[4], handler: s.callSearchChunks},
-		"get_snippet":        {definition: toolDefs[5], handler: s.callGetSnippet},
-		"stale_index_report": {definition: toolDefs[6], handler: s.callStaleIndexReport},
-		"recent_changes":     {definition: toolDefs[7], handler: s.callRecentChanges},
-		"link_check":         {definition: toolDefs[8], handler: s.callLinkCheck},
-		"cache_status":       {definition: toolDefs[9], handler: s.callCacheStatus},
-		"source_backlinks":   {definition: toolDefs[10], handler: s.callSourceBacklinks},
-		"resolve_id":         {definition: toolDefs[11], handler: s.callResolveID},
-		"sync_status":        {definition: toolDefs[12], handler: s.callSyncStatus},
-		"export_snapshot":    {definition: toolDefs[13], handler: s.callExportSnapshot},
-		"diff_snapshot":      {definition: toolDefs[14], handler: s.callDiffSnapshot},
+var toolListOrder = []string{
+	"search_sources",
+	"get_source",
+	"list_sources",
+	"list_chunks",
+	"search_chunks",
+	"get_snippet",
+	"stale_index_report",
+	"recent_changes",
+	"link_check",
+	"cache_status",
+	"source_backlinks",
+	"resolve_id",
+	"sync_status",
+	"export_snapshot",
+	"diff_snapshot",
+}
+
+func toolDefinitionByName(name string) toolDefinition {
+	for _, def := range toolDefs {
+		if def.Name == name {
+			return def
+		}
 	}
+	return toolDefinition{Name: name, InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{}}}
+}
+
+func registerTool(registry toolRegistry, name string, handler toolHandler) {
+	registry[name] = registeredTool{definition: toolDefinitionByName(name), handler: handler}
+}
+
+func (s *Server) toolRegistry() toolRegistry {
+	registry := toolRegistry{}
+	registerTool(registry, "search_sources", s.callSearchSources)
+	registerTool(registry, "get_source", s.callGetSource)
+	registerTool(registry, "list_sources", s.callListSources)
+	registerTool(registry, "list_chunks", s.callListChunks)
+	registerTool(registry, "search_chunks", s.callSearchChunks)
+	registerTool(registry, "get_snippet", s.callGetSnippet)
+	registerTool(registry, "stale_index_report", s.callStaleIndexReport)
+	registerTool(registry, "recent_changes", s.callRecentChanges)
+	registerTool(registry, "link_check", s.callLinkCheck)
+	registerTool(registry, "cache_status", s.callCacheStatus)
+	registerTool(registry, "source_backlinks", s.callSourceBacklinks)
+	registerTool(registry, "resolve_id", s.callResolveID)
+	registerTool(registry, "sync_status", s.callSyncStatus)
+	registerTool(registry, "export_snapshot", s.callExportSnapshot)
+	registerTool(registry, "diff_snapshot", s.callDiffSnapshot)
+	return registry
 }
 
 type searchSourcesArgs struct {

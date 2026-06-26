@@ -721,6 +721,48 @@ func TestMCPToolKindSchemaIncludesOnlyGitCodeKinds(t *testing.T) {
 	}
 }
 
+func TestMCPRegistryIsNameBased(t *testing.T) {
+	originalDefs := append([]toolDefinition(nil), toolDefs...)
+	defer func() { toolDefs = originalDefs }()
+	for i, j := 0, len(toolDefs)-1; i < j; i, j = i+1, j-1 {
+		toolDefs[i], toolDefs[j] = toolDefs[j], toolDefs[i]
+	}
+
+	store := populatedStore(t)
+	defer store.Close()
+	srv := New(io.Reader(strings.NewReader("")), io.Discard, io.Discard, service.New(store))
+	registry := srv.toolRegistry()
+	for _, name := range []string{"search_sources", "get_source", "list_sources", "resolve_id"} {
+		tool, ok := registry[name]
+		if !ok {
+			t.Fatalf("tool %s is not registered", name)
+		}
+		if tool.definition.Name != name {
+			t.Fatalf("registry[%q].definition.Name = %q", name, tool.definition.Name)
+		}
+	}
+
+	var out bytes.Buffer
+	srv.writer = &out
+	srv.toolsList(request{JSONRPC: "2.0"})
+	var resp response
+	if err := json.Unmarshal(bytesTrimSpace(out.Bytes()), &resp); err != nil {
+		t.Fatal(err)
+	}
+	var tls toolsListResult
+	if err := json.Unmarshal(resp.Result, &tls); err != nil {
+		t.Fatal(err)
+	}
+	if len(tls.Tools) != len(toolListOrder) {
+		t.Fatalf("tools count = %d, want %d", len(tls.Tools), len(toolListOrder))
+	}
+	for i, want := range toolListOrder {
+		if tls.Tools[i].Name != want {
+			t.Fatalf("tool[%d].Name = %q, want %q", i, tls.Tools[i].Name, want)
+		}
+	}
+}
+
 func TestMCPReadToolParityOverStdio(t *testing.T) {
 	store := populatedStore(t)
 	defer store.Close()
