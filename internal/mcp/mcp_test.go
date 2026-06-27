@@ -175,13 +175,13 @@ func TestIntegration(t *testing.T) {
 	if err := json.Unmarshal(toolsR.Result, &tls); err != nil {
 		t.Fatalf("decode tools/list result: %v", err)
 	}
-	if len(tls.Tools) != len(toolListOrder) {
-		t.Fatalf("tools count = %d, want %d: %+v", len(tls.Tools), len(toolListOrder), tls.Tools)
+	expectedNames := expectedToolNamesForAccess(ToolAccessRead)
+	if len(tls.Tools) != len(expectedNames) {
+		t.Fatalf("tools count = %d, want %d: %+v", len(tls.Tools), len(expectedNames), tls.Tools)
 	}
-	expectedNames := toolListOrder
 	registry := srv.toolRegistry()
-	if len(registry) != len(tls.Tools) {
-		t.Fatalf("registry count = %d, listed tools = %d", len(registry), len(tls.Tools))
+	if len(registry) != len(toolListOrder) {
+		t.Fatalf("registry count = %d, want %d", len(registry), len(toolListOrder))
 	}
 	seen := map[string]bool{}
 	for i, want := range expectedNames {
@@ -300,10 +300,10 @@ func TestMCPBlockedWriteBoundary(t *testing.T) {
 		if err := json.Unmarshal(resp.Result, &tls); err != nil {
 			t.Fatal(err)
 		}
-		if len(tls.Tools) != len(toolListOrder) {
-			t.Fatalf("tools count = %d, want %d", len(tls.Tools), len(toolListOrder))
-		}
 		blocked := map[string]bool{
+			"sync_live": false, "index_repo": false,
+			"add_issue_comment": false, "update_issue": false,
+			"create_pr": false, "update_pr": false, "add_pr_comment": false, "link_pr_issue": false,
 			"create_issue": false, "add_comment": false,
 			"create_page": false, "update_page": false,
 			"create-issue": false, "update-issue": false, "add-label": false,
@@ -372,6 +372,93 @@ func TestMCPBlockedWriteBoundary(t *testing.T) {
 
 	r.Close()
 	wg.Wait()
+}
+
+func TestMCPToolAccessPolicy(t *testing.T) {
+	t.Run("read mode filters and blocks write tools before validation", func(t *testing.T) {
+		spy := &writeLifecycleSpyService{}
+		srv, r, w, stderr := newPipeServer(spy)
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = srv.Serve() }()
+
+		b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": "list", "method": "tools/list"})
+		_, _ = r.Write(append(b, '\n'))
+		line, err := readLine(w)
+		if err != nil {
+			t.Fatalf("read tools/list response: %v (stderr: %s)", err, stderr.String())
+		}
+		var listResp response
+		if err := json.Unmarshal(line, &listResp); err != nil || listResp.Error != nil {
+			t.Fatalf("tools/list response=%s err=%v", string(line), err)
+		}
+		var tls toolsListResult
+		if err := json.Unmarshal(listResp.Result, &tls); err != nil {
+			t.Fatal(err)
+		}
+		for _, tool := range tls.Tools {
+			if writeToolNames[tool.Name] {
+				t.Fatalf("read mode listed write tool %q", tool.Name)
+			}
+		}
+
+		b, _ = json.Marshal(map[string]any{"jsonrpc": "2.0", "id": "blocked", "method": "tools/call", "params": map[string]any{"name": "add_pr_comment", "arguments": map[string]any{}}})
+		_, _ = r.Write(append(b, '\n'))
+		line, err = readLine(w)
+		if err != nil {
+			t.Fatalf("read blocked call response: %v (stderr: %s)", err, stderr.String())
+		}
+		var callResp response
+		if err := json.Unmarshal(line, &callResp); err != nil {
+			t.Fatalf("decode blocked call response: %v", err)
+		}
+		if callResp.Error == nil || callResp.Error.Data == nil {
+			t.Fatalf("blocked call missing error data: %#v", callResp)
+		}
+		if callResp.Error.Data.Code != "tool_disabled_by_policy" || callResp.Error.Data.AccessMode != "read" || callResp.Error.Code != -32000 {
+			t.Fatalf("unexpected blocked call error: %#v", callResp.Error)
+		}
+		if len(spy.calls) != 0 {
+			t.Fatalf("disabled write tool reached service: %#v", spy.calls)
+		}
+
+		_ = r.Close()
+		wg.Wait()
+	})
+
+	t.Run("write mode lists write tools", func(t *testing.T) {
+		srv, r, w, stderr := newPipeServerWithToolAccess(&writeLifecycleSpyService{}, ToolAccessWrite)
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = srv.Serve() }()
+
+		b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": "list", "method": "tools/list"})
+		_, _ = r.Write(append(b, '\n'))
+		line, err := readLine(w)
+		if err != nil {
+			t.Fatalf("read tools/list response: %v (stderr: %s)", err, stderr.String())
+		}
+		var resp response
+		if err := json.Unmarshal(line, &resp); err != nil || resp.Error != nil {
+			t.Fatalf("tools/list response=%s err=%v", string(line), err)
+		}
+		var tls toolsListResult
+		if err := json.Unmarshal(resp.Result, &tls); err != nil {
+			t.Fatal(err)
+		}
+		listed := map[string]bool{}
+		for _, tool := range tls.Tools {
+			listed[tool.Name] = true
+		}
+		for name := range writeToolNames {
+			if !listed[name] {
+				t.Fatalf("write mode missing write tool %q", name)
+			}
+		}
+
+		_ = r.Close()
+		wg.Wait()
+	})
 }
 
 func TestSchemasAndResults(t *testing.T) {
@@ -773,10 +860,11 @@ func TestMCPRegistryIsNameBased(t *testing.T) {
 	if err := json.Unmarshal(resp.Result, &tls); err != nil {
 		t.Fatal(err)
 	}
-	if len(tls.Tools) != len(toolListOrder) {
-		t.Fatalf("tools count = %d, want %d", len(tls.Tools), len(toolListOrder))
+	expectedNames := expectedToolNamesForAccess(ToolAccessRead)
+	if len(tls.Tools) != len(expectedNames) {
+		t.Fatalf("tools count = %d, want %d", len(tls.Tools), len(expectedNames))
 	}
-	for i, want := range toolListOrder {
+	for i, want := range expectedNames {
 		if tls.Tools[i].Name != want {
 			t.Fatalf("tool[%d].Name = %q, want %q", i, tls.Tools[i].Name, want)
 		}
@@ -790,7 +878,7 @@ func TestMCPLifecycleTools(t *testing.T) {
 	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "empty-repo", Owner: "owner", Name: "empty", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
 		t.Fatal(err)
 	}
-	srv, r, w, stderr := newPipeServer(service.New(store))
+	srv, r, w, stderr := newPipeServerWithToolAccess(service.New(store), ToolAccessWrite)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -878,6 +966,9 @@ func TestMCPLifecycleTools(t *testing.T) {
 	decodeStructured(t, doctorCall, &doctor)
 	if doctor.Status != "ok" || doctor.Diagnostics == nil {
 		t.Fatalf("doctor result=%+v", doctor)
+	}
+	if doctor.ToolAccess != "write" {
+		t.Fatalf("doctor tool_access=%q, want write", doctor.ToolAccess)
 	}
 	doctorRepoCall := call("doctor", map[string]any{"repo_id": "fixture-a"})
 	var doctorRepo doctorResult
@@ -978,7 +1069,7 @@ func (s *indexRepoSpyService) StaleIndex(ctx context.Context, req service.StaleI
 
 func TestMCPIndexRepoDelegatesServiceIndex(t *testing.T) {
 	spy := &indexRepoSpyService{}
-	srv, r, w, stderr := newPipeServer(spy)
+	srv, r, w, stderr := newPipeServerWithToolAccess(spy, ToolAccessWrite)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() { defer wg.Done(); _ = srv.Serve() }()
@@ -1057,7 +1148,7 @@ func (s *writeLifecycleSpyService) LinkPRIssue(_ context.Context, req service.Wr
 
 func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 	spy := &writeLifecycleSpyService{}
-	srv, r, w, stderr := newPipeServer(spy)
+	srv, r, w, stderr := newPipeServerWithToolAccess(spy, ToolAccessWrite)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() { defer wg.Done(); _ = srv.Serve() }()
@@ -1139,7 +1230,7 @@ func (s *syncLiveBoundsSpyService) BulkSyncIssues(ctx context.Context, req servi
 
 func TestMCPSyncLivePropagatesBoundsAndDiagnostics(t *testing.T) {
 	spy := &syncLiveBoundsSpyService{}
-	srv, r, w, stderr := newPipeServer(spy)
+	srv, r, w, stderr := newPipeServerWithToolAccess(spy, ToolAccessWrite)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() { defer wg.Done(); _ = srv.Serve() }()
@@ -1202,7 +1293,7 @@ func TestMCPIndexRepoNotStaleDiagnostic(t *testing.T) {
 		}
 	}
 
-	srv, r, w, stderr := newPipeServer(service.New(store))
+	srv, r, w, stderr := newPipeServerWithToolAccess(service.New(store), ToolAccessWrite)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() { defer wg.Done(); _ = srv.Serve() }()
@@ -2001,12 +2092,27 @@ func TestFramingAndErrors(t *testing.T) {
 }
 
 func newPipeServer(svc serviceInterface) (*Server, io.ReadWriteCloser, io.ReadWriteCloser, *bytes.Buffer) {
+	return newPipeServerWithToolAccess(svc, ToolAccessRead)
+}
+
+func newPipeServerWithToolAccess(svc serviceInterface, access ToolAccess) (*Server, io.ReadWriteCloser, io.ReadWriteCloser, *bytes.Buffer) {
 	clientR, serverW := io.Pipe()
 	serverR, clientW := io.Pipe()
 	stderr := &bytes.Buffer{}
-	srv := New(serverR, serverW, stderr, svc, nil)
+	srv := NewWithToolAccess(serverR, serverW, stderr, svc, nil, access)
 	conn := &pipeConn{Reader: clientR, Writer: clientW}
 	return srv, conn, conn, stderr
+}
+
+func expectedToolNamesForAccess(access ToolAccess) []string {
+	names := make([]string, 0, len(toolListOrder))
+	for _, name := range toolListOrder {
+		if normalizeToolAccess(access) == ToolAccessRead && writeToolNames[name] {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names
 }
 
 type pipeConn struct {

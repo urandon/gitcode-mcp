@@ -325,6 +325,7 @@ type doctorArgs struct {
 type doctorResult struct {
 	Status       string                           `json:"status"`
 	RepoID       string                           `json:"repo_id,omitempty"`
+	ToolAccess   string                           `json:"tool_access"`
 	Cache        *service.CacheStatusResult       `json:"cache,omitempty"`
 	Repo         *service.RepositoryStatus        `json:"repo,omitempty"`
 	Auth         *authStatusResult                `json:"auth,omitempty"`
@@ -341,7 +342,7 @@ func (s *Server) callDoctor(ctx context.Context, id *json.RawMessage, args json.
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
 		return
 	}
-	result := doctorResult{Status: "ok", RepoID: a.RepoID, Diagnostics: []lifecycleDiagnostic{}, GeneratedAt: time.Now().UTC()}
+	result := doctorResult{Status: "ok", RepoID: a.RepoID, ToolAccess: string(s.activeToolAccess()), Diagnostics: []lifecycleDiagnostic{}, GeneratedAt: time.Now().UTC()}
 	text := "doctor status=ok"
 	if s.startupDiagnostic.present() {
 		result.Status = "degraded"

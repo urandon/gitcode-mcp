@@ -62,6 +62,9 @@ func TestConfigLoading(t *testing.T) {
 		if cfg.CachePath != wantCache || cfg.LockPath != wantCache+".lock" || cfg.Format != "text" || cfg.DefaultTimeout != 30*time.Second {
 			t.Fatalf("unexpected defaults: %#v", cfg)
 		}
+		if cfg.MCPToolAccess != MCPToolAccessRead {
+			t.Fatalf("mcp tool access = %q, want read", cfg.MCPToolAccess)
+		}
 	})
 
 	t.Run("SCN-CONFIG-EXPLICIT-PATH", func(t *testing.T) {
@@ -162,6 +165,58 @@ func TestConfigLoading(t *testing.T) {
 		}
 		if strings.Contains(err.Error(), configPath) || strings.Contains(err.Error(), src.homeDir) {
 			t.Fatalf("error was not redacted: %v", err)
+		}
+	})
+
+	t.Run("SCN-CONFIG-MCP-TOOL-ACCESS-JSON", func(t *testing.T) {
+		src := newMemorySource(t)
+		configPath := filepath.Join(t.TempDir(), "mcp.json")
+		src.env[EnvConfigPath] = configPath
+		src.files[configPath] = []byte(`{"mcp":{"tools":{"access":"write"}}}`)
+		eff, err := LoadEffective(src, Overrides{})
+		if err != nil {
+			t.Fatalf("LoadEffective returned error: %v", err)
+		}
+		if eff.Config.MCPToolAccess != MCPToolAccessWrite || eff.FieldSources["mcp_tool_access"] != "legacy-json" {
+			t.Fatalf("mcp tool access effective=%#v", eff)
+		}
+	})
+
+	t.Run("SCN-CONFIG-MCP-TOOL-ACCESS-YAML", func(t *testing.T) {
+		src := newMemorySource(t)
+		configPath := filepath.Join(t.TempDir(), "mcp.yaml")
+		src.env[EnvMCPConfigPath] = configPath
+		src.files[configPath] = []byte("mcp:\n  tools:\n    access: write\n")
+		cfg, err := Load(src, Overrides{})
+		if err != nil {
+			t.Fatalf("Load returned error: %v", err)
+		}
+		if cfg.MCPToolAccess != MCPToolAccessWrite {
+			t.Fatalf("mcp tool access = %q, want write", cfg.MCPToolAccess)
+		}
+	})
+
+	t.Run("SCN-CONFIG-MCP-TOOL-ACCESS-ENV-OVERRIDE", func(t *testing.T) {
+		src := newMemorySource(t)
+		configPath := filepath.Join(t.TempDir(), "mcp.json")
+		src.env[EnvMCPConfigPath] = configPath
+		src.env[EnvMCPToolAccess] = "read"
+		src.files[configPath] = []byte(`{"mcp":{"tools":{"access":"write"}}}`)
+		eff, err := LoadEffective(src, Overrides{})
+		if err != nil {
+			t.Fatalf("LoadEffective returned error: %v", err)
+		}
+		if eff.Config.MCPToolAccess != MCPToolAccessRead || eff.FieldSources["mcp_tool_access"] != "env:"+EnvMCPToolAccess {
+			t.Fatalf("mcp tool access env override effective=%#v", eff)
+		}
+	})
+
+	t.Run("SCN-CONFIG-MCP-TOOL-ACCESS-INVALID", func(t *testing.T) {
+		src := newMemorySource(t)
+		src.env[EnvMCPToolAccess] = "admin"
+		_, err := Load(src, Overrides{})
+		if err == nil || !strings.Contains(err.Error(), "expected read or write") {
+			t.Fatalf("Load error = %v, want invalid access", err)
 		}
 	})
 }

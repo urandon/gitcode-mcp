@@ -119,7 +119,9 @@ The MCP server exposes the same audited live-write lifecycle for agent workflows
 | `add_pr_comment` | Add a testing/report comment to a pull request |
 | `link_pr_issue` | Link a pull request to an issue through the deterministic description fallback |
 
-Each MCP write call requires `write_mode: "live"`. Idempotency keys are accepted on every write tool and are used for safe replay/conflict detection. Successful writes report provider confirmation, audit/cache evidence, remote identity, and the idempotency key; failed writes return typed public-safe diagnostics and do not claim cache confirmation.
+MCP tool access defaults to `read`, so these write lifecycle tools are hidden from `tools/list` unless the server is started with `mcp.tools.access: write` or `GITCODE_MCP_TOOL_ACCESS=write`. A direct call while read-only returns `tool_disabled_by_policy` before validation, credentials, network, or cache mutation. `gitcode-mcp doctor` reports the active `tool_access` mode.
+
+Each MCP write call also requires `write_mode: "live"`. Idempotency keys are accepted on every write tool and are used for safe replay/conflict detection. Successful writes report provider confirmation, audit/cache evidence, remote identity, and the idempotency key; failed writes return typed public-safe diagnostics and do not claim cache confirmation.
 
 ## 6. Search
 

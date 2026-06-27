@@ -97,9 +97,53 @@ Configure your MCP client with the server URL:
 }
 ```
 
+### MCP tool access
+
+MCP tool access defaults to `read`. In read-only mode the server exposes cache/read/status tools and hides live/cache mutation tools from `tools/list`. A direct `tools/call` for a disabled mutation tool returns `tool_disabled_by_policy` before argument validation, credential resolution, network access, or cache mutation.
+
+Enable write-capable MCP sessions explicitly:
+
+```yaml
+mcp:
+  tools:
+    access: write
+```
+
+or:
+
+```sh
+GITCODE_MCP_TOOL_ACCESS=write gitcode-mcp --mcp --live
+```
+
+Read-only Codex MCP example:
+
+```json
+{
+  "command": "gitcode-mcp",
+  "args": ["--mcp", "--cache-path", "/path/to/cache.db"],
+  "env": {
+    "GITCODE_MCP_TOOL_ACCESS": "read"
+  }
+}
+```
+
+Write-enabled Codex MCP example:
+
+```json
+{
+  "command": "gitcode-mcp",
+  "args": ["--mcp", "--live", "--cache-path", "/path/to/cache.db"],
+  "env": {
+    "GITCODE_MCP_TOOL_ACCESS": "write"
+  }
+}
+```
+
+`doctor` reports the active `tool_access` mode so agents can explain why write tools are or are not available.
+
 ### MCP tools exposed
 
-All tools are available in both transport modes:
+Tools are available in both transport modes. Read-only mode lists the cache/read/status subset; write mode lists all current tools:
 
 | Tool | Description |
 |---|---|

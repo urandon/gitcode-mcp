@@ -59,6 +59,7 @@ type RPCHandler struct {
 	startupDiagnostic  StartupDiagnostic
 	minimal            bool
 	credentialResolver *auth.CredentialResolver
+	toolAccess         ToolAccess
 }
 
 type Server struct {
@@ -70,26 +71,40 @@ type Server struct {
 	startupDiagnostic  StartupDiagnostic
 	minimal            bool
 	credentialResolver *auth.CredentialResolver
+	toolAccess         ToolAccess
 }
 
 func NewRPCHandler(svc serviceInterface) *RPCHandler {
-	return &RPCHandler{svc: svc}
+	return NewRPCHandlerWithToolAccess(svc, ToolAccessRead)
 }
 
 func NewRPCHandlerWithCredentialResolver(svc serviceInterface, credResolver *auth.CredentialResolver) *RPCHandler {
-	return &RPCHandler{svc: svc, credentialResolver: credResolver}
+	return NewRPCHandlerWithCredentialResolverAndToolAccess(svc, credResolver, ToolAccessRead)
+}
+
+func NewRPCHandlerWithToolAccess(svc serviceInterface, access ToolAccess) *RPCHandler {
+	return &RPCHandler{svc: svc, toolAccess: normalizeToolAccess(access)}
+}
+
+func NewRPCHandlerWithCredentialResolverAndToolAccess(svc serviceInterface, credResolver *auth.CredentialResolver, access ToolAccess) *RPCHandler {
+	return &RPCHandler{svc: svc, credentialResolver: credResolver, toolAccess: normalizeToolAccess(access)}
 }
 
 func NewMinimalRPCHandler(diagnostic StartupDiagnostic) *RPCHandler {
-	return &RPCHandler{startupDiagnostic: diagnostic, minimal: true}
+	return &RPCHandler{startupDiagnostic: diagnostic, minimal: true, toolAccess: ToolAccessRead}
 }
 
 func New(r io.Reader, w io.Writer, stderr io.Writer, svc serviceInterface, credResolver *auth.CredentialResolver) *Server {
-	return &Server{reader: r, writer: w, stderr: stderr, handler: NewRPCHandlerWithCredentialResolver(svc, credResolver), svc: svc, credentialResolver: credResolver}
+	return NewWithToolAccess(r, w, stderr, svc, credResolver, ToolAccessRead)
+}
+
+func NewWithToolAccess(r io.Reader, w io.Writer, stderr io.Writer, svc serviceInterface, credResolver *auth.CredentialResolver, access ToolAccess) *Server {
+	access = normalizeToolAccess(access)
+	return &Server{reader: r, writer: w, stderr: stderr, handler: NewRPCHandlerWithCredentialResolverAndToolAccess(svc, credResolver, access), svc: svc, credentialResolver: credResolver, toolAccess: access}
 }
 
 func NewMinimal(r io.Reader, w io.Writer, stderr io.Writer, diagnostic StartupDiagnostic) *Server {
-	return &Server{reader: r, writer: w, stderr: stderr, handler: NewMinimalRPCHandler(diagnostic), startupDiagnostic: diagnostic, minimal: true}
+	return &Server{reader: r, writer: w, stderr: stderr, handler: NewMinimalRPCHandler(diagnostic), startupDiagnostic: diagnostic, minimal: true, toolAccess: ToolAccessRead}
 }
 
 func (h *RPCHandler) Handle(ctx context.Context, req request) (*response, bool) {
@@ -97,7 +112,7 @@ func (h *RPCHandler) Handle(ctx context.Context, req request) (*response, bool) 
 		return &response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32600, Message: "Invalid request"}}, true
 	}
 	var buf bytes.Buffer
-	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver}
+	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver, toolAccess: normalizeToolAccess(h.toolAccess)}
 	server.handle(ctx, req, req.ID == nil)
 	line := bytes.TrimSpace(buf.Bytes())
 	if len(line) == 0 {
@@ -139,6 +154,8 @@ type errorData struct {
 	StartedAt    string `json:"started_at,omitempty"`
 	PID          int    `json:"pid,omitempty"`
 	CachePath    string `json:"cache_path,omitempty"`
+	AccessMode   string `json:"access_mode,omitempty"`
+	Remediation  string `json:"remediation,omitempty"`
 }
 
 type toolDefinition struct {
@@ -204,6 +221,42 @@ type toolContentItem struct {
 }
 
 var sourceKindEnums = []string{"issue", "wiki", "pull_request", "pr_comment"}
+
+type ToolAccess string
+
+const (
+	ToolAccessRead  ToolAccess = "read"
+	ToolAccessWrite ToolAccess = "write"
+)
+
+var writeToolNames = map[string]bool{
+	"sync_live":         true,
+	"index_repo":        true,
+	"add_issue_comment": true,
+	"update_issue":      true,
+	"create_pr":         true,
+	"update_pr":         true,
+	"add_pr_comment":    true,
+	"link_pr_issue":     true,
+}
+
+func normalizeToolAccess(access ToolAccess) ToolAccess {
+	if access == ToolAccessWrite {
+		return ToolAccessWrite
+	}
+	return ToolAccessRead
+}
+
+func (s *Server) activeToolAccess() ToolAccess {
+	if s == nil {
+		return ToolAccessRead
+	}
+	return normalizeToolAccess(s.toolAccess)
+}
+
+func (s *Server) toolDisabledByPolicy(name string) bool {
+	return s.activeToolAccess() == ToolAccessRead && writeToolNames[name]
+}
 
 func intPtr(v int) *int             { return &v }
 func float64Ptr(v float64) *float64 { return &v }
@@ -555,6 +608,9 @@ func (s *Server) toolsList(req request) {
 		if !ok {
 			continue
 		}
+		if s.toolDisabledByPolicy(name) {
+			continue
+		}
 		tools = append(tools, tool.definition)
 	}
 	result := toolsListResult{Tools: tools}
@@ -578,6 +634,11 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 	}
 	if params.Name == "" {
 		s.writeError(req.ID, -32602, "Invalid params", &errorData{Code: "invalid_params", Message: "name is required"})
+		return
+	}
+
+	if s.toolDisabledByPolicy(params.Name) {
+		s.writeToolDisabledByPolicy(req.ID, params.Name)
 		return
 	}
 
@@ -1384,6 +1445,11 @@ func (s *Server) callDiffSnapshot(ctx context.Context, id *json.RawMessage, args
 func (s *Server) writeToolResult(id *json.RawMessage, result toolCallResult) {
 	b, _ := json.Marshal(result)
 	s.writeResponse(id, b)
+}
+
+func (s *Server) writeToolDisabledByPolicy(id *json.RawMessage, name string) {
+	access := string(s.activeToolAccess())
+	s.writeError(id, -32000, "Tool disabled by policy", &errorData{Code: "tool_disabled_by_policy", Message: fmt.Sprintf("%q is disabled by MCP tool access policy", name), AccessMode: access, Remediation: "set mcp.tools.access to \"write\" or GITCODE_MCP_TOOL_ACCESS=write for write-capable sessions"})
 }
 
 func mcpDiagnostic(err error) (diagnostics.Diagnostic, bool) {

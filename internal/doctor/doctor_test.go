@@ -74,6 +74,7 @@ func TestBuildFullReport(t *testing.T) {
 		Source:             src,
 		CredentialReporter: fakeCredentialReporter{status: config.CredentialStatus{Source: "env", Present: true, StoreMode: "env", AvailableSources: []string{"env", "keychain"}}},
 		CachePath:          "/cache/db.sqlite",
+		MCPToolAccess:      "write",
 		OpenStore:          func(context.Context, string) (Store, error) { return store, nil },
 		NewService: func(Store) Service {
 			return fakeService{
@@ -89,10 +90,13 @@ func TestBuildFullReport(t *testing.T) {
 	if report.Version != "test-version" || report.Cache.SchemaVersion != "7" || report.Repo.Status != "ready" || report.Credential.Status != "token_configured" || report.Sync.Status != "available" || report.Index.Status != "available" || report.MCP.TransportStdio != "supported" || report.LiveProvider.ProviderMode != "fixture" {
 		t.Fatalf("unexpected report: %#v", report)
 	}
+	if report.MCP.ToolAccess != "write" {
+		t.Fatalf("mcp tool_access=%q, want write", report.MCP.ToolAccess)
+	}
 	var b strings.Builder
 	RenderText(&b, report)
 	out := b.String()
-	for _, want := range []string{"version:", "config:", "cache:", "credential:", "repo:", "sync:", "index:", "mcp:", "live_provider:", "auth_probe:", "last_sync_completed_at:", "zero_delta: true"} {
+	for _, want := range []string{"version:", "config:", "cache:", "credential:", "repo:", "sync:", "index:", "mcp:", "tool_access: write", "live_provider:", "auth_probe:", "last_sync_completed_at:", "zero_delta: true"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("text missing %q in %q", want, out)
 		}
