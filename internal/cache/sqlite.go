@@ -92,6 +92,9 @@ func newSQLiteStore(ctx context.Context, dataSourceName string, forceNoFTS bool)
 		_ = db.Close()
 		return nil, &SchemaVersionError{Compat: compat}
 	}
+	if compat.DetectedVersion == compat.ExpectedVersion {
+		return store, nil
+	}
 	lease, err := store.AcquireWriter(ctx, WriterRequest{Operation: "migration"})
 	if err != nil {
 		_ = db.Close()

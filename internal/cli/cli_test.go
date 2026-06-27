@@ -31,6 +31,23 @@ func TestHelpReturnsSuccess(t *testing.T) {
 	}
 }
 
+func TestWriteErrorClassifiesCacheLockContention(t *testing.T) {
+	var stderr bytes.Buffer
+	err := cache.ErrLockContention{Path: "cache.db.writer.lock", Operation: "sync", RepoID: "fixture-a"}
+
+	code := writeError(&stderr, "text", err)
+
+	if code != 1 {
+		t.Fatalf("writeError code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "failure_class: cache_busy") {
+		t.Fatalf("stderr = %q, want cache_busy failure_class", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "failure_class: internal_error") {
+		t.Fatalf("stderr = %q, want no internal_error classification", stderr.String())
+	}
+}
+
 func TestMinimumReplacementBar(t *testing.T) {
 	factory := cacheBackedFactory(t)
 	cases := [][]string{

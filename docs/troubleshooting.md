@@ -47,17 +47,19 @@ Reports token absent.
 ### Cache database locked
 
 ```text
-cache: database is locked
+cache_busy
 ```
 
-**Cause:** Another process holds the writer lock (sync or index in progress).
+**Cause:** Another process holds the writer lock for a mutating operation such as sync, index refresh, cache initialization, migration, or a live write.
+
+Current-schema cache reads should normally continue while a logical writer lease exists. If a read-style CLI or MCP call reports lock contention, it should be a typed `cache_busy` or `cache_lock_contention` diagnostic rather than `internal_error`.
 
 **Diagnostic:**
 ```sh
 gitcode-mcp cache-status --repo example-owner/example-repo
 ```
 
-**Fix:** Wait for the writer to complete, or terminate the process holding the lock.
+**Fix:** Wait for the writer to complete, then retry the mutating operation. If the holder process is gone, inspect the process metadata in the diagnostic before removing stale state manually.
 
 ### Cache database unreadable
 
