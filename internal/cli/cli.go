@@ -1197,7 +1197,11 @@ func renderOperationText(w io.Writer, result service.OperationResult) {
 }
 
 func renderSyncText(w io.Writer, result service.SyncResult) {
-	fmt.Fprintf(w, "sync: %s fetched=%d updated=%d inserted=%d skipped=%d conflicts=%d idempotency_key=%s replayed=%t zero_delta=%t\n", result.Status, result.Counts.Fetched, result.Counts.Updated, result.Counts.Inserted, result.Counts.Skipped, result.Counts.Conflicts, result.IdempotencyKey, result.Replayed, result.ZeroDelta)
+	extra := ""
+	if result.Counts.Listed > 0 || result.Counts.FetchedDetail > 0 || result.Counts.SkippedByRevision > 0 || result.Counts.Failed > 0 {
+		extra = fmt.Sprintf(" listed=%d fetched_detail=%d skipped_by_revision=%d failed=%d", result.Counts.Listed, result.Counts.FetchedDetail, result.Counts.SkippedByRevision, result.Counts.Failed)
+	}
+	fmt.Fprintf(w, "sync: %s fetched=%d updated=%d inserted=%d skipped=%d conflicts=%d%s idempotency_key=%s replayed=%t zero_delta=%t\n", result.Status, result.Counts.Fetched, result.Counts.Updated, result.Counts.Inserted, result.Counts.Skipped, result.Counts.Conflicts, extra, result.IdempotencyKey, result.Replayed, result.ZeroDelta)
 }
 
 func renderCacheStatusText(w io.Writer, result service.CacheStatusResult) {

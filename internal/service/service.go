@@ -1175,13 +1175,14 @@ func (s *Service) bulkSyncIssuesBounded(ctx context.Context, req BulkSyncRequest
 func (s *Service) stageIssuePage(ctx context.Context, req BulkSyncRequest, items []gitcode.IssueSummary, result *SyncResourcesResult) {
 	for _, summary := range items {
 		remoteID := strconv.Itoa(summary.Number)
-		issue := gitcode.Issue{ID: summary.ID, Number: summary.Number, Title: summary.Title, Body: summary.Body, Status: summary.Status, State: summary.State, Labels: summary.Labels, CreatedAt: summary.CreatedAt, UpdatedAt: summary.UpdatedAt}
+		issue := gitcode.Issue{ID: summary.ID, Number: summary.Number, Title: summary.Title, Body: summary.Body, Status: summary.Status, State: summary.State, Comments: summary.Comments, Labels: summary.Labels, CreatedAt: summary.CreatedAt, UpdatedAt: summary.UpdatedAt}
 		syncReq := SyncRequest{RepoID: req.RepoID, AliasType: "issue", AliasID: remoteID, IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "issue", remoteID), MaxAttempts: req.MaxAttempts, MaxSize: req.MaxSize}
 		graph, counts, err := s.stageIssue(ctx, syncReq, "issue", remoteID, issue)
 		if err != nil {
 			result.Failures = append(result.Failures, ResourceError{SourceID: remoteID, RemoteType: "issue", Err: err, Message: err.Error()})
 			continue
 		}
+		counts.Listed = 1
 		completedAt := s.now().UTC()
 		eventID := syncEventID(syncReq.IdempotencyKey)
 		zeroDelta := counts.Fetched > 0 && counts.Skipped == counts.Fetched && counts.Updated == 0 && counts.Inserted == 0 && counts.Conflicts == 0
@@ -1318,6 +1319,7 @@ func (s *Service) stagePullRequestPage(ctx context.Context, req BulkSyncRequest,
 			result.Failures = append(result.Failures, ResourceError{SourceID: remoteID, RemoteType: "pull_request", Err: err, Message: err.Error()})
 			continue
 		}
+		counts.Listed = 1
 		completedAt := s.now().UTC()
 		eventID := syncEventID(syncReq.IdempotencyKey)
 		zeroDelta := counts.Fetched > 0 && counts.Skipped == counts.Fetched && counts.Updated == 0 && counts.Inserted == 0 && counts.Conflicts == 0
@@ -1438,6 +1440,7 @@ func (s *Service) stagePRCommentPage(ctx context.Context, req BulkSyncRequest, p
 			result.Failures = append(result.Failures, ResourceError{SourceID: remoteID, RemoteType: "pr_comment", Err: err, Message: err.Error()})
 			continue
 		}
+		counts.Listed = 1
 		completedAt := s.now().UTC()
 		eventID := syncEventID(syncReq.IdempotencyKey)
 		zeroDelta := counts.Fetched > 0 && counts.Skipped == counts.Fetched && counts.Updated == 0 && counts.Inserted == 0 && counts.Conflicts == 0
@@ -1492,18 +1495,14 @@ func (s *Service) BulkSyncWiki(ctx context.Context, req BulkSyncRequest) (*SyncR
 			}
 			return bulkSyncFailureResult(normalized, "wiki:*", "wiki")
 		}
-		reqs := make([]SyncRequest, 0, len(page.Items))
-		for _, wp := range page.Items {
-			reqs = append(reqs, SyncRequest{
-				RepoID:         req.RepoID,
-				AliasType:      "wiki",
-				AliasID:        wp.Slug,
-				IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "wiki", wp.Slug),
-				MaxAttempts:    req.MaxAttempts,
-				MaxSize:        req.MaxSize,
-			})
+		result := &SyncResourcesResult{Results: make([]SyncResult, 0, len(page.Items)), Failures: make([]ResourceError, 0)}
+		s.stageWikiPage(ctx, req, page.Items, result)
+		result.SuccessCount = len(result.Results)
+		result.FailureCount = len(result.Failures)
+		if result.FailureCount > 0 {
+			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
 		}
-		return s.SyncResources(ctx, reqs)
+		return result, nil
 	}
 
 	return s.bulkSyncWikiBounded(ctx, req, route)
@@ -1588,22 +1587,7 @@ func (s *Service) bulkSyncWikiBounded(ctx context.Context, req BulkSyncRequest, 
 		items = items[:bounds.MaxRecords]
 	}
 
-	reqs := make([]SyncRequest, 0, len(items))
-	for _, wp := range items {
-		reqs = append(reqs, SyncRequest{
-			RepoID:         req.RepoID,
-			AliasType:      "wiki",
-			AliasID:        wp.Slug,
-			IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "wiki", wp.Slug),
-			MaxAttempts:    req.MaxAttempts,
-			MaxSize:        req.MaxSize,
-		})
-	}
-	syncResult, syncErr := s.SyncResources(ctx, reqs)
-	if syncResult != nil {
-		result.Results = append(result.Results, syncResult.Results...)
-		result.Failures = append(result.Failures, syncResult.Failures...)
-	}
+	s.stageWikiPage(ctx, req, items, result)
 
 	if ctx.Err() != nil {
 		diag := SyncDiagnosticCancelled
@@ -1615,31 +1599,125 @@ func (s *Service) bulkSyncWikiBounded(ctx context.Context, req BulkSyncRequest, 
 		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diag, TotalRequested: totalRequested}
 	}
 
-	if syncErr != nil {
-		result.SuccessCount = len(result.Results)
-		result.FailureCount = len(result.Failures)
-		var partial *PartialSyncError
-		if errors.As(syncErr, &partial) {
-			var diag SyncDiagnostic
-			if ctx.Err() != nil {
-				diag = SyncDiagnosticCancelled
-				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-					diag = SyncDiagnosticTimeout
-				}
-			}
-			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diag}
-		}
-		re := ResourceError{SourceID: "wiki:*", RemoteType: "wiki", Err: syncErr, Message: syncErr.Error()}
-		result.Failures = append(result.Failures, re)
-		result.FailureCount++
-		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
-	}
 	result.SuccessCount = len(result.Results)
 	result.FailureCount = len(result.Failures)
 	if result.FailureCount > 0 {
 		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
 	}
 	return result, nil
+}
+
+func (s *Service) stageWikiPage(ctx context.Context, req BulkSyncRequest, items []gitcode.WikiPage, result *SyncResourcesResult) {
+	for _, wp := range items {
+		if err := ctx.Err(); err != nil {
+			result.Failures = append(result.Failures, ResourceError{SourceID: wp.Slug, RemoteType: "wiki", Err: err, Message: err.Error()})
+			continue
+		}
+		remoteID := strings.TrimSpace(wp.Slug)
+		if remoteID == "" {
+			result.Failures = append(result.Failures, ResourceError{SourceID: wp.Slug, RemoteType: "wiki", Err: ErrInvalidQuery{Field: "wiki_slug", Message: "wiki list item missing slug"}, Message: "wiki list item missing slug"})
+			continue
+		}
+		syncReq := SyncRequest{
+			RepoID:         req.RepoID,
+			AliasType:      "wiki",
+			AliasID:        remoteID,
+			IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "wiki", remoteID),
+			MaxAttempts:    req.MaxAttempts,
+			MaxSize:        req.MaxSize,
+		}
+		syncResult, err := s.syncWikiListItem(ctx, syncReq, wp)
+		if err != nil {
+			result.Failures = append(result.Failures, ResourceError{SourceID: remoteID, RemoteType: "wiki", Err: err, Message: err.Error()})
+			continue
+		}
+		result.Results = append(result.Results, syncResult)
+	}
+}
+
+func (s *Service) syncWikiListItem(ctx context.Context, req SyncRequest, item gitcode.WikiPage) (SyncResult, error) {
+	remoteID := strings.TrimSpace(item.Slug)
+	if remoteID == "" {
+		return SyncResult{}, ErrInvalidQuery{Field: "wiki_slug", Message: "wiki list item missing slug"}
+	}
+	revision := strings.TrimSpace(item.Revision)
+	if revision != "" {
+		skipped, ok, err := s.skipWikiListItemByRevision(ctx, req, remoteID, item, revision)
+		if err != nil {
+			return SyncResult{}, err
+		}
+		if ok {
+			return skipped, nil
+		}
+	}
+
+	graph, counts, err := s.fetchAndStage(ctx, req, "wiki", remoteID)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	counts.Listed = 1
+	counts.FetchedDetail = 1
+	completedAt := s.now().UTC()
+	eventID := syncEventID(req.IdempotencyKey)
+	zeroDelta := counts.Fetched > 0 && counts.Skipped == counts.Fetched && counts.Updated == 0 && counts.Inserted == 0 && counts.Conflicts == 0
+	graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: "wiki", RemoteID: remoteID, RemoteRevision: graph.SyncStatus.RemoteRevision, Status: "succeeded", IdempotencyKey: req.IdempotencyKey, Message: syncEventMessage(counts), CreatedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: zeroDelta})
+	if err := s.store.UpsertSyncGraph(ctx, s.syncGraphFromSourceGraph(req.RepoID, graph)); err != nil {
+		return SyncResult{}, err
+	}
+	stored, err := s.store.GetSourceScoped(ctx, req.RepoID, graph.Source.ID)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	return SyncResult{IdempotencyKey: req.IdempotencyKey, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), Record: sourceSummary(stored), GeneratedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: zeroDelta}, nil
+}
+
+func (s *Service) skipWikiListItemByRevision(ctx context.Context, req SyncRequest, remoteID string, item gitcode.WikiPage, revision string) (SyncResult, bool, error) {
+	stableID := req.StableID
+	if stableID == "" {
+		stableID = s.resolveOrFallback(ctx, req.RepoID, "wiki", remoteID, liveFallbackSourceID(s.syncProviderMode(), "wiki", remoteID, item.ID))
+	}
+	if err := s.guardRemoteAlias(ctx, req.RepoID, "wiki", remoteID, stableID); err != nil {
+		return SyncResult{}, false, err
+	}
+	source, err := s.store.GetSourceScoped(ctx, req.RepoID, stableID)
+	if err != nil {
+		if isCacheNotFound(err) {
+			return SyncResult{}, false, nil
+		}
+		return SyncResult{}, false, err
+	}
+	status, err := s.store.GetSyncStatusScoped(ctx, req.RepoID, stableID)
+	if err != nil {
+		if isCacheNotFound(err) {
+			return SyncResult{}, false, nil
+		}
+		return SyncResult{}, false, err
+	}
+	if source.Kind != "wiki" || source.ContentHash == "" || status.RemoteType != "wiki" || status.RemoteID != remoteID || status.RemoteRevision != revision || status.Status != "fresh" {
+		return SyncResult{}, false, nil
+	}
+
+	completedAt := s.now().UTC()
+	counts := SyncCounts{Fetched: 1, Skipped: 1, Listed: 1, SkippedByRevision: 1}
+	eventID := syncEventID(req.IdempotencyKey)
+	event := cache.SyncEvent{ID: eventID, SourceID: stableID, RemoteType: "wiki", RemoteID: remoteID, RemoteRevision: revision, Status: "succeeded", IdempotencyKey: req.IdempotencyKey, Message: syncEventMessage(counts), CreatedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: true}
+	graph := cache.SourceGraph{
+		Source:     source,
+		Identities: []cache.Identity{{RepoID: req.RepoID, SourceID: stableID, AliasType: "wiki", Alias: remoteID, Remote: cache.RemoteAlias{Type: "wiki", ID: remoteID}}},
+		SyncStatus: &cache.SyncStatus{RepoID: req.RepoID, SourceID: stableID, RemoteType: "wiki", RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: completedAt},
+		SyncEvents: []cache.SyncEvent{event},
+	}
+	if item.ID != "" && item.ID != remoteID {
+		graph.Identities = append(graph.Identities, cache.Identity{RepoID: req.RepoID, SourceID: stableID, AliasType: "gitcode_wiki_id", Alias: item.ID, Remote: cache.RemoteAlias{Type: "gitcode_wiki_id", ID: item.ID}})
+	}
+	if err := s.store.UpsertSyncGraph(ctx, s.syncGraphFromSourceGraph(req.RepoID, graph)); err != nil {
+		return SyncResult{}, false, err
+	}
+	stored, err := s.store.GetSourceScoped(ctx, req.RepoID, stableID)
+	if err != nil {
+		return SyncResult{}, false, err
+	}
+	return SyncResult{IdempotencyKey: req.IdempotencyKey, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), Record: sourceSummary(stored), GeneratedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: true}, true, nil
 }
 
 func (s *Service) BulkSyncAll(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
@@ -2056,6 +2134,7 @@ func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, r
 		created = updated
 	}
 	hash := contentHash(issue.Title, body, issue.State, issue.Labels)
+	revision := issueRemoteRevision(issue, hash)
 	existing, err := s.store.GetSourceScoped(ctx, req.RepoID, stableID)
 	counts := SyncCounts{Fetched: 1}
 	if err == nil && existing.ContentHash == hash {
@@ -2074,14 +2153,25 @@ func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, r
 	if status == "" {
 		status = "open"
 	}
-	graph := cache.SourceGraph{Source: cache.Source{RepoID: req.RepoID, ID: stableID, Kind: "issue", Path: "issues/" + remoteID + ".md", Title: issue.Title, Body: body, Status: status, Labels: issue.Labels, ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{RepoID: req.RepoID, SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, SyncStatus: &cache.SyncStatus{RepoID: req.RepoID, SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: hash, Status: "fresh", LastFetchedAt: now}}
+	graph := cache.SourceGraph{Source: cache.Source{RepoID: req.RepoID, ID: stableID, Kind: "issue", Path: "issues/" + remoteID + ".md", Title: issue.Title, Body: body, Status: status, Labels: issue.Labels, ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{RepoID: req.RepoID, SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, SyncStatus: &cache.SyncStatus{RepoID: req.RepoID, SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}
 	if providerID != "" && providerID != remoteID {
 		graph.Identities = append(graph.Identities, cache.Identity{RepoID: req.RepoID, SourceID: stableID, AliasType: "gitcode_issue_id", Alias: providerID, Remote: cache.RemoteAlias{Type: "gitcode_issue_id", ID: providerID}})
+	}
+	if err == nil {
+		status, statusErr := s.store.GetSyncStatusScoped(ctx, req.RepoID, stableID)
+		if statusErr != nil && !isCacheNotFound(statusErr) {
+			return cache.SourceGraph{}, SyncCounts{}, statusErr
+		}
+		if statusErr == nil && status.RemoteType == remoteType && status.RemoteID == remoteID && status.RemoteRevision == revision && status.Status == "fresh" {
+			counts.SkippedByRevision = 1
+			return graph, counts, nil
+		}
 	}
 	route, err := s.BuildAdapterRoute(ctx, req.RepoID, RepositoryScopeIssues)
 	if err != nil {
 		return cache.SourceGraph{}, SyncCounts{}, err
 	}
+	counts.FetchedDetail = 1
 	comments, err := s.client.ListIssueComments(ctx, gitcode.IssueRequest{Owner: route.Owner, Repo: route.Name, Number: issue.Number, KnownRemoteAlias: true, RemoteAlias: remoteID})
 	if err != nil {
 		if !isDeferredIssueCommentsRead(err) {
@@ -2161,10 +2251,7 @@ func (s *Service) stagePullRequest(ctx context.Context, req SyncRequest, remoteT
 	} else {
 		return cache.SourceGraph{}, SyncCounts{}, err
 	}
-	revision := pr.ID
-	if revision == "" {
-		revision = hash
-	}
+	revision := pullRequestRemoteRevision(pr, hash)
 	graph := cache.SourceGraph{Source: cache.Source{RepoID: req.RepoID, ID: stableID, Kind: "pull_request", Path: "pulls/" + remoteID + ".md", Title: pr.Title, Body: body, Status: status, Labels: pr.Labels, ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{RepoID: req.RepoID, SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, SyncStatus: &cache.SyncStatus{RepoID: req.RepoID, SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}
 	if pr.ID != "" && pr.ID != remoteID {
 		graph.Identities = append(graph.Identities, cache.Identity{RepoID: req.RepoID, SourceID: stableID, AliasType: "gitcode_pr_id", Alias: pr.ID, Remote: cache.RemoteAlias{Type: "gitcode_pr_id", ID: pr.ID}})
@@ -2204,6 +2291,7 @@ func (s *Service) stagePRComment(ctx context.Context, req SyncRequest, remoteTyp
 		created = updated
 	}
 	hash := contentHash(prNumber, commentID, comment.DiscussionID, comment.Author, body, updated)
+	revision := prCommentRemoteRevision(comment, hash)
 	existing, err := s.store.GetSourceScoped(ctx, req.RepoID, stableID)
 	counts := SyncCounts{Fetched: 1}
 	if err == nil && existing.ContentHash == hash {
@@ -2216,7 +2304,7 @@ func (s *Service) stagePRComment(ctx context.Context, req SyncRequest, remoteTyp
 		return cache.SourceGraph{}, SyncCounts{}, err
 	}
 	parentID := pullRequestStableID(prNumber)
-	graph := cache.SourceGraph{Source: cache.Source{RepoID: req.RepoID, ID: stableID, Kind: "pr_comment", Path: fmt.Sprintf("pulls/%d/comments/%s.md", prNumber, safeIDPart(commentID)), Title: title, Body: body, Status: "current", ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{RepoID: req.RepoID, SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, Links: []cache.Link{{RepoID: req.RepoID, SourceID: stableID, TargetID: parentID, Kind: "parent", Text: "pull_request"}}, SyncStatus: &cache.SyncStatus{RepoID: req.RepoID, SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: hash, Status: "fresh", LastFetchedAt: now}}
+	graph := cache.SourceGraph{Source: cache.Source{RepoID: req.RepoID, ID: stableID, Kind: "pr_comment", Path: fmt.Sprintf("pulls/%d/comments/%s.md", prNumber, safeIDPart(commentID)), Title: title, Body: body, Status: "current", ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{RepoID: req.RepoID, SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, Links: []cache.Link{{RepoID: req.RepoID, SourceID: stableID, TargetID: parentID, Kind: "parent", Text: "pull_request"}}, SyncStatus: &cache.SyncStatus{RepoID: req.RepoID, SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}
 	if comment.DiscussionID != "" {
 		graph.Identities = append(graph.Identities, cache.Identity{RepoID: req.RepoID, SourceID: stableID, AliasType: "gitcode_pr_discussion", Alias: comment.DiscussionID, Remote: cache.RemoteAlias{Type: "gitcode_pr_discussion", ID: comment.DiscussionID}})
 	}
@@ -2524,6 +2612,18 @@ func contentHash(parts ...any) string {
 	b, _ := json.Marshal(parts)
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+func issueRemoteRevision(issue gitcode.Issue, contentRevision string) string {
+	return contentHash("issue", issue.ID, issue.Number, issue.UpdatedAt.UTC(), issue.Comments, contentRevision)
+}
+
+func pullRequestRemoteRevision(pr gitcode.PullRequest, contentRevision string) string {
+	return contentHash("pull_request", pr.ID, pr.Number, pr.UpdatedAt.UTC(), pr.Base, pr.Head, contentRevision)
+}
+
+func prCommentRemoteRevision(comment gitcode.PRComment, contentRevision string) string {
+	return contentHash("pr_comment", comment.ID, comment.DiscussionID, comment.UpdatedAt.UTC(), contentRevision)
 }
 
 func syncEventMessage(counts SyncCounts) string {

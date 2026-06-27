@@ -112,6 +112,7 @@ type IssueSummary struct {
 	Body          string         `json:"body"`
 	Status        string         `json:"status"`
 	State         string         `json:"state"`
+	Comments      int            `json:"comments"`
 	GitCodeLabels []GitCodeLabel `json:"labels"`
 	Labels        []string       `json:"-"`
 	CreatedAt     time.Time      `json:"created_at"`
@@ -126,6 +127,7 @@ func (i *IssueSummary) UnmarshalJSON(data []byte) error {
 		Body      string          `json:"body"`
 		Status    string          `json:"status"`
 		State     string          `json:"state"`
+		Comments  any             `json:"comments"`
 		Labels    json.RawMessage `json:"labels"`
 		CreatedAt time.Time       `json:"created_at"`
 		UpdatedAt time.Time       `json:"updated_at"`
@@ -146,6 +148,10 @@ func (i *IssueSummary) UnmarshalJSON(data []byte) error {
 	i.Body = raw.Body
 	i.Status = raw.Status
 	i.State = raw.State
+	i.Comments, err = decodeOptionalInt(raw.Comments)
+	if err != nil {
+		return err
+	}
 	if len(raw.Labels) > 0 {
 		if isLabelObjectArray(raw.Labels) {
 			if err := json.Unmarshal(raw.Labels, &i.GitCodeLabels); err != nil {
@@ -175,6 +181,7 @@ type Issue struct {
 	Body          string         `json:"body"`
 	Status        string         `json:"status"`
 	State         string         `json:"state"`
+	Comments      int            `json:"comments"`
 	GitCodeLabels []GitCodeLabel `json:"labels"`
 	Labels        []string       `json:"-"`
 	Author        string         `json:"author"`
@@ -190,6 +197,7 @@ func (i *Issue) UnmarshalJSON(data []byte) error {
 		Body      string          `json:"body"`
 		Status    string          `json:"status"`
 		State     string          `json:"state"`
+		Comments  any             `json:"comments"`
 		Labels    json.RawMessage `json:"labels"`
 		Author    string          `json:"author"`
 		CreatedAt time.Time       `json:"created_at"`
@@ -211,6 +219,10 @@ func (i *Issue) UnmarshalJSON(data []byte) error {
 	i.Body = raw.Body
 	i.Status = raw.Status
 	i.State = raw.State
+	i.Comments, err = decodeOptionalInt(raw.Comments)
+	if err != nil {
+		return err
+	}
 	if len(raw.Labels) > 0 {
 		if isLabelObjectArray(raw.Labels) {
 			if err := json.Unmarshal(raw.Labels, &i.GitCodeLabels); err != nil {
@@ -276,6 +288,13 @@ func decodeNumber(value any) (int, error) {
 	default:
 		return 0, &ErrSchemaDecode{Field: "number", Message: fmt.Sprintf("unexpected number type %T", v)}
 	}
+}
+
+func decodeOptionalInt(value any) (int, error) {
+	if value == nil {
+		return 0, nil
+	}
+	return decodeNumber(value)
 }
 
 type Comment struct {

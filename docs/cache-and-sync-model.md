@@ -64,7 +64,7 @@ The sync command supports these live sync selectors:
 - `--idempotency-key KEY` supplies a deterministic sync event key.
 - `--max-pages`, `--max-records`, and `--per-page` bound collection sync when the selected surface supports collection bounds.
 
-Bulk sync treats issues, wiki pages, pull requests, and pull request comments as bounded collections. Issue and pull request sync page through list APIs and commit each returned record independently. Wiki sync passes record bounds into the wiki provider traversal before committing individual pages. Pull request comment sync walks cached pull request records and applies record bounds across the resulting comment records. Issue sync covers issue data and comments as part of the source graph for that issue; wiki sync covers wiki page data. Live adapter route construction stays behind the provider boundary, and operator docs should use sanitized placeholders rather than real repository coordinates.
+Bulk sync treats issues, wiki pages, pull requests, and pull request comments as bounded collections. Issue and pull request sync page through list APIs and commit each returned record independently. Issue sync uses list-level issue revision metadata before deciding whether issue comments need to be listed again. Wiki sync passes record bounds into the wiki provider traversal before committing individual pages, then uses list-level wiki revision metadata before deciding whether a page body fetch is necessary. Pull request comment sync walks cached pull request records and applies record bounds across the resulting comment records. Issue sync covers issue data and comments as part of the source graph for that issue; wiki sync covers wiki page data. Live adapter route construction stays behind the provider boundary, and operator docs should use sanitized placeholders rather than real repository coordinates.
 
 The command context carries the configured `default_timeout`, including the `--timeout` override, so large collection syncs have a whole-operation deadline in addition to provider-level request timeouts. When the deadline or caller cancellation fires, completed resource commits remain visible in cache and the sync response reports partial counts plus a typed diagnostic such as `sync_timeout` or `sync_cancelled`.
 
@@ -75,9 +75,28 @@ Each successful resource sync records a `SyncEvent` with:
 - `started_at` and `completed_at` timestamps;
 - `remote_revision` when the provider exposes one;
 - count metadata for fetched, inserted, updated, skipped, and conflict totals;
+- collection metadata counts when available: `listed`, `fetched_detail`, `skipped_by_revision`, and `failed`;
 - `zero_delta` when a re-sync fetched records but all fetched content was unchanged.
 
 Re-syncing unchanged content records a zero-delta event instead of duplicating cached records. `gitcode-mcp sync_status` reports cache freshness from the stored source records and latest completed sync events; the command help describes the query surface, while the model above defines the event fields persisted by sync.
+
+## Metadata-First Collection Sync
+
+Collection sync should do cheap list work before expensive detail or body fetches. Bounds are applied to list candidates first, then the sync engine uses collection-specific metadata to decide whether each bounded candidate needs a detail/body request.
+
+Current collection behavior:
+
+| Collection | List-level marker | Current sync strategy |
+| --- | --- | --- |
+| Wiki pages | `sha`/`revision` from wiki contents/list entries | Cache-aware. If cached `remote_revision` matches the list marker, cached source content exists, and status is fresh, sync records a zero-delta `skipped_by_revision` result without fetching the page body. New, changed, incomplete, or marker-less records fetch the full page body. |
+| Issues | `updated_at`, `comments`, stable `id`, numeric `number`, and the list-provided source content | Cache-aware for the current expensive child read. Bulk issue sync stages issue content from the list payload and does not perform per-issue detail fetches. If cached `remote_revision` matches the list marker, sync skips the per-issue comments list call and records `skipped_by_revision`. New or changed issue markers list comments again. |
+| Pull requests / merge requests | `updated_at`, stable `id`, numeric `number`, branches/diff refs, labels, and list-provided source content | Bulk pull request sync stages from the list payload and does not perform per-PR detail fetches in the current path. The stored `remote_revision` is the list-version token so future detail expansion can compare before adding detail calls. |
+| Pull request review comments | Comment list payloads include stable ids, discussion ids, and `updated_at` timestamps | Comment sync stages from list-comment payloads. It still needs the parent PR comment list call because there is no persisted parent comment-collection checkpoint; individual comment revisions are stored after the list is fetched. |
+| Issue comments | Issue list `updated_at` plus `comments` count, with comment `updated_at` available after listing | Not exposed as an independent bulk selector. As part of issue sync, unchanged issue revision metadata skips the issue comment-list call; changed issue metadata refreshes comments. |
+| Labels | No reliable update marker documented for this cache surface | Not a first-class bulk sync collection yet; use full refresh or a future invalidation strategy. |
+| Milestones | Model supports `updated_at`, but list behavior and cache surface need verification | Not a first-class bulk sync collection yet; do not claim metadata skip until live discovery confirms the marker and persistence contract. |
+
+The compatibility counters keep their older meaning: `fetched` counts one processed remote candidate and `skipped` counts unchanged work. Metadata-first sync adds `listed`, `fetched_detail`, and `skipped_by_revision` so callers can distinguish "listed and skipped without body fetch" from "fetched detail and found no content delta."
 
 ## Partial Failure Handling
 
