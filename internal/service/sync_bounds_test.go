@@ -737,6 +737,11 @@ func TestBulkSyncWikiBoundedCancelMidSync(t *testing.T) {
 		},
 		wikiBySlug: buildWikiMap(20, base),
 	}
+	client.onWikiCall = func(call int) {
+		if call == 2 {
+			cancel()
+		}
+	}
 	store, err := cache.NewInMemorySQLiteStore(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -746,11 +751,6 @@ func TestBulkSyncWikiBoundedCancelMidSync(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := NewWithClient(store, client)
-
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
-	}()
 
 	result, err := svc.BulkSyncWiki(ctx, BulkSyncRequest{
 		RepoID:  "wiki-cancel-mid",

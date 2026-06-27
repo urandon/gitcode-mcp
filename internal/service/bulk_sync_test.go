@@ -16,8 +16,8 @@ func TestBulkSyncIssuesSyncsListedIssuesAndZeroDeltaOnResync(t *testing.T) {
 	base := time.Date(2026, 6, 22, 14, 0, 0, 0, time.UTC)
 	client := &fakeGitCodeClient{
 		listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{
-			{Items: []gitcode.IssueSummary{{ID: "1", Number: 1, Title: "First", State: "open"}, {ID: "2", Number: 2, Title: "Second", State: "open"}}, Page: 1, PerPage: 100},
-			{Items: []gitcode.IssueSummary{{ID: "1", Number: 1, Title: "First", State: "open"}, {ID: "2", Number: 2, Title: "Second", State: "open"}}, Page: 1, PerPage: 100},
+			{Items: []gitcode.IssueSummary{{ID: "1", Number: 1, Title: "First", State: "open", Comments: 1}, {ID: "2", Number: 2, Title: "Second", State: "open"}}, Page: 1, PerPage: 100},
+			{Items: []gitcode.IssueSummary{{ID: "1", Number: 1, Title: "First", State: "open", Comments: 1}, {ID: "2", Number: 2, Title: "Second", State: "open"}}, Page: 1, PerPage: 100},
 		},
 		issuesByNumber: map[int]gitcode.Issue{
 			1: {ID: "1", Number: 1, Title: "First", Body: "first body", State: "open", CreatedAt: base, UpdatedAt: base},
@@ -43,6 +43,12 @@ func TestBulkSyncIssuesSyncsListedIssuesAndZeroDeltaOnResync(t *testing.T) {
 	if first.SuccessCount != 2 || first.FailureCount != 0 {
 		t.Fatalf("first counts = success %d failure %d, want 2/0", first.SuccessCount, first.FailureCount)
 	}
+	if client.issueCalls != 0 {
+		t.Fatalf("bulk issue sync GetIssue calls = %d, want 0 because list payload is the current sync source", client.issueCalls)
+	}
+	if client.commentCalls != 2 {
+		t.Fatalf("first bulk issue sync ListIssueComments calls = %d, want 2 before revision cache is established", client.commentCalls)
+	}
 	seenKeys := map[string]bool{}
 	seenEvents := map[string]bool{}
 	for i, result := range first.Results {
@@ -54,6 +60,9 @@ func TestBulkSyncIssuesSyncsListedIssuesAndZeroDeltaOnResync(t *testing.T) {
 		}
 		if seenEvents[result.SyncEventID] {
 			t.Fatalf("first result %d duplicate sync event id %q", i, result.SyncEventID)
+		}
+		if result.Counts.Listed != 1 || result.Counts.FetchedDetail != 1 {
+			t.Fatalf("first result %d counts = %#v, want listed=1 fetched_detail=1", i, result.Counts)
 		}
 		seenKeys[result.IdempotencyKey] = true
 		seenEvents[result.SyncEventID] = true
@@ -71,12 +80,18 @@ func TestBulkSyncIssuesSyncsListedIssuesAndZeroDeltaOnResync(t *testing.T) {
 	if second.SuccessCount != 2 || second.FailureCount != 0 {
 		t.Fatalf("second counts = success %d failure %d, want 2/0", second.SuccessCount, second.FailureCount)
 	}
+	if client.commentCalls != 2 {
+		t.Fatalf("ListIssueComments calls after unchanged second sync = %d, want still 2", client.commentCalls)
+	}
 	for i, result := range second.Results {
 		if !result.ZeroDelta {
 			t.Fatalf("second result %d ZeroDelta = false, want true", i)
 		}
 		if result.Counts.Fetched != 1 || result.Counts.Skipped != 1 || result.Counts.Inserted != 0 || result.Counts.Updated != 0 {
 			t.Fatalf("second result %d counts = %#v, want fetched/skipped only", i, result.Counts)
+		}
+		if result.Counts.Listed != 1 || result.Counts.FetchedDetail != 0 || result.Counts.SkippedByRevision != 1 {
+			t.Fatalf("second result %d counts = %#v, want listed=1 fetched_detail=0 skipped_by_revision=1", i, result.Counts)
 		}
 	}
 	sources, err := store.ListSources(ctx, cache.SourceFilter{RepoID: "bulk-issues", Kind: "issue"})
@@ -125,6 +140,53 @@ func TestBulkSyncIssuesIgnoresDeferredIssueCommentsRead(t *testing.T) {
 	}
 }
 
+func TestBulkSyncIssuesFetchesCommentsWhenListRevisionChanges(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 27, 11, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{
+			{Items: []gitcode.IssueSummary{{ID: "11", Number: 11, Title: "Issue", Body: "body", State: "open", Comments: 0, CreatedAt: base, UpdatedAt: base}}, Page: 1, PerPage: 100},
+			{Items: []gitcode.IssueSummary{{ID: "11", Number: 11, Title: "Issue", Body: "body", State: "open", Comments: 1, CreatedAt: base, UpdatedAt: base.Add(time.Minute)}}, Page: 1, PerPage: 100},
+		},
+		commentsByIssue: map[int][]gitcode.Comment{
+			11: {{ID: "c11", Author: "author", Body: "new comment", CreatedAt: base.Add(time.Minute), UpdatedAt: base.Add(time.Minute)}},
+		},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "bulk-issues-comment-revision", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+
+	if _, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "bulk-issues-comment-revision", IdempotencyKey: "issues-first", PerPage: 100}); err != nil {
+		t.Fatalf("first BulkSyncIssues returned error: %v", err)
+	}
+	second, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "bulk-issues-comment-revision", IdempotencyKey: "issues-second", PerPage: 100})
+	if err != nil {
+		t.Fatalf("second BulkSyncIssues returned error: %v", err)
+	}
+	if client.commentCalls != 2 {
+		t.Fatalf("ListIssueComments calls = %d, want 2 after changed list revision", client.commentCalls)
+	}
+	if second.SuccessCount != 1 || len(second.Results) != 1 {
+		t.Fatalf("second result count = %d/%d, want 1/1", second.SuccessCount, len(second.Results))
+	}
+	if second.Results[0].Counts.FetchedDetail != 1 || second.Results[0].Counts.SkippedByRevision != 0 {
+		t.Fatalf("second counts = %#v, want fetched_detail=1 skipped_by_revision=0", second.Results[0].Counts)
+	}
+	record, err := store.GetRecord(ctx, "bulk-issues-comment-revision", "ISSUE-11")
+	if err != nil {
+		t.Fatalf("ISSUE-11 record missing: %v", err)
+	}
+	if len(record.Comments) != 1 || record.Comments[0].CommentID != "c11" {
+		t.Fatalf("comments=%+v, want c11", record.Comments)
+	}
+}
+
 func TestBulkSyncWikiPartialFailureCollectsSuccessAndFailure(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 6, 22, 15, 0, 0, 0, time.UTC)
@@ -165,6 +227,111 @@ func TestBulkSyncWikiPartialFailureCollectsSuccessAndFailure(t *testing.T) {
 	}
 	if _, err := store.GetSourceScoped(ctx, "bulk-wiki", "WIKI-HOME"); err != nil {
 		t.Fatalf("WIKI-HOME missing: %v", err)
+	}
+}
+
+func TestBulkSyncWikiSkipsUnchangedPageByListRevision(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 27, 9, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		listWikiPages: []gitcode.Page[gitcode.WikiPage]{
+			{Items: []gitcode.WikiPage{{Slug: "Home", Title: "Home", Revision: "rev-home"}}, Page: 1, PerPage: 100},
+			{Items: []gitcode.WikiPage{{Slug: "Home", Title: "Home", Revision: "rev-home"}}, Page: 1, PerPage: 100},
+		},
+		wikiBySlug: map[string]gitcode.WikiPage{
+			"Home": {ID: "wiki-home", Slug: "Home", Title: "Home", Body: "home body", Revision: "rev-home", CreatedAt: base, UpdatedAt: base},
+		},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "wiki-revision-skip", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+
+	first, err := svc.BulkSyncWiki(ctx, BulkSyncRequest{RepoID: "wiki-revision-skip", IdempotencyKey: "wiki-first", PerPage: 100})
+	if err != nil {
+		t.Fatalf("first BulkSyncWiki returned error: %v", err)
+	}
+	if first.SuccessCount != 1 || client.wikiCalls != 1 {
+		t.Fatalf("first sync success/wikiCalls = %d/%d, want 1/1", first.SuccessCount, client.wikiCalls)
+	}
+
+	second, err := svc.BulkSyncWiki(ctx, BulkSyncRequest{RepoID: "wiki-revision-skip", IdempotencyKey: "wiki-second", PerPage: 100})
+	if err != nil {
+		t.Fatalf("second BulkSyncWiki returned error: %v", err)
+	}
+	if client.wikiCalls != 1 {
+		t.Fatalf("wiki body fetches = %d, want 1 after unchanged second sync", client.wikiCalls)
+	}
+	if second.SuccessCount != 1 || len(second.Results) != 1 {
+		t.Fatalf("second result count = %d/%d, want 1/1", second.SuccessCount, len(second.Results))
+	}
+	result := second.Results[0]
+	if !result.ZeroDelta {
+		t.Fatalf("second result ZeroDelta = false, want true")
+	}
+	if result.Counts.Listed != 1 || result.Counts.SkippedByRevision != 1 || result.Counts.FetchedDetail != 0 {
+		t.Fatalf("second counts = %#v, want listed=1 skipped_by_revision=1 fetched_detail=0", result.Counts)
+	}
+	if result.Counts.Fetched != 1 || result.Counts.Skipped != 1 {
+		t.Fatalf("compat counts = %#v, want fetched=1 skipped=1", result.Counts)
+	}
+}
+
+func TestBulkSyncWikiFetchesChangedListRevision(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		listWikiPages: []gitcode.Page[gitcode.WikiPage]{
+			{Items: []gitcode.WikiPage{{Slug: "Home", Title: "Home", Revision: "rev-1"}}, Page: 1, PerPage: 100},
+			{Items: []gitcode.WikiPage{{Slug: "Home", Title: "Home", Revision: "rev-2"}}, Page: 1, PerPage: 100},
+		},
+		wikiBySlug: map[string]gitcode.WikiPage{
+			"Home": {ID: "wiki-home", Slug: "Home", Title: "Home", Body: "first body", Revision: "rev-1", CreatedAt: base, UpdatedAt: base},
+		},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "wiki-revision-change", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+
+	if _, err := svc.BulkSyncWiki(ctx, BulkSyncRequest{RepoID: "wiki-revision-change", IdempotencyKey: "wiki-first", PerPage: 100}); err != nil {
+		t.Fatalf("first BulkSyncWiki returned error: %v", err)
+	}
+	client.wikiBySlug["Home"] = gitcode.WikiPage{ID: "wiki-home", Slug: "Home", Title: "Home", Body: "second body", Revision: "rev-2", CreatedAt: base, UpdatedAt: base.Add(time.Hour)}
+
+	second, err := svc.BulkSyncWiki(ctx, BulkSyncRequest{RepoID: "wiki-revision-change", IdempotencyKey: "wiki-second", PerPage: 100})
+	if err != nil {
+		t.Fatalf("second BulkSyncWiki returned error: %v", err)
+	}
+	if client.wikiCalls != 2 {
+		t.Fatalf("wiki body fetches = %d, want 2 after changed revision", client.wikiCalls)
+	}
+	if second.SuccessCount != 1 || len(second.Results) != 1 {
+		t.Fatalf("second result count = %d/%d, want 1/1", second.SuccessCount, len(second.Results))
+	}
+	if second.Results[0].Counts.Listed != 1 || second.Results[0].Counts.FetchedDetail != 1 || second.Results[0].Counts.Updated != 1 {
+		t.Fatalf("second counts = %#v, want listed=1 fetched_detail=1 updated=1", second.Results[0].Counts)
+	}
+	source, err := store.GetSourceScoped(ctx, "wiki-revision-change", "WIKI-HOME")
+	if err != nil {
+		t.Fatalf("WIKI-HOME missing: %v", err)
+	}
+	status, err := store.GetSyncStatusScoped(ctx, "wiki-revision-change", "WIKI-HOME")
+	if err != nil {
+		t.Fatalf("WIKI-HOME sync status missing: %v", err)
+	}
+	if source.Body != "second body" || status.RemoteRevision != "rev-2" {
+		t.Fatalf("source body/revision = %q/%q, want second body/rev-2", source.Body, status.RemoteRevision)
 	}
 }
 
@@ -228,12 +395,21 @@ func TestBulkSyncPullRequestsAndCommentsCreatesSearchableSources(t *testing.T) {
 	if prResult.SuccessCount != 1 || prResult.Results[0].Record.ID != "PR-7" || prResult.Results[0].Record.Kind != "pull_request" {
 		t.Fatalf("PR result=%+v", prResult)
 	}
+	if client.prCalls != 0 {
+		t.Fatalf("bulk pull request sync GetPR calls = %d, want 0 because list payload is the current sync source", client.prCalls)
+	}
+	if prResult.Results[0].Counts.Listed != 1 || prResult.Results[0].Counts.FetchedDetail != 0 {
+		t.Fatalf("PR counts=%#v, want listed=1 fetched_detail=0", prResult.Results[0].Counts)
+	}
 	commentResult, err := svc.BulkSyncPRComments(ctx, BulkSyncRequest{RepoID: "bulk-pr", IdempotencyKey: "bulk-pr-comments"})
 	if err != nil {
 		t.Fatalf("BulkSyncPRComments returned error: %v", err)
 	}
 	if commentResult.SuccessCount != 1 || commentResult.Results[0].Record.ID != "PRCOMMENT-7-301" || commentResult.Results[0].Record.Kind != "pr_comment" {
 		t.Fatalf("comment result=%+v", commentResult)
+	}
+	if commentResult.Results[0].Counts.Listed != 1 || commentResult.Results[0].Counts.FetchedDetail != 0 {
+		t.Fatalf("PR comment counts=%#v, want listed=1 fetched_detail=0", commentResult.Results[0].Counts)
 	}
 	pr, err := store.GetSourceScoped(ctx, "bulk-pr", "PR-7")
 	if err != nil || pr.Kind != "pull_request" {

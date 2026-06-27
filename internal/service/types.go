@@ -344,11 +344,15 @@ type SyncRequest struct {
 }
 
 type SyncCounts struct {
-	Fetched   int `json:"fetched"`
-	Skipped   int `json:"skipped"`
-	Updated   int `json:"updated"`
-	Conflicts int `json:"conflicts"`
-	Inserted  int `json:"inserted"`
+	Fetched           int `json:"fetched"`
+	Skipped           int `json:"skipped"`
+	Updated           int `json:"updated"`
+	Conflicts         int `json:"conflicts"`
+	Inserted          int `json:"inserted"`
+	Listed            int `json:"listed,omitempty"`
+	FetchedDetail     int `json:"fetched_detail,omitempty"`
+	SkippedByRevision int `json:"skipped_by_revision,omitempty"`
+	Failed            int `json:"failed,omitempty"`
 }
 
 type SyncResult struct {

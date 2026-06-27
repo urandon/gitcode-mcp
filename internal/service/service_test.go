@@ -2300,10 +2300,12 @@ type fakeGitCodeClient struct {
 	listWikiPages            []gitcode.Page[gitcode.WikiPage]
 	listWikiErrors           []error
 	listWikiPagesCallCount   int
+	onWikiCall               func(int)
 	listPRPages              []gitcode.Page[gitcode.PullRequest]
 	prsByNumber              map[int]gitcode.PullRequest
 	prCommentsByPR           map[int][]gitcode.PRComment
 	listPRCalls              int
+	prCalls                  int
 	prCommentCalls           int
 	issuesByNumber           map[int]gitcode.Issue
 	wikiBySlug               map[string]gitcode.WikiPage
@@ -2367,6 +2369,7 @@ func (f *fakeGitCodeClient) ListPRs(context.Context, gitcode.PRListRequest) (git
 	return gitcode.Page[gitcode.PullRequest]{}, nil
 }
 func (f *fakeGitCodeClient) GetPR(_ context.Context, req gitcode.PRRequest) (gitcode.PullRequest, error) {
+	f.prCalls++
 	if f.prsByNumber != nil {
 		if pr, ok := f.prsByNumber[req.Number]; ok {
 			return pr, nil
@@ -2383,6 +2386,9 @@ func (f *fakeGitCodeClient) ListPRComments(_ context.Context, req gitcode.PRRequ
 }
 func (f *fakeGitCodeClient) GetWikiPage(_ context.Context, req gitcode.WikiPageRequest) (gitcode.WikiPage, error) {
 	f.wikiCalls++
+	if f.onWikiCall != nil {
+		f.onWikiCall(f.wikiCalls)
+	}
 	if err := f.nextError(); err != nil {
 		return gitcode.WikiPage{}, err
 	}
