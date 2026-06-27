@@ -137,6 +137,61 @@ func (c *HTTPClient) ListPRComments(ctx context.Context, req PRRequest) (Page[PR
 	return Page[PRComment]{Items: items, Page: page.Page, PerPage: page.PerPage}, nil
 }
 
+func (c *HTTPClient) CreatePR(ctx context.Context, req CreatePRRequest, opts WriteOptions) (WriteResult[PullRequest], error) {
+	if err := validateCreatePR(req); err != nil {
+		return WriteResult[PullRequest]{}, err
+	}
+	target := req.Owner + "/" + req.Repo
+	return writeConfirmedJSON[PullRequest](ctx, c, http.MethodPost, listPREndpoint(req.Owner, req.Repo), "CreatePR", target, req, opts, func(result WriteResult[PullRequest]) (WriteResult[PullRequest], error) {
+		pr := result.Record
+		if strings.TrimSpace(pr.ID) == "" || pr.Number <= 0 {
+			return WriteResult[PullRequest]{}, ErrValidationFailed{Field: "response", Message: "pull request create confirmation requires id and number"}
+		}
+		result.RemoteID = pr.ID
+		result.RemoteNumber = pr.Number
+		return result, nil
+	})
+}
+
+func (c *HTTPClient) UpdatePR(ctx context.Context, req UpdatePRRequest, opts WriteOptions) (WriteResult[PullRequest], error) {
+	if err := validateUpdatePR(req); err != nil {
+		return WriteResult[PullRequest]{}, err
+	}
+	target := req.Owner + "/" + req.Repo + "/pulls/" + strconv.Itoa(req.Number)
+	key := opts.IdempotencyKey
+	if key == "" {
+		key = GenerateIdempotencyKey("UpdatePR", target, req, opts)
+		opts.IdempotencyKey = key
+	}
+	result, err := writeConfirmedJSON[PullRequest](ctx, c, http.MethodPatch, getPREndpoint(req.Owner, req.Repo, req.Number), "UpdatePR", target, req, opts, func(result WriteResult[PullRequest]) (WriteResult[PullRequest], error) {
+		pr := result.Record
+		if strings.TrimSpace(pr.ID) == "" || pr.Number != req.Number {
+			return WriteResult[PullRequest]{}, ErrValidationFailed{Field: "response", Message: "pull request update confirmation requires id and matching number"}
+		}
+		result.RemoteID = pr.ID
+		result.RemoteNumber = pr.Number
+		return result, nil
+	})
+	if err == nil {
+		return result, nil
+	}
+	var partial ErrPartialResponse
+	if !errors.As(err, &partial) {
+		return WriteResult[PullRequest]{}, err
+	}
+	pr, getErr := c.GetPR(ctx, PRRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
+	if getErr != nil {
+		return WriteResult[PullRequest]{}, err
+	}
+	if strings.TrimSpace(pr.ID) == "" || pr.Number != req.Number {
+		return WriteResult[PullRequest]{}, ErrValidationFailed{Field: "response", Message: "pull request update read-back requires id and matching number"}
+	}
+	body, _ := json.Marshal(pr)
+	hash := sha256.Sum256(body)
+	fingerprint := sha256.Sum256(RedactJSONBody(body, target))
+	return WriteResult[PullRequest]{Record: pr, Confirmed: true, Operation: "UpdatePR", Target: target, ProviderStatus: "2xx-readback", IdempotencyKey: key, ResponseHash: hex.EncodeToString(hash[:]), ProviderPayloadFingerprint: hex.EncodeToString(fingerprint[:]), RemoteID: pr.ID, RemoteNumber: pr.Number, ConfirmedAt: time.Now().UTC()}, nil
+}
+
 func (c *HTTPClient) GetWikiPage(ctx context.Context, req WikiPageRequest) (WikiPage, error) {
 	if err := validateWikiPageRequest(req); err != nil {
 		return WikiPage{}, err
@@ -817,6 +872,32 @@ func validateCreatePRComment(req CreatePRCommentRequest) error {
 	}
 	if strings.TrimSpace(req.Body) == "" {
 		return ErrValidationFailed{Field: "body", Message: "comment body is required"}
+	}
+	return nil
+}
+
+func validateCreatePR(req CreatePRRequest) error {
+	if err := validateWriteRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if strings.TrimSpace(req.Title) == "" {
+		return ErrValidationFailed{Field: "title", Message: "title is required"}
+	}
+	if strings.TrimSpace(req.Head) == "" {
+		return ErrValidationFailed{Field: "head", Message: "head branch is required"}
+	}
+	if strings.TrimSpace(req.Base) == "" {
+		return ErrValidationFailed{Field: "base", Message: "base branch is required"}
+	}
+	return nil
+}
+
+func validateUpdatePR(req UpdatePRRequest) error {
+	if err := validateWriteRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if req.Number <= 0 {
+		return ErrValidationFailed{Field: "number", Message: "positive pull request number is required"}
 	}
 	return nil
 }

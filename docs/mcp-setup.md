@@ -7,7 +7,7 @@ gitcode-mcp provides two MCP transport modes:
 1. **stdio** — single-client, local process. Recommended for editor integrations that spawn the server as a child process.
 2. **HTTP/SSE** — multi-client, shared cache. Recommended when multiple agents or clients need to query the same local cache.
 
-Both modes serve the same 15 MCP tools over the same JSON-RPC 2.0 protocol.
+Both modes serve the same MCP tools over the same JSON-RPC 2.0 protocol.
 
 ## Stdio mode
 
@@ -99,7 +99,7 @@ Configure your MCP client with the server URL:
 
 ### MCP tools exposed
 
-All 15 tools are available in both transport modes:
+All tools are available in both transport modes:
 
 | Tool | Description |
 |---|---|
@@ -118,6 +118,19 @@ All 15 tools are available in both transport modes:
 | `sync_status` | Check sync status for a source or the whole cache |
 | `export_snapshot` | Export a deterministic snapshot |
 | `diff_snapshot` | Diff two snapshots |
+| `repo_status` | Report configured repository binding and cache readiness state |
+| `sync_live` | Synchronize selected live collection records into the cache |
+| `add_issue_comment` | Add a live issue comment through the audited write lifecycle |
+| `update_issue` | Update live issue metadata through the audited write lifecycle |
+| `create_pr` | Create a live pull request through the audited write lifecycle |
+| `update_pr` | Update live pull request metadata through the audited write lifecycle |
+| `add_pr_comment` | Add a live pull request comment through the audited write lifecycle |
+| `link_pr_issue` | Link a pull request to an issue through the deterministic description fallback |
+| `index_repo` | Build or refresh the local cache index |
+| `auth_status` | Report redacted credential presence and source metadata |
+| `doctor` | Report structured server health diagnostics |
+
+MCP write tools require `write_mode: "live"` and use the same service write path as CLI live writes: idempotency keys, provider confirmation, audit records, cache refresh, typed errors, and public-safe diagnostics. `link_pr_issue` currently uses a deterministic PR-body marker plus `Fixes #N` fallback when an explicit GitCode relation endpoint is not available.
 
 ### Correlation IDs
 
@@ -154,6 +167,6 @@ Example JSON-RPC request (HTTP/SSE):
 ## Server lifecycle
 
 - The HTTP/SSE server runs until the process receives SIGINT or SIGTERM.
-- Sync and index operations are explicit CLI commands, never triggered by MCP client requests.
+- Sync, index, and write operations are explicit MCP tool calls or CLI commands; routine reads never trigger them automatically.
 - Multiple MCP clients can read concurrently from the shared cache.
-- Writer operations (sync, index) are serialized and require explicit CLI invocation.
+- Writer operations are serialized and require explicit live intent.

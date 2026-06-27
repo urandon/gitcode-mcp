@@ -304,7 +304,7 @@ func TestMCPBlockedWriteBoundary(t *testing.T) {
 			t.Fatalf("tools count = %d, want %d", len(tls.Tools), len(toolListOrder))
 		}
 		blocked := map[string]bool{
-			"create_issue": false, "update_issue": false, "add_comment": false,
+			"create_issue": false, "add_comment": false,
 			"create_page": false, "update_page": false,
 			"create-issue": false, "update-issue": false, "add-label": false,
 			"create-page": false, "update-page": false,
@@ -318,7 +318,7 @@ func TestMCPBlockedWriteBoundary(t *testing.T) {
 
 	// scenario blocked-write-canonical-5
 	t.Run("blocked write canonical 5", func(t *testing.T) {
-		canonical := []string{"create_issue", "update_issue", "add_comment", "create_page", "update_page"}
+		canonical := []string{"create_issue", "add_comment", "create_page", "update_page"}
 
 		for i, name := range canonical {
 			send(map[string]any{
@@ -827,12 +827,12 @@ func TestMCPLifecycleTools(t *testing.T) {
 	for _, tool := range tls.Tools {
 		listed[tool.Name] = true
 	}
-	for _, name := range []string{"repo_status", "sync_live", "index_repo", "auth_status", "doctor"} {
+	for _, name := range []string{"repo_status", "sync_live", "add_issue_comment", "update_issue", "create_pr", "update_pr", "add_pr_comment", "link_pr_issue", "index_repo", "auth_status", "doctor"} {
 		if !listed[name] {
 			t.Fatalf("tools/list missing lifecycle tool %q", name)
 		}
 	}
-	for _, name := range []string{"create_issue", "update_issue", "add_comment", "create_page", "update_page"} {
+	for _, name := range []string{"create_issue", "add_comment", "create_page", "update_page"} {
 		if listed[name] {
 			t.Fatalf("tools/list advertised write tool %q", name)
 		}
@@ -1012,6 +1012,105 @@ func TestMCPIndexRepoDelegatesServiceIndex(t *testing.T) {
 	}
 	if opResult.ProcessedCount != 3 {
 		t.Fatalf("SCN-MCP-INDEX-REPO-DELEGATES-SERVICE-INDEX: ProcessedCount = %d, want 3", opResult.ProcessedCount)
+	}
+
+	_ = r.Close()
+	wg.Wait()
+}
+
+type writeLifecycleSpyService struct {
+	serviceInterface
+	calls map[string]service.WriteCommandRequest
+}
+
+func (s *writeLifecycleSpyService) record(command string, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	if s.calls == nil {
+		s.calls = map[string]service.WriteCommandRequest{}
+	}
+	s.calls[command] = req
+	return service.WriteCommandResult{Command: command, Status: "succeeded", RepoID: req.RepoID, ID: "PR-7", RemoteID: "7", RemoteNumber: req.Number, IdempotencyKey: req.IdempotencyKey, GeneratedAt: time.Date(2026, 6, 27, 12, 0, 0, 0, time.UTC)}, nil
+}
+
+func (s *writeLifecycleSpyService) AddComment(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	return s.record("add-comment", req)
+}
+
+func (s *writeLifecycleSpyService) UpdateIssue(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	return s.record("update-issue", req)
+}
+
+func (s *writeLifecycleSpyService) CreatePR(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	return s.record("create-pr", req)
+}
+
+func (s *writeLifecycleSpyService) UpdatePR(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	return s.record("update-pr", req)
+}
+
+func (s *writeLifecycleSpyService) AddPRComment(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	return s.record("add-pr-comment", req)
+}
+
+func (s *writeLifecycleSpyService) LinkPRIssue(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	return s.record("link-pr-issue", req)
+}
+
+func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
+	spy := &writeLifecycleSpyService{}
+	srv, r, w, stderr := newPipeServer(spy)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); _ = srv.Serve() }()
+
+	call := func(name string, args map[string]any) service.WriteCommandResult {
+		t.Helper()
+		b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": name, "method": "tools/call", "params": map[string]any{"name": name, "arguments": args}})
+		_, _ = r.Write(append(b, '\n'))
+		line, err := readLine(w)
+		if err != nil {
+			t.Fatalf("read %s response: %v (stderr: %s)", name, err, stderr.String())
+		}
+		result := decodeToolCallResult(t, line)
+		var write service.WriteCommandResult
+		decodeStructured(t, result, &write)
+		return write
+	}
+
+	call("add_issue_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 16, "body": "proposal", "idempotency_key": "issue-comment-key"})
+	call("update_issue", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 16, "title": "updated", "labels": []string{"enhancement"}, "idempotency_key": "issue-update-key"})
+	call("create_pr", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "title": "PR", "body": "body", "head": "topic", "base": "main", "idempotency_key": "create-pr-key"})
+	call("update_pr", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "body": "new body", "idempotency_key": "update-pr-key"})
+	call("add_pr_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "body": "tested", "idempotency_key": "pr-comment-key"})
+	call("link_pr_issue", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "pr_number": 7, "issue_number": 16, "strategy": "description_fallback", "idempotency_key": "link-key"})
+
+	assertReq := func(command string) service.WriteCommandRequest {
+		t.Helper()
+		req, ok := spy.calls[command]
+		if !ok {
+			t.Fatalf("missing service call %s in %#v", command, spy.calls)
+		}
+		if req.RepoID != "fixture-a" || req.Mode != service.WriteModeLive || req.IdempotencyKey == "" {
+			t.Fatalf("%s request=%#v", command, req)
+		}
+		return req
+	}
+	if req := assertReq("add-comment"); req.Number != 16 || req.Body != "proposal" {
+		t.Fatalf("add-comment req=%#v", req)
+	}
+	if req := assertReq("update-issue"); req.Number != 16 || req.Title != "updated" || len(req.Labels) != 1 || req.Labels[0] != "enhancement" {
+		t.Fatalf("update-issue req=%#v", req)
+	}
+	if req := assertReq("create-pr"); req.Title != "PR" || req.Head != "topic" || req.Base != "main" {
+		t.Fatalf("create-pr req=%#v", req)
+	}
+	if req := assertReq("update-pr"); req.Number != 7 || req.Body != "new body" {
+		t.Fatalf("update-pr req=%#v", req)
+	}
+	if req := assertReq("add-pr-comment"); req.Number != 7 || req.Body != "tested" {
+		t.Fatalf("add-pr-comment req=%#v", req)
+	}
+	if req := assertReq("link-pr-issue"); req.Number != 7 || req.IssueNumber != 16 {
+		t.Fatalf("link-pr-issue req=%#v", req)
 	}
 
 	_ = r.Close()

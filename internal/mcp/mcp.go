@@ -38,6 +38,12 @@ type serviceInterface interface {
 	BulkSyncPullRequests(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncPRComments(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncAll(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	UpdateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	AddComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	CreatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	UpdatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	AddPRComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	LinkPRIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	Index(context.Context, service.OperationRequest) (service.OperationResult, error)
 	ListChunks(context.Context, service.ChunkQuery) (service.ChunkQueryResult, error)
 	SearchChunks(context.Context, service.ChunkSearchQuery) (service.ChunkQueryResult, error)
@@ -203,6 +209,18 @@ func intPtr(v int) *int             { return &v }
 func float64Ptr(v float64) *float64 { return &v }
 func kindValidationMessage() string {
 	return "kind must be one of: " + strings.Join(sourceKindEnums, ", ")
+}
+
+func writeSchemaProps(extra map[string]schemaProp) map[string]schemaProp {
+	props := map[string]schemaProp{
+		"repo_id":         {Type: "string", Description: "Configured repository id.", MinLength: 1},
+		"write_mode":      {Type: "string", Description: "Required live write intent.", Enum: []string{"live"}},
+		"idempotency_key": {Type: "string", Description: "Idempotency key."},
+	}
+	for key, prop := range extra {
+		props[key] = prop
+	}
+	return props
 }
 
 func chunkSchemaProps(includeQuery bool) map[string]schemaProp {
@@ -398,6 +416,36 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "issues": {Type: "boolean", Description: "Sync issues."}, "wiki": {Type: "boolean", Description: "Sync wiki pages."}, "comments": {Type: "boolean", Description: "Sync supported comments."}, "pulls": {Type: "boolean", Description: "Sync pull requests."}, "remote_alias": {Type: "string", Description: "Specific remote alias for current sync surface."}, "idempotency_key": {Type: "string", Description: "Idempotency key."}, "max_pages": {Type: "integer", Description: "Maximum pages to sync.", Minimum: float64Ptr(1)}, "max_records": {Type: "integer", Description: "Maximum records to sync.", Minimum: float64Ptr(1)}, "per_page": {Type: "integer", Description: "Records per page.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 25.0}}, Required: []string{"repo_id"}},
 	},
 	{
+		Name:        "add_issue_comment",
+		Description: "Add a live comment to an issue through the audited write lifecycle.",
+		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Comment body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "number", "body"}},
+	},
+	{
+		Name:        "update_issue",
+		Description: "Update live issue metadata through the audited write lifecycle.",
+		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "title": {Type: "string", Description: "Issue title."}, "body": {Type: "string", Description: "Issue body."}, "state": {Type: "string", Description: "Issue state."}, "labels": {Type: "array", Description: "Issue labels."}}), Required: []string{"repo_id", "write_mode", "number"}},
+	},
+	{
+		Name:        "create_pr",
+		Description: "Create a live pull request through the audited write lifecycle.",
+		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"title": {Type: "string", Description: "Pull request title.", MinLength: 1}, "body": {Type: "string", Description: "Pull request body."}, "head": {Type: "string", Description: "Source branch.", MinLength: 1}, "base": {Type: "string", Description: "Target branch.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "title", "head", "base"}},
+	},
+	{
+		Name:        "update_pr",
+		Description: "Update live pull request metadata through the audited write lifecycle.",
+		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "title": {Type: "string", Description: "Pull request title."}, "body": {Type: "string", Description: "Pull request body."}, "state": {Type: "string", Description: "Pull request state."}}), Required: []string{"repo_id", "write_mode", "number"}},
+	},
+	{
+		Name:        "add_pr_comment",
+		Description: "Add a live pull request comment through the audited write lifecycle.",
+		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Comment body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "number", "body"}},
+	},
+	{
+		Name:        "link_pr_issue",
+		Description: "Link a live pull request to an issue through a deterministic description fallback.",
+		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"pr_number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "issue_number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "strategy": {Type: "string", Description: "Link strategy.", Enum: []string{"description_fallback"}, Default: "description_fallback"}}), Required: []string{"repo_id", "write_mode", "pr_number", "issue_number"}},
+	},
+	{
 		Name:        "index_repo",
 		Description: "Build or refresh the local index for a configured repository.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "mode": {Type: "string", Description: "Index mode.", Default: "full"}, "strict": {Type: "boolean", Description: "Use strict indexing behavior."}}, Required: []string{"repo_id"}},
@@ -569,6 +617,12 @@ var toolListOrder = []string{
 	"diff_snapshot",
 	"repo_status",
 	"sync_live",
+	"add_issue_comment",
+	"update_issue",
+	"create_pr",
+	"update_pr",
+	"add_pr_comment",
+	"link_pr_issue",
 	"index_repo",
 	"auth_status",
 	"doctor",
@@ -610,6 +664,12 @@ func (s *Server) toolRegistry() toolRegistry {
 	registerTool(registry, "diff_snapshot", s.callDiffSnapshot)
 	registerTool(registry, "repo_status", s.callRepoStatus)
 	registerTool(registry, "sync_live", s.callSyncLive)
+	registerTool(registry, "add_issue_comment", s.callAddIssueComment)
+	registerTool(registry, "update_issue", s.callUpdateIssue)
+	registerTool(registry, "create_pr", s.callCreatePR)
+	registerTool(registry, "update_pr", s.callUpdatePR)
+	registerTool(registry, "add_pr_comment", s.callAddPRComment)
+	registerTool(registry, "link_pr_issue", s.callLinkPRIssue)
 	registerTool(registry, "index_repo", s.callIndexRepo)
 	registerTool(registry, "auth_status", s.callAuthStatus)
 	registerTool(registry, "doctor", s.callDoctor)

@@ -161,9 +161,24 @@ func TestScenario005FixtureReadOnlyTyped(t *testing.T) {
 	}{
 		{name: "create-issue", run: func() error { _, err := provider.CreateIssue(ctx, CreateIssueRequest{}, WriteOptions{}); return err }},
 		{name: "update-issue", run: func() error { _, err := provider.UpdateIssue(ctx, UpdateIssueRequest{}, WriteOptions{}); return err }},
-		{name: "create-comment", run: func() error { _, err := provider.CreateIssueComment(ctx, CreateIssueCommentRequest{}, WriteOptions{}); return err }},
-		{name: "create-wiki", run: func() error { _, err := provider.CreateWikiPage(ctx, CreateWikiPageRequest{}, WriteOptions{}); return err }},
-		{name: "update-wiki", run: func() error { _, err := provider.UpdateWikiPage(ctx, UpdateWikiPageRequest{}, WriteOptions{}); return err }},
+		{name: "create-comment", run: func() error {
+			_, err := provider.CreateIssueComment(ctx, CreateIssueCommentRequest{}, WriteOptions{})
+			return err
+		}},
+		{name: "create-pr", run: func() error { _, err := provider.CreatePR(ctx, CreatePRRequest{}, WriteOptions{}); return err }},
+		{name: "update-pr", run: func() error { _, err := provider.UpdatePR(ctx, UpdatePRRequest{}, WriteOptions{}); return err }},
+		{name: "create-pr-comment", run: func() error {
+			_, err := provider.CreatePRComment(ctx, CreatePRCommentRequest{}, WriteOptions{})
+			return err
+		}},
+		{name: "create-wiki", run: func() error {
+			_, err := provider.CreateWikiPage(ctx, CreateWikiPageRequest{}, WriteOptions{})
+			return err
+		}},
+		{name: "update-wiki", run: func() error {
+			_, err := provider.UpdateWikiPage(ctx, UpdateWikiPageRequest{}, WriteOptions{})
+			return err
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

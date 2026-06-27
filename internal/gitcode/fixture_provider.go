@@ -163,6 +163,14 @@ func (p *fixtureProvider) ListPRComments(context.Context, PRRequest) (Page[PRCom
 	return Page[PRComment]{}, FixtureReadOnlyError("ListPRComments")
 }
 
+func (p *fixtureProvider) CreatePR(context.Context, CreatePRRequest, WriteOptions) (WriteResult[PullRequest], error) {
+	return WriteResult[PullRequest]{}, FixtureReadOnlyError("CreatePR")
+}
+
+func (p *fixtureProvider) UpdatePR(context.Context, UpdatePRRequest, WriteOptions) (WriteResult[PullRequest], error) {
+	return WriteResult[PullRequest]{}, FixtureReadOnlyError("UpdatePR")
+}
+
 func (p *fixtureProvider) ListWikiPages(ctx context.Context, req WikiListRequest) (Page[WikiPage], error) {
 	if err := p.scenarioError("wiki"); err != nil {
 		return Page[WikiPage]{}, err

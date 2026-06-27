@@ -108,6 +108,19 @@ gitcode-mcp create-issue --dry-run --idempotency-key "ik-001" --title "Test" --b
 
 `create-issue --help` documents `--live`, `--dry-run`, `--idempotency-key`, `--title`, and `--body`. `--live` executes the live write, `--dry-run` validates without mutation, `--idempotency-key` supports audited retries, `--title` is required, and `--body` supplies the issue body.
 
+The MCP server exposes the same audited live-write lifecycle for agent workflows that previously needed shell or direct REST fallback:
+
+| MCP tool | Use |
+|---|---|
+| `add_issue_comment` | Add a proposal or status comment to an issue |
+| `update_issue` | Update issue title, body, state, or labels |
+| `create_pr` | Create a pull request with title, body, head, and base |
+| `update_pr` | Update pull request title, body, or state |
+| `add_pr_comment` | Add a testing/report comment to a pull request |
+| `link_pr_issue` | Link a pull request to an issue through the deterministic description fallback |
+
+Each MCP write call requires `write_mode: "live"`. Idempotency keys are accepted on every write tool and are used for safe replay/conflict detection. Successful writes report provider confirmation, audit/cache evidence, remote identity, and the idempotency key; failed writes return typed public-safe diagnostics and do not claim cache confirmation.
+
 ## 6. Search
 
 After sync and indexing, search cached source records:
