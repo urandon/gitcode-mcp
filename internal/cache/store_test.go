@@ -738,13 +738,19 @@ func TestWriterAdmissionWALOwnershipRuntime(t *testing.T) {
 	}
 
 	migrationStore, err := NewSQLiteStore(ctx, path)
-	if err == nil {
+	if err != nil {
+		t.Fatalf("NewSQLiteStore current schema open returned error while writer lease held: %v", err)
+	}
+	source, err := migrationStore.GetSourceScoped(ctx, "fixture-a", "DOC-WAL")
+	if err != nil {
 		_ = migrationStore.Close()
-		t.Fatalf("NewSQLiteStore migration succeeded while writer lease held")
+		t.Fatalf("new store GetSourceScoped returned error while writer lease held: %v", err)
 	}
-	if !errors.As(err, &contention) {
-		t.Fatalf("migration open error = %T %[1]v, want ErrLockContention", err)
+	if source.RepoID != "fixture-a" || source.ID != "DOC-WAL" {
+		_ = migrationStore.Close()
+		t.Fatalf("new store source = %#v", source)
 	}
+	_ = migrationStore.Close()
 
 	if err := store.ReleaseWriter(ctx, lease); err != nil {
 		t.Fatalf("ReleaseWriter returned error: %v", err)

@@ -101,6 +101,53 @@ func TestWriterHoldReadersUnblocked(t *testing.T) {
 	}
 }
 
+func TestConcurrentCurrentSchemaOpensWhileWriterHeld(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "cache.db")
+	store, err := NewSQLiteStore(ctx, path)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore returned error: %v", err)
+	}
+	defer store.Close()
+	mustAddTestRepo(t, ctx, store, "fixture-a")
+	mustUpsertGraph(t, ctx, store, SourceGraph{Source: testSource("DOC-OPEN", "doc", "Concurrent Open Doc")})
+
+	lease, err := store.AcquireWriter(ctx, WriterRequest{Operation: "sync-index", RepoID: "fixture-a"})
+	if err != nil {
+		t.Fatalf("AcquireWriter returned error: %v", err)
+	}
+	defer store.ReleaseWriter(ctx, lease)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 6)
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			reader, openErr := NewSQLiteStore(ctx, path)
+			if openErr != nil {
+				errs <- openErr
+				return
+			}
+			defer reader.Close()
+			source, readErr := reader.GetSourceScoped(ctx, "fixture-a", "DOC-OPEN")
+			if readErr != nil {
+				errs <- readErr
+				return
+			}
+			if source.ID != "DOC-OPEN" {
+				errs <- fmt.Errorf("reader got unexpected source: %#v", source)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	for e := range errs {
+		t.Errorf("concurrent current-schema open error: %v", e)
+	}
+}
+
 func TestTwoWritersContentionCacheBusy(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "cache.db")

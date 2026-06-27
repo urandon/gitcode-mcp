@@ -34,6 +34,20 @@ Candidate tables:
 - Remote ids are aliases. Legacy ids remain stable migration keys.
 - Failed writes stay visible until retried or deliberately dismissed.
 
+## Concurrent Cache Access
+
+The cache is optimized for agent-side fan-out reads. Routine read operations such as `list`, `get`, `search`, status, export, diff, and MCP read tools must not require the process-wide writer lock when the SQLite schema is already current.
+
+The writer lock is reserved for operations that mutate cache state or need exclusive migration admission:
+
+- schema initialization and supported schema upgrades;
+- sync and index refresh operations;
+- explicit write commands and cache-maintenance commands that persist state.
+
+Opening a current-schema SQLite cache may check schema compatibility, but it must not acquire the migration writer lock just to prove that no migration is required. This keeps parallel CLI/MCP reads from failing before they reach SQLite. SQLite WAL mode remains the storage-level concurrency mechanism for readers while a logical writer lease exists.
+
+When a real writer conflict remains, the caller should receive a typed cache-busy diagnostic (`cache_busy` or `cache_lock_contention`, depending on the surface) with holder metadata when available, not a generic `internal_error`.
+
 ## Live Sync Semantics
 
 `gitcode-mcp sync` keeps the fixture/offline provider as the default. `gitcode-mcp sync --live` opts into the live GitCode provider for the configured repository and uses the current cache as the durable local source for later reads.
@@ -83,7 +97,7 @@ The CLI renders the aggregate success and failure counts and resource details. D
 
 ## Cache Migration
 
-The implemented cache schema version is `7`, matching `currentSchemaVersion` in `internal/cache/schema.go`.
+The implemented cache schema version is `11`, matching `currentSchemaVersion` in `internal/cache/schema.go`.
 
 The primary version source is the SQLite `schema_version` table. Migrations also update `PRAGMA user_version` as an additive SQLite diagnostic bridge, but cache compatibility decisions use `schema_version`.
 
@@ -91,13 +105,13 @@ Compatibility policy:
 
 | Detected version | Behavior | Operator action |
 | --- | --- | --- |
-| New empty cache | Initialize normally at schema version 7 | None |
-| 7 | Open normally; reads and writes are allowed | None |
-| 2-6 | Open read-compatible but writes are blocked until migration | Run `gitcode-mcp migrate-cache --confirm` |
+| New empty cache | Initialize normally at schema version 11 | None |
+| 11 | Open normally; reads and writes are allowed | None |
+| 2-10 | Open read-compatible but writes are blocked until migration | Run `gitcode-mcp migrate-cache --confirm` |
 | 1 | Block migration as pre-supported/iteration-1-equivalent | Reinitialize with `gitcode-mcp reinit-cache` or delete the cache and re-sync |
 | 0, missing, or empty `schema_version` in a non-empty cache | Block as pre-schema-versioning or unknown | Reinitialize with `gitcode-mcp reinit-cache` or delete the cache and re-sync |
-| Greater than 7 | Block as newer than this binary supports | Upgrade `gitcode-mcp` to a binary that supports the schema |
+| Greater than 11 | Block as newer than this binary supports | Upgrade `gitcode-mcp` to a binary that supports the schema |
 
-`gitcode-mcp migrate-cache --confirm` runs supported older-version migrations in place from the detected version to version 7. It creates a backup at `{cache-path}.backup-{timestamp}` before applying changes. Each migration step runs in a transaction and advances both `schema_version` and `PRAGMA user_version` only after that step succeeds.
+`gitcode-mcp migrate-cache --confirm` runs supported older-version migrations in place from the detected version to version 11. It creates a backup at `{cache-path}.backup-{timestamp}` before applying changes. Each migration step runs in a transaction and advances both `schema_version` and `PRAGMA user_version` only after that step succeeds.
 
 Opening an older compatible cache without migration is read-compatible but write-blocked so operators can inspect the cache and run diagnostics before applying the migration. New caches are initialized directly at the current schema version.

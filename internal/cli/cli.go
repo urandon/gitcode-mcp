@@ -1403,6 +1403,10 @@ func failureClass(err error) string {
 	if errors.As(err, &conflict) {
 		return "conflict"
 	}
+	var lockContention cache.ErrLockContention
+	if errors.As(err, &lockContention) {
+		return "cache_busy"
+	}
 	if isStrictFinding(err) {
 		return "validation_failed"
 	}
