@@ -64,9 +64,17 @@ Run live sync with the command-local live selector:
 gitcode-mcp sync --live --repo "YOUR_REPO" --issues --wiki --index
 ```
 
-`sync --help` documents `--live` as the live GitCode API provider selector for sync, plus `--repo`, `--issues`, `--wiki`, `--index`, `--id`, `--input`, `--idempotency-key`, `--cache-path`, and `--format`.
+`sync --help` documents `--live` as the live GitCode API provider selector for sync, plus `--repo`, `--issues`, `--wiki`, `--pulls`, `--comments`, `--index`, `--id`, `--input`, `--idempotency-key`, `--max-pages`, `--max-records`, `--per-page`, `--cache-path`, and `--format`.
 
 Live sync fetches issue records, comments, and wiki pages through the live GitCode provider. Fetches are page/resource scoped; successful records are committed to cache, failures are collected and reported, and re-sync should report deltas rather than duplicate records. Auth failures and rate limits are reported as diagnostics instead of raw API payloads.
+
+For large repositories, bound collection work explicitly:
+
+```sh
+gitcode-mcp --timeout 30s sync --live --repo "YOUR_REPO" --issues --max-pages 3 --per-page 50
+```
+
+The startup `--timeout` value bounds the whole CLI operation context. Collection bounds limit list traversal and record commits. If the operation times out or is cancelled after some records are written, the command reports partial counts and typed diagnostics while keeping successful records in the cache.
 
 ## 5. Live write
 

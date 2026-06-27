@@ -1018,6 +1018,75 @@ func TestMCPIndexRepoDelegatesServiceIndex(t *testing.T) {
 	wg.Wait()
 }
 
+type syncLiveBoundsSpyService struct {
+	serviceInterface
+	bulkIssuesCalls []service.BulkSyncRequest
+}
+
+func (s *syncLiveBoundsSpyService) ProviderMode() gitcode.ProviderMode {
+	return gitcode.ProviderModeLive
+}
+
+func (s *syncLiveBoundsSpyService) BulkSyncIssues(ctx context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
+	s.bulkIssuesCalls = append(s.bulkIssuesCalls, req)
+	result := &service.SyncResourcesResult{
+		Results:      []service.SyncResult{},
+		Failures:     []service.ResourceError{},
+		SuccessCount: 0,
+		FailureCount: 0,
+	}
+	return result, &service.PartialSyncError{Diagnostic: service.SyncDiagnosticTimeout, TotalRequested: 7}
+}
+
+func TestMCPSyncLivePropagatesBoundsAndDiagnostics(t *testing.T) {
+	spy := &syncLiveBoundsSpyService{}
+	srv, r, w, stderr := newPipeServer(spy)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); _ = srv.Serve() }()
+
+	b, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      "sync-live-bounds",
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "sync_live",
+			"arguments": map[string]any{
+				"repo_id":     "fixture-a",
+				"issues":      true,
+				"max_pages":   2,
+				"max_records": 7,
+				"per_page":    3,
+			},
+		},
+	})
+	_, _ = r.Write(append(b, '\n'))
+	line, err := readLine(w)
+	if err != nil {
+		t.Fatalf("read sync_live response: %v (stderr: %s)", err, stderr.String())
+	}
+	callResult := decodeToolCallResult(t, line)
+	var result syncLiveResult
+	decodeStructured(t, callResult, &result)
+
+	if len(spy.bulkIssuesCalls) != 1 {
+		t.Fatalf("BulkSyncIssues calls = %d, want 1", len(spy.bulkIssuesCalls))
+	}
+	req := spy.bulkIssuesCalls[0]
+	if req.PerPage != 3 {
+		t.Fatalf("PerPage = %d, want 3", req.PerPage)
+	}
+	if req.Bounds == nil || req.Bounds.MaxPages != 2 || req.Bounds.MaxRecords != 7 {
+		t.Fatalf("Bounds = %+v, want max_pages=2 max_records=7", req.Bounds)
+	}
+	if !containsLifecycleDiagnostic(result.Diagnostics, string(service.SyncDiagnosticTimeout)) {
+		t.Fatalf("diagnostics = %+v, want sync_timeout", result.Diagnostics)
+	}
+
+	_ = r.Close()
+	wg.Wait()
+}
+
 func TestMCPIndexRepoNotStaleDiagnostic(t *testing.T) {
 	store := populatedStore(t)
 	defer store.Close()

@@ -303,6 +303,120 @@ func TestBulkSyncIssuesBoundedMaxRecords(t *testing.T) {
 	}
 }
 
+func TestBulkSyncPullRequestsBoundedMaxPages(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 22, 17, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		listPRPages: []gitcode.Page[gitcode.PullRequest]{
+			{Items: generatePullRequests(0, 10, base), Page: 1, PerPage: 10},
+			{Items: generatePullRequests(10, 10, base), Page: 2, PerPage: 10},
+			{Items: generatePullRequests(20, 10, base), Page: 3, PerPage: 10},
+		},
+	}
+	store, err := cache.NewInMemorySQLiteStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "pulls-maxpages", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+
+	result, err := svc.BulkSyncPullRequests(ctx, BulkSyncRequest{
+		RepoID:  "pulls-maxpages",
+		Page:    1,
+		PerPage: 10,
+		Bounds:  &SyncBounds{MaxPages: 2},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.SuccessCount != 20 {
+		t.Fatalf("success_count = %d, want 20", result.SuccessCount)
+	}
+	if client.listPRCalls != 2 {
+		t.Fatalf("ListPRs calls = %d, want 2", client.listPRCalls)
+	}
+}
+
+func TestBulkSyncPullRequestsBoundedMaxRecords(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 22, 17, 30, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		listPRPages: []gitcode.Page[gitcode.PullRequest]{
+			{Items: generatePullRequests(0, 10, base), Page: 1, PerPage: 10},
+			{Items: generatePullRequests(10, 10, base), Page: 2, PerPage: 10},
+			{Items: generatePullRequests(20, 10, base), Page: 3, PerPage: 10},
+		},
+	}
+	store, err := cache.NewInMemorySQLiteStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "pulls-maxrecords", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+
+	result, err := svc.BulkSyncPullRequests(ctx, BulkSyncRequest{
+		RepoID:  "pulls-maxrecords",
+		Page:    1,
+		PerPage: 10,
+		Bounds:  &SyncBounds{MaxRecords: 15},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.SuccessCount != 15 {
+		t.Fatalf("success_count = %d, want 15", result.SuccessCount)
+	}
+	if client.listPRCalls != 2 {
+		t.Fatalf("ListPRs calls = %d, want 2", client.listPRCalls)
+	}
+}
+
+func TestBulkSyncPRCommentsBoundedMaxRecords(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 22, 18, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		listPRPages: []gitcode.Page[gitcode.PullRequest]{
+			{Items: generatePullRequests(0, 2, base), Page: 1, PerPage: 10},
+		},
+		prCommentsByPR: map[int][]gitcode.PRComment{
+			1: generatePRComments(1, 3, base),
+			2: generatePRComments(2, 3, base),
+		},
+	}
+	store, err := cache.NewInMemorySQLiteStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "pr-comments-maxrecords", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	if _, err := svc.BulkSyncPullRequests(ctx, BulkSyncRequest{RepoID: "pr-comments-maxrecords", PerPage: 10}); err != nil {
+		t.Fatalf("seed pull requests: %v", err)
+	}
+
+	result, err := svc.BulkSyncPRComments(ctx, BulkSyncRequest{
+		RepoID: "pr-comments-maxrecords",
+		Bounds: &SyncBounds{MaxRecords: 4},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.SuccessCount != 4 {
+		t.Fatalf("success_count = %d, want 4", result.SuccessCount)
+	}
+	if client.prCommentCalls != 2 {
+		t.Fatalf("ListPRComments calls = %d, want 2", client.prCommentCalls)
+	}
+}
+
 func TestBulkSyncWikiBoundedPreCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -731,8 +845,8 @@ func TestErrorHasDiagnosticCode(t *testing.T) {
 
 type emptyWikiTestError struct{}
 
-func (e *emptyWikiTestError) Error() string           { return "wiki is empty/uninitialized" }
-func (e *emptyWikiTestError) DiagnosticCode() string  { return "empty_wiki" }
+func (e *emptyWikiTestError) Error() string          { return "wiki is empty/uninitialized" }
+func (e *emptyWikiTestError) DiagnosticCode() string { return "empty_wiki" }
 
 func buildIssueMap(count int, base time.Time) map[int]gitcode.Issue {
 	m := make(map[int]gitcode.Issue, count)
@@ -765,6 +879,40 @@ func generateWikiPages(offset, count int) []gitcode.WikiPage {
 	for i := 0; i < count; i++ {
 		slug := fmt.Sprintf("Page%d", offset+i+1)
 		out[i] = gitcode.WikiPage{Slug: slug, Title: slug}
+	}
+	return out
+}
+
+func generatePullRequests(offset, count int, base time.Time) []gitcode.PullRequest {
+	out := make([]gitcode.PullRequest, count)
+	for i := 0; i < count; i++ {
+		num := offset + i + 1
+		out[i] = gitcode.PullRequest{
+			ID:        fmt.Sprintf("%d", num),
+			Number:    num,
+			Title:     fmt.Sprintf("PR %d", num),
+			Body:      "body",
+			State:     "open",
+			Base:      "main",
+			Head:      fmt.Sprintf("topic-%d", num),
+			CreatedAt: base,
+			UpdatedAt: base,
+		}
+	}
+	return out
+}
+
+func generatePRComments(prNumber, count int, base time.Time) []gitcode.PRComment {
+	out := make([]gitcode.PRComment, count)
+	for i := 0; i < count; i++ {
+		num := i + 1
+		out[i] = gitcode.PRComment{
+			ID:        fmt.Sprintf("%d-%d", prNumber, num),
+			Author:    "fixture-user",
+			Body:      fmt.Sprintf("comment %d on pr %d", num, prNumber),
+			CreatedAt: base,
+			UpdatedAt: base,
+		}
 	}
 	return out
 }

@@ -130,7 +130,13 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 	if opts.mcp {
 		return mcpRoute(context.Background(), stdin, stdout, stderr, deps)
 	}
-	return cliRoute(context.Background(), rest, stdout, stderr, deps)
+	routeCtx := context.Background()
+	if cfg.DefaultTimeout > 0 {
+		var cancel context.CancelFunc
+		routeCtx, cancel = context.WithTimeout(routeCtx, cfg.DefaultTimeout)
+		defer cancel()
+	}
+	return cliRoute(routeCtx, rest, stdout, stderr, deps)
 }
 
 func buildStartupDeps(cfg config.Config, token string, live bool) StartupDeps {
@@ -506,7 +512,7 @@ func printStartupHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --mcp                 run stdio MCP server")
 	fmt.Fprintln(w, "  mcp serve             run MCP server with stdio or HTTP/SSE transport")
 	fmt.Fprintln(w, "  --cache-path PATH     cache database path")
-	fmt.Fprintln(w, "  --timeout DURATION    startup default timeout")
+	fmt.Fprintln(w, "  --timeout DURATION    CLI operation and GitCode request timeout")
 	fmt.Fprintln(w, "  --max-size BYTES      maximum GitCode response size")
 	fmt.Fprintln(w, "  --format FORMAT       default output format")
 	fmt.Fprintln(w, "  --version             print version")

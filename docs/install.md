@@ -52,7 +52,7 @@ Global flags:
   --mcp                 run stdio MCP server
   mcp serve             run MCP server with stdio or HTTP/SSE transport
   --cache-path PATH     cache database path
-  --timeout DURATION    startup default timeout
+  --timeout DURATION    CLI operation and GitCode request timeout
   --max-size BYTES      maximum GitCode response size
   --format FORMAT       default output format
   --version             print version
