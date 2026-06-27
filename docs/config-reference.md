@@ -45,7 +45,7 @@ credential:
 | `cache_path` | string | `<cache-dir>/gitcode-mcp/cache.db` | SQLite cache database path |
 | `lock_path` | string | `<cache_path>.lock` | Lock file path for writer ownership |
 | `gitcode_base_url` | string | `https://api.gitcode.com/api/v5` | GitCode API base URL |
-| `default_timeout` | duration | `30s` | Timeout for GitCode API calls |
+| `default_timeout` | duration | `30s` | Timeout for GitCode API calls and the CLI operation context |
 | `max_response_size` | int64 | `10485760` | Maximum response size in bytes |
 | `max_retries` | int | `2` | Maximum retries for API calls |
 | `format` | string | `text` | Default output format (`text` or `json`) |

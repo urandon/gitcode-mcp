@@ -126,6 +126,27 @@ func TestEntrypointDefaultModeDependencyHandoff(t *testing.T) {
 	}
 }
 
+func TestEntrypointTimeoutCreatesRouteDeadline(t *testing.T) {
+	src := newTestSource(t)
+
+	old := cliRoute
+	defer func() { cliRoute = old }()
+	var gotDeadline bool
+	cliRoute = func(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps StartupDeps) int {
+		_, gotDeadline = ctx.Deadline()
+		return 0
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--timeout", "10s", "sync", "--repo", "fixture-a", "--issues"}, strings.NewReader(""), &stdout, &stderr, src)
+	if code != 0 {
+		t.Fatalf("exit = %d stderr=%q", code, stderr.String())
+	}
+	if !gotDeadline {
+		t.Fatal("cli route context has no deadline, want --timeout to bound the whole operation")
+	}
+}
+
 func TestEntrypointAuthStatusGlobalLiveRouting(t *testing.T) {
 	src := newTestSource(t)
 	src.env[config.EnvToken] = "sentinel-token"

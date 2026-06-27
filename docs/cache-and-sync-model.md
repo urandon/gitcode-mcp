@@ -57,11 +57,18 @@ The sync command supports these live sync selectors:
 - `--repo REPO` selects the configured repository binding.
 - `--issues` bulk-syncs issue records.
 - `--wiki` bulk-syncs wiki records.
+- `--pulls` bulk-syncs pull request records.
+- `--comments` bulk-syncs pull request comments for cached pull request records.
 - `--id ID` and `--input ALIAS` sync one stable record or remote alias.
 - `--index` builds the local index after sync.
 - `--idempotency-key KEY` supplies a deterministic sync event key.
+- `--max-pages`, `--max-records`, and `--per-page` bound collection sync when the selected surface supports collection bounds.
 
-Bulk issue and wiki sync list remote resources independently, then sync each returned resource through the same atomic single-resource path. Issue sync covers issue data and comments as part of the source graph for that issue; wiki sync covers wiki page data. Live adapter route construction stays behind the provider boundary, and operator docs should use sanitized placeholders rather than real repository coordinates.
+Bulk sync treats issues, wiki pages, pull requests, and pull request comments as bounded collections. Issue and pull request sync page through list APIs and commit each returned record independently. Wiki sync passes record bounds into the wiki provider traversal before committing individual pages. Pull request comment sync walks cached pull request records and applies record bounds across the resulting comment records. Issue sync covers issue data and comments as part of the source graph for that issue; wiki sync covers wiki page data. Live adapter route construction stays behind the provider boundary, and operator docs should use sanitized placeholders rather than real repository coordinates.
+
+The command context carries the configured `default_timeout`, including the `--timeout` override, so large collection syncs have a whole-operation deadline in addition to provider-level request timeouts. When the deadline or caller cancellation fires, completed resource commits remain visible in cache and the sync response reports partial counts plus a typed diagnostic such as `sync_timeout` or `sync_cancelled`.
+
+Labels and milestones are not yet exposed as bulk sync service surfaces. When those collection surfaces are added, they should use the same `SyncBounds` and partial-result contract.
 
 Each successful resource sync records a `SyncEvent` with:
 
