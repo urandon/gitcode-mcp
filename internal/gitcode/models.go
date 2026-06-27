@@ -40,6 +40,24 @@ type PRRequest struct {
 	Number int
 }
 
+type CreatePRRequest struct {
+	Owner string `json:"-"`
+	Repo  string `json:"-"`
+	Title string `json:"title"`
+	Body  string `json:"body,omitempty"`
+	Head  string `json:"head"`
+	Base  string `json:"base"`
+}
+
+type UpdatePRRequest struct {
+	Owner  string `json:"-"`
+	Repo   string `json:"-"`
+	Number int    `json:"-"`
+	Title  string `json:"title,omitempty"`
+	Body   string `json:"body,omitempty"`
+	State  string `json:"state,omitempty"`
+}
+
 type CreatePRCommentRequest struct {
 	Owner  string `json:"-"`
 	Repo   string `json:"-"`

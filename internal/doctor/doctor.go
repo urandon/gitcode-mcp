@@ -42,6 +42,7 @@ type Request struct {
 	CachePath          string
 	Live               bool
 	ProviderMode       string
+	MCPToolAccess      string
 	APIBaseURL         string
 	RepoID             string
 	LiveBinding        service.LiveRepositoryBinding
@@ -125,6 +126,7 @@ type MCPSection struct {
 	TransportStdio string `json:"transport_stdio"`
 	TransportHTTP  string `json:"transport_http"`
 	ServerVersion  string `json:"server_version"`
+	ToolAccess     string `json:"tool_access"`
 }
 
 type LiveProviderSection struct {
@@ -202,7 +204,11 @@ func Build(ctx context.Context, req Request) (Report, error) {
 	report.Repo = RepoSection{Status: "no_repo_bound", BindHint: "run 'gitcode-mcp repo add --repo <id> --owner <owner> --name <name> --api-base-url <url> --scopes issues,wiki'"}
 	report.Sync = SyncSection{Status: "no_repo_bound"}
 	report.Index = IndexSection{Status: "no_repo_bound"}
-	report.MCP = MCPSection{Status: "available", TransportStdio: "supported", TransportHTTP: "supported", ServerVersion: req.Version}
+	toolAccess, err := config.NormalizeMCPToolAccess(req.MCPToolAccess)
+	if err != nil {
+		toolAccess = config.MCPToolAccessRead
+	}
+	report.MCP = MCPSection{Status: "available", TransportStdio: "supported", TransportHTTP: "supported", ServerVersion: req.Version, ToolAccess: toolAccess}
 	report.LiveProvider = LiveProviderSection{Status: "skipped", Reachable: "not_configured", ProviderMode: "fixture", Remediation: "set GITCODE_TOKEN and use --live to enable live provider"}
 	report.AuthProbe = AuthProbeSection{Status: "skipped", ProbeResult: "not_probed", Remediation: "set GITCODE_TOKEN to enable authentication probing"}
 
@@ -539,6 +545,7 @@ func RenderText(w io.Writer, report Report) {
 	fmt.Fprintf(w, "  transport_stdio: %s\n", report.MCP.TransportStdio)
 	fmt.Fprintf(w, "  transport_http: %s\n", report.MCP.TransportHTTP)
 	fmt.Fprintf(w, "  server_version: %s\n", report.MCP.ServerVersion)
+	fmt.Fprintf(w, "  tool_access: %s\n", report.MCP.ToolAccess)
 	fmt.Fprintln(w, "live_provider:")
 	fmt.Fprintf(w, "  status: %s\n", report.LiveProvider.Status)
 	fmt.Fprintf(w, "  reachable: %s\n", report.LiveProvider.Reachable)

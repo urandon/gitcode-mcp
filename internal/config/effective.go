@@ -16,6 +16,12 @@ const (
 	EnvMCPConfigPath = "GITCODE_MCP_CONFIG"
 	EnvMCPCacheDir   = "GITCODE_MCP_CACHE_DIR"
 	EnvAPIURL        = "GITCODE_API_URL"
+	EnvMCPToolAccess = "GITCODE_MCP_TOOL_ACCESS"
+)
+
+const (
+	MCPToolAccessRead  = "read"
+	MCPToolAccessWrite = "write"
 )
 
 type ConfigLocation struct {
@@ -28,6 +34,14 @@ type ConfigLocation struct {
 
 type CredentialConfig struct {
 	Store string `json:"store"`
+}
+
+type MCPToolsConfig struct {
+	Access string `json:"access"`
+}
+
+type MCPConfig struct {
+	Tools MCPToolsConfig `json:"tools"`
 }
 
 type EffectiveConfig struct {
@@ -301,7 +315,9 @@ func LoadEffective(src Source, overrides Overrides) (EffectiveConfig, error) {
 			eff.CredentialPolicy.Store = cred.Store
 		}
 	}
-	applyEnvOverrides(src, &eff)
+	if err := applyEnvOverrides(src, &eff); err != nil {
+		return EffectiveConfig{}, errors.New(RedactDiagnostic(err.Error(), src))
+	}
 	beforeCache := eff.Config.CachePath
 	eff.Config = mergeOverrides(eff.Config, overrides)
 	applyCommandOverrideSources(&eff, overrides, beforeCache)
@@ -430,7 +446,13 @@ func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, er
 			continue
 		}
 		if strings.HasSuffix(line, ":") {
-			section = strings.TrimSuffix(line, ":")
+			name := strings.TrimSuffix(line, ":")
+			indent := len(raw) - len(strings.TrimLeft(raw, " "))
+			if indent > 0 && section == "mcp" && name == "tools" {
+				section = "mcp.tools"
+			} else {
+				section = name
+			}
 			continue
 		}
 		parts := strings.SplitN(line, ":", 2)
@@ -439,6 +461,10 @@ func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, er
 		}
 		key := strings.TrimSpace(parts[0])
 		value := strings.Trim(strings.TrimSpace(parts[1]), "\"")
+		if section == "mcp.tools" && key == "access" {
+			cfg.MCPToolAccess = &value
+			continue
+		}
 		if section == "credential" && key == "store" {
 			cred.Store = value
 			continue
@@ -480,6 +506,7 @@ func defaultFieldSources() map[string]string {
 		"max_response_size": "default",
 		"max_retries":       "default",
 		"format":            "default",
+		"mcp_tool_access":   "default",
 	}
 }
 
@@ -508,9 +535,12 @@ func applyFileSources(sources map[string]string, file fileConfig, source string)
 	if file.Format != nil {
 		sources["format"] = source
 	}
+	if file.MCPToolAccess != nil || (file.MCP != nil && strings.TrimSpace(file.MCP.Tools.Access) != "") {
+		sources["mcp_tool_access"] = source
+	}
 }
 
-func applyEnvOverrides(src Source, eff *EffectiveConfig) {
+func applyEnvOverrides(src Source, eff *EffectiveConfig) error {
 	if dir := src.Env(EnvMCPCacheDir); dir != "" {
 		eff.Config.CachePath = filepath.Join(dir, "cache.db")
 		eff.Config.LockPath = eff.Config.CachePath + ".lock"
@@ -522,6 +552,15 @@ func applyEnvOverrides(src Source, eff *EffectiveConfig) {
 		eff.Config.GitCodeBaseURL = api
 		eff.FieldSources["gitcode_base_url"] = "env:" + EnvAPIURL
 	}
+	if access := src.Env(EnvMCPToolAccess); access != "" {
+		normalized, err := NormalizeMCPToolAccess(access)
+		if err != nil {
+			return err
+		}
+		eff.Config.MCPToolAccess = normalized
+		eff.FieldSources["mcp_tool_access"] = "env:" + EnvMCPToolAccess
+	}
+	return nil
 }
 
 func applyCommandOverrideSources(eff *EffectiveConfig, overrides Overrides, beforeCache string) {
@@ -549,6 +588,9 @@ func applyCommandOverrideSources(eff *EffectiveConfig, overrides Overrides, befo
 	}
 	if overrides.Format != "" {
 		eff.FieldSources["format"] = "command"
+	}
+	if overrides.MCPToolAccess != "" {
+		eff.FieldSources["mcp_tool_access"] = "command"
 	}
 }
 

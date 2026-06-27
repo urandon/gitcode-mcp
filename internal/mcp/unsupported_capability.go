@@ -8,7 +8,6 @@ import (
 
 var unsupportedCapabilityToolNames = map[string]bool{
 	"create_issue": true,
-	"update_issue": true,
 	"add_comment":  true,
 	"create_page":  true,
 	"update_page":  true,

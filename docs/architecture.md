@@ -19,7 +19,7 @@ Provide a cache-first tooling layer that lets AI agents and humans search, inspe
 | Link resolver | Resolve legacy ids, local paths, wiki pages, and remote issue/page ids. |
 | GitCode adapter (fixture + live providers) | Encapsulate fixture/offline records and live tracker/wiki API calls, pagination, auth, rate limits, attachments, and write semantics. |
 | CLI | Provide explicit commands for sync, search, get, link-check, export, diff, and diagnostics. |
-| MCP server | Expose read-first cache operations to agent sessions after the cache contract stabilizes. |
+| MCP server | Expose cache-first reads plus explicit live lifecycle tools for sync, index, diagnostics, and audited issue/PR writes. |
 | Export snapshots | Produce deterministic markdown/JSON/SQLite snapshots for review, rollback, and audit. |
 
 ## Provider Selection
@@ -62,4 +62,4 @@ source ingest -> local cache -> CLI / MCP reads
 GitCode adapter <-> tracker/wiki remote state
 ```
 
-Writes should flow through explicit sync commands and produce sync logs. Routine reads should flow through the local cache.
+Writes flow through explicit CLI or MCP live-write commands, require idempotency keys or deterministic write fingerprints, call the live GitCode adapter for provider confirmation, and then record audit/cache evidence. Routine reads continue to flow through the local cache and never trigger background writes.

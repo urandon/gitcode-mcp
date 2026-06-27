@@ -441,7 +441,7 @@ func newMCPStdioServer(ctx context.Context, stdin io.Reader, stdout io.Writer, s
 		_ = store.Close()
 		return mcp.NewMinimal(stdin, stdout, stderr, mcp.StartupDiagnosticFromError(err)), func() {}
 	}
-	return mcp.New(stdin, stdout, stderr, svc, deps.CredentialResolver), func() { _ = store.Close() }
+	return mcp.NewWithToolAccess(stdin, stdout, stderr, svc, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess)), func() { _ = store.Close() }
 }
 
 func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind string) int {
@@ -472,7 +472,7 @@ func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind
 		}
 		return 0
 	}
-	transport := mcp.NewHTTPSSETransport(mcp.NewRPCHandlerWithCredentialResolver(svc, deps.CredentialResolver), mcp.ServerConfig{BindAddress: bind, ReadinessProbe: func(ctx context.Context) mcp.Readiness {
+	transport := mcp.NewHTTPSSETransport(mcp.NewRPCHandlerWithCredentialResolverAndToolAccess(svc, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess)), mcp.ServerConfig{BindAddress: bind, ReadinessProbe: func(ctx context.Context) mcp.Readiness {
 		repos, err := store.ListRepositories(ctx)
 		if err != nil {
 			var lockErr cache.ErrLockContention

@@ -657,11 +657,14 @@ type WriteCommandRequest struct {
 	Mode           WriteMode `json:"write_mode,omitempty"`
 	ID             string    `json:"id,omitempty"`
 	Number         int       `json:"number,omitempty"`
+	IssueNumber    int       `json:"issue_number,omitempty"`
 	Slug           string    `json:"slug,omitempty"`
 	Path           string    `json:"path,omitempty"`
 	Sha            string    `json:"sha,omitempty"`
 	Title          string    `json:"title,omitempty"`
 	Body           string    `json:"body,omitempty"`
+	Head           string    `json:"head,omitempty"`
+	Base           string    `json:"base,omitempty"`
 	State          string    `json:"state,omitempty"`
 	Label          string    `json:"label,omitempty"`
 	Labels         []string  `json:"labels,omitempty"`

@@ -935,6 +935,98 @@ func TestScenario018PRCommentWrite(t *testing.T) {
 	}
 }
 
+func TestScenario016PRLifecycleWrites(t *testing.T) {
+	t.Run("create-pr", func(t *testing.T) {
+		var seenBody string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != listPREndpoint("example-owner", "example-repo") {
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			seenBody = string(body)
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":9001,"number":7,"title":"new pr","body":"body","state":"open","base":{"ref":"main"},"head":{"ref":"topic"}}`)
+		}))
+		defer server.Close()
+
+		result, err := newTestClient(t, server.URL, Config{}).CreatePR(context.Background(), CreatePRRequest{Owner: "example-owner", Repo: "example-repo", Title: "new pr", Body: "body", Head: "topic", Base: "main"}, WriteOptions{IdempotencyKey: "key-create-pr"})
+		if err != nil {
+			t.Fatalf("CreatePR returned error: %v", err)
+		}
+		for _, want := range []string{`"title":"new pr"`, `"body":"body"`, `"head":"topic"`, `"base":"main"`} {
+			if !strings.Contains(seenBody, want) {
+				t.Fatalf("request body %s missing %s", seenBody, want)
+			}
+		}
+		if !result.Confirmed || result.Operation != "CreatePR" || result.RemoteID != "9001" || result.RemoteNumber != 7 || result.Record.Number != 7 || result.Record.Base != "main" || result.Record.Head != "topic" {
+			t.Fatalf("unexpected PR create result: %+v", result)
+		}
+	})
+
+	t.Run("update-pr", func(t *testing.T) {
+		var seenBody string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPatch || r.URL.Path != getPREndpoint("example-owner", "example-repo", 7) {
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			seenBody = string(body)
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `{"id":9001,"number":7,"title":"updated pr","body":"new body","state":"open"}`)
+		}))
+		defer server.Close()
+
+		result, err := newTestClient(t, server.URL, Config{}).UpdatePR(context.Background(), UpdatePRRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, Title: "updated pr", Body: "new body"}, WriteOptions{IdempotencyKey: "key-update-pr"})
+		if err != nil {
+			t.Fatalf("UpdatePR returned error: %v", err)
+		}
+		for _, want := range []string{`"title":"updated pr"`, `"body":"new body"`} {
+			if !strings.Contains(seenBody, want) {
+				t.Fatalf("request body %s missing %s", seenBody, want)
+			}
+		}
+		if !result.Confirmed || result.Operation != "UpdatePR" || result.RemoteID != "9001" || result.RemoteNumber != 7 || result.Record.Title != "updated pr" {
+			t.Fatalf("unexpected PR update result: %+v", result)
+		}
+	})
+
+	t.Run("update-pr-empty-body-readback", func(t *testing.T) {
+		patches := 0
+		gets := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodPatch && r.URL.Path == getPREndpoint("example-owner", "example-repo", 7):
+				patches++
+				w.WriteHeader(http.StatusNoContent)
+			case r.Method == http.MethodGet && r.URL.Path == getPREndpoint("example-owner", "example-repo", 7):
+				gets++
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"id":9001,"number":7,"title":"readback pr","body":"linked","state":"open"}`)
+			default:
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+		}))
+		defer server.Close()
+
+		result, err := newTestClient(t, server.URL, Config{}).UpdatePR(context.Background(), UpdatePRRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, Body: "linked"}, WriteOptions{IdempotencyKey: "key-update-pr-readback"})
+		if err != nil {
+			t.Fatalf("UpdatePR read-back returned error: %v", err)
+		}
+		if patches != 1 || gets != 1 {
+			t.Fatalf("patches=%d gets=%d", patches, gets)
+		}
+		if !result.Confirmed || result.ProviderStatus != "2xx-readback" || result.RemoteID != "9001" || result.RemoteNumber != 7 || result.Record.Body != "linked" {
+			t.Fatalf("unexpected PR read-back result: %+v", result)
+		}
+	})
+}
+
 func TestWriteNegativeScenariosDoNotConfirm(t *testing.T) {
 	t.Run("write-validation-failed", func(t *testing.T) {
 		client := newTestClient(t, "http://127.0.0.1", Config{})

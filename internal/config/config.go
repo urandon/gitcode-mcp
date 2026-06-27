@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gitcode-mcp/internal/diagnostics"
@@ -24,6 +25,7 @@ type Config struct {
 	MaxResponseSize int64         `json:"max_response_size"`
 	MaxRetries      int           `json:"max_retries"`
 	Format          string        `json:"format"`
+	MCPToolAccess   string        `json:"mcp_tool_access"`
 }
 
 type Overrides struct {
@@ -34,6 +36,7 @@ type Overrides struct {
 	MaxResponseSize int64
 	MaxRetries      *int
 	Format          string
+	MCPToolAccess   string
 }
 
 type Source interface {
@@ -60,7 +63,7 @@ func Load(src Source, overrides Overrides) (Config, error) {
 	if src == nil {
 		src = OSSource{}
 	}
-	if src.Env(EnvMCPConfigPath) != "" || src.Env(EnvMCPCacheDir) != "" || src.Env(EnvAPIURL) != "" {
+	if src.Env(EnvMCPConfigPath) != "" || src.Env(EnvMCPCacheDir) != "" || src.Env(EnvAPIURL) != "" || src.Env(EnvMCPToolAccess) != "" {
 		eff, err := LoadEffective(src, overrides)
 		if err != nil {
 			return Config{}, err
@@ -114,13 +117,15 @@ func RedactDiagnostic(message string, src Source) string {
 }
 
 type fileConfig struct {
-	CachePath       *string `json:"cache_path"`
-	LockPath        *string `json:"lock_path"`
-	GitCodeBaseURL  *string `json:"gitcode_base_url"`
-	DefaultTimeout  *string `json:"default_timeout"`
-	MaxResponseSize *int64  `json:"max_response_size"`
-	MaxRetries      *int    `json:"max_retries"`
-	Format          *string `json:"format"`
+	CachePath       *string    `json:"cache_path"`
+	LockPath        *string    `json:"lock_path"`
+	GitCodeBaseURL  *string    `json:"gitcode_base_url"`
+	DefaultTimeout  *string    `json:"default_timeout"`
+	MaxResponseSize *int64     `json:"max_response_size"`
+	MaxRetries      *int       `json:"max_retries"`
+	Format          *string    `json:"format"`
+	MCPToolAccess   *string    `json:"mcp_tool_access"`
+	MCP             *MCPConfig `json:"mcp"`
 }
 
 func defaultWithSource(src Source) Config {
@@ -136,6 +141,7 @@ func defaultWithSource(src Source) Config {
 		MaxResponseSize: 10 << 20,
 		MaxRetries:      2,
 		Format:          "text",
+		MCPToolAccess:   MCPToolAccessRead,
 	}
 }
 
@@ -217,6 +223,17 @@ func mergeFile(cfg Config, file fileConfig) (Config, error) {
 	if file.Format != nil {
 		cfg.Format = *file.Format
 	}
+	if file.MCP != nil && strings.TrimSpace(file.MCP.Tools.Access) != "" {
+		value := file.MCP.Tools.Access
+		file.MCPToolAccess = &value
+	}
+	if file.MCPToolAccess != nil {
+		access, err := NormalizeMCPToolAccess(*file.MCPToolAccess)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.MCPToolAccess = access
+	}
 	if file.LockPath == nil && file.CachePath != nil {
 		cfg.LockPath = cfg.CachePath + ".lock"
 	}
@@ -248,5 +265,19 @@ func mergeOverrides(cfg Config, overrides Overrides) Config {
 	if overrides.Format != "" {
 		cfg.Format = overrides.Format
 	}
+	if overrides.MCPToolAccess != "" {
+		cfg.MCPToolAccess = overrides.MCPToolAccess
+	}
 	return cfg
+}
+
+func NormalizeMCPToolAccess(value string) (string, error) {
+	access := strings.ToLower(strings.TrimSpace(value))
+	if access == "" {
+		return MCPToolAccessRead, nil
+	}
+	if access != MCPToolAccessRead && access != MCPToolAccessWrite {
+		return "", fmt.Errorf("config: invalid mcp tool access %q: expected read or write", value)
+	}
+	return access, nil
 }

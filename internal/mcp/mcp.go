@@ -38,6 +38,12 @@ type serviceInterface interface {
 	BulkSyncPullRequests(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncPRComments(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncAll(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	UpdateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	AddComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	CreatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	UpdatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	AddPRComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	LinkPRIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	Index(context.Context, service.OperationRequest) (service.OperationResult, error)
 	ListChunks(context.Context, service.ChunkQuery) (service.ChunkQueryResult, error)
 	SearchChunks(context.Context, service.ChunkSearchQuery) (service.ChunkQueryResult, error)
@@ -53,6 +59,7 @@ type RPCHandler struct {
 	startupDiagnostic  StartupDiagnostic
 	minimal            bool
 	credentialResolver *auth.CredentialResolver
+	toolAccess         ToolAccess
 }
 
 type Server struct {
@@ -64,26 +71,40 @@ type Server struct {
 	startupDiagnostic  StartupDiagnostic
 	minimal            bool
 	credentialResolver *auth.CredentialResolver
+	toolAccess         ToolAccess
 }
 
 func NewRPCHandler(svc serviceInterface) *RPCHandler {
-	return &RPCHandler{svc: svc}
+	return NewRPCHandlerWithToolAccess(svc, ToolAccessRead)
 }
 
 func NewRPCHandlerWithCredentialResolver(svc serviceInterface, credResolver *auth.CredentialResolver) *RPCHandler {
-	return &RPCHandler{svc: svc, credentialResolver: credResolver}
+	return NewRPCHandlerWithCredentialResolverAndToolAccess(svc, credResolver, ToolAccessRead)
+}
+
+func NewRPCHandlerWithToolAccess(svc serviceInterface, access ToolAccess) *RPCHandler {
+	return &RPCHandler{svc: svc, toolAccess: normalizeToolAccess(access)}
+}
+
+func NewRPCHandlerWithCredentialResolverAndToolAccess(svc serviceInterface, credResolver *auth.CredentialResolver, access ToolAccess) *RPCHandler {
+	return &RPCHandler{svc: svc, credentialResolver: credResolver, toolAccess: normalizeToolAccess(access)}
 }
 
 func NewMinimalRPCHandler(diagnostic StartupDiagnostic) *RPCHandler {
-	return &RPCHandler{startupDiagnostic: diagnostic, minimal: true}
+	return &RPCHandler{startupDiagnostic: diagnostic, minimal: true, toolAccess: ToolAccessRead}
 }
 
 func New(r io.Reader, w io.Writer, stderr io.Writer, svc serviceInterface, credResolver *auth.CredentialResolver) *Server {
-	return &Server{reader: r, writer: w, stderr: stderr, handler: NewRPCHandlerWithCredentialResolver(svc, credResolver), svc: svc, credentialResolver: credResolver}
+	return NewWithToolAccess(r, w, stderr, svc, credResolver, ToolAccessRead)
+}
+
+func NewWithToolAccess(r io.Reader, w io.Writer, stderr io.Writer, svc serviceInterface, credResolver *auth.CredentialResolver, access ToolAccess) *Server {
+	access = normalizeToolAccess(access)
+	return &Server{reader: r, writer: w, stderr: stderr, handler: NewRPCHandlerWithCredentialResolverAndToolAccess(svc, credResolver, access), svc: svc, credentialResolver: credResolver, toolAccess: access}
 }
 
 func NewMinimal(r io.Reader, w io.Writer, stderr io.Writer, diagnostic StartupDiagnostic) *Server {
-	return &Server{reader: r, writer: w, stderr: stderr, handler: NewMinimalRPCHandler(diagnostic), startupDiagnostic: diagnostic, minimal: true}
+	return &Server{reader: r, writer: w, stderr: stderr, handler: NewMinimalRPCHandler(diagnostic), startupDiagnostic: diagnostic, minimal: true, toolAccess: ToolAccessRead}
 }
 
 func (h *RPCHandler) Handle(ctx context.Context, req request) (*response, bool) {
@@ -91,7 +112,7 @@ func (h *RPCHandler) Handle(ctx context.Context, req request) (*response, bool) 
 		return &response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32600, Message: "Invalid request"}}, true
 	}
 	var buf bytes.Buffer
-	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver}
+	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver, toolAccess: normalizeToolAccess(h.toolAccess)}
 	server.handle(ctx, req, req.ID == nil)
 	line := bytes.TrimSpace(buf.Bytes())
 	if len(line) == 0 {
@@ -133,6 +154,8 @@ type errorData struct {
 	StartedAt    string `json:"started_at,omitempty"`
 	PID          int    `json:"pid,omitempty"`
 	CachePath    string `json:"cache_path,omitempty"`
+	AccessMode   string `json:"access_mode,omitempty"`
+	Remediation  string `json:"remediation,omitempty"`
 }
 
 type toolDefinition struct {
@@ -199,10 +222,58 @@ type toolContentItem struct {
 
 var sourceKindEnums = []string{"issue", "wiki", "pull_request", "pr_comment"}
 
+type ToolAccess string
+
+const (
+	ToolAccessRead  ToolAccess = "read"
+	ToolAccessWrite ToolAccess = "write"
+)
+
+var writeToolNames = map[string]bool{
+	"sync_live":         true,
+	"index_repo":        true,
+	"add_issue_comment": true,
+	"update_issue":      true,
+	"create_pr":         true,
+	"update_pr":         true,
+	"add_pr_comment":    true,
+	"link_pr_issue":     true,
+}
+
+func normalizeToolAccess(access ToolAccess) ToolAccess {
+	if access == ToolAccessWrite {
+		return ToolAccessWrite
+	}
+	return ToolAccessRead
+}
+
+func (s *Server) activeToolAccess() ToolAccess {
+	if s == nil {
+		return ToolAccessRead
+	}
+	return normalizeToolAccess(s.toolAccess)
+}
+
+func (s *Server) toolDisabledByPolicy(name string) bool {
+	return s.activeToolAccess() == ToolAccessRead && writeToolNames[name]
+}
+
 func intPtr(v int) *int             { return &v }
 func float64Ptr(v float64) *float64 { return &v }
 func kindValidationMessage() string {
 	return "kind must be one of: " + strings.Join(sourceKindEnums, ", ")
+}
+
+func writeSchemaProps(extra map[string]schemaProp) map[string]schemaProp {
+	props := map[string]schemaProp{
+		"repo_id":         {Type: "string", Description: "Configured repository id.", MinLength: 1},
+		"write_mode":      {Type: "string", Description: "Required live write intent.", Enum: []string{"live"}},
+		"idempotency_key": {Type: "string", Description: "Idempotency key."},
+	}
+	for key, prop := range extra {
+		props[key] = prop
+	}
+	return props
 }
 
 func chunkSchemaProps(includeQuery bool) map[string]schemaProp {
@@ -398,6 +469,36 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "issues": {Type: "boolean", Description: "Sync issues."}, "wiki": {Type: "boolean", Description: "Sync wiki pages."}, "comments": {Type: "boolean", Description: "Sync supported comments."}, "pulls": {Type: "boolean", Description: "Sync pull requests."}, "remote_alias": {Type: "string", Description: "Specific remote alias for current sync surface."}, "idempotency_key": {Type: "string", Description: "Idempotency key."}, "max_pages": {Type: "integer", Description: "Maximum pages to sync.", Minimum: float64Ptr(1)}, "max_records": {Type: "integer", Description: "Maximum records to sync.", Minimum: float64Ptr(1)}, "per_page": {Type: "integer", Description: "Records per page.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 25.0}}, Required: []string{"repo_id"}},
 	},
 	{
+		Name:        "add_issue_comment",
+		Description: "Add a live comment to an issue through the audited write lifecycle.",
+		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Comment body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "number", "body"}},
+	},
+	{
+		Name:        "update_issue",
+		Description: "Update live issue metadata through the audited write lifecycle.",
+		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "title": {Type: "string", Description: "Issue title."}, "body": {Type: "string", Description: "Issue body."}, "state": {Type: "string", Description: "Issue state."}, "labels": {Type: "array", Description: "Issue labels."}}), Required: []string{"repo_id", "write_mode", "number"}},
+	},
+	{
+		Name:        "create_pr",
+		Description: "Create a live pull request through the audited write lifecycle.",
+		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"title": {Type: "string", Description: "Pull request title.", MinLength: 1}, "body": {Type: "string", Description: "Pull request body."}, "head": {Type: "string", Description: "Source branch.", MinLength: 1}, "base": {Type: "string", Description: "Target branch.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "title", "head", "base"}},
+	},
+	{
+		Name:        "update_pr",
+		Description: "Update live pull request metadata through the audited write lifecycle.",
+		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "title": {Type: "string", Description: "Pull request title."}, "body": {Type: "string", Description: "Pull request body."}, "state": {Type: "string", Description: "Pull request state."}}), Required: []string{"repo_id", "write_mode", "number"}},
+	},
+	{
+		Name:        "add_pr_comment",
+		Description: "Add a live pull request comment through the audited write lifecycle.",
+		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Comment body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "number", "body"}},
+	},
+	{
+		Name:        "link_pr_issue",
+		Description: "Link a live pull request to an issue through a deterministic description fallback.",
+		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"pr_number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "issue_number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "strategy": {Type: "string", Description: "Link strategy.", Enum: []string{"description_fallback"}, Default: "description_fallback"}}), Required: []string{"repo_id", "write_mode", "pr_number", "issue_number"}},
+	},
+	{
 		Name:        "index_repo",
 		Description: "Build or refresh the local index for a configured repository.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "mode": {Type: "string", Description: "Index mode.", Default: "full"}, "strict": {Type: "boolean", Description: "Use strict indexing behavior."}}, Required: []string{"repo_id"}},
@@ -507,6 +608,9 @@ func (s *Server) toolsList(req request) {
 		if !ok {
 			continue
 		}
+		if s.toolDisabledByPolicy(name) {
+			continue
+		}
 		tools = append(tools, tool.definition)
 	}
 	result := toolsListResult{Tools: tools}
@@ -530,6 +634,11 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 	}
 	if params.Name == "" {
 		s.writeError(req.ID, -32602, "Invalid params", &errorData{Code: "invalid_params", Message: "name is required"})
+		return
+	}
+
+	if s.toolDisabledByPolicy(params.Name) {
+		s.writeToolDisabledByPolicy(req.ID, params.Name)
 		return
 	}
 
@@ -569,6 +678,12 @@ var toolListOrder = []string{
 	"diff_snapshot",
 	"repo_status",
 	"sync_live",
+	"add_issue_comment",
+	"update_issue",
+	"create_pr",
+	"update_pr",
+	"add_pr_comment",
+	"link_pr_issue",
 	"index_repo",
 	"auth_status",
 	"doctor",
@@ -610,6 +725,12 @@ func (s *Server) toolRegistry() toolRegistry {
 	registerTool(registry, "diff_snapshot", s.callDiffSnapshot)
 	registerTool(registry, "repo_status", s.callRepoStatus)
 	registerTool(registry, "sync_live", s.callSyncLive)
+	registerTool(registry, "add_issue_comment", s.callAddIssueComment)
+	registerTool(registry, "update_issue", s.callUpdateIssue)
+	registerTool(registry, "create_pr", s.callCreatePR)
+	registerTool(registry, "update_pr", s.callUpdatePR)
+	registerTool(registry, "add_pr_comment", s.callAddPRComment)
+	registerTool(registry, "link_pr_issue", s.callLinkPRIssue)
 	registerTool(registry, "index_repo", s.callIndexRepo)
 	registerTool(registry, "auth_status", s.callAuthStatus)
 	registerTool(registry, "doctor", s.callDoctor)
@@ -1324,6 +1445,11 @@ func (s *Server) callDiffSnapshot(ctx context.Context, id *json.RawMessage, args
 func (s *Server) writeToolResult(id *json.RawMessage, result toolCallResult) {
 	b, _ := json.Marshal(result)
 	s.writeResponse(id, b)
+}
+
+func (s *Server) writeToolDisabledByPolicy(id *json.RawMessage, name string) {
+	access := string(s.activeToolAccess())
+	s.writeError(id, -32000, "Tool disabled by policy", &errorData{Code: "tool_disabled_by_policy", Message: fmt.Sprintf("%q is disabled by MCP tool access policy", name), AccessMode: access, Remediation: "set mcp.tools.access to \"write\" or GITCODE_MCP_TOOL_ACCESS=write for write-capable sessions"})
 }
 
 func mcpDiagnostic(err error) (diagnostics.Diagnostic, bool) {

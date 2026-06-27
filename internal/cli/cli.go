@@ -109,6 +109,7 @@ type startupPlan struct {
 	CachePath             string
 	RepoID                string
 	APIBaseURL            string
+	MCPToolAccess         string
 	LiveRepositoryBinding service.LiveRepositoryBinding
 	CredentialStatus      config.CredentialStatus
 	CredentialResolution  config.CredentialResolutionResult
@@ -265,6 +266,7 @@ func buildStartupPlan(ctx context.Context, command string, opts options, deps lo
 		return plan, err
 	}
 	plan.CachePath = firstNonEmpty(opts.cachePath, eff.Config.CachePath)
+	plan.MCPToolAccess = eff.Config.MCPToolAccess
 	if plan.ProviderMode != "live-http" {
 		return plan, nil
 	}
@@ -1489,7 +1491,7 @@ func executeDoctorCommand(ctx context.Context, opts options, plan startupPlan, s
 		status := plan.CredentialStatus
 		cred = &status
 	}
-	report, err := doctor.Build(ctx, doctor.Request{Version: version, Source: deps.Source, CredentialReporter: deps.CredentialReporter, CredentialStatus: cred, CachePath: cachePath, Live: opts.live, ProviderMode: plan.ProviderMode, APIBaseURL: plan.APIBaseURL, RepoID: opts.repo, LiveBinding: plan.LiveRepositoryBinding})
+	report, err := doctor.Build(ctx, doctor.Request{Version: version, Source: deps.Source, CredentialReporter: deps.CredentialReporter, CredentialStatus: cred, CachePath: cachePath, Live: opts.live, ProviderMode: plan.ProviderMode, MCPToolAccess: plan.MCPToolAccess, APIBaseURL: plan.APIBaseURL, RepoID: opts.repo, LiveBinding: plan.LiveRepositoryBinding})
 	if err != nil {
 		return writeError(stderr, opts.format, err)
 	}

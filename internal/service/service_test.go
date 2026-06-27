@@ -102,6 +102,18 @@ func TestScenario005ServiceSanitizedFixtureBoundary(t *testing.T) {
 			_, err := client.CreateIssueComment(ctx, gitcode.CreateIssueCommentRequest{}, gitcode.WriteOptions{})
 			return err
 		}},
+		{name: "create-pr", run: func() error {
+			_, err := client.CreatePR(ctx, gitcode.CreatePRRequest{}, gitcode.WriteOptions{})
+			return err
+		}},
+		{name: "update-pr", run: func() error {
+			_, err := client.UpdatePR(ctx, gitcode.UpdatePRRequest{}, gitcode.WriteOptions{})
+			return err
+		}},
+		{name: "create-pr-comment", run: func() error {
+			_, err := client.CreatePRComment(ctx, gitcode.CreatePRCommentRequest{}, gitcode.WriteOptions{})
+			return err
+		}},
 		{name: "create-wiki", run: func() error {
 			_, err := client.CreateWikiPage(ctx, gitcode.CreateWikiPageRequest{}, gitcode.WriteOptions{})
 			return err
@@ -638,6 +650,90 @@ func TestScenario017AddCommentLiveShapeCachesComment(t *testing.T) {
 	}
 	if len(record.Comments) != 1 || record.Comments[0].CommentID != "2002" || record.Comments[0].Author != "commenter" || record.Comments[0].Body != "live comment" {
 		t.Fatalf("comments=%#v", record.Comments)
+	}
+}
+
+func TestScenario016MCPWriteLifecycleCreatePRAndComment(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	created := time.Date(2026, 6, 27, 12, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		createPRResult:        gitcode.WriteResult[gitcode.PullRequest]{Record: gitcode.PullRequest{ID: "9001", Number: 7, Title: "Add MCP writes", Body: "body", State: "open", Base: "main", Head: "topic", CreatedAt: created, UpdatedAt: created}, Confirmed: true, Operation: "CreatePR", RemoteID: "9001", RemoteNumber: 7, ConfirmedAt: created},
+		createPRCommentResult: gitcode.WriteResult[gitcode.PRComment]{Record: gitcode.PRComment{ID: "301", Body: "tested", Author: "bot", CreatedAt: created}, Confirmed: true, Operation: "CreatePRComment", RemoteID: "301", ParentIssueNumber: 7, ParentIssueID: "7", ConfirmedAt: created},
+	}
+	svc := NewWithClient(store, client)
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.writeCredentialPresent = true
+
+	pr, err := svc.CreatePR(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "Add MCP writes", Body: "body", Head: "topic", Base: "main", IdempotencyKey: "create-pr-key"})
+	if err != nil {
+		t.Fatalf("CreatePR live returned error: %v", err)
+	}
+	if pr.Status != "succeeded" || pr.ID != "PR-7" || pr.RemoteID != "7" || client.createPRCalls != 1 {
+		t.Fatalf("unexpected PR result=%+v calls=%d", pr, client.createPRCalls)
+	}
+	if client.lastCreatePRRequest.Head != "topic" || client.lastCreatePRRequest.Base != "main" || client.lastWriteOptions.IdempotencyKey != "create-pr-key" {
+		t.Fatalf("create request=%#v opts=%#v", client.lastCreatePRRequest, client.lastWriteOptions)
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", "PR-7")
+	if err != nil {
+		t.Fatalf("PR cache refresh missing: %v", err)
+	}
+	if record.Type != "pull_request" || record.Title != "Add MCP writes" || record.RemoteID != "7" {
+		t.Fatalf("record=%#v", record)
+	}
+
+	comment, err := svc.AddPRComment(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 7, Body: "tested", IdempotencyKey: "pr-comment-key"})
+	if err != nil {
+		t.Fatalf("AddPRComment live returned error: %v", err)
+	}
+	if comment.Status != "succeeded" || comment.ID != "PRCOMMENT-7-301" || comment.RemoteID != "301" || client.createPRCommentCalls != 1 {
+		t.Fatalf("unexpected PR comment result=%+v calls=%d", comment, client.createPRCommentCalls)
+	}
+	commentRecord, err := store.GetRecord(ctx, "fixture-a", "PRCOMMENT-7-301")
+	if err != nil {
+		t.Fatalf("PR comment cache refresh missing: %v", err)
+	}
+	if commentRecord.Type != "pr_comment" || commentRecord.Body != "tested" {
+		t.Fatalf("comment record=%#v", commentRecord)
+	}
+}
+
+func TestScenario016MCPWriteLifecycleLinkPRIssueDescriptionFallback(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	created := time.Date(2026, 6, 27, 12, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		prsByNumber:    map[int]gitcode.PullRequest{7: {ID: "9001", Number: 7, Title: "PR", Body: "existing body", State: "open", CreatedAt: created, UpdatedAt: created}},
+		updatePRResult: gitcode.WriteResult[gitcode.PullRequest]{Record: gitcode.PullRequest{ID: "9001", Number: 7, Title: "PR", Body: "existing body\n\n<!-- gitcode-mcp-link:issue:16 -->\nFixes #16", State: "open", CreatedAt: created, UpdatedAt: created}, Confirmed: true, Operation: "UpdatePR", RemoteID: "9001", RemoteNumber: 7, ConfirmedAt: created},
+	}
+	svc := NewWithClient(store, client)
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.writeCredentialPresent = true
+
+	result, err := svc.LinkPRIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 7, IssueNumber: 16, IdempotencyKey: "link-pr-issue-key"})
+	if err != nil {
+		t.Fatalf("LinkPRIssue live returned error: %v", err)
+	}
+	if result.Status != "succeeded" || client.prCalls != 1 || client.updatePRCalls != 1 {
+		t.Fatalf("result=%#v prCalls=%d updateCalls=%d", result, client.prCalls, client.updatePRCalls)
+	}
+	if strings.Count(client.lastUpdatePRRequest.Body, "gitcode-mcp-link:issue:16") != 1 || !strings.Contains(client.lastUpdatePRRequest.Body, "Fixes #16") {
+		t.Fatalf("link body=%q", client.lastUpdatePRRequest.Body)
 	}
 }
 
@@ -2288,11 +2384,17 @@ type fakeGitCodeClient struct {
 	commentCalls             int
 	createIssueCalls         int
 	createIssueCommentCalls  int
+	createPRCalls            int
+	updatePRCalls            int
+	createPRCommentCalls     int
 	createWikiPageCalls      int
 	addLabelCalls            int
 	createIssueResult        gitcode.WriteResult[gitcode.Issue]
 	createIssueResults       []gitcode.WriteResult[gitcode.Issue]
 	createIssueCommentResult gitcode.WriteResult[gitcode.Comment]
+	createPRResult           gitcode.WriteResult[gitcode.PullRequest]
+	updatePRResult           gitcode.WriteResult[gitcode.PullRequest]
+	createPRCommentResult    gitcode.WriteResult[gitcode.PRComment]
 	createWikiPageResult     gitcode.WriteResult[gitcode.WikiPage]
 	addLabelResult           gitcode.WriteResult[gitcode.Issue]
 	listIssuesPages          []gitcode.Page[gitcode.IssueSummary]
@@ -2312,6 +2414,9 @@ type fakeGitCodeClient struct {
 	commentsByIssue          map[int][]gitcode.Comment
 	listIssueCommentsErr     error
 	lastCreateIssueRequest   gitcode.CreateIssueRequest
+	lastCreatePRRequest      gitcode.CreatePRRequest
+	lastUpdatePRRequest      gitcode.UpdatePRRequest
+	lastCreatePRCommentReq   gitcode.CreatePRCommentRequest
 	lastWriteOptions         gitcode.WriteOptions
 }
 
@@ -2446,8 +2551,32 @@ func (f *fakeGitCodeClient) CreateIssueComment(context.Context, gitcode.CreateIs
 	}
 	return f.createIssueCommentResult, nil
 }
-func (f *fakeGitCodeClient) CreatePRComment(context.Context, gitcode.CreatePRCommentRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PRComment], error) {
-	return gitcode.WriteResult[gitcode.PRComment]{}, nil
+func (f *fakeGitCodeClient) CreatePRComment(_ context.Context, req gitcode.CreatePRCommentRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PRComment], error) {
+	f.createPRCommentCalls++
+	f.lastCreatePRCommentReq = req
+	f.lastWriteOptions = opts
+	if err := f.nextError(); err != nil {
+		return gitcode.WriteResult[gitcode.PRComment]{}, err
+	}
+	return f.createPRCommentResult, nil
+}
+func (f *fakeGitCodeClient) CreatePR(_ context.Context, req gitcode.CreatePRRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PullRequest], error) {
+	f.createPRCalls++
+	f.lastCreatePRRequest = req
+	f.lastWriteOptions = opts
+	if err := f.nextError(); err != nil {
+		return gitcode.WriteResult[gitcode.PullRequest]{}, err
+	}
+	return f.createPRResult, nil
+}
+func (f *fakeGitCodeClient) UpdatePR(_ context.Context, req gitcode.UpdatePRRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PullRequest], error) {
+	f.updatePRCalls++
+	f.lastUpdatePRRequest = req
+	f.lastWriteOptions = opts
+	if err := f.nextError(); err != nil {
+		return gitcode.WriteResult[gitcode.PullRequest]{}, err
+	}
+	return f.updatePRResult, nil
 }
 func (f *fakeGitCodeClient) CreateWikiPage(context.Context, gitcode.CreateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
 	f.createWikiPageCalls++
