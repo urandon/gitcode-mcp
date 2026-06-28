@@ -170,6 +170,22 @@ Write-enabled Codex MCP example:
 }
 ```
 
+Use separate config files or keyring accounts when different agents need different credentials:
+
+```json
+{
+  "command": "gitcode-mcp",
+  "args": ["--mcp"],
+  "env": {
+    "GITCODE_MCP_CONFIG": "/path/to/gitcode-mcp-write.yaml",
+    "GITCODE_MCP_TOOL_ACCESS": "write",
+    "GITCODE_MCP_KEYRING_ACCOUNT": "codex-write"
+  }
+}
+```
+
+The keyring account is non-secret metadata. The token remains in the OS keyring entry selected by `credential.keyring_service` and `credential.keyring_account`.
+
 Zed stdio example for a repo-local cache:
 
 ```json

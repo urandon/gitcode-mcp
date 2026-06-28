@@ -3,7 +3,6 @@ package config
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 
 	"github.com/zalando/go-keyring"
@@ -24,15 +23,18 @@ func (p KeychainCredentialProvider) Resolve(ctx context.Context, eff EffectiveCo
 	if get == nil {
 		get = keyring.Get
 	}
-	token, err := getKeyringToken(get)
+	service, user := effectiveKeyringIdentity(eff)
+	token, err := get(service, user)
 	if err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
 			return SecretString{}, CredentialStatus{
 				Source:           "keyring",
 				Present:          false,
 				StoreMode:        keyringStoreMode(eff),
+				KeyringService:   service,
+				KeyringAccount:   user,
 				ErrorClass:       "token-missing",
-				Remediation:      "No token found in system keyring. Use GITCODE_TOKEN or store a token with service gitcode-mcp and account token.",
+				Remediation:      "No token found in system keyring. Use GITCODE_TOKEN or store a token with the configured keyring service and account.",
 				AttemptedSources: []string{"keyring"},
 				AvailableSources: []string{"keyring"},
 			}, nil
@@ -41,6 +43,8 @@ func (p KeychainCredentialProvider) Resolve(ctx context.Context, eff EffectiveCo
 			Source:             "keyring",
 			Present:            false,
 			StoreMode:          keyringStoreMode(eff),
+			KeyringService:     service,
+			KeyringAccount:     user,
 			ErrorClass:         "credential-store-unavailable",
 			Remediation:        "System keyring access failed: " + err.Error(),
 			AttemptedSources:   []string{"keyring"},
@@ -52,8 +56,10 @@ func (p KeychainCredentialProvider) Resolve(ctx context.Context, eff EffectiveCo
 			Source:           "keyring",
 			Present:          false,
 			StoreMode:        keyringStoreMode(eff),
+			KeyringService:   service,
+			KeyringAccount:   user,
 			ErrorClass:       "token-missing",
-			Remediation:      "No token found in system keyring. Use GITCODE_TOKEN or store a token with service gitcode-mcp and account token.",
+			Remediation:      "No token found in system keyring. Use GITCODE_TOKEN or store a token with the configured keyring service and account.",
 			AttemptedSources: []string{"keyring"},
 			AvailableSources: []string{"keyring"},
 		}, nil
@@ -62,6 +68,8 @@ func (p KeychainCredentialProvider) Resolve(ctx context.Context, eff EffectiveCo
 		Source:           "keyring",
 		Present:          true,
 		StoreMode:        keyringStoreMode(eff),
+		KeyringService:   service,
+		KeyringAccount:   user,
 		AttemptedSources: []string{"keyring"},
 		AvailableSources: []string{"keyring"},
 	}, nil
@@ -79,39 +87,14 @@ func keyringStoreMode(eff EffectiveConfig) string {
 	return "keyring"
 }
 
-func getKeyringToken(get func(service, user string) (string, error)) (string, error) {
-	var lastNotFound error
-	for _, user := range keyringUsers() {
-		token, err := get(keyringService, user)
-		if err == nil {
-			return token, nil
-		}
-		if errors.Is(err, keyring.ErrNotFound) {
-			lastNotFound = err
-			continue
-		}
-		return "", err
+func effectiveKeyringIdentity(eff EffectiveConfig) (string, string) {
+	service := strings.TrimSpace(eff.CredentialPolicy.KeyringService)
+	if service == "" {
+		service = keyringService
 	}
-	if lastNotFound != nil {
-		return "", keyring.ErrNotFound
+	user := strings.TrimSpace(eff.CredentialPolicy.KeyringAccount)
+	if user == "" {
+		user = keyringUser
 	}
-	return "", keyring.ErrNotFound
-}
-
-func keyringUsers() []string {
-	return uniqueKeyringUsers([]string{keyringUser, os.Getenv("USER"), os.Getenv("USERNAME")})
-}
-
-func uniqueKeyringUsers(values []string) []string {
-	seen := make(map[string]bool, len(values))
-	var out []string
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" || seen[value] {
-			continue
-		}
-		seen[value] = true
-		out = append(out, value)
-	}
-	return out
+	return service, user
 }

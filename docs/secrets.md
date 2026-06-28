@@ -18,7 +18,26 @@ security add-generic-password \
   -U
 ```
 
-The runtime reads service `gitcode-mcp`, account `token` through the system keyring. For compatibility with older setup instructions, it also falls back to the current OS user account under the same service. `credential.store: keychain` remains accepted as a legacy alias for `credential.store: keyring`.
+The runtime reads service `gitcode-mcp`, account `token` through the system keyring. `credential.store: keychain` remains accepted as a legacy alias for `credential.store: keyring`.
+
+For multiple local agents or configs, use a distinct keyring account per profile:
+
+```yaml
+credential:
+  store: keyring
+  keyring_service: gitcode-mcp
+  keyring_account: codex-write
+```
+
+Then save the token under the same account:
+
+```sh
+security add-generic-password \
+  -a codex-write \
+  -s "gitcode-mcp" \
+  -w "<your-token>" \
+  -U
+```
 
 Wrapper script to launch with Keychain token when you prefer exporting `GITCODE_TOKEN` only for the child process:
 
@@ -54,7 +73,13 @@ Using Secret Service directly:
 secret-tool store --label='gitcode-mcp token' service gitcode-mcp username token
 ```
 
-The runtime reads that entry through the system keyring when `credential.store` is `auto` or `keyring`. Older entries stored with `username "$USER"` remain supported as a fallback.
+The runtime reads that entry through the system keyring when `credential.store` is `auto` or `keyring`.
+
+For an agent-specific token, match the configured account:
+
+```sh
+secret-tool store --label='gitcode-mcp codex-write' service gitcode-mcp username codex-write
+```
 
 Using `pass`:
 
@@ -88,7 +113,13 @@ Ensure the token is stored in the CI secret management system (not committed to 
 cmdkey /generic:gitcode-mcp:token /user:token /pass:<your-token>
 ```
 
-The runtime reads the Credential Manager target used by the Go keyring library when `credential.store` is `auto` or `keyring`. Older entries stored for `%USERNAME%` remain supported as a fallback.
+The runtime reads the Credential Manager target used by the Go keyring library when `credential.store` is `auto` or `keyring`.
+
+For an agent-specific token, match the configured account:
+
+```powershell
+cmdkey /generic:gitcode-mcp:codex-write /user:codex-write /pass:<your-token>
+```
 
 ## Verifying token status
 

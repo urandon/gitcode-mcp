@@ -53,7 +53,7 @@ unset token
 exec "${gitcode_mcp_bin}" --mcp "$@"
 ```
 
-Current product credential lookup reads service `gitcode-mcp`, account `token`, and falls back to the current OS user account for compatibility with older wrapper setup. The wrapper remains useful for local operation, but it is not a full product experience. A user still has to know how to install the binary, create the config, store the token, point the MCP client at the wrapper, and verify that the read path works.
+Current product credential lookup reads service `gitcode-mcp`, account `token`. The wrapper remains useful for local operation, but it is not a full product experience. A user still has to know how to install the binary, create the config, store the token, point the MCP client at the wrapper, and verify that the read path works.
 
 ## Shared HTTP/SSE Transport Gap
 

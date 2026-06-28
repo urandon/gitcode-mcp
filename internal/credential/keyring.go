@@ -3,7 +3,6 @@ package credential
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 
 	"github.com/zalando/go-keyring"
@@ -15,7 +14,9 @@ const (
 )
 
 type KeychainProvider struct {
-	Get func(service, user string) (string, error)
+	Service string
+	User    string
+	Get     func(service, user string) (string, error)
 }
 
 func (p *KeychainProvider) Name() string {
@@ -28,7 +29,8 @@ func (p *KeychainProvider) Probe(ctx context.Context) Status {
 	if get == nil {
 		get = keyring.Get
 	}
-	token, err := getKeyringToken(get)
+	service, user := p.keyringIdentity()
+	token, err := get(service, user)
 	if err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
 			return Status{
@@ -37,7 +39,7 @@ func (p *KeychainProvider) Probe(ctx context.Context) Status {
 				StoreMode:   "keyring",
 				Available:   true,
 				ErrorClass:  "token-missing",
-				Remediation: "No token found in system keyring. Use GITCODE_TOKEN or store a token with service gitcode-mcp and account token.",
+				Remediation: "No token found in system keyring. Use GITCODE_TOKEN or store a token with the configured keyring service and account.",
 			}
 		}
 		return Status{
@@ -73,46 +75,22 @@ func (p *KeychainProvider) Token(ctx context.Context) ResolvedToken {
 	if get == nil {
 		get = keyring.Get
 	}
-	token, err := getKeyringToken(get)
+	service, user := p.keyringIdentity()
+	token, err := get(service, user)
 	if err != nil {
 		return ResolvedToken{}
 	}
 	return ResolvedToken{Value: strings.TrimSpace(token)}
 }
 
-func getKeyringToken(get func(service, user string) (string, error)) (string, error) {
-	var lastNotFound error
-	for _, user := range keyringUsers() {
-		token, err := get(keyringService, user)
-		if err == nil {
-			return token, nil
-		}
-		if errors.Is(err, keyring.ErrNotFound) {
-			lastNotFound = err
-			continue
-		}
-		return "", err
+func (p *KeychainProvider) keyringIdentity() (string, string) {
+	service := strings.TrimSpace(p.Service)
+	if service == "" {
+		service = keyringService
 	}
-	if lastNotFound != nil {
-		return "", keyring.ErrNotFound
+	user := strings.TrimSpace(p.User)
+	if user == "" {
+		user = keyringUser
 	}
-	return "", keyring.ErrNotFound
-}
-
-func keyringUsers() []string {
-	return uniqueNonEmpty([]string{keyringUser, os.Getenv("USER"), os.Getenv("USERNAME")})
-}
-
-func uniqueNonEmpty(values []string) []string {
-	seen := make(map[string]bool, len(values))
-	var out []string
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" || seen[value] {
-			continue
-		}
-		seen[value] = true
-		out = append(out, value)
-	}
-	return out
+	return service, user
 }

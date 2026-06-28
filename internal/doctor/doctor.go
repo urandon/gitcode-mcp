@@ -102,6 +102,8 @@ type CredentialSection struct {
 	Source             string   `json:"source"`
 	TokenPresent       bool     `json:"token_present"`
 	StoreMode          string   `json:"store_mode"`
+	KeyringService     string   `json:"keyring_service,omitempty"`
+	KeyringAccount     string   `json:"keyring_account,omitempty"`
 	AttemptedSources   []string `json:"attempted_sources,omitempty"`
 	AvailableSources   []string `json:"available_sources,omitempty"`
 	UnavailableSources []string `json:"unavailable_sources,omitempty"`
@@ -183,7 +185,7 @@ func Build(ctx context.Context, req Request) (Report, error) {
 
 	eff, configLoadErr := config.LoadEffective(req.Source, config.Overrides{})
 	if configLoadErr != nil {
-		eff = config.EffectiveConfig{Config: config.Config{}, Location: config.Locate(req.Source), CredentialPolicy: config.CredentialConfig{Store: "auto"}}
+		eff = config.EffectiveConfig{Config: config.Config{}, Location: config.Locate(req.Source), CredentialPolicy: config.CredentialConfig{Store: "auto", KeyringService: "gitcode-mcp", KeyringAccount: "token"}}
 	}
 
 	cred := req.CredentialReporter.Status(ctx, eff)
@@ -216,7 +218,7 @@ func Build(ctx context.Context, req Request) (Report, error) {
 	report.LiveProvider = LiveProviderSection{Status: "skipped", Reachable: "not_configured", ProviderMode: "offline-fixture", Remediation: "set GITCODE_TOKEN for live provider readiness, or use --offline/--fixture for deterministic fixture mode"}
 	report.AuthProbe = AuthProbeSection{Status: "skipped", ProbeResult: "not_probed", Remediation: "set GITCODE_TOKEN to enable authentication probing"}
 
-	report.Credential = CredentialSection{Source: emptyAsNone(cred.Source), TokenPresent: cred.Present, StoreMode: cred.StoreMode, AttemptedSources: append([]string(nil), cred.AttemptedSources...), AvailableSources: append([]string(nil), cred.AvailableSources...), UnavailableSources: append([]string(nil), cred.UnavailableSources...), Remediation: cred.Remediation}
+	report.Credential = CredentialSection{Source: emptyAsNone(cred.Source), TokenPresent: cred.Present, StoreMode: cred.StoreMode, KeyringService: cred.KeyringService, KeyringAccount: cred.KeyringAccount, AttemptedSources: append([]string(nil), cred.AttemptedSources...), AvailableSources: append([]string(nil), cred.AvailableSources...), UnavailableSources: append([]string(nil), cred.UnavailableSources...), Remediation: cred.Remediation}
 	if cred.Present {
 		report.Credential.Status = "token_configured"
 	} else {
@@ -514,6 +516,12 @@ func RenderText(w io.Writer, report Report) {
 	fmt.Fprintf(w, "  source: %s\n", report.Credential.Source)
 	fmt.Fprintf(w, "  token_present: %t\n", report.Credential.TokenPresent)
 	fmt.Fprintf(w, "  store_mode: %s\n", report.Credential.StoreMode)
+	if report.Credential.KeyringService != "" {
+		fmt.Fprintf(w, "  keyring_service: %s\n", report.Credential.KeyringService)
+	}
+	if report.Credential.KeyringAccount != "" {
+		fmt.Fprintf(w, "  keyring_account: %s\n", report.Credential.KeyringAccount)
+	}
 	if len(report.Credential.AvailableSources) > 0 {
 		fmt.Fprintf(w, "  available_sources: %s\n", strings.Join(report.Credential.AvailableSources, ","))
 	}

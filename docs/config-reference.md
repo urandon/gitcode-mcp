@@ -39,6 +39,8 @@ max_retries: 2
 format: text
 credential:
   store: auto
+  keyring_service: gitcode-mcp
+  keyring_account: token
 ```
 
 ### Fields
@@ -54,6 +56,15 @@ credential:
 | `max_retries` | int | `2` | Maximum retries for API calls |
 | `format` | string | `text` | Default output format (`text` or `json`) |
 | `credential.store` | string | `auto` | Credential lookup mode: `auto` checks `GITCODE_TOKEN` then the system keyring, `env` checks only `GITCODE_TOKEN`, and `keyring` checks the system keyring after env fallback. `keychain` is accepted as a legacy alias for `keyring`. |
+| `credential.keyring_service` | string | `gitcode-mcp` | System keyring service name used when `credential.store` is `auto` or `keyring`. Override it to isolate credentials for different agents or profiles. |
+| `credential.keyring_account` | string | `token` | System keyring account/user name used when `credential.store` is `auto` or `keyring`. Override it to isolate credentials for different agents or profiles. |
+
+Environment overrides:
+
+| Environment variable | Effect |
+|---|---|
+| `GITCODE_MCP_KEYRING_SERVICE` | Overrides `credential.keyring_service` for the launched process |
+| `GITCODE_MCP_KEYRING_ACCOUNT` | Overrides `credential.keyring_account` for the launched process |
 
 ## Repo-local cache mode
 
@@ -101,7 +112,7 @@ gitcode-mcp config show --redacted
 ```
 
 Expected: prints effective configuration with token value replaced by `[REDACTED]`.
-The output includes `cache_path_source`, `cache_mode`, and, when repo-local discovery applies, `repo_root` and `repo_local_config_path`.
+The output includes `cache_path_source`, `cache_mode`, credential keyring service/account, and, when repo-local discovery applies, `repo_root` and `repo_local_config_path`.
 
 ### Initialize config
 

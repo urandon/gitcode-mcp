@@ -61,5 +61,11 @@ func normalizeEffectiveConfig(eff config.EffectiveConfig) config.EffectiveConfig
 	if eff.CredentialPolicy.Store == "" {
 		eff.CredentialPolicy.Store = "auto"
 	}
+	if eff.CredentialPolicy.KeyringService == "" {
+		eff.CredentialPolicy.KeyringService = "gitcode-mcp"
+	}
+	if eff.CredentialPolicy.KeyringAccount == "" {
+		eff.CredentialPolicy.KeyringAccount = "token"
+	}
 	return eff
 }
