@@ -30,6 +30,19 @@ Discovery status for metadata-first sync:
 | Labels | No reliable update marker documented for the current cache surface. | Treat as full refresh or unsupported for metadata skip until discovery proves a marker. |
 | Milestones | Adapter model includes `UpdatedAt`, but list behavior and persistence are not verified for collection sync. | Not yet a first-class bulk collection surface; do not report `skipped_by_revision`. |
 
+## Pull Request Issue Relations
+
+Live discovery on a public-safe testing repository confirmed an explicit relation endpoint:
+
+```http
+POST /api/v5/repos/{owner}/{repo}/pulls/{pr_number}/issues
+Content-Type: application/json
+
+[issue_number]
+```
+
+The response is a JSON array of linked issue records. Confirmation should require that the returned array contains the requested issue number. A repeated POST with the same array returned the same linked issue list, so the adapter treats successful readback as idempotent. JSON object payloads and string/object `issue_nums` shapes were rejected during discovery; keep the adapter payload as a raw JSON number array.
+
 ## Evidence Rules
 
 - Never commit credentials or private tokens.

@@ -171,6 +171,10 @@ func (p *fixtureProvider) UpdatePR(context.Context, UpdatePRRequest, WriteOption
 	return WriteResult[PullRequest]{}, FixtureReadOnlyError("UpdatePR")
 }
 
+func (p *fixtureProvider) LinkPRIssue(context.Context, LinkPRIssueRequest, WriteOptions) (WriteResult[[]Issue], error) {
+	return WriteResult[[]Issue]{}, FixtureReadOnlyError("LinkPRIssue")
+}
+
 func (p *fixtureProvider) ListWikiPages(ctx context.Context, req WikiListRequest) (Page[WikiPage], error) {
 	if err := p.scenarioError("wiki"); err != nil {
 		return Page[WikiPage]{}, err

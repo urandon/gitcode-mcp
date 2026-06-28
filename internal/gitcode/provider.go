@@ -21,6 +21,7 @@ type Provider interface {
 	ListPRComments(context.Context, PRRequest) (Page[PRComment], error)
 	CreatePR(context.Context, CreatePRRequest, WriteOptions) (WriteResult[PullRequest], error)
 	UpdatePR(context.Context, UpdatePRRequest, WriteOptions) (WriteResult[PullRequest], error)
+	LinkPRIssue(context.Context, LinkPRIssueRequest, WriteOptions) (WriteResult[[]Issue], error)
 	ListWikiPages(context.Context, WikiListRequest) (Page[WikiPage], error)
 	GetWikiPage(context.Context, WikiPageRequest) (WikiPage, error)
 	Search(context.Context, SearchRequest) (Page[SearchResult], error)
@@ -263,6 +264,13 @@ func (p liveProvider) UpdatePR(ctx context.Context, req UpdatePRRequest, opts Wr
 	return p.HTTPClient.UpdatePR(ctx, req, opts)
 }
 
+func (p liveProvider) LinkPRIssue(ctx context.Context, req LinkPRIssueRequest, opts WriteOptions) (WriteResult[[]Issue], error) {
+	if err := p.matrix.Preflight(ProductAreaPullRequests); err != nil {
+		return WriteResult[[]Issue]{}, err
+	}
+	return p.HTTPClient.LinkPRIssue(ctx, req, opts)
+}
+
 func (p liveProvider) CreatePRComment(ctx context.Context, req CreatePRCommentRequest, opts WriteOptions) (WriteResult[PRComment], error) {
 	if err := p.matrix.Preflight(ProductAreaPullRequests); err != nil {
 		return WriteResult[PRComment]{}, err
@@ -331,6 +339,9 @@ func (p unavailableProvider) CreatePR(context.Context, CreatePRRequest, WriteOpt
 }
 func (p unavailableProvider) UpdatePR(context.Context, UpdatePRRequest, WriteOptions) (WriteResult[PullRequest], error) {
 	return WriteResult[PullRequest]{}, p.err()
+}
+func (p unavailableProvider) LinkPRIssue(context.Context, LinkPRIssueRequest, WriteOptions) (WriteResult[[]Issue], error) {
+	return WriteResult[[]Issue]{}, p.err()
 }
 func (p unavailableProvider) ListWikiPages(context.Context, WikiListRequest) (Page[WikiPage], error) {
 	return Page[WikiPage]{}, p.err()

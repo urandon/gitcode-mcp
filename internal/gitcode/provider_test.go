@@ -167,6 +167,7 @@ func TestScenario005FixtureReadOnlyTyped(t *testing.T) {
 		}},
 		{name: "create-pr", run: func() error { _, err := provider.CreatePR(ctx, CreatePRRequest{}, WriteOptions{}); return err }},
 		{name: "update-pr", run: func() error { _, err := provider.UpdatePR(ctx, UpdatePRRequest{}, WriteOptions{}); return err }},
+		{name: "link-pr-issue", run: func() error { _, err := provider.LinkPRIssue(ctx, LinkPRIssueRequest{}, WriteOptions{}); return err }},
 		{name: "create-pr-comment", run: func() error {
 			_, err := provider.CreatePRComment(ctx, CreatePRCommentRequest{}, WriteOptions{})
 			return err

@@ -192,6 +192,25 @@ func (c *HTTPClient) UpdatePR(ctx context.Context, req UpdatePRRequest, opts Wri
 	return WriteResult[PullRequest]{Record: pr, Confirmed: true, Operation: "UpdatePR", Target: target, ProviderStatus: "2xx-readback", IdempotencyKey: key, ResponseHash: hex.EncodeToString(hash[:]), ProviderPayloadFingerprint: hex.EncodeToString(fingerprint[:]), RemoteID: pr.ID, RemoteNumber: pr.Number, ConfirmedAt: time.Now().UTC()}, nil
 }
 
+func (c *HTTPClient) LinkPRIssue(ctx context.Context, req LinkPRIssueRequest, opts WriteOptions) (WriteResult[[]Issue], error) {
+	if err := validateLinkPRIssue(req); err != nil {
+		return WriteResult[[]Issue]{}, err
+	}
+	target := req.Owner + "/" + req.Repo + "/pulls/" + strconv.Itoa(req.Number) + "/issues/" + strconv.Itoa(req.IssueNumber)
+	result, err := writeConfirmedJSON[[]Issue](ctx, c, http.MethodPost, linkPRIssueEndpoint(req.Owner, req.Repo, req.Number), "LinkPRIssue", target, []int{req.IssueNumber}, opts, func(result WriteResult[[]Issue]) (WriteResult[[]Issue], error) {
+		if !linkedIssuesContain(result.Record, req.IssueNumber) {
+			return WriteResult[[]Issue]{}, ErrValidationFailed{Field: "response", Message: "pull request issue link confirmation requires matching linked issue"}
+		}
+		result.RemoteID = strconv.Itoa(req.Number)
+		result.RemoteNumber = req.Number
+		return result, nil
+	})
+	if err != nil {
+		return WriteResult[[]Issue]{}, linkPRIssueUnsupportedError(err)
+	}
+	return result, nil
+}
+
 func (c *HTTPClient) GetWikiPage(ctx context.Context, req WikiPageRequest) (WikiPage, error) {
 	if err := validateWikiPageRequest(req); err != nil {
 		return WikiPage{}, err
@@ -776,6 +795,27 @@ func writeConfirmedWithDecoder[T any](ctx context.Context, c *HTTPClient, method
 	return result, nil
 }
 
+func linkedIssuesContain(issues []Issue, number int) bool {
+	for _, issue := range issues {
+		if issue.Number == number {
+			return true
+		}
+	}
+	return false
+}
+
+func linkPRIssueUnsupportedError(err error) error {
+	var notFound ErrNotFound
+	if errors.As(err, &notFound) {
+		return ErrUnsupportedCapability{CapabilityKey: "pr_issue_relation", Message: "pull request issue relation endpoint is not available"}
+	}
+	var validation ErrAPIValidation
+	if errors.As(err, &validation) && validation.Status == http.StatusMethodNotAllowed {
+		return ErrUnsupportedCapability{CapabilityKey: "pr_issue_relation", Message: "pull request issue relation endpoint does not allow linking"}
+	}
+	return err
+}
+
 func validateReadRepo(owner, repo string) error {
 	if strings.TrimSpace(owner) == "" {
 		return ErrValidationFailed{Field: "owner", Message: "owner is required"}
@@ -898,6 +938,19 @@ func validateUpdatePR(req UpdatePRRequest) error {
 	}
 	if req.Number <= 0 {
 		return ErrValidationFailed{Field: "number", Message: "positive pull request number is required"}
+	}
+	return nil
+}
+
+func validateLinkPRIssue(req LinkPRIssueRequest) error {
+	if err := validateWriteRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if req.Number <= 0 {
+		return ErrValidationFailed{Field: "number", Message: "positive pull request number is required"}
+	}
+	if req.IssueNumber <= 0 {
+		return ErrValidationFailed{Field: "issue_number", Message: "positive issue number is required"}
 	}
 	return nil
 }

@@ -495,8 +495,8 @@ var toolDefs = []toolDefinition{
 	},
 	{
 		Name:        "link_pr_issue",
-		Description: "Link a live pull request to an issue through a deterministic description fallback.",
-		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"pr_number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "issue_number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "strategy": {Type: "string", Description: "Link strategy.", Enum: []string{"description_fallback"}, Default: "description_fallback"}}), Required: []string{"repo_id", "write_mode", "pr_number", "issue_number"}},
+		Description: "Link a live pull request to an issue through the GitCode relation API, with deterministic description fallback when unsupported.",
+		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"pr_number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "issue_number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "strategy": {Type: "string", Description: "Link strategy.", Enum: []string{"auto", "description_fallback"}, Default: "auto"}}), Required: []string{"repo_id", "write_mode", "pr_number", "issue_number"}},
 	},
 	{
 		Name:        "index_repo",
