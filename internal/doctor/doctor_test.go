@@ -2,6 +2,8 @@ package doctor
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,16 +16,56 @@ import (
 type fakeSource struct {
 	env      map[string]string
 	files    map[string][]byte
+	dirs     map[string]bool
 	home     string
 	cfgDir   string
 	cacheDir string
+	cwd      string
 }
 
-func (s fakeSource) Env(key string) string                { return s.env[key] }
-func (s fakeSource) UserHomeDir() (string, error)         { return s.home, nil }
-func (s fakeSource) UserConfigDir() (string, error)       { return s.cfgDir, nil }
-func (s fakeSource) UserCacheDir() (string, error)        { return s.cacheDir, nil }
-func (s fakeSource) ReadFile(path string) ([]byte, error) { return s.files[path], nil }
+func (s fakeSource) Env(key string) string          { return s.env[key] }
+func (s fakeSource) UserHomeDir() (string, error)   { return s.home, nil }
+func (s fakeSource) UserConfigDir() (string, error) { return s.cfgDir, nil }
+func (s fakeSource) UserCacheDir() (string, error)  { return s.cacheDir, nil }
+func (s fakeSource) ReadFile(path string) ([]byte, error) {
+	data, ok := s.files[path]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	return data, nil
+}
+func (s fakeSource) WorkingDir() (string, error) {
+	if s.cwd == "" {
+		return s.home, nil
+	}
+	return s.cwd, nil
+}
+func (s fakeSource) Stat(path string) (os.FileInfo, error) {
+	if s.dirs[path] {
+		return fakeDoctorFileInfo{name: filepath.Base(path), dir: true}, nil
+	}
+	if _, ok := s.files[path]; ok {
+		return fakeDoctorFileInfo{name: filepath.Base(path)}, nil
+	}
+	return nil, os.ErrNotExist
+}
+
+type fakeDoctorFileInfo struct {
+	name string
+	dir  bool
+}
+
+func (f fakeDoctorFileInfo) Name() string { return f.name }
+func (f fakeDoctorFileInfo) Size() int64  { return 0 }
+func (f fakeDoctorFileInfo) Mode() os.FileMode {
+	if f.dir {
+		return os.ModeDir | 0o755
+	}
+	return 0o644
+}
+func (f fakeDoctorFileInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeDoctorFileInfo) IsDir() bool        { return f.dir }
+func (f fakeDoctorFileInfo) Sys() any           { return nil }
 
 type fakeCredentialReporter struct{ status config.CredentialStatus }
 
@@ -97,6 +139,41 @@ func TestBuildFullReport(t *testing.T) {
 	RenderText(&b, report)
 	out := b.String()
 	for _, want := range []string{"version:", "config:", "cache:", "credential:", "repo:", "sync:", "index:", "mcp:", "tool_access: write", "live_provider:", "auth_probe:", "last_sync_completed_at:", "zero_delta: true"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("text missing %q in %q", want, out)
+		}
+	}
+}
+
+func TestBuildReportsRepoLocalCacheSelection(t *testing.T) {
+	root := "/workspace/repo"
+	repoCfg := filepath.Join(root, ".gitcode", "gitcode-mcp.yaml")
+	cachePath := filepath.Join(root, ".gitcode", "mcp", "cache.db")
+	src := fakeSource{
+		env:      map[string]string{},
+		files:    map[string][]byte{repoCfg: []byte("cache_mode: repo-local\n")},
+		dirs:     map[string]bool{filepath.Join(root, ".git"): true},
+		home:     "/home/test",
+		cfgDir:   "/cfg",
+		cacheDir: "/state",
+		cwd:      filepath.Join(root, "nested"),
+	}
+	report, err := Build(context.Background(), Request{
+		Version:            "test-version",
+		Source:             src,
+		CredentialReporter: fakeCredentialReporter{status: config.CredentialStatus{Source: "missing", StoreMode: "auto"}},
+		OpenStore:          func(context.Context, string) (Store, error) { return &fakeStore{version: 12}, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Config.CacheMode != config.CacheModeRepoLocal || report.Config.CachePath != cachePath || report.Config.CachePathSource != "repo-local:"+repoCfg || report.Config.RepoRoot != root {
+		t.Fatalf("repo-local config section=%#v", report.Config)
+	}
+	var b strings.Builder
+	RenderText(&b, report)
+	out := b.String()
+	for _, want := range []string{"cache_mode: repo-local", "cache_path_source: repo-local:" + repoCfg, "repo_root: " + root} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("text missing %q in %q", want, out)
 		}

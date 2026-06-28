@@ -42,6 +42,31 @@ Configure your MCP client to launch:
 
 Stdio mode uses stdin/stdout for JSON-RPC frames. stderr carries diagnostics.
 
+### Repo-local cache configuration
+
+When the MCP client launches `gitcode-mcp` from inside a Git worktree, the server can use a repo-local cache without a per-client `--cache-path`. Add `.gitcode/gitcode-mcp.yaml` to the worktree:
+
+```yaml
+cache_mode: repo-local
+```
+
+Then launch:
+
+```json
+{
+  "command": "gitcode-mcp",
+  "args": ["--mcp"]
+}
+```
+
+The resolved cache is `<git-worktree>/.gitcode/mcp/cache.db`. Keep generated state out of commits with:
+
+```gitignore
+.gitcode/mcp/
+```
+
+Command-line `--cache-path`, `GITCODE_MCP_CACHE_DIR`, and global `cache_path` still override repo-local discovery.
+
 ## HTTP/SSE mode
 
 ### Starting the server
@@ -126,7 +151,7 @@ Read-only Codex MCP example:
 ```json
 {
   "command": "gitcode-mcp",
-  "args": ["--mcp", "--cache-path", "/path/to/cache.db"],
+  "args": ["--mcp"],
   "env": {
     "GITCODE_MCP_TOOL_ACCESS": "read"
   }
@@ -138,9 +163,23 @@ Write-enabled Codex MCP example:
 ```json
 {
   "command": "gitcode-mcp",
-  "args": ["--mcp", "--cache-path", "/path/to/cache.db"],
+  "args": ["--mcp"],
   "env": {
     "GITCODE_MCP_TOOL_ACCESS": "write"
+  }
+}
+```
+
+Zed stdio example for a repo-local cache:
+
+```json
+{
+  "gitcode-mcp": {
+    "command": "gitcode-mcp",
+    "args": ["--mcp"],
+    "env": {
+      "GITCODE_MCP_TOOL_ACCESS": "read"
+    }
   }
 }
 ```

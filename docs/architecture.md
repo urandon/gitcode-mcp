@@ -68,3 +68,47 @@ GitCode adapter <-> tracker/wiki remote state
 ```
 
 Writes flow through explicit CLI or MCP live-write commands, require idempotency keys or deterministic write fingerprints, call the live GitCode adapter for provider confirmation, and then record audit/cache evidence. Routine reads continue to flow through the local cache and never trigger background writes.
+
+## Repo-Local Cache Storage
+
+The cache resolver supports two storage modes:
+
+- `global`: the compatibility default. The cache lives in the OS/user cache directory or an explicit configured path.
+- `repo-local`: an opt-in mode that keeps the SQLite cache next to the current Git worktree under `.gitcode/mcp/cache.db`.
+
+Repo-local layout:
+
+```text
+<git-worktree>/
+  .gitcode/
+    gitcode-mcp.yaml
+    mcp/
+      cache.db
+      cache.db.lock
+      exports/
+      snapshots/
+```
+
+The tracked config file is `.gitcode/gitcode-mcp.yaml`; generated cache state under `.gitcode/mcp/` should be ignored. This makes repository intent reviewable without committing SQLite databases, locks, exports, or snapshots.
+
+Cache selection is resolved once at process startup:
+
+```mermaid
+flowchart TD
+  A["CLI or MCP startup"] --> B{"--cache-path?"}
+  B -->|yes| C["Use explicit command cache path"]
+  B -->|no| D{"GITCODE_MCP_CACHE_DIR?"}
+  D -->|yes| E["Use env cache directory"]
+  D -->|no| F{"User/global cache_path?"}
+  F -->|yes| G["Use configured global cache path"]
+  F -->|no| H{"cache_mode: repo-local?"}
+  H -->|yes| I["Walk cwd upward to Git root"]
+  I --> J{"Git root found?"}
+  J -->|yes| K["Use <root>/.gitcode/mcp/cache.db"]
+  J -->|no| L["Use global default"]
+  H -->|no| L
+```
+
+Repo-local discovery reads `.gitcode/gitcode-mcp.yaml` from the discovered Git root. A user-level config may also set `cache_mode: repo-local`; the worktree still supplies the concrete root. Explicit cache paths and `GITCODE_MCP_CACHE_DIR` always win, which gives migrations and emergency diagnostics a stable escape hatch.
+
+Migration is intentionally non-destructive. Existing global caches remain the default. Teams can opt into repo-local mode per worktree, then run normal `sync`, `index`, and `doctor` commands to populate and verify the new cache. No automatic copying from the global cache happens during startup; operators who want migration can export/sync again or use future explicit cache migration tooling.

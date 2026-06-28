@@ -45,11 +45,13 @@ type MCPConfig struct {
 }
 
 type EffectiveConfig struct {
-	Config           Config            `json:"config"`
-	Location         ConfigLocation    `json:"location"`
-	FieldSources     map[string]string `json:"field_sources"`
-	CredentialPolicy CredentialConfig  `json:"credential_policy"`
-	CachePathSource  string            `json:"cache_path_source"`
+	Config              Config            `json:"config"`
+	Location            ConfigLocation    `json:"location"`
+	FieldSources        map[string]string `json:"field_sources"`
+	CredentialPolicy    CredentialConfig  `json:"credential_policy"`
+	CachePathSource     string            `json:"cache_path_source"`
+	RepoRoot            string            `json:"repo_root,omitempty"`
+	RepoLocalConfigPath string            `json:"repo_local_config_path,omitempty"`
 }
 
 type CredentialStatus struct {
@@ -318,6 +320,11 @@ func LoadEffective(src Source, overrides Overrides) (EffectiveConfig, error) {
 	if err := applyEnvOverrides(src, &eff); err != nil {
 		return EffectiveConfig{}, errors.New(RedactDiagnostic(err.Error(), src))
 	}
+	if overrides.CachePath == "" {
+		if err := applyRepoLocalCache(src, &eff); err != nil {
+			return EffectiveConfig{}, errors.New(RedactDiagnostic(err.Error(), src))
+		}
+	}
 	beforeCache := eff.Config.CachePath
 	eff.Config = mergeOverrides(eff.Config, overrides)
 	applyCommandOverrideSources(&eff, overrides, beforeCache)
@@ -332,6 +339,13 @@ func RenderRedactedEffectiveConfig(eff EffectiveConfig, status CredentialStatus)
 	fmt.Fprintf(&b, "config_exists: %t\n", eff.Location.Exists)
 	fmt.Fprintf(&b, "cache_path: %s\n", eff.Config.CachePath)
 	fmt.Fprintf(&b, "cache_path_source: %s\n", eff.CachePathSource)
+	fmt.Fprintf(&b, "cache_mode: %s\n", eff.Config.CacheMode)
+	if eff.RepoRoot != "" {
+		fmt.Fprintf(&b, "repo_root: %s\n", eff.RepoRoot)
+	}
+	if eff.RepoLocalConfigPath != "" {
+		fmt.Fprintf(&b, "repo_local_config_path: %s\n", eff.RepoLocalConfigPath)
+	}
 	fmt.Fprintf(&b, "gitcode_base_url_source: %s\n", eff.FieldSources["gitcode_base_url"])
 	fmt.Fprintf(&b, "credential_store_mode: %s\n", eff.CredentialPolicy.Store)
 	fmt.Fprintf(&b, "credential_source: %s\n", emptyAsNone(status.Source))
@@ -465,6 +479,10 @@ func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, er
 			cfg.MCPToolAccess = &value
 			continue
 		}
+		if section == "cache" && key == "mode" {
+			cfg.CacheMode = &value
+			continue
+		}
 		if section == "credential" && key == "store" {
 			cred.Store = value
 			continue
@@ -474,6 +492,8 @@ func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, er
 			cfg.CachePath = &value
 		case "lock_path":
 			cfg.LockPath = &value
+		case "cache_mode":
+			cfg.CacheMode = &value
 		case "gitcode_base_url":
 			cfg.GitCodeBaseURL = &value
 		case "default_timeout":
@@ -501,6 +521,7 @@ func defaultFieldSources() map[string]string {
 	return map[string]string{
 		"cache_path":        "default",
 		"lock_path":         "default",
+		"cache_mode":        "default",
 		"gitcode_base_url":  "default",
 		"default_timeout":   "default",
 		"max_response_size": "default",
@@ -519,6 +540,9 @@ func applyFileSources(sources map[string]string, file fileConfig, source string)
 	}
 	if file.LockPath != nil {
 		sources["lock_path"] = source
+	}
+	if file.CacheMode != nil {
+		sources["cache_mode"] = source
 	}
 	if file.GitCodeBaseURL != nil {
 		sources["gitcode_base_url"] = source
@@ -540,12 +564,115 @@ func applyFileSources(sources map[string]string, file fileConfig, source string)
 	}
 }
 
+func applyRepoLocalCache(src Source, eff *EffectiveConfig) error {
+	if eff.CachePathSource != "default" {
+		if eff.Config.CacheMode == "" {
+			eff.Config.CacheMode = CacheModeGlobal
+		}
+		return nil
+	}
+	root, repoConfigPath, repoFile, err := discoverRepoLocalConfig(src)
+	if err != nil {
+		return err
+	}
+	eff.RepoRoot = root
+	eff.RepoLocalConfigPath = repoConfigPath
+	repoMode := ""
+	if repoFile.CacheMode != nil {
+		mode, err := NormalizeCacheMode(*repoFile.CacheMode)
+		if err != nil {
+			return err
+		}
+		repoMode = mode
+	}
+	mode := eff.Config.CacheMode
+	modeSource := eff.FieldSources["cache_mode"]
+	if mode == "" {
+		mode = CacheModeGlobal
+	}
+	if repoMode != "" && eff.CachePathSource == "default" && modeSource == "default" {
+		mode = repoMode
+		modeSource = "repo-local:" + repoConfigPath
+	}
+	eff.Config.CacheMode = mode
+	eff.FieldSources["cache_mode"] = modeSource
+	if mode != CacheModeRepoLocal || root == "" || eff.CachePathSource != "default" {
+		return nil
+	}
+	cachePath := filepath.Join(root, ".gitcode", "mcp", "cache.db")
+	eff.Config.CachePath = cachePath
+	eff.Config.LockPath = cachePath + ".lock"
+	eff.CachePathSource = modeSource
+	eff.FieldSources["cache_path"] = modeSource
+	eff.FieldSources["lock_path"] = modeSource
+	return nil
+}
+
+func discoverRepoLocalConfig(src Source) (string, string, fileConfig, error) {
+	cwd, ok := workingDir(src)
+	if !ok || strings.TrimSpace(cwd) == "" {
+		return "", "", fileConfig{}, nil
+	}
+	root := findGitRoot(src, cwd)
+	if root == "" {
+		return "", "", fileConfig{}, nil
+	}
+	path := filepath.Join(root, ".gitcode", "gitcode-mcp.yaml")
+	data, err := src.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return root, path, fileConfig{}, nil
+		}
+		return "", "", fileConfig{}, fmt.Errorf("config: cannot read repo-local config file %s: %w", path, err)
+	}
+	cfg, _, err := parseYAMLConfig(data, path)
+	if err != nil {
+		return "", "", fileConfig{}, err
+	}
+	return root, path, cfg, nil
+}
+
+func workingDir(src Source) (string, bool) {
+	if wd, ok := src.(WorkingDirSource); ok {
+		dir, err := wd.WorkingDir()
+		if err == nil {
+			return filepath.Clean(dir), true
+		}
+	}
+	return "", false
+}
+
+func findGitRoot(src Source, start string) string {
+	dir := filepath.Clean(start)
+	for {
+		if isGitRoot(src, dir) {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+func isGitRoot(src Source, dir string) bool {
+	stat, ok := src.(StatSource)
+	if !ok {
+		return false
+	}
+	_, err := stat.Stat(filepath.Join(dir, ".git"))
+	return err == nil
+}
+
 func applyEnvOverrides(src Source, eff *EffectiveConfig) error {
 	if dir := src.Env(EnvMCPCacheDir); dir != "" {
 		eff.Config.CachePath = filepath.Join(dir, "cache.db")
 		eff.Config.LockPath = eff.Config.CachePath + ".lock"
+		eff.Config.CacheMode = CacheModeGlobal
 		eff.FieldSources["cache_path"] = "env:" + EnvMCPCacheDir
 		eff.FieldSources["lock_path"] = "env:" + EnvMCPCacheDir
+		eff.FieldSources["cache_mode"] = "env:" + EnvMCPCacheDir
 		eff.CachePathSource = "env:" + EnvMCPCacheDir
 	}
 	if api := src.Env(EnvAPIURL); api != "" {
@@ -566,6 +693,7 @@ func applyEnvOverrides(src Source, eff *EffectiveConfig) error {
 func applyCommandOverrideSources(eff *EffectiveConfig, overrides Overrides, beforeCache string) {
 	if overrides.CachePath != "" && eff.Config.CachePath != beforeCache {
 		eff.FieldSources["cache_path"] = "command"
+		eff.FieldSources["cache_mode"] = "command"
 		eff.CachePathSource = "command"
 		if overrides.LockPath == "" {
 			eff.FieldSources["lock_path"] = "command"
@@ -591,6 +719,9 @@ func applyCommandOverrideSources(eff *EffectiveConfig, overrides Overrides, befo
 	}
 	if overrides.MCPToolAccess != "" {
 		eff.FieldSources["mcp_tool_access"] = "command"
+	}
+	if overrides.CacheMode != "" {
+		eff.FieldSources["cache_mode"] = "command"
 	}
 }
 

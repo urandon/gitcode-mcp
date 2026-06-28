@@ -66,11 +66,15 @@ type Report struct {
 }
 
 type ConfigSection struct {
-	Path      string `json:"path"`
-	Source    string `json:"source"`
-	Format    string `json:"format"`
-	Exists    bool   `json:"exists"`
-	CachePath string `json:"cache_path"`
+	Path                string `json:"path"`
+	Source              string `json:"source"`
+	Format              string `json:"format"`
+	Exists              bool   `json:"exists"`
+	CachePath           string `json:"cache_path"`
+	CachePathSource     string `json:"cache_path_source"`
+	CacheMode           string `json:"cache_mode"`
+	RepoRoot            string `json:"repo_root,omitempty"`
+	RepoLocalConfigPath string `json:"repo_local_config_path,omitempty"`
 }
 
 type CacheSection struct {
@@ -199,7 +203,7 @@ func Build(ctx context.Context, req Request) (Report, error) {
 	}
 
 	report := Report{Version: req.Version}
-	report.Config = ConfigSection{Path: eff.Location.Path, Source: eff.Location.Source, Format: eff.Location.Format, Exists: eff.Location.Exists, CachePath: cachePath}
+	report.Config = ConfigSection{Path: eff.Location.Path, Source: eff.Location.Source, Format: eff.Location.Format, Exists: eff.Location.Exists, CachePath: cachePath, CachePathSource: eff.CachePathSource, CacheMode: eff.Config.CacheMode, RepoRoot: eff.RepoRoot, RepoLocalConfigPath: eff.RepoLocalConfigPath}
 	report.Cache = CacheSection{Path: cachePath, Status: "not_available", SchemaVersion: "unknown"}
 	report.Repo = RepoSection{Status: "no_repo_bound", BindHint: "run 'gitcode-mcp repo add --repo <id> --owner <owner> --name <name> --api-base-url <url> --scopes issues,wiki'"}
 	report.Sync = SyncSection{Status: "no_repo_bound"}
@@ -484,6 +488,14 @@ func RenderText(w io.Writer, report Report) {
 	fmt.Fprintf(w, "  format: %s\n", report.Config.Format)
 	fmt.Fprintf(w, "  exists: %t\n", report.Config.Exists)
 	fmt.Fprintf(w, "  cache_path: %s\n", report.Config.CachePath)
+	fmt.Fprintf(w, "  cache_path_source: %s\n", report.Config.CachePathSource)
+	fmt.Fprintf(w, "  cache_mode: %s\n", report.Config.CacheMode)
+	if report.Config.RepoRoot != "" {
+		fmt.Fprintf(w, "  repo_root: %s\n", report.Config.RepoRoot)
+	}
+	if report.Config.RepoLocalConfigPath != "" {
+		fmt.Fprintf(w, "  repo_local_config_path: %s\n", report.Config.RepoLocalConfigPath)
+	}
 	fmt.Fprintln(w, "cache:")
 	fmt.Fprintf(w, "  path: %s\n", report.Cache.Path)
 	fmt.Fprintf(w, "  status: %s\n", report.Cache.Status)
