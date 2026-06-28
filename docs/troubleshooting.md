@@ -189,7 +189,7 @@ Emits a JSON report covering:
 | `config-malformed` | Config file contains invalid JSON or bad values |
 | `legacy-config` | Config uses an older format (YAML) |
 | `no-token` | No GitCode API token available |
-| `keychain-unavailable` | OS credential store unavailable |
+| `credential-store-unavailable` | System keyring or credential store unavailable |
 
 All paths and token values are redacted in the output.
 

@@ -114,7 +114,7 @@ func TestBuildFullReport(t *testing.T) {
 	report, err := Build(context.Background(), Request{
 		Version:            "test-version",
 		Source:             src,
-		CredentialReporter: fakeCredentialReporter{status: config.CredentialStatus{Source: "env", Present: true, StoreMode: "env", AvailableSources: []string{"env", "keychain"}}},
+		CredentialReporter: fakeCredentialReporter{status: config.CredentialStatus{Source: "env", Present: true, StoreMode: "env", AvailableSources: []string{"env", "keyring"}}},
 		CachePath:          "/cache/db.sqlite",
 		MCPToolAccess:      "write",
 		OpenStore:          func(context.Context, string) (Store, error) { return store, nil },
@@ -184,7 +184,7 @@ func TestBuildNoBinding(t *testing.T) {
 	report, err := Build(context.Background(), Request{
 		Version:            "test-version",
 		Source:             fakeSource{env: map[string]string{}, files: map[string][]byte{}, home: "/home/test", cfgDir: "/cfg", cacheDir: "/cache"},
-		CredentialReporter: fakeCredentialReporter{status: config.CredentialStatus{Source: "missing", StoreMode: "auto", AvailableSources: []string{"env", "keychain"}}},
+		CredentialReporter: fakeCredentialReporter{status: config.CredentialStatus{Source: "missing", StoreMode: "auto", AvailableSources: []string{"env", "keyring"}}},
 		CachePath:          "/cache/db.sqlite",
 		OpenStore:          func(context.Context, string) (Store, error) { return &fakeStore{version: 7}, nil },
 	})
@@ -200,7 +200,7 @@ func TestBuildNoToken(t *testing.T) {
 	report, err := Build(context.Background(), Request{
 		Version:            "test-version",
 		Source:             fakeSource{env: map[string]string{}, files: map[string][]byte{}, home: "/home/test", cfgDir: "/cfg", cacheDir: "/cache"},
-		CredentialReporter: fakeCredentialReporter{status: config.CredentialStatus{Source: "missing", Present: false, StoreMode: "auto", AvailableSources: []string{"env", "keychain"}, Remediation: "Set GITCODE_TOKEN or configure a credential store."}},
+		CredentialReporter: fakeCredentialReporter{status: config.CredentialStatus{Source: "missing", Present: false, StoreMode: "auto", AvailableSources: []string{"env", "keyring"}, Remediation: "Set GITCODE_TOKEN or configure a credential store."}},
 		CachePath:          "/cache/db.sqlite",
 		OpenStore:          func(context.Context, string) (Store, error) { return &fakeStore{version: 7}, nil },
 	})
@@ -218,7 +218,7 @@ func TestLiveReadinessSelectsEffectiveBinding(t *testing.T) {
 		Source:             fakeSource{env: map[string]string{}, files: map[string][]byte{}, home: "/home/test", cfgDir: "/cfg", cacheDir: "/cache"},
 		Live:               true,
 		ProviderMode:       "live-http",
-		CredentialReporter: fakeCredentialReporter{status: config.CredentialStatus{Source: "mock-keychain", Present: true, StoreMode: "auto"}},
+		CredentialReporter: fakeCredentialReporter{status: config.CredentialStatus{Source: "mock-keyring", Present: true, StoreMode: "auto"}},
 		CachePath:          "/cache/db.sqlite",
 		LiveBinding:        service.LiveRepositoryBinding{RepoID: "selected", APIBaseURL: "https://selected.example.test", BaseURLSource: "repository_binding.api_base_url"},
 		OpenStore: func(context.Context, string) (Store, error) {
@@ -243,7 +243,7 @@ func TestLiveReadinessRepoSelectorSwitchesBinding(t *testing.T) {
 		Live:               true,
 		ProviderMode:       "live-http",
 		RepoID:             "alternate",
-		CredentialReporter: fakeCredentialReporter{status: config.CredentialStatus{Source: "mock-keychain", Present: true, StoreMode: "auto"}},
+		CredentialReporter: fakeCredentialReporter{status: config.CredentialStatus{Source: "mock-keyring", Present: true, StoreMode: "auto"}},
 		CachePath:          "/cache/db.sqlite",
 		LiveBinding:        service.LiveRepositoryBinding{RepoID: "selected", APIBaseURL: "https://selected.example.test"},
 		OpenStore: func(context.Context, string) (Store, error) {

@@ -136,16 +136,17 @@ func RedactDiagnostic(message string, src Source) string {
 }
 
 type fileConfig struct {
-	CachePath       *string    `json:"cache_path"`
-	LockPath        *string    `json:"lock_path"`
-	CacheMode       *string    `json:"cache_mode"`
-	GitCodeBaseURL  *string    `json:"gitcode_base_url"`
-	DefaultTimeout  *string    `json:"default_timeout"`
-	MaxResponseSize *int64     `json:"max_response_size"`
-	MaxRetries      *int       `json:"max_retries"`
-	Format          *string    `json:"format"`
-	MCPToolAccess   *string    `json:"mcp_tool_access"`
-	MCP             *MCPConfig `json:"mcp"`
+	CachePath       *string           `json:"cache_path"`
+	LockPath        *string           `json:"lock_path"`
+	CacheMode       *string           `json:"cache_mode"`
+	GitCodeBaseURL  *string           `json:"gitcode_base_url"`
+	DefaultTimeout  *string           `json:"default_timeout"`
+	MaxResponseSize *int64            `json:"max_response_size"`
+	MaxRetries      *int              `json:"max_retries"`
+	Format          *string           `json:"format"`
+	MCPToolAccess   *string           `json:"mcp_tool_access"`
+	MCP             *MCPConfig        `json:"mcp"`
+	Credential      *CredentialConfig `json:"credential"`
 }
 
 func defaultWithSource(src Source) Config {

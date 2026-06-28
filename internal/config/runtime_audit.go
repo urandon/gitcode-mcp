@@ -52,7 +52,7 @@ func BuildRuntimeAuditConfigReport(src Source, overrides Overrides, reporter Cre
 			Config:           defaultWithSource(src),
 			Location:         loc,
 			FieldSources:     defaultFieldSources(),
-			CredentialPolicy: CredentialConfig{Store: "auto"},
+			CredentialPolicy: defaultCredentialConfig(),
 			CachePathSource:  "default",
 		}
 	} else {

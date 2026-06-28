@@ -41,10 +41,10 @@ gitcode-mcp auth status
 The credential pipeline is:
 
 1. `GITCODE_TOKEN` environment variable;
-2. keychain credential source when available;
+2. system keyring credential source when available;
 3. none.
 
-With no token, `auth status` reports `token_present: false`, lists `available_sources` in the env, keychain, none order, and must not print raw secrets.
+With no token, `auth status` reports `token_present: false`, lists `available_sources` in the env, keyring, none order, and must not print raw secrets.
 
 To include a live auth probe:
 

@@ -13,10 +13,12 @@ import (
 )
 
 const (
-	EnvMCPConfigPath = "GITCODE_MCP_CONFIG"
-	EnvMCPCacheDir   = "GITCODE_MCP_CACHE_DIR"
-	EnvAPIURL        = "GITCODE_API_URL"
-	EnvMCPToolAccess = "GITCODE_MCP_TOOL_ACCESS"
+	EnvMCPConfigPath  = "GITCODE_MCP_CONFIG"
+	EnvMCPCacheDir    = "GITCODE_MCP_CACHE_DIR"
+	EnvAPIURL         = "GITCODE_API_URL"
+	EnvMCPToolAccess  = "GITCODE_MCP_TOOL_ACCESS"
+	EnvKeyringService = "GITCODE_MCP_KEYRING_SERVICE"
+	EnvKeyringAccount = "GITCODE_MCP_KEYRING_ACCOUNT"
 )
 
 const (
@@ -33,7 +35,9 @@ type ConfigLocation struct {
 }
 
 type CredentialConfig struct {
-	Store string `json:"store"`
+	Store          string `json:"store"`
+	KeyringService string `json:"keyring_service,omitempty"`
+	KeyringAccount string `json:"keyring_account,omitempty"`
 }
 
 type MCPToolsConfig struct {
@@ -58,6 +62,8 @@ type CredentialStatus struct {
 	Source             string               `json:"source"`
 	Present            bool                 `json:"present"`
 	StoreMode          string               `json:"store_mode"`
+	KeyringService     string               `json:"keyring_service,omitempty"`
+	KeyringAccount     string               `json:"keyring_account,omitempty"`
 	RedactedToken      string               `json:"redacted_token,omitempty"`
 	ErrorClass         string               `json:"error_class,omitempty"`
 	Remediation        string               `json:"remediation,omitempty"`
@@ -72,6 +78,8 @@ type CredentialResolutionResult struct {
 	Token              SecretString
 	Source             string
 	StoreMode          string
+	KeyringService     string
+	KeyringAccount     string
 	AttemptedSources   []string
 	AvailableSources   []string
 	UnavailableSources []string
@@ -80,7 +88,7 @@ type CredentialResolutionResult struct {
 }
 
 func (r CredentialResolutionResult) Status() CredentialStatus {
-	return CredentialStatus{Source: r.Source, Present: r.Present, StoreMode: r.StoreMode, AttemptedSources: append([]string(nil), r.AttemptedSources...), AvailableSources: append([]string(nil), r.AvailableSources...), UnavailableSources: append([]string(nil), r.UnavailableSources...), ErrorClass: r.ErrorClass, Remediation: r.Remediation}
+	return CredentialStatus{Source: r.Source, Present: r.Present, StoreMode: r.StoreMode, KeyringService: r.KeyringService, KeyringAccount: r.KeyringAccount, AttemptedSources: append([]string(nil), r.AttemptedSources...), AvailableSources: append([]string(nil), r.AvailableSources...), UnavailableSources: append([]string(nil), r.UnavailableSources...), ErrorClass: r.ErrorClass, Remediation: r.Remediation}
 }
 
 type MissingCredentialError struct {
@@ -196,7 +204,7 @@ func DefaultCredentialProvider(src Source) ChainCredentialProvider {
 	providers := []CredentialProvider{EnvCredentialProvider{Source: src}}
 	if src != nil {
 		if token := strings.TrimSpace(src.Env("GITCODE_MCP_TEST_KEYCHAIN_TOKEN")); token != "" {
-			providers = append(providers, StaticCredentialProvider{Source: "mock-keychain", Token: token, StoreMode: "keychain"})
+			providers = append(providers, StaticCredentialProvider{Source: "mock-keyring", Token: token, StoreMode: "keyring"})
 			return ChainCredentialProvider{Providers: providers}
 		}
 	}
@@ -243,17 +251,21 @@ func (p ChainCredentialProvider) ResolveLiveCredential(ctx context.Context, eff 
 		status.UnavailableSources = uniqueStrings(append(status.UnavailableSources, unavailable...))
 		last = status
 		if status.Present && strings.TrimSpace(secret.Value()) != "" {
-			return CredentialResolutionResult{Present: true, Token: secret, Source: status.Source, StoreMode: status.StoreMode, AttemptedSources: status.AttemptedSources, AvailableSources: status.AvailableSources, UnavailableSources: status.UnavailableSources, ErrorClass: status.ErrorClass, Remediation: status.Remediation}, nil
+			return CredentialResolutionResult{Present: true, Token: secret, Source: status.Source, StoreMode: status.StoreMode, KeyringService: status.KeyringService, KeyringAccount: status.KeyringAccount, AttemptedSources: status.AttemptedSources, AvailableSources: status.AvailableSources, UnavailableSources: status.UnavailableSources, ErrorClass: status.ErrorClass, Remediation: status.Remediation}, nil
 		}
 	}
+	lastKeyringService := last.KeyringService
+	lastKeyringAccount := last.KeyringAccount
 	last = missingCredentialStatus(eff.CredentialPolicy.Store)
+	last.KeyringService = lastKeyringService
+	last.KeyringAccount = lastKeyringAccount
 	last.Present = false
 	last.ErrorClass = firstNonEmpty(last.ErrorClass, "token-missing")
 	last.Remediation = firstNonEmpty(last.Remediation, "Set GITCODE_TOKEN or configure a credential store.")
 	last.AttemptedSources = uniqueStrings(append(last.AttemptedSources, attempted...))
 	last.AvailableSources = uniqueStrings(append(last.AvailableSources, available...))
 	last.UnavailableSources = uniqueStrings(append(last.UnavailableSources, unavailable...))
-	result := CredentialResolutionResult{Present: false, Source: last.Source, StoreMode: last.StoreMode, AttemptedSources: last.AttemptedSources, AvailableSources: last.AvailableSources, UnavailableSources: last.UnavailableSources, ErrorClass: last.ErrorClass, Remediation: last.Remediation}
+	result := CredentialResolutionResult{Present: false, Source: last.Source, StoreMode: last.StoreMode, KeyringService: last.KeyringService, KeyringAccount: last.KeyringAccount, AttemptedSources: last.AttemptedSources, AvailableSources: last.AvailableSources, UnavailableSources: last.UnavailableSources, ErrorClass: last.ErrorClass, Remediation: last.Remediation}
 	return result, MissingCredentialError{Status: result.Status()}
 }
 
@@ -296,7 +308,7 @@ func LoadEffective(src Source, overrides Overrides) (EffectiveConfig, error) {
 		Config:           defaultWithSource(src),
 		Location:         Locate(src),
 		FieldSources:     defaultFieldSources(),
-		CredentialPolicy: CredentialConfig{Store: "auto"},
+		CredentialPolicy: defaultCredentialConfig(),
 		CachePathSource:  "default",
 	}
 	if eff.Location.Path != "" && (eff.Location.Exists || eff.Location.Explicit) {
@@ -314,7 +326,19 @@ func LoadEffective(src Source, overrides Overrides) (EffectiveConfig, error) {
 			eff.CachePathSource = eff.Location.Source
 		}
 		if cred.Store != "" {
-			eff.CredentialPolicy.Store = cred.Store
+			store, err := NormalizeCredentialStore(cred.Store)
+			if err != nil {
+				return EffectiveConfig{}, errors.New(RedactDiagnostic(err.Error(), src))
+			}
+			eff.CredentialPolicy.Store = store
+		}
+		if strings.TrimSpace(cred.KeyringService) != "" {
+			eff.CredentialPolicy.KeyringService = strings.TrimSpace(cred.KeyringService)
+			eff.FieldSources["credential.keyring_service"] = eff.Location.Source
+		}
+		if strings.TrimSpace(cred.KeyringAccount) != "" {
+			eff.CredentialPolicy.KeyringAccount = strings.TrimSpace(cred.KeyringAccount)
+			eff.FieldSources["credential.keyring_account"] = eff.Location.Source
 		}
 	}
 	if err := applyEnvOverrides(src, &eff); err != nil {
@@ -348,6 +372,8 @@ func RenderRedactedEffectiveConfig(eff EffectiveConfig, status CredentialStatus)
 	}
 	fmt.Fprintf(&b, "gitcode_base_url_source: %s\n", eff.FieldSources["gitcode_base_url"])
 	fmt.Fprintf(&b, "credential_store_mode: %s\n", eff.CredentialPolicy.Store)
+	fmt.Fprintf(&b, "credential_keyring_service: %s\n", eff.CredentialPolicy.KeyringService)
+	fmt.Fprintf(&b, "credential_keyring_account: %s\n", eff.CredentialPolicy.KeyringAccount)
 	fmt.Fprintf(&b, "credential_source: %s\n", emptyAsNone(status.Source))
 	fmt.Fprintf(&b, "token_present: %t\n", status.Present)
 	if status.ErrorClass != "" {
@@ -372,6 +398,12 @@ func RenderCredentialStatus(status CredentialStatus) string {
 	fmt.Fprintf(&b, "credential_source: %s\n", emptyAsNone(status.Source))
 	fmt.Fprintf(&b, "token_present: %t\n", status.Present)
 	fmt.Fprintf(&b, "credential_store_mode: %s\n", status.StoreMode)
+	if status.KeyringService != "" {
+		fmt.Fprintf(&b, "credential_keyring_service: %s\n", status.KeyringService)
+	}
+	if status.KeyringAccount != "" {
+		fmt.Fprintf(&b, "credential_keyring_account: %s\n", status.KeyringAccount)
+	}
 	if len(status.AvailableSources) > 0 {
 		fmt.Fprintf(&b, "available_sources: %s\n", strings.Join(status.AvailableSources, ","))
 	}
@@ -394,6 +426,10 @@ func RenderCredentialStatus(status CredentialStatus) string {
 		}
 	}
 	return b.String()
+}
+
+func defaultCredentialConfig() CredentialConfig {
+	return CredentialConfig{Store: "auto", KeyringService: keyringService, KeyringAccount: keyringUser}
 }
 
 func InitYAMLConfig(path string, overwrite bool) error {
@@ -445,7 +481,11 @@ func readLocatedConfig(src Source, loc ConfigLocation) (fileConfig, CredentialCo
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return fileConfig{}, CredentialConfig{}, fmt.Errorf("config: malformed config file %s: %w", loc.Path, err)
 		}
-		return cfg, CredentialConfig{}, nil
+		var cred CredentialConfig
+		if cfg.Credential != nil {
+			cred = *cfg.Credential
+		}
+		return cfg, cred, nil
 	}
 	return parseYAMLConfig(data, loc.Path)
 }
@@ -487,6 +527,14 @@ func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, er
 			cred.Store = value
 			continue
 		}
+		if section == "credential" && key == "keyring_service" {
+			cred.KeyringService = value
+			continue
+		}
+		if section == "credential" && key == "keyring_account" {
+			cred.KeyringAccount = value
+			continue
+		}
 		switch key {
 		case "cache_path":
 			cfg.CachePath = &value
@@ -519,15 +567,17 @@ func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, er
 
 func defaultFieldSources() map[string]string {
 	return map[string]string{
-		"cache_path":        "default",
-		"lock_path":         "default",
-		"cache_mode":        "default",
-		"gitcode_base_url":  "default",
-		"default_timeout":   "default",
-		"max_response_size": "default",
-		"max_retries":       "default",
-		"format":            "default",
-		"mcp_tool_access":   "default",
+		"cache_path":                 "default",
+		"lock_path":                  "default",
+		"cache_mode":                 "default",
+		"gitcode_base_url":           "default",
+		"default_timeout":            "default",
+		"max_response_size":          "default",
+		"max_retries":                "default",
+		"format":                     "default",
+		"mcp_tool_access":            "default",
+		"credential.keyring_service": "default",
+		"credential.keyring_account": "default",
 	}
 }
 
@@ -687,6 +737,14 @@ func applyEnvOverrides(src Source, eff *EffectiveConfig) error {
 		eff.Config.MCPToolAccess = normalized
 		eff.FieldSources["mcp_tool_access"] = "env:" + EnvMCPToolAccess
 	}
+	if service := strings.TrimSpace(src.Env(EnvKeyringService)); service != "" {
+		eff.CredentialPolicy.KeyringService = service
+		eff.FieldSources["credential.keyring_service"] = "env:" + EnvKeyringService
+	}
+	if account := strings.TrimSpace(src.Env(EnvKeyringAccount)); account != "" {
+		eff.CredentialPolicy.KeyringAccount = account
+		eff.FieldSources["credential.keyring_account"] = "env:" + EnvKeyringAccount
+	}
 	return nil
 }
 
@@ -732,12 +790,27 @@ func missingCredentialStatus(store string) CredentialStatus {
 	return CredentialStatus{Source: "missing", Present: false, StoreMode: store, ErrorClass: "token-missing", Remediation: "Set GITCODE_TOKEN or configure a credential store."}
 }
 
+func NormalizeCredentialStore(value string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch normalized {
+	case "", "auto":
+		return "auto", nil
+	case "env":
+		return "env", nil
+	case "keyring", "keychain":
+		return "keyring", nil
+	default:
+		return "", fmt.Errorf("config: invalid credential.store %q: expected auto, env, keyring, or keychain", value)
+	}
+}
+
 func providerStatusSource(provider CredentialProvider, status CredentialStatus) string {
 	if _, ok := provider.(EnvCredentialProvider); ok {
 		return "env:" + EnvToken
 	}
-	if _, ok := provider.(KeychainCredentialProvider); ok {
-		return "keychain"
+	switch provider.(type) {
+	case KeychainCredentialProvider, *KeychainCredentialProvider:
+		return "keyring"
 	}
 	return status.Source
 }

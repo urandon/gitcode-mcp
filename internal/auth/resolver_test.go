@@ -23,7 +23,7 @@ func (s *testSource) UserCacheDir() (string, error)        { return "/tmp/test-c
 func (s *testSource) ReadFile(path string) ([]byte, error) { return nil, nil }
 
 func TestCredentialResolverEnvTokenPresent(t *testing.T) {
-	// Priority order: env:GITCODE_TOKEN > keychain (via mock)
+	// Priority order: env:GITCODE_TOKEN > keyring (via mock)
 	// When GITCODE_TOKEN is set, the resolver should pick the env source.
 	src := newTestSource()
 	src.env[config.EnvToken] = "secret-token-value"
@@ -45,12 +45,12 @@ func TestCredentialResolverEnvTokenPresent(t *testing.T) {
 	}
 }
 
-func TestCredentialResolverMockKeychain(t *testing.T) {
+func TestCredentialResolverMockKeyring(t *testing.T) {
 	// When GITCODE_TOKEN is not set but GITCODE_MCP_TEST_KEYCHAIN_TOKEN is,
-	// the resolver should pick the mock-keychain source.
+	// the resolver should pick the mock-keyring source.
 	src := newTestSource()
 	src.env[config.EnvToken] = ""
-	src.env["GITCODE_MCP_TEST_KEYCHAIN_TOKEN"] = "keychain-secret-value"
+	src.env["GITCODE_MCP_TEST_KEYCHAIN_TOKEN"] = "keyring-secret-value"
 
 	resolver := NewCredentialResolver(src)
 	result := resolver.Resolve(context.Background(), config.EffectiveConfig{})
@@ -58,19 +58,19 @@ func TestCredentialResolverMockKeychain(t *testing.T) {
 	if !result.Present {
 		t.Fatalf("expected credential present, got Present=%t", result.Present)
 	}
-	if result.Source != "mock-keychain" {
-		t.Fatalf("expected source mock-keychain, got %q", result.Source)
+	if result.Source != "mock-keyring" {
+		t.Fatalf("expected source mock-keyring, got %q", result.Source)
 	}
-	if result.Token != "keychain-secret-value" {
-		t.Fatalf("expected token 'keychain-secret-value', got %q", result.Token)
+	if result.Token != "keyring-secret-value" {
+		t.Fatalf("expected token 'keyring-secret-value', got %q", result.Token)
 	}
 }
 
 func TestCredentialResolverNoCredential(t *testing.T) {
 	// When no credential is available, resolver should report not present
 	// with error class and remediation.
-	// Use a chain with only EnvCredentialProvider (no real keychain) so the
-	// test is deterministic regardless of OS keychain state.
+	// Use a chain with only EnvCredentialProvider (no real keyring) so the
+	// test is deterministic regardless of OS keyring state.
 	src := newTestSource()
 
 	resolver := NewCredentialResolverWithProvider(config.ChainCredentialProvider{
@@ -122,11 +122,11 @@ func TestCredentialResolverStatusMatchesResolve(t *testing.T) {
 	}
 }
 
-func TestCredentialResolverEnvOverKeychain(t *testing.T) {
-	// When both env and keychain are available, env takes priority.
+func TestCredentialResolverEnvOverKeyring(t *testing.T) {
+	// When both env and keyring are available, env takes priority.
 	src := newTestSource()
 	src.env[config.EnvToken] = "env-token"
-	src.env["GITCODE_MCP_TEST_KEYCHAIN_TOKEN"] = "keychain-token"
+	src.env["GITCODE_MCP_TEST_KEYCHAIN_TOKEN"] = "keyring-token"
 
 	resolver := NewCredentialResolver(src)
 	result := resolver.Resolve(context.Background(), config.EffectiveConfig{})
@@ -135,7 +135,7 @@ func TestCredentialResolverEnvOverKeychain(t *testing.T) {
 		t.Fatalf("expected credential present, got Present=%t", result.Present)
 	}
 	if result.Source != "env:GITCODE_TOKEN" {
-		t.Fatalf("expected source env:GITCODE_TOKEN, got %q (keychain should not take priority)", result.Source)
+		t.Fatalf("expected source env:GITCODE_TOKEN, got %q (keyring should not take priority)", result.Source)
 	}
 	if result.Token != "env-token" {
 		t.Fatalf("expected token 'env-token', got %q", result.Token)

@@ -8,7 +8,7 @@ import (
 
 // Run plan constraint (ai/design_implementator_gitcode_mcp_live_operations_iteration_6_run_plan.yaml line 40):
 // Basic Auth (GITCODE_USER/GITCODE_PASS) is deliberately excluded from this resolver.
-// Only env:GITCODE_TOKEN > keychain priority order is supported until sanitized evidence
+// Only env:GITCODE_TOKEN > system keyring priority order is supported until sanitized evidence
 // proves GitCode accepts basic auth.
 
 type Result struct {
@@ -60,6 +60,12 @@ func (r *CredentialResolver) Status(ctx context.Context, eff config.EffectiveCon
 func normalizeEffectiveConfig(eff config.EffectiveConfig) config.EffectiveConfig {
 	if eff.CredentialPolicy.Store == "" {
 		eff.CredentialPolicy.Store = "auto"
+	}
+	if eff.CredentialPolicy.KeyringService == "" {
+		eff.CredentialPolicy.KeyringService = "gitcode-mcp"
+	}
+	if eff.CredentialPolicy.KeyringAccount == "" {
+		eff.CredentialPolicy.KeyringAccount = "token"
 	}
 	return eff
 }

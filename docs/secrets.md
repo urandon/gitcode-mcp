@@ -2,7 +2,7 @@
 
 ## Token storage policy
 
-The GitCode API token is always provided via the `GITCODE_TOKEN` environment variable. It is never stored in config files, logs, fixtures, snapshots, or any repository-tracked file.
+The GitCode API token is provided via the `GITCODE_TOKEN` environment variable or the configured system keyring. It is never stored in config files, logs, fixtures, snapshots, or any repository-tracked file.
 
 ## Platform-specific credential storage
 
@@ -12,13 +12,34 @@ Save the token:
 
 ```sh
 security add-generic-password \
-  -a "$USER" \
+  -a token \
   -s "gitcode-mcp" \
   -w "<your-token>" \
   -U
 ```
 
-Wrapper script to launch with Keychain token:
+The runtime reads service `gitcode-mcp`, account `token` through the system keyring. `credential.store: keychain` remains accepted as a legacy alias for `credential.store: keyring`.
+
+For multiple local agents or configs, use a distinct keyring account per profile:
+
+```yaml
+credential:
+  store: keyring
+  keyring_service: gitcode-mcp
+  keyring_account: codex-write
+```
+
+Then save the token under the same account:
+
+```sh
+security add-generic-password \
+  -a codex-write \
+  -s "gitcode-mcp" \
+  -w "<your-token>" \
+  -U
+```
+
+Wrapper script to launch with Keychain token when you prefer exporting `GITCODE_TOKEN` only for the child process:
 
 ```zsh
 #!/usr/bin/env zsh
@@ -26,7 +47,7 @@ set -euo pipefail
 
 GITCODE_MCP_BIN="${GITCODE_MCP_BIN:-gitcode-mcp}"
 KEYCHAIN_SERVICE="${GITCODE_MCP_KEYCHAIN_SERVICE:-gitcode-mcp}"
-KEYCHAIN_ACCOUNT="${GITCODE_MCP_KEYCHAIN_ACCOUNT:-${USER}}"
+KEYCHAIN_ACCOUNT="${GITCODE_MCP_KEYCHAIN_ACCOUNT:-token}"
 
 token="$(security find-generic-password \
   -a "${KEYCHAIN_ACCOUNT}" \
@@ -46,10 +67,18 @@ exec "${GITCODE_MCP_BIN}" "$@"
 
 ### Linux (D-Bus Secret Service / pass)
 
-Using `secret-tool`:
+Using Secret Service directly:
 
 ```sh
-secret-tool store --label='gitcode-mcp' service gitcode-mcp account "$USER"
+secret-tool store --label='gitcode-mcp token' service gitcode-mcp username token
+```
+
+The runtime reads that entry through the system keyring when `credential.store` is `auto` or `keyring`.
+
+For an agent-specific token, match the configured account:
+
+```sh
+secret-tool store --label='gitcode-mcp codex-write' service gitcode-mcp username codex-write
 ```
 
 Using `pass`:
@@ -81,7 +110,15 @@ Ensure the token is stored in the CI secret management system (not committed to 
 ### Windows Credential Manager
 
 ```powershell
-cmdkey /generic:gitcode-mcp /user:%USERNAME% /pass:<your-token>
+cmdkey /generic:gitcode-mcp:token /user:token /pass:<your-token>
+```
+
+The runtime reads the Credential Manager target used by the Go keyring library when `credential.store` is `auto` or `keyring`.
+
+For an agent-specific token, match the configured account:
+
+```powershell
+cmdkey /generic:gitcode-mcp:codex-write /user:codex-write /pass:<your-token>
 ```
 
 ## Verifying token status
@@ -105,4 +142,4 @@ gitcode-mcp config show --redacted
 - Tokens are never committed to the repository.
 - Fixtures and test data contain no real tokens.
 - Config files contain only non-secret paths and API base URLs.
-- Live network access requires explicit `GITCODE_TOKEN` and command flags.
+- Live network access requires `GITCODE_TOKEN` or a configured system keyring token and explicit command intent.

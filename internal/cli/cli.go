@@ -2096,7 +2096,7 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "Usage: gitcode-mcp auth status [--live] [--owner OWNER] [--repo REPO] [--format FORMAT]")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Report token source, credential state, and optional auth probe.")
-		fmt.Fprintln(w, "Credential sources are checked in order: env GITCODE_TOKEN, keychain, none.")
+		fmt.Fprintln(w, "Credential sources are checked in order: env GITCODE_TOKEN, keyring, none.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --live              probe GitCode API with token")
 		fmt.Fprintln(w, "  --owner OWNER       repository owner (for auth probe)")

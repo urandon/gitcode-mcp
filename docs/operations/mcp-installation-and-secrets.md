@@ -37,7 +37,7 @@ set -euo pipefail
 gitcode_mcp_bin="${GITCODE_MCP_BIN:-gitcode-mcp}"
 config_path="${GITCODE_CONFIG:-${HOME}/.config/gitcode-mcp/config.json}"
 keychain_service="${GITCODE_MCP_KEYCHAIN_SERVICE:-gitcode-mcp}"
-keychain_account="${GITCODE_MCP_KEYCHAIN_ACCOUNT:-${USER}}"
+keychain_account="${GITCODE_MCP_KEYCHAIN_ACCOUNT:-token}"
 
 token="$(security find-generic-password -a "${keychain_account}" -s "${keychain_service}" -w 2>/dev/null || true)"
 if [[ -z "${token}" ]]; then
@@ -53,7 +53,7 @@ unset token
 exec "${gitcode_mcp_bin}" --mcp "$@"
 ```
 
-This is useful enough for local operation, but it is not a full product experience. A user still has to know how to install the binary, create the config, store the token, point the MCP client at the wrapper, and verify that the read path works.
+Current product credential lookup reads service `gitcode-mcp`, account `token`. The wrapper remains useful for local operation, but it is not a full product experience. A user still has to know how to install the binary, create the config, store the token, point the MCP client at the wrapper, and verify that the read path works.
 
 ## Shared HTTP/SSE Transport Gap
 
@@ -90,7 +90,7 @@ The product should make this explicit through docs and command behavior:
 - Shared-server concurrency: define database ownership, connection settings, locks, busy timeout behavior, index/sync serialization, and how multiple clients observe server/cache status.
 - Read path quickstart: after install and secrets, a user should be able to populate cache from a test GitCode repo, run `index`, verify `search/get/snippet/backlinks/sync-status`, and then use the same cache through MCP.
 - Failure diagnostics: missing binary, missing config, missing token, bad token, network unavailable, empty cache, stale cache, and unsupported GitCode API routes should produce distinct actionable messages.
-- Public-safety invariant: config files may contain non-secret paths and API base URLs, but tokens remain environment/keychain/credential-store only.
+- Public-safety invariant: config files may contain non-secret paths and API base URLs, but tokens remain environment/system-keyring/credential-store only.
 
 ## Desired First-Run Experience
 
