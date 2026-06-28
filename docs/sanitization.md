@@ -18,7 +18,7 @@ Affected surfaces:
 
 | Surface | What is redacted | Replacement |
 |---|---|---|
-| Token value (from `GITCODE_TOKEN` env or keychain) | The full raw token string | Token preview: first 3 characters + `***` + last 3 characters (e.g. `glp***xyz`). None if `RedactToken` returns empty. |
+| Token value (from `GITCODE_TOKEN` env or system keyring) | The full raw token string | Token preview: first 3 characters + `***` + last 3 characters (e.g. `glp***xyz`). None if `RedactToken` returns empty. |
 | Token value in text bodies | Any raw token string in logs, error messages, or formatted text | `[REDACTED]` via `Filter.RedactText` or `RedactText(...)` |
 | Authorization header | `Bearer <token>` and similar auth header values | `[REDACTED]` via `Filter.RedactHeaders` |
 | Cookie / Set-Cookie header | Full header values | `[REDACTED]` via `Filter.RedactHeaders` |

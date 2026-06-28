@@ -619,7 +619,7 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 			t.Fatalf("auth code=%d stdout=%q stderr=%q", authCode, authStdout.String(), authStderr.String())
 		}
 		authOut := authStdout.String() + authStderr.String()
-		if !strings.Contains(authOut, "credential_source: mock-keychain") || strings.Contains(authOut, "test-token") {
+		if !strings.Contains(authOut, "credential_source: mock-keyring") || strings.Contains(authOut, "test-token") {
 			t.Fatalf("auth status output invalid: %q", authOut)
 		}
 		if counts := server.Counts(); counts.TotalRequests != 0 {
@@ -642,7 +642,7 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 		assertStartupCreateConfirmation(t, cachePath, "cred-write-1")
 	})
 
-	t.Run("SCN-CRED-DOCTOR-LIVE-MOCK-KEYCHAIN", func(t *testing.T) {
+	t.Run("SCN-CRED-DOCTOR-LIVE-MOCK-KEYRING", func(t *testing.T) {
 		server := testnet.NewGitCodeAPIServer(t)
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
@@ -656,7 +656,7 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 		}
 		out := stdout.String()
-		for _, want := range []string{"\"provider_mode\": \"live-http\"", "\"source\": \"mock-keychain\"", fmt.Sprintf("\"path\": \"%s\"", cachePath), fmt.Sprintf("\"api_base_url\": \"%s\"", server.BaseURL())} {
+		for _, want := range []string{"\"provider_mode\": \"live-http\"", "\"source\": \"mock-keyring\"", fmt.Sprintf("\"path\": \"%s\"", cachePath), fmt.Sprintf("\"api_base_url\": \"%s\"", server.BaseURL())} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("doctor output missing %q in %q", want, out)
 			}

@@ -196,7 +196,7 @@ func DefaultCredentialProvider(src Source) ChainCredentialProvider {
 	providers := []CredentialProvider{EnvCredentialProvider{Source: src}}
 	if src != nil {
 		if token := strings.TrimSpace(src.Env("GITCODE_MCP_TEST_KEYCHAIN_TOKEN")); token != "" {
-			providers = append(providers, StaticCredentialProvider{Source: "mock-keychain", Token: token, StoreMode: "keychain"})
+			providers = append(providers, StaticCredentialProvider{Source: "mock-keyring", Token: token, StoreMode: "keyring"})
 			return ChainCredentialProvider{Providers: providers}
 		}
 	}
@@ -314,7 +314,11 @@ func LoadEffective(src Source, overrides Overrides) (EffectiveConfig, error) {
 			eff.CachePathSource = eff.Location.Source
 		}
 		if cred.Store != "" {
-			eff.CredentialPolicy.Store = cred.Store
+			store, err := NormalizeCredentialStore(cred.Store)
+			if err != nil {
+				return EffectiveConfig{}, errors.New(RedactDiagnostic(err.Error(), src))
+			}
+			eff.CredentialPolicy.Store = store
 		}
 	}
 	if err := applyEnvOverrides(src, &eff); err != nil {
@@ -732,12 +736,27 @@ func missingCredentialStatus(store string) CredentialStatus {
 	return CredentialStatus{Source: "missing", Present: false, StoreMode: store, ErrorClass: "token-missing", Remediation: "Set GITCODE_TOKEN or configure a credential store."}
 }
 
+func NormalizeCredentialStore(value string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch normalized {
+	case "", "auto":
+		return "auto", nil
+	case "env":
+		return "env", nil
+	case "keyring", "keychain":
+		return "keyring", nil
+	default:
+		return "", fmt.Errorf("config: invalid credential.store %q: expected auto, env, keyring, or keychain", value)
+	}
+}
+
 func providerStatusSource(provider CredentialProvider, status CredentialStatus) string {
 	if _, ok := provider.(EnvCredentialProvider); ok {
 		return "env:" + EnvToken
 	}
-	if _, ok := provider.(KeychainCredentialProvider); ok {
-		return "keychain"
+	switch provider.(type) {
+	case KeychainCredentialProvider, *KeychainCredentialProvider:
+		return "keyring"
 	}
 	return status.Source
 }

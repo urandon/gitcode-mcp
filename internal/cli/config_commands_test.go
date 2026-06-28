@@ -187,14 +187,14 @@ func TestConfigAuthCommandsRedactedUX(t *testing.T) {
 
 	t.Run("SCN-AUTH-STATUS-NO-TOKEN", func(t *testing.T) {
 		src := newCLIConfigSource(t)
-		reporter := statusReporter{status: config.CredentialStatus{Source: "missing", Present: false, StoreMode: "auto", ErrorClass: "token-missing", AvailableSources: []string{"env:GITCODE_TOKEN", "keychain", "none"}}}
+		reporter := statusReporter{status: config.CredentialStatus{Source: "missing", Present: false, StoreMode: "auto", ErrorClass: "token-missing", AvailableSources: []string{"env:GITCODE_TOKEN", "keyring", "none"}}}
 		var stdout, stderr bytes.Buffer
 		code := executeWithFactoryAndDeps([]string{"auth", "status"}, &stdout, &stderr, nil, localCommandDeps{Source: src, CredentialReporter: reporter})
 		if code != 0 {
 			t.Fatalf("code=%d stderr=%q", code, stderr.String())
 		}
 		out := stdout.String() + stderr.String()
-		for _, want := range []string{"credential_source: missing", "token_present: false", "available_sources:", "env:GITCODE_TOKEN", "keychain", "credential_error_class: token-missing"} {
+		for _, want := range []string{"credential_source: missing", "token_present: false", "available_sources:", "env:GITCODE_TOKEN", "keyring", "credential_error_class: token-missing"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("auth missing %q in %q", want, out)
 			}
@@ -309,7 +309,7 @@ func TestDoctorCommandFull(t *testing.T) {
 
 	t.Run("SCN-004-002-no-binding", func(t *testing.T) {
 		src := newCLIConfigSource(t)
-		reporter := statusReporter{status: config.CredentialStatus{Source: "missing", Present: false, StoreMode: "auto", ErrorClass: "token-missing", AvailableSources: []string{"env:GITCODE_TOKEN", "keychain", "none"}}}
+		reporter := statusReporter{status: config.CredentialStatus{Source: "missing", Present: false, StoreMode: "auto", ErrorClass: "token-missing", AvailableSources: []string{"env:GITCODE_TOKEN", "keyring", "none"}}}
 		var stdout, stderr bytes.Buffer
 		code := executeWithFactoryAndDeps([]string{"doctor"}, &stdout, &stderr, nil, localCommandDeps{Source: src, CredentialReporter: reporter})
 		if code != 0 {
@@ -326,7 +326,7 @@ func TestDoctorCommandFull(t *testing.T) {
 
 	t.Run("SCN-004-003-no-token", func(t *testing.T) {
 		src := newCLIConfigSource(t)
-		reporter := statusReporter{status: config.CredentialStatus{Source: "missing", Present: false, StoreMode: "auto", ErrorClass: "token-missing", AvailableSources: []string{"env:GITCODE_TOKEN", "keychain", "none"}}}
+		reporter := statusReporter{status: config.CredentialStatus{Source: "missing", Present: false, StoreMode: "auto", ErrorClass: "token-missing", AvailableSources: []string{"env:GITCODE_TOKEN", "keyring", "none"}}}
 		var stdout, stderr bytes.Buffer
 		code := executeWithFactoryAndDeps([]string{"doctor"}, &stdout, &stderr, nil, localCommandDeps{Source: src, CredentialReporter: reporter})
 		if code != 0 {

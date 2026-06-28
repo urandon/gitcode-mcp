@@ -38,7 +38,7 @@ max_response_size: 10485760
 max_retries: 2
 format: text
 credential:
-  store: env
+  store: auto
 ```
 
 ### Fields
@@ -53,6 +53,7 @@ credential:
 | `max_response_size` | int64 | `10485760` | Maximum response size in bytes |
 | `max_retries` | int | `2` | Maximum retries for API calls |
 | `format` | string | `text` | Default output format (`text` or `json`) |
+| `credential.store` | string | `auto` | Credential lookup mode: `auto` checks `GITCODE_TOKEN` then the system keyring, `env` checks only `GITCODE_TOKEN`, and `keyring` checks the system keyring after env fallback. `keychain` is accepted as a legacy alias for `keyring`. |
 
 ## Repo-local cache mode
 
@@ -112,7 +113,7 @@ Creates the default config file if it does not already exist.
 
 ## Secrets
 
-The GitCode API token is provided via the `GITCODE_TOKEN` environment variable. It is never stored in config files, logs, fixtures, or snapshots.
+The GitCode API token is provided via the `GITCODE_TOKEN` environment variable or the configured system keyring. It is never stored in config files, logs, fixtures, or snapshots.
 
 ```sh
 export GITCODE_TOKEN=<your-token>

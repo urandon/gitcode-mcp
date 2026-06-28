@@ -29,10 +29,10 @@ func defaultTestPipeline(src config.Source) *Pipeline {
 
 type testKeychainProvider struct{}
 
-func (p *testKeychainProvider) Name() string { return "keychain" }
+func (p *testKeychainProvider) Name() string { return "keyring" }
 
 func (p *testKeychainProvider) Probe(ctx context.Context) Status {
-	return Status{Source: "keychain", Present: false, StoreMode: "keychain", Available: true, ErrorClass: "credential-store-unavailable"}
+	return Status{Source: "keyring", Present: false, StoreMode: "keyring", Available: true, ErrorClass: "credential-store-unavailable"}
 }
 
 func (p *testKeychainProvider) Token(ctx context.Context) ResolvedToken {
@@ -113,7 +113,7 @@ func TestPipelineStatusNone(t *testing.T) {
 	}
 }
 
-func TestPipelineStatusKeychainInChain(t *testing.T) {
+func TestPipelineStatusKeyringInChain(t *testing.T) {
 	src := &memSource{env: map[string]string{}}
 	p := defaultTestPipeline(src)
 
@@ -123,11 +123,31 @@ func TestPipelineStatusKeychainInChain(t *testing.T) {
 	}
 
 	kcSource := status.AvailableSource[1]
-	if kcSource.Name != "keychain" {
-		t.Fatalf("got second source name=%q, want keychain", kcSource.Name)
+	if kcSource.Name != "keyring" {
+		t.Fatalf("got second source name=%q, want keyring", kcSource.Name)
 	}
 	if kcSource.Credentials.Present {
-		t.Fatal("expected keychain Present=false (stub)")
+		t.Fatal("expected keyring Present=false (stub)")
+	}
+}
+
+func TestKeyringProviderUsesSystemServiceAndAccount(t *testing.T) {
+	p := &KeychainProvider{Get: func(service, user string) (string, error) {
+		if service != "gitcode-mcp" || user != "token" {
+			t.Fatalf("keyring lookup = %s/%s, want gitcode-mcp/token", service, user)
+		}
+		return "test-token-xxx", nil
+	}}
+	if p.Name() != "keyring" {
+		t.Fatalf("Name = %q, want keyring", p.Name())
+	}
+	st := p.Probe(context.Background())
+	if !st.Present || st.Source != "keyring" || st.StoreMode != "keyring" {
+		t.Fatalf("status=%#v", st)
+	}
+	token := p.Token(context.Background())
+	if token.Value != "test-token-xxx" {
+		t.Fatalf("token = %q, want test-token-xxx", token.Value)
 	}
 }
 
@@ -283,7 +303,7 @@ func TestAuthStatusToCredentialStatusMapping(t *testing.T) {
 		TokenPresent: true,
 		AvailableSource: []SourceStatus{
 			{Name: "env:GITCODE_TOKEN", Available: true, Credentials: Status{Source: "env:GITCODE_TOKEN", Present: true, StoreMode: "auto"}},
-			{Name: "keychain", Available: true, Credentials: Status{Source: "keychain", Present: false, StoreMode: "keychain", ErrorClass: "credential-store-unavailable"}},
+			{Name: "keyring", Available: true, Credentials: Status{Source: "keyring", Present: false, StoreMode: "keyring", ErrorClass: "credential-store-unavailable"}},
 			{Name: "none", Available: true, Credentials: Status{Source: "none", Present: false, StoreMode: "none"}},
 		},
 	}
@@ -308,7 +328,7 @@ func TestAuthStatusToCredentialStatusMissing(t *testing.T) {
 		TokenPresent: false,
 		AvailableSource: []SourceStatus{
 			{Name: "env:GITCODE_TOKEN", Available: true, Credentials: Status{Source: "env:GITCODE_TOKEN", Present: false, StoreMode: "auto", ErrorClass: "token-missing"}},
-			{Name: "keychain", Available: true, Credentials: Status{Source: "keychain", Present: false, StoreMode: "keychain", ErrorClass: "credential-store-unavailable"}},
+			{Name: "keyring", Available: true, Credentials: Status{Source: "keyring", Present: false, StoreMode: "keyring", ErrorClass: "credential-store-unavailable"}},
 			{Name: "none", Available: true, Credentials: Status{Source: "none", Present: false, StoreMode: "none"}},
 		},
 	}

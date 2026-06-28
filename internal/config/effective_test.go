@@ -71,6 +71,30 @@ func TestEffectiveConfigScenarios(t *testing.T) {
 		}
 	})
 
+	t.Run("SCN-AUTH-SYSTEM-KEYRING-PROVIDER", func(t *testing.T) {
+		src := newMemorySource(t)
+		eff, err := LoadEffective(src, Overrides{})
+		if err != nil {
+			t.Fatalf("LoadEffective returned error: %v", err)
+		}
+		provider := KeychainCredentialProvider{Get: func(service, user string) (string, error) {
+			if service != "gitcode-mcp" || user != "token" {
+				t.Fatalf("keyring lookup = %s/%s, want gitcode-mcp/token", service, user)
+			}
+			return "keyring-secret", nil
+		}}
+		secret, status, err := provider.Resolve(context.Background(), eff)
+		if err != nil {
+			t.Fatalf("Resolve returned error: %v", err)
+		}
+		if secret.Value() != "keyring-secret" || !status.Present || status.Source != "keyring" || status.StoreMode != "auto" {
+			t.Fatalf("status=%#v secret=%q", status, secret.Value())
+		}
+		if strings.Contains(RenderCredentialStatus(status), "keyring-secret") {
+			t.Fatalf("rendered keyring status leaked token")
+		}
+	})
+
 	t.Run("SCN-AUTH-MISSING-TOKEN", func(t *testing.T) {
 		src := newMemorySource(t)
 		eff, err := LoadEffective(src, Overrides{})
@@ -89,16 +113,30 @@ func TestEffectiveConfigScenarios(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LoadEffective returned error: %v", err)
 		}
-		provider := ChainCredentialProvider{Providers: []CredentialProvider{EnvCredentialProvider{Source: src}, StaticCredentialProvider{Source: "keychain", StoreMode: "auto", ErrorClass: "token-missing"}}}
+		provider := ChainCredentialProvider{Providers: []CredentialProvider{EnvCredentialProvider{Source: src}, StaticCredentialProvider{Source: "keyring", StoreMode: "auto", ErrorClass: "token-missing"}}}
 		status := provider.Status(context.Background(), eff)
 		if status.Present || status.ErrorClass != "token-missing" || status.Source != "missing" {
 			t.Fatalf("status=%#v", status)
 		}
 		rendered := RenderCredentialStatus(status)
-		for _, want := range []string{"available_sources:", "env:GITCODE_TOKEN", "keychain"} {
+		for _, want := range []string{"available_sources:", "env:GITCODE_TOKEN", "keyring"} {
 			if !strings.Contains(rendered, want) {
 				t.Fatalf("rendered missing %q in %q", want, rendered)
 			}
+		}
+	})
+
+	t.Run("SCN-AUTH-KEYCHAIN-STORE-ALIASES-KEYRING", func(t *testing.T) {
+		src := newMemorySource(t)
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		src.env[EnvMCPConfigPath] = configPath
+		src.files[configPath] = []byte("credential:\n  store: keychain\n")
+		eff, err := LoadEffective(src, Overrides{})
+		if err != nil {
+			t.Fatalf("LoadEffective returned error: %v", err)
+		}
+		if eff.CredentialPolicy.Store != "keyring" {
+			t.Fatalf("credential store = %q, want keyring alias", eff.CredentialPolicy.Store)
 		}
 	})
 
