@@ -711,3 +711,49 @@ type BulkSyncRequest struct {
 	PerPage        int           `json:"per_page,omitempty"`
 	Bounds         *SyncBounds   `json:"-"`
 }
+
+type PRDiscussionRequest struct {
+	RepoID         string `json:"repo_id"`
+	Number         int    `json:"number"`
+	UnresolvedOnly bool   `json:"unresolved_only,omitempty"`
+}
+
+type PRDiscussionsResult struct {
+	RepoID         string         `json:"repo_id"`
+	Number         int            `json:"number"`
+	UnresolvedOnly bool           `json:"unresolved_only,omitempty"`
+	Discussions    []PRDiscussion `json:"discussions"`
+	GeneratedAt    time.Time      `json:"generated_at"`
+}
+
+type PRDiscussion struct {
+	ID         string            `json:"id"`
+	Kind       string            `json:"kind"`
+	Resolved   *bool             `json:"resolved,omitempty"`
+	Resolvable *bool             `json:"resolvable,omitempty"`
+	Path       string            `json:"path,omitempty"`
+	Line       int               `json:"line,omitempty"`
+	StartLine  int               `json:"start_line,omitempty"`
+	EndLine    int               `json:"end_line,omitempty"`
+	Comments   []PRReviewComment `json:"comments"`
+}
+
+type PRReviewComment struct {
+	ID               string    `json:"id"`
+	SourceID         string    `json:"source_id"`
+	DiscussionID     string    `json:"discussion_id,omitempty"`
+	Kind             string    `json:"kind"`
+	Body             string    `json:"body"`
+	Author           string    `json:"author"`
+	Path             string    `json:"path,omitempty"`
+	Line             int       `json:"line,omitempty"`
+	StartLine        int       `json:"start_line,omitempty"`
+	EndLine          int       `json:"end_line,omitempty"`
+	Position         int       `json:"position,omitempty"`
+	OriginalPosition int       `json:"original_position,omitempty"`
+	Resolved         *bool     `json:"resolved,omitempty"`
+	Resolvable       *bool     `json:"resolvable,omitempty"`
+	ParentID         string    `json:"parent_id,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}

@@ -19,6 +19,8 @@ type Store interface {
 	GetSourceScoped(context.Context, string, string) (Source, error)
 	ListSources(context.Context, SourceFilter) ([]Source, error)
 	SearchSources(context.Context, SearchQuery) ([]SearchResult, error)
+	UpsertPRReviewComment(context.Context, PRReviewComment) error
+	ListPRReviewComments(context.Context, PRReviewCommentFilter) ([]PRReviewComment, error)
 	GetRecord(context.Context, string, string) (Record, error)
 	ListRecords(context.Context, RecordFilter) ([]Record, error)
 	SearchRecords(context.Context, SearchQuery) ([]SearchResult, error)
@@ -124,6 +126,27 @@ type RecordComment struct {
 	RemoteRevision string
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+}
+
+type PRReviewComment struct {
+	RepoID           string
+	SourceID         string
+	PRNumber         int
+	CommentID        string
+	DiscussionID     string
+	ReviewKind       string
+	Author           string
+	Path             string
+	Line             int
+	StartLine        int
+	EndLine          int
+	Position         int
+	OriginalPosition int
+	Resolved         *bool
+	Resolvable       *bool
+	ParentID         string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 type IdentityAlias = Identity
@@ -233,26 +256,28 @@ type RecordFilter struct {
 }
 
 type RecordGraph struct {
-	Record          Record
-	Comments        []RecordComment
-	Identities      []Identity
-	Links           []Link
-	RemoteRevisions []RemoteRevision
-	SyncEvents      []SyncEvent
-	AuditTrail      []AuditTrailEntry
-	Snapshots       []Snapshot
+	Record           Record
+	Comments         []RecordComment
+	PRReviewComments []PRReviewComment
+	Identities       []Identity
+	Links            []Link
+	RemoteRevisions  []RemoteRevision
+	SyncEvents       []SyncEvent
+	AuditTrail       []AuditTrailEntry
+	Snapshots        []Snapshot
 }
 
 type SyncGraph struct {
-	RepoID          string
-	Provenance      Provenance
-	Record          Record
-	Comments        []RecordComment
-	Identities      []Identity
-	Links           []Link
-	Chunks          []Chunk
-	RemoteRevisions []RemoteRevision
-	SyncEvents      []SyncEvent
+	RepoID           string
+	Provenance       Provenance
+	Record           Record
+	Comments         []RecordComment
+	PRReviewComments []PRReviewComment
+	Identities       []Identity
+	Links            []Link
+	Chunks           []Chunk
+	RemoteRevisions  []RemoteRevision
+	SyncEvents       []SyncEvent
 }
 
 type Source struct {
@@ -403,12 +428,19 @@ type Conflict struct {
 }
 
 type SourceGraph struct {
-	Source     Source
-	Comments   []RecordComment
-	Identities []Identity
-	Links      []Link
-	Chunks     []Chunk
-	SyncStatus *SyncStatus
-	SyncEvents []SyncEvent
-	Conflicts  []Conflict
+	Source           Source
+	Comments         []RecordComment
+	PRReviewComments []PRReviewComment
+	Identities       []Identity
+	Links            []Link
+	Chunks           []Chunk
+	SyncStatus       *SyncStatus
+	SyncEvents       []SyncEvent
+	Conflicts        []Conflict
+}
+
+type PRReviewCommentFilter struct {
+	RepoID   string
+	PRNumber int
+	SourceID string
 }

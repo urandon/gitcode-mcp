@@ -940,7 +940,7 @@ func TestScenario018PRListDetailCommentsRoutes(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == getPREndpoint("example-owner", "example-repo", 7):
 			fmt.Fprint(w, `{"id":"101","number":"7","html_url":"https://example.test/pulls/7","state":"open","title":"Add cache","body":"body","user":{"login":"alice"},"labels":["feature"],"base":{"ref":"main"},"head":{"ref":"topic"}}`)
 		case r.Method == http.MethodGet && r.URL.Path == listPRCommentsEndpoint("example-owner", "example-repo", 7):
-			fmt.Fprint(w, `[{"id":201,"note_id":301,"body":"looks good","discussion_id":"DISC-7","user":{"login":"bob"}}]`)
+			fmt.Fprint(w, `[{"id":201,"note_id":301,"body":"looks good","discussion_id":"DISC-7","user":{"login":"bob"},"path":"internal/service/service.go","line":42,"start_line":40,"end_line":42,"position":9,"original_position":8,"resolved":false,"resolvable":true,"parent_id":"300"}]`)
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -968,6 +968,13 @@ func TestScenario018PRListDetailCommentsRoutes(t *testing.T) {
 	}
 	if len(comments.Items) != 1 || comments.Items[0].Kind != "pr_comment" || comments.Items[0].ID != "301" || comments.Items[0].DiscussionID != "DISC-7" || comments.Items[0].PRNumber != 7 || comments.Items[0].Body != "looks good" || comments.Items[0].Author != "bob" {
 		t.Fatalf("unexpected PR comment records: %+v", comments.Items)
+	}
+	comment := comments.Items[0]
+	if comment.ReviewKind != "inline" || comment.Path != "internal/service/service.go" || comment.Line != 42 || comment.StartLine != 40 || comment.EndLine != 42 || comment.Position != 9 || comment.OriginalPosition != 8 || comment.ParentID != "300" {
+		t.Fatalf("unexpected PR review metadata: %+v", comment)
+	}
+	if comment.Resolved == nil || *comment.Resolved || comment.Resolvable == nil || !*comment.Resolvable {
+		t.Fatalf("unexpected PR review resolution metadata: %+v", comment)
 	}
 	for _, path := range paths {
 		if strings.Contains(path, "pull_requests") || strings.Contains(path, "merge_requests") || strings.Contains(path, "review_comments") {

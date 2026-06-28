@@ -58,13 +58,13 @@ The sync command supports these live sync selectors:
 - `--issues` bulk-syncs issue records.
 - `--wiki` bulk-syncs wiki records.
 - `--pulls` bulk-syncs pull request records.
-- `--comments` bulk-syncs pull request comments for cached pull request records.
+- `--comments` bulk-syncs pull request comments and review metadata for cached pull request records.
 - `--id ID` and `--input ALIAS` sync one stable record or remote alias.
 - `--index` builds the local index after sync.
 - `--idempotency-key KEY` supplies a deterministic sync event key.
 - `--max-pages`, `--max-records`, and `--per-page` bound collection sync when the selected surface supports collection bounds.
 
-Bulk sync treats issues, wiki pages, pull requests, and pull request comments as bounded collections. Issue and pull request sync page through list APIs and commit each returned record independently. Issue sync uses list-level issue revision metadata before deciding whether issue comments need to be listed again. Wiki sync passes record bounds into the wiki provider traversal before committing individual pages, then uses list-level wiki revision metadata before deciding whether a page body fetch is necessary. Pull request comment sync walks cached pull request records and applies record bounds across the resulting comment records. Issue sync covers issue data and comments as part of the source graph for that issue; wiki sync covers wiki page data. Live adapter route construction stays behind the provider boundary, and operator docs should use sanitized placeholders rather than real repository coordinates.
+Bulk sync treats issues, wiki pages, pull requests, and pull request comments as bounded collections. Issue and pull request sync page through list APIs and commit each returned record independently. Issue sync uses list-level issue revision metadata before deciding whether issue comments need to be listed again. Wiki sync passes record bounds into the wiki provider traversal before committing individual pages, then uses list-level wiki revision metadata before deciding whether a page body fetch is necessary. Pull request comment sync walks cached pull request records and applies record bounds across the resulting comment records. PR review metadata from the comment payload is stored separately from the searchable comment body so cached reads can group review discussions without live network access. Issue sync covers issue data and comments as part of the source graph for that issue; wiki sync covers wiki page data. Live adapter route construction stays behind the provider boundary, and operator docs should use sanitized placeholders rather than real repository coordinates.
 
 The command context carries the configured `default_timeout`, including the `--timeout` override, so large collection syncs have a whole-operation deadline in addition to provider-level request timeouts. When the deadline or caller cancellation fires, completed resource commits remain visible in cache and the sync response reports partial counts plus a typed diagnostic such as `sync_timeout` or `sync_cancelled`.
 
@@ -91,7 +91,7 @@ Current collection behavior:
 | Wiki pages | `sha`/`revision` from wiki contents/list entries | Cache-aware. If cached `remote_revision` matches the list marker, cached source content exists, and status is fresh, sync records a zero-delta `skipped_by_revision` result without fetching the page body. New, changed, incomplete, or marker-less records fetch the full page body. |
 | Issues | `updated_at`, `comments`, stable `id`, numeric `number`, and the list-provided source content | Cache-aware for the current expensive child read. Bulk issue sync stages issue content from the list payload and does not perform per-issue detail fetches. If cached `remote_revision` matches the list marker, sync skips the per-issue comments list call and records `skipped_by_revision`. New or changed issue markers list comments again. |
 | Pull requests / merge requests | `updated_at`, stable `id`, numeric `number`, branches/diff refs, labels, and list-provided source content | Bulk pull request sync stages from the list payload and does not perform per-PR detail fetches in the current path. The stored `remote_revision` is the list-version token so future detail expansion can compare before adding detail calls. |
-| Pull request review comments | Comment list payloads include stable ids, discussion ids, and `updated_at` timestamps | Comment sync stages from list-comment payloads. It still needs the parent PR comment list call because there is no persisted parent comment-collection checkpoint; individual comment revisions are stored after the list is fetched. |
+| Pull request review comments | Comment list payloads include stable ids, discussion ids, optional file/line metadata, optional resolution metadata, and `updated_at` timestamps | Comment sync stages from list-comment payloads and stores structured review metadata in `pr_review_comments` alongside the searchable `pr_comment` source. It still needs the parent PR comment list call because there is no persisted parent comment-collection checkpoint; individual comment revisions are stored after the list is fetched. |
 | Issue comments | Issue list `updated_at` plus `comments` count, with comment `updated_at` available after listing | Not exposed as an independent bulk selector. As part of issue sync, unchanged issue revision metadata skips the issue comment-list call; changed issue metadata refreshes comments. |
 | Labels | No reliable update marker documented for this cache surface | Not a first-class bulk sync collection yet; use full refresh or a future invalidation strategy. |
 | Milestones | Model supports `updated_at`, but list behavior and cache surface need verification | Not a first-class bulk sync collection yet; do not claim metadata skip until live discovery confirms the marker and persistence contract. |
@@ -123,7 +123,7 @@ The CLI renders the aggregate success and failure counts and resource details. D
 
 ## Cache Migration
 
-The implemented cache schema version is `11`, matching `currentSchemaVersion` in `internal/cache/schema.go`.
+The implemented cache schema version is `12`, matching `currentSchemaVersion` in `internal/cache/schema.go`.
 
 The primary version source is the SQLite `schema_version` table. Migrations also update `PRAGMA user_version` as an additive SQLite diagnostic bridge, but cache compatibility decisions use `schema_version`.
 
@@ -131,13 +131,13 @@ Compatibility policy:
 
 | Detected version | Behavior | Operator action |
 | --- | --- | --- |
-| New empty cache | Initialize normally at schema version 11 | None |
-| 11 | Open normally; reads and writes are allowed | None |
-| 2-10 | Open read-compatible but writes are blocked until migration | Run `gitcode-mcp migrate-cache --confirm` |
+| New empty cache | Initialize normally at schema version 12 | None |
+| 12 | Open normally; reads and writes are allowed | None |
+| 2-11 | Open read-compatible but writes are blocked until migration | Run `gitcode-mcp migrate-cache --confirm` |
 | 1 | Block migration as pre-supported/iteration-1-equivalent | Reinitialize with `gitcode-mcp reinit-cache` or delete the cache and re-sync |
 | 0, missing, or empty `schema_version` in a non-empty cache | Block as pre-schema-versioning or unknown | Reinitialize with `gitcode-mcp reinit-cache` or delete the cache and re-sync |
-| Greater than 11 | Block as newer than this binary supports | Upgrade `gitcode-mcp` to a binary that supports the schema |
+| Greater than 12 | Block as newer than this binary supports | Upgrade `gitcode-mcp` to a binary that supports the schema |
 
-`gitcode-mcp migrate-cache --confirm` runs supported older-version migrations in place from the detected version to version 11. It creates a backup at `{cache-path}.backup-{timestamp}` before applying changes. Each migration step runs in a transaction and advances both `schema_version` and `PRAGMA user_version` only after that step succeeds.
+`gitcode-mcp migrate-cache --confirm` runs supported older-version migrations in place from the detected version to version 12. It creates a backup at `{cache-path}.backup-{timestamp}` before applying changes. Each migration step runs in a transaction and advances both `schema_version` and `PRAGMA user_version` only after that step succeeds.
 
 Opening an older compatible cache without migration is read-compatible but write-blocked so operators can inspect the cache and run diagnostics before applying the migration. New caches are initialized directly at the current schema version.

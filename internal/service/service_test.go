@@ -2845,6 +2845,12 @@ func (f *brokenStore) ListSources(context.Context, cache.SourceFilter) ([]cache.
 	}
 	return out, nil
 }
+func (f *brokenStore) UpsertPRReviewComment(context.Context, cache.PRReviewComment) error {
+	return nil
+}
+func (f *brokenStore) ListPRReviewComments(context.Context, cache.PRReviewCommentFilter) ([]cache.PRReviewComment, error) {
+	return nil, nil
+}
 func (f *brokenStore) SearchSources(context.Context, cache.SearchQuery) ([]cache.SearchResult, error) {
 	return nil, nil
 }

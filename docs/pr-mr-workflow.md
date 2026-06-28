@@ -44,6 +44,32 @@ Use the MCP write lifecycle for agent workflows:
 
 Both lifecycles record idempotency, provider confirmation, audit rows, and cache refresh evidence. Direct REST calls are a fallback only when CLI and MCP tools are not available in the current client session.
 
+## Reading Review Discussions
+
+Sync pull requests and their comments before asking for review discussion state:
+
+```sh
+gitcode-mcp sync --repo YOUR_REPO --pulls --comments
+```
+
+Then list cached review discussions:
+
+```sh
+gitcode-mcp pr-discussions --repo YOUR_REPO --number 7 --unresolved-only --format json
+```
+
+The MCP read tool exposes the same cache-first surface:
+
+```json
+{
+  "repo_id": "YOUR_REPO",
+  "number": 7,
+  "unresolved_only": true
+}
+```
+
+The result groups comments by discussion thread. Inline comments include `path`, `line`, `start_line`, `end_line`, and position fields when GitCode provides them. General pull request comments are returned with `kind: "general"` and are not mixed with inline review comments. Resolution is tri-state: if GitCode omits `resolved`, unresolved-only reads keep the discussion visible instead of assuming it is resolved.
+
 ## Linking Pull Requests To Issues
 
 `link_pr_issue` defaults to `strategy: "auto"`.

@@ -35,6 +35,17 @@ func (s *SQLiteStore) UpsertRecordGraph(ctx context.Context, graph RecordGraph) 
 			return err
 		}
 	}
+	for _, review := range graph.PRReviewComments {
+		if review.RepoID == "" {
+			review.RepoID = graph.Record.RepoID
+		}
+		if review.SourceID == "" {
+			review.SourceID = graph.Record.ID
+		}
+		if err = upsertPRReviewCommentTx(ctx, tx, review); err != nil {
+			return err
+		}
+	}
 	for _, identity := range graph.Identities {
 		if identity.RepoID == "" {
 			identity.RepoID = graph.Record.RepoID
@@ -132,6 +143,17 @@ func (s *SQLiteStore) UpsertSyncGraph(ctx context.Context, graph SyncGraph) (err
 			comment.RecordID = graph.Record.ID
 		}
 		if err = upsertRecordCommentTx(ctx, tx, comment); err != nil {
+			return err
+		}
+	}
+	for _, review := range graph.PRReviewComments {
+		if review.RepoID == "" {
+			review.RepoID = repoID
+		}
+		if review.SourceID == "" {
+			review.SourceID = graph.Record.ID
+		}
+		if err = upsertPRReviewCommentTx(ctx, tx, review); err != nil {
 			return err
 		}
 	}

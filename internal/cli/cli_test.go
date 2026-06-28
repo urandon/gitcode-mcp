@@ -567,7 +567,7 @@ func TestQueryCommandsUseServiceOnly(t *testing.T) {
 	spy := &spyService{}
 	factory := func(context.Context, string) (queryService, func() error, error) { return spy, nil, nil }
 	commands := [][]string{
-		{"ingest"}, {"index", "--repo", "fixture-a", "--full"}, {"search", "--repo", "fixture-a", "backlog"}, {"search_sources", "--repo", "fixture-a", "backlog"}, {"list", "--repo", "fixture-a"}, {"get", "--repo", "fixture-a", "DOC-123"}, {"backlinks", "--repo", "fixture-a", "DOC-123"}, {"get-snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"snippets", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"list-chunks", "--repo", "fixture-a"}, {"recent", "--repo", "fixture-a"}, {"link-check", "--repo", "fixture-a"}, {"stale-index", "--repo", "fixture-a"}, {"sync", "--offline", "--repo", "fixture-a", "--input", "issue:42"}, {"cache-status", "--repo", "fixture-a"}, {"sync-status", "--repo", "fixture-a", "DOC-123"}, {"sync_status", "--repo", "fixture-a"}, {"export", "--repo", "fixture-a"}, {"diff", "--repo", "fixture-a"}, {"repo", "add", "--repo", "fixture-a", "--owner", "owner", "--name", "repo", "--api-base-url", "https://example.invalid/api", "--scopes", "issues"}, {"repo", "status", "--repo", "fixture-a"}, {"create-issue", "--repo", "fixture-a", "--title", "t", "--dry-run"}, {"update-issue", "--repo", "fixture-a", "--number", "1", "--dry-run"}, {"create-pr", "--repo", "fixture-a", "--title", "pr", "--head", "topic", "--base", "main", "--dry-run"}, {"create-mr", "--repo", "fixture-a", "--title", "mr", "--head", "topic", "--base", "main", "--dry-run"}, {"create-page", "--repo", "fixture-a", "--title", "t", "--body", "b", "--dry-run"}, {"update-page", "--repo", "fixture-a", "--slug", "s", "--dry-run"}, {"add-comment", "--repo", "fixture-a", "--number", "1", "--body", "b", "--dry-run"}, {"update-comment", "--repo", "fixture-a", "--comment-id", "c1", "--body", "b", "--dry-run"}, {"add-label", "--repo", "fixture-a", "--number", "1", "--label", "l", "--dry-run"},
+		{"ingest"}, {"index", "--repo", "fixture-a", "--full"}, {"search", "--repo", "fixture-a", "backlog"}, {"search_sources", "--repo", "fixture-a", "backlog"}, {"list", "--repo", "fixture-a"}, {"get", "--repo", "fixture-a", "DOC-123"}, {"backlinks", "--repo", "fixture-a", "DOC-123"}, {"get-snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"snippets", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"list-chunks", "--repo", "fixture-a"}, {"recent", "--repo", "fixture-a"}, {"link-check", "--repo", "fixture-a"}, {"stale-index", "--repo", "fixture-a"}, {"pr-discussions", "--repo", "fixture-a", "--number", "7", "--unresolved-only"}, {"sync", "--offline", "--repo", "fixture-a", "--input", "issue:42"}, {"cache-status", "--repo", "fixture-a"}, {"sync-status", "--repo", "fixture-a", "DOC-123"}, {"sync_status", "--repo", "fixture-a"}, {"export", "--repo", "fixture-a"}, {"diff", "--repo", "fixture-a"}, {"repo", "add", "--repo", "fixture-a", "--owner", "owner", "--name", "repo", "--api-base-url", "https://example.invalid/api", "--scopes", "issues"}, {"repo", "status", "--repo", "fixture-a"}, {"create-issue", "--repo", "fixture-a", "--title", "t", "--dry-run"}, {"update-issue", "--repo", "fixture-a", "--number", "1", "--dry-run"}, {"create-pr", "--repo", "fixture-a", "--title", "pr", "--head", "topic", "--base", "main", "--dry-run"}, {"create-mr", "--repo", "fixture-a", "--title", "mr", "--head", "topic", "--base", "main", "--dry-run"}, {"create-page", "--repo", "fixture-a", "--title", "t", "--body", "b", "--dry-run"}, {"update-page", "--repo", "fixture-a", "--slug", "s", "--dry-run"}, {"add-comment", "--repo", "fixture-a", "--number", "1", "--body", "b", "--dry-run"}, {"update-comment", "--repo", "fixture-a", "--comment-id", "c1", "--body", "b", "--dry-run"}, {"add-label", "--repo", "fixture-a", "--number", "1", "--label", "l", "--dry-run"},
 	}
 	for _, args := range commands {
 		var stdout bytes.Buffer
@@ -576,7 +576,7 @@ func TestQueryCommandsUseServiceOnly(t *testing.T) {
 			t.Fatalf("%v code=%d stderr=%q", args, code, stderr.String())
 		}
 	}
-	wantCalls := map[string]int{"Ingest": 1, "Index": 1, "SearchSources": 2, "ListSources": 1, "GetSource": 1, "GetBacklinks": 1, "GetSnippet": 3, "ListChunks": 1, "RecentChanges": 1, "LinkCheck": 1, "StaleIndex": 1, "SyncToCache": 1, "CacheStatus": 1, "GetSyncStatus": 1, "SyncStatus": 1, "ExportSnapshot": 1, "DiffSnapshot": 1, "AddRepository": 1, "RepositoryStatus": 1, "CreateIssue": 1, "UpdateIssue": 1, "CreatePR": 2, "CreatePage": 1, "UpdatePage": 1, "AddComment": 1, "AddLabel": 1}
+	wantCalls := map[string]int{"Ingest": 1, "Index": 1, "SearchSources": 2, "ListSources": 1, "GetSource": 1, "GetBacklinks": 1, "GetSnippet": 3, "ListChunks": 1, "RecentChanges": 1, "LinkCheck": 1, "StaleIndex": 1, "ListPRDiscussions": 1, "SyncToCache": 1, "CacheStatus": 1, "GetSyncStatus": 1, "SyncStatus": 1, "ExportSnapshot": 1, "DiffSnapshot": 1, "AddRepository": 1, "RepositoryStatus": 1, "CreateIssue": 1, "UpdateIssue": 1, "CreatePR": 2, "CreatePage": 1, "UpdatePage": 1, "AddComment": 1, "AddLabel": 1}
 	for method, want := range wantCalls {
 		if spy.calls[method] != want {
 			t.Fatalf("%s calls=%d want %d", method, spy.calls[method], want)
@@ -599,6 +599,24 @@ func TestCreatePRAliasDispatchesWriteRequest(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "create-pr: dry_run_valid") {
 		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
+func TestPRDiscussionsCommandReturnsJSON(t *testing.T) {
+	spy := &spyService{}
+	factory := func(context.Context, string) (queryService, func() error, error) { return spy, nil, nil }
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := executeWithFactory([]string{"pr-discussions", "--repo", "fixture-a", "--number", "7", "--unresolved-only", "--format", "json"}, &stdout, &stderr, factory)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	var result service.PRDiscussionsResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode json: %v\n%s", err, stdout.String())
+	}
+	if result.RepoID != "fixture-a" || result.Number != 7 || !result.UnresolvedOnly || len(result.Discussions) != 1 || result.Discussions[0].ID != "D7" {
+		t.Fatalf("result=%+v", result)
 	}
 }
 
@@ -757,6 +775,11 @@ func (s *spyService) BulkSyncPRComments(context.Context, service.BulkSyncRequest
 func (s *spyService) BulkSyncAll(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
 	s.called("BulkSyncAll")
 	return &service.SyncResourcesResult{Results: []service.SyncResult{{Status: "succeeded", Counts: service.SyncCounts{Fetched: 1}, GeneratedAt: time.Now()}}, SuccessCount: 1}, nil
+}
+func (s *spyService) ListPRDiscussions(_ context.Context, req service.PRDiscussionRequest) (service.PRDiscussionsResult, error) {
+	s.called("ListPRDiscussions")
+	resolved := false
+	return service.PRDiscussionsResult{RepoID: req.RepoID, Number: req.Number, UnresolvedOnly: req.UnresolvedOnly, Discussions: []service.PRDiscussion{{ID: "D7", Kind: "inline", Resolved: &resolved, Comments: []service.PRReviewComment{{ID: "301", Body: "review"}}}}, GeneratedAt: time.Now()}, nil
 }
 func (s *spyService) ResetLiveCache(context.Context, service.ResetLiveCacheRequest) (service.ResetLiveCacheResult, error) {
 	s.called("ResetLiveCache")
