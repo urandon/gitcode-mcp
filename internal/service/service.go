@@ -1103,7 +1103,7 @@ func (s *Service) BulkSyncIssues(ctx context.Context, req BulkSyncRequest) (*Syn
 	}
 
 	if req.Bounds == nil {
-		page, err := s.client.ListIssues(ctx, gitcode.IssueListRequest{Owner: route.Owner, Repo: route.Name, Page: req.Page, PerPage: req.PerPage})
+		page, err := s.client.ListIssues(ctx, gitcode.IssueListRequest{Owner: route.Owner, Repo: route.Name, State: "all", OrderBy: "updated_at", Direction: "desc", Page: req.Page, PerPage: req.PerPage})
 		if err != nil {
 			return bulkSyncFailureResult(s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "issue:*"}, "issues", "*"), "issue:*", "issues")
 		}
@@ -1122,7 +1122,11 @@ func (s *Service) BulkSyncIssues(ctx context.Context, req BulkSyncRequest) (*Syn
 
 func (s *Service) bulkSyncIssuesBounded(ctx context.Context, req BulkSyncRequest, route RepositoryRoute) (*SyncResourcesResult, error) {
 	bounds := req.Bounds
-	result := &SyncResourcesResult{Results: make([]SyncResult, 0), Failures: make([]ResourceError, 0)}
+	result := &SyncResourcesResult{Results: make([]SyncResult, 0), Failures: make([]ResourceError, 0), Ordering: "updated_at_desc"}
+	watermark, hasWatermark, err := s.collectionWatermark(ctx, req.RepoID, "issue")
+	if err != nil {
+		return bulkSyncFailureResult(err, "issue:*", "issues")
+	}
 	currentPage := req.Page
 	if currentPage < 1 {
 		currentPage = 1
@@ -1147,12 +1151,14 @@ func (s *Service) bulkSyncIssuesBounded(ctx context.Context, req BulkSyncRequest
 			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diag, TotalRequested: totalRequested}
 		}
 		if bounds.MaxPages > 0 && pageNum >= bounds.MaxPages {
+			result.StopReason = "max_pages"
 			break
 		}
 		if bounds.MaxRecords > 0 && len(result.Results) >= bounds.MaxRecords {
+			result.StopReason = "max_records"
 			break
 		}
-		page, err := s.client.ListIssues(ctx, gitcode.IssueListRequest{Owner: route.Owner, Repo: route.Name, Page: currentPage, PerPage: perPage})
+		page, err := s.client.ListIssues(ctx, gitcode.IssueListRequest{Owner: route.Owner, Repo: route.Name, State: "all", OrderBy: "updated_at", Direction: "desc", Page: currentPage, PerPage: perPage})
 		if err != nil {
 			result.SuccessCount = len(result.Results)
 			result.FailureCount = len(result.Failures)
@@ -1161,10 +1167,14 @@ func (s *Service) bulkSyncIssuesBounded(ctx context.Context, req BulkSyncRequest
 			result.FailureCount++
 			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, TotalRequested: totalRequested}
 		}
-		items := page.Items
+		result.PagesListed++
+		result.RecordsListed += len(page.Items)
+		items, stopByWatermark, skippedByWatermark := filterIssueSummariesByWatermark(page.Items, watermark, hasWatermark)
+		result.SkippedByWatermark += skippedByWatermark
 		if bounds.MaxRecords > 0 {
 			remaining := bounds.MaxRecords - len(result.Results)
 			if remaining <= 0 {
+				result.StopReason = "max_records"
 				break
 			}
 			if len(items) > remaining {
@@ -1175,7 +1185,12 @@ func (s *Service) bulkSyncIssuesBounded(ctx context.Context, req BulkSyncRequest
 		s.stageIssuePage(ctx, req, items, result)
 		recordsFetched := len(result.Results) - beforeCount
 		emitProgress(bounds.ProgressChan, ProgressEvent{Collection: "issues", Page: currentPage, RecordsFetched: recordsFetched})
+		if stopByWatermark {
+			result.StopReason = "watermark"
+			break
+		}
 		if len(page.Items) < perPage {
+			result.StopReason = "end_of_collection"
 			break
 		}
 		currentPage++
@@ -1242,7 +1257,7 @@ func (s *Service) BulkSyncPullRequests(ctx context.Context, req BulkSyncRequest)
 	}
 
 	if req.Bounds == nil {
-		page, err := s.client.ListPRs(ctx, gitcode.PRListRequest{Owner: route.Owner, Repo: route.Name, Page: req.Page, PerPage: req.PerPage})
+		page, err := s.client.ListPRs(ctx, gitcode.PRListRequest{Owner: route.Owner, Repo: route.Name, State: "all", OrderBy: "updated_at", Direction: "desc", Page: req.Page, PerPage: req.PerPage})
 		if err != nil {
 			return bulkSyncFailureResult(s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "pull_request:*"}, "pull_request", "*"), "pull_request:*", "pull_request")
 		}
@@ -1261,7 +1276,11 @@ func (s *Service) BulkSyncPullRequests(ctx context.Context, req BulkSyncRequest)
 
 func (s *Service) bulkSyncPullRequestsBounded(ctx context.Context, req BulkSyncRequest, route RepositoryRoute) (*SyncResourcesResult, error) {
 	bounds := req.Bounds
-	result := &SyncResourcesResult{Results: make([]SyncResult, 0), Failures: make([]ResourceError, 0)}
+	result := &SyncResourcesResult{Results: make([]SyncResult, 0), Failures: make([]ResourceError, 0), Ordering: "updated_at_desc"}
+	watermark, hasWatermark, err := s.collectionWatermark(ctx, req.RepoID, "pull_request")
+	if err != nil {
+		return bulkSyncFailureResult(err, "pull_request:*", "pull_request")
+	}
 	currentPage := req.Page
 	if currentPage < 1 {
 		currentPage = 1
@@ -1286,12 +1305,14 @@ func (s *Service) bulkSyncPullRequestsBounded(ctx context.Context, req BulkSyncR
 			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diag, TotalRequested: totalRequested}
 		}
 		if bounds.MaxPages > 0 && pageNum >= bounds.MaxPages {
+			result.StopReason = "max_pages"
 			break
 		}
 		if bounds.MaxRecords > 0 && len(result.Results) >= bounds.MaxRecords {
+			result.StopReason = "max_records"
 			break
 		}
-		page, err := s.client.ListPRs(ctx, gitcode.PRListRequest{Owner: route.Owner, Repo: route.Name, Page: currentPage, PerPage: perPage})
+		page, err := s.client.ListPRs(ctx, gitcode.PRListRequest{Owner: route.Owner, Repo: route.Name, State: "all", OrderBy: "updated_at", Direction: "desc", Page: currentPage, PerPage: perPage})
 		if err != nil {
 			normalized := s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "pull_request:*"}, "pull_request", "*")
 			result.Failures = append(result.Failures, ResourceError{SourceID: "pull_request:*", RemoteType: "pull_request", Err: normalized, Message: err.Error()})
@@ -1299,10 +1320,14 @@ func (s *Service) bulkSyncPullRequestsBounded(ctx context.Context, req BulkSyncR
 			result.FailureCount = len(result.Failures)
 			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, TotalRequested: totalRequested}
 		}
-		items := page.Items
+		result.PagesListed++
+		result.RecordsListed += len(page.Items)
+		items, stopByWatermark, skippedByWatermark := filterPullRequestsByWatermark(page.Items, watermark, hasWatermark)
+		result.SkippedByWatermark += skippedByWatermark
 		if bounds.MaxRecords > 0 {
 			remaining := bounds.MaxRecords - len(result.Results)
 			if remaining <= 0 {
+				result.StopReason = "max_records"
 				break
 			}
 			if len(items) > remaining {
@@ -1313,7 +1338,12 @@ func (s *Service) bulkSyncPullRequestsBounded(ctx context.Context, req BulkSyncR
 		s.stagePullRequestPage(ctx, req, items, result)
 		recordsFetched := len(result.Results) - beforeCount
 		emitProgress(bounds.ProgressChan, ProgressEvent{Collection: "pulls", Page: currentPage, RecordsFetched: recordsFetched})
+		if stopByWatermark {
+			result.StopReason = "watermark"
+			break
+		}
 		if len(page.Items) < perPage {
+			result.StopReason = "end_of_collection"
 			break
 		}
 		currentPage++
@@ -1351,6 +1381,74 @@ func (s *Service) stagePullRequestPage(ctx context.Context, req BulkSyncRequest,
 		}
 		result.Results = append(result.Results, SyncResult{IdempotencyKey: syncReq.IdempotencyKey, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), Record: sourceSummary(stored), GeneratedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: zeroDelta})
 	}
+}
+
+type collectionWatermark struct {
+	UpdatedAt time.Time
+	Number    int
+	RemoteID  string
+}
+
+func (s *Service) collectionWatermark(ctx context.Context, repoID, recordType string) (collectionWatermark, bool, error) {
+	records, err := s.store.ListRecords(ctx, cache.RecordFilter{RepoID: repoID, Type: recordType, Provenance: cache.ProvenanceRemote})
+	if err != nil {
+		return collectionWatermark{}, false, err
+	}
+	var watermark collectionWatermark
+	for _, record := range records {
+		if record.UpdatedAt.IsZero() {
+			continue
+		}
+		number := remoteNumber(record.RemoteID)
+		if watermark.UpdatedAt.IsZero() || record.UpdatedAt.After(watermark.UpdatedAt) || (record.UpdatedAt.Equal(watermark.UpdatedAt) && number > watermark.Number) {
+			watermark = collectionWatermark{UpdatedAt: record.UpdatedAt.UTC(), Number: number, RemoteID: record.RemoteID}
+		}
+	}
+	if watermark.UpdatedAt.IsZero() {
+		return collectionWatermark{}, false, nil
+	}
+	return watermark, true, nil
+}
+
+func filterIssueSummariesByWatermark(items []gitcode.IssueSummary, watermark collectionWatermark, ok bool) ([]gitcode.IssueSummary, bool, int) {
+	if !ok {
+		return items, false, 0
+	}
+	out := make([]gitcode.IssueSummary, 0, len(items))
+	skipped := 0
+	stop := false
+	for _, item := range items {
+		if item.UpdatedAt.IsZero() || !item.UpdatedAt.UTC().Before(watermark.UpdatedAt) {
+			out = append(out, item)
+			continue
+		}
+		skipped++
+		stop = true
+	}
+	return out, stop, skipped
+}
+
+func filterPullRequestsByWatermark(items []gitcode.PullRequest, watermark collectionWatermark, ok bool) ([]gitcode.PullRequest, bool, int) {
+	if !ok {
+		return items, false, 0
+	}
+	out := make([]gitcode.PullRequest, 0, len(items))
+	skipped := 0
+	stop := false
+	for _, item := range items {
+		if item.UpdatedAt.IsZero() || !item.UpdatedAt.UTC().Before(watermark.UpdatedAt) {
+			out = append(out, item)
+			continue
+		}
+		skipped++
+		stop = true
+	}
+	return out, stop, skipped
+}
+
+func remoteNumber(remoteID string) int {
+	number, _ := strconv.Atoi(strings.TrimSpace(remoteID))
+	return number
 }
 
 func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {

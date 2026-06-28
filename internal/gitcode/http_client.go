@@ -1289,6 +1289,12 @@ func issueListQuery(req IssueListRequest) url.Values {
 	if req.State != "" {
 		values.Set("state", req.State)
 	}
+	if req.OrderBy != "" {
+		values.Set("order_by", req.OrderBy)
+	}
+	if req.Direction != "" {
+		values.Set("sort", req.Direction)
+	}
 	for _, label := range req.Labels {
 		values.Add("labels", label)
 	}

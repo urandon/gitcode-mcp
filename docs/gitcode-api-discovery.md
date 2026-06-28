@@ -30,6 +30,26 @@ Discovery status for metadata-first sync:
 | Labels | No reliable update marker documented for the current cache surface. | Treat as full refresh or unsupported for metadata skip until discovery proves a marker. |
 | Milestones | Adapter model includes `UpdatedAt`, but list behavior and persistence are not verified for collection sync. | Not yet a first-class bulk collection surface; do not report `skipped_by_revision`. |
 
+## List Ordering Parameters
+
+Live discovery on `2026-06-28` used the public `openharmony/arkcompiler_runtime_core` repository because it has large issue and pull request collections.
+
+Issues:
+
+```http
+GET /api/v5/repos/{owner}/{repo}/issues?state=all&order_by=updated_at&sort=desc&page=1&per_page=3
+```
+
+This returned HTTP 200 and records ordered by recent `updated_at`. Created-time ordering also accepted `order_by=created_at&sort=desc`.
+
+Pull requests:
+
+```http
+GET /api/v5/repos/{owner}/{repo}/pulls?state=all&order_by=updated_at&direction=desc&page=1&per_page=3
+```
+
+This returned HTTP 200 and records ordered by recent `updated_at`. The issue-style `sort=desc` parameter returned HTTP 400 with a message that `direction` is required, so keep issue and pull request query builders collection-specific. The UI-coupled `order_by_sort=updated_at_desc` also returned HTTP 200 for pull requests, but the adapter uses `order_by=updated_at&direction=desc` because the API error points to `direction`.
+
 ## Pull Request Issue Relations
 
 Live discovery on a public-safe testing repository confirmed an explicit relation endpoint:

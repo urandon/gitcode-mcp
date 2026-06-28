@@ -10,12 +10,14 @@ import (
 )
 
 type IssueListRequest struct {
-	Owner   string
-	Repo    string
-	State   string
-	Labels  []string
-	Page    int
-	PerPage int
+	Owner     string
+	Repo      string
+	State     string
+	Labels    []string
+	OrderBy   string
+	Direction string
+	Page      int
+	PerPage   int
 }
 
 type IssueRequest struct {
@@ -27,11 +29,13 @@ type IssueRequest struct {
 }
 
 type PRListRequest struct {
-	Owner   string
-	Repo    string
-	State   string
-	Page    int
-	PerPage int
+	Owner     string
+	Repo      string
+	State     string
+	OrderBy   string
+	Direction string
+	Page      int
+	PerPage   int
 }
 
 type PRRequest struct {
@@ -975,6 +979,12 @@ func prListQuery(req PRListRequest) url.Values {
 	values := url.Values{}
 	if req.State != "" {
 		values.Set("state", req.State)
+	}
+	if req.OrderBy != "" {
+		values.Set("order_by", req.OrderBy)
+	}
+	if req.Direction != "" {
+		values.Set("direction", req.Direction)
 	}
 	return values
 }

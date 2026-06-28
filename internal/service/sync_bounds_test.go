@@ -303,6 +303,110 @@ func TestBulkSyncIssuesBoundedMaxRecords(t *testing.T) {
 	}
 }
 
+func TestBulkSyncIssuesRecentUpdateStopsAfterWatermark(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatalf("NewInMemorySQLiteStore returned error: %v", err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "issues-watermark", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatalf("AddRepository returned error: %v", err)
+	}
+	if err := store.UpsertRecordGraph(ctx, cache.RecordGraph{Record: cache.Record{RepoID: "issues-watermark", ID: "ISSUE-2", Type: "issue", Path: "issues/2.md", Title: "Cached", Body: "cached", Status: "open", ContentHash: "cached", Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: "2", RemoteRevision: "cached-rev", CreatedAt: base.Add(-time.Hour), UpdatedAt: base}}); err != nil {
+		t.Fatalf("seed record returned error: %v", err)
+	}
+	client := &fakeGitCodeClient{
+		listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{
+			{Items: []gitcode.IssueSummary{
+				{ID: "3", Number: 3, Title: "Fresh", State: "open", CreatedAt: base, UpdatedAt: base.Add(5 * time.Minute)},
+				{ID: "2", Number: 2, Title: "Cached", State: "open", CreatedAt: base.Add(-time.Hour), UpdatedAt: base},
+			}, Page: 1, PerPage: 2},
+			{Items: []gitcode.IssueSummary{
+				{ID: "1", Number: 1, Title: "Old", State: "open", CreatedAt: base.Add(-2 * time.Hour), UpdatedAt: base.Add(-time.Minute)},
+			}, Page: 2, PerPage: 2},
+			{Items: []gitcode.IssueSummary{{ID: "0", Number: 0, Title: "Should not list", State: "open", UpdatedAt: base.Add(-2 * time.Minute)}}, Page: 3, PerPage: 2},
+		},
+	}
+	svc := NewWithClient(store, client)
+
+	result, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{
+		RepoID:  "issues-watermark",
+		PerPage: 2,
+		Bounds:  &SyncBounds{MaxPages: 10},
+	})
+	if err != nil {
+		t.Fatalf("BulkSyncIssues returned error: %v", err)
+	}
+	if len(client.listIssueRequests) != 2 {
+		t.Fatalf("ListIssues calls = %d, want 2", len(client.listIssueRequests))
+	}
+	firstReq := client.listIssueRequests[0]
+	if firstReq.State != "all" || firstReq.OrderBy != "updated_at" || firstReq.Direction != "desc" {
+		t.Fatalf("unexpected issue list request: %+v", firstReq)
+	}
+	if result.StopReason != "watermark" || result.Ordering != "updated_at_desc" {
+		t.Fatalf("stop/order = %q/%q, want watermark/updated_at_desc", result.StopReason, result.Ordering)
+	}
+	if result.PagesListed != 2 || result.RecordsListed != 3 || result.SkippedByWatermark != 1 {
+		t.Fatalf("summary pages/records/skipped = %d/%d/%d, want 2/3/1", result.PagesListed, result.RecordsListed, result.SkippedByWatermark)
+	}
+	if result.SuccessCount != 2 {
+		t.Fatalf("SuccessCount = %d, want 2 staged records", result.SuccessCount)
+	}
+}
+
+func TestBulkSyncPullRequestsRecentUpdateStopsAfterWatermark(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatalf("NewInMemorySQLiteStore returned error: %v", err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "pulls-watermark", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatalf("AddRepository returned error: %v", err)
+	}
+	if err := store.UpsertRecordGraph(ctx, cache.RecordGraph{Record: cache.Record{RepoID: "pulls-watermark", ID: "PR-8", Type: "pull_request", Path: "pulls/8.md", Title: "Cached", Body: "cached", Status: "open", ContentHash: "cached", Provenance: cache.ProvenanceRemote, RemoteType: "pull_request", RemoteID: "8", RemoteRevision: "cached-rev", CreatedAt: base.Add(-time.Hour), UpdatedAt: base}}); err != nil {
+		t.Fatalf("seed record returned error: %v", err)
+	}
+	client := &fakeGitCodeClient{
+		listPRPages: []gitcode.Page[gitcode.PullRequest]{
+			{Items: []gitcode.PullRequest{
+				{ID: "9", Number: 9, Title: "Fresh", State: "open", CreatedAt: base, UpdatedAt: base.Add(5 * time.Minute)},
+				{ID: "8", Number: 8, Title: "Cached", State: "open", CreatedAt: base.Add(-time.Hour), UpdatedAt: base},
+			}, Page: 1, PerPage: 2},
+			{Items: []gitcode.PullRequest{
+				{ID: "7", Number: 7, Title: "Old", State: "open", CreatedAt: base.Add(-2 * time.Hour), UpdatedAt: base.Add(-time.Minute)},
+			}, Page: 2, PerPage: 2},
+		},
+	}
+	svc := NewWithClient(store, client)
+
+	result, err := svc.BulkSyncPullRequests(ctx, BulkSyncRequest{
+		RepoID:  "pulls-watermark",
+		PerPage: 2,
+		Bounds:  &SyncBounds{MaxPages: 10},
+	})
+	if err != nil {
+		t.Fatalf("BulkSyncPullRequests returned error: %v", err)
+	}
+	if len(client.listPRRequests) != 2 {
+		t.Fatalf("ListPRs calls = %d, want 2", len(client.listPRRequests))
+	}
+	firstReq := client.listPRRequests[0]
+	if firstReq.State != "all" || firstReq.OrderBy != "updated_at" || firstReq.Direction != "desc" {
+		t.Fatalf("unexpected PR list request: %+v", firstReq)
+	}
+	if result.StopReason != "watermark" || result.PagesListed != 2 || result.RecordsListed != 3 || result.SkippedByWatermark != 1 {
+		t.Fatalf("summary stop/pages/records/skipped = %q/%d/%d/%d", result.StopReason, result.PagesListed, result.RecordsListed, result.SkippedByWatermark)
+	}
+	if result.SuccessCount != 2 {
+		t.Fatalf("SuccessCount = %d, want 2 staged records", result.SuccessCount)
+	}
+}
+
 func TestBulkSyncPullRequestsBoundedMaxPages(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 6, 22, 17, 0, 0, 0, time.UTC)

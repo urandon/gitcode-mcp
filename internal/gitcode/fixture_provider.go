@@ -267,7 +267,7 @@ func (p *fixtureProvider) scenarioError(endpoint string) error {
 func filterIssues(items []IssueSummary, req IssueListRequest) []IssueSummary {
 	out := make([]IssueSummary, 0, len(items))
 	for _, item := range items {
-		if req.State != "" && item.State != req.State && item.Status != req.State {
+		if req.State != "" && req.State != "all" && item.State != req.State && item.Status != req.State {
 			continue
 		}
 		if len(req.Labels) > 0 && !hasAllLabels(item.Labels, req.Labels) {

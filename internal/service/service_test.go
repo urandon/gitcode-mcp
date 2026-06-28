@@ -2546,12 +2546,14 @@ type fakeGitCodeClient struct {
 	createWikiPageResult      gitcode.WriteResult[gitcode.WikiPage]
 	addLabelResult            gitcode.WriteResult[gitcode.Issue]
 	listIssuesPages           []gitcode.Page[gitcode.IssueSummary]
+	listIssueRequests         []gitcode.IssueListRequest
 	listIssuesErrors          []error
 	listWikiPages             []gitcode.Page[gitcode.WikiPage]
 	listWikiErrors            []error
 	listWikiPagesCallCount    int
 	onWikiCall                func(int)
 	listPRPages               []gitcode.Page[gitcode.PullRequest]
+	listPRRequests            []gitcode.PRListRequest
 	prsByNumber               map[int]gitcode.PullRequest
 	prCommentsByPR            map[int][]gitcode.PRComment
 	listPRCalls               int
@@ -2579,7 +2581,8 @@ func (f *fakeGitCodeClient) nextError() error {
 	return err
 }
 
-func (f *fakeGitCodeClient) ListIssues(context.Context, gitcode.IssueListRequest) (gitcode.Page[gitcode.IssueSummary], error) {
+func (f *fakeGitCodeClient) ListIssues(_ context.Context, req gitcode.IssueListRequest) (gitcode.Page[gitcode.IssueSummary], error) {
+	f.listIssueRequests = append(f.listIssueRequests, req)
 	if len(f.listIssuesErrors) > 0 {
 		err := f.listIssuesErrors[0]
 		f.listIssuesErrors = f.listIssuesErrors[1:]
@@ -2614,8 +2617,9 @@ func (f *fakeGitCodeClient) ListIssueComments(_ context.Context, req gitcode.Iss
 	}
 	return gitcode.Page[gitcode.Comment]{Items: f.comments}, nil
 }
-func (f *fakeGitCodeClient) ListPRs(context.Context, gitcode.PRListRequest) (gitcode.Page[gitcode.PullRequest], error) {
+func (f *fakeGitCodeClient) ListPRs(_ context.Context, req gitcode.PRListRequest) (gitcode.Page[gitcode.PullRequest], error) {
 	f.listPRCalls++
+	f.listPRRequests = append(f.listPRRequests, req)
 	if len(f.listPRPages) > 0 {
 		page := f.listPRPages[0]
 		f.listPRPages = f.listPRPages[1:]
