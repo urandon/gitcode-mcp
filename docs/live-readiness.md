@@ -117,11 +117,11 @@ The MCP server exposes the same audited live-write lifecycle for agent workflows
 | `create_pr` | Create a pull request with title, body, head, and base |
 | `update_pr` | Update pull request title, body, or state |
 | `add_pr_comment` | Add a testing/report comment to a pull request |
-| `link_pr_issue` | Link a pull request to an issue through the deterministic description fallback |
+| `link_pr_issue` | Link a pull request to an issue through the GitCode relation API with fallback |
 
 MCP tool access defaults to `read`, so these write lifecycle tools are hidden from `tools/list` unless the server is started with `mcp.tools.access: write` or `GITCODE_MCP_TOOL_ACCESS=write`. A direct call while read-only returns `tool_disabled_by_policy` before validation, credentials, network, or cache mutation. `gitcode-mcp doctor` reports the active `tool_access` mode.
 
-Each MCP write call also requires `write_mode: "live"`. Idempotency keys are accepted on every write tool and are used for safe replay/conflict detection. Successful writes report provider confirmation, audit/cache evidence, remote identity, and the idempotency key; failed writes return typed public-safe diagnostics and do not claim cache confirmation.
+Each MCP write call also requires `write_mode: "live"`. Idempotency keys are accepted on every write tool and are used for safe replay/conflict detection. `link_pr_issue` defaults to `strategy: "auto"`, which uses the explicit GitCode PR issue relation endpoint and falls back to a deterministic description marker only when the relation endpoint is unsupported. Successful writes report provider confirmation, audit/cache evidence, remote identity, and the idempotency key; failed writes return typed public-safe diagnostics and do not claim cache confirmation.
 
 ## 6. Search
 

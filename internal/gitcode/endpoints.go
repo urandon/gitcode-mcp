@@ -38,6 +38,10 @@ func createPRCommentEndpoint(owner, repo string, number int) string {
 	return listPRCommentsEndpoint(owner, repo, number)
 }
 
+func linkPRIssueEndpoint(owner, repo string, number int) string {
+	return endpointPath("/api/v5/repos/%s/%s/pulls/%d/issues", owner, repo, number)
+}
+
 func getWikiPageEndpoint(owner, repo, slug string) string {
 	return wikiContentsPathEndpoint(owner, repo, slug)
 }

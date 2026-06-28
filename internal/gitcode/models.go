@@ -65,6 +65,13 @@ type CreatePRCommentRequest struct {
 	Body   string `json:"body"`
 }
 
+type LinkPRIssueRequest struct {
+	Owner       string `json:"-"`
+	Repo        string `json:"-"`
+	Number      int    `json:"-"`
+	IssueNumber int    `json:"-"`
+}
+
 type WikiPageRequest struct {
 	Owner string
 	Repo  string

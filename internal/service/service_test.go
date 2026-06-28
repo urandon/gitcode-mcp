@@ -706,7 +706,79 @@ func TestScenario016MCPWriteLifecycleCreatePRAndComment(t *testing.T) {
 	}
 }
 
-func TestScenario016MCPWriteLifecycleLinkPRIssueDescriptionFallback(t *testing.T) {
+func TestScenario004MCPWriteLifecycleLinkPRIssueRelationAPI(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	created := time.Date(2026, 6, 27, 12, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		linkPRIssueResult: gitcode.WriteResult[[]gitcode.Issue]{Record: []gitcode.Issue{{ID: "4119896", Number: 16, Title: "Issue 16", State: "open"}}, Confirmed: true, Operation: "LinkPRIssue", RemoteID: "7", RemoteNumber: 7, ResponseHash: "relation-rev", ConfirmedAt: created},
+	}
+	svc := NewWithClient(store, client)
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.writeCredentialPresent = true
+
+	result, err := svc.LinkPRIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 7, IssueNumber: 16, Strategy: "auto", IdempotencyKey: "link-pr-issue-key"})
+	if err != nil {
+		t.Fatalf("LinkPRIssue live returned error: %v", err)
+	}
+	if result.Status != "succeeded" || result.RemoteID != "7" || result.RemoteNumber != 7 || result.RemoteRevision != "relation-rev" {
+		t.Fatalf("result=%#v", result)
+	}
+	if client.linkPRIssueCalls != 1 || client.prCalls != 0 || client.updatePRCalls != 0 {
+		t.Fatalf("linkCalls=%d prCalls=%d updateCalls=%d", client.linkPRIssueCalls, client.prCalls, client.updatePRCalls)
+	}
+	if client.lastLinkPRIssueRequest.Number != 7 || client.lastLinkPRIssueRequest.IssueNumber != 16 {
+		t.Fatalf("link request=%#v", client.lastLinkPRIssueRequest)
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", "PR-7")
+	if err != nil {
+		t.Fatalf("PR link cache refresh missing: %v", err)
+	}
+	if record.RemoteType != "pull_request" || record.RemoteID != "7" || record.RemoteRevision != "relation-rev" {
+		t.Fatalf("record=%#v", record)
+	}
+}
+
+func TestScenario004MCPWriteLifecycleLinkPRIssueUnsupportedFallsBackToDescription(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	created := time.Date(2026, 6, 27, 12, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		prsByNumber:    map[int]gitcode.PullRequest{7: {ID: "9001", Number: 7, Title: "PR", Body: "existing body", State: "open", CreatedAt: created, UpdatedAt: created}},
+		updatePRResult: gitcode.WriteResult[gitcode.PullRequest]{Record: gitcode.PullRequest{ID: "9001", Number: 7, Title: "PR", Body: "existing body\n\n<!-- gitcode-mcp-link:issue:16 -->\nFixes #16", State: "open", CreatedAt: created, UpdatedAt: created}, Confirmed: true, Operation: "UpdatePR", RemoteID: "9001", RemoteNumber: 7, ConfirmedAt: created},
+		errors:         []error{gitcode.ErrUnsupportedCapability{CapabilityKey: "pr_issue_relation", Message: "unsupported in test"}},
+	}
+	svc := NewWithClient(store, client)
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.writeCredentialPresent = true
+
+	result, err := svc.LinkPRIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 7, IssueNumber: 16, IdempotencyKey: "link-pr-issue-key"})
+	if err != nil {
+		t.Fatalf("LinkPRIssue live returned error: %v", err)
+	}
+	if result.Status != "succeeded" || client.linkPRIssueCalls != 1 || client.prCalls != 1 || client.updatePRCalls != 1 {
+		t.Fatalf("result=%#v linkCalls=%d prCalls=%d updateCalls=%d", result, client.linkPRIssueCalls, client.prCalls, client.updatePRCalls)
+	}
+	if strings.Count(client.lastUpdatePRRequest.Body, "gitcode-mcp-link:issue:16") != 1 || !strings.Contains(client.lastUpdatePRRequest.Body, "Fixes #16") {
+		t.Fatalf("link body=%q", client.lastUpdatePRRequest.Body)
+	}
+}
+
+func TestScenario004MCPWriteLifecycleLinkPRIssueForcedDescriptionFallback(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)
 	if err != nil {
@@ -725,15 +797,12 @@ func TestScenario016MCPWriteLifecycleLinkPRIssueDescriptionFallback(t *testing.T
 	svc.providerMode = gitcode.ProviderModeLive
 	svc.writeCredentialPresent = true
 
-	result, err := svc.LinkPRIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 7, IssueNumber: 16, IdempotencyKey: "link-pr-issue-key"})
+	result, err := svc.LinkPRIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 7, IssueNumber: 16, Strategy: "description_fallback", IdempotencyKey: "link-pr-issue-key-fallback"})
 	if err != nil {
 		t.Fatalf("LinkPRIssue live returned error: %v", err)
 	}
-	if result.Status != "succeeded" || client.prCalls != 1 || client.updatePRCalls != 1 {
-		t.Fatalf("result=%#v prCalls=%d updateCalls=%d", result, client.prCalls, client.updatePRCalls)
-	}
-	if strings.Count(client.lastUpdatePRRequest.Body, "gitcode-mcp-link:issue:16") != 1 || !strings.Contains(client.lastUpdatePRRequest.Body, "Fixes #16") {
-		t.Fatalf("link body=%q", client.lastUpdatePRRequest.Body)
+	if result.Status != "succeeded" || client.linkPRIssueCalls != 0 || client.prCalls != 1 || client.updatePRCalls != 1 {
+		t.Fatalf("result=%#v linkCalls=%d prCalls=%d updateCalls=%d", result, client.linkPRIssueCalls, client.prCalls, client.updatePRCalls)
 	}
 }
 
@@ -2386,6 +2455,7 @@ type fakeGitCodeClient struct {
 	createIssueCommentCalls  int
 	createPRCalls            int
 	updatePRCalls            int
+	linkPRIssueCalls         int
 	createPRCommentCalls     int
 	createWikiPageCalls      int
 	addLabelCalls            int
@@ -2394,6 +2464,7 @@ type fakeGitCodeClient struct {
 	createIssueCommentResult gitcode.WriteResult[gitcode.Comment]
 	createPRResult           gitcode.WriteResult[gitcode.PullRequest]
 	updatePRResult           gitcode.WriteResult[gitcode.PullRequest]
+	linkPRIssueResult        gitcode.WriteResult[[]gitcode.Issue]
 	createPRCommentResult    gitcode.WriteResult[gitcode.PRComment]
 	createWikiPageResult     gitcode.WriteResult[gitcode.WikiPage]
 	addLabelResult           gitcode.WriteResult[gitcode.Issue]
@@ -2416,6 +2487,7 @@ type fakeGitCodeClient struct {
 	lastCreateIssueRequest   gitcode.CreateIssueRequest
 	lastCreatePRRequest      gitcode.CreatePRRequest
 	lastUpdatePRRequest      gitcode.UpdatePRRequest
+	lastLinkPRIssueRequest   gitcode.LinkPRIssueRequest
 	lastCreatePRCommentReq   gitcode.CreatePRCommentRequest
 	lastWriteOptions         gitcode.WriteOptions
 }
@@ -2577,6 +2649,15 @@ func (f *fakeGitCodeClient) UpdatePR(_ context.Context, req gitcode.UpdatePRRequ
 		return gitcode.WriteResult[gitcode.PullRequest]{}, err
 	}
 	return f.updatePRResult, nil
+}
+func (f *fakeGitCodeClient) LinkPRIssue(_ context.Context, req gitcode.LinkPRIssueRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[[]gitcode.Issue], error) {
+	f.linkPRIssueCalls++
+	f.lastLinkPRIssueRequest = req
+	f.lastWriteOptions = opts
+	if err := f.nextError(); err != nil {
+		return gitcode.WriteResult[[]gitcode.Issue]{}, err
+	}
+	return f.linkPRIssueResult, nil
 }
 func (f *fakeGitCodeClient) CreateWikiPage(context.Context, gitcode.CreateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
 	f.createWikiPageCalls++

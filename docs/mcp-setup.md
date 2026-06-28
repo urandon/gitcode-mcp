@@ -169,12 +169,12 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 | `create_pr` | Create a live pull request through the audited write lifecycle |
 | `update_pr` | Update live pull request metadata through the audited write lifecycle |
 | `add_pr_comment` | Add a live pull request comment through the audited write lifecycle |
-| `link_pr_issue` | Link a pull request to an issue through the deterministic description fallback |
+| `link_pr_issue` | Link a pull request to an issue through the GitCode relation API with fallback |
 | `index_repo` | Build or refresh the local cache index |
 | `auth_status` | Report redacted credential presence and source metadata |
 | `doctor` | Report structured server health diagnostics |
 
-MCP write tools require `write_mode: "live"` and use the same service write path as CLI live writes: idempotency keys, provider confirmation, audit records, cache refresh, typed errors, and public-safe diagnostics. `link_pr_issue` currently uses a deterministic PR-body marker plus `Fixes #N` fallback when an explicit GitCode relation endpoint is not available.
+MCP write tools require `write_mode: "live"` and use the same service write path as CLI live writes: idempotency keys, provider confirmation, audit records, cache refresh, typed errors, and public-safe diagnostics. `link_pr_issue` defaults to `strategy: "auto"`, which first calls the GitCode PR issue relation endpoint. If that endpoint is unsupported, it falls back to a deterministic PR-body marker plus `Fixes #N`. Use `strategy: "description_fallback"` to force the fallback behavior.
 
 ### Correlation IDs
 

@@ -1025,6 +1025,34 @@ func TestScenario016PRLifecycleWrites(t *testing.T) {
 			t.Fatalf("unexpected PR read-back result: %+v", result)
 		}
 	})
+
+	t.Run("link-pr-issue", func(t *testing.T) {
+		var seenBody string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != linkPRIssueEndpoint("example-owner", "example-repo", 7) {
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			seenBody = string(body)
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `[{"id":4119896,"number":"16","title":"Issue 16","state":"open"}]`)
+		}))
+		defer server.Close()
+
+		result, err := newTestClient(t, server.URL, Config{}).LinkPRIssue(context.Background(), LinkPRIssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, IssueNumber: 16}, WriteOptions{IdempotencyKey: "key-link-pr-issue"})
+		if err != nil {
+			t.Fatalf("LinkPRIssue returned error: %v", err)
+		}
+		if seenBody != "[16]" {
+			t.Fatalf("request body = %s", seenBody)
+		}
+		if !result.Confirmed || result.Operation != "LinkPRIssue" || result.RemoteID != "7" || result.RemoteNumber != 7 || len(result.Record) != 1 || result.Record[0].Number != 16 {
+			t.Fatalf("unexpected PR issue link result: %+v", result)
+		}
+	})
 }
 
 func TestWriteNegativeScenariosDoNotConfirm(t *testing.T) {

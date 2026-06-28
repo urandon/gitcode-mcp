@@ -83,6 +83,7 @@ func (s *Server) callLinkPRIssue(ctx context.Context, id *json.RawMessage, args 
 		req := writeRequestFromArgs(a)
 		req.Number = a.PRNumber
 		req.IssueNumber = a.IssueNumber
+		req.Strategy = strings.TrimSpace(a.Strategy)
 		return req
 	})
 }
@@ -101,8 +102,9 @@ func (s *Server) callWriteTool(ctx context.Context, id *json.RawMessage, args js
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "write_mode must be live"})
 		return
 	}
-	if strings.TrimSpace(a.Strategy) != "" && strings.TrimSpace(a.Strategy) != "description_fallback" {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "strategy must be description_fallback"})
+	strategy := strings.TrimSpace(a.Strategy)
+	if strategy != "" && strategy != "auto" && strategy != "description_fallback" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "strategy must be auto or description_fallback"})
 		return
 	}
 	result, err := handler(ctx, build(a))

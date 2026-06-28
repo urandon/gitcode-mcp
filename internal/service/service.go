@@ -167,6 +167,10 @@ func (sanitizedFixtureClient) UpdatePR(context.Context, gitcode.UpdatePRRequest,
 	return gitcode.WriteResult[gitcode.PullRequest]{}, gitcode.FixtureReadOnlyError("UpdatePR")
 }
 
+func (sanitizedFixtureClient) LinkPRIssue(context.Context, gitcode.LinkPRIssueRequest, gitcode.WriteOptions) (gitcode.WriteResult[[]gitcode.Issue], error) {
+	return gitcode.WriteResult[[]gitcode.Issue]{}, gitcode.FixtureReadOnlyError("LinkPRIssue")
+}
+
 func (sanitizedFixtureClient) GetWikiPage(context.Context, gitcode.WikiPageRequest) (gitcode.WikiPage, error) {
 	now := fixtureNow()
 	return gitcode.WikiPage{Slug: "Home", Title: "Fixture Wiki", Body: "# Wiki\n\nremote fixture wiki body for offline search test", Revision: "rev-home", CreatedAt: now, UpdatedAt: now}, nil
@@ -3014,16 +3018,20 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 		}
 		return s.prCommentWriteGraph(ctx, route.RepoID, req.Number, result.Record, result, now)
 	case "link-pr-issue":
-		pr, err := s.client.GetPR(ctx, gitcode.PRRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number})
+		if strings.TrimSpace(req.Strategy) != "description_fallback" {
+			result, err := s.client.LinkPRIssue(ctx, gitcode.LinkPRIssueRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, IssueNumber: req.IssueNumber}, opts)
+			if err == nil {
+				return s.prIssueLinkWriteGraph(ctx, route.RepoID, req.Number, req.IssueNumber, result, now)
+			}
+			if !isPRIssueRelationUnsupported(err) {
+				return writeConfirmation{}, cache.RecordGraph{}, err
+			}
+		}
+		confirmation, graph, err := s.linkPRIssueDescriptionFallback(ctx, route, req, opts, now)
 		if err != nil {
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
-		body := linkPRIssueBody(pr.Body, req.IssueNumber)
-		result, err := s.client.UpdatePR(ctx, gitcode.UpdatePRRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, Body: body}, opts)
-		if err != nil {
-			return writeConfirmation{}, cache.RecordGraph{}, err
-		}
-		return s.pullRequestWriteGraph(ctx, route.RepoID, result.Record, result, now)
+		return confirmation, graph, nil
 	case "add-label":
 		return writeConfirmation{}, cache.RecordGraph{}, gitcode.ErrUnsupportedCapability{
 			CapabilityKey: "add_label",
@@ -3194,6 +3202,40 @@ func (s *Service) prCommentWriteGraph(ctx context.Context, repoID string, number
 	return writeConfirmation{confirmed: result.Confirmed, remoteID: remoteCommentID, remoteNumber: comment.PRNumber, remoteRevision: revision, message: result.Operation, completedAt: firstNonZeroTime(result.ConfirmedAt, now)}, graph, nil
 }
 
+func (s *Service) prIssueLinkWriteGraph(ctx context.Context, repoID string, prNumber int, issueNumber int, result gitcode.WriteResult[[]gitcode.Issue], now time.Time) (writeConfirmation, cache.RecordGraph, error) {
+	remoteID := strconv.Itoa(firstNonZeroInt(result.RemoteNumber, prNumber))
+	stableID := s.resolveOrFallback(ctx, repoID, "pull_request", remoteID, fallbackSourceID("pull_request", remoteID))
+	record, err := s.store.GetRecord(ctx, repoID, stableID)
+	if err != nil {
+		record = cache.Record{RepoID: repoID, ID: stableID, Type: "pull_request", Path: "pulls/" + remoteID + ".md", Title: "Pull request " + remoteID, Status: "open", ContentHash: contentHash(remoteID), Provenance: cache.ProvenanceRemote, RemoteType: "pull_request", RemoteID: remoteID, CreatedAt: now, UpdatedAt: now}
+	}
+	revision := firstNonEmptyString(result.RemoteRevision, result.ResponseHash, contentHash(remoteID, strconv.Itoa(issueNumber), result.Record))
+	record.RemoteType = "pull_request"
+	record.RemoteID = remoteID
+	record.RemoteRevision = revision
+	record.UpdatedAt = now
+	graph := cache.RecordGraph{Record: record, Identities: []cache.Identity{{RepoID: repoID, SourceID: stableID, AliasType: "pull_request", Alias: remoteID, Remote: cache.RemoteAlias{Type: "pull_request", ID: remoteID}}}, RemoteRevisions: []cache.RemoteRevision{{RepoID: repoID, RecordID: stableID, RemoteType: "pull_request", RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}}
+	return writeConfirmation{confirmed: result.Confirmed, remoteID: remoteID, remoteNumber: prNumber, remoteRevision: revision, message: result.Operation, completedAt: firstNonZeroTime(result.ConfirmedAt, now)}, graph, nil
+}
+
+func (s *Service) linkPRIssueDescriptionFallback(ctx context.Context, route RepositoryRoute, req WriteCommandRequest, opts gitcode.WriteOptions, now time.Time) (writeConfirmation, cache.RecordGraph, error) {
+	pr, err := s.client.GetPR(ctx, gitcode.PRRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number})
+	if err != nil {
+		return writeConfirmation{}, cache.RecordGraph{}, err
+	}
+	body := linkPRIssueBody(pr.Body, req.IssueNumber)
+	result, err := s.client.UpdatePR(ctx, gitcode.UpdatePRRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, Body: body}, opts)
+	if err != nil {
+		return writeConfirmation{}, cache.RecordGraph{}, err
+	}
+	return s.pullRequestWriteGraph(ctx, route.RepoID, result.Record, result, now)
+}
+
+func isPRIssueRelationUnsupported(err error) bool {
+	var unsupported gitcode.ErrUnsupportedCapability
+	return errors.As(err, &unsupported) && unsupported.CapabilityKey == "pr_issue_relation"
+}
+
 func recordGraphFromSourceGraph(graph cache.SourceGraph) cache.RecordGraph {
 	record := cache.Record{RepoID: graph.Source.RepoID, ID: graph.Source.ID, Type: graph.Source.Kind, Path: graph.Source.Path, Title: graph.Source.Title, Body: graph.Source.Body, Status: graph.Source.Status, Labels: graph.Source.Labels, ContentHash: graph.Source.ContentHash, Provenance: cache.ProvenanceRemote, CreatedAt: graph.Source.CreatedAt, UpdatedAt: graph.Source.UpdatedAt}
 	out := cache.RecordGraph{Record: record, Comments: graph.Comments, Identities: graph.Identities, Links: graph.Links, SyncEvents: graph.SyncEvents}
@@ -3237,7 +3279,8 @@ func writeIdempotency(command string, req WriteCommandRequest) (string, string) 
 		State       string
 		Label       string
 		Labels      []string
-	}{command, req.RepoID, req.ID, req.Number, req.IssueNumber, req.Slug, req.Path, req.Sha, strings.TrimSpace(req.Title), req.Body, strings.TrimSpace(req.Head), strings.TrimSpace(req.Base), req.State, strings.TrimSpace(req.Label), req.Labels})
+		Strategy    string
+	}{command, req.RepoID, req.ID, req.Number, req.IssueNumber, req.Slug, req.Path, req.Sha, strings.TrimSpace(req.Title), req.Body, strings.TrimSpace(req.Head), strings.TrimSpace(req.Base), req.State, strings.TrimSpace(req.Label), req.Labels, strings.TrimSpace(req.Strategy)})
 	sum := sha256.Sum256(payload)
 	fingerprint := hex.EncodeToString(sum[:])
 	if strings.TrimSpace(req.IdempotencyKey) != "" {

@@ -1172,7 +1172,7 @@ func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 	call("create_pr", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "title": "PR", "body": "body", "head": "topic", "base": "main", "idempotency_key": "create-pr-key"})
 	call("update_pr", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "body": "new body", "idempotency_key": "update-pr-key"})
 	call("add_pr_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "body": "tested", "idempotency_key": "pr-comment-key"})
-	call("link_pr_issue", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "pr_number": 7, "issue_number": 16, "strategy": "description_fallback", "idempotency_key": "link-key"})
+	call("link_pr_issue", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "pr_number": 7, "issue_number": 16, "strategy": "auto", "idempotency_key": "link-key"})
 
 	assertReq := func(command string) service.WriteCommandRequest {
 		t.Helper()
@@ -1200,7 +1200,7 @@ func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 	if req := assertReq("add-pr-comment"); req.Number != 7 || req.Body != "tested" {
 		t.Fatalf("add-pr-comment req=%#v", req)
 	}
-	if req := assertReq("link-pr-issue"); req.Number != 7 || req.IssueNumber != 16 {
+	if req := assertReq("link-pr-issue"); req.Number != 7 || req.IssueNumber != 16 || req.Strategy != "auto" {
 		t.Fatalf("link-pr-issue req=%#v", req)
 	}
 
