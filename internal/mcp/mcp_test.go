@@ -1216,6 +1216,44 @@ func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 	wg.Wait()
 }
 
+type prDiscussionsSpyService struct {
+	serviceInterface
+	req service.PRDiscussionRequest
+}
+
+func (s *prDiscussionsSpyService) ListPRDiscussions(_ context.Context, req service.PRDiscussionRequest) (service.PRDiscussionsResult, error) {
+	s.req = req
+	resolved := false
+	return service.PRDiscussionsResult{RepoID: req.RepoID, Number: req.Number, UnresolvedOnly: req.UnresolvedOnly, Discussions: []service.PRDiscussion{{ID: "D7", Kind: "inline", Resolved: &resolved, Comments: []service.PRReviewComment{{ID: "301", Body: "review", Author: "alice"}}}}, GeneratedAt: time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC)}, nil
+}
+
+func TestMCPListPRDiscussionsDelegatesToService(t *testing.T) {
+	spy := &prDiscussionsSpyService{}
+	srv, r, w, stderr := newPipeServerWithToolAccess(spy, ToolAccessRead)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); _ = srv.Serve() }()
+
+	b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": "pr-discussions", "method": "tools/call", "params": map[string]any{"name": "list_pr_discussions", "arguments": map[string]any{"repo_id": "fixture-a", "number": 7, "unresolved_only": true}}})
+	_, _ = r.Write(append(b, '\n'))
+	line, err := readLine(w)
+	if err != nil {
+		t.Fatalf("read response: %v (stderr: %s)", err, stderr.String())
+	}
+	result := decodeToolCallResult(t, line)
+	var discussions service.PRDiscussionsResult
+	decodeStructured(t, result, &discussions)
+	if spy.req.RepoID != "fixture-a" || spy.req.Number != 7 || !spy.req.UnresolvedOnly {
+		t.Fatalf("request=%+v", spy.req)
+	}
+	if len(discussions.Discussions) != 1 || discussions.Discussions[0].ID != "D7" || discussions.Discussions[0].Comments[0].Author != "alice" {
+		t.Fatalf("discussions=%+v", discussions)
+	}
+
+	_ = r.Close()
+	wg.Wait()
+}
+
 type syncLiveBoundsSpyService struct {
 	serviceInterface
 	bulkIssuesCalls []service.BulkSyncRequest

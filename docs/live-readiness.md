@@ -118,6 +118,10 @@ gitcode-mcp create-pr --repo "YOUR_REPO" --idempotency-key "ik-pr-001" --title "
 
 The MCP server exposes the same audited live-write lifecycle for agent workflows that previously needed shell or direct REST fallback:
 
+| MCP read tool | Use |
+|---|---|
+| `list_pr_discussions` | List cached PR review discussions, including unresolved-only filtering and inline path/line metadata when available |
+
 | MCP tool | Use |
 |---|---|
 | `add_issue_comment` | Add a proposal or status comment to an issue |

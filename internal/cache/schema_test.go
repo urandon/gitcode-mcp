@@ -178,7 +178,7 @@ func TestInitialMigration(t *testing.T) {
 	defer store.Close()
 
 	tables := tableNames(t, ctx, store.db)
-	for _, want := range []string{"schema_version", "repos", "repo_aliases", "sources", "identity_map", "links", "remote_revisions", "sync_events", "conflicts", "chunks", "records", "record_comments", "audit_trail", "cache_confirmations", "snapshots", "snapshot_chunks"} {
+	for _, want := range []string{"schema_version", "repos", "repo_aliases", "sources", "identity_map", "links", "remote_revisions", "sync_events", "conflicts", "chunks", "records", "record_comments", "pr_review_comments", "audit_trail", "cache_confirmations", "snapshots", "snapshot_chunks"} {
 		if !tables[want] {
 			t.Fatalf("missing table %s; tables=%v", want, tables)
 		}
@@ -187,7 +187,7 @@ func TestInitialMigration(t *testing.T) {
 		t.Fatalf("FTS enabled store missing fts_index table")
 	}
 	indexes := indexNames(t, ctx, store.db)
-	for _, want := range []string{"idx_repo_aliases_repo", "idx_sources_kind_status", "idx_identity_source", "idx_identity_remote", "idx_links_target", "idx_sync_events_source", "idx_chunks_source", "idx_records_type_status", "idx_records_remote", "idx_records_remote_unique", "idx_record_comments_record", "idx_audit_trail_record", "idx_audit_trail_idempotency_unique", "idx_cache_confirmations_record", "idx_cache_confirmations_remote", "idx_snapshot_chunks_record"} {
+	for _, want := range []string{"idx_repo_aliases_repo", "idx_sources_kind_status", "idx_identity_source", "idx_identity_remote", "idx_links_target", "idx_sync_events_source", "idx_chunks_source", "idx_records_type_status", "idx_records_remote", "idx_records_remote_unique", "idx_record_comments_record", "idx_pr_review_comments_pr", "idx_pr_review_comments_discussion", "idx_audit_trail_record", "idx_audit_trail_idempotency_unique", "idx_cache_confirmations_record", "idx_cache_confirmations_remote", "idx_snapshot_chunks_record"} {
 		if !indexes[want] {
 			t.Fatalf("missing index %s; indexes=%v", want, indexes)
 		}

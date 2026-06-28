@@ -38,6 +38,7 @@ type serviceInterface interface {
 	BulkSyncPullRequests(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncPRComments(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncAll(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	ListPRDiscussions(context.Context, service.PRDiscussionRequest) (service.PRDiscussionsResult, error)
 	UpdateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	AddComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdateComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
@@ -466,6 +467,11 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id. Omit for nothing-bound status."}}},
 	},
 	{
+		Name:        "list_pr_discussions",
+		Description: "List cached pull request review discussions grouped by discussion thread.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "unresolved_only": {Type: "boolean", Description: "Only include unresolved or unknown-resolution discussions."}}, Required: []string{"repo_id", "number"}},
+	},
+	{
 		Name:        "sync_live",
 		Description: "Synchronize selected live collection records into the cache.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "issues": {Type: "boolean", Description: "Sync issues."}, "wiki": {Type: "boolean", Description: "Sync wiki pages."}, "comments": {Type: "boolean", Description: "Sync supported comments."}, "pulls": {Type: "boolean", Description: "Sync pull requests."}, "remote_alias": {Type: "string", Description: "Specific remote alias for current sync surface."}, "idempotency_key": {Type: "string", Description: "Idempotency key."}, "max_pages": {Type: "integer", Description: "Maximum pages to sync.", Minimum: float64Ptr(1)}, "max_records": {Type: "integer", Description: "Maximum records to sync.", Minimum: float64Ptr(1)}, "per_page": {Type: "integer", Description: "Records per page.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 25.0}}, Required: []string{"repo_id"}},
@@ -684,6 +690,7 @@ var toolListOrder = []string{
 	"export_snapshot",
 	"diff_snapshot",
 	"repo_status",
+	"list_pr_discussions",
 	"sync_live",
 	"add_issue_comment",
 	"update_issue_comment",
@@ -732,6 +739,7 @@ func (s *Server) toolRegistry() toolRegistry {
 	registerTool(registry, "export_snapshot", s.callExportSnapshot)
 	registerTool(registry, "diff_snapshot", s.callDiffSnapshot)
 	registerTool(registry, "repo_status", s.callRepoStatus)
+	registerTool(registry, "list_pr_discussions", s.callListPRDiscussions)
 	registerTool(registry, "sync_live", s.callSyncLive)
 	registerTool(registry, "add_issue_comment", s.callAddIssueComment)
 	registerTool(registry, "update_issue_comment", s.callUpdateIssueComment)
@@ -1168,6 +1176,35 @@ func (s *Server) callCacheStatus(ctx context.Context, id *json.RawMessage, args 
 		return
 	}
 	text := fmt.Sprintf("repo_id=%s records=%d chunks=%d journal=%s", result.RepoID, result.Records, result.Chunks, result.JournalMode)
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+type listPRDiscussionsArgs struct {
+	RepoID         string `json:"repo_id"`
+	Number         int    `json:"number"`
+	UnresolvedOnly bool   `json:"unresolved_only,omitempty"`
+}
+
+func (s *Server) callListPRDiscussions(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a listPRDiscussionsArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if a.RepoID == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+		return
+	}
+	if a.Number <= 0 {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "positive pull request number is required"})
+		return
+	}
+	result, err := s.svc.ListPRDiscussions(ctx, service.PRDiscussionRequest{RepoID: a.RepoID, Number: a.Number, UnresolvedOnly: a.UnresolvedOnly})
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	text := fmt.Sprintf("repo_id=%s pr=%d discussions=%d", result.RepoID, result.Number, len(result.Discussions))
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 }
 

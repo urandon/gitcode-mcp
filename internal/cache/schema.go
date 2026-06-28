@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 11
+const currentSchemaVersion = 12
 
 type VersionCompatibility struct {
 	DetectedVersion int
@@ -135,6 +135,7 @@ var migrations = []migration{
 	{version: 9, apply: applyAuditConfirmationsMigration},
 	{version: 10, apply: applySourceOriginProvenanceMigration},
 	{version: 11, apply: applyRecordFixtureLiveProvenanceMigration},
+	{version: 12, apply: applyPRReviewCommentsMigration},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB, ftsAvailable bool) error {
@@ -665,6 +666,41 @@ func applyRecordFixtureLiveProvenanceMigration(ctx context.Context, tx *sql.Tx, 
 		`CREATE INDEX IF NOT EXISTS idx_records_remote ON records(repo_id, remote_type, remote_id)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_records_remote_unique ON records(repo_id, remote_type, remote_id) WHERE remote_type <> '' AND remote_id <> ''`,
 	} {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyPRReviewCommentsMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS pr_review_comments (
+	repo_id TEXT NOT NULL,
+	source_id TEXT NOT NULL,
+	pr_number INTEGER NOT NULL,
+	comment_id TEXT NOT NULL,
+	discussion_id TEXT NOT NULL DEFAULT '',
+	review_kind TEXT NOT NULL DEFAULT '',
+	author TEXT NOT NULL DEFAULT '',
+	path TEXT NOT NULL DEFAULT '',
+	line INTEGER NOT NULL DEFAULT 0,
+	start_line INTEGER NOT NULL DEFAULT 0,
+	end_line INTEGER NOT NULL DEFAULT 0,
+	position INTEGER NOT NULL DEFAULT 0,
+	original_position INTEGER NOT NULL DEFAULT 0,
+	resolved TEXT NOT NULL DEFAULT '',
+	resolvable TEXT NOT NULL DEFAULT '',
+	parent_id TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, source_id),
+	FOREIGN KEY(repo_id, source_id) REFERENCES sources(repo_id, id) ON DELETE CASCADE
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_pr_review_comments_pr ON pr_review_comments(repo_id, pr_number)`,
+		`CREATE INDEX IF NOT EXISTS idx_pr_review_comments_discussion ON pr_review_comments(repo_id, pr_number, discussion_id)`,
+	}
+	for _, stmt := range statements {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return err
 		}

@@ -497,26 +497,53 @@ func (p *PullRequest) UnmarshalJSON(data []byte) error {
 }
 
 type PRComment struct {
-	Kind         string    `json:"-"`
-	ID           string    `json:"id"`
-	Body         string    `json:"body"`
-	Author       string    `json:"author"`
-	DiscussionID string    `json:"discussion_id"`
-	PRNumber     int       `json:"-"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	Kind             string    `json:"-"`
+	ID               string    `json:"id"`
+	Body             string    `json:"body"`
+	Author           string    `json:"author"`
+	DiscussionID     string    `json:"discussion_id"`
+	ReviewKind       string    `json:"review_kind,omitempty"`
+	Path             string    `json:"path,omitempty"`
+	Line             int       `json:"line,omitempty"`
+	StartLine        int       `json:"start_line,omitempty"`
+	EndLine          int       `json:"end_line,omitempty"`
+	Position         int       `json:"position,omitempty"`
+	OriginalPosition int       `json:"original_position,omitempty"`
+	Resolved         *bool     `json:"resolved,omitempty"`
+	Resolvable       *bool     `json:"resolvable,omitempty"`
+	ParentID         string    `json:"parent_id,omitempty"`
+	PRNumber         int       `json:"-"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 func (c *PRComment) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		ID           any             `json:"id"`
-		NoteID       any             `json:"note_id"`
-		Body         string          `json:"body"`
-		Author       string          `json:"author"`
-		User         json.RawMessage `json:"user"`
-		DiscussionID any             `json:"discussion_id"`
-		CreatedAt    string          `json:"created_at"`
-		UpdatedAt    string          `json:"updated_at"`
+		ID               any             `json:"id"`
+		NoteID           any             `json:"note_id"`
+		Body             string          `json:"body"`
+		Author           string          `json:"author"`
+		User             json.RawMessage `json:"user"`
+		DiscussionID     any             `json:"discussion_id"`
+		Type             string          `json:"type"`
+		Kind             string          `json:"kind"`
+		NoteableType     string          `json:"noteable_type"`
+		Path             string          `json:"path"`
+		FilePath         string          `json:"file_path"`
+		NewPath          string          `json:"new_path"`
+		Line             any             `json:"line"`
+		NewLine          any             `json:"new_line"`
+		StartLine        any             `json:"start_line"`
+		EndLine          any             `json:"end_line"`
+		Position         any             `json:"position"`
+		OriginalPosition any             `json:"original_position"`
+		Resolved         *bool           `json:"resolved"`
+		Resolvable       *bool           `json:"resolvable"`
+		ParentID         any             `json:"parent_id"`
+		InReplyToID      any             `json:"in_reply_to_id"`
+		ReplyID          any             `json:"reply_id"`
+		CreatedAt        string          `json:"created_at"`
+		UpdatedAt        string          `json:"updated_at"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -537,7 +564,37 @@ func (c *PRComment) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
-	*c = PRComment{Kind: "pr_comment", ID: id, Body: raw.Body, Author: firstNonEmpty(raw.Author, decodeActor(raw.User)), DiscussionID: discussionID, CreatedAt: created, UpdatedAt: updated}
+	line, err := decodeOptionalInt(firstNonNil(raw.Line, raw.NewLine))
+	if err != nil {
+		return err
+	}
+	startLine, err := decodeOptionalInt(raw.StartLine)
+	if err != nil {
+		return err
+	}
+	endLine, err := decodeOptionalInt(raw.EndLine)
+	if err != nil {
+		return err
+	}
+	position, err := decodeOptionalInt(raw.Position)
+	if err != nil {
+		return err
+	}
+	originalPosition, err := decodeOptionalInt(raw.OriginalPosition)
+	if err != nil {
+		return err
+	}
+	parentID, err := decodeOptionalID(firstNonNil(raw.ParentID, raw.InReplyToID, raw.ReplyID))
+	if err != nil {
+		return err
+	}
+	path := firstNonEmpty(raw.Path, raw.FilePath, raw.NewPath)
+	reviewKind := "general"
+	rawKind := strings.ToLower(firstNonEmpty(raw.Kind, raw.Type, raw.NoteableType))
+	if path != "" || line > 0 || position > 0 || strings.Contains(rawKind, "inline") || strings.Contains(rawKind, "diff") {
+		reviewKind = "inline"
+	}
+	*c = PRComment{Kind: "pr_comment", ID: id, Body: raw.Body, Author: firstNonEmpty(raw.Author, decodeActor(raw.User)), DiscussionID: discussionID, ReviewKind: reviewKind, Path: path, Line: line, StartLine: startLine, EndLine: endLine, Position: position, OriginalPosition: originalPosition, Resolved: raw.Resolved, Resolvable: raw.Resolvable, ParentID: parentID, CreatedAt: created, UpdatedAt: updated}
 	return nil
 }
 

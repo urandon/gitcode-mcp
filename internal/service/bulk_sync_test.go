@@ -428,6 +428,72 @@ func TestBulkSyncPullRequestsAndCommentsCreatesSearchableSources(t *testing.T) {
 	}
 }
 
+func TestListPRDiscussionsGroupsRepliesAndFiltersUnresolved(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 24, 9, 0, 0, 0, time.UTC)
+	resolvedFalse := false
+	resolvedTrue := true
+	client := &fakeGitCodeClient{
+		listPRPages: []gitcode.Page[gitcode.PullRequest]{
+			{Items: []gitcode.PullRequest{{ID: "9001", Number: 7, Title: "Review target", Body: "body", State: "open", CreatedAt: base, UpdatedAt: base}}},
+		},
+		prCommentsByPR: map[int][]gitcode.PRComment{
+			7: {
+				{ID: "301", Body: "inline root", Author: "alice", DiscussionID: "D7", ReviewKind: "inline", Path: "internal/service/service.go", Line: 42, Resolved: &resolvedFalse, ParentID: "", PRNumber: 7, CreatedAt: base, UpdatedAt: base},
+				{ID: "302", Body: "reply", Author: "bob", DiscussionID: "D7", ReviewKind: "inline", Path: "internal/service/service.go", Line: 42, Resolved: &resolvedFalse, ParentID: "301", PRNumber: 7, CreatedAt: base.Add(time.Minute), UpdatedAt: base.Add(time.Minute)},
+				{ID: "303", Body: "general note", Author: "carol", ReviewKind: "general", Resolved: &resolvedTrue, PRNumber: 7, CreatedAt: base.Add(2 * time.Minute), UpdatedAt: base.Add(2 * time.Minute)},
+			},
+		},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "review-pr", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	if _, err := svc.BulkSyncPullRequests(ctx, BulkSyncRequest{RepoID: "review-pr"}); err != nil {
+		t.Fatalf("BulkSyncPullRequests returned error: %v", err)
+	}
+	if _, err := svc.BulkSyncPRComments(ctx, BulkSyncRequest{RepoID: "review-pr"}); err != nil {
+		t.Fatalf("BulkSyncPRComments returned error: %v", err)
+	}
+	all, err := svc.ListPRDiscussions(ctx, PRDiscussionRequest{RepoID: "review-pr", Number: 7})
+	if err != nil {
+		t.Fatalf("ListPRDiscussions returned error: %v", err)
+	}
+	if len(all.Discussions) != 2 {
+		t.Fatalf("discussions=%+v, want 2 groups", all.Discussions)
+	}
+	inline := all.Discussions[0]
+	if inline.ID != "D7" || inline.Kind != "inline" || inline.Path != "internal/service/service.go" || inline.Line != 42 || len(inline.Comments) != 2 {
+		t.Fatalf("inline discussion=%+v", inline)
+	}
+	if inline.Comments[0].Author != "alice" || inline.Comments[1].ParentID != "301" || inline.Comments[1].Body != "reply" {
+		t.Fatalf("inline comments=%+v", inline.Comments)
+	}
+	general := all.Discussions[1]
+	if general.Kind != "general" || len(general.Comments) != 1 || general.Comments[0].Author != "carol" {
+		t.Fatalf("general discussion=%+v", general)
+	}
+	unresolved, err := svc.ListPRDiscussions(ctx, PRDiscussionRequest{RepoID: "review-pr", Number: 7, UnresolvedOnly: true})
+	if err != nil {
+		t.Fatalf("ListPRDiscussions unresolved returned error: %v", err)
+	}
+	if len(unresolved.Discussions) != 1 || unresolved.Discussions[0].ID != "D7" {
+		t.Fatalf("unresolved discussions=%+v, want D7 only", unresolved.Discussions)
+	}
+	empty, err := svc.ListPRDiscussions(ctx, PRDiscussionRequest{RepoID: "review-pr", Number: 99})
+	if err != nil {
+		t.Fatalf("empty ListPRDiscussions returned error: %v", err)
+	}
+	if len(empty.Discussions) != 0 {
+		t.Fatalf("empty discussions=%+v, want empty", empty.Discussions)
+	}
+}
+
 func TestBulkSyncIssuesListFailureReturnsError(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeGitCodeClient{listIssuesErrors: []error{gitcode.ErrRateLimited{Endpoint: "/issues", RetryAfter: time.Second, Attempts: 1}}}

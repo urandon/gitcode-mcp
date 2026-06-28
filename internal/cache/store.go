@@ -45,6 +45,17 @@ func (s *SQLiteStore) UpsertSourceGraph(ctx context.Context, graph SourceGraph) 
 			return err
 		}
 	}
+	for _, review := range graph.PRReviewComments {
+		if review.RepoID == "" {
+			review.RepoID = graph.Source.RepoID
+		}
+		if review.SourceID == "" {
+			review.SourceID = graph.Source.ID
+		}
+		if err = upsertPRReviewCommentTx(ctx, tx, review); err != nil {
+			return err
+		}
+	}
 	for _, chunk := range graph.Chunks {
 		if chunk.RepoID == "" {
 			chunk.RepoID = graph.Source.RepoID

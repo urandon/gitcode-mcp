@@ -37,6 +37,7 @@ var commands = []string{
 	"recent",
 	"link-check",
 	"stale-index",
+	"pr-discussions", "pr-review-discussions",
 	"sync",
 	"cache",
 	"cache-status",
@@ -83,6 +84,7 @@ type queryService interface {
 	BulkSyncPullRequests(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncPRComments(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncAll(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	ListPRDiscussions(context.Context, service.PRDiscussionRequest) (service.PRDiscussionsResult, error)
 	ResetLiveCache(context.Context, service.ResetLiveCacheRequest) (service.ResetLiveCacheResult, error)
 	CacheStatus(context.Context, service.CacheStatusRequest) (service.CacheStatusResult, error)
 	ExportSnapshot(context.Context, service.ExportSnapshotRequest) (service.ExportSnapshotResult, error)
@@ -168,6 +170,7 @@ type options struct {
 	overwrite      bool
 	redacted       bool
 	runtimeAudit   bool
+	unresolvedOnly bool
 	apiBaseURL     string
 	scopes         string
 	alias          multiFlag
@@ -456,6 +459,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.BoolVar(&opts.overwrite, "overwrite", false, "overwrite existing file")
 	flags.BoolVar(&opts.redacted, "redacted", false, "redact secret values")
 	flags.BoolVar(&opts.runtimeAudit, "runtime-audit", false, "emit runtime audit report")
+	flags.BoolVar(&opts.unresolvedOnly, "unresolved-only", false, "only include unresolved review discussions")
 	flags.StringVar(&opts.apiBaseURL, "api-base-url", "", "repository API base URL")
 	flags.StringVar(&opts.scopes, "scopes", "", "comma-separated repository scopes")
 	flags.Var(&opts.alias, "alias", "repository alias")
@@ -818,6 +822,12 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return 0
+	case "pr-discussions", "pr-review-discussions":
+		result, err := svc.ListPRDiscussions(ctx, service.PRDiscussionRequest{RepoID: opts.repo, Number: opts.number, UnresolvedOnly: opts.unresolvedOnly})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, renderPRDiscussionsText)
 	case "sync":
 		if opts.issues || opts.wiki || opts.pulls || opts.comments || (opts.id == "" && opts.input == "") {
 			req := bulkSyncRequest(opts)
@@ -1218,6 +1228,25 @@ func renderStaleIndexText(w io.Writer, result service.StaleIndexResult) {
 	}
 	if len(result.MissingTargetIDs) > 0 {
 		fmt.Fprintf(w, "missing_target_ids: %s\n", strings.Join(result.MissingTargetIDs, ","))
+	}
+}
+
+func renderPRDiscussionsText(w io.Writer, result service.PRDiscussionsResult) {
+	fmt.Fprintf(w, "repo_id: %s\npull_request: %d\ndiscussions: %d\n", result.RepoID, result.Number, len(result.Discussions))
+	for _, discussion := range result.Discussions {
+		resolved := "unknown"
+		if discussion.Resolved != nil {
+			resolved = fmt.Sprintf("%t", *discussion.Resolved)
+		}
+		location := discussion.Path
+		if discussion.Line > 0 {
+			location = fmt.Sprintf("%s:%d", location, discussion.Line)
+		}
+		fmt.Fprintf(w, "%s %s resolved=%s comments=%d", discussion.ID, discussion.Kind, resolved, len(discussion.Comments))
+		if location != "" {
+			fmt.Fprintf(w, " %s", location)
+		}
+		fmt.Fprintln(w)
 	}
 }
 
@@ -1808,6 +1837,15 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --id ID             stable record id")
 		fmt.Fprintln(w, "  --input ALIAS       remote alias for single-record sync")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "pr-discussions", "pr-review-discussions":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --number N [--unresolved-only]\n\n", command)
+		fmt.Fprintln(w, "List cached pull request review discussions grouped by discussion thread.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --number N          pull request number (required)")
+		fmt.Fprintln(w, "  --unresolved-only   only include unresolved or unknown-resolution discussions")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "cache":
