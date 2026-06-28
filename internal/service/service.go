@@ -1390,7 +1390,7 @@ type collectionWatermark struct {
 }
 
 func (s *Service) collectionWatermark(ctx context.Context, repoID, recordType string) (collectionWatermark, bool, error) {
-	records, err := s.store.ListRecords(ctx, cache.RecordFilter{RepoID: repoID, Type: recordType, Provenance: cache.ProvenanceRemote})
+	records, err := s.store.ListRecords(ctx, cache.RecordFilter{RepoID: repoID, Type: recordType})
 	if err != nil {
 		return collectionWatermark{}, false, err
 	}

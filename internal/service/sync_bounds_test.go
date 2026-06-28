@@ -407,6 +407,47 @@ func TestBulkSyncPullRequestsRecentUpdateStopsAfterWatermark(t *testing.T) {
 	}
 }
 
+func TestBulkSyncPullRequestsRecentUpdateUsesLiveCacheWatermark(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatalf("NewInMemorySQLiteStore returned error: %v", err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "pulls-live-watermark", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatalf("AddRepository returned error: %v", err)
+	}
+	if err := store.UpsertRecordGraph(ctx, cache.RecordGraph{Record: cache.Record{RepoID: "pulls-live-watermark", ID: "PR-8", Type: "pull_request", Path: "pulls/8.md", Title: "Cached", Body: "cached", Status: "open", ContentHash: "cached", Provenance: cache.ProvenanceLive, RemoteType: "pull_request", RemoteID: "8", RemoteRevision: "cached-rev", CreatedAt: base.Add(-time.Hour), UpdatedAt: base}}); err != nil {
+		t.Fatalf("seed record returned error: %v", err)
+	}
+	client := &fakeGitCodeClient{
+		listPRPages: []gitcode.Page[gitcode.PullRequest]{
+			{Items: []gitcode.PullRequest{
+				{ID: "8", Number: 8, Title: "Cached", State: "open", CreatedAt: base.Add(-time.Hour), UpdatedAt: base},
+				{ID: "7", Number: 7, Title: "Old", State: "open", CreatedAt: base.Add(-2 * time.Hour), UpdatedAt: base.Add(-time.Minute)},
+			}, Page: 1, PerPage: 2},
+			{Items: []gitcode.PullRequest{{ID: "6", Number: 6, Title: "Should not list", State: "open", UpdatedAt: base.Add(-2 * time.Minute)}}, Page: 2, PerPage: 2},
+		},
+	}
+	svc := NewWithClient(store, client)
+
+	result, err := svc.BulkSyncPullRequests(ctx, BulkSyncRequest{
+		RepoID:  "pulls-live-watermark",
+		PerPage: 2,
+		Bounds:  &SyncBounds{MaxPages: 10},
+	})
+	if err != nil {
+		t.Fatalf("BulkSyncPullRequests returned error: %v", err)
+	}
+	if len(client.listPRRequests) != 1 {
+		t.Fatalf("ListPRs calls = %d, want 1", len(client.listPRRequests))
+	}
+	if result.StopReason != "watermark" || result.PagesListed != 1 || result.RecordsListed != 2 || result.SkippedByWatermark != 1 {
+		t.Fatalf("summary stop/pages/records/skipped = %q/%d/%d/%d", result.StopReason, result.PagesListed, result.RecordsListed, result.SkippedByWatermark)
+	}
+}
+
 func TestBulkSyncPullRequestsBoundedMaxPages(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 6, 22, 17, 0, 0, 0, time.UTC)
