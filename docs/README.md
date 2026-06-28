@@ -5,6 +5,7 @@ Durable technical documentation for cache-first GitCode MCP/CLI tooling.
 Start with:
 
 - [architecture.md](architecture.md)
+- [component-architecture.md](component-architecture.md)
 - [cache-and-sync-model.md](cache-and-sync-model.md)
 - [gitcode-api-discovery.md](gitcode-api-discovery.md)
 - [operations/mcp-installation-and-secrets.md](operations/mcp-installation-and-secrets.md)

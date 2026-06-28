@@ -33,6 +33,7 @@ For MCP usage, start with [MCP Setup](docs/mcp-setup.md). For live credentials, 
 - Read from cache: [Read Walkthrough](docs/read-walkthrough.md)
 - Perform explicit writes: [Write Walkthrough](docs/write-walkthrough.md)
 - Work with PR/MR flow: [PR/MR Workflow](docs/pr-mr-workflow.md)
+- Review component boundaries: [Component Architecture](docs/component-architecture.md)
 - Configure repositories: [Repository Binding](docs/repo-binding.md)
 - Understand sync behavior: [Cache and Sync Model](docs/cache-and-sync-model.md)
 - Review live API findings: [GitCode API Discovery](docs/gitcode-api-discovery.md)
@@ -43,6 +44,5 @@ For MCP usage, start with [MCP Setup](docs/mcp-setup.md). For live credentials, 
 - `internal/`: cache, service, provider, CLI, MCP, sync, diagnostics, and tests.
 - `docs/`: durable product, architecture, operations, and API documentation.
 - `testdata/`: sanitized fixture inputs.
-- `tests/`: higher-level validation artifacts and scenarios.
 
 Active planning belongs in GitCode issues and pull requests. Historical research or dogfood evidence that is still useful belongs in the GitCode wiki, not in main.

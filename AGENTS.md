@@ -22,10 +22,11 @@ Do not reference non-public source repositories, trackers, wiki names, raw crede
 
 1. `README.md`
 2. `docs/architecture.md`
-3. `docs/cache-and-sync-model.md`
-4. `docs/gitcode-api-discovery.md`
-5. `docs/mcp-setup.md`
-6. the linked GitCode issue or pull request for the current task
+3. `docs/component-architecture.md`
+4. `docs/cache-and-sync-model.md`
+5. `docs/gitcode-api-discovery.md`
+6. `docs/mcp-setup.md`
+7. the linked GitCode issue or pull request for the current task
 
 ## Engineering Defaults
 
@@ -42,7 +43,6 @@ Do not reference non-public source repositories, trackers, wiki names, raw crede
 - `internal/`: package code and unit tests.
 - `docs/`: durable technical docs.
 - `testdata/`: sanitized fixtures.
-- `tests/`: higher-level validation scenarios.
 
 ## Before Committing
 
