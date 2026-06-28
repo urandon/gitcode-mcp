@@ -14,7 +14,22 @@ Include the issue number when the branch exists to close or narrow a tracked tas
 
 ## Creating Pull Requests
 
-Use the MCP write lifecycle when available:
+Use the CLI write lifecycle for shell workflows:
+
+```sh
+gitcode-mcp create-pr \
+  --repo YOUR_REPO \
+  --title "Implement issue relation API" \
+  --body "Summary and tests." \
+  --head codex/issue-4-explicit-pr-issue-relation \
+  --base main \
+  --live \
+  --idempotency-key ik-pr-001
+```
+
+`create-mr` is an equivalent alias for GitCode UI terminology. Both commands use the same audited service write path and report `command=create-pr`.
+
+Use the MCP write lifecycle for agent workflows:
 
 ```json
 {
@@ -28,7 +43,7 @@ Use the MCP write lifecycle when available:
 }
 ```
 
-The lifecycle records idempotency, provider confirmation, audit rows, and cache refresh evidence. Direct REST calls are a fallback only when MCP tools are not available in the current client session.
+Both lifecycles record idempotency, provider confirmation, audit rows, and cache refresh evidence. Direct REST calls are a fallback only when CLI and MCP tools are not available in the current client session.
 
 ## Linking Pull Requests To Issues
 

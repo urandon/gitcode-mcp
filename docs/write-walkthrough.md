@@ -39,6 +39,20 @@ gitcode-mcp update-issue \
 
 Expected: reports what would be updated without making any mutation.
 
+### Create pull request / merge request (dry-run)
+
+```sh
+gitcode-mcp create-pr \
+  --repo example-owner/example-repo \
+  --title "Add cache-first PR flow" \
+  --body "Summary and tests." \
+  --head feature-branch \
+  --base main \
+  --dry-run
+```
+
+Expected: reports what would be created without making any mutation. `create-mr` is an alias for users who follow GitCode UI terminology.
+
 ### Create wiki page (dry-run)
 
 ```sh
@@ -99,6 +113,21 @@ gitcode-mcp update-issue \
 ```
 
 Expected: issue is updated on remote, audit row recorded, cache refreshed.
+
+### Create pull request / merge request (live)
+
+```sh
+gitcode-mcp create-pr \
+  --repo example-owner/example-repo \
+  --title "Add cache-first PR flow" \
+  --body "Summary and tests." \
+  --head feature-branch \
+  --base main \
+  --live \
+  --idempotency-key "pr-create-001"
+```
+
+Expected: pull request is created on remote, audit row recorded, cache refreshed. Use `create-mr` as an equivalent alias when matching GitCode UI language.
 
 ### Create wiki page (live)
 
