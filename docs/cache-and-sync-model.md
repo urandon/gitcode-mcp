@@ -4,7 +4,7 @@
 
 The cache should answer routine agent queries without network access:
 
-- search tasks, source notes, and wiki-like pages;
+- search issues, pull requests, comments, source notes, and wiki-like pages;
 - get a record by legacy id, path, remote id, or URL;
 - resolve backlinks;
 - explain sync status and conflicts;
@@ -17,7 +17,7 @@ Start with SQLite plus optional deterministic markdown/JSON exports.
 
 Candidate tables:
 
-- `records`: normalized tasks, pages, sources, decisions, handoffs.
+- `records`: normalized issues, pull requests, comments, pages, and sources.
 - `full_text`: search text and extracted headings.
 - `identity_map`: legacy id, local path, remote id, remote URL, aliases.
 - `links`: source record, target record, link kind, raw link text, resolved target.

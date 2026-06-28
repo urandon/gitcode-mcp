@@ -1,6 +1,6 @@
 # Sanitization Rules
 
-Canonical public-safety reference for `gitcode-mcp`. Every output surface, fixture, document, log, and handoff must comply.
+Canonical public-safety reference for `gitcode-mcp`. Every output surface, fixture, document, log, issue comment, pull request report, and wiki page must comply.
 
 ## 1. Purpose
 
@@ -12,7 +12,7 @@ Affected surfaces:
 - Test output (unit, integration, e2e)
 - Fixture files
 - Logs and diagnostic streams
-- Repository documents, handoffs, and commit messages
+- Repository documents, issue comments, pull request reports, wiki pages, and commit messages
 
 ## 2. Redacted Surface Types
 
@@ -60,7 +60,7 @@ JSON response bodies from MCP tools are sanitized: `owner`, `repo`, and secret-k
 Two-cache parity assertions compare digest values without exposing raw content. In mismatch error messages, `title` and `body` fields are replaced with `[REDACTED]`. Redaction filters applied to all test output.
 
 ### Fixture files
-Fixture files under `internal/` and `project/` must contain no real tokens, no private repository coordinates, no Authorization headers, no cookies, and no raw unsanitized API response bodies. Fixtures captured from live APIs must pass through the redaction filter before being committed.
+Fixture files under `internal/`, `testdata/`, and `tests/` must contain no real tokens, no private repository coordinates, no Authorization headers, no cookies, and no raw unsanitized API response bodies. Fixtures captured from live APIs must pass through the redaction filter before being committed.
 
 ### Logs and diagnostics
 All log output from `internal/diagnostics/` flows through the redaction filter. Audit trail records in `internal/audit/` must not store raw tokens. Error messages must not embed bearer tokens, owner/repo names, or raw API payloads.
@@ -68,8 +68,8 @@ All log output from `internal/diagnostics/` flows through the redaction filter. 
 ### Documentation
 All documentation files (`docs/*.md`, `README.md`) use only sanitized placeholders (section 3). Example commands reference `YOUR_OWNER`, `YOUR_REPO`, `$GITCODE_TOKEN`, and `[REDACTED]`. No real private coordinates, tokens, or internal URLs appear in documentation.
 
-### Handoffs and commit messages
-Handoff reports under `project/handoffs/` and commit messages must not contain raw tokens, private repository coordinates, Authorization headers, cookies, or internal URLs.
+### Issues, pull requests, wiki pages, and commit messages
+Issue comments, pull request reports, wiki pages, and commit messages must not contain raw tokens, private repository coordinates, Authorization headers, cookies, or internal URLs.
 
 ## 5. Verification
 

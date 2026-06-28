@@ -22,6 +22,8 @@ Provide a cache-first tooling layer that lets AI agents and humans search, inspe
 | MCP server | Expose cache-first reads plus explicit live lifecycle tools for sync, index, diagnostics, and audited issue/PR writes. |
 | Export snapshots | Produce deterministic markdown/JSON/SQLite snapshots for review, rollback, and audit. |
 
+See [Component Architecture](component-architecture.md) for the durable component catalog, runtime flow, and boundary rules distilled from the historical design-package material.
+
 ## Provider Selection
 
 Provider mode is resolved once at command start and does not switch while the command is running.

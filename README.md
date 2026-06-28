@@ -1,43 +1,48 @@
 # gitcode-mcp
 
-Cache-first MCP and CLI tooling for working with GitCode when network availability is poor.
+Cache-first GitCode tooling for agents and humans.
 
-The mission is to make GitCode usable for agents and humans even when live access is slow, flaky, or unavailable. The project should provide local cache, search, link resolution, deterministic exports, and eventually MCP reads/writes around GitCode tracker/wiki data.
+`gitcode-mcp` keeps GitCode issues, pull requests, wiki pages, comments, and links available through a durable local cache. It exposes that cache through a CLI and an MCP server so agents can search, read, plan, and perform explicit live writes even when network access is slow or unreliable.
 
-This repository is a standalone, public-safe tooling project. It owns implementation issues, code, tests, fixtures, CLI/MCP implementation, development handoffs, and repository-local engineering notes.
+The project is self-contained and public-safe. Source repositories, trackers, and wikis are external inputs; examples use placeholders and sanitized fixtures. See [Sanitization Rules](docs/sanitization.md) for the full safety contract.
 
-Source repositories, trackers, and wikis are external inputs. Keep examples sanitized and avoid committing non-public source names, credentials, cookies, internal URLs, or raw API responses; see [Sanitization Rules](docs/sanitization.md) for the full public-safety contract.
+## What It Does
 
-## Current Shape
-
-```text
-.
-├── AGENTS.md              # agent operating guide
-├── docs/                  # architecture, API discovery, cache/sync docs
-├── project/               # lightweight project management
-│   ├── decisions/
-│   ├── handoffs/
-│   ├── research/
-│   └── tasks/
-├── scripts/               # local helper scripts
-├── cmd/gitcode-mcp/       # CLI entrypoint
-└── internal/              # Go packages
-```
-
-## First Goals
-
-1. Ingest markdown, tracker, or wiki exports into a local cache.
-2. Resolve stable source ids such as `DOC-123` to local records and, later, remote issue/wiki ids.
-3. Provide cache-first CLI commands for search, get, backlinks, link-check, export, diff, and sync status.
-4. Add a read-first MCP server only after the cache contract is clear.
-5. Keep live network writes explicit, idempotent, and logged.
+- Binds GitCode repositories to local cache identities and aliases.
+- Syncs issues, pull requests, comments, wiki pages, labels, and milestones into SQLite.
+- Searches and reads cached records without requiring live network access.
+- Resolves stable local ids and remote aliases for links, snippets, backlinks, and exports.
+- Runs an MCP server over cached data for agent workflows.
+- Performs live writes only through explicit commands with idempotency keys and audit evidence.
+- Supports issue, wiki, comment, and pull request workflows from the same cache-first service layer.
 
 ## Quick Start
 
 ```sh
 go test ./...
 go run ./cmd/gitcode-mcp --help
-go run ./cmd/gitcode-mcp search DOC-123
+go run ./cmd/gitcode-mcp repo add --repo YOUR_OWNER/YOUR_REPO --owner YOUR_OWNER --name YOUR_REPO --scopes issues,wiki
+go run ./cmd/gitcode-mcp sync --repo YOUR_OWNER/YOUR_REPO --issues --wiki --prs --comments --live
+go run ./cmd/gitcode-mcp search --repo YOUR_OWNER/YOUR_REPO "cache-first"
 ```
 
-The current CLI is a scaffold. It defines the intended command surface, but the cache, GitCode adapter, and MCP server still need implementation.
+For MCP usage, start with [MCP Setup](docs/mcp-setup.md). For live credentials, start with [Secrets](docs/secrets.md) and [Config Reference](docs/config-reference.md).
+
+## Common Workflows
+
+- Read from cache: [Read Walkthrough](docs/read-walkthrough.md)
+- Perform explicit writes: [Write Walkthrough](docs/write-walkthrough.md)
+- Work with PR/MR flow: [PR/MR Workflow](docs/pr-mr-workflow.md)
+- Review component boundaries: [Component Architecture](docs/component-architecture.md)
+- Configure repositories: [Repository Binding](docs/repo-binding.md)
+- Understand sync behavior: [Cache and Sync Model](docs/cache-and-sync-model.md)
+- Review live API findings: [GitCode API Discovery](docs/gitcode-api-discovery.md)
+
+## Repository Layout
+
+- `cmd/gitcode-mcp/`: CLI entrypoint.
+- `internal/`: cache, service, provider, CLI, MCP, sync, diagnostics, and tests.
+- `docs/`: durable product, architecture, operations, and API documentation.
+- `testdata/`: sanitized fixture inputs.
+
+Active planning belongs in GitCode issues and pull requests. Historical research or dogfood evidence that is still useful belongs in the GitCode wiki, not in main.

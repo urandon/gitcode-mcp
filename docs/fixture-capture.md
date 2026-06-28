@@ -55,32 +55,13 @@ Fixtures can be created by hand using the documented JSON schema. Ensure:
 
 ## Fixture validation
 
-### Offline validation
+Run the offline test suite before committing fixture changes:
 
 ```sh
-project/dogfood/validate-fixtures.sh \
-  --fixtures fixtures \
-  --transcript /tmp/fixture-validation.md
+go test ./...
 ```
 
-Runs fixture validation without credentials and produces a redacted transcript.
-
-Expected: offline validation passes, live validation reported as skipped.
-
-### Live validation (optional)
-
-```sh
-GITCODE_LIVE_TEST=1 project/dogfood/validate-fixtures.sh \
-  --fixtures fixtures \
-  --transcript /tmp/fixture-validation.md \
-  --live
-```
-
-Requires `GITCODE_TOKEN`. Live API responses are redacted before writing to the transcript.
-
-## Fixture allowlist
-
-The fixture allowlist at `project/dogfood/fixture-allowlist.txt` defines valid fixture identifiers. Only identifiers in the allowlist may appear in docs, scripts, and transcripts.
+Fixture tests must pass without credentials or live network access. Optional live fixture refresh work should be reported on the relevant issue or pull request with sanitized summaries only.
 
 ## Public-safety rules
 
