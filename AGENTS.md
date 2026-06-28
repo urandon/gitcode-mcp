@@ -10,21 +10,22 @@ Keep this repository self-contained and public-safe.
 
 Use this repo for:
 
-- implementation tasks and backlog;
 - code, tests, fixtures, cache schema, CLI, and MCP server work;
-- GitCode API experiments and captured fixtures;
-- development handoffs for this tooling.
+- durable GitCode API compatibility notes and captured fixtures;
+- technical documentation that is part of the product surface.
+
+Use GitCode issues and pull requests for active planning and handoffs. Use the GitCode wiki for historical research, decisions, and dogfood evidence that should remain discoverable without living in main.
 
 Do not reference non-public source repositories, trackers, wiki names, raw credentials, cookies, internal URLs, or unsanitized API responses. Source systems should appear here only as generic concepts or sanitized fixtures.
 
 ## Read First
 
 1. `README.md`
-2. `project/tasks/backlog.md`
-3. `docs/architecture.md`
-4. `docs/cache-and-sync-model.md`
-5. `docs/gitcode-api-discovery.md`
-6. the specific task or handoff under `project/`
+2. `docs/architecture.md`
+3. `docs/cache-and-sync-model.md`
+4. `docs/gitcode-api-discovery.md`
+5. `docs/mcp-setup.md`
+6. the linked GitCode issue or pull request for the current task
 
 ## Engineering Defaults
 
@@ -40,10 +41,8 @@ Do not reference non-public source repositories, trackers, wiki names, raw crede
 - `cmd/gitcode-mcp/`: CLI entrypoint.
 - `internal/`: package code and unit tests.
 - `docs/`: durable technical docs.
-- `project/tasks/`: repo-local implementation tasks.
-- `project/research/`: API discovery and product/tooling research.
-- `project/decisions/`: lightweight ADR-style decisions.
-- `project/handoffs/`: implementation handoffs between sessions.
+- `testdata/`: sanitized fixtures.
+- `tests/`: higher-level validation scenarios.
 
 ## Before Committing
 
@@ -54,4 +53,4 @@ go test ./...
 git diff --check
 ```
 
-If tests cannot run because the task depends on unavailable network/API credentials, record that explicitly in the handoff and keep the test fixture boundary clear.
+If tests cannot run because the task depends on unavailable network/API credentials, record that explicitly on the relevant issue or pull request and keep the test fixture boundary clear.

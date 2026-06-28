@@ -222,4 +222,4 @@ Quick checks:
 | Missing or stale index | `gitcode-mcp sync-status --repo "YOUR_REPO"` and `gitcode-mcp stale-index --repo "YOUR_REPO"` | Run `gitcode-mcp index --repo "YOUR_REPO" --full` |
 | MCP not ready | HTTP/SSE `/ready` or `gitcode-mcp doctor` | Confirm cache path and repository binding |
 
-Keep all examples sanitized. Do not place raw tokens, private repository coordinates, Authorization headers, cookies, internal URLs, or raw API responses in docs, fixtures, logs, or handoffs.
+Keep all examples sanitized. Do not place raw tokens, private repository coordinates, Authorization headers, cookies, internal URLs, or raw API responses in docs, fixtures, logs, issue comments, pull request reports, or wiki pages.

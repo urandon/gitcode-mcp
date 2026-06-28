@@ -1,5 +1,0 @@
-# 014-mcp-server-task-1-tool-registry-parity validation scenarios
-
-- `014-mcp-server-task-1-tool-registry-parity-scenario-1`: An MCP client initializes the server over stdio, calls `tools/list`, then invokes existing and new read tools through `tools/call` with required `repo_id` filters against a two-repository fixture cache.
-- `014-mcp-server-task-1-tool-registry-parity-scenario-2`: Responses include snippet, recent changes, link check, stale-index report, cache status, chunk search/list, backlinks, export/diff where present, and sync status; each response carries repo scope, deterministic payload data, warnings, stale/missing-index fields, pagination metadata where applicable, and typed errors matching the shared read envelope.
-- `014-mcp-server-task-1-tool-registry-parity-scenario-3`: Equivalent CLI read commands over the same fixture cache produce byte-equivalent JSON payloads for the canonical envelope fields, including warnings, repo id, errors, and pagination metadata; executable evidence is an MCP JSON-RPC/server test plus a CLI parity test over issue and wiki records with network disabled.

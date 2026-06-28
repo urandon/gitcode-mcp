@@ -9,4 +9,6 @@ Start with:
 - [gitcode-api-discovery.md](gitcode-api-discovery.md)
 - [operations/mcp-installation-and-secrets.md](operations/mcp-installation-and-secrets.md)
 
-Keep implementation notes that are only useful during a task in `project/handoffs/` or `project/research/`. Promote them here only when they become stable design or operation docs.
+Use this directory only for documentation that is part of the durable product surface.
+
+Active planning belongs in GitCode issues and pull requests. Historical research, decisions, and dogfood evidence belong in the GitCode wiki when they are still useful for future readers.
