@@ -23,10 +23,11 @@ Do not reference non-public source repositories, trackers, wiki names, raw crede
 1. `README.md`
 2. `docs/architecture.md`
 3. `docs/component-architecture.md`
-4. `docs/cache-and-sync-model.md`
-5. `docs/gitcode-api-discovery.md`
-6. `docs/mcp-setup.md`
-7. the linked GitCode issue or pull request for the current task
+4. `docs/test-architecture.md`
+5. `docs/cache-and-sync-model.md`
+6. `docs/gitcode-api-discovery.md`
+7. `docs/mcp-setup.md`
+8. the linked GitCode issue or pull request for the current task
 
 ## Engineering Defaults
 
@@ -40,9 +41,9 @@ Do not reference non-public source repositories, trackers, wiki names, raw crede
 ## Code Layout
 
 - `cmd/gitcode-mcp/`: CLI entrypoint.
-- `internal/`: package code and unit tests.
+- `internal/`: package code, unit tests, offline integration tests, and explicit live E2E tests.
 - `docs/`: durable technical docs.
-- `testdata/`: sanitized fixtures.
+- `testdata/`: sanitized reusable fixture inputs.
 
 ## Before Committing
 

@@ -1,4 +1,4 @@
-package main
+package testnet
 
 import (
 	"fmt"
@@ -10,43 +10,43 @@ import (
 	"time"
 )
 
-type mockGitCodeAPIAuthMode string
+type GitCodeAPIAuthMode string
 
-type mockGitCodeAPIFailureMode string
+type GitCodeAPIFailureMode string
 
 const (
-	mockGitCodeAPIAuthAccept    mockGitCodeAPIAuthMode = "accept"
-	mockGitCodeAPIAuthReject401 mockGitCodeAPIAuthMode = "reject401"
-	mockGitCodeAPIAuthReject403 mockGitCodeAPIAuthMode = "reject403"
+	GitCodeAPIAuthAccept    GitCodeAPIAuthMode = "accept"
+	GitCodeAPIAuthReject401 GitCodeAPIAuthMode = "reject401"
+	GitCodeAPIAuthReject403 GitCodeAPIAuthMode = "reject403"
 )
 
 const (
-	mockGitCodeAPIFailureNone           mockGitCodeAPIFailureMode = ""
-	mockGitCodeAPIFailure400            mockGitCodeAPIFailureMode = "400"
-	mockGitCodeAPIFailure404            mockGitCodeAPIFailureMode = "404"
-	mockGitCodeAPIFailure409            mockGitCodeAPIFailureMode = "409"
-	mockGitCodeAPIFailure413            mockGitCodeAPIFailureMode = "413"
-	mockGitCodeAPIFailure429            mockGitCodeAPIFailureMode = "429"
-	mockGitCodeAPIFailureMalformedJSON  mockGitCodeAPIFailureMode = "malformed_json"
-	mockGitCodeAPIFailureSchemaMismatch mockGitCodeAPIFailureMode = "schema_mismatch"
-	mockGitCodeAPIFailurePartial        mockGitCodeAPIFailureMode = "partial_response"
-	mockGitCodeAPIFailureTimeout        mockGitCodeAPIFailureMode = "timeout"
-	mockGitCodeAPIFailure500            mockGitCodeAPIFailureMode = "500"
+	GitCodeAPIFailureNone           GitCodeAPIFailureMode = ""
+	GitCodeAPIFailure400            GitCodeAPIFailureMode = "400"
+	GitCodeAPIFailure404            GitCodeAPIFailureMode = "404"
+	GitCodeAPIFailure409            GitCodeAPIFailureMode = "409"
+	GitCodeAPIFailure413            GitCodeAPIFailureMode = "413"
+	GitCodeAPIFailure429            GitCodeAPIFailureMode = "429"
+	GitCodeAPIFailureMalformedJSON  GitCodeAPIFailureMode = "malformed_json"
+	GitCodeAPIFailureSchemaMismatch GitCodeAPIFailureMode = "schema_mismatch"
+	GitCodeAPIFailurePartial        GitCodeAPIFailureMode = "partial_response"
+	GitCodeAPIFailureTimeout        GitCodeAPIFailureMode = "timeout"
+	GitCodeAPIFailure500            GitCodeAPIFailureMode = "500"
 )
 
-type MockGitCodeAPI struct {
+type GitCodeAPIServer struct {
 	server        *httptest.Server
 	expectedToken string
-	authMode      mockGitCodeAPIAuthMode
-	failureMode   mockGitCodeAPIFailureMode
+	authMode      GitCodeAPIAuthMode
+	failureMode   GitCodeAPIFailureMode
 	owner         string
 	repo          string
 	mu            sync.Mutex
-	counts        MockGitCodeAPICounts
-	requests      []MockGitCodeAPIRequest
+	counts        GitCodeAPICounts
+	requests      []GitCodeAPIRequest
 }
 
-type MockGitCodeAPICounts struct {
+type GitCodeAPICounts struct {
 	ListIssues         int
 	ListWikiPages      int
 	ListComments       int
@@ -56,7 +56,7 @@ type MockGitCodeAPICounts struct {
 	TotalRequests      int
 }
 
-type MockGitCodeAPIRequest struct {
+type GitCodeAPIRequest struct {
 	Method          string
 	Path            string
 	Operation       string
@@ -65,14 +65,14 @@ type MockGitCodeAPIRequest struct {
 	IdempotencyKey  string
 }
 
-type MockGitCodeAPIPair struct {
-	Selected    *MockGitCodeAPI
-	NonSelected *MockGitCodeAPI
+type GitCodeAPIPair struct {
+	Selected    *GitCodeAPIServer
+	NonSelected *GitCodeAPIServer
 }
 
-func NewMockGitCodeAPI(t *testing.T, opts ...func(*MockGitCodeAPI)) *MockGitCodeAPI {
+func NewGitCodeAPIServer(t *testing.T, opts ...func(*GitCodeAPIServer)) *GitCodeAPIServer {
 	t.Helper()
-	api := &MockGitCodeAPI{expectedToken: "test-token", authMode: mockGitCodeAPIAuthAccept, owner: "owner-a", repo: "repo-a"}
+	api := &GitCodeAPIServer{expectedToken: "test-token", authMode: GitCodeAPIAuthAccept, owner: "owner-a", repo: "repo-a"}
 	for _, opt := range opts {
 		opt(api)
 	}
@@ -80,41 +80,41 @@ func NewMockGitCodeAPI(t *testing.T, opts ...func(*MockGitCodeAPI)) *MockGitCode
 	return api
 }
 
-func NewMockGitCodeAPIPair(t *testing.T) MockGitCodeAPIPair {
+func NewGitCodeAPIPair(t *testing.T) GitCodeAPIPair {
 	t.Helper()
-	return MockGitCodeAPIPair{Selected: NewMockGitCodeAPI(t), NonSelected: NewMockGitCodeAPI(t)}
+	return GitCodeAPIPair{Selected: NewGitCodeAPIServer(t), NonSelected: NewGitCodeAPIServer(t)}
 }
 
-func MockGitCodeAPIAuthMode(mode mockGitCodeAPIAuthMode) func(*MockGitCodeAPI) {
-	return func(api *MockGitCodeAPI) { api.authMode = mode }
+func WithGitCodeAPIAuthMode(mode GitCodeAPIAuthMode) func(*GitCodeAPIServer) {
+	return func(api *GitCodeAPIServer) { api.authMode = mode }
 }
 
-func MockGitCodeAPIFailureMode(mode mockGitCodeAPIFailureMode) func(*MockGitCodeAPI) {
-	return func(api *MockGitCodeAPI) { api.failureMode = mode }
+func WithGitCodeAPIFailureMode(mode GitCodeAPIFailureMode) func(*GitCodeAPIServer) {
+	return func(api *GitCodeAPIServer) { api.failureMode = mode }
 }
 
-func (api *MockGitCodeAPI) BaseURL() string { return api.server.URL }
+func (api *GitCodeAPIServer) BaseURL() string { return api.server.URL }
 
-func (api *MockGitCodeAPI) Close() { api.server.Close() }
+func (api *GitCodeAPIServer) Close() { api.server.Close() }
 
-func (api *MockGitCodeAPI) Counts() MockGitCodeAPICounts {
+func (api *GitCodeAPIServer) Counts() GitCodeAPICounts {
 	api.mu.Lock()
 	defer api.mu.Unlock()
 	return api.counts
 }
 
-func (api *MockGitCodeAPI) Requests() []MockGitCodeAPIRequest {
+func (api *GitCodeAPIServer) Requests() []GitCodeAPIRequest {
 	api.mu.Lock()
 	defer api.mu.Unlock()
-	out := make([]MockGitCodeAPIRequest, len(api.requests))
+	out := make([]GitCodeAPIRequest, len(api.requests))
 	copy(out, api.requests)
 	return out
 }
 
-func (api *MockGitCodeAPI) CapturedCreateRequests() []MockGitCodeAPIRequest {
+func (api *GitCodeAPIServer) CapturedCreateRequests() []GitCodeAPIRequest {
 	api.mu.Lock()
 	defer api.mu.Unlock()
-	var out []MockGitCodeAPIRequest
+	var out []GitCodeAPIRequest
 	for _, req := range api.requests {
 		if req.Operation == "create_issue" {
 			out = append(out, req)
@@ -123,13 +123,13 @@ func (api *MockGitCodeAPI) CapturedCreateRequests() []MockGitCodeAPIRequest {
 	return out
 }
 
-func (api *MockGitCodeAPI) serveHTTP(w http.ResponseWriter, r *http.Request) {
+func (api *GitCodeAPIServer) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	operation := api.operation(r)
 	authOK := r.Header.Get("Authorization") == "Bearer "+api.expectedToken
 	status := http.StatusOK
-	if api.authMode == mockGitCodeAPIAuthReject401 {
+	if api.authMode == GitCodeAPIAuthReject401 {
 		status = http.StatusUnauthorized
-	} else if api.authMode == mockGitCodeAPIAuthReject403 {
+	} else if api.authMode == GitCodeAPIAuthReject403 {
 		status = http.StatusForbidden
 	} else if !authOK {
 		status = http.StatusUnauthorized
@@ -165,34 +165,34 @@ func (api *MockGitCodeAPI) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (api *MockGitCodeAPI) writeFailure(w http.ResponseWriter, operation string) bool {
-	if api.failureMode == mockGitCodeAPIFailureNone || operation != "list_issues" {
+func (api *GitCodeAPIServer) writeFailure(w http.ResponseWriter, operation string) bool {
+	if api.failureMode == GitCodeAPIFailureNone || operation != "list_issues" {
 		return false
 	}
 	w.Header().Set("Content-Type", "application/json")
 	switch api.failureMode {
-	case mockGitCodeAPIFailure400:
+	case GitCodeAPIFailure400:
 		http.Error(w, "bad request", http.StatusBadRequest)
-	case mockGitCodeAPIFailure404:
+	case GitCodeAPIFailure404:
 		http.Error(w, "not found", http.StatusNotFound)
-	case mockGitCodeAPIFailure409:
+	case GitCodeAPIFailure409:
 		http.Error(w, "conflict", http.StatusConflict)
-	case mockGitCodeAPIFailure413:
+	case GitCodeAPIFailure413:
 		http.Error(w, "too large", http.StatusRequestEntityTooLarge)
-	case mockGitCodeAPIFailure429:
+	case GitCodeAPIFailure429:
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "rate limited", http.StatusTooManyRequests)
-	case mockGitCodeAPIFailureMalformedJSON:
+	case GitCodeAPIFailureMalformedJSON:
 		fmt.Fprint(w, `[{"id":"MOCK-ISSUE-100","number":`)
-	case mockGitCodeAPIFailureSchemaMismatch:
+	case GitCodeAPIFailureSchemaMismatch:
 		fmt.Fprint(w, `[{"id":"MOCK-ISSUE-100","title":"missing number"}]`)
-	case mockGitCodeAPIFailurePartial:
+	case GitCodeAPIFailurePartial:
 		w.Header().Set("Content-Length", "100")
 		fmt.Fprint(w, `[{"id":"MOCK-ISSUE-100"`)
-	case mockGitCodeAPIFailureTimeout:
+	case GitCodeAPIFailureTimeout:
 		time.Sleep(100 * time.Millisecond)
 		fmt.Fprint(w, `[]`)
-	case mockGitCodeAPIFailure500:
+	case GitCodeAPIFailure500:
 		http.Error(w, "server error", http.StatusInternalServerError)
 	default:
 		return false
@@ -200,7 +200,7 @@ func (api *MockGitCodeAPI) writeFailure(w http.ResponseWriter, operation string)
 	return true
 }
 
-func (api *MockGitCodeAPI) operation(r *http.Request) string {
+func (api *GitCodeAPIServer) operation(r *http.Request) string {
 	base := "/api/v5/repos/" + api.owner + "/" + api.repo
 	path := r.URL.Path
 	if path == base+"/issues" && r.Method == http.MethodGet {
@@ -231,7 +231,7 @@ func (api *MockGitCodeAPI) operation(r *http.Request) string {
 	return "unexpected"
 }
 
-func (api *MockGitCodeAPI) recordRequest(r *http.Request, operation string, authOK bool, status int) {
+func (api *GitCodeAPIServer) recordRequest(r *http.Request, operation string, authOK bool, status int) {
 	api.mu.Lock()
 	defer api.mu.Unlock()
 	api.counts.TotalRequests++
@@ -250,5 +250,5 @@ func (api *MockGitCodeAPI) recordRequest(r *http.Request, operation string, auth
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
 		api.counts.AuthFailures++
 	}
-	api.requests = append(api.requests, MockGitCodeAPIRequest{Method: r.Method, Path: r.URL.Path, Operation: operation, Status: status, AuthorizationOK: authOK, IdempotencyKey: r.Header.Get("Idempotency-Key")})
+	api.requests = append(api.requests, GitCodeAPIRequest{Method: r.Method, Path: r.URL.Path, Operation: operation, Status: status, AuthorizationOK: authOK, IdempotencyKey: r.Header.Get("Idempotency-Key")})
 }
