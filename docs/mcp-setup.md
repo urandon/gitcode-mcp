@@ -23,6 +23,12 @@ Or equivalently:
 gitcode-mcp mcp serve --transport stdio
 ```
 
+For MCP help without starting the server:
+
+```sh
+gitcode-mcp mcp --help
+```
+
 ### Client configuration (generic)
 
 Configure your MCP client to launch:

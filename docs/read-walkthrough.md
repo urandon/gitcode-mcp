@@ -40,6 +40,13 @@ gitcode-mcp list --repo example-owner/example-repo --kind issue
 gitcode-mcp list --repo example-owner/example-repo --kind wiki
 ```
 
+Filter by provenance when separating live sync results from deterministic fixtures or local projections:
+
+```sh
+gitcode-mcp list --repo example-owner/example-repo --provenance live
+gitcode-mcp list --repo example-owner/example-repo --provenance fixture
+```
+
 ## Get a specific source
 
 ```sh
@@ -61,6 +68,12 @@ gitcode-mcp search --repo example-owner/example-repo "remote issue body"
 ```
 
 Expected: returns sources containing the query text in title or body.
+
+Search accepts the same provenance filter:
+
+```sh
+gitcode-mcp search --repo example-owner/example-repo --provenance live "remote issue body"
+```
 
 ## Get a snippet
 

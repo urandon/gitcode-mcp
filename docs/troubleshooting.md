@@ -152,6 +152,16 @@ write: live mutation requires credentials; use --dry-run for fixture/offline val
 
 **Fix:** Add `--dry-run` to validate without mutation, or configure `GITCODE_TOKEN`/credential store and rerun the write command live.
 
+### Unsupported capability
+
+```text
+failure_class: unsupported_capability
+```
+
+**Cause:** The requested command is intentionally deferred or unsupported by the current adapter surface.
+
+**Fix:** Follow the command remediation. For `add-label`, use `update-issue --labels` when replacing the label set is acceptable; dedicated additive label mutation is not yet implemented.
+
 ## Runtime audit
 
 ```sh
@@ -188,7 +198,7 @@ All paths and token values are redacted in the output.
 Use `--format json` for structured error output:
 
 ```sh
-gitcode-mcp get --repo example-owner/example-repo --id NONEXISTENT --format json
+gitcode-mcp get --repo example-owner/example-repo NONEXISTENT --format json
 ```
 
 Expected: JSON error response with error class and message.

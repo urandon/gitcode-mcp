@@ -90,6 +90,20 @@ func TestEntrypointHelpRouting(t *testing.T) {
 			t.Fatalf("stderr missing MCP help: %q", stderr.String())
 		}
 	})
+
+	t.Run("SCN-ENTRYPOINT-HELP-MCP-SUBCOMMAND", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"mcp", "--help"}, strings.NewReader(""), &stdout, &stderr, newTestSource(t))
+		if code != 0 {
+			t.Fatalf("exit = %d stderr=%q", code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "stdio MCP") {
+			t.Fatalf("stdout missing MCP help: %q", stdout.String())
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("stderr = %q", stderr.String())
+		}
+	})
 }
 
 func TestEntrypointDefaultModeDependencyHandoff(t *testing.T) {
