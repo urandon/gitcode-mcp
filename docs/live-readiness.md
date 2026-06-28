@@ -121,6 +121,7 @@ The MCP server exposes the same audited live-write lifecycle for agent workflows
 | MCP tool | Use |
 |---|---|
 | `add_issue_comment` | Add a proposal or status comment to an issue |
+| `update_issue_comment` | Update an existing issue comment body |
 | `update_issue` | Update issue title, body, state, or labels |
 | `create_pr` | Create a pull request with title, body, head, and base |
 | `update_pr` | Update pull request title, body, or state |

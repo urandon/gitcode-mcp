@@ -165,6 +165,7 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 | `repo_status` | Report configured repository binding and cache readiness state |
 | `sync_live` | Synchronize selected live collection records into the cache |
 | `add_issue_comment` | Add a live issue comment through the audited write lifecycle |
+| `update_issue_comment` | Update a live issue comment through the audited write lifecycle |
 | `update_issue` | Update live issue metadata through the audited write lifecycle |
 | `create_pr` | Create a live pull request through the audited write lifecycle |
 | `update_pr` | Update live pull request metadata through the audited write lifecycle |

@@ -656,6 +656,14 @@ type CreateIssueCommentRequest struct {
 	Body   string `json:"body"`
 }
 
+type UpdateIssueCommentRequest struct {
+	Owner     string `json:"-"`
+	Repo      string `json:"-"`
+	Number    int    `json:"-"`
+	CommentID string `json:"-"`
+	Body      string `json:"body"`
+}
+
 type WikiContentsEntry struct {
 	Path string `json:"path"`
 	Type string `json:"type"`

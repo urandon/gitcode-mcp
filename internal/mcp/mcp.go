@@ -40,6 +40,7 @@ type serviceInterface interface {
 	BulkSyncAll(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	UpdateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	AddComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	UpdateComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	CreatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	AddPRComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
@@ -230,14 +231,15 @@ const (
 )
 
 var writeToolNames = map[string]bool{
-	"sync_live":         true,
-	"index_repo":        true,
-	"add_issue_comment": true,
-	"update_issue":      true,
-	"create_pr":         true,
-	"update_pr":         true,
-	"add_pr_comment":    true,
-	"link_pr_issue":     true,
+	"sync_live":            true,
+	"index_repo":           true,
+	"add_issue_comment":    true,
+	"update_issue_comment": true,
+	"update_issue":         true,
+	"create_pr":            true,
+	"update_pr":            true,
+	"add_pr_comment":       true,
+	"link_pr_issue":        true,
 }
 
 func normalizeToolAccess(access ToolAccess) ToolAccess {
@@ -474,6 +476,11 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Comment body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "number", "body"}},
 	},
 	{
+		Name:        "update_issue_comment",
+		Description: "Update a live issue comment through the audited write lifecycle.",
+		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"comment_id": {Type: "string", Description: "Issue comment id.", MinLength: 1}, "number": {Type: "integer", Description: "Optional issue number hint for cache parent resolution.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Updated comment body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "comment_id", "body"}},
+	},
+	{
 		Name:        "update_issue",
 		Description: "Update live issue metadata through the audited write lifecycle.",
 		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "title": {Type: "string", Description: "Issue title."}, "body": {Type: "string", Description: "Issue body."}, "state": {Type: "string", Description: "Issue state."}, "labels": {Type: "array", Description: "Issue labels."}}), Required: []string{"repo_id", "write_mode", "number"}},
@@ -679,6 +686,7 @@ var toolListOrder = []string{
 	"repo_status",
 	"sync_live",
 	"add_issue_comment",
+	"update_issue_comment",
 	"update_issue",
 	"create_pr",
 	"update_pr",
@@ -726,6 +734,7 @@ func (s *Server) toolRegistry() toolRegistry {
 	registerTool(registry, "repo_status", s.callRepoStatus)
 	registerTool(registry, "sync_live", s.callSyncLive)
 	registerTool(registry, "add_issue_comment", s.callAddIssueComment)
+	registerTool(registry, "update_issue_comment", s.callUpdateIssueComment)
 	registerTool(registry, "update_issue", s.callUpdateIssue)
 	registerTool(registry, "create_pr", s.callCreatePR)
 	registerTool(registry, "update_pr", s.callUpdatePR)

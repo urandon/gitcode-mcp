@@ -50,6 +50,7 @@ var commands = []string{
 	"update-page",
 	"delete-page",
 	"add-comment",
+	"update-comment",
 	"add-label",
 	"config",
 	"auth",
@@ -95,6 +96,7 @@ type queryService interface {
 	UpdatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	DeletePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	AddComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	UpdateComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	AddLabel(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 }
 
@@ -148,6 +150,7 @@ type options struct {
 	name           string
 	id             string
 	number         int
+	commentID      string
 	slug           string
 	path           string
 	sha            string
@@ -315,7 +318,7 @@ func resolveLiveCredential(ctx context.Context, eff config.EffectiveConfig, deps
 
 func isLiveStartupCommand(command string) bool {
 	switch command {
-	case "sync", "create-issue", "update-issue", "create-pr", "create-mr", "create-page", "update-page", "delete-page", "add-comment", "add-label", "doctor":
+	case "sync", "create-issue", "update-issue", "create-pr", "create-mr", "create-page", "update-page", "delete-page", "add-comment", "update-comment", "add-label", "doctor":
 		return true
 	default:
 		return false
@@ -428,6 +431,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.name, "name", "", "repository name")
 	flags.StringVar(&opts.id, "id", "", "record id")
 	flags.IntVar(&opts.number, "number", 0, "issue number")
+	flags.StringVar(&opts.commentID, "comment-id", "", "comment id")
 	flags.StringVar(&opts.slug, "slug", "", "page slug")
 	flags.StringVar(&opts.path, "path", "", "page path")
 	flags.StringVar(&opts.sha, "sha", "", "page sha")
@@ -930,6 +934,8 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		return dispatchWrite(ctx, svc.DeletePage, command, opts, stdout, stderr, plan)
 	case "add-comment":
 		return dispatchWrite(ctx, svc.AddComment, command, opts, stdout, stderr, plan)
+	case "update-comment":
+		return dispatchWrite(ctx, svc.UpdateComment, command, opts, stdout, stderr, plan)
 	case "add-label":
 		return dispatchWrite(ctx, svc.AddLabel, command, opts, stdout, stderr, plan)
 	default:
@@ -1062,7 +1068,7 @@ func writeRequest(opts options) service.WriteCommandRequest {
 	if opts.live {
 		mode = service.WriteModeLive
 	}
-	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, Number: opts.number, Slug: opts.slug, Path: opts.path, Sha: opts.sha, Title: opts.title, Body: opts.body, Head: opts.head, Base: opts.base, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
+	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, Number: opts.number, CommentID: opts.commentID, Slug: opts.slug, Path: opts.path, Sha: opts.sha, Title: opts.title, Body: opts.body, Head: opts.head, Base: opts.base, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
 }
 
 func cliEmptyAsNone(value string) string {
@@ -1888,6 +1894,19 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --number N          issue number (required)")
 		fmt.Fprintln(w, "  --body BODY         comment body (required)")
+		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
+		fmt.Fprintln(w, "  --dry-run           validate without mutation")
+		fmt.Fprintln(w, "  --live              execute live write")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "update-comment":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --comment-id ID --body BODY [--number N] [--idempotency-key KEY] (--dry-run | --live)\n\n", command)
+		fmt.Fprintln(w, "Update an existing issue comment. Requires exactly one of --dry-run or --live.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --comment-id ID     issue comment id (required)")
+		fmt.Fprintln(w, "  --number N          issue number hint for cache parent resolution")
+		fmt.Fprintln(w, "  --body BODY         updated comment body (required)")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
 		fmt.Fprintln(w, "  --live              execute live write")

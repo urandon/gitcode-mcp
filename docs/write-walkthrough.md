@@ -79,6 +79,19 @@ gitcode-mcp add-comment \
 
 Expected: reports what would be added.
 
+### Update comment (dry-run)
+
+```sh
+gitcode-mcp update-comment \
+  --repo example-owner/example-repo \
+  --comment-id 2002 \
+  --number 42 \
+  --body $'Updated comment\nwith real Markdown newlines.' \
+  --dry-run
+```
+
+Expected: reports what would be updated. `--number` is optional for the live GitCode route, but it helps the local cache resolve the parent issue deterministically.
+
 ## Live mode
 
 Live mode requires:
@@ -154,6 +167,19 @@ gitcode-mcp add-comment \
 ```
 
 Expected: comment added on remote, audit row recorded, cache refreshed.
+
+### Update comment (live)
+
+```sh
+gitcode-mcp update-comment \
+  --repo example-owner/example-repo \
+  --comment-id 2002 \
+  --number 42 \
+  --body $'Updated comment\nwith real Markdown newlines.' \
+  --live
+```
+
+Expected: existing issue comment updated on remote through `PATCH /api/v5/repos/{owner}/{repo}/issues/comments/{comment_id}`, audit row recorded, and the cached `record_comments` row upserted instead of duplicated.
 
 ## Idempotency
 

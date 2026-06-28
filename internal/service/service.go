@@ -205,6 +205,10 @@ func (sanitizedFixtureClient) CreateIssueComment(context.Context, gitcode.Create
 	return gitcode.WriteResult[gitcode.Comment]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
+func (sanitizedFixtureClient) UpdateIssueComment(context.Context, gitcode.UpdateIssueCommentRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Comment], error) {
+	return gitcode.WriteResult[gitcode.Comment]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
+}
+
 func (sanitizedFixtureClient) CreatePRComment(context.Context, gitcode.CreatePRCommentRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PRComment], error) {
 	return gitcode.WriteResult[gitcode.PRComment]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
@@ -1870,6 +1874,13 @@ func (s *Service) AddComment(ctx context.Context, req WriteCommandRequest) (Writ
 	return s.executeWrite(ctx, "add-comment", req, RepositoryScopeIssues)
 }
 
+func (s *Service) UpdateComment(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if strings.TrimSpace(firstNonEmptyString(req.CommentID, req.ID)) == "" || strings.TrimSpace(req.Body) == "" {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "comment", Message: "comment id and body are required"}
+	}
+	return s.executeWrite(ctx, "update-comment", req, RepositoryScopeIssues)
+}
+
 func (s *Service) CreatePR(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
 	if strings.TrimSpace(req.Title) == "" || strings.TrimSpace(req.Head) == "" || strings.TrimSpace(req.Base) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "pull_request", Message: "title, head, and base are required"}
@@ -2999,6 +3010,13 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
 		return s.commentWriteGraph(ctx, route.RepoID, req.Number, result.Record, result, now)
+	case "update-comment":
+		commentID := strings.TrimSpace(firstNonEmptyString(req.CommentID, req.ID))
+		result, err := s.client.UpdateIssueComment(ctx, gitcode.UpdateIssueCommentRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, CommentID: commentID, Body: req.Body}, opts)
+		if err != nil {
+			return writeConfirmation{}, cache.RecordGraph{}, err
+		}
+		return s.commentWriteGraph(ctx, route.RepoID, req.Number, result.Record, result, now)
 	case "create-pr":
 		result, err := s.client.CreatePR(ctx, gitcode.CreatePRRequest{Owner: route.Owner, Repo: route.Name, Title: strings.TrimSpace(req.Title), Body: req.Body, Head: strings.TrimSpace(req.Head), Base: strings.TrimSpace(req.Base)}, opts)
 		if err != nil {
@@ -3078,13 +3096,14 @@ func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID s
 		result := gitcode.WriteResult[gitcode.Issue]{Record: issue, Confirmed: true, RemoteID: prior.RemoteID, RemoteNumber: number, RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
 		_, graph := s.issueWriteGraph(repoID, issue, result, now)
 		return graph, nil
-	case "add-comment":
+	case "add-comment", "update-comment":
 		number := req.Number
 		if number == 0 {
 			number, _ = strconv.Atoi(prior.RecordID)
 		}
-		comment := gitcode.Comment{ID: prior.RemoteID, Body: req.Body, CreatedAt: now, UpdatedAt: now}
-		result := gitcode.WriteResult[gitcode.Comment]{Record: comment, Confirmed: true, RemoteID: prior.RemoteID, ParentIssueNumber: number, ParentIssueID: prior.RecordID, RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
+		commentID := firstNonEmptyString(req.CommentID, req.ID, prior.RemoteID)
+		comment := gitcode.Comment{ID: commentID, Body: req.Body, CreatedAt: now, UpdatedAt: now}
+		result := gitcode.WriteResult[gitcode.Comment]{Record: comment, Confirmed: true, RemoteID: commentID, ParentIssueNumber: number, ParentIssueID: prior.RecordID, RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
 		_, graph, err := s.commentWriteGraph(ctx, repoID, number, comment, result, now)
 		return graph, err
 	case "create-pr", "update-pr", "link-pr-issue":

@@ -27,6 +27,7 @@ type (
 	CreateIssueRequest        = gitcode.CreateIssueRequest
 	UpdateIssueRequest        = gitcode.UpdateIssueRequest
 	CreateIssueCommentRequest = gitcode.CreateIssueCommentRequest
+	UpdateIssueCommentRequest = gitcode.UpdateIssueCommentRequest
 	CreateWikiPageRequest     = gitcode.CreateWikiPageRequest
 	UpdateWikiPageRequest     = gitcode.UpdateWikiPageRequest
 	SearchRequest             = gitcode.SearchRequest
