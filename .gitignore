@@ -8,6 +8,7 @@ bin/
 *.test
 *.out
 /gitcode-mcp
+/gitcode-mcp-sync.lock
 .env
 .env.*
 local/
