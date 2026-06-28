@@ -20,7 +20,7 @@ gitcode-mcp repo add \
   --api-base-url https://api.gitcode.com/api/v5
 
 # Sync from the sanitized fixture adapter and build the index
-gitcode-mcp sync --repo example-owner/example-repo --issues --wiki --index
+gitcode-mcp sync --offline --repo example-owner/example-repo --issues --wiki --index
 ```
 
 All subsequent commands work offline from the local cache.

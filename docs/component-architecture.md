@@ -80,7 +80,7 @@ flowchart TD
 
 | Component | Code Area | Responsibility | Durable Contract |
 |---|---|---|---|
-| CLI | `cmd/gitcode-mcp/`, `internal/cli/` | Parses commands, resolves startup options, routes reads, sync, writes, config, auth, doctor, and cache commands. | Default reads and tests remain offline unless `--live` is explicit. Live writes require explicit commands. |
+| CLI | `cmd/gitcode-mcp/`, `internal/cli/` | Parses commands, resolves startup options, routes reads, sync, writes, config, auth, doctor, and cache commands. | Cache reads remain offline; GitCode-touching lifecycle commands use live provider by default unless `--offline`, `--fixture`, or write `--dry-run` is explicit. |
 | MCP server | `internal/mcp/` | Exposes cache-first read tools, sync lifecycle tools, and configured write lifecycle tools to agents. | Tool availability is policy-driven. Write tools use the same service paths as CLI writes. |
 | Service layer | `internal/service/` | Owns command use cases, cache orchestration, sync graph commits, write confirmations, snapshots, diffs, and link checks. | Business behavior lives here rather than inside CLI or MCP transports. |
 | Repository binding | `internal/config/`, `internal/service/` | Maps a stable repo id to owner, repo name, scopes, aliases, API base URL, and cache configuration. | Repository id is the local routing key. Remote ids are aliases, not replacements. |
@@ -107,7 +107,7 @@ flowchart TD
 
 ### Live Sync
 
-1. Caller opts into live mode with `--live` or the MCP lifecycle tool.
+1. Caller runs a GitCode-touching lifecycle command; `--live` is accepted as a compatibility alias, while `--offline`/`--fixture` select deterministic fixture mode.
 2. Credential and repository binding are resolved before HTTP work starts.
 3. Live provider fetches selected collections through GitCode API v5.
 4. Normalizers convert remote records into cache graphs.

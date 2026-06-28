@@ -209,7 +209,7 @@ func Build(ctx context.Context, req Request) (Report, error) {
 		toolAccess = config.MCPToolAccessRead
 	}
 	report.MCP = MCPSection{Status: "available", TransportStdio: "supported", TransportHTTP: "supported", ServerVersion: req.Version, ToolAccess: toolAccess}
-	report.LiveProvider = LiveProviderSection{Status: "skipped", Reachable: "not_configured", ProviderMode: "fixture", Remediation: "set GITCODE_TOKEN and use --live to enable live provider"}
+	report.LiveProvider = LiveProviderSection{Status: "skipped", Reachable: "not_configured", ProviderMode: "offline-fixture", Remediation: "set GITCODE_TOKEN for live provider readiness, or use --offline/--fixture for deterministic fixture mode"}
 	report.AuthProbe = AuthProbeSection{Status: "skipped", ProbeResult: "not_probed", Remediation: "set GITCODE_TOKEN to enable authentication probing"}
 
 	report.Credential = CredentialSection{Source: emptyAsNone(cred.Source), TokenPresent: cred.Present, StoreMode: cred.StoreMode, AttemptedSources: append([]string(nil), cred.AttemptedSources...), AvailableSources: append([]string(nil), cred.AvailableSources...), UnavailableSources: append([]string(nil), cred.UnavailableSources...), Remediation: cred.Remediation}

@@ -112,7 +112,7 @@ mcp:
 or:
 
 ```sh
-GITCODE_MCP_TOOL_ACCESS=write gitcode-mcp --mcp --live
+GITCODE_MCP_TOOL_ACCESS=write gitcode-mcp --mcp
 ```
 
 Read-only Codex MCP example:
@@ -132,14 +132,14 @@ Write-enabled Codex MCP example:
 ```json
 {
   "command": "gitcode-mcp",
-  "args": ["--mcp", "--live", "--cache-path", "/path/to/cache.db"],
+  "args": ["--mcp", "--cache-path", "/path/to/cache.db"],
   "env": {
     "GITCODE_MCP_TOOL_ACCESS": "write"
   }
 }
 ```
 
-`doctor` reports the active `tool_access` mode so agents can explain why write tools are or are not available.
+When credentials resolve, MCP startup selects the live provider by default for live lifecycle tools. Use `--offline` or `--fixture` only for deterministic fixture sessions. `doctor` reports the active `tool_access` and provider mode so agents can explain why write tools are or are not available.
 
 ### MCP tools exposed
 
@@ -183,7 +183,7 @@ HTTP/SSE requests carry an `X-Request-ID` header. If not provided by the client,
 
 ## First MCP read
 
-After syncing fixtures and indexing:
+After syncing an offline fixture and indexing:
 
 1. Start the MCP server.
 2. Open `/sse` and read the announced `/message?session_id=...` endpoint.

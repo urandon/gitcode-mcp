@@ -4,9 +4,9 @@ This walkthrough covers the explicit, gated write path for GitCode operations.
 
 ## Write safety principles
 
-- All writes require explicit `--dry-run` or `--live` flag.
+- Writes execute live by default for configured repositories.
 - `--dry-run` validates the operation without making any mutation.
-- `--live` executes the write through the GitCode adapter and records an audit row.
+- `--live` remains accepted as a compatibility alias for live writes.
 - No write can succeed without reaching the remote adapter.
 - Idempotency keys prevent duplicate writes.
 
@@ -94,11 +94,11 @@ Expected: reports what would be updated. `--number` is optional for the live Git
 
 ## Live mode
 
-Live mode requires:
+Live mode is the default for write commands and requires:
 
 1. `GITCODE_TOKEN` environment variable set
 2. Network access to the GitCode API
-3. `--live` flag explicitly passed
+3. no explicit `--dry-run`
 
 ### Create issue (live)
 
@@ -108,7 +108,6 @@ gitcode-mcp create-issue \
   --title "Test issue" \
   --body "Test body." \
   --labels bug \
-  --live \
   --idempotency-key "issue-create-001"
 ```
 
@@ -121,8 +120,7 @@ gitcode-mcp update-issue \
   --repo example-owner/example-repo \
   --number 42 \
   --title "Updated title" \
-  --state closed \
-  --live
+  --state closed
 ```
 
 Expected: issue is updated on remote, audit row recorded, cache refreshed.
@@ -136,7 +134,6 @@ gitcode-mcp create-pr \
   --body "Summary and tests." \
   --head feature-branch \
   --base main \
-  --live \
   --idempotency-key "pr-create-001"
 ```
 
@@ -149,8 +146,7 @@ gitcode-mcp create-page \
   --repo example-owner/example-repo \
   --slug New-Page \
   --title "New Page" \
-  --body "Content." \
-  --live
+  --body "Content."
 ```
 
 Expected: wiki page created on remote, audit row recorded, cache refreshed.
@@ -162,8 +158,7 @@ gitcode-mcp add-comment \
   --repo example-owner/example-repo \
   --kind issue \
   --number 42 \
-  --body "Comment text." \
-  --live
+  --body "Comment text."
 ```
 
 Expected: comment added on remote, audit row recorded, cache refreshed.
@@ -175,8 +170,7 @@ gitcode-mcp update-comment \
   --repo example-owner/example-repo \
   --comment-id 2002 \
   --number 42 \
-  --body $'Updated comment\nwith real Markdown newlines.' \
-  --live
+  --body $'Updated comment\nwith real Markdown newlines.'
 ```
 
 Expected: existing issue comment updated on remote through `PATCH /api/v5/repos/{owner}/{repo}/issues/comments/{comment_id}`, audit row recorded, and the cached `record_comments` row upserted instead of duplicated.

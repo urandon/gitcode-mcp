@@ -99,7 +99,7 @@ no cached records for repo
 
 **Fix:**
 ```sh
-gitcode-mcp sync --repo example-owner/example-repo --input fixtures/api/v5/repos/example-owner/example-repo
+gitcode-mcp sync --offline --repo example-owner/example-repo --input fixtures/api/v5/repos/example-owner/example-repo
 ```
 
 ### Index is stale or missing
@@ -142,15 +142,15 @@ ambiguous alias: multiple repositories match
 
 **Fix:** Use the full `repo_id` (`--repo owner/name`) instead of the alias.
 
-### Write rejected (dry-run without --live)
+### Write rejected in offline or fixture mode
 
 ```text
-write: --live flag required for mutation
+write: live mutation requires credentials; use --dry-run for fixture/offline validation
 ```
 
-**Cause:** Write command was run without `--live`.
+**Cause:** A write command was run with `--offline` or `--fixture` without `--dry-run`, or live credentials were not configured for the default live write path.
 
-**Fix:** Add `--dry-run` to validate, or `--live` to execute (requires `GITCODE_TOKEN` and network).
+**Fix:** Add `--dry-run` to validate without mutation, or configure `GITCODE_TOKEN`/credential store and rerun the write command live.
 
 ## Runtime audit
 

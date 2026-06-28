@@ -28,17 +28,20 @@ See [Component Architecture](component-architecture.md) for the durable componen
 
 Provider mode is resolved once at command start and does not switch while the command is running.
 
-- `fixture`: default mode when `--live` is absent. It uses deterministic fixture/offline providers, including for `go test ./...`, so routine tests and reads do not require network access or credentials.
-- `live`: selected when `--live` is present and credentials resolve. Live sync and write commands use the live GitCode provider.
-- `unavailable`: selected when `--live` is present but no credential is available. The command fails with a provider/auth diagnostic instead of silently falling back to fixtures.
+- `auto`: default mode. Cache read commands stay cache-first; GitCode-touching lifecycle commands select the live provider.
+- `live`: selected for lifecycle commands when credentials resolve. `--live` remains accepted as a compatibility alias.
+- `offline-fixture`: selected by explicit `--offline` or `--fixture`, and by write `--dry-run`. It uses deterministic fixture/offline providers for docs smoke and tests.
+- `unavailable`: selected when a GitCode-touching command needs live credentials but none are available. The command fails with a credential diagnostic instead of silently falling back to fixtures.
 
 Selection predicate:
 
 | Predicate | Provider mode |
 | --- | --- |
-| `--live` plus credential | `live` |
-| `--live` plus no credential | `unavailable` |
-| no `--live` | `fixture` |
+| cache read command | cache-first local service |
+| lifecycle command plus credential | `live` |
+| lifecycle command plus no credential | `unavailable` |
+| `--offline` or `--fixture` | `offline-fixture` |
+| write command plus `--dry-run` | `offline-fixture` validation |
 
 ## Credential Pipeline
 

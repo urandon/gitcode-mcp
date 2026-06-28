@@ -56,22 +56,22 @@ gitcode-mcp auth status --live --owner "YOUR_OWNER" --repo "YOUR_REPO"
 
 ## 4. Live sync
 
-Default sync uses the configured offline/fixture provider unless live mode is explicitly requested.
+Sync uses the configured live provider by default. Use `--offline` or `--fixture` only when deterministic fixture data is needed for docs smoke or tests.
 
-Run live sync with the command-local live selector:
+Run live sync:
 
 ```sh
-gitcode-mcp sync --live --repo "YOUR_REPO" --issues --wiki --index
+gitcode-mcp sync --repo "YOUR_REPO" --issues --wiki --index
 ```
 
-`sync --help` documents `--live` as the live GitCode API provider selector for sync, plus `--repo`, `--issues`, `--wiki`, `--pulls`, `--comments`, `--index`, `--id`, `--input`, `--idempotency-key`, `--max-pages`, `--max-records`, `--per-page`, `--cache-path`, and `--format`.
+`sync --help` documents `--offline` and `--fixture` as explicit fixture selectors, and `--live` as a compatibility alias, plus `--repo`, `--issues`, `--wiki`, `--pulls`, `--comments`, `--index`, `--id`, `--input`, `--idempotency-key`, `--max-pages`, `--max-records`, `--per-page`, `--cache-path`, and `--format`.
 
 Live sync fetches issue records, comments, and wiki pages through the live GitCode provider. Fetches are page/resource scoped; successful records are committed to cache, failures are collected and reported, and re-sync should report deltas rather than duplicate records. Issue collection sync uses list-level issue revisions before comment-list fetches, so an unchanged issue can report `skipped_by_revision` and avoid listing comments again. Wiki collection sync uses list-level page revisions before body fetches, so an unchanged page can report `skipped_by_revision` and avoid a full page-body request. Auth failures and rate limits are reported as diagnostics instead of raw API payloads.
 
 For large repositories, bound collection work explicitly:
 
 ```sh
-gitcode-mcp --timeout 30s sync --live --repo "YOUR_REPO" --issues --max-pages 3 --per-page 50
+gitcode-mcp --timeout 30s sync --repo "YOUR_REPO" --issues --max-pages 3 --per-page 50
 ```
 
 The startup `--timeout` value bounds the whole CLI operation context. Collection bounds limit list traversal and record commits. If the operation times out or is cancelled after some records are written, the command reports partial counts and typed diagnostics while keeping successful records in the cache.
@@ -86,32 +86,32 @@ Use `--format json` to inspect the same counters structurally for MCP/automation
 
 ## 5. Live write
 
-Write commands require exactly one of `--dry-run` or `--live`.
+Write commands execute live by default. Use `--dry-run` to validate without mutating the remote.
 
 Execute a live issue create only after credentials and binding are ready:
 
 ```sh
-gitcode-mcp create-issue --live --idempotency-key "ik-001" --title "Test"
+gitcode-mcp create-issue --idempotency-key "ik-001" --title "Test"
 ```
 
 Include an issue body when needed:
 
 ```sh
-gitcode-mcp create-issue --live --idempotency-key "ik-001" --title "Test" --body "Body"
+gitcode-mcp create-issue --idempotency-key "ik-001" --title "Test" --body "Body"
 ```
 
-Validate without mutating the remote by using dry-run instead of live:
+Validate without mutating the remote by using dry-run:
 
 ```sh
 gitcode-mcp create-issue --dry-run --idempotency-key "ik-001" --title "Test" --body "Body"
 ```
 
-`create-issue --help` documents `--live`, `--dry-run`, `--idempotency-key`, `--title`, and `--body`. `--live` executes the live write, `--dry-run` validates without mutation, `--idempotency-key` supports audited retries, `--title` is required, and `--body` supplies the issue body.
+`create-issue --help` documents `--live`, `--dry-run`, `--idempotency-key`, `--title`, and `--body`. `--dry-run` validates without mutation, `--idempotency-key` supports audited retries, `--title` is required, and `--body` supplies the issue body.
 
 Create a pull request through the same audited CLI write lifecycle:
 
 ```sh
-gitcode-mcp create-pr --live --repo "YOUR_REPO" --idempotency-key "ik-pr-001" --title "Test PR" --head "feature-branch" --base "main" --body "Body"
+gitcode-mcp create-pr --repo "YOUR_REPO" --idempotency-key "ik-pr-001" --title "Test PR" --head "feature-branch" --base "main" --body "Body"
 ```
 
 `create-pr --help` documents `--live`, `--dry-run`, `--idempotency-key`, `--title`, `--body`, `--head`, and `--base`. `create-mr` is an alias for GitCode UI terminology and uses the same service write path.
@@ -198,10 +198,10 @@ For a specific repository:
 gitcode-mcp doctor --repo "YOUR_REPO"
 ```
 
-Include live checks only when credentials and network access are intentionally available:
+Force deterministic fixture diagnostics when credentials or network access are intentionally unavailable:
 
 ```sh
-gitcode-mcp doctor --repo "YOUR_REPO" --live
+gitcode-mcp doctor --offline --repo "YOUR_REPO"
 ```
 
 Doctor output covers binary version, config path, cache path, cache schema version, repository binding status, token source and credential status, provider mode, auth probe status when requested, last sync, index freshness, and MCP transport health. Sensitive values are redacted.
@@ -219,7 +219,7 @@ Quick checks:
 | No token configured | `gitcode-mcp auth status` | Set `GITCODE_TOKEN` or configure a credential store from [Secrets](secrets.md) |
 | No repo bound | `gitcode-mcp doctor` | Run `gitcode-mcp bind --repo-owner "YOUR_OWNER" --repo "YOUR_REPO"` |
 | Auth failure | `gitcode-mcp auth status --live --owner "YOUR_OWNER" --repo "YOUR_REPO"` | Verify token scope and repository access |
-| Rate limited | `gitcode-mcp sync --live --repo "YOUR_REPO" --issues --wiki` | Retry later; keep cache reads offline |
+| Rate limited | `gitcode-mcp sync --repo "YOUR_REPO" --issues --wiki` | Retry later; keep cache reads offline |
 | Missing or stale index | `gitcode-mcp sync-status --repo "YOUR_REPO"` and `gitcode-mcp stale-index --repo "YOUR_REPO"` | Run `gitcode-mcp index --repo "YOUR_REPO" --full` |
 | MCP not ready | HTTP/SSE `/ready` or `gitcode-mcp doctor` | Confirm cache path and repository binding |
 
