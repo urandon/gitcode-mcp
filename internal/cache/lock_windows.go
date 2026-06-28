@@ -1,5 +1,3 @@
-//go:build !windows
-
 package cache
 
 import (
@@ -8,9 +6,12 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"syscall"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
+
+const wholeFileLockRange = ^uint32(0)
 
 func (s *SQLiteStore) AcquireLock(ctx context.Context, lockPath string) (*LockHandle, error) {
 	return s.acquireLock(ctx, lockPath, WriterOwner{Operation: "legacy", StartedAt: time.Now().UTC(), PID: os.Getpid(), CachePath: s.cachePath})
@@ -50,16 +51,16 @@ func (s *SQLiteStore) acquireLock(ctx context.Context, lockPath string, owner Wr
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := lockFileExclusive(file); err != nil {
 		_ = file.Close()
-		if err == syscall.EWOULDBLOCK || err == syscall.EAGAIN {
+		if isWindowsLockContention(err) {
 			held := readLockOwner(lockPath)
 			return nil, ErrLockContention{Path: lockPath, HolderHint: ownerHint(held), Operation: held.Operation, RepoID: held.RepoID, StartedAt: held.StartedAt, PID: held.PID, CachePath: held.CachePath}
 		}
 		return nil, err
 	}
 	if err := writeLockOwner(file, owner); err != nil {
-		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = unlockFile(file)
 		_ = file.Close()
 		return nil, err
 	}
@@ -75,12 +76,39 @@ func (s *SQLiteStore) ReleaseLock(ctx context.Context, handle *LockHandle) error
 	handle.file = nil
 	_ = file.Truncate(0)
 	_, _ = file.Seek(0, 0)
-	unlockErr := syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+	unlockErr := unlockFile(file)
 	closeErr := file.Close()
 	if unlockErr != nil {
 		return unlockErr
 	}
 	return closeErr
+}
+
+func lockFileExclusive(file *os.File) error {
+	var overlapped windows.Overlapped
+	return windows.LockFileEx(
+		windows.Handle(file.Fd()),
+		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
+		0,
+		wholeFileLockRange,
+		wholeFileLockRange,
+		&overlapped,
+	)
+}
+
+func unlockFile(file *os.File) error {
+	var overlapped windows.Overlapped
+	return windows.UnlockFileEx(
+		windows.Handle(file.Fd()),
+		0,
+		wholeFileLockRange,
+		wholeFileLockRange,
+		&overlapped,
+	)
+}
+
+func isWindowsLockContention(err error) bool {
+	return err == windows.ERROR_LOCK_VIOLATION || err == windows.ERROR_SHARING_VIOLATION
 }
 
 func writeLockOwner(file *os.File, owner WriterOwner) error {

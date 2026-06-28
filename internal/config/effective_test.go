@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/zalando/go-keyring"
 )
 
 func TestEffectiveConfigScenarios(t *testing.T) {
@@ -92,6 +94,40 @@ func TestEffectiveConfigScenarios(t *testing.T) {
 		}
 		if strings.Contains(RenderCredentialStatus(status), "keyring-secret") {
 			t.Fatalf("rendered keyring status leaked token")
+		}
+	})
+
+	t.Run("SCN-AUTH-SYSTEM-KEYRING-LEGACY-USER-FALLBACK", func(t *testing.T) {
+		t.Setenv("USER", "legacy-user")
+		t.Setenv("USERNAME", "")
+		src := newMemorySource(t)
+		eff, err := LoadEffective(src, Overrides{})
+		if err != nil {
+			t.Fatalf("LoadEffective returned error: %v", err)
+		}
+		var calls []string
+		provider := KeychainCredentialProvider{Get: func(service, user string) (string, error) {
+			calls = append(calls, service+"/"+user)
+			if service != "gitcode-mcp" {
+				t.Fatalf("service = %q, want gitcode-mcp", service)
+			}
+			if user == "token" {
+				return "", keyring.ErrNotFound
+			}
+			if user == "legacy-user" {
+				return "legacy-keyring-secret", nil
+			}
+			return "", keyring.ErrNotFound
+		}}
+		secret, status, err := provider.Resolve(context.Background(), eff)
+		if err != nil {
+			t.Fatalf("Resolve returned error: %v", err)
+		}
+		if secret.Value() != "legacy-keyring-secret" || !status.Present || status.Source != "keyring" {
+			t.Fatalf("status=%#v secret=%q", status, secret.Value())
+		}
+		if strings.Join(calls[:2], ",") != "gitcode-mcp/token,gitcode-mcp/legacy-user" {
+			t.Fatalf("calls = %#v", calls)
 		}
 	})
 

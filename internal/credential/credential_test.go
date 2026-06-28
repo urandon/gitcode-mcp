@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"gitcode-mcp/internal/config"
+
+	"github.com/zalando/go-keyring"
 )
 
 type memSource struct {
@@ -148,6 +150,37 @@ func TestKeyringProviderUsesSystemServiceAndAccount(t *testing.T) {
 	token := p.Token(context.Background())
 	if token.Value != "test-token-xxx" {
 		t.Fatalf("token = %q, want test-token-xxx", token.Value)
+	}
+}
+
+func TestKeyringProviderFallsBackToLegacyUserAccount(t *testing.T) {
+	t.Setenv("USER", "legacy-user")
+	t.Setenv("USERNAME", "")
+	var calls []string
+	p := &KeychainProvider{Get: func(service, user string) (string, error) {
+		calls = append(calls, service+"/"+user)
+		if service != "gitcode-mcp" {
+			t.Fatalf("service = %q, want gitcode-mcp", service)
+		}
+		if user == "token" {
+			return "", keyring.ErrNotFound
+		}
+		if user == "legacy-user" {
+			return "legacy-token-xxx", nil
+		}
+		return "", keyring.ErrNotFound
+	}}
+
+	st := p.Probe(context.Background())
+	if !st.Present || st.Source != "keyring" {
+		t.Fatalf("status=%#v", st)
+	}
+	token := p.Token(context.Background())
+	if token.Value != "legacy-token-xxx" {
+		t.Fatalf("token = %q, want legacy-token-xxx", token.Value)
+	}
+	if strings.Join(calls[:2], ",") != "gitcode-mcp/token,gitcode-mcp/legacy-user" {
+		t.Fatalf("calls = %#v", calls)
 	}
 }
 

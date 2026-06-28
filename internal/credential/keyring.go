@@ -3,6 +3,7 @@ package credential
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 
 	"github.com/zalando/go-keyring"
@@ -27,7 +28,7 @@ func (p *KeychainProvider) Probe(ctx context.Context) Status {
 	if get == nil {
 		get = keyring.Get
 	}
-	token, err := get(keyringService, keyringUser)
+	token, err := getKeyringToken(get)
 	if err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
 			return Status{
@@ -72,9 +73,46 @@ func (p *KeychainProvider) Token(ctx context.Context) ResolvedToken {
 	if get == nil {
 		get = keyring.Get
 	}
-	token, err := get(keyringService, keyringUser)
+	token, err := getKeyringToken(get)
 	if err != nil {
 		return ResolvedToken{}
 	}
 	return ResolvedToken{Value: strings.TrimSpace(token)}
+}
+
+func getKeyringToken(get func(service, user string) (string, error)) (string, error) {
+	var lastNotFound error
+	for _, user := range keyringUsers() {
+		token, err := get(keyringService, user)
+		if err == nil {
+			return token, nil
+		}
+		if errors.Is(err, keyring.ErrNotFound) {
+			lastNotFound = err
+			continue
+		}
+		return "", err
+	}
+	if lastNotFound != nil {
+		return "", keyring.ErrNotFound
+	}
+	return "", keyring.ErrNotFound
+}
+
+func keyringUsers() []string {
+	return uniqueNonEmpty([]string{keyringUser, os.Getenv("USER"), os.Getenv("USERNAME")})
+}
+
+func uniqueNonEmpty(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	var out []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
 }
