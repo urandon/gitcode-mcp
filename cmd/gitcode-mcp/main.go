@@ -41,6 +41,7 @@ type GitCodeStartup struct {
 	MaxResponseSize int64
 	MaxRetries      int
 	Live            bool
+	Offline         bool
 	Token           string
 	token           string
 }
@@ -53,6 +54,7 @@ type startupOptions struct {
 	mcpTransport string
 	mcpBind      string
 	live         bool
+	offline      bool
 	overrides    config.Overrides
 }
 
@@ -76,6 +78,10 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), src))
 		return 2
 	}
+	if opts.live && opts.offline {
+		fmt.Fprintln(stderr, "startup: --live conflicts with --offline/--fixture")
+		return 2
+	}
 	if opts.help {
 		if opts.mcpServe {
 			printMCPServeHelp(stdout)
@@ -97,6 +103,9 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 		if (rest[0] == "auth" || rest[0] == "doctor") && opts.live && !hasCLIFlag(localArgs[1:], "--live") {
 			localArgs = append(localArgs, "--live")
 		}
+		if opts.offline && !hasCLIFlag(localArgs[1:], "--offline") && !hasCLIFlag(localArgs[1:], "--fixture") {
+			localArgs = append(localArgs, "--offline")
+		}
 		if opts.overrides.CachePath != "" && !hasCLIFlag(localArgs[1:], "--cache-path") {
 			localArgs = append(localArgs, "--cache-path", opts.overrides.CachePath)
 		}
@@ -117,11 +126,12 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 		if strings.TrimSpace(credential.Token) != "" {
 			token = credential.Token
 		}
-		if (opts.mcp || opts.mcpServe) && credential.Present && strings.TrimSpace(credential.Token) != "" {
+		if (opts.mcp || opts.mcpServe) && !opts.offline && credential.Present && strings.TrimSpace(credential.Token) != "" {
 			live = true
 		}
 	}
 	deps := buildStartupDeps(cfg, token, live)
+	deps.GitCode.Offline = opts.offline
 	deps.Source = src
 	deps.CredentialResolver = credentialResolver
 	if opts.mcpServe {
@@ -149,6 +159,7 @@ func buildStartupDeps(cfg config.Config, token string, live bool) StartupDeps {
 			MaxResponseSize: cfg.MaxResponseSize,
 			MaxRetries:      cfg.MaxRetries,
 			Live:            live,
+			Offline:         false,
 			Token:           token,
 			token:           token,
 		},
@@ -251,6 +262,10 @@ func parseStartupArgs(args []string) (startupOptions, []string, error) {
 			opts.live = true
 			continue
 		}
+		if arg == "--offline" || arg == "--fixture" {
+			opts.offline = true
+			continue
+		}
 		if strings.HasPrefix(arg, "-") {
 			return opts, nil, fmt.Errorf("startup: unknown global flag %s", arg)
 		}
@@ -260,6 +275,7 @@ func parseStartupArgs(args []string) (startupOptions, []string, error) {
 				return opts, nil, err
 			}
 			serveOpts.live = opts.live || serveOpts.live
+			serveOpts.offline = opts.offline || serveOpts.offline
 			serveOpts.overrides = mergeStartupOverrides(opts.overrides, serveOpts.overrides)
 			return serveOpts, rest, nil
 		}
@@ -302,6 +318,8 @@ func parseMCPServeArgs(args []string) (startupOptions, []string, error) {
 			opts.help = true
 		case arg == "--live":
 			opts.live = true
+		case arg == "--offline" || arg == "--fixture":
+			opts.offline = true
 		case strings.HasPrefix(arg, "--transport="):
 			opts.mcpTransport = strings.TrimPrefix(arg, "--transport=")
 		case arg == "--transport":
@@ -353,7 +371,7 @@ func resolveLiveClient(deps StartupDeps) (gitcode.Client, error) {
 	}
 	token := strings.TrimSpace(gc.Token)
 	if token == "" {
-		return nil, fmt.Errorf("live provider requires GITCODE_TOKEN or configured credential (set GITCODE_TOKEN, configure keychain, or remove --live)")
+		return nil, fmt.Errorf("live provider requires GITCODE_TOKEN or configured credential (set GITCODE_TOKEN, configure keychain, or use --offline/--fixture for deterministic fixture mode)")
 	}
 	provider, err := gitcode.NewLiveProvider(gitcode.ProviderConfig{
 		Mode:            gitcode.ProviderModeLive,
@@ -397,6 +415,9 @@ func runCLICompatibility(ctx context.Context, args []string, stdout io.Writer, s
 	}
 	if len(cliArgs) > 0 && deps.GitCode.Live && !hasCLIFlag(cliArgs[1:], "--live") {
 		cliArgs = append(cliArgs, "--live")
+	}
+	if len(cliArgs) > 0 && deps.GitCode.Offline && !hasCLIFlag(cliArgs[1:], "--offline") && !hasCLIFlag(cliArgs[1:], "--fixture") {
+		cliArgs = append(cliArgs, "--offline")
 	}
 	_ = ctx
 	return cli.ExecuteWithSource(cliArgs, stdout, stderr, deps.Source)
@@ -508,7 +529,8 @@ func printStartupHelp(w io.Writer) {
 	fmt.Fprintln(w, "Usage: gitcode-mcp [global flags] <command> [args]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Global flags:")
-	fmt.Fprintln(w, "  --live                enable live GitCode API provider (requires a configured credential)")
+	fmt.Fprintln(w, "  --live                compatibility alias for live GitCode provider selection")
+	fmt.Fprintln(w, "  --offline, --fixture  use explicit offline/fixture provider")
 	fmt.Fprintln(w, "  --mcp                 run stdio MCP server")
 	fmt.Fprintln(w, "  mcp serve             run MCP server with stdio or HTTP/SSE transport")
 	fmt.Fprintln(w, "  --cache-path PATH     cache database path")
@@ -520,13 +542,13 @@ func printStartupHelp(w io.Writer) {
 }
 
 func printMCPHelp(w io.Writer) {
-	fmt.Fprintln(w, "Usage: gitcode-mcp --mcp [global flags]")
+	fmt.Fprintln(w, "Usage: gitcode-mcp --mcp [--offline|--fixture] [global flags]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Starts stdio MCP mode. stdout is reserved for JSON-RPC frames.")
 }
 
 func printMCPServeHelp(w io.Writer) {
-	fmt.Fprintln(w, "Usage: gitcode-mcp mcp serve --transport stdio|http-sse [--bind 127.0.0.1:PORT]")
+	fmt.Fprintln(w, "Usage: gitcode-mcp mcp serve --transport stdio|http-sse [--offline|--fixture] [--bind 127.0.0.1:PORT]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Starts MCP mode over stdio or HTTP/SSE.")
 }

@@ -162,6 +162,8 @@ type options struct {
 	idempotencyKey string
 	dryRun         bool
 	live           bool
+	offline        bool
+	fixture        bool
 	overwrite      bool
 	redacted       bool
 	runtimeAudit   bool
@@ -263,7 +265,11 @@ func executeWithFactoryAndDeps(args []string, stdout io.Writer, stderr io.Writer
 
 func buildStartupPlan(ctx context.Context, command string, opts options, deps localCommandDeps) (startupPlan, error) {
 	plan := startupPlan{Command: command, ProviderMode: "offline-fixture", CachePath: opts.cachePath, RepoID: opts.repo}
-	if opts.live && isLiveStartupCommand(command) {
+	if opts.live && (opts.offline || opts.fixture) {
+		return plan, service.ErrInvalidQuery{Field: "provider_mode", Message: "--live conflicts with --offline/--fixture"}
+	}
+	explicitOffline := opts.offline || opts.fixture
+	if isLiveStartupCommand(command) && !explicitOffline && !opts.dryRun {
 		plan.ProviderMode = "live-http"
 	}
 	eff, err := config.LoadEffective(deps.Source, config.Overrides{CachePath: opts.cachePath})
@@ -443,6 +449,8 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.idempotencyKey, "idempotency-key", "", "idempotency key")
 	flags.BoolVar(&opts.dryRun, "dry-run", false, "validate write without mutation")
 	flags.BoolVar(&opts.live, "live", false, "execute live write")
+	flags.BoolVar(&opts.offline, "offline", false, "use explicit offline/fixture provider")
+	flags.BoolVar(&opts.fixture, "fixture", false, "use explicit fixture provider")
 	flags.BoolVar(&opts.overwrite, "overwrite", false, "overwrite existing file")
 	flags.BoolVar(&opts.redacted, "redacted", false, "redact secret values")
 	flags.BoolVar(&opts.runtimeAudit, "runtime-audit", false, "emit runtime audit report")
@@ -475,7 +483,7 @@ func reorderFlags(args []string) []string {
 		arg := args[i]
 		if strings.HasPrefix(arg, "--") {
 			flags = append(flags, arg)
-			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--index" || arg == "--dry-run" || arg == "--live" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" {
+			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--index" || arg == "--dry-run" || arg == "--live" || arg == "--offline" || arg == "--fixture" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" {
 				continue
 			}
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
@@ -534,7 +542,11 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 		return 0
 	}
 	if command == "doctor" {
-		plan, _ := buildStartupPlan(context.Background(), command, opts, deps)
+		plan, planErr := buildStartupPlan(context.Background(), command, opts, deps)
+		var invalid service.ErrInvalidQuery
+		if errors.As(planErr, &invalid) {
+			return writeError(stderr, opts.format, planErr)
+		}
 		return executeDoctorCommand(context.Background(), opts, plan, stdout, stderr, deps)
 	}
 	if command == "migrate-cache" {
@@ -961,8 +973,11 @@ func validateWriteOptions(command string, opts options) error {
 	if strings.TrimSpace(opts.owner) != "" || strings.TrimSpace(opts.name) != "" || strings.TrimSpace(opts.apiBaseURL) != "" {
 		return service.ErrInvalidQuery{Field: "write_scope", Message: "write commands accept only --repo configured repo id"}
 	}
-	if opts.dryRun == opts.live {
-		return service.ErrInvalidQuery{Field: "write_mode", Message: "exactly one of --dry-run or --live is required"}
+	if opts.live && opts.dryRun {
+		return service.ErrInvalidQuery{Field: "write_mode", Message: "--live conflicts with --dry-run"}
+	}
+	if (opts.offline || opts.fixture) && !opts.dryRun {
+		return service.ErrInvalidQuery{Field: "write_mode", Message: "offline write commands require --dry-run"}
 	}
 	return nil
 }
@@ -1065,7 +1080,7 @@ func writeRequest(opts options) service.WriteCommandRequest {
 		}
 	}
 	mode := service.WriteModeDryRun
-	if opts.live {
+	if !opts.dryRun {
 		mode = service.WriteModeLive
 	}
 	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, Number: opts.number, CommentID: opts.commentID, Slug: opts.slug, Path: opts.path, Sha: opts.sha, Title: opts.title, Body: opts.body, Head: opts.head, Base: opts.base, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
@@ -1501,7 +1516,7 @@ func executeDoctorCommand(ctx context.Context, opts options, plan startupPlan, s
 		status := plan.CredentialStatus
 		cred = &status
 	}
-	report, err := doctor.Build(ctx, doctor.Request{Version: version, Source: deps.Source, CredentialReporter: deps.CredentialReporter, CredentialStatus: cred, CachePath: cachePath, Live: opts.live, ProviderMode: plan.ProviderMode, MCPToolAccess: plan.MCPToolAccess, APIBaseURL: plan.APIBaseURL, RepoID: opts.repo, LiveBinding: plan.LiveRepositoryBinding})
+	report, err := doctor.Build(ctx, doctor.Request{Version: version, Source: deps.Source, CredentialReporter: deps.CredentialReporter, CredentialStatus: cred, CachePath: cachePath, Live: plan.ProviderMode == "live-http", ProviderMode: plan.ProviderMode, MCPToolAccess: plan.MCPToolAccess, APIBaseURL: plan.APIBaseURL, RepoID: opts.repo, LiveBinding: plan.LiveRepositoryBinding})
 	if err != nil {
 		return writeError(stderr, opts.format, err)
 	}
@@ -1766,10 +1781,12 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH cache database path")
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
 	case "sync":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s [--live] --repo REPO [--issues] [--wiki] [--index] [--id ID] [--input REMOTE_ALIAS] [--idempotency-key KEY]\n\n", command)
-		fmt.Fprintln(w, "Synchronize cached records with the configured provider.")
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s [--offline|--fixture] --repo REPO [--issues] [--wiki] [--index] [--id ID] [--input REMOTE_ALIAS] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintln(w, "Synchronize cached records. Uses live GitCode by default; use --offline/--fixture for deterministic fixture sync.")
 		fmt.Fprintln(w, "Flags:")
-		fmt.Fprintln(w, "  --live              use live GitCode API provider for sync")
+		fmt.Fprintln(w, "  --live              compatibility alias for live provider selection")
+		fmt.Fprintln(w, "  --offline           use offline/fixture provider")
+		fmt.Fprintln(w, "  --fixture           use fixture provider")
 		fmt.Fprintln(w, "  --repo REPO         repository id")
 		fmt.Fprintln(w, "  --issues            sync issue records")
 		fmt.Fprintln(w, "  --wiki              sync wiki records")
@@ -1819,8 +1836,8 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH cache database path")
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
 	case "create-issue":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --title TITLE [--body BODY] [--state STATE] [--labels A,B] [--idempotency-key KEY] (--dry-run | --live)\n\n", command)
-		fmt.Fprintln(w, "Create a new issue. Requires exactly one of --dry-run or --live.")
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --title TITLE [--body BODY] [--state STATE] [--labels A,B] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintln(w, "Create a new issue. Executes live by default; use --dry-run for no-mutation validation.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --title TITLE       issue title (required)")
@@ -1829,12 +1846,12 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --labels A,B        comma-separated labels")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
-		fmt.Fprintln(w, "  --live              execute live write")
+		fmt.Fprintln(w, "  --live              compatibility alias for live write")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "update-issue":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --number N [--title TITLE] [--body BODY] [--state STATE] [--labels A,B] [--idempotency-key KEY] (--dry-run | --live)\n\n", command)
-		fmt.Fprintln(w, "Update an existing issue. Requires exactly one of --dry-run or --live.")
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --number N [--title TITLE] [--body BODY] [--state STATE] [--labels A,B] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintln(w, "Update an existing issue. Executes live by default; use --dry-run for no-mutation validation.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --number N          issue number (required)")
@@ -1844,12 +1861,12 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --labels A,B        comma-separated labels")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
-		fmt.Fprintln(w, "  --live              execute live write")
+		fmt.Fprintln(w, "  --live              compatibility alias for live write")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "create-pr", "create-mr":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --title TITLE --head BRANCH --base BRANCH [--body BODY] [--idempotency-key KEY] (--dry-run | --live)\n\n", command)
-		fmt.Fprintln(w, "Create a new pull request / merge request. Requires exactly one of --dry-run or --live.")
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --title TITLE --head BRANCH --base BRANCH [--body BODY] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintln(w, "Create a new pull request / merge request. Executes live by default; use --dry-run for no-mutation validation.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --title TITLE       pull request title (required)")
@@ -1858,12 +1875,12 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --body BODY         pull request body")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
-		fmt.Fprintln(w, "  --live              execute live write")
+		fmt.Fprintln(w, "  --live              compatibility alias for live write")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "create-page":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --title TITLE --body BODY [--slug SLUG] [--idempotency-key KEY] (--dry-run | --live)\n\n", command)
-		fmt.Fprintln(w, "Create a new wiki page. Requires exactly one of --dry-run or --live.")
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --title TITLE --body BODY [--slug SLUG] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintln(w, "Create a new wiki page. Executes live by default; use --dry-run for no-mutation validation.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --title TITLE       page title (required)")
@@ -1871,12 +1888,12 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --slug SLUG         page slug")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
-		fmt.Fprintln(w, "  --live              execute live write")
+		fmt.Fprintln(w, "  --live              compatibility alias for live write")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "update-page":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --slug SLUG [--title TITLE] [--body BODY] [--idempotency-key KEY] (--dry-run | --live)\n\n", command)
-		fmt.Fprintln(w, "Update an existing wiki page. Requires exactly one of --dry-run or --live.")
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --slug SLUG [--title TITLE] [--body BODY] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintln(w, "Update an existing wiki page. Executes live by default; use --dry-run for no-mutation validation.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --slug SLUG         page slug (required)")
@@ -1884,24 +1901,24 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --body BODY         updated body")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
-		fmt.Fprintln(w, "  --live              execute live write")
+		fmt.Fprintln(w, "  --live              compatibility alias for live write")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "add-comment":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --number N --body BODY [--idempotency-key KEY] (--dry-run | --live)\n\n", command)
-		fmt.Fprintln(w, "Add a comment to an issue. Requires exactly one of --dry-run or --live.")
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --number N --body BODY [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintln(w, "Add a comment to an issue. Executes live by default; use --dry-run for no-mutation validation.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --number N          issue number (required)")
 		fmt.Fprintln(w, "  --body BODY         comment body (required)")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
-		fmt.Fprintln(w, "  --live              execute live write")
+		fmt.Fprintln(w, "  --live              compatibility alias for live write")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "update-comment":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --comment-id ID --body BODY [--number N] [--idempotency-key KEY] (--dry-run | --live)\n\n", command)
-		fmt.Fprintln(w, "Update an existing issue comment. Requires exactly one of --dry-run or --live.")
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --comment-id ID --body BODY [--number N] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintln(w, "Update an existing issue comment. Executes live by default; use --dry-run for no-mutation validation.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --comment-id ID     issue comment id (required)")
@@ -1909,19 +1926,19 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --body BODY         updated comment body (required)")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
-		fmt.Fprintln(w, "  --live              execute live write")
+		fmt.Fprintln(w, "  --live              compatibility alias for live write")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "add-label":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --number N --label LABEL [--idempotency-key KEY] (--dry-run | --live)\n\n", command)
-		fmt.Fprintln(w, "Add a label to an issue. Requires exactly one of --dry-run or --live.")
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --number N --label LABEL [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintln(w, "Add a label to an issue. Executes live by default; use --dry-run for no-mutation validation.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --number N          issue number (required)")
 		fmt.Fprintln(w, "  --label LABEL       label to add (required)")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
-		fmt.Fprintln(w, "  --live              execute live write")
+		fmt.Fprintln(w, "  --live              compatibility alias for live write")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "config":
@@ -1941,11 +1958,13 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Run gitcode-mcp auth SUBCOMMAND --help for details.")
 	case "doctor":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s [--repo REPO] [--live] [--runtime-audit] [--cache-path PATH]\n\n", command)
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s [--repo REPO] [--offline|--fixture] [--runtime-audit] [--cache-path PATH]\n\n", command)
 		fmt.Fprintln(w, "Aggregate subsystem diagnostics with public-safe output.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id")
-		fmt.Fprintln(w, "  --live              include live provider checks")
+		fmt.Fprintln(w, "  --live              compatibility alias for live provider checks")
+		fmt.Fprintln(w, "  --offline           report explicit offline/fixture provider mode")
+		fmt.Fprintln(w, "  --fixture           report explicit fixture provider mode")
 		fmt.Fprintln(w, "  --runtime-audit     emit runtime audit report")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")

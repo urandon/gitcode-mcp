@@ -23,11 +23,10 @@ gitcode-mcp create-pr \
   --body "Summary and tests." \
   --head codex/issue-4-explicit-pr-issue-relation \
   --base main \
-  --live \
   --idempotency-key ik-pr-001
 ```
 
-`create-mr` is an equivalent alias for GitCode UI terminology. Both commands use the same audited service write path and report `command=create-pr`.
+`create-pr` runs live by default when credentials and repository binding are available. `--live` remains accepted as a compatibility alias. `create-mr` is an equivalent alias for GitCode UI terminology. Both commands use the same audited service write path and report `command=create-pr`.
 
 Use the MCP write lifecycle for agent workflows:
 

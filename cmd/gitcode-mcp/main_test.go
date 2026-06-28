@@ -249,6 +249,29 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 		assertStartupCacheHasLiveMockRecords(t, cachePath)
 	})
 
+	t.Run("SCN-MOCKAPI-DEFAULT-LIVE-SYNC-VALID", func(t *testing.T) {
+		server := testnet.NewGitCodeAPIServer(t)
+		defer server.Close()
+		cachePath := filepath.Join(t.TempDir(), "cache.db")
+		src := newTestSource(t)
+		src.env[config.EnvToken] = "test-token"
+		addRepoForStartupTest(t, cachePath, server.BaseURL())
+
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"sync", "--cache-path", cachePath, "--repo", "fixture-a", "--issues"}, strings.NewReader(""), &stdout, &stderr, src)
+		if code != 0 {
+			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+		}
+		counts := server.Counts()
+		if counts.ListIssues == 0 || counts.UnexpectedRequests != 0 {
+			t.Fatalf("mock counts = %#v", counts)
+		}
+		out := stdout.String() + stderr.String()
+		if strings.Contains(out, "ISSUE-42") || strings.Contains(out, "WIKI-HOME") {
+			t.Fatalf("fixture identifiers leaked: %q", out)
+		}
+	})
+
 	t.Run("SCN-MOCKAPI-LIVE-SYNC-MISSING-CREDENTIAL", func(t *testing.T) {
 		server := testnet.NewGitCodeAPIServer(t)
 		defer server.Close()
@@ -261,6 +284,29 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 
 		var stdout, stderr bytes.Buffer
 		code := run([]string{"sync", "--live", "--cache-path", cachePath, "--repo", "fixture-a"}, strings.NewReader(""), &stdout, &stderr, src)
+		if code == 0 {
+			t.Fatalf("code=0 stdout=%q", stdout.String())
+		}
+		if counts := server.Counts(); counts.TotalRequests != 0 {
+			t.Fatalf("mock counts=%#v, want zero", counts)
+		}
+		if !strings.Contains(stderr.String(), "failure_class: config_credential") {
+			t.Fatalf("stderr missing canonical failure class: %q", stderr.String())
+		}
+	})
+
+	t.Run("SCN-MOCKAPI-DEFAULT-LIVE-SYNC-MISSING-CREDENTIAL", func(t *testing.T) {
+		server := testnet.NewGitCodeAPIServer(t)
+		defer server.Close()
+		cachePath := filepath.Join(t.TempDir(), "cache.db")
+		src := newTestSource(t)
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		src.files[configPath] = []byte("credential:\n  store: env\n")
+		src.env[config.EnvMCPConfigPath] = configPath
+		addRepoForStartupTest(t, cachePath, server.BaseURL())
+
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"sync", "--cache-path", cachePath, "--repo", "fixture-a", "--issues"}, strings.NewReader(""), &stdout, &stderr, src)
 		if code == 0 {
 			t.Fatalf("code=0 stdout=%q", stdout.String())
 		}
@@ -352,7 +398,7 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 		addRepoForStartupTest(t, cachePath, server.BaseURL())
 
 		var stdout, stderr bytes.Buffer
-		code := run([]string{"sync", "--cache-path", cachePath, "--repo", "fixture-a"}, strings.NewReader(""), &stdout, &stderr, src)
+		code := run([]string{"sync", "--offline", "--cache-path", cachePath, "--repo", "fixture-a"}, strings.NewReader(""), &stdout, &stderr, src)
 		if code != 0 {
 			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 		}
@@ -407,6 +453,30 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 		}
 		if counts := server.Counts(); strings.Contains(out, "test-token") || strings.Contains(out, "Authorization") || counts.TotalRequests != 0 {
 			t.Fatalf("doctor leaked secret or contacted server; counts=%#v out=%q", counts, out)
+		}
+	})
+
+	t.Run("SCN-CLI-DOCTOR-DEFAULT-LIVE-JSON-STARTUP-SNAPSHOT", func(t *testing.T) {
+		server := testnet.NewGitCodeAPIServer(t)
+		defer server.Close()
+		cachePath := filepath.Join(t.TempDir(), "cache.db")
+		src := newTestSource(t)
+		src.env[config.EnvToken] = "test-token"
+		addRepoForStartupTest(t, cachePath, server.BaseURL())
+
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"doctor", "--format", "json", "--cache-path", cachePath, "--repo", "fixture-a"}, strings.NewReader(""), &stdout, &stderr, src)
+		if code != 0 {
+			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+		}
+		out := stdout.String()
+		for _, want := range []string{"\"provider_mode\": \"live-http\"", "\"source\": \"env:GITCODE_TOKEN\"", fmt.Sprintf("\"api_base_url\": \"%s\"", server.BaseURL()), "\"readiness_status\": \"ready\""} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("doctor output missing %q in %q", want, out)
+			}
+		}
+		if counts := server.Counts(); strings.Contains(out, "test-token") || counts.TotalRequests != 0 {
+			t.Fatalf("doctor leaked token or contacted server; counts=%#v out=%q", counts, out)
 		}
 	})
 
@@ -485,7 +555,7 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 		}
 
 		var stdout, stderr bytes.Buffer
-		code := run([]string{"create-issue", "--live", "--cache-path", cachePath, "--repo", "fixture-a", "--title", "Mock Created", "--body", "created by mock keychain", "--idempotency-key", "cred-write-1"}, strings.NewReader(""), &stdout, &stderr, src)
+		code := run([]string{"create-issue", "--cache-path", cachePath, "--repo", "fixture-a", "--title", "Mock Created", "--body", "created by mock keychain", "--idempotency-key", "cred-write-1"}, strings.NewReader(""), &stdout, &stderr, src)
 		if code != 0 {
 			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 		}
@@ -839,6 +909,42 @@ func TestEntrypointMCPAutoLiveWithKeychainCredential(t *testing.T) {
 	}
 	if strings.Contains(stdout.String()+stderr.String(), "test-token") {
 		t.Fatalf("token emitted stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestEntrypointMCPOfflineDisablesAutoLiveWithKeychainCredential(t *testing.T) {
+	src := newTestSource(t)
+	src.env["GITCODE_MCP_TEST_KEYCHAIN_TOKEN"] = "test-token"
+	old := mcpRoute
+	defer func() { mcpRoute = old }()
+	var got StartupDeps
+	mcpRoute = func(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, deps StartupDeps) int {
+		got = deps
+		return 0
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--mcp", "--offline", "--cache-path", filepath.Join(t.TempDir(), "cache.db")}, strings.NewReader(""), &stdout, &stderr, src)
+	if code != 0 {
+		t.Fatalf("exit = %d stderr=%q", code, stderr.String())
+	}
+	if got.GitCode.Live || !got.GitCode.Offline {
+		t.Fatalf("expected explicit MCP offline mode, got %#v", got.GitCode)
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "test-token") {
+		t.Fatalf("token emitted stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestEntrypointProviderModeConflict(t *testing.T) {
+	src := newTestSource(t)
+	src.env[config.EnvToken] = "sentinel-token"
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--mcp", "--live", "--offline"}, strings.NewReader(""), &stdout, &stderr, src)
+	if code != 2 {
+		t.Fatalf("exit = %d stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--live conflicts with --offline/--fixture") {
+		t.Fatalf("stderr missing conflict diagnostic: %q", stderr.String())
 	}
 }
 

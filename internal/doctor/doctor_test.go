@@ -87,7 +87,7 @@ func TestBuildFullReport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Version != "test-version" || report.Cache.SchemaVersion != "7" || report.Repo.Status != "ready" || report.Credential.Status != "token_configured" || report.Sync.Status != "available" || report.Index.Status != "available" || report.MCP.TransportStdio != "supported" || report.LiveProvider.ProviderMode != "fixture" {
+	if report.Version != "test-version" || report.Cache.SchemaVersion != "7" || report.Repo.Status != "ready" || report.Credential.Status != "token_configured" || report.Sync.Status != "available" || report.Index.Status != "available" || report.MCP.TransportStdio != "supported" || report.LiveProvider.ProviderMode != "offline-fixture" {
 		t.Fatalf("unexpected report: %#v", report)
 	}
 	if report.MCP.ToolAccess != "write" {

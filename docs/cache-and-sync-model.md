@@ -50,7 +50,7 @@ When a real writer conflict remains, the caller should receive a typed cache-bus
 
 ## Live Sync Semantics
 
-`gitcode-mcp sync` keeps the fixture/offline provider as the default. `gitcode-mcp sync --live` opts into the live GitCode provider for the configured repository and uses the current cache as the durable local source for later reads.
+`gitcode-mcp sync` uses the live GitCode provider by default for a configured repository and uses the current cache as the durable local source for later reads. `gitcode-mcp sync --offline` or `gitcode-mcp sync --fixture` selects the deterministic fixture/offline provider for docs smoke and tests.
 
 The sync command supports these live sync selectors:
 
