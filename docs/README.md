@@ -7,6 +7,7 @@ Start with:
 - [architecture.md](architecture.md)
 - [component-architecture.md](component-architecture.md)
 - [test-architecture.md](test-architecture.md)
+- [test-intent-migration.md](test-intent-migration.md)
 - [cache-and-sync-model.md](cache-and-sync-model.md)
 - [gitcode-api-discovery.md](gitcode-api-discovery.md)
 - [operations/mcp-installation-and-secrets.md](operations/mcp-installation-and-secrets.md)

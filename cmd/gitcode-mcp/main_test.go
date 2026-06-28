@@ -17,6 +17,7 @@ import (
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/diagnostics"
+	"gitcode-mcp/internal/testnet"
 
 	_ "modernc.org/sqlite"
 )
@@ -225,7 +226,7 @@ func TestEntrypointCLICompatibility(t *testing.T) {
 
 func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 	t.Run("SCN-MOCKAPI-LIVE-SYNC-VALID", func(t *testing.T) {
-		server := NewMockGitCodeAPI(t)
+		server := testnet.NewGitCodeAPIServer(t)
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)
@@ -249,7 +250,7 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 	})
 
 	t.Run("SCN-MOCKAPI-LIVE-SYNC-MISSING-CREDENTIAL", func(t *testing.T) {
-		server := NewMockGitCodeAPI(t)
+		server := testnet.NewGitCodeAPIServer(t)
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)
@@ -272,7 +273,7 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 	})
 
 	t.Run("SCN-MOCKAPI-LIVE-SYNC-INVALID-TOKEN-401 SCN-CLI-ERROR-OUTPUT-401", func(t *testing.T) {
-		server := NewMockGitCodeAPI(t, MockGitCodeAPIAuthMode(mockGitCodeAPIAuthReject401))
+		server := testnet.NewGitCodeAPIServer(t, testnet.WithGitCodeAPIAuthMode(testnet.GitCodeAPIAuthReject401))
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)
@@ -297,27 +298,27 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 
 	for _, tt := range []struct {
 		name string
-		mode mockGitCodeAPIFailureMode
+		mode testnet.GitCodeAPIFailureMode
 		want string
 	}{
-		{name: "SCN-CLI-ERROR-OUTPUT-400", mode: mockGitCodeAPIFailure400, want: string(diagnostics.CodeAPIFailure)},
-		{name: "SCN-CLI-ERROR-OUTPUT-404", mode: mockGitCodeAPIFailure404, want: string(diagnostics.CodeAPIFailure)},
-		{name: "SCN-CLI-ERROR-OUTPUT-409", mode: mockGitCodeAPIFailure409, want: string(diagnostics.CodeAPIFailure)},
-		{name: "SCN-CLI-ERROR-OUTPUT-413", mode: mockGitCodeAPIFailure413, want: string(diagnostics.CodeAPIFailure)},
-		{name: "SCN-CLI-ERROR-OUTPUT-429", mode: mockGitCodeAPIFailure429, want: string(diagnostics.CodeAPIFailure)},
-		{name: "SCN-CLI-ERROR-OUTPUT-MALFORMED-JSON", mode: mockGitCodeAPIFailureMalformedJSON, want: string(diagnostics.CodeSchemaDecode)},
-		{name: "SCN-CLI-ERROR-OUTPUT-SCHEMA-MISMATCH", mode: mockGitCodeAPIFailureSchemaMismatch, want: string(diagnostics.CodeSchemaDecode)},
-		{name: "SCN-CLI-ERROR-OUTPUT-PARTIAL-RESPONSE", mode: mockGitCodeAPIFailurePartial, want: string(diagnostics.CodeSchemaDecode)},
-		{name: "SCN-CLI-ERROR-OUTPUT-TIMEOUT", mode: mockGitCodeAPIFailureTimeout, want: string(diagnostics.CodeLiveTransportFailure)},
-		{name: "SCN-CLI-ERROR-OUTPUT-500", mode: mockGitCodeAPIFailure500, want: string(diagnostics.CodeLiveTransportFailure)},
+		{name: "SCN-CLI-ERROR-OUTPUT-400", mode: testnet.GitCodeAPIFailure400, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-CLI-ERROR-OUTPUT-404", mode: testnet.GitCodeAPIFailure404, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-CLI-ERROR-OUTPUT-409", mode: testnet.GitCodeAPIFailure409, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-CLI-ERROR-OUTPUT-413", mode: testnet.GitCodeAPIFailure413, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-CLI-ERROR-OUTPUT-429", mode: testnet.GitCodeAPIFailure429, want: string(diagnostics.CodeAPIFailure)},
+		{name: "SCN-CLI-ERROR-OUTPUT-MALFORMED-JSON", mode: testnet.GitCodeAPIFailureMalformedJSON, want: string(diagnostics.CodeSchemaDecode)},
+		{name: "SCN-CLI-ERROR-OUTPUT-SCHEMA-MISMATCH", mode: testnet.GitCodeAPIFailureSchemaMismatch, want: string(diagnostics.CodeSchemaDecode)},
+		{name: "SCN-CLI-ERROR-OUTPUT-PARTIAL-RESPONSE", mode: testnet.GitCodeAPIFailurePartial, want: string(diagnostics.CodeSchemaDecode)},
+		{name: "SCN-CLI-ERROR-OUTPUT-TIMEOUT", mode: testnet.GitCodeAPIFailureTimeout, want: string(diagnostics.CodeLiveTransportFailure)},
+		{name: "SCN-CLI-ERROR-OUTPUT-500", mode: testnet.GitCodeAPIFailure500, want: string(diagnostics.CodeLiveTransportFailure)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			server := NewMockGitCodeAPI(t, MockGitCodeAPIFailureMode(tt.mode))
+			server := testnet.NewGitCodeAPIServer(t, testnet.WithGitCodeAPIFailureMode(tt.mode))
 			defer server.Close()
 			cachePath := filepath.Join(t.TempDir(), "cache.db")
 			src := newTestSource(t)
 			src.env[config.EnvToken] = "test-token"
-			if tt.mode == mockGitCodeAPIFailureTimeout {
+			if tt.mode == testnet.GitCodeAPIFailureTimeout {
 				configPath := filepath.Join(t.TempDir(), "config.json")
 				src.env[config.EnvConfigPath] = configPath
 				src.files[configPath] = []byte(`{"default_timeout":"1ms","max_retries":0}`)
@@ -340,7 +341,7 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 	}
 
 	t.Run("SCN-MOCKAPI-OFFLINE-SYNC-NO-HTTP", func(t *testing.T) {
-		server := NewMockGitCodeAPI(t)
+		server := testnet.NewGitCodeAPIServer(t)
 
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
@@ -361,7 +362,7 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 	})
 
 	t.Run("SCN-MOCKAPI-API-BASE-AUTHORITY", func(t *testing.T) {
-		pair := NewMockGitCodeAPIPair(t)
+		pair := testnet.NewGitCodeAPIPair(t)
 		defer pair.Selected.Close()
 		defer pair.NonSelected.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
@@ -381,7 +382,7 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 	})
 
 	t.Run("SCN-CLI-DOCTOR-LIVE-JSON-STARTUP-SNAPSHOT", func(t *testing.T) {
-		server := NewMockGitCodeAPI(t)
+		server := testnet.NewGitCodeAPIServer(t)
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)
@@ -410,7 +411,7 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 	})
 
 	t.Run("SCN-CLI-DOCTOR-LIVE-JSON-SELECTED-VS-NON-SELECTED", func(t *testing.T) {
-		pair := NewMockGitCodeAPIPair(t)
+		pair := testnet.NewGitCodeAPIPair(t)
 		defer pair.Selected.Close()
 		defer pair.NonSelected.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
@@ -434,7 +435,7 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 	})
 
 	t.Run("SCN-CLI-DOCTOR-LIVE-JSON-MISSING-CREDENTIAL-NO-HTTP", func(t *testing.T) {
-		server := NewMockGitCodeAPI(t)
+		server := testnet.NewGitCodeAPIServer(t)
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)
@@ -460,7 +461,7 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 	})
 
 	t.Run("SCN-MOCKAPI-LIVE-CREATE-ISSUE", func(t *testing.T) {
-		server := NewMockGitCodeAPI(t)
+		server := testnet.NewGitCodeAPIServer(t)
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)
@@ -500,7 +501,7 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 	})
 
 	t.Run("SCN-CRED-DOCTOR-LIVE-MOCK-KEYCHAIN", func(t *testing.T) {
-		server := NewMockGitCodeAPI(t)
+		server := testnet.NewGitCodeAPIServer(t)
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)
@@ -524,7 +525,7 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 	})
 
 	t.Run("SCN-CLI-LIVE-BINDING-INVALID-URL-NO-HTTP", func(t *testing.T) {
-		server := NewMockGitCodeAPI(t)
+		server := testnet.NewGitCodeAPIServer(t)
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)
@@ -542,7 +543,7 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 	})
 
 	t.Run("SCN-CLI-LIVE-BINDING-DISABLED-SCOPE-NO-HTTP", func(t *testing.T) {
-		server := NewMockGitCodeAPI(t)
+		server := testnet.NewGitCodeAPIServer(t)
 		defer server.Close()
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
 		src := newTestSource(t)

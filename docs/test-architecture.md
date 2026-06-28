@@ -4,6 +4,9 @@ This repository keeps tests close to the code they verify. Do not add generated
 design packages, captured work logs, or ad hoc harness dumps to `main`; keep
 historical evidence in GitCode issues, pull requests, or wiki pages.
 
+For the migration record of the old generated `tests/design_package` tree, see
+`docs/test-intent-migration.md`.
+
 ## Test Categories
 
 ```mermaid
@@ -38,6 +41,8 @@ flowchart LR
 - Name reusable HTTP fakes by behavior, such as `mock_gitcode_api_test.go`, and
   keep them in the package that owns the surface they verify unless another
   package needs the same helper.
+- Move reusable offline HTTP helpers to `internal/testnet` when more than one
+  package can reasonably use them.
 - Use neutral fixture names such as `offline-smoke`, `example-repo`, or
   `sanitized-*`. Avoid names that describe local dogfood history.
 - Use `TestE2E...` only for live tests behind the `e2e` build tag.
