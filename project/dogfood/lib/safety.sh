@@ -63,8 +63,9 @@ redact_transcript() {
     load_fixture_allowlist
   fi
 
+  local tmp_dir="${TMPDIR:-/tmp}"
   output="${output//${HOME}/<REDACTED_PATH>}"
-  output="${output//${TMPDIR:-/tmp}/<REDACTED_PATH>}"
+  output="${output//${tmp_dir}/<REDACTED_PATH>}"
 
   if [[ -n "${GITCODE_TOKEN:-}" ]]; then
     output="${output//${GITCODE_TOKEN}/<REDACTED_TOKEN>}"

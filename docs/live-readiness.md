@@ -108,6 +108,14 @@ gitcode-mcp create-issue --dry-run --idempotency-key "ik-001" --title "Test" --b
 
 `create-issue --help` documents `--live`, `--dry-run`, `--idempotency-key`, `--title`, and `--body`. `--live` executes the live write, `--dry-run` validates without mutation, `--idempotency-key` supports audited retries, `--title` is required, and `--body` supplies the issue body.
 
+Create a pull request through the same audited CLI write lifecycle:
+
+```sh
+gitcode-mcp create-pr --live --repo "YOUR_REPO" --idempotency-key "ik-pr-001" --title "Test PR" --head "feature-branch" --base "main" --body "Body"
+```
+
+`create-pr --help` documents `--live`, `--dry-run`, `--idempotency-key`, `--title`, `--body`, `--head`, and `--base`. `create-mr` is an alias for GitCode UI terminology and uses the same service write path.
+
 The MCP server exposes the same audited live-write lifecycle for agent workflows that previously needed shell or direct REST fallback:
 
 | MCP tool | Use |

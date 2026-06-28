@@ -45,6 +45,7 @@ var commands = []string{
 	"diff", "diff-snapshot",
 	"create-issue",
 	"update-issue",
+	"create-pr", "create-mr",
 	"create-page",
 	"update-page",
 	"delete-page",
@@ -89,6 +90,7 @@ type queryService interface {
 	RepositoryStatus(context.Context, service.RepositoryStatusRequest) (service.RepositoryStatus, error)
 	CreateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	CreatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	CreatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	DeletePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
@@ -313,7 +315,7 @@ func resolveLiveCredential(ctx context.Context, eff config.EffectiveConfig, deps
 
 func isLiveStartupCommand(command string) bool {
 	switch command {
-	case "sync", "create-issue", "update-issue", "create-page", "update-page", "delete-page", "add-comment", "add-label", "doctor":
+	case "sync", "create-issue", "update-issue", "create-pr", "create-mr", "create-page", "update-page", "delete-page", "add-comment", "add-label", "doctor":
 		return true
 	default:
 		return false
@@ -918,6 +920,8 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		return dispatchWrite(ctx, svc.CreateIssue, command, opts, stdout, stderr, plan)
 	case "update-issue":
 		return dispatchWrite(ctx, svc.UpdateIssue, command, opts, stdout, stderr, plan)
+	case "create-pr", "create-mr":
+		return dispatchWrite(ctx, svc.CreatePR, "create-pr", opts, stdout, stderr, plan)
 	case "create-page":
 		return dispatchWrite(ctx, svc.CreatePage, command, opts, stdout, stderr, plan)
 	case "update-page":
@@ -1058,7 +1062,7 @@ func writeRequest(opts options) service.WriteCommandRequest {
 	if opts.live {
 		mode = service.WriteModeLive
 	}
-	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, Number: opts.number, Slug: opts.slug, Path: opts.path, Sha: opts.sha, Title: opts.title, Body: opts.body, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
+	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, Number: opts.number, Slug: opts.slug, Path: opts.path, Sha: opts.sha, Title: opts.title, Body: opts.body, Head: opts.head, Base: opts.base, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
 }
 
 func cliEmptyAsNone(value string) string {
@@ -1832,6 +1836,20 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --body BODY         updated body")
 		fmt.Fprintln(w, "  --state STATE       updated state")
 		fmt.Fprintln(w, "  --labels A,B        comma-separated labels")
+		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
+		fmt.Fprintln(w, "  --dry-run           validate without mutation")
+		fmt.Fprintln(w, "  --live              execute live write")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "create-pr", "create-mr":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --title TITLE --head BRANCH --base BRANCH [--body BODY] [--idempotency-key KEY] (--dry-run | --live)\n\n", command)
+		fmt.Fprintln(w, "Create a new pull request / merge request. Requires exactly one of --dry-run or --live.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --title TITLE       pull request title (required)")
+		fmt.Fprintln(w, "  --head BRANCH       source branch (required)")
+		fmt.Fprintln(w, "  --base BRANCH       target branch (required)")
+		fmt.Fprintln(w, "  --body BODY         pull request body")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
 		fmt.Fprintln(w, "  --live              execute live write")
