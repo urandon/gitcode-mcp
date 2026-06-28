@@ -475,22 +475,26 @@ func TestAttachmentEndpointsTemplate(t *testing.T) {
 
 func TestWriteEndpointsTemplate(t *testing.T) {
 	tests := map[string]string{
-		"create issue": createIssueEndpoint("example-owner", "example-repo"),
-		"update issue": updateIssueEndpoint("example-owner", "example-repo", 42),
-		"comment":      createIssueCommentEndpoint("example-owner", "example-repo", 42),
-		"create wiki":  createWikiPageEndpoint("example-owner", "example-repo"),
-		"update wiki":  updateWikiPageEndpoint("example-owner", "example-repo", "Home"),
-		"add label":    addLabelEndpoint("example-owner", "example-repo", 42),
-		"remove label": removeLabelEndpoint("example-owner", "example-repo", 42, "needs triage"),
+		"create issue":   createIssueEndpoint("example-owner", "example-repo"),
+		"update issue":   updateIssueEndpoint("example-owner", "example-repo", 42),
+		"comment":        createIssueCommentEndpoint("example-owner", "example-repo", 42),
+		"update comment": updateIssueCommentEndpoint("example-owner", "example-repo", "2002"),
+		"get comment":    getIssueCommentEndpoint("example-owner", "example-repo", "2002"),
+		"create wiki":    createWikiPageEndpoint("example-owner", "example-repo"),
+		"update wiki":    updateWikiPageEndpoint("example-owner", "example-repo", "Home"),
+		"add label":      addLabelEndpoint("example-owner", "example-repo", 42),
+		"remove label":   removeLabelEndpoint("example-owner", "example-repo", 42, "needs triage"),
 	}
 	expected := map[string]string{
-		"create issue": "/api/v5/repos/example-owner/example-repo/issues",
-		"update issue": "/api/v5/repos/example-owner/example-repo/issues/42",
-		"comment":      "/api/v5/repos/example-owner/example-repo/issues/42/comments",
-		"create wiki":  "/api/v5/repos/example-owner/example-repo.wiki/contents",
-		"update wiki":  "/api/v5/repos/example-owner/example-repo.wiki/contents/Home",
-		"add label":    "/api/v5/repos/example-owner/example-repo/issues/42/labels",
-		"remove label": "/api/v5/repos/example-owner/example-repo/issues/42/labels/needs%20triage",
+		"create issue":   "/api/v5/repos/example-owner/example-repo/issues",
+		"update issue":   "/api/v5/repos/example-owner/example-repo/issues/42",
+		"comment":        "/api/v5/repos/example-owner/example-repo/issues/42/comments",
+		"update comment": "/api/v5/repos/example-owner/example-repo/issues/comments/2002",
+		"get comment":    "/api/v5/repos/example-owner/example-repo/issues/comments/2002",
+		"create wiki":    "/api/v5/repos/example-owner/example-repo.wiki/contents",
+		"update wiki":    "/api/v5/repos/example-owner/example-repo.wiki/contents/Home",
+		"add label":      "/api/v5/repos/example-owner/example-repo/issues/42/labels",
+		"remove label":   "/api/v5/repos/example-owner/example-repo/issues/42/labels/needs%20triage",
 	}
 	for name, got := range tests {
 		if got != expected[name] {
@@ -858,6 +862,71 @@ func TestScenario017AddCommentMalformedBodySchemaDecode(t *testing.T) {
 	}
 	if schemaErr.DiagnosticCode() != "schema_decode" {
 		t.Fatalf("diagnostic = %q", schemaErr.DiagnosticCode())
+	}
+}
+
+func TestScenario007UpdateIssueCommentUsesDiscoveredRouteAndPreservesMultilineBody(t *testing.T) {
+	wantBody := "updated comment\nline two\nline three"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch || r.URL.Path != updateIssueCommentEndpoint("example-owner", "example-repo", "2002") {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var payload map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		if payload["body"] != wantBody {
+			t.Fatalf("body=%q want %q", payload["body"], wantBody)
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"id":"2002","issue_id":"42","body":"updated comment\nline two\nline three","author":"bot","created_at":"2026-06-28T10:00:00Z","updated_at":"2026-06-28T10:01:00Z"}`)
+	}))
+	defer server.Close()
+
+	result, err := newTestClient(t, server.URL, Config{}).UpdateIssueComment(context.Background(), UpdateIssueCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 42, CommentID: "2002", Body: wantBody}, WriteOptions{IdempotencyKey: "key-update-comment"})
+	if err != nil {
+		t.Fatalf("UpdateIssueComment returned error: %v", err)
+	}
+	if !result.Confirmed || result.RemoteID != "2002" || result.ParentIssueNumber != 42 || result.ParentIssueID != "42" || result.Record.Body != wantBody {
+		t.Fatalf("unexpected result=%+v", result)
+	}
+}
+
+func TestScenario007UpdateIssueCommentEmptyPatchBodyUsesReadback(t *testing.T) {
+	wantBody := "updated comment\nline two"
+	patches := 0
+	gets := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPatch && r.URL.Path == updateIssueCommentEndpoint("example-owner", "example-repo", "2002"):
+			patches++
+			var payload map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode payload: %v", err)
+			}
+			if payload["body"] != wantBody {
+				t.Fatalf("body=%q want %q", payload["body"], wantBody)
+			}
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && r.URL.Path == getIssueCommentEndpoint("example-owner", "example-repo", "2002"):
+			gets++
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"id":2002,"body":"updated comment\nline two","user":{"login":"bot"}}`)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	result, err := newTestClient(t, server.URL, Config{}).UpdateIssueComment(context.Background(), UpdateIssueCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 42, CommentID: "2002", Body: wantBody}, WriteOptions{IdempotencyKey: "key-update-comment-readback"})
+	if err != nil {
+		t.Fatalf("UpdateIssueComment readback returned error: %v", err)
+	}
+	if patches != 1 || gets != 1 {
+		t.Fatalf("patches=%d gets=%d", patches, gets)
+	}
+	if !result.Confirmed || result.ProviderStatus != "2xx-readback" || result.RemoteID != "2002" || result.ParentIssueNumber != 42 || result.Record.Body != wantBody {
+		t.Fatalf("unexpected result=%+v", result)
 	}
 }
 

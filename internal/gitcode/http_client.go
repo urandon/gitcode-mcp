@@ -324,6 +324,62 @@ func (c *HTTPClient) CreateIssueComment(ctx context.Context, req CreateIssueComm
 	})
 }
 
+func (c *HTTPClient) UpdateIssueComment(ctx context.Context, req UpdateIssueCommentRequest, opts WriteOptions) (WriteResult[Comment], error) {
+	if err := validateUpdateIssueComment(req); err != nil {
+		return WriteResult[Comment]{}, err
+	}
+	target := req.Owner + "/" + req.Repo + "/issues/comments/" + req.CommentID
+	key := opts.IdempotencyKey
+	if key == "" {
+		key = GenerateIdempotencyKey("UpdateIssueComment", target, req, opts)
+		opts.IdempotencyKey = key
+	}
+	result, err := writeConfirmedSchemaJSON[Comment](ctx, c, http.MethodPatch, updateIssueCommentEndpoint(req.Owner, req.Repo, req.CommentID), "UpdateIssueComment", target, req, opts, func(result WriteResult[Comment]) (WriteResult[Comment], error) {
+		comment := result.Record
+		if strings.TrimSpace(comment.ID) == "" {
+			return WriteResult[Comment]{}, &ErrSchemaDecode{Field: "comment.id", Expected: "note_id or id", Received: "missing"}
+		}
+		if comment.ID != req.CommentID {
+			return WriteResult[Comment]{}, ErrValidationFailed{Field: "comment_id", Message: "comment update confirmation requires matching id"}
+		}
+		result.RemoteID = comment.ID
+		result.ParentIssueNumber = req.Number
+		result.ParentIssueID = comment.IssueID
+		return result, nil
+	})
+	if err == nil {
+		return result, nil
+	}
+	var schemaErr *ErrSchemaDecode
+	var partial ErrPartialResponse
+	if !errors.As(err, &schemaErr) && !errors.As(err, &partial) {
+		return WriteResult[Comment]{}, err
+	}
+	comment, getErr := c.getIssueComment(ctx, req)
+	if getErr != nil {
+		return WriteResult[Comment]{}, err
+	}
+	if strings.TrimSpace(comment.ID) == "" || comment.ID != req.CommentID {
+		return WriteResult[Comment]{}, ErrValidationFailed{Field: "comment_id", Message: "comment update read-back requires matching id"}
+	}
+	if comment.Body != req.Body {
+		return WriteResult[Comment]{}, ErrValidationFailed{Field: "body", Message: "comment update read-back requires matching body"}
+	}
+	body, _ := json.Marshal(comment)
+	hash := sha256.Sum256(body)
+	fingerprint := sha256.Sum256(RedactJSONBody(body, target))
+	return WriteResult[Comment]{Record: comment, Confirmed: true, Operation: "UpdateIssueComment", Target: target, ProviderStatus: "2xx-readback", IdempotencyKey: key, ResponseHash: hex.EncodeToString(hash[:]), ProviderPayloadFingerprint: hex.EncodeToString(fingerprint[:]), RemoteID: comment.ID, ParentIssueNumber: req.Number, ParentIssueID: comment.IssueID, ConfirmedAt: time.Now().UTC()}, nil
+}
+
+func (c *HTTPClient) getIssueComment(ctx context.Context, req UpdateIssueCommentRequest) (Comment, error) {
+	var comment Comment
+	err := c.getJSON(ctx, getIssueCommentEndpoint(req.Owner, req.Repo, req.CommentID), nil, &comment)
+	if err != nil {
+		return Comment{}, err
+	}
+	return comment, nil
+}
+
 func (c *HTTPClient) CreatePRComment(ctx context.Context, req CreatePRCommentRequest, opts WriteOptions) (WriteResult[PRComment], error) {
 	if err := validateCreatePRComment(req); err != nil {
 		return WriteResult[PRComment]{}, err
@@ -896,6 +952,19 @@ func validateCreateIssueComment(req CreateIssueCommentRequest) error {
 	}
 	if req.Number <= 0 {
 		return ErrValidationFailed{Field: "number", Message: "positive issue number is required"}
+	}
+	if strings.TrimSpace(req.Body) == "" {
+		return ErrValidationFailed{Field: "body", Message: "comment body is required"}
+	}
+	return nil
+}
+
+func validateUpdateIssueComment(req UpdateIssueCommentRequest) error {
+	if err := validateWriteRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if strings.TrimSpace(req.CommentID) == "" {
+		return ErrValidationFailed{Field: "comment_id", Message: "comment id is required"}
 	}
 	if strings.TrimSpace(req.Body) == "" {
 		return ErrValidationFailed{Field: "body", Message: "comment body is required"}

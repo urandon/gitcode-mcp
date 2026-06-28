@@ -17,6 +17,7 @@ type writeToolArgs struct {
 	Number         int      `json:"number,omitempty"`
 	PRNumber       int      `json:"pr_number,omitempty"`
 	IssueNumber    int      `json:"issue_number,omitempty"`
+	CommentID      string   `json:"comment_id,omitempty"`
 	Title          string   `json:"title,omitempty"`
 	Body           string   `json:"body,omitempty"`
 	Head           string   `json:"head,omitempty"`
@@ -30,6 +31,16 @@ func (s *Server) callAddIssueComment(ctx context.Context, id *json.RawMessage, a
 	s.callWriteTool(ctx, id, args, s.svc.AddComment, func(a writeToolArgs) service.WriteCommandRequest {
 		req := writeRequestFromArgs(a)
 		req.Number = a.Number
+		req.Body = a.Body
+		return req
+	})
+}
+
+func (s *Server) callUpdateIssueComment(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	s.callWriteTool(ctx, id, args, s.svc.UpdateComment, func(a writeToolArgs) service.WriteCommandRequest {
+		req := writeRequestFromArgs(a)
+		req.Number = a.Number
+		req.CommentID = a.CommentID
 		req.Body = a.Body
 		return req
 	})

@@ -86,6 +86,14 @@ func createIssueCommentEndpoint(owner, repo string, number int) string {
 	return listIssueCommentsEndpoint(owner, repo, number)
 }
 
+func updateIssueCommentEndpoint(owner, repo, commentID string) string {
+	return endpointPath("/api/v5/repos/%s/%s/issues/comments/%s", owner, repo, commentID)
+}
+
+func getIssueCommentEndpoint(owner, repo, commentID string) string {
+	return updateIssueCommentEndpoint(owner, repo, commentID)
+}
+
 func createWikiPageEndpoint(owner, repo string) string {
 	return listWikiPagesEndpoint(owner, repo)
 }

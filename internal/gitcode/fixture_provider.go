@@ -223,6 +223,10 @@ func (p *fixtureProvider) CreateIssueComment(context.Context, CreateIssueComment
 	return WriteResult[Comment]{}, FixtureReadOnlyError("CreateIssueComment")
 }
 
+func (p *fixtureProvider) UpdateIssueComment(context.Context, UpdateIssueCommentRequest, WriteOptions) (WriteResult[Comment], error) {
+	return WriteResult[Comment]{}, FixtureReadOnlyError("UpdateIssueComment")
+}
+
 func (p *fixtureProvider) CreatePRComment(context.Context, CreatePRCommentRequest, WriteOptions) (WriteResult[PRComment], error) {
 	return WriteResult[PRComment]{}, FixtureReadOnlyError("CreatePRComment")
 }

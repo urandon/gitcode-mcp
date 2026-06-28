@@ -653,6 +653,47 @@ func TestScenario017AddCommentLiveShapeCachesComment(t *testing.T) {
 	}
 }
 
+func TestScenario007UpdateCommentLiveShapeUpsertsCachedComment(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	created := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
+	updated := created.Add(time.Minute)
+	client := &fakeGitCodeClient{
+		createIssueCommentResult: gitcode.WriteResult[gitcode.Comment]{Record: gitcode.Comment{ID: "2002", IssueID: "42", Body: "initial comment", Author: "commenter", CreatedAt: created, UpdatedAt: created}, Confirmed: true, Operation: "CreateIssueComment", RemoteID: "2002", ParentIssueNumber: 42, ParentIssueID: "42", ConfirmedAt: created},
+		updateIssueCommentResult: gitcode.WriteResult[gitcode.Comment]{Record: gitcode.Comment{ID: "2002", IssueID: "42", Body: "updated comment\nline two", Author: "commenter", CreatedAt: created, UpdatedAt: updated}, Confirmed: true, Operation: "UpdateIssueComment", RemoteID: "2002", ParentIssueNumber: 42, ParentIssueID: "42", ConfirmedAt: updated},
+	}
+	svc := NewWithClient(store, client)
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.writeCredentialPresent = true
+	if _, err := svc.AddComment(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 42, Body: "initial comment", IdempotencyKey: "comment-key-create"}); err != nil {
+		t.Fatalf("AddComment live returned error: %v", err)
+	}
+	result, err := svc.UpdateComment(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 42, CommentID: "2002", Body: "updated comment\nline two", IdempotencyKey: "comment-key-update"})
+	if err != nil {
+		t.Fatalf("UpdateComment live returned error: %v", err)
+	}
+	if result.Status != "succeeded" || result.Command != "update-comment" || result.RemoteID != "2002" || client.updateIssueCommentCalls != 1 {
+		t.Fatalf("unexpected result=%+v updateCalls=%d", result, client.updateIssueCommentCalls)
+	}
+	if client.lastUpdateIssueCommentReq.CommentID != "2002" || client.lastUpdateIssueCommentReq.Number != 42 || client.lastUpdateIssueCommentReq.Body != "updated comment\nline two" {
+		t.Fatalf("last update request=%#v", client.lastUpdateIssueCommentReq)
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", "ISSUE-42")
+	if err != nil {
+		t.Fatalf("GetRecord: %v", err)
+	}
+	if len(record.Comments) != 1 || record.Comments[0].CommentID != "2002" || record.Comments[0].Body != "updated comment\nline two" {
+		t.Fatalf("comments=%#v", record.Comments)
+	}
+}
+
 func TestScenario016MCPWriteLifecycleCreatePRAndComment(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)
@@ -2444,52 +2485,55 @@ func seededSyncService(t *testing.T, ctx context.Context, client gitcode.Client)
 }
 
 type fakeGitCodeClient struct {
-	wiki                     gitcode.WikiPage
-	issue                    gitcode.Issue
-	comments                 []gitcode.Comment
-	errors                   []error
-	wikiCalls                int
-	issueCalls               int
-	commentCalls             int
-	createIssueCalls         int
-	createIssueCommentCalls  int
-	createPRCalls            int
-	updatePRCalls            int
-	linkPRIssueCalls         int
-	createPRCommentCalls     int
-	createWikiPageCalls      int
-	addLabelCalls            int
-	createIssueResult        gitcode.WriteResult[gitcode.Issue]
-	createIssueResults       []gitcode.WriteResult[gitcode.Issue]
-	createIssueCommentResult gitcode.WriteResult[gitcode.Comment]
-	createPRResult           gitcode.WriteResult[gitcode.PullRequest]
-	updatePRResult           gitcode.WriteResult[gitcode.PullRequest]
-	linkPRIssueResult        gitcode.WriteResult[[]gitcode.Issue]
-	createPRCommentResult    gitcode.WriteResult[gitcode.PRComment]
-	createWikiPageResult     gitcode.WriteResult[gitcode.WikiPage]
-	addLabelResult           gitcode.WriteResult[gitcode.Issue]
-	listIssuesPages          []gitcode.Page[gitcode.IssueSummary]
-	listIssuesErrors         []error
-	listWikiPages            []gitcode.Page[gitcode.WikiPage]
-	listWikiErrors           []error
-	listWikiPagesCallCount   int
-	onWikiCall               func(int)
-	listPRPages              []gitcode.Page[gitcode.PullRequest]
-	prsByNumber              map[int]gitcode.PullRequest
-	prCommentsByPR           map[int][]gitcode.PRComment
-	listPRCalls              int
-	prCalls                  int
-	prCommentCalls           int
-	issuesByNumber           map[int]gitcode.Issue
-	wikiBySlug               map[string]gitcode.WikiPage
-	commentsByIssue          map[int][]gitcode.Comment
-	listIssueCommentsErr     error
-	lastCreateIssueRequest   gitcode.CreateIssueRequest
-	lastCreatePRRequest      gitcode.CreatePRRequest
-	lastUpdatePRRequest      gitcode.UpdatePRRequest
-	lastLinkPRIssueRequest   gitcode.LinkPRIssueRequest
-	lastCreatePRCommentReq   gitcode.CreatePRCommentRequest
-	lastWriteOptions         gitcode.WriteOptions
+	wiki                      gitcode.WikiPage
+	issue                     gitcode.Issue
+	comments                  []gitcode.Comment
+	errors                    []error
+	wikiCalls                 int
+	issueCalls                int
+	commentCalls              int
+	createIssueCalls          int
+	createIssueCommentCalls   int
+	updateIssueCommentCalls   int
+	createPRCalls             int
+	updatePRCalls             int
+	linkPRIssueCalls          int
+	createPRCommentCalls      int
+	createWikiPageCalls       int
+	addLabelCalls             int
+	createIssueResult         gitcode.WriteResult[gitcode.Issue]
+	createIssueResults        []gitcode.WriteResult[gitcode.Issue]
+	createIssueCommentResult  gitcode.WriteResult[gitcode.Comment]
+	updateIssueCommentResult  gitcode.WriteResult[gitcode.Comment]
+	createPRResult            gitcode.WriteResult[gitcode.PullRequest]
+	updatePRResult            gitcode.WriteResult[gitcode.PullRequest]
+	linkPRIssueResult         gitcode.WriteResult[[]gitcode.Issue]
+	createPRCommentResult     gitcode.WriteResult[gitcode.PRComment]
+	createWikiPageResult      gitcode.WriteResult[gitcode.WikiPage]
+	addLabelResult            gitcode.WriteResult[gitcode.Issue]
+	listIssuesPages           []gitcode.Page[gitcode.IssueSummary]
+	listIssuesErrors          []error
+	listWikiPages             []gitcode.Page[gitcode.WikiPage]
+	listWikiErrors            []error
+	listWikiPagesCallCount    int
+	onWikiCall                func(int)
+	listPRPages               []gitcode.Page[gitcode.PullRequest]
+	prsByNumber               map[int]gitcode.PullRequest
+	prCommentsByPR            map[int][]gitcode.PRComment
+	listPRCalls               int
+	prCalls                   int
+	prCommentCalls            int
+	issuesByNumber            map[int]gitcode.Issue
+	wikiBySlug                map[string]gitcode.WikiPage
+	commentsByIssue           map[int][]gitcode.Comment
+	listIssueCommentsErr      error
+	lastCreateIssueRequest    gitcode.CreateIssueRequest
+	lastUpdateIssueCommentReq gitcode.UpdateIssueCommentRequest
+	lastCreatePRRequest       gitcode.CreatePRRequest
+	lastUpdatePRRequest       gitcode.UpdatePRRequest
+	lastLinkPRIssueRequest    gitcode.LinkPRIssueRequest
+	lastCreatePRCommentReq    gitcode.CreatePRCommentRequest
+	lastWriteOptions          gitcode.WriteOptions
 }
 
 func (f *fakeGitCodeClient) nextError() error {
@@ -2622,6 +2666,15 @@ func (f *fakeGitCodeClient) CreateIssueComment(context.Context, gitcode.CreateIs
 		return gitcode.WriteResult[gitcode.Comment]{}, err
 	}
 	return f.createIssueCommentResult, nil
+}
+func (f *fakeGitCodeClient) UpdateIssueComment(_ context.Context, req gitcode.UpdateIssueCommentRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Comment], error) {
+	f.updateIssueCommentCalls++
+	f.lastUpdateIssueCommentReq = req
+	f.lastWriteOptions = opts
+	if err := f.nextError(); err != nil {
+		return gitcode.WriteResult[gitcode.Comment]{}, err
+	}
+	return f.updateIssueCommentResult, nil
 }
 func (f *fakeGitCodeClient) CreatePRComment(_ context.Context, req gitcode.CreatePRCommentRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PRComment], error) {
 	f.createPRCommentCalls++

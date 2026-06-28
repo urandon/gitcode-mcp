@@ -28,6 +28,7 @@ type Provider interface {
 	CreateIssue(context.Context, CreateIssueRequest, WriteOptions) (WriteResult[Issue], error)
 	UpdateIssue(context.Context, UpdateIssueRequest, WriteOptions) (WriteResult[Issue], error)
 	CreateIssueComment(context.Context, CreateIssueCommentRequest, WriteOptions) (WriteResult[Comment], error)
+	UpdateIssueComment(context.Context, UpdateIssueCommentRequest, WriteOptions) (WriteResult[Comment], error)
 	CreatePRComment(context.Context, CreatePRCommentRequest, WriteOptions) (WriteResult[PRComment], error)
 	CreateWikiPage(context.Context, CreateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
 	UpdateWikiPage(context.Context, UpdateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
@@ -229,6 +230,13 @@ func (p liveProvider) CreateIssueComment(ctx context.Context, req CreateIssueCom
 	return p.HTTPClient.CreateIssueComment(ctx, req, opts)
 }
 
+func (p liveProvider) UpdateIssueComment(ctx context.Context, req UpdateIssueCommentRequest, opts WriteOptions) (WriteResult[Comment], error) {
+	if err := p.matrix.Preflight(ProductAreaComments); err != nil {
+		return WriteResult[Comment]{}, err
+	}
+	return p.HTTPClient.UpdateIssueComment(ctx, req, opts)
+}
+
 func (p liveProvider) ListPRs(ctx context.Context, req PRListRequest) (Page[PullRequest], error) {
 	if err := p.matrix.Preflight(ProductAreaPullRequests); err != nil {
 		return Page[PullRequest]{}, err
@@ -359,6 +367,9 @@ func (p unavailableProvider) UpdateIssue(context.Context, UpdateIssueRequest, Wr
 	return WriteResult[Issue]{}, p.err()
 }
 func (p unavailableProvider) CreateIssueComment(context.Context, CreateIssueCommentRequest, WriteOptions) (WriteResult[Comment], error) {
+	return WriteResult[Comment]{}, p.err()
+}
+func (p unavailableProvider) UpdateIssueComment(context.Context, UpdateIssueCommentRequest, WriteOptions) (WriteResult[Comment], error) {
 	return WriteResult[Comment]{}, p.err()
 }
 func (p unavailableProvider) CreatePRComment(context.Context, CreatePRCommentRequest, WriteOptions) (WriteResult[PRComment], error) {

@@ -302,7 +302,7 @@ func TestMCPBlockedWriteBoundary(t *testing.T) {
 		}
 		blocked := map[string]bool{
 			"sync_live": false, "index_repo": false,
-			"add_issue_comment": false, "update_issue": false,
+			"add_issue_comment": false, "update_issue_comment": false, "update_issue": false,
 			"create_pr": false, "update_pr": false, "add_pr_comment": false, "link_pr_issue": false,
 			"create_issue": false, "add_comment": false,
 			"create_page": false, "update_page": false,
@@ -915,7 +915,7 @@ func TestMCPLifecycleTools(t *testing.T) {
 	for _, tool := range tls.Tools {
 		listed[tool.Name] = true
 	}
-	for _, name := range []string{"repo_status", "sync_live", "add_issue_comment", "update_issue", "create_pr", "update_pr", "add_pr_comment", "link_pr_issue", "index_repo", "auth_status", "doctor"} {
+	for _, name := range []string{"repo_status", "sync_live", "add_issue_comment", "update_issue_comment", "update_issue", "create_pr", "update_pr", "add_pr_comment", "link_pr_issue", "index_repo", "auth_status", "doctor"} {
 		if !listed[name] {
 			t.Fatalf("tools/list missing lifecycle tool %q", name)
 		}
@@ -1126,6 +1126,10 @@ func (s *writeLifecycleSpyService) AddComment(_ context.Context, req service.Wri
 	return s.record("add-comment", req)
 }
 
+func (s *writeLifecycleSpyService) UpdateComment(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	return s.record("update-comment", req)
+}
+
 func (s *writeLifecycleSpyService) UpdateIssue(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
 	return s.record("update-issue", req)
 }
@@ -1168,6 +1172,7 @@ func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 	}
 
 	call("add_issue_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 16, "body": "proposal", "idempotency_key": "issue-comment-key"})
+	call("update_issue_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "comment_id": "c16", "number": 16, "body": "updated\ncomment", "idempotency_key": "issue-comment-update-key"})
 	call("update_issue", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 16, "title": "updated", "labels": []string{"enhancement"}, "idempotency_key": "issue-update-key"})
 	call("create_pr", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "title": "PR", "body": "body", "head": "topic", "base": "main", "idempotency_key": "create-pr-key"})
 	call("update_pr", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "body": "new body", "idempotency_key": "update-pr-key"})
@@ -1187,6 +1192,9 @@ func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 	}
 	if req := assertReq("add-comment"); req.Number != 16 || req.Body != "proposal" {
 		t.Fatalf("add-comment req=%#v", req)
+	}
+	if req := assertReq("update-comment"); req.Number != 16 || req.CommentID != "c16" || req.Body != "updated\ncomment" {
+		t.Fatalf("update-comment req=%#v", req)
 	}
 	if req := assertReq("update-issue"); req.Number != 16 || req.Title != "updated" || len(req.Labels) != 1 || req.Labels[0] != "enhancement" {
 		t.Fatalf("update-issue req=%#v", req)
