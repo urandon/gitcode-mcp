@@ -372,10 +372,15 @@ type SyncResult struct {
 }
 
 type SyncResourcesResult struct {
-	Results      []SyncResult    `json:"results"`
-	SuccessCount int             `json:"success_count"`
-	FailureCount int             `json:"failure_count"`
-	Failures     []ResourceError `json:"failures,omitempty"`
+	Results            []SyncResult    `json:"results"`
+	SuccessCount       int             `json:"success_count"`
+	FailureCount       int             `json:"failure_count"`
+	Failures           []ResourceError `json:"failures,omitempty"`
+	PagesListed        int             `json:"pages_listed,omitempty"`
+	RecordsListed      int             `json:"records_listed,omitempty"`
+	SkippedByWatermark int             `json:"skipped_by_watermark,omitempty"`
+	StopReason         string          `json:"stop_reason,omitempty"`
+	Ordering           string          `json:"ordering,omitempty"`
 }
 
 type ResourceError struct {

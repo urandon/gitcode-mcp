@@ -983,6 +983,70 @@ func TestScenario018PRListDetailCommentsRoutes(t *testing.T) {
 	}
 }
 
+func TestListIssuesRecentUpdateOrderingParams(t *testing.T) {
+	var got url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != listIssuesEndpoint("example-owner", "example-repo") {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		got = r.URL.Query()
+		fmt.Fprint(w, `[]`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, Config{})
+	_, err := client.ListIssues(context.Background(), IssueListRequest{
+		Owner:     "example-owner",
+		Repo:      "example-repo",
+		State:     "all",
+		OrderBy:   "updated_at",
+		Direction: "desc",
+		Page:      2,
+		PerPage:   50,
+	})
+	if err != nil {
+		t.Fatalf("ListIssues returned error: %v", err)
+	}
+	if got.Get("state") != "all" || got.Get("order_by") != "updated_at" || got.Get("sort") != "desc" {
+		t.Fatalf("unexpected issue list query: %s", got.Encode())
+	}
+	if got.Get("direction") != "" {
+		t.Fatalf("issues must not use PR direction param: %s", got.Encode())
+	}
+}
+
+func TestListPullRequestsRecentUpdateOrderingParams(t *testing.T) {
+	var got url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != listPREndpoint("example-owner", "example-repo") {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		got = r.URL.Query()
+		fmt.Fprint(w, `[]`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, Config{})
+	_, err := client.ListPRs(context.Background(), PRListRequest{
+		Owner:     "example-owner",
+		Repo:      "example-repo",
+		State:     "all",
+		OrderBy:   "updated_at",
+		Direction: "desc",
+		Page:      2,
+		PerPage:   50,
+	})
+	if err != nil {
+		t.Fatalf("ListPRs returned error: %v", err)
+	}
+	if got.Get("state") != "all" || got.Get("order_by") != "updated_at" || got.Get("direction") != "desc" {
+		t.Fatalf("unexpected pull request list query: %s", got.Encode())
+	}
+	if got.Get("sort") != "" {
+		t.Fatalf("pull requests must not use issue sort param: %s", got.Encode())
+	}
+}
+
 func TestScenario018PRCommentWrite(t *testing.T) {
 	var seenBody string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

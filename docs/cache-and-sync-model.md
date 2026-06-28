@@ -64,11 +64,18 @@ The sync command supports these live sync selectors:
 - `--idempotency-key KEY` supplies a deterministic sync event key.
 - `--max-pages`, `--max-records`, and `--per-page` bound collection sync when the selected surface supports collection bounds.
 
-Bulk sync treats issues, wiki pages, pull requests, and pull request comments as bounded collections. Issue and pull request sync page through list APIs and commit each returned record independently. Issue sync uses list-level issue revision metadata before deciding whether issue comments need to be listed again. Wiki sync passes record bounds into the wiki provider traversal before committing individual pages, then uses list-level wiki revision metadata before deciding whether a page body fetch is necessary. Pull request comment sync walks cached pull request records and applies record bounds across the resulting comment records. PR review metadata from the comment payload is stored separately from the searchable comment body so cached reads can group review discussions without live network access. Issue sync covers issue data and comments as part of the source graph for that issue; wiki sync covers wiki page data. Live adapter route construction stays behind the provider boundary, and operator docs should use sanitized placeholders rather than real repository coordinates.
+Bulk sync treats issues, wiki pages, pull requests, and pull request comments as bounded collections. Issue and pull request sync page through list APIs and commit each returned record independently. Bounded issue and pull request sync request recent-update descending order and derive a collection watermark from cached `records.updated_at` plus the numeric remote id, regardless of whether the cached record came from fixture, remote, or live provenance. Records older than the previous watermark are skipped and stop traversal early; records with the same timestamp remain in the safety overlap and still pass through revision checks. Issue sync uses list-level issue revision metadata before deciding whether issue comments need to be listed again. Wiki sync passes record bounds into the wiki provider traversal before committing individual pages, then uses list-level wiki revision metadata before deciding whether a page body fetch is necessary. Pull request comment sync walks cached pull request records and applies record bounds across the resulting comment records. PR review metadata from the comment payload is stored separately from the searchable comment body so cached reads can group review discussions without live network access. Issue sync covers issue data and comments as part of the source graph for that issue; wiki sync covers wiki page data. Live adapter route construction stays behind the provider boundary, and operator docs should use sanitized placeholders rather than real repository coordinates.
 
 The command context carries the configured `default_timeout`, including the `--timeout` override, so large collection syncs have a whole-operation deadline in addition to provider-level request timeouts. When the deadline or caller cancellation fires, completed resource commits remain visible in cache and the sync response reports partial counts plus a typed diagnostic such as `sync_timeout` or `sync_cancelled`.
 
 Labels and milestones are not yet exposed as bulk sync service surfaces. When those collection surfaces are added, they should use the same `SyncBounds` and partial-result contract.
+
+Bulk collection responses also expose traversal metadata when available:
+
+- `pages_listed` and `records_listed` count list-page work done before staging/filtering;
+- `skipped_by_watermark` counts records dropped because they are older than the cached collection watermark;
+- `ordering` reports the server-side ordering contract, currently `updated_at_desc` for bounded issues and pull requests;
+- `stop_reason` reports why traversal stopped, such as `watermark`, `end_of_collection`, `max_pages`, or `max_records`.
 
 Each successful resource sync records a `SyncEvent` with:
 
@@ -97,6 +104,8 @@ Current collection behavior:
 | Milestones | Model supports `updated_at`, but list behavior and cache surface need verification | Not a first-class bulk sync collection yet; do not claim metadata skip until live discovery confirms the marker and persistence contract. |
 
 The compatibility counters keep their older meaning: `fetched` counts one processed remote candidate and `skipped` counts unchanged work. Metadata-first sync adds `listed`, `fetched_detail`, and `skipped_by_revision` so callers can distinguish "listed and skipped without body fetch" from "fetched detail and found no content delta."
+
+For large repositories, combine revision metadata with server-side ordering. Bounded issue sync uses `state=all&order_by=updated_at&sort=desc`; bounded pull request sync uses `state=all&order_by=updated_at&direction=desc`. This lets routine refreshes list the newest changed records first and stop once the cached watermark proves that remaining pages are older than the last known cache frontier. Full refresh and repair workflows should still be available by using explicit bounds or future full-refresh flags when the operator needs to walk the whole collection.
 
 ## Partial Failure Handling
 

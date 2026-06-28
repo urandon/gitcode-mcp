@@ -1032,6 +1032,23 @@ func mergeSyncResources(dst *service.SyncResourcesResult, src *service.SyncResou
 	dst.Failures = append(dst.Failures, src.Failures...)
 	dst.SuccessCount = len(dst.Results)
 	dst.FailureCount = len(dst.Failures)
+	dst.PagesListed += src.PagesListed
+	dst.RecordsListed += src.RecordsListed
+	dst.SkippedByWatermark += src.SkippedByWatermark
+	if src.StopReason != "" {
+		if dst.StopReason == "" {
+			dst.StopReason = src.StopReason
+		} else if dst.StopReason != src.StopReason {
+			dst.StopReason = "mixed"
+		}
+	}
+	if src.Ordering != "" {
+		if dst.Ordering == "" {
+			dst.Ordering = src.Ordering
+		} else if dst.Ordering != src.Ordering {
+			dst.Ordering = "mixed"
+		}
+	}
 }
 
 func mergeSyncError(existing error, result *service.SyncResourcesResult, err error) error {
