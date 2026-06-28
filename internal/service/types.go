@@ -124,11 +124,12 @@ type LiveRepositoryBindingRequest struct {
 }
 
 type SearchSourcesRequest struct {
-	RepoID string `json:"repo_id"`
-	Query  string `json:"query"`
-	Kind   string `json:"kind,omitempty"`
-	Limit  int    `json:"limit,omitempty"`
-	Offset int    `json:"offset,omitempty"`
+	RepoID     string `json:"repo_id"`
+	Query      string `json:"query"`
+	Kind       string `json:"kind,omitempty"`
+	Provenance string `json:"provenance,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+	Offset     int    `json:"offset,omitempty"`
 }
 
 type SearchSourcesResult struct {
@@ -177,11 +178,12 @@ type SourceRecord struct {
 }
 
 type ListSourcesRequest struct {
-	RepoID string `json:"repo_id"`
-	Kind   string `json:"kind,omitempty"`
-	Status string `json:"status,omitempty"`
-	Limit  int    `json:"limit,omitempty"`
-	Offset int    `json:"offset,omitempty"`
+	RepoID     string `json:"repo_id"`
+	Kind       string `json:"kind,omitempty"`
+	Status     string `json:"status,omitempty"`
+	Provenance string `json:"provenance,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+	Offset     int    `json:"offset,omitempty"`
 }
 
 func (r ListSourcesRequest) limitPlusOffset() int {

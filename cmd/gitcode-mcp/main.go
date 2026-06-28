@@ -98,6 +98,10 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 		fmt.Fprintf(stdout, "gitcode-mcp %s\n", version)
 		return 0
 	}
+	if len(rest) > 0 && rest[0] == "mcp" && len(rest) > 1 && (rest[1] == "-h" || rest[1] == "--help") {
+		printMCPHelp(stdout)
+		return 0
+	}
 	if len(rest) > 0 && (rest[0] == "config" || rest[0] == "auth" || rest[0] == "doctor" || rest[0] == "migrate-cache") {
 		localArgs := append([]string(nil), rest...)
 		if (rest[0] == "auth" || rest[0] == "doctor") && opts.live && !hasCLIFlag(localArgs[1:], "--live") {

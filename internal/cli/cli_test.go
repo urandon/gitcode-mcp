@@ -31,6 +31,24 @@ func TestHelpReturnsSuccess(t *testing.T) {
 	}
 }
 
+func TestRootHelpDoesNotAdvertiseGetIDFlag(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := Execute([]string{"--help"}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "--id ID") {
+		t.Fatalf("root help advertises command-local --id flag: %q", out)
+	}
+	if !strings.Contains(out, "record IDs are positional") {
+		t.Fatalf("root help missing positional ID guidance: %q", out)
+	}
+}
+
 func TestWriteErrorClassifiesCacheLockContention(t *testing.T) {
 	var stderr bytes.Buffer
 	err := cache.ErrLockContention{Path: "cache.db.writer.lock", Operation: "sync", RepoID: "fixture-a"}
@@ -48,6 +66,23 @@ func TestWriteErrorClassifiesCacheLockContention(t *testing.T) {
 	}
 }
 
+func TestAddLabelUnsupportedDiagnostic(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := executeWithFactory([]string{"add-label", "--repo", "fixture-a", "--number", "1", "--label", "triage", "--dry-run"}, &stdout, &stderr, cacheBackedFactory(t))
+
+	if code == 0 {
+		t.Fatalf("code=0 stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "failure_class: unsupported_capability") {
+		t.Fatalf("stderr missing unsupported_capability: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "update-issue --labels") {
+		t.Fatalf("stderr missing remediation: %q", stderr.String())
+	}
+}
+
 func TestDoctorRejectsConflictingProviderFlags(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -59,6 +94,44 @@ func TestDoctorRejectsConflictingProviderFlags(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "invalid_query") || !strings.Contains(stderr.String(), "--live conflicts with --offline/--fixture") {
 		t.Fatalf("stderr missing provider conflict: %q", stderr.String())
+	}
+}
+
+func TestCLIProvenanceFiltersListAndSearch(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	if err := store.UpsertSource(context.Background(), cache.Source{RepoID: "fixture-a", ID: "LIVE-1", Kind: "doc", Path: "docs/live.md", Title: "Live Backlog", Body: "backlog live-only", Status: "active", ContentHash: "live-hash", Provenance: cache.ProvenanceLive, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	factory := func(context.Context, string) (queryService, func() error, error) {
+		return service.New(store), nil, nil
+	}
+
+	var listOut bytes.Buffer
+	var listErr bytes.Buffer
+	if code := executeWithFactory([]string{"list", "--repo", "fixture-a", "--provenance", "live", "--format", "json"}, &listOut, &listErr, factory); code != 0 {
+		t.Fatalf("list code=%d stderr=%q", code, listErr.String())
+	}
+	var listed service.ListSourcesResult
+	if err := json.Unmarshal(listOut.Bytes(), &listed); err != nil {
+		t.Fatalf("list json: %v", err)
+	}
+	if len(listed.Results) != 1 || listed.Results[0].ID != "LIVE-1" || listed.Results[0].Provenance != "live" {
+		t.Fatalf("list provenance filter = %#v", listed.Results)
+	}
+
+	var searchOut bytes.Buffer
+	var searchErr bytes.Buffer
+	if code := executeWithFactory([]string{"search", "--repo", "fixture-a", "--provenance", "live", "--format", "json", "backlog"}, &searchOut, &searchErr, factory); code != 0 {
+		t.Fatalf("search code=%d stderr=%q", code, searchErr.String())
+	}
+	var searched service.SearchSourcesResult
+	if err := json.Unmarshal(searchOut.Bytes(), &searched); err != nil {
+		t.Fatalf("search json: %v", err)
+	}
+	if len(searched.Results) != 1 || searched.Results[0].ID != "LIVE-1" || searched.Results[0].Provenance != "live" {
+		t.Fatalf("search provenance filter = %#v", searched.Results)
 	}
 }
 

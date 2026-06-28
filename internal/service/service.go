@@ -408,7 +408,7 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 	if strings.TrimSpace(req.Query) == "" {
 		return SearchSourcesResult{}, ErrInvalidQuery{Field: "query", Message: "query is required"}
 	}
-	results, err := s.store.SearchSources(ctx, cache.SearchQuery{RepoID: repoID, Query: req.Query, Kind: req.Kind, Limit: req.Limit})
+	results, err := s.store.SearchSources(ctx, cache.SearchQuery{RepoID: repoID, Query: req.Query, Kind: req.Kind, Provenance: cache.Provenance(req.Provenance), Limit: req.Limit})
 	if err != nil {
 		return SearchSourcesResult{}, normalizeError(err, "search", req.Query)
 	}
@@ -467,7 +467,7 @@ func (s *Service) ListSources(ctx context.Context, req ListSourcesRequest) (List
 	if err != nil {
 		return ListSourcesResult{}, err
 	}
-	sources, err := s.store.ListSources(ctx, cache.SourceFilter{RepoID: repoID, Kind: req.Kind, Status: req.Status, Limit: req.limitPlusOffset()})
+	sources, err := s.store.ListSources(ctx, cache.SourceFilter{RepoID: repoID, Kind: req.Kind, Status: req.Status, Provenance: cache.Provenance(req.Provenance), Limit: req.limitPlusOffset()})
 	if err != nil {
 		return ListSourcesResult{}, normalizeError(err, "sources", "")
 	}

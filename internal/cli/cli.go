@@ -125,6 +125,7 @@ type options struct {
 	format         string
 	kind           string
 	status         string
+	provenance     string
 	limit          int
 	offset         int
 	lineStart      int
@@ -410,6 +411,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.format, "format", "text", "text, markdown, or json")
 	flags.StringVar(&opts.kind, "kind", "", "source kind")
 	flags.StringVar(&opts.status, "status", "", "source status")
+	flags.StringVar(&opts.provenance, "provenance", "", "source provenance")
 	flags.IntVar(&opts.limit, "limit", 0, "result limit")
 	flags.IntVar(&opts.offset, "offset", 0, "result offset")
 	flags.IntVar(&opts.lineStart, "line-start", 0, "snippet start line")
@@ -702,13 +704,13 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		if len(args) == 0 {
 			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "query", Message: "query is required"})
 		}
-		results, err := svc.SearchSources(ctx, service.SearchSourcesRequest{RepoID: opts.repo, Query: strings.Join(args, " "), Kind: opts.kind, Limit: opts.limit, Offset: opts.offset})
+		results, err := svc.SearchSources(ctx, service.SearchSourcesRequest{RepoID: opts.repo, Query: strings.Join(args, " "), Kind: opts.kind, Provenance: opts.provenance, Limit: opts.limit, Offset: opts.offset})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, results, renderSearchText)
 	case "list":
-		results, err := svc.ListSources(ctx, service.ListSourcesRequest{RepoID: opts.repo, Kind: opts.kind, Status: opts.status, Limit: opts.limit, Offset: opts.offset})
+		results, err := svc.ListSources(ctx, service.ListSourcesRequest{RepoID: opts.repo, Kind: opts.kind, Status: opts.status, Provenance: opts.provenance, Limit: opts.limit, Offset: opts.offset})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
@@ -1434,6 +1436,10 @@ func failureClass(err error) string {
 	if errors.As(err, &conflict) {
 		return "conflict"
 	}
+	var unsupported gitcode.ErrUnsupportedCapability
+	if errors.As(err, &unsupported) {
+		return "unsupported_capability"
+	}
 	var lockContention cache.ErrLockContention
 	if errors.As(err, &lockContention) {
 		return "cache_busy"
@@ -1472,6 +1478,10 @@ func exitCode(err error) int {
 	var conflict service.ErrConflict
 	if errors.As(err, &conflict) {
 		return 6
+	}
+	var unsupported gitcode.ErrUnsupportedCapability
+	if errors.As(err, &unsupported) {
+		return 4
 	}
 	if isStrictFinding(err) {
 		return 5
@@ -1640,6 +1650,7 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --format text|json")
 	fmt.Fprintln(w, "  --kind KIND")
 	fmt.Fprintln(w, "  --status STATUS")
+	fmt.Fprintln(w, "  --provenance live|fixture|remote|projection|bridge")
 	fmt.Fprintln(w, "  --limit N")
 	fmt.Fprintln(w, "  --offset N")
 	fmt.Fprintln(w, "  --line-start N")
@@ -1649,7 +1660,8 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --full | --incremental")
 	fmt.Fprintln(w, "  --input PATH --output PATH")
 	fmt.Fprintln(w, "  --owner OWNER --repo REPO --name NAME --api-base-url URL --scopes issues,wiki --alias ALIAS")
-	fmt.Fprintln(w, "  --number N --id ID --slug SLUG")
+	fmt.Fprintln(w, "  --number N --slug SLUG")
+	fmt.Fprintln(w, "  record IDs are positional for get, backlinks, and snippet commands")
 	fmt.Fprintln(w, "  --title TITLE --body BODY --label LABEL --labels A,B")
 	fmt.Fprintln(w, "  --idempotency-key KEY")
 	fmt.Fprintln(w)
@@ -1689,22 +1701,24 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH cache database path")
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
 	case "search", "search_sources":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO QUERY [--kind KIND] [--limit N] [--offset N]\n\n", command)
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO QUERY [--kind KIND] [--provenance PROVENANCE] [--limit N] [--offset N]\n\n", command)
 		fmt.Fprintln(w, "Search cached sources with full-text matching.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO       repository id")
 		fmt.Fprintln(w, "  --kind KIND       filter by source kind (issue, wiki, doc, task)")
+		fmt.Fprintln(w, "  --provenance P    filter by provenance (live, fixture, remote, projection, bridge)")
 		fmt.Fprintln(w, "  --limit N         maximum results")
 		fmt.Fprintln(w, "  --offset N        result offset")
 		fmt.Fprintln(w, "  --cache-path PATH cache database path")
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
 	case "list":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO [--kind KIND] [--status STATUS] [--limit N] [--offset N]\n\n", command)
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO [--kind KIND] [--status STATUS] [--provenance PROVENANCE] [--limit N] [--offset N]\n\n", command)
 		fmt.Fprintln(w, "List cached sources with optional filters.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO       repository id")
 		fmt.Fprintln(w, "  --kind KIND       filter by source kind")
 		fmt.Fprintln(w, "  --status STATUS   filter by status")
+		fmt.Fprintln(w, "  --provenance P    filter by provenance (live, fixture, remote, projection, bridge)")
 		fmt.Fprintln(w, "  --limit N         maximum results")
 		fmt.Fprintln(w, "  --offset N        result offset")
 		fmt.Fprintln(w, "  --cache-path PATH cache database path")

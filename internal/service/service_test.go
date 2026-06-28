@@ -1039,6 +1039,23 @@ func TestSearchSources(t *testing.T) {
 	}
 }
 
+func TestSearchSourcesFiltersProvenance(t *testing.T) {
+	ctx := context.Background()
+	svc := seededService(t, ctx)
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	if err := svc.store.UpsertSource(ctx, cache.Source{RepoID: "fixture-a", ID: "LIVE-1", Kind: "doc", Path: "docs/live.md", Title: "Live Backlog", Body: "backlog live-only", Status: "ready", ContentHash: "live-hash", Provenance: cache.ProvenanceLive, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: "backlog", Provenance: "live", Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchSources returned error: %v", err)
+	}
+	if len(results.Results) != 1 || results.Results[0].ID != "LIVE-1" || results.Results[0].Provenance != "live" {
+		t.Fatalf("SearchSources provenance filter = %#v", results.Results)
+	}
+}
+
 func TestGetSource(t *testing.T) {
 	ctx := context.Background()
 	svc := seededService(t, ctx)
@@ -1060,6 +1077,23 @@ func TestListSources(t *testing.T) {
 	}
 	if len(results.Results) != 1 || results.Results[0].ID != "TASK-001" || results.RepoID != "fixture-a" {
 		t.Fatalf("ListSources = %#v, want TASK-001", results)
+	}
+}
+
+func TestListSourcesFiltersProvenance(t *testing.T) {
+	ctx := context.Background()
+	svc := seededService(t, ctx)
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	if err := svc.store.UpsertSource(ctx, cache.Source{RepoID: "fixture-a", ID: "LIVE-1", Kind: "doc", Path: "docs/live.md", Title: "Live Backlog", Body: "backlog live-only", Status: "ready", ContentHash: "live-hash", Provenance: cache.ProvenanceLive, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := svc.ListSources(ctx, ListSourcesRequest{RepoID: "fixture-a", Provenance: "live"})
+	if err != nil {
+		t.Fatalf("ListSources returned error: %v", err)
+	}
+	if len(results.Results) != 1 || results.Results[0].ID != "LIVE-1" || results.Results[0].Provenance != "live" {
+		t.Fatalf("ListSources provenance filter = %#v", results.Results)
 	}
 }
 
