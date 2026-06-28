@@ -17,9 +17,15 @@ const (
 	EnvToken      = "GITCODE_TOKEN"
 )
 
+const (
+	CacheModeGlobal    = "global"
+	CacheModeRepoLocal = "repo-local"
+)
+
 type Config struct {
 	CachePath       string        `json:"cache_path"`
 	LockPath        string        `json:"lock_path"`
+	CacheMode       string        `json:"cache_mode"`
 	GitCodeBaseURL  string        `json:"gitcode_base_url"`
 	DefaultTimeout  time.Duration `json:"default_timeout"`
 	MaxResponseSize int64         `json:"max_response_size"`
@@ -31,6 +37,7 @@ type Config struct {
 type Overrides struct {
 	CachePath       string
 	LockPath        string
+	CacheMode       string
 	GitCodeBaseURL  string
 	DefaultTimeout  time.Duration
 	MaxResponseSize int64
@@ -47,6 +54,14 @@ type Source interface {
 	ReadFile(path string) ([]byte, error)
 }
 
+type WorkingDirSource interface {
+	WorkingDir() (string, error)
+}
+
+type StatSource interface {
+	Stat(path string) (os.FileInfo, error)
+}
+
 type OSSource struct{}
 
 func (OSSource) Env(key string) string                { return os.Getenv(key) }
@@ -54,6 +69,10 @@ func (OSSource) UserHomeDir() (string, error)         { return os.UserHomeDir() 
 func (OSSource) UserConfigDir() (string, error)       { return os.UserConfigDir() }
 func (OSSource) UserCacheDir() (string, error)        { return os.UserCacheDir() }
 func (OSSource) ReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
+func (OSSource) WorkingDir() (string, error)          { return os.Getwd() }
+func (OSSource) Stat(path string) (os.FileInfo, error) {
+	return os.Stat(path)
+}
 
 func Default() Config {
 	return defaultWithSource(OSSource{})
@@ -119,6 +138,7 @@ func RedactDiagnostic(message string, src Source) string {
 type fileConfig struct {
 	CachePath       *string    `json:"cache_path"`
 	LockPath        *string    `json:"lock_path"`
+	CacheMode       *string    `json:"cache_mode"`
 	GitCodeBaseURL  *string    `json:"gitcode_base_url"`
 	DefaultTimeout  *string    `json:"default_timeout"`
 	MaxResponseSize *int64     `json:"max_response_size"`
@@ -136,6 +156,7 @@ func defaultWithSource(src Source) Config {
 	return Config{
 		CachePath:       cachePath,
 		LockPath:        cachePath + ".lock",
+		CacheMode:       CacheModeGlobal,
 		GitCodeBaseURL:  "https://api.gitcode.com/api/v5",
 		DefaultTimeout:  30 * time.Second,
 		MaxResponseSize: 10 << 20,
@@ -204,6 +225,13 @@ func mergeFile(cfg Config, file fileConfig) (Config, error) {
 	if file.LockPath != nil {
 		cfg.LockPath = *file.LockPath
 	}
+	if file.CacheMode != nil {
+		mode, err := NormalizeCacheMode(*file.CacheMode)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.CacheMode = mode
+	}
 	if file.GitCodeBaseURL != nil {
 		cfg.GitCodeBaseURL = *file.GitCodeBaseURL
 	}
@@ -240,15 +268,34 @@ func mergeFile(cfg Config, file fileConfig) (Config, error) {
 	return cfg, nil
 }
 
+func NormalizeCacheMode(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", CacheModeGlobal:
+		return CacheModeGlobal, nil
+	case CacheModeRepoLocal, "repo_local", "local":
+		return CacheModeRepoLocal, nil
+	default:
+		return "", fmt.Errorf("config: invalid cache_mode %q; expected global or repo-local", value)
+	}
+}
+
 func mergeOverrides(cfg Config, overrides Overrides) Config {
 	if overrides.CachePath != "" {
 		cfg.CachePath = overrides.CachePath
+		if overrides.CacheMode == "" {
+			cfg.CacheMode = CacheModeGlobal
+		}
 		if overrides.LockPath == "" {
 			cfg.LockPath = overrides.CachePath + ".lock"
 		}
 	}
 	if overrides.LockPath != "" {
 		cfg.LockPath = overrides.LockPath
+	}
+	if overrides.CacheMode != "" {
+		if mode, err := NormalizeCacheMode(overrides.CacheMode); err == nil {
+			cfg.CacheMode = mode
+		}
 	}
 	if overrides.GitCodeBaseURL != "" {
 		cfg.GitCodeBaseURL = overrides.GitCodeBaseURL

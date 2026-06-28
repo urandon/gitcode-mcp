@@ -3,6 +3,7 @@ ai/artifacts
 ai/research-repos
 .cache/
 .gitcode-mcp-cache/
+.gitcode/mcp/
 bin/
 *.test
 *.out

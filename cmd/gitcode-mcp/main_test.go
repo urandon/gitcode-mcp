@@ -25,9 +25,11 @@ import (
 type testSource struct {
 	env       map[string]string
 	files     map[string][]byte
+	dirs      map[string]bool
 	homeDir   string
 	configDir string
 	cacheDir  string
+	cwd       string
 	readErr   map[string]error
 }
 
@@ -37,9 +39,11 @@ func newTestSource(t *testing.T) *testSource {
 	return &testSource{
 		env:       map[string]string{},
 		files:     map[string][]byte{},
+		dirs:      map[string]bool{},
 		homeDir:   filepath.Join(root, "home"),
 		configDir: filepath.Join(root, "config"),
 		cacheDir:  filepath.Join(root, "cache"),
+		cwd:       root,
 		readErr:   map[string]error{},
 	}
 }
@@ -48,6 +52,16 @@ func (s *testSource) Env(key string) string          { return s.env[key] }
 func (s *testSource) UserHomeDir() (string, error)   { return s.homeDir, nil }
 func (s *testSource) UserConfigDir() (string, error) { return s.configDir, nil }
 func (s *testSource) UserCacheDir() (string, error)  { return s.cacheDir, nil }
+func (s *testSource) WorkingDir() (string, error)    { return s.cwd, nil }
+func (s *testSource) Stat(path string) (os.FileInfo, error) {
+	if s.dirs[path] {
+		return testFileInfo{name: filepath.Base(path), dir: true}, nil
+	}
+	if _, ok := s.files[path]; ok {
+		return testFileInfo{name: filepath.Base(path)}, nil
+	}
+	return nil, os.ErrNotExist
+}
 func (s *testSource) ReadFile(path string) ([]byte, error) {
 	if err := s.readErr[path]; err != nil {
 		return nil, err
@@ -58,6 +72,23 @@ func (s *testSource) ReadFile(path string) ([]byte, error) {
 	}
 	return data, nil
 }
+
+type testFileInfo struct {
+	name string
+	dir  bool
+}
+
+func (f testFileInfo) Name() string { return f.name }
+func (f testFileInfo) Size() int64  { return 0 }
+func (f testFileInfo) Mode() os.FileMode {
+	if f.dir {
+		return os.ModeDir | 0o755
+	}
+	return 0o644
+}
+func (f testFileInfo) ModTime() time.Time { return time.Time{} }
+func (f testFileInfo) IsDir() bool        { return f.dir }
+func (f testFileInfo) Sys() any           { return nil }
 
 func TestEntrypointHelpRouting(t *testing.T) {
 	t.Run("SCN-ENTRYPOINT-HELP-CLI", func(t *testing.T) {
@@ -138,6 +169,33 @@ func TestEntrypointDefaultModeDependencyHandoff(t *testing.T) {
 	}
 	if gotDeps.Config.Format != "json" {
 		t.Fatalf("format = %q", gotDeps.Config.Format)
+	}
+}
+
+func TestEntrypointDiscoversRepoLocalCache(t *testing.T) {
+	src := newTestSource(t)
+	root := filepath.Join(src.homeDir, "workspace", "repo")
+	src.cwd = filepath.Join(root, "nested")
+	src.dirs[filepath.Join(root, ".git")] = true
+	repoCfg := filepath.Join(root, ".gitcode", "gitcode-mcp.yaml")
+	src.files[repoCfg] = []byte("cache_mode: repo-local\n")
+
+	old := cliRoute
+	defer func() { cliRoute = old }()
+	var gotDeps StartupDeps
+	cliRoute = func(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps StartupDeps) int {
+		gotDeps = deps
+		return 0
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"search", "needle"}, strings.NewReader(""), &stdout, &stderr, src)
+	if code != 0 {
+		t.Fatalf("exit = %d stderr=%q", code, stderr.String())
+	}
+	want := filepath.Join(root, ".gitcode", "mcp", "cache.db")
+	if gotDeps.Config.CacheMode != config.CacheModeRepoLocal || gotDeps.Config.CachePath != want || gotDeps.Cache.CachePath != want || gotDeps.Cache.LockPath != want+".lock" {
+		t.Fatalf("repo-local handoff=%#v want %q", gotDeps, want)
 	}
 }
 

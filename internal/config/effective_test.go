@@ -101,4 +101,71 @@ func TestEffectiveConfigScenarios(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("SCN-CACHE-REPO-LOCAL-DISCOVERED-FROM-NESTED-CWD", func(t *testing.T) {
+		src := newMemorySource(t)
+		root := filepath.Join(src.homeDir, "workspace", "repo")
+		src.cwd = filepath.Join(root, "subdir", "nested")
+		src.dirs[filepath.Join(root, ".git")] = true
+		repoCfg := filepath.Join(root, ".gitcode", "gitcode-mcp.yaml")
+		src.files[repoCfg] = []byte("cache_mode: repo-local\n")
+		eff, err := LoadEffective(src, Overrides{})
+		if err != nil {
+			t.Fatalf("LoadEffective returned error: %v", err)
+		}
+		wantCache := filepath.Join(root, ".gitcode", "mcp", "cache.db")
+		if eff.Config.CacheMode != CacheModeRepoLocal || eff.Config.CachePath != wantCache || eff.Config.LockPath != wantCache+".lock" {
+			t.Fatalf("repo-local effective=%#v want cache %q", eff, wantCache)
+		}
+		if eff.RepoRoot != root || eff.RepoLocalConfigPath != repoCfg || eff.CachePathSource != "repo-local:"+repoCfg {
+			t.Fatalf("repo-local discovery metadata=%#v", eff)
+		}
+	})
+
+	t.Run("SCN-CACHE-EXPLICIT-PATH-BEATS-REPO-LOCAL", func(t *testing.T) {
+		src := newMemorySource(t)
+		root := filepath.Join(src.homeDir, "workspace", "repo")
+		src.cwd = root
+		src.dirs[filepath.Join(root, ".git")] = true
+		repoCfg := filepath.Join(root, ".gitcode", "gitcode-mcp.yaml")
+		src.files[repoCfg] = []byte("cache_mode: repo-local\n")
+		eff, err := LoadEffective(src, Overrides{CachePath: "/tmp/explicit-cache.db"})
+		if err != nil {
+			t.Fatalf("LoadEffective returned error: %v", err)
+		}
+		if eff.Config.CachePath != "/tmp/explicit-cache.db" || eff.CachePathSource != "command" || eff.Config.CacheMode != CacheModeGlobal {
+			t.Fatalf("explicit cache did not win: %#v", eff)
+		}
+	})
+
+	t.Run("SCN-CACHE-EXPLICIT-PATH-SKIPS-MALFORMED-REPO-LOCAL-CONFIG", func(t *testing.T) {
+		src := newMemorySource(t)
+		root := filepath.Join(src.homeDir, "workspace", "repo")
+		src.cwd = root
+		src.dirs[filepath.Join(root, ".git")] = true
+		repoCfg := filepath.Join(root, ".gitcode", "gitcode-mcp.yaml")
+		src.files[repoCfg] = []byte("cache_mode\n")
+		eff, err := LoadEffective(src, Overrides{CachePath: "/tmp/explicit-cache.db"})
+		if err != nil {
+			t.Fatalf("LoadEffective returned error: %v", err)
+		}
+		if eff.Config.CachePath != "/tmp/explicit-cache.db" || eff.CachePathSource != "command" {
+			t.Fatalf("explicit cache did not bypass repo-local config: %#v", eff)
+		}
+	})
+
+	t.Run("SCN-CACHE-GLOBAL-FALLBACK-WHEN-NO-REPO-OPT-IN", func(t *testing.T) {
+		src := newMemorySource(t)
+		root := filepath.Join(src.homeDir, "workspace", "repo")
+		src.cwd = root
+		src.dirs[filepath.Join(root, ".git")] = true
+		eff, err := LoadEffective(src, Overrides{})
+		if err != nil {
+			t.Fatalf("LoadEffective returned error: %v", err)
+		}
+		wantCache := filepath.Join(src.cacheDir, "gitcode-mcp", "cache.db")
+		if eff.Config.CacheMode != CacheModeGlobal || eff.Config.CachePath != wantCache || eff.CachePathSource != "default" {
+			t.Fatalf("fallback effective=%#v want global cache %q", eff, wantCache)
+		}
+	})
 }

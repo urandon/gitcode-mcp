@@ -13,9 +13,11 @@ import (
 type memorySource struct {
 	env       map[string]string
 	files     map[string][]byte
+	dirs      map[string]bool
 	homeDir   string
 	configDir string
 	cacheDir  string
+	cwd       string
 	readErr   map[string]error
 }
 
@@ -25,9 +27,11 @@ func newMemorySource(t *testing.T) *memorySource {
 	return &memorySource{
 		env:       map[string]string{},
 		files:     map[string][]byte{},
+		dirs:      map[string]bool{},
 		homeDir:   filepath.Join(root, "home"),
 		configDir: filepath.Join(root, "config"),
 		cacheDir:  filepath.Join(root, "cache"),
+		cwd:       root,
 		readErr:   map[string]error{},
 	}
 }
@@ -36,6 +40,16 @@ func (s *memorySource) Env(key string) string          { return s.env[key] }
 func (s *memorySource) UserHomeDir() (string, error)   { return s.homeDir, nil }
 func (s *memorySource) UserConfigDir() (string, error) { return s.configDir, nil }
 func (s *memorySource) UserCacheDir() (string, error)  { return s.cacheDir, nil }
+func (s *memorySource) WorkingDir() (string, error)    { return s.cwd, nil }
+func (s *memorySource) Stat(path string) (os.FileInfo, error) {
+	if _, ok := s.files[path]; ok {
+		return fakeFileInfo{name: filepath.Base(path), dir: false}, nil
+	}
+	if s.dirs[path] {
+		return fakeFileInfo{name: filepath.Base(path), dir: true}, nil
+	}
+	return nil, os.ErrNotExist
+}
 func (s *memorySource) ReadFile(path string) ([]byte, error) {
 	if err := s.readErr[path]; err != nil {
 		return nil, err
@@ -46,6 +60,23 @@ func (s *memorySource) ReadFile(path string) ([]byte, error) {
 	}
 	return data, nil
 }
+
+type fakeFileInfo struct {
+	name string
+	dir  bool
+}
+
+func (f fakeFileInfo) Name() string { return f.name }
+func (f fakeFileInfo) Size() int64  { return 0 }
+func (f fakeFileInfo) Mode() os.FileMode {
+	if f.dir {
+		return os.ModeDir | 0o755
+	}
+	return 0o644
+}
+func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeFileInfo) IsDir() bool        { return f.dir }
+func (f fakeFileInfo) Sys() any           { return nil }
 
 func (s *memorySource) defaultConfigPath() string {
 	return filepath.Join(s.configDir, "gitcode-mcp", "config.json")
