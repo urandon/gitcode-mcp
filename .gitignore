@@ -1,6 +1,5 @@
 .DS_Store
-ai/artifacts
-ai/research-repos
+ai/
 .cache/
 .gitcode-mcp-cache/
 .gitcode/mcp/

@@ -6,11 +6,9 @@ import (
 	"gitcode-mcp/internal/config"
 )
 
-// Run plan constraint (ai/design_implementator_gitcode_mcp_live_operations_iteration_6_run_plan.yaml line 40):
 // Basic Auth (GITCODE_USER/GITCODE_PASS) is deliberately excluded from this resolver.
 // Only env:GITCODE_TOKEN > system keyring priority order is supported until sanitized evidence
 // proves GitCode accepts basic auth.
-
 type Result struct {
 	Present     bool
 	Token       string
