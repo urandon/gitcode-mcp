@@ -213,6 +213,10 @@ func (sanitizedFixtureClient) CreatePRComment(context.Context, gitcode.CreatePRC
 	return gitcode.WriteResult[gitcode.PRComment]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
+func (sanitizedFixtureClient) CreatePRReviewComment(context.Context, gitcode.CreatePRReviewCommentRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PRComment], error) {
+	return gitcode.WriteResult[gitcode.PRComment]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
+}
+
 func (sanitizedFixtureClient) CreateWikiPage(context.Context, gitcode.CreateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
 	return gitcode.WriteResult[gitcode.WikiPage]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
@@ -1553,6 +1557,14 @@ func (s *Service) ListPRDiscussions(ctx context.Context, req PRDiscussionRequest
 	if err != nil {
 		return PRDiscussionsResult{}, normalizeError(err, "pr_review_comments", repoID)
 	}
+	positions, err := s.store.ListPRReviewPositions(ctx, cache.PRReviewPositionFilter{RepoID: repoID, PRNumber: req.Number})
+	if err != nil {
+		return PRDiscussionsResult{}, normalizeError(err, "pr_review_positions", repoID)
+	}
+	positionsByComment := map[string][]PRReviewPosition{}
+	for _, position := range positions {
+		positionsByComment[position.CommentID] = append(positionsByComment[position.CommentID], prReviewPositionFromCache(position))
+	}
 	result := PRDiscussionsResult{RepoID: repoID, Number: req.Number, UnresolvedOnly: req.UnresolvedOnly, Discussions: []PRDiscussion{}, GeneratedAt: s.now().UTC()}
 	groups := map[string]int{}
 	for _, meta := range metadata {
@@ -1561,13 +1573,14 @@ func (s *Service) ListPRDiscussions(ctx context.Context, req PRDiscussionRequest
 			return PRDiscussionsResult{}, normalizeError(err, meta.SourceID, repoID)
 		}
 		comment := prReviewCommentFromCache(meta, source)
+		comment.Positions = positionsByComment[meta.CommentID]
 		groupID := meta.DiscussionID
 		if groupID == "" {
 			groupID = "comment:" + meta.CommentID
 		}
 		idx, ok := groups[groupID]
 		if !ok {
-			discussion := PRDiscussion{ID: groupID, Kind: discussionKind(comment), Resolved: meta.Resolved, Resolvable: meta.Resolvable, Path: meta.Path, Line: meta.Line, StartLine: meta.StartLine, EndLine: meta.EndLine, Comments: []PRReviewComment{}}
+			discussion := PRDiscussion{ID: groupID, Kind: discussionKind(comment), Resolved: meta.Resolved, Resolvable: meta.Resolvable, Path: meta.Path, Line: meta.Line, StartLine: meta.StartLine, EndLine: meta.EndLine, Position: firstCurrentPosition(comment.Positions), Comments: []PRReviewComment{}}
 			result.Discussions = append(result.Discussions, discussion)
 			idx = len(result.Discussions) - 1
 			groups[groupID] = idx
@@ -1587,6 +1600,9 @@ func (s *Service) ListPRDiscussions(ctx context.Context, req PRDiscussionRequest
 		}
 		if discussion.EndLine == 0 {
 			discussion.EndLine = meta.EndLine
+		}
+		if discussion.Position == nil {
+			discussion.Position = firstCurrentPosition(comment.Positions)
 		}
 		discussion.Resolved = mergeDiscussionResolved(discussion.Resolved, meta.Resolved)
 		if discussion.Resolvable == nil && meta.Resolvable != nil {
@@ -2068,6 +2084,13 @@ func (s *Service) AddPRComment(ctx context.Context, req WriteCommandRequest) (Wr
 	return s.executeWrite(ctx, "add-pr-comment", req, RepositoryScopeIssues)
 }
 
+func (s *Service) AddPRReviewComment(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if req.Number == 0 || strings.TrimSpace(req.Body) == "" || strings.TrimSpace(req.Path) == "" || (req.Line == 0 && req.Position == 0) {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "pr_review_comment", Message: "pull request number, body, path, and line or position are required"}
+	}
+	return s.executeWrite(ctx, "add-pr-review-comment", req, RepositoryScopeIssues)
+}
+
 func (s *Service) LinkPRIssue(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
 	if req.Number == 0 || req.IssueNumber == 0 {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "link", Message: "pull request number and issue number are required"}
@@ -2322,7 +2345,7 @@ func (s *Service) syncGraphFromSourceGraph(repoID string, graph cache.SourceGrap
 	if graph.SyncStatus != nil {
 		revisions = append(revisions, cache.RemoteRevision{RepoID: repoID, RecordID: graph.Source.ID, RemoteType: graph.SyncStatus.RemoteType, RemoteID: graph.SyncStatus.RemoteID, RemoteRevision: graph.SyncStatus.RemoteRevision, Status: graph.SyncStatus.Status, LastFetchedAt: graph.SyncStatus.LastFetchedAt})
 	}
-	return cache.SyncGraph{RepoID: repoID, Provenance: s.syncOriginProvenance(), Record: record, Comments: graph.Comments, PRReviewComments: graph.PRReviewComments, Identities: graph.Identities, Links: graph.Links, Chunks: graph.Chunks, RemoteRevisions: revisions, SyncEvents: graph.SyncEvents}
+	return cache.SyncGraph{RepoID: repoID, Provenance: s.syncOriginProvenance(), Record: record, Comments: graph.Comments, PRReviewComments: graph.PRReviewComments, PRReviewDiscussions: graph.PRReviewDiscussions, PRReviewPositions: graph.PRReviewPositions, Identities: graph.Identities, Links: graph.Links, Chunks: graph.Chunks, RemoteRevisions: revisions, SyncEvents: graph.SyncEvents}
 }
 
 func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, remoteID string, issue gitcode.Issue) (cache.SourceGraph, SyncCounts, error) {
@@ -2507,7 +2530,7 @@ func (s *Service) stagePRComment(ctx context.Context, req SyncRequest, remoteTyp
 	if created.IsZero() {
 		created = updated
 	}
-	hash := contentHash(prNumber, commentID, comment.DiscussionID, comment.ReviewKind, comment.Path, comment.Line, comment.StartLine, comment.EndLine, comment.Position, comment.OriginalPosition, nullableBoolHash(comment.Resolved), nullableBoolHash(comment.Resolvable), comment.ParentID, comment.Author, body, updated)
+	hash := contentHash(prNumber, commentID, comment.DiscussionID, comment.ReviewKind, comment.Path, comment.Line, comment.StartLine, comment.EndLine, comment.Position, comment.OriginalPosition, comment.Positions, nullableBoolHash(comment.Resolved), nullableBoolHash(comment.Resolvable), comment.ParentID, comment.Author, body, updated)
 	revision := prCommentRemoteRevision(comment, hash)
 	existing, err := s.store.GetSourceScoped(ctx, req.RepoID, stableID)
 	counts := SyncCounts{Fetched: 1}
@@ -2542,6 +2565,47 @@ func (s *Service) stagePRComment(ctx context.Context, req SyncRequest, remoteTyp
 		CreatedAt:        created,
 		UpdatedAt:        updated,
 	}}
+	if comment.DiscussionID != "" {
+		graph.PRReviewDiscussions = []cache.PRReviewDiscussion{{
+			RepoID:         req.RepoID,
+			PRNumber:       prNumber,
+			DiscussionID:   comment.DiscussionID,
+			Kind:           firstNonEmptyString(comment.ReviewKind, "general"),
+			Resolved:       comment.Resolved,
+			Resolvable:     comment.Resolvable,
+			FirstCommentID: commentID,
+			CreatedAt:      created,
+			UpdatedAt:      updated,
+		}}
+	}
+	for _, position := range comment.Positions {
+		graph.PRReviewPositions = append(graph.PRReviewPositions, cache.PRReviewPosition{
+			RepoID:        req.RepoID,
+			PRNumber:      prNumber,
+			CommentID:     commentID,
+			PositionKind:  firstNonEmptyString(position.PositionKind, "current"),
+			DiscussionID:  comment.DiscussionID,
+			PositionType:  position.PositionType,
+			BaseSHA:       position.BaseSHA,
+			StartSHA:      position.StartSHA,
+			HeadSHA:       position.HeadSHA,
+			OldPath:       position.OldPath,
+			NewPath:       position.NewPath,
+			OldLine:       position.OldLine,
+			NewLine:       position.NewLine,
+			StartOldLine:  position.StartOldLine,
+			StartNewLine:  position.StartNewLine,
+			LineCode:      position.LineCode,
+			StartLineCode: position.StartLineCode,
+			PatchsetIID:   position.PatchsetIID,
+			DiffID:        position.DiffID,
+			VersionSHA:    position.VersionSHA,
+			Side:          position.Side,
+			IsOutdated:    position.IsOutdated,
+			CreatedAt:     created,
+			UpdatedAt:     updated,
+		})
+	}
 	if comment.DiscussionID != "" {
 		graph.Identities = append(graph.Identities, cache.Identity{RepoID: req.RepoID, SourceID: stableID, AliasType: "gitcode_pr_discussion", Alias: comment.DiscussionID, Remote: cache.RemoteAlias{Type: "gitcode_pr_discussion", ID: comment.DiscussionID}})
 	}
@@ -2882,6 +2946,41 @@ func prReviewCommentFromCache(meta cache.PRReviewComment, source cache.Source) P
 		CreatedAt:        firstNonZeroTime(meta.CreatedAt, source.CreatedAt),
 		UpdatedAt:        firstNonZeroTime(meta.UpdatedAt, source.UpdatedAt),
 	}
+}
+
+func prReviewPositionFromCache(position cache.PRReviewPosition) PRReviewPosition {
+	return PRReviewPosition{
+		Kind:          firstNonEmptyString(position.PositionKind, "current"),
+		PositionType:  position.PositionType,
+		BaseSHA:       position.BaseSHA,
+		StartSHA:      position.StartSHA,
+		HeadSHA:       position.HeadSHA,
+		OldPath:       position.OldPath,
+		NewPath:       position.NewPath,
+		OldLine:       position.OldLine,
+		NewLine:       position.NewLine,
+		StartOldLine:  position.StartOldLine,
+		StartNewLine:  position.StartNewLine,
+		LineCode:      position.LineCode,
+		StartLineCode: position.StartLineCode,
+		PatchsetIID:   position.PatchsetIID,
+		DiffID:        position.DiffID,
+		VersionSHA:    position.VersionSHA,
+		Side:          position.Side,
+		IsOutdated:    position.IsOutdated,
+	}
+}
+
+func firstCurrentPosition(positions []PRReviewPosition) *PRReviewPosition {
+	if len(positions) == 0 {
+		return nil
+	}
+	for i := range positions {
+		if positions[i].Kind == "current" {
+			return &positions[i]
+		}
+	}
+	return &positions[0]
 }
 
 func discussionKind(comment PRReviewComment) string {
@@ -3277,6 +3376,12 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
 		return s.prCommentWriteGraph(ctx, route.RepoID, req.Number, result.Record, result, now)
+	case "add-pr-review-comment":
+		result, err := s.client.CreatePRReviewComment(ctx, gitcode.CreatePRReviewCommentRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, Body: req.Body, Path: req.Path, Line: req.Line, StartLine: req.StartLine, EndLine: req.EndLine, Position: req.Position}, opts)
+		if err != nil {
+			return writeConfirmation{}, cache.RecordGraph{}, err
+		}
+		return s.prCommentWriteGraph(ctx, route.RepoID, req.Number, result.Record, result, now)
 	case "link-pr-issue":
 		if strings.TrimSpace(req.Strategy) != "description_fallback" {
 			result, err := s.client.LinkPRIssue(ctx, gitcode.LinkPRIssueRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, IssueNumber: req.IssueNumber}, opts)
@@ -3363,6 +3468,12 @@ func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID s
 	case "add-pr-comment":
 		number := req.Number
 		comment := gitcode.PRComment{ID: prior.RemoteID, Body: req.Body, PRNumber: number, CreatedAt: now, UpdatedAt: now}
+		result := gitcode.WriteResult[gitcode.PRComment]{Record: comment, Confirmed: true, RemoteID: prior.RemoteID, ParentIssueNumber: number, ParentIssueID: strconv.Itoa(number), RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
+		_, graph, err := s.prCommentWriteGraph(ctx, repoID, number, comment, result, now)
+		return graph, err
+	case "add-pr-review-comment":
+		number := req.Number
+		comment := gitcode.PRComment{ID: prior.RemoteID, Body: req.Body, PRNumber: number, ReviewKind: "inline", Path: req.Path, Line: req.Line, StartLine: req.StartLine, EndLine: req.EndLine, Position: req.Position, CreatedAt: now, UpdatedAt: now}
 		result := gitcode.WriteResult[gitcode.PRComment]{Record: comment, Confirmed: true, RemoteID: prior.RemoteID, ParentIssueNumber: number, ParentIssueID: strconv.Itoa(number), RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
 		_, graph, err := s.prCommentWriteGraph(ctx, repoID, number, comment, result, now)
 		return graph, err
@@ -3499,7 +3610,7 @@ func isPRIssueRelationUnsupported(err error) bool {
 
 func recordGraphFromSourceGraph(graph cache.SourceGraph) cache.RecordGraph {
 	record := cache.Record{RepoID: graph.Source.RepoID, ID: graph.Source.ID, Type: graph.Source.Kind, Path: graph.Source.Path, Title: graph.Source.Title, Body: graph.Source.Body, Status: graph.Source.Status, Labels: graph.Source.Labels, ContentHash: graph.Source.ContentHash, Provenance: cache.ProvenanceRemote, CreatedAt: graph.Source.CreatedAt, UpdatedAt: graph.Source.UpdatedAt}
-	out := cache.RecordGraph{Record: record, Comments: graph.Comments, PRReviewComments: graph.PRReviewComments, Identities: graph.Identities, Links: graph.Links, SyncEvents: graph.SyncEvents}
+	out := cache.RecordGraph{Record: record, Comments: graph.Comments, PRReviewComments: graph.PRReviewComments, PRReviewDiscussions: graph.PRReviewDiscussions, PRReviewPositions: graph.PRReviewPositions, Identities: graph.Identities, Links: graph.Links, SyncEvents: graph.SyncEvents}
 	if graph.SyncStatus != nil {
 		record.RemoteType = graph.SyncStatus.RemoteType
 		record.RemoteID = graph.SyncStatus.RemoteID

@@ -668,6 +668,10 @@ type WriteCommandRequest struct {
 	CommentID      string    `json:"comment_id,omitempty"`
 	Slug           string    `json:"slug,omitempty"`
 	Path           string    `json:"path,omitempty"`
+	Line           int       `json:"line,omitempty"`
+	StartLine      int       `json:"start_line,omitempty"`
+	EndLine        int       `json:"end_line,omitempty"`
+	Position       int       `json:"position,omitempty"`
 	Sha            string    `json:"sha,omitempty"`
 	Title          string    `json:"title,omitempty"`
 	Body           string    `json:"body,omitempty"`
@@ -740,25 +744,48 @@ type PRDiscussion struct {
 	Line       int               `json:"line,omitempty"`
 	StartLine  int               `json:"start_line,omitempty"`
 	EndLine    int               `json:"end_line,omitempty"`
+	Position   *PRReviewPosition `json:"position,omitempty"`
 	Comments   []PRReviewComment `json:"comments"`
 }
 
 type PRReviewComment struct {
-	ID               string    `json:"id"`
-	SourceID         string    `json:"source_id"`
-	DiscussionID     string    `json:"discussion_id,omitempty"`
-	Kind             string    `json:"kind"`
-	Body             string    `json:"body"`
-	Author           string    `json:"author"`
-	Path             string    `json:"path,omitempty"`
-	Line             int       `json:"line,omitempty"`
-	StartLine        int       `json:"start_line,omitempty"`
-	EndLine          int       `json:"end_line,omitempty"`
-	Position         int       `json:"position,omitempty"`
-	OriginalPosition int       `json:"original_position,omitempty"`
-	Resolved         *bool     `json:"resolved,omitempty"`
-	Resolvable       *bool     `json:"resolvable,omitempty"`
-	ParentID         string    `json:"parent_id,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID               string             `json:"id"`
+	SourceID         string             `json:"source_id"`
+	DiscussionID     string             `json:"discussion_id,omitempty"`
+	Kind             string             `json:"kind"`
+	Body             string             `json:"body"`
+	Author           string             `json:"author"`
+	Path             string             `json:"path,omitempty"`
+	Line             int                `json:"line,omitempty"`
+	StartLine        int                `json:"start_line,omitempty"`
+	EndLine          int                `json:"end_line,omitempty"`
+	Position         int                `json:"position,omitempty"`
+	OriginalPosition int                `json:"original_position,omitempty"`
+	Resolved         *bool              `json:"resolved,omitempty"`
+	Resolvable       *bool              `json:"resolvable,omitempty"`
+	ParentID         string             `json:"parent_id,omitempty"`
+	Positions        []PRReviewPosition `json:"positions,omitempty"`
+	CreatedAt        time.Time          `json:"created_at"`
+	UpdatedAt        time.Time          `json:"updated_at"`
+}
+
+type PRReviewPosition struct {
+	Kind          string `json:"kind"`
+	PositionType  string `json:"position_type,omitempty"`
+	BaseSHA       string `json:"base_sha,omitempty"`
+	StartSHA      string `json:"start_sha,omitempty"`
+	HeadSHA       string `json:"head_sha,omitempty"`
+	OldPath       string `json:"old_path,omitempty"`
+	NewPath       string `json:"new_path,omitempty"`
+	OldLine       int    `json:"old_line,omitempty"`
+	NewLine       int    `json:"new_line,omitempty"`
+	StartOldLine  int    `json:"start_old_line,omitempty"`
+	StartNewLine  int    `json:"start_new_line,omitempty"`
+	LineCode      string `json:"line_code,omitempty"`
+	StartLineCode string `json:"start_line_code,omitempty"`
+	PatchsetIID   int    `json:"patchset_iid,omitempty"`
+	DiffID        int    `json:"diff_id,omitempty"`
+	VersionSHA    string `json:"version_sha,omitempty"`
+	Side          string `json:"side,omitempty"`
+	IsOutdated    *bool  `json:"is_outdated,omitempty"`
 }

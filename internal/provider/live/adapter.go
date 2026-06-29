@@ -10,6 +10,7 @@ type Client = gitcode.Client
 type Provider = gitcode.Provider
 type Config = gitcode.ProviderConfig
 type ErrProviderUnavailable = gitcode.ErrProviderUnavailable
+type CreatePRReviewCommentRequest = gitcode.CreatePRReviewCommentRequest
 
 type (
 	Page                      = gitcode.Page[any]

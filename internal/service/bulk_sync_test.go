@@ -439,7 +439,7 @@ func TestListPRDiscussionsGroupsRepliesAndFiltersUnresolved(t *testing.T) {
 		},
 		prCommentsByPR: map[int][]gitcode.PRComment{
 			7: {
-				{ID: "301", Body: "inline root", Author: "alice", DiscussionID: "D7", ReviewKind: "inline", Path: "internal/service/service.go", Line: 42, Resolved: &resolvedFalse, ParentID: "", PRNumber: 7, CreatedAt: base, UpdatedAt: base},
+				{ID: "301", Body: "inline root", Author: "alice", DiscussionID: "D7", ReviewKind: "inline", Path: "internal/service/service.go", Line: 42, Resolved: &resolvedFalse, ParentID: "", Positions: []gitcode.PRCommentPosition{{PositionKind: "current", PositionType: "text", BaseSHA: "base-sha", StartSHA: "base-sha", HeadSHA: "head-sha", OldPath: "internal/service/service.go", NewPath: "internal/service/service.go", NewLine: 42, LineCode: "line-code", PatchsetIID: 1, DiffID: 99, VersionSHA: "head-sha", Side: "new", IsOutdated: &resolvedFalse}}, PRNumber: 7, CreatedAt: base, UpdatedAt: base},
 				{ID: "302", Body: "reply", Author: "bob", DiscussionID: "D7", ReviewKind: "inline", Path: "internal/service/service.go", Line: 42, Resolved: &resolvedFalse, ParentID: "301", PRNumber: 7, CreatedAt: base.Add(time.Minute), UpdatedAt: base.Add(time.Minute)},
 				{ID: "303", Body: "general note", Author: "carol", ReviewKind: "general", Resolved: &resolvedTrue, PRNumber: 7, CreatedAt: base.Add(2 * time.Minute), UpdatedAt: base.Add(2 * time.Minute)},
 			},
@@ -473,6 +473,12 @@ func TestListPRDiscussionsGroupsRepliesAndFiltersUnresolved(t *testing.T) {
 	}
 	if inline.Comments[0].Author != "alice" || inline.Comments[1].ParentID != "301" || inline.Comments[1].Body != "reply" {
 		t.Fatalf("inline comments=%+v", inline.Comments)
+	}
+	if inline.Position == nil || inline.Position.Kind != "current" || inline.Position.NewPath != "internal/service/service.go" || inline.Position.NewLine != 42 || inline.Position.LineCode != "line-code" || inline.Position.DiffID != 99 {
+		t.Fatalf("inline position=%+v", inline.Position)
+	}
+	if len(inline.Comments[0].Positions) != 1 || inline.Comments[0].Positions[0].BaseSHA != "base-sha" {
+		t.Fatalf("inline comment positions=%+v", inline.Comments[0].Positions)
 	}
 	general := all.Discussions[1]
 	if general.Kind != "general" || len(general.Comments) != 1 || general.Comments[0].Author != "carol" {

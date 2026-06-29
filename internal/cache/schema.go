@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 12
+const currentSchemaVersion = 13
 
 type VersionCompatibility struct {
 	DetectedVersion int
@@ -136,6 +136,7 @@ var migrations = []migration{
 	{version: 10, apply: applySourceOriginProvenanceMigration},
 	{version: 11, apply: applyRecordFixtureLiveProvenanceMigration},
 	{version: 12, apply: applyPRReviewCommentsMigration},
+	{version: 13, apply: applyPRReviewDiscussionPositionsMigration},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB, ftsAvailable bool) error {
@@ -699,6 +700,62 @@ func applyPRReviewCommentsMigration(ctx context.Context, tx *sql.Tx, ftsAvailabl
 )`,
 		`CREATE INDEX IF NOT EXISTS idx_pr_review_comments_pr ON pr_review_comments(repo_id, pr_number)`,
 		`CREATE INDEX IF NOT EXISTS idx_pr_review_comments_discussion ON pr_review_comments(repo_id, pr_number, discussion_id)`,
+	}
+	for _, stmt := range statements {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyPRReviewDiscussionPositionsMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS pr_review_discussions (
+	repo_id TEXT NOT NULL,
+	pr_number INTEGER NOT NULL,
+	discussion_id TEXT NOT NULL,
+	kind TEXT NOT NULL DEFAULT '',
+	resolved TEXT NOT NULL DEFAULT '',
+	resolvable TEXT NOT NULL DEFAULT '',
+	first_comment_id TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, pr_number, discussion_id),
+	FOREIGN KEY(repo_id) REFERENCES repos(repo_id) ON DELETE CASCADE
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_pr_review_discussions_pr ON pr_review_discussions(repo_id, pr_number)`,
+		`CREATE TABLE IF NOT EXISTS pr_review_positions (
+	repo_id TEXT NOT NULL,
+	pr_number INTEGER NOT NULL,
+	comment_id TEXT NOT NULL,
+	position_kind TEXT NOT NULL DEFAULT 'current',
+	discussion_id TEXT NOT NULL DEFAULT '',
+	position_type TEXT NOT NULL DEFAULT '',
+	base_sha TEXT NOT NULL DEFAULT '',
+	start_sha TEXT NOT NULL DEFAULT '',
+	head_sha TEXT NOT NULL DEFAULT '',
+	old_path TEXT NOT NULL DEFAULT '',
+	new_path TEXT NOT NULL DEFAULT '',
+	old_line INTEGER NOT NULL DEFAULT 0,
+	new_line INTEGER NOT NULL DEFAULT 0,
+	start_old_line INTEGER NOT NULL DEFAULT 0,
+	start_new_line INTEGER NOT NULL DEFAULT 0,
+	line_code TEXT NOT NULL DEFAULT '',
+	start_line_code TEXT NOT NULL DEFAULT '',
+	patchset_iid INTEGER NOT NULL DEFAULT 0,
+	diff_id INTEGER NOT NULL DEFAULT 0,
+	version_sha TEXT NOT NULL DEFAULT '',
+	side TEXT NOT NULL DEFAULT '',
+	is_outdated TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, pr_number, comment_id, position_kind),
+	FOREIGN KEY(repo_id) REFERENCES repos(repo_id) ON DELETE CASCADE
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_pr_review_positions_discussion ON pr_review_positions(repo_id, pr_number, discussion_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_pr_review_positions_new_line ON pr_review_positions(repo_id, pr_number, new_path, new_line)`,
+		`CREATE INDEX IF NOT EXISTS idx_pr_review_positions_old_line ON pr_review_positions(repo_id, pr_number, old_path, old_line)`,
 	}
 	for _, stmt := range statements {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {

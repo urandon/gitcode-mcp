@@ -46,6 +46,22 @@ func (s *SQLiteStore) UpsertRecordGraph(ctx context.Context, graph RecordGraph) 
 			return err
 		}
 	}
+	for _, discussion := range graph.PRReviewDiscussions {
+		if discussion.RepoID == "" {
+			discussion.RepoID = graph.Record.RepoID
+		}
+		if err = upsertPRReviewDiscussionTx(ctx, tx, discussion); err != nil {
+			return err
+		}
+	}
+	for _, position := range graph.PRReviewPositions {
+		if position.RepoID == "" {
+			position.RepoID = graph.Record.RepoID
+		}
+		if err = upsertPRReviewPositionTx(ctx, tx, position); err != nil {
+			return err
+		}
+	}
 	for _, identity := range graph.Identities {
 		if identity.RepoID == "" {
 			identity.RepoID = graph.Record.RepoID
@@ -154,6 +170,22 @@ func (s *SQLiteStore) UpsertSyncGraph(ctx context.Context, graph SyncGraph) (err
 			review.SourceID = graph.Record.ID
 		}
 		if err = upsertPRReviewCommentTx(ctx, tx, review); err != nil {
+			return err
+		}
+	}
+	for _, discussion := range graph.PRReviewDiscussions {
+		if discussion.RepoID == "" {
+			discussion.RepoID = repoID
+		}
+		if err = upsertPRReviewDiscussionTx(ctx, tx, discussion); err != nil {
+			return err
+		}
+	}
+	for _, position := range graph.PRReviewPositions {
+		if position.RepoID == "" {
+			position.RepoID = repoID
+		}
+		if err = upsertPRReviewPositionTx(ctx, tx, position); err != nil {
 			return err
 		}
 	}

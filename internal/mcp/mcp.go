@@ -45,6 +45,7 @@ type serviceInterface interface {
 	CreatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	AddPRComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	AddPRReviewComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	LinkPRIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	Index(context.Context, service.OperationRequest) (service.OperationResult, error)
 	ListChunks(context.Context, service.ChunkQuery) (service.ChunkQueryResult, error)
@@ -232,15 +233,16 @@ const (
 )
 
 var writeToolNames = map[string]bool{
-	"sync_live":            true,
-	"index_repo":           true,
-	"add_issue_comment":    true,
-	"update_issue_comment": true,
-	"update_issue":         true,
-	"create_pr":            true,
-	"update_pr":            true,
-	"add_pr_comment":       true,
-	"link_pr_issue":        true,
+	"sync_live":             true,
+	"index_repo":            true,
+	"add_issue_comment":     true,
+	"update_issue_comment":  true,
+	"update_issue":          true,
+	"create_pr":             true,
+	"update_pr":             true,
+	"add_pr_comment":        true,
+	"add_pr_review_comment": true,
+	"link_pr_issue":         true,
 }
 
 func normalizeToolAccess(access ToolAccess) ToolAccess {
@@ -507,6 +509,11 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Comment body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "number", "body"}},
 	},
 	{
+		Name:        "add_pr_review_comment",
+		Description: "Create a live inline pull request review comment through the audited write lifecycle.",
+		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Comment body.", MinLength: 1}, "path": {Type: "string", Description: "Changed file path.", MinLength: 1}, "line": {Type: "integer", Description: "File line number.", Minimum: float64Ptr(1)}, "position": {Type: "integer", Description: "Diff position.", Minimum: float64Ptr(1)}, "start_line": {Type: "integer", Description: "Optional range start line.", Minimum: float64Ptr(1)}, "end_line": {Type: "integer", Description: "Optional range end line.", Minimum: float64Ptr(1)}}), Required: []string{"repo_id", "write_mode", "number", "body", "path"}},
+	},
+	{
 		Name:        "link_pr_issue",
 		Description: "Link a live pull request to an issue through the GitCode relation API, with deterministic description fallback when unsupported.",
 		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"pr_number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "issue_number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "strategy": {Type: "string", Description: "Link strategy.", Enum: []string{"auto", "description_fallback"}, Default: "auto"}}), Required: []string{"repo_id", "write_mode", "pr_number", "issue_number"}},
@@ -698,6 +705,7 @@ var toolListOrder = []string{
 	"create_pr",
 	"update_pr",
 	"add_pr_comment",
+	"add_pr_review_comment",
 	"link_pr_issue",
 	"index_repo",
 	"auth_status",
@@ -747,6 +755,7 @@ func (s *Server) toolRegistry() toolRegistry {
 	registerTool(registry, "create_pr", s.callCreatePR)
 	registerTool(registry, "update_pr", s.callUpdatePR)
 	registerTool(registry, "add_pr_comment", s.callAddPRComment)
+	registerTool(registry, "add_pr_review_comment", s.callAddPRReviewComment)
 	registerTool(registry, "link_pr_issue", s.callLinkPRIssue)
 	registerTool(registry, "index_repo", s.callIndexRepo)
 	registerTool(registry, "auth_status", s.callAuthStatus)
