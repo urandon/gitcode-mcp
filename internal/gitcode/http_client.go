@@ -128,9 +128,6 @@ func (c *HTTPClient) ListPRComments(ctx context.Context, req PRRequest) (Page[PR
 	if err != nil {
 		return Page[PRComment]{}, err
 	}
-	if discussionItems, err := c.listPRDiscussionComments(ctx, req); err == nil {
-		items = mergePRDiscussionMetadata(items, discussionItems)
-	}
 	for i := range items {
 		items[i].PRNumber = req.Number
 		if items[i].DiscussionID == "" {
@@ -138,17 +135,6 @@ func (c *HTTPClient) ListPRComments(ctx context.Context, req PRRequest) (Page[PR
 		}
 	}
 	return Page[PRComment]{Items: items, Page: page.Page, PerPage: page.PerPage}, nil
-}
-
-func (c *HTTPClient) listPRDiscussionComments(ctx context.Context, req PRRequest) ([]PRComment, error) {
-	values := url.Values{}
-	values.Set("page", "1")
-	values.Set("per_page", strconv.Itoa(firstPositive(c.pagination.PerPage, 100)))
-	body, _, err := c.getBytesWithOptions(ctx, prReviewCommentEndpoint(req.Owner, req.Repo, req.Number), values, requestOptions{})
-	if err != nil {
-		return nil, err
-	}
-	return decodePRDiscussionComments(prReviewCommentEndpoint(req.Owner, req.Repo, req.Number), body, req.Number)
 }
 
 func (c *HTTPClient) CreatePR(ctx context.Context, req CreatePRRequest, opts WriteOptions) (WriteResult[PullRequest], error) {
@@ -428,40 +414,31 @@ func (c *HTTPClient) CreatePRReviewComment(ctx context.Context, req CreatePRRevi
 		return WriteResult[PRComment]{}, ErrValidationFailed{Field: "pull_request.sha", Message: "inline review comment requires base and head sha from pull request detail"}
 	}
 	target := req.Owner + "/" + req.Repo + "/pulls/" + strconv.Itoa(req.Number)
-	endpoint := prReviewCommentEndpoint(req.Owner, req.Repo, req.Number)
+	endpoint := createPRCommentEndpoint(req.Owner, req.Repo, req.Number)
 	payload := prReviewCommentPayload(req, pr)
 	key := opts.IdempotencyKey
 	if key == "" {
 		key = GenerateIdempotencyKey("CreatePRReviewComment", target, payload, opts)
 		opts.IdempotencyKey = key
 	}
-	result, err := writeConfirmedWithDecoder[[]PRComment](ctx, c, http.MethodPost, endpoint, "CreatePRReviewComment", target, payload, opts, func(endpoint string, body []byte, out any) error {
-		comments, err := decodePRDiscussionComments(endpoint, body, req.Number)
-		if err != nil {
-			return err
+	result, err := writeConfirmedSchemaJSON[PRComment](ctx, c, http.MethodPost, endpoint, "CreatePRReviewComment", target, payload, opts, func(result WriteResult[PRComment]) (WriteResult[PRComment], error) {
+		created := result.Record
+		if strings.TrimSpace(created.ID) == "" {
+			return WriteResult[PRComment]{}, &ErrSchemaDecode{Field: "pr_review_comment.id", Expected: "note_id or id", Received: "missing"}
 		}
-		ptr, ok := out.(*[]PRComment)
-		if !ok {
-			return &ErrSchemaDecode{Field: "pr_review_comment", Expected: "[]PRComment output", Received: "unexpected output target"}
+		if created.Body != "" && created.Body != req.Body {
+			return WriteResult[PRComment]{}, ErrValidationFailed{Field: "body", Message: "inline review comment confirmation requires matching body"}
 		}
-		*ptr = comments
-		return nil
-	}, func(result WriteResult[[]PRComment]) (WriteResult[[]PRComment], error) {
-		for _, comment := range result.Record {
-			if isConfirmedInlineComment(comment, req) {
-				result.Record = []PRComment{comment}
-				result.RemoteID = comment.ID
-				result.ParentIssueNumber = req.Number
-				result.ParentIssueID = comment.DiscussionID
-				return result, nil
-			}
-		}
-		return WriteResult[[]PRComment]{}, ErrValidationFailed{Field: "response", Message: "inline review comment confirmation requires matching DiffNote path and line"}
+		result.Record = requestConfirmedPRReviewComment(created, req)
+		result.RemoteID = result.Record.ID
+		result.ParentIssueNumber = req.Number
+		result.ParentIssueID = result.Record.DiscussionID
+		return result, nil
 	})
 	if err != nil {
 		return WriteResult[PRComment]{}, err
 	}
-	comment := ensurePRReviewCommentPosition(result.Record[0], req, pr)
+	comment := ensurePRReviewCommentPosition(result.Record, req, pr)
 	return WriteResult[PRComment]{
 		Record:                     comment,
 		Confirmed:                  result.Confirmed,

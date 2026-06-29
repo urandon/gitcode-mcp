@@ -2,7 +2,6 @@ package gitcode
 
 import (
 	"encoding/json"
-	"strconv"
 	"strings"
 )
 
@@ -246,67 +245,49 @@ func prDiffPositionToCommentPosition(kind string, raw *prDiffPosition, isOutdate
 	}, nil
 }
 
-func mergePRDiscussionMetadata(items []PRComment, discussions []PRComment) []PRComment {
-	byID := make(map[string]PRComment, len(discussions))
-	for _, comment := range discussions {
-		byID[comment.ID] = comment
+func prReviewCommentPayload(req CreatePRReviewCommentRequest, _ PullRequest) any {
+	newLine := prReviewCommentNewLine(req)
+	type reviewPayload struct {
+		Body      string `json:"body"`
+		Path      string `json:"path"`
+		Line      int    `json:"line"`
+		NewLine   int    `json:"new_line"`
+		Position  int    `json:"position"`
+		StartLine int    `json:"start_line,omitempty"`
+		EndLine   int    `json:"end_line,omitempty"`
 	}
-	seen := make(map[string]bool, len(items))
-	for i := range items {
-		seen[items[i].ID] = true
-		if enriched, ok := byID[items[i].ID]; ok {
-			items[i] = mergePRComment(items[i], enriched)
-		}
+	payload := reviewPayload{
+		Body:     req.Body,
+		Path:     req.Path,
+		Line:     newLine,
+		NewLine:  newLine,
+		Position: firstPositive(req.Position, newLine),
 	}
-	for _, comment := range discussions {
-		if comment.ReviewKind == "inline" && !seen[comment.ID] {
-			items = append(items, comment)
-		}
+	if req.StartLine > 0 {
+		payload.StartLine = req.StartLine
+		payload.EndLine = firstPositive(req.EndLine, newLine)
 	}
-	return items
+	return payload
 }
 
-func mergePRComment(base, enriched PRComment) PRComment {
-	if enriched.Body != "" {
-		base.Body = enriched.Body
+func requestConfirmedPRReviewComment(created PRComment, req CreatePRReviewCommentRequest) PRComment {
+	newLine := prReviewCommentNewLine(req)
+	created.Body = firstNonEmpty(created.Body, req.Body)
+	created.ReviewKind = "inline"
+	created.Path = req.Path
+	created.Line = newLine
+	created.Position = firstPositive(req.Position, newLine)
+	created.StartLine = req.StartLine
+	if req.StartLine > 0 {
+		created.EndLine = firstPositive(req.EndLine, newLine)
+	} else {
+		created.EndLine = req.EndLine
 	}
-	if enriched.Author != "" {
-		base.Author = enriched.Author
-	}
-	if enriched.DiscussionID != "" {
-		base.DiscussionID = enriched.DiscussionID
-	}
-	if enriched.ReviewKind != "" {
-		base.ReviewKind = enriched.ReviewKind
-	}
-	if enriched.Path != "" {
-		base.Path = enriched.Path
-	}
-	if enriched.Line != 0 {
-		base.Line = enriched.Line
-	}
-	if enriched.Resolved != nil {
-		base.Resolved = enriched.Resolved
-	}
-	if enriched.Resolvable != nil {
-		base.Resolvable = enriched.Resolvable
-	}
-	if len(enriched.Positions) > 0 {
-		base.Positions = enriched.Positions
-	}
-	if enriched.ParentID != "" {
-		base.ParentID = enriched.ParentID
-	}
-	if !enriched.CreatedAt.IsZero() {
-		base.CreatedAt = enriched.CreatedAt
-	}
-	if !enriched.UpdatedAt.IsZero() {
-		base.UpdatedAt = enriched.UpdatedAt
-	}
-	return base
+	created.PRNumber = req.Number
+	return created
 }
 
-func prReviewCommentPayload(req CreatePRReviewCommentRequest, pr PullRequest) any {
+func prReviewCommentNewLine(req CreatePRReviewCommentRequest) int {
 	newLine := req.Line
 	if req.Position > 0 && newLine == 0 {
 		newLine = req.Position
@@ -314,44 +295,14 @@ func prReviewCommentPayload(req CreatePRReviewCommentRequest, pr PullRequest) an
 	if req.StartLine > 0 {
 		newLine = firstPositive(req.EndLine, req.StartLine, newLine)
 	}
-	type reviewPayload struct {
-		Body     string `json:"body"`
-		Position any    `json:"position"`
-	}
-	payload := reviewPayload{
-		Body: req.Body,
-		Position: struct {
-			BaseSHA      string `json:"base_sha"`
-			HeadSHA      string `json:"head_sha"`
-			StartSHA     string `json:"start_sha"`
-			PositionType string `json:"position_type"`
-			NewPath      string `json:"new_path"`
-			OldPath      string `json:"old_path"`
-			NewLine      int    `json:"new_line,omitempty"`
-		}{
-			BaseSHA:      pr.BaseSHA,
-			HeadSHA:      pr.HeadSHA,
-			StartSHA:     firstNonEmpty(pr.BaseSHA, pr.HeadSHA),
-			PositionType: "text",
-			NewPath:      req.Path,
-			OldPath:      req.Path,
-			NewLine:      newLine,
-		},
-	}
-	return payload
+	return newLine
 }
 
 func ensurePRReviewCommentPosition(comment PRComment, req CreatePRReviewCommentRequest, pr PullRequest) PRComment {
 	if len(comment.Positions) > 0 {
 		return comment
 	}
-	newLine := req.Line
-	if req.Position > 0 && newLine == 0 {
-		newLine = req.Position
-	}
-	if req.StartLine > 0 {
-		newLine = firstPositive(req.EndLine, req.StartLine, newLine)
-	}
+	newLine := prReviewCommentNewLine(req)
 	comment.Positions = []PRCommentPosition{{
 		PositionKind: "current",
 		PositionType: "text",
@@ -365,16 +316,4 @@ func ensurePRReviewCommentPosition(comment PRComment, req CreatePRReviewCommentR
 		Side:         "new",
 	}}
 	return comment
-}
-
-func prReviewCommentEndpoint(owner, repo string, number int) string {
-	return "/api/v4/projects/" + pathEscapedRepo(owner, repo) + "/merge_requests/" + strconv.Itoa(number) + "/discussions"
-}
-
-func pathEscapedRepo(owner, repo string) string {
-	return strings.ReplaceAll(owner+"/"+repo, "/", "%2F")
-}
-
-func isConfirmedInlineComment(comment PRComment, req CreatePRReviewCommentRequest) bool {
-	return comment.ID != "" && comment.ReviewKind == "inline" && comment.Path == req.Path && comment.Line == req.Line
 }
