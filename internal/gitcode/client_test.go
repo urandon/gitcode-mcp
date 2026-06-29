@@ -941,8 +941,6 @@ func TestScenario018PRListDetailCommentsRoutes(t *testing.T) {
 			fmt.Fprint(w, `{"id":"101","number":"7","html_url":"https://example.test/pulls/7","state":"open","title":"Add cache","body":"body","user":{"login":"alice"},"labels":["feature"],"base":{"ref":"main","sha":"base-sha"},"head":{"ref":"topic","sha":"head-sha"}}`)
 		case r.Method == http.MethodGet && r.URL.Path == listPRCommentsEndpoint("example-owner", "example-repo", 7):
 			fmt.Fprint(w, `[{"id":201,"note_id":301,"body":"looks good","discussion_id":"DISC-7","user":{"login":"bob"},"path":"internal/service/service.go","line":42,"start_line":40,"end_line":42,"position":9,"original_position":8,"resolved":false,"resolvable":true,"parent_id":"300"}]`)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/example-owner/example-repo/merge_requests/7/discussions":
-			fmt.Fprint(w, `{"content":{"data":[{"id":"DISC-7","noteable_type":"MergeRequest","notes":[{"id":301,"body":"looks good","discussion_id":"DISC-7","type":"DiffNote","author":{"username":"bob"},"position":{"new_path":"internal/service/service.go","old_path":"internal/service/service.go","new_line":42,"old_line":null},"resolved":false,"resolvable":true}]}]}}`)
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -1080,24 +1078,25 @@ func TestScenario030PRReviewCommentWrite(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == getPREndpoint("example-owner", "example-repo", 7):
 			fmt.Fprint(w, `{"id":"101","number":7,"base":{"ref":"main","sha":"base-sha"},"head":{"ref":"topic","sha":"head-sha"}}`)
 			return
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v4/projects/example-owner/example-repo/merge_requests/7/discussions":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v5/repos/example-owner/example-repo/pulls/7/comments":
 			posts++
-			if got := r.Header.Get("PRIVATE-TOKEN"); got != "test-token" {
-				t.Fatalf("PRIVATE-TOKEN=%q", got)
+			if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+				t.Fatalf("Authorization=%q", got)
 			}
-			if got := r.Header.Get("Authorization"); got != "" {
-				t.Fatalf("Authorization should be empty for v4 request, got %q", got)
+			if got := r.Header.Get("PRIVATE-TOKEN"); got != "" {
+				t.Fatalf("PRIVATE-TOKEN should be empty for v5 request, got %q", got)
 			}
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			seenBody = string(body)
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":201,"note_id":301,"body":"inline"}`)
+			return
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatalf("read request body: %v", err)
-		}
-		seenBody = string(body)
-		w.WriteHeader(http.StatusCreated)
-		fmt.Fprint(w, `{"id":"D7","notes":[{"id":301,"body":"inline","discussion_id":"D7","type":"DiffNote","file_path":"internal/service/service.go","new_line":42,"resolved":false,"resolvable":true}]}`)
 	}))
 	defer server.Close()
 
@@ -1105,17 +1104,17 @@ func TestScenario030PRReviewCommentWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePRReviewComment returned error: %v", err)
 	}
-	for _, want := range []string{`"body":"inline"`, `"position_type":"text"`, `"base_sha":"base-sha"`, `"start_sha":"base-sha"`, `"head_sha":"head-sha"`, `"new_path":"internal/service/service.go"`, `"old_path":"internal/service/service.go"`, `"new_line":42`} {
+	for _, want := range []string{`"body":"inline"`, `"path":"internal/service/service.go"`, `"line":42`, `"new_line":42`, `"position":9`, `"start_line":40`, `"end_line":42`} {
 		if !strings.Contains(seenBody, want) {
 			t.Fatalf("request body = %s, want %s", seenBody, want)
 		}
 	}
-	for _, forbidden := range []string{`"repoId"`, `"iid"`, `"line_types"`, `"assignee_id"`, `"proposer_id"`, `"severity"`} {
+	for _, forbidden := range []string{`"repoId"`, `"iid"`, `"line_types"`, `"assignee_id"`, `"proposer_id"`, `"severity"`, `"base_sha"`, `"head_sha"`, `"position_type"`} {
 		if strings.Contains(seenBody, forbidden) {
 			t.Fatalf("request body = %s, must not contain %s", seenBody, forbidden)
 		}
 	}
-	if posts != 1 || !result.Confirmed || result.RemoteID != "301" || result.ParentIssueNumber != 7 || result.ParentIssueID != "D7" || result.Record.ReviewKind != "inline" || result.Record.Path != "internal/service/service.go" || result.Record.Line != 42 {
+	if posts != 1 || !result.Confirmed || result.RemoteID != "301" || result.ParentIssueNumber != 7 || result.ParentIssueID != "" || result.Record.ReviewKind != "inline" || result.Record.Path != "internal/service/service.go" || result.Record.Line != 42 {
 		t.Fatalf("unexpected PR review comment write result: %+v", result)
 	}
 	if len(result.Record.Positions) != 1 || result.Record.Positions[0].BaseSHA != "base-sha" || result.Record.Positions[0].HeadSHA != "head-sha" || result.Record.Positions[0].NewPath != "internal/service/service.go" || result.Record.Positions[0].NewLine != 42 {
