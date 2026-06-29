@@ -938,9 +938,11 @@ func TestScenario018PRListDetailCommentsRoutes(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == listPREndpoint("example-owner", "example-repo"):
 			fmt.Fprint(w, `[{"id":101,"number":7,"html_url":"https://example.test/pulls/7","state":"open","title":"Add cache","body":"body","user":{"login":"alice"},"labels":[{"id":1,"name":"feature","color":"blue"}],"base":{"ref":"main"},"head":{"ref":"topic"}}]`)
 		case r.Method == http.MethodGet && r.URL.Path == getPREndpoint("example-owner", "example-repo", 7):
-			fmt.Fprint(w, `{"id":"101","number":"7","html_url":"https://example.test/pulls/7","state":"open","title":"Add cache","body":"body","user":{"login":"alice"},"labels":["feature"],"base":{"ref":"main"},"head":{"ref":"topic"}}`)
+			fmt.Fprint(w, `{"id":"101","number":"7","html_url":"https://example.test/pulls/7","state":"open","title":"Add cache","body":"body","user":{"login":"alice"},"labels":["feature"],"base":{"ref":"main","sha":"base-sha"},"head":{"ref":"topic","sha":"head-sha"}}`)
 		case r.Method == http.MethodGet && r.URL.Path == listPRCommentsEndpoint("example-owner", "example-repo", 7):
 			fmt.Fprint(w, `[{"id":201,"note_id":301,"body":"looks good","discussion_id":"DISC-7","user":{"login":"bob"},"path":"internal/service/service.go","line":42,"start_line":40,"end_line":42,"position":9,"original_position":8,"resolved":false,"resolvable":true,"parent_id":"300"}]`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/example-owner/example-repo/merge_requests/7/discussions":
+			fmt.Fprint(w, `{"content":{"data":[{"id":"DISC-7","noteable_type":"MergeRequest","notes":[{"id":301,"body":"looks good","discussion_id":"DISC-7","type":"DiffNote","author":{"username":"bob"},"position":{"new_path":"internal/service/service.go","old_path":"internal/service/service.go","new_line":42,"old_line":null},"resolved":false,"resolvable":true}]}]}}`)
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -975,11 +977,6 @@ func TestScenario018PRListDetailCommentsRoutes(t *testing.T) {
 	}
 	if comment.Resolved == nil || *comment.Resolved || comment.Resolvable == nil || !*comment.Resolvable {
 		t.Fatalf("unexpected PR review resolution metadata: %+v", comment)
-	}
-	for _, path := range paths {
-		if strings.Contains(path, "pull_requests") || strings.Contains(path, "merge_requests") || strings.Contains(path, "review_comments") {
-			t.Fatalf("deployment-inhibited route called: %s", path)
-		}
 	}
 }
 
@@ -1072,6 +1069,57 @@ func TestScenario018PRCommentWrite(t *testing.T) {
 	}
 	if !result.Confirmed || result.ProviderStatus != "201" || result.RemoteID != "301" || result.ParentIssueNumber != 7 || result.ParentIssueID != "7" || result.Record.Kind != "pr_comment" || result.Record.PRNumber != 7 || result.Record.ID != "301" || result.Record.Body != "posted" {
 		t.Fatalf("unexpected PR comment write result: %+v", result)
+	}
+}
+
+func TestScenario030PRReviewCommentWrite(t *testing.T) {
+	var seenBody string
+	var posts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == getPREndpoint("example-owner", "example-repo", 7):
+			fmt.Fprint(w, `{"id":"101","number":7,"base":{"ref":"main","sha":"base-sha"},"head":{"ref":"topic","sha":"head-sha"}}`)
+			return
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v4/projects/example-owner/example-repo/merge_requests/7/discussions":
+			posts++
+			if got := r.Header.Get("PRIVATE-TOKEN"); got != "test-token" {
+				t.Fatalf("PRIVATE-TOKEN=%q", got)
+			}
+			if got := r.Header.Get("Authorization"); got != "" {
+				t.Fatalf("Authorization should be empty for v4 request, got %q", got)
+			}
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		seenBody = string(body)
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"id":"D7","notes":[{"id":301,"body":"inline","discussion_id":"D7","type":"DiffNote","file_path":"internal/service/service.go","new_line":42,"resolved":false,"resolvable":true}]}`)
+	}))
+	defer server.Close()
+
+	result, err := newTestClient(t, server.URL, Config{Token: "test-token"}).CreatePRReviewComment(context.Background(), CreatePRReviewCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, Body: "inline", Path: "internal/service/service.go", Line: 42, Position: 9, StartLine: 40, EndLine: 42}, WriteOptions{IdempotencyKey: "key-create-pr-review-comment"})
+	if err != nil {
+		t.Fatalf("CreatePRReviewComment returned error: %v", err)
+	}
+	for _, want := range []string{`"body":"inline"`, `"position_type":"text"`, `"base_sha":"base-sha"`, `"start_sha":"base-sha"`, `"head_sha":"head-sha"`, `"new_path":"internal/service/service.go"`, `"old_path":"internal/service/service.go"`, `"new_line":42`} {
+		if !strings.Contains(seenBody, want) {
+			t.Fatalf("request body = %s, want %s", seenBody, want)
+		}
+	}
+	for _, forbidden := range []string{`"repoId"`, `"iid"`, `"line_types"`, `"assignee_id"`, `"proposer_id"`, `"severity"`} {
+		if strings.Contains(seenBody, forbidden) {
+			t.Fatalf("request body = %s, must not contain %s", seenBody, forbidden)
+		}
+	}
+	if posts != 1 || !result.Confirmed || result.RemoteID != "301" || result.ParentIssueNumber != 7 || result.ParentIssueID != "D7" || result.Record.ReviewKind != "inline" || result.Record.Path != "internal/service/service.go" || result.Record.Line != 42 {
+		t.Fatalf("unexpected PR review comment write result: %+v", result)
+	}
+	if len(result.Record.Positions) != 1 || result.Record.Positions[0].BaseSHA != "base-sha" || result.Record.Positions[0].HeadSHA != "head-sha" || result.Record.Positions[0].NewPath != "internal/service/service.go" || result.Record.Positions[0].NewLine != 42 {
+		t.Fatalf("unexpected PR review comment positions: %+v", result.Record.Positions)
 	}
 }
 

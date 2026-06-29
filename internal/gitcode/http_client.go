@@ -128,6 +128,9 @@ func (c *HTTPClient) ListPRComments(ctx context.Context, req PRRequest) (Page[PR
 	if err != nil {
 		return Page[PRComment]{}, err
 	}
+	if discussionItems, err := c.listPRDiscussionComments(ctx, req); err == nil {
+		items = mergePRDiscussionMetadata(items, discussionItems)
+	}
 	for i := range items {
 		items[i].PRNumber = req.Number
 		if items[i].DiscussionID == "" {
@@ -135,6 +138,17 @@ func (c *HTTPClient) ListPRComments(ctx context.Context, req PRRequest) (Page[PR
 		}
 	}
 	return Page[PRComment]{Items: items, Page: page.Page, PerPage: page.PerPage}, nil
+}
+
+func (c *HTTPClient) listPRDiscussionComments(ctx context.Context, req PRRequest) ([]PRComment, error) {
+	values := url.Values{}
+	values.Set("page", "1")
+	values.Set("per_page", strconv.Itoa(firstPositive(c.pagination.PerPage, 100)))
+	body, _, err := c.getBytesWithOptions(ctx, prReviewCommentEndpoint(req.Owner, req.Repo, req.Number), values, requestOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return decodePRDiscussionComments(prReviewCommentEndpoint(req.Owner, req.Repo, req.Number), body, req.Number)
 }
 
 func (c *HTTPClient) CreatePR(ctx context.Context, req CreatePRRequest, opts WriteOptions) (WriteResult[PullRequest], error) {
@@ -400,6 +414,68 @@ func (c *HTTPClient) CreatePRComment(ctx context.Context, req CreatePRCommentReq
 		result.ParentIssueID = comment.DiscussionID
 		return result, nil
 	})
+}
+
+func (c *HTTPClient) CreatePRReviewComment(ctx context.Context, req CreatePRReviewCommentRequest, opts WriteOptions) (WriteResult[PRComment], error) {
+	if err := validateCreatePRReviewComment(req); err != nil {
+		return WriteResult[PRComment]{}, err
+	}
+	pr, err := c.GetPR(ctx, PRRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
+	if err != nil {
+		return WriteResult[PRComment]{}, err
+	}
+	if pr.BaseSHA == "" || pr.HeadSHA == "" {
+		return WriteResult[PRComment]{}, ErrValidationFailed{Field: "pull_request.sha", Message: "inline review comment requires base and head sha from pull request detail"}
+	}
+	target := req.Owner + "/" + req.Repo + "/pulls/" + strconv.Itoa(req.Number)
+	endpoint := prReviewCommentEndpoint(req.Owner, req.Repo, req.Number)
+	payload := prReviewCommentPayload(req, pr)
+	key := opts.IdempotencyKey
+	if key == "" {
+		key = GenerateIdempotencyKey("CreatePRReviewComment", target, payload, opts)
+		opts.IdempotencyKey = key
+	}
+	result, err := writeConfirmedWithDecoder[[]PRComment](ctx, c, http.MethodPost, endpoint, "CreatePRReviewComment", target, payload, opts, func(endpoint string, body []byte, out any) error {
+		comments, err := decodePRDiscussionComments(endpoint, body, req.Number)
+		if err != nil {
+			return err
+		}
+		ptr, ok := out.(*[]PRComment)
+		if !ok {
+			return &ErrSchemaDecode{Field: "pr_review_comment", Expected: "[]PRComment output", Received: "unexpected output target"}
+		}
+		*ptr = comments
+		return nil
+	}, func(result WriteResult[[]PRComment]) (WriteResult[[]PRComment], error) {
+		for _, comment := range result.Record {
+			if isConfirmedInlineComment(comment, req) {
+				result.Record = []PRComment{comment}
+				result.RemoteID = comment.ID
+				result.ParentIssueNumber = req.Number
+				result.ParentIssueID = comment.DiscussionID
+				return result, nil
+			}
+		}
+		return WriteResult[[]PRComment]{}, ErrValidationFailed{Field: "response", Message: "inline review comment confirmation requires matching DiffNote path and line"}
+	})
+	if err != nil {
+		return WriteResult[PRComment]{}, err
+	}
+	comment := ensurePRReviewCommentPosition(result.Record[0], req, pr)
+	return WriteResult[PRComment]{
+		Record:                     comment,
+		Confirmed:                  result.Confirmed,
+		Operation:                  result.Operation,
+		Target:                     result.Target,
+		ProviderStatus:             result.ProviderStatus,
+		IdempotencyKey:             result.IdempotencyKey,
+		ResponseHash:               result.ResponseHash,
+		ProviderPayloadFingerprint: result.ProviderPayloadFingerprint,
+		RemoteID:                   result.RemoteID,
+		ParentIssueNumber:          result.ParentIssueNumber,
+		ParentIssueID:              result.ParentIssueID,
+		ConfirmedAt:                result.ConfirmedAt,
+	}, nil
 }
 
 func (c *HTTPClient) CreateWikiPage(ctx context.Context, req CreateWikiPageRequest, opts WriteOptions) (WriteResult[WikiPage], error) {
@@ -985,6 +1061,31 @@ func validateCreatePRComment(req CreatePRCommentRequest) error {
 	return nil
 }
 
+func validateCreatePRReviewComment(req CreatePRReviewCommentRequest) error {
+	if err := validateWriteRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if req.Number <= 0 {
+		return ErrValidationFailed{Field: "number", Message: "positive pull request number is required"}
+	}
+	if strings.TrimSpace(req.Body) == "" {
+		return ErrValidationFailed{Field: "body", Message: "comment body is required"}
+	}
+	if strings.TrimSpace(req.Path) == "" {
+		return ErrValidationFailed{Field: "path", Message: "file path is required"}
+	}
+	if req.Line <= 0 && req.Position <= 0 {
+		return ErrValidationFailed{Field: "line", Message: "line or position is required"}
+	}
+	if req.StartLine < 0 || req.EndLine < 0 || req.Line < 0 || req.Position < 0 {
+		return ErrValidationFailed{Field: "line", Message: "line and position values must be positive"}
+	}
+	if req.StartLine > 0 && req.EndLine > 0 && req.StartLine > req.EndLine {
+		return ErrValidationFailed{Field: "start_line", Message: "start_line must be less than or equal to end_line"}
+	}
+	return nil
+}
+
 func validateCreatePR(req CreatePRRequest) error {
 	if err := validateWriteRepo(req.Owner, req.Repo); err != nil {
 		return err
@@ -1217,7 +1318,19 @@ func (c *HTTPClient) do(ctx context.Context, method, endpoint string, values url
 	if parsed, err := url.Parse(endpoint); err != nil || parsed.IsAbs() || parsed.Host != "" {
 		return nil, ErrValidationFailed{Field: "endpoint", Message: "relative endpoint path is required"}
 	}
-	u := c.baseURL.ResolveReference(&url.URL{Path: endpoint})
+	v4Request := strings.HasPrefix(endpoint, "/api/v4/")
+	baseURL := c.baseURL
+	if v4Request {
+		baseURL = c.v4BaseURL()
+	}
+	ref := &url.URL{Path: endpoint}
+	if strings.Contains(endpoint, "%") {
+		if unescaped, err := url.PathUnescape(endpoint); err == nil {
+			ref.Path = unescaped
+			ref.RawPath = endpoint
+		}
+	}
+	u := baseURL.ResolveReference(ref)
 	if values != nil {
 		u.RawQuery = values.Encode()
 	}
@@ -1225,7 +1338,9 @@ func (c *HTTPClient) do(ctx context.Context, method, endpoint string, values url
 	if err != nil {
 		return nil, err
 	}
-	if c.token != "" {
+	if c.token != "" && v4Request {
+		req.Header.Set("PRIVATE-TOKEN", c.token)
+	} else if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	req.Header.Set("Accept", "application/json")
@@ -1237,6 +1352,15 @@ func (c *HTTPClient) do(ctx context.Context, method, endpoint string, values url
 	}
 	req.Header.Set("User-Agent", c.userAgent)
 	return c.client.Do(req)
+}
+
+func (c *HTTPClient) v4BaseURL() *url.URL {
+	u := *c.baseURL
+	if u.Host == "gitcode.com" || u.Host == "www.gitcode.com" {
+		u.Scheme = "https"
+		u.Host = "api.gitcode.com"
+	}
+	return &u
 }
 
 func (c *HTTPClient) readBounded(resp *http.Response, endpoint string) ([]byte, error) {

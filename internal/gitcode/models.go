@@ -69,6 +69,18 @@ type CreatePRCommentRequest struct {
 	Body   string `json:"body"`
 }
 
+type CreatePRReviewCommentRequest struct {
+	Owner     string `json:"-"`
+	Repo      string `json:"-"`
+	Number    int    `json:"-"`
+	Body      string `json:"body"`
+	Path      string `json:"path"`
+	Line      int    `json:"line,omitempty"`
+	Position  int    `json:"position,omitempty"`
+	StartLine int    `json:"start_line,omitempty"`
+	EndLine   int    `json:"end_line,omitempty"`
+}
+
 type LinkPRIssueRequest struct {
 	Owner       string `json:"-"`
 	Repo        string `json:"-"`
@@ -436,7 +448,9 @@ type PullRequest struct {
 	GitCodeLabels []GitCodeLabel `json:"labels"`
 	Labels        []string       `json:"-"`
 	Base          string         `json:"-"`
+	BaseSHA       string         `json:"-"`
 	Head          string         `json:"-"`
+	HeadSHA       string         `json:"-"`
 	CreatedAt     time.Time      `json:"created_at"`
 	UpdatedAt     time.Time      `json:"updated_at"`
 }
@@ -494,31 +508,55 @@ func (p *PullRequest) UnmarshalJSON(data []byte) error {
 		}
 	}
 	p.Base = decodeRef(raw.Base)
+	p.BaseSHA = decodeRefSHA(raw.Base)
 	p.Head = decodeRef(raw.Head)
+	p.HeadSHA = decodeRefSHA(raw.Head)
 	p.CreatedAt = raw.CreatedAt
 	p.UpdatedAt = raw.UpdatedAt
 	return nil
 }
 
 type PRComment struct {
-	Kind             string    `json:"-"`
-	ID               string    `json:"id"`
-	Body             string    `json:"body"`
-	Author           string    `json:"author"`
-	DiscussionID     string    `json:"discussion_id"`
-	ReviewKind       string    `json:"review_kind,omitempty"`
-	Path             string    `json:"path,omitempty"`
-	Line             int       `json:"line,omitempty"`
-	StartLine        int       `json:"start_line,omitempty"`
-	EndLine          int       `json:"end_line,omitempty"`
-	Position         int       `json:"position,omitempty"`
-	OriginalPosition int       `json:"original_position,omitempty"`
-	Resolved         *bool     `json:"resolved,omitempty"`
-	Resolvable       *bool     `json:"resolvable,omitempty"`
-	ParentID         string    `json:"parent_id,omitempty"`
-	PRNumber         int       `json:"-"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	Kind             string              `json:"-"`
+	ID               string              `json:"id"`
+	Body             string              `json:"body"`
+	Author           string              `json:"author"`
+	DiscussionID     string              `json:"discussion_id"`
+	ReviewKind       string              `json:"review_kind,omitempty"`
+	Path             string              `json:"path,omitempty"`
+	Line             int                 `json:"line,omitempty"`
+	StartLine        int                 `json:"start_line,omitempty"`
+	EndLine          int                 `json:"end_line,omitempty"`
+	Position         int                 `json:"position,omitempty"`
+	OriginalPosition int                 `json:"original_position,omitempty"`
+	Resolved         *bool               `json:"resolved,omitempty"`
+	Resolvable       *bool               `json:"resolvable,omitempty"`
+	ParentID         string              `json:"parent_id,omitempty"`
+	Positions        []PRCommentPosition `json:"positions,omitempty"`
+	PRNumber         int                 `json:"-"`
+	CreatedAt        time.Time           `json:"created_at"`
+	UpdatedAt        time.Time           `json:"updated_at"`
+}
+
+type PRCommentPosition struct {
+	PositionKind  string `json:"position_kind,omitempty"`
+	PositionType  string `json:"position_type,omitempty"`
+	BaseSHA       string `json:"base_sha,omitempty"`
+	StartSHA      string `json:"start_sha,omitempty"`
+	HeadSHA       string `json:"head_sha,omitempty"`
+	OldPath       string `json:"old_path,omitempty"`
+	NewPath       string `json:"new_path,omitempty"`
+	OldLine       int    `json:"old_line,omitempty"`
+	NewLine       int    `json:"new_line,omitempty"`
+	StartOldLine  int    `json:"start_old_line,omitempty"`
+	StartNewLine  int    `json:"start_new_line,omitempty"`
+	LineCode      string `json:"line_code,omitempty"`
+	StartLineCode string `json:"start_line_code,omitempty"`
+	PatchsetIID   int    `json:"patchset_iid,omitempty"`
+	DiffID        int    `json:"diff_id,omitempty"`
+	VersionSHA    string `json:"version_sha,omitempty"`
+	Side          string `json:"side,omitempty"`
+	IsOutdated    *bool  `json:"is_outdated,omitempty"`
 }
 
 func (c *PRComment) UnmarshalJSON(data []byte) error {
@@ -626,6 +664,19 @@ func decodeRef(data json.RawMessage) string {
 		return ""
 	}
 	return firstNonEmpty(ref.Ref, ref.Label, ref.Sha, ref.Repo.FullName)
+}
+
+func decodeRefSHA(data json.RawMessage) string {
+	if len(data) == 0 || string(data) == "null" {
+		return ""
+	}
+	var ref struct {
+		Sha string `json:"sha"`
+	}
+	if err := json.Unmarshal(data, &ref); err != nil {
+		return ""
+	}
+	return ref.Sha
 }
 
 type WikiPage struct {

@@ -25,6 +25,7 @@ type Client interface {
 	CreateIssueComment(context.Context, CreateIssueCommentRequest, WriteOptions) (WriteResult[Comment], error)
 	UpdateIssueComment(context.Context, UpdateIssueCommentRequest, WriteOptions) (WriteResult[Comment], error)
 	CreatePRComment(context.Context, CreatePRCommentRequest, WriteOptions) (WriteResult[PRComment], error)
+	CreatePRReviewComment(context.Context, CreatePRReviewCommentRequest, WriteOptions) (WriteResult[PRComment], error)
 	CreateWikiPage(context.Context, CreateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
 	UpdateWikiPage(context.Context, UpdateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
 	DeleteWikiPage(context.Context, DeleteWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)

@@ -21,6 +21,10 @@ type Store interface {
 	SearchSources(context.Context, SearchQuery) ([]SearchResult, error)
 	UpsertPRReviewComment(context.Context, PRReviewComment) error
 	ListPRReviewComments(context.Context, PRReviewCommentFilter) ([]PRReviewComment, error)
+	UpsertPRReviewDiscussion(context.Context, PRReviewDiscussion) error
+	ListPRReviewDiscussions(context.Context, PRReviewDiscussionFilter) ([]PRReviewDiscussion, error)
+	UpsertPRReviewPosition(context.Context, PRReviewPosition) error
+	ListPRReviewPositions(context.Context, PRReviewPositionFilter) ([]PRReviewPosition, error)
 	GetRecord(context.Context, string, string) (Record, error)
 	ListRecords(context.Context, RecordFilter) ([]Record, error)
 	SearchRecords(context.Context, SearchQuery) ([]SearchResult, error)
@@ -149,6 +153,45 @@ type PRReviewComment struct {
 	UpdatedAt        time.Time
 }
 
+type PRReviewDiscussion struct {
+	RepoID         string
+	PRNumber       int
+	DiscussionID   string
+	Kind           string
+	Resolved       *bool
+	Resolvable     *bool
+	FirstCommentID string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+type PRReviewPosition struct {
+	RepoID        string
+	PRNumber      int
+	CommentID     string
+	PositionKind  string
+	DiscussionID  string
+	PositionType  string
+	BaseSHA       string
+	StartSHA      string
+	HeadSHA       string
+	OldPath       string
+	NewPath       string
+	OldLine       int
+	NewLine       int
+	StartOldLine  int
+	StartNewLine  int
+	LineCode      string
+	StartLineCode string
+	PatchsetIID   int
+	DiffID        int
+	VersionSHA    string
+	Side          string
+	IsOutdated    *bool
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
 type IdentityAlias = Identity
 
 type RemoteRevision struct {
@@ -256,28 +299,32 @@ type RecordFilter struct {
 }
 
 type RecordGraph struct {
-	Record           Record
-	Comments         []RecordComment
-	PRReviewComments []PRReviewComment
-	Identities       []Identity
-	Links            []Link
-	RemoteRevisions  []RemoteRevision
-	SyncEvents       []SyncEvent
-	AuditTrail       []AuditTrailEntry
-	Snapshots        []Snapshot
+	Record              Record
+	Comments            []RecordComment
+	PRReviewComments    []PRReviewComment
+	PRReviewDiscussions []PRReviewDiscussion
+	PRReviewPositions   []PRReviewPosition
+	Identities          []Identity
+	Links               []Link
+	RemoteRevisions     []RemoteRevision
+	SyncEvents          []SyncEvent
+	AuditTrail          []AuditTrailEntry
+	Snapshots           []Snapshot
 }
 
 type SyncGraph struct {
-	RepoID           string
-	Provenance       Provenance
-	Record           Record
-	Comments         []RecordComment
-	PRReviewComments []PRReviewComment
-	Identities       []Identity
-	Links            []Link
-	Chunks           []Chunk
-	RemoteRevisions  []RemoteRevision
-	SyncEvents       []SyncEvent
+	RepoID              string
+	Provenance          Provenance
+	Record              Record
+	Comments            []RecordComment
+	PRReviewComments    []PRReviewComment
+	PRReviewDiscussions []PRReviewDiscussion
+	PRReviewPositions   []PRReviewPosition
+	Identities          []Identity
+	Links               []Link
+	Chunks              []Chunk
+	RemoteRevisions     []RemoteRevision
+	SyncEvents          []SyncEvent
 }
 
 type Source struct {
@@ -428,19 +475,34 @@ type Conflict struct {
 }
 
 type SourceGraph struct {
-	Source           Source
-	Comments         []RecordComment
-	PRReviewComments []PRReviewComment
-	Identities       []Identity
-	Links            []Link
-	Chunks           []Chunk
-	SyncStatus       *SyncStatus
-	SyncEvents       []SyncEvent
-	Conflicts        []Conflict
+	Source              Source
+	Comments            []RecordComment
+	PRReviewComments    []PRReviewComment
+	PRReviewDiscussions []PRReviewDiscussion
+	PRReviewPositions   []PRReviewPosition
+	Identities          []Identity
+	Links               []Link
+	Chunks              []Chunk
+	SyncStatus          *SyncStatus
+	SyncEvents          []SyncEvent
+	Conflicts           []Conflict
 }
 
 type PRReviewCommentFilter struct {
 	RepoID   string
 	PRNumber int
 	SourceID string
+}
+
+type PRReviewDiscussionFilter struct {
+	RepoID       string
+	PRNumber     int
+	DiscussionID string
+}
+
+type PRReviewPositionFilter struct {
+	RepoID       string
+	PRNumber     int
+	CommentID    string
+	DiscussionID string
 }

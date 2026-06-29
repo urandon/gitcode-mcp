@@ -18,6 +18,11 @@ type writeToolArgs struct {
 	PRNumber       int      `json:"pr_number,omitempty"`
 	IssueNumber    int      `json:"issue_number,omitempty"`
 	CommentID      string   `json:"comment_id,omitempty"`
+	Path           string   `json:"path,omitempty"`
+	Line           int      `json:"line,omitempty"`
+	StartLine      int      `json:"start_line,omitempty"`
+	EndLine        int      `json:"end_line,omitempty"`
+	Position       int      `json:"position,omitempty"`
 	Title          string   `json:"title,omitempty"`
 	Body           string   `json:"body,omitempty"`
 	Head           string   `json:"head,omitempty"`
@@ -85,6 +90,20 @@ func (s *Server) callAddPRComment(ctx context.Context, id *json.RawMessage, args
 		req := writeRequestFromArgs(a)
 		req.Number = a.Number
 		req.Body = a.Body
+		return req
+	})
+}
+
+func (s *Server) callAddPRReviewComment(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	s.callWriteTool(ctx, id, args, s.svc.AddPRReviewComment, func(a writeToolArgs) service.WriteCommandRequest {
+		req := writeRequestFromArgs(a)
+		req.Number = a.Number
+		req.Body = a.Body
+		req.Path = a.Path
+		req.Line = a.Line
+		req.StartLine = a.StartLine
+		req.EndLine = a.EndLine
+		req.Position = a.Position
 		return req
 	})
 }

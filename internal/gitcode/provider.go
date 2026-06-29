@@ -30,6 +30,7 @@ type Provider interface {
 	CreateIssueComment(context.Context, CreateIssueCommentRequest, WriteOptions) (WriteResult[Comment], error)
 	UpdateIssueComment(context.Context, UpdateIssueCommentRequest, WriteOptions) (WriteResult[Comment], error)
 	CreatePRComment(context.Context, CreatePRCommentRequest, WriteOptions) (WriteResult[PRComment], error)
+	CreatePRReviewComment(context.Context, CreatePRReviewCommentRequest, WriteOptions) (WriteResult[PRComment], error)
 	CreateWikiPage(context.Context, CreateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
 	UpdateWikiPage(context.Context, UpdateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
 	DeleteWikiPage(context.Context, DeleteWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
@@ -286,6 +287,13 @@ func (p liveProvider) CreatePRComment(ctx context.Context, req CreatePRCommentRe
 	return p.HTTPClient.CreatePRComment(ctx, req, opts)
 }
 
+func (p liveProvider) CreatePRReviewComment(ctx context.Context, req CreatePRReviewCommentRequest, opts WriteOptions) (WriteResult[PRComment], error) {
+	if err := p.matrix.Preflight(ProductAreaPullRequests); err != nil {
+		return WriteResult[PRComment]{}, err
+	}
+	return p.HTTPClient.CreatePRReviewComment(ctx, req, opts)
+}
+
 func (p liveProvider) ListMilestones(ctx context.Context, req MilestoneListRequest) (Page[Milestone], error) {
 	if err := p.matrix.Preflight(ProductAreaMilestones); err != nil {
 		return Page[Milestone]{}, err
@@ -373,6 +381,9 @@ func (p unavailableProvider) UpdateIssueComment(context.Context, UpdateIssueComm
 	return WriteResult[Comment]{}, p.err()
 }
 func (p unavailableProvider) CreatePRComment(context.Context, CreatePRCommentRequest, WriteOptions) (WriteResult[PRComment], error) {
+	return WriteResult[PRComment]{}, p.err()
+}
+func (p unavailableProvider) CreatePRReviewComment(context.Context, CreatePRReviewCommentRequest, WriteOptions) (WriteResult[PRComment], error) {
 	return WriteResult[PRComment]{}, p.err()
 }
 func (p unavailableProvider) CreateWikiPage(context.Context, CreateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error) {

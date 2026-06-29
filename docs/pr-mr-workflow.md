@@ -58,6 +58,18 @@ Then list cached review discussions:
 gitcode-mcp pr-discussions --repo YOUR_REPO --number 7 --unresolved-only --format json
 ```
 
+Create a new inline review discussion through the audited write lifecycle:
+
+```sh
+gitcode-mcp add-pr-review-comment \
+  --repo YOUR_REPO \
+  --number 7 \
+  --path internal/service/service.go \
+  --line 42 \
+  --body "Finding text." \
+  --idempotency-key ik-pr-review-001
+```
+
 The MCP read tool exposes the same cache-first surface:
 
 ```json
@@ -68,7 +80,9 @@ The MCP read tool exposes the same cache-first surface:
 }
 ```
 
-The result groups comments by discussion thread. Inline comments include `path`, `line`, `start_line`, `end_line`, and position fields when GitCode provides them. General pull request comments are returned with `kind: "general"` and are not mixed with inline review comments. Resolution is tri-state: if GitCode omits `resolved`, unresolved-only reads keep the discussion visible instead of assuming it is resolved.
+The result groups comments by discussion thread. Inline comments include `path`, `line`, `start_line`, `end_line`, and position fields when GitCode provides them. Schema version 13 exposes the first current diff position as `discussion.position` and all current/original note positions as `comment.positions[]`; those rows can include base/start/head SHAs, old/new paths, old/new lines, line codes, patchset ids, diff ids, and outdated state. General pull request comments are returned with `kind: "general"` and are not mixed with inline review comments. Resolution is tri-state: if GitCode omits `resolved`, unresolved-only reads keep the discussion visible instead of assuming it is resolved.
+
+The cached position metadata identifies where GitCode placed an inline note. Source-code-change matching should use the local git object database and PR refs or SHAs rather than duplicating PR changed files or diff hunks in SQLite. A matcher can use `base_sha`, `start_sha`, `head_sha`, paths, and lines from `pr_review_positions` as anchors, then resolve surrounding diff/source context through git plumbing as an ephemeral read result.
 
 ## Linking Pull Requests To Issues
 
