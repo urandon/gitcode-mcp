@@ -64,7 +64,7 @@ Run live sync:
 gitcode-mcp sync --repo "YOUR_REPO" --issues --wiki --index
 ```
 
-`sync --help` documents `--offline` and `--fixture` as explicit fixture selectors, and `--live` as a compatibility alias, plus `--repo`, `--issues`, `--wiki`, `--pulls`, `--comments`, `--index`, `--id`, `--input`, `--idempotency-key`, `--max-pages`, `--max-records`, `--per-page`, `--cache-path`, and `--format`.
+`sync --help` documents `--offline` and `--fixture` as explicit fixture selectors, and `--live` as a compatibility alias, plus `--repo`, `--issues`, `--wiki`, `--pulls`, `--comments`, `--index`, `--id`, `--input`, `--idempotency-key`, `--max-pages`, `--max-records`, `--per-page`, `--details`, `--records`, `--cache-path`, and `--format`.
 
 Live sync fetches issue records, comments, and wiki pages through the live GitCode provider. Fetches are page/resource scoped; successful records are committed to cache, failures are collected and reported, and re-sync should report deltas rather than duplicate records. Issue collection sync uses list-level issue revisions before comment-list fetches, so an unchanged issue can report `skipped_by_revision` and avoid listing comments again. Wiki collection sync uses list-level page revisions before body fetches, so an unchanged page can report `skipped_by_revision` and avoid a full page-body request. Auth failures and rate limits are reported as diagnostics instead of raw API payloads.
 
@@ -74,15 +74,16 @@ For large repositories, bound collection work explicitly:
 gitcode-mcp --timeout 30s sync --repo "YOUR_REPO" --issues --max-pages 3 --per-page 50
 ```
 
-The startup `--timeout` value bounds the whole CLI operation context. Collection bounds limit list traversal and record commits. If the operation times out or is cancelled after some records are written, the command reports partial counts and typed diagnostics while keeping successful records in the cache.
+The startup `--timeout` value bounds the whole CLI operation context. Collection bounds limit list traversal and record commits. During bulk sync, progress lines are written to stderr with the current collection, page, committed record count, and elapsed time. If the operation times out or is cancelled after some records are written, the command reports partial counts, grouped failures, elapsed time, and typed diagnostics while keeping successful records in the cache.
 
-For cache-aware wiki refreshes, the text output includes collection counters when they are non-zero:
+Bulk sync text output defaults to an aggregate summary:
 
 ```sh
-sync: succeeded fetched=1 updated=0 inserted=0 skipped=1 conflicts=0 listed=1 fetched_detail=0 skipped_by_revision=1 failed=0 idempotency_key=ik-001 replayed=false zero_delta=true
+sync progress: collection=issues page=1 committed=100 elapsed=2.4s
+sync: succeeded success_count=100 failure_count=0 fetched=100 updated=0 inserted=0 skipped=100 conflicts=0 listed=100 fetched_detail=0 skipped_by_revision=100 zero_delta=100 elapsed=2.5s pages_listed=1 records_listed=100 skipped_by_watermark=0 stop_reason=watermark
 ```
 
-Use `--format json` to inspect the same counters structurally for MCP/automation checks.
+Use `--format json` to inspect the same compact summary structurally for automation checks. Use `--details` or `--records` when per-record sync evidence is required; without that flag, bulk `sync --format json` and aggregate `sync-status --format json` omit large `results[]` arrays.
 
 ## 5. Live write
 

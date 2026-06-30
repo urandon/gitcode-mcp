@@ -1112,7 +1112,9 @@ func (s *Service) BulkSyncIssues(ctx context.Context, req BulkSyncRequest) (*Syn
 			return bulkSyncFailureResult(s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "issue:*"}, "issues", "*"), "issue:*", "issues")
 		}
 		result := &SyncResourcesResult{Results: make([]SyncResult, 0, len(page.Items)), Failures: make([]ResourceError, 0)}
+		beforeCount := len(result.Results)
 		s.stageIssuePage(ctx, req, page.Items, result)
+		emitProgress(req.ProgressChan, ProgressEvent{Collection: "issues", Page: firstNonZeroInt(req.Page, 1), RecordsFetched: len(result.Results) - beforeCount})
 		result.SuccessCount = len(result.Results)
 		result.FailureCount = len(result.Failures)
 		if result.FailureCount > 0 {
@@ -1266,7 +1268,9 @@ func (s *Service) BulkSyncPullRequests(ctx context.Context, req BulkSyncRequest)
 			return bulkSyncFailureResult(s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "pull_request:*"}, "pull_request", "*"), "pull_request:*", "pull_request")
 		}
 		result := &SyncResourcesResult{Results: make([]SyncResult, 0, len(page.Items)), Failures: make([]ResourceError, 0)}
+		beforeCount := len(result.Results)
 		s.stagePullRequestPage(ctx, req, page.Items, result)
+		emitProgress(req.ProgressChan, ProgressEvent{Collection: "pulls", Page: firstNonZeroInt(req.Page, 1), RecordsFetched: len(result.Results) - beforeCount})
 		result.SuccessCount = len(result.Results)
 		result.FailureCount = len(result.Failures)
 		if result.FailureCount > 0 {
@@ -1532,7 +1536,7 @@ func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (
 		}
 		beforeCount := len(result.Results)
 		s.stagePRCommentPage(ctx, req, prNumber, items, result)
-		emitProgress(progressChan(req.Bounds), ProgressEvent{Collection: "pr_comments", Page: idx + 1, RecordsFetched: len(result.Results) - beforeCount})
+		emitProgress(bulkProgressChan(req), ProgressEvent{Collection: "pr_comments", Page: idx + 1, RecordsFetched: len(result.Results) - beforeCount})
 	}
 	result.SuccessCount = len(result.Results)
 	result.FailureCount = len(result.Failures)
@@ -1629,6 +1633,13 @@ func progressChan(bounds *SyncBounds) chan<- ProgressEvent {
 	return bounds.ProgressChan
 }
 
+func bulkProgressChan(req BulkSyncRequest) chan<- ProgressEvent {
+	if req.Bounds != nil && req.Bounds.ProgressChan != nil {
+		return req.Bounds.ProgressChan
+	}
+	return req.ProgressChan
+}
+
 func (s *Service) stagePRCommentPage(ctx context.Context, req BulkSyncRequest, prNumber int, items []gitcode.PRComment, result *SyncResourcesResult) {
 	for _, comment := range items {
 		remoteID := prCommentRemoteID(prNumber, comment.ID)
@@ -1694,7 +1705,9 @@ func (s *Service) BulkSyncWiki(ctx context.Context, req BulkSyncRequest) (*SyncR
 			return bulkSyncFailureResult(normalized, "wiki:*", "wiki")
 		}
 		result := &SyncResourcesResult{Results: make([]SyncResult, 0, len(page.Items)), Failures: make([]ResourceError, 0)}
+		beforeCount := len(result.Results)
 		s.stageWikiPage(ctx, req, page.Items, result)
+		emitProgress(req.ProgressChan, ProgressEvent{Collection: "wiki", Page: firstNonZeroInt(req.Page, 1), RecordsFetched: len(result.Results) - beforeCount})
 		result.SuccessCount = len(result.Results)
 		result.FailureCount = len(result.Failures)
 		if result.FailureCount > 0 {

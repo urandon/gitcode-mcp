@@ -85,7 +85,7 @@ Each successful resource sync records a `SyncEvent` with:
 - collection metadata counts when available: `listed`, `fetched_detail`, `skipped_by_revision`, and `failed`;
 - `zero_delta` when a re-sync fetched records but all fetched content was unchanged.
 
-Re-syncing unchanged content records a zero-delta event instead of duplicating cached records. `gitcode-mcp sync_status` reports cache freshness from the stored source records and latest completed sync events; the command help describes the query surface, while the model above defines the event fields persisted by sync.
+Re-syncing unchanged content records a zero-delta event instead of duplicating cached records. CLI bulk sync output is compact by default: stdout reports aggregate success/failure counts, summed sync counters, grouped failure counts, elapsed time, and timeout/cancellation diagnostics, while stderr carries progress lines for the current collection/page and committed record count. Per-resource sync evidence remains available with `--details` or `--records`. `gitcode-mcp sync_status` reports cache freshness from the stored source records and latest completed sync events; aggregate `sync-status --format json` also defaults to a compact summary and uses `--details` or `--records` for the full per-record `results[]` payload.
 
 ## Metadata-First Collection Sync
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -148,6 +149,7 @@ type options struct {
 	maxPages       int
 	maxRecords     int
 	perPage        int
+	details        bool
 	input          string
 	output         string
 	owner          string
@@ -441,6 +443,8 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.IntVar(&opts.maxPages, "max-pages", 0, "maximum pages to sync")
 	flags.IntVar(&opts.maxRecords, "max-records", 0, "maximum records to sync")
 	flags.IntVar(&opts.perPage, "per-page", 0, "records per page")
+	flags.BoolVar(&opts.details, "details", false, "include per-record details in large command output")
+	flags.BoolVar(&opts.details, "records", false, "alias for --details")
 	flags.StringVar(&opts.input, "input", "", "input path")
 	flags.StringVar(&opts.output, "output", "", "output path")
 	flags.StringVar(&opts.owner, "owner", "", "repository owner")
@@ -841,11 +845,19 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 	case "sync":
 		if opts.issues || opts.wiki || opts.pulls || opts.comments || (opts.id == "" && opts.input == "") {
 			req := bulkSyncRequest(opts)
+			started := time.Now().UTC()
+			progressCh, stopProgress := startSyncProgress(stderr, started)
+			req.ProgressChan = progressCh
+			if req.Bounds != nil {
+				req.Bounds.ProgressChan = progressCh
+			}
+			defer stopProgress()
 			var result *service.SyncResourcesResult
 			var syncErr error
 			if !opts.issues && !opts.wiki && !opts.pulls && !opts.comments {
 				result, syncErr = svc.BulkSyncAll(ctx, req)
-				return renderSyncResources(stdout, stderr, opts.format, result, syncErr, plan)
+				stopProgress()
+				return renderSyncResources(stdout, stderr, opts.format, opts.details, result, syncErr, plan, started)
 			}
 			aggregate := &service.SyncResourcesResult{Results: []service.SyncResult{}, Failures: []service.ResourceError{}}
 			runBulk := func(fn func(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)) {
@@ -872,7 +884,8 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 				result.SuccessCount = len(result.Results)
 				result.FailureCount = len(result.Failures)
 			}
-			return renderSyncResources(stdout, stderr, opts.format, result, syncErr, plan)
+			stopProgress()
+			return renderSyncResources(stdout, stderr, opts.format, opts.details, result, syncErr, plan, started)
 		}
 		result, err := svc.SyncToCache(ctx, service.SyncRequest{RepoID: opts.repo, StableID: opts.id, RemoteAlias: opts.input, IdempotencyKey: opts.idempotencyKey})
 		if err != nil {
@@ -915,6 +928,9 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		result, err := svc.SyncStatus(ctx, service.ListSourcesRequest{RepoID: opts.repo, Kind: opts.kind, Status: opts.status, Limit: opts.limit, Offset: opts.offset})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
+		}
+		if !opts.details && opts.format == "json" {
+			return renderJSON(stdout, syncStatusCompactSummaryFromResult(result))
 		}
 		return render(stdout, opts.format, result, renderSyncStatusSummaryText)
 	case "export", "export-snapshot":
@@ -1036,6 +1052,29 @@ func bulkSyncRequest(opts options) service.BulkSyncRequest {
 	return req
 }
 
+func startSyncProgress(w io.Writer, started time.Time) (chan service.ProgressEvent, func()) {
+	ch := make(chan service.ProgressEvent, 32)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for ev := range ch {
+			if w == nil {
+				continue
+			}
+			fmt.Fprintf(w, "sync progress: collection=%s page=%d committed=%d elapsed=%s\n", ev.Collection, ev.Page, ev.RecordsFetched, time.Since(started).Round(time.Millisecond))
+		}
+	}()
+	stopped := false
+	return ch, func() {
+		if stopped {
+			return
+		}
+		stopped = true
+		close(ch)
+		<-done
+	}
+}
+
 func mergeSyncResources(dst *service.SyncResourcesResult, src *service.SyncResourcesResult) {
 	if dst == nil || src == nil {
 		return
@@ -1076,15 +1115,90 @@ func mergeSyncError(existing error, result *service.SyncResourcesResult, err err
 	return &service.PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
 }
 
-func renderSyncResources(stdout, stderr io.Writer, format string, result *service.SyncResourcesResult, syncErr error, plan startupPlan) int {
+type syncResourcesCompactSummary struct {
+	Status             string                    `json:"status"`
+	SuccessCount       int                       `json:"success_count"`
+	FailureCount       int                       `json:"failure_count"`
+	Counts             service.SyncCounts        `json:"counts"`
+	PagesListed        int                       `json:"pages_listed,omitempty"`
+	RecordsListed      int                       `json:"records_listed,omitempty"`
+	SkippedByWatermark int                       `json:"skipped_by_watermark,omitempty"`
+	StopReason         string                    `json:"stop_reason,omitempty"`
+	Ordering           string                    `json:"ordering,omitempty"`
+	ZeroDeltaCount     int                       `json:"zero_delta_count,omitempty"`
+	Diagnostic         service.SyncDiagnostic    `json:"diagnostic,omitempty"`
+	TotalRequested     int                       `json:"total_requested,omitempty"`
+	FailureGroups      []syncFailureGroupSummary `json:"failure_groups,omitempty"`
+	Elapsed            string                    `json:"elapsed"`
+	StartedAt          time.Time                 `json:"started_at"`
+	CompletedAt        time.Time                 `json:"completed_at"`
+}
+
+type syncFailureGroupSummary struct {
+	RemoteType string `json:"remote_type"`
+	Count      int    `json:"count"`
+}
+
+type syncStatusCompactSummary struct {
+	RepoID              string    `json:"repo_id"`
+	FreshCount          int       `json:"fresh_count"`
+	StaleCount          int       `json:"stale_count"`
+	UnknownCount        int       `json:"unknown_count"`
+	MissingRemoteCount  int       `json:"missing_remote_count"`
+	ResultCount         int       `json:"result_count"`
+	LastSyncAt          time.Time `json:"last_sync_at"`
+	LastSyncStartedAt   time.Time `json:"last_sync_started_at"`
+	LastSyncCompletedAt time.Time `json:"last_sync_completed_at"`
+	ZeroDelta           bool      `json:"zero_delta"`
+	CacheEmpty          bool      `json:"cache_empty"`
+	Limit               int       `json:"limit"`
+	Offset              int       `json:"offset"`
+	Warnings            []string  `json:"warnings,omitempty"`
+}
+
+func syncStatusCompactSummaryFromResult(result service.SyncStatusSummaryResult) syncStatusCompactSummary {
+	summary := syncStatusCompactSummary{
+		RepoID:              result.RepoID,
+		FreshCount:          result.FreshCount,
+		StaleCount:          result.StaleCount,
+		ResultCount:         len(result.Results),
+		LastSyncAt:          result.LastSyncAt,
+		LastSyncStartedAt:   result.LastSyncStartedAt,
+		LastSyncCompletedAt: result.LastSyncCompletedAt,
+		ZeroDelta:           result.ZeroDelta,
+		CacheEmpty:          result.CacheEmpty,
+		Limit:               result.Limit,
+		Offset:              result.Offset,
+		Warnings:            result.Warnings,
+	}
+	for _, item := range result.Results {
+		switch item.Freshness {
+		case service.FreshnessMissingRemote:
+			summary.MissingRemoteCount++
+		case service.FreshnessUnknown:
+			summary.UnknownCount++
+		}
+	}
+	return summary
+}
+
+func renderSyncResources(stdout, stderr io.Writer, format string, details bool, result *service.SyncResourcesResult, syncErr error, plan startupPlan, started time.Time) int {
 	if syncErr != nil {
 		if partial, ok := syncErr.(*service.PartialSyncError); ok {
 			if result != nil && len(result.Results) > 0 {
 				if format == "json" {
-					_ = renderJSON(stdout, result)
+					if details {
+						_ = renderJSON(stdout, result)
+					} else {
+						_ = renderJSON(stdout, syncResourcesSummary(result, partial, started))
+					}
 				} else {
-					for _, r := range result.Results {
-						renderSyncText(stdout, r)
+					if details {
+						for _, r := range result.Results {
+							renderSyncText(stdout, r)
+						}
+					} else {
+						renderSyncResourcesSummaryText(stdout, syncResourcesSummary(result, partial, started))
 					}
 				}
 			}
@@ -1102,13 +1216,135 @@ func renderSyncResources(stdout, stderr io.Writer, format string, result *servic
 	}
 	if result != nil {
 		if format == "json" {
-			return renderJSON(stdout, result)
+			if details {
+				return renderJSON(stdout, result)
+			}
+			return renderJSON(stdout, syncResourcesSummary(result, nil, started))
 		}
-		for _, r := range result.Results {
-			renderSyncText(stdout, r)
+		if details {
+			for _, r := range result.Results {
+				renderSyncText(stdout, r)
+			}
+			return 0
 		}
+		renderSyncResourcesSummaryText(stdout, syncResourcesSummary(result, nil, started))
 	}
 	return 0
+}
+
+func syncResourcesSummary(result *service.SyncResourcesResult, partial *service.PartialSyncError, started time.Time) syncResourcesCompactSummary {
+	if started.IsZero() {
+		started = time.Now().UTC()
+	}
+	completed := time.Now().UTC()
+	summary := syncResourcesCompactSummary{
+		Status:             "succeeded",
+		SuccessCount:       0,
+		FailureCount:       0,
+		PagesListed:        0,
+		RecordsListed:      0,
+		SkippedByWatermark: 0,
+		Elapsed:            completed.Sub(started).Round(time.Millisecond).String(),
+		StartedAt:          started,
+		CompletedAt:        completed,
+	}
+	if result != nil {
+		summary.SuccessCount = result.SuccessCount
+		summary.FailureCount = result.FailureCount
+		summary.PagesListed = result.PagesListed
+		summary.RecordsListed = result.RecordsListed
+		summary.SkippedByWatermark = result.SkippedByWatermark
+		summary.StopReason = result.StopReason
+		summary.Ordering = result.Ordering
+		for _, item := range result.Results {
+			summary.Counts.Fetched += item.Counts.Fetched
+			summary.Counts.Skipped += item.Counts.Skipped
+			summary.Counts.Updated += item.Counts.Updated
+			summary.Counts.Conflicts += item.Counts.Conflicts
+			summary.Counts.Inserted += item.Counts.Inserted
+			summary.Counts.Listed += item.Counts.Listed
+			summary.Counts.FetchedDetail += item.Counts.FetchedDetail
+			summary.Counts.SkippedByRevision += item.Counts.SkippedByRevision
+			summary.Counts.Failed += item.Counts.Failed
+			if item.ZeroDelta {
+				summary.ZeroDeltaCount++
+			}
+		}
+		summary.FailureGroups = syncFailureGroups(result.Failures)
+	}
+	if partial != nil {
+		summary.Status = "partial"
+		summary.Diagnostic = partial.Diagnostic
+		summary.TotalRequested = partial.TotalRequested
+		if summary.FailureCount == 0 {
+			summary.FailureCount = partial.FailureCount
+		}
+		if len(summary.FailureGroups) == 0 {
+			summary.FailureGroups = syncFailureGroups(partial.Errors)
+		}
+	} else if summary.FailureCount > 0 {
+		summary.Status = "partial"
+	}
+	return summary
+}
+
+func syncFailureGroups(failures []service.ResourceError) []syncFailureGroupSummary {
+	if len(failures) == 0 {
+		return nil
+	}
+	counts := map[string]int{}
+	for _, failure := range failures {
+		key := failure.RemoteType
+		if key == "" {
+			key = "unknown"
+		}
+		counts[key]++
+	}
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]syncFailureGroupSummary, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, syncFailureGroupSummary{RemoteType: key, Count: counts[key]})
+	}
+	return out
+}
+
+func renderSyncResourcesSummaryText(w io.Writer, summary syncResourcesCompactSummary) {
+	fmt.Fprintf(w, "sync: %s success_count=%d failure_count=%d fetched=%d updated=%d inserted=%d skipped=%d conflicts=%d listed=%d fetched_detail=%d skipped_by_revision=%d zero_delta=%d elapsed=%s",
+		summary.Status,
+		summary.SuccessCount,
+		summary.FailureCount,
+		summary.Counts.Fetched,
+		summary.Counts.Updated,
+		summary.Counts.Inserted,
+		summary.Counts.Skipped,
+		summary.Counts.Conflicts,
+		summary.Counts.Listed,
+		summary.Counts.FetchedDetail,
+		summary.Counts.SkippedByRevision,
+		summary.ZeroDeltaCount,
+		summary.Elapsed,
+	)
+	if summary.PagesListed > 0 || summary.RecordsListed > 0 || summary.SkippedByWatermark > 0 {
+		fmt.Fprintf(w, " pages_listed=%d records_listed=%d skipped_by_watermark=%d", summary.PagesListed, summary.RecordsListed, summary.SkippedByWatermark)
+	}
+	if summary.StopReason != "" {
+		fmt.Fprintf(w, " stop_reason=%s", summary.StopReason)
+	}
+	if summary.Diagnostic != "" {
+		fmt.Fprintf(w, " diagnostic=%s", summary.Diagnostic)
+	}
+	if len(summary.FailureGroups) > 0 {
+		parts := make([]string, 0, len(summary.FailureGroups))
+		for _, group := range summary.FailureGroups {
+			parts = append(parts, fmt.Sprintf("%s:%d", group.RemoteType, group.Count))
+		}
+		fmt.Fprintf(w, " failure_groups=%s", strings.Join(parts, ","))
+	}
+	fmt.Fprintln(w)
 }
 
 func writeRequest(opts options) service.WriteCommandRequest {
@@ -1853,7 +2089,7 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH cache database path")
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
 	case "sync":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s [--offline|--fixture] --repo REPO [--issues] [--wiki] [--index] [--id ID] [--input REMOTE_ALIAS] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s [--offline|--fixture] --repo REPO [--issues] [--wiki] [--pulls] [--comments] [--index] [--details] [--id ID] [--input REMOTE_ALIAS] [--idempotency-key KEY]\n\n", command)
 		fmt.Fprintln(w, "Synchronize cached records. Uses live GitCode by default; use --offline/--fixture for deterministic fixture sync.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --live              compatibility alias for live provider selection")
@@ -1862,10 +2098,16 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --repo REPO         repository id")
 		fmt.Fprintln(w, "  --issues            sync issue records")
 		fmt.Fprintln(w, "  --wiki              sync wiki records")
+		fmt.Fprintln(w, "  --pulls             sync pull request records")
+		fmt.Fprintln(w, "  --comments          sync pull request comments")
 		fmt.Fprintln(w, "  --index             build index after sync")
+		fmt.Fprintln(w, "  --max-pages N       maximum pages to sync")
+		fmt.Fprintln(w, "  --max-records N     maximum records to sync")
+		fmt.Fprintln(w, "  --per-page N        records per page")
 		fmt.Fprintln(w, "  --id ID             stable record id")
 		fmt.Fprintln(w, "  --input ALIAS       remote alias for single-record sync")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
+		fmt.Fprintln(w, "  --details, --records   include per-record sync results")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "pr-discussions", "pr-review-discussions":
@@ -1887,7 +2129,7 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH cache database path")
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
 	case "sync-status", "sync_status":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO [ID] [--kind KIND] [--status STATUS] [--limit N] [--offset N]\n\n", command)
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO [ID] [--kind KIND] [--status STATUS] [--limit N] [--offset N] [--details]\n\n", command)
 		fmt.Fprintln(w, "Report sync freshness for cached sources.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO       repository id")
@@ -1895,6 +2137,7 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --status STATUS   filter by status")
 		fmt.Fprintln(w, "  --limit N         maximum results")
 		fmt.Fprintln(w, "  --offset N        result offset")
+		fmt.Fprintln(w, "  --details, --records include per-record status results")
 		fmt.Fprintln(w, "  --cache-path PATH cache database path")
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
 	case "export", "export-snapshot":
