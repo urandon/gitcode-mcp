@@ -80,7 +80,7 @@ Bulk sync text output defaults to an aggregate summary:
 
 ```sh
 sync progress: collection=issues page=1 committed=100 elapsed=2.4s
-sync: succeeded success_count=100 failure_count=0 fetched=100 updated=0 inserted=0 skipped=100 conflicts=0 listed=100 fetched_detail=0 skipped_by_revision=100 zero_delta=100 elapsed=2.5s pages_listed=1 records_listed=100 skipped_by_watermark=0 stop_reason=watermark
+sync: succeeded success_count=100 failure_count=0 fetched=100 updated=0 inserted=0 skipped=100 conflicts=0 listed=100 fetched_detail=0 skipped_by_revision=100 zero_delta=100 elapsed=2.5s pages_listed=1 records_listed=100 skipped_by_watermark=0 stop_reason=max_records traversal_status=bounded watermark_status=disabled watermark_reason=no_complete_frontier_metadata
 ```
 
 Use `--format json` to inspect the same compact summary structurally for automation checks. Use `--details` or `--records` when per-record sync evidence is required; without that flag, bulk `sync --format json` and aggregate `sync-status --format json` omit large `results[]` arrays.

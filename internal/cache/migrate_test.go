@@ -452,13 +452,13 @@ func assertV4SchemaTables(t *testing.T, ctx context.Context, path string) {
 		t.Fatalf("enable foreign keys: %v", err)
 	}
 	tables := tableNames(t, ctx, db)
-	for _, want := range []string{"repos", "sources", "chunks", "records", "record_comments", "audit_trail", "snapshots", "snapshot_chunks", "sync_events", "remote_revisions"} {
+	for _, want := range []string{"repos", "sources", "chunks", "records", "record_comments", "audit_trail", "snapshots", "snapshot_chunks", "sync_events", "sync_frontiers", "remote_revisions"} {
 		if !tables[want] {
 			t.Fatalf("missing table %s after migration", want)
 		}
 	}
 	indexes := indexNames(t, ctx, db)
-	for _, want := range []string{"idx_chunks_query", "idx_records_remote", "idx_records_remote_unique", "idx_snapshot_chunks_record", "idx_snapshot_chunks_order"} {
+	for _, want := range []string{"idx_chunks_query", "idx_records_remote", "idx_records_remote_unique", "idx_snapshot_chunks_record", "idx_snapshot_chunks_order", "idx_sync_frontiers_repo"} {
 		if !indexes[want] {
 			t.Fatalf("missing index %s after migration", want)
 		}

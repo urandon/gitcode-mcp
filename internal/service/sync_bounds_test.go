@@ -303,7 +303,7 @@ func TestBulkSyncIssuesBoundedMaxRecords(t *testing.T) {
 	}
 }
 
-func TestBulkSyncIssuesRecentUpdateStopsAfterWatermark(t *testing.T) {
+func TestBulkSyncIssuesBoundedDoesNotStopAtCachedWatermark(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
 	store, err := cache.NewInMemorySQLiteStore(ctx)
@@ -346,18 +346,84 @@ func TestBulkSyncIssuesRecentUpdateStopsAfterWatermark(t *testing.T) {
 	if firstReq.State != "all" || firstReq.OrderBy != "updated_at" || firstReq.Direction != "desc" {
 		t.Fatalf("unexpected issue list request: %+v", firstReq)
 	}
-	if result.StopReason != "watermark" || result.Ordering != "updated_at_desc" {
-		t.Fatalf("stop/order = %q/%q, want watermark/updated_at_desc", result.StopReason, result.Ordering)
+	if result.StopReason != "end_of_collection" || result.Ordering != "updated_at_desc" {
+		t.Fatalf("stop/order = %q/%q, want end_of_collection/updated_at_desc", result.StopReason, result.Ordering)
 	}
-	if result.PagesListed != 2 || result.RecordsListed != 3 || result.SkippedByWatermark != 1 {
-		t.Fatalf("summary pages/records/skipped = %d/%d/%d, want 2/3/1", result.PagesListed, result.RecordsListed, result.SkippedByWatermark)
+	if result.TraversalStatus != "complete" || result.WatermarkStatus != "disabled" || result.WatermarkReason == "" {
+		t.Fatalf("traversal/watermark = %q/%q/%q, want complete/disabled/reason", result.TraversalStatus, result.WatermarkStatus, result.WatermarkReason)
 	}
-	if result.SuccessCount != 2 {
-		t.Fatalf("SuccessCount = %d, want 2 staged records", result.SuccessCount)
+	if result.PagesListed != 2 || result.RecordsListed != 3 || result.SkippedByWatermark != 0 {
+		t.Fatalf("summary pages/records/skipped = %d/%d/%d, want 2/3/0", result.PagesListed, result.RecordsListed, result.SkippedByWatermark)
+	}
+	if result.SuccessCount != 3 {
+		t.Fatalf("SuccessCount = %d, want 3 staged records", result.SuccessCount)
 	}
 }
 
-func TestBulkSyncPullRequestsRecentUpdateStopsAfterWatermark(t *testing.T) {
+func TestBulkSyncIssuesCompleteFrontierStopsAfterCachedTail(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
+	high := base.Add(5 * time.Minute)
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatalf("NewInMemorySQLiteStore returned error: %v", err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "issues-complete-frontier", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatalf("AddRepository returned error: %v", err)
+	}
+	cachedIssue := gitcode.Issue{ID: "3", Number: 3, Title: "Cached High", State: "open", CreatedAt: base, UpdatedAt: high}
+	hash := contentHash(cachedIssue.Title, cachedIssue.Body, cachedIssue.State, cachedIssue.Labels)
+	revision := issueRemoteRevision(cachedIssue, hash)
+	if err := store.UpsertRecordGraph(ctx, cache.RecordGraph{
+		Record:          cache.Record{RepoID: "issues-complete-frontier", ID: "ISSUE-3", Type: "issue", Path: "issues/3.md", Title: cachedIssue.Title, Body: cachedIssue.Body, Status: "open", ContentHash: hash, Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: "3", RemoteRevision: revision, CreatedAt: base, UpdatedAt: high},
+		RemoteRevisions: []cache.RemoteRevision{{RepoID: "issues-complete-frontier", RecordID: "ISSUE-3", RemoteType: "issue", RemoteID: "3", RemoteRevision: revision, Status: "fresh", LastFetchedAt: base}},
+	}); err != nil {
+		t.Fatalf("seed record returned error: %v", err)
+	}
+	if err := store.UpsertSyncFrontier(ctx, cache.SyncFrontier{RepoID: "issues-complete-frontier", RemoteType: "issue", Ordering: syncOrderingUpdatedAtDesc, FilterKey: syncFilterStateAll, Status: "complete", HighUpdatedAt: high, HighRemoteID: "3", HighNumber: 3, StopReason: "end_of_collection", UpdatedAt: base}); err != nil {
+		t.Fatalf("seed frontier returned error: %v", err)
+	}
+	client := &fakeGitCodeClient{
+		listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{
+			{Items: []gitcode.IssueSummary{
+				{ID: "4", Number: 4, Title: "New", State: "open", CreatedAt: base, UpdatedAt: high.Add(time.Minute)},
+				{ID: "3", Number: 3, Title: "Cached High", State: "open", CreatedAt: base, UpdatedAt: high},
+			}, Page: 1, PerPage: 2},
+			{Items: []gitcode.IssueSummary{
+				{ID: "2", Number: 2, Title: "Covered Tail", State: "open", CreatedAt: base.Add(-time.Hour), UpdatedAt: base},
+			}, Page: 2, PerPage: 2},
+			{Items: []gitcode.IssueSummary{{ID: "1", Number: 1, Title: "Should not list", State: "open", UpdatedAt: base.Add(-time.Minute)}}, Page: 3, PerPage: 2},
+		},
+	}
+	svc := NewWithClient(store, client)
+
+	result, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "issues-complete-frontier", PerPage: 2, Bounds: &SyncBounds{MaxPages: 10}})
+	if err != nil {
+		t.Fatalf("BulkSyncIssues returned error: %v", err)
+	}
+	if len(client.listIssueRequests) != 2 {
+		t.Fatalf("ListIssues calls = %d, want 2", len(client.listIssueRequests))
+	}
+	if client.commentCalls != 1 {
+		t.Fatalf("ListIssueComments calls = %d, want 1 for only new issue", client.commentCalls)
+	}
+	if result.StopReason != "watermark" || result.TraversalStatus != "complete" || result.WatermarkStatus != "used" {
+		t.Fatalf("stop/traversal/watermark = %q/%q/%q", result.StopReason, result.TraversalStatus, result.WatermarkStatus)
+	}
+	if result.PagesListed != 2 || result.RecordsListed != 3 || result.SkippedByWatermark != 1 || result.SuccessCount != 2 {
+		t.Fatalf("summary pages/records/skipped/success = %d/%d/%d/%d", result.PagesListed, result.RecordsListed, result.SkippedByWatermark, result.SuccessCount)
+	}
+	frontier, ok, err := store.GetSyncFrontier(ctx, "issues-complete-frontier", "issue", syncOrderingUpdatedAtDesc, syncFilterStateAll)
+	if err != nil || !ok {
+		t.Fatalf("GetSyncFrontier ok=%v err=%v", ok, err)
+	}
+	if frontier.Status != "complete" || frontier.StopReason != "watermark" || !frontier.HighUpdatedAt.Equal(high.Add(time.Minute)) {
+		t.Fatalf("frontier = %#v", frontier)
+	}
+}
+
+func TestBulkSyncPullRequestsBoundedDoesNotStopAtCachedWatermark(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
 	store, err := cache.NewInMemorySQLiteStore(ctx)
@@ -399,15 +465,18 @@ func TestBulkSyncPullRequestsRecentUpdateStopsAfterWatermark(t *testing.T) {
 	if firstReq.State != "all" || firstReq.OrderBy != "updated_at" || firstReq.Direction != "desc" {
 		t.Fatalf("unexpected PR list request: %+v", firstReq)
 	}
-	if result.StopReason != "watermark" || result.PagesListed != 2 || result.RecordsListed != 3 || result.SkippedByWatermark != 1 {
+	if result.StopReason != "end_of_collection" || result.PagesListed != 2 || result.RecordsListed != 3 || result.SkippedByWatermark != 0 {
 		t.Fatalf("summary stop/pages/records/skipped = %q/%d/%d/%d", result.StopReason, result.PagesListed, result.RecordsListed, result.SkippedByWatermark)
 	}
-	if result.SuccessCount != 2 {
-		t.Fatalf("SuccessCount = %d, want 2 staged records", result.SuccessCount)
+	if result.TraversalStatus != "complete" || result.WatermarkStatus != "disabled" || result.WatermarkReason == "" {
+		t.Fatalf("traversal/watermark = %q/%q/%q, want complete/disabled/reason", result.TraversalStatus, result.WatermarkStatus, result.WatermarkReason)
+	}
+	if result.SuccessCount != 3 {
+		t.Fatalf("SuccessCount = %d, want 3 staged records", result.SuccessCount)
 	}
 }
 
-func TestBulkSyncPullRequestsRecentUpdateUsesLiveCacheWatermark(t *testing.T) {
+func TestBulkSyncPullRequestsIgnoresLiveCacheWatermarkWithoutCompleteFrontier(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
 	store, err := cache.NewInMemorySQLiteStore(ctx)
@@ -440,11 +509,57 @@ func TestBulkSyncPullRequestsRecentUpdateUsesLiveCacheWatermark(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BulkSyncPullRequests returned error: %v", err)
 	}
-	if len(client.listPRRequests) != 1 {
-		t.Fatalf("ListPRs calls = %d, want 1", len(client.listPRRequests))
+	if len(client.listPRRequests) != 2 {
+		t.Fatalf("ListPRs calls = %d, want 2", len(client.listPRRequests))
 	}
-	if result.StopReason != "watermark" || result.PagesListed != 1 || result.RecordsListed != 2 || result.SkippedByWatermark != 1 {
+	if result.StopReason != "end_of_collection" || result.PagesListed != 2 || result.RecordsListed != 3 || result.SkippedByWatermark != 0 {
 		t.Fatalf("summary stop/pages/records/skipped = %q/%d/%d/%d", result.StopReason, result.PagesListed, result.RecordsListed, result.SkippedByWatermark)
+	}
+	if result.SuccessCount != 3 {
+		t.Fatalf("SuccessCount = %d, want 3 staged records", result.SuccessCount)
+	}
+}
+
+func TestBulkSyncPullRequestsCompleteFrontierStopsAfterCachedTail(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
+	high := base.Add(5 * time.Minute)
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatalf("NewInMemorySQLiteStore returned error: %v", err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "pulls-complete-frontier", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatalf("AddRepository returned error: %v", err)
+	}
+	if err := store.UpsertSyncFrontier(ctx, cache.SyncFrontier{RepoID: "pulls-complete-frontier", RemoteType: "pull_request", Ordering: syncOrderingUpdatedAtDesc, FilterKey: syncFilterStateAll, Status: "complete", HighUpdatedAt: high, HighRemoteID: "8", HighNumber: 8, StopReason: "end_of_collection", UpdatedAt: base}); err != nil {
+		t.Fatalf("seed frontier returned error: %v", err)
+	}
+	client := &fakeGitCodeClient{
+		listPRPages: []gitcode.Page[gitcode.PullRequest]{
+			{Items: []gitcode.PullRequest{
+				{ID: "9", Number: 9, Title: "New", State: "open", CreatedAt: base, UpdatedAt: high.Add(time.Minute)},
+				{ID: "8", Number: 8, Title: "Cached High", State: "open", CreatedAt: base, UpdatedAt: high},
+			}, Page: 1, PerPage: 2},
+			{Items: []gitcode.PullRequest{
+				{ID: "7", Number: 7, Title: "Covered Tail", State: "open", CreatedAt: base.Add(-time.Hour), UpdatedAt: base},
+			}, Page: 2, PerPage: 2},
+		},
+	}
+	svc := NewWithClient(store, client)
+
+	result, err := svc.BulkSyncPullRequests(ctx, BulkSyncRequest{RepoID: "pulls-complete-frontier", PerPage: 2, Bounds: &SyncBounds{MaxPages: 10}})
+	if err != nil {
+		t.Fatalf("BulkSyncPullRequests returned error: %v", err)
+	}
+	if len(client.listPRRequests) != 2 {
+		t.Fatalf("ListPRs calls = %d, want 2", len(client.listPRRequests))
+	}
+	if result.StopReason != "watermark" || result.TraversalStatus != "complete" || result.WatermarkStatus != "used" {
+		t.Fatalf("stop/traversal/watermark = %q/%q/%q", result.StopReason, result.TraversalStatus, result.WatermarkStatus)
+	}
+	if result.PagesListed != 2 || result.RecordsListed != 3 || result.SkippedByWatermark != 1 || result.SuccessCount != 2 {
+		t.Fatalf("summary pages/records/skipped/success = %d/%d/%d/%d", result.PagesListed, result.RecordsListed, result.SkippedByWatermark, result.SuccessCount)
 	}
 }
 
@@ -870,6 +985,38 @@ func TestNormalizeSyncFailureMapsEmptyWiki(t *testing.T) {
 	}
 	if !strings.Contains(sfErr.Error(), "gitcode-mcp wiki init") {
 		t.Fatalf("error message missing remediation text, got: %v", sfErr.Error())
+	}
+}
+
+func TestBulkSyncWikiRouteFailureClassifiesAPIValidation(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatalf("NewInMemorySQLiteStore returned error: %v", err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "wiki-route-400", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatalf("AddRepository returned error: %v", err)
+	}
+	client := &fakeGitCodeClient{
+		listWikiErrors: []error{gitcode.ErrAPIValidation{Endpoint: "/api/v5/repos/owner/repo.wiki/contents", Status: 400, Message: "bad request"}},
+	}
+	svc := NewWithClient(store, client)
+
+	result, err := svc.BulkSyncWiki(ctx, BulkSyncRequest{RepoID: "wiki-route-400"})
+	if err == nil {
+		t.Fatal("BulkSyncWiki returned nil error, want PartialSyncError")
+	}
+	var partial *PartialSyncError
+	if !errors.As(err, &partial) {
+		t.Fatalf("BulkSyncWiki error = %T %v, want *PartialSyncError", err, err)
+	}
+	if result == nil || len(result.Failures) != 1 {
+		t.Fatalf("result failures = %#v, want one failure", result)
+	}
+	failure := result.Failures[0]
+	if failure.FailureClass != "api_validation" || failure.Endpoint != "/api/v5/repos/owner/repo.wiki/contents" || failure.StatusCode != 400 {
+		t.Fatalf("failure metadata = %#v", failure)
 	}
 }
 

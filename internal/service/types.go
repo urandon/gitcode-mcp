@@ -1,7 +1,9 @@
 package service
 
 import (
+	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"gitcode-mcp/internal/gitcode"
@@ -381,13 +383,20 @@ type SyncResourcesResult struct {
 	SkippedByWatermark int             `json:"skipped_by_watermark,omitempty"`
 	StopReason         string          `json:"stop_reason,omitempty"`
 	Ordering           string          `json:"ordering,omitempty"`
+	TraversalStatus    string          `json:"traversal_status,omitempty"`
+	WatermarkStatus    string          `json:"watermark_status,omitempty"`
+	WatermarkReason    string          `json:"watermark_reason,omitempty"`
 }
 
 type ResourceError struct {
-	SourceID   string `json:"source_id"`
-	RemoteType string `json:"remote_type"`
-	Err        error  `json:"-"`
-	Message    string `json:"message"`
+	SourceID       string `json:"source_id"`
+	RemoteType     string `json:"remote_type"`
+	FailureClass   string `json:"failure_class,omitempty"`
+	Endpoint       string `json:"endpoint,omitempty"`
+	StatusCode     int    `json:"status_code,omitempty"`
+	RecoveryAction string `json:"recovery_action,omitempty"`
+	Err            error  `json:"-"`
+	Message        string `json:"message"`
 }
 
 func (e ResourceError) Error() string {
@@ -395,6 +404,133 @@ func (e ResourceError) Error() string {
 }
 
 func (e ResourceError) Unwrap() error { return e.Err }
+
+func newResourceError(sourceID, remoteType string, err error) ResourceError {
+	return newResourceErrorWithMessage(sourceID, remoteType, err, "")
+}
+
+func newResourceErrorWithMessage(sourceID, remoteType string, err error, message string) ResourceError {
+	if message == "" && err != nil {
+		message = err.Error()
+	}
+	re := ResourceError{SourceID: sourceID, RemoteType: remoteType, Err: err, Message: message}
+	re.FailureClass, re.Endpoint, re.StatusCode, re.RecoveryAction = resourceFailureMetadata(err)
+	return re
+}
+
+func resourceFailureMetadata(err error) (failureClass, endpoint string, statusCode int, recoveryAction string) {
+	if err == nil {
+		return "", "", 0, ""
+	}
+	var syncFailure ErrSyncFailure
+	if errors.As(err, &syncFailure) {
+		failureClass = syncFailure.Mode
+		endpoint = syncFailure.Endpoint
+		statusCode = resourceStatusCode(syncFailure.Cause)
+		recoveryAction = syncFailure.RecoveryAction
+		if endpoint == "" {
+			endpoint = resourceEndpoint(syncFailure.Cause)
+		}
+		if statusCode == 0 {
+			statusCode = resourceStatusCode(err)
+		}
+		return failureClass, endpoint, statusCode, recoveryAction
+	}
+	if coded, ok := err.(interface{ DiagnosticCode() string }); ok {
+		failureClass = coded.DiagnosticCode()
+	}
+	endpoint = resourceEndpoint(err)
+	statusCode = resourceStatusCode(err)
+	var forbidden gitcode.ErrForbidden
+	if errors.As(err, &forbidden) {
+		recoveryAction = forbidden.Recovery
+	}
+	return failureClass, endpoint, statusCode, recoveryAction
+}
+
+func resourceEndpoint(err error) string {
+	var network gitcode.ErrNetworkUnavailable
+	if errors.As(err, &network) {
+		return network.Endpoint
+	}
+	var rate gitcode.ErrRateLimited
+	if errors.As(err, &rate) {
+		return rate.Endpoint
+	}
+	var auth gitcode.ErrAuthExpired
+	if errors.As(err, &auth) {
+		return auth.Endpoint
+	}
+	var forbidden gitcode.ErrForbidden
+	if errors.As(err, &forbidden) {
+		return forbidden.Endpoint
+	}
+	var notFound gitcode.ErrNotFound
+	if errors.As(err, &notFound) {
+		return notFound.Endpoint
+	}
+	var remoteNotFound gitcode.ErrRemoteNotFound
+	if errors.As(err, &remoteNotFound) {
+		return remoteNotFound.Endpoint
+	}
+	var validation gitcode.ErrAPIValidation
+	if errors.As(err, &validation) {
+		return validation.Endpoint
+	}
+	var conflict gitcode.ErrConflict
+	if errors.As(err, &conflict) {
+		return conflict.Endpoint
+	}
+	var partial gitcode.ErrPartialResponse
+	if errors.As(err, &partial) {
+		return partial.Endpoint
+	}
+	var tooLarge gitcode.ErrPayloadTooLarge
+	if errors.As(err, &tooLarge) {
+		return tooLarge.Endpoint
+	}
+	return ""
+}
+
+func resourceStatusCode(err error) int {
+	var network gitcode.ErrNetworkUnavailable
+	if errors.As(err, &network) && network.Status != 0 {
+		return network.Status
+	}
+	var rate gitcode.ErrRateLimited
+	if errors.As(err, &rate) {
+		return http.StatusTooManyRequests
+	}
+	var auth gitcode.ErrAuthExpired
+	if errors.As(err, &auth) {
+		return auth.Status
+	}
+	var forbidden gitcode.ErrForbidden
+	if errors.As(err, &forbidden) {
+		return forbidden.Status
+	}
+	var notFound gitcode.ErrNotFound
+	if errors.As(err, &notFound) {
+		return http.StatusNotFound
+	}
+	var remoteNotFound gitcode.ErrRemoteNotFound
+	if errors.As(err, &remoteNotFound) {
+		return http.StatusNotFound
+	}
+	var validation gitcode.ErrAPIValidation
+	if errors.As(err, &validation) {
+		return validation.Status
+	}
+	var conflict gitcode.ErrConflict
+	if errors.As(err, &conflict) {
+		return conflict.Status
+	}
+	var tooLarge gitcode.ErrPayloadTooLarge
+	if errors.As(err, &tooLarge) {
+		return http.StatusRequestEntityTooLarge
+	}
+	return 0
+}
 
 type PartialSyncError struct {
 	Errors         []ResourceError `json:"errors"`

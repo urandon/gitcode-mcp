@@ -42,6 +42,31 @@ func TestBacklinks(t *testing.T) {
 	}
 }
 
+func TestSyncFrontierRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	if err := store.AddRepository(ctx, RepositoryBinding{RepoID: "frontier-repo", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []RepositoryScope{RepositoryScopeIssues}}); err != nil {
+		t.Fatalf("AddRepository returned error: %v", err)
+	}
+	high := time.Date(2026, 6, 30, 8, 0, 0, 0, time.UTC)
+	updated := high.Add(time.Minute)
+	want := SyncFrontier{RepoID: "frontier-repo", RemoteType: "issue", Ordering: "updated_at_desc", FilterKey: "state=all", Status: "complete", HighUpdatedAt: high, HighRemoteID: "42", HighNumber: 42, StopReason: "end_of_collection", PagesListed: 3, RecordsListed: 250, UpdatedAt: updated}
+	if err := store.UpsertSyncFrontier(ctx, want); err != nil {
+		t.Fatalf("UpsertSyncFrontier returned error: %v", err)
+	}
+	got, ok, err := store.GetSyncFrontier(ctx, "frontier-repo", "issue", "updated_at_desc", "state=all")
+	if err != nil || !ok {
+		t.Fatalf("GetSyncFrontier ok=%v err=%v", ok, err)
+	}
+	if got.Status != want.Status || got.HighRemoteID != want.HighRemoteID || got.HighNumber != want.HighNumber || got.StopReason != want.StopReason || got.PagesListed != want.PagesListed || got.RecordsListed != want.RecordsListed {
+		t.Fatalf("frontier = %#v, want %#v", got, want)
+	}
+	if !got.HighUpdatedAt.Equal(high) || !got.UpdatedAt.Equal(updated) {
+		t.Fatalf("frontier times = %s/%s, want %s/%s", got.HighUpdatedAt, got.UpdatedAt, high, updated)
+	}
+}
+
 func TestRecordSyncEventTimestamps(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)
