@@ -44,10 +44,13 @@ Stdio mode uses stdin/stdout for JSON-RPC frames. stderr carries diagnostics.
 
 ### Repo-local cache configuration
 
-When the MCP client launches `gitcode-mcp` from inside a Git worktree, the server can use a repo-local cache without a per-client `--cache-path`. Add `.gitcode/gitcode-mcp.yaml` to the worktree:
+When the MCP client launches `gitcode-mcp` from inside a Git worktree, the server can use a repo-local cache without a per-client `--cache-path`. Bootstrap the worktree once:
 
-```yaml
-cache_mode: repo-local
+```sh
+gitcode-mcp repo init-local \
+  --repo example-owner/example-repo \
+  --owner example-owner \
+  --name example-repo
 ```
 
 Then launch:
@@ -59,11 +62,13 @@ Then launch:
 }
 ```
 
-The resolved cache is `<git-worktree>/.gitcode/mcp/cache.db`. Keep generated state out of commits with:
+The command creates `.gitcode/gitcode-mcp.yaml` with `cache_mode: repo-local`, records the repository binding in `<git-worktree>/.gitcode/mcp/cache.db`, and ensures generated state is ignored:
 
 ```gitignore
 .gitcode/mcp/
 ```
+
+It does not sync data. Run `gitcode-mcp sync --repo example-owner/example-repo ...` separately when the cache should be populated.
 
 Command-line `--cache-path`, `GITCODE_MCP_CACHE_DIR`, and global `cache_path` still override repo-local discovery.
 

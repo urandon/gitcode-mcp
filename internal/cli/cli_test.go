@@ -1141,6 +1141,114 @@ func TestRepoAddHelpShowsFlagsAndSupportedScopes(t *testing.T) {
 	}
 }
 
+func TestRepoInitLocalHelpShowsBootstrapFlags(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Execute([]string{"repo", "init-local", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"repo init-local", "--owner OWNER", "--name NAME", "--api-base-url URL", "--scopes SCOPES", "--overwrite", "without syncing"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("repo init-local help missing %q in %q", want, out)
+		}
+	}
+}
+
+type repoInitLocalSource struct {
+	env       map[string]string
+	cwd       string
+	homeDir   string
+	configDir string
+	cacheDir  string
+}
+
+func (s *repoInitLocalSource) Env(key string) string          { return s.env[key] }
+func (s *repoInitLocalSource) UserHomeDir() (string, error)   { return s.homeDir, nil }
+func (s *repoInitLocalSource) UserConfigDir() (string, error) { return s.configDir, nil }
+func (s *repoInitLocalSource) UserCacheDir() (string, error)  { return s.cacheDir, nil }
+func (s *repoInitLocalSource) ReadFile(path string) ([]byte, error) {
+	return os.ReadFile(path)
+}
+func (s *repoInitLocalSource) WorkingDir() (string, error) { return s.cwd, nil }
+func (s *repoInitLocalSource) Stat(path string) (os.FileInfo, error) {
+	return os.Stat(path)
+}
+
+func TestRepoInitLocalBootstrapsWorktreeCache(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(root, "packages", "agent")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("build/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := &repoInitLocalSource{
+		env:       map[string]string{},
+		cwd:       nested,
+		homeDir:   filepath.Join(root, "home"),
+		configDir: filepath.Join(root, "config"),
+		cacheDir:  filepath.Join(root, "cache"),
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := executeWithFactoryAndDeps([]string{"repo", "init-local", "--repo", "example-owner/example-repo", "--owner", "example-owner", "--name", "example-repo", "--display-name", "Example Repository", "--api-base-url", "https://api.gitcode.com/api/v5", "--alias", "example"}, &stdout, &stderr, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"config_status: created", "gitignore_updated: true", "binding_status: created", "cache_path: " + filepath.Join(root, ".gitcode", "mcp", "cache.db")} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("init-local output missing %q in %q", want, out)
+		}
+	}
+	configBytes, err := os.ReadFile(filepath.Join(root, ".gitcode", "gitcode-mcp.yaml"))
+	if err != nil {
+		t.Fatalf("repo-local config not written: %v", err)
+	}
+	if strings.TrimSpace(string(configBytes)) != "cache_mode: repo-local" {
+		t.Fatalf("unexpected repo-local config: %q", string(configBytes))
+	}
+	gitignoreBytes, err := os.ReadFile(filepath.Join(root, ".gitignore"))
+	if err != nil {
+		t.Fatalf("gitignore not readable: %v", err)
+	}
+	if !strings.Contains(string(gitignoreBytes), ".gitcode/mcp/") {
+		t.Fatalf("gitignore missing repo-local cache rule: %q", string(gitignoreBytes))
+	}
+	cachePath := filepath.Join(root, ".gitcode", "mcp", "cache.db")
+	store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+	if err != nil {
+		t.Fatalf("open repo-local cache: %v", err)
+	}
+	repo, err := store.GetRepository(context.Background(), "example-owner/example-repo")
+	if closeErr := store.Close(); closeErr != nil {
+		t.Fatalf("close repo-local cache: %v", closeErr)
+	}
+	if err != nil {
+		t.Fatalf("repository binding missing: %v", err)
+	}
+	if repo.Owner != "example-owner" || repo.Name != "example-repo" || repo.DisplayName != "Example Repository" {
+		t.Fatalf("unexpected repository binding: %#v", repo)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = executeWithFactoryAndDeps([]string{"repo", "init-local", "--repo", "example-owner/example-repo", "--owner", "example-owner", "--name", "example-repo", "--api-base-url", "https://api.gitcode.com/api/v5"}, &stdout, &stderr, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("second init-local code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "binding_status: existing") || !strings.Contains(stdout.String(), "gitignore_updated: false") {
+		t.Fatalf("second init-local should be idempotent, stdout=%q", stdout.String())
+	}
+}
+
 func TestAliasCommandHelpExitsZero(t *testing.T) {
 	for _, tc := range []struct {
 		name string

@@ -79,13 +79,24 @@ Repo-local mode keeps a repository-specific MCP cache under the current Git work
       cache.db.lock
 ```
 
-Enable it by committing or creating `.gitcode/gitcode-mcp.yaml` in the worktree:
+Bootstrap it from inside the Git worktree:
+
+```sh
+gitcode-mcp repo init-local \
+  --repo example-owner/example-repo \
+  --owner example-owner \
+  --name example-repo
+```
+
+The command creates or updates `.gitcode/gitcode-mcp.yaml`, ensures `.gitcode/mcp/` is ignored, creates the cache directory, and records the repository binding. It does not sync data.
+
+The tracked config file contains:
 
 ```yaml
 cache_mode: repo-local
 ```
 
-The cache database and lock are local state. Ignore them with:
+The cache database and lock are local state and should stay ignored:
 
 ```gitignore
 .gitcode/mcp/

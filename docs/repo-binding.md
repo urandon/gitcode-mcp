@@ -6,6 +6,21 @@ Repository binding is a first-class model in gitcode-mcp. Every cache record, sy
 
 ## Adding a repository
 
+For a repo-local cache in the current Git worktree, use the bootstrap command:
+
+```sh
+gitcode-mcp repo init-local \
+  --repo example-owner/example-repo \
+  --owner example-owner \
+  --name example-repo \
+  --display-name "Example Repository" \
+  --api-base-url https://api.gitcode.com/api/v5
+```
+
+This creates `.gitcode/gitcode-mcp.yaml` with `cache_mode: repo-local`, ensures `.gitcode/mcp/` is ignored, creates the repo-local cache directory, and records the repository binding in `<git-worktree>/.gitcode/mcp/cache.db`. It does not sync data; run `gitcode-mcp sync --repo example-owner/example-repo ...` explicitly when ready.
+
+To bind a repository to an already selected cache, use `repo add`:
+
 ```sh
 gitcode-mcp repo add \
   --repo example-owner/example-repo \
@@ -27,6 +42,8 @@ gitcode-mcp repo add \
 | `--scopes` | Yes | Comma-separated scopes (`issues`, `wiki`; `pulls` and `comments` are accepted and use the issue-backed GitCode API surface) |
 | `--api-base-url` | No | API base URL. Defaults to config value |
 | `--alias` | No | Short alias for the repository |
+
+`repo init-local` accepts the same repository identity flags. Its `--scopes` default is `issues,wiki,pulls,comments`, and `--overwrite` replaces an existing `.gitcode/gitcode-mcp.yaml` when it already declares a different `cache_mode`.
 
 ### repo_id format
 

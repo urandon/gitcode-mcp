@@ -272,7 +272,7 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 		if command == "repo" {
 			if sub, ok := firstArg(rest); ok {
 				switch sub {
-				case "add", "status":
+				case "add", "status", "init-local":
 					printLocalSubcommandHelp(command, sub, stdout)
 					return 0
 				}
@@ -280,6 +280,11 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 		}
 		printCommandHelp(command, stdout)
 		return 0
+	}
+	if command == "repo" {
+		if sub, ok := firstArg(rest); ok && sub == "init-local" {
+			return executeRepoInitLocalCommand(ctx, opts, stdout, stderr, deps)
+		}
 	}
 	plan, planErr := buildStartupPlan(context.Background(), command, opts, deps)
 	if planErr != nil {
@@ -583,6 +588,8 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 			case "auth status":
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "repo add", "repo status":
+				printLocalSubcommandHelp(command, sub, stdout)
+			case "repo init-local":
 				printLocalSubcommandHelp(command, sub, stdout)
 			default:
 				printCommandHelp(command, stdout)
@@ -1670,6 +1677,11 @@ func renderRepositoryBindingText(w io.Writer, result service.RepositoryBinding) 
 	fmt.Fprintf(w, "repo_id: %s\nowner: %s\nname: %s\napi_base_url: %s\nscopes: %s\ndisplay_name: %s\naliases: %s\n", result.RepoID, result.Owner, result.Name, result.APIBaseURL, joinRepositoryScopes(result.Scopes), result.DisplayName, strings.Join(result.Aliases, ","))
 }
 
+func renderRepoLocalInitText(w io.Writer, result repoLocalInitResult) {
+	fmt.Fprintf(w, "repo_root: %s\nconfig_path: %s\nconfig_status: %s\ngitignore_path: %s\ngitignore_updated: %t\ncache_path: %s\nbinding_status: %s\n", result.RepoRoot, result.ConfigPath, result.ConfigStatus, result.GitignorePath, result.GitignoreUpdated, result.CachePath, result.BindingStatus)
+	renderRepositoryBindingText(w, result.Binding)
+}
+
 func renderRepositoryStatusText(w io.Writer, result service.RepositoryStatus) {
 	fmt.Fprintf(w, "repo_id: %s\nowner: %s\nname: %s\napi_base_url: %s\nscopes: %s\ndisplay_name: %s\naliases: %s\nbinding_state: %s\nalias_conflict_state: %s\ncache_state: %s\nindex_state: %s\n", result.RepoID, result.Owner, result.Name, result.APIBaseURL, joinRepositoryScopes(result.Scopes), result.DisplayName, strings.Join(result.Aliases, ","), result.BindingState, result.AliasConflictState, result.CacheState, result.IndexState)
 	if result.FailureClass != "" {
@@ -1974,6 +1986,227 @@ type migrateCacheResult struct {
 	Applied     []int  `json:"applied,omitempty"`
 	BackupPath  string `json:"backup_path,omitempty"`
 	Remediation string `json:"remediation,omitempty"`
+}
+
+type repoLocalInitResult struct {
+	RepoRoot         string                    `json:"repo_root"`
+	ConfigPath       string                    `json:"config_path"`
+	ConfigStatus     string                    `json:"config_status"`
+	GitignorePath    string                    `json:"gitignore_path"`
+	GitignoreUpdated bool                      `json:"gitignore_updated"`
+	CachePath        string                    `json:"cache_path"`
+	BindingStatus    string                    `json:"binding_status"`
+	Binding          service.RepositoryBinding `json:"binding"`
+}
+
+func executeRepoInitLocalCommand(ctx context.Context, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+	if deps.Source == nil {
+		deps.Source = config.OSSource{}
+	}
+	if strings.TrimSpace(opts.cachePath) != "" {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "cache-path", Message: "repo init-local always selects <git-root>/.gitcode/mcp/cache.db; omit --cache-path"})
+	}
+	repoRoot, err := discoverGitRoot(deps.Source)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	configPath := filepath.Join(repoRoot, ".gitcode", "gitcode-mcp.yaml")
+	configStatus, err := ensureRepoLocalConfig(configPath, opts.overwrite)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	gitignorePath := filepath.Join(repoRoot, ".gitignore")
+	gitignoreUpdated, err := ensureRepoLocalGitignore(gitignorePath)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	cachePath := filepath.Join(repoRoot, ".gitcode", "mcp", "cache.db")
+	if err := ensureCacheParentDir(cachePath); err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	defer store.Close()
+	svc := service.New(store)
+	apiBaseURL := strings.TrimSpace(opts.apiBaseURL)
+	if apiBaseURL == "" {
+		apiBaseURL = defaultAPIBaseURL(deps.Source)
+	}
+	scopes := strings.TrimSpace(opts.scopes)
+	if scopes == "" {
+		scopes = "issues,wiki,pulls,comments"
+	}
+	binding, bindingStatus, err := addOrReuseRepositoryBinding(ctx, svc, service.AddRepositoryRequest{RepoID: opts.repo, Owner: opts.owner, Name: opts.name, APIBaseURL: apiBaseURL, Scopes: []string{scopes}, DisplayName: opts.displayName, Aliases: []string(opts.alias)})
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	result := repoLocalInitResult{RepoRoot: repoRoot, ConfigPath: configPath, ConfigStatus: configStatus, GitignorePath: gitignorePath, GitignoreUpdated: gitignoreUpdated, CachePath: cachePath, BindingStatus: bindingStatus, Binding: binding}
+	return render(stdout, opts.format, result, renderRepoLocalInitText)
+}
+
+func discoverGitRoot(src config.Source) (string, error) {
+	cwd, err := os.Getwd()
+	if wd, ok := src.(config.WorkingDirSource); ok {
+		cwd, err = wd.WorkingDir()
+	}
+	if err != nil {
+		return "", err
+	}
+	dir, err := filepath.Abs(cwd)
+	if err != nil {
+		return "", err
+	}
+	for {
+		if pathExists(filepath.Join(dir, ".git"), src) {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", service.ErrInvalidQuery{Field: "repo", Message: "repo init-local must run inside a Git worktree"}
+		}
+		dir = parent
+	}
+}
+
+func pathExists(path string, src config.Source) bool {
+	if _, err := os.Stat(path); err == nil {
+		return true
+	}
+	if stat, ok := src.(config.StatSource); ok {
+		if _, err := stat.Stat(path); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func ensureRepoLocalConfig(path string, overwrite bool) (string, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", fmt.Errorf("repo-local config: cannot create directory %s: %w", filepath.Dir(path), err)
+	}
+	const body = "cache_mode: repo-local\n"
+	content, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			return "", fmt.Errorf("repo-local config: cannot write %s: %w", path, err)
+		}
+		return "created", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("repo-local config: cannot read %s: %w", path, err)
+	}
+	if overwrite {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			return "", fmt.Errorf("repo-local config: cannot overwrite %s: %w", path, err)
+		}
+		return "overwritten", nil
+	}
+	text := string(content)
+	if hasRepoLocalCacheMode(text) {
+		return "existing", nil
+	}
+	if hasCacheMode(text) {
+		return "", service.ErrInvalidQuery{Field: "config", Message: "repo-local config already sets cache_mode; rerun with --overwrite or edit .gitcode/gitcode-mcp.yaml"}
+	}
+	next := strings.TrimRight(text, "\n")
+	if next != "" {
+		next += "\n"
+	}
+	next += body
+	if err := os.WriteFile(path, []byte(next), 0o600); err != nil {
+		return "", fmt.Errorf("repo-local config: cannot update %s: %w", path, err)
+	}
+	return "updated", nil
+}
+
+func hasRepoLocalCacheMode(text string) bool {
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "cache_mode:") && strings.Contains(trimmed, "repo-local") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCacheMode(text string) bool {
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "cache_mode:") {
+			return true
+		}
+	}
+	return false
+}
+
+func ensureRepoLocalGitignore(path string) (bool, error) {
+	const rule = ".gitcode/mcp/"
+	content, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.WriteFile(path, []byte(rule+"\n"), 0o644); err != nil {
+			return false, fmt.Errorf("gitignore: cannot write %s: %w", path, err)
+		}
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("gitignore: cannot read %s: %w", path, err)
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.TrimSpace(line) == rule {
+			return false, nil
+		}
+	}
+	next := string(content)
+	if next != "" && !strings.HasSuffix(next, "\n") {
+		next += "\n"
+	}
+	next += rule + "\n"
+	if err := os.WriteFile(path, []byte(next), 0o644); err != nil {
+		return false, fmt.Errorf("gitignore: cannot update %s: %w", path, err)
+	}
+	return true, nil
+}
+
+func defaultAPIBaseURL(src config.Source) string {
+	eff, err := config.LoadEffective(src, config.Overrides{})
+	if err == nil && strings.TrimSpace(eff.Config.GitCodeBaseURL) != "" {
+		return eff.Config.GitCodeBaseURL
+	}
+	cfg, err := config.Load(src, config.Overrides{})
+	if err == nil && strings.TrimSpace(cfg.GitCodeBaseURL) != "" {
+		return cfg.GitCodeBaseURL
+	}
+	return config.Default().GitCodeBaseURL
+}
+
+func addOrReuseRepositoryBinding(ctx context.Context, svc *service.Service, req service.AddRepositoryRequest) (service.RepositoryBinding, string, error) {
+	binding, err := svc.AddRepository(ctx, req)
+	if err == nil {
+		return binding, "created", nil
+	}
+	var conflict service.ErrConflict
+	if !errors.As(err, &conflict) || strings.TrimSpace(req.RepoID) == "" {
+		return service.RepositoryBinding{}, "", err
+	}
+	status, statusErr := svc.RepositoryStatus(ctx, service.RepositoryStatusRequest{RepoID: req.RepoID})
+	if statusErr != nil {
+		return service.RepositoryBinding{}, "", err
+	}
+	if strings.TrimSpace(req.Owner) != "" && status.Owner != strings.TrimSpace(req.Owner) {
+		return service.RepositoryBinding{}, "", err
+	}
+	if strings.TrimSpace(req.Name) != "" && status.Name != strings.TrimSpace(req.Name) {
+		return service.RepositoryBinding{}, "", err
+	}
+	return service.RepositoryBinding{RepoID: status.RepoID, Owner: status.Owner, Name: status.Name, APIBaseURL: status.APIBaseURL, Scopes: status.Scopes, DisplayName: status.DisplayName, Aliases: status.Aliases}, "existing", nil
 }
 
 func executeMigrateCacheCommand(ctx context.Context, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
@@ -2469,6 +2702,7 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "Manage GitCode repository bindings.")
 		fmt.Fprintln(w, "Subcommands:")
 		fmt.Fprintln(w, "  add         bind a GitCode repository to the cache")
+		fmt.Fprintln(w, "  init-local  create repo-local cache config and bind the repository")
 		fmt.Fprintln(w, "  status      show repository binding status")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Run gitcode-mcp repo SUBCOMMAND --help for details.")
@@ -2534,6 +2768,20 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "  --alias ALIAS       repository alias (repeatable)")
 		fmt.Fprintln(w, "  --display-name NAME human-readable display name")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "repo init-local":
+		fmt.Fprintln(w, "Usage: gitcode-mcp repo init-local --repo REPO --owner OWNER --name NAME [--api-base-url URL] [--scopes SCOPES] [--alias ALIAS] [--display-name NAME] [--overwrite]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Create repo-local cache configuration in the current Git worktree and bind the repository without syncing.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --owner OWNER       repository owner (required)")
+		fmt.Fprintln(w, "  --name NAME         repository name (required)")
+		fmt.Fprintln(w, "  --api-base-url URL  authoritative live API base URL (defaults to config)")
+		fmt.Fprintln(w, "  --scopes SCOPES     comma-separated scopes (defaults to issues,wiki,pulls,comments)")
+		fmt.Fprintln(w, "  --alias ALIAS       repository alias (repeatable)")
+		fmt.Fprintln(w, "  --display-name NAME human-readable display name")
+		fmt.Fprintln(w, "  --overwrite         replace existing repo-local config file")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "repo status":
 		fmt.Fprintln(w, "Usage: gitcode-mcp repo status --repo REPO [--format FORMAT]")
