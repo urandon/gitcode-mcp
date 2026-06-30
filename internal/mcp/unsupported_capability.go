@@ -4,15 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"gitcode-mcp/internal/capability"
 )
 
 var unsupportedCapabilityToolNames = map[string]bool{
-	"create_issue": true,
-	"add_comment":  true,
-	"create_page":  true,
-	"update_page":  true,
+	"add_comment": true,
 
-	"create-issue": true,
 	"update-issue": true,
 	"add-label":    true,
 	"create-page":  true,
@@ -20,7 +18,11 @@ var unsupportedCapabilityToolNames = map[string]bool{
 }
 
 func isUnsupportedCapabilityTool(name string) bool {
-	return unsupportedCapabilityToolNames[name]
+	if unsupportedCapabilityToolNames[name] {
+		return true
+	}
+	cap, ok := capability.LookupByMCPName(name)
+	return ok && !cap.MCP.Enabled
 }
 
 func (s *Server) unsupportedCapabilityHandler(_ context.Context, id *json.RawMessage, name string) {

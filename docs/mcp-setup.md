@@ -230,6 +230,7 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 | `diff_snapshot` | Diff two snapshots |
 | `repo_status` | Report configured repository binding and cache readiness state |
 | `sync_live` | Synchronize selected live collection records into the cache |
+| `create_issue` | Create a live issue through the audited write lifecycle |
 | `add_issue_comment` | Add a live issue comment through the audited write lifecycle |
 | `update_issue_comment` | Update a live issue comment through the audited write lifecycle |
 | `update_issue` | Update live issue metadata through the audited write lifecycle |
@@ -238,11 +239,17 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 | `add_pr_comment` | Add a live pull request comment through the audited write lifecycle |
 | `add_pr_review_comment` | Create a live inline pull request review comment through the audited write lifecycle |
 | `link_pr_issue` | Link a pull request to an issue through the GitCode relation API with fallback |
+| `create_page` | Create a live wiki page through the audited write lifecycle |
+| `update_page` | Update a live wiki page through the audited write lifecycle |
+| `delete_page` | Delete a live wiki page through the audited write lifecycle |
+| `add_label` | Add a label to a live issue through the audited write lifecycle |
 | `index_repo` | Build or refresh the local cache index |
 | `auth_status` | Report redacted credential presence and source metadata |
 | `doctor` | Report structured server health diagnostics |
 
-MCP write tools require `write_mode: "live"` and use the same service write path as CLI live writes: idempotency keys, provider confirmation, audit records, cache refresh, typed errors, and public-safe diagnostics. `add_pr_review_comment` requires `number`, `body`, `path`, and either `line` or `position`; optional `start_line` and `end_line` are forwarded when supplied. `link_pr_issue` defaults to `strategy: "auto"`, which first calls the GitCode PR issue relation endpoint. If that endpoint is unsupported, it falls back to a deterministic PR-body marker plus `Fixes #N`. Use `strategy: "description_fallback"` to force the fallback behavior.
+MCP write tools require `write_mode: "live"` and use the same service write path as CLI live writes: idempotency keys, provider confirmation, audit records, cache refresh, typed errors, and public-safe diagnostics. `create_issue` requires `title` and accepts `body`, `labels`, and `idempotency_key`. `add_pr_review_comment` requires `number`, `body`, `path`, and either `line` or `position`; optional `start_line` and `end_line` are forwarded when supplied. `link_pr_issue` defaults to `strategy: "auto"`, which first calls the GitCode PR issue relation endpoint. If that endpoint is unsupported, it falls back to a deterministic PR-body marker plus `Fixes #N`. Use `strategy: "description_fallback"` to force the fallback behavior.
+
+Some CLI operations are intentionally not exposed through normal MCP write access. Credential management, raw escape hatches, destructive local cache maintenance, cache resets, and schema migrations must remain CLI-only unless a future capability registry entry documents a stricter MCP confirmation and safety contract.
 
 ### Correlation IDs
 

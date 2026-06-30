@@ -129,6 +129,7 @@ The MCP server exposes the same audited live-write lifecycle for agent workflows
 
 | MCP tool | Use |
 |---|---|
+| `create_issue` | Create an issue with title, body, labels, and idempotency key |
 | `add_issue_comment` | Add a proposal or status comment to an issue |
 | `update_issue_comment` | Update an existing issue comment body |
 | `update_issue` | Update issue title, body, state, or labels |
@@ -137,6 +138,10 @@ The MCP server exposes the same audited live-write lifecycle for agent workflows
 | `add_pr_comment` | Add a testing/report comment to a pull request |
 | `add_pr_review_comment` | Create an inline pull request review comment on a changed file line or diff position |
 | `link_pr_issue` | Link a pull request to an issue through the GitCode relation API with fallback |
+| `create_page` | Create a live wiki page |
+| `update_page` | Update a live wiki page |
+| `delete_page` | Delete a live wiki page |
+| `add_label` | Add a label to a live issue |
 
 MCP tool access defaults to `read`, so these write lifecycle tools are hidden from `tools/list` unless the server is started with `mcp.tools.access: write` or `GITCODE_MCP_TOOL_ACCESS=write`. A direct call while read-only returns `tool_disabled_by_policy` before validation, credentials, network, or cache mutation. `gitcode-mcp doctor` reports the active `tool_access` mode.
 
