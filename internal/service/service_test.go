@@ -3138,7 +3138,7 @@ func TestPublishReleaseCreatesMissingRelease(t *testing.T) {
 	}
 	defer store.Close()
 	seedStore(t, ctx, store)
-	client := &fakeGitCodeClient{getReleaseErr: gitcode.ErrNotFound{Endpoint: "/api/v2/projects/owner-a%2Frepo-a/releases/v0.1.0"}}
+	client := &fakeGitCodeClient{getReleaseErr: gitcode.ErrNotFound{Endpoint: "/api/v5/repos/owner-a/repo-a/releases/tags/v0.1.0"}}
 	svc := NewWithClient(store, client)
 	t.Setenv("GITCODE_TOKEN", "test-token")
 
@@ -3157,6 +3157,9 @@ func TestPublishReleaseCreatesMissingRelease(t *testing.T) {
 	}
 	if len(client.lastCreateReleaseReq.Links) != 1 || client.lastCreateReleaseReq.Links[0].Name != "checksums.txt" {
 		t.Fatalf("links=%#v", client.lastCreateReleaseReq.Links)
+	}
+	if !strings.Contains(client.lastCreateReleaseReq.Description, "## Assets") || !strings.Contains(client.lastCreateReleaseReq.Description, "https://example.invalid/checksums.txt") {
+		t.Fatalf("description=%q", client.lastCreateReleaseReq.Description)
 	}
 	if client.lastWriteOptions.IdempotencyKey != "release-v0.1.0" {
 		t.Fatalf("idempotency=%#v", client.lastWriteOptions)

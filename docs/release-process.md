@@ -40,7 +40,7 @@ git push origin v0.1.0
 4. GitCode push mirroring propagates the tag to GitHub.
 5. GitHub Actions runs the release workflow from the mirrored tag.
 6. The workflow publishes GitHub Release assets and `checksums.txt`.
-7. If the `GITCODE_TOKEN` GitHub Actions secret is configured, the workflow creates or updates the matching GitCode release and links back to the GitHub-hosted assets.
+7. If the `GITCODE_TOKEN` GitHub Actions secret is configured, the workflow creates or updates the matching GitCode release through the PAT-compatible API and links back to the GitHub-hosted assets in the release notes.
 
 ## Artifacts
 
@@ -98,11 +98,11 @@ gitcode-mcp publish-release \
 
 The command validates with `--dry-run` and otherwise performs an idempotent create-or-update by tag:
 
-1. `GET /api/v2/projects/{owner%2Frepo}/releases/{tag}`
-2. `POST /api/v2/projects/{owner%2Frepo}/releases` when missing
-3. `PUT /api/v2/projects/{owner%2Frepo}/releases/{tag}` when present
+1. `GET /api/v5/repos/{owner}/{repo}/releases/tags/{tag}`
+2. `POST /api/v5/repos/{owner}/{repo}/releases` when missing
+3. `PATCH /api/v5/repos/{owner}/{repo}/releases/{tag}` when present
 
-The first automated flow stores binary artifacts in GitHub Releases and publishes them to GitCode as release links. Direct GitCode binary attachment upload uses a separate pre-signed attachment flow and should be enabled only after a live compatibility probe.
+The first automated flow stores binary artifacts in GitHub Releases and publishes them to GitCode as Markdown links in the release body. The browser-oriented GitCode v2 release API uses a different auth surface and is not suitable for GitHub Actions PAT automation. Direct GitCode binary attachment upload uses a separate pre-signed attachment flow and should be enabled only after a live compatibility probe.
 
 ## GitCode Token
 
