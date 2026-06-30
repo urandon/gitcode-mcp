@@ -71,6 +71,13 @@ func TestBulkSyncIssuesBoundedCancelMidway_CancelAfterPage3Progress(t *testing.T
 	if result == nil {
 		t.Fatal("result is nil")
 	}
+	frontier, ok, err := store.GetSyncFrontier(context.Background(), "bounded-cancel", "issue", syncOrderingUpdatedAtDesc, syncFilterStateAll)
+	if err != nil || !ok {
+		t.Fatalf("GetSyncFrontier ok=%v err=%v", ok, err)
+	}
+	if frontier.Status != "cancelled" || frontier.PagesListed == 0 || frontier.RecordsListed == 0 {
+		t.Fatalf("frontier = %#v, want persisted non-empty cancelled frontier", frontier)
+	}
 }
 
 func TestBulkSyncIssuesBoundedCancelMidway(t *testing.T) {
@@ -263,6 +270,75 @@ func TestBulkSyncIssuesBoundedMaxPages(t *testing.T) {
 	}
 	if result.SuccessCount != 20 {
 		t.Fatalf("success_count = %d, want 20", result.SuccessCount)
+	}
+}
+
+func TestBulkSyncIssuesResumesTailAfterBoundedRun(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 6, 30, 10, 0, 0, 0, time.UTC)
+	page1 := issueSummariesWithUpdatedAt(0, 2, base)
+	page2 := issueSummariesWithUpdatedAt(2, 2, base)
+	page3 := issueSummariesWithUpdatedAt(4, 1, base)
+	client := &fakeGitCodeClient{
+		listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{
+			{Items: page1, Page: 1, PerPage: 2},
+			{Items: page1, Page: 1, PerPage: 2},
+			{Items: page2, Page: 2, PerPage: 2},
+			{Items: page3, Page: 3, PerPage: 2},
+		},
+		issuesByNumber: buildIssueMap(5, base),
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "issues-resume-tail", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+
+	first, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "issues-resume-tail", Page: 1, PerPage: 2, Bounds: &SyncBounds{MaxPages: 1}})
+	if err != nil {
+		t.Fatalf("first BulkSyncIssues returned error: %v", err)
+	}
+	if first.SuccessCount != 2 || first.TraversalStatus != "bounded" || first.StopReason != "max_pages" {
+		t.Fatalf("first result success/traversal/stop = %d/%q/%q", first.SuccessCount, first.TraversalStatus, first.StopReason)
+	}
+	frontier, ok, err := store.GetSyncFrontier(ctx, "issues-resume-tail", "issue", syncOrderingUpdatedAtDesc, syncFilterStateAll)
+	if err != nil || !ok {
+		t.Fatalf("first GetSyncFrontier ok=%v err=%v", ok, err)
+	}
+	if frontier.Status != "bounded" || frontier.StopReason != "max_pages" {
+		t.Fatalf("first frontier = %#v", frontier)
+	}
+
+	second, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "issues-resume-tail", Page: 1, PerPage: 2, Bounds: &SyncBounds{}})
+	if err != nil {
+		t.Fatalf("second BulkSyncIssues returned error: %v", err)
+	}
+	if len(client.listIssueRequests) != 4 {
+		t.Fatalf("ListIssues calls = %d, want 4", len(client.listIssueRequests))
+	}
+	if second.SuccessCount != 5 || second.PagesListed != 3 || second.RecordsListed != 5 {
+		t.Fatalf("second summary success/pages/records = %d/%d/%d", second.SuccessCount, second.PagesListed, second.RecordsListed)
+	}
+	if second.TraversalStatus != "complete" || second.StopReason != "end_of_collection" || second.WatermarkStatus != "disabled" || second.WatermarkReason != "previous_frontier_bounded" {
+		t.Fatalf("second traversal/stop/watermark = %q/%q/%q/%q", second.TraversalStatus, second.StopReason, second.WatermarkStatus, second.WatermarkReason)
+	}
+	records, err := store.ListRecords(ctx, cache.RecordFilter{RepoID: "issues-resume-tail", Type: "issue"})
+	if err != nil {
+		t.Fatalf("ListRecords returned error: %v", err)
+	}
+	if len(records) != 5 {
+		t.Fatalf("cached issue records = %d, want 5", len(records))
+	}
+	frontier, ok, err = store.GetSyncFrontier(ctx, "issues-resume-tail", "issue", syncOrderingUpdatedAtDesc, syncFilterStateAll)
+	if err != nil || !ok {
+		t.Fatalf("second GetSyncFrontier ok=%v err=%v", ok, err)
+	}
+	if frontier.Status != "complete" || frontier.StopReason != "end_of_collection" || frontier.RecordsListed != 5 {
+		t.Fatalf("second frontier = %#v", frontier)
 	}
 }
 
@@ -1162,6 +1238,15 @@ func generateIssueSummaries(offset, count int) []gitcode.IssueSummary {
 	for i := 0; i < count; i++ {
 		num := offset + i + 1
 		out[i] = gitcode.IssueSummary{ID: fmt.Sprintf("%d", num), Number: num, Title: fmt.Sprintf("Issue %d", num), State: "open"}
+	}
+	return out
+}
+
+func issueSummariesWithUpdatedAt(offset, count int, base time.Time) []gitcode.IssueSummary {
+	out := generateIssueSummaries(offset, count)
+	for i := range out {
+		out[i].CreatedAt = base.Add(-time.Duration(out[i].Number) * time.Minute)
+		out[i].UpdatedAt = base.Add(-time.Duration(out[i].Number) * time.Minute)
 	}
 	return out
 }

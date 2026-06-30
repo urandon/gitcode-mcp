@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"gitcode-mcp/internal/auth"
@@ -144,7 +146,8 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 	if opts.mcp {
 		return mcpRoute(context.Background(), stdin, stdout, stderr, deps)
 	}
-	routeCtx := context.Background()
+	routeCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
 	if cfg.DefaultTimeout > 0 {
 		var cancel context.CancelFunc
 		routeCtx, cancel = context.WithTimeout(routeCtx, cfg.DefaultTimeout)
@@ -423,8 +426,7 @@ func runCLICompatibility(ctx context.Context, args []string, stdout io.Writer, s
 	if len(cliArgs) > 0 && deps.GitCode.Offline && !hasCLIFlag(cliArgs[1:], "--offline") && !hasCLIFlag(cliArgs[1:], "--fixture") {
 		cliArgs = append(cliArgs, "--offline")
 	}
-	_ = ctx
-	return cli.ExecuteWithSource(cliArgs, stdout, stderr, deps.Source)
+	return cli.ExecuteWithSourceContext(ctx, cliArgs, stdout, stderr, deps.Source)
 }
 
 func hasCLIFlag(args []string, name string) bool {

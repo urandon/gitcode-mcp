@@ -62,7 +62,7 @@ The sync command supports these live sync selectors:
 - `--id ID` and `--input ALIAS` sync one stable record or remote alias.
 - `--index` builds the local index after sync.
 - `--idempotency-key KEY` supplies a deterministic sync event key.
-- `--max-pages`, `--max-records`, and `--per-page` bound collection sync when the selected surface supports collection bounds.
+- `--max-pages`, `--max-records`, and `--per-page` bound collection sync when the selected surface supports collection bounds. If no max bound is supplied, collection sync traverses until `end_of_collection` or a complete frontier watermark proves the remaining tail is already cache-covered.
 
 Bulk sync treats issues, wiki pages, pull requests, and pull request comments as bounded collections. Issue and pull request sync page through list APIs and commit each returned record independently. Bounded issue and pull request sync request recent-update descending order and record collection frontier metadata in `sync_frontiers`. A bounded, timed-out, or partially failed run only proves that the current invocation traversed a slice; it must not poison later traversal by causing early-stop before older records are backfilled. A later run can use a high-watermark stop condition only when the previous frontier for the same repo, surface, ordering, and filter scope is `complete`. Issue sync uses list-level issue revision metadata before deciding whether issue comments need to be listed again. Wiki sync passes record bounds into the wiki provider traversal before committing individual pages, then uses list-level wiki revision metadata before deciding whether a page body fetch is necessary. Pull request comment sync walks cached pull request records and applies record bounds across the resulting comment records. PR review metadata from the comment payload is stored separately from the searchable comment body so cached reads can group review discussions without live network access. Schema version 13 stores review discussion rows and per-comment diff positions so inline review comments can be matched to changed paths and lines using GitCode position metadata. Schema version 14 stores issue and pull request collection frontier metadata. Issue sync covers issue data and comments as part of the source graph for that issue; wiki sync covers wiki page data. Live adapter route construction stays behind the provider boundary, and operator docs should use sanitized placeholders rather than real repository coordinates.
 
@@ -109,6 +109,14 @@ The compatibility counters keep their older meaning: `fetched` counts one proces
 
 For large repositories, combine revision metadata with server-side ordering. Bounded issue sync uses `state=all&order_by=updated_at&sort=desc`; bounded pull request sync uses `state=all&order_by=updated_at&direction=desc`. Routine refreshes list the newest changed records first. Cached records whose list revision still matches skip the detail phase, such as issue comments. If the prior `sync_frontiers` row is complete, traversal can stop after the listing falls below that complete high-watermark because the remaining tail is already cache-covered. If the prior frontier is bounded, timed out, or partial, traversal keeps listing past cached rows so older missing records can be backfilled. Full refresh and repair workflows should still be available by using explicit bounds or future full-refresh flags when the operator needs to walk the whole collection.
 
+## Cache Repair And Reset
+
+`gitcode-mcp cache reset --live --repo REPO` is the supported current-schema live repair command. It clears only repo-scoped live GitCode cache surfaces: remote/live records, their searchable source projections, review discussion/position metadata, and `sync_frontiers` for the selected repository. It does not delete the SQLite cache file, repository bindings, fixture/local records for other repositories, global cache directories, or repo-local cache directories outside the selected cache path.
+
+Resetting live cache data also clears the collection frontiers used by watermark early-stop. The next issue or pull request sync therefore cannot trust an old complete frontier and must list from the newest page again. Unchanged records can still skip detail work after they are listed and their revision metadata matches; missing older tail records are backfilled by continuing traversal until the new run reaches its bounds or records a fresh complete frontier. If the reset is part of a repair, run sync without `--max-pages`/`--max-records` to walk to the collection tail, or set explicit bounds large enough to cover the suspected gap.
+
+A bounded or cancelled run records a non-complete frontier, so it is not eligible for watermark early-stop. A later unbounded collection sync starts at the newest page, re-lists already cached records cheaply by revision, continues past the previous bounded frontier, and fills the missing tail before recording a new complete frontier.
+
 ## Partial Failure Handling
 
 Bulk sync treats each listed issue or wiki page as an independent resource. A failure for one resource does not roll back resources that already synced successfully and does not prevent later resources from being attempted.
@@ -145,9 +153,9 @@ Compatibility policy:
 | New empty cache | Initialize normally at schema version 14 | None |
 | 13 | Open normally; reads and writes are allowed | None |
 | 2-13 | Open read-compatible but writes are blocked until migration | Run `gitcode-mcp migrate-cache --confirm` |
-| 1 | Block migration as pre-supported/iteration-1-equivalent | Reinitialize with `gitcode-mcp reinit-cache` or delete the cache and re-sync |
-| 0, missing, or empty `schema_version` in a non-empty cache | Block as pre-schema-versioning or unknown | Reinitialize with `gitcode-mcp reinit-cache` or delete the cache and re-sync |
-| Greater than 13 | Block as newer than this binary supports | Upgrade `gitcode-mcp` to a binary that supports the schema |
+| 1 | Block migration as pre-supported/iteration-1-equivalent | Confirm the selected cache path, move aside or delete only that cache file, then re-sync |
+| 0, missing, or empty `schema_version` in a non-empty cache | Block as pre-schema-versioning or unknown | Confirm the selected cache path, move aside or delete only that cache file, then re-sync |
+| Greater than 14 | Block as newer than this binary supports | Upgrade `gitcode-mcp` to a binary that supports the schema |
 
 `gitcode-mcp migrate-cache --confirm` runs supported older-version migrations in place from the detected version to version 14. It creates a backup at `{cache-path}.backup-{timestamp}` before applying changes. Each migration step runs in a transaction and advances both `schema_version` and `PRAGMA user_version` only after that step succeeds.
 

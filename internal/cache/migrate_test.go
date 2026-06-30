@@ -282,8 +282,8 @@ func TestMigrateFromVersion1Blocked(t *testing.T) {
 	if result.BackupPath != "" {
 		t.Fatalf("BackupPath = %q, want empty (no backup for incompatible cache)", result.BackupPath)
 	}
-	if !strings.Contains(result.Compatibility.Remediation, "re-initialize") && !strings.Contains(result.Compatibility.Remediation, "reinit") {
-		t.Fatalf("Remediation = %q, want re-initialization recommendation", result.Compatibility.Remediation)
+	if !strings.Contains(result.Compatibility.Remediation, "selected cache path") || !strings.Contains(result.Compatibility.Remediation, "cache reset --live") {
+		t.Fatalf("Remediation = %q, want safe cache replacement or live reset recommendation", result.Compatibility.Remediation)
 	}
 }
 

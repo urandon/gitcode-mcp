@@ -544,18 +544,21 @@ func (s *SQLiteStore) ResetLive(ctx context.Context, repoID string) (err error) 
 		return err
 	}
 	defer txRollbackOnError(tx, &err)
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM sources WHERE repo_id = ? AND provenance = 'live'`, repoID)
+	if err = requireRepoTx(ctx, tx, repoID); err != nil {
+		return err
+	}
+	ids := map[string]struct{}{}
+	rows, err := tx.QueryContext(ctx, `SELECT record_id FROM records WHERE repo_id = ? AND provenance IN ('remote', 'live')`, repoID)
 	if err != nil {
 		return err
 	}
-	ids := []string{}
 	for rows.Next() {
 		var id string
 		if err = rows.Scan(&id); err != nil {
 			_ = rows.Close()
 			return err
 		}
-		ids = append(ids, id)
+		ids[id] = struct{}{}
 	}
 	if err = rows.Close(); err != nil {
 		return err
@@ -563,11 +566,43 @@ func (s *SQLiteStore) ResetLive(ctx context.Context, repoID string) (err error) 
 	if err = rows.Err(); err != nil {
 		return err
 	}
-	for _, id := range ids {
+	rows, err = tx.QueryContext(ctx, `SELECT id FROM sources WHERE repo_id = ? AND provenance = 'live'`, repoID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		ids[id] = struct{}{}
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	for id := range ids {
+		if s.useFTS {
+			if err = execTx(ctx, tx, `DELETE FROM fts_index WHERE repo_id = ? AND source_id = ?`, repoID, id); err != nil {
+				return err
+			}
+		}
 		if err = execTx(ctx, tx, `DELETE FROM records WHERE repo_id = ? AND record_id = ?`, repoID, id); err != nil {
 			return err
 		}
 		if err = execTx(ctx, tx, `DELETE FROM sources WHERE repo_id = ? AND id = ?`, repoID, id); err != nil {
+			return err
+		}
+	}
+	for _, statement := range []string{
+		`DELETE FROM pr_review_positions WHERE repo_id = ?`,
+		`DELETE FROM pr_review_discussions WHERE repo_id = ?`,
+		`DELETE FROM sync_frontiers WHERE repo_id = ?`,
+	} {
+		if err = execTx(ctx, tx, statement, repoID); err != nil {
 			return err
 		}
 	}

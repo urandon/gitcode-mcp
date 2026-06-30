@@ -1149,7 +1149,7 @@ func (s *Service) bulkSyncIssuesBounded(ctx context.Context, req BulkSyncRequest
 			}
 			result.SuccessCount = len(result.Results)
 			result.FailureCount = len(result.Failures)
-			_ = s.recordSyncFrontier(ctx, req.RepoID, "issue", result, observed)
+			s.recordSyncFrontierBestEffort(ctx, req.RepoID, "issue", result, observed)
 			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diag, TotalRequested: totalRequested}
 		}
 		if bounds.MaxPages > 0 && pageNum >= bounds.MaxPages {
@@ -1170,7 +1170,7 @@ func (s *Service) bulkSyncIssuesBounded(ctx context.Context, req BulkSyncRequest
 			re := newResourceErrorWithMessage("issue:*", "issues", s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "issue:*"}, "issues", "*"), err.Error())
 			result.Failures = append(result.Failures, re)
 			result.FailureCount++
-			_ = s.recordSyncFrontier(ctx, req.RepoID, "issue", result, observed)
+			s.recordSyncFrontierBestEffort(ctx, req.RepoID, "issue", result, observed)
 			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, TotalRequested: totalRequested}
 		}
 		result.PagesListed++
@@ -1211,7 +1211,7 @@ func (s *Service) bulkSyncIssuesBounded(ctx context.Context, req BulkSyncRequest
 	result.FailureCount = len(result.Failures)
 	if result.FailureCount > 0 {
 		result.TraversalStatus = "partial"
-		_ = s.recordSyncFrontier(ctx, req.RepoID, "issue", result, observed)
+		s.recordSyncFrontierBestEffort(ctx, req.RepoID, "issue", result, observed)
 		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
 	}
 	if err := s.recordSyncFrontier(ctx, req.RepoID, "issue", result, observed); err != nil {
@@ -1326,7 +1326,7 @@ func (s *Service) bulkSyncPullRequestsBounded(ctx context.Context, req BulkSyncR
 			}
 			result.SuccessCount = len(result.Results)
 			result.FailureCount = len(result.Failures)
-			_ = s.recordSyncFrontier(ctx, req.RepoID, "pull_request", result, observed)
+			s.recordSyncFrontierBestEffort(ctx, req.RepoID, "pull_request", result, observed)
 			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diag, TotalRequested: totalRequested}
 		}
 		if bounds.MaxPages > 0 && pageNum >= bounds.MaxPages {
@@ -1346,7 +1346,7 @@ func (s *Service) bulkSyncPullRequestsBounded(ctx context.Context, req BulkSyncR
 			result.SuccessCount = len(result.Results)
 			result.FailureCount = len(result.Failures)
 			result.TraversalStatus = "partial"
-			_ = s.recordSyncFrontier(ctx, req.RepoID, "pull_request", result, observed)
+			s.recordSyncFrontierBestEffort(ctx, req.RepoID, "pull_request", result, observed)
 			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, TotalRequested: totalRequested}
 		}
 		result.PagesListed++
@@ -1387,7 +1387,7 @@ func (s *Service) bulkSyncPullRequestsBounded(ctx context.Context, req BulkSyncR
 	result.FailureCount = len(result.Failures)
 	if result.FailureCount > 0 {
 		result.TraversalStatus = "partial"
-		_ = s.recordSyncFrontier(ctx, req.RepoID, "pull_request", result, observed)
+		s.recordSyncFrontierBestEffort(ctx, req.RepoID, "pull_request", result, observed)
 		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
 	}
 	if err := s.recordSyncFrontier(ctx, req.RepoID, "pull_request", result, observed); err != nil {
@@ -1538,6 +1538,13 @@ func (s *Service) recordSyncFrontier(ctx context.Context, repoID, remoteType str
 		RecordsListed: result.RecordsListed,
 		UpdatedAt:     s.now().UTC(),
 	})
+}
+
+func (s *Service) recordSyncFrontierBestEffort(ctx context.Context, repoID, remoteType string, result *SyncResourcesResult, high syncHighWatermark) {
+	if ctx.Err() != nil {
+		ctx = context.WithoutCancel(ctx)
+	}
+	_ = s.recordSyncFrontier(ctx, repoID, remoteType, result, high)
 }
 
 func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {

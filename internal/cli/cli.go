@@ -206,7 +206,11 @@ func Execute(args []string, stdout io.Writer, stderr io.Writer) int {
 }
 
 func ExecuteWithSource(args []string, stdout io.Writer, stderr io.Writer, src config.Source) int {
-	return executeWithFactoryAndDeps(args, stdout, stderr, defaultServiceFactory, localCommandDeps{Source: src})
+	return ExecuteWithSourceContext(context.Background(), args, stdout, stderr, src)
+}
+
+func ExecuteWithSourceContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, src config.Source) int {
+	return executeWithFactoryAndDepsContext(ctx, args, stdout, stderr, defaultServiceFactory, localCommandDeps{Source: src})
 }
 
 func ExecuteWithClient(args []string, stdout io.Writer, stderr io.Writer, client gitcode.Client) int {
@@ -228,6 +232,10 @@ func executeWithFactory(args []string, stdout io.Writer, stderr io.Writer, facto
 }
 
 func executeWithFactoryAndDeps(args []string, stdout io.Writer, stderr io.Writer, factory serviceFactory, deps localCommandDeps) int {
+	return executeWithFactoryAndDepsContext(context.Background(), args, stdout, stderr, factory, deps)
+}
+
+func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, factory serviceFactory, deps localCommandDeps) int {
 	if deps.Source == nil {
 		deps.Source = config.OSSource{}
 	}
@@ -272,7 +280,7 @@ func executeWithFactoryAndDeps(args []string, stdout io.Writer, stderr io.Writer
 	if cleanup != nil {
 		defer cleanup()
 	}
-	return dispatch(context.Background(), svc, command, rest, opts, stdout, stderr, plan)
+	return dispatch(ctx, svc, command, rest, opts, stdout, stderr, plan)
 }
 
 func buildStartupPlan(ctx context.Context, command string, opts options, deps localCommandDeps) (startupPlan, error) {
@@ -1045,11 +1053,7 @@ func bulkSyncRequest(opts options) service.BulkSyncRequest {
 	if perPage <= 0 {
 		perPage = 100
 	}
-	req := service.BulkSyncRequest{RepoID: opts.repo, IdempotencyKey: opts.idempotencyKey, PerPage: perPage}
-	if opts.maxPages > 0 || opts.maxRecords > 0 {
-		req.Bounds = &service.SyncBounds{MaxPages: opts.maxPages, MaxRecords: opts.maxRecords}
-	}
-	return req
+	return service.BulkSyncRequest{RepoID: opts.repo, IdempotencyKey: opts.idempotencyKey, PerPage: perPage, Bounds: &service.SyncBounds{MaxPages: opts.maxPages, MaxRecords: opts.maxRecords}}
 }
 
 func startSyncProgress(w io.Writer, started time.Time) (chan service.ProgressEvent, func()) {
@@ -1698,6 +1702,17 @@ func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {
 			ctx.FailureSource = "partial_response"
 		}
 	}
+	var partialSync *service.PartialSyncError
+	if errors.As(err, &partialSync) {
+		switch partialSync.Diagnostic {
+		case service.SyncDiagnosticTimeout, service.SyncDiagnosticCancelled:
+			ctx.HTTPAttempted = true
+			ctx.TransportFailure = true
+			ctx.FailureSource = string(partialSync.Diagnostic)
+		case service.SyncDiagnosticEmptyWiki:
+			ctx.FailureSource = string(partialSync.Diagnostic)
+		}
+	}
 	var apiValidation gitcode.ErrAPIValidation
 	if errors.As(err, &apiValidation) {
 		ctx.HTTPAttempted = true
@@ -2005,6 +2020,7 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  broken pointer search -> link-check")
 	fmt.Fprintln(w, "  stale derived data search -> stale-index")
 	fmt.Fprintln(w, "  cache health inspection -> cache-status")
+	fmt.Fprintln(w, "  scoped live cache repair -> cache reset --live")
 	fmt.Fprintln(w, "  minimum replacement sequence: sync -> search -> list -> get -> backlinks")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Global query flags:")
@@ -2168,8 +2184,8 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --pulls             sync pull request records")
 		fmt.Fprintln(w, "  --comments          sync pull request comments")
 		fmt.Fprintln(w, "  --index             build index after sync")
-		fmt.Fprintln(w, "  --max-pages N       maximum pages to sync")
-		fmt.Fprintln(w, "  --max-records N     maximum records to sync")
+		fmt.Fprintln(w, "  --max-pages N       maximum pages to sync; omit to traverse until end/frontier")
+		fmt.Fprintln(w, "  --max-records N     maximum records to sync; omit to traverse until end/frontier")
 		fmt.Fprintln(w, "  --per-page N        records per page")
 		fmt.Fprintln(w, "  --id ID             stable record id")
 		fmt.Fprintln(w, "  --input ALIAS       remote alias for single-record sync")
@@ -2188,6 +2204,13 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "cache":
 		fmt.Fprintln(w, "Usage: gitcode-mcp cache reset --live --repo REPO")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Reset repo-scoped live GitCode cache records and sync frontiers without deleting the cache file or unrelated repositories.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --live            required safety acknowledgement")
+		fmt.Fprintln(w, "  --repo REPO       repository id")
+		fmt.Fprintln(w, "  --cache-path PATH cache database path")
+		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
 	case "cache-status":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO\n\n", command)
 		fmt.Fprintln(w, "Report cache storage health and record counts.")

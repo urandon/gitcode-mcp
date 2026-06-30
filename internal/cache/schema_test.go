@@ -96,7 +96,7 @@ func TestCheckVersionCompatibilityPreSchemaVersion(t *testing.T) {
 	if compat.PermitWrites {
 		t.Fatalf("compat.PermitWrites = true, want false: %#v", compat)
 	}
-	if !strings.Contains(compat.Message, "pre-schema-versioning") || !strings.Contains(compat.Remediation, "re-initialize") {
+	if !strings.Contains(compat.Message, "pre-schema-versioning") || !strings.Contains(compat.Remediation, "selected cache path") || !strings.Contains(compat.Remediation, "cache reset --live") {
 		t.Fatalf("pre-version compatibility message/remediation not actionable: %#v", compat)
 	}
 }
