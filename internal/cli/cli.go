@@ -1534,6 +1534,7 @@ func renderRuntimeAuditText(w io.Writer, result runtimeAuditPayload) {
 }
 
 func renderSearchText(w io.Writer, result service.SearchSourcesResult) {
+	fmt.Fprintf(w, "search_mode: %s\n", cliSearchMode(result.SearchMode))
 	for _, item := range result.Results {
 		line := 0
 		if item.LineStart != nil {
@@ -1560,6 +1561,9 @@ func renderBacklinksText(w io.Writer, result service.BacklinksResult) {
 }
 
 func renderChunkQueryText(w io.Writer, result service.ChunkQueryResult) {
+	if result.SearchMode != "" {
+		fmt.Fprintf(w, "search_mode: %s\n", result.SearchMode)
+	}
 	for _, chunk := range result.Chunks {
 		text := chunk.SnippetText
 		if text == "" {
@@ -1570,6 +1574,13 @@ func renderChunkQueryText(w io.Writer, result service.ChunkQueryResult) {
 	for _, warning := range result.Warnings {
 		fmt.Fprintf(w, "warning: %s %s\n", warning.Code, warning.Message)
 	}
+}
+
+func cliSearchMode(mode string) string {
+	if strings.TrimSpace(mode) == "" {
+		return service.SearchModeFullText
+	}
+	return mode
 }
 
 func renderResetLiveCacheText(w io.Writer, result service.ResetLiveCacheResult) {
@@ -2369,7 +2380,8 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
 	case "search", "search_sources":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO QUERY [--kind KIND] [--provenance PROVENANCE] [--limit N] [--offset N]\n\n", command)
-		fmt.Fprintln(w, "Search cached sources with full-text matching.")
+		fmt.Fprintln(w, "Search cached sources with full-text matching. This is exact/token text search, not fuzzy or semantic retrieval.")
+		fmt.Fprintln(w, "If no results are returned, retry with exact terms or keyword variants.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO       repository id")
 		fmt.Fprintln(w, "  --kind KIND       filter by source kind (issue, wiki, doc, task)")

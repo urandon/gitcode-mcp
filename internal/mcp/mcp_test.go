@@ -191,6 +191,12 @@ func TestIntegration(t *testing.T) {
 		if seen[tls.Tools[i].Name] {
 			t.Fatalf("duplicate tool listed: %s", tls.Tools[i].Name)
 		}
+		if want == "search_sources" && (!strings.Contains(tls.Tools[i].Description, "full-text") || !strings.Contains(tls.Tools[i].Description, "not fuzzy")) {
+			t.Fatalf("search_sources description should state full-text/not fuzzy contract: %q", tls.Tools[i].Description)
+		}
+		if want == "search_chunks" && (!strings.Contains(tls.Tools[i].Description, "full-text") || !strings.Contains(tls.Tools[i].Description, "not fuzzy")) {
+			t.Fatalf("search_chunks description should state full-text/not fuzzy contract: %q", tls.Tools[i].Description)
+		}
 		seen[tls.Tools[i].Name] = true
 		if _, ok := registry[tls.Tools[i].Name]; !ok {
 			t.Fatalf("listed tool %q is not callable", tls.Tools[i].Name)
@@ -524,6 +530,9 @@ func TestSchemasAndResults(t *testing.T) {
 		}
 		if sres.Offset != 0 {
 			t.Fatalf("offset = %d, want 0", sres.Offset)
+		}
+		if sres.SearchMode != service.SearchModeFullText {
+			t.Fatalf("search_mode = %q, want %q", sres.SearchMode, service.SearchModeFullText)
 		}
 		if len(sres.Results) == 0 || sres.Results[0].ID == "" || sres.Results[0].Path == "" {
 			t.Fatalf("search results missing fields: %+v", sres)
@@ -1837,13 +1846,13 @@ func assertReadToolParity(t *testing.T, call func(string, map[string]any) toolCa
 	searchedChunks := call("search_chunks", map[string]any{"repo_id": "fixture-a", "query": "parity"})
 	var chunkSearch service.ChunkQueryResult
 	decodeStructured(t, searchedChunks, &chunkSearch)
-	if len(chunkSearch.Chunks) == 0 {
+	if chunkSearch.SearchMode != service.SearchModeFullText || len(chunkSearch.Chunks) == 0 {
 		t.Fatalf("search_chunks parity mismatch: %+v", chunkSearch)
 	}
 	searchedSources := call("search_sources", map[string]any{"repo_id": "fixture-a", "query": "parity", "kind": "wiki"})
 	var sourceSearch service.SearchSourcesResult
 	decodeStructured(t, searchedSources, &sourceSearch)
-	if len(sourceSearch.Results) == 0 || sourceSearch.Results[0].Kind != "wiki" {
+	if sourceSearch.SearchMode != service.SearchModeFullText || len(sourceSearch.Results) == 0 || sourceSearch.Results[0].Kind != "wiki" {
 		t.Fatalf("search_sources parity mismatch: %+v", sourceSearch)
 	}
 }

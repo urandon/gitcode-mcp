@@ -295,7 +295,7 @@ func chunkSchemaProps(includeQuery bool) map[string]schemaProp {
 		"offset":      {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
 	}
 	if includeQuery {
-		props["query"] = schemaProp{Type: "string", Description: "Normalized chunk query text.", MinLength: 1}
+		props["query"] = schemaProp{Type: "string", Description: "Full-text chunk query text; not fuzzy or semantic.", MinLength: 1}
 		props["kind"] = schemaProp{Type: "string", Description: "Source kind filter.", Enum: sourceKindEnums}
 	}
 	return props
@@ -313,12 +313,12 @@ type toolRegistry map[string]registeredTool
 var toolDefs = []toolDefinition{
 	{
 		Name:        "search_sources",
-		Description: "Search cached sources by full-text query.",
+		Description: "Search cached sources by full-text/token query. This is not fuzzy or semantic retrieval; retry with exact terms or keyword variants when results are empty.",
 		InputSchema: inputSchema{
 			Type: "object",
 			Properties: map[string]schemaProp{
 				"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1},
-				"query":   {Type: "string", Description: "Search query text.", MinLength: 1},
+				"query":   {Type: "string", Description: "Full-text query text; not fuzzy or semantic.", MinLength: 1},
 				"kind":    {Type: "string", Description: "Source kind filter.", Enum: sourceKindEnums},
 				"limit":   {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 20.0},
 				"offset":  {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
@@ -360,7 +360,7 @@ var toolDefs = []toolDefinition{
 	},
 	{
 		Name:        "search_chunks",
-		Description: "Search cached index chunks through the shared chunk query result model.",
+		Description: "Search cached index chunks by full-text/token query. This is not fuzzy or semantic retrieval.",
 		InputSchema: inputSchema{Type: "object", Properties: chunkSchemaProps(true), Required: []string{"repo_id", "query"}},
 	},
 	{
@@ -818,7 +818,7 @@ func (s *Server) callSearchSources(ctx context.Context, id *json.RawMessage, arg
 		return
 	}
 
-	var text string
+	text := fmt.Sprintf("search_mode: %s\n", mcpSearchMode(results.SearchMode))
 	for _, r := range results.Results {
 		text += fmt.Sprintf("%s:%s\n", r.Path, r.Snippet)
 	}
@@ -1030,6 +1030,9 @@ func (s *Server) parseChunkArgs(id *json.RawMessage, args json.RawMessage, requi
 
 func (s *Server) writeChunkToolResult(id *json.RawMessage, result service.ChunkQueryResult) {
 	text := ""
+	if result.SearchMode != "" {
+		text += fmt.Sprintf("search_mode: %s\n", result.SearchMode)
+	}
 	for _, chunk := range result.Chunks {
 		body := chunk.SnippetText
 		if body == "" {
@@ -1038,6 +1041,13 @@ func (s *Server) writeChunkToolResult(id *json.RawMessage, result service.ChunkQ
 		text += fmt.Sprintf("%s %s %s %s %d-%d %s\n", chunk.RepoID, chunk.SourceID, chunk.ID, chunk.Policy, chunk.ByteStart, chunk.ByteEnd, body)
 	}
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func mcpSearchMode(mode string) string {
+	if strings.TrimSpace(mode) == "" {
+		return service.SearchModeFullText
+	}
+	return mode
 }
 
 func servicePolicy(policy string) service.ChunkPolicy {

@@ -22,6 +22,8 @@ import (
 	"gitcode-mcp/internal/index"
 )
 
+const SearchModeFullText = index.SearchModeFullText
+
 type Service struct {
 	store                  cache.Store
 	client                 gitcode.Client
@@ -443,7 +445,7 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 		}
 		return out[i].Path < out[j].Path
 	})
-	return SearchSourcesResult{RepoID: repoID, Query: req.Query, Results: out, Limit: req.Limit, Offset: req.Offset}, nil
+	return SearchSourcesResult{RepoID: repoID, Query: req.Query, SearchMode: SearchModeFullText, Results: out, Limit: req.Limit, Offset: req.Offset}, nil
 }
 
 func (s *Service) GetSource(ctx context.Context, req GetSourceRequest) (SourceRecord, error) {

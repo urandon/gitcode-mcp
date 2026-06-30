@@ -370,6 +370,8 @@ type ChunkSearchQuery struct {
 	Query string
 }
 
+const SearchModeFullText = "full_text"
+
 type SnippetQuery struct {
 	RepoID     string
 	SourceID   string
@@ -417,11 +419,12 @@ type ChunkResult struct {
 }
 
 type ChunkQueryResult struct {
-	Chunks   []ChunkResult  `json:"chunks"`
-	Limit    int            `json:"limit"`
-	Offset   int            `json:"offset"`
-	Total    int            `json:"total"`
-	Warnings []IndexWarning `json:"warnings"`
+	Chunks     []ChunkResult  `json:"chunks"`
+	SearchMode string         `json:"search_mode,omitempty"`
+	Limit      int            `json:"limit"`
+	Offset     int            `json:"offset"`
+	Total      int            `json:"total"`
+	Warnings   []IndexWarning `json:"warnings"`
 }
 
 type ChunkIndexReader interface {

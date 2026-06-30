@@ -135,11 +135,12 @@ type SearchSourcesRequest struct {
 }
 
 type SearchSourcesResult struct {
-	RepoID  string               `json:"repo_id"`
-	Query   string               `json:"query"`
-	Results []SearchSourceResult `json:"results"`
-	Limit   int                  `json:"limit"`
-	Offset  int                  `json:"offset"`
+	RepoID     string               `json:"repo_id"`
+	Query      string               `json:"query"`
+	SearchMode string               `json:"search_mode"`
+	Results    []SearchSourceResult `json:"results"`
+	Limit      int                  `json:"limit"`
+	Offset     int                  `json:"offset"`
 }
 
 type SearchSourceResult struct {

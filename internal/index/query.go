@@ -38,7 +38,9 @@ func (idx MemoryChunkIndex) SearchChunksWithWarnings(ctx context.Context, query 
 	}
 	needle := normalizeChunkText(query.Query)
 	matches := idx.filter(query.ChunkQuery, needle)
-	return chunkQueryResult(matches, query.Limit, query.Offset, filterWarnings(warnings, query.ChunkQuery)), nil
+	result := chunkQueryResult(matches, query.Limit, query.Offset, filterWarnings(warnings, query.ChunkQuery))
+	result.SearchMode = SearchModeFullText
+	return result, nil
 }
 
 func (idx MemoryChunkIndex) GetSnippet(ctx context.Context, query SnippetQuery) (ChunkQueryResult, error) {

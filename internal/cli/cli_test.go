@@ -241,8 +241,20 @@ func TestSearchJSON(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &results); err != nil {
 		t.Fatalf("invalid json: %v: %q", err, stdout.String())
 	}
-	if results.RepoID != "fixture-a" || results.Query != "backlog" || len(results.Results) == 0 || results.Results[0].ID == "" || results.Results[0].Path == "" || results.Results[0].Title == "" || results.Results[0].Snippet == "" {
+	if results.RepoID != "fixture-a" || results.Query != "backlog" || results.SearchMode != service.SearchModeFullText || len(results.Results) == 0 || results.Results[0].ID == "" || results.Results[0].Path == "" || results.Results[0].Title == "" || results.Results[0].Snippet == "" {
 		t.Fatalf("missing fields: %#v", results)
+	}
+}
+
+func TestSearchTextShowsMode(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := executeWithFactory([]string{"search", "--repo", "fixture-a", "backlog"}, &stdout, &stderr, cacheBackedFactory(t))
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "search_mode: full_text") {
+		t.Fatalf("text search output missing mode: %q", stdout.String())
 	}
 }
 
@@ -257,7 +269,7 @@ func TestSearchSourcesCommandJSON(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &results); err != nil {
 		t.Fatalf("invalid json: %v: %q", err, stdout.String())
 	}
-	if results.RepoID != "fixture-a" || results.Query != "backlog" || len(results.Results) == 0 {
+	if results.RepoID != "fixture-a" || results.Query != "backlog" || results.SearchMode != service.SearchModeFullText || len(results.Results) == 0 {
 		t.Fatalf("missing search_sources results: %#v", results)
 	}
 }
@@ -276,8 +288,27 @@ func TestSearchSourcesCommandEmptyJSON(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &results); err != nil {
 		t.Fatalf("invalid json: %v: %q", err, stdout.String())
 	}
-	if results.RepoID != "fixture-a" || results.Query != "NONEXISTENT" || len(results.Results) != 0 {
+	if results.RepoID != "fixture-a" || results.Query != "NONEXISTENT" || results.SearchMode != service.SearchModeFullText || len(results.Results) != 0 {
 		t.Fatalf("unexpected empty search_sources results: %#v", results)
+	}
+}
+
+func TestSearchHelpStatesFullTextNotFuzzy(t *testing.T) {
+	for _, command := range []string{"search", "search_sources"} {
+		t.Run(command, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := Execute([]string{command, "--help"}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			out := stdout.String()
+			for _, want := range []string{"full-text", "not fuzzy", "not fuzzy or semantic"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("%s help missing %q in %q", command, want, out)
+				}
+			}
+		})
 	}
 }
 

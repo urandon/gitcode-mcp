@@ -10,7 +10,7 @@ The project is self-contained and public-safe. Source repositories, trackers, an
 
 - Binds GitCode repositories to local cache identities and aliases.
 - Syncs issues, pull requests, comments, wiki pages, labels, and milestones into SQLite.
-- Searches and reads cached records without requiring live network access.
+- Searches cached records with full-text/token matching and reads cached records without requiring live network access.
 - Resolves stable local ids and remote aliases for links, snippets, backlinks, and exports.
 - Runs an MCP server over cached data for agent workflows.
 - Performs live writes only through explicit commands with idempotency keys and audit evidence.
@@ -25,6 +25,8 @@ go run ./cmd/gitcode-mcp repo add --repo YOUR_OWNER/YOUR_REPO --owner YOUR_OWNER
 go run ./cmd/gitcode-mcp sync --repo YOUR_OWNER/YOUR_REPO --issues --wiki --pulls --comments
 go run ./cmd/gitcode-mcp search --repo YOUR_OWNER/YOUR_REPO "cache-first"
 ```
+
+`search` is cache full-text search, not fuzzy or semantic retrieval. Empty results mean the exact query terms did not match cached text; retry with exact terms, ids, or keyword variants when wording may differ.
 
 For MCP usage, start with [MCP Setup](docs/mcp-setup.md). For live credentials, start with [Secrets](docs/secrets.md) and [Config Reference](docs/config-reference.md).
 
