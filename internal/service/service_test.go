@@ -2961,6 +2961,10 @@ func (f *brokenStore) GetSyncEventByKey(ctx context.Context, key string) (*cache
 func (f *brokenStore) ListCompletedSyncEventsScoped(context.Context, string) ([]cache.SyncEvent, error) {
 	return nil, nil
 }
+func (f *brokenStore) UpsertSyncFrontier(context.Context, cache.SyncFrontier) error { return nil }
+func (f *brokenStore) GetSyncFrontier(context.Context, string, string, string, string) (cache.SyncFrontier, bool, error) {
+	return cache.SyncFrontier{}, false, nil
+}
 func (f *brokenStore) RecordAuditEvent(context.Context, cache.AuditTrailEntry) error { return nil }
 func (f *brokenStore) GetAuditEventByKey(context.Context, string, string) (*cache.AuditTrailEntry, error) {
 	return nil, nil

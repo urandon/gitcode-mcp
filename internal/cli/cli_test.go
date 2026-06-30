@@ -480,8 +480,8 @@ func TestRenderSyncResourcesPartialSummaryGroupsFailures(t *testing.T) {
 		SuccessCount: 1,
 		FailureCount: 2,
 		Failures: []service.ResourceError{
-			{SourceID: "ISSUE-1", RemoteType: "issue", Message: "one"},
-			{SourceID: "ISSUE-2", RemoteType: "issue", Message: "two"},
+			{SourceID: "PR-1", RemoteType: "pr_comment", FailureClass: "api_validation", Endpoint: "/api/v5/repos/example/repo/pulls/1/comments", StatusCode: 400, Message: "one"},
+			{SourceID: "PR-2", RemoteType: "pr_comment", FailureClass: "api_validation", Endpoint: "/api/v5/repos/example/repo/pulls/1/comments", StatusCode: 400, Message: "two"},
 		},
 	}
 	partial := &service.PartialSyncError{Errors: result.Failures, SuccessCount: 1, FailureCount: 2, Diagnostic: service.SyncDiagnosticTimeout, TotalRequested: 3}
@@ -506,7 +506,7 @@ func TestRenderSyncResourcesPartialSummaryGroupsFailures(t *testing.T) {
 		t.Fatalf("failure groups=%#v", summary["failure_groups"])
 	}
 	group := groups[0].(map[string]any)
-	if group["remote_type"] != "issue" || group["count"].(float64) != 2 {
+	if group["remote_type"] != "pr_comment" || group["failure_class"] != "api_validation" || group["endpoint"] != "/api/v5/repos/example/repo/pulls/1/comments" || group["status_code"].(float64) != 400 || group["count"].(float64) != 2 {
 		t.Fatalf("failure group=%#v", group)
 	}
 }

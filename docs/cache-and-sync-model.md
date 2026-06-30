@@ -64,7 +64,7 @@ The sync command supports these live sync selectors:
 - `--idempotency-key KEY` supplies a deterministic sync event key.
 - `--max-pages`, `--max-records`, and `--per-page` bound collection sync when the selected surface supports collection bounds.
 
-Bulk sync treats issues, wiki pages, pull requests, and pull request comments as bounded collections. Issue and pull request sync page through list APIs and commit each returned record independently. Bounded issue and pull request sync request recent-update descending order and derive a collection watermark from cached `records.updated_at` plus the numeric remote id, regardless of whether the cached record came from fixture, remote, or live provenance. Records older than the previous watermark are skipped and stop traversal early; records with the same timestamp remain in the safety overlap and still pass through revision checks. Issue sync uses list-level issue revision metadata before deciding whether issue comments need to be listed again. Wiki sync passes record bounds into the wiki provider traversal before committing individual pages, then uses list-level wiki revision metadata before deciding whether a page body fetch is necessary. Pull request comment sync walks cached pull request records and applies record bounds across the resulting comment records. PR review metadata from the comment payload is stored separately from the searchable comment body so cached reads can group review discussions without live network access. Schema version 13 also stores review discussion rows and per-comment diff positions so inline review comments can be matched to changed paths and lines using GitCode position metadata. Issue sync covers issue data and comments as part of the source graph for that issue; wiki sync covers wiki page data. Live adapter route construction stays behind the provider boundary, and operator docs should use sanitized placeholders rather than real repository coordinates.
+Bulk sync treats issues, wiki pages, pull requests, and pull request comments as bounded collections. Issue and pull request sync page through list APIs and commit each returned record independently. Bounded issue and pull request sync request recent-update descending order and record collection frontier metadata in `sync_frontiers`. A bounded, timed-out, or partially failed run only proves that the current invocation traversed a slice; it must not poison later traversal by causing early-stop before older records are backfilled. A later run can use a high-watermark stop condition only when the previous frontier for the same repo, surface, ordering, and filter scope is `complete`. Issue sync uses list-level issue revision metadata before deciding whether issue comments need to be listed again. Wiki sync passes record bounds into the wiki provider traversal before committing individual pages, then uses list-level wiki revision metadata before deciding whether a page body fetch is necessary. Pull request comment sync walks cached pull request records and applies record bounds across the resulting comment records. PR review metadata from the comment payload is stored separately from the searchable comment body so cached reads can group review discussions without live network access. Schema version 13 stores review discussion rows and per-comment diff positions so inline review comments can be matched to changed paths and lines using GitCode position metadata. Schema version 14 stores issue and pull request collection frontier metadata. Issue sync covers issue data and comments as part of the source graph for that issue; wiki sync covers wiki page data. Live adapter route construction stays behind the provider boundary, and operator docs should use sanitized placeholders rather than real repository coordinates.
 
 The command context carries the configured `default_timeout`, including the `--timeout` override, so large collection syncs have a whole-operation deadline in addition to provider-level request timeouts. When the deadline or caller cancellation fires, completed resource commits remain visible in cache and the sync response reports partial counts plus a typed diagnostic such as `sync_timeout` or `sync_cancelled`.
 
@@ -73,9 +73,11 @@ Labels and milestones are not yet exposed as bulk sync service surfaces. When th
 Bulk collection responses also expose traversal metadata when available:
 
 - `pages_listed` and `records_listed` count list-page work done before staging/filtering;
-- `skipped_by_watermark` counts records dropped because they are older than the cached collection watermark;
+- `skipped_by_watermark` counts list records skipped because a previous `complete` frontier proves that the remaining tail is already cache-covered;
 - `ordering` reports the server-side ordering contract, currently `updated_at_desc` for bounded issues and pull requests;
-- `stop_reason` reports why traversal stopped, such as `watermark`, `end_of_collection`, `max_pages`, or `max_records`.
+- `stop_reason` reports why traversal stopped, such as `watermark`, `end_of_collection`, `max_pages`, or `max_records`;
+- `traversal_status` classifies the run as `complete`, `bounded`, `timeout`, `cancelled`, or `partial`;
+- `watermark_status` and `watermark_reason` explain whether early-stop was disabled, eligible, or used. Bounded or partial previous frontiers disable early-stop; complete frontiers make it eligible.
 
 Each successful resource sync records a `SyncEvent` with:
 
@@ -105,7 +107,7 @@ Current collection behavior:
 
 The compatibility counters keep their older meaning: `fetched` counts one processed remote candidate and `skipped` counts unchanged work. Metadata-first sync adds `listed`, `fetched_detail`, and `skipped_by_revision` so callers can distinguish "listed and skipped without body fetch" from "fetched detail and found no content delta."
 
-For large repositories, combine revision metadata with server-side ordering. Bounded issue sync uses `state=all&order_by=updated_at&sort=desc`; bounded pull request sync uses `state=all&order_by=updated_at&direction=desc`. This lets routine refreshes list the newest changed records first and stop once the cached watermark proves that remaining pages are older than the last known cache frontier. Full refresh and repair workflows should still be available by using explicit bounds or future full-refresh flags when the operator needs to walk the whole collection.
+For large repositories, combine revision metadata with server-side ordering. Bounded issue sync uses `state=all&order_by=updated_at&sort=desc`; bounded pull request sync uses `state=all&order_by=updated_at&direction=desc`. Routine refreshes list the newest changed records first. Cached records whose list revision still matches skip the detail phase, such as issue comments. If the prior `sync_frontiers` row is complete, traversal can stop after the listing falls below that complete high-watermark because the remaining tail is already cache-covered. If the prior frontier is bounded, timed out, or partial, traversal keeps listing past cached rows so older missing records can be backfilled. Full refresh and repair workflows should still be available by using explicit bounds or future full-refresh flags when the operator needs to walk the whole collection.
 
 ## Partial Failure Handling
 
@@ -115,9 +117,9 @@ When any resource fails, the service returns `PartialSyncError` with:
 
 - `success_count` for resources committed successfully;
 - `failure_count` for resources that failed;
-- per-resource details including source id or remote alias, remote type, and diagnostic message.
+- per-resource details including source id or remote alias, remote type, diagnostic message, `failure_class`, endpoint, HTTP status when known, and remediation hint when available.
 
-Successful resources remain committed to the cache. Failed resources are reported to the caller and can be retried with the same repository, selector, and idempotency key strategy.
+Successful parent resources remain committed to the cache. Child-resource failures are grouped by remote type, diagnostic class, endpoint pattern, and status code in compact summaries so an operator can distinguish repeated route compatibility failures from isolated record failures. Failed resources are reported to the caller and can be retried with the same repository, selector, and idempotency key strategy.
 
 Actionable failure classes include:
 
@@ -132,7 +134,7 @@ The CLI renders the aggregate success and failure counts and resource details. D
 
 ## Cache Migration
 
-The implemented cache schema version is `13`, matching `currentSchemaVersion` in `internal/cache/schema.go`.
+The implemented cache schema version is `14`, matching `currentSchemaVersion` in `internal/cache/schema.go`.
 
 The primary version source is the SQLite `schema_version` table. Migrations also update `PRAGMA user_version` as an additive SQLite diagnostic bridge, but cache compatibility decisions use `schema_version`.
 
@@ -140,15 +142,17 @@ Compatibility policy:
 
 | Detected version | Behavior | Operator action |
 | --- | --- | --- |
-| New empty cache | Initialize normally at schema version 13 | None |
+| New empty cache | Initialize normally at schema version 14 | None |
 | 13 | Open normally; reads and writes are allowed | None |
-| 2-12 | Open read-compatible but writes are blocked until migration | Run `gitcode-mcp migrate-cache --confirm` |
+| 2-13 | Open read-compatible but writes are blocked until migration | Run `gitcode-mcp migrate-cache --confirm` |
 | 1 | Block migration as pre-supported/iteration-1-equivalent | Reinitialize with `gitcode-mcp reinit-cache` or delete the cache and re-sync |
 | 0, missing, or empty `schema_version` in a non-empty cache | Block as pre-schema-versioning or unknown | Reinitialize with `gitcode-mcp reinit-cache` or delete the cache and re-sync |
 | Greater than 13 | Block as newer than this binary supports | Upgrade `gitcode-mcp` to a binary that supports the schema |
 
-`gitcode-mcp migrate-cache --confirm` runs supported older-version migrations in place from the detected version to version 13. It creates a backup at `{cache-path}.backup-{timestamp}` before applying changes. Each migration step runs in a transaction and advances both `schema_version` and `PRAGMA user_version` only after that step succeeds.
+`gitcode-mcp migrate-cache --confirm` runs supported older-version migrations in place from the detected version to version 14. It creates a backup at `{cache-path}.backup-{timestamp}` before applying changes. Each migration step runs in a transaction and advances both `schema_version` and `PRAGMA user_version` only after that step succeeds.
 
 Schema version 13 adds `pr_review_discussions` and `pr_review_positions`. The migration creates empty tables and does not invent position metadata for comments already cached under older schemas. A later pull request comment sync or `add-pr-review-comment` write refreshes the affected comment rows and populates the new position tables. PR comment `content_hash` includes position metadata, so a resync can update stale rows when the live adapter now returns richer v4 discussion data.
+
+Schema version 14 adds `sync_frontiers` for issue and pull request collection traversal metadata. Existing caches start with no complete frontier rows after migration, so the first post-migration bounded sync will not early-stop from legacy record timestamps. A run that reaches `end_of_collection` or safely stops via a previous complete frontier records `status=complete`; bounded, timed-out, cancelled, and partial runs record non-complete statuses that are not eligible for early-stop.
 
 Opening an older compatible cache without migration is read-compatible but write-blocked so operators can inspect the cache and run diagnostics before applying the migration. New caches are initialized directly at the current schema version.

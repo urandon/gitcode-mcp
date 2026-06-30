@@ -1036,12 +1036,7 @@ func (s *Service) SyncResources(ctx context.Context, reqs []SyncRequest) (*SyncR
 	var partial *PartialSyncError
 	for i, req := range reqs {
 		if err := ctx.Err(); err != nil {
-			re := ResourceError{
-				SourceID:   req.StableID,
-				RemoteType: "",
-				Err:        err,
-				Message:    fmt.Sprintf("sync resources: context cancelled at request %d", i),
-			}
+			re := newResourceErrorWithMessage(req.StableID, "", err, fmt.Sprintf("sync resources: context cancelled at request %d", i))
 			result.Failures = append(result.Failures, re)
 			continue
 		}
@@ -1055,12 +1050,7 @@ func (s *Service) SyncResources(ctx context.Context, reqs []SyncRequest) (*SyncR
 			if sourceID == "" {
 				sourceID = req.RemoteAlias
 			}
-			re := ResourceError{
-				SourceID:   sourceID,
-				RemoteType: remoteType,
-				Err:        err,
-				Message:    err.Error(),
-			}
+			re := newResourceError(sourceID, remoteType, err)
 			result.Failures = append(result.Failures, re)
 			continue
 		}
@@ -1128,11 +1118,13 @@ func (s *Service) BulkSyncIssues(ctx context.Context, req BulkSyncRequest) (*Syn
 
 func (s *Service) bulkSyncIssuesBounded(ctx context.Context, req BulkSyncRequest, route RepositoryRoute) (*SyncResourcesResult, error) {
 	bounds := req.Bounds
-	result := &SyncResourcesResult{Results: make([]SyncResult, 0), Failures: make([]ResourceError, 0), Ordering: "updated_at_desc"}
-	watermark, hasWatermark, err := s.collectionWatermark(ctx, req.RepoID, "issue")
+	result := &SyncResourcesResult{Results: make([]SyncResult, 0), Failures: make([]ResourceError, 0), Ordering: syncOrderingUpdatedAtDesc}
+	watermark, watermarkOK, err := s.completeSyncWatermark(ctx, req.RepoID, "issue")
 	if err != nil {
 		return bulkSyncFailureResult(err, "issue:*", "issues")
 	}
+	setWatermarkSummary(result, watermark, watermarkOK)
+	var observed syncHighWatermark
 	currentPage := req.Page
 	if currentPage < 1 {
 		currentPage = 1
@@ -1151,36 +1143,46 @@ func (s *Service) bulkSyncIssuesBounded(ctx context.Context, req BulkSyncRequest
 			diag := SyncDiagnosticCancelled
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				diag = SyncDiagnosticTimeout
+				result.TraversalStatus = "timeout"
+			} else {
+				result.TraversalStatus = "cancelled"
 			}
 			result.SuccessCount = len(result.Results)
 			result.FailureCount = len(result.Failures)
+			_ = s.recordSyncFrontier(ctx, req.RepoID, "issue", result, observed)
 			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diag, TotalRequested: totalRequested}
 		}
 		if bounds.MaxPages > 0 && pageNum >= bounds.MaxPages {
 			result.StopReason = "max_pages"
+			result.TraversalStatus = "bounded"
 			break
 		}
 		if bounds.MaxRecords > 0 && len(result.Results) >= bounds.MaxRecords {
 			result.StopReason = "max_records"
+			result.TraversalStatus = "bounded"
 			break
 		}
 		page, err := s.client.ListIssues(ctx, gitcode.IssueListRequest{Owner: route.Owner, Repo: route.Name, State: "all", OrderBy: "updated_at", Direction: "desc", Page: currentPage, PerPage: perPage})
 		if err != nil {
 			result.SuccessCount = len(result.Results)
 			result.FailureCount = len(result.Failures)
-			re := ResourceError{SourceID: "issue:*", RemoteType: "issues", Err: s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "issue:*"}, "issues", "*"), Message: err.Error()}
+			result.TraversalStatus = "partial"
+			re := newResourceErrorWithMessage("issue:*", "issues", s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "issue:*"}, "issues", "*"), err.Error())
 			result.Failures = append(result.Failures, re)
 			result.FailureCount++
+			_ = s.recordSyncFrontier(ctx, req.RepoID, "issue", result, observed)
 			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, TotalRequested: totalRequested}
 		}
 		result.PagesListed++
 		result.RecordsListed += len(page.Items)
-		items, stopByWatermark, skippedByWatermark := filterIssueSummariesByWatermark(page.Items, watermark, hasWatermark)
+		observeIssueHighWatermark(&observed, page.Items)
+		items, stopByWatermark, skippedByWatermark := filterIssueSummariesByCompleteWatermark(page.Items, watermark, watermarkOK)
 		result.SkippedByWatermark += skippedByWatermark
 		if bounds.MaxRecords > 0 {
 			remaining := bounds.MaxRecords - len(result.Results)
 			if remaining <= 0 {
 				result.StopReason = "max_records"
+				result.TraversalStatus = "bounded"
 				break
 			}
 			if len(items) > remaining {
@@ -1193,10 +1195,14 @@ func (s *Service) bulkSyncIssuesBounded(ctx context.Context, req BulkSyncRequest
 		emitProgress(bounds.ProgressChan, ProgressEvent{Collection: "issues", Page: currentPage, RecordsFetched: recordsFetched})
 		if stopByWatermark {
 			result.StopReason = "watermark"
+			result.TraversalStatus = "complete"
+			result.WatermarkStatus = "used"
+			result.WatermarkReason = "previous_complete_frontier"
 			break
 		}
 		if len(page.Items) < perPage {
 			result.StopReason = "end_of_collection"
+			result.TraversalStatus = "complete"
 			break
 		}
 		currentPage++
@@ -1204,7 +1210,12 @@ func (s *Service) bulkSyncIssuesBounded(ctx context.Context, req BulkSyncRequest
 	result.SuccessCount = len(result.Results)
 	result.FailureCount = len(result.Failures)
 	if result.FailureCount > 0 {
+		result.TraversalStatus = "partial"
+		_ = s.recordSyncFrontier(ctx, req.RepoID, "issue", result, observed)
 		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
+	}
+	if err := s.recordSyncFrontier(ctx, req.RepoID, "issue", result, observed); err != nil {
+		return bulkSyncFailureResult(err, "issue:*", "issues")
 	}
 	return result, nil
 }
@@ -1216,7 +1227,7 @@ func (s *Service) stageIssuePage(ctx context.Context, req BulkSyncRequest, items
 		syncReq := SyncRequest{RepoID: req.RepoID, AliasType: "issue", AliasID: remoteID, IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "issue", remoteID), MaxAttempts: req.MaxAttempts, MaxSize: req.MaxSize}
 		graph, counts, err := s.stageIssue(ctx, syncReq, "issue", remoteID, issue)
 		if err != nil {
-			result.Failures = append(result.Failures, ResourceError{SourceID: remoteID, RemoteType: "issue", Err: err, Message: err.Error()})
+			result.Failures = append(result.Failures, newResourceError(remoteID, "issue", err))
 			continue
 		}
 		counts.Listed = 1
@@ -1225,12 +1236,12 @@ func (s *Service) stageIssuePage(ctx context.Context, req BulkSyncRequest, items
 		zeroDelta := counts.Fetched > 0 && counts.Skipped == counts.Fetched && counts.Updated == 0 && counts.Inserted == 0 && counts.Conflicts == 0
 		graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: "issue", RemoteID: remoteID, RemoteRevision: graph.SyncStatus.RemoteRevision, Status: "succeeded", IdempotencyKey: syncReq.IdempotencyKey, Message: syncEventMessage(counts), CreatedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: zeroDelta})
 		if err := s.store.UpsertSyncGraph(ctx, s.syncGraphFromSourceGraph(req.RepoID, graph)); err != nil {
-			result.Failures = append(result.Failures, ResourceError{SourceID: remoteID, RemoteType: "issue", Err: err, Message: err.Error()})
+			result.Failures = append(result.Failures, newResourceError(remoteID, "issue", err))
 			continue
 		}
 		stored, err := s.store.GetSourceScoped(ctx, req.RepoID, graph.Source.ID)
 		if err != nil {
-			result.Failures = append(result.Failures, ResourceError{SourceID: remoteID, RemoteType: "issue", Err: err, Message: err.Error()})
+			result.Failures = append(result.Failures, newResourceError(remoteID, "issue", err))
 			continue
 		}
 		result.Results = append(result.Results, SyncResult{IdempotencyKey: syncReq.IdempotencyKey, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), Record: sourceSummary(stored), GeneratedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: zeroDelta})
@@ -1284,11 +1295,13 @@ func (s *Service) BulkSyncPullRequests(ctx context.Context, req BulkSyncRequest)
 
 func (s *Service) bulkSyncPullRequestsBounded(ctx context.Context, req BulkSyncRequest, route RepositoryRoute) (*SyncResourcesResult, error) {
 	bounds := req.Bounds
-	result := &SyncResourcesResult{Results: make([]SyncResult, 0), Failures: make([]ResourceError, 0), Ordering: "updated_at_desc"}
-	watermark, hasWatermark, err := s.collectionWatermark(ctx, req.RepoID, "pull_request")
+	result := &SyncResourcesResult{Results: make([]SyncResult, 0), Failures: make([]ResourceError, 0), Ordering: syncOrderingUpdatedAtDesc}
+	watermark, watermarkOK, err := s.completeSyncWatermark(ctx, req.RepoID, "pull_request")
 	if err != nil {
 		return bulkSyncFailureResult(err, "pull_request:*", "pull_request")
 	}
+	setWatermarkSummary(result, watermark, watermarkOK)
+	var observed syncHighWatermark
 	currentPage := req.Page
 	if currentPage < 1 {
 		currentPage = 1
@@ -1307,35 +1320,45 @@ func (s *Service) bulkSyncPullRequestsBounded(ctx context.Context, req BulkSyncR
 			diag := SyncDiagnosticCancelled
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				diag = SyncDiagnosticTimeout
+				result.TraversalStatus = "timeout"
+			} else {
+				result.TraversalStatus = "cancelled"
 			}
 			result.SuccessCount = len(result.Results)
 			result.FailureCount = len(result.Failures)
+			_ = s.recordSyncFrontier(ctx, req.RepoID, "pull_request", result, observed)
 			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diag, TotalRequested: totalRequested}
 		}
 		if bounds.MaxPages > 0 && pageNum >= bounds.MaxPages {
 			result.StopReason = "max_pages"
+			result.TraversalStatus = "bounded"
 			break
 		}
 		if bounds.MaxRecords > 0 && len(result.Results) >= bounds.MaxRecords {
 			result.StopReason = "max_records"
+			result.TraversalStatus = "bounded"
 			break
 		}
 		page, err := s.client.ListPRs(ctx, gitcode.PRListRequest{Owner: route.Owner, Repo: route.Name, State: "all", OrderBy: "updated_at", Direction: "desc", Page: currentPage, PerPage: perPage})
 		if err != nil {
 			normalized := s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "pull_request:*"}, "pull_request", "*")
-			result.Failures = append(result.Failures, ResourceError{SourceID: "pull_request:*", RemoteType: "pull_request", Err: normalized, Message: err.Error()})
+			result.Failures = append(result.Failures, newResourceErrorWithMessage("pull_request:*", "pull_request", normalized, err.Error()))
 			result.SuccessCount = len(result.Results)
 			result.FailureCount = len(result.Failures)
+			result.TraversalStatus = "partial"
+			_ = s.recordSyncFrontier(ctx, req.RepoID, "pull_request", result, observed)
 			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, TotalRequested: totalRequested}
 		}
 		result.PagesListed++
 		result.RecordsListed += len(page.Items)
-		items, stopByWatermark, skippedByWatermark := filterPullRequestsByWatermark(page.Items, watermark, hasWatermark)
+		observePullRequestHighWatermark(&observed, page.Items)
+		items, stopByWatermark, skippedByWatermark := filterPullRequestsByCompleteWatermark(page.Items, watermark, watermarkOK)
 		result.SkippedByWatermark += skippedByWatermark
 		if bounds.MaxRecords > 0 {
 			remaining := bounds.MaxRecords - len(result.Results)
 			if remaining <= 0 {
 				result.StopReason = "max_records"
+				result.TraversalStatus = "bounded"
 				break
 			}
 			if len(items) > remaining {
@@ -1348,10 +1371,14 @@ func (s *Service) bulkSyncPullRequestsBounded(ctx context.Context, req BulkSyncR
 		emitProgress(bounds.ProgressChan, ProgressEvent{Collection: "pulls", Page: currentPage, RecordsFetched: recordsFetched})
 		if stopByWatermark {
 			result.StopReason = "watermark"
+			result.TraversalStatus = "complete"
+			result.WatermarkStatus = "used"
+			result.WatermarkReason = "previous_complete_frontier"
 			break
 		}
 		if len(page.Items) < perPage {
 			result.StopReason = "end_of_collection"
+			result.TraversalStatus = "complete"
 			break
 		}
 		currentPage++
@@ -1359,7 +1386,12 @@ func (s *Service) bulkSyncPullRequestsBounded(ctx context.Context, req BulkSyncR
 	result.SuccessCount = len(result.Results)
 	result.FailureCount = len(result.Failures)
 	if result.FailureCount > 0 {
+		result.TraversalStatus = "partial"
+		_ = s.recordSyncFrontier(ctx, req.RepoID, "pull_request", result, observed)
 		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
+	}
+	if err := s.recordSyncFrontier(ctx, req.RepoID, "pull_request", result, observed); err != nil {
+		return bulkSyncFailureResult(err, "pull_request:*", "pull_request")
 	}
 	return result, nil
 }
@@ -1370,7 +1402,7 @@ func (s *Service) stagePullRequestPage(ctx context.Context, req BulkSyncRequest,
 		syncReq := SyncRequest{RepoID: req.RepoID, AliasType: "pull_request", AliasID: remoteID, IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "pull_request", remoteID), MaxAttempts: req.MaxAttempts, MaxSize: req.MaxSize}
 		graph, counts, err := s.stagePullRequest(ctx, syncReq, "pull_request", remoteID, pr)
 		if err != nil {
-			result.Failures = append(result.Failures, ResourceError{SourceID: remoteID, RemoteType: "pull_request", Err: err, Message: err.Error()})
+			result.Failures = append(result.Failures, newResourceError(remoteID, "pull_request", err))
 			continue
 		}
 		counts.Listed = 1
@@ -1379,46 +1411,76 @@ func (s *Service) stagePullRequestPage(ctx context.Context, req BulkSyncRequest,
 		zeroDelta := counts.Fetched > 0 && counts.Skipped == counts.Fetched && counts.Updated == 0 && counts.Inserted == 0 && counts.Conflicts == 0
 		graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: "pull_request", RemoteID: remoteID, RemoteRevision: graph.SyncStatus.RemoteRevision, Status: "succeeded", IdempotencyKey: syncReq.IdempotencyKey, Message: syncEventMessage(counts), CreatedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: zeroDelta})
 		if err := s.store.UpsertSyncGraph(ctx, s.syncGraphFromSourceGraph(req.RepoID, graph)); err != nil {
-			result.Failures = append(result.Failures, ResourceError{SourceID: remoteID, RemoteType: "pull_request", Err: err, Message: err.Error()})
+			result.Failures = append(result.Failures, newResourceError(remoteID, "pull_request", err))
 			continue
 		}
 		stored, err := s.store.GetSourceScoped(ctx, req.RepoID, graph.Source.ID)
 		if err != nil {
-			result.Failures = append(result.Failures, ResourceError{SourceID: remoteID, RemoteType: "pull_request", Err: err, Message: err.Error()})
+			result.Failures = append(result.Failures, newResourceError(remoteID, "pull_request", err))
 			continue
 		}
 		result.Results = append(result.Results, SyncResult{IdempotencyKey: syncReq.IdempotencyKey, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), Record: sourceSummary(stored), GeneratedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: zeroDelta})
 	}
 }
 
-type collectionWatermark struct {
+const (
+	syncOrderingUpdatedAtDesc = "updated_at_desc"
+	syncFilterStateAll        = "state=all"
+)
+
+type syncHighWatermark struct {
 	UpdatedAt time.Time
-	Number    int
 	RemoteID  string
+	Number    int
 }
 
-func (s *Service) collectionWatermark(ctx context.Context, repoID, recordType string) (collectionWatermark, bool, error) {
-	records, err := s.store.ListRecords(ctx, cache.RecordFilter{RepoID: repoID, Type: recordType})
-	if err != nil {
-		return collectionWatermark{}, false, err
+func (s *Service) completeSyncWatermark(ctx context.Context, repoID, remoteType string) (cache.SyncFrontier, bool, error) {
+	frontier, ok, err := s.store.GetSyncFrontier(ctx, repoID, remoteType, syncOrderingUpdatedAtDesc, syncFilterStateAll)
+	if err != nil || !ok {
+		return cache.SyncFrontier{}, false, err
 	}
-	var watermark collectionWatermark
-	for _, record := range records {
-		if record.UpdatedAt.IsZero() {
-			continue
-		}
-		number := remoteNumber(record.RemoteID)
-		if watermark.UpdatedAt.IsZero() || record.UpdatedAt.After(watermark.UpdatedAt) || (record.UpdatedAt.Equal(watermark.UpdatedAt) && number > watermark.Number) {
-			watermark = collectionWatermark{UpdatedAt: record.UpdatedAt.UTC(), Number: number, RemoteID: record.RemoteID}
-		}
-	}
-	if watermark.UpdatedAt.IsZero() {
-		return collectionWatermark{}, false, nil
-	}
-	return watermark, true, nil
+	return frontier, frontier.Status == "complete" && !frontier.HighUpdatedAt.IsZero(), nil
 }
 
-func filterIssueSummariesByWatermark(items []gitcode.IssueSummary, watermark collectionWatermark, ok bool) ([]gitcode.IssueSummary, bool, int) {
+func setWatermarkSummary(result *SyncResourcesResult, frontier cache.SyncFrontier, ok bool) {
+	if ok {
+		result.WatermarkStatus = "eligible"
+		result.WatermarkReason = "previous_complete_frontier"
+		return
+	}
+	result.WatermarkStatus = "disabled"
+	if frontier.Status != "" {
+		result.WatermarkReason = "previous_frontier_" + frontier.Status
+		return
+	}
+	result.WatermarkReason = "no_complete_frontier_metadata"
+}
+
+func observeIssueHighWatermark(mark *syncHighWatermark, items []gitcode.IssueSummary) {
+	for _, item := range items {
+		observeHighWatermark(mark, item.UpdatedAt, strconv.Itoa(item.Number), item.Number)
+	}
+}
+
+func observePullRequestHighWatermark(mark *syncHighWatermark, items []gitcode.PullRequest) {
+	for _, item := range items {
+		observeHighWatermark(mark, item.UpdatedAt, strconv.Itoa(item.Number), item.Number)
+	}
+}
+
+func observeHighWatermark(mark *syncHighWatermark, updatedAt time.Time, remoteID string, number int) {
+	updatedAt = updatedAt.UTC()
+	if updatedAt.IsZero() {
+		return
+	}
+	if mark.UpdatedAt.IsZero() || updatedAt.After(mark.UpdatedAt) || (updatedAt.Equal(mark.UpdatedAt) && number > mark.Number) {
+		mark.UpdatedAt = updatedAt
+		mark.RemoteID = remoteID
+		mark.Number = number
+	}
+}
+
+func filterIssueSummariesByCompleteWatermark(items []gitcode.IssueSummary, frontier cache.SyncFrontier, ok bool) ([]gitcode.IssueSummary, bool, int) {
 	if !ok {
 		return items, false, 0
 	}
@@ -1426,7 +1488,7 @@ func filterIssueSummariesByWatermark(items []gitcode.IssueSummary, watermark col
 	skipped := 0
 	stop := false
 	for _, item := range items {
-		if item.UpdatedAt.IsZero() || !item.UpdatedAt.UTC().Before(watermark.UpdatedAt) {
+		if item.UpdatedAt.IsZero() || !item.UpdatedAt.UTC().Before(frontier.HighUpdatedAt) {
 			out = append(out, item)
 			continue
 		}
@@ -1436,7 +1498,7 @@ func filterIssueSummariesByWatermark(items []gitcode.IssueSummary, watermark col
 	return out, stop, skipped
 }
 
-func filterPullRequestsByWatermark(items []gitcode.PullRequest, watermark collectionWatermark, ok bool) ([]gitcode.PullRequest, bool, int) {
+func filterPullRequestsByCompleteWatermark(items []gitcode.PullRequest, frontier cache.SyncFrontier, ok bool) ([]gitcode.PullRequest, bool, int) {
 	if !ok {
 		return items, false, 0
 	}
@@ -1444,7 +1506,7 @@ func filterPullRequestsByWatermark(items []gitcode.PullRequest, watermark collec
 	skipped := 0
 	stop := false
 	for _, item := range items {
-		if item.UpdatedAt.IsZero() || !item.UpdatedAt.UTC().Before(watermark.UpdatedAt) {
+		if item.UpdatedAt.IsZero() || !item.UpdatedAt.UTC().Before(frontier.HighUpdatedAt) {
 			out = append(out, item)
 			continue
 		}
@@ -1454,9 +1516,28 @@ func filterPullRequestsByWatermark(items []gitcode.PullRequest, watermark collec
 	return out, stop, skipped
 }
 
-func remoteNumber(remoteID string) int {
-	number, _ := strconv.Atoi(strings.TrimSpace(remoteID))
-	return number
+func (s *Service) recordSyncFrontier(ctx context.Context, repoID, remoteType string, result *SyncResourcesResult, high syncHighWatermark) error {
+	status := result.TraversalStatus
+	if result.StopReason == "watermark" || result.StopReason == "end_of_collection" {
+		status = "complete"
+	}
+	if status == "" {
+		status = "partial"
+	}
+	return s.store.UpsertSyncFrontier(ctx, cache.SyncFrontier{
+		RepoID:        repoID,
+		RemoteType:    remoteType,
+		Ordering:      syncOrderingUpdatedAtDesc,
+		FilterKey:     syncFilterStateAll,
+		Status:        status,
+		HighUpdatedAt: high.UpdatedAt,
+		HighRemoteID:  high.RemoteID,
+		HighNumber:    high.Number,
+		StopReason:    result.StopReason,
+		PagesListed:   result.PagesListed,
+		RecordsListed: result.RecordsListed,
+		UpdatedAt:     s.now().UTC(),
+	})
 }
 
 func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
@@ -1515,13 +1596,14 @@ func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (
 		}
 		prNumber, ok := pullRequestNumberFromSource(source)
 		if !ok {
-			result.Failures = append(result.Failures, ResourceError{SourceID: source.ID, RemoteType: "pr_comment", Err: ErrInvalidQuery{Field: "pull_request", Message: "cached pull request has no numeric remote alias"}, Message: "cached pull request has no numeric remote alias"})
+			err := ErrInvalidQuery{Field: "pull_request", Message: "cached pull request has no numeric remote alias"}
+			result.Failures = append(result.Failures, newResourceErrorWithMessage(source.ID, "pr_comment", err, "cached pull request has no numeric remote alias"))
 			continue
 		}
 		page, err := s.client.ListPRComments(ctx, gitcode.PRRequest{Owner: route.Owner, Repo: route.Name, Number: prNumber})
 		if err != nil {
 			normalized := s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: fmt.Sprintf("pr_comment:%d:*", prNumber)}, "pr_comment", strconv.Itoa(prNumber))
-			result.Failures = append(result.Failures, ResourceError{SourceID: fmt.Sprintf("PR-%d", prNumber), RemoteType: "pr_comment", Err: normalized, Message: err.Error()})
+			result.Failures = append(result.Failures, newResourceErrorWithMessage(fmt.Sprintf("PR-%d", prNumber), "pr_comment", normalized, err.Error()))
 			continue
 		}
 		items := page.Items
@@ -1646,7 +1728,7 @@ func (s *Service) stagePRCommentPage(ctx context.Context, req BulkSyncRequest, p
 		syncReq := SyncRequest{RepoID: req.RepoID, AliasType: "pr_comment", AliasID: remoteID, IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "pr_comment", remoteID), MaxAttempts: req.MaxAttempts, MaxSize: req.MaxSize}
 		graph, counts, err := s.stagePRComment(ctx, syncReq, "pr_comment", remoteID, prNumber, comment)
 		if err != nil {
-			result.Failures = append(result.Failures, ResourceError{SourceID: remoteID, RemoteType: "pr_comment", Err: err, Message: err.Error()})
+			result.Failures = append(result.Failures, newResourceError(remoteID, "pr_comment", err))
 			continue
 		}
 		counts.Listed = 1
@@ -1655,12 +1737,12 @@ func (s *Service) stagePRCommentPage(ctx context.Context, req BulkSyncRequest, p
 		zeroDelta := counts.Fetched > 0 && counts.Skipped == counts.Fetched && counts.Updated == 0 && counts.Inserted == 0 && counts.Conflicts == 0
 		graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: "pr_comment", RemoteID: remoteID, RemoteRevision: graph.SyncStatus.RemoteRevision, Status: "succeeded", IdempotencyKey: syncReq.IdempotencyKey, Message: syncEventMessage(counts), CreatedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: zeroDelta})
 		if err := s.store.UpsertSyncGraph(ctx, s.syncGraphFromSourceGraph(req.RepoID, graph)); err != nil {
-			result.Failures = append(result.Failures, ResourceError{SourceID: remoteID, RemoteType: "pr_comment", Err: err, Message: err.Error()})
+			result.Failures = append(result.Failures, newResourceError(remoteID, "pr_comment", err))
 			continue
 		}
 		stored, err := s.store.GetSourceScoped(ctx, req.RepoID, graph.Source.ID)
 		if err != nil {
-			result.Failures = append(result.Failures, ResourceError{SourceID: remoteID, RemoteType: "pr_comment", Err: err, Message: err.Error()})
+			result.Failures = append(result.Failures, newResourceError(remoteID, "pr_comment", err))
 			continue
 		}
 		result.Results = append(result.Results, SyncResult{IdempotencyKey: syncReq.IdempotencyKey, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), Record: sourceSummary(stored), GeneratedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: zeroDelta})
@@ -1698,7 +1780,7 @@ func (s *Service) BulkSyncWiki(ctx context.Context, req BulkSyncRequest) (*SyncR
 			normalized := s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "wiki:*"}, "wiki", "*")
 			var sfErr ErrSyncFailure
 			if errors.As(normalized, &sfErr) && sfErr.Mode == "empty_wiki" {
-				re := ResourceError{SourceID: "wiki:*", RemoteType: "wiki", Err: normalized, Message: normalized.Error()}
+				re := newResourceError("wiki:*", "wiki", normalized)
 				result := &SyncResourcesResult{Failures: []ResourceError{re}, FailureCount: 1}
 				return result, &PartialSyncError{Errors: result.Failures, FailureCount: 1, Diagnostic: SyncDiagnosticEmptyWiki}
 			}
@@ -1773,7 +1855,7 @@ func (s *Service) bulkSyncWikiBounded(ctx context.Context, req BulkSyncRequest, 
 		result.SuccessCount = len(result.Results)
 		result.FailureCount = len(result.Failures)
 		normalized := s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "wiki:*"}, "wiki", "*")
-		re := ResourceError{SourceID: "wiki:*", RemoteType: "wiki", Err: normalized, Message: err.Error()}
+		re := newResourceErrorWithMessage("wiki:*", "wiki", normalized, err.Error())
 		result.Failures = append(result.Failures, re)
 		result.FailureCount++
 		var sfErr ErrSyncFailure
@@ -1821,12 +1903,13 @@ func (s *Service) bulkSyncWikiBounded(ctx context.Context, req BulkSyncRequest, 
 func (s *Service) stageWikiPage(ctx context.Context, req BulkSyncRequest, items []gitcode.WikiPage, result *SyncResourcesResult) {
 	for _, wp := range items {
 		if err := ctx.Err(); err != nil {
-			result.Failures = append(result.Failures, ResourceError{SourceID: wp.Slug, RemoteType: "wiki", Err: err, Message: err.Error()})
+			result.Failures = append(result.Failures, newResourceError(wp.Slug, "wiki", err))
 			continue
 		}
 		remoteID := strings.TrimSpace(wp.Slug)
 		if remoteID == "" {
-			result.Failures = append(result.Failures, ResourceError{SourceID: wp.Slug, RemoteType: "wiki", Err: ErrInvalidQuery{Field: "wiki_slug", Message: "wiki list item missing slug"}, Message: "wiki list item missing slug"})
+			err := ErrInvalidQuery{Field: "wiki_slug", Message: "wiki list item missing slug"}
+			result.Failures = append(result.Failures, newResourceErrorWithMessage(wp.Slug, "wiki", err, "wiki list item missing slug"))
 			continue
 		}
 		syncReq := SyncRequest{
@@ -1839,7 +1922,7 @@ func (s *Service) stageWikiPage(ctx context.Context, req BulkSyncRequest, items 
 		}
 		syncResult, err := s.syncWikiListItem(ctx, syncReq, wp)
 		if err != nil {
-			result.Failures = append(result.Failures, ResourceError{SourceID: remoteID, RemoteType: "wiki", Err: err, Message: err.Error()})
+			result.Failures = append(result.Failures, newResourceError(remoteID, "wiki", err))
 			continue
 		}
 		result.Results = append(result.Results, syncResult)
@@ -2004,7 +2087,7 @@ func extractPartialSyncError(err error) (*PartialSyncError, bool) {
 }
 
 func bulkSyncFailureResult(err error, sourceID, remoteType string) (*SyncResourcesResult, error) {
-	re := ResourceError{SourceID: sourceID, RemoteType: remoteType, Err: err, Message: err.Error()}
+	re := newResourceError(sourceID, remoteType, err)
 	result := &SyncResourcesResult{Failures: []ResourceError{re}, FailureCount: 1}
 	return result, &PartialSyncError{Errors: result.Failures, FailureCount: 1}
 }

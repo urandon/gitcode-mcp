@@ -1100,6 +1100,27 @@ func mergeSyncResources(dst *service.SyncResourcesResult, src *service.SyncResou
 			dst.Ordering = "mixed"
 		}
 	}
+	if src.TraversalStatus != "" {
+		if dst.TraversalStatus == "" {
+			dst.TraversalStatus = src.TraversalStatus
+		} else if dst.TraversalStatus != src.TraversalStatus {
+			dst.TraversalStatus = "mixed"
+		}
+	}
+	if src.WatermarkStatus != "" {
+		if dst.WatermarkStatus == "" {
+			dst.WatermarkStatus = src.WatermarkStatus
+		} else if dst.WatermarkStatus != src.WatermarkStatus {
+			dst.WatermarkStatus = "mixed"
+		}
+	}
+	if src.WatermarkReason != "" {
+		if dst.WatermarkReason == "" {
+			dst.WatermarkReason = src.WatermarkReason
+		} else if dst.WatermarkReason != src.WatermarkReason {
+			dst.WatermarkReason = "mixed"
+		}
+	}
 }
 
 func mergeSyncError(existing error, result *service.SyncResourcesResult, err error) error {
@@ -1125,6 +1146,9 @@ type syncResourcesCompactSummary struct {
 	SkippedByWatermark int                       `json:"skipped_by_watermark,omitempty"`
 	StopReason         string                    `json:"stop_reason,omitempty"`
 	Ordering           string                    `json:"ordering,omitempty"`
+	TraversalStatus    string                    `json:"traversal_status,omitempty"`
+	WatermarkStatus    string                    `json:"watermark_status,omitempty"`
+	WatermarkReason    string                    `json:"watermark_reason,omitempty"`
 	ZeroDeltaCount     int                       `json:"zero_delta_count,omitempty"`
 	Diagnostic         service.SyncDiagnostic    `json:"diagnostic,omitempty"`
 	TotalRequested     int                       `json:"total_requested,omitempty"`
@@ -1135,8 +1159,11 @@ type syncResourcesCompactSummary struct {
 }
 
 type syncFailureGroupSummary struct {
-	RemoteType string `json:"remote_type"`
-	Count      int    `json:"count"`
+	RemoteType   string `json:"remote_type"`
+	FailureClass string `json:"failure_class,omitempty"`
+	Endpoint     string `json:"endpoint,omitempty"`
+	StatusCode   int    `json:"status_code,omitempty"`
+	Count        int    `json:"count"`
 }
 
 type syncStatusCompactSummary struct {
@@ -1256,6 +1283,9 @@ func syncResourcesSummary(result *service.SyncResourcesResult, partial *service.
 		summary.SkippedByWatermark = result.SkippedByWatermark
 		summary.StopReason = result.StopReason
 		summary.Ordering = result.Ordering
+		summary.TraversalStatus = result.TraversalStatus
+		summary.WatermarkStatus = result.WatermarkStatus
+		summary.WatermarkReason = result.WatermarkReason
 		for _, item := range result.Results {
 			summary.Counts.Fetched += item.Counts.Fetched
 			summary.Counts.Skipped += item.Counts.Skipped
@@ -1292,22 +1322,40 @@ func syncFailureGroups(failures []service.ResourceError) []syncFailureGroupSumma
 	if len(failures) == 0 {
 		return nil
 	}
-	counts := map[string]int{}
+	type failureKey struct {
+		remoteType   string
+		failureClass string
+		endpoint     string
+		statusCode   int
+	}
+	counts := map[failureKey]int{}
 	for _, failure := range failures {
-		key := failure.RemoteType
-		if key == "" {
-			key = "unknown"
+		remoteType := failure.RemoteType
+		if remoteType == "" {
+			remoteType = "unknown"
 		}
+		key := failureKey{remoteType: remoteType, failureClass: failure.FailureClass, endpoint: failure.Endpoint, statusCode: failure.StatusCode}
 		counts[key]++
 	}
-	keys := make([]string, 0, len(counts))
+	keys := make([]failureKey, 0, len(counts))
 	for key := range counts {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].remoteType != keys[j].remoteType {
+			return keys[i].remoteType < keys[j].remoteType
+		}
+		if keys[i].failureClass != keys[j].failureClass {
+			return keys[i].failureClass < keys[j].failureClass
+		}
+		if keys[i].statusCode != keys[j].statusCode {
+			return keys[i].statusCode < keys[j].statusCode
+		}
+		return keys[i].endpoint < keys[j].endpoint
+	})
 	out := make([]syncFailureGroupSummary, 0, len(keys))
 	for _, key := range keys {
-		out = append(out, syncFailureGroupSummary{RemoteType: key, Count: counts[key]})
+		out = append(out, syncFailureGroupSummary{RemoteType: key.remoteType, FailureClass: key.failureClass, Endpoint: key.endpoint, StatusCode: key.statusCode, Count: counts[key]})
 	}
 	return out
 }
@@ -1334,13 +1382,32 @@ func renderSyncResourcesSummaryText(w io.Writer, summary syncResourcesCompactSum
 	if summary.StopReason != "" {
 		fmt.Fprintf(w, " stop_reason=%s", summary.StopReason)
 	}
+	if summary.TraversalStatus != "" {
+		fmt.Fprintf(w, " traversal_status=%s", summary.TraversalStatus)
+	}
+	if summary.WatermarkStatus != "" {
+		fmt.Fprintf(w, " watermark_status=%s", summary.WatermarkStatus)
+	}
+	if summary.WatermarkReason != "" {
+		fmt.Fprintf(w, " watermark_reason=%s", summary.WatermarkReason)
+	}
 	if summary.Diagnostic != "" {
 		fmt.Fprintf(w, " diagnostic=%s", summary.Diagnostic)
 	}
 	if len(summary.FailureGroups) > 0 {
 		parts := make([]string, 0, len(summary.FailureGroups))
 		for _, group := range summary.FailureGroups {
-			parts = append(parts, fmt.Sprintf("%s:%d", group.RemoteType, group.Count))
+			label := group.RemoteType
+			if group.FailureClass != "" {
+				label += "/" + group.FailureClass
+			}
+			if group.StatusCode != 0 {
+				label += fmt.Sprintf("/%d", group.StatusCode)
+			}
+			if group.Endpoint != "" {
+				label += "@" + group.Endpoint
+			}
+			parts = append(parts, fmt.Sprintf("%s:%d", label, group.Count))
 		}
 		fmt.Fprintf(w, " failure_groups=%s", strings.Join(parts, ","))
 	}

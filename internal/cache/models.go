@@ -46,6 +46,8 @@ type Store interface {
 	RecordSyncEvent(context.Context, SyncEvent) error
 	GetSyncEventByKey(context.Context, string) (*SyncEvent, error)
 	ListCompletedSyncEventsScoped(context.Context, string) ([]SyncEvent, error)
+	UpsertSyncFrontier(context.Context, SyncFrontier) error
+	GetSyncFrontier(context.Context, string, string, string, string) (SyncFrontier, bool, error)
 	RecordCacheConfirmation(context.Context, CacheConfirmationRecord) error
 	GetCacheConfirmationByKey(context.Context, string, string) (*CacheConfirmationRecord, error)
 	RecordAuditEvent(context.Context, AuditTrailEntry) error
@@ -202,6 +204,21 @@ type RemoteRevision struct {
 	RemoteRevision string
 	Status         string
 	LastFetchedAt  time.Time
+}
+
+type SyncFrontier struct {
+	RepoID        string
+	RemoteType    string
+	Ordering      string
+	FilterKey     string
+	Status        string
+	HighUpdatedAt time.Time
+	HighRemoteID  string
+	HighNumber    int
+	StopReason    string
+	PagesListed   int
+	RecordsListed int
+	UpdatedAt     time.Time
 }
 
 type AuditTrailEntry struct {

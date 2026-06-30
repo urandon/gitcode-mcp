@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 13
+const currentSchemaVersion = 14
 
 type VersionCompatibility struct {
 	DetectedVersion int
@@ -137,6 +137,7 @@ var migrations = []migration{
 	{version: 11, apply: applyRecordFixtureLiveProvenanceMigration},
 	{version: 12, apply: applyPRReviewCommentsMigration},
 	{version: 13, apply: applyPRReviewDiscussionPositionsMigration},
+	{version: 14, apply: applySyncFrontiersMigration},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB, ftsAvailable bool) error {
@@ -309,6 +310,22 @@ func applyInitialMigration(ctx context.Context, tx *sql.Tx, ftsAvailable bool) e
 )`,
 		`CREATE INDEX IF NOT EXISTS idx_sync_events_source ON sync_events(repo_id, source_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_sync_events_idempotency_key ON sync_events(repo_id, idempotency_key)`,
+		`CREATE TABLE IF NOT EXISTS sync_frontiers (
+	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+	remote_type TEXT NOT NULL,
+	ordering TEXT NOT NULL,
+	filter_key TEXT NOT NULL,
+	status TEXT NOT NULL,
+	high_updated_at TEXT NOT NULL,
+	high_remote_id TEXT NOT NULL,
+	high_number INTEGER NOT NULL DEFAULT 0,
+	stop_reason TEXT NOT NULL,
+	pages_listed INTEGER NOT NULL DEFAULT 0,
+	records_listed INTEGER NOT NULL DEFAULT 0,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, remote_type, ordering, filter_key)
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_sync_frontiers_repo ON sync_frontiers(repo_id, remote_type, status)`,
 		`CREATE TABLE IF NOT EXISTS conflicts (
 	repo_id TEXT NOT NULL,
 	id TEXT NOT NULL,
@@ -756,6 +773,33 @@ func applyPRReviewDiscussionPositionsMigration(ctx context.Context, tx *sql.Tx, 
 		`CREATE INDEX IF NOT EXISTS idx_pr_review_positions_discussion ON pr_review_positions(repo_id, pr_number, discussion_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_pr_review_positions_new_line ON pr_review_positions(repo_id, pr_number, new_path, new_line)`,
 		`CREATE INDEX IF NOT EXISTS idx_pr_review_positions_old_line ON pr_review_positions(repo_id, pr_number, old_path, old_line)`,
+	}
+	for _, stmt := range statements {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applySyncFrontiersMigration(ctx context.Context, tx *sql.Tx, _ bool) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS sync_frontiers (
+	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+	remote_type TEXT NOT NULL,
+	ordering TEXT NOT NULL,
+	filter_key TEXT NOT NULL,
+	status TEXT NOT NULL,
+	high_updated_at TEXT NOT NULL,
+	high_remote_id TEXT NOT NULL,
+	high_number INTEGER NOT NULL DEFAULT 0,
+	stop_reason TEXT NOT NULL,
+	pages_listed INTEGER NOT NULL DEFAULT 0,
+	records_listed INTEGER NOT NULL DEFAULT 0,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, remote_type, ordering, filter_key)
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_sync_frontiers_repo ON sync_frontiers(repo_id, remote_type, status)`,
 	}
 	for _, stmt := range statements {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
