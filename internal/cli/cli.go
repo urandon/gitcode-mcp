@@ -1620,6 +1620,18 @@ func renderDiffText(w io.Writer, result service.DiffSnapshotResult) {
 
 func renderWriteText(w io.Writer, result service.WriteCommandResult) {
 	fmt.Fprintf(w, "%s: %s id=%s idempotency_key=%s evidence=%s\n", result.Command, result.Status, result.ID, result.IdempotencyKey, result.Evidence)
+	if result.RemoteSlug != "" {
+		fmt.Fprintf(w, "remote_slug: %s\n", result.RemoteSlug)
+	}
+	if result.APIPath != "" {
+		fmt.Fprintf(w, "api_path: %s\n", result.APIPath)
+	}
+	if result.CachePath != "" {
+		fmt.Fprintf(w, "cache_path: %s\n", result.CachePath)
+	}
+	if result.BrowserURL != "" {
+		fmt.Fprintf(w, "browser_url: %s\n", result.BrowserURL)
+	}
 }
 
 func renderRepositoryBindingText(w io.Writer, result service.RepositoryBinding) {

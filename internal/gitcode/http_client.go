@@ -459,7 +459,7 @@ func (c *HTTPClient) CreateWikiPage(ctx context.Context, req CreateWikiPageReque
 	if err := validateCreateWikiPage(req); err != nil {
 		return WriteResult[WikiPage]{}, err
 	}
-	wikiPath := wikiRequestPath(req.Path, req.Slug)
+	wikiPath := wikiWritePath(req.Path, req.Slug)
 	payload := WikiContentWriteRequest{Content: base64.StdEncoding.EncodeToString([]byte(req.Body)), Message: wikiWriteMessage(req.Message, "create wiki page")}
 	target := req.Owner + "/" + req.Repo + "/" + wikiPath
 	return c.writeWikiContent(ctx, http.MethodPost, wikiContentsPathEndpoint(req.Owner, req.Repo, wikiPath), "CreateWikiPage", target, payload, opts, req.Owner, req.Repo, wikiPath, req.Body)
@@ -469,7 +469,7 @@ func (c *HTTPClient) UpdateWikiPage(ctx context.Context, req UpdateWikiPageReque
 	if err := validateUpdateWikiPage(req); err != nil {
 		return WriteResult[WikiPage]{}, err
 	}
-	wikiPath := wikiRequestPath(req.Path, req.Slug)
+	wikiPath := wikiWritePath(req.Path, req.Slug)
 	sha := strings.TrimSpace(req.Sha)
 	if sha == "" {
 		meta, err := c.getWikiMetadata(ctx, req.Owner, req.Repo, wikiPath)
@@ -487,7 +487,7 @@ func (c *HTTPClient) DeleteWikiPage(ctx context.Context, req DeleteWikiPageReque
 	if err := validateDeleteWikiPage(req); err != nil {
 		return WriteResult[WikiPage]{}, err
 	}
-	wikiPath := wikiRequestPath(req.Path, req.Slug)
+	wikiPath := wikiWritePath(req.Path, req.Slug)
 	sha := strings.TrimSpace(req.Sha)
 	if sha == "" {
 		meta, err := c.getWikiMetadata(ctx, req.Owner, req.Repo, wikiPath)
@@ -498,7 +498,7 @@ func (c *HTTPClient) DeleteWikiPage(ctx context.Context, req DeleteWikiPageReque
 	}
 	payload := WikiContentWriteRequest{Message: wikiWriteMessage(req.Message, "delete wiki page"), Sha: sha}
 	target := req.Owner + "/" + req.Repo + "/" + wikiPath
-	return c.writeWikiContent(ctx, http.MethodDelete, deleteWikiPageEndpoint(req.Owner, req.Repo, wikiPath), "DeleteWikiPage", target, payload, opts, req.Owner, req.Repo, wikiPath, "")
+	return c.deleteWikiContent(ctx, deleteWikiPageEndpoint(req.Owner, req.Repo, wikiPath), "DeleteWikiPage", target, payload, opts, req.Owner, req.Repo, wikiPath, sha)
 }
 
 func (c *HTTPClient) AddLabel(ctx context.Context, req LabelRequest, opts WriteOptions) (WriteResult[Issue], error) {
@@ -753,13 +753,42 @@ func (c *HTTPClient) writeWikiContent(ctx context.Context, method, endpoint, ope
 		result.RemoteID = confirmedPath
 		result.RemoteSlug = result.RemoteID
 		result.RemoteRevision = result.Record.Sha
+		c.setWikiWriteLocations(&result, endpoint, owner, repo, confirmedPath)
 		return result, nil
 	})
 	if err != nil {
 		return WriteResult[WikiPage]{}, err
 	}
 	page := wikiPageFromMetadata(result.Record, body)
-	return WriteResult[WikiPage]{Record: page, Confirmed: result.Confirmed, Operation: result.Operation, Target: result.Target, ProviderStatus: result.ProviderStatus, RemoteID: result.RemoteID, RemoteSlug: result.RemoteSlug, RemoteRevision: result.RemoteRevision, IdempotencyKey: result.IdempotencyKey, ResponseHash: result.ResponseHash, ConfirmedAt: result.ConfirmedAt, ProviderPayloadFingerprint: result.ProviderPayloadFingerprint}, nil
+	return WriteResult[WikiPage]{Record: page, Confirmed: result.Confirmed, Operation: result.Operation, Target: result.Target, ProviderStatus: result.ProviderStatus, RemoteID: result.RemoteID, RemoteSlug: result.RemoteSlug, RemoteRevision: result.RemoteRevision, APIPath: result.APIPath, CachePath: result.CachePath, BrowserURL: result.BrowserURL, IdempotencyKey: result.IdempotencyKey, ResponseHash: result.ResponseHash, ConfirmedAt: result.ConfirmedAt, ProviderPayloadFingerprint: result.ProviderPayloadFingerprint}, nil
+}
+
+func (c *HTTPClient) deleteWikiContent(ctx context.Context, endpoint, operation, target string, payload WikiContentWriteRequest, opts WriteOptions, owner, repo, wikiPath, sha string) (WriteResult[WikiPage], error) {
+	requestPath := normalizeWikiPath(wikiPath)
+	result, err := writeConfirmedJSON[WikiContentsFile](ctx, c, http.MethodDelete, endpoint, operation, target, payload, opts, func(result WriteResult[WikiContentsFile]) (WriteResult[WikiContentsFile], error) {
+		if confirmedPath := normalizeWikiPath(result.Record.Path); confirmedPath != "" && confirmedPath != requestPath {
+			return WriteResult[WikiContentsFile]{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki delete confirmation path mismatch"}
+		}
+		if err := c.confirmWikiDelete(ctx, owner, repo, requestPath); err != nil {
+			return WriteResult[WikiContentsFile]{}, err
+		}
+		if normalizeWikiPath(result.Record.Path) == "" {
+			result.Record.Path = requestPath
+		}
+		if strings.TrimSpace(result.Record.Sha) == "" {
+			result.Record.Sha = strings.TrimSpace(sha)
+		}
+		result.RemoteID = requestPath
+		result.RemoteSlug = requestPath
+		result.RemoteRevision = firstNonEmpty(result.Record.Sha, result.ResponseHash)
+		c.setWikiWriteLocations(&result, endpoint, owner, repo, requestPath)
+		return result, nil
+	})
+	if err != nil {
+		return WriteResult[WikiPage]{}, err
+	}
+	page := wikiPageFromMetadata(result.Record, "")
+	return WriteResult[WikiPage]{Record: page, Confirmed: result.Confirmed, Operation: result.Operation, Target: result.Target, ProviderStatus: result.ProviderStatus, RemoteID: result.RemoteID, RemoteSlug: result.RemoteSlug, RemoteRevision: result.RemoteRevision, APIPath: result.APIPath, CachePath: result.CachePath, BrowserURL: result.BrowserURL, IdempotencyKey: result.IdempotencyKey, ResponseHash: result.ResponseHash, ConfirmedAt: result.ConfirmedAt, ProviderPayloadFingerprint: result.ProviderPayloadFingerprint}, nil
 }
 
 func (c *HTTPClient) confirmWikiWrite(ctx context.Context, owner, repo, wikiPath, body string) (WikiContentsFile, error) {
@@ -785,6 +814,30 @@ func (c *HTTPClient) confirmWikiWrite(ctx context.Context, owner, repo, wikiPath
 		}
 	}
 	return meta, nil
+}
+
+func (c *HTTPClient) confirmWikiDelete(ctx context.Context, owner, repo, wikiPath string) error {
+	endpoint := wikiContentsPathEndpoint(owner, repo, wikiPath)
+	meta, err := c.getWikiMetadata(ctx, owner, repo, wikiPath)
+	if err != nil {
+		if isNotFoundError(err) {
+			return nil
+		}
+		return ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki delete confirmation GET failed", Cause: err}
+	}
+	if normalizeWikiPath(meta.Path) == normalizeWikiPath(wikiPath) {
+		return ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki delete confirmation expected not found"}
+	}
+	return ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki delete confirmation path mismatch"}
+}
+
+func isNotFoundError(err error) bool {
+	var notFound ErrNotFound
+	if errors.As(err, &notFound) {
+		return true
+	}
+	var remoteNotFound ErrRemoteNotFound
+	return errors.As(err, &remoteNotFound)
 }
 
 type requestOptions struct {
@@ -1142,6 +1195,17 @@ func wikiRequestPath(pathValue, slug string) string {
 	return normalizeWikiPath(slug)
 }
 
+func wikiWritePath(pathValue, slug string) string {
+	return ensureWikiMarkdownPath(wikiRequestPath(pathValue, slug))
+}
+
+func ensureWikiMarkdownPath(wikiPath string) string {
+	if wikiPath == "" || strings.EqualFold(path.Ext(wikiPath), ".md") {
+		return wikiPath
+	}
+	return strings.TrimSuffix(wikiPath, "/") + ".md"
+}
+
 func normalizeWikiPath(value string) string {
 	trimmed := strings.TrimSpace(strings.ReplaceAll(value, "\\", "/"))
 	trimmed = strings.Trim(trimmed, "/")
@@ -1158,6 +1222,39 @@ func normalizeWikiPath(value string) string {
 		cleaned = append(cleaned, part)
 	}
 	return strings.Join(cleaned, "/")
+}
+
+func (c *HTTPClient) setWikiWriteLocations(result *WriteResult[WikiContentsFile], endpoint, owner, repo, wikiPath string) {
+	result.APIPath = endpoint
+	result.CachePath = wikiCachePath(wikiPath)
+	result.BrowserURL = c.wikiBrowserURL(owner, repo, wikiPath)
+}
+
+func wikiCachePath(wikiPath string) string {
+	wikiPath = normalizeWikiPath(wikiPath)
+	if wikiPath == "" {
+		return "wiki/Home.md"
+	}
+	return "wiki/" + ensureWikiMarkdownPath(wikiPath)
+}
+
+func (c *HTTPClient) wikiBrowserURL(owner, repo, wikiPath string) string {
+	base := c.browserBaseURL()
+	return base + "/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/wiki/" + url.PathEscape(ensureWikiMarkdownPath(normalizeWikiPath(wikiPath)))
+}
+
+func (c *HTTPClient) browserBaseURL() string {
+	u := *c.baseURL
+	if u.Host == "api.gitcode.com" || u.Host == "www.api.gitcode.com" {
+		u.Host = "gitcode.com"
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.Path = strings.TrimRight(u.Path, "/")
+	for _, suffix := range []string{"/api/v5", "/api/v4", "/api"} {
+		u.Path = strings.TrimSuffix(u.Path, suffix)
+	}
+	return strings.TrimRight(u.String(), "/")
 }
 
 func isImportableWikiMarkdown(wikiPath string) bool {

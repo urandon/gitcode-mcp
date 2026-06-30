@@ -63,6 +63,26 @@ Content-Type: application/json
 
 The response is a JSON array of linked issue records. Confirmation should require that the returned array contains the requested issue number. A repeated POST with the same array returned the same linked issue list, so the adapter treats successful readback as idempotent. JSON object payloads and string/object `issue_nums` shapes were rejected during discovery; keep the adapter payload as a raw JSON number array.
 
+## Wiki Write Routes And Browser URLs
+
+Wiki writes use the v5 contents API for the `{repo}.wiki` repository:
+
+```http
+POST /api/v5/repos/{owner}/{repo}.wiki/contents/{path}
+PUT /api/v5/repos/{owner}/{repo}.wiki/contents/{path}
+DELETE /api/v5/repos/{owner}/{repo}.wiki/contents/{path}
+```
+
+GitCode wiki UI links use the singular browser route:
+
+```http
+/{owner}/{repo}/wiki/{page_slug}
+```
+
+The browser slug must keep nested wiki paths inside one route segment, so path separators inside the page slug are URL-encoded. For example, `Evidence/Dogfood/Report.md` becomes `/wiki/Evidence%2FDogfood%2FReport.md`. Wiki create, update, and delete commands normalize missing extensions to `.md` before calling the provider. Write output reports the API path, cache path, remote slug, and normalized browser URL so an operator can compare the live page route with the cached record without relying on ambiguous `/wikis/...` SPA routes.
+
+Delete confirmation is inverted from create/update confirmation. After a successful provider DELETE, the confirmation GET for the exact normalized wiki path should return a typed not-found response. That not-found proves the deleted page is absent. A successful GET for the same path means deletion is not confirmed, while auth, route, conflict, rate-limit, and transient provider errors remain write failures.
+
 ## Pull Request Review Discussions
 
 Earlier live discovery for inline review comment metadata used the GitLab-compatible v4 discussion surface:
