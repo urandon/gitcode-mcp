@@ -66,7 +66,7 @@ func CheckVersionCompatibility(ctx context.Context, db *sql.DB) (VersionCompatib
 			Compatible:      false,
 			PermitWrites:    false,
 			Message:         "cache database was created by a pre-schema-versioning binary (iteration 1 equivalent)",
-			Remediation:     "re-initialize the cache with 'gitcode-mcp reinit-cache' or delete the cache file and re-sync",
+			Remediation:     "confirm the selected cache path, move aside or delete only that cache file, then re-sync; for current-schema live data use 'gitcode-mcp cache reset --live --repo <repo>'",
 		}, nil
 	}
 
@@ -82,7 +82,7 @@ func CheckVersionCompatibility(ctx context.Context, db *sql.DB) (VersionCompatib
 			Compatible:      false,
 			PermitWrites:    false,
 			Message:         "cache database contains an empty schema_version table (iteration 1 equivalent)",
-			Remediation:     "re-initialize the cache with 'gitcode-mcp reinit-cache' or delete the cache file and re-sync",
+			Remediation:     "confirm the selected cache path, move aside or delete only that cache file, then re-sync; for current-schema live data use 'gitcode-mcp cache reset --live --repo <repo>'",
 		}, nil
 	}
 

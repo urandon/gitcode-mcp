@@ -76,6 +76,8 @@ gitcode-mcp --timeout 30s sync --repo "YOUR_REPO" --issues --max-pages 3 --per-p
 
 The startup `--timeout` value bounds the whole CLI operation context. Collection bounds limit list traversal and record commits. During bulk sync, progress lines are written to stderr with the current collection, page, committed record count, and elapsed time. If the operation times out or is cancelled after some records are written, the command reports partial counts, grouped failures, elapsed time, and typed diagnostics while keeping successful records in the cache.
 
+Use `Ctrl-C` to cancel the current foreground sync process, or start sync with `--timeout DURATION` when an automatic stop is required. Cancelled and timed-out collection runs persist a non-complete frontier, so rerunning sync later will not treat the old tail as cache-covered. To resume backfill after a bounded or cancelled run, rerun the same collection sync without `--max-pages` or `--max-records`; it will list from the newest page, skip unchanged detail work by revision, continue past the previous bounded frontier, and record a complete frontier only after reaching the collection tail or a safe complete watermark.
+
 Bulk sync text output defaults to an aggregate summary:
 
 ```sh

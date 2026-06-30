@@ -67,6 +67,74 @@ func TestSyncFrontierRoundTrip(t *testing.T) {
 	}
 }
 
+func TestResetLiveClearsRemoteRecordsAndFrontiers(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	mustAddTestRepo(t, ctx, store, "other-repo")
+	now := time.Date(2026, 6, 30, 9, 0, 0, 0, time.UTC)
+	graph := SyncGraph{
+		RepoID: "fixture-a",
+		Record: Record{
+			ID:             "ISSUE-100",
+			Type:           "issue",
+			Path:           "issues/100.md",
+			Title:          "Remote",
+			Body:           "remote body",
+			Status:         "open",
+			ContentHash:    "remote-hash",
+			Provenance:     ProvenanceRemote,
+			RemoteType:     "issue",
+			RemoteID:       "100",
+			RemoteRevision: "rev-100",
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		},
+		Comments:        []RecordComment{{CommentID: "c100", Author: "alice", Body: "comment", ContentHash: "comment-hash", CreatedAt: now, UpdatedAt: now}},
+		RemoteRevisions: []RemoteRevision{{RecordID: "ISSUE-100", RemoteType: "issue", RemoteID: "100", RemoteRevision: "rev-100", Status: "fresh", LastFetchedAt: now}},
+		SyncEvents:      []SyncEvent{{ID: "sync-100", SourceID: "ISSUE-100", RemoteType: "issue", RemoteID: "100", RemoteRevision: "rev-100", Status: "succeeded", IdempotencyKey: "sync-100", Message: "ok", CreatedAt: now, StartedAt: now, CompletedAt: now}},
+		PRReviewDiscussions: []PRReviewDiscussion{{
+			RepoID: "fixture-a", PRNumber: 100, DiscussionID: "discussion-100", Kind: "inline", CreatedAt: now, UpdatedAt: now,
+		}},
+		PRReviewPositions: []PRReviewPosition{{
+			RepoID: "fixture-a", PRNumber: 100, CommentID: "c100", PositionKind: "current", DiscussionID: "discussion-100", NewPath: "x.go", NewLine: 10, CreatedAt: now, UpdatedAt: now,
+		}},
+	}
+	if err := store.UpsertSyncGraph(ctx, graph); err != nil {
+		t.Fatalf("UpsertSyncGraph returned error: %v", err)
+	}
+	if err := store.UpsertRecordGraph(ctx, RecordGraph{Record: Record{RepoID: "other-repo", ID: "ISSUE-200", Type: "issue", Path: "issues/200.md", Title: "Other", Body: "other body", Status: "open", ContentHash: "other-hash", Provenance: ProvenanceRemote, RemoteType: "issue", RemoteID: "200", CreatedAt: now, UpdatedAt: now}}); err != nil {
+		t.Fatalf("UpsertRecordGraph other repo returned error: %v", err)
+	}
+	if err := store.UpsertSyncFrontier(ctx, SyncFrontier{RepoID: "fixture-a", RemoteType: "issue", Ordering: "updated_at_desc", FilterKey: "state=all", Status: "complete", HighUpdatedAt: now, HighRemoteID: "100", HighNumber: 100, StopReason: "end_of_collection", UpdatedAt: now}); err != nil {
+		t.Fatalf("UpsertSyncFrontier returned error: %v", err)
+	}
+	if err := store.UpsertSyncFrontier(ctx, SyncFrontier{RepoID: "other-repo", RemoteType: "issue", Ordering: "updated_at_desc", FilterKey: "state=all", Status: "complete", HighUpdatedAt: now, HighRemoteID: "200", HighNumber: 200, StopReason: "end_of_collection", UpdatedAt: now}); err != nil {
+		t.Fatalf("UpsertSyncFrontier other repo returned error: %v", err)
+	}
+
+	if err := store.ResetLive(ctx, "fixture-a"); err != nil {
+		t.Fatalf("ResetLive returned error: %v", err)
+	}
+
+	for _, table := range []string{"sources", "records", "record_comments", "remote_revisions", "sync_events", "pr_review_discussions", "pr_review_positions", "sync_frontiers"} {
+		if got := countRepoRows(t, ctx, store, table, "fixture-a"); got != 0 {
+			t.Fatalf("%s fixture-a rows=%d, want 0", table, got)
+		}
+	}
+	if store.useFTS {
+		if got := countRepoRows(t, ctx, store, "fts_index", "fixture-a"); got != 0 {
+			t.Fatalf("fts_index fixture-a rows=%d, want 0", got)
+		}
+	}
+	if got := countRepoRows(t, ctx, store, "records", "other-repo"); got != 1 {
+		t.Fatalf("records other-repo rows=%d, want 1", got)
+	}
+	if got := countRepoRows(t, ctx, store, "sync_frontiers", "other-repo"); got != 1 {
+		t.Fatalf("sync_frontiers other-repo rows=%d, want 1", got)
+	}
+}
+
 func TestRecordSyncEventTimestamps(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)
@@ -957,6 +1025,15 @@ func mustAddTestRepo(t *testing.T, ctx context.Context, store *SQLiteStore, repo
 	if err != nil {
 		t.Fatalf("AddRepository returned error: %v", err)
 	}
+}
+
+func countRepoRows(t *testing.T, ctx context.Context, store *SQLiteStore, table string, repoID string) int {
+	t.Helper()
+	var count int
+	if err := store.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT count(*) FROM %s WHERE repo_id = ?`, table), repoID).Scan(&count); err != nil {
+		t.Fatalf("count %s rows returned error: %v", table, err)
+	}
+	return count
 }
 
 func mustUpsertGraph(t *testing.T, ctx context.Context, store *SQLiteStore, graph SourceGraph) {
