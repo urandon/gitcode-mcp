@@ -129,6 +129,7 @@ The MCP server exposes the same audited live-write lifecycle for agent workflows
 
 | MCP tool | Use |
 |---|---|
+| `create_issue` | Create an issue with title, body, labels, and idempotency key |
 | `add_issue_comment` | Add a proposal or status comment to an issue |
 | `update_issue_comment` | Update an existing issue comment body |
 | `update_issue` | Update issue title, body, state, or labels |

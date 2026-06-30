@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/capability"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/service"
 )
@@ -30,6 +31,34 @@ func TestHelpReturnsSuccess(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestCLIWriteCapabilitiesComeFromRegistry(t *testing.T) {
+	known := map[string]bool{}
+	for _, command := range commands {
+		known[command] = true
+	}
+	for _, cap := range capability.WriteCapabilities() {
+		if !cap.CLI.Enabled {
+			if cap.CLI.DisabledReason == "" {
+				t.Fatalf("%s is CLI-disabled without a reason", cap.ID)
+			}
+			continue
+		}
+		if known[cap.CLIName] {
+			continue
+		}
+		foundAlias := false
+		for _, alias := range cap.CLIAliases {
+			if known[alias] {
+				foundAlias = true
+				break
+			}
+		}
+		if !foundAlias {
+			t.Fatalf("CLI-enabled capability %s missing command %q or aliases %v", cap.ID, cap.CLIName, cap.CLIAliases)
+		}
 	}
 }
 

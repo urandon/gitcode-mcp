@@ -13,6 +13,7 @@ import (
 
 	"gitcode-mcp/internal/auth"
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/capability"
 	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/service"
@@ -39,6 +40,7 @@ type serviceInterface interface {
 	BulkSyncPRComments(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncAll(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	ListPRDiscussions(context.Context, service.PRDiscussionRequest) (service.PRDiscussionsResult, error)
+	CreateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	AddComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdateComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
@@ -232,17 +234,13 @@ const (
 	ToolAccessWrite ToolAccess = "write"
 )
 
-var writeToolNames = map[string]bool{
-	"sync_live":             true,
-	"index_repo":            true,
-	"add_issue_comment":     true,
-	"update_issue_comment":  true,
-	"update_issue":          true,
-	"create_pr":             true,
-	"update_pr":             true,
-	"add_pr_comment":        true,
-	"add_pr_review_comment": true,
-	"link_pr_issue":         true,
+var writeToolNames = buildWriteToolNames()
+
+func buildWriteToolNames() map[string]bool {
+	names := capability.MCPWriteToolNames()
+	names["sync_live"] = true
+	names["index_repo"] = true
+	return names
 }
 
 func normalizeToolAccess(access ToolAccess) ToolAccess {
@@ -479,46 +477,6 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "issues": {Type: "boolean", Description: "Sync issues."}, "wiki": {Type: "boolean", Description: "Sync wiki pages."}, "comments": {Type: "boolean", Description: "Sync supported comments."}, "pulls": {Type: "boolean", Description: "Sync pull requests."}, "remote_alias": {Type: "string", Description: "Specific remote alias for current sync surface."}, "idempotency_key": {Type: "string", Description: "Idempotency key."}, "max_pages": {Type: "integer", Description: "Maximum pages to sync.", Minimum: float64Ptr(1)}, "max_records": {Type: "integer", Description: "Maximum records to sync.", Minimum: float64Ptr(1)}, "per_page": {Type: "integer", Description: "Records per page.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 25.0}}, Required: []string{"repo_id"}},
 	},
 	{
-		Name:        "add_issue_comment",
-		Description: "Add a live comment to an issue through the audited write lifecycle.",
-		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Comment body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "number", "body"}},
-	},
-	{
-		Name:        "update_issue_comment",
-		Description: "Update a live issue comment through the audited write lifecycle.",
-		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"comment_id": {Type: "string", Description: "Issue comment id.", MinLength: 1}, "number": {Type: "integer", Description: "Optional issue number hint for cache parent resolution.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Updated comment body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "comment_id", "body"}},
-	},
-	{
-		Name:        "update_issue",
-		Description: "Update live issue metadata through the audited write lifecycle.",
-		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "title": {Type: "string", Description: "Issue title."}, "body": {Type: "string", Description: "Issue body."}, "state": {Type: "string", Description: "Issue state."}, "labels": {Type: "array", Description: "Issue labels."}}), Required: []string{"repo_id", "write_mode", "number"}},
-	},
-	{
-		Name:        "create_pr",
-		Description: "Create a live pull request through the audited write lifecycle.",
-		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"title": {Type: "string", Description: "Pull request title.", MinLength: 1}, "body": {Type: "string", Description: "Pull request body."}, "head": {Type: "string", Description: "Source branch.", MinLength: 1}, "base": {Type: "string", Description: "Target branch.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "title", "head", "base"}},
-	},
-	{
-		Name:        "update_pr",
-		Description: "Update live pull request metadata through the audited write lifecycle.",
-		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "title": {Type: "string", Description: "Pull request title."}, "body": {Type: "string", Description: "Pull request body."}, "state": {Type: "string", Description: "Pull request state."}}), Required: []string{"repo_id", "write_mode", "number"}},
-	},
-	{
-		Name:        "add_pr_comment",
-		Description: "Add a live pull request comment through the audited write lifecycle.",
-		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Comment body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "number", "body"}},
-	},
-	{
-		Name:        "add_pr_review_comment",
-		Description: "Create a live inline pull request review comment through the audited write lifecycle.",
-		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Comment body.", MinLength: 1}, "path": {Type: "string", Description: "Changed file path.", MinLength: 1}, "line": {Type: "integer", Description: "File line number.", Minimum: float64Ptr(1)}, "position": {Type: "integer", Description: "Diff position.", Minimum: float64Ptr(1)}, "start_line": {Type: "integer", Description: "Optional range start line.", Minimum: float64Ptr(1)}, "end_line": {Type: "integer", Description: "Optional range end line.", Minimum: float64Ptr(1)}}), Required: []string{"repo_id", "write_mode", "number", "body", "path"}},
-	},
-	{
-		Name:        "link_pr_issue",
-		Description: "Link a live pull request to an issue through the GitCode relation API, with deterministic description fallback when unsupported.",
-		InputSchema: inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"pr_number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "issue_number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "strategy": {Type: "string", Description: "Link strategy.", Enum: []string{"auto", "description_fallback"}, Default: "auto"}}), Required: []string{"repo_id", "write_mode", "pr_number", "issue_number"}},
-	},
-	{
 		Name:        "index_repo",
 		Description: "Build or refresh the local index for a configured repository.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "mode": {Type: "string", Description: "Index mode.", Default: "full"}, "strict": {Type: "boolean", Description: "Use strict indexing behavior."}}, Required: []string{"repo_id"}},
@@ -680,7 +638,7 @@ func (s *Server) toolsCall(ctx context.Context, req request) {
 	tool.handler(ctx, req.ID, args)
 }
 
-var toolListOrder = []string{
+var preWriteToolListOrder = []string{
 	"search_sources",
 	"get_source",
 	"list_sources",
@@ -699,17 +657,23 @@ var toolListOrder = []string{
 	"repo_status",
 	"list_pr_discussions",
 	"sync_live",
-	"add_issue_comment",
-	"update_issue_comment",
-	"update_issue",
-	"create_pr",
-	"update_pr",
-	"add_pr_comment",
-	"add_pr_review_comment",
-	"link_pr_issue",
+}
+
+var postWriteToolListOrder = []string{
 	"index_repo",
 	"auth_status",
 	"doctor",
+}
+
+var toolListOrder = buildToolListOrder()
+
+func buildToolListOrder() []string {
+	names := append([]string(nil), preWriteToolListOrder...)
+	for _, cap := range capability.MCPWriteCapabilities() {
+		names = append(names, cap.MCPName)
+	}
+	names = append(names, postWriteToolListOrder...)
+	return names
 }
 
 func toolDefinitionByName(name string) toolDefinition {
@@ -717,6 +681,9 @@ func toolDefinitionByName(name string) toolDefinition {
 		if def.Name == name {
 			return def
 		}
+	}
+	if cap, ok := capability.LookupByMCPName(name); ok && cap.MCP.Enabled {
+		return writeToolDefinition(cap)
 	}
 	return toolDefinition{Name: name, InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{}}}
 }
@@ -749,14 +716,9 @@ func (s *Server) toolRegistry() toolRegistry {
 	registerTool(registry, "repo_status", s.callRepoStatus)
 	registerTool(registry, "list_pr_discussions", s.callListPRDiscussions)
 	registerTool(registry, "sync_live", s.callSyncLive)
-	registerTool(registry, "add_issue_comment", s.callAddIssueComment)
-	registerTool(registry, "update_issue_comment", s.callUpdateIssueComment)
-	registerTool(registry, "update_issue", s.callUpdateIssue)
-	registerTool(registry, "create_pr", s.callCreatePR)
-	registerTool(registry, "update_pr", s.callUpdatePR)
-	registerTool(registry, "add_pr_comment", s.callAddPRComment)
-	registerTool(registry, "add_pr_review_comment", s.callAddPRReviewComment)
-	registerTool(registry, "link_pr_issue", s.callLinkPRIssue)
+	for _, cap := range capability.MCPWriteCapabilities() {
+		registerTool(registry, cap.MCPName, s.writeToolHandler(cap))
+	}
 	registerTool(registry, "index_repo", s.callIndexRepo)
 	registerTool(registry, "auth_status", s.callAuthStatus)
 	registerTool(registry, "doctor", s.callDoctor)
