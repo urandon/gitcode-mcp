@@ -423,8 +423,91 @@ func TestSyncStatusJSONAndAlias(t *testing.T) {
 	if err := json.Unmarshal(aggregate.Bytes(), &summary); err != nil {
 		t.Fatalf("invalid aggregate json: %v", err)
 	}
-	if summary.RepoID != "fixture-a" || summary.FreshCount != 1 || summary.CacheEmpty || len(summary.Results) != 1 {
+	if summary.RepoID != "fixture-a" || summary.FreshCount != 1 || summary.CacheEmpty || len(summary.Results) != 0 {
 		t.Fatalf("sync-status aggregate = %#v", summary)
+	}
+	var detailed bytes.Buffer
+	var detailedErr bytes.Buffer
+	if code := executeWithFactory([]string{"sync_status", "--repo", "fixture-a", "--format", "json", "--details"}, &detailed, &detailedErr, factory); code != 0 {
+		t.Fatalf("sync_status detailed code=%d stderr=%q", code, detailedErr.String())
+	}
+	var detailedSummary service.SyncStatusSummaryResult
+	if err := json.Unmarshal(detailed.Bytes(), &detailedSummary); err != nil {
+		t.Fatalf("invalid detailed aggregate json: %v", err)
+	}
+	if len(detailedSummary.Results) != 1 {
+		t.Fatalf("sync-status detailed aggregate = %#v", detailedSummary)
+	}
+}
+
+func TestSyncJSONDefaultsToCompactSummaryAndDetailsRestoresRecords(t *testing.T) {
+	var compactOut bytes.Buffer
+	var compactErr bytes.Buffer
+	if code := executeWithFactory([]string{"sync", "--offline", "--repo", "fixture-a", "--issues", "--format", "json"}, &compactOut, &compactErr, spyFactory()); code != 0 {
+		t.Fatalf("compact sync code=%d stderr=%q", code, compactErr.String())
+	}
+	var compact map[string]any
+	if err := json.Unmarshal(compactOut.Bytes(), &compact); err != nil {
+		t.Fatalf("invalid compact sync json: %v\n%s", err, compactOut.String())
+	}
+	if compact["status"] != "succeeded" || compact["success_count"].(float64) != 1 {
+		t.Fatalf("compact sync summary=%#v", compact)
+	}
+	if _, ok := compact["results"]; ok {
+		t.Fatalf("compact sync should omit per-record results: %#v", compact)
+	}
+	if !strings.Contains(compactErr.String(), "sync progress: collection=issues page=1 committed=1") {
+		t.Fatalf("missing progress stderr: %q", compactErr.String())
+	}
+
+	var detailsOut bytes.Buffer
+	var detailsErr bytes.Buffer
+	if code := executeWithFactory([]string{"sync", "--offline", "--repo", "fixture-a", "--issues", "--format", "json", "--details"}, &detailsOut, &detailsErr, spyFactory()); code != 0 {
+		t.Fatalf("details sync code=%d stderr=%q", code, detailsErr.String())
+	}
+	var detailed service.SyncResourcesResult
+	if err := json.Unmarshal(detailsOut.Bytes(), &detailed); err != nil {
+		t.Fatalf("invalid details sync json: %v\n%s", err, detailsOut.String())
+	}
+	if len(detailed.Results) != 1 || detailed.SuccessCount != 1 {
+		t.Fatalf("details sync result=%#v", detailed)
+	}
+}
+
+func TestRenderSyncResourcesPartialSummaryGroupsFailures(t *testing.T) {
+	result := &service.SyncResourcesResult{
+		Results:      []service.SyncResult{{Status: "succeeded", Counts: service.SyncCounts{Fetched: 1}, GeneratedAt: time.Now()}},
+		SuccessCount: 1,
+		FailureCount: 2,
+		Failures: []service.ResourceError{
+			{SourceID: "ISSUE-1", RemoteType: "issue", Message: "one"},
+			{SourceID: "ISSUE-2", RemoteType: "issue", Message: "two"},
+		},
+	}
+	partial := &service.PartialSyncError{Errors: result.Failures, SuccessCount: 1, FailureCount: 2, Diagnostic: service.SyncDiagnosticTimeout, TotalRequested: 3}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := renderSyncResources(&stdout, &stderr, "json", false, result, partial, startupPlan{}, time.Now().UTC())
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var summary map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &summary); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	if summary["status"] != "partial" || summary["diagnostic"] != string(service.SyncDiagnosticTimeout) || summary["failure_count"].(float64) != 2 {
+		t.Fatalf("partial summary=%#v", summary)
+	}
+	if _, ok := summary["results"]; ok {
+		t.Fatalf("partial summary should omit results: %#v", summary)
+	}
+	groups, ok := summary["failure_groups"].([]any)
+	if !ok || len(groups) != 1 {
+		t.Fatalf("failure groups=%#v", summary["failure_groups"])
+	}
+	group := groups[0].(map[string]any)
+	if group["remote_type"] != "issue" || group["count"].(float64) != 2 {
+		t.Fatalf("failure group=%#v", group)
 	}
 }
 
@@ -756,25 +839,42 @@ func (s *spyService) SyncResources(_ context.Context, reqs []service.SyncRequest
 	}
 	return &service.SyncResourcesResult{Results: results, SuccessCount: len(results)}, nil
 }
-func (s *spyService) BulkSyncIssues(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
+func (s *spyService) BulkSyncIssues(_ context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
 	s.called("BulkSyncIssues")
-	return &service.SyncResourcesResult{Results: []service.SyncResult{{Status: "succeeded", Counts: service.SyncCounts{Fetched: 1}, GeneratedAt: time.Now()}}, SuccessCount: 1}, nil
+	return spyBulkSyncResult(req, "issues"), nil
 }
-func (s *spyService) BulkSyncWiki(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
+func (s *spyService) BulkSyncWiki(_ context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
 	s.called("BulkSyncWiki")
-	return &service.SyncResourcesResult{Results: []service.SyncResult{{Status: "succeeded", Counts: service.SyncCounts{Fetched: 1}, GeneratedAt: time.Now()}}, SuccessCount: 1}, nil
+	return spyBulkSyncResult(req, "wiki"), nil
 }
-func (s *spyService) BulkSyncPullRequests(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
+func (s *spyService) BulkSyncPullRequests(_ context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
 	s.called("BulkSyncPullRequests")
-	return &service.SyncResourcesResult{Results: []service.SyncResult{{Status: "succeeded", Counts: service.SyncCounts{Fetched: 1}, GeneratedAt: time.Now()}}, SuccessCount: 1}, nil
+	return spyBulkSyncResult(req, "pulls"), nil
 }
-func (s *spyService) BulkSyncPRComments(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
+func (s *spyService) BulkSyncPRComments(_ context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
 	s.called("BulkSyncPRComments")
-	return &service.SyncResourcesResult{Results: []service.SyncResult{{Status: "succeeded", Counts: service.SyncCounts{Fetched: 1}, GeneratedAt: time.Now()}}, SuccessCount: 1}, nil
+	return spyBulkSyncResult(req, "pr_comments"), nil
 }
-func (s *spyService) BulkSyncAll(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
+func (s *spyService) BulkSyncAll(_ context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
 	s.called("BulkSyncAll")
-	return &service.SyncResourcesResult{Results: []service.SyncResult{{Status: "succeeded", Counts: service.SyncCounts{Fetched: 1}, GeneratedAt: time.Now()}}, SuccessCount: 1}, nil
+	return spyBulkSyncResult(req, "all"), nil
+}
+
+func spyBulkSyncResult(req service.BulkSyncRequest, collection string) *service.SyncResourcesResult {
+	if req.ProgressChan != nil {
+		req.ProgressChan <- service.ProgressEvent{Collection: collection, Page: 1, RecordsFetched: 1}
+	}
+	if req.Bounds != nil && req.Bounds.ProgressChan != nil && req.Bounds.ProgressChan != req.ProgressChan {
+		req.Bounds.ProgressChan <- service.ProgressEvent{Collection: collection, Page: 1, RecordsFetched: 1}
+	}
+	now := time.Now()
+	return &service.SyncResourcesResult{
+		Results:       []service.SyncResult{{Status: "succeeded", Counts: service.SyncCounts{Fetched: 1, Listed: 1}, GeneratedAt: now, StartedAt: now, CompletedAt: now, ZeroDelta: true}},
+		SuccessCount:  1,
+		PagesListed:   1,
+		RecordsListed: 1,
+		Ordering:      "updated_at_desc",
+	}
 }
 func (s *spyService) ListPRDiscussions(_ context.Context, req service.PRDiscussionRequest) (service.PRDiscussionsResult, error) {
 	s.called("ListPRDiscussions")
