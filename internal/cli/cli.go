@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"gitcode-mcp/internal/buildinfo"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/credential"
@@ -23,8 +24,6 @@ import (
 	"gitcode-mcp/internal/index"
 	"gitcode-mcp/internal/service"
 )
-
-const version = "0.1.0"
 
 var commands = []string{
 	"ingest",
@@ -251,7 +250,7 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 		return 0
 	}
 	if args[0] == "--version" || args[0] == "version" {
-		fmt.Fprintf(stdout, "gitcode-mcp %s\n", version)
+		fmt.Fprintf(stdout, "gitcode-mcp %s\n", buildinfo.Version)
 		return 0
 	}
 	if args[0] == "config" || args[0] == "auth" || args[0] == "doctor" || args[0] == "migrate-cache" || args[0] == "bind" {
@@ -600,7 +599,7 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 		return 0
 	}
 	if command == "doctor" && opts.runtimeAudit {
-		report := config.BuildRuntimeAuditConfigReport(deps.Source, config.Overrides{}, deps.CredentialReporter, version)
+		report := config.BuildRuntimeAuditConfigReport(deps.Source, config.Overrides{}, deps.CredentialReporter, buildinfo.Version)
 		payload := runtimeAuditPayload{RepoID: opts.repo, Config: report}
 		if opts.format == "json" {
 			return renderJSON(stdout, payload)
@@ -1978,7 +1977,7 @@ func executeDoctorCommand(ctx context.Context, opts options, plan startupPlan, s
 		status := plan.CredentialStatus
 		cred = &status
 	}
-	report, err := doctor.Build(ctx, doctor.Request{Version: version, Source: deps.Source, CredentialReporter: deps.CredentialReporter, CredentialStatus: cred, CachePath: cachePath, Live: plan.ProviderMode == "live-http", ProviderMode: plan.ProviderMode, MCPToolAccess: plan.MCPToolAccess, APIBaseURL: plan.APIBaseURL, RepoID: opts.repo, LiveBinding: plan.LiveRepositoryBinding})
+	report, err := doctor.Build(ctx, doctor.Request{Version: buildinfo.Version, Source: deps.Source, CredentialReporter: deps.CredentialReporter, CredentialStatus: cred, CachePath: cachePath, Live: plan.ProviderMode == "live-http", ProviderMode: plan.ProviderMode, MCPToolAccess: plan.MCPToolAccess, APIBaseURL: plan.APIBaseURL, RepoID: opts.repo, LiveBinding: plan.LiveRepositoryBinding})
 	if err != nil {
 		return writeError(stderr, opts.format, err)
 	}

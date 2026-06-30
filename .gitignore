@@ -4,6 +4,7 @@ ai/
 .gitcode-mcp-cache/
 .gitcode/mcp/
 bin/
+dist/
 *.test
 *.out
 /gitcode-mcp

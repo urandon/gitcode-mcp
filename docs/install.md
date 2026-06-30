@@ -5,6 +5,25 @@
 - Go 1.22 or later
 - Git (optional, for source builds)
 
+## From release binary
+
+Download the archive and `checksums.txt` from the GitHub release mirror:
+
+```sh
+curl -LO https://github.com/urandon/gitcode-mcp/releases/download/v0.1.0/gitcode-mcp_v0.1.0_darwin_arm64.tar.gz
+curl -LO https://github.com/urandon/gitcode-mcp/releases/download/v0.1.0/checksums.txt
+shasum -a 256 -c checksums.txt
+tar -xzf gitcode-mcp_v0.1.0_darwin_arm64.tar.gz
+install -m 0755 gitcode-mcp_v0.1.0_darwin_arm64/gitcode-mcp /usr/local/bin/gitcode-mcp
+```
+
+Release artifacts are built for:
+
+- `darwin/arm64`
+- `linux/amd64`
+- `linux/arm64`
+- `windows/amd64`
+
 ## From source
 
 ```sh
