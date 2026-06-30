@@ -35,6 +35,7 @@ For MCP usage, start with [MCP Setup](docs/mcp-setup.md). For live credentials, 
 - Read from cache: [Read Walkthrough](docs/read-walkthrough.md)
 - Perform explicit writes: [Write Walkthrough](docs/write-walkthrough.md)
 - Work with PR/MR flow: [PR/MR Workflow](docs/pr-mr-workflow.md)
+- Install or publish releases: [Install](docs/install.md), [Release Process](docs/release-process.md)
 - Review component boundaries: [Component Architecture](docs/component-architecture.md)
 - Place tests and fixtures: [Test Architecture](docs/test-architecture.md)
 - Configure repositories: [Repository Binding](docs/repo-binding.md)

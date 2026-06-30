@@ -10,6 +10,8 @@ Start with:
 - [test-intent-migration.md](test-intent-migration.md)
 - [cache-and-sync-model.md](cache-and-sync-model.md)
 - [gitcode-api-discovery.md](gitcode-api-discovery.md)
+- [install.md](install.md)
+- [release-process.md](release-process.md)
 - [operations/mcp-installation-and-secrets.md](operations/mcp-installation-and-secrets.md)
 
 Use this directory only for documentation that is part of the durable product surface.

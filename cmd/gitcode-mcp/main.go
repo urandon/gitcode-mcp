@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/auth"
+	"gitcode-mcp/internal/buildinfo"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/cli"
 	"gitcode-mcp/internal/config"
@@ -21,8 +22,6 @@ import (
 	"gitcode-mcp/internal/mcp"
 	"gitcode-mcp/internal/service"
 )
-
-const version = "0.1.0"
 
 type StartupDeps struct {
 	Config             config.Config
@@ -97,7 +96,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 		return 0
 	}
 	if opts.version {
-		fmt.Fprintf(stdout, "gitcode-mcp %s\n", version)
+		fmt.Fprintf(stdout, "gitcode-mcp %s\n", buildinfo.Version)
 		return 0
 	}
 	if len(rest) > 0 && rest[0] == "mcp" && len(rest) > 1 && (rest[1] == "-h" || rest[1] == "--help") {
