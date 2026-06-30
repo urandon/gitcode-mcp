@@ -12,7 +12,7 @@ Download the archive and `checksums.txt` from the GitHub release mirror:
 ```sh
 curl -LO https://github.com/urandon/gitcode-mcp/releases/download/v0.1.0/gitcode-mcp_v0.1.0_darwin_arm64.tar.gz
 curl -LO https://github.com/urandon/gitcode-mcp/releases/download/v0.1.0/checksums.txt
-shasum -a 256 -c checksums.txt
+grep 'gitcode-mcp_v0.1.0_darwin_arm64.tar.gz$' checksums.txt | shasum -a 256 -c -
 tar -xzf gitcode-mcp_v0.1.0_darwin_arm64.tar.gz
 install -m 0755 gitcode-mcp_v0.1.0_darwin_arm64/gitcode-mcp /usr/local/bin/gitcode-mcp
 ```
