@@ -36,6 +36,9 @@ type Provider interface {
 	DeleteWikiPage(context.Context, DeleteWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
 	ListMilestones(context.Context, MilestoneListRequest) (Page[Milestone], error)
 	GetMilestone(context.Context, MilestoneRequest) (Milestone, error)
+	GetRelease(context.Context, ReleaseRequest) (Release, error)
+	CreateRelease(context.Context, ReleaseWriteRequest, WriteOptions) (WriteResult[Release], error)
+	UpdateRelease(context.Context, ReleaseWriteRequest, WriteOptions) (WriteResult[Release], error)
 }
 
 type ProviderMode string
@@ -315,6 +318,18 @@ func (p liveProvider) AddLabel(ctx context.Context, req LabelRequest, opts Write
 	}
 }
 
+func (p liveProvider) GetRelease(ctx context.Context, req ReleaseRequest) (Release, error) {
+	return p.HTTPClient.GetRelease(ctx, req)
+}
+
+func (p liveProvider) CreateRelease(ctx context.Context, req ReleaseWriteRequest, opts WriteOptions) (WriteResult[Release], error) {
+	return p.HTTPClient.CreateRelease(ctx, req, opts)
+}
+
+func (p liveProvider) UpdateRelease(ctx context.Context, req ReleaseWriteRequest, opts WriteOptions) (WriteResult[Release], error) {
+	return p.HTTPClient.UpdateRelease(ctx, req, opts)
+}
+
 type unavailableProvider struct {
 	reason string
 }
@@ -401,6 +416,15 @@ func (p unavailableProvider) ListMilestones(context.Context, MilestoneListReques
 }
 func (p unavailableProvider) GetMilestone(context.Context, MilestoneRequest) (Milestone, error) {
 	return Milestone{}, p.err()
+}
+func (p unavailableProvider) GetRelease(context.Context, ReleaseRequest) (Release, error) {
+	return Release{}, p.err()
+}
+func (p unavailableProvider) CreateRelease(context.Context, ReleaseWriteRequest, WriteOptions) (WriteResult[Release], error) {
+	return WriteResult[Release]{}, p.err()
+}
+func (p unavailableProvider) UpdateRelease(context.Context, ReleaseWriteRequest, WriteOptions) (WriteResult[Release], error) {
+	return WriteResult[Release]{}, p.err()
 }
 
 func IsProviderUnavailable(err error) bool {

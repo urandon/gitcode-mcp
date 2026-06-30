@@ -247,6 +247,18 @@ func (sanitizedFixtureClient) GetMilestone(context.Context, gitcode.MilestoneReq
 	return gitcode.Milestone{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
+func (sanitizedFixtureClient) GetRelease(context.Context, gitcode.ReleaseRequest) (gitcode.Release, error) {
+	return gitcode.Release{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
+}
+
+func (sanitizedFixtureClient) CreateRelease(context.Context, gitcode.ReleaseWriteRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Release], error) {
+	return gitcode.WriteResult[gitcode.Release]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
+}
+
+func (sanitizedFixtureClient) UpdateRelease(context.Context, gitcode.ReleaseWriteRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Release], error) {
+	return gitcode.WriteResult[gitcode.Release]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
+}
+
 func fixtureNow() time.Time {
 	return time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
 }
@@ -2214,6 +2226,75 @@ func (s *Service) AddLabel(ctx context.Context, req WriteCommandRequest) (WriteC
 	return s.executeWrite(ctx, "add-label", req, RepositoryScopeIssues)
 }
 
+func (s *Service) PublishRelease(ctx context.Context, req PublishReleaseRequest) (PublishReleaseResult, error) {
+	if strings.TrimSpace(req.Tag) == "" {
+		return PublishReleaseResult{}, ErrInvalidQuery{Field: "tag", Message: "release tag is required"}
+	}
+	if strings.TrimSpace(req.Title) == "" {
+		return PublishReleaseResult{}, ErrInvalidQuery{Field: "title", Message: "release title is required"}
+	}
+	if strings.TrimSpace(req.Body) == "" {
+		return PublishReleaseResult{}, ErrInvalidQuery{Field: "body", Message: "release body is required"}
+	}
+	if req.Mode != WriteModeDryRun && req.Mode != WriteModeLive {
+		return PublishReleaseResult{}, ErrInvalidQuery{Field: "write_mode", Message: "exactly one of dry_run or live is required"}
+	}
+	route, err := s.BuildAdapterRoute(ctx, firstNonEmptyString(req.RepoID, req.Repo), RepositoryScopeIssues)
+	if err != nil {
+		return PublishReleaseResult{}, err
+	}
+	status, err := releaseStatus(req.Status)
+	if err != nil {
+		return PublishReleaseResult{}, err
+	}
+	if strings.TrimSpace(req.Ref) == "" {
+		req.Ref = "main"
+	}
+	key, fingerprint := releaseIdempotency(req, status)
+	base := PublishReleaseResult{Command: "publish-release", Status: "dry_run_valid", RepoID: route.RepoID, Tag: strings.TrimSpace(req.Tag), ReleaseStatus: status, AssetLinks: req.Assets, IdempotencyKey: key, SourceFingerprint: fingerprint, Evidence: "validated release publish command", GeneratedAt: s.now().UTC()}
+	if req.Mode == WriteModeDryRun {
+		return base, nil
+	}
+	if !s.hasWriteCredential() {
+		return PublishReleaseResult{}, ErrWriteFailure{Code: "write_missing_credential", RepoID: route.RepoID, IdempotencyKey: key}
+	}
+	links := make([]gitcode.ReleaseLink, 0, len(req.Assets))
+	for _, asset := range req.Assets {
+		links = append(links, gitcode.ReleaseLink{Name: strings.TrimSpace(asset.Name), URL: strings.TrimSpace(asset.URL)})
+	}
+	writeReq := gitcode.ReleaseWriteRequest{
+		Owner:         route.Owner,
+		Repo:          route.Name,
+		TagName:       strings.TrimSpace(req.Tag),
+		Ref:           strings.TrimSpace(req.Ref),
+		Name:          strings.TrimSpace(req.Title),
+		Description:   req.Body,
+		ReleaseStatus: status,
+		Links:         links,
+	}
+	existing, err := s.client.GetRelease(ctx, gitcode.ReleaseRequest{Owner: route.Owner, Repo: route.Name, Tag: writeReq.TagName})
+	var result gitcode.WriteResult[gitcode.Release]
+	if err == nil && strings.TrimSpace(existing.TagName) != "" {
+		result, err = s.client.UpdateRelease(ctx, writeReq, gitcode.WriteOptions{IdempotencyKey: key})
+	} else if isReleaseNotFound(err) {
+		result, err = s.client.CreateRelease(ctx, writeReq, gitcode.WriteOptions{IdempotencyKey: key})
+	} else if err != nil {
+		return PublishReleaseResult{}, ErrWriteFailure{Code: s.writeAdapterErrorCode(req.Mode, err), RepoID: route.RepoID, IdempotencyKey: key, PayloadSource: failureSource(err), Cause: writeFailureCause(s.writeAdapterErrorCode(req.Mode, err), err)}
+	}
+	if err != nil {
+		code := s.writeAdapterErrorCode(req.Mode, err)
+		return PublishReleaseResult{}, ErrWriteFailure{Code: code, RepoID: route.RepoID, IdempotencyKey: key, PayloadSource: failureSource(err), Cause: writeFailureCause(code, err)}
+	}
+	if !result.Confirmed || strings.TrimSpace(result.RemoteID) == "" {
+		return PublishReleaseResult{}, ErrWriteFailure{Code: "write_unconfirmed_remote", RepoID: route.RepoID, IdempotencyKey: key}
+	}
+	base.Status = "succeeded"
+	base.RemoteID = result.RemoteID
+	base.Evidence = "adapter-confirmed release publish"
+	base.GeneratedAt = firstNonZeroTime(result.ConfirmedAt, s.now().UTC())
+	return base, nil
+}
+
 func (s *Service) operationResult(ctx context.Context, command string, req OperationRequest) (OperationResult, error) {
 	if err := ctx.Err(); err != nil {
 		return OperationResult{}, err
@@ -3747,6 +3828,56 @@ func linkPRIssueBody(body string, issueNumber int) string {
 		return line
 	}
 	return trimmed + "\n\n" + line
+}
+
+func isReleaseNotFound(err error) bool {
+	var notFound gitcode.ErrNotFound
+	return errors.As(err, &notFound)
+}
+
+func releaseStatus(value string) (int, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "latest":
+		return gitcode.ReleaseStatusLatest, nil
+	case "unset", "default":
+		return gitcode.ReleaseStatusUnset, nil
+	case "pre", "prerelease", "pre-release":
+		return gitcode.ReleaseStatusPreRelease, nil
+	default:
+		return 0, ErrInvalidQuery{Field: "status", Message: "release status must be latest, prerelease, or unset"}
+	}
+}
+
+func releaseIdempotency(req PublishReleaseRequest, status int) (string, string) {
+	payload, _ := json.Marshal(struct {
+		Command string
+		RepoID  string
+		Tag     string
+		Ref     string
+		Title   string
+		Body    string
+		Status  int
+		Assets  []PublishAssetLink
+	}{
+		Command: "publish-release",
+		RepoID:  firstNonEmptyString(req.RepoID, req.Repo),
+		Tag:     strings.TrimSpace(req.Tag),
+		Ref:     strings.TrimSpace(req.Ref),
+		Title:   strings.TrimSpace(req.Title),
+		Body:    req.Body,
+		Status:  status,
+		Assets:  req.Assets,
+	})
+	sum := sha256.Sum256(payload)
+	fingerprint := hex.EncodeToString(sum[:])
+	key := strings.TrimSpace(req.IdempotencyKey)
+	if key == "" {
+		key = "publish-release-" + fingerprint
+		if len(key) > 64 {
+			key = key[:64]
+		}
+	}
+	return key, fingerprint
 }
 
 func writeIdempotency(command string, req WriteCommandRequest) (string, string) {

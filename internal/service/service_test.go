@@ -2562,6 +2562,9 @@ type fakeGitCodeClient struct {
 	createPRReviewCommentCalls   int
 	createWikiPageCalls          int
 	addLabelCalls                int
+	getReleaseCalls              int
+	createReleaseCalls           int
+	updateReleaseCalls           int
 	createIssueResult            gitcode.WriteResult[gitcode.Issue]
 	createIssueResults           []gitcode.WriteResult[gitcode.Issue]
 	createIssueCommentResult     gitcode.WriteResult[gitcode.Comment]
@@ -2573,6 +2576,10 @@ type fakeGitCodeClient struct {
 	createPRReviewCommentResult  gitcode.WriteResult[gitcode.PRComment]
 	createWikiPageResult         gitcode.WriteResult[gitcode.WikiPage]
 	addLabelResult               gitcode.WriteResult[gitcode.Issue]
+	release                      gitcode.Release
+	getReleaseErr                error
+	createReleaseResult          gitcode.WriteResult[gitcode.Release]
+	updateReleaseResult          gitcode.WriteResult[gitcode.Release]
 	listIssuesPages              []gitcode.Page[gitcode.IssueSummary]
 	listIssueRequests            []gitcode.IssueListRequest
 	listIssuesErrors             []error
@@ -2599,6 +2606,8 @@ type fakeGitCodeClient struct {
 	lastCreatePRCommentReq       gitcode.CreatePRCommentRequest
 	lastCreatePRReviewCommentReq gitcode.CreatePRReviewCommentRequest
 	lastWriteOptions             gitcode.WriteOptions
+	lastCreateReleaseReq         gitcode.ReleaseWriteRequest
+	lastUpdateReleaseReq         gitcode.ReleaseWriteRequest
 }
 
 func (f *fakeGitCodeClient) nextError() error {
@@ -2818,6 +2827,40 @@ func (f *fakeGitCodeClient) ListMilestones(context.Context, gitcode.MilestoneLis
 
 func (f *fakeGitCodeClient) GetMilestone(context.Context, gitcode.MilestoneRequest) (gitcode.Milestone, error) {
 	return gitcode.Milestone{}, nil
+}
+
+func (f *fakeGitCodeClient) GetRelease(context.Context, gitcode.ReleaseRequest) (gitcode.Release, error) {
+	f.getReleaseCalls++
+	if f.getReleaseErr != nil {
+		return gitcode.Release{}, f.getReleaseErr
+	}
+	return f.release, nil
+}
+
+func (f *fakeGitCodeClient) CreateRelease(_ context.Context, req gitcode.ReleaseWriteRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Release], error) {
+	f.createReleaseCalls++
+	f.lastCreateReleaseReq = req
+	f.lastWriteOptions = opts
+	if err := f.nextError(); err != nil {
+		return gitcode.WriteResult[gitcode.Release]{}, err
+	}
+	if !f.createReleaseResult.Confirmed {
+		return gitcode.WriteResult[gitcode.Release]{Record: gitcode.Release{TagName: req.TagName, Name: req.Name, Description: req.Description, ReleaseStatus: req.ReleaseStatus}, Confirmed: true, RemoteID: req.TagName, RemoteSlug: req.TagName, ConfirmedAt: time.Now()}, nil
+	}
+	return f.createReleaseResult, nil
+}
+
+func (f *fakeGitCodeClient) UpdateRelease(_ context.Context, req gitcode.ReleaseWriteRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Release], error) {
+	f.updateReleaseCalls++
+	f.lastUpdateReleaseReq = req
+	f.lastWriteOptions = opts
+	if err := f.nextError(); err != nil {
+		return gitcode.WriteResult[gitcode.Release]{}, err
+	}
+	if !f.updateReleaseResult.Confirmed {
+		return gitcode.WriteResult[gitcode.Release]{Record: gitcode.Release{TagName: req.TagName, Name: req.Name, Description: req.Description, ReleaseStatus: req.ReleaseStatus}, Confirmed: true, RemoteID: req.TagName, RemoteSlug: req.TagName, ConfirmedAt: time.Now()}, nil
+	}
+	return f.updateReleaseResult, nil
 }
 
 var _ gitcode.Client = (*fakeGitCodeClient)(nil)
@@ -3061,6 +3104,89 @@ func TestScenario013004AddLabelLiveNoClientCall(t *testing.T) {
 	}
 	if client.addLabelCalls != 0 {
 		t.Fatalf("expected 0 addLabelCalls (old route not called), got %d", client.addLabelCalls)
+	}
+}
+
+func TestPublishReleaseDryRun(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{}
+	svc := NewWithClient(store, client)
+
+	result, err := svc.PublishRelease(ctx, PublishReleaseRequest{RepoID: "fixture-a", Mode: WriteModeDryRun, Tag: "v0.1.0", Title: "gitcode-mcp v0.1.0", Body: "body", Assets: []PublishAssetLink{{Name: "checksums.txt", URL: "https://example.invalid/checksums.txt"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "dry_run_valid" || result.Tag != "v0.1.0" || result.ReleaseStatus != gitcode.ReleaseStatusLatest || len(result.AssetLinks) != 1 {
+		t.Fatalf("result=%#v", result)
+	}
+	if client.getReleaseCalls != 0 || client.createReleaseCalls != 0 || client.updateReleaseCalls != 0 {
+		t.Fatalf("dry-run called client: get=%d create=%d update=%d", client.getReleaseCalls, client.createReleaseCalls, client.updateReleaseCalls)
+	}
+}
+
+func TestPublishReleaseCreatesMissingRelease(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{getReleaseErr: gitcode.ErrNotFound{Endpoint: "/api/v2/projects/owner-a%2Frepo-a/releases/v0.1.0"}}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+
+	result, err := svc.PublishRelease(ctx, PublishReleaseRequest{RepoID: "fixture-a", Mode: WriteModeLive, Tag: "v0.1.0", Ref: "main", Title: "gitcode-mcp v0.1.0", Body: "body", Status: "latest", Assets: []PublishAssetLink{{Name: "checksums.txt", URL: "https://example.invalid/checksums.txt"}}, IdempotencyKey: "release-v0.1.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "succeeded" || result.RemoteID != "v0.1.0" {
+		t.Fatalf("result=%#v", result)
+	}
+	if client.getReleaseCalls != 1 || client.createReleaseCalls != 1 || client.updateReleaseCalls != 0 {
+		t.Fatalf("calls get=%d create=%d update=%d", client.getReleaseCalls, client.createReleaseCalls, client.updateReleaseCalls)
+	}
+	if client.lastCreateReleaseReq.Owner != "owner-a" || client.lastCreateReleaseReq.Repo != "repo-a" || client.lastCreateReleaseReq.TagName != "v0.1.0" || client.lastCreateReleaseReq.Ref != "main" || client.lastCreateReleaseReq.ReleaseStatus != gitcode.ReleaseStatusLatest {
+		t.Fatalf("create request=%#v", client.lastCreateReleaseReq)
+	}
+	if len(client.lastCreateReleaseReq.Links) != 1 || client.lastCreateReleaseReq.Links[0].Name != "checksums.txt" {
+		t.Fatalf("links=%#v", client.lastCreateReleaseReq.Links)
+	}
+	if client.lastWriteOptions.IdempotencyKey != "release-v0.1.0" {
+		t.Fatalf("idempotency=%#v", client.lastWriteOptions)
+	}
+}
+
+func TestPublishReleaseUpdatesExistingRelease(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{release: gitcode.Release{TagName: "v0.1.0", Name: "old"}}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+
+	result, err := svc.PublishRelease(ctx, PublishReleaseRequest{RepoID: "fixture-a", Mode: WriteModeLive, Tag: "v0.1.0", Title: "gitcode-mcp v0.1.0", Body: "body", Status: "prerelease"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "succeeded" || result.ReleaseStatus != gitcode.ReleaseStatusPreRelease {
+		t.Fatalf("result=%#v", result)
+	}
+	if client.getReleaseCalls != 1 || client.createReleaseCalls != 0 || client.updateReleaseCalls != 1 {
+		t.Fatalf("calls get=%d create=%d update=%d", client.getReleaseCalls, client.createReleaseCalls, client.updateReleaseCalls)
+	}
+	if client.lastUpdateReleaseReq.TagName != "v0.1.0" || client.lastUpdateReleaseReq.ReleaseStatus != gitcode.ReleaseStatusPreRelease {
+		t.Fatalf("update request=%#v", client.lastUpdateReleaseReq)
 	}
 }
 
