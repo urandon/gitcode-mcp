@@ -150,7 +150,7 @@ After sync and indexing, search cached source records:
 gitcode-mcp search_sources "query"
 ```
 
-`search_sources --help` documents `--repo`, `--kind`, `--provenance`, `--limit`, `--offset`, `--cache-path`, and `--format`. The `--kind` filter includes `issue` and `wiki`; the `--provenance` filter includes `live`, `fixture`, `remote`, `projection`, and `bridge`. A query with no matches should return an empty result set, not a cache-empty error after successful sync/index.
+`search_sources --help` documents `--repo`, `--kind`, `--provenance`, `--limit`, `--offset`, `--cache-path`, and `--format`. The `--kind` filter includes `issue` and `wiki`; the `--provenance` filter includes `live`, `fixture`, `remote`, `projection`, and `bridge`. Search results report `search_mode: full_text`. The query is exact/token full-text matching over cached text, not fuzzy or semantic retrieval. A query with no matches should return an empty result set, not a cache-empty error after successful sync/index; retry with exact terms or keyword variants when wording may differ.
 
 Chunk search remains available separately:
 

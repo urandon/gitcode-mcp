@@ -213,11 +213,11 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 
 | Tool | Description |
 |---|---|
-| `search_sources` | Search cached sources by full-text query |
+| `search_sources` | Search cached sources by full-text/token query; not fuzzy or semantic |
 | `get_source` | Get a cached source record by stable id |
 | `list_sources` | List cached sources with kind/status/limit/offset |
 | `list_chunks` | List cached index chunks |
-| `search_chunks` | Search cached index chunks |
+| `search_chunks` | Search cached index chunks by full-text/token query; not fuzzy or semantic |
 | `get_snippet` | Get a cached chunk snippet |
 | `stale_index_report` | Report missing or stale index state |
 | `recent_changes` | List recently updated cached sources |

@@ -69,6 +69,8 @@ gitcode-mcp search --repo example-owner/example-repo "remote issue body"
 
 Expected: returns sources containing the query text in title or body.
 
+Search is cache full-text matching over indexed source title/body text. It is not fuzzy or semantic retrieval. If a query returns no results, retry with exact terms, identifiers, or multiple keyword variants rather than treating the miss as proof the source does not exist.
+
 Search accepts the same provenance filter:
 
 ```sh
