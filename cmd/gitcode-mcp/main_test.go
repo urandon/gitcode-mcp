@@ -642,6 +642,47 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 		assertStartupCreateConfirmation(t, cachePath, "cred-write-1")
 	})
 
+	t.Run("SCN-CLI-LIVE-WRITE-SCHEMA-BLOCKED-DIAGNOSTIC-AND-ALTERNATE-CACHE", func(t *testing.T) {
+		server := testnet.NewGitCodeAPIServer(t)
+		defer server.Close()
+		dir := t.TempDir()
+		blockedCachePath := filepath.Join(dir, "blocked-cache.db")
+		alternateCachePath := filepath.Join(dir, "alternate-cache.db")
+		src := newTestSource(t)
+		src.env[config.EnvToken] = "test-token"
+		addRepoForStartupTest(t, blockedCachePath, server.BaseURL())
+		setSchemaVersion(t, blockedCachePath, 13)
+		addRepoForStartupTest(t, alternateCachePath, server.BaseURL())
+
+		var blockedStdout, blockedStderr bytes.Buffer
+		blockedCode := run([]string{"create-issue", "--cache-path", blockedCachePath, "--repo", "fixture-a", "--title", "Blocked", "--body", "selected cache is old", "--idempotency-key", "schema-blocked-write"}, strings.NewReader(""), &blockedStdout, &blockedStderr, src)
+		if blockedCode == 0 {
+			t.Fatalf("blocked write succeeded stdout=%q stderr=%q", blockedStdout.String(), blockedStderr.String())
+		}
+		blockedOut := blockedStdout.String() + blockedStderr.String()
+		for _, want := range []string{"failure_class: cache_schema_blocked", "http_attempted: false", "cache_readiness: schema_blocked", "migrate-cache --confirm --cache-path <selected-cache>", "--cache-path <alternate-current-cache>"} {
+			if !strings.Contains(blockedOut, want) {
+				t.Fatalf("schema-blocked output missing %q in %q", want, blockedOut)
+			}
+		}
+		if strings.Contains(blockedOut, "config_credential") || strings.Contains(blockedOut, "api_validation") {
+			t.Fatalf("schema-blocked output conflated credential/provider readiness: %q", blockedOut)
+		}
+		if counts := server.Counts(); counts.TotalRequests != 0 {
+			t.Fatalf("schema-blocked write contacted server; counts=%#v output=%q", counts, blockedOut)
+		}
+
+		var okStdout, okStderr bytes.Buffer
+		okCode := run([]string{"create-issue", "--cache-path", alternateCachePath, "--repo", "fixture-a", "--title", "Alternate", "--body", "alternate cache current", "--idempotency-key", "alternate-cache-write"}, strings.NewReader(""), &okStdout, &okStderr, src)
+		if okCode != 0 {
+			t.Fatalf("alternate write code=%d stdout=%q stderr=%q", okCode, okStdout.String(), okStderr.String())
+		}
+		if creates := server.CapturedCreateRequests(); len(creates) != 1 || creates[0].IdempotencyKey != "alternate-cache-write" || !creates[0].AuthorizationOK {
+			t.Fatalf("alternate cache create requests = %#v", creates)
+		}
+		assertStartupCreateConfirmation(t, alternateCachePath, "alternate-cache-write")
+	})
+
 	t.Run("SCN-CRED-DOCTOR-LIVE-MOCK-KEYRING", func(t *testing.T) {
 		server := testnet.NewGitCodeAPIServer(t)
 		defer server.Close()
@@ -929,6 +970,26 @@ func writeSchemaVersion(t *testing.T, path string, version int) {
 	}
 	if _, err := db.Exec(`INSERT INTO schema_version (version) VALUES (?)`, version); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func setSchemaVersion(t *testing.T, path string, version int) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	result, err := db.Exec(`UPDATE schema_version SET version = ?`, version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows == 0 {
+		t.Fatalf("schema_version row missing in %s", path)
 	}
 }
 

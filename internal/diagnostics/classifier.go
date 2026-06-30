@@ -24,6 +24,7 @@ const (
 	CodeFixtureFallbackDetected Code = "fixture_fallback_detected"
 	CodeUnsupportedCapability   Code = "unsupported_capability"
 	CodeCacheBusy               Code = "cache_busy"
+	CodeCacheSchemaBlocked      Code = "cache_schema_blocked"
 	CodeSchemaDecode            Code = "schema_decode"
 	CodeAPIFailure              Code = "api_validation"
 )
@@ -44,6 +45,9 @@ type CommandContext struct {
 	RepositoryBindingID         string
 	CachePathPresent            bool
 	AuditPathPresent            bool
+	CacheReadiness              string
+	CacheSchemaDetected         int
+	CacheSchemaExpected         int
 	PayloadKind                 string
 	PayloadSource               string
 	RequiredField               string
@@ -101,6 +105,9 @@ func (d Diagnostic) JSON() ([]byte, error) {
 }
 
 func classifyCode(err error, ctx CommandContext) Code {
+	if hasCode(err, "cache_schema_blocked") {
+		return CodeCacheSchemaBlocked
+	}
 	if ctx.ProviderMode != "live-http" {
 		if ctx.FixtureReadOnly || hasCode(err, "fixture_read_only") || hasCode(err, "write_fixture_read_only") {
 			return CodeFixtureReadOnly
@@ -189,6 +196,8 @@ func codeFromError(err error) Code {
 			return CodeUnsupportedCapability
 		case "cache_busy":
 			return CodeCacheBusy
+		case "cache_schema_blocked":
+			return CodeCacheSchemaBlocked
 		case "schema_decode", "partial_response":
 			return CodeSchemaDecode
 		case "auth_expired", "forbidden", "write_unauthorized", "not_found", "remote_conflict", "remote_collision", "remote_not_found", "rate_limited":
@@ -269,7 +278,7 @@ func exitClassFor(code Code) string {
 		return "capability"
 	case CodeSchemaDecode:
 		return "schema"
-	case CodeCacheBusy:
+	case CodeCacheBusy, CodeCacheSchemaBlocked:
 		return "cache"
 	default:
 		return "configuration"
@@ -307,6 +316,8 @@ func messageFor(code Code, err error) string {
 		base += ": response schema decode failure"
 	case CodeCacheBusy:
 		base += ": cache is busy, retry later"
+	case CodeCacheSchemaBlocked:
+		base += ": selected local cache schema blocks this command; live credential/provider readiness is separate from cache schema readiness"
 	}
 	if err != nil {
 		return base + ": " + err.Error()
@@ -333,6 +344,13 @@ func redactedContext(filter Filter, ctx CommandContext) map[string]string {
 	}
 	put("cache_path_present", fmt.Sprintf("%t", ctx.CachePathPresent))
 	put("audit_path_present", fmt.Sprintf("%t", ctx.AuditPathPresent))
+	put("cache_readiness", ctx.CacheReadiness)
+	if ctx.CacheSchemaDetected != 0 {
+		put("cache_schema_detected", fmt.Sprintf("%d", ctx.CacheSchemaDetected))
+	}
+	if ctx.CacheSchemaExpected != 0 {
+		put("cache_schema_expected", fmt.Sprintf("%d", ctx.CacheSchemaExpected))
+	}
 	for _, key := range ctx.SensitiveContextKeys {
 		delete(values, key)
 	}

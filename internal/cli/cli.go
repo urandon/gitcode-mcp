@@ -1685,12 +1685,21 @@ func writeCommandError(stderr io.Writer, format string, plan startupPlan, err er
 	}
 	if diagnostic.Code != "" {
 		fmt.Fprintf(stderr, "http_attempted: %t\n", diagnostic.HTTPAttempted)
+		if readiness := diagnostic.Context["cache_readiness"]; readiness != "" {
+			fmt.Fprintf(stderr, "cache_readiness: %s\n", readiness)
+		}
 	}
 	return code
 }
 
 func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {
 	ctx := diagnostics.CommandContext{ProviderMode: plan.ProviderMode, Command: plan.Command, SelectedAPIBaseURL: plan.APIBaseURL, RepositoryBindingID: plan.LiveRepositoryBinding.RepoID, CachePathPresent: strings.TrimSpace(plan.CachePath) != "", AuditPathPresent: strings.TrimSpace(plan.LiveRepositoryBinding.AuditPath) != ""}
+	var schemaErr *cache.SchemaVersionError
+	if errors.As(err, &schemaErr) {
+		ctx.CacheReadiness = "schema_blocked"
+		ctx.CacheSchemaDetected = schemaErr.Compat.DetectedVersion
+		ctx.CacheSchemaExpected = schemaErr.Compat.ExpectedVersion
+	}
 	var writeErr service.ErrWriteFailure
 	if errors.As(err, &writeErr) {
 		ctx.HTTPAttempted = writeErr.Code == "write_unauthorized" || writeErr.Code == "write_network_unavailable" || writeErr.Code == "write_provider_error" || writeErr.Code == "write_conflict" || writeErr.Code == "schema_decode"

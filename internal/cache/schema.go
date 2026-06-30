@@ -38,6 +38,8 @@ func (e *SchemaVersionError) Unwrap() error {
 	return ErrSchemaVersionIncompatible
 }
 
+func (e *SchemaVersionError) DiagnosticCode() string { return "cache_schema_blocked" }
+
 func CheckVersionCompatibility(ctx context.Context, db *sql.DB) (VersionCompatibility, error) {
 	expected := currentSchemaVersion
 
@@ -66,7 +68,7 @@ func CheckVersionCompatibility(ctx context.Context, db *sql.DB) (VersionCompatib
 			Compatible:      false,
 			PermitWrites:    false,
 			Message:         "cache database was created by a pre-schema-versioning binary (iteration 1 equivalent)",
-			Remediation:     "confirm the selected cache path, move aside or delete only that cache file, then re-sync; for current-schema live data use 'gitcode-mcp cache reset --live --repo <repo>'",
+			Remediation:     "confirm the selected cache path, move aside or delete only that cache file, then re-sync; for current-schema live data use 'gitcode-mcp cache reset --live --repo <repo>'; for live writes, rerun with '--cache-path <alternate-current-cache>' if another current-schema cache is available",
 		}, nil
 	}
 
@@ -82,7 +84,7 @@ func CheckVersionCompatibility(ctx context.Context, db *sql.DB) (VersionCompatib
 			Compatible:      false,
 			PermitWrites:    false,
 			Message:         "cache database contains an empty schema_version table (iteration 1 equivalent)",
-			Remediation:     "confirm the selected cache path, move aside or delete only that cache file, then re-sync; for current-schema live data use 'gitcode-mcp cache reset --live --repo <repo>'",
+			Remediation:     "confirm the selected cache path, move aside or delete only that cache file, then re-sync; for current-schema live data use 'gitcode-mcp cache reset --live --repo <repo>'; for live writes, rerun with '--cache-path <alternate-current-cache>' if another current-schema cache is available",
 		}, nil
 	}
 
@@ -93,7 +95,7 @@ func CheckVersionCompatibility(ctx context.Context, db *sql.DB) (VersionCompatib
 			Compatible:      false,
 			PermitWrites:    false,
 			Message:         fmt.Sprintf("cache schema version %d is newer than supported version %d", detected, expected),
-			Remediation:     "upgrade the gitcode-mcp binary to a version that supports this schema, or downgrade the cache",
+			Remediation:     "upgrade the gitcode-mcp binary to a version that supports this schema, or rerun with '--cache-path <alternate-current-cache>'",
 		}, nil
 	}
 
@@ -104,7 +106,7 @@ func CheckVersionCompatibility(ctx context.Context, db *sql.DB) (VersionCompatib
 			Compatible:      true,
 			PermitWrites:    false,
 			Message:         fmt.Sprintf("cache schema version %d is older than expected version %d; writes are blocked until migration completes", detected, expected),
-			Remediation:     fmt.Sprintf("run 'gitcode-mcp migrate-cache' to upgrade the schema from version %d to version %d", detected, expected),
+			Remediation:     fmt.Sprintf("run 'gitcode-mcp migrate-cache --confirm --cache-path <selected-cache>' to upgrade the schema from version %d to version %d, or rerun with '--cache-path <alternate-current-cache>'", detected, expected),
 		}, nil
 	}
 

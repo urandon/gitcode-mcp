@@ -68,6 +68,8 @@ gitcode-mcp sync --repo "YOUR_REPO" --issues --wiki --index
 
 Live sync fetches issue records, comments, and wiki pages through the live GitCode provider. Fetches are page/resource scoped; successful records are committed to cache, failures are collected and reported, and re-sync should report deltas rather than duplicate records. Issue collection sync uses list-level issue revisions before comment-list fetches, so an unchanged issue can report `skipped_by_revision` and avoid listing comments again. Wiki collection sync uses list-level page revisions before body fetches, so an unchanged page can report `skipped_by_revision` and avoid a full page-body request. Auth failures and rate limits are reported as diagnostics instead of raw API payloads.
 
+Live writes require both provider readiness and local cache write readiness. Credential and repository binding checks can pass while the selected cache is still schema-blocked for writes. In that case write commands fail before any provider HTTP request with `failure_class: cache_schema_blocked`, `http_attempted: false`, and remediation to run `gitcode-mcp migrate-cache --confirm --cache-path <selected-cache>` or retry with `--cache-path <alternate-current-cache>`. The command must not bypass cache/audit safety by writing to the provider without a writer-capable cache.
+
 For large repositories, bound collection work explicitly:
 
 ```sh
