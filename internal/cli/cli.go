@@ -219,6 +219,9 @@ func ExecuteWithClient(args []string, stdout io.Writer, stderr io.Writer, client
 		if err != nil {
 			return nil, nil, err
 		}
+		if err := ensureCacheParentDir(path); err != nil {
+			return nil, nil, err
+		}
 		store, err := cache.NewSQLiteStore(ctx, path)
 		if err != nil {
 			return nil, nil, err
@@ -266,6 +269,15 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 		return writeError(stderr, opts.format, err)
 	}
 	if opts.helpRequested {
+		if command == "repo" {
+			if sub, ok := firstArg(rest); ok {
+				switch sub {
+				case "add", "status":
+					printLocalSubcommandHelp(command, sub, stdout)
+					return 0
+				}
+			}
+		}
 		printCommandHelp(command, stdout)
 		return 0
 	}
@@ -384,6 +396,9 @@ func serviceFromStartupPlan(ctx context.Context, plan startupPlan, factory servi
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := ensureCacheParentDir(path); err != nil {
+		return nil, nil, err
+	}
 	store, err := cache.NewSQLiteStore(ctx, path)
 	if err != nil {
 		return nil, nil, err
@@ -399,6 +414,9 @@ func serviceFromStartupPlan(ctx context.Context, plan startupPlan, factory servi
 func defaultServiceFactory(ctx context.Context, cachePath string) (queryService, func() error, error) {
 	path, err := resolvedCachePath(cachePath)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := ensureCacheParentDir(path); err != nil {
 		return nil, nil, err
 	}
 	store, err := cache.NewSQLiteStore(ctx, path)
@@ -421,6 +439,20 @@ func resolvedCachePath(path string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "cache.db"), nil
+}
+
+func ensureCacheParentDir(path string) error {
+	if path == "" || path == ":memory:" {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("cache: cannot create cache directory %s: %w", dir, err)
+	}
+	return nil
 }
 
 func parseOptions(command string, args []string) (options, []string, error) {
@@ -1945,12 +1977,16 @@ type migrateCacheResult struct {
 }
 
 func executeMigrateCacheCommand(ctx context.Context, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
-	cachePath := opts.cachePath
-	if cachePath == "" {
-		if deps.Source == nil {
-			deps.Source = config.OSSource{}
-		}
-		cachePath = doctor.DefaultCachePath(deps.Source)
+	if deps.Source == nil {
+		deps.Source = config.OSSource{}
+	}
+	eff, err := config.LoadEffective(deps.Source, config.Overrides{CachePath: opts.cachePath})
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	cachePath := eff.Config.CachePath
+	if err := ensureCacheParentDir(cachePath); err != nil {
+		return writeError(stderr, opts.format, err)
 	}
 
 	result, err := cache.MigrateCacheWithConfirm(ctx, cachePath, false, cache.Confirmation{Confirmed: opts.confirm})
@@ -2494,7 +2530,7 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "  --owner OWNER       repository owner (required)")
 		fmt.Fprintln(w, "  --name NAME         repository name (required)")
 		fmt.Fprintln(w, "  --api-base-url URL  authoritative live API base URL (required)")
-		fmt.Fprintln(w, "  --scopes SCOPES     comma-separated scopes (issues, wiki)")
+		fmt.Fprintln(w, "  --scopes SCOPES     comma-separated scopes (issues, wiki, pulls, comments)")
 		fmt.Fprintln(w, "  --alias ALIAS       repository alias (repeatable)")
 		fmt.Fprintln(w, "  --display-name NAME human-readable display name")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")

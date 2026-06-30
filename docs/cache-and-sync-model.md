@@ -157,7 +157,7 @@ Compatibility policy:
 | 0, missing, or empty `schema_version` in a non-empty cache | Block as pre-schema-versioning or unknown | Confirm the selected cache path, move aside or delete only that cache file, then re-sync |
 | Greater than 14 | Block as newer than this binary supports | Upgrade `gitcode-mcp` to a binary that supports the schema |
 
-`gitcode-mcp migrate-cache --confirm` runs supported older-version migrations in place from the detected version to version 14. It creates a backup at `{cache-path}.backup-{timestamp}` before applying changes. Each migration step runs in a transaction and advances both `schema_version` and `PRAGMA user_version` only after that step succeeds.
+`gitcode-mcp migrate-cache --confirm` runs supported older-version migrations in place from the selected effective cache path, including repo-local cache selection when run from a repo-local workspace. Explicit `--cache-path` still overrides repo-local discovery for emergency repair. The command creates a backup at `{cache-path}.backup-{timestamp}` before applying changes. Each migration step runs in a transaction and advances both `schema_version` and `PRAGMA user_version` only after that step succeeds.
 
 Schema version 13 adds `pr_review_discussions` and `pr_review_positions`. The migration creates empty tables and does not invent position metadata for comments already cached under older schemas. A later pull request comment sync or `add-pr-review-comment` write refreshes the affected comment rows and populates the new position tables. PR comment `content_hash` includes position metadata, so a resync can update stale rows when the live adapter now returns richer v4 discussion data.
 

@@ -352,8 +352,12 @@ func normalizeRepositoryScopes(raw []string) ([]RepositoryScope, error) {
 			if scope == "" {
 				continue
 			}
+			switch scope {
+			case "pull", "pulls", "pr", "prs", "pull_request", "pull_requests", "comment", "comments":
+				scope = RepositoryScopeIssues
+			}
 			if scope != RepositoryScopeIssues && scope != RepositoryScopeWiki {
-				return nil, ErrInvalidQuery{Field: "scopes", Message: "scopes must contain issues or wiki"}
+				return nil, ErrInvalidQuery{Field: "scopes", Message: "scopes must contain issues, wiki, pulls, or comments"}
 			}
 			seen[scope] = true
 		}

@@ -644,7 +644,7 @@ func TestRepoRegistryCLI(t *testing.T) {
 		return service.New(store), store.Close, nil
 	}
 	var addOut, addErr bytes.Buffer
-	code := executeWithFactory([]string{"repo", "add", "--cache-path", cachePath, "--repo", "fixture-a", "--owner", "owner-a", "--name", "repo-a", "--api-base-url", "https://user:pass@example.invalid/api?access_token=secret&safe=1", "--scopes", "issues,wiki,issues", "--alias", "proj"}, &addOut, &addErr, factory)
+	code := executeWithFactory([]string{"repo", "add", "--cache-path", cachePath, "--repo", "fixture-a", "--owner", "owner-a", "--name", "repo-a", "--api-base-url", "https://user:pass@example.invalid/api?access_token=secret&safe=1", "--scopes", "issues,wiki,pulls,comments,issues", "--alias", "proj"}, &addOut, &addErr, factory)
 	if code != 0 {
 		t.Fatalf("repo add code=%d stderr=%q", code, addErr.String())
 	}
@@ -1123,6 +1123,21 @@ func TestLocalSubcommandHelpExitsZero(t *testing.T) {
 				t.Fatalf("help output missing Usage line in %q", stdout.String())
 			}
 		})
+	}
+}
+
+func TestRepoAddHelpShowsFlagsAndSupportedScopes(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Execute([]string{"repo", "add", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"--owner OWNER", "--name NAME", "--api-base-url URL", "--scopes SCOPES", "--alias ALIAS", "issues, wiki, pulls, comments"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("repo add help missing %q in %q", want, out)
+		}
 	}
 }
 

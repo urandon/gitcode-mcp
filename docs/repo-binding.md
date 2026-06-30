@@ -24,7 +24,7 @@ gitcode-mcp repo add \
 | `--owner` | Yes | Repository owner/namespace |
 | `--name` | Yes | Repository name |
 | `--display-name` | No | Human-readable display name |
-| `--scopes` | Yes | Comma-separated scopes (`issues`, `wiki`) |
+| `--scopes` | Yes | Comma-separated scopes (`issues`, `wiki`; `pulls` and `comments` are accepted and use the issue-backed GitCode API surface) |
 | `--api-base-url` | No | API base URL. Defaults to config value |
 | `--alias` | No | Short alias for the repository |
 
