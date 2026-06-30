@@ -3382,6 +3382,9 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	base.RemoteNumber = confirmed.remoteNumber
 	base.RemoteSlug = confirmed.remoteSlug
 	base.RemoteRevision = confirmed.remoteRevision
+	base.APIPath = confirmed.apiPath
+	base.CachePath = confirmed.cachePath
+	base.BrowserURL = confirmed.browserURL
 	base.Evidence = "adapter-confirmed write with audit and cache refresh"
 	return base, nil
 }
@@ -3392,6 +3395,9 @@ type writeConfirmation struct {
 	remoteNumber   int
 	remoteSlug     string
 	remoteRevision string
+	apiPath        string
+	cachePath      string
+	browserURL     string
 	message        string
 	completedAt    time.Time
 }
@@ -3626,7 +3632,7 @@ func (s *Service) wikiWriteGraph(repoID string, page gitcode.WikiPage, result gi
 	revision := firstNonEmptyString(result.RemoteRevision, page.Revision, result.ResponseHash, contentHash(page.Title, page.Body))
 	record := cache.Record{RepoID: repoID, ID: stableID, Type: "wiki", Path: normalizeWikiCachePath(remoteID), Title: page.Title, Body: page.Body, Status: "fresh", ContentHash: contentHash(page.Title, page.Body, revision), Provenance: cache.ProvenanceRemote, RemoteType: "wiki", RemoteID: remoteID, RemoteRevision: revision, CreatedAt: created, UpdatedAt: updated}
 	graph := cache.RecordGraph{Record: record, Identities: []cache.Identity{{RepoID: repoID, SourceID: stableID, AliasType: "wiki", Alias: remoteID, Remote: cache.RemoteAlias{Type: "wiki", ID: remoteID}}}, RemoteRevisions: []cache.RemoteRevision{{RepoID: repoID, RecordID: stableID, RemoteType: "wiki", RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}}
-	return writeConfirmation{confirmed: result.Confirmed, remoteID: remoteID, remoteSlug: remoteID, remoteRevision: revision, message: result.Operation, completedAt: firstNonZeroTime(result.ConfirmedAt, now)}, graph
+	return writeConfirmation{confirmed: result.Confirmed, remoteID: remoteID, remoteSlug: remoteID, remoteRevision: revision, apiPath: result.APIPath, cachePath: firstNonEmptyString(result.CachePath, record.Path), browserURL: result.BrowserURL, message: result.Operation, completedAt: firstNonZeroTime(result.ConfirmedAt, now)}, graph
 }
 
 func (s *Service) commentWriteGraph(ctx context.Context, repoID string, number int, comment gitcode.Comment, result gitcode.WriteResult[gitcode.Comment], now time.Time) (writeConfirmation, cache.RecordGraph, error) {

@@ -715,7 +715,7 @@ func TestConfirmedWriteOperations(t *testing.T) {
 				return anyWriteResult(result), err
 			},
 			assertion: func(t *testing.T, result WriteResult[any]) {
-				if result.RemoteID != "Home.md" || result.RemoteSlug != "Home.md" || result.RemoteRevision != "rev1" {
+				if result.RemoteID != "Home.md" || result.RemoteSlug != "Home.md" || result.RemoteRevision != "rev1" || result.APIPath != updateWikiPageEndpoint("example-owner", "example-repo", "Home.md") || result.CachePath != "wiki/Home.md" || result.BrowserURL == "" {
 					t.Fatalf("missing wiki identity: %+v", result)
 				}
 			},
@@ -842,7 +842,7 @@ func TestScenario015WikiCreatePageFollowupConfirmationFailure(t *testing.T) {
 }
 
 func anyWriteResult[T any](result WriteResult[T]) WriteResult[any] {
-	return WriteResult[any]{Record: result.Record, Confirmed: result.Confirmed, Operation: result.Operation, Target: result.Target, ProviderStatus: result.ProviderStatus, RemoteID: result.RemoteID, RemoteNumber: result.RemoteNumber, RemoteSlug: result.RemoteSlug, RemoteRevision: result.RemoteRevision, ParentIssueNumber: result.ParentIssueNumber, ParentIssueID: result.ParentIssueID, IdempotencyKey: result.IdempotencyKey, ResponseHash: result.ResponseHash, ConfirmedAt: result.ConfirmedAt, ProviderPayloadFingerprint: result.ProviderPayloadFingerprint}
+	return WriteResult[any]{Record: result.Record, Confirmed: result.Confirmed, Operation: result.Operation, Target: result.Target, ProviderStatus: result.ProviderStatus, RemoteID: result.RemoteID, RemoteNumber: result.RemoteNumber, RemoteSlug: result.RemoteSlug, RemoteRevision: result.RemoteRevision, APIPath: result.APIPath, CachePath: result.CachePath, BrowserURL: result.BrowserURL, ParentIssueNumber: result.ParentIssueNumber, ParentIssueID: result.ParentIssueID, IdempotencyKey: result.IdempotencyKey, ResponseHash: result.ResponseHash, ConfirmedAt: result.ConfirmedAt, ProviderPayloadFingerprint: result.ProviderPayloadFingerprint}
 }
 
 func TestScenario017AddCommentMalformedBodySchemaDecode(t *testing.T) {
@@ -1594,6 +1594,34 @@ func TestScenario006WikiCreateBase64NoSha(t *testing.T) {
 	}
 }
 
+func TestScenario006WikiCreateNormalizesMarkdownPathAndBrowserURL(t *testing.T) {
+	var sawPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawPath = r.URL.Path
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v5/repos/example-owner/example-repo.wiki/contents/Evidence/Dogfood/Report.md" {
+			t.Fatalf("unexpected create request %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"path":"Evidence/Dogfood/Report.md","type":"file","sha":"rev-report"}`)
+	}))
+	defer server.Close()
+
+	result, err := newTestClient(t, server.URL, Config{}).CreateWikiPage(context.Background(), CreateWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "Evidence/Dogfood/Report", Body: "body"}, WriteOptions{IdempotencyKey: "key-create-report"})
+	if err != nil {
+		t.Fatalf("CreateWikiPage returned error: %v", err)
+	}
+	if sawPath != "/api/v5/repos/example-owner/example-repo.wiki/contents/Evidence/Dogfood/Report.md" {
+		t.Fatalf("path = %q", sawPath)
+	}
+	if result.RemoteSlug != "Evidence/Dogfood/Report.md" || result.CachePath != "wiki/Evidence/Dogfood/Report.md" || result.APIPath != "/api/v5/repos/example-owner/example-repo.wiki/contents/Evidence/Dogfood/Report.md" {
+		t.Fatalf("unexpected normalized result: %+v", result)
+	}
+	wantBrowserURL := server.URL + "/example-owner/example-repo/wiki/Evidence%2FDogfood%2FReport.md"
+	if result.BrowserURL != wantBrowserURL {
+		t.Fatalf("browser url = %q, want %q", result.BrowserURL, wantBrowserURL)
+	}
+}
+
 func TestScenario007WikiUpdateShaAutoresolve(t *testing.T) {
 	var sawSha string
 	var sawMethod string
@@ -1677,6 +1705,55 @@ func TestScenario009WikiDeleteStaleSha409(t *testing.T) {
 	var conflict ErrConflict
 	if !errors.As(err, &conflict) {
 		t.Fatalf("expected ErrConflict for stale sha, got %T %v", err, err)
+	}
+}
+
+func TestScenario009WikiDeleteConfirmsNotFound(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/Stale.md" && len(paths) == 1:
+			fmt.Fprint(w, `{"path":"Stale.md","type":"file","sha":"auto-sha"}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/Stale.md":
+			fmt.Fprint(w, `{"path":"Stale.md","type":"file","sha":"auto-sha"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/Stale.md":
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"message":"NOT_FOUND"}`)
+		default:
+			t.Fatalf("unexpected delete request %s %s paths=%v", r.Method, r.URL.Path, paths)
+		}
+	}))
+	defer server.Close()
+	result, err := newTestClient(t, server.URL, Config{}).DeleteWikiPage(context.Background(), DeleteWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "Stale"}, WriteOptions{IdempotencyKey: "key-delete"})
+	if err != nil {
+		t.Fatalf("DeleteWikiPage returned error: %v", err)
+	}
+	if !result.Confirmed || result.RemoteSlug != "Stale.md" || result.RemoteRevision != "auto-sha" || result.CachePath != "wiki/Stale.md" {
+		t.Fatalf("unexpected delete result: %+v", result)
+	}
+	want := []string{"GET /api/v5/repos/example-owner/example-repo.wiki/contents/Stale.md", "DELETE /api/v5/repos/example-owner/example-repo.wiki/contents/Stale.md", "GET /api/v5/repos/example-owner/example-repo.wiki/contents/Stale.md"}
+	if strings.Join(paths, "|") != strings.Join(want, "|") {
+		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+}
+
+func TestScenario009WikiDeleteFailsWhenPageStillExists(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/Stale.md":
+			fmt.Fprint(w, `{"path":"Stale.md","type":"file","sha":"still-there"}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/Stale.md":
+			fmt.Fprint(w, `{"path":"Stale.md","type":"file","sha":"still-there"}`)
+		default:
+			t.Fatalf("unexpected delete request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	_, err := newTestClient(t, server.URL, Config{}).DeleteWikiPage(context.Background(), DeleteWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "Stale.md"}, WriteOptions{IdempotencyKey: "key-delete-still-there"})
+	var incomplete ErrWriteConfirmationIncomplete
+	if !errors.As(err, &incomplete) || !strings.Contains(incomplete.Message, "expected not found") {
+		t.Fatalf("expected not-found confirmation failure, got %T %v", err, err)
 	}
 }
 

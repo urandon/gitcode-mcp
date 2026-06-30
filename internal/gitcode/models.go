@@ -735,6 +735,9 @@ type WriteResult[T any] struct {
 	RemoteNumber               int
 	RemoteSlug                 string
 	RemoteRevision             string
+	APIPath                    string
+	CachePath                  string
+	BrowserURL                 string
 	ParentIssueNumber          int
 	ParentIssueID              string
 	IdempotencyKey             string

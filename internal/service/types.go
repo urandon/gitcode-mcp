@@ -829,6 +829,9 @@ type WriteCommandResult struct {
 	RemoteNumber      int       `json:"remote_number,omitempty"`
 	RemoteSlug        string    `json:"remote_slug,omitempty"`
 	RemoteRevision    string    `json:"remote_revision,omitempty"`
+	APIPath           string    `json:"api_path,omitempty"`
+	CachePath         string    `json:"cache_path,omitempty"`
+	BrowserURL        string    `json:"browser_url,omitempty"`
 	IdempotencyKey    string    `json:"idempotency_key"`
 	SourceFingerprint string    `json:"source_fingerprint,omitempty"`
 	Replayed          bool      `json:"replayed,omitempty"`
