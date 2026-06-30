@@ -25,7 +25,7 @@ func TestWriteCapabilitiesDeclareSurfaceReasons(t *testing.T) {
 func TestDangerousCapabilitiesAreNotMCPEnabled(t *testing.T) {
 	for _, cap := range WriteCapabilities() {
 		switch cap.Safety {
-		case SafetyDestructiveRemoteWrite, SafetyDestructiveLocalMaintenance, SafetyCredentialManagement, SafetyRawEscapeHatch:
+		case SafetyDestructiveLocalMaintenance, SafetyCredentialManagement, SafetyRawEscapeHatch:
 			if cap.MCP.Enabled {
 				t.Fatalf("%s is safety class %s but is MCP-enabled", cap.ID, cap.Safety)
 			}

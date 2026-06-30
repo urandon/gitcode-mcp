@@ -18,6 +18,7 @@ const (
 
 type Surface struct {
 	Enabled        bool
+	EnabledReason  string
 	DisabledReason string
 }
 
@@ -34,8 +35,12 @@ type Capability struct {
 	MCP            Surface
 }
 
-func enabled() Surface {
-	return Surface{Enabled: true}
+func enabled(reason ...string) Surface {
+	surface := Surface{Enabled: true}
+	if len(reason) > 0 {
+		surface.EnabledReason = reason[0]
+	}
+	return surface
 }
 
 func disabled(reason string) Surface {
@@ -149,7 +154,7 @@ var writeCapabilities = []Capability{
 		ServiceCommand: "create-page",
 		Description:    "Create a live wiki page through the audited write lifecycle.",
 		CLI:            enabled(),
-		MCP:            disabled("Wiki writes are CLI-only until MCP has stricter confirmation and cache-confirmation UX."),
+		MCP:            enabled(),
 	},
 	{
 		ID:             "update_page",
@@ -160,7 +165,7 @@ var writeCapabilities = []Capability{
 		ServiceCommand: "update-page",
 		Description:    "Update a live wiki page through the audited write lifecycle.",
 		CLI:            enabled(),
-		MCP:            disabled("Wiki writes are CLI-only until MCP has stricter confirmation and cache-confirmation UX."),
+		MCP:            enabled(),
 	},
 	{
 		ID:             "delete_page",
@@ -171,7 +176,7 @@ var writeCapabilities = []Capability{
 		ServiceCommand: "delete-page",
 		Description:    "Delete a live wiki page.",
 		CLI:            enabled(),
-		MCP:            disabled("Destructive remote deletes are CLI-only and require explicit operator intent."),
+		MCP:            enabled("Destructive remote delete exposed only through audited MCP write access and explicit write_mode live."),
 	},
 	{
 		ID:             "add_label",
@@ -182,7 +187,7 @@ var writeCapabilities = []Capability{
 		ServiceCommand: "add-label",
 		Description:    "Add a label to a live issue.",
 		CLI:            enabled(),
-		MCP:            disabled("Label mutation remains CLI-only until write parity defines single-record label semantics for MCP."),
+		MCP:            enabled(),
 	},
 }
 

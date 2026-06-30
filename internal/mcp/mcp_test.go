@@ -312,7 +312,7 @@ func TestMCPBlockedWriteBoundary(t *testing.T) {
 			"add_issue_comment": false, "update_issue_comment": false, "update_issue": false,
 			"create_pr": false, "update_pr": false, "add_pr_comment": false, "add_pr_review_comment": false, "link_pr_issue": false,
 			"create_issue": false, "add_comment": false,
-			"create_page": false, "update_page": false,
+			"create_page": false, "update_page": false, "delete_page": false, "add_label": false,
 			"create-issue": false, "update-issue": false, "add-label": false,
 			"create-page": false, "update-page": false,
 		}
@@ -325,7 +325,7 @@ func TestMCPBlockedWriteBoundary(t *testing.T) {
 
 	// scenario blocked-write-canonical-5
 	t.Run("blocked write canonical 5", func(t *testing.T) {
-		policyBlocked := []string{"create_issue"}
+		policyBlocked := []string{"create_issue", "create_page", "update_page", "delete_page", "add_label"}
 		for i, name := range policyBlocked {
 			send(map[string]any{
 				"jsonrpc": "2.0",
@@ -346,7 +346,7 @@ func TestMCPBlockedWriteBoundary(t *testing.T) {
 			}
 		}
 
-		unsupported := []string{"add_comment", "create_page", "update_page"}
+		unsupported := []string{"add_comment", "create-page", "update-page", "add-label"}
 		for i, name := range unsupported {
 			send(map[string]any{
 				"jsonrpc": "2.0",
@@ -970,12 +970,12 @@ func TestMCPLifecycleTools(t *testing.T) {
 	for _, tool := range tls.Tools {
 		listed[tool.Name] = true
 	}
-	for _, name := range []string{"repo_status", "sync_live", "create_issue", "add_issue_comment", "update_issue_comment", "update_issue", "create_pr", "update_pr", "add_pr_comment", "add_pr_review_comment", "link_pr_issue", "index_repo", "auth_status", "doctor"} {
+	for _, name := range []string{"repo_status", "sync_live", "create_issue", "add_issue_comment", "update_issue_comment", "update_issue", "create_pr", "update_pr", "add_pr_comment", "add_pr_review_comment", "link_pr_issue", "create_page", "update_page", "delete_page", "add_label", "index_repo", "auth_status", "doctor"} {
 		if !listed[name] {
 			t.Fatalf("tools/list missing lifecycle tool %q", name)
 		}
 	}
-	for _, name := range []string{"add_comment", "create_page", "update_page"} {
+	for _, name := range []string{"add_comment", "create-page", "update-page", "add-label"} {
 		if listed[name] {
 			t.Fatalf("tools/list advertised write tool %q", name)
 		}
@@ -1213,6 +1213,22 @@ func (s *writeLifecycleSpyService) LinkPRIssue(_ context.Context, req service.Wr
 	return s.record("link-pr-issue", req)
 }
 
+func (s *writeLifecycleSpyService) CreatePage(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	return s.record("create-page", req)
+}
+
+func (s *writeLifecycleSpyService) UpdatePage(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	return s.record("update-page", req)
+}
+
+func (s *writeLifecycleSpyService) DeletePage(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	return s.record("delete-page", req)
+}
+
+func (s *writeLifecycleSpyService) AddLabel(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	return s.record("add-label", req)
+}
+
 func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 	spy := &writeLifecycleSpyService{}
 	srv, r, w, stderr := newPipeServerWithToolAccess(spy, ToolAccessWrite)
@@ -1243,6 +1259,10 @@ func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 	call("add_pr_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "body": "tested", "idempotency_key": "pr-comment-key"})
 	call("add_pr_review_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "path": "internal/service/service.go", "line": 42, "position": 9, "body": "inline", "idempotency_key": "pr-review-comment-key"})
 	call("link_pr_issue", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "pr_number": 7, "issue_number": 16, "strategy": "auto", "idempotency_key": "link-key"})
+	call("create_page", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "slug": "docs/parity", "title": "Parity", "body": "wiki body", "idempotency_key": "create-page-key"})
+	call("update_page", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "id": "docs/parity", "path": "docs/parity.md", "sha": "sha-1", "title": "Parity updated", "body": "updated body", "idempotency_key": "update-page-key"})
+	call("delete_page", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "slug": "docs/parity", "sha": "sha-1", "idempotency_key": "delete-page-key"})
+	call("add_label", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 16, "label": "triaged", "idempotency_key": "add-label-key"})
 
 	assertReq := func(command string) service.WriteCommandRequest {
 		t.Helper()
@@ -1281,6 +1301,18 @@ func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 	}
 	if req := assertReq("link-pr-issue"); req.Number != 7 || req.IssueNumber != 16 || req.Strategy != "auto" {
 		t.Fatalf("link-pr-issue req=%#v", req)
+	}
+	if req := assertReq("create-page"); req.Slug != "docs/parity" || req.Title != "Parity" || req.Body != "wiki body" {
+		t.Fatalf("create-page req=%#v", req)
+	}
+	if req := assertReq("update-page"); req.ID != "docs/parity" || req.Path != "docs/parity.md" || req.Sha != "sha-1" || req.Title != "Parity updated" || req.Body != "updated body" {
+		t.Fatalf("update-page req=%#v", req)
+	}
+	if req := assertReq("delete-page"); req.Slug != "docs/parity" || req.Sha != "sha-1" {
+		t.Fatalf("delete-page req=%#v", req)
+	}
+	if req := assertReq("add-label"); req.Number != 16 || req.Label != "triaged" {
+		t.Fatalf("add-label req=%#v", req)
 	}
 
 	_ = r.Close()
