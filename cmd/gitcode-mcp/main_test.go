@@ -175,10 +175,7 @@ func TestEntrypointDefaultModeDependencyHandoff(t *testing.T) {
 func TestEntrypointDiscoversRepoLocalCache(t *testing.T) {
 	src := newTestSource(t)
 	root := filepath.Join(src.homeDir, "workspace", "repo")
-	src.cwd = filepath.Join(root, "nested")
-	src.dirs[filepath.Join(root, ".git")] = true
-	repoCfg := filepath.Join(root, ".gitcode", "gitcode-mcp.yaml")
-	src.files[repoCfg] = []byte("cache_mode: repo-local\n")
+	configureRepoLocalSource(src, root, filepath.Join(root, "nested"))
 
 	old := cliRoute
 	defer func() { cliRoute = old }()
@@ -196,6 +193,79 @@ func TestEntrypointDiscoversRepoLocalCache(t *testing.T) {
 	want := filepath.Join(root, ".gitcode", "mcp", "cache.db")
 	if gotDeps.Config.CacheMode != config.CacheModeRepoLocal || gotDeps.Config.CachePath != want || gotDeps.Cache.CachePath != want || gotDeps.Cache.LockPath != want+".lock" {
 		t.Fatalf("repo-local handoff=%#v want %q", gotDeps, want)
+	}
+}
+
+func TestEntrypointRepoLocalCacheDirectoryHandling(t *testing.T) {
+	src := newTestSource(t)
+	root := filepath.Join(src.homeDir, "workspace", "repo")
+	configureRepoLocalSource(src, root, root)
+	cachePath := filepath.Join(root, ".gitcode", "mcp", "cache.db")
+	if _, err := os.Stat(filepath.Dir(cachePath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("repo-local cache dir exists before command: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"repo", "add", "--repo", "fixture-a", "--owner", "owner-a", "--name", "repo-a", "--api-base-url", "https://example.invalid/api", "--scopes", "issues,wiki,pulls"}, strings.NewReader(""), &stdout, &stderr, src)
+	if code != 0 {
+		t.Fatalf("repo add code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(filepath.Dir(cachePath)); err != nil {
+		t.Fatalf("repo-local cache dir was not created: %v", err)
+	}
+	store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+	if err != nil {
+		t.Fatalf("open repo-local cache: %v", err)
+	}
+	defer store.Close()
+	repo, err := store.GetRepository(context.Background(), "fixture-a")
+	if err != nil {
+		t.Fatalf("repo binding missing in repo-local cache: %v", err)
+	}
+	if strings.Join(repositoryScopesForTest(repo.Scopes), ",") != "issues,wiki" {
+		t.Fatalf("repo scopes = %#v, want issues,wiki after pulls alias normalization", repo.Scopes)
+	}
+}
+
+func TestEntrypointMigrateCacheHonorsRepoLocalSelection(t *testing.T) {
+	src := newTestSource(t)
+	root := filepath.Join(src.homeDir, "workspace", "repo")
+	configureRepoLocalSource(src, root, root)
+	repoLocalCache := filepath.Join(root, ".gitcode", "mcp", "cache.db")
+	explicitCache := filepath.Join(src.homeDir, "explicit", "cache.db")
+	createCurrentCache(t, repoLocalCache)
+	createCurrentCache(t, explicitCache)
+
+	var repoLocalOut, repoLocalErr bytes.Buffer
+	code := run([]string{"migrate-cache", "--format", "json"}, strings.NewReader(""), &repoLocalOut, &repoLocalErr, src)
+	if code != 0 {
+		t.Fatalf("repo-local migrate code=%d stdout=%q stderr=%q", code, repoLocalOut.String(), repoLocalErr.String())
+	}
+	var repoLocalResult struct {
+		CachePath string `json:"cache_path"`
+		Status    string `json:"status"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(repoLocalOut.Bytes()), &repoLocalResult); err != nil {
+		t.Fatalf("decode repo-local migrate json: %v out=%q", err, repoLocalOut.String())
+	}
+	if repoLocalResult.CachePath != repoLocalCache || repoLocalResult.Status != "up_to_date" {
+		t.Fatalf("repo-local migrate result=%#v want path %q up_to_date", repoLocalResult, repoLocalCache)
+	}
+
+	var explicitOut, explicitErr bytes.Buffer
+	code = run([]string{"migrate-cache", "--cache-path", explicitCache, "--format", "json"}, strings.NewReader(""), &explicitOut, &explicitErr, src)
+	if code != 0 {
+		t.Fatalf("explicit migrate code=%d stdout=%q stderr=%q", code, explicitOut.String(), explicitErr.String())
+	}
+	var explicitResult struct {
+		CachePath string `json:"cache_path"`
+		Status    string `json:"status"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(explicitOut.Bytes()), &explicitResult); err != nil {
+		t.Fatalf("decode explicit migrate json: %v out=%q", err, explicitOut.String())
+	}
+	if explicitResult.CachePath != explicitCache || explicitResult.Status != "up_to_date" {
+		t.Fatalf("explicit migrate result=%#v want path %q up_to_date", explicitResult, explicitCache)
 	}
 }
 
@@ -747,6 +817,35 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 func addRepoForStartupTest(t *testing.T, cachePath, baseURL string) {
 	t.Helper()
 	addRepoForStartupTestWithScopes(t, cachePath, baseURL, "issues,wiki")
+}
+
+func configureRepoLocalSource(src *testSource, root, cwd string) {
+	src.cwd = cwd
+	src.dirs[filepath.Join(root, ".git")] = true
+	repoCfg := filepath.Join(root, ".gitcode", "gitcode-mcp.yaml")
+	src.files[repoCfg] = []byte("cache_mode: repo-local\n")
+}
+
+func createCurrentCache(t *testing.T, cachePath string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+	if err != nil {
+		t.Fatalf("create current cache %s: %v", cachePath, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close current cache %s: %v", cachePath, err)
+	}
+}
+
+func repositoryScopesForTest(scopes []cache.RepositoryScope) []string {
+	out := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		out = append(out, string(scope))
+	}
+	return out
 }
 
 func addRepoForStartupTestWithScopes(t *testing.T, cachePath, baseURL, scopes string) {
