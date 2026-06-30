@@ -54,6 +54,7 @@ var commands = []string{
 	"add-pr-review-comment",
 	"update-comment",
 	"add-label",
+	"publish-release",
 	"config",
 	"auth",
 	"doctor",
@@ -102,6 +103,7 @@ type queryService interface {
 	AddPRReviewComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdateComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	AddLabel(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	PublishRelease(context.Context, service.PublishReleaseRequest) (service.PublishReleaseResult, error)
 }
 
 type serviceFactory func(context.Context, string) (queryService, func() error, error)
@@ -169,6 +171,9 @@ type options struct {
 	state          string
 	label          string
 	labels         string
+	tag            string
+	ref            string
+	asset          multiFlag
 	idempotencyKey string
 	dryRun         bool
 	live           bool
@@ -360,7 +365,7 @@ func resolveLiveCredential(ctx context.Context, eff config.EffectiveConfig, deps
 
 func isLiveStartupCommand(command string) bool {
 	switch command {
-	case "sync", "create-issue", "update-issue", "create-pr", "create-mr", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "update-comment", "add-label", "doctor":
+	case "sync", "create-issue", "update-issue", "create-pr", "create-mr", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "update-comment", "add-label", "publish-release", "doctor":
 		return true
 	default:
 		return false
@@ -509,6 +514,10 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.state, "state", "", "state")
 	flags.StringVar(&opts.label, "label", "", "label")
 	flags.StringVar(&opts.labels, "labels", "", "comma-separated labels")
+	flags.StringVar(&opts.tag, "tag", "", "release tag")
+	flags.StringVar(&opts.ref, "ref", "", "release ref")
+	flags.Var(&opts.asset, "asset", "release asset link as name=url")
+	flags.Var(&opts.asset, "asset-url", "release asset link as name=url")
 	flags.StringVar(&opts.idempotencyKey, "idempotency-key", "", "idempotency key")
 	flags.BoolVar(&opts.dryRun, "dry-run", false, "validate write without mutation")
 	flags.BoolVar(&opts.live, "live", false, "execute live write")
@@ -1036,9 +1045,26 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		return dispatchWrite(ctx, svc.UpdateComment, command, opts, stdout, stderr, plan)
 	case "add-label":
 		return dispatchWrite(ctx, svc.AddLabel, command, opts, stdout, stderr, plan)
+	case "publish-release":
+		return dispatchPublishRelease(ctx, svc, opts, stdout, stderr, plan)
 	default:
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "command", Message: command + " is not a query command"})
 	}
+}
+
+func dispatchPublishRelease(ctx context.Context, svc queryService, opts options, stdout io.Writer, stderr io.Writer, plan startupPlan) int {
+	if err := validateWriteOptions("publish-release", opts); err != nil {
+		return writeCommandError(stderr, opts.format, plan, err)
+	}
+	req, err := publishReleaseRequest(opts)
+	if err != nil {
+		return writeCommandError(stderr, opts.format, plan, err)
+	}
+	result, err := svc.PublishRelease(ctx, req)
+	if err != nil {
+		return writeCommandError(stderr, opts.format, plan, err)
+	}
+	return render(stdout, opts.format, result, renderPublishReleaseText)
 }
 
 func dispatchWrite(ctx context.Context, handler func(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error), command string, opts options, stdout io.Writer, stderr io.Writer, plan startupPlan) int {
@@ -1472,6 +1498,33 @@ func writeRequest(opts options) service.WriteCommandRequest {
 	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, Number: opts.number, CommentID: opts.commentID, Slug: opts.slug, Path: opts.path, Line: opts.line, StartLine: opts.startLine, EndLine: opts.endLine, Position: opts.position, Sha: opts.sha, Title: opts.title, Body: opts.body, Head: opts.head, Base: opts.base, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
 }
 
+func publishReleaseRequest(opts options) (service.PublishReleaseRequest, error) {
+	body := opts.body
+	if strings.TrimSpace(opts.input) != "" {
+		if strings.TrimSpace(body) != "" {
+			return service.PublishReleaseRequest{}, service.ErrInvalidQuery{Field: "body", Message: "--body conflicts with --input body file"}
+		}
+		data, err := os.ReadFile(opts.input)
+		if err != nil {
+			return service.PublishReleaseRequest{}, err
+		}
+		body = string(data)
+	}
+	assets := make([]service.PublishAssetLink, 0, len(opts.asset))
+	for _, raw := range opts.asset {
+		name, url, ok := strings.Cut(raw, "=")
+		if !ok || strings.TrimSpace(name) == "" || strings.TrimSpace(url) == "" {
+			return service.PublishReleaseRequest{}, service.ErrInvalidQuery{Field: "asset", Message: "asset must be name=url"}
+		}
+		assets = append(assets, service.PublishAssetLink{Name: strings.TrimSpace(name), URL: strings.TrimSpace(url)})
+	}
+	mode := service.WriteModeDryRun
+	if !opts.dryRun {
+		mode = service.WriteModeLive
+	}
+	return service.PublishReleaseRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, Tag: opts.tag, Ref: firstNonEmpty(opts.ref, opts.base), Title: opts.title, Body: body, Status: opts.status, Assets: assets, IdempotencyKey: opts.idempotencyKey}, nil
+}
+
 func cliEmptyAsNone(value string) string {
 	if value == "" {
 		return "none"
@@ -1681,6 +1734,10 @@ func renderWriteText(w io.Writer, result service.WriteCommandResult) {
 	if result.BrowserURL != "" {
 		fmt.Fprintf(w, "browser_url: %s\n", result.BrowserURL)
 	}
+}
+
+func renderPublishReleaseText(w io.Writer, result service.PublishReleaseResult) {
+	fmt.Fprintf(w, "%s: %s repo_id=%s tag=%s release_status=%d assets=%d idempotency_key=%s evidence=%s\n", result.Command, result.Status, result.RepoID, result.Tag, result.ReleaseStatus, len(result.AssetLinks), result.IdempotencyKey, result.Evidence)
 }
 
 func renderRepositoryBindingText(w io.Writer, result service.RepositoryBinding) {
@@ -2339,7 +2396,7 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --owner OWNER --repo REPO --name NAME --api-base-url URL --scopes issues,wiki --alias ALIAS")
 	fmt.Fprintln(w, "  --number N --slug SLUG")
 	fmt.Fprintln(w, "  record IDs are positional for get, backlinks, and snippet commands")
-	fmt.Fprintln(w, "  --title TITLE --body BODY --label LABEL --labels A,B")
+	fmt.Fprintln(w, "  --title TITLE --body BODY --label LABEL --labels A,B --tag TAG")
 	fmt.Fprintln(w, "  --idempotency-key KEY")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Global options:")
@@ -2668,6 +2725,23 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --number N          issue number (required)")
 		fmt.Fprintln(w, "  --label LABEL       label to add (required)")
+		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
+		fmt.Fprintln(w, "  --dry-run           validate without mutation")
+		fmt.Fprintln(w, "  --live              compatibility alias for live write")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "publish-release":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --tag TAG --title TITLE (--body BODY | --input BODY.md) [--ref REF] [--status latest|prerelease|unset] [--asset NAME=URL] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintln(w, "Create or update a GitCode release. Executes live by default; use --dry-run for no-mutation validation.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --tag TAG           release tag (required)")
+		fmt.Fprintln(w, "  --title TITLE       release title (required)")
+		fmt.Fprintln(w, "  --body BODY         release description")
+		fmt.Fprintln(w, "  --input PATH        release description file")
+		fmt.Fprintln(w, "  --ref REF           source ref for release creation (default: main)")
+		fmt.Fprintln(w, "  --status STATUS     latest, prerelease, or unset (default: latest)")
+		fmt.Fprintln(w, "  --asset NAME=URL    release asset link; may be repeated")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
 		fmt.Fprintln(w, "  --live              compatibility alias for live write")

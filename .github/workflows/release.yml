@@ -82,3 +82,56 @@ jobs:
               --notes "gitcode-mcp $tag release artifacts and SHA256 checksums." \
               --verify-tag
           fi
+
+      - name: Publish GitCode release
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          if [ -z "$GITCODE_TOKEN" ]; then
+            echo "GITCODE_TOKEN is not configured; skipping GitCode release publish."
+            exit 0
+          fi
+
+          tag="$RELEASE_TAG"
+          cache_path="$RUNNER_TEMP/gitcode-mcp-cache.db"
+          notes_path="$RUNNER_TEMP/gitcode-release-notes.md"
+          repo="urandon/gitcode-mcp"
+
+          {
+            echo "gitcode-mcp $tag release artifacts and SHA256 checksums."
+            echo
+            echo "## Assets"
+            for asset in dist/*.tar.gz dist/*.zip dist/checksums.txt; do
+              name="$(basename "$asset")"
+              url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/${name}"
+              echo "- [$name]($url)"
+            done
+          } > "$notes_path"
+
+          go run ./cmd/gitcode-mcp repo add \
+            --cache-path "$cache_path" \
+            --repo "$repo" \
+            --owner urandon \
+            --name gitcode-mcp \
+            --api-base-url https://gitcode.com \
+            --scopes issues
+
+          asset_args=()
+          for asset in dist/*.tar.gz dist/*.zip dist/checksums.txt; do
+            name="$(basename "$asset")"
+            url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/${name}"
+            asset_args+=(--asset "$name=$url")
+          done
+
+          go run ./cmd/gitcode-mcp publish-release \
+            --cache-path "$cache_path" \
+            --repo "$repo" \
+            --tag "$tag" \
+            --ref main \
+            --title "gitcode-mcp $tag" \
+            --input "$notes_path" \
+            --status latest \
+            --idempotency-key "release-$tag" \
+            "${asset_args[@]}" \
+            --format json

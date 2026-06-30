@@ -13,6 +13,7 @@ const (
 	SafetyDestructiveRemoteWrite      SafetyClass = "destructive_remote_write"
 	SafetyDestructiveLocalMaintenance SafetyClass = "destructive_local_maintenance"
 	SafetyCredentialManagement        SafetyClass = "credential_management"
+	SafetyReleaseAutomationWrite      SafetyClass = "release_automation_write"
 	SafetyRawEscapeHatch              SafetyClass = "raw_escape_hatch"
 )
 
@@ -188,6 +189,16 @@ var writeCapabilities = []Capability{
 		Description:    "Add a label to a live issue.",
 		CLI:            enabled(),
 		MCP:            enabled(),
+	},
+	{
+		ID:             "publish_release",
+		Category:       CategoryWrite,
+		Safety:         SafetyReleaseAutomationWrite,
+		CLIName:        "publish-release",
+		ServiceCommand: "publish-release",
+		Description:    "Create or update a GitCode release from maintainer release automation.",
+		CLI:            enabled(),
+		MCP:            disabled("Release publishing is CI/maintainer automation; expose through MCP only after explicit product decision and audit semantics."),
 	},
 }
 

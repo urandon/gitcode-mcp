@@ -160,6 +160,73 @@ func TestContract(t *testing.T) {
 	}
 }
 
+func TestReleaseEndpointsUseGitCodeV2ProjectPath(t *testing.T) {
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.EscapedPath())
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("Authorization=%q", got)
+		}
+		if got := r.Header.Get("PRIVATE-TOKEN"); got != "" {
+			t.Fatalf("PRIVATE-TOKEN should be empty for v2 release request, got %q", got)
+		}
+		switch r.Method + " " + r.URL.EscapedPath() {
+		case "GET /api/v2/projects/example-owner%2Fexample-repo/releases/v0.1.0":
+			fmt.Fprint(w, `{"data":{"tag_name":"v0.1.0","name":"gitcode-mcp v0.1.0","description":"body","release_status":2}}`)
+		case "POST /api/v2/projects/example-owner%2Fexample-repo/releases":
+			var payload struct {
+				RepoID      string        `json:"repoId"`
+				TagName     string        `json:"tag_name"`
+				Ref         string        `json:"ref"`
+				Name        string        `json:"name"`
+				Description string        `json:"description"`
+				Links       []ReleaseLink `json:"links"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.RepoID != "example-owner/example-repo" || payload.TagName != "v0.1.0" || payload.Ref != "main" || len(payload.Links) != 1 {
+				t.Fatalf("payload=%#v", payload)
+			}
+			fmt.Fprint(w, `{"data":{"tag_name":"v0.1.0","name":"gitcode-mcp v0.1.0","description":"body","release_status":2}}`)
+		case "PUT /api/v2/projects/example-owner%2Fexample-repo/releases/v0.1.0":
+			fmt.Fprint(w, `{"data":{"tag_name":"v0.1.0","name":"gitcode-mcp v0.1.0","description":"updated","release_status":1}}`)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.EscapedPath())
+		}
+	}))
+	defer server.Close()
+	client, err := NewHTTPClient(Config{BaseURL: server.URL, Token: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	release, err := client.GetRelease(context.Background(), ReleaseRequest{Owner: "example-owner", Repo: "example-repo", Tag: "v0.1.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if release.TagName != "v0.1.0" || release.ReleaseStatus != ReleaseStatusLatest {
+		t.Fatalf("release=%#v", release)
+	}
+	created, err := client.CreateRelease(context.Background(), ReleaseWriteRequest{Owner: "example-owner", Repo: "example-repo", TagName: "v0.1.0", Ref: "main", Name: "gitcode-mcp v0.1.0", Description: "body", ReleaseStatus: ReleaseStatusLatest, Links: []ReleaseLink{{Name: "checksums.txt", URL: "https://example.invalid/checksums.txt"}}}, WriteOptions{IdempotencyKey: "release-v0.1.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created.Confirmed || created.RemoteID != "v0.1.0" {
+		t.Fatalf("created=%#v", created)
+	}
+	updated, err := client.UpdateRelease(context.Background(), ReleaseWriteRequest{Owner: "example-owner", Repo: "example-repo", TagName: "v0.1.0", Name: "gitcode-mcp v0.1.0", Description: "updated", ReleaseStatus: ReleaseStatusPreRelease}, WriteOptions{IdempotencyKey: "release-v0.1.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.Confirmed || updated.Record.ReleaseStatus != ReleaseStatusPreRelease {
+		t.Fatalf("updated=%#v", updated)
+	}
+	if len(seen) != 3 {
+		t.Fatalf("seen=%#v", seen)
+	}
+}
+
 func TestScenario004SelectedBaseURLOnly(t *testing.T) {
 	var selectedHits atomic.Int32
 	selected := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

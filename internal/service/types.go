@@ -840,6 +840,38 @@ type WriteCommandResult struct {
 	GeneratedAt       time.Time `json:"generated_at"`
 }
 
+type PublishReleaseRequest struct {
+	RepoID         string             `json:"repo_id,omitempty"`
+	Repo           string             `json:"repo,omitempty"`
+	Mode           WriteMode          `json:"write_mode,omitempty"`
+	Tag            string             `json:"tag"`
+	Ref            string             `json:"ref,omitempty"`
+	Title          string             `json:"title"`
+	Body           string             `json:"body"`
+	Status         string             `json:"status,omitempty"`
+	Assets         []PublishAssetLink `json:"assets,omitempty"`
+	IdempotencyKey string             `json:"idempotency_key,omitempty"`
+}
+
+type PublishAssetLink struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+type PublishReleaseResult struct {
+	Command           string             `json:"command"`
+	Status            string             `json:"status"`
+	RepoID            string             `json:"repo_id"`
+	Tag               string             `json:"tag"`
+	RemoteID          string             `json:"remote_id,omitempty"`
+	ReleaseStatus     int                `json:"release_status"`
+	AssetLinks        []PublishAssetLink `json:"asset_links,omitempty"`
+	IdempotencyKey    string             `json:"idempotency_key"`
+	SourceFingerprint string             `json:"source_fingerprint,omitempty"`
+	Evidence          string             `json:"evidence,omitempty"`
+	GeneratedAt       time.Time          `json:"generated_at"`
+}
+
 type BulkSyncScope string
 
 const (

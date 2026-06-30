@@ -255,6 +255,18 @@ func (p *fixtureProvider) GetMilestone(context.Context, MilestoneRequest) (Miles
 	return Milestone{}, FixtureReadOnlyError("GetMilestone")
 }
 
+func (p *fixtureProvider) GetRelease(context.Context, ReleaseRequest) (Release, error) {
+	return Release{}, FixtureReadOnlyError("GetRelease")
+}
+
+func (p *fixtureProvider) CreateRelease(context.Context, ReleaseWriteRequest, WriteOptions) (WriteResult[Release], error) {
+	return WriteResult[Release]{}, FixtureReadOnlyError("CreateRelease")
+}
+
+func (p *fixtureProvider) UpdateRelease(context.Context, ReleaseWriteRequest, WriteOptions) (WriteResult[Release], error) {
+	return WriteResult[Release]{}, FixtureReadOnlyError("UpdateRelease")
+}
+
 func (p *fixtureProvider) scenarioError(endpoint string) error {
 	switch p.cfg.Scenario {
 	case "auth-error":
