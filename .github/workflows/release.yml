@@ -114,7 +114,7 @@ jobs:
             --repo "$repo" \
             --owner urandon \
             --name gitcode-mcp \
-            --api-base-url https://gitcode.com \
+            --api-base-url https://api.gitcode.com \
             --scopes issues
 
           asset_args=()

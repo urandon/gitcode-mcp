@@ -2268,7 +2268,7 @@ func (s *Service) PublishRelease(ctx context.Context, req PublishReleaseRequest)
 		TagName:       strings.TrimSpace(req.Tag),
 		Ref:           strings.TrimSpace(req.Ref),
 		Name:          strings.TrimSpace(req.Title),
-		Description:   req.Body,
+		Description:   releaseBodyWithAssets(req.Body, req.Assets),
 		ReleaseStatus: status,
 		Links:         links,
 	}
@@ -3846,6 +3846,31 @@ func releaseStatus(value string) (int, error) {
 	default:
 		return 0, ErrInvalidQuery{Field: "status", Message: "release status must be latest, prerelease, or unset"}
 	}
+}
+
+func releaseBodyWithAssets(body string, assets []PublishAssetLink) string {
+	body = strings.TrimRight(body, "\n")
+	if len(assets) == 0 {
+		return body
+	}
+	var b strings.Builder
+	b.WriteString(body)
+	if !strings.Contains(body, "## Assets") {
+		b.WriteString("\n\n## Assets")
+	}
+	for _, asset := range assets {
+		name := strings.TrimSpace(asset.Name)
+		url := strings.TrimSpace(asset.URL)
+		if name == "" || url == "" || strings.Contains(body, url) {
+			continue
+		}
+		b.WriteString("\n- [")
+		b.WriteString(name)
+		b.WriteString("](")
+		b.WriteString(url)
+		b.WriteString(")")
+	}
+	return b.String()
 }
 
 func releaseIdempotency(req PublishReleaseRequest, status int) (string, string) {

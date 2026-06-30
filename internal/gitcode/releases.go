@@ -36,22 +36,82 @@ type ReleaseWriteRequest struct {
 }
 
 type ReleaseLink struct {
-	Name         string `json:"name"`
-	URL          string `json:"url"`
-	AttachmentID string `json:"attachment_id,omitempty"`
-	Action       string `json:"action,omitempty"`
-	Size         int64  `json:"size,omitempty"`
+	Name               string `json:"name"`
+	URL                string `json:"url"`
+	BrowserDownloadURL string `json:"browser_download_url,omitempty"`
+	AttachmentID       string `json:"attachment_id,omitempty"`
+	Action             string `json:"action,omitempty"`
+	Size               int64  `json:"size,omitempty"`
 }
 
 type Release struct {
-	ID            string        `json:"id,omitempty"`
-	TagName       string        `json:"tag_name"`
-	Name          string        `json:"name"`
-	Description   string        `json:"description"`
-	ReleaseStatus int           `json:"release_status"`
-	Assets        ReleaseAssets `json:"assets"`
-	CreatedAt     time.Time     `json:"created_at"`
-	UpdatedAt     time.Time     `json:"updated_at"`
+	ID              string        `json:"id,omitempty"`
+	TagName         string        `json:"tag_name"`
+	Name            string        `json:"name"`
+	Description     string        `json:"description"`
+	Body            string        `json:"body,omitempty"`
+	TargetCommitish string        `json:"target_commitish,omitempty"`
+	Prerelease      bool          `json:"prerelease,omitempty"`
+	ReleaseStatus   int           `json:"release_status"`
+	Assets          ReleaseAssets `json:"assets"`
+	CreatedAt       *time.Time    `json:"created_at,omitempty"`
+	UpdatedAt       *time.Time    `json:"updated_at,omitempty"`
+}
+
+func (r *Release) UnmarshalJSON(body []byte) error {
+	var wire struct {
+		ID              *string         `json:"id"`
+		TagName         string          `json:"tag_name"`
+		Name            string          `json:"name"`
+		Description     string          `json:"description"`
+		Body            string          `json:"body"`
+		TargetCommitish string          `json:"target_commitish"`
+		Prerelease      bool            `json:"prerelease"`
+		ReleaseStatus   json.RawMessage `json:"release_status"`
+		Assets          json.RawMessage `json:"assets"`
+		CreatedAt       *time.Time      `json:"created_at"`
+		UpdatedAt       *time.Time      `json:"updated_at"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return err
+	}
+	status, hasStatus, err := decodeReleaseStatus(wire.ReleaseStatus)
+	if err != nil {
+		return err
+	}
+	if !hasStatus {
+		if wire.Prerelease {
+			status = ReleaseStatusPreRelease
+		} else {
+			status = ReleaseStatusLatest
+		}
+	}
+	*r = Release{
+		TagName:         wire.TagName,
+		Name:            wire.Name,
+		Description:     wire.Description,
+		Body:            wire.Body,
+		TargetCommitish: wire.TargetCommitish,
+		Prerelease:      wire.Prerelease,
+		ReleaseStatus:   status,
+		CreatedAt:       wire.CreatedAt,
+		UpdatedAt:       wire.UpdatedAt,
+	}
+	if wire.ID != nil {
+		r.ID = *wire.ID
+	}
+	if len(wire.Assets) == 0 || string(wire.Assets) == "null" {
+		return nil
+	}
+	if bytes.HasPrefix(bytes.TrimSpace(wire.Assets), []byte("[")) {
+		var assets []ReleaseLink
+		if err := json.Unmarshal(wire.Assets, &assets); err != nil {
+			return err
+		}
+		r.Assets.Assets = assets
+		return nil
+	}
+	return json.Unmarshal(wire.Assets, &r.Assets)
 }
 
 type ReleaseAssets struct {
@@ -73,7 +133,7 @@ func (c *HTTPClient) GetRelease(ctx context.Context, req ReleaseRequest) (Releas
 	if err := decodeDataJSON(endpoint, body, &release); err != nil {
 		return Release{}, err
 	}
-	return release, nil
+	return normalizeRelease(release), nil
 }
 
 func (c *HTTPClient) CreateRelease(ctx context.Context, req ReleaseWriteRequest, opts WriteOptions) (WriteResult[Release], error) {
@@ -89,7 +149,7 @@ func (c *HTTPClient) UpdateRelease(ctx context.Context, req ReleaseWriteRequest,
 		return WriteResult[Release]{}, err
 	}
 	payload := releaseUpdatePayload(req)
-	return c.writeRelease(ctx, http.MethodPut, getReleaseEndpoint(req.Owner, req.Repo, req.TagName), "UpdateRelease", req.Owner+"/"+req.Repo+"/releases/"+req.TagName, payload, req.TagName, opts)
+	return c.writeRelease(ctx, http.MethodPatch, updateReleaseEndpoint(req.Owner, req.Repo, req.TagName), "UpdateRelease", req.Owner+"/"+req.Repo+"/releases/"+req.TagName, payload, req.TagName, opts)
 }
 
 func (c *HTTPClient) writeRelease(ctx context.Context, method, endpoint, operation, target string, payload any, tag string, opts WriteOptions) (WriteResult[Release], error) {
@@ -110,6 +170,7 @@ func (c *HTTPClient) writeRelease(ctx context.Context, method, endpoint, operati
 	if err := decodeDataJSON(endpoint, respBody, &release); err != nil {
 		return WriteResult[Release]{}, err
 	}
+	release = normalizeRelease(release)
 	if strings.TrimSpace(release.TagName) == "" {
 		release.TagName = tag
 	}
@@ -140,39 +201,66 @@ func (c *HTTPClient) writeRelease(ctx context.Context, method, endpoint, operati
 
 func releaseCreatePayload(req ReleaseWriteRequest) any {
 	return struct {
-		RepoID        string        `json:"repoId"`
-		TagName       string        `json:"tag_name"`
-		Ref           string        `json:"ref"`
-		Name          string        `json:"name"`
-		Description   string        `json:"description"`
-		ReleaseStatus int           `json:"release_status"`
-		Links         []ReleaseLink `json:"links,omitempty"`
-		Assets        []ReleaseLink `json:"assets,omitempty"`
+		TagName         string `json:"tag_name"`
+		TargetCommitish string `json:"target_commitish"`
+		Name            string `json:"name"`
+		Body            string `json:"body"`
+		Prerelease      bool   `json:"prerelease"`
 	}{
-		RepoID:        req.Owner + "/" + req.Repo,
-		TagName:       req.TagName,
-		Ref:           req.Ref,
-		Name:          req.Name,
-		Description:   req.Description,
-		ReleaseStatus: req.ReleaseStatus,
-		Links:         req.Links,
-		Assets:        req.Assets,
+		TagName:         req.TagName,
+		TargetCommitish: req.Ref,
+		Name:            req.Name,
+		Body:            req.Description,
+		Prerelease:      req.ReleaseStatus == ReleaseStatusPreRelease,
 	}
 }
 
 func releaseUpdatePayload(req ReleaseWriteRequest) any {
 	return struct {
-		Name          string        `json:"name"`
-		Description   string        `json:"description"`
-		ReleaseStatus int           `json:"release_status"`
-		Links         []ReleaseLink `json:"links,omitempty"`
-		Assets        []ReleaseLink `json:"assets,omitempty"`
+		Name       string `json:"name"`
+		Body       string `json:"body"`
+		Prerelease bool   `json:"prerelease"`
 	}{
-		Name:          req.Name,
-		Description:   req.Description,
-		ReleaseStatus: req.ReleaseStatus,
-		Links:         req.Links,
-		Assets:        req.Assets,
+		Name:       req.Name,
+		Body:       req.Description,
+		Prerelease: req.ReleaseStatus == ReleaseStatusPreRelease,
+	}
+}
+
+func normalizeRelease(release Release) Release {
+	if strings.TrimSpace(release.Description) == "" {
+		release.Description = release.Body
+	}
+	for i := range release.Assets.Assets {
+		if release.Assets.Assets[i].URL == "" {
+			release.Assets.Assets[i].URL = release.Assets.Assets[i].BrowserDownloadURL
+		}
+	}
+	return release
+}
+
+func decodeReleaseStatus(raw json.RawMessage) (int, bool, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, false, nil
+	}
+	var numeric int
+	if err := json.Unmarshal(raw, &numeric); err == nil {
+		return numeric, true, nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return 0, true, err
+	}
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "", "none", "unset":
+		return ReleaseStatusUnset, true, nil
+	case "latest":
+		return ReleaseStatusLatest, true, nil
+	case "pre", "prerelease", "pre-release":
+		return ReleaseStatusPreRelease, true, nil
+	default:
+		return ReleaseStatusUnset, true, nil
 	}
 }
 

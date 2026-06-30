@@ -119,11 +119,15 @@ func getMilestoneEndpoint(owner, repo string, id int) string {
 }
 
 func listReleasesEndpoint(owner, repo string) string {
-	return endpointPath("/api/v2/projects/%s/releases", owner+"/"+repo)
+	return endpointPath("/api/v5/repos/%s/%s/releases", owner, repo)
 }
 
 func getReleaseEndpoint(owner, repo, tag string) string {
-	return endpointPath("/api/v2/projects/%s/releases/%s", owner+"/"+repo, tag)
+	return endpointPath("/api/v5/repos/%s/%s/releases/tags/%s", owner, repo, tag)
+}
+
+func updateReleaseEndpoint(owner, repo, tag string) string {
+	return endpointPath("/api/v5/repos/%s/%s/releases/%s", owner, repo, tag)
 }
 
 func removeLabelEndpoint(owner, repo string, number int, label string) string {

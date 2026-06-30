@@ -160,7 +160,7 @@ func TestContract(t *testing.T) {
 	}
 }
 
-func TestReleaseEndpointsUseGitCodeV2ProjectPath(t *testing.T) {
+func TestReleaseEndpointsUseGitCodeV5RepoPath(t *testing.T) {
 	var seen []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen = append(seen, r.Method+" "+r.URL.EscapedPath())
@@ -168,29 +168,28 @@ func TestReleaseEndpointsUseGitCodeV2ProjectPath(t *testing.T) {
 			t.Fatalf("Authorization=%q", got)
 		}
 		if got := r.Header.Get("PRIVATE-TOKEN"); got != "" {
-			t.Fatalf("PRIVATE-TOKEN should be empty for v2 release request, got %q", got)
+			t.Fatalf("PRIVATE-TOKEN should be empty for v5 release request, got %q", got)
 		}
 		switch r.Method + " " + r.URL.EscapedPath() {
-		case "GET /api/v2/projects/example-owner%2Fexample-repo/releases/v0.1.0":
-			fmt.Fprint(w, `{"data":{"tag_name":"v0.1.0","name":"gitcode-mcp v0.1.0","description":"body","release_status":2}}`)
-		case "POST /api/v2/projects/example-owner%2Fexample-repo/releases":
+		case "GET /api/v5/repos/example-owner/example-repo/releases/tags/v0.1.0":
+			fmt.Fprint(w, `{"tag_name":"v0.1.0","name":"gitcode-mcp v0.1.0","body":"body","prerelease":false}`)
+		case "POST /api/v5/repos/example-owner/example-repo/releases":
 			var payload struct {
-				RepoID      string        `json:"repoId"`
-				TagName     string        `json:"tag_name"`
-				Ref         string        `json:"ref"`
-				Name        string        `json:"name"`
-				Description string        `json:"description"`
-				Links       []ReleaseLink `json:"links"`
+				TagName         string `json:"tag_name"`
+				TargetCommitish string `json:"target_commitish"`
+				Name            string `json:"name"`
+				Body            string `json:"body"`
+				Prerelease      bool   `json:"prerelease"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Fatal(err)
 			}
-			if payload.RepoID != "example-owner/example-repo" || payload.TagName != "v0.1.0" || payload.Ref != "main" || len(payload.Links) != 1 {
+			if payload.TagName != "v0.1.0" || payload.TargetCommitish != "main" || payload.Body != "body" || payload.Prerelease {
 				t.Fatalf("payload=%#v", payload)
 			}
-			fmt.Fprint(w, `{"data":{"tag_name":"v0.1.0","name":"gitcode-mcp v0.1.0","description":"body","release_status":2}}`)
-		case "PUT /api/v2/projects/example-owner%2Fexample-repo/releases/v0.1.0":
-			fmt.Fprint(w, `{"data":{"tag_name":"v0.1.0","name":"gitcode-mcp v0.1.0","description":"updated","release_status":1}}`)
+			fmt.Fprint(w, `{"tag_name":"v0.1.0","name":"gitcode-mcp v0.1.0","body":"body","prerelease":false}`)
+		case "PATCH /api/v5/repos/example-owner/example-repo/releases/v0.1.0":
+			fmt.Fprint(w, `{"tag_name":"v0.1.0","name":"gitcode-mcp v0.1.0","body":"updated","prerelease":true}`)
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.EscapedPath())
 		}
