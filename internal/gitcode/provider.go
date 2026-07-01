@@ -79,6 +79,8 @@ type ProviderConfig struct {
 	MaxRetries      int
 	UserAgent       string
 	Pagination      PaginationConfig
+	RateLimitRPS    float64
+	RateLimitBurst  int
 }
 
 type FixtureConfig struct {
@@ -142,7 +144,7 @@ func NewLiveProvider(cfg ProviderConfig, opts ...LiveProviderOption) (Provider, 
 	if err != nil {
 		return nil, err
 	}
-	client, err := newHTTPClientForProvider(Config{BaseURL: baseURL, Token: cfg.Token, Timeout: cfg.Timeout, MaxResponseSize: cfg.MaxResponseSize, MaxRetries: cfg.MaxRetries, UserAgent: cfg.UserAgent, Pagination: cfg.Pagination})
+	client, err := newHTTPClientForProvider(Config{BaseURL: baseURL, Token: cfg.Token, Timeout: cfg.Timeout, MaxResponseSize: cfg.MaxResponseSize, MaxRetries: cfg.MaxRetries, UserAgent: cfg.UserAgent, Pagination: cfg.Pagination, RateLimitRPS: cfg.RateLimitRPS, RateLimitBurst: cfg.RateLimitBurst})
 	if err != nil {
 		return nil, err
 	}

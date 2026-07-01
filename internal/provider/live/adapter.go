@@ -69,6 +69,8 @@ func NewHTTPClient(cfg HTTPClientConfig) (*gitcode.HTTPClient, error) {
 		MaxRetries:      cfg.MaxRetries,
 		UserAgent:       cfg.UserAgent,
 		Pagination:      cfg.Pagination,
+		RateLimitRPS:    cfg.RateLimitRPS,
+		RateLimitBurst:  cfg.RateLimitBurst,
 	})
 }
 
@@ -80,4 +82,6 @@ type HTTPClientConfig struct {
 	MaxRetries      int
 	UserAgent       string
 	Pagination      gitcode.PaginationConfig
+	RateLimitRPS    float64
+	RateLimitBurst  int
 }

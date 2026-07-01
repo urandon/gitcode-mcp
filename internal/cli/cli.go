@@ -340,7 +340,7 @@ func buildStartupPlan(ctx context.Context, command string, opts options, deps lo
 	}
 	plan.LiveRepositoryBinding = binding
 	plan.APIBaseURL = binding.APIBaseURL
-	plan.ServiceConfig = service.ServiceConfig{BaseURL: binding.APIBaseURL, LockPath: eff.Config.LockPath, Timeout: eff.Config.DefaultTimeout, MaxResponseSize: eff.Config.MaxResponseSize, MaxRetries: eff.Config.MaxRetries}
+	plan.ServiceConfig = service.ServiceConfig{BaseURL: binding.APIBaseURL, LockPath: eff.Config.LockPath, Timeout: eff.Config.DefaultTimeout, MaxResponseSize: eff.Config.MaxResponseSize, MaxRetries: eff.Config.MaxRetries, RateLimitRPS: eff.Config.RateLimitRPS, RateLimitBurst: eff.Config.RateLimitBurst}
 	return plan, nil
 }
 
@@ -724,7 +724,7 @@ func probeAuthStatus(ctx context.Context, src config.Source, eff config.Effectiv
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	provider, err := gitcode.NewLiveProvider(gitcode.ProviderConfig{Mode: gitcode.ProviderModeLive, LiveAllowed: true, BaseURL: eff.Config.GitCodeBaseURL, Token: token, Timeout: eff.Config.DefaultTimeout, MaxResponseSize: eff.Config.MaxResponseSize, MaxRetries: eff.Config.MaxRetries})
+	provider, err := gitcode.NewLiveProvider(gitcode.ProviderConfig{Mode: gitcode.ProviderModeLive, LiveAllowed: true, BaseURL: eff.Config.GitCodeBaseURL, Token: token, Timeout: eff.Config.DefaultTimeout, MaxResponseSize: eff.Config.MaxResponseSize, MaxRetries: eff.Config.MaxRetries, RateLimitRPS: eff.Config.RateLimitRPS, RateLimitBurst: eff.Config.RateLimitBurst})
 	if err != nil {
 		status.AuthProbe = &config.CredentialAuthProbe{Status: "failed", FailureClass: "auth-failure", Message: "auth-failure: unable to initialize live auth probe"}
 		return status
@@ -1340,6 +1340,12 @@ func renderSyncProgressLine(w io.Writer, ev service.ProgressEvent, started time.
 	}
 	if ev.RateLimitState != "" {
 		fmt.Fprintf(w, " rate_limit=%s", ev.RateLimitState)
+	}
+	if ev.RateLimitRPS != "" {
+		fmt.Fprintf(w, " rps=%s", ev.RateLimitRPS)
+	}
+	if ev.RateLimitBurst > 0 {
+		fmt.Fprintf(w, " burst=%d", ev.RateLimitBurst)
 	}
 	if ev.RetryAfter != "" {
 		fmt.Fprintf(w, " retry_after=%s", ev.RetryAfter)

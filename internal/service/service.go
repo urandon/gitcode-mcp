@@ -97,6 +97,8 @@ func NewWithMode(store cache.Store, mode gitcode.ProviderMode, token string, cfg
 			MaxRetries:      maxRetries,
 			UserAgent:       userAgent,
 			Pagination:      cfg.Pagination,
+			RateLimitRPS:    cfg.RateLimitRPS,
+			RateLimitBurst:  cfg.RateLimitBurst,
 		})
 		if err != nil {
 			return nil, err
@@ -1100,6 +1102,7 @@ func (s *Service) BulkSyncIssues(ctx context.Context, req BulkSyncRequest) (*Syn
 		}
 		return nil, err
 	}
+	ctx = withBulkRateLimitProgress(ctx, bulkProgressChan(req))
 	repoID, err := s.requireRepo(ctx, req.RepoID, "bulk-sync-issues")
 	if err != nil {
 		return nil, err
@@ -1277,6 +1280,7 @@ func (s *Service) BulkSyncPullRequests(ctx context.Context, req BulkSyncRequest)
 		}
 		return nil, err
 	}
+	ctx = withBulkRateLimitProgress(ctx, bulkProgressChan(req))
 	repoID, err := s.requireRepo(ctx, req.RepoID, "bulk-sync-pulls")
 	if err != nil {
 		return nil, err
@@ -1576,6 +1580,7 @@ func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (
 		}
 		return nil, err
 	}
+	ctx = withBulkRateLimitProgress(ctx, bulkProgressChan(req))
 	repoID, err := s.requireRepo(ctx, req.RepoID, "bulk-sync-pr-comments")
 	if err != nil {
 		return nil, err
@@ -1747,6 +1752,38 @@ func bulkProgressChan(req BulkSyncRequest) chan<- ProgressEvent {
 	return req.ProgressChan
 }
 
+func withBulkRateLimitProgress(ctx context.Context, ch chan<- ProgressEvent) context.Context {
+	if ch == nil {
+		return ctx
+	}
+	return gitcode.WithRateLimitObserver(ctx, func(ev gitcode.RateLimitEvent) {
+		emitProgress(ch, progressEventFromRateLimit(ev))
+	})
+}
+
+func progressEventFromRateLimit(ev gitcode.RateLimitEvent) ProgressEvent {
+	progress := ProgressEvent{
+		Type:           "rate_limit",
+		Endpoint:       ev.Endpoint,
+		Attempt:        ev.Attempt,
+		RateLimitState: string(ev.Type),
+		RateLimitBurst: ev.Burst,
+	}
+	if ev.Wait >= 0 && (ev.Wait > 0 || ev.RawRetryAfter != "") {
+		progress.RetryAfter = ev.Wait.String()
+	}
+	if !ev.ResumeAt.IsZero() {
+		progress.ResumeAt = ev.ResumeAt.UTC().Format(time.RFC3339Nano)
+	}
+	if ev.RPS > 0 {
+		progress.RateLimitRPS = strconv.FormatFloat(ev.RPS, 'f', -1, 64)
+	}
+	if ev.RawRetryAfter != "" {
+		progress.Message = "retry_after=" + ev.RawRetryAfter
+	}
+	return progress
+}
+
 func (s *Service) stagePRCommentPage(ctx context.Context, req BulkSyncRequest, prNumber int, items []gitcode.PRComment, result *SyncResourcesResult) {
 	for _, comment := range items {
 		remoteID := prCommentRemoteID(prNumber, comment.ID)
@@ -1785,6 +1822,7 @@ func (s *Service) BulkSyncWiki(ctx context.Context, req BulkSyncRequest) (*SyncR
 		}
 		return nil, err
 	}
+	ctx = withBulkRateLimitProgress(ctx, bulkProgressChan(req))
 	repoID, err := s.requireRepo(ctx, req.RepoID, "bulk-sync-wiki")
 	if err != nil {
 		return nil, err

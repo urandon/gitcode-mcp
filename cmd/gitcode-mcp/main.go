@@ -41,6 +41,8 @@ type GitCodeStartup struct {
 	DefaultTimeout  time.Duration
 	MaxResponseSize int64
 	MaxRetries      int
+	RateLimitRPS    float64
+	RateLimitBurst  int
 	Live            bool
 	Offline         bool
 	Token           string
@@ -164,6 +166,8 @@ func buildStartupDeps(cfg config.Config, token string, live bool) StartupDeps {
 			DefaultTimeout:  cfg.DefaultTimeout,
 			MaxResponseSize: cfg.MaxResponseSize,
 			MaxRetries:      cfg.MaxRetries,
+			RateLimitRPS:    cfg.RateLimitRPS,
+			RateLimitBurst:  cfg.RateLimitBurst,
 			Live:            live,
 			Offline:         false,
 			Token:           token,
@@ -309,6 +313,12 @@ func mergeStartupOverrides(base config.Overrides, override config.Overrides) con
 	if override.MaxRetries != nil {
 		base.MaxRetries = override.MaxRetries
 	}
+	if override.RateLimitRPS != nil {
+		base.RateLimitRPS = override.RateLimitRPS
+	}
+	if override.RateLimitBurst != nil {
+		base.RateLimitBurst = override.RateLimitBurst
+	}
 	if override.Format != "" {
 		base.Format = override.Format
 	}
@@ -387,6 +397,8 @@ func resolveLiveClient(deps StartupDeps) (gitcode.Client, error) {
 		Timeout:         gc.DefaultTimeout,
 		MaxResponseSize: gc.MaxResponseSize,
 		MaxRetries:      gc.MaxRetries,
+		RateLimitRPS:    gc.RateLimitRPS,
+		RateLimitBurst:  gc.RateLimitBurst,
 	})
 	if err != nil {
 		return nil, err
@@ -408,6 +420,8 @@ func resolveService(store cache.Store, deps StartupDeps) (*service.Service, erro
 		Timeout:         deps.GitCode.DefaultTimeout,
 		MaxResponseSize: deps.GitCode.MaxResponseSize,
 		MaxRetries:      deps.GitCode.MaxRetries,
+		RateLimitRPS:    deps.GitCode.RateLimitRPS,
+		RateLimitBurst:  deps.GitCode.RateLimitBurst,
 	})
 }
 

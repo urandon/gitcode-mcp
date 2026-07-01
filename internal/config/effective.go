@@ -558,6 +558,18 @@ func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, er
 				return fileConfig{}, CredentialConfig{}, fmt.Errorf("config: invalid max_retries %q: %w", value, err)
 			}
 			cfg.MaxRetries = &n
+		case "rate_limit_rps":
+			n, err := strconv.ParseFloat(value, 64)
+			if err != nil {
+				return fileConfig{}, CredentialConfig{}, fmt.Errorf("config: invalid rate_limit_rps %q: %w", value, err)
+			}
+			cfg.RateLimitRPS = &n
+		case "rate_limit_burst":
+			n, err := strconv.Atoi(value)
+			if err != nil {
+				return fileConfig{}, CredentialConfig{}, fmt.Errorf("config: invalid rate_limit_burst %q: %w", value, err)
+			}
+			cfg.RateLimitBurst = &n
 		case "format":
 			cfg.Format = &value
 		}
@@ -574,6 +586,8 @@ func defaultFieldSources() map[string]string {
 		"default_timeout":            "default",
 		"max_response_size":          "default",
 		"max_retries":                "default",
+		"rate_limit_rps":             "default",
+		"rate_limit_burst":           "default",
 		"format":                     "default",
 		"mcp_tool_access":            "default",
 		"credential.keyring_service": "default",
@@ -605,6 +619,12 @@ func applyFileSources(sources map[string]string, file fileConfig, source string)
 	}
 	if file.MaxRetries != nil {
 		sources["max_retries"] = source
+	}
+	if file.RateLimitRPS != nil {
+		sources["rate_limit_rps"] = source
+	}
+	if file.RateLimitBurst != nil {
+		sources["rate_limit_burst"] = source
 	}
 	if file.Format != nil {
 		sources["format"] = source
@@ -771,6 +791,12 @@ func applyCommandOverrideSources(eff *EffectiveConfig, overrides Overrides, befo
 	}
 	if overrides.MaxRetries != nil {
 		eff.FieldSources["max_retries"] = "command"
+	}
+	if overrides.RateLimitRPS != nil {
+		eff.FieldSources["rate_limit_rps"] = "command"
+	}
+	if overrides.RateLimitBurst != nil {
+		eff.FieldSources["rate_limit_burst"] = "command"
 	}
 	if overrides.Format != "" {
 		eff.FieldSources["format"] = "command"

@@ -18,6 +18,8 @@ type ServiceConfig struct {
 	MaxRetries      int
 	UserAgent       string
 	Pagination      gitcode.PaginationConfig
+	RateLimitRPS    float64
+	RateLimitBurst  int
 }
 
 type RepositoryScope string

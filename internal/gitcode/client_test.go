@@ -343,6 +343,79 @@ func TestReadRetry(t *testing.T) {
 	}
 }
 
+func TestRateLimiterThrottlesRequestsAndEmitsEvents(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"id":"ISSUE-42","number":42,"title":"limited"}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, Config{RateLimitRPS: 100, RateLimitBurst: 1})
+	var events []RateLimitEvent
+	ctx := WithRateLimitObserver(context.Background(), func(ev RateLimitEvent) {
+		events = append(events, ev)
+	})
+	if _, err := client.GetIssue(ctx, IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42}); err != nil {
+		t.Fatalf("first GetIssue returned error: %v", err)
+	}
+	if _, err := client.GetIssue(ctx, IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42}); err != nil {
+		t.Fatalf("second GetIssue returned error: %v", err)
+	}
+
+	var sawStart, sawComplete bool
+	for _, ev := range events {
+		switch ev.Type {
+		case RateLimitEventThrottleWaitStarted:
+			sawStart = true
+			if ev.Wait <= 0 || ev.RPS != 100 || ev.Burst != 1 || ev.Endpoint == "" {
+				t.Fatalf("unexpected throttle start event: %+v", ev)
+			}
+		case RateLimitEventThrottleWaitCompleted:
+			sawComplete = true
+		}
+	}
+	if !sawStart || !sawComplete {
+		t.Fatalf("missing throttle events: %+v", events)
+	}
+}
+
+func TestRateLimitRetryAfterEmitsEvents(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprint(w, `{"message":"slow down"}`)
+			return
+		}
+		fmt.Fprint(w, `{"id":"ISSUE-42","number":42,"title":"retried"}`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, Config{MaxRetries: 1})
+	var events []RateLimitEvent
+	ctx := WithRateLimitObserver(context.Background(), func(ev RateLimitEvent) {
+		events = append(events, ev)
+	})
+	if _, err := client.GetIssue(ctx, IssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42}); err != nil {
+		t.Fatalf("GetIssue returned error: %v", err)
+	}
+
+	var sawResponse, sawWaitStart, sawWaitComplete bool
+	for _, ev := range events {
+		switch ev.Type {
+		case RateLimitEventResponseRateLimited:
+			sawResponse = ev.Attempt == 1 && ev.RawRetryAfter == "0"
+		case RateLimitEventRetryAfterWaitStarted:
+			sawWaitStart = ev.Attempt == 1 && ev.RawRetryAfter == "0"
+		case RateLimitEventRetryAfterWaitCompleted:
+			sawWaitComplete = ev.Attempt == 1 && ev.RawRetryAfter == "0"
+		}
+	}
+	if !sawResponse || !sawWaitStart || !sawWaitComplete {
+		t.Fatalf("missing retry-after events: %+v", events)
+	}
+}
+
 func TestTimeout(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(50 * time.Millisecond)
