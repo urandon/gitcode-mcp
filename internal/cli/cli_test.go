@@ -549,7 +549,7 @@ func TestSyncJSONDefaultsToCompactSummaryAndDetailsRestoresRecords(t *testing.T)
 	if _, ok := compact["results"]; ok {
 		t.Fatalf("compact sync should omit per-record results: %#v", compact)
 	}
-	if !strings.Contains(compactErr.String(), "sync progress: collection=issues page=1 committed=1") {
+	if !strings.Contains(compactErr.String(), "sync progress: type=records collection=issues page=1 records=1") {
 		t.Fatalf("missing progress stderr: %q", compactErr.String())
 	}
 
@@ -565,6 +565,74 @@ func TestSyncJSONDefaultsToCompactSummaryAndDetailsRestoresRecords(t *testing.T)
 	if len(detailed.Results) != 1 || detailed.SuccessCount != 1 {
 		t.Fatalf("details sync result=%#v", detailed)
 	}
+}
+
+func TestSyncProgressModes(t *testing.T) {
+	t.Run("off suppresses progress", func(t *testing.T) {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		code := executeWithFactory([]string{"sync", "--offline", "--repo", "fixture-a", "--issues", "--format", "json", "--progress", "off"}, &stdout, &stderr, spyFactory())
+		if code != 0 {
+			t.Fatalf("sync code=%d stderr=%q", code, stderr.String())
+		}
+		if strings.Contains(stderr.String(), "sync progress:") {
+			t.Fatalf("progress stderr not suppressed: %q", stderr.String())
+		}
+		var compact map[string]any
+		if err := json.Unmarshal(stdout.Bytes(), &compact); err != nil {
+			t.Fatalf("invalid compact sync json: %v\n%s", err, stdout.String())
+		}
+	})
+
+	t.Run("quiet suppresses progress", func(t *testing.T) {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		code := executeWithFactory([]string{"sync", "--offline", "--repo", "fixture-a", "--issues", "--format", "json", "--quiet"}, &stdout, &stderr, spyFactory())
+		if code != 0 {
+			t.Fatalf("sync code=%d stderr=%q", code, stderr.String())
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("quiet stderr=%q, want empty", stderr.String())
+		}
+	})
+
+	t.Run("jsonl writes progress events to stderr", func(t *testing.T) {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		code := executeWithFactory([]string{"sync", "--offline", "--repo", "fixture-a", "--issues", "--format", "json", "--progress", "jsonl"}, &stdout, &stderr, spyFactory())
+		if code != 0 {
+			t.Fatalf("sync code=%d stderr=%q", code, stderr.String())
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &map[string]any{}); err != nil {
+			t.Fatalf("invalid stdout json: %v\n%s", err, stdout.String())
+		}
+		lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+		if len(lines) != 1 {
+			t.Fatalf("jsonl progress lines=%d stderr=%q", len(lines), stderr.String())
+		}
+		var event map[string]any
+		if err := json.Unmarshal([]byte(lines[0]), &event); err != nil {
+			t.Fatalf("invalid jsonl progress: %v line=%q", err, lines[0])
+		}
+		if event["type"] != "records" || event["collection"] != "issues" || event["records_fetched"].(float64) != 1 {
+			t.Fatalf("unexpected progress event=%#v", event)
+		}
+		if _, ok := event["elapsed_ms"]; !ok {
+			t.Fatalf("progress event missing elapsed_ms=%#v", event)
+		}
+	})
+
+	t.Run("invalid mode fails validation", func(t *testing.T) {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		code := executeWithFactory([]string{"sync", "--offline", "--repo", "fixture-a", "--issues", "--progress", "sparkles"}, &stdout, &stderr, spyFactory())
+		if code == 0 {
+			t.Fatalf("invalid progress mode succeeded stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "progress must be auto, lines, jsonl, or off") {
+			t.Fatalf("stderr missing validation message: %q", stderr.String())
+		}
+	})
 }
 
 func TestRenderSyncResourcesPartialSummaryGroupsFailures(t *testing.T) {
