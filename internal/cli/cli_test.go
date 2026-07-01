@@ -15,6 +15,7 @@ import (
 	"gitcode-mcp/internal/capability"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/service"
+	"gitcode-mcp/internal/servicectl"
 )
 
 func TestHelpReturnsSuccess(t *testing.T) {
@@ -439,9 +440,82 @@ func TestAllCommandsRegistered(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d", code)
 	}
-	for _, want := range []string{"ingest", "index", "search", "search_sources", "list", "get", "get-snippet", "snippet", "snippets", "backlinks", "list-chunks", "link-check", "stale-index", "recent", "cache", "cache-status", "sync-status", "sync_status", "sync", "export", "diff", "create-issue", "update-issue", "create-pr", "create-mr", "create-page", "update-page", "add-comment", "add-pr-review-comment", "update-comment", "add-label"} {
+	for _, want := range []string{"ingest", "index", "search", "search_sources", "list", "get", "get-snippet", "snippet", "snippets", "backlinks", "list-chunks", "link-check", "stale-index", "recent", "cache", "cache-status", "sync-status", "sync_status", "sync", "export", "diff", "create-issue", "update-issue", "create-pr", "create-mr", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "update-comment", "add-label", "publish-release", "config", "auth", "service", "doctor", "migrate-cache", "repo"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("help missing command %q in %q", want, stdout.String())
+		}
+	}
+}
+
+func TestServiceCommandStatusAndInstallUseUserGlobalPaths(t *testing.T) {
+	root := t.TempDir()
+	src := &repoInitLocalSource{
+		env:       map[string]string{},
+		cwd:       root,
+		homeDir:   filepath.Join(root, "home"),
+		configDir: filepath.Join(root, "config"),
+		cacheDir:  filepath.Join(root, "cache"),
+	}
+
+	var statusOut bytes.Buffer
+	var statusErr bytes.Buffer
+	code := executeWithFactoryAndDeps([]string{"service", "status", "--format", "json"}, &statusOut, &statusErr, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("service status code=%d stderr=%q", code, statusErr.String())
+	}
+	var status servicectl.Status
+	if err := json.Unmarshal(statusOut.Bytes(), &status); err != nil {
+		t.Fatalf("invalid status json: %v\n%s", err, statusOut.String())
+	}
+	if status.Status != servicectl.StatusNotInstalled || status.Installed || status.Running {
+		t.Fatalf("initial service status = %#v", status)
+	}
+	if !strings.HasPrefix(status.RuntimeDir, src.cacheDir) || !strings.HasPrefix(status.LogDir, src.cacheDir) {
+		t.Fatalf("service paths are not cache-global: %#v", status)
+	}
+
+	var installOut bytes.Buffer
+	var installErr bytes.Buffer
+	code = executeWithFactoryAndDeps([]string{"service", "install", "--overwrite", "--format", "json"}, &installOut, &installErr, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("service install code=%d stderr=%q", code, installErr.String())
+	}
+	if err := json.Unmarshal(installOut.Bytes(), &status); err != nil {
+		t.Fatalf("invalid install json: %v\n%s", err, installOut.String())
+	}
+	if status.Status != servicectl.StatusInstalledStopped || !status.Installed || status.Running {
+		t.Fatalf("installed service status = %#v", status)
+	}
+	if _, err := os.Stat(status.InstallPath); err != nil {
+		t.Fatalf("install path was not written: %v", err)
+	}
+	if !strings.HasPrefix(status.InstallPath, src.homeDir) && !strings.HasPrefix(status.InstallPath, src.configDir) {
+		t.Fatalf("install path is not user-global: %#v", status)
+	}
+}
+
+func TestServiceHelpShowsLifecycleSubcommands(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Execute([]string{"service", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	for _, want := range []string{"install", "uninstall", "start", "stop", "status", "doctor", "run"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("service help missing %q in %q", want, stdout.String())
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"service", "status", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("status help code=%d stderr=%q", code, stderr.String())
+	}
+	for _, want := range []string{"service status", "runtime", "socket"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("service status help missing %q in %q", want, stdout.String())
 		}
 	}
 }
