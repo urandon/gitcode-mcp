@@ -1272,35 +1272,25 @@ func renderSyncProgressSpinnerFrame(w io.Writer, state *syncProgressSpinnerState
 	frame := frames[state.Frame%len(frames)]
 	state.Frame++
 	fmt.Fprintf(w, "\r\033[K%s sync", frame)
-	if state.Type != "" {
-		fmt.Fprintf(w, " type=%s", state.Type)
-	}
 	if state.Collection != "" {
-		fmt.Fprintf(w, " collection=%s", state.Collection)
+		fmt.Fprintf(w, " %s", state.Collection)
 	}
 	if state.Phase != "" {
-		fmt.Fprintf(w, " phase=%s", state.Phase)
+		fmt.Fprintf(w, " %s", state.Phase)
 	}
 	if state.Page > 0 {
-		fmt.Fprintf(w, " page=%d", state.Page)
-	}
-	if state.RecordsListed > 0 {
-		fmt.Fprintf(w, " listed=%d", state.RecordsListed)
+		fmt.Fprintf(w, " p%d", state.Page)
 	}
 	if state.RecordsFetched > 0 {
-		fmt.Fprintf(w, " records=%d", state.RecordsFetched)
+		fmt.Fprintf(w, " %d rec", state.RecordsFetched)
+	} else if state.RecordsListed > 0 {
+		fmt.Fprintf(w, " %d listed", state.RecordsListed)
 	}
 	if state.RateLimitState != "" {
-		fmt.Fprintf(w, " rate_limit=%s", state.RateLimitState)
+		fmt.Fprint(w, " wait")
 	}
 	if state.RetryAfter != "" {
-		fmt.Fprintf(w, " retry_after=%s", state.RetryAfter)
-	}
-	if state.Endpoint != "" {
-		fmt.Fprintf(w, " endpoint=%s", state.Endpoint)
-	}
-	if state.Message != "" {
-		fmt.Fprintf(w, " message=%q", state.Message)
+		fmt.Fprintf(w, " %s", state.RetryAfter)
 	}
 	fmt.Fprintf(w, " elapsed=%s", time.Since(state.Started).Round(time.Millisecond))
 }

@@ -646,10 +646,32 @@ func TestSyncProgressModes(t *testing.T) {
 		var stderr bytes.Buffer
 		renderSyncProgressSpinnerFrame(&stderr, &state)
 		line := stderr.String()
-		for _, want := range []string{"\r\033[K", "sync", "type=records", "collection=issues", "page=2", "records=3"} {
+		for _, want := range []string{"\r\033[K", "sync", "issues", "p2", "3 rec"} {
 			if !strings.Contains(line, want) {
 				t.Fatalf("spinner line missing %q: %q", want, line)
 			}
+		}
+		for _, unwanted := range []string{"type=", "collection=", "page=", "records="} {
+			if strings.Contains(line, unwanted) {
+				t.Fatalf("spinner line should stay compact and omit %q: %q", unwanted, line)
+			}
+		}
+	})
+
+	t.Run("spinner renders rate limit compactly", func(t *testing.T) {
+		state := syncProgressSpinnerState{Started: time.Now()}
+		state.Apply(service.ProgressEvent{Collection: "issues", Page: 2, RecordsFetched: 3})
+		state.Apply(service.ProgressEvent{Type: "rate_limit", RateLimitState: "throttle_wait_started", RetryAfter: "250ms"})
+		var stderr bytes.Buffer
+		renderSyncProgressSpinnerFrame(&stderr, &state)
+		line := stderr.String()
+		for _, want := range []string{"issues", "p2", "3 rec", "wait 250ms"} {
+			if !strings.Contains(line, want) {
+				t.Fatalf("spinner rate-limit line missing %q: %q", want, line)
+			}
+		}
+		if strings.Contains(line, "rate_limit=") || strings.Contains(line, "retry_after=") {
+			t.Fatalf("spinner rate-limit line should stay compact: %q", line)
 		}
 	})
 }
