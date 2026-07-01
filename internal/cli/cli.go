@@ -198,6 +198,9 @@ type options struct {
 	snapshotID     string
 	confirm        bool
 	helpRequested  bool
+	steps          int
+	intervalMS     int
+	detach         bool
 }
 
 type multiFlag []string
@@ -263,7 +266,7 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 		return 0
 	}
 	if args[0] == "config" || args[0] == "auth" || args[0] == "service" || args[0] == "doctor" || args[0] == "migrate-cache" || args[0] == "bind" {
-		return executeLocalCommand(args, stdout, stderr, deps)
+		return executeLocalCommand(ctx, args, stdout, stderr, deps)
 	}
 	if !isKnownCommand(args[0]) {
 		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
@@ -545,6 +548,9 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.BoolVar(&opts.helpRequested, "help", false, "show help for command")
 	flags.BoolVar(&opts.helpRequested, "h", false, "show help for command")
 	flags.BoolVar(&opts.confirm, "confirm", false, "confirm migration without interactive prompt")
+	flags.IntVar(&opts.steps, "steps", 0, "fake job step count")
+	flags.IntVar(&opts.intervalMS, "interval-ms", 0, "fake job interval in milliseconds")
+	flags.BoolVar(&opts.detach, "detach", false, "start job without attaching progress")
 	if err := flags.Parse(reorderFlags(args)); err != nil {
 		return opts, nil, service.ErrInvalidQuery{Field: "flags", Message: err.Error()}
 	}
@@ -571,7 +577,7 @@ func reorderFlags(args []string) []string {
 		arg := args[i]
 		if strings.HasPrefix(arg, "--") {
 			flags = append(flags, arg)
-			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--index" || arg == "--quiet" || arg == "--dry-run" || arg == "--live" || arg == "--offline" || arg == "--fixture" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" {
+			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--index" || arg == "--quiet" || arg == "--dry-run" || arg == "--live" || arg == "--offline" || arg == "--fixture" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" || arg == "--detach" {
 				continue
 			}
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
@@ -585,7 +591,7 @@ func reorderFlags(args []string) []string {
 	return append(flags, positionals...)
 }
 
-func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
 	if deps.Source == nil {
 		deps.Source = config.OSSource{}
 	}
@@ -614,7 +620,7 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "repo init-local":
 				printLocalSubcommandHelp(command, sub, stdout)
-			case "service run", "service install", "service uninstall", "service start", "service stop", "service status", "service doctor":
+			case "service run", "service install", "service uninstall", "service start", "service stop", "service status", "service doctor", "service fake-job", "service jobs", "service job", "service attach", "service cancel":
 				printLocalSubcommandHelp(command, sub, stdout)
 			default:
 				printCommandHelp(command, stdout)
@@ -634,18 +640,18 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 		return 0
 	}
 	if command == "doctor" {
-		plan, planErr := buildStartupPlan(context.Background(), command, opts, deps)
+		plan, planErr := buildStartupPlan(ctx, command, opts, deps)
 		var invalid service.ErrInvalidQuery
 		if errors.As(planErr, &invalid) {
 			return writeError(stderr, opts.format, planErr)
 		}
-		return executeDoctorCommand(context.Background(), opts, plan, stdout, stderr, deps)
+		return executeDoctorCommand(ctx, opts, plan, stdout, stderr, deps)
 	}
 	if command == "migrate-cache" {
-		return executeMigrateCacheCommand(context.Background(), opts, stdout, stderr, deps)
+		return executeMigrateCacheCommand(ctx, opts, stdout, stderr, deps)
 	}
 	if command == "service" {
-		return executeServiceCommand(context.Background(), rest, opts, stdout, stderr, deps)
+		return executeServiceCommand(ctx, rest, opts, stdout, stderr, deps)
 	}
 	if command == "bind" {
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "bind", Message: "use repo add to create repository bindings"})
@@ -693,11 +699,11 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 			fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), deps.Source))
 			return 1
 		}
-		status := deps.CredentialReporter.Status(context.Background(), eff)
+		status := deps.CredentialReporter.Status(ctx, eff)
 		if opts.live {
-			resolution, _ := resolveLiveCredential(context.Background(), eff, deps)
+			resolution, _ := resolveLiveCredential(ctx, eff, deps)
 			status = resolution.Status()
-			status = probeAuthStatus(context.Background(), deps.Source, eff, opts, status, resolution.Token)
+			status = probeAuthStatus(ctx, deps.Source, eff, opts, status, resolution.Token)
 		}
 		sanitizedStatus := sanitizeCredentialStatus(status, deps.Source)
 		if opts.format == "json" {
@@ -777,6 +783,7 @@ func executeServiceCommand(ctx context.Context, args []string, opts options, std
 	if !ok {
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "service", Message: "subcommand is required"})
 	}
+	rest := args[1:]
 	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Version}
 	var (
 		status servicectl.Status
@@ -804,6 +811,50 @@ func executeServiceCommand(ctx context.Context, args []string, opts options, std
 			return 0
 		}
 		return writeError(stderr, opts.format, err)
+	case "fake-job":
+		client, clientErr := manager.Client()
+		if clientErr != nil {
+			return writeError(stderr, opts.format, clientErr)
+		}
+		var job servicectl.Job
+		if err := client.Call(ctx, "Jobs.StartFake", servicectl.StartFakeJobRequest{Steps: opts.steps, IntervalMS: opts.intervalMS}, &job); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		if opts.detach {
+			return render(stdout, opts.format, job, renderServiceJobText)
+		}
+		return attachServiceJob(ctx, client, job.ID, opts, stdout, stderr)
+	case "jobs":
+		client, clientErr := manager.Client()
+		if clientErr != nil {
+			return writeError(stderr, opts.format, clientErr)
+		}
+		var result servicectl.JobListResult
+		if err := client.Call(ctx, "Jobs.List", nil, &result); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, renderServiceJobListText)
+	case "job", "attach", "cancel":
+		id, idOK := firstArg(rest)
+		if !idOK {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "job_id", Message: "job id is required"})
+		}
+		client, clientErr := manager.Client()
+		if clientErr != nil {
+			return writeError(stderr, opts.format, clientErr)
+		}
+		if sub == "attach" {
+			return attachServiceJob(ctx, client, id, opts, stdout, stderr)
+		}
+		var job servicectl.Job
+		method := "Jobs.Get"
+		if sub == "cancel" {
+			method = "Jobs.Cancel"
+		}
+		if err := client.Call(ctx, method, map[string]string{"job_id": id}, &job); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, job, renderServiceJobText)
 	default:
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "service", Message: "unknown subcommand"})
 	}
@@ -811,6 +862,36 @@ func executeServiceCommand(ctx context.Context, args []string, opts options, std
 		return writeError(stderr, opts.format, err)
 	}
 	return render(stdout, opts.format, status, renderServiceStatusText)
+}
+
+func attachServiceJob(ctx context.Context, client *servicectl.RPCClient, id string, opts options, stdout io.Writer, stderr io.Writer) int {
+	seen := 0
+	for {
+		var job servicectl.Job
+		if err := client.Call(ctx, "Jobs.Get", map[string]string{"job_id": id}, &job); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		for ; seen < len(job.Progress); seen++ {
+			renderServiceJobProgress(stderr, job.ID, job.Progress[seen])
+		}
+		if serviceJobTerminal(job.Status) {
+			return render(stdout, opts.format, job, renderServiceJobText)
+		}
+		select {
+		case <-ctx.Done():
+			return writeError(stderr, opts.format, ctx.Err())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func serviceJobTerminal(status string) bool {
+	switch status {
+	case servicectl.JobStatusSucceeded, servicectl.JobStatusCancelled, servicectl.JobStatusInterrupted:
+		return true
+	default:
+		return false
+	}
 }
 
 func renderServiceStatusText(w io.Writer, status servicectl.Status) {
@@ -834,6 +915,57 @@ func renderServiceStatusText(w io.Writer, status servicectl.Status) {
 	if status.Message != "" {
 		fmt.Fprintf(w, "message: %s\n", status.Message)
 	}
+}
+
+func renderServiceJobListText(w io.Writer, result servicectl.JobListResult) {
+	for _, job := range result.Jobs {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d/%d\n", job.ID, job.Type, job.Status, job.Completed, job.Steps)
+	}
+}
+
+func renderServiceJobText(w io.Writer, job servicectl.Job) {
+	fmt.Fprintf(w, "job_id: %s\n", job.ID)
+	fmt.Fprintf(w, "type: %s\n", job.Type)
+	fmt.Fprintf(w, "status: %s\n", job.Status)
+	fmt.Fprintf(w, "completed: %d\n", job.Completed)
+	fmt.Fprintf(w, "steps: %d\n", job.Steps)
+	fmt.Fprintf(w, "created_at: %s\n", job.CreatedAt.Format(time.RFC3339))
+	fmt.Fprintf(w, "updated_at: %s\n", job.UpdatedAt.Format(time.RFC3339))
+	if job.StartedAt != nil {
+		fmt.Fprintf(w, "started_at: %s\n", job.StartedAt.Format(time.RFC3339))
+	}
+	if job.FinishedAt != nil {
+		fmt.Fprintf(w, "finished_at: %s\n", job.FinishedAt.Format(time.RFC3339))
+	}
+	if job.Error != "" {
+		fmt.Fprintf(w, "message: %s\n", job.Error)
+	}
+	if len(job.Progress) > 0 {
+		fmt.Fprintf(w, "progress_events: %d\n", len(job.Progress))
+	}
+}
+
+func renderServiceJobProgress(w io.Writer, jobID string, ev service.ProgressEvent) {
+	fmt.Fprintf(w, "job progress: job_id=%s", jobID)
+	if ev.Type != "" {
+		fmt.Fprintf(w, " type=%s", ev.Type)
+	}
+	if ev.Phase != "" {
+		fmt.Fprintf(w, " phase=%s", ev.Phase)
+	}
+	if ev.Collection != "" {
+		fmt.Fprintf(w, " collection=%s", ev.Collection)
+	}
+	if ev.Page > 0 {
+		fmt.Fprintf(w, " step=%d", ev.Page)
+	}
+	if ev.RecordsFetched > 0 {
+		fmt.Fprintf(w, " records=%d", ev.RecordsFetched)
+	}
+	if ev.Message != "" {
+		fmt.Fprintf(w, " message=%q", ev.Message)
+	}
+	fmt.Fprintln(w)
 }
 
 func dispatch(ctx context.Context, svc queryService, command string, args []string, opts options, stdout io.Writer, stderr io.Writer, plan startupPlan) int {
@@ -3082,6 +3214,11 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  status      inspect runtime state")
 		fmt.Fprintln(w, "  doctor      inspect service health")
 		fmt.Fprintln(w, "  run         run the coordinator foreground process")
+		fmt.Fprintln(w, "  fake-job    start a fake long-running job for IPC/progress dogfood")
+		fmt.Fprintln(w, "  jobs        list daemon jobs")
+		fmt.Fprintln(w, "  job         inspect one daemon job")
+		fmt.Fprintln(w, "  attach      attach to job progress by id")
+		fmt.Fprintln(w, "  cancel      cancel a daemon job by id")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Run gitcode-mcp service SUBCOMMAND --help for details.")
 	case "doctor":
@@ -3202,6 +3339,39 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "Usage: gitcode-mcp service run")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Run the service coordinator in the foreground using a user-global Unix socket.")
+	case "service fake-job":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service fake-job [--steps N] [--interval-ms N] [--detach] [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Start a fake long-running daemon job. By default the CLI attaches until the job reaches a terminal state.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --steps N          fake job step count")
+		fmt.Fprintln(w, "  --interval-ms N    delay between fake job progress events")
+		fmt.Fprintln(w, "  --detach           return the job id without attaching progress")
+		fmt.Fprintln(w, "  --format FORMAT    output format (text, json)")
+	case "service jobs":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service jobs [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "List daemon jobs through local JSON-RPC IPC.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT    output format (text, json)")
+	case "service job":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service job JOB_ID [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Inspect one daemon job through local JSON-RPC IPC.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT    output format (text, json)")
+	case "service attach":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service attach JOB_ID [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Attach to daemon job progress until the job reaches a terminal state.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT    output format (text, json)")
+	case "service cancel":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service cancel JOB_ID [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Cancel a daemon job by id through local JSON-RPC IPC.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT    output format (text, json)")
 	case "repo add":
 		fmt.Fprintln(w, "Usage: gitcode-mcp repo add --repo REPO --owner OWNER --name NAME --api-base-url URL --scopes SCOPES [--alias ALIAS] [--display-name NAME]")
 		fmt.Fprintln(w)

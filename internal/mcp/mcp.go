@@ -14,9 +14,11 @@ import (
 	"gitcode-mcp/internal/auth"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/capability"
+	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/service"
+	"gitcode-mcp/internal/servicectl"
 )
 
 const protocolVersion = "2024-11-05"
@@ -471,6 +473,21 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id. Omit for nothing-bound status."}}},
 	},
 	{
+		Name:        "service_status",
+		Description: "Poll the local service coordinator status through local IPC.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{}},
+	},
+	{
+		Name:        "service_jobs",
+		Description: "List local service coordinator jobs through local IPC.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{}},
+	},
+	{
+		Name:        "service_job_status",
+		Description: "Poll one local service coordinator job through local IPC.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"job_id": {Type: "string", Description: "Service job id.", MinLength: 1}}, Required: []string{"job_id"}},
+	},
+	{
 		Name:        "list_pr_discussions",
 		Description: "List cached pull request review discussions grouped by discussion thread.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "unresolved_only": {Type: "boolean", Description: "Only include unresolved or unknown-resolution discussions."}}, Required: []string{"repo_id", "number"}},
@@ -659,6 +676,9 @@ var preWriteToolListOrder = []string{
 	"export_snapshot",
 	"diff_snapshot",
 	"repo_status",
+	"service_status",
+	"service_jobs",
+	"service_job_status",
 	"list_pr_discussions",
 	"sync_live",
 }
@@ -718,6 +738,9 @@ func (s *Server) toolRegistry() toolRegistry {
 	registerTool(registry, "export_snapshot", s.callExportSnapshot)
 	registerTool(registry, "diff_snapshot", s.callDiffSnapshot)
 	registerTool(registry, "repo_status", s.callRepoStatus)
+	registerTool(registry, "service_status", s.callServiceStatus)
+	registerTool(registry, "service_jobs", s.callServiceJobs)
+	registerTool(registry, "service_job_status", s.callServiceJobStatus)
 	registerTool(registry, "list_pr_discussions", s.callListPRDiscussions)
 	registerTool(registry, "sync_live", s.callSyncLive)
 	for _, cap := range capability.MCPWriteCapabilities() {
@@ -1162,6 +1185,68 @@ func (s *Server) callCacheStatus(ctx context.Context, id *json.RawMessage, args 
 	}
 	text := fmt.Sprintf("repo_id=%s records=%d chunks=%d journal=%s", result.RepoID, result.Records, result.Chunks, result.JournalMode)
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+type serviceJobStatusArgs struct {
+	JobID string `json:"job_id"`
+}
+
+func (s *Server) callServiceStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	client, err := serviceRPCClient()
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	var result servicectl.Status
+	if err := client.Call(ctx, "Service.Status", nil, &result); err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	text := fmt.Sprintf("service status=%s running=%t", result.Status, result.Running)
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func (s *Server) callServiceJobs(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	client, err := serviceRPCClient()
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	var result servicectl.JobListResult
+	if err := client.Call(ctx, "Jobs.List", nil, &result); err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	text := fmt.Sprintf("jobs=%d", len(result.Jobs))
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func (s *Server) callServiceJobStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a serviceJobStatusArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if a.JobID == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "job_id is required"})
+		return
+	}
+	client, err := serviceRPCClient()
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	var result servicectl.Job
+	if err := client.Call(ctx, "Jobs.Get", map[string]string{"job_id": a.JobID}, &result); err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	text := fmt.Sprintf("job_id=%s status=%s completed=%d/%d", result.ID, result.Status, result.Completed, result.Steps)
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func serviceRPCClient() (*servicectl.RPCClient, error) {
+	return servicectl.Manager{Source: config.OSSource{}}.Client()
 }
 
 type listPRDiscussionsArgs struct {

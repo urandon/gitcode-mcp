@@ -452,9 +452,9 @@ func TestServiceCommandStatusAndInstallUseUserGlobalPaths(t *testing.T) {
 	src := &repoInitLocalSource{
 		env:       map[string]string{},
 		cwd:       root,
-		homeDir:   filepath.Join(root, "home"),
-		configDir: filepath.Join(root, "config"),
-		cacheDir:  filepath.Join(root, "cache"),
+		homeDir:   filepath.Join(root, "h"),
+		configDir: filepath.Join(root, "f"),
+		cacheDir:  filepath.Join(root, "c"),
 	}
 
 	var statusOut bytes.Buffer
@@ -518,6 +518,119 @@ func TestServiceHelpShowsLifecycleSubcommands(t *testing.T) {
 			t.Fatalf("service status help missing %q in %q", want, stdout.String())
 		}
 	}
+}
+
+func TestServiceCLIControlsFakeJobOverIPC(t *testing.T) {
+	root, err := shortCLITestRoot(t, "cli-svc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := &repoInitLocalSource{
+		env:       map[string]string{"GITCODE_MCP_SERVICE_NETWORK": "mem", "GITCODE_MCP_SERVICE_ADDRESS": "test-cli-service-jobs"},
+		cwd:       root,
+		homeDir:   filepath.Join(root, "h"),
+		configDir: filepath.Join(root, "f"),
+		cacheDir:  filepath.Join(root, "c"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runCode := make(chan int, 1)
+	go func() {
+		var runOut bytes.Buffer
+		var runErr bytes.Buffer
+		runCode <- executeWithFactoryAndDepsContext(ctx, []string{"service", "run"}, &runOut, &runErr, nil, localCommandDeps{Source: src})
+	}()
+	waitForServiceSocket(t, src)
+
+	var jobOut bytes.Buffer
+	var jobErr bytes.Buffer
+	code := executeWithFactoryAndDeps([]string{"service", "fake-job", "--steps", "2", "--interval-ms", "1", "--format", "json"}, &jobOut, &jobErr, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("fake-job code=%d stderr=%q", code, jobErr.String())
+	}
+	if !strings.Contains(jobErr.String(), "job progress:") {
+		t.Fatalf("fake-job attach did not emit progress: %q", jobErr.String())
+	}
+	var job servicectl.Job
+	if err := json.Unmarshal(jobOut.Bytes(), &job); err != nil {
+		t.Fatalf("invalid fake-job json: %v\n%s", err, jobOut.String())
+	}
+	if job.Status != servicectl.JobStatusSucceeded || job.Completed != 2 {
+		t.Fatalf("fake-job result = %#v", job)
+	}
+
+	var listOut bytes.Buffer
+	var listErr bytes.Buffer
+	code = executeWithFactoryAndDeps([]string{"service", "jobs", "--format", "json"}, &listOut, &listErr, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("jobs code=%d stderr=%q", code, listErr.String())
+	}
+	var list servicectl.JobListResult
+	if err := json.Unmarshal(listOut.Bytes(), &list); err != nil {
+		t.Fatalf("invalid jobs json: %v\n%s", err, listOut.String())
+	}
+	if len(list.Jobs) != 1 || list.Jobs[0].ID != job.ID {
+		t.Fatalf("jobs result = %#v", list)
+	}
+
+	var detachOut bytes.Buffer
+	var detachErr bytes.Buffer
+	code = executeWithFactoryAndDeps([]string{"service", "fake-job", "--steps", "50", "--interval-ms", "20", "--detach", "--format", "json"}, &detachOut, &detachErr, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("detached fake-job code=%d stderr=%q", code, detachErr.String())
+	}
+	var detached servicectl.Job
+	if err := json.Unmarshal(detachOut.Bytes(), &detached); err != nil {
+		t.Fatalf("invalid detached json: %v\n%s", err, detachOut.String())
+	}
+
+	var cancelOut bytes.Buffer
+	var cancelErr bytes.Buffer
+	code = executeWithFactoryAndDeps([]string{"service", "cancel", detached.ID, "--format", "json"}, &cancelOut, &cancelErr, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("cancel code=%d stderr=%q", code, cancelErr.String())
+	}
+	var cancelled servicectl.Job
+	if err := json.Unmarshal(cancelOut.Bytes(), &cancelled); err != nil {
+		t.Fatalf("invalid cancel json: %v\n%s", err, cancelOut.String())
+	}
+	if cancelled.Status != servicectl.JobStatusCancelled {
+		t.Fatalf("cancelled job = %#v", cancelled)
+	}
+
+	cancel()
+	if code := <-runCode; code != 0 {
+		t.Fatalf("service run code=%d", code)
+	}
+}
+
+func shortCLITestRoot(t *testing.T, pattern string) (string, error) {
+	t.Helper()
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	root := cwd
+	for {
+		if _, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
+			break
+		}
+		parent := filepath.Dir(root)
+		if parent == root {
+			return "", os.ErrNotExist
+		}
+		root = parent
+	}
+	base := filepath.Join(root, ".t")
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		return "", err
+	}
+	dir, err := os.MkdirTemp(base, pattern)
+	if err != nil {
+		return "", err
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir, nil
 }
 
 func TestPublicDocsDoNotAdvertiseReinitCache(t *testing.T) {
@@ -1467,6 +1580,27 @@ func (s *repoInitLocalSource) ReadFile(path string) ([]byte, error) {
 func (s *repoInitLocalSource) WorkingDir() (string, error) { return s.cwd, nil }
 func (s *repoInitLocalSource) Stat(path string) (os.FileInfo, error) {
 	return os.Stat(path)
+}
+
+func waitForServiceSocket(t *testing.T, src config.Source) {
+	t.Helper()
+	manager := servicectl.Manager{Source: src}
+	client, err := manager.Client()
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var status servicectl.Status
+		err := client.Call(context.Background(), "Service.Status", nil, &status)
+		if err == nil && status.Status == servicectl.StatusRunning {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("service socket did not become ready: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func TestRepoInitLocalBootstrapsWorktreeCache(t *testing.T) {
