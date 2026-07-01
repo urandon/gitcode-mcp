@@ -34,6 +34,9 @@ type Paths struct {
 	StatePath   string `json:"state_path"`
 	PIDPath     string `json:"pid_path"`
 	SocketPath  string `json:"socket_path"`
+	JobsPath    string `json:"jobs_path"`
+	Network     string `json:"network"`
+	Address     string `json:"address"`
 	InstallPath string `json:"install_path"`
 	InstallKind string `json:"install_kind"`
 }
@@ -101,6 +104,15 @@ func (m Manager) ResolvePaths() (Paths, error) {
 		StatePath:  filepath.Join(runtimeDir, "state.json"),
 		PIDPath:    filepath.Join(runtimeDir, "service.pid"),
 		SocketPath: filepath.Join(runtimeDir, "control.sock"),
+		JobsPath:   filepath.Join(runtimeDir, "jobs.json"),
+		Network:    "unix",
+	}
+	if network := strings.TrimSpace(src.Env("GITCODE_MCP_SERVICE_NETWORK")); network != "" {
+		paths.Network = network
+	}
+	paths.Address = paths.SocketPath
+	if address := strings.TrimSpace(src.Env("GITCODE_MCP_SERVICE_ADDRESS")); address != "" {
+		paths.Address = address
 	}
 	switch goos {
 	case "darwin":
@@ -161,7 +173,7 @@ func (m Manager) Status() (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	socketPresent := fileExists(paths.SocketPath)
+	socketPresent := paths.Network != "unix" || fileExists(paths.SocketPath)
 	pidAlive := stateOK && processAlive(state.PID)
 	status := Status{
 		Status:        StatusNotInstalled,
@@ -261,20 +273,42 @@ func (m Manager) Run(ctx context.Context) error {
 	if err := ensurePathDirs(paths); err != nil {
 		return err
 	}
-	_ = os.Remove(paths.SocketPath)
-	listener, err := net.Listen("unix", paths.SocketPath)
-	if err != nil {
-		return err
-	}
-	defer listener.Close()
-	defer os.Remove(paths.SocketPath)
 	now := time.Now().UTC()
 	state := State{PID: os.Getpid(), SocketPath: paths.SocketPath, StartedAt: now, UpdatedAt: now, Version: m.Version}
 	if err := writeState(paths, state); err != nil {
 		return err
 	}
-	<-ctx.Done()
+	jobs := NewJobManager(paths.JobsPath)
+	if err := jobs.LoadAndMarkInterrupted(); err != nil {
+		return err
+	}
+	server := RPCServer{Manager: m, Jobs: jobs}
+	if paths.Network == "mem" {
+		return serveMemoryRPC(ctx, paths.Address, server)
+	}
+	if paths.Network == "unix" {
+		_ = os.Remove(paths.SocketPath)
+	}
+	listener, err := net.Listen(paths.Network, paths.Address)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+	if paths.Network == "unix" {
+		defer os.Remove(paths.SocketPath)
+	}
+	if err := server.Serve(ctx, listener); err != nil {
+		return err
+	}
 	return ctx.Err()
+}
+
+func (m Manager) Client() (*RPCClient, error) {
+	paths, err := m.ResolvePaths()
+	if err != nil {
+		return nil, err
+	}
+	return &RPCClient{Network: paths.Network, Address: paths.Address, SocketPath: paths.SocketPath}, nil
 }
 
 func ensurePathDirs(paths Paths) error {

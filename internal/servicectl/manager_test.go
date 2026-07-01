@@ -10,12 +10,13 @@ import (
 )
 
 type testSource struct {
+	env       map[string]string
 	homeDir   string
 	configDir string
 	cacheDir  string
 }
 
-func (s testSource) Env(string) string                    { return "" }
+func (s testSource) Env(key string) string                { return s.env[key] }
 func (s testSource) UserHomeDir() (string, error)         { return s.homeDir, nil }
 func (s testSource) UserConfigDir() (string, error)       { return s.configDir, nil }
 func (s testSource) UserCacheDir() (string, error)        { return s.cacheDir, nil }
@@ -23,17 +24,50 @@ func (s testSource) ReadFile(path string) ([]byte, error) { return os.ReadFile(p
 
 func newTestManager(t *testing.T, goos string) Manager {
 	t.Helper()
-	root := t.TempDir()
+	root, err := shortWorkspaceTemp(t, "svc-")
+	if err != nil {
+		t.Fatal(err)
+	}
 	return Manager{
 		Source: testSource{
-			homeDir:   filepath.Join(root, "home"),
-			configDir: filepath.Join(root, "config"),
-			cacheDir:  filepath.Join(root, "cache"),
+			env:       map[string]string{},
+			homeDir:   filepath.Join(root, "h"),
+			configDir: filepath.Join(root, "f"),
+			cacheDir:  filepath.Join(root, "c"),
 		},
 		BinaryPath: "/tmp/gitcode-mcp-test",
 		Version:    "test-version",
 		GOOS:       goos,
 	}
+}
+
+func shortWorkspaceTemp(t *testing.T, pattern string) (string, error) {
+	t.Helper()
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	root := cwd
+	for {
+		if _, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
+			break
+		}
+		parent := filepath.Dir(root)
+		if parent == root {
+			return "", os.ErrNotExist
+		}
+		root = parent
+	}
+	base := filepath.Join(root, ".t")
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		return "", err
+	}
+	dir, err := os.MkdirTemp(base, pattern)
+	if err != nil {
+		return "", err
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir, nil
 }
 
 func TestResolvePathsUsesPlatformUserLocations(t *testing.T) {
