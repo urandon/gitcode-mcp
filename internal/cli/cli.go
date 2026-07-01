@@ -494,7 +494,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.IntVar(&opts.maxPages, "max-pages", 0, "maximum pages to sync")
 	flags.IntVar(&opts.maxRecords, "max-records", 0, "maximum records to sync")
 	flags.IntVar(&opts.perPage, "per-page", 0, "records per page")
-	flags.StringVar(&opts.progress, "progress", "auto", "sync progress mode: auto, lines, jsonl, or off")
+	flags.StringVar(&opts.progress, "progress", "auto", "sync progress mode: auto, spinner, lines, jsonl, or off")
 	flags.BoolVar(&opts.quiet, "quiet", false, "suppress non-result progress output")
 	flags.BoolVar(&opts.details, "details", false, "include per-record details in large command output")
 	flags.BoolVar(&opts.details, "records", false, "alias for --details")
@@ -555,9 +555,9 @@ func parseOptions(command string, args []string) (options, []string, error) {
 		opts.progress = "auto"
 	}
 	switch opts.progress {
-	case "auto", "lines", "jsonl", "off":
+	case "auto", "spinner", "lines", "jsonl", "off":
 	default:
-		return opts, nil, service.ErrInvalidQuery{Field: "progress", Message: "progress must be auto, lines, jsonl, or off"}
+		return opts, nil, service.ErrInvalidQuery{Field: "progress", Message: "progress must be auto, spinner, lines, jsonl, or off"}
 	}
 	return opts, flags.Args(), nil
 }
@@ -914,7 +914,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		if opts.issues || opts.wiki || opts.pulls || opts.comments || (opts.id == "" && opts.input == "") {
 			req := bulkSyncRequest(opts)
 			started := time.Now().UTC()
-			progressCh, stopProgress := startSyncProgress(stderr, started, syncProgressMode(opts))
+			progressCh, stopProgress := startSyncProgress(stderr, started, syncProgressMode(opts, stderr))
 			req.ProgressChan = progressCh
 			if req.Bounds != nil {
 				req.Bounds.ProgressChan = progressCh
@@ -1133,11 +1133,14 @@ func bulkSyncRequest(opts options) service.BulkSyncRequest {
 	return service.BulkSyncRequest{RepoID: opts.repo, IdempotencyKey: opts.idempotencyKey, PerPage: perPage, Bounds: &service.SyncBounds{MaxPages: opts.maxPages, MaxRecords: opts.maxRecords}}
 }
 
-func syncProgressMode(opts options) string {
+func syncProgressMode(opts options, w io.Writer) string {
 	if opts.quiet {
 		return "off"
 	}
 	if opts.progress == "" || opts.progress == "auto" {
+		if isTerminalWriter(w) {
+			return "spinner"
+		}
 		return "lines"
 	}
 	return opts.progress
@@ -1146,6 +1149,9 @@ func syncProgressMode(opts options) string {
 func startSyncProgress(w io.Writer, started time.Time, mode string) (chan service.ProgressEvent, func()) {
 	if w == nil || mode == "off" {
 		return nil, func() {}
+	}
+	if mode == "spinner" {
+		return startSyncProgressSpinner(w, started)
 	}
 	ch := make(chan service.ProgressEvent, 32)
 	done := make(chan struct{})
@@ -1170,6 +1176,133 @@ func startSyncProgress(w io.Writer, started time.Time, mode string) (chan servic
 		close(ch)
 		<-done
 	}
+}
+
+func isTerminalWriter(w io.Writer) bool {
+	file, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := file.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func startSyncProgressSpinner(w io.Writer, started time.Time) (chan service.ProgressEvent, func()) {
+	ch := make(chan service.ProgressEvent, 32)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		state := syncProgressSpinnerState{Started: started}
+		ticker := time.NewTicker(120 * time.Millisecond)
+		defer ticker.Stop()
+		rendered := false
+		for {
+			select {
+			case ev, ok := <-ch:
+				if !ok {
+					if rendered {
+						fmt.Fprint(w, "\r\033[K")
+					}
+					return
+				}
+				state.Apply(ev)
+				renderSyncProgressSpinnerFrame(w, &state)
+				rendered = true
+			case <-ticker.C:
+				renderSyncProgressSpinnerFrame(w, &state)
+				rendered = true
+			}
+		}
+	}()
+	stopped := false
+	return ch, func() {
+		if stopped {
+			return
+		}
+		stopped = true
+		close(ch)
+		<-done
+	}
+}
+
+type syncProgressSpinnerState struct {
+	Started        time.Time
+	Frame          int
+	Type           string
+	Collection     string
+	Phase          string
+	Page           int
+	RecordsFetched int
+	RecordsListed  int
+	RateLimitState string
+	RetryAfter     string
+	Endpoint       string
+	Message        string
+}
+
+func (s *syncProgressSpinnerState) Apply(ev service.ProgressEvent) {
+	s.Type = syncProgressType(ev)
+	if ev.Collection != "" {
+		s.Collection = ev.Collection
+	}
+	if ev.Phase != "" {
+		s.Phase = ev.Phase
+	}
+	if ev.Page > 0 {
+		s.Page = ev.Page
+	}
+	s.RecordsFetched += ev.RecordsFetched
+	s.RecordsListed += ev.RecordsListed
+	if ev.RateLimitState != "" {
+		s.RateLimitState = ev.RateLimitState
+	}
+	if ev.RetryAfter != "" {
+		s.RetryAfter = ev.RetryAfter
+	}
+	if ev.Endpoint != "" {
+		s.Endpoint = ev.Endpoint
+	}
+	if ev.Message != "" {
+		s.Message = ev.Message
+	}
+}
+
+func renderSyncProgressSpinnerFrame(w io.Writer, state *syncProgressSpinnerState) {
+	frames := []string{"-", "\\", "|", "/"}
+	frame := frames[state.Frame%len(frames)]
+	state.Frame++
+	fmt.Fprintf(w, "\r\033[K%s sync", frame)
+	if state.Type != "" {
+		fmt.Fprintf(w, " type=%s", state.Type)
+	}
+	if state.Collection != "" {
+		fmt.Fprintf(w, " collection=%s", state.Collection)
+	}
+	if state.Phase != "" {
+		fmt.Fprintf(w, " phase=%s", state.Phase)
+	}
+	if state.Page > 0 {
+		fmt.Fprintf(w, " page=%d", state.Page)
+	}
+	if state.RecordsListed > 0 {
+		fmt.Fprintf(w, " listed=%d", state.RecordsListed)
+	}
+	if state.RecordsFetched > 0 {
+		fmt.Fprintf(w, " records=%d", state.RecordsFetched)
+	}
+	if state.RateLimitState != "" {
+		fmt.Fprintf(w, " rate_limit=%s", state.RateLimitState)
+	}
+	if state.RetryAfter != "" {
+		fmt.Fprintf(w, " retry_after=%s", state.RetryAfter)
+	}
+	if state.Endpoint != "" {
+		fmt.Fprintf(w, " endpoint=%s", state.Endpoint)
+	}
+	if state.Message != "" {
+		fmt.Fprintf(w, " message=%q", state.Message)
+	}
+	fmt.Fprintf(w, " elapsed=%s", time.Since(state.Started).Round(time.Millisecond))
 }
 
 type syncProgressEventJSON struct {
@@ -2651,7 +2784,7 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --max-pages N       maximum pages to sync; omit to traverse until end/frontier")
 		fmt.Fprintln(w, "  --max-records N     maximum records to sync; omit to traverse until end/frontier")
 		fmt.Fprintln(w, "  --per-page N        records per page")
-		fmt.Fprintln(w, "  --progress MODE     progress mode: auto, lines, jsonl, off")
+		fmt.Fprintln(w, "  --progress MODE     progress mode: auto, spinner, lines, jsonl, off")
 		fmt.Fprintln(w, "  --quiet             suppress non-result progress output")
 		fmt.Fprintln(w, "  --id ID             stable record id")
 		fmt.Fprintln(w, "  --input ALIAS       remote alias for single-record sync")

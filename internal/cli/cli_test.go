@@ -629,8 +629,27 @@ func TestSyncProgressModes(t *testing.T) {
 		if code == 0 {
 			t.Fatalf("invalid progress mode succeeded stdout=%q stderr=%q", stdout.String(), stderr.String())
 		}
-		if !strings.Contains(stderr.String(), "progress must be auto, lines, jsonl, or off") {
+		if !strings.Contains(stderr.String(), "progress must be auto, spinner, lines, jsonl, or off") {
 			t.Fatalf("stderr missing validation message: %q", stderr.String())
+		}
+	})
+
+	t.Run("auto uses lines for non terminal stderr", func(t *testing.T) {
+		if got := syncProgressMode(options{progress: "auto"}, &bytes.Buffer{}); got != "lines" {
+			t.Fatalf("syncProgressMode auto non-terminal=%q, want lines", got)
+		}
+	})
+
+	t.Run("spinner renders one terminal line", func(t *testing.T) {
+		state := syncProgressSpinnerState{Started: time.Now()}
+		state.Apply(service.ProgressEvent{Collection: "issues", Page: 2, RecordsFetched: 3})
+		var stderr bytes.Buffer
+		renderSyncProgressSpinnerFrame(&stderr, &state)
+		line := stderr.String()
+		for _, want := range []string{"\r\033[K", "sync", "type=records", "collection=issues", "page=2", "records=3"} {
+			if !strings.Contains(line, want) {
+				t.Fatalf("spinner line missing %q: %q", want, line)
+			}
 		}
 	})
 }
