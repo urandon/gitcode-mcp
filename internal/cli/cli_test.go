@@ -549,7 +549,7 @@ func TestSyncJSONDefaultsToCompactSummaryAndDetailsRestoresRecords(t *testing.T)
 	if _, ok := compact["results"]; ok {
 		t.Fatalf("compact sync should omit per-record results: %#v", compact)
 	}
-	if !strings.Contains(compactErr.String(), "sync progress: collection=issues page=1 committed=1") {
+	if !strings.Contains(compactErr.String(), "sync progress: type=records collection=issues page=1 records=1") {
 		t.Fatalf("missing progress stderr: %q", compactErr.String())
 	}
 
@@ -565,6 +565,115 @@ func TestSyncJSONDefaultsToCompactSummaryAndDetailsRestoresRecords(t *testing.T)
 	if len(detailed.Results) != 1 || detailed.SuccessCount != 1 {
 		t.Fatalf("details sync result=%#v", detailed)
 	}
+}
+
+func TestSyncProgressModes(t *testing.T) {
+	t.Run("off suppresses progress", func(t *testing.T) {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		code := executeWithFactory([]string{"sync", "--offline", "--repo", "fixture-a", "--issues", "--format", "json", "--progress", "off"}, &stdout, &stderr, spyFactory())
+		if code != 0 {
+			t.Fatalf("sync code=%d stderr=%q", code, stderr.String())
+		}
+		if strings.Contains(stderr.String(), "sync progress:") {
+			t.Fatalf("progress stderr not suppressed: %q", stderr.String())
+		}
+		var compact map[string]any
+		if err := json.Unmarshal(stdout.Bytes(), &compact); err != nil {
+			t.Fatalf("invalid compact sync json: %v\n%s", err, stdout.String())
+		}
+	})
+
+	t.Run("quiet suppresses progress", func(t *testing.T) {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		code := executeWithFactory([]string{"sync", "--offline", "--repo", "fixture-a", "--issues", "--format", "json", "--quiet"}, &stdout, &stderr, spyFactory())
+		if code != 0 {
+			t.Fatalf("sync code=%d stderr=%q", code, stderr.String())
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("quiet stderr=%q, want empty", stderr.String())
+		}
+	})
+
+	t.Run("jsonl writes progress events to stderr", func(t *testing.T) {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		code := executeWithFactory([]string{"sync", "--offline", "--repo", "fixture-a", "--issues", "--format", "json", "--progress", "jsonl"}, &stdout, &stderr, spyFactory())
+		if code != 0 {
+			t.Fatalf("sync code=%d stderr=%q", code, stderr.String())
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &map[string]any{}); err != nil {
+			t.Fatalf("invalid stdout json: %v\n%s", err, stdout.String())
+		}
+		lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+		if len(lines) != 1 {
+			t.Fatalf("jsonl progress lines=%d stderr=%q", len(lines), stderr.String())
+		}
+		var event map[string]any
+		if err := json.Unmarshal([]byte(lines[0]), &event); err != nil {
+			t.Fatalf("invalid jsonl progress: %v line=%q", err, lines[0])
+		}
+		if event["type"] != "records" || event["collection"] != "issues" || event["records_fetched"].(float64) != 1 {
+			t.Fatalf("unexpected progress event=%#v", event)
+		}
+		if _, ok := event["elapsed_ms"]; !ok {
+			t.Fatalf("progress event missing elapsed_ms=%#v", event)
+		}
+	})
+
+	t.Run("invalid mode fails validation", func(t *testing.T) {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		code := executeWithFactory([]string{"sync", "--offline", "--repo", "fixture-a", "--issues", "--progress", "sparkles"}, &stdout, &stderr, spyFactory())
+		if code == 0 {
+			t.Fatalf("invalid progress mode succeeded stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "progress must be auto, spinner, lines, jsonl, or off") {
+			t.Fatalf("stderr missing validation message: %q", stderr.String())
+		}
+	})
+
+	t.Run("auto uses lines for non terminal stderr", func(t *testing.T) {
+		if got := syncProgressMode(options{progress: "auto"}, &bytes.Buffer{}); got != "lines" {
+			t.Fatalf("syncProgressMode auto non-terminal=%q, want lines", got)
+		}
+	})
+
+	t.Run("spinner renders one terminal line", func(t *testing.T) {
+		state := syncProgressSpinnerState{Started: time.Now()}
+		state.Apply(service.ProgressEvent{Collection: "issues", Page: 2, RecordsFetched: 3})
+		var stderr bytes.Buffer
+		renderSyncProgressSpinnerFrame(&stderr, &state)
+		line := stderr.String()
+		for _, want := range []string{"\r\033[K", "sync", "issues", "p2", "3 rec"} {
+			if !strings.Contains(line, want) {
+				t.Fatalf("spinner line missing %q: %q", want, line)
+			}
+		}
+		for _, unwanted := range []string{"type=", "collection=", "page=", "records="} {
+			if strings.Contains(line, unwanted) {
+				t.Fatalf("spinner line should stay compact and omit %q: %q", unwanted, line)
+			}
+		}
+	})
+
+	t.Run("spinner renders rate limit compactly", func(t *testing.T) {
+		state := syncProgressSpinnerState{Started: time.Now()}
+		state.Apply(service.ProgressEvent{Collection: "issues", Page: 2, RecordsFetched: 3})
+		state.Apply(service.ProgressEvent{Type: "rate_limit", RateLimitState: "throttle_wait_started", RetryAfter: "250ms"})
+		var stderr bytes.Buffer
+		renderSyncProgressSpinnerFrame(&stderr, &state)
+		line := stderr.String()
+		for _, want := range []string{"issues", "p2", "3 rec", "wait 250ms"} {
+			if !strings.Contains(line, want) {
+				t.Fatalf("spinner rate-limit line missing %q: %q", want, line)
+			}
+		}
+		if strings.Contains(line, "rate_limit=") || strings.Contains(line, "retry_after=") {
+			t.Fatalf("spinner rate-limit line should stay compact: %q", line)
+		}
+	})
 }
 
 func TestRenderSyncResourcesPartialSummaryGroupsFailures(t *testing.T) {

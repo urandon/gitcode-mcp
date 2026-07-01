@@ -150,6 +150,8 @@ type options struct {
 	maxPages       int
 	maxRecords     int
 	perPage        int
+	progress       string
+	quiet          bool
 	details        bool
 	input          string
 	output         string
@@ -492,6 +494,8 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.IntVar(&opts.maxPages, "max-pages", 0, "maximum pages to sync")
 	flags.IntVar(&opts.maxRecords, "max-records", 0, "maximum records to sync")
 	flags.IntVar(&opts.perPage, "per-page", 0, "records per page")
+	flags.StringVar(&opts.progress, "progress", "auto", "sync progress mode: auto, spinner, lines, jsonl, or off")
+	flags.BoolVar(&opts.quiet, "quiet", false, "suppress non-result progress output")
 	flags.BoolVar(&opts.details, "details", false, "include per-record details in large command output")
 	flags.BoolVar(&opts.details, "records", false, "alias for --details")
 	flags.StringVar(&opts.input, "input", "", "input path")
@@ -546,6 +550,15 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	if opts.format != "text" && opts.format != "markdown" && opts.format != "json" {
 		return opts, nil, service.ErrInvalidQuery{Field: "format", Message: "format must be text, markdown, or json"}
 	}
+	opts.progress = strings.ToLower(strings.TrimSpace(opts.progress))
+	if opts.progress == "" {
+		opts.progress = "auto"
+	}
+	switch opts.progress {
+	case "auto", "spinner", "lines", "jsonl", "off":
+	default:
+		return opts, nil, service.ErrInvalidQuery{Field: "progress", Message: "progress must be auto, spinner, lines, jsonl, or off"}
+	}
 	return opts, flags.Args(), nil
 }
 
@@ -556,7 +569,7 @@ func reorderFlags(args []string) []string {
 		arg := args[i]
 		if strings.HasPrefix(arg, "--") {
 			flags = append(flags, arg)
-			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--index" || arg == "--dry-run" || arg == "--live" || arg == "--offline" || arg == "--fixture" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" {
+			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--index" || arg == "--quiet" || arg == "--dry-run" || arg == "--live" || arg == "--offline" || arg == "--fixture" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" {
 				continue
 			}
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
@@ -901,7 +914,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		if opts.issues || opts.wiki || opts.pulls || opts.comments || (opts.id == "" && opts.input == "") {
 			req := bulkSyncRequest(opts)
 			started := time.Now().UTC()
-			progressCh, stopProgress := startSyncProgress(stderr, started)
+			progressCh, stopProgress := startSyncProgress(stderr, started, syncProgressMode(opts, stderr))
 			req.ProgressChan = progressCh
 			if req.Bounds != nil {
 				req.Bounds.ProgressChan = progressCh
@@ -1120,16 +1133,38 @@ func bulkSyncRequest(opts options) service.BulkSyncRequest {
 	return service.BulkSyncRequest{RepoID: opts.repo, IdempotencyKey: opts.idempotencyKey, PerPage: perPage, Bounds: &service.SyncBounds{MaxPages: opts.maxPages, MaxRecords: opts.maxRecords}}
 }
 
-func startSyncProgress(w io.Writer, started time.Time) (chan service.ProgressEvent, func()) {
+func syncProgressMode(opts options, w io.Writer) string {
+	if opts.quiet {
+		return "off"
+	}
+	if opts.progress == "" || opts.progress == "auto" {
+		if isTerminalWriter(w) {
+			return "spinner"
+		}
+		return "lines"
+	}
+	return opts.progress
+}
+
+func startSyncProgress(w io.Writer, started time.Time, mode string) (chan service.ProgressEvent, func()) {
+	if w == nil || mode == "off" {
+		return nil, func() {}
+	}
+	if mode == "spinner" {
+		return startSyncProgressSpinner(w, started)
+	}
 	ch := make(chan service.ProgressEvent, 32)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		encoder := json.NewEncoder(w)
 		for ev := range ch {
-			if w == nil {
-				continue
+			switch mode {
+			case "jsonl":
+				_ = encoder.Encode(syncProgressJSONEvent(ev, started))
+			default:
+				renderSyncProgressLine(w, ev, started)
 			}
-			fmt.Fprintf(w, "sync progress: collection=%s page=%d committed=%d elapsed=%s\n", ev.Collection, ev.Page, ev.RecordsFetched, time.Since(started).Round(time.Millisecond))
 		}
 	}()
 	stopped := false
@@ -1141,6 +1176,200 @@ func startSyncProgress(w io.Writer, started time.Time) (chan service.ProgressEve
 		close(ch)
 		<-done
 	}
+}
+
+func isTerminalWriter(w io.Writer) bool {
+	file, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := file.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func startSyncProgressSpinner(w io.Writer, started time.Time) (chan service.ProgressEvent, func()) {
+	ch := make(chan service.ProgressEvent, 32)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		state := syncProgressSpinnerState{Started: started}
+		ticker := time.NewTicker(120 * time.Millisecond)
+		defer ticker.Stop()
+		rendered := false
+		for {
+			select {
+			case ev, ok := <-ch:
+				if !ok {
+					if rendered {
+						fmt.Fprint(w, "\r\033[K")
+					}
+					return
+				}
+				state.Apply(ev)
+				renderSyncProgressSpinnerFrame(w, &state)
+				rendered = true
+			case <-ticker.C:
+				renderSyncProgressSpinnerFrame(w, &state)
+				rendered = true
+			}
+		}
+	}()
+	stopped := false
+	return ch, func() {
+		if stopped {
+			return
+		}
+		stopped = true
+		close(ch)
+		<-done
+	}
+}
+
+type syncProgressSpinnerState struct {
+	Started        time.Time
+	Frame          int
+	Type           string
+	Collection     string
+	Phase          string
+	Page           int
+	RecordsFetched int
+	RecordsListed  int
+	RateLimitState string
+	RetryAfter     string
+	Endpoint       string
+	Message        string
+}
+
+func (s *syncProgressSpinnerState) Apply(ev service.ProgressEvent) {
+	s.Type = syncProgressType(ev)
+	if ev.Collection != "" {
+		s.Collection = ev.Collection
+	}
+	if ev.Phase != "" {
+		s.Phase = ev.Phase
+	}
+	if ev.Page > 0 {
+		s.Page = ev.Page
+	}
+	s.RecordsFetched += ev.RecordsFetched
+	s.RecordsListed += ev.RecordsListed
+	if ev.RateLimitState != "" {
+		s.RateLimitState = ev.RateLimitState
+	}
+	if ev.RetryAfter != "" {
+		s.RetryAfter = ev.RetryAfter
+	}
+	if ev.Endpoint != "" {
+		s.Endpoint = ev.Endpoint
+	}
+	if ev.Message != "" {
+		s.Message = ev.Message
+	}
+}
+
+func renderSyncProgressSpinnerFrame(w io.Writer, state *syncProgressSpinnerState) {
+	frames := []string{"-", "\\", "|", "/"}
+	frame := frames[state.Frame%len(frames)]
+	state.Frame++
+	fmt.Fprintf(w, "\r\033[K%s sync", frame)
+	if state.Collection != "" {
+		fmt.Fprintf(w, " %s", state.Collection)
+	}
+	if state.Phase != "" {
+		fmt.Fprintf(w, " %s", state.Phase)
+	}
+	if state.Page > 0 {
+		fmt.Fprintf(w, " p%d", state.Page)
+	}
+	if state.RecordsFetched > 0 {
+		fmt.Fprintf(w, " %d rec", state.RecordsFetched)
+	} else if state.RecordsListed > 0 {
+		fmt.Fprintf(w, " %d listed", state.RecordsListed)
+	}
+	if state.RateLimitState != "" {
+		fmt.Fprint(w, " wait")
+	}
+	if state.RetryAfter != "" {
+		fmt.Fprintf(w, " %s", state.RetryAfter)
+	}
+	fmt.Fprintf(w, " elapsed=%s", time.Since(state.Started).Round(time.Millisecond))
+}
+
+type syncProgressEventJSON struct {
+	service.ProgressEvent
+	Type      string `json:"type"`
+	ElapsedMS int64  `json:"elapsed_ms"`
+}
+
+func syncProgressJSONEvent(ev service.ProgressEvent, started time.Time) syncProgressEventJSON {
+	return syncProgressEventJSON{
+		ProgressEvent: ev,
+		Type:          syncProgressType(ev),
+		ElapsedMS:     time.Since(started).Milliseconds(),
+	}
+}
+
+func renderSyncProgressLine(w io.Writer, ev service.ProgressEvent, started time.Time) {
+	fmt.Fprintf(w, "sync progress: type=%s", syncProgressType(ev))
+	if ev.Collection != "" {
+		fmt.Fprintf(w, " collection=%s", ev.Collection)
+	}
+	if ev.Phase != "" {
+		fmt.Fprintf(w, " phase=%s", ev.Phase)
+	}
+	if ev.Page > 0 {
+		fmt.Fprintf(w, " page=%d", ev.Page)
+	}
+	if ev.RecordsListed > 0 {
+		fmt.Fprintf(w, " listed=%d", ev.RecordsListed)
+	}
+	if ev.RecordsFetched > 0 {
+		fmt.Fprintf(w, " records=%d", ev.RecordsFetched)
+	}
+	if ev.RecordsInserted > 0 {
+		fmt.Fprintf(w, " inserted=%d", ev.RecordsInserted)
+	}
+	if ev.RecordsUpdated > 0 {
+		fmt.Fprintf(w, " updated=%d", ev.RecordsUpdated)
+	}
+	if ev.RecordsSkipped > 0 {
+		fmt.Fprintf(w, " skipped=%d", ev.RecordsSkipped)
+	}
+	if ev.RecordsFailed > 0 {
+		fmt.Fprintf(w, " failed=%d", ev.RecordsFailed)
+	}
+	if ev.RateLimitState != "" {
+		fmt.Fprintf(w, " rate_limit=%s", ev.RateLimitState)
+	}
+	if ev.RetryAfter != "" {
+		fmt.Fprintf(w, " retry_after=%s", ev.RetryAfter)
+	}
+	if ev.ResumeAt != "" {
+		fmt.Fprintf(w, " resume_at=%s", ev.ResumeAt)
+	}
+	if ev.Attempt > 0 {
+		fmt.Fprintf(w, " attempt=%d", ev.Attempt)
+	}
+	if ev.Endpoint != "" {
+		fmt.Fprintf(w, " endpoint=%s", ev.Endpoint)
+	}
+	if ev.Message != "" {
+		fmt.Fprintf(w, " message=%q", ev.Message)
+	}
+	fmt.Fprintf(w, " elapsed=%s\n", time.Since(started).Round(time.Millisecond))
+}
+
+func syncProgressType(ev service.ProgressEvent) string {
+	if ev.Type != "" {
+		return ev.Type
+	}
+	if ev.RateLimitState != "" || ev.RetryAfter != "" || ev.ResumeAt != "" {
+		return "rate_limit"
+	}
+	if ev.Phase != "" {
+		return "phase"
+	}
+	return "records"
 }
 
 func mergeSyncResources(dst *service.SyncResourcesResult, src *service.SyncResourcesResult) {
@@ -2545,6 +2774,8 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --max-pages N       maximum pages to sync; omit to traverse until end/frontier")
 		fmt.Fprintln(w, "  --max-records N     maximum records to sync; omit to traverse until end/frontier")
 		fmt.Fprintln(w, "  --per-page N        records per page")
+		fmt.Fprintln(w, "  --progress MODE     progress mode: auto, spinner, lines, jsonl, off")
+		fmt.Fprintln(w, "  --quiet             suppress non-result progress output")
 		fmt.Fprintln(w, "  --id ID             stable record id")
 		fmt.Fprintln(w, "  --input ALIAS       remote alias for single-record sync")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
