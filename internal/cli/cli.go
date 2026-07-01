@@ -23,6 +23,7 @@ import (
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
 	"gitcode-mcp/internal/service"
+	"gitcode-mcp/internal/servicectl"
 )
 
 var commands = []string{
@@ -57,6 +58,7 @@ var commands = []string{
 	"publish-release",
 	"config",
 	"auth",
+	"service",
 	"doctor",
 	"migrate-cache",
 	"repo",
@@ -260,7 +262,7 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 		fmt.Fprintf(stdout, "gitcode-mcp %s\n", buildinfo.Version)
 		return 0
 	}
-	if args[0] == "config" || args[0] == "auth" || args[0] == "doctor" || args[0] == "migrate-cache" || args[0] == "bind" {
+	if args[0] == "config" || args[0] == "auth" || args[0] == "service" || args[0] == "doctor" || args[0] == "migrate-cache" || args[0] == "bind" {
 		return executeLocalCommand(args, stdout, stderr, deps)
 	}
 	if !isKnownCommand(args[0]) {
@@ -602,7 +604,7 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 	}
 	if opts.helpRequested {
 		sub, _ := firstArg(rest)
-		if sub != "" && (command == "config" || command == "auth" || command == "repo") {
+		if sub != "" && (command == "config" || command == "auth" || command == "repo" || command == "service") {
 			switch command + " " + sub {
 			case "config init", "config locate", "config show":
 				printLocalSubcommandHelp(command, sub, stdout)
@@ -611,6 +613,8 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 			case "repo add", "repo status":
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "repo init-local":
+				printLocalSubcommandHelp(command, sub, stdout)
+			case "service run", "service install", "service uninstall", "service start", "service stop", "service status", "service doctor":
 				printLocalSubcommandHelp(command, sub, stdout)
 			default:
 				printCommandHelp(command, stdout)
@@ -639,6 +643,9 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 	}
 	if command == "migrate-cache" {
 		return executeMigrateCacheCommand(context.Background(), opts, stdout, stderr, deps)
+	}
+	if command == "service" {
+		return executeServiceCommand(context.Background(), rest, opts, stdout, stderr, deps)
 	}
 	if command == "bind" {
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "bind", Message: "use repo add to create repository bindings"})
@@ -763,6 +770,70 @@ func sanitizeCredentialStatus(status config.CredentialStatus, src config.Source)
 		status.AuthProbe = &probe
 	}
 	return status
+}
+
+func executeServiceCommand(ctx context.Context, args []string, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+	sub, ok := firstArg(args)
+	if !ok {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "service", Message: "subcommand is required"})
+	}
+	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Version}
+	var (
+		status servicectl.Status
+		err    error
+	)
+	switch sub {
+	case "install":
+		status, err = manager.Install(opts.overwrite)
+	case "uninstall":
+		status, err = manager.Uninstall()
+	case "start":
+		status, err = manager.Start(ctx)
+	case "stop":
+		status, err = manager.Stop(ctx)
+	case "status":
+		status, err = manager.Status()
+	case "doctor":
+		status, err = manager.Doctor()
+	case "run":
+		err = manager.Run(ctx)
+		if errors.Is(err, context.Canceled) {
+			return 0
+		}
+		if err == nil {
+			return 0
+		}
+		return writeError(stderr, opts.format, err)
+	default:
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "service", Message: "unknown subcommand"})
+	}
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	return render(stdout, opts.format, status, renderServiceStatusText)
+}
+
+func renderServiceStatusText(w io.Writer, status servicectl.Status) {
+	fmt.Fprintf(w, "status: %s\n", status.Status)
+	fmt.Fprintf(w, "installed: %t\n", status.Installed)
+	fmt.Fprintf(w, "running: %t\n", status.Running)
+	if status.PID > 0 {
+		fmt.Fprintf(w, "pid: %d\n", status.PID)
+	}
+	fmt.Fprintf(w, "pid_alive: %t\n", status.PIDAlive)
+	fmt.Fprintf(w, "socket_present: %t\n", status.SocketPresent)
+	fmt.Fprintf(w, "socket_path: %s\n", status.SocketPath)
+	fmt.Fprintf(w, "runtime_dir: %s\n", status.RuntimeDir)
+	fmt.Fprintf(w, "log_dir: %s\n", status.LogDir)
+	fmt.Fprintf(w, "state_path: %s\n", status.StatePath)
+	fmt.Fprintf(w, "install_kind: %s\n", status.InstallKind)
+	fmt.Fprintf(w, "install_path: %s\n", status.InstallPath)
+	if status.UpdatedAt != nil && !status.UpdatedAt.IsZero() {
+		fmt.Fprintf(w, "updated_at: %s\n", status.UpdatedAt.Format(time.RFC3339))
+	}
+	if status.Message != "" {
+		fmt.Fprintf(w, "message: %s\n", status.Message)
+	}
 }
 
 func dispatch(ctx context.Context, svc queryService, command string, args []string, opts options, stdout io.Writer, stderr io.Writer, plan startupPlan) int {
@@ -3000,6 +3071,19 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  status      report token source and credential state")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Run gitcode-mcp auth SUBCOMMAND --help for details.")
+	case "service":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s SUBCOMMAND\n\n", command)
+		fmt.Fprintln(w, "Manage the local gitcode-mcp service coordinator.")
+		fmt.Fprintln(w, "Subcommands:")
+		fmt.Fprintln(w, "  install     write the user service definition")
+		fmt.Fprintln(w, "  uninstall   remove the user service definition")
+		fmt.Fprintln(w, "  start       report how to start the installed service")
+		fmt.Fprintln(w, "  stop        report how to stop the installed service")
+		fmt.Fprintln(w, "  status      inspect runtime state")
+		fmt.Fprintln(w, "  doctor      inspect service health")
+		fmt.Fprintln(w, "  run         run the coordinator foreground process")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Run gitcode-mcp service SUBCOMMAND --help for details.")
 	case "doctor":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s [--repo REPO] [--offline|--fixture] [--runtime-audit] [--cache-path PATH]\n\n", command)
 		fmt.Fprintln(w, "Aggregate subsystem diagnostics with public-safe output.")
@@ -3077,6 +3161,47 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "  --owner OWNER       repository owner (for auth probe)")
 		fmt.Fprintln(w, "  --repo REPO         repository id (for auth probe)")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "service install":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service install [--overwrite] [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Write the platform user-service definition for gitcode-mcp service run.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --overwrite         replace an existing service definition")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "service uninstall":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service uninstall [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Remove the platform user-service definition.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "service start":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service start [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Report current service state and the platform-manager start boundary.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "service stop":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service stop [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Report current service state and the platform-manager stop boundary.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "service status":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service status [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Inspect install, PID, socket, runtime, and log paths.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "service doctor":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service doctor [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Inspect service health using the same state model as service status.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "service run":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service run")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Run the service coordinator in the foreground using a user-global Unix socket.")
 	case "repo add":
 		fmt.Fprintln(w, "Usage: gitcode-mcp repo add --repo REPO --owner OWNER --name NAME --api-base-url URL --scopes SCOPES [--alias ALIAS] [--display-name NAME]")
 		fmt.Fprintln(w)
