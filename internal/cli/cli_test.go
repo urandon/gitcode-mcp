@@ -674,6 +674,25 @@ func TestSyncProgressModes(t *testing.T) {
 			t.Fatalf("spinner rate-limit line should stay compact: %q", line)
 		}
 	})
+
+	t.Run("lines include rate limiter state", func(t *testing.T) {
+		var stderr bytes.Buffer
+		renderSyncProgressLine(&stderr, service.ProgressEvent{
+			Type:           "rate_limit",
+			RateLimitState: "throttle_wait_started",
+			RateLimitRPS:   "4",
+			RateLimitBurst: 4,
+			RetryAfter:     "250ms",
+			Endpoint:       "/api/v5/repos/example/repo/issues",
+			Attempt:        1,
+		}, time.Now())
+		line := stderr.String()
+		for _, want := range []string{"type=rate_limit", "rate_limit=throttle_wait_started", "rps=4", "burst=4", "retry_after=250ms", "attempt=1"} {
+			if !strings.Contains(line, want) {
+				t.Fatalf("progress line missing %q: %q", want, line)
+			}
+		}
+	})
 }
 
 func TestRenderSyncResourcesPartialSummaryGroupsFailures(t *testing.T) {

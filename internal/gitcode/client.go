@@ -46,6 +46,8 @@ type Config struct {
 	MaxRetries      int
 	UserAgent       string
 	Pagination      PaginationConfig
+	RateLimitRPS    float64
+	RateLimitBurst  int
 }
 
 type PaginationConfig struct {

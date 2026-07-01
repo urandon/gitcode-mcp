@@ -30,6 +30,8 @@ type Config struct {
 	DefaultTimeout  time.Duration `json:"default_timeout"`
 	MaxResponseSize int64         `json:"max_response_size"`
 	MaxRetries      int           `json:"max_retries"`
+	RateLimitRPS    float64       `json:"rate_limit_rps"`
+	RateLimitBurst  int           `json:"rate_limit_burst"`
 	Format          string        `json:"format"`
 	MCPToolAccess   string        `json:"mcp_tool_access"`
 }
@@ -42,6 +44,8 @@ type Overrides struct {
 	DefaultTimeout  time.Duration
 	MaxResponseSize int64
 	MaxRetries      *int
+	RateLimitRPS    *float64
+	RateLimitBurst  *int
 	Format          string
 	MCPToolAccess   string
 }
@@ -143,6 +147,8 @@ type fileConfig struct {
 	DefaultTimeout  *string           `json:"default_timeout"`
 	MaxResponseSize *int64            `json:"max_response_size"`
 	MaxRetries      *int              `json:"max_retries"`
+	RateLimitRPS    *float64          `json:"rate_limit_rps"`
+	RateLimitBurst  *int              `json:"rate_limit_burst"`
 	Format          *string           `json:"format"`
 	MCPToolAccess   *string           `json:"mcp_tool_access"`
 	MCP             *MCPConfig        `json:"mcp"`
@@ -162,6 +168,8 @@ func defaultWithSource(src Source) Config {
 		DefaultTimeout:  30 * time.Second,
 		MaxResponseSize: 10 << 20,
 		MaxRetries:      2,
+		RateLimitRPS:    4,
+		RateLimitBurst:  4,
 		Format:          "text",
 		MCPToolAccess:   MCPToolAccessRead,
 	}
@@ -249,6 +257,12 @@ func mergeFile(cfg Config, file fileConfig) (Config, error) {
 	if file.MaxRetries != nil {
 		cfg.MaxRetries = *file.MaxRetries
 	}
+	if file.RateLimitRPS != nil {
+		cfg.RateLimitRPS = *file.RateLimitRPS
+	}
+	if file.RateLimitBurst != nil {
+		cfg.RateLimitBurst = *file.RateLimitBurst
+	}
 	if file.Format != nil {
 		cfg.Format = *file.Format
 	}
@@ -309,6 +323,12 @@ func mergeOverrides(cfg Config, overrides Overrides) Config {
 	}
 	if overrides.MaxRetries != nil {
 		cfg.MaxRetries = *overrides.MaxRetries
+	}
+	if overrides.RateLimitRPS != nil {
+		cfg.RateLimitRPS = *overrides.RateLimitRPS
+	}
+	if overrides.RateLimitBurst != nil {
+		cfg.RateLimitBurst = *overrides.RateLimitBurst
 	}
 	if overrides.Format != "" {
 		cfg.Format = overrides.Format

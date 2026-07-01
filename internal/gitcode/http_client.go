@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gitcode-mcp/internal/diagnostics"
@@ -32,6 +33,8 @@ type HTTPClient struct {
 	userAgent       string
 	client          *http.Client
 	pagination      PaginationConfig
+	rateLimiter     *clientRateLimiter
+	rateLimiterMu   sync.Mutex
 }
 
 func NewHTTPClient(cfg Config) (*HTTPClient, error) {
@@ -55,7 +58,16 @@ func NewHTTPClient(cfg Config) (*HTTPClient, error) {
 	if ua == "" {
 		ua = "gitcode-mcp"
 	}
-	return &HTTPClient{baseURL: parsed, token: cfg.Token, maxResponseSize: limit, maxRetries: cfg.MaxRetries, userAgent: ua, client: client, pagination: cfg.Pagination}, nil
+	return &HTTPClient{
+		baseURL:         parsed,
+		token:           cfg.Token,
+		maxResponseSize: limit,
+		maxRetries:      cfg.MaxRetries,
+		userAgent:       ua,
+		client:          client,
+		pagination:      cfg.Pagination,
+		rateLimiter:     newClientRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst),
+	}, nil
 }
 
 func (c *HTTPClient) ListIssues(ctx context.Context, req IssueListRequest) (Page[IssueSummary], error) {
@@ -1336,6 +1348,9 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 		if err := ctx.Err(); err != nil {
 			return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempt - 1, Cause: err}
 		}
+		if err := c.waitForRateLimit(ctx, method, endpoint, attempt); err != nil {
+			return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempt - 1, Cause: err}
+		}
 		resp, err := c.do(ctx, method, endpoint, values, bytes.NewReader(requestBody), opts)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -1363,10 +1378,14 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 		case resp.StatusCode == http.StatusTooManyRequests:
 			rawRetryAfter = resp.Header.Get("Retry-After")
 			lastRetryAfter = parseRetryAfter(rawRetryAfter, time.Now())
+			emitRateLimitEvent(ctx, RateLimitEvent{Type: RateLimitEventResponseRateLimited, Method: method, Endpoint: endpoint, Attempt: attempt, Wait: lastRetryAfter, ResumeAt: time.Now().Add(lastRetryAfter), RawRetryAfter: rawRetryAfter})
 			if attempt < attempts {
+				resumeAt := time.Now().Add(lastRetryAfter)
+				emitRateLimitEvent(ctx, RateLimitEvent{Type: RateLimitEventRetryAfterWaitStarted, Method: method, Endpoint: endpoint, Attempt: attempt, Wait: lastRetryAfter, ResumeAt: resumeAt, RawRetryAfter: rawRetryAfter})
 				if err := sleepContext(ctx, lastRetryAfter); err != nil {
 					return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempt, Cause: err}
 				}
+				emitRateLimitEvent(ctx, RateLimitEvent{Type: RateLimitEventRetryAfterWaitCompleted, Method: method, Endpoint: endpoint, Attempt: attempt, Wait: lastRetryAfter, ResumeAt: resumeAt, RawRetryAfter: rawRetryAfter})
 				continue
 			}
 			return nil, nil, ErrRateLimited{RetryAfter: lastRetryAfter, RawRetryAfter: rawRetryAfter, Endpoint: endpoint, Attempts: attempt}
@@ -1383,6 +1402,26 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 		}
 	}
 	return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempts}
+}
+
+func (c *HTTPClient) waitForRateLimit(ctx context.Context, method, endpoint string, attempt int) error {
+	if c.rateLimiter == nil {
+		return nil
+	}
+	c.rateLimiterMu.Lock()
+	wait, resumeAt := c.rateLimiter.reserve(time.Now())
+	rps := c.rateLimiter.rps
+	burst := c.rateLimiter.burst
+	c.rateLimiterMu.Unlock()
+	if wait <= 0 {
+		return nil
+	}
+	emitRateLimitEvent(ctx, RateLimitEvent{Type: RateLimitEventThrottleWaitStarted, Method: method, Endpoint: endpoint, Attempt: attempt, Wait: wait, ResumeAt: resumeAt, RPS: rps, Burst: burst})
+	if err := sleepContext(ctx, wait); err != nil {
+		return err
+	}
+	emitRateLimitEvent(ctx, RateLimitEvent{Type: RateLimitEventThrottleWaitCompleted, Method: method, Endpoint: endpoint, Attempt: attempt, Wait: wait, ResumeAt: resumeAt, RPS: rps, Burst: burst})
+	return nil
 }
 
 func (c *HTTPClient) do(ctx context.Context, method, endpoint string, values url.Values, body io.Reader, opts requestOptions) (*http.Response, error) {
