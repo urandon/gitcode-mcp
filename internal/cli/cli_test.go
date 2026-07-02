@@ -440,7 +440,7 @@ func TestAllCommandsRegistered(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d", code)
 	}
-	for _, want := range []string{"ingest", "index", "search", "search_sources", "list", "get", "get-snippet", "snippet", "snippets", "backlinks", "list-chunks", "link-check", "stale-index", "recent", "cache", "cache-status", "sync-status", "sync_status", "sync", "export", "diff", "create-issue", "update-issue", "create-pr", "create-mr", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "update-comment", "add-label", "publish-release", "config", "auth", "service", "doctor", "migrate-cache", "repo"} {
+	for _, want := range []string{"ingest", "index", "search", "search_sources", "list", "get", "get-snippet", "snippet", "snippets", "backlinks", "list-chunks", "link-check", "stale-index", "recent", "cache", "cache-status", "sync-status", "sync_status", "sync", "export", "diff", "create-issue", "update-issue", "create-pr", "create-mr", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "update-comment", "add-label", "publish-release", "config", "auth", "service", "rag", "doctor", "migrate-cache", "repo"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("help missing command %q in %q", want, stdout.String())
 		}
@@ -1491,6 +1491,7 @@ func TestLocalCommandHelpExitsZero(t *testing.T) {
 		{"auth --help", []string{"auth", "--help"}},
 		{"auth -h", []string{"auth", "-h"}},
 		{"config --help", []string{"config", "--help"}},
+		{"rag --help", []string{"rag", "--help"}},
 		{"doctor --help", []string{"doctor", "--help"}},
 		{"migrate-cache --help", []string{"migrate-cache", "--help"}},
 	} {
@@ -1518,6 +1519,7 @@ func TestLocalSubcommandHelpExitsZero(t *testing.T) {
 		{"auth status --help", []string{"auth", "status", "--help"}},
 		{"repo add --help", []string{"repo", "add", "--help"}},
 		{"repo status --help", []string{"repo", "status", "--help"}},
+		{"rag setup --help", []string{"rag", "setup", "--help"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

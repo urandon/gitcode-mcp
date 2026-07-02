@@ -38,6 +38,7 @@ type RAGProviderConfig struct {
 	Type         string                `json:"type,omitempty"`
 	Endpoint     string                `json:"endpoint,omitempty"`
 	Executable   string                `json:"executable,omitempty"`
+	Startup      string                `json:"startup,omitempty"`
 	Autostart    bool                  `json:"autostart"`
 	Env          map[string]string     `json:"env,omitempty"`
 	InstallHints []string              `json:"install_hints,omitempty"`
@@ -89,6 +90,7 @@ type ragProviderFileConfig struct {
 	Type         *string                    `json:"type"`
 	Endpoint     *string                    `json:"endpoint"`
 	Executable   *string                    `json:"executable"`
+	Startup      *string                    `json:"startup"`
 	Autostart    *bool                      `json:"autostart"`
 	Env          map[string]string          `json:"env"`
 	InstallHints []string                   `json:"install_hints"`
@@ -136,6 +138,7 @@ func defaultRAGConfig(cacheBaseDir string) RAGConfig {
 				Type:       defaultRAGProvider,
 				Endpoint:   defaultRAGProviderEndpoint,
 				Executable: "ollama",
+				Startup:    "managed",
 				Autostart:  true,
 				Env:        map[string]string{},
 				InstallHints: []string{
@@ -239,6 +242,9 @@ func mergeRAGProviderFile(provider RAGProviderConfig, file ragProviderFileConfig
 	}
 	if file.Executable != nil {
 		provider.Executable = strings.TrimSpace(*file.Executable)
+	}
+	if file.Startup != nil {
+		provider.Startup = strings.TrimSpace(*file.Startup)
 	}
 	if file.Autostart != nil {
 		provider.Autostart = *file.Autostart

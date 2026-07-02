@@ -3,12 +3,15 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/rag"
 )
 
 type cliConfigSource struct {
@@ -49,6 +52,45 @@ func (r statusReporter) Resolve(context.Context, config.EffectiveConfig) (config
 func (r statusReporter) Status(context.Context, config.EffectiveConfig) config.CredentialStatus {
 	return r.status
 }
+
+type cliRAGRuntime struct {
+	executablePath string
+	live           bool
+	models         []string
+	pullCalls      int
+	smokeCalls     int
+}
+
+func (r *cliRAGRuntime) LookPath(string) (string, error) {
+	if r.executablePath == "" {
+		return "", errors.New("not found")
+	}
+	return r.executablePath, nil
+}
+func (r *cliRAGRuntime) IsLive(context.Context, string, time.Duration) (bool, string) {
+	if r.live {
+		return true, ""
+	}
+	return false, "not live"
+}
+func (r *cliRAGRuntime) ListModels(context.Context, string, time.Duration) ([]string, error) {
+	return append([]string(nil), r.models...), nil
+}
+func (r *cliRAGRuntime) PullModel(_ context.Context, _, model string, _ time.Duration) error {
+	r.pullCalls++
+	r.models = append(r.models, model)
+	return nil
+}
+func (r *cliRAGRuntime) EmbeddingSmoke(context.Context, string, string, time.Duration) error {
+	r.smokeCalls++
+	return nil
+}
+func (r *cliRAGRuntime) Start(context.Context, config.RAGProviderConfig) (string, error) {
+	r.live = true
+	return "started", nil
+}
+
+var _ rag.Runtime = (*cliRAGRuntime)(nil)
 
 func TestConfigAuthCommandsRedactedUX(t *testing.T) {
 	t.Run("SCN-CONFIG-INIT-YAML-ONLY", func(t *testing.T) {
@@ -217,6 +259,40 @@ func TestConfigAuthCommandsRedactedUX(t *testing.T) {
 		}
 		if strings.Contains(out, "secret-token-value") {
 			t.Fatalf("auth json leaked token: %q", out)
+		}
+	})
+}
+
+func TestRAGSetupCommand(t *testing.T) {
+	t.Run("SCN-RAG-SETUP-DRY-RUN-MISSING-MODEL", func(t *testing.T) {
+		src := newCLIConfigSource(t)
+		runtime := &cliRAGRuntime{executablePath: "/usr/local/bin/ollama", live: true}
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps([]string{"rag", "setup", "--dry-run"}, &stdout, &stderr, nil, localCommandDeps{Source: src, RAGRuntime: runtime})
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		out := stdout.String()
+		for _, want := range []string{"status: missing_model", "profile: qwen3-ollama-0_6b-512", "provider: ollama", "actions: pull model"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("rag setup output missing %q in %q", want, out)
+			}
+		}
+		if runtime.pullCalls != 0 || runtime.smokeCalls != 0 {
+			t.Fatalf("dry-run mutated runtime: %#v", runtime)
+		}
+	})
+
+	t.Run("SCN-RAG-SETUP-YES-PULLS-AND-SMOKES", func(t *testing.T) {
+		src := newCLIConfigSource(t)
+		runtime := &cliRAGRuntime{executablePath: "/usr/local/bin/ollama", live: true}
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps([]string{"rag", "setup", "--yes"}, &stdout, &stderr, nil, localCommandDeps{Source: src, RAGRuntime: runtime})
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+		}
+		if runtime.pullCalls != 1 || runtime.smokeCalls != 1 || !strings.Contains(stdout.String(), "status: ready") {
+			t.Fatalf("runtime=%#v stdout=%q", runtime, stdout.String())
 		}
 	})
 }

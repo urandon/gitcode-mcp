@@ -15,6 +15,7 @@ import (
 
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/rag"
 	"gitcode-mcp/internal/service"
 )
 
@@ -46,6 +47,7 @@ type Request struct {
 	APIBaseURL         string
 	RepoID             string
 	LiveBinding        service.LiveRepositoryBinding
+	RAGRuntime         rag.Runtime
 	OpenStore          OpenStoreFunc
 	NewService         NewServiceFunc
 }
@@ -58,6 +60,7 @@ type Report struct {
 	Credential    CredentialSection     `json:"credential"`
 	Sync          SyncSection           `json:"sync"`
 	Index         IndexSection          `json:"index"`
+	RAG           RAGSection            `json:"rag"`
 	MCP           MCPSection            `json:"mcp"`
 	LiveProvider  LiveProviderSection   `json:"live_provider"`
 	LiveReadiness LiveReadinessSnapshot `json:"live_readiness,omitempty"`
@@ -125,6 +128,24 @@ type IndexSection struct {
 	Status        string `json:"status"`
 	StaleCount    int    `json:"stale_count"`
 	LastIndexedAt string `json:"last_indexed_at,omitempty"`
+}
+
+type RAGSection struct {
+	Status              string   `json:"status"`
+	Profile             string   `json:"profile,omitempty"`
+	Provider            string   `json:"provider,omitempty"`
+	ProviderType        string   `json:"provider_type,omitempty"`
+	Endpoint            string   `json:"endpoint,omitempty"`
+	Model               string   `json:"model,omitempty"`
+	ModelAvailable      bool     `json:"model_available"`
+	ModelStorePath      string   `json:"model_store_path,omitempty"`
+	ProviderModelEnv    string   `json:"provider_model_env,omitempty"`
+	ProviderModelPath   string   `json:"provider_model_path,omitempty"`
+	ProviderInstalled   bool     `json:"provider_installed"`
+	ProviderLive        bool     `json:"provider_live"`
+	Actions             []string `json:"actions,omitempty"`
+	Diagnostics         []string `json:"diagnostics,omitempty"`
+	InstallInstructions []string `json:"install_instructions,omitempty"`
 }
 
 type MCPSection struct {
@@ -210,6 +231,7 @@ func Build(ctx context.Context, req Request) (Report, error) {
 	report.Repo = RepoSection{Status: "no_repo_bound", BindHint: "run 'gitcode-mcp repo add --repo <id> --owner <owner> --name <name> --api-base-url <url> --scopes issues,wiki'"}
 	report.Sync = SyncSection{Status: "no_repo_bound"}
 	report.Index = IndexSection{Status: "no_repo_bound"}
+	applyRAG(ctx, &report, eff.Config, req.RAGRuntime)
 	toolAccess, err := config.NormalizeMCPToolAccess(req.MCPToolAccess)
 	if err != nil {
 		toolAccess = config.MCPToolAccessRead
@@ -400,6 +422,31 @@ func applyIndex(ctx context.Context, svc Service, repoID string, report *Report)
 	report.Index.LastIndexedAt = formatTime(stale.LastIndexedAt)
 }
 
+func applyRAG(ctx context.Context, report *Report, cfg config.Config, runtime rag.Runtime) {
+	result, err := rag.Setup(ctx, rag.SetupRequest{Config: cfg, DryRun: true, Runtime: runtime})
+	if err != nil {
+		report.RAG = RAGSection{Status: "config_error", Diagnostics: []string{err.Error()}}
+		return
+	}
+	report.RAG = RAGSection{
+		Status:              result.Status,
+		Profile:             result.Profile,
+		Provider:            result.Provider,
+		ProviderType:        result.ProviderType,
+		Endpoint:            result.Endpoint,
+		Model:               result.Model,
+		ModelAvailable:      result.ModelAvailable,
+		ModelStorePath:      result.ModelStorePath,
+		ProviderModelEnv:    result.ProviderModelEnv,
+		ProviderModelPath:   result.ProviderModelPath,
+		ProviderInstalled:   result.ProviderInstalled,
+		ProviderLive:        result.ProviderLive,
+		Actions:             result.Actions,
+		Diagnostics:         result.Diagnostics,
+		InstallInstructions: result.InstallInstructions,
+	}
+}
+
 func applyCacheOpenError(report *Report, err error) {
 	var schemaErr *cache.SchemaVersionError
 	if errors.As(err, &schemaErr) {
@@ -559,6 +606,37 @@ func RenderText(w io.Writer, report Report) {
 	fmt.Fprintf(w, "  stale_count: %d\n", report.Index.StaleCount)
 	if report.Index.LastIndexedAt != "" {
 		fmt.Fprintf(w, "  last_indexed_at: %s\n", report.Index.LastIndexedAt)
+	}
+	fmt.Fprintln(w, "rag:")
+	fmt.Fprintf(w, "  status: %s\n", report.RAG.Status)
+	if report.RAG.Profile != "" {
+		fmt.Fprintf(w, "  profile: %s\n", report.RAG.Profile)
+	}
+	if report.RAG.Provider != "" {
+		fmt.Fprintf(w, "  provider: %s\n", report.RAG.Provider)
+		fmt.Fprintf(w, "  provider_type: %s\n", report.RAG.ProviderType)
+		fmt.Fprintf(w, "  endpoint: %s\n", report.RAG.Endpoint)
+		fmt.Fprintf(w, "  provider_installed: %t\n", report.RAG.ProviderInstalled)
+		fmt.Fprintf(w, "  provider_live: %t\n", report.RAG.ProviderLive)
+	}
+	if report.RAG.Model != "" {
+		fmt.Fprintf(w, "  model: %s\n", report.RAG.Model)
+		fmt.Fprintf(w, "  model_available: %t\n", report.RAG.ModelAvailable)
+	}
+	if report.RAG.ModelStorePath != "" {
+		fmt.Fprintf(w, "  model_store_path: %s\n", report.RAG.ModelStorePath)
+	}
+	if report.RAG.ProviderModelEnv != "" {
+		fmt.Fprintf(w, "  provider_model_env: %s\n", report.RAG.ProviderModelEnv)
+	}
+	if report.RAG.ProviderModelPath != "" {
+		fmt.Fprintf(w, "  provider_model_path: %s\n", report.RAG.ProviderModelPath)
+	}
+	if len(report.RAG.Actions) > 0 {
+		fmt.Fprintf(w, "  actions: %s\n", strings.Join(report.RAG.Actions, "; "))
+	}
+	if len(report.RAG.Diagnostics) > 0 {
+		fmt.Fprintf(w, "  diagnostics: %s\n", strings.Join(report.RAG.Diagnostics, "; "))
 	}
 	fmt.Fprintln(w, "mcp:")
 	fmt.Fprintf(w, "  status: %s\n", report.MCP.Status)

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/rag"
 )
 
 const (
@@ -50,20 +51,21 @@ type State struct {
 }
 
 type Status struct {
-	Status        string     `json:"status"`
-	Installed     bool       `json:"installed"`
-	Running       bool       `json:"running"`
-	PIDAlive      bool       `json:"pid_alive"`
-	SocketPresent bool       `json:"socket_present"`
-	PID           int        `json:"pid,omitempty"`
-	SocketPath    string     `json:"socket_path"`
-	RuntimeDir    string     `json:"runtime_dir"`
-	LogDir        string     `json:"log_dir"`
-	StatePath     string     `json:"state_path"`
-	InstallPath   string     `json:"install_path"`
-	InstallKind   string     `json:"install_kind"`
-	UpdatedAt     *time.Time `json:"updated_at,omitempty"`
-	Message       string     `json:"message,omitempty"`
+	Status        string           `json:"status"`
+	Installed     bool             `json:"installed"`
+	Running       bool             `json:"running"`
+	PIDAlive      bool             `json:"pid_alive"`
+	SocketPresent bool             `json:"socket_present"`
+	PID           int              `json:"pid,omitempty"`
+	SocketPath    string           `json:"socket_path"`
+	RuntimeDir    string           `json:"runtime_dir"`
+	LogDir        string           `json:"log_dir"`
+	StatePath     string           `json:"state_path"`
+	InstallPath   string           `json:"install_path"`
+	InstallKind   string           `json:"install_kind"`
+	RAG           *rag.SetupResult `json:"rag,omitempty"`
+	UpdatedAt     *time.Time       `json:"updated_at,omitempty"`
+	Message       string           `json:"message,omitempty"`
 }
 
 type Manager struct {
@@ -214,7 +216,26 @@ func (m Manager) Status() (Status, error) {
 }
 
 func (m Manager) Doctor() (Status, error) {
-	return m.Status()
+	status, err := m.Status()
+	if err != nil {
+		return Status{}, err
+	}
+	src := m.Source
+	if src == nil {
+		src = config.OSSource{}
+	}
+	eff, err := config.LoadEffective(src, config.Overrides{})
+	if err != nil {
+		result := rag.SetupResult{Status: "config_error", Diagnostics: []string{err.Error()}}
+		status.RAG = &result
+		return status, nil
+	}
+	result, err := rag.Setup(context.Background(), rag.SetupRequest{Config: eff.Config, DryRun: true})
+	if err != nil {
+		result = rag.SetupResult{Status: "config_error", Diagnostics: []string{err.Error()}}
+	}
+	status.RAG = &result
+	return status, nil
 }
 
 func (m Manager) Start(ctx context.Context) (Status, error) {
