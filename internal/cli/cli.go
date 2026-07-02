@@ -205,6 +205,7 @@ type options struct {
 	helpRequested  bool
 	steps          int
 	intervalMS     int
+	batchSize      int
 	detach         bool
 }
 
@@ -557,6 +558,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.BoolVar(&opts.yes, "yes", false, "answer yes to setup prompts")
 	flags.IntVar(&opts.steps, "steps", 0, "fake job step count")
 	flags.IntVar(&opts.intervalMS, "interval-ms", 0, "fake job interval in milliseconds")
+	flags.IntVar(&opts.batchSize, "batch-size", 0, "RAG embedding batch size")
 	flags.BoolVar(&opts.detach, "detach", false, "start job without attaching progress")
 	if err := flags.Parse(reorderFlags(args)); err != nil {
 		return opts, nil, service.ErrInvalidQuery{Field: "flags", Message: err.Error()}
@@ -629,7 +631,7 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "service run", "service install", "service uninstall", "service start", "service stop", "service status", "service doctor", "service fake-job", "service jobs", "service job", "service attach", "service cancel":
 				printLocalSubcommandHelp(command, sub, stdout)
-			case "rag setup":
+			case "rag setup", "rag index":
 				printLocalSubcommandHelp(command, sub, stdout)
 			default:
 				printCommandHelp(command, stdout)
@@ -790,6 +792,20 @@ func executeRAGCommand(ctx context.Context, args []string, opts options, stdout 
 			return 1
 		}
 		return code
+	case "index":
+		manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Version}
+		client, clientErr := manager.Client()
+		if clientErr != nil {
+			return writeError(stderr, opts.format, clientErr)
+		}
+		var job servicectl.Job
+		if err := client.Call(ctx, "Jobs.StartRAGIndex", servicectl.StartRAGIndexJobRequest{RepoID: opts.repo, Profile: opts.profile, CachePath: opts.cachePath, BatchSize: opts.batchSize}, &job); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		if opts.detach {
+			return render(stdout, opts.format, job, renderServiceJobText)
+		}
+		return attachServiceJob(ctx, client, job.ID, opts, stdout, stderr)
 	default:
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "rag", Message: "unknown subcommand"})
 	}
@@ -964,7 +980,7 @@ func attachServiceJob(ctx context.Context, client *servicectl.RPCClient, id stri
 
 func serviceJobTerminal(status string) bool {
 	switch status {
-	case servicectl.JobStatusSucceeded, servicectl.JobStatusCancelled, servicectl.JobStatusInterrupted:
+	case servicectl.JobStatusSucceeded, servicectl.JobStatusFailed, servicectl.JobStatusCancelled, servicectl.JobStatusInterrupted:
 		return true
 	default:
 		return false
@@ -3322,6 +3338,7 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "Set up and inspect local RAG providers and models.")
 		fmt.Fprintln(w, "Subcommands:")
 		fmt.Fprintln(w, "  setup       check provider, model, and embedding readiness")
+		fmt.Fprintln(w, "  index       start a daemon-owned RAG index job")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Run gitcode-mcp rag SUBCOMMAND --help for details.")
 	case "doctor":
@@ -3410,6 +3427,16 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "  --profile PROFILE   RAG profile name")
 		fmt.Fprintln(w, "  --dry-run           report setup actions without mutation")
 		fmt.Fprintln(w, "  --yes               allow non-interactive model pull")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "rag index":
+		fmt.Fprintln(w, "Usage: gitcode-mcp rag index --repo REPO [--profile PROFILE] [--batch-size N] [--detach] [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Start a daemon-owned RAG index job. By default the CLI attaches until the job reaches a terminal state.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         configured repository id")
+		fmt.Fprintln(w, "  --profile PROFILE   RAG profile name")
+		fmt.Fprintln(w, "  --batch-size N      embedding batch size")
+		fmt.Fprintln(w, "  --detach            return the job id without attaching progress")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "service install":
 		fmt.Fprintln(w, "Usage: gitcode-mcp service install [--overwrite] [--format FORMAT]")

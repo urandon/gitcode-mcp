@@ -604,6 +604,119 @@ func TestServiceCLIControlsFakeJobOverIPC(t *testing.T) {
 	}
 }
 
+func TestRAGIndexCLIStartsDaemonJobOverIPC(t *testing.T) {
+	root, err := shortCLITestRoot(t, "cli-rag-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(root, "cache.db")
+	store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore returned error: %v", err)
+	}
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatalf("AddRepository returned error: %v", err)
+	}
+	if err := store.UpsertSourceGraph(context.Background(), cache.SourceGraph{
+		Source: cache.Source{RepoID: "fixture-a", ID: "ISSUE-1", Kind: "issue", Path: "issues/1.md", Title: "RAG", Body: "русский 中文 English", Status: "open", ContentHash: "source-hash"},
+		Chunks: []cache.Chunk{{
+			RepoID:         "fixture-a",
+			ID:             "chunk-1",
+			SourceID:       "ISSUE-1",
+			RecordID:       "ISSUE-1",
+			ContentHash:    "chunk-hash",
+			ByteStart:      0,
+			ByteEnd:        32,
+			LineStart:      1,
+			LineEnd:        1,
+			Text:           "русский 中文 English",
+			NormalizedText: "русский 中文 english",
+			Policy:         "heading-v1",
+		}},
+	}); err != nil {
+		t.Fatalf("UpsertSourceGraph returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	configPath := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(strings.Join([]string{
+		"cache_path: " + cachePath,
+		"rag:",
+		"  default_profile: fake-rag",
+		"  providers:",
+		"    fake:",
+		"      type: fake",
+		"  profiles:",
+		"    fake-rag:",
+		"      provider: fake",
+		"      model: fake-embedding",
+		"      dimensions: 2",
+		"      batch_size: 1",
+		"  indexing:",
+		"    profile: fake-rag",
+		"",
+	}, "\n")), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	src := &repoInitLocalSource{
+		env:       map[string]string{"GITCODE_MCP_SERVICE_NETWORK": "mem", "GITCODE_MCP_SERVICE_ADDRESS": "test-cli-rag-index", config.EnvMCPConfigPath: configPath},
+		cwd:       root,
+		homeDir:   filepath.Join(root, "h"),
+		configDir: filepath.Join(root, "f"),
+		cacheDir:  filepath.Join(root, "c"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runCode := make(chan int, 1)
+	go func() {
+		var runOut bytes.Buffer
+		var runErr bytes.Buffer
+		runCode <- executeWithFactoryAndDepsContext(ctx, []string{"service", "run"}, &runOut, &runErr, nil, localCommandDeps{Source: src})
+	}()
+	waitForServiceSocket(t, src)
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := executeWithFactoryAndDeps([]string{"rag", "index", "--repo", "fixture-a", "--detach", "--format", "json"}, &out, &errOut, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("rag index code=%d stderr=%q", code, errOut.String())
+	}
+	var job servicectl.Job
+	if err := json.Unmarshal(out.Bytes(), &job); err != nil {
+		t.Fatalf("invalid job json: %v\n%s", err, out.String())
+	}
+	if job.Type != servicectl.RAGIndexJobType || job.RepoID != "fixture-a" {
+		t.Fatalf("job=%#v", job)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var jobOut bytes.Buffer
+		var jobErr bytes.Buffer
+		code = executeWithFactoryAndDeps([]string{"service", "job", job.ID, "--format", "json"}, &jobOut, &jobErr, nil, localCommandDeps{Source: src})
+		if code != 0 {
+			t.Fatalf("service job code=%d stderr=%q", code, jobErr.String())
+		}
+		if err := json.Unmarshal(jobOut.Bytes(), &job); err != nil {
+			t.Fatalf("invalid job json: %v\n%s", err, jobOut.String())
+		}
+		if job.Status == servicectl.JobStatusSucceeded {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("rag index job did not finish: %#v", job)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if job.Completed != 1 || job.Steps != 1 {
+		t.Fatalf("completed job=%#v", job)
+	}
+	cancel()
+	if code := <-runCode; code != 0 {
+		t.Fatalf("service run code=%d", code)
+	}
+}
+
 func shortCLITestRoot(t *testing.T, pattern string) (string, error) {
 	t.Helper()
 	cwd, err := os.Getwd()

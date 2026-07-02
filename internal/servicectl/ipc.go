@@ -145,6 +145,14 @@ func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawM
 			}
 		}
 		return s.Jobs.StartFake(context.Background(), req)
+	case "Jobs.StartRAGIndex":
+		var req StartRAGIndexJobRequest
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &req); err != nil {
+				return nil, err
+			}
+		}
+		return s.Jobs.StartRAGIndex(context.Background(), s.Manager, req)
 	case "Jobs.List":
 		return JobListResult{Jobs: s.Jobs.List()}, nil
 	case "Jobs.Get":
