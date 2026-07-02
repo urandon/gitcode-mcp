@@ -370,6 +370,14 @@ func RenderRedactedEffectiveConfig(eff EffectiveConfig, status CredentialStatus)
 	if eff.RepoLocalConfigPath != "" {
 		fmt.Fprintf(&b, "repo_local_config_path: %s\n", eff.RepoLocalConfigPath)
 	}
+	fmt.Fprintf(&b, "service_runtime_dir: %s\n", eff.Config.Service.RuntimeDir)
+	fmt.Fprintf(&b, "rag_default_profile: %s\n", eff.Config.RAG.DefaultProfile)
+	fmt.Fprintf(&b, "rag_model_store_path: %s\n", eff.Config.RAG.ModelStorePath)
+	providerName := activeRAGProviderName(eff.Config)
+	fmt.Fprintf(&b, "rag_active_provider: %s\n", providerName)
+	if provider, ok := eff.Config.RAG.Providers[providerName]; ok {
+		fmt.Fprintf(&b, "rag_provider_endpoint: %s\n", provider.Endpoint)
+	}
 	fmt.Fprintf(&b, "gitcode_base_url_source: %s\n", eff.FieldSources["gitcode_base_url"])
 	fmt.Fprintf(&b, "credential_store_mode: %s\n", eff.CredentialPolicy.Store)
 	fmt.Fprintf(&b, "credential_keyring_service: %s\n", eff.CredentialPolicy.KeyringService)
@@ -490,23 +498,26 @@ func readLocatedConfig(src Source, loc ConfigLocation) (fileConfig, CredentialCo
 	return parseYAMLConfig(data, loc.Path)
 }
 
+type yamlSection struct {
+	indent int
+	name   string
+}
+
 func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, error) {
 	var cfg fileConfig
 	var cred CredentialConfig
-	section := ""
+	var stack []yamlSection
 	for _, raw := range strings.Split(string(data), "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		indent := len(raw) - len(strings.TrimLeft(raw, " "))
+		for len(stack) > 0 && indent <= stack[len(stack)-1].indent {
+			stack = stack[:len(stack)-1]
+		}
 		if strings.HasSuffix(line, ":") {
-			name := strings.TrimSuffix(line, ":")
-			indent := len(raw) - len(strings.TrimLeft(raw, " "))
-			if indent > 0 && section == "mcp" && name == "tools" {
-				section = "mcp.tools"
-			} else {
-				section = name
-			}
+			stack = append(stack, yamlSection{indent: indent, name: strings.TrimSpace(strings.TrimSuffix(line, ":"))})
 			continue
 		}
 		parts := strings.SplitN(line, ":", 2)
@@ -515,6 +526,7 @@ func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, er
 		}
 		key := strings.TrimSpace(parts[0])
 		value := strings.Trim(strings.TrimSpace(parts[1]), "\"")
+		section := yamlSectionPath(stack)
 		if section == "mcp.tools" && key == "access" {
 			cfg.MCPToolAccess = &value
 			continue
@@ -533,6 +545,15 @@ func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, er
 		}
 		if section == "credential" && key == "keyring_account" {
 			cred.KeyringAccount = value
+			continue
+		}
+		if err := setYAMLRAGValue(&cfg, section, key, value); err != nil {
+			return fileConfig{}, CredentialConfig{}, err
+		}
+		if isRAGYAMLSection(section) || section == "service" {
+			continue
+		}
+		if section != "" {
 			continue
 		}
 		switch key {
@@ -577,21 +598,229 @@ func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, er
 	return cfg, cred, nil
 }
 
+func yamlSectionPath(stack []yamlSection) string {
+	names := make([]string, 0, len(stack))
+	for _, section := range stack {
+		names = append(names, section.name)
+	}
+	return strings.Join(names, ".")
+}
+
+func setYAMLRAGValue(cfg *fileConfig, section, key, value string) error {
+	switch {
+	case section == "service":
+		if cfg.Service == nil {
+			cfg.Service = &serviceFileConfig{}
+		}
+		if key == "runtime_dir" {
+			cfg.Service.RuntimeDir = &value
+		}
+	case section == "rag":
+		rag := ensureRAGFile(cfg)
+		switch key {
+		case "model_store_path":
+			rag.ModelStorePath = &value
+		case "default_profile":
+			rag.DefaultProfile = &value
+		}
+	case section == "rag.indexing":
+		rag := ensureRAGFile(cfg)
+		if rag.Indexing == nil {
+			rag.Indexing = &ragIndexingFileConfig{}
+		}
+		n, err := parseOptionalIntYAML(section, key, value)
+		if err != nil {
+			return err
+		}
+		switch key {
+		case "profile":
+			rag.Indexing.Profile = &value
+		case "chunk_tokens":
+			rag.Indexing.ChunkTokens = n
+		case "overlap":
+			rag.Indexing.Overlap = n
+		case "batch_size":
+			rag.Indexing.BatchSize = n
+		}
+	case section == "rag.search":
+		rag := ensureRAGFile(cfg)
+		if rag.Search == nil {
+			rag.Search = &ragSearchFileConfig{}
+		}
+		switch key {
+		case "profile":
+			rag.Search.Profile = &value
+		case "top_k":
+			n, err := parseOptionalIntYAML(section, key, value)
+			if err != nil {
+				return err
+			}
+			rag.Search.TopK = n
+		case "hybrid":
+			v, err := parseBoolYAML(section, key, value)
+			if err != nil {
+				return err
+			}
+			rag.Search.Hybrid = &v
+		}
+	case strings.HasPrefix(section, "rag.providers."):
+		return setYAMLRAGProviderValue(cfg, section, key, value)
+	case strings.HasPrefix(section, "rag.profiles."):
+		return setYAMLRAGProfileValue(cfg, section, key, value)
+	}
+	return nil
+}
+
+func setYAMLRAGProviderValue(cfg *fileConfig, section, key, value string) error {
+	parts := strings.Split(section, ".")
+	if len(parts) < 3 {
+		return nil
+	}
+	rag := ensureRAGFile(cfg)
+	if rag.Providers == nil {
+		rag.Providers = map[string]ragProviderFileConfig{}
+	}
+	name := parts[2]
+	provider := rag.Providers[name]
+	if len(parts) == 3 {
+		switch key {
+		case "type":
+			provider.Type = &value
+		case "endpoint":
+			provider.Endpoint = &value
+		case "executable":
+			provider.Executable = &value
+		case "autostart":
+			v, err := parseBoolYAML(section, key, value)
+			if err != nil {
+				return err
+			}
+			provider.Autostart = &v
+		case "install_hints":
+			provider.InstallHints = splitYAMLList(value)
+		case "timeout":
+			provider.Timeout = &value
+		}
+	} else if len(parts) == 4 && parts[3] == "env" {
+		if provider.Env == nil {
+			provider.Env = map[string]string{}
+		}
+		provider.Env[key] = value
+	} else if len(parts) == 4 && parts[3] == "model_storage" {
+		if provider.ModelStorage == nil {
+			provider.ModelStorage = &ragModelStorageFileConfig{}
+		}
+		switch key {
+		case "mode":
+			provider.ModelStorage.Mode = &value
+		case "path":
+			provider.ModelStorage.Path = &value
+		case "env":
+			provider.ModelStorage.Env = &value
+		}
+	}
+	rag.Providers[name] = provider
+	return nil
+}
+
+func setYAMLRAGProfileValue(cfg *fileConfig, section, key, value string) error {
+	parts := strings.Split(section, ".")
+	if len(parts) != 3 {
+		return nil
+	}
+	rag := ensureRAGFile(cfg)
+	if rag.Profiles == nil {
+		rag.Profiles = map[string]ragProfileFileConfig{}
+	}
+	name := parts[2]
+	profile := rag.Profiles[name]
+	n, err := parseOptionalIntYAML(section, key, value)
+	if err != nil {
+		return err
+	}
+	switch key {
+	case "provider":
+		profile.Provider = &value
+	case "model":
+		profile.Model = &value
+	case "dimensions":
+		profile.Dimensions = n
+	case "max_input_tokens":
+		profile.MaxInputTokens = n
+	case "batch_size":
+		profile.BatchSize = n
+	}
+	rag.Profiles[name] = profile
+	return nil
+}
+
+func ensureRAGFile(cfg *fileConfig) *ragFileConfig {
+	if cfg.RAG == nil {
+		cfg.RAG = &ragFileConfig{}
+	}
+	return cfg.RAG
+}
+
+func isRAGYAMLSection(section string) bool {
+	return section == "rag" || strings.HasPrefix(section, "rag.")
+}
+
+func parseOptionalIntYAML(section, key, value string) (*int, error) {
+	switch key {
+	case "chunk_tokens", "overlap", "batch_size", "top_k", "dimensions", "max_input_tokens":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return nil, fmt.Errorf("config: invalid %s.%s %q: %w", section, key, value, err)
+		}
+		return &n, nil
+	default:
+		return nil, nil
+	}
+}
+
+func parseBoolYAML(section, key, value string) (bool, error) {
+	v, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("config: invalid %s.%s %q: %w", section, key, value, err)
+	}
+	return v, nil
+}
+
+func splitYAMLList(value string) []string {
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ';' || r == '|'
+	})
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 func defaultFieldSources() map[string]string {
 	return map[string]string{
-		"cache_path":                 "default",
-		"lock_path":                  "default",
-		"cache_mode":                 "default",
-		"gitcode_base_url":           "default",
-		"default_timeout":            "default",
-		"max_response_size":          "default",
-		"max_retries":                "default",
-		"rate_limit_rps":             "default",
-		"rate_limit_burst":           "default",
-		"format":                     "default",
-		"mcp_tool_access":            "default",
-		"credential.keyring_service": "default",
-		"credential.keyring_account": "default",
+		"cache_path":                    "default",
+		"lock_path":                     "default",
+		"cache_mode":                    "default",
+		"gitcode_base_url":              "default",
+		"default_timeout":               "default",
+		"max_response_size":             "default",
+		"max_retries":                   "default",
+		"rate_limit_rps":                "default",
+		"rate_limit_burst":              "default",
+		"format":                        "default",
+		"mcp_tool_access":               "default",
+		"credential.keyring_service":    "default",
+		"credential.keyring_account":    "default",
+		"service.runtime_dir":           "default",
+		"rag.model_store_path":          "default",
+		"rag.default_profile":           "default",
+		"rag.providers.ollama.endpoint": "default",
+		"rag.indexing.profile":          "default",
+		"rag.search.profile":            "default",
 	}
 }
 
@@ -632,6 +861,106 @@ func applyFileSources(sources map[string]string, file fileConfig, source string)
 	if file.MCPToolAccess != nil || (file.MCP != nil && strings.TrimSpace(file.MCP.Tools.Access) != "") {
 		sources["mcp_tool_access"] = source
 	}
+	applyServiceFileSources(sources, file.Service, source)
+	applyRAGFileSources(sources, file.RAG, source)
+}
+
+func applyServiceFileSources(sources map[string]string, file *serviceFileConfig, source string) {
+	if file == nil {
+		return
+	}
+	if file.RuntimeDir != nil {
+		sources["service.runtime_dir"] = source
+	}
+}
+
+func applyRAGFileSources(sources map[string]string, file *ragFileConfig, source string) {
+	if file == nil {
+		return
+	}
+	if file.ModelStorePath != nil {
+		sources["rag.model_store_path"] = source
+	}
+	if file.DefaultProfile != nil {
+		sources["rag.default_profile"] = source
+		sources["rag.indexing.profile"] = source
+		sources["rag.search.profile"] = source
+	}
+	for name, provider := range file.Providers {
+		prefix := "rag.providers." + name + "."
+		if provider.Type != nil {
+			sources[prefix+"type"] = source
+		}
+		if provider.Endpoint != nil {
+			sources[prefix+"endpoint"] = source
+		}
+		if provider.Executable != nil {
+			sources[prefix+"executable"] = source
+		}
+		if provider.Autostart != nil {
+			sources[prefix+"autostart"] = source
+		}
+		if provider.Timeout != nil {
+			sources[prefix+"timeout"] = source
+		}
+		if provider.ModelStorage != nil {
+			if provider.ModelStorage.Mode != nil {
+				sources[prefix+"model_storage.mode"] = source
+			}
+			if provider.ModelStorage.Path != nil {
+				sources[prefix+"model_storage.path"] = source
+			}
+			if provider.ModelStorage.Env != nil {
+				sources[prefix+"model_storage.env"] = source
+			}
+		}
+		for key := range provider.Env {
+			sources[prefix+"env."+key] = source
+		}
+	}
+	for name, profile := range file.Profiles {
+		prefix := "rag.profiles." + name + "."
+		if profile.Provider != nil {
+			sources[prefix+"provider"] = source
+		}
+		if profile.Model != nil {
+			sources[prefix+"model"] = source
+		}
+		if profile.Dimensions != nil {
+			sources[prefix+"dimensions"] = source
+		}
+		if profile.MaxInputTokens != nil {
+			sources[prefix+"max_input_tokens"] = source
+		}
+		if profile.BatchSize != nil {
+			sources[prefix+"batch_size"] = source
+		}
+	}
+	if file.Indexing != nil {
+		if file.Indexing.Profile != nil {
+			sources["rag.indexing.profile"] = source
+		}
+		if file.Indexing.ChunkTokens != nil {
+			sources["rag.indexing.chunk_tokens"] = source
+		}
+		if file.Indexing.Overlap != nil {
+			sources["rag.indexing.overlap"] = source
+		}
+		if file.Indexing.BatchSize != nil {
+			sources["rag.indexing.batch_size"] = source
+		}
+	}
+	if file.Search != nil {
+		if file.Search.Profile != nil {
+			sources["rag.search.profile"] = source
+		}
+		if file.Search.TopK != nil {
+			sources["rag.search.top_k"] = source
+		}
+		if file.Search.Hybrid != nil {
+			sources["rag.search.hybrid"] = source
+		}
+	}
 }
 
 func applyRepoLocalCache(src Source, eff *EffectiveConfig) error {
@@ -664,6 +993,9 @@ func applyRepoLocalCache(src Source, eff *EffectiveConfig) error {
 		mode = repoMode
 		modeSource = "repo-local:" + repoConfigPath
 	}
+	if err := applyRepoLocalRAG(root, repoConfigPath, repoFile, eff); err != nil {
+		return err
+	}
 	eff.Config.CacheMode = mode
 	eff.FieldSources["cache_mode"] = modeSource
 	if mode != CacheModeRepoLocal || root == "" || eff.CachePathSource != "default" {
@@ -676,6 +1008,64 @@ func applyRepoLocalCache(src Source, eff *EffectiveConfig) error {
 	eff.FieldSources["cache_path"] = modeSource
 	eff.FieldSources["lock_path"] = modeSource
 	return nil
+}
+
+func applyRepoLocalRAG(root, repoConfigPath string, repoFile fileConfig, eff *EffectiveConfig) error {
+	if repoConfigPath == "" || repoFile.RAG == nil && repoFile.Service == nil {
+		return nil
+	}
+	if err := validateRepoLocalRuntimeStorage(root, repoConfigPath, repoFile); err != nil {
+		return err
+	}
+	var err error
+	eff.Config, err = mergeRAGFile(eff.Config, repoFile.RAG)
+	if err != nil {
+		return err
+	}
+	applyRAGFileSources(eff.FieldSources, repoFile.RAG, "repo-local:"+repoConfigPath)
+	return nil
+}
+
+func validateRepoLocalRuntimeStorage(root, repoConfigPath string, file fileConfig) error {
+	if file.Service != nil && file.Service.RuntimeDir != nil {
+		return fmt.Errorf("config: repo-local config %s cannot set service.runtime_dir; configure service runtime globally or with %s", repoConfigPath, EnvServiceRuntimeDir)
+	}
+	if file.RAG != nil && file.RAG.ModelStorePath != nil {
+		return fmt.Errorf("config: repo-local config %s cannot set rag.model_store_path; configure model storage globally or with %s", repoConfigPath, EnvRAGModelStore)
+	}
+	if file.RAG != nil {
+		for name, provider := range file.RAG.Providers {
+			if provider.ModelStorage != nil && provider.ModelStorage.Path != nil {
+				return fmt.Errorf("config: repo-local config %s cannot set rag.providers.%s.model_storage.path; configure provider model storage globally", repoConfigPath, name)
+			}
+			if provider.Env != nil {
+				for key, value := range provider.Env {
+					if strings.TrimSpace(key) == "OLLAMA_MODELS" && pathUnsafeForRepoLocal(root, value) {
+						return fmt.Errorf("config: repo-local config %s cannot set rag.providers.%s.env.%s to a repo-local path; configure provider model storage globally", repoConfigPath, name, key)
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func pathUnsafeForRepoLocal(root, path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	if !filepath.IsAbs(path) {
+		return true
+	}
+	if root == "" {
+		return false
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != "..")
 }
 
 func discoverRepoLocalConfig(src Source) (string, string, fileConfig, error) {
@@ -764,6 +1154,30 @@ func applyEnvOverrides(src Source, eff *EffectiveConfig) error {
 	if account := strings.TrimSpace(src.Env(EnvKeyringAccount)); account != "" {
 		eff.CredentialPolicy.KeyringAccount = account
 		eff.FieldSources["credential.keyring_account"] = "env:" + EnvKeyringAccount
+	}
+	if runtimeDir := strings.TrimSpace(src.Env(EnvServiceRuntimeDir)); runtimeDir != "" {
+		eff.Config.Service.RuntimeDir = runtimeDir
+		eff.FieldSources["service.runtime_dir"] = "env:" + EnvServiceRuntimeDir
+	}
+	if profile := strings.TrimSpace(src.Env(EnvRAGProfile)); profile != "" {
+		setDefaultRAGProfile(&eff.Config, profile)
+		eff.FieldSources["rag.default_profile"] = "env:" + EnvRAGProfile
+		eff.FieldSources["rag.indexing.profile"] = "env:" + EnvRAGProfile
+		eff.FieldSources["rag.search.profile"] = "env:" + EnvRAGProfile
+	}
+	if modelStore := strings.TrimSpace(src.Env(EnvRAGModelStore)); modelStore != "" {
+		eff.Config.RAG.ModelStorePath = modelStore
+		eff.FieldSources["rag.model_store_path"] = "env:" + EnvRAGModelStore
+	}
+	if endpoint := strings.TrimSpace(src.Env(EnvRAGProviderEndpoint)); endpoint != "" {
+		providerName := activeRAGProviderName(eff.Config)
+		if eff.Config.RAG.Providers == nil {
+			eff.Config.RAG.Providers = map[string]RAGProviderConfig{}
+		}
+		provider := eff.Config.RAG.Providers[providerName]
+		provider.Endpoint = endpoint
+		eff.Config.RAG.Providers[providerName] = provider
+		eff.FieldSources["rag.providers."+providerName+".endpoint"] = "env:" + EnvRAGProviderEndpoint
 	}
 	return nil
 }
@@ -872,5 +1286,31 @@ func emptyAsNone(value string) string {
 }
 
 func defaultYAMLConfig() string {
-	return "gitcode_base_url: https://api.gitcode.com/api/v5\ncredential:\n  store: auto\n"
+	return strings.Join([]string{
+		"gitcode_base_url: https://api.gitcode.com/api/v5",
+		"credential:",
+		"  store: auto",
+		"service:",
+		"  # Override with GITCODE_MCP_SERVICE_RUNTIME_DIR when the daemon runtime should live elsewhere.",
+		"  # runtime_dir: /Volumes/fast/gitcode-mcp/runtime",
+		"rag:",
+		"  # Override with GITCODE_MCP_RAG_MODEL_STORE for gitcode-mcp-managed model storage.",
+		"  # model_store_path: /Volumes/models/gitcode-mcp",
+		"  default_profile: qwen3-ollama-0_6b-512",
+		"  providers:",
+		"    ollama:",
+		"      endpoint: http://127.0.0.1:11434",
+		"      executable: ollama",
+		"      autostart: true",
+		"      model_storage:",
+		"        mode: provider-owned",
+		"        env: OLLAMA_MODELS",
+		"  profiles:",
+		"    qwen3-ollama-0_6b-512:",
+		"      provider: ollama",
+		"      model: qwen3-embedding:0.6b",
+		"      dimensions: 512",
+		"      max_input_tokens: 512",
+		"",
+	}, "\n")
 }
