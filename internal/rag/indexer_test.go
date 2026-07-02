@@ -19,13 +19,13 @@ func TestRAGIndexerEmbedsMissingAndSkipsFreshChunks(t *testing.T) {
 		vectorTestChunk("chunk-c", "ISSUE-2", "hash-c"),
 	})
 	provider := mustFakeIndexerProvider(t, 2)
-	namespace, err := EnsureEmbeddingNamespace(ctx, store, provider, NamespaceRequest{RepoID: "fixture-a", ChunkPolicyID: "heading-v1", LanguagePolicyID: DefaultLanguagePolicyID, DocumentInstructionID: DefaultDocumentInstructionID, QueryInstructionID: DefaultQueryInstructionID})
+	namespace, err := EnsureEmbeddingNamespace(ctx, store, provider, NamespaceRequest{RepoID: "fixture-a", ChunkPolicyID: DefaultChunkPolicyID, LanguagePolicyID: DefaultLanguagePolicyID, DocumentInstructionID: DefaultDocumentInstructionID, QueryInstructionID: DefaultQueryInstructionID})
 	if err != nil {
 		t.Fatalf("EnsureEmbeddingNamespace returned error: %v", err)
 	}
 	mustUpsertVectorEmbedding(t, ctx, store, namespace.ID, "chunk-a", []float32{1, 0})
 
-	result, err := NewRAGIndexer(store, provider, RAGIndexerOptions{}).Run(ctx, IndexRequest{RepoID: "fixture-a", ChunkPolicyID: "heading-v1", BatchSize: 2})
+	result, err := NewRAGIndexer(store, provider, RAGIndexerOptions{}).Run(ctx, IndexRequest{RepoID: "fixture-a", ChunkPolicyID: DefaultChunkPolicyID, BatchSize: 2})
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -57,14 +57,14 @@ func TestRAGIndexerResumesStaleCoverage(t *testing.T) {
 		vectorTestChunk("chunk-b", "ISSUE-1", "hash-b"),
 	})
 	provider := mustFakeIndexerProvider(t, 2)
-	namespace, err := EnsureEmbeddingNamespace(ctx, store, provider, NamespaceRequest{RepoID: "fixture-a", ChunkPolicyID: "heading-v1", LanguagePolicyID: DefaultLanguagePolicyID, DocumentInstructionID: DefaultDocumentInstructionID, QueryInstructionID: DefaultQueryInstructionID})
+	namespace, err := EnsureEmbeddingNamespace(ctx, store, provider, NamespaceRequest{RepoID: "fixture-a", ChunkPolicyID: DefaultChunkPolicyID, LanguagePolicyID: DefaultLanguagePolicyID, DocumentInstructionID: DefaultDocumentInstructionID, QueryInstructionID: DefaultQueryInstructionID})
 	if err != nil {
 		t.Fatalf("EnsureEmbeddingNamespace returned error: %v", err)
 	}
 	mustUpsertVectorEmbeddingWithHash(t, ctx, store, namespace.ID, "chunk-a", "hash-old", []float32{1, 0})
 	mustUpsertVectorEmbedding(t, ctx, store, namespace.ID, "chunk-b", []float32{0, 1})
 
-	result, err := NewRAGIndexer(store, provider, RAGIndexerOptions{}).Run(ctx, IndexRequest{RepoID: "fixture-a", ChunkPolicyID: "heading-v1", BatchSize: 1})
+	result, err := NewRAGIndexer(store, provider, RAGIndexerOptions{}).Run(ctx, IndexRequest{RepoID: "fixture-a", ChunkPolicyID: DefaultChunkPolicyID, BatchSize: 1})
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -87,12 +87,46 @@ func TestRAGIndexerRecordsProviderFailure(t *testing.T) {
 	mustUpsertVectorChunks(t, ctx, store, "fixture-a", []cache.Chunk{vectorTestChunk("chunk-a", "ISSUE-1", "hash-a")})
 	provider := &failingProvider{profile: fakeIndexerProfile(2), err: providerError(ProviderFailureUnavailable, "provider down", errors.New("dial failed"))}
 
-	result, err := NewRAGIndexer(store, provider, RAGIndexerOptions{}).Run(ctx, IndexRequest{RepoID: "fixture-a", ChunkPolicyID: "heading-v1"})
+	result, err := NewRAGIndexer(store, provider, RAGIndexerOptions{}).Run(ctx, IndexRequest{RepoID: "fixture-a", ChunkPolicyID: DefaultChunkPolicyID})
 	if err == nil {
 		t.Fatalf("Run returned nil error")
 	}
 	if result.Status != RAGIndexStatusFailed || result.FailedChunks != 1 || result.ErrorClass != ProviderFailureUnavailable {
 		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
+func TestRAGIndexerFallsBackAndContinuesPastBadChunk(t *testing.T) {
+	ctx := context.Background()
+	store := newVectorTestStore(t, ctx)
+	defer store.Close()
+	mustUpsertVectorChunks(t, ctx, store, "fixture-a", []cache.Chunk{
+		vectorTestChunk("chunk-a", "ISSUE-1", "hash-a"),
+		vectorTestChunk("chunk-bad", "ISSUE-1", "hash-bad"),
+		vectorTestChunk("chunk-c", "ISSUE-1", "hash-c"),
+	})
+	provider := &badInputProvider{base: mustFakeIndexerProvider(t, 2), badInput: "chunk-bad"}
+
+	result, err := NewRAGIndexer(store, provider, RAGIndexerOptions{}).Run(ctx, IndexRequest{RepoID: "fixture-a", ChunkPolicyID: DefaultChunkPolicyID, BatchSize: 3})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if result.Status != RAGIndexStatusSucceeded || result.EmbeddedChunks != 2 || result.FailedChunks != 1 {
+		t.Fatalf("result=%#v", result)
+	}
+	if result.Message != "rag index finished with 1 failed chunks" {
+		t.Fatalf("message=%q", result.Message)
+	}
+	namespace, err := EnsureEmbeddingNamespace(ctx, store, provider, NamespaceRequest{RepoID: "fixture-a", ChunkPolicyID: DefaultChunkPolicyID, LanguagePolicyID: DefaultLanguagePolicyID, DocumentInstructionID: DefaultDocumentInstructionID, QueryInstructionID: DefaultQueryInstructionID})
+	if err != nil {
+		t.Fatalf("EnsureEmbeddingNamespace returned error: %v", err)
+	}
+	embeddings, err := store.ListChunkEmbeddings(ctx, cache.ChunkEmbeddingFilter{RepoID: "fixture-a", NamespaceID: namespace.ID})
+	if err != nil {
+		t.Fatalf("ListChunkEmbeddings returned error: %v", err)
+	}
+	if len(embeddings) != 2 {
+		t.Fatalf("embeddings=%d, want 2", len(embeddings))
 	}
 }
 
@@ -138,4 +172,28 @@ func (p *failingProvider) NamespaceIdentity(ctx context.Context, req NamespaceRe
 		return cache.EmbeddingNamespaceIdentity{}, err
 	}
 	return namespaceIdentity(p.profile, info, req)
+}
+
+type badInputProvider struct {
+	base     *FakeProvider
+	badInput string
+}
+
+func (p *badInputProvider) Profile() EmbeddingProviderProfile { return p.base.Profile() }
+
+func (p *badInputProvider) ModelInfo(ctx context.Context) (EmbeddingModelInfo, error) {
+	return p.base.ModelInfo(ctx)
+}
+
+func (p *badInputProvider) Embed(ctx context.Context, req EmbedRequest) (EmbedResponse, error) {
+	for _, input := range req.Inputs {
+		if input == p.badInput {
+			return EmbedResponse{}, providerError(ProviderFailureUnavailable, "provider down", errors.New("bad input"))
+		}
+	}
+	return p.base.Embed(ctx, req)
+}
+
+func (p *badInputProvider) NamespaceIdentity(ctx context.Context, req NamespaceRequest) (cache.EmbeddingNamespaceIdentity, error) {
+	return p.base.NamespaceIdentity(ctx, req)
 }

@@ -134,7 +134,7 @@ func Status(ctx context.Context, store statusStore, provider EmbeddingProvider, 
 		ActiveJob: req.ActiveJob,
 		Service:   req.Service,
 	}
-	req.ChunkPolicyID = firstNonEmpty(req.ChunkPolicyID, "heading-v1")
+	req.ChunkPolicyID = firstNonEmpty(req.ChunkPolicyID, DefaultChunkPolicyID)
 	req.LanguagePolicyID = firstNonEmpty(req.LanguagePolicyID, DefaultLanguagePolicyID)
 	req.DocumentInstructionID = firstNonEmpty(req.DocumentInstructionID, DefaultDocumentInstructionID)
 	req.QueryInstructionID = firstNonEmpty(req.QueryInstructionID, DefaultQueryInstructionID)
@@ -233,10 +233,10 @@ func deriveStatus(result StatusResult) string {
 	if result.Coverage.TotalChunks == 0 {
 		return "empty"
 	}
-	if result.Coverage.FailedChunks > 0 {
+	if result.LastRun != nil && result.LastRun.Status == RAGIndexStatusFailed {
 		return "failed"
 	}
-	if result.Coverage.MissingChunks > 0 || result.Coverage.StaleChunks > 0 {
+	if result.Coverage.MissingChunks > 0 || result.Coverage.StaleChunks > 0 || result.Coverage.FailedChunks > 0 {
 		return "partial"
 	}
 	return "ready"

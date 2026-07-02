@@ -43,7 +43,7 @@ credential:
   keyring_account: token
 rag:
   model_store_path: /path/to/models/gitcode-mcp
-  default_profile: qwen3-ollama-0_6b-512
+  default_profile: qwen3-ollama-0_6b-1024
   providers:
     ollama:
       endpoint: http://127.0.0.1:11434
@@ -56,19 +56,19 @@ rag:
         mode: provider-owned
         env: OLLAMA_MODELS
   profiles:
-    qwen3-ollama-0_6b-512:
+    qwen3-ollama-0_6b-1024:
       provider: ollama
       model: qwen3-embedding:0.6b
-      dimensions: 512
+      dimensions: 1024
       max_input_tokens: 512
       batch_size: 16
   indexing:
-    profile: qwen3-ollama-0_6b-512
+    profile: qwen3-ollama-0_6b-1024
     chunk_tokens: 512
     overlap: 64
     batch_size: 16
   search:
-    profile: qwen3-ollama-0_6b-512
+    profile: qwen3-ollama-0_6b-1024
     top_k: 8
     hybrid: true
 ```
@@ -89,7 +89,7 @@ rag:
 | `credential.keyring_service` | string | `gitcode-mcp` | System keyring service name used when `credential.store` is `auto` or `keyring`. Override it to isolate credentials for different agents or profiles. |
 | `credential.keyring_account` | string | `token` | System keyring account/user name used when `credential.store` is `auto` or `keyring`. Override it to isolate credentials for different agents or profiles. |
 | `rag.model_store_path` | string | `<cache-dir>/gitcode-mcp/models` | Global gitcode-mcp RAG model storage root. This is machine-level state and cannot be set from repo-local config. |
-| `rag.default_profile` | string | `qwen3-ollama-0_6b-512` | Default embedding/search profile. |
+| `rag.default_profile` | string | `qwen3-ollama-0_6b-1024` | Default embedding/search profile. |
 | `rag.providers.<name>.endpoint` | string | `http://127.0.0.1:11434` for `ollama` | Provider API endpoint. |
 | `rag.providers.<name>.executable` | string | `ollama` for `ollama` | Provider executable used by managed startup. |
 | `rag.providers.<name>.startup` | string | `managed` | Provider startup mode. Empty and `managed` allow `rag setup` to autostart the provider when `autostart` is true. |
@@ -97,9 +97,9 @@ rag:
 | `rag.providers.<name>.env` | map | empty | Environment variables passed to managed provider startup, such as `OLLAMA_MODELS`. |
 | `rag.providers.<name>.model_storage.env` | string | `OLLAMA_MODELS` for `ollama` | Provider-owned model path environment variable. |
 | `rag.profiles.<name>.model` | string | `qwen3-embedding:0.6b` | Embedding model id. |
-| `rag.profiles.<name>.dimensions` | int | `512` | Expected embedding dimensions; mismatches are provider failures. |
-| `rag.indexing.*` | mixed | profile `qwen3-ollama-0_6b-512`, chunks `512`, overlap `64`, batch `16` | Indexing profile and chunking defaults. |
-| `rag.search.*` | mixed | profile `qwen3-ollama-0_6b-512`, top_k `8`, hybrid `true` | RAG search defaults. |
+| `rag.profiles.<name>.dimensions` | int | `1024` | Expected embedding dimensions; mismatches are provider failures. |
+| `rag.indexing.*` | mixed | profile `qwen3-ollama-0_6b-1024`, chunks `512`, overlap `64`, batch `16` | Indexing profile and chunking defaults. |
+| `rag.search.*` | mixed | profile `qwen3-ollama-0_6b-1024`, top_k `8`, hybrid `true` | RAG search defaults. |
 
 Environment overrides:
 

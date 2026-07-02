@@ -152,7 +152,7 @@ func mustUpsertVectorNamespace(t *testing.T, ctx context.Context, store *cache.S
 			Normalization:         DefaultEmbeddingNormalization,
 			DocumentInstructionID: DefaultDocumentInstructionID,
 			QueryInstructionID:    DefaultQueryInstructionID,
-			ChunkPolicyID:         "heading-v1",
+			ChunkPolicyID:         DefaultChunkPolicyID,
 			LanguagePolicyID:      DefaultLanguagePolicyID,
 			ConfigHash:            "config-hash-" + revision,
 		},
@@ -213,7 +213,7 @@ func vectorTestChunk(id, sourceID, contentHash string) cache.Chunk {
 		LineEnd:        1,
 		Text:           id,
 		NormalizedText: id,
-		Policy:         "heading-v1",
+		Policy:         DefaultChunkPolicyID,
 	}
 }
 

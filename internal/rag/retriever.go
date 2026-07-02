@@ -126,7 +126,7 @@ func (r *RAGRetriever) Search(ctx context.Context, req SearchRequest) (SearchRes
 	if strings.TrimSpace(req.Query) == "" {
 		return SearchResult{}, fmt.Errorf("rag search: query is required")
 	}
-	req.ChunkPolicyID = firstNonEmpty(req.ChunkPolicyID, "heading-v1")
+	req.ChunkPolicyID = firstNonEmpty(req.ChunkPolicyID, DefaultChunkPolicyID)
 	req.LanguagePolicyID = firstNonEmpty(req.LanguagePolicyID, DefaultLanguagePolicyID)
 	req.DocumentInstructionID = firstNonEmpty(req.DocumentInstructionID, DefaultDocumentInstructionID)
 	req.QueryInstructionID = firstNonEmpty(req.QueryInstructionID, DefaultQueryInstructionID)
