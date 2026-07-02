@@ -542,21 +542,13 @@ func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind
 
 func newMCPRAGStatusProvider(store cache.Store, deps StartupDeps) mcp.RAGStatusProvider {
 	return func(ctx context.Context, req rag.StatusRequest) (rag.StatusResult, error) {
-		provider, err := rag.NewEmbeddingProviderFromConfig(deps.Config, req.ProfileID, rag.ProviderOptions{})
-		if err != nil {
-			return rag.StatusResult{}, err
-		}
-		return rag.Status(ctx, store, provider, req)
+		return rag.NewOperations(store, deps.Config, rag.OperationsOptions{}).Status(ctx, req)
 	}
 }
 
 func newMCPRAGSearchProvider(store cache.Store, deps StartupDeps) mcp.RAGSearchProvider {
 	return func(ctx context.Context, req rag.SearchRequest) (rag.SearchResult, error) {
-		provider, err := rag.NewEmbeddingProviderFromConfig(deps.Config, req.ProfileID, rag.ProviderOptions{})
-		if err != nil {
-			return rag.SearchResult{}, err
-		}
-		return rag.NewRAGRetriever(store, provider, rag.RAGRetrieverOptions{}).Search(ctx, req)
+		return rag.NewOperations(store, deps.Config, rag.OperationsOptions{}).Search(ctx, req)
 	}
 }
 

@@ -1021,6 +1021,32 @@ func TestMCPWriteCapabilitiesComeFromRegistry(t *testing.T) {
 	}
 }
 
+func TestMCPRAGCapabilitiesComeFromRegistry(t *testing.T) {
+	spy := &writeLifecycleSpyService{}
+	srv := NewWithToolAccess(io.Reader(strings.NewReader("")), io.Discard, io.Discard, spy, nil, ToolAccessWrite)
+	registry := srv.toolRegistry()
+	for _, cap := range capability.MCPRAGCapabilities() {
+		tool, ok := registry[cap.MCPName]
+		if !ok {
+			t.Fatalf("MCP registry missing enabled RAG capability %s (%s)", cap.ID, cap.MCPName)
+		}
+		if tool.definition.Description == "" || tool.definition.InputSchema.Type != "object" {
+			t.Fatalf("MCP RAG capability %s has incomplete tool definition: %#v", cap.ID, tool.definition)
+		}
+	}
+	for _, cap := range capability.RAGCapabilities() {
+		if cap.MCP.Enabled || cap.MCPName == "" {
+			continue
+		}
+		if !isUnsupportedCapabilityTool(cap.MCPName) {
+			t.Fatalf("MCP-disabled RAG capability %s (%s) should be unsupported", cap.ID, cap.MCPName)
+		}
+		if _, ok := registry[cap.MCPName]; ok {
+			t.Fatalf("MCP-disabled RAG capability %s (%s) should not be registered", cap.ID, cap.MCPName)
+		}
+	}
+}
+
 func TestMCPLifecycleTools(t *testing.T) {
 	store := populatedStore(t)
 	defer store.Close()

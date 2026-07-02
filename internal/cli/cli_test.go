@@ -64,6 +64,24 @@ func TestCLIWriteCapabilitiesComeFromRegistry(t *testing.T) {
 	}
 }
 
+func TestCLIRAGCapabilitiesComeFromRegistry(t *testing.T) {
+	known := map[string]bool{}
+	for _, command := range commands {
+		known[command] = true
+	}
+	for _, cap := range capability.RAGCapabilities() {
+		if !cap.CLI.Enabled {
+			if cap.CLI.DisabledReason == "" {
+				t.Fatalf("%s is CLI-disabled without a reason", cap.ID)
+			}
+			continue
+		}
+		if !known[cap.CLIName] {
+			t.Fatalf("CLI-enabled RAG capability %s missing command %q", cap.ID, cap.CLIName)
+		}
+	}
+}
+
 func TestRootHelpDoesNotAdvertiseGetIDFlag(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
