@@ -96,37 +96,33 @@ func TestRAGRetrieverMultilingualDeterministicFixtures(t *testing.T) {
 	ctx := context.Background()
 	store := newVectorTestStore(t, ctx)
 	defer store.Close()
+	fixture := loadMultilingualEvalFixture(t)
 	namespace := mustUpsertVectorNamespace(t, ctx, store, "fixture-a", "stub-revision")
-	mustUpsertVectorChunks(t, ctx, store, "fixture-a", []cache.Chunk{
-		vectorTextChunk("chunk-ru", "ISSUE-RU", "hash-ru", "лимитер защищает синхронизацию от rate limit"),
-		vectorTextChunk("chunk-zh", "ISSUE-ZH", "hash-zh", "同步进度需要显示速率限制状态"),
-		vectorTextChunk("chunk-en", "ISSUE-EN", "hash-en", "rag search returns cited context"),
-	})
-	mustUpsertVectorEmbedding(t, ctx, store, namespace.ID, "chunk-ru", []float32{1, 0})
-	mustUpsertVectorEmbedding(t, ctx, store, namespace.ID, "chunk-zh", []float32{0, 1})
-	mustUpsertVectorEmbedding(t, ctx, store, namespace.ID, "chunk-en", []float32{-1, 0})
-	provider := newStubSearchProvider(namespace.EmbeddingNamespaceIdentity, map[string][]float32{
-		"лимиты синка":  []float32{1, 0},
-		"速率限制":          []float32{0, 1},
-		"cited context": []float32{-1, 0},
-	})
+	var chunks []cache.Chunk
+	queryVectors := map[string][]float32{}
+	for _, tc := range fixture.Cases {
+		queryVectors[tc.Query] = tc.QueryVector
+		for _, chunk := range tc.Chunks {
+			cacheChunk := vectorTextChunk(chunk.ID, chunk.SourceID, "hash-"+chunk.ID, chunk.Text)
+			chunks = append(chunks, cacheChunk)
+		}
+	}
+	mustUpsertVectorChunks(t, ctx, store, "fixture-a", chunks)
+	for _, tc := range fixture.Cases {
+		for _, chunk := range tc.Chunks {
+			mustUpsertVectorEmbedding(t, ctx, store, namespace.ID, chunk.ID, chunk.Vector)
+		}
+	}
+	provider := newStubSearchProvider(namespace.EmbeddingNamespaceIdentity, queryVectors)
 
-	for _, tc := range []struct {
-		name      string
-		query     string
-		wantChunk string
-	}{
-		{name: "ru", query: "лимиты синка", wantChunk: "chunk-ru"},
-		{name: "zh", query: "速率限制", wantChunk: "chunk-zh"},
-		{name: "en", query: "cited context", wantChunk: "chunk-en"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			result, err := NewRAGRetriever(store, provider, RAGRetrieverOptions{Now: fixedSearchNow}).Search(ctx, SearchRequest{RepoID: "fixture-a", Query: tc.query, Limit: 1})
+	for _, tc := range fixture.Cases {
+		t.Run(tc.Language, func(t *testing.T) {
+			result, err := NewRAGRetriever(store, provider, RAGRetrieverOptions{Now: fixedSearchNow}).Search(ctx, SearchRequest{RepoID: "fixture-a", Query: tc.Query, Limit: 1})
 			if err != nil {
 				t.Fatalf("Search returned error: %v", err)
 			}
-			if len(result.Results) != 1 || result.Results[0].ChunkID != tc.wantChunk {
-				t.Fatalf("top result = %#v, want %s", result.Results, tc.wantChunk)
+			if len(result.Results) != 1 || result.Results[0].ChunkID != tc.ExpectedChunkID {
+				t.Fatalf("top result = %#v, want %s", result.Results, tc.ExpectedChunkID)
 			}
 		})
 	}

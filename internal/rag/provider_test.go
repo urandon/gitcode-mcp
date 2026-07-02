@@ -20,7 +20,14 @@ func TestFakeProviderDeterministicMultilingualEmbeddings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inputs := []string{"русский поиск", "中文 搜索", "English search"}
+	fixture := loadMultilingualEvalFixture(t)
+	var inputs []string
+	for _, tc := range fixture.Cases {
+		inputs = append(inputs, tc.Query)
+		for _, chunk := range tc.Chunks {
+			inputs = append(inputs, chunk.Text)
+		}
+	}
 	first, err := provider.Embed(context.Background(), EmbedRequest{Inputs: inputs})
 	if err != nil {
 		t.Fatal(err)
