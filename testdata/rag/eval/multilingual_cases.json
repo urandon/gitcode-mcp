@@ -1,0 +1,72 @@
+{
+  "name": "multilingual-rag-eval-v1",
+  "description": "Deterministic RU/ZH/EN RAG evaluation cases for fake-provider and retriever tests.",
+  "profile": "qwen3-ollama-0_6b-512",
+  "chunk_policy_id": "heading-v1",
+  "language_policy_id": "ru-zh-en-v1",
+  "cases": [
+    {
+      "id": "ru-rate-limit-sync",
+      "language": "ru",
+      "query": "лимиты синка",
+      "query_vector": [1, 0],
+      "expected_chunk_id": "chunk-ru-rate-limit",
+      "chunks": [
+        {
+          "id": "chunk-ru-rate-limit",
+          "source_id": "ISSUE-RU",
+          "text": "Лимитер защищает синхронизацию от rate limit и показывает понятный статус.",
+          "vector": [1, 0]
+        },
+        {
+          "id": "chunk-ru-distractor",
+          "source_id": "ISSUE-RU-DISTRACTOR",
+          "text": "Документация описывает установку сервиса без упоминания лимитов.",
+          "vector": [0, 1]
+        }
+      ]
+    },
+    {
+      "id": "zh-progress-rate-limit",
+      "language": "zh",
+      "query": "速率限制",
+      "query_vector": [0, 1],
+      "expected_chunk_id": "chunk-zh-rate-limit",
+      "chunks": [
+        {
+          "id": "chunk-zh-rate-limit",
+          "source_id": "ISSUE-ZH",
+          "text": "同步进度需要显示速率限制状态，并保持输出稳定。",
+          "vector": [0, 1]
+        },
+        {
+          "id": "chunk-zh-distractor",
+          "source_id": "ISSUE-ZH-DISTRACTOR",
+          "text": "配置文件记录默认模型和服务目录。",
+          "vector": [1, 0]
+        }
+      ]
+    },
+    {
+      "id": "en-cited-context",
+      "language": "en",
+      "query": "cited context",
+      "query_vector": [-1, 0],
+      "expected_chunk_id": "chunk-en-cited-context",
+      "chunks": [
+        {
+          "id": "chunk-en-cited-context",
+          "source_id": "ISSUE-EN",
+          "text": "RAG search returns cited context with source ids, paths, lines, snippets, and score breakdowns.",
+          "vector": [-1, 0]
+        },
+        {
+          "id": "chunk-en-distractor",
+          "source_id": "ISSUE-EN-DISTRACTOR",
+          "text": "The service command can install, start, stop, and inspect the daemon.",
+          "vector": [0, 1]
+        }
+      ]
+    }
+  ]
+}
