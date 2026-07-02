@@ -24,6 +24,7 @@ import (
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/gitcode"
+	"gitcode-mcp/internal/rag"
 	"gitcode-mcp/internal/service"
 )
 
@@ -74,6 +75,51 @@ func TestMCPRepoScopedDuplicateAlias(t *testing.T) {
 	}
 	r.Close()
 	wg.Wait()
+}
+
+func TestMCPRAGStatusReturnsStructuredContent(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	handler := NewRPCHandler(service.New(store))
+	handler.SetRAGStatusProvider(func(_ context.Context, req rag.StatusRequest) (rag.StatusResult, error) {
+		if req.RepoID != "fixture-a" || req.ProfileID != "fake-rag" {
+			t.Fatalf("unexpected request: %#v", req)
+		}
+		return rag.StatusResult{
+			RepoID: "fixture-a",
+			Status: "partial",
+			Provider: rag.ProviderStatus{
+				ProfileID: "fake-rag",
+				Ready:     true,
+			},
+			Coverage: rag.CoverageStatus{
+				TotalChunks:    3,
+				EmbeddedChunks: 1,
+				MissingChunks:  2,
+			},
+		}, nil
+	})
+	id := json.RawMessage(`1`)
+	params := json.RawMessage(`{"name":"rag_status","arguments":{"repo_id":"fixture-a","profile":"fake-rag"}}`)
+	resp, ok := handler.Handle(context.Background(), request{JSONRPC: "2.0", ID: &id, Method: "tools/call", Params: &params})
+	if !ok || resp == nil || resp.Error != nil {
+		t.Fatalf("response=%#v ok=%t", resp, ok)
+	}
+	var result toolCallResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("invalid tool result: %v", err)
+	}
+	if len(result.Content) != 1 || !strings.Contains(result.Content[0].Text, "rag_status=partial") {
+		t.Fatalf("unexpected content: %#v", result.Content)
+	}
+	raw, _ := json.Marshal(result.StructuredContent)
+	var structured rag.StatusResult
+	if err := json.Unmarshal(raw, &structured); err != nil {
+		t.Fatalf("invalid structured content: %v", err)
+	}
+	if structured.Status != "partial" || structured.Coverage.TotalChunks != 3 || structured.Coverage.EmbeddedChunks != 1 {
+		t.Fatalf("structured=%#v", structured)
+	}
 }
 
 func TestMCPErrorOutputCanonicalFailureClass(t *testing.T) {

@@ -61,6 +61,7 @@ var commands = []string{
 	"auth",
 	"service",
 	"rag",
+	"rag-status",
 	"doctor",
 	"migrate-cache",
 	"repo",
@@ -271,7 +272,7 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 		fmt.Fprintf(stdout, "gitcode-mcp %s\n", buildinfo.Version)
 		return 0
 	}
-	if args[0] == "config" || args[0] == "auth" || args[0] == "service" || args[0] == "rag" || args[0] == "doctor" || args[0] == "migrate-cache" || args[0] == "bind" {
+	if args[0] == "config" || args[0] == "auth" || args[0] == "service" || args[0] == "rag" || args[0] == "rag-status" || args[0] == "doctor" || args[0] == "migrate-cache" || args[0] == "bind" {
 		return executeLocalCommand(ctx, args, stdout, stderr, deps)
 	}
 	if !isKnownCommand(args[0]) {
@@ -631,7 +632,7 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "service run", "service install", "service uninstall", "service start", "service stop", "service status", "service doctor", "service fake-job", "service jobs", "service job", "service attach", "service cancel":
 				printLocalSubcommandHelp(command, sub, stdout)
-			case "rag setup", "rag index":
+			case "rag setup", "rag index", "rag status":
 				printLocalSubcommandHelp(command, sub, stdout)
 			default:
 				printCommandHelp(command, stdout)
@@ -666,6 +667,9 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 	}
 	if command == "rag" {
 		return executeRAGCommand(ctx, rest, opts, stdout, stderr, deps)
+	}
+	if command == "rag-status" {
+		return executeRAGStatusCommand(ctx, opts, stdout, stderr, deps)
 	}
 	if command == "bind" {
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "bind", Message: "use repo add to create repository bindings"})
@@ -806,8 +810,91 @@ func executeRAGCommand(ctx context.Context, args []string, opts options, stdout 
 			return render(stdout, opts.format, job, renderServiceJobText)
 		}
 		return attachServiceJob(ctx, client, job.ID, opts, stdout, stderr)
+	case "status":
+		return executeRAGStatusCommand(ctx, opts, stdout, stderr, deps)
 	default:
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "rag", Message: "unknown subcommand"})
+	}
+}
+
+func executeRAGStatusCommand(ctx context.Context, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+	eff, err := config.LoadEffective(deps.Source, config.Overrides{CachePath: opts.cachePath})
+	if err != nil {
+		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), deps.Source))
+		return 1
+	}
+	store, err := cache.NewSQLiteReadOnlyStore(ctx, eff.Config.CachePath)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	defer store.Close()
+	provider, err := rag.NewEmbeddingProviderFromConfig(eff.Config, opts.profile, rag.ProviderOptions{})
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Version}
+	svcStatus, activeJob := lookupRAGServiceState(ctx, manager, opts.repo)
+	result, err := rag.Status(ctx, store, provider, rag.StatusRequest{
+		RepoID:    opts.repo,
+		ProfileID: opts.profile,
+		ActiveJob: activeJob,
+		Service:   svcStatus,
+	})
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	return render(stdout, opts.format, result, renderRAGStatusText)
+}
+
+func lookupRAGServiceState(ctx context.Context, manager servicectl.Manager, repoID string) (*rag.ServiceStatus, *rag.JobStatus) {
+	status, err := manager.Status()
+	var serviceStatus *rag.ServiceStatus
+	if err == nil {
+		serviceStatus = &rag.ServiceStatus{
+			Status:        status.Status,
+			Running:       status.Running,
+			PID:           status.PID,
+			SocketPresent: status.SocketPresent,
+			SocketPath:    status.SocketPath,
+			Message:       status.Message,
+		}
+	}
+	if serviceStatus == nil || !serviceStatus.Running {
+		return serviceStatus, nil
+	}
+	client, err := manager.Client()
+	if err != nil {
+		serviceStatus.Message = firstNonEmpty(serviceStatus.Message, err.Error())
+		return serviceStatus, nil
+	}
+	var result servicectl.JobListResult
+	if err := client.Call(ctx, "Jobs.List", nil, &result); err != nil {
+		serviceStatus.Message = firstNonEmpty(serviceStatus.Message, err.Error())
+		return serviceStatus, nil
+	}
+	for _, job := range result.Jobs {
+		if job.Type != servicectl.RAGIndexJobType || job.RepoID != repoID {
+			continue
+		}
+		if job.Status != servicectl.JobStatusQueued && job.Status != servicectl.JobStatusRunning {
+			continue
+		}
+		return serviceStatus, ragJobStatusFromService(job)
+	}
+	return serviceStatus, nil
+}
+
+func ragJobStatusFromService(job servicectl.Job) *rag.JobStatus {
+	return &rag.JobStatus{
+		ID:        job.ID,
+		Type:      job.Type,
+		RepoID:    job.RepoID,
+		ProfileID: job.ProfileID,
+		Status:    job.Status,
+		Steps:     job.Steps,
+		Completed: job.Completed,
+		Error:     job.Error,
+		Progress:  append([]service.ProgressEvent(nil), job.Progress...),
 	}
 }
 
@@ -847,6 +934,43 @@ func renderRAGSetupText(w io.Writer, result rag.SetupResult) {
 	}
 	if len(result.Diagnostics) > 0 {
 		fmt.Fprintf(w, "diagnostics: %s\n", strings.Join(result.Diagnostics, "; "))
+	}
+}
+
+func renderRAGStatusText(w io.Writer, result rag.StatusResult) {
+	fmt.Fprintf(w, "status: %s\n", result.Status)
+	fmt.Fprintf(w, "repo_id: %s\n", result.RepoID)
+	fmt.Fprintf(w, "profile: %s\n", cliEmptyAsNone(result.Provider.ProfileID))
+	fmt.Fprintf(w, "provider: %s\n", cliEmptyAsNone(result.Provider.ProviderID))
+	fmt.Fprintf(w, "provider_type: %s\n", cliEmptyAsNone(result.Provider.ProviderType))
+	fmt.Fprintf(w, "endpoint: %s\n", cliEmptyAsNone(result.Provider.Endpoint))
+	fmt.Fprintf(w, "model: %s\n", cliEmptyAsNone(result.Provider.Model))
+	if result.Provider.Revision != "" {
+		fmt.Fprintf(w, "revision: %s\n", result.Provider.Revision)
+	}
+	fmt.Fprintf(w, "provider_ready: %t\n", result.Provider.Ready)
+	fmt.Fprintf(w, "namespace_exists: %t\n", result.Namespace.Exists)
+	if result.Namespace.ID != "" {
+		fmt.Fprintf(w, "namespace_id: %s\n", result.Namespace.ID)
+	}
+	fmt.Fprintf(w, "coverage: %d/%d embedded, %d missing, %d stale, %d failed, %d skipped\n", result.Coverage.EmbeddedChunks, result.Coverage.TotalChunks, result.Coverage.MissingChunks, result.Coverage.StaleChunks, result.Coverage.FailedChunks, result.Coverage.SkippedChunks)
+	if result.ActiveJob != nil {
+		fmt.Fprintf(w, "active_job: %s %s %d/%d\n", result.ActiveJob.ID, result.ActiveJob.Status, result.ActiveJob.Completed, result.ActiveJob.Steps)
+	}
+	if result.LastRun != nil {
+		fmt.Fprintf(w, "last_run: %s %s %d/%d\n", result.LastRun.ID, result.LastRun.Status, result.LastRun.EmbeddedChunks+result.LastRun.SkippedChunks, result.LastRun.TotalChunks)
+	}
+	if result.Service != nil {
+		fmt.Fprintf(w, "service: %s\n", result.Service.Status)
+	}
+	if result.FailureClass != "" {
+		fmt.Fprintf(w, "failure_class: %s\n", result.FailureClass)
+	}
+	if result.Provider.Message != "" {
+		fmt.Fprintf(w, "provider_message: %s\n", result.Provider.Message)
+	}
+	if result.Message != "" {
+		fmt.Fprintf(w, "message: %s\n", result.Message)
 	}
 }
 
@@ -3339,8 +3463,17 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "Subcommands:")
 		fmt.Fprintln(w, "  setup       check provider, model, and embedding readiness")
 		fmt.Fprintln(w, "  index       start a daemon-owned RAG index job")
+		fmt.Fprintln(w, "  status      report provider, namespace, coverage, and job state")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Run gitcode-mcp rag SUBCOMMAND --help for details.")
+	case "rag-status":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO [--profile PROFILE] [--cache-path PATH] [--format FORMAT]\n\n", command)
+		fmt.Fprintln(w, "Report provider readiness, namespace coverage, last index run, and active daemon job state.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         configured repository id")
+		fmt.Fprintln(w, "  --profile PROFILE   RAG profile name")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "doctor":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s [--repo REPO] [--offline|--fixture] [--runtime-audit] [--cache-path PATH]\n\n", command)
 		fmt.Fprintln(w, "Aggregate subsystem diagnostics with public-safe output.")
@@ -3437,6 +3570,15 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "  --profile PROFILE   RAG profile name")
 		fmt.Fprintln(w, "  --batch-size N      embedding batch size")
 		fmt.Fprintln(w, "  --detach            return the job id without attaching progress")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "rag status":
+		fmt.Fprintln(w, "Usage: gitcode-mcp rag status --repo REPO [--profile PROFILE] [--cache-path PATH] [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Report provider readiness, namespace coverage, last index run, and active daemon job state.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         configured repository id")
+		fmt.Fprintln(w, "  --profile PROFILE   RAG profile name")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "service install":
 		fmt.Fprintln(w, "Usage: gitcode-mcp service install [--overwrite] [--format FORMAT]")
