@@ -24,6 +24,7 @@ Candidate tables:
 - `remote_revisions`: remote revision metadata and fetch timestamps.
 - `sync_events`: sync command, idempotency key, result, error class, evidence path.
 - `conflicts`: local value, remote value, conflict class, resolution state.
+- `embedding_namespaces`, `chunk_embeddings`, and `rag_index_runs`: model-scoped RAG coverage and indexing progress state.
 
 ## Sync Principles
 
@@ -140,9 +141,19 @@ Actionable failure classes include:
 
 The CLI renders the aggregate success and failure counts and resource details. Diagnostics must stay public-safe: tokens, Authorization headers, cookies, private repository coordinates, and raw API bodies are not printed.
 
+## RAG Cache State
+
+RAG state is additive to the GitCode cache. The canonical source records and index chunks remain readable when no embedding provider is configured. Embeddings live in `chunk_embeddings`, keyed by `(repo_id, namespace_id, chunk_id)`, so deleting or rebuilding RAG coverage does not invalidate records, comments, sync events, snapshots, or chunk text.
+
+An `embedding_namespaces` row captures provider/model identity: provider id and type, model id and revision, dimension, dtype, normalization, document/query instruction ids, chunk policy id, language policy id, and config hash. A provider, model, dimension, instruction, chunking, or language-policy change therefore creates a different namespace. The old namespace can be retained or removed without touching the GitCode cache.
+
+The older `chunks.embedding` column is a legacy placeholder. It is nullable and not namespace-aware, so new RAG indexing must not treat it as canonical coverage. It remains in place for compatibility with existing schemas and read paths.
+
+`rag_index_runs` stores long-running indexer progress: namespace, profile, status, total/embedded/skipped/failed counts, timestamps, error class, message, and small metadata. CLI/MCP progress surfaces can read this without contacting the embedding provider.
+
 ## Cache Migration
 
-The implemented cache schema version is `14`, matching `currentSchemaVersion` in `internal/cache/schema.go`.
+The implemented cache schema version is `15`, matching `currentSchemaVersion` in `internal/cache/schema.go`.
 
 The primary version source is the SQLite `schema_version` table. Migrations also update `PRAGMA user_version` as an additive SQLite diagnostic bridge, but cache compatibility decisions use `schema_version`.
 
@@ -150,17 +161,19 @@ Compatibility policy:
 
 | Detected version | Behavior | Operator action |
 | --- | --- | --- |
-| New empty cache | Initialize normally at schema version 14 | None |
-| 13 | Open normally; reads and writes are allowed | None |
-| 2-13 | Open read-compatible but writes are blocked until migration | Run `gitcode-mcp migrate-cache --confirm` |
+| New empty cache | Initialize normally at schema version 15 | None |
+| 14 | Open normally; reads and writes are allowed | None |
+| 2-14 | Open read-compatible but writes are blocked until migration | Run `gitcode-mcp migrate-cache --confirm` |
 | 1 | Block migration as pre-supported/iteration-1-equivalent | Confirm the selected cache path, move aside or delete only that cache file, then re-sync |
 | 0, missing, or empty `schema_version` in a non-empty cache | Block as pre-schema-versioning or unknown | Confirm the selected cache path, move aside or delete only that cache file, then re-sync |
-| Greater than 14 | Block as newer than this binary supports | Upgrade `gitcode-mcp` to a binary that supports the schema |
+| Greater than 15 | Block as newer than this binary supports | Upgrade `gitcode-mcp` to a binary that supports the schema |
 
 `gitcode-mcp migrate-cache --confirm` runs supported older-version migrations in place from the selected effective cache path, including repo-local cache selection when run from a repo-local workspace. Explicit `--cache-path` still overrides repo-local discovery for emergency repair. The command creates a backup at `{cache-path}.backup-{timestamp}` before applying changes. Each migration step runs in a transaction and advances both `schema_version` and `PRAGMA user_version` only after that step succeeds.
 
 Schema version 13 adds `pr_review_discussions` and `pr_review_positions`. The migration creates empty tables and does not invent position metadata for comments already cached under older schemas. A later pull request comment sync or `add-pr-review-comment` write refreshes the affected comment rows and populates the new position tables. PR comment `content_hash` includes position metadata, so a resync can update stale rows when the live adapter now returns richer v4 discussion data.
 
 Schema version 14 adds `sync_frontiers` for issue and pull request collection traversal metadata. Existing caches start with no complete frontier rows after migration, so the first post-migration bounded sync will not early-stop from legacy record timestamps. A run that reaches `end_of_collection` or safely stops via a previous complete frontier records `status=complete`; bounded, timed-out, cancelled, and partial runs record non-complete statuses that are not eligible for early-stop.
+
+Schema version 15 adds RAG namespace, chunk embedding, and index run tables. Existing records, chunks, snapshots, and sync frontiers are not rewritten. Existing `chunks.embedding` data, if present, is left untouched and treated as non-canonical legacy data.
 
 Opening an older compatible cache without migration is read-compatible but write-blocked so operators can inspect the cache and run diagnostics before applying the migration. New caches are initialized directly at the current schema version.

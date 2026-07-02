@@ -166,7 +166,7 @@ func TestConfigLoading(t *testing.T) {
 		if Token(src) != "secret-token-value" {
 			t.Fatalf("Token returned %q", Token(src))
 		}
-		if strings.Contains(string(data), "secret-token-value") || strings.Contains(string(data), "token") {
+		if strings.Contains(string(data), "secret-token-value") || strings.Contains(string(data), EnvToken) {
 			t.Fatalf("serialized Config contains token context: %s", data)
 		}
 	})

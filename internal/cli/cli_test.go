@@ -14,7 +14,9 @@ import (
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/capability"
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/rag"
 	"gitcode-mcp/internal/service"
+	"gitcode-mcp/internal/servicectl"
 )
 
 func TestHelpReturnsSuccess(t *testing.T) {
@@ -58,6 +60,24 @@ func TestCLIWriteCapabilitiesComeFromRegistry(t *testing.T) {
 		}
 		if !foundAlias {
 			t.Fatalf("CLI-enabled capability %s missing command %q or aliases %v", cap.ID, cap.CLIName, cap.CLIAliases)
+		}
+	}
+}
+
+func TestCLIRAGCapabilitiesComeFromRegistry(t *testing.T) {
+	known := map[string]bool{}
+	for _, command := range commands {
+		known[command] = true
+	}
+	for _, cap := range capability.RAGCapabilities() {
+		if !cap.CLI.Enabled {
+			if cap.CLI.DisabledReason == "" {
+				t.Fatalf("%s is CLI-disabled without a reason", cap.ID)
+			}
+			continue
+		}
+		if !known[cap.CLIName] {
+			t.Fatalf("CLI-enabled RAG capability %s missing command %q", cap.ID, cap.CLIName)
 		}
 	}
 }
@@ -439,11 +459,462 @@ func TestAllCommandsRegistered(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d", code)
 	}
-	for _, want := range []string{"ingest", "index", "search", "search_sources", "list", "get", "get-snippet", "snippet", "snippets", "backlinks", "list-chunks", "link-check", "stale-index", "recent", "cache", "cache-status", "sync-status", "sync_status", "sync", "export", "diff", "create-issue", "update-issue", "create-pr", "create-mr", "create-page", "update-page", "add-comment", "add-pr-review-comment", "update-comment", "add-label"} {
+	for _, want := range []string{"ingest", "index", "search", "search_sources", "list", "get", "get-snippet", "snippet", "snippets", "backlinks", "list-chunks", "link-check", "stale-index", "recent", "cache", "cache-status", "sync-status", "sync_status", "sync", "export", "diff", "create-issue", "update-issue", "create-pr", "create-mr", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "update-comment", "add-label", "publish-release", "config", "auth", "service", "rag", "rag-status", "rag-search", "doctor", "migrate-cache", "repo"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("help missing command %q in %q", want, stdout.String())
 		}
 	}
+}
+
+func TestServiceCommandStatusAndInstallUseUserGlobalPaths(t *testing.T) {
+	root := t.TempDir()
+	src := &repoInitLocalSource{
+		env:       map[string]string{},
+		cwd:       root,
+		homeDir:   filepath.Join(root, "h"),
+		configDir: filepath.Join(root, "f"),
+		cacheDir:  filepath.Join(root, "c"),
+	}
+
+	var statusOut bytes.Buffer
+	var statusErr bytes.Buffer
+	code := executeWithFactoryAndDeps([]string{"service", "status", "--format", "json"}, &statusOut, &statusErr, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("service status code=%d stderr=%q", code, statusErr.String())
+	}
+	var status servicectl.Status
+	if err := json.Unmarshal(statusOut.Bytes(), &status); err != nil {
+		t.Fatalf("invalid status json: %v\n%s", err, statusOut.String())
+	}
+	if status.Status != servicectl.StatusNotInstalled || status.Installed || status.Running {
+		t.Fatalf("initial service status = %#v", status)
+	}
+	if !strings.HasPrefix(status.RuntimeDir, src.cacheDir) || !strings.HasPrefix(status.LogDir, src.cacheDir) {
+		t.Fatalf("service paths are not cache-global: %#v", status)
+	}
+
+	var installOut bytes.Buffer
+	var installErr bytes.Buffer
+	code = executeWithFactoryAndDeps([]string{"service", "install", "--overwrite", "--format", "json"}, &installOut, &installErr, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("service install code=%d stderr=%q", code, installErr.String())
+	}
+	if err := json.Unmarshal(installOut.Bytes(), &status); err != nil {
+		t.Fatalf("invalid install json: %v\n%s", err, installOut.String())
+	}
+	if status.Status != servicectl.StatusInstalledStopped || !status.Installed || status.Running {
+		t.Fatalf("installed service status = %#v", status)
+	}
+	if _, err := os.Stat(status.InstallPath); err != nil {
+		t.Fatalf("install path was not written: %v", err)
+	}
+	if !strings.HasPrefix(status.InstallPath, src.homeDir) && !strings.HasPrefix(status.InstallPath, src.configDir) {
+		t.Fatalf("install path is not user-global: %#v", status)
+	}
+}
+
+func TestServiceHelpShowsLifecycleSubcommands(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Execute([]string{"service", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	for _, want := range []string{"install", "uninstall", "start", "stop", "status", "doctor", "run"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("service help missing %q in %q", want, stdout.String())
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"service", "status", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("status help code=%d stderr=%q", code, stderr.String())
+	}
+	for _, want := range []string{"service status", "runtime", "socket"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("service status help missing %q in %q", want, stdout.String())
+		}
+	}
+}
+
+func TestServiceCLIControlsFakeJobOverIPC(t *testing.T) {
+	root, err := shortCLITestRoot(t, "cli-svc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := &repoInitLocalSource{
+		env:       map[string]string{"GITCODE_MCP_SERVICE_NETWORK": "mem", "GITCODE_MCP_SERVICE_ADDRESS": "test-cli-service-jobs"},
+		cwd:       root,
+		homeDir:   filepath.Join(root, "h"),
+		configDir: filepath.Join(root, "f"),
+		cacheDir:  filepath.Join(root, "c"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runCode := make(chan int, 1)
+	go func() {
+		var runOut bytes.Buffer
+		var runErr bytes.Buffer
+		runCode <- executeWithFactoryAndDepsContext(ctx, []string{"service", "run"}, &runOut, &runErr, nil, localCommandDeps{Source: src})
+	}()
+	waitForServiceSocket(t, src)
+
+	var jobOut bytes.Buffer
+	var jobErr bytes.Buffer
+	code := executeWithFactoryAndDeps([]string{"service", "fake-job", "--steps", "2", "--interval-ms", "1", "--format", "json"}, &jobOut, &jobErr, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("fake-job code=%d stderr=%q", code, jobErr.String())
+	}
+	if !strings.Contains(jobErr.String(), "job progress:") {
+		t.Fatalf("fake-job attach did not emit progress: %q", jobErr.String())
+	}
+	var job servicectl.Job
+	if err := json.Unmarshal(jobOut.Bytes(), &job); err != nil {
+		t.Fatalf("invalid fake-job json: %v\n%s", err, jobOut.String())
+	}
+	if job.Status != servicectl.JobStatusSucceeded || job.Completed != 2 {
+		t.Fatalf("fake-job result = %#v", job)
+	}
+
+	var listOut bytes.Buffer
+	var listErr bytes.Buffer
+	code = executeWithFactoryAndDeps([]string{"service", "jobs", "--format", "json"}, &listOut, &listErr, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("jobs code=%d stderr=%q", code, listErr.String())
+	}
+	var list servicectl.JobListResult
+	if err := json.Unmarshal(listOut.Bytes(), &list); err != nil {
+		t.Fatalf("invalid jobs json: %v\n%s", err, listOut.String())
+	}
+	if len(list.Jobs) != 1 || list.Jobs[0].ID != job.ID {
+		t.Fatalf("jobs result = %#v", list)
+	}
+
+	var detachOut bytes.Buffer
+	var detachErr bytes.Buffer
+	code = executeWithFactoryAndDeps([]string{"service", "fake-job", "--steps", "50", "--interval-ms", "20", "--detach", "--format", "json"}, &detachOut, &detachErr, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("detached fake-job code=%d stderr=%q", code, detachErr.String())
+	}
+	var detached servicectl.Job
+	if err := json.Unmarshal(detachOut.Bytes(), &detached); err != nil {
+		t.Fatalf("invalid detached json: %v\n%s", err, detachOut.String())
+	}
+
+	var cancelOut bytes.Buffer
+	var cancelErr bytes.Buffer
+	code = executeWithFactoryAndDeps([]string{"service", "cancel", detached.ID, "--format", "json"}, &cancelOut, &cancelErr, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("cancel code=%d stderr=%q", code, cancelErr.String())
+	}
+	var cancelled servicectl.Job
+	if err := json.Unmarshal(cancelOut.Bytes(), &cancelled); err != nil {
+		t.Fatalf("invalid cancel json: %v\n%s", err, cancelOut.String())
+	}
+	if cancelled.Status != servicectl.JobStatusCancelled {
+		t.Fatalf("cancelled job = %#v", cancelled)
+	}
+
+	cancel()
+	if code := <-runCode; code != 0 {
+		t.Fatalf("service run code=%d", code)
+	}
+}
+
+func TestRAGIndexCLIStartsDaemonJobOverIPC(t *testing.T) {
+	root, err := shortCLITestRoot(t, "cli-rag-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(root, "cache.db")
+	store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore returned error: %v", err)
+	}
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatalf("AddRepository returned error: %v", err)
+	}
+	if err := store.UpsertSourceGraph(context.Background(), cache.SourceGraph{
+		Source: cache.Source{RepoID: "fixture-a", ID: "ISSUE-1", Kind: "issue", Path: "issues/1.md", Title: "RAG", Body: "русский 中文 English", Status: "open", ContentHash: "source-hash"},
+		Chunks: []cache.Chunk{{
+			RepoID:         "fixture-a",
+			ID:             "chunk-1",
+			SourceID:       "ISSUE-1",
+			RecordID:       "ISSUE-1",
+			ContentHash:    "chunk-hash",
+			ByteStart:      0,
+			ByteEnd:        32,
+			LineStart:      1,
+			LineEnd:        1,
+			Text:           "русский 中文 English",
+			NormalizedText: "русский 中文 english",
+			Policy:         rag.DefaultChunkPolicyID,
+		}},
+	}); err != nil {
+		t.Fatalf("UpsertSourceGraph returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	configPath := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(strings.Join([]string{
+		"cache_path: " + cachePath,
+		"rag:",
+		"  default_profile: fake-rag",
+		"  providers:",
+		"    fake:",
+		"      type: fake",
+		"  profiles:",
+		"    fake-rag:",
+		"      provider: fake",
+		"      model: fake-embedding",
+		"      dimensions: 2",
+		"      batch_size: 1",
+		"  indexing:",
+		"    profile: fake-rag",
+		"",
+	}, "\n")), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	src := &repoInitLocalSource{
+		env:       map[string]string{"GITCODE_MCP_SERVICE_NETWORK": "mem", "GITCODE_MCP_SERVICE_ADDRESS": "test-cli-rag-index", config.EnvMCPConfigPath: configPath},
+		cwd:       root,
+		homeDir:   filepath.Join(root, "h"),
+		configDir: filepath.Join(root, "f"),
+		cacheDir:  filepath.Join(root, "c"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runCode := make(chan int, 1)
+	go func() {
+		var runOut bytes.Buffer
+		var runErr bytes.Buffer
+		runCode <- executeWithFactoryAndDepsContext(ctx, []string{"service", "run"}, &runOut, &runErr, nil, localCommandDeps{Source: src})
+	}()
+	waitForServiceSocket(t, src)
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := executeWithFactoryAndDeps([]string{"rag", "index", "--repo", "fixture-a", "--progress", "lines", "--format", "json"}, &out, &errOut, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("rag index code=%d stderr=%q", code, errOut.String())
+	}
+	var job servicectl.Job
+	if err := json.Unmarshal(out.Bytes(), &job); err != nil {
+		t.Fatalf("invalid job json: %v\n%s", err, out.String())
+	}
+	if job.Type != servicectl.RAGIndexJobType || job.RepoID != "fixture-a" {
+		t.Fatalf("job=%#v", job)
+	}
+	if job.Status != servicectl.JobStatusSucceeded {
+		t.Fatalf("rag index job did not finish: %#v", job)
+	}
+	if job.Completed != 1 || job.Steps != 1 {
+		t.Fatalf("completed job=%#v", job)
+	}
+	progress := errOut.String()
+	for _, want := range []string{"rag index progress:", "1/1", "100.0%", "chunks/s", "elapsed="} {
+		if !strings.Contains(progress, want) {
+			t.Fatalf("rag index progress missing %q: %q", want, progress)
+		}
+	}
+	cancel()
+	if code := <-runCode; code != 0 {
+		t.Fatalf("service run code=%d", code)
+	}
+}
+
+func TestRAGStatusCLIReportsCoverage(t *testing.T) {
+	root := t.TempDir()
+	cachePath := filepath.Join(root, "cache.db")
+	store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore returned error: %v", err)
+	}
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatalf("AddRepository returned error: %v", err)
+	}
+	if err := store.UpsertSourceGraph(context.Background(), cache.SourceGraph{
+		Source: cache.Source{RepoID: "fixture-a", ID: "ISSUE-1", Kind: "issue", Path: "issues/1.md", Title: "RAG status", Body: "русский 中文 English", Status: "open", ContentHash: "source-hash"},
+		Chunks: []cache.Chunk{{
+			RepoID:         "fixture-a",
+			ID:             "chunk-1",
+			SourceID:       "ISSUE-1",
+			RecordID:       "ISSUE-1",
+			ContentHash:    "chunk-hash",
+			ByteStart:      0,
+			ByteEnd:        32,
+			LineStart:      1,
+			LineEnd:        1,
+			Text:           "русский 中文 English",
+			NormalizedText: "русский 中文 english",
+			Policy:         rag.DefaultChunkPolicyID,
+		}},
+	}); err != nil {
+		t.Fatalf("UpsertSourceGraph returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	configPath := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(strings.Join([]string{
+		"cache_path: " + cachePath,
+		"rag:",
+		"  default_profile: fake-rag",
+		"  providers:",
+		"    fake:",
+		"      type: fake",
+		"  profiles:",
+		"    fake-rag:",
+		"      provider: fake",
+		"      model: fake-embedding",
+		"      dimensions: 2",
+		"      batch_size: 1",
+		"  indexing:",
+		"    profile: fake-rag",
+		"",
+	}, "\n")), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	src := &repoInitLocalSource{
+		env:       map[string]string{config.EnvMCPConfigPath: configPath},
+		cwd:       root,
+		homeDir:   filepath.Join(root, "h"),
+		configDir: filepath.Join(root, "f"),
+		cacheDir:  filepath.Join(root, "c"),
+	}
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := executeWithFactoryAndDeps([]string{"rag", "status", "--repo", "fixture-a", "--format", "json"}, &out, &errOut, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("rag status code=%d stderr=%q", code, errOut.String())
+	}
+	var payload struct {
+		Status   string `json:"status"`
+		Coverage struct {
+			TotalChunks   int `json:"total_chunks"`
+			MissingChunks int `json:"missing_chunks"`
+		} `json:"coverage"`
+		Provider struct {
+			Ready bool `json:"ready"`
+		} `json:"provider"`
+		Namespace struct {
+			Exists bool `json:"exists"`
+		} `json:"namespace"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("invalid status json: %v\n%s", err, out.String())
+	}
+	if payload.Status != "no_namespace" || payload.Coverage.TotalChunks != 1 || payload.Coverage.MissingChunks != 1 || !payload.Provider.Ready || payload.Namespace.Exists {
+		t.Fatalf("payload=%#v", payload)
+	}
+}
+
+func TestRAGSearchCLIReportsNoNamespace(t *testing.T) {
+	root := t.TempDir()
+	cachePath := filepath.Join(root, "cache.db")
+	store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore returned error: %v", err)
+	}
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatalf("AddRepository returned error: %v", err)
+	}
+	if err := store.UpsertSourceGraph(context.Background(), cache.SourceGraph{
+		Source: cache.Source{RepoID: "fixture-a", ID: "ISSUE-1", Kind: "issue", Path: "issues/1.md", Title: "RAG search", Body: "rate limits and cited context", Status: "open", ContentHash: "source-hash"},
+		Chunks: []cache.Chunk{{
+			RepoID:         "fixture-a",
+			ID:             "chunk-1",
+			SourceID:       "ISSUE-1",
+			RecordID:       "ISSUE-1",
+			ContentHash:    "chunk-hash",
+			ByteStart:      0,
+			ByteEnd:        29,
+			LineStart:      1,
+			LineEnd:        1,
+			Text:           "rate limits and cited context",
+			NormalizedText: "rate limits and cited context",
+			Policy:         rag.DefaultChunkPolicyID,
+		}},
+	}); err != nil {
+		t.Fatalf("UpsertSourceGraph returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	configPath := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(strings.Join([]string{
+		"cache_path: " + cachePath,
+		"rag:",
+		"  default_profile: fake-rag",
+		"  providers:",
+		"    fake:",
+		"      type: fake",
+		"  profiles:",
+		"    fake-rag:",
+		"      provider: fake",
+		"      model: fake-embedding",
+		"      dimensions: 2",
+		"      batch_size: 1",
+		"",
+	}, "\n")), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	src := &repoInitLocalSource{
+		env:       map[string]string{config.EnvMCPConfigPath: configPath},
+		cwd:       root,
+		homeDir:   filepath.Join(root, "h"),
+		configDir: filepath.Join(root, "f"),
+		cacheDir:  filepath.Join(root, "c"),
+	}
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := executeWithFactoryAndDeps([]string{"rag-search", "--repo", "fixture-a", "--format", "json", "rate limits"}, &out, &errOut, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("rag-search code=%d stderr=%q", code, errOut.String())
+	}
+	var payload struct {
+		SearchMode string `json:"search_mode"`
+		Status     string `json:"status"`
+		Warnings   []string
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("invalid search json: %v\n%s", err, out.String())
+	}
+	if payload.SearchMode != rag.SearchModeHybridRAG || payload.Status != rag.RAGSearchStatusNoNamespace || len(payload.Warnings) == 0 {
+		t.Fatalf("payload=%#v", payload)
+	}
+}
+
+func shortCLITestRoot(t *testing.T, pattern string) (string, error) {
+	t.Helper()
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	root := cwd
+	for {
+		if _, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
+			break
+		}
+		parent := filepath.Dir(root)
+		if parent == root {
+			return "", os.ErrNotExist
+		}
+		root = parent
+	}
+	base := filepath.Join(root, ".t")
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		return "", err
+	}
+	dir, err := os.MkdirTemp(base, pattern)
+	if err != nil {
+		return "", err
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir, nil
 }
 
 func TestPublicDocsDoNotAdvertiseReinitCache(t *testing.T) {
@@ -691,6 +1162,39 @@ func TestSyncProgressModes(t *testing.T) {
 			if !strings.Contains(line, want) {
 				t.Fatalf("progress line missing %q: %q", want, line)
 			}
+		}
+	})
+}
+
+func TestRAGIndexProgressRendering(t *testing.T) {
+	started := time.Date(2026, 7, 2, 14, 31, 28, 0, time.UTC)
+	now := started.Add(32 * time.Second)
+	state := ragIndexProgressState{Started: started, JobID: "job-3", Status: servicectl.JobStatusRunning}
+	state.ApplyEvent(service.ProgressEvent{RecordsListed: 4033, RecordsFetched: 336, RecordsFailed: 16})
+
+	t.Run("spinner is compact", func(t *testing.T) {
+		var stderr bytes.Buffer
+		renderRAGIndexProgressSpinnerFrame(&stderr, &state, now)
+		line := stderr.String()
+		for _, want := range []string{"\r\033[K", "rag index running", "336/4033", "8.3%", "10.5 chunks/s", "failed=16", "elapsed=32s"} {
+			if !strings.Contains(line, want) {
+				t.Fatalf("rag spinner line missing %q: %q", want, line)
+			}
+		}
+		for _, unwanted := range []string{"records=", "collection=", "type="} {
+			if strings.Contains(line, unwanted) {
+				t.Fatalf("rag spinner line should stay compact and omit %q: %q", unwanted, line)
+			}
+		}
+	})
+
+	t.Run("json event includes speed", func(t *testing.T) {
+		event := ragIndexProgressJSONEvent(state, now)
+		if event.Completed != 336 || event.Total != 4033 || event.Failed != 16 {
+			t.Fatalf("event counts = %#v", event)
+		}
+		if event.ChunksPerS < 10.4 || event.ChunksPerS > 10.6 {
+			t.Fatalf("event speed = %#v", event)
 		}
 	})
 }
@@ -1304,6 +1808,9 @@ func TestLocalCommandHelpExitsZero(t *testing.T) {
 		{"auth --help", []string{"auth", "--help"}},
 		{"auth -h", []string{"auth", "-h"}},
 		{"config --help", []string{"config", "--help"}},
+		{"rag --help", []string{"rag", "--help"}},
+		{"rag-status --help", []string{"rag-status", "--help"}},
+		{"rag-search --help", []string{"rag-search", "--help"}},
 		{"doctor --help", []string{"doctor", "--help"}},
 		{"migrate-cache --help", []string{"migrate-cache", "--help"}},
 	} {
@@ -1331,6 +1838,10 @@ func TestLocalSubcommandHelpExitsZero(t *testing.T) {
 		{"auth status --help", []string{"auth", "status", "--help"}},
 		{"repo add --help", []string{"repo", "add", "--help"}},
 		{"repo status --help", []string{"repo", "status", "--help"}},
+		{"rag setup --help", []string{"rag", "setup", "--help"}},
+		{"rag index --help", []string{"rag", "index", "--help"}},
+		{"rag status --help", []string{"rag", "status", "--help"}},
+		{"rag search --help", []string{"rag", "search", "--help"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -1393,6 +1904,27 @@ func (s *repoInitLocalSource) ReadFile(path string) ([]byte, error) {
 func (s *repoInitLocalSource) WorkingDir() (string, error) { return s.cwd, nil }
 func (s *repoInitLocalSource) Stat(path string) (os.FileInfo, error) {
 	return os.Stat(path)
+}
+
+func waitForServiceSocket(t *testing.T, src config.Source) {
+	t.Helper()
+	manager := servicectl.Manager{Source: src}
+	client, err := manager.Client()
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var status servicectl.Status
+		err := client.Call(context.Background(), "Service.Status", nil, &status)
+		if err == nil && status.Status == servicectl.StatusRunning {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("service socket did not become ready: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func TestRepoInitLocalBootstrapsWorktreeCache(t *testing.T) {

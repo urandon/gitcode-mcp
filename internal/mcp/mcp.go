@@ -14,9 +14,12 @@ import (
 	"gitcode-mcp/internal/auth"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/capability"
+	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/gitcode"
+	"gitcode-mcp/internal/rag"
 	"gitcode-mcp/internal/service"
+	"gitcode-mcp/internal/servicectl"
 )
 
 const protocolVersion = "2024-11-05"
@@ -69,6 +72,8 @@ type RPCHandler struct {
 	minimal            bool
 	credentialResolver *auth.CredentialResolver
 	toolAccess         ToolAccess
+	ragStatus          RAGStatusProvider
+	ragSearch          RAGSearchProvider
 }
 
 type Server struct {
@@ -81,7 +86,12 @@ type Server struct {
 	minimal            bool
 	credentialResolver *auth.CredentialResolver
 	toolAccess         ToolAccess
+	ragStatus          RAGStatusProvider
+	ragSearch          RAGSearchProvider
 }
+
+type RAGStatusProvider func(context.Context, rag.StatusRequest) (rag.StatusResult, error)
+type RAGSearchProvider func(context.Context, rag.SearchRequest) (rag.SearchResult, error)
 
 func NewRPCHandler(svc serviceInterface) *RPCHandler {
 	return NewRPCHandlerWithToolAccess(svc, ToolAccessRead)
@@ -112,6 +122,28 @@ func NewWithToolAccess(r io.Reader, w io.Writer, stderr io.Writer, svc serviceIn
 	return &Server{reader: r, writer: w, stderr: stderr, handler: NewRPCHandlerWithCredentialResolverAndToolAccess(svc, credResolver, access), svc: svc, credentialResolver: credResolver, toolAccess: access}
 }
 
+func (h *RPCHandler) SetRAGStatusProvider(provider RAGStatusProvider) {
+	h.ragStatus = provider
+}
+
+func (h *RPCHandler) SetRAGSearchProvider(provider RAGSearchProvider) {
+	h.ragSearch = provider
+}
+
+func (s *Server) SetRAGStatusProvider(provider RAGStatusProvider) {
+	s.ragStatus = provider
+	if s.handler != nil {
+		s.handler.SetRAGStatusProvider(provider)
+	}
+}
+
+func (s *Server) SetRAGSearchProvider(provider RAGSearchProvider) {
+	s.ragSearch = provider
+	if s.handler != nil {
+		s.handler.SetRAGSearchProvider(provider)
+	}
+}
+
 func NewMinimal(r io.Reader, w io.Writer, stderr io.Writer, diagnostic StartupDiagnostic) *Server {
 	return &Server{reader: r, writer: w, stderr: stderr, handler: NewMinimalRPCHandler(diagnostic), startupDiagnostic: diagnostic, minimal: true, toolAccess: ToolAccessRead}
 }
@@ -121,7 +153,7 @@ func (h *RPCHandler) Handle(ctx context.Context, req request) (*response, bool) 
 		return &response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32600, Message: "Invalid request"}}, true
 	}
 	var buf bytes.Buffer
-	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver, toolAccess: normalizeToolAccess(h.toolAccess)}
+	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver, toolAccess: normalizeToolAccess(h.toolAccess), ragStatus: h.ragStatus, ragSearch: h.ragSearch}
 	server.handle(ctx, req, req.ID == nil)
 	line := bytes.TrimSpace(buf.Bytes())
 	if len(line) == 0 {
@@ -471,6 +503,52 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id. Omit for nothing-bound status."}}},
 	},
 	{
+		Name:        "service_status",
+		Description: "Poll the local service coordinator status through local IPC.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{}},
+	},
+	{
+		Name:        "service_jobs",
+		Description: "List local service coordinator jobs through local IPC.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{}},
+	},
+	{
+		Name:        "service_job_status",
+		Description: "Poll one local service coordinator job through local IPC.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"job_id": {Type: "string", Description: "Service job id.", MinLength: 1}}, Required: []string{"job_id"}},
+	},
+	{
+		Name:        "rag_status",
+		Description: "Report RAG provider readiness, namespace coverage, last index run, and active daemon job state.",
+		InputSchema: inputSchema{
+			Type: "object",
+			Properties: map[string]schemaProp{
+				"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1},
+				"profile": {Type: "string", Description: "RAG profile name."},
+			},
+			Required: []string{"repo_id"},
+		},
+	},
+	{
+		Name:        "rag_search",
+		Description: "Run semantic/hybrid RAG retrieval over cached chunks with citations, provenance, and transparent score breakdowns. Existing search_sources and search_chunks remain full-text.",
+		InputSchema: inputSchema{
+			Type: "object",
+			Properties: map[string]schemaProp{
+				"repo_id":     {Type: "string", Description: "Configured repository id.", MinLength: 1},
+				"query":       {Type: "string", Description: "Semantic/hybrid retrieval query.", MinLength: 1},
+				"profile":     {Type: "string", Description: "RAG profile name."},
+				"source_id":   {Type: "string", Description: "Source id filter."},
+				"record_id":   {Type: "string", Description: "Record id filter."},
+				"snapshot_id": {Type: "string", Description: "Snapshot id filter."},
+				"policy":      {Type: "string", Description: "Chunk policy namespace."},
+				"top_k":       {Type: "integer", Description: "Semantic candidate count.", Minimum: float64Ptr(1), Maximum: float64Ptr(500), Default: 40.0},
+				"limit":       {Type: "integer", Description: "Maximum packed contexts.", Minimum: float64Ptr(1), Maximum: float64Ptr(50), Default: 10.0},
+			},
+			Required: []string{"repo_id", "query"},
+		},
+	},
+	{
 		Name:        "list_pr_discussions",
 		Description: "List cached pull request review discussions grouped by discussion thread.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "unresolved_only": {Type: "boolean", Description: "Only include unresolved or unknown-resolution discussions."}}, Required: []string{"repo_id", "number"}},
@@ -659,6 +737,9 @@ var preWriteToolListOrder = []string{
 	"export_snapshot",
 	"diff_snapshot",
 	"repo_status",
+	"service_status",
+	"service_jobs",
+	"service_job_status",
 	"list_pr_discussions",
 	"sync_live",
 }
@@ -673,6 +754,9 @@ var toolListOrder = buildToolListOrder()
 
 func buildToolListOrder() []string {
 	names := append([]string(nil), preWriteToolListOrder...)
+	for _, cap := range capability.MCPRAGCapabilities() {
+		names = append(names, cap.MCPName)
+	}
 	for _, cap := range capability.MCPWriteCapabilities() {
 		names = append(names, cap.MCPName)
 	}
@@ -694,6 +778,19 @@ func toolDefinitionByName(name string) toolDefinition {
 
 func registerTool(registry toolRegistry, name string, handler toolHandler) {
 	registry[name] = registeredTool{definition: toolDefinitionByName(name), handler: handler}
+}
+
+func (s *Server) ragToolHandler(cap capability.Capability) toolHandler {
+	switch cap.ID {
+	case "rag_status":
+		return s.callRAGStatus
+	case "rag_search":
+		return s.callRAGSearch
+	default:
+		return func(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+			s.writeError(id, -32601, "Method not found", &errorData{Code: "unsupported_capability", Message: fmt.Sprintf("%q is declared but has no MCP handler", cap.MCPName)})
+		}
+	}
 }
 
 func (s *Server) toolRegistry() toolRegistry {
@@ -718,6 +815,12 @@ func (s *Server) toolRegistry() toolRegistry {
 	registerTool(registry, "export_snapshot", s.callExportSnapshot)
 	registerTool(registry, "diff_snapshot", s.callDiffSnapshot)
 	registerTool(registry, "repo_status", s.callRepoStatus)
+	registerTool(registry, "service_status", s.callServiceStatus)
+	registerTool(registry, "service_jobs", s.callServiceJobs)
+	registerTool(registry, "service_job_status", s.callServiceJobStatus)
+	for _, cap := range capability.MCPRAGCapabilities() {
+		registerTool(registry, cap.MCPName, s.ragToolHandler(cap))
+	}
 	registerTool(registry, "list_pr_discussions", s.callListPRDiscussions)
 	registerTool(registry, "sync_live", s.callSyncLive)
 	for _, cap := range capability.MCPWriteCapabilities() {
@@ -1162,6 +1265,191 @@ func (s *Server) callCacheStatus(ctx context.Context, id *json.RawMessage, args 
 	}
 	text := fmt.Sprintf("repo_id=%s records=%d chunks=%d journal=%s", result.RepoID, result.Records, result.Chunks, result.JournalMode)
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+type serviceJobStatusArgs struct {
+	JobID string `json:"job_id"`
+}
+
+type ragStatusArgs struct {
+	RepoID  string `json:"repo_id"`
+	Profile string `json:"profile,omitempty"`
+}
+
+type ragSearchArgs struct {
+	RepoID     string `json:"repo_id"`
+	Query      string `json:"query"`
+	Profile    string `json:"profile,omitempty"`
+	SourceID   string `json:"source_id,omitempty"`
+	RecordID   string `json:"record_id,omitempty"`
+	SnapshotID string `json:"snapshot_id,omitempty"`
+	Policy     string `json:"policy,omitempty"`
+	TopK       int    `json:"top_k,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+}
+
+func (s *Server) callServiceStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	client, err := serviceRPCClient()
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	var result servicectl.Status
+	if err := client.Call(ctx, "Service.Status", nil, &result); err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	text := fmt.Sprintf("service status=%s running=%t", result.Status, result.Running)
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func (s *Server) callServiceJobs(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	client, err := serviceRPCClient()
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	var result servicectl.JobListResult
+	if err := client.Call(ctx, "Jobs.List", nil, &result); err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	text := fmt.Sprintf("jobs=%d", len(result.Jobs))
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func (s *Server) callServiceJobStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a serviceJobStatusArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if a.JobID == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "job_id is required"})
+		return
+	}
+	client, err := serviceRPCClient()
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	var result servicectl.Job
+	if err := client.Call(ctx, "Jobs.Get", map[string]string{"job_id": a.JobID}, &result); err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	text := fmt.Sprintf("job_id=%s status=%s completed=%d/%d", result.ID, result.Status, result.Completed, result.Steps)
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func (s *Server) callRAGStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a ragStatusArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if a.RepoID == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+		return
+	}
+	if s.ragStatus == nil {
+		s.writeError(id, -32000, "Server error", &errorData{Code: "rag_status_unavailable", Message: "rag status provider is not configured"})
+		return
+	}
+	serviceStatus, activeJob := lookupMCPRAGServiceState(ctx, a.RepoID)
+	result, err := s.ragStatus(ctx, rag.StatusRequest{RepoID: a.RepoID, ProfileID: a.Profile, Service: serviceStatus, ActiveJob: activeJob})
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	text := fmt.Sprintf("rag_status=%s provider_ready=%t coverage=%d/%d missing=%d stale=%d", result.Status, result.Provider.Ready, result.Coverage.EmbeddedChunks, result.Coverage.TotalChunks, result.Coverage.MissingChunks, result.Coverage.StaleChunks)
+	if result.ActiveJob != nil {
+		text += fmt.Sprintf(" active_job=%s:%s", result.ActiveJob.ID, result.ActiveJob.Status)
+	}
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func (s *Server) callRAGSearch(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a ragSearchArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if a.RepoID == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+		return
+	}
+	if strings.TrimSpace(a.Query) == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "query is required"})
+		return
+	}
+	if a.TopK < 0 || a.Limit < 0 {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "top_k and limit must be non-negative"})
+		return
+	}
+	if s.ragSearch == nil {
+		s.writeError(id, -32000, "Server error", &errorData{Code: "rag_search_unavailable", Message: "rag search provider is not configured"})
+		return
+	}
+	result, err := s.ragSearch(ctx, rag.SearchRequest{RepoID: a.RepoID, Query: a.Query, ProfileID: a.Profile, SourceID: a.SourceID, RecordID: a.RecordID, SnapshotID: a.SnapshotID, ChunkPolicyID: a.Policy, TopK: a.TopK, Limit: a.Limit})
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	text := fmt.Sprintf("rag_search=%s results=%d", result.Status, len(result.Results))
+	if result.Namespace.ID != "" {
+		text += fmt.Sprintf(" namespace=%s", result.Namespace.ID)
+	}
+	if len(result.Results) > 0 {
+		top := result.Results[0]
+		text += fmt.Sprintf(" top=%s score=%.4f", top.ChunkID, top.Score.Hybrid)
+	}
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func lookupMCPRAGServiceState(ctx context.Context, repoID string) (*rag.ServiceStatus, *rag.JobStatus) {
+	client, err := serviceRPCClient()
+	if err != nil {
+		return nil, nil
+	}
+	serviceStatus := &rag.ServiceStatus{}
+	var svcStatus servicectl.Status
+	if err := client.Call(ctx, "Service.Status", nil, &svcStatus); err == nil {
+		serviceStatus.Status = svcStatus.Status
+		serviceStatus.Running = svcStatus.Running
+		serviceStatus.PID = svcStatus.PID
+		serviceStatus.SocketPresent = svcStatus.SocketPresent
+		serviceStatus.SocketPath = svcStatus.SocketPath
+		serviceStatus.Message = svcStatus.Message
+	}
+	var jobs servicectl.JobListResult
+	if err := client.Call(ctx, "Jobs.List", nil, &jobs); err != nil {
+		return serviceStatus, nil
+	}
+	for _, job := range jobs.Jobs {
+		if job.Type != servicectl.RAGIndexJobType || job.RepoID != repoID {
+			continue
+		}
+		if job.Status != servicectl.JobStatusQueued && job.Status != servicectl.JobStatusRunning {
+			continue
+		}
+		return serviceStatus, &rag.JobStatus{
+			ID:        job.ID,
+			Type:      job.Type,
+			RepoID:    job.RepoID,
+			ProfileID: job.ProfileID,
+			Status:    job.Status,
+			Steps:     job.Steps,
+			Completed: job.Completed,
+			Error:     job.Error,
+			Progress:  append([]service.ProgressEvent(nil), job.Progress...),
+		}
+	}
+	return serviceStatus, nil
+}
+
+func serviceRPCClient() (*servicectl.RPCClient, error) {
+	return servicectl.Manager{Source: config.OSSource{}}.Client()
 }
 
 type listPRDiscussionsArgs struct {

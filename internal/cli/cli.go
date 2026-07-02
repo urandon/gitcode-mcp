@@ -22,7 +22,9 @@ import (
 	"gitcode-mcp/internal/doctor"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
+	"gitcode-mcp/internal/rag"
 	"gitcode-mcp/internal/service"
+	"gitcode-mcp/internal/servicectl"
 )
 
 var commands = []string{
@@ -57,6 +59,10 @@ var commands = []string{
 	"publish-release",
 	"config",
 	"auth",
+	"service",
+	"rag",
+	"rag-status",
+	"rag-search",
 	"doctor",
 	"migrate-cache",
 	"repo",
@@ -111,6 +117,7 @@ type serviceFactory func(context.Context, string) (queryService, func() error, e
 type localCommandDeps struct {
 	Source             config.Source
 	CredentialReporter config.CredentialStatusReporter
+	RAGRuntime         rag.Runtime
 }
 
 type startupPlan struct {
@@ -175,6 +182,7 @@ type options struct {
 	labels         string
 	tag            string
 	ref            string
+	profile        string
 	asset          multiFlag
 	idempotencyKey string
 	dryRun         bool
@@ -195,7 +203,13 @@ type options struct {
 	recordID       string
 	snapshotID     string
 	confirm        bool
+	yes            bool
 	helpRequested  bool
+	steps          int
+	intervalMS     int
+	batchSize      int
+	topK           int
+	detach         bool
 }
 
 type multiFlag []string
@@ -260,8 +274,8 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 		fmt.Fprintf(stdout, "gitcode-mcp %s\n", buildinfo.Version)
 		return 0
 	}
-	if args[0] == "config" || args[0] == "auth" || args[0] == "doctor" || args[0] == "migrate-cache" || args[0] == "bind" {
-		return executeLocalCommand(args, stdout, stderr, deps)
+	if args[0] == "config" || args[0] == "auth" || args[0] == "service" || args[0] == "rag" || args[0] == "rag-status" || args[0] == "rag-search" || args[0] == "doctor" || args[0] == "migrate-cache" || args[0] == "bind" {
+		return executeLocalCommand(ctx, args, stdout, stderr, deps)
 	}
 	if !isKnownCommand(args[0]) {
 		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
@@ -520,6 +534,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.labels, "labels", "", "comma-separated labels")
 	flags.StringVar(&opts.tag, "tag", "", "release tag")
 	flags.StringVar(&opts.ref, "ref", "", "release ref")
+	flags.StringVar(&opts.profile, "profile", "", "RAG profile")
 	flags.Var(&opts.asset, "asset", "release asset link as name=url")
 	flags.Var(&opts.asset, "asset-url", "release asset link as name=url")
 	flags.StringVar(&opts.idempotencyKey, "idempotency-key", "", "idempotency key")
@@ -543,6 +558,12 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.BoolVar(&opts.helpRequested, "help", false, "show help for command")
 	flags.BoolVar(&opts.helpRequested, "h", false, "show help for command")
 	flags.BoolVar(&opts.confirm, "confirm", false, "confirm migration without interactive prompt")
+	flags.BoolVar(&opts.yes, "yes", false, "answer yes to setup prompts")
+	flags.IntVar(&opts.steps, "steps", 0, "fake job step count")
+	flags.IntVar(&opts.intervalMS, "interval-ms", 0, "fake job interval in milliseconds")
+	flags.IntVar(&opts.batchSize, "batch-size", 0, "RAG embedding batch size")
+	flags.IntVar(&opts.topK, "top-k", 0, "RAG semantic candidate count")
+	flags.BoolVar(&opts.detach, "detach", false, "start job without attaching progress")
 	if err := flags.Parse(reorderFlags(args)); err != nil {
 		return opts, nil, service.ErrInvalidQuery{Field: "flags", Message: err.Error()}
 	}
@@ -569,7 +590,7 @@ func reorderFlags(args []string) []string {
 		arg := args[i]
 		if strings.HasPrefix(arg, "--") {
 			flags = append(flags, arg)
-			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--index" || arg == "--quiet" || arg == "--dry-run" || arg == "--live" || arg == "--offline" || arg == "--fixture" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" {
+			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--index" || arg == "--quiet" || arg == "--dry-run" || arg == "--live" || arg == "--offline" || arg == "--fixture" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" || arg == "--yes" || arg == "--detach" {
 				continue
 			}
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
@@ -583,7 +604,7 @@ func reorderFlags(args []string) []string {
 	return append(flags, positionals...)
 }
 
-func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
 	if deps.Source == nil {
 		deps.Source = config.OSSource{}
 	}
@@ -602,7 +623,7 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 	}
 	if opts.helpRequested {
 		sub, _ := firstArg(rest)
-		if sub != "" && (command == "config" || command == "auth" || command == "repo") {
+		if sub != "" && (command == "config" || command == "auth" || command == "repo" || command == "service" || command == "rag") {
 			switch command + " " + sub {
 			case "config init", "config locate", "config show":
 				printLocalSubcommandHelp(command, sub, stdout)
@@ -611,6 +632,10 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 			case "repo add", "repo status":
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "repo init-local":
+				printLocalSubcommandHelp(command, sub, stdout)
+			case "service run", "service install", "service uninstall", "service start", "service stop", "service status", "service doctor", "service fake-job", "service jobs", "service job", "service attach", "service cancel":
+				printLocalSubcommandHelp(command, sub, stdout)
+			case "rag setup", "rag index", "rag status", "rag search":
 				printLocalSubcommandHelp(command, sub, stdout)
 			default:
 				printCommandHelp(command, stdout)
@@ -630,15 +655,27 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 		return 0
 	}
 	if command == "doctor" {
-		plan, planErr := buildStartupPlan(context.Background(), command, opts, deps)
+		plan, planErr := buildStartupPlan(ctx, command, opts, deps)
 		var invalid service.ErrInvalidQuery
 		if errors.As(planErr, &invalid) {
 			return writeError(stderr, opts.format, planErr)
 		}
-		return executeDoctorCommand(context.Background(), opts, plan, stdout, stderr, deps)
+		return executeDoctorCommand(ctx, opts, plan, stdout, stderr, deps)
 	}
 	if command == "migrate-cache" {
-		return executeMigrateCacheCommand(context.Background(), opts, stdout, stderr, deps)
+		return executeMigrateCacheCommand(ctx, opts, stdout, stderr, deps)
+	}
+	if command == "service" {
+		return executeServiceCommand(ctx, rest, opts, stdout, stderr, deps)
+	}
+	if command == "rag" {
+		return executeRAGCommand(ctx, rest, opts, stdout, stderr, deps)
+	}
+	if command == "rag-status" {
+		return executeRAGStatusCommand(ctx, opts, stdout, stderr, deps)
+	}
+	if command == "rag-search" {
+		return executeRAGSearchCommand(ctx, rest, opts, stdout, stderr, deps)
 	}
 	if command == "bind" {
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "bind", Message: "use repo add to create repository bindings"})
@@ -686,11 +723,11 @@ func executeLocalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 			fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), deps.Source))
 			return 1
 		}
-		status := deps.CredentialReporter.Status(context.Background(), eff)
+		status := deps.CredentialReporter.Status(ctx, eff)
 		if opts.live {
-			resolution, _ := resolveLiveCredential(context.Background(), eff, deps)
+			resolution, _ := resolveLiveCredential(ctx, eff, deps)
 			status = resolution.Status()
-			status = probeAuthStatus(context.Background(), deps.Source, eff, opts, status, resolution.Token)
+			status = probeAuthStatus(ctx, deps.Source, eff, opts, status, resolution.Token)
 		}
 		sanitizedStatus := sanitizeCredentialStatus(status, deps.Source)
 		if opts.format == "json" {
@@ -744,6 +781,261 @@ func probeAuthStatus(ctx context.Context, src config.Source, eff config.Effectiv
 	return status
 }
 
+func executeRAGCommand(ctx context.Context, args []string, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+	sub, ok := firstArg(args)
+	if !ok {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "rag", Message: "subcommand is required"})
+	}
+	switch sub {
+	case "setup":
+		eff, err := config.LoadEffective(deps.Source, config.Overrides{})
+		if err != nil {
+			fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), deps.Source))
+			return 1
+		}
+		result, err := rag.Setup(ctx, rag.SetupRequest{Config: eff.Config, Profile: opts.profile, Yes: opts.yes, DryRun: opts.dryRun, Runtime: deps.RAGRuntime})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		code := render(stdout, opts.format, result, renderRAGSetupText)
+		if result.Status != "ready" && !opts.dryRun {
+			return 1
+		}
+		return code
+	case "index":
+		manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Version}
+		client, clientErr := manager.Client()
+		if clientErr != nil {
+			return writeError(stderr, opts.format, clientErr)
+		}
+		var job servicectl.Job
+		if err := client.Call(ctx, "Jobs.StartRAGIndex", servicectl.StartRAGIndexJobRequest{RepoID: opts.repo, Profile: opts.profile, CachePath: opts.cachePath, BatchSize: opts.batchSize, ChunkPolicy: opts.policy}, &job); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		if opts.detach {
+			return render(stdout, opts.format, job, renderServiceJobText)
+		}
+		return attachRAGIndexJob(ctx, client, job.ID, opts, stdout, stderr)
+	case "status":
+		return executeRAGStatusCommand(ctx, opts, stdout, stderr, deps)
+	case "search":
+		return executeRAGSearchCommand(ctx, args[1:], opts, stdout, stderr, deps)
+	default:
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "rag", Message: "unknown subcommand"})
+	}
+}
+
+func executeRAGSearchCommand(ctx context.Context, args []string, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+	if len(args) == 0 {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "query", Message: "query is required"})
+	}
+	eff, err := config.LoadEffective(deps.Source, config.Overrides{CachePath: opts.cachePath})
+	if err != nil {
+		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), deps.Source))
+		return 1
+	}
+	store, err := cache.NewSQLiteReadOnlyStore(ctx, eff.Config.CachePath)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	defer store.Close()
+	ops := rag.NewOperations(store, eff.Config, rag.OperationsOptions{})
+	result, err := ops.Search(ctx, rag.SearchRequest{
+		RepoID:        opts.repo,
+		Query:         strings.Join(args, " "),
+		ProfileID:     opts.profile,
+		SourceID:      opts.sourceID,
+		RecordID:      opts.recordID,
+		SnapshotID:    opts.snapshotID,
+		ChunkPolicyID: opts.policy,
+		TopK:          opts.topK,
+		Limit:         opts.limit,
+	})
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	return render(stdout, opts.format, result, renderRAGSearchText)
+}
+
+func executeRAGStatusCommand(ctx context.Context, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+	eff, err := config.LoadEffective(deps.Source, config.Overrides{CachePath: opts.cachePath})
+	if err != nil {
+		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), deps.Source))
+		return 1
+	}
+	store, err := cache.NewSQLiteReadOnlyStore(ctx, eff.Config.CachePath)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	defer store.Close()
+	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Version}
+	ops := rag.NewOperations(store, eff.Config, rag.OperationsOptions{ServiceState: func(ctx context.Context, repoID string) (*rag.ServiceStatus, *rag.JobStatus) {
+		return lookupRAGServiceState(ctx, manager, repoID)
+	}})
+	result, err := ops.Status(ctx, rag.StatusRequest{
+		RepoID:    opts.repo,
+		ProfileID: opts.profile,
+	})
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	return render(stdout, opts.format, result, renderRAGStatusText)
+}
+
+func lookupRAGServiceState(ctx context.Context, manager servicectl.Manager, repoID string) (*rag.ServiceStatus, *rag.JobStatus) {
+	status, err := manager.Status()
+	var serviceStatus *rag.ServiceStatus
+	if err == nil {
+		serviceStatus = &rag.ServiceStatus{
+			Status:        status.Status,
+			Running:       status.Running,
+			PID:           status.PID,
+			SocketPresent: status.SocketPresent,
+			SocketPath:    status.SocketPath,
+			Message:       status.Message,
+		}
+	}
+	if serviceStatus == nil || !serviceStatus.Running {
+		return serviceStatus, nil
+	}
+	client, err := manager.Client()
+	if err != nil {
+		serviceStatus.Message = firstNonEmpty(serviceStatus.Message, err.Error())
+		return serviceStatus, nil
+	}
+	var result servicectl.JobListResult
+	if err := client.Call(ctx, "Jobs.List", nil, &result); err != nil {
+		serviceStatus.Message = firstNonEmpty(serviceStatus.Message, err.Error())
+		return serviceStatus, nil
+	}
+	for _, job := range result.Jobs {
+		if job.Type != servicectl.RAGIndexJobType || job.RepoID != repoID {
+			continue
+		}
+		if job.Status != servicectl.JobStatusQueued && job.Status != servicectl.JobStatusRunning {
+			continue
+		}
+		return serviceStatus, ragJobStatusFromService(job)
+	}
+	return serviceStatus, nil
+}
+
+func ragJobStatusFromService(job servicectl.Job) *rag.JobStatus {
+	return &rag.JobStatus{
+		ID:        job.ID,
+		Type:      job.Type,
+		RepoID:    job.RepoID,
+		ProfileID: job.ProfileID,
+		Status:    job.Status,
+		Steps:     job.Steps,
+		Completed: job.Completed,
+		Error:     job.Error,
+		Progress:  append([]service.ProgressEvent(nil), job.Progress...),
+	}
+}
+
+func renderRAGSetupText(w io.Writer, result rag.SetupResult) {
+	fmt.Fprintf(w, "status: %s\n", result.Status)
+	fmt.Fprintf(w, "profile: %s\n", result.Profile)
+	fmt.Fprintf(w, "provider: %s\n", result.Provider)
+	fmt.Fprintf(w, "provider_type: %s\n", result.ProviderType)
+	fmt.Fprintf(w, "endpoint: %s\n", result.Endpoint)
+	if result.Executable != "" {
+		fmt.Fprintf(w, "executable: %s\n", result.Executable)
+	}
+	if result.ExecutablePath != "" {
+		fmt.Fprintf(w, "executable_path: %s\n", result.ExecutablePath)
+	}
+	fmt.Fprintf(w, "provider_installed: %t\n", result.ProviderInstalled)
+	fmt.Fprintf(w, "provider_live: %t\n", result.ProviderLive)
+	fmt.Fprintf(w, "autostart: %t\n", result.Autostart)
+	fmt.Fprintf(w, "model: %s\n", result.Model)
+	fmt.Fprintf(w, "model_available: %t\n", result.ModelAvailable)
+	if result.ModelStorePath != "" {
+		fmt.Fprintf(w, "model_store_path: %s\n", result.ModelStorePath)
+	}
+	if result.ProviderModelEnv != "" {
+		fmt.Fprintf(w, "provider_model_env: %s\n", result.ProviderModelEnv)
+	}
+	if result.ProviderModelPath != "" {
+		fmt.Fprintf(w, "provider_model_path: %s\n", result.ProviderModelPath)
+	}
+	fmt.Fprintf(w, "pull_attempted: %t\n", result.PullAttempted)
+	fmt.Fprintf(w, "embedding_smoke: %s\n", result.EmbeddingSmoke)
+	if len(result.Actions) > 0 {
+		fmt.Fprintf(w, "actions: %s\n", strings.Join(result.Actions, "; "))
+	}
+	if len(result.InstallInstructions) > 0 {
+		fmt.Fprintf(w, "install_instructions: %s\n", strings.Join(result.InstallInstructions, " "))
+	}
+	if len(result.Diagnostics) > 0 {
+		fmt.Fprintf(w, "diagnostics: %s\n", strings.Join(result.Diagnostics, "; "))
+	}
+}
+
+func renderRAGStatusText(w io.Writer, result rag.StatusResult) {
+	fmt.Fprintf(w, "status: %s\n", result.Status)
+	fmt.Fprintf(w, "repo_id: %s\n", result.RepoID)
+	fmt.Fprintf(w, "profile: %s\n", cliEmptyAsNone(result.Provider.ProfileID))
+	fmt.Fprintf(w, "provider: %s\n", cliEmptyAsNone(result.Provider.ProviderID))
+	fmt.Fprintf(w, "provider_type: %s\n", cliEmptyAsNone(result.Provider.ProviderType))
+	fmt.Fprintf(w, "endpoint: %s\n", cliEmptyAsNone(result.Provider.Endpoint))
+	fmt.Fprintf(w, "model: %s\n", cliEmptyAsNone(result.Provider.Model))
+	if result.Provider.Revision != "" {
+		fmt.Fprintf(w, "revision: %s\n", result.Provider.Revision)
+	}
+	fmt.Fprintf(w, "provider_ready: %t\n", result.Provider.Ready)
+	fmt.Fprintf(w, "namespace_exists: %t\n", result.Namespace.Exists)
+	if result.Namespace.ID != "" {
+		fmt.Fprintf(w, "namespace_id: %s\n", result.Namespace.ID)
+	}
+	fmt.Fprintf(w, "coverage: %d/%d embedded, %d missing, %d stale, %d failed, %d skipped\n", result.Coverage.EmbeddedChunks, result.Coverage.TotalChunks, result.Coverage.MissingChunks, result.Coverage.StaleChunks, result.Coverage.FailedChunks, result.Coverage.SkippedChunks)
+	if result.ActiveJob != nil {
+		fmt.Fprintf(w, "active_job: %s %s %d/%d\n", result.ActiveJob.ID, result.ActiveJob.Status, result.ActiveJob.Completed, result.ActiveJob.Steps)
+	}
+	if result.LastRun != nil {
+		fmt.Fprintf(w, "last_run: %s %s %d/%d\n", result.LastRun.ID, result.LastRun.Status, result.LastRun.EmbeddedChunks+result.LastRun.SkippedChunks, result.LastRun.TotalChunks)
+	}
+	if result.Service != nil {
+		fmt.Fprintf(w, "service: %s\n", result.Service.Status)
+	}
+	if result.FailureClass != "" {
+		fmt.Fprintf(w, "failure_class: %s\n", result.FailureClass)
+	}
+	if result.Provider.Message != "" {
+		fmt.Fprintf(w, "provider_message: %s\n", result.Provider.Message)
+	}
+	if result.Message != "" {
+		fmt.Fprintf(w, "message: %s\n", result.Message)
+	}
+}
+
+func renderRAGSearchText(w io.Writer, result rag.SearchResult) {
+	fmt.Fprintf(w, "search_mode: %s status: %s\n", result.SearchMode, result.Status)
+	if result.Namespace.ID != "" {
+		fmt.Fprintf(w, "namespace: %s model: %s\n", result.Namespace.ID, cliEmptyAsNone(result.Provider.Model))
+	}
+	for _, item := range result.Results {
+		locator := item.Path
+		if locator == "" {
+			locator = item.SourceID
+		}
+		if item.LineStart > 0 {
+			locator = fmt.Sprintf("%s:%d", locator, item.LineStart)
+		}
+		fmt.Fprintf(w, "%d %.4f sem=%.4f lex=%.4f %s %s %s\n", item.Rank, item.Score.Hybrid, item.Score.Semantic, item.Score.Lexical, item.SourceID, locator, item.Snippet)
+	}
+	for _, warning := range result.Warnings {
+		fmt.Fprintf(w, "warning: %s\n", warning)
+	}
+	if result.FailureClass != "" {
+		fmt.Fprintf(w, "failure_class: %s\n", result.FailureClass)
+	}
+	if result.Message != "" {
+		fmt.Fprintf(w, "message: %s\n", result.Message)
+	}
+}
+
 func sanitizeCredentialStatus(status config.CredentialStatus, src config.Source) config.CredentialStatus {
 	status.Source = config.RedactDiagnostic(status.Source, src)
 	status.ErrorClass = config.RedactDiagnostic(status.ErrorClass, src)
@@ -763,6 +1055,411 @@ func sanitizeCredentialStatus(status config.CredentialStatus, src config.Source)
 		status.AuthProbe = &probe
 	}
 	return status
+}
+
+func executeServiceCommand(ctx context.Context, args []string, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+	sub, ok := firstArg(args)
+	if !ok {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "service", Message: "subcommand is required"})
+	}
+	rest := args[1:]
+	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Version}
+	var (
+		status servicectl.Status
+		err    error
+	)
+	switch sub {
+	case "install":
+		status, err = manager.Install(opts.overwrite)
+	case "uninstall":
+		status, err = manager.Uninstall()
+	case "start":
+		status, err = manager.Start(ctx)
+	case "stop":
+		status, err = manager.Stop(ctx)
+	case "status":
+		status, err = manager.Status()
+	case "doctor":
+		status, err = manager.Doctor()
+	case "run":
+		err = manager.Run(ctx)
+		if errors.Is(err, context.Canceled) {
+			return 0
+		}
+		if err == nil {
+			return 0
+		}
+		return writeError(stderr, opts.format, err)
+	case "fake-job":
+		client, clientErr := manager.Client()
+		if clientErr != nil {
+			return writeError(stderr, opts.format, clientErr)
+		}
+		var job servicectl.Job
+		if err := client.Call(ctx, "Jobs.StartFake", servicectl.StartFakeJobRequest{Steps: opts.steps, IntervalMS: opts.intervalMS}, &job); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		if opts.detach {
+			return render(stdout, opts.format, job, renderServiceJobText)
+		}
+		return attachServiceJob(ctx, client, job.ID, opts, stdout, stderr)
+	case "jobs":
+		client, clientErr := manager.Client()
+		if clientErr != nil {
+			return writeError(stderr, opts.format, clientErr)
+		}
+		var result servicectl.JobListResult
+		if err := client.Call(ctx, "Jobs.List", nil, &result); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, renderServiceJobListText)
+	case "job", "attach", "cancel":
+		id, idOK := firstArg(rest)
+		if !idOK {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "job_id", Message: "job id is required"})
+		}
+		client, clientErr := manager.Client()
+		if clientErr != nil {
+			return writeError(stderr, opts.format, clientErr)
+		}
+		if sub == "attach" {
+			return attachServiceJob(ctx, client, id, opts, stdout, stderr)
+		}
+		var job servicectl.Job
+		method := "Jobs.Get"
+		if sub == "cancel" {
+			method = "Jobs.Cancel"
+		}
+		if err := client.Call(ctx, method, map[string]string{"job_id": id}, &job); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, job, renderServiceJobText)
+	default:
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "service", Message: "unknown subcommand"})
+	}
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	return render(stdout, opts.format, status, renderServiceStatusText)
+}
+
+func attachServiceJob(ctx context.Context, client *servicectl.RPCClient, id string, opts options, stdout io.Writer, stderr io.Writer) int {
+	seen := 0
+	for {
+		var job servicectl.Job
+		if err := client.Call(ctx, "Jobs.Get", map[string]string{"job_id": id}, &job); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		for ; seen < len(job.Progress); seen++ {
+			renderServiceJobProgress(stderr, job.ID, job.Progress[seen])
+		}
+		if serviceJobTerminal(job.Status) {
+			return render(stdout, opts.format, job, renderServiceJobText)
+		}
+		select {
+		case <-ctx.Done():
+			return writeError(stderr, opts.format, ctx.Err())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func attachRAGIndexJob(ctx context.Context, client *servicectl.RPCClient, id string, opts options, stdout io.Writer, stderr io.Writer) int {
+	mode := syncProgressMode(opts, stderr)
+	seen := 0
+	state := ragIndexProgressState{Started: time.Now().UTC()}
+	encoder := json.NewEncoder(stderr)
+	renderedSpinner := false
+	for {
+		var job servicectl.Job
+		if err := client.Call(ctx, "Jobs.Get", map[string]string{"job_id": id}, &job); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		state.ApplyJob(job)
+		for ; seen < len(job.Progress); seen++ {
+			state.ApplyEvent(job.Progress[seen])
+			switch mode {
+			case "jsonl":
+				_ = encoder.Encode(ragIndexProgressJSONEvent(state, time.Now().UTC()))
+			case "lines":
+				renderRAGIndexProgressLine(stderr, state, time.Now().UTC())
+			}
+		}
+		if mode == "spinner" {
+			renderRAGIndexProgressSpinnerFrame(stderr, &state, time.Now().UTC())
+			renderedSpinner = true
+		}
+		if serviceJobTerminal(job.Status) {
+			if mode == "spinner" && renderedSpinner {
+				renderRAGIndexProgressSpinnerFinal(stderr, &state, time.Now().UTC())
+			}
+			code := render(stdout, opts.format, job, renderServiceJobText)
+			if job.Status == servicectl.JobStatusFailed || job.Status == servicectl.JobStatusCancelled || job.Status == servicectl.JobStatusInterrupted {
+				return 1
+			}
+			return code
+		}
+		select {
+		case <-ctx.Done():
+			return writeError(stderr, opts.format, ctx.Err())
+		case <-time.After(120 * time.Millisecond):
+		}
+	}
+}
+
+func serviceJobTerminal(status string) bool {
+	switch status {
+	case servicectl.JobStatusSucceeded, servicectl.JobStatusFailed, servicectl.JobStatusCancelled, servicectl.JobStatusInterrupted:
+		return true
+	default:
+		return false
+	}
+}
+
+func renderServiceStatusText(w io.Writer, status servicectl.Status) {
+	fmt.Fprintf(w, "status: %s\n", status.Status)
+	fmt.Fprintf(w, "installed: %t\n", status.Installed)
+	fmt.Fprintf(w, "running: %t\n", status.Running)
+	if status.PID > 0 {
+		fmt.Fprintf(w, "pid: %d\n", status.PID)
+	}
+	fmt.Fprintf(w, "pid_alive: %t\n", status.PIDAlive)
+	fmt.Fprintf(w, "socket_present: %t\n", status.SocketPresent)
+	fmt.Fprintf(w, "socket_path: %s\n", status.SocketPath)
+	fmt.Fprintf(w, "runtime_dir: %s\n", status.RuntimeDir)
+	fmt.Fprintf(w, "log_dir: %s\n", status.LogDir)
+	fmt.Fprintf(w, "state_path: %s\n", status.StatePath)
+	fmt.Fprintf(w, "install_kind: %s\n", status.InstallKind)
+	fmt.Fprintf(w, "install_path: %s\n", status.InstallPath)
+	if status.RAG != nil {
+		fmt.Fprintf(w, "rag_status: %s\n", status.RAG.Status)
+		fmt.Fprintf(w, "rag_profile: %s\n", status.RAG.Profile)
+		fmt.Fprintf(w, "rag_provider: %s\n", status.RAG.Provider)
+		fmt.Fprintf(w, "rag_endpoint: %s\n", status.RAG.Endpoint)
+		fmt.Fprintf(w, "rag_model: %s\n", status.RAG.Model)
+		fmt.Fprintf(w, "rag_model_available: %t\n", status.RAG.ModelAvailable)
+		fmt.Fprintf(w, "rag_provider_installed: %t\n", status.RAG.ProviderInstalled)
+		fmt.Fprintf(w, "rag_provider_live: %t\n", status.RAG.ProviderLive)
+		if status.RAG.ModelStorePath != "" {
+			fmt.Fprintf(w, "rag_model_store_path: %s\n", status.RAG.ModelStorePath)
+		}
+		if status.RAG.ProviderModelEnv != "" {
+			fmt.Fprintf(w, "rag_provider_model_env: %s\n", status.RAG.ProviderModelEnv)
+		}
+		if len(status.RAG.Actions) > 0 {
+			fmt.Fprintf(w, "rag_actions: %s\n", strings.Join(status.RAG.Actions, "; "))
+		}
+	}
+	if status.UpdatedAt != nil && !status.UpdatedAt.IsZero() {
+		fmt.Fprintf(w, "updated_at: %s\n", status.UpdatedAt.Format(time.RFC3339))
+	}
+	if status.Message != "" {
+		fmt.Fprintf(w, "message: %s\n", status.Message)
+	}
+}
+
+func renderServiceJobListText(w io.Writer, result servicectl.JobListResult) {
+	for _, job := range result.Jobs {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d/%d\n", job.ID, job.Type, job.Status, job.Completed, job.Steps)
+	}
+}
+
+func renderServiceJobText(w io.Writer, job servicectl.Job) {
+	fmt.Fprintf(w, "job_id: %s\n", job.ID)
+	fmt.Fprintf(w, "type: %s\n", job.Type)
+	fmt.Fprintf(w, "status: %s\n", job.Status)
+	fmt.Fprintf(w, "completed: %d\n", job.Completed)
+	fmt.Fprintf(w, "steps: %d\n", job.Steps)
+	fmt.Fprintf(w, "created_at: %s\n", job.CreatedAt.Format(time.RFC3339))
+	fmt.Fprintf(w, "updated_at: %s\n", job.UpdatedAt.Format(time.RFC3339))
+	if job.StartedAt != nil {
+		fmt.Fprintf(w, "started_at: %s\n", job.StartedAt.Format(time.RFC3339))
+	}
+	if job.FinishedAt != nil {
+		fmt.Fprintf(w, "finished_at: %s\n", job.FinishedAt.Format(time.RFC3339))
+	}
+	if job.Error != "" {
+		fmt.Fprintf(w, "message: %s\n", job.Error)
+	}
+	if len(job.Progress) > 0 {
+		fmt.Fprintf(w, "progress_events: %d\n", len(job.Progress))
+	}
+}
+
+func renderServiceJobProgress(w io.Writer, jobID string, ev service.ProgressEvent) {
+	fmt.Fprintf(w, "job progress: job_id=%s", jobID)
+	if ev.Type != "" {
+		fmt.Fprintf(w, " type=%s", ev.Type)
+	}
+	if ev.Phase != "" {
+		fmt.Fprintf(w, " phase=%s", ev.Phase)
+	}
+	if ev.Collection != "" {
+		fmt.Fprintf(w, " collection=%s", ev.Collection)
+	}
+	if ev.Page > 0 {
+		fmt.Fprintf(w, " step=%d", ev.Page)
+	}
+	if ev.RecordsFetched > 0 {
+		fmt.Fprintf(w, " records=%d", ev.RecordsFetched)
+	}
+	if ev.Message != "" {
+		fmt.Fprintf(w, " message=%q", ev.Message)
+	}
+	fmt.Fprintln(w)
+}
+
+type ragIndexProgressState struct {
+	Started  time.Time
+	Frame    int
+	JobID    string
+	Status   string
+	Phase    string
+	Total    int
+	Embedded int
+	Skipped  int
+	Failed   int
+	Message  string
+}
+
+func (s *ragIndexProgressState) ApplyJob(job servicectl.Job) {
+	s.JobID = job.ID
+	if job.Status != "" {
+		s.Status = job.Status
+	}
+	if job.StartedAt != nil && !job.StartedAt.IsZero() {
+		s.Started = job.StartedAt.UTC()
+	} else if !job.CreatedAt.IsZero() && s.Started.IsZero() {
+		s.Started = job.CreatedAt.UTC()
+	}
+	if job.Steps > 0 {
+		s.Total = job.Steps
+	}
+	if job.Error != "" {
+		s.Message = job.Error
+	}
+}
+
+func (s *ragIndexProgressState) ApplyEvent(ev service.ProgressEvent) {
+	if ev.Phase != "" {
+		s.Phase = ev.Phase
+	}
+	if ev.RecordsListed > 0 {
+		s.Total = ev.RecordsListed
+	}
+	if ev.RecordsFetched > 0 {
+		s.Embedded = ev.RecordsFetched
+	}
+	if ev.RecordsSkipped > 0 {
+		s.Skipped = ev.RecordsSkipped
+	}
+	if ev.RecordsFailed > 0 {
+		s.Failed = ev.RecordsFailed
+	}
+	if ev.Message != "" {
+		s.Message = ev.Message
+	}
+}
+
+func (s ragIndexProgressState) completed() int {
+	return s.Embedded + s.Skipped
+}
+
+func renderRAGIndexProgressSpinnerFrame(w io.Writer, state *ragIndexProgressState, now time.Time) {
+	frames := []string{"-", "\\", "|", "/"}
+	frame := frames[state.Frame%len(frames)]
+	state.Frame++
+	fmt.Fprintf(w, "\r\033[K%s ", frame)
+	renderRAGIndexProgressSummary(w, *state, now)
+}
+
+func renderRAGIndexProgressSpinnerFinal(w io.Writer, state *ragIndexProgressState, now time.Time) {
+	fmt.Fprint(w, "\r\033[K")
+	renderRAGIndexProgressSummary(w, *state, now)
+	fmt.Fprintln(w)
+}
+
+func renderRAGIndexProgressLine(w io.Writer, state ragIndexProgressState, now time.Time) {
+	fmt.Fprint(w, "rag index progress: ")
+	renderRAGIndexProgressSummary(w, state, now)
+	fmt.Fprintln(w)
+}
+
+func renderRAGIndexProgressSummary(w io.Writer, state ragIndexProgressState, now time.Time) {
+	status := firstNonEmpty(state.Status, state.Phase, "running")
+	fmt.Fprintf(w, "rag index %s", status)
+	if state.Total > 0 {
+		completed := state.completed()
+		percent := float64(completed) * 100 / float64(state.Total)
+		fmt.Fprintf(w, " %d/%d %.1f%%", completed, state.Total, percent)
+	} else if state.completed() > 0 {
+		fmt.Fprintf(w, " %d chunks", state.completed())
+	}
+	fmt.Fprintf(w, " %.1f chunks/s", ragIndexProgressSpeed(state, now))
+	if state.Skipped > 0 {
+		fmt.Fprintf(w, " skipped=%d", state.Skipped)
+	}
+	if state.Failed > 0 {
+		fmt.Fprintf(w, " failed=%d", state.Failed)
+	}
+	fmt.Fprintf(w, " elapsed=%s", ragIndexProgressElapsed(state, now))
+	if state.Message != "" && status != servicectl.JobStatusRunning && status != rag.RAGIndexStatusRunning {
+		fmt.Fprintf(w, " message=%q", state.Message)
+	}
+}
+
+type ragIndexProgressEventJSON struct {
+	JobID      string  `json:"job_id,omitempty"`
+	Status     string  `json:"status"`
+	Total      int     `json:"total_chunks,omitempty"`
+	Embedded   int     `json:"embedded_chunks"`
+	Skipped    int     `json:"skipped_chunks,omitempty"`
+	Failed     int     `json:"failed_chunks,omitempty"`
+	Completed  int     `json:"completed_chunks"`
+	Percent    float64 `json:"percent,omitempty"`
+	ChunksPerS float64 `json:"chunks_per_second"`
+	ElapsedMS  int64   `json:"elapsed_ms"`
+	Message    string  `json:"message,omitempty"`
+}
+
+func ragIndexProgressJSONEvent(state ragIndexProgressState, now time.Time) ragIndexProgressEventJSON {
+	completed := state.completed()
+	var percent float64
+	if state.Total > 0 {
+		percent = float64(completed) * 100 / float64(state.Total)
+	}
+	return ragIndexProgressEventJSON{
+		JobID:      state.JobID,
+		Status:     firstNonEmpty(state.Status, state.Phase, "running"),
+		Total:      state.Total,
+		Embedded:   state.Embedded,
+		Skipped:    state.Skipped,
+		Failed:     state.Failed,
+		Completed:  completed,
+		Percent:    percent,
+		ChunksPerS: ragIndexProgressSpeed(state, now),
+		ElapsedMS:  ragIndexProgressElapsed(state, now).Milliseconds(),
+		Message:    state.Message,
+	}
+}
+
+func ragIndexProgressSpeed(state ragIndexProgressState, now time.Time) float64 {
+	elapsed := ragIndexProgressElapsed(state, now)
+	if elapsed <= 0 {
+		return 0
+	}
+	return float64(state.Embedded) / elapsed.Seconds()
+}
+
+func ragIndexProgressElapsed(state ragIndexProgressState, now time.Time) time.Duration {
+	started := state.Started
+	if started.IsZero() {
+		started = now
+	}
+	if now.Before(started) {
+		return 0
+	}
+	return now.Sub(started).Round(time.Millisecond)
 }
 
 func dispatch(ctx context.Context, svc queryService, command string, args []string, opts options, stdout io.Writer, stderr io.Writer, plan startupPlan) int {
@@ -1936,7 +2633,7 @@ func renderSyncText(w io.Writer, result service.SyncResult) {
 }
 
 func renderCacheStatusText(w io.Writer, result service.CacheStatusResult) {
-	fmt.Fprintf(w, "repo_id: %s\nwal_capable: %t\njournal_mode: %s\nrecords: %d\ncomments: %d\nidentity_aliases: %d\nsync_events: %d\naudit_rows: %d\nsnapshots: %d\nsnapshot_chunks: %d\nchunks: %d\nremote_revisions: %d\n", result.RepoID, result.WALCapable, result.JournalMode, result.Records, result.Comments, result.IdentityAliases, result.SyncEvents, result.AuditRows, result.Snapshots, result.SnapshotChunks, result.Chunks, result.RemoteRevisions)
+	fmt.Fprintf(w, "repo_id: %s\nwal_capable: %t\njournal_mode: %s\nrecords: %d\ncomments: %d\nidentity_aliases: %d\nsync_events: %d\naudit_rows: %d\nsnapshots: %d\nsnapshot_chunks: %d\nchunks: %d\nremote_revisions: %d\nrag_namespaces: %d\nrag_embeddings: %d\nrag_index_runs: %d\n", result.RepoID, result.WALCapable, result.JournalMode, result.Records, result.Comments, result.IdentityAliases, result.SyncEvents, result.AuditRows, result.Snapshots, result.SnapshotChunks, result.Chunks, result.RemoteRevisions, result.RAGNamespaces, result.RAGEmbeddings, result.RAGIndexRuns)
 }
 
 func renderExportText(w io.Writer, result service.ExportSnapshotResult) {
@@ -2269,7 +2966,7 @@ func executeDoctorCommand(ctx context.Context, opts options, plan startupPlan, s
 		status := plan.CredentialStatus
 		cred = &status
 	}
-	report, err := doctor.Build(ctx, doctor.Request{Version: buildinfo.Version, Source: deps.Source, CredentialReporter: deps.CredentialReporter, CredentialStatus: cred, CachePath: cachePath, Live: plan.ProviderMode == "live-http", ProviderMode: plan.ProviderMode, MCPToolAccess: plan.MCPToolAccess, APIBaseURL: plan.APIBaseURL, RepoID: opts.repo, LiveBinding: plan.LiveRepositoryBinding})
+	report, err := doctor.Build(ctx, doctor.Request{Version: buildinfo.Version, Source: deps.Source, CredentialReporter: deps.CredentialReporter, CredentialStatus: cred, CachePath: cachePath, Live: plan.ProviderMode == "live-http", ProviderMode: plan.ProviderMode, MCPToolAccess: plan.MCPToolAccess, APIBaseURL: plan.APIBaseURL, RepoID: opts.repo, LiveBinding: plan.LiveRepositoryBinding, RAGRuntime: deps.RAGRuntime})
 	if err != nil {
 		return writeError(stderr, opts.format, err)
 	}
@@ -3000,6 +3697,56 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  status      report token source and credential state")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Run gitcode-mcp auth SUBCOMMAND --help for details.")
+	case "service":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s SUBCOMMAND\n\n", command)
+		fmt.Fprintln(w, "Manage the local gitcode-mcp service coordinator.")
+		fmt.Fprintln(w, "Subcommands:")
+		fmt.Fprintln(w, "  install     write the user service definition")
+		fmt.Fprintln(w, "  uninstall   remove the user service definition")
+		fmt.Fprintln(w, "  start       report how to start the installed service")
+		fmt.Fprintln(w, "  stop        report how to stop the installed service")
+		fmt.Fprintln(w, "  status      inspect runtime state")
+		fmt.Fprintln(w, "  doctor      inspect service health")
+		fmt.Fprintln(w, "  run         run the coordinator foreground process")
+		fmt.Fprintln(w, "  fake-job    start a fake long-running job for IPC/progress dogfood")
+		fmt.Fprintln(w, "  jobs        list daemon jobs")
+		fmt.Fprintln(w, "  job         inspect one daemon job")
+		fmt.Fprintln(w, "  attach      attach to job progress by id")
+		fmt.Fprintln(w, "  cancel      cancel a daemon job by id")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Run gitcode-mcp service SUBCOMMAND --help for details.")
+	case "rag":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s SUBCOMMAND\n\n", command)
+		fmt.Fprintln(w, "Set up, inspect, index, and search local RAG providers and models.")
+		fmt.Fprintln(w, "Subcommands:")
+		fmt.Fprintln(w, "  setup       check provider, model, and embedding readiness")
+		fmt.Fprintln(w, "  index       start a daemon-owned RAG index job")
+		fmt.Fprintln(w, "  status      report provider, namespace, coverage, and job state")
+		fmt.Fprintln(w, "  search      run semantic/hybrid retrieval over cached chunks")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Run gitcode-mcp rag SUBCOMMAND --help for details.")
+	case "rag-status":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO [--profile PROFILE] [--cache-path PATH] [--format FORMAT]\n\n", command)
+		fmt.Fprintln(w, "Report provider readiness, namespace coverage, last index run, and active daemon job state.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         configured repository id")
+		fmt.Fprintln(w, "  --profile PROFILE   RAG profile name")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "rag-search":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO QUERY [--profile PROFILE] [--top-k N] [--limit N] [--format FORMAT]\n\n", command)
+		fmt.Fprintln(w, "Run semantic/hybrid retrieval over cached RAG chunks without changing full-text search behavior.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         configured repository id")
+		fmt.Fprintln(w, "  --profile PROFILE   RAG profile name")
+		fmt.Fprintln(w, "  --top-k N           semantic candidate count")
+		fmt.Fprintln(w, "  --limit N           maximum packed contexts")
+		fmt.Fprintln(w, "  --source-id ID      source id filter")
+		fmt.Fprintln(w, "  --record-id ID      record id filter")
+		fmt.Fprintln(w, "  --snapshot-id ID    snapshot id filter")
+		fmt.Fprintln(w, "  --policy POLICY     chunk policy namespace")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "doctor":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s [--repo REPO] [--offline|--fixture] [--runtime-audit] [--cache-path PATH]\n\n", command)
 		fmt.Fprintln(w, "Aggregate subsystem diagnostics with public-safe output.")
@@ -3077,6 +3824,126 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "  --owner OWNER       repository owner (for auth probe)")
 		fmt.Fprintln(w, "  --repo REPO         repository id (for auth probe)")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "rag setup":
+		fmt.Fprintln(w, "Usage: gitcode-mcp rag setup [--profile PROFILE] [--dry-run] [--yes] [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Check the configured RAG provider, model availability, and embedding readiness.")
+		fmt.Fprintln(w, "Model downloads require --yes; dry-run reports planned actions without starting or pulling.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --profile PROFILE   RAG profile name")
+		fmt.Fprintln(w, "  --dry-run           report setup actions without mutation")
+		fmt.Fprintln(w, "  --yes               allow non-interactive model pull")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "rag index":
+		fmt.Fprintln(w, "Usage: gitcode-mcp rag index --repo REPO [--profile PROFILE] [--policy POLICY] [--batch-size N] [--progress MODE] [--detach] [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Start a daemon-owned RAG index job. By default the CLI attaches until the job reaches a terminal state.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         configured repository id")
+		fmt.Fprintln(w, "  --profile PROFILE   RAG profile name")
+		fmt.Fprintln(w, "  --policy POLICY     chunk policy namespace (defaults to heading)")
+		fmt.Fprintln(w, "  --batch-size N      embedding batch size")
+		fmt.Fprintln(w, "  --progress MODE     progress mode: auto, spinner, lines, jsonl, off")
+		fmt.Fprintln(w, "  --detach            return the job id without attaching progress")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "rag status":
+		fmt.Fprintln(w, "Usage: gitcode-mcp rag status --repo REPO [--profile PROFILE] [--cache-path PATH] [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Report provider readiness, namespace coverage, last index run, and active daemon job state.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         configured repository id")
+		fmt.Fprintln(w, "  --profile PROFILE   RAG profile name")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "rag search":
+		fmt.Fprintln(w, "Usage: gitcode-mcp rag search --repo REPO QUERY [--profile PROFILE] [--top-k N] [--limit N] [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Run semantic/hybrid retrieval over cached RAG chunks without changing full-text search behavior.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         configured repository id")
+		fmt.Fprintln(w, "  --profile PROFILE   RAG profile name")
+		fmt.Fprintln(w, "  --top-k N           semantic candidate count")
+		fmt.Fprintln(w, "  --limit N           maximum packed contexts")
+		fmt.Fprintln(w, "  --source-id ID      source id filter")
+		fmt.Fprintln(w, "  --record-id ID      record id filter")
+		fmt.Fprintln(w, "  --snapshot-id ID    snapshot id filter")
+		fmt.Fprintln(w, "  --policy POLICY     chunk policy namespace")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "service install":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service install [--overwrite] [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Write the platform user-service definition for gitcode-mcp service run.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --overwrite         replace an existing service definition")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "service uninstall":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service uninstall [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Remove the platform user-service definition.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "service start":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service start [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Report current service state and the platform-manager start boundary.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "service stop":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service stop [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Report current service state and the platform-manager stop boundary.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "service status":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service status [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Inspect install, PID, socket, runtime, and log paths.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "service doctor":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service doctor [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Inspect service health using the same state model as service status.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "service run":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service run")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Run the service coordinator in the foreground using a user-global Unix socket.")
+	case "service fake-job":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service fake-job [--steps N] [--interval-ms N] [--detach] [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Start a fake long-running daemon job. By default the CLI attaches until the job reaches a terminal state.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --steps N          fake job step count")
+		fmt.Fprintln(w, "  --interval-ms N    delay between fake job progress events")
+		fmt.Fprintln(w, "  --detach           return the job id without attaching progress")
+		fmt.Fprintln(w, "  --format FORMAT    output format (text, json)")
+	case "service jobs":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service jobs [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "List daemon jobs through local JSON-RPC IPC.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT    output format (text, json)")
+	case "service job":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service job JOB_ID [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Inspect one daemon job through local JSON-RPC IPC.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT    output format (text, json)")
+	case "service attach":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service attach JOB_ID [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Attach to daemon job progress until the job reaches a terminal state.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT    output format (text, json)")
+	case "service cancel":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service cancel JOB_ID [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Cancel a daemon job by id through local JSON-RPC IPC.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT    output format (text, json)")
 	case "repo add":
 		fmt.Fprintln(w, "Usage: gitcode-mcp repo add --repo REPO --owner OWNER --name NAME --api-base-url URL --scopes SCOPES [--alias ALIAS] [--display-name NAME]")
 		fmt.Fprintln(w)

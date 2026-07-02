@@ -20,6 +20,7 @@ import (
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/mcp"
+	"gitcode-mcp/internal/rag"
 	"gitcode-mcp/internal/service"
 )
 
@@ -481,7 +482,10 @@ func newMCPStdioServer(ctx context.Context, stdin io.Reader, stdout io.Writer, s
 		_ = store.Close()
 		return mcp.NewMinimal(stdin, stdout, stderr, mcp.StartupDiagnosticFromError(err)), func() {}
 	}
-	return mcp.NewWithToolAccess(stdin, stdout, stderr, svc, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess)), func() { _ = store.Close() }
+	server := mcp.NewWithToolAccess(stdin, stdout, stderr, svc, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess))
+	server.SetRAGStatusProvider(newMCPRAGStatusProvider(store, deps))
+	server.SetRAGSearchProvider(newMCPRAGSearchProvider(store, deps))
+	return server, func() { _ = store.Close() }
 }
 
 func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind string) int {
@@ -512,7 +516,10 @@ func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind
 		}
 		return 0
 	}
-	transport := mcp.NewHTTPSSETransport(mcp.NewRPCHandlerWithCredentialResolverAndToolAccess(svc, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess)), mcp.ServerConfig{BindAddress: bind, ReadinessProbe: func(ctx context.Context) mcp.Readiness {
+	handler := mcp.NewRPCHandlerWithCredentialResolverAndToolAccess(svc, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess))
+	handler.SetRAGStatusProvider(newMCPRAGStatusProvider(store, deps))
+	handler.SetRAGSearchProvider(newMCPRAGSearchProvider(store, deps))
+	transport := mcp.NewHTTPSSETransport(handler, mcp.ServerConfig{BindAddress: bind, ReadinessProbe: func(ctx context.Context) mcp.Readiness {
 		repos, err := store.ListRepositories(ctx)
 		if err != nil {
 			var lockErr cache.ErrLockContention
@@ -531,6 +538,18 @@ func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind
 		return 1
 	}
 	return 0
+}
+
+func newMCPRAGStatusProvider(store cache.Store, deps StartupDeps) mcp.RAGStatusProvider {
+	return func(ctx context.Context, req rag.StatusRequest) (rag.StatusResult, error) {
+		return rag.NewOperations(store, deps.Config, rag.OperationsOptions{}).Status(ctx, req)
+	}
+}
+
+func newMCPRAGSearchProvider(store cache.Store, deps StartupDeps) mcp.RAGSearchProvider {
+	return func(ctx context.Context, req rag.SearchRequest) (rag.SearchResult, error) {
+		return rag.NewOperations(store, deps.Config, rag.OperationsOptions{}).Search(ctx, req)
+	}
 }
 
 func ensureParentDir(path string) error {

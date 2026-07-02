@@ -11,6 +11,7 @@ The project is self-contained and public-safe. Source repositories, trackers, an
 - Binds GitCode repositories to local cache identities and aliases.
 - Syncs issues, pull requests, comments, wiki pages, labels, and milestones into SQLite.
 - Searches cached records with full-text/token matching and reads cached records without requiring live network access.
+- Runs optional local RAG semantic/hybrid retrieval over cached chunks with model-scoped embeddings.
 - Resolves stable local ids and remote aliases for links, snippets, backlinks, and exports.
 - Runs an MCP server over cached data for agent workflows.
 - Performs live writes only through explicit commands with idempotency keys and audit evidence.
@@ -29,6 +30,7 @@ go run ./cmd/gitcode-mcp search --repo YOUR_OWNER/YOUR_REPO "cache-first"
 `search` is cache full-text search, not fuzzy or semantic retrieval. Empty results mean the exact query terms did not match cached text; retry with exact terms, ids, or keyword variants when wording may differ.
 
 For MCP usage, start with [MCP Setup](docs/mcp-setup.md). For live credentials, start with [Secrets](docs/secrets.md) and [Config Reference](docs/config-reference.md).
+For semantic retrieval, start with [RAG Setup and Operation](docs/rag.md).
 
 ## Common Workflows
 
@@ -40,6 +42,7 @@ For MCP usage, start with [MCP Setup](docs/mcp-setup.md). For live credentials, 
 - Place tests and fixtures: [Test Architecture](docs/test-architecture.md)
 - Configure repositories: [Repository Binding](docs/repo-binding.md)
 - Understand sync behavior: [Cache and Sync Model](docs/cache-and-sync-model.md)
+- Set up semantic retrieval: [RAG Setup and Operation](docs/rag.md)
 - Review live API findings: [GitCode API Discovery](docs/gitcode-api-discovery.md)
 
 ## Repository Layout

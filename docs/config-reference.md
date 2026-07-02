@@ -41,6 +41,36 @@ credential:
   store: auto
   keyring_service: gitcode-mcp
   keyring_account: token
+rag:
+  model_store_path: /path/to/models/gitcode-mcp
+  default_profile: qwen3-ollama-0_6b-1024
+  providers:
+    ollama:
+      endpoint: http://127.0.0.1:11434
+      executable: ollama
+      startup: managed
+      autostart: true
+      env:
+        OLLAMA_MODELS: /path/to/models/ollama
+      model_storage:
+        mode: provider-owned
+        env: OLLAMA_MODELS
+  profiles:
+    qwen3-ollama-0_6b-1024:
+      provider: ollama
+      model: qwen3-embedding:0.6b
+      dimensions: 1024
+      max_input_tokens: 512
+      batch_size: 16
+  indexing:
+    profile: qwen3-ollama-0_6b-1024
+    chunk_tokens: 512
+    overlap: 64
+    batch_size: 16
+  search:
+    profile: qwen3-ollama-0_6b-1024
+    top_k: 8
+    hybrid: true
 ```
 
 ### Fields
@@ -58,6 +88,18 @@ credential:
 | `credential.store` | string | `auto` | Credential lookup mode: `auto` checks `GITCODE_TOKEN` then the system keyring, `env` checks only `GITCODE_TOKEN`, and `keyring` checks the system keyring after env fallback. `keychain` is accepted as a legacy alias for `keyring`. |
 | `credential.keyring_service` | string | `gitcode-mcp` | System keyring service name used when `credential.store` is `auto` or `keyring`. Override it to isolate credentials for different agents or profiles. |
 | `credential.keyring_account` | string | `token` | System keyring account/user name used when `credential.store` is `auto` or `keyring`. Override it to isolate credentials for different agents or profiles. |
+| `rag.model_store_path` | string | `<cache-dir>/gitcode-mcp/models` | Global gitcode-mcp RAG model storage root. This is machine-level state and cannot be set from repo-local config. |
+| `rag.default_profile` | string | `qwen3-ollama-0_6b-1024` | Default embedding/search profile. |
+| `rag.providers.<name>.endpoint` | string | `http://127.0.0.1:11434` for `ollama` | Provider API endpoint. |
+| `rag.providers.<name>.executable` | string | `ollama` for `ollama` | Provider executable used by managed startup. |
+| `rag.providers.<name>.startup` | string | `managed` | Provider startup mode. Empty and `managed` allow `rag setup` to autostart the provider when `autostart` is true. |
+| `rag.providers.<name>.autostart` | bool | `true` for `ollama` | Whether setup may start the provider runtime. |
+| `rag.providers.<name>.env` | map | empty | Environment variables passed to managed provider startup, such as `OLLAMA_MODELS`. |
+| `rag.providers.<name>.model_storage.env` | string | `OLLAMA_MODELS` for `ollama` | Provider-owned model path environment variable. |
+| `rag.profiles.<name>.model` | string | `qwen3-embedding:0.6b` | Embedding model id. |
+| `rag.profiles.<name>.dimensions` | int | `1024` | Expected embedding dimensions; mismatches are provider failures. |
+| `rag.indexing.*` | mixed | profile `qwen3-ollama-0_6b-1024`, chunks `512`, overlap `64`, batch `16` | Indexing profile and chunking defaults. |
+| `rag.search.*` | mixed | profile `qwen3-ollama-0_6b-1024`, top_k `8`, hybrid `true` | RAG search defaults. |
 
 Environment overrides:
 
@@ -65,6 +107,10 @@ Environment overrides:
 |---|---|
 | `GITCODE_MCP_KEYRING_SERVICE` | Overrides `credential.keyring_service` for the launched process |
 | `GITCODE_MCP_KEYRING_ACCOUNT` | Overrides `credential.keyring_account` for the launched process |
+| `GITCODE_MCP_RAG_PROFILE` | Overrides the default RAG profile for the launched process |
+| `GITCODE_MCP_RAG_PROVIDER_ENDPOINT` | Overrides the active RAG provider endpoint |
+| `GITCODE_MCP_RAG_MODEL_STORE` | Overrides `rag.model_store_path` |
+| `GITCODE_MCP_SERVICE_RUNTIME_DIR` | Overrides `service.runtime_dir` |
 
 ## Repo-local cache mode
 
@@ -106,6 +152,8 @@ When a command starts inside a worktree, `gitcode-mcp` walks up to the Git root 
 
 `cache_mode: repo-local` is also accepted in the user config file. In that case the current Git worktree still supplies the repo root, and the cache resolves to `<git-worktree>/.gitcode/mcp/cache.db`.
 
+Repo-local configs may tune RAG profiles, indexing, and search settings, but they cannot set machine-level storage paths such as `service.runtime_dir`, `rag.model_store_path`, or provider-owned model storage paths. Configure those globally or through environment variables.
+
 ## Inspecting configuration
 
 ### Show config location
@@ -142,6 +190,10 @@ export GITCODE_TOKEN=<your-token>
 ```
 
 See [Secrets](secrets.md) for platform-specific credential storage patterns.
+
+## RAG
+
+See [RAG Setup and Operation](rag.md) for provider installation, model storage, namespace invalidation, indexing, status, search, recovery, and optional real-model smoke tests.
 
 ## Runtime audit
 
