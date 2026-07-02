@@ -26,5 +26,9 @@ func isUnsupportedCapabilityTool(name string) bool {
 }
 
 func (s *Server) unsupportedCapabilityHandler(_ context.Context, id *json.RawMessage, name string) {
+	if cap, ok := capability.LookupByMCPName(name); ok && !cap.MCP.Enabled && cap.MCP.DisabledReason != "" {
+		s.writeError(id, -32601, "Method not found", &errorData{Code: "unsupported_capability", Message: fmt.Sprintf("%q is not available: %s", name, cap.MCP.DisabledReason)})
+		return
+	}
 	s.writeError(id, -32601, "Method not found", &errorData{Code: "unsupported_capability", Message: fmt.Sprintf("%q is not available: use CLI mutation commands for writes", name)})
 }

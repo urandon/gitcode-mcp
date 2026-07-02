@@ -4,11 +4,14 @@ type Category string
 
 const (
 	CategoryWrite Category = "write"
+	CategoryRAG   Category = "rag"
 )
 
 type SafetyClass string
 
 const (
+	SafetyReadOnly                    SafetyClass = "read_only"
+	SafetyBackgroundJob               SafetyClass = "background_job"
 	SafetyAuditedWrite                SafetyClass = "audited_write"
 	SafetyDestructiveRemoteWrite      SafetyClass = "destructive_remote_write"
 	SafetyDestructiveLocalMaintenance SafetyClass = "destructive_local_maintenance"
@@ -202,12 +205,107 @@ var writeCapabilities = []Capability{
 	},
 }
 
+var ragCapabilities = []Capability{
+	{
+		ID:             "rag_status",
+		Category:       CategoryRAG,
+		Safety:         SafetyReadOnly,
+		CLIName:        "rag-status",
+		MCPName:        "rag_status",
+		ServiceCommand: "rag-status",
+		Description:    "Report RAG provider readiness, namespace coverage, last index run, and active daemon job state.",
+		CLI:            enabled(),
+		MCP:            enabled(),
+	},
+	{
+		ID:             "rag_search",
+		Category:       CategoryRAG,
+		Safety:         SafetyReadOnly,
+		CLIName:        "rag-search",
+		MCPName:        "rag_search",
+		ServiceCommand: "rag-search",
+		Description:    "Run semantic/hybrid RAG retrieval over cached chunks with citations, provenance, and transparent score breakdowns.",
+		CLI:            enabled(),
+		MCP:            enabled(),
+	},
+	{
+		ID:             "rag_index",
+		Category:       CategoryRAG,
+		Safety:         SafetyBackgroundJob,
+		CLIName:        "rag",
+		MCPName:        "rag_index",
+		ServiceCommand: "rag-index",
+		Description:    "Start a daemon-owned RAG index job.",
+		CLI:            enabled("Available as the grouped CLI command `rag index`."),
+		MCP:            disabled("MCP-triggered RAG indexing needs an explicit job policy; keep it CLI-only until the global lease/cancel semantics are designed for MCP."),
+	},
+	{
+		ID:             "rag_purge_embeddings",
+		Category:       CategoryRAG,
+		Safety:         SafetyDestructiveLocalMaintenance,
+		CLIName:        "rag",
+		MCPName:        "rag_purge_embeddings",
+		ServiceCommand: "rag-purge-embeddings",
+		Description:    "Purge cached RAG embeddings.",
+		CLI:            disabled("Not implemented; destructive cache maintenance requires an explicit product design."),
+		MCP:            disabled("Destructive cache-invalidating RAG maintenance is not exposed through MCP by default."),
+	},
+	{
+		ID:             "rag_delete_namespace",
+		Category:       CategoryRAG,
+		Safety:         SafetyDestructiveLocalMaintenance,
+		CLIName:        "rag",
+		MCPName:        "rag_delete_namespace",
+		ServiceCommand: "rag-delete-namespace",
+		Description:    "Delete a RAG embedding namespace.",
+		CLI:            disabled("Not implemented; destructive cache maintenance requires an explicit product design."),
+		MCP:            disabled("Destructive cache-invalidating RAG maintenance is not exposed through MCP by default."),
+	},
+	{
+		ID:             "rag_rebuild_all_namespaces",
+		Category:       CategoryRAG,
+		Safety:         SafetyDestructiveLocalMaintenance,
+		CLIName:        "rag",
+		MCPName:        "rag_rebuild_all_namespaces",
+		ServiceCommand: "rag-rebuild-all-namespaces",
+		Description:    "Rebuild every RAG embedding namespace.",
+		CLI:            disabled("Not implemented; destructive cache maintenance requires an explicit product design."),
+		MCP:            disabled("Destructive cache-invalidating RAG maintenance is not exposed through MCP by default."),
+	},
+	{
+		ID:             "rag_reset_derived_state",
+		Category:       CategoryRAG,
+		Safety:         SafetyDestructiveLocalMaintenance,
+		CLIName:        "rag",
+		MCPName:        "rag_reset_derived_state",
+		ServiceCommand: "rag-reset-derived-state",
+		Description:    "Reset derived RAG state.",
+		CLI:            disabled("Not implemented; destructive cache maintenance requires an explicit product design."),
+		MCP:            disabled("Destructive cache-invalidating RAG maintenance is not exposed through MCP by default."),
+	},
+}
+
 func WriteCapabilities() []Capability {
 	return append([]Capability(nil), writeCapabilities...)
 }
 
+func RAGCapabilities() []Capability {
+	return append([]Capability(nil), ragCapabilities...)
+}
+
+func Capabilities() []Capability {
+	out := append([]Capability(nil), writeCapabilities...)
+	out = append(out, ragCapabilities...)
+	return out
+}
+
 func LookupByMCPName(name string) (Capability, bool) {
 	for _, cap := range writeCapabilities {
+		if cap.MCPName == name {
+			return cap, true
+		}
+	}
+	for _, cap := range ragCapabilities {
 		if cap.MCPName == name {
 			return cap, true
 		}
@@ -218,6 +316,16 @@ func LookupByMCPName(name string) (Capability, bool) {
 func MCPWriteCapabilities() []Capability {
 	var out []Capability
 	for _, cap := range writeCapabilities {
+		if cap.MCP.Enabled && cap.MCPName != "" {
+			out = append(out, cap)
+		}
+	}
+	return out
+}
+
+func MCPRAGCapabilities() []Capability {
+	var out []Capability
+	for _, cap := range ragCapabilities {
 		if cap.MCP.Enabled && cap.MCPName != "" {
 			out = append(out, cap)
 		}

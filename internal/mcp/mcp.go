@@ -740,8 +740,6 @@ var preWriteToolListOrder = []string{
 	"service_status",
 	"service_jobs",
 	"service_job_status",
-	"rag_status",
-	"rag_search",
 	"list_pr_discussions",
 	"sync_live",
 }
@@ -756,6 +754,9 @@ var toolListOrder = buildToolListOrder()
 
 func buildToolListOrder() []string {
 	names := append([]string(nil), preWriteToolListOrder...)
+	for _, cap := range capability.MCPRAGCapabilities() {
+		names = append(names, cap.MCPName)
+	}
 	for _, cap := range capability.MCPWriteCapabilities() {
 		names = append(names, cap.MCPName)
 	}
@@ -777,6 +778,19 @@ func toolDefinitionByName(name string) toolDefinition {
 
 func registerTool(registry toolRegistry, name string, handler toolHandler) {
 	registry[name] = registeredTool{definition: toolDefinitionByName(name), handler: handler}
+}
+
+func (s *Server) ragToolHandler(cap capability.Capability) toolHandler {
+	switch cap.ID {
+	case "rag_status":
+		return s.callRAGStatus
+	case "rag_search":
+		return s.callRAGSearch
+	default:
+		return func(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+			s.writeError(id, -32601, "Method not found", &errorData{Code: "unsupported_capability", Message: fmt.Sprintf("%q is declared but has no MCP handler", cap.MCPName)})
+		}
+	}
 }
 
 func (s *Server) toolRegistry() toolRegistry {
@@ -804,8 +818,9 @@ func (s *Server) toolRegistry() toolRegistry {
 	registerTool(registry, "service_status", s.callServiceStatus)
 	registerTool(registry, "service_jobs", s.callServiceJobs)
 	registerTool(registry, "service_job_status", s.callServiceJobStatus)
-	registerTool(registry, "rag_status", s.callRAGStatus)
-	registerTool(registry, "rag_search", s.callRAGSearch)
+	for _, cap := range capability.MCPRAGCapabilities() {
+		registerTool(registry, cap.MCPName, s.ragToolHandler(cap))
+	}
 	registerTool(registry, "list_pr_discussions", s.callListPRDiscussions)
 	registerTool(registry, "sync_live", s.callSyncLive)
 	for _, cap := range capability.MCPWriteCapabilities() {

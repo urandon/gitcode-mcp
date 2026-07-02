@@ -839,12 +839,8 @@ func executeRAGSearchCommand(ctx context.Context, args []string, opts options, s
 		return writeError(stderr, opts.format, err)
 	}
 	defer store.Close()
-	provider, err := rag.NewEmbeddingProviderFromConfig(eff.Config, opts.profile, rag.ProviderOptions{})
-	if err != nil {
-		return writeError(stderr, opts.format, err)
-	}
-	retriever := rag.NewRAGRetriever(store, provider, rag.RAGRetrieverOptions{})
-	result, err := retriever.Search(ctx, rag.SearchRequest{
+	ops := rag.NewOperations(store, eff.Config, rag.OperationsOptions{})
+	result, err := ops.Search(ctx, rag.SearchRequest{
 		RepoID:        opts.repo,
 		Query:         strings.Join(args, " "),
 		ProfileID:     opts.profile,
@@ -872,17 +868,13 @@ func executeRAGStatusCommand(ctx context.Context, opts options, stdout io.Writer
 		return writeError(stderr, opts.format, err)
 	}
 	defer store.Close()
-	provider, err := rag.NewEmbeddingProviderFromConfig(eff.Config, opts.profile, rag.ProviderOptions{})
-	if err != nil {
-		return writeError(stderr, opts.format, err)
-	}
 	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Version}
-	svcStatus, activeJob := lookupRAGServiceState(ctx, manager, opts.repo)
-	result, err := rag.Status(ctx, store, provider, rag.StatusRequest{
+	ops := rag.NewOperations(store, eff.Config, rag.OperationsOptions{ServiceState: func(ctx context.Context, repoID string) (*rag.ServiceStatus, *rag.JobStatus) {
+		return lookupRAGServiceState(ctx, manager, repoID)
+	}})
+	result, err := ops.Status(ctx, rag.StatusRequest{
 		RepoID:    opts.repo,
 		ProfileID: opts.profile,
-		ActiveJob: activeJob,
-		Service:   svcStatus,
 	})
 	if err != nil {
 		return writeError(stderr, opts.format, err)
