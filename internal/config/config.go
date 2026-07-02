@@ -34,6 +34,8 @@ type Config struct {
 	RateLimitBurst  int           `json:"rate_limit_burst"`
 	Format          string        `json:"format"`
 	MCPToolAccess   string        `json:"mcp_tool_access"`
+	Service         ServiceConfig `json:"service"`
+	RAG             RAGConfig     `json:"rag"`
 }
 
 type Overrides struct {
@@ -86,7 +88,7 @@ func Load(src Source, overrides Overrides) (Config, error) {
 	if src == nil {
 		src = OSSource{}
 	}
-	if src.Env(EnvMCPConfigPath) != "" || src.Env(EnvMCPCacheDir) != "" || src.Env(EnvAPIURL) != "" || src.Env(EnvMCPToolAccess) != "" {
+	if src.Env(EnvMCPConfigPath) != "" || src.Env(EnvMCPCacheDir) != "" || src.Env(EnvAPIURL) != "" || src.Env(EnvMCPToolAccess) != "" || src.Env(EnvRAGProfile) != "" || src.Env(EnvServiceRuntimeDir) != "" || src.Env(EnvRAGProviderEndpoint) != "" || src.Env(EnvRAGModelStore) != "" {
 		eff, err := LoadEffective(src, overrides)
 		if err != nil {
 			return Config{}, err
@@ -140,25 +142,29 @@ func RedactDiagnostic(message string, src Source) string {
 }
 
 type fileConfig struct {
-	CachePath       *string           `json:"cache_path"`
-	LockPath        *string           `json:"lock_path"`
-	CacheMode       *string           `json:"cache_mode"`
-	GitCodeBaseURL  *string           `json:"gitcode_base_url"`
-	DefaultTimeout  *string           `json:"default_timeout"`
-	MaxResponseSize *int64            `json:"max_response_size"`
-	MaxRetries      *int              `json:"max_retries"`
-	RateLimitRPS    *float64          `json:"rate_limit_rps"`
-	RateLimitBurst  *int              `json:"rate_limit_burst"`
-	Format          *string           `json:"format"`
-	MCPToolAccess   *string           `json:"mcp_tool_access"`
-	MCP             *MCPConfig        `json:"mcp"`
-	Credential      *CredentialConfig `json:"credential"`
+	CachePath       *string            `json:"cache_path"`
+	LockPath        *string            `json:"lock_path"`
+	CacheMode       *string            `json:"cache_mode"`
+	GitCodeBaseURL  *string            `json:"gitcode_base_url"`
+	DefaultTimeout  *string            `json:"default_timeout"`
+	MaxResponseSize *int64             `json:"max_response_size"`
+	MaxRetries      *int               `json:"max_retries"`
+	RateLimitRPS    *float64           `json:"rate_limit_rps"`
+	RateLimitBurst  *int               `json:"rate_limit_burst"`
+	Format          *string            `json:"format"`
+	MCPToolAccess   *string            `json:"mcp_tool_access"`
+	MCP             *MCPConfig         `json:"mcp"`
+	Credential      *CredentialConfig  `json:"credential"`
+	Service         *serviceFileConfig `json:"service"`
+	RAG             *ragFileConfig     `json:"rag"`
 }
 
 func defaultWithSource(src Source) Config {
 	cachePath := filepath.Join(".", "cache.db")
+	cacheBaseDir := "."
 	if dir, err := src.UserCacheDir(); err == nil && dir != "" {
-		cachePath = filepath.Join(dir, "gitcode-mcp", "cache.db")
+		cacheBaseDir = filepath.Join(dir, "gitcode-mcp")
+		cachePath = filepath.Join(cacheBaseDir, "cache.db")
 	}
 	return Config{
 		CachePath:       cachePath,
@@ -172,6 +178,8 @@ func defaultWithSource(src Source) Config {
 		RateLimitBurst:  4,
 		Format:          "text",
 		MCPToolAccess:   MCPToolAccessRead,
+		Service:         defaultServiceConfig(cacheBaseDir),
+		RAG:             defaultRAGConfig(cacheBaseDir),
 	}
 }
 
@@ -204,12 +212,25 @@ func configStringValues(src Source, path string) []string {
 		return nil
 	}
 	values := make([]string, 0, len(raw))
-	for _, value := range raw {
-		if s, ok := value.(string); ok && s != "" {
-			values = append(values, s)
+	collectConfigStrings(raw, &values)
+	return values
+}
+
+func collectConfigStrings(value any, values *[]string) {
+	switch typed := value.(type) {
+	case string:
+		if typed != "" {
+			*values = append(*values, typed)
+		}
+	case map[string]any:
+		for _, nested := range typed {
+			collectConfigStrings(nested, values)
+		}
+	case []any:
+		for _, nested := range typed {
+			collectConfigStrings(nested, values)
 		}
 	}
-	return values
 }
 
 func readConfigFile(src Source, path string, explicit bool) (fileConfig, error) {
@@ -276,6 +297,12 @@ func mergeFile(cfg Config, file fileConfig) (Config, error) {
 			return Config{}, err
 		}
 		cfg.MCPToolAccess = access
+	}
+	cfg = mergeServiceFile(cfg, file.Service)
+	var err error
+	cfg, err = mergeRAGFile(cfg, file.RAG)
+	if err != nil {
+		return Config{}, err
 	}
 	if file.LockPath == nil && file.CachePath != nil {
 		cfg.LockPath = cfg.CachePath + ".lock"

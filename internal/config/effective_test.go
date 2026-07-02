@@ -332,4 +332,178 @@ func TestEffectiveConfigScenarios(t *testing.T) {
 			t.Fatalf("fallback effective=%#v want global cache %q", eff, wantCache)
 		}
 	})
+
+	t.Run("SCN-RAG-DEFAULTS", func(t *testing.T) {
+		src := newMemorySource(t)
+		eff, err := LoadEffective(src, Overrides{})
+		if err != nil {
+			t.Fatalf("LoadEffective returned error: %v", err)
+		}
+		wantBase := filepath.Join(src.cacheDir, "gitcode-mcp")
+		if eff.Config.Service.RuntimeDir != filepath.Join(wantBase, "runtime") {
+			t.Fatalf("service runtime dir=%q want under %q", eff.Config.Service.RuntimeDir, wantBase)
+		}
+		if eff.Config.RAG.ModelStorePath != filepath.Join(wantBase, "models") {
+			t.Fatalf("model store=%q want under %q", eff.Config.RAG.ModelStorePath, wantBase)
+		}
+		if eff.Config.RAG.DefaultProfile != DefaultRAGProfile || eff.Config.RAG.Indexing.Profile != DefaultRAGProfile || eff.Config.RAG.Search.Profile != DefaultRAGProfile {
+			t.Fatalf("default rag profile not wired through: %#v", eff.Config.RAG)
+		}
+		provider := eff.Config.RAG.Providers["ollama"]
+		if provider.Endpoint != "http://127.0.0.1:11434" || !provider.Autostart || provider.ModelStorage.Env != "OLLAMA_MODELS" {
+			t.Fatalf("default provider=%#v", provider)
+		}
+		profile := eff.Config.RAG.Profiles[DefaultRAGProfile]
+		if profile.Provider != "ollama" || profile.Model != "qwen3-embedding:0.6b" || profile.Dimensions != 512 {
+			t.Fatalf("default profile=%#v", profile)
+		}
+	})
+
+	t.Run("SCN-RAG-GLOBAL-YAML", func(t *testing.T) {
+		src := newMemorySource(t)
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		src.env[EnvMCPConfigPath] = configPath
+		src.files[configPath] = []byte(strings.Join([]string{
+			"service:",
+			"  runtime_dir: /Volumes/fast/gitcode-mcp/runtime",
+			"rag:",
+			"  model_store_path: /Volumes/models/gitcode-mcp",
+			"  default_profile: qwen3-custom",
+			"  providers:",
+			"    ollama:",
+			"      endpoint: http://127.0.0.1:21434",
+			"      executable: /opt/homebrew/bin/ollama",
+			"      autostart: false",
+			"      timeout: 45s",
+			"      env:",
+			"        OLLAMA_MODELS: /Volumes/models/ollama",
+			"      model_storage:",
+			"        mode: provider-owned",
+			"        env: OLLAMA_MODELS",
+			"    test-provider:",
+			"      type: openai-compatible",
+			"      endpoint: http://127.0.0.1:9999",
+			"  profiles:",
+			"    qwen3-custom:",
+			"      provider: ollama",
+			"      model: qwen3-embedding:0.6b",
+			"      dimensions: 512",
+			"      max_input_tokens: 512",
+			"      batch_size: 8",
+			"  indexing:",
+			"    chunk_tokens: 384",
+			"    overlap: 48",
+			"  search:",
+			"    top_k: 12",
+			"    hybrid: false",
+			"",
+		}, "\n"))
+		eff, err := LoadEffective(src, Overrides{})
+		if err != nil {
+			t.Fatalf("LoadEffective returned error: %v", err)
+		}
+		if eff.Config.Service.RuntimeDir != "/Volumes/fast/gitcode-mcp/runtime" || eff.Config.RAG.ModelStorePath != "/Volumes/models/gitcode-mcp" {
+			t.Fatalf("global storage paths not applied: %#v", eff.Config)
+		}
+		if eff.Config.RAG.DefaultProfile != "qwen3-custom" || eff.Config.RAG.Indexing.Profile != "qwen3-custom" || eff.Config.RAG.Search.Profile != "qwen3-custom" {
+			t.Fatalf("global profile not applied to default/index/search: %#v", eff.Config.RAG)
+		}
+		provider := eff.Config.RAG.Providers["ollama"]
+		if provider.Endpoint != "http://127.0.0.1:21434" || provider.Executable != "/opt/homebrew/bin/ollama" || provider.Autostart || provider.Env["OLLAMA_MODELS"] != "/Volumes/models/ollama" || provider.Timeout.String() != "45s" {
+			t.Fatalf("global provider not applied: %#v", provider)
+		}
+		if eff.Config.RAG.Indexing.ChunkTokens != 384 || eff.Config.RAG.Indexing.Overlap != 48 || eff.Config.RAG.Search.TopK != 12 || eff.Config.RAG.Search.Hybrid {
+			t.Fatalf("index/search config not applied: %#v", eff.Config.RAG)
+		}
+		if eff.FieldSources["service.runtime_dir"] != "explicit-yaml" || eff.FieldSources["rag.model_store_path"] != "explicit-yaml" || eff.FieldSources["rag.providers.ollama.endpoint"] != "explicit-yaml" {
+			t.Fatalf("field sources=%#v", eff.FieldSources)
+		}
+	})
+
+	t.Run("SCN-RAG-ENV-OVERRIDES", func(t *testing.T) {
+		src := newMemorySource(t)
+		src.env[EnvRAGProfile] = "env-profile"
+		src.env[EnvRAGModelStore] = "/Volumes/env-models/gitcode-mcp"
+		src.env[EnvRAGProviderEndpoint] = "http://127.0.0.1:31434"
+		src.env[EnvServiceRuntimeDir] = "/Volumes/env-runtime/gitcode-mcp"
+		eff, err := LoadEffective(src, Overrides{})
+		if err != nil {
+			t.Fatalf("LoadEffective returned error: %v", err)
+		}
+		if eff.Config.RAG.DefaultProfile != "env-profile" || eff.Config.RAG.Indexing.Profile != "env-profile" || eff.Config.RAG.Search.Profile != "env-profile" {
+			t.Fatalf("env profile did not update default/index/search: %#v", eff.Config.RAG)
+		}
+		if eff.Config.RAG.ModelStorePath != "/Volumes/env-models/gitcode-mcp" || eff.Config.Service.RuntimeDir != "/Volumes/env-runtime/gitcode-mcp" {
+			t.Fatalf("env paths not applied: %#v", eff.Config)
+		}
+		if eff.Config.RAG.Providers["ollama"].Endpoint != "http://127.0.0.1:31434" {
+			t.Fatalf("env provider endpoint not applied: %#v", eff.Config.RAG.Providers["ollama"])
+		}
+		if eff.FieldSources["rag.default_profile"] != "env:"+EnvRAGProfile || eff.FieldSources["rag.model_store_path"] != "env:"+EnvRAGModelStore || eff.FieldSources["service.runtime_dir"] != "env:"+EnvServiceRuntimeDir || eff.FieldSources["rag.providers.ollama.endpoint"] != "env:"+EnvRAGProviderEndpoint {
+			t.Fatalf("field sources=%#v", eff.FieldSources)
+		}
+	})
+
+	t.Run("SCN-RAG-REPO-LOCAL-LIGHTWEIGHT", func(t *testing.T) {
+		src := newMemorySource(t)
+		root := filepath.Join(src.homeDir, "workspace", "repo")
+		src.cwd = filepath.Join(root, "subdir")
+		src.dirs[filepath.Join(root, ".git")] = true
+		repoCfg := filepath.Join(root, ".gitcode", "gitcode-mcp.yaml")
+		src.files[repoCfg] = []byte(strings.Join([]string{
+			"rag:",
+			"  default_profile: repo-profile",
+			"  profiles:",
+			"    repo-profile:",
+			"      provider: ollama",
+			"      model: repo-embedding",
+			"      dimensions: 512",
+			"  indexing:",
+			"    chunk_tokens: 256",
+			"    overlap: 32",
+			"  search:",
+			"    top_k: 5",
+			"",
+		}, "\n"))
+		eff, err := LoadEffective(src, Overrides{})
+		if err != nil {
+			t.Fatalf("LoadEffective returned error: %v", err)
+		}
+		if eff.Config.RAG.DefaultProfile != "repo-profile" || eff.Config.RAG.Indexing.ChunkTokens != 256 || eff.Config.RAG.Search.TopK != 5 {
+			t.Fatalf("repo-local rag override not applied: %#v", eff.Config.RAG)
+		}
+		wantGlobalModelStore := filepath.Join(src.cacheDir, "gitcode-mcp", "models")
+		if eff.Config.RAG.ModelStorePath != wantGlobalModelStore || eff.Config.Service.RuntimeDir != filepath.Join(src.cacheDir, "gitcode-mcp", "runtime") {
+			t.Fatalf("repo-local config changed storage paths: %#v", eff.Config)
+		}
+		if eff.FieldSources["rag.default_profile"] != "repo-local:"+repoCfg || eff.FieldSources["rag.search.top_k"] != "repo-local:"+repoCfg {
+			t.Fatalf("field sources=%#v", eff.FieldSources)
+		}
+	})
+
+	t.Run("SCN-RAG-REPO-LOCAL-REJECTS-MODEL-STORE", func(t *testing.T) {
+		src := newMemorySource(t)
+		root := filepath.Join(src.homeDir, "workspace", "repo")
+		src.cwd = root
+		src.dirs[filepath.Join(root, ".git")] = true
+		repoCfg := filepath.Join(root, ".gitcode", "gitcode-mcp.yaml")
+		src.files[repoCfg] = []byte("rag:\n  model_store_path: .gitcode/models\n")
+		_, err := LoadEffective(src, Overrides{})
+		if err == nil || !strings.Contains(err.Error(), "repo-local") || !strings.Contains(err.Error(), "rag.model_store_path") {
+			t.Fatalf("LoadEffective error=%v, want repo-local model_store_path rejection", err)
+		}
+	})
+
+	t.Run("SCN-RAG-REPO-LOCAL-REJECTS-SERVICE-RUNTIME", func(t *testing.T) {
+		src := newMemorySource(t)
+		root := filepath.Join(src.homeDir, "workspace", "repo")
+		src.cwd = root
+		src.dirs[filepath.Join(root, ".git")] = true
+		repoCfg := filepath.Join(root, ".gitcode", "gitcode-mcp.yaml")
+		src.files[repoCfg] = []byte("service:\n  runtime_dir: .gitcode/runtime\n")
+		_, err := LoadEffective(src, Overrides{})
+		if err == nil || !strings.Contains(err.Error(), "repo-local") || !strings.Contains(err.Error(), "service.runtime_dir") {
+			t.Fatalf("LoadEffective error=%v, want repo-local runtime rejection", err)
+		}
+	})
 }
