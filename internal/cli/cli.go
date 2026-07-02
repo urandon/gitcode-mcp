@@ -2235,7 +2235,7 @@ func renderSyncText(w io.Writer, result service.SyncResult) {
 }
 
 func renderCacheStatusText(w io.Writer, result service.CacheStatusResult) {
-	fmt.Fprintf(w, "repo_id: %s\nwal_capable: %t\njournal_mode: %s\nrecords: %d\ncomments: %d\nidentity_aliases: %d\nsync_events: %d\naudit_rows: %d\nsnapshots: %d\nsnapshot_chunks: %d\nchunks: %d\nremote_revisions: %d\n", result.RepoID, result.WALCapable, result.JournalMode, result.Records, result.Comments, result.IdentityAliases, result.SyncEvents, result.AuditRows, result.Snapshots, result.SnapshotChunks, result.Chunks, result.RemoteRevisions)
+	fmt.Fprintf(w, "repo_id: %s\nwal_capable: %t\njournal_mode: %s\nrecords: %d\ncomments: %d\nidentity_aliases: %d\nsync_events: %d\naudit_rows: %d\nsnapshots: %d\nsnapshot_chunks: %d\nchunks: %d\nremote_revisions: %d\nrag_namespaces: %d\nrag_embeddings: %d\nrag_index_runs: %d\n", result.RepoID, result.WALCapable, result.JournalMode, result.Records, result.Comments, result.IdentityAliases, result.SyncEvents, result.AuditRows, result.Snapshots, result.SnapshotChunks, result.Chunks, result.RemoteRevisions, result.RAGNamespaces, result.RAGEmbeddings, result.RAGIndexRuns)
 }
 
 func renderExportText(w io.Writer, result service.ExportSnapshotResult) {

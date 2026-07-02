@@ -2997,6 +2997,30 @@ func (f *brokenStore) GetChunksScoped(context.Context, string, string) ([]cache.
 func (f *brokenStore) ListChunks(context.Context, cache.ChunkFilter) ([]cache.Chunk, error) {
 	return nil, nil
 }
+func (f *brokenStore) UpsertEmbeddingNamespace(context.Context, cache.EmbeddingNamespace) (cache.EmbeddingNamespace, error) {
+	return cache.EmbeddingNamespace{}, nil
+}
+func (f *brokenStore) ResolveEmbeddingNamespace(context.Context, cache.EmbeddingNamespaceIdentity) (cache.EmbeddingNamespace, bool, error) {
+	return cache.EmbeddingNamespace{}, false, nil
+}
+func (f *brokenStore) GetEmbeddingNamespace(context.Context, string, string) (cache.EmbeddingNamespace, error) {
+	return cache.EmbeddingNamespace{}, cache.ErrNotFound
+}
+func (f *brokenStore) ListEmbeddingNamespaces(context.Context, string) ([]cache.EmbeddingNamespace, error) {
+	return nil, nil
+}
+func (f *brokenStore) UpsertChunkEmbedding(context.Context, cache.ChunkEmbedding) error {
+	return nil
+}
+func (f *brokenStore) ListChunkEmbeddings(context.Context, cache.ChunkEmbeddingFilter) ([]cache.ChunkEmbedding, error) {
+	return nil, nil
+}
+func (f *brokenStore) UpsertRAGIndexRun(context.Context, cache.RAGIndexRun) error {
+	return nil
+}
+func (f *brokenStore) GetRAGIndexRun(context.Context, string, string) (cache.RAGIndexRun, error) {
+	return cache.RAGIndexRun{}, cache.ErrNotFound
+}
 func (f *brokenStore) RecordSyncEvent(context.Context, cache.SyncEvent) error { return nil }
 func (f *brokenStore) GetSyncEventByKey(ctx context.Context, key string) (*cache.SyncEvent, error) {
 	return nil, nil
