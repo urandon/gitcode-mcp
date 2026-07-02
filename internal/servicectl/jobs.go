@@ -17,6 +17,7 @@ const (
 	JobStatusQueued      = "queued"
 	JobStatusRunning     = "running"
 	JobStatusSucceeded   = "succeeded"
+	JobStatusFailed      = "failed"
 	JobStatusCancelled   = "cancelled"
 	JobStatusInterrupted = "interrupted"
 )
@@ -24,6 +25,8 @@ const (
 type Job struct {
 	ID         string                  `json:"id"`
 	Type       string                  `json:"type"`
+	RepoID     string                  `json:"repo_id,omitempty"`
+	ProfileID  string                  `json:"profile_id,omitempty"`
 	Status     string                  `json:"status"`
 	CreatedAt  time.Time               `json:"created_at"`
 	StartedAt  *time.Time              `json:"started_at,omitempty"`
@@ -114,6 +117,20 @@ func (m *JobManager) StartFake(ctx context.Context, req StartFakeJobRequest) (Jo
 	return job, nil
 }
 
+func (m *JobManager) ActiveJob(jobType, repoID string) (Job, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, job := range m.jobs {
+		if job.Type != jobType || job.RepoID != repoID {
+			continue
+		}
+		if job.Status == JobStatusQueued || job.Status == JobStatusRunning {
+			return cloneJob(job), true
+		}
+	}
+	return Job{}, false
+}
+
 func (m *JobManager) List() []Job {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -176,6 +193,16 @@ func (m *JobManager) createJob(jobType string, steps int, cancel context.CancelF
 	return cloneJob(job)
 }
 
+func (m *JobManager) createJobWithMetadata(jobType, repoID, profileID string, steps int, cancel context.CancelFunc) Job {
+	job := m.createJob(jobType, steps, cancel)
+	m.updateJob(job.ID, func(stored *Job, now time.Time) {
+		stored.RepoID = repoID
+		stored.ProfileID = profileID
+		stored.UpdatedAt = now
+	})
+	return m.mustGet(job.ID)
+}
+
 func (m *JobManager) runFakeJob(ctx context.Context, id string, steps int, interval time.Duration) {
 	m.updateJob(id, func(job *Job, now time.Time) {
 		job.Status = JobStatusRunning
@@ -225,6 +252,14 @@ func (m *JobManager) updateJob(id string, fn func(*Job, time.Time)) {
 	}
 	fn(job, m.now())
 	_ = m.saveLocked()
+}
+
+func (m *JobManager) mustGet(id string) Job {
+	job, ok := m.Get(id)
+	if !ok {
+		return Job{}
+	}
+	return job
 }
 
 func (m *JobManager) saveLocked() error {
