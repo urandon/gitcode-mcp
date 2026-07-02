@@ -484,6 +484,7 @@ func newMCPStdioServer(ctx context.Context, stdin io.Reader, stdout io.Writer, s
 	}
 	server := mcp.NewWithToolAccess(stdin, stdout, stderr, svc, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess))
 	server.SetRAGStatusProvider(newMCPRAGStatusProvider(store, deps))
+	server.SetRAGSearchProvider(newMCPRAGSearchProvider(store, deps))
 	return server, func() { _ = store.Close() }
 }
 
@@ -517,6 +518,7 @@ func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind
 	}
 	handler := mcp.NewRPCHandlerWithCredentialResolverAndToolAccess(svc, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess))
 	handler.SetRAGStatusProvider(newMCPRAGStatusProvider(store, deps))
+	handler.SetRAGSearchProvider(newMCPRAGSearchProvider(store, deps))
 	transport := mcp.NewHTTPSSETransport(handler, mcp.ServerConfig{BindAddress: bind, ReadinessProbe: func(ctx context.Context) mcp.Readiness {
 		repos, err := store.ListRepositories(ctx)
 		if err != nil {
@@ -545,6 +547,16 @@ func newMCPRAGStatusProvider(store cache.Store, deps StartupDeps) mcp.RAGStatusP
 			return rag.StatusResult{}, err
 		}
 		return rag.Status(ctx, store, provider, req)
+	}
+}
+
+func newMCPRAGSearchProvider(store cache.Store, deps StartupDeps) mcp.RAGSearchProvider {
+	return func(ctx context.Context, req rag.SearchRequest) (rag.SearchResult, error) {
+		provider, err := rag.NewEmbeddingProviderFromConfig(deps.Config, req.ProfileID, rag.ProviderOptions{})
+		if err != nil {
+			return rag.SearchResult{}, err
+		}
+		return rag.NewRAGRetriever(store, provider, rag.RAGRetrieverOptions{}).Search(ctx, req)
 	}
 }
 

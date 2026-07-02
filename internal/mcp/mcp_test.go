@@ -122,6 +122,55 @@ func TestMCPRAGStatusReturnsStructuredContent(t *testing.T) {
 	}
 }
 
+func TestMCPRAGSearchReturnsStructuredContent(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	handler := NewRPCHandler(service.New(store))
+	handler.SetRAGSearchProvider(func(_ context.Context, req rag.SearchRequest) (rag.SearchResult, error) {
+		if req.RepoID != "fixture-a" || req.Query != "rate limits" || req.ProfileID != "fake-rag" || req.Limit != 2 {
+			t.Fatalf("unexpected request: %#v", req)
+		}
+		return rag.SearchResult{
+			RepoID:     "fixture-a",
+			Query:      req.Query,
+			SearchMode: rag.SearchModeHybridRAG,
+			Status:     rag.RAGSearchStatusReady,
+			Namespace:  rag.NamespaceStatus{ID: "ns-1", Exists: true, Current: true},
+			Coverage:   rag.CoverageStatus{TotalChunks: 3, EmbeddedChunks: 2, MissingChunks: 1},
+			Results: []rag.SearchContext{{
+				Rank:      1,
+				ChunkID:   "chunk-1",
+				SourceID:  "ISSUE-1",
+				Path:      "issues/1.md",
+				LineStart: 7,
+				Snippet:   "retry after rate limits",
+				Score:     rag.ScoreBreakdown{Hybrid: 0.9, Semantic: 0.8, Lexical: 1},
+			}},
+		}, nil
+	})
+	id := json.RawMessage(`1`)
+	params := json.RawMessage(`{"name":"rag_search","arguments":{"repo_id":"fixture-a","query":"rate limits","profile":"fake-rag","limit":2}}`)
+	resp, ok := handler.Handle(context.Background(), request{JSONRPC: "2.0", ID: &id, Method: "tools/call", Params: &params})
+	if !ok || resp == nil || resp.Error != nil {
+		t.Fatalf("response=%#v ok=%t", resp, ok)
+	}
+	var result toolCallResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("invalid tool result: %v", err)
+	}
+	if len(result.Content) != 1 || !strings.Contains(result.Content[0].Text, "rag_search=ready") || !strings.Contains(result.Content[0].Text, "top=chunk-1") {
+		t.Fatalf("unexpected content: %#v", result.Content)
+	}
+	raw, _ := json.Marshal(result.StructuredContent)
+	var structured rag.SearchResult
+	if err := json.Unmarshal(raw, &structured); err != nil {
+		t.Fatalf("invalid structured content: %v", err)
+	}
+	if structured.SearchMode != rag.SearchModeHybridRAG || len(structured.Results) != 1 || structured.Results[0].Score.Lexical != 1 {
+		t.Fatalf("structured=%#v", structured)
+	}
+}
+
 func TestMCPErrorOutputCanonicalFailureClass(t *testing.T) {
 	tests := []struct {
 		name string
