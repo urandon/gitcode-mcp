@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	DefaultRAGProfile = "qwen3-ollama-0_6b-512"
+	DefaultRAGProfile = "qwen3-ollama-0_6b-1024"
 )
 
 const (
@@ -156,7 +156,7 @@ func defaultRAGConfig(cacheBaseDir string) RAGConfig {
 			DefaultRAGProfile: {
 				Provider:       defaultRAGProvider,
 				Model:          defaultRAGEmbeddingModel,
-				Dimensions:     512,
+				Dimensions:     1024,
 				MaxInputTokens: 512,
 				BatchSize:      16,
 			},

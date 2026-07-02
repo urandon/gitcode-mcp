@@ -809,13 +809,13 @@ func executeRAGCommand(ctx context.Context, args []string, opts options, stdout 
 			return writeError(stderr, opts.format, clientErr)
 		}
 		var job servicectl.Job
-		if err := client.Call(ctx, "Jobs.StartRAGIndex", servicectl.StartRAGIndexJobRequest{RepoID: opts.repo, Profile: opts.profile, CachePath: opts.cachePath, BatchSize: opts.batchSize}, &job); err != nil {
+		if err := client.Call(ctx, "Jobs.StartRAGIndex", servicectl.StartRAGIndexJobRequest{RepoID: opts.repo, Profile: opts.profile, CachePath: opts.cachePath, BatchSize: opts.batchSize, ChunkPolicy: opts.policy}, &job); err != nil {
 			return writeError(stderr, opts.format, err)
 		}
 		if opts.detach {
 			return render(stdout, opts.format, job, renderServiceJobText)
 		}
-		return attachServiceJob(ctx, client, job.ID, opts, stdout, stderr)
+		return attachRAGIndexJob(ctx, client, job.ID, opts, stdout, stderr)
 	case "status":
 		return executeRAGStatusCommand(ctx, opts, stdout, stderr, deps)
 	case "search":
@@ -1164,6 +1164,49 @@ func attachServiceJob(ctx context.Context, client *servicectl.RPCClient, id stri
 	}
 }
 
+func attachRAGIndexJob(ctx context.Context, client *servicectl.RPCClient, id string, opts options, stdout io.Writer, stderr io.Writer) int {
+	mode := syncProgressMode(opts, stderr)
+	seen := 0
+	state := ragIndexProgressState{Started: time.Now().UTC()}
+	encoder := json.NewEncoder(stderr)
+	renderedSpinner := false
+	for {
+		var job servicectl.Job
+		if err := client.Call(ctx, "Jobs.Get", map[string]string{"job_id": id}, &job); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		state.ApplyJob(job)
+		for ; seen < len(job.Progress); seen++ {
+			state.ApplyEvent(job.Progress[seen])
+			switch mode {
+			case "jsonl":
+				_ = encoder.Encode(ragIndexProgressJSONEvent(state, time.Now().UTC()))
+			case "lines":
+				renderRAGIndexProgressLine(stderr, state, time.Now().UTC())
+			}
+		}
+		if mode == "spinner" {
+			renderRAGIndexProgressSpinnerFrame(stderr, &state, time.Now().UTC())
+			renderedSpinner = true
+		}
+		if serviceJobTerminal(job.Status) {
+			if mode == "spinner" && renderedSpinner {
+				renderRAGIndexProgressSpinnerFinal(stderr, &state, time.Now().UTC())
+			}
+			code := render(stdout, opts.format, job, renderServiceJobText)
+			if job.Status == servicectl.JobStatusFailed || job.Status == servicectl.JobStatusCancelled || job.Status == servicectl.JobStatusInterrupted {
+				return 1
+			}
+			return code
+		}
+		select {
+		case <-ctx.Done():
+			return writeError(stderr, opts.format, ctx.Err())
+		case <-time.After(120 * time.Millisecond):
+		}
+	}
+}
+
 func serviceJobTerminal(status string) bool {
 	switch status {
 	case servicectl.JobStatusSucceeded, servicectl.JobStatusFailed, servicectl.JobStatusCancelled, servicectl.JobStatusInterrupted:
@@ -1264,6 +1307,159 @@ func renderServiceJobProgress(w io.Writer, jobID string, ev service.ProgressEven
 		fmt.Fprintf(w, " message=%q", ev.Message)
 	}
 	fmt.Fprintln(w)
+}
+
+type ragIndexProgressState struct {
+	Started  time.Time
+	Frame    int
+	JobID    string
+	Status   string
+	Phase    string
+	Total    int
+	Embedded int
+	Skipped  int
+	Failed   int
+	Message  string
+}
+
+func (s *ragIndexProgressState) ApplyJob(job servicectl.Job) {
+	s.JobID = job.ID
+	if job.Status != "" {
+		s.Status = job.Status
+	}
+	if job.StartedAt != nil && !job.StartedAt.IsZero() {
+		s.Started = job.StartedAt.UTC()
+	} else if !job.CreatedAt.IsZero() && s.Started.IsZero() {
+		s.Started = job.CreatedAt.UTC()
+	}
+	if job.Steps > 0 {
+		s.Total = job.Steps
+	}
+	if job.Error != "" {
+		s.Message = job.Error
+	}
+}
+
+func (s *ragIndexProgressState) ApplyEvent(ev service.ProgressEvent) {
+	if ev.Phase != "" {
+		s.Phase = ev.Phase
+	}
+	if ev.RecordsListed > 0 {
+		s.Total = ev.RecordsListed
+	}
+	if ev.RecordsFetched > 0 {
+		s.Embedded = ev.RecordsFetched
+	}
+	if ev.RecordsSkipped > 0 {
+		s.Skipped = ev.RecordsSkipped
+	}
+	if ev.RecordsFailed > 0 {
+		s.Failed = ev.RecordsFailed
+	}
+	if ev.Message != "" {
+		s.Message = ev.Message
+	}
+}
+
+func (s ragIndexProgressState) completed() int {
+	return s.Embedded + s.Skipped
+}
+
+func renderRAGIndexProgressSpinnerFrame(w io.Writer, state *ragIndexProgressState, now time.Time) {
+	frames := []string{"-", "\\", "|", "/"}
+	frame := frames[state.Frame%len(frames)]
+	state.Frame++
+	fmt.Fprintf(w, "\r\033[K%s ", frame)
+	renderRAGIndexProgressSummary(w, *state, now)
+}
+
+func renderRAGIndexProgressSpinnerFinal(w io.Writer, state *ragIndexProgressState, now time.Time) {
+	fmt.Fprint(w, "\r\033[K")
+	renderRAGIndexProgressSummary(w, *state, now)
+	fmt.Fprintln(w)
+}
+
+func renderRAGIndexProgressLine(w io.Writer, state ragIndexProgressState, now time.Time) {
+	fmt.Fprint(w, "rag index progress: ")
+	renderRAGIndexProgressSummary(w, state, now)
+	fmt.Fprintln(w)
+}
+
+func renderRAGIndexProgressSummary(w io.Writer, state ragIndexProgressState, now time.Time) {
+	status := firstNonEmpty(state.Status, state.Phase, "running")
+	fmt.Fprintf(w, "rag index %s", status)
+	if state.Total > 0 {
+		completed := state.completed()
+		percent := float64(completed) * 100 / float64(state.Total)
+		fmt.Fprintf(w, " %d/%d %.1f%%", completed, state.Total, percent)
+	} else if state.completed() > 0 {
+		fmt.Fprintf(w, " %d chunks", state.completed())
+	}
+	fmt.Fprintf(w, " %.1f chunks/s", ragIndexProgressSpeed(state, now))
+	if state.Skipped > 0 {
+		fmt.Fprintf(w, " skipped=%d", state.Skipped)
+	}
+	if state.Failed > 0 {
+		fmt.Fprintf(w, " failed=%d", state.Failed)
+	}
+	fmt.Fprintf(w, " elapsed=%s", ragIndexProgressElapsed(state, now))
+	if state.Message != "" && status != servicectl.JobStatusRunning && status != rag.RAGIndexStatusRunning {
+		fmt.Fprintf(w, " message=%q", state.Message)
+	}
+}
+
+type ragIndexProgressEventJSON struct {
+	JobID      string  `json:"job_id,omitempty"`
+	Status     string  `json:"status"`
+	Total      int     `json:"total_chunks,omitempty"`
+	Embedded   int     `json:"embedded_chunks"`
+	Skipped    int     `json:"skipped_chunks,omitempty"`
+	Failed     int     `json:"failed_chunks,omitempty"`
+	Completed  int     `json:"completed_chunks"`
+	Percent    float64 `json:"percent,omitempty"`
+	ChunksPerS float64 `json:"chunks_per_second"`
+	ElapsedMS  int64   `json:"elapsed_ms"`
+	Message    string  `json:"message,omitempty"`
+}
+
+func ragIndexProgressJSONEvent(state ragIndexProgressState, now time.Time) ragIndexProgressEventJSON {
+	completed := state.completed()
+	var percent float64
+	if state.Total > 0 {
+		percent = float64(completed) * 100 / float64(state.Total)
+	}
+	return ragIndexProgressEventJSON{
+		JobID:      state.JobID,
+		Status:     firstNonEmpty(state.Status, state.Phase, "running"),
+		Total:      state.Total,
+		Embedded:   state.Embedded,
+		Skipped:    state.Skipped,
+		Failed:     state.Failed,
+		Completed:  completed,
+		Percent:    percent,
+		ChunksPerS: ragIndexProgressSpeed(state, now),
+		ElapsedMS:  ragIndexProgressElapsed(state, now).Milliseconds(),
+		Message:    state.Message,
+	}
+}
+
+func ragIndexProgressSpeed(state ragIndexProgressState, now time.Time) float64 {
+	elapsed := ragIndexProgressElapsed(state, now)
+	if elapsed <= 0 {
+		return 0
+	}
+	return float64(state.Embedded) / elapsed.Seconds()
+}
+
+func ragIndexProgressElapsed(state ragIndexProgressState, now time.Time) time.Duration {
+	started := state.Started
+	if started.IsZero() {
+		started = now
+	}
+	if now.Before(started) {
+		return 0
+	}
+	return now.Sub(started).Round(time.Millisecond)
 }
 
 func dispatch(ctx context.Context, svc queryService, command string, args []string, opts options, stdout io.Writer, stderr io.Writer, plan startupPlan) int {
@@ -3639,13 +3835,15 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "  --yes               allow non-interactive model pull")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "rag index":
-		fmt.Fprintln(w, "Usage: gitcode-mcp rag index --repo REPO [--profile PROFILE] [--batch-size N] [--detach] [--format FORMAT]")
+		fmt.Fprintln(w, "Usage: gitcode-mcp rag index --repo REPO [--profile PROFILE] [--policy POLICY] [--batch-size N] [--progress MODE] [--detach] [--format FORMAT]")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Start a daemon-owned RAG index job. By default the CLI attaches until the job reaches a terminal state.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         configured repository id")
 		fmt.Fprintln(w, "  --profile PROFILE   RAG profile name")
+		fmt.Fprintln(w, "  --policy POLICY     chunk policy namespace (defaults to heading)")
 		fmt.Fprintln(w, "  --batch-size N      embedding batch size")
+		fmt.Fprintln(w, "  --progress MODE     progress mode: auto, spinner, lines, jsonl, off")
 		fmt.Fprintln(w, "  --detach            return the job id without attaching progress")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "rag status":

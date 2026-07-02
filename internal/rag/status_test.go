@@ -50,7 +50,7 @@ func TestStatusPartialAndStaleCoverage(t *testing.T) {
 		vectorTestChunk("chunk-missing", "ISSUE-2", "hash-missing"),
 	})
 	provider := mustFakeIndexerProvider(t, 2)
-	namespace, err := EnsureEmbeddingNamespace(ctx, store, provider, NamespaceRequest{RepoID: "fixture-a", ChunkPolicyID: "heading-v1", LanguagePolicyID: DefaultLanguagePolicyID, DocumentInstructionID: DefaultDocumentInstructionID, QueryInstructionID: DefaultQueryInstructionID})
+	namespace, err := EnsureEmbeddingNamespace(ctx, store, provider, NamespaceRequest{RepoID: "fixture-a", ChunkPolicyID: DefaultChunkPolicyID, LanguagePolicyID: DefaultLanguagePolicyID, DocumentInstructionID: DefaultDocumentInstructionID, QueryInstructionID: DefaultQueryInstructionID})
 	if err != nil {
 		t.Fatalf("EnsureEmbeddingNamespace returned error: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestStatusReportsFailedLastRunAndActiveJob(t *testing.T) {
 	defer store.Close()
 	mustUpsertVectorChunks(t, ctx, store, "fixture-a", []cache.Chunk{vectorTestChunk("chunk-a", "ISSUE-1", "hash-a")})
 	provider := mustFakeIndexerProvider(t, 2)
-	namespace, err := EnsureEmbeddingNamespace(ctx, store, provider, NamespaceRequest{RepoID: "fixture-a", ChunkPolicyID: "heading-v1", LanguagePolicyID: DefaultLanguagePolicyID, DocumentInstructionID: DefaultDocumentInstructionID, QueryInstructionID: DefaultQueryInstructionID})
+	namespace, err := EnsureEmbeddingNamespace(ctx, store, provider, NamespaceRequest{RepoID: "fixture-a", ChunkPolicyID: DefaultChunkPolicyID, LanguagePolicyID: DefaultLanguagePolicyID, DocumentInstructionID: DefaultDocumentInstructionID, QueryInstructionID: DefaultQueryInstructionID})
 	if err != nil {
 		t.Fatalf("EnsureEmbeddingNamespace returned error: %v", err)
 	}
@@ -87,6 +87,34 @@ func TestStatusReportsFailedLastRunAndActiveJob(t *testing.T) {
 		t.Fatalf("Status returned error: %v", err)
 	}
 	if result.Status != "indexing" || result.ActiveJob == nil || result.LastRun == nil || result.LastRun.ID != "rag-run-failed" || result.Coverage.FailedChunks != 1 {
+		t.Fatalf("result=%#v", result)
+	}
+}
+
+func TestStatusReportsPartialWhenSucceededRunHasFailedChunks(t *testing.T) {
+	ctx := context.Background()
+	store := newVectorTestStore(t, ctx)
+	defer store.Close()
+	mustUpsertVectorChunks(t, ctx, store, "fixture-a", []cache.Chunk{
+		vectorTestChunk("chunk-a", "ISSUE-1", "hash-a"),
+		vectorTestChunk("chunk-bad", "ISSUE-1", "hash-bad"),
+	})
+	provider := mustFakeIndexerProvider(t, 2)
+	namespace, err := EnsureEmbeddingNamespace(ctx, store, provider, NamespaceRequest{RepoID: "fixture-a", ChunkPolicyID: DefaultChunkPolicyID, LanguagePolicyID: DefaultLanguagePolicyID, DocumentInstructionID: DefaultDocumentInstructionID, QueryInstructionID: DefaultQueryInstructionID})
+	if err != nil {
+		t.Fatalf("EnsureEmbeddingNamespace returned error: %v", err)
+	}
+	mustUpsertVectorEmbedding(t, ctx, store, namespace.ID, "chunk-a", []float32{1, 0})
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	if err := store.UpsertRAGIndexRun(ctx, cache.RAGIndexRun{RepoID: "fixture-a", ID: "rag-run-partial", NamespaceID: namespace.ID, ProfileID: "fake-rag", Status: RAGIndexStatusSucceeded, TotalChunks: 2, EmbeddedChunks: 1, FailedChunks: 1, StartedAt: now, UpdatedAt: now, CompletedAt: now, Message: "rag index finished with 1 failed chunks"}); err != nil {
+		t.Fatalf("UpsertRAGIndexRun returned error: %v", err)
+	}
+
+	result, err := Status(ctx, store, provider, StatusRequest{RepoID: "fixture-a"})
+	if err != nil {
+		t.Fatalf("Status returned error: %v", err)
+	}
+	if result.Status != "partial" || result.Coverage.EmbeddedChunks != 1 || result.Coverage.MissingChunks != 1 || result.Coverage.FailedChunks != 1 {
 		t.Fatalf("result=%#v", result)
 	}
 }

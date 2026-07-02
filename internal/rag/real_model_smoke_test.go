@@ -17,7 +17,7 @@ func TestOptionalOllamaRealModelSmoke(t *testing.T) {
 	fixture := loadMultilingualEvalFixture(t)
 	endpoint := firstNonEmpty(os.Getenv("GITCODE_MCP_RAG_PROVIDER_ENDPOINT"), "http://127.0.0.1:11434")
 	model := firstNonEmpty(os.Getenv("GITCODE_MCP_RAG_REAL_MODEL"), "qwen3-embedding:0.6b")
-	dimensions := 512
+	dimensions := 1024
 	if raw := os.Getenv("GITCODE_MCP_RAG_REAL_DIMENSIONS"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed <= 0 {

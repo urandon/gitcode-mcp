@@ -30,6 +30,7 @@ const (
 
 	DefaultEmbeddingDType              = "float32"
 	DefaultEmbeddingNormalization      = "l2"
+	DefaultChunkPolicyID               = "heading"
 	DefaultDocumentInstructionID       = "doc-default"
 	DefaultQueryInstructionID          = "query-default"
 	DefaultLanguagePolicyID            = "ru-zh-en-v1"

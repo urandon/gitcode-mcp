@@ -189,7 +189,7 @@ func testSearchNamespaceIdentity(repoID string) cache.EmbeddingNamespaceIdentity
 		Normalization:         DefaultEmbeddingNormalization,
 		DocumentInstructionID: DefaultDocumentInstructionID,
 		QueryInstructionID:    DefaultQueryInstructionID,
-		ChunkPolicyID:         "heading-v1",
+		ChunkPolicyID:         DefaultChunkPolicyID,
 		LanguagePolicyID:      DefaultLanguagePolicyID,
 		ConfigHash:            "config-hash-stub-revision",
 	}

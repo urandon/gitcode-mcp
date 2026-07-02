@@ -273,7 +273,7 @@ func TestRAGSetupCommand(t *testing.T) {
 			t.Fatalf("code=%d stderr=%q", code, stderr.String())
 		}
 		out := stdout.String()
-		for _, want := range []string{"status: missing_model", "profile: qwen3-ollama-0_6b-512", "provider: ollama", "actions: pull model"} {
+		for _, want := range []string{"status: missing_model", "profile: qwen3-ollama-0_6b-1024", "provider: ollama", "actions: pull model"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("rag setup output missing %q in %q", want, out)
 			}

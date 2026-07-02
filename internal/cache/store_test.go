@@ -91,12 +91,12 @@ func TestRAGEmbeddingSchemaRoundTrip(t *testing.T) {
 	})
 	identity := EmbeddingNamespaceIdentity{
 		RepoID:                "fixture-a",
-		ProfileID:             "qwen3-ollama-0_6b-512",
+		ProfileID:             "qwen3-ollama-0_6b-1024",
 		ProviderID:            "ollama-local",
 		ProviderType:          "ollama",
 		ModelID:               "qwen3-embedding:0.6b",
 		ModelRevision:         "sha256:one",
-		Dimensions:            512,
+		Dimensions:            1024,
 		DType:                 "float32",
 		Normalization:         "l2",
 		DocumentInstructionID: "doc-default",
@@ -137,7 +137,7 @@ func TestRAGEmbeddingSchemaRoundTrip(t *testing.T) {
 	if changedNamespace.ID == namespace.ID {
 		t.Fatalf("changed model revision reused namespace id %q", namespace.ID)
 	}
-	if err := store.UpsertChunkEmbedding(ctx, ChunkEmbedding{RepoID: "fixture-a", NamespaceID: namespace.ID, ChunkID: "chunk-40-1", Vector: []byte{1, 2, 3, 4}, Dimensions: 512, DType: "float32", EmbeddedAt: now}); err != nil {
+	if err := store.UpsertChunkEmbedding(ctx, ChunkEmbedding{RepoID: "fixture-a", NamespaceID: namespace.ID, ChunkID: "chunk-40-1", Vector: []byte{1, 2, 3, 4}, Dimensions: 1024, DType: "float32", EmbeddedAt: now}); err != nil {
 		t.Fatalf("UpsertChunkEmbedding returned error: %v", err)
 	}
 	embeddings, err := store.ListChunkEmbeddings(ctx, ChunkEmbeddingFilter{RepoID: "fixture-a", NamespaceID: namespace.ID})

@@ -101,7 +101,7 @@ func (i *RAGIndexer) Run(ctx context.Context, req IndexRequest) (IndexResult, er
 	if req.BatchSize <= 0 {
 		req.BatchSize = 16
 	}
-	req.ChunkPolicyID = firstNonEmpty(req.ChunkPolicyID, "heading-v1")
+	req.ChunkPolicyID = firstNonEmpty(req.ChunkPolicyID, DefaultChunkPolicyID)
 	req.LanguagePolicyID = firstNonEmpty(req.LanguagePolicyID, DefaultLanguagePolicyID)
 	req.DocumentInstructionID = firstNonEmpty(req.DocumentInstructionID, DefaultDocumentInstructionID)
 	req.QueryInstructionID = firstNonEmpty(req.QueryInstructionID, DefaultQueryInstructionID)
@@ -173,6 +173,28 @@ func (i *RAGIndexer) Run(ctx context.Context, req IndexRequest) (IndexResult, er
 		return i.failRun(ctx, run, progress, "run_update_failed", err)
 	}
 	emit(service.ProgressEvent{Type: "started", Phase: RAGIndexStatusRunning, Collection: "rag_index", RecordsListed: len(chunks), RecordsSkipped: skipped, Message: "rag index started"})
+	writeEmbedding := func(chunk cache.Chunk, vector []float32) error {
+		blob, err := EncodeNormalizedFloat32Vector(vector)
+		if err != nil {
+			return err
+		}
+		return i.store.UpsertChunkEmbedding(ctx, cache.ChunkEmbedding{
+			RepoID:           req.RepoID,
+			NamespaceID:      namespace.ID,
+			ChunkID:          chunk.ID,
+			SourceID:         chunk.SourceID,
+			RecordID:         chunk.RecordID,
+			SnapshotID:       chunk.SnapshotID,
+			ChunkContentHash: chunk.ContentHash,
+			Vector:           blob,
+			Dimensions:       len(vector),
+			DType:            DefaultEmbeddingDType,
+			EmbeddedAt:       i.now().UTC(),
+		})
+	}
+	emitRecords := func(message string) {
+		emit(service.ProgressEvent{Type: "records", Phase: RAGIndexStatusRunning, Collection: "rag_index", RecordsListed: run.TotalChunks, RecordsFetched: run.EmbeddedChunks, RecordsSkipped: run.SkippedChunks, RecordsFailed: run.FailedChunks, Message: message})
+	}
 	for start := 0; start < len(missing); start += req.BatchSize {
 		if err := ctx.Err(); err != nil {
 			return i.cancelRun(ctx, run, progress, err)
@@ -188,8 +210,46 @@ func (i *RAGIndexer) Run(ctx context.Context, req IndexRequest) (IndexResult, er
 		}
 		response, err := i.provider.Embed(ctx, EmbedRequest{Inputs: inputs})
 		if err != nil {
-			run.FailedChunks += len(batch)
-			return i.failRun(ctx, run, progress, providerFailureClass(err), err)
+			if len(batch) == 1 {
+				run.FailedChunks++
+				run.UpdatedAt = i.now().UTC()
+				if run.EmbeddedChunks+run.SkippedChunks == 0 {
+					return i.failRun(ctx, run, progress, providerFailureClass(err), err)
+				}
+				if updateErr := i.store.UpsertRAGIndexRun(ctx, run); updateErr != nil {
+					return i.failRun(ctx, run, progress, "run_update_failed", updateErr)
+				}
+				emitRecords(fmt.Sprintf("failed chunk %s: %s", batch[0].ID, err.Error()))
+				continue
+			}
+			for _, chunk := range batch {
+				if err := ctx.Err(); err != nil {
+					return i.cancelRun(ctx, run, progress, err)
+				}
+				response, err := i.provider.Embed(ctx, EmbedRequest{Inputs: []string{firstNonEmpty(chunk.NormalizedText, chunk.Text)}})
+				if err != nil {
+					run.FailedChunks++
+					emitRecords(fmt.Sprintf("failed chunk %s: %s", chunk.ID, err.Error()))
+					continue
+				}
+				if len(response.Embeddings) != 1 {
+					run.FailedChunks++
+					emitRecords(fmt.Sprintf("failed chunk %s: embedding count = %d, want 1", chunk.ID, len(response.Embeddings)))
+					continue
+				}
+				if err := writeEmbedding(chunk, response.Embeddings[0]); err != nil {
+					run.FailedChunks++
+					emitRecords(fmt.Sprintf("failed chunk %s: %s", chunk.ID, err.Error()))
+					continue
+				}
+				run.EmbeddedChunks++
+			}
+			run.UpdatedAt = i.now().UTC()
+			if updateErr := i.store.UpsertRAGIndexRun(ctx, run); updateErr != nil {
+				return i.failRun(ctx, run, progress, "run_update_failed", updateErr)
+			}
+			emitRecords(fmt.Sprintf("embedded %d/%d chunks", run.EmbeddedChunks, len(missing)))
+			continue
 		}
 		if len(response.Embeddings) != len(batch) {
 			run.FailedChunks += len(batch)
@@ -224,16 +284,19 @@ func (i *RAGIndexer) Run(ctx context.Context, req IndexRequest) (IndexResult, er
 		if err := i.store.UpsertRAGIndexRun(ctx, run); err != nil {
 			return i.failRun(ctx, run, progress, "run_update_failed", err)
 		}
-		emit(service.ProgressEvent{Type: "records", Phase: RAGIndexStatusRunning, Collection: "rag_index", RecordsListed: run.TotalChunks, RecordsFetched: run.EmbeddedChunks, RecordsSkipped: run.SkippedChunks, RecordsFailed: run.FailedChunks, Message: fmt.Sprintf("embedded %d/%d chunks", run.EmbeddedChunks, len(missing))})
+		emitRecords(fmt.Sprintf("embedded %d/%d chunks", run.EmbeddedChunks, len(missing)))
 	}
 	completed := i.now().UTC()
 	run.Status = RAGIndexStatusSucceeded
+	if run.FailedChunks > 0 {
+		run.Message = fmt.Sprintf("rag index finished with %d failed chunks", run.FailedChunks)
+	}
 	run.UpdatedAt = completed
 	run.CompletedAt = completed
 	if err := i.store.UpsertRAGIndexRun(ctx, run); err != nil {
 		return i.failRun(ctx, run, progress, "run_update_failed", err)
 	}
-	emit(service.ProgressEvent{Type: "finished", Phase: RAGIndexStatusSucceeded, Collection: "rag_index", RecordsListed: run.TotalChunks, RecordsFetched: run.EmbeddedChunks, RecordsSkipped: run.SkippedChunks, Message: "rag index finished"})
+	emit(service.ProgressEvent{Type: "finished", Phase: RAGIndexStatusSucceeded, Collection: "rag_index", RecordsListed: run.TotalChunks, RecordsFetched: run.EmbeddedChunks, RecordsSkipped: run.SkippedChunks, RecordsFailed: run.FailedChunks, Message: firstNonEmpty(run.Message, "rag index finished")})
 	return indexResultFromRun(run, progress), nil
 }
 

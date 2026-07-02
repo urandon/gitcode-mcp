@@ -650,7 +650,7 @@ func TestRAGIndexCLIStartsDaemonJobOverIPC(t *testing.T) {
 			LineEnd:        1,
 			Text:           "русский 中文 English",
 			NormalizedText: "русский 中文 english",
-			Policy:         "heading-v1",
+			Policy:         rag.DefaultChunkPolicyID,
 		}},
 	}); err != nil {
 		t.Fatalf("UpsertSourceGraph returned error: %v", err)
@@ -697,7 +697,7 @@ func TestRAGIndexCLIStartsDaemonJobOverIPC(t *testing.T) {
 
 	var out bytes.Buffer
 	var errOut bytes.Buffer
-	code := executeWithFactoryAndDeps([]string{"rag", "index", "--repo", "fixture-a", "--detach", "--format", "json"}, &out, &errOut, nil, localCommandDeps{Source: src})
+	code := executeWithFactoryAndDeps([]string{"rag", "index", "--repo", "fixture-a", "--progress", "lines", "--format", "json"}, &out, &errOut, nil, localCommandDeps{Source: src})
 	if code != 0 {
 		t.Fatalf("rag index code=%d stderr=%q", code, errOut.String())
 	}
@@ -708,27 +708,17 @@ func TestRAGIndexCLIStartsDaemonJobOverIPC(t *testing.T) {
 	if job.Type != servicectl.RAGIndexJobType || job.RepoID != "fixture-a" {
 		t.Fatalf("job=%#v", job)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		var jobOut bytes.Buffer
-		var jobErr bytes.Buffer
-		code = executeWithFactoryAndDeps([]string{"service", "job", job.ID, "--format", "json"}, &jobOut, &jobErr, nil, localCommandDeps{Source: src})
-		if code != 0 {
-			t.Fatalf("service job code=%d stderr=%q", code, jobErr.String())
-		}
-		if err := json.Unmarshal(jobOut.Bytes(), &job); err != nil {
-			t.Fatalf("invalid job json: %v\n%s", err, jobOut.String())
-		}
-		if job.Status == servicectl.JobStatusSucceeded {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("rag index job did not finish: %#v", job)
-		}
-		time.Sleep(10 * time.Millisecond)
+	if job.Status != servicectl.JobStatusSucceeded {
+		t.Fatalf("rag index job did not finish: %#v", job)
 	}
 	if job.Completed != 1 || job.Steps != 1 {
 		t.Fatalf("completed job=%#v", job)
+	}
+	progress := errOut.String()
+	for _, want := range []string{"rag index progress:", "1/1", "100.0%", "chunks/s", "elapsed="} {
+		if !strings.Contains(progress, want) {
+			t.Fatalf("rag index progress missing %q: %q", want, progress)
+		}
 	}
 	cancel()
 	if code := <-runCode; code != 0 {
@@ -760,7 +750,7 @@ func TestRAGStatusCLIReportsCoverage(t *testing.T) {
 			LineEnd:        1,
 			Text:           "русский 中文 English",
 			NormalizedText: "русский 中文 english",
-			Policy:         "heading-v1",
+			Policy:         rag.DefaultChunkPolicyID,
 		}},
 	}); err != nil {
 		t.Fatalf("UpsertSourceGraph returned error: %v", err)
@@ -846,7 +836,7 @@ func TestRAGSearchCLIReportsNoNamespace(t *testing.T) {
 			LineEnd:        1,
 			Text:           "rate limits and cited context",
 			NormalizedText: "rate limits and cited context",
-			Policy:         "heading-v1",
+			Policy:         rag.DefaultChunkPolicyID,
 		}},
 	}); err != nil {
 		t.Fatalf("UpsertSourceGraph returned error: %v", err)
@@ -1172,6 +1162,39 @@ func TestSyncProgressModes(t *testing.T) {
 			if !strings.Contains(line, want) {
 				t.Fatalf("progress line missing %q: %q", want, line)
 			}
+		}
+	})
+}
+
+func TestRAGIndexProgressRendering(t *testing.T) {
+	started := time.Date(2026, 7, 2, 14, 31, 28, 0, time.UTC)
+	now := started.Add(32 * time.Second)
+	state := ragIndexProgressState{Started: started, JobID: "job-3", Status: servicectl.JobStatusRunning}
+	state.ApplyEvent(service.ProgressEvent{RecordsListed: 4033, RecordsFetched: 336, RecordsFailed: 16})
+
+	t.Run("spinner is compact", func(t *testing.T) {
+		var stderr bytes.Buffer
+		renderRAGIndexProgressSpinnerFrame(&stderr, &state, now)
+		line := stderr.String()
+		for _, want := range []string{"\r\033[K", "rag index running", "336/4033", "8.3%", "10.5 chunks/s", "failed=16", "elapsed=32s"} {
+			if !strings.Contains(line, want) {
+				t.Fatalf("rag spinner line missing %q: %q", want, line)
+			}
+		}
+		for _, unwanted := range []string{"records=", "collection=", "type="} {
+			if strings.Contains(line, unwanted) {
+				t.Fatalf("rag spinner line should stay compact and omit %q: %q", unwanted, line)
+			}
+		}
+	})
+
+	t.Run("json event includes speed", func(t *testing.T) {
+		event := ragIndexProgressJSONEvent(state, now)
+		if event.Completed != 336 || event.Total != 4033 || event.Failed != 16 {
+			t.Fatalf("event counts = %#v", event)
+		}
+		if event.ChunksPerS < 10.4 || event.ChunksPerS > 10.6 {
+			t.Fatalf("event speed = %#v", event)
 		}
 	})
 }

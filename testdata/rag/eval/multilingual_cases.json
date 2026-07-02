@@ -1,8 +1,8 @@
 {
   "name": "multilingual-rag-eval-v1",
   "description": "Deterministic RU/ZH/EN RAG evaluation cases for fake-provider and retriever tests.",
-  "profile": "qwen3-ollama-0_6b-512",
-  "chunk_policy_id": "heading-v1",
+  "profile": "qwen3-ollama-0_6b-1024",
+  "chunk_policy_id": "heading",
   "language_policy_id": "ru-zh-en-v1",
   "cases": [
     {

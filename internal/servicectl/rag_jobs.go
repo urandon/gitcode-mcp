@@ -16,10 +16,11 @@ import (
 const RAGIndexJobType = "rag-index"
 
 type StartRAGIndexJobRequest struct {
-	RepoID    string `json:"repo_id"`
-	Profile   string `json:"profile,omitempty"`
-	CachePath string `json:"cache_path,omitempty"`
-	BatchSize int    `json:"batch_size,omitempty"`
+	RepoID      string `json:"repo_id"`
+	Profile     string `json:"profile,omitempty"`
+	CachePath   string `json:"cache_path,omitempty"`
+	BatchSize   int    `json:"batch_size,omitempty"`
+	ChunkPolicy string `json:"chunk_policy,omitempty"`
 }
 
 func (m *JobManager) StartRAGIndex(ctx context.Context, manager Manager, req StartRAGIndexJobRequest) (Job, error) {
@@ -120,10 +121,14 @@ func runRAGIndex(ctx context.Context, manager Manager, req StartRAGIndexJobReque
 		batchSize = profile.BatchSize
 	}
 	indexer := rag.NewRAGIndexer(store, provider, rag.RAGIndexerOptions{LockPath: eff.Config.LockPath})
+	chunkPolicy := strings.TrimSpace(req.ChunkPolicy)
+	if chunkPolicy == "" {
+		chunkPolicy = rag.DefaultChunkPolicyID
+	}
 	result, err := indexer.Run(ctx, rag.IndexRequest{
 		RepoID:                req.RepoID,
 		ProfileID:             profile.ProfileID,
-		ChunkPolicyID:         "heading-v1",
+		ChunkPolicyID:         chunkPolicy,
 		LanguagePolicyID:      rag.DefaultLanguagePolicyID,
 		DocumentInstructionID: rag.DefaultDocumentInstructionID,
 		QueryInstructionID:    rag.DefaultQueryInstructionID,

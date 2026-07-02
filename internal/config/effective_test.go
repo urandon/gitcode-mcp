@@ -354,7 +354,7 @@ func TestEffectiveConfigScenarios(t *testing.T) {
 			t.Fatalf("default provider=%#v", provider)
 		}
 		profile := eff.Config.RAG.Profiles[DefaultRAGProfile]
-		if profile.Provider != "ollama" || profile.Model != "qwen3-embedding:0.6b" || profile.Dimensions != 512 {
+		if profile.Provider != "ollama" || profile.Model != "qwen3-embedding:0.6b" || profile.Dimensions != 1024 {
 			t.Fatalf("default profile=%#v", profile)
 		}
 	})

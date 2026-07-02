@@ -10,14 +10,14 @@ RAG is additive to the cache:
 
 ## Default Profile
 
-The built-in default profile is `qwen3-ollama-0_6b-512`:
+The built-in default profile is `qwen3-ollama-0_6b-1024`:
 
 | Setting | Value |
 |---|---|
 | Provider | `ollama` |
 | Provider endpoint | `http://127.0.0.1:11434` |
 | Model | `qwen3-embedding:0.6b` |
-| Dimensions | `512` |
+| Dimensions | `1024` |
 | Max input tokens | `512` |
 | Index batch size | `16` |
 | Search mode | hybrid semantic + lexical |
@@ -211,7 +211,7 @@ Normal CI uses fake-provider tests and does not download large models. Optional 
 GITCODE_MCP_RAG_REAL_SMOKE=1 \
 GITCODE_MCP_RAG_PROVIDER_ENDPOINT=http://127.0.0.1:11434 \
 GITCODE_MCP_RAG_REAL_MODEL=qwen3-embedding:0.6b \
-GITCODE_MCP_RAG_REAL_DIMENSIONS=512 \
+GITCODE_MCP_RAG_REAL_DIMENSIONS=1024 \
 go test ./internal/rag -run TestOptionalOllamaRealModelSmoke
 ```
 
