@@ -717,6 +717,92 @@ func TestRAGIndexCLIStartsDaemonJobOverIPC(t *testing.T) {
 	}
 }
 
+func TestRAGStatusCLIReportsCoverage(t *testing.T) {
+	root := t.TempDir()
+	cachePath := filepath.Join(root, "cache.db")
+	store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore returned error: %v", err)
+	}
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatalf("AddRepository returned error: %v", err)
+	}
+	if err := store.UpsertSourceGraph(context.Background(), cache.SourceGraph{
+		Source: cache.Source{RepoID: "fixture-a", ID: "ISSUE-1", Kind: "issue", Path: "issues/1.md", Title: "RAG status", Body: "русский 中文 English", Status: "open", ContentHash: "source-hash"},
+		Chunks: []cache.Chunk{{
+			RepoID:         "fixture-a",
+			ID:             "chunk-1",
+			SourceID:       "ISSUE-1",
+			RecordID:       "ISSUE-1",
+			ContentHash:    "chunk-hash",
+			ByteStart:      0,
+			ByteEnd:        32,
+			LineStart:      1,
+			LineEnd:        1,
+			Text:           "русский 中文 English",
+			NormalizedText: "русский 中文 english",
+			Policy:         "heading-v1",
+		}},
+	}); err != nil {
+		t.Fatalf("UpsertSourceGraph returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	configPath := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(strings.Join([]string{
+		"cache_path: " + cachePath,
+		"rag:",
+		"  default_profile: fake-rag",
+		"  providers:",
+		"    fake:",
+		"      type: fake",
+		"  profiles:",
+		"    fake-rag:",
+		"      provider: fake",
+		"      model: fake-embedding",
+		"      dimensions: 2",
+		"      batch_size: 1",
+		"  indexing:",
+		"    profile: fake-rag",
+		"",
+	}, "\n")), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	src := &repoInitLocalSource{
+		env:       map[string]string{config.EnvMCPConfigPath: configPath},
+		cwd:       root,
+		homeDir:   filepath.Join(root, "h"),
+		configDir: filepath.Join(root, "f"),
+		cacheDir:  filepath.Join(root, "c"),
+	}
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := executeWithFactoryAndDeps([]string{"rag", "status", "--repo", "fixture-a", "--format", "json"}, &out, &errOut, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("rag status code=%d stderr=%q", code, errOut.String())
+	}
+	var payload struct {
+		Status   string `json:"status"`
+		Coverage struct {
+			TotalChunks   int `json:"total_chunks"`
+			MissingChunks int `json:"missing_chunks"`
+		} `json:"coverage"`
+		Provider struct {
+			Ready bool `json:"ready"`
+		} `json:"provider"`
+		Namespace struct {
+			Exists bool `json:"exists"`
+		} `json:"namespace"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("invalid status json: %v\n%s", err, out.String())
+	}
+	if payload.Status != "no_namespace" || payload.Coverage.TotalChunks != 1 || payload.Coverage.MissingChunks != 1 || !payload.Provider.Ready || payload.Namespace.Exists {
+		t.Fatalf("payload=%#v", payload)
+	}
+}
+
 func shortCLITestRoot(t *testing.T, pattern string) (string, error) {
 	t.Helper()
 	cwd, err := os.Getwd()
@@ -1605,6 +1691,7 @@ func TestLocalCommandHelpExitsZero(t *testing.T) {
 		{"auth -h", []string{"auth", "-h"}},
 		{"config --help", []string{"config", "--help"}},
 		{"rag --help", []string{"rag", "--help"}},
+		{"rag-status --help", []string{"rag-status", "--help"}},
 		{"doctor --help", []string{"doctor", "--help"}},
 		{"migrate-cache --help", []string{"migrate-cache", "--help"}},
 	} {
@@ -1633,6 +1720,8 @@ func TestLocalSubcommandHelpExitsZero(t *testing.T) {
 		{"repo add --help", []string{"repo", "add", "--help"}},
 		{"repo status --help", []string{"repo", "status", "--help"}},
 		{"rag setup --help", []string{"rag", "setup", "--help"}},
+		{"rag index --help", []string{"rag", "index", "--help"}},
+		{"rag status --help", []string{"rag", "status", "--help"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

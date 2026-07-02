@@ -51,6 +51,7 @@ type Store interface {
 	ListChunkEmbeddings(context.Context, ChunkEmbeddingFilter) ([]ChunkEmbedding, error)
 	UpsertRAGIndexRun(context.Context, RAGIndexRun) error
 	GetRAGIndexRun(context.Context, string, string) (RAGIndexRun, error)
+	ListRAGIndexRuns(context.Context, RAGIndexRunFilter) ([]RAGIndexRun, error)
 	RecordSyncEvent(context.Context, SyncEvent) error
 	GetSyncEventByKey(context.Context, string) (*SyncEvent, error)
 	ListCompletedSyncEventsScoped(context.Context, string) ([]SyncEvent, error)
@@ -530,6 +531,14 @@ type RAGIndexRun struct {
 	ErrorClass     string
 	Message        string
 	Metadata       map[string]string
+}
+
+type RAGIndexRunFilter struct {
+	RepoID      string
+	NamespaceID string
+	ProfileID   string
+	Status      string
+	Limit       int
 }
 
 type SyncEvent struct {

@@ -147,6 +147,31 @@ func (s *SQLiteStore) GetRAGIndexRun(ctx context.Context, repoID, runID string) 
 	return run, err
 }
 
+func (s *SQLiteStore) ListRAGIndexRuns(ctx context.Context, filter RAGIndexRunFilter) ([]RAGIndexRun, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, run_id, namespace_id, profile_id, status, total_chunks, embedded_chunks, skipped_chunks, failed_chunks, started_at, updated_at, completed_at, error_class, message, metadata_json
+FROM rag_index_runs
+WHERE (? = '' OR repo_id = ?) AND (? = '' OR namespace_id = ?) AND (? = '' OR profile_id = ?) AND (? = '' OR status = ?)
+ORDER BY updated_at DESC, started_at DESC, run_id DESC
+LIMIT ?`, filter.RepoID, filter.RepoID, filter.NamespaceID, filter.NamespaceID, filter.ProfileID, filter.ProfileID, filter.Status, filter.Status, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	runs := []RAGIndexRun{}
+	for rows.Next() {
+		run, err := scanRAGIndexRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
 func normalizeEmbeddingNamespace(namespace EmbeddingNamespace) (EmbeddingNamespace, error) {
 	if namespace.RepoID == "" || namespace.ProfileID == "" || namespace.ProviderID == "" || namespace.ProviderType == "" || namespace.ModelID == "" || namespace.Dimensions <= 0 || namespace.DType == "" || namespace.Normalization == "" || namespace.ChunkPolicyID == "" || namespace.LanguagePolicyID == "" || namespace.ConfigHash == "" {
 		return EmbeddingNamespace{}, fmt.Errorf("cache: embedding namespace identity is incomplete")

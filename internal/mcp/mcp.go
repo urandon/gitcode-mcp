@@ -17,6 +17,7 @@ import (
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/gitcode"
+	"gitcode-mcp/internal/rag"
 	"gitcode-mcp/internal/service"
 	"gitcode-mcp/internal/servicectl"
 )
@@ -71,6 +72,7 @@ type RPCHandler struct {
 	minimal            bool
 	credentialResolver *auth.CredentialResolver
 	toolAccess         ToolAccess
+	ragStatus          RAGStatusProvider
 }
 
 type Server struct {
@@ -83,7 +85,10 @@ type Server struct {
 	minimal            bool
 	credentialResolver *auth.CredentialResolver
 	toolAccess         ToolAccess
+	ragStatus          RAGStatusProvider
 }
+
+type RAGStatusProvider func(context.Context, rag.StatusRequest) (rag.StatusResult, error)
 
 func NewRPCHandler(svc serviceInterface) *RPCHandler {
 	return NewRPCHandlerWithToolAccess(svc, ToolAccessRead)
@@ -114,6 +119,17 @@ func NewWithToolAccess(r io.Reader, w io.Writer, stderr io.Writer, svc serviceIn
 	return &Server{reader: r, writer: w, stderr: stderr, handler: NewRPCHandlerWithCredentialResolverAndToolAccess(svc, credResolver, access), svc: svc, credentialResolver: credResolver, toolAccess: access}
 }
 
+func (h *RPCHandler) SetRAGStatusProvider(provider RAGStatusProvider) {
+	h.ragStatus = provider
+}
+
+func (s *Server) SetRAGStatusProvider(provider RAGStatusProvider) {
+	s.ragStatus = provider
+	if s.handler != nil {
+		s.handler.SetRAGStatusProvider(provider)
+	}
+}
+
 func NewMinimal(r io.Reader, w io.Writer, stderr io.Writer, diagnostic StartupDiagnostic) *Server {
 	return &Server{reader: r, writer: w, stderr: stderr, handler: NewMinimalRPCHandler(diagnostic), startupDiagnostic: diagnostic, minimal: true, toolAccess: ToolAccessRead}
 }
@@ -123,7 +139,7 @@ func (h *RPCHandler) Handle(ctx context.Context, req request) (*response, bool) 
 		return &response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32600, Message: "Invalid request"}}, true
 	}
 	var buf bytes.Buffer
-	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver, toolAccess: normalizeToolAccess(h.toolAccess)}
+	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver, toolAccess: normalizeToolAccess(h.toolAccess), ragStatus: h.ragStatus}
 	server.handle(ctx, req, req.ID == nil)
 	line := bytes.TrimSpace(buf.Bytes())
 	if len(line) == 0 {
@@ -488,6 +504,18 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"job_id": {Type: "string", Description: "Service job id.", MinLength: 1}}, Required: []string{"job_id"}},
 	},
 	{
+		Name:        "rag_status",
+		Description: "Report RAG provider readiness, namespace coverage, last index run, and active daemon job state.",
+		InputSchema: inputSchema{
+			Type: "object",
+			Properties: map[string]schemaProp{
+				"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1},
+				"profile": {Type: "string", Description: "RAG profile name."},
+			},
+			Required: []string{"repo_id"},
+		},
+	},
+	{
 		Name:        "list_pr_discussions",
 		Description: "List cached pull request review discussions grouped by discussion thread.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "unresolved_only": {Type: "boolean", Description: "Only include unresolved or unknown-resolution discussions."}}, Required: []string{"repo_id", "number"}},
@@ -679,6 +707,7 @@ var preWriteToolListOrder = []string{
 	"service_status",
 	"service_jobs",
 	"service_job_status",
+	"rag_status",
 	"list_pr_discussions",
 	"sync_live",
 }
@@ -741,6 +770,7 @@ func (s *Server) toolRegistry() toolRegistry {
 	registerTool(registry, "service_status", s.callServiceStatus)
 	registerTool(registry, "service_jobs", s.callServiceJobs)
 	registerTool(registry, "service_job_status", s.callServiceJobStatus)
+	registerTool(registry, "rag_status", s.callRAGStatus)
 	registerTool(registry, "list_pr_discussions", s.callListPRDiscussions)
 	registerTool(registry, "sync_live", s.callSyncLive)
 	for _, cap := range capability.MCPWriteCapabilities() {
@@ -1191,6 +1221,11 @@ type serviceJobStatusArgs struct {
 	JobID string `json:"job_id"`
 }
 
+type ragStatusArgs struct {
+	RepoID  string `json:"repo_id"`
+	Profile string `json:"profile,omitempty"`
+}
+
 func (s *Server) callServiceStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	client, err := serviceRPCClient()
 	if err != nil {
@@ -1243,6 +1278,74 @@ func (s *Server) callServiceJobStatus(ctx context.Context, id *json.RawMessage, 
 	}
 	text := fmt.Sprintf("job_id=%s status=%s completed=%d/%d", result.ID, result.Status, result.Completed, result.Steps)
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func (s *Server) callRAGStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a ragStatusArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if a.RepoID == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+		return
+	}
+	if s.ragStatus == nil {
+		s.writeError(id, -32000, "Server error", &errorData{Code: "rag_status_unavailable", Message: "rag status provider is not configured"})
+		return
+	}
+	serviceStatus, activeJob := lookupMCPRAGServiceState(ctx, a.RepoID)
+	result, err := s.ragStatus(ctx, rag.StatusRequest{RepoID: a.RepoID, ProfileID: a.Profile, Service: serviceStatus, ActiveJob: activeJob})
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	text := fmt.Sprintf("rag_status=%s provider_ready=%t coverage=%d/%d missing=%d stale=%d", result.Status, result.Provider.Ready, result.Coverage.EmbeddedChunks, result.Coverage.TotalChunks, result.Coverage.MissingChunks, result.Coverage.StaleChunks)
+	if result.ActiveJob != nil {
+		text += fmt.Sprintf(" active_job=%s:%s", result.ActiveJob.ID, result.ActiveJob.Status)
+	}
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func lookupMCPRAGServiceState(ctx context.Context, repoID string) (*rag.ServiceStatus, *rag.JobStatus) {
+	client, err := serviceRPCClient()
+	if err != nil {
+		return nil, nil
+	}
+	serviceStatus := &rag.ServiceStatus{}
+	var svcStatus servicectl.Status
+	if err := client.Call(ctx, "Service.Status", nil, &svcStatus); err == nil {
+		serviceStatus.Status = svcStatus.Status
+		serviceStatus.Running = svcStatus.Running
+		serviceStatus.PID = svcStatus.PID
+		serviceStatus.SocketPresent = svcStatus.SocketPresent
+		serviceStatus.SocketPath = svcStatus.SocketPath
+		serviceStatus.Message = svcStatus.Message
+	}
+	var jobs servicectl.JobListResult
+	if err := client.Call(ctx, "Jobs.List", nil, &jobs); err != nil {
+		return serviceStatus, nil
+	}
+	for _, job := range jobs.Jobs {
+		if job.Type != servicectl.RAGIndexJobType || job.RepoID != repoID {
+			continue
+		}
+		if job.Status != servicectl.JobStatusQueued && job.Status != servicectl.JobStatusRunning {
+			continue
+		}
+		return serviceStatus, &rag.JobStatus{
+			ID:        job.ID,
+			Type:      job.Type,
+			RepoID:    job.RepoID,
+			ProfileID: job.ProfileID,
+			Status:    job.Status,
+			Steps:     job.Steps,
+			Completed: job.Completed,
+			Error:     job.Error,
+			Progress:  append([]service.ProgressEvent(nil), job.Progress...),
+		}
+	}
+	return serviceStatus, nil
 }
 
 func serviceRPCClient() (*servicectl.RPCClient, error) {

@@ -3021,6 +3021,9 @@ func (f *brokenStore) UpsertRAGIndexRun(context.Context, cache.RAGIndexRun) erro
 func (f *brokenStore) GetRAGIndexRun(context.Context, string, string) (cache.RAGIndexRun, error) {
 	return cache.RAGIndexRun{}, cache.ErrNotFound
 }
+func (f *brokenStore) ListRAGIndexRuns(context.Context, cache.RAGIndexRunFilter) ([]cache.RAGIndexRun, error) {
+	return nil, nil
+}
 func (f *brokenStore) RecordSyncEvent(context.Context, cache.SyncEvent) error { return nil }
 func (f *brokenStore) GetSyncEventByKey(ctx context.Context, key string) (*cache.SyncEvent, error) {
 	return nil, nil
