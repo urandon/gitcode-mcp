@@ -62,6 +62,7 @@ var commands = []string{
 	"service",
 	"rag",
 	"rag-status",
+	"rag-search",
 	"doctor",
 	"migrate-cache",
 	"repo",
@@ -207,6 +208,7 @@ type options struct {
 	steps          int
 	intervalMS     int
 	batchSize      int
+	topK           int
 	detach         bool
 }
 
@@ -272,7 +274,7 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 		fmt.Fprintf(stdout, "gitcode-mcp %s\n", buildinfo.Version)
 		return 0
 	}
-	if args[0] == "config" || args[0] == "auth" || args[0] == "service" || args[0] == "rag" || args[0] == "rag-status" || args[0] == "doctor" || args[0] == "migrate-cache" || args[0] == "bind" {
+	if args[0] == "config" || args[0] == "auth" || args[0] == "service" || args[0] == "rag" || args[0] == "rag-status" || args[0] == "rag-search" || args[0] == "doctor" || args[0] == "migrate-cache" || args[0] == "bind" {
 		return executeLocalCommand(ctx, args, stdout, stderr, deps)
 	}
 	if !isKnownCommand(args[0]) {
@@ -560,6 +562,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.IntVar(&opts.steps, "steps", 0, "fake job step count")
 	flags.IntVar(&opts.intervalMS, "interval-ms", 0, "fake job interval in milliseconds")
 	flags.IntVar(&opts.batchSize, "batch-size", 0, "RAG embedding batch size")
+	flags.IntVar(&opts.topK, "top-k", 0, "RAG semantic candidate count")
 	flags.BoolVar(&opts.detach, "detach", false, "start job without attaching progress")
 	if err := flags.Parse(reorderFlags(args)); err != nil {
 		return opts, nil, service.ErrInvalidQuery{Field: "flags", Message: err.Error()}
@@ -632,7 +635,7 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "service run", "service install", "service uninstall", "service start", "service stop", "service status", "service doctor", "service fake-job", "service jobs", "service job", "service attach", "service cancel":
 				printLocalSubcommandHelp(command, sub, stdout)
-			case "rag setup", "rag index", "rag status":
+			case "rag setup", "rag index", "rag status", "rag search":
 				printLocalSubcommandHelp(command, sub, stdout)
 			default:
 				printCommandHelp(command, stdout)
@@ -670,6 +673,9 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 	}
 	if command == "rag-status" {
 		return executeRAGStatusCommand(ctx, opts, stdout, stderr, deps)
+	}
+	if command == "rag-search" {
+		return executeRAGSearchCommand(ctx, rest, opts, stdout, stderr, deps)
 	}
 	if command == "bind" {
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "bind", Message: "use repo add to create repository bindings"})
@@ -812,9 +818,47 @@ func executeRAGCommand(ctx context.Context, args []string, opts options, stdout 
 		return attachServiceJob(ctx, client, job.ID, opts, stdout, stderr)
 	case "status":
 		return executeRAGStatusCommand(ctx, opts, stdout, stderr, deps)
+	case "search":
+		return executeRAGSearchCommand(ctx, args[1:], opts, stdout, stderr, deps)
 	default:
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "rag", Message: "unknown subcommand"})
 	}
+}
+
+func executeRAGSearchCommand(ctx context.Context, args []string, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+	if len(args) == 0 {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "query", Message: "query is required"})
+	}
+	eff, err := config.LoadEffective(deps.Source, config.Overrides{CachePath: opts.cachePath})
+	if err != nil {
+		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), deps.Source))
+		return 1
+	}
+	store, err := cache.NewSQLiteReadOnlyStore(ctx, eff.Config.CachePath)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	defer store.Close()
+	provider, err := rag.NewEmbeddingProviderFromConfig(eff.Config, opts.profile, rag.ProviderOptions{})
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	retriever := rag.NewRAGRetriever(store, provider, rag.RAGRetrieverOptions{})
+	result, err := retriever.Search(ctx, rag.SearchRequest{
+		RepoID:        opts.repo,
+		Query:         strings.Join(args, " "),
+		ProfileID:     opts.profile,
+		SourceID:      opts.sourceID,
+		RecordID:      opts.recordID,
+		SnapshotID:    opts.snapshotID,
+		ChunkPolicyID: opts.policy,
+		TopK:          opts.topK,
+		Limit:         opts.limit,
+	})
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	return render(stdout, opts.format, result, renderRAGSearchText)
 }
 
 func executeRAGStatusCommand(ctx context.Context, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
@@ -968,6 +1012,32 @@ func renderRAGStatusText(w io.Writer, result rag.StatusResult) {
 	}
 	if result.Provider.Message != "" {
 		fmt.Fprintf(w, "provider_message: %s\n", result.Provider.Message)
+	}
+	if result.Message != "" {
+		fmt.Fprintf(w, "message: %s\n", result.Message)
+	}
+}
+
+func renderRAGSearchText(w io.Writer, result rag.SearchResult) {
+	fmt.Fprintf(w, "search_mode: %s status: %s\n", result.SearchMode, result.Status)
+	if result.Namespace.ID != "" {
+		fmt.Fprintf(w, "namespace: %s model: %s\n", result.Namespace.ID, cliEmptyAsNone(result.Provider.Model))
+	}
+	for _, item := range result.Results {
+		locator := item.Path
+		if locator == "" {
+			locator = item.SourceID
+		}
+		if item.LineStart > 0 {
+			locator = fmt.Sprintf("%s:%d", locator, item.LineStart)
+		}
+		fmt.Fprintf(w, "%d %.4f sem=%.4f lex=%.4f %s %s %s\n", item.Rank, item.Score.Hybrid, item.Score.Semantic, item.Score.Lexical, item.SourceID, locator, item.Snippet)
+	}
+	for _, warning := range result.Warnings {
+		fmt.Fprintf(w, "warning: %s\n", warning)
+	}
+	if result.FailureClass != "" {
+		fmt.Fprintf(w, "failure_class: %s\n", result.FailureClass)
 	}
 	if result.Message != "" {
 		fmt.Fprintf(w, "message: %s\n", result.Message)
@@ -3459,11 +3529,12 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "Run gitcode-mcp service SUBCOMMAND --help for details.")
 	case "rag":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s SUBCOMMAND\n\n", command)
-		fmt.Fprintln(w, "Set up and inspect local RAG providers and models.")
+		fmt.Fprintln(w, "Set up, inspect, index, and search local RAG providers and models.")
 		fmt.Fprintln(w, "Subcommands:")
 		fmt.Fprintln(w, "  setup       check provider, model, and embedding readiness")
 		fmt.Fprintln(w, "  index       start a daemon-owned RAG index job")
 		fmt.Fprintln(w, "  status      report provider, namespace, coverage, and job state")
+		fmt.Fprintln(w, "  search      run semantic/hybrid retrieval over cached chunks")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Run gitcode-mcp rag SUBCOMMAND --help for details.")
 	case "rag-status":
@@ -3472,6 +3543,20 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         configured repository id")
 		fmt.Fprintln(w, "  --profile PROFILE   RAG profile name")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "rag-search":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO QUERY [--profile PROFILE] [--top-k N] [--limit N] [--format FORMAT]\n\n", command)
+		fmt.Fprintln(w, "Run semantic/hybrid retrieval over cached RAG chunks without changing full-text search behavior.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         configured repository id")
+		fmt.Fprintln(w, "  --profile PROFILE   RAG profile name")
+		fmt.Fprintln(w, "  --top-k N           semantic candidate count")
+		fmt.Fprintln(w, "  --limit N           maximum packed contexts")
+		fmt.Fprintln(w, "  --source-id ID      source id filter")
+		fmt.Fprintln(w, "  --record-id ID      record id filter")
+		fmt.Fprintln(w, "  --snapshot-id ID    snapshot id filter")
+		fmt.Fprintln(w, "  --policy POLICY     chunk policy namespace")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "doctor":
@@ -3578,6 +3663,21 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         configured repository id")
 		fmt.Fprintln(w, "  --profile PROFILE   RAG profile name")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "rag search":
+		fmt.Fprintln(w, "Usage: gitcode-mcp rag search --repo REPO QUERY [--profile PROFILE] [--top-k N] [--limit N] [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Run semantic/hybrid retrieval over cached RAG chunks without changing full-text search behavior.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         configured repository id")
+		fmt.Fprintln(w, "  --profile PROFILE   RAG profile name")
+		fmt.Fprintln(w, "  --top-k N           semantic candidate count")
+		fmt.Fprintln(w, "  --limit N           maximum packed contexts")
+		fmt.Fprintln(w, "  --source-id ID      source id filter")
+		fmt.Fprintln(w, "  --record-id ID      record id filter")
+		fmt.Fprintln(w, "  --snapshot-id ID    snapshot id filter")
+		fmt.Fprintln(w, "  --policy POLICY     chunk policy namespace")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "service install":

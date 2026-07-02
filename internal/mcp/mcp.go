@@ -73,6 +73,7 @@ type RPCHandler struct {
 	credentialResolver *auth.CredentialResolver
 	toolAccess         ToolAccess
 	ragStatus          RAGStatusProvider
+	ragSearch          RAGSearchProvider
 }
 
 type Server struct {
@@ -86,9 +87,11 @@ type Server struct {
 	credentialResolver *auth.CredentialResolver
 	toolAccess         ToolAccess
 	ragStatus          RAGStatusProvider
+	ragSearch          RAGSearchProvider
 }
 
 type RAGStatusProvider func(context.Context, rag.StatusRequest) (rag.StatusResult, error)
+type RAGSearchProvider func(context.Context, rag.SearchRequest) (rag.SearchResult, error)
 
 func NewRPCHandler(svc serviceInterface) *RPCHandler {
 	return NewRPCHandlerWithToolAccess(svc, ToolAccessRead)
@@ -123,10 +126,21 @@ func (h *RPCHandler) SetRAGStatusProvider(provider RAGStatusProvider) {
 	h.ragStatus = provider
 }
 
+func (h *RPCHandler) SetRAGSearchProvider(provider RAGSearchProvider) {
+	h.ragSearch = provider
+}
+
 func (s *Server) SetRAGStatusProvider(provider RAGStatusProvider) {
 	s.ragStatus = provider
 	if s.handler != nil {
 		s.handler.SetRAGStatusProvider(provider)
+	}
+}
+
+func (s *Server) SetRAGSearchProvider(provider RAGSearchProvider) {
+	s.ragSearch = provider
+	if s.handler != nil {
+		s.handler.SetRAGSearchProvider(provider)
 	}
 }
 
@@ -139,7 +153,7 @@ func (h *RPCHandler) Handle(ctx context.Context, req request) (*response, bool) 
 		return &response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32600, Message: "Invalid request"}}, true
 	}
 	var buf bytes.Buffer
-	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver, toolAccess: normalizeToolAccess(h.toolAccess), ragStatus: h.ragStatus}
+	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver, toolAccess: normalizeToolAccess(h.toolAccess), ragStatus: h.ragStatus, ragSearch: h.ragSearch}
 	server.handle(ctx, req, req.ID == nil)
 	line := bytes.TrimSpace(buf.Bytes())
 	if len(line) == 0 {
@@ -516,6 +530,25 @@ var toolDefs = []toolDefinition{
 		},
 	},
 	{
+		Name:        "rag_search",
+		Description: "Run semantic/hybrid RAG retrieval over cached chunks with citations, provenance, and transparent score breakdowns. Existing search_sources and search_chunks remain full-text.",
+		InputSchema: inputSchema{
+			Type: "object",
+			Properties: map[string]schemaProp{
+				"repo_id":     {Type: "string", Description: "Configured repository id.", MinLength: 1},
+				"query":       {Type: "string", Description: "Semantic/hybrid retrieval query.", MinLength: 1},
+				"profile":     {Type: "string", Description: "RAG profile name."},
+				"source_id":   {Type: "string", Description: "Source id filter."},
+				"record_id":   {Type: "string", Description: "Record id filter."},
+				"snapshot_id": {Type: "string", Description: "Snapshot id filter."},
+				"policy":      {Type: "string", Description: "Chunk policy namespace."},
+				"top_k":       {Type: "integer", Description: "Semantic candidate count.", Minimum: float64Ptr(1), Maximum: float64Ptr(500), Default: 40.0},
+				"limit":       {Type: "integer", Description: "Maximum packed contexts.", Minimum: float64Ptr(1), Maximum: float64Ptr(50), Default: 10.0},
+			},
+			Required: []string{"repo_id", "query"},
+		},
+	},
+	{
 		Name:        "list_pr_discussions",
 		Description: "List cached pull request review discussions grouped by discussion thread.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "unresolved_only": {Type: "boolean", Description: "Only include unresolved or unknown-resolution discussions."}}, Required: []string{"repo_id", "number"}},
@@ -708,6 +741,7 @@ var preWriteToolListOrder = []string{
 	"service_jobs",
 	"service_job_status",
 	"rag_status",
+	"rag_search",
 	"list_pr_discussions",
 	"sync_live",
 }
@@ -771,6 +805,7 @@ func (s *Server) toolRegistry() toolRegistry {
 	registerTool(registry, "service_jobs", s.callServiceJobs)
 	registerTool(registry, "service_job_status", s.callServiceJobStatus)
 	registerTool(registry, "rag_status", s.callRAGStatus)
+	registerTool(registry, "rag_search", s.callRAGSearch)
 	registerTool(registry, "list_pr_discussions", s.callListPRDiscussions)
 	registerTool(registry, "sync_live", s.callSyncLive)
 	for _, cap := range capability.MCPWriteCapabilities() {
@@ -1226,6 +1261,18 @@ type ragStatusArgs struct {
 	Profile string `json:"profile,omitempty"`
 }
 
+type ragSearchArgs struct {
+	RepoID     string `json:"repo_id"`
+	Query      string `json:"query"`
+	Profile    string `json:"profile,omitempty"`
+	SourceID   string `json:"source_id,omitempty"`
+	RecordID   string `json:"record_id,omitempty"`
+	SnapshotID string `json:"snapshot_id,omitempty"`
+	Policy     string `json:"policy,omitempty"`
+	TopK       int    `json:"top_k,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+}
+
 func (s *Server) callServiceStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	client, err := serviceRPCClient()
 	if err != nil {
@@ -1303,6 +1350,44 @@ func (s *Server) callRAGStatus(ctx context.Context, id *json.RawMessage, args js
 	text := fmt.Sprintf("rag_status=%s provider_ready=%t coverage=%d/%d missing=%d stale=%d", result.Status, result.Provider.Ready, result.Coverage.EmbeddedChunks, result.Coverage.TotalChunks, result.Coverage.MissingChunks, result.Coverage.StaleChunks)
 	if result.ActiveJob != nil {
 		text += fmt.Sprintf(" active_job=%s:%s", result.ActiveJob.ID, result.ActiveJob.Status)
+	}
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func (s *Server) callRAGSearch(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a ragSearchArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if a.RepoID == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+		return
+	}
+	if strings.TrimSpace(a.Query) == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "query is required"})
+		return
+	}
+	if a.TopK < 0 || a.Limit < 0 {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "top_k and limit must be non-negative"})
+		return
+	}
+	if s.ragSearch == nil {
+		s.writeError(id, -32000, "Server error", &errorData{Code: "rag_search_unavailable", Message: "rag search provider is not configured"})
+		return
+	}
+	result, err := s.ragSearch(ctx, rag.SearchRequest{RepoID: a.RepoID, Query: a.Query, ProfileID: a.Profile, SourceID: a.SourceID, RecordID: a.RecordID, SnapshotID: a.SnapshotID, ChunkPolicyID: a.Policy, TopK: a.TopK, Limit: a.Limit})
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	text := fmt.Sprintf("rag_search=%s results=%d", result.Status, len(result.Results))
+	if result.Namespace.ID != "" {
+		text += fmt.Sprintf(" namespace=%s", result.Namespace.ID)
+	}
+	if len(result.Results) > 0 {
+		top := result.Results[0]
+		text += fmt.Sprintf(" top=%s score=%.4f", top.ChunkID, top.Score.Hybrid)
 	}
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 }
