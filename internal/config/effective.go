@@ -690,6 +690,8 @@ func setYAMLRAGProviderValue(cfg *fileConfig, section, key, value string) error 
 			provider.Endpoint = &value
 		case "executable":
 			provider.Executable = &value
+		case "startup":
+			provider.Startup = &value
 		case "autostart":
 			v, err := parseBoolYAML(section, key, value)
 			if err != nil {
@@ -896,6 +898,9 @@ func applyRAGFileSources(sources map[string]string, file *ragFileConfig, source 
 		}
 		if provider.Executable != nil {
 			sources[prefix+"executable"] = source
+		}
+		if provider.Startup != nil {
+			sources[prefix+"startup"] = source
 		}
 		if provider.Autostart != nil {
 			sources[prefix+"autostart"] = source
@@ -1301,6 +1306,7 @@ func defaultYAMLConfig() string {
 		"    ollama:",
 		"      endpoint: http://127.0.0.1:11434",
 		"      executable: ollama",
+		"      startup: managed",
 		"      autostart: true",
 		"      model_storage:",
 		"        mode: provider-owned",

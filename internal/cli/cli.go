@@ -22,6 +22,7 @@ import (
 	"gitcode-mcp/internal/doctor"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
+	"gitcode-mcp/internal/rag"
 	"gitcode-mcp/internal/service"
 	"gitcode-mcp/internal/servicectl"
 )
@@ -59,6 +60,7 @@ var commands = []string{
 	"config",
 	"auth",
 	"service",
+	"rag",
 	"doctor",
 	"migrate-cache",
 	"repo",
@@ -113,6 +115,7 @@ type serviceFactory func(context.Context, string) (queryService, func() error, e
 type localCommandDeps struct {
 	Source             config.Source
 	CredentialReporter config.CredentialStatusReporter
+	RAGRuntime         rag.Runtime
 }
 
 type startupPlan struct {
@@ -177,6 +180,7 @@ type options struct {
 	labels         string
 	tag            string
 	ref            string
+	profile        string
 	asset          multiFlag
 	idempotencyKey string
 	dryRun         bool
@@ -197,6 +201,7 @@ type options struct {
 	recordID       string
 	snapshotID     string
 	confirm        bool
+	yes            bool
 	helpRequested  bool
 	steps          int
 	intervalMS     int
@@ -265,7 +270,7 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 		fmt.Fprintf(stdout, "gitcode-mcp %s\n", buildinfo.Version)
 		return 0
 	}
-	if args[0] == "config" || args[0] == "auth" || args[0] == "service" || args[0] == "doctor" || args[0] == "migrate-cache" || args[0] == "bind" {
+	if args[0] == "config" || args[0] == "auth" || args[0] == "service" || args[0] == "rag" || args[0] == "doctor" || args[0] == "migrate-cache" || args[0] == "bind" {
 		return executeLocalCommand(ctx, args, stdout, stderr, deps)
 	}
 	if !isKnownCommand(args[0]) {
@@ -525,6 +530,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.labels, "labels", "", "comma-separated labels")
 	flags.StringVar(&opts.tag, "tag", "", "release tag")
 	flags.StringVar(&opts.ref, "ref", "", "release ref")
+	flags.StringVar(&opts.profile, "profile", "", "RAG profile")
 	flags.Var(&opts.asset, "asset", "release asset link as name=url")
 	flags.Var(&opts.asset, "asset-url", "release asset link as name=url")
 	flags.StringVar(&opts.idempotencyKey, "idempotency-key", "", "idempotency key")
@@ -548,6 +554,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.BoolVar(&opts.helpRequested, "help", false, "show help for command")
 	flags.BoolVar(&opts.helpRequested, "h", false, "show help for command")
 	flags.BoolVar(&opts.confirm, "confirm", false, "confirm migration without interactive prompt")
+	flags.BoolVar(&opts.yes, "yes", false, "answer yes to setup prompts")
 	flags.IntVar(&opts.steps, "steps", 0, "fake job step count")
 	flags.IntVar(&opts.intervalMS, "interval-ms", 0, "fake job interval in milliseconds")
 	flags.BoolVar(&opts.detach, "detach", false, "start job without attaching progress")
@@ -577,7 +584,7 @@ func reorderFlags(args []string) []string {
 		arg := args[i]
 		if strings.HasPrefix(arg, "--") {
 			flags = append(flags, arg)
-			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--index" || arg == "--quiet" || arg == "--dry-run" || arg == "--live" || arg == "--offline" || arg == "--fixture" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" || arg == "--detach" {
+			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--index" || arg == "--quiet" || arg == "--dry-run" || arg == "--live" || arg == "--offline" || arg == "--fixture" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" || arg == "--yes" || arg == "--detach" {
 				continue
 			}
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
@@ -610,7 +617,7 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 	}
 	if opts.helpRequested {
 		sub, _ := firstArg(rest)
-		if sub != "" && (command == "config" || command == "auth" || command == "repo" || command == "service") {
+		if sub != "" && (command == "config" || command == "auth" || command == "repo" || command == "service" || command == "rag") {
 			switch command + " " + sub {
 			case "config init", "config locate", "config show":
 				printLocalSubcommandHelp(command, sub, stdout)
@@ -621,6 +628,8 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 			case "repo init-local":
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "service run", "service install", "service uninstall", "service start", "service stop", "service status", "service doctor", "service fake-job", "service jobs", "service job", "service attach", "service cancel":
+				printLocalSubcommandHelp(command, sub, stdout)
+			case "rag setup":
 				printLocalSubcommandHelp(command, sub, stdout)
 			default:
 				printCommandHelp(command, stdout)
@@ -652,6 +661,9 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 	}
 	if command == "service" {
 		return executeServiceCommand(ctx, rest, opts, stdout, stderr, deps)
+	}
+	if command == "rag" {
+		return executeRAGCommand(ctx, rest, opts, stdout, stderr, deps)
 	}
 	if command == "bind" {
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "bind", Message: "use repo add to create repository bindings"})
@@ -755,6 +767,71 @@ func probeAuthStatus(ctx context.Context, src config.Source, eff config.Effectiv
 	}
 	status.AuthProbe = &config.CredentialAuthProbe{Status: "ok"}
 	return status
+}
+
+func executeRAGCommand(ctx context.Context, args []string, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+	sub, ok := firstArg(args)
+	if !ok {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "rag", Message: "subcommand is required"})
+	}
+	switch sub {
+	case "setup":
+		eff, err := config.LoadEffective(deps.Source, config.Overrides{})
+		if err != nil {
+			fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), deps.Source))
+			return 1
+		}
+		result, err := rag.Setup(ctx, rag.SetupRequest{Config: eff.Config, Profile: opts.profile, Yes: opts.yes, DryRun: opts.dryRun, Runtime: deps.RAGRuntime})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		code := render(stdout, opts.format, result, renderRAGSetupText)
+		if result.Status != "ready" && !opts.dryRun {
+			return 1
+		}
+		return code
+	default:
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "rag", Message: "unknown subcommand"})
+	}
+}
+
+func renderRAGSetupText(w io.Writer, result rag.SetupResult) {
+	fmt.Fprintf(w, "status: %s\n", result.Status)
+	fmt.Fprintf(w, "profile: %s\n", result.Profile)
+	fmt.Fprintf(w, "provider: %s\n", result.Provider)
+	fmt.Fprintf(w, "provider_type: %s\n", result.ProviderType)
+	fmt.Fprintf(w, "endpoint: %s\n", result.Endpoint)
+	if result.Executable != "" {
+		fmt.Fprintf(w, "executable: %s\n", result.Executable)
+	}
+	if result.ExecutablePath != "" {
+		fmt.Fprintf(w, "executable_path: %s\n", result.ExecutablePath)
+	}
+	fmt.Fprintf(w, "provider_installed: %t\n", result.ProviderInstalled)
+	fmt.Fprintf(w, "provider_live: %t\n", result.ProviderLive)
+	fmt.Fprintf(w, "autostart: %t\n", result.Autostart)
+	fmt.Fprintf(w, "model: %s\n", result.Model)
+	fmt.Fprintf(w, "model_available: %t\n", result.ModelAvailable)
+	if result.ModelStorePath != "" {
+		fmt.Fprintf(w, "model_store_path: %s\n", result.ModelStorePath)
+	}
+	if result.ProviderModelEnv != "" {
+		fmt.Fprintf(w, "provider_model_env: %s\n", result.ProviderModelEnv)
+	}
+	if result.ProviderModelPath != "" {
+		fmt.Fprintf(w, "provider_model_path: %s\n", result.ProviderModelPath)
+	}
+	fmt.Fprintf(w, "pull_attempted: %t\n", result.PullAttempted)
+	fmt.Fprintf(w, "embedding_smoke: %s\n", result.EmbeddingSmoke)
+	if len(result.Actions) > 0 {
+		fmt.Fprintf(w, "actions: %s\n", strings.Join(result.Actions, "; "))
+	}
+	if len(result.InstallInstructions) > 0 {
+		fmt.Fprintf(w, "install_instructions: %s\n", strings.Join(result.InstallInstructions, " "))
+	}
+	if len(result.Diagnostics) > 0 {
+		fmt.Fprintf(w, "diagnostics: %s\n", strings.Join(result.Diagnostics, "; "))
+	}
 }
 
 func sanitizeCredentialStatus(status config.CredentialStatus, src config.Source) config.CredentialStatus {
@@ -909,6 +986,25 @@ func renderServiceStatusText(w io.Writer, status servicectl.Status) {
 	fmt.Fprintf(w, "state_path: %s\n", status.StatePath)
 	fmt.Fprintf(w, "install_kind: %s\n", status.InstallKind)
 	fmt.Fprintf(w, "install_path: %s\n", status.InstallPath)
+	if status.RAG != nil {
+		fmt.Fprintf(w, "rag_status: %s\n", status.RAG.Status)
+		fmt.Fprintf(w, "rag_profile: %s\n", status.RAG.Profile)
+		fmt.Fprintf(w, "rag_provider: %s\n", status.RAG.Provider)
+		fmt.Fprintf(w, "rag_endpoint: %s\n", status.RAG.Endpoint)
+		fmt.Fprintf(w, "rag_model: %s\n", status.RAG.Model)
+		fmt.Fprintf(w, "rag_model_available: %t\n", status.RAG.ModelAvailable)
+		fmt.Fprintf(w, "rag_provider_installed: %t\n", status.RAG.ProviderInstalled)
+		fmt.Fprintf(w, "rag_provider_live: %t\n", status.RAG.ProviderLive)
+		if status.RAG.ModelStorePath != "" {
+			fmt.Fprintf(w, "rag_model_store_path: %s\n", status.RAG.ModelStorePath)
+		}
+		if status.RAG.ProviderModelEnv != "" {
+			fmt.Fprintf(w, "rag_provider_model_env: %s\n", status.RAG.ProviderModelEnv)
+		}
+		if len(status.RAG.Actions) > 0 {
+			fmt.Fprintf(w, "rag_actions: %s\n", strings.Join(status.RAG.Actions, "; "))
+		}
+	}
 	if status.UpdatedAt != nil && !status.UpdatedAt.IsZero() {
 		fmt.Fprintf(w, "updated_at: %s\n", status.UpdatedAt.Format(time.RFC3339))
 	}
@@ -2472,7 +2568,7 @@ func executeDoctorCommand(ctx context.Context, opts options, plan startupPlan, s
 		status := plan.CredentialStatus
 		cred = &status
 	}
-	report, err := doctor.Build(ctx, doctor.Request{Version: buildinfo.Version, Source: deps.Source, CredentialReporter: deps.CredentialReporter, CredentialStatus: cred, CachePath: cachePath, Live: plan.ProviderMode == "live-http", ProviderMode: plan.ProviderMode, MCPToolAccess: plan.MCPToolAccess, APIBaseURL: plan.APIBaseURL, RepoID: opts.repo, LiveBinding: plan.LiveRepositoryBinding})
+	report, err := doctor.Build(ctx, doctor.Request{Version: buildinfo.Version, Source: deps.Source, CredentialReporter: deps.CredentialReporter, CredentialStatus: cred, CachePath: cachePath, Live: plan.ProviderMode == "live-http", ProviderMode: plan.ProviderMode, MCPToolAccess: plan.MCPToolAccess, APIBaseURL: plan.APIBaseURL, RepoID: opts.repo, LiveBinding: plan.LiveRepositoryBinding, RAGRuntime: deps.RAGRuntime})
 	if err != nil {
 		return writeError(stderr, opts.format, err)
 	}
@@ -3221,6 +3317,13 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  cancel      cancel a daemon job by id")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Run gitcode-mcp service SUBCOMMAND --help for details.")
+	case "rag":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s SUBCOMMAND\n\n", command)
+		fmt.Fprintln(w, "Set up and inspect local RAG providers and models.")
+		fmt.Fprintln(w, "Subcommands:")
+		fmt.Fprintln(w, "  setup       check provider, model, and embedding readiness")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Run gitcode-mcp rag SUBCOMMAND --help for details.")
 	case "doctor":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s [--repo REPO] [--offline|--fixture] [--runtime-audit] [--cache-path PATH]\n\n", command)
 		fmt.Fprintln(w, "Aggregate subsystem diagnostics with public-safe output.")
@@ -3297,6 +3400,16 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "  --live              probe GitCode API with token")
 		fmt.Fprintln(w, "  --owner OWNER       repository owner (for auth probe)")
 		fmt.Fprintln(w, "  --repo REPO         repository id (for auth probe)")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "rag setup":
+		fmt.Fprintln(w, "Usage: gitcode-mcp rag setup [--profile PROFILE] [--dry-run] [--yes] [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Check the configured RAG provider, model availability, and embedding readiness.")
+		fmt.Fprintln(w, "Model downloads require --yes; dry-run reports planned actions without starting or pulling.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --profile PROFILE   RAG profile name")
+		fmt.Fprintln(w, "  --dry-run           report setup actions without mutation")
+		fmt.Fprintln(w, "  --yes               allow non-interactive model pull")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "service install":
 		fmt.Fprintln(w, "Usage: gitcode-mcp service install [--overwrite] [--format FORMAT]")

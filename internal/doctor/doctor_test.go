@@ -138,7 +138,7 @@ func TestBuildFullReport(t *testing.T) {
 	var b strings.Builder
 	RenderText(&b, report)
 	out := b.String()
-	for _, want := range []string{"version:", "config:", "cache:", "credential:", "repo:", "sync:", "index:", "mcp:", "tool_access: write", "live_provider:", "auth_probe:", "last_sync_completed_at:", "zero_delta: true"} {
+	for _, want := range []string{"version:", "config:", "cache:", "credential:", "repo:", "sync:", "index:", "rag:", "mcp:", "tool_access: write", "live_provider:", "auth_probe:", "last_sync_completed_at:", "zero_delta: true"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("text missing %q in %q", want, out)
 		}
