@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 14
+const currentSchemaVersion = 15
 
 type VersionCompatibility struct {
 	DetectedVersion int
@@ -140,6 +140,7 @@ var migrations = []migration{
 	{version: 12, apply: applyPRReviewCommentsMigration},
 	{version: 13, apply: applyPRReviewDiscussionPositionsMigration},
 	{version: 14, apply: applySyncFrontiersMigration},
+	{version: 15, apply: applyRAGEmbeddingSchemaMigration},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB, ftsAvailable bool) error {
@@ -802,6 +803,79 @@ func applySyncFrontiersMigration(ctx context.Context, tx *sql.Tx, _ bool) error 
 	PRIMARY KEY(repo_id, remote_type, ordering, filter_key)
 )`,
 		`CREATE INDEX IF NOT EXISTS idx_sync_frontiers_repo ON sync_frontiers(repo_id, remote_type, status)`,
+	}
+	for _, stmt := range statements {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyRAGEmbeddingSchemaMigration(ctx context.Context, tx *sql.Tx, _ bool) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS embedding_namespaces (
+	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+	namespace_id TEXT NOT NULL,
+	profile_id TEXT NOT NULL,
+	provider_id TEXT NOT NULL,
+	provider_type TEXT NOT NULL,
+	model_id TEXT NOT NULL,
+	model_revision TEXT NOT NULL DEFAULT '',
+	dimensions INTEGER NOT NULL,
+	dtype TEXT NOT NULL,
+	normalization TEXT NOT NULL,
+	document_instruction_id TEXT NOT NULL DEFAULT '',
+	query_instruction_id TEXT NOT NULL DEFAULT '',
+	chunk_policy_id TEXT NOT NULL,
+	language_policy_id TEXT NOT NULL,
+	config_hash TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, namespace_id)
+)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_embedding_namespaces_identity ON embedding_namespaces(repo_id, provider_id, provider_type, model_id, model_revision, dimensions, dtype, normalization, document_instruction_id, query_instruction_id, chunk_policy_id, language_policy_id, config_hash)`,
+		`CREATE INDEX IF NOT EXISTS idx_embedding_namespaces_profile ON embedding_namespaces(repo_id, profile_id)`,
+		`CREATE TABLE IF NOT EXISTS chunk_embeddings (
+	repo_id TEXT NOT NULL,
+	namespace_id TEXT NOT NULL,
+	chunk_id TEXT NOT NULL,
+	source_id TEXT NOT NULL DEFAULT '',
+	record_id TEXT NOT NULL DEFAULT '',
+	snapshot_id TEXT NOT NULL DEFAULT '',
+	chunk_content_hash TEXT NOT NULL,
+	vector BLOB NOT NULL,
+	dimensions INTEGER NOT NULL,
+	dtype TEXT NOT NULL,
+	vector_hash TEXT NOT NULL,
+	embedded_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, namespace_id, chunk_id),
+	FOREIGN KEY(repo_id, namespace_id) REFERENCES embedding_namespaces(repo_id, namespace_id) ON DELETE CASCADE,
+	FOREIGN KEY(repo_id, chunk_id) REFERENCES chunks(repo_id, id) ON DELETE CASCADE
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_chunk ON chunk_embeddings(repo_id, chunk_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_coverage ON chunk_embeddings(repo_id, namespace_id, source_id, record_id, snapshot_id)`,
+		`CREATE TABLE IF NOT EXISTS rag_index_runs (
+	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+	run_id TEXT NOT NULL,
+	namespace_id TEXT NOT NULL,
+	profile_id TEXT NOT NULL,
+	status TEXT NOT NULL,
+	total_chunks INTEGER NOT NULL DEFAULT 0,
+	embedded_chunks INTEGER NOT NULL DEFAULT 0,
+	skipped_chunks INTEGER NOT NULL DEFAULT 0,
+	failed_chunks INTEGER NOT NULL DEFAULT 0,
+	started_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	completed_at TEXT NOT NULL DEFAULT '',
+	error_class TEXT NOT NULL DEFAULT '',
+	message TEXT NOT NULL DEFAULT '',
+	metadata_json TEXT NOT NULL DEFAULT '{}',
+	PRIMARY KEY(repo_id, run_id),
+	FOREIGN KEY(repo_id, namespace_id) REFERENCES embedding_namespaces(repo_id, namespace_id) ON DELETE CASCADE
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_rag_index_runs_namespace ON rag_index_runs(repo_id, namespace_id, started_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_rag_index_runs_status ON rag_index_runs(repo_id, status, updated_at)`,
 	}
 	for _, stmt := range statements {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {

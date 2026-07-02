@@ -43,6 +43,14 @@ type Store interface {
 	GetChunks(context.Context, string) ([]Chunk, error)
 	GetChunksScoped(context.Context, string, string) ([]Chunk, error)
 	ListChunks(context.Context, ChunkFilter) ([]Chunk, error)
+	UpsertEmbeddingNamespace(context.Context, EmbeddingNamespace) (EmbeddingNamespace, error)
+	ResolveEmbeddingNamespace(context.Context, EmbeddingNamespaceIdentity) (EmbeddingNamespace, bool, error)
+	GetEmbeddingNamespace(context.Context, string, string) (EmbeddingNamespace, error)
+	ListEmbeddingNamespaces(context.Context, string) ([]EmbeddingNamespace, error)
+	UpsertChunkEmbedding(context.Context, ChunkEmbedding) error
+	ListChunkEmbeddings(context.Context, ChunkEmbeddingFilter) ([]ChunkEmbedding, error)
+	UpsertRAGIndexRun(context.Context, RAGIndexRun) error
+	GetRAGIndexRun(context.Context, string, string) (RAGIndexRun, error)
 	RecordSyncEvent(context.Context, SyncEvent) error
 	GetSyncEventByKey(context.Context, string) (*SyncEvent, error)
 	ListCompletedSyncEventsScoped(context.Context, string) ([]SyncEvent, error)
@@ -305,6 +313,9 @@ type RecordCounts struct {
 	SnapshotChunks  int
 	Chunks          int
 	RemoteRevisions int
+	RAGNamespaces   int
+	RAGEmbeddings   int
+	RAGIndexRuns    int
 }
 
 type RecordFilter struct {
@@ -453,6 +464,72 @@ type Chunk struct {
 	ResolvedAliases   map[string]string
 	Embedding         []byte
 	Policy            string
+}
+
+type EmbeddingNamespaceIdentity struct {
+	RepoID                string
+	ProfileID             string
+	ProviderID            string
+	ProviderType          string
+	ModelID               string
+	ModelRevision         string
+	Dimensions            int
+	DType                 string
+	Normalization         string
+	DocumentInstructionID string
+	QueryInstructionID    string
+	ChunkPolicyID         string
+	LanguagePolicyID      string
+	ConfigHash            string
+}
+
+type EmbeddingNamespace struct {
+	EmbeddingNamespaceIdentity
+	ID        string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+type ChunkEmbedding struct {
+	RepoID           string
+	NamespaceID      string
+	ChunkID          string
+	SourceID         string
+	RecordID         string
+	SnapshotID       string
+	ChunkContentHash string
+	Vector           []byte
+	Dimensions       int
+	DType            string
+	VectorHash       string
+	EmbeddedAt       time.Time
+}
+
+type ChunkEmbeddingFilter struct {
+	RepoID      string
+	NamespaceID string
+	ChunkID     string
+	SourceID    string
+	RecordID    string
+	SnapshotID  string
+}
+
+type RAGIndexRun struct {
+	RepoID         string
+	ID             string
+	NamespaceID    string
+	ProfileID      string
+	Status         string
+	TotalChunks    int
+	EmbeddedChunks int
+	SkippedChunks  int
+	FailedChunks   int
+	StartedAt      time.Time
+	UpdatedAt      time.Time
+	CompletedAt    time.Time
+	ErrorClass     string
+	Message        string
+	Metadata       map[string]string
 }
 
 type SyncEvent struct {

@@ -96,6 +96,9 @@ type CacheStatusResult struct {
 	SnapshotChunks          int            `json:"snapshot_chunks"`
 	Chunks                  int            `json:"chunks"`
 	RemoteRevisions         int            `json:"remote_revisions"`
+	RAGNamespaces           int            `json:"rag_namespaces"`
+	RAGEmbeddings           int            `json:"rag_embeddings"`
+	RAGIndexRuns            int            `json:"rag_index_runs"`
 	IndexFreshnessWarnings  int            `json:"index_freshness_warnings"`
 	IndexFreshnessByWarning map[string]int `json:"index_freshness_by_warning,omitempty"`
 }

@@ -624,6 +624,9 @@ func (s *SQLiteStore) RecordCounts(ctx context.Context, repoID string) (RecordCo
 		{&counts.SnapshotChunks, `SELECT count(*) FROM snapshot_chunks WHERE repo_id = ?`},
 		{&counts.Chunks, `SELECT count(*) FROM chunks WHERE repo_id = ?`},
 		{&counts.RemoteRevisions, `SELECT count(*) FROM remote_revisions WHERE repo_id = ?`},
+		{&counts.RAGNamespaces, `SELECT count(*) FROM embedding_namespaces WHERE repo_id = ?`},
+		{&counts.RAGEmbeddings, `SELECT count(*) FROM chunk_embeddings WHERE repo_id = ?`},
+		{&counts.RAGIndexRuns, `SELECT count(*) FROM rag_index_runs WHERE repo_id = ?`},
 	}
 	for _, q := range queries {
 		if err := s.db.QueryRowContext(ctx, q.query, repoID).Scan(q.value); err != nil {

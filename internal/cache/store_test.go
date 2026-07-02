@@ -67,6 +67,111 @@ func TestSyncFrontierRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRAGEmbeddingSchemaRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	now := time.Date(2026, 7, 2, 10, 0, 0, 0, time.UTC)
+	mustUpsertGraph(t, ctx, store, SourceGraph{
+		Source: testSource("ISSUE-40", "issue", "RAG schema"),
+		Chunks: []Chunk{{
+			ID:             "chunk-40-1",
+			SourceID:       "ISSUE-40",
+			RecordID:       "ISSUE-40",
+			ContentHash:    "chunk-hash-1",
+			ByteStart:      0,
+			ByteEnd:        32,
+			LineStart:      1,
+			LineEnd:        2,
+			HeadingPath:    []string{"RAG"},
+			Text:           "русский 中文 English",
+			NormalizedText: "русский 中文 english",
+			Policy:         "heading-v1",
+		}},
+	})
+	identity := EmbeddingNamespaceIdentity{
+		RepoID:                "fixture-a",
+		ProfileID:             "qwen3-ollama-0_6b-512",
+		ProviderID:            "ollama-local",
+		ProviderType:          "ollama",
+		ModelID:               "qwen3-embedding:0.6b",
+		ModelRevision:         "sha256:one",
+		Dimensions:            512,
+		DType:                 "float32",
+		Normalization:         "l2",
+		DocumentInstructionID: "doc-default",
+		QueryInstructionID:    "query-default",
+		ChunkPolicyID:         "heading-v1",
+		LanguagePolicyID:      "ru-zh-en-v1",
+		ConfigHash:            "config-hash-1",
+	}
+	namespace, err := store.UpsertEmbeddingNamespace(ctx, EmbeddingNamespace{EmbeddingNamespaceIdentity: identity, CreatedAt: now, UpdatedAt: now})
+	if err != nil {
+		t.Fatalf("UpsertEmbeddingNamespace returned error: %v", err)
+	}
+	if namespace.ID == "" {
+		t.Fatalf("namespace ID is empty")
+	}
+	resolved, ok, err := store.ResolveEmbeddingNamespace(ctx, identity)
+	if err != nil || !ok {
+		t.Fatalf("ResolveEmbeddingNamespace ok=%v err=%v", ok, err)
+	}
+	if resolved.ID != namespace.ID || resolved.LanguagePolicyID != "ru-zh-en-v1" {
+		t.Fatalf("resolved namespace=%#v, want id=%q", resolved, namespace.ID)
+	}
+	aliasIdentity := identity
+	aliasIdentity.ProfileID = "same-model-alias"
+	aliasNamespace, err := store.UpsertEmbeddingNamespace(ctx, EmbeddingNamespace{EmbeddingNamespaceIdentity: aliasIdentity, CreatedAt: now, UpdatedAt: now})
+	if err != nil {
+		t.Fatalf("UpsertEmbeddingNamespace alias returned error: %v", err)
+	}
+	if aliasNamespace.ID != namespace.ID {
+		t.Fatalf("same model identity produced namespace id %q, want %q", aliasNamespace.ID, namespace.ID)
+	}
+	changedIdentity := identity
+	changedIdentity.ModelRevision = "sha256:two"
+	changedNamespace, err := store.UpsertEmbeddingNamespace(ctx, EmbeddingNamespace{EmbeddingNamespaceIdentity: changedIdentity, CreatedAt: now, UpdatedAt: now})
+	if err != nil {
+		t.Fatalf("UpsertEmbeddingNamespace changed returned error: %v", err)
+	}
+	if changedNamespace.ID == namespace.ID {
+		t.Fatalf("changed model revision reused namespace id %q", namespace.ID)
+	}
+	if err := store.UpsertChunkEmbedding(ctx, ChunkEmbedding{RepoID: "fixture-a", NamespaceID: namespace.ID, ChunkID: "chunk-40-1", Vector: []byte{1, 2, 3, 4}, Dimensions: 512, DType: "float32", EmbeddedAt: now}); err != nil {
+		t.Fatalf("UpsertChunkEmbedding returned error: %v", err)
+	}
+	embeddings, err := store.ListChunkEmbeddings(ctx, ChunkEmbeddingFilter{RepoID: "fixture-a", NamespaceID: namespace.ID})
+	if err != nil {
+		t.Fatalf("ListChunkEmbeddings returned error: %v", err)
+	}
+	if len(embeddings) != 1 || embeddings[0].SourceID != "ISSUE-40" || embeddings[0].ChunkContentHash != "chunk-hash-1" || embeddings[0].VectorHash == "" {
+		t.Fatalf("embeddings=%#v", embeddings)
+	}
+	run := RAGIndexRun{RepoID: "fixture-a", ID: "rag-run-1", NamespaceID: namespace.ID, ProfileID: identity.ProfileID, Status: "running", TotalChunks: 1, EmbeddedChunks: 1, StartedAt: now, UpdatedAt: now, Metadata: map[string]string{"provider": "ollama"}}
+	if err := store.UpsertRAGIndexRun(ctx, run); err != nil {
+		t.Fatalf("UpsertRAGIndexRun returned error: %v", err)
+	}
+	run.Status = "succeeded"
+	run.CompletedAt = now.Add(time.Second)
+	if err := store.UpsertRAGIndexRun(ctx, run); err != nil {
+		t.Fatalf("UpsertRAGIndexRun update returned error: %v", err)
+	}
+	gotRun, err := store.GetRAGIndexRun(ctx, "fixture-a", "rag-run-1")
+	if err != nil {
+		t.Fatalf("GetRAGIndexRun returned error: %v", err)
+	}
+	if gotRun.Status != "succeeded" || gotRun.Metadata["provider"] != "ollama" || gotRun.EmbeddedChunks != 1 {
+		t.Fatalf("run=%#v", gotRun)
+	}
+	counts, err := store.RecordCounts(ctx, "fixture-a")
+	if err != nil {
+		t.Fatalf("RecordCounts returned error: %v", err)
+	}
+	if counts.Chunks != 1 || counts.RAGNamespaces != 2 || counts.RAGEmbeddings != 1 || counts.RAGIndexRuns != 1 {
+		t.Fatalf("RecordCounts = %#v", counts)
+	}
+}
+
 func TestResetLiveClearsRemoteRecordsAndFrontiers(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)
