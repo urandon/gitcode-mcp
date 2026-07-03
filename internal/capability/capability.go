@@ -112,10 +112,11 @@ var writeCapabilities = []Capability{
 		ID:             "update_pr",
 		Category:       CategoryWrite,
 		Safety:         SafetyAuditedWrite,
+		CLIName:        "update-pr",
 		MCPName:        "update_pr",
 		ServiceCommand: "update-pr",
 		Description:    "Update live pull request metadata through the audited write lifecycle.",
-		CLI:            disabled("CLI update-pr command is not implemented yet; tracked by CLI/MCP parity issue #32."),
+		CLI:            enabled(),
 		MCP:            enabled(),
 	},
 	{
