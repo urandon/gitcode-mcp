@@ -28,6 +28,20 @@ gitcode-mcp create-pr \
 
 `create-pr` runs live by default when credentials and repository binding are available. `--live` remains accepted as a compatibility alias. `create-mr` is an equivalent alias for GitCode UI terminology. Both commands use the same audited service write path and report `command=create-pr`.
 
+Update pull request metadata through the same write lifecycle:
+
+```sh
+gitcode-mcp update-pr \
+  --repo YOUR_REPO \
+  --number 42 \
+  --title "Refine issue relation API" \
+  --body "Updated summary and test notes." \
+  --state open \
+  --idempotency-key ik-pr-update-001
+```
+
+`update-pr` accepts `--title`, `--body`, and `--state` independently, so callers can update one field without restating the others. Multiline bodies are preserved by the CLI argument parser and passed to the audited service request unchanged.
+
 Use the MCP write lifecycle for agent workflows:
 
 ```json

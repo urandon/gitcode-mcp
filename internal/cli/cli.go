@@ -49,6 +49,7 @@ var commands = []string{
 	"create-issue",
 	"update-issue",
 	"create-pr", "create-mr",
+	"update-pr",
 	"create-page",
 	"update-page",
 	"delete-page",
@@ -102,6 +103,7 @@ type queryService interface {
 	CreateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	CreatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	UpdatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	CreatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	DeletePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
@@ -381,7 +383,7 @@ func resolveLiveCredential(ctx context.Context, eff config.EffectiveConfig, deps
 
 func isLiveStartupCommand(command string) bool {
 	switch command {
-	case "sync", "create-issue", "update-issue", "create-pr", "create-mr", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "update-comment", "add-label", "publish-release", "doctor":
+	case "sync", "create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "update-comment", "add-label", "publish-release", "doctor":
 		return true
 	default:
 		return false
@@ -1741,6 +1743,8 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		return dispatchWrite(ctx, svc.UpdateIssue, command, opts, stdout, stderr, plan)
 	case "create-pr", "create-mr":
 		return dispatchWrite(ctx, svc.CreatePR, "create-pr", opts, stdout, stderr, plan)
+	case "update-pr":
+		return dispatchWrite(ctx, svc.UpdatePR, command, opts, stdout, stderr, plan)
 	case "create-page":
 		return dispatchWrite(ctx, svc.CreatePage, command, opts, stdout, stderr, plan)
 	case "update-page":
@@ -3579,6 +3583,21 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --head BRANCH       source branch (required)")
 		fmt.Fprintln(w, "  --base BRANCH       target branch (required)")
 		fmt.Fprintln(w, "  --body BODY         pull request body")
+		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
+		fmt.Fprintln(w, "  --dry-run           validate without mutation")
+		fmt.Fprintln(w, "  --live              compatibility alias for live write")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "update-pr":
+		fmt.Fprintln(w, "Usage: gitcode-mcp update-pr --repo REPO --number N [--title TITLE] [--body BODY] [--state STATE] [--idempotency-key KEY]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Update an existing pull request / merge request. Executes live by default; use --dry-run for no-mutation validation.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --number N          pull request number (required)")
+		fmt.Fprintln(w, "  --title TITLE       updated pull request title")
+		fmt.Fprintln(w, "  --body BODY         updated pull request body")
+		fmt.Fprintln(w, "  --state STATE       updated pull request state")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
 		fmt.Fprintln(w, "  --live              compatibility alias for live write")
