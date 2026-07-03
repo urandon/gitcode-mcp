@@ -441,7 +441,7 @@ func TestMCPBlockedWriteBoundary(t *testing.T) {
 			}
 		}
 
-		unsupported := []string{"add_comment", "create-page", "update-page", "add-label"}
+		unsupported := []string{"add_comment", "create-page", "update-page"}
 		for i, name := range unsupported {
 			send(map[string]any{
 				"jsonrpc": "2.0",
@@ -1096,7 +1096,7 @@ func TestMCPLifecycleTools(t *testing.T) {
 			t.Fatalf("tools/list missing lifecycle tool %q", name)
 		}
 	}
-	for _, name := range []string{"add_comment", "create-page", "update-page", "add-label"} {
+	for _, name := range []string{"add_comment", "create-page", "update-page"} {
 		if listed[name] {
 			t.Fatalf("tools/list advertised write tool %q", name)
 		}

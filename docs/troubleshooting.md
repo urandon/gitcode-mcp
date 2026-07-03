@@ -160,7 +160,7 @@ failure_class: unsupported_capability
 
 **Cause:** The requested command is intentionally deferred or unsupported by the current adapter surface.
 
-**Fix:** Follow the command remediation. For `add-label`, use `update-issue --labels` when replacing the label set is acceptable; dedicated additive label mutation is not yet implemented.
+**Fix:** Follow the command remediation. `add-label` is an additive wrapper over issue label updates; use `update-issue --labels` only when intentionally replacing the full label set.
 
 ## Runtime audit
 
