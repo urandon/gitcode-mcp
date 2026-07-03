@@ -584,19 +584,19 @@ func TestAddLabelDryRunNoMutation(t *testing.T) {
 	seedStore(t, ctx, store)
 	client := &fakeGitCodeClient{}
 	svc := NewWithClient(store, client)
-	_, err = svc.AddLabel(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeDryRun, Number: 1, Label: "bug"})
-	if err == nil {
-		t.Fatal("AddLabel dry-run: expected error, got nil")
+	result, err := svc.AddLabel(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeDryRun, Number: 1, Label: "bug"})
+	if err != nil {
+		t.Fatalf("AddLabel dry-run: %v", err)
 	}
-	if !gitcode.IsUnsupportedCapability(err) {
-		t.Fatalf("AddLabel dry-run: expected ErrUnsupportedCapability, got %T: %v", err, err)
+	if result.Status != "dry_run_valid" {
+		t.Fatalf("AddLabel dry-run status=%q, want dry_run_valid", result.Status)
 	}
-	if client.addLabelCalls != 0 {
-		t.Fatalf("expected 0 addLabelCalls, got %d", client.addLabelCalls)
+	if client.addLabelCalls != 0 || client.updateIssueCalls != 0 || client.issueCalls != 0 {
+		t.Fatalf("dry-run should not call client, got add=%d update=%d get=%d", client.addLabelCalls, client.updateIssueCalls, client.issueCalls)
 	}
 }
 
-func TestAddLabelLiveUnsupportedCapability(t *testing.T) {
+func TestAddLabelLiveUsesUpdateIssueWithMergedLabels(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)
 	if err != nil {
@@ -604,19 +604,73 @@ func TestAddLabelLiveUnsupportedCapability(t *testing.T) {
 	}
 	defer store.Close()
 	seedStore(t, ctx, store)
-	client := &fakeGitCodeClient{addLabelResult: gitcode.WriteResult[gitcode.Issue]{Record: gitcode.Issue{ID: "remote-1", Number: 1, Title: "Issue 1", Body: "B", State: "open", Labels: []string{"bug"}}, Confirmed: true, Operation: "AddLabel", RemoteID: "1", RemoteNumber: 1, ConfirmedAt: time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)}}
+	updatedAt := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		issue: gitcode.Issue{ID: "1", Number: 1, Title: "Issue 1", Body: "B", State: "open", Labels: []string{"bug"}, UpdatedAt: updatedAt},
+		updateIssueResult: gitcode.WriteResult[gitcode.Issue]{
+			Record:       gitcode.Issue{ID: "1", Number: 1, Title: "Issue 1", Body: "B", State: "open", Labels: []string{"bug", "triage"}, UpdatedAt: updatedAt},
+			Confirmed:    true,
+			Operation:    "UpdateIssue",
+			RemoteID:     "1",
+			RemoteNumber: 1,
+			ConfirmedAt:  updatedAt,
+		},
+	}
 	svc := NewWithClient(store, client)
 	t.Setenv("GITCODE_TOKEN", "test-token")
-	request := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 1, Label: "bug", IdempotencyKey: "label-key-1"}
-	_, err = svc.AddLabel(ctx, request)
-	if err == nil {
-		t.Fatal("AddLabel live: expected error, got nil")
+	request := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 1, Label: "triage", IdempotencyKey: "label-key-1"}
+	result, err := svc.AddLabel(ctx, request)
+	if err != nil {
+		t.Fatalf("AddLabel live: %v", err)
 	}
-	if !gitcode.IsUnsupportedCapability(err) {
-		t.Fatalf("AddLabel live: expected ErrUnsupportedCapability, got %T: %v", err, err)
+	if result.Status != "succeeded" || result.RemoteNumber != 1 {
+		t.Fatalf("AddLabel live result=%#v", result)
 	}
-	if client.addLabelCalls != 0 {
-		t.Fatalf("expected 0 addLabelCalls, got %d", client.addLabelCalls)
+	if client.issueCalls != 1 || client.updateIssueCalls != 1 || client.addLabelCalls != 0 {
+		t.Fatalf("calls get=%d update=%d add=%d", client.issueCalls, client.updateIssueCalls, client.addLabelCalls)
+	}
+	var labels string
+	if err := json.Unmarshal(client.lastUpdateIssueRequest.Labels, &labels); err != nil {
+		t.Fatalf("decode update labels: %v", err)
+	}
+	if labels != "bug,triage" {
+		t.Fatalf("labels=%q, want bug,triage", labels)
+	}
+	if client.lastWriteOptions.IdempotencyKey != "label-key-1" {
+		t.Fatalf("idempotency key=%q", client.lastWriteOptions.IdempotencyKey)
+	}
+}
+
+func TestAddLabelLiveNoopWhenLabelAlreadyExists(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	updatedAt := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		issue: gitcode.Issue{ID: "1", Number: 1, Title: "Issue 1", Body: "B", State: "open", Labels: []string{"bug", "triage"}, UpdatedAt: updatedAt},
+	}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	result, err := svc.AddLabel(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 1, Label: "triage", IdempotencyKey: "label-key-noop"})
+	if err != nil {
+		t.Fatalf("AddLabel no-op: %v", err)
+	}
+	if result.Status != "succeeded" || result.RemoteNumber != 1 {
+		t.Fatalf("AddLabel no-op result=%#v", result)
+	}
+	if client.issueCalls != 1 || client.updateIssueCalls != 0 || client.addLabelCalls != 0 {
+		t.Fatalf("calls get=%d update=%d add=%d", client.issueCalls, client.updateIssueCalls, client.addLabelCalls)
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", "ISSUE-1")
+	if err != nil {
+		t.Fatalf("get cached issue: %v", err)
+	}
+	if !reflect.DeepEqual(record.Labels, []string{"bug", "triage"}) {
+		t.Fatalf("cached labels=%v", record.Labels)
 	}
 }
 
@@ -2567,6 +2621,8 @@ type fakeGitCodeClient struct {
 	updateReleaseCalls           int
 	createIssueResult            gitcode.WriteResult[gitcode.Issue]
 	createIssueResults           []gitcode.WriteResult[gitcode.Issue]
+	updateIssueCalls             int
+	updateIssueResult            gitcode.WriteResult[gitcode.Issue]
 	createIssueCommentResult     gitcode.WriteResult[gitcode.Comment]
 	updateIssueCommentResult     gitcode.WriteResult[gitcode.Comment]
 	createPRResult               gitcode.WriteResult[gitcode.PullRequest]
@@ -2599,6 +2655,7 @@ type fakeGitCodeClient struct {
 	commentsByIssue              map[int][]gitcode.Comment
 	listIssueCommentsErr         error
 	lastCreateIssueRequest       gitcode.CreateIssueRequest
+	lastUpdateIssueRequest       gitcode.UpdateIssueRequest
 	lastUpdateIssueCommentReq    gitcode.UpdateIssueCommentRequest
 	lastCreatePRRequest          gitcode.CreatePRRequest
 	lastUpdatePRRequest          gitcode.UpdatePRRequest
@@ -2733,8 +2790,14 @@ func (f *fakeGitCodeClient) CreateIssue(_ context.Context, req gitcode.CreateIss
 	}
 	return f.createIssueResult, nil
 }
-func (f *fakeGitCodeClient) UpdateIssue(context.Context, gitcode.UpdateIssueRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
-	return gitcode.WriteResult[gitcode.Issue]{}, nil
+func (f *fakeGitCodeClient) UpdateIssue(_ context.Context, req gitcode.UpdateIssueRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
+	f.updateIssueCalls++
+	f.lastUpdateIssueRequest = req
+	f.lastWriteOptions = opts
+	if err := f.nextError(); err != nil {
+		return gitcode.WriteResult[gitcode.Issue]{}, err
+	}
+	return f.updateIssueResult, nil
 }
 func (f *fakeGitCodeClient) CreateIssueComment(context.Context, gitcode.CreateIssueCommentRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Comment], error) {
 	f.createIssueCommentCalls++
@@ -3079,7 +3142,7 @@ func (f *brokenStore) ReleaseWriter(context.Context, *cache.WriterLease) error {
 func (f *brokenStore) Checkpoint(context.Context, string) error                { return nil }
 func (f *brokenStore) Close() error                                            { return nil }
 
-func TestScenario013009AddLabelDryRunReturnsUnsupportedDiagnostic(t *testing.T) {
+func TestScenario013009AddLabelDryRunValidatesWithoutMutation(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)
 	if err != nil {
@@ -3089,24 +3152,24 @@ func TestScenario013009AddLabelDryRunReturnsUnsupportedDiagnostic(t *testing.T) 
 	seedStore(t, ctx, store)
 	client := &fakeGitCodeClient{}
 	svc := NewWithClient(store, client)
-	_, err = svc.AddLabel(ctx, WriteCommandRequest{
+	result, err := svc.AddLabel(ctx, WriteCommandRequest{
 		RepoID: "fixture-a",
 		Mode:   WriteModeDryRun,
 		Number: 42,
 		Label:  "bug",
 	})
-	if err == nil {
-		t.Fatal("AddLabel dry-run: expected error, got nil")
+	if err != nil {
+		t.Fatalf("AddLabel dry-run: %v", err)
 	}
-	if !gitcode.IsUnsupportedCapability(err) {
-		t.Fatalf("AddLabel dry-run: expected ErrUnsupportedCapability, got %T: %v", err, err)
+	if result.Status != "dry_run_valid" {
+		t.Fatalf("AddLabel dry-run status=%q", result.Status)
 	}
-	if client.addLabelCalls != 0 {
-		t.Fatalf("expected 0 addLabelCalls, got %d", client.addLabelCalls)
+	if client.addLabelCalls != 0 || client.updateIssueCalls != 0 || client.issueCalls != 0 {
+		t.Fatalf("dry-run should not call client, got add=%d update=%d get=%d", client.addLabelCalls, client.updateIssueCalls, client.issueCalls)
 	}
 }
 
-func TestScenario013004AddLabelLiveNoClientCall(t *testing.T) {
+func TestScenario013004AddLabelLiveUsesReadModifyUpdate(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)
 	if err != nil {
@@ -3114,23 +3177,34 @@ func TestScenario013004AddLabelLiveNoClientCall(t *testing.T) {
 	}
 	defer store.Close()
 	seedStore(t, ctx, store)
-	client := &fakeGitCodeClient{}
+	updatedAt := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		issue: gitcode.Issue{ID: "42", Number: 42, Title: "Issue 42", Body: "B", State: "open", Labels: []string{"bug"}, UpdatedAt: updatedAt},
+		updateIssueResult: gitcode.WriteResult[gitcode.Issue]{
+			Record:       gitcode.Issue{ID: "42", Number: 42, Title: "Issue 42", Body: "B", State: "open", Labels: []string{"bug", "triage"}, UpdatedAt: updatedAt},
+			Confirmed:    true,
+			Operation:    "UpdateIssue",
+			RemoteID:     "42",
+			RemoteNumber: 42,
+			ConfirmedAt:  updatedAt,
+		},
+	}
 	svc := NewWithClient(store, client)
 	t.Setenv("GITCODE_TOKEN", "test-token")
-	_, err = svc.AddLabel(ctx, WriteCommandRequest{
+	result, err := svc.AddLabel(ctx, WriteCommandRequest{
 		RepoID: "fixture-a",
 		Mode:   WriteModeLive,
 		Number: 42,
-		Label:  "bug",
+		Label:  "triage",
 	})
-	if err == nil {
-		t.Fatal("AddLabel live: expected error, got nil")
+	if err != nil {
+		t.Fatalf("AddLabel live: %v", err)
 	}
-	if !gitcode.IsUnsupportedCapability(err) {
-		t.Fatalf("AddLabel live: expected ErrUnsupportedCapability, got %T: %v", err, err)
+	if result.Status != "succeeded" || result.RemoteNumber != 42 {
+		t.Fatalf("AddLabel live result=%#v", result)
 	}
-	if client.addLabelCalls != 0 {
-		t.Fatalf("expected 0 addLabelCalls (old route not called), got %d", client.addLabelCalls)
+	if client.issueCalls != 1 || client.updateIssueCalls != 1 || client.addLabelCalls != 0 {
+		t.Fatalf("calls get=%d update=%d add=%d", client.issueCalls, client.updateIssueCalls, client.addLabelCalls)
 	}
 }
 

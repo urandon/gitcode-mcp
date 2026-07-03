@@ -2261,6 +2261,13 @@ func (s *Service) AddLabel(ctx context.Context, req WriteCommandRequest) (WriteC
 	if (req.Number == 0 && strings.TrimSpace(req.ID) == "") || strings.TrimSpace(req.Label) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "label", Message: "issue and label are required"}
 	}
+	if req.Number == 0 {
+		number, err := issueNumberFromWriteID(req.ID)
+		if err != nil {
+			return WriteCommandResult{}, err
+		}
+		req.Number = number
+	}
 	return s.executeWrite(ctx, "add-label", req, RepositoryScopeIssues)
 }
 
@@ -3422,12 +3429,6 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	}
 	key, fingerprint := writeIdempotency(command, req)
 	base := WriteCommandResult{Command: command, RepoID: route.RepoID, Status: "dry_run_valid", ID: writeTargetID(req), IdempotencyKey: key, SourceFingerprint: fingerprint, Evidence: "validated write command", GeneratedAt: s.now().UTC()}
-	if command == "add-label" {
-		return WriteCommandResult{}, gitcode.ErrUnsupportedCapability{
-			CapabilityKey: "add_label",
-			Message:       "add-label is not supported: use update-issue --labels instead",
-		}
-	}
 	if req.Mode == WriteModeDryRun {
 		return base, nil
 	}
@@ -3632,10 +3633,7 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 		}
 		return confirmation, graph, nil
 	case "add-label":
-		return writeConfirmation{}, cache.RecordGraph{}, gitcode.ErrUnsupportedCapability{
-			CapabilityKey: "add_label",
-			Message:       "add-label is not supported: use update-issue --labels instead",
-		}
+		return s.addLabelViaUpdateIssue(ctx, route, req, opts, now)
 	case "create-page":
 		result, err := s.client.CreateWikiPage(ctx, gitcode.CreateWikiPageRequest{Owner: route.Owner, Repo: route.Name, Path: firstNonEmptyString(req.Path, req.Slug, req.Title), Slug: req.Slug, Title: strings.TrimSpace(req.Title), Body: req.Body}, opts)
 		if err != nil {
@@ -3660,6 +3658,64 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 	default:
 		return writeConfirmation{}, cache.RecordGraph{}, ErrWriteFailure{Code: "write_unsupported_deferred", RepoID: route.RepoID}
 	}
+}
+
+func (s *Service) addLabelViaUpdateIssue(ctx context.Context, route RepositoryRoute, req WriteCommandRequest, opts gitcode.WriteOptions, now time.Time) (writeConfirmation, cache.RecordGraph, error) {
+	label := strings.TrimSpace(req.Label)
+	issue, err := s.client.GetIssue(ctx, gitcode.IssueRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number})
+	if err != nil {
+		return writeConfirmation{}, cache.RecordGraph{}, err
+	}
+	labels, changed := mergeIssueLabel(issue.Labels, label)
+	if !changed {
+		result := gitcode.WriteResult[gitcode.Issue]{
+			Record:       issue,
+			Confirmed:    true,
+			Operation:    "AddLabelNoop",
+			RemoteID:     issue.ID,
+			RemoteNumber: issue.Number,
+			ConfirmedAt:  now,
+		}
+		confirmation, graph := s.issueWriteGraph(route.RepoID, issue, result, now)
+		return confirmation, graph, nil
+	}
+	result, err := s.client.UpdateIssue(ctx, gitcode.UpdateIssueRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, Labels: gitcode.EncodeIssueLabels(labels)}, opts)
+	if err != nil {
+		return writeConfirmation{}, cache.RecordGraph{}, err
+	}
+	confirmation, graph := s.issueWriteGraph(route.RepoID, result.Record, result, now)
+	return confirmation, graph, nil
+}
+
+func mergeIssueLabel(existing []string, label string) ([]string, bool) {
+	label = strings.TrimSpace(label)
+	labels := make([]string, 0, len(existing)+1)
+	found := false
+	for _, current := range existing {
+		trimmed := strings.TrimSpace(current)
+		if trimmed == "" {
+			continue
+		}
+		if trimmed == label {
+			found = true
+		}
+		labels = append(labels, trimmed)
+	}
+	if found {
+		return labels, false
+	}
+	labels = append(labels, label)
+	return labels, true
+}
+
+func issueNumberFromWriteID(id string) (int, error) {
+	normalized := strings.TrimSpace(id)
+	normalized = strings.TrimPrefix(normalized, "ISSUE-")
+	number, err := strconv.Atoi(normalized)
+	if err != nil || number <= 0 {
+		return 0, ErrInvalidQuery{Field: "issue", Message: "issue id must be a positive number or ISSUE-N"}
+	}
+	return number, nil
 }
 
 func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID string, req WriteCommandRequest, prior cache.AuditTrailEntry) (cache.RecordGraph, error) {

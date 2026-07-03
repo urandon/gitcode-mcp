@@ -117,20 +117,17 @@ func TestWriteErrorClassifiesCacheLockContention(t *testing.T) {
 	}
 }
 
-func TestAddLabelUnsupportedDiagnostic(t *testing.T) {
+func TestAddLabelDryRunValidates(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
 	code := executeWithFactory([]string{"add-label", "--repo", "fixture-a", "--number", "1", "--label", "triage", "--dry-run"}, &stdout, &stderr, cacheBackedFactory(t))
 
-	if code == 0 {
-		t.Fatalf("code=0 stdout=%q stderr=%q", stdout.String(), stderr.String())
+	if code != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "failure_class: unsupported_capability") {
-		t.Fatalf("stderr missing unsupported_capability: %q", stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "update-issue --labels") {
-		t.Fatalf("stderr missing remediation: %q", stderr.String())
+	if !strings.Contains(stdout.String(), "add-label: dry_run_valid") {
+		t.Fatalf("stdout missing dry_run_valid: %q", stdout.String())
 	}
 }
 

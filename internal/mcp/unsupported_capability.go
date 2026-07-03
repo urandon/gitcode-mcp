@@ -12,7 +12,6 @@ var unsupportedCapabilityToolNames = map[string]bool{
 	"add_comment": true,
 
 	"update-issue": true,
-	"add-label":    true,
 	"create-page":  true,
 	"update-page":  true,
 }
