@@ -3,6 +3,7 @@ package gitcode
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -23,6 +24,21 @@ func EncodeIssueLabels(labels []string) json.RawMessage {
 		return nil
 	}
 	return json.RawMessage(data)
+}
+
+func EncodeIssueMilestone(id string) json.RawMessage {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return nil
+	}
+	if strings.EqualFold(trimmed, "none") || strings.EqualFold(trimmed, "null") {
+		return json.RawMessage("null")
+	}
+	n, err := strconv.Atoi(trimmed)
+	if err != nil || n <= 0 {
+		return nil
+	}
+	return json.RawMessage(strconv.Itoa(n))
 }
 
 func NormalizeLabels(labels []GitCodeLabel) ([]string, error) {

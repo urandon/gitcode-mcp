@@ -551,6 +551,38 @@ func (c *HTTPClient) GetMilestone(ctx context.Context, req MilestoneRequest) (Mi
 	return milestone, nil
 }
 
+func (c *HTTPClient) CreateMilestone(ctx context.Context, req MilestoneWriteRequest, opts WriteOptions) (WriteResult[Milestone], error) {
+	if err := validateCreateMilestone(req); err != nil {
+		return WriteResult[Milestone]{}, err
+	}
+	target := req.Owner + "/" + req.Repo + "/" + strings.TrimSpace(req.Title)
+	return writeConfirmedJSON[Milestone](ctx, c, http.MethodPost, listMilestonesEndpoint(req.Owner, req.Repo), "CreateMilestone", target, milestoneWritePayload(req, true), opts, func(result WriteResult[Milestone]) (WriteResult[Milestone], error) {
+		result.RemoteID = result.Record.RemoteID
+		result.RemoteRevision = firstNonEmpty(result.Record.UpdatedAt, result.ResponseHash)
+		result.BrowserURL = result.Record.HTMLURL
+		return result, nil
+	})
+}
+
+func (c *HTTPClient) UpdateMilestone(ctx context.Context, req MilestoneWriteRequest, opts WriteOptions) (WriteResult[Milestone], error) {
+	if err := validateUpdateMilestone(req); err != nil {
+		return WriteResult[Milestone]{}, err
+	}
+	endpoint := getMilestoneEndpoint(req.Owner, req.Repo, req.ID)
+	target := req.Owner + "/" + req.Repo + "/milestones/" + strconv.Itoa(req.ID)
+	return writeConfirmedJSON[Milestone](ctx, c, http.MethodPatch, endpoint, "UpdateMilestone", target, milestoneWritePayload(req, false), opts, func(result WriteResult[Milestone]) (WriteResult[Milestone], error) {
+		readback, err := c.GetMilestone(ctx, MilestoneRequest{Owner: req.Owner, Repo: req.Repo, ID: req.ID})
+		if err != nil {
+			return WriteResult[Milestone]{}, err
+		}
+		result.Record = readback
+		result.RemoteID = readback.RemoteID
+		result.RemoteRevision = firstNonEmpty(readback.UpdatedAt, result.ResponseHash)
+		result.BrowserURL = readback.HTMLURL
+		return result, nil
+	})
+}
+
 type wikiTraversal struct {
 	client       *HTTPClient
 	owner        string
@@ -912,14 +944,41 @@ func createIssuePayload(req CreateIssueRequest) any {
 
 func updateIssuePayload(req UpdateIssueRequest) any {
 	payload := struct {
-		Title  string           `json:"title,omitempty"`
-		Body   string           `json:"body,omitempty"`
-		State  string           `json:"state,omitempty"`
-		Labels *json.RawMessage `json:"labels,omitempty"`
+		Title     string           `json:"title,omitempty"`
+		Body      string           `json:"body,omitempty"`
+		State     string           `json:"state,omitempty"`
+		Labels    *json.RawMessage `json:"labels,omitempty"`
+		Milestone *json.RawMessage `json:"milestone,omitempty"`
 	}{Title: req.Title, Body: req.Body, State: req.State}
 	if len(req.Labels) > 0 {
 		labels := req.Labels
 		payload.Labels = &labels
+	}
+	if len(req.Milestone) > 0 {
+		milestone := req.Milestone
+		payload.Milestone = &milestone
+	}
+	return payload
+}
+
+func milestoneWritePayload(req MilestoneWriteRequest, includeRequired bool) any {
+	payload := struct {
+		Title       string `json:"title,omitempty"`
+		Description string `json:"description,omitempty"`
+		DueOn       string `json:"due_on,omitempty"`
+		State       string `json:"state,omitempty"`
+	}{}
+	if includeRequired || strings.TrimSpace(req.Title) != "" {
+		payload.Title = strings.TrimSpace(req.Title)
+	}
+	if strings.TrimSpace(req.Description) != "" {
+		payload.Description = req.Description
+	}
+	if strings.TrimSpace(req.DueOn) != "" {
+		payload.DueOn = normalizeMilestoneDueOn(req.DueOn)
+	}
+	if strings.TrimSpace(req.State) != "" {
+		payload.State = strings.TrimSpace(req.State)
 	}
 	return payload
 }
@@ -1008,6 +1067,68 @@ func validateMilestoneRequest(req MilestoneRequest) error {
 		return ErrValidationFailed{Field: "milestone.id", Message: "positive milestone id is required"}
 	}
 	return nil
+}
+
+func validateCreateMilestone(req MilestoneWriteRequest) error {
+	if err := validateWriteRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if strings.TrimSpace(req.Title) == "" {
+		return ErrValidationFailed{Field: "milestone.title", Message: "title is required"}
+	}
+	if strings.TrimSpace(req.DueOn) == "" {
+		return ErrValidationFailed{Field: "milestone.due_on", Message: "due_on is required by GitCode"}
+	}
+	if _, err := parseMilestoneDueOn(req.DueOn); err != nil {
+		return err
+	}
+	return validateMilestoneWriteState(req.State)
+}
+
+func validateUpdateMilestone(req MilestoneWriteRequest) error {
+	if err := validateWriteRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if req.ID <= 0 {
+		return ErrValidationFailed{Field: "milestone.id", Message: "positive milestone id is required"}
+	}
+	if strings.TrimSpace(req.DueOn) != "" {
+		if _, err := parseMilestoneDueOn(req.DueOn); err != nil {
+			return err
+		}
+	}
+	return validateMilestoneWriteState(req.State)
+}
+
+func validateMilestoneWriteState(state string) error {
+	switch strings.TrimSpace(state) {
+	case "", "open", "closed":
+		return nil
+	default:
+		return ErrValidationFailed{Field: "milestone.state", Message: "state must be open or closed"}
+	}
+}
+
+func normalizeMilestoneDueOn(raw string) string {
+	dueOn, err := parseMilestoneDueOn(raw)
+	if err != nil {
+		return strings.TrimSpace(raw)
+	}
+	return dueOn
+}
+
+func parseMilestoneDueOn(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", ErrValidationFailed{Field: "milestone.due_on", Message: "due_on is required"}
+	}
+	if t, err := time.Parse("2006-01-02", trimmed); err == nil {
+		return t.Format("2006-01-02"), nil
+	}
+	if t, err := time.Parse(time.RFC3339, trimmed); err == nil {
+		return t.Format("2006-01-02"), nil
+	}
+	return "", ErrValidationFailed{Field: "milestone.due_on", Message: "due_on must be YYYY-MM-DD or RFC3339"}
 }
 
 func validateIssueRequest(req IssueRequest) error {

@@ -50,6 +50,11 @@ var commands = []string{
 	"update-issue",
 	"create-pr", "create-mr",
 	"update-pr",
+	"milestones",
+	"create-milestone",
+	"update-milestone",
+	"set-issue-milestone",
+	"clear-issue-milestone",
 	"create-page",
 	"update-page",
 	"delete-page",
@@ -104,6 +109,11 @@ type queryService interface {
 	UpdateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	CreatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	ListMilestones(context.Context, service.MilestoneListRequest) (service.MilestoneListResult, error)
+	CreateMilestone(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	UpdateMilestone(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	SetIssueMilestone(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	ClearIssueMilestone(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	CreatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	DeletePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
@@ -179,6 +189,9 @@ type options struct {
 	sha            string
 	title          string
 	body           string
+	description    string
+	dueOn          string
+	milestone      string
 	state          string
 	label          string
 	labels         string
@@ -383,7 +396,7 @@ func resolveLiveCredential(ctx context.Context, eff config.EffectiveConfig, deps
 
 func isLiveStartupCommand(command string) bool {
 	switch command {
-	case "sync", "create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "update-comment", "add-label", "publish-release", "doctor":
+	case "sync", "create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "milestones", "create-milestone", "update-milestone", "set-issue-milestone", "clear-issue-milestone", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "update-comment", "add-label", "publish-release", "doctor":
 		return true
 	default:
 		return false
@@ -531,6 +544,9 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.sha, "sha", "", "page sha")
 	flags.StringVar(&opts.title, "title", "", "title")
 	flags.StringVar(&opts.body, "body", "", "body")
+	flags.StringVar(&opts.description, "description", "", "description")
+	flags.StringVar(&opts.dueOn, "due-on", "", "due date YYYY-MM-DD")
+	flags.StringVar(&opts.milestone, "milestone", "", "milestone id or title")
 	flags.StringVar(&opts.state, "state", "", "state")
 	flags.StringVar(&opts.label, "label", "", "label")
 	flags.StringVar(&opts.labels, "labels", "", "comma-separated labels")
@@ -1745,6 +1761,20 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		return dispatchWrite(ctx, svc.CreatePR, "create-pr", opts, stdout, stderr, plan)
 	case "update-pr":
 		return dispatchWrite(ctx, svc.UpdatePR, command, opts, stdout, stderr, plan)
+	case "milestones":
+		result, err := svc.ListMilestones(ctx, service.MilestoneListRequest{RepoID: opts.repo, Repo: opts.repo, State: opts.state, PerPage: opts.perPage})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, renderMilestonesText)
+	case "create-milestone":
+		return dispatchWrite(ctx, svc.CreateMilestone, command, opts, stdout, stderr, plan)
+	case "update-milestone":
+		return dispatchWrite(ctx, svc.UpdateMilestone, command, opts, stdout, stderr, plan)
+	case "set-issue-milestone":
+		return dispatchWrite(ctx, svc.SetIssueMilestone, command, opts, stdout, stderr, plan)
+	case "clear-issue-milestone":
+		return dispatchWrite(ctx, svc.ClearIssueMilestone, command, opts, stdout, stderr, plan)
 	case "create-page":
 		return dispatchWrite(ctx, svc.CreatePage, command, opts, stdout, stderr, plan)
 	case "update-page":
@@ -2431,7 +2461,7 @@ func writeRequest(opts options) service.WriteCommandRequest {
 	if !opts.dryRun {
 		mode = service.WriteModeLive
 	}
-	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, Number: opts.number, CommentID: opts.commentID, Slug: opts.slug, Path: opts.path, Line: opts.line, StartLine: opts.startLine, EndLine: opts.endLine, Position: opts.position, Sha: opts.sha, Title: opts.title, Body: opts.body, Head: opts.head, Base: opts.base, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
+	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, Number: opts.number, CommentID: opts.commentID, Slug: opts.slug, Path: opts.path, Line: opts.line, StartLine: opts.startLine, EndLine: opts.endLine, Position: opts.position, Sha: opts.sha, Title: opts.title, Body: opts.body, Description: opts.description, DueOn: opts.dueOn, Milestone: opts.milestone, Head: opts.head, Base: opts.base, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
 }
 
 func publishReleaseRequest(opts options) (service.PublishReleaseRequest, error) {
@@ -2669,6 +2699,13 @@ func renderWriteText(w io.Writer, result service.WriteCommandResult) {
 	}
 	if result.BrowserURL != "" {
 		fmt.Fprintf(w, "browser_url: %s\n", result.BrowserURL)
+	}
+}
+
+func renderMilestonesText(w io.Writer, result service.MilestoneListResult) {
+	fmt.Fprintf(w, "milestones: repo_id=%s count=%d evidence=%s\n", result.RepoID, result.Count, result.Evidence)
+	for _, milestone := range result.Milestones {
+		fmt.Fprintf(w, "%s %s state=%s due_on=%s title=%s\n", milestone.ID, milestone.RemoteID, milestone.State, milestone.DueOn, milestone.Title)
 	}
 }
 
@@ -3569,6 +3606,72 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --body BODY         updated body")
 		fmt.Fprintln(w, "  --state STATE       updated state")
 		fmt.Fprintln(w, "  --labels A,B        comma-separated labels")
+		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
+		fmt.Fprintln(w, "  --dry-run           validate without mutation")
+		fmt.Fprintln(w, "  --live              compatibility alias for live write")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "milestones":
+		fmt.Fprintln(w, "Usage: gitcode-mcp milestones --repo REPO [--state open|closed] [--per-page N]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "List repository milestones and refresh the local cache.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --state STATE       milestone state filter")
+		fmt.Fprintln(w, "  --per-page N        records per page")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "create-milestone":
+		fmt.Fprintln(w, "Usage: gitcode-mcp create-milestone --repo REPO --title TITLE --due-on YYYY-MM-DD [--description TEXT] [--state open|closed] [--idempotency-key KEY]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Create a milestone. GitCode requires --due-on. Executes live by default; use --dry-run for no-mutation validation.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --title TITLE       milestone title (required)")
+		fmt.Fprintln(w, "  --due-on DATE       due date YYYY-MM-DD (required)")
+		fmt.Fprintln(w, "  --description TEXT  milestone description")
+		fmt.Fprintln(w, "  --state STATE       milestone state")
+		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
+		fmt.Fprintln(w, "  --dry-run           validate without mutation")
+		fmt.Fprintln(w, "  --live              compatibility alias for live write")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "update-milestone":
+		fmt.Fprintln(w, "Usage: gitcode-mcp update-milestone --repo REPO --milestone ID_OR_TITLE [--title TITLE] [--due-on YYYY-MM-DD] [--description TEXT] [--state open|closed] [--idempotency-key KEY]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Update milestone metadata. Executes live by default; use --dry-run for no-mutation validation.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --milestone VALUE   milestone id or exact title (required)")
+		fmt.Fprintln(w, "  --title TITLE       updated title")
+		fmt.Fprintln(w, "  --due-on DATE       updated due date YYYY-MM-DD")
+		fmt.Fprintln(w, "  --description TEXT  updated description")
+		fmt.Fprintln(w, "  --state STATE       updated state")
+		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
+		fmt.Fprintln(w, "  --dry-run           validate without mutation")
+		fmt.Fprintln(w, "  --live              compatibility alias for live write")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "set-issue-milestone":
+		fmt.Fprintln(w, "Usage: gitcode-mcp set-issue-milestone --repo REPO --number N --milestone ID_OR_TITLE [--idempotency-key KEY]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Assign a milestone to an issue and verify by readback. Executes live by default; use --dry-run for no-mutation validation.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --number N          issue number (required)")
+		fmt.Fprintln(w, "  --milestone VALUE   milestone id or exact title (required)")
+		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
+		fmt.Fprintln(w, "  --dry-run           validate without mutation")
+		fmt.Fprintln(w, "  --live              compatibility alias for live write")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "clear-issue-milestone":
+		fmt.Fprintln(w, "Usage: gitcode-mcp clear-issue-milestone --repo REPO --number N [--idempotency-key KEY]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Clear an issue milestone and verify by readback. Executes live by default; use --dry-run for no-mutation validation.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --number N          issue number (required)")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
 		fmt.Fprintln(w, "  --live              compatibility alias for live write")

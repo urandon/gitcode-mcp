@@ -53,6 +53,29 @@ gitcode-mcp create-pr \
 
 Expected: reports what would be created without making any mutation. `create-mr` is an alias for users who follow GitCode UI terminology.
 
+### Milestones (dry-run)
+
+```sh
+gitcode-mcp create-milestone \
+  --repo example-owner/example-repo \
+  --title "RAG indexer MVP" \
+  --description "Implementation milestone" \
+  --due-on 2026-07-15 \
+  --dry-run
+```
+
+Expected: validates milestone creation without mutation. GitCode requires `--due-on` for milestone creation.
+
+```sh
+gitcode-mcp set-issue-milestone \
+  --repo example-owner/example-repo \
+  --number 42 \
+  --milestone "RAG indexer MVP" \
+  --dry-run
+```
+
+Expected: validates issue milestone assignment. Live `set-issue-milestone` and `clear-issue-milestone` verify the result through issue readback because GitCode can return a stale or null milestone in the immediate PATCH response.
+
 ### Create wiki page (dry-run)
 
 ```sh
