@@ -97,12 +97,34 @@ func TestJobManagerMarksRunningSnapshotInterrupted(t *testing.T) {
 	if job.Status != JobStatusInterrupted || job.FinishedAt == nil || !strings.Contains(job.Error, "restarted") {
 		t.Fatalf("interrupted job = %#v", job)
 	}
-	next, err := manager.StartFake(context.Background(), StartFakeJobRequest{Steps: 1, IntervalMS: 1})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	next, err := manager.StartFake(ctx, StartFakeJobRequest{Steps: 1, IntervalMS: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if next.ID != "job-000008" {
 		t.Fatalf("next job id = %q, want job-000008", next.ID)
+	}
+	waitForManagerJobTerminal(t, manager, next.ID)
+}
+
+func waitForManagerJobTerminal(t *testing.T, manager *JobManager, id string) Job {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		job, ok := manager.Get(id)
+		if !ok {
+			t.Fatalf("job %s not found", id)
+		}
+		switch job.Status {
+		case JobStatusSucceeded, JobStatusFailed, JobStatusCancelled, JobStatusInterrupted:
+			return job
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job %s did not finish before cleanup: %#v", id, job)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
