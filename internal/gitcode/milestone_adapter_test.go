@@ -77,6 +77,66 @@ func TestMilestone002GetRouteContract(t *testing.T) {
 	}
 }
 
+func TestMilestone002CreateRequiresDueOnAndPostsPayload(t *testing.T) {
+	var payload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method=%s, want POST", r.Method)
+		}
+		if r.URL.Path != "/api/v5/repos/test-owner/test-repo/milestones" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":2,"title":"RAG indexer MVP","description":"Design","state":"open","due_on":"2026-07-15"}`)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	result, err := client.CreateMilestone(context.Background(), MilestoneWriteRequest{Owner: "test-owner", Repo: "test-repo", Title: "RAG indexer MVP", Description: "Design", DueOn: "2026-07-15", State: "open"}, WriteOptions{IdempotencyKey: "milestone-create-key"})
+	if err != nil {
+		t.Fatalf("CreateMilestone: %v", err)
+	}
+	if result.RemoteID != "2" || result.Record.Title != "RAG indexer MVP" {
+		t.Fatalf("result=%#v", result)
+	}
+	if payload["title"] != "RAG indexer MVP" || payload["description"] != "Design" || payload["due_on"] != "2026-07-15" || payload["state"] != "open" {
+		t.Fatalf("payload=%#v", payload)
+	}
+	if _, err := client.CreateMilestone(context.Background(), MilestoneWriteRequest{Owner: "test-owner", Repo: "test-repo", Title: "missing due"}, WriteOptions{IdempotencyKey: "missing-due"}); err == nil {
+		t.Fatal("CreateMilestone without due_on returned nil error")
+	}
+}
+
+func TestMilestone002UpdatePatchesAndReadsBack(t *testing.T) {
+	paths := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodPatch:
+			fmt.Fprint(w, `{"id":1,"title":"Stale response","state":"open"}`)
+		case http.MethodGet:
+			fmt.Fprint(w, `{"id":1,"title":"Updated milestone","description":"Updated","state":"closed","due_on":"2026-07-20"}`)
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	result, err := client.UpdateMilestone(context.Background(), MilestoneWriteRequest{Owner: "test-owner", Repo: "test-repo", ID: 1, Title: "Updated milestone", Description: "Updated", DueOn: "2026-07-20", State: "closed"}, WriteOptions{IdempotencyKey: "milestone-update-key"})
+	if err != nil {
+		t.Fatalf("UpdateMilestone: %v", err)
+	}
+	if len(paths) != 2 || paths[0] != "PATCH /api/v5/repos/test-owner/test-repo/milestones/1" || paths[1] != "GET /api/v5/repos/test-owner/test-repo/milestones/1" {
+		t.Fatalf("paths=%v", paths)
+	}
+	if result.Record.Title != "Updated milestone" || result.Record.Status != "closed" {
+		t.Fatalf("readback result=%#v", result.Record)
+	}
+}
+
 func TestMilestone003Pagination(t *testing.T) {
 	pageCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -127,9 +187,9 @@ func TestMilestone004MatrixGatingDeferred(t *testing.T) {
 				Evidence: EvidenceClassOpenAPI,
 			},
 			ProductAreaMilestones: {
-				Area:    ProductAreaMilestones,
-				Status:  SupportStatusDeferred,
-				Route:   RouteFamilyAPIV5,
+				Area:     ProductAreaMilestones,
+				Status:   SupportStatusDeferred,
+				Route:    RouteFamilyAPIV5,
 				Evidence: EvidenceClassDeferred,
 				Diagnostic: &UnsupportedDiagnostic{
 					Code:          "unsupported_capability",
@@ -144,9 +204,9 @@ func TestMilestone004MatrixGatingDeferred(t *testing.T) {
 				Evidence: EvidenceClassLiveProbe,
 			},
 			ProductAreaPullRequests: {
-				Area:    ProductAreaPullRequests,
-				Status:  SupportStatusDeferred,
-				Route:   RouteFamilyAPIV5,
+				Area:     ProductAreaPullRequests,
+				Status:   SupportStatusDeferred,
+				Route:    RouteFamilyAPIV5,
 				Evidence: EvidenceClassDeferred,
 				Diagnostic: &UnsupportedDiagnostic{
 					Code:          "unsupported_capability",
@@ -155,9 +215,9 @@ func TestMilestone004MatrixGatingDeferred(t *testing.T) {
 				},
 			},
 			ProductAreaComments: {
-				Area:    ProductAreaComments,
-				Status:  SupportStatusDeferred,
-				Route:   RouteFamilyAPIV5,
+				Area:     ProductAreaComments,
+				Status:   SupportStatusDeferred,
+				Route:    RouteFamilyAPIV5,
 				Evidence: EvidenceClassDeferred,
 				Diagnostic: &UnsupportedDiagnostic{
 					Code:          "unsupported_capability",
@@ -362,7 +422,7 @@ func TestMilestone011StatusNormalization(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			body := fmt.Sprintf(`{"id":1,"title":"test"}`, )
+			body := fmt.Sprintf(`{"id":1,"title":"test"}`)
 			if tt.status != `` {
 				body = fmt.Sprintf(`{"id":1,"title":"test","state":%s}`, tt.status)
 			}
@@ -719,10 +779,10 @@ func TestMilestone023ListMilestonesStateQuery(t *testing.T) {
 
 func TestMilestone024MilestoneUnmarshalJSON(t *testing.T) {
 	tests := []struct {
-		name    string
-		json    string
-		want    Milestone
-		wantErr bool
+		name     string
+		json     string
+		want     Milestone
+		wantErr  bool
 		errField string
 	}{
 		{
@@ -736,15 +796,15 @@ func TestMilestone024MilestoneUnmarshalJSON(t *testing.T) {
 			want: Milestone{RemoteID: "1", SourceID: "MILESTONE-1", Title: "minimal", Status: "open"},
 		},
 		{
-			name:    "missing id",
-			json:    `{"title":"no id","state":"open"}`,
-			wantErr: true,
+			name:     "missing id",
+			json:     `{"title":"no id","state":"open"}`,
+			wantErr:  true,
 			errField: "milestone.id",
 		},
 		{
-			name:    "missing title with name only",
-			json:    `{"id":1,"name":"only name","state":"open"}`,
-			wantErr: true,
+			name:     "missing title with name only",
+			json:     `{"id":1,"name":"only name","state":"open"}`,
+			wantErr:  true,
 			errField: "milestone.title",
 		},
 	}

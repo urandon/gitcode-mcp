@@ -135,6 +135,11 @@ The MCP server exposes the same audited live-write lifecycle for agent workflows
 | `update_issue` | Update issue title, body, state, or labels |
 | `create_pr` | Create a pull request with title, body, head, and base |
 | `update_pr` | Update pull request title, body, or state |
+| `list_milestones` | List repository milestones and refresh cached milestone records |
+| `create_milestone` | Create a milestone; GitCode requires `due_on` |
+| `update_milestone` | Update milestone title, description, due date, or state |
+| `set_issue_milestone` | Assign a milestone to an issue and verify by readback |
+| `clear_issue_milestone` | Clear an issue milestone and verify by readback |
 | `add_pr_comment` | Add a testing/report comment to a pull request |
 | `add_pr_review_comment` | Create an inline pull request review comment on a changed file line or diff position |
 | `link_pr_issue` | Link a pull request to an issue through the GitCode relation API with fallback |

@@ -31,6 +31,10 @@ type (
 	UpdateIssueCommentRequest = gitcode.UpdateIssueCommentRequest
 	CreateWikiPageRequest     = gitcode.CreateWikiPageRequest
 	UpdateWikiPageRequest     = gitcode.UpdateWikiPageRequest
+	MilestoneListRequest      = gitcode.MilestoneListRequest
+	MilestoneRequest          = gitcode.MilestoneRequest
+	MilestoneWriteRequest     = gitcode.MilestoneWriteRequest
+	Milestone                 = gitcode.Milestone
 	SearchRequest             = gitcode.SearchRequest
 	RepoRequest               = gitcode.RepoRequest
 	Repo                      = gitcode.Repo

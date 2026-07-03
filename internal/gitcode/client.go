@@ -33,6 +33,8 @@ type Client interface {
 	RemoveLabel(context.Context, LabelRequest, WriteOptions) (WriteResult[Issue], error)
 	ListMilestones(context.Context, MilestoneListRequest) (Page[Milestone], error)
 	GetMilestone(context.Context, MilestoneRequest) (Milestone, error)
+	CreateMilestone(context.Context, MilestoneWriteRequest, WriteOptions) (WriteResult[Milestone], error)
+	UpdateMilestone(context.Context, MilestoneWriteRequest, WriteOptions) (WriteResult[Milestone], error)
 	GetRelease(context.Context, ReleaseRequest) (Release, error)
 	CreateRelease(context.Context, ReleaseWriteRequest, WriteOptions) (WriteResult[Release], error)
 	UpdateRelease(context.Context, ReleaseWriteRequest, WriteOptions) (WriteResult[Release], error)

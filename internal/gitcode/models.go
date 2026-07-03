@@ -154,6 +154,7 @@ type IssueSummary struct {
 	Status        string         `json:"status"`
 	State         string         `json:"state"`
 	Comments      int            `json:"comments"`
+	Milestone     *Milestone     `json:"milestone,omitempty"`
 	GitCodeLabels []GitCodeLabel `json:"labels"`
 	Labels        []string       `json:"-"`
 	CreatedAt     time.Time      `json:"created_at"`
@@ -169,6 +170,7 @@ func (i *IssueSummary) UnmarshalJSON(data []byte) error {
 		Status    string          `json:"status"`
 		State     string          `json:"state"`
 		Comments  any             `json:"comments"`
+		Milestone *Milestone      `json:"milestone"`
 		Labels    json.RawMessage `json:"labels"`
 		CreatedAt time.Time       `json:"created_at"`
 		UpdatedAt time.Time       `json:"updated_at"`
@@ -193,6 +195,7 @@ func (i *IssueSummary) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
+	i.Milestone = raw.Milestone
 	if len(raw.Labels) > 0 {
 		if isLabelObjectArray(raw.Labels) {
 			if err := json.Unmarshal(raw.Labels, &i.GitCodeLabels); err != nil {
@@ -223,6 +226,7 @@ type Issue struct {
 	Status        string         `json:"status"`
 	State         string         `json:"state"`
 	Comments      int            `json:"comments"`
+	Milestone     *Milestone     `json:"milestone,omitempty"`
 	GitCodeLabels []GitCodeLabel `json:"labels"`
 	Labels        []string       `json:"-"`
 	Author        string         `json:"author"`
@@ -239,6 +243,7 @@ func (i *Issue) UnmarshalJSON(data []byte) error {
 		Status    string          `json:"status"`
 		State     string          `json:"state"`
 		Comments  any             `json:"comments"`
+		Milestone *Milestone      `json:"milestone"`
 		Labels    json.RawMessage `json:"labels"`
 		Author    string          `json:"author"`
 		CreatedAt time.Time       `json:"created_at"`
@@ -264,6 +269,7 @@ func (i *Issue) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
+	i.Milestone = raw.Milestone
 	if len(raw.Labels) > 0 {
 		if isLabelObjectArray(raw.Labels) {
 			if err := json.Unmarshal(raw.Labels, &i.GitCodeLabels); err != nil {
@@ -755,13 +761,14 @@ type CreateIssueRequest struct {
 }
 
 type UpdateIssueRequest struct {
-	Owner  string          `json:"-"`
-	Repo   string          `json:"-"`
-	Number int             `json:"-"`
-	Title  string          `json:"title,omitempty"`
-	Body   string          `json:"body,omitempty"`
-	State  string          `json:"state,omitempty"`
-	Labels json.RawMessage `json:"labels,omitempty"`
+	Owner     string          `json:"-"`
+	Repo      string          `json:"-"`
+	Number    int             `json:"-"`
+	Title     string          `json:"title,omitempty"`
+	Body      string          `json:"body,omitempty"`
+	State     string          `json:"state,omitempty"`
+	Labels    json.RawMessage `json:"labels,omitempty"`
+	Milestone json.RawMessage `json:"milestone,omitempty"`
 }
 
 type CreateIssueCommentRequest struct {
@@ -850,6 +857,16 @@ type MilestoneRequest struct {
 	Owner string
 	Repo  string
 	ID    int
+}
+
+type MilestoneWriteRequest struct {
+	Owner       string
+	Repo        string
+	ID          int
+	Title       string
+	Description string
+	DueOn       string
+	State       string
 }
 
 type Milestone struct {

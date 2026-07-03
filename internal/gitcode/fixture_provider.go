@@ -255,6 +255,14 @@ func (p *fixtureProvider) GetMilestone(context.Context, MilestoneRequest) (Miles
 	return Milestone{}, FixtureReadOnlyError("GetMilestone")
 }
 
+func (p *fixtureProvider) CreateMilestone(context.Context, MilestoneWriteRequest, WriteOptions) (WriteResult[Milestone], error) {
+	return WriteResult[Milestone]{}, FixtureReadOnlyError("CreateMilestone")
+}
+
+func (p *fixtureProvider) UpdateMilestone(context.Context, MilestoneWriteRequest, WriteOptions) (WriteResult[Milestone], error) {
+	return WriteResult[Milestone]{}, FixtureReadOnlyError("UpdateMilestone")
+}
+
 func (p *fixtureProvider) GetRelease(context.Context, ReleaseRequest) (Release, error) {
 	return Release{}, FixtureReadOnlyError("GetRelease")
 }

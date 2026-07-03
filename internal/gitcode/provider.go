@@ -36,6 +36,8 @@ type Provider interface {
 	DeleteWikiPage(context.Context, DeleteWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
 	ListMilestones(context.Context, MilestoneListRequest) (Page[Milestone], error)
 	GetMilestone(context.Context, MilestoneRequest) (Milestone, error)
+	CreateMilestone(context.Context, MilestoneWriteRequest, WriteOptions) (WriteResult[Milestone], error)
+	UpdateMilestone(context.Context, MilestoneWriteRequest, WriteOptions) (WriteResult[Milestone], error)
 	GetRelease(context.Context, ReleaseRequest) (Release, error)
 	CreateRelease(context.Context, ReleaseWriteRequest, WriteOptions) (WriteResult[Release], error)
 	UpdateRelease(context.Context, ReleaseWriteRequest, WriteOptions) (WriteResult[Release], error)
@@ -313,6 +315,20 @@ func (p liveProvider) GetMilestone(ctx context.Context, req MilestoneRequest) (M
 	return p.HTTPClient.GetMilestone(ctx, req)
 }
 
+func (p liveProvider) CreateMilestone(ctx context.Context, req MilestoneWriteRequest, opts WriteOptions) (WriteResult[Milestone], error) {
+	if err := p.matrix.Preflight(ProductAreaMilestones); err != nil {
+		return WriteResult[Milestone]{}, err
+	}
+	return p.HTTPClient.CreateMilestone(ctx, req, opts)
+}
+
+func (p liveProvider) UpdateMilestone(ctx context.Context, req MilestoneWriteRequest, opts WriteOptions) (WriteResult[Milestone], error) {
+	if err := p.matrix.Preflight(ProductAreaMilestones); err != nil {
+		return WriteResult[Milestone]{}, err
+	}
+	return p.HTTPClient.UpdateMilestone(ctx, req, opts)
+}
+
 func (p liveProvider) AddLabel(ctx context.Context, req LabelRequest, opts WriteOptions) (WriteResult[Issue], error) {
 	return WriteResult[Issue]{}, ErrUnsupportedCapability{
 		CapabilityKey: "add_label",
@@ -418,6 +434,12 @@ func (p unavailableProvider) ListMilestones(context.Context, MilestoneListReques
 }
 func (p unavailableProvider) GetMilestone(context.Context, MilestoneRequest) (Milestone, error) {
 	return Milestone{}, p.err()
+}
+func (p unavailableProvider) CreateMilestone(context.Context, MilestoneWriteRequest, WriteOptions) (WriteResult[Milestone], error) {
+	return WriteResult[Milestone]{}, p.err()
+}
+func (p unavailableProvider) UpdateMilestone(context.Context, MilestoneWriteRequest, WriteOptions) (WriteResult[Milestone], error) {
+	return WriteResult[Milestone]{}, p.err()
 }
 func (p unavailableProvider) GetRelease(context.Context, ReleaseRequest) (Release, error) {
 	return Release{}, p.err()

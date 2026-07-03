@@ -817,6 +817,9 @@ type WriteCommandRequest struct {
 	Sha            string    `json:"sha,omitempty"`
 	Title          string    `json:"title,omitempty"`
 	Body           string    `json:"body,omitempty"`
+	Description    string    `json:"description,omitempty"`
+	DueOn          string    `json:"due_on,omitempty"`
+	Milestone      string    `json:"milestone,omitempty"`
 	Head           string    `json:"head,omitempty"`
 	Base           string    `json:"base,omitempty"`
 	State          string    `json:"state,omitempty"`
@@ -843,6 +846,36 @@ type WriteCommandResult struct {
 	Replayed          bool      `json:"replayed,omitempty"`
 	Evidence          string    `json:"evidence,omitempty"`
 	GeneratedAt       time.Time `json:"generated_at"`
+}
+
+type MilestoneRecord struct {
+	ID          string    `json:"id"`
+	RemoteID    string    `json:"remote_id"`
+	Title       string    `json:"title"`
+	Description string    `json:"description,omitempty"`
+	State       string    `json:"state"`
+	DueOn       string    `json:"due_on,omitempty"`
+	BrowserURL  string    `json:"browser_url,omitempty"`
+	CreatedAt   time.Time `json:"created_at,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+}
+
+type MilestoneListRequest struct {
+	RepoID  string `json:"repo_id,omitempty"`
+	Repo    string `json:"repo,omitempty"`
+	State   string `json:"state,omitempty"`
+	Page    int    `json:"page,omitempty"`
+	PerPage int    `json:"per_page,omitempty"`
+}
+
+type MilestoneListResult struct {
+	RepoID      string            `json:"repo_id"`
+	Milestones  []MilestoneRecord `json:"milestones"`
+	Page        int               `json:"page,omitempty"`
+	PerPage     int               `json:"per_page,omitempty"`
+	Count       int               `json:"count"`
+	Evidence    string            `json:"evidence,omitempty"`
+	GeneratedAt time.Time         `json:"generated_at"`
 }
 
 type PublishReleaseRequest struct {

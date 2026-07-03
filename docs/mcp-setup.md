@@ -236,6 +236,11 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 | `update_issue` | Update live issue metadata through the audited write lifecycle |
 | `create_pr` | Create a live pull request through the audited write lifecycle |
 | `update_pr` | Update live pull request metadata through the audited write lifecycle |
+| `list_milestones` | List live repository milestones and refresh cached milestone records |
+| `create_milestone` | Create a live milestone through the audited write lifecycle |
+| `update_milestone` | Update live milestone metadata through the audited write lifecycle |
+| `set_issue_milestone` | Assign a live issue milestone through the audited write lifecycle |
+| `clear_issue_milestone` | Clear a live issue milestone through the audited write lifecycle |
 | `add_pr_comment` | Add a live pull request comment through the audited write lifecycle |
 | `add_pr_review_comment` | Create a live inline pull request review comment through the audited write lifecycle |
 | `link_pr_issue` | Link a pull request to an issue through the GitCode relation API with fallback |
@@ -247,7 +252,7 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 | `auth_status` | Report redacted credential presence and source metadata |
 | `doctor` | Report structured server health diagnostics |
 
-MCP write tools require `write_mode: "live"` and use the same service write path as CLI live writes: idempotency keys, provider confirmation, audit records, cache refresh, typed errors, and public-safe diagnostics. `create_issue` requires `title` and accepts `body`, `labels`, and `idempotency_key`. `add_pr_review_comment` requires `number`, `body`, `path`, and either `line` or `position`; optional `start_line` and `end_line` are forwarded when supplied. `link_pr_issue` defaults to `strategy: "auto"`, which first calls the GitCode PR issue relation endpoint. If that endpoint is unsupported, it falls back to a deterministic PR-body marker plus `Fixes #N`. Use `strategy: "description_fallback"` to force the fallback behavior.
+MCP write tools require `write_mode: "live"` and use the same service write path as CLI live writes: idempotency keys, provider confirmation, audit records, cache refresh, typed errors, and public-safe diagnostics. `list_milestones` is read-only and does not require `write_mode`; it refreshes cached milestone records from the live list response. `create_issue` requires `title` and accepts `body`, `labels`, and `idempotency_key`. `create_milestone` requires `title` and `due_on` because GitCode rejects milestone creation without a due date. `set_issue_milestone` and `clear_issue_milestone` verify success with issue readback because GitCode can return `milestone: null` in the immediate issue PATCH response even when assignment succeeds. `add_pr_review_comment` requires `number`, `body`, `path`, and either `line` or `position`; optional `start_line` and `end_line` are forwarded when supplied. `link_pr_issue` defaults to `strategy: "auto"`, which first calls the GitCode PR issue relation endpoint. If that endpoint is unsupported, it falls back to a deterministic PR-body marker plus `Fixes #N`. Use `strategy: "description_fallback"` to force the fallback behavior.
 
 Some CLI operations are intentionally not exposed through normal MCP write access. Credential management, raw escape hatches, destructive local cache maintenance, cache resets, and schema migrations must remain CLI-only unless a future capability registry entry documents a stricter MCP confirmation and safety contract.
 

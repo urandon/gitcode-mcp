@@ -1004,7 +1004,7 @@ func TestMCPWriteCapabilitiesComeFromRegistry(t *testing.T) {
 		if _, ok := registry[cap.MCPName]; !ok {
 			t.Fatalf("MCP registry missing enabled write capability %s (%s)", cap.ID, cap.MCPName)
 		}
-		if !writeToolNames[cap.MCPName] {
+		if cap.Safety != capability.SafetyReadOnly && !writeToolNames[cap.MCPName] {
 			t.Fatalf("writeToolNames missing enabled write capability %s (%s)", cap.ID, cap.MCPName)
 		}
 	}

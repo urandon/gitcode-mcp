@@ -69,7 +69,7 @@ Bulk sync treats issues, wiki pages, pull requests, and pull request comments as
 
 The command context carries the configured `default_timeout`, including the `--timeout` override, so large collection syncs have a whole-operation deadline in addition to provider-level request timeouts. When the deadline or caller cancellation fires, completed resource commits remain visible in cache and the sync response reports partial counts plus a typed diagnostic such as `sync_timeout` or `sync_cancelled`.
 
-Labels and milestones are not yet exposed as bulk sync service surfaces. When those collection surfaces are added, they should use the same `SyncBounds` and partial-result contract.
+Labels and milestones are not yet exposed as bulk sync service surfaces. The `milestones` CLI command and `list_milestones` MCP tool perform a live list read and refresh cached milestone records, but they do not yet maintain collection frontiers. When milestone bulk sync is added, it should use the same `SyncBounds` and partial-result contract.
 
 Bulk collection responses also expose traversal metadata when available:
 

@@ -120,6 +120,61 @@ var writeCapabilities = []Capability{
 		MCP:            enabled(),
 	},
 	{
+		ID:             "list_milestones",
+		Category:       CategoryWrite,
+		Safety:         SafetyReadOnly,
+		CLIName:        "milestones",
+		MCPName:        "list_milestones",
+		ServiceCommand: "milestones",
+		Description:    "List live repository milestones and refresh cached milestone records.",
+		CLI:            enabled(),
+		MCP:            enabled(),
+	},
+	{
+		ID:             "create_milestone",
+		Category:       CategoryWrite,
+		Safety:         SafetyAuditedWrite,
+		CLIName:        "create-milestone",
+		MCPName:        "create_milestone",
+		ServiceCommand: "create-milestone",
+		Description:    "Create a live milestone through the audited write lifecycle.",
+		CLI:            enabled(),
+		MCP:            enabled(),
+	},
+	{
+		ID:             "update_milestone",
+		Category:       CategoryWrite,
+		Safety:         SafetyAuditedWrite,
+		CLIName:        "update-milestone",
+		MCPName:        "update_milestone",
+		ServiceCommand: "update-milestone",
+		Description:    "Update live milestone metadata through the audited write lifecycle.",
+		CLI:            enabled(),
+		MCP:            enabled(),
+	},
+	{
+		ID:             "set_issue_milestone",
+		Category:       CategoryWrite,
+		Safety:         SafetyAuditedWrite,
+		CLIName:        "set-issue-milestone",
+		MCPName:        "set_issue_milestone",
+		ServiceCommand: "set-issue-milestone",
+		Description:    "Assign a live issue milestone through the audited write lifecycle.",
+		CLI:            enabled(),
+		MCP:            enabled(),
+	},
+	{
+		ID:             "clear_issue_milestone",
+		Category:       CategoryWrite,
+		Safety:         SafetyAuditedWrite,
+		CLIName:        "clear-issue-milestone",
+		MCPName:        "clear_issue_milestone",
+		ServiceCommand: "clear-issue-milestone",
+		Description:    "Clear a live issue milestone through the audited write lifecycle.",
+		CLI:            enabled(),
+		MCP:            enabled(),
+	},
+	{
 		ID:             "add_pr_comment",
 		Category:       CategoryWrite,
 		Safety:         SafetyAuditedWrite,
@@ -337,6 +392,9 @@ func MCPRAGCapabilities() []Capability {
 func MCPWriteToolNames() map[string]bool {
 	names := map[string]bool{}
 	for _, cap := range MCPWriteCapabilities() {
+		if cap.Safety == SafetyReadOnly {
+			continue
+		}
 		names[cap.MCPName] = true
 	}
 	return names

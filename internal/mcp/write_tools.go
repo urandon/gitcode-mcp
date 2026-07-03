@@ -28,9 +28,13 @@ type writeToolArgs struct {
 	Position       int      `json:"position,omitempty"`
 	Title          string   `json:"title,omitempty"`
 	Body           string   `json:"body,omitempty"`
+	Description    string   `json:"description,omitempty"`
+	DueOn          string   `json:"due_on,omitempty"`
+	Milestone      string   `json:"milestone,omitempty"`
 	Head           string   `json:"head,omitempty"`
 	Base           string   `json:"base,omitempty"`
 	State          string   `json:"state,omitempty"`
+	PerPage        int      `json:"per_page,omitempty"`
 	Label          string   `json:"label,omitempty"`
 	Labels         []string `json:"labels,omitempty"`
 	Strategy       string   `json:"strategy,omitempty"`
@@ -58,6 +62,16 @@ func writeToolInputSchema(id string) inputSchema {
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"title": {Type: "string", Description: "Pull request title.", MinLength: 1}, "body": {Type: "string", Description: "Pull request body."}, "head": {Type: "string", Description: "Source branch.", MinLength: 1}, "base": {Type: "string", Description: "Target branch.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "title", "head", "base"}}
 	case "update_pr":
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "title": {Type: "string", Description: "Pull request title."}, "body": {Type: "string", Description: "Pull request body."}, "state": {Type: "string", Description: "Pull request state."}}), Required: []string{"repo_id", "write_mode", "number"}}
+	case "list_milestones":
+		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"state": {Type: "string", Description: "Milestone state filter.", Enum: []string{"open", "closed"}}, "per_page": {Type: "integer", Description: "Records per page.", Minimum: float64Ptr(1), Maximum: float64Ptr(100)}}), Required: []string{"repo_id"}}
+	case "create_milestone":
+		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"title": {Type: "string", Description: "Milestone title.", MinLength: 1}, "description": {Type: "string", Description: "Milestone description."}, "due_on": {Type: "string", Description: "Due date YYYY-MM-DD.", MinLength: 1}, "state": {Type: "string", Description: "Milestone state.", Enum: []string{"open", "closed"}}}), Required: []string{"repo_id", "write_mode", "title", "due_on"}}
+	case "update_milestone":
+		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"milestone": {Type: "string", Description: "Milestone id or exact title.", MinLength: 1}, "title": {Type: "string", Description: "Updated milestone title."}, "description": {Type: "string", Description: "Updated milestone description."}, "due_on": {Type: "string", Description: "Updated due date YYYY-MM-DD."}, "state": {Type: "string", Description: "Updated milestone state.", Enum: []string{"open", "closed"}}}), Required: []string{"repo_id", "write_mode", "milestone"}}
+	case "set_issue_milestone":
+		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "milestone": {Type: "string", Description: "Milestone id or exact title.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "number", "milestone"}}
+	case "clear_issue_milestone":
+		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}}), Required: []string{"repo_id", "write_mode", "number"}}
 	case "add_pr_comment":
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Comment body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "number", "body"}}
 	case "add_pr_review_comment":
@@ -91,6 +105,16 @@ func (s *Server) writeToolHandler(cap capability.Capability) toolHandler {
 		return s.callCreatePR
 	case "update_pr":
 		return s.callUpdatePR
+	case "list_milestones":
+		return s.callListMilestones
+	case "create_milestone":
+		return s.callCreateMilestone
+	case "update_milestone":
+		return s.callUpdateMilestone
+	case "set_issue_milestone":
+		return s.callSetIssueMilestone
+	case "clear_issue_milestone":
+		return s.callClearIssueMilestone
 	case "add_pr_comment":
 		return s.callAddPRComment
 	case "add_pr_review_comment":
@@ -171,6 +195,64 @@ func (s *Server) callUpdatePR(ctx context.Context, id *json.RawMessage, args jso
 		req.Title = a.Title
 		req.Body = a.Body
 		req.State = a.State
+		return req
+	})
+}
+
+func (s *Server) callListMilestones(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a writeToolArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if strings.TrimSpace(a.RepoID) == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+		return
+	}
+	result, err := s.svc.ListMilestones(ctx, service.MilestoneListRequest{RepoID: a.RepoID, Repo: a.RepoID, State: a.State, PerPage: a.PerPage})
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: fmt.Sprintf("repo_id=%s milestones=%d", result.RepoID, result.Count)}}, StructuredContent: result})
+}
+
+func (s *Server) callCreateMilestone(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	s.callWriteTool(ctx, id, args, s.svc.CreateMilestone, func(a writeToolArgs) service.WriteCommandRequest {
+		req := writeRequestFromArgs(a)
+		req.Title = a.Title
+		req.Description = a.Description
+		req.DueOn = a.DueOn
+		req.State = a.State
+		return req
+	})
+}
+
+func (s *Server) callUpdateMilestone(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	s.callWriteTool(ctx, id, args, s.svc.UpdateMilestone, func(a writeToolArgs) service.WriteCommandRequest {
+		req := writeRequestFromArgs(a)
+		req.Milestone = a.Milestone
+		req.Title = a.Title
+		req.Description = a.Description
+		req.DueOn = a.DueOn
+		req.State = a.State
+		return req
+	})
+}
+
+func (s *Server) callSetIssueMilestone(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	s.callWriteTool(ctx, id, args, s.svc.SetIssueMilestone, func(a writeToolArgs) service.WriteCommandRequest {
+		req := writeRequestFromArgs(a)
+		req.Number = a.Number
+		req.Milestone = a.Milestone
+		return req
+	})
+}
+
+func (s *Server) callClearIssueMilestone(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	s.callWriteTool(ctx, id, args, s.svc.ClearIssueMilestone, func(a writeToolArgs) service.WriteCommandRequest {
+		req := writeRequestFromArgs(a)
+		req.Number = a.Number
 		return req
 	})
 }
