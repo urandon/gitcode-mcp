@@ -63,7 +63,7 @@ Both lifecycles record idempotency, provider confirmation, audit rows, and cache
 Sync pull requests and their comments before asking for review discussion state:
 
 ```sh
-gitcode-mcp sync --repo YOUR_REPO --pulls --comments
+gitcode-mcp sync --repo YOUR_REPO --pulls --pr-comments
 ```
 
 Then list cached review discussions:

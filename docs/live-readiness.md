@@ -64,7 +64,7 @@ Run live sync:
 gitcode-mcp sync --repo "YOUR_REPO" --issues --wiki --index
 ```
 
-`sync --help` documents `--offline` and `--fixture` as explicit fixture selectors, and `--live` as a compatibility alias, plus `--repo`, `--issues`, `--wiki`, `--pulls`, `--comments`, `--index`, `--id`, `--input`, `--idempotency-key`, `--max-pages`, `--max-records`, `--per-page`, `--details`, `--records`, `--cache-path`, and `--format`.
+`sync --help` documents `--offline` and `--fixture` as explicit fixture selectors, and `--live` as a compatibility alias, plus `--repo`, `--issues`, `--wiki`, `--pulls`, `--issue-comments`, `--pr-comments`, `--comments`, `--index`, `--id`, `--input`, `--idempotency-key`, `--max-pages`, `--max-records`, `--per-page`, `--details`, `--records`, `--cache-path`, and `--format`.
 
 Live sync fetches issue records, comments, and wiki pages through the live GitCode provider. Fetches are page/resource scoped; successful records are committed to cache, failures are collected and reported, and re-sync should report deltas rather than duplicate records. Issue collection sync uses list-level issue revisions before comment-list fetches, so an unchanged issue can report `skipped_by_revision` and avoid listing comments again. Wiki collection sync uses list-level page revisions before body fetches, so an unchanged page can report `skipped_by_revision` and avoid a full page-body request. Auth failures and rate limits are reported as diagnostics instead of raw API payloads.
 

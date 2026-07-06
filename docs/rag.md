@@ -131,7 +131,7 @@ Populate cache data first:
 
 ```sh
 gitcode-mcp repo add --repo YOUR_OWNER/YOUR_REPO --owner YOUR_OWNER --name YOUR_REPO --scopes issues,wiki,pulls
-gitcode-mcp sync --repo YOUR_OWNER/YOUR_REPO --issues --wiki --pulls --comments
+gitcode-mcp sync --repo YOUR_OWNER/YOUR_REPO --issues --wiki --pulls --pr-comments
 ```
 
 Start indexing through the daemon:

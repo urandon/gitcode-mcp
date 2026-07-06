@@ -165,6 +165,8 @@ type options struct {
 	wiki           bool
 	pulls          bool
 	comments       bool
+	issueComments  bool
+	prComments     bool
 	syncIndex      bool
 	maxPages       int
 	maxRecords     int
@@ -418,7 +420,7 @@ func liveRequestedScope(command string, opts options) service.RepositoryScope {
 	case "create-page", "update-page", "delete-page":
 		return service.RepositoryScopeWiki
 	case "sync":
-		if opts.wiki && !opts.issues && !opts.pulls && !opts.comments {
+		if opts.wiki && !opts.issues && !opts.pulls && !opts.comments && !opts.issueComments && !opts.prComments {
 			return service.RepositoryScopeWiki
 		}
 	}
@@ -519,6 +521,8 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.BoolVar(&opts.wiki, "wiki", false, "sync wiki")
 	flags.BoolVar(&opts.pulls, "pulls", false, "sync pull requests")
 	flags.BoolVar(&opts.comments, "comments", false, "sync supported comments")
+	flags.BoolVar(&opts.issueComments, "issue-comments", false, "sync issue records and issue comments")
+	flags.BoolVar(&opts.prComments, "pr-comments", false, "sync pull request comments")
 	flags.BoolVar(&opts.syncIndex, "index", false, "build index during sync")
 	flags.IntVar(&opts.maxPages, "max-pages", 0, "maximum pages to sync")
 	flags.IntVar(&opts.maxRecords, "max-records", 0, "maximum records to sync")
@@ -608,7 +612,7 @@ func reorderFlags(args []string) []string {
 		arg := args[i]
 		if strings.HasPrefix(arg, "--") {
 			flags = append(flags, arg)
-			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--index" || arg == "--quiet" || arg == "--dry-run" || arg == "--live" || arg == "--offline" || arg == "--fixture" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" || arg == "--yes" || arg == "--detach" {
+			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--issue-comments" || arg == "--pr-comments" || arg == "--index" || arg == "--quiet" || arg == "--dry-run" || arg == "--live" || arg == "--offline" || arg == "--fixture" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" || arg == "--yes" || arg == "--detach" {
 				continue
 			}
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
@@ -1626,7 +1630,17 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		}
 		return render(stdout, opts.format, result, renderPRDiscussionsText)
 	case "sync":
-		if opts.issues || opts.wiki || opts.pulls || opts.comments || (opts.id == "" && opts.input == "") {
+		if err := validateSyncCommentSurface(opts); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		if syncSingleRecordRequested(opts) {
+			result, err := svc.SyncToCache(ctx, service.SyncRequest{RepoID: opts.repo, StableID: opts.id, RemoteAlias: opts.input, IdempotencyKey: opts.idempotencyKey})
+			if err != nil {
+				return writeError(stderr, opts.format, err)
+			}
+			return render(stdout, opts.format, result, renderSyncText)
+		}
+		if opts.issues || opts.wiki || opts.pulls || opts.comments || opts.issueComments || opts.prComments || (opts.id == "" && opts.input == "") {
 			req := bulkSyncRequest(opts)
 			started := time.Now().UTC()
 			progressCh, stopProgress := startSyncProgress(stderr, started, syncProgressMode(opts, stderr))
@@ -1637,7 +1651,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			defer stopProgress()
 			var result *service.SyncResourcesResult
 			var syncErr error
-			if !opts.issues && !opts.wiki && !opts.pulls && !opts.comments {
+			if !opts.issues && !opts.wiki && !opts.pulls && !opts.comments && !opts.issueComments && !opts.prComments {
 				result, syncErr = svc.BulkSyncAll(ctx, req)
 				stopProgress()
 				return renderSyncResources(stdout, stderr, opts.format, opts.details, result, syncErr, plan, started)
@@ -1650,7 +1664,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 					syncErr = mergeSyncError(syncErr, aggregate, err)
 				}
 			}
-			if opts.issues {
+			if opts.issues || opts.issueComments {
 				runBulk(svc.BulkSyncIssues)
 			}
 			if opts.wiki {
@@ -1659,7 +1673,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			if opts.pulls {
 				runBulk(svc.BulkSyncPullRequests)
 			}
-			if opts.comments {
+			if opts.comments || opts.prComments {
 				runBulk(svc.BulkSyncPRComments)
 			}
 			result = aggregate
@@ -1670,11 +1684,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			stopProgress()
 			return renderSyncResources(stdout, stderr, opts.format, opts.details, result, syncErr, plan, started)
 		}
-		result, err := svc.SyncToCache(ctx, service.SyncRequest{RepoID: opts.repo, StableID: opts.id, RemoteAlias: opts.input, IdempotencyKey: opts.idempotencyKey})
-		if err != nil {
-			return writeError(stderr, opts.format, err)
-		}
-		return render(stdout, opts.format, result, renderSyncText)
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "sync target", Message: "stable id or remote alias is required"})
 	case "cache":
 		sub, ok := firstArg(args)
 		if !ok {
@@ -1862,6 +1872,65 @@ func bulkSyncRequest(opts options) service.BulkSyncRequest {
 		perPage = 100
 	}
 	return service.BulkSyncRequest{RepoID: opts.repo, IdempotencyKey: opts.idempotencyKey, PerPage: perPage, Bounds: &service.SyncBounds{MaxPages: opts.maxPages, MaxRecords: opts.maxRecords}}
+}
+
+func syncSingleRecordRequested(opts options) bool {
+	if opts.id == "" && opts.input == "" {
+		return false
+	}
+	if opts.input != "" && !opts.issues && !opts.wiki && !opts.pulls && !opts.prComments {
+		if !syncCommentSelectorUsed(opts) {
+			return true
+		}
+		return syncRemoteAliasSurface(opts.input) == "issue"
+	}
+	return !opts.issues && !opts.wiki && !opts.pulls && !syncCommentSelectorUsed(opts)
+}
+
+func validateSyncCommentSurface(opts options) error {
+	if !syncCommentSelectorUsed(opts) {
+		return nil
+	}
+	if opts.id != "" {
+		return service.ErrInvalidQuery{Field: "comments", Message: "comment sync with --id is ambiguous; use --input issue:N for issue comments or --pr-comments without --id for pull request comments"}
+	}
+	if opts.input == "" {
+		return nil
+	}
+	if opts.issues || opts.wiki || opts.pulls {
+		return service.ErrInvalidQuery{Field: "comments", Message: "comment sync with --input cannot be combined with collection selectors; use --input issue:N alone or run a collection sync without --input"}
+	}
+	surface := syncRemoteAliasSurface(opts.input)
+	switch surface {
+	case "issue":
+		if opts.prComments {
+			return service.ErrInvalidQuery{Field: "comments", Message: "--pr-comments cannot target issue aliases; use --issue-comments or --comments with issue:N"}
+		}
+		return nil
+	case "pull_request":
+		return service.ErrInvalidQuery{Field: "comments", Message: "targeted pull request comment sync is not supported; sync pull requests first, then run --pr-comments without --input"}
+	default:
+		return service.ErrInvalidQuery{Field: "comments", Message: "comment sync with --input supports issue:N only; use --pr-comments without --input for pull request comments"}
+	}
+}
+
+func syncCommentSelectorUsed(opts options) bool {
+	return opts.comments || opts.issueComments || opts.prComments
+}
+
+func syncRemoteAliasSurface(alias string) string {
+	remoteType, _, ok := strings.Cut(strings.TrimSpace(alias), ":")
+	if !ok {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(remoteType)) {
+	case "issue", "issues":
+		return "issue"
+	case "pull_request", "pull", "pulls", "pr":
+		return "pull_request"
+	default:
+		return ""
+	}
 }
 
 func syncProgressMode(opts options, w io.Writer) string {
@@ -3503,7 +3572,7 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH cache database path")
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
 	case "sync":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s [--offline|--fixture] --repo REPO [--issues] [--wiki] [--pulls] [--comments] [--index] [--details] [--id ID] [--input REMOTE_ALIAS] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s [--offline|--fixture] --repo REPO [--issues] [--wiki] [--pulls] [--issue-comments|--pr-comments|--comments] [--index] [--details] [--id ID] [--input REMOTE_ALIAS] [--idempotency-key KEY]\n\n", command)
 		fmt.Fprintln(w, "Synchronize cached records. Uses live GitCode by default; use --offline/--fixture for deterministic fixture sync.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --live              compatibility alias for live provider selection")
@@ -3513,7 +3582,9 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --issues            sync issue records")
 		fmt.Fprintln(w, "  --wiki              sync wiki records")
 		fmt.Fprintln(w, "  --pulls             sync pull request records")
-		fmt.Fprintln(w, "  --comments          sync pull request comments")
+		fmt.Fprintln(w, "  --issue-comments    sync issue records and issue comments")
+		fmt.Fprintln(w, "  --pr-comments       sync pull request comments")
+		fmt.Fprintln(w, "  --comments          compatibility alias for --pr-comments; with --input issue:N, sync issue comments")
 		fmt.Fprintln(w, "  --index             build index after sync")
 		fmt.Fprintln(w, "  --max-pages N       maximum pages to sync; omit to traverse until end/frontier")
 		fmt.Fprintln(w, "  --max-records N     maximum records to sync; omit to traverse until end/frontier")
