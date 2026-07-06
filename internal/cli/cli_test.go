@@ -1035,6 +1035,60 @@ func TestSyncJSONDefaultsToCompactSummaryAndDetailsRestoresRecords(t *testing.T)
 	}
 }
 
+func TestSyncCommentSurfaceRouting(t *testing.T) {
+	run := func(args []string) (*spyService, int, string) {
+		t.Helper()
+		spy := &spyService{}
+		factory := func(context.Context, string) (queryService, func() error, error) {
+			return spy, nil, nil
+		}
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		code := executeWithFactory(args, &stdout, &stderr, factory)
+		return spy, code, stderr.String()
+	}
+
+	spy, code, stderr := run([]string{"sync", "--offline", "--repo", "fixture-a", "--comments", "--input", "issue:42"})
+	if code != 0 {
+		t.Fatalf("legacy issue comments sync code=%d stderr=%q", code, stderr)
+	}
+	if spy.calls["SyncToCache"] != 1 || spy.calls["BulkSyncPRComments"] != 0 {
+		t.Fatalf("legacy issue comments calls=%+v, want SyncToCache only", spy.calls)
+	}
+
+	spy, code, stderr = run([]string{"sync", "--offline", "--repo", "fixture-a", "--issue-comments", "--input", "issue:42"})
+	if code != 0 {
+		t.Fatalf("issue comments sync code=%d stderr=%q", code, stderr)
+	}
+	if spy.calls["SyncToCache"] != 1 || spy.calls["BulkSyncPRComments"] != 0 {
+		t.Fatalf("issue comments calls=%+v, want SyncToCache only", spy.calls)
+	}
+
+	spy, code, stderr = run([]string{"sync", "--offline", "--repo", "fixture-a", "--pr-comments"})
+	if code != 0 {
+		t.Fatalf("pr comments sync code=%d stderr=%q", code, stderr)
+	}
+	if spy.calls["BulkSyncPRComments"] != 1 || spy.calls["SyncToCache"] != 0 {
+		t.Fatalf("pr comments calls=%+v, want BulkSyncPRComments only", spy.calls)
+	}
+
+	spy, code, stderr = run([]string{"sync", "--offline", "--repo", "fixture-a", "--pr-comments", "--input", "issue:42"})
+	if code != 4 || !strings.Contains(stderr, "--pr-comments cannot target issue aliases") {
+		t.Fatalf("invalid pr comments target code=%d stderr=%q", code, stderr)
+	}
+	if len(spy.calls) != 0 {
+		t.Fatalf("invalid pr comments target called service: %+v", spy.calls)
+	}
+
+	spy, code, stderr = run([]string{"sync", "--offline", "--repo", "fixture-a", "--comments", "--input", "pr:7"})
+	if code != 4 || !strings.Contains(stderr, "targeted pull request comment sync is not supported") {
+		t.Fatalf("targeted pr comments code=%d stderr=%q", code, stderr)
+	}
+	if len(spy.calls) != 0 {
+		t.Fatalf("targeted pr comments called service: %+v", spy.calls)
+	}
+}
+
 func TestSyncProgressModes(t *testing.T) {
 	t.Run("off suppresses progress", func(t *testing.T) {
 		var stdout bytes.Buffer

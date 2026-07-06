@@ -62,6 +62,8 @@ type syncLiveArgs struct {
 	Issues         bool   `json:"issues,omitempty"`
 	Wiki           bool   `json:"wiki,omitempty"`
 	Comments       bool   `json:"comments,omitempty"`
+	IssueComments  bool   `json:"issue_comments,omitempty"`
+	PRComments     bool   `json:"pr_comments,omitempty"`
 	Pulls          bool   `json:"pulls,omitempty"`
 	RemoteAlias    string `json:"remote_alias,omitempty"`
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
@@ -94,6 +96,10 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 	}
 	if a.MaxPages < 0 || a.MaxRecords < 0 || a.PerPage < 0 {
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "bounds must be non-negative"})
+		return
+	}
+	if message := syncLiveCommentSurfaceError(a); message != "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: message})
 		return
 	}
 	selected := syncLiveCollections(a)
@@ -149,10 +155,10 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 		}
 	}
 	switch {
-	case a.Issues && a.Wiki && !a.Pulls && !a.Comments:
+	case a.Issues && a.Wiki && !a.Pulls && !a.Comments && !a.IssueComments && !a.PRComments:
 		runBulk("all", s.svc.BulkSyncAll)
 	default:
-		if a.Issues || len(syncLiveCollections(a)) == 0 {
+		if a.Issues || a.IssueComments || len(syncLiveCollections(a)) == 0 {
 			runBulk("issues", s.svc.BulkSyncIssues)
 		}
 		if a.Wiki || len(syncLiveCollections(a)) == 0 {
@@ -161,11 +167,11 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 		if a.Pulls {
 			runBulk("pulls", s.svc.BulkSyncPullRequests)
 		}
-		if a.Comments {
+		if a.Comments || a.PRComments {
 			if a.Issues && !a.Pulls {
-				result.Diagnostics = append(result.Diagnostics, lifecycleDiagnostic{Code: "unsupported_comments_parent", Message: "sync_live comments currently syncs pull request comments only", Remediation: "sync pull requests first, then call sync_live with comments=true"})
+				result.Diagnostics = append(result.Diagnostics, lifecycleDiagnostic{Code: "legacy_comments_parent", Message: "sync_live comments is a compatibility pull request comments selector", Remediation: "use issue_comments=true for issue comments or pr_comments=true for pull request comments"})
 			}
-			runBulk("comments", s.svc.BulkSyncPRComments)
+			runBulk("pr_comments", s.svc.BulkSyncPRComments)
 		}
 	}
 	if syncErr != nil {
@@ -235,6 +241,12 @@ func syncLiveCollections(a syncLiveArgs) []string {
 	if a.Wiki {
 		selected = append(selected, "wiki")
 	}
+	if a.IssueComments {
+		selected = append(selected, "issue_comments")
+	}
+	if a.PRComments {
+		selected = append(selected, "pr_comments")
+	}
 	if a.Comments {
 		selected = append(selected, "comments")
 	}
@@ -242,6 +254,41 @@ func syncLiveCollections(a syncLiveArgs) []string {
 		selected = append(selected, "pulls")
 	}
 	return selected
+}
+
+func syncLiveCommentSurfaceError(a syncLiveArgs) string {
+	if strings.TrimSpace(a.RemoteAlias) == "" || !(a.Comments || a.IssueComments || a.PRComments) {
+		return ""
+	}
+	if a.Issues || a.Wiki || a.Pulls {
+		return "comment sync with remote_alias cannot be combined with collection selectors; use remote_alias issue:N alone or run a collection sync without remote_alias"
+	}
+	switch syncLiveRemoteAliasSurface(a.RemoteAlias) {
+	case "issue":
+		if a.PRComments {
+			return "pr_comments cannot target issue aliases; use issue_comments=true or comments=true with issue:N"
+		}
+		return ""
+	case "pull_request":
+		return "targeted pull request comment sync is not supported; sync pull requests first, then call sync_live with pr_comments=true and no remote_alias"
+	default:
+		return "comment sync with remote_alias supports issue:N only; use pr_comments=true without remote_alias for pull request comments"
+	}
+}
+
+func syncLiveRemoteAliasSurface(alias string) string {
+	remoteType, _, ok := strings.Cut(strings.TrimSpace(alias), ":")
+	if !ok {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(remoteType)) {
+	case "issue", "issues":
+		return "issue"
+	case "pull_request", "pull", "pulls", "pr":
+		return "pull_request"
+	default:
+		return ""
+	}
 }
 
 func lifecycleProviderMode(svc serviceInterface) (gitcode.ProviderMode, bool) {

@@ -23,7 +23,7 @@ The project is self-contained and public-safe. Source repositories, trackers, an
 go test ./...
 go run ./cmd/gitcode-mcp --help
 go run ./cmd/gitcode-mcp repo add --repo YOUR_OWNER/YOUR_REPO --owner YOUR_OWNER --name YOUR_REPO --scopes issues,wiki
-go run ./cmd/gitcode-mcp sync --repo YOUR_OWNER/YOUR_REPO --issues --wiki --pulls --comments
+go run ./cmd/gitcode-mcp sync --repo YOUR_OWNER/YOUR_REPO --issues --wiki --pulls --pr-comments
 go run ./cmd/gitcode-mcp search --repo YOUR_OWNER/YOUR_REPO "cache-first"
 ```
 

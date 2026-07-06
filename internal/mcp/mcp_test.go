@@ -1480,7 +1480,9 @@ func TestMCPListPRDiscussionsDelegatesToService(t *testing.T) {
 
 type syncLiveBoundsSpyService struct {
 	serviceInterface
-	bulkIssuesCalls []service.BulkSyncRequest
+	bulkIssuesCalls     []service.BulkSyncRequest
+	bulkPRCommentsCalls []service.BulkSyncRequest
+	syncRequests        []service.SyncRequest
 }
 
 func (s *syncLiveBoundsSpyService) ProviderMode() gitcode.ProviderMode {
@@ -1496,6 +1498,16 @@ func (s *syncLiveBoundsSpyService) BulkSyncIssues(ctx context.Context, req servi
 		FailureCount: 0,
 	}
 	return result, &service.PartialSyncError{Diagnostic: service.SyncDiagnosticTimeout, TotalRequested: 7}
+}
+
+func (s *syncLiveBoundsSpyService) BulkSyncPRComments(ctx context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
+	s.bulkPRCommentsCalls = append(s.bulkPRCommentsCalls, req)
+	return &service.SyncResourcesResult{Results: []service.SyncResult{{Status: "succeeded"}}, SuccessCount: 1}, nil
+}
+
+func (s *syncLiveBoundsSpyService) SyncToCache(ctx context.Context, req service.SyncRequest) (service.SyncResult, error) {
+	s.syncRequests = append(s.syncRequests, req)
+	return service.SyncResult{Status: "succeeded"}, nil
 }
 
 func TestMCPSyncLivePropagatesBoundsAndDiagnostics(t *testing.T) {
@@ -1541,6 +1553,56 @@ func TestMCPSyncLivePropagatesBoundsAndDiagnostics(t *testing.T) {
 	}
 	if !containsLifecycleDiagnostic(result.Diagnostics, string(service.SyncDiagnosticTimeout)) {
 		t.Fatalf("diagnostics = %+v, want sync_timeout", result.Diagnostics)
+	}
+
+	_ = r.Close()
+	wg.Wait()
+}
+
+func TestMCPSyncLiveCommentSurfaceRouting(t *testing.T) {
+	spy := &syncLiveBoundsSpyService{}
+	srv, r, w, stderr := newPipeServerWithToolAccess(spy, ToolAccessWrite)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); _ = srv.Serve() }()
+
+	call := func(id, name string, args map[string]any) response {
+		t.Helper()
+		b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": map[string]any{"name": name, "arguments": args}})
+		_, _ = r.Write(append(b, '\n'))
+		line, err := readLine(w)
+		if err != nil {
+			t.Fatalf("read %s response: %v (stderr: %s)", name, err, stderr.String())
+		}
+		var resp response
+		if err := json.Unmarshal(line, &resp); err != nil {
+			t.Fatalf("decode %s response: %v\n%s", name, err, string(line))
+		}
+		return resp
+	}
+
+	issueResp := call("issue-comments", "sync_live", map[string]any{"repo_id": "fixture-a", "comments": true, "remote_alias": "issue:42"})
+	if issueResp.Error != nil {
+		t.Fatalf("issue comments response error=%+v", issueResp.Error)
+	}
+	if len(spy.syncRequests) != 1 || spy.syncRequests[0].RemoteAlias != "issue:42" || len(spy.bulkPRCommentsCalls) != 0 {
+		t.Fatalf("issue comments routing syncRequests=%+v prCalls=%+v", spy.syncRequests, spy.bulkPRCommentsCalls)
+	}
+
+	prResp := call("pr-comments", "sync_live", map[string]any{"repo_id": "fixture-a", "pr_comments": true})
+	if prResp.Error != nil {
+		t.Fatalf("pr comments response error=%+v", prResp.Error)
+	}
+	if len(spy.bulkPRCommentsCalls) != 1 {
+		t.Fatalf("pr comments calls=%d, want 1", len(spy.bulkPRCommentsCalls))
+	}
+
+	invalidResp := call("invalid-pr-comments", "sync_live", map[string]any{"repo_id": "fixture-a", "pr_comments": true, "remote_alias": "issue:42"})
+	if invalidResp.Error == nil || !strings.Contains(invalidResp.Error.Data.Message, "pr_comments cannot target issue aliases") {
+		t.Fatalf("invalid response=%+v", invalidResp.Error)
+	}
+	if len(spy.syncRequests) != 1 || len(spy.bulkPRCommentsCalls) != 1 {
+		t.Fatalf("invalid request called service: sync=%+v pr=%+v", spy.syncRequests, spy.bulkPRCommentsCalls)
 	}
 
 	_ = r.Close()
