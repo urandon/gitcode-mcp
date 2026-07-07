@@ -55,6 +55,8 @@ gitcode-mcp sync --repo YOUR_OWNER/YOUR_REPO --issues --pulls --pr-comments --da
 
 Use `--detach` to return the job id immediately, then inspect or control it through `gitcode-mcp service jobs`, `gitcode-mcp service attach JOB_ID`, and `gitcode-mcp service cancel JOB_ID`.
 
+Daemon job state is a bounded service runtime snapshot, not part of the GitCode cache or RAG index. The service keeps active jobs plus the latest 128 terminal jobs, and trims each job to the latest 256 progress events.
+
 Ollama is a provider runtime. It may already be running, or `rag setup` can autostart `ollama serve` when the provider is configured with managed startup.
 
 ## Install Service
