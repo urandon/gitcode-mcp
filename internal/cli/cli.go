@@ -227,6 +227,7 @@ type options struct {
 	batchSize      int
 	topK           int
 	detach         bool
+	daemon         bool
 }
 
 type multiFlag []string
@@ -334,7 +335,7 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 	if cleanup != nil {
 		defer cleanup()
 	}
-	return dispatch(ctx, svc, command, rest, opts, stdout, stderr, plan)
+	return dispatch(ctx, svc, command, rest, opts, stdout, stderr, plan, deps)
 }
 
 func buildStartupPlan(ctx context.Context, command string, opts options, deps localCommandDeps) (startupPlan, error) {
@@ -586,6 +587,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.IntVar(&opts.batchSize, "batch-size", 0, "RAG embedding batch size")
 	flags.IntVar(&opts.topK, "top-k", 0, "RAG semantic candidate count")
 	flags.BoolVar(&opts.detach, "detach", false, "start job without attaching progress")
+	flags.BoolVar(&opts.daemon, "daemon", false, "start sync as a daemon job")
 	if err := flags.Parse(reorderFlags(args)); err != nil {
 		return opts, nil, service.ErrInvalidQuery{Field: "flags", Message: err.Error()}
 	}
@@ -612,7 +614,7 @@ func reorderFlags(args []string) []string {
 		arg := args[i]
 		if strings.HasPrefix(arg, "--") {
 			flags = append(flags, arg)
-			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--issue-comments" || arg == "--pr-comments" || arg == "--index" || arg == "--quiet" || arg == "--dry-run" || arg == "--live" || arg == "--offline" || arg == "--fixture" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" || arg == "--yes" || arg == "--detach" {
+			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--issue-comments" || arg == "--pr-comments" || arg == "--index" || arg == "--quiet" || arg == "--dry-run" || arg == "--live" || arg == "--offline" || arg == "--fixture" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" || arg == "--yes" || arg == "--detach" || arg == "--daemon" {
 				continue
 			}
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
@@ -1229,6 +1231,56 @@ func attachRAGIndexJob(ctx context.Context, client *servicectl.RPCClient, id str
 	}
 }
 
+func attachSyncJob(ctx context.Context, client *servicectl.RPCClient, id string, opts options, stdout io.Writer, stderr io.Writer) int {
+	mode := syncProgressMode(opts, stderr)
+	seen := 0
+	started := time.Now().UTC()
+	state := syncProgressSpinnerState{Started: started}
+	encoder := json.NewEncoder(stderr)
+	renderedSpinner := false
+	for {
+		var job servicectl.Job
+		if err := client.Call(ctx, "Jobs.Get", map[string]string{"job_id": id}, &job); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		if job.StartedAt != nil {
+			started = *job.StartedAt
+			if state.Started.IsZero() || state.Started.After(started) {
+				state.Started = started
+			}
+		}
+		for ; seen < len(job.Progress); seen++ {
+			ev := job.Progress[seen]
+			state.Apply(ev)
+			switch mode {
+			case "jsonl":
+				_ = encoder.Encode(syncProgressJSONEvent(ev, started))
+			case "lines":
+				renderSyncProgressLine(stderr, ev, started)
+			}
+		}
+		if mode == "spinner" {
+			renderSyncProgressSpinnerFrame(stderr, &state)
+			renderedSpinner = true
+		}
+		if serviceJobTerminal(job.Status) {
+			if mode == "spinner" && renderedSpinner {
+				fmt.Fprint(stderr, "\r\033[K")
+			}
+			code := render(stdout, opts.format, job, renderServiceJobText)
+			if job.Status == servicectl.JobStatusFailed || job.Status == servicectl.JobStatusCancelled || job.Status == servicectl.JobStatusInterrupted {
+				return 1
+			}
+			return code
+		}
+		select {
+		case <-ctx.Done():
+			return writeError(stderr, opts.format, ctx.Err())
+		case <-time.After(120 * time.Millisecond):
+		}
+	}
+}
+
 func serviceJobTerminal(status string) bool {
 	switch status {
 	case servicectl.JobStatusSucceeded, servicectl.JobStatusFailed, servicectl.JobStatusCancelled, servicectl.JobStatusInterrupted:
@@ -1484,7 +1536,7 @@ func ragIndexProgressElapsed(state ragIndexProgressState, now time.Time) time.Du
 	return now.Sub(started).Round(time.Millisecond)
 }
 
-func dispatch(ctx context.Context, svc queryService, command string, args []string, opts options, stdout io.Writer, stderr io.Writer, plan startupPlan) int {
+func dispatch(ctx context.Context, svc queryService, command string, args []string, opts options, stdout io.Writer, stderr io.Writer, plan startupPlan, deps localCommandDeps) int {
 	switch command {
 	case "ingest":
 		result, err := svc.Ingest(ctx, service.OperationRequest{InputPath: opts.input, OutputPath: opts.output, Strict: opts.strict})
@@ -1632,6 +1684,24 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 	case "sync":
 		if err := validateSyncCommentSurface(opts); err != nil {
 			return writeError(stderr, opts.format, err)
+		}
+		if opts.daemon || opts.detach {
+			if opts.id != "" || opts.input != "" {
+				return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "sync", Message: "daemon sync supports collection selectors only; omit --id/--input"})
+			}
+			manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Version}
+			client, clientErr := manager.Client()
+			if clientErr != nil {
+				return writeError(stderr, opts.format, clientErr)
+			}
+			var job servicectl.Job
+			if err := client.Call(ctx, "Jobs.StartSync", syncJobRequest(opts), &job); err != nil {
+				return writeError(stderr, opts.format, err)
+			}
+			if opts.detach {
+				return render(stdout, opts.format, job, renderServiceJobText)
+			}
+			return attachSyncJob(ctx, client, job.ID, opts, stdout, stderr)
 		}
 		if syncSingleRecordRequested(opts) {
 			result, err := svc.SyncToCache(ctx, service.SyncRequest{RepoID: opts.repo, StableID: opts.id, RemoteAlias: opts.input, IdempotencyKey: opts.idempotencyKey})
@@ -1872,6 +1942,28 @@ func bulkSyncRequest(opts options) service.BulkSyncRequest {
 		perPage = 100
 	}
 	return service.BulkSyncRequest{RepoID: opts.repo, IdempotencyKey: opts.idempotencyKey, PerPage: perPage, Bounds: &service.SyncBounds{MaxPages: opts.maxPages, MaxRecords: opts.maxRecords}}
+}
+
+func syncJobRequest(opts options) servicectl.StartSyncJobRequest {
+	mode := string(gitcode.ProviderModeLive)
+	if opts.offline || opts.fixture {
+		mode = string(gitcode.ProviderModeFixture)
+	}
+	return servicectl.StartSyncJobRequest{
+		RepoID:         opts.repo,
+		ProviderMode:   mode,
+		CachePath:      opts.cachePath,
+		Issues:         opts.issues,
+		Wiki:           opts.wiki,
+		Pulls:          opts.pulls,
+		Comments:       opts.comments,
+		IssueComments:  opts.issueComments,
+		PRComments:     opts.prComments,
+		IdempotencyKey: opts.idempotencyKey,
+		MaxPages:       opts.maxPages,
+		MaxRecords:     opts.maxRecords,
+		PerPage:        opts.perPage,
+	}
 }
 
 func syncSingleRecordRequested(opts options) bool {
@@ -3572,7 +3664,7 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH cache database path")
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
 	case "sync":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s [--offline|--fixture] --repo REPO [--issues] [--wiki] [--pulls] [--issue-comments|--pr-comments|--comments] [--index] [--details] [--id ID] [--input REMOTE_ALIAS] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s [--offline|--fixture] --repo REPO [--issues] [--wiki] [--pulls] [--issue-comments|--pr-comments|--comments] [--daemon] [--detach] [--index] [--details] [--id ID] [--input REMOTE_ALIAS] [--idempotency-key KEY]\n\n", command)
 		fmt.Fprintln(w, "Synchronize cached records. Uses live GitCode by default; use --offline/--fixture for deterministic fixture sync.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --live              compatibility alias for live provider selection")
@@ -3585,6 +3677,8 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --issue-comments    sync issue records and issue comments")
 		fmt.Fprintln(w, "  --pr-comments       sync pull request comments")
 		fmt.Fprintln(w, "  --comments          compatibility alias for --pr-comments; with --input issue:N, sync issue comments")
+		fmt.Fprintln(w, "  --daemon            start collection sync as a service-owned job and attach progress")
+		fmt.Fprintln(w, "  --detach            start collection sync as a service-owned job and return the job id")
 		fmt.Fprintln(w, "  --index             build index after sync")
 		fmt.Fprintln(w, "  --max-pages N       maximum pages to sync; omit to traverse until end/frontier")
 		fmt.Fprintln(w, "  --max-records N     maximum records to sync; omit to traverse until end/frontier")

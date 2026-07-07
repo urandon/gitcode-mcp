@@ -723,6 +723,69 @@ func TestRAGIndexCLIStartsDaemonJobOverIPC(t *testing.T) {
 	}
 }
 
+func TestSyncCLIStartsDaemonJobOverIPC(t *testing.T) {
+	root, err := shortCLITestRoot(t, "cli-sync-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(root, "cache.db")
+	store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore returned error: %v", err)
+	}
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatalf("AddRepository returned error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	configPath := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("cache_path: "+cachePath+"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	src := &repoInitLocalSource{
+		env:       map[string]string{"GITCODE_MCP_SERVICE_NETWORK": "mem", "GITCODE_MCP_SERVICE_ADDRESS": "test-cli-sync-job", config.EnvMCPConfigPath: configPath},
+		cwd:       root,
+		homeDir:   filepath.Join(root, "h"),
+		configDir: filepath.Join(root, "f"),
+		cacheDir:  filepath.Join(root, "c"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runCode := make(chan int, 1)
+	go func() {
+		var runOut bytes.Buffer
+		var runErr bytes.Buffer
+		runCode <- executeWithFactoryAndDepsContext(ctx, []string{"service", "run"}, &runOut, &runErr, nil, localCommandDeps{Source: src})
+	}()
+	waitForServiceSocket(t, src)
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := executeWithFactoryAndDeps([]string{"sync", "--offline", "--repo", "fixture-a", "--issues", "--daemon", "--progress", "lines", "--format", "json"}, &out, &errOut, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("sync daemon code=%d stderr=%q", code, errOut.String())
+	}
+	var job servicectl.Job
+	if err := json.Unmarshal(out.Bytes(), &job); err != nil {
+		t.Fatalf("invalid job json: %v\n%s", err, out.String())
+	}
+	if job.Type != servicectl.SyncJobType || job.RepoID != "fixture-a" || job.Status != servicectl.JobStatusSucceeded {
+		t.Fatalf("sync job=%#v", job)
+	}
+	if job.Completed == 0 || job.Steps == 0 {
+		t.Fatalf("sync job progress counters not populated: %#v", job)
+	}
+	if progress := errOut.String(); !strings.Contains(progress, "sync progress:") || !strings.Contains(progress, "collection=issues") {
+		t.Fatalf("sync daemon progress missing expected output: %q", progress)
+	}
+
+	cancel()
+	if code := <-runCode; code != 0 {
+		t.Fatalf("service run code=%d", code)
+	}
+}
+
 func TestRAGStatusCLIReportsCoverage(t *testing.T) {
 	root := t.TempDir()
 	cachePath := filepath.Join(root, "cache.db")

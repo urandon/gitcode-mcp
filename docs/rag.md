@@ -47,6 +47,14 @@ flowchart LR
 
 `gitcode-mcp` and `gitcode-mcp service run` are the same codebase. The daemon owns long-running local jobs such as `rag index`; CLI and MCP surfaces observe job status through the same local service state.
 
+Collection sync can also use the same service job queue for large repositories:
+
+```sh
+gitcode-mcp sync --repo YOUR_OWNER/YOUR_REPO --issues --pulls --pr-comments --daemon
+```
+
+Use `--detach` to return the job id immediately, then inspect or control it through `gitcode-mcp service jobs`, `gitcode-mcp service attach JOB_ID`, and `gitcode-mcp service cancel JOB_ID`.
+
 Ollama is a provider runtime. It may already be running, or `rag setup` can autostart `ollama serve` when the provider is configured with managed startup.
 
 ## Install Service
