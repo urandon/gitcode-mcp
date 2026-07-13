@@ -22,6 +22,10 @@ func listIssueCommentsEndpoint(owner, repo string, number int) string {
 	return endpointPath("/api/v5/repos/%s/%s/issues/%d/comments", owner, repo, number)
 }
 
+func listRepositoryIssueCommentsEndpoint(owner, repo string) string {
+	return endpointPath("/api/v5/repos/%s/%s/issues/comments", owner, repo)
+}
+
 func listPREndpoint(owner, repo string) string {
 	return endpointPath("/api/v5/repos/%s/%s/pulls", owner, repo)
 }

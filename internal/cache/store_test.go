@@ -99,6 +99,29 @@ func TestIssueCommentSyncQueueRoundTripAndReplaceComments(t *testing.T) {
 	}
 }
 
+func TestRecordCommentsPageUpsertAndSuccessfulReconciliation(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	now := time.Date(2026, 7, 13, 13, 0, 0, 0, time.UTC)
+	if err := store.UpsertRecordGraph(ctx, RecordGraph{Record: Record{RepoID: "fixture-a", ID: "ISSUE-59", Type: "issue", Path: "issues/59.md", Title: "Aggregate comments", Status: "open", ContentHash: "hash", Provenance: ProvenanceRemote, RemoteType: "issue", RemoteID: "59", CreatedAt: now, UpdatedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertRecordComments(ctx, "fixture-a", "ISSUE-59", []RecordComment{{CommentID: "c1", Body: "first", CreatedAt: now, UpdatedAt: now}, {CommentID: "stale", Body: "stale", CreatedAt: now, UpdatedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertRecordComments(ctx, "fixture-a", "ISSUE-59", []RecordComment{{CommentID: "c1", Body: "updated", CreatedAt: now, UpdatedAt: now.Add(time.Minute)}, {CommentID: "c2", Body: "second", CreatedAt: now, UpdatedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReconcileRecordComments(ctx, "fixture-a", "ISSUE-59", []string{"c1", "c2"}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", "ISSUE-59")
+	if err != nil || len(record.Comments) != 2 || record.Comments[0].CommentID != "c1" || record.Comments[0].Body != "updated" || record.Comments[1].CommentID != "c2" {
+		t.Fatalf("record=%#v err=%v", record, err)
+	}
+}
+
 func TestRAGEmbeddingSchemaRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)

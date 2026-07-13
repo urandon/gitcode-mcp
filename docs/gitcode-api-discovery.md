@@ -25,8 +25,8 @@ Discovery status for metadata-first sync:
 | Wiki pages | Contents/list entries expose `path`, `type`, and `sha`; the adapter maps `sha` to wiki page `revision`. | Confirmed usable for body-fetch skip. The sync engine compares the list revision to cached `remote_revision` and fetches the page body only for new, changed, incomplete, or marker-less records. |
 | Issues | Live list responses expose stable `id`, numeric `number`, source `body`, labels, `comments` count, and `updated_at`. A live issue with one comment showed issue `updated_at` equal to the comment `updated_at`. | Usable for parent-first issue sync. The revision token includes list content, `updated_at`, and `comments`; collection traversal persists parents and updates durable comment work without issuing child reads. |
 | Pull requests / merge requests | Live list payloads expose stable `id`, numeric `number`, state/status, labels, base/head refs, `diff_refs`, `notes`, and `updated_at`. | Bulk sync currently stages from list records and stores a list-version token as `remote_revision`. Future diff, commit, or review detail fetches should compare this marker before detail calls. |
-| Pull request review comments | Live v5 comment payloads expose stable comment and discussion ids and nest replies under the root note's `reply` field. The read-only v4 discussion representation exposes richer diff-note `position` metadata but omits an explicit parent id for replies. | The adapter flattens v5 replies, derives their parent from the root note, and enriches matching comment ids with v4 position metadata. Bulk sync then persists one ordered cached discussion. A safe skip of the parent `ListPRComments` call still needs a persisted parent comment-collection checkpoint. |
-| Issue comments | Comment payloads expose stable ids, body, and `updated_at`; issue list payload exposes `comments` count and `updated_at`. | An independent durable queue is populated by parent issue traversal and drained by `--issue-comments`. Rate limiting defers the current work item and stops the drain, while parent traversal remains complete or resumable on its own frontier. |
+| Pull request review comments | Live v5 comment payloads expose stable comment and discussion ids and nest replies under the root note's `reply` field. The read-only v4 discussion route has returned both nested discussions and a flat `data` envelope of timeline notes; matching diff notes expose richer `position` metadata but omit a reliable parent id for replies. | The adapter flattens v5 replies, derives their parent from the root note, accepts both observed v4 shapes, and enriches matching comment ids with v4 position metadata. Bulk sync then persists one ordered cached discussion. A safe skip of the parent `ListPRComments` call still needs a persisted parent comment-collection checkpoint. |
+| Issue comments | Comment payloads expose stable ids, body, and `updated_at`; the repository aggregate includes `target.issue.id` and `target.issue.number`; issue list payload exposes `comments` count and `updated_at`. | An independent durable queue is populated by parent issue traversal. With a complete parent frontier, `--issue-comments` uses the aggregate collection and reconciles it to stable cached parents. Bounds or interruption replay from page 1; rate limiting stops without per-issue fan-out. The per-issue route remains the compatibility fallback. |
 | Labels | No reliable update marker documented for the current cache surface. | Treat as full refresh or unsupported for metadata skip until discovery proves a marker. |
 | Milestones | Adapter model includes `UpdatedAt`, but list behavior and persistence are not verified for collection sync. | Not yet a first-class bulk collection surface; do not report `skipped_by_revision`. |
 
@@ -55,6 +55,19 @@ GET /api/v5/repos/{owner}/{repo}/pulls?state=all&order_by=updated_at&direction=d
 ```
 
 This returned HTTP 200 and records ordered by recent `updated_at`. The issue-style `sort=desc` parameter returned HTTP 400 with a message that `direction` is required, so keep issue and pull request query builders collection-specific. The UI-coupled `order_by_sort=updated_at_desc` also returned HTTP 200 for pull requests, but the adapter uses `order_by=updated_at&direction=desc` because the API error points to `direction`.
+
+## Repository-Wide Issue Comments
+
+Sanitized live discovery on 2026-07-13 confirmed the repository aggregate:
+
+```http
+GET /api/v5/repos/{owner}/{repo}/issues/comments?page=1&per_page=100
+Authorization: Bearer $GITCODE_TOKEN
+```
+
+The route returns a JSON array. Pagination uses `total_count` and `total_page` response headers. Each comment exposes its stable comment id, body, timestamps, and a nested parent object at `target.issue` containing both provider `id` and numeric `number`. The adapter requests one page at a time so the service can commit page-level progress. Parent reconciliation requires the provider id and number to agree when both resolve; missing or conflicting parents are reported as `issue_comment_reconciliation` instead of being silently attached.
+
+Aggregate traversal is safe only after the issue parent frontier is complete. A bounded or interrupted run restarts at page 1 and repeats idempotent upserts, because newer comments can shift page offsets. Queue items become complete and stale cached comments are removed only after a full collection pass. If the route returns an explicit unsupported response, the service uses the existing per-issue endpoint. Transient and rate-limit errors do not trigger that request-amplifying fallback.
 
 ## Pull Request Issue Relations
 
@@ -95,10 +108,16 @@ Earlier live discovery for inline review comment metadata used the GitLab-compat
 
 ```http
 GET /api/v4/projects/{owner}%2F{repo}/merge_requests/{iid}/discussions
-PRIVATE-TOKEN: $GITCODE_TOKEN
+Authorization: Bearer $GITCODE_TOKEN
 ```
 
-Inline notes are returned as `DiffNote` entries inside discussion `notes`. When present, `position` and `original_position` include fields such as `position_type`, `base_sha`, `start_sha`, `head_sha`, `old_path`, `new_path`, `old_line`, `new_line`, `line_code`, `start_line_code`, `patchset_iid`, `diff_id`, `version_sha`, and `is_outdated`. Browser dogfood on 2026-06-29 showed that v4-created inline comments can disappear from private or unauthenticated discussion views even though authenticated views and v4 readback expose them. Treat this v4 surface as legacy metadata evidence, not as the frontend-compatible write contract.
+Inline notes can be returned as `DiffNote` entries inside discussion `notes`. A 2026-07-13 public sample also returned an object envelope with flat notes/events in `data`; those entries carry `discussion_id` directly and may contain the same diff fields. The adapter accepts both shapes. When present, `position` and `original_position` include fields such as `position_type`, `base_sha`, `start_sha`, `head_sha`, `old_path`, `new_path`, `old_line`, `new_line`, `line_code`, `start_line_code`, `patchset_iid`, `diff_id`, `version_sha`, and `is_outdated`. Bearer and `PRIVATE-TOKEN` authentication were both accepted in the bounded probe; the adapter keeps Bearer auth consistent with other reads. Browser dogfood on 2026-06-29 showed that v4-created inline comments can disappear from private or unauthenticated discussion views even though authenticated views and v4 readback expose them. Treat this v4 surface as legacy metadata evidence, not as the frontend-compatible write contract.
+
+No repository-wide PR comment or discussion endpoint was found. Read-only probes of `/api/v5/repos/{owner}/{repo}/pulls/comments` and `/pulls/discussions` returned parameter-validation errors because the route interpreted the final segment as a pull request identifier. Collection must therefore remain a rate-limit-aware per-PR walk over an explicitly selected cached parent set; it must stop on rate limit and must not enable an unbounded body crawl by default.
+
+The bounded sizing sample used five public repositories and the 100 most recently updated PR metadata rows from each. The list-level `notes` marker was almost always nonzero but includes system timeline events, so it is not a user-comment count. Fifteen PRs were then selected across low, middle, and upper `notes <= 30` strata and read with at most one 100-record v5 page and one v4 page each. The sanitized result contained 192 v5 roots, 7 nested replies, 199 total v5 notes, 245,323 UTF-8 body bytes, and a 4 KiB size floor of 221 chunks; 20 bodies exceeded 4 KiB. The v4 representation contained 511 timeline notes across 504 discussion ids, including 22 inline notes. The two surfaces are not additive: unmatched v4 events must not become duplicate RAG text.
+
+For conditional planning, the observed repository strata required 1.00-1.27 size-based chunks per fetched v5 note, 1.11 overall. This is a calibration bound, not a corpus confidence interval: the sample intentionally selected comment-bearing PRs, recent-list `notes` does not measure user-comment prevalence, and unseen large bodies leave the global upper bound open. Estimate future RAG work from measured v5 note bodies in the selected queue, not from a fixed multiplier such as two chunks per PR.
 
 Creating an inline review discussion uses the v5 pull request comments surface:
 

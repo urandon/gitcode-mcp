@@ -41,6 +41,13 @@ type Client interface {
 	UpdateRelease(context.Context, ReleaseWriteRequest, WriteOptions) (WriteResult[Release], error)
 }
 
+// RepositoryIssueCommentLister is an optional compatibility surface. Clients
+// that do not implement GitCode's repository-wide endpoint continue to use the
+// per-issue ListIssueComments path.
+type RepositoryIssueCommentLister interface {
+	ListRepositoryIssueComments(context.Context, RepositoryIssueCommentListRequest) (Page[Comment], error)
+}
+
 type Config struct {
 	BaseURL         string
 	Token           string

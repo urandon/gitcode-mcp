@@ -3322,6 +3322,12 @@ func (f *brokenStore) ListIssueCommentSync(context.Context, cache.IssueCommentSy
 func (f *brokenStore) IssueCommentSyncSummary(context.Context, string) (cache.IssueCommentSyncSummary, error) {
 	return cache.IssueCommentSyncSummary{}, nil
 }
+func (f *brokenStore) UpsertRecordComments(context.Context, string, string, []cache.RecordComment) error {
+	return nil
+}
+func (f *brokenStore) ReconcileRecordComments(context.Context, string, string, []string) error {
+	return nil
+}
 func (f *brokenStore) ReplaceRecordComments(context.Context, string, string, []cache.RecordComment) error {
 	return nil
 }

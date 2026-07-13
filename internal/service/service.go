@@ -1394,6 +1394,48 @@ func (s *Service) BulkSyncIssueComments(ctx context.Context, req BulkSyncRequest
 	if err := s.seedLegacyIssueCommentQueue(ctx, repoID); err != nil {
 		return nil, err
 	}
+	pending, err := s.store.ListIssueCommentSync(ctx, cache.IssueCommentSyncFilter{RepoID: repoID, Statuses: []string{"pending", "deferred"}})
+	if err != nil {
+		return nil, err
+	}
+	if len(pending) == 0 {
+		result := &SyncResourcesResult{Results: []SyncResult{}, Failures: []ResourceError{}, Ordering: "queue_updated_at_asc", TraversalStatus: "complete", StopReason: "queue_empty"}
+		if err := s.attachIssueCommentQueueSummary(ctx, result, repoID, "drain"); err != nil {
+			return result, err
+		}
+		return result, nil
+	}
+	route, err := s.BuildAdapterRoute(ctx, repoID, RepositoryScopeIssues)
+	if err != nil {
+		return nil, err
+	}
+	lister, aggregateAvailable := s.client.(gitcode.RepositoryIssueCommentLister)
+	_, parentsComplete, frontierErr := s.completeSyncWatermark(ctx, repoID, "issue")
+	if frontierErr != nil {
+		return nil, frontierErr
+	}
+	if aggregateAvailable && parentsComplete {
+		items, err := s.store.ListIssueCommentSync(ctx, cache.IssueCommentSyncFilter{RepoID: repoID})
+		if err != nil {
+			return nil, err
+		}
+		result, aggregateErr := s.bulkSyncRepositoryIssueComments(ctx, req, route, lister, pending, items)
+		if aggregateErr == nil {
+			return result, nil
+		}
+		if !repositoryIssueCommentsUnsupported(aggregateErr) {
+			return result, aggregateErr
+		}
+		return s.bulkSyncIssueCommentsPerIssue(ctx, req, route, "aggregate_endpoint_unsupported")
+	}
+	reason := "aggregate_not_implemented"
+	if aggregateAvailable && !parentsComplete {
+		reason = "parent_frontier_incomplete"
+	}
+	return s.bulkSyncIssueCommentsPerIssue(ctx, req, route, reason)
+}
+
+func (s *Service) bulkSyncIssueCommentsPerIssue(ctx context.Context, req BulkSyncRequest, route RepositoryRoute, fallbackReason string) (*SyncResourcesResult, error) {
 	limit := 0
 	if req.Bounds != nil {
 		limit = req.Bounds.MaxRecords
@@ -1405,15 +1447,11 @@ func (s *Service) BulkSyncIssueComments(ctx context.Context, req BulkSyncRequest
 			limit = req.Bounds.MaxPages * perPage
 		}
 	}
-	items, err := s.store.ListIssueCommentSync(ctx, cache.IssueCommentSyncFilter{RepoID: repoID, Statuses: []string{"pending", "deferred"}, Limit: limit})
+	items, err := s.store.ListIssueCommentSync(ctx, cache.IssueCommentSyncFilter{RepoID: req.RepoID, Statuses: []string{"pending", "deferred"}, Limit: limit})
 	if err != nil {
 		return nil, err
 	}
 	result := &SyncResourcesResult{Results: []SyncResult{}, Failures: []ResourceError{}, Ordering: "queue_updated_at_asc", TraversalStatus: "complete", StopReason: "queue_empty"}
-	route, err := s.BuildAdapterRoute(ctx, repoID, RepositoryScopeIssues)
-	if err != nil {
-		return nil, err
-	}
 	for _, item := range items {
 		if err := ctx.Err(); err != nil {
 			result.TraversalStatus = "cancelled"
@@ -1443,7 +1481,7 @@ func (s *Service) BulkSyncIssueComments(ctx context.Context, req BulkSyncRequest
 				result.Failures = append(result.Failures, newResourceError(item.RemoteID, "issue_comments", err))
 				continue
 			}
-			source, sourceErr := s.store.GetSourceScoped(ctx, repoID, item.SourceID)
+			source, sourceErr := s.store.GetSourceScoped(ctx, req.RepoID, item.SourceID)
 			if sourceErr == nil {
 				now := s.now().UTC()
 				result.Results = append(result.Results, SyncResult{Status: "deferred", Freshness: string(FreshnessStale), Counts: SyncCounts{Fetched: 1, FetchedDetail: 1, Deferred: 1}, Record: sourceSummary(source), GeneratedAt: now, StartedAt: now, CompletedAt: now})
@@ -1457,9 +1495,11 @@ func (s *Service) BulkSyncIssueComments(ctx context.Context, req BulkSyncRequest
 	}
 	result.SuccessCount = len(result.Results)
 	result.FailureCount = len(result.Failures)
-	if err := s.attachIssueCommentQueueSummary(ctx, result, repoID, "drain"); err != nil {
+	if err := s.attachIssueCommentQueueSummary(ctx, result, req.RepoID, "drain"); err != nil {
 		return result, err
 	}
+	result.IssueComments.Strategy = "per_issue_fallback"
+	result.IssueComments.FallbackReason = fallbackReason
 	if limit > 0 && len(items) == limit && result.TraversalStatus == "complete" && result.IssueComments != nil && result.IssueComments.Pending+result.IssueComments.Deferred > 0 {
 		result.TraversalStatus = "bounded"
 		result.StopReason = "max_records"
@@ -1468,6 +1508,292 @@ func (s *Service) BulkSyncIssueComments(ctx context.Context, req BulkSyncRequest
 		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
 	}
 	return result, nil
+}
+
+func (s *Service) bulkSyncRepositoryIssueComments(ctx context.Context, req BulkSyncRequest, route RepositoryRoute, lister gitcode.RepositoryIssueCommentLister, pending, allItems []cache.IssueCommentSync) (*SyncResourcesResult, error) {
+	result := &SyncResourcesResult{Results: []SyncResult{}, Failures: []ResourceError{}, Ordering: "repository_comment_order", TraversalStatus: "complete"}
+	pendingBySource := make(map[string]cache.IssueCommentSync, len(pending))
+	byProviderID := make(map[string]cache.IssueCommentSync, len(allItems))
+	byNumber := make(map[int]cache.IssueCommentSync, len(allItems))
+	for _, item := range pending {
+		pendingBySource[item.SourceID] = item
+	}
+	for _, item := range allItems {
+		if id := strings.TrimSpace(item.ProviderID); id != "" {
+			byProviderID[id] = item
+		}
+		if item.IssueNumber > 0 {
+			byNumber[item.IssueNumber] = item
+		}
+	}
+	seen := make(map[string]map[string]struct{}, len(pending))
+	expectedTotal := 0
+	// An interrupted aggregate traversal restarts at page one. Page-level upserts
+	// make that retry idempotent, while starting later could falsely reconcile a
+	// parent after missing comments from earlier pages.
+	pageNumber := 1
+	perPage := req.PerPage
+	if perPage < 1 {
+		perPage = 100
+	}
+	if req.Bounds != nil && req.Bounds.MaxRecords > 0 && req.Bounds.MaxRecords < perPage {
+		perPage = req.Bounds.MaxRecords
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			result.TraversalStatus = "cancelled"
+			result.StopReason = "cancelled"
+			if errors.Is(err, context.DeadlineExceeded) {
+				result.TraversalStatus = "timeout"
+				result.StopReason = "timeout"
+			}
+			if summaryErr := s.attachRepositoryIssueCommentSummary(context.WithoutCancel(ctx), result, req.RepoID, len(pending)); summaryErr != nil {
+				return result, summaryErr
+			}
+			diagnostic := SyncDiagnosticCancelled
+			if errors.Is(err, context.DeadlineExceeded) {
+				diagnostic = SyncDiagnosticTimeout
+			}
+			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, Diagnostic: diagnostic}
+		}
+		if req.Bounds != nil && req.Bounds.MaxPages > 0 && result.PagesListed >= req.Bounds.MaxPages {
+			result.TraversalStatus = "bounded"
+			result.StopReason = "max_pages"
+			break
+		}
+		if req.Bounds != nil && req.Bounds.MaxRecords > 0 {
+			if result.RecordsListed >= req.Bounds.MaxRecords {
+				result.TraversalStatus = "bounded"
+				result.StopReason = "max_records"
+				break
+			}
+			if result.RecordsListed > 0 && result.RecordsListed+perPage > req.Bounds.MaxRecords {
+				result.TraversalStatus = "bounded"
+				result.StopReason = "max_records"
+				break
+			}
+		}
+		page, err := lister.ListRepositoryIssueComments(ctx, gitcode.RepositoryIssueCommentListRequest{Owner: route.Owner, Repo: route.Name, Page: pageNumber, PerPage: perPage})
+		if err != nil {
+			if repositoryIssueCommentsUnsupported(err) && result.PagesListed == 0 {
+				return result, err
+			}
+			var rateLimited gitcode.ErrRateLimited
+			if errors.As(err, &rateLimited) {
+				result.TraversalStatus = "deferred"
+				result.StopReason = "rate_limited"
+				result.FailureCount = len(result.Failures)
+				emitProgress(req.ProgressChan, ProgressEvent{Collection: "issue_comments", Phase: "aggregate_deferred", Endpoint: rateLimited.Endpoint, RetryAfter: rateLimited.RetryAfter.String()})
+				if summaryErr := s.attachRepositoryIssueCommentSummary(ctx, result, req.RepoID, len(pending)); summaryErr != nil {
+					return result, summaryErr
+				}
+				if result.FailureCount > 0 {
+					return result, &PartialSyncError{Errors: result.Failures, SuccessCount: 0, FailureCount: result.FailureCount}
+				}
+				return result, nil
+			}
+			result.TraversalStatus = "partial"
+			result.StopReason = "provider_error"
+			result.Failures = append(result.Failures, newResourceError("issue-comment:*", "issue_comments", err))
+			result.FailureCount = len(result.Failures)
+			if summaryErr := s.attachRepositoryIssueCommentSummary(ctx, result, req.RepoID, len(pending)); summaryErr != nil {
+				return result, summaryErr
+			}
+			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
+		}
+		result.PagesListed++
+		result.RecordsListed += len(page.Items)
+		if page.TotalCount > 0 {
+			if expectedTotal > 0 && expectedTotal != page.TotalCount {
+				result.Failures = append(result.Failures, newResourceError("issue-comment:*", "issue_comment_reconciliation", issueCommentReconciliationError(fmt.Sprintf("aggregate total_count changed from %d to %d during traversal", expectedTotal, page.TotalCount))))
+			} else {
+				expectedTotal = page.TotalCount
+			}
+		}
+		pageComments := make(map[string][]cache.RecordComment)
+		for _, comment := range page.Items {
+			item, reconcileErr := reconcileRepositoryIssueCommentParent(comment, byProviderID, byNumber)
+			if reconcileErr != nil {
+				result.Failures = append(result.Failures, newResourceError(strings.TrimSpace(comment.ID), "issue_comment_reconciliation", issueCommentReconciliationError(reconcileErr.Error())))
+				continue
+			}
+			if _, needsRefresh := pendingBySource[item.SourceID]; !needsRefresh {
+				continue
+			}
+			cached, err := cachedIssueComment(comment, item, s.now().UTC())
+			if err != nil {
+				result.Failures = append(result.Failures, newResourceError(strings.TrimSpace(comment.ID), "issue_comment_reconciliation", err))
+				continue
+			}
+			pageComments[item.SourceID] = append(pageComments[item.SourceID], cached)
+			if seen[item.SourceID] == nil {
+				seen[item.SourceID] = map[string]struct{}{}
+			}
+			seen[item.SourceID][cached.CommentID] = struct{}{}
+		}
+		for sourceID, comments := range pageComments {
+			if err := s.store.UpsertRecordComments(ctx, req.RepoID, sourceID, comments); err != nil {
+				result.Failures = append(result.Failures, newResourceError(sourceID, "issue_comments", err))
+			}
+		}
+		emitProgress(req.ProgressChan, ProgressEvent{Collection: "issue_comments", Phase: "aggregate_page", Page: pageNumber, RecordsListed: len(page.Items), RecordsFetched: len(page.Items), RecordsFailed: len(result.Failures)})
+		if page.NextPage <= 0 {
+			result.StopReason = "end_of_collection"
+			break
+		}
+		if page.NextPage <= pageNumber {
+			result.Failures = append(result.Failures, newResourceError("issue-comment:*", "issue_comment_reconciliation", issueCommentReconciliationError(fmt.Sprintf("aggregate pagination did not advance from page %d", pageNumber))))
+			result.TraversalStatus = "partial"
+			result.StopReason = "pagination_invalid"
+			break
+		}
+		pageNumber = page.NextPage
+	}
+	if result.TraversalStatus == "bounded" {
+		result.FailureCount = len(result.Failures)
+		if result.FailureCount > 0 {
+			result.TraversalStatus = "partial"
+			result.StopReason = "reconciliation_failed"
+		}
+		if summaryErr := s.attachRepositoryIssueCommentSummary(ctx, result, req.RepoID, len(pending)); summaryErr != nil {
+			return result, summaryErr
+		}
+		if result.FailureCount > 0 {
+			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: 0, FailureCount: result.FailureCount}
+		}
+		return result, nil
+	}
+	if expectedTotal > 0 && result.RecordsListed != expectedTotal {
+		result.Failures = append(result.Failures, newResourceError("issue-comment:*", "issue_comment_reconciliation", issueCommentReconciliationError(fmt.Sprintf("aggregate listed %d comments, expected total_count %d", result.RecordsListed, expectedTotal))))
+	}
+	if len(result.Failures) > 0 {
+		result.TraversalStatus = "partial"
+		result.StopReason = "reconciliation_failed"
+		result.FailureCount = len(result.Failures)
+		if summaryErr := s.attachRepositoryIssueCommentSummary(ctx, result, req.RepoID, len(pending)); summaryErr != nil {
+			return result, summaryErr
+		}
+		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: 0, FailureCount: result.FailureCount}
+	}
+	for _, item := range pending {
+		commentIDs := make([]string, 0, len(seen[item.SourceID]))
+		for id := range seen[item.SourceID] {
+			commentIDs = append(commentIDs, id)
+		}
+		sort.Strings(commentIDs)
+		if item.ExpectedCount >= 0 && len(commentIDs) != item.ExpectedCount {
+			err := issueCommentReconciliationError(fmt.Sprintf("aggregate comments for issue %d = %d, expected %d", item.IssueNumber, len(commentIDs), item.ExpectedCount))
+			result.Failures = append(result.Failures, newResourceError(item.RemoteID, "issue_comment_reconciliation", err))
+			item.Attempts++
+			item.LastAttemptAt = s.now().UTC()
+			item.UpdatedAt = item.LastAttemptAt
+			item.LastErrorClass = "live_graph_invalid"
+			_ = s.store.UpsertIssueCommentSync(ctx, item)
+			continue
+		}
+		if err := s.store.ReconcileRecordComments(ctx, req.RepoID, item.SourceID, commentIDs); err != nil {
+			result.Failures = append(result.Failures, newResourceError(item.RemoteID, "issue_comments", err))
+			continue
+		}
+		now := s.now().UTC()
+		item.Status = "complete"
+		item.ExpectedCount = len(commentIDs)
+		item.Attempts++
+		item.LastErrorClass = ""
+		item.RetryAfter = ""
+		item.LastAttemptAt = now
+		item.UpdatedAt = now
+		if err := s.store.UpsertIssueCommentSync(ctx, item); err != nil {
+			result.Failures = append(result.Failures, newResourceError(item.RemoteID, "issue_comments", err))
+			continue
+		}
+		source, err := s.store.GetSourceScoped(ctx, req.RepoID, item.SourceID)
+		if err != nil {
+			result.Failures = append(result.Failures, newResourceError(item.RemoteID, "issue_comments", err))
+			continue
+		}
+		result.Results = append(result.Results, SyncResult{Status: "succeeded", Freshness: string(FreshnessFresh), Counts: SyncCounts{Fetched: 1, Listed: len(commentIDs)}, Record: sourceSummary(source), GeneratedAt: now, StartedAt: now, CompletedAt: now})
+	}
+	result.SuccessCount = len(result.Results)
+	result.FailureCount = len(result.Failures)
+	if result.FailureCount > 0 {
+		result.TraversalStatus = "partial"
+		result.StopReason = "reconciliation_failed"
+	}
+	if summaryErr := s.attachRepositoryIssueCommentSummary(ctx, result, req.RepoID, len(pending)); summaryErr != nil {
+		return result, summaryErr
+	}
+	if result.FailureCount > 0 {
+		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
+	}
+	return result, nil
+}
+
+func (s *Service) attachRepositoryIssueCommentSummary(ctx context.Context, result *SyncResourcesResult, repoID string, attempted int) error {
+	if err := s.attachIssueCommentQueueSummary(ctx, result, repoID, "aggregate_backfill"); err != nil {
+		return err
+	}
+	result.IssueComments.Strategy = "repository_aggregate"
+	result.IssueComments.Attempted = attempted
+	result.IssueComments.Drained = result.SuccessCount
+	result.IssueComments.AggregateRequests = result.PagesListed
+	result.IssueComments.CommentsListed = result.RecordsListed
+	for _, failure := range result.Failures {
+		if failure.RemoteType == "issue_comment_reconciliation" {
+			result.IssueComments.Unreconciled++
+		}
+	}
+	if result.TraversalStatus == "complete" && result.FailureCount == 0 {
+		avoided := attempted - result.PagesListed
+		if avoided > 0 {
+			result.IssueComments.ParentRequestsAvoided = avoided
+		}
+	}
+	return nil
+}
+
+func reconcileRepositoryIssueCommentParent(comment gitcode.Comment, byProviderID map[string]cache.IssueCommentSync, byNumber map[int]cache.IssueCommentSync) (cache.IssueCommentSync, error) {
+	provider, providerOK := byProviderID[strings.TrimSpace(comment.IssueID)]
+	number, numberOK := byNumber[comment.IssueNumber]
+	if providerOK && numberOK && provider.SourceID != number.SourceID {
+		return cache.IssueCommentSync{}, fmt.Errorf("comment %s parent ids resolve to different cached issues", comment.ID)
+	}
+	if providerOK {
+		return provider, nil
+	}
+	if numberOK {
+		return number, nil
+	}
+	return cache.IssueCommentSync{}, fmt.Errorf("comment %s parent issue is not present in the completed parent cache", comment.ID)
+}
+
+func cachedIssueComment(comment gitcode.Comment, item cache.IssueCommentSync, now time.Time) (cache.RecordComment, error) {
+	commentID := strings.TrimSpace(comment.ID)
+	if commentID == "" {
+		return cache.RecordComment{}, ErrSyncFailure{Mode: "live_graph_invalid", Cause: ErrInvalidQuery{Field: "live_graph", Message: "comment missing provider id"}}
+	}
+	updated := comment.UpdatedAt.UTC()
+	if updated.IsZero() {
+		updated = now
+	}
+	created := comment.CreatedAt.UTC()
+	if created.IsZero() {
+		created = updated
+	}
+	return cache.RecordComment{RepoID: item.RepoID, RecordID: item.SourceID, CommentID: commentID, Author: comment.Author, Body: comment.Body, ContentHash: contentHash(commentID, comment.Author, comment.Body), RemoteRevision: contentHash(updated), CreatedAt: created, UpdatedAt: updated}, nil
+}
+
+func repositoryIssueCommentsUnsupported(err error) bool {
+	var capability gitcode.ErrUnsupportedCapability
+	return errors.As(err, &capability) && capability.CapabilityKey == "repository_issue_comments"
+}
+
+func issueCommentReconciliationError(message string) error {
+	return ErrSyncFailure{
+		Mode:           "live_graph_invalid",
+		RecoveryAction: "refresh issue parents with `sync --issues`, then retry `sync --issue-comments`",
+		Cause:          ErrInvalidQuery{Field: "live_graph", Message: message},
+	}
 }
 
 func (s *Service) seedLegacyIssueCommentQueue(ctx context.Context, repoID string) error {

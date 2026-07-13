@@ -89,6 +89,58 @@ func (s *SQLiteStore) IssueCommentSyncSummary(ctx context.Context, repoID string
 	return summary, rows.Err()
 }
 
+func (s *SQLiteStore) UpsertRecordComments(ctx context.Context, repoID, recordID string, comments []RecordComment) (err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer txRollbackOnError(tx, &err)
+	for _, comment := range comments {
+		comment.RepoID = repoID
+		comment.RecordID = recordID
+		if err = upsertRecordCommentTx(ctx, tx, comment); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *SQLiteStore) ReconcileRecordComments(ctx context.Context, repoID, recordID string, keepCommentIDs []string) (err error) {
+	keep := make(map[string]struct{}, len(keepCommentIDs))
+	for _, id := range keepCommentIDs {
+		keep[id] = struct{}{}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer txRollbackOnError(tx, &err)
+	rows, err := tx.QueryContext(ctx, `SELECT comment_id FROM record_comments WHERE repo_id = ? AND record_id = ?`, repoID, recordID)
+	if err != nil {
+		return err
+	}
+	var stale []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		if _, ok := keep[id]; !ok {
+			stale = append(stale, id)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, id := range stale {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM record_comments WHERE repo_id = ? AND record_id = ? AND comment_id = ?`, repoID, recordID, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *SQLiteStore) ReplaceRecordComments(ctx context.Context, repoID, recordID string, comments []RecordComment) (err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

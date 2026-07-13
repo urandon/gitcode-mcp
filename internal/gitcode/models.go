@@ -28,6 +28,13 @@ type IssueRequest struct {
 	RemoteAlias      string
 }
 
+type RepositoryIssueCommentListRequest struct {
+	Owner   string
+	Repo    string
+	Page    int
+	PerPage int
+}
+
 type PRListRequest struct {
 	Owner     string
 	Repo      string
@@ -354,12 +361,13 @@ func decodeOptionalInt(value any) (int, error) {
 }
 
 type Comment struct {
-	ID        string    `json:"id"`
-	IssueID   string    `json:"issue_id"`
-	Body      string    `json:"body"`
-	Author    string    `json:"author"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID          string    `json:"id"`
+	IssueID     string    `json:"issue_id"`
+	IssueNumber int       `json:"issue_number,omitempty"`
+	Body        string    `json:"body"`
+	Author      string    `json:"author"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 func (c *Comment) UnmarshalJSON(data []byte) error {
@@ -372,6 +380,12 @@ func (c *Comment) UnmarshalJSON(data []byte) error {
 		User      json.RawMessage `json:"user"`
 		CreatedAt string          `json:"created_at"`
 		UpdatedAt string          `json:"updated_at"`
+		Target    struct {
+			Issue struct {
+				ID     any `json:"id"`
+				Number any `json:"number"`
+			} `json:"issue"`
+		} `json:"target"`
 	}
 	var raw rawComment
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -381,7 +395,11 @@ func (c *Comment) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
-	issueID, err := decodeOptionalID(raw.IssueID)
+	issueID, err := decodeOptionalID(firstNonNil(raw.IssueID, raw.Target.Issue.ID))
+	if err != nil {
+		return err
+	}
+	issueNumber, err := decodeOptionalInt(raw.Target.Issue.Number)
 	if err != nil {
 		return err
 	}
@@ -393,7 +411,7 @@ func (c *Comment) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
-	*c = Comment{ID: id, IssueID: issueID, Body: raw.Body, Author: firstNonEmpty(raw.Author, decodeCommentUser(raw.User)), CreatedAt: created, UpdatedAt: updated}
+	*c = Comment{ID: id, IssueID: issueID, IssueNumber: issueNumber, Body: raw.Body, Author: firstNonEmpty(raw.Author, decodeCommentUser(raw.User)), CreatedAt: created, UpdatedAt: updated}
 	return nil
 }
 

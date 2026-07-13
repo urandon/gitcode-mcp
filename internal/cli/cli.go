@@ -527,7 +527,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.BoolVar(&opts.wiki, "wiki", false, "sync wiki")
 	flags.BoolVar(&opts.pulls, "pulls", false, "sync pull requests")
 	flags.BoolVar(&opts.comments, "comments", false, "sync supported comments")
-	flags.BoolVar(&opts.issueComments, "issue-comments", false, "drain the durable issue comment sync queue")
+	flags.BoolVar(&opts.issueComments, "issue-comments", false, "sync the durable issue comment queue with aggregate-first collection")
 	flags.BoolVar(&opts.prComments, "pr-comments", false, "sync pull request comments")
 	flags.BoolVar(&opts.syncIndex, "index", false, "build index during sync")
 	flags.IntVar(&opts.maxPages, "max-pages", 0, "maximum pages to sync")
@@ -2618,6 +2618,15 @@ func renderSyncResourcesSummaryText(w io.Writer, summary syncResourcesCompactSum
 	}
 	if summary.IssueComments != nil {
 		fmt.Fprintf(w, " issue_comments_phase=%s issue_comments_pending=%d issue_comments_deferred=%d issue_comments_complete=%d", summary.IssueComments.Phase, summary.IssueComments.Pending, summary.IssueComments.Deferred, summary.IssueComments.Complete)
+		if summary.IssueComments.Strategy != "" {
+			fmt.Fprintf(w, " issue_comments_strategy=%s", summary.IssueComments.Strategy)
+		}
+		if summary.IssueComments.FallbackReason != "" {
+			fmt.Fprintf(w, " issue_comments_fallback=%s", summary.IssueComments.FallbackReason)
+		}
+		if summary.IssueComments.AggregateRequests > 0 || summary.IssueComments.CommentsListed > 0 || summary.IssueComments.ParentRequestsAvoided > 0 || summary.IssueComments.Unreconciled > 0 {
+			fmt.Fprintf(w, " issue_comments_aggregate_requests=%d issue_comments_listed=%d issue_comment_parent_requests_avoided=%d issue_comments_unreconciled=%d", summary.IssueComments.AggregateRequests, summary.IssueComments.CommentsListed, summary.IssueComments.ParentRequestsAvoided, summary.IssueComments.Unreconciled)
+		}
 	}
 	if summary.Diagnostic != "" {
 		fmt.Fprintf(w, " diagnostic=%s", summary.Diagnostic)
@@ -3713,7 +3722,7 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --issues            sync issue records")
 		fmt.Fprintln(w, "  --wiki              sync wiki records")
 		fmt.Fprintln(w, "  --pulls             sync pull request records")
-		fmt.Fprintln(w, "  --issue-comments    drain the durable issue comment sync queue")
+		fmt.Fprintln(w, "  --issue-comments    sync the durable issue comment queue with aggregate-first collection")
 		fmt.Fprintln(w, "  --pr-comments       sync pull request comments")
 		fmt.Fprintln(w, "  --comments          compatibility alias for --pr-comments; with --input issue:N, sync issue comments")
 		fmt.Fprintln(w, "  --daemon            start collection sync as a service-owned job and attach progress")

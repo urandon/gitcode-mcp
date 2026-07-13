@@ -410,13 +410,19 @@ type SyncResourcesResult struct {
 }
 
 type IssueCommentQueueSummary struct {
-	Phase     string `json:"phase"`
-	Pending   int    `json:"pending"`
-	Deferred  int    `json:"deferred"`
-	Complete  int    `json:"complete"`
-	Total     int    `json:"total"`
-	Attempted int    `json:"attempted,omitempty"`
-	Drained   int    `json:"drained,omitempty"`
+	Phase                 string `json:"phase"`
+	Strategy              string `json:"strategy,omitempty"`
+	FallbackReason        string `json:"fallback_reason,omitempty"`
+	Pending               int    `json:"pending"`
+	Deferred              int    `json:"deferred"`
+	Complete              int    `json:"complete"`
+	Total                 int    `json:"total"`
+	Attempted             int    `json:"attempted,omitempty"`
+	Drained               int    `json:"drained,omitempty"`
+	AggregateRequests     int    `json:"aggregate_requests,omitempty"`
+	CommentsListed        int    `json:"comments_listed,omitempty"`
+	ParentRequestsAvoided int    `json:"parent_requests_avoided,omitempty"`
+	Unreconciled          int    `json:"unreconciled,omitempty"`
 }
 
 type ResourceError struct {
