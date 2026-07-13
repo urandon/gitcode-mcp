@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"gitcode-mcp/internal/cache"
@@ -36,6 +37,8 @@ const (
 	DefaultLanguagePolicyID            = "ru-zh-en-v1"
 	defaultEmbeddingProviderMaxRetries = 1
 )
+
+var errOllamaBatchEndpointUnsupported = errors.New("ollama batch embedding endpoint is unsupported")
 
 type EmbeddingProvider interface {
 	Profile() EmbeddingProviderProfile
@@ -194,9 +197,10 @@ func (p *FakeProvider) NamespaceIdentity(ctx context.Context, req NamespaceReque
 }
 
 type OllamaProvider struct {
-	profile    EmbeddingProviderProfile
-	httpClient *http.Client
-	maxRetries int
+	profile          EmbeddingProviderProfile
+	httpClient       *http.Client
+	maxRetries       int
+	batchUnsupported atomic.Bool
 }
 
 func NewOllamaProvider(profile EmbeddingProviderProfile, opts ProviderOptions) (*OllamaProvider, error) {
@@ -249,16 +253,24 @@ func (p *OllamaProvider) Embed(ctx context.Context, req EmbedRequest) (EmbedResp
 		if end > len(req.Inputs) {
 			end = len(req.Inputs)
 		}
-		for _, input := range req.Inputs[start:end] {
-			vector, err := p.embedOne(ctx, input)
-			if err != nil {
-				return EmbedResponse{}, err
+		inputs := req.Inputs[start:end]
+		var batch [][]float32
+		if p.batchUnsupported.Load() {
+			batch, err = p.embedLegacyBatch(ctx, inputs)
+		} else {
+			batch, err = p.embedNativeBatch(ctx, inputs)
+			if errors.Is(err, errOllamaBatchEndpointUnsupported) {
+				p.batchUnsupported.Store(true)
+				batch, err = p.embedLegacyBatch(ctx, inputs)
 			}
-			if len(vector) != p.profile.Dimensions {
-				return EmbedResponse{}, providerError(ProviderFailureDimensionMismatch, fmt.Sprintf("embedding dimensions = %d, want %d", len(vector), p.profile.Dimensions), nil)
-			}
-			embeddings = append(embeddings, vector)
 		}
+		if err != nil {
+			return EmbedResponse{}, err
+		}
+		if len(batch) != len(inputs) {
+			return EmbedResponse{}, providerError(ProviderFailureUnsupportedResponse, fmt.Sprintf("ollama embedding count = %d, want %d", len(batch), len(inputs)), nil)
+		}
+		embeddings = append(embeddings, batch...)
 	}
 	return EmbedResponse{Model: info.Model, Revision: info.Revision, Dimensions: p.profile.Dimensions, Embeddings: embeddings}, nil
 }
@@ -302,6 +314,46 @@ func (p *OllamaProvider) embedOne(ctx context.Context, input string) ([]float32,
 		vector[i] = float32(value)
 	}
 	return vector, nil
+}
+
+func (p *OllamaProvider) embedNativeBatch(ctx context.Context, inputs []string) ([][]float32, error) {
+	body := map[string]any{"model": p.profile.Model, "input": inputs}
+	var payload struct {
+		Embeddings [][]float64 `json:"embeddings"`
+	}
+	if err := p.postJSON(ctx, "/api/embed", body, &payload); err != nil {
+		return nil, err
+	}
+	if len(payload.Embeddings) != len(inputs) {
+		return nil, providerError(ProviderFailureUnsupportedResponse, fmt.Sprintf("ollama embedding count = %d, want %d", len(payload.Embeddings), len(inputs)), nil)
+	}
+	embeddings := make([][]float32, len(payload.Embeddings))
+	for i, values := range payload.Embeddings {
+		if len(values) != p.profile.Dimensions {
+			return nil, providerError(ProviderFailureDimensionMismatch, fmt.Sprintf("embedding %d dimensions = %d, want %d", i, len(values), p.profile.Dimensions), nil)
+		}
+		vector := make([]float32, len(values))
+		for j, value := range values {
+			vector[j] = float32(value)
+		}
+		embeddings[i] = vector
+	}
+	return embeddings, nil
+}
+
+func (p *OllamaProvider) embedLegacyBatch(ctx context.Context, inputs []string) ([][]float32, error) {
+	embeddings := make([][]float32, 0, len(inputs))
+	for i, input := range inputs {
+		vector, err := p.embedOne(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+		if len(vector) != p.profile.Dimensions {
+			return nil, providerError(ProviderFailureDimensionMismatch, fmt.Sprintf("embedding %d dimensions = %d, want %d", i, len(vector), p.profile.Dimensions), nil)
+		}
+		embeddings = append(embeddings, vector)
+	}
+	return embeddings, nil
 }
 
 func (p *OllamaProvider) getJSON(ctx context.Context, path string, target any) error {
@@ -519,8 +571,12 @@ func classifyProviderError(message string, err error) error {
 
 func classifyHTTPProviderError(path string, status int, body string) error {
 	lower := strings.ToLower(body)
-	if path == "/api/embeddings" && status == http.StatusNotFound || strings.Contains(lower, "model") && (strings.Contains(lower, "not found") || strings.Contains(lower, "missing")) {
+	modelMissing := strings.Contains(lower, "model") && (strings.Contains(lower, "not found") || strings.Contains(lower, "missing"))
+	if modelMissing || path == "/api/embeddings" && status == http.StatusNotFound {
 		return providerError(ProviderFailureModelMissing, fmt.Sprintf("embedding provider reported missing model: status %d", status), nil)
+	}
+	if path == "/api/embed" && (status == http.StatusNotFound || status == http.StatusMethodNotAllowed) {
+		return providerError(ProviderFailureUnsupportedResponse, "ollama batch embedding endpoint is unavailable", errOllamaBatchEndpointUnsupported)
 	}
 	return providerError(ProviderFailureUnavailable, fmt.Sprintf("embedding provider returned status %d", status), nil)
 }

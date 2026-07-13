@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -160,6 +161,162 @@ func TestOllamaProviderEmbedsAndClassifiesFailures(t *testing.T) {
 	})
 }
 
+func TestOllamaProviderUsesNativeBatchAndPreservesOrdering(t *testing.T) {
+	var embedCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			_ = json.NewEncoder(w).Encode(map[string]any{"models": []ollamaModel{{Name: "qwen3-embedding:0.6b", Digest: "sha256:test"}}})
+		case "/api/embed":
+			atomic.AddInt32(&embedCalls, 1)
+			var body struct {
+				Model string   `json:"model"`
+				Input []string `json:"input"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode native batch: %v", err)
+			}
+			if body.Model != "qwen3-embedding:0.6b" || len(body.Input) == 0 || len(body.Input) > 2 {
+				t.Fatalf("native batch body=%#v", body)
+			}
+			embeddings := make([][]float64, len(body.Input))
+			for i, input := range body.Input {
+				var value float64
+				if _, err := fmt.Sscanf(input, "input-%f", &value); err != nil {
+					t.Fatalf("parse input %q: %v", input, err)
+				}
+				embeddings[i] = []float64{value, 0, 0}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"embeddings": embeddings})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	provider := newTestOllamaProvider(t, server.URL, 3)
+	inputs := []string{"input-1", "input-2", "input-3", "input-4", "input-5"}
+	result, err := provider.Embed(context.Background(), EmbedRequest{Inputs: inputs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if atomic.LoadInt32(&embedCalls) != 3 || len(result.Embeddings) != len(inputs) {
+		t.Fatalf("calls=%d result=%#v", embedCalls, result)
+	}
+	for i, embedding := range result.Embeddings {
+		if embedding[0] != float32(i+1) {
+			t.Fatalf("embedding[%d]=%v, want ordered value %d", i, embedding, i+1)
+		}
+	}
+}
+
+func TestOllamaProviderRejectsMalformedNativeBatch(t *testing.T) {
+	tests := []struct {
+		name       string
+		response   string
+		wantClass  string
+		inputCount int
+	}{
+		{name: "partial cardinality", response: `{"embeddings":[[1,0,0]]}`, wantClass: ProviderFailureUnsupportedResponse, inputCount: 2},
+		{name: "malformed json", response: `{"embeddings":`, wantClass: ProviderFailureUnsupportedResponse, inputCount: 2},
+		{name: "dimension mismatch", response: `{"embeddings":[[1,0],[2,0,0]]}`, wantClass: ProviderFailureDimensionMismatch, inputCount: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/tags" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"models": []ollamaModel{{Name: "qwen3-embedding:0.6b", Digest: "sha256:test"}}})
+					return
+				}
+				if r.URL.Path != "/api/embed" {
+					http.NotFound(w, r)
+					return
+				}
+				_, _ = w.Write([]byte(tt.response))
+			}))
+			defer server.Close()
+			provider := newTestOllamaProvider(t, server.URL, 3)
+			inputs := make([]string, tt.inputCount)
+			for i := range inputs {
+				inputs[i] = fmt.Sprintf("input-%d", i)
+			}
+			_, err := provider.Embed(context.Background(), EmbedRequest{Inputs: inputs})
+			assertProviderClass(t, err, tt.wantClass)
+		})
+	}
+}
+
+func TestOllamaProviderRetriesNativeBatchWithoutLegacyFallback(t *testing.T) {
+	var nativeCalls int32
+	var legacyCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			_ = json.NewEncoder(w).Encode(map[string]any{"models": []ollamaModel{{Name: "qwen3-embedding:0.6b", Digest: "sha256:test"}}})
+		case "/api/embed":
+			if atomic.AddInt32(&nativeCalls, 1) == 1 {
+				http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"embeddings": [][]float64{{1, 0, 0}, {2, 0, 0}}})
+		case "/api/embeddings":
+			atomic.AddInt32(&legacyCalls, 1)
+			http.Error(w, "legacy should not be called", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	provider := newTestOllamaProvider(t, server.URL, 3)
+	result, err := provider.Embed(context.Background(), EmbedRequest{Inputs: []string{"first", "second"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Embeddings) != 2 || nativeCalls != 2 || legacyCalls != 0 {
+		t.Fatalf("result=%#v native=%d legacy=%d", result, nativeCalls, legacyCalls)
+	}
+}
+
+func TestOllamaProviderFallsBackToLegacyOnceAndPreservesOrdering(t *testing.T) {
+	var nativeCalls int32
+	var legacyCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			_ = json.NewEncoder(w).Encode(map[string]any{"models": []ollamaModel{{Name: "qwen3-embedding:0.6b", Digest: "sha256:test"}}})
+		case "/api/embed":
+			atomic.AddInt32(&nativeCalls, 1)
+			http.NotFound(w, r)
+		case "/api/embeddings":
+			atomic.AddInt32(&legacyCalls, 1)
+			var body struct {
+				Prompt string `json:"prompt"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode legacy request: %v", err)
+			}
+			value := float64(len(body.Prompt))
+			_ = json.NewEncoder(w).Encode(map[string]any{"embedding": []float64{value, 0, 0}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	provider := newTestOllamaProvider(t, server.URL, 3)
+	for _, inputs := range [][]string{{"a", "bbbb"}, {"cc", "dddddd"}} {
+		result, err := provider.Embed(context.Background(), EmbedRequest{Inputs: inputs})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Embeddings[0][0] != float32(len(inputs[0])) || result.Embeddings[1][0] != float32(len(inputs[1])) {
+			t.Fatalf("inputs=%v result=%#v", inputs, result)
+		}
+	}
+	if nativeCalls != 1 || legacyCalls != 4 {
+		t.Fatalf("native=%d legacy=%d, want 1 and 4", nativeCalls, legacyCalls)
+	}
+}
+
 func fakeProviderConfig() config.Config {
 	cfg := config.Default()
 	cfg.RAG.DefaultProfile = "fake"
@@ -184,11 +341,21 @@ func newOllamaTestServer(t *testing.T, behavior ollamaServerBehavior) *httptest.
 		switch r.URL.Path {
 		case "/api/tags":
 			_ = json.NewEncoder(w).Encode(map[string]any{"models": behavior.models})
-		case "/api/embeddings":
+		case "/api/embed":
 			if behavior.embedding == nil {
 				behavior.embedding = []float64{0.1, 0.2, 0.3}
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"embedding": behavior.embedding})
+			var body struct {
+				Input []string `json:"input"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode batch request: %v", err)
+			}
+			embeddings := make([][]float64, len(body.Input))
+			for i := range embeddings {
+				embeddings[i] = behavior.embedding
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"embeddings": embeddings})
 		default:
 			http.NotFound(w, r)
 		}
