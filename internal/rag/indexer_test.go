@@ -2,7 +2,11 @@ package rag
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -127,6 +131,57 @@ func TestRAGIndexerFallsBackAndContinuesPastBadChunk(t *testing.T) {
 	}
 	if len(embeddings) != 2 {
 		t.Fatalf("embeddings=%d, want 2", len(embeddings))
+	}
+}
+
+func TestRAGIndexerRetriesNativeBatchAndDoesNotDuplicateCommittedEmbeddings(t *testing.T) {
+	ctx := context.Background()
+	store := newVectorTestStore(t, ctx)
+	defer store.Close()
+	mustUpsertVectorChunks(t, ctx, store, "fixture-a", []cache.Chunk{
+		vectorTestChunk("chunk-a", "ISSUE-1", "hash-a"),
+		vectorTestChunk("chunk-b", "ISSUE-1", "hash-b"),
+	})
+	var nativeCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			_ = json.NewEncoder(w).Encode(map[string]any{"models": []ollamaModel{{Name: "qwen3-embedding:0.6b", Digest: "sha256:test"}}})
+		case "/api/embed":
+			if atomic.AddInt32(&nativeCalls, 1) == 1 {
+				http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"embeddings": [][]float64{{1, 0}, {0, 1}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	provider := newTestOllamaProvider(t, server.URL, 2)
+	indexer := NewRAGIndexer(store, provider, RAGIndexerOptions{})
+
+	first, err := indexer.Run(ctx, IndexRequest{RepoID: "fixture-a", ChunkPolicyID: DefaultChunkPolicyID, BatchSize: 2})
+	if err != nil {
+		t.Fatalf("first Run returned error: %v", err)
+	}
+	if first.EmbeddedChunks != 2 || first.FailedChunks != 0 || nativeCalls != 2 {
+		t.Fatalf("first=%#v nativeCalls=%d", first, nativeCalls)
+	}
+	embeddings, err := store.ListChunkEmbeddings(ctx, cache.ChunkEmbeddingFilter{RepoID: "fixture-a", NamespaceID: first.NamespaceID})
+	if err != nil {
+		t.Fatalf("ListChunkEmbeddings returned error: %v", err)
+	}
+	if len(embeddings) != 2 {
+		t.Fatalf("embeddings=%d, want exactly 2", len(embeddings))
+	}
+
+	second, err := indexer.Run(ctx, IndexRequest{RepoID: "fixture-a", ChunkPolicyID: DefaultChunkPolicyID, BatchSize: 2})
+	if err != nil {
+		t.Fatalf("second Run returned error: %v", err)
+	}
+	if second.EmbeddedChunks != 0 || second.SkippedChunks != 2 || nativeCalls != 2 {
+		t.Fatalf("second=%#v nativeCalls=%d", second, nativeCalls)
 	}
 }
 

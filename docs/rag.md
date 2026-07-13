@@ -227,6 +227,29 @@ go test ./internal/rag -run TestOptionalOllamaRealModelSmoke
 
 If Ollama or the model is missing, the smoke test skips cleanly. Other provider failures fail the test.
 
+### Ollama batching
+
+The Ollama adapter uses the native [`POST /api/embed`](https://docs.ollama.com/api/embed) array input. One provider batch is sent as one request, and the returned vectors retain input order. Before the indexer can commit any vector from a batch, the adapter verifies both the complete response cardinality and every vector dimension.
+
+Transient request failures retry the same side-effect-free embedding request. A `404` or `405` specifically from `/api/embed` marks that endpoint unsupported for the provider instance and falls back to the legacy one-input endpoint; other failures do not silently change protocols. SQLite upserts remain keyed by repository, namespace, and chunk id, so a repeated index run skips already committed chunks instead of duplicating vectors.
+
+### End-to-end throughput benchmark
+
+The real-model benchmark is opt-in and intentionally lives in the test harness rather than the product command surface. It uses unique, exact-size 1 KiB and 4 KiB inputs at batch sizes 1, 8, 16, and 32. Each case starts from a fresh on-disk SQLite database and measures the complete indexing path after fixture setup: model/namespace checks, Ollama calls, float32 vector encoding, SQLite vector and run writes, and progress events.
+
+Run the sustained profile with a local Ollama model:
+
+```sh
+GITCODE_MCP_RAG_REAL_BENCHMARK=1 \
+GITCODE_MCP_RAG_BENCHMARK_MACHINE="Mac mini M4 Pro 24 GB" \
+GITCODE_MCP_RAG_BENCHMARK_CHUNKS_PER_CASE=256 \
+GITCODE_MCP_RAG_BENCHMARK_CORPUS_CHUNKS=5758376 \
+GITCODE_MCP_RAG_BENCHMARK_OUTPUT=/tmp/gitcode-mcp-rag-benchmark.json \
+go test ./internal/rag -run TestOptionalOllamaRealModelBenchmark -v -count=1
+```
+
+The JSON report is public-safe and records warmup time, throughput, p50/p95 provider-batch latency, first/second-half sustained throughput, Go heap peak, loaded Ollama model memory, SQLite growth, progress events, failures, and an estimated full-corpus duration. The default 256 chunks per case makes both sustained halves meaningful and must remain divisible by 32. Override the corpus count with the latest estimator output before using the ETA for capacity planning. Generated reports are local evidence; summarize them on the relevant GitCode issue or wiki page rather than committing them to `main`.
+
 ## Vector Store Escalation
 
 The MVP stores vectors in SQLite and performs an exact scan over the active namespace. That keeps dependencies small and predictable while caches are modest.
