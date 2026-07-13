@@ -53,6 +53,20 @@ When a real writer conflict remains, the caller should receive a typed cache-bus
 
 `gitcode-mcp sync` uses the live GitCode provider by default for a configured repository and uses the current cache as the durable local source for later reads. `gitcode-mcp sync --offline` or `gitcode-mcp sync --fixture` selects the deterministic fixture/offline provider for docs smoke and tests.
 
+Large collection sync can run through the local service job queue:
+
+```sh
+gitcode-mcp sync --repo YOUR_OWNER/YOUR_REPO --issues --pulls --pr-comments --daemon
+gitcode-mcp sync --repo YOUR_OWNER/YOUR_REPO --issues --pulls --pr-comments --detach
+gitcode-mcp service jobs
+gitcode-mcp service attach JOB_ID
+gitcode-mcp service cancel JOB_ID
+```
+
+`--daemon` starts a service-owned sync job and keeps the CLI attached to compact sync progress. `--detach` starts the same service-owned job and returns the job id immediately. The daemon path is collection-oriented; targeted `--id`/`--input` sync remains a foreground operation. Jobs use the same bulk sync service paths as foreground sync, so existing frontiers/checkpoints still drive resumability after bounded or interrupted collection sync.
+
+Service job state is stored separately from the cache in the service runtime `jobs.json` snapshot. It is operational state, not cache content: active jobs are always kept, completed/cancelled/failed/interrupted history is pruned to the latest 128 terminal jobs, and each job keeps only the latest 256 progress events. This keeps long-running sync/RAG observability bounded without deleting cached GitCode records.
+
 The sync command supports these live sync selectors:
 
 - `--repo REPO` selects the configured repository binding.

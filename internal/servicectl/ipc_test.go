@@ -3,11 +3,14 @@ package servicectl
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"gitcode-mcp/internal/service"
 )
 
 func TestRPCServiceStatusAndFakeJobLifecycle(t *testing.T) {
@@ -107,6 +110,76 @@ func TestJobManagerMarksRunningSnapshotInterrupted(t *testing.T) {
 		t.Fatalf("next job id = %q, want job-000008", next.ID)
 	}
 	waitForManagerJobTerminal(t, manager, next.ID)
+}
+
+func TestJobManagerPrunesStoredTerminalJobs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "jobs.json")
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	manager := NewJobManager(path)
+	manager.mu.Lock()
+	for i := 1; i <= maxStoredTerminalJobs+2; i++ {
+		finished := now.Add(time.Duration(i) * time.Minute)
+		id := fmt.Sprintf("job-%06d", i)
+		manager.jobs[id] = &Job{ID: id, Type: "fake", Status: JobStatusSucceeded, CreatedAt: now, UpdatedAt: finished, FinishedAt: &finished}
+	}
+	manager.jobs["job-active"] = &Job{ID: "job-active", Type: "fake", Status: JobStatusRunning, CreatedAt: now, UpdatedAt: now}
+	if err := manager.saveLocked(); err != nil {
+		manager.mu.Unlock()
+		t.Fatal(err)
+	}
+	manager.mu.Unlock()
+
+	if _, ok := manager.Get("job-000001"); ok {
+		t.Fatal("oldest terminal job was not pruned")
+	}
+	if _, ok := manager.Get("job-000002"); ok {
+		t.Fatal("second oldest terminal job was not pruned")
+	}
+	if _, ok := manager.Get("job-active"); !ok {
+		t.Fatal("active job was pruned")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jobs []Job
+	if err := json.Unmarshal(data, &jobs); err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != maxStoredTerminalJobs+1 {
+		t.Fatalf("stored jobs = %d, want %d", len(jobs), maxStoredTerminalJobs+1)
+	}
+}
+
+func TestJobManagerTrimsStoredProgressEvents(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "jobs.json")
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	manager := NewJobManager(path)
+	progress := make([]service.ProgressEvent, 0, maxStoredProgressEvents+3)
+	for i := 0; i < maxStoredProgressEvents+3; i++ {
+		progress = append(progress, service.ProgressEvent{Type: "records", Page: i + 1})
+	}
+	manager.mu.Lock()
+	manager.jobs["job-000001"] = &Job{ID: "job-000001", Type: "fake", Status: JobStatusSucceeded, CreatedAt: now, UpdatedAt: now, FinishedAt: &now, Progress: progress}
+	if err := manager.saveLocked(); err != nil {
+		manager.mu.Unlock()
+		t.Fatal(err)
+	}
+	manager.mu.Unlock()
+
+	job, ok := manager.Get("job-000001")
+	if !ok {
+		t.Fatal("job not stored")
+	}
+	if len(job.Progress) != maxStoredProgressEvents {
+		t.Fatalf("progress events = %d, want %d", len(job.Progress), maxStoredProgressEvents)
+	}
+	if job.Progress[0].Page != 4 {
+		t.Fatalf("first kept progress page = %d, want 4", job.Progress[0].Page)
+	}
 }
 
 func waitForManagerJobTerminal(t *testing.T, manager *JobManager, id string) Job {

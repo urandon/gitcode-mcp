@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -20,6 +21,9 @@ const (
 	JobStatusFailed      = "failed"
 	JobStatusCancelled   = "cancelled"
 	JobStatusInterrupted = "interrupted"
+
+	maxStoredTerminalJobs   = 128
+	maxStoredProgressEvents = 256
 )
 
 type Job struct {
@@ -89,6 +93,7 @@ func (m *JobManager) LoadAndMarkInterrupted() error {
 			job.Error = "service restarted before job completed"
 			job.Progress = append(job.Progress, service.ProgressEvent{Type: "interrupted", Phase: "interrupted", Message: job.Error})
 		}
+		trimJobProgress(&job)
 		idNum := parseJobIDNumber(job.ID)
 		if idNum > maxID {
 			maxID = idNum
@@ -251,6 +256,7 @@ func (m *JobManager) updateJob(id string, fn func(*Job, time.Time)) {
 		return
 	}
 	fn(job, m.now())
+	trimJobProgress(job)
 	_ = m.saveLocked()
 }
 
@@ -266,6 +272,7 @@ func (m *JobManager) saveLocked() error {
 	if m.snapshotPath == "" {
 		return nil
 	}
+	m.pruneLocked()
 	if err := os.MkdirAll(filepath.Dir(m.snapshotPath), 0o700); err != nil {
 		return err
 	}
@@ -279,6 +286,61 @@ func (m *JobManager) saveLocked() error {
 		return err
 	}
 	return os.WriteFile(m.snapshotPath, append(data, '\n'), 0o600)
+}
+
+func (m *JobManager) pruneLocked() {
+	if maxStoredTerminalJobs <= 0 {
+		return
+	}
+	terminal := make([]*Job, 0, len(m.jobs))
+	for _, job := range m.jobs {
+		if job == nil {
+			continue
+		}
+		trimJobProgress(job)
+		if jobTerminalStatus(job.Status) {
+			terminal = append(terminal, job)
+		}
+	}
+	if len(terminal) <= maxStoredTerminalJobs {
+		return
+	}
+	sort.Slice(terminal, func(i, j int) bool {
+		return terminalSortTime(terminal[i]).Before(terminalSortTime(terminal[j]))
+	})
+	for _, job := range terminal[:len(terminal)-maxStoredTerminalJobs] {
+		delete(m.jobs, job.ID)
+		delete(m.cancel, job.ID)
+	}
+}
+
+func jobTerminalStatus(status string) bool {
+	switch status {
+	case JobStatusSucceeded, JobStatusFailed, JobStatusCancelled, JobStatusInterrupted:
+		return true
+	default:
+		return false
+	}
+}
+
+func terminalSortTime(job *Job) time.Time {
+	if job == nil {
+		return time.Time{}
+	}
+	if job.FinishedAt != nil {
+		return *job.FinishedAt
+	}
+	if !job.UpdatedAt.IsZero() {
+		return job.UpdatedAt
+	}
+	return job.CreatedAt
+}
+
+func trimJobProgress(job *Job) {
+	if job == nil || maxStoredProgressEvents <= 0 || len(job.Progress) <= maxStoredProgressEvents {
+		return
+	}
+	job.Progress = append([]service.ProgressEvent(nil), job.Progress[len(job.Progress)-maxStoredProgressEvents:]...)
 }
 
 func cloneJob(job *Job) Job {

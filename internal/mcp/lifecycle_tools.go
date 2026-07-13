@@ -12,6 +12,7 @@ import (
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/service"
+	"gitcode-mcp/internal/servicectl"
 )
 
 type repoStatusArgs struct {
@@ -70,6 +71,8 @@ type syncLiveArgs struct {
 	MaxPages       int    `json:"max_pages,omitempty"`
 	MaxRecords     int    `json:"max_records,omitempty"`
 	PerPage        int    `json:"per_page,omitempty"`
+	Daemon         bool   `json:"daemon,omitempty"`
+	Detach         bool   `json:"detach,omitempty"`
 }
 
 type syncLiveResult struct {
@@ -80,6 +83,7 @@ type syncLiveResult struct {
 	FailureCount int                     `json:"failure_count"`
 	Results      []service.SyncResult    `json:"results,omitempty"`
 	Failures     []service.ResourceError `json:"failures,omitempty"`
+	Job          *servicectl.Job         `json:"job,omitempty"`
 	Diagnostics  []lifecycleDiagnostic   `json:"diagnostics,omitempty"`
 	GeneratedAt  time.Time               `json:"generated_at"`
 }
@@ -104,6 +108,29 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 	}
 	selected := syncLiveCollections(a)
 	result := syncLiveResult{RepoID: a.RepoID, Collections: selected, GeneratedAt: time.Now().UTC()}
+	if a.Daemon || a.Detach {
+		if strings.TrimSpace(a.RemoteAlias) != "" {
+			s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "daemon sync_live supports collection selectors only; omit remote_alias"})
+			return
+		}
+		if len(result.Collections) == 0 {
+			result.Collections = []string{"issues", "wiki"}
+		}
+		client, err := serviceRPCClient()
+		if err != nil {
+			s.writeDomainError(id, err)
+			return
+		}
+		var job servicectl.Job
+		if err := client.Call(ctx, "Jobs.StartSync", syncLiveJobRequest(a), &job); err != nil {
+			s.writeDomainError(id, err)
+			return
+		}
+		result.Job = &job
+		text := fmt.Sprintf("job=%s status=%s collections=%s", job.ID, job.Status, strings.Join(result.Collections, ","))
+		s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+		return
+	}
 	if mode, ok := lifecycleProviderMode(s.svc); ok && mode != gitcode.ProviderModeLive {
 		if len(result.Collections) == 0 {
 			result.Collections = []string{"issues", "wiki"}
@@ -195,6 +222,23 @@ func syncLiveBulkRequest(a syncLiveArgs) service.BulkSyncRequest {
 		req.Bounds = &service.SyncBounds{MaxPages: a.MaxPages, MaxRecords: a.MaxRecords}
 	}
 	return req
+}
+
+func syncLiveJobRequest(a syncLiveArgs) servicectl.StartSyncJobRequest {
+	return servicectl.StartSyncJobRequest{
+		RepoID:         strings.TrimSpace(a.RepoID),
+		ProviderMode:   string(gitcode.ProviderModeLive),
+		Issues:         a.Issues,
+		Wiki:           a.Wiki,
+		Pulls:          a.Pulls,
+		Comments:       a.Comments,
+		IssueComments:  a.IssueComments,
+		PRComments:     a.PRComments,
+		IdempotencyKey: strings.TrimSpace(a.IdempotencyKey),
+		MaxPages:       a.MaxPages,
+		MaxRecords:     a.MaxRecords,
+		PerPage:        a.PerPage,
+	}
 }
 
 func appendBulkSyncResult(dst *syncLiveResult, src *service.SyncResourcesResult) {
