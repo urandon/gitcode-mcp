@@ -405,7 +405,7 @@ func TestMCPBlockedWriteBoundary(t *testing.T) {
 		blocked := map[string]bool{
 			"sync_live": false, "index_repo": false,
 			"add_issue_comment": false, "update_issue_comment": false, "update_issue": false,
-			"create_pr": false, "update_pr": false, "add_pr_comment": false, "add_pr_review_comment": false, "link_pr_issue": false,
+			"create_pr": false, "update_pr": false, "add_pr_comment": false, "add_pr_review_comment": false, "reply_pr_review_comment": false, "link_pr_issue": false,
 			"create_issue": false, "add_comment": false,
 			"create_page": false, "update_page": false, "delete_page": false, "add_label": false,
 			"create-issue": false, "update-issue": false, "add-label": false,
@@ -1091,7 +1091,7 @@ func TestMCPLifecycleTools(t *testing.T) {
 	for _, tool := range tls.Tools {
 		listed[tool.Name] = true
 	}
-	for _, name := range []string{"repo_status", "sync_live", "create_issue", "add_issue_comment", "update_issue_comment", "update_issue", "create_pr", "update_pr", "add_pr_comment", "add_pr_review_comment", "link_pr_issue", "create_page", "update_page", "delete_page", "add_label", "index_repo", "auth_status", "doctor"} {
+	for _, name := range []string{"repo_status", "sync_live", "create_issue", "add_issue_comment", "update_issue_comment", "update_issue", "create_pr", "update_pr", "add_pr_comment", "add_pr_review_comment", "reply_pr_review_comment", "link_pr_issue", "create_page", "update_page", "delete_page", "add_label", "index_repo", "auth_status", "doctor"} {
 		if !listed[name] {
 			t.Fatalf("tools/list missing lifecycle tool %q", name)
 		}
@@ -1330,6 +1330,10 @@ func (s *writeLifecycleSpyService) AddPRReviewComment(_ context.Context, req ser
 	return s.record("add-pr-review-comment", req)
 }
 
+func (s *writeLifecycleSpyService) ReplyPRReviewComment(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	return s.record("reply-pr-review-comment", req)
+}
+
 func (s *writeLifecycleSpyService) LinkPRIssue(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
 	return s.record("link-pr-issue", req)
 }
@@ -1379,6 +1383,7 @@ func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 	call("update_pr", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "body": "new body", "idempotency_key": "update-pr-key"})
 	call("add_pr_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "body": "tested", "idempotency_key": "pr-comment-key"})
 	call("add_pr_review_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "path": "internal/service/service.go", "line": 42, "position": 9, "body": "inline", "idempotency_key": "pr-review-comment-key"})
+	call("reply_pr_review_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "discussion_id": "D7", "parent_comment_id": "302", "body": "confirmed", "idempotency_key": "pr-review-reply-key"})
 	call("link_pr_issue", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "pr_number": 7, "issue_number": 16, "strategy": "auto", "idempotency_key": "link-key"})
 	call("create_page", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "slug": "docs/parity", "title": "Parity", "body": "wiki body", "idempotency_key": "create-page-key"})
 	call("update_page", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "id": "docs/parity", "path": "docs/parity.md", "sha": "sha-1", "title": "Parity updated", "body": "updated body", "idempotency_key": "update-page-key"})
@@ -1419,6 +1424,9 @@ func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 	}
 	if req := assertReq("add-pr-review-comment"); req.Number != 7 || req.Body != "inline" || req.Path != "internal/service/service.go" || req.Line != 42 || req.Position != 9 {
 		t.Fatalf("add-pr-review-comment req=%#v", req)
+	}
+	if req := assertReq("reply-pr-review-comment"); req.Number != 7 || req.DiscussionID != "D7" || req.ParentID != "302" || req.Body != "confirmed" {
+		t.Fatalf("reply-pr-review-comment req=%#v", req)
 	}
 	if req := assertReq("link-pr-issue"); req.Number != 7 || req.IssueNumber != 16 || req.Strategy != "auto" {
 		t.Fatalf("link-pr-issue req=%#v", req)

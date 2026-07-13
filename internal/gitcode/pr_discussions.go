@@ -89,8 +89,15 @@ func prDiscussionsToComments(discussions []prDiscussion, prNumber int) ([]PRComm
 		if err != nil {
 			return nil, err
 		}
+		rootID := ""
+		if len(discussion.Notes) > 0 {
+			rootID, err = decodeOptionalID(discussion.Notes[0].ID)
+			if err != nil {
+				return nil, err
+			}
+		}
 		for i, note := range discussion.Notes {
-			comment, err := prDiscussionNoteToComment(discussionID, i, note, prNumber)
+			comment, err := prDiscussionNoteToComment(discussionID, rootID, i, note, prNumber)
 			if err != nil {
 				return nil, err
 			}
@@ -102,7 +109,7 @@ func prDiscussionsToComments(discussions []prDiscussion, prNumber int) ([]PRComm
 	return out, nil
 }
 
-func prDiscussionNoteToComment(discussionID string, index int, note prDiscussionNote, prNumber int) (PRComment, error) {
+func prDiscussionNoteToComment(discussionID, rootID string, index int, note prDiscussionNote, prNumber int) (PRComment, error) {
 	id, err := decodeOptionalID(note.ID)
 	if err != nil {
 		return PRComment{}, err
@@ -135,7 +142,7 @@ func prDiscussionNoteToComment(discussionID string, index int, note prDiscussion
 		return PRComment{}, err
 	}
 	if parentID == "" && index > 0 {
-		parentID = discussionID
+		parentID = rootID
 	}
 	path := firstNonEmpty(note.FilePath, note.DiffFile)
 	if note.Position != nil {

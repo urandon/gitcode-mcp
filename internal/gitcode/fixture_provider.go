@@ -235,6 +235,10 @@ func (p *fixtureProvider) CreatePRReviewComment(context.Context, CreatePRReviewC
 	return WriteResult[PRComment]{}, FixtureReadOnlyError("CreatePRReviewComment")
 }
 
+func (p *fixtureProvider) ReplyPRReviewComment(context.Context, ReplyPRReviewCommentRequest, WriteOptions) (WriteResult[PRComment], error) {
+	return WriteResult[PRComment]{}, FixtureReadOnlyError("ReplyPRReviewComment")
+}
+
 func (p *fixtureProvider) CreateWikiPage(context.Context, CreateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error) {
 	return WriteResult[WikiPage]{}, FixtureReadOnlyError("CreateWikiPage")
 }

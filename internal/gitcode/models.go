@@ -81,6 +81,15 @@ type CreatePRReviewCommentRequest struct {
 	EndLine   int    `json:"end_line,omitempty"`
 }
 
+type ReplyPRReviewCommentRequest struct {
+	Owner           string `json:"-"`
+	Repo            string `json:"-"`
+	Number          int    `json:"-"`
+	DiscussionID    string `json:"-"`
+	ParentCommentID string `json:"-"`
+	Body            string `json:"body"`
+}
+
 type LinkPRIssueRequest struct {
 	Owner       string `json:"-"`
 	Repo        string `json:"-"`
@@ -538,6 +547,8 @@ type PRComment struct {
 	Resolved         *bool               `json:"resolved,omitempty"`
 	Resolvable       *bool               `json:"resolvable,omitempty"`
 	ParentID         string              `json:"parent_id,omitempty"`
+	Replies          []PRComment         `json:"-"`
+	Thread           []PRComment         `json:"-"`
 	Positions        []PRCommentPosition `json:"positions,omitempty"`
 	PRNumber         int                 `json:"-"`
 	CreatedAt        time.Time           `json:"created_at"`
@@ -583,13 +594,14 @@ func (c *PRComment) UnmarshalJSON(data []byte) error {
 		NewLine          any             `json:"new_line"`
 		StartLine        any             `json:"start_line"`
 		EndLine          any             `json:"end_line"`
-		Position         any             `json:"position"`
+		Position         json.RawMessage `json:"position"`
 		OriginalPosition any             `json:"original_position"`
 		Resolved         *bool           `json:"resolved"`
 		Resolvable       *bool           `json:"resolvable"`
 		ParentID         any             `json:"parent_id"`
 		InReplyToID      any             `json:"in_reply_to_id"`
 		ReplyID          any             `json:"reply_id"`
+		Replies          []PRComment     `json:"reply"`
 		CreatedAt        string          `json:"created_at"`
 		UpdatedAt        string          `json:"updated_at"`
 	}
@@ -624,7 +636,7 @@ func (c *PRComment) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
-	position, err := decodeOptionalInt(raw.Position)
+	position, positions, positionPath, positionLine, err := decodePRCommentPosition(raw.Position)
 	if err != nil {
 		return err
 	}
@@ -636,14 +648,41 @@ func (c *PRComment) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
-	path := firstNonEmpty(raw.Path, raw.FilePath, raw.NewPath)
+	path := firstNonEmpty(raw.Path, raw.FilePath, raw.NewPath, positionPath)
+	if line == 0 {
+		line = positionLine
+	}
 	reviewKind := "general"
 	rawKind := strings.ToLower(firstNonEmpty(raw.Kind, raw.Type, raw.NoteableType))
 	if path != "" || line > 0 || position > 0 || strings.Contains(rawKind, "inline") || strings.Contains(rawKind, "diff") {
 		reviewKind = "inline"
 	}
-	*c = PRComment{Kind: "pr_comment", ID: id, Body: raw.Body, Author: firstNonEmpty(raw.Author, decodeActor(raw.User)), DiscussionID: discussionID, ReviewKind: reviewKind, Path: path, Line: line, StartLine: startLine, EndLine: endLine, Position: position, OriginalPosition: originalPosition, Resolved: raw.Resolved, Resolvable: raw.Resolvable, ParentID: parentID, CreatedAt: created, UpdatedAt: updated}
+	*c = PRComment{Kind: "pr_comment", ID: id, Body: raw.Body, Author: firstNonEmpty(raw.Author, decodeActor(raw.User)), DiscussionID: discussionID, ReviewKind: reviewKind, Path: path, Line: line, StartLine: startLine, EndLine: endLine, Position: position, OriginalPosition: originalPosition, Resolved: raw.Resolved, Resolvable: raw.Resolvable, ParentID: parentID, Replies: raw.Replies, Positions: positions, CreatedAt: created, UpdatedAt: updated}
 	return nil
+}
+
+func decodePRCommentPosition(raw json.RawMessage) (int, []PRCommentPosition, string, int, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, nil, "", 0, nil
+	}
+	var scalar any
+	if err := json.Unmarshal(raw, &scalar); err != nil {
+		return 0, nil, "", 0, err
+	}
+	if _, ok := scalar.(map[string]any); !ok {
+		position, err := decodeOptionalInt(scalar)
+		return position, nil, "", 0, err
+	}
+	var diff prDiffPosition
+	if err := json.Unmarshal(raw, &diff); err != nil {
+		return 0, nil, "", 0, err
+	}
+	position, err := prDiffPositionToCommentPosition("current", &diff, nil)
+	if err != nil {
+		return 0, nil, "", 0, err
+	}
+	line := firstPositive(position.NewLine, position.OldLine)
+	return 0, []PRCommentPosition{position}, firstNonEmpty(position.NewPath, position.OldPath), line, nil
 }
 
 func pullRequestSourceID(number int) string {

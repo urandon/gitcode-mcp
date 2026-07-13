@@ -140,13 +140,71 @@ func (c *HTTPClient) ListPRComments(ctx context.Context, req PRRequest) (Page[PR
 	if err != nil {
 		return Page[PRComment]{}, err
 	}
-	for i := range items {
-		items[i].PRNumber = req.Number
-		if items[i].DiscussionID == "" {
-			items[i].DiscussionID = strconv.Itoa(req.Number)
+	items = flattenPRCommentReplies(items, req.Number)
+	values := url.Values{"page": {"1"}, "per_page": {"100"}, "sort": {"asc"}, "type": {"user"}}
+	if body, _, discussionErr := c.getBytes(ctx, listPRDiscussionsEndpoint(req.Owner, req.Repo, req.Number), values); discussionErr == nil {
+		if discussionItems, decodeErr := decodePRDiscussionComments(listPRDiscussionsEndpoint(req.Owner, req.Repo, req.Number), body, req.Number); decodeErr == nil {
+			items = mergePRCommentRepresentations(items, discussionItems)
 		}
 	}
 	return Page[PRComment]{Items: items, Page: page.Page, PerPage: page.PerPage}, nil
+}
+
+func flattenPRCommentReplies(items []PRComment, prNumber int) []PRComment {
+	flattened := make([]PRComment, 0, len(items))
+	for _, root := range items {
+		root.PRNumber = prNumber
+		if root.DiscussionID == "" {
+			root.DiscussionID = strconv.Itoa(prNumber)
+		}
+		replies := root.Replies
+		root.Replies = nil
+		flattened = append(flattened, root)
+		for _, reply := range replies {
+			reply.PRNumber = prNumber
+			reply.DiscussionID = firstNonEmpty(reply.DiscussionID, root.DiscussionID)
+			reply.ParentID = firstNonEmpty(reply.ParentID, root.ID)
+			reply.ReviewKind = firstNonEmpty(reply.ReviewKind, root.ReviewKind)
+			reply.Path = firstNonEmpty(reply.Path, root.Path)
+			reply.Line = firstPositive(reply.Line, root.Line)
+			if len(reply.Positions) == 0 {
+				reply.Positions = append([]PRCommentPosition(nil), root.Positions...)
+			}
+			flattened = append(flattened, reply)
+		}
+	}
+	return flattened
+}
+
+func mergePRCommentRepresentations(v5, discussions []PRComment) []PRComment {
+	v5ByID := make(map[string]PRComment, len(v5))
+	for _, comment := range v5 {
+		v5ByID[comment.ID] = comment
+	}
+	merged := make([]PRComment, 0, len(v5)+len(discussions))
+	seen := make(map[string]bool, len(v5)+len(discussions))
+	for _, comment := range discussions {
+		if fallback, ok := v5ByID[comment.ID]; ok {
+			comment.ParentID = firstNonEmpty(comment.ParentID, fallback.ParentID)
+			comment.DiscussionID = firstNonEmpty(comment.DiscussionID, fallback.DiscussionID)
+			comment.Body = firstNonEmpty(comment.Body, fallback.Body)
+			comment.Author = firstNonEmpty(comment.Author, fallback.Author)
+			if comment.CreatedAt.IsZero() {
+				comment.CreatedAt = fallback.CreatedAt
+			}
+			if comment.UpdatedAt.IsZero() {
+				comment.UpdatedAt = fallback.UpdatedAt
+			}
+		}
+		merged = append(merged, comment)
+		seen[comment.ID] = true
+	}
+	for _, comment := range v5 {
+		if !seen[comment.ID] {
+			merged = append(merged, comment)
+		}
+	}
+	return merged
 }
 
 func (c *HTTPClient) CreatePR(ctx context.Context, req CreatePRRequest, opts WriteOptions) (WriteResult[PullRequest], error) {
@@ -465,6 +523,92 @@ func (c *HTTPClient) CreatePRReviewComment(ctx context.Context, req CreatePRRevi
 		ParentIssueID:              result.ParentIssueID,
 		ConfirmedAt:                result.ConfirmedAt,
 	}, nil
+}
+
+func (c *HTTPClient) ReplyPRReviewComment(ctx context.Context, req ReplyPRReviewCommentRequest, opts WriteOptions) (WriteResult[PRComment], error) {
+	if err := validateReplyPRReviewComment(req); err != nil {
+		return WriteResult[PRComment]{}, err
+	}
+	target := req.Owner + "/" + req.Repo + "/pulls/" + strconv.Itoa(req.Number) + "/discussions/" + req.DiscussionID
+	key := strings.TrimSpace(opts.IdempotencyKey)
+	if key == "" {
+		key = GenerateIdempotencyKey("ReplyPRReviewComment", target, req, opts)
+		opts.IdempotencyKey = key
+	}
+	comments, err := c.ListPRComments(ctx, PRRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
+	if err != nil {
+		return WriteResult[PRComment]{}, err
+	}
+	parentFound := false
+	thread := make([]PRComment, 0)
+	var existing *PRComment
+	for _, comment := range comments.Items {
+		if comment.DiscussionID == req.DiscussionID {
+			thread = append(thread, comment)
+		}
+		if comment.ID == req.ParentCommentID && comment.DiscussionID == req.DiscussionID {
+			parentFound = true
+		}
+		if comment.DiscussionID == req.DiscussionID && comment.ParentID == req.ParentCommentID && comment.Body == req.Body {
+			copy := comment
+			existing = &copy
+		}
+	}
+	if existing != nil {
+		existing.Thread = thread
+		return confirmedExistingPRReviewReply(*existing, target, key), nil
+	}
+	if !parentFound {
+		return WriteResult[PRComment]{}, ErrValidationFailed{Field: "parent_comment_id", Message: "parent comment must belong to the requested discussion"}
+	}
+	endpoint := replyPRReviewCommentEndpoint(req.Owner, req.Repo, req.Number, req.DiscussionID)
+	result, err := writeConfirmedSchemaJSON[PRComment](ctx, c, http.MethodPost, endpoint, "ReplyPRReviewComment", target, struct {
+		Body string `json:"body"`
+	}{Body: req.Body}, opts, func(result WriteResult[PRComment]) (WriteResult[PRComment], error) {
+		if strings.TrimSpace(result.Record.ID) == "" {
+			return WriteResult[PRComment]{}, &ErrSchemaDecode{Field: "pr_review_reply.id", Expected: "note_id", Received: "missing"}
+		}
+		result.Record.Body = firstNonEmpty(result.Record.Body, req.Body)
+		result.Record.DiscussionID = req.DiscussionID
+		result.Record.ParentID = req.ParentCommentID
+		result.Record.PRNumber = req.Number
+		result.Record.ReviewKind = "inline"
+		result.RemoteID = result.Record.ID
+		result.ParentIssueNumber = req.Number
+		result.ParentIssueID = req.DiscussionID
+		return result, nil
+	})
+	if err != nil {
+		return WriteResult[PRComment]{}, err
+	}
+	readback, err := c.ListPRComments(ctx, PRRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
+	if err != nil {
+		return WriteResult[PRComment]{}, err
+	}
+	thread = thread[:0]
+	var confirmed *PRComment
+	for _, comment := range readback.Items {
+		if comment.DiscussionID == req.DiscussionID {
+			thread = append(thread, comment)
+		}
+		if comment.ID == result.RemoteID && comment.DiscussionID == req.DiscussionID && comment.ParentID == req.ParentCommentID && comment.Body == req.Body {
+			copy := comment
+			confirmed = &copy
+		}
+	}
+	if confirmed != nil {
+		confirmed.Thread = thread
+		result.Record = *confirmed
+		result.ProviderStatus += "-readback"
+		return result, nil
+	}
+	return WriteResult[PRComment]{}, ErrValidationFailed{Field: "response", Message: "reply write was not confirmed by discussion readback"}
+}
+
+func confirmedExistingPRReviewReply(comment PRComment, target, key string) WriteResult[PRComment] {
+	payload, _ := json.Marshal(comment)
+	hash := sha256.Sum256(payload)
+	return WriteResult[PRComment]{Record: comment, Confirmed: true, Operation: "ReplyPRReviewComment", Target: target, ProviderStatus: "readback-existing", IdempotencyKey: key, ResponseHash: hex.EncodeToString(hash[:]), ProviderPayloadFingerprint: hex.EncodeToString(hash[:]), RemoteID: comment.ID, ParentIssueNumber: comment.PRNumber, ParentIssueID: comment.DiscussionID, ConfirmedAt: time.Now().UTC()}
 }
 
 func (c *HTTPClient) CreateWikiPage(ctx context.Context, req CreateWikiPageRequest, opts WriteOptions) (WriteResult[WikiPage], error) {
@@ -1245,6 +1389,25 @@ func validateCreatePRReviewComment(req CreatePRReviewCommentRequest) error {
 	}
 	if req.StartLine > 0 && req.EndLine > 0 && req.StartLine > req.EndLine {
 		return ErrValidationFailed{Field: "start_line", Message: "start_line must be less than or equal to end_line"}
+	}
+	return nil
+}
+
+func validateReplyPRReviewComment(req ReplyPRReviewCommentRequest) error {
+	if err := validateWriteRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if req.Number <= 0 {
+		return ErrValidationFailed{Field: "number", Message: "positive pull request number is required"}
+	}
+	if strings.TrimSpace(req.DiscussionID) == "" {
+		return ErrValidationFailed{Field: "discussion_id", Message: "discussion id is required"}
+	}
+	if strings.TrimSpace(req.ParentCommentID) == "" {
+		return ErrValidationFailed{Field: "parent_comment_id", Message: "parent comment id is required"}
+	}
+	if strings.TrimSpace(req.Body) == "" {
+		return ErrValidationFailed{Field: "body", Message: "comment body is required"}
 	}
 	return nil
 }

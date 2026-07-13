@@ -142,6 +142,7 @@ The MCP server exposes the same audited live-write lifecycle for agent workflows
 | `clear_issue_milestone` | Clear an issue milestone and verify by readback |
 | `add_pr_comment` | Add a testing/report comment to a pull request |
 | `add_pr_review_comment` | Create an inline pull request review comment on a changed file line or diff position |
+| `reply_pr_review_comment` | Reply inside an inline pull request review discussion with readback |
 | `link_pr_issue` | Link a pull request to an issue through the GitCode relation API with fallback |
 | `create_page` | Create a live wiki page |
 | `update_page` | Update a live wiki page |

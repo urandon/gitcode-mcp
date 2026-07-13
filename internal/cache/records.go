@@ -24,6 +24,17 @@ func (s *SQLiteStore) UpsertRecordGraph(ctx context.Context, graph RecordGraph) 
 	if err = upsertRecordTx(ctx, tx, graph.Record); err != nil {
 		return err
 	}
+	for _, record := range graph.RelatedRecords {
+		if err = upsertSourceTx(ctx, tx, sourceFromRecord(record)); err != nil {
+			return err
+		}
+		if err = upsertSearchProjectionTx(ctx, tx, sourceFromRecord(record), s.useFTS); err != nil {
+			return err
+		}
+		if err = upsertRecordTx(ctx, tx, record); err != nil {
+			return err
+		}
+	}
 	for _, comment := range graph.Comments {
 		if comment.RepoID == "" {
 			comment.RepoID = graph.Record.RepoID

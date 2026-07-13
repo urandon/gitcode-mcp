@@ -828,7 +828,9 @@ func TestScenario016MCPWriteLifecycleCreatePRAndComment(t *testing.T) {
 		createPRResult:              gitcode.WriteResult[gitcode.PullRequest]{Record: gitcode.PullRequest{ID: "9001", Number: 7, Title: "Add MCP writes", Body: "body", State: "open", Base: "main", Head: "topic", CreatedAt: created, UpdatedAt: created}, Confirmed: true, Operation: "CreatePR", RemoteID: "9001", RemoteNumber: 7, ConfirmedAt: created},
 		createPRCommentResult:       gitcode.WriteResult[gitcode.PRComment]{Record: gitcode.PRComment{ID: "301", Body: "tested", Author: "bot", CreatedAt: created}, Confirmed: true, Operation: "CreatePRComment", RemoteID: "301", ParentIssueNumber: 7, ParentIssueID: "7", ConfirmedAt: created},
 		createPRReviewCommentResult: gitcode.WriteResult[gitcode.PRComment]{Record: gitcode.PRComment{ID: "302", Body: "inline", Author: "bot", DiscussionID: "D7", ReviewKind: "inline", Path: "internal/service/service.go", Line: 42, Position: 9, Positions: []gitcode.PRCommentPosition{{PositionKind: "current", PositionType: "text", BaseSHA: "base-sha", StartSHA: "base-sha", HeadSHA: "head-sha", OldPath: "internal/service/service.go", NewPath: "internal/service/service.go", NewLine: 42, LineCode: "line-code", Side: "new"}}, CreatedAt: created, UpdatedAt: created}, Confirmed: true, Operation: "CreatePRReviewComment", RemoteID: "302", ParentIssueNumber: 7, ParentIssueID: "D7", ConfirmedAt: created},
+		replyPRReviewCommentResult:  gitcode.WriteResult[gitcode.PRComment]{Record: gitcode.PRComment{ID: "303", Body: "confirmed", Author: "bot", DiscussionID: "D7", ParentID: "302", ReviewKind: "inline", Path: "internal/service/service.go", Line: 42, Positions: []gitcode.PRCommentPosition{{PositionKind: "current", PositionType: "text", BaseSHA: "base-sha", StartSHA: "base-sha", HeadSHA: "head-sha", NewPath: "internal/service/service.go", NewLine: 42, Side: "new"}}, CreatedAt: created, UpdatedAt: created}, Confirmed: true, Operation: "ReplyPRReviewComment", RemoteID: "303", ParentIssueNumber: 7, ParentIssueID: "D7", ConfirmedAt: created},
 	}
+	client.replyPRReviewCommentResult.Record.Thread = []gitcode.PRComment{{ID: "302", Body: "inline", Author: "bot", DiscussionID: "D7", ReviewKind: "inline", Path: "internal/service/service.go", Line: 42, Positions: []gitcode.PRCommentPosition{{PositionKind: "current", PositionType: "text", BaseSHA: "base-sha", StartSHA: "base-sha", HeadSHA: "head-sha", NewPath: "internal/service/service.go", NewLine: 42, Side: "new"}}, CreatedAt: created, UpdatedAt: created}}
 	svc := NewWithClient(store, client)
 	svc.providerMode = gitcode.ProviderModeLive
 	svc.writeCredentialPresent = true
@@ -889,6 +891,40 @@ func TestScenario016MCPWriteLifecycleCreatePRAndComment(t *testing.T) {
 	}
 	if len(positionRows) != 1 || positionRows[0].NewPath != "internal/service/service.go" || positionRows[0].NewLine != 42 || positionRows[0].LineCode != "line-code" {
 		t.Fatalf("position rows=%+v", positionRows)
+	}
+	reply, err := svc.ReplyPRReviewComment(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 7, DiscussionID: "D7", ParentID: "302", Body: "confirmed", IdempotencyKey: "pr-review-reply-key"})
+	if err != nil {
+		t.Fatalf("ReplyPRReviewComment live returned error: %v", err)
+	}
+	if reply.Status != "succeeded" || reply.ID != "PRCOMMENT-7-303" || reply.RemoteID != "303" || client.replyPRReviewCommentCalls != 1 {
+		t.Fatalf("unexpected PR review reply=%+v calls=%d", reply, client.replyPRReviewCommentCalls)
+	}
+	if client.lastReplyPRReviewCommentReq.DiscussionID != "D7" || client.lastReplyPRReviewCommentReq.ParentCommentID != "302" || client.lastWriteOptions.IdempotencyKey != "pr-review-reply-key" {
+		t.Fatalf("reply request=%#v opts=%#v", client.lastReplyPRReviewCommentReq, client.lastWriteOptions)
+	}
+	replyRows, err := store.ListPRReviewComments(ctx, cache.PRReviewCommentFilter{RepoID: "fixture-a", PRNumber: 7, SourceID: "PRCOMMENT-7-303"})
+	if err != nil {
+		t.Fatalf("list reply comments: %v", err)
+	}
+	if len(replyRows) != 1 || replyRows[0].DiscussionID != "D7" || replyRows[0].ParentID != "302" {
+		t.Fatalf("reply rows=%+v", replyRows)
+	}
+	replyRecord, err := store.GetRecord(ctx, "fixture-a", "PRCOMMENT-7-303")
+	if err != nil || replyRecord.Body != "confirmed" {
+		t.Fatalf("reply record=%+v err=%v", replyRecord, err)
+	}
+	discussions, err := svc.ListPRDiscussions(ctx, PRDiscussionRequest{RepoID: "fixture-a", Number: 7})
+	if err != nil {
+		t.Fatalf("list cached reply discussion: %v", err)
+	}
+	var reviewDiscussion *PRDiscussion
+	for i := range discussions.Discussions {
+		if discussions.Discussions[i].ID == "D7" {
+			reviewDiscussion = &discussions.Discussions[i]
+		}
+	}
+	if reviewDiscussion == nil || len(reviewDiscussion.Comments) != 2 || reviewDiscussion.Comments[0].ID != "302" || reviewDiscussion.Comments[1].ID != "303" {
+		t.Fatalf("cached discussions=%+v", discussions.Discussions)
 	}
 }
 
@@ -2683,6 +2719,7 @@ type fakeGitCodeClient struct {
 	linkPRIssueCalls             int
 	createPRCommentCalls         int
 	createPRReviewCommentCalls   int
+	replyPRReviewCommentCalls    int
 	createWikiPageCalls          int
 	addLabelCalls                int
 	getReleaseCalls              int
@@ -2702,6 +2739,7 @@ type fakeGitCodeClient struct {
 	updateMilestoneResult        gitcode.WriteResult[gitcode.Milestone]
 	createPRCommentResult        gitcode.WriteResult[gitcode.PRComment]
 	createPRReviewCommentResult  gitcode.WriteResult[gitcode.PRComment]
+	replyPRReviewCommentResult   gitcode.WriteResult[gitcode.PRComment]
 	createWikiPageResult         gitcode.WriteResult[gitcode.WikiPage]
 	addLabelResult               gitcode.WriteResult[gitcode.Issue]
 	release                      gitcode.Release
@@ -2737,6 +2775,7 @@ type fakeGitCodeClient struct {
 	lastUpdateMilestoneRequest   gitcode.MilestoneWriteRequest
 	lastCreatePRCommentReq       gitcode.CreatePRCommentRequest
 	lastCreatePRReviewCommentReq gitcode.CreatePRReviewCommentRequest
+	lastReplyPRReviewCommentReq  gitcode.ReplyPRReviewCommentRequest
 	lastWriteOptions             gitcode.WriteOptions
 	lastCreateReleaseReq         gitcode.ReleaseWriteRequest
 	lastUpdateReleaseReq         gitcode.ReleaseWriteRequest
@@ -2907,6 +2946,15 @@ func (f *fakeGitCodeClient) CreatePRReviewComment(_ context.Context, req gitcode
 		return gitcode.WriteResult[gitcode.PRComment]{}, err
 	}
 	return f.createPRReviewCommentResult, nil
+}
+func (f *fakeGitCodeClient) ReplyPRReviewComment(_ context.Context, req gitcode.ReplyPRReviewCommentRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PRComment], error) {
+	f.replyPRReviewCommentCalls++
+	f.lastReplyPRReviewCommentReq = req
+	f.lastWriteOptions = opts
+	if err := f.nextError(); err != nil {
+		return gitcode.WriteResult[gitcode.PRComment]{}, err
+	}
+	return f.replyPRReviewCommentResult, nil
 }
 func (f *fakeGitCodeClient) CreatePR(_ context.Context, req gitcode.CreatePRRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PullRequest], error) {
 	f.createPRCalls++

@@ -364,6 +364,7 @@ type RecordFilter struct {
 
 type RecordGraph struct {
 	Record              Record
+	RelatedRecords      []Record
 	Comments            []RecordComment
 	PRReviewComments    []PRReviewComment
 	PRReviewDiscussions []PRReviewDiscussion

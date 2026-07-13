@@ -221,6 +221,10 @@ func (sanitizedFixtureClient) CreatePRReviewComment(context.Context, gitcode.Cre
 	return gitcode.WriteResult[gitcode.PRComment]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
+func (sanitizedFixtureClient) ReplyPRReviewComment(context.Context, gitcode.ReplyPRReviewCommentRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PRComment], error) {
+	return gitcode.WriteResult[gitcode.PRComment]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
+}
+
 func (sanitizedFixtureClient) CreateWikiPage(context.Context, gitcode.CreateWikiPageRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.WikiPage], error) {
 	return gitcode.WriteResult[gitcode.WikiPage]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
@@ -2610,6 +2614,13 @@ func (s *Service) AddPRReviewComment(ctx context.Context, req WriteCommandReques
 	return s.executeWrite(ctx, "add-pr-review-comment", req, RepositoryScopeIssues)
 }
 
+func (s *Service) ReplyPRReviewComment(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if req.Number == 0 || strings.TrimSpace(req.Body) == "" || strings.TrimSpace(req.DiscussionID) == "" || strings.TrimSpace(req.ParentID) == "" {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "pr_review_reply", Message: "pull request number, discussion id, parent comment id, and body are required"}
+	}
+	return s.executeWrite(ctx, "reply-pr-review-comment", req, RepositoryScopeIssues)
+}
+
 func (s *Service) LinkPRIssue(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
 	if req.Number == 0 || req.IssueNumber == 0 {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "link", Message: "pull request number and issue number are required"}
@@ -4082,6 +4093,12 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
 		return s.prCommentWriteGraph(ctx, route.RepoID, req.Number, result.Record, result, now)
+	case "reply-pr-review-comment":
+		result, err := s.client.ReplyPRReviewComment(ctx, gitcode.ReplyPRReviewCommentRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, DiscussionID: req.DiscussionID, ParentCommentID: req.ParentID, Body: req.Body}, opts)
+		if err != nil {
+			return writeConfirmation{}, cache.RecordGraph{}, err
+		}
+		return s.prCommentThreadWriteGraph(ctx, route.RepoID, req.Number, result, now)
 	case "link-pr-issue":
 		if strings.TrimSpace(req.Strategy) != "description_fallback" {
 			result, err := s.client.LinkPRIssue(ctx, gitcode.LinkPRIssueRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, IssueNumber: req.IssueNumber}, opts)
@@ -4306,6 +4323,12 @@ func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID s
 		result := gitcode.WriteResult[gitcode.PRComment]{Record: comment, Confirmed: true, RemoteID: prior.RemoteID, ParentIssueNumber: number, ParentIssueID: strconv.Itoa(number), RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
 		_, graph, err := s.prCommentWriteGraph(ctx, repoID, number, comment, result, now)
 		return graph, err
+	case "reply-pr-review-comment":
+		number := req.Number
+		comment := gitcode.PRComment{ID: prior.RemoteID, Body: req.Body, PRNumber: number, DiscussionID: req.DiscussionID, ParentID: req.ParentID, ReviewKind: "inline", CreatedAt: now, UpdatedAt: now}
+		result := gitcode.WriteResult[gitcode.PRComment]{Record: comment, Confirmed: true, RemoteID: prior.RemoteID, ParentIssueNumber: number, ParentIssueID: req.DiscussionID, RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
+		_, graph, err := s.prCommentWriteGraph(ctx, repoID, number, comment, result, now)
+		return graph, err
 	case "create-page", "update-page", "delete-page":
 		page := gitcode.WikiPage{ID: prior.RemoteID, Slug: firstNonEmptyString(req.Path, req.Slug, req.ID, prior.RemoteID), Title: req.Title, Body: req.Body, Revision: firstNonEmptyString(prior.Message, prior.PayloadHash), CreatedAt: now, UpdatedAt: now}
 		if page.Title == "" {
@@ -4435,6 +4458,35 @@ func (s *Service) prCommentWriteGraph(ctx context.Context, repoID string, number
 		graph.RemoteRevisions[0].RemoteRevision = revision
 	}
 	return writeConfirmation{confirmed: result.Confirmed, remoteID: remoteCommentID, remoteNumber: comment.PRNumber, remoteRevision: revision, message: result.Operation, completedAt: firstNonZeroTime(result.ConfirmedAt, now)}, graph, nil
+}
+
+func (s *Service) prCommentThreadWriteGraph(ctx context.Context, repoID string, number int, result gitcode.WriteResult[gitcode.PRComment], now time.Time) (writeConfirmation, cache.RecordGraph, error) {
+	confirmation, graph, err := s.prCommentWriteGraph(ctx, repoID, number, result.Record, result, now)
+	if err != nil {
+		return writeConfirmation{}, cache.RecordGraph{}, err
+	}
+	seen := map[string]bool{result.Record.ID: true}
+	for _, comment := range result.Record.Thread {
+		if comment.ID == "" || seen[comment.ID] {
+			continue
+		}
+		seen[comment.ID] = true
+		threadResult := gitcode.WriteResult[gitcode.PRComment]{Record: comment, Confirmed: true, Operation: "ReplyPRReviewCommentReadback", RemoteID: comment.ID, ParentIssueNumber: number, ParentIssueID: comment.DiscussionID, ConfirmedAt: result.ConfirmedAt}
+		_, related, err := s.prCommentWriteGraph(ctx, repoID, number, comment, threadResult, now)
+		if err != nil {
+			return writeConfirmation{}, cache.RecordGraph{}, err
+		}
+		graph.RelatedRecords = append(graph.RelatedRecords, related.Record)
+		graph.Comments = append(graph.Comments, related.Comments...)
+		graph.PRReviewComments = append(graph.PRReviewComments, related.PRReviewComments...)
+		graph.PRReviewDiscussions = append(graph.PRReviewDiscussions, related.PRReviewDiscussions...)
+		graph.PRReviewPositions = append(graph.PRReviewPositions, related.PRReviewPositions...)
+		graph.Identities = append(graph.Identities, related.Identities...)
+		graph.Links = append(graph.Links, related.Links...)
+		graph.RemoteRevisions = append(graph.RemoteRevisions, related.RemoteRevisions...)
+		graph.SyncEvents = append(graph.SyncEvents, related.SyncEvents...)
+	}
+	return confirmation, graph, nil
 }
 
 func (s *Service) prIssueLinkWriteGraph(ctx context.Context, repoID string, prNumber int, issueNumber int, result gitcode.WriteResult[[]gitcode.Issue], now time.Time) (writeConfirmation, cache.RecordGraph, error) {
@@ -4574,26 +4626,28 @@ func releaseIdempotency(req PublishReleaseRequest, status int) (string, string) 
 
 func writeIdempotency(command string, req WriteCommandRequest) (string, string) {
 	payload, _ := json.Marshal(struct {
-		Command     string
-		RepoID      string
-		ID          string
-		Number      int
-		IssueNumber int
-		Slug        string
-		Path        string
-		Sha         string
-		Title       string
-		Body        string
-		Description string
-		DueOn       string
-		Milestone   string
-		Head        string
-		Base        string
-		State       string
-		Label       string
-		Labels      []string
-		Strategy    string
-	}{command, req.RepoID, req.ID, req.Number, req.IssueNumber, req.Slug, req.Path, req.Sha, strings.TrimSpace(req.Title), req.Body, req.Description, strings.TrimSpace(req.DueOn), strings.TrimSpace(req.Milestone), strings.TrimSpace(req.Head), strings.TrimSpace(req.Base), req.State, strings.TrimSpace(req.Label), req.Labels, strings.TrimSpace(req.Strategy)})
+		Command      string
+		RepoID       string
+		ID           string
+		Number       int
+		IssueNumber  int
+		DiscussionID string
+		ParentID     string
+		Slug         string
+		Path         string
+		Sha          string
+		Title        string
+		Body         string
+		Description  string
+		DueOn        string
+		Milestone    string
+		Head         string
+		Base         string
+		State        string
+		Label        string
+		Labels       []string
+		Strategy     string
+	}{command, req.RepoID, req.ID, req.Number, req.IssueNumber, req.DiscussionID, req.ParentID, req.Slug, req.Path, req.Sha, strings.TrimSpace(req.Title), req.Body, req.Description, strings.TrimSpace(req.DueOn), strings.TrimSpace(req.Milestone), strings.TrimSpace(req.Head), strings.TrimSpace(req.Base), req.State, strings.TrimSpace(req.Label), req.Labels, strings.TrimSpace(req.Strategy)})
 	sum := sha256.Sum256(payload)
 	fingerprint := hex.EncodeToString(sum[:])
 	if strings.TrimSpace(req.IdempotencyKey) != "" {

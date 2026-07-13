@@ -19,6 +19,8 @@ type writeToolArgs struct {
 	PRNumber       int      `json:"pr_number,omitempty"`
 	IssueNumber    int      `json:"issue_number,omitempty"`
 	CommentID      string   `json:"comment_id,omitempty"`
+	DiscussionID   string   `json:"discussion_id,omitempty"`
+	ParentID       string   `json:"parent_comment_id,omitempty"`
 	Slug           string   `json:"slug,omitempty"`
 	Path           string   `json:"path,omitempty"`
 	Sha            string   `json:"sha,omitempty"`
@@ -76,6 +78,8 @@ func writeToolInputSchema(id string) inputSchema {
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Comment body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "number", "body"}}
 	case "add_pr_review_comment":
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Comment body.", MinLength: 1}, "path": {Type: "string", Description: "Changed file path.", MinLength: 1}, "line": {Type: "integer", Description: "File line number.", Minimum: float64Ptr(1)}, "position": {Type: "integer", Description: "Diff position.", Minimum: float64Ptr(1)}, "start_line": {Type: "integer", Description: "Optional range start line.", Minimum: float64Ptr(1)}, "end_line": {Type: "integer", Description: "Optional range end line.", Minimum: float64Ptr(1)}}), Required: []string{"repo_id", "write_mode", "number", "body", "path"}}
+	case "reply_pr_review_comment":
+		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "discussion_id": {Type: "string", Description: "Review discussion id.", MinLength: 1}, "parent_comment_id": {Type: "string", Description: "Parent/root review comment id.", MinLength: 1}, "body": {Type: "string", Description: "Reply body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "number", "discussion_id", "parent_comment_id", "body"}}
 	case "link_pr_issue":
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"pr_number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "issue_number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "strategy": {Type: "string", Description: "Link strategy.", Enum: []string{"auto", "description_fallback"}, Default: "auto"}}), Required: []string{"repo_id", "write_mode", "pr_number", "issue_number"}}
 	case "create_page":
@@ -119,6 +123,8 @@ func (s *Server) writeToolHandler(cap capability.Capability) toolHandler {
 		return s.callAddPRComment
 	case "add_pr_review_comment":
 		return s.callAddPRReviewComment
+	case "reply_pr_review_comment":
+		return s.callReplyPRReviewComment
 	case "link_pr_issue":
 		return s.callLinkPRIssue
 	case "create_page":
@@ -276,6 +282,17 @@ func (s *Server) callAddPRReviewComment(ctx context.Context, id *json.RawMessage
 		req.StartLine = a.StartLine
 		req.EndLine = a.EndLine
 		req.Position = a.Position
+		return req
+	})
+}
+
+func (s *Server) callReplyPRReviewComment(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	s.callWriteTool(ctx, id, args, s.svc.ReplyPRReviewComment, func(a writeToolArgs) service.WriteCommandRequest {
+		req := writeRequestFromArgs(a)
+		req.Number = a.Number
+		req.DiscussionID = a.DiscussionID
+		req.ParentID = a.ParentID
+		req.Body = a.Body
 		return req
 	})
 }
