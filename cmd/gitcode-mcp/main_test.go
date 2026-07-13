@@ -381,7 +381,7 @@ func TestCLIStartupPlanSelectsLiveProvider(t *testing.T) {
 			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 		}
 		counts := server.Counts()
-		if counts.ListIssues == 0 || counts.ListWikiPages == 0 || counts.ListComments == 0 || counts.UnexpectedRequests != 0 {
+		if counts.ListIssues == 0 || counts.ListWikiPages == 0 || counts.ListComments != 0 || counts.UnexpectedRequests != 0 {
 			t.Fatalf("mock counts = %#v", counts)
 		}
 		out := stdout.String() + stderr.String()

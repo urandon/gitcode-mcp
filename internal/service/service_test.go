@@ -1445,6 +1445,10 @@ func TestScenario006LiveGraphValidStagesIssueWikiComments(t *testing.T) {
 	if err != nil || len(issue.Comments) != 1 || issue.Comments[0].CommentID != "MOCK-COMMENT-1" {
 		t.Fatalf("live issue record = %#v err=%v", issue, err)
 	}
+	coverage, ok, err := store.GetIssueCommentSync(ctx, "live-a", "ISSUE-MOCK-ISSUE-100")
+	if err != nil || !ok || coverage.Status != "complete" || coverage.ExpectedCount != 1 {
+		t.Fatalf("targeted issue comment coverage = %#v ok=%v err=%v", coverage, ok, err)
+	}
 	if _, err := store.GetRecord(ctx, "live-a", "WIKI-MOCK-WIKI-LIVE"); err != nil {
 		t.Fatalf("live wiki missing: %v", err)
 	}
@@ -3190,6 +3194,21 @@ func (f *brokenStore) ListCompletedSyncEventsScoped(context.Context, string) ([]
 func (f *brokenStore) UpsertSyncFrontier(context.Context, cache.SyncFrontier) error { return nil }
 func (f *brokenStore) GetSyncFrontier(context.Context, string, string, string, string) (cache.SyncFrontier, bool, error) {
 	return cache.SyncFrontier{}, false, nil
+}
+func (f *brokenStore) UpsertIssueCommentSync(context.Context, cache.IssueCommentSync) error {
+	return nil
+}
+func (f *brokenStore) GetIssueCommentSync(context.Context, string, string) (cache.IssueCommentSync, bool, error) {
+	return cache.IssueCommentSync{}, false, nil
+}
+func (f *brokenStore) ListIssueCommentSync(context.Context, cache.IssueCommentSyncFilter) ([]cache.IssueCommentSync, error) {
+	return nil, nil
+}
+func (f *brokenStore) IssueCommentSyncSummary(context.Context, string) (cache.IssueCommentSyncSummary, error) {
+	return cache.IssueCommentSyncSummary{}, nil
+}
+func (f *brokenStore) ReplaceRecordComments(context.Context, string, string, []cache.RecordComment) error {
+	return nil
 }
 func (f *brokenStore) RecordAuditEvent(context.Context, cache.AuditTrailEntry) error { return nil }
 func (f *brokenStore) GetAuditEventByKey(context.Context, string, string) (*cache.AuditTrailEntry, error) {

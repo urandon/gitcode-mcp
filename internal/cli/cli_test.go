@@ -1047,7 +1047,7 @@ func TestSyncStatusJSONAndAlias(t *testing.T) {
 	if err := json.Unmarshal(aggregate.Bytes(), &summary); err != nil {
 		t.Fatalf("invalid aggregate json: %v", err)
 	}
-	if summary.RepoID != "fixture-a" || summary.FreshCount != 1 || summary.CacheEmpty || len(summary.Results) != 0 {
+	if summary.RepoID != "fixture-a" || summary.FreshCount != 1 || summary.CacheEmpty || len(summary.Results) != 0 || summary.IssueComments == nil {
 		t.Fatalf("sync-status aggregate = %#v", summary)
 	}
 	var detailed bytes.Buffer
@@ -1149,6 +1149,22 @@ func TestSyncCommentSurfaceRouting(t *testing.T) {
 	}
 	if spy.calls["SyncToCache"] != 1 || spy.calls["BulkSyncPRComments"] != 0 {
 		t.Fatalf("issue comments calls=%+v, want SyncToCache only", spy.calls)
+	}
+
+	spy, code, stderr = run([]string{"sync", "--offline", "--repo", "fixture-a", "--issue-comments"})
+	if code != 0 {
+		t.Fatalf("bulk issue comments sync code=%d stderr=%q", code, stderr)
+	}
+	if spy.calls["BulkSyncIssueComments"] != 1 || spy.calls["BulkSyncIssues"] != 0 {
+		t.Fatalf("bulk issue comments calls=%+v, want queue drain only", spy.calls)
+	}
+
+	spy, code, stderr = run([]string{"sync", "--offline", "--repo", "fixture-a", "--issues", "--issue-comments"})
+	if code != 0 {
+		t.Fatalf("combined parent and issue comments sync code=%d stderr=%q", code, stderr)
+	}
+	if spy.calls["BulkSyncIssues"] != 1 || spy.calls["BulkSyncIssueComments"] != 1 {
+		t.Fatalf("combined parent and issue comments calls=%+v, want parent then queue drain", spy.calls)
 	}
 
 	spy, code, stderr = run([]string{"sync", "--offline", "--repo", "fixture-a", "--pr-comments"})
@@ -1804,6 +1820,10 @@ func (s *spyService) SyncResources(_ context.Context, reqs []service.SyncRequest
 func (s *spyService) BulkSyncIssues(_ context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
 	s.called("BulkSyncIssues")
 	return spyBulkSyncResult(req, "issues"), nil
+}
+func (s *spyService) BulkSyncIssueComments(_ context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
+	s.called("BulkSyncIssueComments")
+	return spyBulkSyncResult(req, "issue_comments"), nil
 }
 func (s *spyService) BulkSyncWiki(_ context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
 	s.called("BulkSyncWiki")

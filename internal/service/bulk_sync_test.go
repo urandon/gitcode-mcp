@@ -46,8 +46,8 @@ func TestBulkSyncIssuesSyncsListedIssuesAndZeroDeltaOnResync(t *testing.T) {
 	if client.issueCalls != 0 {
 		t.Fatalf("bulk issue sync GetIssue calls = %d, want 0 because list payload is the current sync source", client.issueCalls)
 	}
-	if client.commentCalls != 2 {
-		t.Fatalf("first bulk issue sync ListIssueComments calls = %d, want 2 before revision cache is established", client.commentCalls)
+	if client.commentCalls != 0 {
+		t.Fatalf("first parent backfill ListIssueComments calls = %d, want 0", client.commentCalls)
 	}
 	seenKeys := map[string]bool{}
 	seenEvents := map[string]bool{}
@@ -61,8 +61,8 @@ func TestBulkSyncIssuesSyncsListedIssuesAndZeroDeltaOnResync(t *testing.T) {
 		if seenEvents[result.SyncEventID] {
 			t.Fatalf("first result %d duplicate sync event id %q", i, result.SyncEventID)
 		}
-		if result.Counts.Listed != 1 || result.Counts.FetchedDetail != 1 {
-			t.Fatalf("first result %d counts = %#v, want listed=1 fetched_detail=1", i, result.Counts)
+		if result.Counts.Listed != 1 || result.Counts.FetchedDetail != 0 {
+			t.Fatalf("first result %d counts = %#v, want parent-only listed=1 fetched_detail=0", i, result.Counts)
 		}
 		seenKeys[result.IdempotencyKey] = true
 		seenEvents[result.SyncEventID] = true
@@ -73,6 +73,30 @@ func TestBulkSyncIssuesSyncsListedIssuesAndZeroDeltaOnResync(t *testing.T) {
 	if _, err := store.GetSourceScoped(ctx, "bulk-issues", "ISSUE-2"); err != nil {
 		t.Fatalf("ISSUE-2 missing: %v", err)
 	}
+	if first.IssueComments == nil || first.IssueComments.Pending != 1 || first.IssueComments.Complete != 1 {
+		t.Fatalf("first issue comment queue = %#v, want pending=1 complete=1", first.IssueComments)
+	}
+	status, err := svc.GetSyncStatus(ctx, SyncStatusRequest{RepoID: "bulk-issues", ID: "ISSUE-1"})
+	if err != nil {
+		t.Fatalf("GetSyncStatus ISSUE-1 returned error: %v", err)
+	}
+	if status.Status != "fresh" || status.IssueComments == nil || status.IssueComments.Status != "pending" || status.IssueComments.ExpectedCount != 1 {
+		t.Fatalf("ISSUE-1 sync status = %#v, want fresh parent with pending comment coverage", status)
+	}
+	summary, err := svc.SyncStatus(ctx, ListSourcesRequest{RepoID: "bulk-issues"})
+	if err != nil {
+		t.Fatalf("SyncStatus returned error: %v", err)
+	}
+	if summary.IssueComments == nil || summary.IssueComments.Pending != 1 || summary.IssueComments.Complete != 1 {
+		t.Fatalf("aggregate issue comment status = %#v", summary.IssueComments)
+	}
+	drained, err := svc.BulkSyncIssueComments(ctx, BulkSyncRequest{RepoID: "bulk-issues", PerPage: 100})
+	if err != nil {
+		t.Fatalf("BulkSyncIssueComments returned error: %v", err)
+	}
+	if drained.IssueComments == nil || drained.IssueComments.Pending != 0 || drained.IssueComments.Complete != 2 || client.commentCalls != 1 {
+		t.Fatalf("drained queue=%#v comment_calls=%d", drained.IssueComments, client.commentCalls)
+	}
 	second, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "bulk-issues", IdempotencyKey: "bulk-issues-second", PerPage: 100})
 	if err != nil {
 		t.Fatalf("BulkSyncIssues second returned error: %v", err)
@@ -80,8 +104,8 @@ func TestBulkSyncIssuesSyncsListedIssuesAndZeroDeltaOnResync(t *testing.T) {
 	if second.SuccessCount != 2 || second.FailureCount != 0 {
 		t.Fatalf("second counts = success %d failure %d, want 2/0", second.SuccessCount, second.FailureCount)
 	}
-	if client.commentCalls != 2 {
-		t.Fatalf("ListIssueComments calls after unchanged second sync = %d, want still 2", client.commentCalls)
+	if client.commentCalls != 1 {
+		t.Fatalf("parent resync ListIssueComments calls = %d, want drain-only call count 1", client.commentCalls)
 	}
 	for i, result := range second.Results {
 		if !result.ZeroDelta {
@@ -108,7 +132,7 @@ func TestBulkSyncIssuesIgnoresDeferredIssueCommentsRead(t *testing.T) {
 	base := time.Date(2026, 6, 26, 16, 30, 0, 0, time.UTC)
 	client := &fakeGitCodeClient{
 		listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{
-			{Items: []gitcode.IssueSummary{{ID: "4119847", Number: 16, Title: "Live issue", Body: "live body", State: "open", CreatedAt: base, UpdatedAt: base}}, Page: 1, PerPage: 1},
+			{Items: []gitcode.IssueSummary{{ID: "4119847", Number: 16, Title: "Live issue", Body: "live body", State: "open", Comments: 1, CreatedAt: base, UpdatedAt: base}}, Page: 1, PerPage: 1},
 		},
 		listIssueCommentsErr: gitcode.ErrUnsupportedCapability{
 			CapabilityKey: "comments_read",
@@ -131,8 +155,8 @@ func TestBulkSyncIssuesIgnoresDeferredIssueCommentsRead(t *testing.T) {
 	if result.SuccessCount != 1 || result.FailureCount != 0 {
 		t.Fatalf("counts = success %d failure %d, want 1/0", result.SuccessCount, result.FailureCount)
 	}
-	if len(result.Results) != 1 || result.Results[0].Counts.Deferred != 1 {
-		t.Fatalf("deferred counts = %+v, want one deferred issue comment read", result.Results)
+	if len(result.Results) != 1 || result.Results[0].Counts.Deferred != 1 || client.commentCalls != 0 {
+		t.Fatalf("parent result = %+v calls=%d, want queued comments without child read", result.Results, client.commentCalls)
 	}
 	source, err := store.GetSourceScoped(ctx, "bulk-issues-comments-deferred", "ISSUE-16")
 	if err != nil {
@@ -140,6 +164,13 @@ func TestBulkSyncIssuesIgnoresDeferredIssueCommentsRead(t *testing.T) {
 	}
 	if source.Title != "Live issue" || source.Body != "live body" {
 		t.Fatalf("source=%+v", source)
+	}
+	drained, err := svc.BulkSyncIssueComments(ctx, BulkSyncRequest{RepoID: "bulk-issues-comments-deferred", PerPage: 1})
+	if err != nil {
+		t.Fatalf("BulkSyncIssueComments returned error: %v", err)
+	}
+	if drained.TraversalStatus != "deferred" || drained.StopReason != "comments_read_unsupported" || drained.IssueComments == nil || drained.IssueComments.Deferred != 1 || client.commentCalls != 1 {
+		t.Fatalf("drained=%+v calls=%d", drained, client.commentCalls)
 	}
 }
 
@@ -174,8 +205,8 @@ func TestBulkSyncIssuesDefersRateLimitedIssueCommentsRead(t *testing.T) {
 	if result.SuccessCount != 1 || result.FailureCount != 0 {
 		t.Fatalf("counts = success %d failure %d, want 1/0", result.SuccessCount, result.FailureCount)
 	}
-	if len(result.Results) != 1 || result.Results[0].Counts.Deferred != 1 || result.Results[0].Counts.FetchedDetail != 1 {
-		t.Fatalf("result counts = %+v, want deferred comment detail without primary failure", result.Results)
+	if len(result.Results) != 1 || result.Results[0].Counts.Deferred != 1 || result.Results[0].Counts.FetchedDetail != 0 || client.commentCalls != 0 {
+		t.Fatalf("result counts = %+v calls=%d, want queued comment work without child reads", result.Results, client.commentCalls)
 	}
 	source, err := store.GetSourceScoped(ctx, "bulk-issues-comments-rate-limited", "ISSUE-11985")
 	if err != nil {
@@ -195,20 +226,27 @@ func TestBulkSyncIssuesDefersRateLimitedIssueCommentsRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sync status missing: %v", err)
 	}
-	if status.Status != "deferred" {
-		t.Fatalf("sync status = %q, want deferred", status.Status)
+	if status.Status != "fresh" {
+		t.Fatalf("primary sync status = %q, want fresh despite queued child coverage", status.Status)
+	}
+	deferred, err := svc.BulkSyncIssueComments(ctx, BulkSyncRequest{RepoID: "bulk-issues-comments-rate-limited", PerPage: 1})
+	if err != nil {
+		t.Fatalf("BulkSyncIssueComments deferred returned error: %v", err)
+	}
+	if deferred.TraversalStatus != "deferred" || deferred.StopReason != "rate_limited" || deferred.IssueComments == nil || deferred.IssueComments.Deferred != 1 {
+		t.Fatalf("deferred drain=%+v", deferred)
 	}
 
 	client.listIssueCommentsErr = nil
 	client.commentsByIssue = map[int][]gitcode.Comment{
 		11985: {{ID: "comment-1", Author: "reviewer", Body: "late comment", CreatedAt: base.Add(time.Minute), UpdatedAt: base.Add(time.Minute)}},
 	}
-	second, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "bulk-issues-comments-rate-limited", IdempotencyKey: "retry-comments", PerPage: 1})
+	second, err := svc.BulkSyncIssueComments(ctx, BulkSyncRequest{RepoID: "bulk-issues-comments-rate-limited", IdempotencyKey: "retry-comments", PerPage: 1})
 	if err != nil {
 		t.Fatalf("second BulkSyncIssues returned error: %v", err)
 	}
-	if len(second.Results) != 1 || second.Results[0].Counts.SkippedByRevision != 0 || second.Results[0].Counts.Deferred != 0 {
-		t.Fatalf("second counts = %+v, want comment retry instead of revision skip", second.Results)
+	if len(second.Results) != 1 || second.Results[0].Counts.FetchedDetail != 1 || second.Results[0].Counts.Deferred != 0 || second.IssueComments == nil || second.IssueComments.Complete != 1 {
+		t.Fatalf("second counts = %+v queue=%#v, want completed queued comment retry", second.Results, second.IssueComments)
 	}
 	record, err = store.GetRecord(ctx, "bulk-issues-comments-rate-limited", "ISSUE-11985")
 	if err != nil {
@@ -226,6 +264,7 @@ func TestBulkSyncIssuesFetchesCommentsWhenListRevisionChanges(t *testing.T) {
 		listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{
 			{Items: []gitcode.IssueSummary{{ID: "11", Number: 11, Title: "Issue", Body: "body", State: "open", Comments: 0, CreatedAt: base, UpdatedAt: base}}, Page: 1, PerPage: 100},
 			{Items: []gitcode.IssueSummary{{ID: "11", Number: 11, Title: "Issue", Body: "body", State: "open", Comments: 1, CreatedAt: base, UpdatedAt: base.Add(time.Minute)}}, Page: 1, PerPage: 100},
+			{Items: []gitcode.IssueSummary{{ID: "11", Number: 11, Title: "Issue", Body: "body", State: "open", Comments: 0, CreatedAt: base, UpdatedAt: base.Add(2 * time.Minute)}}, Page: 1, PerPage: 100},
 		},
 		commentsByIssue: map[int][]gitcode.Comment{
 			11: {{ID: "c11", Author: "author", Body: "new comment", CreatedAt: base.Add(time.Minute), UpdatedAt: base.Add(time.Minute)}},
@@ -248,14 +287,20 @@ func TestBulkSyncIssuesFetchesCommentsWhenListRevisionChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second BulkSyncIssues returned error: %v", err)
 	}
-	if client.commentCalls != 2 {
-		t.Fatalf("ListIssueComments calls = %d, want 2 after changed list revision", client.commentCalls)
+	if client.commentCalls != 0 {
+		t.Fatalf("parent ListIssueComments calls = %d, want 0 after changed list revision", client.commentCalls)
 	}
 	if second.SuccessCount != 1 || len(second.Results) != 1 {
 		t.Fatalf("second result count = %d/%d, want 1/1", second.SuccessCount, len(second.Results))
 	}
-	if second.Results[0].Counts.FetchedDetail != 1 || second.Results[0].Counts.SkippedByRevision != 0 {
-		t.Fatalf("second counts = %#v, want fetched_detail=1 skipped_by_revision=0", second.Results[0].Counts)
+	if second.Results[0].Counts.FetchedDetail != 0 || second.Results[0].Counts.SkippedByRevision != 0 || second.Results[0].Counts.Deferred != 1 {
+		t.Fatalf("second counts = %#v, want changed parent plus queued comments", second.Results[0].Counts)
+	}
+	if _, err := svc.BulkSyncIssueComments(ctx, BulkSyncRequest{RepoID: "bulk-issues-comment-revision", PerPage: 100}); err != nil {
+		t.Fatalf("BulkSyncIssueComments returned error: %v", err)
+	}
+	if client.commentCalls != 1 {
+		t.Fatalf("ListIssueComments calls after explicit drain = %d, want 1", client.commentCalls)
 	}
 	record, err := store.GetRecord(ctx, "bulk-issues-comment-revision", "ISSUE-11")
 	if err != nil {
@@ -263,6 +308,19 @@ func TestBulkSyncIssuesFetchesCommentsWhenListRevisionChanges(t *testing.T) {
 	}
 	if len(record.Comments) != 1 || record.Comments[0].CommentID != "c11" {
 		t.Fatalf("comments=%+v, want c11", record.Comments)
+	}
+	if _, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "bulk-issues-comment-revision", IdempotencyKey: "issues-third", PerPage: 100}); err != nil {
+		t.Fatalf("third BulkSyncIssues returned error: %v", err)
+	}
+	if client.commentCalls != 1 {
+		t.Fatalf("ListIssueComments calls after zero-comment parent revision = %d, want 1", client.commentCalls)
+	}
+	record, err = store.GetRecord(ctx, "bulk-issues-comment-revision", "ISSUE-11")
+	if err != nil {
+		t.Fatalf("ISSUE-11 record missing after zero-comment revision: %v", err)
+	}
+	if len(record.Comments) != 0 {
+		t.Fatalf("comments=%+v, want exact empty coverage after list count reached zero", record.Comments)
 	}
 }
 

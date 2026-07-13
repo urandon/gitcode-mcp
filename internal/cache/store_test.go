@@ -67,6 +67,38 @@ func TestSyncFrontierRoundTrip(t *testing.T) {
 	}
 }
 
+func TestIssueCommentSyncQueueRoundTripAndReplaceComments(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	if err := store.UpsertRecordGraph(ctx, RecordGraph{Record: Record{RepoID: "fixture-a", ID: "ISSUE-51", Type: "issue", Path: "issues/51.md", Title: "Deferred comments", Body: "body", Status: "open", ContentHash: "hash", Provenance: ProvenanceRemote, RemoteType: "issue", RemoteID: "51", RemoteRevision: "rev-1", CreatedAt: now, UpdatedAt: now}}); err != nil {
+		t.Fatalf("UpsertRecordGraph returned error: %v", err)
+	}
+	item := IssueCommentSync{RepoID: "fixture-a", SourceID: "ISSUE-51", IssueNumber: 51, RemoteID: "51", RemoteRevision: "rev-1", ExpectedCount: 2, Status: "pending", UpdatedAt: now}
+	if err := store.UpsertIssueCommentSync(ctx, item); err != nil {
+		t.Fatalf("UpsertIssueCommentSync returned error: %v", err)
+	}
+	got, ok, err := store.GetIssueCommentSync(ctx, "fixture-a", "ISSUE-51")
+	if err != nil || !ok || got.Status != "pending" || got.ExpectedCount != 2 {
+		t.Fatalf("GetIssueCommentSync ok=%v err=%v item=%#v", ok, err, got)
+	}
+	if err := store.ReplaceRecordComments(ctx, "fixture-a", "ISSUE-51", []RecordComment{{CommentID: "c1", Body: "one", CreatedAt: now, UpdatedAt: now}, {CommentID: "c2", Body: "two", CreatedAt: now, UpdatedAt: now}}); err != nil {
+		t.Fatalf("ReplaceRecordComments returned error: %v", err)
+	}
+	if err := store.ReplaceRecordComments(ctx, "fixture-a", "ISSUE-51", []RecordComment{{CommentID: "c2", Body: "updated", CreatedAt: now, UpdatedAt: now.Add(time.Minute)}}); err != nil {
+		t.Fatalf("ReplaceRecordComments second returned error: %v", err)
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", "ISSUE-51")
+	if err != nil || len(record.Comments) != 1 || record.Comments[0].CommentID != "c2" || record.Comments[0].Body != "updated" {
+		t.Fatalf("record=%#v err=%v", record, err)
+	}
+	summary, err := store.IssueCommentSyncSummary(ctx, "fixture-a")
+	if err != nil || summary.Pending != 1 || summary.Total != 1 {
+		t.Fatalf("summary=%#v err=%v", summary, err)
+	}
+}
+
 func TestRAGEmbeddingSchemaRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)
@@ -217,12 +249,18 @@ func TestResetLiveClearsRemoteRecordsAndFrontiers(t *testing.T) {
 	if err := store.UpsertSyncFrontier(ctx, SyncFrontier{RepoID: "other-repo", RemoteType: "issue", Ordering: "updated_at_desc", FilterKey: "state=all", Status: "complete", HighUpdatedAt: now, HighRemoteID: "200", HighNumber: 200, StopReason: "end_of_collection", UpdatedAt: now}); err != nil {
 		t.Fatalf("UpsertSyncFrontier other repo returned error: %v", err)
 	}
+	if err := store.UpsertIssueCommentSync(ctx, IssueCommentSync{RepoID: "fixture-a", SourceID: "ISSUE-100", IssueNumber: 100, RemoteID: "100", RemoteRevision: "rev-100", ExpectedCount: 1, Status: "pending", UpdatedAt: now}); err != nil {
+		t.Fatalf("UpsertIssueCommentSync returned error: %v", err)
+	}
+	if err := store.UpsertIssueCommentSync(ctx, IssueCommentSync{RepoID: "other-repo", SourceID: "ISSUE-200", IssueNumber: 200, RemoteID: "200", RemoteRevision: "rev-200", ExpectedCount: 1, Status: "pending", UpdatedAt: now}); err != nil {
+		t.Fatalf("UpsertIssueCommentSync other repo returned error: %v", err)
+	}
 
 	if err := store.ResetLive(ctx, "fixture-a"); err != nil {
 		t.Fatalf("ResetLive returned error: %v", err)
 	}
 
-	for _, table := range []string{"sources", "records", "record_comments", "remote_revisions", "sync_events", "pr_review_discussions", "pr_review_positions", "sync_frontiers"} {
+	for _, table := range []string{"sources", "records", "record_comments", "remote_revisions", "sync_events", "pr_review_discussions", "pr_review_positions", "sync_frontiers", "issue_comment_sync"} {
 		if got := countRepoRows(t, ctx, store, table, "fixture-a"); got != 0 {
 			t.Fatalf("%s fixture-a rows=%d, want 0", table, got)
 		}
@@ -237,6 +275,9 @@ func TestResetLiveClearsRemoteRecordsAndFrontiers(t *testing.T) {
 	}
 	if got := countRepoRows(t, ctx, store, "sync_frontiers", "other-repo"); got != 1 {
 		t.Fatalf("sync_frontiers other-repo rows=%d, want 1", got)
+	}
+	if got := countRepoRows(t, ctx, store, "issue_comment_sync", "other-repo"); got != 1 {
+		t.Fatalf("issue_comment_sync other-repo rows=%d, want 1", got)
 	}
 }
 

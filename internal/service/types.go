@@ -301,31 +301,44 @@ type SyncStatusRequest struct {
 }
 
 type SyncStatusResult struct {
-	RepoID         string    `json:"repo_id"`
-	SourceID       string    `json:"source_id"`
-	RemoteType     string    `json:"remote_type"`
-	RemoteID       string    `json:"remote_id"`
-	RemoteRevision string    `json:"remote_revision"`
+	RepoID         string                      `json:"repo_id"`
+	SourceID       string                      `json:"source_id"`
+	RemoteType     string                      `json:"remote_type"`
+	RemoteID       string                      `json:"remote_id"`
+	RemoteRevision string                      `json:"remote_revision"`
+	Status         string                      `json:"status"`
+	Freshness      string                      `json:"freshness"`
+	Provenance     string                      `json:"provenance"`
+	LocalUpdatedAt time.Time                   `json:"local_updated_at"`
+	LastFetchedAt  time.Time                   `json:"last_fetched_at"`
+	IssueComments  *IssueCommentCoverageStatus `json:"issue_comments,omitempty"`
+}
+
+type IssueCommentCoverageStatus struct {
 	Status         string    `json:"status"`
-	Freshness      string    `json:"freshness"`
-	Provenance     string    `json:"provenance"`
-	LocalUpdatedAt time.Time `json:"local_updated_at"`
-	LastFetchedAt  time.Time `json:"last_fetched_at"`
+	RemoteRevision string    `json:"remote_revision"`
+	ExpectedCount  int       `json:"expected_count"`
+	Attempts       int       `json:"attempts"`
+	LastErrorClass string    `json:"last_error_class,omitempty"`
+	RetryAfter     string    `json:"retry_after,omitempty"`
+	LastAttemptAt  time.Time `json:"last_attempt_at,omitempty"`
+	QueueUpdatedAt time.Time `json:"queue_updated_at"`
 }
 
 type SyncStatusSummaryResult struct {
-	RepoID              string             `json:"repo_id"`
-	Results             []SyncStatusResult `json:"results"`
-	FreshCount          int                `json:"fresh_count"`
-	StaleCount          int                `json:"stale_count"`
-	LastSyncAt          time.Time          `json:"last_sync_at"`
-	LastSyncStartedAt   time.Time          `json:"last_sync_started_at"`
-	LastSyncCompletedAt time.Time          `json:"last_sync_completed_at"`
-	ZeroDelta           bool               `json:"zero_delta"`
-	CacheEmpty          bool               `json:"cache_empty"`
-	Limit               int                `json:"limit"`
-	Offset              int                `json:"offset"`
-	Warnings            []string           `json:"warnings,omitempty"`
+	RepoID              string                    `json:"repo_id"`
+	Results             []SyncStatusResult        `json:"results"`
+	FreshCount          int                       `json:"fresh_count"`
+	StaleCount          int                       `json:"stale_count"`
+	LastSyncAt          time.Time                 `json:"last_sync_at"`
+	LastSyncStartedAt   time.Time                 `json:"last_sync_started_at"`
+	LastSyncCompletedAt time.Time                 `json:"last_sync_completed_at"`
+	ZeroDelta           bool                      `json:"zero_delta"`
+	CacheEmpty          bool                      `json:"cache_empty"`
+	Limit               int                       `json:"limit"`
+	Offset              int                       `json:"offset"`
+	IssueComments       *IssueCommentQueueSummary `json:"issue_comments,omitempty"`
+	Warnings            []string                  `json:"warnings,omitempty"`
 }
 
 type FreshnessState = string
@@ -381,18 +394,29 @@ type SyncResult struct {
 }
 
 type SyncResourcesResult struct {
-	Results            []SyncResult    `json:"results"`
-	SuccessCount       int             `json:"success_count"`
-	FailureCount       int             `json:"failure_count"`
-	Failures           []ResourceError `json:"failures,omitempty"`
-	PagesListed        int             `json:"pages_listed,omitempty"`
-	RecordsListed      int             `json:"records_listed,omitempty"`
-	SkippedByWatermark int             `json:"skipped_by_watermark,omitempty"`
-	StopReason         string          `json:"stop_reason,omitempty"`
-	Ordering           string          `json:"ordering,omitempty"`
-	TraversalStatus    string          `json:"traversal_status,omitempty"`
-	WatermarkStatus    string          `json:"watermark_status,omitempty"`
-	WatermarkReason    string          `json:"watermark_reason,omitempty"`
+	Results            []SyncResult              `json:"results"`
+	SuccessCount       int                       `json:"success_count"`
+	FailureCount       int                       `json:"failure_count"`
+	Failures           []ResourceError           `json:"failures,omitempty"`
+	PagesListed        int                       `json:"pages_listed,omitempty"`
+	RecordsListed      int                       `json:"records_listed,omitempty"`
+	SkippedByWatermark int                       `json:"skipped_by_watermark,omitempty"`
+	StopReason         string                    `json:"stop_reason,omitempty"`
+	Ordering           string                    `json:"ordering,omitempty"`
+	TraversalStatus    string                    `json:"traversal_status,omitempty"`
+	WatermarkStatus    string                    `json:"watermark_status,omitempty"`
+	WatermarkReason    string                    `json:"watermark_reason,omitempty"`
+	IssueComments      *IssueCommentQueueSummary `json:"issue_comments,omitempty"`
+}
+
+type IssueCommentQueueSummary struct {
+	Phase     string `json:"phase"`
+	Pending   int    `json:"pending"`
+	Deferred  int    `json:"deferred"`
+	Complete  int    `json:"complete"`
+	Total     int    `json:"total"`
+	Attempted int    `json:"attempted,omitempty"`
+	Drained   int    `json:"drained,omitempty"`
 }
 
 type ResourceError struct {
