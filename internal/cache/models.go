@@ -57,6 +57,11 @@ type Store interface {
 	ListCompletedSyncEventsScoped(context.Context, string) ([]SyncEvent, error)
 	UpsertSyncFrontier(context.Context, SyncFrontier) error
 	GetSyncFrontier(context.Context, string, string, string, string) (SyncFrontier, bool, error)
+	UpsertIssueCommentSync(context.Context, IssueCommentSync) error
+	GetIssueCommentSync(context.Context, string, string) (IssueCommentSync, bool, error)
+	ListIssueCommentSync(context.Context, IssueCommentSyncFilter) ([]IssueCommentSync, error)
+	IssueCommentSyncSummary(context.Context, string) (IssueCommentSyncSummary, error)
+	ReplaceRecordComments(context.Context, string, string, []RecordComment) error
 	RecordCacheConfirmation(context.Context, CacheConfirmationRecord) error
 	GetCacheConfirmationByKey(context.Context, string, string) (*CacheConfirmationRecord, error)
 	RecordAuditEvent(context.Context, AuditTrailEntry) error
@@ -228,6 +233,36 @@ type SyncFrontier struct {
 	PagesListed   int
 	RecordsListed int
 	UpdatedAt     time.Time
+}
+
+type IssueCommentSync struct {
+	RepoID         string
+	SourceID       string
+	IssueNumber    int
+	RemoteID       string
+	ProviderID     string
+	RemoteRevision string
+	ExpectedCount  int
+	Status         string
+	Attempts       int
+	LastErrorClass string
+	RetryAfter     string
+	LastAttemptAt  time.Time
+	UpdatedAt      time.Time
+}
+
+type IssueCommentSyncFilter struct {
+	RepoID   string
+	Statuses []string
+	Limit    int
+}
+
+type IssueCommentSyncSummary struct {
+	RepoID   string `json:"repo_id"`
+	Pending  int    `json:"pending"`
+	Deferred int    `json:"deferred"`
+	Complete int    `json:"complete"`
+	Total    int    `json:"total"`
 }
 
 type AuditTrailEntry struct {

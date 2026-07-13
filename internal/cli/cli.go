@@ -94,6 +94,7 @@ type queryService interface {
 	SyncToCache(context.Context, service.SyncRequest) (service.SyncResult, error)
 	SyncResources(context.Context, []service.SyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncIssues(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	BulkSyncIssueComments(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncWiki(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncPullRequests(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncPRComments(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
@@ -522,7 +523,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.BoolVar(&opts.wiki, "wiki", false, "sync wiki")
 	flags.BoolVar(&opts.pulls, "pulls", false, "sync pull requests")
 	flags.BoolVar(&opts.comments, "comments", false, "sync supported comments")
-	flags.BoolVar(&opts.issueComments, "issue-comments", false, "sync issue records and issue comments")
+	flags.BoolVar(&opts.issueComments, "issue-comments", false, "drain the durable issue comment sync queue")
 	flags.BoolVar(&opts.prComments, "pr-comments", false, "sync pull request comments")
 	flags.BoolVar(&opts.syncIndex, "index", false, "build index during sync")
 	flags.IntVar(&opts.maxPages, "max-pages", 0, "maximum pages to sync")
@@ -1734,8 +1735,11 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 					syncErr = mergeSyncError(syncErr, aggregate, err)
 				}
 			}
-			if opts.issues || opts.issueComments {
+			if opts.issues {
 				runBulk(svc.BulkSyncIssues)
+			}
+			if opts.issueComments {
+				runBulk(svc.BulkSyncIssueComments)
 			}
 			if opts.wiki {
 				runBulk(svc.BulkSyncWiki)
@@ -2118,18 +2122,19 @@ func startSyncProgressSpinner(w io.Writer, started time.Time) (chan service.Prog
 }
 
 type syncProgressSpinnerState struct {
-	Started        time.Time
-	Frame          int
-	Type           string
-	Collection     string
-	Phase          string
-	Page           int
-	RecordsFetched int
-	RecordsListed  int
-	RateLimitState string
-	RetryAfter     string
-	Endpoint       string
-	Message        string
+	Started         time.Time
+	Frame           int
+	Type            string
+	Collection      string
+	Phase           string
+	Page            int
+	RecordsFetched  int
+	RecordsListed   int
+	RecordsDeferred int
+	RateLimitState  string
+	RetryAfter      string
+	Endpoint        string
+	Message         string
 }
 
 func (s *syncProgressSpinnerState) Apply(ev service.ProgressEvent) {
@@ -2145,6 +2150,7 @@ func (s *syncProgressSpinnerState) Apply(ev service.ProgressEvent) {
 	}
 	s.RecordsFetched += ev.RecordsFetched
 	s.RecordsListed += ev.RecordsListed
+	s.RecordsDeferred += ev.RecordsDeferred
 	if ev.RateLimitState != "" {
 		s.RateLimitState = ev.RateLimitState
 	}
@@ -2177,6 +2183,9 @@ func renderSyncProgressSpinnerFrame(w io.Writer, state *syncProgressSpinnerState
 		fmt.Fprintf(w, " %d rec", state.RecordsFetched)
 	} else if state.RecordsListed > 0 {
 		fmt.Fprintf(w, " %d listed", state.RecordsListed)
+	}
+	if state.RecordsDeferred > 0 {
+		fmt.Fprintf(w, " %d def", state.RecordsDeferred)
 	}
 	if state.RateLimitState != "" {
 		fmt.Fprint(w, " wait")
@@ -2226,6 +2235,9 @@ func renderSyncProgressLine(w io.Writer, ev service.ProgressEvent, started time.
 	}
 	if ev.RecordsSkipped > 0 {
 		fmt.Fprintf(w, " skipped=%d", ev.RecordsSkipped)
+	}
+	if ev.RecordsDeferred > 0 {
+		fmt.Fprintf(w, " deferred=%d", ev.RecordsDeferred)
 	}
 	if ev.RecordsFailed > 0 {
 		fmt.Fprintf(w, " failed=%d", ev.RecordsFailed)
@@ -2316,6 +2328,10 @@ func mergeSyncResources(dst *service.SyncResourcesResult, src *service.SyncResou
 			dst.WatermarkReason = "mixed"
 		}
 	}
+	if src.IssueComments != nil {
+		queue := *src.IssueComments
+		dst.IssueComments = &queue
+	}
 }
 
 func mergeSyncError(existing error, result *service.SyncResourcesResult, err error) error {
@@ -2332,25 +2348,26 @@ func mergeSyncError(existing error, result *service.SyncResourcesResult, err err
 }
 
 type syncResourcesCompactSummary struct {
-	Status             string                    `json:"status"`
-	SuccessCount       int                       `json:"success_count"`
-	FailureCount       int                       `json:"failure_count"`
-	Counts             service.SyncCounts        `json:"counts"`
-	PagesListed        int                       `json:"pages_listed,omitempty"`
-	RecordsListed      int                       `json:"records_listed,omitempty"`
-	SkippedByWatermark int                       `json:"skipped_by_watermark,omitempty"`
-	StopReason         string                    `json:"stop_reason,omitempty"`
-	Ordering           string                    `json:"ordering,omitempty"`
-	TraversalStatus    string                    `json:"traversal_status,omitempty"`
-	WatermarkStatus    string                    `json:"watermark_status,omitempty"`
-	WatermarkReason    string                    `json:"watermark_reason,omitempty"`
-	ZeroDeltaCount     int                       `json:"zero_delta_count,omitempty"`
-	Diagnostic         service.SyncDiagnostic    `json:"diagnostic,omitempty"`
-	TotalRequested     int                       `json:"total_requested,omitempty"`
-	FailureGroups      []syncFailureGroupSummary `json:"failure_groups,omitempty"`
-	Elapsed            string                    `json:"elapsed"`
-	StartedAt          time.Time                 `json:"started_at"`
-	CompletedAt        time.Time                 `json:"completed_at"`
+	Status             string                            `json:"status"`
+	SuccessCount       int                               `json:"success_count"`
+	FailureCount       int                               `json:"failure_count"`
+	Counts             service.SyncCounts                `json:"counts"`
+	PagesListed        int                               `json:"pages_listed,omitempty"`
+	RecordsListed      int                               `json:"records_listed,omitempty"`
+	SkippedByWatermark int                               `json:"skipped_by_watermark,omitempty"`
+	StopReason         string                            `json:"stop_reason,omitempty"`
+	Ordering           string                            `json:"ordering,omitempty"`
+	TraversalStatus    string                            `json:"traversal_status,omitempty"`
+	WatermarkStatus    string                            `json:"watermark_status,omitempty"`
+	WatermarkReason    string                            `json:"watermark_reason,omitempty"`
+	IssueComments      *service.IssueCommentQueueSummary `json:"issue_comments,omitempty"`
+	ZeroDeltaCount     int                               `json:"zero_delta_count,omitempty"`
+	Diagnostic         service.SyncDiagnostic            `json:"diagnostic,omitempty"`
+	TotalRequested     int                               `json:"total_requested,omitempty"`
+	FailureGroups      []syncFailureGroupSummary         `json:"failure_groups,omitempty"`
+	Elapsed            string                            `json:"elapsed"`
+	StartedAt          time.Time                         `json:"started_at"`
+	CompletedAt        time.Time                         `json:"completed_at"`
 }
 
 type syncFailureGroupSummary struct {
@@ -2362,20 +2379,21 @@ type syncFailureGroupSummary struct {
 }
 
 type syncStatusCompactSummary struct {
-	RepoID              string    `json:"repo_id"`
-	FreshCount          int       `json:"fresh_count"`
-	StaleCount          int       `json:"stale_count"`
-	UnknownCount        int       `json:"unknown_count"`
-	MissingRemoteCount  int       `json:"missing_remote_count"`
-	ResultCount         int       `json:"result_count"`
-	LastSyncAt          time.Time `json:"last_sync_at"`
-	LastSyncStartedAt   time.Time `json:"last_sync_started_at"`
-	LastSyncCompletedAt time.Time `json:"last_sync_completed_at"`
-	ZeroDelta           bool      `json:"zero_delta"`
-	CacheEmpty          bool      `json:"cache_empty"`
-	Limit               int       `json:"limit"`
-	Offset              int       `json:"offset"`
-	Warnings            []string  `json:"warnings,omitempty"`
+	RepoID              string                            `json:"repo_id"`
+	FreshCount          int                               `json:"fresh_count"`
+	StaleCount          int                               `json:"stale_count"`
+	UnknownCount        int                               `json:"unknown_count"`
+	MissingRemoteCount  int                               `json:"missing_remote_count"`
+	ResultCount         int                               `json:"result_count"`
+	LastSyncAt          time.Time                         `json:"last_sync_at"`
+	LastSyncStartedAt   time.Time                         `json:"last_sync_started_at"`
+	LastSyncCompletedAt time.Time                         `json:"last_sync_completed_at"`
+	ZeroDelta           bool                              `json:"zero_delta"`
+	CacheEmpty          bool                              `json:"cache_empty"`
+	Limit               int                               `json:"limit"`
+	Offset              int                               `json:"offset"`
+	IssueComments       *service.IssueCommentQueueSummary `json:"issue_comments,omitempty"`
+	Warnings            []string                          `json:"warnings,omitempty"`
 }
 
 func syncStatusCompactSummaryFromResult(result service.SyncStatusSummaryResult) syncStatusCompactSummary {
@@ -2391,6 +2409,7 @@ func syncStatusCompactSummaryFromResult(result service.SyncStatusSummaryResult) 
 		CacheEmpty:          result.CacheEmpty,
 		Limit:               result.Limit,
 		Offset:              result.Offset,
+		IssueComments:       result.IssueComments,
 		Warnings:            result.Warnings,
 	}
 	for _, item := range result.Results {
@@ -2481,6 +2500,7 @@ func syncResourcesSummary(result *service.SyncResourcesResult, partial *service.
 		summary.TraversalStatus = result.TraversalStatus
 		summary.WatermarkStatus = result.WatermarkStatus
 		summary.WatermarkReason = result.WatermarkReason
+		summary.IssueComments = result.IssueComments
 		for _, item := range result.Results {
 			summary.Counts.Fetched += item.Counts.Fetched
 			summary.Counts.Skipped += item.Counts.Skipped
@@ -2490,6 +2510,7 @@ func syncResourcesSummary(result *service.SyncResourcesResult, partial *service.
 			summary.Counts.Listed += item.Counts.Listed
 			summary.Counts.FetchedDetail += item.Counts.FetchedDetail
 			summary.Counts.SkippedByRevision += item.Counts.SkippedByRevision
+			summary.Counts.Deferred += item.Counts.Deferred
 			summary.Counts.Failed += item.Counts.Failed
 			if item.ZeroDelta {
 				summary.ZeroDeltaCount++
@@ -2556,7 +2577,7 @@ func syncFailureGroups(failures []service.ResourceError) []syncFailureGroupSumma
 }
 
 func renderSyncResourcesSummaryText(w io.Writer, summary syncResourcesCompactSummary) {
-	fmt.Fprintf(w, "sync: %s success_count=%d failure_count=%d fetched=%d updated=%d inserted=%d skipped=%d conflicts=%d listed=%d fetched_detail=%d skipped_by_revision=%d zero_delta=%d elapsed=%s",
+	fmt.Fprintf(w, "sync: %s success_count=%d failure_count=%d fetched=%d updated=%d inserted=%d skipped=%d conflicts=%d listed=%d fetched_detail=%d skipped_by_revision=%d deferred=%d zero_delta=%d elapsed=%s",
 		summary.Status,
 		summary.SuccessCount,
 		summary.FailureCount,
@@ -2568,6 +2589,7 @@ func renderSyncResourcesSummaryText(w io.Writer, summary syncResourcesCompactSum
 		summary.Counts.Listed,
 		summary.Counts.FetchedDetail,
 		summary.Counts.SkippedByRevision,
+		summary.Counts.Deferred,
 		summary.ZeroDeltaCount,
 		summary.Elapsed,
 	)
@@ -2585,6 +2607,9 @@ func renderSyncResourcesSummaryText(w io.Writer, summary syncResourcesCompactSum
 	}
 	if summary.WatermarkReason != "" {
 		fmt.Fprintf(w, " watermark_reason=%s", summary.WatermarkReason)
+	}
+	if summary.IssueComments != nil {
+		fmt.Fprintf(w, " issue_comments_phase=%s issue_comments_pending=%d issue_comments_deferred=%d issue_comments_complete=%d", summary.IssueComments.Phase, summary.IssueComments.Pending, summary.IssueComments.Deferred, summary.IssueComments.Complete)
 	}
 	if summary.Diagnostic != "" {
 		fmt.Fprintf(w, " diagnostic=%s", summary.Diagnostic)
@@ -2768,10 +2793,16 @@ func renderResetLiveCacheText(w io.Writer, result service.ResetLiveCacheResult) 
 
 func renderSyncStatusText(w io.Writer, result service.SyncStatusResult) {
 	fmt.Fprintf(w, "%s %s %s %s %s %s\n", result.RepoID, result.SourceID, result.Status, result.RemoteType, result.RemoteID, result.LastFetchedAt.Format(time.RFC3339))
+	if result.IssueComments != nil {
+		fmt.Fprintf(w, "issue_comments: status=%s expected=%d attempts=%d last_error=%s retry_after=%s\n", result.IssueComments.Status, result.IssueComments.ExpectedCount, result.IssueComments.Attempts, result.IssueComments.LastErrorClass, result.IssueComments.RetryAfter)
+	}
 }
 
 func renderSyncStatusSummaryText(w io.Writer, result service.SyncStatusSummaryResult) {
 	fmt.Fprintf(w, "repo_id: %s\nfresh_count: %d\nstale_count: %d\ncache_empty: %t\nzero_delta: %t\n", result.RepoID, result.FreshCount, result.StaleCount, result.CacheEmpty, result.ZeroDelta)
+	if result.IssueComments != nil {
+		fmt.Fprintf(w, "issue_comments: pending=%d deferred=%d complete=%d total=%d\n", result.IssueComments.Pending, result.IssueComments.Deferred, result.IssueComments.Complete, result.IssueComments.Total)
+	}
 }
 
 func renderRecentText(w io.Writer, result service.RecentChangesResult) {
@@ -3674,7 +3705,7 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --issues            sync issue records")
 		fmt.Fprintln(w, "  --wiki              sync wiki records")
 		fmt.Fprintln(w, "  --pulls             sync pull request records")
-		fmt.Fprintln(w, "  --issue-comments    sync issue records and issue comments")
+		fmt.Fprintln(w, "  --issue-comments    drain the durable issue comment sync queue")
 		fmt.Fprintln(w, "  --pr-comments       sync pull request comments")
 		fmt.Fprintln(w, "  --comments          compatibility alias for --pr-comments; with --input issue:N, sync issue comments")
 		fmt.Fprintln(w, "  --daemon            start collection sync as a service-owned job and attach progress")

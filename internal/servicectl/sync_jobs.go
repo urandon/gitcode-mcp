@@ -152,6 +152,7 @@ func runSync(ctx context.Context, manager Manager, req StartSyncJobRequest, prog
 
 type bulkSyncService interface {
 	BulkSyncIssues(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
+	BulkSyncIssueComments(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncWiki(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncPullRequests(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 	BulkSyncPRComments(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
@@ -171,8 +172,11 @@ func runSyncSelections(ctx context.Context, svc bulkSyncService, req service.Bul
 			syncErr = mergeSyncError(syncErr, aggregate, err)
 		}
 	}
-	if sel.Issues || sel.IssueComments {
+	if sel.Issues {
 		run(svc.BulkSyncIssues)
+	}
+	if sel.IssueComments {
+		run(svc.BulkSyncIssueComments)
 	}
 	if sel.Wiki {
 		run(svc.BulkSyncWiki)
@@ -215,6 +219,10 @@ func mergeSyncResources(dst *service.SyncResourcesResult, src *service.SyncResou
 	}
 	if dst.WatermarkReason == "" {
 		dst.WatermarkReason = src.WatermarkReason
+	}
+	if src.IssueComments != nil {
+		queue := *src.IssueComments
+		dst.IssueComments = &queue
 	}
 }
 

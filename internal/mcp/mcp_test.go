@@ -1500,6 +1500,10 @@ func (s *syncLiveBoundsSpyService) BulkSyncIssues(ctx context.Context, req servi
 	return result, &service.PartialSyncError{Diagnostic: service.SyncDiagnosticTimeout, TotalRequested: 7}
 }
 
+func (s *syncLiveBoundsSpyService) BulkSyncIssueComments(ctx context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
+	return &service.SyncResourcesResult{Results: []service.SyncResult{{Status: "succeeded"}}, SuccessCount: 1}, nil
+}
+
 func (s *syncLiveBoundsSpyService) BulkSyncPRComments(ctx context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
 	s.bulkPRCommentsCalls = append(s.bulkPRCommentsCalls, req)
 	return &service.SyncResourcesResult{Results: []service.SyncResult{{Status: "succeeded"}}, SuccessCount: 1}, nil

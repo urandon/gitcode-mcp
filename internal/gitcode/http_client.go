@@ -1498,7 +1498,7 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 			return body, headers, nil
 		case resp.StatusCode == http.StatusTooManyRequests:
 			rawRetryAfter = resp.Header.Get("Retry-After")
-			lastRetryAfter = parseRetryAfter(rawRetryAfter, time.Now())
+			lastRetryAfter = effectiveRateLimitRetryAfter(rawRetryAfter, time.Now(), attempt)
 			emitRateLimitEvent(ctx, RateLimitEvent{Type: RateLimitEventResponseRateLimited, Method: method, Endpoint: endpoint, Attempt: attempt, Wait: lastRetryAfter, ResumeAt: time.Now().Add(lastRetryAfter), RawRetryAfter: rawRetryAfter})
 			if attempt < attempts {
 				resumeAt := time.Now().Add(lastRetryAfter)
@@ -1523,6 +1523,20 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 		}
 	}
 	return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempts}
+}
+
+func effectiveRateLimitRetryAfter(raw string, now time.Time, attempt int) time.Duration {
+	if wait := parseRetryAfter(raw, now); wait > 0 {
+		return wait
+	}
+	if attempt < 1 {
+		attempt = 1
+	}
+	wait := time.Second << min(attempt-1, 5)
+	if wait > 30*time.Second {
+		return 30 * time.Second
+	}
+	return wait
 }
 
 func (c *HTTPClient) waitForRateLimit(ctx context.Context, method, endpoint string, attempt int) error {

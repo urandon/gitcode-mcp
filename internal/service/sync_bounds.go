@@ -18,6 +18,7 @@ type ProgressEvent struct {
 	RecordsInserted int    `json:"records_inserted,omitempty"`
 	RecordsUpdated  int    `json:"records_updated,omitempty"`
 	RecordsSkipped  int    `json:"records_skipped,omitempty"`
+	RecordsDeferred int    `json:"records_deferred,omitempty"`
 	RecordsFailed   int    `json:"records_failed,omitempty"`
 	LastSeenCursor  string `json:"last_seen_cursor,omitempty"`
 	Endpoint        string `json:"endpoint,omitempty"`

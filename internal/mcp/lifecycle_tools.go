@@ -76,16 +76,17 @@ type syncLiveArgs struct {
 }
 
 type syncLiveResult struct {
-	RepoID       string                  `json:"repo_id"`
-	Collections  []string                `json:"collections"`
-	FreshCount   int                     `json:"fresh_count"`
-	SuccessCount int                     `json:"success_count"`
-	FailureCount int                     `json:"failure_count"`
-	Results      []service.SyncResult    `json:"results,omitempty"`
-	Failures     []service.ResourceError `json:"failures,omitempty"`
-	Job          *servicectl.Job         `json:"job,omitempty"`
-	Diagnostics  []lifecycleDiagnostic   `json:"diagnostics,omitempty"`
-	GeneratedAt  time.Time               `json:"generated_at"`
+	RepoID        string                            `json:"repo_id"`
+	Collections   []string                          `json:"collections"`
+	FreshCount    int                               `json:"fresh_count"`
+	SuccessCount  int                               `json:"success_count"`
+	FailureCount  int                               `json:"failure_count"`
+	Results       []service.SyncResult              `json:"results,omitempty"`
+	Failures      []service.ResourceError           `json:"failures,omitempty"`
+	IssueComments *service.IssueCommentQueueSummary `json:"issue_comments,omitempty"`
+	Job           *servicectl.Job                   `json:"job,omitempty"`
+	Diagnostics   []lifecycleDiagnostic             `json:"diagnostics,omitempty"`
+	GeneratedAt   time.Time                         `json:"generated_at"`
 }
 
 func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
@@ -185,8 +186,11 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 	case a.Issues && a.Wiki && !a.Pulls && !a.Comments && !a.IssueComments && !a.PRComments:
 		runBulk("all", s.svc.BulkSyncAll)
 	default:
-		if a.Issues || a.IssueComments || len(syncLiveCollections(a)) == 0 {
+		if a.Issues || len(syncLiveCollections(a)) == 0 {
 			runBulk("issues", s.svc.BulkSyncIssues)
+		}
+		if a.IssueComments {
+			runBulk("issue_comments", s.svc.BulkSyncIssueComments)
 		}
 		if a.Wiki || len(syncLiveCollections(a)) == 0 {
 			runBulk("wiki", s.svc.BulkSyncWiki)
@@ -249,6 +253,10 @@ func appendBulkSyncResult(dst *syncLiveResult, src *service.SyncResourcesResult)
 	dst.Failures = append(dst.Failures, src.Failures...)
 	dst.SuccessCount = len(dst.Results)
 	dst.FailureCount = len(dst.Failures)
+	if src.IssueComments != nil {
+		queue := *src.IssueComments
+		dst.IssueComments = &queue
+	}
 	for _, syncResult := range src.Results {
 		if syncResult.Freshness == service.FreshnessFresh || syncResult.Status == "succeeded" || syncResult.Status == "ok" {
 			dst.FreshCount++

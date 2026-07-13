@@ -279,9 +279,16 @@ func TestBulkSyncIssuesResumesTailAfterBoundedRun(t *testing.T) {
 	page1 := issueSummariesWithUpdatedAt(0, 2, base)
 	page2 := issueSummariesWithUpdatedAt(2, 2, base)
 	page3 := issueSummariesWithUpdatedAt(4, 1, base)
+	for _, page := range [][]gitcode.IssueSummary{page1, page2, page3} {
+		for i := range page {
+			page[i].Comments = 1
+		}
+	}
 	client := &fakeGitCodeClient{
 		listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{
 			{Items: page1, Page: 1, PerPage: 2},
+			{Items: page1, Page: 1, PerPage: 2},
+			{Items: page2, Page: 2, PerPage: 2},
 			{Items: page1, Page: 1, PerPage: 2},
 			{Items: page2, Page: 2, PerPage: 2},
 			{Items: page3, Page: 3, PerPage: 2},
@@ -298,33 +305,44 @@ func TestBulkSyncIssuesResumesTailAfterBoundedRun(t *testing.T) {
 	}
 	svc := NewWithClient(store, client)
 
-	first, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "issues-resume-tail", Page: 1, PerPage: 2, Bounds: &SyncBounds{MaxPages: 1}})
+	first, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "issues-resume-tail", Page: 1, PerPage: 2, Bounds: &SyncBounds{MaxRecords: 2}})
 	if err != nil {
 		t.Fatalf("first BulkSyncIssues returned error: %v", err)
 	}
-	if first.SuccessCount != 2 || first.TraversalStatus != "bounded" || first.StopReason != "max_pages" {
+	if first.SuccessCount != 2 || first.TraversalStatus != "bounded" || first.StopReason != "max_records" {
 		t.Fatalf("first result success/traversal/stop = %d/%q/%q", first.SuccessCount, first.TraversalStatus, first.StopReason)
 	}
 	frontier, ok, err := store.GetSyncFrontier(ctx, "issues-resume-tail", "issue", syncOrderingUpdatedAtDesc, syncFilterStateAll)
 	if err != nil || !ok {
 		t.Fatalf("first GetSyncFrontier ok=%v err=%v", ok, err)
 	}
-	if frontier.Status != "bounded" || frontier.StopReason != "max_pages" {
+	if frontier.Status != "bounded" || frontier.StopReason != "max_records" {
 		t.Fatalf("first frontier = %#v", frontier)
 	}
 
-	second, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "issues-resume-tail", Page: 1, PerPage: 2, Bounds: &SyncBounds{}})
+	second, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "issues-resume-tail", Page: 1, PerPage: 2, Bounds: &SyncBounds{MaxRecords: 2}})
 	if err != nil {
 		t.Fatalf("second BulkSyncIssues returned error: %v", err)
 	}
-	if len(client.listIssueRequests) != 4 {
-		t.Fatalf("ListIssues calls = %d, want 4", len(client.listIssueRequests))
-	}
-	if second.SuccessCount != 5 || second.PagesListed != 3 || second.RecordsListed != 5 {
+	if second.SuccessCount != 4 || second.PagesListed != 2 || second.RecordsListed != 4 {
 		t.Fatalf("second summary success/pages/records = %d/%d/%d", second.SuccessCount, second.PagesListed, second.RecordsListed)
 	}
-	if second.TraversalStatus != "complete" || second.StopReason != "end_of_collection" || second.WatermarkStatus != "disabled" || second.WatermarkReason != "previous_frontier_bounded" {
+	if second.TraversalStatus != "bounded" || second.StopReason != "max_records" || second.WatermarkStatus != "disabled" || second.WatermarkReason != "previous_frontier_bounded" {
 		t.Fatalf("second traversal/stop/watermark = %q/%q/%q/%q", second.TraversalStatus, second.StopReason, second.WatermarkStatus, second.WatermarkReason)
+	}
+
+	third, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "issues-resume-tail", Page: 1, PerPage: 2, Bounds: &SyncBounds{MaxRecords: 2}})
+	if err != nil {
+		t.Fatalf("third BulkSyncIssues returned error: %v", err)
+	}
+	if len(client.listIssueRequests) != 6 {
+		t.Fatalf("ListIssues calls = %d, want 6", len(client.listIssueRequests))
+	}
+	if third.SuccessCount != 5 || third.PagesListed != 3 || third.RecordsListed != 5 {
+		t.Fatalf("third summary success/pages/records = %d/%d/%d", third.SuccessCount, third.PagesListed, third.RecordsListed)
+	}
+	if third.TraversalStatus != "complete" || third.StopReason != "end_of_collection" || third.WatermarkStatus != "disabled" || third.WatermarkReason != "previous_frontier_bounded" {
+		t.Fatalf("third traversal/stop/watermark = %q/%q/%q/%q", third.TraversalStatus, third.StopReason, third.WatermarkStatus, third.WatermarkReason)
 	}
 	records, err := store.ListRecords(ctx, cache.RecordFilter{RepoID: "issues-resume-tail", Type: "issue"})
 	if err != nil {
@@ -332,6 +350,16 @@ func TestBulkSyncIssuesResumesTailAfterBoundedRun(t *testing.T) {
 	}
 	if len(records) != 5 {
 		t.Fatalf("cached issue records = %d, want 5", len(records))
+	}
+	if client.commentCalls != 0 {
+		t.Fatalf("parent restart made %d child comment calls, want 0 while reaching the uncached tail", client.commentCalls)
+	}
+	queue, err := store.IssueCommentSyncSummary(ctx, "issues-resume-tail")
+	if err != nil {
+		t.Fatalf("IssueCommentSyncSummary returned error: %v", err)
+	}
+	if queue.Pending != 5 || queue.Total != 5 {
+		t.Fatalf("comment queue = %#v, want five durable pending items after parent backfill", queue)
 	}
 	frontier, ok, err = store.GetSyncFrontier(ctx, "issues-resume-tail", "issue", syncOrderingUpdatedAtDesc, syncFilterStateAll)
 	if err != nil || !ok {
@@ -481,8 +509,8 @@ func TestBulkSyncIssuesCompleteFrontierStopsAfterCachedTail(t *testing.T) {
 	if len(client.listIssueRequests) != 2 {
 		t.Fatalf("ListIssues calls = %d, want 2", len(client.listIssueRequests))
 	}
-	if client.commentCalls != 1 {
-		t.Fatalf("ListIssueComments calls = %d, want 1 for only new issue", client.commentCalls)
+	if client.commentCalls != 0 {
+		t.Fatalf("parent traversal ListIssueComments calls = %d, want 0", client.commentCalls)
 	}
 	if result.StopReason != "watermark" || result.TraversalStatus != "complete" || result.WatermarkStatus != "used" {
 		t.Fatalf("stop/traversal/watermark = %q/%q/%q", result.StopReason, result.TraversalStatus, result.WatermarkStatus)

@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 15
+const currentSchemaVersion = 16
 
 type VersionCompatibility struct {
 	DetectedVersion int
@@ -141,6 +141,7 @@ var migrations = []migration{
 	{version: 13, apply: applyPRReviewDiscussionPositionsMigration},
 	{version: 14, apply: applySyncFrontiersMigration},
 	{version: 15, apply: applyRAGEmbeddingSchemaMigration},
+	{version: 16, apply: applyIssueCommentSyncMigration},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB, ftsAvailable bool) error {
@@ -803,6 +804,35 @@ func applySyncFrontiersMigration(ctx context.Context, tx *sql.Tx, _ bool) error 
 	PRIMARY KEY(repo_id, remote_type, ordering, filter_key)
 )`,
 		`CREATE INDEX IF NOT EXISTS idx_sync_frontiers_repo ON sync_frontiers(repo_id, remote_type, status)`,
+	}
+	for _, stmt := range statements {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyIssueCommentSyncMigration(ctx context.Context, tx *sql.Tx, _ bool) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS issue_comment_sync (
+	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+	source_id TEXT NOT NULL,
+	issue_number INTEGER NOT NULL,
+	remote_id TEXT NOT NULL,
+	provider_id TEXT NOT NULL DEFAULT '',
+	remote_revision TEXT NOT NULL,
+	expected_count INTEGER NOT NULL DEFAULT 0,
+	status TEXT NOT NULL CHECK(status IN ('pending', 'deferred', 'complete')),
+	attempts INTEGER NOT NULL DEFAULT 0,
+	last_error_class TEXT NOT NULL DEFAULT '',
+	retry_after TEXT NOT NULL DEFAULT '',
+	last_attempt_at TEXT NOT NULL DEFAULT '',
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, source_id),
+	FOREIGN KEY(repo_id, source_id) REFERENCES sources(repo_id, id) ON DELETE CASCADE
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_issue_comment_sync_queue ON issue_comment_sync(repo_id, status, updated_at, issue_number)`,
 	}
 	for _, stmt := range statements {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
