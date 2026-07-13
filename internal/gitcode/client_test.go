@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1080,6 +1081,8 @@ func TestScenario018PRListDetailCommentsRoutes(t *testing.T) {
 			fmt.Fprint(w, `{"id":"101","number":"7","html_url":"https://example.test/pulls/7","state":"open","title":"Add cache","body":"body","user":{"login":"alice"},"labels":["feature"],"base":{"ref":"main","sha":"base-sha"},"head":{"ref":"topic","sha":"head-sha"}}`)
 		case r.Method == http.MethodGet && r.URL.Path == listPRCommentsEndpoint("example-owner", "example-repo", 7):
 			fmt.Fprint(w, `[{"id":201,"note_id":301,"body":"looks good","discussion_id":"DISC-7","user":{"login":"bob"},"path":"internal/service/service.go","line":42,"start_line":40,"end_line":42,"position":9,"original_position":8,"resolved":false,"resolvable":true,"parent_id":"300"}]`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/example-owner/example-repo/merge_requests/7/discussions":
+			http.NotFound(w, r)
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -1258,6 +1261,95 @@ func TestScenario030PRReviewCommentWrite(t *testing.T) {
 	}
 	if len(result.Record.Positions) != 1 || result.Record.Positions[0].BaseSHA != "base-sha" || result.Record.Positions[0].HeadSHA != "head-sha" || result.Record.Positions[0].NewPath != "internal/service/service.go" || result.Record.Positions[0].NewLine != 42 {
 		t.Fatalf("unexpected PR review comment positions: %+v", result.Record.Positions)
+	}
+}
+
+func TestScenario031PRReviewReplyMergesDiscussionReadbackAndReplays(t *testing.T) {
+	const discussionID = "DISC-7"
+	const parentID = "301"
+	const replyID = "302"
+	const replyBody = "confirmed inline"
+	var posted bool
+	var posts int
+	var v5Reads int
+	var v4Reads int
+	v5Fixture, err := os.ReadFile("../../testdata/gitcode/pr-review-comments-v5.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v4Fixture, err := os.ReadFile("../../testdata/gitcode/pr-review-discussions-v4.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replyFixture, err := os.ReadFile("../../testdata/gitcode/pr-review-reply-response-v5.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == listPRCommentsEndpoint("example-owner", "example-repo", 7):
+			v5Reads++
+			if posted {
+				_, _ = w.Write(v5Fixture)
+				return
+			}
+			fmt.Fprint(w, `[{"id":301,"discussion_id":"DISC-7","body":"root","comment_type":"diff_comment","created_at":"2026-07-13T20:13:14+08:00","user":{"login":"reviewer"},"reply":[]}]`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/example-owner/example-repo/merge_requests/7/discussions":
+			v4Reads++
+			if posted {
+				_, _ = w.Write(v4Fixture)
+				return
+			}
+			fmt.Fprint(w, `{"data":[{"id":"DISC-7","notes":[{"id":301,"discussion_id":"DISC-7","body":"root","type":"DiffNote","created_at":"2026-07-13T20:13:14+08:00","author":{"username":"reviewer"},"position":{"base_sha":"base-sha","start_sha":"base-sha","head_sha":"head-sha","new_path":"internal/service/service.go","new_line":42,"position_type":"text","patchset_iid":1}}]}]}`)
+		case r.Method == http.MethodPost && r.URL.Path == replyPRReviewCommentEndpoint("example-owner", "example-repo", 7, discussionID):
+			posts++
+			if got := r.Header.Get("Idempotency-Key"); got != "reply-key" {
+				t.Fatalf("Idempotency-Key=%q", got)
+			}
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode reply payload: %v", err)
+			}
+			if len(payload) != 1 || payload["body"] != replyBody {
+				t.Fatalf("reply payload=%v", payload)
+			}
+			posted = true
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write(replyFixture)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, Config{Token: "test-token"})
+	req := ReplyPRReviewCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, DiscussionID: discussionID, ParentCommentID: parentID, Body: replyBody}
+	result, err := client.ReplyPRReviewComment(context.Background(), req, WriteOptions{IdempotencyKey: "reply-key"})
+	if err != nil {
+		t.Fatalf("ReplyPRReviewComment returned error: %v", err)
+	}
+	if posts != 1 || v5Reads != 2 || v4Reads != 2 {
+		t.Fatalf("posts=%d v5Reads=%d v4Reads=%d", posts, v5Reads, v4Reads)
+	}
+	if !result.Confirmed || result.ProviderStatus != "201-readback" || result.RemoteID != replyID || result.ParentIssueID != discussionID || result.Record.ParentID != parentID || result.Record.Body != replyBody {
+		t.Fatalf("unexpected reply result=%+v", result)
+	}
+	if result.Record.Path != "internal/service/service.go" || result.Record.Line != 42 || len(result.Record.Positions) != 1 {
+		t.Fatalf("missing inline readback metadata=%+v", result.Record)
+	}
+	if len(result.Record.Thread) != 2 || result.Record.Thread[0].ID != parentID || result.Record.Thread[1].ID != replyID {
+		t.Fatalf("thread readback=%+v", result.Record.Thread)
+	}
+
+	replay, err := client.ReplyPRReviewComment(context.Background(), req, WriteOptions{IdempotencyKey: "reply-key"})
+	if err != nil {
+		t.Fatalf("ReplyPRReviewComment replay returned error: %v", err)
+	}
+	if posts != 1 || replay.ProviderStatus != "readback-existing" || replay.RemoteID != replyID {
+		t.Fatalf("unexpected replay=%+v posts=%d", replay, posts)
+	}
+	if len(replay.Record.Thread) != 2 {
+		t.Fatalf("replay thread=%+v", replay.Record.Thread)
 	}
 }
 

@@ -84,6 +84,18 @@ gitcode-mcp add-pr-review-comment \
   --idempotency-key ik-pr-review-001
 ```
 
+Reply to that inline discussion using the stable ids returned by `pr-discussions`:
+
+```sh
+gitcode-mcp reply-pr-review-comment \
+  --repo YOUR_REPO \
+  --number 7 \
+  --discussion-id DISCUSSION_ID \
+  --parent-comment-id ROOT_COMMENT_ID \
+  --body "Confirmed; this is now covered." \
+  --idempotency-key ik-pr-review-reply-001
+```
+
 The MCP read tool exposes the same cache-first surface:
 
 ```json
@@ -96,7 +108,7 @@ The MCP read tool exposes the same cache-first surface:
 
 The result groups comments by discussion thread. Inline comments include `path`, `line`, `start_line`, `end_line`, and position fields when GitCode provides them. Schema version 13 exposes the first current diff position as `discussion.position` and all current/original note positions as `comment.positions[]`; those rows can include base/start/head SHAs, old/new paths, old/new lines, line codes, patchset ids, diff ids, and outdated state. General pull request comments are returned with `kind: "general"` and are not mixed with inline review comments. Resolution is tri-state: if GitCode omits `resolved`, unresolved-only reads keep the discussion visible instead of assuming it is resolved.
 
-Writes use GitCode's v5 pull request comments endpoint with an inline payload. Because GitCode can return a sparse create response, the adapter confirms the returned `note_id` or `id`, then stores request-derived inline metadata and a normalized current position for cache-first matching.
+New inline threads use GitCode's v5 pull request comments endpoint. Replies use the dedicated v5 discussion comments endpoint. The reply lifecycle validates the discussion/root pair, avoids an already matching duplicate, requires readback of the returned note, and refreshes the cached thread before reporting success. Reads combine v5 reply nesting with read-only v4 diff positions because neither representation alone contains both parentage and complete inline anchors.
 
 The cached position metadata identifies where GitCode placed an inline note. Source-code-change matching should use the local git object database and PR refs or SHAs rather than duplicating PR changed files or diff hunks in SQLite. A matcher can use `base_sha`, `start_sha`, `head_sha`, paths, and lines from `pr_review_positions` as anchors, then resolve surrounding diff/source context through git plumbing as an ephemeral read result.
 

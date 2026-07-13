@@ -196,6 +196,17 @@ var writeCapabilities = []Capability{
 		MCP:            enabled(),
 	},
 	{
+		ID:             "reply_pr_review_comment",
+		Category:       CategoryWrite,
+		Safety:         SafetyAuditedWrite,
+		CLIName:        "reply-pr-review-comment",
+		MCPName:        "reply_pr_review_comment",
+		ServiceCommand: "reply-pr-review-comment",
+		Description:    "Reply inside a live pull request review discussion with readback through the audited write lifecycle.",
+		CLI:            enabled(),
+		MCP:            enabled(),
+	},
+	{
 		ID:             "link_pr_issue",
 		Category:       CategoryWrite,
 		Safety:         SafetyAuditedWrite,

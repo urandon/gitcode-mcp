@@ -38,6 +38,15 @@ func createPRCommentEndpoint(owner, repo string, number int) string {
 	return listPRCommentsEndpoint(owner, repo, number)
 }
 
+func listPRDiscussionsEndpoint(owner, repo string, number int) string {
+	project := url.PathEscape(owner + "/" + repo)
+	return fmt.Sprintf("/api/v4/projects/%s/merge_requests/%d/discussions", project, number)
+}
+
+func replyPRReviewCommentEndpoint(owner, repo string, number int, discussionID string) string {
+	return endpointPath("/api/v5/repos/%s/%s/pulls/%d/discussions/%s/comments", owner, repo, number, discussionID)
+}
+
 func linkPRIssueEndpoint(owner, repo string, number int) string {
 	return endpointPath("/api/v5/repos/%s/%s/pulls/%d/issues", owner, repo, number)
 }

@@ -60,6 +60,7 @@ var commands = []string{
 	"delete-page",
 	"add-comment",
 	"add-pr-review-comment",
+	"reply-pr-review-comment",
 	"update-comment",
 	"add-label",
 	"publish-release",
@@ -120,6 +121,7 @@ type queryService interface {
 	DeletePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	AddComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	AddPRReviewComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	ReplyPRReviewComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdateComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	AddLabel(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	PublishRelease(context.Context, service.PublishReleaseRequest) (service.PublishReleaseResult, error)
@@ -183,6 +185,8 @@ type options struct {
 	id             string
 	number         int
 	commentID      string
+	discussionID   string
+	parentID       string
 	slug           string
 	path           string
 	line           int
@@ -400,7 +404,7 @@ func resolveLiveCredential(ctx context.Context, eff config.EffectiveConfig, deps
 
 func isLiveStartupCommand(command string) bool {
 	switch command {
-	case "sync", "create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "milestones", "create-milestone", "update-milestone", "set-issue-milestone", "clear-issue-milestone", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "update-comment", "add-label", "publish-release", "doctor":
+	case "sync", "create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "milestones", "create-milestone", "update-milestone", "set-issue-milestone", "clear-issue-milestone", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "reply-pr-review-comment", "update-comment", "add-label", "publish-release", "doctor":
 		return true
 	default:
 		return false
@@ -541,6 +545,8 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.id, "id", "", "record id")
 	flags.IntVar(&opts.number, "number", 0, "issue number")
 	flags.StringVar(&opts.commentID, "comment-id", "", "comment id")
+	flags.StringVar(&opts.discussionID, "discussion-id", "", "review discussion id")
+	flags.StringVar(&opts.parentID, "parent-comment-id", "", "parent review comment id")
 	flags.StringVar(&opts.slug, "slug", "", "page slug")
 	flags.StringVar(&opts.path, "path", "", "page path")
 	flags.IntVar(&opts.line, "line", 0, "line number")
@@ -1869,6 +1875,8 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		return dispatchWrite(ctx, svc.AddComment, command, opts, stdout, stderr, plan)
 	case "add-pr-review-comment":
 		return dispatchWrite(ctx, svc.AddPRReviewComment, command, opts, stdout, stderr, plan)
+	case "reply-pr-review-comment":
+		return dispatchWrite(ctx, svc.ReplyPRReviewComment, command, opts, stdout, stderr, plan)
 	case "update-comment":
 		return dispatchWrite(ctx, svc.UpdateComment, command, opts, stdout, stderr, plan)
 	case "add-label":
@@ -2647,7 +2655,7 @@ func writeRequest(opts options) service.WriteCommandRequest {
 	if !opts.dryRun {
 		mode = service.WriteModeLive
 	}
-	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, Number: opts.number, CommentID: opts.commentID, Slug: opts.slug, Path: opts.path, Line: opts.line, StartLine: opts.startLine, EndLine: opts.endLine, Position: opts.position, Sha: opts.sha, Title: opts.title, Body: opts.body, Description: opts.description, DueOn: opts.dueOn, Milestone: opts.milestone, Head: opts.head, Base: opts.base, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
+	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, Number: opts.number, CommentID: opts.commentID, DiscussionID: opts.discussionID, ParentID: opts.parentID, Slug: opts.slug, Path: opts.path, Line: opts.line, StartLine: opts.startLine, EndLine: opts.endLine, Position: opts.position, Sha: opts.sha, Title: opts.title, Body: opts.body, Description: opts.description, DueOn: opts.dueOn, Milestone: opts.milestone, Head: opts.head, Base: opts.base, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
 }
 
 func publishReleaseRequest(opts options) (service.PublishReleaseRequest, error) {
@@ -3957,6 +3965,21 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --live              compatibility alias for live write")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "reply-pr-review-comment":
+		fmt.Fprintln(w, "Usage: gitcode-mcp reply-pr-review-comment --repo REPO --number N --discussion-id ID --parent-comment-id ID --body BODY [--idempotency-key KEY]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Reply inside an existing pull request review discussion. Executes live by default; use --dry-run for no-mutation validation.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO             repository id (required)")
+		fmt.Fprintln(w, "  --number N              pull request number (required)")
+		fmt.Fprintln(w, "  --discussion-id ID      review discussion id (required)")
+		fmt.Fprintln(w, "  --parent-comment-id ID  parent/root review comment id (required)")
+		fmt.Fprintln(w, "  --body BODY             reply body (required)")
+		fmt.Fprintln(w, "  --idempotency-key KEY   idempotency key")
+		fmt.Fprintln(w, "  --dry-run               validate without mutation")
+		fmt.Fprintln(w, "  --live                  compatibility alias for live write")
+		fmt.Fprintln(w, "  --cache-path PATH       cache database path")
+		fmt.Fprintln(w, "  --format FORMAT         output format (text, json)")
 	case "update-comment":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --comment-id ID --body BODY [--number N] [--idempotency-key KEY]\n\n", command)
 		fmt.Fprintln(w, "Update an existing issue comment. Executes live by default; use --dry-run for no-mutation validation.")

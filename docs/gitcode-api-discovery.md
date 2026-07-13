@@ -25,7 +25,7 @@ Discovery status for metadata-first sync:
 | Wiki pages | Contents/list entries expose `path`, `type`, and `sha`; the adapter maps `sha` to wiki page `revision`. | Confirmed usable for body-fetch skip. The sync engine compares the list revision to cached `remote_revision` and fetches the page body only for new, changed, incomplete, or marker-less records. |
 | Issues | Live list responses expose stable `id`, numeric `number`, source `body`, labels, `comments` count, and `updated_at`. A live issue with one comment showed issue `updated_at` equal to the comment `updated_at`. | Usable for parent-first issue sync. The revision token includes list content, `updated_at`, and `comments`; collection traversal persists parents and updates durable comment work without issuing child reads. |
 | Pull requests / merge requests | Live list payloads expose stable `id`, numeric `number`, state/status, labels, base/head refs, `diff_refs`, `notes`, and `updated_at`. | Bulk sync currently stages from list records and stores a list-version token as `remote_revision`. Future diff, commit, or review detail fetches should compare this marker before detail calls. |
-| Pull request review comments | Live v5 comment payloads expose stable comment ids, optional discussion ids, body, optional inline anchors, and `updated_at`; parent PR list payload exposes `notes` and `updated_at`. Earlier v4 merge request discussions discovery exposed richer diff-note `position` metadata, but v4-created comments are not reliable in private or unauthenticated browser views. | Bulk sync stages from v5 list-comment payloads. A safe skip of the parent `ListPRComments` call needs a persisted parent comment-collection checkpoint; current cache stores individual comment revisions after listing. Schema version 13 persists discussion rows and per-comment current/original position rows when that metadata is available or synthesized from a confirmed v5 inline write. |
+| Pull request review comments | Live v5 comment payloads expose stable comment and discussion ids and nest replies under the root note's `reply` field. The read-only v4 discussion representation exposes richer diff-note `position` metadata but omits an explicit parent id for replies. | The adapter flattens v5 replies, derives their parent from the root note, and enriches matching comment ids with v4 position metadata. Bulk sync then persists one ordered cached discussion. A safe skip of the parent `ListPRComments` call still needs a persisted parent comment-collection checkpoint. |
 | Issue comments | Comment payloads expose stable ids, body, and `updated_at`; issue list payload exposes `comments` count and `updated_at`. | An independent durable queue is populated by parent issue traversal and drained by `--issue-comments`. Rate limiting defers the current work item and stops the drain, while parent traversal remains complete or resumable on its own frontier. |
 | Labels | No reliable update marker documented for the current cache surface. | Treat as full refresh or unsupported for metadata skip until discovery proves a marker. |
 | Milestones | Adapter model includes `UpdatedAt`, but list behavior and persistence are not verified for collection sync. | Not yet a first-class bulk collection surface; do not report `skipped_by_revision`. |
@@ -111,6 +111,20 @@ Content-Type: application/json
 ```
 
 The v5 create endpoint expects `Authorization: Bearer ...`. GitCode accepts body-only and `path` plus `line` payloads, but those create timeline comments rather than private-mode-visible inline review comments. A payload that repeats the anchor as `line`, `new_line`, and `position` creates an inline review comment that appears in both private and authenticated browser views. The v5 POST response can be sparse, so the adapter confirms a write from the returned `note_id` or `id` plus matching body, then stores request-derived inline metadata and a normalized current position using the PR base/head SHAs. Later resync can replace or enrich that position if GitCode exposes richer metadata through a frontend-compatible API.
+
+Replying inside an existing review discussion uses the official v5 endpoint added in the 2025-07-31 API release:
+
+```http
+POST /api/v5/repos/{owner}/{repo}/pulls/{number}/discussions/{discussion_id}/comments
+Authorization: Bearer $GITCODE_TOKEN
+Content-Type: application/json
+
+{"body":"Reply text"}
+```
+
+Live discovery on 2026-07-13 returned HTTP 201 with a sparse `{id, note_id, body}` response where `id` was the discussion id and `note_id` was the new comment id. The v5 comment list then exposed the created note inside the root comment's `reply` array. The v4 read representation returned both notes with the same inline position but left `in_reply_to_id` and `parent_id` empty, so the adapter must derive parentage from the v5 nesting rather than from v4 note fields. The v4 write route returned HTTP 403 with guidance to use v5 and must not be used for replies.
+
+The reply adapter requires both `discussion_id` and the expected parent/root comment id. It validates that pair before mutation, reuses an already matching reply on retry, sends the audited v5 write, and requires a list readback matching comment id, discussion id, parent id, and body before reporting success.
 
 ## Evidence Rules
 

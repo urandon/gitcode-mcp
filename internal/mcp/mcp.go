@@ -57,6 +57,7 @@ type serviceInterface interface {
 	ClearIssueMilestone(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	AddPRComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	AddPRReviewComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	ReplyPRReviewComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	LinkPRIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	CreatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
