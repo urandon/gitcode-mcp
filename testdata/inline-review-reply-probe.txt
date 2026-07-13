@@ -1,0 +1,2 @@
+stable inline review anchor
+reply readback anchor
