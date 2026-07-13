@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -2388,6 +2389,98 @@ func TestScenario016UpdateIssueTitleOnlyLabelsOmitted(t *testing.T) {
 		t.Fatal("expected confirmed result")
 	}
 	assertJSONKeyAbsent(t, sawBody, "labels")
+}
+
+func TestScenario062UpdateIssueNormalizesStateAndRequiresReadback(t *testing.T) {
+	tests := []struct {
+		name          string
+		publicState   string
+		wireState     string
+		readbackState string
+	}{
+		{name: "close", publicState: "closed", wireState: "close", readbackState: "closed"},
+		{name: "reopen", publicState: "open", wireState: "reopen", readbackState: "open"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls = append(calls, r.Method)
+				if r.URL.Path != "/api/v5/repos/example-owner/example-repo/issues/42" {
+					t.Fatalf("unexpected path %s", r.URL.Path)
+				}
+				switch r.Method {
+				case http.MethodPatch:
+					body, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Fatalf("read update body: %v", err)
+					}
+					var payload map[string]json.RawMessage
+					if err := json.Unmarshal(body, &payload); err != nil {
+						t.Fatalf("decode update body: %v", err)
+					}
+					if len(payload) != 1 || string(payload["state"]) != `"`+tt.wireState+`"` {
+						t.Fatalf("update payload=%s, want state-only %q", body, tt.wireState)
+					}
+					fmt.Fprintf(w, `{"id":"42","number":42,"title":"Preserved title","state":%q}`, tt.readbackState)
+				case http.MethodGet:
+					fmt.Fprintf(w, `{"id":"42","number":42,"title":"Preserved title","body":"Preserved body","state":%q,"labels":[{"id":1,"name":"bug","color":"#ff0000"}],"updated_at":"2026-07-13T23:40:14Z"}`, tt.readbackState)
+				default:
+					t.Fatalf("unexpected method %s", r.Method)
+				}
+			}))
+			defer server.Close()
+
+			result, err := newTestClient(t, server.URL, Config{}).UpdateIssue(context.Background(), UpdateIssueRequest{
+				Owner: "example-owner", Repo: "example-repo", Number: 42, State: tt.publicState,
+			}, WriteOptions{IdempotencyKey: "issue-state-" + tt.name})
+			if err != nil {
+				t.Fatalf("UpdateIssue state %q: %v", tt.publicState, err)
+			}
+			if !reflect.DeepEqual(calls, []string{http.MethodPatch, http.MethodGet}) {
+				t.Fatalf("calls=%v, want PATCH then GET", calls)
+			}
+			if result.Record.State != tt.readbackState || result.Record.Title != "Preserved title" || result.Record.Body != "Preserved body" || !reflect.DeepEqual(result.Record.Labels, []string{"bug"}) {
+				t.Fatalf("readback result=%#v", result.Record)
+			}
+			if result.ProviderStatus != "2xx-readback" || result.RemoteID != "42" || result.RemoteNumber != 42 || result.RemoteRevision == "" {
+				t.Fatalf("confirmation result=%#v", result)
+			}
+		})
+	}
+}
+
+func TestScenario062UpdateIssueRejectsNonPublicStateBeforeHTTP(t *testing.T) {
+	client := newTestClient(t, "http://127.0.0.1:1", Config{})
+	_, err := client.UpdateIssue(context.Background(), UpdateIssueRequest{
+		Owner: "example-owner", Repo: "example-repo", Number: 42, State: "close",
+	}, WriteOptions{IdempotencyKey: "invalid-issue-state"})
+	var validation ErrValidationFailed
+	if !errors.As(err, &validation) || validation.Field != "state" {
+		t.Fatalf("error=%T %v, want state ErrValidationFailed", err, err)
+	}
+}
+
+func TestScenario062UpdateIssueRejectsStateReadbackMismatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPatch:
+			fmt.Fprint(w, `{"id":"42","number":42,"title":"Issue","state":"closed"}`)
+		case http.MethodGet:
+			fmt.Fprint(w, `{"id":"42","number":42,"title":"Issue","state":"open"}`)
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	}))
+	defer server.Close()
+
+	_, err := newTestClient(t, server.URL, Config{}).UpdateIssue(context.Background(), UpdateIssueRequest{
+		Owner: "example-owner", Repo: "example-repo", Number: 42, State: "closed",
+	}, WriteOptions{IdempotencyKey: "issue-state-mismatch"})
+	var validation ErrValidationFailed
+	if !errors.As(err, &validation) || validation.Field != "state" {
+		t.Fatalf("error=%T %v, want state readback validation error", err, err)
+	}
 }
 
 func TestScenario016ExplicitLabelsPreserved(t *testing.T) {

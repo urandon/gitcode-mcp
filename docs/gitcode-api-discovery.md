@@ -30,6 +30,12 @@ Discovery status for metadata-first sync:
 | Labels | No reliable update marker documented for the current cache surface. | Treat as full refresh or unsupported for metadata skip until discovery proves a marker. |
 | Milestones | Adapter model includes `UpdatedAt`, but list behavior and persistence are not verified for collection sync. | Not yet a first-class bulk collection surface; do not report `skipped_by_revision`. |
 
+## Issue State Update Transitions
+
+Sanitized live discovery on `2026-07-13` confirmed that issue read states and write transitions use different values. A state-only `PATCH` accepted `{"state":"close"}` and `{"state":"reopen"}` without a title, returned canonical `closed` and `open` states, and preserved the existing title and body. Sending the public/read value `{"state":"closed"}` was rejected with a validation response requiring one of `reopen` or `close`.
+
+The CLI, MCP, service, and adapter request contract therefore remains `open|closed`. The HTTP adapter translates those values to `reopen|close` only at the wire boundary and requires a separate issue readback with the requested canonical state before confirming the write.
+
 ## List Ordering Parameters
 
 Live discovery on `2026-06-28` used the public `openharmony/arkcompiler_runtime_core` repository because it has large issue and pull request collections.

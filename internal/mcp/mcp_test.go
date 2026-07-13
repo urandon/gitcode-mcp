@@ -28,6 +28,17 @@ import (
 	"gitcode-mcp/internal/service"
 )
 
+func TestIssueUpdateStateSchemaUsesPublicValues(t *testing.T) {
+	schema := writeToolInputSchema("update_issue")
+	state, ok := schema.Properties["state"]
+	if !ok {
+		t.Fatal("update_issue schema missing state")
+	}
+	if !reflect.DeepEqual(state.Enum, []string{"open", "closed"}) {
+		t.Fatalf("update_issue state enum=%v, want [open closed]", state.Enum)
+	}
+}
+
 func TestMCPRepoScopedDuplicateAlias(t *testing.T) {
 	store := populatedStore(t)
 	defer store.Close()
@@ -1378,7 +1389,7 @@ func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 	call("create_issue", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "title": "new issue", "body": "issue body", "labels": []string{"bug"}, "idempotency_key": "issue-create-key"})
 	call("add_issue_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 16, "body": "proposal", "idempotency_key": "issue-comment-key"})
 	call("update_issue_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "comment_id": "c16", "number": 16, "body": "updated\ncomment", "idempotency_key": "issue-comment-update-key"})
-	call("update_issue", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 16, "title": "updated", "labels": []string{"enhancement"}, "idempotency_key": "issue-update-key"})
+	call("update_issue", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 16, "title": "updated", "state": "closed", "labels": []string{"enhancement"}, "idempotency_key": "issue-update-key"})
 	call("create_pr", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "title": "PR", "body": "body", "head": "topic", "base": "main", "idempotency_key": "create-pr-key"})
 	call("update_pr", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "body": "new body", "idempotency_key": "update-pr-key"})
 	call("add_pr_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "body": "tested", "idempotency_key": "pr-comment-key"})
@@ -1410,7 +1421,7 @@ func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 	if req := assertReq("update-comment"); req.Number != 16 || req.CommentID != "c16" || req.Body != "updated\ncomment" {
 		t.Fatalf("update-comment req=%#v", req)
 	}
-	if req := assertReq("update-issue"); req.Number != 16 || req.Title != "updated" || len(req.Labels) != 1 || req.Labels[0] != "enhancement" {
+	if req := assertReq("update-issue"); req.Number != 16 || req.Title != "updated" || req.State != "closed" || len(req.Labels) != 1 || req.Labels[0] != "enhancement" {
 		t.Fatalf("update-issue req=%#v", req)
 	}
 	if req := assertReq("create-pr"); req.Title != "PR" || req.Head != "topic" || req.Base != "main" {

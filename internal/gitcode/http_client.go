@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -365,8 +366,14 @@ func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, op
 	if err := validateUpdateIssue(req); err != nil {
 		return WriteResult[Issue]{}, err
 	}
+	wireState, expectedState, err := normalizeIssueUpdateState(req.State)
+	if err != nil {
+		return WriteResult[Issue]{}, err
+	}
+	req.State = wireState
 	target := req.Owner + "/" + req.Repo + "/" + strconv.Itoa(req.Number)
-	return writeConfirmedJSON[Issue](ctx, c, http.MethodPatch, updateIssueEndpoint(req.Owner, req.Repo, req.Number), "UpdateIssue", target, updateIssuePayload(req), opts, func(result WriteResult[Issue]) (WriteResult[Issue], error) {
+	endpoint := updateIssueEndpoint(req.Owner, req.Repo, req.Number)
+	result, err := writeConfirmedJSON[Issue](ctx, c, http.MethodPatch, endpoint, "UpdateIssue", target, updateIssuePayload(req), opts, func(result WriteResult[Issue]) (WriteResult[Issue], error) {
 		issue := result.Record
 		if strings.TrimSpace(issue.ID) == "" || issue.Number != req.Number {
 			return WriteResult[Issue]{}, ErrValidationFailed{Field: "response", Message: "issue update confirmation requires id and matching number"}
@@ -375,6 +382,27 @@ func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, op
 		result.RemoteNumber = issue.Number
 		return result, nil
 	})
+	if err != nil || expectedState == "" {
+		return result, err
+	}
+	readback, err := c.GetIssue(ctx, IssueRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
+	if err != nil {
+		return WriteResult[Issue]{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "issue state update requires readback", Cause: err}
+	}
+	if strings.TrimSpace(readback.ID) == "" || readback.Number != req.Number {
+		return WriteResult[Issue]{}, ErrValidationFailed{Field: "response", Message: "issue state update readback requires id and matching number"}
+	}
+	if strings.TrimSpace(readback.State) != expectedState {
+		return WriteResult[Issue]{}, ErrValidationFailed{Field: "state", Message: fmt.Sprintf("issue state update readback = %q, want %q", readback.State, expectedState)}
+	}
+	result.Record = readback
+	result.RemoteID = readback.ID
+	result.RemoteNumber = readback.Number
+	result.ProviderStatus = "2xx-readback"
+	if !readback.UpdatedAt.IsZero() {
+		result.RemoteRevision = readback.UpdatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	return result, nil
 }
 
 func (c *HTTPClient) CreateIssueComment(ctx context.Context, req CreateIssueCommentRequest, opts WriteOptions) (WriteResult[Comment], error) {
@@ -1327,6 +1355,19 @@ func validateUpdateIssue(req UpdateIssueRequest) error {
 		return ErrValidationFailed{Field: "number", Message: "positive issue number is required"}
 	}
 	return nil
+}
+
+func normalizeIssueUpdateState(state string) (wireState string, expectedState string, err error) {
+	switch strings.TrimSpace(state) {
+	case "":
+		return "", "", nil
+	case "open":
+		return "reopen", "open", nil
+	case "closed":
+		return "close", "closed", nil
+	default:
+		return "", "", ErrValidationFailed{Field: "state", Message: "state must be open or closed"}
+	}
 }
 
 func validateCreateIssueComment(req CreateIssueCommentRequest) error {

@@ -574,6 +574,73 @@ func TestWriteLiveMissingToken(t *testing.T) {
 	}
 }
 
+func TestUpdateIssueValidatesPublicStateBeforeDryRun(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{}
+	svc := NewWithClient(store, client)
+
+	_, err = svc.UpdateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeDryRun, Number: 1, State: "close"})
+	var invalid ErrInvalidQuery
+	if !errors.As(err, &invalid) || invalid.Field != "state" {
+		t.Fatalf("error=%T %v, want state ErrInvalidQuery", err, err)
+	}
+	if client.updateIssueCalls != 0 || client.issueCalls != 0 {
+		t.Fatalf("invalid dry-run called adapter: update=%d get=%d", client.updateIssueCalls, client.issueCalls)
+	}
+}
+
+func TestUpdateIssueStateLiveCachesReadbackAndReplaysIdempotently(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	updatedAt := time.Date(2026, 7, 13, 23, 40, 14, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		updateIssueResult: gitcode.WriteResult[gitcode.Issue]{
+			Record:    gitcode.Issue{ID: "1", Number: 1, Title: "Issue 1", Body: "Preserved body", State: "closed", Labels: []string{"bug"}, UpdatedAt: updatedAt},
+			Confirmed: true, Operation: "UpdateIssue", RemoteID: "1", RemoteNumber: 1, RemoteRevision: updatedAt.Format(time.RFC3339Nano), ConfirmedAt: updatedAt,
+		},
+	}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	request := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 1, State: "closed", IdempotencyKey: "issue-state-close-key"}
+
+	result, err := svc.UpdateIssue(ctx, request)
+	if err != nil {
+		t.Fatalf("UpdateIssue live: %v", err)
+	}
+	if result.Status != "succeeded" || result.RemoteNumber != 1 || client.updateIssueCalls != 1 {
+		t.Fatalf("result=%#v calls=%d", result, client.updateIssueCalls)
+	}
+	if client.lastUpdateIssueRequest.State != "closed" || client.lastUpdateIssueRequest.Title != "" || client.lastUpdateIssueRequest.Body != "" || len(client.lastUpdateIssueRequest.Labels) != 0 {
+		t.Fatalf("service update request=%#v", client.lastUpdateIssueRequest)
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", "ISSUE-1")
+	if err != nil {
+		t.Fatalf("get cached issue: %v", err)
+	}
+	if record.Status != "closed" || record.Title != "Issue 1" || record.Body != "Preserved body" || !reflect.DeepEqual(record.Labels, []string{"bug"}) {
+		t.Fatalf("cached record=%#v", record)
+	}
+
+	replay, err := svc.UpdateIssue(ctx, request)
+	if err != nil {
+		t.Fatalf("UpdateIssue replay: %v", err)
+	}
+	if replay.Status != "already_applied" || !replay.Replayed || client.updateIssueCalls != 1 {
+		t.Fatalf("replay=%#v calls=%d", replay, client.updateIssueCalls)
+	}
+}
+
 func TestAddLabelDryRunNoMutation(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)

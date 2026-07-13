@@ -2490,6 +2490,11 @@ func (s *Service) UpdateIssue(ctx context.Context, req WriteCommandRequest) (Wri
 	if req.Number == 0 && strings.TrimSpace(req.ID) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "issue", Message: "number or id is required"}
 	}
+	switch strings.TrimSpace(req.State) {
+	case "", "open", "closed":
+	default:
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "state", Message: "issue state must be open or closed"}
+	}
 	return s.executeWrite(ctx, "update-issue", req, RepositoryScopeIssues)
 }
 

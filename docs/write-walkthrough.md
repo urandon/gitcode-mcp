@@ -148,6 +148,8 @@ gitcode-mcp update-issue \
 
 Expected: issue is updated on remote, audit row recorded, cache refreshed.
 
+The public CLI and MCP state values are `open` and `closed`. The GitCode adapter translates them to the write-only transition events `reopen` and `close`, then requires issue readback with the requested public state. A state-only update does not send title, body, labels, milestone, or assignee fields.
+
 ### Create pull request / merge request (live)
 
 ```sh
