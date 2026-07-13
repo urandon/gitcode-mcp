@@ -1132,8 +1132,9 @@ func (s *Service) BulkSyncIssues(ctx context.Context, req BulkSyncRequest) (*Syn
 		}
 		result := &SyncResourcesResult{Results: make([]SyncResult, 0, len(page.Items)), Failures: make([]ResourceError, 0)}
 		beforeCount := len(result.Results)
+		beforeDeferred := syncResultsDeferredCount(result.Results)
 		s.stageIssuePage(ctx, req, page.Items, result)
-		emitProgress(req.ProgressChan, ProgressEvent{Collection: "issues", Page: firstNonZeroInt(req.Page, 1), RecordsFetched: len(result.Results) - beforeCount})
+		emitProgress(req.ProgressChan, ProgressEvent{Collection: "issues", Page: firstNonZeroInt(req.Page, 1), RecordsFetched: len(result.Results) - beforeCount, RecordsDeferred: syncResultsDeferredCount(result.Results) - beforeDeferred})
 		result.SuccessCount = len(result.Results)
 		result.FailureCount = len(result.Failures)
 		if result.FailureCount > 0 {
@@ -1219,9 +1220,10 @@ func (s *Service) bulkSyncIssuesBounded(ctx context.Context, req BulkSyncRequest
 			}
 		}
 		beforeCount := len(result.Results)
+		beforeDeferred := syncResultsDeferredCount(result.Results)
 		s.stageIssuePage(ctx, req, items, result)
 		recordsFetched := len(result.Results) - beforeCount
-		emitProgress(bounds.ProgressChan, ProgressEvent{Collection: "issues", Page: currentPage, RecordsFetched: recordsFetched})
+		emitProgress(bounds.ProgressChan, ProgressEvent{Collection: "issues", Page: currentPage, RecordsFetched: recordsFetched, RecordsDeferred: syncResultsDeferredCount(result.Results) - beforeDeferred})
 		if stopByWatermark {
 			result.StopReason = "watermark"
 			result.TraversalStatus = "complete"
@@ -1275,6 +1277,14 @@ func (s *Service) stageIssuePage(ctx context.Context, req BulkSyncRequest, items
 		}
 		result.Results = append(result.Results, SyncResult{IdempotencyKey: syncReq.IdempotencyKey, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), Record: sourceSummary(stored), GeneratedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: zeroDelta})
 	}
+}
+
+func syncResultsDeferredCount(results []SyncResult) int {
+	total := 0
+	for _, result := range results {
+		total += result.Counts.Deferred
+	}
+	return total
 }
 
 func (s *Service) BulkSyncPullRequests(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
@@ -2718,6 +2728,8 @@ func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, r
 		if !isDeferredIssueCommentsRead(err) {
 			return cache.SourceGraph{}, SyncCounts{}, err
 		}
+		counts.Deferred = 1
+		graph.SyncStatus.Status = "deferred"
 		comments = gitcode.Page[gitcode.Comment]{}
 	}
 	for _, comment := range comments.Items {
@@ -2749,7 +2761,11 @@ func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, r
 
 func isDeferredIssueCommentsRead(err error) bool {
 	var capability gitcode.ErrUnsupportedCapability
-	return errors.As(err, &capability) && capability.CapabilityKey == "comments_read"
+	if errors.As(err, &capability) && capability.CapabilityKey == "comments_read" {
+		return true
+	}
+	var rate gitcode.ErrRateLimited
+	return errors.As(err, &rate)
 }
 
 func (s *Service) stagePullRequest(ctx context.Context, req SyncRequest, remoteType, remoteID string, pr gitcode.PullRequest) (cache.SourceGraph, SyncCounts, error) {

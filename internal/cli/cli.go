@@ -2118,18 +2118,19 @@ func startSyncProgressSpinner(w io.Writer, started time.Time) (chan service.Prog
 }
 
 type syncProgressSpinnerState struct {
-	Started        time.Time
-	Frame          int
-	Type           string
-	Collection     string
-	Phase          string
-	Page           int
-	RecordsFetched int
-	RecordsListed  int
-	RateLimitState string
-	RetryAfter     string
-	Endpoint       string
-	Message        string
+	Started         time.Time
+	Frame           int
+	Type            string
+	Collection      string
+	Phase           string
+	Page            int
+	RecordsFetched  int
+	RecordsListed   int
+	RecordsDeferred int
+	RateLimitState  string
+	RetryAfter      string
+	Endpoint        string
+	Message         string
 }
 
 func (s *syncProgressSpinnerState) Apply(ev service.ProgressEvent) {
@@ -2145,6 +2146,7 @@ func (s *syncProgressSpinnerState) Apply(ev service.ProgressEvent) {
 	}
 	s.RecordsFetched += ev.RecordsFetched
 	s.RecordsListed += ev.RecordsListed
+	s.RecordsDeferred += ev.RecordsDeferred
 	if ev.RateLimitState != "" {
 		s.RateLimitState = ev.RateLimitState
 	}
@@ -2177,6 +2179,9 @@ func renderSyncProgressSpinnerFrame(w io.Writer, state *syncProgressSpinnerState
 		fmt.Fprintf(w, " %d rec", state.RecordsFetched)
 	} else if state.RecordsListed > 0 {
 		fmt.Fprintf(w, " %d listed", state.RecordsListed)
+	}
+	if state.RecordsDeferred > 0 {
+		fmt.Fprintf(w, " %d def", state.RecordsDeferred)
 	}
 	if state.RateLimitState != "" {
 		fmt.Fprint(w, " wait")
@@ -2226,6 +2231,9 @@ func renderSyncProgressLine(w io.Writer, ev service.ProgressEvent, started time.
 	}
 	if ev.RecordsSkipped > 0 {
 		fmt.Fprintf(w, " skipped=%d", ev.RecordsSkipped)
+	}
+	if ev.RecordsDeferred > 0 {
+		fmt.Fprintf(w, " deferred=%d", ev.RecordsDeferred)
 	}
 	if ev.RecordsFailed > 0 {
 		fmt.Fprintf(w, " failed=%d", ev.RecordsFailed)
@@ -2490,6 +2498,7 @@ func syncResourcesSummary(result *service.SyncResourcesResult, partial *service.
 			summary.Counts.Listed += item.Counts.Listed
 			summary.Counts.FetchedDetail += item.Counts.FetchedDetail
 			summary.Counts.SkippedByRevision += item.Counts.SkippedByRevision
+			summary.Counts.Deferred += item.Counts.Deferred
 			summary.Counts.Failed += item.Counts.Failed
 			if item.ZeroDelta {
 				summary.ZeroDeltaCount++
@@ -2556,7 +2565,7 @@ func syncFailureGroups(failures []service.ResourceError) []syncFailureGroupSumma
 }
 
 func renderSyncResourcesSummaryText(w io.Writer, summary syncResourcesCompactSummary) {
-	fmt.Fprintf(w, "sync: %s success_count=%d failure_count=%d fetched=%d updated=%d inserted=%d skipped=%d conflicts=%d listed=%d fetched_detail=%d skipped_by_revision=%d zero_delta=%d elapsed=%s",
+	fmt.Fprintf(w, "sync: %s success_count=%d failure_count=%d fetched=%d updated=%d inserted=%d skipped=%d conflicts=%d listed=%d fetched_detail=%d skipped_by_revision=%d deferred=%d zero_delta=%d elapsed=%s",
 		summary.Status,
 		summary.SuccessCount,
 		summary.FailureCount,
@@ -2568,6 +2577,7 @@ func renderSyncResourcesSummaryText(w io.Writer, summary syncResourcesCompactSum
 		summary.Counts.Listed,
 		summary.Counts.FetchedDetail,
 		summary.Counts.SkippedByRevision,
+		summary.Counts.Deferred,
 		summary.ZeroDeltaCount,
 		summary.Elapsed,
 	)

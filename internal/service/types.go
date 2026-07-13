@@ -362,6 +362,7 @@ type SyncCounts struct {
 	Listed            int `json:"listed,omitempty"`
 	FetchedDetail     int `json:"fetched_detail,omitempty"`
 	SkippedByRevision int `json:"skipped_by_revision,omitempty"`
+	Deferred          int `json:"deferred,omitempty"`
 	Failed            int `json:"failed,omitempty"`
 }
 

@@ -131,12 +131,91 @@ func TestBulkSyncIssuesIgnoresDeferredIssueCommentsRead(t *testing.T) {
 	if result.SuccessCount != 1 || result.FailureCount != 0 {
 		t.Fatalf("counts = success %d failure %d, want 1/0", result.SuccessCount, result.FailureCount)
 	}
+	if len(result.Results) != 1 || result.Results[0].Counts.Deferred != 1 {
+		t.Fatalf("deferred counts = %+v, want one deferred issue comment read", result.Results)
+	}
 	source, err := store.GetSourceScoped(ctx, "bulk-issues-comments-deferred", "ISSUE-16")
 	if err != nil {
 		t.Fatalf("ISSUE-16 missing: %v", err)
 	}
 	if source.Title != "Live issue" || source.Body != "live body" {
 		t.Fatalf("source=%+v", source)
+	}
+}
+
+func TestBulkSyncIssuesDefersRateLimitedIssueCommentsRead(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{
+			{Items: []gitcode.IssueSummary{{ID: "11985", Number: 11985, Title: "Runtime issue", Body: "primary issue body", State: "open", Comments: 3, CreatedAt: base, UpdatedAt: base}}, Page: 1, PerPage: 1},
+			{Items: []gitcode.IssueSummary{{ID: "11985", Number: 11985, Title: "Runtime issue", Body: "primary issue body", State: "open", Comments: 3, CreatedAt: base, UpdatedAt: base}}, Page: 1, PerPage: 1},
+		},
+		listIssueCommentsErr: gitcode.ErrRateLimited{
+			Endpoint:      "/api/v5/repos/owner/repo/issues/11985/comments",
+			RetryAfter:    2 * time.Second,
+			RawRetryAfter: "2",
+			Attempts:      3,
+		},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "bulk-issues-comments-rate-limited", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	result, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "bulk-issues-comments-rate-limited", PerPage: 1})
+	if err != nil {
+		t.Fatalf("BulkSyncIssues returned error: %v", err)
+	}
+	if result.SuccessCount != 1 || result.FailureCount != 0 {
+		t.Fatalf("counts = success %d failure %d, want 1/0", result.SuccessCount, result.FailureCount)
+	}
+	if len(result.Results) != 1 || result.Results[0].Counts.Deferred != 1 || result.Results[0].Counts.FetchedDetail != 1 {
+		t.Fatalf("result counts = %+v, want deferred comment detail without primary failure", result.Results)
+	}
+	source, err := store.GetSourceScoped(ctx, "bulk-issues-comments-rate-limited", "ISSUE-11985")
+	if err != nil {
+		t.Fatalf("ISSUE-11985 missing: %v", err)
+	}
+	if source.Title != "Runtime issue" || source.Body != "primary issue body" {
+		t.Fatalf("source=%+v", source)
+	}
+	record, err := store.GetRecord(ctx, "bulk-issues-comments-rate-limited", "ISSUE-11985")
+	if err != nil {
+		t.Fatalf("record missing: %v", err)
+	}
+	if len(record.Comments) != 0 {
+		t.Fatalf("comments=%+v, want comments deferred", record.Comments)
+	}
+	status, err := store.GetSyncStatusScoped(ctx, "bulk-issues-comments-rate-limited", "ISSUE-11985")
+	if err != nil {
+		t.Fatalf("sync status missing: %v", err)
+	}
+	if status.Status != "deferred" {
+		t.Fatalf("sync status = %q, want deferred", status.Status)
+	}
+
+	client.listIssueCommentsErr = nil
+	client.commentsByIssue = map[int][]gitcode.Comment{
+		11985: {{ID: "comment-1", Author: "reviewer", Body: "late comment", CreatedAt: base.Add(time.Minute), UpdatedAt: base.Add(time.Minute)}},
+	}
+	second, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "bulk-issues-comments-rate-limited", IdempotencyKey: "retry-comments", PerPage: 1})
+	if err != nil {
+		t.Fatalf("second BulkSyncIssues returned error: %v", err)
+	}
+	if len(second.Results) != 1 || second.Results[0].Counts.SkippedByRevision != 0 || second.Results[0].Counts.Deferred != 0 {
+		t.Fatalf("second counts = %+v, want comment retry instead of revision skip", second.Results)
+	}
+	record, err = store.GetRecord(ctx, "bulk-issues-comments-rate-limited", "ISSUE-11985")
+	if err != nil {
+		t.Fatalf("record missing after retry: %v", err)
+	}
+	if len(record.Comments) != 1 || record.Comments[0].CommentID != "comment-1" {
+		t.Fatalf("comments=%+v, want retry comment", record.Comments)
 	}
 }
 

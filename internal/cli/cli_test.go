@@ -1098,6 +1098,30 @@ func TestSyncJSONDefaultsToCompactSummaryAndDetailsRestoresRecords(t *testing.T)
 	}
 }
 
+func TestSyncSummaryAndProgressExposeDeferredRecords(t *testing.T) {
+	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	result := &service.SyncResourcesResult{
+		Results: []service.SyncResult{
+			{Status: "succeeded", Counts: service.SyncCounts{Fetched: 1, Listed: 1, FetchedDetail: 1, Deferred: 1}, GeneratedAt: now, StartedAt: now, CompletedAt: now},
+		},
+		SuccessCount: 1,
+	}
+	summary := syncResourcesSummary(result, nil, now)
+	if summary.Counts.Deferred != 1 {
+		t.Fatalf("summary deferred = %d, want 1", summary.Counts.Deferred)
+	}
+	var text bytes.Buffer
+	renderSyncResourcesSummaryText(&text, summary)
+	if !strings.Contains(text.String(), "deferred=1") {
+		t.Fatalf("summary text missing deferred count: %q", text.String())
+	}
+	var progress bytes.Buffer
+	renderSyncProgressLine(&progress, service.ProgressEvent{Collection: "issues", Page: 1, RecordsFetched: 1, RecordsDeferred: 1}, now)
+	if !strings.Contains(progress.String(), "deferred=1") {
+		t.Fatalf("progress text missing deferred count: %q", progress.String())
+	}
+}
+
 func TestSyncCommentSurfaceRouting(t *testing.T) {
 	run := func(args []string) (*spyService, int, string) {
 		t.Helper()
