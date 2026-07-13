@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,21 @@ import (
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/gitcode"
 )
+
+type aggregateIssueCommentClient struct {
+	*fakeGitCodeClient
+	pages    map[int]gitcode.Page[gitcode.Comment]
+	err      error
+	requests []gitcode.RepositoryIssueCommentListRequest
+}
+
+func (c *aggregateIssueCommentClient) ListRepositoryIssueComments(_ context.Context, req gitcode.RepositoryIssueCommentListRequest) (gitcode.Page[gitcode.Comment], error) {
+	c.requests = append(c.requests, req)
+	if c.err != nil {
+		return gitcode.Page[gitcode.Comment]{}, c.err
+	}
+	return c.pages[req.Page], nil
+}
 
 func TestBulkSyncIssuesSyncsListedIssuesAndZeroDeltaOnResync(t *testing.T) {
 	ctx := context.Background()
@@ -125,6 +141,175 @@ func TestBulkSyncIssuesSyncsListedIssuesAndZeroDeltaOnResync(t *testing.T) {
 	if len(sources) != 2 {
 		t.Fatalf("issue source count = %d, want 2", len(sources))
 	}
+}
+
+func TestBulkSyncIssueCommentsUsesRepositoryAggregateAndReportsAvoidedRequests(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 7, 13, 14, 0, 0, 0, time.UTC)
+	parents := []gitcode.IssueSummary{
+		{ID: "7001", Number: 7, Title: "First", State: "open", Comments: 1, CreatedAt: base, UpdatedAt: base.Add(3 * time.Minute)},
+		{ID: "7002", Number: 8, Title: "Second", State: "open", Comments: 1, CreatedAt: base, UpdatedAt: base.Add(2 * time.Minute)},
+		{ID: "7003", Number: 9, Title: "Third", State: "open", Comments: 1, CreatedAt: base, UpdatedAt: base.Add(time.Minute)},
+	}
+	client := &aggregateIssueCommentClient{
+		fakeGitCodeClient: &fakeGitCodeClient{listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{{Items: parents}, {Items: nil}}},
+		pages: map[int]gitcode.Page[gitcode.Comment]{
+			1: {Items: []gitcode.Comment{{ID: "c7", IssueID: "7001", IssueNumber: 7, Body: "seven", CreatedAt: base, UpdatedAt: base}, {ID: "c8", IssueID: "7002", IssueNumber: 8, Body: "eight", CreatedAt: base, UpdatedAt: base}}, Page: 1, PerPage: 2, TotalCount: 3, NextPage: 2},
+			2: {Items: []gitcode.Comment{{ID: "c9", IssueID: "7003", IssueNumber: 9, Body: "nine", CreatedAt: base, UpdatedAt: base}}, Page: 2, PerPage: 2, TotalCount: 3},
+		},
+	}
+	store := newBulkIssueCommentStore(t, ctx, "aggregate-comments")
+	defer store.Close()
+	svc := NewWithClient(store, client)
+	if _, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "aggregate-comments", PerPage: 3, Bounds: &SyncBounds{MaxPages: 10}}); err != nil {
+		t.Fatalf("BulkSyncIssues returned error: %v", err)
+	}
+	if err := store.UpsertRecordComments(ctx, "aggregate-comments", "ISSUE-7", []cache.RecordComment{{CommentID: "stale", Body: "remove me", CreatedAt: base, UpdatedAt: base}}); err != nil {
+		t.Fatal(err)
+	}
+	progress := make(chan ProgressEvent, 8)
+	result, err := svc.BulkSyncIssueComments(ctx, BulkSyncRequest{RepoID: "aggregate-comments", PerPage: 2, Bounds: &SyncBounds{ProgressChan: progress}, ProgressChan: progress})
+	if err != nil {
+		t.Fatalf("BulkSyncIssueComments returned error: %v", err)
+	}
+	if client.commentCalls != 0 || len(client.requests) != 2 {
+		t.Fatalf("per_issue=%d aggregate=%d", client.commentCalls, len(client.requests))
+	}
+	if result.SuccessCount != 3 || result.PagesListed != 2 || result.RecordsListed != 3 || result.IssueComments == nil || result.IssueComments.Strategy != "repository_aggregate" || result.IssueComments.ParentRequestsAvoided != 1 || result.IssueComments.Unreconciled != 0 {
+		t.Fatalf("result=%#v", result)
+	}
+	for number, commentID := range map[int]string{7: "c7", 8: "c8", 9: "c9"} {
+		record, err := store.GetRecord(ctx, "aggregate-comments", fmt.Sprintf("ISSUE-%d", number))
+		if err != nil || len(record.Comments) != 1 || record.Comments[0].CommentID != commentID {
+			t.Fatalf("number=%d record=%#v err=%v", number, record, err)
+		}
+	}
+	second, err := svc.BulkSyncIssueComments(ctx, BulkSyncRequest{RepoID: "aggregate-comments", PerPage: 2, Bounds: &SyncBounds{}})
+	if err != nil || second.StopReason != "queue_empty" || len(client.requests) != 2 {
+		t.Fatalf("second=%#v requests=%d err=%v", second, len(client.requests), err)
+	}
+}
+
+func TestBulkSyncIssueCommentsAggregateBoundedRunRestartsSafely(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 7, 13, 15, 0, 0, 0, time.UTC)
+	parents := []gitcode.IssueSummary{{ID: "7101", Number: 11, Title: "One", State: "open", Comments: 2, CreatedAt: base, UpdatedAt: base.Add(time.Minute)}}
+	client := &aggregateIssueCommentClient{
+		fakeGitCodeClient: &fakeGitCodeClient{listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{{Items: parents}, {Items: nil}}},
+		pages: map[int]gitcode.Page[gitcode.Comment]{
+			1: {Items: []gitcode.Comment{{ID: "c11a", IssueID: "7101", IssueNumber: 11, Body: "first"}}, Page: 1, PerPage: 1, NextPage: 2},
+			2: {Items: []gitcode.Comment{{ID: "c11b", IssueID: "7101", IssueNumber: 11, Body: "second"}}, Page: 2, PerPage: 1},
+		},
+	}
+	store := newBulkIssueCommentStore(t, ctx, "aggregate-resume")
+	defer store.Close()
+	svc := NewWithClient(store, client)
+	if _, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "aggregate-resume", PerPage: 1, Bounds: &SyncBounds{MaxPages: 10}}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := svc.BulkSyncIssueComments(ctx, BulkSyncRequest{RepoID: "aggregate-resume", Page: 7, PerPage: 1, Bounds: &SyncBounds{MaxPages: 1}})
+	if err != nil || first.TraversalStatus != "bounded" || first.StopReason != "max_pages" || first.SuccessCount != 0 || first.IssueComments.Pending != 1 {
+		t.Fatalf("first=%#v err=%v", first, err)
+	}
+	second, err := svc.BulkSyncIssueComments(ctx, BulkSyncRequest{RepoID: "aggregate-resume", PerPage: 1, Bounds: &SyncBounds{}})
+	if err != nil || second.SuccessCount != 1 || second.IssueComments.Complete != 1 {
+		t.Fatalf("second=%#v err=%v", second, err)
+	}
+	if len(client.requests) != 3 || client.requests[0].Page != 1 || client.requests[1].Page != 1 || client.requests[2].Page != 2 {
+		t.Fatalf("requests=%#v", client.requests)
+	}
+	record, err := store.GetRecord(ctx, "aggregate-resume", "ISSUE-11")
+	if err != nil || len(record.Comments) != 2 {
+		t.Fatalf("record=%#v err=%v", record, err)
+	}
+}
+
+func TestBulkSyncIssueCommentsAggregateParentFailureIsExplicitAndRetryable(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 7, 13, 16, 0, 0, 0, time.UTC)
+	client := &aggregateIssueCommentClient{
+		fakeGitCodeClient: &fakeGitCodeClient{listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{
+			{Items: []gitcode.IssueSummary{{ID: "7201", Number: 21, Title: "Known", State: "open", Comments: 1, CreatedAt: base, UpdatedAt: base}}},
+			{Items: nil},
+		}},
+		pages: map[int]gitcode.Page[gitcode.Comment]{1: {Items: []gitcode.Comment{{ID: "orphan", IssueID: "9999", IssueNumber: 99, Body: "orphan"}, {ID: "known", IssueID: "7201", IssueNumber: 21, Body: "known"}}, Page: 1, PerPage: 100}},
+	}
+	store := newBulkIssueCommentStore(t, ctx, "aggregate-reconcile")
+	defer store.Close()
+	svc := NewWithClient(store, client)
+	if _, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "aggregate-reconcile", PerPage: 1, Bounds: &SyncBounds{MaxPages: 10}}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.BulkSyncIssueComments(ctx, BulkSyncRequest{RepoID: "aggregate-reconcile", PerPage: 100, Bounds: &SyncBounds{}})
+	var partial *PartialSyncError
+	if !errors.As(err, &partial) || result.TraversalStatus != "partial" || result.StopReason != "reconciliation_failed" || len(result.Failures) != 1 || result.Failures[0].RemoteType != "issue_comment_reconciliation" || result.Failures[0].RecoveryAction == "" || result.IssueComments.Unreconciled != 1 {
+		t.Fatalf("result=%#v err=%T %v", result, err, err)
+	}
+	queue, ok, queueErr := store.GetIssueCommentSync(ctx, "aggregate-reconcile", "ISSUE-21")
+	if queueErr != nil || !ok || queue.Status != "pending" {
+		t.Fatalf("queue=%#v ok=%t err=%v", queue, ok, queueErr)
+	}
+}
+
+func TestBulkSyncIssueCommentsAggregateRejectsIncompleteReportedTotal(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 7, 13, 16, 30, 0, 0, time.UTC)
+	client := &aggregateIssueCommentClient{
+		fakeGitCodeClient: &fakeGitCodeClient{listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{
+			{Items: []gitcode.IssueSummary{{ID: "7251", Number: 25, Title: "Known", State: "open", Comments: 1, CreatedAt: base, UpdatedAt: base}}},
+			{Items: nil},
+		}},
+		pages: map[int]gitcode.Page[gitcode.Comment]{1: {Items: []gitcode.Comment{{ID: "known", IssueID: "7251", IssueNumber: 25, Body: "known"}}, Page: 1, PerPage: 100, TotalCount: 2}},
+	}
+	store := newBulkIssueCommentStore(t, ctx, "aggregate-total")
+	defer store.Close()
+	svc := NewWithClient(store, client)
+	if _, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "aggregate-total", PerPage: 1, Bounds: &SyncBounds{MaxPages: 10}}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.BulkSyncIssueComments(ctx, BulkSyncRequest{RepoID: "aggregate-total", PerPage: 100, Bounds: &SyncBounds{}})
+	var partial *PartialSyncError
+	if !errors.As(err, &partial) || result.FailureCount != 1 || result.Failures[0].RemoteType != "issue_comment_reconciliation" || !strings.Contains(result.Failures[0].Message, "expected total_count 2") {
+		t.Fatalf("result=%#v err=%T %v", result, err, err)
+	}
+}
+
+func TestBulkSyncIssueCommentsFallsBackWhenAggregateEndpointUnsupported(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 7, 13, 17, 0, 0, 0, time.UTC)
+	client := &aggregateIssueCommentClient{
+		fakeGitCodeClient: &fakeGitCodeClient{
+			listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{
+				{Items: []gitcode.IssueSummary{{ID: "7301", Number: 31, Title: "Fallback", State: "open", Comments: 1, CreatedAt: base, UpdatedAt: base}}},
+				{Items: nil},
+			},
+			commentsByIssue: map[int][]gitcode.Comment{31: {{ID: "fallback-comment", Body: "fallback"}}},
+		},
+		err: gitcode.ErrUnsupportedCapability{CapabilityKey: "repository_issue_comments", Message: "unsupported fixture"},
+	}
+	store := newBulkIssueCommentStore(t, ctx, "aggregate-fallback")
+	defer store.Close()
+	svc := NewWithClient(store, client)
+	if _, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "aggregate-fallback", PerPage: 1, Bounds: &SyncBounds{MaxPages: 10}}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.BulkSyncIssueComments(ctx, BulkSyncRequest{RepoID: "aggregate-fallback", Bounds: &SyncBounds{}})
+	if err != nil || len(client.requests) != 1 || client.commentCalls != 1 || result.IssueComments.Strategy != "per_issue_fallback" || result.IssueComments.FallbackReason != "aggregate_endpoint_unsupported" || result.SuccessCount != 1 {
+		t.Fatalf("result=%#v aggregate=%d per_issue=%d err=%v", result, len(client.requests), client.commentCalls, err)
+	}
+}
+
+func newBulkIssueCommentStore(t *testing.T, ctx context.Context, repoID string) *cache.SQLiteStore {
+	t.Helper()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: repoID, Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	return store
 }
 
 func TestBulkSyncIssuesIgnoresDeferredIssueCommentsRead(t *testing.T) {

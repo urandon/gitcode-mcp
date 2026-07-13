@@ -108,6 +108,36 @@ func (c *HTTPClient) ListIssueComments(ctx context.Context, req IssueRequest) (P
 	return Page[Comment]{Items: items, Page: page.Page, PerPage: page.PerPage}, nil
 }
 
+func (c *HTTPClient) ListRepositoryIssueComments(ctx context.Context, req RepositoryIssueCommentListRequest) (Page[Comment], error) {
+	if err := validateReadRepo(req.Owner, req.Repo); err != nil {
+		return Page[Comment]{}, err
+	}
+	page := firstPositive(req.Page, c.pagination.Page, 1)
+	perPage := firstPositive(req.PerPage, c.pagination.PerPage, 100)
+	endpoint := listRepositoryIssueCommentsEndpoint(req.Owner, req.Repo)
+	values := url.Values{"page": {strconv.Itoa(page)}, "per_page": {strconv.Itoa(perPage)}}
+	body, headers, err := c.getBytes(ctx, endpoint, values)
+	if err != nil {
+		var notFound ErrNotFound
+		var validation ErrAPIValidation
+		if errors.As(err, &notFound) || (errors.As(err, &validation) && validation.Status == http.StatusMethodNotAllowed) {
+			return Page[Comment]{}, ErrUnsupportedCapability{CapabilityKey: "repository_issue_comments", Message: "repository-wide issue comments are unavailable; use the per-issue compatibility path"}
+		}
+		return Page[Comment]{}, err
+	}
+	var items []Comment
+	if err := decodeJSON(endpoint, body, &items); err != nil {
+		return Page[Comment]{}, err
+	}
+	totalCount := headerInt(headers, "total_count")
+	totalPages := headerInt(headers, "total_page")
+	nextPage := headerInt(headers, "X-Next-Page")
+	if nextPage == 0 && totalPages > page {
+		nextPage = page + 1
+	}
+	return Page[Comment]{Items: items, Page: page, PerPage: perPage, TotalCount: totalCount, NextPage: nextPage}, nil
+}
+
 func (c *HTTPClient) ListPRs(ctx context.Context, req PRListRequest) (Page[PullRequest], error) {
 	if err := validateReadRepo(req.Owner, req.Repo); err != nil {
 		return Page[PullRequest]{}, err

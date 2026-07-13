@@ -87,6 +87,59 @@ func TestScenario004ReadRouteContract(t *testing.T) {
 	}
 }
 
+func TestListRepositoryIssueCommentsReadsOnePageAndDecodesParent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v5/repos/example-owner/example-repo/issues/comments" {
+			t.Fatalf("path=%q", r.URL.Path)
+		}
+		page := r.URL.Query().Get("page")
+		if r.URL.Query().Get("per_page") != "2" {
+			t.Fatalf("query=%s", r.URL.RawQuery)
+		}
+		fixture := "../../testdata/gitcode/repository-issue-comments-page-1.json"
+		if page == "2" {
+			fixture = "../../testdata/gitcode/repository-issue-comments-page-2.json"
+		}
+		data, err := os.ReadFile(fixture)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("total_count", "3")
+		w.Header().Set("total_page", "2")
+		_, _ = w.Write(data)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+
+	first, err := client.ListRepositoryIssueComments(context.Background(), RepositoryIssueCommentListRequest{Owner: "example-owner", Repo: "example-repo", Page: 1, PerPage: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Items) != 2 || first.NextPage != 2 || first.TotalCount != 3 || first.Items[0].ID != "9001" || first.Items[0].IssueID != "7001" || first.Items[0].IssueNumber != 7 || first.Items[0].Author != "example-user" {
+		t.Fatalf("first=%#v", first)
+	}
+	second, err := client.ListRepositoryIssueComments(context.Background(), RepositoryIssueCommentListRequest{Owner: "example-owner", Repo: "example-repo", Page: first.NextPage, PerPage: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Items) != 1 || second.NextPage != 0 || second.Items[0].ID != "9003" || second.Items[0].IssueNumber != 7 {
+		t.Fatalf("second=%#v", second)
+	}
+}
+
+func TestListRepositoryIssueCommentsClassifiesUnsupportedEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	_, err := client.ListRepositoryIssueComments(context.Background(), RepositoryIssueCommentListRequest{Owner: "example-owner", Repo: "example-repo", Page: 1, PerPage: 100})
+	var unsupported ErrUnsupportedCapability
+	if !errors.As(err, &unsupported) || unsupported.CapabilityKey != "repository_issue_comments" {
+		t.Fatalf("err=%T %v", err, err)
+	}
+}
+
 func TestContract(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
@@ -1068,6 +1121,27 @@ func TestScenario007UpdateIssueCommentEmptyPatchBodyUsesReadback(t *testing.T) {
 	}
 	if !result.Confirmed || result.ProviderStatus != "2xx-readback" || result.RemoteID != "2002" || result.ParentIssueNumber != 42 || result.Record.Body != wantBody {
 		t.Fatalf("unexpected result=%+v", result)
+	}
+}
+
+func TestDecodeFlatPRDiscussionEnvelope(t *testing.T) {
+	body, err := os.ReadFile("../../testdata/gitcode/pr-review-discussions-v4-flat.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	comments, err := decodePRDiscussionComments("fixture://pr-review-discussions-v4-flat", body, 7)
+	if err != nil {
+		t.Fatalf("decodePRDiscussionComments returned error: %v", err)
+	}
+	if len(comments) != 2 {
+		t.Fatalf("comments=%#v", comments)
+	}
+	root, reply := comments[0], comments[1]
+	if root.ID != "301" || root.DiscussionID != "DISC-7" || root.ReviewKind != "inline" || root.Path != "internal/service/service.go" || root.Line != 42 {
+		t.Fatalf("root=%#v", root)
+	}
+	if reply.ID != "302" || reply.DiscussionID != "DISC-7" || reply.ParentID != "301" || reply.Body != "Nested reply" {
+		t.Fatalf("reply=%#v", reply)
 	}
 }
 

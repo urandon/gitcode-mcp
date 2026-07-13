@@ -14,6 +14,13 @@ type prDiscussionEnvelope struct {
 	prDiscussion
 }
 
+type flatPRDiscussionEnvelope struct {
+	Content struct {
+		Data []prDiscussionNote `json:"data"`
+	} `json:"content"`
+	Data []prDiscussionNote `json:"data"`
+}
+
 type prDiscussion struct {
 	ID           any                `json:"id"`
 	NoteableType string             `json:"noteable_type"`
@@ -79,7 +86,76 @@ func decodePRDiscussionComments(endpoint string, body []byte, prNumber int) ([]P
 		discussions = []prDiscussion{envelope.prDiscussion}
 		discussions[0].Notes = envelope.Notes
 	}
+	if !hasDiscussionNotes(discussions) {
+		var flat flatPRDiscussionEnvelope
+		if err := json.Unmarshal(body, &flat); err == nil {
+			notes := flat.Content.Data
+			if len(notes) == 0 {
+				notes = flat.Data
+			}
+			if hasFlatDiscussionNotes(notes) {
+				return flatPRDiscussionNotesToComments(notes, prNumber)
+			}
+		}
+	}
 	return prDiscussionsToComments(discussions, prNumber)
+}
+
+func hasDiscussionNotes(discussions []prDiscussion) bool {
+	for _, discussion := range discussions {
+		if len(discussion.Notes) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func hasFlatDiscussionNotes(notes []prDiscussionNote) bool {
+	for _, note := range notes {
+		if flatDiscussionNoteIsInline(note) {
+			return true
+		}
+	}
+	return false
+}
+
+func flatPRDiscussionNotesToComments(notes []prDiscussionNote, prNumber int) ([]PRComment, error) {
+	grouped := make([]prDiscussion, 0)
+	byID := map[string]int{}
+	for _, note := range notes {
+		discussionID, err := decodeOptionalID(note.DiscussionID)
+		if err != nil {
+			return nil, err
+		}
+		if discussionID == "" {
+			discussionID, err = decodeOptionalID(note.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		index, ok := byID[discussionID]
+		if !ok {
+			index = len(grouped)
+			byID[discussionID] = index
+			grouped = append(grouped, prDiscussion{ID: discussionID})
+		}
+		grouped[index].Notes = append(grouped[index].Notes, note)
+	}
+	inlineDiscussions := grouped[:0]
+	for _, discussion := range grouped {
+		for _, note := range discussion.Notes {
+			if flatDiscussionNoteIsInline(note) {
+				inlineDiscussions = append(inlineDiscussions, discussion)
+				break
+			}
+		}
+	}
+	return prDiscussionsToComments(inlineDiscussions, prNumber)
+}
+
+func flatDiscussionNoteIsInline(note prDiscussionNote) bool {
+	kind := strings.ToLower(note.Type)
+	return note.Position != nil || note.OriginalPosition != nil || strings.TrimSpace(note.DiffFile) != "" || strings.TrimSpace(note.FilePath) != "" || note.Line != nil || note.NewLine != nil || strings.Contains(kind, "diff") || strings.Contains(kind, "inline")
 }
 
 func prDiscussionsToComments(discussions []prDiscussion, prNumber int) ([]PRComment, error) {

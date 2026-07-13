@@ -61,6 +61,8 @@ type Store interface {
 	GetIssueCommentSync(context.Context, string, string) (IssueCommentSync, bool, error)
 	ListIssueCommentSync(context.Context, IssueCommentSyncFilter) ([]IssueCommentSync, error)
 	IssueCommentSyncSummary(context.Context, string) (IssueCommentSyncSummary, error)
+	UpsertRecordComments(context.Context, string, string, []RecordComment) error
+	ReconcileRecordComments(context.Context, string, string, []string) error
 	ReplaceRecordComments(context.Context, string, string, []RecordComment) error
 	RecordCacheConfirmation(context.Context, CacheConfirmationRecord) error
 	GetCacheConfirmationByKey(context.Context, string, string) (*CacheConfirmationRecord, error)
