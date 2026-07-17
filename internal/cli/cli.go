@@ -1829,7 +1829,8 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		}
 		switch sub {
 		case "add":
-			result, err := svc.AddRepository(ctx, service.AddRepositoryRequest{RepoID: opts.repo, Owner: opts.owner, Name: opts.name, APIBaseURL: opts.apiBaseURL, Scopes: []string{opts.scopes}, DisplayName: opts.displayName, Aliases: []string(opts.alias)})
+			apiBaseURL := repositoryAPIBaseURL(opts.apiBaseURL, deps.Source)
+			result, err := svc.AddRepository(ctx, service.AddRepositoryRequest{RepoID: opts.repo, Owner: opts.owner, Name: opts.name, APIBaseURL: apiBaseURL, Scopes: []string{opts.scopes}, DisplayName: opts.displayName, Aliases: []string(opts.alias)})
 			if err != nil {
 				return writeError(stderr, opts.format, err)
 			}
@@ -3279,10 +3280,7 @@ func executeRepoInitLocalCommand(ctx context.Context, opts options, stdout io.Wr
 	}
 	defer store.Close()
 	svc := service.New(store)
-	apiBaseURL := strings.TrimSpace(opts.apiBaseURL)
-	if apiBaseURL == "" {
-		apiBaseURL = defaultAPIBaseURL(deps.Source)
-	}
+	apiBaseURL := repositoryAPIBaseURL(opts.apiBaseURL, deps.Source)
 	scopes := strings.TrimSpace(opts.scopes)
 	if scopes == "" {
 		scopes = "issues,wiki,pulls,comments"
@@ -3434,6 +3432,13 @@ func defaultAPIBaseURL(src config.Source) string {
 		return cfg.GitCodeBaseURL
 	}
 	return config.Default().GitCodeBaseURL
+}
+
+func repositoryAPIBaseURL(explicit string, src config.Source) string {
+	if value := strings.TrimSpace(explicit); value != "" {
+		return value
+	}
+	return defaultAPIBaseURL(src)
 }
 
 func addOrReuseRepositoryBinding(ctx context.Context, svc *service.Service, req service.AddRepositoryRequest) (service.RepositoryBinding, string, error) {
@@ -4126,14 +4131,10 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Run gitcode-mcp repo SUBCOMMAND --help for details.")
 	case "bind":
-		fmt.Fprintln(w, "Usage: gitcode-mcp bind --repo-owner OWNER --repo REPO")
+		fmt.Fprintln(w, "Usage: gitcode-mcp bind")
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Bind a GitCode repository to the cache. This compatibility help surface maps to repo add.")
-		fmt.Fprintln(w, "Flags:")
-		fmt.Fprintln(w, "  --repo-owner OWNER  repository owner (required)")
-		fmt.Fprintln(w, "  --repo REPO         repository name (required)")
-		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
-		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+		fmt.Fprintln(w, "Deprecated, non-operational compatibility command.")
+		fmt.Fprintln(w, "Use gitcode-mcp repo add --repo OWNER/REPO --owner OWNER --name REPO --scopes SCOPES.")
 	default:
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s [flags]\n\n", command)
 		fmt.Fprintln(w, "Flags:")
@@ -4295,14 +4296,14 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --format FORMAT    output format (text, json)")
 	case "repo add":
-		fmt.Fprintln(w, "Usage: gitcode-mcp repo add --repo REPO --owner OWNER --name NAME --api-base-url URL --scopes SCOPES [--alias ALIAS] [--display-name NAME]")
+		fmt.Fprintln(w, "Usage: gitcode-mcp repo add --repo REPO --owner OWNER --name NAME --scopes SCOPES [--api-base-url URL] [--alias ALIAS] [--display-name NAME]")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Bind a GitCode repository to the cache.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --owner OWNER       repository owner (required)")
 		fmt.Fprintln(w, "  --name NAME         repository name (required)")
-		fmt.Fprintln(w, "  --api-base-url URL  authoritative live API base URL (required)")
+		fmt.Fprintln(w, "  --api-base-url URL  authoritative live API base URL (defaults to effective config, then GitCode v5)")
 		fmt.Fprintln(w, "  --scopes SCOPES     comma-separated scopes (issues, wiki, pulls, comments)")
 		fmt.Fprintln(w, "  --alias ALIAS       repository alias (repeatable)")
 		fmt.Fprintln(w, "  --display-name NAME human-readable display name")

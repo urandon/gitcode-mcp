@@ -16,8 +16,7 @@ gitcode-mcp repo add \
   --repo example-owner/example-repo \
   --owner example-owner \
   --name example-repo \
-  --scopes issues,wiki \
-  --api-base-url https://api.gitcode.com/api/v5
+  --scopes issues,wiki
 
 # Sync from the sanitized fixture adapter and build the index
 gitcode-mcp sync --offline --repo example-owner/example-repo --issues --wiki --index

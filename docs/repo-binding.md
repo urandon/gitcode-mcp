@@ -13,8 +13,7 @@ gitcode-mcp repo init-local \
   --repo example-owner/example-repo \
   --owner example-owner \
   --name example-repo \
-  --display-name "Example Repository" \
-  --api-base-url https://api.gitcode.com/api/v5
+  --display-name "Example Repository"
 ```
 
 This creates `.gitcode/gitcode-mcp.yaml` with `cache_mode: repo-local`, ensures `.gitcode/mcp/` is ignored, creates the repo-local cache directory, and records the repository binding in `<git-worktree>/.gitcode/mcp/cache.db`. It does not sync data; run `gitcode-mcp sync --repo example-owner/example-repo ...` explicitly when ready.
@@ -27,8 +26,7 @@ gitcode-mcp repo add \
   --owner example-owner \
   --name example-repo \
   --display-name "Example Repository" \
-  --scopes issues,wiki \
-  --api-base-url https://api.gitcode.com/api/v5
+  --scopes issues,wiki
 ```
 
 ### Flags
@@ -40,10 +38,23 @@ gitcode-mcp repo add \
 | `--name` | Yes | Repository name |
 | `--display-name` | No | Human-readable display name |
 | `--scopes` | Yes | Comma-separated scopes (`issues`, `wiki`; `pulls` and `comments` are accepted and use the issue-backed GitCode API surface) |
-| `--api-base-url` | No | API base URL. Defaults to config value |
+| `--api-base-url` | No | API base URL. Defaults to effective `gitcode_base_url`, then `https://api.gitcode.com/api/v5` |
 | `--alias` | No | Short alias for the repository |
 
 `repo init-local` accepts the same repository identity flags. Its `--scopes` default is `issues,wiki,pulls,comments`, and `--overwrite` replaces an existing `.gitcode/gitcode-mcp.yaml` when it already declares a different `cache_mode`.
+
+For a GitCode-compatible deployment at another endpoint, set `gitcode_base_url` in configuration or pass an explicit override:
+
+```sh
+gitcode-mcp repo add \
+  --repo example-owner/example-repo \
+  --owner example-owner \
+  --name example-repo \
+  --scopes issues,wiki \
+  --api-base-url https://gitcode.example/api/v5
+```
+
+The explicit flag takes precedence over configuration. An invalid explicit URL fails validation; it does not fall back silently.
 
 ### repo_id format
 
