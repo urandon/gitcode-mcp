@@ -86,7 +86,7 @@ repo_unavailable
 
 **Fix:**
 ```sh
-gitcode-mcp repo add --owner <owner> --repo <name> --scopes issues,wiki
+gitcode-mcp repo add --repo <owner>/<name> --owner <owner> --name <name> --scopes issues,wiki
 ```
 
 ### Sync has not been run

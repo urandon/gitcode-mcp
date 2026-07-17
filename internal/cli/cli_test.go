@@ -1525,6 +1525,145 @@ func TestRepoRegistryCLI(t *testing.T) {
 	}
 }
 
+func TestRepoAddAPIBaseURLPrecedence(t *testing.T) {
+	tests := []struct {
+		name          string
+		configuredURL string
+		explicitURL   string
+		wantURL       string
+		wantError     string
+	}{
+		{
+			name:    "built-in GitCode v5 default",
+			wantURL: "https://api.gitcode.com/api/v5",
+		},
+		{
+			name:          "effective config",
+			configuredURL: "https://configured.example/api/v5",
+			wantURL:       "https://configured.example/api/v5",
+		},
+		{
+			name:          "explicit override",
+			configuredURL: "https://configured.example/api/v5",
+			explicitURL:   "https://explicit.example/api/v5",
+			wantURL:       "https://explicit.example/api/v5",
+		},
+		{
+			name:          "invalid explicit value does not fall back",
+			configuredURL: "https://configured.example/api/v5",
+			explicitURL:   "not-a-url",
+			wantError:     "valid api base url is required",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			cachePath := filepath.Join(root, "cache.db")
+			env := map[string]string{}
+			if tc.configuredURL != "" {
+				configPath := filepath.Join(root, "config.yaml")
+				if err := os.WriteFile(configPath, []byte("gitcode_base_url: "+tc.configuredURL+"\n"), 0o600); err != nil {
+					t.Fatalf("write config: %v", err)
+				}
+				env[config.EnvMCPConfigPath] = configPath
+			}
+			src := &repoInitLocalSource{
+				env:       env,
+				cwd:       root,
+				homeDir:   filepath.Join(root, "home"),
+				configDir: filepath.Join(root, "config"),
+				cacheDir:  filepath.Join(root, "cache"),
+			}
+			factory := func(ctx context.Context, path string) (queryService, func() error, error) {
+				store, err := cache.NewSQLiteStore(ctx, path)
+				if err != nil {
+					return nil, nil, err
+				}
+				return service.New(store), store.Close, nil
+			}
+			args := []string{"repo", "add", "--cache-path", cachePath, "--repo", "example-owner/example-repo", "--owner", "example-owner", "--name", "example-repo", "--scopes", "issues,wiki"}
+			if tc.explicitURL != "" {
+				args = append(args, "--api-base-url", tc.explicitURL)
+			}
+			var stdout, stderr bytes.Buffer
+			code := executeWithFactoryAndDeps(args, &stdout, &stderr, factory, localCommandDeps{Source: src})
+			if tc.wantError != "" {
+				if code == 0 || !strings.Contains(stderr.String(), tc.wantError) {
+					t.Fatalf("code=%d stderr=%q, want error containing %q", code, stderr.String(), tc.wantError)
+				}
+				store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+				if err != nil {
+					t.Fatalf("open cache: %v", err)
+				}
+				defer store.Close()
+				if _, err := store.GetRepository(context.Background(), "example-owner/example-repo"); err == nil {
+					t.Fatal("invalid explicit URL unexpectedly created a repository binding")
+				}
+				return
+			}
+			if code != 0 {
+				t.Fatalf("code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+			}
+			store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+			if err != nil {
+				t.Fatalf("open cache: %v", err)
+			}
+			repo, err := store.GetRepository(context.Background(), "example-owner/example-repo")
+			if closeErr := store.Close(); closeErr != nil {
+				t.Fatalf("close cache: %v", closeErr)
+			}
+			if err != nil {
+				t.Fatalf("get repository: %v", err)
+			}
+			if repo.APIBaseURL != tc.wantURL {
+				t.Fatalf("api base URL=%q want %q", repo.APIBaseURL, tc.wantURL)
+			}
+		})
+	}
+}
+
+func TestBindCompatibilityAliasCreatesRepository(t *testing.T) {
+	root := t.TempDir()
+	cachePath := filepath.Join(root, "cache.db")
+	src := &repoInitLocalSource{
+		env:       map[string]string{},
+		cwd:       root,
+		homeDir:   filepath.Join(root, "home"),
+		configDir: filepath.Join(root, "config"),
+		cacheDir:  filepath.Join(root, "cache"),
+	}
+	factory := func(ctx context.Context, path string) (queryService, func() error, error) {
+		store, err := cache.NewSQLiteStore(ctx, path)
+		if err != nil {
+			return nil, nil, err
+		}
+		return service.New(store), store.Close, nil
+	}
+	var stdout, stderr bytes.Buffer
+	code := executeWithFactoryAndDeps([]string{"bind", "--cache-path", cachePath, "--repo-owner", "example-owner", "--repo", "example-repo", "--format", "json"}, &stdout, &stderr, factory, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+	if err != nil {
+		t.Fatalf("open cache: %v", err)
+	}
+	repo, err := store.GetRepository(context.Background(), "example-owner/example-repo")
+	if closeErr := store.Close(); closeErr != nil {
+		t.Fatalf("close cache: %v", closeErr)
+	}
+	if err != nil {
+		t.Fatalf("get repository: %v", err)
+	}
+	if repo.Owner != "example-owner" || repo.Name != "example-repo" || repo.APIBaseURL != "https://api.gitcode.com/api/v5" {
+		t.Fatalf("unexpected compatibility binding: %#v", repo)
+	}
+	if len(repo.Scopes) != 2 || repo.Scopes[0] != cache.RepositoryScopeIssues || repo.Scopes[1] != cache.RepositoryScopeWiki {
+		t.Fatalf("scopes=%v want [issues wiki]", repo.Scopes)
+	}
+}
+
 func TestQueryCommandsUseServiceOnly(t *testing.T) {
 	spy := &spyService{}
 	factory := func(context.Context, string) (queryService, func() error, error) { return spy, nil, nil }
@@ -2117,10 +2256,31 @@ func TestRepoAddHelpShowsFlagsAndSupportedScopes(t *testing.T) {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
 	out := stdout.String()
-	for _, want := range []string{"--owner OWNER", "--name NAME", "--api-base-url URL", "--scopes SCOPES", "--alias ALIAS", "issues, wiki, pulls, comments"} {
+	for _, want := range []string{"--owner OWNER", "--name NAME", "[--api-base-url URL]", "defaults to effective config", "--scopes SCOPES", "--alias ALIAS", "issues, wiki, pulls, comments"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("repo add help missing %q in %q", want, out)
 		}
+	}
+	if strings.Contains(out, "API base URL (required)") {
+		t.Fatalf("repo add help still marks API base URL required: %q", out)
+	}
+}
+
+func TestBindHelpDocumentsWorkingCompatibilityAlias(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Execute([]string{"bind", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"Deprecated compatibility alias", "repo add", "--repo-owner OWNER", "--repo REPO", "defaults to effective config", "defaults to issues,wiki,pulls,comments"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("bind help missing %q in %q", want, out)
+		}
+	}
+	if strings.Contains(out, "non-operational") {
+		t.Fatalf("bind help still claims the compatibility route is non-operational: %q", out)
 	}
 }
 

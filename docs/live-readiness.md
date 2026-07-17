@@ -25,10 +25,14 @@ gitcode-mcp --help
 Bind the repository with sanitized owner and repository placeholders:
 
 ```sh
-gitcode-mcp bind --repo-owner "YOUR_OWNER" --repo "YOUR_REPO"
+gitcode-mcp repo add \
+  --repo "YOUR_OWNER/YOUR_REPO" \
+  --owner "YOUR_OWNER" \
+  --name "YOUR_REPO" \
+  --scopes issues,wiki
 ```
 
-`bind --help` documents `--repo-owner` and `--repo`. The current implementation also exposes repository binding through `repo add`; see [Repository Binding](repo-binding.md) for the detailed repository management workflow.
+`repo add` uses the effective configured `gitcode_base_url`, or the built-in GitCode v5 endpoint when it is not configured. Use `--api-base-url` only for an explicit endpoint override. See [Repository Binding](repo-binding.md) for the detailed repository management workflow.
 
 ## 3. Verify credentials
 
@@ -238,7 +242,7 @@ Quick checks:
 | Symptom | Check | Fix |
 |---|---|---|
 | No token configured | `gitcode-mcp auth status` | Set `GITCODE_TOKEN` or configure a credential store from [Secrets](secrets.md) |
-| No repo bound | `gitcode-mcp doctor` | Run `gitcode-mcp bind --repo-owner "YOUR_OWNER" --repo "YOUR_REPO"` |
+| No repo bound | `gitcode-mcp doctor` | Run `gitcode-mcp repo add --repo "YOUR_OWNER/YOUR_REPO" --owner "YOUR_OWNER" --name "YOUR_REPO" --scopes issues,wiki` |
 | Auth failure | `gitcode-mcp auth status --live --owner "YOUR_OWNER" --repo "YOUR_REPO"` | Verify token scope and repository access |
 | Rate limited | `gitcode-mcp sync --repo "YOUR_REPO" --issues --wiki` | Retry later; keep cache reads offline |
 | Missing or stale index | `gitcode-mcp sync-status --repo "YOUR_REPO"` and `gitcode-mcp stale-index --repo "YOUR_REPO"` | Run `gitcode-mcp index --repo "YOUR_REPO" --full` |
