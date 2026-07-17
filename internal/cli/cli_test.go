@@ -1623,6 +1623,47 @@ func TestRepoAddAPIBaseURLPrecedence(t *testing.T) {
 	}
 }
 
+func TestBindCompatibilityAliasCreatesRepository(t *testing.T) {
+	root := t.TempDir()
+	cachePath := filepath.Join(root, "cache.db")
+	src := &repoInitLocalSource{
+		env:       map[string]string{},
+		cwd:       root,
+		homeDir:   filepath.Join(root, "home"),
+		configDir: filepath.Join(root, "config"),
+		cacheDir:  filepath.Join(root, "cache"),
+	}
+	factory := func(ctx context.Context, path string) (queryService, func() error, error) {
+		store, err := cache.NewSQLiteStore(ctx, path)
+		if err != nil {
+			return nil, nil, err
+		}
+		return service.New(store), store.Close, nil
+	}
+	var stdout, stderr bytes.Buffer
+	code := executeWithFactoryAndDeps([]string{"bind", "--cache-path", cachePath, "--repo-owner", "example-owner", "--repo", "example-repo", "--format", "json"}, &stdout, &stderr, factory, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+	if err != nil {
+		t.Fatalf("open cache: %v", err)
+	}
+	repo, err := store.GetRepository(context.Background(), "example-owner/example-repo")
+	if closeErr := store.Close(); closeErr != nil {
+		t.Fatalf("close cache: %v", closeErr)
+	}
+	if err != nil {
+		t.Fatalf("get repository: %v", err)
+	}
+	if repo.Owner != "example-owner" || repo.Name != "example-repo" || repo.APIBaseURL != "https://api.gitcode.com/api/v5" {
+		t.Fatalf("unexpected compatibility binding: %#v", repo)
+	}
+	if len(repo.Scopes) != 2 || repo.Scopes[0] != cache.RepositoryScopeIssues || repo.Scopes[1] != cache.RepositoryScopeWiki {
+		t.Fatalf("scopes=%v want [issues wiki]", repo.Scopes)
+	}
+}
+
 func TestQueryCommandsUseServiceOnly(t *testing.T) {
 	spy := &spyService{}
 	factory := func(context.Context, string) (queryService, func() error, error) { return spy, nil, nil }
@@ -2225,7 +2266,7 @@ func TestRepoAddHelpShowsFlagsAndSupportedScopes(t *testing.T) {
 	}
 }
 
-func TestBindHelpStatesDeprecatedNonOperationalContract(t *testing.T) {
+func TestBindHelpDocumentsWorkingCompatibilityAlias(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := Execute([]string{"bind", "--help"}, &stdout, &stderr)
@@ -2233,13 +2274,13 @@ func TestBindHelpStatesDeprecatedNonOperationalContract(t *testing.T) {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
 	out := stdout.String()
-	for _, want := range []string{"Deprecated", "non-operational", "repo add"} {
+	for _, want := range []string{"Deprecated compatibility alias", "repo add", "--repo-owner OWNER", "--repo REPO", "defaults to effective config", "defaults to issues,wiki,pulls,comments"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("bind help missing %q in %q", want, out)
 		}
 	}
-	if strings.Contains(out, "--repo-owner") || strings.Contains(out, "maps to repo add") {
-		t.Fatalf("bind help still advertises an unsupported contract: %q", out)
+	if strings.Contains(out, "non-operational") {
+		t.Fatalf("bind help still claims the compatibility route is non-operational: %q", out)
 	}
 }
 

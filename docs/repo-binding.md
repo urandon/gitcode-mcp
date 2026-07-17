@@ -56,6 +56,8 @@ gitcode-mcp repo add \
 
 The explicit flag takes precedence over configuration. An invalid explicit URL fails validation; it does not fall back silently.
 
+The deprecated `bind --repo-owner OWNER --repo REPO` form remains a working compatibility alias. It derives the stable id as `OWNER/REPO`, defaults scopes to all supported collections, and uses the same API URL precedence as `repo add`. New automation should use `repo add` because its repository identity is explicit.
+
 ### repo_id format
 
 The stable local `repo_id` is formed as `<owner>/<name>`. For example, `example-owner/example-repo`.
