@@ -93,8 +93,8 @@ func TestConfigLoading(t *testing.T) {
 		if cfg.CachePath != wantCache || cfg.LockPath != wantCache+".lock" || cfg.Format != "text" || cfg.DefaultTimeout != 30*time.Second {
 			t.Fatalf("unexpected defaults: %#v", cfg)
 		}
-		if cfg.MCPToolAccess != MCPToolAccessRead {
-			t.Fatalf("mcp tool access = %q, want read", cfg.MCPToolAccess)
+		if cfg.MCPToolAccess != MCPToolAccessWrite {
+			t.Fatalf("mcp tool access = %q, want write", cfg.MCPToolAccess)
 		}
 	})
 
@@ -224,6 +224,20 @@ func TestConfigLoading(t *testing.T) {
 		}
 		if cfg.MCPToolAccess != MCPToolAccessWrite {
 			t.Fatalf("mcp tool access = %q, want write", cfg.MCPToolAccess)
+		}
+	})
+
+	t.Run("SCN-CONFIG-MCP-TOOL-ACCESS-YAML-READ-ONLY", func(t *testing.T) {
+		src := newMemorySource(t)
+		configPath := filepath.Join(t.TempDir(), "mcp-read-only.yaml")
+		src.env[EnvMCPConfigPath] = configPath
+		src.files[configPath] = []byte("mcp:\n  tools:\n    access: read\n")
+		eff, err := LoadEffective(src, Overrides{})
+		if err != nil {
+			t.Fatalf("LoadEffective returned error: %v", err)
+		}
+		if eff.Config.MCPToolAccess != MCPToolAccessRead || eff.FieldSources["mcp_tool_access"] != "explicit-yaml" {
+			t.Fatalf("mcp tool access effective=%#v", eff)
 		}
 	})
 

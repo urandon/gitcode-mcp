@@ -939,6 +939,84 @@ func TestEntrypointMCPInitialize(t *testing.T) {
 	}
 }
 
+func TestEntrypointMCPToolAccessDefaultAndReadOnlyConfig(t *testing.T) {
+	t.Run("no config exposes read and write tools", func(t *testing.T) {
+		src := newTestSource(t)
+		cachePath := filepath.Join(t.TempDir(), "cache.db")
+		stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}` + "\n")
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"--mcp", "--cache-path", cachePath}, stdin, &stdout, &stderr, src)
+		if code != 0 || stderr.Len() != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		names := entrypointMCPToolNames(t, strings.TrimSpace(stdout.String()))
+		for _, want := range []string{"search_sources", "create_issue"} {
+			if !names[want] {
+				t.Fatalf("default tools/list missing %q: %v", want, names)
+			}
+		}
+	})
+
+	t.Run("explicit read config filters and blocks write tools", func(t *testing.T) {
+		src := newTestSource(t)
+		configPath := filepath.Join(t.TempDir(), "read-only.yaml")
+		src.env[config.EnvMCPConfigPath] = configPath
+		src.files[configPath] = []byte("mcp:\n  tools:\n    access: read\n")
+		cachePath := filepath.Join(t.TempDir(), "cache.db")
+		stdin := strings.NewReader(
+			`{"jsonrpc":"2.0","id":1,"method":"tools/list"}` + "\n" +
+				`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_issue","arguments":{}}}` + "\n",
+		)
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"--mcp", "--cache-path", cachePath}, stdin, &stdout, &stderr, src)
+		if code != 0 || stderr.Len() != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		lines := nonEmptyLines(stdout.String())
+		if len(lines) != 2 {
+			t.Fatalf("stdout lines=%d %q", len(lines), stdout.String())
+		}
+		names := entrypointMCPToolNames(t, lines[0])
+		if !names["search_sources"] || names["create_issue"] {
+			t.Fatalf("read-only tools/list=%v", names)
+		}
+		var blocked struct {
+			Error struct {
+				Data struct {
+					Code        string `json:"code"`
+					AccessMode  string `json:"access_mode"`
+					Remediation string `json:"remediation"`
+				} `json:"data"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(lines[1]), &blocked); err != nil {
+			t.Fatalf("decode blocked call: %v line=%q", err, lines[1])
+		}
+		if blocked.Error.Data.Code != "tool_disabled_by_policy" || blocked.Error.Data.AccessMode != "read" || !strings.Contains(blocked.Error.Data.Remediation, "read-only override") {
+			t.Fatalf("blocked call=%+v", blocked.Error.Data)
+		}
+	})
+}
+
+func entrypointMCPToolNames(t *testing.T, line string) map[string]bool {
+	t.Helper()
+	var resp struct {
+		Result struct {
+			Tools []struct {
+				Name string `json:"name"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(line), &resp); err != nil {
+		t.Fatalf("decode tools/list: %v line=%q", err, line)
+	}
+	names := make(map[string]bool, len(resp.Result.Tools))
+	for _, tool := range resp.Result.Tools {
+		names[tool.Name] = true
+	}
+	return names
+}
+
 func TestEntrypointMCPStartupFallback(t *testing.T) {
 	t.Run("SCN-MCP-STARTUP-SCHEMA-INCOMPATIBLE", func(t *testing.T) {
 		cachePath := filepath.Join(t.TempDir(), "cache.db")
