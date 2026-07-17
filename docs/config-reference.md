@@ -37,6 +37,9 @@ default_timeout: 30s
 max_response_size: 10485760
 max_retries: 2
 format: text
+mcp:
+  tools:
+    access: write
 credential:
   store: auto
   keyring_service: gitcode-mcp
@@ -85,6 +88,7 @@ rag:
 | `max_response_size` | int64 | `10485760` | Maximum response size in bytes |
 | `max_retries` | int | `2` | Maximum retries for API calls |
 | `format` | string | `text` | Default output format (`text` or `json`) |
+| `mcp.tools.access` | string | `write` | MCP discovery policy. `write` exposes read and write tools; `read` explicitly selects the read/status-only surface. Write calls still require `write_mode: "live"` and the normal readiness/audit gates. |
 | `credential.store` | string | `auto` | Credential lookup mode: `auto` checks `GITCODE_TOKEN` then the system keyring, `env` checks only `GITCODE_TOKEN`, and `keyring` checks the system keyring after env fallback. `keychain` is accepted as a legacy alias for `keyring`. |
 | `credential.keyring_service` | string | `gitcode-mcp` | System keyring service name used when `credential.store` is `auto` or `keyring`. Override it to isolate credentials for different agents or profiles. |
 | `credential.keyring_account` | string | `token` | System keyring account/user name used when `credential.store` is `auto` or `keyring`. Override it to isolate credentials for different agents or profiles. |
@@ -107,6 +111,7 @@ Environment overrides:
 |---|---|
 | `GITCODE_MCP_KEYRING_SERVICE` | Overrides `credential.keyring_service` for the launched process |
 | `GITCODE_MCP_KEYRING_ACCOUNT` | Overrides `credential.keyring_account` for the launched process |
+| `GITCODE_MCP_TOOL_ACCESS` | Overrides `mcp.tools.access`; set to `read` for an explicit read-only session |
 | `GITCODE_MCP_RAG_PROFILE` | Overrides the default RAG profile for the launched process |
 | `GITCODE_MCP_RAG_PROVIDER_ENDPOINT` | Overrides the active RAG provider endpoint |
 | `GITCODE_MCP_RAG_MODEL_STORE` | Overrides `rag.model_store_path` |

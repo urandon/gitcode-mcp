@@ -177,7 +177,7 @@ func defaultWithSource(src Source) Config {
 		RateLimitRPS:    4,
 		RateLimitBurst:  4,
 		Format:          "text",
-		MCPToolAccess:   MCPToolAccessRead,
+		MCPToolAccess:   MCPToolAccessWrite,
 		Service:         defaultServiceConfig(cacheBaseDir),
 		RAG:             defaultRAGConfig(cacheBaseDir),
 	}
@@ -369,7 +369,7 @@ func mergeOverrides(cfg Config, overrides Overrides) Config {
 func NormalizeMCPToolAccess(value string) (string, error) {
 	access := strings.ToLower(strings.TrimSpace(value))
 	if access == "" {
-		return MCPToolAccessRead, nil
+		return MCPToolAccessWrite, nil
 	}
 	if access != MCPToolAccessRead && access != MCPToolAccessWrite {
 		return "", fmt.Errorf("config: invalid mcp tool access %q: expected read or write", value)

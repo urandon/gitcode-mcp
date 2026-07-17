@@ -153,7 +153,7 @@ The MCP server exposes the same audited live-write lifecycle for agent workflows
 | `delete_page` | Delete a live wiki page |
 | `add_label` | Add a label to a live issue |
 
-MCP tool access defaults to `read`, so these write lifecycle tools are hidden from `tools/list` unless the server is started with `mcp.tools.access: write` or `GITCODE_MCP_TOOL_ACCESS=write`. A direct call while read-only returns `tool_disabled_by_policy` before validation, credentials, network, or cache mutation. `gitcode-mcp doctor` reports the active `tool_access` mode.
+MCP tool access defaults to `write`, so `tools/list` includes both read and write lifecycle tools. This is a discovery policy, not implicit mutation authority: each write still requires `write_mode: "live"` and all existing readiness/audit gates. Configure `mcp.tools.access: read` or `GITCODE_MCP_TOOL_ACCESS=read` for a read-only session; direct mutation calls then return `tool_disabled_by_policy` before validation, credentials, network, or cache mutation. `gitcode-mcp doctor` reports the active `tool_access` mode.
 
 Each MCP write call also requires `write_mode: "live"`. Idempotency keys are accepted on every write tool and are used for safe replay/conflict detection. `link_pr_issue` defaults to `strategy: "auto"`, which uses the explicit GitCode PR issue relation endpoint and falls back to a deterministic description marker only when the relation endpoint is unsupported. Successful writes report provider confirmation, audit/cache evidence, remote identity, and the idempotency key; failed writes return typed public-safe diagnostics and do not claim cache confirmation.
 

@@ -135,21 +135,23 @@ Configure your MCP client with the server URL:
 
 ### MCP tool access
 
-MCP tool access defaults to `read`. In read-only mode the server exposes cache/read/status tools and hides live/cache mutation tools from `tools/list`. A direct `tools/call` for a disabled mutation tool returns `tool_disabled_by_policy` before argument validation, credential resolution, network access, or cache mutation.
+MCP tool access defaults to `write`, which exposes both read and write tools. This changes discovery only: every mutation still requires `write_mode: "live"` and passes the existing credential, provider, idempotency, audit, and cache-readiness gates.
 
-Enable write-capable MCP sessions explicitly:
+Select a read-only MCP session explicitly:
 
 ```yaml
 mcp:
   tools:
-    access: write
+    access: read
 ```
 
 or:
 
 ```sh
-GITCODE_MCP_TOOL_ACCESS=write gitcode-mcp --mcp
+GITCODE_MCP_TOOL_ACCESS=read gitcode-mcp --mcp
 ```
+
+In read-only mode the server exposes cache/read/status tools and hides live/cache mutation tools from `tools/list`. A direct `tools/call` for a disabled mutation tool returns `tool_disabled_by_policy` before argument validation, credential resolution, network access, or cache mutation. Set access to `write` explicitly when overriding a read-only parent configuration.
 
 Read-only Codex MCP example:
 

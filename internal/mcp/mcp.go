@@ -1775,7 +1775,7 @@ func (s *Server) writeToolResult(id *json.RawMessage, result toolCallResult) {
 
 func (s *Server) writeToolDisabledByPolicy(id *json.RawMessage, name string) {
 	access := string(s.activeToolAccess())
-	s.writeError(id, -32000, "Tool disabled by policy", &errorData{Code: "tool_disabled_by_policy", Message: fmt.Sprintf("%q is disabled by MCP tool access policy", name), AccessMode: access, Remediation: "set mcp.tools.access to \"write\" or GITCODE_MCP_TOOL_ACCESS=write for write-capable sessions"})
+	s.writeError(id, -32000, "Tool disabled by policy", &errorData{Code: "tool_disabled_by_policy", Message: fmt.Sprintf("%q is disabled by MCP tool access policy", name), AccessMode: access, Remediation: "remove the explicit read-only override, or set mcp.tools.access to \"write\" or GITCODE_MCP_TOOL_ACCESS=write"})
 }
 
 func mcpDiagnostic(err error) (diagnostics.Diagnostic, bool) {
