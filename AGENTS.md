@@ -16,6 +16,8 @@ Use this repo for:
 
 Use GitCode issues and pull requests for active planning and handoffs. Use the GitCode wiki for historical research, decisions, and dogfood evidence that should remain discoverable without living in main.
 
+Treat an existing GitCode issue title and description as the fixed task input. Do not edit either unless the user explicitly requests that exact metadata change. Publish design proposals, decisions, progress updates, verification evidence, handoffs, and later corrections as issue comments so the original input remains reviewable.
+
 Do not reference non-public source repositories, trackers, wiki names, raw credentials, cookies, internal URLs, or unsanitized API responses. Source systems should appear here only as generic concepts or sanitized fixtures.
 
 ## Read First
