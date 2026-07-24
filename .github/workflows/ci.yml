@@ -35,5 +35,8 @@ jobs:
       - name: Run tests
         run: go test ./...
 
+      - name: Run release automation tests
+        run: python3 -m unittest scripts/release/test_generate_notes.py
+
       - name: Check diff whitespace
         run: git diff --check
