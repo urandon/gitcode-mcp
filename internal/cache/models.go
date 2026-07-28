@@ -19,6 +19,7 @@ type Store interface {
 	GetSourceScoped(context.Context, string, string) (Source, error)
 	ListSources(context.Context, SourceFilter) ([]Source, error)
 	SearchSources(context.Context, SearchQuery) ([]SearchResult, error)
+	ReconcileChildSources(context.Context, string, string, string, []string) error
 	UpsertPRReviewComment(context.Context, PRReviewComment) error
 	ListPRReviewComments(context.Context, PRReviewCommentFilter) ([]PRReviewComment, error)
 	UpsertPRReviewDiscussion(context.Context, PRReviewDiscussion) error

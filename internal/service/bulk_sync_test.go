@@ -154,8 +154,8 @@ func TestBulkSyncIssueCommentsUsesRepositoryAggregateAndReportsAvoidedRequests(t
 	client := &aggregateIssueCommentClient{
 		fakeGitCodeClient: &fakeGitCodeClient{listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{{Items: parents}, {Items: nil}}},
 		pages: map[int]gitcode.Page[gitcode.Comment]{
-			1: {Items: []gitcode.Comment{{ID: "c7", IssueID: "7001", IssueNumber: 7, Body: "seven", CreatedAt: base, UpdatedAt: base}, {ID: "c8", IssueID: "7002", IssueNumber: 8, Body: "eight", CreatedAt: base, UpdatedAt: base}}, Page: 1, PerPage: 2, TotalCount: 3, NextPage: 2},
-			2: {Items: []gitcode.Comment{{ID: "c9", IssueID: "7003", IssueNumber: 9, Body: "nine", CreatedAt: base, UpdatedAt: base}}, Page: 2, PerPage: 2, TotalCount: 3},
+			1: {Items: []gitcode.Comment{{ID: "c7", IssueID: "7001", IssueNumber: 7, Body: "issue-comment-seven-unique", CreatedAt: base, UpdatedAt: base}, {ID: "c8", IssueID: "7002", IssueNumber: 8, Body: "issue-comment-eight-unique", CreatedAt: base, UpdatedAt: base}}, Page: 1, PerPage: 2, TotalCount: 3, NextPage: 2},
+			2: {Items: []gitcode.Comment{{ID: "c9", IssueID: "7003", IssueNumber: 9, Body: "issue-comment-nine-unique", CreatedAt: base, UpdatedAt: base}}, Page: 2, PerPage: 2, TotalCount: 3},
 		},
 	}
 	store := newBulkIssueCommentStore(t, ctx, "aggregate-comments")
@@ -165,6 +165,14 @@ func TestBulkSyncIssueCommentsUsesRepositoryAggregateAndReportsAvoidedRequests(t
 		t.Fatalf("BulkSyncIssues returned error: %v", err)
 	}
 	if err := store.UpsertRecordComments(ctx, "aggregate-comments", "ISSUE-7", []cache.RecordComment{{CommentID: "stale", Body: "remove me", CreatedAt: base, UpdatedAt: base}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertSyncGraph(ctx, cache.SyncGraph{
+		RepoID:     "aggregate-comments",
+		Provenance: cache.ProvenanceLive,
+		Record:     cache.Record{ID: "ISSUECOMMENT-7-stale", Type: "issue_comment", Path: "issues/7/comments/stale.md", Title: "Stale comment", Body: "issue-comment-stale-unique", Status: "current", ContentHash: "stale", RemoteType: "issue_comment", RemoteID: "7:stale", CreatedAt: base, UpdatedAt: base},
+		Links:      []cache.Link{{SourceID: "ISSUECOMMENT-7-stale", TargetID: "ISSUE-7", Kind: "parent", Text: "issue"}},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	progress := make(chan ProgressEvent, 8)
@@ -183,6 +191,26 @@ func TestBulkSyncIssueCommentsUsesRepositoryAggregateAndReportsAvoidedRequests(t
 		if err != nil || len(record.Comments) != 1 || record.Comments[0].CommentID != commentID {
 			t.Fatalf("number=%d record=%#v err=%v", number, record, err)
 		}
+		sourceID := fmt.Sprintf("ISSUECOMMENT-%d-%s", number, commentID)
+		source, err := svc.GetSource(ctx, GetSourceRequest{RepoID: "aggregate-comments", ID: sourceID})
+		if err != nil || source.Kind != "issue_comment" || source.Body == "" || len(source.Links) != 1 || source.Links[0].TargetID != fmt.Sprintf("ISSUE-%d", number) || source.Links[0].Kind != "parent" {
+			t.Fatalf("number=%d source=%#v err=%v", number, source, err)
+		}
+	}
+	listed, err := svc.ListSources(ctx, ListSourcesRequest{RepoID: "aggregate-comments", Kind: "issue_comment"})
+	if err != nil || len(listed.Results) != 3 {
+		t.Fatalf("listed=%#v err=%v", listed, err)
+	}
+	found, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "aggregate-comments", Query: "issue-comment-seven-unique", Kind: "issue_comment"})
+	if err != nil || len(found.Results) != 1 || found.Results[0].ID != "ISSUECOMMENT-7-c7" {
+		t.Fatalf("found=%#v err=%v", found, err)
+	}
+	if _, err := store.GetSourceScoped(ctx, "aggregate-comments", "ISSUECOMMENT-7-stale"); !errors.Is(err, cache.ErrNotFound) {
+		t.Fatalf("stale source error = %v, want ErrNotFound", err)
+	}
+	stale, err := store.SearchSources(ctx, cache.SearchQuery{RepoID: "aggregate-comments", Query: "issue-comment-stale-unique", Kind: "issue_comment", Limit: 10})
+	if err != nil || len(stale) != 0 {
+		t.Fatalf("stale search=%#v err=%v", stale, err)
 	}
 	second, err := svc.BulkSyncIssueComments(ctx, BulkSyncRequest{RepoID: "aggregate-comments", PerPage: 2, Bounds: &SyncBounds{}})
 	if err != nil || second.StopReason != "queue_empty" || len(client.requests) != 2 {
