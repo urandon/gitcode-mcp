@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/auth"
+	"gitcode-mcp/internal/buildinfo"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/capability"
 	"gitcode-mcp/internal/config"
@@ -23,7 +24,6 @@ import (
 )
 
 const protocolVersion = "2024-11-05"
-const serverVersion = "0.1.0"
 
 type serviceInterface interface {
 	SearchSources(context.Context, service.SearchSourcesRequest) (service.SearchSourcesResult, error)
@@ -661,7 +661,7 @@ func (s *Server) init(req request) {
 	result := initResult{
 		ProtocolVersion: protocolVersion,
 		Capabilities:    initCapability{Tools: capability},
-		ServerInfo:      serverInfo{Name: "gitcode-mcp", Version: serverVersion},
+		ServerInfo:      serverInfo{Name: "gitcode-mcp", Version: buildinfo.Current().Version},
 	}
 	b, _ := json.Marshal(result)
 	s.writeResponse(req.ID, b)

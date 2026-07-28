@@ -190,6 +190,18 @@ The implemented cache schema version is `16`, matching `currentSchemaVersion` in
 
 The primary version source is the SQLite `schema_version` table. Migrations also update `PRAGMA user_version` as an additive SQLite diagnostic bridge, but cache compatibility decisions use `schema_version`.
 
+`repo status` and the MCP `repo_status` tool report the effective binary
+identity together with detected/expected cache schema versions. They also
+include cached issue/comment counts and the durable issue-comment queue
+summary, so operators can distinguish binary skew, schema skew, incomplete
+comment coverage, and an empty cache before attempting repair.
+
+When the cache is on an older compatible schema, CLI `repo status` reopens it
+read-only for diagnostics instead of failing before it can report the mismatch.
+Fields introduced by a newer schema, such as the issue-comment queue in schema
+16, are reported with `issue_comment_queue_state: "schema_unavailable"` until
+the cache is migrated.
+
 Compatibility policy:
 
 | Detected version | Behavior | Operator action |

@@ -55,7 +55,16 @@ func (s *Server) callRepoStatus(ctx context.Context, id *json.RawMessage, args j
 		return
 	}
 	result := repoStatusResult{RepoID: status.RepoID, BindingState: status.BindingState, Status: &status}
-	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: fmt.Sprintf("binding_state=%s", status.BindingState)}}, StructuredContent: result})
+	text := fmt.Sprintf(
+		"binding_state=%s binary_version=%s cache_schema=%d/%d issue_records=%d issue_comments=%d",
+		status.BindingState,
+		status.BinaryVersion,
+		status.CacheSchemaVersion,
+		status.ExpectedCacheSchemaVersion,
+		status.IssueRecords,
+		status.IssueComments,
+	)
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 }
 
 type syncLiveArgs struct {

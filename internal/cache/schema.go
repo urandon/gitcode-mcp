@@ -8,6 +8,15 @@ import (
 )
 
 const currentSchemaVersion = 16
+const issueCommentSyncSchemaVersion = 16
+
+func CurrentSchemaVersion() int {
+	return currentSchemaVersion
+}
+
+func IssueCommentSyncSchemaVersion() int {
+	return issueCommentSyncSchemaVersion
+}
 
 type VersionCompatibility struct {
 	DetectedVersion int

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/auth"
+	"gitcode-mcp/internal/buildinfo"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/capability"
 	"gitcode-mcp/internal/config"
@@ -86,6 +87,30 @@ func TestMCPRepoScopedDuplicateAlias(t *testing.T) {
 	}
 	r.Close()
 	wg.Wait()
+}
+
+func TestMCPRepoStatusIncludesRuntimeAndIssueCommentDiagnostics(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	handler := NewRPCHandler(service.New(store))
+	id := json.RawMessage(`1`)
+	params := json.RawMessage(`{"name":"repo_status","arguments":{"repo_id":"fixture-a"}}`)
+	resp, ok := handler.Handle(context.Background(), request{JSONRPC: "2.0", ID: &id, Method: "tools/call", Params: &params})
+	if !ok || resp == nil || resp.Error != nil {
+		t.Fatalf("response=%#v ok=%t", resp, ok)
+	}
+	var result toolCallResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatal(err)
+	}
+	var structured repoStatusResult
+	decodeStructured(t, result, &structured)
+	if structured.Status == nil || structured.Status.BinaryVersion != buildinfo.Current().Version || structured.Status.CacheSchemaVersion != cache.CurrentSchemaVersion() || structured.Status.ExpectedCacheSchemaVersion != cache.CurrentSchemaVersion() || structured.Status.CacheState != "ready" || structured.Status.IssueCommentQueueState != "available" || structured.Status.IssueCommentQueue == nil {
+		t.Fatalf("repo status=%#v", structured)
+	}
+	if len(result.Content) != 1 || !strings.Contains(result.Content[0].Text, "binary_version=") || !strings.Contains(result.Content[0].Text, "cache_schema=16/16") || !strings.Contains(result.Content[0].Text, "issue_comments=") {
+		t.Fatalf("repo status content=%#v", result.Content)
+	}
 }
 
 func TestMCPRAGStatusReturnsStructuredContent(t *testing.T) {
@@ -265,7 +290,7 @@ func TestIntegration(t *testing.T) {
 	if ir.Capabilities.Tools.ListChanged != false {
 		t.Fatalf("tools.listChanged = %v, want false", ir.Capabilities.Tools.ListChanged)
 	}
-	if ir.ServerInfo.Name != "gitcode-mcp" || ir.ServerInfo.Version != "0.1.0" {
+	if ir.ServerInfo.Name != "gitcode-mcp" || ir.ServerInfo.Version != buildinfo.Current().Version {
 		t.Fatalf("serverInfo = %+v", ir.ServerInfo)
 	}
 
@@ -1872,8 +1897,8 @@ func TestStartupDiagnosticInjection(t *testing.T) {
 }
 
 func TestStartupDiagnosticSchemaIncompatible(t *testing.T) {
-	diagnostic := StartupDiagnosticFromError(&cache.SchemaVersionError{Compat: cache.VersionCompatibility{Message: "cache schema is newer than supported", Remediation: "upgrade the gitcode-mcp binary to a version that supports this schema"}})
-	if diagnostic.ErrorClass != "schema_incompatible" || !strings.Contains(diagnostic.Remediation, "upgrade") {
+	diagnostic := StartupDiagnosticFromError(&cache.SchemaVersionError{Compat: cache.VersionCompatibility{DetectedVersion: 17, ExpectedVersion: 16, Message: "cache schema is newer than supported", Remediation: "upgrade the gitcode-mcp binary to a version that supports this schema"}})
+	if diagnostic.ErrorClass != "schema_incompatible" || !strings.Contains(diagnostic.Remediation, "upgrade") || diagnostic.DetectedSchemaVersion != 17 || diagnostic.ExpectedSchemaVersion != 16 {
 		t.Fatalf("schema_incompatible diagnostic=%+v", diagnostic)
 	}
 	srv := NewMinimalRPCHandler(diagnostic)
@@ -1894,6 +1919,9 @@ func TestStartupDiagnosticSchemaIncompatible(t *testing.T) {
 	}
 	if !strings.Contains(init.Capabilities.Tools.StartupDiagnostic.Remediation, "upgrade") {
 		t.Fatalf("initialize startup diagnostic missing upgrade remediation: %+v", init.Capabilities.Tools.StartupDiagnostic)
+	}
+	if init.Capabilities.Tools.StartupDiagnostic.DetectedSchemaVersion != 17 || init.Capabilities.Tools.StartupDiagnostic.ExpectedSchemaVersion != 16 {
+		t.Fatalf("initialize startup diagnostic missing schema versions: %+v", init.Capabilities.Tools.StartupDiagnostic)
 	}
 
 	listReq := request{JSONRPC: "2.0", Method: "tools/list"}

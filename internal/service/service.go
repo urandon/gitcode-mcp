@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/audit"
+	"gitcode-mcp/internal/buildinfo"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
@@ -339,11 +340,69 @@ func (s *Service) RepositoryStatus(ctx context.Context, req RepositoryStatusRequ
 	if err != nil {
 		return RepositoryStatus{}, normalizeError(err, "repository", repoID)
 	}
-	status := RepositoryStatus{RepoID: repo.RepoID, Owner: repo.Owner, Name: repo.Name, APIBaseURL: sanitizeAPIBaseURL(repo.APIBaseURL), DisplayName: repo.DisplayName, Aliases: append([]string(nil), repo.Aliases...), BindingState: "ready", AliasConflictState: "none", CacheState: "unknown", IndexState: "unknown"}
+	schemaVersion, err := s.store.SchemaVersion(ctx)
+	if err != nil {
+		return RepositoryStatus{}, normalizeError(err, "cache schema", repoID)
+	}
+	counts, err := s.store.RecordCounts(ctx, repoID)
+	if err != nil {
+		return RepositoryStatus{}, normalizeError(err, "cache", repoID)
+	}
+	issues, err := s.store.ListRecords(ctx, cache.RecordFilter{RepoID: repoID, Type: "issue"})
+	if err != nil {
+		return RepositoryStatus{}, normalizeError(err, "issues", repoID)
+	}
+	queueState := "schema_unavailable"
+	var queueSummary *IssueCommentQueueSummary
+	if schemaVersion >= cache.IssueCommentSyncSchemaVersion() {
+		queue, err := s.store.IssueCommentSyncSummary(ctx, repoID)
+		if err != nil {
+			return RepositoryStatus{}, normalizeError(err, "issue comments", repoID)
+		}
+		queueState = "available"
+		queueSummary = &IssueCommentQueueSummary{Phase: "status", Pending: queue.Pending, Deferred: queue.Deferred, Complete: queue.Complete, Total: queue.Total}
+	}
+	build := buildinfo.Current()
+	expectedSchemaVersion := cache.CurrentSchemaVersion()
+	status := RepositoryStatus{
+		RepoID:                     repo.RepoID,
+		Owner:                      repo.Owner,
+		Name:                       repo.Name,
+		APIBaseURL:                 sanitizeAPIBaseURL(repo.APIBaseURL),
+		DisplayName:                repo.DisplayName,
+		Aliases:                    append([]string(nil), repo.Aliases...),
+		BindingState:               "ready",
+		AliasConflictState:         "none",
+		CacheState:                 repositoryCacheState(schemaVersion, expectedSchemaVersion),
+		IndexState:                 "unknown",
+		BinaryVersion:              build.Version,
+		BinaryCommit:               build.ShortCommit(),
+		BinaryBuildDate:            build.Date,
+		BinaryVersionSource:        build.Source,
+		CacheSchemaVersion:         schemaVersion,
+		ExpectedCacheSchemaVersion: expectedSchemaVersion,
+		IssueRecords:               len(issues),
+		IssueComments:              counts.Comments,
+		IssueCommentQueueState:     queueState,
+		IssueCommentQueue:          queueSummary,
+	}
 	for _, scope := range repo.Scopes {
 		status.Scopes = append(status.Scopes, RepositoryScope(scope))
 	}
 	return status, nil
+}
+
+func repositoryCacheState(detected, expected int) string {
+	switch {
+	case detected == expected:
+		return "ready"
+	case detected > 0 && detected < expected:
+		return "migration_required"
+	case detected > expected:
+		return "binary_upgrade_required"
+	default:
+		return "unknown"
+	}
 }
 
 func normalizeRepositoryRequest(req AddRepositoryRequest, now time.Time) (RepositoryBinding, error) {

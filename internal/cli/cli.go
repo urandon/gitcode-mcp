@@ -294,7 +294,7 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 		return 0
 	}
 	if args[0] == "--version" || args[0] == "version" {
-		fmt.Fprintf(stdout, "gitcode-mcp %s\n", buildinfo.Version)
+		fmt.Fprintf(stdout, "gitcode-mcp %s\n", buildinfo.Current().Version)
 		return 0
 	}
 	if args[0] == "config" || args[0] == "auth" || args[0] == "service" || args[0] == "rag" || args[0] == "rag-status" || args[0] == "rag-search" || args[0] == "doctor" || args[0] == "migrate-cache" {
@@ -355,6 +355,9 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 		return writeCommandError(stderr, opts.format, plan, planErr)
 	}
 	svc, cleanup, err := serviceFromStartupPlan(context.Background(), plan, factory)
+	if err != nil && command == "repo" && firstPositional(rest) == "status" {
+		svc, cleanup, err = repoStatusReadOnlyFallback(context.Background(), plan, err)
+	}
 	if err != nil {
 		return writeCommandError(stderr, opts.format, plan, err)
 	}
@@ -362,6 +365,27 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 		defer cleanup()
 	}
 	return dispatch(ctx, svc, command, rest, opts, stdout, stderr, plan, deps)
+}
+
+func firstPositional(args []string) string {
+	value, _ := firstArg(args)
+	return value
+}
+
+func repoStatusReadOnlyFallback(ctx context.Context, plan startupPlan, openErr error) (queryService, func() error, error) {
+	var schemaErr *cache.SchemaVersionError
+	if !errors.As(openErr, &schemaErr) || !schemaErr.Compat.Compatible {
+		return nil, nil, openErr
+	}
+	path, err := resolvedCachePath(plan.CachePath)
+	if err != nil {
+		return nil, nil, err
+	}
+	store, err := cache.NewSQLiteReadOnlyStore(ctx, path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return service.New(store), store.Close, nil
 }
 
 func buildStartupPlan(ctx context.Context, command string, opts options, deps localCommandDeps) (startupPlan, error) {
@@ -699,7 +723,7 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 		return 0
 	}
 	if command == "doctor" && opts.runtimeAudit {
-		report := config.BuildRuntimeAuditConfigReport(deps.Source, config.Overrides{}, deps.CredentialReporter, buildinfo.Version)
+		report := config.BuildRuntimeAuditConfigReport(deps.Source, config.Overrides{}, deps.CredentialReporter, buildinfo.Current().Version)
 		payload := runtimeAuditPayload{RepoID: opts.repo, Config: report}
 		if opts.format == "json" {
 			return renderJSON(stdout, payload)
@@ -853,7 +877,7 @@ func executeRAGCommand(ctx context.Context, args []string, opts options, stdout 
 		}
 		return code
 	case "index":
-		manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Version}
+		manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version}
 		client, clientErr := manager.Client()
 		if clientErr != nil {
 			return writeError(stderr, opts.format, clientErr)
@@ -918,7 +942,7 @@ func executeRAGStatusCommand(ctx context.Context, opts options, stdout io.Writer
 		return writeError(stderr, opts.format, err)
 	}
 	defer store.Close()
-	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Version}
+	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version}
 	ops := rag.NewOperations(store, eff.Config, rag.OperationsOptions{ServiceState: func(ctx context.Context, repoID string) (*rag.ServiceStatus, *rag.JobStatus) {
 		return lookupRAGServiceState(ctx, manager, repoID)
 	}})
@@ -1113,7 +1137,7 @@ func executeServiceCommand(ctx context.Context, args []string, opts options, std
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "service", Message: "subcommand is required"})
 	}
 	rest := args[1:]
-	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Version}
+	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version}
 	var (
 		status servicectl.Status
 		err    error
@@ -1715,7 +1739,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			if opts.id != "" || opts.input != "" {
 				return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "sync", Message: "daemon sync supports collection selectors only; omit --id/--input"})
 			}
-			manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Version}
+			manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version}
 			client, clientErr := manager.Client()
 			if clientErr != nil {
 				return writeError(stderr, opts.format, clientErr)
@@ -2952,7 +2976,40 @@ func renderRepoLocalInitText(w io.Writer, result repoLocalInitResult) {
 }
 
 func renderRepositoryStatusText(w io.Writer, result service.RepositoryStatus) {
-	fmt.Fprintf(w, "repo_id: %s\nowner: %s\nname: %s\napi_base_url: %s\nscopes: %s\ndisplay_name: %s\naliases: %s\nbinding_state: %s\nalias_conflict_state: %s\ncache_state: %s\nindex_state: %s\n", result.RepoID, result.Owner, result.Name, result.APIBaseURL, joinRepositoryScopes(result.Scopes), result.DisplayName, strings.Join(result.Aliases, ","), result.BindingState, result.AliasConflictState, result.CacheState, result.IndexState)
+	fmt.Fprintf(
+		w,
+		"repo_id: %s\nowner: %s\nname: %s\napi_base_url: %s\nscopes: %s\ndisplay_name: %s\naliases: %s\nbinding_state: %s\nalias_conflict_state: %s\ncache_state: %s\nindex_state: %s\nbinary_version: %s\nbinary_commit: %s\nbinary_build_date: %s\nbinary_version_source: %s\ncache_schema_version: %d\nexpected_cache_schema_version: %d\nissue_records: %d\nissue_comments: %d\n",
+		result.RepoID,
+		result.Owner,
+		result.Name,
+		result.APIBaseURL,
+		joinRepositoryScopes(result.Scopes),
+		result.DisplayName,
+		strings.Join(result.Aliases, ","),
+		result.BindingState,
+		result.AliasConflictState,
+		result.CacheState,
+		result.IndexState,
+		result.BinaryVersion,
+		result.BinaryCommit,
+		result.BinaryBuildDate,
+		result.BinaryVersionSource,
+		result.CacheSchemaVersion,
+		result.ExpectedCacheSchemaVersion,
+		result.IssueRecords,
+		result.IssueComments,
+	)
+	fmt.Fprintf(w, "issue_comment_queue_state: %s\n", result.IssueCommentQueueState)
+	if result.IssueCommentQueue != nil {
+		fmt.Fprintf(
+			w,
+			"issue_comment_queue: pending=%d deferred=%d complete=%d total=%d\n",
+			result.IssueCommentQueue.Pending,
+			result.IssueCommentQueue.Deferred,
+			result.IssueCommentQueue.Complete,
+			result.IssueCommentQueue.Total,
+		)
+	}
 	if result.FailureClass != "" {
 		fmt.Fprintf(w, "failure_class: %s\n", result.FailureClass)
 	}
@@ -3154,6 +3211,10 @@ func failureClass(err error) string {
 	if errors.As(err, &lockContention) {
 		return "cache_busy"
 	}
+	var schemaErr *cache.SchemaVersionError
+	if errors.As(err, &schemaErr) {
+		return "cache_schema_blocked"
+	}
 	if isStrictFinding(err) {
 		return "validation_failed"
 	}
@@ -3236,7 +3297,7 @@ func executeDoctorCommand(ctx context.Context, opts options, plan startupPlan, s
 		status := plan.CredentialStatus
 		cred = &status
 	}
-	report, err := doctor.Build(ctx, doctor.Request{Version: buildinfo.Version, Source: deps.Source, CredentialReporter: deps.CredentialReporter, CredentialStatus: cred, CachePath: cachePath, Live: plan.ProviderMode == "live-http", ProviderMode: plan.ProviderMode, MCPToolAccess: plan.MCPToolAccess, APIBaseURL: plan.APIBaseURL, RepoID: opts.repo, LiveBinding: plan.LiveRepositoryBinding, RAGRuntime: deps.RAGRuntime})
+	report, err := doctor.Build(ctx, doctor.Request{Version: buildinfo.Current().Version, Source: deps.Source, CredentialReporter: deps.CredentialReporter, CredentialStatus: cred, CachePath: cachePath, Live: plan.ProviderMode == "live-http", ProviderMode: plan.ProviderMode, MCPToolAccess: plan.MCPToolAccess, APIBaseURL: plan.APIBaseURL, RepoID: opts.repo, LiveBinding: plan.LiveRepositoryBinding, RAGRuntime: deps.RAGRuntime})
 	if err != nil {
 		return writeError(stderr, opts.format, err)
 	}
