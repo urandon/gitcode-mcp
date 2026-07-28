@@ -2947,6 +2947,9 @@ func (s *Service) CreateIssue(ctx context.Context, req WriteCommandRequest) (Wri
 	if strings.TrimSpace(req.Title) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "title", Message: "title is required"}
 	}
+	if req.ClearMilestone {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "clear_milestone", Message: "clear_milestone is not valid when creating an issue"}
+	}
 	return s.executeWrite(ctx, "create-issue", req, RepositoryScopeIssues)
 }
 
@@ -2958,6 +2961,9 @@ func (s *Service) UpdateIssue(ctx context.Context, req WriteCommandRequest) (Wri
 	case "", "open", "closed":
 	default:
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "state", Message: "issue state must be open or closed"}
+	}
+	if strings.TrimSpace(req.Milestone) != "" && req.ClearMilestone {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "milestone", Message: "milestone and clear_milestone are mutually exclusive"}
 	}
 	return s.executeWrite(ctx, "update-issue", req, RepositoryScopeIssues)
 }
@@ -3969,6 +3975,8 @@ func fallbackSourceID(remoteType, remoteID string) string {
 		return "PR-" + clean
 	case "pr_comment":
 		return "PRCOMMENT-" + clean
+	case "milestone", "milestones":
+		return "MILESTONE-" + clean
 	case "wiki", "page", "remote":
 		return "WIKI-" + clean
 	default:
@@ -4383,13 +4391,14 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 				return WriteCommandResult{}, err
 			}
 			if err := s.store.UpsertRecordGraph(ctx, graph); err != nil {
-				_ = s.store.RecordAuditEvent(ctx, audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, prior.RecordID, prior.RemoteType, prior.RemoteID, fingerprint, err.Error(), s.now().UTC()))
+				partial := audit.WithRequestMetadata(audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, prior.RecordID, prior.RemoteType, prior.RemoteID, fingerprint, err.Error(), s.now().UTC()), prior.RequestMetadata)
+				_ = s.store.RecordAuditEvent(ctx, partial)
 				return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key, Cause: err}
 			}
 			if err := s.recordCacheConfirmation(ctx, command, route.RepoID, key, fingerprint, graph, prior.RemoteID, "succeeded", s.now().UTC()); err != nil {
 				return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key, Cause: err}
 			}
-			completed := audit.Success(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, prior.RemoteID, fingerprint, "cache refresh replay completed", s.now().UTC())
+			completed := audit.WithRequestMetadata(audit.Success(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, prior.RemoteID, fingerprint, "cache refresh replay completed", s.now().UTC()), prior.RequestMetadata)
 			if err := s.store.RecordAuditEvent(ctx, completed); err != nil {
 				return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key, Cause: err}
 			}
@@ -4420,16 +4429,20 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 		}
 		auditEntry = entry
 	}
+	auditEntry = withWriteAuditMetadata(auditEntry, command, key, fingerprint, graph.Record.RemoteType, confirmed)
 	if err := s.store.RecordAuditEvent(ctx, auditEntry); err != nil {
-		_ = s.store.RecordAuditEvent(ctx, audit.RemoteConfirmedAuditFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()))
+		partial := withWriteAuditMetadata(audit.RemoteConfirmedAuditFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()), command, key, fingerprint, graph.Record.RemoteType, confirmed)
+		_ = s.store.RecordAuditEvent(ctx, partial)
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
 	}
 	if err := s.store.UpsertRecordGraph(ctx, graph); err != nil {
-		_ = s.store.RecordAuditEvent(ctx, audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()))
+		partial := withWriteAuditMetadata(audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()), command, key, fingerprint, graph.Record.RemoteType, confirmed)
+		_ = s.store.RecordAuditEvent(ctx, partial)
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
 	}
 	if err := s.recordCacheConfirmation(ctx, command, route.RepoID, key, fingerprint, graph, confirmed.remoteID, "succeeded", confirmed.completedAt); err != nil {
-		_ = s.store.RecordAuditEvent(ctx, audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()))
+		partial := withWriteAuditMetadata(audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()), command, key, fingerprint, graph.Record.RemoteType, confirmed)
+		_ = s.store.RecordAuditEvent(ctx, partial)
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
 	}
 	base.Status = "succeeded"
@@ -4441,6 +4454,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	base.APIPath = confirmed.apiPath
 	base.CachePath = confirmed.cachePath
 	base.BrowserURL = confirmed.browserURL
+	base.Milestone = confirmed.milestone
 	base.Evidence = "adapter-confirmed write with audit and cache refresh"
 	return base, nil
 }
@@ -4456,11 +4470,17 @@ type writeConfirmation struct {
 	browserURL     string
 	message        string
 	completedAt    time.Time
+	milestone      *WriteMilestoneReceipt
 }
 
 func writeAuditMetadata(command, key, fingerprint, remoteType string, confirmed writeConfirmation) map[string]string {
+	method := "POST"
+	switch command {
+	case "update-issue", "set-issue-milestone", "clear-issue-milestone":
+		method = "PATCH"
+	}
 	metadata := map[string]string{
-		"method":             "POST",
+		"method":             method,
 		"idempotency_key":    key,
 		"remote_type":        remoteType,
 		"provider_mode":      string(gitcode.ProviderModeLive),
@@ -4475,7 +4495,28 @@ func writeAuditMetadata(command, key, fingerprint, remoteType string, confirmed 
 	if command != "" {
 		metadata["provider"] = "gitcode-http"
 	}
+	if confirmed.milestone != nil {
+		if confirmed.milestone.ID != "" {
+			metadata["milestone_id"] = confirmed.milestone.ID
+		}
+		if confirmed.milestone.RemoteID != "" {
+			metadata["milestone_remote_id"] = confirmed.milestone.RemoteID
+		}
+		if confirmed.milestone.Title != "" {
+			metadata["milestone_title"] = confirmed.milestone.Title
+		}
+		if confirmed.milestone.Cleared {
+			metadata["milestone_cleared"] = "true"
+		}
+	}
 	return metadata
+}
+
+func withWriteAuditMetadata(entry cache.AuditTrailEntry, command, key, fingerprint, remoteType string, confirmed writeConfirmation) cache.AuditTrailEntry {
+	if command != "create-issue" && confirmed.milestone == nil {
+		return entry
+	}
+	return audit.WithRequestMetadata(entry, writeAuditMetadata(command, key, fingerprint, remoteType, confirmed))
 }
 
 func (s *Service) recordCacheConfirmation(ctx context.Context, command, repoID, key, fingerprint string, graph cache.RecordGraph, remoteID, status string, createdAt time.Time) error {
@@ -4497,18 +4538,56 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 	now := s.now().UTC()
 	switch command {
 	case "create-issue":
-		result, err := s.client.CreateIssue(ctx, gitcode.CreateIssueRequest{Owner: route.Owner, Repo: route.Name, Title: strings.TrimSpace(req.Title), Body: req.Body, Labels: gitcode.EncodeIssueLabels(req.Labels)}, opts)
+		var resolved *gitcode.Milestone
+		var encoded json.RawMessage
+		if strings.TrimSpace(req.Milestone) != "" {
+			milestone, err := s.resolveMilestone(ctx, route, req.Milestone)
+			if err != nil {
+				return writeConfirmation{}, cache.RecordGraph{}, err
+			}
+			resolved = &milestone
+			encoded = gitcode.EncodeIssueMilestone(milestone.RemoteID)
+		}
+		result, err := s.client.CreateIssue(ctx, gitcode.CreateIssueRequest{Owner: route.Owner, Repo: route.Name, Title: strings.TrimSpace(req.Title), Body: req.Body, Labels: gitcode.EncodeIssueLabels(req.Labels), Milestone: encoded}, opts)
 		if err != nil {
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
+		var receipt *WriteMilestoneReceipt
+		if resolved != nil {
+			result, receipt, err = s.confirmIssueMilestone(ctx, route, result, resolved, false)
+			if err != nil {
+				return writeConfirmation{}, cache.RecordGraph{}, err
+			}
+		}
 		confirmation, graph := s.issueWriteGraph(route.RepoID, result.Record, result, now)
+		confirmation.milestone = receipt
 		return confirmation, graph, nil
 	case "update-issue":
-		result, err := s.client.UpdateIssue(ctx, gitcode.UpdateIssueRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, Title: req.Title, Body: req.Body, State: req.State, Labels: gitcode.EncodeIssueLabels(req.Labels)}, opts)
+		var resolved *gitcode.Milestone
+		var encoded json.RawMessage
+		if strings.TrimSpace(req.Milestone) != "" {
+			milestone, err := s.resolveMilestone(ctx, route, req.Milestone)
+			if err != nil {
+				return writeConfirmation{}, cache.RecordGraph{}, err
+			}
+			resolved = &milestone
+			encoded = gitcode.EncodeIssueMilestone(milestone.RemoteID)
+		} else if req.ClearMilestone {
+			encoded = gitcode.EncodeIssueMilestone("null")
+		}
+		result, err := s.client.UpdateIssue(ctx, gitcode.UpdateIssueRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, Title: req.Title, Body: req.Body, State: req.State, Labels: gitcode.EncodeIssueLabels(req.Labels), Milestone: encoded}, opts)
 		if err != nil {
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
+		var receipt *WriteMilestoneReceipt
+		if resolved != nil || req.ClearMilestone {
+			result, receipt, err = s.confirmIssueMilestone(ctx, route, result, resolved, req.ClearMilestone)
+			if err != nil {
+				return writeConfirmation{}, cache.RecordGraph{}, err
+			}
+		}
 		confirmation, graph := s.issueWriteGraph(route.RepoID, result.Record, result, now)
+		confirmation.milestone = receipt
 		return confirmation, graph, nil
 	case "add-comment":
 		result, err := s.client.CreateIssueComment(ctx, gitcode.CreateIssueCommentRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, Body: req.Body}, opts)
@@ -4554,13 +4633,13 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 		confirmation, graph := s.milestoneWriteGraph(route.RepoID, result.Record, result, now)
 		return confirmation, graph, nil
 	case "set-issue-milestone":
-		id, err := s.resolveMilestoneID(ctx, route, firstNonEmptyString(req.Milestone, req.ID))
+		milestone, err := s.resolveMilestone(ctx, route, firstNonEmptyString(req.Milestone, req.ID))
 		if err != nil {
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
-		return s.updateIssueMilestone(ctx, route, req.Number, strconv.Itoa(id), opts, now)
+		return s.updateIssueMilestone(ctx, route, req.Number, &milestone, false, opts, now)
 	case "clear-issue-milestone":
-		return s.updateIssueMilestone(ctx, route, req.Number, "null", opts, now)
+		return s.updateIssueMilestone(ctx, route, req.Number, nil, true, opts, now)
 	case "add-pr-comment":
 		result, err := s.client.CreatePRComment(ctx, gitcode.CreatePRCommentRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, Body: req.Body}, opts)
 		if err != nil {
@@ -4670,40 +4749,96 @@ func mergeIssueLabel(existing []string, label string) ([]string, bool) {
 	return labels, true
 }
 
-func (s *Service) resolveMilestoneID(ctx context.Context, route RepositoryRoute, milestone string) (int, error) {
+func (s *Service) resolveMilestone(ctx context.Context, route RepositoryRoute, milestone string) (gitcode.Milestone, error) {
 	trimmed := strings.TrimSpace(milestone)
 	if trimmed == "" {
-		return 0, ErrInvalidQuery{Field: "milestone", Message: "milestone id or title is required"}
+		return gitcode.Milestone{}, ErrInvalidQuery{Field: "milestone", Message: "milestone id or title is required"}
 	}
 	normalized := strings.TrimPrefix(strings.ToUpper(trimmed), "MILESTONE-")
 	if id, err := strconv.Atoi(normalized); err == nil && id > 0 {
-		return id, nil
+		resolved, err := s.client.GetMilestone(ctx, gitcode.MilestoneRequest{Owner: route.Owner, Repo: route.Name, ID: id})
+		if err != nil {
+			return gitcode.Milestone{}, err
+		}
+		if resolved.RemoteID != strconv.Itoa(id) {
+			return gitcode.Milestone{}, ErrInvalidQuery{Field: "milestone", Message: "milestone readback id does not match requested repository milestone"}
+		}
+		return resolved, nil
 	}
 	page, err := s.client.ListMilestones(ctx, gitcode.MilestoneListRequest{Owner: route.Owner, Repo: route.Name, PerPage: 100})
 	if err != nil {
-		return 0, err
+		return gitcode.Milestone{}, err
 	}
 	var match *gitcode.Milestone
 	for idx := range page.Items {
 		if strings.EqualFold(strings.TrimSpace(page.Items[idx].Title), trimmed) {
 			if match != nil {
-				return 0, ErrInvalidQuery{Field: "milestone", Message: "milestone title is ambiguous; use numeric id"}
+				return gitcode.Milestone{}, ErrInvalidQuery{Field: "milestone", Message: "milestone title is ambiguous; use numeric id"}
 			}
 			match = &page.Items[idx]
 		}
 	}
 	if match == nil {
-		return 0, ErrInvalidQuery{Field: "milestone", Message: "milestone not found by id or title"}
+		return gitcode.Milestone{}, ErrInvalidQuery{Field: "milestone", Message: "milestone not found by id or title"}
 	}
 	id, err := strconv.Atoi(match.RemoteID)
+	if err != nil || id <= 0 {
+		return gitcode.Milestone{}, ErrInvalidQuery{Field: "milestone", Message: "milestone id is invalid"}
+	}
+	return *match, nil
+}
+
+func (s *Service) resolveMilestoneID(ctx context.Context, route RepositoryRoute, milestone string) (int, error) {
+	resolved, err := s.resolveMilestone(ctx, route, milestone)
+	if err != nil {
+		return 0, err
+	}
+	id, err := strconv.Atoi(resolved.RemoteID)
 	if err != nil || id <= 0 {
 		return 0, ErrInvalidQuery{Field: "milestone", Message: "milestone id is invalid"}
 	}
 	return id, nil
 }
 
-func (s *Service) updateIssueMilestone(ctx context.Context, route RepositoryRoute, number int, milestone string, opts gitcode.WriteOptions, now time.Time) (writeConfirmation, cache.RecordGraph, error) {
-	encoded := gitcode.EncodeIssueMilestone(milestone)
+func (s *Service) confirmIssueMilestone(ctx context.Context, route RepositoryRoute, result gitcode.WriteResult[gitcode.Issue], milestone *gitcode.Milestone, clear bool) (gitcode.WriteResult[gitcode.Issue], *WriteMilestoneReceipt, error) {
+	number := firstNonZeroInt(result.Record.Number, result.RemoteNumber)
+	if number <= 0 {
+		return gitcode.WriteResult[gitcode.Issue]{}, nil, ErrWriteFailure{Code: "write_readback_mismatch", RepoID: route.RepoID, RemoteID: result.RemoteID}
+	}
+	readback, err := s.client.GetIssue(ctx, gitcode.IssueRequest{Owner: route.Owner, Repo: route.Name, Number: number})
+	if err != nil {
+		return gitcode.WriteResult[gitcode.Issue]{}, nil, err
+	}
+	if clear {
+		if readback.Milestone != nil {
+			return gitcode.WriteResult[gitcode.Issue]{}, nil, ErrWriteFailure{Code: "write_readback_mismatch", RepoID: route.RepoID, RemoteID: strconv.Itoa(number)}
+		}
+		result.Record = readback
+		result.RemoteID = firstNonEmptyString(result.RemoteID, readback.ID, strconv.Itoa(readback.Number))
+		result.RemoteNumber = firstNonZeroInt(result.RemoteNumber, readback.Number)
+		result.RemoteRevision = firstNonEmptyString(result.RemoteRevision, result.ResponseHash, readback.UpdatedAt.UTC().Format(time.RFC3339Nano))
+		return result, &WriteMilestoneReceipt{Cleared: true}, nil
+	}
+	if milestone == nil || readback.Milestone == nil || readback.Milestone.RemoteID != milestone.RemoteID {
+		return gitcode.WriteResult[gitcode.Issue]{}, nil, ErrWriteFailure{Code: "write_readback_mismatch", RepoID: route.RepoID, RemoteID: strconv.Itoa(number)}
+	}
+	resolved := readback.Milestone
+	if strings.TrimSpace(resolved.Title) == "" {
+		resolved = milestone
+	}
+	result.Record = readback
+	result.RemoteID = firstNonEmptyString(result.RemoteID, readback.ID, strconv.Itoa(readback.Number))
+	result.RemoteNumber = firstNonZeroInt(result.RemoteNumber, readback.Number)
+	result.RemoteRevision = firstNonEmptyString(result.RemoteRevision, result.ResponseHash, readback.UpdatedAt.UTC().Format(time.RFC3339Nano))
+	return result, milestoneWriteReceipt(resolved, false), nil
+}
+
+func (s *Service) updateIssueMilestone(ctx context.Context, route RepositoryRoute, number int, milestone *gitcode.Milestone, clear bool, opts gitcode.WriteOptions, now time.Time) (writeConfirmation, cache.RecordGraph, error) {
+	raw := "null"
+	if milestone != nil {
+		raw = milestone.RemoteID
+	}
+	encoded := gitcode.EncodeIssueMilestone(raw)
 	if len(encoded) == 0 {
 		return writeConfirmation{}, cache.RecordGraph{}, ErrInvalidQuery{Field: "milestone", Message: "milestone id must be positive or null"}
 	}
@@ -4711,29 +4846,32 @@ func (s *Service) updateIssueMilestone(ctx context.Context, route RepositoryRout
 	if err != nil {
 		return writeConfirmation{}, cache.RecordGraph{}, err
 	}
-	readback, err := s.client.GetIssue(ctx, gitcode.IssueRequest{Owner: route.Owner, Repo: route.Name, Number: number})
+	result, receipt, err := s.confirmIssueMilestone(ctx, route, result, milestone, clear)
 	if err != nil {
 		return writeConfirmation{}, cache.RecordGraph{}, err
 	}
-	wantClear := string(encoded) == "null"
-	if wantClear {
-		if readback.Milestone != nil {
-			return writeConfirmation{}, cache.RecordGraph{}, ErrWriteFailure{Code: "write_readback_mismatch", RepoID: route.RepoID, RemoteID: strconv.Itoa(number)}
-		}
-	} else if readback.Milestone == nil || readback.Milestone.RemoteID != string(encoded) {
-		return writeConfirmation{}, cache.RecordGraph{}, ErrWriteFailure{Code: "write_readback_mismatch", RepoID: route.RepoID, RemoteID: strconv.Itoa(number)}
-	}
-	result.Record = readback
-	result.RemoteID = firstNonEmptyString(result.RemoteID, readback.ID, strconv.Itoa(readback.Number))
-	result.RemoteNumber = firstNonZeroInt(result.RemoteNumber, readback.Number)
-	result.RemoteRevision = firstNonEmptyString(result.RemoteRevision, result.ResponseHash, readback.UpdatedAt.UTC().Format(time.RFC3339Nano))
-	if wantClear {
+	if clear {
 		result.Operation = "ClearIssueMilestone"
 	} else {
 		result.Operation = "SetIssueMilestone"
 	}
-	confirmation, graph := s.issueWriteGraph(route.RepoID, readback, result, now)
+	confirmation, graph := s.issueWriteGraph(route.RepoID, result.Record, result, now)
+	confirmation.milestone = receipt
 	return confirmation, graph, nil
+}
+
+func milestoneWriteReceipt(milestone *gitcode.Milestone, cleared bool) *WriteMilestoneReceipt {
+	if cleared {
+		return &WriteMilestoneReceipt{Cleared: true}
+	}
+	if milestone == nil {
+		return nil
+	}
+	return &WriteMilestoneReceipt{
+		ID:       firstNonEmptyString(milestone.SourceID, fallbackSourceID("milestone", milestone.RemoteID)),
+		RemoteID: milestone.RemoteID,
+		Title:    milestone.Title,
+	}
 }
 
 func issueNumberFromWriteID(id string) (int, error) {
@@ -4752,6 +4890,9 @@ func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID s
 	case "create-issue", "update-issue", "add-label", "set-issue-milestone", "clear-issue-milestone":
 		number, _ := strconv.Atoi(prior.RemoteID)
 		issue := gitcode.Issue{ID: prior.RemoteID, Number: number, Title: strings.TrimSpace(req.Title), Body: req.Body, State: firstNonEmptyString(req.State, "open"), CreatedAt: now, UpdatedAt: now}
+		if receipt := milestoneReceiptFromAudit(prior); receipt != nil && !receipt.Cleared {
+			issue.Milestone = &gitcode.Milestone{RemoteID: receipt.RemoteID, SourceID: receipt.ID, Title: receipt.Title}
+		}
 		if issue.Title == "" {
 			issue.Title = "Issue " + prior.RemoteID
 		}
@@ -4835,15 +4976,31 @@ func (s *Service) issueWriteGraph(repoID string, issue gitcode.Issue, result git
 	if created.IsZero() {
 		created = updated
 	}
-	revision := firstNonEmptyString(result.RemoteRevision, result.ResponseHash, contentHash(issue.Title, issue.Body, status, issue.Labels))
-	record := cache.Record{RepoID: repoID, ID: stableID, Type: "issue", Path: "issues/" + remoteID + ".md", Title: issue.Title, Body: issue.Body, Status: status, Labels: issue.Labels, ContentHash: contentHash(issue.Title, issue.Body, status, issue.Labels), Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: remoteID, RemoteRevision: revision, CreatedAt: created, UpdatedAt: updated}
-	graph := cache.RecordGraph{Record: record, Identities: []cache.Identity{{RepoID: repoID, SourceID: stableID, AliasType: "issue", Alias: remoteID, Remote: cache.RemoteAlias{Type: "issue", ID: remoteID}}}, RemoteRevisions: []cache.RemoteRevision{{RepoID: repoID, RecordID: stableID, RemoteType: "issue", RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}}
+	milestoneID := ""
+	if issue.Milestone != nil {
+		milestoneID = issue.Milestone.RemoteID
+	}
+	hash := contentHash(issue.Title, issue.Body, status, issue.Labels)
+	if milestoneID != "" {
+		hash = contentHash(issue.Title, issue.Body, status, issue.Labels, milestoneID)
+	}
+	revision := firstNonEmptyString(result.RemoteRevision, result.ResponseHash, hash)
+	record := cache.Record{RepoID: repoID, ID: stableID, Type: "issue", Path: "issues/" + remoteID + ".md", Title: issue.Title, Body: issue.Body, Status: status, Labels: issue.Labels, ContentHash: hash, Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: remoteID, RemoteRevision: revision, CreatedAt: created, UpdatedAt: updated}
+	graph := cache.RecordGraph{Record: record, Identities: []cache.Identity{{RepoID: repoID, SourceID: stableID, AliasType: "issue", Alias: remoteID, Remote: cache.RemoteAlias{Type: "issue", ID: remoteID}}}, ReplaceLinkKinds: []string{"milestone"}, RemoteRevisions: []cache.RemoteRevision{{RepoID: repoID, RecordID: stableID, RemoteType: "issue", RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}}
+	if issue.Milestone != nil {
+		milestoneResult := gitcode.WriteResult[gitcode.Milestone]{Record: *issue.Milestone, Confirmed: true, RemoteID: issue.Milestone.RemoteID, RemoteRevision: issue.Milestone.UpdatedAt, BrowserURL: issue.Milestone.HTMLURL, ConfirmedAt: now}
+		_, milestoneGraph := s.milestoneWriteGraph(repoID, *issue.Milestone, milestoneResult, now)
+		graph.RelatedRecords = append(graph.RelatedRecords, milestoneGraph.Record)
+		graph.Identities = append(graph.Identities, milestoneGraph.Identities...)
+		graph.RemoteRevisions = append(graph.RemoteRevisions, milestoneGraph.RemoteRevisions...)
+		graph.Links = append(graph.Links, cache.Link{RepoID: repoID, SourceID: stableID, TargetID: milestoneGraph.Record.ID, Kind: "milestone", Text: issue.Milestone.Title})
+	}
 	return writeConfirmation{confirmed: result.Confirmed, remoteID: remoteID, remoteNumber: issue.Number, remoteRevision: revision, message: result.Operation, completedAt: firstNonZeroTime(result.ConfirmedAt, now)}, graph
 }
 
 func (s *Service) milestoneWriteGraph(repoID string, milestone gitcode.Milestone, result gitcode.WriteResult[gitcode.Milestone], now time.Time) (writeConfirmation, cache.RecordGraph) {
 	remoteID := firstNonEmptyString(result.RemoteID, milestone.RemoteID)
-	stableID := fallbackSourceID("milestone", remoteID)
+	stableID := firstNonEmptyString(milestone.SourceID, fallbackSourceID("milestone", remoteID))
 	updated := parseMilestoneTime(milestone.UpdatedAt)
 	if updated.IsZero() {
 		updated = now
@@ -5106,28 +5263,29 @@ func releaseIdempotency(req PublishReleaseRequest, status int) (string, string) 
 
 func writeIdempotency(command string, req WriteCommandRequest) (string, string) {
 	payload, _ := json.Marshal(struct {
-		Command      string
-		RepoID       string
-		ID           string
-		Number       int
-		IssueNumber  int
-		DiscussionID string
-		ParentID     string
-		Slug         string
-		Path         string
-		Sha          string
-		Title        string
-		Body         string
-		Description  string
-		DueOn        string
-		Milestone    string
-		Head         string
-		Base         string
-		State        string
-		Label        string
-		Labels       []string
-		Strategy     string
-	}{command, req.RepoID, req.ID, req.Number, req.IssueNumber, req.DiscussionID, req.ParentID, req.Slug, req.Path, req.Sha, strings.TrimSpace(req.Title), req.Body, req.Description, strings.TrimSpace(req.DueOn), strings.TrimSpace(req.Milestone), strings.TrimSpace(req.Head), strings.TrimSpace(req.Base), req.State, strings.TrimSpace(req.Label), req.Labels, strings.TrimSpace(req.Strategy)})
+		Command        string
+		RepoID         string
+		ID             string
+		Number         int
+		IssueNumber    int
+		DiscussionID   string
+		ParentID       string
+		Slug           string
+		Path           string
+		Sha            string
+		Title          string
+		Body           string
+		Description    string
+		DueOn          string
+		Milestone      string
+		ClearMilestone bool
+		Head           string
+		Base           string
+		State          string
+		Label          string
+		Labels         []string
+		Strategy       string
+	}{command, req.RepoID, req.ID, req.Number, req.IssueNumber, req.DiscussionID, req.ParentID, req.Slug, req.Path, req.Sha, strings.TrimSpace(req.Title), req.Body, req.Description, strings.TrimSpace(req.DueOn), strings.TrimSpace(req.Milestone), req.ClearMilestone, strings.TrimSpace(req.Head), strings.TrimSpace(req.Base), req.State, strings.TrimSpace(req.Label), req.Labels, strings.TrimSpace(req.Strategy)})
 	sum := sha256.Sum256(payload)
 	fingerprint := hex.EncodeToString(sum[:])
 	if strings.TrimSpace(req.IdempotencyKey) != "" {
@@ -5147,7 +5305,24 @@ func writeTargetID(req WriteCommandRequest) string {
 }
 
 func replayWriteResult(command string, entry cache.AuditTrailEntry, fingerprint string, now time.Time) WriteCommandResult {
-	return WriteCommandResult{Command: command, Status: "already_applied", RepoID: entry.RepoID, ID: entry.RecordID, RemoteID: entry.RemoteID, IdempotencyKey: entry.IdempotencyKey, SourceFingerprint: fingerprint, Replayed: true, Evidence: "replayed from audit_trail", GeneratedAt: now}
+	return WriteCommandResult{Command: command, Status: "already_applied", RepoID: entry.RepoID, ID: entry.RecordID, RemoteID: entry.RemoteID, IdempotencyKey: entry.IdempotencyKey, SourceFingerprint: fingerprint, Replayed: true, Milestone: milestoneReceiptFromAudit(entry), Evidence: "replayed from audit_trail", GeneratedAt: now}
+}
+
+func milestoneReceiptFromAudit(entry cache.AuditTrailEntry) *WriteMilestoneReceipt {
+	metadata := entry.RequestMetadata
+	if len(metadata) == 0 {
+		return nil
+	}
+	receipt := &WriteMilestoneReceipt{
+		ID:       metadata["milestone_id"],
+		RemoteID: metadata["milestone_remote_id"],
+		Title:    metadata["milestone_title"],
+		Cleared:  metadata["milestone_cleared"] == "true",
+	}
+	if receipt.ID == "" && receipt.RemoteID == "" && receipt.Title == "" && !receipt.Cleared {
+		return nil
+	}
+	return receipt
 }
 
 func (s *Service) writeAdapterErrorCode(mode WriteMode, err error) string {

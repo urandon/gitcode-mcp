@@ -2169,6 +2169,42 @@ func TestLabel011CreateRequestLabelString(t *testing.T) {
 	}
 }
 
+func TestIssueMilestonePayloadsPreserveSetAndClearIntent(t *testing.T) {
+	createBody, err := json.Marshal(createIssuePayload(CreateIssueRequest{
+		Title:     "Milestoned issue",
+		Milestone: EncodeIssueMilestone("42"),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var createPayload struct {
+		Milestone json.RawMessage `json:"milestone"`
+	}
+	if err := json.Unmarshal(createBody, &createPayload); err != nil {
+		t.Fatal(err)
+	}
+	if string(createPayload.Milestone) != "42" {
+		t.Fatalf("create milestone=%s", string(createPayload.Milestone))
+	}
+
+	updateBody, err := json.Marshal(updateIssuePayload(UpdateIssueRequest{
+		Number:    7,
+		Milestone: EncodeIssueMilestone("null"),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updatePayload struct {
+		Milestone json.RawMessage `json:"milestone"`
+	}
+	if err := json.Unmarshal(updateBody, &updatePayload); err != nil {
+		t.Fatal(err)
+	}
+	if string(updatePayload.Milestone) != "null" {
+		t.Fatalf("update milestone=%s", string(updatePayload.Milestone))
+	}
+}
+
 func TestLabel012CreateRequestEmptyLabels(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues" {

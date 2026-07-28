@@ -375,6 +375,7 @@ type RecordGraph struct {
 	PRReviewPositions   []PRReviewPosition
 	Identities          []Identity
 	Links               []Link
+	ReplaceLinkKinds    []string
 	RemoteRevisions     []RemoteRevision
 	SyncEvents          []SyncEvent
 	AuditTrail          []AuditTrailEntry

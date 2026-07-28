@@ -84,6 +84,26 @@ func (s *SQLiteStore) UpsertRecordGraph(ctx context.Context, graph RecordGraph) 
 			return err
 		}
 	}
+	for _, kind := range graph.ReplaceLinkKinds {
+		kind = strings.TrimSpace(kind)
+		if kind == "" {
+			continue
+		}
+		if err = execTx(ctx, tx, `DELETE FROM links WHERE repo_id = ? AND source_id = ? AND kind = ?`, graph.Record.RepoID, graph.Record.ID, kind); err != nil {
+			return err
+		}
+	}
+	for _, link := range graph.Links {
+		if link.RepoID == "" {
+			link.RepoID = graph.Record.RepoID
+		}
+		if link.SourceID == "" {
+			link.SourceID = graph.Record.ID
+		}
+		if err = upsertLinkTx(ctx, tx, link); err != nil {
+			return err
+		}
+	}
 	for _, revision := range graph.RemoteRevisions {
 		if revision.RepoID == "" {
 			revision.RepoID = graph.Record.RepoID

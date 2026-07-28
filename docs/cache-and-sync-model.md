@@ -98,6 +98,11 @@ The command context carries the configured `default_timeout`, including the `--t
 
 Labels and milestones are not yet exposed as bulk sync service surfaces. The `milestones` CLI command and `list_milestones` MCP tool perform a live list read and refresh cached milestone records, but they do not yet maintain collection frontiers. When milestone bulk sync is added, it should use the same `SyncBounds` and partial-result contract.
 
+Milestone-aware issue writes also refresh a deterministic `milestone` link from
+the cached issue source to the resolved `MILESTONE-<id>` source. The link kind
+is replaced atomically for each issue write, so assignment changes do not leave
+stale targets and explicit clears remove the cached relationship.
+
 Bulk collection responses also expose traversal metadata when available:
 
 - `pages_listed` and `records_listed` count list-page work done before staging/filtering;

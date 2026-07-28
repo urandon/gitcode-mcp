@@ -810,11 +810,12 @@ type WriteResult[T any] struct {
 }
 
 type CreateIssueRequest struct {
-	Owner  string          `json:"-"`
-	Repo   string          `json:"-"`
-	Title  string          `json:"title"`
-	Body   string          `json:"body,omitempty"`
-	Labels json.RawMessage `json:"labels,omitempty"`
+	Owner     string          `json:"-"`
+	Repo      string          `json:"-"`
+	Title     string          `json:"title"`
+	Body      string          `json:"body,omitempty"`
+	Labels    json.RawMessage `json:"labels,omitempty"`
+	Milestone json.RawMessage `json:"milestone,omitempty"`
 }
 
 type UpdateIssueRequest struct {
