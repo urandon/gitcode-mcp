@@ -268,7 +268,7 @@ type toolContentItem struct {
 	Text string `json:"text"`
 }
 
-var sourceKindEnums = []string{"issue", "wiki", "pull_request", "pr_comment"}
+var sourceKindEnums = []string{"issue", "issue_comment", "wiki", "pull_request", "pr_comment"}
 
 type ToolAccess string
 
@@ -562,8 +562,8 @@ var toolDefs = []toolDefinition{
 	},
 	{
 		Name:        "sync_live",
-		Description: "Synchronize selected live collection records into the cache.",
-		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "issues": {Type: "boolean", Description: "Backfill primary issue records and enqueue secondary comment coverage."}, "wiki": {Type: "boolean", Description: "Sync wiki pages."}, "comments": {Type: "boolean", Description: "Compatibility selector for pull request comments; with remote_alias issue:N, sync issue comments."}, "issue_comments": {Type: "boolean", Description: "Drain the durable issue comment sync queue."}, "pr_comments": {Type: "boolean", Description: "Sync pull request comments."}, "pulls": {Type: "boolean", Description: "Sync pull requests."}, "remote_alias": {Type: "string", Description: "Specific remote alias for current sync surface."}, "daemon": {Type: "boolean", Description: "Start collection sync as a service-owned job."}, "detach": {Type: "boolean", Description: "Return immediately after starting the service-owned sync job."}, "idempotency_key": {Type: "string", Description: "Idempotency key."}, "max_pages": {Type: "integer", Description: "Maximum pages to sync.", Minimum: float64Ptr(1)}, "max_records": {Type: "integer", Description: "Maximum records or queued comments to process.", Minimum: float64Ptr(1)}, "per_page": {Type: "integer", Description: "Records per page.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 25.0}}, Required: []string{"repo_id"}},
+		Description: "Synchronize selected live issue, issue-comment, pull-request, pull-request-comment, or wiki collections into the cache.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "issues": {Type: "boolean", Description: "Backfill primary issue records and enqueue secondary comment coverage."}, "wiki": {Type: "boolean", Description: "Sync wiki pages."}, "comments": {Type: "boolean", Description: "Compatibility selector resolved from its parent: issues selects issue comments, pulls selects pull request comments, and no parent retains pull request comment compatibility."}, "issue_comments": {Type: "boolean", Description: "Drain the durable issue comment sync queue."}, "pr_comments": {Type: "boolean", Description: "Sync pull request comments."}, "pulls": {Type: "boolean", Description: "Sync pull requests."}, "remote_alias": {Type: "string", Description: "Specific remote alias for current sync surface."}, "daemon": {Type: "boolean", Description: "Start collection sync as a service-owned job."}, "detach": {Type: "boolean", Description: "Return immediately after starting the service-owned sync job."}, "idempotency_key": {Type: "string", Description: "Idempotency key."}, "max_pages": {Type: "integer", Description: "Maximum pages to sync.", Minimum: float64Ptr(1)}, "max_records": {Type: "integer", Description: "Maximum records or queued comments to process.", Minimum: float64Ptr(1)}, "per_page": {Type: "integer", Description: "Records per page.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 25.0}}, Required: []string{"repo_id"}},
 	},
 	{
 		Name:        "index_repo",

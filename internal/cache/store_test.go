@@ -122,6 +122,69 @@ func TestRecordCommentsPageUpsertAndSuccessfulReconciliation(t *testing.T) {
 	}
 }
 
+func TestReconcileChildSourcesRemovesOnlyStaleChildrenForParent(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+
+	for _, number := range []int{7, 8} {
+		if err := store.UpsertSyncGraph(ctx, SyncGraph{
+			RepoID:     "fixture-a",
+			Provenance: ProvenanceLive,
+			Record:     Record{ID: fmt.Sprintf("ISSUE-%d", number), Type: "issue", Path: fmt.Sprintf("issues/%d.md", number), Title: fmt.Sprintf("Issue %d", number), Status: "open", ContentHash: fmt.Sprintf("issue-%d", number), RemoteType: "issue", RemoteID: fmt.Sprintf("%d", number), CreatedAt: now, UpdatedAt: now},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, graph := range []SyncGraph{
+		{
+			RepoID:     "fixture-a",
+			Provenance: ProvenanceLive,
+			Record:     Record{ID: "ISSUECOMMENT-7-c1", Type: "issue_comment", Path: "issues/7/comments/c1.md", Title: "Stale", Body: "stale child token", Status: "current", ContentHash: "c1", RemoteType: "issue_comment", RemoteID: "7:c1", CreatedAt: now, UpdatedAt: now},
+			Links:      []Link{{SourceID: "ISSUECOMMENT-7-c1", TargetID: "ISSUE-7", Kind: "parent", Text: "issue"}},
+		},
+		{
+			RepoID:     "fixture-a",
+			Provenance: ProvenanceLive,
+			Record:     Record{ID: "ISSUECOMMENT-7-c2", Type: "issue_comment", Path: "issues/7/comments/c2.md", Title: "Current", Body: "current child token", Status: "current", ContentHash: "c2", RemoteType: "issue_comment", RemoteID: "7:c2", CreatedAt: now, UpdatedAt: now},
+			Links:      []Link{{SourceID: "ISSUECOMMENT-7-c2", TargetID: "ISSUE-7", Kind: "parent", Text: "issue"}},
+		},
+		{
+			RepoID:     "fixture-a",
+			Provenance: ProvenanceLive,
+			Record:     Record{ID: "ISSUECOMMENT-8-c1", Type: "issue_comment", Path: "issues/8/comments/c1.md", Title: "Other parent", Body: "other child token", Status: "current", ContentHash: "other", RemoteType: "issue_comment", RemoteID: "8:c1", CreatedAt: now, UpdatedAt: now},
+			Links:      []Link{{SourceID: "ISSUECOMMENT-8-c1", TargetID: "ISSUE-8", Kind: "parent", Text: "issue"}},
+		},
+	} {
+		if err := store.UpsertSyncGraph(ctx, graph); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := store.ReconcileChildSources(ctx, "fixture-a", "ISSUE-7", "issue_comment", []string{"ISSUECOMMENT-7-c2"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetSourceScoped(ctx, "fixture-a", "ISSUECOMMENT-7-c1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("stale child source error = %v, want ErrNotFound", err)
+	}
+	if _, err := store.GetRecord(ctx, "fixture-a", "ISSUECOMMENT-7-c1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("stale child record error = %v, want ErrNotFound", err)
+	}
+	for _, id := range []string{"ISSUECOMMENT-7-c2", "ISSUECOMMENT-8-c1"} {
+		if _, err := store.GetSourceScoped(ctx, "fixture-a", id); err != nil {
+			t.Fatalf("preserved child %s: %v", id, err)
+		}
+	}
+	results, err := store.SearchSources(ctx, SearchQuery{RepoID: "fixture-a", Query: "stale child token", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("stale child remained searchable: %#v", results)
+	}
+}
+
 func TestRAGEmbeddingSchemaRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)

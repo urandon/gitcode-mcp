@@ -75,6 +75,11 @@ type syncLiveArgs struct {
 	Detach         bool   `json:"detach,omitempty"`
 }
 
+type syncLiveCommentSelection struct {
+	Issue bool
+	PR    bool
+}
+
 type syncLiveResult struct {
 	RepoID        string                            `json:"repo_id"`
 	Collections   []string                          `json:"collections"`
@@ -103,11 +108,16 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "bounds must be non-negative"})
 		return
 	}
+	commentSelection, message := resolveSyncLiveCommentSelection(a)
+	if message != "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: message})
+		return
+	}
 	if message := syncLiveCommentSurfaceError(a); message != "" {
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: message})
 		return
 	}
-	selected := syncLiveCollections(a)
+	selected := syncLiveCollections(a, commentSelection)
 	result := syncLiveResult{RepoID: a.RepoID, Collections: selected, GeneratedAt: time.Now().UTC()}
 	if a.Daemon || a.Detach {
 		if strings.TrimSpace(a.RemoteAlias) != "" {
@@ -123,7 +133,7 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 			return
 		}
 		var job servicectl.Job
-		if err := client.Call(ctx, "Jobs.StartSync", syncLiveJobRequest(a), &job); err != nil {
+		if err := client.Call(ctx, "Jobs.StartSync", syncLiveJobRequest(a, commentSelection), &job); err != nil {
 			s.writeDomainError(id, err)
 			return
 		}
@@ -166,6 +176,7 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 		return
 	}
 
+	defaultCollections := len(selected) == 0
 	if len(selected) == 0 {
 		selected = []string{"issues", "wiki"}
 		result.Collections = selected
@@ -183,25 +194,22 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 		}
 	}
 	switch {
-	case a.Issues && a.Wiki && !a.Pulls && !a.Comments && !a.IssueComments && !a.PRComments:
+	case a.Issues && a.Wiki && !a.Pulls && !commentSelection.Issue && !commentSelection.PR:
 		runBulk("all", s.svc.BulkSyncAll)
 	default:
-		if a.Issues || len(syncLiveCollections(a)) == 0 {
+		if a.Issues || defaultCollections {
 			runBulk("issues", s.svc.BulkSyncIssues)
 		}
-		if a.IssueComments {
+		if commentSelection.Issue {
 			runBulk("issue_comments", s.svc.BulkSyncIssueComments)
 		}
-		if a.Wiki || len(syncLiveCollections(a)) == 0 {
+		if a.Wiki || defaultCollections {
 			runBulk("wiki", s.svc.BulkSyncWiki)
 		}
 		if a.Pulls {
 			runBulk("pulls", s.svc.BulkSyncPullRequests)
 		}
-		if a.Comments || a.PRComments {
-			if a.Issues && !a.Pulls {
-				result.Diagnostics = append(result.Diagnostics, lifecycleDiagnostic{Code: "legacy_comments_parent", Message: "sync_live comments is a compatibility pull request comments selector", Remediation: "use issue_comments=true for issue comments or pr_comments=true for pull request comments"})
-			}
+		if commentSelection.PR {
 			runBulk("pr_comments", s.svc.BulkSyncPRComments)
 		}
 	}
@@ -228,16 +236,15 @@ func syncLiveBulkRequest(a syncLiveArgs) service.BulkSyncRequest {
 	return req
 }
 
-func syncLiveJobRequest(a syncLiveArgs) servicectl.StartSyncJobRequest {
+func syncLiveJobRequest(a syncLiveArgs, comments syncLiveCommentSelection) servicectl.StartSyncJobRequest {
 	return servicectl.StartSyncJobRequest{
 		RepoID:         strings.TrimSpace(a.RepoID),
 		ProviderMode:   string(gitcode.ProviderModeLive),
 		Issues:         a.Issues,
 		Wiki:           a.Wiki,
 		Pulls:          a.Pulls,
-		Comments:       a.Comments,
-		IssueComments:  a.IssueComments,
-		PRComments:     a.PRComments,
+		IssueComments:  comments.Issue,
+		PRComments:     comments.PR,
 		IdempotencyKey: strings.TrimSpace(a.IdempotencyKey),
 		MaxPages:       a.MaxPages,
 		MaxRecords:     a.MaxRecords,
@@ -285,27 +292,49 @@ func extractLifecyclePartial(err error) (*service.PartialSyncError, bool) {
 	return nil, false
 }
 
-func syncLiveCollections(a syncLiveArgs) []string {
+func syncLiveCollections(a syncLiveArgs, comments syncLiveCommentSelection) []string {
 	var selected []string
 	if a.Issues {
 		selected = append(selected, "issues")
 	}
-	if a.Wiki {
-		selected = append(selected, "wiki")
-	}
-	if a.IssueComments {
+	if comments.Issue {
 		selected = append(selected, "issue_comments")
 	}
-	if a.PRComments {
-		selected = append(selected, "pr_comments")
-	}
-	if a.Comments {
-		selected = append(selected, "comments")
+	if a.Wiki {
+		selected = append(selected, "wiki")
 	}
 	if a.Pulls {
 		selected = append(selected, "pulls")
 	}
+	if comments.PR {
+		selected = append(selected, "pr_comments")
+	}
 	return selected
+}
+
+func resolveSyncLiveCommentSelection(a syncLiveArgs) (syncLiveCommentSelection, string) {
+	selection := syncLiveCommentSelection{Issue: a.IssueComments, PR: a.PRComments}
+	if !a.Comments {
+		return selection, ""
+	}
+	if a.IssueComments || a.PRComments {
+		return syncLiveCommentSelection{}, "comments cannot be combined with issue_comments or pr_comments; use the explicit selectors only"
+	}
+	if strings.TrimSpace(a.RemoteAlias) != "" {
+		if syncLiveRemoteAliasSurface(a.RemoteAlias) == "issue" {
+			selection.Issue = true
+		}
+		return selection, ""
+	}
+	if a.Issues && a.Pulls {
+		return syncLiveCommentSelection{}, "comments is ambiguous when both issues and pulls are selected; use issue_comments=true and/or pr_comments=true"
+	}
+	if a.Issues {
+		selection.Issue = true
+		return selection, ""
+	}
+	selection.PR = true
+	return selection, ""
 }
 
 func syncLiveCommentSurfaceError(a syncLiveArgs) string {

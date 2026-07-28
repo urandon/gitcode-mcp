@@ -957,8 +957,8 @@ func TestMCPToolKindSchemaIncludesOnlyGitCodeKinds(t *testing.T) {
 		if !ok {
 			t.Fatalf("tool %s missing kind schema", name)
 		}
-		if !reflect.DeepEqual(prop.Enum, []string{"issue", "wiki", "pull_request", "pr_comment"}) {
-			t.Fatalf("tool %s kind enum = %#v, want [issue wiki pull_request pr_comment]", name, prop.Enum)
+		if !reflect.DeepEqual(prop.Enum, []string{"issue", "issue_comment", "wiki", "pull_request", "pr_comment"}) {
+			t.Fatalf("tool %s kind enum = %#v, want [issue issue_comment wiki pull_request pr_comment]", name, prop.Enum)
 		}
 	}
 }
@@ -1499,9 +1499,12 @@ func TestMCPListPRDiscussionsDelegatesToService(t *testing.T) {
 
 type syncLiveBoundsSpyService struct {
 	serviceInterface
-	bulkIssuesCalls     []service.BulkSyncRequest
-	bulkPRCommentsCalls []service.BulkSyncRequest
-	syncRequests        []service.SyncRequest
+	bulkIssuesCalls        []service.BulkSyncRequest
+	bulkIssueCommentsCalls []service.BulkSyncRequest
+	bulkWikiCalls          []service.BulkSyncRequest
+	bulkPullsCalls         []service.BulkSyncRequest
+	bulkPRCommentsCalls    []service.BulkSyncRequest
+	syncRequests           []service.SyncRequest
 }
 
 func (s *syncLiveBoundsSpyService) ProviderMode() gitcode.ProviderMode {
@@ -1520,6 +1523,17 @@ func (s *syncLiveBoundsSpyService) BulkSyncIssues(ctx context.Context, req servi
 }
 
 func (s *syncLiveBoundsSpyService) BulkSyncIssueComments(ctx context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
+	s.bulkIssueCommentsCalls = append(s.bulkIssueCommentsCalls, req)
+	return &service.SyncResourcesResult{Results: []service.SyncResult{{Status: "succeeded"}}, SuccessCount: 1}, nil
+}
+
+func (s *syncLiveBoundsSpyService) BulkSyncWiki(ctx context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
+	s.bulkWikiCalls = append(s.bulkWikiCalls, req)
+	return &service.SyncResourcesResult{Results: []service.SyncResult{{Status: "succeeded"}}, SuccessCount: 1}, nil
+}
+
+func (s *syncLiveBoundsSpyService) BulkSyncPullRequests(ctx context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
+	s.bulkPullsCalls = append(s.bulkPullsCalls, req)
 	return &service.SyncResourcesResult{Results: []service.SyncResult{{Status: "succeeded"}}, SuccessCount: 1}, nil
 }
 
@@ -1603,6 +1617,22 @@ func TestMCPSyncLiveCommentSurfaceRouting(t *testing.T) {
 		}
 		return resp
 	}
+	structured := func(resp response) syncLiveResult {
+		t.Helper()
+		var result toolCallResult
+		if err := json.Unmarshal(resp.Result, &result); err != nil {
+			t.Fatalf("decode tool result: %v", err)
+		}
+		raw, err := json.Marshal(result.StructuredContent)
+		if err != nil {
+			t.Fatalf("encode structured content: %v", err)
+		}
+		var out syncLiveResult
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatalf("decode structured content: %v", err)
+		}
+		return out
+	}
 
 	issueResp := call("issue-comments", "sync_live", map[string]any{"repo_id": "fixture-a", "comments": true, "remote_alias": "issue:42"})
 	if issueResp.Error != nil {
@@ -1612,24 +1642,110 @@ func TestMCPSyncLiveCommentSurfaceRouting(t *testing.T) {
 		t.Fatalf("issue comments routing syncRequests=%+v prCalls=%+v", spy.syncRequests, spy.bulkPRCommentsCalls)
 	}
 
-	prResp := call("pr-comments", "sync_live", map[string]any{"repo_id": "fixture-a", "pr_comments": true})
-	if prResp.Error != nil {
-		t.Fatalf("pr comments response error=%+v", prResp.Error)
+	defaultResp := call("default-collections", "sync_live", map[string]any{"repo_id": "fixture-a"})
+	if defaultResp.Error != nil {
+		t.Fatalf("default collections response error=%+v", defaultResp.Error)
 	}
-	if len(spy.bulkPRCommentsCalls) != 1 {
-		t.Fatalf("pr comments calls=%d, want 1", len(spy.bulkPRCommentsCalls))
+	if len(spy.bulkIssuesCalls) != 1 || len(spy.bulkWikiCalls) != 1 {
+		t.Fatalf("default collections issues=%d wiki=%d", len(spy.bulkIssuesCalls), len(spy.bulkWikiCalls))
+	}
+	if got := structured(defaultResp).Collections; !reflect.DeepEqual(got, []string{"issues", "wiki"}) {
+		t.Fatalf("default collections=%v", got)
+	}
+
+	issueParentResp := call("issue-parent-comments", "sync_live", map[string]any{"repo_id": "fixture-a", "issues": true, "comments": true})
+	if issueParentResp.Error != nil {
+		t.Fatalf("issue parent comments response error=%+v", issueParentResp.Error)
+	}
+	if len(spy.bulkIssuesCalls) != 2 || len(spy.bulkIssueCommentsCalls) != 1 || len(spy.bulkPRCommentsCalls) != 0 {
+		t.Fatalf("issue parent routing issues=%d issue_comments=%d pr_comments=%d", len(spy.bulkIssuesCalls), len(spy.bulkIssueCommentsCalls), len(spy.bulkPRCommentsCalls))
+	}
+	if got := structured(issueParentResp).Collections; !reflect.DeepEqual(got, []string{"issues", "issue_comments"}) {
+		t.Fatalf("issue parent collections=%v", got)
+	}
+
+	pullParentResp := call("pull-parent-comments", "sync_live", map[string]any{"repo_id": "fixture-a", "pulls": true, "comments": true})
+	if pullParentResp.Error != nil {
+		t.Fatalf("pull parent comments response error=%+v", pullParentResp.Error)
+	}
+	if len(spy.bulkPullsCalls) != 1 || len(spy.bulkPRCommentsCalls) != 1 {
+		t.Fatalf("pull parent routing pulls=%d pr_comments=%d", len(spy.bulkPullsCalls), len(spy.bulkPRCommentsCalls))
+	}
+	if got := structured(pullParentResp).Collections; !reflect.DeepEqual(got, []string{"pulls", "pr_comments"}) {
+		t.Fatalf("pull parent collections=%v", got)
+	}
+
+	legacyResp := call("legacy-pr-comments", "sync_live", map[string]any{"repo_id": "fixture-a", "comments": true})
+	if legacyResp.Error != nil {
+		t.Fatalf("legacy comments response error=%+v", legacyResp.Error)
+	}
+	if len(spy.bulkPRCommentsCalls) != 2 {
+		t.Fatalf("legacy comments calls=%d, want 2 total", len(spy.bulkPRCommentsCalls))
+	}
+	if got := structured(legacyResp).Collections; !reflect.DeepEqual(got, []string{"pr_comments"}) {
+		t.Fatalf("legacy collections=%v", got)
+	}
+
+	explicitResp := call("explicit-comments", "sync_live", map[string]any{"repo_id": "fixture-a", "issue_comments": true, "pr_comments": true})
+	if explicitResp.Error != nil {
+		t.Fatalf("explicit comments response error=%+v", explicitResp.Error)
+	}
+	if len(spy.bulkIssueCommentsCalls) != 2 || len(spy.bulkPRCommentsCalls) != 3 {
+		t.Fatalf("explicit comment routing issue_comments=%d pr_comments=%d", len(spy.bulkIssueCommentsCalls), len(spy.bulkPRCommentsCalls))
+	}
+
+	beforeIssues := len(spy.bulkIssuesCalls)
+	beforeIssueComments := len(spy.bulkIssueCommentsCalls)
+	beforePulls := len(spy.bulkPullsCalls)
+	beforePRComments := len(spy.bulkPRCommentsCalls)
+	ambiguousResp := call("ambiguous-comments", "sync_live", map[string]any{"repo_id": "fixture-a", "issues": true, "pulls": true, "comments": true})
+	if ambiguousResp.Error == nil || !strings.Contains(ambiguousResp.Error.Data.Message, "comments is ambiguous") {
+		t.Fatalf("ambiguous response=%+v", ambiguousResp.Error)
+	}
+	conflictingResp := call("conflicting-comments", "sync_live", map[string]any{"repo_id": "fixture-a", "comments": true, "issue_comments": true})
+	if conflictingResp.Error == nil || !strings.Contains(conflictingResp.Error.Data.Message, "comments cannot be combined") {
+		t.Fatalf("conflicting response=%+v", conflictingResp.Error)
+	}
+	if len(spy.bulkIssuesCalls) != beforeIssues || len(spy.bulkIssueCommentsCalls) != beforeIssueComments || len(spy.bulkPullsCalls) != beforePulls || len(spy.bulkPRCommentsCalls) != beforePRComments {
+		t.Fatalf("invalid requests called bulk service: issues=%d issue_comments=%d pulls=%d pr_comments=%d", len(spy.bulkIssuesCalls), len(spy.bulkIssueCommentsCalls), len(spy.bulkPullsCalls), len(spy.bulkPRCommentsCalls))
 	}
 
 	invalidResp := call("invalid-pr-comments", "sync_live", map[string]any{"repo_id": "fixture-a", "pr_comments": true, "remote_alias": "issue:42"})
 	if invalidResp.Error == nil || !strings.Contains(invalidResp.Error.Data.Message, "pr_comments cannot target issue aliases") {
 		t.Fatalf("invalid response=%+v", invalidResp.Error)
 	}
-	if len(spy.syncRequests) != 1 || len(spy.bulkPRCommentsCalls) != 1 {
+	if len(spy.syncRequests) != 1 || len(spy.bulkPRCommentsCalls) != beforePRComments {
 		t.Fatalf("invalid request called service: sync=%+v pr=%+v", spy.syncRequests, spy.bulkPRCommentsCalls)
 	}
 
 	_ = r.Close()
 	wg.Wait()
+}
+
+func TestSyncLiveJobRequestNormalizesLegacyCommentRouting(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      syncLiveArgs
+		wantIssue bool
+		wantPR    bool
+	}{
+		{name: "issue parent", args: syncLiveArgs{Issues: true, Comments: true}, wantIssue: true},
+		{name: "pull parent", args: syncLiveArgs{Pulls: true, Comments: true}, wantPR: true},
+		{name: "legacy no parent", args: syncLiveArgs{Comments: true}, wantPR: true},
+		{name: "explicit both", args: syncLiveArgs{IssueComments: true, PRComments: true}, wantIssue: true, wantPR: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			selection, message := resolveSyncLiveCommentSelection(tt.args)
+			if message != "" {
+				t.Fatalf("resolveSyncLiveCommentSelection returned %q", message)
+			}
+			req := syncLiveJobRequest(tt.args, selection)
+			if req.Comments || req.IssueComments != tt.wantIssue || req.PRComments != tt.wantPR {
+				t.Fatalf("job request=%+v, want comments=false issue_comments=%t pr_comments=%t", req, tt.wantIssue, tt.wantPR)
+			}
+		})
+	}
 }
 
 func TestMCPIndexRepoNotStaleDiagnostic(t *testing.T) {

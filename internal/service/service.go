@@ -1527,6 +1527,7 @@ func (s *Service) bulkSyncRepositoryIssueComments(ctx context.Context, req BulkS
 		}
 	}
 	seen := make(map[string]map[string]struct{}, len(pending))
+	seenSources := make(map[string]map[string]struct{}, len(pending))
 	expectedTotal := 0
 	// An interrupted aggregate traversal restarts at page one. Page-level upserts
 	// make that retry idempotent, while starting later could falsely reconcile a
@@ -1625,11 +1626,20 @@ func (s *Service) bulkSyncRepositoryIssueComments(ctx context.Context, req BulkS
 				result.Failures = append(result.Failures, newResourceError(strings.TrimSpace(comment.ID), "issue_comment_reconciliation", err))
 				continue
 			}
+			commentSourceID, err := s.upsertIssueCommentProjection(ctx, item, cached)
+			if err != nil {
+				result.Failures = append(result.Failures, newResourceError(strings.TrimSpace(comment.ID), "issue_comments", err))
+				continue
+			}
 			pageComments[item.SourceID] = append(pageComments[item.SourceID], cached)
 			if seen[item.SourceID] == nil {
 				seen[item.SourceID] = map[string]struct{}{}
 			}
 			seen[item.SourceID][cached.CommentID] = struct{}{}
+			if seenSources[item.SourceID] == nil {
+				seenSources[item.SourceID] = map[string]struct{}{}
+			}
+			seenSources[item.SourceID][commentSourceID] = struct{}{}
 		}
 		for sourceID, comments := range pageComments {
 			if err := s.store.UpsertRecordComments(ctx, req.RepoID, sourceID, comments); err != nil {
@@ -1692,6 +1702,15 @@ func (s *Service) bulkSyncRepositoryIssueComments(ctx context.Context, req BulkS
 			continue
 		}
 		if err := s.store.ReconcileRecordComments(ctx, req.RepoID, item.SourceID, commentIDs); err != nil {
+			result.Failures = append(result.Failures, newResourceError(item.RemoteID, "issue_comments", err))
+			continue
+		}
+		commentSourceIDs := make([]string, 0, len(seenSources[item.SourceID]))
+		for id := range seenSources[item.SourceID] {
+			commentSourceIDs = append(commentSourceIDs, id)
+		}
+		sort.Strings(commentSourceIDs)
+		if err := s.store.ReconcileChildSources(ctx, req.RepoID, item.SourceID, "issue_comment", commentSourceIDs); err != nil {
 			result.Failures = append(result.Failures, newResourceError(item.RemoteID, "issue_comments", err))
 			continue
 		}
@@ -1783,6 +1802,71 @@ func cachedIssueComment(comment gitcode.Comment, item cache.IssueCommentSync, no
 	return cache.RecordComment{RepoID: item.RepoID, RecordID: item.SourceID, CommentID: commentID, Author: comment.Author, Body: comment.Body, ContentHash: contentHash(commentID, comment.Author, comment.Body), RemoteRevision: contentHash(updated), CreatedAt: created, UpdatedAt: updated}, nil
 }
 
+func (s *Service) upsertIssueCommentProjection(ctx context.Context, item cache.IssueCommentSync, comment cache.RecordComment) (string, error) {
+	commentID := strings.TrimSpace(comment.CommentID)
+	if commentID == "" {
+		return "", s.liveGraphError("comment missing provider id")
+	}
+	remoteID := issueCommentRemoteID(item.IssueNumber, commentID)
+	stableID := s.resolveOrFallback(ctx, item.RepoID, "issue_comment", remoteID, issueCommentStableID(item.IssueNumber, commentID))
+	if err := s.guardRemoteAlias(ctx, item.RepoID, "issue_comment", remoteID, stableID); err != nil {
+		return "", err
+	}
+	now := s.now().UTC()
+	updated := comment.UpdatedAt.UTC()
+	if updated.IsZero() {
+		updated = now
+	}
+	created := comment.CreatedAt.UTC()
+	if created.IsZero() {
+		created = updated
+	}
+	hash := comment.ContentHash
+	if hash == "" {
+		hash = contentHash(commentID, comment.Author, comment.Body)
+	}
+	revision := comment.RemoteRevision
+	if revision == "" {
+		revision = contentHash(updated)
+	}
+	source := cache.Source{
+		RepoID:      item.RepoID,
+		ID:          stableID,
+		Kind:        "issue_comment",
+		Path:        fmt.Sprintf("issues/%d/comments/%s.md", item.IssueNumber, safeIDPart(commentID)),
+		Title:       fmt.Sprintf("Issue #%d comment %s", item.IssueNumber, commentID),
+		Body:        comment.Body,
+		Status:      "current",
+		ContentHash: hash,
+		CreatedAt:   created,
+		UpdatedAt:   updated,
+	}
+	graph := cache.SourceGraph{
+		Source:     source,
+		Identities: []cache.Identity{{RepoID: item.RepoID, SourceID: stableID, AliasType: "issue_comment", Alias: remoteID, Remote: cache.RemoteAlias{Type: "issue_comment", ID: remoteID}}},
+		Links:      []cache.Link{{RepoID: item.RepoID, SourceID: stableID, TargetID: item.SourceID, Kind: "parent", Text: "issue"}},
+		Chunks:     chunksForSource(source),
+		SyncStatus: &cache.SyncStatus{RepoID: item.RepoID, SourceID: stableID, RemoteType: "issue_comment", RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now},
+	}
+	if err := s.store.UpsertSyncGraph(ctx, s.syncGraphFromSourceGraph(item.RepoID, graph)); err != nil {
+		return "", err
+	}
+	return stableID, nil
+}
+
+func (s *Service) projectIssueComments(ctx context.Context, item cache.IssueCommentSync, comments []cache.RecordComment) error {
+	sourceIDs := make([]string, 0, len(comments))
+	for _, comment := range comments {
+		sourceID, err := s.upsertIssueCommentProjection(ctx, item, comment)
+		if err != nil {
+			return err
+		}
+		sourceIDs = append(sourceIDs, sourceID)
+	}
+	sort.Strings(sourceIDs)
+	return s.store.ReconcileChildSources(ctx, item.RepoID, item.SourceID, "issue_comment", sourceIDs)
+}
+
 func repositoryIssueCommentsUnsupported(err error) bool {
 	var capability gitcode.ErrUnsupportedCapability
 	return errors.As(err, &capability) && capability.CapabilityKey == "repository_issue_comments"
@@ -1837,24 +1921,19 @@ func (s *Service) syncIssueCommentItem(ctx context.Context, route RepositoryRout
 	now := s.now().UTC()
 	cached := make([]cache.RecordComment, 0, len(comments.Items))
 	for _, comment := range comments.Items {
-		commentID := strings.TrimSpace(comment.ID)
-		if commentID == "" {
-			return SyncResult{}, s.liveGraphError("comment missing provider id")
-		}
 		if s.syncProviderMode() == gitcode.ProviderModeLive && !s.liveCommentParentReconciles(comment, item.RemoteID, item.ProviderID) {
 			return SyncResult{}, s.liveGraphError("comment parent issue id is unreconciled")
 		}
-		updated := comment.UpdatedAt.UTC()
-		if updated.IsZero() {
-			updated = now
+		recordComment, err := cachedIssueComment(comment, item, now)
+		if err != nil {
+			return SyncResult{}, err
 		}
-		created := comment.CreatedAt.UTC()
-		if created.IsZero() {
-			created = updated
-		}
-		cached = append(cached, cache.RecordComment{RepoID: item.RepoID, RecordID: item.SourceID, CommentID: commentID, Author: comment.Author, Body: comment.Body, ContentHash: contentHash(commentID, comment.Author, comment.Body), RemoteRevision: contentHash(updated), CreatedAt: created, UpdatedAt: updated})
+		cached = append(cached, recordComment)
 	}
 	if err := s.store.ReplaceRecordComments(ctx, item.RepoID, item.SourceID, cached); err != nil {
+		return SyncResult{}, err
+	}
+	if err := s.projectIssueComments(ctx, item, cached); err != nil {
 		return SyncResult{}, err
 	}
 	item.Status = "complete"
@@ -3348,6 +3427,9 @@ func (s *Service) recordTargetedIssueCommentCoverage(ctx context.Context, remote
 		item.Status = "deferred"
 		item.LastErrorClass = "comments_read"
 	} else {
+		if err := s.projectIssueComments(ctx, item, graph.Comments); err != nil {
+			return err
+		}
 		item.Status = "complete"
 		item.ExpectedCount = len(graph.Comments)
 		item.LastErrorClass = ""
@@ -3845,6 +3927,14 @@ func prCommentStableID(prNumber int, commentID string) string {
 
 func prCommentRemoteID(prNumber int, commentID string) string {
 	return strconv.Itoa(prNumber) + ":" + strings.TrimSpace(commentID)
+}
+
+func issueCommentStableID(issueNumber int, commentID string) string {
+	return "ISSUECOMMENT-" + strconv.Itoa(issueNumber) + "-" + safeIDPart(commentID)
+}
+
+func issueCommentRemoteID(issueNumber int, commentID string) string {
+	return strconv.Itoa(issueNumber) + ":" + strings.TrimSpace(commentID)
 }
 
 func safeIDPart(value string) string {

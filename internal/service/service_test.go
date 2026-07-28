@@ -1503,6 +1503,10 @@ func TestSyncGraphFixtureOfflineReadsIssueWikiCommentsAndChunks(t *testing.T) {
 	if err != nil || wiki.Kind != "wiki" {
 		t.Fatalf("wiki get = %#v, %v", wiki, err)
 	}
+	comment, err := svc.GetSource(ctx, GetSourceRequest{RepoID: "fixture-a", ID: "ISSUECOMMENT-42-c1"})
+	if err != nil || comment.Kind != "issue_comment" || comment.Body != "comment" || len(comment.Links) != 1 || comment.Links[0].TargetID != "ISSUE-42" {
+		t.Fatalf("comment get = %#v, %v", comment, err)
+	}
 	snippet, err := svc.GetSnippet(ctx, SnippetRequest{RepoID: "fixture-a", ID: "ISSUE-42", LineStart: 1, LineEnd: 2})
 	if err != nil || snippet.Text == "" {
 		t.Fatalf("snippet = %#v, %v", snippet, err)
@@ -1515,7 +1519,7 @@ func TestSyncGraphFixtureOfflineReadsIssueWikiCommentsAndChunks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts.Records != 2 || counts.Comments != 1 || counts.SyncEvents != 2 || counts.RemoteRevisions != 2 || counts.Chunks == 0 {
+	if counts.Records != 3 || counts.Comments != 1 || counts.IdentityAliases != 3 || counts.SyncEvents != 2 || counts.RemoteRevisions != 3 || counts.Chunks != 3 {
 		t.Fatalf("counts = %#v", counts)
 	}
 }
@@ -3204,6 +3208,9 @@ func (f *brokenStore) ListSources(context.Context, cache.SourceFilter) ([]cache.
 		out = append(out, source)
 	}
 	return out, nil
+}
+func (f *brokenStore) ReconcileChildSources(context.Context, string, string, string, []string) error {
+	return nil
 }
 func (f *brokenStore) UpsertPRReviewComment(context.Context, cache.PRReviewComment) error {
 	return nil
