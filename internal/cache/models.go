@@ -11,6 +11,7 @@ type Store interface {
 	GetRepository(context.Context, string) (RepositoryBinding, error)
 	GetRepo(context.Context, string) (RepositoryBinding, error)
 	ListRepositories(context.Context) ([]RepositoryBinding, error)
+	SchemaVersion(context.Context) (int, error)
 	UpsertSourceGraph(context.Context, SourceGraph) error
 	UpsertRecordGraph(context.Context, RecordGraph) error
 	UpsertSyncGraph(context.Context, SyncGraph) error

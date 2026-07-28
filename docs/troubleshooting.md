@@ -10,7 +10,16 @@ gitcode-mcp: command not found
 
 **Cause:** Binary is not in PATH.
 
-**Fix:** Build and install the binary. See [Install](install.md).
+**Fix:** Build and install the binary. See [Install](install.md). Release
+linker metadata is authoritative; module-installed binaries fall back to Go
+build metadata for version, revision, and build time so `--version`,
+`repo status`, MCP initialization, and doctor identify the same executable.
+
+If `repo status` reports `cache_state: migration_required`, compare
+`cache_schema_version` with `expected_cache_schema_version` and run
+`gitcode-mcp cache migrate` with the same binary. The status command can inspect
+an older compatible cache read-only even when newer schema-owned diagnostics
+are not yet available.
 
 ### Config file not found
 

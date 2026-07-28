@@ -56,18 +56,28 @@ type RepositoryStatusRequest struct {
 }
 
 type RepositoryStatus struct {
-	RepoID             string            `json:"repo_id"`
-	Owner              string            `json:"owner"`
-	Name               string            `json:"name"`
-	APIBaseURL         string            `json:"api_base_url"`
-	Scopes             []RepositoryScope `json:"scopes"`
-	DisplayName        string            `json:"display_name,omitempty"`
-	Aliases            []string          `json:"aliases"`
-	BindingState       string            `json:"binding_state"`
-	AliasConflictState string            `json:"alias_conflict_state"`
-	CacheState         string            `json:"cache_state"`
-	IndexState         string            `json:"index_state"`
-	FailureClass       string            `json:"failure_class,omitempty"`
+	RepoID                     string                    `json:"repo_id"`
+	Owner                      string                    `json:"owner"`
+	Name                       string                    `json:"name"`
+	APIBaseURL                 string                    `json:"api_base_url"`
+	Scopes                     []RepositoryScope         `json:"scopes"`
+	DisplayName                string                    `json:"display_name,omitempty"`
+	Aliases                    []string                  `json:"aliases"`
+	BindingState               string                    `json:"binding_state"`
+	AliasConflictState         string                    `json:"alias_conflict_state"`
+	CacheState                 string                    `json:"cache_state"`
+	IndexState                 string                    `json:"index_state"`
+	FailureClass               string                    `json:"failure_class,omitempty"`
+	BinaryVersion              string                    `json:"binary_version"`
+	BinaryCommit               string                    `json:"binary_commit,omitempty"`
+	BinaryBuildDate            string                    `json:"binary_build_date,omitempty"`
+	BinaryVersionSource        string                    `json:"binary_version_source"`
+	CacheSchemaVersion         int                       `json:"cache_schema_version"`
+	ExpectedCacheSchemaVersion int                       `json:"expected_cache_schema_version"`
+	IssueRecords               int                       `json:"issue_records"`
+	IssueComments              int                       `json:"issue_comments"`
+	IssueCommentQueueState     string                    `json:"issue_comment_queue_state"`
+	IssueCommentQueue          *IssueCommentQueueSummary `json:"issue_comment_queue,omitempty"`
 }
 
 type CacheStatusRequest struct {

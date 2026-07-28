@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io/fs"
 	"os"
@@ -1500,7 +1501,7 @@ func TestRepoRegistryCLI(t *testing.T) {
 		t.Fatalf("repo status code=%d stderr=%q", code, statusErr.String())
 	}
 	out := statusOut.String()
-	for _, want := range []string{"repo_id: fixture-a", "owner: owner-a", "name: repo-a", "api_base_url: https://example.invalid/api?safe=1", "scopes: issues,wiki", "aliases: proj", "binding_state: ready", "alias_conflict_state: none", "cache_state: unknown", "index_state: unknown"} {
+	for _, want := range []string{"repo_id: fixture-a", "owner: owner-a", "name: repo-a", "api_base_url: https://example.invalid/api?safe=1", "scopes: issues,wiki", "aliases: proj", "binding_state: ready", "alias_conflict_state: none", "cache_state: ready", "index_state: unknown", "binary_version:", "binary_version_source:", "cache_schema_version: 16", "expected_cache_schema_version: 16", "issue_records: 0", "issue_comments: 0", "issue_comment_queue_state: available", "issue_comment_queue: pending=0 deferred=0 complete=0 total=0"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("status output missing %q in %q", want, out)
 		}
@@ -1522,6 +1523,47 @@ func TestRepoRegistryCLI(t *testing.T) {
 	code = executeWithFactory([]string{"repo", "status", "--cache-path", cachePath, "--repo", "missing-repo"}, &missingOut, &missingErr, factory)
 	if code != 3 || !strings.Contains(missingErr.String(), "repository") || !strings.Contains(missingErr.String(), "not found") {
 		t.Fatalf("missing status code=%d stderr=%q", code, missingErr.String())
+	}
+}
+
+func TestRepoStatusReadsCompatibleOlderSchemaForDiagnostics(t *testing.T) {
+	ctx := context.Background()
+	cachePath := filepath.Join(t.TempDir(), "older-cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE issue_comment_sync`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE schema_version SET version = 15`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Execute([]string{"repo", "status", "--cache-path", cachePath, "--repo", "fixture-a", "--format", "json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{`"cache_state": "migration_required"`, `"cache_schema_version": 15`, `"expected_cache_schema_version": 16`, `"binary_version"`, `"issue_comment_queue_state": "schema_unavailable"`} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("repo status missing %q in %q", want, stdout.String())
+		}
 	}
 }
 

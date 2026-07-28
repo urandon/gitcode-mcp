@@ -99,7 +99,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 		return 0
 	}
 	if opts.version {
-		fmt.Fprintf(stdout, "gitcode-mcp %s\n", buildinfo.Version)
+		fmt.Fprintf(stdout, "gitcode-mcp %s\n", buildinfo.Current().Version)
 		return 0
 	}
 	if len(rest) > 0 && rest[0] == "mcp" && len(rest) > 1 && (rest[1] == "-h" || rest[1] == "--help") {

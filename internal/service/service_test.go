@@ -321,11 +321,24 @@ func TestRepositoryRegistry(t *testing.T) {
 	if repo.RepoID != "fixture-a" || !reflect.DeepEqual(repo.Scopes, []RepositoryScope{RepositoryScopeIssues, RepositoryScopeWiki}) || !reflect.DeepEqual(repo.Aliases, []string{"proj"}) {
 		t.Fatalf("repo = %#v", repo)
 	}
+	now := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
+	if err := store.UpsertRecordGraph(ctx, cache.RecordGraph{Record: cache.Record{RepoID: "fixture-a", ID: "ISSUE-7", Type: "issue", Path: "issues/7.md", Title: "Issue 7", Status: "open", ContentHash: "issue-7", Provenance: cache.ProvenanceLive, RemoteType: "issue", RemoteID: "7", CreatedAt: now, UpdatedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceRecordComments(ctx, "fixture-a", "ISSUE-7", []cache.RecordComment{{CommentID: "c7", Body: "cached comment", CreatedAt: now, UpdatedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertIssueCommentSync(ctx, cache.IssueCommentSync{RepoID: "fixture-a", SourceID: "ISSUE-7", IssueNumber: 7, RemoteID: "7", ExpectedCount: 1, Status: "complete", UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
 	status, err := svc.RepositoryStatus(ctx, RepositoryStatusRequest{RepoID: "fixture-a"})
 	if err != nil {
 		t.Fatalf("RepositoryStatus returned error: %v", err)
 	}
-	if status.APIBaseURL != "https://example.invalid/api?safe=1" || status.BindingState != "ready" || status.CacheState != "unknown" || status.IndexState != "unknown" {
+	if status.APIBaseURL != "https://example.invalid/api?safe=1" || status.BindingState != "ready" || status.CacheState != "ready" || status.IndexState != "unknown" {
+		t.Fatalf("status = %#v", status)
+	}
+	if status.BinaryVersion == "" || status.BinaryVersionSource == "" || status.CacheSchemaVersion != cache.CurrentSchemaVersion() || status.ExpectedCacheSchemaVersion != cache.CurrentSchemaVersion() || status.IssueRecords != 1 || status.IssueComments != 1 || status.IssueCommentQueueState != "available" || status.IssueCommentQueue == nil || status.IssueCommentQueue.Complete != 1 || status.IssueCommentQueue.Total != 1 {
 		t.Fatalf("status = %#v", status)
 	}
 	_, err = svc.AddRepository(ctx, AddRepositoryRequest{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []string{"issues"}})
@@ -341,6 +354,26 @@ func TestRepositoryRegistry(t *testing.T) {
 	var notFound ErrNotFound
 	if !errors.As(err, &notFound) || notFound.Kind != "repository" {
 		t.Fatalf("missing err=%v want repository ErrNotFound", err)
+	}
+}
+
+func TestRepositoryCacheState(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		detected int
+		expected int
+		want     string
+	}{
+		{name: "current", detected: 16, expected: 16, want: "ready"},
+		{name: "older", detected: 15, expected: 16, want: "migration_required"},
+		{name: "newer", detected: 17, expected: 16, want: "binary_upgrade_required"},
+		{name: "unknown", detected: 0, expected: 16, want: "unknown"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := repositoryCacheState(tt.detected, tt.expected); got != tt.want {
+				t.Fatalf("repositoryCacheState(%d, %d) = %q, want %q", tt.detected, tt.expected, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -3185,6 +3218,9 @@ func (f *brokenStore) GetRepo(ctx context.Context, repoID string) (cache.Reposit
 }
 func (f *brokenStore) ListRepositories(context.Context) ([]cache.RepositoryBinding, error) {
 	return nil, nil
+}
+func (f *brokenStore) SchemaVersion(context.Context) (int, error) {
+	return cache.CurrentSchemaVersion(), nil
 }
 func (f *brokenStore) UpsertSourceGraph(context.Context, cache.SourceGraph) error { return nil }
 func (f *brokenStore) UpsertRecordGraph(context.Context, cache.RecordGraph) error { return nil }

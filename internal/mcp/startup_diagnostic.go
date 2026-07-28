@@ -9,9 +9,11 @@ import (
 )
 
 type StartupDiagnostic struct {
-	ErrorClass  string `json:"error_class"`
-	Message     string `json:"message"`
-	Remediation string `json:"remediation"`
+	ErrorClass            string `json:"error_class"`
+	Message               string `json:"message"`
+	Remediation           string `json:"remediation"`
+	DetectedSchemaVersion int    `json:"detected_schema_version,omitempty"`
+	ExpectedSchemaVersion int    `json:"expected_schema_version,omitempty"`
 }
 
 func StartupDiagnosticFromError(err error) StartupDiagnostic {
@@ -22,7 +24,13 @@ func StartupDiagnosticFromError(err error) StartupDiagnostic {
 	var lockErr cache.ErrLockContention
 	switch {
 	case errors.As(err, &schemaErr):
-		return StartupDiagnostic{ErrorClass: "schema_incompatible", Message: schemaErr.Compat.Message, Remediation: schemaErr.Compat.Remediation}
+		return StartupDiagnostic{
+			ErrorClass:            "schema_incompatible",
+			Message:               schemaErr.Compat.Message,
+			Remediation:           schemaErr.Compat.Remediation,
+			DetectedSchemaVersion: schemaErr.Compat.DetectedVersion,
+			ExpectedSchemaVersion: schemaErr.Compat.ExpectedVersion,
+		}
 	case errors.As(err, &lockErr):
 		return StartupDiagnostic{ErrorClass: "cache_lock_contention", Message: "cache writer lock is held", Remediation: "wait for the active gitcode-mcp operation to finish, then retry MCP startup"}
 	case os.IsPermission(err):
