@@ -115,7 +115,7 @@ Validate without mutating the remote by using dry-run:
 gitcode-mcp create-issue --dry-run --idempotency-key "ik-001" --title "Test" --body "Body"
 ```
 
-`create-issue --help` documents `--live`, `--dry-run`, `--idempotency-key`, `--title`, and `--body`. `--dry-run` validates without mutation, `--idempotency-key` supports audited retries, `--title` is required, and `--body` supplies the issue body.
+`create-issue --help` documents `--live`, `--dry-run`, `--idempotency-key`, `--title`, `--body`, and `--milestone`. `--dry-run` validates without mutation, `--idempotency-key` supports audited retries, `--title` is required, `--body` supplies the issue body, and `--milestone` accepts a remote id, stable `MILESTONE-<id>`, or exact title. `update-issue` accepts the same selector or `--clear-milestone`.
 
 Create a pull request through the same audited CLI write lifecycle:
 
@@ -133,10 +133,10 @@ The MCP server exposes the same audited live-write lifecycle for agent workflows
 
 | MCP tool | Use |
 |---|---|
-| `create_issue` | Create an issue with title, body, labels, and idempotency key |
+| `create_issue` | Create an issue with title, body, labels, optional milestone, and idempotency key |
 | `add_issue_comment` | Add a proposal or status comment to an issue |
 | `update_issue_comment` | Update an existing issue comment body |
-| `update_issue` | Update issue title, body, state, or labels |
+| `update_issue` | Update issue title, body, state, labels, or set/clear its milestone |
 | `create_pr` | Create a pull request with title, body, head, and base |
 | `update_pr` | Update pull request title, body, or state |
 | `list_milestones` | List repository milestones and refresh cached milestone records |

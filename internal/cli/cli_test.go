@@ -1820,6 +1820,31 @@ func TestSetIssueMilestoneDispatchesWriteRequest(t *testing.T) {
 	}
 }
 
+func TestIssueWritesDispatchMilestoneFlags(t *testing.T) {
+	spy := &spyService{}
+	factory := func(context.Context, string) (queryService, func() error, error) { return spy, nil, nil }
+	var stdout, stderr bytes.Buffer
+	code := executeWithFactory([]string{"create-issue", "--repo", "fixture-a", "--title", "Milestoned", "--milestone", "MILESTONE-1", "--dry-run", "--idempotency-key", "create-milestone-key"}, &stdout, &stderr, factory)
+	if code != 0 {
+		t.Fatalf("create code=%d stderr=%q", code, stderr.String())
+	}
+	createReq := spy.lastWriteRequest["CreateIssue"]
+	if createReq.Milestone != "MILESTONE-1" || createReq.ClearMilestone {
+		t.Fatalf("CreateIssue request=%#v", createReq)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = executeWithFactory([]string{"update-issue", "--repo", "fixture-a", "--number", "42", "--clear-milestone", "--dry-run", "--idempotency-key", "clear-milestone-key"}, &stdout, &stderr, factory)
+	if code != 0 {
+		t.Fatalf("update code=%d stderr=%q", code, stderr.String())
+	}
+	updateReq := spy.lastWriteRequest["UpdateIssue"]
+	if updateReq.Number != 42 || !updateReq.ClearMilestone || updateReq.Milestone != "" {
+		t.Fatalf("UpdateIssue request=%#v", updateReq)
+	}
+}
+
 func TestPublishReleaseParsesBodyFileAndAssets(t *testing.T) {
 	bodyPath := filepath.Join(t.TempDir(), "release.md")
 	if err := os.WriteFile(bodyPath, []byte("release body"), 0o600); err != nil {
@@ -2072,13 +2097,21 @@ func (s *spyService) RepositoryStatus(context.Context, service.RepositoryStatusR
 	s.called("RepositoryStatus")
 	return service.RepositoryStatus{RepoID: "fixture-a", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []service.RepositoryScope{service.RepositoryScopeIssues}, BindingState: "ready", AliasConflictState: "none", CacheState: "unknown", IndexState: "unknown"}, nil
 }
-func (s *spyService) CreateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error) {
+func (s *spyService) CreateIssue(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
 	s.called("CreateIssue")
-	return service.WriteCommandResult{Command: "create-issue", Status: "dry_run_valid", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
+	if s.lastWriteRequest == nil {
+		s.lastWriteRequest = map[string]service.WriteCommandRequest{}
+	}
+	s.lastWriteRequest["CreateIssue"] = req
+	return service.WriteCommandResult{Command: "create-issue", Status: "dry_run_valid", IdempotencyKey: firstNonEmpty(req.IdempotencyKey, "key"), GeneratedAt: time.Now()}, nil
 }
-func (s *spyService) UpdateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error) {
+func (s *spyService) UpdateIssue(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
 	s.called("UpdateIssue")
-	return service.WriteCommandResult{Command: "update-issue", Status: "dry_run_valid", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
+	if s.lastWriteRequest == nil {
+		s.lastWriteRequest = map[string]service.WriteCommandRequest{}
+	}
+	s.lastWriteRequest["UpdateIssue"] = req
+	return service.WriteCommandResult{Command: "update-issue", Status: "dry_run_valid", IdempotencyKey: firstNonEmpty(req.IdempotencyKey, "key"), GeneratedAt: time.Now()}, nil
 }
 func (s *spyService) CreatePR(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
 	s.called("CreatePR")

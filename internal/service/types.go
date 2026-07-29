@@ -863,6 +863,7 @@ type WriteCommandRequest struct {
 	Description    string    `json:"description,omitempty"`
 	DueOn          string    `json:"due_on,omitempty"`
 	Milestone      string    `json:"milestone,omitempty"`
+	ClearMilestone bool      `json:"clear_milestone,omitempty"`
 	Head           string    `json:"head,omitempty"`
 	Base           string    `json:"base,omitempty"`
 	State          string    `json:"state,omitempty"`
@@ -873,22 +874,30 @@ type WriteCommandRequest struct {
 }
 
 type WriteCommandResult struct {
-	Command           string    `json:"command"`
-	Status            string    `json:"status"`
-	RepoID            string    `json:"repo_id,omitempty"`
-	ID                string    `json:"id,omitempty"`
-	RemoteID          string    `json:"remote_id,omitempty"`
-	RemoteNumber      int       `json:"remote_number,omitempty"`
-	RemoteSlug        string    `json:"remote_slug,omitempty"`
-	RemoteRevision    string    `json:"remote_revision,omitempty"`
-	APIPath           string    `json:"api_path,omitempty"`
-	CachePath         string    `json:"cache_path,omitempty"`
-	BrowserURL        string    `json:"browser_url,omitempty"`
-	IdempotencyKey    string    `json:"idempotency_key"`
-	SourceFingerprint string    `json:"source_fingerprint,omitempty"`
-	Replayed          bool      `json:"replayed,omitempty"`
-	Evidence          string    `json:"evidence,omitempty"`
-	GeneratedAt       time.Time `json:"generated_at"`
+	Command           string                 `json:"command"`
+	Status            string                 `json:"status"`
+	RepoID            string                 `json:"repo_id,omitempty"`
+	ID                string                 `json:"id,omitempty"`
+	RemoteID          string                 `json:"remote_id,omitempty"`
+	RemoteNumber      int                    `json:"remote_number,omitempty"`
+	RemoteSlug        string                 `json:"remote_slug,omitempty"`
+	RemoteRevision    string                 `json:"remote_revision,omitempty"`
+	APIPath           string                 `json:"api_path,omitempty"`
+	CachePath         string                 `json:"cache_path,omitempty"`
+	BrowserURL        string                 `json:"browser_url,omitempty"`
+	IdempotencyKey    string                 `json:"idempotency_key"`
+	SourceFingerprint string                 `json:"source_fingerprint,omitempty"`
+	Replayed          bool                   `json:"replayed,omitempty"`
+	Milestone         *WriteMilestoneReceipt `json:"milestone,omitempty"`
+	Evidence          string                 `json:"evidence,omitempty"`
+	GeneratedAt       time.Time              `json:"generated_at"`
+}
+
+type WriteMilestoneReceipt struct {
+	ID       string `json:"id,omitempty"`
+	RemoteID string `json:"remote_id,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Cleared  bool   `json:"cleared,omitempty"`
 }
 
 type MilestoneRecord struct {

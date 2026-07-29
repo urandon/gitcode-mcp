@@ -199,6 +199,7 @@ type options struct {
 	description    string
 	dueOn          string
 	milestone      string
+	clearMilestone bool
 	state          string
 	label          string
 	labels         string
@@ -605,6 +606,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.description, "description", "", "description")
 	flags.StringVar(&opts.dueOn, "due-on", "", "due date YYYY-MM-DD")
 	flags.StringVar(&opts.milestone, "milestone", "", "milestone id or title")
+	flags.BoolVar(&opts.clearMilestone, "clear-milestone", false, "clear issue milestone")
 	flags.StringVar(&opts.state, "state", "", "state")
 	flags.StringVar(&opts.label, "label", "", "label")
 	flags.StringVar(&opts.labels, "labels", "", "comma-separated labels")
@@ -2708,7 +2710,7 @@ func writeRequest(opts options) service.WriteCommandRequest {
 	if !opts.dryRun {
 		mode = service.WriteModeLive
 	}
-	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, Number: opts.number, CommentID: opts.commentID, DiscussionID: opts.discussionID, ParentID: opts.parentID, Slug: opts.slug, Path: opts.path, Line: opts.line, StartLine: opts.startLine, EndLine: opts.endLine, Position: opts.position, Sha: opts.sha, Title: opts.title, Body: opts.body, Description: opts.description, DueOn: opts.dueOn, Milestone: opts.milestone, Head: opts.head, Base: opts.base, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
+	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, Number: opts.number, CommentID: opts.commentID, DiscussionID: opts.discussionID, ParentID: opts.parentID, Slug: opts.slug, Path: opts.path, Line: opts.line, StartLine: opts.startLine, EndLine: opts.endLine, Position: opts.position, Sha: opts.sha, Title: opts.title, Body: opts.body, Description: opts.description, DueOn: opts.dueOn, Milestone: opts.milestone, ClearMilestone: opts.clearMilestone, Head: opts.head, Base: opts.base, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
 }
 
 func publishReleaseRequest(opts options) (service.PublishReleaseRequest, error) {
@@ -2941,6 +2943,9 @@ func renderDiffText(w io.Writer, result service.DiffSnapshotResult) {
 
 func renderWriteText(w io.Writer, result service.WriteCommandResult) {
 	fmt.Fprintf(w, "%s: %s id=%s idempotency_key=%s evidence=%s\n", result.Command, result.Status, result.ID, result.IdempotencyKey, result.Evidence)
+	if result.Milestone != nil {
+		fmt.Fprintf(w, "milestone: id=%s remote_id=%s title=%s cleared=%t\n", result.Milestone.ID, result.Milestone.RemoteID, result.Milestone.Title, result.Milestone.Cleared)
+	}
 	if result.RemoteSlug != "" {
 		fmt.Fprintf(w, "remote_slug: %s\n", result.RemoteSlug)
 	}
@@ -3881,21 +3886,21 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH cache database path")
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
 	case "create-issue":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --title TITLE [--body BODY] [--state STATE] [--labels A,B] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --title TITLE [--body BODY] [--labels A,B] [--milestone ID_OR_TITLE] [--idempotency-key KEY]\n\n", command)
 		fmt.Fprintln(w, "Create a new issue. Executes live by default; use --dry-run for no-mutation validation.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --title TITLE       issue title (required)")
 		fmt.Fprintln(w, "  --body BODY         issue body")
-		fmt.Fprintln(w, "  --state STATE       issue state")
 		fmt.Fprintln(w, "  --labels A,B        comma-separated labels")
+		fmt.Fprintln(w, "  --milestone VALUE   milestone remote id, stable MILESTONE-id, or exact title")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
 		fmt.Fprintln(w, "  --live              compatibility alias for live write")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "update-issue":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --number N [--title TITLE] [--body BODY] [--state open|closed] [--labels A,B] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --number N [--title TITLE] [--body BODY] [--state open|closed] [--labels A,B] [--milestone ID_OR_TITLE | --clear-milestone] [--idempotency-key KEY]\n\n", command)
 		fmt.Fprintln(w, "Update an existing issue. Executes live by default; use --dry-run for no-mutation validation.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
@@ -3904,6 +3909,8 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --body BODY         updated body")
 		fmt.Fprintln(w, "  --state STATE       updated state: open or closed")
 		fmt.Fprintln(w, "  --labels A,B        comma-separated labels")
+		fmt.Fprintln(w, "  --milestone VALUE   milestone remote id, stable MILESTONE-id, or exact title")
+		fmt.Fprintln(w, "  --clear-milestone   clear the current milestone; conflicts with --milestone")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
 		fmt.Fprintln(w, "  --live              compatibility alias for live write")

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -798,6 +799,9 @@ func TestSetIssueMilestoneVerifiesReadbackWhenPatchResponseIsNull(t *testing.T) 
 	if result.Status != "succeeded" || result.RemoteNumber != 1 {
 		t.Fatalf("result=%#v", result)
 	}
+	if result.Milestone == nil || result.Milestone.ID != "MILESTONE-576480" || result.Milestone.RemoteID != "576480" || result.Milestone.Title != "RAG indexer MVP" {
+		t.Fatalf("milestone receipt=%#v", result.Milestone)
+	}
 	if client.lastListMilestonesRequest.PerPage != 100 {
 		t.Fatalf("list milestone request=%#v", client.lastListMilestonesRequest)
 	}
@@ -831,11 +835,204 @@ func TestClearIssueMilestoneSendsNullAndVerifiesReadback(t *testing.T) {
 	if result.Status != "succeeded" || result.RemoteNumber != 1 {
 		t.Fatalf("result=%#v", result)
 	}
+	if result.Milestone == nil || !result.Milestone.Cleared {
+		t.Fatalf("milestone receipt=%#v", result.Milestone)
+	}
 	if string(client.lastUpdateIssueRequest.Milestone) != "null" {
 		t.Fatalf("milestone payload=%s", string(client.lastUpdateIssueRequest.Milestone))
 	}
 	if client.issueCalls != 1 {
 		t.Fatalf("readback calls=%d, want 1", client.issueCalls)
+	}
+}
+
+func TestCreateIssueWithMilestoneValidatesBeforeMutationAndReplaysReceipt(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	updatedAt := time.Date(2026, 7, 28, 18, 0, 0, 0, time.UTC)
+	milestone := gitcode.Milestone{RemoteID: "1", SourceID: "MILESTONE-1", Title: "Release 1", Status: "open"}
+	client := &fakeGitCodeClient{
+		milestonesByID: map[int]gitcode.Milestone{1: milestone},
+		createIssueResult: gitcode.WriteResult[gitcode.Issue]{
+			Record:       gitcode.Issue{ID: "101", Number: 101, Title: "Milestoned issue", State: "open", UpdatedAt: updatedAt},
+			Confirmed:    true,
+			Operation:    "CreateIssue",
+			RemoteID:     "101",
+			RemoteNumber: 101,
+			ConfirmedAt:  updatedAt,
+		},
+		issuesByNumber: map[int]gitcode.Issue{
+			101: {ID: "101", Number: 101, Title: "Milestoned issue", State: "open", Milestone: &milestone, UpdatedAt: updatedAt},
+		},
+	}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "Milestoned issue", Milestone: "MILESTONE-1", IdempotencyKey: "create-issue-milestone-key"}
+
+	result, err := svc.CreateIssue(ctx, req)
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if client.getMilestoneCalls != 1 || client.createIssueCalls != 1 || client.issueCalls != 1 {
+		t.Fatalf("calls milestone=%d create=%d issue=%d", client.getMilestoneCalls, client.createIssueCalls, client.issueCalls)
+	}
+	if string(client.lastCreateIssueRequest.Milestone) != "1" {
+		t.Fatalf("create milestone payload=%s", string(client.lastCreateIssueRequest.Milestone))
+	}
+	if result.Milestone == nil || result.Milestone.ID != "MILESTONE-1" || result.Milestone.RemoteID != "1" || result.Milestone.Title != "Release 1" || result.Milestone.Cleared {
+		t.Fatalf("milestone receipt=%#v", result.Milestone)
+	}
+	if _, err := store.GetRecord(ctx, "fixture-a", "ISSUE-101"); err != nil {
+		t.Fatalf("cached issue: %v", err)
+	}
+	links, err := store.ListLinks(ctx, cache.LinkFilter{RepoID: "fixture-a", SourceID: "ISSUE-101"})
+	if err != nil || len(links) != 1 || links[0].TargetID != "MILESTONE-1" || links[0].Kind != "milestone" {
+		t.Fatalf("milestone links=%#v err=%v", links, err)
+	}
+
+	replay, err := svc.CreateIssue(ctx, req)
+	if err != nil {
+		t.Fatalf("CreateIssue replay: %v", err)
+	}
+	if !replay.Replayed || replay.Status != "already_applied" || replay.Milestone == nil || replay.Milestone.ID != "MILESTONE-1" || replay.Milestone.RemoteID != "1" || replay.Milestone.Title != "Release 1" {
+		t.Fatalf("replay=%#v", replay)
+	}
+	if client.getMilestoneCalls != 1 || client.createIssueCalls != 1 || client.issueCalls != 1 {
+		t.Fatalf("replay performed remote calls: milestone=%d create=%d issue=%d", client.getMilestoneCalls, client.createIssueCalls, client.issueCalls)
+	}
+}
+
+func TestCreateIssueInvalidMilestoneFailsBeforeMutation(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{getMilestoneErr: gitcode.ErrRemoteNotFound{Alias: "milestone:999", Endpoint: "/milestones/999"}}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+
+	_, err = svc.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "Invalid milestone", Milestone: "999", IdempotencyKey: "invalid-milestone-key"})
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) {
+		t.Fatalf("error=%T %v, want ErrWriteFailure", err, err)
+	}
+	if client.getMilestoneCalls != 1 || client.createIssueCalls != 0 {
+		t.Fatalf("invalid milestone calls milestone=%d create=%d", client.getMilestoneCalls, client.createIssueCalls)
+	}
+}
+
+func TestCreateIssueAmbiguousMilestoneTitleFailsBeforeMutation(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{listMilestonesResult: gitcode.Page[gitcode.Milestone]{Items: []gitcode.Milestone{
+		{RemoteID: "1", Title: "Release"},
+		{RemoteID: "2", Title: "release"},
+	}}}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+
+	_, err = svc.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "Ambiguous milestone", Milestone: "Release", IdempotencyKey: "ambiguous-milestone-key"})
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || client.createIssueCalls != 0 {
+		t.Fatalf("error=%T %v create_calls=%d", err, err, client.createIssueCalls)
+	}
+}
+
+func TestCreateIssueMilestoneReadbackMismatchFailsConfirmation(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	milestone := gitcode.Milestone{RemoteID: "1", SourceID: "MILESTONE-1", Title: "Release 1"}
+	client := &fakeGitCodeClient{
+		milestonesByID: map[int]gitcode.Milestone{1: milestone},
+		createIssueResult: gitcode.WriteResult[gitcode.Issue]{
+			Record:    gitcode.Issue{ID: "102", Number: 102, Title: "Mismatch"},
+			Confirmed: true, Operation: "CreateIssue", RemoteID: "102", RemoteNumber: 102,
+		},
+		issuesByNumber: map[int]gitcode.Issue{102: {ID: "102", Number: 102, Title: "Mismatch"}},
+	}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+
+	_, err = svc.CreateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "Mismatch", Milestone: "1", IdempotencyKey: "mismatch-milestone-key"})
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_provider_error" {
+		t.Fatalf("error=%T %v", err, err)
+	}
+	if client.createIssueCalls != 1 || client.issueCalls != 1 {
+		t.Fatalf("calls create=%d readback=%d", client.createIssueCalls, client.issueCalls)
+	}
+}
+
+func TestUpdateIssueClearMilestoneReturnsClearedReceipt(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	updatedAt := time.Date(2026, 7, 28, 18, 15, 0, 0, time.UTC)
+	if err := store.UpsertRecordGraph(ctx, cache.RecordGraph{
+		Record:           cache.Record{RepoID: "fixture-a", ID: "ISSUE-1", Type: "issue", Path: "issues/1.md", Title: "Issue 1", Status: "open", ContentHash: "with-milestone", Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: "1", CreatedAt: updatedAt, UpdatedAt: updatedAt},
+		RelatedRecords:   []cache.Record{{RepoID: "fixture-a", ID: "MILESTONE-1", Type: "milestone", Path: "milestones/1.md", Title: "Release 1", Status: "open", ContentHash: "milestone-1", Provenance: cache.ProvenanceRemote, RemoteType: "milestone", RemoteID: "1", CreatedAt: updatedAt, UpdatedAt: updatedAt}},
+		ReplaceLinkKinds: []string{"milestone"},
+		Links:            []cache.Link{{TargetID: "MILESTONE-1", Kind: "milestone", Text: "Release 1"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeGitCodeClient{
+		updateIssueResult: gitcode.WriteResult[gitcode.Issue]{Record: gitcode.Issue{ID: "1", Number: 1, Title: "Issue 1", State: "open", UpdatedAt: updatedAt}, Confirmed: true, Operation: "UpdateIssue", RemoteID: "1", RemoteNumber: 1, ConfirmedAt: updatedAt},
+		issuesByNumber:    map[int]gitcode.Issue{1: {ID: "1", Number: 1, Title: "Issue 1", State: "open", UpdatedAt: updatedAt}},
+	}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+
+	result, err := svc.UpdateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 1, ClearMilestone: true, IdempotencyKey: "update-clear-milestone-key"})
+	if err != nil {
+		t.Fatalf("UpdateIssue clear milestone: %v", err)
+	}
+	if string(client.lastUpdateIssueRequest.Milestone) != "null" || result.Milestone == nil || !result.Milestone.Cleared {
+		t.Fatalf("request=%#v result=%#v", client.lastUpdateIssueRequest, result)
+	}
+	links, err := store.ListLinks(ctx, cache.LinkFilter{RepoID: "fixture-a", SourceID: "ISSUE-1"})
+	if err != nil || len(links) != 0 {
+		t.Fatalf("cleared milestone links=%#v err=%v", links, err)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", "update-clear-milestone-key")
+	if err != nil || entry == nil || entry.RequestMetadata["method"] != "PATCH" || entry.RequestMetadata["milestone_cleared"] != "true" {
+		t.Fatalf("audit entry=%#v err=%v", entry, err)
+	}
+	replay, err := svc.UpdateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 1, ClearMilestone: true, IdempotencyKey: "update-clear-milestone-key"})
+	if err != nil || !replay.Replayed || replay.Milestone == nil || !replay.Milestone.Cleared || client.updateIssueCalls != 1 {
+		t.Fatalf("replay=%#v err=%v update_calls=%d", replay, err, client.updateIssueCalls)
+	}
+}
+
+func TestUpdateIssueRejectsMilestoneAndClearMilestone(t *testing.T) {
+	ctx := context.Background()
+	svc := seededSyncService(t, ctx, &fakeGitCodeClient{})
+	_, err := svc.UpdateIssue(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeDryRun, Number: 1, Milestone: "1", ClearMilestone: true})
+	var invalid ErrInvalidQuery
+	if !errors.As(err, &invalid) || invalid.Field != "milestone" {
+		t.Fatalf("error=%T %v, want milestone ErrInvalidQuery", err, err)
 	}
 }
 
@@ -2841,6 +3038,10 @@ type fakeGitCodeClient struct {
 	listMilestonesResult         gitcode.Page[gitcode.Milestone]
 	createMilestoneResult        gitcode.WriteResult[gitcode.Milestone]
 	updateMilestoneResult        gitcode.WriteResult[gitcode.Milestone]
+	milestonesByID               map[int]gitcode.Milestone
+	getMilestoneErr              error
+	getMilestoneCalls            int
+	lastGetMilestoneRequest      gitcode.MilestoneRequest
 	createPRCommentResult        gitcode.WriteResult[gitcode.PRComment]
 	createPRReviewCommentResult  gitcode.WriteResult[gitcode.PRComment]
 	replyPRReviewCommentResult   gitcode.WriteResult[gitcode.PRComment]
@@ -3119,8 +3320,21 @@ func (f *fakeGitCodeClient) ListMilestones(_ context.Context, req gitcode.Milest
 	return f.listMilestonesResult, nil
 }
 
-func (f *fakeGitCodeClient) GetMilestone(context.Context, gitcode.MilestoneRequest) (gitcode.Milestone, error) {
-	return gitcode.Milestone{}, nil
+func (f *fakeGitCodeClient) GetMilestone(_ context.Context, req gitcode.MilestoneRequest) (gitcode.Milestone, error) {
+	f.getMilestoneCalls++
+	f.lastGetMilestoneRequest = req
+	if f.getMilestoneErr != nil {
+		return gitcode.Milestone{}, f.getMilestoneErr
+	}
+	if milestone, ok := f.milestonesByID[req.ID]; ok {
+		return milestone, nil
+	}
+	for _, milestone := range f.listMilestonesResult.Items {
+		if milestone.RemoteID == strconv.Itoa(req.ID) {
+			return milestone, nil
+		}
+	}
+	return gitcode.Milestone{RemoteID: strconv.Itoa(req.ID), SourceID: "MILESTONE-" + strconv.Itoa(req.ID), Title: "Milestone " + strconv.Itoa(req.ID)}, nil
 }
 
 func (f *fakeGitCodeClient) CreateMilestone(_ context.Context, req gitcode.MilestoneWriteRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Milestone], error) {

@@ -22,6 +22,7 @@ gitcode-mcp create-issue \
   --title "Test issue" \
   --body "This is a test issue body." \
   --labels bug,needs-triage \
+  --milestone MILESTONE-1 \
   --dry-run
 ```
 
@@ -34,10 +35,13 @@ gitcode-mcp update-issue \
   --repo example-owner/example-repo \
   --number 42 \
   --state closed \
+  --clear-milestone \
   --dry-run
 ```
 
 Expected: reports what would be updated without making any mutation.
+`--milestone ID_OR_TITLE` assigns a milestone; `--clear-milestone` clears it,
+and the two flags are mutually exclusive.
 
 ### Create pull request / merge request (dry-run)
 
@@ -75,6 +79,11 @@ gitcode-mcp set-issue-milestone \
 ```
 
 Expected: validates issue milestone assignment. Live `set-issue-milestone` and `clear-issue-milestone` verify the result through issue readback because GitCode can return a stale or null milestone in the immediate PATCH response.
+
+The generic `create-issue` and `update-issue` commands use the same resolver and
+readback contract. A milestone selector may be a numeric remote id, stable
+`MILESTONE-<id>`, or exact title. Live receipts include the resolved stable id,
+remote id, and title; clear operations include an explicit cleared marker.
 
 ### Create wiki page (dry-run)
 

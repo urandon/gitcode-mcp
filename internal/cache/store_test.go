@@ -99,6 +99,35 @@ func TestIssueCommentSyncQueueRoundTripAndReplaceComments(t *testing.T) {
 	}
 }
 
+func TestRecordGraphReplacesLinksByKind(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	now := time.Date(2026, 7, 28, 18, 30, 0, 0, time.UTC)
+	issue := Record{RepoID: "fixture-a", ID: "ISSUE-1", Type: "issue", Path: "issues/1.md", Title: "Issue", Status: "open", ContentHash: "issue-1", Provenance: ProvenanceRemote, RemoteType: "issue", RemoteID: "1", CreatedAt: now, UpdatedAt: now}
+	milestone := Record{RepoID: "fixture-a", ID: "MILESTONE-1", Type: "milestone", Path: "milestones/1.md", Title: "Release 1", Status: "open", ContentHash: "milestone-1", Provenance: ProvenanceRemote, RemoteType: "milestone", RemoteID: "1", CreatedAt: now, UpdatedAt: now}
+	if err := store.UpsertRecordGraph(ctx, RecordGraph{
+		Record:           issue,
+		RelatedRecords:   []Record{milestone},
+		ReplaceLinkKinds: []string{"milestone"},
+		Links:            []Link{{TargetID: "MILESTONE-1", Kind: "milestone", Text: "Release 1"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	links, err := store.ListLinks(ctx, LinkFilter{RepoID: "fixture-a", SourceID: "ISSUE-1"})
+	if err != nil || len(links) != 1 || links[0].TargetID != "MILESTONE-1" {
+		t.Fatalf("links=%#v err=%v", links, err)
+	}
+	issue.ContentHash = "issue-cleared"
+	if err := store.UpsertRecordGraph(ctx, RecordGraph{Record: issue, ReplaceLinkKinds: []string{"milestone"}}); err != nil {
+		t.Fatal(err)
+	}
+	links, err = store.ListLinks(ctx, LinkFilter{RepoID: "fixture-a", SourceID: "ISSUE-1"})
+	if err != nil || len(links) != 0 {
+		t.Fatalf("cleared links=%#v err=%v", links, err)
+	}
+}
+
 func TestRecordCommentsPageUpsertAndSuccessfulReconciliation(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)

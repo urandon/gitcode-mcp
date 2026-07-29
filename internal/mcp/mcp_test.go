@@ -38,6 +38,16 @@ func TestIssueUpdateStateSchemaUsesPublicValues(t *testing.T) {
 	if !reflect.DeepEqual(state.Enum, []string{"open", "closed"}) {
 		t.Fatalf("update_issue state enum=%v, want [open closed]", state.Enum)
 	}
+	if milestone, ok := schema.Properties["milestone"]; !ok || milestone.Type != "string" {
+		t.Fatalf("update_issue milestone schema=%#v present=%t", milestone, ok)
+	}
+	if clear, ok := schema.Properties["clear_milestone"]; !ok || clear.Type != "boolean" {
+		t.Fatalf("update_issue clear_milestone schema=%#v present=%t", clear, ok)
+	}
+	createSchema := writeToolInputSchema("create_issue")
+	if milestone, ok := createSchema.Properties["milestone"]; !ok || milestone.Type != "string" {
+		t.Fatalf("create_issue milestone schema=%#v present=%t", milestone, ok)
+	}
 }
 
 func TestMCPRepoScopedDuplicateAlias(t *testing.T) {
@@ -1411,10 +1421,10 @@ func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 		return write
 	}
 
-	call("create_issue", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "title": "new issue", "body": "issue body", "labels": []string{"bug"}, "idempotency_key": "issue-create-key"})
+	call("create_issue", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "title": "new issue", "body": "issue body", "labels": []string{"bug"}, "milestone": "MILESTONE-1", "idempotency_key": "issue-create-key"})
 	call("add_issue_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 16, "body": "proposal", "idempotency_key": "issue-comment-key"})
 	call("update_issue_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "comment_id": "c16", "number": 16, "body": "updated\ncomment", "idempotency_key": "issue-comment-update-key"})
-	call("update_issue", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 16, "title": "updated", "state": "closed", "labels": []string{"enhancement"}, "idempotency_key": "issue-update-key"})
+	call("update_issue", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 16, "title": "updated", "state": "closed", "labels": []string{"enhancement"}, "clear_milestone": true, "idempotency_key": "issue-update-key"})
 	call("create_pr", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "title": "PR", "body": "body", "head": "topic", "base": "main", "idempotency_key": "create-pr-key"})
 	call("update_pr", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "body": "new body", "idempotency_key": "update-pr-key"})
 	call("add_pr_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "body": "tested", "idempotency_key": "pr-comment-key"})
@@ -1437,7 +1447,7 @@ func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 		}
 		return req
 	}
-	if req := assertReq("create-issue"); req.Title != "new issue" || req.Body != "issue body" || len(req.Labels) != 1 || req.Labels[0] != "bug" {
+	if req := assertReq("create-issue"); req.Title != "new issue" || req.Body != "issue body" || len(req.Labels) != 1 || req.Labels[0] != "bug" || req.Milestone != "MILESTONE-1" {
 		t.Fatalf("create-issue req=%#v", req)
 	}
 	if req := assertReq("add-comment"); req.Number != 16 || req.Body != "proposal" {
@@ -1446,7 +1456,7 @@ func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 	if req := assertReq("update-comment"); req.Number != 16 || req.CommentID != "c16" || req.Body != "updated\ncomment" {
 		t.Fatalf("update-comment req=%#v", req)
 	}
-	if req := assertReq("update-issue"); req.Number != 16 || req.Title != "updated" || req.State != "closed" || len(req.Labels) != 1 || req.Labels[0] != "enhancement" {
+	if req := assertReq("update-issue"); req.Number != 16 || req.Title != "updated" || req.State != "closed" || len(req.Labels) != 1 || req.Labels[0] != "enhancement" || !req.ClearMilestone {
 		t.Fatalf("update-issue req=%#v", req)
 	}
 	if req := assertReq("create-pr"); req.Title != "PR" || req.Head != "topic" || req.Base != "main" {

@@ -78,6 +78,11 @@ func Success(repoID, key, operation, recordID, remoteType, remoteID, payloadHash
 	return entry(repoID, key, operation, recordID, remoteType, remoteID, StatusSucceeded, message, payloadHash, createdAt)
 }
 
+func WithRequestMetadata(entry cache.AuditTrailEntry, metadata map[string]string) cache.AuditTrailEntry {
+	entry.RequestMetadata = sanitizedMetadata(metadata)
+	return entry
+}
+
 func LiveCreateIssueConfirmation(input ConfirmationInput) (cache.AuditTrailEntry, error) {
 	input.Command = normalizeCommand(input.Command)
 	input.Mode = strings.TrimSpace(input.Mode)
@@ -116,16 +121,20 @@ func normalizeCommand(command string) string {
 
 func sanitizedMetadata(metadata map[string]string) map[string]string {
 	allowed := map[string]bool{
-		"method":             true,
-		"request_id":         true,
-		"idempotency_key":    true,
-		"remote_alias":       true,
-		"remote_number":      true,
-		"remote_type":        true,
-		"provider":           true,
-		"provider_mode":      true,
-		"response_status":    true,
-		"source_fingerprint": true,
+		"method":              true,
+		"request_id":          true,
+		"idempotency_key":     true,
+		"remote_alias":        true,
+		"remote_number":       true,
+		"remote_type":         true,
+		"provider":            true,
+		"provider_mode":       true,
+		"response_status":     true,
+		"source_fingerprint":  true,
+		"milestone_id":        true,
+		"milestone_remote_id": true,
+		"milestone_title":     true,
+		"milestone_cleared":   true,
 	}
 	out := map[string]string{}
 	for key, value := range metadata {

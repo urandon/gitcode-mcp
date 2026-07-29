@@ -1133,13 +1133,18 @@ func writeJSON[T any](ctx context.Context, c *HTTPClient, method, endpoint, oper
 
 func createIssuePayload(req CreateIssueRequest) any {
 	payload := struct {
-		Title  string           `json:"title"`
-		Body   string           `json:"body,omitempty"`
-		Labels *json.RawMessage `json:"labels,omitempty"`
+		Title     string           `json:"title"`
+		Body      string           `json:"body,omitempty"`
+		Labels    *json.RawMessage `json:"labels,omitempty"`
+		Milestone *json.RawMessage `json:"milestone,omitempty"`
 	}{Title: req.Title, Body: req.Body}
 	if len(req.Labels) > 0 {
 		labels := req.Labels
 		payload.Labels = &labels
+	}
+	if len(req.Milestone) > 0 {
+		milestone := req.Milestone
+		payload.Milestone = &milestone
 	}
 	return payload
 }
