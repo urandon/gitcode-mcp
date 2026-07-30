@@ -131,6 +131,17 @@ var writeCapabilities = []Capability{
 		MCP:            enabled(),
 	},
 	{
+		ID:             "list_push_remote_mirrors",
+		Category:       CategoryWrite,
+		Safety:         SafetyReadOnly,
+		CLIName:        "push-mirrors",
+		MCPName:        "list_push_remote_mirrors",
+		ServiceCommand: "push-mirrors",
+		Description:    "List live repository push mirrors and refresh sanitized cached records.",
+		CLI:            enabled(),
+		MCP:            enabled(),
+	},
+	{
 		ID:             "create_milestone",
 		Category:       CategoryWrite,
 		Safety:         SafetyAuditedWrite,

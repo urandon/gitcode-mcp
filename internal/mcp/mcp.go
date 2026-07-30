@@ -51,6 +51,7 @@ type serviceInterface interface {
 	CreatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	ListMilestones(context.Context, service.MilestoneListRequest) (service.MilestoneListResult, error)
+	ListPushRemoteMirrors(context.Context, service.PushMirrorListRequest) (service.PushMirrorListResult, error)
 	CreateMilestone(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdateMilestone(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	SetIssueMilestone(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)

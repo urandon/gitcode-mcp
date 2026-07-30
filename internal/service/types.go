@@ -930,6 +930,34 @@ type MilestoneListResult struct {
 	GeneratedAt time.Time         `json:"generated_at"`
 }
 
+type PushMirrorRecord struct {
+	ID                     string    `json:"id"`
+	RemoteID               string    `json:"remote_id"`
+	ProjectID              string    `json:"project_id,omitempty"`
+	Destination            string    `json:"destination"`
+	Force                  bool      `json:"force"`
+	Private                bool      `json:"is_private"`
+	UpdateStatus           string    `json:"update_status,omitempty"`
+	NumberOfFailures       int       `json:"number_of_failures"`
+	Message                string    `json:"message,omitempty"`
+	CreatedAt              time.Time `json:"created_at,omitempty"`
+	LastUpdateAt           time.Time `json:"last_update_at,omitempty"`
+	LastSuccessfulUpdateAt time.Time `json:"last_successful_update_at,omitempty"`
+}
+
+type PushMirrorListRequest struct {
+	RepoID string `json:"repo_id,omitempty"`
+	Repo   string `json:"repo,omitempty"`
+}
+
+type PushMirrorListResult struct {
+	RepoID      string             `json:"repo_id"`
+	Mirrors     []PushMirrorRecord `json:"mirrors"`
+	Count       int                `json:"count"`
+	Evidence    string             `json:"evidence,omitempty"`
+	GeneratedAt time.Time          `json:"generated_at"`
+}
+
 type PublishReleaseRequest struct {
 	RepoID         string             `json:"repo_id,omitempty"`
 	Repo           string             `json:"repo,omitempty"`

@@ -51,6 +51,7 @@ var commands = []string{
 	"create-pr", "create-mr",
 	"update-pr",
 	"milestones",
+	"push-mirrors",
 	"create-milestone",
 	"update-milestone",
 	"set-issue-milestone",
@@ -112,6 +113,7 @@ type queryService interface {
 	CreatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	ListMilestones(context.Context, service.MilestoneListRequest) (service.MilestoneListResult, error)
+	ListPushRemoteMirrors(context.Context, service.PushMirrorListRequest) (service.PushMirrorListResult, error)
 	CreateMilestone(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdateMilestone(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	SetIssueMilestone(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
@@ -450,7 +452,7 @@ func resolveLiveCredential(ctx context.Context, eff config.EffectiveConfig, deps
 
 func isLiveStartupCommand(command string) bool {
 	switch command {
-	case "sync", "create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "milestones", "create-milestone", "update-milestone", "set-issue-milestone", "clear-issue-milestone", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "reply-pr-review-comment", "update-comment", "add-label", "publish-release", "doctor":
+	case "sync", "create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "milestones", "push-mirrors", "create-milestone", "update-milestone", "set-issue-milestone", "clear-issue-milestone", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "reply-pr-review-comment", "update-comment", "add-label", "publish-release", "doctor":
 		return true
 	default:
 		return false
@@ -1903,6 +1905,12 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, renderMilestonesText)
+	case "push-mirrors":
+		result, err := svc.ListPushRemoteMirrors(ctx, service.PushMirrorListRequest{RepoID: opts.repo, Repo: opts.repo})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, renderPushMirrorsText)
 	case "create-milestone":
 		return dispatchWrite(ctx, svc.CreateMilestone, command, opts, stdout, stderr, plan)
 	case "update-milestone":
@@ -2967,6 +2975,13 @@ func renderMilestonesText(w io.Writer, result service.MilestoneListResult) {
 	}
 }
 
+func renderPushMirrorsText(w io.Writer, result service.PushMirrorListResult) {
+	fmt.Fprintf(w, "push-mirrors: repo_id=%s count=%d evidence=%s\n", result.RepoID, result.Count, result.Evidence)
+	for _, mirror := range result.Mirrors {
+		fmt.Fprintf(w, "%s %s status=%s failures=%d private=%t force=%t destination=%s\n", mirror.ID, mirror.RemoteID, mirror.UpdateStatus, mirror.NumberOfFailures, mirror.Private, mirror.Force, mirror.Destination)
+	}
+}
+
 func renderPublishReleaseText(w io.Writer, result service.PublishReleaseResult) {
 	fmt.Fprintf(w, "%s: %s repo_id=%s tag=%s release_status=%d assets=%d idempotency_key=%s evidence=%s\n", result.Command, result.Status, result.RepoID, result.Tag, result.ReleaseStatus, len(result.AssetLinks), result.IdempotencyKey, result.Evidence)
 }
@@ -3924,6 +3939,15 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --state STATE       milestone state filter")
 		fmt.Fprintln(w, "  --per-page N        records per page")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "push-mirrors":
+		fmt.Fprintln(w, "Usage: gitcode-mcp push-mirrors --repo REPO")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "List repository push mirrors and refresh sanitized cached records.")
+		fmt.Fprintln(w, "Credentials, query parameters, and fragments are removed from mirror destinations.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "create-milestone":

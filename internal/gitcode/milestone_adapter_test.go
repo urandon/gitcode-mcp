@@ -225,6 +225,12 @@ func TestMilestone004MatrixGatingDeferred(t *testing.T) {
 					Message:       "Comment reads are deferred",
 				},
 			},
+			ProductAreaPushMirrors: {
+				Area:     ProductAreaPushMirrors,
+				Status:   SupportStatusSupported,
+				Route:    RouteFamilyAPIV5,
+				Evidence: EvidenceClassOpenAPI,
+			},
 		},
 	}
 	cfg := ProviderConfig{Mode: ProviderModeLive, LiveAllowed: true, Token: "token", BaseURL: "https://api.example.com"}

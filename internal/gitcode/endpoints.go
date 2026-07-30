@@ -127,6 +127,10 @@ func listMilestonesEndpoint(owner, repo string) string {
 	return endpointPath("/api/v5/repos/%s/%s/milestones", owner, repo)
 }
 
+func listPushRemoteMirrorsEndpoint(owner, repo string) string {
+	return endpointPath("/api/v5/repos/%s/%s/push_remote_mirrors", owner, repo)
+}
+
 func getMilestoneEndpoint(owner, repo string, id int) string {
 	return endpointPath("/api/v5/repos/%s/%s/milestones/%d", owner, repo, id)
 }

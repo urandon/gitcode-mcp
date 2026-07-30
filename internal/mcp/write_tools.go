@@ -67,6 +67,8 @@ func writeToolInputSchema(id string) inputSchema {
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "title": {Type: "string", Description: "Pull request title."}, "body": {Type: "string", Description: "Pull request body."}, "state": {Type: "string", Description: "Pull request state."}}), Required: []string{"repo_id", "write_mode", "number"}}
 	case "list_milestones":
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"state": {Type: "string", Description: "Milestone state filter.", Enum: []string{"open", "closed"}}, "per_page": {Type: "integer", Description: "Records per page.", Minimum: float64Ptr(1), Maximum: float64Ptr(100)}}), Required: []string{"repo_id"}}
+	case "list_push_remote_mirrors":
+		return inputSchema{Type: "object", Properties: writeSchemaProps(nil), Required: []string{"repo_id"}}
 	case "create_milestone":
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"title": {Type: "string", Description: "Milestone title.", MinLength: 1}, "description": {Type: "string", Description: "Milestone description."}, "due_on": {Type: "string", Description: "Due date YYYY-MM-DD.", MinLength: 1}, "state": {Type: "string", Description: "Milestone state.", Enum: []string{"open", "closed"}}}), Required: []string{"repo_id", "write_mode", "title", "due_on"}}
 	case "update_milestone":
@@ -112,6 +114,8 @@ func (s *Server) writeToolHandler(cap capability.Capability) toolHandler {
 		return s.callUpdatePR
 	case "list_milestones":
 		return s.callListMilestones
+	case "list_push_remote_mirrors":
+		return s.callListPushRemoteMirrors
 	case "create_milestone":
 		return s.callCreateMilestone
 	case "update_milestone":
@@ -225,6 +229,24 @@ func (s *Server) callListMilestones(ctx context.Context, id *json.RawMessage, ar
 		return
 	}
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: fmt.Sprintf("repo_id=%s milestones=%d", result.RepoID, result.Count)}}, StructuredContent: result})
+}
+
+func (s *Server) callListPushRemoteMirrors(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a writeToolArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if strings.TrimSpace(a.RepoID) == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+		return
+	}
+	result, err := s.svc.ListPushRemoteMirrors(ctx, service.PushMirrorListRequest{RepoID: a.RepoID, Repo: a.RepoID})
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: fmt.Sprintf("repo_id=%s push_mirrors=%d", result.RepoID, result.Count)}}, StructuredContent: result})
 }
 
 func (s *Server) callCreateMilestone(ctx context.Context, id *json.RawMessage, args json.RawMessage) {

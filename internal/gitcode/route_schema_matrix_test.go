@@ -15,7 +15,8 @@ func TestScenario005RouteSchemaMatrixDefaultShape(t *testing.T) {
 
 	expectedAreas := []ProductArea{
 		ProductAreaComments, ProductAreaIssues, ProductAreaLabels,
-		ProductAreaMilestones, ProductAreaPullRequests, ProductAreaWiki,
+		ProductAreaMilestones, ProductAreaPullRequests, ProductAreaPushMirrors,
+		ProductAreaWiki,
 	}
 	areas := m.DeclaredAreas()
 	if len(areas) != len(expectedAreas) {
@@ -28,7 +29,8 @@ func TestScenario005RouteSchemaMatrixDefaultShape(t *testing.T) {
 	}
 
 	for _, area := range []ProductArea{
-		ProductAreaIssues, ProductAreaLabels, ProductAreaMilestones, ProductAreaPullRequests, ProductAreaWiki,
+		ProductAreaIssues, ProductAreaLabels, ProductAreaMilestones,
+		ProductAreaPullRequests, ProductAreaPushMirrors, ProductAreaWiki,
 	} {
 		spec, ok := m.Spec(area)
 		if !ok {

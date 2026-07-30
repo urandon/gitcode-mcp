@@ -36,6 +36,7 @@ type Provider interface {
 	UpdateWikiPage(context.Context, UpdateWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
 	DeleteWikiPage(context.Context, DeleteWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
 	ListMilestones(context.Context, MilestoneListRequest) (Page[Milestone], error)
+	ListPushRemoteMirrors(context.Context, PushMirrorListRequest) ([]PushMirror, error)
 	GetMilestone(context.Context, MilestoneRequest) (Milestone, error)
 	CreateMilestone(context.Context, MilestoneWriteRequest, WriteOptions) (WriteResult[Milestone], error)
 	UpdateMilestone(context.Context, MilestoneWriteRequest, WriteOptions) (WriteResult[Milestone], error)
@@ -158,6 +159,7 @@ func NewLiveProvider(cfg ProviderConfig, opts ...LiveProviderOption) (Provider, 
 	if err := lp.matrix.ValidateCoverage([]ProductArea{
 		ProductAreaIssues, ProductAreaLabels, ProductAreaMilestones,
 		ProductAreaPullRequests, ProductAreaComments, ProductAreaWiki,
+		ProductAreaPushMirrors,
 	}); err != nil {
 		return nil, fmt.Errorf("gitcode: live provider route schema matrix validation failed: %w", err)
 	}
@@ -316,6 +318,13 @@ func (p liveProvider) ListMilestones(ctx context.Context, req MilestoneListReque
 	return p.HTTPClient.ListMilestones(ctx, req)
 }
 
+func (p liveProvider) ListPushRemoteMirrors(ctx context.Context, req PushMirrorListRequest) ([]PushMirror, error) {
+	if err := p.matrix.Preflight(ProductAreaPushMirrors); err != nil {
+		return nil, err
+	}
+	return p.HTTPClient.ListPushRemoteMirrors(ctx, req)
+}
+
 func (p liveProvider) GetMilestone(ctx context.Context, req MilestoneRequest) (Milestone, error) {
 	if err := p.matrix.Preflight(ProductAreaMilestones); err != nil {
 		return Milestone{}, err
@@ -442,6 +451,9 @@ func (p unavailableProvider) DeleteWikiPage(context.Context, DeleteWikiPageReque
 
 func (p unavailableProvider) ListMilestones(context.Context, MilestoneListRequest) (Page[Milestone], error) {
 	return Page[Milestone]{}, p.err()
+}
+func (p unavailableProvider) ListPushRemoteMirrors(context.Context, PushMirrorListRequest) ([]PushMirror, error) {
+	return nil, p.err()
 }
 func (p unavailableProvider) GetMilestone(context.Context, MilestoneRequest) (Milestone, error) {
 	return Milestone{}, p.err()

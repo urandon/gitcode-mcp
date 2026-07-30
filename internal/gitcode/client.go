@@ -33,6 +33,7 @@ type Client interface {
 	AddLabel(context.Context, LabelRequest, WriteOptions) (WriteResult[Issue], error)
 	RemoveLabel(context.Context, LabelRequest, WriteOptions) (WriteResult[Issue], error)
 	ListMilestones(context.Context, MilestoneListRequest) (Page[Milestone], error)
+	ListPushRemoteMirrors(context.Context, PushMirrorListRequest) ([]PushMirror, error)
 	GetMilestone(context.Context, MilestoneRequest) (Milestone, error)
 	CreateMilestone(context.Context, MilestoneWriteRequest, WriteOptions) (WriteResult[Milestone], error)
 	UpdateMilestone(context.Context, MilestoneWriteRequest, WriteOptions) (WriteResult[Milestone], error)
