@@ -12,21 +12,22 @@ import (
 type Code string
 
 const (
-	CodeMissingCredential       Code = "missing_credential"
-	CodeConfigCredential        Code = "config_credential"
-	CodeLiveAuthFailure         Code = "live_auth_failure"
-	CodeLiveTransportFailure    Code = "live_transport_failure"
-	CodeLiveAPIFailure          Code = "live_api_failure"
-	CodeConfigurationError      Code = "configuration_error"
-	CodeInvalidAPIBaseURL       Code = "invalid_api_base_url"
-	CodeUnsupportedMockPayload  Code = "unsupported_mock_payload"
-	CodeFixtureReadOnly         Code = "fixture_read_only"
-	CodeFixtureFallbackDetected Code = "fixture_fallback_detected"
-	CodeUnsupportedCapability   Code = "unsupported_capability"
-	CodeCacheBusy               Code = "cache_busy"
-	CodeCacheSchemaBlocked      Code = "cache_schema_blocked"
-	CodeSchemaDecode            Code = "schema_decode"
-	CodeAPIFailure              Code = "api_validation"
+	CodeMissingCredential        Code = "missing_credential"
+	CodeConfigCredential         Code = "config_credential"
+	CodeLiveAuthFailure          Code = "live_auth_failure"
+	CodeLiveTransportFailure     Code = "live_transport_failure"
+	CodeLiveAPIFailure           Code = "live_api_failure"
+	CodeConfigurationError       Code = "configuration_error"
+	CodeInvalidAPIBaseURL        Code = "invalid_api_base_url"
+	CodeUnsupportedMockPayload   Code = "unsupported_mock_payload"
+	CodeFixtureReadOnly          Code = "fixture_read_only"
+	CodeFixtureFallbackDetected  Code = "fixture_fallback_detected"
+	CodeUnsupportedCapability    Code = "unsupported_capability"
+	CodeCacheBusy                Code = "cache_busy"
+	CodeCacheSchemaBlocked       Code = "cache_schema_blocked"
+	CodeSchemaDecode             Code = "schema_decode"
+	CodeAPIFailure               Code = "api_validation"
+	CodePushMirrorSyncInProgress Code = "push_mirror_sync_in_progress"
 )
 
 type Diagnostic struct {
@@ -67,6 +68,7 @@ type CommandContext struct {
 	MalformedSuccess            bool
 	LocalPayloadTooLarge        bool
 	FailureSource               string
+	RetryableProviderFailure    bool
 }
 
 type Classifier struct {
@@ -87,7 +89,7 @@ func (c Classifier) Classify(err error, ctx CommandContext) Diagnostic {
 		filter.SensitiveTerms = append(filter.SensitiveTerms, ctx.SensitiveTerms...)
 	}
 	code := classifyCode(err, ctx)
-	d := Diagnostic{Code: code, Message: messageFor(code, err), ExitClass: exitClassFor(code), HTTPAttempted: httpAttemptedFor(code, ctx), Retryable: retryableFor(code)}
+	d := Diagnostic{Code: code, Message: messageFor(code, err), ExitClass: exitClassFor(code), HTTPAttempted: httpAttemptedFor(code, ctx), Retryable: retryableFor(code) || ctx.RetryableProviderFailure}
 	d.Message = filter.RedactText(d.Message)
 	d.Context = redactedContext(filter, ctx)
 	return d
@@ -122,6 +124,9 @@ func classifyCode(err error, ctx CommandContext) Code {
 	}
 	if ctx.InvalidSelectedAPIBaseURL || hasCode(err, "invalid_api_base_url") {
 		return CodeConfigCredential
+	}
+	if hasCode(err, "push_mirror_sync_in_progress") && ctx.HTTPAttempted {
+		return CodePushMirrorSyncInProgress
 	}
 	if (ctx.HTTPStatus == http.StatusUnauthorized || ctx.HTTPStatus == http.StatusForbidden || hasCode(err, "live_auth_failure") || hasCode(err, "auth_expired") || hasCode(err, "forbidden") || hasCode(err, "write_unauthorized")) && ctx.HTTPAttempted {
 		return CodeAPIFailure
@@ -202,6 +207,8 @@ func codeFromError(err error) Code {
 			return CodeSchemaDecode
 		case "auth_expired", "forbidden", "write_unauthorized", "not_found", "remote_conflict", "remote_collision", "remote_not_found", "rate_limited":
 			return CodeAPIFailure
+		case "push_mirror_sync_in_progress":
+			return CodePushMirrorSyncInProgress
 		}
 	}
 	return CodeConfigurationError
@@ -247,7 +254,7 @@ func isConfigurationInputBug(err error) bool {
 
 func httpAttemptedFor(code Code, ctx CommandContext) bool {
 	switch code {
-	case CodeLiveAuthFailure, CodeLiveTransportFailure, CodeLiveAPIFailure, CodeAPIFailure, CodeSchemaDecode:
+	case CodeLiveAuthFailure, CodeLiveTransportFailure, CodeLiveAPIFailure, CodeAPIFailure, CodeSchemaDecode, CodePushMirrorSyncInProgress:
 		return ctx.HTTPAttempted
 	case CodeConfigCredential:
 		return false
@@ -257,7 +264,7 @@ func httpAttemptedFor(code Code, ctx CommandContext) bool {
 }
 
 func retryableFor(code Code) bool {
-	return code == CodeLiveTransportFailure || code == CodeCacheBusy
+	return code == CodeLiveTransportFailure || code == CodeCacheBusy || code == CodePushMirrorSyncInProgress
 }
 
 func exitClassFor(code Code) string {
@@ -268,7 +275,7 @@ func exitClassFor(code Code) string {
 		return "configuration"
 	case CodeLiveTransportFailure:
 		return "transport"
-	case CodeLiveAPIFailure, CodeAPIFailure:
+	case CodeLiveAPIFailure, CodeAPIFailure, CodePushMirrorSyncInProgress:
 		return "provider"
 	case CodeUnsupportedMockPayload:
 		return "payload"
@@ -318,6 +325,8 @@ func messageFor(code Code, err error) string {
 		base += ": cache is busy, retry later"
 	case CodeCacheSchemaBlocked:
 		base += ": selected local cache schema blocks this command; live credential/provider readiness is separate from cache schema readiness"
+	case CodePushMirrorSyncInProgress:
+		base += ": mirror synchronization is already running or cooling down"
 	}
 	if err != nil {
 		return base + ": " + err.Error()

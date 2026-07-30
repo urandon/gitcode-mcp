@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"gitcode-mcp/internal/capability"
 	"gitcode-mcp/internal/service"
@@ -15,6 +16,9 @@ type writeToolArgs struct {
 	WriteMode      string   `json:"write_mode"`
 	IdempotencyKey string   `json:"idempotency_key,omitempty"`
 	ID             string   `json:"id,omitempty"`
+	MirrorID       string   `json:"mirror_id,omitempty"`
+	After          string   `json:"after,omitempty"`
+	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
 	Number         int      `json:"number,omitempty"`
 	PRNumber       int      `json:"pr_number,omitempty"`
 	IssueNumber    int      `json:"issue_number,omitempty"`
@@ -69,6 +73,10 @@ func writeToolInputSchema(id string) inputSchema {
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"state": {Type: "string", Description: "Milestone state filter.", Enum: []string{"open", "closed"}}, "per_page": {Type: "integer", Description: "Records per page.", Minimum: float64Ptr(1), Maximum: float64Ptr(100)}}), Required: []string{"repo_id"}}
 	case "list_push_remote_mirrors":
 		return inputSchema{Type: "object", Properties: writeSchemaProps(nil), Required: []string{"repo_id"}}
+	case "trigger_push_remote_mirror":
+		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"mirror_id": {Type: "string", Description: "Configured push mirror id; optional only when exactly one mirror exists."}}), Required: []string{"repo_id", "write_mode", "idempotency_key"}}
+	case "wait_push_remote_mirror":
+		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"mirror_id": {Type: "string", Description: "Configured push mirror id; optional only when exactly one mirror exists."}, "after": {Type: "string", Description: "RFC3339 freshness barrier for terminal status."}, "timeout_seconds": {Type: "integer", Description: "Polling timeout in seconds.", Minimum: float64Ptr(1), Maximum: float64Ptr(600)}}), Required: []string{"repo_id"}}
 	case "create_milestone":
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"title": {Type: "string", Description: "Milestone title.", MinLength: 1}, "description": {Type: "string", Description: "Milestone description."}, "due_on": {Type: "string", Description: "Due date YYYY-MM-DD.", MinLength: 1}, "state": {Type: "string", Description: "Milestone state.", Enum: []string{"open", "closed"}}}), Required: []string{"repo_id", "write_mode", "title", "due_on"}}
 	case "update_milestone":
@@ -116,6 +124,10 @@ func (s *Server) writeToolHandler(cap capability.Capability) toolHandler {
 		return s.callListMilestones
 	case "list_push_remote_mirrors":
 		return s.callListPushRemoteMirrors
+	case "trigger_push_remote_mirror":
+		return s.callTriggerPushRemoteMirror
+	case "wait_push_remote_mirror":
+		return s.callWaitPushRemoteMirror
 	case "create_milestone":
 		return s.callCreateMilestone
 	case "update_milestone":
@@ -247,6 +259,41 @@ func (s *Server) callListPushRemoteMirrors(ctx context.Context, id *json.RawMess
 		return
 	}
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: fmt.Sprintf("repo_id=%s push_mirrors=%d", result.RepoID, result.Count)}}, StructuredContent: result})
+}
+
+func (s *Server) callTriggerPushRemoteMirror(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	s.callWriteTool(ctx, id, args, s.svc.TriggerPushRemoteMirror, func(a writeToolArgs) service.WriteCommandRequest {
+		req := writeRequestFromArgs(a)
+		req.ID = strings.TrimSpace(a.MirrorID)
+		return req
+	})
+}
+
+func (s *Server) callWaitPushRemoteMirror(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a writeToolArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if strings.TrimSpace(a.RepoID) == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+		return
+	}
+	var after time.Time
+	if strings.TrimSpace(a.After) != "" {
+		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(a.After))
+		if err != nil {
+			s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "after must be an RFC3339 timestamp"})
+			return
+		}
+		after = parsed.UTC()
+	}
+	result, err := s.svc.WaitPushRemoteMirror(ctx, service.PushMirrorWaitRequest{RepoID: a.RepoID, Repo: a.RepoID, MirrorID: a.MirrorID, After: after, TimeoutSeconds: a.TimeoutSeconds})
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: fmt.Sprintf("repo_id=%s mirror_id=%s status=%s", result.RepoID, result.MirrorID, result.Status)}}, StructuredContent: result})
 }
 
 func (s *Server) callCreateMilestone(ctx context.Context, id *json.RawMessage, args json.RawMessage) {

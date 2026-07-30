@@ -34,6 +34,10 @@ type Service struct {
 	writeCredentialPresent bool
 }
 
+type auditClaimStore interface {
+	ClaimAuditEvent(context.Context, cache.AuditTrailEntry) (bool, error)
+}
+
 func New(store cache.Store) *Service {
 	svc, err := NewWithMode(store, gitcode.ProviderModeFixture, "", ServiceConfig{})
 	if err != nil {
@@ -252,6 +256,10 @@ func (sanitizedFixtureClient) ListMilestones(context.Context, gitcode.MilestoneL
 
 func (sanitizedFixtureClient) ListPushRemoteMirrors(context.Context, gitcode.PushMirrorListRequest) ([]gitcode.PushMirror, error) {
 	return nil, gitcode.FixtureReadOnlyError("sanitized fixture read")
+}
+
+func (sanitizedFixtureClient) TriggerPushRemoteMirror(context.Context, gitcode.PushMirrorTriggerRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PushMirror], error) {
+	return gitcode.WriteResult[gitcode.PushMirror]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
 func (sanitizedFixtureClient) GetMilestone(context.Context, gitcode.MilestoneRequest) (gitcode.Milestone, error) {
@@ -3078,6 +3086,142 @@ func (s *Service) ListPushRemoteMirrors(ctx context.Context, req PushMirrorListR
 	return PushMirrorListResult{RepoID: route.RepoID, Mirrors: records, Count: len(records), Evidence: "adapter-confirmed read with sanitized cache refresh", GeneratedAt: now}, nil
 }
 
+func (s *Service) TriggerPushRemoteMirror(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if req.Mode == WriteModeLive && strings.TrimSpace(req.IdempotencyKey) == "" {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "idempotency_key", Message: "is required for live push mirror triggers"}
+	}
+	repoID := firstNonEmptyString(req.RepoID, req.Repo)
+	route, err := s.BuildAdapterRoute(ctx, repoID, RepositoryScopeIssues)
+	if err != nil {
+		return WriteCommandResult{}, err
+	}
+	mirrors, err := s.client.ListPushRemoteMirrors(ctx, gitcode.PushMirrorListRequest{Owner: route.Owner, Repo: route.Name})
+	if err != nil {
+		return WriteCommandResult{}, err
+	}
+	mirror, err := resolvePushMirror(mirrors, req.ID)
+	if err != nil {
+		return WriteCommandResult{}, err
+	}
+	req.RepoID = route.RepoID
+	req.Repo = route.RepoID
+	req.ID = mirror.RemoteID
+	req.pushMirrorPreviousStatus = mirror.UpdateStatus
+	return s.executeWrite(ctx, "trigger-push-mirror", req, RepositoryScopeIssues)
+}
+
+func (s *Service) WaitPushRemoteMirror(ctx context.Context, req PushMirrorWaitRequest) (PushMirrorWaitResult, error) {
+	timeoutSeconds := req.TimeoutSeconds
+	if timeoutSeconds == 0 {
+		timeoutSeconds = 120
+	}
+	if timeoutSeconds < 1 || timeoutSeconds > 600 {
+		return PushMirrorWaitResult{}, ErrInvalidQuery{Field: "timeout_seconds", Message: "must be between 1 and 600"}
+	}
+	pollInterval := req.PollInterval
+	if pollInterval <= 0 {
+		pollInterval = 2 * time.Second
+	}
+	timeout := req.Timeout
+	if timeout <= 0 {
+		timeout = time.Duration(timeoutSeconds) * time.Second
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	mirrorID := strings.TrimSpace(req.MirrorID)
+	for {
+		list, err := s.ListPushRemoteMirrors(ctx, PushMirrorListRequest{RepoID: firstNonEmptyString(req.RepoID, req.Repo)})
+		if err != nil {
+			return PushMirrorWaitResult{}, err
+		}
+		record, err := resolvePushMirrorRecord(list.Mirrors, mirrorID)
+		if err != nil {
+			return PushMirrorWaitResult{}, err
+		}
+		mirrorID = record.RemoteID
+		result := pushMirrorWaitResult(list.RepoID, record, req.After, s.now().UTC())
+		if pushMirrorTerminalAfter(record, req.After) {
+			result.Evidence = "terminal status confirmed by sanitized live readback"
+			return result, nil
+		}
+		select {
+		case <-ctx.Done():
+			return PushMirrorWaitResult{}, ctx.Err()
+		case <-deadline.C:
+			result.Status = "timeout"
+			result.Evidence = "timeout while polling sanitized live mirror status"
+			result.GeneratedAt = s.now().UTC()
+			return result, nil
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+func resolvePushMirror(mirrors []gitcode.PushMirror, mirrorID string) (gitcode.PushMirror, error) {
+	id := strings.TrimSpace(mirrorID)
+	if id == "" {
+		if len(mirrors) != 1 {
+			return gitcode.PushMirror{}, ErrPushMirrorSelectionRequired{Count: len(mirrors)}
+		}
+		return mirrors[0], nil
+	}
+	for _, mirror := range mirrors {
+		if mirror.RemoteID == id || fallbackSourceID("pushmirror", mirror.RemoteID) == id {
+			return mirror, nil
+		}
+	}
+	return gitcode.PushMirror{}, ErrPushMirrorNotFound{MirrorID: id}
+}
+
+func resolvePushMirrorRecord(mirrors []PushMirrorRecord, mirrorID string) (PushMirrorRecord, error) {
+	id := strings.TrimSpace(mirrorID)
+	if id == "" {
+		if len(mirrors) != 1 {
+			return PushMirrorRecord{}, ErrPushMirrorSelectionRequired{Count: len(mirrors)}
+		}
+		return mirrors[0], nil
+	}
+	for _, mirror := range mirrors {
+		if mirror.RemoteID == id || mirror.ID == id {
+			return mirror, nil
+		}
+	}
+	return PushMirrorRecord{}, ErrPushMirrorNotFound{MirrorID: id}
+}
+
+func pushMirrorTerminalAfter(mirror PushMirrorRecord, after time.Time) bool {
+	status := strings.ToLower(strings.TrimSpace(mirror.UpdateStatus))
+	if status != "finished" && status != "failed" {
+		return false
+	}
+	if after.IsZero() {
+		return true
+	}
+	if status == "finished" {
+		return !mirror.LastSuccessfulUpdateAt.IsZero() && !mirror.LastSuccessfulUpdateAt.Before(after)
+	}
+	return !mirror.LastUpdateAt.IsZero() && !mirror.LastUpdateAt.Before(after)
+}
+
+func pushMirrorWaitResult(repoID string, mirror PushMirrorRecord, after, now time.Time) PushMirrorWaitResult {
+	status := strings.ToLower(strings.TrimSpace(mirror.UpdateStatus))
+	if status != "finished" && status != "failed" {
+		status = "waiting"
+	}
+	return PushMirrorWaitResult{
+		RepoID:                 repoID,
+		MirrorID:               mirror.RemoteID,
+		Status:                 status,
+		UpdateStatus:           mirror.UpdateStatus,
+		NumberOfFailures:       mirror.NumberOfFailures,
+		Message:                mirror.Message,
+		LastUpdateAt:           mirror.LastUpdateAt,
+		LastSuccessfulUpdateAt: mirror.LastSuccessfulUpdateAt,
+		After:                  after,
+		GeneratedAt:            now,
+	}
+}
+
 func (s *Service) CreateMilestone(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
 	if strings.TrimSpace(req.Title) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "milestone.title", Message: "title is required"}
@@ -4448,10 +4592,41 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 		if prior.Status == audit.StatusRemoteConfirmedAuditFailed {
 			return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
 		}
+		if lookup.InProgress {
+			return WriteCommandResult{}, ErrWriteFailure{Code: "write_idempotency_in_progress", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
+		}
+	}
+	if command == "trigger-push-mirror" {
+		entry := audit.WithRequestMetadata(
+			audit.InProgress(route.RepoID, key, command, fallbackSourceID("pushmirror", req.ID), "push_remote_mirror", req.ID, fingerprint, "remote trigger pending confirmation", s.now().UTC()),
+			map[string]string{
+				"method":             "POST",
+				"idempotency_key":    key,
+				"remote_alias":       req.ID,
+				"remote_type":        "push_remote_mirror",
+				"provider":           "gitcode-http",
+				"provider_mode":      string(gitcode.ProviderModeLive),
+				"source_fingerprint": fingerprint,
+			},
+		)
+		if claimer, ok := s.store.(auditClaimStore); ok {
+			claimed, err := claimer.ClaimAuditEvent(ctx, entry)
+			if err != nil {
+				return WriteCommandResult{}, ErrWriteFailure{Code: "write_audit_start_failed", RepoID: route.RepoID, RemoteID: req.ID, IdempotencyKey: key, Cause: err}
+			}
+			if !claimed {
+				return s.executeWrite(ctx, command, req, scope)
+			}
+		} else if err := s.store.RecordAuditEvent(ctx, entry); err != nil {
+			return WriteCommandResult{}, ErrWriteFailure{Code: "write_audit_start_failed", RepoID: route.RepoID, RemoteID: req.ID, IdempotencyKey: key, Cause: err}
+		}
 	}
 	confirmed, graph, err := s.callWriteAdapter(ctx, command, route, req, key)
 	if err != nil {
 		code := s.writeAdapterErrorCode(req.Mode, err)
+		if command == "trigger-push-mirror" && !safePushMirrorTriggerFailure(err) {
+			return WriteCommandResult{}, ErrWriteFailure{Code: "write_ambiguous_remote", RepoID: route.RepoID, RemoteID: req.ID, IdempotencyKey: key, PayloadSource: failureSource(err), Cause: err}
+		}
 		_ = s.store.RecordAuditEvent(ctx, audit.Failure(route.RepoID, key, command, fingerprint, code, s.now().UTC()))
 		return WriteCommandResult{}, ErrWriteFailure{Code: code, RepoID: route.RepoID, IdempotencyKey: key, PayloadSource: failureSource(err), Cause: writeFailureCause(code, err)}
 	}
@@ -4494,6 +4669,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	base.CachePath = confirmed.cachePath
 	base.BrowserURL = confirmed.browserURL
 	base.Milestone = confirmed.milestone
+	base.PushMirror = confirmed.pushMirror
 	base.Evidence = "adapter-confirmed write with audit and cache refresh"
 	return base, nil
 }
@@ -4510,6 +4686,7 @@ type writeConfirmation struct {
 	message        string
 	completedAt    time.Time
 	milestone      *WriteMilestoneReceipt
+	pushMirror     *WritePushMirrorReceipt
 }
 
 func writeAuditMetadata(command, key, fingerprint, remoteType string, confirmed writeConfirmation) map[string]string {
@@ -4548,11 +4725,17 @@ func writeAuditMetadata(command, key, fingerprint, remoteType string, confirmed 
 			metadata["milestone_cleared"] = "true"
 		}
 	}
+	if confirmed.pushMirror != nil {
+		metadata["push_mirror_id"] = confirmed.pushMirror.MirrorID
+		metadata["push_mirror_status"] = confirmed.pushMirror.Status
+		metadata["push_mirror_previous_status"] = confirmed.pushMirror.PreviousStatus
+		metadata["push_mirror_triggered_at"] = confirmed.pushMirror.TriggeredAt.UTC().Format(time.RFC3339Nano)
+	}
 	return metadata
 }
 
 func withWriteAuditMetadata(entry cache.AuditTrailEntry, command, key, fingerprint, remoteType string, confirmed writeConfirmation) cache.AuditTrailEntry {
-	if command != "create-issue" && confirmed.milestone == nil {
+	if command != "create-issue" && confirmed.milestone == nil && confirmed.pushMirror == nil {
 		return entry
 	}
 	return audit.WithRequestMetadata(entry, writeAuditMetadata(command, key, fingerprint, remoteType, confirmed))
@@ -4670,6 +4853,29 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
 		confirmation, graph := s.milestoneWriteGraph(route.RepoID, result.Record, result, now)
+		return confirmation, graph, nil
+	case "trigger-push-mirror":
+		result, err := s.client.TriggerPushRemoteMirror(ctx, gitcode.PushMirrorTriggerRequest{Owner: route.Owner, Repo: route.Name, MirrorID: req.ID}, opts)
+		if err != nil {
+			return writeConfirmation{}, cache.RecordGraph{}, err
+		}
+		_, graph := pushMirrorRecordGraph(route.RepoID, result.Record, now)
+		confirmation := writeConfirmation{
+			confirmed:      result.Confirmed,
+			remoteID:       result.RemoteID,
+			remoteRevision: result.RemoteRevision,
+			apiPath:        triggerPushMirrorAPIPath(route.Owner, route.Name, result.RemoteID),
+			cachePath:      graph.Record.Path,
+			message:        result.ProviderStatus,
+			completedAt:    firstNonZeroTime(result.ConfirmedAt, now),
+			pushMirror: &WritePushMirrorReceipt{
+				MirrorID:       result.RemoteID,
+				Status:         "triggered",
+				PreviousStatus: req.pushMirrorPreviousStatus,
+				ReadbackStatus: result.Record.UpdateStatus,
+				TriggeredAt:    firstNonZeroTime(result.ConfirmedAt, now),
+			},
+		}
 		return confirmation, graph, nil
 	case "set-issue-milestone":
 		milestone, err := s.resolveMilestone(ctx, route, firstNonEmptyString(req.Milestone, req.ID))
@@ -4949,6 +5155,21 @@ func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID s
 		result := gitcode.WriteResult[gitcode.Milestone]{Record: milestone, Confirmed: true, RemoteID: prior.RemoteID, RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
 		_, graph := s.milestoneWriteGraph(repoID, milestone, result, now)
 		return graph, nil
+	case "trigger-push-mirror":
+		route, err := s.BuildAdapterRoute(ctx, repoID, RepositoryScopeIssues)
+		if err != nil {
+			return cache.RecordGraph{}, err
+		}
+		mirrors, err := s.client.ListPushRemoteMirrors(ctx, gitcode.PushMirrorListRequest{Owner: route.Owner, Repo: route.Name})
+		if err != nil {
+			return cache.RecordGraph{}, err
+		}
+		mirror, err := resolvePushMirror(mirrors, prior.RemoteID)
+		if err != nil {
+			return cache.RecordGraph{}, err
+		}
+		_, graph := pushMirrorRecordGraph(repoID, mirror, now)
+		return graph, nil
 	case "add-comment", "update-comment":
 		number := req.Number
 		if number == 0 {
@@ -5149,6 +5370,10 @@ func pushMirrorRecordGraph(repoID string, mirror gitcode.PushMirror, now time.Ti
 		LastUpdateAt:           parseMilestoneTime(mirror.LastUpdateAt),
 		LastSuccessfulUpdateAt: parseMilestoneTime(mirror.LastSuccessfulUpdateAt),
 	}, graph
+}
+
+func triggerPushMirrorAPIPath(owner, repo, mirrorID string) string {
+	return fmt.Sprintf("/api/v5/repos/%s/%s/push_remote_mirrors/%s", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(mirrorID))
 }
 
 func (s *Service) wikiWriteGraph(repoID string, page gitcode.WikiPage, result gitcode.WriteResult[gitcode.WikiPage], now time.Time) (writeConfirmation, cache.RecordGraph) {
@@ -5424,7 +5649,7 @@ func writeTargetID(req WriteCommandRequest) string {
 }
 
 func replayWriteResult(command string, entry cache.AuditTrailEntry, fingerprint string, now time.Time) WriteCommandResult {
-	return WriteCommandResult{Command: command, Status: "already_applied", RepoID: entry.RepoID, ID: entry.RecordID, RemoteID: entry.RemoteID, IdempotencyKey: entry.IdempotencyKey, SourceFingerprint: fingerprint, Replayed: true, Milestone: milestoneReceiptFromAudit(entry), Evidence: "replayed from audit_trail", GeneratedAt: now}
+	return WriteCommandResult{Command: command, Status: "already_applied", RepoID: entry.RepoID, ID: entry.RecordID, RemoteID: entry.RemoteID, IdempotencyKey: entry.IdempotencyKey, SourceFingerprint: fingerprint, Replayed: true, Milestone: milestoneReceiptFromAudit(entry), PushMirror: pushMirrorReceiptFromAudit(entry), Evidence: "replayed from audit_trail", GeneratedAt: now}
 }
 
 func milestoneReceiptFromAudit(entry cache.AuditTrailEntry) *WriteMilestoneReceipt {
@@ -5442,6 +5667,20 @@ func milestoneReceiptFromAudit(entry cache.AuditTrailEntry) *WriteMilestoneRecei
 		return nil
 	}
 	return receipt
+}
+
+func pushMirrorReceiptFromAudit(entry cache.AuditTrailEntry) *WritePushMirrorReceipt {
+	metadata := entry.RequestMetadata
+	if len(metadata) == 0 || strings.TrimSpace(metadata["push_mirror_id"]) == "" {
+		return nil
+	}
+	triggeredAt, _ := time.Parse(time.RFC3339Nano, metadata["push_mirror_triggered_at"])
+	return &WritePushMirrorReceipt{
+		MirrorID:       metadata["push_mirror_id"],
+		Status:         firstNonEmptyString(metadata["push_mirror_status"], "triggered"),
+		PreviousStatus: metadata["push_mirror_previous_status"],
+		TriggeredAt:    triggeredAt,
+	}
 }
 
 func (s *Service) writeAdapterErrorCode(mode WriteMode, err error) string {
@@ -5468,11 +5707,48 @@ func writeErrorCode(err error) string {
 	if errors.As(err, &limited) {
 		return "write_rate_limited"
 	}
+	var mirrorInProgress gitcode.ErrPushMirrorSyncInProgress
+	if errors.As(err, &mirrorInProgress) {
+		return "push_mirror_sync_in_progress"
+	}
+	var forbidden gitcode.ErrForbidden
+	if errors.As(err, &forbidden) {
+		return "write_forbidden"
+	}
+	var notFound gitcode.ErrRemoteNotFound
+	if errors.As(err, &notFound) {
+		return "push_mirror_not_found"
+	}
 	var network gitcode.ErrNetworkUnavailable
 	if errors.As(err, &network) {
 		return "write_network_unavailable"
 	}
 	return "write_provider_error"
+}
+
+func safePushMirrorTriggerFailure(err error) bool {
+	var inProgress gitcode.ErrPushMirrorSyncInProgress
+	if errors.As(err, &inProgress) {
+		return true
+	}
+	var auth gitcode.ErrAuthExpired
+	if errors.As(err, &auth) {
+		return true
+	}
+	var forbidden gitcode.ErrForbidden
+	if errors.As(err, &forbidden) {
+		return true
+	}
+	var notFound gitcode.ErrRemoteNotFound
+	if errors.As(err, &notFound) {
+		return true
+	}
+	var validation gitcode.ErrAPIValidation
+	if errors.As(err, &validation) {
+		return true
+	}
+	var limited gitcode.ErrRateLimited
+	return errors.As(err, &limited)
 }
 
 func writeFailureCause(code string, err error) error {

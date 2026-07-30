@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"gitcode-mcp/internal/audit"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/gitcode"
@@ -839,6 +840,205 @@ func TestListPushRemoteMirrorsPropagatesProviderFailure(t *testing.T) {
 	if !errors.As(err, &forbidden) {
 		t.Fatalf("error=%T %v", err, err)
 	}
+}
+
+func TestTriggerPushRemoteMirrorAuditsCachesAndReplays(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "example-owner", Name: "example-repo", APIBaseURL: "https://api.example.invalid/api/v5", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	triggeredAt := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	before := gitcode.PushMirror{RemoteID: "17", ProjectID: "101", URL: "https://mirror.example.invalid/repo.git", UpdateStatus: "finished", LastSuccessfulUpdateAt: "2026-07-30T11:00:00Z"}
+	readback := before
+	readback.UpdateStatus = "processing"
+	readback.LastUpdateAt = "2026-07-30T12:00:00Z"
+	client := &fakeGitCodeClient{
+		pushMirrorsResult: beforeSlice(before),
+		triggerPushMirrorResult: gitcode.WriteResult[gitcode.PushMirror]{
+			Record:         readback,
+			Confirmed:      true,
+			Operation:      "TriggerPushRemoteMirror",
+			ProviderStatus: "200-sanitized-readback",
+			RemoteID:       "17",
+			RemoteRevision: "revision-17",
+			ConfirmedAt:    triggeredAt,
+		},
+	}
+	svc := NewWithClient(store, client)
+	svc.now = func() time.Time { return triggeredAt }
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, IdempotencyKey: "trigger-17-key"}
+
+	result, err := svc.TriggerPushRemoteMirror(ctx, req)
+	if err != nil {
+		t.Fatalf("TriggerPushRemoteMirror: %v", err)
+	}
+	if result.Status != "succeeded" || result.RemoteID != "17" || result.PushMirror == nil {
+		t.Fatalf("result=%#v", result)
+	}
+	if result.PushMirror.PreviousStatus != "finished" || result.PushMirror.ReadbackStatus != "processing" || !result.PushMirror.TriggeredAt.Equal(triggeredAt) {
+		t.Fatalf("receipt=%#v", result.PushMirror)
+	}
+	if client.triggerPushMirrorCalls != 1 || client.lastTriggerPushMirrorRequest.MirrorID != "17" || client.lastWriteOptions.IdempotencyKey != "trigger-17-key" {
+		t.Fatalf("calls=%d request=%#v opts=%#v", client.triggerPushMirrorCalls, client.lastTriggerPushMirrorRequest, client.lastWriteOptions)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", "trigger-17-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry == nil || entry.Status != audit.StatusSucceeded || entry.RemoteID != "17" || entry.RequestMetadata["push_mirror_previous_status"] != "finished" {
+		t.Fatalf("audit=%#v", entry)
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", "PUSHMIRROR-17")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != "processing" || strings.Contains(record.Body, "@") || strings.Contains(record.Body, "?") {
+		t.Fatalf("record=%#v", record)
+	}
+
+	replay, err := svc.TriggerPushRemoteMirror(ctx, req)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if !replay.Replayed || replay.Status != "already_applied" || replay.PushMirror == nil || replay.PushMirror.MirrorID != "17" {
+		t.Fatalf("replay=%#v", replay)
+	}
+	if client.triggerPushMirrorCalls != 1 {
+		t.Fatalf("trigger calls=%d want 1", client.triggerPushMirrorCalls)
+	}
+}
+
+func TestTriggerPushRemoteMirrorRequiresSelectionAndKnownMirror(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "example-owner", Name: "example-repo", APIBaseURL: "https://api.example.invalid/api/v5", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeGitCodeClient{pushMirrorsResult: []gitcode.PushMirror{{RemoteID: "1"}, {RemoteID: "2"}}}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+
+	_, err = svc.TriggerPushRemoteMirror(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, IdempotencyKey: "selection-key"})
+	var selection ErrPushMirrorSelectionRequired
+	if !errors.As(err, &selection) || selection.Count != 2 {
+		t.Fatalf("error=%T %v", err, err)
+	}
+	_, err = svc.TriggerPushRemoteMirror(ctx, WriteCommandRequest{RepoID: "fixture-a", ID: "99", Mode: WriteModeLive, IdempotencyKey: "missing-key"})
+	var missing ErrPushMirrorNotFound
+	if !errors.As(err, &missing) || missing.MirrorID != "99" {
+		t.Fatalf("error=%T %v", err, err)
+	}
+	if client.triggerPushMirrorCalls != 0 {
+		t.Fatalf("trigger calls=%d", client.triggerPushMirrorCalls)
+	}
+}
+
+func TestTriggerPushRemoteMirrorAmbiguousFailureBlocksSameKeyReplay(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "example-owner", Name: "example-repo", APIBaseURL: "https://api.example.invalid/api/v5", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeGitCodeClient{
+		pushMirrorsResult:    []gitcode.PushMirror{{RemoteID: "17", URL: "https://mirror.example.invalid/repo.git", UpdateStatus: "finished"}},
+		triggerPushMirrorErr: gitcode.ErrNetworkUnavailable{Endpoint: "/push_remote_mirrors/17", Attempts: 1},
+	}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, IdempotencyKey: "ambiguous-key"}
+
+	_, err = svc.TriggerPushRemoteMirror(ctx, req)
+	var first ErrWriteFailure
+	if !errors.As(err, &first) || first.Code != "write_ambiguous_remote" {
+		t.Fatalf("first error=%T %v", err, err)
+	}
+	_, err = svc.TriggerPushRemoteMirror(ctx, req)
+	var replay ErrWriteFailure
+	if !errors.As(err, &replay) || replay.Code != "write_idempotency_in_progress" {
+		t.Fatalf("replay error=%T %v", err, err)
+	}
+	if client.triggerPushMirrorCalls != 1 {
+		t.Fatalf("trigger calls=%d want 1", client.triggerPushMirrorCalls)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", "ambiguous-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry == nil || entry.Status != audit.StatusInProgress {
+		t.Fatalf("audit=%#v", entry)
+	}
+}
+
+func TestWaitPushRemoteMirrorIgnoresStaleTerminalAndReturnsFreshSuccess(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "example-owner", Name: "example-repo", APIBaseURL: "https://api.example.invalid/api/v5", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeGitCodeClient{pushMirrorsResults: [][]gitcode.PushMirror{
+		{{RemoteID: "17", URL: "https://mirror.example.invalid/repo.git", UpdateStatus: "finished", LastUpdateAt: "2026-07-30T11:59:00Z", LastSuccessfulUpdateAt: "2026-07-30T11:59:00Z"}},
+		{{RemoteID: "17", URL: "https://mirror.example.invalid/repo.git", UpdateStatus: "processing", LastUpdateAt: "2026-07-30T12:00:01Z"}},
+		{{RemoteID: "17", URL: "https://mirror.example.invalid/repo.git", UpdateStatus: "finished", LastUpdateAt: "2026-07-30T12:00:02Z", LastSuccessfulUpdateAt: "2026-07-30T12:00:02Z"}},
+	}}
+	svc := NewWithClient(store, client)
+	after := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	result, err := svc.WaitPushRemoteMirror(ctx, PushMirrorWaitRequest{RepoID: "fixture-a", MirrorID: "17", After: after, TimeoutSeconds: 1, PollInterval: time.Millisecond})
+	if err != nil {
+		t.Fatalf("WaitPushRemoteMirror: %v", err)
+	}
+	if result.Status != "finished" || result.UpdateStatus != "finished" || result.LastSuccessfulUpdateAt.Before(after) {
+		t.Fatalf("result=%#v", result)
+	}
+}
+
+func TestWaitPushRemoteMirrorReturnsTimeoutWithoutDestination(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "example-owner", Name: "example-repo", APIBaseURL: "https://api.example.invalid/api/v5", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeGitCodeClient{pushMirrorsResult: []gitcode.PushMirror{{RemoteID: "17", URL: "https://mirror.example.invalid/repo.git", UpdateStatus: "processing", LastUpdateAt: "2026-07-30T12:00:00Z"}}}
+	svc := NewWithClient(store, client)
+	result, err := svc.WaitPushRemoteMirror(ctx, PushMirrorWaitRequest{RepoID: "fixture-a", MirrorID: "17", Timeout: 10 * time.Millisecond, PollInterval: time.Millisecond})
+	if err != nil {
+		t.Fatalf("WaitPushRemoteMirror: %v", err)
+	}
+	if result.Status != "timeout" || result.MirrorID != "17" {
+		t.Fatalf("result=%#v", result)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "destination") || strings.Contains(string(encoded), "example.invalid") {
+		t.Fatalf("result leaked destination: %s", encoded)
+	}
+}
+
+func beforeSlice(mirror gitcode.PushMirror) []gitcode.PushMirror {
+	return []gitcode.PushMirror{mirror}
 }
 
 func TestSetIssueMilestoneVerifiesReadbackWhenPatchResponseIsNull(t *testing.T) {
@@ -3143,8 +3343,13 @@ type fakeGitCodeClient struct {
 	lastLinkPRIssueRequest       gitcode.LinkPRIssueRequest
 	lastListMilestonesRequest    gitcode.MilestoneListRequest
 	pushMirrorsResult            []gitcode.PushMirror
+	pushMirrorsResults           [][]gitcode.PushMirror
 	pushMirrorsErr               error
 	lastPushMirrorsRequest       gitcode.PushMirrorListRequest
+	triggerPushMirrorResult      gitcode.WriteResult[gitcode.PushMirror]
+	triggerPushMirrorErr         error
+	triggerPushMirrorCalls       int
+	lastTriggerPushMirrorRequest gitcode.PushMirrorTriggerRequest
 	lastCreateMilestoneRequest   gitcode.MilestoneWriteRequest
 	lastUpdateMilestoneRequest   gitcode.MilestoneWriteRequest
 	lastCreatePRCommentReq       gitcode.CreatePRCommentRequest
@@ -3394,7 +3599,22 @@ func (f *fakeGitCodeClient) ListPushRemoteMirrors(_ context.Context, req gitcode
 	if f.pushMirrorsErr != nil {
 		return nil, f.pushMirrorsErr
 	}
+	if len(f.pushMirrorsResults) > 0 {
+		result := f.pushMirrorsResults[0]
+		f.pushMirrorsResults = f.pushMirrorsResults[1:]
+		return append([]gitcode.PushMirror(nil), result...), nil
+	}
 	return append([]gitcode.PushMirror(nil), f.pushMirrorsResult...), nil
+}
+
+func (f *fakeGitCodeClient) TriggerPushRemoteMirror(_ context.Context, req gitcode.PushMirrorTriggerRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PushMirror], error) {
+	f.triggerPushMirrorCalls++
+	f.lastTriggerPushMirrorRequest = req
+	f.lastWriteOptions = opts
+	if f.triggerPushMirrorErr != nil {
+		return gitcode.WriteResult[gitcode.PushMirror]{}, f.triggerPushMirrorErr
+	}
+	return f.triggerPushMirrorResult, nil
 }
 
 func (f *fakeGitCodeClient) GetMilestone(_ context.Context, req gitcode.MilestoneRequest) (gitcode.Milestone, error) {

@@ -44,6 +44,12 @@ func TestLookupIdempotencyClassifiesReplayConflictRetryAndPartial(t *testing.T) 
 	if err != nil || !lookup.Partial || lookup.Replay || lookup.Conflict {
 		t.Fatalf("partial lookup=%#v err=%v", lookup, err)
 	}
+
+	store.entry = &cache.AuditTrailEntry{Status: StatusInProgress, PayloadHash: "hash", CreatedAt: now}
+	lookup, err = LookupIdempotency(ctx, store, "repo", "key", "hash")
+	if err != nil || !lookup.InProgress || lookup.Replay || lookup.Retry || lookup.Partial || lookup.Conflict {
+		t.Fatalf("in-progress lookup=%#v err=%v", lookup, err)
+	}
 }
 
 func TestEntryHelpersAvoidRawPayloadStorage(t *testing.T) {

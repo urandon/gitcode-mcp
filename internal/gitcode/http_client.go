@@ -1091,6 +1091,7 @@ type requestOptions struct {
 	remoteAlias      string
 	idempotencyKey   string
 	localPayload     []byte
+	noRetry          bool
 }
 
 func (c *HTTPClient) getJSON(ctx context.Context, endpoint string, values url.Values, out any) error {
@@ -1702,6 +1703,9 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 	if attempts < 1 {
 		attempts = 1
 	}
+	if opts.noRetry {
+		attempts = 1
+	}
 	var lastRetryAfter time.Duration
 	var rawRetryAfter string
 	for attempt := 1; attempt <= attempts; attempt++ {
@@ -1872,6 +1876,9 @@ func (c *HTTPClient) readBounded(resp *http.Response, endpoint string) ([]byte, 
 }
 
 func (c *HTTPClient) statusError(status int, endpoint string, body []byte, opts requestOptions) error {
+	if status == http.StatusForbidden && strings.Contains(endpoint, "/push_remote_mirrors/") && pushMirrorCooldownResponse(body) {
+		return ErrPushMirrorSyncInProgress{Endpoint: endpoint, Message: "sync too frequently; wait for the current synchronization or cooldown to finish"}
+	}
 	msg := responseMessage(status, body)
 	switch status {
 	case http.StatusUnauthorized:
@@ -1893,6 +1900,18 @@ func (c *HTTPClient) statusError(status int, endpoint string, body []byte, opts 
 		}
 		return ErrNetworkUnavailable{Endpoint: endpoint, Status: status, Attempts: 1}
 	}
+}
+
+func pushMirrorCooldownResponse(body []byte) bool {
+	var payload struct {
+		ErrorMessage string `json:"error_message"`
+		Message      string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(firstNonEmpty(payload.ErrorMessage, payload.Message)))
+	return strings.Contains(message, "sync too frequently")
 }
 
 func issueListQuery(req IssueListRequest) url.Values {

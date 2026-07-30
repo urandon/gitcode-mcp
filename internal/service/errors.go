@@ -271,6 +271,28 @@ func (e ErrWriteFailure) Unwrap() error { return e.Cause }
 
 func (e ErrWriteFailure) DiagnosticCode() string { return e.Code }
 
+type ErrPushMirrorNotFound struct {
+	MirrorID string
+}
+
+func (e ErrPushMirrorNotFound) Error() string {
+	return fmt.Sprintf("push mirror %q not found", e.MirrorID)
+}
+
+func (e ErrPushMirrorNotFound) DiagnosticCode() string { return "push_mirror_not_found" }
+
+type ErrPushMirrorSelectionRequired struct {
+	Count int
+}
+
+func (e ErrPushMirrorSelectionRequired) Error() string {
+	return fmt.Sprintf("push mirror selection is required because repository has %d configured mirrors", e.Count)
+}
+
+func (e ErrPushMirrorSelectionRequired) DiagnosticCode() string {
+	return "push_mirror_selection_required"
+}
+
 type ErrSyncInProgress struct {
 	EventID        string
 	IdempotencyKey string

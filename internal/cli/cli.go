@@ -51,7 +51,9 @@ var commands = []string{
 	"create-pr", "create-mr",
 	"update-pr",
 	"milestones",
-	"push-mirrors",
+	"list-push-mirrors", "push-mirrors",
+	"trigger-push-mirror",
+	"wait-push-mirror",
 	"create-milestone",
 	"update-milestone",
 	"set-issue-milestone",
@@ -114,6 +116,8 @@ type queryService interface {
 	UpdatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	ListMilestones(context.Context, service.MilestoneListRequest) (service.MilestoneListResult, error)
 	ListPushRemoteMirrors(context.Context, service.PushMirrorListRequest) (service.PushMirrorListResult, error)
+	TriggerPushRemoteMirror(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	WaitPushRemoteMirror(context.Context, service.PushMirrorWaitRequest) (service.PushMirrorWaitResult, error)
 	CreateMilestone(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdateMilestone(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	SetIssueMilestone(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
@@ -185,6 +189,9 @@ type options struct {
 	repo           string
 	name           string
 	id             string
+	mirrorID       string
+	after          string
+	timeoutSeconds int
 	number         int
 	commentID      string
 	discussionID   string
@@ -452,7 +459,7 @@ func resolveLiveCredential(ctx context.Context, eff config.EffectiveConfig, deps
 
 func isLiveStartupCommand(command string) bool {
 	switch command {
-	case "sync", "create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "milestones", "push-mirrors", "create-milestone", "update-milestone", "set-issue-milestone", "clear-issue-milestone", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "reply-pr-review-comment", "update-comment", "add-label", "publish-release", "doctor":
+	case "sync", "create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "milestones", "list-push-mirrors", "push-mirrors", "trigger-push-mirror", "wait-push-mirror", "create-milestone", "update-milestone", "set-issue-milestone", "clear-issue-milestone", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "reply-pr-review-comment", "update-comment", "add-label", "publish-release", "doctor":
 		return true
 	default:
 		return false
@@ -592,6 +599,9 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.repo, "repo", "", "configured repository id")
 	flags.StringVar(&opts.name, "name", "", "repository name")
 	flags.StringVar(&opts.id, "id", "", "record id")
+	flags.StringVar(&opts.mirrorID, "mirror-id", "", "push mirror id")
+	flags.StringVar(&opts.after, "after", "", "RFC3339 freshness barrier")
+	flags.IntVar(&opts.timeoutSeconds, "timeout-seconds", 0, "wait timeout in seconds")
 	flags.IntVar(&opts.number, "number", 0, "issue number")
 	flags.StringVar(&opts.commentID, "comment-id", "", "comment id")
 	flags.StringVar(&opts.discussionID, "discussion-id", "", "review discussion id")
@@ -1905,12 +1915,25 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, renderMilestonesText)
-	case "push-mirrors":
+	case "list-push-mirrors", "push-mirrors":
 		result, err := svc.ListPushRemoteMirrors(ctx, service.PushMirrorListRequest{RepoID: opts.repo, Repo: opts.repo})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, renderPushMirrorsText)
+	case "trigger-push-mirror":
+		opts.id = opts.mirrorID
+		return dispatchWrite(ctx, svc.TriggerPushRemoteMirror, command, opts, stdout, stderr, plan)
+	case "wait-push-mirror":
+		after, err := parseOptionalRFC3339(opts.after)
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		result, err := svc.WaitPushRemoteMirror(ctx, service.PushMirrorWaitRequest{RepoID: opts.repo, Repo: opts.repo, MirrorID: opts.mirrorID, After: after, TimeoutSeconds: opts.timeoutSeconds})
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, renderPushMirrorWaitText)
 	case "create-milestone":
 		return dispatchWrite(ctx, svc.CreateMilestone, command, opts, stdout, stderr, plan)
 	case "update-milestone":
@@ -1977,6 +2000,9 @@ func validateWriteOptions(command string, opts options) error {
 	}
 	if opts.live && opts.dryRun {
 		return service.ErrInvalidQuery{Field: "write_mode", Message: "--live conflicts with --dry-run"}
+	}
+	if command == "trigger-push-mirror" && !opts.live && !opts.dryRun {
+		return service.ErrInvalidQuery{Field: "write_mode", Message: "trigger-push-mirror requires --live or --dry-run"}
 	}
 	if (opts.offline || opts.fixture) && !opts.dryRun {
 		return service.ErrInvalidQuery{Field: "write_mode", Message: "offline write commands require --dry-run"}
@@ -2954,6 +2980,9 @@ func renderWriteText(w io.Writer, result service.WriteCommandResult) {
 	if result.Milestone != nil {
 		fmt.Fprintf(w, "milestone: id=%s remote_id=%s title=%s cleared=%t\n", result.Milestone.ID, result.Milestone.RemoteID, result.Milestone.Title, result.Milestone.Cleared)
 	}
+	if result.PushMirror != nil {
+		fmt.Fprintf(w, "push_mirror: mirror_id=%s status=%s previous_status=%s readback_status=%s triggered_at=%s\n", result.PushMirror.MirrorID, result.PushMirror.Status, result.PushMirror.PreviousStatus, result.PushMirror.ReadbackStatus, result.PushMirror.TriggeredAt.UTC().Format(time.RFC3339Nano))
+	}
 	if result.RemoteSlug != "" {
 		fmt.Fprintf(w, "remote_slug: %s\n", result.RemoteSlug)
 	}
@@ -2980,6 +3009,29 @@ func renderPushMirrorsText(w io.Writer, result service.PushMirrorListResult) {
 	for _, mirror := range result.Mirrors {
 		fmt.Fprintf(w, "%s %s status=%s failures=%d private=%t force=%t destination=%s\n", mirror.ID, mirror.RemoteID, mirror.UpdateStatus, mirror.NumberOfFailures, mirror.Private, mirror.Force, mirror.Destination)
 	}
+}
+
+func renderPushMirrorWaitText(w io.Writer, result service.PushMirrorWaitResult) {
+	fmt.Fprintf(w, "wait-push-mirror: repo_id=%s mirror_id=%s status=%s update_status=%s failures=%d last_update_at=%s last_successful_update_at=%s evidence=%s\n", result.RepoID, result.MirrorID, result.Status, result.UpdateStatus, result.NumberOfFailures, optionalTimestamp(result.LastUpdateAt), optionalTimestamp(result.LastSuccessfulUpdateAt), result.Evidence)
+}
+
+func optionalTimestamp(value time.Time) string {
+	if value.IsZero() {
+		return "-"
+	}
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func parseOptionalRFC3339(raw string) (time.Time, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return time.Time{}, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, service.ErrInvalidQuery{Field: "after", Message: "must be an RFC3339 timestamp"}
+	}
+	return parsed.UTC(), nil
 }
 
 func renderPublishReleaseText(w io.Writer, result service.PublishReleaseResult) {
@@ -3163,6 +3215,13 @@ func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {
 	if errors.As(err, &rateLimited) {
 		ctx.HTTPAttempted = true
 		ctx.HTTPStatus = http.StatusTooManyRequests
+	}
+	var mirrorSyncInProgress gitcode.ErrPushMirrorSyncInProgress
+	if errors.As(err, &mirrorSyncInProgress) {
+		ctx.HTTPAttempted = true
+		ctx.HTTPStatus = http.StatusForbidden
+		ctx.APIFailure = true
+		ctx.RetryableProviderFailure = true
 	}
 	var auth gitcode.ErrAuthExpired
 	if errors.As(err, &auth) {
@@ -3941,15 +4000,37 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --per-page N        records per page")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
-	case "push-mirrors":
-		fmt.Fprintln(w, "Usage: gitcode-mcp push-mirrors --repo REPO")
+	case "list-push-mirrors", "push-mirrors":
+		fmt.Fprintln(w, "Usage: gitcode-mcp list-push-mirrors --repo REPO")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "List repository push mirrors and refresh sanitized cached records.")
+		fmt.Fprintln(w, "`push-mirrors` remains a backward-compatible alias.")
 		fmt.Fprintln(w, "Credentials, query parameters, and fragments are removed from mirror destinations.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "trigger-push-mirror":
+		fmt.Fprintln(w, "Usage: gitcode-mcp trigger-push-mirror --repo REPO [--mirror-id ID] --live --idempotency-key KEY")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Trigger a configured push mirror through an audited live write.")
+		fmt.Fprintln(w, "The mirror id may be omitted only when exactly one mirror is configured.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO           repository id (required)")
+		fmt.Fprintln(w, "  --mirror-id ID        configured mirror id")
+		fmt.Fprintln(w, "  --live                required live write acknowledgement")
+		fmt.Fprintln(w, "  --idempotency-key KEY idempotency key")
+		fmt.Fprintln(w, "  --format FORMAT       output format (text, json)")
+	case "wait-push-mirror":
+		fmt.Fprintln(w, "Usage: gitcode-mcp wait-push-mirror --repo REPO [--mirror-id ID] [--after RFC3339] [--timeout-seconds N]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Poll sanitized live status until the mirror finishes, fails, or times out.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO           repository id (required)")
+		fmt.Fprintln(w, "  --mirror-id ID        configured mirror id")
+		fmt.Fprintln(w, "  --after RFC3339       require terminal update at or after this timestamp")
+		fmt.Fprintln(w, "  --timeout-seconds N   wait timeout, 1-600 (default 120)")
+		fmt.Fprintln(w, "  --format FORMAT       output format (text, json)")
 	case "create-milestone":
 		fmt.Fprintln(w, "Usage: gitcode-mcp create-milestone --repo REPO --title TITLE --due-on YYYY-MM-DD [--description TEXT] [--state open|closed] [--idempotency-key KEY]")
 		fmt.Fprintln(w)

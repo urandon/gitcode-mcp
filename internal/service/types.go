@@ -871,26 +871,29 @@ type WriteCommandRequest struct {
 	Labels         []string  `json:"labels,omitempty"`
 	Strategy       string    `json:"strategy,omitempty"`
 	IdempotencyKey string    `json:"idempotency_key,omitempty"`
+
+	pushMirrorPreviousStatus string
 }
 
 type WriteCommandResult struct {
-	Command           string                 `json:"command"`
-	Status            string                 `json:"status"`
-	RepoID            string                 `json:"repo_id,omitempty"`
-	ID                string                 `json:"id,omitempty"`
-	RemoteID          string                 `json:"remote_id,omitempty"`
-	RemoteNumber      int                    `json:"remote_number,omitempty"`
-	RemoteSlug        string                 `json:"remote_slug,omitempty"`
-	RemoteRevision    string                 `json:"remote_revision,omitempty"`
-	APIPath           string                 `json:"api_path,omitempty"`
-	CachePath         string                 `json:"cache_path,omitempty"`
-	BrowserURL        string                 `json:"browser_url,omitempty"`
-	IdempotencyKey    string                 `json:"idempotency_key"`
-	SourceFingerprint string                 `json:"source_fingerprint,omitempty"`
-	Replayed          bool                   `json:"replayed,omitempty"`
-	Milestone         *WriteMilestoneReceipt `json:"milestone,omitempty"`
-	Evidence          string                 `json:"evidence,omitempty"`
-	GeneratedAt       time.Time              `json:"generated_at"`
+	Command           string                  `json:"command"`
+	Status            string                  `json:"status"`
+	RepoID            string                  `json:"repo_id,omitempty"`
+	ID                string                  `json:"id,omitempty"`
+	RemoteID          string                  `json:"remote_id,omitempty"`
+	RemoteNumber      int                     `json:"remote_number,omitempty"`
+	RemoteSlug        string                  `json:"remote_slug,omitempty"`
+	RemoteRevision    string                  `json:"remote_revision,omitempty"`
+	APIPath           string                  `json:"api_path,omitempty"`
+	CachePath         string                  `json:"cache_path,omitempty"`
+	BrowserURL        string                  `json:"browser_url,omitempty"`
+	IdempotencyKey    string                  `json:"idempotency_key"`
+	SourceFingerprint string                  `json:"source_fingerprint,omitempty"`
+	Replayed          bool                    `json:"replayed,omitempty"`
+	Milestone         *WriteMilestoneReceipt  `json:"milestone,omitempty"`
+	PushMirror        *WritePushMirrorReceipt `json:"push_mirror,omitempty"`
+	Evidence          string                  `json:"evidence,omitempty"`
+	GeneratedAt       time.Time               `json:"generated_at"`
 }
 
 type WriteMilestoneReceipt struct {
@@ -898,6 +901,14 @@ type WriteMilestoneReceipt struct {
 	RemoteID string `json:"remote_id,omitempty"`
 	Title    string `json:"title,omitempty"`
 	Cleared  bool   `json:"cleared,omitempty"`
+}
+
+type WritePushMirrorReceipt struct {
+	MirrorID       string    `json:"mirror_id"`
+	Status         string    `json:"status"`
+	PreviousStatus string    `json:"previous_status,omitempty"`
+	ReadbackStatus string    `json:"readback_status,omitempty"`
+	TriggeredAt    time.Time `json:"triggered_at"`
 }
 
 type MilestoneRecord struct {
@@ -956,6 +967,30 @@ type PushMirrorListResult struct {
 	Count       int                `json:"count"`
 	Evidence    string             `json:"evidence,omitempty"`
 	GeneratedAt time.Time          `json:"generated_at"`
+}
+
+type PushMirrorWaitRequest struct {
+	RepoID         string        `json:"repo_id,omitempty"`
+	Repo           string        `json:"repo,omitempty"`
+	MirrorID       string        `json:"mirror_id,omitempty"`
+	After          time.Time     `json:"after,omitempty"`
+	TimeoutSeconds int           `json:"timeout_seconds,omitempty"`
+	Timeout        time.Duration `json:"-"`
+	PollInterval   time.Duration `json:"-"`
+}
+
+type PushMirrorWaitResult struct {
+	RepoID                 string    `json:"repo_id"`
+	MirrorID               string    `json:"mirror_id"`
+	Status                 string    `json:"status"`
+	UpdateStatus           string    `json:"update_status,omitempty"`
+	NumberOfFailures       int       `json:"number_of_failures"`
+	Message                string    `json:"message,omitempty"`
+	LastUpdateAt           time.Time `json:"last_update_at,omitempty"`
+	LastSuccessfulUpdateAt time.Time `json:"last_successful_update_at,omitempty"`
+	After                  time.Time `json:"after,omitempty"`
+	Evidence               string    `json:"evidence,omitempty"`
+	GeneratedAt            time.Time `json:"generated_at"`
 }
 
 type PublishReleaseRequest struct {
