@@ -14,11 +14,12 @@ const (
 	ProductAreaPullRequests ProductArea = "pull_requests"
 	ProductAreaComments     ProductArea = "comments"
 	ProductAreaWiki         ProductArea = "wiki"
+	ProductAreaPushMirrors  ProductArea = "push_mirrors"
 )
 
 func validProductArea(area ProductArea) bool {
 	switch area {
-	case ProductAreaIssues, ProductAreaLabels, ProductAreaMilestones, ProductAreaPullRequests, ProductAreaComments, ProductAreaWiki:
+	case ProductAreaIssues, ProductAreaLabels, ProductAreaMilestones, ProductAreaPullRequests, ProductAreaComments, ProductAreaWiki, ProductAreaPushMirrors:
 		return true
 	}
 	return false
@@ -95,6 +96,12 @@ func DefaultRouteSchemaMatrix() RouteSchemaMatrix {
 			},
 			ProductAreaMilestones: {
 				Area:     ProductAreaMilestones,
+				Status:   SupportStatusSupported,
+				Route:    RouteFamilyAPIV5,
+				Evidence: EvidenceClassOpenAPI,
+			},
+			ProductAreaPushMirrors: {
+				Area:     ProductAreaPushMirrors,
 				Status:   SupportStatusSupported,
 				Route:    RouteFamilyAPIV5,
 				Evidence: EvidenceClassOpenAPI,

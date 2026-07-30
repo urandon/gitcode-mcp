@@ -96,7 +96,13 @@ Parent restart behavior is intentionally conservative because the public issue A
 
 The command context carries the configured `default_timeout`, including the `--timeout` override, so large collection syncs have a whole-operation deadline in addition to provider-level request timeouts. When the deadline or caller cancellation fires, completed resource commits remain visible in cache and the sync response reports partial counts plus a typed diagnostic such as `sync_timeout` or `sync_cancelled`.
 
-Labels and milestones are not yet exposed as bulk sync service surfaces. The `milestones` CLI command and `list_milestones` MCP tool perform a live list read and refresh cached milestone records, but they do not yet maintain collection frontiers. When milestone bulk sync is added, it should use the same `SyncBounds` and partial-result contract.
+Labels, milestones, and push mirrors are not yet exposed as bulk sync service
+surfaces. The `milestones` CLI command and `list_milestones` MCP tool perform a
+live list read and refresh cached milestone records. The `push-mirrors` CLI
+command and `list_push_remote_mirrors` MCP tool similarly perform an explicit
+live read and refresh sanitized `push_remote_mirror` records. These surfaces do
+not maintain collection frontiers. When milestone or mirror bulk sync is added,
+it should use the same `SyncBounds` and partial-result contract.
 
 Milestone-aware issue writes also refresh a deterministic `milestone` link from
 the cached issue source to the resolved `MILESTONE-<id>` source. The link kind
@@ -137,6 +143,7 @@ Current collection behavior:
 | Issue comments | Issue list `updated_at` plus `comments` count; the repository aggregate exposes comment `updated_at` and `target.issue.{id,number}`. | `--issues` creates or refreshes durable queue items. Once the parent frontier is complete, `--issue-comments` scans the aggregate route, commits pages idempotently, and reconciles cached parents only after a complete pass. Bounds/interruption leave work pending for page-1 replay. Missing aggregate support or an incomplete parent frontier uses the per-issue fallback. Targeted `--input issue:N` remains an immediate single-record refresh path. |
 | Labels | No reliable update marker documented for this cache surface | Not a first-class bulk sync collection yet; use full refresh or a future invalidation strategy. |
 | Milestones | Model supports `updated_at`, but list behavior and cache surface need verification | Not a first-class bulk sync collection yet; do not claim metadata skip until live discovery confirms the marker and persistence contract. |
+| Push remote mirrors | Stable id plus status/failure/update metadata; no verified collection revision marker | Explicit live list refreshes credential-redacted cache records. No frontier or metadata-skip claim. |
 
 The compatibility counters keep their older meaning: `fetched` counts one processed remote candidate and `skipped` counts unchanged work. Metadata-first sync adds `listed`, `fetched_detail`, and `skipped_by_revision` so callers can distinguish "listed and skipped without body fetch" from "fetched detail and found no content delta."
 

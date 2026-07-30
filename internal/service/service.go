@@ -250,6 +250,10 @@ func (sanitizedFixtureClient) ListMilestones(context.Context, gitcode.MilestoneL
 	return gitcode.Page[gitcode.Milestone]{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
 
+func (sanitizedFixtureClient) ListPushRemoteMirrors(context.Context, gitcode.PushMirrorListRequest) ([]gitcode.PushMirror, error) {
+	return nil, gitcode.FixtureReadOnlyError("sanitized fixture read")
+}
+
 func (sanitizedFixtureClient) GetMilestone(context.Context, gitcode.MilestoneRequest) (gitcode.Milestone, error) {
 	return gitcode.Milestone{}, gitcode.FixtureReadOnlyError("sanitized fixture write")
 }
@@ -3041,6 +3045,39 @@ func (s *Service) ListMilestones(ctx context.Context, req MilestoneListRequest) 
 	return MilestoneListResult{RepoID: route.RepoID, Milestones: milestones, Page: page.Page, PerPage: page.PerPage, Count: len(milestones), Evidence: "adapter-confirmed read with cache refresh", GeneratedAt: now}, nil
 }
 
+func (s *Service) ListPushRemoteMirrors(ctx context.Context, req PushMirrorListRequest) (PushMirrorListResult, error) {
+	repoID := firstNonEmptyString(req.RepoID, req.Repo)
+	route, err := s.BuildAdapterRoute(ctx, repoID, RepositoryScopeIssues)
+	if err != nil {
+		return PushMirrorListResult{}, err
+	}
+	mirrors, err := s.client.ListPushRemoteMirrors(ctx, gitcode.PushMirrorListRequest{Owner: route.Owner, Repo: route.Name})
+	if err != nil {
+		return PushMirrorListResult{}, err
+	}
+	sort.Slice(mirrors, func(i, j int) bool {
+		left, leftErr := strconv.ParseInt(mirrors[i].RemoteID, 10, 64)
+		right, rightErr := strconv.ParseInt(mirrors[j].RemoteID, 10, 64)
+		if leftErr == nil && rightErr == nil && left != right {
+			return left < right
+		}
+		if mirrors[i].RemoteID != mirrors[j].RemoteID {
+			return mirrors[i].RemoteID < mirrors[j].RemoteID
+		}
+		return mirrors[i].URL < mirrors[j].URL
+	})
+	now := s.now().UTC()
+	records := make([]PushMirrorRecord, 0, len(mirrors))
+	for _, mirror := range mirrors {
+		record, graph := pushMirrorRecordGraph(route.RepoID, mirror, now)
+		if err := s.store.UpsertRecordGraph(ctx, graph); err != nil {
+			return PushMirrorListResult{}, normalizeError(err, "push mirror cache", route.RepoID)
+		}
+		records = append(records, record)
+	}
+	return PushMirrorListResult{RepoID: route.RepoID, Mirrors: records, Count: len(records), Evidence: "adapter-confirmed read with sanitized cache refresh", GeneratedAt: now}, nil
+}
+
 func (s *Service) CreateMilestone(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
 	if strings.TrimSpace(req.Title) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "milestone.title", Message: "title is required"}
@@ -3977,6 +4014,8 @@ func fallbackSourceID(remoteType, remoteID string) string {
 		return "PRCOMMENT-" + clean
 	case "milestone", "milestones":
 		return "MILESTONE-" + clean
+	case "push_mirror", "push_mirrors", "pushmirror", "push_remote_mirror":
+		return "PUSHMIRROR-" + clean
 	case "wiki", "page", "remote":
 		return "WIKI-" + clean
 	default:
@@ -5030,6 +5069,86 @@ func parseMilestoneTime(raw string) time.Time {
 		return time.Time{}
 	}
 	return t.UTC()
+}
+
+func pushMirrorRecordGraph(repoID string, mirror gitcode.PushMirror, now time.Time) (PushMirrorRecord, cache.RecordGraph) {
+	stableID := fallbackSourceID("pushmirror", mirror.RemoteID)
+	created := parseMilestoneTime(mirror.CreatedAt)
+	updated := parseMilestoneTime(mirror.LastUpdateAt)
+	if updated.IsZero() {
+		updated = parseMilestoneTime(mirror.LastSuccessfulUpdateAt)
+	}
+	if updated.IsZero() {
+		updated = created
+	}
+	if updated.IsZero() {
+		updated = now
+	}
+	if created.IsZero() {
+		created = updated
+	}
+	status := firstNonEmptyString(mirror.UpdateStatus, "configured")
+	body := fmt.Sprintf(
+		"destination: %s\nforce: %t\nprivate: %t\nupdate_status: %s\nnumber_of_failures: %d\nmessage: %s\nlast_update_at: %s\nlast_successful_update_at: %s\n",
+		mirror.URL,
+		mirror.Force,
+		mirror.Private,
+		status,
+		mirror.NumberOfFailures,
+		mirror.Message,
+		mirror.LastUpdateAt,
+		mirror.LastSuccessfulUpdateAt,
+	)
+	hash := contentHash(mirror.RemoteID, mirror.ProjectID, mirror.URL, mirror.Force, mirror.Private, status, mirror.NumberOfFailures, mirror.Message, mirror.CreatedAt, mirror.LastUpdateAt, mirror.LastSuccessfulUpdateAt)
+	record := cache.Record{
+		RepoID:         repoID,
+		ID:             stableID,
+		Type:           "push_remote_mirror",
+		Path:           "push-mirrors/" + mirror.RemoteID + ".md",
+		Title:          "Push mirror " + mirror.RemoteID,
+		Body:           body,
+		Status:         status,
+		ContentHash:    hash,
+		Provenance:     cache.ProvenanceRemote,
+		RemoteType:     "push_remote_mirror",
+		RemoteID:       mirror.RemoteID,
+		RemoteRevision: hash,
+		CreatedAt:      created,
+		UpdatedAt:      updated,
+	}
+	graph := cache.RecordGraph{
+		Record: record,
+		Identities: []cache.Identity{{
+			RepoID:    repoID,
+			SourceID:  stableID,
+			AliasType: "push_remote_mirror",
+			Alias:     mirror.RemoteID,
+			Remote:    cache.RemoteAlias{Type: "push_remote_mirror", ID: mirror.RemoteID},
+		}},
+		RemoteRevisions: []cache.RemoteRevision{{
+			RepoID:         repoID,
+			RecordID:       stableID,
+			RemoteType:     "push_remote_mirror",
+			RemoteID:       mirror.RemoteID,
+			RemoteRevision: hash,
+			Status:         "fresh",
+			LastFetchedAt:  now,
+		}},
+	}
+	return PushMirrorRecord{
+		ID:                     stableID,
+		RemoteID:               mirror.RemoteID,
+		ProjectID:              mirror.ProjectID,
+		Destination:            mirror.URL,
+		Force:                  mirror.Force,
+		Private:                mirror.Private,
+		UpdateStatus:           mirror.UpdateStatus,
+		NumberOfFailures:       mirror.NumberOfFailures,
+		Message:                mirror.Message,
+		CreatedAt:              parseMilestoneTime(mirror.CreatedAt),
+		LastUpdateAt:           parseMilestoneTime(mirror.LastUpdateAt),
+		LastSuccessfulUpdateAt: parseMilestoneTime(mirror.LastSuccessfulUpdateAt),
+	}, graph
 }
 
 func (s *Service) wikiWriteGraph(repoID string, page gitcode.WikiPage, result gitcode.WriteResult[gitcode.WikiPage], now time.Time) (writeConfirmation, cache.RecordGraph) {

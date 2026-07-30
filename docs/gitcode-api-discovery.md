@@ -29,6 +29,39 @@ Discovery status for metadata-first sync:
 | Issue comments | Comment payloads expose stable ids, body, and `updated_at`; the repository aggregate includes `target.issue.id` and `target.issue.number`; issue list payload exposes `comments` count and `updated_at`. | An independent durable queue is populated by parent issue traversal. With a complete parent frontier, `--issue-comments` uses the aggregate collection and reconciles it to stable cached parents. Bounds or interruption replay from page 1; rate limiting stops without per-issue fan-out. The per-issue route remains the compatibility fallback. |
 | Labels | No reliable update marker documented for the current cache surface. | Treat as full refresh or unsupported for metadata skip until discovery proves a marker. |
 | Milestones | Adapter model includes `UpdatedAt`, but list behavior and persistence are not verified for collection sync. | Not yet a first-class bulk collection surface; do not report `skipped_by_revision`. |
+| Push remote mirrors | The documented v5 list exposes stable `id`, `project_id`, destination `url`, force/private flags, update status, failure count/message, and update timestamps. | Implemented as an explicit read-only live list with a sanitized cache projection. It is not a bulk frontier collection. |
+
+## Repository Push Remote Mirrors
+
+Current GitCode API documentation declares the read-only repository route:
+
+```http
+GET /api/v5/repos/{owner}/{repo}/push_remote_mirrors
+Authorization: Bearer $GITCODE_TOKEN
+Accept: application/json
+```
+
+A minimal live probe on 2026-07-30 confirmed that the configured personal token
+is accepted and that the response is a JSON array. Observed item fields are
+`id`, `project_id`, `url`, `force`, `is_private`, `update_status`,
+`number_of_failures`, `message`, `created_at`, `last_update_at`, and
+`last_successful_update_at`.
+
+The GitCode settings UI also uses a browser-coupled v2 route:
+
+```http
+GET https://web-api.gitcode.com/api/v2/projects/{owner}%2F{repo}/push_remote_mirrors?project_id={owner}%252F{repo}
+```
+
+The normal configured API token received HTTP 403 from that surface. The
+adapter therefore uses only the documented v5 route and does not reproduce
+browser cookies, JWTs, page metadata, device identifiers, or double-encoded UI
+query behavior.
+
+Push mirror destination URLs are credential-bearing inputs. The adapter removes
+URL user-info, query strings, and fragments during decode; invalid or
+unsupported URL forms become `[redacted]`. Only that sanitized representation
+may reach the service, cache, CLI, MCP, logs, tests, or snapshots.
 
 ## Issue State Update Transitions
 

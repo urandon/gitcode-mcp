@@ -16,6 +16,7 @@ The project is self-contained and public-safe. Source repositories, trackers, an
 - Runs an MCP server over cached data for agent workflows.
 - Performs live writes only through explicit commands with idempotency keys and audit evidence.
 - Supports issue, wiki, comment, and pull request workflows from the same cache-first service layer.
+- Inspects repository push mirrors through the official v5 API while stripping destination credentials before cache, CLI, or MCP output.
 
 ## Quick Start
 
@@ -44,6 +45,7 @@ For semantic retrieval, start with [RAG Setup and Operation](docs/rag.md).
 - Understand sync behavior: [Cache and Sync Model](docs/cache-and-sync-model.md)
 - Set up semantic retrieval: [RAG Setup and Operation](docs/rag.md)
 - Review live API findings: [GitCode API Discovery](docs/gitcode-api-discovery.md)
+- Inspect repository mirrors safely: [Push Mirror Inspection](docs/push-mirrors.md)
 
 ## Repository Layout
 
