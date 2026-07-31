@@ -200,6 +200,22 @@ type ErrWriteConfirmationIncomplete struct {
 	Cause    error
 }
 
+type ErrPushMirrorSyncInProgress struct {
+	Endpoint string
+	Message  string
+}
+
+func (e ErrPushMirrorSyncInProgress) Error() string {
+	if e.Message == "" {
+		e.Message = "push mirror synchronization is already running or cooling down"
+	}
+	return fmt.Sprintf("gitcode: push mirror sync unavailable for %s: %s", e.Endpoint, e.Message)
+}
+
+func (e ErrPushMirrorSyncInProgress) DiagnosticCode() string {
+	return "push_mirror_sync_in_progress"
+}
+
 func (e ErrWriteConfirmationIncomplete) Error() string {
 	if e.Message == "" {
 		e.Message = "write confirmation incomplete"

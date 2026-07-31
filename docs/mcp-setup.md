@@ -240,6 +240,8 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 | `update_pr` | Update live pull request metadata through the audited write lifecycle |
 | `list_milestones` | List live repository milestones and refresh cached milestone records |
 | `list_push_remote_mirrors` | List live repository push mirrors and refresh credential-redacted cached records |
+| `trigger_push_remote_mirror` | Trigger one configured push mirror through the audited write lifecycle |
+| `wait_push_remote_mirror` | Poll sanitized mirror status until finished, failed, or timed out |
 | `create_milestone` | Create a live milestone through the audited write lifecycle |
 | `update_milestone` | Update live milestone metadata through the audited write lifecycle |
 | `set_issue_milestone` | Assign a live issue milestone through the audited write lifecycle |
@@ -260,7 +262,12 @@ MCP write tools require `write_mode: "live"` and use the same service write path
 
 `list_push_remote_mirrors` is also read-only and requires only `repo_id`. It
 removes destination URL user-info, query strings, and fragments before returning
-or caching mirror records. See [Push Mirror Inspection](push-mirrors.md).
+or caching mirror records. `trigger_push_remote_mirror` requires
+`write_mode: "live"` and a caller-provided `idempotency_key`; `mirror_id` may be
+omitted only for a repository with exactly one configured mirror.
+`wait_push_remote_mirror` accepts an optional RFC3339 `after` barrier and a
+bounded `timeout_seconds`. Trigger and wait results contain no destination
+field. See [Push Mirror Operations](push-mirrors.md).
 
 Some CLI operations are intentionally not exposed through normal MCP write access. Credential management, raw escape hatches, destructive local cache maintenance, cache resets, and schema migrations must remain CLI-only unless a future capability registry entry documents a stricter MCP confirmation and safety contract.
 

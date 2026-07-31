@@ -37,6 +37,7 @@ type Provider interface {
 	DeleteWikiPage(context.Context, DeleteWikiPageRequest, WriteOptions) (WriteResult[WikiPage], error)
 	ListMilestones(context.Context, MilestoneListRequest) (Page[Milestone], error)
 	ListPushRemoteMirrors(context.Context, PushMirrorListRequest) ([]PushMirror, error)
+	TriggerPushRemoteMirror(context.Context, PushMirrorTriggerRequest, WriteOptions) (WriteResult[PushMirror], error)
 	GetMilestone(context.Context, MilestoneRequest) (Milestone, error)
 	CreateMilestone(context.Context, MilestoneWriteRequest, WriteOptions) (WriteResult[Milestone], error)
 	UpdateMilestone(context.Context, MilestoneWriteRequest, WriteOptions) (WriteResult[Milestone], error)
@@ -325,6 +326,13 @@ func (p liveProvider) ListPushRemoteMirrors(ctx context.Context, req PushMirrorL
 	return p.HTTPClient.ListPushRemoteMirrors(ctx, req)
 }
 
+func (p liveProvider) TriggerPushRemoteMirror(ctx context.Context, req PushMirrorTriggerRequest, opts WriteOptions) (WriteResult[PushMirror], error) {
+	if err := p.matrix.Preflight(ProductAreaPushMirrors); err != nil {
+		return WriteResult[PushMirror]{}, err
+	}
+	return p.HTTPClient.TriggerPushRemoteMirror(ctx, req, opts)
+}
+
 func (p liveProvider) GetMilestone(ctx context.Context, req MilestoneRequest) (Milestone, error) {
 	if err := p.matrix.Preflight(ProductAreaMilestones); err != nil {
 		return Milestone{}, err
@@ -454,6 +462,9 @@ func (p unavailableProvider) ListMilestones(context.Context, MilestoneListReques
 }
 func (p unavailableProvider) ListPushRemoteMirrors(context.Context, PushMirrorListRequest) ([]PushMirror, error) {
 	return nil, p.err()
+}
+func (p unavailableProvider) TriggerPushRemoteMirror(context.Context, PushMirrorTriggerRequest, WriteOptions) (WriteResult[PushMirror], error) {
+	return WriteResult[PushMirror]{}, p.err()
 }
 func (p unavailableProvider) GetMilestone(context.Context, MilestoneRequest) (Milestone, error) {
 	return Milestone{}, p.err()

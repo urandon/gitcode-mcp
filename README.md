@@ -45,7 +45,7 @@ For semantic retrieval, start with [RAG Setup and Operation](docs/rag.md).
 - Understand sync behavior: [Cache and Sync Model](docs/cache-and-sync-model.md)
 - Set up semantic retrieval: [RAG Setup and Operation](docs/rag.md)
 - Review live API findings: [GitCode API Discovery](docs/gitcode-api-discovery.md)
-- Inspect repository mirrors safely: [Push Mirror Inspection](docs/push-mirrors.md)
+- List, trigger, and monitor repository mirrors safely: [Push Mirror Operations](docs/push-mirrors.md)
 
 ## Repository Layout
 

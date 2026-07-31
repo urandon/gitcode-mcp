@@ -2,9 +2,13 @@ package gitcode
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -19,6 +23,12 @@ var pushMirrorURLPattern = regexp.MustCompile(`(?i)\b(?:https?|ssh|git)://[^\s<>
 type PushMirrorListRequest struct {
 	Owner string
 	Repo  string
+}
+
+type PushMirrorTriggerRequest struct {
+	Owner    string
+	Repo     string
+	MirrorID string
 }
 
 // PushMirror is sanitized at JSON decode time. URL and Message never contain
@@ -159,4 +169,76 @@ func (c *HTTPClient) ListPushRemoteMirrors(ctx context.Context, req PushMirrorLi
 		return nil, err
 	}
 	return mirrors, nil
+}
+
+func (c *HTTPClient) TriggerPushRemoteMirror(ctx context.Context, req PushMirrorTriggerRequest, opts WriteOptions) (WriteResult[PushMirror], error) {
+	if err := validateReadRepo(req.Owner, req.Repo); err != nil {
+		return WriteResult[PushMirror]{}, err
+	}
+	mirrorID, err := decodePushMirrorID("push_mirror.id", strings.TrimSpace(req.MirrorID), true)
+	if err != nil {
+		return WriteResult[PushMirror]{}, err
+	}
+	endpoint := triggerPushRemoteMirrorEndpoint(req.Owner, req.Repo, mirrorID)
+	payload := struct {
+		Force bool `json:"force"`
+	}{Force: true}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return WriteResult[PushMirror]{}, err
+	}
+	key := strings.TrimSpace(opts.IdempotencyKey)
+	if key == "" {
+		key = GenerateIdempotencyKey("TriggerPushRemoteMirror", req.Owner+"/"+req.Repo+"/push-mirrors/"+mirrorID, payload, opts)
+	}
+	responseBody, headers, err := c.bytesWithOptions(ctx, http.MethodPost, endpoint, nil, body, requestOptions{
+		knownRemoteAlias: true,
+		remoteAlias:      mirrorID,
+		idempotencyKey:   key,
+		localPayload:     body,
+		noRetry:          true,
+	})
+	if err != nil {
+		var forbidden ErrForbidden
+		if errors.As(err, &forbidden) && strings.Contains(strings.ToLower(forbidden.Message), "sync too frequently") {
+			return WriteResult[PushMirror]{}, ErrPushMirrorSyncInProgress{Endpoint: endpoint, Message: "sync too frequently; wait for the current synchronization or cooldown to finish"}
+		}
+		return WriteResult[PushMirror]{}, err
+	}
+
+	mirrors, err := c.ListPushRemoteMirrors(ctx, PushMirrorListRequest{Owner: req.Owner, Repo: req.Repo})
+	if err != nil {
+		return WriteResult[PushMirror]{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "trigger was accepted but sanitized readback failed", Cause: err}
+	}
+	var mirror PushMirror
+	found := false
+	for _, candidate := range mirrors {
+		if candidate.RemoteID == mirrorID {
+			mirror = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		return WriteResult[PushMirror]{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "trigger was accepted but mirror was absent from sanitized readback"}
+	}
+	responseHash := sha256.Sum256(responseBody)
+	payloadFingerprint := sha256.Sum256(RedactJSONBody(responseBody, req.Owner+"/"+req.Repo+"/push-mirrors/"+mirrorID))
+	providerStatus := headers.Get("Status")
+	if providerStatus == "" {
+		providerStatus = "2xx"
+	}
+	return WriteResult[PushMirror]{
+		Record:                     mirror,
+		Confirmed:                  true,
+		Operation:                  "TriggerPushRemoteMirror",
+		Target:                     req.Owner + "/" + req.Repo + "/push-mirrors/" + mirrorID,
+		ProviderStatus:             providerStatus + "-sanitized-readback",
+		RemoteID:                   mirrorID,
+		RemoteRevision:             hex.EncodeToString(responseHash[:]),
+		IdempotencyKey:             key,
+		ResponseHash:               hex.EncodeToString(responseHash[:]),
+		ConfirmedAt:                time.Now().UTC(),
+		ProviderPayloadFingerprint: hex.EncodeToString(payloadFingerprint[:]),
+	}, nil
 }

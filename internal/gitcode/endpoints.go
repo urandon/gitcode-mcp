@@ -131,6 +131,10 @@ func listPushRemoteMirrorsEndpoint(owner, repo string) string {
 	return endpointPath("/api/v5/repos/%s/%s/push_remote_mirrors", owner, repo)
 }
 
+func triggerPushRemoteMirrorEndpoint(owner, repo, mirrorID string) string {
+	return endpointPath("/api/v5/repos/%s/%s/push_remote_mirrors/%s", owner, repo, mirrorID)
+}
+
 func getMilestoneEndpoint(owner, repo string, id int) string {
 	return endpointPath("/api/v5/repos/%s/%s/milestones/%d", owner, repo, id)
 }

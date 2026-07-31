@@ -42,6 +42,7 @@ func TestClassifierLivePrecedenceAndHTTPInvariants(t *testing.T) {
 		{name: "SCN-DIAG-PRECEDENCE-13 401 without attempted is config credential", err: codedError{code: "auth_expired", msg: "auth"}, ctx: CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusUnauthorized}, want: CodeConfigCredential, exitClass: "configuration"},
 		{name: "SCN-DIAG-PRECEDENCE-14 live fixture sentinel", err: codedError{code: "write_fixture_fallback_detected", msg: "fixture client is read-only"}, ctx: CommandContext{ProviderMode: "live-http"}, want: CodeFixtureFallbackDetected, exitClass: "fixture"},
 		{name: "SCN-DIAG-PRECEDENCE-15 non-live fixture read only", err: codedError{code: "fixture_read_only", msg: "fixture client is read-only"}, ctx: CommandContext{ProviderMode: "offline-fixture"}, want: CodeFixtureReadOnly, exitClass: "fixture"},
+		{name: "SCN-DIAG-PRECEDENCE-16 push mirror cooldown is retryable provider response", err: codedError{code: "push_mirror_sync_in_progress", msg: "cooldown"}, ctx: CommandContext{ProviderMode: "live-http", HTTPStatus: http.StatusForbidden, HTTPAttempted: true, RetryableProviderFailure: true}, want: CodePushMirrorSyncInProgress, http: true, retryable: true, exitClass: "provider"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

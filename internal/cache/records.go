@@ -364,6 +364,43 @@ func (s *SQLiteStore) RecordAuditEvent(ctx context.Context, entry AuditTrailEntr
 	return err
 }
 
+// ClaimAuditEvent atomically inserts a new audit claim or transitions a known
+// failed attempt back to in-progress. Existing in-progress, succeeded, partial,
+// or conflicting claims are left untouched.
+func (s *SQLiteStore) ClaimAuditEvent(ctx context.Context, entry AuditTrailEntry) (bool, error) {
+	if entry.CreatedAt.IsZero() {
+		entry.CreatedAt = time.Unix(0, 0).UTC()
+	}
+	metadata, err := marshalJSON(entry.RequestMetadata)
+	if err != nil {
+		return false, err
+	}
+	result, err := s.db.ExecContext(ctx, `INSERT INTO audit_trail (repo_id, id, operation, command, mode, record_id, remote_type, remote_id, idempotency_key, status, message, payload_hash, request_metadata, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(repo_id, id) DO UPDATE SET
+	operation = excluded.operation,
+	command = excluded.command,
+	mode = excluded.mode,
+	record_id = excluded.record_id,
+	remote_type = excluded.remote_type,
+	remote_id = excluded.remote_id,
+	idempotency_key = excluded.idempotency_key,
+	status = excluded.status,
+	message = excluded.message,
+	payload_hash = excluded.payload_hash,
+	request_metadata = excluded.request_metadata
+WHERE audit_trail.status = 'failed' AND audit_trail.payload_hash = excluded.payload_hash`,
+		entry.RepoID, entry.ID, entry.Operation, entry.Command, entry.Mode, entry.RecordID, entry.RemoteType, entry.RemoteID, entry.IdempotencyKey, entry.Status, entry.Message, entry.PayloadHash, metadata, entry.CreatedAt.Format(time.RFC3339Nano))
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
+}
+
 func (s *SQLiteStore) GetAuditEventByKey(ctx context.Context, repoID, key string) (*AuditTrailEntry, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT repo_id, id, operation, command, mode, record_id, remote_type, remote_id, idempotency_key, status, message, payload_hash, request_metadata, created_at FROM audit_trail WHERE repo_id = ? AND idempotency_key = ? ORDER BY created_at DESC LIMIT 1`, repoID, key)
 	entry, err := scanAuditTrailRow(row)

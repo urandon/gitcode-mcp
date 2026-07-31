@@ -457,6 +457,55 @@ func TestScenario009AuditConfirmationPersistsInspectableMetadata(t *testing.T) {
 	}
 }
 
+func TestAuditClaimIsAtomicAndOnlyFailedAttemptCanRetry(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	entry := AuditTrailEntry{
+		RepoID:         "fixture-a",
+		ID:             "write-mirror-key",
+		Operation:      "trigger-push-mirror",
+		Command:        "trigger-push-mirror",
+		Mode:           "live",
+		RecordID:       "PUSHMIRROR-17",
+		RemoteType:     "push_remote_mirror",
+		RemoteID:       "17",
+		IdempotencyKey: "mirror-key",
+		Status:         "in_progress",
+		PayloadHash:    "payload-hash",
+		CreatedAt:      time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC),
+	}
+
+	claimed, err := store.ClaimAuditEvent(ctx, entry)
+	if err != nil || !claimed {
+		t.Fatalf("first claim=%t err=%v", claimed, err)
+	}
+	claimed, err = store.ClaimAuditEvent(ctx, entry)
+	if err != nil || claimed {
+		t.Fatalf("duplicate in-progress claim=%t err=%v", claimed, err)
+	}
+
+	failed := entry
+	failed.Status = "failed"
+	if err := store.RecordAuditEvent(ctx, failed); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = store.ClaimAuditEvent(ctx, entry)
+	if err != nil || !claimed {
+		t.Fatalf("failed retry claim=%t err=%v", claimed, err)
+	}
+
+	succeeded := entry
+	succeeded.Status = "succeeded"
+	if err := store.RecordAuditEvent(ctx, succeeded); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = store.ClaimAuditEvent(ctx, entry)
+	if err != nil || claimed {
+		t.Fatalf("succeeded claim=%t err=%v", claimed, err)
+	}
+}
+
 func TestScenario008CacheConfirmationIdempotentUpsert(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)

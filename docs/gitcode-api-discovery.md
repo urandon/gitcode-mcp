@@ -29,11 +29,11 @@ Discovery status for metadata-first sync:
 | Issue comments | Comment payloads expose stable ids, body, and `updated_at`; the repository aggregate includes `target.issue.id` and `target.issue.number`; issue list payload exposes `comments` count and `updated_at`. | An independent durable queue is populated by parent issue traversal. With a complete parent frontier, `--issue-comments` uses the aggregate collection and reconciles it to stable cached parents. Bounds or interruption replay from page 1; rate limiting stops without per-issue fan-out. The per-issue route remains the compatibility fallback. |
 | Labels | No reliable update marker documented for the current cache surface. | Treat as full refresh or unsupported for metadata skip until discovery proves a marker. |
 | Milestones | Adapter model includes `UpdatedAt`, but list behavior and persistence are not verified for collection sync. | Not yet a first-class bulk collection surface; do not report `skipped_by_revision`. |
-| Push remote mirrors | The documented v5 list exposes stable `id`, `project_id`, destination `url`, force/private flags, update status, failure count/message, and update timestamps. | Implemented as an explicit read-only live list with a sanitized cache projection. It is not a bulk frontier collection. |
+| Push remote mirrors | The v5 list exposes stable `id`, `project_id`, destination `url`, force/private flags, update status, failure count/message, and update timestamps. The v5 item POST accepts `{"force":true}` for a manual trigger. | Implemented as explicit list, audited trigger, and bounded wait surfaces with sanitized cache projection. It is not a bulk frontier collection. |
 
 ## Repository Push Remote Mirrors
 
-Current GitCode API documentation declares the read-only repository route:
+The repository list route is:
 
 ```http
 GET /api/v5/repos/{owner}/{repo}/push_remote_mirrors
@@ -54,9 +54,33 @@ GET https://web-api.gitcode.com/api/v2/projects/{owner}%2F{repo}/push_remote_mir
 ```
 
 The normal configured API token received HTTP 403 from that surface. The
-adapter therefore uses only the documented v5 route and does not reproduce
+adapter therefore uses only the v5 repository route and does not reproduce
 browser cookies, JWTs, page metadata, device identifiers, or double-encoded UI
 query behavior.
+
+Frontend compatibility discovery on 2026-07-30 showed that the UI's **Sync
+Now** action posts `force: true` to the selected mirror item. The corresponding
+v5 repository route is:
+
+```http
+POST /api/v5/repos/{owner}/{repo}/push_remote_mirrors/{mirror-id}
+Authorization: Bearer $GITCODE_TOKEN
+Content-Type: application/json
+
+{"force":true}
+```
+
+A bounded live probe with a configured personal token reached the mirror
+operation and returned the provider's typed synchronization-cooldown response,
+confirming that the v5 POST is PAT-compatible. The adapter makes one POST
+attempt, then confirms a successful trigger through a sanitized v5 list
+readback. Because no server-side idempotency guarantee has been demonstrated,
+an ambiguous POST or readback result remains locally `in_progress` and blocks a
+same-key replay.
+
+Observed update states include `default`, `failed`, `update`, `processing`,
+`started`, and `finished`. The wait surface treats only `failed` and `finished`
+as terminal and returns `timeout` when its bounded polling interval expires.
 
 Push mirror destination URLs are credential-bearing inputs. The adapter removes
 URL user-info, query strings, and fragments during decode; invalid or

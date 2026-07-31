@@ -259,6 +259,10 @@ func (p *fixtureProvider) ListPushRemoteMirrors(context.Context, PushMirrorListR
 	return nil, FixtureReadOnlyError("ListPushRemoteMirrors")
 }
 
+func (p *fixtureProvider) TriggerPushRemoteMirror(context.Context, PushMirrorTriggerRequest, WriteOptions) (WriteResult[PushMirror], error) {
+	return WriteResult[PushMirror]{}, FixtureReadOnlyError("TriggerPushRemoteMirror")
+}
+
 func (p *fixtureProvider) GetMilestone(context.Context, MilestoneRequest) (Milestone, error) {
 	return Milestone{}, FixtureReadOnlyError("GetMilestone")
 }

@@ -12,6 +12,7 @@ import (
 const (
 	StatusSucceeded                         = "succeeded"
 	StatusFailed                            = "failed"
+	StatusInProgress                        = "in_progress"
 	StatusRemoteConfirmedCacheRefreshFailed = "remote_confirmed_cache_refresh_failed"
 	StatusRemoteConfirmedAuditFailed        = "remote_confirmed_audit_failed"
 )
@@ -38,11 +39,12 @@ type Store interface {
 }
 
 type Lookup struct {
-	Entry    *cache.AuditTrailEntry
-	Conflict bool
-	Replay   bool
-	Retry    bool
-	Partial  bool
+	Entry      *cache.AuditTrailEntry
+	Conflict   bool
+	Replay     bool
+	Retry      bool
+	Partial    bool
+	InProgress bool
 }
 
 func EntryID(key string) string {
@@ -70,6 +72,8 @@ func LookupIdempotency(ctx context.Context, store Store, repoID, key, payloadHas
 		lookup.Partial = true
 	case StatusFailed:
 		lookup.Retry = true
+	case StatusInProgress:
+		lookup.InProgress = true
 	}
 	return lookup, nil
 }
@@ -102,6 +106,10 @@ func Failure(repoID, key, operation, payloadHash, message string, createdAt time
 	return entry(repoID, key, operation, "", "", "", StatusFailed, message, payloadHash, createdAt)
 }
 
+func InProgress(repoID, key, operation, recordID, remoteType, remoteID, payloadHash, message string, createdAt time.Time) cache.AuditTrailEntry {
+	return entry(repoID, key, operation, recordID, remoteType, remoteID, StatusInProgress, message, payloadHash, createdAt)
+}
+
 func RemoteConfirmedCacheRefreshFailed(repoID, key, operation, recordID, remoteType, remoteID, payloadHash, message string, createdAt time.Time) cache.AuditTrailEntry {
 	return entry(repoID, key, operation, recordID, remoteType, remoteID, StatusRemoteConfirmedCacheRefreshFailed, message, payloadHash, createdAt)
 }
@@ -121,20 +129,24 @@ func normalizeCommand(command string) string {
 
 func sanitizedMetadata(metadata map[string]string) map[string]string {
 	allowed := map[string]bool{
-		"method":              true,
-		"request_id":          true,
-		"idempotency_key":     true,
-		"remote_alias":        true,
-		"remote_number":       true,
-		"remote_type":         true,
-		"provider":            true,
-		"provider_mode":       true,
-		"response_status":     true,
-		"source_fingerprint":  true,
-		"milestone_id":        true,
-		"milestone_remote_id": true,
-		"milestone_title":     true,
-		"milestone_cleared":   true,
+		"method":                      true,
+		"request_id":                  true,
+		"idempotency_key":             true,
+		"remote_alias":                true,
+		"remote_number":               true,
+		"remote_type":                 true,
+		"provider":                    true,
+		"provider_mode":               true,
+		"response_status":             true,
+		"source_fingerprint":          true,
+		"milestone_id":                true,
+		"milestone_remote_id":         true,
+		"milestone_title":             true,
+		"milestone_cleared":           true,
+		"push_mirror_id":              true,
+		"push_mirror_status":          true,
+		"push_mirror_previous_status": true,
+		"push_mirror_triggered_at":    true,
 	}
 	out := map[string]string{}
 	for key, value := range metadata {

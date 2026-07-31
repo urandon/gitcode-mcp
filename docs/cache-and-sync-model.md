@@ -98,11 +98,21 @@ The command context carries the configured `default_timeout`, including the `--t
 
 Labels, milestones, and push mirrors are not yet exposed as bulk sync service
 surfaces. The `milestones` CLI command and `list_milestones` MCP tool perform a
-live list read and refresh cached milestone records. The `push-mirrors` CLI
-command and `list_push_remote_mirrors` MCP tool similarly perform an explicit
-live read and refresh sanitized `push_remote_mirror` records. These surfaces do
-not maintain collection frontiers. When milestone or mirror bulk sync is added,
-it should use the same `SyncBounds` and partial-result contract.
+live list read and refresh cached milestone records. The
+`list-push-mirrors` CLI command (`push-mirrors` alias) and
+`list_push_remote_mirrors` MCP tool similarly perform an explicit live read and
+refresh sanitized `push_remote_mirror` records. `trigger-push-mirror` and
+`trigger_push_remote_mirror` use the audited write lifecycle, while
+`wait-push-mirror` and `wait_push_remote_mirror` poll sanitized live status
+without creating a collection frontier. When milestone or mirror bulk sync is
+added, it should use the same `SyncBounds` and partial-result contract.
+
+A mirror trigger atomically claims `in_progress` in the shared SQLite audit
+before the provider POST and performs only one transport attempt. Confirmed
+triggers become `succeeded`; known safe rejections become `failed`; ambiguous
+transport, provider, or readback failures remain `in_progress`, so sequential
+or concurrent replay of the same idempotency key cannot issue an unsafe
+duplicate operation.
 
 Milestone-aware issue writes also refresh a deterministic `milestone` link from
 the cached issue source to the resolved `MILESTONE-<id>` source. The link kind
