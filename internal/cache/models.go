@@ -54,6 +54,9 @@ type Store interface {
 	UpsertRAGIndexRun(context.Context, RAGIndexRun) error
 	GetRAGIndexRun(context.Context, string, string) (RAGIndexRun, error)
 	ListRAGIndexRuns(context.Context, RAGIndexRunFilter) ([]RAGIndexRun, error)
+	GetRepoContentState(context.Context, string) (RepoContentState, error)
+	GetRAGCoverageState(context.Context, string, string) (RAGCoverageState, bool, error)
+	UpsertRAGCoverageState(context.Context, RAGCoverageState) error
 	RecordSyncEvent(context.Context, SyncEvent) error
 	GetSyncEventByKey(context.Context, string) (*SyncEvent, error)
 	ListCompletedSyncEventsScoped(context.Context, string) ([]SyncEvent, error)
@@ -237,6 +240,44 @@ type SyncFrontier struct {
 	PagesListed   int
 	RecordsListed int
 	UpdatedAt     time.Time
+}
+
+type CacheIdentity struct {
+	UUID      string    `json:"cache_uuid"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type RepoContentState struct {
+	RepoID            string    `json:"repo_id"`
+	ContentGeneration int64     `json:"content_generation"`
+	ContentChangedAt  time.Time `json:"content_changed_at,omitempty"`
+	LastProjectionID  string    `json:"last_projection_id,omitempty"`
+}
+
+type RAGCoverageState struct {
+	RepoID            string    `json:"repo_id"`
+	NamespaceID       string    `json:"namespace_id"`
+	CoveredGeneration int64     `json:"covered_generation"`
+	Status            string    `json:"status"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+type MaintenanceFrontier struct {
+	RepoID         string    `json:"repo_id"`
+	RemoteType     string    `json:"remote_type"`
+	Ordering       string    `json:"ordering"`
+	FilterKey      string    `json:"filter_key"`
+	Lane           string    `json:"lane"`
+	Status         string    `json:"status"`
+	HighUpdatedAt  time.Time `json:"high_updated_at,omitempty"`
+	HighRemoteID   string    `json:"high_remote_id,omitempty"`
+	HighNumber     int       `json:"high_number,omitempty"`
+	StopReason     string    `json:"stop_reason,omitempty"`
+	PagesListed    int       `json:"pages_listed,omitempty"`
+	RecordsListed  int       `json:"records_listed,omitempty"`
+	Checkpoint     string    `json:"checkpoint,omitempty"`
+	LastErrorClass string    `json:"last_error_class,omitempty"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type IssueCommentSync struct {

@@ -16,11 +16,14 @@ import (
 const RAGIndexJobType = "rag-index"
 
 type StartRAGIndexJobRequest struct {
-	RepoID      string `json:"repo_id"`
-	Profile     string `json:"profile,omitempty"`
-	CachePath   string `json:"cache_path,omitempty"`
-	BatchSize   int    `json:"batch_size,omitempty"`
-	ChunkPolicy string `json:"chunk_policy,omitempty"`
+	RepoID         string `json:"repo_id"`
+	Profile        string `json:"profile,omitempty"`
+	CachePath      string `json:"cache_path,omitempty"`
+	BatchSize      int    `json:"batch_size,omitempty"`
+	ChunkPolicy    string `json:"chunk_policy,omitempty"`
+	CacheUUID      string `json:"cache_uuid,omitempty"`
+	RegistrationID string `json:"registration_id,omitempty"`
+	NamespaceID    string `json:"namespace_id,omitempty"`
 }
 
 func (m *JobManager) StartRAGIndex(ctx context.Context, manager Manager, req StartRAGIndexJobRequest) (Job, error) {
@@ -28,14 +31,24 @@ func (m *JobManager) StartRAGIndex(ctx context.Context, manager Manager, req Sta
 	if req.RepoID == "" {
 		return Job{}, errors.New("repo_id is required")
 	}
-	if active, ok := m.ActiveJob(RAGIndexJobType, req.RepoID); ok {
+	workKey := ragIndexWorkKey(req)
+	if active, ok := m.ActiveWork(workKey); ok {
 		return active, nil
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	profile := strings.TrimSpace(req.Profile)
 	job := m.createJobWithMetadata(RAGIndexJobType, req.RepoID, profile, 0, cancel)
+	job = m.SetWorkIdentity(job.ID, workKey, req.CacheUUID, req.RegistrationID, req.NamespaceID)
 	go m.runRAGIndexJob(ctx, manager, job.ID, req)
 	return job, nil
+}
+
+func ragIndexWorkKey(req StartRAGIndexJobRequest) string {
+	cacheID := strings.TrimSpace(req.CacheUUID)
+	if cacheID == "" {
+		cacheID = strings.TrimSpace(req.CachePath)
+	}
+	return strings.Join([]string{RAGIndexJobType, cacheID, strings.TrimSpace(req.RepoID), strings.TrimSpace(req.NamespaceID), strings.TrimSpace(req.ChunkPolicy)}, ":")
 }
 
 func (m *JobManager) runRAGIndexJob(ctx context.Context, manager Manager, jobID string, req StartRAGIndexJobRequest) {
@@ -78,6 +91,8 @@ func (m *JobManager) runRAGIndexJob(ctx context.Context, manager Manager, jobID 
 			job.Error = err.Error()
 			job.Steps = result.TotalChunks
 			job.Completed = result.EmbeddedChunks + result.SkippedChunks
+			job.NamespaceID = result.NamespaceID
+			job.ProfileID = result.ProfileID
 			job.Progress = append(job.Progress, service.ProgressEvent{Type: job.Status, Phase: job.Status, Collection: RAGIndexJobType, RecordsListed: result.TotalChunks, RecordsFetched: result.EmbeddedChunks, RecordsSkipped: result.SkippedChunks, RecordsFailed: result.FailedChunks, Message: err.Error()})
 			delete(m.cancel, jobID)
 		})
@@ -90,6 +105,7 @@ func (m *JobManager) runRAGIndexJob(ctx context.Context, manager Manager, jobID 
 		job.Steps = result.TotalChunks
 		job.Completed = result.EmbeddedChunks + result.SkippedChunks
 		job.ProfileID = result.ProfileID
+		job.NamespaceID = result.NamespaceID
 		delete(m.cancel, jobID)
 	})
 }

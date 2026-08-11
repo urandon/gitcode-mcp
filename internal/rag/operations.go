@@ -13,6 +13,8 @@ type OperationStore interface {
 	ListChunks(context.Context, cache.ChunkFilter) ([]cache.Chunk, error)
 	ListChunkEmbeddings(context.Context, cache.ChunkEmbeddingFilter) ([]cache.ChunkEmbedding, error)
 	ListRAGIndexRuns(context.Context, cache.RAGIndexRunFilter) ([]cache.RAGIndexRun, error)
+	GetRepoContentState(context.Context, string) (cache.RepoContentState, error)
+	GetRAGCoverageState(context.Context, string, string) (cache.RAGCoverageState, bool, error)
 	GetSourceScoped(context.Context, string, string) (cache.Source, error)
 }
 

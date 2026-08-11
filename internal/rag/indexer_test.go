@@ -50,6 +50,10 @@ func TestRAGIndexerEmbedsMissingAndSkipsFreshChunks(t *testing.T) {
 	if run.Status != RAGIndexStatusSucceeded || run.EmbeddedChunks != 2 || run.SkippedChunks != 1 {
 		t.Fatalf("run=%#v", run)
 	}
+	coverage, ok, err := store.GetRAGCoverageState(ctx, "fixture-a", namespace.ID)
+	if err != nil || !ok || coverage.Status != "ready" || coverage.CoveredGeneration == 0 || result.CoveredGeneration != coverage.CoveredGeneration {
+		t.Fatalf("coverage=%+v ok=%t result=%+v err=%v", coverage, ok, result, err)
+	}
 }
 
 func TestRAGIndexerResumesStaleCoverage(t *testing.T) {

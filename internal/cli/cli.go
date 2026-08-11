@@ -724,7 +724,7 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "repo init-local":
 				printLocalSubcommandHelp(command, sub, stdout)
-			case "service run", "service install", "service uninstall", "service start", "service stop", "service status", "service doctor", "service fake-job", "service jobs", "service job", "service attach", "service cancel":
+			case "service run", "service install", "service uninstall", "service start", "service stop", "service status", "service doctor", "service maintenance", "service reconcile", "service fake-job", "service jobs", "service job", "service attach", "service cancel":
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "rag setup", "rag index", "rag status", "rag search":
 				printLocalSubcommandHelp(command, sub, stdout)
@@ -1201,6 +1201,23 @@ func executeServiceCommand(ctx context.Context, args []string, opts options, std
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, renderServiceJobListText)
+	case "maintenance", "reconcile":
+		client, clientErr := manager.Client()
+		if clientErr != nil {
+			return writeError(stderr, opts.format, clientErr)
+		}
+		if sub == "maintenance" {
+			var result servicectl.MaintenanceListResult
+			if err := client.Call(ctx, "Maintenance.List", nil, &result); err != nil {
+				return writeError(stderr, opts.format, err)
+			}
+			return render(stdout, opts.format, result, renderMaintenanceListText)
+		}
+		var result servicectl.MaintenanceReconcileResult
+		if err := client.Call(ctx, "Maintenance.Reconcile", nil, &result); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, renderMaintenanceReconcileText)
 	case "job", "attach", "cancel":
 		id, idOK := firstArg(rest)
 		if !idOK {
@@ -1399,6 +1416,24 @@ func renderServiceStatusText(w io.Writer, status servicectl.Status) {
 func renderServiceJobListText(w io.Writer, result servicectl.JobListResult) {
 	for _, job := range result.Jobs {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%d/%d\n", job.ID, job.Type, job.Status, job.Completed, job.Steps)
+	}
+}
+
+func renderMaintenanceListText(w io.Writer, result servicectl.MaintenanceListResult) {
+	fmt.Fprintf(w, "schema_version: %s\n", result.SchemaVersion)
+	fmt.Fprintf(w, "generation: %d\n", result.Generation)
+	fmt.Fprintf(w, "managed_caches: %d\n", len(result.Entries))
+	for _, entry := range result.Entries {
+		fmt.Fprintf(w, "%s\t%s\t%s\tcontent=%d covered=%d\n", entry.RegistrationID, entry.RepoID, entry.State, entry.ContentGeneration, entry.CoveredGeneration)
+	}
+}
+
+func renderMaintenanceReconcileText(w io.Writer, result servicectl.MaintenanceReconcileResult) {
+	fmt.Fprintf(w, "checked_at: %s\n", result.CheckedAt.Format(time.RFC3339))
+	fmt.Fprintf(w, "managed_caches: %d\n", len(result.Entries))
+	fmt.Fprintf(w, "jobs_started: %d\n", len(result.JobsStarted))
+	for _, entry := range result.Entries {
+		fmt.Fprintf(w, "%s\t%s\t%s\tcontent=%d covered=%d\n", entry.RegistrationID, entry.RepoID, entry.State, entry.ContentGeneration, entry.CoveredGeneration)
 	}
 }
 
@@ -4254,6 +4289,8 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  stop        report how to stop the installed service")
 		fmt.Fprintln(w, "  status      inspect runtime state")
 		fmt.Fprintln(w, "  doctor      inspect service health")
+		fmt.Fprintln(w, "  maintenance inspect daemon-managed cache and RAG lifecycle state")
+		fmt.Fprintln(w, "  reconcile   request an immediate maintenance reconciliation")
 		fmt.Fprintln(w, "  run         run the coordinator foreground process")
 		fmt.Fprintln(w, "  fake-job    start a fake long-running job for IPC/progress dogfood")
 		fmt.Fprintln(w, "  jobs        list daemon jobs")
@@ -4455,6 +4492,18 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "Usage: gitcode-mcp service doctor [--format FORMAT]")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Inspect service health using the same state model as service status.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "service maintenance":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service maintenance [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Inspect sanitized daemon-managed cache, backfill, and RAG coverage state.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "service reconcile":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service reconcile [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Request an immediate maintenance pass; scheduled work remains coalesced by cache identity.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "service run":

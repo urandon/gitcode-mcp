@@ -3853,6 +3853,15 @@ func (f *brokenStore) GetRAGIndexRun(context.Context, string, string) (cache.RAG
 func (f *brokenStore) ListRAGIndexRuns(context.Context, cache.RAGIndexRunFilter) ([]cache.RAGIndexRun, error) {
 	return nil, nil
 }
+func (f *brokenStore) GetRepoContentState(context.Context, string) (cache.RepoContentState, error) {
+	return cache.RepoContentState{}, nil
+}
+func (f *brokenStore) GetRAGCoverageState(context.Context, string, string) (cache.RAGCoverageState, bool, error) {
+	return cache.RAGCoverageState{}, false, nil
+}
+func (f *brokenStore) UpsertRAGCoverageState(context.Context, cache.RAGCoverageState) error {
+	return nil
+}
 func (f *brokenStore) RecordSyncEvent(context.Context, cache.SyncEvent) error { return nil }
 func (f *brokenStore) GetSyncEventByKey(ctx context.Context, key string) (*cache.SyncEvent, error) {
 	return nil, nil

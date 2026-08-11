@@ -29,6 +29,9 @@ type StartSyncJobRequest struct {
 	MaxPages       int    `json:"max_pages,omitempty"`
 	MaxRecords     int    `json:"max_records,omitempty"`
 	PerPage        int    `json:"per_page,omitempty"`
+	CacheUUID      string `json:"cache_uuid,omitempty"`
+	RegistrationID string `json:"registration_id,omitempty"`
+	Lane           string `json:"lane,omitempty"`
 }
 
 func (m *JobManager) StartSync(ctx context.Context, manager Manager, req StartSyncJobRequest) (Job, error) {
@@ -36,13 +39,28 @@ func (m *JobManager) StartSync(ctx context.Context, manager Manager, req StartSy
 	if req.RepoID == "" {
 		return Job{}, errors.New("repo_id is required")
 	}
-	if active, ok := m.ActiveJob(SyncJobType, req.RepoID); ok {
+	workKey := syncWorkKey(req)
+	if active, ok := m.ActiveWork(workKey); ok {
 		return active, nil
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	job := m.createJobWithMetadata(SyncJobType, req.RepoID, "", 0, cancel)
+	job = m.SetWorkIdentity(job.ID, workKey, req.CacheUUID, req.RegistrationID, "")
 	go m.runSyncJob(ctx, manager, job.ID, req)
 	return job, nil
+}
+
+func syncWorkKey(req StartSyncJobRequest) string {
+	cacheID := strings.TrimSpace(req.CacheUUID)
+	if cacheID == "" {
+		cacheID = strings.TrimSpace(req.CachePath)
+	}
+	lane := strings.TrimSpace(req.Lane)
+	if lane == "" {
+		lane = "manual"
+	}
+	collections := fmt.Sprintf("%t%t%t%t%t", req.Issues, req.Wiki, req.Pulls, req.IssueComments, req.PRComments || req.Comments)
+	return strings.Join([]string{SyncJobType, cacheID, strings.TrimSpace(req.RepoID), lane, collections}, ":")
 }
 
 func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID string, req StartSyncJobRequest) {
@@ -75,6 +93,11 @@ func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID stri
 	if result == nil {
 		result = &service.SyncResourcesResult{}
 	}
+	if strings.TrimSpace(req.Lane) != "" {
+		if frontierErr := recordMaintenanceSyncFrontiers(context.Background(), req, result, err); frontierErr != nil && err == nil {
+			err = fmt.Errorf("record maintenance frontier: %w", frontierErr)
+		}
+	}
 	if err != nil {
 		status := JobStatusFailed
 		if errors.Is(ctx.Err(), context.Canceled) {
@@ -103,6 +126,61 @@ func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID stri
 		job.Progress = append(job.Progress, service.ProgressEvent{Type: "finished", Phase: JobStatusSucceeded, Collection: SyncJobType, RecordsListed: result.RecordsListed, RecordsFetched: result.SuccessCount, RecordsFailed: result.FailureCount, Message: "sync job finished"})
 		delete(m.cancel, jobID)
 	})
+}
+
+func recordMaintenanceSyncFrontiers(ctx context.Context, req StartSyncJobRequest, result *service.SyncResourcesResult, syncErr error) error {
+	store, err := cache.NewSQLiteStore(ctx, req.CachePath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	status := "fresh"
+	if req.Lane == "tail" {
+		status = "backfilling"
+		if syncErr == nil && result != nil && result.TraversalStatus == "complete" {
+			status = "complete"
+		}
+	}
+	errorClass := ""
+	if syncErr != nil {
+		status = "degraded"
+		errorClass = "sync_failed"
+		if coded, ok := syncErr.(interface{ DiagnosticCode() string }); ok {
+			errorClass = coded.DiagnosticCode()
+		}
+	}
+	remoteTypes := []string{}
+	if req.Issues {
+		remoteTypes = append(remoteTypes, "issue")
+	}
+	if req.Wiki {
+		remoteTypes = append(remoteTypes, "wiki")
+	}
+	if req.Pulls {
+		remoteTypes = append(remoteTypes, "pull_request")
+	}
+	if req.IssueComments {
+		remoteTypes = append(remoteTypes, "issue_comment")
+	}
+	if req.PRComments || req.Comments {
+		remoteTypes = append(remoteTypes, "pr_comment")
+	}
+	if len(remoteTypes) == 0 {
+		remoteTypes = append(remoteTypes, "all")
+	}
+	for _, remoteType := range remoteTypes {
+		frontier := cache.MaintenanceFrontier{RepoID: req.RepoID, RemoteType: remoteType, Ordering: "updated_at_desc", FilterKey: "all", Lane: req.Lane, Status: status, LastErrorClass: errorClass, UpdatedAt: time.Now().UTC()}
+		if result != nil {
+			frontier.StopReason = result.StopReason
+			frontier.PagesListed = result.PagesListed
+			frontier.RecordsListed = result.RecordsListed
+			frontier.Checkpoint = fmt.Sprintf("max_pages:%d", req.MaxPages)
+		}
+		if err := store.UpsertMaintenanceFrontier(ctx, frontier); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func runSync(ctx context.Context, manager Manager, req StartSyncJobRequest, progressCh chan<- service.ProgressEvent) (*service.SyncResourcesResult, error) {
@@ -208,11 +286,10 @@ func mergeSyncResources(dst *service.SyncResourcesResult, src *service.SyncResou
 	if dst.Ordering == "" {
 		dst.Ordering = src.Ordering
 	}
-	if dst.StopReason == "" {
+	previousTraversal := dst.TraversalStatus
+	dst.TraversalStatus = mergeTraversalStatus(previousTraversal, src.TraversalStatus)
+	if dst.StopReason == "" || traversalPriority(src.TraversalStatus) > traversalPriority(previousTraversal) {
 		dst.StopReason = src.StopReason
-	}
-	if dst.TraversalStatus == "" {
-		dst.TraversalStatus = src.TraversalStatus
 	}
 	if dst.WatermarkStatus == "" {
 		dst.WatermarkStatus = src.WatermarkStatus
@@ -223,6 +300,26 @@ func mergeSyncResources(dst *service.SyncResourcesResult, src *service.SyncResou
 	if src.IssueComments != nil {
 		queue := *src.IssueComments
 		dst.IssueComments = &queue
+	}
+}
+
+func mergeTraversalStatus(left, right string) string {
+	if traversalPriority(right) > traversalPriority(left) {
+		return right
+	}
+	return left
+}
+
+func traversalPriority(status string) int {
+	switch status {
+	case "partial", "deferred", "timeout", "cancelled":
+		return 3
+	case "bounded":
+		return 2
+	case "complete":
+		return 1
+	default:
+		return 0
 	}
 }
 

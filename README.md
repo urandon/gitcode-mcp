@@ -12,6 +12,7 @@ The project is self-contained and public-safe. Source repositories, trackers, an
 - Syncs issues, pull requests, comments, wiki pages, labels, and milestones into SQLite.
 - Searches cached records with full-text/token matching and reads cached records without requiring live network access.
 - Runs optional local RAG semantic/hybrid retrieval over cached chunks with model-scoped embeddings.
+- Maintains multiple enrolled caches with daemon-owned recent refresh, historical backfill, and content-generation-aware RAG repair.
 - Resolves stable local ids and remote aliases for links, snippets, backlinks, and exports.
 - Runs an MCP server over cached data for agent workflows.
 - Performs live writes only through explicit commands with idempotency keys and audit evidence.
@@ -43,6 +44,7 @@ For semantic retrieval, start with [RAG Setup and Operation](docs/rag.md).
 - Place tests and fixtures: [Test Architecture](docs/test-architecture.md)
 - Configure repositories: [Repository Binding](docs/repo-binding.md)
 - Understand sync behavior: [Cache and Sync Model](docs/cache-and-sync-model.md)
+- Operate daemon maintenance: [Daemon Cache and RAG Maintenance](docs/cache-maintenance.md)
 - Set up semantic retrieval: [RAG Setup and Operation](docs/rag.md)
 - Review live API findings: [GitCode API Discovery](docs/gitcode-api-discovery.md)
 - List, trigger, and monitor repository mirrors safely: [Push Mirror Operations](docs/push-mirrors.md)

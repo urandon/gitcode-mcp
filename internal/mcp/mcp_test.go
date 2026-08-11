@@ -118,7 +118,7 @@ func TestMCPRepoStatusIncludesRuntimeAndIssueCommentDiagnostics(t *testing.T) {
 	if structured.Status == nil || structured.Status.BinaryVersion != buildinfo.Current().Version || structured.Status.CacheSchemaVersion != cache.CurrentSchemaVersion() || structured.Status.ExpectedCacheSchemaVersion != cache.CurrentSchemaVersion() || structured.Status.CacheState != "ready" || structured.Status.IssueCommentQueueState != "available" || structured.Status.IssueCommentQueue == nil {
 		t.Fatalf("repo status=%#v", structured)
 	}
-	if len(result.Content) != 1 || !strings.Contains(result.Content[0].Text, "binary_version=") || !strings.Contains(result.Content[0].Text, "cache_schema=16/16") || !strings.Contains(result.Content[0].Text, "issue_comments=") {
+	if len(result.Content) != 1 || !strings.Contains(result.Content[0].Text, "binary_version=") || !strings.Contains(result.Content[0].Text, "cache_schema=17/17") || !strings.Contains(result.Content[0].Text, "issue_comments=") {
 		t.Fatalf("repo status content=%#v", result.Content)
 	}
 }

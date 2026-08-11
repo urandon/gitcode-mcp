@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 16
+const currentSchemaVersion = 17
 const issueCommentSyncSchemaVersion = 16
 
 func CurrentSchemaVersion() int {
@@ -151,6 +151,7 @@ var migrations = []migration{
 	{version: 14, apply: applySyncFrontiersMigration},
 	{version: 15, apply: applyRAGEmbeddingSchemaMigration},
 	{version: 16, apply: applyIssueCommentSyncMigration},
+	{version: 17, apply: applyMaintenanceLifecycleMigration},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB, ftsAvailable bool) error {
@@ -915,6 +916,101 @@ func applyRAGEmbeddingSchemaMigration(ctx context.Context, tx *sql.Tx, _ bool) e
 )`,
 		`CREATE INDEX IF NOT EXISTS idx_rag_index_runs_namespace ON rag_index_runs(repo_id, namespace_id, started_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_rag_index_runs_status ON rag_index_runs(repo_id, status, updated_at)`,
+	}
+	for _, stmt := range statements {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyMaintenanceLifecycleMigration(ctx context.Context, tx *sql.Tx, _ bool) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS cache_identity (
+	identity_key INTEGER PRIMARY KEY CHECK(identity_key = 1),
+	cache_uuid TEXT NOT NULL UNIQUE,
+	created_at TEXT NOT NULL
+)`,
+		`INSERT OR IGNORE INTO cache_identity (identity_key, cache_uuid, created_at)
+VALUES (1, 'cache-' || lower(hex(randomblob(16))), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`,
+		`CREATE TABLE IF NOT EXISTS repo_content_state (
+	repo_id TEXT PRIMARY KEY REFERENCES repos(repo_id) ON DELETE CASCADE,
+	content_generation INTEGER NOT NULL DEFAULT 0,
+	content_changed_at TEXT NOT NULL DEFAULT '',
+	last_projection_id TEXT NOT NULL DEFAULT ''
+)`,
+		`INSERT OR IGNORE INTO repo_content_state (repo_id, content_generation, content_changed_at, last_projection_id)
+SELECT r.repo_id, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'migration-v17'
+FROM repos r
+WHERE EXISTS (SELECT 1 FROM sources s WHERE s.repo_id = r.repo_id)
+   OR EXISTS (SELECT 1 FROM chunks c WHERE c.repo_id = r.repo_id)`,
+		`CREATE TABLE IF NOT EXISTS rag_coverage_state (
+	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+	namespace_id TEXT NOT NULL,
+	covered_generation INTEGER NOT NULL DEFAULT 0,
+	status TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, namespace_id),
+	FOREIGN KEY(repo_id, namespace_id) REFERENCES embedding_namespaces(repo_id, namespace_id) ON DELETE CASCADE
+)`,
+		`CREATE TABLE IF NOT EXISTS maintenance_frontiers (
+	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+	remote_type TEXT NOT NULL,
+	ordering TEXT NOT NULL,
+	filter_key TEXT NOT NULL,
+	lane TEXT NOT NULL CHECK(lane IN ('head', 'tail', 'secondary')),
+	status TEXT NOT NULL,
+	high_updated_at TEXT NOT NULL DEFAULT '',
+	high_remote_id TEXT NOT NULL DEFAULT '',
+	high_number INTEGER NOT NULL DEFAULT 0,
+	stop_reason TEXT NOT NULL DEFAULT '',
+	pages_listed INTEGER NOT NULL DEFAULT 0,
+	records_listed INTEGER NOT NULL DEFAULT 0,
+	checkpoint TEXT NOT NULL DEFAULT '',
+	last_error_class TEXT NOT NULL DEFAULT '',
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, remote_type, ordering, filter_key, lane)
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_maintenance_frontiers_state ON maintenance_frontiers(repo_id, lane, status, updated_at)`,
+		`CREATE TRIGGER IF NOT EXISTS trg_sources_content_insert AFTER INSERT ON sources
+BEGIN
+	INSERT INTO repo_content_state (repo_id, content_generation, content_changed_at)
+	VALUES (NEW.repo_id, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+	ON CONFLICT(repo_id) DO UPDATE SET content_generation = content_generation + 1, content_changed_at = excluded.content_changed_at;
+END`,
+		`CREATE TRIGGER IF NOT EXISTS trg_sources_content_update AFTER UPDATE OF content_hash ON sources
+WHEN OLD.content_hash <> NEW.content_hash
+BEGIN
+	INSERT INTO repo_content_state (repo_id, content_generation, content_changed_at)
+	VALUES (NEW.repo_id, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+	ON CONFLICT(repo_id) DO UPDATE SET content_generation = content_generation + 1, content_changed_at = excluded.content_changed_at;
+END`,
+		`CREATE TRIGGER IF NOT EXISTS trg_sources_content_delete AFTER DELETE ON sources
+BEGIN
+	INSERT INTO repo_content_state (repo_id, content_generation, content_changed_at)
+	VALUES (OLD.repo_id, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+	ON CONFLICT(repo_id) DO UPDATE SET content_generation = content_generation + 1, content_changed_at = excluded.content_changed_at;
+END`,
+		`CREATE TRIGGER IF NOT EXISTS trg_chunks_content_insert AFTER INSERT ON chunks
+BEGIN
+	INSERT INTO repo_content_state (repo_id, content_generation, content_changed_at)
+	VALUES (NEW.repo_id, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+	ON CONFLICT(repo_id) DO UPDATE SET content_generation = content_generation + 1, content_changed_at = excluded.content_changed_at;
+END`,
+		`CREATE TRIGGER IF NOT EXISTS trg_chunks_content_update AFTER UPDATE OF content_hash ON chunks
+WHEN OLD.content_hash <> NEW.content_hash
+BEGIN
+	INSERT INTO repo_content_state (repo_id, content_generation, content_changed_at)
+	VALUES (NEW.repo_id, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+	ON CONFLICT(repo_id) DO UPDATE SET content_generation = content_generation + 1, content_changed_at = excluded.content_changed_at;
+END`,
+		`CREATE TRIGGER IF NOT EXISTS trg_chunks_content_delete AFTER DELETE ON chunks
+BEGIN
+	INSERT INTO repo_content_state (repo_id, content_generation, content_changed_at)
+	VALUES (OLD.repo_id, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+	ON CONFLICT(repo_id) DO UPDATE SET content_generation = content_generation + 1, content_changed_at = excluded.content_changed_at;
+END`,
 	}
 	for _, stmt := range statements {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {

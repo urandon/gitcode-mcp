@@ -373,7 +373,7 @@ func upsertChunkTx(ctx context.Context, tx *sql.Tx, chunk Chunk) (Chunk, error) 
 	}
 	err = execTx(ctx, tx, `INSERT INTO chunks (repo_id, id, source_id, record_id, snapshot_id, content_hash, byte_start, byte_end, line_start, line_end, heading_path, text, normalized_text, inherited_metadata, outbound_links, resolved_aliases, embedding, policy)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(repo_id, id) DO UPDATE SET record_id = excluded.record_id, snapshot_id = excluded.snapshot_id, byte_end = excluded.byte_end, line_start = excluded.line_start, line_end = excluded.line_end, heading_path = excluded.heading_path, text = excluded.text, normalized_text = excluded.normalized_text, inherited_metadata = excluded.inherited_metadata, outbound_links = excluded.outbound_links, resolved_aliases = excluded.resolved_aliases, embedding = excluded.embedding, policy = excluded.policy`,
+ON CONFLICT(repo_id, id) DO UPDATE SET record_id = excluded.record_id, snapshot_id = excluded.snapshot_id, content_hash = excluded.content_hash, byte_end = excluded.byte_end, line_start = excluded.line_start, line_end = excluded.line_end, heading_path = excluded.heading_path, text = excluded.text, normalized_text = excluded.normalized_text, inherited_metadata = excluded.inherited_metadata, outbound_links = excluded.outbound_links, resolved_aliases = excluded.resolved_aliases, embedding = excluded.embedding, policy = excluded.policy`,
 		chunk.RepoID, chunk.ID, chunk.SourceID, chunk.RecordID, chunk.SnapshotID, chunk.ContentHash, chunk.ByteStart, chunk.ByteEnd, chunk.LineStart, chunk.LineEnd, headingPath, chunk.Text, chunk.NormalizedText, metadata, outboundLinks, resolvedAliases, chunk.Embedding, chunk.Policy)
 	return chunk, err
 }

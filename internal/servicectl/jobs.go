@@ -27,19 +27,23 @@ const (
 )
 
 type Job struct {
-	ID         string                  `json:"id"`
-	Type       string                  `json:"type"`
-	RepoID     string                  `json:"repo_id,omitempty"`
-	ProfileID  string                  `json:"profile_id,omitempty"`
-	Status     string                  `json:"status"`
-	CreatedAt  time.Time               `json:"created_at"`
-	StartedAt  *time.Time              `json:"started_at,omitempty"`
-	UpdatedAt  time.Time               `json:"updated_at"`
-	FinishedAt *time.Time              `json:"finished_at,omitempty"`
-	Steps      int                     `json:"steps,omitempty"`
-	Completed  int                     `json:"completed,omitempty"`
-	Error      string                  `json:"error,omitempty"`
-	Progress   []service.ProgressEvent `json:"progress,omitempty"`
+	ID             string                  `json:"id"`
+	Type           string                  `json:"type"`
+	RepoID         string                  `json:"repo_id,omitempty"`
+	ProfileID      string                  `json:"profile_id,omitempty"`
+	CacheUUID      string                  `json:"cache_uuid,omitempty"`
+	RegistrationID string                  `json:"registration_id,omitempty"`
+	NamespaceID    string                  `json:"namespace_id,omitempty"`
+	WorkKey        string                  `json:"-"`
+	Status         string                  `json:"status"`
+	CreatedAt      time.Time               `json:"created_at"`
+	StartedAt      *time.Time              `json:"started_at,omitempty"`
+	UpdatedAt      time.Time               `json:"updated_at"`
+	FinishedAt     *time.Time              `json:"finished_at,omitempty"`
+	Steps          int                     `json:"steps,omitempty"`
+	Completed      int                     `json:"completed,omitempty"`
+	Error          string                  `json:"error,omitempty"`
+	Progress       []service.ProgressEvent `json:"progress,omitempty"`
 }
 
 type JobManager struct {
@@ -134,6 +138,53 @@ func (m *JobManager) ActiveJob(jobType, repoID string) (Job, bool) {
 		}
 	}
 	return Job{}, false
+}
+
+func (m *JobManager) ActiveWork(workKey string) (Job, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, job := range m.jobs {
+		candidate := job.WorkKey
+		if candidate == "" {
+			candidate = job.Type + ":" + job.RepoID
+		}
+		if candidate != workKey {
+			continue
+		}
+		if job.Status == JobStatusQueued || job.Status == JobStatusRunning {
+			return cloneJob(job), true
+		}
+	}
+	return Job{}, false
+}
+
+// ActiveCacheRepo returns active maintenance work for one logical cache and
+// repository. This prevents head/tail or sync/index jobs from overlapping in a
+// cache without serializing an unrelated cache that happens to contain the
+// same repository.
+func (m *JobManager) ActiveCacheRepo(jobType, cacheUUID, repoID string) (Job, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, job := range m.jobs {
+		if job.Type != jobType || job.CacheUUID != cacheUUID || job.RepoID != repoID {
+			continue
+		}
+		if job.Status == JobStatusQueued || job.Status == JobStatusRunning {
+			return cloneJob(job), true
+		}
+	}
+	return Job{}, false
+}
+
+func (m *JobManager) SetWorkIdentity(id, workKey, cacheUUID, registrationID, namespaceID string) Job {
+	m.updateJob(id, func(job *Job, now time.Time) {
+		job.WorkKey = workKey
+		job.CacheUUID = cacheUUID
+		job.RegistrationID = registrationID
+		job.NamespaceID = namespaceID
+		job.UpdatedAt = now
+	})
+	return m.mustGet(id)
 }
 
 func (m *JobManager) List() []Job {

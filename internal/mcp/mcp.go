@@ -518,6 +518,11 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{}},
 	},
 	{
+		Name:        "maintenance_status",
+		Description: "Report sanitized daemon-managed cache backfill and RAG coverage state through local IPC.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{}},
+	},
+	{
 		Name:        "service_jobs",
 		Description: "List local service coordinator jobs through local IPC.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{}},
@@ -748,6 +753,7 @@ var preWriteToolListOrder = []string{
 	"diff_snapshot",
 	"repo_status",
 	"service_status",
+	"maintenance_status",
 	"service_jobs",
 	"service_job_status",
 	"list_pr_discussions",
@@ -826,6 +832,7 @@ func (s *Server) toolRegistry() toolRegistry {
 	registerTool(registry, "diff_snapshot", s.callDiffSnapshot)
 	registerTool(registry, "repo_status", s.callRepoStatus)
 	registerTool(registry, "service_status", s.callServiceStatus)
+	registerTool(registry, "maintenance_status", s.callMaintenanceStatus)
 	registerTool(registry, "service_jobs", s.callServiceJobs)
 	registerTool(registry, "service_job_status", s.callServiceJobStatus)
 	for _, cap := range capability.MCPRAGCapabilities() {
@@ -1310,6 +1317,21 @@ func (s *Server) callServiceStatus(ctx context.Context, id *json.RawMessage, arg
 		return
 	}
 	text := fmt.Sprintf("service status=%s running=%t", result.Status, result.Running)
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func (s *Server) callMaintenanceStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	client, err := serviceRPCClient()
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	var result servicectl.MaintenanceListResult
+	if err := client.Call(ctx, "Maintenance.List", nil, &result); err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	text := fmt.Sprintf("managed caches=%d generation=%d", len(result.Entries), result.Generation)
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 }
 
