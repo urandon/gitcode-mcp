@@ -22,13 +22,15 @@ Maintenance uses two independent sync lanes:
 - `tail` gradually extends historical coverage. A bounded pass remains `backfilling`; only reaching the collection tail records `complete`.
 - Secondary child coverage, such as comments, retains its own queue/frontier rather than making the parent head appear stale.
 
-The first implementation conservatively replays page-number collections from page 1 and increases the tail bound. This is safe when newer records shift page boundaries because cached revisions make replay idempotent. A future cursor-capable adapter may resume more efficiently without changing the frontier contract.
+For page-number collections, each tail job reads a constant-size window beginning at its persisted `next_page` checkpoint. Consecutive windows overlap by one page so newer records shifting page boundaries cannot create a gap. Collections maintained in the same job keep independent monotonic checkpoints; a slower collection cannot regress a faster one. Child coverage uses bounded work units too: issue comments drain the durable pending queue incrementally, while PR comments resume over stable cached-PR windows. Cached revisions make overlap replay idempotent. A future cursor-capable adapter may resume more efficiently without changing the frontier contract.
 
 ## Invalidation and RAG repair
 
 Schema version 17 tracks a monotonic `content_generation` per repository. SQLite triggers advance it only when a source or chunk is inserted, deleted, or receives a different `content_hash`; timestamp-only rewrites do not invalidate embeddings.
 
-An index run captures the current generation after acquiring the writer lock. Successful indexing records `covered_generation` for its embedding namespace. If cache content changes during a run, the new generation remains uncovered, so the next reconciliation schedules repair. Chunk deletion already removes namespace embeddings through foreign-key cascade.
+An index run captures the current generation after acquiring the writer lock. Successful indexing records `covered_generation` for its embedding namespace. If cache content changes during a run, the new generation remains uncovered, so the next reconciliation schedules repair. Remote source replacement transactionally replaces that source's chunks; removed chunks delete their namespace embeddings through foreign-key cascade.
+
+The daemon periodically resolves the configured embedding profile again even when generation coverage is current. A provider/model revision or effective configuration change therefore creates and selects its new namespace instead of leaving an older ready namespace current indefinitely. Explicit profile changes clear the previous namespace selection immediately.
 
 The maintenance dependency order is:
 
@@ -36,7 +38,7 @@ The maintenance dependency order is:
 validate identity -> sync head/tail -> observe content generation -> RAG repair -> publish status
 ```
 
-Only one sync lane and one RAG writer may be active for a `(cache_uuid, repo_id)` pair. The same repository in a different cache is independent. Job coalescing also includes lane and namespace/chunk policy, preventing accidental cross-cache reuse.
+Only one sync lane and one RAG writer may be active for a `(cache_uuid, repo_id)` pair. The same repository in a different cache is independent. Job coalescing also includes lane, profile, and namespace/chunk policy, preventing accidental cross-cache reuse.
 
 ## Registry and protocol
 
@@ -61,4 +63,6 @@ Agents can call the read-only MCP tool `maintenance_status`. Results include cac
 
 ## Failure and restart behavior
 
-The registry and bounded job history survive daemon restart. Active jobs restored after a crash become `interrupted`; the next reconciliation validates the cache again and safely reschedules incomplete work. Identity replacement, unreadable caches, sync failures, and index failures become explicit degraded states. Disabling a registration is reversible and does not mutate cache content.
+The registry and bounded job history survive daemon restart. Active jobs restored after a crash become `interrupted`; the next reconciliation validates the cache again and safely reschedules incomplete work. Identity replacement, unreadable caches, sync failures, and index failures become explicit degraded states.
+
+Sync and RAG failures are tracked independently. Each failed stage keeps a sanitized error class and uses persisted exponential retry backoff from one minute up to 64 minutes; success of that same stage clears its failure state. A backed-off stage does not prevent healthy work in the other stage. Disabling a registration is reversible and does not mutate cache content.

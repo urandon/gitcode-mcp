@@ -120,6 +120,9 @@ func TestMaintenanceWorkKeysSeparateSameRepoAcrossCaches(t *testing.T) {
 	if left == right {
 		t.Fatalf("RAG work keys collapsed: %q", left)
 	}
+	if ragIndexWorkKey(StartRAGIndexJobRequest{RepoID: "owner/repo", CacheUUID: "cache-left", Profile: "old"}) == ragIndexWorkKey(StartRAGIndexJobRequest{RepoID: "owner/repo", CacheUUID: "cache-left", Profile: "current"}) {
+		t.Fatal("RAG work keys collapsed distinct profiles")
+	}
 	head := syncWorkKey(StartSyncJobRequest{RepoID: "owner/repo", CacheUUID: "cache-left", Lane: "head", Issues: true})
 	tail := syncWorkKey(StartSyncJobRequest{RepoID: "owner/repo", CacheUUID: "cache-left", Lane: "tail", Issues: true})
 	if head == tail {
@@ -149,14 +152,14 @@ func TestMaintenanceSyncAggregationNeverPromotesBoundedTail(t *testing.T) {
 	}
 }
 
-func TestMaintenanceTailExtendsRequestedBoundNotAggregatePageCount(t *testing.T) {
+func TestMaintenanceTailUsesConstantWindowFromCheckpoint(t *testing.T) {
 	now := time.Now().UTC()
-	lane, maxPages := nextMaintenanceSyncLane(MaintenanceEntry{Policy: MaintenancePolicy{Issues: true, HeadIntervalSeconds: 900, TailSlicePages: 10}}, []cache.MaintenanceFrontier{
+	lane, page, maxPages := nextMaintenanceSyncLane(MaintenanceEntry{Policy: MaintenancePolicy{Issues: true, HeadIntervalSeconds: 900, TailSlicePages: 10}}, []cache.MaintenanceFrontier{
 		{RemoteType: "issue", Lane: "head", Status: "fresh", UpdatedAt: now},
-		{RemoteType: "issue", Lane: "tail", Status: "backfilling", PagesListed: 50, Checkpoint: "max_pages:10", UpdatedAt: now},
+		{RemoteType: "issue", Lane: "tail", Status: "backfilling", PagesListed: 50, Checkpoint: "next_page:41", UpdatedAt: now},
 	}, now)
-	if lane != "tail" || maxPages != 20 {
-		t.Fatalf("lane=%q max_pages=%d", lane, maxPages)
+	if lane != "tail" || page != 41 || maxPages != 10 {
+		t.Fatalf("lane=%q page=%d max_pages=%d", lane, page, maxPages)
 	}
 }
 
@@ -249,8 +252,11 @@ func TestMaintenanceFrontiersPreservePerCollectionResults(t *testing.T) {
 	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.UpsertMaintenanceFrontier(ctx, cache.MaintenanceFrontier{RepoID: "owner/repo", RemoteType: "wiki", Ordering: "updated_at_desc", FilterKey: "all", Lane: "tail", Status: "backfilling", Checkpoint: "next_page:21", UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
 	store.Close()
-	req := StartSyncJobRequest{RepoID: "owner/repo", CachePath: cachePath, Lane: "tail", MaxPages: 10}
+	req := StartSyncJobRequest{RepoID: "owner/repo", CachePath: cachePath, Lane: "tail", Page: 1, MaxPages: 10}
 	err = recordMaintenanceSyncFrontiers(ctx, req, []syncCollectionResult{
 		{RemoteType: "issue", Result: &service.SyncResourcesResult{TraversalStatus: "complete", StopReason: "end_of_collection", PagesListed: 1, RecordsListed: 5}},
 		{RemoteType: "wiki", Result: &service.SyncResourcesResult{TraversalStatus: "bounded", StopReason: "max_pages", PagesListed: 10, RecordsListed: 100}},
@@ -277,18 +283,27 @@ func TestMaintenanceFrontiersPreservePerCollectionResults(t *testing.T) {
 	if byType["wiki"].Status != "backfilling" || byType["wiki"].PagesListed != 10 {
 		t.Fatalf("wiki frontier=%+v", byType["wiki"])
 	}
+	if byType["wiki"].Checkpoint != "next_page:21" {
+		t.Fatalf("wiki checkpoint regressed: %+v", byType["wiki"])
+	}
 }
 
 func TestMaintenanceStageInterleavesRAGBeforeTail(t *testing.T) {
 	policy := MaintenancePolicy{SyncEnabled: true, RAGEnabled: true}
-	if got := nextMaintenanceStage(policy, "head", true); got != SyncJobType {
+	if got := nextMaintenanceStage(policy, "head", true, true, true); got != SyncJobType {
 		t.Fatalf("head stage=%q", got)
 	}
-	if got := nextMaintenanceStage(policy, "tail", true); got != RAGIndexJobType {
+	if got := nextMaintenanceStage(policy, "tail", true, true, true); got != RAGIndexJobType {
 		t.Fatalf("stale RAG stage=%q", got)
 	}
-	if got := nextMaintenanceStage(policy, "tail", false); got != SyncJobType {
+	if got := nextMaintenanceStage(policy, "tail", false, true, true); got != SyncJobType {
 		t.Fatalf("tail stage=%q", got)
+	}
+	if got := nextMaintenanceStage(policy, "tail", true, true, false); got != SyncJobType {
+		t.Fatalf("RAG backoff blocked healthy tail stage: %q", got)
+	}
+	if got := nextMaintenanceStage(policy, "head", true, false, true); got != RAGIndexJobType {
+		t.Fatalf("sync backoff blocked healthy RAG stage: %q", got)
 	}
 }
 
@@ -331,13 +346,109 @@ func TestMaintenanceLaneTracksEveryCollectionFrontier(t *testing.T) {
 	frontiers := []cache.MaintenanceFrontier{
 		{RemoteType: "issue", Lane: "head", Status: "fresh", UpdatedAt: now},
 		{RemoteType: "issue", Lane: "tail", Status: "complete", UpdatedAt: now},
-		{RemoteType: "wiki", Lane: "tail", Status: "backfilling", Checkpoint: "max_pages:20", UpdatedAt: now},
+		{RemoteType: "wiki", Lane: "tail", Status: "backfilling", Checkpoint: "next_page:21", UpdatedAt: now},
 	}
-	if lane, pages := nextMaintenanceSyncLane(entry, frontiers, now); lane != "head" || pages != 3 {
-		t.Fatalf("missing wiki head lane=%q pages=%d", lane, pages)
+	if lane, page, pages := nextMaintenanceSyncLane(entry, frontiers, now); lane != "head" || page != 1 || pages != 3 {
+		t.Fatalf("missing wiki head lane=%q page=%d pages=%d", lane, page, pages)
 	}
 	frontiers = append(frontiers, cache.MaintenanceFrontier{RemoteType: "wiki", Lane: "head", Status: "fresh", UpdatedAt: now})
-	if lane, pages := nextMaintenanceSyncLane(entry, frontiers, now); lane != "tail" || pages != 30 {
-		t.Fatalf("wiki tail lane=%q pages=%d", lane, pages)
+	if lane, page, pages := nextMaintenanceSyncLane(entry, frontiers, now); lane != "tail" || page != 21 || pages != 10 {
+		t.Fatalf("wiki tail lane=%q page=%d pages=%d", lane, page, pages)
+	}
+}
+
+func TestMaintenanceCheckpointAdvancesWithOnePageOverlap(t *testing.T) {
+	req := StartSyncJobRequest{Lane: "tail", Page: 21, MaxPages: 10}
+	collection := syncCollectionResult{Result: &service.SyncResourcesResult{TraversalStatus: "bounded", PagesListed: 10}}
+	if got := nextMaintenanceCheckpoint(req, collection); got != "next_page:30" {
+		t.Fatalf("checkpoint=%q", got)
+	}
+	collection.Result.TraversalStatus = "complete"
+	if got := nextMaintenanceCheckpoint(req, collection); got != "" {
+		t.Fatalf("complete checkpoint=%q", got)
+	}
+}
+
+func TestMaintenanceHeadBoundedTraversalIsNotFresh(t *testing.T) {
+	ctx := context.Background()
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	err = recordMaintenanceSyncFrontiers(ctx, StartSyncJobRequest{RepoID: "owner/repo", CachePath: cachePath, Lane: "head", MaxPages: 3}, []syncCollectionResult{{RemoteType: "issue", Result: &service.SyncResourcesResult{TraversalStatus: "bounded", StopReason: "max_pages", PagesListed: 3}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err = cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	frontiers, err := store.ListMaintenanceFrontiers(ctx, "owner/repo")
+	if err != nil || len(frontiers) != 1 || frontiers[0].Status != "partial" {
+		t.Fatalf("frontiers=%+v err=%v", frontiers, err)
+	}
+}
+
+func TestMaintenanceStageFailureBackoffPersistsUntilSuccess(t *testing.T) {
+	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
+	failedAt := now.Add(-time.Second)
+	failed := Job{ID: "job-000001", Type: RAGIndexJobType, Status: JobStatusFailed, ErrorClass: "provider_unavailable", UpdatedAt: failedAt, FinishedAt: &failedAt}
+	state := observeMaintenanceStage(MaintenanceStageState{}, failed, now)
+	if state.ConsecutiveFailures != 1 || !state.RetryAfter.Equal(now.Add(time.Minute)) || state.LastErrorClass != "provider_unavailable" {
+		t.Fatalf("first failure state=%+v", state)
+	}
+	if repeated := observeMaintenanceStage(state, failed, now.Add(30*time.Second)); repeated.ConsecutiveFailures != 1 || !repeated.RetryAfter.Equal(state.RetryAfter) {
+		t.Fatalf("same job counted twice: %+v", repeated)
+	}
+	secondAt := now.Add(time.Minute)
+	second := Job{ID: "job-000002", Type: RAGIndexJobType, Status: JobStatusFailed, ErrorClass: "provider_unavailable", UpdatedAt: secondAt, FinishedAt: &secondAt}
+	state = observeMaintenanceStage(state, second, secondAt)
+	if state.ConsecutiveFailures != 2 || !state.RetryAfter.Equal(secondAt.Add(2*time.Minute)) {
+		t.Fatalf("second failure state=%+v", state)
+	}
+	succeededAt := secondAt.Add(3 * time.Minute)
+	succeeded := Job{ID: "job-000003", Type: RAGIndexJobType, Status: JobStatusSucceeded, NamespaceID: "namespace-new", UpdatedAt: succeededAt, FinishedAt: &succeededAt}
+	state = observeMaintenanceStage(state, succeeded, succeededAt)
+	if state.ConsecutiveFailures != 0 || !state.RetryAfter.IsZero() || state.LastErrorClass != "" || state.NamespaceID != "namespace-new" {
+		t.Fatalf("success did not clear failure state: %+v", state)
+	}
+}
+
+func TestMaintenanceJobDiagnosticsArePublicSafe(t *testing.T) {
+	secret := "/Users/private/cache.db?token=secret"
+	event := sanitizeMaintenanceProgress(RAGIndexJobType, service.ProgressEvent{Type: "records", Phase: "running", RecordsFailed: 1, Message: secret})
+	if strings.Contains(event.Message, secret) || event.Message != "RAG maintenance failed" {
+		t.Fatalf("progress message=%q", event.Message)
+	}
+	if got := sanitizeMaintenanceErrorClass("../../private", "rag_failed"); got != "rag_failed" {
+		t.Fatalf("error class=%q", got)
+	}
+}
+
+func TestSelectMaintenanceNamespaceHonorsExplicitProfile(t *testing.T) {
+	now := time.Now().UTC()
+	namespaces := []cache.EmbeddingNamespace{
+		{ID: "old", EmbeddingNamespaceIdentity: cache.EmbeddingNamespaceIdentity{ProfileID: "profile-old"}, UpdatedAt: now.Add(time.Minute)},
+		{ID: "current", EmbeddingNamespaceIdentity: cache.EmbeddingNamespaceIdentity{ProfileID: "profile-current"}, UpdatedAt: now},
+	}
+	entry := MaintenanceEntry{NamespaceID: "old", Policy: MaintenancePolicy{Profile: "profile-current"}}
+	if got := selectMaintenanceNamespace(entry, namespaces); got != "current" {
+		t.Fatalf("namespace=%q", got)
+	}
+}
+
+func TestMaintenancePeriodicallyVerifiesReadyRAGNamespace(t *testing.T) {
+	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
+	if !maintenanceRAGVerificationDue("namespace", "ready", now.Add(-15*time.Minute), 15*time.Minute, now) {
+		t.Fatal("ready namespace did not become due for provider/model verification")
+	}
+	if maintenanceRAGVerificationDue("namespace", "ready", now.Add(-14*time.Minute), 15*time.Minute, now) {
+		t.Fatal("recently verified namespace became due early")
 	}
 }

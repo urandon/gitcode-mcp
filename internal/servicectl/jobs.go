@@ -18,6 +18,7 @@ const (
 	JobStatusQueued      = "queued"
 	JobStatusRunning     = "running"
 	JobStatusSucceeded   = "succeeded"
+	JobStatusSuperseded  = "superseded"
 	JobStatusFailed      = "failed"
 	JobStatusCancelled   = "cancelled"
 	JobStatusInterrupted = "interrupted"
@@ -43,6 +44,7 @@ type Job struct {
 	Steps          int                     `json:"steps,omitempty"`
 	Completed      int                     `json:"completed,omitempty"`
 	Error          string                  `json:"error,omitempty"`
+	ErrorClass     string                  `json:"error_class,omitempty"`
 	Progress       []service.ProgressEvent `json:"progress,omitempty"`
 }
 
@@ -97,6 +99,7 @@ func (m *JobManager) LoadAndMarkInterrupted() error {
 			job.Error = "service restarted before job completed"
 			job.Progress = append(job.Progress, service.ProgressEvent{Type: "interrupted", Phase: "interrupted", Message: job.Error})
 		}
+		sanitizeStoredMaintenanceJob(&job)
 		trimJobProgress(&job)
 		idNum := parseJobIDNumber(job.ID)
 		if idNum > maxID {
@@ -109,6 +112,19 @@ func (m *JobManager) LoadAndMarkInterrupted() error {
 		m.nextID = maxID
 	}
 	return m.saveLocked()
+}
+
+func sanitizeStoredMaintenanceJob(job *Job) {
+	if job == nil || (job.Type != SyncJobType && job.Type != RAGIndexJobType) {
+		return
+	}
+	if job.Error != "" {
+		job.ErrorClass = sanitizeMaintenanceErrorClass(job.ErrorClass, job.Type+"_failed")
+		job.Error = publicMaintenanceJobError(job.Type, job.ErrorClass)
+	}
+	for i := range job.Progress {
+		job.Progress[i] = sanitizeMaintenanceProgress(job.Type, job.Progress[i])
+	}
 }
 
 func (m *JobManager) StartFake(ctx context.Context, req StartFakeJobRequest) (Job, error) {
@@ -174,6 +190,24 @@ func (m *JobManager) ActiveCacheRepo(jobType, cacheUUID, repoID string) (Job, bo
 		}
 	}
 	return Job{}, false
+}
+
+func (m *JobManager) LatestCacheRepo(jobType, cacheUUID, repoID string) (Job, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var latest *Job
+	for _, job := range m.jobs {
+		if job.Type != jobType || job.CacheUUID != cacheUUID || job.RepoID != repoID {
+			continue
+		}
+		if latest == nil || parseJobIDNumber(job.ID) > parseJobIDNumber(latest.ID) {
+			latest = job
+		}
+	}
+	if latest == nil {
+		return Job{}, false
+	}
+	return cloneJob(latest), true
 }
 
 func (m *JobManager) SetWorkIdentity(id, workKey, cacheUUID, registrationID, namespaceID string) Job {
@@ -248,7 +282,7 @@ func (m *JobManager) Cancel(id string) (Job, bool) {
 		if !found {
 			return Job{}, false
 		}
-		if current.Status == JobStatusCancelled || current.Status == JobStatusSucceeded || current.Status == JobStatusInterrupted {
+		if jobTerminalStatus(current.Status) {
 			return current, true
 		}
 		if time.Now().After(deadline) {
@@ -389,7 +423,7 @@ func (m *JobManager) pruneLocked() {
 
 func jobTerminalStatus(status string) bool {
 	switch status {
-	case JobStatusSucceeded, JobStatusFailed, JobStatusCancelled, JobStatusInterrupted:
+	case JobStatusSucceeded, JobStatusSuperseded, JobStatusFailed, JobStatusCancelled, JobStatusInterrupted:
 		return true
 	default:
 		return false

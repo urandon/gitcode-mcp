@@ -781,6 +781,35 @@ func TestBulkSyncPRCommentsBoundedMaxRecords(t *testing.T) {
 	}
 }
 
+func TestBulkSyncPRCommentsResumesBoundedSourceWindow(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 8, 11, 15, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		listPRPages: []gitcode.Page[gitcode.PullRequest]{{Items: generatePullRequests(0, 3, base), Page: 1, PerPage: 10}},
+		prCommentsByPR: map[int][]gitcode.PRComment{
+			1: generatePRComments(1, 1, base),
+			2: generatePRComments(2, 1, base),
+			3: generatePRComments(3, 1, base),
+		},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "pr-comments-window", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	if _, err := svc.BulkSyncPullRequests(ctx, BulkSyncRequest{RepoID: "pr-comments-window", PerPage: 10}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.BulkSyncPRComments(ctx, BulkSyncRequest{RepoID: "pr-comments-window", Page: 2, Bounds: &SyncBounds{MaxPages: 1}})
+	if err != nil || result.SuccessCount != 1 || result.PagesListed != 1 || result.TraversalStatus != "bounded" || client.prCommentCalls != 1 {
+		t.Fatalf("result=%#v calls=%d err=%v", result, client.prCommentCalls, err)
+	}
+}
+
 func TestBulkSyncWikiBoundedPreCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

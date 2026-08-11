@@ -191,7 +191,7 @@ func waitForManagerJobTerminal(t *testing.T, manager *JobManager, id string) Job
 			t.Fatalf("job %s not found", id)
 		}
 		switch job.Status {
-		case JobStatusSucceeded, JobStatusFailed, JobStatusCancelled, JobStatusInterrupted:
+		case JobStatusSucceeded, JobStatusSuperseded, JobStatusFailed, JobStatusCancelled, JobStatusInterrupted:
 			return job
 		}
 		if time.Now().After(deadline) {
@@ -240,7 +240,7 @@ func waitForJobStatus(t *testing.T, client *RPCClient, id string, action string)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if job.Status == JobStatusCancelled || job.Status == JobStatusSucceeded || job.Status == JobStatusInterrupted {
+		if jobTerminalStatus(job.Status) {
 			return job
 		}
 		if time.Now().After(deadline) {

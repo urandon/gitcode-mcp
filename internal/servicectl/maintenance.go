@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/service"
 )
 
 const maintenanceRegistrySchema = "gitcode-mcp.managed-caches.v1"
@@ -28,10 +29,22 @@ type MaintenancePolicy struct {
 	Pulls               bool   `json:"pulls,omitempty"`
 	PRComments          bool   `json:"pr_comments,omitempty"`
 	HeadIntervalSeconds int    `json:"head_interval_seconds,omitempty"`
+	RAGIntervalSeconds  int    `json:"rag_interval_seconds,omitempty"`
 	HeadMaxPages        int    `json:"head_max_pages,omitempty"`
 	TailSlicePages      int    `json:"tail_slice_pages,omitempty"`
 	PerPage             int    `json:"per_page,omitempty"`
 	Profile             string `json:"profile,omitempty"`
+}
+
+type MaintenanceStageState struct {
+	LastJobID           string    `json:"last_job_id,omitempty"`
+	Status              string    `json:"status,omitempty"`
+	LastErrorClass      string    `json:"last_error_class,omitempty"`
+	LastError           string    `json:"last_error,omitempty"`
+	ConsecutiveFailures int       `json:"consecutive_failures,omitempty"`
+	RetryAfter          time.Time `json:"retry_after,omitempty"`
+	UpdatedAt           time.Time `json:"updated_at,omitempty"`
+	NamespaceID         string    `json:"namespace_id,omitempty"`
 }
 
 type MaintenanceEntry struct {
@@ -51,6 +64,8 @@ type MaintenanceEntry struct {
 	ActiveJobs        []string                    `json:"active_jobs,omitempty"`
 	LastErrorClass    string                      `json:"last_error_class,omitempty"`
 	LastError         string                      `json:"last_error,omitempty"`
+	SyncStage         MaintenanceStageState       `json:"sync_stage,omitempty"`
+	RAGStage          MaintenanceStageState       `json:"rag_stage,omitempty"`
 	LastSeenAt        time.Time                   `json:"last_seen_at"`
 	LastReconciledAt  time.Time                   `json:"last_reconciled_at,omitempty"`
 	NextReconcileAt   time.Time                   `json:"next_reconcile_at,omitempty"`
@@ -133,6 +148,9 @@ func (m *MaintenanceManager) Load() error {
 	m.generation = disk.Generation
 	for _, stored := range disk.Entries {
 		entry := stored.MaintenanceEntry
+		if entry.Policy.RAGIntervalSeconds <= 0 {
+			entry.Policy.RAGIntervalSeconds = 900
+		}
 		entry.cachePath = stored.CachePath
 		m.entries[entry.RegistrationID] = &entry
 	}
@@ -234,7 +252,12 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 			return cloneMaintenanceEntry(existing), nil
 		}
 		previous := *existing
+		profileChanged := existing.Policy.Profile != policy.Profile || existing.Policy.RAGEnabled != policy.RAGEnabled
 		existing.Policy = policy
+		if profileChanged {
+			existing.NamespaceID = ""
+			existing.RAGStage = MaintenanceStageState{}
+		}
 		existing.Enabled = true
 		existing.Generation++
 		existing.State = "enrolled"
@@ -342,24 +365,37 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	}
 	frontiers, _ := store.ListMaintenanceFrontiers(ctx, snapshot.RepoID)
 	namespaces, _ := store.ListEmbeddingNamespaces(ctx, snapshot.RepoID)
+	latestSync, _ := m.jobs.LatestCacheRepo(SyncJobType, snapshot.CacheUUID, snapshot.RepoID)
+	latestRAG, _ := m.jobs.LatestCacheRepo(RAGIndexJobType, snapshot.CacheUUID, snapshot.RepoID)
+	snapshot.SyncStage = observeMaintenanceStage(snapshot.SyncStage, latestSync, now)
+	snapshot.RAGStage = observeMaintenanceStage(snapshot.RAGStage, latestRAG, now)
+	if (latestRAG.Status == JobStatusSucceeded || latestRAG.Status == JobStatusSuperseded) && latestRAG.NamespaceID != "" {
+		snapshot.NamespaceID = latestRAG.NamespaceID
+	}
 	namespaceID := selectMaintenanceNamespace(snapshot, namespaces)
 	covered := int64(0)
 	ragStatus := "missing"
+	coverageUpdatedAt := time.Time{}
 	if namespaceID != "" {
 		state, ok, _ := store.GetRAGCoverageState(ctx, snapshot.RepoID, namespaceID)
 		if ok {
 			covered = state.CoveredGeneration
 			ragStatus = state.Status
+			coverageUpdatedAt = state.UpdatedAt
 		}
 	}
 	store.Close()
 	started := []string{}
 	activeSync, _ := m.jobs.ActiveCacheRepo(SyncJobType, snapshot.CacheUUID, snapshot.RepoID)
 	activeRAG, _ := m.jobs.ActiveCacheRepo(RAGIndexJobType, snapshot.CacheUUID, snapshot.RepoID)
-	needsRAGRepair := contentState.ContentGeneration > covered || (contentState.ContentGeneration > 0 && ragStatus != "ready")
+	ragInterval := time.Duration(snapshot.Policy.RAGIntervalSeconds) * time.Second
+	ragVerificationDue := maintenanceRAGVerificationDue(namespaceID, ragStatus, coverageUpdatedAt, ragInterval, now)
+	needsRAGRepair := contentState.ContentGeneration > covered || (contentState.ContentGeneration > 0 && ragStatus != "ready") || ragVerificationDue
 	if activeSync.ID == "" && activeRAG.ID == "" {
-		lane, maxPages := nextMaintenanceSyncLane(snapshot, frontiers, now)
-		stage := nextMaintenanceStage(snapshot.Policy, lane, needsRAGRepair)
+		lane, page, maxPages := nextMaintenanceSyncLane(snapshot, frontiers, now)
+		syncReady := snapshot.SyncStage.RetryAfter.IsZero() || !now.Before(snapshot.SyncStage.RetryAfter)
+		ragReady := snapshot.RAGStage.RetryAfter.IsZero() || !now.Before(snapshot.RAGStage.RetryAfter)
+		stage := nextMaintenanceStage(snapshot.Policy, lane, needsRAGRepair, syncReady, ragReady)
 		if stage == SyncJobType {
 			req := StartSyncJobRequest{
 				RepoID: snapshot.RepoID, ProviderMode: "live", CachePath: path,
@@ -367,7 +403,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 				Issues: snapshot.Policy.Issues, IssueComments: snapshot.Policy.IssueComments,
 				Wiki: snapshot.Policy.Wiki, Pulls: snapshot.Policy.Pulls, PRComments: snapshot.Policy.PRComments,
 				MaxPages: maxPages, PerPage: snapshot.Policy.PerPage,
-				IdempotencyKey: fmt.Sprintf("maintenance-%s-%s-%d", snapshot.RegistrationID, lane, now.Unix()/60),
+				Page: page, IdempotencyKey: fmt.Sprintf("maintenance-%s-%s-%d-%d", snapshot.RegistrationID, lane, page, now.Unix()/60),
 			}
 			job, jobErr := m.jobs.StartSync(context.Background(), m.manager, req)
 			if jobErr != nil {
@@ -389,12 +425,15 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	entry.ContentGeneration = contentState.ContentGeneration
 	entry.CoveredGeneration = covered
 	entry.RAGStatus = ragStatus
+	entry.SyncStage = snapshot.SyncStage
+	entry.RAGStage = snapshot.RAGStage
 	entry.NamespaceID = namespaceID
 	if activeRAG.NamespaceID != "" {
 		entry.NamespaceID = activeRAG.NamespaceID
 	}
 	entry.Frontiers = frontiers
 	entry.ActiveJobs = activeMaintenanceJobIDs(activeSync, activeRAG)
+	entry.LastErrorClass, entry.LastError = maintenanceEntryError(entry.Policy, entry.SyncStage, entry.RAGStage)
 	entry.State = deriveMaintenanceEntryState(*entry)
 	if activeSync.ID != "" {
 		entry.State = "refreshing"
@@ -404,8 +443,6 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	} else if activeRAG.ID != "" {
 		entry.State = "indexing"
 	}
-	entry.LastError = ""
-	entry.LastErrorClass = ""
 	entry.LastReconciledAt = now
 	entry.NextReconcileAt = now.Add(time.Minute)
 	_ = m.saveLocked()
@@ -414,10 +451,14 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	return updated, started
 }
 
+func maintenanceRAGVerificationDue(namespaceID, status string, updatedAt time.Time, interval time.Duration, now time.Time) bool {
+	return namespaceID != "" && status == "ready" && (updatedAt.IsZero() || !updatedAt.Add(interval).After(now))
+}
+
 func selectMaintenanceNamespace(entry MaintenanceEntry, namespaces []cache.EmbeddingNamespace) string {
 	if entry.NamespaceID != "" {
 		for _, namespace := range namespaces {
-			if namespace.ID == entry.NamespaceID {
+			if namespace.ID == entry.NamespaceID && (entry.Policy.Profile == "" || namespace.ProfileID == entry.Policy.Profile) {
 				return namespace.ID
 			}
 		}
@@ -446,10 +487,10 @@ func activeMaintenanceJobIDs(jobs ...Job) []string {
 	return ids
 }
 
-func nextMaintenanceSyncLane(entry MaintenanceEntry, frontiers []cache.MaintenanceFrontier, now time.Time) (string, int) {
+func nextMaintenanceSyncLane(entry MaintenanceEntry, frontiers []cache.MaintenanceFrontier, now time.Time) (string, int, int) {
 	expected := maintenanceRemoteTypes(entry.Policy)
 	if len(expected) == 0 {
-		return "", 0
+		return "", 0, 0
 	}
 	byKey := make(map[string]cache.MaintenanceFrontier, len(frontiers))
 	for i := range frontiers {
@@ -460,31 +501,35 @@ func nextMaintenanceSyncLane(entry MaintenanceEntry, frontiers []cache.Maintenan
 	for _, remoteType := range expected {
 		head, ok := byKey[remoteType+"\x00head"]
 		if !ok || head.UpdatedAt.Add(interval).Before(now) {
-			return "head", entry.Policy.HeadMaxPages
+			return "head", 1, entry.Policy.HeadMaxPages
 		}
 	}
-	largestBound := 0
+	nextPage := 0
 	needsTail := false
 	for _, remoteType := range expected {
 		tail, ok := byKey[remoteType+"\x00tail"]
 		if !ok || tail.Status != "complete" {
 			needsTail = true
 		}
-		if ok {
-			bound := 0
-			_, _ = fmt.Sscanf(tail.Checkpoint, "max_pages:%d", &bound)
-			if bound <= 0 {
-				bound = tail.PagesListed
-			}
-			if bound > largestBound {
-				largestBound = bound
-			}
+		if !ok || tail.Status == "complete" {
+			continue
+		}
+		page := 1
+		_, _ = fmt.Sscanf(tail.Checkpoint, "next_page:%d", &page)
+		if page <= 0 {
+			page = 1
+		}
+		if nextPage == 0 || page < nextPage {
+			nextPage = page
 		}
 	}
 	if needsTail {
-		return "tail", entry.Policy.TailSlicePages + largestBound
+		if nextPage <= 0 {
+			nextPage = 1
+		}
+		return "tail", nextPage, entry.Policy.TailSlicePages
 	}
-	return "", 0
+	return "", 0, 0
 }
 
 func maintenanceRemoteTypes(policy MaintenancePolicy) []string {
@@ -507,17 +552,115 @@ func maintenanceRemoteTypes(policy MaintenancePolicy) []string {
 	return remoteTypes
 }
 
-func nextMaintenanceStage(policy MaintenancePolicy, lane string, needsRAGRepair bool) string {
-	if policy.SyncEnabled && lane == "head" {
+func nextMaintenanceStage(policy MaintenancePolicy, lane string, needsRAGRepair, syncReady, ragReady bool) string {
+	if policy.SyncEnabled && syncReady && lane == "head" {
 		return SyncJobType
 	}
-	if policy.RAGEnabled && needsRAGRepair {
+	if policy.RAGEnabled && ragReady && needsRAGRepair {
 		return RAGIndexJobType
 	}
-	if policy.SyncEnabled && lane == "tail" {
+	if policy.SyncEnabled && syncReady && lane == "tail" {
 		return SyncJobType
 	}
 	return ""
+}
+
+func observeMaintenanceStage(state MaintenanceStageState, job Job, now time.Time) MaintenanceStageState {
+	if job.ID == "" || job.ID == state.LastJobID || !jobTerminalStatus(job.Status) {
+		return state
+	}
+	state.LastJobID = job.ID
+	state.Status = job.Status
+	state.UpdatedAt = job.UpdatedAt
+	if job.FinishedAt != nil {
+		state.UpdatedAt = *job.FinishedAt
+	}
+	if job.NamespaceID != "" {
+		state.NamespaceID = job.NamespaceID
+	}
+	switch job.Status {
+	case JobStatusSucceeded, JobStatusSuperseded:
+		state.ConsecutiveFailures = 0
+		state.LastErrorClass = ""
+		state.LastError = ""
+		state.RetryAfter = time.Time{}
+	default:
+		state.ConsecutiveFailures++
+		state.LastErrorClass = sanitizeMaintenanceErrorClass(job.ErrorClass, job.Type+"_failed")
+		state.LastError = publicMaintenanceJobError(job.Type, state.LastErrorClass)
+		state.RetryAfter = now.Add(maintenanceStageBackoff(state.ConsecutiveFailures))
+	}
+	return state
+}
+
+func maintenanceStageBackoff(failures int) time.Duration {
+	if failures < 1 {
+		failures = 1
+	}
+	shift := failures - 1
+	if shift > 6 {
+		shift = 6
+	}
+	return time.Minute * time.Duration(1<<shift)
+}
+
+func maintenanceEntryError(policy MaintenancePolicy, syncStage, ragStage MaintenanceStageState) (string, string) {
+	selected := MaintenanceStageState{}
+	stages := []MaintenanceStageState{}
+	if policy.SyncEnabled {
+		stages = append(stages, syncStage)
+	}
+	if policy.RAGEnabled {
+		stages = append(stages, ragStage)
+	}
+	for _, stage := range stages {
+		if stage.LastErrorClass != "" && (selected.LastErrorClass == "" || stage.UpdatedAt.After(selected.UpdatedAt)) {
+			selected = stage
+		}
+	}
+	return selected.LastErrorClass, selected.LastError
+}
+
+func maintenanceJobErrorClass(err error, fallback string) string {
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	for current := err; current != nil; current = errors.Unwrap(current) {
+		if coded, ok := current.(interface{ DiagnosticCode() string }); ok && strings.TrimSpace(coded.DiagnosticCode()) != "" {
+			return sanitizeMaintenanceErrorClass(coded.DiagnosticCode(), fallback)
+		}
+	}
+	return sanitizeMaintenanceErrorClass(fallback, "maintenance_failed")
+}
+
+func sanitizeMaintenanceErrorClass(value, fallback string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" || len(value) > 64 {
+		return fallback
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' && r != '-' {
+			return fallback
+		}
+	}
+	return value
+}
+
+func sanitizeMaintenanceProgress(jobType string, event service.ProgressEvent) service.ProgressEvent {
+	if event.RecordsFailed > 0 || event.Type == JobStatusFailed || event.Type == JobStatusCancelled || event.Type == JobStatusInterrupted || event.Phase == JobStatusFailed || event.Phase == JobStatusCancelled || event.Phase == JobStatusInterrupted {
+		event.Message = publicMaintenanceJobError(jobType, "progress_failed")
+	}
+	return event
+}
+
+func publicMaintenanceJobError(jobType, class string) string {
+	if class == "cancelled" {
+		return "maintenance job was cancelled"
+	}
+	if jobType == RAGIndexJobType {
+		return "RAG maintenance failed"
+	}
+	return "remote cache maintenance failed"
 }
 
 func (m *MaintenanceManager) updateEntryFailure(id, class string, _ error) MaintenanceEntry {
@@ -566,6 +709,9 @@ func (m *MaintenanceManager) saveLocked() error {
 func normalizeMaintenancePolicy(policy MaintenancePolicy, binding cache.RepositoryBinding) (MaintenancePolicy, error) {
 	if policy.HeadIntervalSeconds <= 0 {
 		policy.HeadIntervalSeconds = 900
+	}
+	if policy.RAGIntervalSeconds <= 0 {
+		policy.RAGIntervalSeconds = 900
 	}
 	if policy.HeadMaxPages <= 0 {
 		policy.HeadMaxPages = 3
@@ -656,6 +802,9 @@ func maintenanceIdempotencyKeyHash(key string) string {
 func deriveMaintenanceEntryState(entry MaintenanceEntry) string {
 	if !entry.Enabled {
 		return "disabled"
+	}
+	if entry.LastErrorClass != "" {
+		return "degraded"
 	}
 	if entry.Policy.SyncEnabled {
 		for _, frontier := range entry.Frontiers {

@@ -29,6 +29,7 @@ type StartSyncJobRequest struct {
 	MaxPages       int    `json:"max_pages,omitempty"`
 	MaxRecords     int    `json:"max_records,omitempty"`
 	PerPage        int    `json:"per_page,omitempty"`
+	Page           int    `json:"page,omitempty"`
 	CacheUUID      string `json:"cache_uuid,omitempty"`
 	RegistrationID string `json:"registration_id,omitempty"`
 	Lane           string `json:"lane,omitempty"`
@@ -75,6 +76,7 @@ func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID stri
 	go func() {
 		defer close(done)
 		for ev := range progressCh {
+			ev = sanitizeMaintenanceProgress(SyncJobType, ev)
 			m.updateJob(jobID, func(job *Job, now time.Time) {
 				job.UpdatedAt = now
 				job.Progress = append(job.Progress, ev)
@@ -107,8 +109,12 @@ func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID stri
 			job.Status = status
 			job.UpdatedAt = now
 			job.FinishedAt = &now
-			job.Error = err.Error()
-			job.Progress = append(job.Progress, service.ProgressEvent{Type: status, Phase: status, Collection: SyncJobType, RecordsListed: result.RecordsListed, RecordsFetched: result.SuccessCount, RecordsFailed: result.FailureCount, Message: err.Error()})
+			job.ErrorClass = maintenanceJobErrorClass(err, "sync_failed")
+			if status == JobStatusCancelled {
+				job.ErrorClass = "cancelled"
+			}
+			job.Error = publicMaintenanceJobError(SyncJobType, job.ErrorClass)
+			job.Progress = append(job.Progress, service.ProgressEvent{Type: status, Phase: status, Collection: SyncJobType, RecordsListed: result.RecordsListed, RecordsFetched: result.SuccessCount, RecordsFailed: result.FailureCount, Message: job.Error})
 			delete(m.cancel, jobID)
 		})
 		return
@@ -140,9 +146,17 @@ func recordMaintenanceSyncFrontiers(ctx context.Context, req StartSyncJobRequest
 		return err
 	}
 	defer store.Close()
+	existing := map[string]cache.MaintenanceFrontier{}
+	if frontiers, listErr := store.ListMaintenanceFrontiers(ctx, req.RepoID); listErr == nil {
+		for _, frontier := range frontiers {
+			existing[frontier.RemoteType+"\x00"+frontier.Lane] = frontier
+		}
+	}
 	for _, collection := range collections {
 		status := "fresh"
-		if req.Lane == "tail" {
+		if req.Lane == "head" && (collection.Result == nil || collection.Result.TraversalStatus != "complete") {
+			status = "partial"
+		} else if req.Lane == "tail" {
 			status = "backfilling"
 			if collection.Err == nil && collection.Result != nil && collection.Result.TraversalStatus == "complete" {
 				status = "complete"
@@ -161,13 +175,46 @@ func recordMaintenanceSyncFrontiers(ctx context.Context, req StartSyncJobRequest
 			frontier.StopReason = collection.Result.StopReason
 			frontier.PagesListed = collection.Result.PagesListed
 			frontier.RecordsListed = collection.Result.RecordsListed
-			frontier.Checkpoint = fmt.Sprintf("max_pages:%d", req.MaxPages)
+		}
+		frontier.Checkpoint = nextMaintenanceCheckpoint(req, collection)
+		if req.Lane == "tail" && frontier.Status == "backfilling" {
+			previous := existing[collection.RemoteType+"\x00tail"]
+			if checkpointPage(previous.Checkpoint) > checkpointPage(frontier.Checkpoint) {
+				frontier.Checkpoint = previous.Checkpoint
+			}
 		}
 		if err := store.UpsertMaintenanceFrontier(ctx, frontier); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func checkpointPage(checkpoint string) int {
+	page := 0
+	_, _ = fmt.Sscanf(checkpoint, "next_page:%d", &page)
+	return page
+}
+
+func nextMaintenanceCheckpoint(req StartSyncJobRequest, collection syncCollectionResult) string {
+	if req.Lane != "tail" || (collection.Result != nil && collection.Result.TraversalStatus == "complete") {
+		return ""
+	}
+	if collection.RemoteType == "issue_comment" {
+		return "next_page:1"
+	}
+	page := req.Page
+	if page <= 0 {
+		page = 1
+	}
+	if collection.Err != nil || collection.Result == nil || collection.Result.PagesListed <= 0 {
+		return fmt.Sprintf("next_page:%d", page)
+	}
+	advance := collection.Result.PagesListed
+	if advance > 1 {
+		advance-- // replay one page so page-number shifts cannot create a boundary gap
+	}
+	return fmt.Sprintf("next_page:%d", page+advance)
 }
 
 func runSync(ctx context.Context, manager Manager, req StartSyncJobRequest, progressCh chan<- service.ProgressEvent) (*service.SyncResourcesResult, []syncCollectionResult, error) {
@@ -208,7 +255,7 @@ func runSync(ctx context.Context, manager Manager, req StartSyncJobRequest, prog
 	if err != nil {
 		return nil, nil, err
 	}
-	bulkReq := service.BulkSyncRequest{RepoID: req.RepoID, IdempotencyKey: strings.TrimSpace(req.IdempotencyKey), PerPage: req.PerPage, Bounds: &service.SyncBounds{MaxPages: req.MaxPages, MaxRecords: req.MaxRecords, ProgressChan: progressCh}, ProgressChan: progressCh}
+	bulkReq := service.BulkSyncRequest{RepoID: req.RepoID, IdempotencyKey: strings.TrimSpace(req.IdempotencyKey), Page: req.Page, PerPage: req.PerPage, Bounds: &service.SyncBounds{MaxPages: req.MaxPages, MaxRecords: req.MaxRecords, ProgressChan: progressCh}, ProgressChan: progressCh, IncrementalQueue: strings.TrimSpace(req.Lane) != ""}
 	if bulkReq.PerPage <= 0 {
 		bulkReq.PerPage = 100
 	}

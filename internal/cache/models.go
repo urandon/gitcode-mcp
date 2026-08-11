@@ -434,6 +434,7 @@ type SyncGraph struct {
 	Identities          []Identity
 	Links               []Link
 	Chunks              []Chunk
+	ReplaceChunks       bool
 	RemoteRevisions     []RemoteRevision
 	SyncEvents          []SyncEvent
 }
@@ -668,6 +669,7 @@ type SourceGraph struct {
 	Identities          []Identity
 	Links               []Link
 	Chunks              []Chunk
+	ReplaceChunks       bool
 	SyncStatus          *SyncStatus
 	SyncEvents          []SyncEvent
 	Conflicts           []Conflict

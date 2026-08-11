@@ -253,6 +253,11 @@ func (s *SQLiteStore) UpsertSyncGraph(ctx context.Context, graph SyncGraph) (err
 			return err
 		}
 	}
+	if graph.ReplaceChunks {
+		if err = reconcileSourceChunksTx(ctx, tx, repoID, graph.Record.ID, graph.Chunks); err != nil {
+			return err
+		}
+	}
 	for _, chunk := range graph.Chunks {
 		if chunk.RepoID == "" {
 			chunk.RepoID = repoID
