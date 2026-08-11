@@ -40,12 +40,12 @@ func (m *JobManager) StartSync(ctx context.Context, manager Manager, req StartSy
 		return Job{}, errors.New("repo_id is required")
 	}
 	workKey := syncWorkKey(req)
-	if active, ok := m.ActiveWork(workKey); ok {
-		return active, nil
-	}
 	ctx, cancel := context.WithCancel(ctx)
-	job := m.createJobWithMetadata(SyncJobType, req.RepoID, "", 0, cancel)
-	job = m.SetWorkIdentity(job.ID, workKey, req.CacheUUID, req.RegistrationID, "")
+	job, created := m.createCoalescedJob(SyncJobType, req.RepoID, "", 0, workKey, req.CacheUUID, req.RegistrationID, "", cancel)
+	if !created {
+		cancel()
+		return job, nil
+	}
 	go m.runSyncJob(ctx, manager, job.ID, req)
 	return job, nil
 }
@@ -87,14 +87,14 @@ func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID stri
 			})
 		}
 	}()
-	result, err := runSync(ctx, manager, req, progressCh)
+	result, collections, err := runSync(ctx, manager, req, progressCh)
 	close(progressCh)
 	<-done
 	if result == nil {
 		result = &service.SyncResourcesResult{}
 	}
 	if strings.TrimSpace(req.Lane) != "" {
-		if frontierErr := recordMaintenanceSyncFrontiers(context.Background(), req, result, err); frontierErr != nil && err == nil {
+		if frontierErr := recordMaintenanceSyncFrontiers(context.Background(), req, collections); frontierErr != nil && err == nil {
 			err = fmt.Errorf("record maintenance frontier: %w", frontierErr)
 		}
 	}
@@ -128,52 +128,39 @@ func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID stri
 	})
 }
 
-func recordMaintenanceSyncFrontiers(ctx context.Context, req StartSyncJobRequest, result *service.SyncResourcesResult, syncErr error) error {
+type syncCollectionResult struct {
+	RemoteType string
+	Result     *service.SyncResourcesResult
+	Err        error
+}
+
+func recordMaintenanceSyncFrontiers(ctx context.Context, req StartSyncJobRequest, collections []syncCollectionResult) error {
 	store, err := cache.NewSQLiteStore(ctx, req.CachePath)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-	status := "fresh"
-	if req.Lane == "tail" {
-		status = "backfilling"
-		if syncErr == nil && result != nil && result.TraversalStatus == "complete" {
-			status = "complete"
+	for _, collection := range collections {
+		status := "fresh"
+		if req.Lane == "tail" {
+			status = "backfilling"
+			if collection.Err == nil && collection.Result != nil && collection.Result.TraversalStatus == "complete" {
+				status = "complete"
+			}
 		}
-	}
-	errorClass := ""
-	if syncErr != nil {
-		status = "degraded"
-		errorClass = "sync_failed"
-		if coded, ok := syncErr.(interface{ DiagnosticCode() string }); ok {
-			errorClass = coded.DiagnosticCode()
+		errorClass := ""
+		if collection.Err != nil {
+			status = "degraded"
+			errorClass = "sync_failed"
+			if coded, ok := collection.Err.(interface{ DiagnosticCode() string }); ok {
+				errorClass = coded.DiagnosticCode()
+			}
 		}
-	}
-	remoteTypes := []string{}
-	if req.Issues {
-		remoteTypes = append(remoteTypes, "issue")
-	}
-	if req.Wiki {
-		remoteTypes = append(remoteTypes, "wiki")
-	}
-	if req.Pulls {
-		remoteTypes = append(remoteTypes, "pull_request")
-	}
-	if req.IssueComments {
-		remoteTypes = append(remoteTypes, "issue_comment")
-	}
-	if req.PRComments || req.Comments {
-		remoteTypes = append(remoteTypes, "pr_comment")
-	}
-	if len(remoteTypes) == 0 {
-		remoteTypes = append(remoteTypes, "all")
-	}
-	for _, remoteType := range remoteTypes {
-		frontier := cache.MaintenanceFrontier{RepoID: req.RepoID, RemoteType: remoteType, Ordering: "updated_at_desc", FilterKey: "all", Lane: req.Lane, Status: status, LastErrorClass: errorClass, UpdatedAt: time.Now().UTC()}
-		if result != nil {
-			frontier.StopReason = result.StopReason
-			frontier.PagesListed = result.PagesListed
-			frontier.RecordsListed = result.RecordsListed
+		frontier := cache.MaintenanceFrontier{RepoID: req.RepoID, RemoteType: collection.RemoteType, Ordering: "updated_at_desc", FilterKey: "all", Lane: req.Lane, Status: status, LastErrorClass: errorClass, UpdatedAt: time.Now().UTC()}
+		if collection.Result != nil {
+			frontier.StopReason = collection.Result.StopReason
+			frontier.PagesListed = collection.Result.PagesListed
+			frontier.RecordsListed = collection.Result.RecordsListed
 			frontier.Checkpoint = fmt.Sprintf("max_pages:%d", req.MaxPages)
 		}
 		if err := store.UpsertMaintenanceFrontier(ctx, frontier); err != nil {
@@ -183,29 +170,29 @@ func recordMaintenanceSyncFrontiers(ctx context.Context, req StartSyncJobRequest
 	return nil
 }
 
-func runSync(ctx context.Context, manager Manager, req StartSyncJobRequest, progressCh chan<- service.ProgressEvent) (*service.SyncResourcesResult, error) {
+func runSync(ctx context.Context, manager Manager, req StartSyncJobRequest, progressCh chan<- service.ProgressEvent) (*service.SyncResourcesResult, []syncCollectionResult, error) {
 	src := manager.Source
 	if src == nil {
 		src = config.OSSource{}
 	}
 	eff, err := config.LoadEffective(src, config.Overrides{CachePath: req.CachePath})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	store, err := cache.NewSQLiteStore(ctx, eff.Config.CachePath)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer store.Close()
 	mode, err := syncJobProviderMode(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	token := ""
 	if mode == gitcode.ProviderModeLive {
 		secret, _, err := config.DefaultCredentialProvider(src).Resolve(ctx, eff)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		token = secret.Value()
 	}
@@ -219,7 +206,7 @@ func runSync(ctx context.Context, manager Manager, req StartSyncJobRequest, prog
 		RateLimitBurst:  eff.Config.RateLimitBurst,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	bulkReq := service.BulkSyncRequest{RepoID: req.RepoID, IdempotencyKey: strings.TrimSpace(req.IdempotencyKey), PerPage: req.PerPage, Bounds: &service.SyncBounds{MaxPages: req.MaxPages, MaxRecords: req.MaxRecords, ProgressChan: progressCh}, ProgressChan: progressCh}
 	if bulkReq.PerPage <= 0 {
@@ -237,39 +224,42 @@ type bulkSyncService interface {
 	BulkSyncAll(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)
 }
 
-func runSyncSelections(ctx context.Context, svc bulkSyncService, req service.BulkSyncRequest, sel StartSyncJobRequest) (*service.SyncResourcesResult, error) {
+func runSyncSelections(ctx context.Context, svc bulkSyncService, req service.BulkSyncRequest, sel StartSyncJobRequest) (*service.SyncResourcesResult, []syncCollectionResult, error) {
 	if !sel.Issues && !sel.Wiki && !sel.Pulls && !sel.Comments && !sel.IssueComments && !sel.PRComments {
-		return svc.BulkSyncAll(ctx, req)
+		part, err := svc.BulkSyncAll(ctx, req)
+		return part, []syncCollectionResult{{RemoteType: "all", Result: part, Err: err}}, err
 	}
 	aggregate := &service.SyncResourcesResult{Results: []service.SyncResult{}, Failures: []service.ResourceError{}}
+	collections := []syncCollectionResult{}
 	var syncErr error
-	run := func(fn func(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)) {
+	run := func(remoteType string, fn func(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)) {
 		part, err := fn(ctx, req)
+		collections = append(collections, syncCollectionResult{RemoteType: remoteType, Result: part, Err: err})
 		mergeSyncResources(aggregate, part)
 		if err != nil {
 			syncErr = mergeSyncError(syncErr, aggregate, err)
 		}
 	}
 	if sel.Issues {
-		run(svc.BulkSyncIssues)
+		run("issue", svc.BulkSyncIssues)
 	}
 	if sel.IssueComments {
-		run(svc.BulkSyncIssueComments)
+		run("issue_comment", svc.BulkSyncIssueComments)
 	}
 	if sel.Wiki {
-		run(svc.BulkSyncWiki)
+		run("wiki", svc.BulkSyncWiki)
 	}
 	if sel.Pulls {
-		run(svc.BulkSyncPullRequests)
+		run("pull_request", svc.BulkSyncPullRequests)
 	}
 	if sel.Comments || sel.PRComments {
-		run(svc.BulkSyncPRComments)
+		run("pr_comment", svc.BulkSyncPRComments)
 	}
 	if aggregate.SuccessCount == 0 && aggregate.FailureCount == 0 {
 		aggregate.SuccessCount = len(aggregate.Results)
 		aggregate.FailureCount = len(aggregate.Failures)
 	}
-	return aggregate, syncErr
+	return aggregate, collections, syncErr
 }
 
 func mergeSyncResources(dst *service.SyncResourcesResult, src *service.SyncResourcesResult) {

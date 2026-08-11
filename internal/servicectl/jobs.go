@@ -187,6 +187,28 @@ func (m *JobManager) SetWorkIdentity(id, workKey, cacheUUID, registrationID, nam
 	return m.mustGet(id)
 }
 
+func (m *JobManager) createCoalescedJob(jobType, repoID, profileID string, steps int, workKey, cacheUUID, registrationID, namespaceID string, cancel context.CancelFunc) (Job, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, job := range m.jobs {
+		if job.WorkKey == workKey && (job.Status == JobStatusQueued || job.Status == JobStatusRunning) {
+			return cloneJob(job), false
+		}
+	}
+	m.nextID++
+	now := m.now()
+	id := fmt.Sprintf("job-%06d", m.nextID)
+	job := &Job{
+		ID: id, Type: jobType, RepoID: repoID, ProfileID: profileID,
+		CacheUUID: cacheUUID, RegistrationID: registrationID, NamespaceID: namespaceID, WorkKey: workKey,
+		Status: JobStatusQueued, CreatedAt: now, UpdatedAt: now, Steps: steps,
+	}
+	m.jobs[id] = job
+	m.cancel[id] = cancel
+	_ = m.saveLocked()
+	return cloneJob(job), true
+}
+
 func (m *JobManager) List() []Job {
 	m.mu.Lock()
 	defer m.mu.Unlock()

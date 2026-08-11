@@ -98,14 +98,15 @@ type MaintenanceReconcileResult struct {
 }
 
 type MaintenanceManager struct {
-	mu         sync.Mutex
-	manager    Manager
-	jobs       *JobManager
-	path       string
-	generation int64
-	entries    map[string]*MaintenanceEntry
-	receipts   map[string]string
-	now        func() time.Time
+	mu          sync.Mutex
+	reconcileMu sync.Mutex
+	manager     Manager
+	jobs        *JobManager
+	path        string
+	generation  int64
+	entries     map[string]*MaintenanceEntry
+	receipts    map[string]string
+	now         func() time.Time
 }
 
 func NewMaintenanceManager(manager Manager, jobs *JobManager, path string) *MaintenanceManager {
@@ -183,17 +184,20 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 	if err != nil {
 		return MaintenanceEntry{}, err
 	}
-	found := false
+	var binding cache.RepositoryBinding
 	for _, repo := range repos {
 		if repo.RepoID == req.RepoID {
-			found = true
+			binding = repo
 			break
 		}
 	}
-	if !found {
+	if binding.RepoID == "" {
 		return MaintenanceEntry{}, fmt.Errorf("maintenance: repository %q is not bound in selected cache", req.RepoID)
 	}
-	policy := normalizeMaintenancePolicy(req.Policy)
+	policy, err := normalizeMaintenancePolicy(req.Policy, binding)
+	if err != nil {
+		return MaintenanceEntry{}, err
+	}
 	registrationID := maintenanceRegistrationID(identity.UUID, req.RepoID)
 	keyHash := maintenanceIdempotencyKeyHash(req.IdempotencyKey)
 	now := m.now()
@@ -289,6 +293,8 @@ func (m *MaintenanceManager) Disable(ctx context.Context, registrationID string)
 }
 
 func (m *MaintenanceManager) Reconcile(ctx context.Context) (MaintenanceReconcileResult, error) {
+	m.reconcileMu.Lock()
+	defer m.reconcileMu.Unlock()
 	list, err := m.List(ctx)
 	if err != nil {
 		return MaintenanceReconcileResult{}, err
@@ -349,10 +355,12 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	store.Close()
 	started := []string{}
 	activeSync, _ := m.jobs.ActiveCacheRepo(SyncJobType, snapshot.CacheUUID, snapshot.RepoID)
-	syncScheduled := activeSync.ID != ""
-	if snapshot.Policy.SyncEnabled && activeSync.ID == "" {
+	activeRAG, _ := m.jobs.ActiveCacheRepo(RAGIndexJobType, snapshot.CacheUUID, snapshot.RepoID)
+	needsRAGRepair := contentState.ContentGeneration > covered || (contentState.ContentGeneration > 0 && ragStatus != "ready")
+	if activeSync.ID == "" && activeRAG.ID == "" {
 		lane, maxPages := nextMaintenanceSyncLane(snapshot, frontiers, now)
-		if lane != "" {
+		stage := nextMaintenanceStage(snapshot.Policy, lane, needsRAGRepair)
+		if stage == SyncJobType {
 			req := StartSyncJobRequest{
 				RepoID: snapshot.RepoID, ProviderMode: "live", CachePath: path,
 				CacheUUID: snapshot.CacheUUID, RegistrationID: snapshot.RegistrationID, Lane: lane,
@@ -367,18 +375,14 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 			}
 			started = append(started, job.ID)
 			activeSync = job
-			syncScheduled = true
+		} else if stage == RAGIndexJobType {
+			job, jobErr := m.jobs.StartRAGIndex(context.Background(), m.manager, StartRAGIndexJobRequest{RepoID: snapshot.RepoID, Profile: snapshot.Policy.Profile, CachePath: path, CacheUUID: snapshot.CacheUUID, RegistrationID: snapshot.RegistrationID})
+			if jobErr != nil {
+				return m.updateEntryFailure(registrationID, "rag_schedule_failed", jobErr), started
+			}
+			started = append(started, job.ID)
+			activeRAG = job
 		}
-	}
-	activeRAG, _ := m.jobs.ActiveCacheRepo(RAGIndexJobType, snapshot.CacheUUID, snapshot.RepoID)
-	needsRAGRepair := contentState.ContentGeneration > covered || (contentState.ContentGeneration > 0 && ragStatus != "ready")
-	if snapshot.Policy.RAGEnabled && !syncScheduled && activeRAG.ID == "" && needsRAGRepair {
-		job, jobErr := m.jobs.StartRAGIndex(context.Background(), m.manager, StartRAGIndexJobRequest{RepoID: snapshot.RepoID, Profile: snapshot.Policy.Profile, CachePath: path, CacheUUID: snapshot.CacheUUID, RegistrationID: snapshot.RegistrationID})
-		if jobErr != nil {
-			return m.updateEntryFailure(registrationID, "rag_schedule_failed", jobErr), started
-		}
-		started = append(started, job.ID)
-		activeRAG = job
 	}
 	m.mu.Lock()
 	entry = m.entries[registrationID]
@@ -443,36 +447,80 @@ func activeMaintenanceJobIDs(jobs ...Job) []string {
 }
 
 func nextMaintenanceSyncLane(entry MaintenanceEntry, frontiers []cache.MaintenanceFrontier, now time.Time) (string, int) {
-	var head, tail *cache.MaintenanceFrontier
+	expected := maintenanceRemoteTypes(entry.Policy)
+	if len(expected) == 0 {
+		return "", 0
+	}
+	byKey := make(map[string]cache.MaintenanceFrontier, len(frontiers))
 	for i := range frontiers {
-		frontier := &frontiers[i]
-		switch frontier.Lane {
-		case "head":
-			head = frontier
-		case "tail":
-			tail = frontier
-		}
+		frontier := frontiers[i]
+		byKey[frontier.RemoteType+"\x00"+frontier.Lane] = frontier
 	}
 	interval := time.Duration(entry.Policy.HeadIntervalSeconds) * time.Second
-	if head == nil || head.UpdatedAt.Add(interval).Before(now) {
-		return "head", entry.Policy.HeadMaxPages
-	}
-	if tail == nil || tail.Status != "complete" {
-		maxPages := entry.Policy.TailSlicePages
-		if tail != nil {
-			previousBound := 0
-			_, _ = fmt.Sscanf(tail.Checkpoint, "max_pages:%d", &previousBound)
-			if previousBound <= 0 {
-				previousBound = tail.PagesListed
-			}
-			maxPages += previousBound
+	for _, remoteType := range expected {
+		head, ok := byKey[remoteType+"\x00head"]
+		if !ok || head.UpdatedAt.Add(interval).Before(now) {
+			return "head", entry.Policy.HeadMaxPages
 		}
-		return "tail", maxPages
+	}
+	largestBound := 0
+	needsTail := false
+	for _, remoteType := range expected {
+		tail, ok := byKey[remoteType+"\x00tail"]
+		if !ok || tail.Status != "complete" {
+			needsTail = true
+		}
+		if ok {
+			bound := 0
+			_, _ = fmt.Sscanf(tail.Checkpoint, "max_pages:%d", &bound)
+			if bound <= 0 {
+				bound = tail.PagesListed
+			}
+			if bound > largestBound {
+				largestBound = bound
+			}
+		}
+	}
+	if needsTail {
+		return "tail", entry.Policy.TailSlicePages + largestBound
 	}
 	return "", 0
 }
 
-func (m *MaintenanceManager) updateEntryFailure(id, class string, err error) MaintenanceEntry {
+func maintenanceRemoteTypes(policy MaintenancePolicy) []string {
+	remoteTypes := []string{}
+	if policy.Issues {
+		remoteTypes = append(remoteTypes, "issue")
+	}
+	if policy.IssueComments {
+		remoteTypes = append(remoteTypes, "issue_comment")
+	}
+	if policy.Wiki {
+		remoteTypes = append(remoteTypes, "wiki")
+	}
+	if policy.Pulls {
+		remoteTypes = append(remoteTypes, "pull_request")
+	}
+	if policy.PRComments {
+		remoteTypes = append(remoteTypes, "pr_comment")
+	}
+	return remoteTypes
+}
+
+func nextMaintenanceStage(policy MaintenancePolicy, lane string, needsRAGRepair bool) string {
+	if policy.SyncEnabled && lane == "head" {
+		return SyncJobType
+	}
+	if policy.RAGEnabled && needsRAGRepair {
+		return RAGIndexJobType
+	}
+	if policy.SyncEnabled && lane == "tail" {
+		return SyncJobType
+	}
+	return ""
+}
+
+func (m *MaintenanceManager) updateEntryFailure(id, class string, _ error) MaintenanceEntry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entry := m.entries[id]
@@ -481,7 +529,7 @@ func (m *MaintenanceManager) updateEntryFailure(id, class string, err error) Mai
 	}
 	entry.State = "degraded"
 	entry.LastErrorClass = class
-	entry.LastError = err.Error()
+	entry.LastError = publicMaintenanceError(class)
 	entry.LastReconciledAt = m.now()
 	entry.NextReconcileAt = entry.LastReconciledAt.Add(time.Minute)
 	_ = m.saveLocked()
@@ -515,7 +563,7 @@ func (m *MaintenanceManager) saveLocked() error {
 	return os.Rename(tmp, m.path)
 }
 
-func normalizeMaintenancePolicy(policy MaintenancePolicy) MaintenancePolicy {
+func normalizeMaintenancePolicy(policy MaintenancePolicy, binding cache.RepositoryBinding) (MaintenancePolicy, error) {
 	if policy.HeadIntervalSeconds <= 0 {
 		policy.HeadIntervalSeconds = 900
 	}
@@ -529,9 +577,46 @@ func normalizeMaintenancePolicy(policy MaintenancePolicy) MaintenancePolicy {
 		policy.PerPage = 100
 	}
 	if policy.SyncEnabled && !policy.Issues && !policy.IssueComments && !policy.Wiki && !policy.Pulls && !policy.PRComments {
-		policy.Issues, policy.IssueComments, policy.Wiki, policy.Pulls, policy.PRComments = true, true, true, true, true
+		if bindingHasScope(binding, cache.RepositoryScopeIssues) {
+			policy.Issues, policy.IssueComments, policy.Pulls, policy.PRComments = true, true, true, true
+		}
+		if bindingHasScope(binding, cache.RepositoryScopeWiki) {
+			policy.Wiki = true
+		}
 	}
-	return policy
+	if (policy.Issues || policy.IssueComments || policy.Pulls || policy.PRComments) && !bindingHasScope(binding, cache.RepositoryScopeIssues) {
+		return MaintenancePolicy{}, errors.New("maintenance: issues scope is not enabled for selected repository")
+	}
+	if policy.Wiki && !bindingHasScope(binding, cache.RepositoryScopeWiki) {
+		return MaintenancePolicy{}, errors.New("maintenance: wiki scope is not enabled for selected repository")
+	}
+	return policy, nil
+}
+
+func bindingHasScope(binding cache.RepositoryBinding, scope cache.RepositoryScope) bool {
+	for _, configured := range binding.Scopes {
+		if configured == scope {
+			return true
+		}
+	}
+	return false
+}
+
+func publicMaintenanceError(class string) string {
+	switch class {
+	case "cache_unreadable":
+		return "managed cache is unavailable"
+	case "cache_replaced":
+		return "managed cache identity changed"
+	case "content_state_failed":
+		return "managed cache content state is unavailable"
+	case "sync_schedule_failed":
+		return "remote cache refresh could not be scheduled"
+	case "rag_schedule_failed":
+		return "RAG repair could not be scheduled"
+	default:
+		return "maintenance operation failed"
+	}
 }
 
 func canonicalCachePath(path string) (string, error) {

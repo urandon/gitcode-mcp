@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -150,11 +151,193 @@ func TestMaintenanceSyncAggregationNeverPromotesBoundedTail(t *testing.T) {
 
 func TestMaintenanceTailExtendsRequestedBoundNotAggregatePageCount(t *testing.T) {
 	now := time.Now().UTC()
-	lane, maxPages := nextMaintenanceSyncLane(MaintenanceEntry{Policy: MaintenancePolicy{HeadIntervalSeconds: 900, TailSlicePages: 10}}, []cache.MaintenanceFrontier{
-		{Lane: "head", Status: "fresh", UpdatedAt: now},
-		{Lane: "tail", Status: "backfilling", PagesListed: 50, Checkpoint: "max_pages:10", UpdatedAt: now},
+	lane, maxPages := nextMaintenanceSyncLane(MaintenanceEntry{Policy: MaintenancePolicy{Issues: true, HeadIntervalSeconds: 900, TailSlicePages: 10}}, []cache.MaintenanceFrontier{
+		{RemoteType: "issue", Lane: "head", Status: "fresh", UpdatedAt: now},
+		{RemoteType: "issue", Lane: "tail", Status: "backfilling", PagesListed: 50, Checkpoint: "max_pages:10", UpdatedAt: now},
 	}, now)
 	if lane != "tail" || maxPages != 20 {
 		t.Fatalf("lane=%q max_pages=%d", lane, maxPages)
+	}
+}
+
+func TestMaintenancePolicyDefaultsFromRepositoryScopes(t *testing.T) {
+	issuesOnly := cache.RepositoryBinding{RepoID: "owner/repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}
+	policy, err := normalizeMaintenancePolicy(MaintenancePolicy{SyncEnabled: true}, issuesOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !policy.Issues || !policy.IssueComments || !policy.Pulls || !policy.PRComments || policy.Wiki {
+		t.Fatalf("scope-derived policy=%+v", policy)
+	}
+	if _, err := normalizeMaintenancePolicy(MaintenancePolicy{SyncEnabled: true, Wiki: true}, issuesOnly); err == nil {
+		t.Fatal("explicit wiki selection without wiki scope returned nil error")
+	}
+}
+
+func TestMaintenanceFailureDoesNotExposeCachePath(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "private-cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(filepath.Join(dir, "jobs.json")), filepath.Join(dir, "managed-caches.json"))
+	if _, err := maintenance.Enroll(ctx, MaintenanceEnrollRequest{CachePath: cachePath, RepoID: "owner/repo", IdempotencyKey: "private-path-test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(cachePath); err != nil {
+		t.Fatal(err)
+	}
+	result, err := maintenance.Reconcile(ctx)
+	if err != nil || len(result.Entries) != 1 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), cachePath) || strings.Contains(result.Entries[0].LastError, dir) {
+		t.Fatalf("maintenance result leaked private path: %s", data)
+	}
+	if result.Entries[0].LastError != "managed cache is unavailable" {
+		t.Fatalf("last_error=%q", result.Entries[0].LastError)
+	}
+}
+
+func TestCreateCoalescedJobIsAtomic(t *testing.T) {
+	jobs := NewJobManager(filepath.Join(t.TempDir(), "jobs.json"))
+	const callers = 32
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	created := 0
+	ids := map[string]int{}
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, cancel := context.WithCancel(context.Background())
+			job, wasCreated := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 0, "same-work", "cache-1", "reg-1", "", cancel)
+			if !wasCreated {
+				cancel()
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			ids[job.ID]++
+			if wasCreated {
+				created++
+			}
+		}()
+	}
+	wg.Wait()
+	if created != 1 || len(ids) != 1 {
+		t.Fatalf("created=%d ids=%v", created, ids)
+	}
+}
+
+func TestMaintenanceFrontiersPreservePerCollectionResults(t *testing.T) {
+	ctx := context.Background()
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	req := StartSyncJobRequest{RepoID: "owner/repo", CachePath: cachePath, Lane: "tail", MaxPages: 10}
+	err = recordMaintenanceSyncFrontiers(ctx, req, []syncCollectionResult{
+		{RemoteType: "issue", Result: &service.SyncResourcesResult{TraversalStatus: "complete", StopReason: "end_of_collection", PagesListed: 1, RecordsListed: 5}},
+		{RemoteType: "wiki", Result: &service.SyncResourcesResult{TraversalStatus: "bounded", StopReason: "max_pages", PagesListed: 10, RecordsListed: 100}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err = cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	frontiers, err := store.ListMaintenanceFrontiers(ctx, "owner/repo")
+	if err != nil || len(frontiers) != 2 {
+		t.Fatalf("frontiers=%+v err=%v", frontiers, err)
+	}
+	byType := map[string]cache.MaintenanceFrontier{}
+	for _, frontier := range frontiers {
+		byType[frontier.RemoteType] = frontier
+	}
+	if byType["issue"].Status != "complete" || byType["issue"].PagesListed != 1 {
+		t.Fatalf("issue frontier=%+v", byType["issue"])
+	}
+	if byType["wiki"].Status != "backfilling" || byType["wiki"].PagesListed != 10 {
+		t.Fatalf("wiki frontier=%+v", byType["wiki"])
+	}
+}
+
+func TestMaintenanceStageInterleavesRAGBeforeTail(t *testing.T) {
+	policy := MaintenancePolicy{SyncEnabled: true, RAGEnabled: true}
+	if got := nextMaintenanceStage(policy, "head", true); got != SyncJobType {
+		t.Fatalf("head stage=%q", got)
+	}
+	if got := nextMaintenanceStage(policy, "tail", true); got != RAGIndexJobType {
+		t.Fatalf("stale RAG stage=%q", got)
+	}
+	if got := nextMaintenanceStage(policy, "tail", false); got != SyncJobType {
+		t.Fatalf("tail stage=%q", got)
+	}
+}
+
+func TestMaintenanceReconcileDoesNotOverlapActiveRAGAndSync(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), jobs, filepath.Join(dir, "managed-caches.json"))
+	entry, err := maintenance.Enroll(ctx, MaintenanceEnrollRequest{CachePath: cachePath, RepoID: "owner/repo", IdempotencyKey: "cross-type-arbitration", Policy: MaintenancePolicy{SyncEnabled: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, cancel := context.WithCancel(ctx)
+	defer cancel()
+	active, created := jobs.createCoalescedJob(RAGIndexJobType, entry.RepoID, "fake-rag", 0, "rag-index:"+entry.CacheUUID+":"+entry.RepoID, entry.CacheUUID, entry.RegistrationID, "", cancel)
+	if !created {
+		t.Fatal("active RAG test job was not created")
+	}
+	result, err := maintenance.Reconcile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.JobsStarted) != 0 || len(result.Entries) != 1 || len(result.Entries[0].ActiveJobs) != 1 || result.Entries[0].ActiveJobs[0] != active.ID {
+		t.Fatalf("result=%+v active=%+v", result, active)
+	}
+}
+
+func TestMaintenanceLaneTracksEveryCollectionFrontier(t *testing.T) {
+	now := time.Now().UTC()
+	entry := MaintenanceEntry{Policy: MaintenancePolicy{Issues: true, Wiki: true, HeadIntervalSeconds: 900, HeadMaxPages: 3, TailSlicePages: 10}}
+	frontiers := []cache.MaintenanceFrontier{
+		{RemoteType: "issue", Lane: "head", Status: "fresh", UpdatedAt: now},
+		{RemoteType: "issue", Lane: "tail", Status: "complete", UpdatedAt: now},
+		{RemoteType: "wiki", Lane: "tail", Status: "backfilling", Checkpoint: "max_pages:20", UpdatedAt: now},
+	}
+	if lane, pages := nextMaintenanceSyncLane(entry, frontiers, now); lane != "head" || pages != 3 {
+		t.Fatalf("missing wiki head lane=%q pages=%d", lane, pages)
+	}
+	frontiers = append(frontiers, cache.MaintenanceFrontier{RemoteType: "wiki", Lane: "head", Status: "fresh", UpdatedAt: now})
+	if lane, pages := nextMaintenanceSyncLane(entry, frontiers, now); lane != "tail" || pages != 30 {
+		t.Fatalf("wiki tail lane=%q pages=%d", lane, pages)
 	}
 }

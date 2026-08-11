@@ -16,6 +16,7 @@ const (
 	RAGIndexStatusQueued      = "queued"
 	RAGIndexStatusRunning     = "running"
 	RAGIndexStatusSucceeded   = "succeeded"
+	RAGIndexStatusSuperseded  = "superseded"
 	RAGIndexStatusFailed      = "failed"
 	RAGIndexStatusCancelled   = "canceled"
 	RAGIndexStatusInterrupted = "interrupted"
@@ -297,6 +298,10 @@ func (i *RAGIndexer) Run(ctx context.Context, req IndexRequest) (IndexResult, er
 		emitRecords(fmt.Sprintf("embedded %d/%d chunks", run.EmbeddedChunks, len(missing)))
 	}
 	completed := i.now().UTC()
+	finalContentState, err := i.store.GetRepoContentState(ctx, req.RepoID)
+	if err != nil {
+		return i.failRun(ctx, run, progress, "content_state_failed", err)
+	}
 	run.Status = RAGIndexStatusSucceeded
 	if run.FailedChunks > 0 {
 		run.Message = fmt.Sprintf("rag index finished with %d failed chunks", run.FailedChunks)
@@ -307,13 +312,18 @@ func (i *RAGIndexer) Run(ctx context.Context, req IndexRequest) (IndexResult, er
 	if run.FailedChunks > 0 {
 		coverageStatus = "partial"
 	}
+	if finalContentState.ContentGeneration != startGeneration {
+		run.Status = RAGIndexStatusSuperseded
+		coverageStatus = "partial"
+		run.Message = fmt.Sprintf("cache content advanced from generation %d to %d during indexing", startGeneration, finalContentState.ContentGeneration)
+	}
 	if err := i.store.UpsertRAGCoverageState(ctx, cache.RAGCoverageState{RepoID: req.RepoID, NamespaceID: namespace.ID, CoveredGeneration: startGeneration, Status: coverageStatus, UpdatedAt: completed}); err != nil {
 		return i.failRun(ctx, run, progress, "coverage_state_failed", err)
 	}
 	if err := i.store.UpsertRAGIndexRun(ctx, run); err != nil {
 		return i.failRun(ctx, run, progress, "run_update_failed", err)
 	}
-	emit(service.ProgressEvent{Type: "finished", Phase: RAGIndexStatusSucceeded, Collection: "rag_index", RecordsListed: run.TotalChunks, RecordsFetched: run.EmbeddedChunks, RecordsSkipped: run.SkippedChunks, RecordsFailed: run.FailedChunks, Message: firstNonEmpty(run.Message, "rag index finished")})
+	emit(service.ProgressEvent{Type: "finished", Phase: run.Status, Collection: "rag_index", RecordsListed: run.TotalChunks, RecordsFetched: run.EmbeddedChunks, RecordsSkipped: run.SkippedChunks, RecordsFailed: run.FailedChunks, Message: firstNonEmpty(run.Message, "rag index finished")})
 	result := indexResultFromRun(run, progress)
 	result.StartGeneration = startGeneration
 	result.CoveredGeneration = startGeneration

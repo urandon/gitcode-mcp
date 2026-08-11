@@ -138,6 +138,36 @@ func TestRAGIndexerFallsBackAndContinuesPastBadChunk(t *testing.T) {
 	}
 }
 
+func TestRAGIndexerMarksRunSupersededWhenContentAdvances(t *testing.T) {
+	ctx := context.Background()
+	store := newVectorTestStore(t, ctx)
+	defer store.Close()
+	mustUpsertVectorChunks(t, ctx, store, "fixture-a", []cache.Chunk{vectorTestChunk("chunk-a", "ISSUE-1", "hash-a")})
+	start, err := store.GetRepoContentState(ctx, "fixture-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &generationAdvancingProvider{base: mustFakeIndexerProvider(t, 2), store: store, repoID: "fixture-a"}
+	result, err := NewRAGIndexer(store, provider, RAGIndexerOptions{}).Run(ctx, IndexRequest{RepoID: "fixture-a", ChunkPolicyID: DefaultChunkPolicyID, BatchSize: 1})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if result.Status != RAGIndexStatusSuperseded || result.StartGeneration != start.ContentGeneration || result.CoveredGeneration != start.ContentGeneration {
+		t.Fatalf("result=%+v start=%+v", result, start)
+	}
+	finalState, err := store.GetRepoContentState(ctx, "fixture-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	coverage, ok, err := store.GetRAGCoverageState(ctx, "fixture-a", result.NamespaceID)
+	if err != nil || !ok {
+		t.Fatalf("coverage=%+v ok=%t err=%v", coverage, ok, err)
+	}
+	if finalState.ContentGeneration <= coverage.CoveredGeneration || coverage.Status != "partial" {
+		t.Fatalf("final=%+v coverage=%+v", finalState, coverage)
+	}
+}
+
 func TestRAGIndexerRetriesNativeBatchAndDoesNotDuplicateCommittedEmbeddings(t *testing.T) {
 	ctx := context.Background()
 	store := newVectorTestStore(t, ctx)
@@ -236,6 +266,32 @@ func (p *failingProvider) NamespaceIdentity(ctx context.Context, req NamespaceRe
 type badInputProvider struct {
 	base     *FakeProvider
 	badInput string
+}
+
+type generationAdvancingProvider struct {
+	base     *FakeProvider
+	store    *cache.SQLiteStore
+	repoID   string
+	advanced int32
+}
+
+func (p *generationAdvancingProvider) Profile() EmbeddingProviderProfile { return p.base.Profile() }
+
+func (p *generationAdvancingProvider) ModelInfo(ctx context.Context) (EmbeddingModelInfo, error) {
+	return p.base.ModelInfo(ctx)
+}
+
+func (p *generationAdvancingProvider) Embed(ctx context.Context, req EmbedRequest) (EmbedResponse, error) {
+	if atomic.CompareAndSwapInt32(&p.advanced, 0, 1) {
+		if err := p.store.UpsertSource(ctx, cache.Source{RepoID: p.repoID, ID: "ISSUE-1", Kind: "issue", Path: "issues/1.md", Title: "changed during indexing", Body: "new content", Status: "open", ContentHash: "source-hash-new"}); err != nil {
+			return EmbedResponse{}, err
+		}
+	}
+	return p.base.Embed(ctx, req)
+}
+
+func (p *generationAdvancingProvider) NamespaceIdentity(ctx context.Context, req NamespaceRequest) (cache.EmbeddingNamespaceIdentity, error) {
+	return p.base.NamespaceIdentity(ctx, req)
 }
 
 func (p *badInputProvider) Profile() EmbeddingProviderProfile { return p.base.Profile() }

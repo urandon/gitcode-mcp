@@ -32,13 +32,13 @@ func (m *JobManager) StartRAGIndex(ctx context.Context, manager Manager, req Sta
 		return Job{}, errors.New("repo_id is required")
 	}
 	workKey := ragIndexWorkKey(req)
-	if active, ok := m.ActiveWork(workKey); ok {
-		return active, nil
-	}
 	ctx, cancel := context.WithCancel(ctx)
 	profile := strings.TrimSpace(req.Profile)
-	job := m.createJobWithMetadata(RAGIndexJobType, req.RepoID, profile, 0, cancel)
-	job = m.SetWorkIdentity(job.ID, workKey, req.CacheUUID, req.RegistrationID, req.NamespaceID)
+	job, created := m.createCoalescedJob(RAGIndexJobType, req.RepoID, profile, 0, workKey, req.CacheUUID, req.RegistrationID, req.NamespaceID, cancel)
+	if !created {
+		cancel()
+		return job, nil
+	}
 	go m.runRAGIndexJob(ctx, manager, job.ID, req)
 	return job, nil
 }
