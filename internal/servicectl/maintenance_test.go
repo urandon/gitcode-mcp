@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/service"
 )
 
@@ -159,6 +160,17 @@ func TestMaintenanceTailUsesConstantWindowFromCheckpoint(t *testing.T) {
 		{RemoteType: "issue", Lane: "tail", Status: "backfilling", PagesListed: 50, Checkpoint: "next_page:41", UpdatedAt: now},
 	}, now)
 	if lane != "tail" || page != 41 || maxPages != 10 {
+		t.Fatalf("lane=%q page=%d max_pages=%d", lane, page, maxPages)
+	}
+}
+
+func TestMaintenancePartialHeadContinuesBeforeCompletedTail(t *testing.T) {
+	now := time.Now().UTC()
+	lane, page, maxPages := nextMaintenanceSyncLane(MaintenanceEntry{Policy: MaintenancePolicy{Issues: true, HeadIntervalSeconds: 900, HeadMaxPages: 3, TailSlicePages: 10}}, []cache.MaintenanceFrontier{
+		{RemoteType: "issue", Lane: "head", Status: "partial", Checkpoint: "next_page:3", UpdatedAt: now},
+		{RemoteType: "issue", Lane: "tail", Status: "complete", UpdatedAt: now},
+	}, now)
+	if lane != "head" || page != 3 || maxPages != 3 {
 		t.Fatalf("lane=%q page=%d max_pages=%d", lane, page, maxPages)
 	}
 }
@@ -369,6 +381,49 @@ func TestMaintenanceCheckpointAdvancesWithOnePageOverlap(t *testing.T) {
 	}
 }
 
+func TestMaintenanceHeadCheckpointAdvancesUntilTraversalCompletes(t *testing.T) {
+	req := StartSyncJobRequest{Lane: "head", Page: 1, MaxPages: 3}
+	collection := syncCollectionResult{Result: &service.SyncResourcesResult{TraversalStatus: "bounded", PagesListed: 3}}
+	if got := nextMaintenanceCheckpoint(req, collection); got != "next_page:3" {
+		t.Fatalf("checkpoint=%q", got)
+	}
+	req.Page = 3
+	collection.Result.TraversalStatus = "complete"
+	if got := nextMaintenanceCheckpoint(req, collection); got != "" {
+		t.Fatalf("complete checkpoint=%q", got)
+	}
+}
+
+func TestMaintenanceCompletedHeadPublishesAggregatedHighWatermark(t *testing.T) {
+	ctx := context.Background()
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+	if err := store.UpsertMaintenanceFrontier(ctx, cache.MaintenanceFrontier{RepoID: "owner/repo", RemoteType: "issue", Ordering: "updated_at_desc", FilterKey: "all", Lane: "head", Status: "partial", HighUpdatedAt: base.Add(time.Hour), HighRemoteID: "issue:2", Checkpoint: "next_page:3", UpdatedAt: base}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	result := &service.SyncResourcesResult{TraversalStatus: "complete", StopReason: "watermark", PagesListed: 1, Results: []service.SyncResult{{Record: service.SourceSummary{ID: "ISSUE-3", RemoteAlias: "issue:3", UpdatedAt: base.Add(2 * time.Hour)}}}}
+	if err := recordMaintenanceSyncFrontiers(ctx, StartSyncJobRequest{RepoID: "owner/repo", CachePath: cachePath, Lane: "head", Page: 3, MaxPages: 3}, []syncCollectionResult{{RemoteType: "issue", Result: result}}); err != nil {
+		t.Fatal(err)
+	}
+	store, err = cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	frontier, ok, err := store.GetSyncFrontier(ctx, "owner/repo", "issue", "updated_at_desc", "state=all")
+	if err != nil || !ok || frontier.Status != "complete" || !frontier.HighUpdatedAt.Equal(base.Add(2*time.Hour)) {
+		t.Fatalf("frontier=%+v ok=%t err=%v", frontier, ok, err)
+	}
+}
+
 func TestMaintenanceHeadBoundedTraversalIsNotFresh(t *testing.T) {
 	ctx := context.Background()
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
@@ -390,7 +445,7 @@ func TestMaintenanceHeadBoundedTraversalIsNotFresh(t *testing.T) {
 	}
 	defer store.Close()
 	frontiers, err := store.ListMaintenanceFrontiers(ctx, "owner/repo")
-	if err != nil || len(frontiers) != 1 || frontiers[0].Status != "partial" {
+	if err != nil || len(frontiers) != 1 || frontiers[0].Status != "partial" || frontiers[0].Checkpoint != "next_page:3" {
 		t.Fatalf("frontiers=%+v err=%v", frontiers, err)
 	}
 }
@@ -431,15 +486,37 @@ func TestMaintenanceJobDiagnosticsArePublicSafe(t *testing.T) {
 	}
 }
 
-func TestSelectMaintenanceNamespaceHonorsExplicitProfile(t *testing.T) {
+func TestSelectMaintenanceNamespaceRequiresRecordedEffectiveProfile(t *testing.T) {
 	now := time.Now().UTC()
 	namespaces := []cache.EmbeddingNamespace{
 		{ID: "old", EmbeddingNamespaceIdentity: cache.EmbeddingNamespaceIdentity{ProfileID: "profile-old"}, UpdatedAt: now.Add(time.Minute)},
 		{ID: "current", EmbeddingNamespaceIdentity: cache.EmbeddingNamespaceIdentity{ProfileID: "profile-current"}, UpdatedAt: now},
 	}
 	entry := MaintenanceEntry{NamespaceID: "old", Policy: MaintenancePolicy{Profile: "profile-current"}}
-	if got := selectMaintenanceNamespace(entry, namespaces); got != "current" {
+	if got := selectMaintenanceNamespace(entry, namespaces, "profile-current"); got != "" {
+		t.Fatalf("unverified namespace=%q", got)
+	}
+	entry.NamespaceID = "current"
+	if got := selectMaintenanceNamespace(entry, namespaces, "profile-current"); got != "current" {
 		t.Fatalf("namespace=%q", got)
+	}
+}
+
+func TestMaintenanceEffectiveDefaultProfileRejectsOtherNamespace(t *testing.T) {
+	manager := newTestManager(t, "darwin")
+	source := manager.Source.(testSource)
+	source.env[config.EnvRAGProfile] = "profile-default"
+	profile := maintenanceEffectiveProfile(source, filepath.Join(t.TempDir(), "cache.db"), "")
+	if profile != "profile-default" {
+		t.Fatalf("effective profile=%q", profile)
+	}
+	entry := MaintenanceEntry{NamespaceID: "manual"}
+	namespaces := []cache.EmbeddingNamespace{
+		{ID: "manual", EmbeddingNamespaceIdentity: cache.EmbeddingNamespaceIdentity{ProfileID: "profile-manual"}},
+		{ID: "default", EmbeddingNamespaceIdentity: cache.EmbeddingNamespaceIdentity{ProfileID: "profile-default"}},
+	}
+	if got := selectMaintenanceNamespace(entry, namespaces, profile); got != "" {
+		t.Fatalf("selected non-default namespace=%q", got)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/service"
 )
 
@@ -372,7 +373,8 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	if (latestRAG.Status == JobStatusSucceeded || latestRAG.Status == JobStatusSuperseded) && latestRAG.NamespaceID != "" {
 		snapshot.NamespaceID = latestRAG.NamespaceID
 	}
-	namespaceID := selectMaintenanceNamespace(snapshot, namespaces)
+	effectiveProfile := maintenanceEffectiveProfile(m.manager.Source, path, snapshot.Policy.Profile)
+	namespaceID := selectMaintenanceNamespace(snapshot, namespaces, effectiveProfile)
 	covered := int64(0)
 	ragStatus := "missing"
 	coverageUpdatedAt := time.Time{}
@@ -412,7 +414,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 			started = append(started, job.ID)
 			activeSync = job
 		} else if stage == RAGIndexJobType {
-			job, jobErr := m.jobs.StartRAGIndex(context.Background(), m.manager, StartRAGIndexJobRequest{RepoID: snapshot.RepoID, Profile: snapshot.Policy.Profile, CachePath: path, CacheUUID: snapshot.CacheUUID, RegistrationID: snapshot.RegistrationID})
+			job, jobErr := m.jobs.StartRAGIndex(context.Background(), m.manager, StartRAGIndexJobRequest{RepoID: snapshot.RepoID, Profile: effectiveProfile, CachePath: path, CacheUUID: snapshot.CacheUUID, RegistrationID: snapshot.RegistrationID})
 			if jobErr != nil {
 				return m.updateEntryFailure(registrationID, "rag_schedule_failed", jobErr), started
 			}
@@ -455,24 +457,32 @@ func maintenanceRAGVerificationDue(namespaceID, status string, updatedAt time.Ti
 	return namespaceID != "" && status == "ready" && (updatedAt.IsZero() || !updatedAt.Add(interval).After(now))
 }
 
-func selectMaintenanceNamespace(entry MaintenanceEntry, namespaces []cache.EmbeddingNamespace) string {
-	if entry.NamespaceID != "" {
-		for _, namespace := range namespaces {
-			if namespace.ID == entry.NamespaceID && (entry.Policy.Profile == "" || namespace.ProfileID == entry.Policy.Profile) {
-				return namespace.ID
-			}
+func maintenanceEffectiveProfile(src config.Source, cachePath, requested string) string {
+	if profile := strings.TrimSpace(requested); profile != "" {
+		return profile
+	}
+	if src == nil {
+		src = config.OSSource{}
+	}
+	effective, err := config.LoadEffective(src, config.Overrides{CachePath: cachePath})
+	if err == nil {
+		if profile := strings.TrimSpace(effective.Config.RAG.DefaultProfile); profile != "" {
+			return profile
 		}
 	}
-	selected := cache.EmbeddingNamespace{}
+	return config.DefaultRAGProfile
+}
+
+func selectMaintenanceNamespace(entry MaintenanceEntry, namespaces []cache.EmbeddingNamespace, effectiveProfile string) string {
+	if entry.NamespaceID == "" || strings.TrimSpace(effectiveProfile) == "" {
+		return ""
+	}
 	for _, namespace := range namespaces {
-		if entry.Policy.Profile != "" && namespace.ProfileID != entry.Policy.Profile {
-			continue
-		}
-		if selected.ID == "" || namespace.UpdatedAt.After(selected.UpdatedAt) {
-			selected = namespace
+		if namespace.ID == entry.NamespaceID && namespace.ProfileID == effectiveProfile {
+			return namespace.ID
 		}
 	}
-	return selected.ID
+	return ""
 }
 
 func activeMaintenanceJobIDs(jobs ...Job) []string {
@@ -498,11 +508,24 @@ func nextMaintenanceSyncLane(entry MaintenanceEntry, frontiers []cache.Maintenan
 		byKey[frontier.RemoteType+"\x00"+frontier.Lane] = frontier
 	}
 	interval := time.Duration(entry.Policy.HeadIntervalSeconds) * time.Second
+	headPage := 0
 	for _, remoteType := range expected {
 		head, ok := byKey[remoteType+"\x00head"]
-		if !ok || head.UpdatedAt.Add(interval).Before(now) {
+		if !ok || head.Status == "fresh" && head.UpdatedAt.Add(interval).Before(now) {
 			return "head", 1, entry.Policy.HeadMaxPages
 		}
+		if head.Status != "fresh" {
+			page := checkpointPage(head.Checkpoint)
+			if page <= 0 {
+				page = 1
+			}
+			if headPage == 0 || page < headPage {
+				headPage = page
+			}
+		}
+	}
+	if headPage > 0 {
+		return "head", headPage, entry.Policy.HeadMaxPages
 	}
 	nextPage := 0
 	needsTail := false

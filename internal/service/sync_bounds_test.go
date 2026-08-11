@@ -851,6 +851,30 @@ func TestBulkSyncWikiBoundedPreCancel(t *testing.T) {
 	}
 }
 
+func TestBoundedRefreshPreservesLastCompleteWatermark(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "watermark-preserve", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	baseline := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
+	if err := store.UpsertSyncFrontier(ctx, cache.SyncFrontier{RepoID: "watermark-preserve", RemoteType: "issue", Ordering: syncOrderingUpdatedAtDesc, FilterKey: syncFilterStateAll, Status: "complete", HighUpdatedAt: baseline, StopReason: "end_of_collection", UpdatedAt: baseline}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, &fakeGitCodeClient{})
+	if err := svc.recordSyncFrontier(ctx, "watermark-preserve", "issue", &SyncResourcesResult{TraversalStatus: "bounded", StopReason: "max_pages", PagesListed: 3}, syncHighWatermark{UpdatedAt: baseline.Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	frontier, ok, err := store.GetSyncFrontier(ctx, "watermark-preserve", "issue", syncOrderingUpdatedAtDesc, syncFilterStateAll)
+	if err != nil || !ok || frontier.Status != "complete" || !frontier.HighUpdatedAt.Equal(baseline) {
+		t.Fatalf("frontier=%+v ok=%t err=%v", frontier, ok, err)
+	}
+}
+
 func TestBulkSyncWikiBoundedMaxRecords(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 6, 22, 15, 0, 0, 0, time.UTC)
@@ -914,6 +938,9 @@ func TestBulkSyncWikiBoundedMaxPages(t *testing.T) {
 	}
 	if result.SuccessCount != 6 {
 		t.Fatalf("success_count = %d, want 6", result.SuccessCount)
+	}
+	if result.PagesListed != 2 || result.RecordsListed != 6 || result.TraversalStatus != "bounded" || result.StopReason != "max_pages" {
+		t.Fatalf("result metadata=%#v", result)
 	}
 }
 

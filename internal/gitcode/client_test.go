@@ -2810,6 +2810,45 @@ func TestBoundedWikiTreeTraversalMaxRecords(t *testing.T) {
 	}
 }
 
+func TestBoundedWikiTreeTraversalResumesWithoutRefetchingSkippedBodies(t *testing.T) {
+	fetchedBodies := map[string]int{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents":
+			fmt.Fprint(w, `[{"path":"A.md","type":"file","sha":"rev-a"},{"path":"B.md","type":"file","sha":"rev-b"},{"path":"C.md","type":"file","sha":"rev-c"},{"path":"D.md","type":"file","sha":"rev-d"},{"path":"E.md","type":"file","sha":"rev-e"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/A.md", "/api/v5/repos/example-owner/example-repo.wiki/contents/B.md", "/api/v5/repos/example-owner/example-repo.wiki/contents/C.md", "/api/v5/repos/example-owner/example-repo.wiki/contents/D.md", "/api/v5/repos/example-owner/example-repo.wiki/contents/E.md":
+			path := strings.TrimPrefix(r.URL.Path, "/api/v5/repos/example-owner/example-repo.wiki/contents/")
+			fmt.Fprintf(w, `{"path":%q,"type":"file","sha":%q}`, path, "rev-"+strings.ToLower(strings.TrimSuffix(path, ".md")))
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/A.md", "/api/v5/repos/example-owner/example-repo.wiki/raw/B.md", "/api/v5/repos/example-owner/example-repo.wiki/raw/C.md", "/api/v5/repos/example-owner/example-repo.wiki/raw/D.md", "/api/v5/repos/example-owner/example-repo.wiki/raw/E.md":
+			path := strings.TrimPrefix(r.URL.Path, "/api/v5/repos/example-owner/example-repo.wiki/raw/")
+			fetchedBodies[path]++
+			fmt.Fprintf(w, "# %s", path)
+		default:
+			t.Fatalf("unexpected wiki path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+
+	first, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo", Page: 1, PerPage: 2, Bounds: &WikiBounds{MaxRecords: 2}})
+	if err != nil {
+		t.Fatalf("ListWikiPages returned error: %v", err)
+	}
+	if len(first.Items) != 2 || first.Items[0].Slug != "A.md" || first.Items[1].Slug != "B.md" || first.NextPage != 2 {
+		t.Fatalf("first page=%+v", first)
+	}
+	second, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo", Page: first.NextPage, PerPage: 2, Bounds: &WikiBounds{MaxRecords: 2}})
+	if err != nil {
+		t.Fatalf("ListWikiPages resume returned error: %v", err)
+	}
+	if len(second.Items) != 2 || second.Items[0].Slug != "C.md" || second.Items[1].Slug != "D.md" || second.NextPage != 3 {
+		t.Fatalf("resumed page=%+v", second)
+	}
+	if fetchedBodies["A.md"] != 1 || fetchedBodies["B.md"] != 1 || fetchedBodies["C.md"] != 1 || fetchedBodies["D.md"] != 1 || fetchedBodies["E.md"] != 0 {
+		t.Fatalf("fetched bodies=%v", fetchedBodies)
+	}
+}
+
 func TestBoundedWikiTreeTraversalCancelMidTraversal(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

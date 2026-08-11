@@ -171,16 +171,33 @@ func recordMaintenanceSyncFrontiers(ctx context.Context, req StartSyncJobRequest
 			}
 		}
 		frontier := cache.MaintenanceFrontier{RepoID: req.RepoID, RemoteType: collection.RemoteType, Ordering: "updated_at_desc", FilterKey: "all", Lane: req.Lane, Status: status, LastErrorClass: errorClass, UpdatedAt: time.Now().UTC()}
+		previous := existing[collection.RemoteType+"\x00"+req.Lane]
+		frontier.HighUpdatedAt = previous.HighUpdatedAt
+		frontier.HighRemoteID = previous.HighRemoteID
+		frontier.HighNumber = previous.HighNumber
 		if collection.Result != nil {
 			frontier.StopReason = collection.Result.StopReason
 			frontier.PagesListed = collection.Result.PagesListed
 			frontier.RecordsListed = collection.Result.RecordsListed
+			observeMaintenanceResultHigh(&frontier, collection.Result.Results)
 		}
 		frontier.Checkpoint = nextMaintenanceCheckpoint(req, collection)
 		if req.Lane == "tail" && frontier.Status == "backfilling" {
-			previous := existing[collection.RemoteType+"\x00tail"]
 			if checkpointPage(previous.Checkpoint) > checkpointPage(frontier.Checkpoint) {
 				frontier.Checkpoint = previous.Checkpoint
+			}
+		}
+		if collection.Err == nil && collection.Result != nil && collection.Result.TraversalStatus == "complete" && (collection.RemoteType == "issue" || collection.RemoteType == "pull_request") {
+			filterKey := "state=all"
+			current, ok, err := store.GetSyncFrontier(ctx, req.RepoID, collection.RemoteType, "updated_at_desc", filterKey)
+			if err != nil {
+				return err
+			}
+			if ok {
+				observeMaintenanceHigh(&frontier, current.HighUpdatedAt, current.HighRemoteID, current.HighNumber)
+			}
+			if err := store.UpsertSyncFrontier(ctx, cache.SyncFrontier{RepoID: req.RepoID, RemoteType: collection.RemoteType, Ordering: "updated_at_desc", FilterKey: filterKey, Status: "complete", HighUpdatedAt: frontier.HighUpdatedAt, HighRemoteID: frontier.HighRemoteID, HighNumber: frontier.HighNumber, StopReason: collection.Result.StopReason, PagesListed: collection.Result.PagesListed, RecordsListed: collection.Result.RecordsListed, UpdatedAt: frontier.UpdatedAt}); err != nil {
+				return err
 			}
 		}
 		if err := store.UpsertMaintenanceFrontier(ctx, frontier); err != nil {
@@ -190,6 +207,31 @@ func recordMaintenanceSyncFrontiers(ctx context.Context, req StartSyncJobRequest
 	return nil
 }
 
+func observeMaintenanceResultHigh(frontier *cache.MaintenanceFrontier, results []service.SyncResult) {
+	for _, result := range results {
+		observeMaintenanceHigh(frontier, result.Record.UpdatedAt, firstNonEmptyString(result.Record.RemoteAlias, result.Record.ID), 0)
+	}
+}
+
+func observeMaintenanceHigh(frontier *cache.MaintenanceFrontier, updatedAt time.Time, remoteID string, number int) {
+	updatedAt = updatedAt.UTC()
+	if updatedAt.IsZero() || !frontier.HighUpdatedAt.IsZero() && !updatedAt.After(frontier.HighUpdatedAt) {
+		return
+	}
+	frontier.HighUpdatedAt = updatedAt
+	frontier.HighRemoteID = remoteID
+	frontier.HighNumber = number
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func checkpointPage(checkpoint string) int {
 	page := 0
 	_, _ = fmt.Sscanf(checkpoint, "next_page:%d", &page)
@@ -197,10 +239,10 @@ func checkpointPage(checkpoint string) int {
 }
 
 func nextMaintenanceCheckpoint(req StartSyncJobRequest, collection syncCollectionResult) string {
-	if req.Lane != "tail" || (collection.Result != nil && collection.Result.TraversalStatus == "complete") {
+	if req.Lane != "head" && req.Lane != "tail" || (collection.Result != nil && collection.Result.TraversalStatus == "complete") {
 		return ""
 	}
-	if collection.RemoteType == "issue_comment" {
+	if req.Lane == "tail" && collection.RemoteType == "issue_comment" {
 		return "next_page:1"
 	}
 	page := req.Page

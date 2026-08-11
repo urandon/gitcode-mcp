@@ -2337,6 +2337,16 @@ func (s *Service) recordSyncFrontier(ctx context.Context, repoID, remoteType str
 	if status == "" {
 		status = "partial"
 	}
+	previous, ok, err := s.store.GetSyncFrontier(ctx, repoID, remoteType, syncOrderingUpdatedAtDesc, syncFilterStateAll)
+	if err != nil {
+		return err
+	}
+	if ok && previous.Status == "complete" && status != "complete" {
+		// Keep the last proven full-corpus watermark while a bounded head pass is
+		// still working toward it. Maintenance stores the in-progress checkpoint
+		// and candidate high watermark separately.
+		return nil
+	}
 	return s.store.UpsertSyncFrontier(ctx, cache.SyncFrontier{
 		RepoID:        repoID,
 		RemoteType:    remoteType,
@@ -2674,7 +2684,7 @@ func (s *Service) BulkSyncWiki(ctx context.Context, req BulkSyncRequest) (*SyncR
 
 func (s *Service) bulkSyncWikiBounded(ctx context.Context, req BulkSyncRequest, route RepositoryRoute) (*SyncResourcesResult, error) {
 	bounds := req.Bounds
-	result := &SyncResourcesResult{Results: make([]SyncResult, 0), Failures: make([]ResourceError, 0)}
+	result := &SyncResourcesResult{Results: make([]SyncResult, 0), Failures: make([]ResourceError, 0), Ordering: "path_asc"}
 
 	var wikiBounds *gitcode.WikiBounds
 	totalRequested := bounds.MaxRecords
@@ -2737,6 +2747,7 @@ func (s *Service) bulkSyncWikiBounded(ctx context.Context, req BulkSyncRequest, 
 	}
 
 	items := page.Items
+	originalCount := len(items)
 	if bounds.MaxPages > 0 {
 		perPage := req.PerPage
 		if perPage < 1 {
@@ -2749,6 +2760,25 @@ func (s *Service) bulkSyncWikiBounded(ctx context.Context, req BulkSyncRequest, 
 	}
 	if bounds.MaxRecords > 0 && len(items) > bounds.MaxRecords {
 		items = items[:bounds.MaxRecords]
+	}
+	perPage := req.PerPage
+	if perPage < 1 {
+		perPage = 10
+	}
+	result.RecordsListed = len(items)
+	if len(items) > 0 {
+		result.PagesListed = (len(items) + perPage - 1) / perPage
+	}
+	if page.NextPage > 0 || originalCount > len(items) {
+		result.TraversalStatus = "bounded"
+		if bounds.MaxRecords > 0 {
+			result.StopReason = "max_records"
+		} else {
+			result.StopReason = "max_pages"
+		}
+	} else {
+		result.TraversalStatus = "complete"
+		result.StopReason = "end_of_collection"
 	}
 
 	s.stageWikiPage(ctx, req, items, result)
