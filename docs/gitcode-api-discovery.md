@@ -93,6 +93,19 @@ Sanitized live discovery on `2026-07-13` confirmed that issue read states and wr
 
 The CLI, MCP, service, and adapter request contract therefore remains `open|closed`. The HTTP adapter translates those values to `reopen|close` only at the wire boundary and requires a separate issue readback with the requested canonical state before confirming the write.
 
+## Issue List Milestone Identity And Response Diagnostics
+
+Sanitized live inspection on `2026-08-17` confirmed that the issue collection endpoint can return a nested milestone with its positive identity in `number` and no `id` field. The milestone collection used the same `number` identity shape. The adapter accepts `id` for backward compatibility and falls back to `number` only when `id` is absent; all existing positive-integer and title/date validation still applies.
+
+The same incident exposed an error-classification bug: the provider returned a complete `application/json` array, but the nested milestone schema error was reported as malformed JSON. Response handling now keeps four cases separate without logging response bodies:
+
+- incomplete JSON or a short transport body is `partial_response`;
+- syntactically invalid complete JSON is `malformed_response`;
+- a non-JSON success response is `unexpected_content_type`;
+- valid JSON that does not match a captured adapter shape is `schema_decode`.
+
+Only the first three response-level failures are retried for the same bounded page, using the configured read retry budget. Schema drift is deterministic and is not retried. Exhausted diagnostics expose only the endpoint, normalized media type, response byte count, decode offset, and attempt count; raw bodies, headers, cookies, and tokens remain excluded.
+
 ## List Ordering Parameters
 
 Live discovery on `2026-06-28` used the public `openharmony/arkcompiler_runtime_core` repository because it has large issue and pull request collections.

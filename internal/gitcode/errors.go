@@ -104,11 +104,14 @@ func (e ErrConflict) Error() string {
 func (e ErrConflict) DiagnosticCode() string { return "remote_conflict" }
 
 type ErrPartialResponse struct {
-	Endpoint string
-	Expected int64
-	Got      int64
-	Cause    error
-	Message  string
+	Endpoint    string
+	Expected    int64
+	Got         int64
+	Cause       error
+	Message     string
+	ContentType string
+	Offset      int64
+	Attempts    int
 }
 
 func (e ErrPartialResponse) Error() string {

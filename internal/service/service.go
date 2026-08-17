@@ -4470,7 +4470,19 @@ func (s *Service) normalizeSyncFailure(err error, req SyncRequest, remoteType, r
 	}
 	var partial gitcode.ErrPartialResponse
 	if errors.As(err, &partial) {
-		return ErrSyncFailure{Mode: "partial_response", Target: target, Endpoint: partial.Endpoint, ExpectedBytes: partial.Expected, GotBytes: partial.Got, RecoveryAction: "run sync again to resume", Cause: err}
+		return ErrSyncFailure{Mode: "partial_response", Target: target, Endpoint: partial.Endpoint, ExpectedBytes: partial.Expected, GotBytes: partial.Got, ResponseBytes: partial.Got, ContentType: partial.ContentType, DecodeOffset: partial.Offset, Attempts: partial.Attempts, RecoveryAction: "response remained truncated after bounded retries; reduce per_page or inspect provider transport health", Cause: err}
+	}
+	var malformed gitcode.ErrMalformedJSON
+	if errors.As(err, &malformed) {
+		return ErrSyncFailure{Mode: "malformed_response", Target: target, Endpoint: malformed.Endpoint, ResponseBytes: malformed.ResponseSize, DecodeOffset: malformed.Offset, Attempts: malformed.Attempts, RecoveryAction: "provider returned malformed JSON after bounded retries; inspect provider status or update the captured adapter contract", Cause: err}
+	}
+	var contentType gitcode.ErrUnexpectedContentType
+	if errors.As(err, &contentType) {
+		return ErrSyncFailure{Mode: "unexpected_content_type", Target: target, Endpoint: contentType.Endpoint, ResponseBytes: contentType.ResponseSize, ContentType: contentType.ContentType, Attempts: contentType.Attempts, RecoveryAction: "provider returned a non-JSON success response after bounded retries; inspect provider gateway status", Cause: err}
+	}
+	var schema *gitcode.ErrSchemaDecode
+	if errors.As(err, &schema) {
+		return ErrSyncFailure{Mode: "schema_decode", Target: target, Endpoint: schema.Endpoint, RecoveryAction: "changing sync bounds will not recover; update the captured GitCode response fixture and adapter schema", Cause: err}
 	}
 	var auth gitcode.ErrAuthExpired
 	if errors.As(err, &auth) {

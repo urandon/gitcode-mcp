@@ -3202,6 +3202,14 @@ func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {
 	}
 	var partialSync *service.PartialSyncError
 	if errors.As(err, &partialSync) {
+		for _, failure := range partialSync.Errors {
+			switch failure.FailureClass {
+			case "schema_decode", "partial_response", "malformed_response", "unexpected_content_type":
+				ctx.HTTPAttempted = true
+				ctx.SchemaDecodeFailure = true
+				ctx.FailureSource = failure.FailureClass
+			}
+		}
 		switch partialSync.Diagnostic {
 		case service.SyncDiagnosticTimeout, service.SyncDiagnosticCancelled:
 			ctx.HTTPAttempted = true
@@ -3279,6 +3287,20 @@ func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {
 		ctx.HTTPAttempted = true
 		ctx.FailureSource = "partial_response"
 		ctx.SchemaDecodeFailure = true
+	}
+	var malformed gitcode.ErrMalformedJSON
+	if errors.As(err, &malformed) {
+		ctx.HTTPAttempted = true
+		ctx.SchemaDecodeFailure = true
+		ctx.MalformedSuccess = true
+		ctx.FailureSource = "malformed_response"
+	}
+	var unexpectedContent gitcode.ErrUnexpectedContentType
+	if errors.As(err, &unexpectedContent) {
+		ctx.HTTPAttempted = true
+		ctx.SchemaDecodeFailure = true
+		ctx.MalformedSuccess = true
+		ctx.FailureSource = "unexpected_content_type"
 	}
 	var schema *gitcode.ErrSchemaDecode
 	if errors.As(err, &schema) {

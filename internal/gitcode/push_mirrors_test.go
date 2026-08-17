@@ -136,11 +136,11 @@ func TestListPushRemoteMirrorsErrorsAreTyped(t *testing.T) {
 			return errors.As(err, &target)
 		}},
 		{name: "html-login", status: http.StatusOK, body: `<!doctype html><title>login</title>`, check: func(err error) bool {
-			var target ErrPartialResponse
+			var target ErrUnexpectedContentType
 			return errors.As(err, &target)
 		}},
 		{name: "invalid-timestamp", status: http.StatusOK, body: `[{"id":1,"url":"https://mirror.example.invalid/repo.git","last_update_at":"not-a-time"}]`, check: func(err error) bool {
-			var target ErrPartialResponse
+			var target *ErrSchemaDecode
 			return errors.As(err, &target)
 		}},
 	}

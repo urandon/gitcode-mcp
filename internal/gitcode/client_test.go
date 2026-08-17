@@ -87,6 +87,169 @@ func TestScenario004ReadRouteContract(t *testing.T) {
 	}
 }
 
+func TestListIssuesAcceptsCapturedMilestoneNumberIdentity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		fixture, err := os.ReadFile("../../testdata/gitcode/issues-page-milestone-number.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write(fixture)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+
+	page, err := client.ListIssues(context.Background(), IssueListRequest{Owner: "example-owner", Repo: "example-repo", Page: 1, PerPage: 100})
+	if err != nil {
+		t.Fatalf("ListIssues: %v", err)
+	}
+	if len(page.Items) != 1 || page.Items[0].Milestone == nil {
+		t.Fatalf("page=%+v", page)
+	}
+	milestone := page.Items[0].Milestone
+	if milestone.RemoteID != "576480" || milestone.SourceID != "MILESTONE-576480" || milestone.Title != "RAG indexer MVP" || milestone.HTMLURL != "https://example.invalid/milestones/576480" {
+		t.Fatalf("milestone=%+v", milestone)
+	}
+}
+
+func TestListIssuesPreservesSchemaDecodeWithoutRetry(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `[{"id":1,"number":"1","title":"bad milestone","body":"body","state":"open","comments":0,"labels":[],"created_at":"2026-08-17T00:00:00Z","updated_at":"2026-08-17T00:00:00Z","milestone":{"number":{"unexpected":true},"title":"M1"}}]`)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{MaxRetries: 2})
+
+	_, err := client.ListIssues(context.Background(), IssueListRequest{Owner: "example-owner", Repo: "example-repo"})
+	var schema *ErrSchemaDecode
+	if !errors.As(err, &schema) {
+		t.Fatalf("expected schema decode, got %T: %v", err, err)
+	}
+	var partial ErrPartialResponse
+	if errors.As(err, &partial) {
+		t.Fatalf("schema drift was mislabeled as partial response: %+v", partial)
+	}
+	if schema.Endpoint != "/api/v5/repos/example-owner/example-repo/issues" || schema.Field != "milestone.id" {
+		t.Fatalf("schema=%+v", schema)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("deterministic schema error retried %d times", attempts.Load())
+	}
+}
+
+func TestListIssuesRetriesTruncatedJSONPage(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := attempts.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if attempt == 1 {
+			fmt.Fprint(w, `[{"id":1`)
+			return
+		}
+		fmt.Fprint(w, `[{"id":1,"number":1,"title":"recovered","body":"","state":"open","comments":0,"labels":[]}]`)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{MaxRetries: 1})
+
+	page, err := client.ListIssues(context.Background(), IssueListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if err != nil || len(page.Items) != 1 || page.Items[0].Title != "recovered" {
+		t.Fatalf("page=%+v err=%v", page, err)
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("attempts=%d", attempts.Load())
+	}
+}
+
+func TestListIssuesRetriesShortTransportBody(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := attempts.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if attempt == 1 {
+			w.Header().Set("Content-Length", "100")
+			fmt.Fprint(w, `[{"id":1`)
+			return
+		}
+		fmt.Fprint(w, `[{"id":1,"number":1,"title":"transport recovered","body":"","state":"open","comments":0,"labels":[]}]`)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{MaxRetries: 1})
+
+	page, err := client.ListIssues(context.Background(), IssueListRequest{Owner: "example-owner", Repo: "example-repo"})
+	if err != nil || len(page.Items) != 1 || page.Items[0].Title != "transport recovered" {
+		t.Fatalf("page=%+v err=%v", page, err)
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("attempts=%d", attempts.Load())
+	}
+}
+
+func TestListIssuesReportsSanitizedResponseDiagnosticsAfterRetry(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+		assert      func(*testing.T, error)
+	}{
+		{
+			name:        "truncated json",
+			contentType: "application/json; charset=utf-8",
+			body:        `[{"id":1`,
+			assert: func(t *testing.T, err error) {
+				var partial ErrPartialResponse
+				if !errors.As(err, &partial) || partial.Attempts != 2 || partial.Got == 0 || partial.ContentType != "application/json" || partial.Offset == 0 {
+					t.Fatalf("partial=%+v err=%T %v", partial, err, err)
+				}
+			},
+		},
+		{
+			name:        "malformed json",
+			contentType: "application/json",
+			body:        `[{"id":}]`,
+			assert: func(t *testing.T, err error) {
+				var malformed ErrMalformedJSON
+				if !errors.As(err, &malformed) || malformed.Attempts != 2 || malformed.ResponseSize == 0 || malformed.Offset == 0 {
+					t.Fatalf("malformed=%+v err=%T %v", malformed, err, err)
+				}
+			},
+		},
+		{
+			name:        "unexpected content type",
+			contentType: "text/html; charset=utf-8",
+			body:        `<html>temporary gateway response</html>`,
+			assert: func(t *testing.T, err error) {
+				var unexpected ErrUnexpectedContentType
+				if !errors.As(err, &unexpected) || unexpected.Attempts != 2 || unexpected.ResponseSize == 0 || unexpected.ContentType != "text/html" {
+					t.Fatalf("unexpected=%+v err=%T %v", unexpected, err, err)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				attempts.Add(1)
+				w.Header().Set("Content-Type", tt.contentType)
+				fmt.Fprint(w, tt.body)
+			}))
+			defer server.Close()
+			client := newTestClient(t, server.URL, Config{MaxRetries: 1})
+
+			_, err := client.ListIssues(context.Background(), IssueListRequest{Owner: "example-owner", Repo: "example-repo"})
+			if err == nil {
+				t.Fatal("expected response diagnostic")
+			}
+			tt.assert(t, err)
+			if attempts.Load() != 2 {
+				t.Fatalf("attempts=%d", attempts.Load())
+			}
+		})
+	}
+}
+
 func TestListRepositoryIssueCommentsReadsOnePageAndDecodesParent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v5/repos/example-owner/example-repo/issues/comments" {

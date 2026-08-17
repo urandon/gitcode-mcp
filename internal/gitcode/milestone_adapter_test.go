@@ -405,9 +405,9 @@ func TestMilestone010MalformedJSON(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for malformed JSON, got nil")
 	}
-	var partialErr ErrPartialResponse
-	if !errors.As(err, &partialErr) {
-		t.Fatalf("expected ErrPartialResponse for malformed JSON, got %T: %v", err, err)
+	var malformed ErrMalformedJSON
+	if !errors.As(err, &malformed) {
+		t.Fatalf("expected ErrMalformedJSON for malformed JSON, got %T: %v", err, err)
 	}
 	var netErr ErrNetworkUnavailable
 	if errors.As(err, &netErr) {
@@ -800,6 +800,11 @@ func TestMilestone024MilestoneUnmarshalJSON(t *testing.T) {
 			name: "minimal milestone",
 			json: `{"id":1,"title":"minimal"}`,
 			want: Milestone{RemoteID: "1", SourceID: "MILESTONE-1", Title: "minimal", Status: "open"},
+		},
+		{
+			name: "captured number identity",
+			json: `{"number":576480,"title":"number identity","url":"https://example.invalid/milestones/576480"}`,
+			want: Milestone{RemoteID: "576480", SourceID: "MILESTONE-576480", Title: "number identity", Status: "open", HTMLURL: "https://example.invalid/milestones/576480"},
 		},
 		{
 			name:     "missing id",

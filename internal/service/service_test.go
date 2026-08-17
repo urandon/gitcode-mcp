@@ -2341,7 +2341,10 @@ func TestFailureModes(t *testing.T) {
 			var target gitcode.ErrRateLimited
 			return errors.As(err, &target) && target.RetryAfter == time.Second
 		}, wantMessage: "sync: rate limited. Retry after 1 seconds.", wantRemote: 1},
-		{name: "failure-partial-response", client: &fakeGitCodeClient{errors: []error{gitcode.ErrPartialResponse{Endpoint: "/wiki", Expected: 100, Got: 40}}}, request: SyncRequest{RepoID: "fixture-a", StableID: "DOC-123", IdempotencyKey: "failure-partial-response"}, wantMode: "partial_response", wantErrAs: func(err error) bool { var target gitcode.ErrPartialResponse; return errors.As(err, &target) }, wantMessage: "sync: received partial response for /wiki: expected 100 bytes, got 40 bytes. Run sync again to resume.", wantRemote: 1},
+		{name: "failure-partial-response", client: &fakeGitCodeClient{errors: []error{gitcode.ErrPartialResponse{Endpoint: "/wiki", Expected: 100, Got: 40}}}, request: SyncRequest{RepoID: "fixture-a", StableID: "DOC-123", IdempotencyKey: "failure-partial-response"}, wantMode: "partial_response", wantErrAs: func(err error) bool { var target gitcode.ErrPartialResponse; return errors.As(err, &target) }, wantMessage: "sync: received a truncated response for /wiki after 1 attempt(s)", wantRemote: 1},
+		{name: "failure-malformed-response", client: &fakeGitCodeClient{errors: []error{gitcode.ErrMalformedJSON{Endpoint: "/wiki", ResponseSize: 41, Offset: 17, Attempts: 3}}}, request: SyncRequest{RepoID: "fixture-a", StableID: "DOC-123", IdempotencyKey: "failure-malformed-response"}, wantMode: "malformed_response", wantErrAs: func(err error) bool { var target gitcode.ErrMalformedJSON; return errors.As(err, &target) }, wantMessage: "sync: provider returned malformed JSON for /wiki after 3 attempt(s)", wantRemote: 1},
+		{name: "failure-unexpected-content-type", client: &fakeGitCodeClient{errors: []error{gitcode.ErrUnexpectedContentType{Endpoint: "/wiki", ContentType: "text/html", ResponseSize: 73, Attempts: 3}}}, request: SyncRequest{RepoID: "fixture-a", StableID: "DOC-123", IdempotencyKey: "failure-unexpected-content-type"}, wantMode: "unexpected_content_type", wantErrAs: func(err error) bool { var target gitcode.ErrUnexpectedContentType; return errors.As(err, &target) }, wantMessage: "sync: provider returned unexpected content type text/html for /wiki after 3 attempt(s)", wantRemote: 1},
+		{name: "failure-schema-decode", client: &fakeGitCodeClient{errors: []error{&gitcode.ErrSchemaDecode{Endpoint: "/wiki", Field: "milestone.id", Expected: "number", Received: "object"}}}, request: SyncRequest{RepoID: "fixture-a", StableID: "DOC-123", IdempotencyKey: "failure-schema-decode"}, wantMode: "schema_decode", wantErrAs: func(err error) bool { var target *gitcode.ErrSchemaDecode; return errors.As(err, &target) }, wantMessage: "sync: provider response schema is incompatible for /wiki", wantRemote: 1},
 		{name: "failure-auth-expired", client: &fakeGitCodeClient{errors: []error{gitcode.ErrAuthExpired{Endpoint: "/wiki", Status: 401}}}, request: SyncRequest{RepoID: "fixture-a", StableID: "DOC-123", IdempotencyKey: "failure-auth-expired"}, wantMode: "auth_expired", wantErrAs: func(err error) bool { var target gitcode.ErrAuthExpired; return errors.As(err, &target) }, wantMessage: "sync: authentication expired. Renew your GITCODE_TOKEN and try again.", wantRemote: 1},
 		{name: "failure-remote-id-collision", client: &fakeGitCodeClient{wiki: baseWiki}, request: SyncRequest{RepoID: "fixture-a", StableID: "TASK-001", RemoteAlias: "remote:wiki/design", IdempotencyKey: "failure-remote-id-collision"}, wantMode: "remote_collision", wantErrAs: func(err error) bool {
 			var target gitcode.ErrRemoteCollision
@@ -2432,6 +2435,33 @@ func TestFailureModes(t *testing.T) {
 				t.Fatalf("conflicts written after failure: %#v", conflicts)
 			}
 		})
+	}
+}
+
+func TestResourceErrorIncludesSanitizedResponseDiagnostics(t *testing.T) {
+	cause := gitcode.ErrMalformedJSON{Endpoint: "/api/v5/repos/example/repo/issues", ContentType: "application/json", ResponseSize: 2048, Offset: 1024, Attempts: 3}
+	failure := ErrSyncFailure{
+		Mode:           "malformed_response",
+		Target:         "issue:*",
+		Endpoint:       cause.Endpoint,
+		ResponseBytes:  cause.ResponseSize,
+		ContentType:    cause.ContentType,
+		DecodeOffset:   cause.Offset,
+		Attempts:       cause.Attempts,
+		RecoveryAction: "inspect provider status or adapter contract",
+		Cause:          cause,
+	}
+	resource := newResourceError("issue:*", "issues", failure)
+	if resource.FailureClass != "malformed_response" || resource.Endpoint != cause.Endpoint || resource.ResponseBytes != 2048 || resource.ContentType != "application/json" || resource.DecodeOffset != 1024 || resource.Attempts != 3 {
+		t.Fatalf("resource=%+v", resource)
+	}
+	encoded, err := json.Marshal(resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	if strings.Contains(text, "Authorization") || strings.Contains(text, "Cookie") || strings.Contains(text, "response_body") {
+		t.Fatalf("unsafe response diagnostics: %s", text)
 	}
 }
 
