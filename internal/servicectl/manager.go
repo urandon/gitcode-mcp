@@ -30,16 +30,17 @@ const (
 )
 
 type Paths struct {
-	RuntimeDir  string `json:"runtime_dir"`
-	LogDir      string `json:"log_dir"`
-	StatePath   string `json:"state_path"`
-	PIDPath     string `json:"pid_path"`
-	SocketPath  string `json:"socket_path"`
-	JobsPath    string `json:"jobs_path"`
-	Network     string `json:"network"`
-	Address     string `json:"address"`
-	InstallPath string `json:"install_path"`
-	InstallKind string `json:"install_kind"`
+	RuntimeDir   string `json:"runtime_dir"`
+	LogDir       string `json:"log_dir"`
+	StatePath    string `json:"state_path"`
+	PIDPath      string `json:"pid_path"`
+	SocketPath   string `json:"socket_path"`
+	JobsPath     string `json:"jobs_path"`
+	RegistryPath string `json:"registry_path"`
+	Network      string `json:"network"`
+	Address      string `json:"address"`
+	InstallPath  string `json:"install_path"`
+	InstallKind  string `json:"install_kind"`
 }
 
 type State struct {
@@ -101,13 +102,14 @@ func (m Manager) ResolvePaths() (Paths, error) {
 		goos = runtime.GOOS
 	}
 	paths := Paths{
-		RuntimeDir: runtimeDir,
-		LogDir:     filepath.Join(cacheDir, ServiceName, "logs"),
-		StatePath:  filepath.Join(runtimeDir, "state.json"),
-		PIDPath:    filepath.Join(runtimeDir, "service.pid"),
-		SocketPath: filepath.Join(runtimeDir, "control.sock"),
-		JobsPath:   filepath.Join(runtimeDir, "jobs.json"),
-		Network:    "unix",
+		RuntimeDir:   runtimeDir,
+		LogDir:       filepath.Join(cacheDir, ServiceName, "logs"),
+		StatePath:    filepath.Join(runtimeDir, "state.json"),
+		PIDPath:      filepath.Join(runtimeDir, "service.pid"),
+		SocketPath:   filepath.Join(runtimeDir, "control.sock"),
+		JobsPath:     filepath.Join(runtimeDir, "jobs.json"),
+		RegistryPath: filepath.Join(runtimeDir, "managed-caches.json"),
+		Network:      "unix",
 	}
 	if network := strings.TrimSpace(src.Env("GITCODE_MCP_SERVICE_NETWORK")); network != "" {
 		paths.Network = network
@@ -303,7 +305,12 @@ func (m Manager) Run(ctx context.Context) error {
 	if err := jobs.LoadAndMarkInterrupted(); err != nil {
 		return err
 	}
-	server := RPCServer{Manager: m, Jobs: jobs}
+	maintenance := NewMaintenanceManager(m, jobs, paths.RegistryPath)
+	if err := maintenance.Load(); err != nil {
+		return err
+	}
+	server := RPCServer{Manager: m, Jobs: jobs, Maintenance: maintenance}
+	go maintenance.Run(ctx)
 	if paths.Network == "mem" {
 		return serveMemoryRPC(ctx, paths.Address, server)
 	}

@@ -1480,6 +1480,9 @@ func (s *Service) BulkSyncIssueComments(ctx context.Context, req BulkSyncRequest
 	if err != nil {
 		return nil, err
 	}
+	if req.IncrementalQueue {
+		return s.bulkSyncIssueCommentsPerIssue(ctx, req, route, "incremental_queue")
+	}
 	lister, aggregateAvailable := s.client.(gitcode.RepositoryIssueCommentLister)
 	_, parentsComplete, frontierErr := s.completeSyncWatermark(ctx, repoID, "issue")
 	if frontierErr != nil {
@@ -1511,11 +1514,15 @@ func (s *Service) bulkSyncIssueCommentsPerIssue(ctx context.Context, req BulkSyn
 	if req.Bounds != nil {
 		limit = req.Bounds.MaxRecords
 		if limit <= 0 && req.Bounds.MaxPages > 0 {
-			perPage := req.PerPage
-			if perPage <= 0 {
-				perPage = 100
+			if req.IncrementalQueue {
+				limit = req.Bounds.MaxPages
+			} else {
+				perPage := req.PerPage
+				if perPage <= 0 {
+					perPage = 100
+				}
+				limit = req.Bounds.MaxPages * perPage
 			}
-			limit = req.Bounds.MaxPages * perPage
 		}
 	}
 	items, err := s.store.ListIssueCommentSync(ctx, cache.IssueCommentSyncFilter{RepoID: req.RepoID, Statuses: []string{"pending", "deferred"}, Limit: limit})
@@ -1566,6 +1573,8 @@ func (s *Service) bulkSyncIssueCommentsPerIssue(ctx context.Context, req BulkSyn
 	}
 	result.SuccessCount = len(result.Results)
 	result.FailureCount = len(result.Failures)
+	result.PagesListed = len(items)
+	result.RecordsListed = len(items)
 	if err := s.attachIssueCommentQueueSummary(ctx, result, req.RepoID, "drain"); err != nil {
 		return result, err
 	}
@@ -1913,11 +1922,12 @@ func (s *Service) upsertIssueCommentProjection(ctx context.Context, item cache.I
 		UpdatedAt:   updated,
 	}
 	graph := cache.SourceGraph{
-		Source:     source,
-		Identities: []cache.Identity{{RepoID: item.RepoID, SourceID: stableID, AliasType: "issue_comment", Alias: remoteID, Remote: cache.RemoteAlias{Type: "issue_comment", ID: remoteID}}},
-		Links:      []cache.Link{{RepoID: item.RepoID, SourceID: stableID, TargetID: item.SourceID, Kind: "parent", Text: "issue"}},
-		Chunks:     chunksForSource(source),
-		SyncStatus: &cache.SyncStatus{RepoID: item.RepoID, SourceID: stableID, RemoteType: "issue_comment", RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now},
+		Source:        source,
+		Identities:    []cache.Identity{{RepoID: item.RepoID, SourceID: stableID, AliasType: "issue_comment", Alias: remoteID, Remote: cache.RemoteAlias{Type: "issue_comment", ID: remoteID}}},
+		Links:         []cache.Link{{RepoID: item.RepoID, SourceID: stableID, TargetID: item.SourceID, Kind: "parent", Text: "issue"}},
+		Chunks:        chunksForSource(source),
+		ReplaceChunks: true,
+		SyncStatus:    &cache.SyncStatus{RepoID: item.RepoID, SourceID: stableID, RemoteType: "issue_comment", RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now},
 	}
 	if err := s.store.UpsertSyncGraph(ctx, s.syncGraphFromSourceGraph(item.RepoID, graph)); err != nil {
 		return "", err
@@ -2327,6 +2337,16 @@ func (s *Service) recordSyncFrontier(ctx context.Context, repoID, remoteType str
 	if status == "" {
 		status = "partial"
 	}
+	previous, ok, err := s.store.GetSyncFrontier(ctx, repoID, remoteType, syncOrderingUpdatedAtDesc, syncFilterStateAll)
+	if err != nil {
+		return err
+	}
+	if ok && previous.Status == "complete" && status != "complete" {
+		// Keep the last proven full-corpus watermark while a bounded head pass is
+		// still working toward it. Maintenance stores the in-progress checkpoint
+		// and candidate high watermark separately.
+		return nil
+	}
 	return s.store.UpsertSyncFrontier(ctx, cache.SyncFrontier{
 		RepoID:        repoID,
 		RemoteType:    remoteType,
@@ -2383,11 +2403,26 @@ func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (
 		return nil, normalizeError(err, "sources", repoID)
 	}
 	sort.SliceStable(prSources, func(i, j int) bool { return prSources[i].ID < prSources[j].ID })
-	if req.Bounds != nil && req.Bounds.MaxPages > 0 && len(prSources) > req.Bounds.MaxPages {
-		prSources = prSources[:req.Bounds.MaxPages]
+	start := 0
+	if req.Bounds != nil && req.Page > 1 {
+		start = req.Page - 1
 	}
+	if start > len(prSources) {
+		start = len(prSources)
+	}
+	end := len(prSources)
+	bounded := false
+	if req.Bounds != nil && req.Bounds.MaxPages > 0 && end > start+req.Bounds.MaxPages {
+		end = start + req.Bounds.MaxPages
+		bounded = true
+	}
+	prSources = prSources[start:end]
 
-	result := &SyncResourcesResult{Results: make([]SyncResult, 0), Failures: make([]ResourceError, 0)}
+	result := &SyncResourcesResult{Results: make([]SyncResult, 0), Failures: make([]ResourceError, 0), Ordering: "source_id_asc", PagesListed: len(prSources), RecordsListed: len(prSources), TraversalStatus: "complete", StopReason: "end_of_collection"}
+	if bounded {
+		result.TraversalStatus = "bounded"
+		result.StopReason = "max_pages"
+	}
 	totalRequested := 0
 	if req.Bounds != nil {
 		totalRequested = req.Bounds.MaxRecords
@@ -2434,6 +2469,8 @@ func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (
 	result.SuccessCount = len(result.Results)
 	result.FailureCount = len(result.Failures)
 	if result.FailureCount > 0 {
+		result.TraversalStatus = "partial"
+		result.StopReason = "provider_error"
 		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, TotalRequested: totalRequested}
 	}
 	return result, nil
@@ -2647,7 +2684,7 @@ func (s *Service) BulkSyncWiki(ctx context.Context, req BulkSyncRequest) (*SyncR
 
 func (s *Service) bulkSyncWikiBounded(ctx context.Context, req BulkSyncRequest, route RepositoryRoute) (*SyncResourcesResult, error) {
 	bounds := req.Bounds
-	result := &SyncResourcesResult{Results: make([]SyncResult, 0), Failures: make([]ResourceError, 0)}
+	result := &SyncResourcesResult{Results: make([]SyncResult, 0), Failures: make([]ResourceError, 0), Ordering: "path_asc"}
 
 	var wikiBounds *gitcode.WikiBounds
 	totalRequested := bounds.MaxRecords
@@ -2710,6 +2747,7 @@ func (s *Service) bulkSyncWikiBounded(ctx context.Context, req BulkSyncRequest, 
 	}
 
 	items := page.Items
+	originalCount := len(items)
 	if bounds.MaxPages > 0 {
 		perPage := req.PerPage
 		if perPage < 1 {
@@ -2722,6 +2760,25 @@ func (s *Service) bulkSyncWikiBounded(ctx context.Context, req BulkSyncRequest, 
 	}
 	if bounds.MaxRecords > 0 && len(items) > bounds.MaxRecords {
 		items = items[:bounds.MaxRecords]
+	}
+	perPage := req.PerPage
+	if perPage < 1 {
+		perPage = 10
+	}
+	result.RecordsListed = len(items)
+	if len(items) > 0 {
+		result.PagesListed = (len(items) + perPage - 1) / perPage
+	}
+	if page.NextPage > 0 || originalCount > len(items) {
+		result.TraversalStatus = "bounded"
+		if bounds.MaxRecords > 0 {
+			result.StopReason = "max_records"
+		} else {
+			result.StopReason = "max_pages"
+		}
+	} else {
+		result.TraversalStatus = "complete"
+		result.StopReason = "end_of_collection"
 	}
 
 	s.stageWikiPage(ctx, req, items, result)
@@ -3607,7 +3664,7 @@ func (s *Service) syncGraphFromSourceGraph(repoID string, graph cache.SourceGrap
 	if graph.SyncStatus != nil {
 		revisions = append(revisions, cache.RemoteRevision{RepoID: repoID, RecordID: graph.Source.ID, RemoteType: graph.SyncStatus.RemoteType, RemoteID: graph.SyncStatus.RemoteID, RemoteRevision: graph.SyncStatus.RemoteRevision, Status: graph.SyncStatus.Status, LastFetchedAt: graph.SyncStatus.LastFetchedAt})
 	}
-	return cache.SyncGraph{RepoID: repoID, Provenance: s.syncOriginProvenance(), Record: record, Comments: graph.Comments, PRReviewComments: graph.PRReviewComments, PRReviewDiscussions: graph.PRReviewDiscussions, PRReviewPositions: graph.PRReviewPositions, Identities: graph.Identities, Links: graph.Links, Chunks: graph.Chunks, RemoteRevisions: revisions, SyncEvents: graph.SyncEvents}
+	return cache.SyncGraph{RepoID: repoID, Provenance: s.syncOriginProvenance(), Record: record, Comments: graph.Comments, PRReviewComments: graph.PRReviewComments, PRReviewDiscussions: graph.PRReviewDiscussions, PRReviewPositions: graph.PRReviewPositions, Identities: graph.Identities, Links: graph.Links, Chunks: graph.Chunks, ReplaceChunks: graph.ReplaceChunks, RemoteRevisions: revisions, SyncEvents: graph.SyncEvents}
 }
 
 func (s *Service) stageIssue(ctx context.Context, req SyncRequest, remoteType, remoteID string, issue gitcode.Issue) (cache.SourceGraph, SyncCounts, error) {
@@ -3744,6 +3801,7 @@ func (s *Service) stageIssueParent(ctx context.Context, req SyncRequest, remoteT
 		}
 	}
 	graph.Chunks = chunksForSource(graph.Source)
+	graph.ReplaceChunks = true
 	return graph, counts, nil
 }
 
@@ -3841,6 +3899,7 @@ func (s *Service) stagePullRequest(ctx context.Context, req SyncRequest, remoteT
 		graph.Identities = append(graph.Identities, cache.Identity{RepoID: req.RepoID, SourceID: stableID, AliasType: "gitcode_pr_id", Alias: pr.ID, Remote: cache.RemoteAlias{Type: "gitcode_pr_id", ID: pr.ID}})
 	}
 	graph.Chunks = chunksForSource(graph.Source)
+	graph.ReplaceChunks = true
 	return graph, counts, nil
 }
 
@@ -3954,6 +4013,7 @@ func (s *Service) stagePRComment(ctx context.Context, req SyncRequest, remoteTyp
 		graph.Identities = append(graph.Identities, cache.Identity{RepoID: req.RepoID, SourceID: stableID, AliasType: "gitcode_pr_discussion", Alias: comment.DiscussionID, Remote: cache.RemoteAlias{Type: "gitcode_pr_discussion", ID: comment.DiscussionID}})
 	}
 	graph.Chunks = chunksForSource(graph.Source)
+	graph.ReplaceChunks = true
 	return graph, counts, nil
 }
 
@@ -4003,6 +4063,7 @@ func (s *Service) stageWiki(ctx context.Context, req SyncRequest, remoteType, re
 		graph.Identities = append(graph.Identities, cache.Identity{RepoID: req.RepoID, SourceID: stableID, AliasType: "gitcode_wiki_id", Alias: providerID, Remote: cache.RemoteAlias{Type: "gitcode_wiki_id", ID: providerID}})
 	}
 	graph.Chunks = chunksForSource(graph.Source)
+	graph.ReplaceChunks = true
 	return graph, counts, nil
 }
 

@@ -231,6 +231,7 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 | `export_snapshot` | Export a deterministic snapshot |
 | `diff_snapshot` | Diff two snapshots |
 | `repo_status` | Report repository binding plus binary identity, cache schema compatibility, issue/comment counts, and issue-comment queue state |
+| `maintenance_status` | Report sanitized daemon-managed cache, backfill frontier, content generation, and RAG coverage state |
 | `sync_live` | Synchronize selected issue, issue-comment, pull-request, pull-request-comment, or wiki collections into the cache |
 | `create_issue` | Create a live issue through the audited write lifecycle |
 | `add_issue_comment` | Add a live issue comment through the audited write lifecycle |

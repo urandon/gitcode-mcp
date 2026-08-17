@@ -72,6 +72,11 @@ func (s *SQLiteStore) UpsertSourceGraph(ctx context.Context, graph SourceGraph) 
 			return err
 		}
 	}
+	if graph.ReplaceChunks {
+		if err = reconcileSourceChunksTx(ctx, tx, graph.Source.RepoID, graph.Source.ID, graph.Chunks); err != nil {
+			return err
+		}
+	}
 	for _, chunk := range graph.Chunks {
 		if chunk.RepoID == "" {
 			chunk.RepoID = graph.Source.RepoID
@@ -118,6 +123,41 @@ func (s *SQLiteStore) UpsertSourceGraph(ctx context.Context, graph SourceGraph) 
 		}
 	}
 	return tx.Commit()
+}
+
+func reconcileSourceChunksTx(ctx context.Context, tx *sql.Tx, repoID, sourceID string, replacements []Chunk) error {
+	wanted := make(map[string]string, len(replacements))
+	for _, chunk := range replacements {
+		wanted[chunk.ID] = chunk.ContentHash
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id, content_hash FROM chunks WHERE repo_id = ? AND source_id = ?`, repoID, sourceID)
+	if err != nil {
+		return err
+	}
+	stale := []string{}
+	for rows.Next() {
+		var id, contentHash string
+		if err := rows.Scan(&id, &contentHash); err != nil {
+			rows.Close()
+			return err
+		}
+		if replacementHash, ok := wanted[id]; !ok || replacementHash != contentHash {
+			stale = append(stale, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, id := range stale {
+		if err := execTx(ctx, tx, `DELETE FROM chunks WHERE repo_id = ? AND id = ?`, repoID, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *SQLiteStore) UpsertSource(ctx context.Context, source Source) (err error) {

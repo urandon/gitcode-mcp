@@ -324,7 +324,19 @@ func (c *HTTPClient) ListWikiPages(ctx context.Context, req WikiListRequest) (Pa
 		return Page[WikiPage]{}, err
 	}
 	walker := &wikiTraversal{client: c, owner: req.Owner, repo: req.Repo, seenDirs: map[string]bool{}, seenFiles: map[string]bool{}}
+	pageNumber := firstPositive(req.Page, 1)
+	perPage := req.PerPage
 	if req.Bounds != nil {
+		if perPage <= 0 {
+			perPage = firstPositive(req.Bounds.MaxRecords, 1)
+		}
+		if pageNumber > 1 && perPage > 0 {
+			maxInt := int(^uint(0) >> 1)
+			if pageNumber-1 > maxInt/perPage {
+				return Page[WikiPage]{}, ErrValidationFailed{Field: "page", Message: "wiki page offset is too large"}
+			}
+			walker.skipRecords = (pageNumber - 1) * perPage
+		}
 		walker.maxRecords = req.Bounds.MaxRecords
 		walker.progressChan = req.Bounds.ProgressChan
 	}
@@ -332,7 +344,12 @@ func (c *HTTPClient) ListWikiPages(ctx context.Context, req WikiListRequest) (Pa
 	if err != nil {
 		return Page[WikiPage]{}, err
 	}
-	return Page[WikiPage]{Items: items, Page: firstPositive(req.Page, 1), PerPage: firstPositive(req.PerPage, len(items)), TotalCount: len(items)}, nil
+	nextPage := 0
+	if req.Bounds != nil && req.Bounds.MaxRecords > 0 && walker.hasMore {
+		logicalPages := (len(items) + perPage - 1) / perPage
+		nextPage = pageNumber + logicalPages
+	}
+	return Page[WikiPage]{Items: items, Page: pageNumber, PerPage: firstPositive(perPage, len(items)), TotalCount: len(items), NextPage: nextPage}, nil
 }
 
 func (c *HTTPClient) Search(ctx context.Context, req SearchRequest) (Page[SearchResult], error) {
@@ -791,7 +808,9 @@ type wikiTraversal struct {
 	repo         string
 	seenDirs     map[string]bool
 	seenFiles    map[string]bool
+	skipRecords  int
 	maxRecords   int
+	hasMore      bool
 	progressChan chan<- WikiProgressEvent
 }
 
@@ -812,10 +831,6 @@ func (w *wikiTraversal) walk(ctx context.Context, dir string, depth int) ([]Wiki
 		if err := ctx.Err(); err != nil {
 			return out, err
 		}
-		if w.maxRecords > 0 && len(out) >= w.maxRecords {
-			break
-		}
-
 		current := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 
@@ -829,6 +844,14 @@ func (w *wikiTraversal) walk(ctx context.Context, dir string, depth int) ([]Wiki
 			w.seenFiles[current.entryPath] = true
 			if !isImportableWikiMarkdown(current.entryPath) {
 				continue
+			}
+			if w.skipRecords > 0 {
+				w.skipRecords--
+				continue
+			}
+			if w.maxRecords > 0 && len(out) >= w.maxRecords {
+				w.hasMore = true
+				break
 			}
 			page, err := w.client.getWikiPageByPath(ctx, w.owner, w.repo, current.entryPath)
 			if err != nil {

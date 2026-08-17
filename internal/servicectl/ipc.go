@@ -44,8 +44,9 @@ type ServiceHealth struct {
 }
 
 type RPCServer struct {
-	Manager Manager
-	Jobs    *JobManager
+	Manager     Manager
+	Jobs        *JobManager
+	Maintenance *MaintenanceManager
 }
 
 type RPCClient struct {
@@ -183,6 +184,22 @@ func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawM
 			return nil, fmt.Errorf("job not found: %s", id)
 		}
 		return job, nil
+	case "Maintenance.Enroll":
+		var req MaintenanceEnrollRequest
+		if err := json.Unmarshal(params, &req); err != nil {
+			return nil, err
+		}
+		return s.Maintenance.Enroll(ctx, req)
+	case "Maintenance.List":
+		return s.Maintenance.List(ctx)
+	case "Maintenance.Reconcile":
+		return s.Maintenance.Reconcile(ctx)
+	case "Maintenance.Disable":
+		var req MaintenanceRegistrationRequest
+		if err := json.Unmarshal(params, &req); err != nil {
+			return nil, err
+		}
+		return s.Maintenance.Disable(ctx, req.RegistrationID)
 	default:
 		return nil, fmt.Errorf("unknown method: %s", method)
 	}

@@ -8,7 +8,7 @@ Provide a cache-first tooling layer that lets AI agents and humans search, inspe
 
 - Do not require live GitCode network access for routine reads.
 - Do not make remote issue ids replace stable source ids such as `DOC-123`.
-- Do not hide writes behind automatic background sync.
+- Do not hide remote GitCode mutations behind background maintenance; daemon sync is remote-read/local-cache-write work for explicitly enrolled caches only.
 
 ## Components
 
@@ -20,6 +20,7 @@ Provide a cache-first tooling layer that lets AI agents and humans search, inspe
 | GitCode adapter (fixture + live providers) | Encapsulate fixture/offline records and live tracker/wiki API calls, pagination, auth, rate limits, attachments, and write semantics. |
 | CLI | Provide explicit commands for sync, search, get, link-check, export, diff, and diagnostics. |
 | MCP server | Expose cache-first reads plus explicit live lifecycle tools for sync, index, diagnostics, and audited issue/PR writes. |
+| Local coordinator | Maintain an explicit registry of cache identities and schedule bounded head refresh, tail backfill, and RAG repair without putting network work on read paths. |
 | Export snapshots | Produce deterministic markdown/JSON/SQLite snapshots for review, rollback, and audit. |
 
 See [Component Architecture](component-architecture.md) for the durable component catalog, runtime flow, and boundary rules distilled from the historical design-package material.

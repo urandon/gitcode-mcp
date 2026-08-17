@@ -16,6 +16,7 @@ const (
 	RAGIndexStatusQueued      = "queued"
 	RAGIndexStatusRunning     = "running"
 	RAGIndexStatusSucceeded   = "succeeded"
+	RAGIndexStatusSuperseded  = "superseded"
 	RAGIndexStatusFailed      = "failed"
 	RAGIndexStatusCancelled   = "canceled"
 	RAGIndexStatusInterrupted = "interrupted"
@@ -34,20 +35,22 @@ type IndexRequest struct {
 }
 
 type IndexResult struct {
-	RepoID         string                  `json:"repo_id"`
-	RunID          string                  `json:"run_id"`
-	NamespaceID    string                  `json:"namespace_id"`
-	ProfileID      string                  `json:"profile_id"`
-	Status         string                  `json:"status"`
-	TotalChunks    int                     `json:"total_chunks"`
-	EmbeddedChunks int                     `json:"embedded_chunks"`
-	SkippedChunks  int                     `json:"skipped_chunks"`
-	FailedChunks   int                     `json:"failed_chunks"`
-	StartedAt      time.Time               `json:"started_at"`
-	CompletedAt    time.Time               `json:"completed_at,omitempty"`
-	ErrorClass     string                  `json:"error_class,omitempty"`
-	Message        string                  `json:"message,omitempty"`
-	Progress       []service.ProgressEvent `json:"progress,omitempty"`
+	RepoID            string                  `json:"repo_id"`
+	RunID             string                  `json:"run_id"`
+	NamespaceID       string                  `json:"namespace_id"`
+	ProfileID         string                  `json:"profile_id"`
+	Status            string                  `json:"status"`
+	TotalChunks       int                     `json:"total_chunks"`
+	EmbeddedChunks    int                     `json:"embedded_chunks"`
+	SkippedChunks     int                     `json:"skipped_chunks"`
+	FailedChunks      int                     `json:"failed_chunks"`
+	StartGeneration   int64                   `json:"start_generation,omitempty"`
+	CoveredGeneration int64                   `json:"covered_generation,omitempty"`
+	StartedAt         time.Time               `json:"started_at"`
+	CompletedAt       time.Time               `json:"completed_at,omitempty"`
+	ErrorClass        string                  `json:"error_class,omitempty"`
+	Message           string                  `json:"message,omitempty"`
+	Progress          []service.ProgressEvent `json:"progress,omitempty"`
 }
 
 type RAGIndexer struct {
@@ -71,6 +74,8 @@ type ragIndexStore interface {
 	UpsertRAGIndexRun(context.Context, cache.RAGIndexRun) error
 	AcquireWriter(context.Context, cache.WriterRequest) (*cache.WriterLease, error)
 	ReleaseWriter(context.Context, *cache.WriterLease) error
+	GetRepoContentState(context.Context, string) (cache.RepoContentState, error)
+	UpsertRAGCoverageState(context.Context, cache.RAGCoverageState) error
 }
 
 func NewRAGIndexer(store ragIndexStore, provider EmbeddingProvider, opts RAGIndexerOptions) *RAGIndexer {
@@ -133,6 +138,12 @@ func (i *RAGIndexer) Run(ctx context.Context, req IndexRequest) (IndexResult, er
 		return i.failRun(ctx, run, progress, "lease_failed", err)
 	}
 	defer i.store.ReleaseWriter(context.Background(), lease)
+	contentState, err := i.store.GetRepoContentState(ctx, req.RepoID)
+	if err != nil {
+		return i.failRun(ctx, run, progress, "content_state_failed", err)
+	}
+	startGeneration := contentState.ContentGeneration
+	run.Metadata["start_generation"] = fmt.Sprintf("%d", startGeneration)
 
 	chunks, err := i.store.ListChunks(ctx, cache.ChunkFilter{RepoID: req.RepoID, Policy: req.ChunkPolicyID})
 	if err != nil {
@@ -287,17 +298,36 @@ func (i *RAGIndexer) Run(ctx context.Context, req IndexRequest) (IndexResult, er
 		emitRecords(fmt.Sprintf("embedded %d/%d chunks", run.EmbeddedChunks, len(missing)))
 	}
 	completed := i.now().UTC()
+	finalContentState, err := i.store.GetRepoContentState(ctx, req.RepoID)
+	if err != nil {
+		return i.failRun(ctx, run, progress, "content_state_failed", err)
+	}
 	run.Status = RAGIndexStatusSucceeded
 	if run.FailedChunks > 0 {
 		run.Message = fmt.Sprintf("rag index finished with %d failed chunks", run.FailedChunks)
 	}
 	run.UpdatedAt = completed
 	run.CompletedAt = completed
+	coverageStatus := "ready"
+	if run.FailedChunks > 0 {
+		coverageStatus = "partial"
+	}
+	if finalContentState.ContentGeneration != startGeneration {
+		run.Status = RAGIndexStatusSuperseded
+		coverageStatus = "partial"
+		run.Message = fmt.Sprintf("cache content advanced from generation %d to %d during indexing", startGeneration, finalContentState.ContentGeneration)
+	}
+	if err := i.store.UpsertRAGCoverageState(ctx, cache.RAGCoverageState{RepoID: req.RepoID, NamespaceID: namespace.ID, CoveredGeneration: startGeneration, Status: coverageStatus, UpdatedAt: completed}); err != nil {
+		return i.failRun(ctx, run, progress, "coverage_state_failed", err)
+	}
 	if err := i.store.UpsertRAGIndexRun(ctx, run); err != nil {
 		return i.failRun(ctx, run, progress, "run_update_failed", err)
 	}
-	emit(service.ProgressEvent{Type: "finished", Phase: RAGIndexStatusSucceeded, Collection: "rag_index", RecordsListed: run.TotalChunks, RecordsFetched: run.EmbeddedChunks, RecordsSkipped: run.SkippedChunks, RecordsFailed: run.FailedChunks, Message: firstNonEmpty(run.Message, "rag index finished")})
-	return indexResultFromRun(run, progress), nil
+	emit(service.ProgressEvent{Type: "finished", Phase: run.Status, Collection: "rag_index", RecordsListed: run.TotalChunks, RecordsFetched: run.EmbeddedChunks, RecordsSkipped: run.SkippedChunks, RecordsFailed: run.FailedChunks, Message: firstNonEmpty(run.Message, "rag index finished")})
+	result := indexResultFromRun(run, progress)
+	result.StartGeneration = startGeneration
+	result.CoveredGeneration = startGeneration
+	return result, nil
 }
 
 func (i *RAGIndexer) failRun(ctx context.Context, run cache.RAGIndexRun, progress []service.ProgressEvent, class string, err error) (IndexResult, error) {

@@ -807,6 +807,55 @@ func TestUpsertSyncGraphIdempotentRepeat(t *testing.T) {
 	}
 }
 
+func TestUpsertSyncGraphReplacesStaleChunksAndEmbeddings(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	now := time.Date(2026, 8, 11, 10, 0, 0, 0, time.UTC)
+	record := Record{ID: "ISSUE-79", Type: "issue", Path: "issues/79.md", Title: "Lifecycle", Body: "old body", Status: "open", ContentHash: "old-record", Provenance: ProvenanceRemote, RemoteType: "issue", RemoteID: "79", CreatedAt: now, UpdatedAt: now}
+	oldChunk := Chunk{ID: "chunk-old", SourceID: record.ID, RecordID: record.ID, ContentHash: "old-chunk", Text: "old body", NormalizedText: "old body", Policy: "heading-v1"}
+	if err := store.UpsertSyncGraph(ctx, SyncGraph{RepoID: "fixture-a", Record: record, Chunks: []Chunk{oldChunk}, ReplaceChunks: true}); err != nil {
+		t.Fatal(err)
+	}
+	identity := EmbeddingNamespaceIdentity{RepoID: "fixture-a", ProfileID: "profile", ProviderID: "provider", ProviderType: "test", ModelID: "model", ModelRevision: "rev-1", Dimensions: 2, DType: "float32", Normalization: "l2", DocumentInstructionID: "doc", QueryInstructionID: "query", ChunkPolicyID: "heading-v1", LanguagePolicyID: "default", ConfigHash: "config"}
+	namespace, err := store.UpsertEmbeddingNamespace(ctx, EmbeddingNamespace{EmbeddingNamespaceIdentity: identity, CreatedAt: now, UpdatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertChunkEmbedding(ctx, ChunkEmbedding{RepoID: "fixture-a", NamespaceID: namespace.ID, ChunkID: oldChunk.ID, Vector: []byte{1, 2}, Dimensions: 2, DType: "float32", EmbeddedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertSyncGraph(ctx, SyncGraph{RepoID: "fixture-a", Record: record, Chunks: []Chunk{oldChunk}, ReplaceChunks: true}); err != nil {
+		t.Fatal(err)
+	}
+	embeddings, err := store.ListChunkEmbeddings(ctx, ChunkEmbeddingFilter{RepoID: "fixture-a", NamespaceID: namespace.ID})
+	if err != nil || len(embeddings) != 1 {
+		t.Fatalf("unchanged replacement discarded embedding: %#v err=%v", embeddings, err)
+	}
+	record.Body = "new body"
+	record.ContentHash = "new-record"
+	record.UpdatedAt = now.Add(time.Minute)
+	newChunk := Chunk{ID: "chunk-new", SourceID: record.ID, RecordID: record.ID, ContentHash: "new-chunk", Text: "new body", NormalizedText: "new body", Policy: "heading-v1"}
+	if err := store.UpsertSyncGraph(ctx, SyncGraph{RepoID: "fixture-a", Record: record, Chunks: []Chunk{newChunk}, ReplaceChunks: true}); err != nil {
+		t.Fatal(err)
+	}
+	chunks, err := store.GetChunks(ctx, record.ID)
+	if err != nil || len(chunks) != 1 || chunks[0].ID != newChunk.ID {
+		t.Fatalf("replacement chunks=%#v err=%v", chunks, err)
+	}
+	embeddings, err = store.ListChunkEmbeddings(ctx, ChunkEmbeddingFilter{RepoID: "fixture-a", NamespaceID: namespace.ID})
+	if err != nil || len(embeddings) != 0 {
+		t.Fatalf("stale embeddings=%#v err=%v", embeddings, err)
+	}
+	if err := store.UpsertSyncGraph(ctx, SyncGraph{RepoID: "fixture-a", Record: record, ReplaceChunks: true}); err != nil {
+		t.Fatal(err)
+	}
+	chunks, err = store.GetChunks(ctx, record.ID)
+	if err != nil || len(chunks) != 0 {
+		t.Fatalf("empty replacement chunks=%#v err=%v", chunks, err)
+	}
+}
+
 func TestUpsertSyncGraphProjectionThenRemotePreservesProjectionAliasBoundary(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)

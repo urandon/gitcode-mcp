@@ -40,6 +40,30 @@ func TestStatusNoNamespaceWithChunks(t *testing.T) {
 	}
 }
 
+func TestStatusReportsGenerationLagAfterContentHashChange(t *testing.T) {
+	ctx := context.Background()
+	store := newVectorTestStore(t, ctx)
+	defer store.Close()
+	chunk := vectorTestChunk("chunk-a", "ISSUE-1", "hash-a")
+	mustUpsertVectorChunks(t, ctx, store, "fixture-a", []cache.Chunk{chunk})
+	provider := mustFakeIndexerProvider(t, 2)
+	indexed, err := NewRAGIndexer(store, provider, RAGIndexerOptions{}).Run(ctx, IndexRequest{RepoID: "fixture-a", ChunkPolicyID: DefaultChunkPolicyID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk.ContentHash = "hash-b"
+	if _, err := store.UpsertChunk(ctx, chunk); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Status(ctx, store, provider, StatusRequest{RepoID: "fixture-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "partial" || !result.Coverage.GenerationTracked || result.Coverage.ContentGeneration <= indexed.CoveredGeneration || result.Coverage.CoveredGeneration != indexed.CoveredGeneration {
+		t.Fatalf("indexed=%+v status=%+v", indexed, result)
+	}
+}
+
 func TestStatusPartialAndStaleCoverage(t *testing.T) {
 	ctx := context.Background()
 	store := newVectorTestStore(t, ctx)

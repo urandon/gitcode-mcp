@@ -252,6 +252,37 @@ func TestBulkSyncIssueCommentsAggregateBoundedRunRestartsSafely(t *testing.T) {
 	}
 }
 
+func TestBulkSyncIssueCommentsIncrementalQueueDrainsBoundedWork(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 8, 11, 14, 0, 0, 0, time.UTC)
+	parents := []gitcode.IssueSummary{
+		{ID: "8101", Number: 11, Title: "One", State: "open", Comments: 1, CreatedAt: base, UpdatedAt: base},
+		{ID: "8102", Number: 12, Title: "Two", State: "open", Comments: 1, CreatedAt: base, UpdatedAt: base.Add(time.Minute)},
+	}
+	client := &fakeGitCodeClient{
+		listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{{Items: parents, Page: 1, PerPage: 100}},
+		commentsByIssue: map[int][]gitcode.Comment{
+			11: {{ID: "c11", IssueID: "8101", IssueNumber: 11, Body: "one", CreatedAt: base, UpdatedAt: base}},
+			12: {{ID: "c12", IssueID: "8102", IssueNumber: 12, Body: "two", CreatedAt: base, UpdatedAt: base}},
+		},
+	}
+	store := newBulkIssueCommentStore(t, ctx, "incremental-comments")
+	defer store.Close()
+	svc := NewWithClient(store, client)
+	if _, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "incremental-comments", PerPage: 100, Bounds: &SyncBounds{MaxPages: 10}}); err != nil {
+		t.Fatal(err)
+	}
+	request := BulkSyncRequest{RepoID: "incremental-comments", IncrementalQueue: true, Bounds: &SyncBounds{MaxPages: 1}}
+	first, err := svc.BulkSyncIssueComments(ctx, request)
+	if err != nil || first.SuccessCount != 1 || first.PagesListed != 1 || first.TraversalStatus != "bounded" || first.IssueComments.Pending != 1 {
+		t.Fatalf("first=%#v err=%v", first, err)
+	}
+	second, err := svc.BulkSyncIssueComments(ctx, request)
+	if err != nil || second.SuccessCount != 1 || second.PagesListed != 1 || second.TraversalStatus != "complete" || second.IssueComments.Complete != 2 {
+		t.Fatalf("second=%#v err=%v", second, err)
+	}
+}
+
 func TestBulkSyncIssueCommentsAggregateParentFailureIsExplicitAndRetryable(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 7, 13, 16, 0, 0, 0, time.UTC)

@@ -55,12 +55,15 @@ type NamespaceStatus struct {
 }
 
 type CoverageStatus struct {
-	TotalChunks    int `json:"total_chunks"`
-	EmbeddedChunks int `json:"embedded_chunks"`
-	MissingChunks  int `json:"missing_chunks"`
-	StaleChunks    int `json:"stale_chunks"`
-	FailedChunks   int `json:"failed_chunks"`
-	SkippedChunks  int `json:"skipped_chunks"`
+	TotalChunks       int   `json:"total_chunks"`
+	EmbeddedChunks    int   `json:"embedded_chunks"`
+	MissingChunks     int   `json:"missing_chunks"`
+	StaleChunks       int   `json:"stale_chunks"`
+	FailedChunks      int   `json:"failed_chunks"`
+	SkippedChunks     int   `json:"skipped_chunks"`
+	ContentGeneration int64 `json:"content_generation,omitempty"`
+	CoveredGeneration int64 `json:"covered_generation,omitempty"`
+	GenerationTracked bool  `json:"generation_tracked,omitempty"`
 }
 
 type JobStatus struct {
@@ -105,6 +108,8 @@ type statusStore interface {
 	ListChunks(context.Context, cache.ChunkFilter) ([]cache.Chunk, error)
 	ListChunkEmbeddings(context.Context, cache.ChunkEmbeddingFilter) ([]cache.ChunkEmbedding, error)
 	ListRAGIndexRuns(context.Context, cache.RAGIndexRunFilter) ([]cache.RAGIndexRun, error)
+	GetRepoContentState(context.Context, string) (cache.RepoContentState, error)
+	GetRAGCoverageState(context.Context, string, string) (cache.RAGCoverageState, bool, error)
 }
 
 func Status(ctx context.Context, store statusStore, provider EmbeddingProvider, req StatusRequest) (StatusResult, error) {
@@ -163,6 +168,21 @@ func Status(ctx context.Context, store statusStore, provider EmbeddingProvider, 
 	result.Namespace.Current = ok
 	if ok {
 		result.Namespace.ID = namespace.ID
+	}
+	contentState, err := store.GetRepoContentState(ctx, req.RepoID)
+	if err != nil {
+		return StatusResult{}, err
+	}
+	result.Coverage.ContentGeneration = contentState.ContentGeneration
+	if ok {
+		coverageState, exists, err := store.GetRAGCoverageState(ctx, req.RepoID, namespace.ID)
+		if err != nil {
+			return StatusResult{}, err
+		}
+		if exists {
+			result.Coverage.CoveredGeneration = coverageState.CoveredGeneration
+			result.Coverage.GenerationTracked = true
+		}
 	}
 	chunks, err := store.ListChunks(ctx, cache.ChunkFilter{RepoID: req.RepoID, Policy: req.ChunkPolicyID})
 	if err != nil {
@@ -236,7 +256,7 @@ func deriveStatus(result StatusResult) string {
 	if result.LastRun != nil && result.LastRun.Status == RAGIndexStatusFailed {
 		return "failed"
 	}
-	if result.Coverage.MissingChunks > 0 || result.Coverage.StaleChunks > 0 || result.Coverage.FailedChunks > 0 {
+	if result.Coverage.MissingChunks > 0 || result.Coverage.StaleChunks > 0 || result.Coverage.FailedChunks > 0 || (result.Coverage.GenerationTracked && result.Coverage.CoveredGeneration < result.Coverage.ContentGeneration) {
 		return "partial"
 	}
 	return "ready"

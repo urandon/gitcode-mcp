@@ -18,6 +18,7 @@ const (
 	JobStatusQueued      = "queued"
 	JobStatusRunning     = "running"
 	JobStatusSucceeded   = "succeeded"
+	JobStatusSuperseded  = "superseded"
 	JobStatusFailed      = "failed"
 	JobStatusCancelled   = "cancelled"
 	JobStatusInterrupted = "interrupted"
@@ -27,19 +28,24 @@ const (
 )
 
 type Job struct {
-	ID         string                  `json:"id"`
-	Type       string                  `json:"type"`
-	RepoID     string                  `json:"repo_id,omitempty"`
-	ProfileID  string                  `json:"profile_id,omitempty"`
-	Status     string                  `json:"status"`
-	CreatedAt  time.Time               `json:"created_at"`
-	StartedAt  *time.Time              `json:"started_at,omitempty"`
-	UpdatedAt  time.Time               `json:"updated_at"`
-	FinishedAt *time.Time              `json:"finished_at,omitempty"`
-	Steps      int                     `json:"steps,omitempty"`
-	Completed  int                     `json:"completed,omitempty"`
-	Error      string                  `json:"error,omitempty"`
-	Progress   []service.ProgressEvent `json:"progress,omitempty"`
+	ID             string                  `json:"id"`
+	Type           string                  `json:"type"`
+	RepoID         string                  `json:"repo_id,omitempty"`
+	ProfileID      string                  `json:"profile_id,omitempty"`
+	CacheUUID      string                  `json:"cache_uuid,omitempty"`
+	RegistrationID string                  `json:"registration_id,omitempty"`
+	NamespaceID    string                  `json:"namespace_id,omitempty"`
+	WorkKey        string                  `json:"-"`
+	Status         string                  `json:"status"`
+	CreatedAt      time.Time               `json:"created_at"`
+	StartedAt      *time.Time              `json:"started_at,omitempty"`
+	UpdatedAt      time.Time               `json:"updated_at"`
+	FinishedAt     *time.Time              `json:"finished_at,omitempty"`
+	Steps          int                     `json:"steps,omitempty"`
+	Completed      int                     `json:"completed,omitempty"`
+	Error          string                  `json:"error,omitempty"`
+	ErrorClass     string                  `json:"error_class,omitempty"`
+	Progress       []service.ProgressEvent `json:"progress,omitempty"`
 }
 
 type JobManager struct {
@@ -93,6 +99,7 @@ func (m *JobManager) LoadAndMarkInterrupted() error {
 			job.Error = "service restarted before job completed"
 			job.Progress = append(job.Progress, service.ProgressEvent{Type: "interrupted", Phase: "interrupted", Message: job.Error})
 		}
+		sanitizeStoredMaintenanceJob(&job)
 		trimJobProgress(&job)
 		idNum := parseJobIDNumber(job.ID)
 		if idNum > maxID {
@@ -105,6 +112,19 @@ func (m *JobManager) LoadAndMarkInterrupted() error {
 		m.nextID = maxID
 	}
 	return m.saveLocked()
+}
+
+func sanitizeStoredMaintenanceJob(job *Job) {
+	if job == nil || (job.Type != SyncJobType && job.Type != RAGIndexJobType) {
+		return
+	}
+	if job.Error != "" {
+		job.ErrorClass = sanitizeMaintenanceErrorClass(job.ErrorClass, job.Type+"_failed")
+		job.Error = publicMaintenanceJobError(job.Type, job.ErrorClass)
+	}
+	for i := range job.Progress {
+		job.Progress[i] = sanitizeMaintenanceProgress(job.Type, job.Progress[i])
+	}
 }
 
 func (m *JobManager) StartFake(ctx context.Context, req StartFakeJobRequest) (Job, error) {
@@ -134,6 +154,93 @@ func (m *JobManager) ActiveJob(jobType, repoID string) (Job, bool) {
 		}
 	}
 	return Job{}, false
+}
+
+func (m *JobManager) ActiveWork(workKey string) (Job, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, job := range m.jobs {
+		candidate := job.WorkKey
+		if candidate == "" {
+			candidate = job.Type + ":" + job.RepoID
+		}
+		if candidate != workKey {
+			continue
+		}
+		if job.Status == JobStatusQueued || job.Status == JobStatusRunning {
+			return cloneJob(job), true
+		}
+	}
+	return Job{}, false
+}
+
+// ActiveCacheRepo returns active maintenance work for one logical cache and
+// repository. This prevents head/tail or sync/index jobs from overlapping in a
+// cache without serializing an unrelated cache that happens to contain the
+// same repository.
+func (m *JobManager) ActiveCacheRepo(jobType, cacheUUID, repoID string) (Job, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, job := range m.jobs {
+		if job.Type != jobType || job.CacheUUID != cacheUUID || job.RepoID != repoID {
+			continue
+		}
+		if job.Status == JobStatusQueued || job.Status == JobStatusRunning {
+			return cloneJob(job), true
+		}
+	}
+	return Job{}, false
+}
+
+func (m *JobManager) LatestCacheRepo(jobType, cacheUUID, repoID string) (Job, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var latest *Job
+	for _, job := range m.jobs {
+		if job.Type != jobType || job.CacheUUID != cacheUUID || job.RepoID != repoID {
+			continue
+		}
+		if latest == nil || parseJobIDNumber(job.ID) > parseJobIDNumber(latest.ID) {
+			latest = job
+		}
+	}
+	if latest == nil {
+		return Job{}, false
+	}
+	return cloneJob(latest), true
+}
+
+func (m *JobManager) SetWorkIdentity(id, workKey, cacheUUID, registrationID, namespaceID string) Job {
+	m.updateJob(id, func(job *Job, now time.Time) {
+		job.WorkKey = workKey
+		job.CacheUUID = cacheUUID
+		job.RegistrationID = registrationID
+		job.NamespaceID = namespaceID
+		job.UpdatedAt = now
+	})
+	return m.mustGet(id)
+}
+
+func (m *JobManager) createCoalescedJob(jobType, repoID, profileID string, steps int, workKey, cacheUUID, registrationID, namespaceID string, cancel context.CancelFunc) (Job, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, job := range m.jobs {
+		if job.WorkKey == workKey && (job.Status == JobStatusQueued || job.Status == JobStatusRunning) {
+			return cloneJob(job), false
+		}
+	}
+	m.nextID++
+	now := m.now()
+	id := fmt.Sprintf("job-%06d", m.nextID)
+	job := &Job{
+		ID: id, Type: jobType, RepoID: repoID, ProfileID: profileID,
+		CacheUUID: cacheUUID, RegistrationID: registrationID, NamespaceID: namespaceID, WorkKey: workKey,
+		Status: JobStatusQueued, CreatedAt: now, UpdatedAt: now, Steps: steps,
+	}
+	m.jobs[id] = job
+	m.cancel[id] = cancel
+	_ = m.saveLocked()
+	return cloneJob(job), true
 }
 
 func (m *JobManager) List() []Job {
@@ -175,7 +282,7 @@ func (m *JobManager) Cancel(id string) (Job, bool) {
 		if !found {
 			return Job{}, false
 		}
-		if current.Status == JobStatusCancelled || current.Status == JobStatusSucceeded || current.Status == JobStatusInterrupted {
+		if jobTerminalStatus(current.Status) {
 			return current, true
 		}
 		if time.Now().After(deadline) {
@@ -316,7 +423,7 @@ func (m *JobManager) pruneLocked() {
 
 func jobTerminalStatus(status string) bool {
 	switch status {
-	case JobStatusSucceeded, JobStatusFailed, JobStatusCancelled, JobStatusInterrupted:
+	case JobStatusSucceeded, JobStatusSuperseded, JobStatusFailed, JobStatusCancelled, JobStatusInterrupted:
 		return true
 	default:
 		return false

@@ -16,11 +16,14 @@ import (
 const RAGIndexJobType = "rag-index"
 
 type StartRAGIndexJobRequest struct {
-	RepoID      string `json:"repo_id"`
-	Profile     string `json:"profile,omitempty"`
-	CachePath   string `json:"cache_path,omitempty"`
-	BatchSize   int    `json:"batch_size,omitempty"`
-	ChunkPolicy string `json:"chunk_policy,omitempty"`
+	RepoID         string `json:"repo_id"`
+	Profile        string `json:"profile,omitempty"`
+	CachePath      string `json:"cache_path,omitempty"`
+	BatchSize      int    `json:"batch_size,omitempty"`
+	ChunkPolicy    string `json:"chunk_policy,omitempty"`
+	CacheUUID      string `json:"cache_uuid,omitempty"`
+	RegistrationID string `json:"registration_id,omitempty"`
+	NamespaceID    string `json:"namespace_id,omitempty"`
 }
 
 func (m *JobManager) StartRAGIndex(ctx context.Context, manager Manager, req StartRAGIndexJobRequest) (Job, error) {
@@ -28,14 +31,24 @@ func (m *JobManager) StartRAGIndex(ctx context.Context, manager Manager, req Sta
 	if req.RepoID == "" {
 		return Job{}, errors.New("repo_id is required")
 	}
-	if active, ok := m.ActiveJob(RAGIndexJobType, req.RepoID); ok {
-		return active, nil
-	}
+	workKey := ragIndexWorkKey(req)
 	ctx, cancel := context.WithCancel(ctx)
 	profile := strings.TrimSpace(req.Profile)
-	job := m.createJobWithMetadata(RAGIndexJobType, req.RepoID, profile, 0, cancel)
+	job, created := m.createCoalescedJob(RAGIndexJobType, req.RepoID, profile, 0, workKey, req.CacheUUID, req.RegistrationID, req.NamespaceID, cancel)
+	if !created {
+		cancel()
+		return job, nil
+	}
 	go m.runRAGIndexJob(ctx, manager, job.ID, req)
 	return job, nil
+}
+
+func ragIndexWorkKey(req StartRAGIndexJobRequest) string {
+	cacheID := strings.TrimSpace(req.CacheUUID)
+	if cacheID == "" {
+		cacheID = strings.TrimSpace(req.CachePath)
+	}
+	return strings.Join([]string{RAGIndexJobType, cacheID, strings.TrimSpace(req.RepoID), strings.TrimSpace(req.Profile), strings.TrimSpace(req.NamespaceID), strings.TrimSpace(req.ChunkPolicy)}, ":")
 }
 
 func (m *JobManager) runRAGIndexJob(ctx context.Context, manager Manager, jobID string, req StartRAGIndexJobRequest) {
@@ -49,6 +62,7 @@ func (m *JobManager) runRAGIndexJob(ctx context.Context, manager Manager, jobID 
 	go func() {
 		defer close(done)
 		for ev := range progressCh {
+			ev = sanitizeMaintenanceProgress(RAGIndexJobType, ev)
 			m.updateJob(jobID, func(job *Job, now time.Time) {
 				job.UpdatedAt = now
 				job.Progress = append(job.Progress, ev)
@@ -75,21 +89,31 @@ func (m *JobManager) runRAGIndexJob(ctx context.Context, manager Manager, jobID 
 			}
 			job.UpdatedAt = now
 			job.FinishedAt = &now
-			job.Error = err.Error()
+			job.ErrorClass = maintenanceJobErrorClass(err, "rag_failed")
+			if job.Status == JobStatusCancelled {
+				job.ErrorClass = "cancelled"
+			}
+			job.Error = publicMaintenanceJobError(RAGIndexJobType, job.ErrorClass)
 			job.Steps = result.TotalChunks
 			job.Completed = result.EmbeddedChunks + result.SkippedChunks
-			job.Progress = append(job.Progress, service.ProgressEvent{Type: job.Status, Phase: job.Status, Collection: RAGIndexJobType, RecordsListed: result.TotalChunks, RecordsFetched: result.EmbeddedChunks, RecordsSkipped: result.SkippedChunks, RecordsFailed: result.FailedChunks, Message: err.Error()})
+			job.NamespaceID = result.NamespaceID
+			job.ProfileID = result.ProfileID
+			job.Progress = append(job.Progress, service.ProgressEvent{Type: job.Status, Phase: job.Status, Collection: RAGIndexJobType, RecordsListed: result.TotalChunks, RecordsFetched: result.EmbeddedChunks, RecordsSkipped: result.SkippedChunks, RecordsFailed: result.FailedChunks, Message: job.Error})
 			delete(m.cancel, jobID)
 		})
 		return
 	}
 	m.updateJob(jobID, func(job *Job, now time.Time) {
 		job.Status = JobStatusSucceeded
+		if result.Status == rag.RAGIndexStatusSuperseded {
+			job.Status = JobStatusSuperseded
+		}
 		job.UpdatedAt = now
 		job.FinishedAt = &now
 		job.Steps = result.TotalChunks
 		job.Completed = result.EmbeddedChunks + result.SkippedChunks
 		job.ProfileID = result.ProfileID
+		job.NamespaceID = result.NamespaceID
 		delete(m.cancel, jobID)
 	})
 }
