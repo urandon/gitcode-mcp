@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -2088,7 +2089,7 @@ func TestScenario006LiveGraphInvalidRejectedBeforeCommit(t *testing.T) {
 			svc := NewWithClient(store, &fakeGitCodeClient{issue: tt.issue, comments: tt.comments})
 			svc.providerMode = gitcode.ProviderModeLive
 			svc.lockPath = filepath.Join(t.TempDir(), "sync.lock")
-			_, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "live-invalid", RemoteAlias: "issue:42", IdempotencyKey: "sc-006-" + tt.name})
+			_, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "live-invalid", RemoteAlias: fmt.Sprintf("issue:%d", tt.issue.Number), IdempotencyKey: "sc-006-" + tt.name})
 			var failure ErrSyncFailure
 			if !errors.As(err, &failure) || failure.Mode != "live_graph_invalid" {
 				t.Fatalf("error = %T %v, want live_graph_invalid", err, err)
@@ -2889,6 +2890,36 @@ func seedStore(t *testing.T, ctx context.Context, store cache.Store) {
 	err = store.UpsertLink(ctx, cache.Link{RepoID: "fixture-a", SourceID: "TASK-001", TargetID: "DOC-123", Kind: "mentions", Text: "doc"})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestTargetedIssueSyncRejectsMismatchedProviderIdentityBeforeCacheMutation(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "identity-check", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeGitCodeClient{issue: gitcode.Issue{ID: "provider-71", Number: 71, Title: "Unrelated issue", State: "open"}}
+	svc := NewWithClient(store, client)
+	svc.lockPath = filepath.Join(t.TempDir(), "sync.lock")
+
+	_, err = svc.SyncToCache(ctx, SyncRequest{RepoID: "identity-check", RemoteAlias: "issue:42", IdempotencyKey: "identity-mismatch"})
+	var syncErr ErrSyncFailure
+	if !errors.As(err, &syncErr) || syncErr.Mode != "remote_identity_mismatch" || syncErr.ExpectedID != "42" || syncErr.ActualID != "71" {
+		t.Fatalf("sync error=%#v, want remote_identity_mismatch 42 != 71", err)
+	}
+	if client.issueCalls != 1 || client.commentCalls != 0 || len(client.listIssueRequests) != 0 {
+		t.Fatalf("provider calls: get=%d comments=%d list=%d", client.issueCalls, client.commentCalls, len(client.listIssueRequests))
+	}
+	if _, err := store.GetSourceScoped(ctx, "identity-check", "ISSUE-42"); err == nil {
+		t.Fatal("requested issue was written despite identity mismatch")
+	}
+	if _, err := store.GetSourceScoped(ctx, "identity-check", "ISSUE-71"); err == nil {
+		t.Fatal("unrelated issue was written despite identity mismatch")
 	}
 }
 

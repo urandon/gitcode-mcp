@@ -27,6 +27,8 @@ type ErrSyncFailure struct {
 	Alias          string
 	ExistingID     string
 	NewID          string
+	ExpectedID     string
+	ActualID       string
 	LocalPayload   []byte
 	RemotePayload  []byte
 	RecoveryAction string
@@ -58,6 +60,8 @@ func (e ErrSyncFailure) Error() string {
 			return "sync: live_graph_invalid: " + e.Cause.Error()
 		}
 		return "sync: live_graph_invalid"
+	case "remote_identity_mismatch":
+		return fmt.Sprintf("sync: provider returned remote id %s for requested %s; refusing to mutate the cache", e.ActualID, e.ExpectedID)
 	case "remote_collision":
 		return fmt.Sprintf("sync: remote id %s already maps to local id %s; cannot map to %s. Run link-check for guidance.", e.Alias, e.ExistingID, e.NewID)
 	case "cache_corruption":

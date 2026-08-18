@@ -1784,6 +1784,9 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		if err := validateSyncCommentSurface(opts); err != nil {
 			return writeError(stderr, opts.format, err)
 		}
+		if err := validateSyncTargetRouting(opts); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
 		if opts.daemon || opts.detach {
 			if opts.id != "" || opts.input != "" {
 				return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "sync", Message: "daemon sync supports collection selectors only; omit --id/--input"})
@@ -2094,16 +2097,48 @@ func syncJobRequest(opts options) servicectl.StartSyncJobRequest {
 }
 
 func syncSingleRecordRequested(opts options) bool {
+	return opts.id != "" || opts.input != ""
+}
+
+func validateSyncTargetRouting(opts options) error {
 	if opts.id == "" && opts.input == "" {
-		return false
+		return nil
 	}
-	if opts.input != "" && !opts.issues && !opts.wiki && !opts.pulls && !opts.prComments {
-		if !syncCommentSelectorUsed(opts) {
-			return true
-		}
-		return syncRemoteAliasSurface(opts.input) == "issue"
+	if opts.id != "" && opts.input != "" {
+		return service.ErrInvalidQuery{Field: "sync target", Message: "--id and --input are mutually exclusive"}
 	}
-	return !opts.issues && !opts.wiki && !opts.pulls && !syncCommentSelectorUsed(opts)
+	if opts.maxPages > 0 || opts.maxRecords > 0 || opts.perPage > 0 {
+		return service.ErrInvalidQuery{Field: "sync bounds", Message: "--max-pages, --max-records, and --per-page apply to collection sync only; omit them for an exact --id/--input sync"}
+	}
+
+	selected := ""
+	selectedCount := 0
+	if opts.issues {
+		selected, selectedCount = "issue", selectedCount+1
+	}
+	if opts.wiki {
+		selected, selectedCount = "wiki", selectedCount+1
+	}
+	if opts.pulls {
+		selected, selectedCount = "pull_request", selectedCount+1
+	}
+	if selectedCount == 0 {
+		return nil
+	}
+	if opts.id != "" {
+		return service.ErrInvalidQuery{Field: "sync target", Message: "collection selectors cannot be combined with --id; omit the selector for an exact stable-id sync"}
+	}
+	if selectedCount > 1 {
+		return service.ErrInvalidQuery{Field: "sync target", Message: "an exact --input target can have at most one matching collection selector"}
+	}
+	surface := syncRemoteAliasSurface(opts.input)
+	if surface == "" {
+		return service.ErrInvalidQuery{Field: "sync target", Message: "collection selectors require a matching issue:N, wiki:SLUG, or pr:N --input alias"}
+	}
+	if selected != surface {
+		return service.ErrInvalidQuery{Field: "sync target", Message: fmt.Sprintf("--input targets %s but the selected collection is %s", surface, selected)}
+	}
+	return nil
 }
 
 func validateSyncCommentSurface(opts options) error {
@@ -2145,6 +2180,8 @@ func syncRemoteAliasSurface(alias string) string {
 	switch strings.ToLower(strings.TrimSpace(remoteType)) {
 	case "issue", "issues":
 		return "issue"
+	case "wiki", "page", "remote":
+		return "wiki"
 	case "pull_request", "pull", "pulls", "pr":
 		return "pull_request"
 	default:
@@ -3190,7 +3227,7 @@ func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {
 	}
 	var syncErr service.ErrSyncFailure
 	if errors.As(err, &syncErr) {
-		ctx.HTTPAttempted = syncErr.Mode == "live_auth_failure" || syncErr.Mode == "network_timeout" || syncErr.Mode == "rate_limited" || syncErr.Mode == "partial_response" || syncErr.Mode == "live_graph_invalid" || syncErr.Mode == "payload_too_large" || syncErr.Mode == "remote_not_found" || syncErr.Mode == "conflict" || syncErr.Mode == "remote_collision"
+		ctx.HTTPAttempted = syncErr.Mode == "live_auth_failure" || syncErr.Mode == "network_timeout" || syncErr.Mode == "rate_limited" || syncErr.Mode == "partial_response" || syncErr.Mode == "live_graph_invalid" || syncErr.Mode == "remote_identity_mismatch" || syncErr.Mode == "payload_too_large" || syncErr.Mode == "remote_not_found" || syncErr.Mode == "conflict" || syncErr.Mode == "remote_collision"
 		ctx.UnsupportedPayload = syncErr.Mode == "live_graph_invalid"
 		ctx.PayloadSource = syncErr.PayloadSource
 		ctx.FailureSource = syncErr.PayloadSource
@@ -3949,13 +3986,13 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --daemon            start collection sync as a service-owned job and attach progress")
 		fmt.Fprintln(w, "  --detach            start collection sync as a service-owned job and return the job id")
 		fmt.Fprintln(w, "  --index             build index after sync")
-		fmt.Fprintln(w, "  --max-pages N       maximum pages to sync; omit to traverse until end/frontier")
-		fmt.Fprintln(w, "  --max-records N     maximum records to sync; omit to traverse until end/frontier")
-		fmt.Fprintln(w, "  --per-page N        records per page")
+		fmt.Fprintln(w, "  --max-pages N       collection-only page bound; omit to traverse until end/frontier")
+		fmt.Fprintln(w, "  --max-records N     collection-only record bound; omit to traverse until end/frontier")
+		fmt.Fprintln(w, "  --per-page N        collection-only records per page")
 		fmt.Fprintln(w, "  --progress MODE     progress mode: auto, spinner, lines, jsonl, off")
 		fmt.Fprintln(w, "  --quiet             suppress non-result progress output")
 		fmt.Fprintln(w, "  --id ID             stable record id")
-		fmt.Fprintln(w, "  --input ALIAS       remote alias for single-record sync")
+		fmt.Fprintln(w, "  --input ALIAS       exact remote alias; a matching --issues/--wiki/--pulls selector is allowed")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --details, --records   include per-record sync results")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")

@@ -3620,6 +3620,15 @@ func (s *Service) fetchOnce(ctx context.Context, req SyncRequest, remoteType, re
 		if err != nil {
 			return cache.SourceGraph{}, SyncCounts{}, err
 		}
+		if issue.Number != number {
+			return cache.SourceGraph{}, SyncCounts{}, ErrSyncFailure{
+				Mode:           "remote_identity_mismatch",
+				Target:         remoteType + ":" + remoteID,
+				ExpectedID:     strconv.Itoa(number),
+				ActualID:       strconv.Itoa(issue.Number),
+				RecoveryAction: "inspect the GitCode single-issue response contract before retrying",
+			}
+		}
 		return s.stageIssue(ctx, req, remoteType, remoteID, issue)
 	case "pull_request", "pull", "pulls", "pr":
 		route, err := s.BuildAdapterRoute(ctx, req.RepoID, RepositoryScopeIssues)
