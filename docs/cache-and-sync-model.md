@@ -179,7 +179,7 @@ A bounded or cancelled run records a non-complete frontier, so it is not eligibl
 
 ## Partial Failure Handling
 
-Bulk sync treats each listed issue or wiki page as an independent resource. A failure for one resource does not roll back resources that already synced successfully and does not prevent later resources from being attempted.
+Bulk sync treats each listed issue or wiki page as an independent resource. A failure for one resource does not roll back resources that already synced successfully and does not prevent later resources from being attempted. If an issue collection page remains truncated or malformed after bounded adapter retries, complete schema-valid array elements before the decode failure are committed as successful resources. The malformed item and remaining bytes are discarded, pagination stops, and the run records a non-complete frontier so the page is retried rather than treated as covered.
 
 When any resource fails, the service returns `PartialSyncError` with:
 

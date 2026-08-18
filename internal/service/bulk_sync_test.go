@@ -943,3 +943,46 @@ func TestBulkSyncIssuesListFailureReturnsError(t *testing.T) {
 		t.Fatalf("failure error = %T %v, want rate_limited ErrSyncFailure", result.Failures[0].Err, result.Failures[0].Err)
 	}
 }
+
+func TestBulkSyncIssuesCachesRecoverablePrefixAndKeepsPartialFrontier(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 8, 18, 13, 0, 0, 0, time.UTC)
+	decodeErr := gitcode.ErrPartialResponse{Endpoint: "/issues", Got: 512, Offset: 511, Attempts: 2, Message: "truncated JSON"}
+	client := &fakeGitCodeClient{
+		listIssuesErrors: []error{decodeErr},
+		listIssuesErrorPages: []gitcode.Page[gitcode.IssueSummary]{{Items: []gitcode.IssueSummary{
+			{ID: "1", Number: 1, Title: "First recovered", Body: "first", State: "open", CreatedAt: base, UpdatedAt: base},
+			{ID: "2", Number: 2, Title: "Second recovered", Body: "second", State: "open", CreatedAt: base.Add(-time.Minute), UpdatedAt: base.Add(-time.Minute)},
+		}, Page: 1, PerPage: 10}},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	const repoID = "bulk-partial-prefix"
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: repoID, Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	result, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: repoID, PerPage: 10, Bounds: &SyncBounds{MaxPages: 5}})
+	var partial *PartialSyncError
+	if !errors.As(err, &partial) {
+		t.Fatalf("result=%+v err=%T %v, want typed partial", result, err, err)
+	}
+	if result.SuccessCount != 2 || result.FailureCount != 1 || len(result.Results) != 2 || len(result.Failures) != 1 {
+		t.Fatalf("result=%+v, want 2 successes plus collection failure", result)
+	}
+	if result.Failures[0].FailureClass != "partial_response" || result.Failures[0].ResponseBytes != 512 || result.Failures[0].DecodeOffset != 511 || result.Failures[0].Attempts != 2 {
+		t.Fatalf("failure=%+v", result.Failures[0])
+	}
+	for _, id := range []string{"ISSUE-1", "ISSUE-2"} {
+		if _, err := store.GetSourceScoped(ctx, repoID, id); err != nil {
+			t.Fatalf("recovered %s missing: %v", id, err)
+		}
+	}
+	frontier, ok, err := store.GetSyncFrontier(ctx, repoID, "issue", syncOrderingUpdatedAtDesc, syncFilterStateAll)
+	if err != nil || !ok || frontier.Status == "complete" {
+		t.Fatalf("frontier=%+v ok=%t err=%v, want non-complete retryable frontier", frontier, ok, err)
+	}
+}

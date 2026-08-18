@@ -186,6 +186,29 @@ func TestListIssuesRetriesShortTransportBody(t *testing.T) {
 	}
 }
 
+func TestListIssuesReturnsCompletePrefixAfterTruncatedRetryExhaustion(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `[{"id":"1","number":1,"title":"first","body":"","state":"open","comments":0,"labels":[]},{"id":"2","number":2,"title":"second","body":"","state":"open","comments":0,"labels":[]},{"id":`)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{MaxRetries: 1})
+
+	page, err := client.ListIssues(context.Background(), IssueListRequest{Owner: "example-owner", Repo: "example-repo"})
+	var partial ErrPartialResponse
+	if !errors.As(err, &partial) || partial.Attempts != 2 {
+		t.Fatalf("page=%+v partial=%+v err=%T %v", page, partial, err, err)
+	}
+	if len(page.Items) != 2 || page.Items[0].Number != 1 || page.Items[1].Number != 2 {
+		t.Fatalf("salvaged items=%+v, want complete prefix 1,2", page.Items)
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("attempts=%d, want 2", attempts.Load())
+	}
+}
+
 func TestListIssuesReportsSanitizedResponseDiagnosticsAfterRetry(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -238,9 +261,12 @@ func TestListIssuesReportsSanitizedResponseDiagnosticsAfterRetry(t *testing.T) {
 			defer server.Close()
 			client := newTestClient(t, server.URL, Config{MaxRetries: 1})
 
-			_, err := client.ListIssues(context.Background(), IssueListRequest{Owner: "example-owner", Repo: "example-repo"})
+			page, err := client.ListIssues(context.Background(), IssueListRequest{Owner: "example-owner", Repo: "example-repo"})
 			if err == nil {
 				t.Fatal("expected response diagnostic")
+			}
+			if len(page.Items) != 0 {
+				t.Fatalf("malformed first item unexpectedly salvaged %+v", page.Items)
 			}
 			tt.assert(t, err)
 			if attempts.Load() != 2 {

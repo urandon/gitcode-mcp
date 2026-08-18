@@ -78,7 +78,10 @@ func (c *HTTPClient) ListIssues(ctx context.Context, req IssueListRequest) (Page
 	endpoint := listIssuesEndpoint(req.Owner, req.Repo)
 	items, page, err := getPaged[IssueSummary](ctx, c, endpoint, issueListQuery(req), PageState{Page: req.Page, PerPage: req.PerPage})
 	if err != nil {
-		return Page[IssueSummary]{}, err
+		if !recoverableCollectionDecode(err) {
+			items = nil
+		}
+		return Page[IssueSummary]{Items: items, Page: page.Page, PerPage: page.PerPage}, err
 	}
 	return Page[IssueSummary]{Items: items, Page: page.Page, PerPage: page.PerPage}, nil
 }

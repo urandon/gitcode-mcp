@@ -1233,14 +1233,21 @@ func (s *Service) BulkSyncIssues(ctx context.Context, req BulkSyncRequest) (*Syn
 
 	if req.Bounds == nil {
 		page, err := s.client.ListIssues(ctx, gitcode.IssueListRequest{Owner: route.Owner, Repo: route.Name, State: "all", OrderBy: "updated_at", Direction: "desc", Page: req.Page, PerPage: req.PerPage})
-		if err != nil {
-			return bulkSyncFailureResult(s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "issue:*"}, "issues", "*"), "issue:*", "issues")
+		if err != nil && !recoverableIssueListPage(err) {
+			page.Items = nil
 		}
 		result := &SyncResourcesResult{Results: make([]SyncResult, 0, len(page.Items)), Failures: make([]ResourceError, 0)}
+		result.PagesListed = 1
+		result.RecordsListed = len(page.Items)
 		beforeCount := len(result.Results)
 		beforeDeferred := syncResultsDeferredCount(result.Results)
 		s.stageIssuePage(ctx, req, page.Items, result, 0)
 		emitProgress(req.ProgressChan, ProgressEvent{Collection: "issues", Page: firstNonZeroInt(req.Page, 1), RecordsFetched: len(result.Results) - beforeCount, RecordsDeferred: syncResultsDeferredCount(result.Results) - beforeDeferred})
+		if err != nil {
+			normalized := s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "issue:*"}, "issues", "*")
+			result.Failures = append(result.Failures, newResourceErrorWithMessage("issue:*", "issues", normalized, err.Error()))
+			result.TraversalStatus = "partial"
+		}
 		result.SuccessCount = len(result.Results)
 		result.FailureCount = len(result.Failures)
 		if summaryErr := s.attachIssueCommentQueueSummary(ctx, result, repoID, "parent_backfill"); summaryErr != nil {
@@ -1305,12 +1312,30 @@ func (s *Service) bulkSyncIssuesBounded(ctx context.Context, req BulkSyncRequest
 		}
 		page, err := s.client.ListIssues(ctx, gitcode.IssueListRequest{Owner: route.Owner, Repo: route.Name, State: "all", OrderBy: "updated_at", Direction: "desc", Page: currentPage, PerPage: perPage})
 		if err != nil {
+			if recoverableIssueListPage(err) && len(page.Items) > 0 {
+				result.PagesListed++
+				result.RecordsListed += len(page.Items)
+				observeIssueHighWatermark(&observed, page.Items)
+				items, _, skippedByWatermark := filterIssueSummariesByCompleteWatermark(page.Items, watermark, watermarkOK)
+				result.SkippedByWatermark += skippedByWatermark
+				remaining := 0
+				if bounds.MaxRecords > 0 {
+					remaining = bounds.MaxRecords - recordsAdvanced
+				}
+				beforeCount := len(result.Results)
+				beforeDeferred := syncResultsDeferredCount(result.Results)
+				advanced, _ := s.stageIssuePage(ctx, req, items, result, remaining)
+				recordsAdvanced += advanced
+				emitProgress(bounds.ProgressChan, ProgressEvent{Collection: "issues", Page: currentPage, RecordsFetched: len(result.Results) - beforeCount, RecordsDeferred: syncResultsDeferredCount(result.Results) - beforeDeferred})
+			}
 			result.SuccessCount = len(result.Results)
-			result.FailureCount = len(result.Failures)
 			result.TraversalStatus = "partial"
 			re := newResourceErrorWithMessage("issue:*", "issues", s.normalizeSyncFailure(err, SyncRequest{RepoID: req.RepoID, RemoteAlias: "issue:*"}, "issues", "*"), err.Error())
 			result.Failures = append(result.Failures, re)
-			result.FailureCount++
+			result.FailureCount = len(result.Failures)
+			if summaryErr := s.attachIssueCommentQueueSummary(ctx, result, req.RepoID, "parent_backfill"); summaryErr != nil {
+				return result, summaryErr
+			}
 			s.recordSyncFrontierBestEffort(ctx, req.RepoID, "issue", result, observed)
 			return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, TotalRequested: totalRequested}
 		}
@@ -1365,6 +1390,15 @@ func (s *Service) bulkSyncIssuesBounded(ctx context.Context, req BulkSyncRequest
 		return bulkSyncFailureResult(err, "issue:*", "issues")
 	}
 	return result, nil
+}
+
+func recoverableIssueListPage(err error) bool {
+	var partial gitcode.ErrPartialResponse
+	if errors.As(err, &partial) {
+		return true
+	}
+	var malformed gitcode.ErrMalformedJSON
+	return errors.As(err, &malformed)
 }
 
 func (s *Service) stageIssuePage(ctx context.Context, req BulkSyncRequest, items []gitcode.IssueSummary, result *SyncResourcesResult, maxAdvances int) (int, bool) {

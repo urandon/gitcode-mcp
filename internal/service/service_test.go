@@ -3675,6 +3675,7 @@ type fakeGitCodeClient struct {
 	createReleaseResult          gitcode.WriteResult[gitcode.Release]
 	updateReleaseResult          gitcode.WriteResult[gitcode.Release]
 	listIssuesPages              []gitcode.Page[gitcode.IssueSummary]
+	listIssuesErrorPages         []gitcode.Page[gitcode.IssueSummary]
 	listIssueRequests            []gitcode.IssueListRequest
 	listIssuesErrors             []error
 	listWikiPages                []gitcode.Page[gitcode.WikiPage]
@@ -3733,6 +3734,11 @@ func (f *fakeGitCodeClient) ListIssues(_ context.Context, req gitcode.IssueListR
 	if len(f.listIssuesErrors) > 0 {
 		err := f.listIssuesErrors[0]
 		f.listIssuesErrors = f.listIssuesErrors[1:]
+		if len(f.listIssuesErrorPages) > 0 {
+			page := f.listIssuesErrorPages[0]
+			f.listIssuesErrorPages = f.listIssuesErrorPages[1:]
+			return page, err
+		}
 		return gitcode.Page[gitcode.IssueSummary]{}, err
 	}
 	if len(f.listIssuesPages) > 0 {

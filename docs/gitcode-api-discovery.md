@@ -106,6 +106,8 @@ The same incident exposed an error-classification bug: the provider returned a c
 
 Only the first three response-level failures are retried for the same bounded page, using the configured read retry budget. Schema drift is deterministic and is not retried. Exhausted diagnostics expose only the endpoint, normalized media type, response byte count, decode offset, and attempt count; raw bodies, headers, cookies, and tokens remain excluded.
 
+After those retries are exhausted, the issues collection adapter preserves any complete `IssueSummary` array elements that precede a truncated or syntactically malformed item. It returns that validated prefix together with the original typed response error. The service commits the usable prefix, reports both successes and one collection failure, stops pagination at the damaged page, and records only a non-complete frontier. This is recovery, not silent success: a later run must refetch the page, and a failure before the first complete element still returns zero usable records.
+
 ## List Ordering Parameters
 
 Live discovery on `2026-06-28` used the public `openharmony/arkcompiler_runtime_core` repository because it has large issue and pull request collections.

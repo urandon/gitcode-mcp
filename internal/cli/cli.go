@@ -2824,6 +2824,7 @@ func mergeSyncError(existing error, result *service.SyncResourcesResult, err err
 
 type syncResourcesCompactSummary struct {
 	Status             string                            `json:"status"`
+	FailureClass       string                            `json:"failure_class,omitempty"`
 	SuccessCount       int                               `json:"success_count"`
 	FailureCount       int                               `json:"failure_count"`
 	Counts             service.SyncCounts                `json:"counts"`
@@ -2901,12 +2902,15 @@ func syncStatusCompactSummaryFromResult(result service.SyncStatusSummaryResult) 
 func renderSyncResources(stdout, stderr io.Writer, format string, details bool, result *service.SyncResourcesResult, syncErr error, plan startupPlan, started time.Time) int {
 	if syncErr != nil {
 		if partial, ok := syncErr.(*service.PartialSyncError); ok {
+			canonicalFailureClass := syncPartialFailureClass(plan, partial)
 			if result != nil && len(result.Results) > 0 {
 				if format == "json" {
 					if details {
 						_ = renderJSON(stdout, result)
 					} else {
-						_ = renderJSON(stdout, syncResourcesSummary(result, partial, started))
+						summary := syncResourcesSummary(result, partial, started)
+						summary.FailureClass = canonicalFailureClass
+						_ = renderJSON(stdout, summary)
 					}
 				} else {
 					if details {
@@ -2914,7 +2918,9 @@ func renderSyncResources(stdout, stderr io.Writer, format string, details bool, 
 							renderSyncText(stdout, r)
 						}
 					} else {
-						renderSyncResourcesSummaryText(stdout, syncResourcesSummary(result, partial, started))
+						summary := syncResourcesSummary(result, partial, started)
+						summary.FailureClass = canonicalFailureClass
+						renderSyncResourcesSummaryText(stdout, summary)
 					}
 				}
 			}
@@ -2925,6 +2931,9 @@ func renderSyncResources(stdout, stderr io.Writer, format string, details bool, 
 			}
 			if result == nil || result.SuccessCount == 0 {
 				return writeCommandError(stderr, format, plan, partial)
+			}
+			if format != "json" && details && canonicalFailureClass != "" {
+				fmt.Fprintf(stderr, "failure_class: %s\n", canonicalFailureClass)
 			}
 			return 1
 		}
@@ -2946,6 +2955,13 @@ func renderSyncResources(stdout, stderr io.Writer, format string, details bool, 
 		renderSyncResourcesSummaryText(stdout, syncResourcesSummary(result, nil, started))
 	}
 	return 0
+}
+
+func syncPartialFailureClass(plan startupPlan, err error) string {
+	if plan.ProviderMode == "live-http" {
+		return string(diagnostics.Classify(err, diagnosticContext(plan, err)).Code)
+	}
+	return failureClass(err)
 }
 
 func syncResourcesSummary(result *service.SyncResourcesResult, partial *service.PartialSyncError, started time.Time) syncResourcesCompactSummary {
@@ -3116,6 +3132,9 @@ func renderSyncResourcesSummaryText(w io.Writer, summary syncResourcesCompactSum
 		fmt.Fprintf(w, " failure_groups=%s", strings.Join(parts, ","))
 	}
 	fmt.Fprintln(w)
+	if summary.FailureClass != "" {
+		fmt.Fprintf(w, "failure_class: %s\n", summary.FailureClass)
+	}
 }
 
 func writeRequest(opts options) service.WriteCommandRequest {
