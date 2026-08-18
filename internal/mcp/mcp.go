@@ -960,7 +960,7 @@ func (s *Server) callSearchSources(ctx context.Context, id *json.RawMessage, arg
 		Offset: offset,
 	})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "search_sources", RepoID: a.RepoID})
 		return
 	}
 
@@ -997,7 +997,7 @@ func (s *Server) callGetSource(ctx context.Context, id *json.RawMessage, args js
 
 	result, err := s.svc.GetSource(ctx, service.GetSourceRequest{RepoID: a.RepoID, ID: a.ID})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "get_source", RepoID: a.RepoID})
 		return
 	}
 
@@ -1062,7 +1062,7 @@ func (s *Server) callListSources(ctx context.Context, id *json.RawMessage, args 
 		Offset: offset,
 	})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "list_sources", RepoID: a.RepoID})
 		return
 	}
 
@@ -1103,7 +1103,7 @@ func (s *Server) callListChunks(ctx context.Context, id *json.RawMessage, args j
 	}
 	result, err := s.svc.ListChunks(ctx, service.ChunkQuery{RepoID: a.RepoID, SourceID: a.SourceID, RecordID: a.RecordID, SnapshotID: a.SnapshotID, Policy: servicePolicy(a.Policy), Limit: valueOr(a.Limit, 50), Offset: valueOr(a.Offset, 0)})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "list_chunks", RepoID: a.RepoID})
 		return
 	}
 	s.writeChunkToolResult(id, result)
@@ -1116,7 +1116,7 @@ func (s *Server) callSearchChunks(ctx context.Context, id *json.RawMessage, args
 	}
 	result, err := s.svc.SearchChunks(ctx, service.ChunkSearchQuery{ChunkQuery: service.ChunkQuery{RepoID: a.RepoID, SourceID: a.SourceID, RecordID: a.RecordID, SnapshotID: a.SnapshotID, Policy: servicePolicy(a.Policy), Limit: valueOr(a.Limit, 50), Offset: valueOr(a.Offset, 0)}, Query: a.Query})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "search_chunks", RepoID: a.RepoID})
 		return
 	}
 	s.writeChunkToolResult(id, result)
@@ -1136,7 +1136,7 @@ func (s *Server) callGetSnippet(ctx context.Context, id *json.RawMessage, args j
 	}
 	result, err := s.svc.GetChunkSnippet(ctx, query)
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "get_snippet", RepoID: a.RepoID})
 		return
 	}
 	s.writeChunkToolResult(id, result)
@@ -1288,7 +1288,7 @@ func (s *Server) callRecentChanges(ctx context.Context, id *json.RawMessage, arg
 
 	results, err := s.svc.RecentChanges(ctx, service.RecentChangesRequest{RepoID: a.RepoID, Kind: a.Kind, Status: a.Status, Limit: limit, Offset: offset})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "recent_changes", RepoID: a.RepoID})
 		return
 	}
 	text := ""
@@ -1321,7 +1321,7 @@ func (s *Server) callLinkCheck(ctx context.Context, id *json.RawMessage, args js
 	if err != nil {
 		var linkErr service.ErrLinkCheckFailed
 		if !errors.As(err, &linkErr) {
-			s.writeDomainError(id, err)
+			s.writeOperationalError(id, err, domainErrorContext{Operation: "link_check", RepoID: a.RepoID})
 			return
 		}
 	}
@@ -1436,7 +1436,7 @@ func (s *Server) callMaintenancePlan(ctx context.Context, id *json.RawMessage, a
 	}
 	result, err := s.maintenancePlan(ctx, a.request())
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "maintenance_plan", RepoID: a.RepoID})
 		return
 	}
 	text := fmt.Sprintf("maintenance plan=%s status=%s next=%s", result.PlanID, result.Status, result.NextAction)
@@ -1458,7 +1458,7 @@ func (s *Server) callEnableCacheMaintenance(ctx context.Context, id *json.RawMes
 	req.AllowMachineChange = false
 	result, err := s.maintenanceApply(ctx, req)
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "enable_cache_maintenance", RepoID: a.RepoID})
 		return
 	}
 	text := fmt.Sprintf("maintenance status=%s plan=%s next=%s", result.Status, result.PlanID, result.NextAction)
@@ -1521,7 +1521,7 @@ func (s *Server) callRAGStatus(ctx context.Context, id *json.RawMessage, args js
 	serviceStatus, activeJob := lookupMCPRAGServiceState(ctx, a.RepoID)
 	result, err := s.ragStatus(ctx, rag.StatusRequest{RepoID: a.RepoID, ProfileID: a.Profile, Service: serviceStatus, ActiveJob: activeJob})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "rag_status", RepoID: a.RepoID})
 		return
 	}
 	text := fmt.Sprintf("rag_status=%s provider_ready=%t coverage=%d/%d missing=%d stale=%d", result.Status, result.Provider.Ready, result.Coverage.EmbeddedChunks, result.Coverage.TotalChunks, result.Coverage.MissingChunks, result.Coverage.StaleChunks)
@@ -1555,7 +1555,7 @@ func (s *Server) callRAGSearch(ctx context.Context, id *json.RawMessage, args js
 	}
 	result, err := s.ragSearch(ctx, rag.SearchRequest{RepoID: a.RepoID, Query: a.Query, ProfileID: a.Profile, SourceID: a.SourceID, RecordID: a.RecordID, SnapshotID: a.SnapshotID, ChunkPolicyID: a.Policy, TopK: a.TopK, Limit: a.Limit})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "rag_search", RepoID: a.RepoID})
 		return
 	}
 	text := fmt.Sprintf("rag_search=%s results=%d", result.Status, len(result.Results))
@@ -1643,7 +1643,7 @@ func (s *Server) callListPRDiscussions(ctx context.Context, id *json.RawMessage,
 	}
 	result, err := s.svc.ListPRDiscussions(ctx, service.PRDiscussionRequest{RepoID: a.RepoID, Number: a.Number, UnresolvedOnly: a.UnresolvedOnly})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "list_pr_discussions", RepoID: a.RepoID})
 		return
 	}
 	text := fmt.Sprintf("repo_id=%s pr=%d discussions=%d", result.RepoID, result.Number, len(result.Discussions))
@@ -1690,7 +1690,7 @@ func (s *Server) callSourceBacklinks(ctx context.Context, id *json.RawMessage, a
 
 	results, err := s.svc.GetBacklinks(ctx, service.GetBacklinksRequest{RepoID: a.RepoID, ID: a.ID, Limit: limit, Offset: offset})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "source_backlinks", RepoID: a.RepoID})
 		return
 	}
 
@@ -1727,7 +1727,7 @@ func (s *Server) callResolveID(ctx context.Context, id *json.RawMessage, args js
 	}
 	result, err := s.svc.ResolveID(ctx, service.ResolveIDRequest{RepoID: a.RepoID, ID: a.ID})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "resolve_id", RepoID: a.RepoID})
 		return
 	}
 
@@ -1761,7 +1761,7 @@ func (s *Server) callSyncStatus(ctx context.Context, id *json.RawMessage, args j
 	if a.ID == "" {
 		result, err := s.svc.SyncStatus(ctx, service.ListSourcesRequest{RepoID: a.RepoID})
 		if err != nil {
-			s.writeDomainError(id, err)
+			s.writeOperationalError(id, err, domainErrorContext{Operation: "sync_status", RepoID: a.RepoID})
 			return
 		}
 		text := fmt.Sprintf("fresh=%d stale=%d cache_empty=%v", result.FreshCount, result.StaleCount, result.CacheEmpty)
@@ -1777,7 +1777,7 @@ func (s *Server) callSyncStatus(ctx context.Context, id *json.RawMessage, args j
 
 	status, err := s.svc.GetSyncStatus(ctx, service.SyncStatusRequest{RepoID: a.RepoID, ID: a.ID})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "sync_status", RepoID: a.RepoID})
 		return
 	}
 
@@ -1830,7 +1830,7 @@ func (s *Server) callExportSnapshot(ctx context.Context, id *json.RawMessage, ar
 
 	result, err := s.svc.ExportSnapshot(ctx, service.ExportSnapshotRequest{RepoID: a.RepoID, Format: format})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "export_snapshot", RepoID: a.RepoID})
 		return
 	}
 
@@ -1915,7 +1915,7 @@ func (s *Server) callDiffSnapshot(ctx context.Context, id *json.RawMessage, args
 	}
 	result, err := s.svc.DiffSnapshot(ctx, diffReq)
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "diff_snapshot", RepoID: a.RepoID})
 		return
 	}
 
@@ -2098,12 +2098,13 @@ func classifyDomainError(err error, ctx domainErrorContext) *errorData {
 	case service.IsNotFound(err):
 		data.Code = "not_found"
 		data.Message = err.Error()
+		data.Remediation = remediationForRepo("call sync_live for the missing resource or list_sources to inspect cached ids", data.RepoID, "gitcode-mcp sync")
 	case service.IsCacheEmpty(err):
 		data.Code = "cache_empty"
 		data.Message = err.Error()
 		data.Remediation = remediationForRepo("call sync_live for the required collection", data.RepoID, "gitcode-mcp sync")
 	case errors.As(err, &invalid):
-		data.Code = "invalid_query"
+		data.Code = invalid.DiagnosticCode()
 		data.Message = err.Error()
 	case errors.As(err, &repoRequired):
 		data.Code = "repo_required"

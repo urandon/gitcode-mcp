@@ -337,7 +337,7 @@ func (s *Server) callListMilestones(ctx context.Context, id *json.RawMessage, ar
 	}
 	result, err := s.svc.ListMilestones(ctx, service.MilestoneListRequest{RepoID: a.RepoID, Repo: a.RepoID, State: a.State, PerPage: a.PerPage})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "list_milestones", RepoID: a.RepoID})
 		return
 	}
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: fmt.Sprintf("repo_id=%s milestones=%d", result.RepoID, result.Count)}}, StructuredContent: result})
@@ -355,7 +355,7 @@ func (s *Server) callListPushRemoteMirrors(ctx context.Context, id *json.RawMess
 	}
 	result, err := s.svc.ListPushRemoteMirrors(ctx, service.PushMirrorListRequest{RepoID: a.RepoID, Repo: a.RepoID})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "list_push_remote_mirrors", RepoID: a.RepoID})
 		return
 	}
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: fmt.Sprintf("repo_id=%s push_mirrors=%d", result.RepoID, result.Count)}}, StructuredContent: result})
@@ -390,7 +390,7 @@ func (s *Server) callWaitPushRemoteMirror(ctx context.Context, id *json.RawMessa
 	}
 	result, err := s.svc.WaitPushRemoteMirror(ctx, service.PushMirrorWaitRequest{RepoID: a.RepoID, Repo: a.RepoID, MirrorID: a.MirrorID, After: after, TimeoutSeconds: a.TimeoutSeconds})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "wait_push_remote_mirror", RepoID: a.RepoID})
 		return
 	}
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: fmt.Sprintf("repo_id=%s mirror_id=%s status=%s", result.RepoID, result.MirrorID, result.Status)}}, StructuredContent: result})
@@ -553,7 +553,7 @@ func (s *Server) callWriteTool(ctx context.Context, id *json.RawMessage, args js
 	}
 	result, err := handler(ctx, build(a))
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "write", RepoID: a.RepoID})
 		return
 	}
 	text := fmt.Sprintf("status=%s command=%s", result.Status, result.Command)

@@ -358,6 +358,27 @@ func TestMCPOperationalErrorContracts(t *testing.T) {
 		}
 	})
 
+	t.Run("repo-scoped read includes operation and repo", func(t *testing.T) {
+		rpcErr := call(t, NewRPCHandler(base), "get_source", map[string]any{"repo_id": "fixture-a", "id": "MISSING"})
+		if rpcErr.Data.Code != "not_found" || rpcErr.Data.Operation != "get_source" || rpcErr.Data.RepoID != "fixture-a" {
+			t.Fatalf("error=%#v", rpcErr)
+		}
+	})
+
+	t.Run("invalid api base keeps specialized diagnostic code", func(t *testing.T) {
+		var out bytes.Buffer
+		id := json.RawMessage(`"invalid-api-base"`)
+		srv := &Server{writer: &out, stderr: io.Discard}
+		srv.writeOperationalError(&id, service.ErrInvalidQuery{Field: "api_base_url", Message: "invalid live endpoint"}, domainErrorContext{Operation: "sync_live", RepoID: "fixture-a"})
+		var resp response
+		if err := json.Unmarshal(bytesTrimSpace(out.Bytes()), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp.Error == nil || resp.Error.Data == nil || resp.Error.Data.Code != "invalid_api_base_url" || resp.Error.Data.FailureClass != "invalid_api_base_url" || resp.Error.Data.RepoID != "fixture-a" {
+			t.Fatalf("response=%s", out.Bytes())
+		}
+	})
+
 	t.Run("stale_index_report schema blocked", func(t *testing.T) {
 		compat := cache.VersionCompatibility{DetectedVersion: 99, ExpectedVersion: cache.CurrentSchemaVersion(), Remediation: "run a supported cache migration"}
 		svc := &operationalErrorService{serviceInterface: base, staleIndexErr: &cache.SchemaVersionError{Compat: compat}}
