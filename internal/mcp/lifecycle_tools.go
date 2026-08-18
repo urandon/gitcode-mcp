@@ -51,7 +51,7 @@ func (s *Server) callRepoStatus(ctx context.Context, id *json.RawMessage, args j
 			s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: "binding_state=nothing_bound"}}, StructuredContent: result})
 			return
 		}
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "repo_status", RepoID: a.RepoID})
 		return
 	}
 	result := repoStatusResult{RepoID: status.RepoID, BindingState: status.BindingState, Status: &status}
@@ -142,12 +142,12 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 		}
 		client, err := serviceRPCClient()
 		if err != nil {
-			s.writeDomainError(id, err)
+			s.writeOperationalError(id, err, domainErrorContext{Operation: "sync_live", RepoID: a.RepoID, Subsystem: "service"})
 			return
 		}
 		var job servicectl.Job
 		if err := client.Call(ctx, "Jobs.StartSync", syncLiveJobRequest(a, commentSelection), &job); err != nil {
-			s.writeDomainError(id, err)
+			s.writeOperationalError(id, err, domainErrorContext{Operation: "sync_live", RepoID: a.RepoID, Subsystem: "service"})
 			return
 		}
 		result.Job = &job
@@ -191,7 +191,7 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 		}
 		syncResult, err := s.svc.SyncToCache(ctx, service.SyncRequest{RepoID: a.RepoID, RemoteAlias: strings.TrimSpace(a.RemoteAlias), IdempotencyKey: key})
 		if err != nil {
-			s.writeDomainError(id, err)
+			s.writeOperationalError(id, err, domainErrorContext{Operation: "sync_live", RepoID: a.RepoID})
 			return
 		}
 		result.Results = append(result.Results, syncResult)
@@ -477,7 +477,7 @@ func (s *Server) callIndexRepo(ctx context.Context, id *json.RawMessage, args js
 	}
 	result, err := s.svc.Index(ctx, service.OperationRequest{RepoID: a.RepoID, Mode: mode, Strict: a.Strict})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "index_repo", RepoID: a.RepoID})
 		return
 	}
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: fmt.Sprintf("index status=%s processed=%d", result.Status, result.ProcessedCount)}}, StructuredContent: result})

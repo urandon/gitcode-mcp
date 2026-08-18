@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -324,6 +325,138 @@ func TestMCPErrorOutputCanonicalFailureClass(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMCPOperationalErrorContracts(t *testing.T) {
+	ctx := context.Background()
+	store := populatedStore(t)
+	defer store.Close()
+	base := service.New(store)
+
+	call := func(t *testing.T, handler *RPCHandler, name string, arguments map[string]any) *rpcError {
+		t.Helper()
+		params, err := json.Marshal(map[string]any{"name": name, "arguments": arguments})
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := json.RawMessage(`"operational-error"`)
+		raw := json.RawMessage(params)
+		resp, ok := handler.Handle(ctx, request{JSONRPC: "2.0", ID: &id, Method: "tools/call", Params: &raw})
+		if !ok || resp == nil || resp.Error == nil || resp.Error.Data == nil {
+			t.Fatalf("response=%#v ok=%t", resp, ok)
+		}
+		if resp.Error.Code != -32000 || resp.Error.Message == "Server error" || resp.Error.Data.FailureClass == "" || resp.Error.Data.Remediation == "" {
+			t.Fatalf("error contract=%#v", resp.Error)
+		}
+		return resp.Error
+	}
+
+	t.Run("cache_status missing binding", func(t *testing.T) {
+		rpcErr := call(t, NewRPCHandler(base), "cache_status", map[string]any{"repo_id": "missing/repo"})
+		if rpcErr.Data.Code != "missing_repository_binding" || rpcErr.Data.FailureClass != "missing_repository_binding" || rpcErr.Data.Operation != "cache_status" || rpcErr.Data.RepoID != "missing/repo" {
+			t.Fatalf("error=%#v", rpcErr)
+		}
+	})
+
+	t.Run("repo-scoped read includes operation and repo", func(t *testing.T) {
+		rpcErr := call(t, NewRPCHandler(base), "get_source", map[string]any{"repo_id": "fixture-a", "id": "MISSING"})
+		if rpcErr.Data.Code != "not_found" || rpcErr.Data.Operation != "get_source" || rpcErr.Data.RepoID != "fixture-a" {
+			t.Fatalf("error=%#v", rpcErr)
+		}
+	})
+
+	t.Run("invalid api base keeps specialized diagnostic code", func(t *testing.T) {
+		var out bytes.Buffer
+		id := json.RawMessage(`"invalid-api-base"`)
+		srv := &Server{writer: &out, stderr: io.Discard}
+		srv.writeOperationalError(&id, service.ErrInvalidQuery{Field: "api_base_url", Message: "invalid live endpoint"}, domainErrorContext{Operation: "sync_live", RepoID: "fixture-a"})
+		var resp response
+		if err := json.Unmarshal(bytesTrimSpace(out.Bytes()), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp.Error == nil || resp.Error.Data == nil || resp.Error.Data.Code != "invalid_api_base_url" || resp.Error.Data.FailureClass != "invalid_api_base_url" || resp.Error.Data.RepoID != "fixture-a" {
+			t.Fatalf("response=%s", out.Bytes())
+		}
+	})
+
+	t.Run("stale_index_report schema blocked", func(t *testing.T) {
+		compat := cache.VersionCompatibility{DetectedVersion: 99, ExpectedVersion: cache.CurrentSchemaVersion(), Remediation: "run a supported cache migration"}
+		svc := &operationalErrorService{serviceInterface: base, staleIndexErr: &cache.SchemaVersionError{Compat: compat}}
+		rpcErr := call(t, NewRPCHandler(svc), "stale_index_report", map[string]any{"repo_id": "fixture-a"})
+		if rpcErr.Data.Code != "cache_schema_blocked" || rpcErr.Data.FailureClass != "cache_schema_blocked" || rpcErr.Data.Operation != "stale_index_report" || !strings.Contains(rpcErr.Data.Message, "detected=99") {
+			t.Fatalf("error=%#v", rpcErr)
+		}
+	})
+
+	t.Run("cache_status corruption is sanitized", func(t *testing.T) {
+		svc := &operationalErrorService{serviceInterface: base, cacheStatusErr: cache.ErrCacheCorruption{Path: "/secret/cache.db", Detail: "credential-shaped detail"}}
+		rpcErr := call(t, NewRPCHandler(svc), "cache_status", map[string]any{"repo_id": "fixture-a"})
+		raw, _ := json.Marshal(rpcErr)
+		if rpcErr.Data.Code != "cache_corruption" || rpcErr.Data.FailureClass != "cache_corruption" || bytes.Contains(raw, []byte("/secret/cache.db")) || bytes.Contains(raw, []byte("credential-shaped")) {
+			t.Fatalf("error=%s", raw)
+		}
+	})
+
+	t.Run("service_status unavailable is sanitized", func(t *testing.T) {
+		var out bytes.Buffer
+		id := json.RawMessage(`"service-status"`)
+		srv := &Server{writer: &out, stderr: io.Discard, serviceClient: func() (*servicectl.RPCClient, error) {
+			return nil, &net.OpError{Op: "dial", Net: "unix", Err: errors.New("/secret/service.sock")}
+		}}
+		srv.callServiceStatus(ctx, &id, json.RawMessage(`{}`))
+		var resp response
+		if err := json.Unmarshal(bytesTrimSpace(out.Bytes()), &resp); err != nil {
+			t.Fatal(err)
+		}
+		raw := out.Bytes()
+		if resp.Error == nil || resp.Error.Data == nil || resp.Error.Data.Code != "service_unavailable" || resp.Error.Data.FailureClass != "service_unavailable" || resp.Error.Data.Operation != "service_status" || bytes.Contains(raw, []byte("/secret/service.sock")) {
+			t.Fatalf("response=%s", raw)
+		}
+	})
+
+	t.Run("service_jobs preserves typed RPC code", func(t *testing.T) {
+		var out bytes.Buffer
+		id := json.RawMessage(`"service-jobs"`)
+		srv := &Server{writer: &out, stderr: io.Discard, serviceClient: func() (*servicectl.RPCClient, error) {
+			return nil, servicectl.RPCDomainError{Code: "job_store_unavailable", Message: "job store unavailable"}
+		}}
+		srv.callServiceJobs(ctx, &id, json.RawMessage(`{}`))
+		var resp response
+		if err := json.Unmarshal(bytesTrimSpace(out.Bytes()), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp.Error == nil || resp.Error.Data == nil || resp.Error.Data.Code != "job_store_unavailable" || resp.Error.Data.FailureClass != "job_store_unavailable" || resp.Error.Data.Operation != "service_jobs" {
+			t.Fatalf("response=%s", out.Bytes())
+		}
+	})
+
+	t.Run("unknown failure is internal error, not sync required", func(t *testing.T) {
+		var out bytes.Buffer
+		id := json.RawMessage(`"unknown"`)
+		srv := &Server{writer: &out, stderr: io.Discard}
+		srv.writeDomainError(&id, errors.New("private implementation detail"))
+		var resp response
+		if err := json.Unmarshal(bytesTrimSpace(out.Bytes()), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp.Error == nil || resp.Error.Data == nil || resp.Error.Data.Code != "internal_error" || resp.Error.Data.FailureClass != "internal_error" || strings.Contains(out.String(), "sync_required") || strings.Contains(out.String(), "private implementation detail") {
+			t.Fatalf("response=%s", out.Bytes())
+		}
+	})
+}
+
+type operationalErrorService struct {
+	serviceInterface
+	cacheStatusErr error
+	staleIndexErr  error
+}
+
+func (s *operationalErrorService) CacheStatus(context.Context, service.CacheStatusRequest) (service.CacheStatusResult, error) {
+	return service.CacheStatusResult{}, s.cacheStatusErr
+}
+
+func (s *operationalErrorService) StaleIndex(context.Context, service.StaleIndexRequest) (service.StaleIndexResult, error) {
+	return service.StaleIndexResult{}, s.staleIndexErr
 }
 
 func TestMCPParentPRNotCachedIncludesTargetedRemediation(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -105,6 +106,7 @@ type Server struct {
 	ragSearch          RAGSearchProvider
 	maintenancePlan    MaintenancePlanProvider
 	maintenanceApply   MaintenanceApplyProvider
+	serviceClient      func() (*servicectl.RPCClient, error)
 }
 
 type RAGStatusProvider func(context.Context, rag.StatusRequest) (rag.StatusResult, error)
@@ -958,7 +960,7 @@ func (s *Server) callSearchSources(ctx context.Context, id *json.RawMessage, arg
 		Offset: offset,
 	})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "search_sources", RepoID: a.RepoID})
 		return
 	}
 
@@ -995,7 +997,7 @@ func (s *Server) callGetSource(ctx context.Context, id *json.RawMessage, args js
 
 	result, err := s.svc.GetSource(ctx, service.GetSourceRequest{RepoID: a.RepoID, ID: a.ID})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "get_source", RepoID: a.RepoID})
 		return
 	}
 
@@ -1060,7 +1062,7 @@ func (s *Server) callListSources(ctx context.Context, id *json.RawMessage, args 
 		Offset: offset,
 	})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "list_sources", RepoID: a.RepoID})
 		return
 	}
 
@@ -1101,7 +1103,7 @@ func (s *Server) callListChunks(ctx context.Context, id *json.RawMessage, args j
 	}
 	result, err := s.svc.ListChunks(ctx, service.ChunkQuery{RepoID: a.RepoID, SourceID: a.SourceID, RecordID: a.RecordID, SnapshotID: a.SnapshotID, Policy: servicePolicy(a.Policy), Limit: valueOr(a.Limit, 50), Offset: valueOr(a.Offset, 0)})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "list_chunks", RepoID: a.RepoID})
 		return
 	}
 	s.writeChunkToolResult(id, result)
@@ -1114,7 +1116,7 @@ func (s *Server) callSearchChunks(ctx context.Context, id *json.RawMessage, args
 	}
 	result, err := s.svc.SearchChunks(ctx, service.ChunkSearchQuery{ChunkQuery: service.ChunkQuery{RepoID: a.RepoID, SourceID: a.SourceID, RecordID: a.RecordID, SnapshotID: a.SnapshotID, Policy: servicePolicy(a.Policy), Limit: valueOr(a.Limit, 50), Offset: valueOr(a.Offset, 0)}, Query: a.Query})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "search_chunks", RepoID: a.RepoID})
 		return
 	}
 	s.writeChunkToolResult(id, result)
@@ -1134,7 +1136,7 @@ func (s *Server) callGetSnippet(ctx context.Context, id *json.RawMessage, args j
 	}
 	result, err := s.svc.GetChunkSnippet(ctx, query)
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "get_snippet", RepoID: a.RepoID})
 		return
 	}
 	s.writeChunkToolResult(id, result)
@@ -1240,7 +1242,7 @@ func (s *Server) callStaleIndexReport(ctx context.Context, id *json.RawMessage, 
 	if err != nil {
 		var staleErr service.ErrStaleIndex
 		if !errors.As(err, &staleErr) {
-			s.writeDomainError(id, err)
+			s.writeOperationalError(id, err, domainErrorContext{Operation: "stale_index_report", RepoID: a.RepoID, Subsystem: "cache"})
 			return
 		}
 	}
@@ -1286,7 +1288,7 @@ func (s *Server) callRecentChanges(ctx context.Context, id *json.RawMessage, arg
 
 	results, err := s.svc.RecentChanges(ctx, service.RecentChangesRequest{RepoID: a.RepoID, Kind: a.Kind, Status: a.Status, Limit: limit, Offset: offset})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "recent_changes", RepoID: a.RepoID})
 		return
 	}
 	text := ""
@@ -1319,7 +1321,7 @@ func (s *Server) callLinkCheck(ctx context.Context, id *json.RawMessage, args js
 	if err != nil {
 		var linkErr service.ErrLinkCheckFailed
 		if !errors.As(err, &linkErr) {
-			s.writeDomainError(id, err)
+			s.writeOperationalError(id, err, domainErrorContext{Operation: "link_check", RepoID: a.RepoID})
 			return
 		}
 	}
@@ -1346,7 +1348,7 @@ func (s *Server) callCacheStatus(ctx context.Context, id *json.RawMessage, args 
 	}
 	result, err := s.svc.CacheStatus(ctx, service.CacheStatusRequest{RepoID: a.RepoID})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "cache_status", RepoID: a.RepoID, Subsystem: "cache"})
 		return
 	}
 	text := fmt.Sprintf("repo_id=%s records=%d chunks=%d journal=%s", result.RepoID, result.Records, result.Chunks, result.JournalMode)
@@ -1375,14 +1377,14 @@ type ragSearchArgs struct {
 }
 
 func (s *Server) callServiceStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
-	client, err := serviceRPCClient()
+	client, err := s.localServiceClient()
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "service_status", Subsystem: "service"})
 		return
 	}
 	var result servicectl.Status
 	if err := client.Call(ctx, "Service.Status", nil, &result); err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "service_status", Subsystem: "service"})
 		return
 	}
 	text := fmt.Sprintf("service status=%s running=%t", result.Status, result.Running)
@@ -1434,7 +1436,7 @@ func (s *Server) callMaintenancePlan(ctx context.Context, id *json.RawMessage, a
 	}
 	result, err := s.maintenancePlan(ctx, a.request())
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "maintenance_plan", RepoID: a.RepoID})
 		return
 	}
 	text := fmt.Sprintf("maintenance plan=%s status=%s next=%s", result.PlanID, result.Status, result.NextAction)
@@ -1456,7 +1458,7 @@ func (s *Server) callEnableCacheMaintenance(ctx context.Context, id *json.RawMes
 	req.AllowMachineChange = false
 	result, err := s.maintenanceApply(ctx, req)
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "enable_cache_maintenance", RepoID: a.RepoID})
 		return
 	}
 	text := fmt.Sprintf("maintenance status=%s plan=%s next=%s", result.Status, result.PlanID, result.NextAction)
@@ -1464,14 +1466,14 @@ func (s *Server) callEnableCacheMaintenance(ctx context.Context, id *json.RawMes
 }
 
 func (s *Server) callServiceJobs(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
-	client, err := serviceRPCClient()
+	client, err := s.localServiceClient()
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "service_jobs", Subsystem: "service"})
 		return
 	}
 	var result servicectl.JobListResult
 	if err := client.Call(ctx, "Jobs.List", nil, &result); err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "service_jobs", Subsystem: "service"})
 		return
 	}
 	text := fmt.Sprintf("jobs=%d", len(result.Jobs))
@@ -1488,14 +1490,14 @@ func (s *Server) callServiceJobStatus(ctx context.Context, id *json.RawMessage, 
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "job_id is required"})
 		return
 	}
-	client, err := serviceRPCClient()
+	client, err := s.localServiceClient()
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "service_job_status", Subsystem: "service"})
 		return
 	}
 	var result servicectl.Job
 	if err := client.Call(ctx, "Jobs.Get", map[string]string{"job_id": a.JobID}, &result); err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "service_job_status", Subsystem: "service"})
 		return
 	}
 	text := fmt.Sprintf("job_id=%s status=%s completed=%d/%d", result.ID, result.Status, result.Completed, result.Steps)
@@ -1519,7 +1521,7 @@ func (s *Server) callRAGStatus(ctx context.Context, id *json.RawMessage, args js
 	serviceStatus, activeJob := lookupMCPRAGServiceState(ctx, a.RepoID)
 	result, err := s.ragStatus(ctx, rag.StatusRequest{RepoID: a.RepoID, ProfileID: a.Profile, Service: serviceStatus, ActiveJob: activeJob})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "rag_status", RepoID: a.RepoID})
 		return
 	}
 	text := fmt.Sprintf("rag_status=%s provider_ready=%t coverage=%d/%d missing=%d stale=%d", result.Status, result.Provider.Ready, result.Coverage.EmbeddedChunks, result.Coverage.TotalChunks, result.Coverage.MissingChunks, result.Coverage.StaleChunks)
@@ -1553,7 +1555,7 @@ func (s *Server) callRAGSearch(ctx context.Context, id *json.RawMessage, args js
 	}
 	result, err := s.ragSearch(ctx, rag.SearchRequest{RepoID: a.RepoID, Query: a.Query, ProfileID: a.Profile, SourceID: a.SourceID, RecordID: a.RecordID, SnapshotID: a.SnapshotID, ChunkPolicyID: a.Policy, TopK: a.TopK, Limit: a.Limit})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "rag_search", RepoID: a.RepoID})
 		return
 	}
 	text := fmt.Sprintf("rag_search=%s results=%d", result.Status, len(result.Results))
@@ -1612,6 +1614,13 @@ func serviceRPCClient() (*servicectl.RPCClient, error) {
 	return servicectl.Manager{Source: config.OSSource{}}.Client()
 }
 
+func (s *Server) localServiceClient() (*servicectl.RPCClient, error) {
+	if s.serviceClient != nil {
+		return s.serviceClient()
+	}
+	return serviceRPCClient()
+}
+
 type listPRDiscussionsArgs struct {
 	RepoID         string `json:"repo_id"`
 	Number         int    `json:"number"`
@@ -1634,7 +1643,7 @@ func (s *Server) callListPRDiscussions(ctx context.Context, id *json.RawMessage,
 	}
 	result, err := s.svc.ListPRDiscussions(ctx, service.PRDiscussionRequest{RepoID: a.RepoID, Number: a.Number, UnresolvedOnly: a.UnresolvedOnly})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "list_pr_discussions", RepoID: a.RepoID})
 		return
 	}
 	text := fmt.Sprintf("repo_id=%s pr=%d discussions=%d", result.RepoID, result.Number, len(result.Discussions))
@@ -1681,7 +1690,7 @@ func (s *Server) callSourceBacklinks(ctx context.Context, id *json.RawMessage, a
 
 	results, err := s.svc.GetBacklinks(ctx, service.GetBacklinksRequest{RepoID: a.RepoID, ID: a.ID, Limit: limit, Offset: offset})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "source_backlinks", RepoID: a.RepoID})
 		return
 	}
 
@@ -1718,7 +1727,7 @@ func (s *Server) callResolveID(ctx context.Context, id *json.RawMessage, args js
 	}
 	result, err := s.svc.ResolveID(ctx, service.ResolveIDRequest{RepoID: a.RepoID, ID: a.ID})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "resolve_id", RepoID: a.RepoID})
 		return
 	}
 
@@ -1752,7 +1761,7 @@ func (s *Server) callSyncStatus(ctx context.Context, id *json.RawMessage, args j
 	if a.ID == "" {
 		result, err := s.svc.SyncStatus(ctx, service.ListSourcesRequest{RepoID: a.RepoID})
 		if err != nil {
-			s.writeDomainError(id, err)
+			s.writeOperationalError(id, err, domainErrorContext{Operation: "sync_status", RepoID: a.RepoID})
 			return
 		}
 		text := fmt.Sprintf("fresh=%d stale=%d cache_empty=%v", result.FreshCount, result.StaleCount, result.CacheEmpty)
@@ -1768,7 +1777,7 @@ func (s *Server) callSyncStatus(ctx context.Context, id *json.RawMessage, args j
 
 	status, err := s.svc.GetSyncStatus(ctx, service.SyncStatusRequest{RepoID: a.RepoID, ID: a.ID})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "sync_status", RepoID: a.RepoID})
 		return
 	}
 
@@ -1821,7 +1830,7 @@ func (s *Server) callExportSnapshot(ctx context.Context, id *json.RawMessage, ar
 
 	result, err := s.svc.ExportSnapshot(ctx, service.ExportSnapshotRequest{RepoID: a.RepoID, Format: format})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "export_snapshot", RepoID: a.RepoID})
 		return
 	}
 
@@ -1906,7 +1915,7 @@ func (s *Server) callDiffSnapshot(ctx context.Context, id *json.RawMessage, args
 	}
 	result, err := s.svc.DiffSnapshot(ctx, diffReq)
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "diff_snapshot", RepoID: a.RepoID})
 		return
 	}
 
@@ -2036,51 +2045,188 @@ func mcpDiagnostic(err error) (diagnostics.Diagnostic, bool) {
 	return diagnostics.Diagnostic{}, false
 }
 
+type domainErrorContext struct {
+	Operation string
+	RepoID    string
+	Subsystem string
+}
+
 func (s *Server) writeDomainError(id *json.RawMessage, err error) {
-	var data *errorData
+	s.writeOperationalError(id, err, domainErrorContext{})
+}
+
+func (s *Server) writeOperationalError(id *json.RawMessage, err error, ctx domainErrorContext) {
+	data := classifyDomainError(err, ctx)
 	diagnostic, hasDiagnostic := mcpDiagnostic(err)
-	switch {
-	case service.IsNotFound(err):
-		data = &errorData{Code: "not_found", Message: err.Error()}
-	case service.IsCacheEmpty(err):
-		data = &errorData{Code: "cache_empty", Message: err.Error()}
-	default:
-		var invalid service.ErrInvalidQuery
-		var repoRequired service.ErrRepoRequired
-		var staleErr service.ErrStaleIndex
-		var linkErr service.ErrLinkCheckFailed
-		var lockErr cache.ErrLockContention
-		var writeErr service.ErrWriteFailure
-		var parentMissing service.ErrParentPRNotCached
-		switch {
-		case errors.As(err, &invalid):
-			data = &errorData{Code: "invalid_query", Message: err.Error()}
-		case errors.As(err, &repoRequired):
-			data = &errorData{Code: "repo_required", Message: err.Error()}
-		case errors.As(err, &staleErr):
-			data = &errorData{Code: "stale_index", Message: err.Error()}
-		case errors.As(err, &linkErr):
-			data = &errorData{Code: "link_check_failed", Message: err.Error()}
-		case errors.As(err, &lockErr):
-			data = cacheLockErrorData(lockErr, err.Error())
-		case errors.As(err, &parentMissing):
-			data = &errorData{
-				Code:        parentMissing.DiagnosticCode(),
-				Message:     parentMissing.Error(),
-				RepoID:      parentMissing.RepoID,
-				Remediation: fmt.Sprintf("call sync_live with repo_id=%q, pulls=true, remote_alias=%q; CLI fallback: %s", parentMissing.RepoID, fmt.Sprintf("pr:%d", parentMissing.Number), parentMissing.Remediation()),
-			}
-		case errors.As(err, &writeErr) && writeErr.Code == "discussion_reply_unavailable":
-			data = &errorData{Code: "discussion_reply_unavailable", Message: err.Error()}
-		default:
-			data = &errorData{Code: "sync_required", Message: err.Error()}
+	if hasDiagnostic {
+		data.FailureClass = string(diagnostic.Code)
+		if data.Code == "internal_error" {
+			data.Code = string(diagnostic.Code)
+			data.Message = diagnostic.Message
 		}
 	}
-	if hasDiagnostic && data != nil {
-		data.FailureClass = string(diagnostic.Code)
+	if data.FailureClass == "" {
+		data.FailureClass = data.Code
 	}
+	if data.Operation == "" {
+		data.Operation = strings.TrimSpace(ctx.Operation)
+	}
+	if data.RepoID == "" {
+		data.RepoID = strings.TrimSpace(ctx.RepoID)
+	}
+	s.writeError(id, -32000, domainErrorTitle(data.Code), data)
+}
 
-	s.writeError(id, -32000, "Server error", data)
+func classifyDomainError(err error, ctx domainErrorContext) *errorData {
+	data := &errorData{Operation: strings.TrimSpace(ctx.Operation), RepoID: strings.TrimSpace(ctx.RepoID)}
+	var notFound service.ErrNotFound
+	var invalid service.ErrInvalidQuery
+	var repoRequired service.ErrRepoRequired
+	var staleErr service.ErrStaleIndex
+	var linkErr service.ErrLinkCheckFailed
+	var lockErr cache.ErrLockContention
+	var corruption cache.ErrCacheCorruption
+	var schemaErr *cache.SchemaVersionError
+	var parentMissing service.ErrParentPRNotCached
+	var rpcErr servicectl.RPCDomainError
+
+	switch {
+	case errors.As(err, &notFound) && notFound.Kind == "repository":
+		data.Code = "missing_repository_binding"
+		data.Message = fmt.Sprintf("repository binding %q is not configured", firstNonEmpty(data.RepoID, notFound.ID))
+		data.Remediation = fmt.Sprintf("call repo_status with repo_id=%q; CLI fallback: gitcode-mcp doctor --repo %q --format json", firstNonEmpty(data.RepoID, notFound.ID), firstNonEmpty(data.RepoID, notFound.ID))
+	case service.IsNotFound(err):
+		data.Code = "not_found"
+		data.Message = err.Error()
+		data.Remediation = remediationForRepo("call sync_live for the missing resource or list_sources to inspect cached ids", data.RepoID, "gitcode-mcp sync")
+	case service.IsCacheEmpty(err):
+		data.Code = "cache_empty"
+		data.Message = err.Error()
+		data.Remediation = remediationForRepo("call sync_live for the required collection", data.RepoID, "gitcode-mcp sync")
+	case errors.As(err, &invalid):
+		data.Code = invalid.DiagnosticCode()
+		data.Message = err.Error()
+	case errors.As(err, &repoRequired):
+		data.Code = "repo_required"
+		data.Message = err.Error()
+	case errors.As(err, &staleErr):
+		data.Code = "stale_index"
+		data.Message = err.Error()
+		data.Remediation = remediationForRepo("call index_repo", data.RepoID, "gitcode-mcp index")
+	case errors.As(err, &linkErr):
+		data.Code = "link_check_failed"
+		data.Message = err.Error()
+	case errors.As(err, &lockErr):
+		data = cacheLockErrorData(lockErr, err.Error())
+		if data.Remediation == "" {
+			data.Remediation = "retry after the current cache writer completes; CLI fallback: gitcode-mcp doctor --format json"
+		}
+	case errors.As(err, &schemaErr):
+		data.Code = "cache_schema_blocked"
+		data.Message = fmt.Sprintf("cache schema is incompatible: detected=%d expected=%d", schemaErr.Compat.DetectedVersion, schemaErr.Compat.ExpectedVersion)
+		data.Remediation = firstNonEmpty(schemaErr.Compat.Remediation, "run gitcode-mcp migrate-cache, review the plan, then rerun with --confirm")
+	case errors.As(err, &corruption):
+		data.Code = "cache_corruption"
+		data.Message = "cache integrity validation failed"
+		data.Remediation = "run gitcode-mcp doctor --format json; restore the cache or rebuild it with sync"
+	case errors.As(err, &parentMissing):
+		data.Code = parentMissing.DiagnosticCode()
+		data.Message = parentMissing.Error()
+		data.RepoID = parentMissing.RepoID
+		data.Remediation = fmt.Sprintf("call sync_live with repo_id=%q, pulls=true, remote_alias=%q; CLI fallback: %s", parentMissing.RepoID, fmt.Sprintf("pr:%d", parentMissing.Number), parentMissing.Remediation())
+	case errors.As(err, &rpcErr) && strings.TrimSpace(rpcErr.Code) != "":
+		data.Code = strings.TrimSpace(rpcErr.Code)
+		data.Message = fmt.Sprintf("local service reported %s", data.Code)
+		data.Remediation = serviceRemediation(ctx.Operation)
+	case errors.Is(err, context.DeadlineExceeded):
+		data.Code = "operation_timeout"
+		data.Message = "the operation exceeded its deadline"
+		if ctx.Subsystem == "service" {
+			data.Remediation = serviceRemediation(ctx.Operation)
+		} else {
+			data.Remediation = remediationForRepo("retry the operation", data.RepoID, "gitcode-mcp doctor")
+		}
+	case errors.Is(err, context.Canceled):
+		data.Code = "operation_cancelled"
+		data.Message = "the operation was cancelled"
+		data.Remediation = "retry only if the caller still needs the result"
+	case ctx.Subsystem == "service" && isServiceUnavailableError(err):
+		data.Code = "service_unavailable"
+		data.Message = "local gitcode-mcp service is unavailable"
+		data.Remediation = serviceRemediation(ctx.Operation)
+	default:
+		var coded interface{ DiagnosticCode() string }
+		if errors.As(err, &coded) && strings.TrimSpace(coded.DiagnosticCode()) != "" {
+			data.Code = strings.TrimSpace(coded.DiagnosticCode())
+			data.Message = err.Error()
+		} else if ctx.Subsystem == "cache" {
+			data.Code = "cache_unavailable"
+			data.Message = "the selected cache could not complete the operation"
+			data.Remediation = remediationForRepo("call doctor", data.RepoID, "gitcode-mcp doctor")
+		} else if ctx.Subsystem == "service" {
+			data.Code = "service_operation_failed"
+			data.Message = "the local service rejected or could not complete the operation"
+			data.Remediation = serviceRemediation(ctx.Operation)
+		} else {
+			data.Code = "internal_error"
+			data.Message = "the operation failed without a recognized public-safe diagnostic"
+			data.Remediation = "call doctor; CLI fallback: gitcode-mcp doctor --format json"
+		}
+	}
+	return data
+}
+
+func domainErrorTitle(code string) string {
+	switch code {
+	case "missing_repository_binding":
+		return "Repository binding unavailable"
+	case "cache_empty", "cache_busy", "cache_owned", "cache_schema_blocked", "cache_corruption", "cache_unavailable", "migration_blocked":
+		return "Cache operation failed"
+	case "service_unavailable":
+		return "Local service unavailable"
+	case "service_operation_failed":
+		return "Local service operation failed"
+	case "invalid_query", "repo_required":
+		return "Invalid request"
+	case "not_found":
+		return "Resource not found"
+	default:
+		return "Operation failed"
+	}
+}
+
+func remediationForRepo(mcpAction, repoID, cliCommand string) string {
+	if strings.TrimSpace(repoID) == "" {
+		return fmt.Sprintf("%s; CLI fallback: %s", mcpAction, cliCommand)
+	}
+	return fmt.Sprintf("%s with repo_id=%q; CLI fallback: %s --repo %q", mcpAction, repoID, cliCommand, repoID)
+}
+
+func serviceRemediation(operation string) string {
+	if strings.TrimSpace(operation) == "service_status" {
+		return "CLI fallback: gitcode-mcp service status --format json; if stopped, run gitcode-mcp service start"
+	}
+	return "call service_status; CLI fallback: gitcode-mcp service status --format json; if stopped, run gitcode-mcp service start"
+}
+
+func isServiceUnavailableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	return errors.Is(err, io.EOF) || strings.Contains(err.Error(), "service memory endpoint not found") || strings.Contains(err.Error(), "service address is required")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func LockContentionReadiness(err cache.ErrLockContention) Readiness {
