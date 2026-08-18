@@ -2,6 +2,7 @@ package service
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 
 	"gitcode-mcp/internal/cache"
@@ -16,13 +17,37 @@ func nullableLine(line int) *int {
 }
 
 func sourceSummary(source cache.Source) SourceSummary {
-	return SourceSummary{RepoID: source.RepoID, ID: source.ID, Path: source.Path, RemoteAlias: remoteAlias(source.Aliases), Kind: source.Kind, Title: source.Title, Status: source.Status, Provenance: string(source.Provenance), UpdatedAt: source.UpdatedAt.UTC()}
+	stableID, issueNumber := sourceIssueIdentity(source)
+	return SourceSummary{RepoID: source.RepoID, ID: source.ID, StableSourceID: stableID, IssueNumber: issueNumber, Path: source.Path, RemoteAlias: remoteAlias(source.Aliases), Kind: source.Kind, Title: source.Title, Status: source.Status, Provenance: string(source.Provenance), UpdatedAt: source.UpdatedAt.UTC()}
 }
 
 func sourceRecord(source cache.Source, links []cache.Link, backlinks []BacklinkResult) SourceRecord {
 	labels := append([]string(nil), source.Labels...)
 	sort.Strings(labels)
-	return SourceRecord{RepoID: source.RepoID, ID: source.ID, Path: source.Path, RemoteAlias: remoteAlias(source.Aliases), Kind: source.Kind, Title: source.Title, Body: source.Body, Status: source.Status, Provenance: string(source.Provenance), Labels: labels, Links: linkResults(links), Backlinks: backlinks, UpdatedAt: source.UpdatedAt.UTC()}
+	stableID, issueNumber := sourceIssueIdentity(source)
+	return SourceRecord{RepoID: source.RepoID, ID: source.ID, StableSourceID: stableID, IssueNumber: issueNumber, Path: source.Path, RemoteAlias: remoteAlias(source.Aliases), Kind: source.Kind, Title: source.Title, Body: source.Body, Status: source.Status, Provenance: string(source.Provenance), Labels: labels, Links: linkResults(links), Backlinks: backlinks, UpdatedAt: source.UpdatedAt.UTC()}
+}
+
+func sourceIssueIdentity(source cache.Source) (string, int) {
+	stableID := source.ID
+	if source.Kind != "issue" && source.Kind != "issues" {
+		return stableID, 0
+	}
+	for _, alias := range source.Aliases {
+		aliasType := strings.TrimSpace(alias.Remote.Type)
+		aliasID := strings.TrimSpace(alias.Remote.ID)
+		if aliasType == "" {
+			aliasType = strings.TrimSpace(alias.AliasType)
+			aliasID = strings.TrimSpace(alias.Alias)
+		}
+		if aliasType != "issue" {
+			continue
+		}
+		if number, err := strconv.Atoi(aliasID); err == nil && number > 0 {
+			return stableID, number
+		}
+	}
+	return stableID, 0
 }
 
 func linkResults(links []cache.Link) []LinkResult {

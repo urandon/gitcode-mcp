@@ -51,6 +51,29 @@ func TestIssueUpdateStateSchemaUsesPublicValues(t *testing.T) {
 	}
 }
 
+func TestIssueWriteSchemasDistinguishNumberFromStableID(t *testing.T) {
+	for _, name := range []string{"add_issue_comment", "update_issue_comment", "update_issue", "set_issue_milestone", "clear_issue_milestone", "link_pr_issue", "add_label"} {
+		schema := writeToolInputSchema(name)
+		issueID, ok := schema.Properties["issue_id"]
+		if !ok || issueID.Type != "string" || !strings.Contains(issueID.Description, "Stable source id") {
+			t.Fatalf("%s issue_id schema=%#v present=%t", name, issueID, ok)
+		}
+		numberName := "number"
+		if name == "link_pr_issue" {
+			numberName = "issue_number"
+		}
+		number, ok := schema.Properties[numberName]
+		if !ok || !strings.Contains(number.Description, "Repository-local") || !strings.Contains(number.Description, "never use a provider id") {
+			t.Fatalf("%s %s schema=%#v present=%t", name, numberName, number, ok)
+		}
+		for _, required := range schema.Required {
+			if required == numberName {
+				t.Fatalf("%s requires %s even though issue_id is an alternative: %#v", name, numberName, schema.Required)
+			}
+		}
+	}
+}
+
 func TestMCPRepoScopedDuplicateAlias(t *testing.T) {
 	store := populatedStore(t)
 	defer store.Close()
@@ -1509,7 +1532,7 @@ func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 	}
 
 	call("create_issue", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "title": "new issue", "body": "issue body", "labels": []string{"bug"}, "milestone": "MILESTONE-1", "idempotency_key": "issue-create-key"})
-	call("add_issue_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 16, "body": "proposal", "idempotency_key": "issue-comment-key"})
+	call("add_issue_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "issue_id": "ISSUE-16", "body": "proposal", "idempotency_key": "issue-comment-key"})
 	call("update_issue_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "comment_id": "c16", "number": 16, "body": "updated\ncomment", "idempotency_key": "issue-comment-update-key"})
 	call("update_issue", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 16, "title": "updated", "state": "closed", "labels": []string{"enhancement"}, "clear_milestone": true, "idempotency_key": "issue-update-key"})
 	call("create_pr", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "title": "PR", "body": "body", "head": "topic", "base": "main", "idempotency_key": "create-pr-key"})
@@ -1517,7 +1540,7 @@ func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 	call("add_pr_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "body": "tested", "idempotency_key": "pr-comment-key"})
 	call("add_pr_review_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "path": "internal/service/service.go", "line": 42, "position": 42, "body": "inline", "idempotency_key": "pr-review-comment-key"})
 	call("reply_pr_review_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "discussion_id": "D7", "parent_comment_id": "302", "body": "confirmed", "idempotency_key": "pr-review-reply-key"})
-	call("link_pr_issue", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "pr_number": 7, "issue_number": 16, "strategy": "auto", "idempotency_key": "link-key"})
+	call("link_pr_issue", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "pr_number": 7, "issue_id": "issue:16", "strategy": "auto", "idempotency_key": "link-key"})
 	call("create_page", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "slug": "docs/parity", "title": "Parity", "body": "wiki body", "idempotency_key": "create-page-key"})
 	call("update_page", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "id": "docs/parity", "path": "docs/parity.md", "sha": "sha-1", "title": "Parity updated", "body": "updated body", "idempotency_key": "update-page-key"})
 	call("delete_page", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "slug": "docs/parity", "sha": "sha-1", "idempotency_key": "delete-page-key"})
@@ -1537,7 +1560,7 @@ func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 	if req := assertReq("create-issue"); req.Title != "new issue" || req.Body != "issue body" || len(req.Labels) != 1 || req.Labels[0] != "bug" || req.Milestone != "MILESTONE-1" {
 		t.Fatalf("create-issue req=%#v", req)
 	}
-	if req := assertReq("add-comment"); req.Number != 16 || req.Body != "proposal" {
+	if req := assertReq("add-comment"); req.IssueID != "ISSUE-16" || req.Body != "proposal" {
 		t.Fatalf("add-comment req=%#v", req)
 	}
 	if req := assertReq("update-comment"); req.Number != 16 || req.CommentID != "c16" || req.Body != "updated\ncomment" {
@@ -1561,7 +1584,7 @@ func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 	if req := assertReq("reply-pr-review-comment"); req.Number != 7 || req.DiscussionID != "D7" || req.ParentID != "302" || req.Body != "confirmed" {
 		t.Fatalf("reply-pr-review-comment req=%#v", req)
 	}
-	if req := assertReq("link-pr-issue"); req.Number != 7 || req.IssueNumber != 16 || req.Strategy != "auto" {
+	if req := assertReq("link-pr-issue"); req.Number != 7 || req.IssueID != "issue:16" || req.Strategy != "auto" {
 		t.Fatalf("link-pr-issue req=%#v", req)
 	}
 	if req := assertReq("create-page"); req.Slug != "docs/parity" || req.Title != "Parity" || req.Body != "wiki body" {
@@ -2447,10 +2470,13 @@ func assertReadToolParity(t *testing.T, call func(string, map[string]any) toolCa
 	if len(sources.Results) == 0 || sources.Results[0].Kind != "issue" {
 		t.Fatalf("list_sources parity mismatch: %+v", sources)
 	}
+	if sources.Results[0].StableSourceID != "ISSUE-42" || sources.Results[0].IssueNumber != 42 || !strings.Contains(listed.Content[0].Text, "stable_source_id=ISSUE-42 issue_number=42") {
+		t.Fatalf("list_sources issue identity mismatch: structured=%+v text=%q", sources.Results[0], listed.Content[0].Text)
+	}
 	got := call("get_source", map[string]any{"repo_id": "fixture-a", "id": "issue:42"})
 	var record service.SourceRecord
 	decodeStructured(t, got, &record)
-	if record.ID != "ISSUE-42" || record.Kind != "issue" {
+	if record.ID != "ISSUE-42" || record.StableSourceID != "ISSUE-42" || record.IssueNumber != 42 || record.Kind != "issue" || !strings.Contains(got.Content[0].Text, "stable_source_id=ISSUE-42 issue_number=42") {
 		t.Fatalf("get_source parity mismatch: %+v", record)
 	}
 	syncStatus := call("sync_status", map[string]any{"repo_id": "fixture-a"})

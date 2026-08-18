@@ -639,7 +639,8 @@ func (s *Service) ResolveID(ctx context.Context, req ResolveIDRequest) (Resolved
 	if err != nil {
 		return ResolvedID{}, normalizeError(err, "source", id)
 	}
-	return ResolvedID{RepoID: source.RepoID, ID: source.ID, Path: source.Path, RemoteAlias: remoteAlias(source.Aliases), Kind: source.Kind, Title: source.Title}, nil
+	stableID, issueNumber := sourceIssueIdentity(source)
+	return ResolvedID{RepoID: source.RepoID, ID: source.ID, StableSourceID: stableID, IssueNumber: issueNumber, Path: source.Path, RemoteAlias: remoteAlias(source.Aliases), Kind: source.Kind, Title: source.Title}, nil
 }
 
 func (s *Service) GetSnippet(ctx context.Context, req SnippetRequest) (SnippetResult, error) {
@@ -828,7 +829,8 @@ func (s *Service) RecentChanges(ctx context.Context, req RecentChangesRequest) (
 	sources = sliceSources(sources, req.Offset, req.Limit)
 	out := make([]RecentChangeResult, 0, len(sources))
 	for _, source := range sources {
-		out = append(out, RecentChangeResult{RepoID: source.RepoID, ID: source.ID, Path: source.Path, Title: source.Title, Kind: source.Kind, Status: source.Status, UpdatedAt: source.UpdatedAt.UTC()})
+		stableID, issueNumber := sourceIssueIdentity(source)
+		out = append(out, RecentChangeResult{RepoID: source.RepoID, ID: source.ID, StableSourceID: stableID, IssueNumber: issueNumber, Path: source.Path, Title: source.Title, Kind: source.Kind, Status: source.Status, UpdatedAt: source.UpdatedAt.UTC()})
 	}
 	return RecentChangesResult{RepoID: repoID, Results: out, Limit: req.Limit, Offset: req.Offset}, nil
 }
@@ -3165,8 +3167,8 @@ func (s *Service) CreateIssue(ctx context.Context, req WriteCommandRequest) (Wri
 }
 
 func (s *Service) UpdateIssue(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
-	if req.Number == 0 && strings.TrimSpace(req.ID) == "" {
-		return WriteCommandResult{}, ErrInvalidQuery{Field: "issue", Message: "number or id is required"}
+	if req.Number == 0 && strings.TrimSpace(firstNonEmptyString(req.IssueID, req.ID)) == "" {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "issue", Message: "number or issue_id is required"}
 	}
 	switch strings.TrimSpace(req.State) {
 	case "", "open", "closed":
@@ -3201,7 +3203,7 @@ func (s *Service) DeletePage(ctx context.Context, req WriteCommandRequest) (Writ
 }
 
 func (s *Service) AddComment(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
-	if (req.Number == 0 && strings.TrimSpace(req.ID) == "") || strings.TrimSpace(req.Body) == "" {
+	if (req.Number == 0 && strings.TrimSpace(firstNonEmptyString(req.IssueID, req.ID)) == "") || strings.TrimSpace(req.Body) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "comment", Message: "issue and body are required"}
 	}
 	return s.executeWrite(ctx, "add-comment", req, RepositoryScopeIssues)
@@ -3439,8 +3441,8 @@ func (s *Service) UpdateMilestone(ctx context.Context, req WriteCommandRequest) 
 }
 
 func (s *Service) SetIssueMilestone(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
-	if req.Number == 0 {
-		return WriteCommandResult{}, ErrInvalidQuery{Field: "issue", Message: "issue number is required"}
+	if req.Number == 0 && strings.TrimSpace(req.IssueID) == "" {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "issue", Message: "issue number or issue_id is required"}
 	}
 	if strings.TrimSpace(firstNonEmptyString(req.Milestone, req.ID)) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "milestone", Message: "milestone id or title is required"}
@@ -3449,8 +3451,8 @@ func (s *Service) SetIssueMilestone(ctx context.Context, req WriteCommandRequest
 }
 
 func (s *Service) ClearIssueMilestone(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
-	if req.Number == 0 {
-		return WriteCommandResult{}, ErrInvalidQuery{Field: "issue", Message: "issue number is required"}
+	if req.Number == 0 && strings.TrimSpace(firstNonEmptyString(req.IssueID, req.ID)) == "" {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "issue", Message: "issue number or issue_id is required"}
 	}
 	return s.executeWrite(ctx, "clear-issue-milestone", req, RepositoryScopeIssues)
 }
@@ -3490,22 +3492,15 @@ func (s *Service) ReplyPRReviewComment(ctx context.Context, req WriteCommandRequ
 }
 
 func (s *Service) LinkPRIssue(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
-	if req.Number == 0 || req.IssueNumber == 0 {
-		return WriteCommandResult{}, ErrInvalidQuery{Field: "link", Message: "pull request number and issue number are required"}
+	if req.Number == 0 || (req.IssueNumber == 0 && strings.TrimSpace(req.IssueID) == "") {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "link", Message: "pull request number and issue number or issue_id are required"}
 	}
 	return s.executeWrite(ctx, "link-pr-issue", req, RepositoryScopeIssues)
 }
 
 func (s *Service) AddLabel(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
-	if (req.Number == 0 && strings.TrimSpace(req.ID) == "") || strings.TrimSpace(req.Label) == "" {
+	if (req.Number == 0 && strings.TrimSpace(firstNonEmptyString(req.IssueID, req.ID)) == "") || strings.TrimSpace(req.Label) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "label", Message: "issue and label are required"}
-	}
-	if req.Number == 0 {
-		number, err := issueNumberFromWriteID(req.ID)
-		if err != nil {
-			return WriteCommandResult{}, err
-		}
-		req.Number = number
 	}
 	return s.executeWrite(ctx, "add-label", req, RepositoryScopeIssues)
 }
@@ -4803,11 +4798,15 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	}
 	req.RepoID = route.RepoID
 	req.Repo = route.RepoID
+	if err := s.canonicalizeIssueWriteTarget(ctx, command, route.RepoID, &req); err != nil {
+		return WriteCommandResult{}, err
+	}
 	if req.Mode != WriteModeDryRun && req.Mode != WriteModeLive {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "write_mode", Message: "exactly one of dry_run or live is required"}
 	}
 	key, fingerprint := writeIdempotency(command, req)
 	base := WriteCommandResult{Command: command, RepoID: route.RepoID, Status: "dry_run_valid", ID: writeTargetID(req), IdempotencyKey: key, SourceFingerprint: fingerprint, Evidence: "validated write command", GeneratedAt: s.now().UTC()}
+	applyWriteIssueIdentity(&base, command, req, req.IssueID, 0)
 	if req.Mode == WriteModeDryRun {
 		return base, nil
 	}
@@ -4839,7 +4838,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 			return WriteCommandResult{}, ErrWriteFailure{Code: "write_idempotency_conflict", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
 		}
 		if lookup.Replay {
-			return replayWriteResult(command, prior, fingerprint, s.now().UTC()), nil
+			return replayWriteResult(command, req, prior, fingerprint, s.now().UTC()), nil
 		}
 		if lookup.Partial {
 			graph, err := s.replayWriteGraph(ctx, command, route.RepoID, req, prior)
@@ -4858,7 +4857,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 			if err := s.store.RecordAuditEvent(ctx, completed); err != nil {
 				return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key, Cause: err}
 			}
-			result := replayWriteResult(command, completed, fingerprint, s.now().UTC())
+			result := replayWriteResult(command, req, completed, fingerprint, s.now().UTC())
 			result.Status = "succeeded"
 			return result, nil
 		}
@@ -4980,6 +4979,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	}
 	base.Status = "succeeded"
 	base.ID = graph.Record.ID
+	applyWriteIssueIdentity(&base, command, req, graph.Record.ID, confirmed.remoteNumber)
 	base.RemoteID = confirmed.remoteID
 	base.RemoteNumber = confirmed.remoteNumber
 	base.RemoteSlug = confirmed.remoteSlug
@@ -5442,14 +5442,128 @@ func milestoneWriteReceipt(milestone *gitcode.Milestone, cleared bool) *WriteMil
 	}
 }
 
-func issueNumberFromWriteID(id string) (int, error) {
-	normalized := strings.TrimSpace(id)
-	normalized = strings.TrimPrefix(normalized, "ISSUE-")
-	number, err := strconv.Atoi(normalized)
-	if err != nil || number <= 0 {
-		return 0, ErrInvalidQuery{Field: "issue", Message: "issue id must be a positive number or ISSUE-N"}
+func (s *Service) canonicalizeIssueWriteTarget(ctx context.Context, command, repoID string, req *WriteCommandRequest) error {
+	var number int
+	var selector string
+	consumedLegacyID := false
+	switch command {
+	case "update-issue", "add-comment", "add-label":
+		number, selector = req.Number, firstNonEmptyString(req.IssueID, req.ID)
+		consumedLegacyID = strings.TrimSpace(req.IssueID) == "" && strings.TrimSpace(req.ID) != ""
+	case "update-comment":
+		if req.Number == 0 && strings.TrimSpace(req.IssueID) == "" {
+			return nil
+		}
+		number, selector = req.Number, req.IssueID
+	case "set-issue-milestone":
+		number, selector = req.Number, req.IssueID
+	case "clear-issue-milestone":
+		number, selector = req.Number, firstNonEmptyString(req.IssueID, req.ID)
+		consumedLegacyID = strings.TrimSpace(req.IssueID) == "" && strings.TrimSpace(req.ID) != ""
+	case "link-pr-issue":
+		number, selector = req.IssueNumber, req.IssueID
+	default:
+		return nil
 	}
-	return number, nil
+	resolvedNumber, stableID, err := s.resolveIssueWriteTarget(ctx, repoID, number, selector)
+	if err != nil {
+		return err
+	}
+	if command == "link-pr-issue" {
+		req.IssueNumber = resolvedNumber
+	} else {
+		req.Number = resolvedNumber
+	}
+	req.IssueID = stableID
+	if consumedLegacyID {
+		// The deprecated --id selector is semantically identical to issue_id.
+		// Clear it after canonicalization so both forms share one fingerprint.
+		req.ID = ""
+	}
+	return nil
+}
+
+func (s *Service) resolveIssueWriteTarget(ctx context.Context, repoID string, number int, selector string) (int, string, error) {
+	selector = strings.TrimSpace(selector)
+	if selector != "" {
+		stableID, err := s.resolveScopedStableID(ctx, repoID, selector, "", "")
+		if err != nil {
+			if IsNotFound(err) {
+				return 0, "", ErrInvalidQuery{Field: "issue_id", Message: fmt.Sprintf("issue_id %q is not cached in repo %q; sync the issue first with sync_live or CLI sync --issues --input issue:N, then retry the same idempotency key", selector, repoID)}
+			}
+			return 0, "", err
+		}
+		source, err := s.store.GetSourceScoped(ctx, repoID, stableID)
+		if err != nil {
+			return 0, "", normalizeError(err, "source", stableID)
+		}
+		if source.Kind != "issue" && source.Kind != "issues" {
+			return 0, "", ErrInvalidQuery{Field: "issue_id", Message: fmt.Sprintf("%q resolves to %s %q, not an issue", selector, source.Kind, source.ID)}
+		}
+		_, resolvedNumber := sourceIssueIdentity(source)
+		if resolvedNumber == 0 {
+			return 0, "", ErrInvalidQuery{Field: "issue_id", Message: fmt.Sprintf("%q resolves to %q but the cache has no repository-local issue number; sync issue details before writing", selector, source.ID)}
+		}
+		if number > 0 && number != resolvedNumber {
+			return 0, "", ErrInvalidQuery{Field: "issue", Message: fmt.Sprintf("number %d and issue_id %q resolve to different issues; issue_id maps to issue_number %d and stable_source_id %q", number, selector, resolvedNumber, source.ID)}
+		}
+		return resolvedNumber, source.ID, nil
+	}
+	if number <= 0 {
+		return 0, "", ErrInvalidQuery{Field: "issue", Message: "positive issue number or issue_id is required"}
+	}
+	if source, ok, err := s.issueSourceForNumber(ctx, repoID, number); err != nil {
+		return 0, "", err
+	} else if ok {
+		return number, source.ID, nil
+	}
+	if source, ok, err := s.issueSourceForProviderID(ctx, repoID, strconv.Itoa(number)); err != nil {
+		return 0, "", err
+	} else if ok {
+		_, actual := sourceIssueIdentity(source)
+		if actual > 0 && actual != number {
+			return 0, "", ErrInvalidQuery{Field: "number", Message: fmt.Sprintf("%d is a cached GitCode provider id, not the repository-local issue number; use number %d or issue_id %q", number, actual, source.ID)}
+		}
+	}
+	if source, err := s.store.GetSourceScoped(ctx, repoID, "ISSUE-"+strconv.Itoa(number)); err == nil {
+		_, actual := sourceIssueIdentity(source)
+		if actual > 0 && actual != number {
+			return 0, "", ErrInvalidQuery{Field: "number", Message: fmt.Sprintf("%d is the numeric part of stable_source_id %q, not the repository-local issue number; use number %d or issue_id %q", number, source.ID, actual, source.ID)}
+		}
+	} else if !isCacheNotFound(err) {
+		return 0, "", normalizeError(err, "source", "ISSUE-"+strconv.Itoa(number))
+	}
+	return number, "", nil
+}
+
+func (s *Service) issueSourceForProviderID(ctx context.Context, repoID, providerID string) (cache.Source, bool, error) {
+	identity, err := s.store.ResolveAliasScoped(ctx, repoID, cache.RemoteAlias{Type: "gitcode_issue_id", ID: providerID})
+	if err != nil {
+		if isCacheNotFound(err) {
+			return cache.Source{}, false, nil
+		}
+		return cache.Source{}, false, err
+	}
+	source, err := s.store.GetSourceScoped(ctx, repoID, identity.SourceID)
+	if err != nil {
+		return cache.Source{}, false, normalizeError(err, "source", identity.SourceID)
+	}
+	return source, source.Kind == "issue" || source.Kind == "issues", nil
+}
+
+func (s *Service) issueSourceForNumber(ctx context.Context, repoID string, number int) (cache.Source, bool, error) {
+	identity, err := s.store.ResolveAliasScoped(ctx, repoID, cache.RemoteAlias{Type: "issue", ID: strconv.Itoa(number)})
+	if err != nil {
+		if isCacheNotFound(err) {
+			return cache.Source{}, false, nil
+		}
+		return cache.Source{}, false, err
+	}
+	source, err := s.store.GetSourceScoped(ctx, repoID, identity.SourceID)
+	if err != nil {
+		return cache.Source{}, false, normalizeError(err, "source", identity.SourceID)
+	}
+	return source, source.Kind == "issue" || source.Kind == "issues", nil
 }
 
 func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID string, req WriteCommandRequest, prior cache.AuditTrailEntry) (cache.RecordGraph, error) {
@@ -5981,6 +6095,9 @@ func writeIdempotency(command string, req WriteCommandRequest) (string, string) 
 }
 
 func writeTargetID(req WriteCommandRequest) string {
+	if req.IssueID != "" {
+		return req.IssueID
+	}
 	if req.ID != "" {
 		return req.ID
 	}
@@ -5990,8 +6107,31 @@ func writeTargetID(req WriteCommandRequest) string {
 	return firstNonEmptyString(req.Milestone, req.Path, req.Slug)
 }
 
-func replayWriteResult(command string, entry cache.AuditTrailEntry, fingerprint string, now time.Time) WriteCommandResult {
-	return WriteCommandResult{Command: command, Status: "already_applied", RepoID: entry.RepoID, ID: entry.RecordID, RemoteID: entry.RemoteID, IdempotencyKey: entry.IdempotencyKey, SourceFingerprint: fingerprint, Replayed: true, Milestone: milestoneReceiptFromAudit(entry), PushMirror: pushMirrorReceiptFromAudit(entry), Evidence: "replayed from audit_trail", GeneratedAt: now}
+func replayWriteResult(command string, req WriteCommandRequest, entry cache.AuditTrailEntry, fingerprint string, now time.Time) WriteCommandResult {
+	result := WriteCommandResult{Command: command, Status: "already_applied", RepoID: entry.RepoID, ID: entry.RecordID, RemoteID: entry.RemoteID, IdempotencyKey: entry.IdempotencyKey, SourceFingerprint: fingerprint, Replayed: true, Milestone: milestoneReceiptFromAudit(entry), PushMirror: pushMirrorReceiptFromAudit(entry), Evidence: "replayed from audit_trail", GeneratedAt: now}
+	remoteNumber, _ := strconv.Atoi(entry.RequestMetadata["remote_number"])
+	if remoteNumber == 0 {
+		remoteNumber, _ = strconv.Atoi(entry.RemoteID)
+	}
+	applyWriteIssueIdentity(&result, command, req, entry.RecordID, remoteNumber)
+	return result
+}
+
+func applyWriteIssueIdentity(result *WriteCommandResult, command string, req WriteCommandRequest, recordID string, remoteNumber int) {
+	if result == nil {
+		return
+	}
+	switch command {
+	case "create-issue", "update-issue", "add-label", "set-issue-milestone", "clear-issue-milestone":
+		result.StableSourceID = firstNonEmptyString(req.IssueID, recordID)
+		result.IssueNumber = firstNonZeroInt(req.Number, remoteNumber)
+	case "add-comment", "update-comment":
+		result.StableSourceID = req.IssueID
+		result.IssueNumber = req.Number
+	case "link-pr-issue":
+		result.StableSourceID = req.IssueID
+		result.IssueNumber = req.IssueNumber
+	}
 }
 
 func milestoneReceiptFromAudit(entry cache.AuditTrailEntry) *WriteMilestoneReceipt {

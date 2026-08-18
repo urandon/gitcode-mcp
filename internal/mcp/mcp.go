@@ -1003,6 +1003,9 @@ func (s *Server) callGetSource(ctx context.Context, id *json.RawMessage, args js
 	if text == "" {
 		text = fmt.Sprintf("%s: %s", result.Title, result.Body)
 	}
+	if result.IssueNumber > 0 {
+		text = fmt.Sprintf("stable_source_id=%s issue_number=%d\n\n%s", result.StableSourceID, result.IssueNumber, text)
+	}
 
 	s.writeToolResult(id, toolCallResult{
 		Content:           []toolContentItem{{Type: "text", Text: text}},
@@ -1063,7 +1066,11 @@ func (s *Server) callListSources(ctx context.Context, id *json.RawMessage, args 
 
 	var text string
 	for _, r := range results.Results {
-		text += fmt.Sprintf("%s %s %s\n", r.ID, r.Path, r.Title)
+		if r.IssueNumber > 0 {
+			text += fmt.Sprintf("stable_source_id=%s issue_number=%d %s %s\n", r.StableSourceID, r.IssueNumber, r.Path, r.Title)
+			continue
+		}
+		text += fmt.Sprintf("stable_source_id=%s %s %s\n", r.StableSourceID, r.Path, r.Title)
 	}
 
 	s.writeToolResult(id, toolCallResult{
@@ -1284,7 +1291,11 @@ func (s *Server) callRecentChanges(ctx context.Context, id *json.RawMessage, arg
 	}
 	text := ""
 	for _, result := range results.Results {
-		text += fmt.Sprintf("%s %s %s %s\n", result.RepoID, result.ID, result.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"), result.Title)
+		if result.IssueNumber > 0 {
+			text += fmt.Sprintf("%s stable_source_id=%s issue_number=%d %s %s\n", result.RepoID, result.StableSourceID, result.IssueNumber, result.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"), result.Title)
+			continue
+		}
+		text += fmt.Sprintf("%s stable_source_id=%s %s %s\n", result.RepoID, result.StableSourceID, result.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"), result.Title)
 	}
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: results})
 }
@@ -1711,7 +1722,10 @@ func (s *Server) callResolveID(ctx context.Context, id *json.RawMessage, args js
 		return
 	}
 
-	text := fmt.Sprintf("%s %s %s", result.ID, result.Path, result.RemoteAlias)
+	text := fmt.Sprintf("stable_source_id=%s %s %s", result.StableSourceID, result.Path, result.RemoteAlias)
+	if result.IssueNumber > 0 {
+		text = fmt.Sprintf("stable_source_id=%s issue_number=%d %s %s", result.StableSourceID, result.IssueNumber, result.Path, result.RemoteAlias)
+	}
 
 	s.writeToolResult(id, toolCallResult{
 		Content:           []toolContentItem{{Type: "text", Text: text}},

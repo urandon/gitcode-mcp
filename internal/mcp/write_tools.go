@@ -23,6 +23,7 @@ type writeToolArgs struct {
 	WriteMode      string   `json:"write_mode"`
 	IdempotencyKey string   `json:"idempotency_key,omitempty"`
 	ID             string   `json:"id,omitempty"`
+	IssueID        string   `json:"issue_id,omitempty"`
 	MirrorID       string   `json:"mirror_id,omitempty"`
 	After          string   `json:"after,omitempty"`
 	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
@@ -71,11 +72,11 @@ func writeToolInputSchema(id string) inputSchema {
 	case "create_issue":
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"title": {Type: "string", Description: "Issue title.", MinLength: 1}, "body": {Type: "string", Description: "Issue body."}, "labels": {Type: "array", Description: "Issue labels."}, "milestone": {Type: "string", Description: "Milestone remote id, stable MILESTONE-id, or exact title.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "title"}}
 	case "add_issue_comment":
-		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Comment body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "number", "body"}}
+		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": issueNumberSchemaProp(), "issue_id": issueIDSchemaProp(), "body": {Type: "string", Description: "Comment body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "body"}}
 	case "update_issue_comment":
-		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"comment_id": {Type: "string", Description: "Issue comment id.", MinLength: 1}, "number": {Type: "integer", Description: "Optional issue number hint for cache parent resolution.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Updated comment body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "comment_id", "body"}}
+		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"comment_id": {Type: "string", Description: "Issue comment id.", MinLength: 1}, "number": issueNumberSchemaProp(), "issue_id": issueIDSchemaProp(), "body": {Type: "string", Description: "Updated comment body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "comment_id", "body"}}
 	case "update_issue":
-		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "title": {Type: "string", Description: "Issue title."}, "body": {Type: "string", Description: "Issue body."}, "state": {Type: "string", Description: "Issue state.", Enum: []string{"open", "closed"}}, "labels": {Type: "array", Description: "Issue labels."}, "milestone": {Type: "string", Description: "Milestone remote id, stable MILESTONE-id, or exact title.", MinLength: 1}, "clear_milestone": {Type: "boolean", Description: "Clear the issue milestone; conflicts with milestone.", Default: false}}), Required: []string{"repo_id", "write_mode", "number"}}
+		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": issueNumberSchemaProp(), "issue_id": issueIDSchemaProp(), "title": {Type: "string", Description: "Issue title."}, "body": {Type: "string", Description: "Issue body."}, "state": {Type: "string", Description: "Issue state.", Enum: []string{"open", "closed"}}, "labels": {Type: "array", Description: "Issue labels."}, "milestone": {Type: "string", Description: "Milestone remote id, stable MILESTONE-id, or exact title.", MinLength: 1}, "clear_milestone": {Type: "boolean", Description: "Clear the issue milestone; conflicts with milestone.", Default: false}}), Required: []string{"repo_id", "write_mode"}}
 	case "create_pr":
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"title": {Type: "string", Description: "Pull request title.", MinLength: 1}, "body": {Type: "string", Description: "Pull request body."}, "head": {Type: "string", Description: "Source branch.", MinLength: 1}, "base": {Type: "string", Description: "Target branch.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "title", "head", "base"}}
 	case "update_pr":
@@ -93,9 +94,9 @@ func writeToolInputSchema(id string) inputSchema {
 	case "update_milestone":
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"milestone": {Type: "string", Description: "Milestone id or exact title.", MinLength: 1}, "title": {Type: "string", Description: "Updated milestone title."}, "description": {Type: "string", Description: "Updated milestone description."}, "due_on": {Type: "string", Description: "Updated due date YYYY-MM-DD."}, "state": {Type: "string", Description: "Updated milestone state.", Enum: []string{"open", "closed"}}}), Required: []string{"repo_id", "write_mode", "milestone"}}
 	case "set_issue_milestone":
-		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "milestone": {Type: "string", Description: "Milestone id or exact title.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "number", "milestone"}}
+		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": issueNumberSchemaProp(), "issue_id": issueIDSchemaProp(), "milestone": {Type: "string", Description: "Milestone id or exact title.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "milestone"}}
 	case "clear_issue_milestone":
-		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}}), Required: []string{"repo_id", "write_mode", "number"}}
+		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": issueNumberSchemaProp(), "issue_id": issueIDSchemaProp()}), Required: []string{"repo_id", "write_mode"}}
 	case "add_pr_comment":
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Comment body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "number", "body"}}
 	case "add_pr_review_comment":
@@ -103,7 +104,7 @@ func writeToolInputSchema(id string) inputSchema {
 	case "reply_pr_review_comment":
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "discussion_id": {Type: "string", Description: "Use reply_discussion_id returned by list_pr_discussions; a synthetic comment:<root-id> is resolved by live refresh or rejected without posting.", MinLength: 1}, "parent_comment_id": {Type: "string", Description: "Parent/root review comment id.", MinLength: 1}, "body": {Type: "string", Description: "Reply body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "number", "discussion_id", "parent_comment_id", "body"}}
 	case "link_pr_issue":
-		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"pr_number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "issue_number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "strategy": {Type: "string", Description: "Link strategy.", Enum: []string{"auto", "description_fallback"}, Default: "auto"}}), Required: []string{"repo_id", "write_mode", "pr_number", "issue_number"}}
+		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"pr_number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "issue_number": issueNumberSchemaProp(), "issue_id": issueIDSchemaProp(), "strategy": {Type: "string", Description: "Link strategy.", Enum: []string{"auto", "description_fallback"}, Default: "auto"}}), Required: []string{"repo_id", "write_mode", "pr_number"}}
 	case "create_page":
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"path": {Type: "string", Description: "Wiki page path."}, "slug": {Type: "string", Description: "Wiki page slug."}, "title": {Type: "string", Description: "Wiki page title."}, "body": {Type: "string", Description: "Wiki page body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "body"}}
 	case "update_page":
@@ -111,10 +112,18 @@ func writeToolInputSchema(id string) inputSchema {
 	case "delete_page":
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"id": {Type: "string", Description: "Wiki page id."}, "path": {Type: "string", Description: "Wiki page path."}, "slug": {Type: "string", Description: "Wiki page slug."}, "sha": {Type: "string", Description: "Expected wiki page sha/revision."}}), Required: []string{"repo_id", "write_mode"}}
 	case "add_label":
-		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Issue number.", Minimum: float64Ptr(1)}, "id": {Type: "string", Description: "Issue id."}, "label": {Type: "string", Description: "Label to add.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "label"}}
+		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": issueNumberSchemaProp(), "issue_id": issueIDSchemaProp(), "id": {Type: "string", Description: "Deprecated issue stable-id selector; prefer issue_id."}, "label": {Type: "string", Description: "Label to add.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "label"}}
 	default:
 		return inputSchema{Type: "object", Properties: writeSchemaProps(nil), Required: []string{"repo_id", "write_mode"}}
 	}
+}
+
+func issueNumberSchemaProp() schemaProp {
+	return schemaProp{Type: "integer", Description: "Repository-local GitCode issue number; never use a provider id or stable source id here.", Minimum: float64Ptr(1)}
+}
+
+func issueIDSchemaProp() schemaProp {
+	return schemaProp{Type: "string", Description: "Stable source id or known cached issue alias, for example ISSUE-76, issue:76, or gitcode_issue_id:ID.", MinLength: 1}
 }
 
 func feedbackInputSchema(submit bool) inputSchema {
@@ -262,6 +271,7 @@ func (s *Server) callAddIssueComment(ctx context.Context, id *json.RawMessage, a
 	s.callWriteTool(ctx, id, args, s.svc.AddComment, func(a writeToolArgs) service.WriteCommandRequest {
 		req := writeRequestFromArgs(a)
 		req.Number = a.Number
+		req.IssueID = a.IssueID
 		req.Body = a.Body
 		return req
 	})
@@ -271,6 +281,7 @@ func (s *Server) callUpdateIssueComment(ctx context.Context, id *json.RawMessage
 	s.callWriteTool(ctx, id, args, s.svc.UpdateComment, func(a writeToolArgs) service.WriteCommandRequest {
 		req := writeRequestFromArgs(a)
 		req.Number = a.Number
+		req.IssueID = a.IssueID
 		req.CommentID = a.CommentID
 		req.Body = a.Body
 		return req
@@ -281,6 +292,7 @@ func (s *Server) callUpdateIssue(ctx context.Context, id *json.RawMessage, args 
 	s.callWriteTool(ctx, id, args, s.svc.UpdateIssue, func(a writeToolArgs) service.WriteCommandRequest {
 		req := writeRequestFromArgs(a)
 		req.Number = a.Number
+		req.IssueID = a.IssueID
 		req.Title = a.Title
 		req.Body = a.Body
 		req.State = a.State
@@ -411,6 +423,7 @@ func (s *Server) callSetIssueMilestone(ctx context.Context, id *json.RawMessage,
 	s.callWriteTool(ctx, id, args, s.svc.SetIssueMilestone, func(a writeToolArgs) service.WriteCommandRequest {
 		req := writeRequestFromArgs(a)
 		req.Number = a.Number
+		req.IssueID = a.IssueID
 		req.Milestone = a.Milestone
 		return req
 	})
@@ -420,6 +433,7 @@ func (s *Server) callClearIssueMilestone(ctx context.Context, id *json.RawMessag
 	s.callWriteTool(ctx, id, args, s.svc.ClearIssueMilestone, func(a writeToolArgs) service.WriteCommandRequest {
 		req := writeRequestFromArgs(a)
 		req.Number = a.Number
+		req.IssueID = a.IssueID
 		return req
 	})
 }
@@ -469,6 +483,7 @@ func (s *Server) callLinkPRIssue(ctx context.Context, id *json.RawMessage, args 
 		req := writeRequestFromArgs(a)
 		req.Number = a.PRNumber
 		req.IssueNumber = a.IssueNumber
+		req.IssueID = a.IssueID
 		req.Strategy = strings.TrimSpace(a.Strategy)
 		return req
 	})
@@ -511,6 +526,7 @@ func (s *Server) callAddLabel(ctx context.Context, id *json.RawMessage, args jso
 	s.callWriteTool(ctx, id, args, s.svc.AddLabel, func(a writeToolArgs) service.WriteCommandRequest {
 		req := writeRequestFromArgs(a)
 		req.Number = a.Number
+		req.IssueID = a.IssueID
 		req.Label = a.Label
 		return req
 	})
@@ -541,6 +557,9 @@ func (s *Server) callWriteTool(ctx context.Context, id *json.RawMessage, args js
 		return
 	}
 	text := fmt.Sprintf("status=%s command=%s", result.Status, result.Command)
+	if result.StableSourceID != "" || result.IssueNumber > 0 {
+		text += fmt.Sprintf(" stable_source_id=%s issue_number=%d", result.StableSourceID, result.IssueNumber)
+	}
 	if result.Milestone != nil {
 		text += fmt.Sprintf(" milestone_id=%s milestone_remote_id=%s milestone_cleared=%t", result.Milestone.ID, result.Milestone.RemoteID, result.Milestone.Cleared)
 	}

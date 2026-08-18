@@ -244,8 +244,72 @@ func (s *SQLiteStore) ListSources(ctx context.Context, filter SourceFilter) ([]S
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return scanSources(rows)
+	sources, err := scanSources(rows)
+	closeErr := rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if err := s.attachSourceAliases(ctx, sources); err != nil {
+		return nil, err
+	}
+	return sources, nil
+}
+
+// attachSourceAliases hydrates identities for a source list in bounded batches.
+// Keeping this at the cache boundary prevents callers from falling into an N+1
+// query pattern when they need stable and provider identities for list results.
+func (s *SQLiteStore) attachSourceAliases(ctx context.Context, sources []Source) error {
+	const batchSize = 500
+	idsByRepo := make(map[string][]string)
+	seen := make(map[string]struct{})
+	for _, source := range sources {
+		key := source.RepoID + "\x00" + source.ID
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		idsByRepo[source.RepoID] = append(idsByRepo[source.RepoID], source.ID)
+	}
+
+	aliasesBySource := make(map[string][]Identity)
+	for repoID, ids := range idsByRepo {
+		for start := 0; start < len(ids); start += batchSize {
+			end := start + batchSize
+			if end > len(ids) {
+				end = len(ids)
+			}
+			batch := ids[start:end]
+			placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
+			args := make([]any, 0, len(batch)+1)
+			args = append(args, repoID)
+			for _, id := range batch {
+				args = append(args, id)
+			}
+			rows, err := s.db.QueryContext(ctx, `SELECT repo_id, source_id, alias_type, alias, remote_type, remote_id FROM identity_map WHERE repo_id = ? AND source_id IN (`+placeholders+`) ORDER BY source_id, alias_type, alias`, args...)
+			if err != nil {
+				return err
+			}
+			identities, scanErr := scanIdentities(rows)
+			closeErr := rows.Close()
+			if scanErr != nil {
+				return scanErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+			for _, identity := range identities {
+				key := identity.RepoID + "\x00" + identity.SourceID
+				aliasesBySource[key] = append(aliasesBySource[key], identity)
+			}
+		}
+	}
+	for i := range sources {
+		sources[i].Aliases = aliasesBySource[sources[i].RepoID+"\x00"+sources[i].ID]
+	}
+	return nil
 }
 
 func (s *SQLiteStore) scanSource(ctx context.Context, query string, args ...any) (Source, error) {

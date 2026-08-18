@@ -541,7 +541,7 @@ func TestWriteLiveSuccessAuditCacheAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateIssue live returned error: %v", err)
 	}
-	if result.Status != "succeeded" || result.RemoteID != "42" || result.ID != "ISSUE-42" || client.createIssueCalls != 1 {
+	if result.Status != "succeeded" || result.RemoteID != "42" || result.ID != "ISSUE-42" || result.StableSourceID != "ISSUE-42" || result.IssueNumber != 42 || client.createIssueCalls != 1 {
 		t.Fatalf("live result=%#v calls=%d", result, client.createIssueCalls)
 	}
 	counts, err := store.RecordCounts(ctx, "fixture-a")
@@ -565,8 +565,103 @@ func TestWriteLiveSuccessAuditCacheAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateIssue replay returned error: %v", err)
 	}
-	if replay.Status != "already_applied" || !replay.Replayed || client.createIssueCalls != 1 {
+	if replay.Status != "already_applied" || !replay.Replayed || replay.StableSourceID != "ISSUE-42" || replay.IssueNumber != 42 || client.createIssueCalls != 1 {
 		t.Fatalf("replay=%#v calls=%d", replay, client.createIssueCalls)
+	}
+}
+
+func TestIssueWriteTargetResolutionIsExplicitAndCacheFirst(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "identity-write", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	issue := cache.Source{RepoID: "identity-write", ID: "ISSUE-4226802", Kind: "issue", Path: "issues/76.md", Title: "Identity", Body: "body", Status: "open", ContentHash: "identity"}
+	identities := []cache.Identity{
+		{RepoID: "identity-write", SourceID: issue.ID, AliasType: "issue", Alias: "76", Remote: cache.RemoteAlias{Type: "issue", ID: "76"}},
+		{RepoID: "identity-write", SourceID: issue.ID, AliasType: "gitcode_issue_id", Alias: "4226802", Remote: cache.RemoteAlias{Type: "gitcode_issue_id", ID: "4226802"}},
+	}
+	if err := store.UpsertSourceGraph(ctx, cache.SourceGraph{Source: issue, Identities: identities}); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeGitCodeClient{}
+	svc := NewWithClient(store, client)
+
+	for _, selector := range []string{"ISSUE-4226802", "issue:76", "gitcode_issue_id:4226802"} {
+		t.Run(selector, func(t *testing.T) {
+			result, err := svc.AddComment(ctx, WriteCommandRequest{RepoID: "identity-write", Mode: WriteModeDryRun, IssueID: selector, Body: "comment", IdempotencyKey: "resolve-" + strings.ReplaceAll(selector, ":", "-")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.IssueNumber != 76 || result.StableSourceID != "ISSUE-4226802" || result.ID != "ISSUE-4226802" {
+				t.Fatalf("result=%#v", result)
+			}
+		})
+	}
+
+	result, err := svc.AddComment(ctx, WriteCommandRequest{RepoID: "identity-write", Mode: WriteModeDryRun, Number: 76, Body: "comment", IdempotencyKey: "number-76"})
+	if err != nil || result.IssueNumber != 76 || result.StableSourceID != "ISSUE-4226802" {
+		t.Fatalf("number result=%#v err=%v", result, err)
+	}
+
+	tests := []struct {
+		name string
+		req  WriteCommandRequest
+		want string
+	}{
+		{name: "provider id passed as number", req: WriteCommandRequest{Number: 4226802}, want: "cached GitCode provider id"},
+		{name: "conflicting selectors", req: WriteCommandRequest{Number: 77, IssueID: "ISSUE-4226802"}, want: "resolve to different issues"},
+		{name: "unknown stable id", req: WriteCommandRequest{IssueID: "ISSUE-999"}, want: "sync the issue first"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			test.req.RepoID = "identity-write"
+			test.req.Mode = WriteModeDryRun
+			test.req.Body = "comment"
+			test.req.IdempotencyKey = "invalid-" + test.name
+			_, err := svc.AddComment(ctx, test.req)
+			var invalid ErrInvalidQuery
+			if !errors.As(err, &invalid) || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("err=%T %v, want invalid_query containing %q", err, err, test.want)
+			}
+		})
+	}
+
+	confirmedAt := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	client.createIssueCommentResult = gitcode.WriteResult[gitcode.Comment]{
+		Record:            gitcode.Comment{ID: "comment-76", IssueID: "4226802", Body: "same comment", Author: "agent", CreatedAt: confirmedAt, UpdatedAt: confirmedAt},
+		Confirmed:         true,
+		Operation:         "CreateIssueComment",
+		RemoteID:          "comment-76",
+		ParentIssueNumber: 76,
+		ParentIssueID:     "4226802",
+		ConfirmedAt:       confirmedAt,
+	}
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.writeCredentialPresent = true
+	legacy, err := svc.AddComment(ctx, WriteCommandRequest{RepoID: "identity-write", Mode: WriteModeLive, ID: "ISSUE-4226802", Body: "same comment", IdempotencyKey: "selector-form-replay"})
+	if err != nil {
+		t.Fatalf("legacy selector write: %v", err)
+	}
+	canonical, err := svc.AddComment(ctx, WriteCommandRequest{RepoID: "identity-write", Mode: WriteModeLive, IssueID: "ISSUE-4226802", Body: "same comment", IdempotencyKey: "selector-form-replay"})
+	if err != nil {
+		t.Fatalf("canonical selector replay: %v", err)
+	}
+	if legacy.SourceFingerprint != canonical.SourceFingerprint || canonical.Status != "already_applied" || !canonical.Replayed || client.createIssueCommentCalls != 1 {
+		t.Fatalf("legacy=%#v canonical=%#v adapter_calls=%d", legacy, canonical, client.createIssueCommentCalls)
+	}
+
+	legitimate := cache.Source{RepoID: "identity-write", ID: "ISSUE-LARGE-NUMBER", Kind: "issue", Path: "issues/4226802.md", Title: "Large number", Body: "body", Status: "open", ContentHash: "large-number"}
+	if err := store.UpsertSourceGraph(ctx, cache.SourceGraph{Source: legitimate, Identities: []cache.Identity{{RepoID: "identity-write", SourceID: legitimate.ID, AliasType: "issue", Alias: "4226802", Remote: cache.RemoteAlias{Type: "issue", ID: "4226802"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	largeNumber, err := svc.AddComment(ctx, WriteCommandRequest{RepoID: "identity-write", Mode: WriteModeDryRun, Number: 4226802, Body: "comment", IdempotencyKey: "legitimate-large-number"})
+	if err != nil || largeNumber.IssueNumber != 4226802 || largeNumber.StableSourceID != "ISSUE-LARGE-NUMBER" {
+		t.Fatalf("legitimate large issue number result=%#v err=%v", largeNumber, err)
 	}
 }
 
@@ -2159,6 +2254,54 @@ func TestResolveID(t *testing.T) {
 	}
 	if resolved.ID != "DOC-123" || resolved.Path != "docs/design.md" || resolved.RemoteAlias != "remote:wiki/design" {
 		t.Fatalf("ResolveID = %#v", resolved)
+	}
+}
+
+func TestIssueReadResultsExposeStableIDAndIssueNumber(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertSourceGraph(ctx, cache.SourceGraph{
+		Source:     cache.Source{RepoID: "fixture-a", ID: "ISSUE-42", Kind: "issue", Path: "issues/42.md", Title: "Issue", Body: "body", Status: "open", ContentHash: "issue-42"},
+		Identities: []cache.Identity{{RepoID: "fixture-a", SourceID: "ISSUE-42", AliasType: "issue", Alias: "42", Remote: cache.RemoteAlias{Type: "issue", ID: "42"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := New(store)
+
+	record, err := svc.GetSource(ctx, GetSourceRequest{RepoID: "fixture-a", ID: "ISSUE-42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.StableSourceID != "ISSUE-42" || record.IssueNumber != 42 {
+		t.Fatalf("record=%#v", record)
+	}
+	listed, err := svc.ListSources(ctx, ListSourcesRequest{RepoID: "fixture-a", Kind: "issue", Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Results) == 0 || listed.Results[0].StableSourceID != "ISSUE-42" || listed.Results[0].IssueNumber != 42 {
+		t.Fatalf("listed=%#v", listed)
+	}
+	recent, err := svc.RecentChanges(ctx, RecentChangesRequest{RepoID: "fixture-a", Kind: "issue", Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recent.Results) == 0 || recent.Results[0].StableSourceID != "ISSUE-42" || recent.Results[0].IssueNumber != 42 {
+		t.Fatalf("recent=%#v", recent)
+	}
+	resolved, err := svc.ResolveID(ctx, ResolveIDRequest{RepoID: "fixture-a", ID: "issue:42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.StableSourceID != "ISSUE-42" || resolved.IssueNumber != 42 {
+		t.Fatalf("resolved=%#v", resolved)
 	}
 }
 

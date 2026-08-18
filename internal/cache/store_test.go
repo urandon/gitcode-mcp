@@ -42,6 +42,46 @@ func TestBacklinks(t *testing.T) {
 	}
 }
 
+func TestListSourcesHydratesAliasesInBatchesAndKeepsRepoScope(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	mustAddTestRepo(t, ctx, store, "fixture-b")
+
+	for _, repoID := range []string{"fixture-a", "fixture-b"} {
+		source := testSource("ISSUE-SHARED", "issue", repoID+" issue")
+		source.RepoID = repoID
+		alias := "41"
+		if repoID == "fixture-b" {
+			alias = "42"
+		}
+		mustUpsertGraph(t, ctx, store, SourceGraph{
+			Source: source,
+			Identities: []Identity{{
+				RepoID:    repoID,
+				SourceID:  source.ID,
+				AliasType: "issue",
+				Alias:     alias,
+				Remote:    RemoteAlias{Type: "issue", ID: alias},
+			}},
+		})
+	}
+
+	sources, err := store.ListSources(ctx, SourceFilter{Kind: "issue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 2 {
+		t.Fatalf("ListSources returned %d sources, want 2", len(sources))
+	}
+	wantAlias := map[string]string{"fixture-a": "41", "fixture-b": "42"}
+	for _, source := range sources {
+		if len(source.Aliases) != 1 || source.Aliases[0].RepoID != source.RepoID || source.Aliases[0].Alias != wantAlias[source.RepoID] {
+			t.Fatalf("source %s aliases = %#v", source.RepoID, source.Aliases)
+		}
+	}
+}
+
 func TestSyncFrontierRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)
