@@ -575,7 +575,12 @@ func defaultServiceFactory(ctx context.Context, cachePath string) (queryService,
 	if err != nil {
 		return nil, nil, err
 	}
-	return service.New(store), store.Close, nil
+	svc, err := service.NewWithMode(store, gitcode.ProviderModeFixture, "", service.ServiceConfig{LockPath: path + ".lock"})
+	if err != nil {
+		_ = store.Close()
+		return nil, nil, err
+	}
+	return svc, store.Close, nil
 }
 
 func resolvedCachePath(path string) (string, error) {
