@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -105,6 +106,7 @@ type Server struct {
 	ragSearch          RAGSearchProvider
 	maintenancePlan    MaintenancePlanProvider
 	maintenanceApply   MaintenanceApplyProvider
+	serviceClient      func() (*servicectl.RPCClient, error)
 }
 
 type RAGStatusProvider func(context.Context, rag.StatusRequest) (rag.StatusResult, error)
@@ -1240,7 +1242,7 @@ func (s *Server) callStaleIndexReport(ctx context.Context, id *json.RawMessage, 
 	if err != nil {
 		var staleErr service.ErrStaleIndex
 		if !errors.As(err, &staleErr) {
-			s.writeDomainError(id, err)
+			s.writeOperationalError(id, err, domainErrorContext{Operation: "stale_index_report", RepoID: a.RepoID, Subsystem: "cache"})
 			return
 		}
 	}
@@ -1346,7 +1348,7 @@ func (s *Server) callCacheStatus(ctx context.Context, id *json.RawMessage, args 
 	}
 	result, err := s.svc.CacheStatus(ctx, service.CacheStatusRequest{RepoID: a.RepoID})
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "cache_status", RepoID: a.RepoID, Subsystem: "cache"})
 		return
 	}
 	text := fmt.Sprintf("repo_id=%s records=%d chunks=%d journal=%s", result.RepoID, result.Records, result.Chunks, result.JournalMode)
@@ -1375,14 +1377,14 @@ type ragSearchArgs struct {
 }
 
 func (s *Server) callServiceStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
-	client, err := serviceRPCClient()
+	client, err := s.localServiceClient()
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "service_status", Subsystem: "service"})
 		return
 	}
 	var result servicectl.Status
 	if err := client.Call(ctx, "Service.Status", nil, &result); err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "service_status", Subsystem: "service"})
 		return
 	}
 	text := fmt.Sprintf("service status=%s running=%t", result.Status, result.Running)
@@ -1464,14 +1466,14 @@ func (s *Server) callEnableCacheMaintenance(ctx context.Context, id *json.RawMes
 }
 
 func (s *Server) callServiceJobs(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
-	client, err := serviceRPCClient()
+	client, err := s.localServiceClient()
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "service_jobs", Subsystem: "service"})
 		return
 	}
 	var result servicectl.JobListResult
 	if err := client.Call(ctx, "Jobs.List", nil, &result); err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "service_jobs", Subsystem: "service"})
 		return
 	}
 	text := fmt.Sprintf("jobs=%d", len(result.Jobs))
@@ -1488,14 +1490,14 @@ func (s *Server) callServiceJobStatus(ctx context.Context, id *json.RawMessage, 
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "job_id is required"})
 		return
 	}
-	client, err := serviceRPCClient()
+	client, err := s.localServiceClient()
 	if err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "service_job_status", Subsystem: "service"})
 		return
 	}
 	var result servicectl.Job
 	if err := client.Call(ctx, "Jobs.Get", map[string]string{"job_id": a.JobID}, &result); err != nil {
-		s.writeDomainError(id, err)
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "service_job_status", Subsystem: "service"})
 		return
 	}
 	text := fmt.Sprintf("job_id=%s status=%s completed=%d/%d", result.ID, result.Status, result.Completed, result.Steps)
@@ -1610,6 +1612,13 @@ func lookupMCPRAGServiceState(ctx context.Context, repoID string) (*rag.ServiceS
 
 func serviceRPCClient() (*servicectl.RPCClient, error) {
 	return servicectl.Manager{Source: config.OSSource{}}.Client()
+}
+
+func (s *Server) localServiceClient() (*servicectl.RPCClient, error) {
+	if s.serviceClient != nil {
+		return s.serviceClient()
+	}
+	return serviceRPCClient()
 }
 
 type listPRDiscussionsArgs struct {
@@ -2036,51 +2045,187 @@ func mcpDiagnostic(err error) (diagnostics.Diagnostic, bool) {
 	return diagnostics.Diagnostic{}, false
 }
 
+type domainErrorContext struct {
+	Operation string
+	RepoID    string
+	Subsystem string
+}
+
 func (s *Server) writeDomainError(id *json.RawMessage, err error) {
-	var data *errorData
+	s.writeOperationalError(id, err, domainErrorContext{})
+}
+
+func (s *Server) writeOperationalError(id *json.RawMessage, err error, ctx domainErrorContext) {
+	data := classifyDomainError(err, ctx)
 	diagnostic, hasDiagnostic := mcpDiagnostic(err)
-	switch {
-	case service.IsNotFound(err):
-		data = &errorData{Code: "not_found", Message: err.Error()}
-	case service.IsCacheEmpty(err):
-		data = &errorData{Code: "cache_empty", Message: err.Error()}
-	default:
-		var invalid service.ErrInvalidQuery
-		var repoRequired service.ErrRepoRequired
-		var staleErr service.ErrStaleIndex
-		var linkErr service.ErrLinkCheckFailed
-		var lockErr cache.ErrLockContention
-		var writeErr service.ErrWriteFailure
-		var parentMissing service.ErrParentPRNotCached
-		switch {
-		case errors.As(err, &invalid):
-			data = &errorData{Code: "invalid_query", Message: err.Error()}
-		case errors.As(err, &repoRequired):
-			data = &errorData{Code: "repo_required", Message: err.Error()}
-		case errors.As(err, &staleErr):
-			data = &errorData{Code: "stale_index", Message: err.Error()}
-		case errors.As(err, &linkErr):
-			data = &errorData{Code: "link_check_failed", Message: err.Error()}
-		case errors.As(err, &lockErr):
-			data = cacheLockErrorData(lockErr, err.Error())
-		case errors.As(err, &parentMissing):
-			data = &errorData{
-				Code:        parentMissing.DiagnosticCode(),
-				Message:     parentMissing.Error(),
-				RepoID:      parentMissing.RepoID,
-				Remediation: fmt.Sprintf("call sync_live with repo_id=%q, pulls=true, remote_alias=%q; CLI fallback: %s", parentMissing.RepoID, fmt.Sprintf("pr:%d", parentMissing.Number), parentMissing.Remediation()),
-			}
-		case errors.As(err, &writeErr) && writeErr.Code == "discussion_reply_unavailable":
-			data = &errorData{Code: "discussion_reply_unavailable", Message: err.Error()}
-		default:
-			data = &errorData{Code: "sync_required", Message: err.Error()}
+	if hasDiagnostic {
+		data.FailureClass = string(diagnostic.Code)
+		if data.Code == "internal_error" {
+			data.Code = string(diagnostic.Code)
+			data.Message = diagnostic.Message
 		}
 	}
-	if hasDiagnostic && data != nil {
-		data.FailureClass = string(diagnostic.Code)
+	if data.FailureClass == "" {
+		data.FailureClass = data.Code
 	}
+	if data.Operation == "" {
+		data.Operation = strings.TrimSpace(ctx.Operation)
+	}
+	if data.RepoID == "" {
+		data.RepoID = strings.TrimSpace(ctx.RepoID)
+	}
+	s.writeError(id, -32000, domainErrorTitle(data.Code), data)
+}
 
-	s.writeError(id, -32000, "Server error", data)
+func classifyDomainError(err error, ctx domainErrorContext) *errorData {
+	data := &errorData{Operation: strings.TrimSpace(ctx.Operation), RepoID: strings.TrimSpace(ctx.RepoID)}
+	var notFound service.ErrNotFound
+	var invalid service.ErrInvalidQuery
+	var repoRequired service.ErrRepoRequired
+	var staleErr service.ErrStaleIndex
+	var linkErr service.ErrLinkCheckFailed
+	var lockErr cache.ErrLockContention
+	var corruption cache.ErrCacheCorruption
+	var schemaErr *cache.SchemaVersionError
+	var parentMissing service.ErrParentPRNotCached
+	var rpcErr servicectl.RPCDomainError
+
+	switch {
+	case errors.As(err, &notFound) && notFound.Kind == "repository":
+		data.Code = "missing_repository_binding"
+		data.Message = fmt.Sprintf("repository binding %q is not configured", firstNonEmpty(data.RepoID, notFound.ID))
+		data.Remediation = fmt.Sprintf("call repo_status with repo_id=%q; CLI fallback: gitcode-mcp doctor --repo %q --format json", firstNonEmpty(data.RepoID, notFound.ID), firstNonEmpty(data.RepoID, notFound.ID))
+	case service.IsNotFound(err):
+		data.Code = "not_found"
+		data.Message = err.Error()
+	case service.IsCacheEmpty(err):
+		data.Code = "cache_empty"
+		data.Message = err.Error()
+		data.Remediation = remediationForRepo("call sync_live for the required collection", data.RepoID, "gitcode-mcp sync")
+	case errors.As(err, &invalid):
+		data.Code = "invalid_query"
+		data.Message = err.Error()
+	case errors.As(err, &repoRequired):
+		data.Code = "repo_required"
+		data.Message = err.Error()
+	case errors.As(err, &staleErr):
+		data.Code = "stale_index"
+		data.Message = err.Error()
+		data.Remediation = remediationForRepo("call index_repo", data.RepoID, "gitcode-mcp index")
+	case errors.As(err, &linkErr):
+		data.Code = "link_check_failed"
+		data.Message = err.Error()
+	case errors.As(err, &lockErr):
+		data = cacheLockErrorData(lockErr, err.Error())
+		if data.Remediation == "" {
+			data.Remediation = "retry after the current cache writer completes; CLI fallback: gitcode-mcp doctor --format json"
+		}
+	case errors.As(err, &schemaErr):
+		data.Code = "cache_schema_blocked"
+		data.Message = fmt.Sprintf("cache schema is incompatible: detected=%d expected=%d", schemaErr.Compat.DetectedVersion, schemaErr.Compat.ExpectedVersion)
+		data.Remediation = firstNonEmpty(schemaErr.Compat.Remediation, "run gitcode-mcp migrate-cache, review the plan, then rerun with --confirm")
+	case errors.As(err, &corruption):
+		data.Code = "cache_corruption"
+		data.Message = "cache integrity validation failed"
+		data.Remediation = "run gitcode-mcp doctor --format json; restore the cache or rebuild it with sync"
+	case errors.As(err, &parentMissing):
+		data.Code = parentMissing.DiagnosticCode()
+		data.Message = parentMissing.Error()
+		data.RepoID = parentMissing.RepoID
+		data.Remediation = fmt.Sprintf("call sync_live with repo_id=%q, pulls=true, remote_alias=%q; CLI fallback: %s", parentMissing.RepoID, fmt.Sprintf("pr:%d", parentMissing.Number), parentMissing.Remediation())
+	case errors.As(err, &rpcErr) && strings.TrimSpace(rpcErr.Code) != "":
+		data.Code = strings.TrimSpace(rpcErr.Code)
+		data.Message = fmt.Sprintf("local service reported %s", data.Code)
+		data.Remediation = serviceRemediation(ctx.Operation)
+	case errors.Is(err, context.DeadlineExceeded):
+		data.Code = "operation_timeout"
+		data.Message = "the operation exceeded its deadline"
+		if ctx.Subsystem == "service" {
+			data.Remediation = serviceRemediation(ctx.Operation)
+		} else {
+			data.Remediation = remediationForRepo("retry the operation", data.RepoID, "gitcode-mcp doctor")
+		}
+	case errors.Is(err, context.Canceled):
+		data.Code = "operation_cancelled"
+		data.Message = "the operation was cancelled"
+		data.Remediation = "retry only if the caller still needs the result"
+	case ctx.Subsystem == "service" && isServiceUnavailableError(err):
+		data.Code = "service_unavailable"
+		data.Message = "local gitcode-mcp service is unavailable"
+		data.Remediation = serviceRemediation(ctx.Operation)
+	default:
+		var coded interface{ DiagnosticCode() string }
+		if errors.As(err, &coded) && strings.TrimSpace(coded.DiagnosticCode()) != "" {
+			data.Code = strings.TrimSpace(coded.DiagnosticCode())
+			data.Message = err.Error()
+		} else if ctx.Subsystem == "cache" {
+			data.Code = "cache_unavailable"
+			data.Message = "the selected cache could not complete the operation"
+			data.Remediation = remediationForRepo("call doctor", data.RepoID, "gitcode-mcp doctor")
+		} else if ctx.Subsystem == "service" {
+			data.Code = "service_operation_failed"
+			data.Message = "the local service rejected or could not complete the operation"
+			data.Remediation = serviceRemediation(ctx.Operation)
+		} else {
+			data.Code = "internal_error"
+			data.Message = "the operation failed without a recognized public-safe diagnostic"
+			data.Remediation = "call doctor; CLI fallback: gitcode-mcp doctor --format json"
+		}
+	}
+	return data
+}
+
+func domainErrorTitle(code string) string {
+	switch code {
+	case "missing_repository_binding":
+		return "Repository binding unavailable"
+	case "cache_empty", "cache_busy", "cache_owned", "cache_schema_blocked", "cache_corruption", "cache_unavailable", "migration_blocked":
+		return "Cache operation failed"
+	case "service_unavailable":
+		return "Local service unavailable"
+	case "service_operation_failed":
+		return "Local service operation failed"
+	case "invalid_query", "repo_required":
+		return "Invalid request"
+	case "not_found":
+		return "Resource not found"
+	default:
+		return "Operation failed"
+	}
+}
+
+func remediationForRepo(mcpAction, repoID, cliCommand string) string {
+	if strings.TrimSpace(repoID) == "" {
+		return fmt.Sprintf("%s; CLI fallback: %s", mcpAction, cliCommand)
+	}
+	return fmt.Sprintf("%s with repo_id=%q; CLI fallback: %s --repo %q", mcpAction, repoID, cliCommand, repoID)
+}
+
+func serviceRemediation(operation string) string {
+	if strings.TrimSpace(operation) == "service_status" {
+		return "CLI fallback: gitcode-mcp service status --format json; if stopped, run gitcode-mcp service start"
+	}
+	return "call service_status; CLI fallback: gitcode-mcp service status --format json; if stopped, run gitcode-mcp service start"
+}
+
+func isServiceUnavailableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	return errors.Is(err, io.EOF) || strings.Contains(err.Error(), "service memory endpoint not found") || strings.Contains(err.Error(), "service address is required")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func LockContentionReadiness(err cache.ErrLockContention) Readiness {

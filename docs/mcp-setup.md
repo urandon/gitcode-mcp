@@ -267,6 +267,34 @@ MCP write tools require `write_mode: "live"` and use the same service write path
 
 Issue read results make identity roles explicit. `get_source`, `list_sources`, `recent_changes`, and `resolve_id` return `stable_source_id` for cache links and `issue_number` for GitCode's repository-local write route; legacy `id` and `remote_alias` remain for compatibility. Issue-targeting MCP writes accept either `number` or `issue_id`. Use `number` only for the repository-local issue number. Use `issue_id` for a stable id such as `ISSUE-76` or a known cached alias such as `issue:76` or `gitcode_issue_id:...`. Resolution is cache-first. If both selectors are present they must identify the same issue, and a cached provider id accidentally supplied as `number` is rejected with an `invalid_query` hint before any remote write.
 
+### Operational error contract
+
+Domain and local-operational failures use JSON-RPC code `-32000`, with a
+stable category in the top-level message and a machine-readable `error.data`
+object. Agents should branch on `error.data.code` or `failure_class`, not parse
+the human `message`:
+
+```json
+{
+  "code": "missing_repository_binding",
+  "failure_class": "missing_repository_binding",
+  "operation": "cache_status",
+  "repo_id": "example-owner/example-repo",
+  "message": "repository binding is not configured",
+  "remediation": "call repo_status ...; CLI fallback: gitcode-mcp doctor ..."
+}
+```
+
+Known cache, repository-binding, local-service IPC, sync, write, and provider
+diagnostics retain their typed codes. An unclassified failure is
+`internal_error`; it is never mislabeled as `sync_required`. Cache corruption
+and local-service connection errors return sanitized summaries rather than raw
+database paths, socket addresses, or provider payloads. `cache_status`,
+`stale_index_report`, `service_status`, `service_jobs`, and
+`service_job_status` include their operation name, and repo-scoped tools include
+the selected `repo_id`. Follow `remediation` for the MCP-first recovery and use
+the stated CLI fallback when the MCP operation itself is unavailable.
+
 Before `add_pr_review_comment` performs a POST, it requires the parent `PR-<number>` record in the selected cache. A missing parent returns typed `parent_pr_not_cached` with an MCP-first targeted-sync remediation (`sync_live` with `pulls=true` and `remote_alias=pr:N`) plus the CLI fallback; no audit claim or provider write has occurred. Retry the review write with the same idempotency key after syncing `pr:N`.
 
 For bounded discussion refresh, call `sync_live` with `pr_comments: true` and `remote_alias: "pr:N"`. The PR must already be cached; the operation calls the per-PR comments adapter once and does not enumerate other cached pull requests. Exact selectors cannot be combined with collection bounds or daemon mode.
