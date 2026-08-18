@@ -321,11 +321,21 @@ func runSyncSelections(ctx context.Context, svc bulkSyncService, req service.Bul
 	aggregate := &service.SyncResourcesResult{Results: []service.SyncResult{}, Failures: []service.ResourceError{}}
 	collections := []syncCollectionResult{}
 	var syncErr error
+	halted := false
 	run := func(remoteType string, fn func(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)) {
+		if halted {
+			return
+		}
 		part, err := fn(ctx, req)
 		collections = append(collections, syncCollectionResult{RemoteType: remoteType, Result: part, Err: err})
 		mergeSyncResources(aggregate, part)
 		if err != nil {
+			var contention cache.ErrLockContention
+			if part == nil && errors.As(err, &contention) {
+				syncErr = err
+				halted = true
+				return
+			}
 			syncErr = mergeSyncError(syncErr, aggregate, err)
 		}
 	}

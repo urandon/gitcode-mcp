@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/service"
@@ -217,6 +218,11 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 			appendBulkSyncResult(&result, part)
 			result.Collections = []string{"pr_comments"}
 			if err != nil {
+				var contention cache.ErrLockContention
+				if part == nil && errors.As(err, &contention) {
+					s.writeOperationalError(id, err, domainErrorContext{Operation: "sync_live", RepoID: a.RepoID})
+					return
+				}
 				if partial, ok := extractLifecyclePartial(err); ok && partial.Diagnostic != "" {
 					result.Diagnostics = append(result.Diagnostics, lifecycleDiagnostic{Code: string(partial.Diagnostic), Message: "pr_comments sync returned a diagnostic"})
 				} else {
@@ -253,10 +259,19 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 	}
 	req := syncLiveBulkRequest(a)
 	var syncErr error
+	var admissionErr error
 	runBulk := func(collection string, fn func(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)) {
+		if admissionErr != nil {
+			return
+		}
 		part, err := fn(ctx, req)
 		appendBulkSyncResult(&result, part)
 		if err != nil {
+			var contention cache.ErrLockContention
+			if part == nil && errors.As(err, &contention) {
+				admissionErr = err
+				return
+			}
 			syncErr = mergeLifecycleSyncError(syncErr, &result, err)
 			if partial, ok := extractLifecyclePartial(err); ok && partial.Diagnostic != "" {
 				result.Diagnostics = append(result.Diagnostics, lifecycleDiagnostic{Code: string(partial.Diagnostic), Message: collection + " sync returned a diagnostic"})
@@ -282,6 +297,10 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 		if commentSelection.PR {
 			runBulk("pr_comments", s.svc.BulkSyncPRComments)
 		}
+	}
+	if admissionErr != nil {
+		s.writeOperationalError(id, admissionErr, domainErrorContext{Operation: "sync_live", RepoID: a.RepoID})
+		return
 	}
 	if syncErr != nil {
 		if partial, ok := extractLifecyclePartial(syncErr); ok && partial.Diagnostic != "" {

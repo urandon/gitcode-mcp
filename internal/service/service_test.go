@@ -2701,6 +2701,143 @@ func TestSyncLockContention(t *testing.T) {
 	}
 }
 
+func TestBulkSyncWriterAdmissionFailsBeforeProviderOrCacheWork(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	lockPath := cachePath + ".lock"
+	holderStore, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holderStore.Close()
+	if err := holderStore.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	contenderStore, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer contenderStore.Close()
+	client := &fakeGitCodeClient{}
+	svc := NewWithClientConfig(contenderStore, client, ServiceConfig{LockPath: lockPath})
+	before, err := contenderStore.RecordCounts(ctx, "fixture-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := holderStore.AcquireWriter(ctx, cache.WriterRequest{Operation: "other-sync", RepoID: "fixture-a", LockPath: lockPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holderStore.ReleaseWriter(ctx, held)
+
+	operations := []struct {
+		name string
+		call func() (*SyncResourcesResult, error)
+	}{
+		{name: "issues", call: func() (*SyncResourcesResult, error) {
+			return svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "fixture-a"})
+		}},
+		{name: "issue-comments", call: func() (*SyncResourcesResult, error) {
+			return svc.BulkSyncIssueComments(ctx, BulkSyncRequest{RepoID: "fixture-a"})
+		}},
+		{name: "pulls", call: func() (*SyncResourcesResult, error) {
+			return svc.BulkSyncPullRequests(ctx, BulkSyncRequest{RepoID: "fixture-a"})
+		}},
+		{name: "pr-comments", call: func() (*SyncResourcesResult, error) {
+			return svc.BulkSyncPRComments(ctx, BulkSyncRequest{RepoID: "fixture-a"})
+		}},
+		{name: "wiki", call: func() (*SyncResourcesResult, error) {
+			return svc.BulkSyncWiki(ctx, BulkSyncRequest{RepoID: "fixture-a"})
+		}},
+		{name: "all", call: func() (*SyncResourcesResult, error) {
+			return svc.BulkSyncAll(ctx, BulkSyncRequest{RepoID: "fixture-a"})
+		}},
+	}
+	for _, operation := range operations {
+		t.Run(operation.name, func(t *testing.T) {
+			result, err := operation.call()
+			if result != nil {
+				t.Fatalf("result=%+v, want nil admission failure", result)
+			}
+			var contention cache.ErrLockContention
+			if !errors.As(err, &contention) {
+				t.Fatalf("err=%T %v, want ErrLockContention", err, err)
+			}
+			var partial *PartialSyncError
+			if errors.As(err, &partial) {
+				t.Fatalf("admission failure wrapped as partial sync: %v", err)
+			}
+			if contention.Operation != "other-sync" || contention.RepoID != "fixture-a" {
+				t.Fatalf("contention=%+v", contention)
+			}
+		})
+	}
+	if len(client.listIssueRequests) != 0 || client.listPRCalls != 0 || client.prCommentCalls != 0 || client.listWikiPagesCallCount != 0 || client.commentCalls != 0 {
+		t.Fatalf("provider called during admission failure: %+v", client)
+	}
+	after, err := contenderStore.RecordCounts(ctx, "fixture-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("cache mutated during admission failure: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestBulkSyncAllReusesWriterAdmissionForNestedCollections(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewSQLiteStore(ctx, filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeGitCodeClient{}
+	svc := NewWithClientConfig(store, client, ServiceConfig{LockPath: filepath.Join(t.TempDir(), "sync.lock")})
+	result, err := svc.BulkSyncAll(ctx, BulkSyncRequest{RepoID: "fixture-a"})
+	if err != nil {
+		t.Fatalf("BulkSyncAll returned error: %v", err)
+	}
+	if result == nil || client.listWikiPagesCallCount != 1 || len(client.listIssueRequests) != 1 {
+		t.Fatalf("result=%+v client=%+v", result, client)
+	}
+}
+
+func TestBulkSyncWriterAdmissionIsIndependentPerCache(t *testing.T) {
+	ctx := context.Background()
+	firstPath := filepath.Join(t.TempDir(), "first.db")
+	secondPath := filepath.Join(t.TempDir(), "second.db")
+	first, err := cache.NewSQLiteStore(ctx, firstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := cache.NewSQLiteStore(ctx, secondPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if err := second.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	held, err := first.AcquireWriter(ctx, cache.WriterRequest{Operation: "first-cache-sync", RepoID: "fixture-a", LockPath: firstPath + ".lock"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.ReleaseWriter(ctx, held)
+	client := &fakeGitCodeClient{}
+	svc := NewWithClientConfig(second, client, ServiceConfig{LockPath: secondPath + ".lock"})
+	if _, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{RepoID: "fixture-a"}); err != nil {
+		t.Fatalf("independent cache sync returned error: %v", err)
+	}
+	if len(client.listIssueRequests) != 1 {
+		t.Fatalf("independent cache provider calls=%d", len(client.listIssueRequests))
+	}
+}
+
 func TestSyncIdempotencyReplay(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeGitCodeClient{wiki: gitcode.WikiPage{Slug: "wiki/design", Title: "Design", Body: "new body", Revision: "rev-2", UpdatedAt: time.Now().UTC()}}

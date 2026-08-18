@@ -136,6 +136,25 @@ func serviceLockPath(lockPath string) string {
 	return filepath.Join(os.TempDir(), "gitcode-mcp-sync.lock")
 }
 
+type bulkWriterAdmissionKey struct{}
+
+type bulkWriterAdmission struct {
+	lockPath string
+	repoID   string
+}
+
+func (s *Service) acquireBulkWriter(ctx context.Context, repoID, operation string) (context.Context, func(), error) {
+	if held, ok := ctx.Value(bulkWriterAdmissionKey{}).(bulkWriterAdmission); ok && held.lockPath == s.lockPath && held.repoID == repoID {
+		return ctx, func() {}, nil
+	}
+	lease, err := s.store.AcquireWriter(ctx, cache.WriterRequest{Operation: operation, RepoID: repoID, LockPath: s.lockPath})
+	if err != nil {
+		return ctx, nil, err
+	}
+	admitted := context.WithValue(ctx, bulkWriterAdmissionKey{}, bulkWriterAdmission{lockPath: s.lockPath, repoID: repoID})
+	return admitted, func() { _ = s.store.ReleaseWriter(context.Background(), lease) }, nil
+}
+
 type sanitizedFixtureClient struct{}
 
 func (sanitizedFixtureClient) FixtureBoundaryMode() string {
@@ -1262,6 +1281,11 @@ func (s *Service) BulkSyncIssues(ctx context.Context, req BulkSyncRequest) (*Syn
 		return nil, err
 	}
 	req.RepoID = repoID
+	ctx, releaseWriter, err := s.acquireBulkWriter(ctx, repoID, "bulk-sync-issues")
+	if err != nil {
+		return nil, err
+	}
+	defer releaseWriter()
 	s.ensureBulkIdempotencyKey(&req, "issues")
 	if err := s.validateRepoScope(ctx, repoID, "issues"); err != nil {
 		return nil, err
@@ -1544,6 +1568,11 @@ func (s *Service) BulkSyncIssueComments(ctx context.Context, req BulkSyncRequest
 		return nil, err
 	}
 	req.RepoID = repoID
+	ctx, releaseWriter, err := s.acquireBulkWriter(ctx, repoID, "bulk-sync-issue-comments")
+	if err != nil {
+		return nil, err
+	}
+	defer releaseWriter()
 	if err := s.validateRepoScope(ctx, repoID, "issues"); err != nil {
 		return nil, err
 	}
@@ -2163,6 +2192,11 @@ func (s *Service) BulkSyncPullRequests(ctx context.Context, req BulkSyncRequest)
 		return nil, err
 	}
 	req.RepoID = repoID
+	ctx, releaseWriter, err := s.acquireBulkWriter(ctx, repoID, "bulk-sync-pulls")
+	if err != nil {
+		return nil, err
+	}
+	defer releaseWriter()
 	s.ensureBulkIdempotencyKey(&req, "pulls")
 	if err := s.validateRepoScope(ctx, repoID, "pull_request"); err != nil {
 		return nil, err
@@ -2485,6 +2519,11 @@ func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (
 		return nil, err
 	}
 	req.RepoID = repoID
+	ctx, releaseWriter, err := s.acquireBulkWriter(ctx, repoID, "bulk-sync-pr-comments")
+	if err != nil {
+		return nil, err
+	}
+	defer releaseWriter()
 	s.ensureBulkIdempotencyKey(&req, "pr_comments")
 	if err := s.validateRepoScope(ctx, repoID, "pull_request"); err != nil {
 		return nil, err
@@ -2828,6 +2867,11 @@ func (s *Service) BulkSyncWiki(ctx context.Context, req BulkSyncRequest) (*SyncR
 		return nil, err
 	}
 	req.RepoID = repoID
+	ctx, releaseWriter, err := s.acquireBulkWriter(ctx, repoID, "bulk-sync-wiki")
+	if err != nil {
+		return nil, err
+	}
+	defer releaseWriter()
 	s.ensureBulkIdempotencyKey(&req, "wiki")
 	if err := s.validateRepoScope(ctx, repoID, "wiki"); err != nil {
 		return nil, err
@@ -3106,6 +3150,11 @@ func (s *Service) BulkSyncAll(ctx context.Context, req BulkSyncRequest) (*SyncRe
 		return nil, err
 	}
 	req.RepoID = repoID
+	ctx, releaseWriter, err := s.acquireBulkWriter(ctx, repoID, "bulk-sync-all")
+	if err != nil {
+		return nil, err
+	}
+	defer releaseWriter()
 	var issuesResult, wikiResult *SyncResourcesResult
 	var issuesErr, wikiErr error
 	var firstDiagnostic SyncDiagnostic

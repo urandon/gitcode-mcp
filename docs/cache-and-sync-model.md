@@ -50,6 +50,8 @@ Opening a current-schema SQLite cache may check schema compatibility, but it mus
 
 When a real writer conflict remains, the caller should receive a typed cache-busy diagnostic (`cache_busy` or `cache_lock_contention`, depending on the surface) with holder metadata when available, not a generic `internal_error`.
 
+Foreground bulk sync takes one logical writer lease for the selected cache and collection before making provider requests. Admission failure is operation-level: it returns one typed contention error with no provider traversal, cache mutation, or per-record partial-failure flood. Composite all-sync reuses its outer lease for nested collection work. The lease marker is private and scoped to the exact cache lock path plus repository id; a different cache path has an independent writer lease and can synchronize concurrently.
+
 ## Live Sync Semantics
 
 `gitcode-mcp sync` uses the live GitCode provider by default for a configured repository and uses the current cache as the durable local source for later reads. `gitcode-mcp sync --offline` or `gitcode-mcp sync --fixture` selects the deterministic fixture/offline provider for docs smoke and tests.
