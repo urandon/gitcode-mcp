@@ -5465,7 +5465,11 @@ func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID s
 func (s *Service) issueWriteGraph(repoID string, issue gitcode.Issue, result gitcode.WriteResult[gitcode.Issue], now time.Time) (writeConfirmation, cache.RecordGraph) {
 	remoteID := firstNonEmptyString(result.RemoteID, issue.ID, strconv.Itoa(firstNonZeroInt(result.RemoteNumber, issue.Number)))
 	issue.Number = firstNonZeroInt(issue.Number, result.RemoteNumber)
-	stableID := fallbackSourceID("issue", remoteID)
+	remoteAlias := remoteID
+	if issue.Number > 0 {
+		remoteAlias = strconv.Itoa(issue.Number)
+	}
+	stableID := fallbackSourceID("issue", remoteAlias)
 	status := firstNonEmptyString(issue.State, issue.Status, "open")
 	updated := issue.UpdatedAt.UTC()
 	if updated.IsZero() {
@@ -5484,8 +5488,11 @@ func (s *Service) issueWriteGraph(repoID string, issue gitcode.Issue, result git
 		hash = contentHash(issue.Title, issue.Body, status, issue.Labels, milestoneID)
 	}
 	revision := firstNonEmptyString(result.RemoteRevision, result.ResponseHash, hash)
-	record := cache.Record{RepoID: repoID, ID: stableID, Type: "issue", Path: "issues/" + remoteID + ".md", Title: issue.Title, Body: issue.Body, Status: status, Labels: issue.Labels, ContentHash: hash, Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: remoteID, RemoteRevision: revision, CreatedAt: created, UpdatedAt: updated}
-	graph := cache.RecordGraph{Record: record, Identities: []cache.Identity{{RepoID: repoID, SourceID: stableID, AliasType: "issue", Alias: remoteID, Remote: cache.RemoteAlias{Type: "issue", ID: remoteID}}}, ReplaceLinkKinds: []string{"milestone"}, RemoteRevisions: []cache.RemoteRevision{{RepoID: repoID, RecordID: stableID, RemoteType: "issue", RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}}
+	record := cache.Record{RepoID: repoID, ID: stableID, Type: "issue", Path: "issues/" + remoteAlias + ".md", Title: issue.Title, Body: issue.Body, Status: status, Labels: issue.Labels, ContentHash: hash, Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: remoteAlias, RemoteRevision: revision, CreatedAt: created, UpdatedAt: updated}
+	graph := cache.RecordGraph{Record: record, Identities: []cache.Identity{{RepoID: repoID, SourceID: stableID, AliasType: "issue", Alias: remoteAlias, Remote: cache.RemoteAlias{Type: "issue", ID: remoteAlias}}}, ReplaceLinkKinds: []string{"milestone"}, RemoteRevisions: []cache.RemoteRevision{{RepoID: repoID, RecordID: stableID, RemoteType: "issue", RemoteID: remoteAlias, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}}
+	if remoteID != remoteAlias {
+		graph.Identities = append(graph.Identities, cache.Identity{RepoID: repoID, SourceID: stableID, AliasType: "gitcode_issue_id", Alias: remoteID, Remote: cache.RemoteAlias{Type: "gitcode_issue_id", ID: remoteID}})
+	}
 	if issue.Milestone != nil {
 		milestoneResult := gitcode.WriteResult[gitcode.Milestone]{Record: *issue.Milestone, Confirmed: true, RemoteID: issue.Milestone.RemoteID, RemoteRevision: issue.Milestone.UpdatedAt, BrowserURL: issue.Milestone.HTMLURL, ConfirmedAt: now}
 		_, milestoneGraph := s.milestoneWriteGraph(repoID, *issue.Milestone, milestoneResult, now)

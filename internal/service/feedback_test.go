@@ -45,7 +45,7 @@ func TestSubmitFeedbackUsesAuditedIssueWriteAndReplays(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "submitted" || result.TicketNumber != 91 || client.createIssueCalls != 1 || !strings.Contains(client.lastCreateIssueRequest.Body, "gitcode-mcp-feedback:") {
+	if result.Status != "submitted" || result.TicketID != "ISSUE-91" || result.TicketNumber != 91 || result.TicketURL != "https://gitcode.com/feedback-repo/issues/91" || client.createIssueCalls != 1 || !strings.Contains(client.lastCreateIssueRequest.Body, "gitcode-mcp-feedback:") {
 		t.Fatalf("result=%#v calls=%d body=%q", result, client.createIssueCalls, client.lastCreateIssueRequest.Body)
 	}
 	if string(client.lastCreateIssueRequest.Labels) != `"feedback,dogfood"` || client.lastWriteOptions.IdempotencyKey != "feedback-submit-1" {

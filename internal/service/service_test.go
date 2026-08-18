@@ -228,7 +228,7 @@ func TestS018LiveWriteUsesConstructedLiveClientWithoutEnv(t *testing.T) {
 	if result.Status != "succeeded" || result.RemoteID != "remote-77" || requests != 1 {
 		t.Fatalf("result=%#v requests=%d", result, requests)
 	}
-	if _, err := store.GetRecord(ctx, "fixture-a", "ISSUE-REMOTE-77"); err != nil {
+	if _, err := store.GetRecord(ctx, "fixture-a", "ISSUE-77"); err != nil {
 		if _, fallbackErr := store.GetRecord(ctx, "fixture-a", "ISSUE-77"); fallbackErr != nil {
 			t.Fatalf("live write did not refresh cache: %v", err)
 		}
@@ -441,10 +441,10 @@ func TestScenario007WriteLiveCreateAuditCacheConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if confirmation == nil || confirmation.RecordID != "ISSUE-REMOTE-77" || confirmation.RemoteID != "remote-77" || confirmation.IdempotencyKey != "scenario-007-key" {
+	if confirmation == nil || confirmation.RecordID != "ISSUE-77" || confirmation.RemoteID != "remote-77" || confirmation.IdempotencyKey != "scenario-007-key" {
 		t.Fatalf("cache confirmation=%#v", confirmation)
 	}
-	if _, err := store.GetRecord(ctx, "fixture-a", "ISSUE-REMOTE-77"); err != nil {
+	if _, err := store.GetRecord(ctx, "fixture-a", "ISSUE-77"); err != nil {
 		t.Fatalf("cache confirmation missing: %v", err)
 	}
 }

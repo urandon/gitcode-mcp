@@ -923,7 +923,7 @@ func assertStartupCreateConfirmation(t *testing.T, cachePath, idempotencyKey str
 	}
 	defer store.Close()
 	confirmation, err := store.GetCacheConfirmationByKey(context.Background(), "fixture-a", idempotencyKey)
-	if err != nil || confirmation == nil || confirmation.RecordID != "ISSUE-MOCK-CREATED-ISSUE" || confirmation.RemoteID != "MOCK-CREATED-ISSUE" {
+	if err != nil || confirmation == nil || confirmation.RecordID != "ISSUE-101" || confirmation.RemoteID != "MOCK-CREATED-ISSUE" {
 		t.Fatalf("cache confirmation = %#v err=%v", confirmation, err)
 	}
 	auditEvent, err := store.GetAuditEventByKey(context.Background(), "fixture-a", idempotencyKey)
