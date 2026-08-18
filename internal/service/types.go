@@ -182,19 +182,21 @@ type GetSourceRequest struct {
 }
 
 type SourceRecord struct {
-	RepoID      string           `json:"repo_id"`
-	ID          string           `json:"id"`
-	Path        string           `json:"path"`
-	RemoteAlias string           `json:"remote_alias"`
-	Kind        string           `json:"kind"`
-	Title       string           `json:"title"`
-	Body        string           `json:"body"`
-	Status      string           `json:"status"`
-	Provenance  string           `json:"provenance"`
-	Labels      []string         `json:"labels"`
-	Links       []LinkResult     `json:"links"`
-	Backlinks   []BacklinkResult `json:"backlinks,omitempty"`
-	UpdatedAt   time.Time        `json:"updated_at"`
+	RepoID         string           `json:"repo_id"`
+	ID             string           `json:"id"`
+	StableSourceID string           `json:"stable_source_id"`
+	IssueNumber    int              `json:"issue_number,omitempty"`
+	Path           string           `json:"path"`
+	RemoteAlias    string           `json:"remote_alias"`
+	Kind           string           `json:"kind"`
+	Title          string           `json:"title"`
+	Body           string           `json:"body"`
+	Status         string           `json:"status"`
+	Provenance     string           `json:"provenance"`
+	Labels         []string         `json:"labels"`
+	Links          []LinkResult     `json:"links"`
+	Backlinks      []BacklinkResult `json:"backlinks,omitempty"`
+	UpdatedAt      time.Time        `json:"updated_at"`
 }
 
 type ListSourcesRequest struct {
@@ -221,15 +223,17 @@ type ListSourcesResult struct {
 }
 
 type SourceSummary struct {
-	RepoID      string    `json:"repo_id"`
-	ID          string    `json:"id"`
-	Path        string    `json:"path"`
-	RemoteAlias string    `json:"remote_alias,omitempty"`
-	Kind        string    `json:"kind"`
-	Title       string    `json:"title"`
-	Status      string    `json:"status"`
-	Provenance  string    `json:"provenance"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	RepoID         string    `json:"repo_id"`
+	ID             string    `json:"id"`
+	StableSourceID string    `json:"stable_source_id"`
+	IssueNumber    int       `json:"issue_number,omitempty"`
+	Path           string    `json:"path"`
+	RemoteAlias    string    `json:"remote_alias,omitempty"`
+	Kind           string    `json:"kind"`
+	Title          string    `json:"title"`
+	Status         string    `json:"status"`
+	Provenance     string    `json:"provenance"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type GetBacklinksRequest struct {
@@ -262,12 +266,14 @@ type ResolveIDRequest struct {
 }
 
 type ResolvedID struct {
-	RepoID      string `json:"repo_id"`
-	ID          string `json:"id"`
-	Path        string `json:"path"`
-	RemoteAlias string `json:"remote_alias"`
-	Kind        string `json:"kind"`
-	Title       string `json:"title"`
+	RepoID         string `json:"repo_id"`
+	ID             string `json:"id"`
+	StableSourceID string `json:"stable_source_id"`
+	IssueNumber    int    `json:"issue_number,omitempty"`
+	Path           string `json:"path"`
+	RemoteAlias    string `json:"remote_alias"`
+	Kind           string `json:"kind"`
+	Title          string `json:"title"`
 }
 
 type ChunkPolicy = index.ChunkPolicy
@@ -653,13 +659,15 @@ type RecentChangesResult struct {
 }
 
 type RecentChangeResult struct {
-	RepoID    string    `json:"repo_id"`
-	ID        string    `json:"id"`
-	Path      string    `json:"path"`
-	Title     string    `json:"title"`
-	Kind      string    `json:"kind"`
-	Status    string    `json:"status"`
-	UpdatedAt time.Time `json:"updated_at"`
+	RepoID         string    `json:"repo_id"`
+	ID             string    `json:"id"`
+	StableSourceID string    `json:"stable_source_id"`
+	IssueNumber    int       `json:"issue_number,omitempty"`
+	Path           string    `json:"path"`
+	Title          string    `json:"title"`
+	Kind           string    `json:"kind"`
+	Status         string    `json:"status"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type LinkCheckRequest struct {
@@ -882,6 +890,7 @@ type WriteCommandRequest struct {
 	RepoID         string    `json:"repo_id,omitempty"`
 	Mode           WriteMode `json:"write_mode,omitempty"`
 	ID             string    `json:"id,omitempty"`
+	IssueID        string    `json:"issue_id,omitempty"`
 	Number         int       `json:"number,omitempty"`
 	IssueNumber    int       `json:"issue_number,omitempty"`
 	CommentID      string    `json:"comment_id,omitempty"`
@@ -918,6 +927,8 @@ type WriteCommandResult struct {
 	Status            string                  `json:"status"`
 	RepoID            string                  `json:"repo_id,omitempty"`
 	ID                string                  `json:"id,omitempty"`
+	StableSourceID    string                  `json:"stable_source_id,omitempty"`
+	IssueNumber       int                     `json:"issue_number,omitempty"`
 	RemoteID          string                  `json:"remote_id,omitempty"`
 	RemoteNumber      int                     `json:"remote_number,omitempty"`
 	RemoteSlug        string                  `json:"remote_slug,omitempty"`

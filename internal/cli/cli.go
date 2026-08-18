@@ -194,6 +194,7 @@ type options struct {
 	repo              string
 	name              string
 	id                string
+	issueID           string
 	mirrorID          string
 	after             string
 	timeoutSeconds    int
@@ -647,6 +648,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.repo, "repo", "", "configured repository id")
 	flags.StringVar(&opts.name, "name", "", "repository name")
 	flags.StringVar(&opts.id, "id", "", "record id")
+	flags.StringVar(&opts.issueID, "issue-id", "", "stable source id or known issue alias")
 	flags.StringVar(&opts.mirrorID, "mirror-id", "", "push mirror id")
 	flags.StringVar(&opts.after, "after", "", "RFC3339 freshness barrier")
 	flags.IntVar(&opts.timeoutSeconds, "timeout-seconds", 0, "wait timeout in seconds")
@@ -3150,7 +3152,7 @@ func writeRequest(opts options) service.WriteCommandRequest {
 	if !opts.dryRun {
 		mode = service.WriteModeLive
 	}
-	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, Number: opts.number, CommentID: opts.commentID, DiscussionID: opts.discussionID, ParentID: opts.parentID, Slug: opts.slug, Path: opts.path, Line: opts.line, StartLine: opts.startLine, EndLine: opts.endLine, Position: opts.position, Sha: opts.sha, Title: opts.title, Body: opts.body, Description: opts.description, DueOn: opts.dueOn, Milestone: opts.milestone, ClearMilestone: opts.clearMilestone, Head: opts.head, Base: opts.base, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
+	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, IssueID: opts.issueID, Number: opts.number, CommentID: opts.commentID, DiscussionID: opts.discussionID, ParentID: opts.parentID, Slug: opts.slug, Path: opts.path, Line: opts.line, StartLine: opts.startLine, EndLine: opts.endLine, Position: opts.position, Sha: opts.sha, Title: opts.title, Body: opts.body, Description: opts.description, DueOn: opts.dueOn, Milestone: opts.milestone, ClearMilestone: opts.clearMilestone, Head: opts.head, Base: opts.base, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
 }
 
 func publishReleaseRequest(opts options) (service.PublishReleaseRequest, error) {
@@ -3253,12 +3255,20 @@ func renderSearchText(w io.Writer, result service.SearchSourcesResult) {
 
 func renderListText(w io.Writer, result service.ListSourcesResult) {
 	for _, item := range result.Results {
-		fmt.Fprintf(w, "%s %s %s %s %s %s\n", item.RepoID, item.ID, item.Kind, item.Status, item.Path, item.Title)
+		if item.IssueNumber > 0 {
+			fmt.Fprintf(w, "%s stable_source_id=%s issue_number=%d %s %s %s %s\n", item.RepoID, item.StableSourceID, item.IssueNumber, item.Kind, item.Status, item.Path, item.Title)
+			continue
+		}
+		fmt.Fprintf(w, "%s stable_source_id=%s %s %s %s %s\n", item.RepoID, item.StableSourceID, item.Kind, item.Status, item.Path, item.Title)
 	}
 }
 
 func renderGetText(w io.Writer, result service.SourceRecord) {
-	fmt.Fprintf(w, "repo_id: %s\nid: %s\nkind: %s\npath: %s\nremote_alias: %s\ntitle: %s\nstatus: %s\nbody:\n%s\n", result.RepoID, result.ID, result.Kind, result.Path, result.RemoteAlias, result.Title, result.Status, result.Body)
+	fmt.Fprintf(w, "repo_id: %s\nid: %s\nstable_source_id: %s\n", result.RepoID, result.ID, result.StableSourceID)
+	if result.IssueNumber > 0 {
+		fmt.Fprintf(w, "issue_number: %d\n", result.IssueNumber)
+	}
+	fmt.Fprintf(w, "kind: %s\npath: %s\nremote_alias: %s\ntitle: %s\nstatus: %s\nbody:\n%s\n", result.Kind, result.Path, result.RemoteAlias, result.Title, result.Status, result.Body)
 }
 
 func renderBacklinksText(w io.Writer, result service.BacklinksResult) {
@@ -3310,7 +3320,11 @@ func renderSyncStatusSummaryText(w io.Writer, result service.SyncStatusSummaryRe
 
 func renderRecentText(w io.Writer, result service.RecentChangesResult) {
 	for _, item := range result.Results {
-		fmt.Fprintf(w, "%s %s %s %s %s\n", item.UpdatedAt.UTC().Format(time.RFC3339), item.RepoID, item.ID, item.Path, item.Title)
+		if item.IssueNumber > 0 {
+			fmt.Fprintf(w, "%s %s stable_source_id=%s issue_number=%d %s %s\n", item.UpdatedAt.UTC().Format(time.RFC3339), item.RepoID, item.StableSourceID, item.IssueNumber, item.Path, item.Title)
+			continue
+		}
+		fmt.Fprintf(w, "%s %s stable_source_id=%s %s %s\n", item.UpdatedAt.UTC().Format(time.RFC3339), item.RepoID, item.StableSourceID, item.Path, item.Title)
 	}
 }
 
@@ -3383,6 +3397,9 @@ func renderDiffText(w io.Writer, result service.DiffSnapshotResult) {
 
 func renderWriteText(w io.Writer, result service.WriteCommandResult) {
 	fmt.Fprintf(w, "%s: %s id=%s idempotency_key=%s evidence=%s\n", result.Command, result.Status, result.ID, result.IdempotencyKey, result.Evidence)
+	if result.StableSourceID != "" || result.IssueNumber > 0 {
+		fmt.Fprintf(w, "issue_identity: stable_source_id=%s issue_number=%d\n", result.StableSourceID, result.IssueNumber)
+	}
 	if result.Milestone != nil {
 		fmt.Fprintf(w, "milestone: id=%s remote_id=%s title=%s cleared=%t\n", result.Milestone.ID, result.Milestone.RemoteID, result.Milestone.Title, result.Milestone.Cleared)
 	}
@@ -4418,11 +4435,12 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "update-issue":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --number N [--title TITLE] [--body BODY] [--state open|closed] [--labels A,B] [--milestone ID_OR_TITLE | --clear-milestone] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO (--number N | --issue-id ISSUE_OR_ALIAS) [--title TITLE] [--body BODY] [--state open|closed] [--labels A,B] [--milestone ID_OR_TITLE | --clear-milestone] [--idempotency-key KEY]\n\n", command)
 		fmt.Fprintln(w, "Update an existing issue. Executes live by default; use --dry-run for no-mutation validation.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
-		fmt.Fprintln(w, "  --number N          issue number (required)")
+		fmt.Fprintln(w, "  --number N          repository-local issue number; not a provider id")
+		fmt.Fprintln(w, "  --issue-id VALUE    stable source id or known cached issue alias")
 		fmt.Fprintln(w, "  --title TITLE       updated title")
 		fmt.Fprintln(w, "  --body BODY         updated body")
 		fmt.Fprintln(w, "  --state STATE       updated state: open or closed")
@@ -4507,12 +4525,13 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "set-issue-milestone":
-		fmt.Fprintln(w, "Usage: gitcode-mcp set-issue-milestone --repo REPO --number N --milestone ID_OR_TITLE [--idempotency-key KEY]")
+		fmt.Fprintln(w, "Usage: gitcode-mcp set-issue-milestone --repo REPO (--number N | --issue-id ISSUE_OR_ALIAS) --milestone ID_OR_TITLE [--idempotency-key KEY]")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Assign a milestone to an issue and verify by readback. Executes live by default; use --dry-run for no-mutation validation.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
-		fmt.Fprintln(w, "  --number N          issue number (required)")
+		fmt.Fprintln(w, "  --number N          repository-local issue number; not a provider id")
+		fmt.Fprintln(w, "  --issue-id VALUE    stable source id or known cached issue alias")
 		fmt.Fprintln(w, "  --milestone VALUE   milestone id or exact title (required)")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
@@ -4520,12 +4539,13 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "clear-issue-milestone":
-		fmt.Fprintln(w, "Usage: gitcode-mcp clear-issue-milestone --repo REPO --number N [--idempotency-key KEY]")
+		fmt.Fprintln(w, "Usage: gitcode-mcp clear-issue-milestone --repo REPO (--number N | --issue-id ISSUE_OR_ALIAS) [--idempotency-key KEY]")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Clear an issue milestone and verify by readback. Executes live by default; use --dry-run for no-mutation validation.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
-		fmt.Fprintln(w, "  --number N          issue number (required)")
+		fmt.Fprintln(w, "  --number N          repository-local issue number; not a provider id")
+		fmt.Fprintln(w, "  --issue-id VALUE    stable source id or known cached issue alias")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
 		fmt.Fprintln(w, "  --live              compatibility alias for live write")
@@ -4587,11 +4607,12 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "add-comment":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --number N --body BODY [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO (--number N | --issue-id ISSUE_OR_ALIAS) --body BODY [--idempotency-key KEY]\n\n", command)
 		fmt.Fprintln(w, "Add a comment to an issue. Executes live by default; use --dry-run for no-mutation validation.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
-		fmt.Fprintln(w, "  --number N          issue number (required)")
+		fmt.Fprintln(w, "  --number N          repository-local issue number; not a provider id")
+		fmt.Fprintln(w, "  --issue-id VALUE    stable source id or known cached issue alias")
 		fmt.Fprintln(w, "  --body BODY         comment body (required)")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
@@ -4644,11 +4665,12 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "add-label":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --number N --label LABEL [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO (--number N | --issue-id ISSUE_OR_ALIAS) --label LABEL [--idempotency-key KEY]\n\n", command)
 		fmt.Fprintln(w, "Add a label to an issue. Executes live by default; use --dry-run for no-mutation validation.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
-		fmt.Fprintln(w, "  --number N          issue number (required)")
+		fmt.Fprintln(w, "  --number N          repository-local issue number; not a provider id")
+		fmt.Fprintln(w, "  --issue-id VALUE    stable source id or known cached issue alias")
 		fmt.Fprintln(w, "  --label LABEL       label to add (required)")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")

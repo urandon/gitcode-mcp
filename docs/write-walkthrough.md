@@ -1,5 +1,19 @@
 # Write Walkthrough
 
+## Issue identity selectors
+
+Issue write commands accept either `--number`, meaning the repository-local GitCode issue number, or `--issue-id`, meaning a stable source id or known cached alias:
+
+```sh
+gitcode-mcp add-comment \
+  --repo example-owner/example-repo \
+  --issue-id ISSUE-76 \
+  --body "Design reviewed" \
+  --idempotency-key issue-76-design-reviewed
+```
+
+Aliases such as `issue:76` and a cached `gitcode_issue_id:...` are also accepted. Resolution stays cache-first; sync the issue before using an uncached alias. Do not pass a provider id as `--number`. If the cache can prove that a numeric value is a provider or stable id rather than an issue number, the command fails before mutation and reports the correct `issue_number` and `stable_source_id`.
+
 This walkthrough covers the explicit, gated write path for GitCode operations.
 
 ## Write safety principles
