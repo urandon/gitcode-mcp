@@ -3154,6 +3154,23 @@ func logWriter(w io.Writer) *log.Logger {
 	return log.New(w, "", 0)
 }
 
+type synchronizedLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *synchronizedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *synchronizedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 func readLine(r io.Reader) (json.RawMessage, error) {
 	buf := make([]byte, 0, 4096)
 	for {
@@ -3172,7 +3189,7 @@ func readLine(r io.Reader) (json.RawMessage, error) {
 func TestHTTPSSETransportSessionFlow(t *testing.T) {
 	store := populatedStore(t)
 	defer store.Close()
-	var logs bytes.Buffer
+	var logs synchronizedLogBuffer
 	transport := NewHTTPSSETransport(NewRPCHandler(service.New(store)), ServerConfig{
 		ReadinessProbe: func(context.Context) Readiness { return Readiness{Ready: true} },
 		Logger:         logWriter(&logs),
@@ -3391,7 +3408,7 @@ func TestHTTPSSETransportSessionErrorsAndMultiClient(t *testing.T) {
 	defer store.Close()
 	ids := []string{"session-a", "session-b"}
 	var idMu sync.Mutex
-	var logs bytes.Buffer
+	var logs synchronizedLogBuffer
 	transport := NewHTTPSSETransport(NewRPCHandler(service.New(store)), ServerConfig{
 		Logger: logWriter(&logs),
 		SessionID: func() string {
