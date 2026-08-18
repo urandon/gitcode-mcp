@@ -72,6 +72,7 @@ var commands = []string{
 	"config",
 	"auth",
 	"service",
+	"maintenance",
 	"rag",
 	"rag-status",
 	"rag-search",
@@ -266,6 +267,11 @@ type options struct {
 	evidence          multiFlag
 	detach            bool
 	daemon            bool
+	syncMode          string
+	ragMode           string
+	collections       string
+	noServiceInstall  bool
+	noModelDownload   bool
 }
 
 type multiFlag []string
@@ -330,7 +336,7 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 		fmt.Fprintf(stdout, "gitcode-mcp %s\n", buildinfo.Current().Version)
 		return 0
 	}
-	if args[0] == "config" || args[0] == "auth" || args[0] == "service" || args[0] == "rag" || args[0] == "rag-status" || args[0] == "rag-search" || args[0] == "doctor" || args[0] == "migrate-cache" {
+	if args[0] == "config" || args[0] == "auth" || args[0] == "service" || args[0] == "maintenance" || args[0] == "rag" || args[0] == "rag-status" || args[0] == "rag-search" || args[0] == "doctor" || args[0] == "migrate-cache" {
 		return executeLocalCommand(ctx, args, stdout, stderr, deps)
 	}
 	if !isKnownCommand(args[0]) {
@@ -716,6 +722,11 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.Var(&opts.evidence, "evidence", "sanitized evidence fact; repeatable")
 	flags.BoolVar(&opts.detach, "detach", false, "start job without attaching progress")
 	flags.BoolVar(&opts.daemon, "daemon", false, "start sync as a daemon job")
+	flags.StringVar(&opts.syncMode, "sync", "", "maintenance sync policy: off, head, or head-and-backfill")
+	flags.StringVar(&opts.ragMode, "rag", "", "maintenance RAG policy: off or maintain")
+	flags.StringVar(&opts.collections, "collections", "", "comma-separated maintained collections")
+	flags.BoolVar(&opts.noServiceInstall, "no-service-install", false, "do not install the user service")
+	flags.BoolVar(&opts.noModelDownload, "no-model-download", false, "do not download an embedding model")
 	if err := flags.Parse(reorderFlags(args)); err != nil {
 		return opts, nil, service.ErrInvalidQuery{Field: "flags", Message: err.Error()}
 	}
@@ -742,7 +753,7 @@ func reorderFlags(args []string) []string {
 		arg := args[i]
 		if strings.HasPrefix(arg, "--") {
 			flags = append(flags, arg)
-			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--issue-comments" || arg == "--pr-comments" || arg == "--index" || arg == "--quiet" || arg == "--dry-run" || arg == "--live" || arg == "--offline" || arg == "--fixture" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" || arg == "--yes" || arg == "--detach" || arg == "--daemon" {
+			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--issue-comments" || arg == "--pr-comments" || arg == "--index" || arg == "--quiet" || arg == "--dry-run" || arg == "--live" || arg == "--offline" || arg == "--fixture" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" || arg == "--yes" || arg == "--detach" || arg == "--daemon" || arg == "--no-service-install" || arg == "--no-model-download" {
 				continue
 			}
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
@@ -775,7 +786,7 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 	}
 	if opts.helpRequested {
 		sub, _ := firstArg(rest)
-		if sub != "" && (command == "config" || command == "auth" || command == "repo" || command == "service" || command == "rag") {
+		if sub != "" && (command == "config" || command == "auth" || command == "repo" || command == "service" || command == "maintenance" || command == "rag") {
 			switch command + " " + sub {
 			case "config init", "config locate", "config show":
 				printLocalSubcommandHelp(command, sub, stdout)
@@ -787,7 +798,9 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "service run", "service install", "service uninstall", "service start", "service stop", "service status", "service doctor", "service maintenance", "service reconcile", "service fake-job", "service jobs", "service job", "service attach", "service cancel":
 				printLocalSubcommandHelp(command, sub, stdout)
-			case "rag setup", "rag index", "rag status", "rag search":
+			case "maintenance plan", "maintenance enable":
+				printLocalSubcommandHelp(command, sub, stdout)
+			case "rag setup", "rag enable", "rag index", "rag status", "rag search":
 				printLocalSubcommandHelp(command, sub, stdout)
 			default:
 				printCommandHelp(command, stdout)
@@ -819,6 +832,9 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 	}
 	if command == "service" {
 		return executeServiceCommand(ctx, rest, opts, stdout, stderr, deps)
+	}
+	if command == "maintenance" {
+		return executeMaintenanceCommand(ctx, rest, opts, stdout, stderr, deps)
 	}
 	if command == "rag" {
 		return executeRAGCommand(ctx, rest, opts, stdout, stderr, deps)
@@ -930,12 +946,119 @@ func probeAuthStatus(ctx context.Context, src config.Source, eff config.Effectiv
 	return status
 }
 
+func executeMaintenanceCommand(ctx context.Context, args []string, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+	sub, ok := firstArg(args)
+	if !ok {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "maintenance", Message: "subcommand is required"})
+	}
+	if sub != "plan" && sub != "enable" {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "maintenance", Message: "unknown subcommand"})
+	}
+	eff, err := config.LoadEffective(deps.Source, config.Overrides{CachePath: opts.cachePath})
+	if err != nil {
+		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), deps.Source))
+		return 1
+	}
+	setup := servicectl.MaintenanceSetup{
+		Manager:         servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, RuntimeDir: eff.Config.Service.RuntimeDir},
+		Config:          eff.Config,
+		CachePath:       eff.Config.CachePath,
+		CachePathSource: eff.CachePathSource,
+		RAGRuntime:      deps.RAGRuntime,
+		ConfigReference: maintenanceConfigReference(eff),
+	}
+	collections := []string{}
+	if strings.TrimSpace(opts.collections) != "" {
+		collections = strings.Split(opts.collections, ",")
+	}
+	req := servicectl.MaintenanceSetupRequest{
+		RepoID: opts.repo, Profile: opts.profile, SyncMode: opts.syncMode, Collections: collections,
+		RAGMode: opts.ragMode, NoServiceInstall: opts.noServiceInstall, NoModelDownload: opts.noModelDownload,
+		Detach: opts.detach, IdempotencyKey: opts.idempotencyKey,
+	}
+	plan, err := setup.Plan(ctx, req)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	if sub == "plan" || opts.dryRun {
+		return render(stdout, opts.format, plan, renderMaintenancePlanText)
+	}
+	req.PlanID = plan.PlanID
+	req.Confirmed = opts.yes
+	req.AllowMachineChange = true
+	result, err := setup.Apply(ctx, req)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	code := render(stdout, opts.format, result, renderMaintenanceApplyText)
+	if result.Status == "blocked" {
+		return 1
+	}
+	return code
+}
+
+func maintenanceConfigReference(eff config.EffectiveConfig) string {
+	if strings.TrimSpace(eff.RepoLocalConfigPath) != "" {
+		return eff.RepoLocalConfigPath
+	}
+	if eff.Location.Exists || eff.Location.Explicit {
+		return eff.Location.Path
+	}
+	return ""
+}
+
+func renderMaintenancePlanText(w io.Writer, plan servicectl.MaintenancePlan) {
+	fmt.Fprintf(w, "status: %s\nplan_id: %s\nrepo_id: %s\n", plan.Status, plan.PlanID, plan.RepoID)
+	fmt.Fprintf(w, "configuration_hash: %s\n", plan.ConfigurationHash)
+	fmt.Fprintf(w, "cache_ref: %s\ncache_uuid: %s\ncache_location: %s (%s)\n", plan.Cache.Ref, plan.Cache.UUID, plan.Cache.LocationKind, plan.Cache.PathFingerprint)
+	fmt.Fprintf(w, "service: %s\nprovider: %s model=%s revision=%s boundary=%s\n", plan.Service.Status, cliEmptyAsNone(plan.Provider.Provider), cliEmptyAsNone(plan.Provider.Model), cliEmptyAsNone(plan.Provider.ModelRevision), plan.Provider.DataBoundary)
+	fmt.Fprintf(w, "policy: sync=%s rag=%t profile=%s\n", plan.Policy.SyncMode, plan.Policy.RAGEnabled, cliEmptyAsNone(plan.Policy.Profile))
+	for _, action := range plan.Actions {
+		fmt.Fprintf(w, "action: %s class=%s status=%s boundary=%s — %s\n", action.ID, action.Class, action.Status, cliEmptyAsNone(action.DataBoundary), action.Summary)
+		if action.Handoff != "" {
+			fmt.Fprintf(w, "  handoff: %s\n", action.Handoff)
+		}
+	}
+	for _, blocker := range plan.Blockers {
+		fmt.Fprintf(w, "blocker: %s\n", blocker)
+	}
+	fmt.Fprintf(w, "next_action: %s\n", plan.NextAction)
+}
+
+func renderMaintenanceApplyText(w io.Writer, result servicectl.MaintenanceApplyResult) {
+	fmt.Fprintf(w, "status: %s\nplan_id: %s\nrepo_id: %s\n", result.Status, result.PlanID, result.RepoID)
+	if result.Registration != nil {
+		fmt.Fprintf(w, "registration_id: %s\ncache_uuid: %s\n", result.Registration.RegistrationID, result.Registration.CacheUUID)
+	}
+	if len(result.CompletedStages) > 0 {
+		fmt.Fprintf(w, "completed_stages: %s\n", strings.Join(result.CompletedStages, ","))
+	}
+	if len(result.JobsStarted) > 0 {
+		fmt.Fprintf(w, "jobs_started: %s\n", strings.Join(result.JobsStarted, ","))
+	}
+	for _, action := range result.PendingActions {
+		fmt.Fprintf(w, "pending: %s class=%s — %s\n", action.ID, action.Class, action.Summary)
+	}
+	if result.AuditReceipt != "" {
+		fmt.Fprintf(w, "audit_receipt: %s\n", result.AuditReceipt)
+	}
+	if result.FailureClass != "" {
+		fmt.Fprintf(w, "failure_class: %s\n", result.FailureClass)
+	}
+	if result.Message != "" {
+		fmt.Fprintf(w, "message: %s\n", result.Message)
+	}
+	fmt.Fprintf(w, "next_action: %s\n", result.NextAction)
+}
+
 func executeRAGCommand(ctx context.Context, args []string, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
 	sub, ok := firstArg(args)
 	if !ok {
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "rag", Message: "subcommand is required"})
 	}
 	switch sub {
+	case "enable":
+		return executeMaintenanceCommand(ctx, []string{"enable"}, opts, stdout, stderr, deps)
 	case "setup":
 		eff, err := config.LoadEffective(deps.Source, config.Overrides{})
 		if err != nil {
@@ -1017,7 +1140,7 @@ func executeRAGStatusCommand(ctx context.Context, opts options, stdout io.Writer
 		return writeError(stderr, opts.format, err)
 	}
 	defer store.Close()
-	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version}
+	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, RuntimeDir: eff.Config.Service.RuntimeDir}
 	ops := rag.NewOperations(store, eff.Config, rag.OperationsOptions{ServiceState: func(ctx context.Context, repoID string) (*rag.ServiceStatus, *rag.JobStatus) {
 		return lookupRAGServiceState(ctx, manager, repoID)
 	}})
@@ -1212,7 +1335,11 @@ func executeServiceCommand(ctx context.Context, args []string, opts options, std
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "service", Message: "subcommand is required"})
 	}
 	rest := args[1:]
-	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version}
+	eff, configErr := config.LoadEffective(deps.Source, config.Overrides{})
+	if configErr != nil {
+		return writeError(stderr, opts.format, configErr)
+	}
+	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, RuntimeDir: eff.Config.Service.RuntimeDir}
 	var (
 		status servicectl.Status
 		err    error
@@ -4554,11 +4681,30 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  cancel      cancel a daemon job by id")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Run gitcode-mcp service SUBCOMMAND --help for details.")
+	case "maintenance":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s plan --repo REPO [flags]\n", command)
+		fmt.Fprintf(w, "       gitcode-mcp %s enable --repo REPO --yes --idempotency-key KEY [flags]\n\n", command)
+		fmt.Fprintln(w, "Plan and enable daemon-managed cache refresh, historical backfill, and RAG repair.")
+		fmt.Fprintln(w, "Plan is read-only. Enable revalidates the rendered plan before any local effect.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO                 configured repository id")
+		fmt.Fprintln(w, "  --cache-path PATH           selected cache (CLI only)")
+		fmt.Fprintln(w, "  --profile PROFILE           RAG profile")
+		fmt.Fprintln(w, "  --sync MODE                 off, head, or head-and-backfill")
+		fmt.Fprintln(w, "  --collections LIST          issues,issue-comments,wiki,pulls,pr-comments")
+		fmt.Fprintln(w, "  --rag MODE                  off or maintain")
+		fmt.Fprintln(w, "  --yes                       confirm exactly the rendered plan")
+		fmt.Fprintln(w, "  --idempotency-key KEY       audited apply identity")
+		fmt.Fprintln(w, "  --no-service-install        prohibit service installation")
+		fmt.Fprintln(w, "  --no-model-download         prohibit model download")
+		fmt.Fprintln(w, "  --detach                    return after initial jobs are coalesced")
+		fmt.Fprintln(w, "  --format FORMAT             text or json")
 	case "rag":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s SUBCOMMAND\n\n", command)
 		fmt.Fprintln(w, "Set up, inspect, index, and search local RAG providers and models.")
 		fmt.Fprintln(w, "Subcommands:")
 		fmt.Fprintln(w, "  setup       check provider, model, and embedding readiness")
+		fmt.Fprintln(w, "  enable      compatibility shortcut for maintenance enable")
 		fmt.Fprintln(w, "  index       start a daemon-owned RAG index job")
 		fmt.Fprintln(w, "  status      report provider, namespace, coverage, and job state")
 		fmt.Fprintln(w, "  search      run semantic/hybrid retrieval over cached chunks")
@@ -4666,6 +4812,8 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "  --owner OWNER       repository owner (for auth probe)")
 		fmt.Fprintln(w, "  --repo REPO         repository id (for auth probe)")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "maintenance plan", "maintenance enable", "rag enable":
+		printCommandHelp("maintenance", w)
 	case "rag setup":
 		fmt.Fprintln(w, "Usage: gitcode-mcp rag setup [--profile PROFILE] [--dry-run] [--yes] [--format FORMAT]")
 		fmt.Fprintln(w)

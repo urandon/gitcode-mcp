@@ -87,6 +87,8 @@ type RPCHandler struct {
 	toolAccess         ToolAccess
 	ragStatus          RAGStatusProvider
 	ragSearch          RAGSearchProvider
+	maintenancePlan    MaintenancePlanProvider
+	maintenanceApply   MaintenanceApplyProvider
 }
 
 type Server struct {
@@ -101,10 +103,14 @@ type Server struct {
 	toolAccess         ToolAccess
 	ragStatus          RAGStatusProvider
 	ragSearch          RAGSearchProvider
+	maintenancePlan    MaintenancePlanProvider
+	maintenanceApply   MaintenanceApplyProvider
 }
 
 type RAGStatusProvider func(context.Context, rag.StatusRequest) (rag.StatusResult, error)
 type RAGSearchProvider func(context.Context, rag.SearchRequest) (rag.SearchResult, error)
+type MaintenancePlanProvider func(context.Context, servicectl.MaintenanceSetupRequest) (servicectl.MaintenancePlan, error)
+type MaintenanceApplyProvider func(context.Context, servicectl.MaintenanceSetupRequest) (servicectl.MaintenanceApplyResult, error)
 
 func NewRPCHandler(svc serviceInterface) *RPCHandler {
 	return NewRPCHandlerWithToolAccess(svc, ToolAccessRead)
@@ -143,6 +149,11 @@ func (h *RPCHandler) SetRAGSearchProvider(provider RAGSearchProvider) {
 	h.ragSearch = provider
 }
 
+func (h *RPCHandler) SetMaintenanceProviders(plan MaintenancePlanProvider, apply MaintenanceApplyProvider) {
+	h.maintenancePlan = plan
+	h.maintenanceApply = apply
+}
+
 func (s *Server) SetRAGStatusProvider(provider RAGStatusProvider) {
 	s.ragStatus = provider
 	if s.handler != nil {
@@ -157,6 +168,14 @@ func (s *Server) SetRAGSearchProvider(provider RAGSearchProvider) {
 	}
 }
 
+func (s *Server) SetMaintenanceProviders(plan MaintenancePlanProvider, apply MaintenanceApplyProvider) {
+	s.maintenancePlan = plan
+	s.maintenanceApply = apply
+	if s.handler != nil {
+		s.handler.SetMaintenanceProviders(plan, apply)
+	}
+}
+
 func NewMinimal(r io.Reader, w io.Writer, stderr io.Writer, diagnostic StartupDiagnostic) *Server {
 	return &Server{reader: r, writer: w, stderr: stderr, handler: NewMinimalRPCHandler(diagnostic), startupDiagnostic: diagnostic, minimal: true, toolAccess: ToolAccessRead}
 }
@@ -166,7 +185,7 @@ func (h *RPCHandler) Handle(ctx context.Context, req request) (*response, bool) 
 		return &response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32600, Message: "Invalid request"}}, true
 	}
 	var buf bytes.Buffer
-	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver, toolAccess: normalizeToolAccess(h.toolAccess), ragStatus: h.ragStatus, ragSearch: h.ragSearch}
+	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver, toolAccess: normalizeToolAccess(h.toolAccess), ragStatus: h.ragStatus, ragSearch: h.ragSearch, maintenancePlan: h.maintenancePlan, maintenanceApply: h.maintenanceApply}
 	server.handle(ctx, req, req.ID == nil)
 	line := bytes.TrimSpace(buf.Bytes())
 	if len(line) == 0 {
@@ -225,13 +244,14 @@ type inputSchema struct {
 }
 
 type schemaProp struct {
-	Type        string   `json:"type"`
-	Description string   `json:"description,omitempty"`
-	Enum        []string `json:"enum,omitempty"`
-	Minimum     *float64 `json:"minimum,omitempty"`
-	Maximum     *float64 `json:"maximum,omitempty"`
-	Default     any      `json:"default,omitempty"`
-	MinLength   int      `json:"minLength,omitempty"`
+	Type        string      `json:"type"`
+	Description string      `json:"description,omitempty"`
+	Enum        []string    `json:"enum,omitempty"`
+	Minimum     *float64    `json:"minimum,omitempty"`
+	Maximum     *float64    `json:"maximum,omitempty"`
+	Default     any         `json:"default,omitempty"`
+	MinLength   int         `json:"minLength,omitempty"`
+	Items       *schemaProp `json:"items,omitempty"`
 }
 
 type initResult struct {
@@ -289,6 +309,7 @@ func buildWriteToolNames() map[string]bool {
 	names := capability.MCPWriteToolNames()
 	names["sync_live"] = true
 	names["index_repo"] = true
+	names["enable_cache_maintenance"] = true
 	return names
 }
 
@@ -526,6 +547,36 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{}},
 	},
 	{
+		Name:        "maintenance_plan",
+		Description: "Build a deterministic, read-only plan for daemon-managed cache refresh, backfill, and RAG maintenance. The selected MCP cache is implicit; filesystem paths are never accepted or returned.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
+			"repo_id":            {Type: "string", Description: "Configured repository id.", MinLength: 1},
+			"profile":            {Type: "string", Description: "RAG profile name."},
+			"sync":               {Type: "string", Description: "Cache refresh policy.", Enum: []string{"off", "head", "head-and-backfill"}, Default: "head-and-backfill"},
+			"collections":        {Type: "array", Description: "Maintained collections.", Items: &schemaProp{Type: "string", Enum: []string{"issues", "issue-comments", "wiki", "pulls", "pr-comments"}}},
+			"rag":                {Type: "string", Description: "RAG maintenance policy.", Enum: []string{"off", "maintain"}, Default: "maintain"},
+			"no_service_install": {Type: "boolean", Description: "Treat missing service installation as a blocker.", Default: false},
+			"no_model_download":  {Type: "boolean", Description: "Treat a missing model as a blocker.", Default: false},
+		}, Required: []string{"repo_id"}},
+	},
+	{
+		Name:        "enable_cache_maintenance",
+		Description: "Apply a previously rendered maintenance plan as an audited local write. Machine-level service installation, provider startup, and model downloads are never performed through MCP; use the returned exact CLI handoff.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
+			"repo_id":            {Type: "string", Description: "Configured repository id.", MinLength: 1},
+			"plan_id":            {Type: "string", Description: "Plan id returned by maintenance_plan.", MinLength: 1},
+			"write_mode":         {Type: "string", Description: "Required explicit local write intent.", Enum: []string{"live"}},
+			"idempotency_key":    {Type: "string", Description: "Caller-provided idempotency key.", MinLength: 1},
+			"profile":            {Type: "string", Description: "Must match the planned RAG profile."},
+			"sync":               {Type: "string", Description: "Must match the planned cache refresh policy.", Enum: []string{"off", "head", "head-and-backfill"}, Default: "head-and-backfill"},
+			"collections":        {Type: "array", Description: "Must match the planned collections.", Items: &schemaProp{Type: "string", Enum: []string{"issues", "issue-comments", "wiki", "pulls", "pr-comments"}}},
+			"rag":                {Type: "string", Description: "Must match the planned RAG policy.", Enum: []string{"off", "maintain"}, Default: "maintain"},
+			"detach":             {Type: "boolean", Description: "Return after jobs are coalesced.", Default: true},
+			"no_service_install": {Type: "boolean", Description: "Must match the planned service-install policy.", Default: false},
+			"no_model_download":  {Type: "boolean", Description: "Must match the planned model-download policy.", Default: false},
+		}, Required: []string{"repo_id", "plan_id", "write_mode", "idempotency_key"}},
+	},
+	{
 		Name:        "service_jobs",
 		Description: "List local service coordinator jobs through local IPC.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{}},
@@ -757,6 +808,8 @@ var preWriteToolListOrder = []string{
 	"repo_status",
 	"service_status",
 	"maintenance_status",
+	"maintenance_plan",
+	"enable_cache_maintenance",
 	"service_jobs",
 	"service_job_status",
 	"list_pr_discussions",
@@ -836,6 +889,8 @@ func (s *Server) toolRegistry() toolRegistry {
 	registerTool(registry, "repo_status", s.callRepoStatus)
 	registerTool(registry, "service_status", s.callServiceStatus)
 	registerTool(registry, "maintenance_status", s.callMaintenanceStatus)
+	registerTool(registry, "maintenance_plan", s.callMaintenancePlan)
+	registerTool(registry, "enable_cache_maintenance", s.callEnableCacheMaintenance)
 	registerTool(registry, "service_jobs", s.callServiceJobs)
 	registerTool(registry, "service_job_status", s.callServiceJobStatus)
 	for _, cap := range capability.MCPRAGCapabilities() {
@@ -1335,6 +1390,65 @@ func (s *Server) callMaintenanceStatus(ctx context.Context, id *json.RawMessage,
 		return
 	}
 	text := fmt.Sprintf("managed caches=%d generation=%d", len(result.Entries), result.Generation)
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+type maintenanceSetupArgs struct {
+	RepoID           string   `json:"repo_id"`
+	PlanID           string   `json:"plan_id,omitempty"`
+	WriteMode        string   `json:"write_mode,omitempty"`
+	IdempotencyKey   string   `json:"idempotency_key,omitempty"`
+	Profile          string   `json:"profile,omitempty"`
+	Sync             string   `json:"sync,omitempty"`
+	Collections      []string `json:"collections,omitempty"`
+	RAG              string   `json:"rag,omitempty"`
+	NoServiceInstall bool     `json:"no_service_install,omitempty"`
+	NoModelDownload  bool     `json:"no_model_download,omitempty"`
+	Detach           bool     `json:"detach,omitempty"`
+}
+
+func (a maintenanceSetupArgs) request() servicectl.MaintenanceSetupRequest {
+	return servicectl.MaintenanceSetupRequest{RepoID: a.RepoID, PlanID: a.PlanID, IdempotencyKey: a.IdempotencyKey, Profile: a.Profile, SyncMode: a.Sync, Collections: a.Collections, RAGMode: a.RAG, NoServiceInstall: a.NoServiceInstall, NoModelDownload: a.NoModelDownload, Detach: a.Detach}
+}
+
+func (s *Server) callMaintenancePlan(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	if s.maintenancePlan == nil {
+		s.writeError(id, -32000, "Maintenance unavailable", &errorData{Code: "maintenance_unavailable", Message: "maintenance planning is not configured"})
+		return
+	}
+	var a maintenanceSetupArgs
+	if err := json.Unmarshal(args, &a); err != nil || strings.TrimSpace(a.RepoID) == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+		return
+	}
+	result, err := s.maintenancePlan(ctx, a.request())
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	text := fmt.Sprintf("maintenance plan=%s status=%s next=%s", result.PlanID, result.Status, result.NextAction)
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func (s *Server) callEnableCacheMaintenance(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	if s.maintenanceApply == nil {
+		s.writeError(id, -32000, "Maintenance unavailable", &errorData{Code: "maintenance_unavailable", Message: "maintenance apply is not configured"})
+		return
+	}
+	var a maintenanceSetupArgs
+	if err := json.Unmarshal(args, &a); err != nil || strings.TrimSpace(a.RepoID) == "" || strings.TrimSpace(a.PlanID) == "" || strings.TrimSpace(a.IdempotencyKey) == "" || a.WriteMode != "live" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id, plan_id, idempotency_key, and write_mode=live are required"})
+		return
+	}
+	req := a.request()
+	req.Confirmed = true
+	req.AllowMachineChange = false
+	result, err := s.maintenanceApply(ctx, req)
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	text := fmt.Sprintf("maintenance status=%s plan=%s next=%s", result.Status, result.PlanID, result.NextAction)
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 }
 

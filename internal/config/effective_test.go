@@ -350,7 +350,7 @@ func TestEffectiveConfigScenarios(t *testing.T) {
 			t.Fatalf("default rag profile not wired through: %#v", eff.Config.RAG)
 		}
 		provider := eff.Config.RAG.Providers["ollama"]
-		if provider.Endpoint != "http://127.0.0.1:11434" || !provider.Autostart || provider.ModelStorage.Env != "OLLAMA_MODELS" {
+		if provider.Endpoint != "http://127.0.0.1:11434" || provider.DataBoundary != "local_network" || !provider.Autostart || provider.ModelStorage.Env != "OLLAMA_MODELS" {
 			t.Fatalf("default provider=%#v", provider)
 		}
 		profile := eff.Config.RAG.Profiles[DefaultRAGProfile]
@@ -372,6 +372,7 @@ func TestEffectiveConfigScenarios(t *testing.T) {
 			"  providers:",
 			"    ollama:",
 			"      endpoint: http://127.0.0.1:21434",
+			"      data_boundary: local_network",
 			"      executable: /opt/homebrew/bin/ollama",
 			"      autostart: false",
 			"      timeout: 45s",
@@ -409,7 +410,7 @@ func TestEffectiveConfigScenarios(t *testing.T) {
 			t.Fatalf("global profile not applied to default/index/search: %#v", eff.Config.RAG)
 		}
 		provider := eff.Config.RAG.Providers["ollama"]
-		if provider.Endpoint != "http://127.0.0.1:21434" || provider.Executable != "/opt/homebrew/bin/ollama" || provider.Autostart || provider.Env["OLLAMA_MODELS"] != "/Volumes/models/ollama" || provider.Timeout.String() != "45s" {
+		if provider.Endpoint != "http://127.0.0.1:21434" || provider.DataBoundary != "local_network" || provider.Executable != "/opt/homebrew/bin/ollama" || provider.Autostart || provider.Env["OLLAMA_MODELS"] != "/Volumes/models/ollama" || provider.Timeout.String() != "45s" {
 			t.Fatalf("global provider not applied: %#v", provider)
 		}
 		if eff.Config.RAG.Indexing.ChunkTokens != 384 || eff.Config.RAG.Indexing.Overlap != 48 || eff.Config.RAG.Search.TopK != 12 || eff.Config.RAG.Search.Hybrid {
@@ -436,7 +437,7 @@ func TestEffectiveConfigScenarios(t *testing.T) {
 		if eff.Config.RAG.ModelStorePath != "/Volumes/env-models/gitcode-mcp" || eff.Config.Service.RuntimeDir != "/Volumes/env-runtime/gitcode-mcp" {
 			t.Fatalf("env paths not applied: %#v", eff.Config)
 		}
-		if eff.Config.RAG.Providers["ollama"].Endpoint != "http://127.0.0.1:31434" {
+		if eff.Config.RAG.Providers["ollama"].Endpoint != "http://127.0.0.1:31434" || eff.Config.RAG.Providers["ollama"].DataBoundary != "unknown" {
 			t.Fatalf("env provider endpoint not applied: %#v", eff.Config.RAG.Providers["ollama"])
 		}
 		if eff.FieldSources["rag.default_profile"] != "env:"+EnvRAGProfile || eff.FieldSources["rag.model_store_path"] != "env:"+EnvRAGModelStore || eff.FieldSources["service.runtime_dir"] != "env:"+EnvServiceRuntimeDir || eff.FieldSources["rag.providers.ollama.endpoint"] != "env:"+EnvRAGProviderEndpoint {

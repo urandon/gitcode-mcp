@@ -56,6 +56,7 @@ rag:
   providers:
     ollama:
       endpoint: http://127.0.0.1:11434
+      data_boundary: local_network
       executable: ollama
       startup: managed
       autostart: true
@@ -210,6 +211,8 @@ See [Secrets](secrets.md) for platform-specific credential storage patterns.
 ## RAG
 
 See [RAG Setup and Operation](rag.md) for provider installation, model storage, namespace invalidation, indexing, status, search, recovery, and optional real-model smoke tests.
+
+Each provider should declare `data_boundary` as `local_process`, `local_network`, `remote`, or `unknown`. Maintenance planning reports that configured value and never infers data locality from an endpoint hostname.
 
 ## Structured feedback
 

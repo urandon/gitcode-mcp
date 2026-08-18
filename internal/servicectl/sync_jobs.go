@@ -264,7 +264,7 @@ func runSync(ctx context.Context, manager Manager, req StartSyncJobRequest, prog
 	if src == nil {
 		src = config.OSSource{}
 	}
-	eff, err := config.LoadEffective(src, config.Overrides{CachePath: req.CachePath})
+	eff, err := effectiveJobConfig(manager, req.CachePath)
 	if err != nil {
 		return nil, nil, err
 	}

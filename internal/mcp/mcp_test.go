@@ -27,6 +27,7 @@ import (
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/rag"
 	"gitcode-mcp/internal/service"
+	"gitcode-mcp/internal/servicectl"
 )
 
 func TestIssueUpdateStateSchemaUsesPublicValues(t *testing.T) {
@@ -165,6 +166,50 @@ func TestMCPRAGStatusReturnsStructuredContent(t *testing.T) {
 	}
 	if structured.Status != "partial" || structured.Coverage.TotalChunks != 3 || structured.Coverage.EmbeddedChunks != 1 {
 		t.Fatalf("structured=%#v", structured)
+	}
+}
+
+func TestMCPMaintenancePlanAndApplyKeepCacheSelectionImplicit(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	handler := NewRPCHandlerWithToolAccess(service.New(store), ToolAccessWrite)
+	handler.SetMaintenanceProviders(
+		func(_ context.Context, req servicectl.MaintenanceSetupRequest) (servicectl.MaintenancePlan, error) {
+			if req.RepoID != "fixture-a" || req.SyncMode != "head" || len(req.Collections) != 1 || req.Collections[0] != "issues" {
+				t.Fatalf("plan request=%#v", req)
+			}
+			return servicectl.MaintenancePlan{PlanID: "maintenance-plan-1", RepoID: req.RepoID, Status: "ready", NextAction: "apply"}, nil
+		},
+		func(_ context.Context, req servicectl.MaintenanceSetupRequest) (servicectl.MaintenanceApplyResult, error) {
+			if req.PlanID != "maintenance-plan-1" || req.IdempotencyKey != "apply-1" || !req.Confirmed || req.AllowMachineChange {
+				t.Fatalf("apply request=%#v", req)
+			}
+			return servicectl.MaintenanceApplyResult{PlanID: req.PlanID, RepoID: req.RepoID, Status: "ready"}, nil
+		},
+	)
+	call := func(name, arguments string) response {
+		t.Helper()
+		id := json.RawMessage(`1`)
+		params := json.RawMessage(fmt.Sprintf(`{"name":%q,"arguments":%s}`, name, arguments))
+		resp, ok := handler.Handle(context.Background(), request{JSONRPC: "2.0", ID: &id, Method: "tools/call", Params: &params})
+		if !ok || resp == nil {
+			t.Fatalf("response=%#v ok=%t", resp, ok)
+		}
+		return *resp
+	}
+	if resp := call("maintenance_plan", `{"repo_id":"fixture-a","sync":"head","rag":"off","collections":["issues"]}`); resp.Error != nil {
+		t.Fatalf("plan error=%#v", resp.Error)
+	}
+	if resp := call("enable_cache_maintenance", `{"repo_id":"fixture-a","plan_id":"maintenance-plan-1","write_mode":"live","idempotency_key":"apply-1","sync":"head","rag":"off","collections":["issues"]}`); resp.Error != nil {
+		t.Fatalf("apply error=%#v", resp.Error)
+	}
+	def := toolDefinitionByName("maintenance_plan")
+	if _, exists := def.InputSchema.Properties["cache_path"]; exists {
+		t.Fatal("maintenance_plan accepts arbitrary cache_path")
+	}
+	def = toolDefinitionByName("enable_cache_maintenance")
+	if _, exists := def.InputSchema.Properties["cache_path"]; exists {
+		t.Fatal("enable_cache_maintenance accepts arbitrary cache_path")
 	}
 }
 

@@ -73,11 +73,28 @@ type Manager struct {
 	Source     config.Source
 	BinaryPath string
 	Version    string
-	GOOS       string
-	Runner     CommandRunner
+	RuntimeDir string
+	// EffectiveConfig is an in-memory, non-secret configuration snapshot used by
+	// daemon-managed jobs. It is never rendered by service status APIs.
+	EffectiveConfig *config.Config
+	GOOS            string
+	Runner          CommandRunner
 }
 
 type CommandRunner func(context.Context, string, ...string) error
+
+func effectiveJobConfig(manager Manager, cachePath string) (config.EffectiveConfig, error) {
+	if manager.EffectiveConfig != nil {
+		cfg := *manager.EffectiveConfig
+		cfg.CachePath = cachePath
+		return config.EffectiveConfig{Config: cfg, CachePathSource: "daemon-registry-snapshot"}, nil
+	}
+	src := manager.Source
+	if src == nil {
+		src = config.OSSource{}
+	}
+	return config.LoadEffective(src, config.Overrides{CachePath: cachePath})
+}
 
 func (m Manager) ResolvePaths() (Paths, error) {
 	src := m.Source
@@ -97,6 +114,9 @@ func (m Manager) ResolvePaths() (Paths, error) {
 		return Paths{}, err
 	}
 	runtimeDir := filepath.Join(cacheDir, ServiceName, "runtime")
+	if configured := strings.TrimSpace(m.RuntimeDir); configured != "" {
+		runtimeDir = configured
+	}
 	goos := m.GOOS
 	if goos == "" {
 		goos = runtime.GOOS

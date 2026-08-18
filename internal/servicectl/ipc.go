@@ -28,9 +28,18 @@ type RPCResponse struct {
 }
 
 type RPCError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code           int    `json:"code"`
+	Message        string `json:"message"`
+	DiagnosticCode string `json:"diagnostic_code,omitempty"`
 }
+
+type RPCDomainError struct {
+	Message string
+	Code    string
+}
+
+func (e RPCDomainError) Error() string          { return e.Message }
+func (e RPCDomainError) DiagnosticCode() string { return e.Code }
 
 type JobListResult struct {
 	Jobs []Job `json:"jobs"`
@@ -124,6 +133,9 @@ func (s RPCServer) handleRequest(ctx context.Context, req RPCRequest) RPCRespons
 	result, err := s.dispatch(ctx, req.Method, req.Params)
 	if err != nil {
 		resp.Error = &RPCError{Code: -32000, Message: err.Error()}
+		if coded, ok := err.(interface{ DiagnosticCode() string }); ok {
+			resp.Error.DiagnosticCode = coded.DiagnosticCode()
+		}
 		return resp
 	}
 	resp.Result = result
@@ -190,10 +202,24 @@ func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawM
 			return nil, err
 		}
 		return s.Maintenance.Enroll(ctx, req)
+	case "Maintenance.Capabilities":
+		return maintenanceCapabilities(s.Manager.Version), nil
 	case "Maintenance.List":
 		return s.Maintenance.List(ctx)
 	case "Maintenance.Reconcile":
 		return s.Maintenance.Reconcile(ctx)
+	case "Maintenance.ReconcileRegistration":
+		var req MaintenanceRegistrationRequest
+		if err := json.Unmarshal(params, &req); err != nil {
+			return nil, err
+		}
+		return s.Maintenance.ReconcileRegistration(ctx, req.RegistrationID)
+	case "Maintenance.ResolveConfig":
+		var req MaintenanceResolveConfigRequest
+		if err := json.Unmarshal(params, &req); err != nil {
+			return nil, err
+		}
+		return s.Maintenance.ResolveConfig(req)
 	case "Maintenance.Disable":
 		var req MaintenanceRegistrationRequest
 		if err := json.Unmarshal(params, &req); err != nil {
@@ -273,6 +299,9 @@ func (c *RPCClient) Call(ctx context.Context, method string, params any, result 
 		return err
 	}
 	if resp.Error != nil {
+		if resp.Error.DiagnosticCode != "" {
+			return RPCDomainError{Message: resp.Error.Message, Code: resp.Error.DiagnosticCode}
+		}
 		return errors.New(resp.Error.Message)
 	}
 	if result == nil {
@@ -303,6 +332,9 @@ func (c *RPCClient) callMemory(ctx context.Context, address, method string, para
 	}
 	resp := server.handleRequest(ctx, req)
 	if resp.Error != nil {
+		if resp.Error.DiagnosticCode != "" {
+			return RPCDomainError{Message: resp.Error.Message, Code: resp.Error.DiagnosticCode}
+		}
 		return errors.New(resp.Error.Message)
 	}
 	if result == nil {

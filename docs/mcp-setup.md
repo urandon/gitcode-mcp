@@ -232,6 +232,8 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 | `diff_snapshot` | Diff two snapshots |
 | `repo_status` | Report repository binding plus binary identity, cache schema compatibility, issue/comment counts, and issue-comment queue state |
 | `maintenance_status` | Report sanitized daemon-managed cache, backfill frontier, content generation, and RAG coverage state |
+| `maintenance_plan` | Build a deterministic, path-free plan for the selected MCP cache and requested refresh/RAG policy |
+| `enable_cache_maintenance` | Apply an already rendered plan with `write_mode=live` and an idempotency key; machine-level installs/downloads return a CLI handoff |
 | `sync_live` | Synchronize selected issue, issue-comment, pull-request, pull-request-comment, or wiki collections into the cache |
 | `prepare_feedback` | Prepare and deduplicate a structured public-safe dogfood report without creating an issue |
 | `submit_feedback` | Submit a prepared report to the configured sink through the audited write lifecycle |
