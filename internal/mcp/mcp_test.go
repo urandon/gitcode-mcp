@@ -3266,6 +3266,26 @@ func TestMCPRuntimeLockContentionErrorMapping(t *testing.T) {
 	wg.Wait()
 }
 
+func TestMCPSyncLiveStopsOnWriterAdmissionFailure(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	lockErr := cache.ErrLockContention{Path: "redacted.lock", Operation: "other-sync", RepoID: "fixture-a", StartedAt: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC), PID: 42, CachePath: ":memory:"}
+	svc := &bulkLockContentionService{serviceInterface: service.New(store), err: lockErr}
+	handler := NewRPCHandlerWithToolAccess(svc, ToolAccessWrite)
+	id := json.RawMessage(`1`)
+	params := json.RawMessage(`{"name":"sync_live","arguments":{"repo_id":"fixture-a","issues":true,"pulls":true}}`)
+	resp, ok := handler.Handle(context.Background(), request{JSONRPC: "2.0", ID: &id, Method: "tools/call", Params: &params})
+	if !ok || resp == nil || resp.Error == nil || resp.Error.Data == nil {
+		t.Fatalf("response=%+v ok=%t", resp, ok)
+	}
+	if resp.Error.Data.Code != "cache_busy" || resp.Error.Data.Operation != "other-sync" || resp.Error.Data.RepoID != "fixture-a" {
+		t.Fatalf("error=%+v", resp.Error)
+	}
+	if svc.issueCalls != 1 || svc.pullCalls != 0 {
+		t.Fatalf("issue calls=%d pull calls=%d, want fail-fast", svc.issueCalls, svc.pullCalls)
+	}
+}
+
 func TestHTTPSSEReadinessLockContention(t *testing.T) {
 	lockErr := cache.ErrLockContention{Path: "redacted.lock", Operation: "migration", StartedAt: time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC), PID: 42, CachePath: ":memory:"}
 	store := populatedStore(t)
@@ -3434,6 +3454,23 @@ type lockContentionService struct {
 
 func (s *lockContentionService) ListSources(context.Context, service.ListSourcesRequest) (service.ListSourcesResult, error) {
 	return service.ListSourcesResult{}, s.err
+}
+
+type bulkLockContentionService struct {
+	serviceInterface
+	err        error
+	issueCalls int
+	pullCalls  int
+}
+
+func (s *bulkLockContentionService) BulkSyncIssues(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
+	s.issueCalls++
+	return nil, s.err
+}
+
+func (s *bulkLockContentionService) BulkSyncPullRequests(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
+	s.pullCalls++
+	return &service.SyncResourcesResult{}, nil
 }
 
 func populatedStore(t *testing.T) cache.Store {

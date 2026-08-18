@@ -1140,6 +1140,30 @@ func TestSyncJSONDefaultsToCompactSummaryAndDetailsRestoresRecords(t *testing.T)
 	}
 }
 
+func TestSyncStopsSelectedCollectionsOnWriterAdmissionFailure(t *testing.T) {
+	lockErr := cache.ErrLockContention{Path: "cache.db.lock", Operation: "other-sync", RepoID: "fixture-a", PID: 42, StartedAt: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)}
+	spy := &spyService{bulkErrors: map[string]error{"issues": lockErr}}
+	factory := func(context.Context, string) (queryService, func() error, error) { return spy, nil, nil }
+	var stdout, stderr bytes.Buffer
+	code := executeWithFactory([]string{"sync", "--offline", "--repo", "fixture-a", "--issues", "--wiki", "--format", "json", "--progress", "off"}, &stdout, &stderr, factory)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if spy.calls["BulkSyncIssues"] != 1 || spy.calls["BulkSyncWiki"] != 0 {
+		t.Fatalf("calls=%+v, want fail-fast before wiki", spy.calls)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout=%q, want no partial-success payload", stdout.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
+		t.Fatalf("stderr is not typed JSON: %v (%q)", err, stderr.String())
+	}
+	if payload["failure_class"] != "cache_busy" {
+		t.Fatalf("payload=%+v", payload)
+	}
+}
+
 func TestSyncSummaryAndProgressExposeDeferredRecords(t *testing.T) {
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	result := &service.SyncResourcesResult{
@@ -2063,6 +2087,7 @@ func populatedStore(t *testing.T) *cache.SQLiteStore {
 
 type spyService struct {
 	calls              map[string]int
+	bulkErrors         map[string]error
 	lastWriteRequest   map[string]service.WriteCommandRequest
 	lastReleaseRequest service.PublishReleaseRequest
 	lastSyncRequest    service.SyncRequest
@@ -2162,26 +2187,44 @@ func (s *spyService) SyncResources(_ context.Context, reqs []service.SyncRequest
 }
 func (s *spyService) BulkSyncIssues(_ context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
 	s.called("BulkSyncIssues")
+	if err := s.bulkErrors["issues"]; err != nil {
+		return nil, err
+	}
 	return spyBulkSyncResult(req, "issues"), nil
 }
 func (s *spyService) BulkSyncIssueComments(_ context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
 	s.called("BulkSyncIssueComments")
+	if err := s.bulkErrors["issue_comments"]; err != nil {
+		return nil, err
+	}
 	return spyBulkSyncResult(req, "issue_comments"), nil
 }
 func (s *spyService) BulkSyncWiki(_ context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
 	s.called("BulkSyncWiki")
+	if err := s.bulkErrors["wiki"]; err != nil {
+		return nil, err
+	}
 	return spyBulkSyncResult(req, "wiki"), nil
 }
 func (s *spyService) BulkSyncPullRequests(_ context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
 	s.called("BulkSyncPullRequests")
+	if err := s.bulkErrors["pulls"]; err != nil {
+		return nil, err
+	}
 	return spyBulkSyncResult(req, "pulls"), nil
 }
 func (s *spyService) BulkSyncPRComments(_ context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
 	s.called("BulkSyncPRComments")
+	if err := s.bulkErrors["pr_comments"]; err != nil {
+		return nil, err
+	}
 	return spyBulkSyncResult(req, "pr_comments"), nil
 }
 func (s *spyService) BulkSyncAll(_ context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
 	s.called("BulkSyncAll")
+	if err := s.bulkErrors["all"]; err != nil {
+		return nil, err
+	}
 	return spyBulkSyncResult(req, "all"), nil
 }
 

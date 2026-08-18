@@ -2024,10 +2024,20 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 				return renderSyncResources(stdout, stderr, opts.format, opts.details, result, syncErr, plan, started)
 			}
 			aggregate := &service.SyncResourcesResult{Results: []service.SyncResult{}, Failures: []service.ResourceError{}}
+			admissionFailed := false
 			runBulk := func(fn func(context.Context, service.BulkSyncRequest) (*service.SyncResourcesResult, error)) {
+				if admissionFailed {
+					return
+				}
 				part, err := fn(ctx, req)
 				mergeSyncResources(aggregate, part)
 				if err != nil {
+					var contention cache.ErrLockContention
+					if part == nil && errors.As(err, &contention) {
+						syncErr = err
+						admissionFailed = true
+						return
+					}
 					syncErr = mergeSyncError(syncErr, aggregate, err)
 				}
 			}
