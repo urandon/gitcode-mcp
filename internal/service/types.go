@@ -59,6 +59,8 @@ type RepositoryStatusRequest struct {
 
 type RepositoryStatus struct {
 	RepoID                     string                    `json:"repo_id"`
+	SuggestedRepoID            string                    `json:"suggested_repo_id,omitempty"`
+	AvailableBindings          []string                  `json:"available_bindings,omitempty"`
 	Owner                      string                    `json:"owner"`
 	Name                       string                    `json:"name"`
 	APIBaseURL                 string                    `json:"api_base_url"`

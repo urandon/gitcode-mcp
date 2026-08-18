@@ -353,10 +353,33 @@ func TestRepositoryRegistry(t *testing.T) {
 	if !errors.As(err, &conflict) {
 		t.Fatalf("alias err=%v want ErrConflict", err)
 	}
-	_, err = svc.RepositoryStatus(ctx, RepositoryStatusRequest{RepoID: "missing-repo"})
+	missing, err := svc.RepositoryStatus(ctx, RepositoryStatusRequest{RepoID: "repo-a"})
 	var notFound ErrNotFound
 	if !errors.As(err, &notFound) || notFound.Kind != "repository" {
 		t.Fatalf("missing err=%v want repository ErrNotFound", err)
+	}
+	if missing.BindingState != "missing" || missing.RepoID != "repo-a" || missing.SuggestedRepoID != "fixture-a" || !reflect.DeepEqual(missing.AvailableBindings, []string{"fixture-a"}) {
+		t.Fatalf("missing status = %#v", missing)
+	}
+}
+
+func TestRepositoryBindingHintsAreBoundedAndUnambiguous(t *testing.T) {
+	repos := []cache.RepositoryBinding{
+		{RepoID: "org/z", Name: "shared"},
+		{RepoID: "org/a", Name: "shared"},
+		{RepoID: "org/b", Name: "other", Aliases: []string{"short"}},
+		{RepoID: "org/c", Name: "c"},
+	}
+	available, suggested := repositoryBindingHints("shared", repos, 3)
+	if suggested != "" {
+		t.Fatalf("ambiguous suggestion = %q", suggested)
+	}
+	if !reflect.DeepEqual(available, []string{"org/a", "org/b", "org/c"}) {
+		t.Fatalf("bounded bindings = %#v", available)
+	}
+	_, suggested = repositoryBindingHints("SHORT", repos, 8)
+	if suggested != "org/b" {
+		t.Fatalf("alias suggestion = %q", suggested)
 	}
 }
 

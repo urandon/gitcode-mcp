@@ -481,27 +481,36 @@ func runMCPStdio(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr 
 
 func newMCPStdioServer(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, deps StartupDeps) (*mcp.Server, func()) {
 	if err := ensureParentDir(deps.Config.CachePath); err != nil {
-		return mcp.NewMinimal(stdin, stdout, stderr, mcp.StartupDiagnosticFromError(err)), func() {}
+		server := mcp.NewMinimal(stdin, stdout, stderr, mcp.StartupDiagnosticFromError(err))
+		server.SetRuntimeContext(mcpRuntimeContext(deps))
+		return server, func() {}
 	}
 	store, err := cache.NewSQLiteStore(ctx, deps.Config.CachePath)
 	if err != nil {
-		return mcp.NewMinimal(stdin, stdout, stderr, mcp.StartupDiagnosticFromError(err)), func() {}
+		server := mcp.NewMinimal(stdin, stdout, stderr, mcp.StartupDiagnosticFromError(err))
+		server.SetRuntimeContext(mcpRuntimeContext(deps))
+		return server, func() {}
 	}
 	svc, err := resolveService(store, deps)
 	if err != nil {
 		_ = store.Close()
-		return mcp.NewMinimal(stdin, stdout, stderr, mcp.StartupDiagnosticFromError(err)), func() {}
+		server := mcp.NewMinimal(stdin, stdout, stderr, mcp.StartupDiagnosticFromError(err))
+		server.SetRuntimeContext(mcpRuntimeContext(deps))
+		return server, func() {}
 	}
 	server := mcp.NewWithToolAccess(stdin, stdout, stderr, svc, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess))
 	server.SetRAGStatusProvider(newMCPRAGStatusProvider(store, deps))
 	server.SetRAGSearchProvider(newMCPRAGSearchProvider(store, deps))
+	server.SetRuntimeContext(mcpRuntimeContext(deps))
 	setMCPMaintenanceProviders(server.SetMaintenanceProviders, deps)
 	return server, func() { _ = store.Close() }
 }
 
 func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind string) int {
 	if err := ensureParentDir(deps.Config.CachePath); err != nil {
-		transport := mcp.NewHTTPSSETransport(mcp.NewMinimalRPCHandler(mcp.StartupDiagnosticFromError(err)), mcp.ServerConfig{BindAddress: bind})
+		handler := mcp.NewMinimalRPCHandler(mcp.StartupDiagnosticFromError(err))
+		handler.SetRuntimeContext(mcpRuntimeContext(deps))
+		transport := mcp.NewHTTPSSETransport(handler, mcp.ServerConfig{BindAddress: bind})
 		if err := transport.Serve(ctx); err != nil {
 			fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
 			return 1
@@ -510,7 +519,9 @@ func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind
 	}
 	store, err := cache.NewSQLiteStore(ctx, deps.Config.CachePath)
 	if err != nil {
-		transport := mcp.NewHTTPSSETransport(mcp.NewMinimalRPCHandler(mcp.StartupDiagnosticFromError(err)), mcp.ServerConfig{BindAddress: bind})
+		handler := mcp.NewMinimalRPCHandler(mcp.StartupDiagnosticFromError(err))
+		handler.SetRuntimeContext(mcpRuntimeContext(deps))
+		transport := mcp.NewHTTPSSETransport(handler, mcp.ServerConfig{BindAddress: bind})
 		if err := transport.Serve(ctx); err != nil {
 			fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
 			return 1
@@ -520,7 +531,9 @@ func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind
 	defer store.Close()
 	svc, err := resolveService(store, deps)
 	if err != nil {
-		transport := mcp.NewHTTPSSETransport(mcp.NewMinimalRPCHandler(mcp.StartupDiagnosticFromError(err)), mcp.ServerConfig{BindAddress: bind})
+		handler := mcp.NewMinimalRPCHandler(mcp.StartupDiagnosticFromError(err))
+		handler.SetRuntimeContext(mcpRuntimeContext(deps))
+		transport := mcp.NewHTTPSSETransport(handler, mcp.ServerConfig{BindAddress: bind})
 		if err := transport.Serve(ctx); err != nil {
 			fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), config.OSSource{}))
 			return 1
@@ -530,6 +543,7 @@ func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind
 	handler := mcp.NewRPCHandlerWithCredentialResolverAndToolAccess(svc, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess))
 	handler.SetRAGStatusProvider(newMCPRAGStatusProvider(store, deps))
 	handler.SetRAGSearchProvider(newMCPRAGSearchProvider(store, deps))
+	handler.SetRuntimeContext(mcpRuntimeContext(deps))
 	setMCPMaintenanceProviders(handler.SetMaintenanceProviders, deps)
 	transport := mcp.NewHTTPSSETransport(handler, mcp.ServerConfig{BindAddress: bind, ReadinessProbe: func(ctx context.Context) mcp.Readiness {
 		repos, err := store.ListRepositories(ctx)
@@ -550,6 +564,10 @@ func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind
 		return 1
 	}
 	return 0
+}
+
+func mcpRuntimeContext(deps StartupDeps) mcp.RuntimeContext {
+	return mcp.RuntimeContext{EffectiveCachePath: deps.Config.CachePath, CachePathSource: deps.CachePathSource, ConfigReference: deps.ConfigReference}
 }
 
 func newMCPRAGStatusProvider(store cache.Store, deps StartupDeps) mcp.RAGStatusProvider {
