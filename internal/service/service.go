@@ -600,13 +600,6 @@ func (s *Service) ListSources(ctx context.Context, req ListSourcesRequest) (List
 	sources = sliceSources(sources, req.Offset, req.Limit)
 	out := make([]SourceSummary, 0, len(sources))
 	for _, source := range sources {
-		if source.Kind == "issue" || source.Kind == "issues" {
-			identitySource, identityErr := s.store.GetSourceScoped(ctx, repoID, source.ID)
-			if identityErr != nil {
-				return ListSourcesResult{}, normalizeError(identityErr, "source", source.ID)
-			}
-			source = identitySource
-		}
 		out = append(out, sourceSummary(source))
 	}
 	return ListSourcesResult{RepoID: repoID, Results: out, Limit: req.Limit, Offset: req.Offset}, nil
@@ -836,13 +829,6 @@ func (s *Service) RecentChanges(ctx context.Context, req RecentChangesRequest) (
 	sources = sliceSources(sources, req.Offset, req.Limit)
 	out := make([]RecentChangeResult, 0, len(sources))
 	for _, source := range sources {
-		if source.Kind == "issue" || source.Kind == "issues" {
-			identitySource, identityErr := s.store.GetSourceScoped(ctx, repoID, source.ID)
-			if identityErr != nil {
-				return RecentChangesResult{}, normalizeError(identityErr, "source", source.ID)
-			}
-			source = identitySource
-		}
 		stableID, issueNumber := sourceIssueIdentity(source)
 		out = append(out, RecentChangeResult{RepoID: source.RepoID, ID: source.ID, StableSourceID: stableID, IssueNumber: issueNumber, Path: source.Path, Title: source.Title, Kind: source.Kind, Status: source.Status, UpdatedAt: source.UpdatedAt.UTC()})
 	}
@@ -5459,9 +5445,11 @@ func milestoneWriteReceipt(milestone *gitcode.Milestone, cleared bool) *WriteMil
 func (s *Service) canonicalizeIssueWriteTarget(ctx context.Context, command, repoID string, req *WriteCommandRequest) error {
 	var number int
 	var selector string
+	consumedLegacyID := false
 	switch command {
 	case "update-issue", "add-comment", "add-label":
 		number, selector = req.Number, firstNonEmptyString(req.IssueID, req.ID)
+		consumedLegacyID = strings.TrimSpace(req.IssueID) == "" && strings.TrimSpace(req.ID) != ""
 	case "update-comment":
 		if req.Number == 0 && strings.TrimSpace(req.IssueID) == "" {
 			return nil
@@ -5471,6 +5459,7 @@ func (s *Service) canonicalizeIssueWriteTarget(ctx context.Context, command, rep
 		number, selector = req.Number, req.IssueID
 	case "clear-issue-milestone":
 		number, selector = req.Number, firstNonEmptyString(req.IssueID, req.ID)
+		consumedLegacyID = strings.TrimSpace(req.IssueID) == "" && strings.TrimSpace(req.ID) != ""
 	case "link-pr-issue":
 		number, selector = req.IssueNumber, req.IssueID
 	default:
@@ -5486,6 +5475,11 @@ func (s *Service) canonicalizeIssueWriteTarget(ctx context.Context, command, rep
 		req.Number = resolvedNumber
 	}
 	req.IssueID = stableID
+	if consumedLegacyID {
+		// The deprecated --id selector is semantically identical to issue_id.
+		// Clear it after canonicalization so both forms share one fingerprint.
+		req.ID = ""
+	}
 	return nil
 }
 

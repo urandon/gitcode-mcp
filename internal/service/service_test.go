@@ -588,7 +588,8 @@ func TestIssueWriteTargetResolutionIsExplicitAndCacheFirst(t *testing.T) {
 	if err := store.UpsertSourceGraph(ctx, cache.SourceGraph{Source: issue, Identities: identities}); err != nil {
 		t.Fatal(err)
 	}
-	svc := NewWithClient(store, &fakeGitCodeClient{})
+	client := &fakeGitCodeClient{}
+	svc := NewWithClient(store, client)
 
 	for _, selector := range []string{"ISSUE-4226802", "issue:76", "gitcode_issue_id:4226802"} {
 		t.Run(selector, func(t *testing.T) {
@@ -628,6 +629,30 @@ func TestIssueWriteTargetResolutionIsExplicitAndCacheFirst(t *testing.T) {
 				t.Fatalf("err=%T %v, want invalid_query containing %q", err, err, test.want)
 			}
 		})
+	}
+
+	confirmedAt := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	client.createIssueCommentResult = gitcode.WriteResult[gitcode.Comment]{
+		Record:            gitcode.Comment{ID: "comment-76", IssueID: "4226802", Body: "same comment", Author: "agent", CreatedAt: confirmedAt, UpdatedAt: confirmedAt},
+		Confirmed:         true,
+		Operation:         "CreateIssueComment",
+		RemoteID:          "comment-76",
+		ParentIssueNumber: 76,
+		ParentIssueID:     "4226802",
+		ConfirmedAt:       confirmedAt,
+	}
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.writeCredentialPresent = true
+	legacy, err := svc.AddComment(ctx, WriteCommandRequest{RepoID: "identity-write", Mode: WriteModeLive, ID: "ISSUE-4226802", Body: "same comment", IdempotencyKey: "selector-form-replay"})
+	if err != nil {
+		t.Fatalf("legacy selector write: %v", err)
+	}
+	canonical, err := svc.AddComment(ctx, WriteCommandRequest{RepoID: "identity-write", Mode: WriteModeLive, IssueID: "ISSUE-4226802", Body: "same comment", IdempotencyKey: "selector-form-replay"})
+	if err != nil {
+		t.Fatalf("canonical selector replay: %v", err)
+	}
+	if legacy.SourceFingerprint != canonical.SourceFingerprint || canonical.Status != "already_applied" || !canonical.Replayed || client.createIssueCommentCalls != 1 {
+		t.Fatalf("legacy=%#v canonical=%#v adapter_calls=%d", legacy, canonical, client.createIssueCommentCalls)
 	}
 
 	legitimate := cache.Source{RepoID: "identity-write", ID: "ISSUE-LARGE-NUMBER", Kind: "issue", Path: "issues/4226802.md", Title: "Large number", Body: "body", Status: "open", ContentHash: "large-number"}
