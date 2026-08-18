@@ -5875,6 +5875,9 @@ func writeIdempotency(command string, req WriteCommandRequest) (string, string) 
 	}{command, req.RepoID, req.ID, req.Number, req.IssueNumber, req.DiscussionID, req.ParentID, req.Slug, req.Path, req.Sha, req.Line, req.Position, req.StartLine, req.EndLine, strings.TrimSpace(req.Title), req.Body, req.Description, strings.TrimSpace(req.DueOn), strings.TrimSpace(req.Milestone), req.ClearMilestone, strings.TrimSpace(req.Head), strings.TrimSpace(req.Base), req.State, strings.TrimSpace(req.Label), req.Labels, strings.TrimSpace(req.Strategy)})
 	sum := sha256.Sum256(payload)
 	fingerprint := hex.EncodeToString(sum[:])
+	if override := strings.TrimSpace(req.idempotencyFingerprint); override != "" {
+		fingerprint = override
+	}
 	if strings.TrimSpace(req.IdempotencyKey) != "" {
 		return strings.TrimSpace(req.IdempotencyKey), fingerprint
 	}

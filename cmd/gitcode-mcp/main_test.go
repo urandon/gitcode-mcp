@@ -17,10 +17,31 @@ import (
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/diagnostics"
+	"gitcode-mcp/internal/feedback"
 	"gitcode-mcp/internal/testnet"
 
 	_ "modernc.org/sqlite"
 )
+
+func TestResolveServiceKeepsFeedbackConfigOffline(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	svc, err := resolveService(store, StartupDeps{Config: config.Config{Feedback: feedback.Config{Enabled: true, Sink: feedback.SinkGitCodeIssues, RepoID: "example/feedback"}}, Cache: CacheStartup{LockPath: filepath.Join(t.TempDir(), "cache.lock")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := svc.PrepareFeedback(ctx, feedback.Draft{Summary: "MCP fallback required", Category: "ux_friction", Surface: "mcp", ReporterType: "agent", Observed: "tool unavailable", Expected: "tool available", Impact: "CLI fallback"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prepared.Configured || prepared.Status != "prepared" || prepared.RepoID != "example/feedback" {
+		t.Fatalf("prepared=%#v", prepared)
+	}
+}
 
 type testSource struct {
 	env       map[string]string

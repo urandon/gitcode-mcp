@@ -909,6 +909,7 @@ type WriteCommandRequest struct {
 	IdempotencyKey string    `json:"idempotency_key,omitempty"`
 
 	pushMirrorPreviousStatus string
+	idempotencyFingerprint   string
 }
 
 type WriteCommandResult struct {

@@ -99,7 +99,7 @@ rag:
 | `feedback.sink` | string | `gitcode_issues` | Feedback destination adapter. The first supported sink is GitCode issues. |
 | `feedback.repo_id` | string | empty | Preconfigured repository binding used by the sink. Callers cannot override this destination. Required when feedback is enabled. |
 | `feedback.labels` | pipe-separated string | empty | Labels attached to newly submitted reports, for example `feedback\|dogfood`. |
-| `feedback.duplicate_policy` | string | `suggest` | Duplicate handling policy (`suggest` or `return_existing`). Exact fingerprint matches never create another issue. |
+| `feedback.duplicate_policy` | string | `suggest` | Duplicate handling policy. `suggest` blocks on likely candidates for explicit review; `return_existing` selects the strongest likely match without writing. Exact fingerprint matches never create another issue. |
 | `credential.store` | string | `auto` | Credential lookup mode: `auto` checks `GITCODE_TOKEN` then the system keyring, `env` checks only `GITCODE_TOKEN`, and `keyring` checks the system keyring after env fallback. `keychain` is accepted as a legacy alias for `keyring`. |
 | `credential.keyring_service` | string | `gitcode-mcp` | System keyring service name used when `credential.store` is `auto` or `keyring`. Override it to isolate credentials for different agents or profiles. |
 | `credential.keyring_account` | string | `token` | System keyring account/user name used when `credential.store` is `auto` or `keyring`. Override it to isolate credentials for different agents or profiles. |

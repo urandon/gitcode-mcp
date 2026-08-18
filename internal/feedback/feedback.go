@@ -189,8 +189,13 @@ func Prepare(draft Draft, context RuntimeContext, cfg Config, existing []Existin
 		status = "configuration_required"
 		remediation = "configure feedback.enabled=true and feedback.repo_id in the trusted gitcode-mcp config"
 	} else if decision == "likely_match" && normalized.DuplicateOverride != DuplicateOverrideCreate {
-		status = "duplicate_candidates"
-		remediation = "review candidates; pass duplicate_override=create only when this is a distinct report"
+		if cfg.DuplicatePolicy == DuplicatePolicyReturn {
+			status = "duplicate"
+			remediation = "duplicate_policy=return_existing selected the strongest likely match; use duplicate_override=create only when this is a distinct report"
+		} else {
+			status = "duplicate_candidates"
+			remediation = "review candidates; pass duplicate_override=create only when this is a distinct report"
+		}
 	} else if decision == "exact_match" {
 		status = "duplicate"
 	}
@@ -322,10 +327,23 @@ func sanitizeURL(raw string) string {
 	if err != nil || parsed.Host == "" {
 		return diagnostics.RedactText(raw)
 	}
+	if !publicFeedbackHost(parsed.Hostname()) {
+		return "[REDACTED_URL]" + suffix
+	}
 	parsed.User = nil
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
 	return parsed.String() + suffix
+}
+
+func publicFeedbackHost(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	for _, domain := range []string{"gitcode.com", "github.com"} {
+		if host == domain || strings.HasSuffix(host, "."+domain) {
+			return true
+		}
+	}
+	return false
 }
 
 func fingerprint(draft Draft) string {

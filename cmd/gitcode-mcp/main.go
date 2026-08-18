@@ -413,7 +413,7 @@ func resolveLiveClient(deps StartupDeps) (gitcode.Client, error) {
 
 func resolveService(store cache.Store, deps StartupDeps) (*service.Service, error) {
 	if !deps.GitCode.Live {
-		return service.New(store), nil
+		return service.NewWithMode(store, gitcode.ProviderModeFixture, "", service.ServiceConfig{LockPath: deps.Cache.LockPath, Feedback: deps.Config.Feedback})
 	}
 	return service.NewWithMode(store, gitcode.ProviderModeLive, deps.GitCode.Token, service.ServiceConfig{
 		BaseURL:         deps.GitCode.BaseURL,

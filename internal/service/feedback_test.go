@@ -37,6 +37,8 @@ func feedbackService(t *testing.T, client gitcode.Client) (*Service, *cache.SQLi
 func TestSubmitFeedbackUsesAuditedIssueWriteAndReplays(t *testing.T) {
 	client := &fakeGitCodeClient{createIssueResult: gitcode.WriteResult[gitcode.Issue]{Record: gitcode.Issue{ID: "remote-91", Number: 91, State: "open"}, Confirmed: true, Operation: "CreateIssue", RemoteID: "91", RemoteNumber: 91, ConfirmedAt: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)}}
 	svc, store := feedbackService(t, client)
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time { return now }
 
 	req := SubmitFeedbackRequest{Draft: feedbackDraft(), Mode: WriteModeLive, IdempotencyKey: "feedback-submit-1"}
 	result, err := svc.SubmitFeedback(context.Background(), req)
@@ -53,6 +55,7 @@ func TestSubmitFeedbackUsesAuditedIssueWriteAndReplays(t *testing.T) {
 	if err != nil || entry == nil || entry.Status != "succeeded" {
 		t.Fatalf("audit entry=%#v err=%v", entry, err)
 	}
+	now = now.Add(10 * time.Minute)
 	replay, err := svc.SubmitFeedback(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -74,6 +77,22 @@ func TestSubmitFeedbackRequiresExplicitLiveModeAndConfiguration(t *testing.T) {
 	}
 	if result.Status != "configuration_required" || result.Remediation == "" {
 		t.Fatalf("result=%#v", result)
+	}
+}
+
+func TestSubmitFeedbackReturnExistingPolicyDoesNotWriteLikelyDuplicate(t *testing.T) {
+	client := &fakeGitCodeClient{onCreateIssue: func(gitcode.CreateIssueRequest, gitcode.WriteOptions) { t.Fatal("provider must not be called") }}
+	svc, store := feedbackService(t, client)
+	if err := store.UpsertSourceGraph(context.Background(), cache.SourceGraph{Source: cache.Source{RepoID: "feedback-repo", ID: "ISSUE-42", Kind: "issue", Path: "issues/42.md", Title: "[Feedback/bug][sync] Exact issue sync required after bulk provider failure", Body: "manual feedback", Status: "open", ContentHash: "feedback-42", Provenance: cache.ProvenanceLive}}); err != nil {
+		t.Fatal(err)
+	}
+	svc.ConfigureFeedback(feedback.Config{Enabled: true, Sink: feedback.SinkGitCodeIssues, RepoID: "feedback-repo", DuplicatePolicy: feedback.DuplicatePolicyReturn})
+	result, err := svc.SubmitFeedback(context.Background(), SubmitFeedbackRequest{Draft: feedbackDraft(), Mode: WriteModeLive, IdempotencyKey: "return-existing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "duplicate" || result.DedupeDecision != "likely_match" || result.TicketNumber != 42 || client.createIssueCalls != 0 {
+		t.Fatalf("result=%#v calls=%d", result, client.createIssueCalls)
 	}
 }
 

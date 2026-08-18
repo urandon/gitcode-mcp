@@ -31,13 +31,14 @@ func (s gitCodeIssueFeedbackSink) Name() string { return feedback.SinkGitCodeIss
 
 func (s gitCodeIssueFeedbackSink) Submit(ctx context.Context, prepared feedback.PreparedReport, idempotencyKey string) (feedback.SubmissionResult, error) {
 	write, err := s.service.CreateIssue(ctx, WriteCommandRequest{
-		RepoID:         s.config.RepoID,
-		Repo:           s.config.RepoID,
-		Mode:           WriteModeLive,
-		Title:          prepared.Title,
-		Body:           prepared.Body,
-		Labels:         append([]string(nil), s.config.Labels...),
-		IdempotencyKey: idempotencyKey,
+		RepoID:                 s.config.RepoID,
+		Repo:                   s.config.RepoID,
+		Mode:                   WriteModeLive,
+		Title:                  prepared.Title,
+		Body:                   prepared.Body,
+		Labels:                 append([]string(nil), s.config.Labels...),
+		IdempotencyKey:         idempotencyKey,
+		idempotencyFingerprint: prepared.Fingerprint,
 	})
 	if err != nil {
 		return feedback.SubmissionResult{}, err
@@ -109,13 +110,17 @@ func (s *Service) SubmitFeedback(ctx context.Context, req SubmitFeedbackRequest)
 	if !prepared.Configured {
 		return base, nil
 	}
-	if prepared.DedupeDecision == "exact_match" && len(prepared.Candidates) > 0 {
+	if prepared.Status == "duplicate" && len(prepared.Candidates) > 0 {
 		candidate := prepared.Candidates[0]
 		base.Status = "duplicate"
 		base.TicketID = candidate.ID
 		base.TicketNumber = candidate.Number
 		base.TicketURL = candidate.URL
-		base.Evidence = "existing open feedback issue matched the deterministic fingerprint; no write performed"
+		if prepared.DedupeDecision == "exact_match" {
+			base.Evidence = "existing open feedback issue matched the deterministic fingerprint; no write performed"
+		} else {
+			base.Evidence = "duplicate_policy=return_existing selected the strongest cached likely match; no write performed"
+		}
 		return base, nil
 	}
 	if prepared.Status == "duplicate_candidates" {

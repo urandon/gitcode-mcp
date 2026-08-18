@@ -43,7 +43,7 @@ First call `prepare_feedback`. It is read-only and is available even in read-onl
 }
 ```
 
-Preparation validates the shape, redacts secrets, strips URL credentials/query/fragment components and private paths, records sanitized runtime context, renders deterministic Markdown, computes a fingerprint, and checks cached open feedback issues. It returns one of:
+Preparation validates the shape, redacts secrets, replaces URLs outside approved public GitCode/GitHub hosts, strips URL credentials/query/fragment components and private paths, records sanitized runtime context, renders deterministic Markdown, computes a fingerprint, and checks cached open feedback issues. It returns one of:
 
 - `prepared`: ready to submit;
 - `configuration_required`: useful draft, but no sink is enabled;
@@ -59,7 +59,7 @@ After external issue creation is authorized, call `submit_feedback` with the sam
 }
 ```
 
-The submission re-prepares the report, resolves only the configured sink, creates the issue through the normal audited write lifecycle, performs sanitized cache readback, and returns the issue receipt. Replaying the same idempotency key does not repeat the provider write. Pass `duplicate_override: "create"` only after reviewing likely candidates and confirming the report is distinct; an exact fingerprint match is never duplicated.
+The submission re-prepares the report, resolves only the configured sink, creates the issue through the normal audited write lifecycle, performs sanitized cache readback, and returns the issue receipt. Replaying the same idempotency key does not repeat the provider write even when the generated observation timestamp changes. With the default `duplicate_policy: suggest`, pass `duplicate_override: "create"` only after reviewing likely candidates and confirming the report is distinct. `return_existing` instead returns the strongest likely match without writing. An exact fingerprint match is never duplicated.
 
 ## CLI workflow
 
