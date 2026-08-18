@@ -942,6 +942,7 @@ type Milestone struct {
 func (m *Milestone) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		ID          any    `json:"id"`
+		Number      any    `json:"number"`
 		Title       string `json:"title"`
 		Name        string `json:"name"`
 		Description string `json:"description"`
@@ -951,6 +952,7 @@ func (m *Milestone) UnmarshalJSON(data []byte) error {
 		DueOn       string `json:"due_on"`
 		DueDate     string `json:"due_date"`
 		HTMLURL     string `json:"html_url"`
+		URL         string `json:"url"`
 		CreatedAt   string `json:"created_at"`
 		UpdatedAt   string `json:"updated_at"`
 	}
@@ -958,7 +960,11 @@ func (m *Milestone) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	var err error
-	m.RemoteID, err = decodeMilestoneID(raw.ID)
+	identity := raw.ID
+	if milestoneIdentityMissing(identity) {
+		identity = raw.Number
+	}
+	m.RemoteID, err = decodeMilestoneID(identity)
 	if err != nil {
 		m.RemoteID = ""
 		return err
@@ -1012,8 +1018,18 @@ func (m *Milestone) UnmarshalJSON(data []byte) error {
 		}
 		m.UpdatedAt = raw.UpdatedAt
 	}
-	m.HTMLURL = raw.HTMLURL
+	m.HTMLURL = firstNonEmpty(raw.HTMLURL, raw.URL)
 	return nil
+}
+
+func milestoneIdentityMissing(value any) bool {
+	if value == nil {
+		return true
+	}
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text) == ""
+	}
+	return false
 }
 
 func decodeMilestoneID(value any) (string, error) {

@@ -441,6 +441,10 @@ type ResourceError struct {
 	FailureClass   string `json:"failure_class,omitempty"`
 	Endpoint       string `json:"endpoint,omitempty"`
 	StatusCode     int    `json:"status_code,omitempty"`
+	ResponseBytes  int64  `json:"response_bytes,omitempty"`
+	ContentType    string `json:"content_type,omitempty"`
+	DecodeOffset   int64  `json:"decode_offset,omitempty"`
+	Attempts       int    `json:"attempts,omitempty"`
 	RecoveryAction string `json:"recovery_action,omitempty"`
 	Err            error  `json:"-"`
 	Message        string `json:"message"`
@@ -462,7 +466,24 @@ func newResourceErrorWithMessage(sourceID, remoteType string, err error, message
 	}
 	re := ResourceError{SourceID: sourceID, RemoteType: remoteType, Err: err, Message: message}
 	re.FailureClass, re.Endpoint, re.StatusCode, re.RecoveryAction = resourceFailureMetadata(err)
+	re.ResponseBytes, re.ContentType, re.DecodeOffset, re.Attempts = resourceResponseMetadata(err)
 	return re
+}
+
+func resourceResponseMetadata(err error) (responseBytes int64, contentType string, decodeOffset int64, attempts int) {
+	var partial gitcode.ErrPartialResponse
+	if errors.As(err, &partial) {
+		return partial.Got, partial.ContentType, partial.Offset, partial.Attempts
+	}
+	var malformed gitcode.ErrMalformedJSON
+	if errors.As(err, &malformed) {
+		return malformed.ResponseSize, malformed.ContentType, malformed.Offset, malformed.Attempts
+	}
+	var unexpected gitcode.ErrUnexpectedContentType
+	if errors.As(err, &unexpected) {
+		return unexpected.ResponseSize, unexpected.ContentType, 0, unexpected.Attempts
+	}
+	return 0, "", 0, 0
 }
 
 func resourceFailureMetadata(err error) (failureClass, endpoint string, statusCode int, recoveryAction string) {
@@ -531,6 +552,18 @@ func resourceEndpoint(err error) string {
 	var partial gitcode.ErrPartialResponse
 	if errors.As(err, &partial) {
 		return partial.Endpoint
+	}
+	var malformed gitcode.ErrMalformedJSON
+	if errors.As(err, &malformed) {
+		return malformed.Endpoint
+	}
+	var unexpected gitcode.ErrUnexpectedContentType
+	if errors.As(err, &unexpected) {
+		return unexpected.Endpoint
+	}
+	var schema *gitcode.ErrSchemaDecode
+	if errors.As(err, &schema) {
+		return schema.Endpoint
 	}
 	var tooLarge gitcode.ErrPayloadTooLarge
 	if errors.As(err, &tooLarge) {

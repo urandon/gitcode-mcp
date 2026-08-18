@@ -1122,25 +1122,156 @@ func (c *HTTPClient) getJSON(ctx context.Context, endpoint string, values url.Va
 }
 
 func (c *HTTPClient) getJSONWithOptions(ctx context.Context, endpoint string, values url.Values, out any, opts requestOptions) error {
-	body, _, err := c.getBytesWithOptions(ctx, endpoint, values, opts)
+	body, headers, err := c.getBytesWithOptions(ctx, endpoint, values, opts)
 	if err != nil {
 		return err
 	}
-	return decodeJSON(endpoint, body, out)
+	return decodeJSONResponse(endpoint, body, headers, out)
 }
 
 func decodeJSON(endpoint string, body []byte, out any) error {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	if err := dec.Decode(out); err != nil {
-		return ErrPartialResponse{Endpoint: endpoint, Got: int64(len(body)), Cause: err, Message: decodeMessage(err)}
+		return classifyJSONDecodeError(endpoint, body, err)
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return ErrMalformedJSON{Endpoint: endpoint, ResponseSize: int64(len(body)), Offset: dec.InputOffset()}
+		}
+		return classifyJSONDecodeError(endpoint, body, err)
 	}
 	return nil
+}
+
+func decodeJSONResponse(endpoint string, body []byte, headers http.Header, out any) error {
+	contentType := strings.TrimSpace(headers.Get("Content-Type"))
+	err := decodeJSON(endpoint, body, out)
+	if err != nil && contentType != "" && !isJSONContentType(contentType) && !looksLikeJSON(body) {
+		return ErrUnexpectedContentType{Endpoint: endpoint, ContentType: sanitizeContentType(contentType), ResponseSize: int64(len(body))}
+	}
+	var partial ErrPartialResponse
+	if errors.As(err, &partial) && partial.ContentType == "" {
+		partial.ContentType = sanitizeContentType(contentType)
+		return partial
+	}
+	var malformed ErrMalformedJSON
+	if errors.As(err, &malformed) && malformed.ContentType == "" {
+		malformed.ContentType = sanitizeContentType(contentType)
+		return malformed
+	}
+	return err
+}
+
+func classifyJSONDecodeError(endpoint string, body []byte, err error) error {
+	var schema *ErrSchemaDecode
+	if errors.As(err, &schema) {
+		if schema.Endpoint == "" {
+			schema.Endpoint = endpoint
+		}
+		return schema
+	}
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		field := strings.TrimSpace(typeErr.Field)
+		if field == "" {
+			field = endpoint
+		}
+		return &ErrSchemaDecode{Endpoint: endpoint, Field: field, Expected: typeErr.Type.String(), Received: "incompatible JSON value"}
+	}
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		if errors.Is(err, io.ErrUnexpectedEOF) || strings.Contains(strings.ToLower(syntaxErr.Error()), "unexpected end") {
+			offset := syntaxErr.Offset
+			if offset == 0 {
+				offset = int64(len(body))
+			}
+			return ErrPartialResponse{Endpoint: endpoint, Got: int64(len(body)), Cause: err, Message: "truncated JSON", Offset: offset}
+		}
+		return ErrMalformedJSON{Endpoint: endpoint, ResponseSize: int64(len(body)), Offset: syntaxErr.Offset}
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return ErrPartialResponse{Endpoint: endpoint, Got: int64(len(body)), Cause: err, Message: "truncated JSON", Offset: int64(len(body))}
+	}
+	return &ErrSchemaDecode{Endpoint: endpoint, Field: endpoint, Expected: "response matching adapter schema", Received: "incompatible JSON value"}
+}
+
+func retryableResponseDecode(err error) bool {
+	var partial ErrPartialResponse
+	if errors.As(err, &partial) {
+		return true
+	}
+	var malformed ErrMalformedJSON
+	if errors.As(err, &malformed) {
+		return true
+	}
+	var contentType ErrUnexpectedContentType
+	return errors.As(err, &contentType)
+}
+
+func withResponseAttempt(err error, attempt int) error {
+	var partial ErrPartialResponse
+	if errors.As(err, &partial) {
+		partial.Attempts = attempt
+		return partial
+	}
+	var malformed ErrMalformedJSON
+	if errors.As(err, &malformed) {
+		malformed.Attempts = attempt
+		return malformed
+	}
+	var contentType ErrUnexpectedContentType
+	if errors.As(err, &contentType) {
+		contentType.Attempts = attempt
+		return contentType
+	}
+	return err
+}
+
+func withResponseContentType(err error, contentType string) error {
+	normalized := sanitizeContentType(contentType)
+	var partial ErrPartialResponse
+	if errors.As(err, &partial) {
+		partial.ContentType = normalized
+		return partial
+	}
+	var malformed ErrMalformedJSON
+	if errors.As(err, &malformed) {
+		malformed.ContentType = normalized
+		return malformed
+	}
+	return err
+}
+
+func isJSONContentType(value string) bool {
+	mediaType := strings.ToLower(strings.TrimSpace(strings.SplitN(value, ";", 2)[0]))
+	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
+}
+
+func looksLikeJSON(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	return len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[')
+}
+
+func sanitizeContentType(value string) string {
+	mediaType := strings.ToLower(strings.TrimSpace(strings.SplitN(value, ";", 2)[0]))
+	if len(mediaType) > 128 {
+		return mediaType[:128]
+	}
+	return mediaType
 }
 
 func decodeSchemaJSON(endpoint string, body []byte, out any) error {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	if err := dec.Decode(out); err != nil {
-		return &ErrSchemaDecode{Field: endpoint, Expected: "valid JSON response", Received: decodeMessage(err)}
+		var schema *ErrSchemaDecode
+		if errors.As(err, &schema) {
+			if schema.Endpoint == "" {
+				schema.Endpoint = endpoint
+			}
+			return schema
+		}
+		return &ErrSchemaDecode{Endpoint: endpoint, Field: endpoint, Expected: "valid JSON response", Received: decodeMessage(err)}
 	}
 	return nil
 }
@@ -1753,13 +1884,17 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 			return nil, nil, ErrPayloadTooLarge{Endpoint: endpoint, Limit: c.maxResponseSize, Size: resp.ContentLength, Source: "remote_status"}
 		}
 		body, readErr := c.readBounded(resp, endpoint)
+		headers := resp.Header.Clone()
 		resp.Body.Close()
 		if readErr != nil {
+			readErr = withResponseContentType(withResponseAttempt(readErr, attempt), headers.Get("Content-Type"))
+			if retryableResponseDecode(readErr) && attempt < attempts {
+				continue
+			}
 			return nil, nil, readErr
 		}
 		switch {
 		case resp.StatusCode >= 200 && resp.StatusCode <= 299:
-			headers := resp.Header.Clone()
 			headers.Set("Status", strconv.Itoa(resp.StatusCode))
 			return body, headers, nil
 		case resp.StatusCode == http.StatusTooManyRequests:

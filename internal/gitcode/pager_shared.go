@@ -14,15 +14,26 @@ func getPaged[T any](ctx context.Context, c *HTTPClient, endpoint string, baseVa
 	fetch := func(ctx context.Context, state PageState) ([]T, http.Header, error) {
 		values := cloneValues(baseValues)
 		strategy.Apply(values, state)
-		body, headers, err := c.getBytes(ctx, endpoint, values)
-		if err != nil {
-			return nil, nil, err
+		attempts := c.maxRetries + 1
+		if attempts < 1 {
+			attempts = 1
 		}
-		var pageItems []T
-		if err := decodeJSON(endpoint, body, &pageItems); err != nil {
-			return nil, nil, err
+		for attempt := 1; attempt <= attempts; attempt++ {
+			body, headers, err := c.getBytes(ctx, endpoint, values)
+			if err != nil {
+				return nil, nil, err
+			}
+			var pageItems []T
+			if err := decodeJSONResponse(endpoint, body, headers, &pageItems); err != nil {
+				err = withResponseAttempt(err, attempt)
+				if retryableResponseDecode(err) && attempt < attempts {
+					continue
+				}
+				return nil, nil, err
+			}
+			return pageItems, headers, nil
 		}
-		return pageItems, headers, nil
+		panic("unreachable response decode retry loop")
 	}
 	return collectPages(ctx, endpoint, initial, c.pagination, strategy, fetch)
 }

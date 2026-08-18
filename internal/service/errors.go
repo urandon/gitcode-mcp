@@ -17,6 +17,10 @@ type ErrSyncFailure struct {
 	RetryAfter     time.Duration
 	ExpectedBytes  int64
 	GotBytes       int64
+	ResponseBytes  int64
+	ContentType    string
+	DecodeOffset   int64
+	Attempts       int
 	LimitBytes     int64
 	SizeBytes      int64
 	PayloadSource  string
@@ -38,7 +42,13 @@ func (e ErrSyncFailure) Error() string {
 	case "rate_limited":
 		return fmt.Sprintf("sync: rate limited. Retry after %d seconds.", int(e.RetryAfter.Seconds()))
 	case "partial_response":
-		return fmt.Sprintf("sync: received partial response for %s: expected %d bytes, got %d bytes. Run sync again to resume.", e.Endpoint, e.ExpectedBytes, e.GotBytes)
+		return fmt.Sprintf("sync: received a truncated response for %s after %d attempt(s)", e.Endpoint, max(e.Attempts, 1))
+	case "malformed_response":
+		return fmt.Sprintf("sync: provider returned malformed JSON for %s after %d attempt(s)", e.Endpoint, max(e.Attempts, 1))
+	case "unexpected_content_type":
+		return fmt.Sprintf("sync: provider returned unexpected content type %s for %s after %d attempt(s)", e.ContentType, e.Endpoint, max(e.Attempts, 1))
+	case "schema_decode":
+		return fmt.Sprintf("sync: provider response schema is incompatible for %s", e.Endpoint)
 	case "auth_expired":
 		return "sync: authentication expired. Renew your GITCODE_TOKEN and try again."
 	case "live_auth_failure":

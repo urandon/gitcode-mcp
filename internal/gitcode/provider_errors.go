@@ -3,6 +3,7 @@ package gitcode
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 type ErrProviderUnavailable struct {
@@ -75,6 +76,7 @@ func (e ErrValidationFailed) Error() string {
 func (e ErrValidationFailed) DiagnosticCode() string { return "validation_failed" }
 
 type ErrSchemaDecode struct {
+	Endpoint string
 	Field    string
 	Expected string
 	Received string
@@ -97,6 +99,40 @@ func (e ErrSchemaDecode) Error() string {
 }
 
 func (e ErrSchemaDecode) DiagnosticCode() string { return "schema_decode" }
+
+type ErrUnexpectedContentType struct {
+	Endpoint     string
+	ContentType  string
+	ResponseSize int64
+	Attempts     int
+}
+
+func (e ErrUnexpectedContentType) Error() string {
+	contentType := strings.TrimSpace(e.ContentType)
+	if contentType == "" {
+		contentType = "missing"
+	}
+	return fmt.Sprintf("gitcode: unexpected content type for %s: %s", e.Endpoint, contentType)
+}
+
+func (e ErrUnexpectedContentType) DiagnosticCode() string { return "unexpected_content_type" }
+
+type ErrMalformedJSON struct {
+	Endpoint     string
+	ContentType  string
+	ResponseSize int64
+	Offset       int64
+	Attempts     int
+}
+
+func (e ErrMalformedJSON) Error() string {
+	if e.Offset > 0 {
+		return fmt.Sprintf("gitcode: malformed JSON for %s at byte %d", e.Endpoint, e.Offset)
+	}
+	return fmt.Sprintf("gitcode: malformed JSON for %s", e.Endpoint)
+}
+
+func (e ErrMalformedJSON) DiagnosticCode() string { return "malformed_response" }
 
 type ErrPaginationMalformed struct {
 	Endpoint string

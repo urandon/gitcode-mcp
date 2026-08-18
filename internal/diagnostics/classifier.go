@@ -2,7 +2,6 @@ package diagnostics
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -134,7 +133,7 @@ func classifyCode(err error, ctx CommandContext) Code {
 	if hasCode(err, "auth_expired") || hasCode(err, "forbidden") || hasCode(err, "write_unauthorized") || hasCode(err, "live_auth_failure") {
 		return CodeConfigCredential
 	}
-	if ctx.HTTPStatus >= 200 && ctx.HTTPStatus <= 299 && (ctx.SchemaDecodeFailure || ctx.MalformedSuccess || hasCode(err, "schema_decode")) {
+	if ctx.HTTPStatus >= 200 && ctx.HTTPStatus <= 299 && (ctx.SchemaDecodeFailure || ctx.MalformedSuccess || hasCode(err, "schema_decode") || hasCode(err, "malformed_response") || hasCode(err, "unexpected_content_type")) {
 		return CodeSchemaDecode
 	}
 	if ctx.HTTPStatus >= 400 && ctx.HTTPStatus <= 499 && ctx.HTTPStatus != http.StatusUnauthorized && ctx.HTTPStatus != http.StatusForbidden && ctx.HTTPAttempted {
@@ -155,7 +154,7 @@ func classifyCode(err error, ctx CommandContext) Code {
 	if ctx.UnsupportedPayload || hasCode(err, "unsupported_mock_payload") || hasCode(err, "live_graph_invalid") || hasCode(err, "validation_failed") {
 		return CodeSchemaDecode
 	}
-	if hasCode(err, "schema_decode") {
+	if hasCode(err, "schema_decode") || hasCode(err, "malformed_response") || hasCode(err, "unexpected_content_type") {
 		return CodeSchemaDecode
 	}
 	if (ctx.TransportFailure || hasCode(err, "live_transport_failure") || hasCode(err, "network_unavailable") || hasCode(err, "write_network_unavailable")) && ctx.HTTPAttempted {
@@ -203,7 +202,7 @@ func codeFromError(err error) Code {
 			return CodeCacheBusy
 		case "cache_schema_blocked":
 			return CodeCacheSchemaBlocked
-		case "schema_decode", "partial_response":
+		case "schema_decode", "partial_response", "malformed_response", "unexpected_content_type":
 			return CodeSchemaDecode
 		case "auth_expired", "forbidden", "write_unauthorized", "not_found", "remote_conflict", "remote_collision", "remote_not_found", "rate_limited":
 			return CodeAPIFailure
@@ -225,18 +224,26 @@ func hasCode(err error, want string) bool {
 
 func diagnosticCodes(err error) []string {
 	var out []string
-	for err != nil {
+	var walk func(error)
+	walk = func(err error) {
+		if err == nil {
+			return
+		}
 		if coded, ok := err.(interface{ DiagnosticCode() string }); ok {
 			if code := strings.TrimSpace(coded.DiagnosticCode()); code != "" {
 				out = append(out, code)
 			}
 		}
-		unwrapped := errors.Unwrap(err)
-		if unwrapped == nil {
-			break
+		switch unwrapped := err.(type) {
+		case interface{ Unwrap() []error }:
+			for _, child := range unwrapped.Unwrap() {
+				walk(child)
+			}
+		case interface{ Unwrap() error }:
+			walk(unwrapped.Unwrap())
 		}
-		err = unwrapped
 	}
+	walk(err)
 	return out
 }
 
