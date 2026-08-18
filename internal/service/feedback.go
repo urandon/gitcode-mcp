@@ -181,6 +181,9 @@ func (s *Service) feedbackExistingIssues(ctx context.Context) ([]feedback.Existi
 	}
 	out := make([]feedback.ExistingIssue, 0, len(sources))
 	for _, source := range sources {
+		if source.Provenance == cache.ProvenanceFixture {
+			continue
+		}
 		number := issueNumberFromFeedbackSource(source)
 		url := ""
 		if number > 0 {

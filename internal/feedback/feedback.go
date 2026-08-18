@@ -479,11 +479,8 @@ func overlapScore(a, b map[string]struct{}) float64 {
 			common++
 		}
 	}
-	denominator := len(a)
-	if len(b) < denominator {
-		denominator = len(b)
-	}
-	return float64(common) / float64(denominator)
+	union := len(a) + len(b) - common
+	return float64(common) / float64(union)
 }
 
 func uniqueStrings(values []string) []string {

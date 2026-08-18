@@ -81,7 +81,7 @@ func TestPrepareDedupeContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	likelyExisting := []ExistingIssue{{ID: "ISSUE-43", Number: 43, Status: "open", Title: base.Title}}
+	likelyExisting := []ExistingIssue{{ID: "ISSUE-43", Number: 43, Status: "open", Title: "[Feedback/bug][sync] Bulk issue sync returns malformed JSON"}}
 	if likelyBase.Fingerprint == base.Fingerprint {
 		t.Fatal("distinct report unexpectedly shared fingerprint")
 	}
@@ -99,6 +99,15 @@ func TestPrepareDedupeContract(t *testing.T) {
 	}
 	if override.Status != "prepared" || override.DedupeDecision != "likely_match" {
 		t.Fatalf("override result: %#v", override)
+	}
+
+	generic := []ExistingIssue{{ID: "ISSUE-4226732", Status: "open", Title: "Issue 4226732"}}
+	noFalsePositive, err := Prepare(draft, testContext(), cfg, generic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if noFalsePositive.DedupeDecision != "none" {
+		t.Fatalf("generic placeholder became duplicate: %#v", noFalsePositive.Candidates)
 	}
 }
 
