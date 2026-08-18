@@ -31,6 +31,7 @@ const (
 	CodePRReviewAnchorMismatch     Code = "pr_review_anchor_mismatch"
 	CodeWriteConfirmationMissing   Code = "write_confirmation_incomplete"
 	CodeDiscussionReplyUnavailable Code = "discussion_reply_unavailable"
+	CodeParentPRNotCached          Code = "parent_pr_not_cached"
 )
 
 type Diagnostic struct {
@@ -124,6 +125,9 @@ func classifyCode(err error, ctx CommandContext) Code {
 	}
 	if hasCode(err, "discussion_reply_unavailable") {
 		return CodeDiscussionReplyUnavailable
+	}
+	if hasCode(err, "parent_pr_not_cached") {
+		return CodeParentPRNotCached
 	}
 	if ctx.ProviderMode != "live-http" {
 		if ctx.FixtureReadOnly || hasCode(err, "fixture_read_only") || hasCode(err, "write_fixture_read_only") {
@@ -232,6 +236,8 @@ func codeFromError(err error) Code {
 			return CodeWriteConfirmationMissing
 		case "discussion_reply_unavailable":
 			return CodeDiscussionReplyUnavailable
+		case "parent_pr_not_cached":
+			return CodeParentPRNotCached
 		}
 	}
 	return CodeConfigurationError
@@ -314,6 +320,8 @@ func exitClassFor(code Code) string {
 		return "input"
 	case CodeDiscussionReplyUnavailable:
 		return "capability"
+	case CodeParentPRNotCached:
+		return "cache"
 	case CodeUnsupportedMockPayload:
 		return "payload"
 	case CodeFixtureFallbackDetected, CodeFixtureReadOnly:
@@ -372,6 +380,8 @@ func messageFor(code Code, err error) string {
 		base += ": remote write anchor could not be safely confirmed"
 	case CodeDiscussionReplyUnavailable:
 		base += ": provider discussion identity is unavailable for a safe reply"
+	case CodeParentPRNotCached:
+		base += ": inline review write requires its parent pull request in the selected cache"
 	}
 	if err != nil {
 		return base + ": " + err.Error()

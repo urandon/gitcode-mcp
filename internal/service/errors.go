@@ -285,6 +285,25 @@ func (e ErrWriteFailure) Unwrap() error { return e.Cause }
 
 func (e ErrWriteFailure) DiagnosticCode() string { return e.Code }
 
+type ErrParentPRNotCached struct {
+	RepoID string
+	Number int
+}
+
+func (e ErrParentPRNotCached) Remediation() string {
+	return fmt.Sprintf("gitcode-mcp sync --repo %s --pulls --input %s", shellQuote(e.RepoID), shellQuote(fmt.Sprintf("pr:%d", e.Number)))
+}
+
+func (e ErrParentPRNotCached) Error() string {
+	return fmt.Sprintf("parent pull request %d is not cached; run %s before creating an inline review comment", e.Number, e.Remediation())
+}
+
+func (e ErrParentPRNotCached) DiagnosticCode() string { return "parent_pr_not_cached" }
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
 type ErrPushMirrorNotFound struct {
 	MirrorID string
 }

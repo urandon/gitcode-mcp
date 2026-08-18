@@ -318,6 +318,11 @@ func (s *Service) ResetLiveCache(ctx context.Context, req ResetLiveCacheRequest)
 	if err != nil {
 		return ResetLiveCacheResult{}, err
 	}
+	lease, err := s.store.AcquireWriter(ctx, cache.WriterRequest{Operation: "reset-live", RepoID: repoID, LockPath: s.lockPath})
+	if err != nil {
+		return ResetLiveCacheResult{}, err
+	}
+	defer s.store.ReleaseWriter(context.Background(), lease)
 	if err := s.store.ResetLive(ctx, repoID); err != nil {
 		return ResetLiveCacheResult{}, normalizeError(err, "cache reset live", repoID)
 	}
@@ -3538,6 +3543,27 @@ func (s *Service) PublishRelease(ctx context.Context, req PublishReleaseRequest)
 	return base, nil
 }
 
+func (s *Service) requireCachedPRParent(ctx context.Context, repoID string, number int) (string, error) {
+	stableID := pullRequestStableID(number)
+	identity, err := s.store.ResolveAliasScoped(ctx, repoID, cache.RemoteAlias{Type: "pull_request", ID: strconv.Itoa(number)})
+	if err == nil && strings.TrimSpace(identity.SourceID) != "" {
+		stableID = identity.SourceID
+	} else if err != nil && !isCacheNotFound(err) {
+		return "", err
+	}
+	record, err := s.store.GetRecord(ctx, repoID, stableID)
+	if err != nil {
+		if isCacheNotFound(err) {
+			return "", ErrParentPRNotCached{RepoID: repoID, Number: number}
+		}
+		return "", err
+	}
+	if record.Type != "pull_request" {
+		return "", ErrParentPRNotCached{RepoID: repoID, Number: number}
+	}
+	return stableID, nil
+}
+
 func (s *Service) operationResult(ctx context.Context, command string, req OperationRequest) (OperationResult, error) {
 	if err := ctx.Err(); err != nil {
 		return OperationResult{}, err
@@ -4749,6 +4775,21 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	if req.Mode == WriteModeDryRun {
 		return base, nil
 	}
+	if command == "add-pr-review-comment" {
+		lease, err := s.store.AcquireWriter(ctx, cache.WriterRequest{Operation: "write", RepoID: route.RepoID, LockPath: s.lockPath})
+		if err != nil {
+			if lookup, lookupErr := audit.LookupIdempotency(ctx, s.store, route.RepoID, key, fingerprint); lookupErr == nil && lookup.InProgress {
+				return WriteCommandResult{}, ErrWriteFailure{Code: "write_idempotency_in_progress", RepoID: route.RepoID, IdempotencyKey: key}
+			}
+			return WriteCommandResult{}, err
+		}
+		defer s.store.ReleaseWriter(context.Background(), lease)
+		parentSourceID, err := s.requireCachedPRParent(ctx, route.RepoID, req.Number)
+		if err != nil {
+			return WriteCommandResult{}, err
+		}
+		req.parentSourceID = parentSourceID
+	}
 	if !s.hasWriteCredential() {
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_missing_credential", RepoID: route.RepoID, IdempotencyKey: key}
 	}
@@ -4795,13 +4836,21 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 			return WriteCommandResult{}, ErrWriteFailure{Code: firstNonEmptyString(prior.Message, "write_ambiguous_remote"), RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
 		}
 	}
-	if command == "create-issue" {
+	if command == "create-issue" || command == "add-pr-review-comment" {
+		remoteType := "issue"
+		recordID := fallbackSourceID("issue", fingerprint)
+		message := "remote issue creation pending confirmation"
+		if command == "add-pr-review-comment" {
+			remoteType = "pr_comment"
+			recordID = fallbackSourceID("pr_comment", fingerprint)
+			message = "remote inline review comment pending confirmation"
+		}
 		entry := audit.WithRequestMetadata(
-			audit.InProgress(route.RepoID, key, command, fallbackSourceID("issue", fingerprint), "issue", "", fingerprint, "remote issue creation pending confirmation", s.now().UTC()),
+			audit.InProgress(route.RepoID, key, command, recordID, remoteType, "", fingerprint, message, s.now().UTC()),
 			map[string]string{
 				"method":             "POST",
 				"idempotency_key":    key,
-				"remote_type":        "issue",
+				"remote_type":        remoteType,
 				"provider":           "gitcode-http",
 				"provider_mode":      string(gitcode.ProviderModeLive),
 				"source_fingerprint": fingerprint,
@@ -4813,7 +4862,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 				return WriteCommandResult{}, ErrWriteFailure{Code: "write_audit_start_failed", RepoID: route.RepoID, IdempotencyKey: key, Cause: err}
 			}
 			if !claimed {
-				return s.executeWrite(ctx, command, req, scope)
+				return WriteCommandResult{}, ErrWriteFailure{Code: "write_idempotency_in_progress", RepoID: route.RepoID, IdempotencyKey: key}
 			}
 		} else if err := s.store.RecordAuditEvent(ctx, entry); err != nil {
 			return WriteCommandResult{}, ErrWriteFailure{Code: "write_audit_start_failed", RepoID: route.RepoID, IdempotencyKey: key, Cause: err}
@@ -5134,7 +5183,7 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 		if err != nil {
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
-		return s.prCommentWriteGraph(ctx, route.RepoID, req.Number, result.Record, result, now)
+		return s.prCommentWriteGraphWithParent(ctx, route.RepoID, req.Number, req.parentSourceID, result.Record, result, now)
 	case "reply-pr-review-comment":
 		result, err := s.client.ReplyPRReviewComment(ctx, gitcode.ReplyPRReviewCommentRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, DiscussionID: req.DiscussionID, ParentCommentID: req.ParentID, Body: req.Body}, opts)
 		if err != nil {
@@ -5440,7 +5489,7 @@ func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID s
 		number := req.Number
 		comment := gitcode.PRComment{ID: prior.RemoteID, Body: req.Body, PRNumber: number, ReviewKind: "inline", Path: req.Path, Line: req.Line, StartLine: req.StartLine, EndLine: req.EndLine, Position: req.Position, CreatedAt: now, UpdatedAt: now}
 		result := gitcode.WriteResult[gitcode.PRComment]{Record: comment, Confirmed: true, RemoteID: prior.RemoteID, ParentIssueNumber: number, ParentIssueID: strconv.Itoa(number), RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
-		_, graph, err := s.prCommentWriteGraph(ctx, repoID, number, comment, result, now)
+		_, graph, err := s.prCommentWriteGraphWithParent(ctx, repoID, number, req.parentSourceID, comment, result, now)
 		return graph, err
 	case "reply-pr-review-comment":
 		number := req.Number
@@ -5672,10 +5721,14 @@ func (s *Service) pullRequestWriteGraph(ctx context.Context, repoID string, pr g
 }
 
 func (s *Service) prCommentWriteGraph(ctx context.Context, repoID string, number int, comment gitcode.PRComment, result gitcode.WriteResult[gitcode.PRComment], now time.Time) (writeConfirmation, cache.RecordGraph, error) {
+	return s.prCommentWriteGraphWithParent(ctx, repoID, number, "", comment, result, now)
+}
+
+func (s *Service) prCommentWriteGraphWithParent(ctx context.Context, repoID string, number int, parentSourceID string, comment gitcode.PRComment, result gitcode.WriteResult[gitcode.PRComment], now time.Time) (writeConfirmation, cache.RecordGraph, error) {
 	comment.PRNumber = firstNonZeroInt(comment.PRNumber, number, result.ParentIssueNumber)
 	remoteCommentID := firstNonEmptyString(result.RemoteID, comment.ID)
 	remoteID := prCommentRemoteID(comment.PRNumber, remoteCommentID)
-	sourceGraph, _, err := s.stagePRComment(ctx, SyncRequest{RepoID: repoID}, "pr_comment", remoteID, comment.PRNumber, comment)
+	sourceGraph, _, err := s.stagePRComment(ctx, SyncRequest{RepoID: repoID, ParentSourceID: parentSourceID}, "pr_comment", remoteID, comment.PRNumber, comment)
 	if err != nil {
 		return writeConfirmation{}, cache.RecordGraph{}, err
 	}

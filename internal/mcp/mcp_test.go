@@ -281,6 +281,7 @@ func TestMCPErrorOutputCanonicalFailureClass(t *testing.T) {
 		{name: "SCN-MCP-ERROR-OUTPUT-TIMEOUT", err: service.ErrSyncFailure{Mode: "network_timeout", Target: "issue:*", Cause: gitcode.ErrNetworkUnavailable{Endpoint: "/api/v5/repos/owner/repo/issues", Attempts: 1}}, want: string(diagnostics.CodeLiveTransportFailure)},
 		{name: "SCN-MCP-ERROR-OUTPUT-500", err: gitcode.ErrNetworkUnavailable{Endpoint: "/api/v5/repos/owner/repo/issues", Status: http.StatusInternalServerError, Attempts: 1}, want: string(diagnostics.CodeLiveTransportFailure)},
 		{name: "SCN-MCP-ERROR-OUTPUT-DISCUSSION-REPLY", err: service.ErrWriteFailure{Code: "discussion_reply_unavailable", Cause: gitcode.ErrDiscussionReplyUnavailable{DiscussionID: "comment:301", ParentCommentID: "301"}}, want: string(diagnostics.CodeDiscussionReplyUnavailable)},
+		{name: "SCN-MCP-ERROR-OUTPUT-PARENT-PR-NOT-CACHED", err: service.ErrParentPRNotCached{RepoID: "fixture-a", Number: 7}, want: string(diagnostics.CodeParentPRNotCached)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -299,6 +300,25 @@ func TestMCPErrorOutputCanonicalFailureClass(t *testing.T) {
 				t.Fatalf("failure_class=%q want %s body=%q", resp.Error.Data.FailureClass, tt.want, out.String())
 			}
 		})
+	}
+}
+
+func TestMCPParentPRNotCachedIncludesTargetedRemediation(t *testing.T) {
+	var out bytes.Buffer
+	id := json.RawMessage(`"parent-preflight"`)
+	srv := &Server{writer: &out, stderr: io.Discard}
+	srv.writeDomainError(&id, service.ErrParentPRNotCached{RepoID: "fixture-a", Number: 7})
+
+	var resp response
+	if err := json.Unmarshal(bytesTrimSpace(out.Bytes()), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%q", err, out.String())
+	}
+	if resp.Error == nil || resp.Error.Data == nil {
+		t.Fatalf("response missing error data: %#v", resp)
+	}
+	data := resp.Error.Data
+	if data.Code != "parent_pr_not_cached" || data.RepoID != "fixture-a" || !strings.Contains(data.Remediation, `sync_live with repo_id="fixture-a", pulls=true, remote_alias="pr:7"`) || !strings.Contains(data.Remediation, "CLI fallback: gitcode-mcp sync --repo 'fixture-a' --pulls --input 'pr:7'") {
+		t.Fatalf("error data=%#v", data)
 	}
 }
 

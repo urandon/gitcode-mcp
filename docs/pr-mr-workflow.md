@@ -90,6 +90,12 @@ gitcode-mcp add-pr-review-comment \
   --idempotency-key ik-pr-review-001
 ```
 
+The parent pull request must already be present in the selected cache. This is a preflight safety boundary: when `PR-<number>` is absent, the command returns typed `parent_pr_not_cached` before any remote write. Run the exact remediation and retry with the same idempotency key:
+
+```sh
+gitcode-mcp sync --repo YOUR_REPO --pulls --input pr:7
+```
+
 Reply to that inline discussion using the stable ids returned by `pr-discussions`:
 
 ```sh
