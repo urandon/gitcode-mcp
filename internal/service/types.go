@@ -910,6 +910,7 @@ type WriteCommandRequest struct {
 
 	pushMirrorPreviousStatus string
 	idempotencyFingerprint   string
+	parentSourceID           string
 }
 
 type WriteCommandResult struct {

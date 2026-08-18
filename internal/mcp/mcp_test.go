@@ -317,7 +317,7 @@ func TestMCPParentPRNotCachedIncludesTargetedRemediation(t *testing.T) {
 		t.Fatalf("response missing error data: %#v", resp)
 	}
 	data := resp.Error.Data
-	if data.Code != "parent_pr_not_cached" || data.RepoID != "fixture-a" || !strings.Contains(data.Remediation, `sync_live with repo_id="fixture-a", pulls=true, remote_alias="pr:7"`) || !strings.Contains(data.Remediation, "CLI fallback: gitcode-mcp sync --repo fixture-a --pulls --input pr:7") {
+	if data.Code != "parent_pr_not_cached" || data.RepoID != "fixture-a" || !strings.Contains(data.Remediation, `sync_live with repo_id="fixture-a", pulls=true, remote_alias="pr:7"`) || !strings.Contains(data.Remediation, "CLI fallback: gitcode-mcp sync --repo 'fixture-a' --pulls --input 'pr:7'") {
 		t.Fatalf("error data=%#v", data)
 	}
 }

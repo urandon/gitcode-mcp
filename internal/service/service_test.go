@@ -1579,7 +1579,7 @@ func TestAddPRReviewCommentRequiresCachedParentBeforeProviderWrite(t *testing.T)
 	if !errors.As(err, &parentMissing) || parentMissing.RepoID != repoID || parentMissing.Number != 7 {
 		t.Fatalf("error=%#v, want typed missing parent", err)
 	}
-	if parentMissing.DiagnosticCode() != "parent_pr_not_cached" || parentMissing.Remediation() != "gitcode-mcp sync --repo empty-review --pulls --input pr:7" {
+	if parentMissing.DiagnosticCode() != "parent_pr_not_cached" || parentMissing.Remediation() != "gitcode-mcp sync --repo 'empty-review' --pulls --input 'pr:7'" {
 		t.Fatalf("parent error=%#v remediation=%q", parentMissing, parentMissing.Remediation())
 	}
 	if client.createPRReviewCommentCalls != 0 {
@@ -1600,6 +1600,104 @@ func TestAddPRReviewCommentRequiresCachedParentBeforeProviderWrite(t *testing.T)
 	replayed, err := svc.AddPRReviewComment(ctx, req)
 	if err != nil || !replayed.Replayed || client.createPRReviewCommentCalls != 1 {
 		t.Fatalf("replay=%#v err=%v calls=%d", replayed, err, client.createPRReviewCommentCalls)
+	}
+}
+
+func TestAddPRReviewCommentUsesAliasedParentStableID(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	const repoID = "custom-parent"
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: repoID, Owner: "owner-a", Name: "repo-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	if err := store.UpsertRecordGraph(ctx, cache.RecordGraph{
+		Record:     cache.Record{RepoID: repoID, ID: "DOC-123", Type: "pull_request", Path: "pulls/7.md", Title: "Custom stable parent", Status: "open", ContentHash: "doc-123", Provenance: cache.ProvenanceLive, RemoteType: "pull_request", RemoteID: "7", CreatedAt: now, UpdatedAt: now},
+		Identities: []cache.Identity{{RepoID: repoID, SourceID: "DOC-123", AliasType: "pull_request", Alias: "7", Remote: cache.RemoteAlias{Type: "pull_request", ID: "7"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeGitCodeClient{createPRReviewCommentResult: gitcode.WriteResult[gitcode.PRComment]{
+		Record:    gitcode.PRComment{ID: "302", Body: "inline", PRNumber: 7, Path: "x.go", Line: 42, ReviewKind: "inline", CreatedAt: now, UpdatedAt: now},
+		Confirmed: true, Operation: "CreatePRReviewComment", RemoteID: "302", ParentIssueNumber: 7, ConfirmedAt: now,
+	}}
+	svc := NewWithClient(store, client)
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.writeCredentialPresent = true
+	result, err := svc.AddPRReviewComment(ctx, WriteCommandRequest{RepoID: repoID, Mode: WriteModeLive, Number: 7, Body: "inline", Path: "x.go", Line: 42, IdempotencyKey: "custom-parent-review"})
+	if err != nil || result.Status != "succeeded" {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	links, err := store.ListLinks(ctx, cache.LinkFilter{RepoID: repoID, SourceID: "PRCOMMENT-7-302"})
+	if err != nil || len(links) != 1 || links[0].TargetID != "DOC-123" {
+		t.Fatalf("links=%#v err=%v, want custom parent stable id", links, err)
+	}
+}
+
+func TestAddPRReviewCommentClaimAndWriterLeasePreventConcurrentUnsafeWrites(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	const repoID = "concurrent-review"
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: repoID, Owner: "owner-a", Name: "repo-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	seedCachedPullRequest(t, ctx, store, repoID, 7)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		createPRReviewCommentResult: gitcode.WriteResult[gitcode.PRComment]{Record: gitcode.PRComment{ID: "302", Body: "inline", PRNumber: 7, Path: "x.go", Line: 42, ReviewKind: "inline", CreatedAt: now, UpdatedAt: now}, Confirmed: true, Operation: "CreatePRReviewComment", RemoteID: "302", ParentIssueNumber: 7, ConfirmedAt: now},
+		onCreatePRReviewComment: func(gitcode.CreatePRReviewCommentRequest, gitcode.WriteOptions) {
+			close(started)
+			<-release
+		},
+	}
+	svc := NewWithClient(store, client)
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.writeCredentialPresent = true
+	req := WriteCommandRequest{RepoID: repoID, Mode: WriteModeLive, Number: 7, Body: "inline", Path: "x.go", Line: 42, IdempotencyKey: "concurrent-review-key"}
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := svc.AddPRReviewComment(context.Background(), req)
+		firstDone <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first provider call did not start")
+	}
+	_, secondErr := svc.AddPRReviewComment(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(secondErr, &writeErr) || writeErr.Code != "write_idempotency_in_progress" {
+		t.Fatalf("second error=%T %v", secondErr, secondErr)
+	}
+	_, resetErr := svc.ResetLiveCache(ctx, ResetLiveCacheRequest{RepoID: repoID})
+	var lockErr cache.ErrLockContention
+	if !errors.As(resetErr, &lockErr) {
+		t.Fatalf("reset error=%T %v, want writer lock contention", resetErr, resetErr)
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if client.createPRReviewCommentCalls != 1 {
+		t.Fatalf("provider writes=%d, want one", client.createPRReviewCommentCalls)
+	}
+}
+
+func TestParentPRRemediationShellQuotesRepositoryID(t *testing.T) {
+	err := ErrParentPRNotCached{RepoID: "repo; $(unsafe) 'quoted'", Number: 7}
+	want := `gitcode-mcp sync --repo 'repo; $(unsafe) '"'"'quoted'"'"'' --pulls --input 'pr:7'`
+	if got := err.Remediation(); got != want {
+		t.Fatalf("remediation=%q want %q", got, want)
 	}
 }
 
@@ -3618,6 +3716,7 @@ type fakeGitCodeClient struct {
 	lastCreateReleaseReq         gitcode.ReleaseWriteRequest
 	lastUpdateReleaseReq         gitcode.ReleaseWriteRequest
 	onCreateIssue                func(gitcode.CreateIssueRequest, gitcode.WriteOptions)
+	onCreatePRReviewComment      func(gitcode.CreatePRReviewCommentRequest, gitcode.WriteOptions)
 }
 
 func (f *fakeGitCodeClient) nextError() error {
@@ -3784,6 +3883,9 @@ func (f *fakeGitCodeClient) CreatePRReviewComment(_ context.Context, req gitcode
 	f.createPRReviewCommentCalls++
 	f.lastCreatePRReviewCommentReq = req
 	f.lastWriteOptions = opts
+	if f.onCreatePRReviewComment != nil {
+		f.onCreatePRReviewComment(req, opts)
+	}
 	if err := f.nextError(); err != nil {
 		return gitcode.WriteResult[gitcode.PRComment]{}, err
 	}

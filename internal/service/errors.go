@@ -291,7 +291,7 @@ type ErrParentPRNotCached struct {
 }
 
 func (e ErrParentPRNotCached) Remediation() string {
-	return fmt.Sprintf("gitcode-mcp sync --repo %s --pulls --input pr:%d", e.RepoID, e.Number)
+	return fmt.Sprintf("gitcode-mcp sync --repo %s --pulls --input %s", shellQuote(e.RepoID), shellQuote(fmt.Sprintf("pr:%d", e.Number)))
 }
 
 func (e ErrParentPRNotCached) Error() string {
@@ -299,6 +299,10 @@ func (e ErrParentPRNotCached) Error() string {
 }
 
 func (e ErrParentPRNotCached) DiagnosticCode() string { return "parent_pr_not_cached" }
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
 
 type ErrPushMirrorNotFound struct {
 	MirrorID string
