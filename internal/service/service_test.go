@@ -1549,6 +1549,81 @@ func TestPRReviewAnchorMismatchIsAuditedAndIdempotentlyBlocked(t *testing.T) {
 	}
 }
 
+func TestPRReviewReplyIncompleteReadbackIsAuditedAndIdempotentlyBlocked(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "reply-incomplete", Owner: "owner-a", Name: "repo-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeGitCodeClient{errors: []error{gitcode.ErrWriteConfirmationIncomplete{Endpoint: "/discussions/D7/comments", RemoteID: "303", Message: "reply readback unavailable"}}}
+	svc := NewWithClient(store, client)
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.writeCredentialPresent = true
+	req := WriteCommandRequest{RepoID: "reply-incomplete", Mode: WriteModeLive, Number: 7, DiscussionID: "comment:301", ParentID: "301", Body: "reply", IdempotencyKey: "reply-incomplete-key"}
+
+	_, err = svc.ReplyPRReviewComment(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_confirmation_incomplete" || writeErr.RemoteID != "303" {
+		t.Fatalf("first error=%#v", err)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "reply-incomplete", "reply-incomplete-key")
+	if err != nil || entry == nil || entry.Status != audit.StatusRemoteConfirmedUnsafe || entry.RemoteID != "303" {
+		t.Fatalf("audit entry=%#v err=%v", entry, err)
+	}
+	_, err = svc.ReplyPRReviewComment(ctx, req)
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_confirmation_incomplete" || client.replyPRReviewCommentCalls != 1 {
+		t.Fatalf("replay error=%#v calls=%d", err, client.replyPRReviewCommentCalls)
+	}
+}
+
+func TestPRReviewReplyPartialCacheReplayPreservesResolvedDiscussionID(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "reply-partial", Owner: "owner-a", Name: "repo-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		listPRPages:                []gitcode.Page[gitcode.PullRequest]{{Items: []gitcode.PullRequest{{ID: "9001", Number: 7, Title: "PR", State: "open", CreatedAt: now, UpdatedAt: now}}}},
+		replyPRReviewCommentResult: gitcode.WriteResult[gitcode.PRComment]{Record: gitcode.PRComment{ID: "303", Body: "reply", PRNumber: 7, DiscussionID: "D7", ParentID: "301", ReviewKind: "inline", CreatedAt: now, UpdatedAt: now}, Confirmed: true, Operation: "ReplyPRReviewComment", RemoteID: "303", ParentIssueNumber: 7, ParentIssueID: "D7", ConfirmedAt: now},
+	}
+	seedSvc := NewWithClient(store, client)
+	if _, err := seedSvc.BulkSyncPullRequests(ctx, BulkSyncRequest{RepoID: "reply-partial"}); err != nil {
+		t.Fatal(err)
+	}
+	wrapped := &writeRefreshFailStore{Store: store, failNextRefresh: true}
+	svc := NewWithClient(wrapped, client)
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.writeCredentialPresent = true
+	req := WriteCommandRequest{RepoID: "reply-partial", Mode: WriteModeLive, Number: 7, DiscussionID: "comment:301", ParentID: "301", Body: "reply", IdempotencyKey: "reply-partial-key"}
+
+	_, err = svc.ReplyPRReviewComment(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_partial_cache_refresh_failed" {
+		t.Fatalf("first error=%#v", err)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "reply-partial", "reply-partial-key")
+	if err != nil || entry == nil || entry.RequestMetadata["pr_discussion_id"] != "D7" {
+		t.Fatalf("audit entry=%#v err=%v", entry, err)
+	}
+	result, err := svc.ReplyPRReviewComment(ctx, req)
+	if err != nil || !result.Replayed || client.replyPRReviewCommentCalls != 1 {
+		t.Fatalf("replay=%#v err=%v calls=%d", result, err, client.replyPRReviewCommentCalls)
+	}
+	rows, err := store.ListPRReviewComments(ctx, cache.PRReviewCommentFilter{RepoID: "reply-partial", PRNumber: 7, SourceID: "PRCOMMENT-7-303"})
+	if err != nil || len(rows) != 1 || rows[0].DiscussionID != "D7" {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+}
+
 func TestScenario004MCPWriteLifecycleLinkPRIssueRelationAPI(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)

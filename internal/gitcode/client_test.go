@@ -1618,7 +1618,7 @@ func TestScenario031PRReviewReplyMergesDiscussionReadbackAndReplays(t *testing.T
 	defer server.Close()
 
 	client := newTestClient(t, server.URL, Config{Token: "test-token"})
-	req := ReplyPRReviewCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, DiscussionID: discussionID, ParentCommentID: parentID, Body: replyBody}
+	req := ReplyPRReviewCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, DiscussionID: "comment:" + parentID, ParentCommentID: parentID, Body: replyBody}
 	result, err := client.ReplyPRReviewComment(context.Background(), req, WriteOptions{IdempotencyKey: "reply-key"})
 	if err != nil {
 		t.Fatalf("ReplyPRReviewComment returned error: %v", err)
@@ -1645,6 +1645,69 @@ func TestScenario031PRReviewReplyMergesDiscussionReadbackAndReplays(t *testing.T
 	}
 	if len(replay.Record.Thread) != 2 {
 		t.Fatalf("replay thread=%+v", replay.Record.Thread)
+	}
+}
+
+func TestPRReviewReplyRejectsSyntheticThreadWithoutProviderDiscussionID(t *testing.T) {
+	var posts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == listPRCommentsEndpoint("example-owner", "example-repo", 7):
+			fmt.Fprint(w, `[{"id":301,"body":"root","comment_type":"diff_comment","reply":[]}]`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/example-owner/example-repo/merge_requests/7/discussions":
+			http.NotFound(w, r)
+		case r.Method == http.MethodPost:
+			posts++
+			http.Error(w, "must not post", http.StatusInternalServerError)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, Config{Token: "test-token"})
+	_, err := client.ReplyPRReviewComment(context.Background(), ReplyPRReviewCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, DiscussionID: "comment:301", ParentCommentID: "301", Body: "reply"}, WriteOptions{IdempotencyKey: "synthetic-reply"})
+	var unavailable ErrDiscussionReplyUnavailable
+	if !errors.As(err, &unavailable) || unavailable.DiscussionID != "comment:301" || unavailable.ParentCommentID != "301" {
+		t.Fatalf("error=%#v, want typed discussion reply unavailable", err)
+	}
+	if posts != 0 {
+		t.Fatalf("posts=%d, want zero", posts)
+	}
+}
+
+func TestPRReviewReplyReadbackFailureCarriesRemoteID(t *testing.T) {
+	var posted bool
+	var posts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == listPRCommentsEndpoint("example-owner", "example-repo", 7):
+			if posted {
+				http.Error(w, "readback unavailable", http.StatusInternalServerError)
+				return
+			}
+			fmt.Fprint(w, `[{"id":301,"body":"root","comment_type":"diff_comment","reply":[]}]`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/example-owner/example-repo/merge_requests/7/discussions":
+			fmt.Fprint(w, `{"data":[{"id":"DISC-7","notes":[{"id":301,"discussion_id":"DISC-7","body":"root","type":"DiffNote"}]}]}`)
+		case r.Method == http.MethodPost && r.URL.Path == replyPRReviewCommentEndpoint("example-owner", "example-repo", 7, "DISC-7"):
+			posts++
+			posted = true
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":302,"body":"reply"}`)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, Config{Token: "test-token", MaxRetries: 0})
+	_, err := client.ReplyPRReviewComment(context.Background(), ReplyPRReviewCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, DiscussionID: "comment:301", ParentCommentID: "301", Body: "reply"}, WriteOptions{IdempotencyKey: "readback-failure"})
+	var incomplete ErrWriteConfirmationIncomplete
+	if !errors.As(err, &incomplete) || incomplete.RemoteID != "302" {
+		t.Fatalf("error=%#v, want typed incomplete confirmation with remote id", err)
+	}
+	if posts != 1 {
+		t.Fatalf("posts=%d, want one", posts)
 	}
 }
 

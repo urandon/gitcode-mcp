@@ -565,7 +565,7 @@ var toolDefs = []toolDefinition{
 	},
 	{
 		Name:        "list_pr_discussions",
-		Description: "List cached pull request review discussions grouped by discussion thread.",
+		Description: "List cached pull request review discussions with explicit replyability and provider reply targets.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "unresolved_only": {Type: "boolean", Description: "Only include unresolved or unknown-resolution discussions."}}, Required: []string{"repo_id", "number"}},
 	},
 	{
@@ -1830,7 +1830,7 @@ func mcpDiagnostic(err error) (diagnostics.Diagnostic, bool) {
 		return diagnostics.Classify(err, ctx), true
 	}
 	if errors.As(err, &writeErr) {
-		ctx.HTTPAttempted = writeErr.Code == "write_unauthorized" || writeErr.Code == "write_network_unavailable" || writeErr.Code == "write_provider_error" || writeErr.Code == "write_conflict" || writeErr.Code == "schema_decode" || writeErr.Code == "pr_review_anchor_mismatch" || writeErr.Code == "write_confirmation_incomplete"
+		ctx.HTTPAttempted = writeErr.Code == "write_unauthorized" || writeErr.Code == "write_network_unavailable" || writeErr.Code == "write_provider_error" || writeErr.Code == "write_conflict" || writeErr.Code == "schema_decode" || writeErr.Code == "pr_review_anchor_mismatch" || writeErr.Code == "write_confirmation_incomplete" || writeErr.Code == "discussion_reply_unavailable"
 		ctx.SchemaDecodeFailure = writeErr.Code == "schema_decode" || writeErr.PayloadSource == "partial_response"
 		ctx.FailureSource = writeErr.PayloadSource
 		ctx.LocalPayloadTooLarge = writeErr.PayloadSource == "local_body_limit"
@@ -1915,6 +1915,7 @@ func (s *Server) writeDomainError(id *json.RawMessage, err error) {
 		var staleErr service.ErrStaleIndex
 		var linkErr service.ErrLinkCheckFailed
 		var lockErr cache.ErrLockContention
+		var writeErr service.ErrWriteFailure
 		switch {
 		case errors.As(err, &invalid):
 			data = &errorData{Code: "invalid_query", Message: err.Error()}
@@ -1926,6 +1927,8 @@ func (s *Server) writeDomainError(id *json.RawMessage, err error) {
 			data = &errorData{Code: "link_check_failed", Message: err.Error()}
 		case errors.As(err, &lockErr):
 			data = cacheLockErrorData(lockErr, err.Error())
+		case errors.As(err, &writeErr) && writeErr.Code == "discussion_reply_unavailable":
+			data = &errorData{Code: "discussion_reply_unavailable", Message: err.Error()}
 		default:
 			data = &errorData{Code: "sync_required", Message: err.Error()}
 		}

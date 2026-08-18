@@ -204,6 +204,24 @@ type ErrWriteConfirmationIncomplete struct {
 	Cause    error
 }
 
+type ErrDiscussionReplyUnavailable struct {
+	DiscussionID    string
+	ParentCommentID string
+	Message         string
+}
+
+func (e ErrDiscussionReplyUnavailable) Error() string {
+	message := e.Message
+	if message == "" {
+		message = "no provider discussion id was proven by live readback"
+	}
+	return fmt.Sprintf("gitcode: discussion reply unavailable for %s (parent %s): %s", e.DiscussionID, e.ParentCommentID, message)
+}
+
+func (e ErrDiscussionReplyUnavailable) DiagnosticCode() string {
+	return "discussion_reply_unavailable"
+}
+
 type ErrPRReviewAnchorMismatch struct {
 	Endpoint     string
 	CommentID    string

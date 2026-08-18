@@ -849,7 +849,7 @@ func TestListPRDiscussionsGroupsRepliesAndFiltersUnresolved(t *testing.T) {
 		t.Fatalf("discussions=%+v, want 2 groups", all.Discussions)
 	}
 	inline := all.Discussions[0]
-	if inline.ID != "D7" || inline.Kind != "inline" || inline.Path != "internal/service/service.go" || inline.Line != 42 || len(inline.Comments) != 2 {
+	if inline.ID != "D7" || !inline.Replyable || inline.ReplyDiscussionID != "D7" || inline.ReplyUnavailableReason != "" || inline.Kind != "inline" || inline.Path != "internal/service/service.go" || inline.Line != 42 || len(inline.Comments) != 2 {
 		t.Fatalf("inline discussion=%+v", inline)
 	}
 	if inline.Comments[0].Author != "alice" || inline.Comments[1].ParentID != "301" || inline.Comments[1].Body != "reply" {
@@ -862,7 +862,7 @@ func TestListPRDiscussionsGroupsRepliesAndFiltersUnresolved(t *testing.T) {
 		t.Fatalf("inline comment positions=%+v", inline.Comments[0].Positions)
 	}
 	general := all.Discussions[1]
-	if general.Kind != "general" || len(general.Comments) != 1 || general.Comments[0].Author != "carol" {
+	if general.ID != "comment:303" || general.Replyable || general.ReplyUnavailableReason == "" || general.Kind != "general" || len(general.Comments) != 1 || general.Comments[0].Author != "carol" {
 		t.Fatalf("general discussion=%+v", general)
 	}
 	unresolved, err := svc.ListPRDiscussions(ctx, PRDiscussionRequest{RepoID: "review-pr", Number: 7, UnresolvedOnly: true})
@@ -878,6 +878,40 @@ func TestListPRDiscussionsGroupsRepliesAndFiltersUnresolved(t *testing.T) {
 	}
 	if len(empty.Discussions) != 0 {
 		t.Fatalf("empty discussions=%+v, want empty", empty.Discussions)
+	}
+}
+
+func TestListPRDiscussionsKeepsV5OnlyNestedRepliesInOneSyntheticThread(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		listPRPages: []gitcode.Page[gitcode.PullRequest]{{Items: []gitcode.PullRequest{{ID: "9001", Number: 7, Title: "Review target", State: "open", CreatedAt: base, UpdatedAt: base}}}},
+		prCommentsByPR: map[int][]gitcode.PRComment{7: {
+			{ID: "301", Body: "root", ReviewKind: "inline", Path: "x.go", Line: 7, PRNumber: 7, CreatedAt: base, UpdatedAt: base},
+			{ID: "302", Body: "nested", ReviewKind: "inline", ParentID: "301", Path: "x.go", Line: 7, PRNumber: 7, CreatedAt: base.Add(time.Minute), UpdatedAt: base.Add(time.Minute)},
+		}},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "v5-only", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	if _, err := svc.BulkSyncPullRequests(ctx, BulkSyncRequest{RepoID: "v5-only"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.BulkSyncPRComments(ctx, BulkSyncRequest{RepoID: "v5-only"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.ListPRDiscussions(ctx, PRDiscussionRequest{RepoID: "v5-only", Number: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Discussions) != 1 || got.Discussions[0].ID != "comment:301" || got.Discussions[0].Replyable || len(got.Discussions[0].Comments) != 2 {
+		t.Fatalf("discussions=%+v, want one non-replyable synthetic thread", got.Discussions)
 	}
 }
 

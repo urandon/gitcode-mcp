@@ -2499,6 +2499,10 @@ func (s *Service) ListPRDiscussions(ctx context.Context, req PRDiscussionRequest
 	for _, position := range positions {
 		positionsByComment[position.CommentID] = append(positionsByComment[position.CommentID], prReviewPositionFromCache(position))
 	}
+	metadataByComment := make(map[string]cache.PRReviewComment, len(metadata))
+	for _, meta := range metadata {
+		metadataByComment[meta.CommentID] = meta
+	}
 	result := PRDiscussionsResult{RepoID: repoID, Number: req.Number, UnresolvedOnly: req.UnresolvedOnly, Discussions: []PRDiscussion{}, GeneratedAt: s.now().UTC()}
 	groups := map[string]int{}
 	for _, meta := range metadata {
@@ -2510,11 +2514,43 @@ func (s *Service) ListPRDiscussions(ctx context.Context, req PRDiscussionRequest
 		comment.Positions = positionsByComment[meta.CommentID]
 		groupID := meta.DiscussionID
 		if groupID == "" {
-			groupID = "comment:" + meta.CommentID
+			rootID := meta.CommentID
+			parentID := meta.ParentID
+			providerDiscussionID := ""
+			seen := map[string]bool{rootID: true}
+			for parentID != "" && !seen[parentID] {
+				seen[parentID] = true
+				parent, ok := metadataByComment[parentID]
+				if !ok {
+					break
+				}
+				rootID = parent.CommentID
+				if parent.DiscussionID != "" {
+					providerDiscussionID = parent.DiscussionID
+					break
+				}
+				parentID = parent.ParentID
+			}
+			groupID = providerDiscussionID
+			if groupID == "" {
+				groupID = "comment:" + rootID
+			}
 		}
 		idx, ok := groups[groupID]
 		if !ok {
-			discussion := PRDiscussion{ID: groupID, Kind: discussionKind(comment), Resolved: meta.Resolved, Resolvable: meta.Resolvable, Path: meta.Path, Line: meta.Line, StartLine: meta.StartLine, EndLine: meta.EndLine, Position: firstCurrentPosition(comment.Positions), Comments: []PRReviewComment{}}
+			kind := discussionKind(comment)
+			replyable := kind == "inline" && !strings.HasPrefix(groupID, "comment:")
+			replyDiscussionID := ""
+			if replyable {
+				replyDiscussionID = groupID
+			}
+			discussion := PRDiscussion{ID: groupID, Replyable: replyable, ReplyDiscussionID: replyDiscussionID, Kind: kind, Resolved: meta.Resolved, Resolvable: meta.Resolvable, Path: meta.Path, Line: meta.Line, StartLine: meta.StartLine, EndLine: meta.EndLine, Position: firstCurrentPosition(comment.Positions), Comments: []PRReviewComment{}}
+			if !replyable {
+				discussion.ReplyUnavailableReason = "provider discussion id unavailable; refresh PR discussions before replying"
+				if kind != "inline" {
+					discussion.ReplyUnavailableReason = "general PR comments do not expose an inline discussion reply target"
+				}
+			}
 			result.Discussions = append(result.Discussions, discussion)
 			idx = len(result.Discussions) - 1
 			groups[groupID] = idx
@@ -4796,6 +4832,7 @@ type writeConfirmation struct {
 	completedAt    time.Time
 	milestone      *WriteMilestoneReceipt
 	pushMirror     *WritePushMirrorReceipt
+	parentRemoteID string
 }
 
 func writeAuditMetadata(command, key, fingerprint, remoteType string, confirmed writeConfirmation) map[string]string {
@@ -4816,6 +4853,9 @@ func writeAuditMetadata(command, key, fingerprint, remoteType string, confirmed 
 	}
 	if confirmed.remoteNumber > 0 {
 		metadata["remote_number"] = strconv.Itoa(confirmed.remoteNumber)
+	}
+	if confirmed.parentRemoteID != "" {
+		metadata["pr_discussion_id"] = confirmed.parentRemoteID
 	}
 	if command != "" {
 		metadata["provider"] = "gitcode-http"
@@ -4844,7 +4884,7 @@ func writeAuditMetadata(command, key, fingerprint, remoteType string, confirmed 
 }
 
 func withWriteAuditMetadata(entry cache.AuditTrailEntry, command, key, fingerprint, remoteType string, confirmed writeConfirmation) cache.AuditTrailEntry {
-	if command != "create-issue" && confirmed.milestone == nil && confirmed.pushMirror == nil {
+	if command != "create-issue" && command != "reply-pr-review-comment" && confirmed.milestone == nil && confirmed.pushMirror == nil {
 		return entry
 	}
 	return audit.WithRequestMetadata(entry, writeAuditMetadata(command, key, fingerprint, remoteType, confirmed))
@@ -5315,8 +5355,9 @@ func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID s
 		return graph, err
 	case "reply-pr-review-comment":
 		number := req.Number
-		comment := gitcode.PRComment{ID: prior.RemoteID, Body: req.Body, PRNumber: number, DiscussionID: req.DiscussionID, ParentID: req.ParentID, ReviewKind: "inline", CreatedAt: now, UpdatedAt: now}
-		result := gitcode.WriteResult[gitcode.PRComment]{Record: comment, Confirmed: true, RemoteID: prior.RemoteID, ParentIssueNumber: number, ParentIssueID: req.DiscussionID, RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
+		discussionID := firstNonEmptyString(prior.RequestMetadata["pr_discussion_id"], req.DiscussionID)
+		comment := gitcode.PRComment{ID: prior.RemoteID, Body: req.Body, PRNumber: number, DiscussionID: discussionID, ParentID: req.ParentID, ReviewKind: "inline", CreatedAt: now, UpdatedAt: now}
+		result := gitcode.WriteResult[gitcode.PRComment]{Record: comment, Confirmed: true, RemoteID: prior.RemoteID, ParentIssueNumber: number, ParentIssueID: discussionID, RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
 		_, graph, err := s.prCommentWriteGraph(ctx, repoID, number, comment, result, now)
 		return graph, err
 	case "create-page", "update-page", "delete-page":
@@ -5547,7 +5588,7 @@ func (s *Service) prCommentWriteGraph(ctx context.Context, repoID string, number
 	if len(graph.RemoteRevisions) > 0 {
 		graph.RemoteRevisions[0].RemoteRevision = revision
 	}
-	return writeConfirmation{confirmed: result.Confirmed, remoteID: remoteCommentID, remoteNumber: comment.PRNumber, remoteRevision: revision, message: result.Operation, completedAt: firstNonZeroTime(result.ConfirmedAt, now)}, graph, nil
+	return writeConfirmation{confirmed: result.Confirmed, remoteID: remoteCommentID, remoteNumber: comment.PRNumber, remoteRevision: revision, message: result.Operation, completedAt: firstNonZeroTime(result.ConfirmedAt, now), parentRemoteID: firstNonEmptyString(result.ParentIssueID, comment.DiscussionID)}, graph, nil
 }
 
 func (s *Service) prCommentThreadWriteGraph(ctx context.Context, repoID string, number int, result gitcode.WriteResult[gitcode.PRComment], now time.Time) (writeConfirmation, cache.RecordGraph, error) {
@@ -5804,6 +5845,10 @@ func (s *Service) writeAdapterErrorCode(mode WriteMode, err error) string {
 }
 
 func writeErrorCode(err error) string {
+	var replyUnavailable gitcode.ErrDiscussionReplyUnavailable
+	if errors.As(err, &replyUnavailable) {
+		return "discussion_reply_unavailable"
+	}
 	var anchorMismatch gitcode.ErrPRReviewAnchorMismatch
 	if errors.As(err, &anchorMismatch) {
 		return "pr_review_anchor_mismatch"
