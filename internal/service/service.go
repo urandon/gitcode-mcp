@@ -19,6 +19,7 @@ import (
 	"gitcode-mcp/internal/audit"
 	"gitcode-mcp/internal/buildinfo"
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/feedback"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
 )
@@ -32,6 +33,7 @@ type Service struct {
 	lockPath               string
 	providerMode           gitcode.ProviderMode
 	writeCredentialPresent bool
+	feedbackConfig         feedback.Config
 }
 
 type auditClaimStore interface {
@@ -55,6 +57,7 @@ func NewWithClientConfig(store cache.Store, client gitcode.Client, cfg ServiceCo
 	svc.client = client
 	svc.providerMode = gitcode.ProviderMode("custom")
 	svc.lockPath = serviceLockPath(cfg.LockPath)
+	svc.ConfigureFeedback(cfg.Feedback)
 	return svc
 }
 
@@ -69,11 +72,12 @@ func NewWithMode(store cache.Store, mode gitcode.ProviderMode, token string, cfg
 	switch mode {
 	case gitcode.ProviderModeFixture:
 		return &Service{
-			store:        store,
-			client:       sanitizedFixtureClient{},
-			now:          func() time.Time { return time.Now().UTC() },
-			lockPath:     serviceLockPath(cfg.LockPath),
-			providerMode: gitcode.ProviderModeFixture,
+			store:          store,
+			client:         sanitizedFixtureClient{},
+			now:            func() time.Time { return time.Now().UTC() },
+			lockPath:       serviceLockPath(cfg.LockPath),
+			providerMode:   gitcode.ProviderModeFixture,
+			feedbackConfig: normalizeFeedbackConfig(cfg.Feedback),
 		}, nil
 	case gitcode.ProviderModeLive:
 		token = strings.TrimSpace(token)
@@ -115,6 +119,7 @@ func NewWithMode(store cache.Store, mode gitcode.ProviderMode, token string, cfg
 			lockPath:               serviceLockPath(cfg.LockPath),
 			providerMode:           gitcode.ProviderModeLive,
 			writeCredentialPresent: true,
+			feedbackConfig:         normalizeFeedbackConfig(cfg.Feedback),
 		}, nil
 	case gitcode.ProviderModeUnavailable:
 		return nil, gitcode.ErrProviderUnavailable{Reason: "provider unavailable"}
@@ -4790,6 +4795,30 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 			return WriteCommandResult{}, ErrWriteFailure{Code: firstNonEmptyString(prior.Message, "write_ambiguous_remote"), RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
 		}
 	}
+	if command == "create-issue" {
+		entry := audit.WithRequestMetadata(
+			audit.InProgress(route.RepoID, key, command, fallbackSourceID("issue", fingerprint), "issue", "", fingerprint, "remote issue creation pending confirmation", s.now().UTC()),
+			map[string]string{
+				"method":             "POST",
+				"idempotency_key":    key,
+				"remote_type":        "issue",
+				"provider":           "gitcode-http",
+				"provider_mode":      string(gitcode.ProviderModeLive),
+				"source_fingerprint": fingerprint,
+			},
+		)
+		if claimer, ok := s.store.(auditClaimStore); ok {
+			claimed, err := claimer.ClaimAuditEvent(ctx, entry)
+			if err != nil {
+				return WriteCommandResult{}, ErrWriteFailure{Code: "write_audit_start_failed", RepoID: route.RepoID, IdempotencyKey: key, Cause: err}
+			}
+			if !claimed {
+				return s.executeWrite(ctx, command, req, scope)
+			}
+		} else if err := s.store.RecordAuditEvent(ctx, entry); err != nil {
+			return WriteCommandResult{}, ErrWriteFailure{Code: "write_audit_start_failed", RepoID: route.RepoID, IdempotencyKey: key, Cause: err}
+		}
+	}
 	if command == "trigger-push-mirror" {
 		entry := audit.WithRequestMetadata(
 			audit.InProgress(route.RepoID, key, command, fallbackSourceID("pushmirror", req.ID), "push_remote_mirror", req.ID, fingerprint, "remote trigger pending confirmation", s.now().UTC()),
@@ -5436,7 +5465,11 @@ func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID s
 func (s *Service) issueWriteGraph(repoID string, issue gitcode.Issue, result gitcode.WriteResult[gitcode.Issue], now time.Time) (writeConfirmation, cache.RecordGraph) {
 	remoteID := firstNonEmptyString(result.RemoteID, issue.ID, strconv.Itoa(firstNonZeroInt(result.RemoteNumber, issue.Number)))
 	issue.Number = firstNonZeroInt(issue.Number, result.RemoteNumber)
-	stableID := fallbackSourceID("issue", remoteID)
+	remoteAlias := remoteID
+	if issue.Number > 0 {
+		remoteAlias = strconv.Itoa(issue.Number)
+	}
+	stableID := fallbackSourceID("issue", remoteAlias)
 	status := firstNonEmptyString(issue.State, issue.Status, "open")
 	updated := issue.UpdatedAt.UTC()
 	if updated.IsZero() {
@@ -5455,8 +5488,11 @@ func (s *Service) issueWriteGraph(repoID string, issue gitcode.Issue, result git
 		hash = contentHash(issue.Title, issue.Body, status, issue.Labels, milestoneID)
 	}
 	revision := firstNonEmptyString(result.RemoteRevision, result.ResponseHash, hash)
-	record := cache.Record{RepoID: repoID, ID: stableID, Type: "issue", Path: "issues/" + remoteID + ".md", Title: issue.Title, Body: issue.Body, Status: status, Labels: issue.Labels, ContentHash: hash, Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: remoteID, RemoteRevision: revision, CreatedAt: created, UpdatedAt: updated}
-	graph := cache.RecordGraph{Record: record, Identities: []cache.Identity{{RepoID: repoID, SourceID: stableID, AliasType: "issue", Alias: remoteID, Remote: cache.RemoteAlias{Type: "issue", ID: remoteID}}}, ReplaceLinkKinds: []string{"milestone"}, RemoteRevisions: []cache.RemoteRevision{{RepoID: repoID, RecordID: stableID, RemoteType: "issue", RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}}
+	record := cache.Record{RepoID: repoID, ID: stableID, Type: "issue", Path: "issues/" + remoteAlias + ".md", Title: issue.Title, Body: issue.Body, Status: status, Labels: issue.Labels, ContentHash: hash, Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: remoteAlias, RemoteRevision: revision, CreatedAt: created, UpdatedAt: updated}
+	graph := cache.RecordGraph{Record: record, Identities: []cache.Identity{{RepoID: repoID, SourceID: stableID, AliasType: "issue", Alias: remoteAlias, Remote: cache.RemoteAlias{Type: "issue", ID: remoteAlias}}}, ReplaceLinkKinds: []string{"milestone"}, RemoteRevisions: []cache.RemoteRevision{{RepoID: repoID, RecordID: stableID, RemoteType: "issue", RemoteID: remoteAlias, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}}
+	if remoteID != remoteAlias {
+		graph.Identities = append(graph.Identities, cache.Identity{RepoID: repoID, SourceID: stableID, AliasType: "gitcode_issue_id", Alias: remoteID, Remote: cache.RemoteAlias{Type: "gitcode_issue_id", ID: remoteID}})
+	}
 	if issue.Milestone != nil {
 		milestoneResult := gitcode.WriteResult[gitcode.Milestone]{Record: *issue.Milestone, Confirmed: true, RemoteID: issue.Milestone.RemoteID, RemoteRevision: issue.Milestone.UpdatedAt, BrowserURL: issue.Milestone.HTMLURL, ConfirmedAt: now}
 		_, milestoneGraph := s.milestoneWriteGraph(repoID, *issue.Milestone, milestoneResult, now)
@@ -5846,6 +5882,9 @@ func writeIdempotency(command string, req WriteCommandRequest) (string, string) 
 	}{command, req.RepoID, req.ID, req.Number, req.IssueNumber, req.DiscussionID, req.ParentID, req.Slug, req.Path, req.Sha, req.Line, req.Position, req.StartLine, req.EndLine, strings.TrimSpace(req.Title), req.Body, req.Description, strings.TrimSpace(req.DueOn), strings.TrimSpace(req.Milestone), req.ClearMilestone, strings.TrimSpace(req.Head), strings.TrimSpace(req.Base), req.State, strings.TrimSpace(req.Label), req.Labels, strings.TrimSpace(req.Strategy)})
 	sum := sha256.Sum256(payload)
 	fingerprint := hex.EncodeToString(sum[:])
+	if override := strings.TrimSpace(req.idempotencyFingerprint); override != "" {
+		fingerprint = override
+	}
 	if strings.TrimSpace(req.IdempotencyKey) != "" {
 		return strings.TrimSpace(req.IdempotencyKey), fingerprint
 	}

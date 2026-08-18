@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/diagnostics"
+	"gitcode-mcp/internal/feedback"
 )
 
 const (
@@ -23,19 +24,20 @@ const (
 )
 
 type Config struct {
-	CachePath       string        `json:"cache_path"`
-	LockPath        string        `json:"lock_path"`
-	CacheMode       string        `json:"cache_mode"`
-	GitCodeBaseURL  string        `json:"gitcode_base_url"`
-	DefaultTimeout  time.Duration `json:"default_timeout"`
-	MaxResponseSize int64         `json:"max_response_size"`
-	MaxRetries      int           `json:"max_retries"`
-	RateLimitRPS    float64       `json:"rate_limit_rps"`
-	RateLimitBurst  int           `json:"rate_limit_burst"`
-	Format          string        `json:"format"`
-	MCPToolAccess   string        `json:"mcp_tool_access"`
-	Service         ServiceConfig `json:"service"`
-	RAG             RAGConfig     `json:"rag"`
+	CachePath       string          `json:"cache_path"`
+	LockPath        string          `json:"lock_path"`
+	CacheMode       string          `json:"cache_mode"`
+	GitCodeBaseURL  string          `json:"gitcode_base_url"`
+	DefaultTimeout  time.Duration   `json:"default_timeout"`
+	MaxResponseSize int64           `json:"max_response_size"`
+	MaxRetries      int             `json:"max_retries"`
+	RateLimitRPS    float64         `json:"rate_limit_rps"`
+	RateLimitBurst  int             `json:"rate_limit_burst"`
+	Format          string          `json:"format"`
+	MCPToolAccess   string          `json:"mcp_tool_access"`
+	Service         ServiceConfig   `json:"service"`
+	RAG             RAGConfig       `json:"rag"`
+	Feedback        feedback.Config `json:"feedback"`
 }
 
 type Overrides struct {
@@ -142,21 +144,30 @@ func RedactDiagnostic(message string, src Source) string {
 }
 
 type fileConfig struct {
-	CachePath       *string            `json:"cache_path"`
-	LockPath        *string            `json:"lock_path"`
-	CacheMode       *string            `json:"cache_mode"`
-	GitCodeBaseURL  *string            `json:"gitcode_base_url"`
-	DefaultTimeout  *string            `json:"default_timeout"`
-	MaxResponseSize *int64             `json:"max_response_size"`
-	MaxRetries      *int               `json:"max_retries"`
-	RateLimitRPS    *float64           `json:"rate_limit_rps"`
-	RateLimitBurst  *int               `json:"rate_limit_burst"`
-	Format          *string            `json:"format"`
-	MCPToolAccess   *string            `json:"mcp_tool_access"`
-	MCP             *MCPConfig         `json:"mcp"`
-	Credential      *CredentialConfig  `json:"credential"`
-	Service         *serviceFileConfig `json:"service"`
-	RAG             *ragFileConfig     `json:"rag"`
+	CachePath       *string             `json:"cache_path"`
+	LockPath        *string             `json:"lock_path"`
+	CacheMode       *string             `json:"cache_mode"`
+	GitCodeBaseURL  *string             `json:"gitcode_base_url"`
+	DefaultTimeout  *string             `json:"default_timeout"`
+	MaxResponseSize *int64              `json:"max_response_size"`
+	MaxRetries      *int                `json:"max_retries"`
+	RateLimitRPS    *float64            `json:"rate_limit_rps"`
+	RateLimitBurst  *int                `json:"rate_limit_burst"`
+	Format          *string             `json:"format"`
+	MCPToolAccess   *string             `json:"mcp_tool_access"`
+	MCP             *MCPConfig          `json:"mcp"`
+	Credential      *CredentialConfig   `json:"credential"`
+	Service         *serviceFileConfig  `json:"service"`
+	RAG             *ragFileConfig      `json:"rag"`
+	Feedback        *feedbackFileConfig `json:"feedback"`
+}
+
+type feedbackFileConfig struct {
+	Enabled         *bool    `json:"enabled"`
+	Sink            *string  `json:"sink"`
+	RepoID          *string  `json:"repo_id"`
+	Labels          []string `json:"labels"`
+	DuplicatePolicy *string  `json:"duplicate_policy"`
 }
 
 func defaultWithSource(src Source) Config {
@@ -180,6 +191,7 @@ func defaultWithSource(src Source) Config {
 		MCPToolAccess:   MCPToolAccessWrite,
 		Service:         defaultServiceConfig(cacheBaseDir),
 		RAG:             defaultRAGConfig(cacheBaseDir),
+		Feedback:        feedback.DefaultConfig(),
 	}
 }
 
@@ -304,9 +316,40 @@ func mergeFile(cfg Config, file fileConfig) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	cfg, err = mergeFeedbackFile(cfg, file.Feedback)
+	if err != nil {
+		return Config{}, err
+	}
 	if file.LockPath == nil && file.CachePath != nil {
 		cfg.LockPath = cfg.CachePath + ".lock"
 	}
+	return cfg, nil
+}
+
+func mergeFeedbackFile(cfg Config, file *feedbackFileConfig) (Config, error) {
+	if file == nil {
+		return cfg, nil
+	}
+	if file.Enabled != nil {
+		cfg.Feedback.Enabled = *file.Enabled
+	}
+	if file.Sink != nil {
+		cfg.Feedback.Sink = strings.TrimSpace(*file.Sink)
+	}
+	if file.RepoID != nil {
+		cfg.Feedback.RepoID = strings.TrimSpace(*file.RepoID)
+	}
+	if file.Labels != nil {
+		cfg.Feedback.Labels = append([]string(nil), file.Labels...)
+	}
+	if file.DuplicatePolicy != nil {
+		cfg.Feedback.DuplicatePolicy = strings.TrimSpace(*file.DuplicatePolicy)
+	}
+	normalized, err := feedback.NormalizeConfig(cfg.Feedback)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Feedback = normalized
 	return cfg, nil
 }
 

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"gitcode-mcp/internal/feedback"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
 )
@@ -20,6 +21,7 @@ type ServiceConfig struct {
 	Pagination      gitcode.PaginationConfig
 	RateLimitRPS    float64
 	RateLimitBurst  int
+	Feedback        feedback.Config
 }
 
 type RepositoryScope string
@@ -907,6 +909,7 @@ type WriteCommandRequest struct {
 	IdempotencyKey string    `json:"idempotency_key,omitempty"`
 
 	pushMirrorPreviousStatus string
+	idempotencyFingerprint   string
 }
 
 type WriteCommandResult struct {

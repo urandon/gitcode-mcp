@@ -86,3 +86,14 @@ func TestCreateIssueIsSharedWriteCapability(t *testing.T) {
 		t.Fatalf("create_issue names = CLI %q service %q", cap.CLIName, cap.ServiceCommand)
 	}
 }
+
+func TestFeedbackCapabilitiesSeparatePreparationFromSubmission(t *testing.T) {
+	prepare, ok := LookupByMCPName("prepare_feedback")
+	if !ok || prepare.Safety != SafetyReadOnly || !prepare.MCP.Enabled || !prepare.CLI.Enabled {
+		t.Fatalf("prepare_feedback=%#v ok=%t", prepare, ok)
+	}
+	submit, ok := LookupByMCPName("submit_feedback")
+	if !ok || submit.Safety != SafetyAuditedWrite || !submit.MCP.Enabled || !submit.CLI.Enabled {
+		t.Fatalf("submit_feedback=%#v ok=%t", submit, ok)
+	}
+}
