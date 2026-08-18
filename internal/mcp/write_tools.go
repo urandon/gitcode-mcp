@@ -88,7 +88,7 @@ func writeToolInputSchema(id string) inputSchema {
 	case "add_pr_comment":
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Comment body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "number", "body"}}
 	case "add_pr_review_comment":
-		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Comment body.", MinLength: 1}, "path": {Type: "string", Description: "Changed file path.", MinLength: 1}, "line": {Type: "integer", Description: "File line number.", Minimum: float64Ptr(1)}, "position": {Type: "integer", Description: "Diff position.", Minimum: float64Ptr(1)}, "start_line": {Type: "integer", Description: "Optional range start line.", Minimum: float64Ptr(1)}, "end_line": {Type: "integer", Description: "Optional range end line.", Minimum: float64Ptr(1)}}), Required: []string{"repo_id", "write_mode", "number", "body", "path"}}
+		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "body": {Type: "string", Description: "Comment body.", MinLength: 1}, "path": {Type: "string", Description: "Changed file path.", MinLength: 1}, "line": {Type: "integer", Description: "Required 1-based current-side file line; the adapter derives GitCode provider coordinates.", Minimum: float64Ptr(1)}, "position": {Type: "integer", Description: "Deprecated file-line alias, not a diff-hunk offset; omit it or make it equal line.", Minimum: float64Ptr(1)}, "start_line": {Type: "integer", Description: "Optional range start line; must be at or before line.", Minimum: float64Ptr(1)}, "end_line": {Type: "integer", Description: "Optional range end line; must equal the anchor line.", Minimum: float64Ptr(1)}}), Required: []string{"repo_id", "write_mode", "number", "body", "path", "line"}}
 	case "reply_pr_review_comment":
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "discussion_id": {Type: "string", Description: "Review discussion id.", MinLength: 1}, "parent_comment_id": {Type: "string", Description: "Parent/root review comment id.", MinLength: 1}, "body": {Type: "string", Description: "Reply body.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "number", "discussion_id", "parent_comment_id", "body"}}
 	case "link_pr_issue":
@@ -346,7 +346,13 @@ func (s *Server) callAddPRComment(ctx context.Context, id *json.RawMessage, args
 }
 
 func (s *Server) callAddPRReviewComment(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
-	s.callWriteTool(ctx, id, args, s.svc.AddPRReviewComment, func(a writeToolArgs) service.WriteCommandRequest {
+	handler := func(ctx context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
+		if req.Line <= 0 {
+			return service.WriteCommandResult{}, service.ErrInvalidQuery{Field: "line", Message: "line is required; position is not a diff-hunk offset"}
+		}
+		return s.svc.AddPRReviewComment(ctx, req)
+	}
+	s.callWriteTool(ctx, id, args, handler, func(a writeToolArgs) service.WriteCommandRequest {
 		req := writeRequestFromArgs(a)
 		req.Number = a.Number
 		req.Body = a.Body

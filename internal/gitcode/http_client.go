@@ -551,6 +551,10 @@ func (c *HTTPClient) CreatePRReviewComment(ctx context.Context, req CreatePRRevi
 	if err := validateCreatePRReviewComment(req); err != nil {
 		return WriteResult[PRComment]{}, err
 	}
+	if req.Line == 0 {
+		req.Line = req.Position
+	}
+	req.Position = req.Line
 	pr, err := c.GetPR(ctx, PRRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
 	if err != nil {
 		return WriteResult[PRComment]{}, err
@@ -583,21 +587,51 @@ func (c *HTTPClient) CreatePRReviewComment(ctx context.Context, req CreatePRRevi
 	if err != nil {
 		return WriteResult[PRComment]{}, err
 	}
-	comment := ensurePRReviewCommentPosition(result.Record, req, pr)
-	return WriteResult[PRComment]{
-		Record:                     comment,
-		Confirmed:                  result.Confirmed,
-		Operation:                  result.Operation,
-		Target:                     result.Target,
-		ProviderStatus:             result.ProviderStatus,
-		IdempotencyKey:             result.IdempotencyKey,
-		ResponseHash:               result.ResponseHash,
-		ProviderPayloadFingerprint: result.ProviderPayloadFingerprint,
-		RemoteID:                   result.RemoteID,
-		ParentIssueNumber:          result.ParentIssueNumber,
-		ParentIssueID:              result.ParentIssueID,
-		ConfirmedAt:                result.ConfirmedAt,
-	}, nil
+	return c.confirmCreatedPRReviewComment(ctx, endpoint, req, pr, result)
+}
+
+func (c *HTTPClient) confirmCreatedPRReviewComment(ctx context.Context, endpoint string, req CreatePRReviewCommentRequest, pr PullRequest, result WriteResult[PRComment]) (WriteResult[PRComment], error) {
+	readback, err := c.ListPRComments(ctx, PRRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
+	if err != nil {
+		return WriteResult[PRComment]{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "inline review comment requires anchor readback", RemoteID: result.RemoteID, Cause: err}
+	}
+	for _, comment := range readback.Items {
+		if comment.ID != result.RemoteID {
+			continue
+		}
+		path, line := prReviewCommentAnchor(comment)
+		if path == "" || line <= 0 {
+			return WriteResult[PRComment]{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "inline review comment readback omitted path or line", RemoteID: result.RemoteID}
+		}
+		if path != req.Path || line != req.Line {
+			return WriteResult[PRComment]{}, ErrPRReviewAnchorMismatch{Endpoint: endpoint, CommentID: result.RemoteID, ExpectedPath: req.Path, ActualPath: path, ExpectedLine: req.Line, ActualLine: line}
+		}
+		if comment.Body != "" && comment.Body != req.Body {
+			return WriteResult[PRComment]{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "inline review comment readback body mismatch", RemoteID: result.RemoteID}
+		}
+		comment.Body = firstNonEmpty(comment.Body, req.Body)
+		comment.PRNumber = req.Number
+		comment.ReviewKind = "inline"
+		result.Record = ensurePRReviewCommentPosition(comment, req, pr)
+		result.ParentIssueID = result.Record.DiscussionID
+		result.ProviderStatus += "-readback"
+		return result, nil
+	}
+	return WriteResult[PRComment]{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "created inline review comment was absent from readback", RemoteID: result.RemoteID}
+}
+
+func prReviewCommentAnchor(comment PRComment) (string, int) {
+	for _, position := range comment.Positions {
+		if position.PositionKind != "" && position.PositionKind != "current" {
+			continue
+		}
+		path := firstNonEmpty(position.NewPath, position.OldPath)
+		line := firstPositive(position.NewLine, position.OldLine)
+		if path != "" && line > 0 {
+			return path, line
+		}
+	}
+	return strings.TrimSpace(comment.Path), comment.Line
 }
 
 func (c *HTTPClient) ReplyPRReviewComment(ctx context.Context, req ReplyPRReviewCommentRequest, opts WriteOptions) (WriteResult[PRComment], error) {
@@ -1620,6 +1654,16 @@ func validateCreatePRReviewComment(req CreatePRReviewCommentRequest) error {
 	}
 	if req.StartLine > 0 && req.EndLine > 0 && req.StartLine > req.EndLine {
 		return ErrValidationFailed{Field: "start_line", Message: "start_line must be less than or equal to end_line"}
+	}
+	line := firstPositive(req.Line, req.Position)
+	if req.Line > 0 && req.Position > 0 && req.Line != req.Position {
+		return ErrValidationFailed{Field: "position", Message: "position is a deprecated file-line alias and must equal line when both are supplied"}
+	}
+	if req.EndLine > 0 && req.EndLine != line {
+		return ErrValidationFailed{Field: "end_line", Message: "end_line must equal the anchor line"}
+	}
+	if req.StartLine > line {
+		return ErrValidationFailed{Field: "start_line", Message: "start_line must be less than or equal to the anchor line"}
 	}
 	return nil
 }

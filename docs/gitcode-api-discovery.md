@@ -205,7 +205,7 @@ Content-Type: application/json
 }
 ```
 
-The v5 create endpoint expects `Authorization: Bearer ...`. GitCode accepts body-only and `path` plus `line` payloads, but those create timeline comments rather than private-mode-visible inline review comments. A payload that repeats the anchor as `line`, `new_line`, and `position` creates an inline review comment that appears in both private and authenticated browser views. The v5 POST response can be sparse, so the adapter confirms a write from the returned `note_id` or `id` plus matching body, then stores request-derived inline metadata and a normalized current position using the PR base/head SHAs. Later resync can replace or enrich that position if GitCode exposes richer metadata through a frontend-compatible API.
+The v5 create endpoint expects `Authorization: Bearer ...`. GitCode accepts body-only and `path` plus `line` payloads, but those create timeline comments rather than private-mode-visible inline review comments. A payload that repeats the 1-based current-side file line as `line`, `new_line`, and `position` creates an inline review comment that appears in both private and authenticated browser views. Here `position` is not a diff-hunk ordinal. The adapter therefore accepts `line` as the ordinary coordinate and derives all three provider fields from it. Because the v5 POST response can be sparse, success additionally requires list/discussion readback of the returned `note_id` with matching current path and line. Missing anchor evidence is ambiguous; a different anchor is a typed mismatch. Request-derived metadata alone is not write confirmation.
 
 Replying inside an existing review discussion uses the official v5 endpoint added in the 2025-07-31 API release:
 

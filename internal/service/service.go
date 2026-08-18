@@ -3324,6 +3324,19 @@ func (s *Service) AddPRReviewComment(ctx context.Context, req WriteCommandReques
 	if req.Number == 0 || strings.TrimSpace(req.Body) == "" || strings.TrimSpace(req.Path) == "" || (req.Line == 0 && req.Position == 0) {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "pr_review_comment", Message: "pull request number, body, path, and line or position are required"}
 	}
+	if req.Line == 0 {
+		req.Line = req.Position
+	}
+	if req.Position > 0 && req.Position != req.Line {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "position", Message: "position is a deprecated file-line alias and must equal line when both are supplied"}
+	}
+	if req.EndLine > 0 && req.EndLine != req.Line {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "end_line", Message: "end_line must equal the anchor line"}
+	}
+	if req.StartLine > req.Line {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "start_line", Message: "start_line must be less than or equal to the anchor line"}
+	}
+	req.Position = req.Line
 	return s.executeWrite(ctx, "add-pr-review-comment", req, RepositoryScopeIssues)
 }
 
@@ -4677,6 +4690,9 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 		if lookup.InProgress {
 			return WriteCommandResult{}, ErrWriteFailure{Code: "write_idempotency_in_progress", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
 		}
+		if lookup.Unsafe {
+			return WriteCommandResult{}, ErrWriteFailure{Code: firstNonEmptyString(prior.Message, "write_ambiguous_remote"), RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
+		}
 	}
 	if command == "trigger-push-mirror" {
 		entry := audit.WithRequestMetadata(
@@ -4706,6 +4722,17 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	confirmed, graph, err := s.callWriteAdapter(ctx, command, route, req, key)
 	if err != nil {
 		code := s.writeAdapterErrorCode(req.Mode, err)
+		remoteID := remoteWriteID(err)
+		if remoteID != "" {
+			remoteType := writeCommandRemoteType(command)
+			entry := audit.RemoteConfirmedUnsafe(route.RepoID, key, command, fallbackSourceID(remoteType, remoteID), remoteType, remoteID, fingerprint, code, s.now().UTC())
+			if auditErr := s.store.RecordAuditEvent(ctx, entry); auditErr != nil {
+				partial := audit.RemoteConfirmedAuditFailed(route.RepoID, key, command, entry.RecordID, remoteType, remoteID, fingerprint, auditErr.Error(), s.now().UTC())
+				_ = s.store.RecordAuditEvent(ctx, partial)
+				return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: remoteID, IdempotencyKey: key, Cause: auditErr}
+			}
+			return WriteCommandResult{}, ErrWriteFailure{Code: code, RepoID: route.RepoID, RemoteID: remoteID, IdempotencyKey: key, PayloadSource: failureSource(err), Cause: writeFailureCause(code, err)}
+		}
 		if command == "trigger-push-mirror" && !safePushMirrorTriggerFailure(err) {
 			return WriteCommandResult{}, ErrWriteFailure{Code: "write_ambiguous_remote", RepoID: route.RepoID, RemoteID: req.ID, IdempotencyKey: key, PayloadSource: failureSource(err), Cause: err}
 		}
@@ -5699,6 +5726,10 @@ func writeIdempotency(command string, req WriteCommandRequest) (string, string) 
 		Slug           string
 		Path           string
 		Sha            string
+		Line           int
+		Position       int
+		StartLine      int
+		EndLine        int
 		Title          string
 		Body           string
 		Description    string
@@ -5711,7 +5742,7 @@ func writeIdempotency(command string, req WriteCommandRequest) (string, string) 
 		Label          string
 		Labels         []string
 		Strategy       string
-	}{command, req.RepoID, req.ID, req.Number, req.IssueNumber, req.DiscussionID, req.ParentID, req.Slug, req.Path, req.Sha, strings.TrimSpace(req.Title), req.Body, req.Description, strings.TrimSpace(req.DueOn), strings.TrimSpace(req.Milestone), req.ClearMilestone, strings.TrimSpace(req.Head), strings.TrimSpace(req.Base), req.State, strings.TrimSpace(req.Label), req.Labels, strings.TrimSpace(req.Strategy)})
+	}{command, req.RepoID, req.ID, req.Number, req.IssueNumber, req.DiscussionID, req.ParentID, req.Slug, req.Path, req.Sha, req.Line, req.Position, req.StartLine, req.EndLine, strings.TrimSpace(req.Title), req.Body, req.Description, strings.TrimSpace(req.DueOn), strings.TrimSpace(req.Milestone), req.ClearMilestone, strings.TrimSpace(req.Head), strings.TrimSpace(req.Base), req.State, strings.TrimSpace(req.Label), req.Labels, strings.TrimSpace(req.Strategy)})
 	sum := sha256.Sum256(payload)
 	fingerprint := hex.EncodeToString(sum[:])
 	if strings.TrimSpace(req.IdempotencyKey) != "" {
@@ -5773,6 +5804,14 @@ func (s *Service) writeAdapterErrorCode(mode WriteMode, err error) string {
 }
 
 func writeErrorCode(err error) string {
+	var anchorMismatch gitcode.ErrPRReviewAnchorMismatch
+	if errors.As(err, &anchorMismatch) {
+		return "pr_review_anchor_mismatch"
+	}
+	var incomplete gitcode.ErrWriteConfirmationIncomplete
+	if errors.As(err, &incomplete) {
+		return "write_confirmation_incomplete"
+	}
 	var schema *gitcode.ErrSchemaDecode
 	if errors.As(err, &schema) {
 		return "schema_decode"
@@ -5854,6 +5893,29 @@ func failureSource(err error) string {
 		return "partial_response"
 	}
 	return ""
+}
+
+func remoteWriteID(err error) string {
+	var remote interface{ RemoteWriteID() string }
+	if errors.As(err, &remote) {
+		return strings.TrimSpace(remote.RemoteWriteID())
+	}
+	return ""
+}
+
+func writeCommandRemoteType(command string) string {
+	switch command {
+	case "add-pr-comment", "add-pr-review-comment", "reply-pr-review-comment":
+		return "pr_comment"
+	case "add-comment", "update-comment":
+		return "issue_comment"
+	case "create-issue", "update-issue":
+		return "issue"
+	case "create-page", "update-page", "delete-page":
+		return "wiki"
+	default:
+		return "remote"
+	}
 }
 
 func firstNonEmptyString(values ...string) string {

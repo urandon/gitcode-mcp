@@ -15,6 +15,7 @@ const (
 	StatusInProgress                        = "in_progress"
 	StatusRemoteConfirmedCacheRefreshFailed = "remote_confirmed_cache_refresh_failed"
 	StatusRemoteConfirmedAuditFailed        = "remote_confirmed_audit_failed"
+	StatusRemoteConfirmedUnsafe             = "remote_confirmed_unsafe"
 )
 
 var ErrInvalidConfirmation = errors.New("audit: invalid live confirmation")
@@ -45,6 +46,7 @@ type Lookup struct {
 	Retry      bool
 	Partial    bool
 	InProgress bool
+	Unsafe     bool
 }
 
 func EntryID(key string) string {
@@ -74,6 +76,8 @@ func LookupIdempotency(ctx context.Context, store Store, repoID, key, payloadHas
 		lookup.Retry = true
 	case StatusInProgress:
 		lookup.InProgress = true
+	case StatusRemoteConfirmedUnsafe:
+		lookup.Unsafe = true
 	}
 	return lookup, nil
 }
@@ -116,6 +120,10 @@ func RemoteConfirmedCacheRefreshFailed(repoID, key, operation, recordID, remoteT
 
 func RemoteConfirmedAuditFailed(repoID, key, operation, recordID, remoteType, remoteID, payloadHash, message string, createdAt time.Time) cache.AuditTrailEntry {
 	return entry(repoID, key, operation, recordID, remoteType, remoteID, StatusRemoteConfirmedAuditFailed, message, payloadHash, createdAt)
+}
+
+func RemoteConfirmedUnsafe(repoID, key, operation, recordID, remoteType, remoteID, payloadHash, message string, createdAt time.Time) cache.AuditTrailEntry {
+	return entry(repoID, key, operation, recordID, remoteType, remoteID, StatusRemoteConfirmedUnsafe, message, payloadHash, createdAt)
 }
 
 func entry(repoID, key, operation, recordID, remoteType, remoteID, status, message, payloadHash string, createdAt time.Time) cache.AuditTrailEntry {

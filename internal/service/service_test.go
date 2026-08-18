@@ -1391,7 +1391,7 @@ func TestScenario016MCPWriteLifecycleCreatePRAndComment(t *testing.T) {
 	client := &fakeGitCodeClient{
 		createPRResult:              gitcode.WriteResult[gitcode.PullRequest]{Record: gitcode.PullRequest{ID: "9001", Number: 7, Title: "Add MCP writes", Body: "body", State: "open", Base: "main", Head: "topic", CreatedAt: created, UpdatedAt: created}, Confirmed: true, Operation: "CreatePR", RemoteID: "9001", RemoteNumber: 7, ConfirmedAt: created},
 		createPRCommentResult:       gitcode.WriteResult[gitcode.PRComment]{Record: gitcode.PRComment{ID: "301", Body: "tested", Author: "bot", CreatedAt: created}, Confirmed: true, Operation: "CreatePRComment", RemoteID: "301", ParentIssueNumber: 7, ParentIssueID: "7", ConfirmedAt: created},
-		createPRReviewCommentResult: gitcode.WriteResult[gitcode.PRComment]{Record: gitcode.PRComment{ID: "302", Body: "inline", Author: "bot", DiscussionID: "D7", ReviewKind: "inline", Path: "internal/service/service.go", Line: 42, Position: 9, Positions: []gitcode.PRCommentPosition{{PositionKind: "current", PositionType: "text", BaseSHA: "base-sha", StartSHA: "base-sha", HeadSHA: "head-sha", OldPath: "internal/service/service.go", NewPath: "internal/service/service.go", NewLine: 42, LineCode: "line-code", Side: "new"}}, CreatedAt: created, UpdatedAt: created}, Confirmed: true, Operation: "CreatePRReviewComment", RemoteID: "302", ParentIssueNumber: 7, ParentIssueID: "D7", ConfirmedAt: created},
+		createPRReviewCommentResult: gitcode.WriteResult[gitcode.PRComment]{Record: gitcode.PRComment{ID: "302", Body: "inline", Author: "bot", DiscussionID: "D7", ReviewKind: "inline", Path: "internal/service/service.go", Line: 42, Position: 42, Positions: []gitcode.PRCommentPosition{{PositionKind: "current", PositionType: "text", BaseSHA: "base-sha", StartSHA: "base-sha", HeadSHA: "head-sha", OldPath: "internal/service/service.go", NewPath: "internal/service/service.go", NewLine: 42, LineCode: "line-code", Side: "new"}}, CreatedAt: created, UpdatedAt: created}, Confirmed: true, Operation: "CreatePRReviewComment", RemoteID: "302", ParentIssueNumber: 7, ParentIssueID: "D7", ConfirmedAt: created},
 		replyPRReviewCommentResult:  gitcode.WriteResult[gitcode.PRComment]{Record: gitcode.PRComment{ID: "303", Body: "confirmed", Author: "bot", DiscussionID: "D7", ParentID: "302", ReviewKind: "inline", Path: "internal/service/service.go", Line: 42, Positions: []gitcode.PRCommentPosition{{PositionKind: "current", PositionType: "text", BaseSHA: "base-sha", StartSHA: "base-sha", HeadSHA: "head-sha", NewPath: "internal/service/service.go", NewLine: 42, Side: "new"}}, CreatedAt: created, UpdatedAt: created}, Confirmed: true, Operation: "ReplyPRReviewComment", RemoteID: "303", ParentIssueNumber: 7, ParentIssueID: "D7", ConfirmedAt: created},
 	}
 	client.replyPRReviewCommentResult.Record.Thread = []gitcode.PRComment{{ID: "302", Body: "inline", Author: "bot", DiscussionID: "D7", ReviewKind: "inline", Path: "internal/service/service.go", Line: 42, Positions: []gitcode.PRCommentPosition{{PositionKind: "current", PositionType: "text", BaseSHA: "base-sha", StartSHA: "base-sha", HeadSHA: "head-sha", NewPath: "internal/service/service.go", NewLine: 42, Side: "new"}}, CreatedAt: created, UpdatedAt: created}}
@@ -1432,21 +1432,21 @@ func TestScenario016MCPWriteLifecycleCreatePRAndComment(t *testing.T) {
 		t.Fatalf("comment record=%#v", commentRecord)
 	}
 
-	reviewComment, err := svc.AddPRReviewComment(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 7, Body: "inline", Path: "internal/service/service.go", Line: 42, Position: 9, IdempotencyKey: "pr-review-comment-key"})
+	reviewComment, err := svc.AddPRReviewComment(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 7, Body: "inline", Path: "internal/service/service.go", Line: 42, Position: 42, IdempotencyKey: "pr-review-comment-key"})
 	if err != nil {
 		t.Fatalf("AddPRReviewComment live returned error: %v", err)
 	}
 	if reviewComment.Status != "succeeded" || reviewComment.ID != "PRCOMMENT-7-302" || reviewComment.RemoteID != "302" || client.createPRReviewCommentCalls != 1 {
 		t.Fatalf("unexpected PR review comment result=%+v calls=%d", reviewComment, client.createPRReviewCommentCalls)
 	}
-	if client.lastCreatePRReviewCommentReq.Path != "internal/service/service.go" || client.lastCreatePRReviewCommentReq.Line != 42 || client.lastCreatePRReviewCommentReq.Position != 9 {
+	if client.lastCreatePRReviewCommentReq.Path != "internal/service/service.go" || client.lastCreatePRReviewCommentReq.Line != 42 || client.lastCreatePRReviewCommentReq.Position != 42 {
 		t.Fatalf("review comment request=%#v", client.lastCreatePRReviewCommentReq)
 	}
 	reviewRows, err := store.ListPRReviewComments(ctx, cache.PRReviewCommentFilter{RepoID: "fixture-a", PRNumber: 7, SourceID: "PRCOMMENT-7-302"})
 	if err != nil {
 		t.Fatalf("list review comments: %v", err)
 	}
-	if len(reviewRows) != 1 || reviewRows[0].ReviewKind != "inline" || reviewRows[0].Path != "internal/service/service.go" || reviewRows[0].Line != 42 || reviewRows[0].Position != 9 || reviewRows[0].DiscussionID != "D7" {
+	if len(reviewRows) != 1 || reviewRows[0].ReviewKind != "inline" || reviewRows[0].Path != "internal/service/service.go" || reviewRows[0].Line != 42 || reviewRows[0].Position != 42 || reviewRows[0].DiscussionID != "D7" {
 		t.Fatalf("review rows=%+v", reviewRows)
 	}
 	positionRows, err := store.ListPRReviewPositions(ctx, cache.PRReviewPositionFilter{RepoID: "fixture-a", PRNumber: 7, CommentID: "302"})
@@ -1489,6 +1489,63 @@ func TestScenario016MCPWriteLifecycleCreatePRAndComment(t *testing.T) {
 	}
 	if reviewDiscussion == nil || len(reviewDiscussion.Comments) != 2 || reviewDiscussion.Comments[0].ID != "302" || reviewDiscussion.Comments[1].ID != "303" {
 		t.Fatalf("cached discussions=%+v", discussions.Discussions)
+	}
+}
+
+func TestAddPRReviewCommentRejectsConflictingAnchorBeforeWriteLifecycle(t *testing.T) {
+	svc := &Service{}
+	_, err := svc.AddPRReviewComment(context.Background(), WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 7, Body: "inline", Path: "internal/service/service.go", Line: 42, Position: 9, IdempotencyKey: "conflicting-anchor"})
+	var invalid ErrInvalidQuery
+	if !errors.As(err, &invalid) || invalid.Field != "position" {
+		t.Fatalf("error=%#v, want position invalid query", err)
+	}
+}
+
+func TestPRReviewCommentAnchorChangesIdempotencyFingerprint(t *testing.T) {
+	base := WriteCommandRequest{RepoID: "fixture-a", Number: 7, Body: "inline", Path: "x.go", Line: 42, Position: 42, StartLine: 41, EndLine: 42, IdempotencyKey: "review-key"}
+	key, fingerprint := writeIdempotency("add-pr-review-comment", base)
+	changed := base
+	changed.Line = 43
+	changed.Position = 43
+	changed.EndLine = 43
+	changedKey, changedFingerprint := writeIdempotency("add-pr-review-comment", changed)
+	if key != changedKey || fingerprint == changedFingerprint {
+		t.Fatalf("keys=(%q,%q) fingerprints=(%q,%q), want stable explicit key and anchor-sensitive fingerprint", key, changedKey, fingerprint, changedFingerprint)
+	}
+}
+
+func TestPRReviewAnchorMismatchIsAuditedAndIdempotentlyBlocked(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "anchor-mismatch", Owner: "owner-a", Name: "repo-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeGitCodeClient{errors: []error{gitcode.ErrPRReviewAnchorMismatch{Endpoint: "/pulls/7/comments", CommentID: "301", ExpectedPath: "x.go", ActualPath: "x.go", ExpectedLine: 42, ActualLine: 41}}}
+	svc := NewWithClient(store, client)
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.writeCredentialPresent = true
+	req := WriteCommandRequest{RepoID: "anchor-mismatch", Mode: WriteModeLive, Number: 7, Body: "inline", Path: "x.go", Line: 42, IdempotencyKey: "anchor-mismatch-key"}
+
+	_, err = svc.AddPRReviewComment(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "pr_review_anchor_mismatch" || writeErr.RemoteID != "301" {
+		t.Fatalf("first error=%#v, want typed remote mismatch", err)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "anchor-mismatch", "anchor-mismatch-key")
+	if err != nil || entry == nil || entry.Status != audit.StatusRemoteConfirmedUnsafe || entry.RemoteID != "301" {
+		t.Fatalf("audit entry=%#v err=%v", entry, err)
+	}
+
+	_, err = svc.AddPRReviewComment(ctx, req)
+	if !errors.As(err, &writeErr) || writeErr.Code != "pr_review_anchor_mismatch" || writeErr.RemoteID != "301" {
+		t.Fatalf("replay error=%#v, want blocked mismatch", err)
+	}
+	if client.createPRReviewCommentCalls != 1 {
+		t.Fatalf("provider writes=%d, want one after replay", client.createPRReviewCommentCalls)
 	}
 }
 
