@@ -1237,7 +1237,9 @@ func (s *Service) BulkSyncIssues(ctx context.Context, req BulkSyncRequest) (*Syn
 			page.Items = nil
 		}
 		result := &SyncResourcesResult{Results: make([]SyncResult, 0, len(page.Items)), Failures: make([]ResourceError, 0)}
-		result.PagesListed = 1
+		if err == nil || len(page.Items) > 0 {
+			result.PagesListed = 1
+		}
 		result.RecordsListed = len(page.Items)
 		beforeCount := len(result.Results)
 		beforeDeferred := syncResultsDeferredCount(result.Results)

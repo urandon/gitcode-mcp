@@ -24,6 +24,9 @@ func getPaged[T any](ctx context.Context, c *HTTPClient, endpoint string, baseVa
 		for attempt := 1; attempt <= attempts; attempt++ {
 			body, headers, err := c.getBytes(ctx, endpoint, values)
 			if err != nil {
+				if recoverableCollectionDecode(err) && len(body) > 0 {
+					return decodeJSONArrayPrefix[T](body), headers, err
+				}
 				return nil, nil, err
 			}
 			var pageItems []T

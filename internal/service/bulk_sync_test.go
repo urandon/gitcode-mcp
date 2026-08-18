@@ -938,6 +938,9 @@ func TestBulkSyncIssuesListFailureReturnsError(t *testing.T) {
 	if result.SuccessCount != 0 || result.FailureCount != 1 {
 		t.Fatalf("counts = success %d failure %d, want 0/1", result.SuccessCount, result.FailureCount)
 	}
+	if result.PagesListed != 0 || result.RecordsListed != 0 {
+		t.Fatalf("list stats = pages %d records %d, want 0/0", result.PagesListed, result.RecordsListed)
+	}
 	var failure ErrSyncFailure
 	if !errors.As(result.Failures[0].Err, &failure) || failure.Mode != "rate_limited" {
 		t.Fatalf("failure error = %T %v, want rate_limited ErrSyncFailure", result.Failures[0].Err, result.Failures[0].Err)
