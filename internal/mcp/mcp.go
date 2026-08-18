@@ -90,6 +90,7 @@ type RPCHandler struct {
 	ragSearch          RAGSearchProvider
 	maintenancePlan    MaintenancePlanProvider
 	maintenanceApply   MaintenanceApplyProvider
+	runtimeContext     RuntimeContext
 }
 
 type Server struct {
@@ -107,6 +108,13 @@ type Server struct {
 	maintenancePlan    MaintenancePlanProvider
 	maintenanceApply   MaintenanceApplyProvider
 	serviceClient      func() (*servicectl.RPCClient, error)
+	runtimeContext     RuntimeContext
+}
+
+type RuntimeContext struct {
+	EffectiveCachePath string `json:"effective_cache_path,omitempty"`
+	CachePathSource    string `json:"cache_path_source,omitempty"`
+	ConfigReference    string `json:"config_reference,omitempty"`
 }
 
 type RAGStatusProvider func(context.Context, rag.StatusRequest) (rag.StatusResult, error)
@@ -156,6 +164,10 @@ func (h *RPCHandler) SetMaintenanceProviders(plan MaintenancePlanProvider, apply
 	h.maintenanceApply = apply
 }
 
+func (h *RPCHandler) SetRuntimeContext(runtimeContext RuntimeContext) {
+	h.runtimeContext = runtimeContext
+}
+
 func (s *Server) SetRAGStatusProvider(provider RAGStatusProvider) {
 	s.ragStatus = provider
 	if s.handler != nil {
@@ -178,6 +190,13 @@ func (s *Server) SetMaintenanceProviders(plan MaintenancePlanProvider, apply Mai
 	}
 }
 
+func (s *Server) SetRuntimeContext(runtimeContext RuntimeContext) {
+	s.runtimeContext = runtimeContext
+	if s.handler != nil {
+		s.handler.SetRuntimeContext(runtimeContext)
+	}
+}
+
 func NewMinimal(r io.Reader, w io.Writer, stderr io.Writer, diagnostic StartupDiagnostic) *Server {
 	return &Server{reader: r, writer: w, stderr: stderr, handler: NewMinimalRPCHandler(diagnostic), startupDiagnostic: diagnostic, minimal: true, toolAccess: ToolAccessRead}
 }
@@ -187,7 +206,7 @@ func (h *RPCHandler) Handle(ctx context.Context, req request) (*response, bool) 
 		return &response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32600, Message: "Invalid request"}}, true
 	}
 	var buf bytes.Buffer
-	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver, toolAccess: normalizeToolAccess(h.toolAccess), ragStatus: h.ragStatus, ragSearch: h.ragSearch, maintenancePlan: h.maintenancePlan, maintenanceApply: h.maintenanceApply}
+	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver, toolAccess: normalizeToolAccess(h.toolAccess), ragStatus: h.ragStatus, ragSearch: h.ragSearch, maintenancePlan: h.maintenancePlan, maintenanceApply: h.maintenanceApply, runtimeContext: h.runtimeContext}
 	server.handle(ctx, req, req.ID == nil)
 	line := bytes.TrimSpace(buf.Bytes())
 	if len(line) == 0 {

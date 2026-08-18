@@ -360,6 +360,15 @@ func (s *Service) RepositoryStatus(ctx context.Context, req RepositoryStatusRequ
 	}
 	repo, err := s.store.GetRepository(ctx, repoID)
 	if err != nil {
+		if isCacheNotFound(err) {
+			status := RepositoryStatus{RepoID: repoID, BindingState: "missing", AvailableBindings: []string{}}
+			repos, listErr := s.store.ListRepositories(ctx)
+			if listErr != nil {
+				return status, normalizeError(listErr, "repository bindings", repoID)
+			}
+			status.AvailableBindings, status.SuggestedRepoID = repositoryBindingHints(repoID, repos, 8)
+			return status, ErrNotFound{Kind: "repository", ID: repoID}
+		}
 		return RepositoryStatus{}, normalizeError(err, "repository", repoID)
 	}
 	schemaVersion, err := s.store.SchemaVersion(ctx)
@@ -412,6 +421,35 @@ func (s *Service) RepositoryStatus(ctx context.Context, req RepositoryStatusRequ
 		status.Scopes = append(status.Scopes, RepositoryScope(scope))
 	}
 	return status, nil
+}
+
+func repositoryBindingHints(requested string, repos []cache.RepositoryBinding, limit int) ([]string, string) {
+	requested = strings.TrimSpace(requested)
+	availableSet := make(map[string]struct{}, len(repos))
+	strongSet := make(map[string]struct{})
+	for _, repo := range repos {
+		if strings.TrimSpace(repo.RepoID) == "" {
+			continue
+		}
+		availableSet[repo.RepoID] = struct{}{}
+		matched := strings.EqualFold(strings.TrimSpace(repo.Name), requested)
+		for _, alias := range repo.Aliases {
+			matched = matched || strings.EqualFold(strings.TrimSpace(alias), requested)
+		}
+		if matched {
+			strongSet[repo.RepoID] = struct{}{}
+		}
+	}
+	available := sortedKeys(availableSet)
+	if limit > 0 && len(available) > limit {
+		available = available[:limit]
+	}
+	strong := sortedKeys(strongSet)
+	suggested := ""
+	if len(strong) == 1 {
+		suggested = strong[0]
+	}
+	return available, suggested
 }
 
 func repositoryCacheState(detected, expected int) string {

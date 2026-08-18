@@ -20,10 +20,14 @@ type repoStatusArgs struct {
 }
 
 type repoStatusResult struct {
-	RepoID       string                    `json:"repo_id,omitempty"`
-	BindingState string                    `json:"binding_state"`
-	Status       *service.RepositoryStatus `json:"status,omitempty"`
-	Diagnostics  []lifecycleDiagnostic     `json:"diagnostics,omitempty"`
+	RepoID            string                    `json:"repo_id,omitempty"`
+	SelectedRepoID    string                    `json:"selected_repo_id,omitempty"`
+	SuggestedRepoID   string                    `json:"suggested_repo_id,omitempty"`
+	AvailableBindings []string                  `json:"available_bindings,omitempty"`
+	BindingState      string                    `json:"binding_state"`
+	Runtime           RuntimeContext            `json:"runtime"`
+	Status            *service.RepositoryStatus `json:"status,omitempty"`
+	Diagnostics       []lifecycleDiagnostic     `json:"diagnostics,omitempty"`
 }
 
 type lifecycleDiagnostic struct {
@@ -40,21 +44,23 @@ func (s *Server) callRepoStatus(ctx context.Context, id *json.RawMessage, args j
 		return
 	}
 	if strings.TrimSpace(a.RepoID) == "" {
-		result := repoStatusResult{BindingState: "nothing_bound", Diagnostics: []lifecycleDiagnostic{{Code: "nothing_bound", Message: "no repository binding requested"}}}
-		s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: "binding_state=nothing_bound"}}, StructuredContent: result})
+		result := repoStatusResult{BindingState: "nothing_bound", Runtime: s.runtimeContext, Diagnostics: []lifecycleDiagnostic{{Code: "nothing_bound", Message: "no repository binding requested", Remediation: "retry repo_status with repo_id set to the stable owner/name binding; CLI fallback: gitcode-mcp repo status --repo OWNER/NAME --format json"}}}
+		s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: repoStatusText(result)}}, StructuredContent: result})
 		return
 	}
-	status, err := s.svc.RepositoryStatus(ctx, service.RepositoryStatusRequest{RepoID: a.RepoID})
+	selected := strings.TrimSpace(a.RepoID)
+	status, err := s.svc.RepositoryStatus(ctx, service.RepositoryStatusRequest{RepoID: selected})
 	if err != nil {
 		if service.IsNotFound(err) {
-			result := repoStatusResult{RepoID: a.RepoID, BindingState: "nothing_bound", Diagnostics: []lifecycleDiagnostic{{Code: "nothing_bound", Message: err.Error(), Remediation: "add a repository binding before using live sync"}}}
-			s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: "binding_state=nothing_bound"}}, StructuredContent: result})
+			diagnostic := missingBindingDiagnostic(selected, status)
+			result := repoStatusResult{RepoID: selected, SelectedRepoID: selected, SuggestedRepoID: status.SuggestedRepoID, AvailableBindings: status.AvailableBindings, BindingState: "missing", Runtime: s.runtimeContext, Status: &status, Diagnostics: []lifecycleDiagnostic{diagnostic}}
+			s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: repoStatusText(result)}}, StructuredContent: result})
 			return
 		}
-		s.writeOperationalError(id, err, domainErrorContext{Operation: "repo_status", RepoID: a.RepoID})
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "repo_status", RepoID: selected})
 		return
 	}
-	result := repoStatusResult{RepoID: status.RepoID, BindingState: status.BindingState, Status: &status}
+	result := repoStatusResult{RepoID: status.RepoID, SelectedRepoID: selected, BindingState: status.BindingState, Runtime: s.runtimeContext, Status: &status}
 	text := fmt.Sprintf(
 		"binding_state=%s binary_version=%s cache_schema=%d/%d issue_records=%d issue_comments=%d",
 		status.BindingState,
@@ -65,6 +71,42 @@ func (s *Server) callRepoStatus(ctx context.Context, id *json.RawMessage, args j
 		status.IssueComments,
 	)
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func repoStatusText(result repoStatusResult) string {
+	parts := []string{"binding_state=" + result.BindingState}
+	if result.SelectedRepoID != "" {
+		parts = append(parts, "selected_repo_id="+result.SelectedRepoID)
+	}
+	if result.SuggestedRepoID != "" {
+		parts = append(parts, "suggested_repo_id="+result.SuggestedRepoID)
+	}
+	if result.Runtime.EffectiveCachePath != "" {
+		parts = append(parts, "effective_cache_path="+result.Runtime.EffectiveCachePath)
+	}
+	if result.Runtime.ConfigReference != "" {
+		parts = append(parts, "config_reference="+result.Runtime.ConfigReference)
+	}
+	if len(result.AvailableBindings) > 0 {
+		parts = append(parts, "available_bindings="+strings.Join(result.AvailableBindings, ","))
+	}
+	return strings.Join(parts, " ")
+}
+
+func missingBindingDiagnostic(selected string, status service.RepositoryStatus) lifecycleDiagnostic {
+	name := strings.TrimSpace(selected)
+	if strings.Contains(name, "/") {
+		name = "REPO"
+	}
+	remediation := fmt.Sprintf("add or select the stable owner/name binding; CLI fallback: gitcode-mcp repo add --repo OWNER/%s --owner OWNER --name %s --scopes issues,wiki", name, name)
+	if status.SuggestedRepoID != "" {
+		remediation = fmt.Sprintf("retry repo_status with repo_id=%q and use that stable repo_id for subsequent MCP calls; CLI fallback: gitcode-mcp repo status --repo %q --format json", status.SuggestedRepoID, status.SuggestedRepoID)
+	} else if owner, name, ok := strings.Cut(selected, "/"); ok && strings.TrimSpace(owner) != "" && strings.TrimSpace(name) != "" {
+		remediation = fmt.Sprintf("add the selected repository binding; CLI fallback: gitcode-mcp repo add --repo %q --owner %q --name %q --scopes issues,wiki", selected, strings.TrimSpace(owner), strings.TrimSpace(name))
+	} else if len(status.AvailableBindings) > 0 {
+		remediation = "retry repo_status with the intended stable owner/name repo_id from available_bindings; if none is correct, CLI fallback: gitcode-mcp repo add --repo OWNER/REPO --owner OWNER --name REPO --scopes issues,wiki"
+	}
+	return lifecycleDiagnostic{Code: "missing_repository_binding", ErrorClass: "missing_repository_binding", Message: fmt.Sprintf("selected repository binding %q is not configured in the effective cache", selected), Remediation: remediation}
 }
 
 type syncLiveArgs struct {
@@ -521,17 +563,21 @@ type doctorArgs struct {
 }
 
 type doctorResult struct {
-	Status       string                           `json:"status"`
-	RepoID       string                           `json:"repo_id,omitempty"`
-	ToolAccess   string                           `json:"tool_access"`
-	Cache        *service.CacheStatusResult       `json:"cache,omitempty"`
-	Repo         *service.RepositoryStatus        `json:"repo,omitempty"`
-	Auth         *authStatusResult                `json:"auth,omitempty"`
-	Sync         *service.SyncStatusSummaryResult `json:"sync,omitempty"`
-	Index        *service.StaleIndexResult        `json:"index,omitempty"`
-	LiveProvider map[string]string                `json:"live_provider,omitempty"`
-	Diagnostics  []lifecycleDiagnostic            `json:"diagnostics"`
-	GeneratedAt  time.Time                        `json:"generated_at"`
+	Status            string                           `json:"status"`
+	RepoID            string                           `json:"repo_id,omitempty"`
+	SelectedRepoID    string                           `json:"selected_repo_id,omitempty"`
+	SuggestedRepoID   string                           `json:"suggested_repo_id,omitempty"`
+	AvailableBindings []string                         `json:"available_bindings,omitempty"`
+	ToolAccess        string                           `json:"tool_access"`
+	Cache             *service.CacheStatusResult       `json:"cache,omitempty"`
+	Repo              *service.RepositoryStatus        `json:"repo,omitempty"`
+	Auth              *authStatusResult                `json:"auth,omitempty"`
+	Sync              *service.SyncStatusSummaryResult `json:"sync,omitempty"`
+	Index             *service.StaleIndexResult        `json:"index,omitempty"`
+	LiveProvider      map[string]string                `json:"live_provider,omitempty"`
+	Runtime           RuntimeContext                   `json:"runtime"`
+	Diagnostics       []lifecycleDiagnostic            `json:"diagnostics"`
+	GeneratedAt       time.Time                        `json:"generated_at"`
 }
 
 func (s *Server) callDoctor(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
@@ -540,7 +586,8 @@ func (s *Server) callDoctor(ctx context.Context, id *json.RawMessage, args json.
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
 		return
 	}
-	result := doctorResult{Status: "ok", RepoID: a.RepoID, ToolAccess: string(s.activeToolAccess()), Diagnostics: []lifecycleDiagnostic{}, GeneratedAt: time.Now().UTC()}
+	selected := strings.TrimSpace(a.RepoID)
+	result := doctorResult{Status: "ok", RepoID: selected, SelectedRepoID: selected, ToolAccess: string(s.activeToolAccess()), Runtime: s.runtimeContext, Diagnostics: []lifecycleDiagnostic{}, GeneratedAt: time.Now().UTC()}
 	text := "doctor status=ok"
 	if s.startupDiagnostic.present() {
 		result.Status = "degraded"
@@ -555,30 +602,47 @@ func (s *Server) callDoctor(ctx context.Context, id *json.RawMessage, args json.
 		result.LiveProvider = map[string]string{"status": "not_configured", "source": auth.Source}
 	}
 	if s.svc != nil && strings.TrimSpace(a.RepoID) != "" {
-		if repo, err := s.svc.RepositoryStatus(ctx, service.RepositoryStatusRequest{RepoID: a.RepoID}); err == nil {
+		repo, repoErr := s.svc.RepositoryStatus(ctx, service.RepositoryStatusRequest{RepoID: a.RepoID})
+		if repoErr == nil {
 			result.Repo = &repo
+		} else if service.IsNotFound(repoErr) {
+			result.Repo = &repo
+			result.SuggestedRepoID = repo.SuggestedRepoID
+			result.AvailableBindings = append([]string(nil), repo.AvailableBindings...)
+			result.Diagnostics = append(result.Diagnostics, missingBindingDiagnostic(strings.TrimSpace(a.RepoID), repo))
 		} else {
-			result.addDoctorDiagnostic("repo_status", err, "check repository binding")
+			result.addDoctorDiagnostic("repo_status", repoErr, "check repository binding")
 		}
-		if cacheStatus, err := s.svc.CacheStatus(ctx, service.CacheStatusRequest{RepoID: a.RepoID}); err == nil {
-			result.Cache = &cacheStatus
-		} else {
-			result.addDoctorDiagnostic("cache_status", err, "check cache path and schema")
-		}
-		if syncStatus, err := s.svc.SyncStatus(ctx, service.ListSourcesRequest{RepoID: a.RepoID}); err == nil {
-			result.Sync = &syncStatus
-		} else {
-			result.addDoctorDiagnostic("sync_status", err, "run sync_live for this repository")
-		}
-		if indexStatus, err := s.svc.StaleIndex(ctx, service.StaleIndexRequest{RepoID: a.RepoID}); err == nil {
-			result.Index = &indexStatus
-		} else {
-			result.addDoctorDiagnostic("index_status", err, "run index_repo after syncing")
+		if !service.IsNotFound(repoErr) {
+			if cacheStatus, err := s.svc.CacheStatus(ctx, service.CacheStatusRequest{RepoID: a.RepoID}); err == nil {
+				result.Cache = &cacheStatus
+			} else {
+				result.addDoctorDiagnostic("cache_status", err, "check cache path and schema")
+			}
+			if syncStatus, err := s.svc.SyncStatus(ctx, service.ListSourcesRequest{RepoID: a.RepoID}); err == nil {
+				result.Sync = &syncStatus
+			} else {
+				result.addDoctorDiagnostic("sync_status", err, "run sync_live for this repository")
+			}
+			if indexStatus, err := s.svc.StaleIndex(ctx, service.StaleIndexRequest{RepoID: a.RepoID}); err == nil {
+				result.Index = &indexStatus
+			} else {
+				result.addDoctorDiagnostic("index_status", err, "run index_repo after syncing")
+			}
 		}
 	}
 	if len(result.Diagnostics) > 0 {
 		result.Status = "degraded"
 		text = "doctor status=degraded"
+		if result.Repo != nil && result.Repo.BindingState == "missing" {
+			text += " binding_state=missing selected_repo_id=" + result.RepoID
+			if result.Repo.SuggestedRepoID != "" {
+				text += " suggested_repo_id=" + result.Repo.SuggestedRepoID
+			}
+			if result.Runtime.EffectiveCachePath != "" {
+				text += " effective_cache_path=" + result.Runtime.EffectiveCachePath
+			}
+		}
 	}
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 }

@@ -148,6 +148,83 @@ func TestMCPRepoStatusIncludesRuntimeAndIssueCommentDiagnostics(t *testing.T) {
 	}
 }
 
+func TestMCPMissingRepositoryBindingReturnsExplicitRecoveryContext(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	handler := NewRPCHandler(service.New(store))
+	handler.SetRuntimeContext(RuntimeContext{EffectiveCachePath: "/safe/cache.db", CachePathSource: "explicit-yaml", ConfigReference: "/safe/config.yaml"})
+
+	callTool := func(name string, arguments map[string]any) toolCallResult {
+		t.Helper()
+		id := json.RawMessage(`1`)
+		paramsBytes, err := json.Marshal(map[string]any{"name": name, "arguments": arguments})
+		if err != nil {
+			t.Fatal(err)
+		}
+		params := json.RawMessage(paramsBytes)
+		resp, ok := handler.Handle(context.Background(), request{JSONRPC: "2.0", ID: &id, Method: "tools/call", Params: &params})
+		if !ok || resp == nil || resp.Error != nil {
+			t.Fatalf("%s response=%#v ok=%t", name, resp, ok)
+		}
+		var result toolCallResult
+		if err := json.Unmarshal(resp.Result, &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+
+	statusCall := callTool("repo_status", map[string]any{"repo_id": "repo-a"})
+	var status repoStatusResult
+	decodeStructured(t, statusCall, &status)
+	if status.BindingState != "missing" || status.SelectedRepoID != "repo-a" || status.SuggestedRepoID != "fixture-a" || !reflect.DeepEqual(status.AvailableBindings, []string{"fixture-a"}) {
+		t.Fatalf("repo_status=%+v", status)
+	}
+	if status.Runtime.EffectiveCachePath != "/safe/cache.db" || status.Runtime.CachePathSource != "explicit-yaml" || status.Runtime.ConfigReference != "/safe/config.yaml" {
+		t.Fatalf("runtime=%+v", status.Runtime)
+	}
+	if len(status.Diagnostics) != 1 || status.Diagnostics[0].Code != "missing_repository_binding" || !strings.Contains(status.Diagnostics[0].Remediation, `repo_id="fixture-a"`) {
+		t.Fatalf("diagnostics=%+v", status.Diagnostics)
+	}
+	if len(statusCall.Content) != 1 || !strings.Contains(statusCall.Content[0].Text, "binding_state=missing") || !strings.Contains(statusCall.Content[0].Text, "suggested_repo_id=fixture-a") || !strings.Contains(statusCall.Content[0].Text, "effective_cache_path=/safe/cache.db") {
+		t.Fatalf("content=%+v", statusCall.Content)
+	}
+
+	doctorCall := callTool("doctor", map[string]any{"repo_id": "repo-a"})
+	var doctor doctorResult
+	decodeStructured(t, doctorCall, &doctor)
+	if doctor.Status != "degraded" || doctor.Repo == nil || doctor.Repo.BindingState != "missing" || doctor.Repo.SuggestedRepoID != "fixture-a" {
+		t.Fatalf("doctor=%+v", doctor)
+	}
+	if doctor.SelectedRepoID != "repo-a" || doctor.SuggestedRepoID != "fixture-a" || !reflect.DeepEqual(doctor.AvailableBindings, []string{"fixture-a"}) {
+		t.Fatalf("doctor recovery fields=%+v", doctor)
+	}
+	if len(doctor.Diagnostics) != 1 || doctor.Diagnostics[0].Code != "missing_repository_binding" {
+		t.Fatalf("doctor diagnostics=%+v", doctor.Diagnostics)
+	}
+	if doctor.Cache != nil || doctor.Sync != nil || doctor.Index != nil {
+		t.Fatalf("doctor ran derivative probes: %+v", doctor)
+	}
+	if len(doctorCall.Content) != 1 || !strings.Contains(doctorCall.Content[0].Text, "binding_state=missing") || !strings.Contains(doctorCall.Content[0].Text, "suggested_repo_id=fixture-a") {
+		t.Fatalf("doctor content=%+v", doctorCall.Content)
+	}
+
+	emptyStore, err := cache.NewInMemorySQLiteStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer emptyStore.Close()
+	handler = NewRPCHandler(service.New(emptyStore))
+	noMatchCall := callTool("repo_status", map[string]any{"repo_id": "ghost"})
+	var noMatch repoStatusResult
+	decodeStructured(t, noMatchCall, &noMatch)
+	if noMatch.BindingState != "missing" || noMatch.SuggestedRepoID != "" || len(noMatch.AvailableBindings) != 0 || len(noMatch.Diagnostics) != 1 {
+		t.Fatalf("no-match repo_status=%+v", noMatch)
+	}
+	if remediation := noMatch.Diagnostics[0].Remediation; !strings.Contains(remediation, "gitcode-mcp repo add") || !strings.Contains(remediation, "--name ghost") {
+		t.Fatalf("no-match remediation=%q", remediation)
+	}
+}
+
 func TestMCPRAGStatusReturnsStructuredContent(t *testing.T) {
 	store := populatedStore(t)
 	defer store.Close()

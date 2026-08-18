@@ -353,10 +353,55 @@ func TestRepositoryRegistry(t *testing.T) {
 	if !errors.As(err, &conflict) {
 		t.Fatalf("alias err=%v want ErrConflict", err)
 	}
-	_, err = svc.RepositoryStatus(ctx, RepositoryStatusRequest{RepoID: "missing-repo"})
+	missing, err := svc.RepositoryStatus(ctx, RepositoryStatusRequest{RepoID: "repo-a"})
 	var notFound ErrNotFound
 	if !errors.As(err, &notFound) || notFound.Kind != "repository" {
 		t.Fatalf("missing err=%v want repository ErrNotFound", err)
+	}
+	if missing.BindingState != "missing" || missing.RepoID != "repo-a" || missing.SuggestedRepoID != "fixture-a" || !reflect.DeepEqual(missing.AvailableBindings, []string{"fixture-a"}) {
+		t.Fatalf("missing status = %#v", missing)
+	}
+}
+
+func TestRepositoryBindingHintsAreBoundedAndUnambiguous(t *testing.T) {
+	repos := []cache.RepositoryBinding{
+		{RepoID: "org/z", Name: "shared"},
+		{RepoID: "org/a", Name: "shared"},
+		{RepoID: "org/b", Name: "other", Aliases: []string{"short"}},
+		{RepoID: "org/c", Name: "c"},
+	}
+	available, suggested := repositoryBindingHints("shared", repos, 3)
+	if suggested != "" {
+		t.Fatalf("ambiguous suggestion = %q", suggested)
+	}
+	if !reflect.DeepEqual(available, []string{"org/a", "org/b", "org/c"}) {
+		t.Fatalf("bounded bindings = %#v", available)
+	}
+	_, suggested = repositoryBindingHints("SHORT", repos, 8)
+	if suggested != "org/b" {
+		t.Fatalf("alias suggestion = %q", suggested)
+	}
+}
+
+func TestRepositoryStatusPreservesBindingRegistryFailure(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	want := cache.ErrCacheCorruption{Path: "/private/cache.db", Detail: "aliases table is malformed"}
+	svc := New(&listRepositoriesFailStore{Store: store, err: want})
+	status, err := svc.RepositoryStatus(ctx, RepositoryStatusRequest{RepoID: "missing"})
+	if status.BindingState != "missing" {
+		t.Fatalf("status=%+v", status)
+	}
+	var corruption cache.ErrCacheCorruption
+	if !errors.As(err, &corruption) {
+		t.Fatalf("err=%v, want cache corruption", err)
+	}
+	if IsNotFound(err) {
+		t.Fatalf("registry failure was collapsed to not found: %v", err)
 	}
 }
 
@@ -4205,6 +4250,15 @@ var _ gitcode.Client = (*fakeGitCodeClient)(nil)
 type writeRefreshFailStore struct {
 	cache.Store
 	failNextRefresh bool
+}
+
+type listRepositoriesFailStore struct {
+	cache.Store
+	err error
+}
+
+func (s *listRepositoriesFailStore) ListRepositories(context.Context) ([]cache.RepositoryBinding, error) {
+	return nil, s.err
 }
 
 func (s *writeRefreshFailStore) UpsertRecordGraph(ctx context.Context, graph cache.RecordGraph) error {
