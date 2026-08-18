@@ -960,11 +960,12 @@ func executeMaintenanceCommand(ctx context.Context, args []string, opts options,
 		return 1
 	}
 	setup := servicectl.MaintenanceSetup{
-		Manager:         servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version},
+		Manager:         servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, RuntimeDir: eff.Config.Service.RuntimeDir},
 		Config:          eff.Config,
 		CachePath:       eff.Config.CachePath,
 		CachePathSource: eff.CachePathSource,
 		RAGRuntime:      deps.RAGRuntime,
+		ConfigReference: maintenanceConfigReference(eff),
 	}
 	collections := []string{}
 	if strings.TrimSpace(opts.collections) != "" {
@@ -996,8 +997,19 @@ func executeMaintenanceCommand(ctx context.Context, args []string, opts options,
 	return code
 }
 
+func maintenanceConfigReference(eff config.EffectiveConfig) string {
+	if strings.TrimSpace(eff.RepoLocalConfigPath) != "" {
+		return eff.RepoLocalConfigPath
+	}
+	if eff.Location.Exists || eff.Location.Explicit {
+		return eff.Location.Path
+	}
+	return ""
+}
+
 func renderMaintenancePlanText(w io.Writer, plan servicectl.MaintenancePlan) {
 	fmt.Fprintf(w, "status: %s\nplan_id: %s\nrepo_id: %s\n", plan.Status, plan.PlanID, plan.RepoID)
+	fmt.Fprintf(w, "configuration_hash: %s\n", plan.ConfigurationHash)
 	fmt.Fprintf(w, "cache_ref: %s\ncache_uuid: %s\ncache_location: %s (%s)\n", plan.Cache.Ref, plan.Cache.UUID, plan.Cache.LocationKind, plan.Cache.PathFingerprint)
 	fmt.Fprintf(w, "service: %s\nprovider: %s model=%s revision=%s boundary=%s\n", plan.Service.Status, cliEmptyAsNone(plan.Provider.Provider), cliEmptyAsNone(plan.Provider.Model), cliEmptyAsNone(plan.Provider.ModelRevision), plan.Provider.DataBoundary)
 	fmt.Fprintf(w, "policy: sync=%s rag=%t profile=%s\n", plan.Policy.SyncMode, plan.Policy.RAGEnabled, cliEmptyAsNone(plan.Policy.Profile))
@@ -1029,6 +1041,12 @@ func renderMaintenanceApplyText(w io.Writer, result servicectl.MaintenanceApplyR
 	}
 	if result.AuditReceipt != "" {
 		fmt.Fprintf(w, "audit_receipt: %s\n", result.AuditReceipt)
+	}
+	if result.FailureClass != "" {
+		fmt.Fprintf(w, "failure_class: %s\n", result.FailureClass)
+	}
+	if result.Message != "" {
+		fmt.Fprintf(w, "message: %s\n", result.Message)
 	}
 	fmt.Fprintf(w, "next_action: %s\n", result.NextAction)
 }
@@ -1122,7 +1140,7 @@ func executeRAGStatusCommand(ctx context.Context, opts options, stdout io.Writer
 		return writeError(stderr, opts.format, err)
 	}
 	defer store.Close()
-	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version}
+	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, RuntimeDir: eff.Config.Service.RuntimeDir}
 	ops := rag.NewOperations(store, eff.Config, rag.OperationsOptions{ServiceState: func(ctx context.Context, repoID string) (*rag.ServiceStatus, *rag.JobStatus) {
 		return lookupRAGServiceState(ctx, manager, repoID)
 	}})
@@ -1317,7 +1335,11 @@ func executeServiceCommand(ctx context.Context, args []string, opts options, std
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "service", Message: "subcommand is required"})
 	}
 	rest := args[1:]
-	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version}
+	eff, configErr := config.LoadEffective(deps.Source, config.Overrides{})
+	if configErr != nil {
+		return writeError(stderr, opts.format, configErr)
+	}
+	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, RuntimeDir: eff.Config.Service.RuntimeDir}
 	var (
 		status servicectl.Status
 		err    error

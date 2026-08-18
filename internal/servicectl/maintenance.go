@@ -62,6 +62,7 @@ type MaintenanceEntry struct {
 	ContentGeneration int64                       `json:"content_generation,omitempty"`
 	CoveredGeneration int64                       `json:"covered_generation,omitempty"`
 	RAGStatus         string                      `json:"rag_status,omitempty"`
+	ConfigHash        string                      `json:"config_hash,omitempty"`
 	Frontiers         []cache.MaintenanceFrontier `json:"frontiers,omitempty"`
 	ActiveJobs        []string                    `json:"active_jobs,omitempty"`
 	LastErrorClass    string                      `json:"last_error_class,omitempty"`
@@ -72,11 +73,15 @@ type MaintenanceEntry struct {
 	LastReconciledAt  time.Time                   `json:"last_reconciled_at,omitempty"`
 	NextReconcileAt   time.Time                   `json:"next_reconcile_at,omitempty"`
 	cachePath         string
+	configReference   string
+	configSnapshot    config.Config
 }
 
 type maintenanceDiskEntry struct {
 	MaintenanceEntry
-	CachePath string `json:"cache_path"`
+	CachePath       string        `json:"cache_path"`
+	ConfigReference string        `json:"config_reference,omitempty"`
+	ConfigSnapshot  config.Config `json:"config_snapshot"`
 }
 
 type maintenanceRegistryFile struct {
@@ -89,18 +94,44 @@ type maintenanceRegistryFile struct {
 type maintenanceReceipt struct {
 	KeyHash        string `json:"key_hash"`
 	RegistrationID string `json:"registration_id"`
+	IntentHash     string `json:"intent_hash,omitempty"`
 }
 
 type MaintenanceEnrollRequest struct {
-	CachePath      string            `json:"cache_path"`
-	RepoID         string            `json:"repo_id"`
-	Policy         MaintenancePolicy `json:"policy"`
-	IdempotencyKey string            `json:"idempotency_key"`
+	CachePath       string            `json:"cache_path"`
+	RepoID          string            `json:"repo_id"`
+	Policy          MaintenancePolicy `json:"policy"`
+	IdempotencyKey  string            `json:"idempotency_key"`
+	ConfigReference string            `json:"config_reference,omitempty"`
+	ConfigHash      string            `json:"config_hash,omitempty"`
+	ConfigSnapshot  config.Config     `json:"config_snapshot"`
+}
+
+type MaintenanceResolveConfigRequest struct {
+	CachePath      string        `json:"cache_path"`
+	Profile        string        `json:"profile,omitempty"`
+	RAGEnabled     bool          `json:"rag_enabled"`
+	ConfigSnapshot config.Config `json:"config_snapshot"`
+}
+
+type MaintenanceResolveConfigResult struct {
+	ConfigHash string `json:"config_hash"`
+	Profile    string `json:"profile,omitempty"`
+	Provider   string `json:"provider,omitempty"`
+	Model      string `json:"model,omitempty"`
 }
 
 type MaintenanceRegistrationRequest struct {
 	RegistrationID string `json:"registration_id"`
 }
+
+type MaintenanceIdempotencyConflictError struct{}
+
+func (MaintenanceIdempotencyConflictError) Error() string {
+	return "maintenance: idempotency key was already used for a different enrollment intent"
+}
+
+func (MaintenanceIdempotencyConflictError) DiagnosticCode() string { return "idempotency_conflict" }
 
 type MaintenanceListResult struct {
 	SchemaVersion string             `json:"schema_version"`
@@ -114,6 +145,16 @@ type MaintenanceReconcileResult struct {
 	CheckedAt   time.Time          `json:"checked_at"`
 }
 
+type MaintenanceCapabilities struct {
+	RegistryProtocol string   `json:"registry_protocol"`
+	Methods          []string `json:"methods"`
+	BinaryVersion    string   `json:"binary_version,omitempty"`
+}
+
+func maintenanceCapabilities(version string) MaintenanceCapabilities {
+	return MaintenanceCapabilities{RegistryProtocol: maintenanceRegistrySchema, BinaryVersion: version, Methods: []string{"Maintenance.Enroll", "Maintenance.List", "Maintenance.Reconcile", "Maintenance.ReconcileRegistration", "Maintenance.ResolveConfig", "Maintenance.Disable"}}
+}
+
 type MaintenanceManager struct {
 	mu          sync.Mutex
 	reconcileMu sync.Mutex
@@ -122,12 +163,12 @@ type MaintenanceManager struct {
 	path        string
 	generation  int64
 	entries     map[string]*MaintenanceEntry
-	receipts    map[string]string
+	receipts    map[string]maintenanceReceipt
 	now         func() time.Time
 }
 
 func NewMaintenanceManager(manager Manager, jobs *JobManager, path string) *MaintenanceManager {
-	return &MaintenanceManager{manager: manager, jobs: jobs, path: path, entries: map[string]*MaintenanceEntry{}, receipts: map[string]string{}, now: func() time.Time { return time.Now().UTC() }}
+	return &MaintenanceManager{manager: manager, jobs: jobs, path: path, entries: map[string]*MaintenanceEntry{}, receipts: map[string]maintenanceReceipt{}, now: func() time.Time { return time.Now().UTC() }}
 }
 
 func (m *MaintenanceManager) Load() error {
@@ -154,10 +195,12 @@ func (m *MaintenanceManager) Load() error {
 			entry.Policy.RAGIntervalSeconds = 900
 		}
 		entry.cachePath = stored.CachePath
+		entry.configReference = stored.ConfigReference
+		entry.configSnapshot = stored.ConfigSnapshot
 		m.entries[entry.RegistrationID] = &entry
 	}
 	for _, receipt := range disk.Receipts {
-		m.receipts[receipt.KeyHash] = receipt.RegistrationID
+		m.receipts[receipt.KeyHash] = receipt
 	}
 	return nil
 }
@@ -220,14 +263,21 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 	}
 	registrationID := maintenanceRegistrationID(identity.UUID, req.RepoID)
 	keyHash := maintenanceIdempotencyKeyHash(req.IdempotencyKey)
+	intentHash := maintenanceEnrollmentIntentHash(registrationID, policy, req.ConfigHash)
+	if req.ConfigHash == "" || req.ConfigHash != maintenanceHash(req.ConfigSnapshot) {
+		return MaintenanceEntry{}, errors.New("maintenance: config snapshot hash mismatch")
+	}
 	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if replayRegistrationID, ok := m.receipts[keyHash]; ok {
-		if replayRegistrationID != registrationID {
-			return MaintenanceEntry{}, errors.New("maintenance: idempotency key was already used for another registration")
+	if receipt, ok := m.receipts[keyHash]; ok {
+		if receipt.RegistrationID != registrationID || (receipt.IntentHash != "" && receipt.IntentHash != intentHash) {
+			return MaintenanceEntry{}, MaintenanceIdempotencyConflictError{}
 		}
 		if existing := m.entries[registrationID]; existing != nil {
+			if receipt.IntentHash == "" && (existing.Policy != policy || existing.ConfigHash != strings.TrimSpace(req.ConfigHash)) {
+				return MaintenanceEntry{}, MaintenanceIdempotencyConflictError{}
+			}
 			return cloneMaintenanceEntry(existing), nil
 		}
 	}
@@ -240,10 +290,10 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 		if existing.cachePath != path {
 			return MaintenanceEntry{}, errors.New("maintenance: cache clone detected at another registered location")
 		}
-		if existing.Policy == policy && existing.Enabled {
+		if existing.Policy == policy && existing.ConfigHash == strings.TrimSpace(req.ConfigHash) && existing.Enabled {
 			previousSeen := existing.LastSeenAt
 			existing.LastSeenAt = now
-			m.receipts[keyHash] = registrationID
+			m.receipts[keyHash] = maintenanceReceipt{KeyHash: keyHash, RegistrationID: registrationID, IntentHash: intentHash}
 			m.generation++
 			if err := m.saveLocked(); err != nil {
 				existing.LastSeenAt = previousSeen
@@ -256,6 +306,9 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 		previous := *existing
 		profileChanged := existing.Policy.Profile != policy.Profile || existing.Policy.RAGEnabled != policy.RAGEnabled
 		existing.Policy = policy
+		existing.ConfigHash = strings.TrimSpace(req.ConfigHash)
+		existing.configReference = strings.TrimSpace(req.ConfigReference)
+		existing.configSnapshot = req.ConfigSnapshot
 		if profileChanged {
 			existing.NamespaceID = ""
 			existing.RAGStage = MaintenanceStageState{}
@@ -264,7 +317,7 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 		existing.Generation++
 		existing.State = "enrolled"
 		existing.LastSeenAt = now
-		m.receipts[keyHash] = registrationID
+		m.receipts[keyHash] = maintenanceReceipt{KeyHash: keyHash, RegistrationID: registrationID, IntentHash: intentHash}
 		m.generation++
 		if err := m.saveLocked(); err != nil {
 			*existing = previous
@@ -274,9 +327,9 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 		}
 		return cloneMaintenanceEntry(existing), nil
 	}
-	entry := &MaintenanceEntry{RegistrationID: registrationID, CacheUUID: identity.UUID, PathFingerprint: pathFingerprint(path), RepoID: req.RepoID, Policy: policy, Enabled: true, Generation: 1, State: "enrolled", LastSeenAt: now, cachePath: path}
+	entry := &MaintenanceEntry{RegistrationID: registrationID, CacheUUID: identity.UUID, PathFingerprint: pathFingerprint(path), RepoID: req.RepoID, Policy: policy, ConfigHash: strings.TrimSpace(req.ConfigHash), Enabled: true, Generation: 1, State: "enrolled", LastSeenAt: now, cachePath: path, configReference: strings.TrimSpace(req.ConfigReference), configSnapshot: req.ConfigSnapshot}
 	m.entries[registrationID] = entry
-	m.receipts[keyHash] = registrationID
+	m.receipts[keyHash] = maintenanceReceipt{KeyHash: keyHash, RegistrationID: registrationID, IntentHash: intentHash}
 	m.generation++
 	if err := m.saveLocked(); err != nil {
 		delete(m.entries, registrationID)
@@ -337,6 +390,59 @@ func (m *MaintenanceManager) Reconcile(ctx context.Context) (MaintenanceReconcil
 	return result, nil
 }
 
+func (m *MaintenanceManager) ReconcileRegistration(ctx context.Context, registrationID string) (MaintenanceReconcileResult, error) {
+	m.reconcileMu.Lock()
+	defer m.reconcileMu.Unlock()
+	registrationID = strings.TrimSpace(registrationID)
+	if registrationID == "" {
+		return MaintenanceReconcileResult{}, errors.New("maintenance: registration_id is required")
+	}
+	m.mu.Lock()
+	registered := m.entries[registrationID]
+	var snapshot MaintenanceEntry
+	if registered != nil {
+		snapshot = cloneMaintenanceEntry(registered)
+	}
+	m.mu.Unlock()
+	if registered == nil {
+		return MaintenanceReconcileResult{}, errors.New("maintenance: registration not found")
+	}
+	if !snapshot.Enabled {
+		return MaintenanceReconcileResult{Entries: []MaintenanceEntry{snapshot}, CheckedAt: m.now()}, nil
+	}
+	entry, started := m.reconcileEntry(ctx, registrationID)
+	return MaintenanceReconcileResult{Entries: []MaintenanceEntry{entry}, JobsStarted: started, CheckedAt: m.now()}, nil
+}
+
+func (m *MaintenanceManager) ResolveConfig(req MaintenanceResolveConfigRequest) (MaintenanceResolveConfigResult, error) {
+	if strings.TrimSpace(req.CachePath) == "" {
+		return MaintenanceResolveConfigResult{}, errors.New("maintenance: cache_path is required")
+	}
+	cfg := req.ConfigSnapshot
+	cfg.CachePath = req.CachePath
+	result := MaintenanceResolveConfigResult{ConfigHash: maintenanceHash(cfg)}
+	if !req.RAGEnabled {
+		return result, nil
+	}
+	profile := strings.TrimSpace(req.Profile)
+	if profile == "" {
+		profile = strings.TrimSpace(cfg.RAG.DefaultProfile)
+	}
+	if profile == "" {
+		profile = config.DefaultRAGProfile
+	}
+	profileConfig, ok := cfg.RAG.Profiles[profile]
+	if !ok {
+		return MaintenanceResolveConfigResult{}, fmt.Errorf("maintenance: RAG profile %q is not configured", profile)
+	}
+	provider := strings.TrimSpace(profileConfig.Provider)
+	if _, ok := cfg.RAG.Providers[provider]; !ok {
+		return MaintenanceResolveConfigResult{}, fmt.Errorf("maintenance: RAG provider %q is not configured", provider)
+	}
+	result.Profile, result.Provider, result.Model = profile, provider, profileConfig.Model
+	return result, nil
+}
+
 func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID string) (MaintenanceEntry, []string) {
 	m.mu.Lock()
 	entry := m.entries[registrationID]
@@ -346,6 +452,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	}
 	snapshot := *entry
 	path := entry.cachePath
+	snapshot.configSnapshot = entry.configSnapshot
 	m.mu.Unlock()
 	now := m.now()
 	store, err := cache.NewSQLiteReadOnlyStore(ctx, path)
@@ -374,7 +481,11 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	if (latestRAG.Status == JobStatusSucceeded || latestRAG.Status == JobStatusSuperseded) && latestRAG.NamespaceID != "" {
 		snapshot.NamespaceID = latestRAG.NamespaceID
 	}
-	effectiveProfile := maintenanceEffectiveProfile(m.manager.Source, path, snapshot.Policy.Profile)
+	jobManager := m.manager
+	if snapshot.ConfigHash != "" {
+		jobManager.EffectiveConfig = &snapshot.configSnapshot
+	}
+	effectiveProfile := maintenanceEffectiveProfile(jobManager, path, snapshot.Policy.Profile)
 	namespaceID := selectMaintenanceNamespace(snapshot, namespaces, effectiveProfile)
 	covered := int64(0)
 	ragStatus := "missing"
@@ -408,14 +519,14 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 				MaxPages: maxPages, PerPage: snapshot.Policy.PerPage,
 				Page: page, IdempotencyKey: fmt.Sprintf("maintenance-%s-%s-%d-%d", snapshot.RegistrationID, lane, page, now.Unix()/60),
 			}
-			job, jobErr := m.jobs.StartSync(context.Background(), m.manager, req)
+			job, jobErr := m.jobs.StartSync(context.Background(), jobManager, req)
 			if jobErr != nil {
 				return m.updateEntryFailure(registrationID, "sync_schedule_failed", jobErr), nil
 			}
 			started = append(started, job.ID)
 			activeSync = job
 		} else if stage == RAGIndexJobType {
-			job, jobErr := m.jobs.StartRAGIndex(context.Background(), m.manager, StartRAGIndexJobRequest{RepoID: snapshot.RepoID, Profile: effectiveProfile, CachePath: path, CacheUUID: snapshot.CacheUUID, RegistrationID: snapshot.RegistrationID})
+			job, jobErr := m.jobs.StartRAGIndex(context.Background(), jobManager, StartRAGIndexJobRequest{RepoID: snapshot.RepoID, Profile: effectiveProfile, CachePath: path, CacheUUID: snapshot.CacheUUID, RegistrationID: snapshot.RegistrationID})
 			if jobErr != nil {
 				return m.updateEntryFailure(registrationID, "rag_schedule_failed", jobErr), started
 			}
@@ -458,14 +569,11 @@ func maintenanceRAGVerificationDue(namespaceID, status string, updatedAt time.Ti
 	return namespaceID != "" && status == "ready" && (updatedAt.IsZero() || !updatedAt.Add(interval).After(now))
 }
 
-func maintenanceEffectiveProfile(src config.Source, cachePath, requested string) string {
+func maintenanceEffectiveProfile(manager Manager, cachePath, requested string) string {
 	if profile := strings.TrimSpace(requested); profile != "" {
 		return profile
 	}
-	if src == nil {
-		src = config.OSSource{}
-	}
-	effective, err := config.LoadEffective(src, config.Overrides{CachePath: cachePath})
+	effective, err := effectiveJobConfig(manager, cachePath)
 	if err == nil {
 		if profile := strings.TrimSpace(effective.Config.RAG.DefaultProfile); profile != "" {
 			return profile
@@ -712,11 +820,11 @@ func (m *MaintenanceManager) saveLocked() error {
 	}
 	disk := maintenanceRegistryFile{SchemaVersion: maintenanceRegistrySchema, Generation: m.generation}
 	for _, entry := range m.entries {
-		disk.Entries = append(disk.Entries, maintenanceDiskEntry{MaintenanceEntry: cloneMaintenanceEntry(entry), CachePath: entry.cachePath})
+		disk.Entries = append(disk.Entries, maintenanceDiskEntry{MaintenanceEntry: cloneMaintenanceEntry(entry), CachePath: entry.cachePath, ConfigReference: entry.configReference, ConfigSnapshot: entry.configSnapshot})
 	}
 	sort.Slice(disk.Entries, func(i, j int) bool { return disk.Entries[i].RegistrationID < disk.Entries[j].RegistrationID })
-	for keyHash, registrationID := range m.receipts {
-		disk.Receipts = append(disk.Receipts, maintenanceReceipt{KeyHash: keyHash, RegistrationID: registrationID})
+	for _, receipt := range m.receipts {
+		disk.Receipts = append(disk.Receipts, receipt)
 	}
 	sort.Slice(disk.Receipts, func(i, j int) bool { return disk.Receipts[i].KeyHash < disk.Receipts[j].KeyHash })
 	data, err := json.MarshalIndent(disk, "", "  ")
@@ -835,6 +943,16 @@ func pathFingerprint(path string) string {
 
 func maintenanceIdempotencyKeyHash(key string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(key)))
+	return "sha256:" + hex.EncodeToString(sum[:16])
+}
+
+func maintenanceEnrollmentIntentHash(registrationID string, policy MaintenancePolicy, configHash string) string {
+	payload, _ := json.Marshal(struct {
+		RegistrationID string            `json:"registration_id"`
+		Policy         MaintenancePolicy `json:"policy"`
+		ConfigHash     string            `json:"config_hash,omitempty"`
+	}{registrationID, policy, strings.TrimSpace(configHash)})
+	sum := sha256.Sum256(payload)
 	return "sha256:" + hex.EncodeToString(sum[:16])
 }
 

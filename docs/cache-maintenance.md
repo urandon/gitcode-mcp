@@ -42,13 +42,15 @@ Only one sync lane and one RAG writer may be active for a `(cache_uuid, repo_id)
 
 ## Registry and protocol
 
-The daemon owns a versioned per-user `managed-caches.json` registry next to its runtime state. Enrollment resolves the real cache path, validates current schema, reads the durable cache identity, verifies the repository binding, and stores the registry with mode `0600`. A cache copied to a different path with the same UUID is reported as a clone instead of being silently treated as a new cache.
+The daemon owns a versioned per-user `managed-caches.json` registry next to its runtime state. Enrollment resolves the real cache path, validates current schema, reads the durable cache identity, verifies the repository binding, and stores the registry with mode `0600`. It also stores the exact non-secret effective configuration snapshot and its hash privately with the registration. Jobs therefore use the configuration that was planned and confirmed instead of rediscovering profiles from the daemon's working directory or environment. Neither the snapshot nor its local config reference is present in public status output. A cache copied to a different path with the same UUID is reported as a clone instead of being silently treated as a new cache.
 
 Low-level JSON-RPC methods are:
 
 - `Maintenance.Enroll` — register a validated cache and policy with an idempotency key;
 - `Maintenance.List` — return sanitized lifecycle state;
 - `Maintenance.Reconcile` — run an immediate scheduler pass;
+- `Maintenance.ReconcileRegistration` — reconcile only one newly enrolled registration;
+- `Maintenance.ResolveConfig` — validate an enrollment snapshot and return only its hash and selected RAG identifiers;
 - `Maintenance.Disable` — stop scheduling a registration without deleting its cache.
 
 ## One-command setup
@@ -63,15 +65,15 @@ gitcode-mcp maintenance enable \
   --idempotency-key workstation-setup-1
 ```
 
-`enable` always renders the same plan internally, revalidates its identity immediately before applying it, enrolls the cache through `Maintenance.Enroll`, and requests one reconciliation. Existing active work is coalesced by the #79 job keys. Replaying the same idempotency key resumes the same registration instead of duplicating work.
+`enable` always renders the same plan internally, revalidates its identity immediately before applying it, waits for a newly launched daemon to advertise a compatible maintenance protocol, verifies that daemon's view of the configuration hash, runs a real embedding smoke request, enrolls the cache through `Maintenance.Enroll`, and reconciles only that registration. Existing active work is coalesced by the #79 job keys. Replaying the same idempotency key resumes the same registration instead of duplicating work; reusing it with a different policy or configuration returns `idempotency_conflict`.
 
 Useful policy controls are `--sync off|head|head-and-backfill`, `--collections issues,issue-comments,wiki,pulls,pr-comments`, `--rag off|maintain`, `--profile`, `--detach`, `--no-service-install`, and `--no-model-download`. `rag enable` is a compatibility shortcut for `maintenance enable`.
 
-Every plan lists effects by class (`inspect`, `local_config_write`, `local_service_change`, `large_download`, `provider_data_transfer`, and `job_enqueue`) and declares the configured provider data boundary (`local_process`, `local_network`, `remote`, or `unknown`). `--yes` confirms only the rendered plan; a changed cache identity, binding, configuration, provider/model configuration revision, service state, or policy produces `stale_plan` and requires a new plan.
+Every plan lists effects by class (`inspect`, `local_config_write`, `local_service_change`, `large_download`, `provider_data_transfer`, and `job_enqueue`), includes a hash of the full effective non-secret configuration, and declares the configured provider data boundary (`local_process`, `local_network`, `remote`, or `unknown`). `--yes` confirms only the rendered plan; a changed cache identity, binding, configuration, provider/model configuration revision, service state, or policy produces `stale_plan` and requires a new plan.
 
 MCP clients use `maintenance_plan` followed by `enable_cache_maintenance` with `write_mode=live`, the returned `plan_id`, and an idempotency key. The selected MCP process cache is implicit: neither tool accepts or returns a filesystem path. MCP apply can enroll and enqueue an already-ready setup, but it never installs a user service, starts a provider, or downloads a model. Those effects return `confirmation_required` with an exact CLI handoff.
 
-The plan and apply statuses are `ready`, `indexing`, `backfilling`, `confirmation_required`, or `blocked`. The result separately answers whether enrollment completed and which initial jobs were coalesced; it does not claim a historically complete corpus merely because maintenance is enabled.
+The plan and apply statuses are `ready`, `refreshing`, `indexing`, `backfilling`, `confirmation_required`, or `blocked`. `refreshing` is a bounded head update, while `backfilling` is historical tail work. The result separately answers whether enrollment completed and which initial jobs were coalesced; it does not claim a historically complete corpus merely because maintenance is enabled. Provider setup failures include a typed failure class, sanitized diagnostic, and remediation handoff.
 
 The supported operator diagnostics are:
 

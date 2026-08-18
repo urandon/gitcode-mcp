@@ -31,22 +31,29 @@ func TestMaintenanceRegistryEnrollReplayAndSanitize(t *testing.T) {
 	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
 	registryPath := filepath.Join(dir, "managed-caches.json")
 	maintenance := NewMaintenanceManager(manager, jobs, registryPath)
-	req := MaintenanceEnrollRequest{CachePath: cachePath, RepoID: "owner/repo", IdempotencyKey: "enroll-1", Policy: MaintenancePolicy{RAGEnabled: false}}
+	req := testMaintenanceEnrollRequest(cachePath, "enroll-1", MaintenancePolicy{RAGEnabled: false})
 	first, err := maintenance.Enroll(ctx, req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := maintenance.Enroll(ctx, MaintenanceEnrollRequest{CachePath: cachePath, RepoID: "owner/repo", IdempotencyKey: "enroll-1", Policy: MaintenancePolicy{RAGEnabled: true}})
-	if err != nil {
-		t.Fatal(err)
+	changedConfig := testMaintenanceEnrollRequest(cachePath, "enroll-1", MaintenancePolicy{RAGEnabled: false})
+	changedConfig.ConfigSnapshot.MaxRetries++
+	changedConfig.ConfigHash = maintenanceHash(changedConfig.ConfigSnapshot)
+	if _, err := maintenance.Enroll(ctx, changedConfig); err == nil {
+		t.Fatal("idempotency key reuse with changed config succeeded")
+	} else if coded, ok := err.(interface{ DiagnosticCode() string }); !ok || coded.DiagnosticCode() != "idempotency_conflict" {
+		t.Fatalf("changed-config replay error=%T %v", err, err)
 	}
-	if first.RegistrationID == "" || second.RegistrationID != first.RegistrationID || second.Generation != first.Generation {
-		t.Fatalf("first=%+v second=%+v", first, second)
+	if _, err := maintenance.Enroll(ctx, testMaintenanceEnrollRequest(cachePath, "enroll-1", MaintenancePolicy{RAGEnabled: true})); err == nil {
+		t.Fatal("idempotency key reuse with changed policy succeeded")
+	} else if coded, ok := err.(interface{ DiagnosticCode() string }); !ok || coded.DiagnosticCode() != "idempotency_conflict" {
+		t.Fatalf("changed-policy replay error=%T %v", err, err)
 	}
-	if second.Policy.RAGEnabled {
-		t.Fatal("idempotent replay changed policy")
+	second, err := maintenance.Enroll(ctx, req)
+	if err != nil || first.RegistrationID == "" || second.RegistrationID != first.RegistrationID || second.Generation != first.Generation {
+		t.Fatalf("first=%+v second=%+v err=%v", first, second, err)
 	}
-	updated, err := maintenance.Enroll(ctx, MaintenanceEnrollRequest{CachePath: cachePath, RepoID: "owner/repo", IdempotencyKey: "enroll-2", Policy: MaintenancePolicy{RAGEnabled: true}})
+	updated, err := maintenance.Enroll(ctx, testMaintenanceEnrollRequest(cachePath, "enroll-2", MaintenancePolicy{RAGEnabled: true}))
 	if err != nil || !updated.Policy.RAGEnabled || updated.Generation <= first.Generation {
 		t.Fatalf("updated=%+v err=%v", updated, err)
 	}
@@ -101,7 +108,7 @@ func TestMaintenanceReconcileReadsGenerationWithoutStartingDisabledJobs(t *testi
 	store.Close()
 	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
 	maintenance := NewMaintenanceManager(manager, jobs, filepath.Join(dir, "managed-caches.json"))
-	entry, err := maintenance.Enroll(ctx, MaintenanceEnrollRequest{CachePath: cachePath, RepoID: "owner/repo", IdempotencyKey: "enroll-1", Policy: MaintenancePolicy{}})
+	entry, err := maintenance.Enroll(ctx, testMaintenanceEnrollRequest(cachePath, "enroll-1", MaintenancePolicy{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,6 +119,43 @@ func TestMaintenanceReconcileReadsGenerationWithoutStartingDisabledJobs(t *testi
 	got := result.Entries[0]
 	if got.RegistrationID != entry.RegistrationID || got.ContentGeneration != wantState.ContentGeneration || got.State != "ready" {
 		t.Fatalf("got=%+v want generation=%d", got, wantState.ContentGeneration)
+	}
+}
+
+func TestMaintenanceReconcileRegistrationDoesNotTouchOtherCaches(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	manager := newTestManager(t, "darwin")
+	maintenance := NewMaintenanceManager(manager, NewJobManager(filepath.Join(dir, "jobs.json")), filepath.Join(dir, "managed-caches.json"))
+	var entries []MaintenanceEntry
+	for _, name := range []string{"left.db", "right.db"} {
+		cachePath := filepath.Join(dir, name)
+		store, err := cache.NewSQLiteStore(ctx, cachePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+			t.Fatal(err)
+		}
+		store.Close()
+		entry, err := maintenance.Enroll(ctx, testMaintenanceEnrollRequest(cachePath, "enroll-"+name, MaintenancePolicy{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries = append(entries, entry)
+	}
+	result, err := maintenance.ReconcileRegistration(ctx, entries[0].RegistrationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Entries) != 1 || result.Entries[0].RegistrationID != entries[0].RegistrationID || len(result.JobsStarted) != 0 {
+		t.Fatalf("scoped reconcile=%+v", result)
+	}
+	listed, _ := maintenance.List(ctx)
+	for _, entry := range listed.Entries {
+		if entry.RegistrationID == entries[1].RegistrationID && !entry.LastReconciledAt.IsZero() {
+			t.Fatalf("unrelated registration was reconciled: %+v", entry)
+		}
 	}
 }
 
@@ -202,7 +246,7 @@ func TestMaintenanceFailureDoesNotExposeCachePath(t *testing.T) {
 	}
 	store.Close()
 	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(filepath.Join(dir, "jobs.json")), filepath.Join(dir, "managed-caches.json"))
-	if _, err := maintenance.Enroll(ctx, MaintenanceEnrollRequest{CachePath: cachePath, RepoID: "owner/repo", IdempotencyKey: "private-path-test"}); err != nil {
+	if _, err := maintenance.Enroll(ctx, testMaintenanceEnrollRequest(cachePath, "private-path-test", MaintenancePolicy{})); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(cachePath); err != nil {
@@ -333,7 +377,7 @@ func TestMaintenanceReconcileDoesNotOverlapActiveRAGAndSync(t *testing.T) {
 	store.Close()
 	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
 	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), jobs, filepath.Join(dir, "managed-caches.json"))
-	entry, err := maintenance.Enroll(ctx, MaintenanceEnrollRequest{CachePath: cachePath, RepoID: "owner/repo", IdempotencyKey: "cross-type-arbitration", Policy: MaintenancePolicy{SyncEnabled: true}})
+	entry, err := maintenance.Enroll(ctx, testMaintenanceEnrollRequest(cachePath, "cross-type-arbitration", MaintenancePolicy{SyncEnabled: true}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,7 +550,7 @@ func TestMaintenanceEffectiveDefaultProfileRejectsOtherNamespace(t *testing.T) {
 	manager := newTestManager(t, "darwin")
 	source := manager.Source.(testSource)
 	source.env[config.EnvRAGProfile] = "profile-default"
-	profile := maintenanceEffectiveProfile(source, filepath.Join(t.TempDir(), "cache.db"), "")
+	profile := maintenanceEffectiveProfile(Manager{Source: source}, filepath.Join(t.TempDir(), "cache.db"), "")
 	if profile != "profile-default" {
 		t.Fatalf("effective profile=%q", profile)
 	}
@@ -527,5 +571,14 @@ func TestMaintenancePeriodicallyVerifiesReadyRAGNamespace(t *testing.T) {
 	}
 	if maintenanceRAGVerificationDue("namespace", "ready", now.Add(-14*time.Minute), 15*time.Minute, now) {
 		t.Fatal("recently verified namespace became due early")
+	}
+}
+
+func testMaintenanceEnrollRequest(cachePath, key string, policy MaintenancePolicy) MaintenanceEnrollRequest {
+	cfg := config.Default()
+	cfg.CachePath = cachePath
+	return MaintenanceEnrollRequest{
+		CachePath: cachePath, RepoID: "owner/repo", IdempotencyKey: key, Policy: policy,
+		ConfigHash: maintenanceHash(cfg), ConfigSnapshot: cfg,
 	}
 }

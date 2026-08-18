@@ -31,6 +31,7 @@ type StartupDeps struct {
 	GitCode            GitCodeStartup
 	Source             config.Source
 	CachePathSource    string
+	ConfigReference    string
 	CredentialResolver *auth.CredentialResolver
 }
 
@@ -144,6 +145,11 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 	deps.GitCode.Offline = opts.offline
 	deps.Source = src
 	deps.CachePathSource = eff.CachePathSource
+	if strings.TrimSpace(eff.RepoLocalConfigPath) != "" {
+		deps.ConfigReference = eff.RepoLocalConfigPath
+	} else if eff.Location.Exists || eff.Location.Explicit {
+		deps.ConfigReference = eff.Location.Path
+	}
 	deps.CredentialResolver = credentialResolver
 	if opts.mcpServe {
 		return mcpServeRoute(context.Background(), stdin, stdout, stderr, deps, opts.mcpTransport, opts.mcpBind)
@@ -560,10 +566,11 @@ func newMCPRAGSearchProvider(store cache.Store, deps StartupDeps) mcp.RAGSearchP
 
 func setMCPMaintenanceProviders(set func(mcp.MaintenancePlanProvider, mcp.MaintenanceApplyProvider), deps StartupDeps) {
 	setup := servicectl.MaintenanceSetup{
-		Manager:         servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version},
+		Manager:         servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, RuntimeDir: deps.Config.Service.RuntimeDir},
 		Config:          deps.Config,
 		CachePath:       deps.Config.CachePath,
 		CachePathSource: deps.CachePathSource,
+		ConfigReference: deps.ConfigReference,
 	}
 	set(setup.Plan, setup.Apply)
 }

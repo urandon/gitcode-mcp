@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/cache"
-	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/rag"
 	"gitcode-mcp/internal/service"
 )
@@ -119,11 +118,7 @@ func (m *JobManager) runRAGIndexJob(ctx context.Context, manager Manager, jobID 
 }
 
 func runRAGIndex(ctx context.Context, manager Manager, req StartRAGIndexJobRequest, progressCh chan<- service.ProgressEvent) (rag.IndexResult, error) {
-	src := manager.Source
-	if src == nil {
-		src = config.OSSource{}
-	}
-	eff, err := config.LoadEffective(src, config.Overrides{CachePath: req.CachePath})
+	eff, err := effectiveJobConfig(manager, req.CachePath)
 	if err != nil {
 		return rag.IndexResult{}, err
 	}

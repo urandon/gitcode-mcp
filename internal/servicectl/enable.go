@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
@@ -67,18 +68,20 @@ type MaintenanceProviderPlan struct {
 }
 
 type MaintenancePlan struct {
-	SchemaVersion  string                  `json:"schema_version"`
-	PlanID         string                  `json:"plan_id"`
-	Status         string                  `json:"status"`
-	RepoID         string                  `json:"repo_id"`
-	Cache          MaintenanceCachePlan    `json:"cache"`
-	DaemonProtocol string                  `json:"daemon_protocol"`
-	Service        Status                  `json:"service"`
-	Provider       MaintenanceProviderPlan `json:"provider"`
-	Policy         MaintenancePolicy       `json:"policy"`
-	Actions        []MaintenancePlanAction `json:"actions"`
-	Blockers       []string                `json:"blockers,omitempty"`
-	NextAction     string                  `json:"next_action,omitempty"`
+	SchemaVersion     string                  `json:"schema_version"`
+	PlanID            string                  `json:"plan_id"`
+	ConfigurationHash string                  `json:"configuration_hash"`
+	Status            string                  `json:"status"`
+	RepoID            string                  `json:"repo_id"`
+	Cache             MaintenanceCachePlan    `json:"cache"`
+	DaemonProtocol    string                  `json:"daemon_protocol"`
+	DaemonVersion     string                  `json:"daemon_version,omitempty"`
+	Service           Status                  `json:"service"`
+	Provider          MaintenanceProviderPlan `json:"provider"`
+	Policy            MaintenancePolicy       `json:"policy"`
+	Actions           []MaintenancePlanAction `json:"actions"`
+	Blockers          []string                `json:"blockers,omitempty"`
+	NextAction        string                  `json:"next_action,omitempty"`
 }
 
 type MaintenanceApplyResult struct {
@@ -90,6 +93,8 @@ type MaintenanceApplyResult struct {
 	CompletedStages []string                `json:"completed_stages,omitempty"`
 	PendingActions  []MaintenancePlanAction `json:"pending_actions,omitempty"`
 	AuditReceipt    string                  `json:"audit_receipt,omitempty"`
+	FailureClass    string                  `json:"failure_class,omitempty"`
+	Message         string                  `json:"message,omitempty"`
 	NextAction      string                  `json:"next_action,omitempty"`
 }
 
@@ -111,24 +116,32 @@ type MaintenanceSetup struct {
 	CachePathSource string
 	RAGRuntime      rag.Runtime
 	Client          func() (*RPCClient, error)
+	ConfigReference string
+	StartupTimeout  time.Duration
 }
+
+type MaintenanceServiceReadinessError struct{}
+
+func (MaintenanceServiceReadinessError) Error() string {
+	return "maintenance: service did not expose the required maintenance protocol before the readiness deadline"
+}
+
+func (MaintenanceServiceReadinessError) DiagnosticCode() string { return "service_not_ready" }
 
 func (s MaintenanceSetup) Plan(ctx context.Context, req MaintenanceSetupRequest) (MaintenancePlan, error) {
 	req, err := normalizeMaintenanceSetupRequest(req)
 	if err != nil {
 		return MaintenancePlan{}, err
 	}
-	plan := MaintenancePlan{SchemaVersion: MaintenancePlanSchema, RepoID: req.RepoID, DaemonProtocol: maintenanceRegistrySchema}
+	configSnapshot := s.Config
+	configSnapshot.CachePath = s.CachePath
+	plan := MaintenancePlan{SchemaVersion: MaintenancePlanSchema, RepoID: req.RepoID, DaemonProtocol: maintenanceRegistrySchema, ConfigurationHash: maintenanceHash(configSnapshot)}
 	store, err := cache.NewSQLiteReadOnlyStore(ctx, s.CachePath)
 	if err != nil {
 		return MaintenancePlan{}, fmt.Errorf("maintenance plan: selected cache is unavailable: %w", err)
 	}
 	defer store.Close()
 	version, err := store.SchemaVersion(ctx)
-	if err != nil {
-		return MaintenancePlan{}, err
-	}
-	identity, err := store.CacheIdentity(ctx)
 	if err != nil {
 		return MaintenancePlan{}, err
 	}
@@ -144,14 +157,25 @@ func (s MaintenanceSetup) Plan(ctx context.Context, req MaintenanceSetupRequest)
 	if err != nil {
 		return MaintenancePlan{}, err
 	}
+	if version != cache.CurrentSchemaVersion() {
+		plan.Policy = policy
+		plan.Cache = MaintenanceCachePlan{Ref: "unavailable", PathFingerprint: pathFingerprint(canonicalPath), LocationKind: maintenanceLocationKind(s.CachePathSource), SchemaVersion: version, RepositoryBinding: maintenanceHash(binding), Scopes: maintenanceScopes(binding)}
+		plan.Status = "blocked"
+		plan.Blockers = []string{fmt.Sprintf("cache schema %d must be migrated to %d", version, cache.CurrentSchemaVersion())}
+		plan.Actions = []MaintenancePlanAction{{ID: "migrate-cache", Class: "cache_write", Status: "blocked", Summary: "migrate the selected cache before daemon enrollment", ConfirmationRequired: true, Handoff: "gitcode-mcp migrate-cache --confirm"}}
+		plan.NextAction = plan.Actions[0].Handoff
+		plan.PlanID = maintenancePlanID(plan)
+		return plan, nil
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		return MaintenancePlan{}, err
+	}
 	plan.Policy = policy
 	plan.Cache = MaintenanceCachePlan{
 		Ref: maintenanceRegistrationID(identity.UUID, req.RepoID), UUID: identity.UUID,
 		PathFingerprint: pathFingerprint(canonicalPath), LocationKind: maintenanceLocationKind(s.CachePathSource),
 		SchemaVersion: version, RepositoryBinding: maintenanceHash(binding), Scopes: maintenanceScopes(binding),
-	}
-	if version != cache.CurrentSchemaVersion() {
-		plan.Blockers = append(plan.Blockers, fmt.Sprintf("cache schema %d must be migrated to %d", version, cache.CurrentSchemaVersion()))
 	}
 	plan.Actions = append(plan.Actions, MaintenancePlanAction{ID: "validate-cache", Class: "inspect", Status: "complete", Summary: "validate cache identity, schema, and repository binding"})
 	serviceStatus, statusErr := s.Manager.Status()
@@ -169,6 +193,19 @@ func (s MaintenanceSetup) Plan(ctx context.Context, req MaintenanceSetupRequest)
 		}
 		if !serviceStatus.Running {
 			plan.Actions = append(plan.Actions, MaintenancePlanAction{ID: "start-service", Class: "local_service_change", Status: "required", Summary: "start the per-user gitcode-mcp service", ConfirmationRequired: true, Handoff: "gitcode-mcp service start"})
+		} else {
+			client, clientErr := s.rpcClient()
+			var capabilities MaintenanceCapabilities
+			if clientErr != nil || client.Call(ctx, "Maintenance.Capabilities", nil, &capabilities) != nil {
+				plan.Blockers = append(plan.Blockers, "running daemon does not expose the required maintenance protocol; reinstall or restart it with the current binary")
+				plan.Actions = append(plan.Actions, MaintenancePlanAction{ID: "upgrade-service", Class: "local_service_change", Status: "blocked", Summary: "restart the daemon with a binary that exposes Maintenance.Capabilities", ConfirmationRequired: true, Handoff: "gitcode-mcp service stop && gitcode-mcp service start"})
+			} else if capabilities.RegistryProtocol != maintenanceRegistrySchema {
+				plan.Blockers = append(plan.Blockers, fmt.Sprintf("daemon registry protocol %q is incompatible with %q", capabilities.RegistryProtocol, maintenanceRegistrySchema))
+			} else {
+				plan.DaemonProtocol = capabilities.RegistryProtocol
+				plan.DaemonVersion = capabilities.BinaryVersion
+				plan.Actions = append(plan.Actions, MaintenancePlanAction{ID: "validate-daemon-protocol", Class: "inspect", Status: "complete", Summary: "validate daemon maintenance protocol and capabilities"})
+			}
 		}
 	}
 	providerPlan, providerActions, providerBlockers, err := s.providerPlan(ctx, req)
@@ -237,6 +274,13 @@ func (s MaintenanceSetup) Apply(ctx context.Context, req MaintenanceSetupRequest
 		}
 		result.CompletedStages = append(result.CompletedStages, "service_started")
 	}
+	client, capabilities, err := s.waitForMaintenanceDaemon(ctx)
+	if err != nil {
+		return MaintenanceApplyResult{}, err
+	}
+	if capabilities.RegistryProtocol != maintenanceRegistrySchema {
+		return MaintenanceApplyResult{}, MaintenanceServiceReadinessError{}
+	}
 	if current.Policy.RAGEnabled {
 		setup, err := rag.Setup(ctx, rag.SetupRequest{Config: s.Config, Profile: req.Profile, Yes: !req.NoModelDownload, Runtime: s.RAGRuntime})
 		if err != nil {
@@ -244,17 +288,32 @@ func (s MaintenanceSetup) Apply(ctx context.Context, req MaintenanceSetupRequest
 		}
 		if setup.Status != "ready" {
 			result.Status = "blocked"
+			result.FailureClass = setup.Status
+			result.Message = maintenanceProviderFailureMessage(setup.Status)
 			result.NextAction = firstString(setup.Actions)
+			if result.NextAction == "" {
+				result.NextAction = firstString(setup.InstallInstructions)
+			}
+			if result.NextAction == "" {
+				result.NextAction = "gitcode-mcp rag setup --yes"
+			}
 			return result, nil
 		}
-		result.CompletedStages = append(result.CompletedStages, "provider_model_ready")
+		result.CompletedStages = append(result.CompletedStages, "provider_model_ready", "provider_smoke_verified")
 	}
-	client, err := s.rpcClient()
-	if err != nil {
+	configSnapshot := s.Config
+	configSnapshot.CachePath = s.CachePath
+	configHash := current.ConfigurationHash
+	var resolved MaintenanceResolveConfigResult
+	if err := client.Call(ctx, "Maintenance.ResolveConfig", MaintenanceResolveConfigRequest{CachePath: s.CachePath, Profile: current.Policy.Profile, RAGEnabled: current.Policy.RAGEnabled, ConfigSnapshot: configSnapshot}, &resolved); err != nil {
 		return MaintenanceApplyResult{}, err
 	}
+	if resolved.ConfigHash != configHash {
+		return MaintenanceApplyResult{}, errors.New("maintenance: daemon resolved a different configuration snapshot")
+	}
+	result.CompletedStages = append(result.CompletedStages, "daemon_config_verified")
 	var entry MaintenanceEntry
-	if err := client.Call(ctx, "Maintenance.Enroll", MaintenanceEnrollRequest{CachePath: s.CachePath, RepoID: req.RepoID, Policy: current.Policy, IdempotencyKey: req.IdempotencyKey}, &entry); err != nil {
+	if err := client.Call(ctx, "Maintenance.Enroll", MaintenanceEnrollRequest{CachePath: s.CachePath, RepoID: req.RepoID, Policy: current.Policy, IdempotencyKey: req.IdempotencyKey, ConfigReference: s.ConfigReference, ConfigHash: configHash, ConfigSnapshot: configSnapshot}, &entry); err != nil {
 		return MaintenanceApplyResult{}, err
 	}
 	result.Registration = &entry
@@ -264,7 +323,7 @@ func (s MaintenanceSetup) Apply(ctx context.Context, req MaintenanceSetupRequest
 	}{current.PlanID, req.IdempotencyKey})
 	result.CompletedStages = append(result.CompletedStages, "cache_enrolled", "policy_stored")
 	var reconcile MaintenanceReconcileResult
-	if err := client.Call(ctx, "Maintenance.Reconcile", nil, &reconcile); err != nil {
+	if err := client.Call(ctx, "Maintenance.ReconcileRegistration", MaintenanceRegistrationRequest{RegistrationID: entry.RegistrationID}, &reconcile); err != nil {
 		return MaintenanceApplyResult{}, err
 	}
 	result.JobsStarted = append([]string(nil), reconcile.JobsStarted...)
@@ -324,7 +383,7 @@ func (s MaintenanceSetup) providerPlan(ctx context.Context, req MaintenanceSetup
 				result.ModelRevision = strings.TrimSpace(info.Revision)
 			}
 		}
-		actions = append(actions, MaintenancePlanAction{ID: "verify-provider", Class: "provider_data_transfer", Status: "complete", Summary: "verify embedding provider and configured model", DataBoundary: boundary})
+		actions = append(actions, MaintenancePlanAction{ID: "verify-provider-smoke", Class: "provider_data_transfer", Status: "required", Summary: "run an embedding smoke request before daemon enrollment", DataBoundary: boundary})
 	}
 	return result, actions, blockers, nil
 }
@@ -334,6 +393,33 @@ func (s MaintenanceSetup) rpcClient() (*RPCClient, error) {
 		return s.Client()
 	}
 	return s.Manager.Client()
+}
+
+func (s MaintenanceSetup) waitForMaintenanceDaemon(ctx context.Context) (*RPCClient, MaintenanceCapabilities, error) {
+	timeout := s.StartupTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		client, err := s.rpcClient()
+		if err == nil {
+			var capabilities MaintenanceCapabilities
+			if callErr := client.Call(ctx, "Maintenance.Capabilities", nil, &capabilities); callErr == nil {
+				return client, capabilities, nil
+			}
+		}
+		if ctx.Err() != nil || !time.Now().Before(deadline) {
+			return nil, MaintenanceCapabilities{}, MaintenanceServiceReadinessError{}
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, MaintenanceCapabilities{}, MaintenanceServiceReadinessError{}
+		case <-timer.C:
+		}
+	}
 }
 
 func normalizeMaintenanceSetupRequest(req MaintenanceSetupRequest) (MaintenanceSetupRequest, error) {
@@ -528,8 +614,10 @@ func maintenanceApplyStatus(entry MaintenanceEntry, reconcile MaintenanceReconci
 	for _, candidate := range reconcile.Entries {
 		if candidate.RegistrationID == entry.RegistrationID {
 			switch candidate.State {
-			case "backfilling", "refreshing":
+			case "backfilling":
 				return "backfilling"
+			case "refreshing":
+				return "refreshing"
 			case "indexing":
 				return "indexing"
 			case "degraded":
@@ -558,4 +646,21 @@ func firstString(values []string) string {
 		return ""
 	}
 	return values[0]
+}
+
+func maintenanceProviderFailureMessage(status string) string {
+	switch status {
+	case "missing_provider":
+		return "embedding provider is not installed"
+	case "provider_not_running":
+		return "embedding provider is not running"
+	case "missing_model":
+		return "configured embedding model is unavailable"
+	case "model_pull_failed":
+		return "configured embedding model could not be installed"
+	case "smoke_failed":
+		return "embedding provider smoke verification failed"
+	default:
+		return "embedding provider verification failed"
+	}
 }

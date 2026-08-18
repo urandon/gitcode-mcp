@@ -33,6 +33,13 @@ func TestRPCServiceStatusAndFakeJobLifecycle(t *testing.T) {
 	if status.Status != StatusRunning || !status.Running || !status.SocketPresent {
 		t.Fatalf("service status = %#v", status)
 	}
+	var capabilities MaintenanceCapabilities
+	if err := client.Call(context.Background(), "Maintenance.Capabilities", nil, &capabilities); err != nil {
+		t.Fatal(err)
+	}
+	if capabilities.RegistryProtocol != maintenanceRegistrySchema || capabilities.BinaryVersion != manager.Version || len(capabilities.Methods) != 6 {
+		t.Fatalf("maintenance capabilities = %#v", capabilities)
+	}
 
 	var job Job
 	if err := client.Call(context.Background(), "Jobs.StartFake", StartFakeJobRequest{Steps: 20, IntervalMS: 25}, &job); err != nil {
