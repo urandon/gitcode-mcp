@@ -3243,7 +3243,7 @@ func TestMCPRuntimeLockContentionErrorMapping(t *testing.T) {
 	lockErr := cache.ErrLockContention{Path: secretPath, HolderHint: "holder at " + secretPath, Operation: "sync-index", RepoID: "fixture-a", StartedAt: started, PID: 42, CachePath: "file:" + secretPath + "?token=secret#fragment"}
 	store := populatedStore(t)
 	defer store.Close()
-	svc := &lockContentionService{serviceInterface: service.New(store), err: lockErr}
+	svc := &lockContentionService{serviceInterface: service.New(store), err: fmt.Errorf("cache %s unavailable: %w", secretPath, lockErr)}
 
 	srv, r, w, stderr := newPipeServer(svc)
 	var wg sync.WaitGroup

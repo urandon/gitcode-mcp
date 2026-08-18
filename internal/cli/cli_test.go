@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -123,7 +124,8 @@ func TestWriteErrorClassifiesCacheLockContention(t *testing.T) {
 
 func TestWriteErrorSanitizesCacheLockContentionAndKeepsHolderFields(t *testing.T) {
 	secretPath := "/Users/private-user/workspace/cache.db.lock"
-	err := cache.ErrLockContention{Path: secretPath, CachePath: "file:" + secretPath + "?token=secret#fragment", HolderHint: "holder at " + secretPath, Operation: "bulk-sync-issues", RepoID: "owner/repo", PID: 42, StartedAt: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)}
+	lockErr := cache.ErrLockContention{Path: secretPath, CachePath: "file:" + secretPath + "?token=secret#fragment", HolderHint: "holder at " + secretPath, Operation: "bulk-sync-issues", RepoID: "owner/repo", PID: 42, StartedAt: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)}
+	err := fmt.Errorf("cache %s unavailable: %w", secretPath, lockErr)
 
 	var stderr bytes.Buffer
 	if code := writeError(&stderr, "json", err); code != 1 {
@@ -154,6 +156,14 @@ func TestWriteErrorSanitizesCacheLockContentionAndKeepsHolderFields(t *testing.T
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("text stderr %q missing %q", stderr.String(), want)
 		}
+	}
+
+	stderr.Reset()
+	if code := writeCommandError(&stderr, "json", startupPlan{ProviderMode: "live-http", Command: "sync", CachePath: "/safe/cache.db"}, err); code != 1 {
+		t.Fatalf("live writeCommandError code = %d, want 1", code)
+	}
+	if strings.Contains(stderr.String(), secretPath) || strings.Contains(stderr.String(), "token=secret") || strings.Contains(stderr.String(), "#fragment") {
+		t.Fatalf("live diagnostic leaked wrapped private metadata: %q", stderr.String())
 	}
 }
 

@@ -34,3 +34,22 @@ func TestLockContentionPublicProjectionNeverFormatsPathsOrHints(t *testing.T) {
 		t.Fatalf("PublicCacheRef() = %q, again %q", got, again)
 	}
 }
+
+func TestLockContentionPublicProjectionOmitsHostileLegacyOwnerFields(t *testing.T) {
+	secretPath := "/Users/private-user/workspace/cache.db"
+	err := ErrLockContention{
+		Path:      secretPath + ".lock",
+		Operation: "sync\npath=" + secretPath,
+		RepoID:    "owner/repo?token=secret#fragment",
+		PID:       -42,
+	}
+	message := err.Error()
+	for _, forbidden := range []string{secretPath, "token=secret", "#fragment", "operation=", "repo_id=", "pid="} {
+		if strings.Contains(message, forbidden) {
+			t.Fatalf("public message leaked hostile owner field %q: %q", forbidden, message)
+		}
+	}
+	if err.PublicOperation() != "" || err.PublicRepoID() != "" {
+		t.Fatalf("hostile fields survived projection: operation=%q repo=%q", err.PublicOperation(), err.PublicRepoID())
+	}
+}

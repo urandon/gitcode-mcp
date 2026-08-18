@@ -50,16 +50,16 @@ func (e ErrLockContention) Error() string {
 	if ref := e.PublicCacheRef(); ref != "" {
 		details = append(details, "cache_ref="+ref)
 	}
-	if operation := strings.TrimSpace(e.Operation); operation != "" {
+	if operation := e.PublicOperation(); operation != "" {
 		details = append(details, "operation="+operation)
 	}
-	if repoID := strings.TrimSpace(e.RepoID); repoID != "" {
+	if repoID := e.PublicRepoID(); repoID != "" {
 		details = append(details, "repo_id="+repoID)
 	}
 	if !e.StartedAt.IsZero() {
 		details = append(details, "started_at="+e.StartedAt.UTC().Format(time.RFC3339Nano))
 	}
-	if e.PID != 0 {
+	if e.PID > 0 {
 		details = append(details, fmt.Sprintf("pid=%d", e.PID))
 	}
 	if len(details) == 0 {
@@ -79,6 +79,45 @@ func (e ErrLockContention) PublicCacheRef() string {
 		}
 	}
 	return ""
+}
+
+// PublicOperation returns a bounded identifier or omits hostile legacy owner data.
+func (e ErrLockContention) PublicOperation() string {
+	value := strings.TrimSpace(e.Operation)
+	if !validPublicLockComponent(value, 64) {
+		return ""
+	}
+	return value
+}
+
+// PublicRepoID returns a bounded local or owner/repository identifier.
+func (e ErrLockContention) PublicRepoID() string {
+	value := strings.TrimSpace(e.RepoID)
+	if value == "" || len(value) > 255 || strings.Count(value, "/") > 1 {
+		return ""
+	}
+	for _, component := range strings.Split(value, "/") {
+		if !validPublicLockComponent(component, 128) || component == "." || component == ".." {
+			return ""
+		}
+	}
+	return value
+}
+
+func validPublicLockComponent(value string, maxLen int) bool {
+	if value == "" || len(value) > maxLen {
+		return false
+	}
+	for i, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		if i > 0 && (r == '-' || r == '_' || r == '.') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // OpaqueCacheRef turns private cache identity material into a stable public correlation id.

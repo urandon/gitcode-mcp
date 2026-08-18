@@ -2136,7 +2136,7 @@ func classifyDomainError(err error, ctx domainErrorContext) *errorData {
 		data.Code = "link_check_failed"
 		data.Message = err.Error()
 	case errors.As(err, &lockErr):
-		data = cacheLockErrorData(lockErr, err.Error())
+		data = cacheLockErrorData(lockErr, lockErr.Error())
 		if data.Remediation == "" {
 			data.Remediation = "retry after the current cache writer completes; CLI fallback: gitcode-mcp doctor --format json"
 		}
@@ -2254,7 +2254,10 @@ func LockContentionReadiness(err cache.ErrLockContention) Readiness {
 }
 
 func cacheLockErrorData(err cache.ErrLockContention, message string) *errorData {
-	data := &errorData{Code: cacheLockErrorCode(err), Message: message, Operation: strings.TrimSpace(err.Operation), RepoID: strings.TrimSpace(err.RepoID), PID: err.PID, CacheRef: err.PublicCacheRef()}
+	data := &errorData{Code: cacheLockErrorCode(err), Message: message, Operation: err.PublicOperation(), RepoID: err.PublicRepoID(), CacheRef: err.PublicCacheRef()}
+	if err.PID > 0 {
+		data.PID = err.PID
+	}
 	if !err.StartedAt.IsZero() {
 		data.StartedAt = err.StartedAt.UTC().Format(time.RFC3339Nano)
 	}

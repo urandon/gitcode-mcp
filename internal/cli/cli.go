@@ -3540,10 +3540,15 @@ func writeError(stderr io.Writer, format string, err error) int {
 func writeCommandError(stderr io.Writer, format string, plan startupPlan, err error) int {
 	code := exitCode(err)
 	failureClass := failureClass(err)
-	message := config.RedactDiagnostic(err.Error(), config.OSSource{})
+	publicErr := err
+	var lockErr cache.ErrLockContention
+	if errors.As(err, &lockErr) {
+		publicErr = lockErr
+	}
+	message := config.RedactDiagnostic(publicErr.Error(), config.OSSource{})
 	var diagnostic diagnostics.Diagnostic
 	if plan.ProviderMode == "live-http" {
-		diagnostic = diagnostics.Classify(err, diagnosticContext(plan, err))
+		diagnostic = diagnostics.Classify(publicErr, diagnosticContext(plan, err))
 		failureClass = string(diagnostic.Code)
 		message = diagnostic.Message
 	}
@@ -3601,7 +3606,10 @@ func lockContentionDetails(err error) (lockContentionOutput, bool) {
 	if !errors.As(err, &contention) {
 		return lockContentionOutput{}, false
 	}
-	details := lockContentionOutput{CacheRef: contention.PublicCacheRef(), Operation: strings.TrimSpace(contention.Operation), RepoID: strings.TrimSpace(contention.RepoID), PID: contention.PID}
+	details := lockContentionOutput{CacheRef: contention.PublicCacheRef(), Operation: contention.PublicOperation(), RepoID: contention.PublicRepoID()}
+	if contention.PID > 0 {
+		details.PID = contention.PID
+	}
 	if !contention.StartedAt.IsZero() {
 		details.StartedAt = contention.StartedAt.UTC().Format(time.RFC3339Nano)
 	}
