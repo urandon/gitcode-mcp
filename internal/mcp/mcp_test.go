@@ -1669,11 +1669,27 @@ func TestMCPSyncLiveCommentSurfaceRouting(t *testing.T) {
 		return out
 	}
 
+	targetResp := call("targeted-issue", "sync_live", map[string]any{"repo_id": "fixture-a", "issues": true, "remote_alias": "issue:42"})
+	if targetResp.Error != nil {
+		t.Fatalf("targeted issue response error=%+v", targetResp.Error)
+	}
+	if len(spy.syncRequests) != 1 || spy.syncRequests[0].RemoteAlias != "issue:42" || len(spy.bulkIssuesCalls) != 0 {
+		t.Fatalf("targeted issue routing syncRequests=%+v issueCalls=%+v", spy.syncRequests, spy.bulkIssuesCalls)
+	}
+
+	boundedTargetResp := call("bounded-targeted-issue", "sync_live", map[string]any{"repo_id": "fixture-a", "issues": true, "remote_alias": "issue:42", "max_pages": 1})
+	if boundedTargetResp.Error == nil || !strings.Contains(boundedTargetResp.Error.Data.Message, "apply to collection sync only") {
+		t.Fatalf("bounded targeted response=%+v", boundedTargetResp.Error)
+	}
+	if len(spy.syncRequests) != 1 || len(spy.bulkIssuesCalls) != 0 {
+		t.Fatalf("bounded target called service: sync=%+v issues=%+v", spy.syncRequests, spy.bulkIssuesCalls)
+	}
+
 	issueResp := call("issue-comments", "sync_live", map[string]any{"repo_id": "fixture-a", "comments": true, "remote_alias": "issue:42"})
 	if issueResp.Error != nil {
 		t.Fatalf("issue comments response error=%+v", issueResp.Error)
 	}
-	if len(spy.syncRequests) != 1 || spy.syncRequests[0].RemoteAlias != "issue:42" || len(spy.bulkPRCommentsCalls) != 0 {
+	if len(spy.syncRequests) != 2 || spy.syncRequests[1].RemoteAlias != "issue:42" || len(spy.bulkPRCommentsCalls) != 0 {
 		t.Fatalf("issue comments routing syncRequests=%+v prCalls=%+v", spy.syncRequests, spy.bulkPRCommentsCalls)
 	}
 
@@ -1749,7 +1765,7 @@ func TestMCPSyncLiveCommentSurfaceRouting(t *testing.T) {
 	if invalidResp.Error == nil || !strings.Contains(invalidResp.Error.Data.Message, "pr_comments cannot target issue aliases") {
 		t.Fatalf("invalid response=%+v", invalidResp.Error)
 	}
-	if len(spy.syncRequests) != 1 || len(spy.bulkPRCommentsCalls) != beforePRComments {
+	if len(spy.syncRequests) != 2 || len(spy.bulkPRCommentsCalls) != beforePRComments {
 		t.Fatalf("invalid request called service: sync=%+v pr=%+v", spy.syncRequests, spy.bulkPRCommentsCalls)
 	}
 

@@ -1217,6 +1217,47 @@ func TestSyncCommentSurfaceRouting(t *testing.T) {
 	}
 }
 
+func TestSyncTargetRoutingNeverFallsThroughToCollectionListing(t *testing.T) {
+	run := func(args []string) (*spyService, int, string) {
+		t.Helper()
+		spy := &spyService{}
+		factory := func(context.Context, string) (queryService, func() error, error) {
+			return spy, nil, nil
+		}
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		code := executeWithFactory(args, &stdout, &stderr, factory)
+		return spy, code, stderr.String()
+	}
+
+	spy, code, stderr := run([]string{"sync", "--offline", "--repo", "fixture-a", "--issues", "--input", "issue:42"})
+	if code != 0 {
+		t.Fatalf("targeted issue sync code=%d stderr=%q", code, stderr)
+	}
+	if spy.calls["SyncToCache"] != 1 || spy.calls["BulkSyncIssues"] != 0 {
+		t.Fatalf("targeted issue calls=%+v, want SyncToCache only", spy.calls)
+	}
+	if spy.lastSyncRequest.RemoteAlias != "issue:42" || spy.lastSyncRequest.RepoID != "fixture-a" {
+		t.Fatalf("targeted issue request=%+v", spy.lastSyncRequest)
+	}
+
+	spy, code, stderr = run([]string{"sync", "--offline", "--repo", "fixture-a", "--issues", "--input", "issue:42", "--max-pages", "1", "--max-records", "1", "--per-page", "1"})
+	if code != 4 || !strings.Contains(stderr, "apply to collection sync only") {
+		t.Fatalf("targeted bounds code=%d stderr=%q", code, stderr)
+	}
+	if len(spy.calls) != 0 {
+		t.Fatalf("invalid targeted bounds called service: %+v", spy.calls)
+	}
+
+	spy, code, stderr = run([]string{"sync", "--offline", "--repo", "fixture-a", "--issues", "--input", "pr:7"})
+	if code != 4 || !strings.Contains(stderr, "targets pull_request") {
+		t.Fatalf("mismatched selector code=%d stderr=%q", code, stderr)
+	}
+	if len(spy.calls) != 0 {
+		t.Fatalf("mismatched selector called service: %+v", spy.calls)
+	}
+}
+
 func TestSyncProgressModes(t *testing.T) {
 	t.Run("off suppresses progress", func(t *testing.T) {
 		var stdout bytes.Buffer
@@ -1960,6 +2001,7 @@ type spyService struct {
 	calls              map[string]int
 	lastWriteRequest   map[string]service.WriteCommandRequest
 	lastReleaseRequest service.PublishReleaseRequest
+	lastSyncRequest    service.SyncRequest
 	lastContextErr     error
 }
 
@@ -2039,8 +2081,9 @@ func (s *spyService) StaleIndex(_ context.Context, req service.StaleIndexRequest
 	}
 	return result, nil
 }
-func (s *spyService) SyncToCache(context.Context, service.SyncRequest) (service.SyncResult, error) {
+func (s *spyService) SyncToCache(_ context.Context, req service.SyncRequest) (service.SyncResult, error) {
 	s.called("SyncToCache")
+	s.lastSyncRequest = req
 	return service.SyncResult{Status: "succeeded", Counts: service.SyncCounts{Fetched: 1}, IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
 }
 func (s *spyService) SyncResources(_ context.Context, reqs []service.SyncRequest) (*service.SyncResourcesResult, error) {

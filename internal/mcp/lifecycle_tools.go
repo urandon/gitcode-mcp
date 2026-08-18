@@ -126,6 +126,10 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: message})
 		return
 	}
+	if message := syncLiveTargetError(a); message != "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: message})
+		return
+	}
 	selected := syncLiveCollections(a, commentSelection)
 	result := syncLiveResult{RepoID: a.RepoID, Collections: selected, GeneratedAt: time.Now().UTC()}
 	if a.Daemon || a.Detach {
@@ -366,6 +370,40 @@ func syncLiveCommentSurfaceError(a syncLiveArgs) string {
 	}
 }
 
+func syncLiveTargetError(a syncLiveArgs) string {
+	if strings.TrimSpace(a.RemoteAlias) == "" {
+		return ""
+	}
+	if a.MaxPages > 0 || a.MaxRecords > 0 || a.PerPage > 0 {
+		return "max_pages, max_records, and per_page apply to collection sync only; omit them for an exact remote_alias sync"
+	}
+	selected := ""
+	selectedCount := 0
+	if a.Issues {
+		selected, selectedCount = "issue", selectedCount+1
+	}
+	if a.Wiki {
+		selected, selectedCount = "wiki", selectedCount+1
+	}
+	if a.Pulls {
+		selected, selectedCount = "pull_request", selectedCount+1
+	}
+	if selectedCount == 0 {
+		return ""
+	}
+	if selectedCount > 1 {
+		return "an exact remote_alias target can have at most one matching collection selector"
+	}
+	surface := syncLiveRemoteAliasSurface(a.RemoteAlias)
+	if surface == "" {
+		return "collection selectors require a matching issue:N, wiki:SLUG, or pr:N remote_alias"
+	}
+	if selected != surface {
+		return fmt.Sprintf("remote_alias targets %s but the selected collection is %s", surface, selected)
+	}
+	return ""
+}
+
 func syncLiveRemoteAliasSurface(alias string) string {
 	remoteType, _, ok := strings.Cut(strings.TrimSpace(alias), ":")
 	if !ok {
@@ -374,6 +412,8 @@ func syncLiveRemoteAliasSurface(alias string) string {
 	switch strings.ToLower(strings.TrimSpace(remoteType)) {
 	case "issue", "issues":
 		return "issue"
+	case "wiki", "page", "remote":
+		return "wiki"
 	case "pull_request", "pull", "pulls", "pr":
 		return "pull_request"
 	default:
