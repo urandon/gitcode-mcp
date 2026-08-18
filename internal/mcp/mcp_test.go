@@ -1596,6 +1596,16 @@ func (s *syncLiveBoundsSpyService) BulkSyncPullRequests(ctx context.Context, req
 
 func (s *syncLiveBoundsSpyService) BulkSyncPRComments(ctx context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
 	s.bulkPRCommentsCalls = append(s.bulkPRCommentsCalls, req)
+	if req.RemoteAlias == "pr:9" {
+		failure := service.ResourceError{SourceID: "9:failed", RemoteType: "pr_comment", FailureClass: "provider_error", Endpoint: "pulls/9/comments", StatusCode: 502, RecoveryAction: "retry", Message: "provider failed"}
+		result := &service.SyncResourcesResult{
+			Results:      []service.SyncResult{{Status: "succeeded", Record: service.SourceSummary{ID: "PRCOMMENT-9-ok"}}},
+			Failures:     []service.ResourceError{failure},
+			SuccessCount: 1,
+			FailureCount: 1,
+		}
+		return result, &service.PartialSyncError{Errors: result.Failures, SuccessCount: 1, FailureCount: 1, Diagnostic: service.SyncDiagnosticTimeout}
+	}
 	return &service.SyncResourcesResult{Results: []service.SyncResult{{Status: "succeeded"}}, SuccessCount: 1}, nil
 }
 
@@ -1797,6 +1807,21 @@ func TestMCPSyncLiveCommentSurfaceRouting(t *testing.T) {
 	}
 	if len(spy.syncRequests) != 2 || len(spy.bulkPRCommentsCalls) != beforePRComments+1 || spy.bulkPRCommentsCalls[len(spy.bulkPRCommentsCalls)-1].RemoteAlias != "pr:7" {
 		t.Fatalf("targeted routing sync=%+v pr=%+v", spy.syncRequests, spy.bulkPRCommentsCalls)
+	}
+
+	partialResp := call("targeted-pr-comments-partial", "sync_live", map[string]any{"repo_id": "fixture-a", "pr_comments": true, "remote_alias": "pr:9"})
+	if partialResp.Error != nil {
+		t.Fatalf("targeted partial response error=%+v", partialResp.Error)
+	}
+	partial := structured(partialResp)
+	if partial.SuccessCount != 1 || partial.FailureCount != 1 || len(partial.Results) != 1 || len(partial.Failures) != 1 {
+		t.Fatalf("targeted partial structured result=%+v", partial)
+	}
+	if partial.Failures[0].FailureClass != "provider_error" || partial.Failures[0].StatusCode != 502 || partial.Failures[0].RecoveryAction != "retry" {
+		t.Fatalf("targeted partial failure metadata=%+v", partial.Failures[0])
+	}
+	if !containsLifecycleDiagnostic(partial.Diagnostics, string(service.SyncDiagnosticTimeout)) {
+		t.Fatalf("targeted partial diagnostics=%+v, want sync_timeout", partial.Diagnostics)
 	}
 
 	_ = r.Close()

@@ -374,6 +374,7 @@ type SyncRequest struct {
 	BackoffMax     string `json:"backoff_max,omitempty"`
 	Timeout        string `json:"timeout,omitempty"`
 	MaxSize        int64  `json:"max_size,omitempty"`
+	ParentSourceID string `json:"-"`
 }
 
 type SyncCounts struct {

@@ -2371,6 +2371,18 @@ func (s *Service) recordSyncFrontierBestEffort(ctx context.Context, repoID, remo
 }
 
 func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
+	remoteAlias := strings.TrimSpace(req.RemoteAlias)
+	targetedPRNumber := 0
+	if remoteAlias != "" {
+		if req.Page != 0 || req.PerPage != 0 || (req.Bounds != nil && (req.Bounds.MaxPages != 0 || req.Bounds.MaxRecords != 0)) {
+			return nil, ErrInvalidQuery{Field: "bounds", Message: "targeted PR comment sync does not accept page, per_page, max_pages, or max_records"}
+		}
+		var err error
+		targetedPRNumber, err = targetedPRCommentNumber(remoteAlias)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		if req.Bounds != nil {
 			diag := SyncDiagnosticCancelled
@@ -2396,17 +2408,23 @@ func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (
 		return nil, err
 	}
 	var prSources []cache.Source
-	if strings.TrimSpace(req.RemoteAlias) != "" {
-		prNumber, err := targetedPRCommentNumber(req.RemoteAlias)
-		if err != nil {
-			return nil, err
-		}
-		source, err := s.store.GetSourceScoped(ctx, repoID, pullRequestStableID(prNumber))
+	if targetedPRNumber > 0 {
+		identity, err := s.store.ResolveAliasScoped(ctx, repoID, cache.RemoteAlias{Type: "pull_request", ID: strconv.Itoa(targetedPRNumber)})
 		if err != nil {
 			if isCacheNotFound(err) {
-				return nil, ErrInvalidQuery{Field: "remote_alias", Message: fmt.Sprintf("pull request %d is not cached; sync --pulls --input pr:%d first", prNumber, prNumber)}
+				return nil, ErrInvalidQuery{Field: "remote_alias", Message: fmt.Sprintf("pull request %d is not cached; sync --pulls --input pr:%d first", targetedPRNumber, targetedPRNumber)}
 			}
-			return nil, normalizeError(err, "pull_request", strconv.Itoa(prNumber))
+			return nil, normalizeError(err, "pull_request", strconv.Itoa(targetedPRNumber))
+		}
+		source, err := s.store.GetSourceScoped(ctx, repoID, identity.SourceID)
+		if err != nil {
+			if isCacheNotFound(err) {
+				return nil, ErrInvalidQuery{Field: "remote_alias", Message: fmt.Sprintf("pull request %d is not cached; sync --pulls --input pr:%d first", targetedPRNumber, targetedPRNumber)}
+			}
+			return nil, normalizeError(err, "pull_request", strconv.Itoa(targetedPRNumber))
+		}
+		if source.Kind != "pull_request" {
+			return nil, ErrInvalidQuery{Field: "remote_alias", Message: fmt.Sprintf("pull_request:%d resolves to cached %s %s, not a pull request", targetedPRNumber, source.Kind, source.ID)}
 		}
 		prSources = []cache.Source{source}
 	} else {
@@ -2456,8 +2474,17 @@ func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (
 		if req.Bounds != nil && req.Bounds.MaxRecords > 0 && len(result.Results) >= req.Bounds.MaxRecords {
 			break
 		}
-		prNumber, ok := pullRequestNumberFromSource(source)
-		if !ok {
+		prNumber := targetedPRNumber
+		if prNumber == 0 {
+			var ok bool
+			prNumber, ok = pullRequestNumberFromSource(source)
+			if !ok {
+				err := ErrInvalidQuery{Field: "pull_request", Message: "cached pull request has no numeric remote alias"}
+				result.Failures = append(result.Failures, newResourceErrorWithMessage(source.ID, "pr_comment", err, "cached pull request has no numeric remote alias"))
+				continue
+			}
+		}
+		if prNumber <= 0 {
 			err := ErrInvalidQuery{Field: "pull_request", Message: "cached pull request has no numeric remote alias"}
 			result.Failures = append(result.Failures, newResourceErrorWithMessage(source.ID, "pr_comment", err, "cached pull request has no numeric remote alias"))
 			continue
@@ -2479,7 +2506,7 @@ func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (
 			}
 		}
 		beforeCount := len(result.Results)
-		s.stagePRCommentPage(ctx, req, prNumber, items, result)
+		s.stagePRCommentPage(ctx, req, prNumber, source.ID, items, result)
 		emitProgress(bulkProgressChan(req), ProgressEvent{Collection: "pr_comments", Page: idx + 1, RecordsFetched: len(result.Results) - beforeCount})
 	}
 	result.SuccessCount = len(result.Results)
@@ -2671,10 +2698,10 @@ func progressEventFromRateLimit(ev gitcode.RateLimitEvent) ProgressEvent {
 	return progress
 }
 
-func (s *Service) stagePRCommentPage(ctx context.Context, req BulkSyncRequest, prNumber int, items []gitcode.PRComment, result *SyncResourcesResult) {
+func (s *Service) stagePRCommentPage(ctx context.Context, req BulkSyncRequest, prNumber int, parentSourceID string, items []gitcode.PRComment, result *SyncResourcesResult) {
 	for _, comment := range items {
 		remoteID := prCommentRemoteID(prNumber, comment.ID)
-		syncReq := SyncRequest{RepoID: req.RepoID, AliasType: "pr_comment", AliasID: remoteID, IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "pr_comment", remoteID), MaxAttempts: req.MaxAttempts, MaxSize: req.MaxSize}
+		syncReq := SyncRequest{RepoID: req.RepoID, AliasType: "pr_comment", AliasID: remoteID, IdempotencyKey: scopedBulkSyncKey(req.IdempotencyKey, "pr_comment", remoteID), MaxAttempts: req.MaxAttempts, MaxSize: req.MaxSize, ParentSourceID: parentSourceID}
 		graph, counts, err := s.stagePRComment(ctx, syncReq, "pr_comment", remoteID, prNumber, comment)
 		if err != nil {
 			result.Failures = append(result.Failures, newResourceError(remoteID, "pr_comment", err))
@@ -4037,7 +4064,7 @@ func (s *Service) stagePRComment(ctx context.Context, req SyncRequest, remoteTyp
 	} else {
 		return cache.SourceGraph{}, SyncCounts{}, err
 	}
-	parentID := pullRequestStableID(prNumber)
+	parentID := firstNonEmptyString(req.ParentSourceID, pullRequestStableID(prNumber))
 	graph := cache.SourceGraph{Source: cache.Source{RepoID: req.RepoID, ID: stableID, Kind: "pr_comment", Path: fmt.Sprintf("pulls/%d/comments/%s.md", prNumber, safeIDPart(commentID)), Title: title, Body: body, Status: "current", ContentHash: hash, CreatedAt: created, UpdatedAt: updated}, Identities: []cache.Identity{{RepoID: req.RepoID, SourceID: stableID, AliasType: remoteType, Alias: remoteID, Remote: cache.RemoteAlias{Type: remoteType, ID: remoteID}}}, Links: []cache.Link{{RepoID: req.RepoID, SourceID: stableID, TargetID: parentID, Kind: "parent", Text: "pull_request"}}, SyncStatus: &cache.SyncStatus{RepoID: req.RepoID, SourceID: stableID, RemoteType: remoteType, RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}
 	graph.PRReviewComments = []cache.PRReviewComment{{
 		RepoID:           req.RepoID,

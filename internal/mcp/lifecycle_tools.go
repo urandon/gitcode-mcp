@@ -172,12 +172,15 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 	if strings.TrimSpace(a.RemoteAlias) != "" {
 		if commentSelection.PR && syncLiveRemoteAliasSurface(a.RemoteAlias) == "pull_request" {
 			part, err := s.svc.BulkSyncPRComments(ctx, service.BulkSyncRequest{RepoID: a.RepoID, RemoteAlias: strings.TrimSpace(a.RemoteAlias), IdempotencyKey: strings.TrimSpace(a.IdempotencyKey)})
-			if err != nil {
-				s.writeDomainError(id, err)
-				return
-			}
 			appendBulkSyncResult(&result, part)
 			result.Collections = []string{"pr_comments"}
+			if err != nil {
+				if partial, ok := extractLifecyclePartial(err); ok && partial.Diagnostic != "" {
+					result.Diagnostics = append(result.Diagnostics, lifecycleDiagnostic{Code: string(partial.Diagnostic), Message: "pr_comments sync returned a diagnostic"})
+				} else {
+					result.Diagnostics = append(result.Diagnostics, lifecycleDiagnostic{Code: "partial_sync", Message: err.Error()})
+				}
+			}
 			text := fmt.Sprintf("fresh_count=%d collections=pr_comments", result.FreshCount)
 			s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 			return
