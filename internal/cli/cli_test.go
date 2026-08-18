@@ -121,6 +121,42 @@ func TestWriteErrorClassifiesCacheLockContention(t *testing.T) {
 	}
 }
 
+func TestWriteErrorSanitizesCacheLockContentionAndKeepsHolderFields(t *testing.T) {
+	secretPath := "/Users/private-user/workspace/cache.db.lock"
+	err := cache.ErrLockContention{Path: secretPath, CachePath: "file:" + secretPath + "?token=secret#fragment", HolderHint: "holder at " + secretPath, Operation: "bulk-sync-issues", RepoID: "owner/repo", PID: 42, StartedAt: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)}
+
+	var stderr bytes.Buffer
+	if code := writeError(&stderr, "json", err); code != 1 {
+		t.Fatalf("writeError code = %d, want 1", code)
+	}
+	if strings.Contains(stderr.String(), secretPath) || strings.Contains(stderr.String(), "token=secret") || strings.Contains(stderr.String(), "#fragment") {
+		t.Fatalf("stderr leaked private lock metadata: %q", stderr.String())
+	}
+	var payload map[string]any
+	if jsonErr := json.Unmarshal(stderr.Bytes(), &payload); jsonErr != nil {
+		t.Fatalf("decode stderr: %v (%q)", jsonErr, stderr.String())
+	}
+	if payload["failure_class"] != "cache_busy" || payload["operation"] != "bulk-sync-issues" || payload["repo_id"] != "owner/repo" || payload["started_at"] != "2026-08-18T12:00:00Z" || payload["pid"] != float64(42) {
+		t.Fatalf("payload = %#v", payload)
+	}
+	if ref, _ := payload["cache_ref"].(string); !strings.HasPrefix(ref, "cache-") {
+		t.Fatalf("cache_ref = %#v", payload["cache_ref"])
+	}
+
+	stderr.Reset()
+	if code := writeError(&stderr, "text", err); code != 1 {
+		t.Fatalf("text writeError code = %d, want 1", code)
+	}
+	if strings.Contains(stderr.String(), secretPath) || strings.Contains(stderr.String(), "token=secret") || strings.Contains(stderr.String(), "#fragment") {
+		t.Fatalf("text stderr leaked private lock metadata: %q", stderr.String())
+	}
+	for _, want := range []string{"failure_class: cache_busy", "cache_ref: cache-", "operation: bulk-sync-issues", "repo_id: owner/repo", "started_at: 2026-08-18T12:00:00Z", "pid: 42"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("text stderr %q missing %q", stderr.String(), want)
+		}
+	}
+}
+
 func TestDefaultOfflineServicesUseIndependentCacheWriterLocks(t *testing.T) {
 	ctx := context.Background()
 	firstPath := filepath.Join(t.TempDir(), "first.db")

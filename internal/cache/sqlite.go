@@ -19,6 +19,7 @@ type SQLiteStore struct {
 	forceNoFTS bool
 	cachePath  string
 	lockPath   string
+	cacheRef   string
 }
 
 type LockHandle struct {
@@ -32,7 +33,8 @@ type WriterOwner struct {
 	RepoID    string    `json:"repo_id,omitempty"`
 	StartedAt time.Time `json:"started_at"`
 	PID       int       `json:"pid"`
-	CachePath string    `json:"cache_path"`
+	CacheRef  string    `json:"cache_ref,omitempty"`
+	CachePath string    `json:"cache_path,omitempty"` // Legacy read compatibility; new owners do not write paths.
 }
 
 type WriterLease struct {
@@ -81,6 +83,7 @@ func newSQLiteStore(ctx context.Context, dataSourceName string, forceNoFTS bool)
 			_ = db.Close()
 			return nil, err
 		}
+		store.loadCacheRef(ctx)
 		return store, nil
 	}
 	compat, err := CheckVersionCompatibility(ctx, db)
@@ -93,6 +96,7 @@ func newSQLiteStore(ctx context.Context, dataSourceName string, forceNoFTS bool)
 		return nil, &SchemaVersionError{Compat: compat}
 	}
 	if compat.DetectedVersion == compat.ExpectedVersion {
+		store.loadCacheRef(ctx)
 		return store, nil
 	}
 	lease, err := store.AcquireWriter(ctx, WriterRequest{Operation: "migration"})
@@ -109,6 +113,7 @@ func newSQLiteStore(ctx context.Context, dataSourceName string, forceNoFTS bool)
 		_ = db.Close()
 		return nil, err
 	}
+	store.loadCacheRef(ctx)
 	return store, nil
 }
 
@@ -167,6 +172,14 @@ func writerLockPath(cachePath string) string {
 		return filepath.Join(os.TempDir(), "gitcode-mcp-cache-writer.lock")
 	}
 	return cachePath + ".writer.lock"
+}
+
+func (s *SQLiteStore) loadCacheRef(ctx context.Context) {
+	identity, err := s.CacheIdentity(ctx)
+	if err != nil {
+		return
+	}
+	s.cacheRef = strings.TrimSpace(identity.UUID)
 }
 
 func (s *SQLiteStore) Close() error {

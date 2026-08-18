@@ -247,7 +247,7 @@ type errorData struct {
 	RepoID       string `json:"repo_id,omitempty"`
 	StartedAt    string `json:"started_at,omitempty"`
 	PID          int    `json:"pid,omitempty"`
-	CachePath    string `json:"cache_path,omitempty"`
+	CacheRef     string `json:"cache_ref,omitempty"`
 	AccessMode   string `json:"access_mode,omitempty"`
 	Remediation  string `json:"remediation,omitempty"`
 }
@@ -2254,12 +2254,9 @@ func LockContentionReadiness(err cache.ErrLockContention) Readiness {
 }
 
 func cacheLockErrorData(err cache.ErrLockContention, message string) *errorData {
-	data := &errorData{Code: cacheLockErrorCode(err), Message: message, Operation: strings.TrimSpace(err.Operation), RepoID: strings.TrimSpace(err.RepoID), PID: err.PID}
+	data := &errorData{Code: cacheLockErrorCode(err), Message: message, Operation: strings.TrimSpace(err.Operation), RepoID: strings.TrimSpace(err.RepoID), PID: err.PID, CacheRef: err.PublicCacheRef()}
 	if !err.StartedAt.IsZero() {
 		data.StartedAt = err.StartedAt.UTC().Format(time.RFC3339Nano)
-	}
-	if strings.HasPrefix(err.CachePath, ":memory:") || strings.HasPrefix(err.CachePath, "file:") {
-		data.CachePath = err.CachePath
 	}
 	return data
 }

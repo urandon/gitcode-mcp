@@ -3549,6 +3549,7 @@ func writeCommandError(stderr io.Writer, format string, plan startupPlan, err er
 	}
 	if format == "json" {
 		payload := map[string]any{"error": message, "exit_code": code, "failure_class": failureClass}
+		addLockContentionFields(payload, err)
 		if diagnostic.Code != "" {
 			payload["http_attempted"] = diagnostic.HTTPAttempted
 			payload["retryable"] = diagnostic.Retryable
@@ -3569,7 +3570,64 @@ func writeCommandError(stderr io.Writer, format string, plan startupPlan, err er
 			fmt.Fprintf(stderr, "cache_readiness: %s\n", readiness)
 		}
 	}
+	if contention, ok := lockContentionDetails(err); ok {
+		fmt.Fprintf(stderr, "cache_ref: %s\n", contention.CacheRef)
+		if contention.Operation != "" {
+			fmt.Fprintf(stderr, "operation: %s\n", contention.Operation)
+		}
+		if contention.RepoID != "" {
+			fmt.Fprintf(stderr, "repo_id: %s\n", contention.RepoID)
+		}
+		if contention.StartedAt != "" {
+			fmt.Fprintf(stderr, "started_at: %s\n", contention.StartedAt)
+		}
+		if contention.PID != 0 {
+			fmt.Fprintf(stderr, "pid: %d\n", contention.PID)
+		}
+	}
 	return code
+}
+
+type lockContentionOutput struct {
+	CacheRef  string
+	Operation string
+	RepoID    string
+	StartedAt string
+	PID       int
+}
+
+func lockContentionDetails(err error) (lockContentionOutput, bool) {
+	var contention cache.ErrLockContention
+	if !errors.As(err, &contention) {
+		return lockContentionOutput{}, false
+	}
+	details := lockContentionOutput{CacheRef: contention.PublicCacheRef(), Operation: strings.TrimSpace(contention.Operation), RepoID: strings.TrimSpace(contention.RepoID), PID: contention.PID}
+	if !contention.StartedAt.IsZero() {
+		details.StartedAt = contention.StartedAt.UTC().Format(time.RFC3339Nano)
+	}
+	return details, true
+}
+
+func addLockContentionFields(payload map[string]any, err error) {
+	details, ok := lockContentionDetails(err)
+	if !ok {
+		return
+	}
+	if details.CacheRef != "" {
+		payload["cache_ref"] = details.CacheRef
+	}
+	if details.Operation != "" {
+		payload["operation"] = details.Operation
+	}
+	if details.RepoID != "" {
+		payload["repo_id"] = details.RepoID
+	}
+	if details.StartedAt != "" {
+		payload["started_at"] = details.StartedAt
+	}
+	if details.PID != 0 {
+		payload["pid"] = details.PID
+	}
 }
 
 func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {

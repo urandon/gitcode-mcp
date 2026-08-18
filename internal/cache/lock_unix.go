@@ -13,7 +13,7 @@ import (
 )
 
 func (s *SQLiteStore) AcquireLock(ctx context.Context, lockPath string) (*LockHandle, error) {
-	return s.acquireLock(ctx, lockPath, WriterOwner{Operation: "legacy", StartedAt: time.Now().UTC(), PID: os.Getpid(), CachePath: s.cachePath})
+	return s.acquireLock(ctx, lockPath, WriterOwner{Operation: "legacy", StartedAt: time.Now().UTC(), PID: os.Getpid(), CacheRef: s.cacheRef})
 }
 
 func (s *SQLiteStore) AcquireWriter(ctx context.Context, req WriterRequest) (*WriterLease, error) {
@@ -25,7 +25,7 @@ func (s *SQLiteStore) AcquireWriter(ctx context.Context, req WriterRequest) (*Wr
 	if lockPath == "" {
 		lockPath = s.lockPath
 	}
-	owner := WriterOwner{Operation: operation, RepoID: strings.TrimSpace(req.RepoID), StartedAt: time.Now().UTC(), PID: os.Getpid(), CachePath: s.cachePath}
+	owner := WriterOwner{Operation: operation, RepoID: strings.TrimSpace(req.RepoID), StartedAt: time.Now().UTC(), PID: os.Getpid(), CacheRef: s.cacheRef}
 	lock, err := s.acquireLock(ctx, lockPath, owner)
 	if err != nil {
 		return nil, err
@@ -54,7 +54,7 @@ func (s *SQLiteStore) acquireLock(ctx context.Context, lockPath string, owner Wr
 		_ = file.Close()
 		if err == syscall.EWOULDBLOCK || err == syscall.EAGAIN {
 			held := readLockOwner(lockPath)
-			return nil, ErrLockContention{Path: lockPath, HolderHint: ownerHint(held), Operation: held.Operation, RepoID: held.RepoID, StartedAt: held.StartedAt, PID: held.PID, CachePath: held.CachePath}
+			return nil, ErrLockContention{Path: lockPath, HolderHint: ownerHint(held), Operation: held.Operation, RepoID: held.RepoID, StartedAt: held.StartedAt, PID: held.PID, CacheRef: held.CacheRef, CachePath: held.CachePath}
 		}
 		return nil, err
 	}
