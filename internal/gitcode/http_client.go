@@ -78,7 +78,10 @@ func (c *HTTPClient) ListIssues(ctx context.Context, req IssueListRequest) (Page
 	endpoint := listIssuesEndpoint(req.Owner, req.Repo)
 	items, page, err := getPaged[IssueSummary](ctx, c, endpoint, issueListQuery(req), PageState{Page: req.Page, PerPage: req.PerPage})
 	if err != nil {
-		return Page[IssueSummary]{}, err
+		if !recoverableCollectionDecode(err) {
+			items = nil
+		}
+		return Page[IssueSummary]{Items: items, Page: page.Page, PerPage: page.PerPage}, err
 	}
 	return Page[IssueSummary]{Items: items, Page: page.Page, PerPage: page.PerPage}, nil
 }
@@ -1949,6 +1952,10 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 			if retryableResponseDecode(readErr) && attempt < attempts {
 				continue
 			}
+			if resp.StatusCode >= 200 && resp.StatusCode <= 299 && recoverableCollectionDecode(readErr) && len(body) > 0 {
+				headers.Set("Status", strconv.Itoa(resp.StatusCode))
+				return body, headers, readErr
+			}
 			return nil, nil, readErr
 		}
 		switch {
@@ -2081,12 +2088,12 @@ func (c *HTTPClient) readBounded(resp *http.Response, endpoint string) ([]byte, 
 	}
 	if err != nil {
 		if errors.Is(err, io.ErrUnexpectedEOF) {
-			return nil, ErrPartialResponse{Endpoint: endpoint, Expected: resp.ContentLength, Got: int64(len(body)), Cause: err}
+			return body, ErrPartialResponse{Endpoint: endpoint, Expected: resp.ContentLength, Got: int64(len(body)), Cause: err}
 		}
 		return nil, ErrNetworkUnavailable{Endpoint: endpoint, Cause: err, Attempts: 1}
 	}
 	if resp.ContentLength >= 0 && resp.ContentLength != int64(len(body)) {
-		return nil, ErrPartialResponse{Endpoint: endpoint, Expected: resp.ContentLength, Got: int64(len(body))}
+		return body, ErrPartialResponse{Endpoint: endpoint, Expected: resp.ContentLength, Got: int64(len(body))}
 	}
 	return body, nil
 }

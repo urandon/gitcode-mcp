@@ -1635,6 +1635,16 @@ func (s *syncLiveBoundsSpyService) ProviderMode() gitcode.ProviderMode {
 
 func (s *syncLiveBoundsSpyService) BulkSyncIssues(ctx context.Context, req service.BulkSyncRequest) (*service.SyncResourcesResult, error) {
 	s.bulkIssuesCalls = append(s.bulkIssuesCalls, req)
+	if req.IdempotencyKey == "recoverable-prefix" {
+		failure := service.ResourceError{SourceID: "issue:*", RemoteType: "issues", FailureClass: "partial_response", ResponseBytes: 512, DecodeOffset: 511, Attempts: 2, Message: "truncated JSON"}
+		result := &service.SyncResourcesResult{
+			Results:      []service.SyncResult{{Status: "succeeded", Freshness: service.FreshnessFresh, Record: service.SourceSummary{ID: "ISSUE-1"}}},
+			Failures:     []service.ResourceError{failure},
+			SuccessCount: 1,
+			FailureCount: 1,
+		}
+		return result, &service.PartialSyncError{Errors: result.Failures, SuccessCount: 1, FailureCount: 1}
+	}
 	result := &service.SyncResourcesResult{
 		Results:      []service.SyncResult{},
 		Failures:     []service.ResourceError{},
@@ -1722,6 +1732,36 @@ func TestMCPSyncLivePropagatesBoundsAndDiagnostics(t *testing.T) {
 	}
 	if !containsLifecycleDiagnostic(result.Diagnostics, string(service.SyncDiagnosticTimeout)) {
 		t.Fatalf("diagnostics = %+v, want sync_timeout", result.Diagnostics)
+	}
+
+	b, _ = json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      "sync-live-recoverable-prefix",
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "sync_live",
+			"arguments": map[string]any{
+				"repo_id":         "fixture-a",
+				"issues":          true,
+				"idempotency_key": "recoverable-prefix",
+			},
+		},
+	})
+	_, _ = r.Write(append(b, '\n'))
+	line, err = readLine(w)
+	if err != nil {
+		t.Fatalf("read partial prefix response: %v (stderr: %s)", err, stderr.String())
+	}
+	callResult = decodeToolCallResult(t, line)
+	decodeStructured(t, callResult, &result)
+	if result.SuccessCount != 1 || result.FailureCount != 1 || len(result.Results) != 1 || len(result.Failures) != 1 || result.Results[0].Record.ID != "ISSUE-1" {
+		t.Fatalf("recoverable prefix result=%+v", result)
+	}
+	if result.Failures[0].FailureClass != "partial_response" || result.Failures[0].ResponseBytes != 512 || result.Failures[0].DecodeOffset != 511 || result.Failures[0].Attempts != 2 {
+		t.Fatalf("recoverable prefix failure=%+v", result.Failures[0])
+	}
+	if !containsLifecycleDiagnostic(result.Diagnostics, "partial_sync") {
+		t.Fatalf("recoverable prefix diagnostics=%+v", result.Diagnostics)
 	}
 
 	_ = r.Close()

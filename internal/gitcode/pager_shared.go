@@ -1,7 +1,10 @@
 package gitcode
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -21,6 +24,9 @@ func getPaged[T any](ctx context.Context, c *HTTPClient, endpoint string, baseVa
 		for attempt := 1; attempt <= attempts; attempt++ {
 			body, headers, err := c.getBytes(ctx, endpoint, values)
 			if err != nil {
+				if recoverableCollectionDecode(err) && len(body) > 0 {
+					return decodeJSONArrayPrefix[T](body), headers, err
+				}
 				return nil, nil, err
 			}
 			var pageItems []T
@@ -29,13 +35,42 @@ func getPaged[T any](ctx context.Context, c *HTTPClient, endpoint string, baseVa
 				if retryableResponseDecode(err) && attempt < attempts {
 					continue
 				}
-				return nil, nil, err
+				if recoverableCollectionDecode(err) {
+					pageItems = decodeJSONArrayPrefix[T](body)
+				}
+				return pageItems, headers, err
 			}
 			return pageItems, headers, nil
 		}
 		panic("unreachable response decode retry loop")
 	}
 	return collectPages(ctx, endpoint, initial, c.pagination, strategy, fetch)
+}
+
+func recoverableCollectionDecode(err error) bool {
+	var partial ErrPartialResponse
+	if errors.As(err, &partial) {
+		return true
+	}
+	var malformed ErrMalformedJSON
+	return errors.As(err, &malformed)
+}
+
+func decodeJSONArrayPrefix[T any](body []byte) []T {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	token, err := dec.Token()
+	if err != nil || token != json.Delim('[') {
+		return nil
+	}
+	var items []T
+	for dec.More() {
+		var item T
+		if err := dec.Decode(&item); err != nil {
+			break
+		}
+		items = append(items, item)
+	}
+	return items
 }
 
 func paginateFixture[T any](ctx context.Context, endpoint string, items []T, initial PageState, cfg PaginationConfig, scenario string) (Page[T], error) {
@@ -94,7 +129,8 @@ func collectPages[T any](ctx context.Context, endpoint string, initial PageState
 		seen[state] = true
 		pageItems, headers, err := fetch(ctx, state)
 		if err != nil {
-			return nil, PageState{}, err
+			items = append(items, pageItems...)
+			return items, state, err
 		}
 		if err := validatePageMetadata(endpoint, headers); err != nil {
 			return nil, PageState{}, err
