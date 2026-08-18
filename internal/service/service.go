@@ -19,6 +19,7 @@ import (
 	"gitcode-mcp/internal/audit"
 	"gitcode-mcp/internal/buildinfo"
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/feedback"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
 )
@@ -32,6 +33,7 @@ type Service struct {
 	lockPath               string
 	providerMode           gitcode.ProviderMode
 	writeCredentialPresent bool
+	feedbackConfig         feedback.Config
 }
 
 type auditClaimStore interface {
@@ -55,6 +57,7 @@ func NewWithClientConfig(store cache.Store, client gitcode.Client, cfg ServiceCo
 	svc.client = client
 	svc.providerMode = gitcode.ProviderMode("custom")
 	svc.lockPath = serviceLockPath(cfg.LockPath)
+	svc.ConfigureFeedback(cfg.Feedback)
 	return svc
 }
 
@@ -69,11 +72,12 @@ func NewWithMode(store cache.Store, mode gitcode.ProviderMode, token string, cfg
 	switch mode {
 	case gitcode.ProviderModeFixture:
 		return &Service{
-			store:        store,
-			client:       sanitizedFixtureClient{},
-			now:          func() time.Time { return time.Now().UTC() },
-			lockPath:     serviceLockPath(cfg.LockPath),
-			providerMode: gitcode.ProviderModeFixture,
+			store:          store,
+			client:         sanitizedFixtureClient{},
+			now:            func() time.Time { return time.Now().UTC() },
+			lockPath:       serviceLockPath(cfg.LockPath),
+			providerMode:   gitcode.ProviderModeFixture,
+			feedbackConfig: normalizeFeedbackConfig(cfg.Feedback),
 		}, nil
 	case gitcode.ProviderModeLive:
 		token = strings.TrimSpace(token)
@@ -115,6 +119,7 @@ func NewWithMode(store cache.Store, mode gitcode.ProviderMode, token string, cfg
 			lockPath:               serviceLockPath(cfg.LockPath),
 			providerMode:           gitcode.ProviderModeLive,
 			writeCredentialPresent: true,
+			feedbackConfig:         normalizeFeedbackConfig(cfg.Feedback),
 		}, nil
 	case gitcode.ProviderModeUnavailable:
 		return nil, gitcode.ErrProviderUnavailable{Reason: "provider unavailable"}
@@ -4788,6 +4793,30 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 		}
 		if lookup.Unsafe {
 			return WriteCommandResult{}, ErrWriteFailure{Code: firstNonEmptyString(prior.Message, "write_ambiguous_remote"), RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
+		}
+	}
+	if command == "create-issue" {
+		entry := audit.WithRequestMetadata(
+			audit.InProgress(route.RepoID, key, command, fallbackSourceID("issue", fingerprint), "issue", "", fingerprint, "remote issue creation pending confirmation", s.now().UTC()),
+			map[string]string{
+				"method":             "POST",
+				"idempotency_key":    key,
+				"remote_type":        "issue",
+				"provider":           "gitcode-http",
+				"provider_mode":      string(gitcode.ProviderModeLive),
+				"source_fingerprint": fingerprint,
+			},
+		)
+		if claimer, ok := s.store.(auditClaimStore); ok {
+			claimed, err := claimer.ClaimAuditEvent(ctx, entry)
+			if err != nil {
+				return WriteCommandResult{}, ErrWriteFailure{Code: "write_audit_start_failed", RepoID: route.RepoID, IdempotencyKey: key, Cause: err}
+			}
+			if !claimed {
+				return s.executeWrite(ctx, command, req, scope)
+			}
+		} else if err := s.store.RecordAuditEvent(ctx, entry); err != nil {
+			return WriteCommandResult{}, ErrWriteFailure{Code: "write_audit_start_failed", RepoID: route.RepoID, IdempotencyKey: key, Cause: err}
 		}
 	}
 	if command == "trigger-push-mirror" {

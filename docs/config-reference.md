@@ -40,6 +40,12 @@ format: text
 mcp:
   tools:
     access: write
+feedback:
+  enabled: false
+  sink: gitcode_issues
+  repo_id: example-owner/feedback-repo
+  labels: feedback|dogfood
+  duplicate_policy: suggest
 credential:
   store: auto
   keyring_service: gitcode-mcp
@@ -89,6 +95,11 @@ rag:
 | `max_retries` | int | `2` | Maximum retries for API calls |
 | `format` | string | `text` | Default output format (`text` or `json`) |
 | `mcp.tools.access` | string | `write` | MCP discovery policy. `write` exposes read and write tools; `read` explicitly selects the read/status-only surface. Write calls still require `write_mode: "live"` and the normal readiness/audit gates. |
+| `feedback.enabled` | bool | `false` | Enables submission to the trusted feedback sink. Preparation remains available while disabled. |
+| `feedback.sink` | string | `gitcode_issues` | Feedback destination adapter. The first supported sink is GitCode issues. |
+| `feedback.repo_id` | string | empty | Preconfigured repository binding used by the sink. Callers cannot override this destination. Required when feedback is enabled. |
+| `feedback.labels` | pipe-separated string | empty | Labels attached to newly submitted reports, for example `feedback\|dogfood`. |
+| `feedback.duplicate_policy` | string | `suggest` | Duplicate handling policy (`suggest` or `return_existing`). Exact fingerprint matches never create another issue. |
 | `credential.store` | string | `auto` | Credential lookup mode: `auto` checks `GITCODE_TOKEN` then the system keyring, `env` checks only `GITCODE_TOKEN`, and `keyring` checks the system keyring after env fallback. `keychain` is accepted as a legacy alias for `keyring`. |
 | `credential.keyring_service` | string | `gitcode-mcp` | System keyring service name used when `credential.store` is `auto` or `keyring`. Override it to isolate credentials for different agents or profiles. |
 | `credential.keyring_account` | string | `token` | System keyring account/user name used when `credential.store` is `auto` or `keyring`. Override it to isolate credentials for different agents or profiles. |
@@ -199,6 +210,10 @@ See [Secrets](secrets.md) for platform-specific credential storage patterns.
 ## RAG
 
 See [RAG Setup and Operation](rag.md) for provider installation, model storage, namespace invalidation, indexing, status, search, recovery, and optional real-model smoke tests.
+
+## Structured feedback
+
+The feedback sink is disabled by default. Configure it only in a trusted global configuration because it authorizes where `submit_feedback` may create issues. Neither MCP nor CLI accepts an arbitrary destination repository. See [Structured Feedback](feedback.md) for preparation, redaction, duplicate handling, and submission examples.
 
 ## Runtime audit
 

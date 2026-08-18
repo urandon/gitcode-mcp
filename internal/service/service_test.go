@@ -3551,6 +3551,7 @@ type fakeGitCodeClient struct {
 	lastWriteOptions             gitcode.WriteOptions
 	lastCreateReleaseReq         gitcode.ReleaseWriteRequest
 	lastUpdateReleaseReq         gitcode.ReleaseWriteRequest
+	onCreateIssue                func(gitcode.CreateIssueRequest, gitcode.WriteOptions)
 }
 
 func (f *fakeGitCodeClient) nextError() error {
@@ -3666,6 +3667,9 @@ func (f *fakeGitCodeClient) CreateIssue(_ context.Context, req gitcode.CreateIss
 	f.createIssueCalls++
 	f.lastCreateIssueRequest = req
 	f.lastWriteOptions = opts
+	if f.onCreateIssue != nil {
+		f.onCreateIssue(req, opts)
+	}
 	if err := f.nextError(); err != nil {
 		return gitcode.WriteResult[gitcode.Issue]{}, err
 	}

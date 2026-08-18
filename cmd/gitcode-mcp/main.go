@@ -423,6 +423,7 @@ func resolveService(store cache.Store, deps StartupDeps) (*service.Service, erro
 		MaxRetries:      deps.GitCode.MaxRetries,
 		RateLimitRPS:    deps.GitCode.RateLimitRPS,
 		RateLimitBurst:  deps.GitCode.RateLimitBurst,
+		Feedback:        deps.Config.Feedback,
 	})
 }
 

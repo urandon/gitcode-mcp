@@ -15,6 +15,7 @@ import (
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/capability"
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/feedback"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/rag"
 	"gitcode-mcp/internal/service"
@@ -1851,6 +1852,44 @@ func TestDispatchUsesProvidedContext(t *testing.T) {
 	}
 }
 
+func TestFeedbackPrepareLoadsStructuredJSONAndAllowsFlagOverrides(t *testing.T) {
+	spy := &spyService{}
+	factory := func(context.Context, string) (queryService, func() error, error) { return spy, nil, nil }
+	input := filepath.Join(t.TempDir(), "feedback.json")
+	if err := os.WriteFile(input, []byte(`{"summary":"from file","category":"bug","surface":"sync","reporter_type":"agent","observed":"bulk failed","expected":"bulk succeeds","impact":"fallback required","fallback_used":"exact sync"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := executeWithFactory([]string{"feedback", "prepare", "--input", input, "--title", "overridden summary", "--format", "json"}, &stdout, &stderr, factory)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if spy.calls["PrepareFeedback"] != 1 || spy.lastFeedbackDraft.Summary != "overridden summary" || spy.lastFeedbackDraft.FallbackUsed != "exact sync" {
+		t.Fatalf("calls=%v draft=%#v", spy.calls, spy.lastFeedbackDraft)
+	}
+	var result feedback.PreparedReport
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.Fingerprint != "feedback-fingerprint" {
+		t.Fatalf("result=%#v err=%v output=%q", result, err, stdout.String())
+	}
+}
+
+func TestFeedbackSubmitDelegatesExplicitLiveWrite(t *testing.T) {
+	spy := &spyService{}
+	args := []string{"feedback", "submit", "--title", "fallback required", "--category", "ux_friction", "--surface", "mcp", "--reporter-type", "agent", "--observed", "MCP failed", "--expected", "MCP succeeds", "--impact", "CLI fallback", "--live", "--idempotency-key", "feedback-submit-99", "--format", "json"}
+	opts, rest, err := parseOptions("feedback", args[1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := dispatchFeedback(context.Background(), spy, rest, opts, &stdout, &stderr, startupPlan{Command: "submit-feedback", RepoID: "feedback-repo"})
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if spy.calls["SubmitFeedback"] != 1 || spy.lastFeedbackSubmit.Mode != service.WriteModeLive || spy.lastFeedbackSubmit.IdempotencyKey != "feedback-submit-99" || spy.lastFeedbackSubmit.Draft.Surface != "mcp" {
+		t.Fatalf("calls=%v request=%#v", spy.calls, spy.lastFeedbackSubmit)
+	}
+}
+
 func TestCreatePRAliasDispatchesWriteRequest(t *testing.T) {
 	spy := &spyService{}
 	factory := func(context.Context, string) (queryService, func() error, error) { return spy, nil, nil }
@@ -2024,6 +2063,8 @@ type spyService struct {
 	lastReleaseRequest service.PublishReleaseRequest
 	lastSyncRequest    service.SyncRequest
 	lastContextErr     error
+	lastFeedbackDraft  feedback.Draft
+	lastFeedbackSubmit service.SubmitFeedbackRequest
 }
 
 func (s *spyService) called(name string) {
@@ -2316,6 +2357,18 @@ func (s *spyService) PublishRelease(_ context.Context, req service.PublishReleas
 	return service.PublishReleaseResult{Command: "publish-release", Status: "dry_run_valid", RepoID: req.RepoID, Tag: req.Tag, ReleaseStatus: 2, AssetLinks: req.Assets, IdempotencyKey: firstNonEmpty(req.IdempotencyKey, "key"), GeneratedAt: time.Now()}, nil
 }
 
+func (s *spyService) PrepareFeedback(_ context.Context, draft feedback.Draft) (feedback.PreparedReport, error) {
+	s.called("PrepareFeedback")
+	s.lastFeedbackDraft = draft
+	return feedback.PreparedReport{Status: "prepared", Configured: true, Sink: feedback.SinkGitCodeIssues, RepoID: "feedback-repo", Title: "[Feedback/" + draft.Category + "] " + draft.Summary, Body: draft.Observed, Fingerprint: "feedback-fingerprint", DedupeDecision: "none"}, nil
+}
+
+func (s *spyService) SubmitFeedback(_ context.Context, req service.SubmitFeedbackRequest) (feedback.SubmissionResult, error) {
+	s.called("SubmitFeedback")
+	s.lastFeedbackSubmit = req
+	return feedback.SubmissionResult{Status: "submitted", Sink: feedback.SinkGitCodeIssues, RepoID: "feedback-repo", TicketNumber: 99, TicketURL: "https://gitcode.com/example/feedback/issues/99", Fingerprint: "feedback-fingerprint", DedupeDecision: "none", IdempotencyKey: req.IdempotencyKey, GeneratedAt: time.Now()}, nil
+}
+
 func spyFactory() serviceFactory {
 	return func(context.Context, string) (queryService, func() error, error) { return &spyService{}, nil, nil }
 }
@@ -2332,7 +2385,7 @@ func TestCommandHelpExitsZero(t *testing.T) {
 		"create-issue", "update-issue", "create-pr", "create-mr", "update-pr",
 		"milestones", "list-push-mirrors", "push-mirrors", "trigger-push-mirror", "wait-push-mirror", "create-milestone", "update-milestone", "set-issue-milestone", "clear-issue-milestone",
 		"create-page", "update-page",
-		"add-comment", "add-pr-review-comment", "reply-pr-review-comment", "update-comment", "add-label", "publish-release",
+		"add-comment", "add-pr-review-comment", "reply-pr-review-comment", "update-comment", "add-label", "publish-release", "feedback",
 		"ingest",
 	}
 	for _, command := range commands {

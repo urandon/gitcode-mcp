@@ -20,6 +20,7 @@ import (
 	"gitcode-mcp/internal/credential"
 	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/doctor"
+	"gitcode-mcp/internal/feedback"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
 	"gitcode-mcp/internal/rag"
@@ -67,6 +68,7 @@ var commands = []string{
 	"update-comment",
 	"add-label",
 	"publish-release",
+	"feedback",
 	"config",
 	"auth",
 	"service",
@@ -131,6 +133,8 @@ type queryService interface {
 	UpdateComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	AddLabel(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	PublishRelease(context.Context, service.PublishReleaseRequest) (service.PublishReleaseResult, error)
+	PrepareFeedback(context.Context, feedback.Draft) (feedback.PreparedReport, error)
+	SubmitFeedback(context.Context, service.SubmitFeedbackRequest) (feedback.SubmissionResult, error)
 }
 
 type serviceFactory func(context.Context, string) (queryService, func() error, error)
@@ -156,93 +160,112 @@ type startupPlan struct {
 }
 
 type options struct {
-	format         string
-	kind           string
-	status         string
-	provenance     string
-	limit          int
-	offset         int
-	lineStart      int
-	lineEnd        int
-	cachePath      string
-	strict         bool
-	base           string
-	head           string
-	full           bool
-	incremental    bool
-	issues         bool
-	wiki           bool
-	pulls          bool
-	comments       bool
-	issueComments  bool
-	prComments     bool
-	syncIndex      bool
-	maxPages       int
-	maxRecords     int
-	perPage        int
-	progress       string
-	quiet          bool
-	details        bool
-	input          string
-	output         string
-	owner          string
-	repo           string
-	name           string
-	id             string
-	mirrorID       string
-	after          string
-	timeoutSeconds int
-	number         int
-	commentID      string
-	discussionID   string
-	parentID       string
-	slug           string
-	path           string
-	line           int
-	startLine      int
-	endLine        int
-	position       int
-	sha            string
-	title          string
-	body           string
-	description    string
-	dueOn          string
-	milestone      string
-	clearMilestone bool
-	state          string
-	label          string
-	labels         string
-	tag            string
-	ref            string
-	profile        string
-	asset          multiFlag
-	idempotencyKey string
-	dryRun         bool
-	live           bool
-	offline        bool
-	fixture        bool
-	overwrite      bool
-	redacted       bool
-	runtimeAudit   bool
-	unresolvedOnly bool
-	apiBaseURL     string
-	scopes         string
-	alias          multiFlag
-	displayName    string
-	policy         string
-	chunkID        string
-	sourceID       string
-	recordID       string
-	snapshotID     string
-	confirm        bool
-	yes            bool
-	helpRequested  bool
-	steps          int
-	intervalMS     int
-	batchSize      int
-	topK           int
-	detach         bool
-	daemon         bool
+	format            string
+	kind              string
+	status            string
+	provenance        string
+	limit             int
+	offset            int
+	lineStart         int
+	lineEnd           int
+	cachePath         string
+	strict            bool
+	base              string
+	head              string
+	full              bool
+	incremental       bool
+	issues            bool
+	wiki              bool
+	pulls             bool
+	comments          bool
+	issueComments     bool
+	prComments        bool
+	syncIndex         bool
+	maxPages          int
+	maxRecords        int
+	perPage           int
+	progress          string
+	quiet             bool
+	details           bool
+	input             string
+	output            string
+	owner             string
+	repo              string
+	name              string
+	id                string
+	mirrorID          string
+	after             string
+	timeoutSeconds    int
+	number            int
+	commentID         string
+	discussionID      string
+	parentID          string
+	slug              string
+	path              string
+	line              int
+	startLine         int
+	endLine           int
+	position          int
+	sha               string
+	title             string
+	body              string
+	description       string
+	dueOn             string
+	milestone         string
+	clearMilestone    bool
+	state             string
+	label             string
+	labels            string
+	tag               string
+	ref               string
+	profile           string
+	asset             multiFlag
+	idempotencyKey    string
+	dryRun            bool
+	live              bool
+	offline           bool
+	fixture           bool
+	overwrite         bool
+	redacted          bool
+	runtimeAudit      bool
+	unresolvedOnly    bool
+	apiBaseURL        string
+	scopes            string
+	alias             multiFlag
+	displayName       string
+	policy            string
+	chunkID           string
+	sourceID          string
+	recordID          string
+	snapshotID        string
+	confirm           bool
+	yes               bool
+	helpRequested     bool
+	steps             int
+	intervalMS        int
+	batchSize         int
+	topK              int
+	category          string
+	surface           string
+	reporterType      string
+	observed          string
+	expected          string
+	impact            string
+	fallbackUsed      string
+	workaround        string
+	relatedTask       string
+	acceptanceSignal  string
+	proposal          string
+	toolName          string
+	errorCode         string
+	failureClass      string
+	correlationID     string
+	jobID             string
+	duplicateOverride string
+	reproductionSteps multiFlag
+	evidence          multiFlag
+	detach            bool
+	daemon            bool
 }
 
 type multiFlag []string
@@ -360,7 +383,16 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 			return executeRepoInitLocalCommand(ctx, opts, stdout, stderr, deps)
 		}
 	}
-	plan, planErr := buildStartupPlan(context.Background(), command, opts, deps)
+	planCommand := command
+	if command == "feedback" {
+		sub, _ := firstArg(rest)
+		if sub == "submit" && opts.live && !opts.dryRun {
+			planCommand = "submit-feedback"
+		} else {
+			planCommand = "prepare-feedback"
+		}
+	}
+	plan, planErr := buildStartupPlan(context.Background(), planCommand, opts, deps)
 	if planErr != nil {
 		return writeCommandError(stderr, opts.format, plan, planErr)
 	}
@@ -413,6 +445,10 @@ func buildStartupPlan(ctx context.Context, command string, opts options, deps lo
 	}
 	plan.CachePath = firstNonEmpty(opts.cachePath, eff.Config.CachePath)
 	plan.MCPToolAccess = eff.Config.MCPToolAccess
+	plan.ServiceConfig = service.ServiceConfig{LockPath: eff.Config.LockPath, Feedback: eff.Config.Feedback}
+	if command == "submit-feedback" {
+		plan.RepoID = eff.Config.Feedback.RepoID
+	}
 	if plan.ProviderMode != "live-http" {
 		return plan, nil
 	}
@@ -426,13 +462,13 @@ func buildStartupPlan(ctx context.Context, command string, opts options, deps lo
 		return plan, config.MissingCredentialError{Status: resolution.Status()}
 	}
 	plan.Token = resolution.Token
-	binding, err := resolveStartupLiveRepositoryBinding(ctx, plan.CachePath, opts.repo, liveRequestedScope(command, opts), eff.Config.GitCodeBaseURL)
+	binding, err := resolveStartupLiveRepositoryBinding(ctx, plan.CachePath, plan.RepoID, liveRequestedScope(command, opts), eff.Config.GitCodeBaseURL)
 	if err != nil {
 		return plan, err
 	}
 	plan.LiveRepositoryBinding = binding
 	plan.APIBaseURL = binding.APIBaseURL
-	plan.ServiceConfig = service.ServiceConfig{BaseURL: binding.APIBaseURL, LockPath: eff.Config.LockPath, Timeout: eff.Config.DefaultTimeout, MaxResponseSize: eff.Config.MaxResponseSize, MaxRetries: eff.Config.MaxRetries, RateLimitRPS: eff.Config.RateLimitRPS, RateLimitBurst: eff.Config.RateLimitBurst}
+	plan.ServiceConfig = service.ServiceConfig{BaseURL: binding.APIBaseURL, LockPath: eff.Config.LockPath, Timeout: eff.Config.DefaultTimeout, MaxResponseSize: eff.Config.MaxResponseSize, MaxRetries: eff.Config.MaxRetries, RateLimitRPS: eff.Config.RateLimitRPS, RateLimitBurst: eff.Config.RateLimitBurst, Feedback: eff.Config.Feedback}
 	return plan, nil
 }
 
@@ -459,7 +495,7 @@ func resolveLiveCredential(ctx context.Context, eff config.EffectiveConfig, deps
 
 func isLiveStartupCommand(command string) bool {
 	switch command {
-	case "sync", "create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "milestones", "list-push-mirrors", "push-mirrors", "trigger-push-mirror", "wait-push-mirror", "create-milestone", "update-milestone", "set-issue-milestone", "clear-issue-milestone", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "reply-pr-review-comment", "update-comment", "add-label", "publish-release", "doctor":
+	case "sync", "submit-feedback", "create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "milestones", "list-push-mirrors", "push-mirrors", "trigger-push-mirror", "wait-push-mirror", "create-milestone", "update-milestone", "set-issue-milestone", "clear-issue-milestone", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "reply-pr-review-comment", "update-comment", "add-label", "publish-release", "doctor":
 		return true
 	default:
 		return false
@@ -493,7 +529,13 @@ func serviceFromStartupPlan(ctx context.Context, plan startupPlan, factory servi
 		if factory == nil {
 			factory = defaultServiceFactory
 		}
-		return factory(ctx, plan.CachePath)
+		svc, cleanup, err := factory(ctx, plan.CachePath)
+		if err == nil {
+			if configurable, ok := svc.(interface{ ConfigureFeedback(feedback.Config) }); ok {
+				configurable.ConfigureFeedback(plan.ServiceConfig.Feedback)
+			}
+		}
+		return svc, cleanup, err
 	}
 	path, err := resolvedCachePath(plan.CachePath)
 	if err != nil {
@@ -653,6 +695,25 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.IntVar(&opts.intervalMS, "interval-ms", 0, "fake job interval in milliseconds")
 	flags.IntVar(&opts.batchSize, "batch-size", 0, "RAG embedding batch size")
 	flags.IntVar(&opts.topK, "top-k", 0, "RAG semantic candidate count")
+	flags.StringVar(&opts.category, "category", "", "feedback category")
+	flags.StringVar(&opts.surface, "surface", "", "feedback surface")
+	flags.StringVar(&opts.reporterType, "reporter-type", "", "feedback reporter type")
+	flags.StringVar(&opts.observed, "observed", "", "observed behavior")
+	flags.StringVar(&opts.expected, "expected", "", "expected behavior")
+	flags.StringVar(&opts.impact, "impact", "", "feedback impact")
+	flags.StringVar(&opts.fallbackUsed, "fallback-used", "", "fallback used")
+	flags.StringVar(&opts.workaround, "workaround", "", "workaround")
+	flags.StringVar(&opts.relatedTask, "related-task", "", "related task reference")
+	flags.StringVar(&opts.acceptanceSignal, "acceptance-signal", "", "feedback acceptance signal")
+	flags.StringVar(&opts.proposal, "proposal", "", "optional proposal")
+	flags.StringVar(&opts.toolName, "tool-name", "", "tool or command name")
+	flags.StringVar(&opts.errorCode, "error-code", "", "structured error code")
+	flags.StringVar(&opts.failureClass, "failure-class", "", "structured failure class")
+	flags.StringVar(&opts.correlationID, "correlation-id", "", "sanitized correlation id")
+	flags.StringVar(&opts.jobID, "job-id", "", "sanitized job id")
+	flags.StringVar(&opts.duplicateOverride, "duplicate-override", "", "explicit duplicate action")
+	flags.Var(&opts.reproductionSteps, "step", "feedback reproduction step; repeatable")
+	flags.Var(&opts.evidence, "evidence", "sanitized evidence fact; repeatable")
 	flags.BoolVar(&opts.detach, "detach", false, "start job without attaching progress")
 	flags.BoolVar(&opts.daemon, "daemon", false, "start sync as a daemon job")
 	if err := flags.Parse(reorderFlags(args)); err != nil {
@@ -2003,8 +2064,127 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		return dispatchWrite(ctx, svc.AddLabel, command, opts, stdout, stderr, plan)
 	case "publish-release":
 		return dispatchPublishRelease(ctx, svc, opts, stdout, stderr, plan)
+	case "feedback":
+		return dispatchFeedback(ctx, svc, args, opts, stdout, stderr, plan)
 	default:
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "command", Message: command + " is not a query command"})
+	}
+}
+
+func dispatchFeedback(ctx context.Context, svc queryService, args []string, opts options, stdout io.Writer, stderr io.Writer, plan startupPlan) int {
+	sub, ok := firstArg(args)
+	if !ok || (sub != "prepare" && sub != "submit") {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "feedback", Message: "subcommand must be prepare or submit"})
+	}
+	draft, err := feedbackDraftFromOptions(opts)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	if sub == "prepare" || opts.dryRun {
+		if opts.live && sub == "prepare" {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "write_mode", Message: "feedback prepare is read-only; omit --live"})
+		}
+		result, err := svc.PrepareFeedback(ctx, draft)
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, renderFeedbackPreparedText)
+	}
+	if !opts.live {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "write_mode", Message: "feedback submit requires --live or --dry-run"})
+	}
+	if strings.TrimSpace(opts.idempotencyKey) == "" {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "idempotency_key", Message: "feedback submit requires --idempotency-key"})
+	}
+	result, err := svc.SubmitFeedback(ctx, service.SubmitFeedbackRequest{Draft: draft, Mode: service.WriteModeLive, IdempotencyKey: opts.idempotencyKey})
+	if err != nil {
+		return writeCommandError(stderr, opts.format, plan, err)
+	}
+	return render(stdout, opts.format, result, renderFeedbackSubmissionText)
+}
+
+func feedbackDraftFromOptions(opts options) (feedback.Draft, error) {
+	var draft feedback.Draft
+	if strings.TrimSpace(opts.input) != "" {
+		var data []byte
+		var err error
+		if opts.input == "-" {
+			data, err = io.ReadAll(os.Stdin)
+		} else {
+			data, err = os.ReadFile(opts.input)
+		}
+		if err != nil {
+			return draft, service.ErrInvalidQuery{Field: "input", Message: err.Error()}
+		}
+		if err := json.Unmarshal(data, &draft); err != nil {
+			return draft, service.ErrInvalidQuery{Field: "input", Message: "feedback input must be a JSON object: " + err.Error()}
+		}
+	}
+	setIfNotEmpty := func(value string, target *string) {
+		if strings.TrimSpace(value) != "" {
+			*target = value
+		}
+	}
+	setIfNotEmpty(opts.title, &draft.Summary)
+	setIfNotEmpty(opts.category, &draft.Category)
+	setIfNotEmpty(opts.surface, &draft.Surface)
+	setIfNotEmpty(opts.reporterType, &draft.ReporterType)
+	setIfNotEmpty(opts.observed, &draft.Observed)
+	setIfNotEmpty(opts.expected, &draft.Expected)
+	setIfNotEmpty(opts.impact, &draft.Impact)
+	setIfNotEmpty(opts.fallbackUsed, &draft.FallbackUsed)
+	setIfNotEmpty(opts.workaround, &draft.Workaround)
+	setIfNotEmpty(opts.relatedTask, &draft.RelatedTask)
+	setIfNotEmpty(opts.acceptanceSignal, &draft.AcceptanceSignal)
+	setIfNotEmpty(opts.proposal, &draft.Proposal)
+	setIfNotEmpty(opts.toolName, &draft.ToolName)
+	setIfNotEmpty(opts.errorCode, &draft.ErrorCode)
+	setIfNotEmpty(opts.failureClass, &draft.FailureClass)
+	setIfNotEmpty(opts.correlationID, &draft.CorrelationID)
+	setIfNotEmpty(opts.jobID, &draft.JobID)
+	setIfNotEmpty(opts.duplicateOverride, &draft.DuplicateOverride)
+	if len(opts.reproductionSteps) > 0 {
+		draft.ReproductionSteps = append([]string(nil), opts.reproductionSteps...)
+	}
+	if len(opts.evidence) > 0 {
+		draft.Evidence = append([]string(nil), opts.evidence...)
+	}
+	return draft, nil
+}
+
+func renderFeedbackPreparedText(w io.Writer, result feedback.PreparedReport) {
+	fmt.Fprintf(w, "status: %s\n", result.Status)
+	fmt.Fprintf(w, "sink: %s\n", result.Sink)
+	fmt.Fprintf(w, "repo_id: %s\n", result.RepoID)
+	fmt.Fprintf(w, "fingerprint: %s\n", result.Fingerprint)
+	fmt.Fprintf(w, "dedupe_decision: %s\n", result.DedupeDecision)
+	fmt.Fprintf(w, "title: %s\n", result.Title)
+	if result.Remediation != "" {
+		fmt.Fprintf(w, "remediation: %s\n", result.Remediation)
+	}
+	if len(result.Candidates) > 0 {
+		fmt.Fprintln(w, "candidates:")
+		for _, candidate := range result.Candidates {
+			fmt.Fprintf(w, "- #%d score=%.2f %s\n", candidate.Number, candidate.Score, candidate.Title)
+		}
+	}
+	fmt.Fprintln(w, "\n--- preview ---")
+	fmt.Fprintln(w, result.Body)
+}
+
+func renderFeedbackSubmissionText(w io.Writer, result feedback.SubmissionResult) {
+	fmt.Fprintf(w, "status: %s\n", result.Status)
+	fmt.Fprintf(w, "sink: %s\n", result.Sink)
+	fmt.Fprintf(w, "fingerprint: %s\n", result.Fingerprint)
+	fmt.Fprintf(w, "dedupe_decision: %s\n", result.DedupeDecision)
+	if result.TicketNumber > 0 {
+		fmt.Fprintf(w, "ticket: #%d\n", result.TicketNumber)
+	}
+	if result.TicketURL != "" {
+		fmt.Fprintf(w, "url: %s\n", result.TicketURL)
+	}
+	if result.Remediation != "" {
+		fmt.Fprintf(w, "remediation: %s\n", result.Remediation)
 	}
 }
 
@@ -3872,6 +4052,14 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --strict          exit non-zero on findings")
 		fmt.Fprintln(w, "  --cache-path PATH cache database path")
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
+	case "feedback":
+		fmt.Fprintln(w, "Usage: gitcode-mcp feedback prepare [--input PATH | structured flags] [--format FORMAT]")
+		fmt.Fprintln(w, "       gitcode-mcp feedback submit [--input PATH | structured flags] --live --idempotency-key KEY [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Prepare or submit a structured, redacted dogfood report to the configured feedback sink.")
+		fmt.Fprintln(w, "Preparation is read-only. Submission is an audited write and cannot override the configured destination.")
+		fmt.Fprintln(w, "Required draft fields: --title, --category, --surface, --reporter-type, --observed, --expected, --impact.")
+		fmt.Fprintln(w, "Use repeatable --step and --evidence flags for bounded public-safe facts; never include prompts, transcripts, secrets, cookies, private content, or raw API bodies.")
 	case "index":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO [--full | --incremental] [--strict]\n\n", command)
 		fmt.Fprintln(w, "Build or update the text index for cached sources.")

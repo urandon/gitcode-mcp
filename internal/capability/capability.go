@@ -53,6 +53,28 @@ func disabled(reason string) Surface {
 
 var writeCapabilities = []Capability{
 	{
+		ID:             "prepare_feedback",
+		Category:       CategoryWrite,
+		Safety:         SafetyReadOnly,
+		CLIName:        "feedback",
+		MCPName:        "prepare_feedback",
+		ServiceCommand: "prepare-feedback",
+		Description:    "Prepare a public-safe structured feedback report when a tool forces CLI, browser, or human fallback; returns generic/misleading errors; requires hidden setup or retries; lacks useful evidence; or reveals a reusable AI UX improvement. Include observed impact and reproducible facts, never prompts, transcripts, secrets, private content, or guessed evidence. This operation is read-only and does not submit a ticket.",
+		CLI:            enabled("Available as the grouped CLI command `feedback prepare`."),
+		MCP:            enabled(),
+	},
+	{
+		ID:             "submit_feedback",
+		Category:       CategoryWrite,
+		Safety:         SafetyAuditedWrite,
+		CLIName:        "feedback",
+		MCPName:        "submit_feedback",
+		ServiceCommand: "submit-feedback",
+		Description:    "Submit concise evidence-backed product feedback to the configured sink through the audited write lifecycle. Use after prepare_feedback when external issue creation is authorized. Do not include prompts, transcripts, credentials, cookies, private repository content, raw API payloads, or speculative evidence; likely duplicates are returned for explicit review.",
+		CLI:            enabled("Available as the grouped CLI command `feedback submit`."),
+		MCP:            enabled(),
+	},
+	{
 		ID:             "create_issue",
 		Category:       CategoryWrite,
 		Safety:         SafetyAuditedWrite,

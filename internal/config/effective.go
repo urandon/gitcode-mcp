@@ -373,6 +373,9 @@ func RenderRedactedEffectiveConfig(eff EffectiveConfig, status CredentialStatus)
 	fmt.Fprintf(&b, "service_runtime_dir: %s\n", eff.Config.Service.RuntimeDir)
 	fmt.Fprintf(&b, "rag_default_profile: %s\n", eff.Config.RAG.DefaultProfile)
 	fmt.Fprintf(&b, "rag_model_store_path: %s\n", eff.Config.RAG.ModelStorePath)
+	fmt.Fprintf(&b, "feedback_enabled: %t\n", eff.Config.Feedback.Enabled)
+	fmt.Fprintf(&b, "feedback_sink: %s\n", eff.Config.Feedback.Sink)
+	fmt.Fprintf(&b, "feedback_repo_id: %s\n", emptyAsNone(eff.Config.Feedback.RepoID))
 	providerName := activeRAGProviderName(eff.Config)
 	fmt.Fprintf(&b, "rag_active_provider: %s\n", providerName)
 	if provider, ok := eff.Config.RAG.Providers[providerName]; ok {
@@ -545,6 +548,28 @@ func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, er
 		}
 		if section == "credential" && key == "keyring_account" {
 			cred.KeyringAccount = value
+			continue
+		}
+		if section == "feedback" {
+			if cfg.Feedback == nil {
+				cfg.Feedback = &feedbackFileConfig{}
+			}
+			switch key {
+			case "enabled":
+				v, err := parseBoolYAML(section, key, value)
+				if err != nil {
+					return fileConfig{}, CredentialConfig{}, err
+				}
+				cfg.Feedback.Enabled = &v
+			case "sink":
+				cfg.Feedback.Sink = &value
+			case "repo_id":
+				cfg.Feedback.RepoID = &value
+			case "labels":
+				cfg.Feedback.Labels = splitYAMLList(value)
+			case "duplicate_policy":
+				cfg.Feedback.DuplicatePolicy = &value
+			}
 			continue
 		}
 		if err := setYAMLRAGValue(&cfg, section, key, value); err != nil {
@@ -823,6 +848,11 @@ func defaultFieldSources() map[string]string {
 		"rag.providers.ollama.endpoint": "default",
 		"rag.indexing.profile":          "default",
 		"rag.search.profile":            "default",
+		"feedback.enabled":              "default",
+		"feedback.sink":                 "default",
+		"feedback.repo_id":              "default",
+		"feedback.labels":               "default",
+		"feedback.duplicate_policy":     "default",
 	}
 }
 
@@ -865,6 +895,28 @@ func applyFileSources(sources map[string]string, file fileConfig, source string)
 	}
 	applyServiceFileSources(sources, file.Service, source)
 	applyRAGFileSources(sources, file.RAG, source)
+	applyFeedbackFileSources(sources, file.Feedback, source)
+}
+
+func applyFeedbackFileSources(sources map[string]string, file *feedbackFileConfig, source string) {
+	if file == nil {
+		return
+	}
+	if file.Enabled != nil {
+		sources["feedback.enabled"] = source
+	}
+	if file.Sink != nil {
+		sources["feedback.sink"] = source
+	}
+	if file.RepoID != nil {
+		sources["feedback.repo_id"] = source
+	}
+	if file.Labels != nil {
+		sources["feedback.labels"] = source
+	}
+	if file.DuplicatePolicy != nil {
+		sources["feedback.duplicate_policy"] = source
+	}
 }
 
 func applyServiceFileSources(sources map[string]string, file *serviceFileConfig, source string) {
@@ -1295,6 +1347,12 @@ func defaultYAMLConfig() string {
 		"gitcode_base_url: https://api.gitcode.com/api/v5",
 		"credential:",
 		"  store: auto",
+		"feedback:",
+		"  enabled: false",
+		"  sink: gitcode_issues",
+		"  # repo_id: owner/feedback-repo",
+		"  labels: feedback|dogfood",
+		"  duplicate_policy: suggest",
 		"service:",
 		"  # Override with GITCODE_MCP_SERVICE_RUNTIME_DIR when the daemon runtime should live elsewhere.",
 		"  # runtime_dir: /Volumes/fast/gitcode-mcp/runtime",

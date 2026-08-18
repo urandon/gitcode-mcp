@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"gitcode-mcp/internal/feedback"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
 )
@@ -20,6 +21,7 @@ type ServiceConfig struct {
 	Pagination      gitcode.PaginationConfig
 	RateLimitRPS    float64
 	RateLimitBurst  int
+	Feedback        feedback.Config
 }
 
 type RepositoryScope string

@@ -8,8 +8,15 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/capability"
+	"gitcode-mcp/internal/feedback"
 	"gitcode-mcp/internal/service"
 )
+
+type feedbackToolArgs struct {
+	feedback.Draft
+	WriteMode      string `json:"write_mode,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+}
 
 type writeToolArgs struct {
 	RepoID         string   `json:"repo_id"`
@@ -57,6 +64,10 @@ func writeToolDefinition(cap capability.Capability) toolDefinition {
 
 func writeToolInputSchema(id string) inputSchema {
 	switch id {
+	case "prepare_feedback":
+		return feedbackInputSchema(false)
+	case "submit_feedback":
+		return feedbackInputSchema(true)
 	case "create_issue":
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"title": {Type: "string", Description: "Issue title.", MinLength: 1}, "body": {Type: "string", Description: "Issue body."}, "labels": {Type: "array", Description: "Issue labels."}, "milestone": {Type: "string", Description: "Milestone remote id, stable MILESTONE-id, or exact title.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "title"}}
 	case "add_issue_comment":
@@ -106,8 +117,44 @@ func writeToolInputSchema(id string) inputSchema {
 	}
 }
 
+func feedbackInputSchema(submit bool) inputSchema {
+	props := map[string]schemaProp{
+		"summary":            {Type: "string", Description: "Concise observed product friction; do not include a prompt or transcript.", MinLength: 1},
+		"category":           {Type: "string", Description: "Feedback category.", Enum: []string{"bug", "feature_gap", "ux_friction", "diagnostics", "docs", "performance", "other"}},
+		"surface":            {Type: "string", Description: "Affected product surface.", Enum: []string{"mcp", "cli", "daemon", "cache", "sync", "rag", "gitcode_adapter", "setup", "other"}},
+		"reporter_type":      {Type: "string", Description: "Reporter type.", Enum: []string{"agent", "human", "mixed"}},
+		"observed":           {Type: "string", Description: "What reproducibly happened; concise facts only.", MinLength: 1},
+		"expected":           {Type: "string", Description: "What should have happened.", MinLength: 1},
+		"impact":             {Type: "string", Description: "User or agent workflow impact.", MinLength: 1},
+		"reproduction_steps": {Type: "array", Description: "Bounded reproduction steps without secrets or raw payloads."},
+		"fallback_used":      {Type: "string", Description: "CLI, browser, live API, or human fallback used."},
+		"workaround":         {Type: "string", Description: "Optional safe workaround."},
+		"related_task":       {Type: "string", Description: "Optional public-safe task/PR reference."},
+		"acceptance_signal":  {Type: "string", Description: "What would make this workflow better."},
+		"proposal":           {Type: "string", Description: "Optional implementation-neutral proposal."},
+		"evidence":           {Type: "array", Description: "Sanitized bounded facts only; raw prompts, transcripts, environment dumps, private paths, credentials, cookies, and API bodies are rejected or redacted."},
+		"tool_name":          {Type: "string", Description: "Affected MCP tool or CLI command."},
+		"error_code":         {Type: "string", Description: "Structured error code when available."},
+		"failure_class":      {Type: "string", Description: "Structured failure class when available."},
+		"correlation_id":     {Type: "string", Description: "Sanitized correlation/request id."},
+		"job_id":             {Type: "string", Description: "Sanitized daemon job id."},
+		"duplicate_override": {Type: "string", Description: "Use create only after reviewing likely duplicate candidates and confirming this report is distinct.", Enum: []string{"create"}},
+	}
+	required := []string{"summary", "category", "surface", "reporter_type", "observed", "expected", "impact"}
+	if submit {
+		props["write_mode"] = schemaProp{Type: "string", Description: "Required live external-write intent.", Enum: []string{"live"}}
+		props["idempotency_key"] = schemaProp{Type: "string", Description: "Caller-provided idempotency key.", MinLength: 1}
+		required = append(required, "write_mode", "idempotency_key")
+	}
+	return inputSchema{Type: "object", Properties: props, Required: required}
+}
+
 func (s *Server) writeToolHandler(cap capability.Capability) toolHandler {
 	switch cap.ID {
+	case "prepare_feedback":
+		return s.callPrepareFeedback
+	case "submit_feedback":
+		return s.callSubmitFeedback
 	case "create_issue":
 		return s.callCreateIssue
 	case "add_issue_comment":
@@ -157,6 +204,47 @@ func (s *Server) writeToolHandler(cap capability.Capability) toolHandler {
 			s.writeError(id, -32601, "Method not found", &errorData{Code: "unsupported_capability", Message: fmt.Sprintf("%q is declared but has no MCP handler", cap.MCPName)})
 		}
 	}
+}
+
+func (s *Server) callPrepareFeedback(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a feedbackToolArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid feedback object"})
+		return
+	}
+	result, err := s.svc.PrepareFeedback(ctx, a.Draft)
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	text := fmt.Sprintf("status=%s fingerprint=%s dedupe=%s", result.Status, result.Fingerprint, result.DedupeDecision)
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func (s *Server) callSubmitFeedback(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a feedbackToolArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid feedback object"})
+		return
+	}
+	if strings.TrimSpace(a.WriteMode) != string(service.WriteModeLive) {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "write_mode must be live"})
+		return
+	}
+	if strings.TrimSpace(a.IdempotencyKey) == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "idempotency_key is required"})
+		return
+	}
+	result, err := s.svc.SubmitFeedback(ctx, service.SubmitFeedbackRequest{Draft: a.Draft, Mode: service.WriteModeLive, IdempotencyKey: strings.TrimSpace(a.IdempotencyKey)})
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	text := fmt.Sprintf("status=%s fingerprint=%s dedupe=%s", result.Status, result.Fingerprint, result.DedupeDecision)
+	if result.TicketNumber > 0 {
+		text += fmt.Sprintf(" ticket=%d", result.TicketNumber)
+	}
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 }
 
 func (s *Server) callCreateIssue(ctx context.Context, id *json.RawMessage, args json.RawMessage) {

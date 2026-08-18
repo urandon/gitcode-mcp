@@ -17,6 +17,7 @@ import (
 	"gitcode-mcp/internal/capability"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/diagnostics"
+	"gitcode-mcp/internal/feedback"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/rag"
 	"gitcode-mcp/internal/service"
@@ -74,6 +75,8 @@ type serviceInterface interface {
 	RecentChanges(context.Context, service.RecentChangesRequest) (service.RecentChangesResult, error)
 	LinkCheck(context.Context, service.LinkCheckRequest) (service.LinkCheckResult, error)
 	CacheStatus(context.Context, service.CacheStatusRequest) (service.CacheStatusResult, error)
+	PrepareFeedback(context.Context, feedback.Draft) (feedback.PreparedReport, error)
+	SubmitFeedback(context.Context, service.SubmitFeedbackRequest) (feedback.SubmissionResult, error)
 }
 
 type RPCHandler struct {
