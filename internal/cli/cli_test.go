@@ -1225,11 +1225,16 @@ func TestSyncCommentSurfaceRouting(t *testing.T) {
 	}
 
 	spy, code, stderr = run([]string{"sync", "--offline", "--repo", "fixture-a", "--comments", "--input", "pr:7"})
-	if code != 4 || !strings.Contains(stderr, "targeted pull request comment sync is not supported") {
+	if code != 0 {
 		t.Fatalf("targeted pr comments code=%d stderr=%q", code, stderr)
 	}
-	if len(spy.calls) != 0 {
-		t.Fatalf("targeted pr comments called service: %+v", spy.calls)
+	if spy.calls["BulkSyncPRComments"] != 1 || spy.calls["SyncToCache"] != 0 {
+		t.Fatalf("targeted pr comments calls=%+v", spy.calls)
+	}
+
+	spy, code, stderr = run([]string{"sync", "--offline", "--repo", "fixture-a", "--pr-comments", "--input", "pr:8"})
+	if code != 0 || spy.calls["BulkSyncPRComments"] != 1 || spy.calls["SyncToCache"] != 0 {
+		t.Fatalf("explicit targeted pr comments code=%d stderr=%q calls=%+v", code, stderr, spy.calls)
 	}
 }
 
