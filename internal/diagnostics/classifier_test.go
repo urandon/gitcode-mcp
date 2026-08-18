@@ -46,6 +46,7 @@ func TestClassifierLivePrecedenceAndHTTPInvariants(t *testing.T) {
 		{name: "SCN-DIAG-PRECEDENCE-17 invalid query remains caller input", err: codedError{code: "invalid_query", msg: "line and position differ"}, ctx: CommandContext{ProviderMode: "live-http"}, want: CodeInvalidQuery, exitClass: "input"},
 		{name: "SCN-DIAG-PRECEDENCE-18 anchor mismatch is provider confirmation failure", err: codedError{code: "pr_review_anchor_mismatch", msg: "wrong line"}, ctx: CommandContext{ProviderMode: "live-http", HTTPAttempted: true}, want: CodePRReviewAnchorMismatch, http: true, exitClass: "provider"},
 		{name: "SCN-DIAG-PRECEDENCE-19 missing write confirmation is provider failure", err: codedError{code: "write_confirmation_incomplete", msg: "readback missing"}, ctx: CommandContext{ProviderMode: "live-http", HTTPAttempted: true}, want: CodeWriteConfirmationMissing, http: true, exitClass: "provider"},
+		{name: "SCN-DIAG-PRECEDENCE-20 unavailable discussion reply is typed capability", err: codedError{code: "discussion_reply_unavailable", msg: "no provider id"}, ctx: CommandContext{ProviderMode: "live-http", HTTPAttempted: true}, want: CodeDiscussionReplyUnavailable, http: true, exitClass: "capability"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

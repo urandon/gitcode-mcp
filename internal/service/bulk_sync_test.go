@@ -849,7 +849,7 @@ func TestListPRDiscussionsGroupsRepliesAndFiltersUnresolved(t *testing.T) {
 		t.Fatalf("discussions=%+v, want 2 groups", all.Discussions)
 	}
 	inline := all.Discussions[0]
-	if inline.ID != "D7" || inline.Kind != "inline" || inline.Path != "internal/service/service.go" || inline.Line != 42 || len(inline.Comments) != 2 {
+	if inline.ID != "D7" || !inline.Replyable || inline.ReplyDiscussionID != "D7" || inline.ReplyUnavailableReason != "" || inline.Kind != "inline" || inline.Path != "internal/service/service.go" || inline.Line != 42 || len(inline.Comments) != 2 {
 		t.Fatalf("inline discussion=%+v", inline)
 	}
 	if inline.Comments[0].Author != "alice" || inline.Comments[1].ParentID != "301" || inline.Comments[1].Body != "reply" {
@@ -862,7 +862,7 @@ func TestListPRDiscussionsGroupsRepliesAndFiltersUnresolved(t *testing.T) {
 		t.Fatalf("inline comment positions=%+v", inline.Comments[0].Positions)
 	}
 	general := all.Discussions[1]
-	if general.Kind != "general" || len(general.Comments) != 1 || general.Comments[0].Author != "carol" {
+	if general.ID != "comment:303" || general.Replyable || general.ReplyUnavailableReason == "" || general.Kind != "general" || len(general.Comments) != 1 || general.Comments[0].Author != "carol" {
 		t.Fatalf("general discussion=%+v", general)
 	}
 	unresolved, err := svc.ListPRDiscussions(ctx, PRDiscussionRequest{RepoID: "review-pr", Number: 7, UnresolvedOnly: true})

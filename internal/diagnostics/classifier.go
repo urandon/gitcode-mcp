@@ -11,25 +11,26 @@ import (
 type Code string
 
 const (
-	CodeMissingCredential        Code = "missing_credential"
-	CodeConfigCredential         Code = "config_credential"
-	CodeLiveAuthFailure          Code = "live_auth_failure"
-	CodeLiveTransportFailure     Code = "live_transport_failure"
-	CodeLiveAPIFailure           Code = "live_api_failure"
-	CodeConfigurationError       Code = "configuration_error"
-	CodeInvalidAPIBaseURL        Code = "invalid_api_base_url"
-	CodeUnsupportedMockPayload   Code = "unsupported_mock_payload"
-	CodeFixtureReadOnly          Code = "fixture_read_only"
-	CodeFixtureFallbackDetected  Code = "fixture_fallback_detected"
-	CodeUnsupportedCapability    Code = "unsupported_capability"
-	CodeCacheBusy                Code = "cache_busy"
-	CodeCacheSchemaBlocked       Code = "cache_schema_blocked"
-	CodeSchemaDecode             Code = "schema_decode"
-	CodeAPIFailure               Code = "api_validation"
-	CodePushMirrorSyncInProgress Code = "push_mirror_sync_in_progress"
-	CodeInvalidQuery             Code = "invalid_query"
-	CodePRReviewAnchorMismatch   Code = "pr_review_anchor_mismatch"
-	CodeWriteConfirmationMissing Code = "write_confirmation_incomplete"
+	CodeMissingCredential          Code = "missing_credential"
+	CodeConfigCredential           Code = "config_credential"
+	CodeLiveAuthFailure            Code = "live_auth_failure"
+	CodeLiveTransportFailure       Code = "live_transport_failure"
+	CodeLiveAPIFailure             Code = "live_api_failure"
+	CodeConfigurationError         Code = "configuration_error"
+	CodeInvalidAPIBaseURL          Code = "invalid_api_base_url"
+	CodeUnsupportedMockPayload     Code = "unsupported_mock_payload"
+	CodeFixtureReadOnly            Code = "fixture_read_only"
+	CodeFixtureFallbackDetected    Code = "fixture_fallback_detected"
+	CodeUnsupportedCapability      Code = "unsupported_capability"
+	CodeCacheBusy                  Code = "cache_busy"
+	CodeCacheSchemaBlocked         Code = "cache_schema_blocked"
+	CodeSchemaDecode               Code = "schema_decode"
+	CodeAPIFailure                 Code = "api_validation"
+	CodePushMirrorSyncInProgress   Code = "push_mirror_sync_in_progress"
+	CodeInvalidQuery               Code = "invalid_query"
+	CodePRReviewAnchorMismatch     Code = "pr_review_anchor_mismatch"
+	CodeWriteConfirmationMissing   Code = "write_confirmation_incomplete"
+	CodeDiscussionReplyUnavailable Code = "discussion_reply_unavailable"
 )
 
 type Diagnostic struct {
@@ -120,6 +121,9 @@ func classifyCode(err error, ctx CommandContext) Code {
 	}
 	if hasCode(err, "invalid_query") {
 		return CodeInvalidQuery
+	}
+	if hasCode(err, "discussion_reply_unavailable") {
+		return CodeDiscussionReplyUnavailable
 	}
 	if ctx.ProviderMode != "live-http" {
 		if ctx.FixtureReadOnly || hasCode(err, "fixture_read_only") || hasCode(err, "write_fixture_read_only") {
@@ -226,6 +230,8 @@ func codeFromError(err error) Code {
 			return CodePRReviewAnchorMismatch
 		case "write_confirmation_incomplete":
 			return CodeWriteConfirmationMissing
+		case "discussion_reply_unavailable":
+			return CodeDiscussionReplyUnavailable
 		}
 	}
 	return CodeConfigurationError
@@ -279,7 +285,7 @@ func isConfigurationInputBug(err error) bool {
 
 func httpAttemptedFor(code Code, ctx CommandContext) bool {
 	switch code {
-	case CodeLiveAuthFailure, CodeLiveTransportFailure, CodeLiveAPIFailure, CodeAPIFailure, CodeSchemaDecode, CodePushMirrorSyncInProgress, CodePRReviewAnchorMismatch, CodeWriteConfirmationMissing:
+	case CodeLiveAuthFailure, CodeLiveTransportFailure, CodeLiveAPIFailure, CodeAPIFailure, CodeSchemaDecode, CodePushMirrorSyncInProgress, CodePRReviewAnchorMismatch, CodeWriteConfirmationMissing, CodeDiscussionReplyUnavailable:
 		return ctx.HTTPAttempted
 	case CodeConfigCredential:
 		return false
@@ -306,6 +312,8 @@ func exitClassFor(code Code) string {
 		return "provider"
 	case CodeInvalidQuery:
 		return "input"
+	case CodeDiscussionReplyUnavailable:
+		return "capability"
 	case CodeUnsupportedMockPayload:
 		return "payload"
 	case CodeFixtureFallbackDetected, CodeFixtureReadOnly:
@@ -362,6 +370,8 @@ func messageFor(code Code, err error) string {
 		base += ": GitCode created the review comment on a different path or line"
 	case CodeWriteConfirmationMissing:
 		base += ": remote write anchor could not be safely confirmed"
+	case CodeDiscussionReplyUnavailable:
+		base += ": provider discussion identity is unavailable for a safe reply"
 	}
 	if err != nil {
 		return base + ": " + err.Error()

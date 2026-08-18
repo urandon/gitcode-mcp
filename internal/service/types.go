@@ -1096,16 +1096,19 @@ type PRDiscussionsResult struct {
 }
 
 type PRDiscussion struct {
-	ID         string            `json:"id"`
-	Kind       string            `json:"kind"`
-	Resolved   *bool             `json:"resolved,omitempty"`
-	Resolvable *bool             `json:"resolvable,omitempty"`
-	Path       string            `json:"path,omitempty"`
-	Line       int               `json:"line,omitempty"`
-	StartLine  int               `json:"start_line,omitempty"`
-	EndLine    int               `json:"end_line,omitempty"`
-	Position   *PRReviewPosition `json:"position,omitempty"`
-	Comments   []PRReviewComment `json:"comments"`
+	ID                     string            `json:"id"`
+	Replyable              bool              `json:"replyable"`
+	ReplyDiscussionID      string            `json:"reply_discussion_id,omitempty"`
+	ReplyUnavailableReason string            `json:"reply_unavailable_reason,omitempty"`
+	Kind                   string            `json:"kind"`
+	Resolved               *bool             `json:"resolved,omitempty"`
+	Resolvable             *bool             `json:"resolvable,omitempty"`
+	Path                   string            `json:"path,omitempty"`
+	Line                   int               `json:"line,omitempty"`
+	StartLine              int               `json:"start_line,omitempty"`
+	EndLine                int               `json:"end_line,omitempty"`
+	Position               *PRReviewPosition `json:"position,omitempty"`
+	Comments               []PRReviewComment `json:"comments"`
 }
 
 type PRReviewComment struct {

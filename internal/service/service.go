@@ -2514,7 +2514,19 @@ func (s *Service) ListPRDiscussions(ctx context.Context, req PRDiscussionRequest
 		}
 		idx, ok := groups[groupID]
 		if !ok {
-			discussion := PRDiscussion{ID: groupID, Kind: discussionKind(comment), Resolved: meta.Resolved, Resolvable: meta.Resolvable, Path: meta.Path, Line: meta.Line, StartLine: meta.StartLine, EndLine: meta.EndLine, Position: firstCurrentPosition(comment.Positions), Comments: []PRReviewComment{}}
+			kind := discussionKind(comment)
+			replyable := kind == "inline" && meta.DiscussionID != ""
+			replyDiscussionID := ""
+			if replyable {
+				replyDiscussionID = meta.DiscussionID
+			}
+			discussion := PRDiscussion{ID: groupID, Replyable: replyable, ReplyDiscussionID: replyDiscussionID, Kind: kind, Resolved: meta.Resolved, Resolvable: meta.Resolvable, Path: meta.Path, Line: meta.Line, StartLine: meta.StartLine, EndLine: meta.EndLine, Position: firstCurrentPosition(comment.Positions), Comments: []PRReviewComment{}}
+			if !replyable {
+				discussion.ReplyUnavailableReason = "provider discussion id unavailable; refresh PR discussions before replying"
+				if kind != "inline" {
+					discussion.ReplyUnavailableReason = "general PR comments do not expose an inline discussion reply target"
+				}
+			}
 			result.Discussions = append(result.Discussions, discussion)
 			idx = len(result.Discussions) - 1
 			groups[groupID] = idx
@@ -5804,6 +5816,10 @@ func (s *Service) writeAdapterErrorCode(mode WriteMode, err error) string {
 }
 
 func writeErrorCode(err error) string {
+	var replyUnavailable gitcode.ErrDiscussionReplyUnavailable
+	if errors.As(err, &replyUnavailable) {
+		return "discussion_reply_unavailable"
+	}
 	var anchorMismatch gitcode.ErrPRReviewAnchorMismatch
 	if errors.As(err, &anchorMismatch) {
 		return "pr_review_anchor_mismatch"

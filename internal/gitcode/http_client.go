@@ -185,9 +185,6 @@ func flattenPRCommentReplies(items []PRComment, prNumber int) []PRComment {
 	flattened := make([]PRComment, 0, len(items))
 	for _, root := range items {
 		root.PRNumber = prNumber
-		if root.DiscussionID == "" {
-			root.DiscussionID = strconv.Itoa(prNumber)
-		}
 		replies := root.Replies
 		root.Replies = nil
 		flattened = append(flattened, root)
@@ -638,15 +635,32 @@ func (c *HTTPClient) ReplyPRReviewComment(ctx context.Context, req ReplyPRReview
 	if err := validateReplyPRReviewComment(req); err != nil {
 		return WriteResult[PRComment]{}, err
 	}
+	comments, err := c.ListPRComments(ctx, PRRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
+	if err != nil {
+		return WriteResult[PRComment]{}, err
+	}
+	if strings.HasPrefix(req.DiscussionID, "comment:") {
+		syntheticParent := strings.TrimPrefix(req.DiscussionID, "comment:")
+		if syntheticParent != req.ParentCommentID {
+			return WriteResult[PRComment]{}, ErrDiscussionReplyUnavailable{DiscussionID: req.DiscussionID, ParentCommentID: req.ParentCommentID, Message: "synthetic thread id does not match the requested parent comment"}
+		}
+		resolved := ""
+		for _, comment := range comments.Items {
+			if comment.ID == req.ParentCommentID {
+				resolved = strings.TrimSpace(comment.DiscussionID)
+				break
+			}
+		}
+		if resolved == "" {
+			return WriteResult[PRComment]{}, ErrDiscussionReplyUnavailable{DiscussionID: req.DiscussionID, ParentCommentID: req.ParentCommentID}
+		}
+		req.DiscussionID = resolved
+	}
 	target := req.Owner + "/" + req.Repo + "/pulls/" + strconv.Itoa(req.Number) + "/discussions/" + req.DiscussionID
 	key := strings.TrimSpace(opts.IdempotencyKey)
 	if key == "" {
 		key = GenerateIdempotencyKey("ReplyPRReviewComment", target, req, opts)
 		opts.IdempotencyKey = key
-	}
-	comments, err := c.ListPRComments(ctx, PRRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
-	if err != nil {
-		return WriteResult[PRComment]{}, err
 	}
 	parentFound := false
 	thread := make([]PRComment, 0)

@@ -1618,7 +1618,7 @@ func TestScenario031PRReviewReplyMergesDiscussionReadbackAndReplays(t *testing.T
 	defer server.Close()
 
 	client := newTestClient(t, server.URL, Config{Token: "test-token"})
-	req := ReplyPRReviewCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, DiscussionID: discussionID, ParentCommentID: parentID, Body: replyBody}
+	req := ReplyPRReviewCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, DiscussionID: "comment:" + parentID, ParentCommentID: parentID, Body: replyBody}
 	result, err := client.ReplyPRReviewComment(context.Background(), req, WriteOptions{IdempotencyKey: "reply-key"})
 	if err != nil {
 		t.Fatalf("ReplyPRReviewComment returned error: %v", err)
@@ -1645,6 +1645,34 @@ func TestScenario031PRReviewReplyMergesDiscussionReadbackAndReplays(t *testing.T
 	}
 	if len(replay.Record.Thread) != 2 {
 		t.Fatalf("replay thread=%+v", replay.Record.Thread)
+	}
+}
+
+func TestPRReviewReplyRejectsSyntheticThreadWithoutProviderDiscussionID(t *testing.T) {
+	var posts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == listPRCommentsEndpoint("example-owner", "example-repo", 7):
+			fmt.Fprint(w, `[{"id":301,"body":"root","comment_type":"diff_comment","reply":[]}]`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/example-owner/example-repo/merge_requests/7/discussions":
+			http.NotFound(w, r)
+		case r.Method == http.MethodPost:
+			posts++
+			http.Error(w, "must not post", http.StatusInternalServerError)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, Config{Token: "test-token"})
+	_, err := client.ReplyPRReviewComment(context.Background(), ReplyPRReviewCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, DiscussionID: "comment:301", ParentCommentID: "301", Body: "reply"}, WriteOptions{IdempotencyKey: "synthetic-reply"})
+	var unavailable ErrDiscussionReplyUnavailable
+	if !errors.As(err, &unavailable) || unavailable.DiscussionID != "comment:301" || unavailable.ParentCommentID != "301" {
+		t.Fatalf("error=%#v, want typed discussion reply unavailable", err)
+	}
+	if posts != 0 {
+		t.Fatalf("posts=%d, want zero", posts)
 	}
 }
 
