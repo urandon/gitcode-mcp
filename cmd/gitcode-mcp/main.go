@@ -22,6 +22,7 @@ import (
 	"gitcode-mcp/internal/mcp"
 	"gitcode-mcp/internal/rag"
 	"gitcode-mcp/internal/service"
+	"gitcode-mcp/internal/servicectl"
 )
 
 type StartupDeps struct {
@@ -29,6 +30,7 @@ type StartupDeps struct {
 	Cache              CacheStartup
 	GitCode            GitCodeStartup
 	Source             config.Source
+	CachePathSource    string
 	CredentialResolver *auth.CredentialResolver
 }
 
@@ -141,6 +143,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 	deps := buildStartupDeps(cfg, token, live)
 	deps.GitCode.Offline = opts.offline
 	deps.Source = src
+	deps.CachePathSource = eff.CachePathSource
 	deps.CredentialResolver = credentialResolver
 	if opts.mcpServe {
 		return mcpServeRoute(context.Background(), stdin, stdout, stderr, deps, opts.mcpTransport, opts.mcpBind)
@@ -486,6 +489,7 @@ func newMCPStdioServer(ctx context.Context, stdin io.Reader, stdout io.Writer, s
 	server := mcp.NewWithToolAccess(stdin, stdout, stderr, svc, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess))
 	server.SetRAGStatusProvider(newMCPRAGStatusProvider(store, deps))
 	server.SetRAGSearchProvider(newMCPRAGSearchProvider(store, deps))
+	setMCPMaintenanceProviders(server.SetMaintenanceProviders, deps)
 	return server, func() { _ = store.Close() }
 }
 
@@ -520,6 +524,7 @@ func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind
 	handler := mcp.NewRPCHandlerWithCredentialResolverAndToolAccess(svc, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess))
 	handler.SetRAGStatusProvider(newMCPRAGStatusProvider(store, deps))
 	handler.SetRAGSearchProvider(newMCPRAGSearchProvider(store, deps))
+	setMCPMaintenanceProviders(handler.SetMaintenanceProviders, deps)
 	transport := mcp.NewHTTPSSETransport(handler, mcp.ServerConfig{BindAddress: bind, ReadinessProbe: func(ctx context.Context) mcp.Readiness {
 		repos, err := store.ListRepositories(ctx)
 		if err != nil {
@@ -551,6 +556,16 @@ func newMCPRAGSearchProvider(store cache.Store, deps StartupDeps) mcp.RAGSearchP
 	return func(ctx context.Context, req rag.SearchRequest) (rag.SearchResult, error) {
 		return rag.NewOperations(store, deps.Config, rag.OperationsOptions{}).Search(ctx, req)
 	}
+}
+
+func setMCPMaintenanceProviders(set func(mcp.MaintenancePlanProvider, mcp.MaintenanceApplyProvider), deps StartupDeps) {
+	setup := servicectl.MaintenanceSetup{
+		Manager:         servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version},
+		Config:          deps.Config,
+		CachePath:       deps.Config.CachePath,
+		CachePathSource: deps.CachePathSource,
+	}
+	set(setup.Plan, setup.Apply)
 }
 
 func ensureParentDir(path string) error {

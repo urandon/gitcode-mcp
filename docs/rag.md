@@ -15,6 +15,7 @@ The built-in default profile is `qwen3-ollama-0_6b-1024`:
 | Setting | Value |
 |---|---|
 | Provider | `ollama` |
+| Data boundary | `local_network` (explicit configuration, not inferred from the endpoint hostname) |
 | Provider endpoint | `http://127.0.0.1:11434` |
 | Model | `qwen3-embedding:0.6b` |
 | Dimensions | `1024` |
@@ -98,6 +99,15 @@ gitcode-mcp rag setup --yes
 
 `--dry-run` reports missing actions without pulling a model. `--yes` is allowed to pull the configured model and run a small embedding smoke test.
 
+For the normal end-to-end setup, prefer the maintenance plan/apply flow. It also enrolls the selected cache for daemon head refresh, historical backfill, and generation-based RAG repair:
+
+```sh
+gitcode-mcp maintenance plan --repo YOUR_OWNER/YOUR_REPO
+gitcode-mcp maintenance enable --repo YOUR_OWNER/YOUR_REPO --yes --idempotency-key setup-1
+```
+
+`gitcode-mcp rag enable ...` remains an alias for the same flow. `rag setup` is still useful as the narrower provider/model diagnostic.
+
 ## Model Storage
 
 Models are not repository-local state and should not be committed. Keep them in a global or disk-specific path.
@@ -123,6 +133,7 @@ rag:
   providers:
     ollama:
       endpoint: http://127.0.0.1:11434
+      data_boundary: local_network
       executable: ollama
       startup: managed
       autostart: true

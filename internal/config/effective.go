@@ -711,6 +711,8 @@ func setYAMLRAGProviderValue(cfg *fileConfig, section, key, value string) error 
 		switch key {
 		case "type":
 			provider.Type = &value
+		case "data_boundary":
+			provider.DataBoundary = &value
 		case "endpoint":
 			provider.Endpoint = &value
 		case "executable":
@@ -1233,6 +1235,7 @@ func applyEnvOverrides(src Source, eff *EffectiveConfig) error {
 		}
 		provider := eff.Config.RAG.Providers[providerName]
 		provider.Endpoint = endpoint
+		provider.DataBoundary = "unknown"
 		eff.Config.RAG.Providers[providerName] = provider
 		eff.FieldSources["rag.providers."+providerName+".endpoint"] = "env:" + EnvRAGProviderEndpoint
 	}

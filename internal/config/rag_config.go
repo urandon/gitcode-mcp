@@ -36,6 +36,7 @@ type RAGConfig struct {
 
 type RAGProviderConfig struct {
 	Type         string                `json:"type,omitempty"`
+	DataBoundary string                `json:"data_boundary,omitempty"`
 	Endpoint     string                `json:"endpoint,omitempty"`
 	Executable   string                `json:"executable,omitempty"`
 	Startup      string                `json:"startup,omitempty"`
@@ -88,6 +89,7 @@ type ragFileConfig struct {
 
 type ragProviderFileConfig struct {
 	Type         *string                    `json:"type"`
+	DataBoundary *string                    `json:"data_boundary"`
 	Endpoint     *string                    `json:"endpoint"`
 	Executable   *string                    `json:"executable"`
 	Startup      *string                    `json:"startup"`
@@ -135,12 +137,13 @@ func defaultRAGConfig(cacheBaseDir string) RAGConfig {
 		DefaultProfile: DefaultRAGProfile,
 		Providers: map[string]RAGProviderConfig{
 			defaultRAGProvider: {
-				Type:       defaultRAGProvider,
-				Endpoint:   defaultRAGProviderEndpoint,
-				Executable: "ollama",
-				Startup:    "managed",
-				Autostart:  true,
-				Env:        map[string]string{},
+				Type:         defaultRAGProvider,
+				DataBoundary: "local_network",
+				Endpoint:     defaultRAGProviderEndpoint,
+				Executable:   "ollama",
+				Startup:      "managed",
+				Autostart:    true,
+				Env:          map[string]string{},
 				InstallHints: []string{
 					"Install Ollama from https://ollama.com/download.",
 					"Set OLLAMA_MODELS or rag.providers.ollama.env.OLLAMA_MODELS to place provider-owned models on another disk.",
@@ -237,8 +240,20 @@ func mergeRAGProviderFile(provider RAGProviderConfig, file ragProviderFileConfig
 	if file.Type != nil {
 		provider.Type = strings.TrimSpace(*file.Type)
 	}
+	if file.DataBoundary != nil {
+		boundary := strings.TrimSpace(*file.DataBoundary)
+		switch boundary {
+		case "local_process", "local_network", "remote", "unknown":
+			provider.DataBoundary = boundary
+		default:
+			return RAGProviderConfig{}, fmt.Errorf("rag provider data_boundary must be local_process, local_network, remote, or unknown")
+		}
+	}
 	if file.Endpoint != nil {
 		provider.Endpoint = strings.TrimSpace(*file.Endpoint)
+		if file.DataBoundary == nil {
+			provider.DataBoundary = "unknown"
+		}
 	}
 	if file.Executable != nil {
 		provider.Executable = strings.TrimSpace(*file.Executable)

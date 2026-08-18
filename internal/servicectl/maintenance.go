@@ -23,6 +23,7 @@ const maintenanceRegistrySchema = "gitcode-mcp.managed-caches.v1"
 
 type MaintenancePolicy struct {
 	SyncEnabled         bool   `json:"sync_enabled"`
+	SyncMode            string `json:"sync_mode,omitempty"`
 	RAGEnabled          bool   `json:"rag_enabled"`
 	Issues              bool   `json:"issues,omitempty"`
 	IssueComments       bool   `json:"issue_comments,omitempty"`
@@ -527,6 +528,9 @@ func nextMaintenanceSyncLane(entry MaintenanceEntry, frontiers []cache.Maintenan
 	if headPage > 0 {
 		return "head", headPage, entry.Policy.HeadMaxPages
 	}
+	if entry.Policy.SyncMode == "head" {
+		return "", 0, 0
+	}
 	nextPage := 0
 	needsTail := false
 	for _, remoteType := range expected {
@@ -730,6 +734,18 @@ func (m *MaintenanceManager) saveLocked() error {
 }
 
 func normalizeMaintenancePolicy(policy MaintenancePolicy, binding cache.RepositoryBinding) (MaintenancePolicy, error) {
+	if policy.SyncEnabled && policy.SyncMode == "" {
+		policy.SyncMode = "head-and-backfill"
+	}
+	if !policy.SyncEnabled && policy.SyncMode == "" {
+		policy.SyncMode = "off"
+	}
+	if policy.SyncMode != "off" && policy.SyncMode != "head" && policy.SyncMode != "head-and-backfill" {
+		return MaintenancePolicy{}, errors.New("maintenance: sync_mode must be off, head, or head-and-backfill")
+	}
+	if policy.SyncEnabled != (policy.SyncMode != "off") {
+		return MaintenancePolicy{}, errors.New("maintenance: sync_enabled and sync_mode disagree")
+	}
 	if policy.HeadIntervalSeconds <= 0 {
 		policy.HeadIntervalSeconds = 900
 	}

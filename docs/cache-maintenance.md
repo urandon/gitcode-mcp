@@ -51,7 +51,29 @@ Low-level JSON-RPC methods are:
 - `Maintenance.Reconcile` — run an immediate scheduler pass;
 - `Maintenance.Disable` — stop scheduling a registration without deleting its cache.
 
-Easy enrollment and policy presets are intentionally a separate setup surface. The supported operator diagnostics in this change are:
+## One-command setup
+
+The setup surface composes the registry and scheduler above instead of introducing another daemon protocol. Planning is read-only and deterministic for a selected cache identity, repository binding, effective non-secret configuration, daemon protocol, provider/model configuration revision, and requested policy:
+
+```sh
+gitcode-mcp maintenance plan --repo YOUR_OWNER/YOUR_REPO
+gitcode-mcp maintenance enable \
+  --repo YOUR_OWNER/YOUR_REPO \
+  --yes \
+  --idempotency-key workstation-setup-1
+```
+
+`enable` always renders the same plan internally, revalidates its identity immediately before applying it, enrolls the cache through `Maintenance.Enroll`, and requests one reconciliation. Existing active work is coalesced by the #79 job keys. Replaying the same idempotency key resumes the same registration instead of duplicating work.
+
+Useful policy controls are `--sync off|head|head-and-backfill`, `--collections issues,issue-comments,wiki,pulls,pr-comments`, `--rag off|maintain`, `--profile`, `--detach`, `--no-service-install`, and `--no-model-download`. `rag enable` is a compatibility shortcut for `maintenance enable`.
+
+Every plan lists effects by class (`inspect`, `local_config_write`, `local_service_change`, `large_download`, `provider_data_transfer`, and `job_enqueue`) and declares the configured provider data boundary (`local_process`, `local_network`, `remote`, or `unknown`). `--yes` confirms only the rendered plan; a changed cache identity, binding, configuration, provider/model configuration revision, service state, or policy produces `stale_plan` and requires a new plan.
+
+MCP clients use `maintenance_plan` followed by `enable_cache_maintenance` with `write_mode=live`, the returned `plan_id`, and an idempotency key. The selected MCP process cache is implicit: neither tool accepts or returns a filesystem path. MCP apply can enroll and enqueue an already-ready setup, but it never installs a user service, starts a provider, or downloads a model. Those effects return `confirmation_required` with an exact CLI handoff.
+
+The plan and apply statuses are `ready`, `indexing`, `backfilling`, `confirmation_required`, or `blocked`. The result separately answers whether enrollment completed and which initial jobs were coalesced; it does not claim a historically complete corpus merely because maintenance is enabled.
+
+The supported operator diagnostics are:
 
 ```sh
 gitcode-mcp service maintenance

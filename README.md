@@ -28,6 +28,8 @@ go run ./cmd/gitcode-mcp --help
 go run ./cmd/gitcode-mcp repo add --repo YOUR_OWNER/YOUR_REPO --owner YOUR_OWNER --name YOUR_REPO --scopes issues,wiki
 go run ./cmd/gitcode-mcp sync --repo YOUR_OWNER/YOUR_REPO --issues --wiki --pulls --pr-comments
 go run ./cmd/gitcode-mcp search --repo YOUR_OWNER/YOUR_REPO "cache-first"
+go run ./cmd/gitcode-mcp maintenance plan --repo YOUR_OWNER/YOUR_REPO
+go run ./cmd/gitcode-mcp maintenance enable --repo YOUR_OWNER/YOUR_REPO --yes --idempotency-key setup-1
 ```
 
 `search` is cache full-text search, not fuzzy or semantic retrieval. Empty results mean the exact query terms did not match cached text; retry with exact terms, ids, or keyword variants when wording may differ.
