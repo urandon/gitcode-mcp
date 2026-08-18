@@ -170,6 +170,18 @@ func (s *Server) callSyncLive(ctx context.Context, id *json.RawMessage, args jso
 		return
 	}
 	if strings.TrimSpace(a.RemoteAlias) != "" {
+		if commentSelection.PR && syncLiveRemoteAliasSurface(a.RemoteAlias) == "pull_request" {
+			part, err := s.svc.BulkSyncPRComments(ctx, service.BulkSyncRequest{RepoID: a.RepoID, RemoteAlias: strings.TrimSpace(a.RemoteAlias), IdempotencyKey: strings.TrimSpace(a.IdempotencyKey)})
+			if err != nil {
+				s.writeDomainError(id, err)
+				return
+			}
+			appendBulkSyncResult(&result, part)
+			result.Collections = []string{"pr_comments"}
+			text := fmt.Sprintf("fresh_count=%d collections=pr_comments", result.FreshCount)
+			s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+			return
+		}
 		key := strings.TrimSpace(a.IdempotencyKey)
 		if key == "" {
 			key = fmt.Sprintf("mcp-sync-live-remote-%d", time.Now().UTC().UnixNano())
@@ -334,8 +346,11 @@ func resolveSyncLiveCommentSelection(a syncLiveArgs) (syncLiveCommentSelection, 
 		return syncLiveCommentSelection{}, "comments cannot be combined with issue_comments or pr_comments; use the explicit selectors only"
 	}
 	if strings.TrimSpace(a.RemoteAlias) != "" {
-		if syncLiveRemoteAliasSurface(a.RemoteAlias) == "issue" {
+		switch syncLiveRemoteAliasSurface(a.RemoteAlias) {
+		case "issue":
 			selection.Issue = true
+		case "pull_request":
+			selection.PR = true
 		}
 		return selection, ""
 	}
@@ -364,9 +379,12 @@ func syncLiveCommentSurfaceError(a syncLiveArgs) string {
 		}
 		return ""
 	case "pull_request":
-		return "targeted pull request comment sync is not supported; sync pull requests first, then call sync_live with pr_comments=true and no remote_alias"
+		if a.IssueComments {
+			return "issue_comments cannot target pull request aliases; use pr_comments=true with pr:N"
+		}
+		return ""
 	default:
-		return "comment sync with remote_alias supports issue:N only; use pr_comments=true without remote_alias for pull request comments"
+		return "comment sync with remote_alias supports issue:N or pr:N"
 	}
 }
 

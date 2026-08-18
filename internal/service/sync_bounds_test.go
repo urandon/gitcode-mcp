@@ -781,6 +781,56 @@ func TestBulkSyncPRCommentsBoundedMaxRecords(t *testing.T) {
 	}
 }
 
+func TestBulkSyncPRCommentsTargetsExactlyOneCachedPullRequest(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		listPRPages:    []gitcode.Page[gitcode.PullRequest]{{Items: generatePullRequests(0, 3, base), Page: 1, PerPage: 10}},
+		prCommentsByPR: map[int][]gitcode.PRComment{1: generatePRComments(1, 1, base), 2: generatePRComments(2, 1, base), 3: generatePRComments(3, 1, base)},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "target-pr-comments", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	if _, err := svc.BulkSyncPullRequests(ctx, BulkSyncRequest{RepoID: "target-pr-comments"}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.BulkSyncPRComments(ctx, BulkSyncRequest{RepoID: "target-pr-comments", RemoteAlias: "pr:2"})
+	if err != nil || result.SuccessCount != 1 || result.PagesListed != 1 || client.prCommentCalls != 1 {
+		t.Fatalf("result=%#v calls=%d err=%v", result, client.prCommentCalls, err)
+	}
+	if _, err := store.GetSourceScoped(ctx, "target-pr-comments", "PRCOMMENT-2-2-1"); err != nil {
+		t.Fatalf("target comment missing: %v", err)
+	}
+	if _, err := store.GetSourceScoped(ctx, "target-pr-comments", "PRCOMMENT-1-1-1"); !isCacheNotFound(err) {
+		t.Fatalf("non-target comment unexpectedly cached: %v", err)
+	}
+}
+
+func TestBulkSyncPRCommentsTargetRequiresCachedParentBeforeHTTP(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeGitCodeClient{}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "missing-target-pr", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	_, err = svc.BulkSyncPRComments(ctx, BulkSyncRequest{RepoID: "missing-target-pr", RemoteAlias: "pr:99"})
+	var invalid ErrInvalidQuery
+	if !errors.As(err, &invalid) || invalid.Field != "remote_alias" || client.prCommentCalls != 0 {
+		t.Fatalf("error=%#v calls=%d", err, client.prCommentCalls)
+	}
+}
+
 func TestBulkSyncPRCommentsResumesBoundedSourceWindow(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 8, 11, 15, 0, 0, 0, time.UTC)

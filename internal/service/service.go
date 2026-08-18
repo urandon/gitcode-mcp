@@ -2395,12 +2395,28 @@ func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (
 	if err != nil {
 		return nil, err
 	}
-	prSources, err := s.store.ListSources(ctx, cache.SourceFilter{RepoID: repoID, Kind: "pull_request"})
-	if err != nil {
-		if isCacheNotFound(err) {
-			return &SyncResourcesResult{Results: []SyncResult{}, Failures: []ResourceError{}}, nil
+	var prSources []cache.Source
+	if strings.TrimSpace(req.RemoteAlias) != "" {
+		prNumber, err := targetedPRCommentNumber(req.RemoteAlias)
+		if err != nil {
+			return nil, err
 		}
-		return nil, normalizeError(err, "sources", repoID)
+		source, err := s.store.GetSourceScoped(ctx, repoID, pullRequestStableID(prNumber))
+		if err != nil {
+			if isCacheNotFound(err) {
+				return nil, ErrInvalidQuery{Field: "remote_alias", Message: fmt.Sprintf("pull request %d is not cached; sync --pulls --input pr:%d first", prNumber, prNumber)}
+			}
+			return nil, normalizeError(err, "pull_request", strconv.Itoa(prNumber))
+		}
+		prSources = []cache.Source{source}
+	} else {
+		prSources, err = s.store.ListSources(ctx, cache.SourceFilter{RepoID: repoID, Kind: "pull_request"})
+		if err != nil {
+			if isCacheNotFound(err) {
+				return &SyncResourcesResult{Results: []SyncResult{}, Failures: []ResourceError{}}, nil
+			}
+			return nil, normalizeError(err, "sources", repoID)
+		}
 	}
 	sort.SliceStable(prSources, func(i, j int) bool { return prSources[i].ID < prSources[j].ID })
 	start := 0
@@ -2474,6 +2490,23 @@ func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (
 		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount, TotalRequested: totalRequested}
 	}
 	return result, nil
+}
+
+func targetedPRCommentNumber(alias string) (int, error) {
+	remoteType, remoteID, ok := strings.Cut(strings.TrimSpace(alias), ":")
+	if !ok {
+		return 0, ErrInvalidQuery{Field: "remote_alias", Message: "targeted PR comment sync requires pr:N"}
+	}
+	switch strings.ToLower(strings.TrimSpace(remoteType)) {
+	case "pr", "pull", "pulls", "pull_request":
+	default:
+		return 0, ErrInvalidQuery{Field: "remote_alias", Message: "targeted PR comment sync requires a pull request alias such as pr:N"}
+	}
+	number, err := strconv.Atoi(strings.TrimSpace(remoteID))
+	if err != nil || number <= 0 {
+		return 0, ErrInvalidQuery{Field: "remote_alias", Message: "targeted PR comment sync requires a positive pull request number"}
+	}
+	return number, nil
 }
 
 func (s *Service) ListPRDiscussions(ctx context.Context, req PRDiscussionRequest) (PRDiscussionsResult, error) {

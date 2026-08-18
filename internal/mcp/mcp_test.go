@@ -1791,6 +1791,14 @@ func TestMCPSyncLiveCommentSurfaceRouting(t *testing.T) {
 		t.Fatalf("invalid request called service: sync=%+v pr=%+v", spy.syncRequests, spy.bulkPRCommentsCalls)
 	}
 
+	targetedResp := call("targeted-pr-comments", "sync_live", map[string]any{"repo_id": "fixture-a", "pr_comments": true, "remote_alias": "pr:7"})
+	if targetedResp.Error != nil {
+		t.Fatalf("targeted response=%+v", targetedResp.Error)
+	}
+	if len(spy.syncRequests) != 2 || len(spy.bulkPRCommentsCalls) != beforePRComments+1 || spy.bulkPRCommentsCalls[len(spy.bulkPRCommentsCalls)-1].RemoteAlias != "pr:7" {
+		t.Fatalf("targeted routing sync=%+v pr=%+v", spy.syncRequests, spy.bulkPRCommentsCalls)
+	}
+
 	_ = r.Close()
 	wg.Wait()
 }

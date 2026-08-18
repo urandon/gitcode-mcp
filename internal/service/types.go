@@ -1070,6 +1070,7 @@ const (
 
 type BulkSyncRequest struct {
 	RepoID           string               `json:"repo_id"`
+	RemoteAlias      string               `json:"remote_alias,omitempty"`
 	Scope            BulkSyncScope        `json:"scope"`
 	IdempotencyKey   string               `json:"idempotency_key,omitempty"`
 	MaxAttempts      int                  `json:"max_attempts,omitempty"`

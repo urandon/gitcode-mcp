@@ -66,6 +66,12 @@ Sync pull requests and their comments before asking for review discussion state:
 gitcode-mcp sync --repo YOUR_REPO --pulls --pr-comments
 ```
 
+For a large repository, refresh one already cached pull request without walking other PRs:
+
+```sh
+gitcode-mcp sync --repo YOUR_REPO --pr-comments --input pr:7
+```
+
 Then list cached review discussions:
 
 ```sh

@@ -1806,6 +1806,11 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return attachSyncJob(ctx, client, job.ID, opts, stdout, stderr)
 		}
 		if syncSingleRecordRequested(opts) {
+			if opts.input != "" && (opts.prComments || opts.comments) && syncRemoteAliasSurface(opts.input) == "pull_request" {
+				started := time.Now().UTC()
+				result, err := svc.BulkSyncPRComments(ctx, service.BulkSyncRequest{RepoID: opts.repo, RemoteAlias: opts.input, IdempotencyKey: opts.idempotencyKey})
+				return renderSyncResources(stdout, stderr, opts.format, opts.details, result, err, plan, started)
+			}
 			result, err := svc.SyncToCache(ctx, service.SyncRequest{RepoID: opts.repo, StableID: opts.id, RemoteAlias: opts.input, IdempotencyKey: opts.idempotencyKey})
 			if err != nil {
 				return writeError(stderr, opts.format, err)
@@ -2146,7 +2151,7 @@ func validateSyncCommentSurface(opts options) error {
 		return nil
 	}
 	if opts.id != "" {
-		return service.ErrInvalidQuery{Field: "comments", Message: "comment sync with --id is ambiguous; use --input issue:N for issue comments or --pr-comments without --id for pull request comments"}
+		return service.ErrInvalidQuery{Field: "comments", Message: "comment sync with --id is ambiguous; use --input issue:N for issue comments or --pr-comments --input pr:N for pull request comments"}
 	}
 	if opts.input == "" {
 		return nil
@@ -2162,9 +2167,12 @@ func validateSyncCommentSurface(opts options) error {
 		}
 		return nil
 	case "pull_request":
-		return service.ErrInvalidQuery{Field: "comments", Message: "targeted pull request comment sync is not supported; sync pull requests first, then run --pr-comments without --input"}
+		if opts.issueComments {
+			return service.ErrInvalidQuery{Field: "comments", Message: "--issue-comments cannot target pull request aliases; use --pr-comments with pr:N"}
+		}
+		return nil
 	default:
-		return service.ErrInvalidQuery{Field: "comments", Message: "comment sync with --input supports issue:N only; use --pr-comments without --input for pull request comments"}
+		return service.ErrInvalidQuery{Field: "comments", Message: "comment sync with --input supports issue:N or pr:N"}
 	}
 }
 
@@ -3981,8 +3989,8 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --wiki              sync wiki records")
 		fmt.Fprintln(w, "  --pulls             sync pull request records")
 		fmt.Fprintln(w, "  --issue-comments    sync the durable issue comment queue with aggregate-first collection")
-		fmt.Fprintln(w, "  --pr-comments       sync pull request comments")
-		fmt.Fprintln(w, "  --comments          compatibility alias for --pr-comments; with --input issue:N, sync issue comments")
+		fmt.Fprintln(w, "  --pr-comments       sync pull request comments; with --input pr:N, sync exactly one cached PR")
+		fmt.Fprintln(w, "  --comments          compatibility selector; --input issue:N targets issue comments and pr:N targets PR comments")
 		fmt.Fprintln(w, "  --daemon            start collection sync as a service-owned job and attach progress")
 		fmt.Fprintln(w, "  --detach            start collection sync as a service-owned job and return the job id")
 		fmt.Fprintln(w, "  --index             build index after sync")
