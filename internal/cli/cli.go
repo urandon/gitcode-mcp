@@ -3663,6 +3663,10 @@ func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {
 }
 
 func failureClass(err error) string {
+	var parentMissing service.ErrParentPRNotCached
+	if errors.As(err, &parentMissing) {
+		return parentMissing.DiagnosticCode()
+	}
 	var cacheEmpty service.ErrCacheEmpty
 	if errors.As(err, &cacheEmpty) {
 		return "cache_empty"
@@ -3710,6 +3714,10 @@ func failureClass(err error) string {
 }
 
 func exitCode(err error) int {
+	var parentMissing service.ErrParentPRNotCached
+	if errors.As(err, &parentMissing) {
+		return 3
+	}
 	var cacheEmpty service.ErrCacheEmpty
 	if errors.As(err, &cacheEmpty) {
 		return 2

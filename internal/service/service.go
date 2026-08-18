@@ -3538,6 +3538,20 @@ func (s *Service) PublishRelease(ctx context.Context, req PublishReleaseRequest)
 	return base, nil
 }
 
+func (s *Service) requireCachedPRParent(ctx context.Context, repoID string, number int) error {
+	record, err := s.store.GetRecord(ctx, repoID, pullRequestStableID(number))
+	if err != nil {
+		if isCacheNotFound(err) {
+			return ErrParentPRNotCached{RepoID: repoID, Number: number}
+		}
+		return err
+	}
+	if record.Type != "pull_request" {
+		return ErrParentPRNotCached{RepoID: repoID, Number: number}
+	}
+	return nil
+}
+
 func (s *Service) operationResult(ctx context.Context, command string, req OperationRequest) (OperationResult, error) {
 	if err := ctx.Err(); err != nil {
 		return OperationResult{}, err
@@ -4748,6 +4762,11 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	base := WriteCommandResult{Command: command, RepoID: route.RepoID, Status: "dry_run_valid", ID: writeTargetID(req), IdempotencyKey: key, SourceFingerprint: fingerprint, Evidence: "validated write command", GeneratedAt: s.now().UTC()}
 	if req.Mode == WriteModeDryRun {
 		return base, nil
+	}
+	if command == "add-pr-review-comment" {
+		if err := s.requireCachedPRParent(ctx, route.RepoID, req.Number); err != nil {
+			return WriteCommandResult{}, err
+		}
 	}
 	if !s.hasWriteCredential() {
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_missing_credential", RepoID: route.RepoID, IdempotencyKey: key}

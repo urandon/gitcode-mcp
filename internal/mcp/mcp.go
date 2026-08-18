@@ -1922,6 +1922,7 @@ func (s *Server) writeToolDisabledByPolicy(id *json.RawMessage, name string) {
 
 func mcpDiagnostic(err error) (diagnostics.Diagnostic, bool) {
 	ctx := diagnostics.CommandContext{ProviderMode: "live-http"}
+	var parentMissing service.ErrParentPRNotCached
 	var syncErr service.ErrSyncFailure
 	var writeErr service.ErrWriteFailure
 	var apiErr gitcode.ErrAPIValidation
@@ -1936,6 +1937,9 @@ func mcpDiagnostic(err error) (diagnostics.Diagnostic, bool) {
 	var forbiddenErr gitcode.ErrForbidden
 	var partialErr gitcode.ErrPartialResponse
 	var tooLargeErr gitcode.ErrPayloadTooLarge
+	if errors.As(err, &parentMissing) {
+		return diagnostics.Classify(err, ctx), true
+	}
 	if errors.As(err, &syncErr) {
 		ctx.HTTPAttempted = syncErr.Mode == "live_auth_failure" || syncErr.Mode == "network_timeout" || syncErr.Mode == "rate_limited" || syncErr.Mode == "partial_response" || syncErr.Mode == "live_graph_invalid" || syncErr.Mode == "remote_identity_mismatch" || syncErr.Mode == "payload_too_large" || syncErr.Mode == "remote_not_found" || syncErr.Mode == "conflict" || syncErr.Mode == "remote_collision"
 		ctx.FailureSource = syncErr.PayloadSource
@@ -2033,6 +2037,7 @@ func (s *Server) writeDomainError(id *json.RawMessage, err error) {
 		var linkErr service.ErrLinkCheckFailed
 		var lockErr cache.ErrLockContention
 		var writeErr service.ErrWriteFailure
+		var parentMissing service.ErrParentPRNotCached
 		switch {
 		case errors.As(err, &invalid):
 			data = &errorData{Code: "invalid_query", Message: err.Error()}
@@ -2044,6 +2049,13 @@ func (s *Server) writeDomainError(id *json.RawMessage, err error) {
 			data = &errorData{Code: "link_check_failed", Message: err.Error()}
 		case errors.As(err, &lockErr):
 			data = cacheLockErrorData(lockErr, err.Error())
+		case errors.As(err, &parentMissing):
+			data = &errorData{
+				Code:        parentMissing.DiagnosticCode(),
+				Message:     parentMissing.Error(),
+				RepoID:      parentMissing.RepoID,
+				Remediation: fmt.Sprintf("call sync_live with repo_id=%q, pulls=true, remote_alias=%q; CLI fallback: %s", parentMissing.RepoID, fmt.Sprintf("pr:%d", parentMissing.Number), parentMissing.Remediation()),
+			}
 		case errors.As(err, &writeErr) && writeErr.Code == "discussion_reply_unavailable":
 			data = &errorData{Code: "discussion_reply_unavailable", Message: err.Error()}
 		default:

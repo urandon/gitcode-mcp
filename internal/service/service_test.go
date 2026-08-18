@@ -1524,6 +1524,7 @@ func TestPRReviewAnchorMismatchIsAuditedAndIdempotentlyBlocked(t *testing.T) {
 	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "anchor-mismatch", Owner: "owner-a", Name: "repo-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
 		t.Fatal(err)
 	}
+	seedCachedPullRequest(t, ctx, store, "anchor-mismatch", 7)
 	client := &fakeGitCodeClient{errors: []error{gitcode.ErrPRReviewAnchorMismatch{Endpoint: "/pulls/7/comments", CommentID: "301", ExpectedPath: "x.go", ActualPath: "x.go", ExpectedLine: 42, ActualLine: 41}}}
 	svc := NewWithClient(store, client)
 	svc.providerMode = gitcode.ProviderModeLive
@@ -1546,6 +1547,71 @@ func TestPRReviewAnchorMismatchIsAuditedAndIdempotentlyBlocked(t *testing.T) {
 	}
 	if client.createPRReviewCommentCalls != 1 {
 		t.Fatalf("provider writes=%d, want one after replay", client.createPRReviewCommentCalls)
+	}
+}
+
+func TestAddPRReviewCommentRequiresCachedParentBeforeProviderWrite(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	const repoID = "empty-review"
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: repoID, Owner: "owner-a", Name: "repo-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		prsByNumber: map[int]gitcode.PullRequest{7: {ID: "9001", Number: 7, Title: "Review target", State: "open", CreatedAt: now, UpdatedAt: now}},
+		createPRReviewCommentResult: gitcode.WriteResult[gitcode.PRComment]{
+			Record:    gitcode.PRComment{ID: "302", Body: "inline", PRNumber: 7, Path: "x.go", Line: 42, Position: 42, ReviewKind: "inline", DiscussionID: "D7", CreatedAt: now, UpdatedAt: now},
+			Confirmed: true, Operation: "CreatePRReviewComment", RemoteID: "302", ParentIssueNumber: 7, ConfirmedAt: now,
+		},
+	}
+	svc := NewWithClient(store, client)
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.writeCredentialPresent = true
+	req := WriteCommandRequest{RepoID: repoID, Mode: WriteModeLive, Number: 7, Body: "inline", Path: "x.go", Line: 42, Position: 42, IdempotencyKey: "review-parent-key"}
+
+	_, err = svc.AddPRReviewComment(ctx, req)
+	var parentMissing ErrParentPRNotCached
+	if !errors.As(err, &parentMissing) || parentMissing.RepoID != repoID || parentMissing.Number != 7 {
+		t.Fatalf("error=%#v, want typed missing parent", err)
+	}
+	if parentMissing.DiagnosticCode() != "parent_pr_not_cached" || parentMissing.Remediation() != "gitcode-mcp sync --repo empty-review --pulls --input pr:7" {
+		t.Fatalf("parent error=%#v remediation=%q", parentMissing, parentMissing.Remediation())
+	}
+	if client.createPRReviewCommentCalls != 0 {
+		t.Fatalf("provider writes=%d, want zero before parent sync", client.createPRReviewCommentCalls)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, repoID, req.IdempotencyKey)
+	if err != nil || entry != nil {
+		t.Fatalf("audit entry=%#v err=%v, want no claim before preflight", entry, err)
+	}
+
+	if _, err := svc.SyncToCache(ctx, SyncRequest{RepoID: repoID, RemoteAlias: "pr:7", IdempotencyKey: "review-parent-sync"}); err != nil {
+		t.Fatalf("targeted parent sync: %v", err)
+	}
+	result, err := svc.AddPRReviewComment(ctx, req)
+	if err != nil || result.Status != "succeeded" || client.createPRReviewCommentCalls != 1 {
+		t.Fatalf("result=%#v err=%v calls=%d", result, err, client.createPRReviewCommentCalls)
+	}
+	replayed, err := svc.AddPRReviewComment(ctx, req)
+	if err != nil || !replayed.Replayed || client.createPRReviewCommentCalls != 1 {
+		t.Fatalf("replay=%#v err=%v calls=%d", replayed, err, client.createPRReviewCommentCalls)
+	}
+}
+
+func seedCachedPullRequest(t *testing.T, ctx context.Context, store cache.Store, repoID string, number int) {
+	t.Helper()
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	if err := store.UpsertRecordGraph(ctx, cache.RecordGraph{Record: cache.Record{
+		RepoID: repoID, ID: fmt.Sprintf("PR-%d", number), Type: "pull_request", Path: fmt.Sprintf("pulls/%d.md", number),
+		Title: "Review target", Status: "open", ContentHash: fmt.Sprintf("pr-%d", number), Provenance: cache.ProvenanceLive,
+		RemoteType: "pull_request", RemoteID: strconv.Itoa(number), CreatedAt: now, UpdatedAt: now,
+	}}); err != nil {
+		t.Fatal(err)
 	}
 }
 
