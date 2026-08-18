@@ -28,6 +28,7 @@ Affected surfaces:
 | Internal/unapproved URLs | URLs whose host is not in the approved-host allowlist | Host replaced with `redacted.example.com` via `Filter.RedactURL` |
 | URL query secrets | `token`, `key`, `secret`, `password`, `credential` query parameters | Value replaced with `[REDACTED]` via `isSecretKey` |
 | JSON secret keys | `authorization`, `cookie`, `set-cookie`, `token`, `secret`, `key`, `password`, `credential`, `api_key`, `access_key`, `private_key` | Value replaced with `[REDACTED]` via `isJSONSecretKey` |
+| Cache contention location | Absolute lock/cache paths, filesystem DSNs, query parameters, fragments, and arbitrary owner hints | Omitted; typed diagnostics use an opaque `cache_ref` plus safe holder metadata |
 
 ## 3. Safe Replacement Patterns
 
@@ -64,6 +65,8 @@ Fixture files under `internal/`, `testdata/`, and `tests/` must contain no real 
 
 ### Logs and diagnostics
 All log output from `internal/diagnostics/` flows through the redaction filter. Audit trail records in `internal/audit/` must not store raw tokens. Error messages must not embed bearer tokens, owner/repo names, or raw API payloads.
+
+Writer contention is safe at the error type boundary because daemon RPC and job/log surfaces may format `error` values directly. `ErrLockContention.Error()` must never format its internal path fields or untrusted legacy owner hint.
 
 ### Documentation
 All documentation files (`docs/*.md`, `README.md`) use only sanitized placeholders (section 3). Example commands reference `YOUR_OWNER`, `YOUR_REPO`, `$GITCODE_TOKEN`, and `[REDACTED]`. No real private coordinates, tokens, or internal URLs appear in documentation.

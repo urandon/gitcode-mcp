@@ -297,6 +297,12 @@ database paths, socket addresses, or provider payloads. `cache_status`,
 the selected `repo_id`. Follow `remediation` for the MCP-first recovery and use
 the stated CLI fallback when the MCP operation itself is unavailable.
 
+Cache contention errors expose `cache_ref`, holder `operation`, `repo_id`,
+`started_at`, and `pid` when known. They never expose the lock/cache path,
+filesystem DSN, URL-style query parameters or fragments, or an arbitrary
+lock-owner hint. `cache_ref` is an opaque correlation value derived from the
+durable cache identity when available.
+
 Before `add_pr_review_comment` performs a POST, it requires the parent `PR-<number>` record in the selected cache. A missing parent returns typed `parent_pr_not_cached` with an MCP-first targeted-sync remediation (`sync_live` with `pulls=true` and `remote_alias=pr:N`) plus the CLI fallback; no audit claim or provider write has occurred. Retry the review write with the same idempotency key after syncing `pr:N`.
 
 For bounded discussion refresh, call `sync_live` with `pr_comments: true` and `remote_alias: "pr:N"`. The PR must already be cached; the operation calls the per-PR comments adapter once and does not enumerate other cached pull requests. Exact selectors cannot be combined with collection bounds or daemon mode.

@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -163,6 +165,16 @@ func TestTwoWritersContentionCacheBusy(t *testing.T) {
 		t.Fatalf("AcquireWriter returned error: %v", err)
 	}
 	defer store.ReleaseWriter(ctx, lease)
+	if lease.Owner.CacheRef == "" || lease.Owner.CachePath != "" {
+		t.Fatalf("writer owner = %#v, want opaque cache ref and no cache path", lease.Owner)
+	}
+	ownerJSON, err := os.ReadFile(store.lockPath)
+	if err != nil {
+		t.Fatalf("ReadFile(writer owner): %v", err)
+	}
+	if strings.Contains(string(ownerJSON), path) || strings.Contains(string(ownerJSON), "cache_path") || !strings.Contains(string(ownerJSON), "cache_ref") {
+		t.Fatalf("writer owner metadata must contain cache_ref without cache path: %s", ownerJSON)
+	}
 
 	_, err = store.AcquireWriter(ctx, WriterRequest{Operation: "write", RepoID: "fixture-a"})
 	if err == nil {
@@ -183,6 +195,9 @@ func TestTwoWritersContentionCacheBusy(t *testing.T) {
 	}
 	if contention.PID == 0 {
 		t.Fatalf("contention.PID = 0, want non-zero PID")
+	}
+	if contention.PublicCacheRef() == "" || strings.Contains(contention.Error(), path) {
+		t.Fatalf("contention public projection leaked path or omitted cache_ref: %q", contention.Error())
 	}
 }
 

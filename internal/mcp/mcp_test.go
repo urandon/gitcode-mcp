@@ -3239,10 +3239,11 @@ func TestHTTPSSETransportSessionFlow(t *testing.T) {
 
 func TestMCPRuntimeLockContentionErrorMapping(t *testing.T) {
 	started := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
-	lockErr := cache.ErrLockContention{Path: "redacted.lock", Operation: "sync-index", RepoID: "fixture-a", StartedAt: started, PID: 42, CachePath: ":memory:"}
+	secretPath := "/Users/private-user/workspace/cache.db.lock"
+	lockErr := cache.ErrLockContention{Path: secretPath, HolderHint: "holder at " + secretPath, Operation: "sync-index", RepoID: "fixture-a", StartedAt: started, PID: 42, CachePath: "file:" + secretPath + "?token=secret#fragment"}
 	store := populatedStore(t)
 	defer store.Close()
-	svc := &lockContentionService{serviceInterface: service.New(store), err: lockErr}
+	svc := &lockContentionService{serviceInterface: service.New(store), err: fmt.Errorf("cache %s unavailable: %w", secretPath, lockErr)}
 
 	srv, r, w, stderr := newPipeServer(svc)
 	var wg sync.WaitGroup
@@ -3259,8 +3260,12 @@ func TestMCPRuntimeLockContentionErrorMapping(t *testing.T) {
 	if err := json.Unmarshal(line, &resp); err != nil {
 		t.Fatal(err)
 	}
-	if resp.Error == nil || resp.Error.Data == nil || resp.Error.Data.Code != "cache_owned" || resp.Error.Data.Operation != "sync-index" || resp.Error.Data.RepoID != "fixture-a" || resp.Error.Data.PID != 42 || resp.Error.Data.StartedAt == "" || resp.Error.Data.CachePath != ":memory:" {
+	if resp.Error == nil || resp.Error.Data == nil || resp.Error.Data.Code != "cache_owned" || resp.Error.Data.Operation != "sync-index" || resp.Error.Data.RepoID != "fixture-a" || resp.Error.Data.PID != 42 || resp.Error.Data.StartedAt == "" || !strings.HasPrefix(resp.Error.Data.CacheRef, "cache-") {
 		t.Fatalf("lock error response = %+v", resp.Error)
+	}
+	encoded, _ := json.Marshal(resp)
+	if strings.Contains(string(encoded), secretPath) || strings.Contains(string(encoded), "token=secret") || strings.Contains(string(encoded), "#fragment") {
+		t.Fatalf("MCP response leaked private lock metadata: %s", encoded)
 	}
 	_ = r.Close()
 	wg.Wait()
@@ -3287,7 +3292,8 @@ func TestMCPSyncLiveStopsOnWriterAdmissionFailure(t *testing.T) {
 }
 
 func TestHTTPSSEReadinessLockContention(t *testing.T) {
-	lockErr := cache.ErrLockContention{Path: "redacted.lock", Operation: "migration", StartedAt: time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC), PID: 42, CachePath: ":memory:"}
+	secretPath := "/Users/private-user/workspace/cache.db.lock"
+	lockErr := cache.ErrLockContention{Path: secretPath, HolderHint: "holder at " + secretPath, Operation: "migration", StartedAt: time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC), PID: 42, CachePath: "file:" + secretPath + "?token=secret#fragment"}
 	store := populatedStore(t)
 	defer store.Close()
 	transport := NewHTTPSSETransport(NewRPCHandler(service.New(store)), ServerConfig{ReadinessProbe: func(context.Context) Readiness { return LockContentionReadiness(lockErr) }})
@@ -3314,6 +3320,10 @@ func TestHTTPSSEReadinessLockContention(t *testing.T) {
 	}
 	if readyResp.StatusCode != http.StatusServiceUnavailable || ready.Code != "migration_blocked" || ready.ErrorData == nil || ready.ErrorData.Code != "migration_blocked" {
 		t.Fatalf("ready status=%d body=%+v", readyResp.StatusCode, ready)
+	}
+	encoded, _ := json.Marshal(ready)
+	if strings.Contains(string(encoded), secretPath) || strings.Contains(string(encoded), "token=secret") || strings.Contains(string(encoded), "#fragment") || !strings.Contains(string(encoded), "cache_ref") {
+		t.Fatalf("readiness response is not a path-free typed projection: %s", encoded)
 	}
 }
 
