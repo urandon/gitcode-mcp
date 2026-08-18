@@ -344,7 +344,7 @@ func prReviewCommentPayload(req CreatePRReviewCommentRequest, _ PullRequest) any
 		Path:     req.Path,
 		Line:     newLine,
 		NewLine:  newLine,
-		Position: firstPositive(req.Position, newLine),
+		Position: newLine,
 	}
 	if req.StartLine > 0 {
 		payload.StartLine = req.StartLine
@@ -359,7 +359,7 @@ func requestConfirmedPRReviewComment(created PRComment, req CreatePRReviewCommen
 	created.ReviewKind = "inline"
 	created.Path = req.Path
 	created.Line = newLine
-	created.Position = firstPositive(req.Position, newLine)
+	created.Position = newLine
 	created.StartLine = req.StartLine
 	if req.StartLine > 0 {
 		created.EndLine = firstPositive(req.EndLine, newLine)

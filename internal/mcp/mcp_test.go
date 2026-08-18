@@ -1336,6 +1336,19 @@ type writeLifecycleSpyService struct {
 	calls map[string]service.WriteCommandRequest
 }
 
+func TestPRReviewCommentSchemaMakesLineTheOrdinaryCoordinate(t *testing.T) {
+	schema := writeToolInputSchema("add_pr_review_comment")
+	if !containsString(schema.Required, "line") {
+		t.Fatalf("required=%v, want line", schema.Required)
+	}
+	if !strings.Contains(schema.Properties["line"].Description, "current-side file line") {
+		t.Fatalf("line description=%q", schema.Properties["line"].Description)
+	}
+	if !strings.Contains(schema.Properties["position"].Description, "not a diff-hunk offset") {
+		t.Fatalf("position description=%q", schema.Properties["position"].Description)
+	}
+}
+
 func (s *writeLifecycleSpyService) record(command string, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
 	if s.calls == nil {
 		s.calls = map[string]service.WriteCommandRequest{}
@@ -1428,7 +1441,7 @@ func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 	call("create_pr", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "title": "PR", "body": "body", "head": "topic", "base": "main", "idempotency_key": "create-pr-key"})
 	call("update_pr", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "body": "new body", "idempotency_key": "update-pr-key"})
 	call("add_pr_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "body": "tested", "idempotency_key": "pr-comment-key"})
-	call("add_pr_review_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "path": "internal/service/service.go", "line": 42, "position": 9, "body": "inline", "idempotency_key": "pr-review-comment-key"})
+	call("add_pr_review_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "path": "internal/service/service.go", "line": 42, "position": 42, "body": "inline", "idempotency_key": "pr-review-comment-key"})
 	call("reply_pr_review_comment", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "number": 7, "discussion_id": "D7", "parent_comment_id": "302", "body": "confirmed", "idempotency_key": "pr-review-reply-key"})
 	call("link_pr_issue", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "pr_number": 7, "issue_number": 16, "strategy": "auto", "idempotency_key": "link-key"})
 	call("create_page", map[string]any{"repo_id": "fixture-a", "write_mode": "live", "slug": "docs/parity", "title": "Parity", "body": "wiki body", "idempotency_key": "create-page-key"})
@@ -1468,7 +1481,7 @@ func TestMCPWriteLifecycleToolsDelegateToService(t *testing.T) {
 	if req := assertReq("add-pr-comment"); req.Number != 7 || req.Body != "tested" {
 		t.Fatalf("add-pr-comment req=%#v", req)
 	}
-	if req := assertReq("add-pr-review-comment"); req.Number != 7 || req.Body != "inline" || req.Path != "internal/service/service.go" || req.Line != 42 || req.Position != 9 {
+	if req := assertReq("add-pr-review-comment"); req.Number != 7 || req.Body != "inline" || req.Path != "internal/service/service.go" || req.Line != 42 || req.Position != 42 {
 		t.Fatalf("add-pr-review-comment req=%#v", req)
 	}
 	if req := assertReq("reply-pr-review-comment"); req.Number != 7 || req.DiscussionID != "D7" || req.ParentID != "302" || req.Body != "confirmed" {

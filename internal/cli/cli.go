@@ -3216,7 +3216,7 @@ func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {
 	}
 	var writeErr service.ErrWriteFailure
 	if errors.As(err, &writeErr) {
-		ctx.HTTPAttempted = writeErr.Code == "write_unauthorized" || writeErr.Code == "write_network_unavailable" || writeErr.Code == "write_provider_error" || writeErr.Code == "write_conflict" || writeErr.Code == "schema_decode"
+		ctx.HTTPAttempted = writeErr.Code == "write_unauthorized" || writeErr.Code == "write_network_unavailable" || writeErr.Code == "write_provider_error" || writeErr.Code == "write_conflict" || writeErr.Code == "schema_decode" || writeErr.Code == "pr_review_anchor_mismatch" || writeErr.Code == "write_confirmation_incomplete"
 		ctx.FixtureFallbackSentinel = writeErr.Code == "write_fixture_fallback_detected"
 		ctx.MissingCredential = writeErr.Code == "write_missing_credential"
 		ctx.UnsupportedPayload = writeErr.Code == "live_graph_invalid" || writeErr.Code == "unsupported_mock_payload"
@@ -4249,16 +4249,16 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "add-pr-review-comment":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --number N --path PATH --body BODY (--line N | --position N) [--start-line N] [--end-line N] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --number N --path PATH --line N --body BODY [--start-line N] [--end-line N] [--idempotency-key KEY]\n\n", command)
 		fmt.Fprintln(w, "Create an inline pull request review comment. Executes live by default; use --dry-run for no-mutation validation.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --number N          pull request number (required)")
 		fmt.Fprintln(w, "  --path PATH         changed file path (required)")
-		fmt.Fprintln(w, "  --line N            file line number")
-		fmt.Fprintln(w, "  --position N        diff position")
-		fmt.Fprintln(w, "  --start-line N      optional start line for ranges")
-		fmt.Fprintln(w, "  --end-line N        optional end line for ranges")
+		fmt.Fprintln(w, "  --line N            1-based current-side file line (required)")
+		fmt.Fprintln(w, "  --position N        deprecated file-line alias; if supplied, must equal --line")
+		fmt.Fprintln(w, "  --start-line N      optional range start at or before --line")
+		fmt.Fprintln(w, "  --end-line N        optional range end; must equal --line")
 		fmt.Fprintln(w, "  --body BODY         comment body (required)")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")

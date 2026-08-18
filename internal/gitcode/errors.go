@@ -200,7 +200,29 @@ func (e ErrEmptyWiki) DiagnosticCode() string { return "empty_wiki" }
 type ErrWriteConfirmationIncomplete struct {
 	Endpoint string
 	Message  string
+	RemoteID string
 	Cause    error
+}
+
+type ErrPRReviewAnchorMismatch struct {
+	Endpoint     string
+	CommentID    string
+	ExpectedPath string
+	ActualPath   string
+	ExpectedLine int
+	ActualLine   int
+}
+
+func (e ErrPRReviewAnchorMismatch) RemoteWriteID() string { return e.CommentID }
+
+func (e ErrWriteConfirmationIncomplete) RemoteWriteID() string { return e.RemoteID }
+
+func (e ErrPRReviewAnchorMismatch) Error() string {
+	return fmt.Sprintf("gitcode: PR review anchor mismatch for %s: requested %s:%d, read back %s:%d", e.Endpoint, e.ExpectedPath, e.ExpectedLine, e.ActualPath, e.ActualLine)
+}
+
+func (e ErrPRReviewAnchorMismatch) DiagnosticCode() string {
+	return "pr_review_anchor_mismatch"
 }
 
 type ErrPushMirrorSyncInProgress struct {

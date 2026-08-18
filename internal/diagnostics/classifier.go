@@ -27,6 +27,9 @@ const (
 	CodeSchemaDecode             Code = "schema_decode"
 	CodeAPIFailure               Code = "api_validation"
 	CodePushMirrorSyncInProgress Code = "push_mirror_sync_in_progress"
+	CodeInvalidQuery             Code = "invalid_query"
+	CodePRReviewAnchorMismatch   Code = "pr_review_anchor_mismatch"
+	CodeWriteConfirmationMissing Code = "write_confirmation_incomplete"
 )
 
 type Diagnostic struct {
@@ -108,6 +111,15 @@ func (d Diagnostic) JSON() ([]byte, error) {
 func classifyCode(err error, ctx CommandContext) Code {
 	if hasCode(err, "cache_schema_blocked") {
 		return CodeCacheSchemaBlocked
+	}
+	if hasCode(err, "pr_review_anchor_mismatch") {
+		return CodePRReviewAnchorMismatch
+	}
+	if hasCode(err, "write_confirmation_incomplete") {
+		return CodeWriteConfirmationMissing
+	}
+	if hasCode(err, "invalid_query") {
+		return CodeInvalidQuery
 	}
 	if ctx.ProviderMode != "live-http" {
 		if ctx.FixtureReadOnly || hasCode(err, "fixture_read_only") || hasCode(err, "write_fixture_read_only") {
@@ -208,6 +220,12 @@ func codeFromError(err error) Code {
 			return CodeAPIFailure
 		case "push_mirror_sync_in_progress":
 			return CodePushMirrorSyncInProgress
+		case "invalid_query":
+			return CodeInvalidQuery
+		case "pr_review_anchor_mismatch":
+			return CodePRReviewAnchorMismatch
+		case "write_confirmation_incomplete":
+			return CodeWriteConfirmationMissing
 		}
 	}
 	return CodeConfigurationError
@@ -261,7 +279,7 @@ func isConfigurationInputBug(err error) bool {
 
 func httpAttemptedFor(code Code, ctx CommandContext) bool {
 	switch code {
-	case CodeLiveAuthFailure, CodeLiveTransportFailure, CodeLiveAPIFailure, CodeAPIFailure, CodeSchemaDecode, CodePushMirrorSyncInProgress:
+	case CodeLiveAuthFailure, CodeLiveTransportFailure, CodeLiveAPIFailure, CodeAPIFailure, CodeSchemaDecode, CodePushMirrorSyncInProgress, CodePRReviewAnchorMismatch, CodeWriteConfirmationMissing:
 		return ctx.HTTPAttempted
 	case CodeConfigCredential:
 		return false
@@ -284,6 +302,10 @@ func exitClassFor(code Code) string {
 		return "transport"
 	case CodeLiveAPIFailure, CodeAPIFailure, CodePushMirrorSyncInProgress:
 		return "provider"
+	case CodePRReviewAnchorMismatch, CodeWriteConfirmationMissing:
+		return "provider"
+	case CodeInvalidQuery:
+		return "input"
 	case CodeUnsupportedMockPayload:
 		return "payload"
 	case CodeFixtureFallbackDetected, CodeFixtureReadOnly:
@@ -334,6 +356,12 @@ func messageFor(code Code, err error) string {
 		base += ": selected local cache schema blocks this command; live credential/provider readiness is separate from cache schema readiness"
 	case CodePushMirrorSyncInProgress:
 		base += ": mirror synchronization is already running or cooling down"
+	case CodeInvalidQuery:
+		base += ": command arguments are invalid"
+	case CodePRReviewAnchorMismatch:
+		base += ": GitCode created the review comment on a different path or line"
+	case CodeWriteConfirmationMissing:
+		base += ": remote write anchor could not be safely confirmed"
 	}
 	if err != nil {
 		return base + ": " + err.Error()

@@ -1453,6 +1453,7 @@ func TestScenario018PRCommentWrite(t *testing.T) {
 func TestScenario030PRReviewCommentWrite(t *testing.T) {
 	var seenBody string
 	var posts int
+	var readbacks int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == getPREndpoint("example-owner", "example-repo", 7):
@@ -1474,17 +1475,25 @@ func TestScenario030PRReviewCommentWrite(t *testing.T) {
 			w.WriteHeader(http.StatusCreated)
 			fmt.Fprint(w, `{"id":201,"note_id":301,"body":"inline"}`)
 			return
+		case r.Method == http.MethodGet && r.URL.Path == listPRCommentsEndpoint("example-owner", "example-repo", 7):
+			readbacks++
+			fmt.Fprint(w, `[{"id":301,"discussion_id":"DISC-7","body":"inline","comment_type":"diff_comment"}]`)
+			return
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/example-owner/example-repo/merge_requests/7/discussions":
+			readbacks++
+			fmt.Fprint(w, `{"data":[{"id":"DISC-7","notes":[{"id":301,"discussion_id":"DISC-7","body":"inline","type":"DiffNote","position":{"base_sha":"base-sha","start_sha":"base-sha","head_sha":"head-sha","new_path":"internal/service/service.go","new_line":42,"position_type":"text"}}]}]}`)
+			return
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
 	}))
 	defer server.Close()
 
-	result, err := newTestClient(t, server.URL, Config{Token: "test-token"}).CreatePRReviewComment(context.Background(), CreatePRReviewCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, Body: "inline", Path: "internal/service/service.go", Line: 42, Position: 9, StartLine: 40, EndLine: 42}, WriteOptions{IdempotencyKey: "key-create-pr-review-comment"})
+	result, err := newTestClient(t, server.URL, Config{Token: "test-token"}).CreatePRReviewComment(context.Background(), CreatePRReviewCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, Body: "inline", Path: "internal/service/service.go", Line: 42, Position: 42, StartLine: 40, EndLine: 42}, WriteOptions{IdempotencyKey: "key-create-pr-review-comment"})
 	if err != nil {
 		t.Fatalf("CreatePRReviewComment returned error: %v", err)
 	}
-	for _, want := range []string{`"body":"inline"`, `"path":"internal/service/service.go"`, `"line":42`, `"new_line":42`, `"position":9`, `"start_line":40`, `"end_line":42`} {
+	for _, want := range []string{`"body":"inline"`, `"path":"internal/service/service.go"`, `"line":42`, `"new_line":42`, `"position":42`, `"start_line":40`, `"end_line":42`} {
 		if !strings.Contains(seenBody, want) {
 			t.Fatalf("request body = %s, want %s", seenBody, want)
 		}
@@ -1494,11 +1503,59 @@ func TestScenario030PRReviewCommentWrite(t *testing.T) {
 			t.Fatalf("request body = %s, must not contain %s", seenBody, forbidden)
 		}
 	}
-	if posts != 1 || !result.Confirmed || result.RemoteID != "301" || result.ParentIssueNumber != 7 || result.ParentIssueID != "" || result.Record.ReviewKind != "inline" || result.Record.Path != "internal/service/service.go" || result.Record.Line != 42 {
+	if posts != 1 || readbacks != 2 || !result.Confirmed || result.RemoteID != "301" || result.ParentIssueNumber != 7 || result.ParentIssueID != "DISC-7" || result.Record.ReviewKind != "inline" || result.Record.Path != "internal/service/service.go" || result.Record.Line != 42 || result.ProviderStatus != "201-readback" {
 		t.Fatalf("unexpected PR review comment write result: %+v", result)
 	}
 	if len(result.Record.Positions) != 1 || result.Record.Positions[0].BaseSHA != "base-sha" || result.Record.Positions[0].HeadSHA != "head-sha" || result.Record.Positions[0].NewPath != "internal/service/service.go" || result.Record.Positions[0].NewLine != 42 {
 		t.Fatalf("unexpected PR review comment positions: %+v", result.Record.Positions)
+	}
+}
+
+func TestPRReviewCommentRejectsConflictingLineAndPositionBeforeNetwork(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	_, err := newTestClient(t, server.URL, Config{Token: "test-token"}).CreatePRReviewComment(context.Background(), CreatePRReviewCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, Body: "inline", Path: "internal/service/service.go", Line: 42, Position: 9}, WriteOptions{IdempotencyKey: "key-conflicting-anchor"})
+	var validation ErrValidationFailed
+	if !errors.As(err, &validation) || validation.Field != "position" {
+		t.Fatalf("error=%#v, want position validation", err)
+	}
+	if requests != 0 {
+		t.Fatalf("requests=%d, want validation before network", requests)
+	}
+}
+
+func TestPRReviewCommentReturnsTypedReadbackAnchorMismatch(t *testing.T) {
+	posts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == getPREndpoint("example-owner", "example-repo", 7):
+			fmt.Fprint(w, `{"id":"101","number":7,"base":{"ref":"main","sha":"base-sha"},"head":{"ref":"topic","sha":"head-sha"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == createPRCommentEndpoint("example-owner", "example-repo", 7):
+			posts++
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":201,"note_id":301,"body":"inline"}`)
+		case r.Method == http.MethodGet && r.URL.Path == listPRCommentsEndpoint("example-owner", "example-repo", 7):
+			fmt.Fprint(w, `[{"id":301,"discussion_id":"DISC-7","body":"inline","comment_type":"diff_comment"}]`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/example-owner/example-repo/merge_requests/7/discussions":
+			fmt.Fprint(w, `{"data":[{"id":"DISC-7","notes":[{"id":301,"discussion_id":"DISC-7","body":"inline","type":"DiffNote","position":{"new_path":"internal/service/service.go","new_line":41,"position_type":"text"}}]}]}`)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	_, err := newTestClient(t, server.URL, Config{Token: "test-token"}).CreatePRReviewComment(context.Background(), CreatePRReviewCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, Body: "inline", Path: "internal/service/service.go", Line: 42}, WriteOptions{IdempotencyKey: "key-anchor-mismatch"})
+	var mismatch ErrPRReviewAnchorMismatch
+	if !errors.As(err, &mismatch) || mismatch.ExpectedLine != 42 || mismatch.ActualLine != 41 || mismatch.ExpectedPath != mismatch.ActualPath {
+		t.Fatalf("error=%#v, want typed 42 != 41 anchor mismatch", err)
+	}
+	if posts != 1 {
+		t.Fatalf("posts=%d, want one attempted write", posts)
 	}
 }
 

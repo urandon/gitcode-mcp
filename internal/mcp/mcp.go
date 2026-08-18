@@ -1830,7 +1830,7 @@ func mcpDiagnostic(err error) (diagnostics.Diagnostic, bool) {
 		return diagnostics.Classify(err, ctx), true
 	}
 	if errors.As(err, &writeErr) {
-		ctx.HTTPAttempted = writeErr.Code == "write_unauthorized" || writeErr.Code == "write_network_unavailable" || writeErr.Code == "write_provider_error" || writeErr.Code == "write_conflict" || writeErr.Code == "schema_decode"
+		ctx.HTTPAttempted = writeErr.Code == "write_unauthorized" || writeErr.Code == "write_network_unavailable" || writeErr.Code == "write_provider_error" || writeErr.Code == "write_conflict" || writeErr.Code == "schema_decode" || writeErr.Code == "pr_review_anchor_mismatch" || writeErr.Code == "write_confirmation_incomplete"
 		ctx.SchemaDecodeFailure = writeErr.Code == "schema_decode" || writeErr.PayloadSource == "partial_response"
 		ctx.FailureSource = writeErr.PayloadSource
 		ctx.LocalPayloadTooLarge = writeErr.PayloadSource == "local_body_limit"
