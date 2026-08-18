@@ -1676,6 +1676,41 @@ func TestPRReviewReplyRejectsSyntheticThreadWithoutProviderDiscussionID(t *testi
 	}
 }
 
+func TestPRReviewReplyReadbackFailureCarriesRemoteID(t *testing.T) {
+	var posted bool
+	var posts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == listPRCommentsEndpoint("example-owner", "example-repo", 7):
+			if posted {
+				http.Error(w, "readback unavailable", http.StatusInternalServerError)
+				return
+			}
+			fmt.Fprint(w, `[{"id":301,"body":"root","comment_type":"diff_comment","reply":[]}]`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/example-owner/example-repo/merge_requests/7/discussions":
+			fmt.Fprint(w, `{"data":[{"id":"DISC-7","notes":[{"id":301,"discussion_id":"DISC-7","body":"root","type":"DiffNote"}]}]}`)
+		case r.Method == http.MethodPost && r.URL.Path == replyPRReviewCommentEndpoint("example-owner", "example-repo", 7, "DISC-7"):
+			posts++
+			posted = true
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":302,"body":"reply"}`)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL, Config{Token: "test-token", MaxRetries: 0})
+	_, err := client.ReplyPRReviewComment(context.Background(), ReplyPRReviewCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, DiscussionID: "comment:301", ParentCommentID: "301", Body: "reply"}, WriteOptions{IdempotencyKey: "readback-failure"})
+	var incomplete ErrWriteConfirmationIncomplete
+	if !errors.As(err, &incomplete) || incomplete.RemoteID != "302" {
+		t.Fatalf("error=%#v, want typed incomplete confirmation with remote id", err)
+	}
+	if posts != 1 {
+		t.Fatalf("posts=%d, want one", posts)
+	}
+}
+
 func TestScenario016PRLifecycleWrites(t *testing.T) {
 	t.Run("create-pr", func(t *testing.T) {
 		var seenBody string

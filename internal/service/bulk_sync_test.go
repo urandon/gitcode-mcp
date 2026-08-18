@@ -881,6 +881,40 @@ func TestListPRDiscussionsGroupsRepliesAndFiltersUnresolved(t *testing.T) {
 	}
 }
 
+func TestListPRDiscussionsKeepsV5OnlyNestedRepliesInOneSyntheticThread(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		listPRPages: []gitcode.Page[gitcode.PullRequest]{{Items: []gitcode.PullRequest{{ID: "9001", Number: 7, Title: "Review target", State: "open", CreatedAt: base, UpdatedAt: base}}}},
+		prCommentsByPR: map[int][]gitcode.PRComment{7: {
+			{ID: "301", Body: "root", ReviewKind: "inline", Path: "x.go", Line: 7, PRNumber: 7, CreatedAt: base, UpdatedAt: base},
+			{ID: "302", Body: "nested", ReviewKind: "inline", ParentID: "301", Path: "x.go", Line: 7, PRNumber: 7, CreatedAt: base.Add(time.Minute), UpdatedAt: base.Add(time.Minute)},
+		}},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "v5-only", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	if _, err := svc.BulkSyncPullRequests(ctx, BulkSyncRequest{RepoID: "v5-only"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.BulkSyncPRComments(ctx, BulkSyncRequest{RepoID: "v5-only"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.ListPRDiscussions(ctx, PRDiscussionRequest{RepoID: "v5-only", Number: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Discussions) != 1 || got.Discussions[0].ID != "comment:301" || got.Discussions[0].Replyable || len(got.Discussions[0].Comments) != 2 {
+		t.Fatalf("discussions=%+v, want one non-replyable synthetic thread", got.Discussions)
+	}
+}
+
 func TestBulkSyncIssuesListFailureReturnsError(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeGitCodeClient{listIssuesErrors: []error{gitcode.ErrRateLimited{Endpoint: "/issues", RetryAfter: time.Second, Attempts: 1}}}

@@ -706,7 +706,7 @@ func (c *HTTPClient) ReplyPRReviewComment(ctx context.Context, req ReplyPRReview
 	}
 	readback, err := c.ListPRComments(ctx, PRRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
 	if err != nil {
-		return WriteResult[PRComment]{}, err
+		return WriteResult[PRComment]{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "reply requires discussion readback", RemoteID: result.RemoteID, Cause: err}
 	}
 	thread = thread[:0]
 	var confirmed *PRComment
@@ -725,7 +725,7 @@ func (c *HTTPClient) ReplyPRReviewComment(ctx context.Context, req ReplyPRReview
 		result.ProviderStatus += "-readback"
 		return result, nil
 	}
-	return WriteResult[PRComment]{}, ErrValidationFailed{Field: "response", Message: "reply write was not confirmed by discussion readback"}
+	return WriteResult[PRComment]{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "reply was absent from discussion readback", RemoteID: result.RemoteID}
 }
 
 func confirmedExistingPRReviewReply(comment PRComment, target, key string) WriteResult[PRComment] {

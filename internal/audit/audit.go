@@ -155,6 +155,7 @@ func sanitizedMetadata(metadata map[string]string) map[string]string {
 		"push_mirror_status":          true,
 		"push_mirror_previous_status": true,
 		"push_mirror_triggered_at":    true,
+		"pr_discussion_id":            true,
 	}
 	out := map[string]string{}
 	for key, value := range metadata {

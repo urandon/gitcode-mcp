@@ -142,6 +142,22 @@ func TestLivePushMirrorCooldownReportsRetryableProviderResponse(t *testing.T) {
 	}
 }
 
+func TestDiscussionReplyUnavailableReportsLiveReadAttempt(t *testing.T) {
+	var stderr bytes.Buffer
+	err := service.ErrWriteFailure{Code: "discussion_reply_unavailable", RepoID: "fixture-a", Cause: gitcode.ErrDiscussionReplyUnavailable{DiscussionID: "comment:301", ParentCommentID: "301"}}
+	code := writeCommandError(&stderr, "json", startupPlan{ProviderMode: "live-http", Command: "reply-pr-review-comment", APIBaseURL: "https://api.gitcode.com/api/v5"}, err)
+	if code != 1 {
+		t.Fatalf("writeCommandError code = %d, want 1", code)
+	}
+	var payload map[string]any
+	if decodeErr := json.Unmarshal(stderr.Bytes(), &payload); decodeErr != nil {
+		t.Fatalf("decode stderr: %v (%s)", decodeErr, stderr.String())
+	}
+	if payload["failure_class"] != "discussion_reply_unavailable" || payload["http_attempted"] != true {
+		t.Fatalf("payload=%#v", payload)
+	}
+}
+
 func TestAddLabelDryRunValidates(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

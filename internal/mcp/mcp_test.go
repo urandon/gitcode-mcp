@@ -235,6 +235,7 @@ func TestMCPErrorOutputCanonicalFailureClass(t *testing.T) {
 		{name: "SCN-MCP-ERROR-OUTPUT-LOCAL-BODY-LIMIT", err: service.ErrWriteFailure{Code: "write_provider_error", PayloadSource: "local_body_limit", Cause: gitcode.ErrPayloadTooLarge{Endpoint: "/api/v5/repos/owner/repo/issues", Limit: 5, Size: 6, Source: "local_body_limit"}}, want: string(diagnostics.CodeSchemaDecode)},
 		{name: "SCN-MCP-ERROR-OUTPUT-TIMEOUT", err: service.ErrSyncFailure{Mode: "network_timeout", Target: "issue:*", Cause: gitcode.ErrNetworkUnavailable{Endpoint: "/api/v5/repos/owner/repo/issues", Attempts: 1}}, want: string(diagnostics.CodeLiveTransportFailure)},
 		{name: "SCN-MCP-ERROR-OUTPUT-500", err: gitcode.ErrNetworkUnavailable{Endpoint: "/api/v5/repos/owner/repo/issues", Status: http.StatusInternalServerError, Attempts: 1}, want: string(diagnostics.CodeLiveTransportFailure)},
+		{name: "SCN-MCP-ERROR-OUTPUT-DISCUSSION-REPLY", err: service.ErrWriteFailure{Code: "discussion_reply_unavailable", Cause: gitcode.ErrDiscussionReplyUnavailable{DiscussionID: "comment:301", ParentCommentID: "301"}}, want: string(diagnostics.CodeDiscussionReplyUnavailable)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -253,6 +254,14 @@ func TestMCPErrorOutputCanonicalFailureClass(t *testing.T) {
 				t.Fatalf("failure_class=%q want %s body=%q", resp.Error.Data.FailureClass, tt.want, out.String())
 			}
 		})
+	}
+}
+
+func TestMCPDiscussionReplyUnavailableRecordsLiveReadAttempt(t *testing.T) {
+	err := service.ErrWriteFailure{Code: "discussion_reply_unavailable", Cause: gitcode.ErrDiscussionReplyUnavailable{DiscussionID: "comment:301", ParentCommentID: "301"}}
+	diagnostic, ok := mcpDiagnostic(err)
+	if !ok || diagnostic.Code != diagnostics.CodeDiscussionReplyUnavailable || !diagnostic.HTTPAttempted {
+		t.Fatalf("diagnostic=%+v ok=%t", diagnostic, ok)
 	}
 }
 
