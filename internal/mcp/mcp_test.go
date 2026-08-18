@@ -195,6 +195,9 @@ func TestMCPMissingRepositoryBindingReturnsExplicitRecoveryContext(t *testing.T)
 	if doctor.Status != "degraded" || doctor.Repo == nil || doctor.Repo.BindingState != "missing" || doctor.Repo.SuggestedRepoID != "fixture-a" {
 		t.Fatalf("doctor=%+v", doctor)
 	}
+	if doctor.SelectedRepoID != "repo-a" || doctor.SuggestedRepoID != "fixture-a" || !reflect.DeepEqual(doctor.AvailableBindings, []string{"fixture-a"}) {
+		t.Fatalf("doctor recovery fields=%+v", doctor)
+	}
 	if len(doctor.Diagnostics) != 1 || doctor.Diagnostics[0].Code != "missing_repository_binding" {
 		t.Fatalf("doctor diagnostics=%+v", doctor.Diagnostics)
 	}
@@ -203,6 +206,22 @@ func TestMCPMissingRepositoryBindingReturnsExplicitRecoveryContext(t *testing.T)
 	}
 	if len(doctorCall.Content) != 1 || !strings.Contains(doctorCall.Content[0].Text, "binding_state=missing") || !strings.Contains(doctorCall.Content[0].Text, "suggested_repo_id=fixture-a") {
 		t.Fatalf("doctor content=%+v", doctorCall.Content)
+	}
+
+	emptyStore, err := cache.NewInMemorySQLiteStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer emptyStore.Close()
+	handler = NewRPCHandler(service.New(emptyStore))
+	noMatchCall := callTool("repo_status", map[string]any{"repo_id": "ghost"})
+	var noMatch repoStatusResult
+	decodeStructured(t, noMatchCall, &noMatch)
+	if noMatch.BindingState != "missing" || noMatch.SuggestedRepoID != "" || len(noMatch.AvailableBindings) != 0 || len(noMatch.Diagnostics) != 1 {
+		t.Fatalf("no-match repo_status=%+v", noMatch)
+	}
+	if remediation := noMatch.Diagnostics[0].Remediation; !strings.Contains(remediation, "gitcode-mcp repo add") || !strings.Contains(remediation, "--name ghost") {
+		t.Fatalf("no-match remediation=%q", remediation)
 	}
 }
 

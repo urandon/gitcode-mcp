@@ -362,9 +362,11 @@ func (s *Service) RepositoryStatus(ctx context.Context, req RepositoryStatusRequ
 	if err != nil {
 		if isCacheNotFound(err) {
 			status := RepositoryStatus{RepoID: repoID, BindingState: "missing", AvailableBindings: []string{}}
-			if repos, listErr := s.store.ListRepositories(ctx); listErr == nil {
-				status.AvailableBindings, status.SuggestedRepoID = repositoryBindingHints(repoID, repos, 8)
+			repos, listErr := s.store.ListRepositories(ctx)
+			if listErr != nil {
+				return status, normalizeError(listErr, "repository bindings", repoID)
 			}
+			status.AvailableBindings, status.SuggestedRepoID = repositoryBindingHints(repoID, repos, 8)
 			return status, ErrNotFound{Kind: "repository", ID: repoID}
 		}
 		return RepositoryStatus{}, normalizeError(err, "repository", repoID)

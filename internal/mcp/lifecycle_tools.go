@@ -94,11 +94,17 @@ func repoStatusText(result repoStatusResult) string {
 }
 
 func missingBindingDiagnostic(selected string, status service.RepositoryStatus) lifecycleDiagnostic {
-	remediation := "retry repo_status with a stable owner/name repo_id from available_bindings; CLI fallback: gitcode-mcp repo status --repo OWNER/NAME --format json"
+	name := strings.TrimSpace(selected)
+	if strings.Contains(name, "/") {
+		name = "REPO"
+	}
+	remediation := fmt.Sprintf("add or select the stable owner/name binding; CLI fallback: gitcode-mcp repo add --repo OWNER/%s --owner OWNER --name %s --scopes issues,wiki", name, name)
 	if status.SuggestedRepoID != "" {
 		remediation = fmt.Sprintf("retry repo_status with repo_id=%q and use that stable repo_id for subsequent MCP calls; CLI fallback: gitcode-mcp repo status --repo %q --format json", status.SuggestedRepoID, status.SuggestedRepoID)
 	} else if owner, name, ok := strings.Cut(selected, "/"); ok && strings.TrimSpace(owner) != "" && strings.TrimSpace(name) != "" {
 		remediation = fmt.Sprintf("add the selected repository binding; CLI fallback: gitcode-mcp repo add --repo %q --owner %q --name %q --scopes issues,wiki", selected, strings.TrimSpace(owner), strings.TrimSpace(name))
+	} else if len(status.AvailableBindings) > 0 {
+		remediation = "retry repo_status with the intended stable owner/name repo_id from available_bindings; if none is correct, CLI fallback: gitcode-mcp repo add --repo OWNER/REPO --owner OWNER --name REPO --scopes issues,wiki"
 	}
 	return lifecycleDiagnostic{Code: "missing_repository_binding", ErrorClass: "missing_repository_binding", Message: fmt.Sprintf("selected repository binding %q is not configured in the effective cache", selected), Remediation: remediation}
 }
@@ -557,18 +563,21 @@ type doctorArgs struct {
 }
 
 type doctorResult struct {
-	Status       string                           `json:"status"`
-	RepoID       string                           `json:"repo_id,omitempty"`
-	ToolAccess   string                           `json:"tool_access"`
-	Cache        *service.CacheStatusResult       `json:"cache,omitempty"`
-	Repo         *service.RepositoryStatus        `json:"repo,omitempty"`
-	Auth         *authStatusResult                `json:"auth,omitempty"`
-	Sync         *service.SyncStatusSummaryResult `json:"sync,omitempty"`
-	Index        *service.StaleIndexResult        `json:"index,omitempty"`
-	LiveProvider map[string]string                `json:"live_provider,omitempty"`
-	Runtime      RuntimeContext                   `json:"runtime"`
-	Diagnostics  []lifecycleDiagnostic            `json:"diagnostics"`
-	GeneratedAt  time.Time                        `json:"generated_at"`
+	Status            string                           `json:"status"`
+	RepoID            string                           `json:"repo_id,omitempty"`
+	SelectedRepoID    string                           `json:"selected_repo_id,omitempty"`
+	SuggestedRepoID   string                           `json:"suggested_repo_id,omitempty"`
+	AvailableBindings []string                         `json:"available_bindings,omitempty"`
+	ToolAccess        string                           `json:"tool_access"`
+	Cache             *service.CacheStatusResult       `json:"cache,omitempty"`
+	Repo              *service.RepositoryStatus        `json:"repo,omitempty"`
+	Auth              *authStatusResult                `json:"auth,omitempty"`
+	Sync              *service.SyncStatusSummaryResult `json:"sync,omitempty"`
+	Index             *service.StaleIndexResult        `json:"index,omitempty"`
+	LiveProvider      map[string]string                `json:"live_provider,omitempty"`
+	Runtime           RuntimeContext                   `json:"runtime"`
+	Diagnostics       []lifecycleDiagnostic            `json:"diagnostics"`
+	GeneratedAt       time.Time                        `json:"generated_at"`
 }
 
 func (s *Server) callDoctor(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
@@ -577,7 +586,8 @@ func (s *Server) callDoctor(ctx context.Context, id *json.RawMessage, args json.
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
 		return
 	}
-	result := doctorResult{Status: "ok", RepoID: strings.TrimSpace(a.RepoID), ToolAccess: string(s.activeToolAccess()), Runtime: s.runtimeContext, Diagnostics: []lifecycleDiagnostic{}, GeneratedAt: time.Now().UTC()}
+	selected := strings.TrimSpace(a.RepoID)
+	result := doctorResult{Status: "ok", RepoID: selected, SelectedRepoID: selected, ToolAccess: string(s.activeToolAccess()), Runtime: s.runtimeContext, Diagnostics: []lifecycleDiagnostic{}, GeneratedAt: time.Now().UTC()}
 	text := "doctor status=ok"
 	if s.startupDiagnostic.present() {
 		result.Status = "degraded"
@@ -597,6 +607,8 @@ func (s *Server) callDoctor(ctx context.Context, id *json.RawMessage, args json.
 			result.Repo = &repo
 		} else if service.IsNotFound(repoErr) {
 			result.Repo = &repo
+			result.SuggestedRepoID = repo.SuggestedRepoID
+			result.AvailableBindings = append([]string(nil), repo.AvailableBindings...)
 			result.Diagnostics = append(result.Diagnostics, missingBindingDiagnostic(strings.TrimSpace(a.RepoID), repo))
 		} else {
 			result.addDoctorDiagnostic("repo_status", repoErr, "check repository binding")
