@@ -1577,6 +1577,13 @@ func (s *Service) BulkSyncIssueComments(ctx context.Context, req BulkSyncRequest
 		return nil, err
 	}
 	ctx = withBulkRateLimitProgress(ctx, bulkProgressChan(req))
+	if repairer, ok := s.store.(interface {
+		RepairIssueProviderPlaceholders(context.Context, string) (int, error)
+	}); ok {
+		if _, err := repairer.RepairIssueProviderPlaceholders(ctx, repoID); err != nil {
+			return nil, err
+		}
+	}
 	if err := s.seedLegacyIssueCommentQueue(ctx, repoID); err != nil {
 		return nil, err
 	}
@@ -4937,6 +4944,9 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 				_ = s.store.RecordAuditEvent(ctx, partial)
 				return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key, Cause: err}
 			}
+			if err := s.refreshIssueCommentWriteCache(ctx, command, graph); err != nil {
+				return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key, Cause: err}
+			}
 			if err := s.recordCacheConfirmation(ctx, command, route.RepoID, key, fingerprint, graph, prior.RemoteID, "succeeded", s.now().UTC()); err != nil {
 				return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key, Cause: err}
 			}
@@ -5055,6 +5065,11 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
 	}
 	if err := s.store.UpsertRecordGraph(ctx, graph); err != nil {
+		partial := withWriteAuditMetadata(audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()), command, key, fingerprint, graph.Record.RemoteType, confirmed)
+		_ = s.store.RecordAuditEvent(ctx, partial)
+		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
+	}
+	if err := s.refreshIssueCommentWriteCache(ctx, command, graph); err != nil {
 		partial := withWriteAuditMetadata(audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()), command, key, fingerprint, graph.Record.RemoteType, confirmed)
 		_ = s.store.RecordAuditEvent(ctx, partial)
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
@@ -5226,14 +5241,14 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 		if err != nil {
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
-		return s.commentWriteGraph(ctx, route.RepoID, req.Number, result.Record, result, now)
+		return s.commentWriteGraph(ctx, route.RepoID, req.Number, req.IssueID, result.Record, result, now)
 	case "update-comment":
 		commentID := strings.TrimSpace(firstNonEmptyString(req.CommentID, req.ID))
 		result, err := s.client.UpdateIssueComment(ctx, gitcode.UpdateIssueCommentRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, CommentID: commentID, Body: req.Body}, opts)
 		if err != nil {
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
-		return s.commentWriteGraph(ctx, route.RepoID, req.Number, result.Record, result, now)
+		return s.commentWriteGraph(ctx, route.RepoID, req.Number, req.IssueID, result.Record, result, now)
 	case "create-pr":
 		result, err := s.client.CreatePR(ctx, gitcode.CreatePRRequest{Owner: route.Owner, Repo: route.Name, Title: strings.TrimSpace(req.Title), Body: req.Body, Head: strings.TrimSpace(req.Head), Base: strings.TrimSpace(req.Base)}, opts)
 		if err != nil {
@@ -5702,7 +5717,7 @@ func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID s
 		commentID := firstNonEmptyString(req.CommentID, req.ID, prior.RemoteID)
 		comment := gitcode.Comment{ID: commentID, Body: req.Body, CreatedAt: now, UpdatedAt: now}
 		result := gitcode.WriteResult[gitcode.Comment]{Record: comment, Confirmed: true, RemoteID: commentID, ParentIssueNumber: number, ParentIssueID: prior.RecordID, RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
-		_, graph, err := s.commentWriteGraph(ctx, repoID, number, comment, result, now)
+		_, graph, err := s.commentWriteGraph(ctx, repoID, number, req.IssueID, comment, result, now)
 		return graph, err
 	case "create-pr", "update-pr", "link-pr-issue":
 		number := req.Number
@@ -5925,18 +5940,102 @@ func (s *Service) wikiWriteGraph(repoID string, page gitcode.WikiPage, result gi
 	return writeConfirmation{confirmed: result.Confirmed, remoteID: remoteID, remoteSlug: remoteID, remoteRevision: revision, apiPath: result.APIPath, cachePath: firstNonEmptyString(result.CachePath, record.Path), browserURL: result.BrowserURL, message: result.Operation, completedAt: firstNonZeroTime(result.ConfirmedAt, now)}, graph
 }
 
-func (s *Service) commentWriteGraph(ctx context.Context, repoID string, number int, comment gitcode.Comment, result gitcode.WriteResult[gitcode.Comment], now time.Time) (writeConfirmation, cache.RecordGraph, error) {
-	remoteID := firstNonEmptyString(result.ParentIssueID, comment.IssueID, strconv.Itoa(firstNonZeroInt(result.ParentIssueNumber, number)))
-	stableID := s.resolveOrFallback(ctx, repoID, "issue", remoteID, fallbackSourceID("issue", remoteID))
+func (s *Service) commentWriteGraph(ctx context.Context, repoID string, number int, parentSourceID string, comment gitcode.Comment, result gitcode.WriteResult[gitcode.Comment], now time.Time) (writeConfirmation, cache.RecordGraph, error) {
+	issueNumber := firstNonZeroInt(result.ParentIssueNumber, number)
+	providerID := firstNonEmptyString(result.ParentIssueID, comment.IssueID)
+	stableID := strings.TrimSpace(parentSourceID)
+	if stableID == "" && issueNumber > 0 {
+		if source, ok, err := s.issueSourceForNumber(ctx, repoID, issueNumber); err != nil {
+			return writeConfirmation{}, cache.RecordGraph{}, err
+		} else if ok {
+			stableID = source.ID
+		}
+	}
+	if stableID == "" && providerID != "" {
+		if source, ok, err := s.issueSourceForProviderID(ctx, repoID, providerID); err != nil {
+			return writeConfirmation{}, cache.RecordGraph{}, err
+		} else if ok {
+			stableID = source.ID
+		}
+	}
+	if stableID == "" && issueNumber > 0 {
+		stableID = fallbackSourceID("issue", strconv.Itoa(issueNumber))
+	}
+	if stableID == "" {
+		return writeConfirmation{}, cache.RecordGraph{}, errors.New("issue comment parent cannot be resolved to a repository-local issue identity")
+	}
 	record, err := s.store.GetRecord(ctx, repoID, stableID)
 	if err != nil {
+		if !isCacheNotFound(err) {
+			return writeConfirmation{}, cache.RecordGraph{}, err
+		}
+		if issueNumber <= 0 {
+			return writeConfirmation{}, cache.RecordGraph{}, err
+		}
+		remoteID := strconv.Itoa(issueNumber)
 		record = cache.Record{RepoID: repoID, ID: stableID, Type: "issue", Path: "issues/" + remoteID + ".md", Title: "Issue " + remoteID, Status: "open", ContentHash: contentHash(remoteID), Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: remoteID, CreatedAt: now, UpdatedAt: now}
 	}
-	commentID := firstNonEmptyString(result.RemoteID, comment.ID, contentHash(remoteID, comment.Body, now))
+	commentID := firstNonEmptyString(result.RemoteID, comment.ID, contentHash(stableID, comment.Body, now))
 	created := firstNonZeroTime(comment.CreatedAt.UTC(), now)
 	updated := firstNonZeroTime(comment.UpdatedAt.UTC(), created)
 	graph := cache.RecordGraph{Record: record, Comments: []cache.RecordComment{{RepoID: repoID, RecordID: stableID, CommentID: commentID, Author: comment.Author, Body: comment.Body, ContentHash: contentHash(commentID, comment.Body), RemoteRevision: firstNonEmptyString(result.RemoteRevision, result.ResponseHash), CreatedAt: created, UpdatedAt: updated}}}
-	return writeConfirmation{confirmed: result.Confirmed, remoteID: commentID, remoteNumber: firstNonZeroInt(result.ParentIssueNumber, number), remoteRevision: result.RemoteRevision, message: result.Operation, completedAt: firstNonZeroTime(result.ConfirmedAt, now)}, graph, nil
+	if issueNumber > 0 {
+		numberID := strconv.Itoa(issueNumber)
+		graph.Identities = append(graph.Identities, cache.Identity{RepoID: repoID, SourceID: stableID, AliasType: "issue", Alias: numberID, Remote: cache.RemoteAlias{Type: "issue", ID: numberID}})
+	}
+	if providerID != "" {
+		graph.Identities = append(graph.Identities, cache.Identity{RepoID: repoID, SourceID: stableID, AliasType: "gitcode_issue_id", Alias: providerID, Remote: cache.RemoteAlias{Type: "gitcode_issue_id", ID: providerID}})
+	}
+	return writeConfirmation{confirmed: result.Confirmed, remoteID: commentID, remoteNumber: issueNumber, remoteRevision: result.RemoteRevision, message: result.Operation, completedAt: firstNonZeroTime(result.ConfirmedAt, now)}, graph, nil
+}
+
+func (s *Service) refreshIssueCommentWriteCache(ctx context.Context, command string, graph cache.RecordGraph) error {
+	if command != "add-comment" && command != "update-comment" {
+		return nil
+	}
+	issueNumber, err := strconv.Atoi(strings.TrimSpace(graph.Record.RemoteID))
+	if err != nil || issueNumber <= 0 {
+		return errors.New("issue comment cache refresh is missing the canonical repository-local issue number")
+	}
+	providerID := ""
+	for _, identity := range graph.Identities {
+		if identity.AliasType == "gitcode_issue_id" {
+			providerID = identity.Alias
+			break
+		}
+	}
+	item, ok, err := s.store.GetIssueCommentSync(ctx, graph.Record.RepoID, graph.Record.ID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		item = cache.IssueCommentSync{
+			RepoID:        graph.Record.RepoID,
+			SourceID:      graph.Record.ID,
+			RemoteID:      graph.Record.RemoteID,
+			ExpectedCount: -1,
+			Status:        "pending",
+		}
+	}
+	item.IssueNumber = issueNumber
+	if item.RemoteID == "" {
+		item.RemoteID = graph.Record.RemoteID
+	}
+	if providerID != "" {
+		item.ProviderID = providerID
+	}
+	item.UpdatedAt = s.now().UTC()
+	record, err := s.store.GetRecord(ctx, graph.Record.RepoID, graph.Record.ID)
+	if err != nil {
+		return err
+	}
+	if item.ExpectedCount >= 0 && item.ExpectedCount < len(record.Comments) {
+		item.ExpectedCount = len(record.Comments)
+	}
+	if err := s.projectIssueComments(ctx, item, record.Comments); err != nil {
+		return err
+	}
+	return s.store.UpsertIssueCommentSync(ctx, item)
 }
 
 func (s *Service) pullRequestWriteGraph(ctx context.Context, repoID string, pr gitcode.PullRequest, result gitcode.WriteResult[gitcode.PullRequest], now time.Time) (writeConfirmation, cache.RecordGraph, error) {
