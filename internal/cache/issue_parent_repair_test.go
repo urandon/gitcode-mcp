@@ -24,7 +24,9 @@ func TestRepairIssueProviderPlaceholdersMergesCommentsAndQueue(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	canonicalNewer := now.Add(time.Hour)
+	// RFC3339Nano omits a zero fractional part, so this specifically guards
+	// against treating ...00Z as lexically newer than the later ...00.5Z.
+	canonicalNewer := now.Add(500 * time.Millisecond)
 	if err := store.UpsertRecordGraph(ctx, RecordGraph{Record: canonical, Comments: []RecordComment{{RepoID: "repair", RecordID: canonical.ID, CommentID: "comment-1", Body: "new canonical body", ContentHash: "canonical-comment", CreatedAt: now, UpdatedAt: canonicalNewer}}}); err != nil {
 		t.Fatal(err)
 	}

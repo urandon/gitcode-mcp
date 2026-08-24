@@ -103,7 +103,7 @@ ON CONFLICT(repo_id, record_id, comment_id) DO UPDATE SET
   remote_revision = excluded.remote_revision,
   created_at = excluded.created_at,
   updated_at = excluded.updated_at
-WHERE excluded.updated_at > record_comments.updated_at`, canonicalID, repoID, placeholderID); err != nil {
+WHERE julianday(excluded.updated_at) > julianday(record_comments.updated_at)`, canonicalID, repoID, placeholderID); err != nil {
 		return err
 	}
 	if err := execTx(ctx, tx, `INSERT OR IGNORE INTO links (repo_id, source_id, target_id, kind, text)
