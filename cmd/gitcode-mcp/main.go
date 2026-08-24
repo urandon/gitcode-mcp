@@ -159,12 +159,16 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 	}
 	routeCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
-	if cfg.DefaultTimeout > 0 {
+	if cfg.DefaultTimeout > 0 && !runsUntilSignal(rest) {
 		var cancel context.CancelFunc
 		routeCtx, cancel = context.WithTimeout(routeCtx, cfg.DefaultTimeout)
 		defer cancel()
 	}
 	return cliRoute(routeCtx, rest, stdout, stderr, deps)
+}
+
+func runsUntilSignal(args []string) bool {
+	return len(args) >= 2 && args[0] == "service" && args[1] == "run"
 }
 
 func buildStartupDeps(cfg config.Config, token string, live bool) StartupDeps {

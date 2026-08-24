@@ -193,6 +193,60 @@ func TestEntrypointDefaultModeDependencyHandoff(t *testing.T) {
 	}
 }
 
+func TestEntrypointServiceRunOutlivesDefaultOperationTimeout(t *testing.T) {
+	src := newTestSource(t)
+	configPath := filepath.Join(src.homeDir, "startup.json")
+	src.env[config.EnvConfigPath] = configPath
+	src.files[configPath] = []byte(`{"default_timeout":"1ms"}`)
+
+	old := cliRoute
+	defer func() { cliRoute = old }()
+	cliRoute = func(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps StartupDeps) int {
+		if got := strings.Join(args, " "); got != "service run" {
+			t.Fatalf("args = %q", got)
+		}
+		if _, ok := ctx.Deadline(); ok {
+			t.Fatal("service run inherited the default operation deadline")
+		}
+		time.Sleep(10 * time.Millisecond)
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("service run context expired: %v", err)
+		}
+		return 0
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"service", "run"}, strings.NewReader(""), &stdout, &stderr, src); code != 0 {
+		t.Fatalf("exit = %d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestEntrypointFiniteCommandRetainsDefaultOperationTimeout(t *testing.T) {
+	src := newTestSource(t)
+	configPath := filepath.Join(src.homeDir, "startup.json")
+	src.env[config.EnvConfigPath] = configPath
+	src.files[configPath] = []byte(`{"default_timeout":"1s"}`)
+
+	old := cliRoute
+	defer func() { cliRoute = old }()
+	cliRoute = func(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps StartupDeps) int {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("finite command is missing the default operation deadline")
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 || remaining > time.Second {
+			t.Fatalf("unexpected remaining timeout: %s", remaining)
+		}
+		return 0
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"search", "test"}, strings.NewReader(""), &stdout, &stderr, src); code != 0 {
+		t.Fatalf("exit = %d stderr=%q", code, stderr.String())
+	}
+}
+
 func TestEntrypointDiscoversRepoLocalCache(t *testing.T) {
 	src := newTestSource(t)
 	root := filepath.Join(src.homeDir, "workspace", "repo")
