@@ -102,7 +102,14 @@ ON CONFLICT(repo_id, record_id, comment_id) DO UPDATE SET
   content_hash = excluded.content_hash,
   remote_revision = excluded.remote_revision,
   created_at = excluded.created_at,
-  updated_at = excluded.updated_at`, canonicalID, repoID, placeholderID); err != nil {
+  updated_at = excluded.updated_at
+WHERE excluded.updated_at > record_comments.updated_at`, canonicalID, repoID, placeholderID); err != nil {
+		return err
+	}
+	if err := execTx(ctx, tx, `INSERT OR IGNORE INTO links (repo_id, source_id, target_id, kind, text)
+SELECT repo_id, ?, target_id, kind, text
+FROM links
+WHERE repo_id = ? AND source_id = ? AND target_id <> ?`, canonicalID, repoID, placeholderID, placeholderID); err != nil {
 		return err
 	}
 	if err := execTx(ctx, tx, `INSERT OR IGNORE INTO links (repo_id, source_id, target_id, kind, text)
@@ -111,10 +118,36 @@ FROM links
 WHERE repo_id = ? AND target_id = ? AND source_id <> ?`, canonicalID, repoID, placeholderID, placeholderID); err != nil {
 		return err
 	}
-	if err := execTx(ctx, tx, `DELETE FROM links WHERE repo_id = ? AND target_id = ?`, repoID, placeholderID); err != nil {
+	if err := execTx(ctx, tx, `DELETE FROM links WHERE repo_id = ? AND (source_id = ? OR target_id = ?)`, repoID, placeholderID, placeholderID); err != nil {
 		return err
 	}
 	if err := execTx(ctx, tx, `UPDATE audit_trail SET record_id = ? WHERE repo_id = ? AND record_id = ?`, canonicalID, repoID, placeholderID); err != nil {
+		return err
+	}
+	if err := execTx(ctx, tx, `UPDATE cache_confirmations SET record_id = ? WHERE repo_id = ? AND record_id = ?`, canonicalID, repoID, placeholderID); err != nil {
+		return err
+	}
+	if err := execTx(ctx, tx, `INSERT INTO issue_comment_sync (repo_id, source_id, issue_number, remote_id, provider_id, remote_revision, expected_count, status, attempts, last_error_class, retry_after, last_attempt_at, updated_at)
+SELECT canonical.repo_id,
+       canonical.record_id,
+       CAST(canonical.remote_id AS INTEGER),
+       canonical.remote_id,
+       COALESCE((SELECT alias FROM identity_map WHERE repo_id = canonical.repo_id AND source_id = canonical.record_id AND alias_type = 'gitcode_issue_id' ORDER BY alias LIMIT 1), ''),
+       canonical.remote_revision,
+       (SELECT count(*) FROM record_comments WHERE repo_id = canonical.repo_id AND record_id = canonical.record_id),
+       'pending', 0, '', '', '', canonical.updated_at
+FROM records canonical
+WHERE canonical.repo_id = ? AND canonical.record_id = ?
+ON CONFLICT(repo_id, source_id) DO UPDATE SET
+  issue_number = excluded.issue_number,
+  remote_id = excluded.remote_id,
+  provider_id = CASE WHEN excluded.provider_id <> '' THEN excluded.provider_id ELSE issue_comment_sync.provider_id END,
+  remote_revision = excluded.remote_revision,
+  expected_count = CASE WHEN excluded.expected_count > issue_comment_sync.expected_count THEN excluded.expected_count ELSE issue_comment_sync.expected_count END,
+  status = 'pending',
+  last_error_class = '',
+  retry_after = '',
+  updated_at = excluded.updated_at`, repoID, canonicalID); err != nil {
 		return err
 	}
 	if err := execTx(ctx, tx, `DELETE FROM issue_comment_sync WHERE repo_id = ? AND source_id = ?`, repoID, placeholderID); err != nil {

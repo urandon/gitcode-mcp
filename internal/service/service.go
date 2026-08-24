@@ -1577,10 +1577,12 @@ func (s *Service) BulkSyncIssueComments(ctx context.Context, req BulkSyncRequest
 		return nil, err
 	}
 	ctx = withBulkRateLimitProgress(ctx, bulkProgressChan(req))
+	repairedPlaceholders := 0
 	if repairer, ok := s.store.(interface {
 		RepairIssueProviderPlaceholders(context.Context, string) (int, error)
 	}); ok {
-		if _, err := repairer.RepairIssueProviderPlaceholders(ctx, repoID); err != nil {
+		repairedPlaceholders, err = repairer.RepairIssueProviderPlaceholders(ctx, repoID)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -1590,6 +1592,11 @@ func (s *Service) BulkSyncIssueComments(ctx context.Context, req BulkSyncRequest
 	pending, err := s.store.ListIssueCommentSync(ctx, cache.IssueCommentSyncFilter{RepoID: repoID, Statuses: []string{"pending", "deferred"}})
 	if err != nil {
 		return nil, err
+	}
+	if repairedPlaceholders > 0 {
+		if err := s.projectPendingIssueCommentCache(ctx, pending); err != nil {
+			return nil, err
+		}
 	}
 	if len(pending) == 0 {
 		result := &SyncResourcesResult{Results: []SyncResult{}, Failures: []ResourceError{}, Ordering: "queue_updated_at_asc", TraversalStatus: "complete", StopReason: "queue_empty"}
@@ -1629,6 +1636,22 @@ func (s *Service) BulkSyncIssueComments(ctx context.Context, req BulkSyncRequest
 		reason = "parent_frontier_incomplete"
 	}
 	return s.bulkSyncIssueCommentsPerIssue(ctx, req, route, reason)
+}
+
+func (s *Service) projectPendingIssueCommentCache(ctx context.Context, pending []cache.IssueCommentSync) error {
+	for _, item := range pending {
+		record, err := s.store.GetRecord(ctx, item.RepoID, item.SourceID)
+		if err != nil {
+			return err
+		}
+		if len(record.Comments) == 0 {
+			continue
+		}
+		if err := s.projectIssueComments(ctx, item, record.Comments); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) bulkSyncIssueCommentsPerIssue(ctx context.Context, req BulkSyncRequest, route RepositoryRoute, fallbackReason string) (*SyncResourcesResult, error) {

@@ -2235,6 +2235,33 @@ func TestWriteIdempotencyScopedByRepo(t *testing.T) {
 	}
 }
 
+func TestProjectPendingIssueCommentCacheMakesRepairedCommentsSearchable(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "repair", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	record := cache.Record{RepoID: "repair", ID: "ISSUE-88", Type: "issue", Path: "issues/88.md", Title: "Issue 88", Status: "open", ContentHash: "issue", Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: "88", CreatedAt: now, UpdatedAt: now}
+	comment := cache.RecordComment{RepoID: "repair", RecordID: record.ID, CommentID: "comment-1", Body: "repaired comment searchable", ContentHash: "comment", CreatedAt: now, UpdatedAt: now}
+	if err := store.UpsertRecordGraph(ctx, cache.RecordGraph{Record: record, Comments: []cache.RecordComment{comment}}); err != nil {
+		t.Fatal(err)
+	}
+	item := cache.IssueCommentSync{RepoID: "repair", SourceID: record.ID, IssueNumber: 88, RemoteID: "88", ExpectedCount: 1, Status: "pending", UpdatedAt: now}
+	svc := New(store)
+	if err := svc.projectPendingIssueCommentCache(ctx, []cache.IssueCommentSync{item}); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := store.GetSourceScoped(ctx, "repair", "ISSUECOMMENT-88-comment-1")
+	if err != nil || projection.Body != comment.Body {
+		t.Fatalf("projection=%#v err=%v", projection, err)
+	}
+}
+
 func TestSearchSources(t *testing.T) {
 	ctx := context.Background()
 	svc := seededService(t, ctx)
