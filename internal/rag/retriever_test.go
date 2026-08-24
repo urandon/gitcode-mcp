@@ -92,6 +92,29 @@ func TestRAGRetrieverReportsIncompleteCoverage(t *testing.T) {
 	}
 }
 
+func TestRAGRetrieverRestrictsCandidatesBeforeTopK(t *testing.T) {
+	ctx := context.Background()
+	store := newVectorTestStore(t, ctx)
+	defer store.Close()
+	namespace := mustUpsertVectorNamespace(t, ctx, store, "fixture-a", "stub-revision")
+	chunks := []cache.Chunk{
+		vectorTextChunk("chunk-disallowed", "ISSUE-1", "hash-disallowed", "strong semantic result"),
+		vectorTextChunk("chunk-allowed", "ISSUE-2", "hash-allowed", "weaker semantic result"),
+	}
+	mustUpsertVectorChunks(t, ctx, store, "fixture-a", chunks)
+	mustUpsertVectorEmbedding(t, ctx, store, namespace.ID, "chunk-disallowed", []float32{1, 0})
+	mustUpsertVectorEmbedding(t, ctx, store, namespace.ID, "chunk-allowed", []float32{0.8, 0.6})
+	provider := newStubSearchProvider(namespace.EmbeddingNamespaceIdentity, map[string][]float32{"concept": {1, 0}})
+
+	result, err := NewRAGRetriever(store, provider, RAGRetrieverOptions{Now: fixedSearchNow}).Search(ctx, SearchRequest{RepoID: "fixture-a", Query: "concept", SourceIDs: []string{"ISSUE-2"}, TopK: 1, Limit: 1})
+	if err != nil {
+		t.Fatalf("Search returned error: %v", err)
+	}
+	if len(result.Results) != 1 || result.Results[0].SourceID != "ISSUE-2" || result.Coverage.TotalChunks != 1 {
+		t.Fatalf("filtered result=%#v coverage=%#v", result.Results, result.Coverage)
+	}
+}
+
 func TestRAGRetrieverMultilingualDeterministicFixtures(t *testing.T) {
 	ctx := context.Background()
 	store := newVectorTestStore(t, ctx)

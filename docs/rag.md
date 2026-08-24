@@ -173,16 +173,26 @@ gitcode-mcp rag-status --repo YOUR_OWNER/YOUR_REPO
 Search:
 
 ```sh
-gitcode-mcp rag search --repo YOUR_OWNER/YOUR_REPO "rate limit during sync"
-gitcode-mcp rag-search --repo YOUR_OWNER/YOUR_REPO "rate limit during sync"
+gitcode-mcp search --repo YOUR_OWNER/YOUR_REPO "rate limit during sync"
+gitcode-mcp search_sources --repo YOUR_OWNER/YOUR_REPO "rate limit during sync"
+gitcode-mcp search --repo YOUR_OWNER/YOUR_REPO --mode full_text "exact token query"
 ```
+
+Normal source search requests `hybrid` mode. It runs lexical search unconditionally, attempts the local semantic branch, groups semantic chunks by source, then fuses lexical and semantic source ranks with deterministic reciprocal-rank fusion. Exact stable ids, aliases, paths, and titles receive a deterministic boost. Up to three best semantic citations are retained per source, so repeated chunks cannot consume multiple result slots.
+
+Every result reports `requested_mode`, `effective_mode`, RAG state/coverage, repair state, score provenance, and any typed fallback reason. Missing namespaces, models, or providers return lexical results with `effective_mode=full_text`; they do not make source search fail. Partial coverage remains effective hybrid retrieval and is reported as `rag_state=partial`. Existing `rag search` / `rag_search` remain advanced chunk-oriented compatibility surfaces.
+
+### Migration from full-text default
+
+Existing caches need no schema migration and stay readable without RAG. Calls that omit `mode` now request hybrid retrieval, but preserve lexical results when semantic retrieval cannot run. Automation that depends on the old exact/token-only ordering should add `mode=full_text` (MCP) or `--mode full_text` (CLI). The compatibility `search_mode` field reports the effective execution mode; new callers should branch on `requested_mode`, `effective_mode`, and `fallback_reason`.
 
 MCP clients should use:
 
 | MCP tool | Purpose |
 |---|---|
 | `rag_status` | Provider readiness, namespace, coverage, last run, and active job state. |
-| `rag_search` | Semantic/hybrid retrieval with citations, source ids, snippets, and score breakdowns. |
+| `search_sources` | Default source-oriented hybrid retrieval; use `mode=full_text` to bypass embeddings. |
+| `rag_search` | Advanced compatibility surface for chunk-oriented semantic diagnostics. |
 | `service_status` | Local daemon liveness. |
 | `service_jobs` / `service_job_status` | Background job visibility. |
 

@@ -158,6 +158,7 @@ type startupPlan struct {
 	CredentialResolution  config.CredentialResolutionResult
 	Token                 config.SecretString
 	ServiceConfig         service.ServiceConfig
+	RAGConfig             config.Config
 }
 
 type options struct {
@@ -165,6 +166,7 @@ type options struct {
 	kind              string
 	status            string
 	provenance        string
+	searchMode        string
 	limit             int
 	offset            int
 	lineStart         int
@@ -285,7 +287,7 @@ func (m *multiFlag) Set(value string) error {
 
 // Execute runs the gitcode-mcp CLI.
 func Execute(args []string, stdout io.Writer, stderr io.Writer) int {
-	return executeWithFactory(args, stdout, stderr, defaultServiceFactory)
+	return executeWithFactory(args, stdout, stderr, nil)
 }
 
 func ExecuteWithSource(args []string, stdout io.Writer, stderr io.Writer, src config.Source) int {
@@ -293,7 +295,7 @@ func ExecuteWithSource(args []string, stdout io.Writer, stderr io.Writer, src co
 }
 
 func ExecuteWithSourceContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, src config.Source) int {
-	return executeWithFactoryAndDepsContext(ctx, args, stdout, stderr, defaultServiceFactory, localCommandDeps{Source: src})
+	return executeWithFactoryAndDepsContext(ctx, args, stdout, stderr, nil, localCommandDeps{Source: src})
 }
 
 func ExecuteWithClient(args []string, stdout io.Writer, stderr io.Writer, client gitcode.Client) int {
@@ -451,6 +453,7 @@ func buildStartupPlan(ctx context.Context, command string, opts options, deps lo
 		return plan, err
 	}
 	plan.CachePath = firstNonEmpty(opts.cachePath, eff.Config.CachePath)
+	plan.RAGConfig = eff.Config
 	plan.MCPToolAccess = eff.Config.MCPToolAccess
 	plan.ServiceConfig = service.ServiceConfig{LockPath: eff.Config.LockPath, Feedback: eff.Config.Feedback}
 	if command == "submit-feedback" {
@@ -533,6 +536,7 @@ func liveRequestedScope(command string, opts options) service.RepositoryScope {
 
 func serviceFromStartupPlan(ctx context.Context, plan startupPlan, factory serviceFactory) (queryService, func() error, error) {
 	if plan.ProviderMode != "live-http" {
+		configureRAG := factory == nil
 		if factory == nil {
 			factory = defaultServiceFactory
 		}
@@ -540,6 +544,11 @@ func serviceFromStartupPlan(ctx context.Context, plan startupPlan, factory servi
 		if err == nil {
 			if configurable, ok := svc.(interface{ ConfigureFeedback(feedback.Config) }); ok {
 				configurable.ConfigureFeedback(plan.ServiceConfig.Feedback)
+			}
+			if configureRAG {
+				if configurable, ok := svc.(interface{ ConfigureRAGSearch(config.Config) }); ok {
+					configurable.ConfigureRAGSearch(plan.RAGConfig)
+				}
 			}
 		}
 		return svc, cleanup, err
@@ -560,6 +569,7 @@ func serviceFromStartupPlan(ctx context.Context, plan startupPlan, factory servi
 		_ = store.Close()
 		return nil, nil, err
 	}
+	svc.ConfigureRAGSearch(plan.RAGConfig)
 	return svc, store.Close, nil
 }
 
@@ -620,6 +630,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.kind, "kind", "", "source kind")
 	flags.StringVar(&opts.status, "status", "", "source status")
 	flags.StringVar(&opts.provenance, "provenance", "", "source provenance")
+	flags.StringVar(&opts.searchMode, "mode", "", "search mode: hybrid or full_text")
 	flags.IntVar(&opts.limit, "limit", 0, "result limit")
 	flags.IntVar(&opts.offset, "offset", 0, "result offset")
 	flags.IntVar(&opts.lineStart, "line-start", 0, "snippet start line")
@@ -1855,7 +1866,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		if len(args) == 0 {
 			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "query", Message: "query is required"})
 		}
-		results, err := svc.SearchSources(ctx, service.SearchSourcesRequest{RepoID: opts.repo, Query: strings.Join(args, " "), Kind: opts.kind, Provenance: opts.provenance, Limit: opts.limit, Offset: opts.offset})
+		results, err := svc.SearchSources(ctx, service.SearchSourcesRequest{RepoID: opts.repo, Query: strings.Join(args, " "), Mode: opts.searchMode, Kind: opts.kind, Provenance: opts.provenance, Limit: opts.limit, Offset: opts.offset})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
@@ -3258,13 +3269,17 @@ func renderRuntimeAuditText(w io.Writer, result runtimeAuditPayload) {
 }
 
 func renderSearchText(w io.Writer, result service.SearchSourcesResult) {
-	fmt.Fprintf(w, "search_mode: %s\n", cliSearchMode(result.SearchMode))
+	fmt.Fprintf(w, "requested_mode: %s effective_mode: %s rag_state: %s\n", result.RequestedMode, result.EffectiveMode, result.RAGState)
+	if result.FallbackReason != "" {
+		fmt.Fprintf(w, "fallback_reason: %s\n", result.FallbackReason)
+	}
+	fmt.Fprintf(w, "coverage: %d/%d embedded, %d missing, %d stale\n", result.Coverage.EmbeddedChunks, result.Coverage.EligibleChunks, result.Coverage.MissingChunks, result.Coverage.StaleChunks)
 	for _, item := range result.Results {
 		line := 0
 		if item.LineStart != nil {
 			line = *item.LineStart
 		}
-		fmt.Fprintf(w, "%s %s %s:%d:%s\n", item.RepoID, item.ID, item.Path, line, item.Snippet)
+		fmt.Fprintf(w, "%d %.6f %s %s %s:%d:%s\n", item.Rank, item.Match.FusionScore, item.RepoID, item.ID, item.Path, line, item.Snippet)
 	}
 }
 
@@ -3306,13 +3321,6 @@ func renderChunkQueryText(w io.Writer, result service.ChunkQueryResult) {
 	for _, warning := range result.Warnings {
 		fmt.Fprintf(w, "warning: %s %s\n", warning.Code, warning.Message)
 	}
-}
-
-func cliSearchMode(mode string) string {
-	if strings.TrimSpace(mode) == "" {
-		return service.SearchModeFullText
-	}
-	return mode
 }
 
 func renderResetLiveCacheText(w io.Writer, result service.ResetLiveCacheResult) {
@@ -4323,11 +4331,12 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH cache database path")
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
 	case "search", "search_sources":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO QUERY [--kind KIND] [--provenance PROVENANCE] [--limit N] [--offset N]\n\n", command)
-		fmt.Fprintln(w, "Search cached sources with full-text matching. This is exact/token text search, not fuzzy or semantic retrieval.")
-		fmt.Fprintln(w, "If no results are returned, retry with exact terms or keyword variants.")
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO QUERY [--mode hybrid|full_text] [--kind KIND] [--provenance PROVENANCE] [--limit N] [--offset N]\n\n", command)
+		fmt.Fprintln(w, "Search cached sources with hybrid lexical plus semantic retrieval by default.")
+		fmt.Fprintln(w, "Use --mode full_text for deterministic exact/token matching without an embedding-provider call.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO       repository id")
+		fmt.Fprintln(w, "  --mode MODE       hybrid (default) or full_text")
 		fmt.Fprintln(w, "  --kind KIND       filter by source kind (issue, wiki, doc, task)")
 		fmt.Fprintln(w, "  --provenance P    filter by provenance (live, fixture, remote, projection, bridge)")
 		fmt.Fprintln(w, "  --limit N         maximum results")

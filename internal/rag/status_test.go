@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/cache"
-	"gitcode-mcp/internal/service"
+	"gitcode-mcp/internal/progress"
 )
 
 func TestStatusEmptyCacheWithoutNamespace(t *testing.T) {
@@ -104,7 +104,7 @@ func TestStatusReportsFailedLastRunAndActiveJob(t *testing.T) {
 	if err := store.UpsertRAGIndexRun(ctx, cache.RAGIndexRun{RepoID: "fixture-a", ID: "rag-run-failed", NamespaceID: namespace.ID, ProfileID: "fake-rag", Status: RAGIndexStatusFailed, TotalChunks: 1, FailedChunks: 1, StartedAt: now, UpdatedAt: now, CompletedAt: now, ErrorClass: "provider_error", Message: "provider down"}); err != nil {
 		t.Fatalf("UpsertRAGIndexRun returned error: %v", err)
 	}
-	active := &JobStatus{ID: "job-1", Type: "rag-index", RepoID: "fixture-a", Status: RAGIndexStatusRunning, Steps: 1, Completed: 0, Progress: []service.ProgressEvent{{Type: "started", Phase: "running"}}}
+	active := &JobStatus{ID: "job-1", Type: "rag-index", RepoID: "fixture-a", Status: RAGIndexStatusRunning, Steps: 1, Completed: 0, Progress: []progress.Event{{Type: "started", Phase: "running"}}}
 
 	result, err := Status(ctx, store, provider, StatusRequest{RepoID: "fixture-a", ActiveJob: active})
 	if err != nil {

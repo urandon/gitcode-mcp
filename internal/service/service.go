@@ -19,12 +19,19 @@ import (
 	"gitcode-mcp/internal/audit"
 	"gitcode-mcp/internal/buildinfo"
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/feedback"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
+	"gitcode-mcp/internal/rag"
 )
 
-const SearchModeFullText = index.SearchModeFullText
+const (
+	SearchModeHybrid   = "hybrid"
+	SearchModeFullText = index.SearchModeFullText
+)
+
+type RAGSearchProvider func(context.Context, rag.SearchRequest) (rag.SearchResult, error)
 
 type Service struct {
 	store                  cache.Store
@@ -34,6 +41,20 @@ type Service struct {
 	providerMode           gitcode.ProviderMode
 	writeCredentialPresent bool
 	feedbackConfig         feedback.Config
+	ragSearch              RAGSearchProvider
+}
+
+func (s *Service) ConfigureRAGSearch(cfg config.Config) {
+	if !cfg.RAG.Search.Hybrid {
+		s.ragSearch = nil
+		return
+	}
+	ops := rag.NewOperations(s.store, cfg, rag.OperationsOptions{})
+	s.ragSearch = ops.Search
+}
+
+func (s *Service) SetRAGSearchProvider(provider RAGSearchProvider) {
+	s.ragSearch = provider
 }
 
 type auditClaimStore interface {
@@ -582,20 +603,183 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 	if strings.TrimSpace(req.Query) == "" {
 		return SearchSourcesResult{}, ErrInvalidQuery{Field: "query", Message: "query is required"}
 	}
-	results, err := s.store.SearchSources(ctx, cache.SearchQuery{RepoID: repoID, Query: req.Query, Kind: req.Kind, Provenance: cache.Provenance(req.Provenance), Limit: req.Limit})
+	mode := strings.ToLower(strings.TrimSpace(req.Mode))
+	mode = strings.ReplaceAll(mode, "-", "_")
+	if mode == "" {
+		mode = SearchModeHybrid
+	}
+	if mode != SearchModeHybrid && mode != SearchModeFullText {
+		return SearchSourcesResult{}, ErrInvalidQuery{Field: "mode", Message: "mode must be hybrid or full_text"}
+	}
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	if req.Offset < 0 {
+		return SearchSourcesResult{}, ErrInvalidQuery{Field: "offset", Message: "offset must be non-negative"}
+	}
+	lexicalLimit := limit + req.Offset
+	semanticLimit := lexicalLimit
+	if semanticLimit < 40 {
+		semanticLimit = 40
+	}
+	if semanticLimit > 400 {
+		semanticLimit = 400
+	}
+	lexical, updated, err := s.searchSourceLexicalCandidates(ctx, repoID, req, lexicalLimit)
 	if err != nil {
-		return SearchSourcesResult{}, normalizeError(err, "search", req.Query)
+		return SearchSourcesResult{}, err
+	}
+	base := SearchSourcesResult{
+		RepoID:        repoID,
+		Query:         req.Query,
+		RequestedMode: mode,
+		EffectiveMode: SearchModeFullText,
+		SearchMode:    SearchModeFullText,
+		RAGState:      "disabled",
+		Repair:        SearchRepairStatus{State: "not_needed"},
+		Limit:         limit,
+		Offset:        req.Offset,
+	}
+	if mode == SearchModeFullText {
+		base.RAGState = "not_requested"
+		base.Results = pageSearchSources(lexical, req.Offset, limit)
+		for i := range base.Results {
+			base.Results[i].Rank = req.Offset + i + 1
+			base.Results[i].Match.LexicalRank = req.Offset + i + 1
+			base.Results[i].Match.ExactMatch = s.exactSourceMatch(ctx, repoID, req.Query, base.Results[i])
+			base.Results[i].Match.FusionScore = base.Results[i].Score
+			base.Results[i].Citations = []SearchCitation{}
+		}
+		return base, nil
+	}
+	if s.ragSearch == nil {
+		base.FallbackReason = "rag_disabled"
+		base.Repair.State = "enable_required"
+		base.Results = pageSearchSources(lexical, req.Offset, limit)
+		decorateLexicalFallback(ctx, s, &base, repoID, req.Offset)
+		return base, nil
+	}
+	semanticSourceIDs, err := s.searchSemanticSourceIDs(ctx, repoID, req)
+	if err != nil {
+		return SearchSourcesResult{}, err
+	}
+	ragLimit := semanticLimit * 2
+	ragResult, ragErr := s.ragSearch(ctx, rag.SearchRequest{RepoID: repoID, Query: req.Query, SourceIDs: semanticSourceIDs, TopK: semanticLimit, Limit: ragLimit})
+	base.Coverage = searchCoverageFromRAG(ragResult)
+	if err := ctx.Err(); err != nil {
+		return SearchSourcesResult{}, err
+	}
+	if ragErr != nil {
+		reason, ok := ragProviderErrorFallbackReason(ragErr)
+		if !ok {
+			return SearchSourcesResult{}, ragErr
+		}
+		base.RAGState = "unavailable"
+		base.FallbackReason = reason
+		base.Repair.State = "needed"
+		base.Results = pageSearchSources(lexical, req.Offset, limit)
+		decorateLexicalFallback(ctx, s, &base, repoID, req.Offset)
+		return base, nil
+	}
+	if reason := ragFallbackReason(ragResult); reason != "" {
+		base.RAGState = ragStateForFallback(ragResult)
+		base.FallbackReason = reason
+		base.Repair.State = "needed"
+		base.Results = pageSearchSources(lexical, req.Offset, limit)
+		decorateLexicalFallback(ctx, s, &base, repoID, req.Offset)
+		return base, nil
+	}
+	base.EffectiveMode = SearchModeHybrid
+	base.SearchMode = SearchModeHybrid
+	base.RAGState = "ready"
+	base.Repair.State = "not_needed"
+	if base.Coverage.MissingChunks > 0 || base.Coverage.StaleChunks > 0 {
+		base.RAGState = "partial"
+		base.Repair.State = "needed"
+	}
+	out, err := s.fuseSearchSources(ctx, repoID, req, lexical, ragResult, updated)
+	if err != nil {
+		return SearchSourcesResult{}, err
+	}
+	base.Results = pageSearchSources(out, req.Offset, limit)
+	for i := range base.Results {
+		base.Results[i].Rank = req.Offset + i + 1
+	}
+	return base, nil
+}
+
+func ragProviderErrorFallbackReason(err error) (string, bool) {
+	var providerErr *rag.ProviderError
+	if !errors.As(err, &providerErr) {
+		return "", false
+	}
+	switch providerErr.Class {
+	case rag.ProviderFailureUnavailable:
+		return "provider_unavailable", true
+	case rag.ProviderFailureModelMissing:
+		return "model_missing", true
+	case rag.ProviderFailureTimeout:
+		return "query_embedding_timeout", true
+	default:
+		return "query_embedding_failed", true
+	}
+}
+
+func (s *Service) searchSemanticSourceIDs(ctx context.Context, repoID string, req SearchSourcesRequest) ([]string, error) {
+	if req.Kind == "" && req.Provenance == "" {
+		return nil, nil
+	}
+	sources, err := s.store.ListSources(ctx, cache.SourceFilter{RepoID: repoID, Kind: req.Kind, Provenance: cache.Provenance(req.Provenance)})
+	if err != nil {
+		return nil, normalizeError(err, "search", req.Query)
+	}
+	ids := make([]string, 0, len(sources))
+	for _, source := range sources {
+		ids = append(ids, source.ID)
+	}
+	return ids, nil
+}
+
+func (s *Service) searchSourceLexicalCandidates(ctx context.Context, repoID string, req SearchSourcesRequest, limit int) ([]SearchSourceResult, map[string]time.Time, error) {
+	results, err := s.store.SearchSources(ctx, cache.SearchQuery{RepoID: repoID, Query: req.Query, Kind: req.Kind, Provenance: cache.Provenance(req.Provenance), Limit: limit})
+	if err != nil {
+		return nil, nil, normalizeError(err, "search", req.Query)
 	}
 	out := make([]SearchSourceResult, 0, len(results))
 	updated := map[string]time.Time{}
 	for _, result := range results {
 		source, err := s.store.GetSourceScoped(ctx, repoID, result.ID)
 		if err != nil {
-			return SearchSourcesResult{}, normalizeError(err, "source", result.ID)
+			return nil, nil, normalizeError(err, "source", result.ID)
 		}
 		updated[result.ID] = source.UpdatedAt.UTC()
 		line := nullableLine(result.Line)
-		out = append(out, SearchSourceResult{RepoID: source.RepoID, ID: result.ID, Path: result.Path, Title: result.Title, Kind: source.Kind, Status: source.Status, Provenance: string(source.Provenance), Snippet: result.Snippet, LineStart: line, LineEnd: line, Score: result.Score})
+		out = append(out, SearchSourceResult{RepoID: source.RepoID, ID: result.ID, Path: result.Path, Title: result.Title, Kind: source.Kind, Status: source.Status, Provenance: string(source.Provenance), Snippet: result.Snippet, LineStart: line, LineEnd: line, Score: result.Score, Citations: []SearchCitation{}})
+	}
+	if stableID, err := s.resolveScopedStableID(ctx, repoID, req.Query, "", ""); err == nil {
+		seen := false
+		for _, item := range out {
+			if item.ID == stableID {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			source, getErr := s.store.GetSourceScoped(ctx, repoID, stableID)
+			if getErr == nil && (req.Kind == "" || source.Kind == req.Kind) && (req.Provenance == "" || string(source.Provenance) == req.Provenance) {
+				line := 1
+				snippet := strings.TrimSpace(source.Title)
+				if body := strings.TrimSpace(source.Body); body != "" {
+					snippet = body
+					if len([]rune(snippet)) > 160 {
+						snippet = string([]rune(snippet)[:160]) + "..."
+					}
+				}
+				out = append(out, SearchSourceResult{RepoID: source.RepoID, ID: source.ID, Path: source.Path, Title: source.Title, Kind: source.Kind, Status: source.Status, Provenance: string(source.Provenance), Snippet: snippet, LineStart: &line, LineEnd: &line, Score: 100, Citations: []SearchCitation{}})
+				updated[source.ID] = source.UpdatedAt.UTC()
+			}
+		}
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Score != out[j].Score {
@@ -604,12 +788,234 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 		if !updated[out[i].ID].Equal(updated[out[j].ID]) {
 			return updated[out[i].ID].Before(updated[out[j].ID])
 		}
-		if out[i].ID != out[j].ID {
-			return out[i].ID < out[j].ID
-		}
-		return out[i].Path < out[j].Path
+		return out[i].ID < out[j].ID
 	})
-	return SearchSourcesResult{RepoID: repoID, Query: req.Query, SearchMode: SearchModeFullText, Results: out, Limit: req.Limit, Offset: req.Offset}, nil
+	return out, updated, nil
+}
+
+type semanticSourceCandidate struct {
+	result    SearchSourceResult
+	score     float64
+	citations []scoredSearchCitation
+}
+
+type scoredSearchCitation struct {
+	citation SearchCitation
+	score    float64
+}
+
+func (s *Service) fuseSearchSources(ctx context.Context, repoID string, req SearchSourcesRequest, lexical []SearchSourceResult, ragResult rag.SearchResult, updated map[string]time.Time) ([]SearchSourceResult, error) {
+	candidates := make(map[string]SearchSourceResult, len(lexical)+len(ragResult.Results))
+	for i, result := range lexical {
+		result.Match.LexicalRank = i + 1
+		candidates[result.ID] = result
+	}
+	semantic := map[string]*semanticSourceCandidate{}
+	for _, hit := range ragResult.Results {
+		if hit.Score.Semantic <= 0 || strings.TrimSpace(hit.SourceID) == "" {
+			continue
+		}
+		source, err := s.store.GetSourceScoped(ctx, repoID, hit.SourceID)
+		if err != nil {
+			if isCacheNotFound(err) {
+				continue
+			}
+			return nil, normalizeError(err, "source", hit.SourceID)
+		}
+		if req.Kind != "" && source.Kind != req.Kind {
+			continue
+		}
+		if req.Provenance != "" && string(source.Provenance) != req.Provenance {
+			continue
+		}
+		item := semantic[source.ID]
+		if item == nil {
+			item = &semanticSourceCandidate{result: SearchSourceResult{RepoID: source.RepoID, ID: source.ID, Path: source.Path, Title: source.Title, Kind: source.Kind, Status: source.Status, Provenance: string(source.Provenance), Citations: []SearchCitation{}}}
+			semantic[source.ID] = item
+			updated[source.ID] = source.UpdatedAt.UTC()
+		}
+		if hit.Score.Semantic > item.score {
+			item.score = hit.Score.Semantic
+		}
+		duplicate := false
+		for _, citation := range item.citations {
+			if citation.citation.ChunkID == hit.ChunkID {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			item.citations = append(item.citations, scoredSearchCitation{citation: SearchCitation{ChunkID: hit.ChunkID, LineStart: hit.LineStart, LineEnd: hit.LineEnd, Snippet: hit.Snippet}, score: hit.Score.Semantic})
+		}
+	}
+	semanticOrder := make([]*semanticSourceCandidate, 0, len(semantic))
+	for _, item := range semantic {
+		sort.SliceStable(item.citations, func(i, j int) bool {
+			if item.citations[i].score != item.citations[j].score {
+				return item.citations[i].score > item.citations[j].score
+			}
+			return item.citations[i].citation.ChunkID < item.citations[j].citation.ChunkID
+		})
+		if len(item.citations) > 3 {
+			item.citations = item.citations[:3]
+		}
+		for _, citation := range item.citations {
+			item.result.Citations = append(item.result.Citations, citation.citation)
+		}
+		semanticOrder = append(semanticOrder, item)
+	}
+	sort.SliceStable(semanticOrder, func(i, j int) bool {
+		if semanticOrder[i].score != semanticOrder[j].score {
+			return semanticOrder[i].score > semanticOrder[j].score
+		}
+		return semanticOrder[i].result.ID < semanticOrder[j].result.ID
+	})
+	for i, item := range semanticOrder {
+		result, ok := candidates[item.result.ID]
+		if !ok {
+			result = item.result
+			if len(result.Citations) > 0 {
+				result.Snippet = result.Citations[0].Snippet
+				result.LineStart = nullableLine(result.Citations[0].LineStart)
+				result.LineEnd = nullableLine(result.Citations[0].LineEnd)
+			}
+		} else {
+			result.Citations = item.result.Citations
+		}
+		result.Match.SemanticRank = i + 1
+		candidates[result.ID] = result
+	}
+	out := make([]SearchSourceResult, 0, len(candidates))
+	for _, result := range candidates {
+		result.Match.ExactMatch = s.exactSourceMatch(ctx, repoID, req.Query, result)
+		score := 0.0
+		if result.Match.LexicalRank > 0 {
+			score += 1.0 / float64(60+result.Match.LexicalRank)
+		}
+		if result.Match.SemanticRank > 0 {
+			score += 1.0 / float64(60+result.Match.SemanticRank)
+		}
+		if result.Match.ExactMatch {
+			score += 1
+		}
+		result.Match.FusionScore = score
+		result.Score = score
+		if result.Citations == nil {
+			result.Citations = []SearchCitation{}
+		}
+		out = append(out, result)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Score != out[j].Score {
+			return out[i].Score > out[j].Score
+		}
+		if out[i].Match.ExactMatch != out[j].Match.ExactMatch {
+			return out[i].Match.ExactMatch
+		}
+		if out[i].Match.SemanticRank != out[j].Match.SemanticRank {
+			if out[i].Match.SemanticRank == 0 {
+				return false
+			}
+			if out[j].Match.SemanticRank == 0 {
+				return true
+			}
+			return out[i].Match.SemanticRank < out[j].Match.SemanticRank
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
+func (s *Service) exactSourceMatch(ctx context.Context, repoID, query string, result SearchSourceResult) bool {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return false
+	}
+	if strings.EqualFold(query, result.ID) || strings.EqualFold(query, result.Title) || strings.EqualFold(query, result.Path) {
+		return true
+	}
+	identities, err := s.store.GetIdentityMapScoped(ctx, repoID, result.ID)
+	if err != nil {
+		return false
+	}
+	for _, identity := range identities {
+		if strings.EqualFold(query, identity.Alias) || strings.EqualFold(query, identity.AliasType+":"+identity.Alias) {
+			return true
+		}
+	}
+	return false
+}
+
+func decorateLexicalFallback(ctx context.Context, s *Service, result *SearchSourcesResult, repoID string, offset int) {
+	for i := range result.Results {
+		result.Results[i].Rank = offset + i + 1
+		result.Results[i].Match.LexicalRank = offset + i + 1
+		result.Results[i].Match.ExactMatch = s.exactSourceMatch(ctx, repoID, result.Query, result.Results[i])
+		result.Results[i].Match.FusionScore = result.Results[i].Score
+		if result.Results[i].Citations == nil {
+			result.Results[i].Citations = []SearchCitation{}
+		}
+	}
+}
+
+func pageSearchSources(results []SearchSourceResult, offset, limit int) []SearchSourceResult {
+	if offset >= len(results) {
+		return []SearchSourceResult{}
+	}
+	end := offset + limit
+	if end > len(results) {
+		end = len(results)
+	}
+	return append([]SearchSourceResult(nil), results[offset:end]...)
+}
+
+func searchCoverageFromRAG(result rag.SearchResult) SearchRAGCoverage {
+	coverage := SearchRAGCoverage{
+		EligibleChunks: result.Coverage.TotalChunks,
+		EmbeddedChunks: result.Coverage.EmbeddedChunks,
+		MissingChunks:  result.Coverage.MissingChunks,
+		StaleChunks:    result.Coverage.StaleChunks,
+		NamespaceID:    result.Namespace.ID,
+	}
+	if coverage.EligibleChunks > 0 {
+		coverage.Ratio = float64(coverage.EmbeddedChunks) / float64(coverage.EligibleChunks)
+	}
+	return coverage
+}
+
+func ragFallbackReason(result rag.SearchResult) string {
+	switch result.Status {
+	case rag.RAGSearchStatusReady, rag.RAGSearchStatusNoResults:
+		return ""
+	case rag.RAGSearchStatusNoNamespace:
+		return "rag_namespace_missing"
+	case rag.RAGSearchStatusEmpty:
+		return "rag_namespace_stale"
+	case rag.RAGSearchStatusProviderNotReady:
+		if result.FailureClass == rag.ProviderFailureModelMissing {
+			return "model_missing"
+		}
+		if result.Provider.Ready {
+			if result.FailureClass == rag.ProviderFailureTimeout {
+				return "query_embedding_timeout"
+			}
+			return "query_embedding_failed"
+		}
+		return "provider_unavailable"
+	default:
+		return "provider_unavailable"
+	}
+}
+
+func ragStateForFallback(result rag.SearchResult) string {
+	switch result.Status {
+	case rag.RAGSearchStatusNoNamespace:
+		return "missing"
+	case rag.RAGSearchStatusEmpty:
+		return "stale"
+	default:
+		return "unavailable"
+	}
 }
 
 func (s *Service) GetSource(ctx context.Context, req GetSourceRequest) (SourceRecord, error) {

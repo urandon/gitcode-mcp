@@ -68,7 +68,7 @@ gitcode-mcp search --repo example-owner/example-repo "remote issue body"
 
 Expected: returns sources containing the query text in title or body.
 
-Search is cache full-text matching over indexed source title/body text. It is not fuzzy or semantic retrieval. If a query returns no results, retry with exact terms, identifiers, or multiple keyword variants rather than treating the miss as proof the source does not exist.
+Source search is hybrid by default: cache full-text candidates are always included, and a ready local RAG namespace adds semantic candidates. Semantic chunks are grouped back into source results with bounded citations. Responses distinguish `requested_mode` from `effective_mode` and report coverage plus any typed lexical fallback. Use `--mode full_text` when exact/token-only behavior is required; that mode never calls the embedding provider.
 
 Search accepts the same provenance filter:
 

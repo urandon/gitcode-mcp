@@ -147,6 +147,7 @@ type LiveRepositoryBindingRequest struct {
 type SearchSourcesRequest struct {
 	RepoID     string `json:"repo_id"`
 	Query      string `json:"query"`
+	Mode       string `json:"mode,omitempty"`
 	Kind       string `json:"kind,omitempty"`
 	Provenance string `json:"provenance,omitempty"`
 	Limit      int    `json:"limit,omitempty"`
@@ -154,26 +155,62 @@ type SearchSourcesRequest struct {
 }
 
 type SearchSourcesResult struct {
-	RepoID     string               `json:"repo_id"`
-	Query      string               `json:"query"`
-	SearchMode string               `json:"search_mode"`
-	Results    []SearchSourceResult `json:"results"`
-	Limit      int                  `json:"limit"`
-	Offset     int                  `json:"offset"`
+	RepoID         string               `json:"repo_id"`
+	Query          string               `json:"query"`
+	SearchMode     string               `json:"search_mode"`
+	RequestedMode  string               `json:"requested_mode"`
+	EffectiveMode  string               `json:"effective_mode"`
+	RAGState       string               `json:"rag_state"`
+	FallbackReason string               `json:"fallback_reason,omitempty"`
+	Coverage       SearchRAGCoverage    `json:"coverage"`
+	Repair         SearchRepairStatus   `json:"repair"`
+	Results        []SearchSourceResult `json:"results"`
+	Limit          int                  `json:"limit"`
+	Offset         int                  `json:"offset"`
 }
 
 type SearchSourceResult struct {
-	RepoID     string  `json:"repo_id"`
-	ID         string  `json:"id"`
-	Path       string  `json:"path"`
-	Title      string  `json:"title"`
-	Kind       string  `json:"kind"`
-	Status     string  `json:"status"`
-	Provenance string  `json:"provenance"`
-	Snippet    string  `json:"snippet"`
-	LineStart  *int    `json:"line_start"`
-	LineEnd    *int    `json:"line_end"`
-	Score      float64 `json:"score"`
+	RepoID     string           `json:"repo_id"`
+	ID         string           `json:"id"`
+	Path       string           `json:"path"`
+	Title      string           `json:"title"`
+	Kind       string           `json:"kind"`
+	Status     string           `json:"status"`
+	Provenance string           `json:"provenance"`
+	Snippet    string           `json:"snippet"`
+	LineStart  *int             `json:"line_start"`
+	LineEnd    *int             `json:"line_end"`
+	Score      float64          `json:"score"`
+	Rank       int              `json:"rank"`
+	Match      SearchMatch      `json:"match"`
+	Citations  []SearchCitation `json:"citations"`
+}
+
+type SearchMatch struct {
+	LexicalRank  int     `json:"lexical_rank,omitempty"`
+	SemanticRank int     `json:"semantic_rank,omitempty"`
+	ExactMatch   bool    `json:"exact_match"`
+	FusionScore  float64 `json:"fusion_score"`
+}
+
+type SearchCitation struct {
+	ChunkID   string `json:"chunk_id"`
+	LineStart int    `json:"line_start,omitempty"`
+	LineEnd   int    `json:"line_end,omitempty"`
+	Snippet   string `json:"snippet"`
+}
+
+type SearchRAGCoverage struct {
+	EligibleChunks int     `json:"eligible_chunks"`
+	EmbeddedChunks int     `json:"embedded_chunks"`
+	MissingChunks  int     `json:"missing_chunks"`
+	StaleChunks    int     `json:"stale_chunks"`
+	Ratio          float64 `json:"ratio"`
+	NamespaceID    string  `json:"namespace_id,omitempty"`
+}
+
+type SearchRepairStatus struct {
+	State string `json:"state"`
 }
 
 type GetSourceRequest struct {

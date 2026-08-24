@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/cache"
-	"gitcode-mcp/internal/service"
+	"gitcode-mcp/internal/progress"
 )
 
 const defaultBenchmarkCorpusChunks = 5758376
@@ -221,7 +221,7 @@ func runRealModelBenchmarkCase(t *testing.T, ctx context.Context, endpoint, mode
 		t.Fatal(err)
 	}
 	timed := &timedEmbeddingProvider{EmbeddingProvider: provider}
-	progressCh := make(chan service.ProgressEvent, chunks+16)
+	progressCh := make(chan progress.Event, chunks+16)
 	progressDone := make(chan struct{})
 	var progressEvents int
 	var halfwayAt time.Time

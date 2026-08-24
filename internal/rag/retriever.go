@@ -24,18 +24,19 @@ const (
 )
 
 type SearchRequest struct {
-	RepoID                string `json:"repo_id"`
-	Query                 string `json:"query"`
-	ProfileID             string `json:"profile_id,omitempty"`
-	SourceID              string `json:"source_id,omitempty"`
-	RecordID              string `json:"record_id,omitempty"`
-	SnapshotID            string `json:"snapshot_id,omitempty"`
-	ChunkPolicyID         string `json:"chunk_policy_id,omitempty"`
-	LanguagePolicyID      string `json:"language_policy_id,omitempty"`
-	DocumentInstructionID string `json:"document_instruction_id,omitempty"`
-	QueryInstructionID    string `json:"query_instruction_id,omitempty"`
-	TopK                  int    `json:"top_k,omitempty"`
-	Limit                 int    `json:"limit,omitempty"`
+	RepoID                string   `json:"repo_id"`
+	Query                 string   `json:"query"`
+	ProfileID             string   `json:"profile_id,omitempty"`
+	SourceID              string   `json:"source_id,omitempty"`
+	SourceIDs             []string `json:"source_ids,omitempty"`
+	RecordID              string   `json:"record_id,omitempty"`
+	SnapshotID            string   `json:"snapshot_id,omitempty"`
+	ChunkPolicyID         string   `json:"chunk_policy_id,omitempty"`
+	LanguagePolicyID      string   `json:"language_policy_id,omitempty"`
+	DocumentInstructionID string   `json:"document_instruction_id,omitempty"`
+	QueryInstructionID    string   `json:"query_instruction_id,omitempty"`
+	TopK                  int      `json:"top_k,omitempty"`
+	Limit                 int      `json:"limit,omitempty"`
 }
 
 type SearchResult struct {
@@ -159,6 +160,10 @@ func (r *RAGRetriever) Search(ctx context.Context, req SearchRequest) (SearchRes
 			BatchSize:    profile.BatchSize,
 		},
 	}
+	if req.SourceIDs != nil && len(req.SourceIDs) == 0 {
+		result.Status = RAGSearchStatusNoResults
+		return result, nil
+	}
 	info, providerErr := r.provider.ModelInfo(ctx)
 	if providerErr != nil {
 		result.Status = RAGSearchStatusProviderNotReady
@@ -196,6 +201,7 @@ func (r *RAGRetriever) Search(ctx context.Context, req SearchRequest) (SearchRes
 	if err != nil {
 		return SearchResult{}, err
 	}
+	chunks = filterChunksBySourceIDs(chunks, req.SourceIDs)
 	if len(chunks) == 0 {
 		result.Status = RAGSearchStatusEmpty
 		result.Warnings = append(result.Warnings, "no cached chunks match the request")
@@ -225,7 +231,7 @@ func (r *RAGRetriever) Search(ctx context.Context, req SearchRequest) (SearchRes
 	if len(embedded.Embeddings) != 1 {
 		return SearchResult{}, fmt.Errorf("rag search: embedding count = %d, want 1", len(embedded.Embeddings))
 	}
-	semantic, err := r.vectorStore.Search(ctx, VectorSearchRequest{RepoID: req.RepoID, NamespaceID: namespace.ID, QueryVector: embedded.Embeddings[0], TopK: topK, SourceID: req.SourceID, RecordID: req.RecordID, SnapshotID: req.SnapshotID})
+	semantic, err := r.vectorStore.Search(ctx, VectorSearchRequest{RepoID: req.RepoID, NamespaceID: namespace.ID, QueryVector: embedded.Embeddings[0], TopK: topK, SourceID: req.SourceID, SourceIDs: req.SourceIDs, RecordID: req.RecordID, SnapshotID: req.SnapshotID})
 	if err != nil {
 		return SearchResult{}, err
 	}
@@ -295,6 +301,23 @@ func (r *RAGRetriever) Search(ctx context.Context, req SearchRequest) (SearchRes
 		})
 	}
 	return result, nil
+}
+
+func filterChunksBySourceIDs(chunks []cache.Chunk, sourceIDs []string) []cache.Chunk {
+	if sourceIDs == nil {
+		return chunks
+	}
+	allowed := make(map[string]struct{}, len(sourceIDs))
+	for _, sourceID := range sourceIDs {
+		allowed[sourceID] = struct{}{}
+	}
+	filtered := make([]cache.Chunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		if _, ok := allowed[chunk.SourceID]; ok {
+			filtered = append(filtered, chunk)
+		}
+	}
+	return filtered
 }
 
 func searchCoverage(ctx context.Context, store ragSearchStore, req SearchRequest, namespaceID string, chunks map[string]cache.Chunk) (CoverageStatus, error) {
