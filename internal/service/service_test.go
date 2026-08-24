@@ -2267,7 +2267,7 @@ func TestSearchSourcesHybridGroupsSemanticChunksBySource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.RequestedMode != SearchModeHybrid || result.EffectiveMode != SearchModeHybrid || result.RAGState != "partial" || result.FallbackReason != "" || result.Coverage.Ratio != .75 || result.Repair.State != "automatic" {
+	if result.RequestedMode != SearchModeHybrid || result.EffectiveMode != SearchModeHybrid || result.RAGState != "partial" || result.FallbackReason != "" || result.Coverage.Ratio != .75 || result.Repair.State != "needed" {
 		t.Fatalf("hybrid state=%#v", result)
 	}
 	if len(result.Results) != 2 || result.Results[0].ID != "DOC-123" || len(result.Results[0].Citations) != 2 || result.Results[1].ID != "TASK-001" {
@@ -2275,6 +2275,23 @@ func TestSearchSourcesHybridGroupsSemanticChunksBySource(t *testing.T) {
 	}
 	if result.Results[0].Match.SemanticRank != 1 || result.Results[0].Match.LexicalRank != 0 || result.Results[0].Snippet != "русский концептуальный фрагмент" {
 		t.Fatalf("top result=%#v", result.Results[0])
+	}
+}
+
+func TestSearchSourcesHybridAppliesFiltersBeforeSemanticTopK(t *testing.T) {
+	ctx := context.Background()
+	svc := seededService(t, ctx)
+	svc.SetRAGSearchProvider(func(_ context.Context, req rag.SearchRequest) (rag.SearchResult, error) {
+		if strings.Join(req.SourceIDs, ",") != "TASK-001" {
+			t.Fatalf("semantic source filter=%#v, want TASK-001", req.SourceIDs)
+		}
+		return rag.SearchResult{Status: rag.RAGSearchStatusReady, Namespace: rag.NamespaceStatus{ID: "namespace-1", Exists: true, Current: true}, Coverage: rag.CoverageStatus{TotalChunks: 1, EmbeddedChunks: 1}, Results: []rag.SearchContext{
+			{ChunkID: "task", SourceID: "TASK-001", Snippet: "filtered semantic result", Score: rag.ScoreBreakdown{Semantic: .5}},
+		}}, nil
+	})
+	result, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: "semantic only", Kind: "task", Provenance: "fixture", Limit: 1})
+	if err != nil || len(result.Results) != 1 || result.Results[0].ID != "TASK-001" {
+		t.Fatalf("result=%#v err=%v", result, err)
 	}
 }
 

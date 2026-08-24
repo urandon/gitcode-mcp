@@ -660,8 +660,12 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 		decorateLexicalFallback(ctx, s, &base, repoID, req.Offset)
 		return base, nil
 	}
+	semanticSourceIDs, err := s.searchSemanticSourceIDs(ctx, repoID, req)
+	if err != nil {
+		return SearchSourcesResult{}, err
+	}
 	ragLimit := semanticLimit * 2
-	ragResult, ragErr := s.ragSearch(ctx, rag.SearchRequest{RepoID: repoID, Query: req.Query, TopK: semanticLimit, Limit: ragLimit})
+	ragResult, ragErr := s.ragSearch(ctx, rag.SearchRequest{RepoID: repoID, Query: req.Query, SourceIDs: semanticSourceIDs, TopK: semanticLimit, Limit: ragLimit})
 	base.Coverage = searchCoverageFromRAG(ragResult)
 	if ragErr != nil {
 		base.RAGState = "unavailable"
@@ -685,7 +689,7 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 	base.Repair.State = "not_needed"
 	if base.Coverage.MissingChunks > 0 || base.Coverage.StaleChunks > 0 {
 		base.RAGState = "partial"
-		base.Repair.State = "automatic"
+		base.Repair.State = "needed"
 	}
 	out, err := s.fuseSearchSources(ctx, repoID, req, lexical, ragResult, updated)
 	if err != nil {
@@ -696,6 +700,21 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 		base.Results[i].Rank = req.Offset + i + 1
 	}
 	return base, nil
+}
+
+func (s *Service) searchSemanticSourceIDs(ctx context.Context, repoID string, req SearchSourcesRequest) ([]string, error) {
+	if req.Kind == "" && req.Provenance == "" {
+		return nil, nil
+	}
+	sources, err := s.store.ListSources(ctx, cache.SourceFilter{RepoID: repoID, Kind: req.Kind, Provenance: cache.Provenance(req.Provenance)})
+	if err != nil {
+		return nil, normalizeError(err, "search", req.Query)
+	}
+	ids := make([]string, 0, len(sources))
+	for _, source := range sources {
+		ids = append(ids, source.ID)
+	}
+	return ids, nil
 }
 
 func (s *Service) searchSourceLexicalCandidates(ctx context.Context, repoID string, req SearchSourcesRequest, limit int) ([]SearchSourceResult, map[string]time.Time, error) {

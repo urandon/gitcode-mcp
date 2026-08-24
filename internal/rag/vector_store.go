@@ -23,6 +23,7 @@ type VectorSearchRequest struct {
 	QueryVector []float32
 	TopK        int
 	SourceID    string
+	SourceIDs   []string
 	RecordID    string
 	SnapshotID  string
 }
@@ -82,12 +83,18 @@ func (s *ExactScanVectorStore) Search(ctx context.Context, req VectorSearchReque
 	}
 	top := &vectorResultHeap{}
 	heap.Init(top)
+	allowedSourceIDs := stringSet(req.SourceIDs)
 	for _, embedding := range embeddings {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		if currentHash, ok := currentHashes[embedding.ChunkID]; !ok || currentHash != embedding.ChunkContentHash {
 			continue
+		}
+		if allowedSourceIDs != nil {
+			if _, ok := allowedSourceIDs[embedding.SourceID]; !ok {
+				continue
+			}
 		}
 		vector, err := DecodeFloat32Vector(embedding.Vector, embedding.Dimensions)
 		if err != nil {
@@ -137,10 +144,27 @@ func (s *ExactScanVectorStore) currentChunkHashes(ctx context.Context, req Vecto
 		return nil, err
 	}
 	hashes := make(map[string]string, len(chunks))
+	allowedSourceIDs := stringSet(req.SourceIDs)
 	for _, chunk := range chunks {
+		if allowedSourceIDs != nil {
+			if _, ok := allowedSourceIDs[chunk.SourceID]; !ok {
+				continue
+			}
+		}
 		hashes[chunk.ID] = chunk.ContentHash
 	}
 	return hashes, nil
+}
+
+func stringSet(values []string) map[string]struct{} {
+	if values == nil {
+		return nil
+	}
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		set[value] = struct{}{}
+	}
+	return set
 }
 
 func EncodeNormalizedFloat32Vector(vector []float32) ([]byte, error) {
