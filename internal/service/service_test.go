@@ -708,6 +708,34 @@ func TestIssueWriteTargetResolutionIsExplicitAndCacheFirst(t *testing.T) {
 	if err != nil || largeNumber.IssueNumber != 4226802 || largeNumber.StableSourceID != "ISSUE-LARGE-NUMBER" {
 		t.Fatalf("legitimate large issue number result=%#v err=%v", largeNumber, err)
 	}
+
+	partialStore := &writeRefreshFailStore{Store: store, failNextRefresh: true}
+	partialClient := &fakeGitCodeClient{createIssueCommentResult: gitcode.WriteResult[gitcode.Comment]{
+		Record:            gitcode.Comment{ID: "partial-comment-76", IssueID: "4226802", Body: "partial replay", CreatedAt: confirmedAt, UpdatedAt: confirmedAt},
+		Confirmed:         true,
+		Operation:         "CreateIssueComment",
+		RemoteID:          "partial-comment-76",
+		ParentIssueNumber: 76,
+		ParentIssueID:     "4226802",
+		ConfirmedAt:       confirmedAt,
+	}}
+	partialSvc := NewWithClient(partialStore, partialClient)
+	partialSvc.providerMode = gitcode.ProviderModeLive
+	partialSvc.writeCredentialPresent = true
+	partialReq := WriteCommandRequest{RepoID: "identity-write", Mode: WriteModeLive, Number: 76, Body: "partial replay", IdempotencyKey: "partial-comment-replay"}
+	if _, err := partialSvc.AddComment(ctx, partialReq); err == nil {
+		t.Fatal("first partial comment write unexpectedly succeeded")
+	}
+	if result, err := partialSvc.AddComment(ctx, partialReq); err != nil || result.Status != "succeeded" || !result.Replayed || partialClient.createIssueCommentCalls != 1 {
+		t.Fatalf("partial replay result=%#v calls=%d err=%v", result, partialClient.createIssueCommentCalls, err)
+	}
+	if _, err := store.ResolveAliasScoped(ctx, "identity-write", cache.RemoteAlias{Type: "gitcode_issue_id", ID: "ISSUE-4226802"}); err == nil {
+		t.Fatal("partial replay created a stable id as a provider alias")
+	}
+	identity, err := store.ResolveAliasScoped(ctx, "identity-write", cache.RemoteAlias{Type: "gitcode_issue_id", ID: "4226802"})
+	if err != nil || identity.SourceID != "ISSUE-4226802" {
+		t.Fatalf("canonical provider identity=%#v err=%v", identity, err)
+	}
 }
 
 func TestWritePartialCacheRefreshRetryUsesAuditWithoutSecondAdapterCall(t *testing.T) {
@@ -1454,8 +1482,15 @@ func TestScenario017AddCommentLiveShapeCachesComment(t *testing.T) {
 		t.Fatal(err)
 	}
 	created := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	parent := cache.Record{RepoID: "fixture-a", ID: "ISSUE-42", Type: "issue", Path: "issues/42.md", Title: "Canonical issue", Body: "body", Status: "open", ContentHash: "issue-42", Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: "42", CreatedAt: created, UpdatedAt: created}
+	if err := store.UpsertRecordGraph(ctx, cache.RecordGraph{Record: parent, Identities: []cache.Identity{
+		{RepoID: "fixture-a", SourceID: parent.ID, AliasType: "issue", Alias: "42", Remote: cache.RemoteAlias{Type: "issue", ID: "42"}},
+		{RepoID: "fixture-a", SourceID: parent.ID, AliasType: "gitcode_issue_id", Alias: "420042", Remote: cache.RemoteAlias{Type: "gitcode_issue_id", ID: "420042"}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
 	client := &fakeGitCodeClient{
-		createIssueCommentResult: gitcode.WriteResult[gitcode.Comment]{Record: gitcode.Comment{ID: "2002", Body: "live comment", Author: "commenter", CreatedAt: created}, Confirmed: true, Operation: "CreateIssueComment", RemoteID: "2002", ParentIssueNumber: 42, ConfirmedAt: created},
+		createIssueCommentResult: gitcode.WriteResult[gitcode.Comment]{Record: gitcode.Comment{ID: "2002", IssueID: "420042", Body: "live comment", Author: "commenter", CreatedAt: created}, Confirmed: true, Operation: "CreateIssueComment", RemoteID: "2002", ParentIssueNumber: 42, ParentIssueID: "420042", ConfirmedAt: created},
 	}
 	svc := NewWithClient(store, client)
 	svc.providerMode = gitcode.ProviderModeLive
@@ -1473,6 +1508,37 @@ func TestScenario017AddCommentLiveShapeCachesComment(t *testing.T) {
 	}
 	if len(record.Comments) != 1 || record.Comments[0].CommentID != "2002" || record.Comments[0].Author != "commenter" || record.Comments[0].Body != "live comment" {
 		t.Fatalf("comments=%#v", record.Comments)
+	}
+	if _, err := store.GetRecord(ctx, "fixture-a", "ISSUE-420042"); err == nil {
+		t.Fatal("add-comment created a provider-id placeholder parent")
+	}
+	identity, err := store.ResolveAliasScoped(ctx, "fixture-a", cache.RemoteAlias{Type: "gitcode_issue_id", ID: "420042"})
+	if err != nil || identity.SourceID != "ISSUE-42" {
+		t.Fatalf("provider identity=%#v err=%v", identity, err)
+	}
+	projection, err := store.GetSourceScoped(ctx, "fixture-a", "ISSUECOMMENT-42-2002")
+	if err != nil || projection.Body != "live comment" {
+		t.Fatalf("projection=%#v err=%v", projection, err)
+	}
+	links, err := store.ListLinks(ctx, cache.LinkFilter{RepoID: "fixture-a", SourceID: projection.ID})
+	if err != nil || len(links) != 1 || links[0].TargetID != "ISSUE-42" {
+		t.Fatalf("projection links=%#v err=%v", links, err)
+	}
+	queue, ok, err := store.GetIssueCommentSync(ctx, "fixture-a", "ISSUE-42")
+	if err != nil || !ok || queue.IssueNumber != 42 || queue.ProviderID != "420042" {
+		t.Fatalf("queue=%#v ok=%t err=%v", queue, ok, err)
+	}
+	found, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: "live comment", Kind: "issue_comment"})
+	if err != nil || len(found.Results) != 1 || found.Results[0].ID != projection.ID {
+		t.Fatalf("search=%#v err=%v", found, err)
+	}
+	replayed, err := svc.AddComment(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 42, Body: "live comment", IdempotencyKey: "comment-key-live-shape"})
+	if err != nil || replayed.Status != "already_applied" || client.createIssueCommentCalls != 1 {
+		t.Fatalf("replay=%#v calls=%d err=%v", replayed, client.createIssueCommentCalls, err)
+	}
+	record, err = store.GetRecord(ctx, "fixture-a", "ISSUE-42")
+	if err != nil || len(record.Comments) != 1 {
+		t.Fatalf("record after replay=%#v err=%v", record, err)
 	}
 }
 
@@ -2194,6 +2260,33 @@ func TestWriteIdempotencyScopedByRepo(t *testing.T) {
 	}
 	if client.createIssueCalls != 2 {
 		t.Fatalf("calls=%d want 2", client.createIssueCalls)
+	}
+}
+
+func TestProjectPendingIssueCommentCacheMakesRepairedCommentsSearchable(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "repair", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	record := cache.Record{RepoID: "repair", ID: "ISSUE-88", Type: "issue", Path: "issues/88.md", Title: "Issue 88", Status: "open", ContentHash: "issue", Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: "88", CreatedAt: now, UpdatedAt: now}
+	comment := cache.RecordComment{RepoID: "repair", RecordID: record.ID, CommentID: "comment-1", Body: "repaired comment searchable", ContentHash: "comment", CreatedAt: now, UpdatedAt: now}
+	if err := store.UpsertRecordGraph(ctx, cache.RecordGraph{Record: record, Comments: []cache.RecordComment{comment}}); err != nil {
+		t.Fatal(err)
+	}
+	item := cache.IssueCommentSync{RepoID: "repair", SourceID: record.ID, IssueNumber: 88, RemoteID: "88", ExpectedCount: 1, Status: "pending", UpdatedAt: now}
+	svc := New(store)
+	if err := svc.projectPendingIssueCommentCache(ctx, []cache.IssueCommentSync{item}); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := store.GetSourceScoped(ctx, "repair", "ISSUECOMMENT-88-comment-1")
+	if err != nil || projection.Body != comment.Body {
+		t.Fatalf("projection=%#v err=%v", projection, err)
 	}
 }
 
