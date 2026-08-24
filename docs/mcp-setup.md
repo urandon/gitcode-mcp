@@ -215,7 +215,7 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 
 | Tool | Description |
 |---|---|
-| `search_sources` | Search cached sources by full-text/token query; not fuzzy or semantic |
+| `search_sources` | Hybrid source search by default; lexical results always participate, semantic chunks are grouped into source citations, and `mode=full_text` disables the embedding branch |
 | `get_source` | Get a cached source record by stable id |
 | `list_sources` | List cached sources with kind/status/limit/offset |
 | `list_chunks` | List cached index chunks |

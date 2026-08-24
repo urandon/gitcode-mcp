@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/cache"
-	"gitcode-mcp/internal/service"
+	"gitcode-mcp/internal/progress"
 )
 
 type StatusRequest struct {
@@ -67,15 +67,15 @@ type CoverageStatus struct {
 }
 
 type JobStatus struct {
-	ID        string                  `json:"id"`
-	Type      string                  `json:"type,omitempty"`
-	RepoID    string                  `json:"repo_id,omitempty"`
-	ProfileID string                  `json:"profile_id,omitempty"`
-	Status    string                  `json:"status"`
-	Steps     int                     `json:"steps,omitempty"`
-	Completed int                     `json:"completed,omitempty"`
-	Error     string                  `json:"error,omitempty"`
-	Progress  []service.ProgressEvent `json:"progress,omitempty"`
+	ID        string           `json:"id"`
+	Type      string           `json:"type,omitempty"`
+	RepoID    string           `json:"repo_id,omitempty"`
+	ProfileID string           `json:"profile_id,omitempty"`
+	Status    string           `json:"status"`
+	Steps     int              `json:"steps,omitempty"`
+	Completed int              `json:"completed,omitempty"`
+	Error     string           `json:"error,omitempty"`
+	Progress  []progress.Event `json:"progress,omitempty"`
 }
 
 type ServiceStatus struct {

@@ -421,19 +421,27 @@ func resolveLiveClient(deps StartupDeps) (gitcode.Client, error) {
 }
 
 func resolveService(store cache.Store, deps StartupDeps) (*service.Service, error) {
+	var svc *service.Service
+	var err error
 	if !deps.GitCode.Live {
-		return service.NewWithMode(store, gitcode.ProviderModeFixture, "", service.ServiceConfig{LockPath: deps.Cache.LockPath, Feedback: deps.Config.Feedback})
+		svc, err = service.NewWithMode(store, gitcode.ProviderModeFixture, "", service.ServiceConfig{LockPath: deps.Cache.LockPath, Feedback: deps.Config.Feedback})
+	} else {
+		svc, err = service.NewWithMode(store, gitcode.ProviderModeLive, deps.GitCode.Token, service.ServiceConfig{
+			BaseURL:         deps.GitCode.BaseURL,
+			LockPath:        deps.Cache.LockPath,
+			Timeout:         deps.GitCode.DefaultTimeout,
+			MaxResponseSize: deps.GitCode.MaxResponseSize,
+			MaxRetries:      deps.GitCode.MaxRetries,
+			RateLimitRPS:    deps.GitCode.RateLimitRPS,
+			RateLimitBurst:  deps.GitCode.RateLimitBurst,
+			Feedback:        deps.Config.Feedback,
+		})
 	}
-	return service.NewWithMode(store, gitcode.ProviderModeLive, deps.GitCode.Token, service.ServiceConfig{
-		BaseURL:         deps.GitCode.BaseURL,
-		LockPath:        deps.Cache.LockPath,
-		Timeout:         deps.GitCode.DefaultTimeout,
-		MaxResponseSize: deps.GitCode.MaxResponseSize,
-		MaxRetries:      deps.GitCode.MaxRetries,
-		RateLimitRPS:    deps.GitCode.RateLimitRPS,
-		RateLimitBurst:  deps.GitCode.RateLimitBurst,
-		Feedback:        deps.Config.Feedback,
-	})
+	if err != nil {
+		return nil, err
+	}
+	svc.ConfigureRAGSearch(deps.Config)
+	return svc, nil
 }
 
 func runCLICompatibility(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps StartupDeps) int {

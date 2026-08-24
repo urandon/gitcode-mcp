@@ -10,7 +10,7 @@ The project is self-contained and public-safe. Source repositories, trackers, an
 
 - Binds GitCode repositories to local cache identities and aliases.
 - Syncs issues, pull requests, comments, wiki pages, labels, and milestones into SQLite.
-- Searches cached records with full-text/token matching and reads cached records without requiring live network access.
+- Searches cached sources with hybrid lexical/semantic retrieval by default and keeps deterministic full-text mode available.
 - Runs optional local RAG semantic/hybrid retrieval over cached chunks with model-scoped embeddings.
 - Maintains multiple enrolled caches with daemon-owned recent refresh, historical backfill, and content-generation-aware RAG repair.
 - Resolves stable local ids and remote aliases for links, snippets, backlinks, and exports.
@@ -32,7 +32,7 @@ go run ./cmd/gitcode-mcp maintenance plan --repo YOUR_OWNER/YOUR_REPO
 go run ./cmd/gitcode-mcp maintenance enable --repo YOUR_OWNER/YOUR_REPO --yes --idempotency-key setup-1
 ```
 
-`search` is cache full-text search, not fuzzy or semantic retrieval. Empty results mean the exact query terms did not match cached text; retry with exact terms, ids, or keyword variants when wording may differ.
+`search` and `search_sources` request hybrid retrieval by default: full text always runs, and a ready local RAG namespace contributes semantic candidates. Results are grouped by source and carry citations plus lexical/semantic rank provenance. If RAG is unavailable, the response returns full-text results with an explicit fallback reason. Use `--mode full_text` for deterministic exact/token retrieval without calling the embedding provider.
 
 For MCP usage, start with [MCP Setup](docs/mcp-setup.md). For live credentials, start with [Secrets](docs/secrets.md) and [Config Reference](docs/config-reference.md).
 For semantic retrieval, start with [RAG Setup and Operation](docs/rag.md).

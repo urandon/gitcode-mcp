@@ -363,6 +363,43 @@ func TestMCPRAGSearchReturnsStructuredContent(t *testing.T) {
 	}
 }
 
+func TestMCPSearchSourcesDefaultsToSourceOrientedHybrid(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	svc := service.New(store)
+	svc.SetRAGSearchProvider(func(_ context.Context, req rag.SearchRequest) (rag.SearchResult, error) {
+		if req.Query != "conceptual daemon lifetime" {
+			t.Fatalf("request=%#v", req)
+		}
+		return rag.SearchResult{Status: rag.RAGSearchStatusReady, Namespace: rag.NamespaceStatus{ID: "ns-1", Exists: true, Current: true}, Coverage: rag.CoverageStatus{TotalChunks: 3, EmbeddedChunks: 3}, Results: []rag.SearchContext{
+			{ChunkID: "issue-a", SourceID: "ISSUE-42", LineStart: 1, LineEnd: 1, Snippet: "daemon lifetime evidence", Score: rag.ScoreBreakdown{Semantic: .95}},
+			{ChunkID: "issue-b", SourceID: "ISSUE-42", LineStart: 2, LineEnd: 2, Snippet: "same source second chunk", Score: rag.ScoreBreakdown{Semantic: .90}},
+		}}, nil
+	})
+	handler := NewRPCHandler(svc)
+	id := json.RawMessage(`1`)
+	params := json.RawMessage(`{"name":"search_sources","arguments":{"repo_id":"fixture-a","query":"conceptual daemon lifetime"}}`)
+	resp, ok := handler.Handle(context.Background(), request{JSONRPC: "2.0", ID: &id, Method: "tools/call", Params: &params})
+	if !ok || resp == nil || resp.Error != nil {
+		t.Fatalf("response=%#v ok=%t", resp, ok)
+	}
+	var result toolCallResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(result.StructuredContent)
+	var structured service.SearchSourcesResult
+	if err := json.Unmarshal(raw, &structured); err != nil {
+		t.Fatal(err)
+	}
+	if structured.RequestedMode != service.SearchModeHybrid || structured.EffectiveMode != service.SearchModeHybrid || len(structured.Results) != 1 || len(structured.Results[0].Citations) != 2 {
+		t.Fatalf("structured=%#v", structured)
+	}
+	if len(result.Content) != 1 || !strings.Contains(result.Content[0].Text, "requested_mode: hybrid effective_mode: hybrid") {
+		t.Fatalf("content=%#v", result.Content)
+	}
+}
+
 func TestMCPErrorOutputCanonicalFailureClass(t *testing.T) {
 	tests := []struct {
 		name string
@@ -640,8 +677,8 @@ func TestIntegration(t *testing.T) {
 		if seen[tls.Tools[i].Name] {
 			t.Fatalf("duplicate tool listed: %s", tls.Tools[i].Name)
 		}
-		if want == "search_sources" && (!strings.Contains(tls.Tools[i].Description, "full-text") || !strings.Contains(tls.Tools[i].Description, "not fuzzy")) {
-			t.Fatalf("search_sources description should state full-text/not fuzzy contract: %q", tls.Tools[i].Description)
+		if want == "search_sources" && (!strings.Contains(tls.Tools[i].Description, "hybrid") || !strings.Contains(tls.Tools[i].Description, "full_text")) {
+			t.Fatalf("search_sources description should state hybrid/full_text contract: %q", tls.Tools[i].Description)
 		}
 		if want == "search_chunks" && (!strings.Contains(tls.Tools[i].Description, "full-text") || !strings.Contains(tls.Tools[i].Description, "not fuzzy")) {
 			t.Fatalf("search_chunks description should state full-text/not fuzzy contract: %q", tls.Tools[i].Description)
@@ -1002,6 +1039,9 @@ func TestSchemasAndResults(t *testing.T) {
 		}
 		if sres.SearchMode != service.SearchModeFullText {
 			t.Fatalf("search_mode = %q, want %q", sres.SearchMode, service.SearchModeFullText)
+		}
+		if sres.RequestedMode != service.SearchModeHybrid || sres.EffectiveMode != service.SearchModeFullText || sres.FallbackReason != "rag_disabled" {
+			t.Fatalf("hybrid fallback contract=%#v", sres)
 		}
 		if len(sres.Results) == 0 || sres.Results[0].ID == "" || sres.Results[0].Path == "" {
 			t.Fatalf("search results missing fields: %+v", sres)

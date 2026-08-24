@@ -20,6 +20,7 @@ import (
 	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
+	"gitcode-mcp/internal/rag"
 )
 
 func TestNewDelegatesToFixture(t *testing.T) {
@@ -2207,6 +2208,9 @@ func TestSearchSources(t *testing.T) {
 	if len(results.Results) != 2 {
 		t.Fatalf("SearchSources returned %d results, want 2", len(results.Results))
 	}
+	if results.RequestedMode != SearchModeHybrid || results.EffectiveMode != SearchModeFullText || results.FallbackReason != "rag_disabled" {
+		t.Fatalf("default fallback contract=%#v", results)
+	}
 	if results.RepoID != "fixture-a" || results.Query != "backlog" || results.Results[0].ID == "" || results.Results[0].Path == "" || results.Results[0].Title == "" || results.Results[0].Kind == "" || results.Results[0].Status == "" || results.Results[0].Snippet == "" || results.Results[0].LineStart == nil || results.Results[0].LineEnd == nil {
 		t.Fatalf("SearchSources result missing contract fields: %#v", results)
 	}
@@ -2217,6 +2221,105 @@ func TestSearchSources(t *testing.T) {
 	}
 	if len(missing.Results) != 0 {
 		t.Fatalf("SearchSources missing query returned %d results, want 0", len(missing.Results))
+	}
+}
+
+func TestSearchSourcesFullTextNeverCallsRAG(t *testing.T) {
+	ctx := context.Background()
+	svc := seededService(t, ctx)
+	calls := 0
+	svc.SetRAGSearchProvider(func(context.Context, rag.SearchRequest) (rag.SearchResult, error) {
+		calls++
+		return rag.SearchResult{}, nil
+	})
+	result, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: "backlog", Mode: "full-text", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 || result.RequestedMode != SearchModeFullText || result.EffectiveMode != SearchModeFullText || result.RAGState != "not_requested" || len(result.Results) != 2 {
+		t.Fatalf("calls=%d result=%#v", calls, result)
+	}
+	exact, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: "DOC-123", Mode: SearchModeFullText, Limit: 10})
+	if err != nil || calls != 0 || len(exact.Results) != 1 || exact.Results[0].ID != "DOC-123" || !exact.Results[0].Match.ExactMatch {
+		t.Fatalf("exact=%#v calls=%d err=%v", exact, calls, err)
+	}
+}
+
+func TestSearchSourcesHybridGroupsSemanticChunksBySource(t *testing.T) {
+	ctx := context.Background()
+	svc := seededService(t, ctx)
+	svc.SetRAGSearchProvider(func(_ context.Context, req rag.SearchRequest) (rag.SearchResult, error) {
+		if req.TopK < 40 || req.Limit < 80 {
+			t.Fatalf("bounded semantic candidates=%#v", req)
+		}
+		return rag.SearchResult{
+			Status:    rag.RAGSearchStatusReady,
+			Namespace: rag.NamespaceStatus{ID: "namespace-1", Exists: true, Current: true},
+			Coverage:  rag.CoverageStatus{TotalChunks: 4, EmbeddedChunks: 3, MissingChunks: 1},
+			Results: []rag.SearchContext{
+				{ChunkID: "doc-a", SourceID: "DOC-123", LineStart: 2, LineEnd: 2, Snippet: "русский концептуальный фрагмент", Score: rag.ScoreBreakdown{Semantic: .99}},
+				{ChunkID: "doc-b", SourceID: "DOC-123", LineStart: 3, LineEnd: 3, Snippet: "中文语义片段", Score: rag.ScoreBreakdown{Semantic: .98}},
+				{ChunkID: "task-a", SourceID: "TASK-001", LineStart: 1, LineEnd: 1, Snippet: "English semantic citation", Score: rag.ScoreBreakdown{Semantic: .80}},
+			},
+		}, nil
+	})
+	result, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: "как искать по смыслу", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequestedMode != SearchModeHybrid || result.EffectiveMode != SearchModeHybrid || result.RAGState != "partial" || result.FallbackReason != "" || result.Coverage.Ratio != .75 || result.Repair.State != "automatic" {
+		t.Fatalf("hybrid state=%#v", result)
+	}
+	if len(result.Results) != 2 || result.Results[0].ID != "DOC-123" || len(result.Results[0].Citations) != 2 || result.Results[1].ID != "TASK-001" {
+		t.Fatalf("grouped results=%#v", result.Results)
+	}
+	if result.Results[0].Match.SemanticRank != 1 || result.Results[0].Match.LexicalRank != 0 || result.Results[0].Snippet != "русский концептуальный фрагмент" {
+		t.Fatalf("top result=%#v", result.Results[0])
+	}
+}
+
+func TestSearchSourcesHybridExactIDBoostAndProviderFallback(t *testing.T) {
+	ctx := context.Background()
+	svc := seededService(t, ctx)
+	svc.SetRAGSearchProvider(func(_ context.Context, req rag.SearchRequest) (rag.SearchResult, error) {
+		if req.Query == "backlog" {
+			return rag.SearchResult{Status: rag.RAGSearchStatusProviderNotReady, FailureClass: rag.ProviderFailureUnavailable}, nil
+		}
+		if req.Query == "same" {
+			return rag.SearchResult{Status: rag.RAGSearchStatusNoNamespace}, nil
+		}
+		return rag.SearchResult{Status: rag.RAGSearchStatusReady, Namespace: rag.NamespaceStatus{ID: "namespace-1", Exists: true, Current: true}, Coverage: rag.CoverageStatus{TotalChunks: 2, EmbeddedChunks: 2}, Results: []rag.SearchContext{
+			{ChunkID: "task", SourceID: "TASK-001", Snippet: "broad match", Score: rag.ScoreBreakdown{Semantic: .99}},
+			{ChunkID: "doc", SourceID: "DOC-123", Snippet: "exact source", Score: rag.ScoreBreakdown{Semantic: .50}},
+		}}, nil
+	})
+	exact, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: "DOC-123", Limit: 10})
+	if err != nil || len(exact.Results) != 2 || exact.Results[0].ID != "DOC-123" || !exact.Results[0].Match.ExactMatch {
+		t.Fatalf("exact=%#v err=%v", exact, err)
+	}
+	fallback, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: "backlog", Limit: 10})
+	if err != nil || fallback.EffectiveMode != SearchModeFullText || fallback.FallbackReason != "provider_unavailable" || len(fallback.Results) != 2 {
+		t.Fatalf("fallback=%#v err=%v", fallback, err)
+	}
+	missing, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: "same", Limit: 10})
+	if err != nil || missing.EffectiveMode != SearchModeFullText || missing.FallbackReason != "rag_namespace_missing" || len(missing.Results) != 2 {
+		t.Fatalf("missing namespace=%#v err=%v", missing, err)
+	}
+}
+
+func TestSearchSourcesHybridMultilingualSemanticOnly(t *testing.T) {
+	for _, query := range []string{"фоновый процесс завершается", "后台进程提前退出", "background process exits early"} {
+		t.Run(query, func(t *testing.T) {
+			ctx := context.Background()
+			svc := seededService(t, ctx)
+			svc.SetRAGSearchProvider(func(context.Context, rag.SearchRequest) (rag.SearchResult, error) {
+				return rag.SearchResult{Status: rag.RAGSearchStatusReady, Namespace: rag.NamespaceStatus{ID: "namespace-1", Exists: true, Current: true}, Coverage: rag.CoverageStatus{TotalChunks: 1, EmbeddedChunks: 1}, Results: []rag.SearchContext{{ChunkID: "doc", SourceID: "DOC-123", Snippet: "daemon lifetime", Score: rag.ScoreBreakdown{Semantic: .9}}}}, nil
+			})
+			result, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: query, Limit: 5})
+			if err != nil || result.EffectiveMode != SearchModeHybrid || len(result.Results) != 1 || result.Results[0].ID != "DOC-123" {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+		})
 	}
 }
 

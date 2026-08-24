@@ -402,12 +402,13 @@ type toolRegistry map[string]registeredTool
 var toolDefs = []toolDefinition{
 	{
 		Name:        "search_sources",
-		Description: "Search cached sources by full-text/token query. This is not fuzzy or semantic retrieval; retry with exact terms or keyword variants when results are empty.",
+		Description: "Search cached sources with hybrid lexical plus semantic retrieval by default. Results are grouped by source with citations and score provenance. Use mode=full_text for deterministic exact/token matching without an embedding-provider call.",
 		InputSchema: inputSchema{
 			Type: "object",
 			Properties: map[string]schemaProp{
 				"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1},
-				"query":   {Type: "string", Description: "Full-text query text; not fuzzy or semantic.", MinLength: 1},
+				"query":   {Type: "string", Description: "Conceptual, fuzzy, identifier, or exact text query.", MinLength: 1},
+				"mode":    {Type: "string", Description: "hybrid (default) or deterministic full_text retrieval.", Enum: []string{service.SearchModeHybrid, service.SearchModeFullText}, Default: service.SearchModeHybrid},
 				"kind":    {Type: "string", Description: "Source kind filter.", Enum: sourceKindEnums},
 				"limit":   {Type: "integer", Description: "Maximum results.", Minimum: float64Ptr(1), Maximum: float64Ptr(100), Default: 20.0},
 				"offset":  {Type: "integer", Description: "Result offset.", Minimum: float64Ptr(0), Default: 0.0},
@@ -931,6 +932,7 @@ func (s *Server) toolRegistry() toolRegistry {
 type searchSourcesArgs struct {
 	RepoID string `json:"repo_id"`
 	Query  string `json:"query"`
+	Mode   string `json:"mode,omitempty"`
 	Kind   string `json:"kind,omitempty"`
 	Limit  *int   `json:"limit,omitempty"`
 	Offset *int   `json:"offset,omitempty"`
@@ -970,10 +972,16 @@ func (s *Server) callSearchSources(ctx context.Context, id *json.RawMessage, arg
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: kindValidationMessage()})
 		return
 	}
+	mode := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(a.Mode)), "-", "_")
+	if mode != "" && mode != service.SearchModeHybrid && mode != service.SearchModeFullText {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "mode must be hybrid or full_text"})
+		return
+	}
 
 	results, err := s.svc.SearchSources(ctx, service.SearchSourcesRequest{
 		RepoID: a.RepoID,
 		Query:  a.Query,
+		Mode:   mode,
 		Kind:   a.Kind,
 		Limit:  limit,
 		Offset: offset,
@@ -983,9 +991,12 @@ func (s *Server) callSearchSources(ctx context.Context, id *json.RawMessage, arg
 		return
 	}
 
-	text := fmt.Sprintf("search_mode: %s\n", mcpSearchMode(results.SearchMode))
+	text := fmt.Sprintf("requested_mode: %s effective_mode: %s rag_state: %s\n", results.RequestedMode, results.EffectiveMode, results.RAGState)
+	if results.FallbackReason != "" {
+		text += fmt.Sprintf("fallback_reason: %s\n", results.FallbackReason)
+	}
 	for _, r := range results.Results {
-		text += fmt.Sprintf("%s:%s\n", r.Path, r.Snippet)
+		text += fmt.Sprintf("%d %.6f %s:%s\n", r.Rank, r.Match.FusionScore, r.Path, r.Snippet)
 	}
 
 	s.writeToolResult(id, toolCallResult{
@@ -1213,13 +1224,6 @@ func (s *Server) writeChunkToolResult(id *json.RawMessage, result service.ChunkQ
 		text += fmt.Sprintf("%s %s %s %s %d-%d %s\n", chunk.RepoID, chunk.SourceID, chunk.ID, chunk.Policy, chunk.ByteStart, chunk.ByteEnd, body)
 	}
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
-}
-
-func mcpSearchMode(mode string) string {
-	if strings.TrimSpace(mode) == "" {
-		return service.SearchModeFullText
-	}
-	return mode
 }
 
 func servicePolicy(policy string) service.ChunkPolicy {

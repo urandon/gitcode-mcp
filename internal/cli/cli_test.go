@@ -420,7 +420,7 @@ func TestSearchJSON(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &results); err != nil {
 		t.Fatalf("invalid json: %v: %q", err, stdout.String())
 	}
-	if results.RepoID != "fixture-a" || results.Query != "backlog" || results.SearchMode != service.SearchModeFullText || len(results.Results) == 0 || results.Results[0].ID == "" || results.Results[0].Path == "" || results.Results[0].Title == "" || results.Results[0].Snippet == "" {
+	if results.RepoID != "fixture-a" || results.Query != "backlog" || results.SearchMode != service.SearchModeFullText || results.RequestedMode != service.SearchModeHybrid || results.FallbackReason != "rag_disabled" || len(results.Results) == 0 || results.Results[0].ID == "" || results.Results[0].Path == "" || results.Results[0].Title == "" || results.Results[0].Snippet == "" {
 		t.Fatalf("missing fields: %#v", results)
 	}
 }
@@ -432,7 +432,7 @@ func TestSearchTextShowsMode(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "search_mode: full_text") {
+	if !strings.Contains(stdout.String(), "requested_mode: hybrid effective_mode: full_text") || !strings.Contains(stdout.String(), "fallback_reason: rag_disabled") {
 		t.Fatalf("text search output missing mode: %q", stdout.String())
 	}
 }
@@ -448,7 +448,7 @@ func TestSearchSourcesCommandJSON(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &results); err != nil {
 		t.Fatalf("invalid json: %v: %q", err, stdout.String())
 	}
-	if results.RepoID != "fixture-a" || results.Query != "backlog" || results.SearchMode != service.SearchModeFullText || len(results.Results) == 0 {
+	if results.RepoID != "fixture-a" || results.Query != "backlog" || results.SearchMode != service.SearchModeFullText || results.RequestedMode != service.SearchModeHybrid || len(results.Results) == 0 {
 		t.Fatalf("missing search_sources results: %#v", results)
 	}
 }
@@ -472,7 +472,22 @@ func TestSearchSourcesCommandEmptyJSON(t *testing.T) {
 	}
 }
 
-func TestSearchHelpStatesFullTextNotFuzzy(t *testing.T) {
+func TestSearchModeFlagIsForwarded(t *testing.T) {
+	spy := &spyService{}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := executeWithFactory([]string{"search_sources", "--repo", "fixture-a", "--mode", "full_text", "exact terms", "--format", "json"}, &stdout, &stderr, func(context.Context, string) (queryService, func() error, error) {
+		return spy, func() error { return nil }, nil
+	})
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if spy.lastSearchRequest.Mode != service.SearchModeFullText || spy.lastSearchRequest.Query != "exact terms" {
+		t.Fatalf("request=%#v", spy.lastSearchRequest)
+	}
+}
+
+func TestSearchHelpStatesHybridDefaultAndFullTextOverride(t *testing.T) {
 	for _, command := range []string{"search", "search_sources"} {
 		t.Run(command, func(t *testing.T) {
 			var stdout bytes.Buffer
@@ -482,7 +497,7 @@ func TestSearchHelpStatesFullTextNotFuzzy(t *testing.T) {
 				t.Fatalf("code=%d stderr=%q", code, stderr.String())
 			}
 			out := stdout.String()
-			for _, want := range []string{"full-text", "not fuzzy", "not fuzzy or semantic"} {
+			for _, want := range []string{"hybrid", "--mode full_text", "without an embedding-provider call"} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("%s help missing %q in %q", command, want, out)
 				}
@@ -2182,6 +2197,7 @@ type spyService struct {
 	lastWriteRequest   map[string]service.WriteCommandRequest
 	lastReleaseRequest service.PublishReleaseRequest
 	lastSyncRequest    service.SyncRequest
+	lastSearchRequest  service.SearchSourcesRequest
 	lastContextErr     error
 	lastFeedbackDraft  feedback.Draft
 	lastFeedbackSubmit service.SubmitFeedbackRequest
@@ -2204,6 +2220,7 @@ func (s *spyService) Index(context.Context, service.OperationRequest) (service.O
 func (s *spyService) SearchSources(ctx context.Context, req service.SearchSourcesRequest) (service.SearchSourcesResult, error) {
 	s.called("SearchSources")
 	s.lastContextErr = ctx.Err()
+	s.lastSearchRequest = req
 	line := 1
 	return service.SearchSourcesResult{RepoID: req.RepoID, Query: req.Query, Results: []service.SearchSourceResult{{ID: "DOC-123", Path: "docs/backlog.md", Title: "Backlog", Kind: "doc", Status: "active", Snippet: "backlog", LineStart: &line, LineEnd: &line, Score: 1}}}, nil
 }
