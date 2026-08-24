@@ -5739,7 +5739,7 @@ func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID s
 		}
 		commentID := firstNonEmptyString(req.CommentID, req.ID, prior.RemoteID)
 		comment := gitcode.Comment{ID: commentID, Body: req.Body, CreatedAt: now, UpdatedAt: now}
-		result := gitcode.WriteResult[gitcode.Comment]{Record: comment, Confirmed: true, RemoteID: commentID, ParentIssueNumber: number, ParentIssueID: prior.RecordID, RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
+		result := gitcode.WriteResult[gitcode.Comment]{Record: comment, Confirmed: true, RemoteID: commentID, ParentIssueNumber: number, RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
 		_, graph, err := s.commentWriteGraph(ctx, repoID, number, req.IssueID, comment, result, now)
 		return graph, err
 	case "create-pr", "update-pr", "link-pr-issue":

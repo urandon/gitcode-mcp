@@ -708,6 +708,34 @@ func TestIssueWriteTargetResolutionIsExplicitAndCacheFirst(t *testing.T) {
 	if err != nil || largeNumber.IssueNumber != 4226802 || largeNumber.StableSourceID != "ISSUE-LARGE-NUMBER" {
 		t.Fatalf("legitimate large issue number result=%#v err=%v", largeNumber, err)
 	}
+
+	partialStore := &writeRefreshFailStore{Store: store, failNextRefresh: true}
+	partialClient := &fakeGitCodeClient{createIssueCommentResult: gitcode.WriteResult[gitcode.Comment]{
+		Record:            gitcode.Comment{ID: "partial-comment-76", IssueID: "4226802", Body: "partial replay", CreatedAt: confirmedAt, UpdatedAt: confirmedAt},
+		Confirmed:         true,
+		Operation:         "CreateIssueComment",
+		RemoteID:          "partial-comment-76",
+		ParentIssueNumber: 76,
+		ParentIssueID:     "4226802",
+		ConfirmedAt:       confirmedAt,
+	}}
+	partialSvc := NewWithClient(partialStore, partialClient)
+	partialSvc.providerMode = gitcode.ProviderModeLive
+	partialSvc.writeCredentialPresent = true
+	partialReq := WriteCommandRequest{RepoID: "identity-write", Mode: WriteModeLive, Number: 76, Body: "partial replay", IdempotencyKey: "partial-comment-replay"}
+	if _, err := partialSvc.AddComment(ctx, partialReq); err == nil {
+		t.Fatal("first partial comment write unexpectedly succeeded")
+	}
+	if result, err := partialSvc.AddComment(ctx, partialReq); err != nil || result.Status != "succeeded" || !result.Replayed || partialClient.createIssueCommentCalls != 1 {
+		t.Fatalf("partial replay result=%#v calls=%d err=%v", result, partialClient.createIssueCommentCalls, err)
+	}
+	if _, err := store.ResolveAliasScoped(ctx, "identity-write", cache.RemoteAlias{Type: "gitcode_issue_id", ID: "ISSUE-4226802"}); err == nil {
+		t.Fatal("partial replay created a stable id as a provider alias")
+	}
+	identity, err := store.ResolveAliasScoped(ctx, "identity-write", cache.RemoteAlias{Type: "gitcode_issue_id", ID: "4226802"})
+	if err != nil || identity.SourceID != "ISSUE-4226802" {
+		t.Fatalf("canonical provider identity=%#v err=%v", identity, err)
+	}
 }
 
 func TestWritePartialCacheRefreshRetryUsesAuditWithoutSecondAdapterCall(t *testing.T) {
