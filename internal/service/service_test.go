@@ -2324,6 +2324,35 @@ func TestSearchSourcesHybridExactIDBoostAndProviderFallback(t *testing.T) {
 	}
 }
 
+func TestSearchSourcesHybridPropagatesCancellationAndInternalErrors(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	svc := seededService(t, ctx)
+	svc.SetRAGSearchProvider(func(context.Context, rag.SearchRequest) (rag.SearchResult, error) {
+		cancel()
+		return rag.SearchResult{}, &rag.ProviderError{Class: rag.ProviderFailureTimeout, Message: "cancelled provider"}
+	})
+	if _, err := svc.SearchSources(ctx, SearchSourcesRequest{RepoID: "fixture-a", Query: "backlog"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation err=%v, want context.Canceled", err)
+	}
+
+	internalErr := errors.New("cache invariant failed")
+	svc = seededService(t, context.Background())
+	svc.SetRAGSearchProvider(func(context.Context, rag.SearchRequest) (rag.SearchResult, error) {
+		return rag.SearchResult{}, internalErr
+	})
+	if _, err := svc.SearchSources(context.Background(), SearchSourcesRequest{RepoID: "fixture-a", Query: "backlog"}); !errors.Is(err, internalErr) {
+		t.Fatalf("internal err=%v, want propagation", err)
+	}
+
+	svc.SetRAGSearchProvider(func(context.Context, rag.SearchRequest) (rag.SearchResult, error) {
+		return rag.SearchResult{}, &rag.ProviderError{Class: rag.ProviderFailureUnavailable, Message: "provider down"}
+	})
+	fallback, err := svc.SearchSources(context.Background(), SearchSourcesRequest{RepoID: "fixture-a", Query: "backlog"})
+	if err != nil || fallback.EffectiveMode != SearchModeFullText || fallback.FallbackReason != "provider_unavailable" {
+		t.Fatalf("typed provider fallback=%#v err=%v", fallback, err)
+	}
+}
+
 func TestSearchSourcesHybridMultilingualSemanticOnly(t *testing.T) {
 	for _, query := range []string{"фоновый процесс завершается", "后台进程提前退出", "background process exits early"} {
 		t.Run(query, func(t *testing.T) {

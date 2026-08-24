@@ -667,9 +667,16 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 	ragLimit := semanticLimit * 2
 	ragResult, ragErr := s.ragSearch(ctx, rag.SearchRequest{RepoID: repoID, Query: req.Query, SourceIDs: semanticSourceIDs, TopK: semanticLimit, Limit: ragLimit})
 	base.Coverage = searchCoverageFromRAG(ragResult)
+	if err := ctx.Err(); err != nil {
+		return SearchSourcesResult{}, err
+	}
 	if ragErr != nil {
+		reason, ok := ragProviderErrorFallbackReason(ragErr)
+		if !ok {
+			return SearchSourcesResult{}, ragErr
+		}
 		base.RAGState = "unavailable"
-		base.FallbackReason = "provider_unavailable"
+		base.FallbackReason = reason
 		base.Repair.State = "needed"
 		base.Results = pageSearchSources(lexical, req.Offset, limit)
 		decorateLexicalFallback(ctx, s, &base, repoID, req.Offset)
@@ -700,6 +707,23 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 		base.Results[i].Rank = req.Offset + i + 1
 	}
 	return base, nil
+}
+
+func ragProviderErrorFallbackReason(err error) (string, bool) {
+	var providerErr *rag.ProviderError
+	if !errors.As(err, &providerErr) {
+		return "", false
+	}
+	switch providerErr.Class {
+	case rag.ProviderFailureUnavailable:
+		return "provider_unavailable", true
+	case rag.ProviderFailureModelMissing:
+		return "model_missing", true
+	case rag.ProviderFailureTimeout:
+		return "query_embedding_timeout", true
+	default:
+		return "query_embedding_failed", true
+	}
 }
 
 func (s *Service) searchSemanticSourceIDs(ctx context.Context, repoID string, req SearchSourcesRequest) ([]string, error) {
