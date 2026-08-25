@@ -13,6 +13,10 @@ import (
 func TestAdminControlsRequireSessionOriginCSRFAndStrictIntent(t *testing.T) {
 	maintenanceCalls := 0
 	bindingCalls := 0
+	searchCalls := 0
+	smokeCalls := 0
+	repairPlanCalls := 0
+	repairApplyCalls := 0
 	c := New(Config{
 		Assets: fstest.MapFS{"index.html": {Data: []byte("index")}},
 		PlanMaintenance: func(_ context.Context, req MaintenanceControlRequest) (any, error) {
@@ -22,6 +26,22 @@ func TestAdminControlsRequireSessionOriginCSRFAndStrictIntent(t *testing.T) {
 		ApplyBinding: func(_ context.Context, req BindingControlRequest) (any, error) {
 			bindingCalls++
 			return map[string]any{"outcome": "added", "repo_id": req.RepoID}, nil
+		},
+		CompareSearch: func(_ context.Context, req SearchCompareRequest) (any, error) {
+			searchCalls++
+			return map[string]any{"query": req.Query}, nil
+		},
+		SmokeProvider: func(_ context.Context, req ProviderSmokeRequest) (any, error) {
+			smokeCalls++
+			return map[string]any{"status": "ready", "repo_id": req.RepoID}, nil
+		},
+		PlanRAGRepair: func(_ context.Context, req RAGRepairRequest) (any, error) {
+			repairPlanCalls++
+			return map[string]any{"plan_id": "rag-plan-1", "max_chunks": req.MaxChunks}, nil
+		},
+		ApplyRAGRepair: func(_ context.Context, req RAGRepairRequest) (any, error) {
+			repairApplyCalls++
+			return map[string]any{"outcome": "created", "plan_id": req.PlanID}, nil
 		},
 	})
 	cookie := authorizeObservationController(c, time.Now().Add(time.Hour))
@@ -61,8 +81,26 @@ func TestAdminControlsRequireSessionOriginCSRFAndStrictIntent(t *testing.T) {
 	if got := call("/api/admin/v1/bindings/apply", `{"cache_ref":"cache-a","repo_id":"owner/repo","plan_id":"plan-1","idempotency_key":"key-1"}`, true, validHeaders); got.Code != http.StatusOK {
 		t.Fatalf("apply status=%d body=%s", got.Code, got.Body.String())
 	}
-	if maintenanceCalls != 1 || bindingCalls != 1 {
-		t.Fatalf("provider calls maintenance=%d binding=%d", maintenanceCalls, bindingCalls)
+	if got := call("/api/admin/v1/search/compare", `{"cache_ref":"cache-a","repo_id":"owner/repo","query":"cache lifecycle","cache_path":"/private/cache.db"}`, true, validHeaders); got.Code != http.StatusBadRequest {
+		t.Fatalf("search accepted private path status=%d body=%s", got.Code, got.Body.String())
+	}
+	if got := call("/api/admin/v1/search/compare", `{"cache_ref":"cache-a","repo_id":"owner/repo","query":"cache lifecycle"}`, true, validHeaders); got.Code != http.StatusOK {
+		t.Fatalf("search status=%d body=%s", got.Code, got.Body.String())
+	}
+	if got := call("/api/admin/v1/rag/provider/smoke", `{"cache_ref":"cache-a","repo_id":"owner/repo"}`, true, validHeaders); got.Code != http.StatusOK {
+		t.Fatalf("smoke status=%d body=%s", got.Code, got.Body.String())
+	}
+	if got := call("/api/admin/v1/rag/repair/plan", `{"cache_ref":"cache-a","repo_id":"owner/repo","max_chunks":64}`, true, validHeaders); got.Code != http.StatusOK {
+		t.Fatalf("repair plan status=%d body=%s", got.Code, got.Body.String())
+	}
+	if got := call("/api/admin/v1/rag/repair/apply", `{"cache_ref":"cache-a","repo_id":"owner/repo","plan_id":"rag-plan-1","max_chunks":64}`, true, validHeaders); got.Code != http.StatusBadRequest {
+		t.Fatalf("repair apply missing key status=%d body=%s", got.Code, got.Body.String())
+	}
+	if got := call("/api/admin/v1/rag/repair/apply", `{"cache_ref":"cache-a","repo_id":"owner/repo","plan_id":"rag-plan-1","max_chunks":64,"idempotency_key":"repair-key-1"}`, true, validHeaders); got.Code != http.StatusOK {
+		t.Fatalf("repair apply status=%d body=%s", got.Code, got.Body.String())
+	}
+	if maintenanceCalls != 1 || bindingCalls != 1 || searchCalls != 1 || smokeCalls != 1 || repairPlanCalls != 1 || repairApplyCalls != 1 {
+		t.Fatalf("provider calls maintenance=%d binding=%d search=%d smoke=%d repair_plan=%d repair_apply=%d", maintenanceCalls, bindingCalls, searchCalls, smokeCalls, repairPlanCalls, repairApplyCalls)
 	}
 }
 

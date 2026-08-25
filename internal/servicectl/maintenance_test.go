@@ -168,6 +168,9 @@ func TestMaintenanceWorkKeysSeparateSameRepoAcrossCaches(t *testing.T) {
 	if ragIndexWorkKey(StartRAGIndexJobRequest{RepoID: "owner/repo", CacheUUID: "cache-left", Profile: "old"}) == ragIndexWorkKey(StartRAGIndexJobRequest{RepoID: "owner/repo", CacheUUID: "cache-left", Profile: "current"}) {
 		t.Fatal("RAG work keys collapsed distinct profiles")
 	}
+	if ragIndexWorkKey(StartRAGIndexJobRequest{RepoID: "owner/repo", CacheUUID: "cache-left", MaxChunks: 10}) == ragIndexWorkKey(StartRAGIndexJobRequest{RepoID: "owner/repo", CacheUUID: "cache-left", MaxChunks: 1000}) {
+		t.Fatal("RAG work keys collapsed distinct repair bounds")
+	}
 	head := syncWorkKey(StartSyncJobRequest{RepoID: "owner/repo", CacheUUID: "cache-left", Lane: "head", Issues: true})
 	tail := syncWorkKey(StartSyncJobRequest{RepoID: "owner/repo", CacheUUID: "cache-left", Lane: "tail", Issues: true})
 	if head == tail {

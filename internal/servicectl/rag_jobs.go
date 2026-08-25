@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ type StartRAGIndexJobRequest struct {
 	Profile        string `json:"profile,omitempty"`
 	CachePath      string `json:"cache_path,omitempty"`
 	BatchSize      int    `json:"batch_size,omitempty"`
+	MaxChunks      int    `json:"max_chunks,omitempty"`
 	ChunkPolicy    string `json:"chunk_policy,omitempty"`
 	CacheUUID      string `json:"cache_uuid,omitempty"`
 	RegistrationID string `json:"registration_id,omitempty"`
@@ -47,7 +49,7 @@ func ragIndexWorkKey(req StartRAGIndexJobRequest) string {
 	if cacheID == "" {
 		cacheID = strings.TrimSpace(req.CachePath)
 	}
-	return strings.Join([]string{RAGIndexJobType, cacheID, strings.TrimSpace(req.RepoID), strings.TrimSpace(req.Profile), strings.TrimSpace(req.NamespaceID), strings.TrimSpace(req.ChunkPolicy)}, ":")
+	return strings.Join([]string{RAGIndexJobType, cacheID, strings.TrimSpace(req.RepoID), strings.TrimSpace(req.Profile), strings.TrimSpace(req.NamespaceID), strings.TrimSpace(req.ChunkPolicy), "max=" + strconv.Itoa(req.MaxChunks)}, ":")
 }
 
 func (m *JobManager) runRAGIndexJob(ctx context.Context, manager Manager, jobID string, req StartRAGIndexJobRequest) {
@@ -152,6 +154,7 @@ func runRAGIndex(ctx context.Context, manager Manager, req StartRAGIndexJobReque
 		DocumentInstructionID: rag.DefaultDocumentInstructionID,
 		QueryInstructionID:    rag.DefaultQueryInstructionID,
 		BatchSize:             batchSize,
+		MaxChunks:             req.MaxChunks,
 		ProgressChan:          progressCh,
 	})
 	if err != nil {

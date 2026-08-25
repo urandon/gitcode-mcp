@@ -57,6 +57,10 @@ The authenticated `/api/admin/v1` surface is an in-process transport over the co
 | `POST /maintenance/{registration_id}/reconcile` | Reconcile current truth; equivalent active work is coalesced. |
 | `POST /bindings/plan` | Validate and render an add/update/no-op binding plan without contacting GitCode. |
 | `POST /bindings/apply` | Re-plan and atomically write the confirmed local binding with an idempotency key. |
+| `POST /search/compare` | Run the same bounded query as full-text and requested hybrid retrieval against one managed cache; never syncs or repairs. |
+| `POST /rag/provider/smoke` | Probe configured embedding-provider/model metadata without sending cached source text. |
+| `POST /rag/repair/plan` | Inspect current namespace and generation coverage and render an explicit bounded repair effect ledger. |
+| `POST /rag/repair/apply` | Re-plan and enqueue at most the confirmed number of missing or stale chunks with an idempotency key. |
 | `GET /diagnostics` | Current/recovered typed failures and sanitized remediation. |
 | `GET /capabilities` | Capability and safety catalog with explicit UI availability. |
 | `GET /events?after=CURSOR` | Bounded SSE invalidation/progress replay. |
@@ -69,6 +73,12 @@ Maintenance apply always renders the plan again and rejects changes to cache ide
 
 Binding plan/apply accepts `cache_ref`, never `cache_path`. An omitted API URL uses the effective GitCode v5 default for a new binding and preserves an existing custom route on update. Owner/name derivation, normalized scopes, unique aliases, schema compatibility, and ambiguous cache identity are checked before the atomic SQLite transaction. Applying a stale plan, an alias collision, or a reused key with changed intent produces a typed conflict. Unbind remains deliberately unavailable.
 
+Search comparison is observation-only. It opens an already managed cache read-only and runs full-text and requested hybrid retrieval side by side. It reports requested/effective mode, typed fallback reason, RAG state, namespace and generation coverage, lexical/semantic/fusion scores, ranks, and bounded citations. A comparison never performs GitCode reads, sync, provider setup, model download, indexing, or repair. Hybrid retrieval sends only the query to the configured embedding provider; full-text retrieval is local.
+
+Provider smoke asks only for model metadata and sends no cached source text. If the provider or model is unavailable, the UI returns a sanitized failure class and the fixed `gitcode-mcp rag setup --yes` CLI handoff. It never installs, starts, or downloads provider components.
+
+RAG repair is a separate explicit plan/confirm/apply action. Its ledger names the configured-provider data boundary and the maximum cached-text chunk count. Apply recomputes the current plan, rejects stale coverage or provider state, records a durable idempotent receipt, and enqueues one background RAG job limited to the confirmed slice. Deferred or failed chunks keep coverage partial and remain visible for a later bounded repair. Repair does not contact GitCode and cannot purge or rebuild every namespace.
+
 Ordinary responses expose `cache_ref` and a one-way path fingerprint, never an absolute cache path. Current coverage truth is kept separate from active contention, a scheduled retry, and the last stage error, so a transient maintenance failure cannot hide a still-current RAG namespace.
 
 ## Read-only operator views
@@ -78,12 +88,20 @@ The observation UI is organized around product state rather than CLI command gro
 - **Overview** leads with current attention, service/cache readiness, active work, cache/repository cohort summaries, and recovered failures.
 - **Caches** shows the safe cache → repository topology. Repository details keep head freshness, tail completeness, secondary coverage, projection generation, and RAG generation as five independent lanes.
 - **Collections** shows bounded per-kind counts and head/tail frontier evidence. A bounded tail stop is always labelled partial; only end-of-collection evidence is presented as complete.
-- **Search status** explains full-text versus hybrid readiness without running a query, provider call, sync, or repair.
+- **Search status / Search Lab** first explains full-text versus hybrid readiness, then lets an operator run a bounded side-by-side experiment. Score provenance, citations, fallback, namespace/generation coverage, provider smoke, and bounded repair remain distinct actions with explicit data boundaries.
 - **Activity** presents bounded structured history. **Maintenance** adds capability-derived policy and binding workbenches: edit intent, render the effect ledger, confirm the exact plan id, and inspect receipts or CLI handoffs. **Jobs** adds URL-preserved filters and detail, retained progress, throughput/ETA where derivable, rate-limit/retry/interruption state, and explicit cancel/retry controls only where the daemon reports them safe.
 - **Diagnostics** separates current from recovered typed failures, gives fixed public-safe CLI handoffs, and shows the capability/safety catalog.
 
-Local deep links use URL search parameters: `view`, opaque `cache`, public repository id `repo`, repository `tab`, diagnostic state, public `job`, and job state/type/cache/repository/failure filters. Browser reload and back/forward navigation preserve this state. The UI explicitly renders loading, empty, partial/degraded, stale, recovered, interrupted, waiting, and API-version-mismatch states; status meaning is always present as text rather than color alone.
+Local deep links use URL search parameters: `view`, opaque `cache`, public repository id `repo`, repository `tab`, diagnostic state, public `job`, job state/type/cache/repository/failure filters, and Search Lab `q`, `kind`, `provenance`, and `limit`. No cache path, credential, provider endpoint, raw source body, or session material is included. Browser reload and back/forward navigation preserve this state. The UI explicitly renders loading, empty, partial/degraded, stale, recovered, interrupted, waiting, and API-version-mismatch states; status meaning is always present as text rather than color alone.
 
 ## Themes
 
 The visible selector has exactly three choices: **Light**, **Dark**, and **System**. **System is the default** when no preference is saved or an invalid value is found. It follows `prefers-color-scheme`; explicit Light and Dark choices are stored only in browser-local storage. A small external head script applies the choice before the application starts, avoiding a first-paint theme flash while keeping the CSP free of inline script allowances.
+
+Typography, icon roles, surface hierarchy, component cohorts, and cross-view visual QA are specified in the [Admin UI design system](admin-ui-design-system.md). New screens and tabs must use that shared system rather than introduce view-local density or icon conventions.
+
+## Release and upgrade checks
+
+The committed static assets are part of the Go binary's reviewed source surface. Before an admin-UI release, run `scripts/check-admin-ui-assets.sh`, the frontend unit and Playwright suites, and the Go test/race/vet suites. Dependency licenses, accessibility states, binary/asset size, startup, and idle RSS have explicit budgets and measurement notes in [Admin UI release gates](admin-ui-release-gates.md).
+
+Upgrades replace the binary and its embedded assets atomically; there is no separate web deployment or Node.js runtime. Existing sessions are intentionally short-lived and API-version mismatch forces a reload. To disable the UI, restart the daemon without `--admin` and do not run `admin open`; cached data, bindings, jobs, and maintenance registrations remain intact.

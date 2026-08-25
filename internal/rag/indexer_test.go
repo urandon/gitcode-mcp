@@ -88,6 +88,42 @@ func TestRAGIndexerResumesStaleCoverage(t *testing.T) {
 	}
 }
 
+func TestRAGIndexerBoundedRepairLeavesExplicitPartialCoverage(t *testing.T) {
+	ctx := context.Background()
+	store := newVectorTestStore(t, ctx)
+	defer store.Close()
+	mustUpsertVectorChunks(t, ctx, store, "fixture-a", []cache.Chunk{
+		vectorTestChunk("chunk-a", "ISSUE-1", "hash-a"),
+		vectorTestChunk("chunk-b", "ISSUE-1", "hash-b"),
+		vectorTestChunk("chunk-c", "ISSUE-2", "hash-c"),
+	})
+	provider := mustFakeIndexerProvider(t, 2)
+	indexer := NewRAGIndexer(store, provider, RAGIndexerOptions{})
+
+	first, err := indexer.Run(ctx, IndexRequest{RepoID: "fixture-a", ChunkPolicyID: DefaultChunkPolicyID, BatchSize: 2, MaxChunks: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.Bounded || first.TotalChunks != 3 || first.EmbeddedChunks != 1 || first.RemainingChunks != 2 || first.Status != RAGIndexStatusSucceeded {
+		t.Fatalf("first=%+v", first)
+	}
+	coverage, ok, err := store.GetRAGCoverageState(ctx, "fixture-a", first.NamespaceID)
+	if err != nil || !ok || coverage.Status != "partial" {
+		t.Fatalf("coverage=%+v ok=%t err=%v", coverage, ok, err)
+	}
+	second, err := indexer.Run(ctx, IndexRequest{RepoID: "fixture-a", ChunkPolicyID: DefaultChunkPolicyID, BatchSize: 2, MaxChunks: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.Bounded || second.EmbeddedChunks != 2 || second.SkippedChunks != 1 || second.RemainingChunks != 0 {
+		t.Fatalf("second=%+v", second)
+	}
+	coverage, ok, err = store.GetRAGCoverageState(ctx, "fixture-a", second.NamespaceID)
+	if err != nil || !ok || coverage.Status != "ready" {
+		t.Fatalf("final coverage=%+v ok=%t err=%v", coverage, ok, err)
+	}
+}
+
 func TestRAGIndexerRecordsProviderFailure(t *testing.T) {
 	ctx := context.Background()
 	store := newVectorTestStore(t, ctx)

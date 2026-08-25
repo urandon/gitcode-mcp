@@ -187,10 +187,12 @@ type SearchSourceResult struct {
 }
 
 type SearchMatch struct {
-	LexicalRank  int     `json:"lexical_rank,omitempty"`
-	SemanticRank int     `json:"semantic_rank,omitempty"`
-	ExactMatch   bool    `json:"exact_match"`
-	FusionScore  float64 `json:"fusion_score"`
+	LexicalRank   int     `json:"lexical_rank,omitempty"`
+	SemanticRank  int     `json:"semantic_rank,omitempty"`
+	LexicalScore  float64 `json:"lexical_score,omitempty"`
+	SemanticScore float64 `json:"semantic_score,omitempty"`
+	ExactMatch    bool    `json:"exact_match"`
+	FusionScore   float64 `json:"fusion_score"`
 }
 
 type SearchCitation struct {
@@ -201,12 +203,15 @@ type SearchCitation struct {
 }
 
 type SearchRAGCoverage struct {
-	EligibleChunks int     `json:"eligible_chunks"`
-	EmbeddedChunks int     `json:"embedded_chunks"`
-	MissingChunks  int     `json:"missing_chunks"`
-	StaleChunks    int     `json:"stale_chunks"`
-	Ratio          float64 `json:"ratio"`
-	NamespaceID    string  `json:"namespace_id,omitempty"`
+	EligibleChunks    int     `json:"eligible_chunks"`
+	EmbeddedChunks    int     `json:"embedded_chunks"`
+	MissingChunks     int     `json:"missing_chunks"`
+	StaleChunks       int     `json:"stale_chunks"`
+	FailedChunks      int     `json:"failed_chunks"`
+	Ratio             float64 `json:"ratio"`
+	NamespaceID       string  `json:"namespace_id,omitempty"`
+	ContentGeneration int64   `json:"content_generation,omitempty"`
+	CoveredGeneration int64   `json:"covered_generation,omitempty"`
 }
 
 type SearchRepairStatus struct {

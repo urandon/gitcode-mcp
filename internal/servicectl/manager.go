@@ -96,6 +96,7 @@ func effectiveJobConfig(manager Manager, cachePath string) (config.EffectiveConf
 	if manager.EffectiveConfig != nil {
 		cfg := *manager.EffectiveConfig
 		cfg.CachePath = cachePath
+		cfg.LockPath = cachePath + ".lock"
 		return config.EffectiveConfig{Config: cfg, CachePathSource: "daemon-registry-snapshot"}, nil
 	}
 	src := manager.Source
@@ -346,7 +347,7 @@ func (m Manager) Run(ctx context.Context) error {
 	if err := controlReceipts.Load(); err != nil {
 		return err
 	}
-	adminControls := NewAdminControlManager(m, maintenance, controlReceipts)
+	adminControls := NewAdminControlManager(m, maintenance, jobs, controlReceipts)
 	assets, err := fs.Sub(adminui.Files, "assets")
 	if err != nil {
 		return err
@@ -365,6 +366,10 @@ func (m Manager) Run(ctx context.Context) error {
 		ReconcileMaintenance: adminControls.ReconcileMaintenance,
 		PlanBinding:          adminControls.PlanBinding,
 		ApplyBinding:         adminControls.ApplyBinding,
+		CompareSearch:        adminControls.CompareSearch,
+		SmokeProvider:        adminControls.SmokeProvider,
+		PlanRAGRepair:        adminControls.PlanRAGRepair,
+		ApplyRAGRepair:       adminControls.ApplyRAGRepair,
 	})
 	if m.AdminAutoStart {
 		if _, err := admin.Start(ctx); err != nil {

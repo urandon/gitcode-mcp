@@ -97,6 +97,12 @@ type ragSearchStore interface {
 	GetSourceScoped(context.Context, string, string) (cache.Source, error)
 }
 
+type ragSearchCoverageStore interface {
+	GetRepoContentState(context.Context, string) (cache.RepoContentState, error)
+	GetRAGCoverageState(context.Context, string, string) (cache.RAGCoverageState, bool, error)
+	ListRAGIndexRuns(context.Context, cache.RAGIndexRunFilter) ([]cache.RAGIndexRun, error)
+}
+
 func NewRAGRetriever(store ragSearchStore, provider EmbeddingProvider, opts RAGRetrieverOptions) *RAGRetriever {
 	now := opts.Now
 	if now == nil {
@@ -217,6 +223,25 @@ func (r *RAGRetriever) Search(ctx context.Context, req SearchRequest) (SearchRes
 		return SearchResult{}, err
 	}
 	result.Coverage = coverage
+	if coverageStore, ok := r.store.(ragSearchCoverageStore); ok {
+		contentState, stateErr := coverageStore.GetRepoContentState(ctx, req.RepoID)
+		if stateErr != nil {
+			return SearchResult{}, stateErr
+		}
+		result.Coverage.ContentGeneration = contentState.ContentGeneration
+		if state, exists, stateErr := coverageStore.GetRAGCoverageState(ctx, req.RepoID, namespace.ID); stateErr != nil {
+			return SearchResult{}, stateErr
+		} else if exists {
+			result.Coverage.CoveredGeneration = state.CoveredGeneration
+			result.Coverage.GenerationTracked = true
+		}
+		if runs, runsErr := coverageStore.ListRAGIndexRuns(ctx, cache.RAGIndexRunFilter{RepoID: req.RepoID, NamespaceID: namespace.ID, Limit: 1}); runsErr != nil {
+			return SearchResult{}, runsErr
+		} else if len(runs) > 0 {
+			result.Coverage.FailedChunks = runs[0].FailedChunks
+			result.Coverage.SkippedChunks = runs[0].SkippedChunks
+		}
+	}
 	if coverage.MissingChunks > 0 || coverage.StaleChunks > 0 {
 		result.Warnings = append(result.Warnings, fmt.Sprintf("rag coverage is incomplete: %d missing, %d stale", coverage.MissingChunks, coverage.StaleChunks))
 	}
