@@ -497,9 +497,13 @@ func adminStageDiagnostics(entry MaintenanceEntry) []adminhttp.DiagnosticObserva
 }
 
 func adminCapabilityObservation(cap capability.Capability) adminhttp.CapabilityObservation {
+	uiReason := cap.UI.DisabledReason
+	if !cap.UI.Enabled && uiReason == "" {
+		uiReason = "Not exposed by the local admin console."
+	}
 	return adminhttp.CapabilityObservation{
 		ID: cap.ID, Category: string(cap.Category), SafetyClass: string(cap.Safety), Description: cap.Description,
-		UIEnabled: false, UIReason: "Not exposed by the read-only observation slice.", CLIName: cap.CLIName,
+		UIEnabled: cap.UI.Enabled, UIReason: uiReason, CLIName: cap.CLIName,
 		CLIEnabled: cap.CLI.Enabled, MCPName: cap.MCPName, MCPEnabled: cap.MCP.Enabled,
 	}
 }

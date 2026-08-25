@@ -353,6 +353,39 @@ func (s *Service) AddRepository(ctx context.Context, req AddRepositoryRequest) (
 	return repo, nil
 }
 
+func (s *Service) UpdateRepository(ctx context.Context, req AddRepositoryRequest) (RepositoryBinding, error) {
+	repo, err := normalizeRepositoryRequest(req, s.now())
+	if err != nil {
+		return RepositoryBinding{}, err
+	}
+	existing, err := s.store.GetRepository(ctx, repo.RepoID)
+	if err != nil {
+		return RepositoryBinding{}, normalizeError(err, "repository", repo.RepoID)
+	}
+	repo.CreatedAt = existing.CreatedAt
+	cacheRepo := cache.RepositoryBinding{RepoID: repo.RepoID, Owner: repo.Owner, Name: repo.Name, APIBaseURL: repo.APIBaseURL, DisplayName: repo.DisplayName, CreatedAt: repo.CreatedAt, UpdatedAt: repo.UpdatedAt, Aliases: repo.Aliases}
+	for _, scope := range repo.Scopes {
+		cacheRepo.Scopes = append(cacheRepo.Scopes, cache.RepositoryScope(scope))
+	}
+	updater, ok := s.store.(interface {
+		UpdateRepository(context.Context, cache.RepositoryBinding) error
+	})
+	if !ok {
+		return RepositoryBinding{}, ErrInvalidQuery{Field: "repository", Message: "repository updates are unavailable for this store"}
+	}
+	if err := updater.UpdateRepository(ctx, cacheRepo); err != nil {
+		if cache.IsConstraintError(err) {
+			return RepositoryBinding{}, ErrConflict{Kind: "repository", ID: repo.RepoID, Message: "repository alias already exists"}
+		}
+		return RepositoryBinding{}, err
+	}
+	return repo, nil
+}
+
+func ValidateRepositoryBinding(req AddRepositoryRequest, now time.Time) (RepositoryBinding, error) {
+	return normalizeRepositoryRequest(req, now)
+}
+
 func (s *Service) ResetLiveCache(ctx context.Context, req ResetLiveCacheRequest) (ResetLiveCacheResult, error) {
 	repoID, err := s.requireRepo(ctx, req.RepoID, "cache reset live")
 	if err != nil {

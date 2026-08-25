@@ -342,6 +342,11 @@ func (m Manager) Run(ctx context.Context) error {
 	if err := jobActions.Load(); err != nil {
 		return err
 	}
+	controlReceipts := NewAdminControlReceiptManager(paths.JobsPath + ".controls")
+	if err := controlReceipts.Load(); err != nil {
+		return err
+	}
+	adminControls := NewAdminControlManager(m, maintenance, controlReceipts)
 	assets, err := fs.Sub(adminui.Files, "assets")
 	if err != nil {
 		return err
@@ -352,8 +357,14 @@ func (m Manager) Run(ctx context.Context) error {
 		Snapshot: func(snapshotContext context.Context) (adminhttp.ObservationSnapshot, error) {
 			return m.adminObservation(snapshotContext, jobs, maintenance, now)
 		},
-		CancelJob: jobActions.Cancel,
-		RetryJob:  jobActions.Retry,
+		CancelJob:            jobActions.Cancel,
+		RetryJob:             jobActions.Retry,
+		PlanMaintenance:      adminControls.PlanMaintenance,
+		ApplyMaintenance:     adminControls.ApplyMaintenance,
+		DisableMaintenance:   adminControls.DisableMaintenance,
+		ReconcileMaintenance: adminControls.ReconcileMaintenance,
+		PlanBinding:          adminControls.PlanBinding,
+		ApplyBinding:         adminControls.ApplyBinding,
 	})
 	if m.AdminAutoStart {
 		if _, err := admin.Start(ctx); err != nil {

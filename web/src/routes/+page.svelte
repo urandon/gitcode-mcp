@@ -1,9 +1,9 @@
 <script lang="ts">
   import './+page.css';
   import { onDestroy, onMount, tick } from 'svelte';
-  import { Activity, AlertTriangle, ArrowLeft, Blocks, CheckCircle2, ChevronRight, CircleGauge, Clipboard, Clock3, Database, FolderCog, Gauge, HeartPulse, History, Layers3, Monitor, Moon, RefreshCw, RotateCcw, Search, ShieldCheck, Sun, Wrench, XCircle } from '@lucide/svelte';
+  import { Activity, AlertTriangle, ArrowLeft, Blocks, CheckCircle2, ChevronRight, CircleGauge, Clipboard, Clock3, Database, FileCheck2, FolderCog, Gauge, GitFork, HeartPulse, History, Layers3, Monitor, Moon, Power, RefreshCw, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Sun, Wrench, XCircle, Zap } from '@lucide/svelte';
   import { applyTheme, normalizeTheme, themeStorageKey, type Theme } from '$lib/theme';
-  import { adminApiVersion, cliHandoff, emptySnapshot, humanize, isSnapshotStale, laneSummary, type AdminView, type CacheObservation, type Diagnostic, type Job, type JobAction, type JobActionReceipt, type ObservationSnapshot, type Repository, type RepositoryTab } from '$lib/admin';
+  import { adminApiVersion, cliHandoff, emptySnapshot, humanize, isSnapshotStale, laneSummary, type AdminView, type BindingIntent, type BindingPlan, type CacheObservation, type ControlReceipt, type Diagnostic, type Job, type JobAction, type JobActionReceipt, type Maintenance, type MaintenanceIntent, type MaintenancePlan, type ObservationSnapshot, type Repository, type RepositoryTab } from '$lib/admin';
   import CoverageLaneCard from '$lib/CoverageLaneCard.svelte';
   import StatusChip from '$lib/StatusChip.svelte';
 
@@ -52,6 +52,26 @@
   let filteredJobs = snapshot.jobs;
   let selectedJob: Job | undefined;
   let stale = false;
+  let maintenanceTargetKey = '';
+  let maintenanceIntent: MaintenanceIntent = { cache_ref: '', repo_id: '', sync_mode: 'head-and-backfill', collections: ['issues', 'wiki'], rag_mode: 'off' };
+  let maintenancePlan: MaintenancePlan | undefined;
+  let maintenanceReceipt: ControlReceipt | undefined;
+  let maintenanceError = '';
+  let bindingIntent: BindingIntent = { cache_ref: '', repo_id: '', scopes: ['issues'], aliases: [] };
+  let bindingPlan: BindingPlan | undefined;
+  let bindingReceipt: ControlReceipt | undefined;
+  let bindingError = '';
+  let controlRunning = false;
+  let pendingControl: 'maintenance_apply' | 'binding_apply' | 'disable' | 'reconcile' | '' = '';
+  let pendingControlKey = '';
+  let controlDialog: HTMLDialogElement | undefined;
+  let controlConfirmButton: HTMLButtonElement | undefined;
+  let controlTriggerButton: HTMLButtonElement | undefined;
+  let selectedMaintenance: Maintenance | undefined;
+  let maintenanceControlsEnabled = false;
+  let bindingControlsEnabled = false;
+  let registrationControlsEnabled = false;
+  let repoTargets: Array<{ key: string; cache: CacheObservation; repo: Repository }> = [];
 
   $: selectedCache = snapshot.caches.find((cache) => cache.cache_ref === selectedCacheRef);
   $: selectedRepo = selectedCache?.repositories.find((repo) => repo.repo_id === selectedRepoID);
@@ -61,6 +81,11 @@
   $: filteredJobs = snapshot.jobs.filter((job) => (!jobStateFilter || job.status === jobStateFilter) && (!jobTypeFilter || job.type === jobTypeFilter) && (!jobCacheFilter || job.cache_ref === jobCacheFilter) && (!jobRepoFilter || job.repo_id === jobRepoFilter) && (!jobFailureFilter || job.failure_class === jobFailureFilter));
   $: selectedJob = snapshot.jobs.find((job) => job.id === selectedJobID);
   $: stale = snapshot.revision !== '' && isSnapshotStale(snapshot.generated_at);
+  $: selectedMaintenance = snapshot.maintenance.find((item) => `${item.cache_ref}\u0000${item.repo_id}` === maintenanceTargetKey);
+  $: maintenanceControlsEnabled = snapshot.capabilities.some((item) => item.id === 'admin_maintenance_plan_apply' && item.ui_enabled);
+  $: bindingControlsEnabled = snapshot.capabilities.some((item) => item.id === 'admin_binding_plan_apply' && item.ui_enabled);
+  $: registrationControlsEnabled = snapshot.capabilities.some((item) => item.id === 'admin_registration_controls' && item.ui_enabled);
+  $: repoTargets = snapshot.caches.flatMap((cache) => cache.repositories.map((repo) => ({ key: `${cache.cache_ref}\u0000${repo.repo_id}`, cache, repo })));
 
   function normalizeSnapshot(value: ObservationSnapshot): ObservationSnapshot {
     value.attention ||= []; value.caches ||= []; value.jobs ||= []; value.maintenance ||= []; value.diagnostics ||= []; value.capabilities ||= [];
@@ -98,6 +123,7 @@
       const response = await fetch('/api/admin/v1/snapshot');
       if (!response.ok) throw new Error(response.status === 401 ? 'Admin session required. Run admin open again.' : 'Observation is unavailable.');
       snapshot = normalizeSnapshot(await response.json());
+      ensureControlSelections();
     } catch (value) { error = value instanceof Error ? value.message : 'Observation is unavailable.'; }
     finally { loading = false; }
   }
@@ -179,6 +205,103 @@
   async function copyCommand(diagnostic: Diagnostic): Promise<void> {
     try { await navigator.clipboard.writeText(cliHandoff(diagnostic)); copied = diagnostic.id; window.setTimeout(() => (copied = ''), 1800); }
     catch { copied = ''; }
+  }
+
+  function ensureControlSelections(): void {
+    const targets = snapshot.caches.flatMap((cache) => cache.repositories.map((repo) => ({ key: `${cache.cache_ref}\u0000${repo.repo_id}`, cache, repo })));
+    if (!targets.some((target) => target.key === maintenanceTargetKey)) {
+      const registration = snapshot.maintenance[0];
+      const target = registration ? targets.find((item) => item.cache.cache_ref === registration.cache_ref && item.repo.repo_id === registration.repo_id) : targets[0];
+      if (target) loadMaintenanceTarget(target.key);
+    }
+    if (!bindingIntent.cache_ref && snapshot.caches[0]) bindingIntent = { ...bindingIntent, cache_ref: snapshot.caches[0].cache_ref };
+  }
+
+  function loadMaintenanceTarget(key: string): void {
+    maintenanceTargetKey = key;
+    const [cacheRef, repoID] = key.split('\u0000');
+    const registration = snapshot.maintenance.find((item) => item.cache_ref === cacheRef && item.repo_id === repoID);
+    const repo = snapshot.caches.find((item) => item.cache_ref === cacheRef)?.repositories.find((item) => item.repo_id === repoID);
+    maintenanceIntent = {
+      cache_ref: cacheRef, repo_id: repoID,
+      sync_mode: registration?.policy.sync_enabled === false ? 'off' : registration?.policy.sync_mode || 'head-and-backfill',
+      collections: registration?.policy.collections?.length ? [...registration.policy.collections] : [...(repo?.scopes || ['issues'])],
+      rag_mode: registration?.policy.rag_enabled ? 'maintain' : 'off', profile: registration?.policy.profile || '',
+      head_interval_seconds: registration?.policy.head_interval_seconds || 0, rag_interval_seconds: registration?.policy.rag_interval_seconds || 0,
+      head_max_pages: registration?.policy.head_max_pages || 0, tail_slice_pages: registration?.policy.tail_slice_pages || 0, per_page: registration?.policy.per_page || 0
+    };
+    maintenancePlan = undefined; maintenanceReceipt = undefined; maintenanceError = '';
+  }
+
+  function toggleCollection(name: string, checked: boolean): void {
+    const next = new Set(maintenanceIntent.collections);
+    if (checked) next.add(name); else next.delete(name);
+    maintenanceIntent = { ...maintenanceIntent, collections: [...next] };
+    invalidateMaintenancePlan();
+  }
+
+  function invalidateMaintenancePlan(): void {
+    maintenancePlan = undefined; maintenanceReceipt = undefined; maintenanceError = '';
+  }
+
+  function invalidateBindingPlan(): void {
+    bindingPlan = undefined; bindingReceipt = undefined; bindingError = '';
+  }
+
+  function loadBinding(cache: CacheObservation, repo?: Repository): void {
+    const [owner = '', name = ''] = (repo?.repo_id || '').split('/');
+    bindingIntent = { cache_ref: cache.cache_ref, repo_id: repo?.repo_id || '', owner, name, api_base_url: '', scopes: [...(repo?.scopes || ['issues'])], aliases: [...(repo?.aliases || [])], display_name: repo?.display_name || '' };
+    bindingPlan = undefined; bindingReceipt = undefined; bindingError = '';
+  }
+
+  async function controlPost<T>(path: string, body: unknown): Promise<T> {
+    const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken }, body: JSON.stringify(body) });
+    const payload = await response.json();
+    if (!response.ok) throw new Error([payload.error?.message, payload.error?.remediation].filter(Boolean).join(' ') || 'The control request failed.');
+    return payload.result as T;
+  }
+
+  async function renderMaintenancePlan(): Promise<void> {
+    if (!csrfToken || !maintenanceControlsEnabled) return;
+    controlRunning = true; maintenanceError = ''; maintenanceReceipt = undefined;
+    try { maintenancePlan = await controlPost<MaintenancePlan>('/api/admin/v1/maintenance/plan', maintenanceIntent); }
+    catch (value) { maintenancePlan = undefined; maintenanceError = value instanceof Error ? value.message : 'Maintenance planning failed.'; }
+    finally { controlRunning = false; }
+  }
+
+  async function renderBindingPlan(): Promise<void> {
+    if (!csrfToken || !bindingControlsEnabled) return;
+    controlRunning = true; bindingError = ''; bindingReceipt = undefined;
+    try { bindingPlan = await controlPost<BindingPlan>('/api/admin/v1/bindings/plan', bindingIntent); }
+    catch (value) { bindingPlan = undefined; bindingError = value instanceof Error ? value.message : 'Binding planning failed.'; }
+    finally { controlRunning = false; }
+  }
+
+  async function confirmControl(kind: typeof pendingControl, trigger: HTMLButtonElement): Promise<void> {
+    controlTriggerButton = trigger; pendingControl = kind; pendingControlKey = `admin-${kind}-${crypto.randomUUID()}`;
+    maintenanceError = ''; bindingError = ''; await tick(); controlDialog?.showModal(); controlConfirmButton?.focus();
+  }
+
+  async function cancelControlConfirmation(): Promise<void> {
+    controlDialog?.close(); pendingControl = ''; pendingControlKey = ''; await tick(); controlTriggerButton?.focus();
+  }
+
+  async function executeControl(): Promise<void> {
+    if (!pendingControl || !csrfToken) return;
+    controlRunning = true;
+    try {
+      if (pendingControl === 'maintenance_apply' && maintenancePlan) {
+        maintenanceReceipt = await controlPost<ControlReceipt>('/api/admin/v1/maintenance/apply', { ...maintenanceIntent, plan_id: maintenancePlan.plan_id, idempotency_key: pendingControlKey });
+      } else if (pendingControl === 'binding_apply' && bindingPlan) {
+        bindingReceipt = await controlPost<ControlReceipt>('/api/admin/v1/bindings/apply', { ...bindingIntent, plan_id: bindingPlan.plan_id, idempotency_key: pendingControlKey });
+      } else if ((pendingControl === 'disable' || pendingControl === 'reconcile') && selectedMaintenance) {
+        maintenanceReceipt = await controlPost<ControlReceipt>(`/api/admin/v1/maintenance/${encodeURIComponent(selectedMaintenance.registration_id)}/${pendingControl}`, { idempotency_key: pendingControlKey });
+      }
+      controlDialog?.close(); pendingControl = ''; pendingControlKey = ''; await refresh(); await tick(); controlTriggerButton?.focus();
+    } catch (value) {
+      const message = value instanceof Error ? value.message : 'The confirmed control failed.';
+      if (pendingControl === 'binding_apply') bindingError = message; else maintenanceError = message;
+    } finally { controlRunning = false; }
   }
   function selectTheme(value: Theme): void { theme = value; applyTheme(value); }
   function onPopState(): void { hydrateLocation(); }
@@ -309,8 +432,55 @@
           {/if}
 
         {:else if active === 'Maintenance'}
-          <div class="intro section-intro"><p class="eyebrow">POLICY</p><h1>Maintenance</h1><p>What the daemon is configured to keep current, without mutation controls.</p></div>
-          {#if snapshot.maintenance.length === 0}<div class="empty-state large-empty"><Wrench size={27} /><h2>No maintenance registrations</h2><p>Cache data can still be read, but no background policy is enrolled.</p></div>{:else}<div class="maintenance-grid">{#each snapshot.maintenance as item}<article><div class="card-heading"><div><span class="entity-icon"><Wrench size={17} /></span><div><strong>{item.repo_id}</strong><span>{item.cache_ref} · generation {item.generation}</span></div></div><StatusChip value={item.enabled ? item.state || 'ready' : 'disabled'} /></div><dl><div><dt>Sync</dt><dd>{item.policy.sync_enabled ? humanize(item.policy.sync_mode) : 'Off'}</dd></div><div><dt>Collections</dt><dd>{item.policy.collections?.map(humanize).join(', ') || 'None'}</dd></div><div><dt>RAG</dt><dd>{item.policy.rag_enabled ? item.policy.profile || 'Maintained' : 'Off'}</dd></div><div><dt>Head bound</dt><dd>{item.policy.head_max_pages || 'Default'} pages</dd></div><div><dt>Tail slice</dt><dd>{item.policy.tail_slice_pages || 'Default'} pages</dd></div><div><dt>Next reconcile</dt><dd>{item.next_reconcile_at ? new Date(item.next_reconcile_at).toLocaleString() : 'Not scheduled'}</dd></div></dl></article>{/each}</div>{/if}
+          <div class="intro section-intro"><p class="eyebrow">POLICY & BINDINGS</p><h1>Maintenance</h1><p>Render every local effect before it runs. Browser controls never install services, download models, accept cache paths, or contact GitCode for binding changes.</p></div>
+          {#if !csrfToken}<div class="state-panel warning-panel"><ShieldCheck size={20} /><div><strong>Controls need an authenticated admin session</strong><p>Reopen the console with <code>gitcode-mcp admin open</code>. Observation remains available.</p></div></div>{/if}
+
+          <section class="control-workbench" aria-labelledby="policy-editor-title">
+            <div class="control-heading"><div><span class="large-icon"><SlidersHorizontal size={22} /></span><div><p class="section-kicker">PLAN → CONFIRM → APPLY</p><h2 id="policy-editor-title">Maintenance policy</h2><p>Change a managed repository policy, review the effect ledger, then confirm the exact plan id.</p></div></div><StatusChip value={maintenancePlan?.status || selectedMaintenance?.state || 'not_planned'} label={maintenancePlan ? humanize(maintenancePlan.status) : selectedMaintenance ? humanize(selectedMaintenance.state) : 'Not planned'} /></div>
+            {#if repoTargets.length === 0}<div class="empty-state"><Database size={23} /><h3>No bound repositories</h3><p>Add a repository binding below before planning maintenance.</p></div>{:else}
+              <form class="control-form" oninput={invalidateMaintenancePlan} onsubmit={(event) => { event.preventDefault(); void renderMaintenancePlan(); }}>
+                <label class="span-two"><span>Managed target</span><select value={maintenanceTargetKey} onchange={(event) => loadMaintenanceTarget(event.currentTarget.value)}>{#each repoTargets as target}<option value={target.key}>{target.repo.repo_id} · {target.cache.cache_ref}</option>{/each}</select><small>Opaque cache identity only; no filesystem path crosses the browser boundary.</small></label>
+                <label><span>Sync mode</span><select bind:value={maintenanceIntent.sync_mode}><option value="off">Off</option><option value="head">Head only</option><option value="head-and-backfill">Head + bounded backfill</option></select></label>
+                <label><span>RAG mode</span><select bind:value={maintenanceIntent.rag_mode}><option value="off">Off</option><option value="maintain">Maintain index</option></select></label>
+                <fieldset class="span-two collection-field"><legend>Collections</legend>{#each ['issues', 'issue-comments', 'wiki', 'pulls', 'pr-comments'] as collection}<label><input type="checkbox" checked={maintenanceIntent.collections.includes(collection)} onchange={(event) => toggleCollection(collection, event.currentTarget.checked)} />{humanize(collection)}</label>{/each}</fieldset>
+                <label><span>RAG profile</span><input bind:value={maintenanceIntent.profile} placeholder="Configured default" /></label>
+                <label><span>Head interval</span><div class="unit-input"><input type="number" min="0" max="2592000" bind:value={maintenanceIntent.head_interval_seconds} /><span>sec</span></div></label>
+                <label><span>RAG interval</span><div class="unit-input"><input type="number" min="0" max="2592000" bind:value={maintenanceIntent.rag_interval_seconds} /><span>sec</span></div></label>
+                <label><span>Head pages</span><input type="number" min="0" max="1000" bind:value={maintenanceIntent.head_max_pages} /></label>
+                <label><span>Tail slice</span><input type="number" min="0" max="1000" bind:value={maintenanceIntent.tail_slice_pages} /></label>
+                <label><span>Per page</span><input type="number" min="0" max="100" bind:value={maintenanceIntent.per_page} /></label>
+                <div class="form-actions span-two"><span>{maintenanceControlsEnabled ? 'Capability available in this daemon.' : 'Capability registry does not expose maintenance controls.'}</span><button class="primary-action" type="submit" disabled={!csrfToken || !maintenanceControlsEnabled || controlRunning}><FileCheck2 size={16} />{controlRunning ? 'Planning…' : 'Render plan'}</button></div>
+              </form>
+            {/if}
+
+            {#if maintenanceError}<div class="action-result error" role="alert"><AlertTriangle size={17} /><div><strong>Maintenance control failed</strong><span>{maintenanceError}</span></div></div>{/if}
+            {#if maintenancePlan}<div class="plan-panel"><div class="plan-summary"><div><p class="section-kicker">REVIEWED INTENT</p><h3>{maintenancePlan.repo_id}</h3><code>{maintenancePlan.plan_id}</code></div><StatusChip value={maintenancePlan.status} /></div>{#if maintenancePlan.blockers?.length}<ul class="blocker-list">{#each maintenancePlan.blockers as blocker}<li><AlertTriangle size={15} />{blocker}</li>{/each}</ul>{/if}<div class="effect-ledger">{#each maintenancePlan.actions as effect}<article><span class="effect-icon"><Zap size={15} /></span><div><strong>{effect.summary}</strong><small>{humanize(effect.class)}{effect.data_boundary ? ` · ${humanize(effect.data_boundary)}` : ''}</small>{#if effect.handoff}<code>{effect.handoff}</code>{/if}</div><StatusChip value={effect.status} /></article>{/each}</div><div class="plan-footer"><div><strong>Next safe action</strong><span>{maintenancePlan.next_action || 'Confirm this exact plan.'}</span></div><button class="primary-action" disabled={maintenancePlan.status === 'blocked' || controlRunning} onclick={(event) => void confirmControl('maintenance_apply', event.currentTarget)}><Power size={16} />Confirm & apply</button></div></div>{/if}
+            {#if maintenanceReceipt}<div class="action-result" role="status"><CheckCircle2 size={17} /><div><strong>{humanize(maintenanceReceipt.outcome || maintenanceReceipt.status || 'applied')}</strong><span>{maintenanceReceipt.receipt_id ? `Receipt ${maintenanceReceipt.receipt_id}` : maintenanceReceipt.audit_receipt ? `Audit ${maintenanceReceipt.audit_receipt}` : 'The confirmed plan was accepted.'}{maintenanceReceipt.replayed ? ' · replayed safely' : ''}{maintenanceReceipt.jobs_started?.length ? ` · jobs ${maintenanceReceipt.jobs_started.join(', ')}` : ''}</span></div></div>{/if}
+            {#if selectedMaintenance}<div class="registration-actions"><div><strong>Registration {selectedMaintenance.registration_id}</strong><span>Generation {selectedMaintenance.generation} · {selectedMaintenance.enabled ? 'enabled' : 'disabled'} · {registrationControlsEnabled ? 'reconcile is coalesced with active work.' : 'registration controls are unavailable in this daemon.'}</span></div><button disabled={!csrfToken || !registrationControlsEnabled || controlRunning} onclick={(event) => void confirmControl('reconcile', event.currentTarget)}><RotateCcw size={15} />Reconcile now</button><button class="danger-action" disabled={!csrfToken || !registrationControlsEnabled || !selectedMaintenance.enabled || controlRunning} onclick={(event) => void confirmControl('disable', event.currentTarget)}><Power size={15} />Disable</button></div>{/if}
+          </section>
+
+          <section class="control-workbench" aria-labelledby="binding-editor-title">
+            <div class="control-heading"><div><span class="large-icon"><GitFork size={22} /></span><div><p class="section-kicker">LOCAL ROUTING</p><h2 id="binding-editor-title">Repository binding</h2><p>Add or update one stable repository identity. API URL defaults to the configured GitCode v5 endpoint; existing custom routes are preserved when omitted.</p></div></div><StatusChip value={bindingPlan?.status || 'not_planned'} label={bindingPlan ? humanize(bindingPlan.status) : 'Not planned'} /></div>
+            {#if snapshot.caches.length === 0}<div class="empty-state"><Database size={23} /><h3>No managed cache</h3><p>The browser cannot create or choose arbitrary cache paths. Enroll a cache from the CLI first.</p></div>{:else}
+              <div class="binding-shortcuts"><span>Edit existing</span>{#each snapshot.caches as cache}{#each cache.repositories as repo}<button onclick={() => loadBinding(cache, repo)}>{repo.repo_id}<small>{cache.cache_ref}</small></button>{/each}{/each}<button onclick={() => loadBinding(snapshot.caches[0])}>+ New binding<small>{snapshot.caches[0].cache_ref}</small></button></div>
+              <form class="control-form" oninput={invalidateBindingPlan} onsubmit={(event) => { event.preventDefault(); void renderBindingPlan(); }}>
+                <label><span>Managed cache</span><select bind:value={bindingIntent.cache_ref}>{#each snapshot.caches as cache}<option value={cache.cache_ref}>{cache.cache_ref}</option>{/each}</select></label>
+                <label><span>Repository id</span><input required bind:value={bindingIntent.repo_id} placeholder="owner/repository" /></label>
+                <label><span>Owner</span><input bind:value={bindingIntent.owner} placeholder="Derived from repository id" /></label>
+                <label><span>Name</span><input bind:value={bindingIntent.name} placeholder="Derived from repository id" /></label>
+                <label class="span-two"><span>API base URL</span><input type="url" bind:value={bindingIntent.api_base_url} placeholder="Configured GitCode v5 default" /><small>Leave blank to use the configured default or preserve an existing custom endpoint.</small></label>
+                <label><span>Display name</span><input bind:value={bindingIntent.display_name} placeholder="Optional operator label" /></label>
+                <label><span>Aliases</span><input value={bindingIntent.aliases.join(', ')} oninput={(event) => { bindingIntent = { ...bindingIntent, aliases: event.currentTarget.value.split(',').map((item) => item.trim()).filter(Boolean) }; invalidateBindingPlan(); }} placeholder="legacy/name, short-name" /></label>
+                <fieldset class="span-two collection-field"><legend>Scopes</legend>{#each ['issues', 'wiki'] as scope}<label><input type="checkbox" checked={bindingIntent.scopes.includes(scope)} onchange={(event) => { const next = new Set(bindingIntent.scopes); if (event.currentTarget.checked) next.add(scope); else next.delete(scope); bindingIntent = { ...bindingIntent, scopes: [...next] }; invalidateBindingPlan(); }} />{humanize(scope)}</label>{/each}</fieldset>
+                <div class="form-actions span-two"><span>{bindingControlsEnabled ? 'Atomic local cache write; zero GitCode requests.' : 'Capability registry does not expose binding controls.'}</span><button class="primary-action" type="submit" disabled={!csrfToken || !bindingControlsEnabled || controlRunning}><FileCheck2 size={16} />{controlRunning ? 'Planning…' : 'Render binding plan'}</button></div>
+              </form>
+            {/if}
+            {#if bindingError}<div class="action-result error" role="alert"><AlertTriangle size={17} /><div><strong>Binding control failed</strong><span>{bindingError}</span></div></div>{/if}
+            {#if bindingPlan}<div class="plan-panel"><div class="plan-summary"><div><p class="section-kicker">{bindingPlan.action.toUpperCase()} BINDING</p><h3>{bindingPlan.repo_id}</h3><code>{bindingPlan.plan_id}</code></div><StatusChip value={bindingPlan.status} /></div>{#if bindingPlan.blockers?.length}<ul class="blocker-list">{#each bindingPlan.blockers as blocker}<li><AlertTriangle size={15} />{blocker}</li>{/each}</ul>{/if}<dl class="binding-preview"><div><dt>API route</dt><dd>{bindingPlan.binding.api_base_url}</dd></div><div><dt>Scopes</dt><dd>{bindingPlan.binding.scopes.map(humanize).join(', ')}</dd></div><div><dt>Aliases</dt><dd>{bindingPlan.binding.aliases.join(', ') || 'None'}</dd></div></dl><div class="effect-ledger">{#each bindingPlan.effects as effect}<article><span class="effect-icon"><Zap size={15} /></span><div><strong>{effect.summary}</strong><small>{humanize(effect.class)}</small>{#if effect.handoff}<code>{effect.handoff}</code>{/if}</div><StatusChip value={effect.status} /></article>{/each}</div><div class="plan-footer"><div><strong>Mutation boundary</strong><span>No unbind, cache deletion, credentials, provider changes, or remote requests.</span></div><button class="primary-action" disabled={bindingPlan.status === 'blocked' || controlRunning} onclick={(event) => void confirmControl('binding_apply', event.currentTarget)}><GitFork size={16} />Confirm & apply</button></div></div>{/if}
+            {#if bindingReceipt}<div class="action-result" role="status"><CheckCircle2 size={17} /><div><strong>{humanize(bindingReceipt.outcome)}</strong><span>Receipt {bindingReceipt.receipt_id}{bindingReceipt.replayed ? ' · replayed safely' : ''}</span></div></div>{/if}
+          </section>
+
+          {#if pendingControl}<dialog bind:this={controlDialog} class="confirmation-dialog control-confirmation" aria-labelledby="confirm-control-title" oncancel={(event) => { event.preventDefault(); void cancelControlConfirmation(); }}><span class:danger={pendingControl === 'disable'} class="dialog-icon">{#if pendingControl === 'binding_apply'}<GitFork size={21} />{:else if pendingControl === 'reconcile'}<RotateCcw size={21} />{:else}<Power size={21} />{/if}</span><div><p class="section-kicker">CONFIRM LOCAL CONTROL</p><h2 id="confirm-control-title">{pendingControl === 'maintenance_apply' ? 'Apply this maintenance plan?' : pendingControl === 'binding_apply' ? 'Write this repository binding?' : pendingControl === 'disable' ? 'Disable this registration?' : 'Reconcile this registration now?'}</h2><p>The daemon will validate current state again. A stale plan is rejected; an interrupted retry reuses the same durable idempotency key.</p><dl><div><dt>Target</dt><dd>{pendingControl === 'binding_apply' ? bindingIntent.repo_id : maintenanceIntent.repo_id}</dd></div><div><dt>Cache</dt><dd>{pendingControl === 'binding_apply' ? bindingIntent.cache_ref : maintenanceIntent.cache_ref}</dd></div><div><dt>Plan</dt><dd>{pendingControl === 'binding_apply' ? bindingPlan?.plan_id : pendingControl === 'maintenance_apply' ? maintenancePlan?.plan_id : selectedMaintenance?.registration_id}</dd></div></dl><div class="dialog-actions"><button onclick={() => void cancelControlConfirmation()} disabled={controlRunning}>Keep current state</button><button bind:this={controlConfirmButton} class:danger-action={pendingControl === 'disable'} class="primary-action" onclick={() => void executeControl()} disabled={controlRunning}>{controlRunning ? 'Submitting…' : 'Confirm action'}</button></div></div></dialog>{/if}
 
         {:else}
           <div class="intro section-intro"><p class="eyebrow">GOVERNANCE & RECOVERY</p><h1>Diagnostics</h1><p>Typed failures, recovered state, exact remediation, and capability boundaries.</p></div>

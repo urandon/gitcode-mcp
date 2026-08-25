@@ -5,6 +5,7 @@ type Category string
 const (
 	CategoryWrite Category = "write"
 	CategoryRAG   Category = "rag"
+	CategoryAdmin Category = "admin"
 )
 
 type SafetyClass string
@@ -35,6 +36,7 @@ type Capability struct {
 	MCPName        string
 	ServiceCommand string
 	Description    string
+	UI             Surface
 	CLI            Surface
 	MCP            Surface
 }
@@ -408,6 +410,27 @@ var ragCapabilities = []Capability{
 	},
 }
 
+var adminCapabilities = []Capability{
+	{
+		ID: "admin_maintenance_plan_apply", Category: CategoryAdmin, Safety: SafetyBackgroundJob,
+		CLIName: "maintenance", ServiceCommand: "maintenance-enable",
+		Description: "Plan and apply bounded cache maintenance policy through explicit browser confirmation and durable receipts.",
+		UI:          enabled("Available in the loopback admin console."), CLI: enabled("Available as `maintenance plan` and `maintenance enable`."), MCP: disabled("Maintenance policy mutation is not exposed through MCP."),
+	},
+	{
+		ID: "admin_binding_plan_apply", Category: CategoryAdmin, Safety: SafetyAuditedWrite,
+		CLIName: "repo", ServiceCommand: "repo-add",
+		Description: "Plan and atomically add or update repository bindings without accepting browser-supplied cache paths.",
+		UI:          enabled("Available in the loopback admin console."), CLI: enabled("Available as `repo add`."), MCP: disabled("Repository binding mutation is not exposed through MCP."),
+	},
+	{
+		ID: "admin_registration_controls", Category: CategoryAdmin, Safety: SafetyBackgroundJob,
+		CLIName: "maintenance", ServiceCommand: "maintenance-status",
+		Description: "Disable or reconcile an existing maintenance registration with explicit confirmation and durable receipts.",
+		UI:          enabled("Available in the loopback admin console."), CLI: enabled("Maintenance status and enable flows remain available in the CLI."), MCP: disabled("Registration mutation is not exposed through MCP."),
+	},
+}
+
 func WriteCapabilities() []Capability {
 	return append([]Capability(nil), writeCapabilities...)
 }
@@ -416,9 +439,14 @@ func RAGCapabilities() []Capability {
 	return append([]Capability(nil), ragCapabilities...)
 }
 
+func AdminCapabilities() []Capability {
+	return append([]Capability(nil), adminCapabilities...)
+}
+
 func Capabilities() []Capability {
 	out := append([]Capability(nil), writeCapabilities...)
 	out = append(out, ragCapabilities...)
+	out = append(out, adminCapabilities...)
 	return out
 }
 

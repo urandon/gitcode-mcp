@@ -1,0 +1,1 @@
+import{a as c,au as t,aR as l,as as o}from"./Vw_9FM2e.js";function a(e){throw new Error("https://svelte.dev/e/lifecycle_outside_component")}function u(e){t===null&&a(),l&&t.l!==null?s(t).m.push(e):c(()=>{const n=o(e);if(typeof n=="function")return n})}function f(e){t===null&&a(),u(()=>()=>o(e))}function s(e){var n=e.l;return n.u??={a:[],b:[],m:[]}}export{f as a,u as o};

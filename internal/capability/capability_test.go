@@ -74,6 +74,17 @@ func TestRAGCapabilitiesDeclareSafeSurfacePolicy(t *testing.T) {
 	}
 }
 
+func TestAdminCapabilitiesDeclareBrowserAndFallbackSurfaces(t *testing.T) {
+	for _, cap := range AdminCapabilities() {
+		if cap.Category != CategoryAdmin || !cap.UI.Enabled || !cap.CLI.Enabled || cap.MCP.Enabled {
+			t.Fatalf("admin capability has unsafe surfaces: %#v", cap)
+		}
+		if cap.UI.EnabledReason == "" || cap.MCP.DisabledReason == "" {
+			t.Fatalf("admin capability lacks surface rationale: %#v", cap)
+		}
+	}
+}
+
 func TestCreateIssueIsSharedWriteCapability(t *testing.T) {
 	cap, ok := LookupByMCPName("create_issue")
 	if !ok {
