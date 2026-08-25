@@ -134,6 +134,27 @@ func TestSyncFrontierRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRecentCompletedSyncEventsAreBoundedAndNewestFirst(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	mustUpsertGraph(t, ctx, store, SourceGraph{Source: testSource("ISSUE-SYNC", "issue", "Sync target")})
+	for i := 1; i <= 3; i++ {
+		event := SyncEvent{RepoID: "fixture-a", ID: fmt.Sprintf("sync-%d", i), SourceID: "ISSUE-SYNC", RemoteType: "issue", Status: "succeeded", IdempotencyKey: fmt.Sprintf("ik-sync-%d", i), CreatedAt: now.Add(time.Duration(i) * time.Minute), CompletedAt: now.Add(time.Duration(i) * time.Minute)}
+		if err := store.RecordSyncEvent(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	events, err := store.RecentSyncEventSummaries(ctx, "fixture-a", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].ID != "sync-3" || events[1].ID != "sync-2" {
+		t.Fatalf("recent events=%+v", events)
+	}
+}
+
 func TestIssueCommentSyncQueueRoundTripAndReplaceComments(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)

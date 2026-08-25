@@ -205,34 +205,32 @@ func buildAdminRepository(ctx context.Context, store *cache.SQLiteStore, reposit
 		copy.ContentGeneration = contentGeneration
 		entry = &copy
 	}
+	if frontiers, err := store.ListMaintenanceFrontiers(ctx, repository.RepoID); err == nil {
+		copy := *entry
+		copy.Frontiers = frontiers
+		entry = &copy
+	}
 	view.Coverage = coverageFromEntry(*entry, view.Counts.Secondary, view.Counts.Chunks, embedded)
 	view.Execution = executionFromEntry(*entry, jobs)
+	view.Collections = collectionObservations(*entry, view.Counts.ByKind)
+	if events, err := store.RecentSyncEventSummaries(ctx, repository.RepoID, 12); err == nil {
+		for _, event := range events {
+			view.RecentSync = append(view.RecentSync, adminhttp.SyncEventObservation{
+				ID: event.ID, Kind: event.RemoteType, Status: event.Status,
+				CompletedAt: event.CompletedAt, ZeroDelta: event.ZeroDelta,
+			})
+		}
+	}
 	return view
 }
 
 func coverageFromEntry(entry MaintenanceEntry, secondary adminhttp.SecondaryCount, chunks, embedded int) adminhttp.CoverageObservation {
 	coverage := adminhttp.CoverageObservation{
-		Head:       adminhttp.CoverageLane{State: "unknown", Status: "not_observed"},
-		Tail:       adminhttp.CoverageLane{State: "unknown", Status: "not_observed"},
+		Head:       aggregateFrontierLane(entry.Frontiers, "head", frontierCollectionKinds(entry)),
+		Tail:       aggregateFrontierLane(entry.Frontiers, "tail", frontierCollectionKinds(entry)),
 		Secondary:  adminhttp.CoverageLane{State: "unknown", Status: "not_observed"},
 		Projection: adminhttp.CoverageLane{State: "unknown", Status: "not_observed"},
 		RAG:        adminhttp.CoverageLane{State: "unconfigured", Status: "not_configured"},
-	}
-	for _, frontier := range entry.Frontiers {
-		lane := adminhttp.CoverageLane{Status: frontier.Status, UpdatedAt: adminTimePointer(frontier.UpdatedAt), StopReason: frontier.StopReason, PagesListed: frontier.PagesListed, RecordsListed: frontier.RecordsListed}
-		if frontier.Status == "complete" || frontier.Status == "current" {
-			lane.State = "current"
-		} else if frontier.Status == "" {
-			lane.State = "unknown"
-		} else {
-			lane.State = "partial"
-		}
-		switch frontier.Lane {
-		case "head":
-			coverage.Head = lane
-		case "tail":
-			coverage.Tail = lane
-		}
 	}
 	coverage.Secondary = adminhttp.CoverageLane{State: "current", Status: "complete"}
 	if secondary.Total == 0 {
@@ -253,6 +251,130 @@ func coverageFromEntry(entry MaintenanceEntry, secondary adminhttp.SecondaryCoun
 		}
 	}
 	return coverage
+}
+
+func collectionObservations(entry MaintenanceEntry, counts []adminhttp.KindCount) []adminhttp.CollectionObservation {
+	countByKind := map[string]int{}
+	kinds := map[string]bool{}
+	for _, count := range counts {
+		countByKind[count.Kind] = count.Count
+		kinds[count.Kind] = true
+	}
+	for _, kind := range frontierCollectionKinds(entry) {
+		kinds[kind] = true
+	}
+	ordered := make([]string, 0, len(kinds))
+	for kind := range kinds {
+		ordered = append(ordered, kind)
+	}
+	sort.Strings(ordered)
+	out := make([]adminhttp.CollectionObservation, 0, len(ordered))
+	for _, kind := range ordered {
+		out = append(out, adminhttp.CollectionObservation{
+			Kind: kind, Count: countByKind[kind],
+			Head: aggregateFrontierLane(entry.Frontiers, "head", []string{kind}),
+			Tail: aggregateFrontierLane(entry.Frontiers, "tail", []string{kind}),
+		})
+	}
+	return out
+}
+
+func frontierCollectionKinds(entry MaintenanceEntry) []string {
+	kinds := map[string]bool{}
+	for _, frontier := range entry.Frontiers {
+		if frontier.RemoteType != "" {
+			kinds[frontier.RemoteType] = true
+		}
+	}
+	for _, item := range []struct {
+		enabled bool
+		kind    string
+	}{
+		{entry.Policy.Issues, "issue"},
+		{entry.Policy.Wiki, "wiki"},
+		{entry.Policy.Pulls, "pull_request"},
+	} {
+		if item.enabled {
+			kinds[item.kind] = true
+		}
+	}
+	out := make([]string, 0, len(kinds))
+	for kind := range kinds {
+		out = append(out, kind)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func aggregateFrontierLane(frontiers []cache.MaintenanceFrontier, lane string, kinds []string) adminhttp.CoverageLane {
+	result := adminhttp.CoverageLane{State: "unknown", Status: "not_observed"}
+	if len(kinds) == 0 {
+		return result
+	}
+	byKind := map[string]cache.MaintenanceFrontier{}
+	for _, frontier := range frontiers {
+		if frontier.Lane == lane {
+			byKind[frontier.RemoteType] = frontier
+		}
+	}
+	observed := 0
+	current := 0
+	partial := 0
+	stopReasons := map[string]bool{}
+	for _, kind := range kinds {
+		frontier, ok := byKind[kind]
+		if !ok {
+			continue
+		}
+		observed++
+		result.PagesListed += frontier.PagesListed
+		result.RecordsListed += frontier.RecordsListed
+		if result.UpdatedAt == nil || frontier.UpdatedAt.After(*result.UpdatedAt) {
+			result.UpdatedAt = adminTimePointer(frontier.UpdatedAt)
+		}
+		if frontier.StopReason != "" {
+			stopReasons[frontier.StopReason] = true
+		}
+		if frontierState(frontier.Status) == "current" {
+			current++
+		} else {
+			partial++
+		}
+	}
+	if observed == 0 {
+		return result
+	}
+	if current == len(kinds) {
+		result.State = "current"
+		if lane == "tail" {
+			result.Status = "complete"
+		} else {
+			result.Status = "fresh"
+		}
+	} else {
+		result.State = "partial"
+		result.Status = "partial"
+		if partial == 0 && observed < len(kinds) {
+			result.Status = "not_observed_for_all_collections"
+		}
+	}
+	if len(stopReasons) == 1 {
+		for reason := range stopReasons {
+			result.StopReason = reason
+		}
+	} else if len(stopReasons) > 1 {
+		result.StopReason = "mixed"
+	}
+	return result
+}
+
+func frontierState(status string) string {
+	switch status {
+	case "complete", "current", "fresh", "ready":
+		return "current"
+	default:
+		return "partial"
+	}
 }
 
 func executionFromEntry(entry MaintenanceEntry, jobs []Job) adminhttp.ExecutionObservation {

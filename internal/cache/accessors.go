@@ -503,6 +503,32 @@ func (s *SQLiteStore) ListCompletedSyncEventsScoped(ctx context.Context, repoID 
 	return events, rows.Err()
 }
 
+// RecentSyncEventSummaries returns bounded, newest-first activity for operator
+// observation without loading an unbounded sync history.
+func (s *SQLiteStore) RecentSyncEventSummaries(ctx context.Context, repoID string, limit int) ([]SyncEventSummary, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, id, remote_type, status, completed_at, zero_delta FROM sync_events WHERE repo_id = ? AND completed_at != '' ORDER BY completed_at DESC, id DESC LIMIT ?`, repoID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []SyncEventSummary
+	for rows.Next() {
+		var event SyncEventSummary
+		var completedRaw string
+		var zeroDelta int
+		if err := rows.Scan(&event.RepoID, &event.ID, &event.RemoteType, &event.Status, &completedRaw, &zeroDelta); err != nil {
+			return nil, err
+		}
+		event.CompletedAt = parseTimeOrZero(completedRaw)
+		event.ZeroDelta = zeroDelta != 0
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
 func (s *SQLiteStore) UpsertSyncFrontier(ctx context.Context, frontier SyncFrontier) (err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

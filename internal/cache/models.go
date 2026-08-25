@@ -645,6 +645,15 @@ type SyncEvent struct {
 	ZeroDelta      bool
 }
 
+type SyncEventSummary struct {
+	RepoID      string
+	ID          string
+	RemoteType  string
+	Status      string
+	CompletedAt time.Time
+	ZeroDelta   bool
+}
+
 type SyncStatus struct {
 	RepoID         string
 	SourceID       string

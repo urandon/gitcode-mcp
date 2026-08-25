@@ -100,3 +100,30 @@ func TestAdminJobObservationDropsRawProgressMessagesAndEndpoints(t *testing.T) {
 		t.Fatalf("sanitized job=%+v", view)
 	}
 }
+
+func TestAdminCoverageNeverPromotesBoundedTailToComplete(t *testing.T) {
+	now := time.Now().UTC()
+	entry := MaintenanceEntry{
+		Policy: MaintenancePolicy{Issues: true, Wiki: true},
+		Frontiers: []cache.MaintenanceFrontier{
+			{RemoteType: "issue", Lane: "tail", Status: "complete", UpdatedAt: now},
+			{RemoteType: "wiki", Lane: "tail", Status: "backfilling", StopReason: "max_pages", PagesListed: 3, UpdatedAt: now},
+		},
+	}
+	coverage := coverageFromEntry(entry, adminhttp.SecondaryCount{}, 0, 0)
+	if coverage.Tail.State != "partial" || coverage.Tail.Status == "complete" || coverage.Tail.StopReason != "max_pages" {
+		t.Fatalf("bounded tail was promoted: %+v", coverage.Tail)
+	}
+}
+
+func TestAdminCoverageRequiresEveryConfiguredCollectionForCurrentHead(t *testing.T) {
+	now := time.Now().UTC()
+	entry := MaintenanceEntry{
+		Policy:    MaintenancePolicy{Issues: true, Wiki: true},
+		Frontiers: []cache.MaintenanceFrontier{{RemoteType: "issue", Lane: "head", Status: "fresh", UpdatedAt: now}},
+	}
+	coverage := coverageFromEntry(entry, adminhttp.SecondaryCount{}, 0, 0)
+	if coverage.Head.State != "partial" || coverage.Head.Status != "not_observed_for_all_collections" {
+		t.Fatalf("missing collection head evidence=%+v", coverage.Head)
+	}
+}

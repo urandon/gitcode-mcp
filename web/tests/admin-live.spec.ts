@@ -40,9 +40,9 @@ test('embedded admin launch, controls, and theme states', async ({ page, context
   await page.screenshot({ path: path.join(outputDir!, 'admin-dark.png'), fullPage: true });
 
   await page.getByRole('button', { name: 'Open diagnostics' }).click();
-  await expect(page.getByRole('heading', { name: 'Diagnostics' })).toBeVisible();
-  await page.getByRole('button', { name: 'Back to overview' }).click();
-  await expect(page.getByRole('button', { name: 'Refresh status' })).toBeEnabled();
+  await expect(page.getByRole('heading', { name: 'Diagnostics', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Overview' }).click();
+  await expect(page.getByRole('button', { name: 'Refresh snapshot' })).toBeEnabled();
 
   const reloadedSnapshot = page.waitForResponse((response) => response.url().endsWith('/api/admin/v1/snapshot') && response.status() === 200);
   await page.reload();
