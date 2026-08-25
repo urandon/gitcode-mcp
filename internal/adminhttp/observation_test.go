@@ -24,11 +24,11 @@ func TestObservationSnapshotContractAndResourceBoundaries(t *testing.T) {
 				{CacheRef: "cache-b", Readiness: "ready"},
 				{CacheRef: "cache-a", Readiness: "ready", Repositories: []RepositoryObservation{{RepoID: "owner/repo", BindingState: "bound"}}},
 			},
-			Jobs: []JobObservation{{ID: "job-000002", Type: "rag", Status: "running", CreatedAt: fixed, UpdatedAt: fixed}, {ID: "job-000001", Type: "sync", Status: "succeeded", CreatedAt: fixed, UpdatedAt: fixed}},
+			Jobs: []JobObservation{{ID: "job-000002", Type: "rag", Status: "running", CreatedAt: fixed, UpdatedAt: fixed}, {ID: "job-000001", Type: "sync", Status: "succeeded", FailureClass: "provider_unavailable", CreatedAt: fixed, UpdatedAt: fixed}},
 		}, fixed), nil
 	}
 	c := New(Config{Assets: fstest.MapFS{"index.html": {Data: []byte("index")}}, Snapshot: provider})
-	cookie := authorizeObservationController(c, fixed.Add(time.Hour))
+	cookie := authorizeObservationController(c, time.Now().Add(time.Hour))
 	handler := c.handler()
 
 	snapshotResponse := authorizedRequest(t, handler, cookie, "/api/admin/v1/snapshot")
@@ -65,6 +65,10 @@ func TestObservationSnapshotContractAndResourceBoundaries(t *testing.T) {
 	jobs := authorizedRequest(t, handler, cookie, "/api/admin/v1/jobs?limit=1&type=sync")
 	if jobs.Code != http.StatusOK || !strings.Contains(jobs.Body.String(), `"job-000001"`) || strings.Contains(jobs.Body.String(), `"job-000002"`) {
 		t.Fatalf("filtered jobs status=%d body=%s", jobs.Code, jobs.Body.String())
+	}
+	failures := authorizedRequest(t, handler, cookie, "/api/admin/v1/jobs?failure_class=provider_unavailable")
+	if failures.Code != http.StatusOK || !strings.Contains(failures.Body.String(), `"job-000001"`) || strings.Contains(failures.Body.String(), `"job-000002"`) {
+		t.Fatalf("failure-filtered jobs status=%d body=%s", failures.Code, failures.Body.String())
 	}
 	job := authorizedRequest(t, handler, cookie, "/api/admin/v1/jobs/job-000001")
 	if job.Code != http.StatusOK || !strings.Contains(job.Body.String(), `"api_version":"1"`) || !strings.Contains(job.Body.String(), `"job":{"id":"job-000001"`) {

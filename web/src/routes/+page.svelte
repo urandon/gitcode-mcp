@@ -1,9 +1,9 @@
 <script lang="ts">
   import './+page.css';
-  import { onDestroy, onMount } from 'svelte';
-  import { Activity, AlertTriangle, ArrowLeft, Blocks, CheckCircle2, ChevronRight, CircleGauge, Clipboard, Clock3, Database, FolderCog, HeartPulse, History, Layers3, Monitor, Moon, RefreshCw, Search, ShieldCheck, Sun, Wrench } from '@lucide/svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
+  import { Activity, AlertTriangle, ArrowLeft, Blocks, CheckCircle2, ChevronRight, CircleGauge, Clipboard, Clock3, Database, FolderCog, Gauge, HeartPulse, History, Layers3, Monitor, Moon, RefreshCw, RotateCcw, Search, ShieldCheck, Sun, Wrench, XCircle } from '@lucide/svelte';
   import { applyTheme, normalizeTheme, themeStorageKey, type Theme } from '$lib/theme';
-  import { adminApiVersion, cliHandoff, emptySnapshot, humanize, isSnapshotStale, laneSummary, type AdminView, type CacheObservation, type Diagnostic, type ObservationSnapshot, type Repository, type RepositoryTab } from '$lib/admin';
+  import { adminApiVersion, cliHandoff, emptySnapshot, humanize, isSnapshotStale, laneSummary, type AdminView, type CacheObservation, type Diagnostic, type Job, type JobAction, type JobActionReceipt, type ObservationSnapshot, type Repository, type RepositoryTab } from '$lib/admin';
   import CoverageLaneCard from '$lib/CoverageLaneCard.svelte';
   import StatusChip from '$lib/StatusChip.svelte';
 
@@ -24,6 +24,21 @@
   let selectedRepoID = '';
   let repoTab: RepositoryTab = 'coverage';
   let diagnosticsFilter: 'current' | 'recovered' | 'all' = 'current';
+  let jobStateFilter = '';
+  let jobTypeFilter = '';
+  let jobCacheFilter = '';
+  let jobRepoFilter = '';
+  let jobFailureFilter = '';
+  let selectedJobID = '';
+  let csrfToken = '';
+  let pendingConfirmation: JobAction | '' = '';
+  let actionRunning = false;
+  let actionError = '';
+  let actionReceipt: JobActionReceipt | undefined;
+  let pendingIdempotencyKey = '';
+  let actionTriggerButton: HTMLButtonElement | undefined;
+  let confirmationDialog: HTMLDialogElement | undefined;
+  let confirmActionButton: HTMLButtonElement | undefined;
   let loading = true;
   let error = '';
   let copied = '';
@@ -34,6 +49,8 @@
   let activeJobs = snapshot.jobs.filter((job) => activeJobStates.has(job.status));
   let scopedJobs = snapshot.jobs;
   let visibleDiagnostics = snapshot.diagnostics;
+  let filteredJobs = snapshot.jobs;
+  let selectedJob: Job | undefined;
   let stale = false;
 
   $: selectedCache = snapshot.caches.find((cache) => cache.cache_ref === selectedCacheRef);
@@ -41,6 +58,8 @@
   $: activeJobs = snapshot.jobs.filter((job) => activeJobStates.has(job.status));
   $: scopedJobs = snapshot.jobs.filter((job) => job.cache_ref === selectedCache?.cache_ref && job.repo_id === selectedRepo?.repo_id);
   $: visibleDiagnostics = snapshot.diagnostics.filter((item) => diagnosticsFilter === 'all' || (diagnosticsFilter === 'current' ? item.current : !item.current));
+  $: filteredJobs = snapshot.jobs.filter((job) => (!jobStateFilter || job.status === jobStateFilter) && (!jobTypeFilter || job.type === jobTypeFilter) && (!jobCacheFilter || job.cache_ref === jobCacheFilter) && (!jobRepoFilter || job.repo_id === jobRepoFilter) && (!jobFailureFilter || job.failure_class === jobFailureFilter));
+  $: selectedJob = snapshot.jobs.find((job) => job.id === selectedJobID);
   $: stale = snapshot.revision !== '' && isSnapshotStale(snapshot.generated_at);
 
   function normalizeSnapshot(value: ObservationSnapshot): ObservationSnapshot {
@@ -51,12 +70,26 @@
     return value;
   }
 
+  function uniqueJobValues(values: Array<string | undefined>): string[] {
+    return [...new Set(values.filter((value): value is string => Boolean(value)))].sort();
+  }
+
   async function establishSession(): Promise<void> {
     const launchToken = new URLSearchParams(location.hash.slice(1)).get('launch');
-    if (!launchToken) return;
-    history.replaceState(null, '', location.pathname + location.search);
-    const response = await fetch('/api/admin/v1/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ launch_token: launchToken }) });
-    if (!response.ok) throw new Error('The launch link is invalid or has expired. Run admin open again.');
+    const response = launchToken
+      ? await fetch('/api/admin/v1/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ launch_token: launchToken }) })
+      : await fetch('/api/admin/v1/session');
+    if (launchToken) history.replaceState(null, '', location.pathname + location.search);
+    if (!response.ok) {
+      if (launchToken) throw new Error('The launch link is invalid or has expired. Run admin open again.');
+      return;
+    }
+    try {
+      const session = await response.json();
+      csrfToken = session.csrf_token || '';
+    } catch {
+      if (launchToken) throw new Error('The launch response was not compatible with this admin UI.');
+    }
   }
 
   async function refresh(): Promise<void> {
@@ -83,6 +116,9 @@
     if (repositoryTabs.some((item) => item.value === requestedTab)) repoTab = requestedTab as RepositoryTab;
     const requestedFilter = params.get('diagnostics');
     if (requestedFilter === 'current' || requestedFilter === 'recovered' || requestedFilter === 'all') diagnosticsFilter = requestedFilter;
+    selectedJobID = params.get('job') || '';
+    jobStateFilter = params.get('job_state') || ''; jobTypeFilter = params.get('job_type') || '';
+    jobCacheFilter = params.get('job_cache') || ''; jobRepoFilter = params.get('job_repo') || ''; jobFailureFilter = params.get('job_failure') || '';
   }
 
   function updateLocation(replace = false): void {
@@ -92,18 +128,54 @@
     if (selectedRepoID) params.set('repo', selectedRepoID);
     if (selectedRepoID && repoTab !== 'coverage') params.set('tab', repoTab);
     if (active === 'Diagnostics' && diagnosticsFilter !== 'current') params.set('diagnostics', diagnosticsFilter);
+    if (active === 'Jobs') {
+      if (selectedJobID) params.set('job', selectedJobID);
+      if (jobStateFilter) params.set('job_state', jobStateFilter);
+      if (jobTypeFilter) params.set('job_type', jobTypeFilter);
+      if (jobCacheFilter) params.set('job_cache', jobCacheFilter);
+      if (jobRepoFilter) params.set('job_repo', jobRepoFilter);
+      if (jobFailureFilter) params.set('job_failure', jobFailureFilter);
+    }
     history[replace ? 'replaceState' : 'pushState'](null, '', `${location.pathname}${params.size ? `?${params}` : ''}`);
   }
 
   function selectView(view: AdminView): void {
     active = view;
     if (view !== 'Caches') { selectedCacheRef = ''; selectedRepoID = ''; }
+    if (view !== 'Jobs') selectedJobID = '';
     updateLocation();
   }
   function openRepository(cache: CacheObservation, repo: Repository): void { active = 'Caches'; selectedCacheRef = cache.cache_ref; selectedRepoID = repo.repo_id; repoTab = 'coverage'; updateLocation(); }
   function closeRepository(): void { selectedRepoID = ''; repoTab = 'coverage'; updateLocation(); }
   function selectRepositoryTab(value: RepositoryTab): void { repoTab = value; updateLocation(); }
   function selectDiagnosticFilter(value: 'current' | 'recovered' | 'all'): void { diagnosticsFilter = value; updateLocation(); }
+  function setJobFilter(kind: 'state' | 'type' | 'cache' | 'repo' | 'failure', value: string): void {
+    if (kind === 'state') jobStateFilter = value; else if (kind === 'type') jobTypeFilter = value; else if (kind === 'cache') jobCacheFilter = value; else if (kind === 'repo') jobRepoFilter = value; else jobFailureFilter = value;
+    selectedJobID = ''; updateLocation();
+  }
+  function openJob(job: Job): void { selectedJobID = job.id; pendingConfirmation = ''; pendingIdempotencyKey = ''; actionError = ''; actionReceipt = undefined; updateLocation(); }
+  function closeJob(): void { selectedJobID = ''; pendingConfirmation = ''; pendingIdempotencyKey = ''; actionError = ''; actionReceipt = undefined; updateLocation(); }
+  async function confirmJobAction(action: JobAction, trigger: HTMLButtonElement): Promise<void> {
+    actionTriggerButton = trigger; pendingConfirmation = action; pendingIdempotencyKey = `admin-${action}-${crypto.randomUUID()}`; actionError = ''; actionReceipt = undefined;
+    await tick(); confirmationDialog?.showModal(); confirmActionButton?.focus();
+  }
+  async function cancelJobConfirmation(): Promise<void> { confirmationDialog?.close(); pendingConfirmation = ''; pendingIdempotencyKey = ''; await tick(); actionTriggerButton?.focus(); }
+  async function executeJobAction(): Promise<void> {
+    if (!selectedJob || !pendingConfirmation || !csrfToken) return;
+    const action = pendingConfirmation;
+    actionRunning = true; actionError = '';
+    try {
+      const response = await fetch(`/api/admin/v1/jobs/${encodeURIComponent(selectedJob.id)}/${action}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify({ idempotency_key: pendingIdempotencyKey })
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error([payload.error?.message, payload.error?.remediation].filter(Boolean).join(' '));
+      actionReceipt = payload.receipt; confirmationDialog?.close(); pendingConfirmation = ''; pendingIdempotencyKey = ''; await tick(); actionTriggerButton?.focus();
+      await refresh();
+    } catch (value) { actionError = value instanceof Error ? value.message : 'The job action failed.'; }
+    finally { actionRunning = false; }
+  }
   async function copyCommand(diagnostic: Diagnostic): Promise<void> {
     try { await navigator.clipboard.writeText(cliHandoff(diagnostic)); copied = diagnostic.id; window.setTimeout(() => (copied = ''), 1800); }
     catch { copied = ''; }
@@ -195,9 +267,46 @@
           {/if}
 
         {:else if active === 'Jobs'}
-          <div class="intro section-intro"><p class="eyebrow">EXECUTION</p><h1>Jobs</h1><p>Read-only active and terminal coordinator work. Supervision controls arrive next.</p></div>
-          <div class="metric-strip"><div><span>Active</span><strong>{activeJobs.length}</strong></div><div><span>Terminal</span><strong>{snapshot.jobs.length - activeJobs.length}</strong></div><div><span>Retained</span><strong>{snapshot.jobs.length}</strong></div></div>
-          {#if snapshot.jobs.length === 0}<div class="empty-state large-empty"><Activity size={27} /><h2>No retained jobs</h2><p>The coordinator has no active or terminal work.</p></div>{:else}<div class="table-wrap"><table><caption class="sr-only">Coordinator jobs</caption><thead><tr><th>Job</th><th>Scope</th><th>Status</th><th>Progress</th><th>Updated</th></tr></thead><tbody>{#each [...snapshot.jobs].reverse() as job}<tr><th scope="row"><span class="table-primary">{job.id}</span><small>{humanize(job.type)}</small></th><td><span class="table-primary">{job.repo_id || 'service-wide'}</span><small>{job.cache_ref || 'unscoped'}</small></td><td><StatusChip value={job.status} /></td><td>{job.completed || 0}/{job.steps || '—'}</td><td>{new Date(job.updated_at).toLocaleString()}</td></tr>{/each}</tbody></table></div>{/if}
+          {#if selectedJobID}
+            <button class="back-link" onclick={closeJob}><ArrowLeft size={15} />Back to retained jobs</button>
+            {#if selectedJob}
+              <div class="intro section-intro job-heading"><p class="eyebrow">JOB DETAIL</p><h1>{humanize(selectedJob.type)}</h1><p>{selectedJob.id} · {selectedJob.repo_id || 'service-wide'} · {selectedJob.cache_ref || 'unscoped'}</p></div>
+              <section class="job-state-card" aria-labelledby="job-state-title">
+                <div class="job-state-heading"><div><span class="entity-icon"><Gauge size={18} /></span><div><p class="section-kicker">CURRENT STATE</p><h2 id="job-state-title">{humanize(selectedJob.status)}</h2></div></div><StatusChip value={selectedJob.status} /></div>
+                <div class="job-progress" aria-label={`Job progress ${selectedJob.completed || 0} of ${selectedJob.steps || 0}`}><span style={`width: ${selectedJob.steps ? Math.min(100, ((selectedJob.completed || 0) / selectedJob.steps) * 100) : 0}%`}></span></div>
+                <dl class="job-metrics"><div><dt>Progress</dt><dd>{selectedJob.completed || 0}/{selectedJob.steps || '—'}</dd></div><div><dt>Throughput</dt><dd>{selectedJob.throughput_per_second ? `${selectedJob.throughput_per_second.toFixed(2)}/s` : 'Not enough data'}</dd></div><div><dt>ETA</dt><dd>{selectedJob.eta_seconds ? `${selectedJob.eta_seconds}s` : 'Not available'}</dd></div><div><dt>Work identity</dt><dd>{selectedJob.work_ref || 'Legacy job'}</dd></div></dl>
+                <div class="job-actions">
+                  <div><strong>Safe controls</strong><span>{selectedJob.action_reason || 'Available for this daemon-owned work.'}</span></div>
+                  <button class="danger-action" disabled={!selectedJob.cancellable || !csrfToken || actionRunning} onclick={(event) => void confirmJobAction('cancel', event.currentTarget)}><XCircle size={16} />Cancel job</button>
+                  <button disabled={!selectedJob.retryable || !csrfToken || actionRunning} onclick={(event) => void confirmJobAction('retry', event.currentTarget)}><RotateCcw size={16} />Retry job</button>
+                </div>
+                {#if !csrfToken}<p class="control-note"><ShieldCheck size={15} />Controls are unavailable until this browser has an authenticated CSRF-bound admin session.</p>{/if}
+                {#if actionError}<div class="action-result error" role="alert"><AlertTriangle size={17} /><div><strong>Action failed</strong><span>{actionError}</span></div></div>{/if}
+                {#if actionReceipt}<div class="action-result" role="status"><CheckCircle2 size={17} /><div><strong>{humanize(actionReceipt.outcome)}</strong><span>Receipt {actionReceipt.receipt_id} · result {actionReceipt.result_job_id || actionReceipt.target_job_id} · {humanize(actionReceipt.job_status)}{actionReceipt.replayed ? ' · replayed safely' : ''}</span></div></div>{/if}
+              </section>
+
+              <section class="repository-section" aria-labelledby="job-context-title"><div class="section-heading"><div><p class="section-kicker">IDENTITY & RETENTION</p><h2 id="job-context-title">Execution context</h2></div></div><dl class="job-context"><div><dt>Created</dt><dd>{new Date(selectedJob.created_at).toLocaleString()}</dd></div><div><dt>Started</dt><dd>{selectedJob.started_at ? new Date(selectedJob.started_at).toLocaleString() : 'Not started'}</dd></div><div><dt>Finished</dt><dd>{selectedJob.finished_at ? new Date(selectedJob.finished_at).toLocaleString() : 'Not terminal'}</dd></div><div><dt>Registration</dt><dd>{selectedJob.registration_id || 'Manual work'}</dd></div><div><dt>Profile</dt><dd>{selectedJob.profile_id || 'Not applicable'}</dd></div><div><dt>Progress retention</dt><dd>{selectedJob.progress_retained || 0}/{selectedJob.progress_limit || '—'} events</dd></div></dl>{#if selectedJob.failure_class}<div class="action-result error"><AlertTriangle size={17} /><div><strong>{humanize(selectedJob.failure_class)}</strong><span>{selectedJob.failure_message || 'Use Diagnostics for typed remediation.'}</span></div></div>{/if}</section>
+
+              <section class="repository-section" aria-labelledby="job-timeline-title"><div class="section-heading"><div><p class="section-kicker">STRUCTURED, BOUNDED</p><h2 id="job-timeline-title">Progress timeline</h2></div><span class="count-badge">{selectedJob.progress?.length || 0}</span></div>{#if !selectedJob.progress?.length}<div class="empty-state"><History size={23} /><h3>No retained progress events</h3><p>The current state and timestamps remain authoritative.</p></div>{:else}<ol class="job-timeline">{#each selectedJob.progress as event, index}<li><span class="timeline-mark"></span><div><strong>{humanize(event.phase || event.type || `Event ${index + 1}`)}</strong><span>{[event.collection && humanize(event.collection), event.page ? `page ${event.page}` : '', event.records_fetched ? `${event.records_fetched} fetched` : '', event.records_skipped ? `${event.records_skipped} skipped` : '', event.records_failed ? `${event.records_failed} failed` : ''].filter(Boolean).join(' · ') || 'State transition'}</span>{#if event.rate_limit_state || event.retry_after}<small>{event.rate_limit_state ? `Rate limit: ${humanize(event.rate_limit_state)}` : ''}{event.retry_after ? ` · retry after ${event.retry_after}` : ''}</small>{/if}</div></li>{/each}</ol>{/if}</section>
+            {:else}
+              <div class="empty-state large-empty"><History size={27} /><h2>Job is no longer retained</h2><p>The bounded daemon history expired this job. Return to the current list.</p><button class="text-action" onclick={closeJob}>Show retained jobs</button></div>
+            {/if}
+          {:else}
+            <div class="intro section-intro"><p class="eyebrow">EXECUTION</p><h1>Jobs</h1><p>Daemon-owned work, bounded history, and deliberate supervision with durable receipts.</p></div>
+            <div class="metric-strip"><div><span>Active</span><strong>{activeJobs.length}</strong></div><div><span>Terminal</span><strong>{snapshot.jobs.length - activeJobs.length}</strong></div><div><span>Retained</span><strong>{snapshot.jobs.length}</strong></div></div>
+            <div class="job-filter-bar" aria-label="Job filters">
+              <label><span>State</span><select value={jobStateFilter} onchange={(event) => setJobFilter('state', event.currentTarget.value)}><option value="">All states</option>{#each [...new Set(snapshot.jobs.map((job) => job.status))].sort() as value}<option value={value}>{humanize(value)}</option>{/each}</select></label>
+              <label><span>Type</span><select value={jobTypeFilter} onchange={(event) => setJobFilter('type', event.currentTarget.value)}><option value="">All types</option>{#each [...new Set(snapshot.jobs.map((job) => job.type))].sort() as value}<option value={value}>{humanize(value)}</option>{/each}</select></label>
+              <label><span>Cache</span><select value={jobCacheFilter} onchange={(event) => setJobFilter('cache', event.currentTarget.value)}><option value="">All caches</option>{#each uniqueJobValues(snapshot.jobs.map((job) => job.cache_ref)) as value}<option value={value}>{value}</option>{/each}</select></label>
+              <label><span>Repository</span><select value={jobRepoFilter} onchange={(event) => setJobFilter('repo', event.currentTarget.value)}><option value="">All repositories</option>{#each uniqueJobValues(snapshot.jobs.map((job) => job.repo_id)) as value}<option value={value}>{value}</option>{/each}</select></label>
+              <label><span>Failure</span><select value={jobFailureFilter} onchange={(event) => setJobFilter('failure', event.currentTarget.value)}><option value="">All failures</option>{#each uniqueJobValues(snapshot.jobs.map((job) => job.failure_class)) as value}<option value={value}>{humanize(value)}</option>{/each}</select></label>
+            </div>
+            {#if snapshot.jobs.length === 0}<div class="empty-state large-empty"><Activity size={27} /><h2>No retained jobs</h2><p>The coordinator has no active or terminal work.</p></div>{:else if filteredJobs.length === 0}<div class="empty-state large-empty"><Search size={27} /><h2>No jobs match these filters</h2><p>Change one or more filters to return to retained work.</p></div>{:else}<div class="table-wrap"><table><caption class="sr-only">Coordinator jobs</caption><thead><tr><th>Job</th><th>Scope</th><th>Status</th><th>Progress</th><th>Updated</th></tr></thead><tbody>{#each [...filteredJobs].reverse() as job}<tr><th scope="row"><button class="job-link" onclick={() => openJob(job)}><span class="table-primary">{job.id}</span><small>{humanize(job.type)} · {job.work_ref || 'legacy identity'}</small></button></th><td><span class="table-primary">{job.repo_id || 'service-wide'}</span><small>{job.cache_ref || 'unscoped'}</small></td><td><StatusChip value={job.status} /></td><td>{job.completed || 0}/{job.steps || '—'}</td><td>{new Date(job.updated_at).toLocaleString()}</td></tr>{/each}</tbody></table></div>{/if}
+          {/if}
+
+          {#if pendingConfirmation && selectedJob}
+            <dialog bind:this={confirmationDialog} class="confirmation-dialog" aria-labelledby="confirm-action-title" oncancel={(event) => { event.preventDefault(); void cancelJobConfirmation(); }}><span class:danger={pendingConfirmation === 'cancel'} class="dialog-icon">{#if pendingConfirmation === 'cancel'}<XCircle size={21} />{:else}<RotateCcw size={21} />{/if}</span><div><p class="section-kicker">CONFIRM {pendingConfirmation.toUpperCase()}</p><h2 id="confirm-action-title">{pendingConfirmation === 'cancel' ? 'Cancel active work?' : 'Retry terminal work?'}</h2><p>{pendingConfirmation === 'cancel' ? 'The daemon will request graceful cancellation and preserve the terminal observation.' : 'Equivalent active work will be coalesced; otherwise maintenance may create one new job.'}</p><dl><div><dt>Job</dt><dd>{selectedJob.id}</dd></div><div><dt>Scope</dt><dd>{selectedJob.repo_id || 'service-wide'} · {selectedJob.cache_ref || 'unscoped'}</dd></div><div><dt>Identity</dt><dd>{selectedJob.work_ref || 'legacy job'}</dd></div></dl><div class="dialog-actions"><button onclick={() => void cancelJobConfirmation()} disabled={actionRunning}>Keep current state</button><button bind:this={confirmActionButton} class:danger-action={pendingConfirmation === 'cancel'} class="primary-action" onclick={() => void executeJobAction()} disabled={actionRunning}>{actionRunning ? 'Submitting…' : pendingConfirmation === 'cancel' ? 'Confirm cancel' : 'Confirm retry'}</button></div></div></dialog>
+          {/if}
 
         {:else if active === 'Maintenance'}
           <div class="intro section-intro"><p class="eyebrow">POLICY</p><h1>Maintenance</h1><p>What the daemon is configured to keep current, without mutation controls.</p></div>

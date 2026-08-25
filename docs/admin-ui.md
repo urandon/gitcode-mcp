@@ -37,22 +37,27 @@ The admin listener applies these controls:
 - immutable caching for hashed SvelteKit assets, explicit no-store revalidation for `index.html`, and SPA fallback routing;
 - readiness payloads that contain local operational state but never credentials, launch tokens, session cookies, or CSRF material.
 
-## Observation API
+## Observation and supervision API
 
-The authenticated `/api/admin/v1` surface is a read-only transport over the in-process coordinator. It does not invoke CLI or MCP subprocesses and does not contact GitCode or an embedding provider while rendering a page.
+The authenticated `/api/admin/v1` surface is an in-process transport over the coordinator. Observation requests do not invoke CLI or MCP subprocesses and do not contact GitCode or an embedding provider while rendering a page. The only mutations are the explicit, CSRF-bound daemon job actions listed below.
 
 | Endpoint | Purpose |
 | --- | --- |
+| `GET /session` | Return the authenticated browser session's API version and CSRF value; never returns the session cookie material. |
 | `GET /snapshot` | Coarse overview: service, attention, caches/repositories, jobs, maintenance, diagnostics, capabilities, and a content revision. |
 | `GET /caches` and `/caches/{cache_ref}` | Managed cache topology and safe storage/readiness metadata. |
 | `GET /caches/{cache_ref}/repositories/{repo_id}` | Binding, collection counts, five independent coverage lanes, active work, contention, retry, and last-stage errors. |
-| `GET /jobs` and `/jobs/{job_id}` | Structured bounded job history and progress; list filters accept state, type, cache, and repository. |
+| `GET /jobs` and `/jobs/{job_id}` | Structured bounded job history and progress; list filters accept state, type, cache, repository, and failure class. |
+| `POST /jobs/{job_id}/cancel` | Request graceful cancellation of an active daemon-owned sync or RAG job. |
+| `POST /jobs/{job_id}/retry` | Request one safe current maintenance reconciliation for a terminal sync or RAG job; equivalent active work is coalesced. |
 | `GET /maintenance` | Read-only registrations and policy summaries. |
 | `GET /diagnostics` | Current/recovered typed failures and sanitized remediation. |
 | `GET /capabilities` | Capability and safety catalog with explicit UI availability. |
 | `GET /events?after=CURSOR` | Bounded SSE invalidation/progress replay. |
 
 Event cursors are opaque and monotonic. A reconnect within the retained window replays missed compact events. An expired cursor produces `snapshot_required`, after which the browser reloads the coarse snapshot. The stream never carries raw logs or cached record bodies.
+
+Job mutations require the authenticated session cookie, a same-origin request, the session CSRF value returned by `GET /session`, a retained public job id, a supported job type/state, and a fresh idempotency key. The daemon persists only hashes of idempotency material and a bounded set of 256 public receipts. Replaying a retained key returns the original receipt; reusing it for a different target or action is rejected. A cancel receipt distinguishes a completed cancellation from a request still converging. Retry does not force an identical historical execution: it asks the owning maintenance registration to reconcile current truth, then reports whether work was created, coalesced, or no longer needed.
 
 Ordinary responses expose `cache_ref` and a one-way path fingerprint, never an absolute cache path. Current coverage truth is kept separate from active contention, a scheduled retry, and the last stage error, so a transient maintenance failure cannot hide a still-current RAG namespace.
 
@@ -64,10 +69,10 @@ The observation UI is organized around product state rather than CLI command gro
 - **Caches** shows the safe cache → repository topology. Repository details keep head freshness, tail completeness, secondary coverage, projection generation, and RAG generation as five independent lanes.
 - **Collections** shows bounded per-kind counts and head/tail frontier evidence. A bounded tail stop is always labelled partial; only end-of-collection evidence is presented as complete.
 - **Search status** explains full-text versus hybrid readiness without running a query, provider call, sync, or repair.
-- **Activity**, **Jobs**, and **Maintenance** present bounded structured history and policy summaries without mutation controls.
+- **Activity** and **Maintenance** present bounded structured history and policy summaries. **Jobs** adds URL-preserved filters and detail, retained progress, throughput/ETA where derivable, rate-limit/retry/interruption state, and explicit cancel/retry controls only where the daemon reports them safe.
 - **Diagnostics** separates current from recovered typed failures, gives fixed public-safe CLI handoffs, and shows the capability/safety catalog.
 
-Local deep links use URL search parameters: `view`, opaque `cache`, public repository id `repo`, repository `tab`, and the diagnostic state filter. Browser reload and back/forward navigation preserve this state. The UI explicitly renders loading, empty, partial/degraded, stale, recovered, and API-version-mismatch states; status meaning is always present as text rather than color alone.
+Local deep links use URL search parameters: `view`, opaque `cache`, public repository id `repo`, repository `tab`, diagnostic state, public `job`, and job state/type/cache/repository/failure filters. Browser reload and back/forward navigation preserve this state. The UI explicitly renders loading, empty, partial/degraded, stale, recovered, interrupted, waiting, and API-version-mismatch states; status meaning is always present as text rather than color alone.
 
 ## Themes
 

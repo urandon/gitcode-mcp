@@ -57,6 +57,8 @@ type Config struct {
 	Snapshot          SnapshotProvider
 	EventCapacity     int
 	EventPollInterval time.Duration
+	CancelJob         JobActionProvider
+	RetryJob          JobActionProvider
 }
 
 type Controller struct {
@@ -154,6 +156,7 @@ func NewLaunchToken() (token string, encodedHash string, err error) {
 func (c *Controller) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/admin/v1/session", c.exchangeSession)
+	mux.HandleFunc("GET /api/admin/v1/session", c.getSession)
 	mux.HandleFunc("DELETE /api/admin/v1/session", c.deleteSession)
 	mux.HandleFunc("GET /api/admin/v1/readiness", c.getReadiness)
 	mux.HandleFunc("GET /api/admin/v1/snapshot", c.getSnapshot)
@@ -162,6 +165,8 @@ func (c *Controller) handler() http.Handler {
 	mux.HandleFunc("GET /api/admin/v1/caches/{cache_ref}/repositories/{repo_id...}", c.getRepository)
 	mux.HandleFunc("GET /api/admin/v1/jobs", c.getJobs)
 	mux.HandleFunc("GET /api/admin/v1/jobs/{job_id}", c.getJob)
+	mux.HandleFunc("POST /api/admin/v1/jobs/{job_id}/cancel", c.cancelJob)
+	mux.HandleFunc("POST /api/admin/v1/jobs/{job_id}/retry", c.retryJob)
 	mux.HandleFunc("GET /api/admin/v1/maintenance", c.getMaintenance)
 	mux.HandleFunc("GET /api/admin/v1/diagnostics", c.getDiagnostics)
 	mux.HandleFunc("GET /api/admin/v1/capabilities", c.getCapabilities)

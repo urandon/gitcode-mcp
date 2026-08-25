@@ -71,7 +71,28 @@ export type Job = {
   completed?: number;
   failure_class?: string;
   failure_message?: string;
-  progress?: Array<{ type?: string; phase?: string; collection?: string; page?: number; records_listed?: number; records_fetched?: number; records_failed?: number; retry_after?: string; attempt?: number; rate_limit_state?: string }>;
+  work_ref?: string;
+  cancellable: boolean;
+  retryable: boolean;
+  action_reason?: string;
+  progress_retained: number;
+  progress_limit: number;
+  throughput_per_second?: number;
+  eta_seconds?: number;
+  progress?: Array<{ type?: string; phase?: string; collection?: string; page?: number; records_listed?: number; records_fetched?: number; records_inserted?: number; records_updated?: number; records_skipped?: number; records_deferred?: number; records_failed?: number; retry_after?: string; attempt?: number; rate_limit_state?: string }>;
+};
+
+export type JobAction = 'cancel' | 'retry';
+
+export type JobActionReceipt = {
+  receipt_id: string;
+  action: JobAction;
+  target_job_id: string;
+  result_job_id?: string;
+  outcome: string;
+  job_status: string;
+  replayed: boolean;
+  created_at: string;
 };
 
 export type Diagnostic = {
@@ -180,6 +201,8 @@ export function statusTone(value: string | undefined): 'good' | 'warn' | 'bad' |
     case 'retry_scheduled':
     case 'backfilling':
     case 'deferred':
+    case 'interrupted':
+    case 'waiting':
       return 'warn';
     default:
       return 'neutral';
