@@ -34,6 +34,10 @@ func getPREndpoint(owner, repo string, number int) string {
 	return endpointPath("/api/v5/repos/%s/%s/pulls/%d", owner, repo, number)
 }
 
+func mergePREndpoint(owner, repo string, number int) string {
+	return endpointPath("/api/v5/repos/%s/%s/pulls/%d/merge", owner, repo, number)
+}
+
 func listPRCommentsEndpoint(owner, repo string, number int) string {
 	return endpointPath("/api/v5/repos/%s/%s/pulls/%d/comments", owner, repo, number)
 }

@@ -1854,6 +1854,76 @@ func TestScenario016PRLifecycleWrites(t *testing.T) {
 		}
 	})
 
+	t.Run("merge-pr-with-head-sha-and-readback", func(t *testing.T) {
+		gets := 0
+		puts := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == getPREndpoint("example-owner", "example-repo", 7):
+				gets++
+				state := "open"
+				if gets > 1 {
+					state = "merged"
+				}
+				fmt.Fprintf(w, `{"id":9001,"number":7,"title":"merge me","state":%q,"head":{"ref":"topic","sha":"abc123"}}`, state)
+			case r.Method == http.MethodPut && r.URL.Path == mergePREndpoint("example-owner", "example-repo", 7):
+				puts++
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(body) != `{"merge_method":"squash"}` {
+					t.Fatalf("merge body=%s", body)
+				}
+				fmt.Fprint(w, `{"sha":"merged-sha","merged":true,"message":"merged"}`)
+			default:
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+		}))
+		defer server.Close()
+
+		result, err := newTestClient(t, server.URL, Config{}).MergePR(context.Background(), MergePRRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, HeadSHA: "abc123", MergeMethod: "squash"}, WriteOptions{IdempotencyKey: "key-merge-pr"})
+		if err != nil {
+			t.Fatalf("MergePR returned error: %v", err)
+		}
+		if gets != 2 || puts != 1 || !result.Confirmed || result.Operation != "MergePR" || result.Record.State != "merged" || result.RemoteNumber != 7 || result.RemoteRevision != "merged-sha" {
+			t.Fatalf("gets=%d puts=%d result=%+v", gets, puts, result)
+		}
+	})
+
+	t.Run("merge-pr-rejects-stale-head", func(t *testing.T) {
+		puts := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPut {
+				puts++
+			}
+			fmt.Fprint(w, `{"id":9001,"number":7,"title":"merge me","state":"open","head":{"ref":"topic","sha":"new-sha"}}`)
+		}))
+		defer server.Close()
+
+		_, err := newTestClient(t, server.URL, Config{}).MergePR(context.Background(), MergePRRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, HeadSHA: "old-sha", MergeMethod: "merge"}, WriteOptions{IdempotencyKey: "key-stale-merge"})
+		var conflict ErrConflict
+		if !errors.As(err, &conflict) || puts != 0 {
+			t.Fatalf("err=%v puts=%d", err, puts)
+		}
+	})
+
+	t.Run("merge-pr-already-merged-is-idempotent", func(t *testing.T) {
+		puts := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPut {
+				puts++
+			}
+			fmt.Fprint(w, `{"id":9001,"number":7,"title":"merged","state":"merged"}`)
+		}))
+		defer server.Close()
+
+		result, err := newTestClient(t, server.URL, Config{}).MergePR(context.Background(), MergePRRequest{Owner: "example-owner", Repo: "example-repo", Number: 7}, WriteOptions{IdempotencyKey: "key-existing-merge"})
+		if err != nil || puts != 0 || result.ProviderStatus != "readback-existing" || !result.Confirmed {
+			t.Fatalf("err=%v puts=%d result=%+v", err, puts, result)
+		}
+	})
+
 	t.Run("link-pr-issue", func(t *testing.T) {
 		var seenBody string
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

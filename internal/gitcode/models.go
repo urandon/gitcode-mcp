@@ -69,6 +69,20 @@ type UpdatePRRequest struct {
 	State  string `json:"state,omitempty"`
 }
 
+type MergePRRequest struct {
+	Owner       string `json:"-"`
+	Repo        string `json:"-"`
+	Number      int    `json:"-"`
+	HeadSHA     string `json:"-"`
+	MergeMethod string `json:"merge_method,omitempty"`
+}
+
+type MergePRResponse struct {
+	SHA     string `json:"sha"`
+	Merged  any    `json:"merged"`
+	Message string `json:"message"`
+}
+
 type CreatePRCommentRequest struct {
 	Owner  string `json:"-"`
 	Repo   string `json:"-"`

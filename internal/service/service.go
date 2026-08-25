@@ -221,6 +221,10 @@ func (sanitizedFixtureClient) UpdatePR(context.Context, gitcode.UpdatePRRequest,
 	return gitcode.WriteResult[gitcode.PullRequest]{}, gitcode.FixtureReadOnlyError("UpdatePR")
 }
 
+func (sanitizedFixtureClient) MergePR(context.Context, gitcode.MergePRRequest, gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PullRequest], error) {
+	return gitcode.WriteResult[gitcode.PullRequest]{}, gitcode.FixtureReadOnlyError("MergePR")
+}
+
 func (sanitizedFixtureClient) LinkPRIssue(context.Context, gitcode.LinkPRIssueRequest, gitcode.WriteOptions) (gitcode.WriteResult[[]gitcode.Issue], error) {
 	return gitcode.WriteResult[[]gitcode.Issue]{}, gitcode.FixtureReadOnlyError("LinkPRIssue")
 }
@@ -3807,6 +3811,23 @@ func (s *Service) UpdatePR(ctx context.Context, req WriteCommandRequest) (WriteC
 	return s.executeWrite(ctx, "update-pr", req, RepositoryScopeIssues)
 }
 
+func (s *Service) MergePR(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
+	if req.Number == 0 {
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "pull_request", Message: "number is required"}
+	}
+	strategy := strings.ToLower(strings.TrimSpace(req.Strategy))
+	if strategy == "" {
+		strategy = "merge"
+	}
+	switch strategy {
+	case "merge", "squash", "rebase":
+		req.Strategy = strategy
+	default:
+		return WriteCommandResult{}, ErrInvalidQuery{Field: "strategy", Message: "must be merge, squash, or rebase"}
+	}
+	return s.executeWrite(ctx, "merge-pr", req, RepositoryScopeIssues)
+}
+
 func (s *Service) ListMilestones(ctx context.Context, req MilestoneListRequest) (MilestoneListResult, error) {
 	repoID := firstNonEmptyString(req.RepoID, req.Repo)
 	route, err := s.BuildAdapterRoute(ctx, repoID, RepositoryScopeIssues)
@@ -5597,8 +5618,10 @@ type writeConfirmation struct {
 func writeAuditMetadata(command, key, fingerprint, remoteType string, confirmed writeConfirmation) map[string]string {
 	method := "POST"
 	switch command {
-	case "update-issue", "set-issue-milestone", "clear-issue-milestone":
+	case "update-issue", "update-pr", "set-issue-milestone", "clear-issue-milestone":
 		method = "PATCH"
+	case "merge-pr":
+		method = "PUT"
 	}
 	metadata := map[string]string{
 		"method":             method,
@@ -5643,7 +5666,7 @@ func writeAuditMetadata(command, key, fingerprint, remoteType string, confirmed 
 }
 
 func withWriteAuditMetadata(entry cache.AuditTrailEntry, command, key, fingerprint, remoteType string, confirmed writeConfirmation) cache.AuditTrailEntry {
-	if command != "create-issue" && command != "reply-pr-review-comment" && confirmed.milestone == nil && confirmed.pushMirror == nil {
+	if command != "create-issue" && command != "merge-pr" && command != "reply-pr-review-comment" && confirmed.milestone == nil && confirmed.pushMirror == nil {
 		return entry
 	}
 	return audit.WithRequestMetadata(entry, writeAuditMetadata(command, key, fingerprint, remoteType, confirmed))
@@ -5740,6 +5763,12 @@ func (s *Service) callWriteAdapter(ctx context.Context, command string, route Re
 		return s.pullRequestWriteGraph(ctx, route.RepoID, result.Record, result, now)
 	case "update-pr":
 		result, err := s.client.UpdatePR(ctx, gitcode.UpdatePRRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, Title: req.Title, Body: req.Body, State: req.State}, opts)
+		if err != nil {
+			return writeConfirmation{}, cache.RecordGraph{}, err
+		}
+		return s.pullRequestWriteGraph(ctx, route.RepoID, result.Record, result, now)
+	case "merge-pr":
+		result, err := s.client.MergePR(ctx, gitcode.MergePRRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number, HeadSHA: strings.TrimSpace(req.Sha), MergeMethod: req.Strategy}, opts)
 		if err != nil {
 			return writeConfirmation{}, cache.RecordGraph{}, err
 		}
@@ -6202,12 +6231,16 @@ func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID s
 		result := gitcode.WriteResult[gitcode.Comment]{Record: comment, Confirmed: true, RemoteID: commentID, ParentIssueNumber: number, RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
 		_, graph, err := s.commentWriteGraph(ctx, repoID, number, req.IssueID, comment, result, now)
 		return graph, err
-	case "create-pr", "update-pr", "link-pr-issue":
+	case "create-pr", "update-pr", "merge-pr", "link-pr-issue":
 		number := req.Number
 		if number == 0 {
 			number, _ = strconv.Atoi(prior.RemoteID)
 		}
-		pr := gitcode.PullRequest{ID: prior.RemoteID, Number: number, Title: req.Title, Body: req.Body, State: firstNonEmptyString(req.State, "open"), Base: req.Base, Head: req.Head, CreatedAt: now, UpdatedAt: now}
+		state := firstNonEmptyString(req.State, "open")
+		if command == "merge-pr" {
+			state = "merged"
+		}
+		pr := gitcode.PullRequest{ID: prior.RemoteID, Number: number, Title: req.Title, Body: req.Body, State: state, Base: req.Base, Head: req.Head, CreatedAt: now, UpdatedAt: now}
 		if pr.Title == "" {
 			pr.Title = "Pull request " + strconv.Itoa(number)
 		}
@@ -6955,6 +6988,8 @@ func writeCommandRemoteType(command string) string {
 		return "issue"
 	case "create-page", "update-page", "delete-page":
 		return "wiki"
+	case "create-pr", "update-pr", "merge-pr", "link-pr-issue":
+		return "pull_request"
 	default:
 		return "remote"
 	}

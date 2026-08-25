@@ -293,6 +293,68 @@ func (c *HTTPClient) UpdatePR(ctx context.Context, req UpdatePRRequest, opts Wri
 	return WriteResult[PullRequest]{Record: pr, Confirmed: true, Operation: "UpdatePR", Target: target, ProviderStatus: "2xx-readback", IdempotencyKey: key, ResponseHash: hex.EncodeToString(hash[:]), ProviderPayloadFingerprint: hex.EncodeToString(fingerprint[:]), RemoteID: pr.ID, RemoteNumber: pr.Number, ConfirmedAt: time.Now().UTC()}, nil
 }
 
+func (c *HTTPClient) MergePR(ctx context.Context, req MergePRRequest, opts WriteOptions) (WriteResult[PullRequest], error) {
+	if err := validateMergePR(req); err != nil {
+		return WriteResult[PullRequest]{}, err
+	}
+	target := req.Owner + "/" + req.Repo + "/pulls/" + strconv.Itoa(req.Number) + "/merge"
+	key := opts.IdempotencyKey
+	if key == "" {
+		key = GenerateIdempotencyKey("MergePR", target, req, opts)
+		opts.IdempotencyKey = key
+	}
+	before, err := c.GetPR(ctx, PRRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
+	if err != nil {
+		return WriteResult[PullRequest]{}, err
+	}
+	if strings.TrimSpace(req.HeadSHA) != "" && !strings.EqualFold(strings.TrimSpace(req.HeadSHA), strings.TrimSpace(before.HeadSHA)) {
+		return WriteResult[PullRequest]{}, ErrConflict{Endpoint: mergePREndpoint(req.Owner, req.Repo, req.Number), Status: http.StatusConflict, Message: "pull request head SHA changed before merge"}
+	}
+	if strings.EqualFold(strings.TrimSpace(before.State), "merged") {
+		return confirmedExistingPRMerge(before, target, key)
+	}
+	merged, err := writeConfirmedJSON[MergePRResponse](ctx, c, http.MethodPut, mergePREndpoint(req.Owner, req.Repo, req.Number), "MergePR", target, req, opts, func(result WriteResult[MergePRResponse]) (WriteResult[MergePRResponse], error) {
+		if !mergeResponseConfirmed(result.Record.Merged) {
+			return WriteResult[MergePRResponse]{}, ErrValidationFailed{Field: "response.merged", Message: "merge confirmation requires merged=true"}
+		}
+		return result, nil
+	})
+	if err != nil {
+		return WriteResult[PullRequest]{}, err
+	}
+	pr, err := c.GetPR(ctx, PRRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
+	if err != nil {
+		return WriteResult[PullRequest]{}, ErrPartialResponse{Endpoint: mergePREndpoint(req.Owner, req.Repo, req.Number), Cause: err, Message: "merge succeeded but pull request readback failed"}
+	}
+	if pr.Number != req.Number || strings.TrimSpace(pr.ID) == "" || !strings.EqualFold(strings.TrimSpace(pr.State), "merged") {
+		return WriteResult[PullRequest]{}, ErrPartialResponse{Endpoint: mergePREndpoint(req.Owner, req.Repo, req.Number), Cause: ErrValidationFailed{Field: "readback.state", Message: "merged pull request readback requires state=merged"}, Message: "merge succeeded but readback did not confirm state=merged"}
+	}
+	return WriteResult[PullRequest]{Record: pr, Confirmed: merged.Confirmed, Operation: merged.Operation, Target: merged.Target, ProviderStatus: merged.ProviderStatus, RemoteID: pr.ID, RemoteNumber: pr.Number, RemoteRevision: strings.TrimSpace(merged.Record.SHA), BrowserURL: pr.HTMLURL, IdempotencyKey: merged.IdempotencyKey, ResponseHash: merged.ResponseHash, ConfirmedAt: merged.ConfirmedAt, ProviderPayloadFingerprint: merged.ProviderPayloadFingerprint}, nil
+}
+
+func confirmedExistingPRMerge(pr PullRequest, target, key string) (WriteResult[PullRequest], error) {
+	body, err := json.Marshal(pr)
+	if err != nil {
+		return WriteResult[PullRequest]{}, err
+	}
+	hash := sha256.Sum256(body)
+	fingerprint := sha256.Sum256(RedactJSONBody(body, target))
+	return WriteResult[PullRequest]{Record: pr, Confirmed: true, Operation: "MergePR", Target: target, ProviderStatus: "readback-existing", RemoteID: pr.ID, RemoteNumber: pr.Number, BrowserURL: pr.HTMLURL, IdempotencyKey: key, ResponseHash: hex.EncodeToString(hash[:]), ConfirmedAt: time.Now().UTC(), ProviderPayloadFingerprint: hex.EncodeToString(fingerprint[:])}, nil
+}
+
+func mergeResponseConfirmed(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case float64:
+		return typed == 1
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typed), "true") || strings.TrimSpace(typed) == "1"
+	default:
+		return false
+	}
+}
+
 func (c *HTTPClient) LinkPRIssue(ctx context.Context, req LinkPRIssueRequest, opts WriteOptions) (WriteResult[[]Issue], error) {
 	if err := validateLinkPRIssue(req); err != nil {
 		return WriteResult[[]Issue]{}, err
@@ -1728,6 +1790,21 @@ func validateUpdatePR(req UpdatePRRequest) error {
 		return ErrValidationFailed{Field: "number", Message: "positive pull request number is required"}
 	}
 	return nil
+}
+
+func validateMergePR(req MergePRRequest) error {
+	if err := validateWriteRepo(req.Owner, req.Repo); err != nil {
+		return err
+	}
+	if req.Number <= 0 {
+		return ErrValidationFailed{Field: "number", Message: "positive pull request number is required"}
+	}
+	switch strings.ToLower(strings.TrimSpace(req.MergeMethod)) {
+	case "", "merge", "squash", "rebase":
+		return nil
+	default:
+		return ErrValidationFailed{Field: "merge_method", Message: "merge method must be merge, squash, or rebase"}
+	}
 }
 
 func validateLinkPRIssue(req LinkPRIssueRequest) error {

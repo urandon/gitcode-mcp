@@ -171,6 +171,10 @@ func (p *fixtureProvider) UpdatePR(context.Context, UpdatePRRequest, WriteOption
 	return WriteResult[PullRequest]{}, FixtureReadOnlyError("UpdatePR")
 }
 
+func (p *fixtureProvider) MergePR(context.Context, MergePRRequest, WriteOptions) (WriteResult[PullRequest], error) {
+	return WriteResult[PullRequest]{}, FixtureReadOnlyError("MergePR")
+}
+
 func (p *fixtureProvider) LinkPRIssue(context.Context, LinkPRIssueRequest, WriteOptions) (WriteResult[[]Issue], error) {
 	return WriteResult[[]Issue]{}, FixtureReadOnlyError("LinkPRIssue")
 }

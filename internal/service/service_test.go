@@ -114,6 +114,10 @@ func TestScenario005ServiceSanitizedFixtureBoundary(t *testing.T) {
 			_, err := client.UpdatePR(ctx, gitcode.UpdatePRRequest{}, gitcode.WriteOptions{})
 			return err
 		}},
+		{name: "merge-pr", run: func() error {
+			_, err := client.MergePR(ctx, gitcode.MergePRRequest{}, gitcode.WriteOptions{})
+			return err
+		}},
 		{name: "create-pr-comment", run: func() error {
 			_, err := client.CreatePRComment(ctx, gitcode.CreatePRCommentRequest{}, gitcode.WriteOptions{})
 			return err
@@ -1992,6 +1996,39 @@ func TestPRReviewReplyPartialCacheReplayPreservesResolvedDiscussionID(t *testing
 	rows, err := store.ListPRReviewComments(ctx, cache.PRReviewCommentFilter{RepoID: "reply-partial", PRNumber: 7, SourceID: "PRCOMMENT-7-303"})
 	if err != nil || len(rows) != 1 || rows[0].DiscussionID != "D7" {
 		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+}
+
+func TestMergePRWritesAuditAndRefreshesCachedPR(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{mergePRResult: gitcode.WriteResult[gitcode.PullRequest]{Record: gitcode.PullRequest{ID: "9001", Number: 103, Title: "Release batch", State: "merged", HeadSHA: "head-sha", CreatedAt: now, UpdatedAt: now}, Confirmed: true, Operation: "MergePR", ProviderStatus: "200", RemoteID: "9001", RemoteNumber: 103, RemoteRevision: "merge-sha", IdempotencyKey: "merge-103", ResponseHash: "response-hash", ProviderPayloadFingerprint: "payload-hash", ConfirmedAt: now}}
+	svc := NewWithClient(store, client)
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.writeCredentialPresent = true
+
+	result, err := svc.MergePR(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 103, Sha: "head-sha", Strategy: "squash", IdempotencyKey: "merge-103"})
+	if err != nil {
+		t.Fatalf("MergePR: %v", err)
+	}
+	if result.Status != "succeeded" || result.RemoteNumber != 103 || result.RemoteRevision != "merge-sha" || client.mergePRCalls != 1 || client.lastMergePRRequest.HeadSHA != "head-sha" || client.lastMergePRRequest.MergeMethod != "squash" {
+		t.Fatalf("result=%+v calls=%d request=%+v", result, client.mergePRCalls, client.lastMergePRRequest)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", "merge-103")
+	if err != nil || entry == nil || entry.Status != audit.StatusSucceeded || entry.RequestMetadata["method"] != "PUT" || entry.RequestMetadata["remote_type"] != "pull_request" {
+		t.Fatalf("audit=%+v err=%v", entry, err)
+	}
+	replayed, err := svc.MergePR(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 103, Sha: "head-sha", Strategy: "squash", IdempotencyKey: "merge-103"})
+	if err != nil || !replayed.Replayed || client.mergePRCalls != 1 {
+		t.Fatalf("replayed=%+v err=%v calls=%d", replayed, err, client.mergePRCalls)
 	}
 }
 
@@ -4254,6 +4291,7 @@ type fakeGitCodeClient struct {
 	updateIssueCommentCalls      int
 	createPRCalls                int
 	updatePRCalls                int
+	mergePRCalls                 int
 	linkPRIssueCalls             int
 	createPRCommentCalls         int
 	createPRReviewCommentCalls   int
@@ -4271,6 +4309,7 @@ type fakeGitCodeClient struct {
 	updateIssueCommentResult     gitcode.WriteResult[gitcode.Comment]
 	createPRResult               gitcode.WriteResult[gitcode.PullRequest]
 	updatePRResult               gitcode.WriteResult[gitcode.PullRequest]
+	mergePRResult                gitcode.WriteResult[gitcode.PullRequest]
 	linkPRIssueResult            gitcode.WriteResult[[]gitcode.Issue]
 	listMilestonesResult         gitcode.Page[gitcode.Milestone]
 	createMilestoneResult        gitcode.WriteResult[gitcode.Milestone]
@@ -4312,6 +4351,7 @@ type fakeGitCodeClient struct {
 	lastUpdateIssueCommentReq    gitcode.UpdateIssueCommentRequest
 	lastCreatePRRequest          gitcode.CreatePRRequest
 	lastUpdatePRRequest          gitcode.UpdatePRRequest
+	lastMergePRRequest           gitcode.MergePRRequest
 	lastLinkPRIssueRequest       gitcode.LinkPRIssueRequest
 	lastListMilestonesRequest    gitcode.MilestoneListRequest
 	pushMirrorsResult            []gitcode.PushMirror
@@ -4537,6 +4577,16 @@ func (f *fakeGitCodeClient) UpdatePR(_ context.Context, req gitcode.UpdatePRRequ
 		return gitcode.WriteResult[gitcode.PullRequest]{}, err
 	}
 	return f.updatePRResult, nil
+}
+
+func (f *fakeGitCodeClient) MergePR(_ context.Context, req gitcode.MergePRRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PullRequest], error) {
+	f.mergePRCalls++
+	f.lastMergePRRequest = req
+	f.lastWriteOptions = opts
+	if err := f.nextError(); err != nil {
+		return gitcode.WriteResult[gitcode.PullRequest]{}, err
+	}
+	return f.mergePRResult, nil
 }
 func (f *fakeGitCodeClient) LinkPRIssue(_ context.Context, req gitcode.LinkPRIssueRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[[]gitcode.Issue], error) {
 	f.linkPRIssueCalls++
