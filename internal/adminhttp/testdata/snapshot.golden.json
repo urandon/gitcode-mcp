@@ -1,6 +1,6 @@
 {
   "api_version": "1",
-  "revision": "snapshot-8ad585dc6f7c3814",
+  "revision": "snapshot-a1623831b773a361",
   "generated_at": "2026-08-25T10:30:00Z",
   "service": {
     "version": "v2.0.0",
@@ -62,7 +62,9 @@
               "covered_generation": 4
             }
           },
-          "execution": {}
+          "execution": {},
+          "collections": [],
+          "recent_sync_events": []
         }
       ]
     }

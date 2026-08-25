@@ -56,6 +56,19 @@ Event cursors are opaque and monotonic. A reconnect within the retained window r
 
 Ordinary responses expose `cache_ref` and a one-way path fingerprint, never an absolute cache path. Current coverage truth is kept separate from active contention, a scheduled retry, and the last stage error, so a transient maintenance failure cannot hide a still-current RAG namespace.
 
+## Read-only operator views
+
+The observation UI is organized around product state rather than CLI command groups:
+
+- **Overview** leads with current attention, service/cache readiness, active work, cache/repository cohort summaries, and recovered failures.
+- **Caches** shows the safe cache → repository topology. Repository details keep head freshness, tail completeness, secondary coverage, projection generation, and RAG generation as five independent lanes.
+- **Collections** shows bounded per-kind counts and head/tail frontier evidence. A bounded tail stop is always labelled partial; only end-of-collection evidence is presented as complete.
+- **Search status** explains full-text versus hybrid readiness without running a query, provider call, sync, or repair.
+- **Activity**, **Jobs**, and **Maintenance** present bounded structured history and policy summaries without mutation controls.
+- **Diagnostics** separates current from recovered typed failures, gives fixed public-safe CLI handoffs, and shows the capability/safety catalog.
+
+Local deep links use URL search parameters: `view`, opaque `cache`, public repository id `repo`, repository `tab`, and the diagnostic state filter. Browser reload and back/forward navigation preserve this state. The UI explicitly renders loading, empty, partial/degraded, stale, recovered, and API-version-mismatch states; status meaning is always present as text rather than color alone.
+
 ## Themes
 
 The visible selector has exactly three choices: **Light**, **Dark**, and **System**. **System is the default** when no preference is saved or an invalid value is found. It follows `prefers-color-scheme`; explicit Light and Dark choices are stored only in browser-local storage. A small external head script applies the choice before the application starts, avoiding a first-paint theme flash while keeping the CSP free of inline script allowances.

@@ -69,14 +69,31 @@ type CacheObservation struct {
 }
 
 type RepositoryObservation struct {
-	RepoID       string               `json:"repo_id"`
-	DisplayName  string               `json:"display_name,omitempty"`
-	Aliases      []string             `json:"aliases,omitempty"`
-	Scopes       []string             `json:"scopes,omitempty"`
-	BindingState string               `json:"binding_state"`
-	Counts       CollectionCounts     `json:"counts"`
-	Coverage     CoverageObservation  `json:"coverage"`
-	Execution    ExecutionObservation `json:"execution"`
+	RepoID       string                  `json:"repo_id"`
+	DisplayName  string                  `json:"display_name,omitempty"`
+	Aliases      []string                `json:"aliases,omitempty"`
+	Scopes       []string                `json:"scopes,omitempty"`
+	BindingState string                  `json:"binding_state"`
+	Counts       CollectionCounts        `json:"counts"`
+	Coverage     CoverageObservation     `json:"coverage"`
+	Execution    ExecutionObservation    `json:"execution"`
+	Collections  []CollectionObservation `json:"collections"`
+	RecentSync   []SyncEventObservation  `json:"recent_sync_events"`
+}
+
+type CollectionObservation struct {
+	Kind  string       `json:"kind"`
+	Count int          `json:"count"`
+	Head  CoverageLane `json:"head"`
+	Tail  CoverageLane `json:"tail"`
+}
+
+type SyncEventObservation struct {
+	ID          string    `json:"id"`
+	Kind        string    `json:"kind"`
+	Status      string    `json:"status"`
+	CompletedAt time.Time `json:"completed_at"`
+	ZeroDelta   bool      `json:"zero_delta"`
 }
 
 type CollectionCounts struct {
@@ -339,9 +356,22 @@ func sortSnapshot(snapshot *ObservationSnapshot) {
 		sort.Slice(cache.Repositories, func(i, j int) bool { return cache.Repositories[i].RepoID < cache.Repositories[j].RepoID })
 		for j := range cache.Repositories {
 			repo := &cache.Repositories[j]
+			if repo.Collections == nil {
+				repo.Collections = []CollectionObservation{}
+			}
+			if repo.RecentSync == nil {
+				repo.RecentSync = []SyncEventObservation{}
+			}
 			sort.Strings(repo.Aliases)
 			sort.Strings(repo.Scopes)
 			sort.Slice(repo.Counts.ByKind, func(i, j int) bool { return repo.Counts.ByKind[i].Kind < repo.Counts.ByKind[j].Kind })
+			sort.Slice(repo.Collections, func(i, j int) bool { return repo.Collections[i].Kind < repo.Collections[j].Kind })
+			sort.Slice(repo.RecentSync, func(i, j int) bool {
+				if repo.RecentSync[i].CompletedAt.Equal(repo.RecentSync[j].CompletedAt) {
+					return repo.RecentSync[i].ID > repo.RecentSync[j].ID
+				}
+				return repo.RecentSync[i].CompletedAt.After(repo.RecentSync[j].CompletedAt)
+			})
 			sort.Strings(repo.Execution.ActiveJobIDs)
 			sort.Slice(repo.Execution.LastErrors, func(i, j int) bool { return repo.Execution.LastErrors[i].Stage < repo.Execution.LastErrors[j].Stage })
 		}
