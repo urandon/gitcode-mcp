@@ -10,9 +10,16 @@ test('embedded admin launch, controls, and theme states', async ({ page, context
   test.skip(!launchURL || !outputDir, 'requires an explicit one-time local QA launch URL and output directory');
   await mkdir(outputDir!, { recursive: true });
   await page.setViewportSize({ width: 1487, height: 1058 });
+  const firstSnapshot = page.waitForResponse((response) => response.url().endsWith('/api/admin/v1/snapshot') && response.status() === 200);
+  const firstEvents = page.waitForResponse((response) => response.url().includes('/api/admin/v1/events') && response.status() === 200);
   await page.goto(launchURL!);
   await expect(page.getByRole('heading', { name: 'Local operator console' })).toBeVisible();
   await expect(page).not.toHaveURL(/launch=/);
+  const snapshotPayload = await (await firstSnapshot).json();
+  expect(snapshotPayload.api_version).toBe('1');
+  expect(snapshotPayload.revision).toMatch(/^snapshot-/);
+  expect(JSON.stringify(snapshotPayload)).not.toContain('/Users/');
+  expect((await firstEvents).headers()['content-type']).toContain('text/event-stream');
 
   const cookies = await context.cookies();
   const session = cookies.find((cookie) => cookie.name === 'gitcode_mcp_admin_session');
@@ -36,6 +43,11 @@ test('embedded admin launch, controls, and theme states', async ({ page, context
   await expect(page.getByRole('heading', { name: 'Diagnostics' })).toBeVisible();
   await page.getByRole('button', { name: 'Back to overview' }).click();
   await expect(page.getByRole('button', { name: 'Refresh status' })).toBeEnabled();
+
+  const reloadedSnapshot = page.waitForResponse((response) => response.url().endsWith('/api/admin/v1/snapshot') && response.status() === 200);
+  await page.reload();
+  await reloadedSnapshot;
+  await expect(page.getByRole('heading', { name: 'Local operator console' })).toBeVisible();
 
   await system.click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'system');

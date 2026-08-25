@@ -342,7 +342,13 @@ func (m Manager) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	admin := adminhttp.New(adminhttp.Config{Bind: m.AdminBind, AllowNonLoopback: m.AdminAllowNonLoopback, SessionTTL: m.AdminSessionTTL, Assets: assets, Readiness: m.adminReadiness})
+	admin := adminhttp.New(adminhttp.Config{
+		Bind: m.AdminBind, AllowNonLoopback: m.AdminAllowNonLoopback, SessionTTL: m.AdminSessionTTL,
+		Assets: assets, Readiness: m.adminReadiness,
+		Snapshot: func(snapshotContext context.Context) (adminhttp.ObservationSnapshot, error) {
+			return m.adminObservation(snapshotContext, jobs, maintenance, now)
+		},
+	})
 	if m.AdminAutoStart {
 		if _, err := admin.Start(ctx); err != nil {
 			return err
@@ -372,11 +378,16 @@ func (m Manager) Run(ctx context.Context) error {
 
 func (m Manager) adminReadiness(ctx context.Context) adminhttp.Readiness {
 	result := adminhttp.Readiness{Version: m.Version}
-	result.CacheReference = m.AdminCachePath
-	if result.CacheReference != "" && result.CacheReference != ":memory:" {
-		if info, err := os.Stat(result.CacheReference); err == nil && !info.IsDir() {
-			if store, err := cache.NewSQLiteReadOnlyStore(ctx, result.CacheReference); err == nil {
+	cachePath := m.AdminCachePath
+	if cachePath != "" && cachePath != ":memory:" {
+		if info, err := os.Stat(cachePath); err == nil && !info.IsDir() {
+			if store, err := cache.NewSQLiteReadOnlyStore(ctx, cachePath); err == nil {
 				defer store.Close()
+				if identity, err := store.CacheIdentity(ctx); err == nil {
+					result.CacheReference = publicCacheRef(identity.UUID, cachePath)
+				} else {
+					result.CacheReference = publicCacheRef("", cachePath)
+				}
 				if version, err := store.SchemaVersion(ctx); err == nil {
 					result.CacheConnected = true
 					result.SchemaVersion = version

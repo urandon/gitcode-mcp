@@ -1,6 +1,6 @@
 <script lang="ts">
   import './+page.css';
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import {
     Activity,
     Blocks,
@@ -27,6 +27,14 @@
     cache_reference?: string;
     schema_version?: number;
     checked_at: string;
+  };
+
+  type ObservationSnapshot = {
+    api_version: string;
+    revision: string;
+    generated_at: string;
+    service: { version: string; running: boolean; admin_secure: boolean };
+    caches: Array<{ cache_ref: string; readiness: string; schema_version?: number }>;
   };
 
   const navigation = [
@@ -57,6 +65,7 @@
     schema_version: 0,
     checked_at: new Date(0).toISOString()
   };
+  let eventStream: EventSource | undefined;
 
   async function establishSession(): Promise<void> {
     const fragment = new URLSearchParams(location.hash.slice(1));
@@ -75,13 +84,32 @@
     loading = true;
     error = '';
     try {
-      const response = await fetch('/api/admin/v1/readiness');
+      const response = await fetch('/api/admin/v1/snapshot');
       if (!response.ok) throw new Error(response.status === 401 ? 'Admin session required. Run admin open again.' : 'Readiness is unavailable.');
-      readiness = await response.json();
+      const snapshot: ObservationSnapshot = await response.json();
+      const selectedCache = snapshot.caches[0];
+      readiness = {
+        api_version: snapshot.api_version,
+        version: snapshot.service.version,
+        daemon_running: snapshot.service.running,
+        session_secure: snapshot.service.admin_secure,
+        cache_connected: selectedCache?.readiness === 'ready',
+        cache_reference: selectedCache?.cache_ref || 'No managed cache',
+        schema_version: selectedCache?.schema_version || 0,
+        checked_at: snapshot.generated_at
+      };
     } catch (value) {
       error = value instanceof Error ? value.message : 'Readiness is unavailable.';
     } finally {
       loading = false;
+    }
+  }
+
+  function connectEvents(): void {
+    eventStream?.close();
+    eventStream = new EventSource('/api/admin/v1/events');
+    for (const kind of ['snapshot_changed', 'snapshot_required']) {
+      eventStream.addEventListener(kind, () => void refresh());
     }
   }
 
@@ -96,11 +124,14 @@
     try {
       await establishSession();
       await refresh();
+      connectEvents();
     } catch (value) {
       error = value instanceof Error ? value.message : 'Admin session is unavailable.';
       loading = false;
     }
   });
+
+  onDestroy(() => eventStream?.close());
 </script>
 
 <svelte:head><title>gitcode-mcp · Local operator console</title></svelte:head>

@@ -399,6 +399,11 @@ type RecordCounts struct {
 	RAGIndexRuns    int
 }
 
+type SourceKindCount struct {
+	Kind  string
+	Count int
+}
+
 type RecordFilter struct {
 	RepoID     string
 	Type       string
