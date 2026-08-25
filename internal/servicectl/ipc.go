@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"gitcode-mcp/internal/adminhttp"
 )
 
 const jsonrpcVersion = "2.0"
@@ -56,6 +58,7 @@ type RPCServer struct {
 	Manager     Manager
 	Jobs        *JobManager
 	Maintenance *MaintenanceManager
+	Admin       *adminhttp.Controller
 }
 
 type RPCClient struct {
@@ -150,6 +153,20 @@ func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawM
 		return s.health(ctx)
 	case "Service.Doctor":
 		return s.Manager.Doctor()
+	case "Admin.Status":
+		if s.Admin == nil {
+			return adminhttp.Status{}, errors.New("admin controller is unavailable")
+		}
+		return s.Admin.Status(), nil
+	case "Admin.Open":
+		if s.Admin == nil {
+			return adminhttp.OpenResult{}, errors.New("admin controller is unavailable")
+		}
+		var request adminhttp.OpenRequest
+		if err := json.Unmarshal(params, &request); err != nil {
+			return adminhttp.OpenResult{}, err
+		}
+		return s.Admin.Open(ctx, request)
 	case "Jobs.StartFake":
 		var req StartFakeJobRequest
 		if len(params) > 0 {

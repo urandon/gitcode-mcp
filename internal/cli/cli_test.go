@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -604,10 +605,70 @@ func TestAllCommandsRegistered(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d", code)
 	}
-	for _, want := range []string{"ingest", "index", "search", "search_sources", "list", "get", "get-snippet", "snippet", "snippets", "backlinks", "list-chunks", "link-check", "stale-index", "recent", "cache", "cache-status", "sync-status", "sync_status", "sync", "export", "diff", "create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "milestones", "list-push-mirrors", "push-mirrors", "trigger-push-mirror", "wait-push-mirror", "create-milestone", "update-milestone", "set-issue-milestone", "clear-issue-milestone", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "reply-pr-review-comment", "update-comment", "add-label", "publish-release", "config", "auth", "service", "rag", "rag-status", "rag-search", "doctor", "migrate-cache", "repo"} {
+	for _, want := range []string{"ingest", "index", "search", "search_sources", "list", "get", "get-snippet", "snippet", "snippets", "backlinks", "list-chunks", "link-check", "stale-index", "recent", "cache", "cache-status", "sync-status", "sync_status", "sync", "export", "diff", "create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "milestones", "list-push-mirrors", "push-mirrors", "trigger-push-mirror", "wait-push-mirror", "create-milestone", "update-milestone", "set-issue-milestone", "clear-issue-milestone", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "reply-pr-review-comment", "update-comment", "add-label", "publish-release", "config", "auth", "service", "admin", "rag", "rag-status", "rag-search", "doctor", "migrate-cache", "repo"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("help missing command %q in %q", want, stdout.String())
 		}
+	}
+}
+
+func TestAdminCLIUsesExistingDaemon(t *testing.T) {
+	root, err := shortCLITestRoot(t, "cli-admin-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := &repoInitLocalSource{
+		env:       map[string]string{"GITCODE_MCP_SERVICE_NETWORK": "mem", "GITCODE_MCP_SERVICE_ADDRESS": "test-cli-admin"},
+		cwd:       root,
+		homeDir:   filepath.Join(root, "h"),
+		configDir: filepath.Join(root, "f"),
+		cacheDir:  filepath.Join(root, "c"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runCode := make(chan int, 1)
+	go func() {
+		runCode <- executeWithFactoryAndDepsContext(ctx, []string{"service", "run"}, io.Discard, io.Discard, nil, localCommandDeps{Source: src})
+	}()
+	waitForServiceSocket(t, src)
+
+	var opened string
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := executeWithFactoryAndDeps([]string{"admin", "open", "--format", "json"}, &out, &errOut, nil, localCommandDeps{Source: src, OpenURL: func(value string) error {
+		opened = value
+		return nil
+	}})
+	if code != 0 {
+		t.Fatalf("admin open code=%d stderr=%q", code, errOut.String())
+	}
+	if !strings.HasPrefix(opened, "http://127.0.0.1:") || !strings.Contains(opened, "#launch=") {
+		t.Fatalf("opened URL=%q", opened)
+	}
+	if strings.Contains(out.String(), "launch=") {
+		t.Fatalf("admin RPC/normal output retained launch material: %q", out.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	code = executeWithFactoryAndDeps([]string{"admin", "status", "--format", "json"}, &out, &errOut, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("admin status code=%d stderr=%q", code, errOut.String())
+	}
+	var status struct {
+		Running bool   `json:"running"`
+		URL     string `json:"url"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Running || strings.Contains(status.URL, "launch=") {
+		t.Fatalf("sanitized admin status=%+v", status)
+	}
+
+	cancel()
+	if code := <-runCode; code != 0 {
+		t.Fatalf("service run code=%d", code)
 	}
 }
 
