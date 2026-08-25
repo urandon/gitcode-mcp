@@ -49,11 +49,14 @@ type OpenRequest struct {
 }
 
 type Config struct {
-	Bind             string
-	AllowNonLoopback bool
-	SessionTTL       time.Duration
-	Assets           fs.FS
-	Readiness        func(context.Context) Readiness
+	Bind              string
+	AllowNonLoopback  bool
+	SessionTTL        time.Duration
+	Assets            fs.FS
+	Readiness         func(context.Context) Readiness
+	Snapshot          SnapshotProvider
+	EventCapacity     int
+	EventPollInterval time.Duration
 }
 
 type Controller struct {
@@ -64,6 +67,7 @@ type Controller struct {
 	status   Status
 	launch   map[[32]byte]time.Time
 	sessions map[[32]byte]session
+	events   *eventLog
 }
 
 type session struct {
@@ -78,7 +82,10 @@ func New(cfg Config) *Controller {
 	if cfg.SessionTTL <= 0 {
 		cfg.SessionTTL = 8 * time.Hour
 	}
-	return &Controller{cfg: cfg, launch: map[[32]byte]time.Time{}, sessions: map[[32]byte]session{}}
+	if cfg.EventPollInterval <= 0 {
+		cfg.EventPollInterval = time.Second
+	}
+	return &Controller{cfg: cfg, launch: map[[32]byte]time.Time{}, sessions: map[[32]byte]session{}, events: newEventLog(cfg.EventCapacity)}
 }
 
 func (c *Controller) Start(ctx context.Context) (Status, error) {
@@ -105,6 +112,9 @@ func (c *Controller) Start(ctx context.Context) (Status, error) {
 		_ = c.server.Shutdown(shutdownCtx)
 	}()
 	go func() { _ = c.server.Serve(ln) }()
+	if c.cfg.Snapshot != nil {
+		go c.pollObservation(ctx)
+	}
 	return c.status, nil
 }
 
@@ -146,6 +156,16 @@ func (c *Controller) handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/v1/session", c.exchangeSession)
 	mux.HandleFunc("DELETE /api/admin/v1/session", c.deleteSession)
 	mux.HandleFunc("GET /api/admin/v1/readiness", c.getReadiness)
+	mux.HandleFunc("GET /api/admin/v1/snapshot", c.getSnapshot)
+	mux.HandleFunc("GET /api/admin/v1/caches", c.getCaches)
+	mux.HandleFunc("GET /api/admin/v1/caches/{cache_ref}", c.getCache)
+	mux.HandleFunc("GET /api/admin/v1/caches/{cache_ref}/repositories/{repo_id...}", c.getRepository)
+	mux.HandleFunc("GET /api/admin/v1/jobs", c.getJobs)
+	mux.HandleFunc("GET /api/admin/v1/jobs/{job_id}", c.getJob)
+	mux.HandleFunc("GET /api/admin/v1/maintenance", c.getMaintenance)
+	mux.HandleFunc("GET /api/admin/v1/diagnostics", c.getDiagnostics)
+	mux.HandleFunc("GET /api/admin/v1/capabilities", c.getCapabilities)
+	mux.HandleFunc("GET /api/admin/v1/events", c.getEvents)
 	mux.HandleFunc("/", c.serveAsset)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		setSecurityHeaders(w)
@@ -155,6 +175,61 @@ func (c *Controller) handler() http.Handler {
 		}
 		mux.ServeHTTP(w, r)
 	})
+}
+
+func (c *Controller) pollObservation(ctx context.Context) {
+	ticker := time.NewTicker(c.cfg.EventPollInterval)
+	defer ticker.Stop()
+	var previous ObservationSnapshot
+	for {
+		snapshot, err := c.snapshot(ctx)
+		if err == nil {
+			if previous.Revision == "" {
+				c.events.append(Event{Kind: "snapshot_changed", EntityType: "snapshot", EntityID: "overview", Revision: snapshot.Revision})
+			} else if snapshot.Revision != previous.Revision {
+				c.publishObservationDiff(previous, snapshot)
+			}
+			previous = snapshot
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (c *Controller) publishObservationDiff(previous, current ObservationSnapshot) {
+	previousJobs := make(map[string]JobObservation, len(previous.Jobs))
+	for _, job := range previous.Jobs {
+		previousJobs[job.ID] = job
+	}
+	for _, job := range current.Jobs {
+		if before, ok := previousJobs[job.ID]; !ok || before.Status != job.Status || !before.UpdatedAt.Equal(job.UpdatedAt) || before.Completed != job.Completed {
+			c.events.append(Event{Kind: "job_changed", EntityType: "job", EntityID: job.ID, Revision: current.Revision})
+		}
+	}
+	previousCaches := make(map[string]CacheObservation, len(previous.Caches))
+	for _, cache := range previous.Caches {
+		previousCaches[cache.CacheRef] = cache
+	}
+	for _, cache := range current.Caches {
+		before, ok := previousCaches[cache.CacheRef]
+		if !ok || before.Readiness != cache.Readiness || before.RecordCount != cache.RecordCount || before.ChunkCount != cache.ChunkCount || before.RepositoryCount != cache.RepositoryCount {
+			c.events.append(Event{Kind: "cache_changed", EntityType: "cache", EntityID: cache.CacheRef, Revision: current.Revision})
+		}
+	}
+	previousMaintenance := make(map[string]MaintenanceObservation, len(previous.Maintenance))
+	for _, entry := range previous.Maintenance {
+		previousMaintenance[entry.RegistrationID] = entry
+	}
+	for _, entry := range current.Maintenance {
+		before, ok := previousMaintenance[entry.RegistrationID]
+		if !ok || before.Generation != entry.Generation || before.State != entry.State || before.Enabled != entry.Enabled {
+			c.events.append(Event{Kind: "maintenance_changed", EntityType: "maintenance", EntityID: entry.RegistrationID, Revision: current.Revision})
+		}
+	}
+	c.events.append(Event{Kind: "snapshot_changed", EntityType: "snapshot", EntityID: "overview", Revision: current.Revision})
 }
 
 func (c *Controller) exchangeSession(w http.ResponseWriter, r *http.Request) {

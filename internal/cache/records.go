@@ -709,6 +709,29 @@ func (s *SQLiteStore) RecordCounts(ctx context.Context, repoID string) (RecordCo
 	return counts, nil
 }
 
+// SourceKindCounts returns aggregate collection counts without loading cached
+// source bodies or identity aliases. Observation surfaces use this bounded query
+// instead of ListSources so periodic status refreshes remain cheap on large caches.
+func (s *SQLiteStore) SourceKindCounts(ctx context.Context, repoID string) ([]SourceKindCount, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT kind, count(*) FROM sources WHERE repo_id = ? GROUP BY kind ORDER BY kind`, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var counts []SourceKindCount
+	for rows.Next() {
+		var count SourceKindCount
+		if err := rows.Scan(&count.Kind, &count.Count); err != nil {
+			return nil, err
+		}
+		counts = append(counts, count)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return counts, nil
+}
+
 func (s *SQLiteStore) WALCapable(ctx context.Context) (bool, string, error) {
 	var mode string
 	if err := s.db.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&mode); err != nil {

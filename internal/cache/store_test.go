@@ -82,6 +82,33 @@ func TestListSourcesHydratesAliasesInBatchesAndKeepsRepoScope(t *testing.T) {
 	}
 }
 
+func TestSourceKindCountsAggregatesWithoutCrossingRepositoryScope(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	mustAddTestRepo(t, ctx, store, "fixture-b")
+
+	for _, source := range []Source{
+		testSource("ISSUE-1", "issue", "Issue one"),
+		testSource("ISSUE-2", "issue", "Issue two"),
+		testSource("WIKI-1", "wiki", "Wiki one"),
+	} {
+		mustUpsertGraph(t, ctx, store, SourceGraph{Source: source})
+	}
+	other := testSource("ISSUE-3", "issue", "Other repository")
+	other.RepoID = "fixture-b"
+	mustUpsertGraph(t, ctx, store, SourceGraph{Source: other})
+
+	counts, err := store.SourceKindCounts(ctx, "fixture-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []SourceKindCount{{Kind: "issue", Count: 2}, {Kind: "wiki", Count: 1}}
+	if !reflect.DeepEqual(counts, want) {
+		t.Fatalf("SourceKindCounts = %#v, want %#v", counts, want)
+	}
+}
+
 func TestSyncFrontierRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)

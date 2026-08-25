@@ -1,0 +1,74 @@
+{
+  "api_version": "1",
+  "revision": "snapshot-8ad585dc6f7c3814",
+  "generated_at": "2026-08-25T10:30:00Z",
+  "service": {
+    "version": "v2.0.0",
+    "protocol": "admin.v1",
+    "running": true,
+    "installed": false,
+    "admin_secure": true
+  },
+  "attention": [],
+  "caches": [
+    {
+      "cache_ref": "cache-abc123",
+      "path_fingerprint": "sha256:abc123",
+      "readiness": "ready",
+      "schema_version": 17,
+      "wal_capable": true,
+      "journal_mode": "wal",
+      "record_count": 0,
+      "chunk_count": 0,
+      "repository_count": 1,
+      "repositories": [
+        {
+          "repo_id": "example/repo",
+          "binding_state": "bound",
+          "counts": {
+            "records": 0,
+            "comments": 0,
+            "chunks": 0,
+            "secondary": {
+              "pending": 0,
+              "deferred": 0,
+              "complete": 0,
+              "total": 0
+            }
+          },
+          "coverage": {
+            "head": {
+              "state": "current",
+              "status": "complete"
+            },
+            "tail": {
+              "state": "partial",
+              "status": "bounded"
+            },
+            "secondary": {
+              "state": "current",
+              "status": "complete"
+            },
+            "projection": {
+              "state": "current",
+              "status": "current",
+              "current_generation": 4,
+              "covered_generation": 4
+            },
+            "rag": {
+              "state": "current",
+              "status": "ready",
+              "current_generation": 4,
+              "covered_generation": 4
+            }
+          },
+          "execution": {}
+        }
+      ]
+    }
+  ],
+  "jobs": [],
+  "maintenance": [],
+  "diagnostics": [],
+  "capabilities": []
+}
