@@ -21,6 +21,7 @@ type Provider interface {
 	ListPRComments(context.Context, PRRequest) (Page[PRComment], error)
 	CreatePR(context.Context, CreatePRRequest, WriteOptions) (WriteResult[PullRequest], error)
 	UpdatePR(context.Context, UpdatePRRequest, WriteOptions) (WriteResult[PullRequest], error)
+	MergePR(context.Context, MergePRRequest, WriteOptions) (WriteResult[PullRequest], error)
 	LinkPRIssue(context.Context, LinkPRIssueRequest, WriteOptions) (WriteResult[[]Issue], error)
 	ListWikiPages(context.Context, WikiListRequest) (Page[WikiPage], error)
 	GetWikiPage(context.Context, WikiPageRequest) (WikiPage, error)
@@ -284,6 +285,13 @@ func (p liveProvider) UpdatePR(ctx context.Context, req UpdatePRRequest, opts Wr
 	return p.HTTPClient.UpdatePR(ctx, req, opts)
 }
 
+func (p liveProvider) MergePR(ctx context.Context, req MergePRRequest, opts WriteOptions) (WriteResult[PullRequest], error) {
+	if err := p.matrix.Preflight(ProductAreaPullRequests); err != nil {
+		return WriteResult[PullRequest]{}, err
+	}
+	return p.HTTPClient.MergePR(ctx, req, opts)
+}
+
 func (p liveProvider) LinkPRIssue(ctx context.Context, req LinkPRIssueRequest, opts WriteOptions) (WriteResult[[]Issue], error) {
 	if err := p.matrix.Preflight(ProductAreaPullRequests); err != nil {
 		return WriteResult[[]Issue]{}, err
@@ -412,6 +420,9 @@ func (p unavailableProvider) CreatePR(context.Context, CreatePRRequest, WriteOpt
 	return WriteResult[PullRequest]{}, p.err()
 }
 func (p unavailableProvider) UpdatePR(context.Context, UpdatePRRequest, WriteOptions) (WriteResult[PullRequest], error) {
+	return WriteResult[PullRequest]{}, p.err()
+}
+func (p unavailableProvider) MergePR(context.Context, MergePRRequest, WriteOptions) (WriteResult[PullRequest], error) {
 	return WriteResult[PullRequest]{}, p.err()
 }
 func (p unavailableProvider) LinkPRIssue(context.Context, LinkPRIssueRequest, WriteOptions) (WriteResult[[]Issue], error) {

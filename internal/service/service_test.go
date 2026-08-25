@@ -114,6 +114,10 @@ func TestScenario005ServiceSanitizedFixtureBoundary(t *testing.T) {
 			_, err := client.UpdatePR(ctx, gitcode.UpdatePRRequest{}, gitcode.WriteOptions{})
 			return err
 		}},
+		{name: "merge-pr", run: func() error {
+			_, err := client.MergePR(ctx, gitcode.MergePRRequest{}, gitcode.WriteOptions{})
+			return err
+		}},
 		{name: "create-pr-comment", run: func() error {
 			_, err := client.CreatePRComment(ctx, gitcode.CreatePRCommentRequest{}, gitcode.WriteOptions{})
 			return err
@@ -1995,6 +1999,39 @@ func TestPRReviewReplyPartialCacheReplayPreservesResolvedDiscussionID(t *testing
 	}
 }
 
+func TestMergePRWritesAuditAndRefreshesCachedPR(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{mergePRResult: gitcode.WriteResult[gitcode.PullRequest]{Record: gitcode.PullRequest{ID: "9001", Number: 103, Title: "Release batch", State: "merged", HeadSHA: "head-sha", CreatedAt: now, UpdatedAt: now}, Confirmed: true, Operation: "MergePR", ProviderStatus: "200", RemoteID: "9001", RemoteNumber: 103, RemoteRevision: "merge-sha", IdempotencyKey: "merge-103", ResponseHash: "response-hash", ProviderPayloadFingerprint: "payload-hash", ConfirmedAt: now}}
+	svc := NewWithClient(store, client)
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.writeCredentialPresent = true
+
+	result, err := svc.MergePR(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 103, Sha: "head-sha", Strategy: "squash", IdempotencyKey: "merge-103"})
+	if err != nil {
+		t.Fatalf("MergePR: %v", err)
+	}
+	if result.Status != "succeeded" || result.RemoteNumber != 103 || result.RemoteRevision != "merge-sha" || client.mergePRCalls != 1 || client.lastMergePRRequest.HeadSHA != "head-sha" || client.lastMergePRRequest.MergeMethod != "squash" {
+		t.Fatalf("result=%+v calls=%d request=%+v", result, client.mergePRCalls, client.lastMergePRRequest)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", "merge-103")
+	if err != nil || entry == nil || entry.Status != audit.StatusSucceeded || entry.RequestMetadata["method"] != "PUT" || entry.RequestMetadata["remote_type"] != "pull_request" {
+		t.Fatalf("audit=%+v err=%v", entry, err)
+	}
+	replayed, err := svc.MergePR(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 103, Sha: "head-sha", Strategy: "squash", IdempotencyKey: "merge-103"})
+	if err != nil || !replayed.Replayed || client.mergePRCalls != 1 {
+		t.Fatalf("replayed=%+v err=%v calls=%d", replayed, err, client.mergePRCalls)
+	}
+}
+
 func TestScenario004MCPWriteLifecycleLinkPRIssueRelationAPI(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)
@@ -2288,6 +2325,53 @@ func TestProjectPendingIssueCommentCacheMakesRepairedCommentsSearchable(t *testi
 	projection, err := store.GetSourceScoped(ctx, "repair", "ISSUECOMMENT-88-comment-1")
 	if err != nil || projection.Body != comment.Body {
 		t.Fatalf("projection=%#v err=%v", projection, err)
+	}
+}
+
+func TestProjectRepairedIssueCommentCacheLeavesUnrelatedQueueUntouched(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "repair", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	for _, item := range []struct {
+		id     string
+		number int
+		status string
+	}{
+		{id: "ISSUE-88", number: 88, status: "pending"},
+		{id: "ISSUE-89", number: 89, status: "deferred"},
+		{id: "ISSUE-90", number: 90, status: "pending"},
+	} {
+		record := cache.Record{RepoID: "repair", ID: item.id, Type: "issue", Path: fmt.Sprintf("issues/%d.md", item.number), Title: item.id, Status: "open", ContentHash: item.id, Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: fmt.Sprint(item.number), CreatedAt: now, UpdatedAt: now}
+		comment := cache.RecordComment{RepoID: "repair", RecordID: item.id, CommentID: "comment-1", Body: "comment " + item.id, ContentHash: item.id + "-comment", CreatedAt: now, UpdatedAt: now}
+		if err := store.UpsertRecordGraph(ctx, cache.RecordGraph{Record: record, Comments: []cache.RecordComment{comment}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertIssueCommentSync(ctx, cache.IssueCommentSync{RepoID: "repair", SourceID: item.id, IssueNumber: item.number, RemoteID: fmt.Sprint(item.number), Status: item.status, UpdatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := New(store)
+	if err := svc.projectRepairedIssueCommentCache(ctx, "repair", []string{"ISSUE-88", "ISSUE-89"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, sourceID := range []string{"ISSUECOMMENT-88-comment-1", "ISSUECOMMENT-89-comment-1"} {
+		if _, err := store.GetSourceScoped(ctx, "repair", sourceID); err != nil {
+			t.Fatalf("repaired projection %s missing: %v", sourceID, err)
+		}
+	}
+	if _, err := store.GetSourceScoped(ctx, "repair", "ISSUECOMMENT-90-comment-1"); err == nil {
+		t.Fatal("unrelated pending issue comment was projected")
+	}
+	queue, ok, err := store.GetIssueCommentSync(ctx, "repair", "ISSUE-90")
+	if err != nil || !ok || queue.Status != "pending" {
+		t.Fatalf("unrelated queue=%+v ok=%t err=%v", queue, ok, err)
 	}
 }
 
@@ -4207,6 +4291,7 @@ type fakeGitCodeClient struct {
 	updateIssueCommentCalls      int
 	createPRCalls                int
 	updatePRCalls                int
+	mergePRCalls                 int
 	linkPRIssueCalls             int
 	createPRCommentCalls         int
 	createPRReviewCommentCalls   int
@@ -4224,6 +4309,7 @@ type fakeGitCodeClient struct {
 	updateIssueCommentResult     gitcode.WriteResult[gitcode.Comment]
 	createPRResult               gitcode.WriteResult[gitcode.PullRequest]
 	updatePRResult               gitcode.WriteResult[gitcode.PullRequest]
+	mergePRResult                gitcode.WriteResult[gitcode.PullRequest]
 	linkPRIssueResult            gitcode.WriteResult[[]gitcode.Issue]
 	listMilestonesResult         gitcode.Page[gitcode.Milestone]
 	createMilestoneResult        gitcode.WriteResult[gitcode.Milestone]
@@ -4265,6 +4351,7 @@ type fakeGitCodeClient struct {
 	lastUpdateIssueCommentReq    gitcode.UpdateIssueCommentRequest
 	lastCreatePRRequest          gitcode.CreatePRRequest
 	lastUpdatePRRequest          gitcode.UpdatePRRequest
+	lastMergePRRequest           gitcode.MergePRRequest
 	lastLinkPRIssueRequest       gitcode.LinkPRIssueRequest
 	lastListMilestonesRequest    gitcode.MilestoneListRequest
 	pushMirrorsResult            []gitcode.PushMirror
@@ -4490,6 +4577,16 @@ func (f *fakeGitCodeClient) UpdatePR(_ context.Context, req gitcode.UpdatePRRequ
 		return gitcode.WriteResult[gitcode.PullRequest]{}, err
 	}
 	return f.updatePRResult, nil
+}
+
+func (f *fakeGitCodeClient) MergePR(_ context.Context, req gitcode.MergePRRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PullRequest], error) {
+	f.mergePRCalls++
+	f.lastMergePRRequest = req
+	f.lastWriteOptions = opts
+	if err := f.nextError(); err != nil {
+		return gitcode.WriteResult[gitcode.PullRequest]{}, err
+	}
+	return f.mergePRResult, nil
 }
 func (f *fakeGitCodeClient) LinkPRIssue(_ context.Context, req gitcode.LinkPRIssueRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[[]gitcode.Issue], error) {
 	f.linkPRIssueCalls++

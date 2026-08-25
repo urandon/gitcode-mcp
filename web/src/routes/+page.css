@@ -245,6 +245,7 @@ table small { display: block; max-width: 280px; margin-top: 4px; overflow: hidde
 .repo-main small { color: var(--muted); font-size: 10px; }
 .repo-lanes { display: flex; gap: 14px; }
 .metric-strip { margin-bottom: 24px; }
+.metric-strip.jobs-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .job-filter-bar { margin-bottom: 18px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
 .job-filter-bar label { min-width: 0; display: grid; gap: 6px; }
 .job-filter-bar label > span { color: var(--muted); font-size: 9px; font-weight: 680; text-transform: uppercase; letter-spacing: .06em; }

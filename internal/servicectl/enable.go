@@ -332,7 +332,11 @@ func (s MaintenanceSetup) Apply(ctx context.Context, req MaintenanceSetupRequest
 		return MaintenanceApplyResult{}, err
 	}
 	result.JobsStarted = append([]string(nil), reconcile.JobsStarted...)
-	result.CompletedStages = append(result.CompletedStages, "jobs_enqueued")
+	if len(reconcile.JobsStarted) > 0 {
+		result.CompletedStages = append(result.CompletedStages, "jobs_enqueued")
+	} else {
+		result.CompletedStages = append(result.CompletedStages, "maintenance_reconciled")
+	}
 	result.Status = maintenanceApplyStatus(entry, reconcile)
 	result.NextAction = maintenanceApplyNextAction(result.Status, req.Detach)
 	return result, nil

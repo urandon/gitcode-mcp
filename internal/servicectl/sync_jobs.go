@@ -42,7 +42,11 @@ func (m *JobManager) StartSync(ctx context.Context, manager Manager, req StartSy
 	}
 	workKey := syncWorkKey(req)
 	ctx, cancel := context.WithCancel(ctx)
-	job, created := m.createCoalescedJob(SyncJobType, req.RepoID, "", 0, workKey, req.CacheUUID, req.RegistrationID, "", cancel)
+	job, created, err := m.createCoalescedJob(SyncJobType, req.RepoID, "", 0, workKey, req.CacheUUID, req.RegistrationID, "", cancel)
+	if err != nil {
+		cancel()
+		return Job{}, err
+	}
 	if !created {
 		cancel()
 		return job, nil
@@ -114,6 +118,7 @@ func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID stri
 				job.ErrorClass = "cancelled"
 			}
 			job.Error = publicMaintenanceJobError(SyncJobType, job.ErrorClass)
+			job.Progress = append(job.Progress, failedSyncCollectionProgress(collections)...)
 			job.Progress = append(job.Progress, service.ProgressEvent{Type: status, Phase: status, Collection: SyncJobType, RecordsListed: result.RecordsListed, RecordsFetched: result.SuccessCount, RecordsFailed: result.FailureCount, Message: job.Error})
 			delete(m.cancel, jobID)
 		})
@@ -132,6 +137,26 @@ func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID stri
 		job.Progress = append(job.Progress, service.ProgressEvent{Type: "finished", Phase: JobStatusSucceeded, Collection: SyncJobType, RecordsListed: result.RecordsListed, RecordsFetched: result.SuccessCount, RecordsFailed: result.FailureCount, Message: "sync job finished"})
 		delete(m.cancel, jobID)
 	})
+}
+
+func failedSyncCollectionProgress(collections []syncCollectionResult) []service.ProgressEvent {
+	events := []service.ProgressEvent{}
+	for _, collection := range collections {
+		failed := 0
+		if collection.Result != nil {
+			failed = collection.Result.FailureCount
+			if failed == 0 {
+				failed = len(collection.Result.Failures)
+			}
+		}
+		if collection.Err != nil && failed == 0 {
+			failed = 1
+		}
+		if failed > 0 {
+			events = append(events, service.ProgressEvent{Type: JobStatusFailed, Phase: JobStatusFailed, Collection: collection.RemoteType, RecordsFailed: failed, Message: "collection sync failed"})
+		}
+	}
+	return events
 }
 
 type syncCollectionResult struct {

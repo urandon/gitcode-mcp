@@ -14,6 +14,7 @@ type Client interface {
 	ListPRComments(context.Context, PRRequest) (Page[PRComment], error)
 	CreatePR(context.Context, CreatePRRequest, WriteOptions) (WriteResult[PullRequest], error)
 	UpdatePR(context.Context, UpdatePRRequest, WriteOptions) (WriteResult[PullRequest], error)
+	MergePR(context.Context, MergePRRequest, WriteOptions) (WriteResult[PullRequest], error)
 	LinkPRIssue(context.Context, LinkPRIssueRequest, WriteOptions) (WriteResult[[]Issue], error)
 	GetWikiPage(context.Context, WikiPageRequest) (WikiPage, error)
 	ListWikiPages(context.Context, WikiListRequest) (Page[WikiPage], error)

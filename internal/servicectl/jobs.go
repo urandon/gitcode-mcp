@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -57,6 +58,20 @@ type JobManager struct {
 	snapshotPath string
 	now          func() time.Time
 }
+
+type ErrCacheWriterBusy struct {
+	ActiveJobID string
+	ActiveType  string
+}
+
+func (e ErrCacheWriterBusy) Error() string {
+	if e.ActiveJobID == "" {
+		return "cache writer is busy"
+	}
+	return fmt.Sprintf("cache writer is busy (%s %s)", e.ActiveType, e.ActiveJobID)
+}
+
+func (e ErrCacheWriterBusy) DiagnosticCode() string { return "cache_writer_busy" }
 
 type StartFakeJobRequest struct {
 	Steps      int `json:"steps,omitempty"`
@@ -193,6 +208,35 @@ func (m *JobManager) ActiveCacheRepo(jobType, cacheUUID, repoID string) (Job, bo
 	return Job{}, false
 }
 
+// ActiveCacheWriter returns the writer currently admitted for a logical cache.
+// Sync and RAG indexing both mutate cache-owned state and therefore share this
+// admission boundary even when they target different repository bindings.
+func (m *JobManager) ActiveCacheWriter(cacheUUID string) (Job, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.activeCacheWriterLocked(cacheUUID)
+}
+
+func (m *JobManager) activeCacheWriterLocked(cacheUUID string) (Job, bool) {
+	cacheUUID = strings.TrimSpace(cacheUUID)
+	if cacheUUID == "" {
+		return Job{}, false
+	}
+	for _, job := range m.jobs {
+		if job.CacheUUID != cacheUUID || !isCacheWriterJob(job.Type) {
+			continue
+		}
+		if job.Status == JobStatusQueued || job.Status == JobStatusRunning {
+			return cloneJob(job), true
+		}
+	}
+	return Job{}, false
+}
+
+func isCacheWriterJob(jobType string) bool {
+	return jobType == SyncJobType || jobType == RAGIndexJobType
+}
+
 func (m *JobManager) LatestCacheRepo(jobType, cacheUUID, repoID string) (Job, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -223,12 +267,17 @@ func (m *JobManager) SetWorkIdentity(id, workKey, cacheUUID, registrationID, nam
 	return m.mustGet(id)
 }
 
-func (m *JobManager) createCoalescedJob(jobType, repoID, profileID string, steps int, workKey, cacheUUID, registrationID, namespaceID string, cancel context.CancelFunc) (Job, bool) {
+func (m *JobManager) createCoalescedJob(jobType, repoID, profileID string, steps int, workKey, cacheUUID, registrationID, namespaceID string, cancel context.CancelFunc) (Job, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, job := range m.jobs {
 		if job.WorkKey == workKey && (job.Status == JobStatusQueued || job.Status == JobStatusRunning) {
-			return cloneJob(job), false
+			return cloneJob(job), false, nil
+		}
+	}
+	if isCacheWriterJob(jobType) {
+		if active, ok := m.activeCacheWriterLocked(cacheUUID); ok {
+			return Job{}, false, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
 		}
 	}
 	m.nextID++
@@ -242,7 +291,7 @@ func (m *JobManager) createCoalescedJob(jobType, repoID, profileID string, steps
 	m.jobs[id] = job
 	m.cancel[id] = cancel
 	_ = m.saveLocked()
-	return cloneJob(job), true
+	return cloneJob(job), true, nil
 }
 
 func (m *JobManager) List() []Job {

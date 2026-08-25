@@ -42,6 +42,19 @@ gitcode-mcp update-pr \
 
 `update-pr` accepts `--title`, `--body`, and `--state` independently, so callers can update one field without restating the others. Multiline bodies are preserved by the CLI argument parser and passed to the audited service request unchanged.
 
+Merge the reviewed change through the same idempotent write boundary:
+
+```sh
+gitcode-mcp merge-pr \
+  --repo YOUR_REPO \
+  --number 42 \
+  --strategy merge \
+  --sha EXPECTED_HEAD_SHA \
+  --idempotency-key ik-pr-merge-001
+```
+
+`merge-pr` accepts `merge`, `squash`, or `rebase`; `merge-mr` is an equivalent alias. The optional `--sha` guard rejects a stale head before mutation. A successful provider response is followed by a PR readback that must report `state=merged`; rerunning against an already merged PR produces an audited idempotent success.
+
 Use the MCP write lifecycle for agent workflows:
 
 ```json

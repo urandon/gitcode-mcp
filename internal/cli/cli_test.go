@@ -605,7 +605,7 @@ func TestAllCommandsRegistered(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d", code)
 	}
-	for _, want := range []string{"ingest", "index", "search", "search_sources", "list", "get", "get-snippet", "snippet", "snippets", "backlinks", "list-chunks", "link-check", "stale-index", "recent", "cache", "cache-status", "sync-status", "sync_status", "sync", "export", "diff", "create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "milestones", "list-push-mirrors", "push-mirrors", "trigger-push-mirror", "wait-push-mirror", "create-milestone", "update-milestone", "set-issue-milestone", "clear-issue-milestone", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "reply-pr-review-comment", "update-comment", "add-label", "publish-release", "config", "auth", "service", "admin", "rag", "rag-status", "rag-search", "doctor", "migrate-cache", "repo"} {
+	for _, want := range []string{"ingest", "index", "search", "search_sources", "list", "get", "get-snippet", "snippet", "snippets", "backlinks", "list-chunks", "link-check", "stale-index", "recent", "cache", "cache-status", "sync-status", "sync_status", "sync", "export", "diff", "create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "merge-pr", "merge-mr", "milestones", "list-push-mirrors", "push-mirrors", "trigger-push-mirror", "wait-push-mirror", "create-milestone", "update-milestone", "set-issue-milestone", "clear-issue-milestone", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "reply-pr-review-comment", "update-comment", "add-label", "publish-release", "config", "auth", "service", "admin", "rag", "rag-status", "rag-search", "doctor", "migrate-cache", "repo"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("help missing command %q in %q", want, stdout.String())
 		}
@@ -1988,7 +1988,7 @@ func TestQueryCommandsUseServiceOnly(t *testing.T) {
 	spy := &spyService{}
 	factory := func(context.Context, string) (queryService, func() error, error) { return spy, nil, nil }
 	commands := [][]string{
-		{"ingest"}, {"index", "--repo", "fixture-a", "--full"}, {"search", "--repo", "fixture-a", "backlog"}, {"search_sources", "--repo", "fixture-a", "backlog"}, {"list", "--repo", "fixture-a"}, {"get", "--repo", "fixture-a", "DOC-123"}, {"backlinks", "--repo", "fixture-a", "DOC-123"}, {"get-snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"snippets", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"list-chunks", "--repo", "fixture-a"}, {"recent", "--repo", "fixture-a"}, {"link-check", "--repo", "fixture-a"}, {"stale-index", "--repo", "fixture-a"}, {"pr-discussions", "--repo", "fixture-a", "--number", "7", "--unresolved-only"}, {"sync", "--offline", "--repo", "fixture-a", "--input", "issue:42"}, {"cache", "reset", "--live", "--repo", "fixture-a"}, {"cache-status", "--repo", "fixture-a"}, {"sync-status", "--repo", "fixture-a", "DOC-123"}, {"sync_status", "--repo", "fixture-a"}, {"export", "--repo", "fixture-a"}, {"diff", "--repo", "fixture-a"}, {"repo", "add", "--repo", "fixture-a", "--owner", "owner", "--name", "repo", "--api-base-url", "https://example.invalid/api", "--scopes", "issues"}, {"repo", "status", "--repo", "fixture-a"}, {"create-issue", "--repo", "fixture-a", "--title", "t", "--dry-run"}, {"update-issue", "--repo", "fixture-a", "--issue-id", "ISSUE-1", "--dry-run"}, {"create-pr", "--repo", "fixture-a", "--title", "pr", "--head", "topic", "--base", "main", "--dry-run"}, {"create-mr", "--repo", "fixture-a", "--title", "mr", "--head", "topic", "--base", "main", "--dry-run"}, {"update-pr", "--repo", "fixture-a", "--number", "1", "--body", "line 1\nline 2", "--dry-run"}, {"milestones", "--repo", "fixture-a", "--dry-run"}, {"list-push-mirrors", "--repo", "fixture-a", "--offline"}, {"push-mirrors", "--repo", "fixture-a", "--offline"}, {"trigger-push-mirror", "--repo", "fixture-a", "--mirror-id", "17", "--idempotency-key", "trigger-key", "--dry-run"}, {"wait-push-mirror", "--repo", "fixture-a", "--mirror-id", "17", "--offline"}, {"create-milestone", "--repo", "fixture-a", "--title", "M1", "--due-on", "2026-07-15", "--dry-run"}, {"update-milestone", "--repo", "fixture-a", "--milestone", "1", "--title", "M1b", "--dry-run"}, {"set-issue-milestone", "--repo", "fixture-a", "--number", "1", "--milestone", "1", "--dry-run"}, {"clear-issue-milestone", "--repo", "fixture-a", "--number", "1", "--dry-run"}, {"create-page", "--repo", "fixture-a", "--title", "t", "--body", "b", "--dry-run"}, {"update-page", "--repo", "fixture-a", "--slug", "s", "--dry-run"}, {"add-comment", "--repo", "fixture-a", "--number", "1", "--body", "b", "--dry-run"}, {"add-pr-review-comment", "--repo", "fixture-a", "--number", "1", "--body", "b", "--path", "internal/service/service.go", "--line", "42", "--dry-run"}, {"reply-pr-review-comment", "--repo", "fixture-a", "--number", "1", "--discussion-id", "D1", "--parent-comment-id", "C1", "--body", "b", "--dry-run"}, {"update-comment", "--repo", "fixture-a", "--comment-id", "c1", "--body", "b", "--dry-run"}, {"add-label", "--repo", "fixture-a", "--number", "1", "--label", "l", "--dry-run"}, {"publish-release", "--repo", "fixture-a", "--tag", "v0.1.0", "--title", "t", "--body", "b", "--dry-run"},
+		{"ingest"}, {"index", "--repo", "fixture-a", "--full"}, {"search", "--repo", "fixture-a", "backlog"}, {"search_sources", "--repo", "fixture-a", "backlog"}, {"list", "--repo", "fixture-a"}, {"get", "--repo", "fixture-a", "DOC-123"}, {"backlinks", "--repo", "fixture-a", "DOC-123"}, {"get-snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"snippet", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"snippets", "--repo", "fixture-a", "DOC-123", "--line-start", "1", "--line-end", "1"}, {"list-chunks", "--repo", "fixture-a"}, {"recent", "--repo", "fixture-a"}, {"link-check", "--repo", "fixture-a"}, {"stale-index", "--repo", "fixture-a"}, {"pr-discussions", "--repo", "fixture-a", "--number", "7", "--unresolved-only"}, {"sync", "--offline", "--repo", "fixture-a", "--input", "issue:42"}, {"cache", "reset", "--live", "--repo", "fixture-a"}, {"cache-status", "--repo", "fixture-a"}, {"sync-status", "--repo", "fixture-a", "DOC-123"}, {"sync_status", "--repo", "fixture-a"}, {"export", "--repo", "fixture-a"}, {"diff", "--repo", "fixture-a"}, {"repo", "add", "--repo", "fixture-a", "--owner", "owner", "--name", "repo", "--api-base-url", "https://example.invalid/api", "--scopes", "issues"}, {"repo", "status", "--repo", "fixture-a"}, {"create-issue", "--repo", "fixture-a", "--title", "t", "--dry-run"}, {"update-issue", "--repo", "fixture-a", "--issue-id", "ISSUE-1", "--dry-run"}, {"create-pr", "--repo", "fixture-a", "--title", "pr", "--head", "topic", "--base", "main", "--dry-run"}, {"create-mr", "--repo", "fixture-a", "--title", "mr", "--head", "topic", "--base", "main", "--dry-run"}, {"update-pr", "--repo", "fixture-a", "--number", "1", "--body", "line 1\nline 2", "--dry-run"}, {"merge-pr", "--repo", "fixture-a", "--number", "1", "--strategy", "merge", "--dry-run"}, {"merge-mr", "--repo", "fixture-a", "--number", "1", "--dry-run"}, {"milestones", "--repo", "fixture-a", "--dry-run"}, {"list-push-mirrors", "--repo", "fixture-a", "--offline"}, {"push-mirrors", "--repo", "fixture-a", "--offline"}, {"trigger-push-mirror", "--repo", "fixture-a", "--mirror-id", "17", "--idempotency-key", "trigger-key", "--dry-run"}, {"wait-push-mirror", "--repo", "fixture-a", "--mirror-id", "17", "--offline"}, {"create-milestone", "--repo", "fixture-a", "--title", "M1", "--due-on", "2026-07-15", "--dry-run"}, {"update-milestone", "--repo", "fixture-a", "--milestone", "1", "--title", "M1b", "--dry-run"}, {"set-issue-milestone", "--repo", "fixture-a", "--number", "1", "--milestone", "1", "--dry-run"}, {"clear-issue-milestone", "--repo", "fixture-a", "--number", "1", "--dry-run"}, {"create-page", "--repo", "fixture-a", "--title", "t", "--body", "b", "--dry-run"}, {"update-page", "--repo", "fixture-a", "--slug", "s", "--dry-run"}, {"add-comment", "--repo", "fixture-a", "--number", "1", "--body", "b", "--dry-run"}, {"add-pr-review-comment", "--repo", "fixture-a", "--number", "1", "--body", "b", "--path", "internal/service/service.go", "--line", "42", "--dry-run"}, {"reply-pr-review-comment", "--repo", "fixture-a", "--number", "1", "--discussion-id", "D1", "--parent-comment-id", "C1", "--body", "b", "--dry-run"}, {"update-comment", "--repo", "fixture-a", "--comment-id", "c1", "--body", "b", "--dry-run"}, {"add-label", "--repo", "fixture-a", "--number", "1", "--label", "l", "--dry-run"}, {"publish-release", "--repo", "fixture-a", "--tag", "v0.1.0", "--title", "t", "--body", "b", "--dry-run"},
 	}
 	for _, args := range commands {
 		var stdout bytes.Buffer
@@ -1997,7 +1997,7 @@ func TestQueryCommandsUseServiceOnly(t *testing.T) {
 			t.Fatalf("%v code=%d stderr=%q", args, code, stderr.String())
 		}
 	}
-	wantCalls := map[string]int{"Ingest": 1, "Index": 1, "SearchSources": 2, "ListSources": 1, "GetSource": 1, "GetBacklinks": 1, "GetSnippet": 3, "ListChunks": 1, "RecentChanges": 1, "LinkCheck": 1, "StaleIndex": 1, "ListPRDiscussions": 1, "SyncToCache": 1, "ResetLiveCache": 1, "CacheStatus": 1, "GetSyncStatus": 1, "SyncStatus": 1, "ExportSnapshot": 1, "DiffSnapshot": 1, "AddRepository": 1, "RepositoryStatus": 1, "CreateIssue": 1, "UpdateIssue": 1, "CreatePR": 2, "UpdatePR": 1, "ListMilestones": 1, "ListPushRemoteMirrors": 2, "TriggerPushRemoteMirror": 1, "WaitPushRemoteMirror": 1, "CreateMilestone": 1, "UpdateMilestone": 1, "SetIssueMilestone": 1, "ClearIssueMilestone": 1, "CreatePage": 1, "UpdatePage": 1, "AddComment": 1, "ReplyPRReviewComment": 1, "AddLabel": 1, "PublishRelease": 1}
+	wantCalls := map[string]int{"Ingest": 1, "Index": 1, "SearchSources": 2, "ListSources": 1, "GetSource": 1, "GetBacklinks": 1, "GetSnippet": 3, "ListChunks": 1, "RecentChanges": 1, "LinkCheck": 1, "StaleIndex": 1, "ListPRDiscussions": 1, "SyncToCache": 1, "ResetLiveCache": 1, "CacheStatus": 1, "GetSyncStatus": 1, "SyncStatus": 1, "ExportSnapshot": 1, "DiffSnapshot": 1, "AddRepository": 1, "RepositoryStatus": 1, "CreateIssue": 1, "UpdateIssue": 1, "CreatePR": 2, "UpdatePR": 1, "MergePR": 2, "ListMilestones": 1, "ListPushRemoteMirrors": 2, "TriggerPushRemoteMirror": 1, "WaitPushRemoteMirror": 1, "CreateMilestone": 1, "UpdateMilestone": 1, "SetIssueMilestone": 1, "ClearIssueMilestone": 1, "CreatePage": 1, "UpdatePage": 1, "AddComment": 1, "ReplyPRReviewComment": 1, "AddLabel": 1, "PublishRelease": 1}
 	for method, want := range wantCalls {
 		if spy.calls[method] != want {
 			t.Fatalf("%s calls=%d want %d", method, spy.calls[method], want)
@@ -2118,6 +2118,24 @@ func TestUpdatePRDispatchesWriteRequest(t *testing.T) {
 		t.Fatalf("UpdatePR request=%#v", req)
 	}
 	if !strings.Contains(stdout.String(), "update-pr: dry_run_valid") {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
+func TestMergeMRAliasDispatchesMergeRequest(t *testing.T) {
+	spy := &spyService{}
+	factory := func(context.Context, string) (queryService, func() error, error) { return spy, nil, nil }
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := executeWithFactory([]string{"merge-mr", "--repo", "fixture-a", "--number", "103", "--strategy", "squash", "--sha", "abc123", "--dry-run", "--idempotency-key", "merge-103"}, &stdout, &stderr, factory)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	req := spy.lastWriteRequest["MergePR"]
+	if req.RepoID != "fixture-a" || req.Mode != service.WriteModeDryRun || req.Number != 103 || req.Strategy != "squash" || req.Sha != "abc123" || req.IdempotencyKey != "merge-103" {
+		t.Fatalf("MergePR request=%#v", req)
+	}
+	if !strings.Contains(stdout.String(), "merge-pr: dry_run_valid") {
 		t.Fatalf("stdout=%q", stdout.String())
 	}
 }
@@ -2474,6 +2492,14 @@ func (s *spyService) UpdatePR(_ context.Context, req service.WriteCommandRequest
 	s.lastWriteRequest["UpdatePR"] = req
 	return service.WriteCommandResult{Command: "update-pr", Status: "dry_run_valid", IdempotencyKey: firstNonEmpty(req.IdempotencyKey, "key"), GeneratedAt: time.Now()}, nil
 }
+func (s *spyService) MergePR(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
+	s.called("MergePR")
+	if s.lastWriteRequest == nil {
+		s.lastWriteRequest = map[string]service.WriteCommandRequest{}
+	}
+	s.lastWriteRequest["MergePR"] = req
+	return service.WriteCommandResult{Command: "merge-pr", Status: "dry_run_valid", IdempotencyKey: firstNonEmpty(req.IdempotencyKey, "key"), GeneratedAt: time.Now()}, nil
+}
 func (s *spyService) ListMilestones(context.Context, service.MilestoneListRequest) (service.MilestoneListResult, error) {
 	s.called("ListMilestones")
 	return service.MilestoneListResult{RepoID: "fixture-a", Count: 1, Milestones: []service.MilestoneRecord{{ID: "MILESTONE-1", RemoteID: "1", Title: "M1", State: "open"}}, Evidence: "adapter-confirmed read with cache refresh", GeneratedAt: time.Now()}, nil
@@ -2598,7 +2624,7 @@ func TestCommandHelpExitsZero(t *testing.T) {
 		"recent", "link-check", "stale-index", "cache", "cache-status",
 		"sync-status", "sync_status", "export", "export-snapshot",
 		"diff", "diff-snapshot",
-		"create-issue", "update-issue", "create-pr", "create-mr", "update-pr",
+		"create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "merge-pr", "merge-mr",
 		"milestones", "list-push-mirrors", "push-mirrors", "trigger-push-mirror", "wait-push-mirror", "create-milestone", "update-milestone", "set-issue-milestone", "clear-issue-milestone",
 		"create-page", "update-page",
 		"add-comment", "add-pr-review-comment", "reply-pr-review-comment", "update-comment", "add-label", "publish-release", "feedback",

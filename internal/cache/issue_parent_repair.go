@@ -11,10 +11,10 @@ import (
 // without aliases, or an exact title/body copy carrying only the mistaken
 // issue:<provider-id> alias. In both cases the remote id must already be the
 // provider alias of a different canonical issue.
-func (s *SQLiteStore) RepairIssueProviderPlaceholders(ctx context.Context, repoID string) (repaired int, err error) {
+func (s *SQLiteStore) RepairIssueProviderPlaceholders(ctx context.Context, repoID string) (repairedSourceIDs []string, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer txRollbackOnError(tx, &err)
 	rows, err := tx.QueryContext(ctx, `SELECT placeholder.record_id, canonical.source_id
@@ -58,7 +58,7 @@ WHERE placeholder.repo_id = ?
   )
 ORDER BY placeholder.record_id`, repoID)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	type candidate struct {
 		placeholder string
@@ -69,26 +69,26 @@ ORDER BY placeholder.record_id`, repoID)
 		var item candidate
 		if err = rows.Scan(&item.placeholder, &item.canonical); err != nil {
 			_ = rows.Close()
-			return 0, err
+			return nil, err
 		}
 		candidates = append(candidates, item)
 	}
 	if err = rows.Close(); err != nil {
-		return 0, err
+		return nil, err
 	}
 	if err = rows.Err(); err != nil {
-		return 0, err
+		return nil, err
 	}
 	for _, item := range candidates {
 		if err = mergeIssueProviderPlaceholderTx(ctx, tx, s.useFTS, repoID, item.placeholder, item.canonical); err != nil {
-			return repaired, err
+			return repairedSourceIDs, err
 		}
-		repaired++
+		repairedSourceIDs = append(repairedSourceIDs, item.canonical)
 	}
 	if err = tx.Commit(); err != nil {
-		return repaired, err
+		return repairedSourceIDs, err
 	}
-	return repaired, nil
+	return repairedSourceIDs, nil
 }
 
 func mergeIssueProviderPlaceholderTx(ctx context.Context, tx *sql.Tx, useFTS bool, repoID, placeholderID, canonicalID string) error {

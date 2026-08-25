@@ -305,6 +305,7 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 		}
 		previous := *existing
 		profileChanged := existing.Policy.Profile != policy.Profile || existing.Policy.RAGEnabled != policy.RAGEnabled
+		syncChanged := maintenanceSyncPolicyChanged(existing.Policy, policy)
 		existing.Policy = policy
 		existing.ConfigHash = strings.TrimSpace(req.ConfigHash)
 		existing.configReference = strings.TrimSpace(req.ConfigReference)
@@ -312,6 +313,9 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 		if profileChanged {
 			existing.NamespaceID = ""
 			existing.RAGStage = MaintenanceStageState{}
+		}
+		if syncChanged {
+			existing.SyncStage = MaintenanceStageState{}
 		}
 		existing.Enabled = true
 		existing.Generation++
@@ -338,6 +342,20 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 		return MaintenanceEntry{}, err
 	}
 	return cloneMaintenanceEntry(entry), nil
+}
+
+func maintenanceSyncPolicyChanged(before, after MaintenancePolicy) bool {
+	return before.SyncEnabled != after.SyncEnabled ||
+		before.SyncMode != after.SyncMode ||
+		before.Issues != after.Issues ||
+		before.IssueComments != after.IssueComments ||
+		before.Wiki != after.Wiki ||
+		before.Pulls != after.Pulls ||
+		before.PRComments != after.PRComments ||
+		before.HeadIntervalSeconds != after.HeadIntervalSeconds ||
+		before.HeadMaxPages != after.HeadMaxPages ||
+		before.TailSlicePages != after.TailSlicePages ||
+		before.PerPage != after.PerPage
 }
 
 func (m *MaintenanceManager) List(ctx context.Context) (MaintenanceListResult, error) {
@@ -378,16 +396,45 @@ func (m *MaintenanceManager) Reconcile(ctx context.Context) (MaintenanceReconcil
 		return MaintenanceReconcileResult{}, err
 	}
 	result := MaintenanceReconcileResult{CheckedAt: m.now()}
-	for _, snapshot := range list.Entries {
+	schedule := maintenanceReconcileOrder(list.Entries, m.jobs.List())
+	updated := make(map[string]MaintenanceEntry, len(schedule))
+	for _, snapshot := range schedule {
 		if !snapshot.Enabled {
-			result.Entries = append(result.Entries, snapshot)
+			updated[snapshot.RegistrationID] = snapshot
 			continue
 		}
 		entry, started := m.reconcileEntry(ctx, snapshot.RegistrationID)
-		result.Entries = append(result.Entries, entry)
+		updated[snapshot.RegistrationID] = entry
 		result.JobsStarted = append(result.JobsStarted, started...)
 	}
+	for _, snapshot := range list.Entries {
+		result.Entries = append(result.Entries, updated[snapshot.RegistrationID])
+	}
 	return result, nil
+}
+
+func maintenanceReconcileOrder(entries []MaintenanceEntry, jobs []Job) []MaintenanceEntry {
+	ordered := append([]MaintenanceEntry(nil), entries...)
+	lastWriter := map[string]time.Time{}
+	for _, job := range jobs {
+		if !isCacheWriterJob(job.Type) || job.RegistrationID == "" {
+			continue
+		}
+		if lastWriter[job.RegistrationID].Before(job.UpdatedAt) {
+			lastWriter[job.RegistrationID] = job.UpdatedAt
+		}
+	}
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].CacheUUID != ordered[j].CacheUUID {
+			return ordered[i].CacheUUID < ordered[j].CacheUUID
+		}
+		left, right := lastWriter[ordered[i].RegistrationID], lastWriter[ordered[j].RegistrationID]
+		if left.Equal(right) {
+			return ordered[i].RegistrationID < ordered[j].RegistrationID
+		}
+		return left.Before(right)
+	})
+	return ordered
 }
 
 func (m *MaintenanceManager) ReconcileRegistration(ctx context.Context, registrationID string) (MaintenanceReconcileResult, error) {
@@ -502,10 +549,11 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	started := []string{}
 	activeSync, _ := m.jobs.ActiveCacheRepo(SyncJobType, snapshot.CacheUUID, snapshot.RepoID)
 	activeRAG, _ := m.jobs.ActiveCacheRepo(RAGIndexJobType, snapshot.CacheUUID, snapshot.RepoID)
+	activeWriter, _ := m.jobs.ActiveCacheWriter(snapshot.CacheUUID)
 	ragInterval := time.Duration(snapshot.Policy.RAGIntervalSeconds) * time.Second
 	ragVerificationDue := maintenanceRAGVerificationDue(namespaceID, ragStatus, coverageUpdatedAt, ragInterval, now)
 	needsRAGRepair := contentState.ContentGeneration > covered || (contentState.ContentGeneration > 0 && ragStatus != "ready") || ragVerificationDue
-	if activeSync.ID == "" && activeRAG.ID == "" {
+	if activeSync.ID == "" && activeRAG.ID == "" && activeWriter.ID == "" {
 		lane, page, maxPages := nextMaintenanceSyncLane(snapshot, frontiers, now)
 		syncReady := snapshot.SyncStage.RetryAfter.IsZero() || !now.Before(snapshot.SyncStage.RetryAfter)
 		ragReady := snapshot.RAGStage.RetryAfter.IsZero() || !now.Before(snapshot.RAGStage.RetryAfter)
@@ -521,6 +569,10 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 			}
 			job, jobErr := m.jobs.StartSync(context.Background(), jobManager, req)
 			if jobErr != nil {
+				var busy ErrCacheWriterBusy
+				if errors.As(jobErr, &busy) {
+					return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, now), nil
+				}
 				return m.updateEntryFailure(registrationID, "sync_schedule_failed", jobErr), nil
 			}
 			started = append(started, job.ID)
@@ -528,15 +580,23 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 		} else if stage == RAGIndexJobType {
 			job, jobErr := m.jobs.StartRAGIndex(context.Background(), jobManager, StartRAGIndexJobRequest{RepoID: snapshot.RepoID, Profile: effectiveProfile, CachePath: path, CacheUUID: snapshot.CacheUUID, RegistrationID: snapshot.RegistrationID})
 			if jobErr != nil {
+				var busy ErrCacheWriterBusy
+				if errors.As(jobErr, &busy) {
+					return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, now), started
+				}
 				return m.updateEntryFailure(registrationID, "rag_schedule_failed", jobErr), started
 			}
 			started = append(started, job.ID)
 			activeRAG = job
 		}
 	}
+	return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, now), started
+}
+
+func (m *MaintenanceManager) finishReconcileEntry(registrationID string, snapshot MaintenanceEntry, contentGeneration, covered int64, ragStatus, namespaceID string, frontiers []cache.MaintenanceFrontier, activeSync, activeRAG Job, now time.Time) MaintenanceEntry {
 	m.mu.Lock()
-	entry = m.entries[registrationID]
-	entry.ContentGeneration = contentState.ContentGeneration
+	entry := m.entries[registrationID]
+	entry.ContentGeneration = contentGeneration
 	entry.CoveredGeneration = covered
 	entry.RAGStatus = ragStatus
 	entry.SyncStage = snapshot.SyncStage
@@ -562,7 +622,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	_ = m.saveLocked()
 	updated := cloneMaintenanceEntry(entry)
 	m.mu.Unlock()
-	return updated, started
+	return updated
 }
 
 func maintenanceRAGVerificationDue(namespaceID, status string, updatedAt time.Time, interval time.Duration, now time.Time) bool {
@@ -964,8 +1024,12 @@ func deriveMaintenanceEntryState(entry MaintenanceEntry) string {
 		return "degraded"
 	}
 	if entry.Policy.SyncEnabled {
+		selected := map[string]bool{}
+		for _, remoteType := range maintenanceRemoteTypes(entry.Policy) {
+			selected[remoteType] = true
+		}
 		for _, frontier := range entry.Frontiers {
-			if frontier.Lane == "tail" && frontier.Status != "complete" {
+			if selected[frontier.RemoteType] && frontier.Lane == "tail" && frontier.Status != "complete" {
 				return "backfilling"
 			}
 		}

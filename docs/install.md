@@ -7,7 +7,8 @@
 
 ## From release binary
 
-Download the archive and `checksums.txt` from the GitHub release mirror:
+Download the archive and `checksums.txt` from the GitCode release **Download**
+section. The GitHub release mirror remains a command-line-friendly fallback:
 
 ```sh
 curl -LO https://github.com/urandon/gitcode-mcp/releases/download/v0.1.0/gitcode-mcp_v0.1.0_darwin_arm64.tar.gz

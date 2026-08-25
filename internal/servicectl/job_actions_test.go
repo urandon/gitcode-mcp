@@ -17,7 +17,10 @@ func TestJobActionCancelPersistsAndReplaysReceipt(t *testing.T) {
 	dir := t.TempDir()
 	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
 	jobContext, cancel := context.WithCancel(context.Background())
-	job, created := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 1, "sync-work", "cache-1", "reg-1", "", cancel)
+	job, created, err := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 1, "sync-work", "cache-1", "reg-1", "", cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !created {
 		t.Fatal("job not created")
 	}
@@ -76,7 +79,10 @@ func TestJobActionRetryCoalescesEquivalentWork(t *testing.T) {
 	finished := now.Add(-time.Minute)
 	jobs.jobs["job-000001"] = &Job{ID: "job-000001", Type: RAGIndexJobType, RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", Status: JobStatusFailed, CreatedAt: finished, UpdatedAt: finished, FinishedAt: &finished}
 	jobs.nextID = 1
-	active, _ := jobs.createCoalescedJob(RAGIndexJobType, "owner/repo", "profile", 10, "rag-work", "cache-1", "reg-1", "ns-1", func() {})
+	active, _, err := jobs.createCoalescedJob(RAGIndexJobType, "owner/repo", "profile", 10, "rag-work", "cache-1", "reg-1", "ns-1", func() {})
+	if err != nil {
+		t.Fatal(err)
+	}
 	actions := NewJobActionManager("", jobs, nil)
 	receipt, err := actions.Retry(context.Background(), adminhttp.JobActionRequest{JobID: "job-000001", IdempotencyKey: "retry-1"})
 	if err != nil || receipt.Outcome != "coalesced" || receipt.ResultJob != active.ID || receipt.JobStatus != JobStatusQueued {
@@ -95,7 +101,10 @@ func TestJobActionRetryCreatesCurrentMaintenanceWork(t *testing.T) {
 		if registrationID != "reg-1" {
 			t.Fatalf("registration=%q", registrationID)
 		}
-		created, _ := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 10, "new-sync-work", "cache-1", "reg-1", "", func() {})
+		created, _, err := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 10, "new-sync-work", "cache-1", "reg-1", "", func() {})
+		if err != nil {
+			return MaintenanceReconcileResult{}, err
+		}
 		return MaintenanceReconcileResult{JobsStarted: []string{created.ID}}, nil
 	}
 	receipt, err := actions.Retry(context.Background(), adminhttp.JobActionRequest{JobID: "job-000001", IdempotencyKey: "retry-new"})

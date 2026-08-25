@@ -55,6 +55,7 @@ var commands = []string{
 	"update-issue",
 	"create-pr", "create-mr",
 	"update-pr",
+	"merge-pr", "merge-mr",
 	"milestones",
 	"list-push-mirrors", "push-mirrors",
 	"trigger-push-mirror",
@@ -122,6 +123,7 @@ type queryService interface {
 	UpdateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	CreatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	MergePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	ListMilestones(context.Context, service.MilestoneListRequest) (service.MilestoneListResult, error)
 	ListPushRemoteMirrors(context.Context, service.PushMirrorListRequest) (service.PushMirrorListResult, error)
 	TriggerPushRemoteMirror(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
@@ -217,6 +219,7 @@ type options struct {
 	endLine           int
 	position          int
 	sha               string
+	strategy          string
 	title             string
 	body              string
 	description       string
@@ -515,7 +518,7 @@ func resolveLiveCredential(ctx context.Context, eff config.EffectiveConfig, deps
 
 func isLiveStartupCommand(command string) bool {
 	switch command {
-	case "sync", "submit-feedback", "create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "milestones", "list-push-mirrors", "push-mirrors", "trigger-push-mirror", "wait-push-mirror", "create-milestone", "update-milestone", "set-issue-milestone", "clear-issue-milestone", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "reply-pr-review-comment", "update-comment", "add-label", "publish-release", "doctor":
+	case "sync", "submit-feedback", "create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "merge-pr", "merge-mr", "milestones", "list-push-mirrors", "push-mirrors", "trigger-push-mirror", "wait-push-mirror", "create-milestone", "update-milestone", "set-issue-milestone", "clear-issue-milestone", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "reply-pr-review-comment", "update-comment", "add-label", "publish-release", "doctor":
 		return true
 	default:
 		return false
@@ -688,7 +691,8 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.IntVar(&opts.startLine, "start-line", 0, "start line")
 	flags.IntVar(&opts.endLine, "end-line", 0, "end line")
 	flags.IntVar(&opts.position, "position", 0, "diff position")
-	flags.StringVar(&opts.sha, "sha", "", "page sha")
+	flags.StringVar(&opts.sha, "sha", "", "expected revision or head sha")
+	flags.StringVar(&opts.strategy, "strategy", "", "merge strategy: merge, squash, or rebase")
 	flags.StringVar(&opts.title, "title", "", "title")
 	flags.StringVar(&opts.body, "body", "", "body")
 	flags.StringVar(&opts.description, "description", "", "description")
@@ -2257,6 +2261,8 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		return dispatchWrite(ctx, svc.CreatePR, "create-pr", opts, stdout, stderr, plan)
 	case "update-pr":
 		return dispatchWrite(ctx, svc.UpdatePR, command, opts, stdout, stderr, plan)
+	case "merge-pr", "merge-mr":
+		return dispatchWrite(ctx, svc.MergePR, "merge-pr", opts, stdout, stderr, plan)
 	case "milestones":
 		result, err := svc.ListMilestones(ctx, service.MilestoneListRequest{RepoID: opts.repo, Repo: opts.repo, State: opts.state, PerPage: opts.perPage})
 		if err != nil {
@@ -3267,7 +3273,7 @@ func writeRequest(opts options) service.WriteCommandRequest {
 	if !opts.dryRun {
 		mode = service.WriteModeLive
 	}
-	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, IssueID: opts.issueID, Number: opts.number, CommentID: opts.commentID, DiscussionID: opts.discussionID, ParentID: opts.parentID, Slug: opts.slug, Path: opts.path, Line: opts.line, StartLine: opts.startLine, EndLine: opts.endLine, Position: opts.position, Sha: opts.sha, Title: opts.title, Body: opts.body, Description: opts.description, DueOn: opts.dueOn, Milestone: opts.milestone, ClearMilestone: opts.clearMilestone, Head: opts.head, Base: opts.base, State: opts.state, Label: opts.label, Labels: labels, IdempotencyKey: opts.idempotencyKey}
+	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, IssueID: opts.issueID, Number: opts.number, CommentID: opts.commentID, DiscussionID: opts.discussionID, ParentID: opts.parentID, Slug: opts.slug, Path: opts.path, Line: opts.line, StartLine: opts.startLine, EndLine: opts.endLine, Position: opts.position, Sha: opts.sha, Title: opts.title, Body: opts.body, Description: opts.description, DueOn: opts.dueOn, Milestone: opts.milestone, ClearMilestone: opts.clearMilestone, Head: opts.head, Base: opts.base, State: opts.state, Label: opts.label, Labels: labels, Strategy: opts.strategy, IdempotencyKey: opts.idempotencyKey}
 }
 
 func publishReleaseRequest(opts options) (service.PublishReleaseRequest, error) {
@@ -4754,6 +4760,19 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --title TITLE       updated pull request title")
 		fmt.Fprintln(w, "  --body BODY         updated pull request body")
 		fmt.Fprintln(w, "  --state STATE       updated pull request state")
+		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
+		fmt.Fprintln(w, "  --dry-run           validate without mutation")
+		fmt.Fprintln(w, "  --live              compatibility alias for live write")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "merge-pr", "merge-mr":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --number N [--strategy merge|squash|rebase] [--sha HEAD_SHA] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintln(w, "Merge a pull request / merge request and confirm the merged state by readback. Executes live by default; use --dry-run for validation.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --number N          pull request number (required)")
+		fmt.Fprintln(w, "  --strategy VALUE    merge, squash, or rebase (default merge)")
+		fmt.Fprintln(w, "  --sha SHA           require this exact current head SHA before merge")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
 		fmt.Fprintln(w, "  --live              compatibility alias for live write")

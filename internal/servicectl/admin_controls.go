@@ -363,7 +363,19 @@ func (m *AdminControlManager) resolveManagedCachePath(ctx context.Context, cache
 
 func validateAdminMaintenanceRequest(req adminhttp.MaintenanceControlRequest) error {
 	if strings.TrimSpace(req.RepoID) == "" {
-		return controlError(http.StatusBadRequest, "invalid_request", "repo_id is required.", "Select a repository in the managed cache.")
+		return controlFieldError("repo_id", "repo_id is required.", "Select a repository in the managed cache.")
+	}
+	if req.SyncMode != "" && req.SyncMode != "off" && req.SyncMode != "head" && req.SyncMode != "head-and-backfill" {
+		return controlFieldError("sync_mode", "sync_mode must be off, head, or head-and-backfill.", "Choose a supported synchronization mode and render a new plan.")
+	}
+	if req.RAGMode != "" && req.RAGMode != "off" && req.RAGMode != "maintain" {
+		return controlFieldError("rag_mode", "rag_mode must be off or maintain.", "Choose a supported RAG mode and render a new plan.")
+	}
+	allowedCollections := map[string]bool{"issues": true, "issue-comments": true, "wiki": true, "pulls": true, "pr-comments": true}
+	for _, collection := range req.Collections {
+		if !allowedCollections[strings.TrimSpace(strings.ToLower(collection))] {
+			return controlFieldError("collections", "collections contains an unsupported value.", "Select only the collections exposed by this daemon.")
+		}
 	}
 	for _, bound := range []struct {
 		name  string
@@ -371,10 +383,14 @@ func validateAdminMaintenanceRequest(req adminhttp.MaintenanceControlRequest) er
 		max   int
 	}{{"head_interval_seconds", req.HeadIntervalSeconds, 86400 * 30}, {"rag_interval_seconds", req.RAGIntervalSeconds, 86400 * 30}, {"head_max_pages", req.HeadMaxPages, 1000}, {"tail_slice_pages", req.TailSlicePages, 1000}, {"per_page", req.PerPage, 100}} {
 		if bound.value < 0 || bound.value > bound.max {
-			return controlError(http.StatusBadRequest, "invalid_request", bound.name+" is outside the supported bound.", "Use a non-negative bounded policy value.")
+			return controlFieldError(bound.name, bound.name+" is outside the supported bound.", "Use a non-negative bounded policy value.")
 		}
 	}
 	return nil
+}
+
+func controlFieldError(field, message, remediation string) error {
+	return adminhttp.ControlError{Status: http.StatusBadRequest, Code: "invalid_policy", Field: field, Message: message, Remediation: remediation, Blockers: []string{message}}
 }
 
 func maintenanceReconcileOutcome(result MaintenanceReconcileResult) string {

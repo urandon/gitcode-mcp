@@ -1,9 +1,8 @@
 # Release Process
 
-GitCode is the source of truth for code review, issues, and tags. GitHub Actions
-owns release automation and binary storage. The GitCode release is a metadata
-mirror that receives the rendered GitHub CI release notes and links to the
-GitHub-hosted assets.
+GitCode is the source of truth for code review, issues, tags, and native release
+downloads. GitHub Actions owns release automation and also publishes a GitHub
+Release mirror. Both releases receive the same rendered notes and binary set.
 
 ## Versioning
 
@@ -30,7 +29,7 @@ gitcode-mcp 0.1.0
 
 ```sh
 go test ./...
-python3 -m unittest scripts/release/test_generate_notes.py
+python3 -m unittest discover -s scripts/release -p 'test_*.py'
 git diff --check
 ```
 
@@ -49,7 +48,10 @@ git push origin v0.1.0
    assets, and `checksums.txt`.
 8. If the `GITCODE_TOKEN` GitHub Actions secret is configured, the workflow
    creates or updates the matching GitCode release through the PAT-compatible
-   API using the same Markdown file and links to the GitHub-hosted assets.
+   API using the same Markdown file and GitHub fallback links.
+9. The workflow requests a short-lived upload contract for each artifact,
+   uploads it without forwarding the GitCode token to object storage, and
+   verifies the final GitCode asset names and byte sizes.
 
 Creating and pushing the tag remains the only required release action. Release
 note generation is not part of the shipped `gitcode-mcp` binary.
@@ -105,7 +107,7 @@ section. The generated file itself is not committed.
 Run the generator fixture tests locally:
 
 ```sh
-python3 -m unittest scripts/release/test_generate_notes.py
+python3 -m unittest discover -s scripts/release -p 'test_*.py'
 ```
 
 The generator emits deterministic Markdown and reports its SHA-256 fingerprint.
@@ -114,10 +116,11 @@ before either release publisher runs.
 
 ## Verification
 
-After GitHub publishes the release:
+After both publishers complete:
 
 1. Confirm the release commit matches the GitCode tag commit.
-2. Download the target archive and `checksums.txt`.
+2. Confirm the GitCode **Download** list contains every archive and
+   `checksums.txt`; use the GitHub mirror as a fallback.
 3. Verify the checksum.
 4. Run `gitcode-mcp --version`.
 
@@ -145,14 +148,17 @@ The command validates with `--dry-run` and otherwise performs an idempotent crea
 2. `POST /api/v5/repos/{owner}/{repo}/releases` when missing
 3. `PATCH /api/v5/repos/{owner}/{repo}/releases/{tag}` when present
 
-The automated flow stores binary artifacts in GitHub Releases and publishes
-them to GitCode as Markdown links in the release body. Both GitHub and GitCode
-consume `dist/release-notes.md`; reruns edit the existing release for the same
-tag and replace assets instead of creating duplicates. The browser-oriented
-GitCode v2 release API uses a different auth surface and is not suitable for
-GitHub Actions PAT automation. Direct GitCode binary attachment upload uses a
-separate pre-signed attachment flow and should be enabled only after a live
-compatibility probe.
+The automated flow publishes binary artifacts to both GitHub Releases and the
+native GitCode **Download** section. GitHub links remain in the Markdown as a
+portable fallback. Both publishers consume `dist/release-notes.md`.
+
+GitCode attachments use a separate presigned upload flow. The workflow first
+creates or updates release metadata, requests an HTTPS upload contract for each
+filename, then sends the artifact bytes with exactly the returned object-store
+headers. It never forwards `GITCODE_TOKEN` to the presigned URL and never prints
+the URL or contract headers. A rerun skips an existing name only when its byte
+size matches; a mismatch fails closed. The final release asset inventory is
+polled for a bounded period and verified by name and size.
 
 ## GitCode Token
 

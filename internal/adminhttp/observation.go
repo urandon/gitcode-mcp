@@ -179,6 +179,10 @@ type JobObservation struct {
 	Completed           int                   `json:"completed,omitempty"`
 	FailureClass        string                `json:"failure_class,omitempty"`
 	FailureMessage      string                `json:"failure_message,omitempty"`
+	FailureCollection   string                `json:"failure_collection,omitempty"`
+	RetryAfter          string                `json:"retry_after,omitempty"`
+	InspectCommand      string                `json:"inspect_command,omitempty"`
+	RemediationCommand  string                `json:"remediation_command,omitempty"`
 	Progress            []ProgressObservation `json:"progress,omitempty"`
 	WorkRef             string                `json:"work_ref,omitempty"`
 	Cancellable         bool                  `json:"cancellable"`
