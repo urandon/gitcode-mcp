@@ -21,6 +21,7 @@ Provide a cache-first tooling layer that lets AI agents and humans search, inspe
 | CLI | Provide explicit commands for sync, search, get, link-check, export, diff, and diagnostics. |
 | MCP server | Expose cache-first reads plus explicit live lifecycle tools for sync, index, diagnostics, and audited issue/PR writes. |
 | Local coordinator | Maintain an explicit registry of cache identities and schedule bounded head refresh, tail backfill, and RAG repair without putting network work on read paths. |
+| Embedded admin UI | Serve a session-protected SvelteKit operator console from the coordinator's loopback-only HTTP listener. |
 | Export snapshots | Produce deterministic markdown/JSON/SQLite snapshots for review, rollback, and audit. |
 
 See [Component Architecture](component-architecture.md) for the durable component catalog, runtime flow, and boundary rules distilled from the historical design-package material.

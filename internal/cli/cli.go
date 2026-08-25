@@ -8,12 +8,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 
+	"gitcode-mcp/internal/adminhttp"
 	"gitcode-mcp/internal/buildinfo"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
@@ -72,6 +76,7 @@ var commands = []string{
 	"config",
 	"auth",
 	"service",
+	"admin",
 	"maintenance",
 	"rag",
 	"rag-status",
@@ -144,6 +149,7 @@ type localCommandDeps struct {
 	Source             config.Source
 	CredentialReporter config.CredentialStatusReporter
 	RAGRuntime         rag.Runtime
+	OpenURL            func(string) error
 }
 
 type startupPlan struct {
@@ -275,6 +281,10 @@ type options struct {
 	collections       string
 	noServiceInstall  bool
 	noModelDownload   bool
+	noBrowser         bool
+	admin             bool
+	adminBind         string
+	adminUnsafe       bool
 }
 
 type multiFlag []string
@@ -339,7 +349,7 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 		fmt.Fprintf(stdout, "gitcode-mcp %s\n", buildinfo.Current().Version)
 		return 0
 	}
-	if args[0] == "config" || args[0] == "auth" || args[0] == "service" || args[0] == "maintenance" || args[0] == "rag" || args[0] == "rag-status" || args[0] == "rag-search" || args[0] == "doctor" || args[0] == "migrate-cache" {
+	if args[0] == "config" || args[0] == "auth" || args[0] == "service" || args[0] == "admin" || args[0] == "maintenance" || args[0] == "rag" || args[0] == "rag-status" || args[0] == "rag-search" || args[0] == "doctor" || args[0] == "migrate-cache" {
 		return executeLocalCommand(ctx, args, stdout, stderr, deps)
 	}
 	if !isKnownCommand(args[0]) {
@@ -745,6 +755,10 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.collections, "collections", "", "comma-separated maintained collections")
 	flags.BoolVar(&opts.noServiceInstall, "no-service-install", false, "do not install the user service")
 	flags.BoolVar(&opts.noModelDownload, "no-model-download", false, "do not download an embedding model")
+	flags.BoolVar(&opts.noBrowser, "no-browser", false, "print URL without opening a browser")
+	flags.BoolVar(&opts.admin, "admin", false, "start the embedded admin listener")
+	flags.StringVar(&opts.adminBind, "admin-bind", "", "admin listener bind address")
+	flags.BoolVar(&opts.adminUnsafe, "admin-unsafe-allow-non-loopback", false, "allow an unsafe non-loopback admin listener")
 	if err := flags.Parse(reorderFlags(args)); err != nil {
 		return opts, nil, service.ErrInvalidQuery{Field: "flags", Message: err.Error()}
 	}
@@ -771,7 +785,7 @@ func reorderFlags(args []string) []string {
 		arg := args[i]
 		if strings.HasPrefix(arg, "--") {
 			flags = append(flags, arg)
-			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--issue-comments" || arg == "--pr-comments" || arg == "--index" || arg == "--quiet" || arg == "--dry-run" || arg == "--live" || arg == "--offline" || arg == "--fixture" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" || arg == "--yes" || arg == "--detach" || arg == "--daemon" || arg == "--no-service-install" || arg == "--no-model-download" {
+			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--issue-comments" || arg == "--pr-comments" || arg == "--index" || arg == "--quiet" || arg == "--dry-run" || arg == "--live" || arg == "--offline" || arg == "--fixture" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" || arg == "--yes" || arg == "--detach" || arg == "--daemon" || arg == "--no-service-install" || arg == "--no-model-download" || arg == "--no-browser" || arg == "--admin" || arg == "--admin-unsafe-allow-non-loopback" {
 				continue
 			}
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
@@ -804,7 +818,7 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 	}
 	if opts.helpRequested {
 		sub, _ := firstArg(rest)
-		if sub != "" && (command == "config" || command == "auth" || command == "repo" || command == "service" || command == "maintenance" || command == "rag") {
+		if sub != "" && (command == "config" || command == "auth" || command == "repo" || command == "service" || command == "admin" || command == "maintenance" || command == "rag") {
 			switch command + " " + sub {
 			case "config init", "config locate", "config show":
 				printLocalSubcommandHelp(command, sub, stdout)
@@ -815,6 +829,8 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 			case "repo init-local":
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "service run", "service install", "service uninstall", "service start", "service stop", "service status", "service doctor", "service maintenance", "service reconcile", "service fake-job", "service jobs", "service job", "service attach", "service cancel":
+				printLocalSubcommandHelp(command, sub, stdout)
+			case "admin open", "admin status":
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "maintenance plan", "maintenance enable":
 				printLocalSubcommandHelp(command, sub, stdout)
@@ -850,6 +866,9 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 	}
 	if command == "service" {
 		return executeServiceCommand(ctx, rest, opts, stdout, stderr, deps)
+	}
+	if command == "admin" {
+		return executeAdminCommand(ctx, rest, opts, stdout, stderr, deps)
 	}
 	if command == "maintenance" {
 		return executeMaintenanceCommand(ctx, rest, opts, stdout, stderr, deps)
@@ -1357,7 +1376,7 @@ func executeServiceCommand(ctx context.Context, args []string, opts options, std
 	if configErr != nil {
 		return writeError(stderr, opts.format, configErr)
 	}
-	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, RuntimeDir: eff.Config.Service.RuntimeDir}
+	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, RuntimeDir: eff.Config.Service.RuntimeDir, AdminBind: opts.adminBind, AdminAutoStart: opts.admin, AdminAllowNonLoopback: opts.adminUnsafe, AdminCachePath: eff.Config.CachePath}
 	var (
 		status servicectl.Status
 		err    error
@@ -1452,6 +1471,76 @@ func executeServiceCommand(ctx context.Context, args []string, opts options, std
 		return writeError(stderr, opts.format, err)
 	}
 	return render(stdout, opts.format, status, renderServiceStatusText)
+}
+
+func executeAdminCommand(ctx context.Context, args []string, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+	sub, ok := firstArg(args)
+	if !ok {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "admin", Message: "subcommand is required"})
+	}
+	eff, err := config.LoadEffective(deps.Source, config.Overrides{})
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, RuntimeDir: eff.Config.Service.RuntimeDir}
+	client, err := manager.Client()
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	switch sub {
+	case "status":
+		var status adminhttp.Status
+		if err := client.Call(ctx, "Admin.Status", nil, &status); err != nil {
+			return writeError(stderr, opts.format, fmt.Errorf("admin: existing daemon is unavailable: %w", err))
+		}
+		return render(stdout, opts.format, status, renderAdminStatusText)
+	case "open":
+		token, tokenHash, err := adminhttp.NewLaunchToken()
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		var result adminhttp.OpenResult
+		if err := client.Call(ctx, "Admin.Open", adminhttp.OpenRequest{LaunchTokenHash: tokenHash}, &result); err != nil {
+			return writeError(stderr, opts.format, fmt.Errorf("admin: existing daemon is unavailable; start or install the service first: %w", err))
+		}
+		launchURL := result.URL + "/#launch=" + url.QueryEscape(token)
+		if !opts.noBrowser {
+			opener := deps.OpenURL
+			if opener == nil {
+				opener = openBrowserURL
+			}
+			if err := opener(launchURL); err != nil {
+				return writeError(stderr, opts.format, fmt.Errorf("admin: open browser: %w", err))
+			}
+		}
+		output := result
+		if opts.noBrowser {
+			output.URL = launchURL
+		}
+		return render(stdout, opts.format, output, func(w io.Writer, value adminhttp.OpenResult) {
+			fmt.Fprintf(w, "admin_status: running\nadmin_url: %s\n", value.URL)
+		})
+	default:
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "admin", Message: "unknown subcommand"})
+	}
+}
+
+func renderAdminStatusText(w io.Writer, status adminhttp.Status) {
+	fmt.Fprintf(w, "admin_status: %s\nadmin_url: %s\nadmin_bind: %s\n", map[bool]string{true: "running", false: "stopped"}[status.Running], cliEmptyAsNone(status.URL), cliEmptyAsNone(status.Bind))
+}
+
+func openBrowserURL(value string) error {
+	var command string
+	var args []string
+	switch runtime.GOOS {
+	case "darwin":
+		command, args = "open", []string{value}
+	case "windows":
+		command, args = "rundll32", []string{"url.dll,FileProtocolHandler", value}
+	default:
+		command, args = "xdg-open", []string{value}
+	}
+	return exec.Command(command, args...).Start()
 }
 
 func attachServiceJob(ctx context.Context, client *servicectl.RPCClient, id string, opts options, stdout io.Writer, stderr io.Writer) int {
@@ -4820,6 +4909,14 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  cancel      cancel a daemon job by id")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Run gitcode-mcp service SUBCOMMAND --help for details.")
+	case "admin":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s SUBCOMMAND\n\n", command)
+		fmt.Fprintln(w, "Open and inspect the embedded local admin UI on the existing daemon.")
+		fmt.Fprintln(w, "Subcommands:")
+		fmt.Fprintln(w, "  open        create a one-time launch link and open it")
+		fmt.Fprintln(w, "  status      inspect the sanitized listener state")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Run gitcode-mcp admin SUBCOMMAND --help for details.")
 	case "maintenance":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s plan --repo REPO [flags]\n", command)
 		fmt.Fprintf(w, "       gitcode-mcp %s enable --repo REPO --yes --idempotency-key KEY [flags]\n\n", command)
@@ -5049,9 +5146,25 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "service run":
-		fmt.Fprintln(w, "Usage: gitcode-mcp service run")
+		fmt.Fprintln(w, "Usage: gitcode-mcp service run [--admin] [--admin-bind ADDRESS] [--admin-unsafe-allow-non-loopback]")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Run the service coordinator in the foreground using a user-global Unix socket.")
+		fmt.Fprintln(w, "The admin listener defaults to 127.0.0.1 on a dynamic port and can also start lazily through admin open.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --admin             start the admin listener with the daemon")
+		fmt.Fprintln(w, "  --admin-bind ADDR   listener address (default 127.0.0.1:0)")
+		fmt.Fprintln(w, "  --admin-unsafe-allow-non-loopback  explicitly permit a non-loopback bind")
+	case "admin open":
+		fmt.Fprintln(w, "Usage: gitcode-mcp admin open [--no-browser] [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Attach to the existing daemon, issue a one-time launch link, and open the local UI.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --no-browser        print the one-time URL without launching a browser")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "admin status":
+		fmt.Fprintln(w, "Usage: gitcode-mcp admin status [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Inspect listener state without exposing launch or session material.")
 	case "service fake-job":
 		fmt.Fprintln(w, "Usage: gitcode-mcp service fake-job [--steps N] [--interval-ms N] [--detach] [--format FORMAT]")
 		fmt.Fprintln(w)

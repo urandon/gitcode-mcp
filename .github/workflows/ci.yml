@@ -32,6 +32,30 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Check embedded admin UI assets
+        run: ./scripts/check-admin-ui-assets.sh
+
+      - name: Check admin UI types and unit tests
+        working-directory: web
+        run: |
+          npm run check
+          npm run test
+
+      - name: Install admin UI browser
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      - name: Run admin UI browser tests
+        working-directory: web
+        run: npm run test:e2e
+
       - name: Run tests
         run: go test ./...
 

@@ -48,6 +48,7 @@ For semantic retrieval, start with [RAG Setup and Operation](docs/rag.md).
 - Configure repositories: [Repository Binding](docs/repo-binding.md)
 - Understand sync behavior: [Cache and Sync Model](docs/cache-and-sync-model.md)
 - Operate daemon maintenance: [Daemon Cache and RAG Maintenance](docs/cache-maintenance.md)
+- Open the embedded local operator console: [Admin UI](docs/admin-ui.md)
 - Set up semantic retrieval: [RAG Setup and Operation](docs/rag.md)
 - Review live API findings: [GitCode API Discovery](docs/gitcode-api-discovery.md)
 - List, trigger, and monitor repository mirrors safely: [Push Mirror Operations](docs/push-mirrors.md)

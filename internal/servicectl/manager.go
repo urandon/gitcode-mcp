@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -14,6 +15,9 @@ import (
 	"syscall"
 	"time"
 
+	"gitcode-mcp/internal/adminhttp"
+	"gitcode-mcp/internal/adminui"
+	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/rag"
 )
@@ -70,10 +74,15 @@ type Status struct {
 }
 
 type Manager struct {
-	Source     config.Source
-	BinaryPath string
-	Version    string
-	RuntimeDir string
+	Source                config.Source
+	BinaryPath            string
+	Version               string
+	RuntimeDir            string
+	AdminBind             string
+	AdminAutoStart        bool
+	AdminAllowNonLoopback bool
+	AdminSessionTTL       time.Duration
+	AdminCachePath        string
 	// EffectiveConfig is an in-memory, non-secret configuration snapshot used by
 	// daemon-managed jobs. It is never rendered by service status APIs.
 	EffectiveConfig *config.Config
@@ -329,7 +338,17 @@ func (m Manager) Run(ctx context.Context) error {
 	if err := maintenance.Load(); err != nil {
 		return err
 	}
-	server := RPCServer{Manager: m, Jobs: jobs, Maintenance: maintenance}
+	assets, err := fs.Sub(adminui.Files, "assets")
+	if err != nil {
+		return err
+	}
+	admin := adminhttp.New(adminhttp.Config{Bind: m.AdminBind, AllowNonLoopback: m.AdminAllowNonLoopback, SessionTTL: m.AdminSessionTTL, Assets: assets, Readiness: m.adminReadiness})
+	if m.AdminAutoStart {
+		if _, err := admin.Start(ctx); err != nil {
+			return err
+		}
+	}
+	server := RPCServer{Manager: m, Jobs: jobs, Maintenance: maintenance, Admin: admin}
 	go maintenance.Run(ctx)
 	if paths.Network == "mem" {
 		return serveMemoryRPC(ctx, paths.Address, server)
@@ -349,6 +368,23 @@ func (m Manager) Run(ctx context.Context) error {
 		return err
 	}
 	return ctx.Err()
+}
+
+func (m Manager) adminReadiness(ctx context.Context) adminhttp.Readiness {
+	result := adminhttp.Readiness{Version: m.Version}
+	result.CacheReference = m.AdminCachePath
+	if result.CacheReference != "" && result.CacheReference != ":memory:" {
+		if info, err := os.Stat(result.CacheReference); err == nil && !info.IsDir() {
+			if store, err := cache.NewSQLiteReadOnlyStore(ctx, result.CacheReference); err == nil {
+				defer store.Close()
+				if version, err := store.SchemaVersion(ctx); err == nil {
+					result.CacheConnected = true
+					result.SchemaVersion = version
+				}
+			}
+		}
+	}
+	return result
 }
 
 func (m Manager) Client() (*RPCClient, error) {
