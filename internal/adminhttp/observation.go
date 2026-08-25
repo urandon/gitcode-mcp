@@ -163,23 +163,31 @@ type StageError struct {
 }
 
 type JobObservation struct {
-	ID             string                `json:"id"`
-	Type           string                `json:"type"`
-	CacheRef       string                `json:"cache_ref,omitempty"`
-	RepoID         string                `json:"repo_id,omitempty"`
-	ProfileID      string                `json:"profile_id,omitempty"`
-	NamespaceID    string                `json:"namespace_id,omitempty"`
-	RegistrationID string                `json:"registration_id,omitempty"`
-	Status         string                `json:"status"`
-	CreatedAt      time.Time             `json:"created_at"`
-	StartedAt      *time.Time            `json:"started_at,omitempty"`
-	UpdatedAt      time.Time             `json:"updated_at"`
-	FinishedAt     *time.Time            `json:"finished_at,omitempty"`
-	Steps          int                   `json:"steps,omitempty"`
-	Completed      int                   `json:"completed,omitempty"`
-	FailureClass   string                `json:"failure_class,omitempty"`
-	FailureMessage string                `json:"failure_message,omitempty"`
-	Progress       []ProgressObservation `json:"progress,omitempty"`
+	ID                  string                `json:"id"`
+	Type                string                `json:"type"`
+	CacheRef            string                `json:"cache_ref,omitempty"`
+	RepoID              string                `json:"repo_id,omitempty"`
+	ProfileID           string                `json:"profile_id,omitempty"`
+	NamespaceID         string                `json:"namespace_id,omitempty"`
+	RegistrationID      string                `json:"registration_id,omitempty"`
+	Status              string                `json:"status"`
+	CreatedAt           time.Time             `json:"created_at"`
+	StartedAt           *time.Time            `json:"started_at,omitempty"`
+	UpdatedAt           time.Time             `json:"updated_at"`
+	FinishedAt          *time.Time            `json:"finished_at,omitempty"`
+	Steps               int                   `json:"steps,omitempty"`
+	Completed           int                   `json:"completed,omitempty"`
+	FailureClass        string                `json:"failure_class,omitempty"`
+	FailureMessage      string                `json:"failure_message,omitempty"`
+	Progress            []ProgressObservation `json:"progress,omitempty"`
+	WorkRef             string                `json:"work_ref,omitempty"`
+	Cancellable         bool                  `json:"cancellable"`
+	Retryable           bool                  `json:"retryable"`
+	ActionReason        string                `json:"action_reason,omitempty"`
+	ProgressRetained    int                   `json:"progress_retained"`
+	ProgressLimit       int                   `json:"progress_limit"`
+	ThroughputPerSecond float64               `json:"throughput_per_second,omitempty"`
+	ETASeconds          int                   `json:"eta_seconds,omitempty"`
 }
 
 type ProgressObservation struct {
@@ -507,6 +515,9 @@ func (c *Controller) getJobs(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if value := r.URL.Query().Get("repo_id"); value != "" && job.RepoID != value {
+			continue
+		}
+		if value := r.URL.Query().Get("failure_class"); value != "" && job.FailureClass != value {
 			continue
 		}
 		if cursor := r.URL.Query().Get("after"); cursor != "" && job.ID <= cursor {

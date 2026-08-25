@@ -36,6 +36,7 @@ type Job struct {
 	RegistrationID string                  `json:"registration_id,omitempty"`
 	NamespaceID    string                  `json:"namespace_id,omitempty"`
 	WorkKey        string                  `json:"-"`
+	WorkRef        string                  `json:"work_ref,omitempty"`
 	Status         string                  `json:"status"`
 	CreatedAt      time.Time               `json:"created_at"`
 	StartedAt      *time.Time              `json:"started_at,omitempty"`
@@ -213,6 +214,7 @@ func (m *JobManager) LatestCacheRepo(jobType, cacheUUID, repoID string) (Job, bo
 func (m *JobManager) SetWorkIdentity(id, workKey, cacheUUID, registrationID, namespaceID string) Job {
 	m.updateJob(id, func(job *Job, now time.Time) {
 		job.WorkKey = workKey
+		job.WorkRef = publicWorkRef(workKey)
 		job.CacheUUID = cacheUUID
 		job.RegistrationID = registrationID
 		job.NamespaceID = namespaceID
@@ -235,7 +237,7 @@ func (m *JobManager) createCoalescedJob(jobType, repoID, profileID string, steps
 	job := &Job{
 		ID: id, Type: jobType, RepoID: repoID, ProfileID: profileID,
 		CacheUUID: cacheUUID, RegistrationID: registrationID, NamespaceID: namespaceID, WorkKey: workKey,
-		Status: JobStatusQueued, CreatedAt: now, UpdatedAt: now, Steps: steps,
+		Status: JobStatusQueued, CreatedAt: now, UpdatedAt: now, Steps: steps, WorkRef: publicWorkRef(workKey),
 	}
 	m.jobs[id] = job
 	m.cancel[id] = cancel

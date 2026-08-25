@@ -411,6 +411,23 @@ func adminJobObservation(job Job) adminhttp.JobObservation {
 		ProfileID: job.ProfileID, NamespaceID: job.NamespaceID, RegistrationID: job.RegistrationID,
 		Status: job.Status, CreatedAt: job.CreatedAt, StartedAt: job.StartedAt, UpdatedAt: job.UpdatedAt,
 		FinishedAt: job.FinishedAt, Steps: job.Steps, Completed: job.Completed, FailureClass: job.ErrorClass,
+		WorkRef: firstNonEmpty(job.WorkRef, publicWorkRef(job.WorkKey)), ProgressRetained: len(job.Progress), ProgressLimit: maxStoredProgressEvents,
+	}
+	active := job.Status == JobStatusQueued || job.Status == JobStatusRunning
+	terminal := jobTerminalStatus(job.Status)
+	view.Cancellable = active && (job.Type == SyncJobType || job.Type == RAGIndexJobType)
+	view.Retryable = terminal && job.RegistrationID != "" && (job.Type == SyncJobType || job.Type == RAGIndexJobType)
+	if !view.Cancellable && !view.Retryable {
+		view.ActionReason = "No safe admin action is available for the current job type and state."
+	}
+	if job.StartedAt != nil && job.Completed > 0 {
+		elapsed := job.UpdatedAt.Sub(*job.StartedAt).Seconds()
+		if elapsed > 0 {
+			view.ThroughputPerSecond = float64(job.Completed) / elapsed
+			if active && job.Steps > job.Completed {
+				view.ETASeconds = int(float64(job.Steps-job.Completed) / view.ThroughputPerSecond)
+			}
+		}
 	}
 	if job.Error != "" {
 		view.FailureMessage = "The job ended with a typed failure; use diagnostics for remediation."
@@ -426,6 +443,14 @@ func adminJobObservation(job Job) adminhttp.JobObservation {
 		})
 	}
 	return view
+}
+
+func publicWorkRef(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	hash := sha256.Sum256([]byte(value))
+	return "work-" + hex.EncodeToString(hash[:8])
 }
 
 func adminMaintenanceObservation(entry MaintenanceEntry) adminhttp.MaintenanceObservation {

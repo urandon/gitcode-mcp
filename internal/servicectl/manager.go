@@ -338,6 +338,10 @@ func (m Manager) Run(ctx context.Context) error {
 	if err := maintenance.Load(); err != nil {
 		return err
 	}
+	jobActions := NewJobActionManager(paths.JobsPath+".actions", jobs, maintenance)
+	if err := jobActions.Load(); err != nil {
+		return err
+	}
 	assets, err := fs.Sub(adminui.Files, "assets")
 	if err != nil {
 		return err
@@ -348,6 +352,8 @@ func (m Manager) Run(ctx context.Context) error {
 		Snapshot: func(snapshotContext context.Context) (adminhttp.ObservationSnapshot, error) {
 			return m.adminObservation(snapshotContext, jobs, maintenance, now)
 		},
+		CancelJob: jobActions.Cancel,
+		RetryJob:  jobActions.Retry,
 	})
 	if m.AdminAutoStart {
 		if _, err := admin.Start(ctx); err != nil {
