@@ -43,9 +43,36 @@ type BindingControlRequest struct {
 	IdempotencyKey string   `json:"idempotency_key,omitempty"`
 }
 
+type SearchCompareRequest struct {
+	CacheRef   string `json:"cache_ref"`
+	RepoID     string `json:"repo_id"`
+	Query      string `json:"query"`
+	Kind       string `json:"kind,omitempty"`
+	Provenance string `json:"provenance,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+}
+
+type ProviderSmokeRequest struct {
+	CacheRef string `json:"cache_ref"`
+	RepoID   string `json:"repo_id"`
+	Profile  string `json:"profile,omitempty"`
+}
+
+type RAGRepairRequest struct {
+	CacheRef       string `json:"cache_ref"`
+	RepoID         string `json:"repo_id"`
+	Profile        string `json:"profile,omitempty"`
+	MaxChunks      int    `json:"max_chunks,omitempty"`
+	PlanID         string `json:"plan_id,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+}
+
 type MaintenanceControlProvider func(context.Context, MaintenanceControlRequest) (any, error)
 type RegistrationControlProvider func(context.Context, RegistrationControlRequest) (any, error)
 type BindingControlProvider func(context.Context, BindingControlRequest) (any, error)
+type SearchCompareProvider func(context.Context, SearchCompareRequest) (any, error)
+type ProviderSmokeProvider func(context.Context, ProviderSmokeRequest) (any, error)
+type RAGRepairProvider func(context.Context, RAGRepairRequest) (any, error)
 
 type ControlError struct {
 	Code        string
@@ -80,6 +107,22 @@ func (c *Controller) planBinding(w http.ResponseWriter, r *http.Request) {
 
 func (c *Controller) applyBinding(w http.ResponseWriter, r *http.Request) {
 	applyControl(c, w, r, c.cfg.ApplyBinding, BindingControlRequest{}, true)
+}
+
+func (c *Controller) compareSearch(w http.ResponseWriter, r *http.Request) {
+	applyControl(c, w, r, c.cfg.CompareSearch, SearchCompareRequest{}, false)
+}
+
+func (c *Controller) smokeProvider(w http.ResponseWriter, r *http.Request) {
+	applyControl(c, w, r, c.cfg.SmokeProvider, ProviderSmokeRequest{}, false)
+}
+
+func (c *Controller) planRAGRepair(w http.ResponseWriter, r *http.Request) {
+	applyControl(c, w, r, c.cfg.PlanRAGRepair, RAGRepairRequest{}, false)
+}
+
+func (c *Controller) applyRAGRepair(w http.ResponseWriter, r *http.Request) {
+	applyControl(c, w, r, c.cfg.ApplyRAGRepair, RAGRepairRequest{}, true)
 }
 
 func applyControl[T any](c *Controller, w http.ResponseWriter, r *http.Request, provider func(context.Context, T) (any, error), req T, requireIdempotency bool) {
@@ -131,6 +174,8 @@ func controlIdempotencyKey(value any) string {
 	case RegistrationControlRequest:
 		return strings.TrimSpace(req.IdempotencyKey)
 	case BindingControlRequest:
+		return strings.TrimSpace(req.IdempotencyKey)
+	case RAGRepairRequest:
 		return strings.TrimSpace(req.IdempotencyKey)
 	default:
 		return ""

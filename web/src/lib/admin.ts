@@ -222,6 +222,92 @@ export type ControlReceipt = {
   status?: string;
 };
 
+export type SearchMatch = {
+  lexical_rank?: number;
+  semantic_rank?: number;
+  lexical_score?: number;
+  semantic_score?: number;
+  exact_match: boolean;
+  fusion_score: number;
+};
+
+export type SearchResult = {
+  repo_id: string;
+  id: string;
+  path: string;
+  title: string;
+  kind: string;
+  status: string;
+  provenance: string;
+  snippet: string;
+  line_start?: number;
+  line_end?: number;
+  score: number;
+  rank: number;
+  match: SearchMatch;
+  citations: Array<{ chunk_id: string; line_start?: number; line_end?: number; snippet: string }>;
+};
+
+export type SearchRun = {
+  requested_mode: string;
+  effective_mode: string;
+  rag_state: string;
+  fallback_reason?: string;
+  coverage: RAGCoverage;
+  repair: { state: string };
+  results: SearchResult[];
+};
+
+export type RAGCoverage = {
+  eligible_chunks: number;
+  embedded_chunks: number;
+  missing_chunks: number;
+  stale_chunks: number;
+  failed_chunks: number;
+  ratio: number;
+  namespace_id?: string;
+  content_generation?: number;
+  covered_generation?: number;
+};
+
+export type SearchComparison = {
+  schema_version: string;
+  cache_ref: string;
+  repo_id: string;
+  query: string;
+  full_text: SearchRun;
+  hybrid: SearchRun;
+  generated_at: string;
+};
+
+export type ProviderSmoke = {
+  status: string;
+  profile_id?: string;
+  provider_id?: string;
+  provider_type?: string;
+  model?: string;
+  revision?: string;
+  dimensions?: number;
+  failure_class?: string;
+  message?: string;
+  handoff?: string;
+};
+
+export type RAGRepairPlan = {
+  schema_version: string;
+  plan_id: string;
+  status: string;
+  cache_ref: string;
+  repo_id: string;
+  profile?: string;
+  max_chunks: number;
+  provider: ProviderSmoke;
+  namespace_id?: string;
+  coverage: RAGCoverage;
+  effects: ControlEffect[];
+  blockers?: string[];
+};
+
 export type ObservationSnapshot = {
   api_version: string;
   revision: string;

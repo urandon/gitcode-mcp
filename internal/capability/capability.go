@@ -429,6 +429,24 @@ var adminCapabilities = []Capability{
 		Description: "Disable or reconcile an existing maintenance registration with explicit confirmation and durable receipts.",
 		UI:          enabled("Available in the loopback admin console."), CLI: enabled("Maintenance status and enable flows remain available in the CLI."), MCP: disabled("Registration mutation is not exposed through MCP."),
 	},
+	{
+		ID: "admin_search_compare", Category: CategoryAdmin, Safety: SafetyReadOnly,
+		CLIName: "search_sources", ServiceCommand: "search-sources",
+		Description: "Compare deterministic full-text retrieval with requested hybrid retrieval without sync or index side effects.",
+		UI:          enabled("Available in the repository Search Lab."), CLI: enabled("Available as `search_sources --mode full_text|hybrid`."), MCP: disabled("The admin comparison transport is UI-specific; MCP already exposes search_sources."),
+	},
+	{
+		ID: "admin_provider_smoke", Category: CategoryAdmin, Safety: SafetyReadOnly,
+		CLIName: "rag", ServiceCommand: "rag-status",
+		Description: "Explicitly verify configured embedding provider and model readiness without sending cached text.",
+		UI:          enabled("Available in the repository Search Lab."), CLI: enabled("Available as `rag status`."), MCP: disabled("The admin smoke transport is UI-specific; MCP already exposes rag_status."),
+	},
+	{
+		ID: "admin_rag_bounded_repair", Category: CategoryAdmin, Safety: SafetyBackgroundJob,
+		CLIName: "rag", ServiceCommand: "rag-index",
+		Description: "Plan and enqueue an idempotent RAG repair capped by an explicit maximum chunk count.",
+		UI:          enabled("Available in the repository Search Lab."), CLI: enabled("Available as `rag index`; the browser adds a stricter chunk bound."), MCP: disabled("RAG indexing is not exposed through MCP by default."),
+	},
 }
 
 func WriteCapabilities() []Capability {

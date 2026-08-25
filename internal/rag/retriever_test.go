@@ -44,6 +44,9 @@ func TestRAGRetrieverHybridRanksSemanticAndLexicalCandidates(t *testing.T) {
 	if result.Results[0].Path != "issues/ISSUE-2.md" || result.Results[0].LineStart != 1 || result.Results[0].NamespaceID != namespace.ID {
 		t.Fatalf("missing context provenance: %#v", result.Results[0])
 	}
+	if result.Coverage.ContentGeneration == 0 {
+		t.Fatalf("missing content generation: %#v", result.Coverage)
+	}
 }
 
 func TestRAGRetrieverNoNamespaceIsStableEmptyResult(t *testing.T) {

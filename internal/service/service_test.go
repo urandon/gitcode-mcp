@@ -2366,7 +2366,7 @@ func TestSearchSourcesHybridGroupsSemanticChunksBySource(t *testing.T) {
 	if len(result.Results) != 2 || result.Results[0].ID != "DOC-123" || len(result.Results[0].Citations) != 2 || result.Results[1].ID != "TASK-001" {
 		t.Fatalf("grouped results=%#v", result.Results)
 	}
-	if result.Results[0].Match.SemanticRank != 1 || result.Results[0].Match.LexicalRank != 0 || result.Results[0].Snippet != "русский концептуальный фрагмент" {
+	if result.Results[0].Match.SemanticRank != 1 || result.Results[0].Match.SemanticScore != .99 || result.Results[0].Match.LexicalRank != 0 || result.Results[0].Snippet != "русский концептуальный фрагмент" {
 		t.Fatalf("top result=%#v", result.Results[0])
 	}
 }

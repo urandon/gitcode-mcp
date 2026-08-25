@@ -33,7 +33,7 @@ func TestAdminBindingPlanApplyDefaultsAPIAndReplays(t *testing.T) {
 	manager.EffectiveConfig = &cfg
 	receiptPath := filepath.Join(t.TempDir(), "controls.json")
 	receipts := NewAdminControlReceiptManager(receiptPath)
-	controls := NewAdminControlManager(manager, NewMaintenanceManager(manager, NewJobManager(""), ""), receipts)
+	controls := NewAdminControlManager(manager, NewMaintenanceManager(manager, NewJobManager(""), ""), NewJobManager(""), receipts)
 	req := adminhttp.BindingControlRequest{CacheRef: publicCacheRef(identity.UUID, cachePath), RepoID: "owner/repo", Scopes: []string{"issues"}}
 
 	planned, err := controls.PlanBinding(ctx, req)
@@ -57,7 +57,7 @@ func TestAdminBindingPlanApplyDefaultsAPIAndReplays(t *testing.T) {
 	if err := restartedReceipts.Load(); err != nil {
 		t.Fatal(err)
 	}
-	restarted := NewAdminControlManager(manager, NewMaintenanceManager(manager, NewJobManager(""), ""), restartedReceipts)
+	restarted := NewAdminControlManager(manager, NewMaintenanceManager(manager, NewJobManager(""), ""), NewJobManager(""), restartedReceipts)
 	replay, err := restarted.ApplyBinding(ctx, req)
 	if err != nil || replay.(map[string]any)["replayed"] != true {
 		t.Fatalf("replay=%+v err=%v", replay, err)
@@ -94,7 +94,7 @@ func TestAdminBindingRejectsStalePlanAliasConflictAndPrivatePath(t *testing.T) {
 	manager.AdminCachePath = cachePath
 	cfg := config.Default()
 	manager.EffectiveConfig = &cfg
-	controls := NewAdminControlManager(manager, NewMaintenanceManager(manager, NewJobManager(""), ""), NewAdminControlReceiptManager(""))
+	controls := NewAdminControlManager(manager, NewMaintenanceManager(manager, NewJobManager(""), ""), NewJobManager(""), NewAdminControlReceiptManager(""))
 	cacheRef := publicCacheRef(identity.UUID, cachePath)
 
 	blockedAny, err := controls.PlanBinding(ctx, adminhttp.BindingControlRequest{CacheRef: cacheRef, RepoID: "owner/repo", Scopes: []string{"issues"}, Aliases: []string{"legacy/repo"}})
@@ -159,7 +159,7 @@ func TestAdminMaintenanceSetupMapsBoundedPolicy(t *testing.T) {
 	manager.AdminCachePath = cachePath
 	cfg := config.Default()
 	manager.EffectiveConfig = &cfg
-	controls := NewAdminControlManager(manager, NewMaintenanceManager(manager, NewJobManager(""), ""), NewAdminControlReceiptManager(""))
+	controls := NewAdminControlManager(manager, NewMaintenanceManager(manager, NewJobManager(""), ""), NewJobManager(""), NewAdminControlReceiptManager(""))
 	req := adminhttp.MaintenanceControlRequest{
 		CacheRef: publicCacheRef(identity.UUID, cachePath), RepoID: "owner/repo", SyncMode: "head-and-backfill",
 		Collections: []string{"issues"}, RAGMode: "maintain", Profile: "local",

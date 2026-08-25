@@ -38,7 +38,10 @@ const snapshot = {
     { id: 'rag_search', category: 'rag', safety_class: 'read_only', description: 'Search cached RAG chunks.', ui_enabled: false, ui_reason: 'Search lab is delivered separately.', cli_name: 'rag-search', cli_enabled: true, mcp_name: 'rag_search', mcp_enabled: true },
     { id: 'admin_maintenance_plan_apply', category: 'admin', safety_class: 'background_job', description: 'Plan and apply maintenance.', ui_enabled: true, cli_name: 'maintenance', cli_enabled: true, mcp_enabled: false },
     { id: 'admin_binding_plan_apply', category: 'admin', safety_class: 'audited_write', description: 'Plan and apply bindings.', ui_enabled: true, cli_name: 'repo', cli_enabled: true, mcp_enabled: false },
-    { id: 'admin_registration_controls', category: 'admin', safety_class: 'background_job', description: 'Reconcile and disable registrations.', ui_enabled: true, cli_name: 'maintenance', cli_enabled: true, mcp_enabled: false }
+    { id: 'admin_registration_controls', category: 'admin', safety_class: 'background_job', description: 'Reconcile and disable registrations.', ui_enabled: true, cli_name: 'maintenance', cli_enabled: true, mcp_enabled: false },
+    { id: 'admin_search_compare', category: 'admin', safety_class: 'read_only', description: 'Compare search modes.', ui_enabled: true, cli_name: 'search_sources', cli_enabled: true, mcp_enabled: false },
+    { id: 'admin_provider_smoke', category: 'admin', safety_class: 'read_only', description: 'Smoke provider.', ui_enabled: true, cli_name: 'rag', cli_enabled: true, mcp_enabled: false },
+    { id: 'admin_rag_bounded_repair', category: 'admin', safety_class: 'background_job', description: 'Bounded RAG repair.', ui_enabled: true, cli_name: 'rag', cli_enabled: true, mcp_enabled: false }
   ]
 };
 
@@ -74,7 +77,8 @@ test('operator views keep coverage truth, deep links, and recovery states', asyn
   await expect(page.getByRole('heading', { name: 'Collections and frontiers' })).toBeVisible();
 
   await page.getByRole('tab', { name: 'Search status' }).click();
-  await expect(page.getByText('Hybrid search ready')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Search Lab' })).toBeVisible();
+  await expect(page.getByText('A query never syncs GitCode, starts provider setup, or repairs an index.')).toBeVisible();
   await page.getByRole('tab', { name: 'Activity' }).click();
   await expect(page.getByText('Recent sync events')).toBeVisible();
 
@@ -277,4 +281,47 @@ test('binding control defaults API in the plan and stale apply stays non-mutatin
   await page.getByRole('button', { name: 'Confirm action' }).click();
   await expect(page.getByRole('alert')).toContainText('Render and confirm a new binding plan.');
   expect(applyCalls).toBe(1);
+});
+
+test('Search Lab explains hybrid fallback and applies one bounded repair intent', async ({ page }) => {
+  await mockAdmin(page);
+  let compareBody: Record<string, unknown> = {};
+  await page.route('**/api/admin/v1/search/compare', async (route) => {
+    compareBody = route.request().postDataJSON();
+    const result = { repo_id: 'example/repo', id: 'ISSUE-77', path: 'issues/77.md', title: 'Hybrid search policy', kind: 'issue', status: 'open', provenance: 'live', snippet: 'Hybrid search falls back explicitly when the provider is down.', line_start: 10, line_end: 12, score: 0.032, rank: 1, match: { lexical_rank: 1, semantic_rank: 2, lexical_score: 4.2, semantic_score: 0.81, exact_match: false, fusion_score: 0.032 }, citations: [{ chunk_id: 'chunk-semantic-evidence', line_start: 10, line_end: 12, snippet: 'Semantic evidence with a current chunk hash.' }] };
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { schema_version: 'gitcode-mcp.admin-search-comparison.v1', cache_ref: 'cache-111111112222', repo_id: 'example/repo', query: 'daemon lifecycle', generated_at: new Date().toISOString(), full_text: { requested_mode: 'full_text', effective_mode: 'full_text', rag_state: 'not_requested', coverage: {}, repair: { state: 'not_needed' }, results: [{ ...result, match: { ...result.match, semantic_rank: 0, semantic_score: 0 }, citations: [] }] }, hybrid: { requested_mode: 'hybrid', effective_mode: 'full_text', rag_state: 'unavailable', fallback_reason: 'provider_unavailable', coverage: { eligible_chunks: 20, embedded_chunks: 17, missing_chunks: 2, stale_chunks: 1, failed_chunks: 1, ratio: .85, namespace_id: 'embns-public', content_generation: 9, covered_generation: 8 }, repair: { state: 'needed' }, results: [result] } } }) });
+  });
+  await page.route('**/api/admin/v1/rag/provider/smoke', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { status: 'unavailable', profile_id: 'easy-rag', provider_id: 'ollama', model: 'qwen3-embedding:0.6b', failure_class: 'unavailable', message: 'The configured embedding provider is unavailable.', handoff: 'gitcode-mcp rag setup --yes' } }) }));
+  await page.route('**/api/admin/v1/rag/repair/plan', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { schema_version: 'gitcode-mcp.admin-rag-repair-plan.v1', plan_id: 'rag-repair-plan-safe', status: 'ready', cache_ref: 'cache-111111112222', repo_id: 'example/repo', profile: 'easy-rag', max_chunks: 64, provider: { status: 'ready', provider_id: 'ollama', model: 'qwen3-embedding:0.6b' }, namespace_id: 'embns-public', coverage: { eligible_chunks: 20, embedded_chunks: 17, missing_chunks: 2, stale_chunks: 1, failed_chunks: 1 }, effects: [{ id: 'inspect', class: 'inspect', status: 'complete', summary: 'inspect current chunk hashes, namespace, and generation coverage' }, { id: 'enqueue', class: 'job_enqueue', status: 'required', summary: 'enqueue at most 64 missing or stale chunks', confirmation_required: true }, { id: 'embed', class: 'provider_request', status: 'required', summary: 'send only the selected bounded cached-text slice to the configured embedding provider', data_boundary: 'configured_embedding_provider', confirmation_required: true }, { id: 'gitcode', class: 'network_read', status: 'not_performed', summary: 'no GitCode request is performed' }] } }) }));
+  const repairKeys: string[] = [];
+  await page.route('**/api/admin/v1/rag/repair/apply', async (route) => {
+    const body = route.request().postDataJSON(); repairKeys.push(body.idempotency_key);
+    expect(body.max_chunks).toBe(64); expect(body).not.toHaveProperty('cache_path');
+    if (repairKeys.length === 1) return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { message: 'Receipt delivery was interrupted.', remediation: 'Retry this confirmation.' } }) });
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { outcome: 'created', receipt_id: 'receipt-rag', job_id: 'job-rag', replayed: false } }) });
+  });
+  await page.goto('/?view=Caches&cache=cache-111111112222&repo=example%2Frepo&tab=search&q=daemon%20lifecycle');
+  await page.getByRole('button', { name: 'Compare modes' }).click();
+  expect(compareBody.query).toBe('daemon lifecycle'); expect(compareBody).not.toHaveProperty('cache_path');
+  await expect(page.getByText('Provider Unavailable').first()).toBeVisible();
+  await expect(page.getByText('4.2000 · #1').first()).toBeVisible();
+  await expect(page.getByText('0.8100 · #2')).toBeVisible();
+  await page.getByText('1 semantic citation').click();
+  await expect(page.getByText('Semantic evidence with a current chunk hash.')).toBeVisible();
+  await page.getByRole('button', { name: 'Smoke provider' }).click();
+  await expect(page.getByText('gitcode-mcp rag setup --yes')).toBeVisible();
+  await page.getByLabel('Repair cap').fill('64');
+  await page.getByRole('button', { name: 'Plan repair' }).click();
+  await expect(page.getByText('enqueue at most 64 missing or stale chunks')).toBeVisible();
+  await page.getByLabel('Repair cap').fill('65');
+  await expect(page.getByText('enqueue at most 64 missing or stale chunks')).toBeHidden();
+  await page.getByLabel('Repair cap').fill('64');
+  await page.getByRole('button', { name: 'Plan repair' }).click();
+  await page.getByRole('button', { name: 'Confirm bounded repair' }).click();
+  await expect(page.getByRole('dialog')).toContainText('Repair at most 64 chunks?');
+  await page.getByRole('button', { name: 'Confirm bounded repair' }).last().click();
+  await expect(page.getByRole('alert')).toContainText('Retry this confirmation.');
+  await page.getByRole('button', { name: 'Confirm bounded repair' }).last().click();
+  await expect(page.getByText('Receipt receipt-rag')).toBeVisible();
+  expect(repairKeys).toHaveLength(2); expect(repairKeys[1]).toBe(repairKeys[0]);
 });

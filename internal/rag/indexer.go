@@ -30,6 +30,7 @@ type IndexRequest struct {
 	DocumentInstructionID string
 	QueryInstructionID    string
 	BatchSize             int
+	MaxChunks             int
 	RunID                 string
 	ProgressChan          chan<- progress.Event
 }
@@ -44,6 +45,8 @@ type IndexResult struct {
 	EmbeddedChunks    int              `json:"embedded_chunks"`
 	SkippedChunks     int              `json:"skipped_chunks"`
 	FailedChunks      int              `json:"failed_chunks"`
+	RemainingChunks   int              `json:"remaining_chunks,omitempty"`
+	Bounded           bool             `json:"bounded,omitempty"`
 	StartGeneration   int64            `json:"start_generation,omitempty"`
 	CoveredGeneration int64            `json:"covered_generation,omitempty"`
 	StartedAt         time.Time        `json:"started_at"`
@@ -175,6 +178,13 @@ func (i *RAGIndexer) Run(ctx context.Context, req IndexRequest) (IndexResult, er
 			continue
 		}
 		missing = append(missing, chunk)
+	}
+	remaining := 0
+	if req.MaxChunks > 0 && len(missing) > req.MaxChunks {
+		remaining = len(missing) - req.MaxChunks
+		missing = missing[:req.MaxChunks]
+		run.Metadata["max_chunks"] = fmt.Sprintf("%d", req.MaxChunks)
+		run.Metadata["remaining_chunks"] = fmt.Sprintf("%d", remaining)
 	}
 	run.Status = RAGIndexStatusRunning
 	run.TotalChunks = len(chunks)
@@ -309,8 +319,14 @@ func (i *RAGIndexer) Run(ctx context.Context, req IndexRequest) (IndexResult, er
 	run.UpdatedAt = completed
 	run.CompletedAt = completed
 	coverageStatus := "ready"
-	if run.FailedChunks > 0 {
+	pendingAfterRun := remaining + run.FailedChunks
+	if pendingAfterRun > 0 {
 		coverageStatus = "partial"
+	}
+	if remaining > 0 && run.FailedChunks > 0 {
+		run.Message = fmt.Sprintf("bounded RAG repair embedded this slice; %d chunks were deferred and %d failed", remaining, run.FailedChunks)
+	} else if remaining > 0 {
+		run.Message = fmt.Sprintf("bounded RAG repair embedded this slice; %d chunks remain", remaining)
 	}
 	if finalContentState.ContentGeneration != startGeneration {
 		run.Status = RAGIndexStatusSuperseded
@@ -327,6 +343,8 @@ func (i *RAGIndexer) Run(ctx context.Context, req IndexRequest) (IndexResult, er
 	result := indexResultFromRun(run, events)
 	result.StartGeneration = startGeneration
 	result.CoveredGeneration = startGeneration
+	result.RemainingChunks = pendingAfterRun
+	result.Bounded = req.MaxChunks > 0
 	return result, nil
 }
 

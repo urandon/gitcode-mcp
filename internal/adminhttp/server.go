@@ -65,6 +65,10 @@ type Config struct {
 	ReconcileMaintenance RegistrationControlProvider
 	PlanBinding          BindingControlProvider
 	ApplyBinding         BindingControlProvider
+	CompareSearch        SearchCompareProvider
+	SmokeProvider        ProviderSmokeProvider
+	PlanRAGRepair        RAGRepairProvider
+	ApplyRAGRepair       RAGRepairProvider
 }
 
 type Controller struct {
@@ -180,6 +184,10 @@ func (c *Controller) handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/v1/maintenance/{registration_id}/reconcile", c.reconcileMaintenance)
 	mux.HandleFunc("POST /api/admin/v1/bindings/plan", c.planBinding)
 	mux.HandleFunc("POST /api/admin/v1/bindings/apply", c.applyBinding)
+	mux.HandleFunc("POST /api/admin/v1/search/compare", c.compareSearch)
+	mux.HandleFunc("POST /api/admin/v1/rag/provider/smoke", c.smokeProvider)
+	mux.HandleFunc("POST /api/admin/v1/rag/repair/plan", c.planRAGRepair)
+	mux.HandleFunc("POST /api/admin/v1/rag/repair/apply", c.applyRAGRepair)
 	mux.HandleFunc("GET /api/admin/v1/diagnostics", c.getDiagnostics)
 	mux.HandleFunc("GET /api/admin/v1/capabilities", c.getCapabilities)
 	mux.HandleFunc("GET /api/admin/v1/events", c.getEvents)

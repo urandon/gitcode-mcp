@@ -30,11 +30,12 @@ type AdminBindingPlan struct {
 type AdminControlManager struct {
 	manager     Manager
 	maintenance *MaintenanceManager
+	jobs        *JobManager
 	receipts    *AdminControlReceiptManager
 }
 
-func NewAdminControlManager(manager Manager, maintenance *MaintenanceManager, receipts *AdminControlReceiptManager) *AdminControlManager {
-	return &AdminControlManager{manager: manager, maintenance: maintenance, receipts: receipts}
+func NewAdminControlManager(manager Manager, maintenance *MaintenanceManager, jobs *JobManager, receipts *AdminControlReceiptManager) *AdminControlManager {
+	return &AdminControlManager{manager: manager, maintenance: maintenance, jobs: jobs, receipts: receipts}
 }
 
 func (m *AdminControlManager) PlanMaintenance(ctx context.Context, req adminhttp.MaintenanceControlRequest) (any, error) {

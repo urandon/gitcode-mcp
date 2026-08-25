@@ -3,7 +3,7 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import { Activity, AlertTriangle, ArrowLeft, Blocks, CheckCircle2, ChevronRight, CircleGauge, Clipboard, Clock3, Database, FileCheck2, FolderCog, Gauge, GitFork, HeartPulse, History, Layers3, Monitor, Moon, Power, RefreshCw, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Sun, Wrench, XCircle, Zap } from '@lucide/svelte';
   import { applyTheme, normalizeTheme, themeStorageKey, type Theme } from '$lib/theme';
-  import { adminApiVersion, cliHandoff, emptySnapshot, humanize, isSnapshotStale, laneSummary, type AdminView, type BindingIntent, type BindingPlan, type CacheObservation, type ControlReceipt, type Diagnostic, type Job, type JobAction, type JobActionReceipt, type Maintenance, type MaintenanceIntent, type MaintenancePlan, type ObservationSnapshot, type Repository, type RepositoryTab } from '$lib/admin';
+  import { adminApiVersion, cliHandoff, emptySnapshot, humanize, isSnapshotStale, laneSummary, type AdminView, type BindingIntent, type BindingPlan, type CacheObservation, type ControlReceipt, type Diagnostic, type Job, type JobAction, type JobActionReceipt, type Maintenance, type MaintenanceIntent, type MaintenancePlan, type ObservationSnapshot, type ProviderSmoke, type RAGRepairPlan, type Repository, type RepositoryTab, type SearchComparison } from '$lib/admin';
   import CoverageLaneCard from '$lib/CoverageLaneCard.svelte';
   import StatusChip from '$lib/StatusChip.svelte';
 
@@ -62,7 +62,7 @@
   let bindingReceipt: ControlReceipt | undefined;
   let bindingError = '';
   let controlRunning = false;
-  let pendingControl: 'maintenance_apply' | 'binding_apply' | 'disable' | 'reconcile' | '' = '';
+  let pendingControl: 'maintenance_apply' | 'binding_apply' | 'rag_repair_apply' | 'disable' | 'reconcile' | '' = '';
   let pendingControlKey = '';
   let controlDialog: HTMLDialogElement | undefined;
   let controlConfirmButton: HTMLButtonElement | undefined;
@@ -71,6 +71,22 @@
   let maintenanceControlsEnabled = false;
   let bindingControlsEnabled = false;
   let registrationControlsEnabled = false;
+  let searchCompareEnabled = false;
+  let providerSmokeEnabled = false;
+  let ragRepairEnabled = false;
+  let searchQuery = '';
+  let searchKind = '';
+  let searchProvenance = '';
+  let searchLimit = 8;
+  let searchRunning = false;
+  let searchError = '';
+  let searchComparison: SearchComparison | undefined;
+  let providerSmoke: ProviderSmoke | undefined;
+  let repairProfile = '';
+  let repairMaxChunks = 128;
+  let repairPlan: RAGRepairPlan | undefined;
+  let repairReceipt: ControlReceipt | undefined;
+  let experimentCopied = false;
   let repoTargets: Array<{ key: string; cache: CacheObservation; repo: Repository }> = [];
 
   $: selectedCache = snapshot.caches.find((cache) => cache.cache_ref === selectedCacheRef);
@@ -85,6 +101,9 @@
   $: maintenanceControlsEnabled = snapshot.capabilities.some((item) => item.id === 'admin_maintenance_plan_apply' && item.ui_enabled);
   $: bindingControlsEnabled = snapshot.capabilities.some((item) => item.id === 'admin_binding_plan_apply' && item.ui_enabled);
   $: registrationControlsEnabled = snapshot.capabilities.some((item) => item.id === 'admin_registration_controls' && item.ui_enabled);
+  $: searchCompareEnabled = snapshot.capabilities.some((item) => item.id === 'admin_search_compare' && item.ui_enabled);
+  $: providerSmokeEnabled = snapshot.capabilities.some((item) => item.id === 'admin_provider_smoke' && item.ui_enabled);
+  $: ragRepairEnabled = snapshot.capabilities.some((item) => item.id === 'admin_rag_bounded_repair' && item.ui_enabled);
   $: repoTargets = snapshot.caches.flatMap((cache) => cache.repositories.map((repo) => ({ key: `${cache.cache_ref}\u0000${repo.repo_id}`, cache, repo })));
 
   function normalizeSnapshot(value: ObservationSnapshot): ObservationSnapshot {
@@ -140,6 +159,8 @@
     selectedCacheRef = params.get('cache') || ''; selectedRepoID = params.get('repo') || '';
     const requestedTab = params.get('tab');
     if (repositoryTabs.some((item) => item.value === requestedTab)) repoTab = requestedTab as RepositoryTab;
+    searchQuery = (params.get('q') || '').slice(0, 512); searchKind = params.get('kind') || ''; searchProvenance = params.get('provenance') || '';
+    const requestedLimit = Number(params.get('limit')); if (Number.isInteger(requestedLimit) && requestedLimit >= 1 && requestedLimit <= 20) searchLimit = requestedLimit;
     const requestedFilter = params.get('diagnostics');
     if (requestedFilter === 'current' || requestedFilter === 'recovered' || requestedFilter === 'all') diagnosticsFilter = requestedFilter;
     selectedJobID = params.get('job') || '';
@@ -153,6 +174,12 @@
     if (selectedCacheRef) params.set('cache', selectedCacheRef);
     if (selectedRepoID) params.set('repo', selectedRepoID);
     if (selectedRepoID && repoTab !== 'coverage') params.set('tab', repoTab);
+    if (selectedRepoID && repoTab === 'search') {
+      if (searchQuery) params.set('q', searchQuery);
+      if (searchKind) params.set('kind', searchKind);
+      if (searchProvenance) params.set('provenance', searchProvenance);
+      if (searchLimit !== 8) params.set('limit', String(searchLimit));
+    }
     if (active === 'Diagnostics' && diagnosticsFilter !== 'current') params.set('diagnostics', diagnosticsFilter);
     if (active === 'Jobs') {
       if (selectedJobID) params.set('job', selectedJobID);
@@ -171,7 +198,7 @@
     if (view !== 'Jobs') selectedJobID = '';
     updateLocation();
   }
-  function openRepository(cache: CacheObservation, repo: Repository): void { active = 'Caches'; selectedCacheRef = cache.cache_ref; selectedRepoID = repo.repo_id; repoTab = 'coverage'; updateLocation(); }
+  function openRepository(cache: CacheObservation, repo: Repository): void { active = 'Caches'; selectedCacheRef = cache.cache_ref; selectedRepoID = repo.repo_id; repoTab = 'coverage'; searchComparison = undefined; searchError = ''; providerSmoke = undefined; repairPlan = undefined; repairReceipt = undefined; updateLocation(); }
   function closeRepository(): void { selectedRepoID = ''; repoTab = 'coverage'; updateLocation(); }
   function selectRepositoryTab(value: RepositoryTab): void { repoTab = value; updateLocation(); }
   function selectDiagnosticFilter(value: 'current' | 'recovered' | 'all'): void { diagnosticsFilter = value; updateLocation(); }
@@ -277,6 +304,45 @@
     finally { controlRunning = false; }
   }
 
+  async function runSearchComparison(): Promise<void> {
+    if (!csrfToken || !searchCompareEnabled || !selectedCache || !selectedRepo || !searchQuery.trim()) return;
+    searchRunning = true; searchError = ''; searchComparison = undefined; providerSmoke = undefined; repairPlan = undefined; repairReceipt = undefined;
+    updateLocation(true);
+    try {
+      searchComparison = await controlPost<SearchComparison>('/api/admin/v1/search/compare', { cache_ref: selectedCache.cache_ref, repo_id: selectedRepo.repo_id, query: searchQuery.trim(), kind: searchKind, provenance: searchProvenance, limit: searchLimit });
+      repairProfile = snapshot.maintenance.find((item) => item.cache_ref === selectedCache?.cache_ref && item.repo_id === selectedRepo?.repo_id)?.policy.profile || '';
+    } catch (value) { searchError = value instanceof Error ? value.message : 'Search comparison failed.'; }
+    finally { searchRunning = false; }
+  }
+
+  async function smokeSearchProvider(): Promise<void> {
+    if (!csrfToken || !providerSmokeEnabled || !selectedCache || !selectedRepo) return;
+    searchRunning = true; searchError = '';
+    try { providerSmoke = await controlPost<ProviderSmoke>('/api/admin/v1/rag/provider/smoke', { cache_ref: selectedCache.cache_ref, repo_id: selectedRepo.repo_id, profile: repairProfile }); }
+    catch (value) { searchError = value instanceof Error ? value.message : 'Provider smoke test failed.'; }
+    finally { searchRunning = false; }
+  }
+
+  async function renderRAGRepairPlan(): Promise<void> {
+    if (!csrfToken || !ragRepairEnabled || !selectedCache || !selectedRepo) return;
+    searchRunning = true; searchError = ''; repairReceipt = undefined;
+    try { repairPlan = await controlPost<RAGRepairPlan>('/api/admin/v1/rag/repair/plan', { cache_ref: selectedCache.cache_ref, repo_id: selectedRepo.repo_id, profile: repairProfile, max_chunks: repairMaxChunks }); }
+    catch (value) { repairPlan = undefined; searchError = value instanceof Error ? value.message : 'RAG repair planning failed.'; }
+    finally { searchRunning = false; }
+  }
+
+  function invalidateRAGRepairPlan(): void {
+    repairPlan = undefined;
+    repairReceipt = undefined;
+  }
+
+  async function copyExperimentSummary(): Promise<void> {
+    if (!searchComparison) return;
+    const hybrid = searchComparison.hybrid;
+    const lines = [`Search experiment: ${searchComparison.repo_id}`, `Query: ${searchComparison.query}`, `Requested/effective: ${hybrid.requested_mode}/${hybrid.effective_mode}`, `RAG: ${hybrid.rag_state}${hybrid.fallback_reason ? ` (${hybrid.fallback_reason})` : ''}`, `Coverage: ${hybrid.coverage.embedded_chunks}/${hybrid.coverage.eligible_chunks}; missing ${hybrid.coverage.missing_chunks}; stale ${hybrid.coverage.stale_chunks}`, ...hybrid.results.slice(0, 5).map((item) => `#${item.rank} ${item.id} fusion=${item.match.fusion_score.toFixed(6)} ${item.path}${item.line_start ? `:${item.line_start}` : ''}`)];
+    try { await navigator.clipboard.writeText(lines.join('\n')); experimentCopied = true; window.setTimeout(() => (experimentCopied = false), 1800); } catch { experimentCopied = false; }
+  }
+
   async function confirmControl(kind: typeof pendingControl, trigger: HTMLButtonElement): Promise<void> {
     controlTriggerButton = trigger; pendingControl = kind; pendingControlKey = `admin-${kind}-${crypto.randomUUID()}`;
     maintenanceError = ''; bindingError = ''; await tick(); controlDialog?.showModal(); controlConfirmButton?.focus();
@@ -294,13 +360,15 @@
         maintenanceReceipt = await controlPost<ControlReceipt>('/api/admin/v1/maintenance/apply', { ...maintenanceIntent, plan_id: maintenancePlan.plan_id, idempotency_key: pendingControlKey });
       } else if (pendingControl === 'binding_apply' && bindingPlan) {
         bindingReceipt = await controlPost<ControlReceipt>('/api/admin/v1/bindings/apply', { ...bindingIntent, plan_id: bindingPlan.plan_id, idempotency_key: pendingControlKey });
+      } else if (pendingControl === 'rag_repair_apply' && repairPlan && selectedCache && selectedRepo) {
+        repairReceipt = await controlPost<ControlReceipt>('/api/admin/v1/rag/repair/apply', { cache_ref: selectedCache.cache_ref, repo_id: selectedRepo.repo_id, profile: repairProfile, max_chunks: repairMaxChunks, plan_id: repairPlan.plan_id, idempotency_key: pendingControlKey });
       } else if ((pendingControl === 'disable' || pendingControl === 'reconcile') && selectedMaintenance) {
         maintenanceReceipt = await controlPost<ControlReceipt>(`/api/admin/v1/maintenance/${encodeURIComponent(selectedMaintenance.registration_id)}/${pendingControl}`, { idempotency_key: pendingControlKey });
       }
       controlDialog?.close(); pendingControl = ''; pendingControlKey = ''; await refresh(); await tick(); controlTriggerButton?.focus();
     } catch (value) {
       const message = value instanceof Error ? value.message : 'The confirmed control failed.';
-      if (pendingControl === 'binding_apply') bindingError = message; else maintenanceError = message;
+      if (pendingControl === 'binding_apply') bindingError = message; else if (pendingControl === 'rag_repair_apply') searchError = message; else maintenanceError = message;
     } finally { controlRunning = false; }
   }
   function selectTheme(value: Theme): void { theme = value; applyTheme(value); }
@@ -380,7 +448,47 @@
             {:else if repoTab === 'collections'}
               <section class="repository-section" aria-labelledby="collections-title"><div class="section-heading"><div><p class="section-kicker">CORPUS</p><h2 id="collections-title">Collections and frontiers</h2></div></div>{#if selectedRepo.collections.length === 0}<div class="empty-state"><Layers3 size={24} /><h3>No collection observations</h3><p>The binding exists, but no counts or frontiers have been observed.</p></div>{:else}<div class="table-wrap"><table><caption class="sr-only">Cached collection counts and coverage</caption><thead><tr><th>Collection</th><th>Cached</th><th>Head freshness</th><th>Tail completeness</th></tr></thead><tbody>{#each selectedRepo.collections as collection}<tr><th scope="row">{humanize(collection.kind)}</th><td>{collection.count.toLocaleString()}</td><td><StatusChip value={collection.head.state} label={laneSummary('head', collection.head)} /></td><td><StatusChip value={collection.tail.state} label={laneSummary('tail', collection.tail)} /></td></tr>{/each}</tbody></table></div>{/if}<div class="secondary-summary"><div><span>Secondary total</span><strong>{selectedRepo.counts.secondary.total.toLocaleString()}</strong></div><div><span>Pending</span><strong>{selectedRepo.counts.secondary.pending.toLocaleString()}</strong></div><div><span>Deferred</span><strong>{selectedRepo.counts.secondary.deferred.toLocaleString()}</strong></div><div><span>Complete</span><strong>{selectedRepo.counts.secondary.complete.toLocaleString()}</strong></div></div></section>
             {:else if repoTab === 'search'}
-              <section class="repository-section" aria-labelledby="search-title"><div class="section-heading"><div><p class="section-kicker">READINESS, NOT A QUERY</p><h2 id="search-title">Search status</h2></div></div><div class="search-readiness"><article><span class="large-icon"><Search size={24} /></span><div><strong>{selectedRepo.coverage.rag.state === 'current' ? 'Hybrid search ready' : 'Full-text remains available'}</strong><p>{selectedRepo.coverage.rag.state === 'current' ? 'The RAG namespace covers the current content generation.' : `RAG is ${humanize(selectedRepo.coverage.rag.state)}; semantic fallback must remain explicit.`}</p></div><StatusChip value={selectedRepo.coverage.rag.state} /></article></div><div class="coverage-grid two-up"><CoverageLaneCard name="projection" lane={selectedRepo.coverage.projection} /><CoverageLaneCard name="rag" lane={selectedRepo.coverage.rag} /></div><div class="state-panel neutral-panel"><ShieldCheck size={19} /><div><strong>Observation has no indexing side effects</strong><p>Opening this tab does not contact a provider, refresh GitCode, or repair an index.</p></div></div></section>
+              <section class="repository-section search-lab" aria-labelledby="search-title">
+                <div class="section-heading"><div><p class="section-kicker">OBSERVATION-ONLY EXPERIMENT</p><h2 id="search-title">Search Lab</h2><p>Compare deterministic full-text with requested hybrid retrieval. A query never syncs GitCode, starts provider setup, or repairs an index.</p></div><StatusChip value={selectedRepo.coverage.rag.state} label={`RAG ${humanize(selectedRepo.coverage.rag.state)}`} /></div>
+                <form class="search-query-form" onsubmit={(event) => { event.preventDefault(); void runSearchComparison(); }}>
+                  <label class="search-query"><span>Experiment query</span><input required maxlength="512" bind:value={searchQuery} placeholder="How does daemon maintenance avoid duplicate work?" /></label>
+                  <label><span>Kind</span><select bind:value={searchKind}><option value="">All kinds</option>{#each ['issue', 'issue_comment', 'pull_request', 'pr_comment', 'wiki'] as kind}<option value={kind}>{humanize(kind)}</option>{/each}</select></label>
+                  <label><span>Provenance</span><select bind:value={searchProvenance}><option value="">All provenance</option>{#each ['live', 'fixture', 'projection', 'bridge'] as provenance}<option value={provenance}>{humanize(provenance)}</option>{/each}</select></label>
+                  <label><span>Limit</span><input type="number" min="1" max="20" bind:value={searchLimit} /></label>
+                  <button class="primary-action" type="submit" disabled={!csrfToken || !searchCompareEnabled || searchRunning}><Search size={16} />{searchRunning ? 'Comparing…' : 'Compare modes'}</button>
+                </form>
+                <p class="privacy search-boundary"><ShieldCheck size={15} />Only the query is sent to the configured embedding provider for hybrid mode; cached source text and GitCode are not contacted by search.</p>
+                {#if searchError}<div class="action-result error" role="alert"><AlertTriangle size={17} /><div><strong>Search Lab action failed</strong><span>{searchError}</span></div></div>{/if}
+
+                {#if searchComparison}
+                  <div class="experiment-summary">
+                    <div><span>Requested → effective</span><strong>{humanize(searchComparison.hybrid.requested_mode)} → {humanize(searchComparison.hybrid.effective_mode)}</strong></div>
+                    <div><span>RAG state</span><strong>{humanize(searchComparison.hybrid.rag_state)}</strong><small>{searchComparison.hybrid.fallback_reason ? humanize(searchComparison.hybrid.fallback_reason) : 'No fallback'}</small></div>
+                    <div><span>Coverage</span><strong>{searchComparison.hybrid.coverage.embedded_chunks}/{searchComparison.hybrid.coverage.eligible_chunks}</strong><small>{searchComparison.hybrid.coverage.missing_chunks} missing · {searchComparison.hybrid.coverage.stale_chunks} stale · {searchComparison.hybrid.coverage.failed_chunks || 0} failed</small></div>
+                    <div><span>Generation</span><strong>{searchComparison.hybrid.coverage.covered_generation ?? '—'} / {searchComparison.hybrid.coverage.content_generation ?? '—'}</strong><small>{searchComparison.hybrid.coverage.namespace_id || 'No namespace'}</small></div>
+                    <button onclick={() => void copyExperimentSummary()}><Clipboard size={15} />{experimentCopied ? 'Copied report' : 'Copy report'}</button>
+                  </div>
+                  <div class="search-compare-grid">
+                    {#each [{ label: 'Full text', run: searchComparison.full_text }, { label: 'Hybrid requested', run: searchComparison.hybrid }] as column}
+                      <article class="search-mode-column">
+                        <header><div><p class="section-kicker">{column.label.toUpperCase()}</p><h3>{humanize(column.run.effective_mode)}</h3></div><StatusChip value={column.run.fallback_reason ? 'partial' : 'ready'} label={column.run.fallback_reason ? humanize(column.run.fallback_reason) : `${column.run.results.length} results`} /></header>
+                        {#if column.run.results.length === 0}<div class="empty-inline"><Search size={18} /><div><strong>No cached match</strong><span>This is a valid empty result, not an operational failure.</span></div></div>{:else}
+                          <ol class="search-result-list">{#each column.run.results as result}<li><div class="search-result-heading"><span class="result-rank">#{result.rank}</span><div><strong>{result.title || result.id}</strong><small>{result.id} · {humanize(result.kind)} · {humanize(result.provenance)}</small></div></div><p>{result.snippet}</p><dl class="score-row"><div><dt>Lexical</dt><dd>{(result.match.lexical_score || 0).toFixed(4)}{result.match.lexical_rank ? ` · #${result.match.lexical_rank}` : ''}</dd></div><div><dt>Semantic</dt><dd>{(result.match.semantic_score || 0).toFixed(4)}{result.match.semantic_rank ? ` · #${result.match.semantic_rank}` : ''}</dd></div><div><dt>Fusion</dt><dd>{result.match.fusion_score.toFixed(6)}</dd></div></dl><div class="result-location"><code>{result.path}{result.line_start ? `:${result.line_start}` : ''}</code>{#if result.match.exact_match}<span>Exact identity</span>{/if}</div>{#if result.citations.length}<details><summary>{result.citations.length} semantic citation{result.citations.length === 1 ? '' : 's'}</summary><ul>{#each result.citations as citation}<li><code>{citation.chunk_id.slice(0, 12)} · L{citation.line_start || '?'}–{citation.line_end || '?'}</code><p>{citation.snippet}</p></li>{/each}</ul></details>{/if}</li>{/each}</ol>
+                        {/if}
+                      </article>
+                    {/each}
+                  </div>
+                {/if}
+
+                <div class="rag-operator-panel">
+                  <div><p class="section-kicker">EXPLICIT PROVIDER ACTIONS</p><h3>Readiness and bounded repair</h3><p>Smoke sends no cached text. Repair embeds at most the confirmed chunk count and never installs, starts, downloads, purges, or rebuilds all namespaces.</p></div>
+                  <div class="rag-action-form"><label><span>Profile</span><input bind:value={repairProfile} oninput={invalidateRAGRepairPlan} placeholder="Configured default" /></label><label><span>Repair cap</span><div class="unit-input"><input type="number" min="1" max="1000" bind:value={repairMaxChunks} oninput={invalidateRAGRepairPlan} /><span>chunks</span></div></label><button disabled={!csrfToken || !providerSmokeEnabled || searchRunning} onclick={() => void smokeSearchProvider()}><HeartPulse size={16} />Smoke provider</button><button disabled={!csrfToken || !ragRepairEnabled || searchRunning} onclick={() => void renderRAGRepairPlan()}><FileCheck2 size={16} />Plan repair</button></div>
+                  {#if providerSmoke}<div class="action-result" role="status"><StatusChip value={providerSmoke.status} /><div><strong>{providerSmoke.status === 'ready' ? `${providerSmoke.provider_id} · ${providerSmoke.model}` : humanize(providerSmoke.failure_class)}</strong><span>{providerSmoke.status === 'ready' ? `${providerSmoke.dimensions} dimensions · revision ${providerSmoke.revision || 'reported ready'}` : providerSmoke.message}{providerSmoke.handoff ? ` · ${providerSmoke.handoff}` : ''}</span></div></div>{/if}
+                  {#if repairPlan}<div class="plan-panel rag-plan"><div class="plan-summary"><div><p class="section-kicker">BOUNDED REPAIR</p><h3>At most {repairPlan.max_chunks} chunks</h3><code>{repairPlan.plan_id}</code></div><StatusChip value={repairPlan.status} /></div>{#if repairPlan.blockers?.length}<ul class="blocker-list">{#each repairPlan.blockers as blocker}<li><AlertTriangle size={15} />{blocker}</li>{/each}</ul>{/if}<div class="effect-ledger">{#each repairPlan.effects as effect}<article><span class="effect-icon"><Zap size={15} /></span><div><strong>{effect.summary}</strong><small>{humanize(effect.class)}{effect.data_boundary ? ` · ${humanize(effect.data_boundary)}` : ''}</small>{#if effect.handoff}<code>{effect.handoff}</code>{/if}</div><StatusChip value={effect.status} /></article>{/each}</div><div class="plan-footer"><div><strong>Current gap</strong><span>{repairPlan.coverage.missing_chunks} missing · {repairPlan.coverage.stale_chunks} stale · {repairPlan.coverage.failed_chunks || 0} failed</span></div><button class="primary-action" disabled={repairPlan.status === 'blocked' || repairPlan.status === 'no_work_needed' || controlRunning} onclick={(event) => void confirmControl('rag_repair_apply', event.currentTarget)}><Power size={16} />Confirm bounded repair</button></div></div>{/if}
+                  {#if repairReceipt}<div class="action-result" role="status"><CheckCircle2 size={17} /><div><strong>{humanize(repairReceipt.outcome)}</strong><span>{repairReceipt.receipt_id ? `Receipt ${repairReceipt.receipt_id}` : 'Bounded repair accepted.'}{repairReceipt.replayed ? ' · replayed safely' : ''}</span></div></div>{/if}
+                </div>
+                {#if pendingControl === 'rag_repair_apply' && repairPlan}<dialog bind:this={controlDialog} class="confirmation-dialog control-confirmation" aria-labelledby="confirm-rag-repair-title" oncancel={(event) => { event.preventDefault(); void cancelControlConfirmation(); }}><span class="dialog-icon"><Zap size={21} /></span><div><p class="section-kicker">CONFIRM PROVIDER DATA BOUNDARY</p><h2 id="confirm-rag-repair-title">Repair at most {repairPlan.max_chunks} chunks?</h2><p>Current plan state will be checked again. Only this bounded cached-text slice may be sent to the configured embedding provider; no GitCode request or provider setup is allowed.</p><dl><div><dt>Target</dt><dd>{selectedRepo.repo_id}</dd></div><div><dt>Cache</dt><dd>{selectedCache?.cache_ref}</dd></div><div><dt>Plan</dt><dd>{repairPlan.plan_id}</dd></div></dl><div class="dialog-actions"><button onclick={() => void cancelControlConfirmation()} disabled={controlRunning}>Keep current state</button><button bind:this={controlConfirmButton} class="primary-action" onclick={() => void executeControl()} disabled={controlRunning}>{controlRunning ? 'Submitting…' : 'Confirm bounded repair'}</button></div></div></dialog>{/if}
+              </section>
             {:else}
               <section class="repository-section" aria-labelledby="activity-title"><div class="section-heading"><div><p class="section-kicker">BOUNDED HISTORY</p><h2 id="activity-title">Repository activity</h2></div></div><div class="activity-columns"><div><h3>Recent sync events</h3>{#if selectedRepo.recent_sync_events.length === 0}<div class="empty-inline"><History size={18} /><div><strong>No retained sync events</strong><span>Coverage may still contain frontier evidence.</span></div></div>{:else}<div class="timeline">{#each selectedRepo.recent_sync_events as event}<article><span class="timeline-mark"></span><div><strong>{humanize(event.kind)}</strong><span>{event.zero_delta ? 'No content delta' : humanize(event.status)}</span></div><time>{new Date(event.completed_at).toLocaleString()}</time></article>{/each}</div>{/if}</div><div><h3>Scoped jobs</h3>{#if scopedJobs.length === 0}<div class="empty-inline"><Clock3 size={18} /><div><strong>No retained jobs</strong><span>No work history for this pair.</span></div></div>{:else}<div class="mini-job-list">{#each scopedJobs.slice(-8).reverse() as job}<div><span><strong>{humanize(job.type)}</strong>{new Date(job.updated_at).toLocaleString()}</span><StatusChip value={job.status} /></div>{/each}</div>{/if}</div></div></section>
             {/if}

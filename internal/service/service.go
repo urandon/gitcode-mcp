@@ -680,6 +680,7 @@ func (s *Service) SearchSources(ctx context.Context, req SearchSourcesRequest) (
 		for i := range base.Results {
 			base.Results[i].Rank = req.Offset + i + 1
 			base.Results[i].Match.LexicalRank = req.Offset + i + 1
+			base.Results[i].Match.LexicalScore = base.Results[i].Score
 			base.Results[i].Match.ExactMatch = s.exactSourceMatch(ctx, repoID, req.Query, base.Results[i])
 			base.Results[i].Match.FusionScore = base.Results[i].Score
 			base.Results[i].Citations = []SearchCitation{}
@@ -841,6 +842,7 @@ func (s *Service) fuseSearchSources(ctx context.Context, repoID string, req Sear
 	candidates := make(map[string]SearchSourceResult, len(lexical)+len(ragResult.Results))
 	for i, result := range lexical {
 		result.Match.LexicalRank = i + 1
+		result.Match.LexicalScore = result.Score
 		candidates[result.ID] = result
 	}
 	semantic := map[string]*semanticSourceCandidate{}
@@ -916,6 +918,7 @@ func (s *Service) fuseSearchSources(ctx context.Context, repoID string, req Sear
 			result.Citations = item.result.Citations
 		}
 		result.Match.SemanticRank = i + 1
+		result.Match.SemanticScore = item.score
 		candidates[result.ID] = result
 	}
 	out := make([]SearchSourceResult, 0, len(candidates))
@@ -983,6 +986,7 @@ func decorateLexicalFallback(ctx context.Context, s *Service, result *SearchSour
 	for i := range result.Results {
 		result.Results[i].Rank = offset + i + 1
 		result.Results[i].Match.LexicalRank = offset + i + 1
+		result.Results[i].Match.LexicalScore = result.Results[i].Score
 		result.Results[i].Match.ExactMatch = s.exactSourceMatch(ctx, repoID, result.Query, result.Results[i])
 		result.Results[i].Match.FusionScore = result.Results[i].Score
 		if result.Results[i].Citations == nil {
@@ -1004,11 +1008,14 @@ func pageSearchSources(results []SearchSourceResult, offset, limit int) []Search
 
 func searchCoverageFromRAG(result rag.SearchResult) SearchRAGCoverage {
 	coverage := SearchRAGCoverage{
-		EligibleChunks: result.Coverage.TotalChunks,
-		EmbeddedChunks: result.Coverage.EmbeddedChunks,
-		MissingChunks:  result.Coverage.MissingChunks,
-		StaleChunks:    result.Coverage.StaleChunks,
-		NamespaceID:    result.Namespace.ID,
+		EligibleChunks:    result.Coverage.TotalChunks,
+		EmbeddedChunks:    result.Coverage.EmbeddedChunks,
+		MissingChunks:     result.Coverage.MissingChunks,
+		StaleChunks:       result.Coverage.StaleChunks,
+		FailedChunks:      result.Coverage.FailedChunks,
+		NamespaceID:       result.Namespace.ID,
+		ContentGeneration: result.Coverage.ContentGeneration,
+		CoveredGeneration: result.Coverage.CoveredGeneration,
 	}
 	if coverage.EligibleChunks > 0 {
 		coverage.Ratio = float64(coverage.EmbeddedChunks) / float64(coverage.EligibleChunks)
