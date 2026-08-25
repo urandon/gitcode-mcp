@@ -138,6 +138,14 @@ func TestAdminControlErrorMapsBindingConflict(t *testing.T) {
 	}
 }
 
+func TestValidateAdminMaintenanceRequestReturnsFieldSpecificFailure(t *testing.T) {
+	err := validateAdminMaintenanceRequest(adminhttp.MaintenanceControlRequest{RepoID: "owner/repo", SyncMode: "forever"})
+	var typed adminhttp.ControlError
+	if !errors.As(err, &typed) || typed.Code != "invalid_policy" || typed.Field != "sync_mode" || len(typed.Blockers) != 1 || typed.CLIHandoff != "" {
+		t.Fatalf("err=%T %v typed=%+v", err, err, typed)
+	}
+}
+
 func TestAdminMaintenanceSetupMapsBoundedPolicy(t *testing.T) {
 	ctx := context.Background()
 	cachePath := filepath.Join(t.TempDir(), "cache.db")

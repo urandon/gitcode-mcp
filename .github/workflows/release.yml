@@ -55,7 +55,7 @@ jobs:
         run: go test ./...
 
       - name: Run release automation tests
-        run: python3 -m unittest scripts/release/test_generate_notes.py
+        run: python3 -m unittest discover -s scripts/release -p 'test_*.py'
 
       - name: Check diff whitespace
         run: git diff --check
@@ -164,3 +164,12 @@ jobs:
             --idempotency-key "release-$tag" \
             "${asset_args[@]}" \
             --format json
+
+          upload_args=()
+          for asset in dist/*.tar.gz dist/*.zip dist/checksums.txt; do
+            upload_args+=(--asset "$asset")
+          done
+          python3 scripts/release/upload_gitcode_assets.py \
+            --repo "$repo" \
+            --tag "$tag" \
+            "${upload_args[@]}"

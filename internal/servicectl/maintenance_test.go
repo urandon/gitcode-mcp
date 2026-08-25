@@ -3,6 +3,7 @@ package servicectl
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,6 +87,39 @@ func TestMaintenanceRegistryEnrollReplayAndSanitize(t *testing.T) {
 	reloadedList, _ := reloaded.List(ctx)
 	if len(reloadedList.Entries) != 1 || reloadedList.Entries[0].RegistrationID != first.RegistrationID {
 		t.Fatalf("reloaded=%+v", reloadedList)
+	}
+}
+
+func TestMaintenancePolicyChangeClearsInheritedSyncFailureAndIgnoresDeselectedFrontier(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), filepath.Join(dir, "managed-caches.json"))
+	before, err := maintenance.Enroll(ctx, testMaintenanceEnrollRequest(cachePath, "enroll-wiki", MaintenancePolicy{SyncEnabled: true, SyncMode: "head-and-backfill", Issues: true, Wiki: true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedAt := time.Date(2026, 8, 25, 16, 43, 37, 0, time.UTC)
+	maintenance.entries[before.RegistrationID].SyncStage = MaintenanceStageState{Status: JobStatusFailed, LastErrorClass: "sync_failed", LastError: "remote cache maintenance failed", ConsecutiveFailures: 7, RetryAfter: failedAt.Add(time.Hour), UpdatedAt: failedAt}
+	maintenance.entries[before.RegistrationID].Frontiers = []cache.MaintenanceFrontier{{RemoteType: "wiki", Lane: "tail", Status: "degraded", UpdatedAt: failedAt}}
+	after, err := maintenance.Enroll(ctx, testMaintenanceEnrollRequest(cachePath, "enroll-no-wiki", MaintenancePolicy{SyncEnabled: true, SyncMode: "head-and-backfill", Issues: true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.SyncStage.LastErrorClass != "" || !after.SyncStage.RetryAfter.IsZero() {
+		t.Fatalf("inherited sync failure survived policy change: %+v", after.SyncStage)
+	}
+	after.LastErrorClass, after.LastError = maintenanceEntryError(after.Policy, after.SyncStage, after.RAGStage)
+	if state := deriveMaintenanceEntryState(after); state != "ready" {
+		t.Fatalf("deselected wiki frontier degraded active policy: state=%q entry=%+v", state, after)
 	}
 }
 
@@ -283,7 +317,11 @@ func TestCreateCoalescedJobIsAtomic(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			_, cancel := context.WithCancel(context.Background())
-			job, wasCreated := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 0, "same-work", "cache-1", "reg-1", "", cancel)
+			job, wasCreated, err := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 0, "same-work", "cache-1", "reg-1", "", cancel)
+			if err != nil {
+				t.Errorf("create job: %v", err)
+				return
+			}
 			if !wasCreated {
 				cancel()
 			}
@@ -298,6 +336,47 @@ func TestCreateCoalescedJobIsAtomic(t *testing.T) {
 	wg.Wait()
 	if created != 1 || len(ids) != 1 {
 		t.Fatalf("created=%d ids=%v", created, ids)
+	}
+}
+
+func TestCacheWriterAdmissionSerializesIndependentWork(t *testing.T) {
+	jobs := NewJobManager(filepath.Join(t.TempDir(), "jobs.json"))
+	first, created, err := jobs.createCoalescedJob(SyncJobType, "owner/left", "", 0, "sync:cache-1:owner/left:head", "cache-1", "reg-left", "", func() {})
+	if err != nil || !created {
+		t.Fatalf("first=%+v created=%t err=%v", first, created, err)
+	}
+	coalesced, created, err := jobs.createCoalescedJob(SyncJobType, "owner/left", "", 0, "sync:cache-1:owner/left:head", "cache-1", "reg-left", "", func() {})
+	if err != nil || created || coalesced.ID != first.ID {
+		t.Fatalf("coalesced=%+v created=%t err=%v", coalesced, created, err)
+	}
+	_, created, err = jobs.createCoalescedJob(RAGIndexJobType, "owner/right", "profile", 0, "rag:cache-1:owner/right", "cache-1", "reg-right", "ns", func() {})
+	var busy ErrCacheWriterBusy
+	if created || !errors.As(err, &busy) || busy.ActiveJobID != first.ID || busy.DiagnosticCode() != "cache_writer_busy" {
+		t.Fatalf("created=%t err=%T %v busy=%+v", created, err, err, busy)
+	}
+	other, created, err := jobs.createCoalescedJob(RAGIndexJobType, "owner/right", "profile", 0, "rag:cache-2:owner/right", "cache-2", "reg-right", "ns", func() {})
+	if err != nil || !created || other.CacheUUID != "cache-2" {
+		t.Fatalf("other=%+v created=%t err=%v", other, created, err)
+	}
+}
+
+func TestMaintenanceReconcileOrderPrefersOldestWriterIntentPerCache(t *testing.T) {
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	entries := []MaintenanceEntry{
+		{RegistrationID: "reg-newer", CacheUUID: "cache-1"},
+		{RegistrationID: "reg-never", CacheUUID: "cache-1"},
+		{RegistrationID: "reg-older", CacheUUID: "cache-1"},
+	}
+	jobs := []Job{
+		{Type: SyncJobType, RegistrationID: "reg-newer", UpdatedAt: now},
+		{Type: RAGIndexJobType, RegistrationID: "reg-older", UpdatedAt: now.Add(-time.Hour)},
+	}
+	ordered := maintenanceReconcileOrder(entries, jobs)
+	want := []string{"reg-never", "reg-older", "reg-newer"}
+	for i := range want {
+		if ordered[i].RegistrationID != want[i] {
+			t.Fatalf("order=%+v want=%v", ordered, want)
+		}
 	}
 }
 
@@ -386,7 +465,10 @@ func TestMaintenanceReconcileDoesNotOverlapActiveRAGAndSync(t *testing.T) {
 	}
 	_, cancel := context.WithCancel(ctx)
 	defer cancel()
-	active, created := jobs.createCoalescedJob(RAGIndexJobType, entry.RepoID, "fake-rag", 0, "rag-index:"+entry.CacheUUID+":"+entry.RepoID, entry.CacheUUID, entry.RegistrationID, "", cancel)
+	active, created, err := jobs.createCoalescedJob(RAGIndexJobType, entry.RepoID, "fake-rag", 0, "rag-index:"+entry.CacheUUID+":"+entry.RepoID, entry.CacheUUID, entry.RegistrationID, "", cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !created {
 		t.Fatal("active RAG test job was not created")
 	}

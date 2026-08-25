@@ -110,7 +110,7 @@ func TestAdminControlTypedErrorsUnavailableAndPathTargetWins(t *testing.T) {
 		Assets: fstest.MapFS{"index.html": {Data: []byte("index")}},
 		DisableMaintenance: func(_ context.Context, req RegistrationControlRequest) (any, error) {
 			registration = req.RegistrationID
-			return nil, ControlError{Status: http.StatusConflict, Code: "stale_plan", Message: "stale", Remediation: "replan"}
+			return nil, ControlError{Status: http.StatusConflict, Code: "stale_plan", Message: "stale", Remediation: "replan", Field: "plan_id", Blockers: []string{"state changed"}, CLIHandoff: "gitcode-mcp service maintenance --format json"}
 		},
 	})
 	cookie := authorizeObservationController(c, time.Now().Add(time.Hour))
@@ -128,7 +128,7 @@ func TestAdminControlTypedErrorsUnavailableAndPathTargetWins(t *testing.T) {
 		t.Fatalf("body target status=%d body=%s", got.Code, got.Body.String())
 	}
 	got := call("/api/admin/v1/maintenance/reg-path/disable", `{"idempotency_key":"key"}`)
-	if got.Code != http.StatusConflict || !strings.Contains(got.Body.String(), `"code":"stale_plan"`) || registration != "reg-path" {
+	if got.Code != http.StatusConflict || !strings.Contains(got.Body.String(), `"code":"stale_plan"`) || !strings.Contains(got.Body.String(), `"field":"plan_id"`) || !strings.Contains(got.Body.String(), `"blockers":["state changed"]`) || !strings.Contains(got.Body.String(), `"cli_handoff":"gitcode-mcp service maintenance --format json"`) || registration != "reg-path" {
 		t.Fatalf("typed status=%d registration=%q body=%s", got.Code, registration, got.Body.String())
 	}
 	if got := call("/api/admin/v1/maintenance/reg-path/reconcile", `{"idempotency_key":"key-2"}`); got.Code != http.StatusNotImplemented || !strings.Contains(got.Body.String(), `"code":"capability_unavailable"`) {

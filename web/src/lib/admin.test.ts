@@ -15,5 +15,6 @@ describe('admin presentation helpers', () => {
 
   it('builds only fixed public-safe CLI handoffs', () => {
     expect(cliHandoff({ id: 'd', severity: 'warning', entity_type: 'cache', entity_id: 'cache-a', failure_class: 'cache_busy', message: 'busy', retryable: true, current: true })).toBe('gitcode-mcp service doctor');
+    expect(cliHandoff({ id: 'm', severity: 'warning', entity_type: 'maintenance', entity_id: 'reg-a', failure_class: 'sync_failed', message: 'failed', retryable: true, current: true })).toBe('gitcode-mcp service maintenance --format json');
   });
 });

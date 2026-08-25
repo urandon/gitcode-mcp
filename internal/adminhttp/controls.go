@@ -78,6 +78,9 @@ type ControlError struct {
 	Code        string
 	Message     string
 	Remediation string
+	Field       string
+	Blockers    []string
+	CLIHandoff  string
 	Status      int
 }
 
@@ -158,13 +161,29 @@ func applyControl[T any](c *Controller, w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		var typed ControlError
 		if errors.As(err, &typed) {
-			writeAPIError(w, typed.Status, typed.Code, typed.Message, typed.Remediation)
+			writeControlError(w, typed)
 			return
 		}
 		writeAPIError(w, http.StatusInternalServerError, "control_failed", "The requested control could not be completed.", "Refresh current state and render a new plan.")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"api_version": observationAPIVersion, "result": result})
+}
+
+func writeControlError(w http.ResponseWriter, failure ControlError) {
+	body := map[string]any{
+		"code": failure.Code, "message": failure.Message, "remediation": failure.Remediation,
+	}
+	if failure.Field != "" {
+		body["field"] = failure.Field
+	}
+	if len(failure.Blockers) > 0 {
+		body["blockers"] = failure.Blockers
+	}
+	if failure.CLIHandoff != "" {
+		body["cli_handoff"] = failure.CLIHandoff
+	}
+	writeJSON(w, failure.Status, map[string]any{"error": body})
 }
 
 func controlIdempotencyKey(value any) string {

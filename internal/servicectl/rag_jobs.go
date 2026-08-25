@@ -35,7 +35,11 @@ func (m *JobManager) StartRAGIndex(ctx context.Context, manager Manager, req Sta
 	workKey := ragIndexWorkKey(req)
 	ctx, cancel := context.WithCancel(ctx)
 	profile := strings.TrimSpace(req.Profile)
-	job, created := m.createCoalescedJob(RAGIndexJobType, req.RepoID, profile, 0, workKey, req.CacheUUID, req.RegistrationID, req.NamespaceID, cancel)
+	job, created, err := m.createCoalescedJob(RAGIndexJobType, req.RepoID, profile, 0, workKey, req.CacheUUID, req.RegistrationID, req.NamespaceID, cancel)
+	if err != nil {
+		cancel()
+		return Job{}, err
+	}
 	if !created {
 		cancel()
 		return job, nil

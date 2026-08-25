@@ -430,9 +430,20 @@ func adminJobObservation(job Job) adminhttp.JobObservation {
 		}
 	}
 	if job.Error != "" {
-		view.FailureMessage = "The job ended with a typed failure; use diagnostics for remediation."
+		view.InspectCommand = "gitcode-mcp service job " + job.ID + " --format json"
+		if job.RegistrationID != "" {
+			view.RemediationCommand = "gitcode-mcp service maintenance --format json"
+		} else {
+			view.RemediationCommand = "gitcode-mcp service doctor"
+		}
 	}
 	for _, event := range job.Progress {
+		if event.Collection != "" && event.Collection != SyncJobType && event.RecordsFailed > 0 {
+			view.FailureCollection = event.Collection
+		}
+		if event.RetryAfter != "" {
+			view.RetryAfter = event.RetryAfter
+		}
 		view.Progress = append(view.Progress, adminhttp.ProgressObservation{
 			Type: event.Type, Phase: event.Phase, Collection: event.Collection, Page: event.Page,
 			RecordsListed: event.RecordsListed, RecordsFetched: event.RecordsFetched,
@@ -441,6 +452,13 @@ func adminJobObservation(job Job) adminhttp.JobObservation {
 			RecordsFailed: event.RecordsFailed, RetryAfter: event.RetryAfter, Attempt: event.Attempt,
 			RateLimitState: event.RateLimitState,
 		})
+	}
+	if job.Error != "" {
+		if view.FailureCollection != "" {
+			view.FailureMessage = strings.ReplaceAll(view.FailureCollection, "_", " ") + " collection failed; inspect the retained timeline before retrying."
+		} else {
+			view.FailureMessage = "The job ended with " + firstNonEmpty(job.ErrorClass, "a typed failure") + "; inspect the retained timeline before retrying."
+		}
 	}
 	return view
 }

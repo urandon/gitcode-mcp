@@ -93,10 +93,10 @@ func TestAdminObservationUsesOpaqueCacheReferences(t *testing.T) {
 }
 
 func TestAdminJobObservationDropsRawProgressMessagesAndEndpoints(t *testing.T) {
-	job := Job{ID: "job-000001", Type: "sync", Status: JobStatusFailed, Error: "/private/cache.db failed", ErrorClass: "cache_busy"}
-	job.Progress = append(job.Progress, service.ProgressEvent{Type: "page", Endpoint: "/private/api", Message: "raw log"})
+	job := Job{ID: "job-000001", Type: "sync", RegistrationID: "reg-1", Status: JobStatusFailed, Error: "/private/cache.db failed", ErrorClass: "cache_busy"}
+	job.Progress = append(job.Progress, service.ProgressEvent{Type: "page", Endpoint: "/private/api", Message: "raw log"}, service.ProgressEvent{Type: "failed", Collection: "wiki", RecordsFailed: 1, RetryAfter: "30s"})
 	view := adminJobObservation(job)
-	if strings.Contains(view.FailureMessage, "/private/") || len(view.Progress) != 1 {
+	if strings.Contains(view.FailureMessage, "/private/") || len(view.Progress) != 2 || view.FailureCollection != "wiki" || view.RetryAfter != "30s" || view.InspectCommand != "gitcode-mcp service job job-000001 --format json" || view.RemediationCommand != "gitcode-mcp service maintenance --format json" {
 		t.Fatalf("sanitized job=%+v", view)
 	}
 }

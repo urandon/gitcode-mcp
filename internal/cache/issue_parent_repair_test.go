@@ -49,8 +49,8 @@ func TestRepairIssueProviderPlaceholdersMergesCommentsAndQueue(t *testing.T) {
 	}
 
 	repaired, err := store.RepairIssueProviderPlaceholders(ctx, "repair")
-	if err != nil || repaired != 1 {
-		t.Fatalf("repaired=%d err=%v", repaired, err)
+	if err != nil || len(repaired) != 1 || repaired[0] != canonical.ID {
+		t.Fatalf("repaired=%v err=%v", repaired, err)
 	}
 	record, err := store.GetRecord(ctx, "repair", canonical.ID)
 	if err != nil || len(record.Comments) != 1 || record.Comments[0].CommentID != "comment-1" || record.Comments[0].Body != "new canonical body" {
@@ -79,8 +79,8 @@ func TestRepairIssueProviderPlaceholdersMergesCommentsAndQueue(t *testing.T) {
 		t.Fatalf("identity=%#v err=%v", identity, err)
 	}
 	repaired, err = store.RepairIssueProviderPlaceholders(ctx, "repair")
-	if err != nil || repaired != 0 {
-		t.Fatalf("second repaired=%d err=%v", repaired, err)
+	if err != nil || len(repaired) != 0 {
+		t.Fatalf("second repaired=%v err=%v", repaired, err)
 	}
 }
 
@@ -104,8 +104,8 @@ func TestRepairIssueProviderPlaceholdersPreservesIdentifiedLargeIssue(t *testing
 		t.Fatal(err)
 	}
 	repaired, err := store.RepairIssueProviderPlaceholders(ctx, "repair")
-	if err != nil || repaired != 0 {
-		t.Fatalf("repaired=%d err=%v", repaired, err)
+	if err != nil || len(repaired) != 0 {
+		t.Fatalf("repaired=%v err=%v", repaired, err)
 	}
 	if _, err := store.GetRecord(ctx, "repair", large.ID); err != nil {
 		t.Fatalf("identified large issue removed: %v", err)
@@ -135,8 +135,8 @@ func TestRepairIssueProviderPlaceholdersMergesExactHistoricalDuplicate(t *testin
 		t.Fatal(err)
 	}
 	repaired, err := store.RepairIssueProviderPlaceholders(ctx, "repair")
-	if err != nil || repaired != 1 {
-		t.Fatalf("repaired=%d err=%v", repaired, err)
+	if err != nil || len(repaired) != 1 || repaired[0] != canonical.ID {
+		t.Fatalf("repaired=%v err=%v", repaired, err)
 	}
 	if _, err := store.GetRecord(ctx, "repair", duplicate.ID); err == nil {
 		t.Fatal("historical duplicate still exists")

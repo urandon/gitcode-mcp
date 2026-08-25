@@ -71,6 +71,10 @@ export type Job = {
   completed?: number;
   failure_class?: string;
   failure_message?: string;
+  failure_collection?: string;
+  retry_after?: string;
+  inspect_command?: string;
+  remediation_command?: string;
   work_ref?: string;
   cancellable: boolean;
   retryable: boolean;
@@ -220,6 +224,15 @@ export type ControlReceipt = {
   next_action?: string;
   audit_receipt?: string;
   status?: string;
+};
+
+export type ControlFailure = {
+  code: string;
+  message: string;
+  remediation?: string;
+  field?: string;
+  blockers?: string[];
+  cli_handoff?: string;
 };
 
 export type SearchMatch = {
@@ -394,7 +407,7 @@ export function isSnapshotStale(generatedAt: string, now = Date.now()): boolean 
 }
 
 export function cliHandoff(diagnostic: Diagnostic): string {
-  if (diagnostic.entity_type === 'cache') return `gitcode-mcp service doctor`;
-  if (diagnostic.entity_type === 'maintenance') return `gitcode-mcp maintenance status --format json`;
-  return `gitcode-mcp doctor --format json`;
+	if (diagnostic.entity_type === 'cache') return `gitcode-mcp service doctor`;
+	if (diagnostic.entity_type === 'maintenance') return `gitcode-mcp service maintenance --format json`;
+	return `gitcode-mcp doctor --format json`;
 }

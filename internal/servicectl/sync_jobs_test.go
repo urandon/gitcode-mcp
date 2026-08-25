@@ -74,3 +74,14 @@ func TestRunSyncSelectionsStopsAfterWriterAdmissionContention(t *testing.T) {
 		t.Fatalf("error = %T %[1]v, must preserve direct contention", err)
 	}
 }
+
+func TestFailedSyncCollectionProgressNamesEachFailedCollection(t *testing.T) {
+	events := failedSyncCollectionProgress([]syncCollectionResult{
+		{RemoteType: "wiki", Err: errors.New("empty repository")},
+		{RemoteType: "pr_comment", Result: &service.SyncResourcesResult{FailureCount: 2}},
+		{RemoteType: "issue", Result: &service.SyncResourcesResult{SuccessCount: 1}},
+	})
+	if len(events) != 2 || events[0].Collection != "wiki" || events[0].RecordsFailed != 1 || events[1].Collection != "pr_comment" || events[1].RecordsFailed != 2 {
+		t.Fatalf("events=%+v", events)
+	}
+}

@@ -3,7 +3,7 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import { Activity, AlertTriangle, ArrowLeft, Blocks, CheckCircle2, ChevronRight, CircleGauge, Clipboard, Clock3, Database, FileCheck2, FolderCog, Gauge, GitFork, HeartPulse, History, Layers3, Monitor, Moon, Power, RefreshCw, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Sun, Wrench, XCircle, Zap } from '@lucide/svelte';
   import { applyTheme, normalizeTheme, themeStorageKey, type Theme } from '$lib/theme';
-  import { adminApiVersion, cliHandoff, emptySnapshot, humanize, isSnapshotStale, laneSummary, type AdminView, type BindingIntent, type BindingPlan, type CacheObservation, type ControlReceipt, type Diagnostic, type Job, type JobAction, type JobActionReceipt, type Maintenance, type MaintenanceIntent, type MaintenancePlan, type ObservationSnapshot, type ProviderSmoke, type RAGRepairPlan, type Repository, type RepositoryTab, type SearchComparison } from '$lib/admin';
+  import { adminApiVersion, cliHandoff, emptySnapshot, humanize, isSnapshotStale, laneSummary, type AdminView, type BindingIntent, type BindingPlan, type CacheObservation, type ControlFailure, type ControlReceipt, type Diagnostic, type Job, type JobAction, type JobActionReceipt, type Maintenance, type MaintenanceIntent, type MaintenancePlan, type ObservationSnapshot, type ProviderSmoke, type RAGRepairPlan, type Repository, type RepositoryTab, type SearchComparison } from '$lib/admin';
   import CoverageLaneCard from '$lib/CoverageLaneCard.svelte';
   import StatusChip from '$lib/StatusChip.svelte';
 
@@ -47,6 +47,7 @@
   let selectedCache: CacheObservation | undefined;
   let selectedRepo: Repository | undefined;
   let activeJobs = snapshot.jobs.filter((job) => activeJobStates.has(job.status));
+  let failedJobs = snapshot.jobs.filter((job) => job.status === 'failed');
   let scopedJobs = snapshot.jobs;
   let visibleDiagnostics = snapshot.diagnostics;
   let filteredJobs = snapshot.jobs;
@@ -57,6 +58,7 @@
   let maintenancePlan: MaintenancePlan | undefined;
   let maintenanceReceipt: ControlReceipt | undefined;
   let maintenanceError = '';
+  let maintenanceFailure: ControlFailure | undefined;
   let bindingIntent: BindingIntent = { cache_ref: '', repo_id: '', scopes: ['issues'], aliases: [] };
   let bindingPlan: BindingPlan | undefined;
   let bindingReceipt: ControlReceipt | undefined;
@@ -92,6 +94,7 @@
   $: selectedCache = snapshot.caches.find((cache) => cache.cache_ref === selectedCacheRef);
   $: selectedRepo = selectedCache?.repositories.find((repo) => repo.repo_id === selectedRepoID);
   $: activeJobs = snapshot.jobs.filter((job) => activeJobStates.has(job.status));
+  $: failedJobs = snapshot.jobs.filter((job) => job.status === 'failed');
   $: scopedJobs = snapshot.jobs.filter((job) => job.cache_ref === selectedCache?.cache_ref && job.repo_id === selectedRepo?.repo_id);
   $: visibleDiagnostics = snapshot.diagnostics.filter((item) => diagnosticsFilter === 'all' || (diagnosticsFilter === 'current' ? item.current : !item.current));
   $: filteredJobs = snapshot.jobs.filter((job) => (!jobStateFilter || job.status === jobStateFilter) && (!jobTypeFilter || job.type === jobTypeFilter) && (!jobCacheFilter || job.cache_ref === jobCacheFilter) && (!jobRepoFilter || job.repo_id === jobRepoFilter) && (!jobFailureFilter || job.failure_class === jobFailureFilter));
@@ -257,7 +260,7 @@
       head_interval_seconds: registration?.policy.head_interval_seconds || 0, rag_interval_seconds: registration?.policy.rag_interval_seconds || 0,
       head_max_pages: registration?.policy.head_max_pages || 0, tail_slice_pages: registration?.policy.tail_slice_pages || 0, per_page: registration?.policy.per_page || 0
     };
-    maintenancePlan = undefined; maintenanceReceipt = undefined; maintenanceError = '';
+    maintenancePlan = undefined; maintenanceReceipt = undefined; maintenanceError = ''; maintenanceFailure = undefined;
   }
 
   function toggleCollection(name: string, checked: boolean): void {
@@ -268,7 +271,7 @@
   }
 
   function invalidateMaintenancePlan(): void {
-    maintenancePlan = undefined; maintenanceReceipt = undefined; maintenanceError = '';
+    maintenancePlan = undefined; maintenanceReceipt = undefined; maintenanceError = ''; maintenanceFailure = undefined;
   }
 
   function invalidateBindingPlan(): void {
@@ -284,15 +287,23 @@
   async function controlPost<T>(path: string, body: unknown): Promise<T> {
     const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken }, body: JSON.stringify(body) });
     const payload = await response.json();
-    if (!response.ok) throw new Error([payload.error?.message, payload.error?.remediation].filter(Boolean).join(' ') || 'The control request failed.');
+    if (!response.ok) {
+      const failure = (payload.error || { code: 'control_failed', message: 'The control request failed.' }) as ControlFailure;
+      const message = [failure.message || 'The control request failed.', failure.remediation].filter(Boolean).join(' ');
+      throw Object.assign(new Error(message), { failure });
+    }
     return payload.result as T;
   }
 
   async function renderMaintenancePlan(): Promise<void> {
     if (!csrfToken || !maintenanceControlsEnabled) return;
-    controlRunning = true; maintenanceError = ''; maintenanceReceipt = undefined;
+    controlRunning = true; maintenanceError = ''; maintenanceFailure = undefined; maintenanceReceipt = undefined;
     try { maintenancePlan = await controlPost<MaintenancePlan>('/api/admin/v1/maintenance/plan', maintenanceIntent); }
-    catch (value) { maintenancePlan = undefined; maintenanceError = value instanceof Error ? value.message : 'Maintenance planning failed.'; }
+    catch (value) {
+      maintenancePlan = undefined;
+      maintenanceFailure = value instanceof Error && 'failure' in value ? (value as Error & { failure: ControlFailure }).failure : undefined;
+      maintenanceError = maintenanceFailure?.message || (value instanceof Error ? value.message : 'Maintenance planning failed.');
+    }
     finally { controlRunning = false; }
   }
 
@@ -345,7 +356,7 @@
 
   async function confirmControl(kind: typeof pendingControl, trigger: HTMLButtonElement): Promise<void> {
     controlTriggerButton = trigger; pendingControl = kind; pendingControlKey = `admin-${kind}-${crypto.randomUUID()}`;
-    maintenanceError = ''; bindingError = ''; await tick(); controlDialog?.showModal(); controlConfirmButton?.focus();
+    maintenanceError = ''; maintenanceFailure = undefined; bindingError = ''; await tick(); controlDialog?.showModal(); controlConfirmButton?.focus();
   }
 
   async function cancelControlConfirmation(): Promise<void> {
@@ -368,7 +379,10 @@
       controlDialog?.close(); pendingControl = ''; pendingControlKey = ''; await refresh(); await tick(); controlTriggerButton?.focus();
     } catch (value) {
       const message = value instanceof Error ? value.message : 'The confirmed control failed.';
-      if (pendingControl === 'binding_apply') bindingError = message; else if (pendingControl === 'rag_repair_apply') searchError = message; else maintenanceError = message;
+      if (pendingControl !== 'binding_apply' && pendingControl !== 'rag_repair_apply') {
+        maintenanceFailure = value instanceof Error && 'failure' in value ? (value as Error & { failure: ControlFailure }).failure : undefined;
+      }
+      if (pendingControl === 'binding_apply') bindingError = message; else if (pendingControl === 'rag_repair_apply') searchError = message; else maintenanceError = maintenanceFailure?.message || message;
     } finally { controlRunning = false; }
   }
   function selectTheme(value: Theme): void { theme = value; applyTheme(value); }
@@ -516,7 +530,7 @@
                 {#if actionReceipt}<div class="action-result" role="status"><CheckCircle2 size={17} /><div><strong>{humanize(actionReceipt.outcome)}</strong><span>Receipt {actionReceipt.receipt_id} · result {actionReceipt.result_job_id || actionReceipt.target_job_id} · {humanize(actionReceipt.job_status)}{actionReceipt.replayed ? ' · replayed safely' : ''}</span></div></div>{/if}
               </section>
 
-              <section class="repository-section" aria-labelledby="job-context-title"><div class="section-heading"><div><p class="section-kicker">IDENTITY & RETENTION</p><h2 id="job-context-title">Execution context</h2></div></div><dl class="job-context"><div><dt>Created</dt><dd>{new Date(selectedJob.created_at).toLocaleString()}</dd></div><div><dt>Started</dt><dd>{selectedJob.started_at ? new Date(selectedJob.started_at).toLocaleString() : 'Not started'}</dd></div><div><dt>Finished</dt><dd>{selectedJob.finished_at ? new Date(selectedJob.finished_at).toLocaleString() : 'Not terminal'}</dd></div><div><dt>Registration</dt><dd>{selectedJob.registration_id || 'Manual work'}</dd></div><div><dt>Profile</dt><dd>{selectedJob.profile_id || 'Not applicable'}</dd></div><div><dt>Progress retention</dt><dd>{selectedJob.progress_retained || 0}/{selectedJob.progress_limit || '—'} events</dd></div></dl>{#if selectedJob.failure_class}<div class="action-result error"><AlertTriangle size={17} /><div><strong>{humanize(selectedJob.failure_class)}</strong><span>{selectedJob.failure_message || 'Use Diagnostics for typed remediation.'}</span></div></div>{/if}</section>
+              <section class="repository-section" aria-labelledby="job-context-title"><div class="section-heading"><div><p class="section-kicker">IDENTITY & RETENTION</p><h2 id="job-context-title">Execution context</h2></div></div><dl class="job-context"><div><dt>Created</dt><dd>{new Date(selectedJob.created_at).toLocaleString()}</dd></div><div><dt>Started</dt><dd>{selectedJob.started_at ? new Date(selectedJob.started_at).toLocaleString() : 'Not started'}</dd></div><div><dt>Finished</dt><dd>{selectedJob.finished_at ? new Date(selectedJob.finished_at).toLocaleString() : 'Not terminal'}</dd></div><div><dt>Registration</dt><dd>{selectedJob.registration_id || 'Manual work'}</dd></div><div><dt>Profile</dt><dd>{selectedJob.profile_id || 'Not applicable'}</dd></div><div><dt>Progress retention</dt><dd>{selectedJob.progress_retained || 0}/{selectedJob.progress_limit || '—'} events</dd></div></dl>{#if selectedJob.failure_class}<div class="action-result error"><AlertTriangle size={17} /><div><strong>{humanize(selectedJob.failure_class)}{selectedJob.failure_collection ? ` · ${humanize(selectedJob.failure_collection)}` : ''}</strong><span>{selectedJob.failure_message || 'Use Diagnostics for typed remediation.'}{selectedJob.retry_after ? ` Retry after ${selectedJob.retry_after}.` : ''}</span>{#if selectedJob.inspect_command}<code>{selectedJob.inspect_command}</code>{/if}{#if selectedJob.remediation_command}<code>{selectedJob.remediation_command}</code>{/if}</div></div>{/if}</section>
 
               <section class="repository-section" aria-labelledby="job-timeline-title"><div class="section-heading"><div><p class="section-kicker">STRUCTURED, BOUNDED</p><h2 id="job-timeline-title">Progress timeline</h2></div><span class="count-badge">{selectedJob.progress?.length || 0}</span></div>{#if !selectedJob.progress?.length}<div class="empty-state"><History size={23} /><h3>No retained progress events</h3><p>The current state and timestamps remain authoritative.</p></div>{:else}<ol class="job-timeline">{#each selectedJob.progress as event, index}<li><span class="timeline-mark"></span><div><strong>{humanize(event.phase || event.type || `Event ${index + 1}`)}</strong><span>{[event.collection && humanize(event.collection), event.page ? `page ${event.page}` : '', event.records_fetched ? `${event.records_fetched} fetched` : '', event.records_skipped ? `${event.records_skipped} skipped` : '', event.records_failed ? `${event.records_failed} failed` : ''].filter(Boolean).join(' · ') || 'State transition'}</span>{#if event.rate_limit_state || event.retry_after}<small>{event.rate_limit_state ? `Rate limit: ${humanize(event.rate_limit_state)}` : ''}{event.retry_after ? ` · retry after ${event.retry_after}` : ''}</small>{/if}</div></li>{/each}</ol>{/if}</section>
             {:else}
@@ -524,7 +538,7 @@
             {/if}
           {:else}
             <div class="intro section-intro"><p class="eyebrow">EXECUTION</p><h1>Jobs</h1><p>Daemon-owned work, bounded history, and deliberate supervision with durable receipts.</p></div>
-            <div class="metric-strip"><div><span>Active</span><strong>{activeJobs.length}</strong></div><div><span>Terminal</span><strong>{snapshot.jobs.length - activeJobs.length}</strong></div><div><span>Retained</span><strong>{snapshot.jobs.length}</strong></div></div>
+            <div class="metric-strip jobs-metrics"><div><span>Active</span><strong>{activeJobs.length}</strong></div><div><span>Failed</span><strong>{failedJobs.length}</strong><button class="text-action" onclick={() => setJobFilter('state', 'failed')}>Show failed</button></div><div><span>Terminal</span><strong>{snapshot.jobs.length - activeJobs.length}</strong></div><div><span>Retained</span><strong>{snapshot.jobs.length}</strong></div></div>
             <div class="job-filter-bar" aria-label="Job filters">
               <label><span>State</span><select value={jobStateFilter} onchange={(event) => setJobFilter('state', event.currentTarget.value)}><option value="">All states</option>{#each [...new Set(snapshot.jobs.map((job) => job.status))].sort() as value}<option value={value}>{humanize(value)}</option>{/each}</select></label>
               <label><span>Type</span><select value={jobTypeFilter} onchange={(event) => setJobFilter('type', event.currentTarget.value)}><option value="">All types</option>{#each [...new Set(snapshot.jobs.map((job) => job.type))].sort() as value}<option value={value}>{humanize(value)}</option>{/each}</select></label>
@@ -561,7 +575,7 @@
               </form>
             {/if}
 
-            {#if maintenanceError}<div class="action-result error" role="alert"><AlertTriangle size={17} /><div><strong>Maintenance control failed</strong><span>{maintenanceError}</span></div></div>{/if}
+            {#if maintenanceError}<div class="action-result error" role="alert"><AlertTriangle size={17} /><div><strong>Maintenance control failed{maintenanceFailure?.field ? ` · ${humanize(maintenanceFailure.field)}` : ''}</strong><span>{maintenanceError}</span>{#if maintenanceFailure?.remediation}<span>{maintenanceFailure.remediation}</span>{/if}{#if maintenanceFailure?.blockers?.length}<ul class="blocker-list">{#each maintenanceFailure.blockers as blocker}<li>{blocker}</li>{/each}</ul>{/if}{#if maintenanceFailure?.cli_handoff}<code>{maintenanceFailure.cli_handoff}</code>{/if}</div></div>{/if}
             {#if maintenancePlan}<div class="plan-panel"><div class="plan-summary"><div><p class="section-kicker">REVIEWED INTENT</p><h3>{maintenancePlan.repo_id}</h3><code>{maintenancePlan.plan_id}</code></div><StatusChip value={maintenancePlan.status} /></div>{#if maintenancePlan.blockers?.length}<ul class="blocker-list">{#each maintenancePlan.blockers as blocker}<li><AlertTriangle size={15} />{blocker}</li>{/each}</ul>{/if}<div class="effect-ledger">{#each maintenancePlan.actions as effect}<article><span class="effect-icon"><Zap size={15} /></span><div><strong>{effect.summary}</strong><small>{humanize(effect.class)}{effect.data_boundary ? ` · ${humanize(effect.data_boundary)}` : ''}</small>{#if effect.handoff}<code>{effect.handoff}</code>{/if}</div><StatusChip value={effect.status} /></article>{/each}</div><div class="plan-footer"><div><strong>Next safe action</strong><span>{maintenancePlan.next_action || 'Confirm this exact plan.'}</span></div><button class="primary-action" disabled={maintenancePlan.status === 'blocked' || controlRunning} onclick={(event) => void confirmControl('maintenance_apply', event.currentTarget)}><Power size={16} />Confirm & apply</button></div></div>{/if}
             {#if maintenanceReceipt}<div class="action-result" role="status"><CheckCircle2 size={17} /><div><strong>{humanize(maintenanceReceipt.outcome || maintenanceReceipt.status || 'applied')}</strong><span>{maintenanceReceipt.receipt_id ? `Receipt ${maintenanceReceipt.receipt_id}` : maintenanceReceipt.audit_receipt ? `Audit ${maintenanceReceipt.audit_receipt}` : 'The confirmed plan was accepted.'}{maintenanceReceipt.replayed ? ' · replayed safely' : ''}{maintenanceReceipt.jobs_started?.length ? ` · jobs ${maintenanceReceipt.jobs_started.join(', ')}` : ''}</span></div></div>{/if}
             {#if selectedMaintenance}<div class="registration-actions"><div><strong>Registration {selectedMaintenance.registration_id}</strong><span>Generation {selectedMaintenance.generation} · {selectedMaintenance.enabled ? 'enabled' : 'disabled'} · {registrationControlsEnabled ? 'reconcile is coalesced with active work.' : 'registration controls are unavailable in this daemon.'}</span></div><button disabled={!csrfToken || !registrationControlsEnabled || controlRunning} onclick={(event) => void confirmControl('reconcile', event.currentTarget)}><RotateCcw size={15} />Reconcile now</button><button class="danger-action" disabled={!csrfToken || !registrationControlsEnabled || !selectedMaintenance.enabled || controlRunning} onclick={(event) => void confirmControl('disable', event.currentTarget)}><Power size={15} />Disable</button></div>{/if}

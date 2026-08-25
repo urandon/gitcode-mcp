@@ -26,7 +26,7 @@ const snapshot = {
   }],
   jobs: [
     { id: 'job-000001', type: 'rag-index', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'running', created_at: new Date(Date.now() - 120000).toISOString(), started_at: new Date(Date.now() - 110000).toISOString(), updated_at: new Date().toISOString(), steps: 80, completed: 40, work_ref: 'work-active', cancellable: true, retryable: false, progress_retained: 2, progress_limit: 256, throughput_per_second: 0.36, eta_seconds: 111, progress: [{ type: 'started', phase: 'running', collection: 'rag-index' }, { type: 'records', phase: 'running', collection: 'rag-index', records_fetched: 40, rate_limit_state: 'ready' }] },
-    { id: 'job-000002', type: 'sync', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'failed', created_at: new Date(Date.now() - 240000).toISOString(), updated_at: new Date(Date.now() - 180000).toISOString(), finished_at: new Date(Date.now() - 180000).toISOString(), failure_class: 'provider_unavailable', failure_message: 'The provider was unavailable.', work_ref: 'work-terminal', cancellable: false, retryable: true, progress_retained: 1, progress_limit: 256, progress: [{ type: 'failed', phase: 'failed', collection: 'issues', records_failed: 1, retry_after: '30s', attempt: 2, rate_limit_state: 'waiting' }] },
+    { id: 'job-000002', type: 'sync', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'failed', created_at: new Date(Date.now() - 240000).toISOString(), updated_at: new Date(Date.now() - 180000).toISOString(), finished_at: new Date(Date.now() - 180000).toISOString(), failure_class: 'provider_unavailable', failure_collection: 'issues', failure_message: 'The provider was unavailable while syncing issues.', retry_after: '30s', inspect_command: 'gitcode-mcp service job job-000002 --format json', remediation_command: 'gitcode-mcp service maintenance --format json', work_ref: 'work-terminal', cancellable: false, retryable: true, progress_retained: 1, progress_limit: 256, progress: [{ type: 'failed', phase: 'failed', collection: 'issues', records_failed: 1, retry_after: '30s', attempt: 2, rate_limit_state: 'waiting' }] },
     { id: 'job-000003', type: 'sync', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'interrupted', created_at: new Date(Date.now() - 360000).toISOString(), updated_at: new Date(Date.now() - 300000).toISOString(), finished_at: new Date(Date.now() - 300000).toISOString(), work_ref: 'work-interrupted', cancellable: false, retryable: true, progress_retained: 1, progress_limit: 256, progress: [{ type: 'interrupted', phase: 'interrupted', collection: 'sync' }] }
   ],
   maintenance: [{ registration_id: 'reg-1', cache_ref: 'cache-111111112222', repo_id: 'example/repo', enabled: true, state: 'retry_scheduled', generation: 4, policy: { sync_enabled: true, sync_mode: 'head-and-backfill', rag_enabled: true, collections: ['issues', 'wiki'], head_max_pages: 3, tail_slice_pages: 10, profile: 'easy-rag' } }],
@@ -184,12 +184,46 @@ test('retry coalescing, filters, interruption, and structured wait state are obs
   await page.getByRole('button', { name: 'Retry job' }).click();
   await expect(page.getByRole('dialog')).toContainText('Equivalent active work will be coalesced');
   await page.getByRole('button', { name: 'Confirm retry' }).click();
-  await expect(page.getByRole('alert')).toContainText('Receipt delivery was interrupted. Retry this confirmation.');
+  await expect(page.getByRole('alert')).toContainText('Receipt delivery was interrupted.');
+  await expect(page.getByRole('alert')).toContainText('Retry this confirmation.');
   await page.getByRole('button', { name: 'Confirm retry' }).click();
   await expect(page.getByRole('status')).toContainText('Coalesced');
   await expect(page.getByRole('status')).toContainText('job-000001');
   expect(retryKeys).toHaveLength(2);
   expect(retryKeys[1]).toBe(retryKeys[0]);
+});
+
+test('failed jobs are discoverable and expose exact inspect and remediation commands', async ({ page }) => {
+  await mockAdmin(page);
+  await page.goto('/?view=Jobs');
+  await expect(page.getByText('Failed').first()).toBeVisible();
+  await expect(page.getByText('1').first()).toBeVisible();
+  await page.getByRole('button', { name: 'Show failed' }).click();
+  await expect(page).toHaveURL(/job_state=failed/);
+  await expect(page.getByText('job-000002')).toBeVisible();
+  await page.getByText('job-000002').click();
+  await expect(page.getByText('Provider Unavailable · Issues')).toBeVisible();
+  await expect(page.getByText('gitcode-mcp service job job-000002 --format json')).toBeVisible();
+  await expect(page.getByText('gitcode-mcp service maintenance --format json')).toBeVisible();
+});
+
+test('maintenance validation identifies the field and omits an unavailable CLI handoff', async ({ page }) => {
+  await mockAdmin(page);
+  await page.route('**/api/admin/v1/maintenance/plan', async (route) => {
+    await route.fulfill({ status: 422, contentType: 'application/json', body: JSON.stringify({ error: {
+      code: 'invalid_policy',
+      field: 'head_interval_seconds',
+      message: 'head interval must be at least 60 seconds',
+      remediation: 'Increase the head interval and render the plan again.',
+      blockers: ['head_interval_seconds must be greater than or equal to 60']
+    } }) });
+  });
+  await page.goto('/?view=Maintenance');
+  await page.getByRole('button', { name: 'Render plan' }).click();
+  const alert = page.getByRole('alert');
+  await expect(alert).toContainText('Maintenance control failed · Head Interval Seconds');
+  await expect(alert).toContainText('head_interval_seconds must be greater than or equal to 60');
+  await expect(alert.locator('code')).toHaveCount(0);
 });
 
 test('maintenance plan/apply renders every effect and safely retries one confirmed intent', async ({ page }) => {
@@ -247,7 +281,8 @@ test('maintenance plan/apply renders every effect and safely retries one confirm
   await page.getByRole('button', { name: 'Confirm & apply' }).first().click();
   await expect(page.getByRole('dialog')).toContainText('Apply this maintenance plan?');
   await page.getByRole('button', { name: 'Confirm action' }).click();
-  await expect(page.getByRole('alert')).toContainText('Receipt delivery was interrupted. Retry this confirmation.');
+  await expect(page.getByRole('alert')).toContainText('Receipt delivery was interrupted.');
+  await expect(page.getByRole('alert')).toContainText('Retry this confirmation.');
   await page.getByRole('button', { name: 'Confirm action' }).click();
   await expect(page.getByRole('status')).toContainText('audit-1');
   expect(applyKeys).toHaveLength(2);

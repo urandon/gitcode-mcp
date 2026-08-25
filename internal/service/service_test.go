@@ -2291,6 +2291,53 @@ func TestProjectPendingIssueCommentCacheMakesRepairedCommentsSearchable(t *testi
 	}
 }
 
+func TestProjectRepairedIssueCommentCacheLeavesUnrelatedQueueUntouched(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "repair", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	for _, item := range []struct {
+		id     string
+		number int
+		status string
+	}{
+		{id: "ISSUE-88", number: 88, status: "pending"},
+		{id: "ISSUE-89", number: 89, status: "deferred"},
+		{id: "ISSUE-90", number: 90, status: "pending"},
+	} {
+		record := cache.Record{RepoID: "repair", ID: item.id, Type: "issue", Path: fmt.Sprintf("issues/%d.md", item.number), Title: item.id, Status: "open", ContentHash: item.id, Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: fmt.Sprint(item.number), CreatedAt: now, UpdatedAt: now}
+		comment := cache.RecordComment{RepoID: "repair", RecordID: item.id, CommentID: "comment-1", Body: "comment " + item.id, ContentHash: item.id + "-comment", CreatedAt: now, UpdatedAt: now}
+		if err := store.UpsertRecordGraph(ctx, cache.RecordGraph{Record: record, Comments: []cache.RecordComment{comment}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertIssueCommentSync(ctx, cache.IssueCommentSync{RepoID: "repair", SourceID: item.id, IssueNumber: item.number, RemoteID: fmt.Sprint(item.number), Status: item.status, UpdatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := New(store)
+	if err := svc.projectRepairedIssueCommentCache(ctx, "repair", []string{"ISSUE-88", "ISSUE-89"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, sourceID := range []string{"ISSUECOMMENT-88-comment-1", "ISSUECOMMENT-89-comment-1"} {
+		if _, err := store.GetSourceScoped(ctx, "repair", sourceID); err != nil {
+			t.Fatalf("repaired projection %s missing: %v", sourceID, err)
+		}
+	}
+	if _, err := store.GetSourceScoped(ctx, "repair", "ISSUECOMMENT-90-comment-1"); err == nil {
+		t.Fatal("unrelated pending issue comment was projected")
+	}
+	queue, ok, err := store.GetIssueCommentSync(ctx, "repair", "ISSUE-90")
+	if err != nil || !ok || queue.Status != "pending" {
+		t.Fatalf("unrelated queue=%+v ok=%t err=%v", queue, ok, err)
+	}
+}
+
 func TestSearchSources(t *testing.T) {
 	ctx := context.Background()
 	svc := seededService(t, ctx)
