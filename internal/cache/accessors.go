@@ -41,6 +41,42 @@ func (s *SQLiteStore) UpsertRepo(ctx context.Context, repo RepositoryBinding) er
 	return s.AddRepository(ctx, repo)
 }
 
+// UpdateRepository replaces mutable binding metadata and aliases atomically.
+// Repository removal remains a separate, unsupported product capability.
+func (s *SQLiteStore) UpdateRepository(ctx context.Context, repo RepositoryBinding) (err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer txRollbackOnError(tx, &err)
+	scopes, err := marshalJSON(repo.Scopes)
+	if err != nil {
+		return err
+	}
+	updatedAt := repo.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE repos SET owner = ?, name = ?, api_base_url = ?, scopes = ?, display_name = ?, updated_at = ? WHERE repo_id = ?`, repo.Owner, repo.Name, repo.APIBaseURL, scopes, repo.DisplayName, updatedAt.Format(time.RFC3339Nano), repo.RepoID)
+	if err != nil {
+		return err
+	}
+	if affected, affectedErr := result.RowsAffected(); affectedErr != nil {
+		return affectedErr
+	} else if affected == 0 {
+		return notFoundErr("repository", repo.RepoID)
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM repo_aliases WHERE repo_id = ?`, repo.RepoID); err != nil {
+		return err
+	}
+	for _, alias := range repo.Aliases {
+		if err = execTx(ctx, tx, `INSERT INTO repo_aliases (alias, repo_id, created_at) VALUES (?, ?, ?)`, alias, repo.RepoID, updatedAt.Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *SQLiteStore) GetRepo(ctx context.Context, repoID string) (RepositoryBinding, error) {
 	return s.GetRepository(ctx, repoID)
 }

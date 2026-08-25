@@ -34,7 +34,12 @@ const snapshot = {
     { id: 'diag-current', severity: 'warning', entity_type: 'maintenance', entity_id: 'reg-1', failure_class: 'cache_busy', message: 'A cache writer is active.', retryable: true, current: true, remediation: 'Wait for the scheduled retry.' },
     { id: 'diag-recovered', severity: 'warning', entity_type: 'cache', entity_id: 'cache-111111112222', failure_class: 'provider_unavailable', message: 'The provider recovered.', retryable: true, current: false }
   ],
-  capabilities: [{ id: 'rag_search', category: 'rag', safety_class: 'read_only', description: 'Search cached RAG chunks.', ui_enabled: false, ui_reason: 'Search lab is delivered separately.', cli_name: 'rag-search', cli_enabled: true, mcp_name: 'rag_search', mcp_enabled: true }]
+  capabilities: [
+    { id: 'rag_search', category: 'rag', safety_class: 'read_only', description: 'Search cached RAG chunks.', ui_enabled: false, ui_reason: 'Search lab is delivered separately.', cli_name: 'rag-search', cli_enabled: true, mcp_name: 'rag_search', mcp_enabled: true },
+    { id: 'admin_maintenance_plan_apply', category: 'admin', safety_class: 'background_job', description: 'Plan and apply maintenance.', ui_enabled: true, cli_name: 'maintenance', cli_enabled: true, mcp_enabled: false },
+    { id: 'admin_binding_plan_apply', category: 'admin', safety_class: 'audited_write', description: 'Plan and apply bindings.', ui_enabled: true, cli_name: 'repo', cli_enabled: true, mcp_enabled: false },
+    { id: 'admin_registration_controls', category: 'admin', safety_class: 'background_job', description: 'Reconcile and disable registrations.', ui_enabled: true, cli_name: 'maintenance', cli_enabled: true, mcp_enabled: false }
+  ]
 };
 
 async function mockAdmin(page: Page, value = snapshot) {
@@ -181,4 +186,95 @@ test('retry coalescing, filters, interruption, and structured wait state are obs
   await expect(page.getByRole('status')).toContainText('job-000001');
   expect(retryKeys).toHaveLength(2);
   expect(retryKeys[1]).toBe(retryKeys[0]);
+});
+
+test('maintenance plan/apply renders every effect and safely retries one confirmed intent', async ({ page }) => {
+  await mockAdmin(page);
+  let plannedBody: Record<string, unknown> = {};
+  const applyKeys: string[] = [];
+  await page.route('**/api/admin/v1/maintenance/plan', async (route) => {
+    expect(route.request().headers()['x-csrf-token']).toBe('csrf-test');
+    plannedBody = route.request().postDataJSON();
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: {
+      schema_version: 'gitcode-mcp.maintenance-plan.v1', plan_id: 'maintenance-plan-safe', configuration_hash: 'sha256:cfg', status: 'confirmation_required', repo_id: 'example/repo',
+      cache: { cache_ref: 'cache-111111112222', path_fingerprint: 'sha256:public', location_kind: 'managed', schema_version: 17, scopes: ['issues', 'wiki'] },
+      provider: { profile: 'easy-rag', provider: 'ollama', provider_type: 'local', model: 'nomic-embed-text', data_boundary: 'local_network', installed: true, running: true, model_available: true, embedding_smoke_status: 'ready' },
+      policy: { sync_enabled: true, sync_mode: 'head-and-backfill', rag_enabled: true }, blockers: [], next_action: 'apply the plan with an idempotency key',
+      actions: [
+        { id: 'validate-cache', class: 'inspect', status: 'complete', summary: 'validate cache identity, schema, and repository binding' },
+        { id: 'enroll-cache', class: 'local_config_write', status: 'required', summary: 'enroll the validated cache and maintenance policy', confirmation_required: true },
+        { id: 'enqueue-initial-maintenance', class: 'job_enqueue', status: 'required', summary: 'coalesce initial maintenance work', confirmation_required: true }
+      ]
+    } }) });
+  });
+  await page.route('**/api/admin/v1/maintenance/apply', async (route) => {
+    const body = route.request().postDataJSON();
+    applyKeys.push(body.idempotency_key);
+    expect(body.plan_id).toBe('maintenance-plan-safe');
+    if (applyKeys.length === 1) {
+      await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'temporarily_unavailable', message: 'Receipt delivery was interrupted.', remediation: 'Retry this confirmation.' } }) });
+      return;
+    }
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { status: 'enabled', plan_id: 'maintenance-plan-safe', repo_id: 'example/repo', jobs_started: ['job-000004'], audit_receipt: 'audit-1' } }) });
+  });
+  await page.goto('/?view=Maintenance');
+  await expect(page.getByRole('heading', { name: 'Maintenance policy' })).toBeVisible();
+  await page.getByLabel('RAG mode').selectOption('maintain');
+  await page.getByRole('button', { name: 'Render plan' }).click();
+  expect(plannedBody.cache_ref).toBe('cache-111111112222');
+  expect(plannedBody).not.toHaveProperty('cache_path');
+  await expect(page.getByText('enroll the validated cache and maintenance policy')).toBeVisible();
+  if (qaOutput) {
+    await mkdir(qaOutput, { recursive: true });
+    await page.setViewportSize({ width: 1487, height: 1058 });
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.screenshot({ path: path.join(qaOutput, 'maintenance-plan-viewport.png') });
+    await page.screenshot({ path: path.join(qaOutput, 'maintenance-plan.png'), fullPage: true });
+    if (qaReference) {
+      const reference = (await readFile(qaReference)).toString('base64');
+      const implementation = (await readFile(path.join(qaOutput, 'maintenance-plan-viewport.png'))).toString('base64');
+      const comparePage = await page.context().newPage();
+      await comparePage.setViewportSize({ width: 2974, height: 1058 });
+      await comparePage.setContent(`<!doctype html><style>html,body{margin:0;background:#111}main{display:flex;width:2974px;height:1058px}figure{position:relative;margin:0;width:1487px;height:1058px;overflow:hidden;background:#f7f6f2}img{display:block;width:1487px;height:1058px;object-fit:cover;object-position:top}figcaption{position:absolute;top:12px;left:12px;padding:7px 10px;border-radius:5px;background:rgba(20,25,24,.86);color:#fff;font:600 13px system-ui}</style><main><figure><img src="data:image/png;base64,${reference}"><figcaption>Selected direction</figcaption></figure><figure><img src="data:image/png;base64,${implementation}"><figcaption>Maintenance plan</figcaption></figure></main>`);
+      await comparePage.screenshot({ path: path.join(qaOutput, 'maintenance-plan-comparison.png'), fullPage: true });
+      await comparePage.close();
+    }
+  }
+  await page.getByRole('button', { name: 'Confirm & apply' }).first().click();
+  await expect(page.getByRole('dialog')).toContainText('Apply this maintenance plan?');
+  await page.getByRole('button', { name: 'Confirm action' }).click();
+  await expect(page.getByRole('alert')).toContainText('Receipt delivery was interrupted. Retry this confirmation.');
+  await page.getByRole('button', { name: 'Confirm action' }).click();
+  await expect(page.getByRole('status')).toContainText('audit-1');
+  expect(applyKeys).toHaveLength(2);
+  expect(applyKeys[1]).toBe(applyKeys[0]);
+});
+
+test('binding control defaults API in the plan and stale apply stays non-mutating', async ({ page }) => {
+  await mockAdmin(page);
+  let planBody: Record<string, unknown> = {};
+  await page.route('**/api/admin/v1/bindings/plan', async (route) => {
+    planBody = route.request().postDataJSON();
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: {
+      schema_version: 'gitcode-mcp.binding-plan.v1', plan_id: 'binding-plan-safe', status: 'ready', cache_ref: 'cache-111111112222', repo_id: 'example/repo', action: 'no_op', blockers: [],
+      binding: { repo_id: 'example/repo', owner: 'example', name: 'repo', api_base_url: 'https://api.gitcode.com/api/v5', scopes: ['issues', 'wiki'], aliases: [], display_name: 'Example repository' },
+      effects: [{ id: 'validate-binding', class: 'inspect', status: 'complete', summary: 'validate repository identity, API route, scopes, and aliases' }, { id: 'write-binding', class: 'cache_write', status: 'complete', summary: 'binding already matches the requested intent' }, { id: 'gitcode-network', class: 'network_read', status: 'not_performed', summary: 'no GitCode request is performed while planning or applying the binding' }]
+    } }) });
+  });
+  let applyCalls = 0;
+  await page.route('**/api/admin/v1/bindings/apply', async (route) => {
+    applyCalls++;
+    await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: { code: 'stale_plan', message: 'The reviewed binding plan no longer matches current cache state.', remediation: 'Render and confirm a new binding plan.' } }) });
+  });
+  await page.goto('/?view=Maintenance');
+  await page.getByRole('button', { name: /example\/repo/ }).last().click();
+  await page.getByRole('button', { name: 'Render binding plan' }).click();
+  expect(planBody.api_base_url).toBe('');
+  expect(planBody).not.toHaveProperty('cache_path');
+  await expect(page.getByText('https://api.gitcode.com/api/v5')).toBeVisible();
+  await expect(page.getByText('zero GitCode requests')).toBeVisible();
+  await page.getByRole('button', { name: 'Confirm & apply' }).last().click();
+  await page.getByRole('button', { name: 'Confirm action' }).click();
+  await expect(page.getByRole('alert')).toContainText('Render and confirm a new binding plan.');
+  expect(applyCalls).toBe(1);
 });

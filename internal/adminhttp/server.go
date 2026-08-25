@@ -49,16 +49,22 @@ type OpenRequest struct {
 }
 
 type Config struct {
-	Bind              string
-	AllowNonLoopback  bool
-	SessionTTL        time.Duration
-	Assets            fs.FS
-	Readiness         func(context.Context) Readiness
-	Snapshot          SnapshotProvider
-	EventCapacity     int
-	EventPollInterval time.Duration
-	CancelJob         JobActionProvider
-	RetryJob          JobActionProvider
+	Bind                 string
+	AllowNonLoopback     bool
+	SessionTTL           time.Duration
+	Assets               fs.FS
+	Readiness            func(context.Context) Readiness
+	Snapshot             SnapshotProvider
+	EventCapacity        int
+	EventPollInterval    time.Duration
+	CancelJob            JobActionProvider
+	RetryJob             JobActionProvider
+	PlanMaintenance      MaintenanceControlProvider
+	ApplyMaintenance     MaintenanceControlProvider
+	DisableMaintenance   RegistrationControlProvider
+	ReconcileMaintenance RegistrationControlProvider
+	PlanBinding          BindingControlProvider
+	ApplyBinding         BindingControlProvider
 }
 
 type Controller struct {
@@ -168,6 +174,12 @@ func (c *Controller) handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/v1/jobs/{job_id}/cancel", c.cancelJob)
 	mux.HandleFunc("POST /api/admin/v1/jobs/{job_id}/retry", c.retryJob)
 	mux.HandleFunc("GET /api/admin/v1/maintenance", c.getMaintenance)
+	mux.HandleFunc("POST /api/admin/v1/maintenance/plan", c.planMaintenance)
+	mux.HandleFunc("POST /api/admin/v1/maintenance/apply", c.applyMaintenance)
+	mux.HandleFunc("POST /api/admin/v1/maintenance/{registration_id}/disable", c.disableMaintenance)
+	mux.HandleFunc("POST /api/admin/v1/maintenance/{registration_id}/reconcile", c.reconcileMaintenance)
+	mux.HandleFunc("POST /api/admin/v1/bindings/plan", c.planBinding)
+	mux.HandleFunc("POST /api/admin/v1/bindings/apply", c.applyBinding)
 	mux.HandleFunc("GET /api/admin/v1/diagnostics", c.getDiagnostics)
 	mux.HandleFunc("GET /api/admin/v1/capabilities", c.getCapabilities)
 	mux.HandleFunc("GET /api/admin/v1/events", c.getEvents)

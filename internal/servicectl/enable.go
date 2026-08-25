@@ -19,18 +19,23 @@ import (
 const MaintenancePlanSchema = "gitcode-mcp.maintenance-plan.v1"
 
 type MaintenanceSetupRequest struct {
-	RepoID             string   `json:"repo_id"`
-	Profile            string   `json:"profile,omitempty"`
-	SyncMode           string   `json:"sync,omitempty"`
-	Collections        []string `json:"collections,omitempty"`
-	RAGMode            string   `json:"rag,omitempty"`
-	NoServiceInstall   bool     `json:"no_service_install,omitempty"`
-	NoModelDownload    bool     `json:"no_model_download,omitempty"`
-	Detach             bool     `json:"detach,omitempty"`
-	IdempotencyKey     string   `json:"idempotency_key,omitempty"`
-	PlanID             string   `json:"plan_id,omitempty"`
-	Confirmed          bool     `json:"-"`
-	AllowMachineChange bool     `json:"-"`
+	RepoID              string   `json:"repo_id"`
+	Profile             string   `json:"profile,omitempty"`
+	SyncMode            string   `json:"sync,omitempty"`
+	Collections         []string `json:"collections,omitempty"`
+	RAGMode             string   `json:"rag,omitempty"`
+	HeadIntervalSeconds int      `json:"head_interval_seconds,omitempty"`
+	RAGIntervalSeconds  int      `json:"rag_interval_seconds,omitempty"`
+	HeadMaxPages        int      `json:"head_max_pages,omitempty"`
+	TailSlicePages      int      `json:"tail_slice_pages,omitempty"`
+	PerPage             int      `json:"per_page,omitempty"`
+	NoServiceInstall    bool     `json:"no_service_install,omitempty"`
+	NoModelDownload     bool     `json:"no_model_download,omitempty"`
+	Detach              bool     `json:"detach,omitempty"`
+	IdempotencyKey      string   `json:"idempotency_key,omitempty"`
+	PlanID              string   `json:"plan_id,omitempty"`
+	Confirmed           bool     `json:"-"`
+	AllowMachineChange  bool     `json:"-"`
 }
 
 type MaintenancePlanAction struct {
@@ -462,7 +467,11 @@ func normalizeMaintenanceSetupRequest(req MaintenanceSetupRequest) (MaintenanceS
 }
 
 func setupMaintenancePolicy(req MaintenanceSetupRequest, binding cache.RepositoryBinding) (MaintenancePolicy, error) {
-	policy := MaintenancePolicy{SyncEnabled: req.SyncMode != "off", SyncMode: req.SyncMode, RAGEnabled: req.RAGMode == "maintain", Profile: strings.TrimSpace(req.Profile)}
+	policy := MaintenancePolicy{
+		SyncEnabled: req.SyncMode != "off", SyncMode: req.SyncMode, RAGEnabled: req.RAGMode == "maintain", Profile: strings.TrimSpace(req.Profile),
+		HeadIntervalSeconds: req.HeadIntervalSeconds, RAGIntervalSeconds: req.RAGIntervalSeconds,
+		HeadMaxPages: req.HeadMaxPages, TailSlicePages: req.TailSlicePages, PerPage: req.PerPage,
+	}
 	if len(req.Collections) > 0 {
 		for _, collection := range req.Collections {
 			switch collection {

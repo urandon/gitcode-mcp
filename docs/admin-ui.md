@@ -39,7 +39,7 @@ The admin listener applies these controls:
 
 ## Observation and supervision API
 
-The authenticated `/api/admin/v1` surface is an in-process transport over the coordinator. Observation requests do not invoke CLI or MCP subprocesses and do not contact GitCode or an embedding provider while rendering a page. The only mutations are the explicit, CSRF-bound daemon job actions listed below.
+The authenticated `/api/admin/v1` surface is an in-process transport over the coordinator. Observation requests do not invoke CLI or MCP subprocesses and do not contact GitCode or an embedding provider while rendering a page. Mutation endpoints are capability-gated, CSRF-bound, plan/apply controls; the browser never receives authority to install services, download models, change credentials, migrate or delete caches, unbind repositories, or choose an arbitrary filesystem path.
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -51,13 +51,23 @@ The authenticated `/api/admin/v1` surface is an in-process transport over the co
 | `POST /jobs/{job_id}/cancel` | Request graceful cancellation of an active daemon-owned sync or RAG job. |
 | `POST /jobs/{job_id}/retry` | Request one safe current maintenance reconciliation for a terminal sync or RAG job; equivalent active work is coalesced. |
 | `GET /maintenance` | Read-only registrations and policy summaries. |
+| `POST /maintenance/plan` | Render the current maintenance policy effect ledger for one opaque cache/repository target. |
+| `POST /maintenance/apply` | Re-plan and apply the exact confirmed maintenance plan with an idempotency key. |
+| `POST /maintenance/{registration_id}/disable` | Disable one retained registration and return a durable receipt. |
+| `POST /maintenance/{registration_id}/reconcile` | Reconcile current truth; equivalent active work is coalesced. |
+| `POST /bindings/plan` | Validate and render an add/update/no-op binding plan without contacting GitCode. |
+| `POST /bindings/apply` | Re-plan and atomically write the confirmed local binding with an idempotency key. |
 | `GET /diagnostics` | Current/recovered typed failures and sanitized remediation. |
 | `GET /capabilities` | Capability and safety catalog with explicit UI availability. |
 | `GET /events?after=CURSOR` | Bounded SSE invalidation/progress replay. |
 
 Event cursors are opaque and monotonic. A reconnect within the retained window replays missed compact events. An expired cursor produces `snapshot_required`, after which the browser reloads the coarse snapshot. The stream never carries raw logs or cached record bodies.
 
-Job mutations require the authenticated session cookie, a same-origin request, the session CSRF value returned by `GET /session`, a retained public job id, a supported job type/state, and a fresh idempotency key. The daemon persists only hashes of idempotency material and a bounded set of 256 public receipts. Replaying a retained key returns the original receipt; reusing it for a different target or action is rejected. A cancel receipt distinguishes a completed cancellation from a request still converging. Retry does not force an identical historical execution: it asks the owning maintenance registration to reconcile current truth, then reports whether work was created, coalesced, or no longer needed.
+Every mutation requires the authenticated session cookie, a same-origin request, the session CSRF value returned by `GET /session`, a public target id, and a fresh idempotency key. The daemon persists only hashes of idempotency material and bounded sets of 256 public receipts. Replaying a retained key returns the original receipt after restart; reusing it for a different target, action, or plan is rejected. A cancel receipt distinguishes a completed cancellation from a request still converging. Retry and reconcile do not force an identical historical execution: they reconcile current truth, then report whether work was created, coalesced, or no longer needed.
+
+Maintenance apply always renders the plan again and rejects changes to cache identity, repository binding, effective non-secret configuration, provider/model revision, daemon protocol/state, or requested policy as `stale_plan`. Its effect ledger labels inspection, local configuration writes, job enqueueing, provider data transfer, local service changes, and downloads separately. Machine-level effects remain blocked with an exact CLI handoff.
+
+Binding plan/apply accepts `cache_ref`, never `cache_path`. An omitted API URL uses the effective GitCode v5 default for a new binding and preserves an existing custom route on update. Owner/name derivation, normalized scopes, unique aliases, schema compatibility, and ambiguous cache identity are checked before the atomic SQLite transaction. Applying a stale plan, an alias collision, or a reused key with changed intent produces a typed conflict. Unbind remains deliberately unavailable.
 
 Ordinary responses expose `cache_ref` and a one-way path fingerprint, never an absolute cache path. Current coverage truth is kept separate from active contention, a scheduled retry, and the last stage error, so a transient maintenance failure cannot hide a still-current RAG namespace.
 
@@ -69,7 +79,7 @@ The observation UI is organized around product state rather than CLI command gro
 - **Caches** shows the safe cache → repository topology. Repository details keep head freshness, tail completeness, secondary coverage, projection generation, and RAG generation as five independent lanes.
 - **Collections** shows bounded per-kind counts and head/tail frontier evidence. A bounded tail stop is always labelled partial; only end-of-collection evidence is presented as complete.
 - **Search status** explains full-text versus hybrid readiness without running a query, provider call, sync, or repair.
-- **Activity** and **Maintenance** present bounded structured history and policy summaries. **Jobs** adds URL-preserved filters and detail, retained progress, throughput/ETA where derivable, rate-limit/retry/interruption state, and explicit cancel/retry controls only where the daemon reports them safe.
+- **Activity** presents bounded structured history. **Maintenance** adds capability-derived policy and binding workbenches: edit intent, render the effect ledger, confirm the exact plan id, and inspect receipts or CLI handoffs. **Jobs** adds URL-preserved filters and detail, retained progress, throughput/ETA where derivable, rate-limit/retry/interruption state, and explicit cancel/retry controls only where the daemon reports them safe.
 - **Diagnostics** separates current from recovered typed failures, gives fixed public-safe CLI handoffs, and shows the capability/safety catalog.
 
 Local deep links use URL search parameters: `view`, opaque `cache`, public repository id `repo`, repository `tab`, diagnostic state, public `job`, and job state/type/cache/repository/failure filters. Browser reload and back/forward navigation preserve this state. The UI explicitly renders loading, empty, partial/degraded, stale, recovered, interrupted, waiting, and API-version-mismatch states; status meaning is always present as text rather than color alone.

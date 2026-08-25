@@ -144,6 +144,84 @@ export type Maintenance = {
   };
 };
 
+export type ControlEffect = {
+  id: string;
+  class: string;
+  status: string;
+  summary: string;
+  data_boundary?: string;
+  confirmation_required?: boolean;
+  handoff?: string;
+};
+
+export type MaintenanceIntent = {
+  cache_ref: string;
+  repo_id: string;
+  sync_mode: string;
+  collections: string[];
+  rag_mode: string;
+  profile?: string;
+  head_interval_seconds?: number;
+  rag_interval_seconds?: number;
+  head_max_pages?: number;
+  tail_slice_pages?: number;
+  per_page?: number;
+  plan_id?: string;
+  idempotency_key?: string;
+};
+
+export type MaintenancePlan = {
+  schema_version: string;
+  plan_id: string;
+  configuration_hash: string;
+  status: string;
+  repo_id: string;
+  cache: { cache_ref: string; path_fingerprint: string; location_kind: string; schema_version: number; scopes: string[] };
+  provider: { profile?: string; provider?: string; provider_type?: string; model?: string; data_boundary?: string; installed?: boolean; running?: boolean; model_available?: boolean; embedding_smoke_status?: string };
+  policy: Record<string, string | number | boolean>;
+  actions: ControlEffect[];
+  blockers?: string[];
+  next_action?: string;
+};
+
+export type BindingIntent = {
+  cache_ref: string;
+  repo_id: string;
+  owner?: string;
+  name?: string;
+  api_base_url?: string;
+  scopes: string[];
+  aliases: string[];
+  display_name?: string;
+  plan_id?: string;
+  idempotency_key?: string;
+};
+
+export type BindingPlan = {
+  schema_version: string;
+  plan_id: string;
+  status: string;
+  cache_ref: string;
+  repo_id: string;
+  action: string;
+  binding: { repo_id: string; owner: string; name: string; api_base_url: string; scopes: string[]; aliases: string[]; display_name?: string };
+  effects: ControlEffect[];
+  blockers?: string[];
+};
+
+export type ControlReceipt = {
+  outcome: string;
+  receipt_id?: string;
+  plan_id?: string;
+  replayed?: boolean;
+  created_at?: string;
+  jobs_started?: string[];
+  checked_at?: string;
+  next_action?: string;
+  audit_receipt?: string;
+  status?: string;
+};
+
 export type ObservationSnapshot = {
   api_version: string;
   revision: string;
