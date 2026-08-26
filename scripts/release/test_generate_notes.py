@@ -280,6 +280,12 @@ class ReleaseNotesTest(unittest.TestCase):
         self.assertIn('notes_path="dist/release-notes.md"', workflow)
         self.assertIn("--notes-file dist/release-notes.md", workflow)
         self.assertIn('--input "$notes_path"', workflow)
+        self.assertLess(
+            workflow.index("Wait for GitCode tag mirror"),
+            workflow.index("Publish GitCode release"),
+        )
+        self.assertIn("scripts/release/wait_gitcode_tag.py", workflow)
+        self.assertIn('--expected-commit "$(git rev-parse HEAD)"', workflow)
         self.assertNotIn(
             "release artifacts and SHA256 checksums.", workflow
         )

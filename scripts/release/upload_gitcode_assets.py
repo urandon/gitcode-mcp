@@ -12,7 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 
 class UploadError(RuntimeError):
@@ -20,6 +20,12 @@ class UploadError(RuntimeError):
 
 
 Request = Callable[[str, str, Dict[str, str], Optional[bytes]], Any]
+DownloadSize = Callable[[str], int]
+
+
+class ReleaseAsset(NamedTuple):
+    size: Optional[int]
+    download_url: str
 
 
 def _urllib_request(method: str, url: str, headers: Dict[str, str], body: Optional[bytes]) -> Any:
@@ -44,7 +50,7 @@ def _unwrap(payload: Any) -> Any:
     return payload
 
 
-def _release_assets(payload: Any) -> Dict[str, int]:
+def _release_assets(payload: Any) -> Dict[str, ReleaseAsset]:
     release = _unwrap(payload)
     if not isinstance(release, dict):
         raise UploadError("GitCode release response is not an object")
@@ -53,19 +59,47 @@ def _release_assets(payload: Any) -> Dict[str, int]:
         assets = assets.get("assets", [])
     if not isinstance(assets, list):
         raise UploadError("GitCode release assets response is not a list")
-    result: Dict[str, int] = {}
+    result: Dict[str, ReleaseAsset] = {}
     for asset in assets:
         if not isinstance(asset, dict):
             continue
         name = str(asset.get("name") or "").strip()
         if not name:
             continue
+        raw_size = asset.get("size")
         try:
-            size = int(asset.get("size") or 0)
+            size = int(raw_size) if raw_size not in (None, "") else None
         except (TypeError, ValueError):
-            size = 0
-        result[name] = size
+            size = None
+        download_url = str(asset.get("browser_download_url") or "").strip()
+        result[name] = ReleaseAsset(size=size, download_url=download_url)
     return result
+
+
+def _urllib_download_size(url: str) -> int:
+    if urllib.parse.urlparse(url).scheme != "https":
+        raise UploadError("GitCode release asset did not return an HTTPS download URL")
+    request = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            size = 0
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    return size
+                size += len(chunk)
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError):
+        raise UploadError("GitCode release asset download verification failed") from None
+
+
+def _verified_size(asset: ReleaseAsset, download_size: DownloadSize, cache: Dict[str, int]) -> Optional[int]:
+    if asset.size is not None:
+        return asset.size
+    if not asset.download_url:
+        return None
+    if asset.download_url not in cache:
+        cache[asset.download_url] = download_size(asset.download_url)
+    return cache[asset.download_url]
 
 
 def _upload_contract(payload: Any) -> Tuple[str, Dict[str, str]]:
@@ -96,6 +130,7 @@ def upload_assets(
     token: str,
     api_base_url: str = "https://api.gitcode.com/api/v5",
     request: Request = _urllib_request,
+    download_size: DownloadSize = _urllib_download_size,
     verify_attempts: int = 5,
     verify_delay: float = 1.0,
 ) -> List[Dict[str, Any]]:
@@ -111,6 +146,7 @@ def upload_assets(
     release_url = base + repo_path + "/tags/" + urllib.parse.quote(tag, safe="")
     api_headers = {"Authorization": "Bearer " + token, "Accept": "application/json"}
     existing = _release_assets(request("GET", release_url, api_headers, None))
+    downloaded_sizes: Dict[str, int] = {}
     result: List[Dict[str, Any]] = []
     expected: Dict[str, int] = {}
     for path in assets:
@@ -122,7 +158,7 @@ def upload_assets(
             raise UploadError(f"duplicate release asset name: {asset_name}")
         expected[asset_name] = size
         if asset_name in existing:
-            if existing[asset_name] != size:
+            if _verified_size(existing[asset_name], download_size, downloaded_sizes) != size:
                 raise UploadError(f"existing release asset size differs: {asset_name}")
             result.append({"name": asset_name, "size": size, "status": "already_present"})
             continue
@@ -131,14 +167,23 @@ def upload_assets(
         request("PUT", upload_url, upload_headers, path.read_bytes())
         result.append({"name": asset_name, "size": size, "status": "uploaded"})
 
-    verified: Dict[str, int] = {}
+    verified: Dict[str, ReleaseAsset] = {}
     for attempt in range(max(1, verify_attempts)):
         verified = _release_assets(request("GET", release_url, api_headers, None))
-        if all(verified.get(asset_name) == size for asset_name, size in expected.items()):
+        if all(
+            asset_name in verified
+            and _verified_size(verified[asset_name], download_size, downloaded_sizes) == size
+            for asset_name, size in expected.items()
+        ):
             return result
         if attempt + 1 < verify_attempts:
             time.sleep(verify_delay)
-    missing = sorted(asset_name for asset_name, size in expected.items() if verified.get(asset_name) != size)
+    missing = sorted(
+        asset_name
+        for asset_name, size in expected.items()
+        if asset_name not in verified
+        or _verified_size(verified[asset_name], download_size, downloaded_sizes) != size
+    )
     raise UploadError("GitCode release asset verification failed: " + ", ".join(missing))
 
 
