@@ -103,7 +103,7 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 	}
 	job, ok := m.jobs.Get(req.JobID)
 	if !ok {
-		return adminhttp.JobActionReceipt{}, jobActionError(http.StatusNotFound, "job_not_found", "The selected job is not retained by this daemon.", "Refresh the bounded job list.")
+		return adminhttp.JobActionReceipt{}, jobActionError(http.StatusNotFound, "job_not_retained", "The selected job has expired or is not retained by this daemon.", "Return to the bounded job list; cached repository data and audit evidence are unaffected.")
 	}
 	if job.Type != SyncJobType && job.Type != RAGIndexJobType {
 		return adminhttp.JobActionReceipt{}, jobActionError(http.StatusForbidden, "capability_unavailable", "This job type does not support the requested admin action.", "Use the capability catalog or CLI for supported operations.")
@@ -116,7 +116,7 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		}
 		cancelled, found := m.jobs.Cancel(job.ID)
 		if !found {
-			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusNotFound, "job_not_found", "The selected job is no longer retained.", "Refresh the bounded job list.")
+			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusNotFound, "job_not_retained", "The selected job is no longer retained.", "Return to the bounded job list; cached repository data and audit evidence are unaffected.")
 		}
 		outcome := "cancellation_requested"
 		if cancelled.Status == JobStatusCancelled {

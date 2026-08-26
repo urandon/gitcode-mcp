@@ -310,8 +310,11 @@ func mergeFile(cfg Config, file fileConfig) (Config, error) {
 		}
 		cfg.MCPToolAccess = access
 	}
-	cfg = mergeServiceFile(cfg, file.Service)
 	var err error
+	cfg, err = mergeServiceFile(cfg, file.Service)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg, err = mergeRAGFile(cfg, file.RAG)
 	if err != nil {
 		return Config{}, err

@@ -11,6 +11,7 @@ import (
 
 	"gitcode-mcp/internal/adminhttp"
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/service"
 )
 
@@ -52,6 +53,9 @@ func TestAdminObservationReadsCacheWithoutExposingItsPath(t *testing.T) {
 	}
 	if len(snapshot.Caches) != 1 || len(snapshot.Caches[0].Repositories) != 1 || snapshot.Caches[0].Repositories[0].RepoID != "example/repo" {
 		t.Fatalf("cache topology=%+v", snapshot.Caches)
+	}
+	if snapshot.JobRetention.SuccessTTLSeconds != int64(config.DefaultJobSuccessTTL.Seconds()) || snapshot.JobRetention.MaxTerminalJobs != config.DefaultJobMaxTerminal {
+		t.Fatalf("job retention observation=%+v", snapshot.JobRetention)
 	}
 }
 

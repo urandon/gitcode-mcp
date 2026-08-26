@@ -29,9 +29,32 @@ type ObservationSnapshot struct {
 	Attention    []AttentionItem          `json:"attention"`
 	Caches       []CacheObservation       `json:"caches"`
 	Jobs         []JobObservation         `json:"jobs"`
+	JobRetention JobRetentionObservation  `json:"job_retention"`
 	Maintenance  []MaintenanceObservation `json:"maintenance"`
 	Diagnostics  []DiagnosticObservation  `json:"diagnostics"`
 	Capabilities []CapabilityObservation  `json:"capabilities"`
+}
+
+type JobRetentionObservation struct {
+	SuccessTTLSeconds    int64            `json:"success_ttl_seconds"`
+	DiagnosticTTLSeconds int64            `json:"diagnostic_ttl_seconds"`
+	MaxTerminalJobs      int              `json:"max_terminal_jobs"`
+	MaxDiagnosticJobs    int              `json:"max_diagnostic_jobs"`
+	MaxProgressEvents    int              `json:"max_progress_events"`
+	Active               int              `json:"active"`
+	Terminal             int              `json:"terminal"`
+	RetainedByStatus     []JobStatusCount `json:"retained_by_status"`
+	OldestRetainedAt     *time.Time       `json:"oldest_retained_at,omitempty"`
+	LastPrunedAt         *time.Time       `json:"last_pruned_at,omitempty"`
+	ExpiredTotal         int              `json:"expired_total"`
+	TruncatedTotal       int              `json:"truncated_total"`
+	LastExpired          int              `json:"last_expired"`
+	LastTruncated        int              `json:"last_truncated"`
+}
+
+type JobStatusCount struct {
+	Status string `json:"status"`
+	Count  int    `json:"count"`
 }
 
 type ServiceObservation struct {
@@ -344,6 +367,9 @@ func normalizeSnapshotSlices(snapshot *ObservationSnapshot) {
 	if snapshot.Jobs == nil {
 		snapshot.Jobs = []JobObservation{}
 	}
+	if snapshot.JobRetention.RetainedByStatus == nil {
+		snapshot.JobRetention.RetainedByStatus = []JobStatusCount{}
+	}
 	if snapshot.Maintenance == nil {
 		snapshot.Maintenance = []MaintenanceObservation{}
 	}
@@ -389,6 +415,9 @@ func sortSnapshot(snapshot *ObservationSnapshot) {
 		}
 	}
 	sort.Slice(snapshot.Jobs, func(i, j int) bool { return snapshot.Jobs[i].ID < snapshot.Jobs[j].ID })
+	sort.Slice(snapshot.JobRetention.RetainedByStatus, func(i, j int) bool {
+		return snapshot.JobRetention.RetainedByStatus[i].Status < snapshot.JobRetention.RetainedByStatus[j].Status
+	})
 	sort.Slice(snapshot.Maintenance, func(i, j int) bool {
 		return snapshot.Maintenance[i].RegistrationID < snapshot.Maintenance[j].RegistrationID
 	})
@@ -562,7 +591,7 @@ func (c *Controller) getJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeAPIError(w, http.StatusNotFound, "job_not_found", "The selected job is not retained by this daemon.", "Refresh the job list.")
+	writeAPIError(w, http.StatusNotFound, "job_not_retained", "The selected job has expired or is not retained by this daemon.", "Return to the retained job list; cached repository data and maintenance state are unaffected.")
 }
 
 func (c *Controller) getMaintenance(w http.ResponseWriter, r *http.Request) {

@@ -246,6 +246,15 @@ table small { display: block; max-width: 280px; margin-top: 4px; overflow: hidde
 .repo-lanes { display: flex; gap: 14px; }
 .metric-strip { margin-bottom: 24px; }
 .metric-strip.jobs-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.retention-summary { margin: -8px 0 24px; padding: 18px; display: grid; gap: 14px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface); }
+.retention-summary > div:first-child { display: grid; gap: 5px; }
+.retention-summary h2 { margin: 0; font-size: 15px; }
+.retention-summary span, .retention-summary > p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.retention-summary dl { margin: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--line-soft); border-radius: 7px; overflow: hidden; }
+.retention-summary dl div { min-width: 0; padding: 11px; display: grid; gap: 4px; border-right: 1px solid var(--line-soft); }
+.retention-summary dl div:last-child { border-right: 0; }
+.retention-summary dt { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .05em; }
+.retention-summary dd { margin: 0; font: 620 10px ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .job-filter-bar { margin-bottom: 18px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
 .job-filter-bar label { min-width: 0; display: grid; gap: 6px; }
 .job-filter-bar label > span { color: var(--muted); font-size: 9px; font-weight: 680; text-transform: uppercase; letter-spacing: .06em; }
@@ -579,6 +588,9 @@ table small { font-size: var(--type-micro); }
   .cache-summary-grid, .maintenance-grid, .coverage-grid, .coverage-grid.two-up, .activity-columns { grid-template-columns: 1fr; }
   .job-filter-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .job-metrics, .job-context { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .retention-summary dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .retention-summary dl div:nth-child(2) { border-right: 0; }
+  .retention-summary dl div:nth-child(n+3) { border-top: 1px solid var(--line-soft); }
   .job-metrics div:nth-child(2n), .job-context div:nth-child(2n) { border-right: 0; }
   .job-metrics div:nth-child(n+3), .job-context div:nth-child(n+3) { border-top: 1px solid var(--line-soft); }
   .job-actions { align-items: stretch; flex-wrap: wrap; }
@@ -620,6 +632,9 @@ table small { font-size: var(--type-micro); }
   .cohort-strip div, .cache-metadata div { border-right: 0; border-bottom: 1px solid var(--line-soft); }
   .tab-list button { min-width: 105px; }
   .job-filter-bar, .job-metrics, .job-context { grid-template-columns: 1fr; }
+  .retention-summary dl { grid-template-columns: 1fr; }
+  .retention-summary dl div { border-right: 0; border-top: 1px solid var(--line-soft); }
+  .retention-summary dl div:first-child { border-top: 0; }
   .job-filter-bar { gap: 10px; }
   .job-metrics div, .job-context div { border-right: 0; border-top: 1px solid var(--line-soft); }
   .job-metrics div:first-child, .job-context div:first-child { border-top: 0; }

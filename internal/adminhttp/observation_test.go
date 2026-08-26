@@ -74,6 +74,10 @@ func TestObservationSnapshotContractAndResourceBoundaries(t *testing.T) {
 	if job.Code != http.StatusOK || !strings.Contains(job.Body.String(), `"api_version":"1"`) || !strings.Contains(job.Body.String(), `"job":{"id":"job-000001"`) {
 		t.Fatalf("job detail status=%d body=%s", job.Code, job.Body.String())
 	}
+	expiredJob := authorizedRequest(t, handler, cookie, "/api/admin/v1/jobs/job-expired")
+	if expiredJob.Code != http.StatusNotFound || !strings.Contains(expiredJob.Body.String(), `"code":"job_not_retained"`) || !strings.Contains(expiredJob.Body.String(), "cached repository data") {
+		t.Fatalf("expired job status=%d body=%s", expiredJob.Code, expiredJob.Body.String())
+	}
 	invalidLimit := authorizedRequest(t, handler, cookie, "/api/admin/v1/jobs?limit=1000")
 	if invalidLimit.Code != http.StatusBadRequest || !strings.Contains(invalidLimit.Body.String(), `"code":"invalid_query"`) {
 		t.Fatalf("invalid limit status=%d body=%s", invalidLimit.Code, invalidLimit.Body.String())

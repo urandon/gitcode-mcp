@@ -1,6 +1,6 @@
 {
   "api_version": "1",
-  "revision": "snapshot-a1623831b773a361",
+  "revision": "snapshot-5f2bb333e0434a6c",
   "generated_at": "2026-08-25T10:30:00Z",
   "service": {
     "version": "v2.0.0",
@@ -70,6 +70,20 @@
     }
   ],
   "jobs": [],
+  "job_retention": {
+    "success_ttl_seconds": 0,
+    "diagnostic_ttl_seconds": 0,
+    "max_terminal_jobs": 0,
+    "max_diagnostic_jobs": 0,
+    "max_progress_events": 0,
+    "active": 0,
+    "terminal": 0,
+    "retained_by_status": [],
+    "expired_total": 0,
+    "truncated_total": 0,
+    "last_expired": 0,
+    "last_truncated": 0
+  },
   "maintenance": [],
   "diagnostics": [],
   "capabilities": []

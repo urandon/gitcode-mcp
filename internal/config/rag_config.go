@@ -8,7 +8,12 @@ import (
 )
 
 const (
-	DefaultRAGProfile = "qwen3-ollama-0_6b-1024"
+	DefaultRAGProfile           = "qwen3-ollama-0_6b-1024"
+	DefaultJobSuccessTTL        = 48 * time.Hour
+	DefaultJobDiagnosticTTL     = 14 * 24 * time.Hour
+	DefaultJobMaxTerminal       = 128
+	DefaultJobMaxDiagnostic     = 32
+	DefaultJobMaxProgressEvents = 256
 )
 
 const (
@@ -22,7 +27,16 @@ const (
 )
 
 type ServiceConfig struct {
-	RuntimeDir string `json:"runtime_dir,omitempty"`
+	RuntimeDir   string                    `json:"runtime_dir,omitempty"`
+	JobRetention ServiceJobRetentionConfig `json:"job_retention"`
+}
+
+type ServiceJobRetentionConfig struct {
+	SuccessTTL        time.Duration `json:"success_ttl"`
+	DiagnosticTTL     time.Duration `json:"diagnostic_ttl"`
+	MaxTerminalJobs   int           `json:"max_terminal_jobs"`
+	MaxDiagnosticJobs int           `json:"max_diagnostic_jobs"`
+	MaxProgressEvents int           `json:"max_progress_events"`
 }
 
 type RAGConfig struct {
@@ -75,7 +89,16 @@ type RAGSearchConfig struct {
 }
 
 type serviceFileConfig struct {
-	RuntimeDir *string `json:"runtime_dir"`
+	RuntimeDir   *string                        `json:"runtime_dir"`
+	JobRetention *serviceJobRetentionFileConfig `json:"job_retention"`
+}
+
+type serviceJobRetentionFileConfig struct {
+	SuccessTTL        *string `json:"success_ttl"`
+	DiagnosticTTL     *string `json:"diagnostic_ttl"`
+	MaxTerminalJobs   *int    `json:"max_terminal_jobs"`
+	MaxDiagnosticJobs *int    `json:"max_diagnostic_jobs"`
+	MaxProgressEvents *int    `json:"max_progress_events"`
 }
 
 type ragFileConfig struct {
@@ -128,7 +151,14 @@ type ragSearchFileConfig struct {
 }
 
 func defaultServiceConfig(cacheBaseDir string) ServiceConfig {
-	return ServiceConfig{RuntimeDir: filepath.Join(cacheBaseDir, "runtime")}
+	return ServiceConfig{
+		RuntimeDir: filepath.Join(cacheBaseDir, "runtime"),
+		JobRetention: ServiceJobRetentionConfig{
+			SuccessTTL: DefaultJobSuccessTTL, DiagnosticTTL: DefaultJobDiagnosticTTL,
+			MaxTerminalJobs: DefaultJobMaxTerminal, MaxDiagnosticJobs: DefaultJobMaxDiagnostic,
+			MaxProgressEvents: DefaultJobMaxProgressEvents,
+		},
+	}
 }
 
 func defaultRAGConfig(cacheBaseDir string) RAGConfig {
@@ -178,14 +208,63 @@ func defaultRAGConfig(cacheBaseDir string) RAGConfig {
 	}
 }
 
-func mergeServiceFile(cfg Config, file *serviceFileConfig) Config {
+func mergeServiceFile(cfg Config, file *serviceFileConfig) (Config, error) {
 	if file == nil {
-		return cfg
+		return cfg, nil
 	}
 	if file.RuntimeDir != nil {
 		cfg.Service.RuntimeDir = strings.TrimSpace(*file.RuntimeDir)
 	}
-	return cfg
+	if file.JobRetention == nil {
+		return cfg, nil
+	}
+	retention := cfg.Service.JobRetention
+	var err error
+	if file.JobRetention.SuccessTTL != nil {
+		retention.SuccessTTL, err = time.ParseDuration(strings.TrimSpace(*file.JobRetention.SuccessTTL))
+		if err != nil {
+			return Config{}, fmt.Errorf("config: invalid service.job_retention.success_ttl %q: %w", *file.JobRetention.SuccessTTL, err)
+		}
+	}
+	if file.JobRetention.DiagnosticTTL != nil {
+		retention.DiagnosticTTL, err = time.ParseDuration(strings.TrimSpace(*file.JobRetention.DiagnosticTTL))
+		if err != nil {
+			return Config{}, fmt.Errorf("config: invalid service.job_retention.diagnostic_ttl %q: %w", *file.JobRetention.DiagnosticTTL, err)
+		}
+	}
+	if file.JobRetention.MaxTerminalJobs != nil {
+		retention.MaxTerminalJobs = *file.JobRetention.MaxTerminalJobs
+	}
+	if file.JobRetention.MaxDiagnosticJobs != nil {
+		retention.MaxDiagnosticJobs = *file.JobRetention.MaxDiagnosticJobs
+	}
+	if file.JobRetention.MaxProgressEvents != nil {
+		retention.MaxProgressEvents = *file.JobRetention.MaxProgressEvents
+	}
+	if err := ValidateServiceJobRetention(retention); err != nil {
+		return Config{}, err
+	}
+	cfg.Service.JobRetention = retention
+	return cfg, nil
+}
+
+func ValidateServiceJobRetention(retention ServiceJobRetentionConfig) error {
+	if retention.SuccessTTL < time.Minute || retention.SuccessTTL > 90*24*time.Hour {
+		return fmt.Errorf("config: service.job_retention.success_ttl must be between 1m and 2160h")
+	}
+	if retention.DiagnosticTTL < retention.SuccessTTL || retention.DiagnosticTTL > 365*24*time.Hour {
+		return fmt.Errorf("config: service.job_retention.diagnostic_ttl must be at least success_ttl and no more than 8760h")
+	}
+	if retention.MaxTerminalJobs < 1 || retention.MaxTerminalJobs > 4096 {
+		return fmt.Errorf("config: service.job_retention.max_terminal_jobs must be between 1 and 4096")
+	}
+	if retention.MaxDiagnosticJobs < 1 || retention.MaxDiagnosticJobs > retention.MaxTerminalJobs {
+		return fmt.Errorf("config: service.job_retention.max_diagnostic_jobs must be between 1 and max_terminal_jobs")
+	}
+	if retention.MaxProgressEvents < 1 || retention.MaxProgressEvents > 4096 {
+		return fmt.Errorf("config: service.job_retention.max_progress_events must be between 1 and 4096")
+	}
+	return nil
 }
 
 func mergeRAGFile(cfg Config, file *ragFileConfig) (Config, error) {

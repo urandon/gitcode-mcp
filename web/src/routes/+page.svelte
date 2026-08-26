@@ -111,10 +111,23 @@
 
   function normalizeSnapshot(value: ObservationSnapshot): ObservationSnapshot {
     value.attention ||= []; value.caches ||= []; value.jobs ||= []; value.maintenance ||= []; value.diagnostics ||= []; value.capabilities ||= [];
+    value.job_retention ||= structuredClone(emptySnapshot.job_retention); value.job_retention.retained_by_status ||= [];
     for (const cache of value.caches) for (const repo of (cache.repositories ||= [])) {
       repo.collections ||= []; repo.recent_sync_events ||= []; repo.execution ||= {}; repo.counts.by_kind ||= [];
     }
     return value;
+  }
+
+  function retentionDuration(seconds: number): string {
+    if (!seconds) return 'Not reported';
+    if (seconds % 86400 === 0) return `${seconds / 86400} days`;
+    if (seconds % 3600 === 0) return `${seconds / 3600} hours`;
+    return `${seconds} seconds`;
+  }
+
+  function retainedStatusSummary(): string {
+    const counts = snapshot.job_retention.retained_by_status;
+    return counts.length ? counts.map(({ status, count }) => `${humanize(status)} ${count}`).join(' · ') : 'No retained jobs';
   }
 
   function uniqueJobValues(values: Array<string | undefined>): string[] {
@@ -534,11 +547,17 @@
 
               <section class="repository-section" aria-labelledby="job-timeline-title"><div class="section-heading"><div><p class="section-kicker">STRUCTURED, BOUNDED</p><h2 id="job-timeline-title">Progress timeline</h2></div><span class="count-badge">{selectedJob.progress?.length || 0}</span></div>{#if !selectedJob.progress?.length}<div class="empty-state"><History size={23} /><h3>No retained progress events</h3><p>The current state and timestamps remain authoritative.</p></div>{:else}<ol class="job-timeline">{#each selectedJob.progress as event, index}<li><span class="timeline-mark"></span><div><strong>{humanize(event.phase || event.type || `Event ${index + 1}`)}</strong><span>{[event.collection && humanize(event.collection), event.page ? `page ${event.page}` : '', event.records_fetched ? `${event.records_fetched} fetched` : '', event.records_skipped ? `${event.records_skipped} skipped` : '', event.records_failed ? `${event.records_failed} failed` : ''].filter(Boolean).join(' · ') || 'State transition'}</span>{#if event.rate_limit_state || event.retry_after}<small>{event.rate_limit_state ? `Rate limit: ${humanize(event.rate_limit_state)}` : ''}{event.retry_after ? ` · retry after ${event.retry_after}` : ''}</small>{/if}</div></li>{/each}</ol>{/if}</section>
             {:else}
-              <div class="empty-state large-empty"><History size={27} /><h2>Job is no longer retained</h2><p>The bounded daemon history expired this job. Return to the current list.</p><button class="text-action" onclick={closeJob}>Show retained jobs</button></div>
+              <div class="empty-state large-empty"><History size={27} /><h2>Job is no longer retained</h2><p>The bounded daemon history expired this job. Cached records, maintenance frontiers, and audit receipts are unaffected.</p><button class="text-action" onclick={closeJob}>Show retained jobs</button></div>
             {/if}
           {:else}
             <div class="intro section-intro"><p class="eyebrow">EXECUTION</p><h1>Jobs</h1><p>Daemon-owned work, bounded history, and deliberate supervision with durable receipts.</p></div>
             <div class="metric-strip jobs-metrics"><div><span>Active</span><strong>{activeJobs.length}</strong></div><div><span>Failed</span><strong>{failedJobs.length}</strong><button class="text-action" onclick={() => setJobFilter('state', 'failed')}>Show failed</button></div><div><span>Terminal</span><strong>{snapshot.jobs.length - activeJobs.length}</strong></div><div><span>Retained</span><strong>{snapshot.jobs.length}</strong></div></div>
+            <section class="retention-summary" aria-labelledby="retention-title">
+              <div><p class="section-kicker">LIFECYCLE POLICY</p><h2 id="retention-title">Bounded job history</h2><span>Routine successes expire after {retentionDuration(snapshot.job_retention.success_ttl_seconds)}; failures and interruptions after {retentionDuration(snapshot.job_retention.diagnostic_ttl_seconds)}.</span></div>
+              <dl><div><dt>Terminal cap</dt><dd>{snapshot.job_retention.max_terminal_jobs || '—'}</dd></div><div><dt>Diagnostic cohort</dt><dd>{snapshot.job_retention.max_diagnostic_jobs || '—'}</dd></div><div><dt>Progress cap</dt><dd>{snapshot.job_retention.max_progress_events || '—'} / job</dd></div><div><dt>Oldest retained</dt><dd>{snapshot.job_retention.oldest_retained_at ? new Date(snapshot.job_retention.oldest_retained_at).toLocaleString() : 'None'}</dd></div></dl>
+              <p>Retained by state: {retainedStatusSummary()}. Expired this runtime: {snapshot.job_retention.expired_total}; cap-truncated: {snapshot.job_retention.truncated_total}.{snapshot.job_retention.last_pruned_at ? ` Last prune ${new Date(snapshot.job_retention.last_pruned_at).toLocaleString()}.` : ''}</p>
+              <p>Expiry removes only operational job history. Cached GitCode records, maintenance frontiers and policies, RAG indexes, and audit receipts remain intact.</p>
+            </section>
             <div class="job-filter-bar" aria-label="Job filters">
               <label><span>State</span><select value={jobStateFilter} onchange={(event) => setJobFilter('state', event.currentTarget.value)}><option value="">All states</option>{#each [...new Set(snapshot.jobs.map((job) => job.status))].sort() as value}<option value={value}>{humanize(value)}</option>{/each}</select></label>
               <label><span>Type</span><select value={jobTypeFilter} onchange={(event) => setJobFilter('type', event.currentTarget.value)}><option value="">All types</option>{#each [...new Set(snapshot.jobs.map((job) => job.type))].sort() as value}<option value={value}>{humanize(value)}</option>{/each}</select></label>

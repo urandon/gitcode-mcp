@@ -371,6 +371,11 @@ func RenderRedactedEffectiveConfig(eff EffectiveConfig, status CredentialStatus)
 		fmt.Fprintf(&b, "repo_local_config_path: %s\n", eff.RepoLocalConfigPath)
 	}
 	fmt.Fprintf(&b, "service_runtime_dir: %s\n", eff.Config.Service.RuntimeDir)
+	fmt.Fprintf(&b, "service_job_success_ttl: %s\n", eff.Config.Service.JobRetention.SuccessTTL)
+	fmt.Fprintf(&b, "service_job_diagnostic_ttl: %s\n", eff.Config.Service.JobRetention.DiagnosticTTL)
+	fmt.Fprintf(&b, "service_job_max_terminal: %d\n", eff.Config.Service.JobRetention.MaxTerminalJobs)
+	fmt.Fprintf(&b, "service_job_max_diagnostic: %d\n", eff.Config.Service.JobRetention.MaxDiagnosticJobs)
+	fmt.Fprintf(&b, "service_job_max_progress_events: %d\n", eff.Config.Service.JobRetention.MaxProgressEvents)
 	fmt.Fprintf(&b, "rag_default_profile: %s\n", eff.Config.RAG.DefaultProfile)
 	fmt.Fprintf(&b, "rag_model_store_path: %s\n", eff.Config.RAG.ModelStorePath)
 	fmt.Fprintf(&b, "feedback_enabled: %t\n", eff.Config.Feedback.Enabled)
@@ -640,6 +645,33 @@ func setYAMLRAGValue(cfg *fileConfig, section, key, value string) error {
 		if key == "runtime_dir" {
 			cfg.Service.RuntimeDir = &value
 		}
+	case section == "service.job_retention":
+		if cfg.Service == nil {
+			cfg.Service = &serviceFileConfig{}
+		}
+		if cfg.Service.JobRetention == nil {
+			cfg.Service.JobRetention = &serviceJobRetentionFileConfig{}
+		}
+		retention := cfg.Service.JobRetention
+		switch key {
+		case "success_ttl":
+			retention.SuccessTTL = &value
+		case "diagnostic_ttl":
+			retention.DiagnosticTTL = &value
+		case "max_terminal_jobs", "max_diagnostic_jobs", "max_progress_events":
+			n, err := strconv.Atoi(value)
+			if err != nil {
+				return fmt.Errorf("config: invalid %s.%s %q: %w", section, key, value, err)
+			}
+			switch key {
+			case "max_terminal_jobs":
+				retention.MaxTerminalJobs = &n
+			case "max_diagnostic_jobs":
+				retention.MaxDiagnosticJobs = &n
+			case "max_progress_events":
+				retention.MaxProgressEvents = &n
+			}
+		}
 	case section == "rag":
 		rag := ensureRAGFile(cfg)
 		switch key {
@@ -831,30 +863,35 @@ func splitYAMLList(value string) []string {
 
 func defaultFieldSources() map[string]string {
 	return map[string]string{
-		"cache_path":                    "default",
-		"lock_path":                     "default",
-		"cache_mode":                    "default",
-		"gitcode_base_url":              "default",
-		"default_timeout":               "default",
-		"max_response_size":             "default",
-		"max_retries":                   "default",
-		"rate_limit_rps":                "default",
-		"rate_limit_burst":              "default",
-		"format":                        "default",
-		"mcp_tool_access":               "default",
-		"credential.keyring_service":    "default",
-		"credential.keyring_account":    "default",
-		"service.runtime_dir":           "default",
-		"rag.model_store_path":          "default",
-		"rag.default_profile":           "default",
-		"rag.providers.ollama.endpoint": "default",
-		"rag.indexing.profile":          "default",
-		"rag.search.profile":            "default",
-		"feedback.enabled":              "default",
-		"feedback.sink":                 "default",
-		"feedback.repo_id":              "default",
-		"feedback.labels":               "default",
-		"feedback.duplicate_policy":     "default",
+		"cache_path":                                "default",
+		"lock_path":                                 "default",
+		"cache_mode":                                "default",
+		"gitcode_base_url":                          "default",
+		"default_timeout":                           "default",
+		"max_response_size":                         "default",
+		"max_retries":                               "default",
+		"rate_limit_rps":                            "default",
+		"rate_limit_burst":                          "default",
+		"format":                                    "default",
+		"mcp_tool_access":                           "default",
+		"credential.keyring_service":                "default",
+		"credential.keyring_account":                "default",
+		"service.runtime_dir":                       "default",
+		"service.job_retention.success_ttl":         "default",
+		"service.job_retention.diagnostic_ttl":      "default",
+		"service.job_retention.max_terminal_jobs":   "default",
+		"service.job_retention.max_diagnostic_jobs": "default",
+		"service.job_retention.max_progress_events": "default",
+		"rag.model_store_path":                      "default",
+		"rag.default_profile":                       "default",
+		"rag.providers.ollama.endpoint":             "default",
+		"rag.indexing.profile":                      "default",
+		"rag.search.profile":                        "default",
+		"feedback.enabled":                          "default",
+		"feedback.sink":                             "default",
+		"feedback.repo_id":                          "default",
+		"feedback.labels":                           "default",
+		"feedback.duplicate_policy":                 "default",
 	}
 }
 
@@ -927,6 +964,24 @@ func applyServiceFileSources(sources map[string]string, file *serviceFileConfig,
 	}
 	if file.RuntimeDir != nil {
 		sources["service.runtime_dir"] = source
+	}
+	if file.JobRetention == nil {
+		return
+	}
+	if file.JobRetention.SuccessTTL != nil {
+		sources["service.job_retention.success_ttl"] = source
+	}
+	if file.JobRetention.DiagnosticTTL != nil {
+		sources["service.job_retention.diagnostic_ttl"] = source
+	}
+	if file.JobRetention.MaxTerminalJobs != nil {
+		sources["service.job_retention.max_terminal_jobs"] = source
+	}
+	if file.JobRetention.MaxDiagnosticJobs != nil {
+		sources["service.job_retention.max_diagnostic_jobs"] = source
+	}
+	if file.JobRetention.MaxProgressEvents != nil {
+		sources["service.job_retention.max_progress_events"] = source
 	}
 }
 
@@ -1088,6 +1143,9 @@ func applyRepoLocalRAG(root, repoConfigPath string, repoFile fileConfig, eff *Ef
 func validateRepoLocalRuntimeStorage(root, repoConfigPath string, file fileConfig) error {
 	if file.Service != nil && file.Service.RuntimeDir != nil {
 		return fmt.Errorf("config: repo-local config %s cannot set service.runtime_dir; configure service runtime globally or with %s", repoConfigPath, EnvServiceRuntimeDir)
+	}
+	if file.Service != nil && file.Service.JobRetention != nil {
+		return fmt.Errorf("config: repo-local config %s cannot set service.job_retention; configure daemon retention globally", repoConfigPath)
 	}
 	if file.RAG != nil && file.RAG.ModelStorePath != nil {
 		return fmt.Errorf("config: repo-local config %s cannot set rag.model_store_path; configure model storage globally or with %s", repoConfigPath, EnvRAGModelStore)
@@ -1359,6 +1417,12 @@ func defaultYAMLConfig() string {
 		"service:",
 		"  # Override with GITCODE_MCP_SERVICE_RUNTIME_DIR when the daemon runtime should live elsewhere.",
 		"  # runtime_dir: /Volumes/fast/gitcode-mcp/runtime",
+		"  job_retention:",
+		"    success_ttl: 48h",
+		"    diagnostic_ttl: 336h",
+		"    max_terminal_jobs: 128",
+		"    max_diagnostic_jobs: 32",
+		"    max_progress_events: 256",
 		"rag:",
 		"  # Override with GITCODE_MCP_RAG_MODEL_STORE for gitcode-mcp-managed model storage.",
 		"  # model_store_path: /Volumes/models/gitcode-mcp",
