@@ -1106,7 +1106,15 @@ func executeRAGCommand(ctx context.Context, args []string, opts options, stdout 
 			fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), deps.Source))
 			return 1
 		}
-		result, err := rag.Setup(ctx, rag.SetupRequest{Config: eff.Config, Profile: opts.profile, Yes: opts.yes, DryRun: opts.dryRun, Runtime: deps.RAGRuntime})
+		var progress func(rag.SetupProgress)
+		if opts.format == "text" {
+			progress = func(event rag.SetupProgress) {
+				if event.Phase == "model_pull_started" {
+					fmt.Fprintf(stderr, "rag setup: pulling model %s; this can take several minutes...\n", event.Model)
+				}
+			}
+		}
+		result, err := rag.Setup(ctx, rag.SetupRequest{Config: eff.Config, Profile: opts.profile, Yes: opts.yes, DryRun: opts.dryRun, Runtime: deps.RAGRuntime, Progress: progress})
 		if err != nil {
 			return writeError(stderr, opts.format, err)
 		}
@@ -1277,6 +1285,9 @@ func renderRAGSetupText(w io.Writer, result rag.SetupResult) {
 	fmt.Fprintf(w, "embedding_smoke: %s\n", result.EmbeddingSmoke)
 	if len(result.Actions) > 0 {
 		fmt.Fprintf(w, "actions: %s\n", strings.Join(result.Actions, "; "))
+	}
+	if len(result.NextActions) > 0 {
+		fmt.Fprintf(w, "next_actions: %s\n", strings.Join(result.NextActions, "; "))
 	}
 	if len(result.InstallInstructions) > 0 {
 		fmt.Fprintf(w, "install_instructions: %s\n", strings.Join(result.InstallInstructions, " "))

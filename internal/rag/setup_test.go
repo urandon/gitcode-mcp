@@ -16,6 +16,8 @@ type fakeRuntime struct {
 	pullErr        error
 	smokeErr       error
 	pullCalls      int
+	pullTimeout    time.Duration
+	modelOnPullErr bool
 	smokeCalls     int
 	startCalls     int
 }
@@ -38,9 +40,13 @@ func (r *fakeRuntime) ListModels(context.Context, string, time.Duration) ([]stri
 	return append([]string(nil), r.models...), nil
 }
 
-func (r *fakeRuntime) PullModel(_ context.Context, _, model string, _ time.Duration) error {
+func (r *fakeRuntime) PullModel(_ context.Context, _, model string, timeout time.Duration) error {
 	r.pullCalls++
+	r.pullTimeout = timeout
 	if r.pullErr != nil {
+		if r.modelOnPullErr {
+			r.models = append(r.models, model)
+		}
 		return r.pullErr
 	}
 	r.models = append(r.models, model)
@@ -96,11 +102,31 @@ func TestSetupScenarios(t *testing.T) {
 
 	t.Run("yes pulls model and runs smoke", func(t *testing.T) {
 		runtime := &fakeRuntime{executablePath: "/usr/local/bin/ollama", live: true}
+		var progress []SetupProgress
+		result, err := Setup(context.Background(), SetupRequest{Config: cfg, Runtime: runtime, Yes: true, Progress: func(event SetupProgress) {
+			progress = append(progress, event)
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Status != "ready" || !result.PullAttempted || runtime.pullCalls != 1 || runtime.smokeCalls != 1 || !result.ModelAvailable || runtime.pullTimeout < minimumModelPullTimeout {
+			t.Fatalf("result=%#v runtime=%#v", result, runtime)
+		}
+		if len(progress) != 2 || progress[0].Phase != "model_pull_started" || progress[1].Phase != "model_pull_finished" {
+			t.Fatalf("progress=%#v", progress)
+		}
+		if len(result.NextActions) == 0 {
+			t.Fatalf("missing next actions: %#v", result)
+		}
+	})
+
+	t.Run("pull transport failure recovers when model became available", func(t *testing.T) {
+		runtime := &fakeRuntime{executablePath: "/usr/local/bin/ollama", live: true, pullErr: context.DeadlineExceeded, modelOnPullErr: true}
 		result, err := Setup(context.Background(), SetupRequest{Config: cfg, Runtime: runtime, Yes: true})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.Status != "ready" || !result.PullAttempted || runtime.pullCalls != 1 || runtime.smokeCalls != 1 || !result.ModelAvailable {
+		if result.Status != "ready" || !result.ModelAvailable || result.EmbeddingSmoke != "ok" {
 			t.Fatalf("result=%#v runtime=%#v", result, runtime)
 		}
 	})
