@@ -27,12 +27,21 @@ type Runtime interface {
 
 type OSRuntime struct{}
 
+const minimumModelPullTimeout = 30 * time.Minute
+
+type SetupProgress struct {
+	Phase   string `json:"phase"`
+	Message string `json:"message"`
+	Model   string `json:"model,omitempty"`
+}
+
 type SetupRequest struct {
-	Config  config.Config
-	Profile string
-	Yes     bool
-	DryRun  bool
-	Runtime Runtime
+	Config   config.Config
+	Profile  string
+	Yes      bool
+	DryRun   bool
+	Runtime  Runtime
+	Progress func(SetupProgress)
 }
 
 type SetupResult struct {
@@ -54,6 +63,7 @@ type SetupResult struct {
 	PullAttempted       bool     `json:"pull_attempted"`
 	EmbeddingSmoke      string   `json:"embedding_smoke"`
 	Actions             []string `json:"actions,omitempty"`
+	NextActions         []string `json:"next_actions,omitempty"`
 	Diagnostics         []string `json:"diagnostics,omitempty"`
 	InstallInstructions []string `json:"install_instructions,omitempty"`
 }
@@ -156,24 +166,51 @@ func Setup(ctx context.Context, req SetupRequest) (SetupResult, error) {
 	}
 	result.ModelAvailable = containsModel(models, profile.Model)
 	if !result.ModelAvailable {
-		result.Actions = append(result.Actions, "pull model "+profile.Model)
+		result.Actions = append(result.Actions,
+			"run gitcode-mcp rag setup --yes to pull model "+profile.Model,
+			"or run ollama pull "+profile.Model,
+		)
 		if req.DryRun || !req.Yes {
 			result.Status = "missing_model"
 			return result, nil
 		}
 		result.PullAttempted = true
-		if err := runtime.PullModel(ctx, provider.Endpoint, profile.Model, timeout); err != nil {
-			result.Diagnostics = append(result.Diagnostics, "model pull failed: "+err.Error())
-			result.Status = "model_pull_failed"
-			return result, nil
+		emitSetupProgress(req.Progress, SetupProgress{
+			Phase:   "model_pull_started",
+			Message: "pulling model; this can take several minutes",
+			Model:   profile.Model,
+		})
+		pullTimeout := timeout
+		if pullTimeout < minimumModelPullTimeout {
+			pullTimeout = minimumModelPullTimeout
 		}
-		models, err = runtime.ListModels(ctx, provider.Endpoint, timeout)
-		if err != nil {
-			result.Diagnostics = append(result.Diagnostics, "model list after pull failed: "+err.Error())
-			result.Status = "provider_error"
-			return result, nil
+		if pullErr := runtime.PullModel(ctx, provider.Endpoint, profile.Model, pullTimeout); pullErr != nil {
+			// Ollama may continue a pull after the initiating HTTP request is
+			// interrupted. Re-check provider state before reporting a failure so
+			// a completed download is not misclassified as failed.
+			models, listErr := runtime.ListModels(ctx, provider.Endpoint, timeout)
+			if listErr == nil && containsModel(models, profile.Model) {
+				result.ModelAvailable = true
+				result.Diagnostics = append(result.Diagnostics, "model became available after pull transport ended: "+pullErr.Error())
+			} else {
+				result.Diagnostics = append(result.Diagnostics, "model pull failed: "+pullErr.Error())
+				if listErr != nil {
+					result.Diagnostics = append(result.Diagnostics, "model verification after pull failed: "+listErr.Error())
+				}
+				result.Status = "model_pull_failed"
+				return result, nil
+			}
 		}
-		result.ModelAvailable = containsModel(models, profile.Model)
+		if !result.ModelAvailable {
+			models, err = runtime.ListModels(ctx, provider.Endpoint, timeout)
+			if err != nil {
+				result.Diagnostics = append(result.Diagnostics, "model list after pull failed: "+err.Error())
+				result.Status = "provider_error"
+				return result, nil
+			}
+			result.ModelAvailable = containsModel(models, profile.Model)
+		}
+		emitSetupProgress(req.Progress, SetupProgress{Phase: "model_pull_finished", Message: "model pull finished", Model: profile.Model})
 	}
 	if !result.ModelAvailable {
 		result.Status = "missing_model"
@@ -191,7 +228,18 @@ func Setup(ctx context.Context, req SetupRequest) (SetupResult, error) {
 	}
 	result.EmbeddingSmoke = "ok"
 	result.Status = "ready"
+	result.NextActions = []string{
+		"gitcode-mcp rag status --repo OWNER/REPO",
+		"gitcode-mcp rag index --repo OWNER/REPO",
+		"gitcode-mcp rag search --repo OWNER/REPO QUERY",
+	}
 	return result, nil
+}
+
+func emitSetupProgress(progress func(SetupProgress), event SetupProgress) {
+	if progress != nil {
+		progress(event)
+	}
 }
 
 func (OSRuntime) LookPath(executable string) (string, error) {

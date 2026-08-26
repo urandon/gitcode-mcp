@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -273,7 +274,7 @@ func TestRAGSetupCommand(t *testing.T) {
 			t.Fatalf("code=%d stderr=%q", code, stderr.String())
 		}
 		out := stdout.String()
-		for _, want := range []string{"status: missing_model", "profile: qwen3-ollama-0_6b-1024", "provider: ollama", "actions: pull model"} {
+		for _, want := range []string{"status: missing_model", "profile: qwen3-ollama-0_6b-1024", "provider: ollama", "actions: run gitcode-mcp rag setup --yes"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("rag setup output missing %q in %q", want, out)
 			}
@@ -293,6 +294,32 @@ func TestRAGSetupCommand(t *testing.T) {
 		}
 		if runtime.pullCalls != 1 || runtime.smokeCalls != 1 || !strings.Contains(stdout.String(), "status: ready") {
 			t.Fatalf("runtime=%#v stdout=%q", runtime, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "pulling model") {
+			t.Fatalf("stderr=%q", stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "next_actions:") || !strings.Contains(stdout.String(), "--repo OWNER/REPO") {
+			t.Fatalf("stdout=%q", stdout.String())
+		}
+	})
+
+	t.Run("SCN-RAG-SETUP-JSON-REMAINS-SINGLE-DOCUMENT", func(t *testing.T) {
+		src := newCLIConfigSource(t)
+		runtime := &cliRAGRuntime{executablePath: "/usr/local/bin/ollama", live: true}
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps([]string{"rag", "setup", "--yes", "--format", "json"}, &stdout, &stderr, nil, localCommandDeps{Source: src, RAGRuntime: runtime})
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("json progress leaked to stderr: %q", stderr.String())
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+			t.Fatalf("invalid json: %v output=%q", err, stdout.String())
+		}
+		if payload["status"] != "ready" {
+			t.Fatalf("payload=%#v", payload)
 		}
 	})
 }

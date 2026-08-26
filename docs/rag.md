@@ -99,6 +99,16 @@ gitcode-mcp rag setup --yes
 
 `--dry-run` reports missing actions without pulling a model. `--yes` is allowed to pull the configured model and run a small embedding smoke test.
 
+In text mode, a confirmed model download prints an immediate progress handoff before it starts. Model pulls use a long-running download timeout rather than the short provider-probe timeout. If the pull transport is interrupted, setup checks provider state again before reporting a failure because Ollama may finish the download after the initiating request disconnects.
+
+When setup is ready, continue with an explicit repository id:
+
+```sh
+gitcode-mcp rag status --repo OWNER/REPO
+gitcode-mcp rag index --repo OWNER/REPO
+gitcode-mcp rag search --repo OWNER/REPO "query"
+```
+
 For the normal end-to-end setup, prefer the maintenance plan/apply flow. It also enrolls the selected cache for daemon head refresh, historical backfill, and generation-based RAG repair:
 
 ```sh
