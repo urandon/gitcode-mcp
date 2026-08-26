@@ -123,6 +123,22 @@ jobs:
               --verify-tag
           fi
 
+      - name: Wait for GitCode tag mirror
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          if [ -z "$GITCODE_TOKEN" ]; then
+            echo "GITCODE_TOKEN is not configured; skipping GitCode tag wait."
+            exit 0
+          fi
+          python3 scripts/release/wait_gitcode_tag.py \
+            --repo-url https://gitcode.com/urandon/gitcode-mcp.git \
+            --tag "$RELEASE_TAG" \
+            --expected-commit "$(git rev-parse HEAD)" \
+            --timeout 600 \
+            --interval 5
+
       - name: Publish GitCode release
         env:
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}

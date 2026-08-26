@@ -61,6 +61,44 @@ class UploadGitCodeAssetsTest(unittest.TestCase):
                 upload.upload_assets(repo="owner/repo", tag="v0.2.1", assets=[self.asset(directory)], token="token", request=transport, verify_delay=0)
         self.assertFalse(any(call[0] == "PUT" for call in transport.calls))
 
+    def test_missing_api_size_is_verified_through_download_url(self):
+        with tempfile.TemporaryDirectory() as directory:
+            asset = self.asset(directory)
+
+            def transport(method, url, headers, body):
+                return {"assets": [{"name": "artifact.tar.gz", "browser_download_url": "https://download.example/artifact"}]}
+
+            downloads = []
+            result = upload.upload_assets(
+                repo="owner/repo",
+                tag="v0.2.1",
+                assets=[asset],
+                token="token",
+                request=transport,
+                download_size=lambda url: downloads.append(url) or 8,
+                verify_delay=0,
+            )
+        self.assertEqual(result[0]["status"], "already_present")
+        self.assertEqual(downloads, ["https://download.example/artifact"])
+
+    def test_missing_api_size_with_wrong_download_size_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            asset = self.asset(directory)
+
+            def transport(method, url, headers, body):
+                return {"assets": [{"name": "artifact.tar.gz", "browser_download_url": "https://download.example/artifact"}]}
+
+            with self.assertRaisesRegex(upload.UploadError, "size differs"):
+                upload.upload_assets(
+                    repo="owner/repo",
+                    tag="v0.2.1",
+                    assets=[asset],
+                    token="token",
+                    request=transport,
+                    download_size=lambda url: 7,
+                    verify_delay=0,
+                )
+
     def test_rejects_non_https_upload_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             asset = self.asset(directory)
