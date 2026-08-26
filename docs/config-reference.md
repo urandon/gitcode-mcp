@@ -50,6 +50,13 @@ credential:
   store: auto
   keyring_service: gitcode-mcp
   keyring_account: token
+service:
+  job_retention:
+    success_ttl: 48h
+    diagnostic_ttl: 336h
+    max_terminal_jobs: 128
+    max_diagnostic_jobs: 32
+    max_progress_events: 256
 rag:
   model_store_path: /path/to/models/gitcode-mcp
   default_profile: qwen3-ollama-0_6b-1024
@@ -98,6 +105,11 @@ rag:
 | `mcp.tools.access` | string | `write` | MCP discovery policy. `write` exposes read and write tools; `read` explicitly selects the read/status-only surface. Write calls still require `write_mode: "live"` and the normal readiness/audit gates. |
 | `feedback.enabled` | bool | `false` | Enables submission to the trusted feedback sink. Preparation remains available while disabled. |
 | `feedback.sink` | string | `gitcode_issues` | Feedback destination adapter. The first supported sink is GitCode issues. |
+| `service.job_retention.success_ttl` | duration | `48h` | TTL for succeeded and superseded jobs; bounded to 1 minute–90 days. |
+| `service.job_retention.diagnostic_ttl` | duration | `336h` | TTL for failed, interrupted, and cancelled jobs; must be at least the success TTL and at most 365 days. |
+| `service.job_retention.max_terminal_jobs` | int | `128` | Absolute terminal-history cap (1–4096); active jobs are never pruned. |
+| `service.job_retention.max_diagnostic_jobs` | int | `32` | Separate hard bound for latest-failure-per-registration/work-stream preservation. |
+| `service.job_retention.max_progress_events` | int | `256` | Per-job progress-event cap (1–4096). |
 | `feedback.repo_id` | string | empty | Preconfigured repository binding used by the sink. Callers cannot override this destination. Required when feedback is enabled. |
 | `feedback.labels` | pipe-separated string | empty | Labels attached to newly submitted reports, for example `feedback\|dogfood`. |
 | `feedback.duplicate_policy` | string | `suggest` | Duplicate handling policy. `suggest` blocks on likely candidates for explicit review; `return_existing` selects the strongest likely match without writing. Exact fingerprint matches never create another issue. |

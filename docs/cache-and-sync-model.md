@@ -68,7 +68,7 @@ gitcode-mcp service cancel JOB_ID
 
 `--daemon` starts a service-owned sync job and keeps the CLI attached to compact sync progress. `--detach` starts the same service-owned job and returns the job id immediately. The daemon path is collection-oriented; targeted `--id`/`--input` sync remains a foreground operation. Jobs use the same bulk sync service paths as foreground sync, so existing frontiers/checkpoints still drive resumability after bounded or interrupted collection sync.
 
-Service job state is stored separately from the cache in the service runtime `jobs.json` snapshot. It is operational state, not cache content: active jobs are always kept, completed/cancelled/failed/interrupted history is pruned to the latest 128 terminal jobs, and each job keeps only the latest 256 progress events. This keeps long-running sync/RAG observability bounded without deleting cached GitCode records.
+Service job state is stored separately from the cache in the mode-`0600` service runtime `jobs.json` snapshot. It is operational state, not cache content. Active jobs have no TTL. By default, succeeded/superseded jobs expire after 48 hours; failed/interrupted/cancelled jobs expire after 14 days. The latest significant failure per maintenance registration or work stream survives its ordinary TTL inside a separately bounded diagnostic cohort. A final 128-terminal-job cap and 256-progress-event cap keep the snapshot bounded. Pruning runs on load, job updates/completion, and idle maintenance reconciliation. It never deletes cached GitCode records, sync frontiers, maintenance policy, RAG indexes, or audit receipts.
 
 The sync command supports these live sync selectors:
 

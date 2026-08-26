@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/service"
 )
 
@@ -124,6 +125,7 @@ func TestJobManagerPrunesStoredTerminalJobs(t *testing.T) {
 	path := filepath.Join(dir, "jobs.json")
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	manager := NewJobManager(path)
+	manager.now = func() time.Time { return now }
 	manager.mu.Lock()
 	for i := 1; i <= maxStoredTerminalJobs+2; i++ {
 		finished := now.Add(time.Duration(i) * time.Minute)
@@ -165,6 +167,7 @@ func TestJobManagerTrimsStoredProgressEvents(t *testing.T) {
 	path := filepath.Join(dir, "jobs.json")
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	manager := NewJobManager(path)
+	manager.now = func() time.Time { return now }
 	progress := make([]service.ProgressEvent, 0, maxStoredProgressEvents+3)
 	for i := 0; i < maxStoredProgressEvents+3; i++ {
 		progress = append(progress, service.ProgressEvent{Type: "records", Page: i + 1})
@@ -186,6 +189,124 @@ func TestJobManagerTrimsStoredProgressEvents(t *testing.T) {
 	}
 	if job.Progress[0].Page != 4 {
 		t.Fatalf("first kept progress page = %d, want 4", job.Progress[0].Page)
+	}
+}
+
+func TestJobManagerRetentionTTLsAndDiagnosticCohort(t *testing.T) {
+	now := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	manager := NewJobManagerWithRetention(filepath.Join(t.TempDir(), "jobs.json"), config.ServiceJobRetentionConfig{
+		SuccessTTL: 2 * time.Hour, DiagnosticTTL: 24 * time.Hour,
+		MaxTerminalJobs: 10, MaxDiagnosticJobs: 2, MaxProgressEvents: 5,
+	})
+	manager.now = func() time.Time { return now }
+	add := func(id, status, registration string, age time.Duration) {
+		finished := now.Add(-age)
+		manager.jobs[id] = &Job{ID: id, Type: "sync", RegistrationID: registration, Status: status, CreatedAt: finished.Add(-time.Minute), UpdatedAt: finished, FinishedAt: &finished}
+	}
+	manager.mu.Lock()
+	add("job-success-expired", JobStatusSucceeded, "reg-a", 2*time.Hour)
+	add("job-success-recent", JobStatusSucceeded, "reg-a", time.Hour)
+	add("job-failure-old", JobStatusFailed, "reg-a", 72*time.Hour)
+	add("job-failure-latest", JobStatusFailed, "reg-a", 48*time.Hour)
+	add("job-cancelled-recent", JobStatusCancelled, "reg-b", time.Hour)
+	manager.jobs["job-active"] = &Job{ID: "job-active", Type: "sync", Status: JobStatusRunning, CreatedAt: now.Add(-365 * 24 * time.Hour), UpdatedAt: now.Add(-time.Hour)}
+	manager.mu.Unlock()
+
+	if err := manager.Prune(); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"job-success-expired", "job-failure-old"} {
+		if _, ok := manager.Get(id); ok {
+			t.Fatalf("%s was not expired", id)
+		}
+	}
+	for _, id := range []string{"job-success-recent", "job-failure-latest", "job-cancelled-recent", "job-active"} {
+		if _, ok := manager.Get(id); !ok {
+			t.Fatalf("%s was unexpectedly pruned", id)
+		}
+	}
+	snapshot := manager.RetentionSnapshot()
+	if snapshot.ExpiredTotal != 2 || snapshot.LastExpired != 2 || snapshot.Active != 1 || snapshot.Terminal != 3 {
+		t.Fatalf("retention snapshot=%+v", snapshot)
+	}
+}
+
+func TestJobManagerPrunesOnLoadAndPreservesInterruptedJob(t *testing.T) {
+	now := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "jobs.json")
+	old := now.Add(-3 * time.Hour)
+	jobs := []Job{
+		{ID: "job-000001", Type: "sync", Status: JobStatusSucceeded, CreatedAt: old, UpdatedAt: old, FinishedAt: &old},
+		{ID: "job-000002", Type: "sync", RegistrationID: "reg-a", Status: JobStatusRunning, CreatedAt: old, UpdatedAt: old},
+	}
+	data, err := json.Marshal(jobs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewJobManagerWithRetention(path, config.ServiceJobRetentionConfig{
+		SuccessTTL: time.Hour, DiagnosticTTL: 24 * time.Hour,
+		MaxTerminalJobs: 8, MaxDiagnosticJobs: 2, MaxProgressEvents: 8,
+	})
+	manager.now = func() time.Time { return now }
+	if err := manager.LoadAndMarkInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := manager.Get("job-000001"); ok {
+		t.Fatal("expired success survived load pruning")
+	}
+	interrupted, ok := manager.Get("job-000002")
+	if !ok || interrupted.Status != JobStatusInterrupted {
+		t.Fatalf("restart job=%+v, retained=%t", interrupted, ok)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("jobs.json mode=%#o, want 0600", got)
+	}
+}
+
+func TestJobManagerPrunesOnCompletion(t *testing.T) {
+	now := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	manager := NewJobManagerWithRetention(filepath.Join(t.TempDir(), "jobs.json"), config.ServiceJobRetentionConfig{
+		SuccessTTL: time.Hour, DiagnosticTTL: 24 * time.Hour,
+		MaxTerminalJobs: 8, MaxDiagnosticJobs: 2, MaxProgressEvents: 8,
+	})
+	manager.now = func() time.Time { return now }
+	old := now.Add(-2 * time.Hour)
+	manager.jobs["job-old"] = &Job{ID: "job-old", Type: "sync", Status: JobStatusSucceeded, CreatedAt: old, UpdatedAt: old, FinishedAt: &old}
+	manager.jobs["job-current"] = &Job{ID: "job-current", Type: "fake", Status: JobStatusRunning, CreatedAt: now, UpdatedAt: now}
+	manager.finishJob("job-current", JobStatusSucceeded, "")
+	if _, ok := manager.Get("job-old"); ok {
+		t.Fatal("completion did not prune expired history")
+	}
+	if current, ok := manager.Get("job-current"); !ok || current.Status != JobStatusSucceeded {
+		t.Fatalf("completed job=%+v, retained=%t", current, ok)
+	}
+}
+
+func TestJobManagerIdleReconcilePrunesExpiredHistory(t *testing.T) {
+	now := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	jobs := NewJobManagerWithRetention(filepath.Join(t.TempDir(), "jobs.json"), config.ServiceJobRetentionConfig{
+		SuccessTTL: time.Hour, DiagnosticTTL: 2 * time.Hour,
+		MaxTerminalJobs: 8, MaxDiagnosticJobs: 2, MaxProgressEvents: 8,
+	})
+	jobs.now = func() time.Time { return now }
+	finished := now.Add(-2 * time.Hour)
+	jobs.mu.Lock()
+	jobs.jobs["job-expired"] = &Job{ID: "job-expired", Type: "sync", Status: JobStatusSucceeded, CreatedAt: finished, UpdatedAt: finished, FinishedAt: &finished}
+	jobs.mu.Unlock()
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), jobs, filepath.Join(t.TempDir(), "managed-caches.json"))
+	maintenance.now = func() time.Time { return now }
+	if _, err := maintenance.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := jobs.Get("job-expired"); ok {
+		t.Fatal("idle reconcile did not prune expired job")
 	}
 }
 

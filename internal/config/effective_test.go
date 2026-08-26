@@ -5,11 +5,40 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zalando/go-keyring"
 )
 
 func TestEffectiveConfigScenarios(t *testing.T) {
+	t.Run("SCN-SERVICE-JOB-RETENTION-VALIDATED", func(t *testing.T) {
+		src := newMemorySource(t)
+		path := filepath.Join(src.configDir, "retention.yaml")
+		src.env[EnvMCPConfigPath] = path
+		src.files[path] = []byte("service:\n  job_retention:\n    success_ttl: 24h\n    diagnostic_ttl: 240h\n    max_terminal_jobs: 64\n    max_diagnostic_jobs: 16\n    max_progress_events: 128\n")
+		eff, err := LoadEffective(src, Overrides{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := eff.Config.Service.JobRetention
+		if got.SuccessTTL != 24*time.Hour || got.DiagnosticTTL != 240*time.Hour || got.MaxTerminalJobs != 64 || got.MaxDiagnosticJobs != 16 || got.MaxProgressEvents != 128 {
+			t.Fatalf("job retention=%+v", got)
+		}
+		if eff.FieldSources["service.job_retention.success_ttl"] != "explicit-yaml" {
+			t.Fatalf("sources=%+v", eff.FieldSources)
+		}
+	})
+
+	t.Run("SCN-SERVICE-JOB-RETENTION-REJECTS-UNBOUNDED", func(t *testing.T) {
+		src := newMemorySource(t)
+		path := filepath.Join(src.configDir, "retention-invalid.yaml")
+		src.env[EnvMCPConfigPath] = path
+		src.files[path] = []byte("service:\n  job_retention:\n    success_ttl: 0s\n")
+		if _, err := LoadEffective(src, Overrides{}); err == nil || !strings.Contains(err.Error(), "success_ttl") {
+			t.Fatalf("expected bounded retention error, got %v", err)
+		}
+	})
+
 	t.Run("SCN-CONFIG-LOCATE-DEFAULT-YAML", func(t *testing.T) {
 		src := newMemorySource(t)
 		loc := Locate(src)

@@ -329,6 +329,22 @@ export type ObservationSnapshot = {
   attention: Array<{ id: string; severity: string; entity_type: string; entity_id: string; code: string; message: string; remediation?: string }>;
   caches: CacheObservation[];
   jobs: Job[];
+  job_retention: {
+    success_ttl_seconds: number;
+    diagnostic_ttl_seconds: number;
+    max_terminal_jobs: number;
+    max_diagnostic_jobs: number;
+    max_progress_events: number;
+    active: number;
+    terminal: number;
+    retained_by_status: Array<{ status: string; count: number }>;
+    oldest_retained_at?: string;
+    last_pruned_at?: string;
+    expired_total: number;
+    truncated_total: number;
+    last_expired: number;
+    last_truncated: number;
+  };
   maintenance: Maintenance[];
   diagnostics: Diagnostic[];
   capabilities: Capability[];
@@ -345,6 +361,7 @@ export const emptySnapshot: ObservationSnapshot = {
   attention: [],
   caches: [],
   jobs: [],
+  job_retention: { success_ttl_seconds: 0, diagnostic_ttl_seconds: 0, max_terminal_jobs: 0, max_diagnostic_jobs: 0, max_progress_events: 0, active: 0, terminal: 0, retained_by_status: [], expired_total: 0, truncated_total: 0, last_expired: 0, last_truncated: 0 },
   maintenance: [],
   diagnostics: [],
   capabilities: []

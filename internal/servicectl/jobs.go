@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/service"
 )
 
@@ -24,8 +25,8 @@ const (
 	JobStatusCancelled   = "cancelled"
 	JobStatusInterrupted = "interrupted"
 
-	maxStoredTerminalJobs   = 128
-	maxStoredProgressEvents = 256
+	maxStoredTerminalJobs   = config.DefaultJobMaxTerminal
+	maxStoredProgressEvents = config.DefaultJobMaxProgressEvents
 )
 
 type Job struct {
@@ -51,12 +52,31 @@ type Job struct {
 }
 
 type JobManager struct {
-	mu           sync.Mutex
-	jobs         map[string]*Job
-	cancel       map[string]context.CancelFunc
-	nextID       int
-	snapshotPath string
-	now          func() time.Time
+	mu             sync.Mutex
+	jobs           map[string]*Job
+	cancel         map[string]context.CancelFunc
+	nextID         int
+	snapshotPath   string
+	now            func() time.Time
+	retention      config.ServiceJobRetentionConfig
+	expiredTotal   int
+	truncatedTotal int
+	lastExpired    int
+	lastTruncated  int
+	lastPrunedAt   *time.Time
+}
+
+type JobRetentionSnapshot struct {
+	Policy         config.ServiceJobRetentionConfig
+	Active         int
+	Terminal       int
+	ByStatus       map[string]int
+	OldestRetained *time.Time
+	LastPrunedAt   *time.Time
+	ExpiredTotal   int
+	TruncatedTotal int
+	LastExpired    int
+	LastTruncated  int
 }
 
 type ErrCacheWriterBusy struct {
@@ -79,11 +99,23 @@ type StartFakeJobRequest struct {
 }
 
 func NewJobManager(snapshotPath string) *JobManager {
+	return NewJobManagerWithRetention(snapshotPath, config.ServiceJobRetentionConfig{
+		SuccessTTL: config.DefaultJobSuccessTTL, DiagnosticTTL: config.DefaultJobDiagnosticTTL,
+		MaxTerminalJobs: config.DefaultJobMaxTerminal, MaxDiagnosticJobs: config.DefaultJobMaxDiagnostic,
+		MaxProgressEvents: config.DefaultJobMaxProgressEvents,
+	})
+}
+
+func NewJobManagerWithRetention(snapshotPath string, retention config.ServiceJobRetentionConfig) *JobManager {
+	if err := config.ValidateServiceJobRetention(retention); err != nil {
+		panic(err)
+	}
 	return &JobManager{
 		jobs:         map[string]*Job{},
 		cancel:       map[string]context.CancelFunc{},
 		snapshotPath: snapshotPath,
 		now:          func() time.Time { return time.Now().UTC() },
+		retention:    retention,
 	}
 }
 
@@ -116,7 +148,7 @@ func (m *JobManager) LoadAndMarkInterrupted() error {
 			job.Progress = append(job.Progress, service.ProgressEvent{Type: "interrupted", Phase: "interrupted", Message: job.Error})
 		}
 		sanitizeStoredMaintenanceJob(&job)
-		trimJobProgress(&job)
+		trimJobProgress(&job, m.retention.MaxProgressEvents)
 		idNum := parseJobIDNumber(job.ID)
 		if idNum > maxID {
 			maxID = idNum
@@ -305,6 +337,43 @@ func (m *JobManager) List() []Job {
 	return out
 }
 
+func (m *JobManager) Prune() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.saveLocked()
+}
+
+func (m *JobManager) RetentionSnapshot() JobRetentionSnapshot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	snapshot := JobRetentionSnapshot{
+		Policy: m.retention, ByStatus: map[string]int{},
+		ExpiredTotal: m.expiredTotal, TruncatedTotal: m.truncatedTotal,
+		LastExpired: m.lastExpired, LastTruncated: m.lastTruncated,
+	}
+	if m.lastPrunedAt != nil {
+		value := *m.lastPrunedAt
+		snapshot.LastPrunedAt = &value
+	}
+	for _, job := range m.jobs {
+		if job == nil {
+			continue
+		}
+		snapshot.ByStatus[job.Status]++
+		if jobTerminalStatus(job.Status) {
+			snapshot.Terminal++
+		} else {
+			snapshot.Active++
+		}
+		when := job.CreatedAt
+		if snapshot.OldestRetained == nil || when.Before(*snapshot.OldestRetained) {
+			value := when
+			snapshot.OldestRetained = &value
+		}
+	}
+	return snapshot
+}
+
 func (m *JobManager) Get(id string) (Job, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -414,7 +483,7 @@ func (m *JobManager) updateJob(id string, fn func(*Job, time.Time)) {
 		return
 	}
 	fn(job, m.now())
-	trimJobProgress(job)
+	trimJobProgress(job, m.retention.MaxProgressEvents)
 	_ = m.saveLocked()
 }
 
@@ -427,10 +496,10 @@ func (m *JobManager) mustGet(id string) Job {
 }
 
 func (m *JobManager) saveLocked() error {
+	m.pruneLocked()
 	if m.snapshotPath == "" {
 		return nil
 	}
-	m.pruneLocked()
 	if err := os.MkdirAll(filepath.Dir(m.snapshotPath), 0o700); err != nil {
 		return err
 	}
@@ -443,33 +512,120 @@ func (m *JobManager) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(m.snapshotPath, append(data, '\n'), 0o600)
+	if err := os.WriteFile(m.snapshotPath, append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(m.snapshotPath, 0o600)
 }
 
 func (m *JobManager) pruneLocked() {
-	if maxStoredTerminalJobs <= 0 {
-		return
-	}
+	now := m.now()
 	terminal := make([]*Job, 0, len(m.jobs))
 	for _, job := range m.jobs {
 		if job == nil {
 			continue
 		}
-		trimJobProgress(job)
+		trimJobProgress(job, m.retention.MaxProgressEvents)
 		if jobTerminalStatus(job.Status) {
 			terminal = append(terminal, job)
 		}
 	}
-	if len(terminal) <= maxStoredTerminalJobs {
-		return
+
+	protected := m.protectedDiagnosticJobs(terminal)
+	expired := 0
+	for _, job := range terminal {
+		ttl := m.retention.SuccessTTL
+		if diagnosticJobStatus(job.Status) {
+			ttl = m.retention.DiagnosticTTL
+		}
+		if now.Sub(terminalSortTime(job)) >= ttl && !protected[job.ID] {
+			delete(m.jobs, job.ID)
+			delete(m.cancel, job.ID)
+			expired++
+		}
 	}
-	sort.Slice(terminal, func(i, j int) bool {
-		return terminalSortTime(terminal[i]).Before(terminalSortTime(terminal[j]))
-	})
-	for _, job := range terminal[:len(terminal)-maxStoredTerminalJobs] {
+
+	terminal = terminal[:0]
+	for _, job := range m.jobs {
+		if job != nil && jobTerminalStatus(job.Status) {
+			terminal = append(terminal, job)
+		}
+	}
+	sort.Slice(terminal, func(i, j int) bool { return terminalJobLess(terminal[i], terminal[j]) })
+	truncated := 0
+	for len(terminal) > m.retention.MaxTerminalJobs {
+		index := 0
+		for i, job := range terminal {
+			if !protected[job.ID] {
+				index = i
+				break
+			}
+		}
+		job := terminal[index]
 		delete(m.jobs, job.ID)
 		delete(m.cancel, job.ID)
+		terminal = append(terminal[:index], terminal[index+1:]...)
+		truncated++
 	}
+	if expired > 0 || truncated > 0 {
+		prunedAt := now
+		m.lastPrunedAt = &prunedAt
+	}
+	if expired > 0 || truncated > 0 {
+		m.lastExpired, m.lastTruncated = expired, truncated
+		m.expiredTotal += expired
+		m.truncatedTotal += truncated
+	}
+}
+
+func (m *JobManager) protectedDiagnosticJobs(terminal []*Job) map[string]bool {
+	latest := map[string]*Job{}
+	for _, job := range terminal {
+		if !diagnosticJobStatus(job.Status) {
+			continue
+		}
+		key := diagnosticJobKey(job)
+		if current := latest[key]; current == nil || terminalJobLess(current, job) {
+			latest[key] = job
+		}
+	}
+	candidates := make([]*Job, 0, len(latest))
+	for _, job := range latest {
+		candidates = append(candidates, job)
+	}
+	sort.Slice(candidates, func(i, j int) bool { return terminalJobLess(candidates[j], candidates[i]) })
+	protected := map[string]bool{}
+	for i, job := range candidates {
+		if i >= m.retention.MaxDiagnosticJobs {
+			break
+		}
+		protected[job.ID] = true
+	}
+	return protected
+}
+
+func diagnosticJobStatus(status string) bool {
+	switch status {
+	case JobStatusFailed, JobStatusInterrupted, JobStatusCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+func diagnosticJobKey(job *Job) string {
+	if job == nil {
+		return "unknown"
+	}
+	return firstNonEmpty(job.RegistrationID, job.WorkKey, job.WorkRef, strings.Join([]string{job.Type, job.CacheUUID, job.RepoID}, "\x00"))
+}
+
+func terminalJobLess(left, right *Job) bool {
+	leftTime, rightTime := terminalSortTime(left), terminalSortTime(right)
+	if leftTime.Equal(rightTime) {
+		return left.ID < right.ID
+	}
+	return leftTime.Before(rightTime)
 }
 
 func jobTerminalStatus(status string) bool {
@@ -494,11 +650,11 @@ func terminalSortTime(job *Job) time.Time {
 	return job.CreatedAt
 }
 
-func trimJobProgress(job *Job) {
-	if job == nil || maxStoredProgressEvents <= 0 || len(job.Progress) <= maxStoredProgressEvents {
+func trimJobProgress(job *Job, limit int) {
+	if job == nil || limit <= 0 || len(job.Progress) <= limit {
 		return
 	}
-	job.Progress = append([]service.ProgressEvent(nil), job.Progress[len(job.Progress)-maxStoredProgressEvents:]...)
+	job.Progress = append([]service.ProgressEvent(nil), job.Progress[len(job.Progress)-limit:]...)
 }
 
 func cloneJob(job *Job) Job {

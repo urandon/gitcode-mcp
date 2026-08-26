@@ -44,6 +44,18 @@ func (m Manager) adminObservation(ctx context.Context, jobs *JobManager, mainten
 	}
 	entries := maintenance.adminEntries()
 	jobList := jobs.List()
+	retention := jobs.RetentionSnapshot()
+	snapshot.JobRetention = adminhttp.JobRetentionObservation{
+		SuccessTTLSeconds: int64(retention.Policy.SuccessTTL.Seconds()), DiagnosticTTLSeconds: int64(retention.Policy.DiagnosticTTL.Seconds()),
+		MaxTerminalJobs: retention.Policy.MaxTerminalJobs, MaxDiagnosticJobs: retention.Policy.MaxDiagnosticJobs,
+		MaxProgressEvents: retention.Policy.MaxProgressEvents, Active: retention.Active, Terminal: retention.Terminal,
+		OldestRetainedAt: retention.OldestRetained, LastPrunedAt: retention.LastPrunedAt,
+		ExpiredTotal: retention.ExpiredTotal, TruncatedTotal: retention.TruncatedTotal,
+		LastExpired: retention.LastExpired, LastTruncated: retention.LastTruncated,
+	}
+	for status, count := range retention.ByStatus {
+		snapshot.JobRetention.RetainedByStatus = append(snapshot.JobRetention.RetainedByStatus, adminhttp.JobStatusCount{Status: status, Count: count})
+	}
 	cacheGroups := groupAdminCaches(m.AdminCachePath, entries)
 	for _, group := range cacheGroups {
 		cacheView, diagnostics := buildAdminCache(ctx, group, entries, jobList)

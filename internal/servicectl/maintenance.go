@@ -391,6 +391,9 @@ func (m *MaintenanceManager) Disable(ctx context.Context, registrationID string)
 func (m *MaintenanceManager) Reconcile(ctx context.Context) (MaintenanceReconcileResult, error) {
 	m.reconcileMu.Lock()
 	defer m.reconcileMu.Unlock()
+	if err := m.jobs.Prune(); err != nil {
+		return MaintenanceReconcileResult{}, fmt.Errorf("maintenance: prune job history: %w", err)
+	}
 	list, err := m.List(ctx)
 	if err != nil {
 		return MaintenanceReconcileResult{}, err

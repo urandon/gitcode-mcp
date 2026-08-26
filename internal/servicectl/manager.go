@@ -83,6 +83,10 @@ type Manager struct {
 	AdminAllowNonLoopback bool
 	AdminSessionTTL       time.Duration
 	AdminCachePath        string
+	// JobRetention is the daemon-owned terminal job history policy. Keep it
+	// separate from EffectiveConfig: daemon jobs deliberately resolve their
+	// cache-scoped provider configuration at execution time.
+	JobRetention *config.ServiceJobRetentionConfig
 	// EffectiveConfig is an in-memory, non-secret configuration snapshot used by
 	// daemon-managed jobs. It is never rendered by service status APIs.
 	EffectiveConfig *config.Config
@@ -331,7 +335,11 @@ func (m Manager) Run(ctx context.Context) error {
 	if err := writeState(paths, state); err != nil {
 		return err
 	}
-	jobs := NewJobManager(paths.JobsPath)
+	retention := config.Default().Service.JobRetention
+	if m.JobRetention != nil {
+		retention = *m.JobRetention
+	}
+	jobs := NewJobManagerWithRetention(paths.JobsPath, retention)
 	if err := jobs.LoadAndMarkInterrupted(); err != nil {
 		return err
 	}
