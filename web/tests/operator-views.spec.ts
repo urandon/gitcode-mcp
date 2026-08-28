@@ -21,13 +21,15 @@ const snapshot = {
       },
       execution: { active_job_ids: ['job-000001'], contention: { state: 'waiting', operation: 'rag' }, scheduled_retry: { stage: 'rag', at: new Date(Date.now() + 60000).toISOString() }, last_stage_errors: [{ stage: 'rag', failure_class: 'cache_busy', message: 'RAG maintenance recorded cache_busy.' }] },
       collections: [{ kind: 'issue', count: 30, head: { state: 'current', status: 'fresh' }, tail: { state: 'partial', status: 'backfilling', stop_reason: 'max_pages' } }, { kind: 'wiki', count: 12, head: { state: 'current', status: 'fresh' }, tail: { state: 'current', status: 'complete' } }],
+      documentation: { state: 'partial', registered: true, reconcile_state: 'ready', target_commit_oid: '0123456789abcdef0123456789abcdef01234567', next_poll_at: new Date(Date.now() + 60_000).toISOString(), revision_set_id: 'repo-doc-set-public', commit_oid: '0123456789abcdef0123456789abcdef01234567', requested_revision: 'HEAD', policy_source: 'committed', policy_hash: 'policy-public-safe', git_store_ref: 'git-store-public', overlay: false, namespace_id: 'embns-public', eligible_files: 4, eligible_chunks: 10, embedded_chunks: 6, reused_chunks: 2, failed_chunks: 1, missing_objects: 1, updated_at: new Date().toISOString(), revision_set_count: 2, search_available: false, index_handoff: 'gitcode-mcp repo-docs index --repo example/repo --detach', search_handoff: 'gitcode-mcp repo-docs search --repo example/repo "QUERY"' },
       recent_sync_events: [{ id: 'sync-1', kind: 'issue', status: 'succeeded', completed_at: new Date().toISOString(), zero_delta: false }]
     }]
   }],
   jobs: [
     { id: 'job-000001', type: 'rag-index', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'running', created_at: new Date(Date.now() - 120000).toISOString(), started_at: new Date(Date.now() - 110000).toISOString(), updated_at: new Date().toISOString(), steps: 80, completed: 40, work_ref: 'work-active', cancellable: true, retryable: false, progress_retained: 2, progress_limit: 256, throughput_per_second: 0.36, eta_seconds: 111, progress: [{ type: 'started', phase: 'running', collection: 'rag-index' }, { type: 'records', phase: 'running', collection: 'rag-index', records_fetched: 40, rate_limit_state: 'ready' }] },
     { id: 'job-000002', type: 'sync', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'failed', created_at: new Date(Date.now() - 240000).toISOString(), updated_at: new Date(Date.now() - 180000).toISOString(), finished_at: new Date(Date.now() - 180000).toISOString(), failure_class: 'provider_unavailable', failure_collection: 'issues', failure_message: 'The provider was unavailable while syncing issues.', retry_after: '30s', inspect_command: 'gitcode-mcp service job job-000002 --format json', remediation_command: 'gitcode-mcp service maintenance --format json', work_ref: 'work-terminal', cancellable: false, retryable: true, progress_retained: 1, progress_limit: 256, progress: [{ type: 'failed', phase: 'failed', collection: 'issues', records_failed: 1, retry_after: '30s', attempt: 2, rate_limit_state: 'waiting' }] },
-    { id: 'job-000003', type: 'sync', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'interrupted', created_at: new Date(Date.now() - 360000).toISOString(), updated_at: new Date(Date.now() - 300000).toISOString(), finished_at: new Date(Date.now() - 300000).toISOString(), work_ref: 'work-interrupted', cancellable: false, retryable: true, progress_retained: 1, progress_limit: 256, progress: [{ type: 'interrupted', phase: 'interrupted', collection: 'sync' }] }
+    { id: 'job-000003', type: 'sync', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'interrupted', created_at: new Date(Date.now() - 360000).toISOString(), updated_at: new Date(Date.now() - 300000).toISOString(), finished_at: new Date(Date.now() - 300000).toISOString(), work_ref: 'work-interrupted', cancellable: false, retryable: true, progress_retained: 1, progress_limit: 256, progress: [{ type: 'interrupted', phase: 'interrupted', collection: 'sync' }] },
+    { id: 'job-000004', type: 'repository-docs-index', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'succeeded', created_at: new Date(Date.now() - 90_000).toISOString(), started_at: new Date(Date.now() - 85_000).toISOString(), updated_at: new Date(Date.now() - 60_000).toISOString(), finished_at: new Date(Date.now() - 60_000).toISOString(), steps: 10, completed: 8, work_ref: 'repository-docs-public-work', cancellable: false, retryable: false, progress_retained: 2, progress_limit: 256, progress: [{ type: 'started', phase: 'indexing', collection: 'repository-docs-index' }, { type: 'succeeded', phase: 'succeeded', collection: 'repository-docs-index', records_fetched: 6, records_skipped: 2 }] }
   ],
   maintenance: [{ registration_id: 'reg-1', cache_ref: 'cache-111111112222', repo_id: 'example/repo', enabled: true, state: 'retry_scheduled', generation: 4, policy: { sync_enabled: true, sync_mode: 'head-and-backfill', rag_enabled: true, collections: ['issues', 'wiki'], head_max_pages: 3, tail_slice_pages: 10, profile: 'easy-rag' } }],
   diagnostics: [
@@ -41,7 +43,9 @@ const snapshot = {
     { id: 'admin_registration_controls', category: 'admin', safety_class: 'background_job', description: 'Reconcile and disable registrations.', ui_enabled: true, cli_name: 'maintenance', cli_enabled: true, mcp_enabled: false },
     { id: 'admin_search_compare', category: 'admin', safety_class: 'read_only', description: 'Compare search modes.', ui_enabled: true, cli_name: 'search_sources', cli_enabled: true, mcp_enabled: false },
     { id: 'admin_provider_smoke', category: 'admin', safety_class: 'read_only', description: 'Smoke provider.', ui_enabled: true, cli_name: 'rag', cli_enabled: true, mcp_enabled: false },
-    { id: 'admin_rag_bounded_repair', category: 'admin', safety_class: 'background_job', description: 'Bounded RAG repair.', ui_enabled: true, cli_name: 'rag', cli_enabled: true, mcp_enabled: false }
+    { id: 'admin_rag_bounded_repair', category: 'admin', safety_class: 'background_job', description: 'Bounded RAG repair.', ui_enabled: true, cli_name: 'rag', cli_enabled: true, mcp_enabled: false },
+    { id: 'repository_docs_search', category: 'rag', safety_class: 'read_only', description: 'Search registered repository docs.', ui_enabled: true, cli_name: 'repo-docs', cli_enabled: true, mcp_name: 'repository_docs_search', mcp_enabled: true },
+    { id: 'repository_docs_index', category: 'rag', safety_class: 'background_job', description: 'Index registered repository docs.', ui_enabled: true, cli_name: 'repo-docs', cli_enabled: true, mcp_name: 'repository_docs_index', mcp_enabled: true }
   ]
 };
 
@@ -102,6 +106,47 @@ test('operator views keep coverage truth, deep links, and recovery states', asyn
     await comparePage.screenshot({ path: path.join(qaOutput, 'operator-overview-comparison.png'), fullPage: true });
     await comparePage.close();
   }
+});
+
+test('repository documentation cohort exposes versioned authority, coverage, and safe handoffs', async ({ page }) => {
+  await mockAdmin(page);
+  let indexBody: Record<string, string> = {};
+  await page.route('**/api/admin/v1/repository-docs/reg-1/index', async (route) => {
+    indexBody = route.request().postDataJSON();
+    expect(route.request().headers()['x-csrf-token']).toBe('csrf-test');
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { outcome: 'accepted', job_id: 'job-000004', job_status: 'succeeded' } }) });
+  });
+  await page.route('**/api/admin/v1/repository-docs/reg-1/search', async (route) => {
+    expect(route.request().headers()['x-csrf-token']).toBe('csrf-test');
+    expect(route.request().postDataJSON()).toMatchObject({ query: 'private registration', revision: 'HEAD', mode: 'hybrid', limit: 8, include_worktree: false });
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: {
+      repo_id: 'example/repo', corpus_kind: 'repository_docs', query: 'private registration', requested_revision: 'HEAD', effective_revision: '0123456789abcdef0123456789abcdef01234567', requested_mode: 'hybrid', effective_mode: 'hybrid', authority: 'git', revision_set_id: 'repo-doc-set-public', policy_hash: 'policy-public-safe', policy_source: 'committed', namespace_id: 'embns-public', coverage: { state: 'ready', eligible_files: 4, eligible_chunks: 10, embedded_chunks: 8, reused_chunks: 2, failed_chunks: 0, missing_objects: 0 }, hits: [{ rank: 1, chunk_id: 'chunk-public-safe', snippet: 'The daemon resolves Git authority from a private registration.', score: 0.031, lexical_score: 1.2, semantic_score: 0.8, citation: { authority: 'git', commit_oid: '0123456789abcdef0123456789abcdef01234567', blob_oid: 'abcdef0123456789abcdef0123456789abcdef01', path: 'docs/architecture.md', line_start: 3, line_end: 4, raw_slice_digest: 'digest-public-safe' } }]
+    } }) });
+  });
+  await page.goto('/?view=Caches&cache=cache-111111112222&repo=example%2Frepo&tab=documentation');
+  await expect(page.getByRole('heading', { name: 'Repository documentation RAG' })).toBeVisible();
+  await expect(page.getByText('Committed Git')).toBeVisible();
+  await expect(page.getByText('8/10')).toBeVisible();
+  await expect(page.getByText('repo-doc-set-public')).toBeVisible();
+  await expect(page.getByText('Automatic reconciliation')).toBeVisible();
+  await page.getByRole('button', { name: 'Index current HEAD' }).click();
+  await expect(page.getByRole('heading', { name: 'Resolve and index current HEAD?' })).toBeVisible();
+  await page.getByRole('button', { name: 'Confirm indexing' }).click();
+  expect(indexBody.idempotency_key).toMatch(/^admin-repository_docs_index-/);
+  await page.getByLabel('Query').fill('private registration');
+  await page.getByRole('button', { name: 'Search Git' }).click();
+  await expect(page.getByText('The daemon resolves Git authority from a private registration.')).toBeVisible();
+  await expect(page.getByText('docs/architecture.md:L3–L4')).toBeVisible();
+  await expect(page.getByText('Digest-verified Git citation')).toBeVisible();
+  await expect(page.getByText("The browser sends only the opaque registration id. Filesystem authority remains in the daemon's private registry.")).toBeVisible();
+  await page.getByRole('button', { name: 'Open index jobs' }).click();
+  await expect(page.getByRole('heading', { name: 'Repository Docs Index' })).toBeVisible();
+  await expect(page.getByText('repository-docs-public-work')).toBeVisible();
+  await page.goto('/?view=Caches&cache=cache-111111112222&repo=example%2Frepo&tab=documentation');
+  await page.reload();
+  await expect(page).toHaveURL(/tab=documentation/);
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
 test('API version mismatch is explicit and blocks ordinary views', async ({ page }) => {

@@ -27,6 +27,7 @@ import (
 	"gitcode-mcp/internal/diagnostics"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/rag"
+	"gitcode-mcp/internal/repositorydocs"
 	"gitcode-mcp/internal/service"
 	"gitcode-mcp/internal/servicectl"
 )
@@ -143,7 +144,7 @@ func TestMCPRepoStatusIncludesRuntimeAndIssueCommentDiagnostics(t *testing.T) {
 	if structured.Status == nil || structured.Status.BinaryVersion != buildinfo.Current().Version || structured.Status.CacheSchemaVersion != cache.CurrentSchemaVersion() || structured.Status.ExpectedCacheSchemaVersion != cache.CurrentSchemaVersion() || structured.Status.CacheState != "ready" || structured.Status.IssueCommentQueueState != "available" || structured.Status.IssueCommentQueue == nil {
 		t.Fatalf("repo status=%#v", structured)
 	}
-	if len(result.Content) != 1 || !strings.Contains(result.Content[0].Text, "binary_version=") || !strings.Contains(result.Content[0].Text, "cache_schema=17/17") || !strings.Contains(result.Content[0].Text, "issue_comments=") {
+	if len(result.Content) != 1 || !strings.Contains(result.Content[0].Text, "binary_version=") || !strings.Contains(result.Content[0].Text, "cache_schema=18/18") || !strings.Contains(result.Content[0].Text, "issue_comments=") {
 		t.Fatalf("repo status content=%#v", result.Content)
 	}
 }
@@ -360,6 +361,66 @@ func TestMCPRAGSearchReturnsStructuredContent(t *testing.T) {
 	}
 	if structured.SearchMode != rag.SearchModeHybridRAG || len(structured.Results) != 1 || structured.Results[0].Score.Lexical != 1 {
 		t.Fatalf("structured=%#v", structured)
+	}
+}
+
+func TestMCPRepositoryDocumentationToolsReturnRevisionScopedStructuredContent(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	handler := NewRPCHandler(service.New(store))
+	policy := repositorydocs.PolicyResult{RepoID: "fixture-a", CommitOID: strings.Repeat("a", 40), GitStoreRef: "git-store-opaque", Policy: repositorydocs.PolicyResolution{Policy: repositorydocs.BuiltinPolicy(), Source: repositorydocs.PolicySourceBuiltin, Status: repositorydocs.PolicyStatusReady, PolicyHash: "policy-1"}}
+	handler.SetRepositoryDocsProviders(
+		func(_ context.Context, req repositorydocs.PolicyRequest) (repositorydocs.PolicyResult, error) {
+			if req.RepoID != "fixture-a" || req.Revision != "v1" {
+				t.Fatalf("policy req=%#v", req)
+			}
+			return policy, nil
+		},
+		func(_ context.Context, req repositorydocs.StatusRequest) (repositorydocs.StatusResult, error) {
+			return repositorydocs.StatusResult{PolicyResult: policy, RevisionSets: []cache.RepositoryDocRevisionSet{{RepoID: req.RepoID, ID: "set-1", State: cache.RepoDocSetReady}}}, nil
+		},
+		func(_ context.Context, req repositorydocs.SearchRequest) (repositorydocs.SearchResult, error) {
+			if req.Mode != repositorydocs.SearchModeFullText || req.Query != "offline" {
+				t.Fatalf("search req=%#v", req)
+			}
+			return repositorydocs.SearchResult{
+				RepoID: req.RepoID, CorpusKind: "repository_docs", Query: req.Query,
+				EffectiveRevision: policy.CommitOID, Mode: req.Mode, RequestedMode: req.Mode, EffectiveMode: req.Mode, Authority: "git",
+				Hits: []repositorydocs.SearchHit{{
+					Rank: 1, ChunkID: "chunk-1", Snippet: "offline",
+					Citation: repositorydocs.Citation{Authority: "git", CommitOID: policy.CommitOID, BlobOID: strings.Repeat("b", 40), Path: "docs/guide.md", LineStart: 1, LineEnd: 1, RawSliceDigest: "digest"},
+				}},
+			}, nil
+		},
+	)
+	call := func(name, arguments string) toolCallResult {
+		t.Helper()
+		id := json.RawMessage(`1`)
+		params := json.RawMessage(fmt.Sprintf(`{"name":%q,"arguments":%s}`, name, arguments))
+		resp, ok := handler.Handle(context.Background(), request{JSONRPC: "2.0", ID: &id, Method: "tools/call", Params: &params})
+		if !ok || resp == nil || resp.Error != nil {
+			t.Fatalf("%s response=%#v", name, resp)
+		}
+		var result toolCallResult
+		if err := json.Unmarshal(resp.Result, &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	var gotPolicy repositorydocs.PolicyResult
+	decodeStructured(t, call("repository_docs_policy", `{"repo_id":"fixture-a","revision":"v1"}`), &gotPolicy)
+	if gotPolicy.CommitOID != policy.CommitOID || gotPolicy.GitStoreRef != "git-store-opaque" {
+		t.Fatalf("policy=%#v", gotPolicy)
+	}
+	var gotStatus repositorydocs.StatusResult
+	decodeStructured(t, call("repository_docs_status", `{"repo_id":"fixture-a"}`), &gotStatus)
+	if len(gotStatus.RevisionSets) != 1 {
+		t.Fatalf("status=%#v", gotStatus)
+	}
+	var gotSearch repositorydocs.SearchResult
+	decodeStructured(t, call("repository_docs_search", `{"repo_id":"fixture-a","query":"offline","mode":"fulltext"}`), &gotSearch)
+	if len(gotSearch.Hits) != 1 || gotSearch.RequestedMode != repositorydocs.SearchModeFullText || gotSearch.EffectiveMode != repositorydocs.SearchModeFullText || gotSearch.Authority != "git" || gotSearch.Hits[0].Citation.Path != "docs/guide.md" {
+		t.Fatalf("search=%#v", gotSearch)
 	}
 }
 

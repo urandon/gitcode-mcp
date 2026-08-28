@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -932,6 +933,148 @@ func TestRAGIndexCLIStartsDaemonJobOverIPC(t *testing.T) {
 	}
 }
 
+func TestRepositoryDocsIndexCLIHonorsConfiguredServiceRuntime(t *testing.T) {
+	root, err := shortCLITestRoot(t, "cli-repo-docs-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		if output, runErr := cmd.CombinedOutput(); runErr != nil {
+			t.Fatalf("git %v: %v\n%s", args, runErr, output)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("# Repository docs\n\nрусский 中文 English\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("init")
+	runGit("add", "README.md")
+	runGit("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+	originalDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(originalDirectory) })
+
+	cachePath := filepath.Join(root, "cache.db")
+	store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{
+		RepoID: "fixture-a", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api",
+		Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}, Aliases: []string{"fixture-alias"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runtimeDir, err := os.MkdirTemp("/private/tmp", "cli-repo-docs-runtime-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
+	configPath := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(strings.Join([]string{
+		"cache_path: " + cachePath,
+		"rag:",
+		"  default_profile: fake-rag",
+		"  providers:",
+		"    fake:",
+		"      type: fake",
+		"  profiles:",
+		"    fake-rag:",
+		"      provider: fake",
+		"      model: fake-embedding",
+		"      dimensions: 2",
+		"      batch_size: 1",
+		"  indexing:",
+		"    profile: fake-rag",
+		"",
+	}, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src := &repoInitLocalSource{
+		env: map[string]string{
+			config.EnvMCPConfigPath:       configPath,
+			config.EnvServiceRuntimeDir:   runtimeDir,
+			"GITCODE_MCP_SERVICE_NETWORK": "mem",
+		},
+		cwd: root, homeDir: filepath.Join(root, "h"), configDir: filepath.Join(root, "f"), cacheDir: filepath.Join(root, "c"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runCode := make(chan int, 1)
+	var runOut bytes.Buffer
+	var runErr bytes.Buffer
+	go func() {
+		runCode <- executeWithFactoryAndDepsContext(ctx, []string{"service", "run"}, &runOut, &runErr, nil, localCommandDeps{Source: src})
+	}()
+	manager := servicectl.Manager{Source: src, RuntimeDir: runtimeDir}
+	client, err := manager.Client()
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var status servicectl.Status
+		if callErr := client.Call(context.Background(), "Service.Status", nil, &status); callErr == nil && status.Status == servicectl.StatusRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("configured service runtime did not become ready: stdout=%q stderr=%q", runOut.String(), runErr.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	effective, err := config.LoadEffective(src, config.Overrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resolvedConfig servicectl.MaintenanceResolveConfigResult
+	if err := client.Call(context.Background(), "Maintenance.ResolveConfig", servicectl.MaintenanceResolveConfigRequest{
+		CachePath: cachePath, ConfigSnapshot: effective.Config,
+	}, &resolvedConfig); err != nil {
+		t.Fatal(err)
+	}
+	var registration servicectl.MaintenanceEntry
+	if err := client.Call(context.Background(), "Maintenance.Enroll", servicectl.MaintenanceEnrollRequest{
+		CachePath: cachePath, RepoID: "fixture-a", IdempotencyKey: "repo-docs-runtime-registration",
+		Policy: servicectl.MaintenancePolicy{}, ConfigSnapshot: effective.Config, ConfigHash: resolvedConfig.ConfigHash,
+	}, &registration); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := executeWithFactoryAndDeps([]string{"repo-docs", "index", "--repo", "fixture-alias", "--format", "json"}, &out, &errOut, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("repo-docs index code=%d stderr=%q", code, errOut.String())
+	}
+	var job servicectl.Job
+	if err := json.Unmarshal(out.Bytes(), &job); err != nil {
+		t.Fatalf("invalid job JSON: %v\n%s", err, out.String())
+	}
+	if job.Type != servicectl.RepositoryDocsIndexJobType || job.RepoID != "fixture-a" || job.Status != servicectl.JobStatusSucceeded {
+		t.Fatalf("repository-docs job=%#v", job)
+	}
+	var registrations servicectl.MaintenanceListResult
+	if err := client.Call(context.Background(), "Maintenance.List", nil, &registrations); err != nil {
+		t.Fatal(err)
+	}
+	if len(registrations.Entries) != 1 || registrations.Entries[0].RepositoryDocs == nil || registrations.Entries[0].RepositoryDocs.GitStoreRef == "" {
+		t.Fatalf("repository-docs registration=%#v", registrations)
+	}
+	cancel()
+	if code := <-runCode; code != 0 {
+		t.Fatalf("service run code=%d", code)
+	}
+}
+
 func TestSyncCLIStartsDaemonJobOverIPC(t *testing.T) {
 	root, err := shortCLITestRoot(t, "cli-sync-")
 	if err != nil {
@@ -1779,7 +1922,7 @@ func TestRepoRegistryCLI(t *testing.T) {
 		t.Fatalf("repo status code=%d stderr=%q", code, statusErr.String())
 	}
 	out := statusOut.String()
-	for _, want := range []string{"repo_id: fixture-a", "owner: owner-a", "name: repo-a", "api_base_url: https://example.invalid/api?safe=1", "scopes: issues,wiki", "aliases: proj", "binding_state: ready", "alias_conflict_state: none", "cache_state: ready", "index_state: unknown", "binary_version:", "binary_version_source:", "cache_schema_version: 17", "expected_cache_schema_version: 17", "issue_records: 0", "issue_comments: 0", "issue_comment_queue_state: available", "issue_comment_queue: pending=0 deferred=0 complete=0 total=0"} {
+	for _, want := range []string{"repo_id: fixture-a", "owner: owner-a", "name: repo-a", "api_base_url: https://example.invalid/api?safe=1", "scopes: issues,wiki", "aliases: proj", "binding_state: ready", "alias_conflict_state: none", "cache_state: ready", "index_state: unknown", "binary_version:", "binary_version_source:", "cache_schema_version: 18", "expected_cache_schema_version: 18", "issue_records: 0", "issue_comments: 0", "issue_comment_queue_state: available", "issue_comment_queue: pending=0 deferred=0 complete=0 total=0"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("status output missing %q in %q", want, out)
 		}
@@ -1838,7 +1981,7 @@ func TestRepoStatusReadsCompatibleOlderSchemaForDiagnostics(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	for _, want := range []string{`"cache_state": "migration_required"`, `"cache_schema_version": 15`, `"expected_cache_schema_version": 17`, `"binary_version"`, `"issue_comment_queue_state": "schema_unavailable"`} {
+	for _, want := range []string{`"cache_state": "migration_required"`, `"cache_schema_version": 15`, `"expected_cache_schema_version": 18`, `"binary_version"`, `"issue_comment_queue_state": "schema_unavailable"`} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("repo status missing %q in %q", want, stdout.String())
 		}

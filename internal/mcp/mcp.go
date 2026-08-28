@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"gitcode-mcp/internal/feedback"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/rag"
+	"gitcode-mcp/internal/repositorydocs"
 	"gitcode-mcp/internal/service"
 	"gitcode-mcp/internal/servicectl"
 )
@@ -81,34 +83,40 @@ type serviceInterface interface {
 }
 
 type RPCHandler struct {
-	svc                serviceInterface
-	startupDiagnostic  StartupDiagnostic
-	minimal            bool
-	credentialResolver *auth.CredentialResolver
-	toolAccess         ToolAccess
-	ragStatus          RAGStatusProvider
-	ragSearch          RAGSearchProvider
-	maintenancePlan    MaintenancePlanProvider
-	maintenanceApply   MaintenanceApplyProvider
-	runtimeContext     RuntimeContext
+	svc                  serviceInterface
+	startupDiagnostic    StartupDiagnostic
+	minimal              bool
+	credentialResolver   *auth.CredentialResolver
+	toolAccess           ToolAccess
+	ragStatus            RAGStatusProvider
+	ragSearch            RAGSearchProvider
+	repositoryDocsPolicy RepositoryDocsPolicyProvider
+	repositoryDocsStatus RepositoryDocsStatusProvider
+	repositoryDocsSearch RepositoryDocsSearchProvider
+	maintenancePlan      MaintenancePlanProvider
+	maintenanceApply     MaintenanceApplyProvider
+	runtimeContext       RuntimeContext
 }
 
 type Server struct {
-	reader             io.Reader
-	writer             io.Writer
-	stderr             io.Writer
-	handler            *RPCHandler
-	svc                serviceInterface
-	startupDiagnostic  StartupDiagnostic
-	minimal            bool
-	credentialResolver *auth.CredentialResolver
-	toolAccess         ToolAccess
-	ragStatus          RAGStatusProvider
-	ragSearch          RAGSearchProvider
-	maintenancePlan    MaintenancePlanProvider
-	maintenanceApply   MaintenanceApplyProvider
-	serviceClient      func() (*servicectl.RPCClient, error)
-	runtimeContext     RuntimeContext
+	reader               io.Reader
+	writer               io.Writer
+	stderr               io.Writer
+	handler              *RPCHandler
+	svc                  serviceInterface
+	startupDiagnostic    StartupDiagnostic
+	minimal              bool
+	credentialResolver   *auth.CredentialResolver
+	toolAccess           ToolAccess
+	ragStatus            RAGStatusProvider
+	ragSearch            RAGSearchProvider
+	repositoryDocsPolicy RepositoryDocsPolicyProvider
+	repositoryDocsStatus RepositoryDocsStatusProvider
+	repositoryDocsSearch RepositoryDocsSearchProvider
+	maintenancePlan      MaintenancePlanProvider
+	maintenanceApply     MaintenanceApplyProvider
+	serviceClient        func() (*servicectl.RPCClient, error)
+	runtimeContext       RuntimeContext
 }
 
 type RuntimeContext struct {
@@ -119,6 +127,9 @@ type RuntimeContext struct {
 
 type RAGStatusProvider func(context.Context, rag.StatusRequest) (rag.StatusResult, error)
 type RAGSearchProvider func(context.Context, rag.SearchRequest) (rag.SearchResult, error)
+type RepositoryDocsPolicyProvider func(context.Context, repositorydocs.PolicyRequest) (repositorydocs.PolicyResult, error)
+type RepositoryDocsStatusProvider func(context.Context, repositorydocs.StatusRequest) (repositorydocs.StatusResult, error)
+type RepositoryDocsSearchProvider func(context.Context, repositorydocs.SearchRequest) (repositorydocs.SearchResult, error)
 type MaintenancePlanProvider func(context.Context, servicectl.MaintenanceSetupRequest) (servicectl.MaintenancePlan, error)
 type MaintenanceApplyProvider func(context.Context, servicectl.MaintenanceSetupRequest) (servicectl.MaintenanceApplyResult, error)
 
@@ -159,6 +170,12 @@ func (h *RPCHandler) SetRAGSearchProvider(provider RAGSearchProvider) {
 	h.ragSearch = provider
 }
 
+func (h *RPCHandler) SetRepositoryDocsProviders(policy RepositoryDocsPolicyProvider, status RepositoryDocsStatusProvider, search RepositoryDocsSearchProvider) {
+	h.repositoryDocsPolicy = policy
+	h.repositoryDocsStatus = status
+	h.repositoryDocsSearch = search
+}
+
 func (h *RPCHandler) SetMaintenanceProviders(plan MaintenancePlanProvider, apply MaintenanceApplyProvider) {
 	h.maintenancePlan = plan
 	h.maintenanceApply = apply
@@ -179,6 +196,15 @@ func (s *Server) SetRAGSearchProvider(provider RAGSearchProvider) {
 	s.ragSearch = provider
 	if s.handler != nil {
 		s.handler.SetRAGSearchProvider(provider)
+	}
+}
+
+func (s *Server) SetRepositoryDocsProviders(policy RepositoryDocsPolicyProvider, status RepositoryDocsStatusProvider, search RepositoryDocsSearchProvider) {
+	s.repositoryDocsPolicy = policy
+	s.repositoryDocsStatus = status
+	s.repositoryDocsSearch = search
+	if s.handler != nil {
+		s.handler.SetRepositoryDocsProviders(policy, status, search)
 	}
 }
 
@@ -206,7 +232,7 @@ func (h *RPCHandler) Handle(ctx context.Context, req request) (*response, bool) 
 		return &response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32600, Message: "Invalid request"}}, true
 	}
 	var buf bytes.Buffer
-	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver, toolAccess: normalizeToolAccess(h.toolAccess), ragStatus: h.ragStatus, ragSearch: h.ragSearch, maintenancePlan: h.maintenancePlan, maintenanceApply: h.maintenanceApply, runtimeContext: h.runtimeContext}
+	server := &Server{writer: &buf, stderr: io.Discard, handler: h, svc: h.svc, startupDiagnostic: h.startupDiagnostic, minimal: h.minimal, credentialResolver: h.credentialResolver, toolAccess: normalizeToolAccess(h.toolAccess), ragStatus: h.ragStatus, ragSearch: h.ragSearch, repositoryDocsPolicy: h.repositoryDocsPolicy, repositoryDocsStatus: h.repositoryDocsStatus, repositoryDocsSearch: h.repositoryDocsSearch, maintenancePlan: h.maintenancePlan, maintenanceApply: h.maintenanceApply, runtimeContext: h.runtimeContext}
 	server.handle(ctx, req, req.ID == nil)
 	line := bytes.TrimSpace(buf.Bytes())
 	if len(line) == 0 {
@@ -640,6 +666,48 @@ var toolDefs = []toolDefinition{
 		},
 	},
 	{
+		Name:        "repository_docs_policy",
+		Description: "Resolve the versioned repository-document policy at one local Git revision. No fetch or GitCode call is performed.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
+			"repo_id":          {Type: "string", Description: "Configured repository id.", MinLength: 1},
+			"revision":         {Type: "string", Description: "Local Git revision; defaults to HEAD."},
+			"include_worktree": {Type: "boolean", Description: "Explicitly apply tracked worktree changes.", Default: false},
+		}, Required: []string{"repo_id"}},
+	},
+	{
+		Name:        "repository_docs_status",
+		Description: "Inspect repository-document revision-set identity and vector coverage using public-safe opaque Git references.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
+			"repo_id":          {Type: "string", Description: "Configured repository id.", MinLength: 1},
+			"revision":         {Type: "string", Description: "Local Git revision; defaults to HEAD."},
+			"include_worktree": {Type: "boolean", Description: "Explicitly select the tracked worktree overlay.", Default: false},
+		}, Required: []string{"repo_id"}},
+	},
+	{
+		Name:        "repository_docs_search",
+		Description: "Search one local Git revision and return bounded digest-verified citations. Fulltext mode does not require an embedding provider.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
+			"repo_id":          {Type: "string", Description: "Configured repository id.", MinLength: 1},
+			"query":            {Type: "string", Description: "Repository documentation query.", MinLength: 1},
+			"revision":         {Type: "string", Description: "Local Git revision; defaults to HEAD."},
+			"include_worktree": {Type: "boolean", Description: "Explicitly search tracked dirty files.", Default: false},
+			"mode":             {Type: "string", Description: "Retrieval mode.", Enum: []string{"hybrid", "fulltext"}, Default: "hybrid"},
+			"limit":            {Type: "integer", Description: "Maximum verified results.", Minimum: float64Ptr(1), Maximum: float64Ptr(50), Default: 10.0},
+		}, Required: []string{"repo_id", "query"}},
+	},
+	{
+		Name:        "repository_docs_index",
+		Description: "Start a daemon-owned repository-document indexing job for one local Git revision. The job stores metadata and vectors only.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
+			"repo_id":          {Type: "string", Description: "Configured repository id or alias; canonicalized before writing.", MinLength: 1},
+			"revision":         {Type: "string", Description: "Local Git revision; defaults to HEAD."},
+			"include_worktree": {Type: "boolean", Description: "Explicitly index tracked dirty files.", Default: false},
+			"profile":          {Type: "string", Description: "RAG profile name."},
+			"batch_size":       {Type: "integer", Description: "Provider batch size.", Minimum: float64Ptr(1), Maximum: float64Ptr(512)},
+			"max_chunks":       {Type: "integer", Description: "Optional bounded chunk cap.", Minimum: float64Ptr(1)},
+		}, Required: []string{"repo_id"}},
+	},
+	{
 		Name:        "list_pr_discussions",
 		Description: "List cached pull request review discussions with explicit replyability and provider reply targets.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", Description: "Configured repository id.", MinLength: 1}, "number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "unresolved_only": {Type: "boolean", Description: "Only include unresolved or unknown-resolution discussions."}}, Required: []string{"repo_id", "number"}},
@@ -880,6 +948,14 @@ func (s *Server) ragToolHandler(cap capability.Capability) toolHandler {
 		return s.callRAGStatus
 	case "rag_search":
 		return s.callRAGSearch
+	case "repository_docs_policy":
+		return s.callRepositoryDocsPolicy
+	case "repository_docs_status":
+		return s.callRepositoryDocsStatus
+	case "repository_docs_search":
+		return s.callRepositoryDocsSearch
+	case "repository_docs_index":
+		return s.callRepositoryDocsIndex
 	default:
 		return func(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 			s.writeError(id, -32601, "Method not found", &errorData{Code: "unsupported_capability", Message: fmt.Sprintf("%q is declared but has no MCP handler", cap.MCPName)})
@@ -1399,6 +1475,18 @@ type ragSearchArgs struct {
 	Limit      int    `json:"limit,omitempty"`
 }
 
+type repositoryDocsArgs struct {
+	RepoID          string `json:"repo_id"`
+	Query           string `json:"query,omitempty"`
+	Revision        string `json:"revision,omitempty"`
+	IncludeWorktree bool   `json:"include_worktree,omitempty"`
+	Mode            string `json:"mode,omitempty"`
+	Limit           int    `json:"limit,omitempty"`
+	Profile         string `json:"profile,omitempty"`
+	BatchSize       int    `json:"batch_size,omitempty"`
+	MaxChunks       int    `json:"max_chunks,omitempty"`
+}
+
 func (s *Server) callServiceStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	client, err := s.localServiceClient()
 	if err != nil {
@@ -1590,6 +1678,101 @@ func (s *Server) callRAGSearch(ctx context.Context, id *json.RawMessage, args js
 		text += fmt.Sprintf(" top=%s score=%.4f", top.ChunkID, top.Score.Hybrid)
 	}
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func (s *Server) callRepositoryDocsPolicy(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a repositoryDocsArgs
+	if err := json.Unmarshal(args, &a); err != nil || strings.TrimSpace(a.RepoID) == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+		return
+	}
+	if s.repositoryDocsPolicy == nil {
+		s.writeError(id, -32000, "Server error", &errorData{Code: "repository_docs_policy_unavailable", Message: "repository documentation policy provider is not configured"})
+		return
+	}
+	result, err := s.repositoryDocsPolicy(ctx, repositorydocs.PolicyRequest{RepoID: a.RepoID, Revision: a.Revision, IncludeWorktree: a.IncludeWorktree})
+	if err != nil {
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "repository_docs_policy", RepoID: a.RepoID})
+		return
+	}
+	text := fmt.Sprintf("repository_docs_policy=%s commit=%s source=%s", result.Policy.Status, result.CommitOID, result.Policy.Source)
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func (s *Server) callRepositoryDocsStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a repositoryDocsArgs
+	if err := json.Unmarshal(args, &a); err != nil || strings.TrimSpace(a.RepoID) == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+		return
+	}
+	if s.repositoryDocsStatus == nil {
+		s.writeError(id, -32000, "Server error", &errorData{Code: "repository_docs_status_unavailable", Message: "repository documentation status provider is not configured"})
+		return
+	}
+	result, err := s.repositoryDocsStatus(ctx, repositorydocs.StatusRequest{RepoID: a.RepoID, Revision: a.Revision, IncludeWorktree: a.IncludeWorktree})
+	if err != nil {
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "repository_docs_status", RepoID: a.RepoID})
+		return
+	}
+	text := fmt.Sprintf("repository_docs_status=%s commit=%s revision_sets=%d", result.Policy.Status, result.CommitOID, len(result.RevisionSets))
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func (s *Server) callRepositoryDocsSearch(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a repositoryDocsArgs
+	if err := json.Unmarshal(args, &a); err != nil || strings.TrimSpace(a.RepoID) == "" || strings.TrimSpace(a.Query) == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id and query are required"})
+		return
+	}
+	if a.Limit < 0 {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "limit must be non-negative"})
+		return
+	}
+	if s.repositoryDocsSearch == nil {
+		s.writeError(id, -32000, "Server error", &errorData{Code: "repository_docs_search_unavailable", Message: "repository documentation search provider is not configured"})
+		return
+	}
+	result, err := s.repositoryDocsSearch(ctx, repositorydocs.SearchRequest{RepoID: a.RepoID, Query: a.Query, Revision: a.Revision, IncludeWorktree: a.IncludeWorktree, Mode: a.Mode, Limit: a.Limit})
+	if err != nil {
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "repository_docs_search", RepoID: a.RepoID})
+		return
+	}
+	text := fmt.Sprintf("repository_docs_search=%s->%s commit=%s authority=%s results=%d", result.RequestedMode, result.EffectiveMode, result.EffectiveRevision, result.Authority, len(result.Hits))
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func (s *Server) callRepositoryDocsIndex(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a repositoryDocsArgs
+	if err := json.Unmarshal(args, &a); err != nil || strings.TrimSpace(a.RepoID) == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+		return
+	}
+	if a.BatchSize < 0 || a.MaxChunks < 0 {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "batch_size and max_chunks must be non-negative"})
+		return
+	}
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "repository_docs_index", RepoID: a.RepoID})
+		return
+	}
+	client, err := s.localServiceClient()
+	if err != nil {
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "repository_docs_index", RepoID: a.RepoID, Subsystem: "service"})
+		return
+	}
+	var job servicectl.Job
+	request := servicectl.StartRepositoryDocsIndexJobRequest{
+		RepoID: a.RepoID, RepositoryPath: workingDirectory, Revision: a.Revision,
+		IncludeWorktree: a.IncludeWorktree, Profile: a.Profile,
+		CachePath: s.runtimeContext.EffectiveCachePath, BatchSize: a.BatchSize, MaxChunks: a.MaxChunks,
+	}
+	if err := client.Call(ctx, "Jobs.StartRepositoryDocsIndex", request, &job); err != nil {
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "repository_docs_index", RepoID: a.RepoID, Subsystem: "service"})
+		return
+	}
+	text := fmt.Sprintf("repository_docs_index job=%s status=%s repo=%s", job.ID, job.Status, job.RepoID)
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: job})
 }
 
 func lookupMCPRAGServiceState(ctx context.Context, repoID string) (*rag.ServiceStatus, *rag.JobStatus) {

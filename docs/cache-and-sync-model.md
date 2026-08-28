@@ -25,6 +25,7 @@ Candidate tables:
 - `sync_events`: sync command, idempotency key, result, error class, evidence path.
 - `conflicts`: local value, remote value, conflict class, resolution state.
 - `embedding_namespaces`, `chunk_embeddings`, `rag_index_runs`, and `rag_coverage_state`: model-scoped RAG coverage, content-generation coverage, and indexing progress state.
+- `repo_doc_revision_sets`, `repo_doc_chunks`, `repo_doc_membership`, and `repo_doc_vectors`: metadata-only repository-document revision identity, byte/line locators, Git/worktree authority, and reusable vectors. These tables never contain source or chunk text.
 - `cache_identity`, `repo_content_state`, and `maintenance_frontiers`: durable cache identity, hash-driven invalidation generation, and independent daemon head/tail coverage.
 
 ## Sync Principles

@@ -21,6 +21,7 @@ import (
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/mcp"
 	"gitcode-mcp/internal/rag"
+	"gitcode-mcp/internal/repositorydocs"
 	"gitcode-mcp/internal/service"
 	"gitcode-mcp/internal/servicectl"
 )
@@ -513,6 +514,7 @@ func newMCPStdioServer(ctx context.Context, stdin io.Reader, stdout io.Writer, s
 	server := mcp.NewWithToolAccess(stdin, stdout, stderr, svc, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess))
 	server.SetRAGStatusProvider(newMCPRAGStatusProvider(store, deps))
 	server.SetRAGSearchProvider(newMCPRAGSearchProvider(store, deps))
+	setMCPRepositoryDocsProviders(server.SetRepositoryDocsProviders, store, deps)
 	server.SetRuntimeContext(mcpRuntimeContext(deps))
 	setMCPMaintenanceProviders(server.SetMaintenanceProviders, deps)
 	return server, func() { _ = store.Close() }
@@ -555,6 +557,7 @@ func runMCPHTTPSSE(ctx context.Context, stderr io.Writer, deps StartupDeps, bind
 	handler := mcp.NewRPCHandlerWithCredentialResolverAndToolAccess(svc, deps.CredentialResolver, mcp.ToolAccess(deps.Config.MCPToolAccess))
 	handler.SetRAGStatusProvider(newMCPRAGStatusProvider(store, deps))
 	handler.SetRAGSearchProvider(newMCPRAGSearchProvider(store, deps))
+	setMCPRepositoryDocsProviders(handler.SetRepositoryDocsProviders, store, deps)
 	handler.SetRuntimeContext(mcpRuntimeContext(deps))
 	setMCPMaintenanceProviders(handler.SetMaintenanceProviders, deps)
 	transport := mcp.NewHTTPSSETransport(handler, mcp.ServerConfig{BindAddress: bind, ReadinessProbe: func(ctx context.Context) mcp.Readiness {
@@ -592,6 +595,54 @@ func newMCPRAGSearchProvider(store cache.Store, deps StartupDeps) mcp.RAGSearchP
 	return func(ctx context.Context, req rag.SearchRequest) (rag.SearchResult, error) {
 		return rag.NewOperations(store, deps.Config, rag.OperationsOptions{}).Search(ctx, req)
 	}
+}
+
+func setMCPRepositoryDocsProviders(set func(mcp.RepositoryDocsPolicyProvider, mcp.RepositoryDocsStatusProvider, mcp.RepositoryDocsSearchProvider), store *cache.SQLiteStore, deps StartupDeps) {
+	open := func(ctx context.Context) (*repositorydocs.Repository, error) {
+		return repositorydocs.OpenRepository(ctx, ".")
+	}
+	policy := func(ctx context.Context, req repositorydocs.PolicyRequest) (repositorydocs.PolicyResult, error) {
+		binding, err := store.ResolveRepositoryBinding(ctx, req.RepoID)
+		if err != nil {
+			return repositorydocs.PolicyResult{}, err
+		}
+		req.RepoID = binding.RepoID
+		repo, err := open(ctx)
+		if err != nil {
+			return repositorydocs.PolicyResult{}, err
+		}
+		return repositorydocs.InspectPolicy(ctx, repo, req)
+	}
+	status := func(ctx context.Context, req repositorydocs.StatusRequest) (repositorydocs.StatusResult, error) {
+		binding, err := store.ResolveRepositoryBinding(ctx, req.RepoID)
+		if err != nil {
+			return repositorydocs.StatusResult{}, err
+		}
+		req.RepoID = binding.RepoID
+		repo, err := open(ctx)
+		if err != nil {
+			return repositorydocs.StatusResult{}, err
+		}
+		return repositorydocs.InspectStatus(ctx, store, repo, req)
+	}
+	search := func(ctx context.Context, req repositorydocs.SearchRequest) (repositorydocs.SearchResult, error) {
+		binding, err := store.ResolveRepositoryBinding(ctx, req.RepoID)
+		if err != nil {
+			return repositorydocs.SearchResult{}, err
+		}
+		req.RepoID = binding.RepoID
+		repo, err := open(ctx)
+		if err != nil {
+			return repositorydocs.SearchResult{}, err
+		}
+		req.Repository = repo
+		var provider rag.EmbeddingProvider
+		if req.Mode == "" || req.Mode == repositorydocs.SearchModeHybrid {
+			provider, _ = rag.NewEmbeddingProviderFromConfig(deps.Config, "", rag.ProviderOptions{})
+		}
+		return repositorydocs.NewRetriever(store, provider).Search(ctx, req)
+	}
+	set(policy, status, search)
 }
 
 func setMCPMaintenanceProviders(set func(mcp.MaintenancePlanProvider, mcp.MaintenanceApplyProvider), deps StartupDeps) {

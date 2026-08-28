@@ -332,6 +332,30 @@ var writeCapabilities = []Capability{
 
 var ragCapabilities = []Capability{
 	{
+		ID: "repository_docs_policy", Category: CategoryRAG, Safety: SafetyReadOnly,
+		CLIName: "repo-docs", MCPName: "repository_docs_policy", ServiceCommand: "repository-docs-policy",
+		Description: "Resolve the repository-owned documentation policy at one local Git revision without fetching or copying document bodies.",
+		UI:          enabled("Available in the Admin Repository documentation cohort."), CLI: enabled("Available as `repo-docs policy`."), MCP: enabled(),
+	},
+	{
+		ID: "repository_docs_status", Category: CategoryRAG, Safety: SafetyReadOnly,
+		CLIName: "repo-docs", MCPName: "repository_docs_status", ServiceCommand: "repository-docs-status",
+		Description: "Inspect revision-set identity and repository-document vector coverage using opaque Git/worktree references.",
+		UI:          enabled("Available in the Admin Repository documentation cohort."), CLI: enabled("Available as `repo-docs status`."), MCP: enabled(),
+	},
+	{
+		ID: "repository_docs_search", Category: CategoryRAG, Safety: SafetyReadOnly,
+		CLIName: "repo-docs", MCPName: "repository_docs_search", ServiceCommand: "repository-docs-search",
+		Description: "Search one explicit local Git revision and return bounded digest-verified Git citations; full-text mode does not require an embedding provider.",
+		UI:          enabled("Available for privately registered worktrees; browser requests carry only registration identity, revision, and query."), CLI: enabled("Available as `repo-docs search`."), MCP: enabled(),
+	},
+	{
+		ID: "repository_docs_index", Category: CategoryRAG, Safety: SafetyBackgroundJob,
+		CLIName: "repo-docs", MCPName: "repository_docs_index", ServiceCommand: "repository-docs-index",
+		Description: "Build one immutable repository-document revision set as a daemon-owned job.",
+		UI:          enabled("Admin can reconcile a privately registered worktree and supervise the resulting daemon job; initial filesystem selection remains a local CLI action."), CLI: enabled("Available as `repo-docs index`."), MCP: enabled("Starts the coordinator repository-document job contract."),
+	},
+	{
 		ID:             "rag_status",
 		Category:       CategoryRAG,
 		Safety:         SafetyReadOnly,

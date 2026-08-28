@@ -10,6 +10,8 @@ import (
 
 	"gitcode-mcp/internal/adminhttp"
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/rag"
+	"gitcode-mcp/internal/repositorydocs"
 	"gitcode-mcp/internal/service"
 )
 
@@ -98,6 +100,84 @@ func (m *AdminControlManager) ReconcileMaintenance(ctx context.Context, req admi
 			return nil, adminControlError(err)
 		}
 		return map[string]any{"outcome": maintenanceReconcileOutcome(result), "jobs_started": result.JobsStarted, "checked_at": result.CheckedAt}, nil
+	})
+}
+
+func (m *AdminControlManager) SearchRepositoryDocs(ctx context.Context, req adminhttp.RepositoryDocsSearchRequest) (any, error) {
+	if m.maintenance == nil {
+		return nil, controlError(http.StatusNotImplemented, "capability_unavailable", "Repository documentation search is unavailable.", "Use the CLI repository documentation surface.")
+	}
+	req.Query = strings.TrimSpace(req.Query)
+	req.Revision = strings.TrimSpace(req.Revision)
+	req.Mode = strings.ReplaceAll(strings.ToLower(strings.TrimSpace(req.Mode)), "_", "")
+	if req.Query == "" || len(req.Query) > 512 {
+		return nil, controlError(http.StatusBadRequest, "invalid_request", "query must contain between 1 and 512 characters.", "Enter a bounded repository documentation query.")
+	}
+	if len(req.Revision) > 256 {
+		return nil, controlError(http.StatusBadRequest, "invalid_request", "revision is too long.", "Use a Git ref or object id with at most 256 characters.")
+	}
+	if req.Mode == "" {
+		req.Mode = repositorydocs.SearchModeHybrid
+	}
+	if req.Mode != repositorydocs.SearchModeHybrid && req.Mode != repositorydocs.SearchModeFullText {
+		return nil, controlError(http.StatusBadRequest, "invalid_request", "mode must be hybrid or fulltext.", "Select a supported repository documentation search mode.")
+	}
+	if req.Limit == 0 {
+		req.Limit = 8
+	}
+	if req.Limit < 1 || req.Limit > 20 {
+		return nil, controlError(http.StatusBadRequest, "invalid_request", "limit must be between 1 and 20.", "Select a bounded result limit.")
+	}
+	source, err := m.maintenance.repositoryDocsSourceForAdmin(req.RegistrationID)
+	if err != nil {
+		return nil, adminControlError(err)
+	}
+	store, err := cache.NewSQLiteReadOnlyStore(ctx, source.CachePath)
+	if err != nil {
+		return nil, adminControlError(err)
+	}
+	defer store.Close()
+	repo, err := repositorydocs.OpenRepository(ctx, source.RepositoryPath)
+	if err != nil {
+		return nil, adminControlError(err)
+	}
+	var provider rag.EmbeddingProvider
+	if req.Mode == repositorydocs.SearchModeHybrid {
+		provider, _ = rag.NewEmbeddingProviderFromConfig(source.Config, source.Profile, rag.ProviderOptions{})
+	}
+	result, err := repositorydocs.NewRetriever(store, provider).Search(ctx, repositorydocs.SearchRequest{
+		RepoID: source.RepoID, Repository: repo, Revision: req.Revision,
+		IncludeWorktree: req.IncludeWorktree, Query: req.Query, Mode: req.Mode, Limit: req.Limit,
+	})
+	if err != nil {
+		return nil, adminControlError(err)
+	}
+	return result, nil
+}
+
+func (m *AdminControlManager) IndexRepositoryDocs(ctx context.Context, req adminhttp.RegistrationControlRequest) (any, error) {
+	if m.maintenance == nil || m.jobs == nil {
+		return nil, controlError(http.StatusNotImplemented, "capability_unavailable", "Repository documentation indexing is unavailable.", "Use the CLI repository documentation surface.")
+	}
+	source, err := m.maintenance.repositoryDocsSourceForAdmin(req.RegistrationID)
+	if err != nil {
+		return nil, adminControlError(err)
+	}
+	intent := struct {
+		RegistrationID string `json:"registration_id"`
+		CommitScope    string `json:"commit_scope"`
+	}{source.RegistrationID, "HEAD"}
+	return m.receipts.Apply(ctx, "repository_docs_index", source.RegistrationID, req.IdempotencyKey, intent, func() (map[string]any, error) {
+		jobManager := m.manager
+		jobManager.EffectiveConfig = &source.Config
+		job, err := m.jobs.StartRepositoryDocsIndex(context.Background(), jobManager, StartRepositoryDocsIndexJobRequest{
+			RepoID: source.RepoID, RepositoryPath: source.RepositoryPath, Profile: source.Profile,
+			CachePath: source.CachePath, CacheUUID: source.CacheUUID, RegistrationID: source.RegistrationID,
+		})
+		if err != nil {
+			return nil, adminControlError(err)
+		}
+		return map[string]any{"outcome": "accepted", "job_id": job.ID, "job_status": job.Status, "commit_scope": "HEAD"}, nil
 	})
 }
 

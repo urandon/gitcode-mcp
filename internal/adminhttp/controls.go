@@ -52,6 +52,18 @@ type SearchCompareRequest struct {
 	Limit      int    `json:"limit,omitempty"`
 }
 
+// RepositoryDocsSearchRequest deliberately carries no filesystem path. The
+// daemon resolves local Git and cache authority from its private maintenance
+// registration after authenticating the loopback Admin session.
+type RepositoryDocsSearchRequest struct {
+	RegistrationID  string `json:"-"`
+	Query           string `json:"query"`
+	Revision        string `json:"revision,omitempty"`
+	Mode            string `json:"mode,omitempty"`
+	Limit           int    `json:"limit,omitempty"`
+	IncludeWorktree bool   `json:"include_worktree,omitempty"`
+}
+
 type ProviderSmokeRequest struct {
 	CacheRef string `json:"cache_ref"`
 	RepoID   string `json:"repo_id"`
@@ -71,6 +83,7 @@ type MaintenanceControlProvider func(context.Context, MaintenanceControlRequest)
 type RegistrationControlProvider func(context.Context, RegistrationControlRequest) (any, error)
 type BindingControlProvider func(context.Context, BindingControlRequest) (any, error)
 type SearchCompareProvider func(context.Context, SearchCompareRequest) (any, error)
+type RepositoryDocsSearchProvider func(context.Context, RepositoryDocsSearchRequest) (any, error)
 type ProviderSmokeProvider func(context.Context, ProviderSmokeRequest) (any, error)
 type RAGRepairProvider func(context.Context, RAGRepairRequest) (any, error)
 
@@ -114,6 +127,16 @@ func (c *Controller) applyBinding(w http.ResponseWriter, r *http.Request) {
 
 func (c *Controller) compareSearch(w http.ResponseWriter, r *http.Request) {
 	applyControl(c, w, r, c.cfg.CompareSearch, SearchCompareRequest{}, false)
+}
+
+func (c *Controller) searchRepositoryDocs(w http.ResponseWriter, r *http.Request) {
+	req := RepositoryDocsSearchRequest{RegistrationID: strings.TrimSpace(r.PathValue("registration_id"))}
+	applyControl(c, w, r, c.cfg.SearchRepositoryDocs, req, false)
+}
+
+func (c *Controller) indexRepositoryDocs(w http.ResponseWriter, r *http.Request) {
+	req := RegistrationControlRequest{RegistrationID: strings.TrimSpace(r.PathValue("registration_id"))}
+	applyControl(c, w, r, c.cfg.IndexRepositoryDocs, req, true)
 }
 
 func (c *Controller) smokeProvider(w http.ResponseWriter, r *http.Request) {

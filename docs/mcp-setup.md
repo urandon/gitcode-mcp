@@ -234,6 +234,10 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 | `maintenance_status` | Report sanitized daemon-managed cache, backfill frontier, content generation, and RAG coverage state |
 | `maintenance_plan` | Build a deterministic, path-free plan for the selected MCP cache and requested refresh/RAG policy |
 | `enable_cache_maintenance` | Apply an already rendered plan with `write_mode=live` and an idempotency key; machine-level installs/downloads return a CLI handoff |
+| `repository_docs_policy` | Resolve the committed repository-document corpus policy at an exact local Git revision without fetching |
+| `repository_docs_status` | Inspect metadata-only revision-set and vector coverage using opaque Git/worktree references |
+| `repository_docs_search` | Search exact local Git blobs with bounded digest-verified citations; `mode=fulltext` requires no provider or index |
+| `repository_docs_index` | Submit daemon-owned indexing for the MCP process's current worktree; repository aliases are canonicalized and document text is never persisted |
 | `sync_live` | Synchronize selected issue, issue-comment, pull-request, pull-request-comment, or wiki collections into the cache |
 | `prepare_feedback` | Prepare and deduplicate a structured public-safe dogfood report without creating an issue |
 | `submit_feedback` | Submit a prepared report to the configured sink through the audited write lifecycle |

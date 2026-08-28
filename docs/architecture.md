@@ -16,6 +16,7 @@ Provide a cache-first tooling layer that lets AI agents and humans search, inspe
 | --- | --- |
 | Source ingest | Read markdown, tracker, or wiki exports and extract source/task/page metadata. |
 | Local cache | Store normalized records, full text, backlinks, identity map, remote metadata, sync status, and conflicts. |
+| Repository documentation retrieval | Resolve committed corpus policy, scan exact local Git blobs, maintain metadata-only revision sets/vectors, and hydrate digest-verified citations without fetching. |
 | Link resolver | Resolve legacy ids, local paths, wiki pages, and remote issue/page ids. |
 | GitCode adapter (fixture + live providers) | Encapsulate fixture/offline records and live tracker/wiki API calls, pagination, auth, rate limits, attachments, and write semantics. |
 | CLI | Provide explicit commands for sync, search, get, link-check, export, diff, and diagnostics. |
@@ -70,6 +71,22 @@ GitCode adapter <-> tracker/wiki remote state
 ```
 
 Writes flow through explicit CLI or MCP live-write commands, require idempotency keys or deterministic write fingerprints, call the live GitCode adapter for provider confirmation, and then record audit/cache evidence. Routine reads continue to flow through the local cache and never trigger background writes.
+
+Repository documentation follows a separate local-authority path:
+
+```text
+committed .gitcode/gitcode-mcp.yaml + exact Git tree
+        |                              |
+        v                              v
+  corpus policy              bounded blob hydration
+        |                              |
+        +--> metadata/vector revision set --> CLI / MCP / Admin status
+                                       |
+                                       +--> digest-verified citations
+```
+
+Git is the only durable document store. SQLite never persists repository
+document or chunk text. See [Repository documentation RAG](repository-documentation-rag.md).
 
 ## Repo-Local Cache Storage
 

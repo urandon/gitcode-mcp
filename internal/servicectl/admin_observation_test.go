@@ -54,6 +54,10 @@ func TestAdminObservationReadsCacheWithoutExposingItsPath(t *testing.T) {
 	if len(snapshot.Caches) != 1 || len(snapshot.Caches[0].Repositories) != 1 || snapshot.Caches[0].Repositories[0].RepoID != "example/repo" {
 		t.Fatalf("cache topology=%+v", snapshot.Caches)
 	}
+	documentation := snapshot.Caches[0].Repositories[0].Documentation
+	if documentation == nil || documentation.State != "not_indexed" || documentation.IndexHandoff != "gitcode-mcp repo-docs index --repo example/repo" || documentation.SearchAvailable {
+		t.Fatalf("repository documentation observation=%+v", documentation)
+	}
 	if snapshot.JobRetention.SuccessTTLSeconds != int64(config.DefaultJobSuccessTTL.Seconds()) || snapshot.JobRetention.MaxTerminalJobs != config.DefaultJobMaxTerminal {
 		t.Fatalf("job retention observation=%+v", snapshot.JobRetention)
 	}

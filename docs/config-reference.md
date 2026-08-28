@@ -97,6 +97,7 @@ rag:
 | `cache_path` | string | `<cache-dir>/gitcode-mcp/cache.db` | SQLite cache database path |
 | `lock_path` | string | `<cache_path>.lock` | Lock file path for writer ownership |
 | `cache_mode` | string | `global` | Cache placement mode. Use `repo-local` to resolve the cache under the current Git worktree when no explicit cache path is set |
+| `repository_docs` | object | `conventional-docs-v1` preset | Repository-owned documentation corpus intent. Valid only as committed policy in `.gitcode/gitcode-mcp.yaml`; see below. |
 | `gitcode_base_url` | string | `https://api.gitcode.com/api/v5` | GitCode API base URL |
 | `default_timeout` | duration | `30s` | Timeout for GitCode API calls and the CLI operation context |
 | `max_response_size` | int64 | `10485760` | Maximum response size in bytes |
@@ -153,6 +154,25 @@ Repo-local mode keeps a repository-specific MCP cache under the current Git work
       cache.db
       cache.db.lock
 ```
+
+The same tracked file may declare versioned repository-document corpus intent:
+
+```yaml
+repository_docs:
+  schema: 1
+  enabled: true
+  preset: conventional-docs-v1
+  include:
+    - runbooks/**/*.md
+  exclude:
+    - docs/generated/**
+```
+
+The default preset includes root `README*`, root `AGENTS.md`, and `docs/**`.
+Use `preset: none` plus an explicit `include` list to replace it. Provider,
+model, credential, cache-path, and machine resource settings do not belong in
+this repository-owned section. See [Repository documentation
+RAG](repository-documentation-rag.md) for revision, overlay, and storage rules.
 
 Bootstrap it from inside the Git worktree:
 

@@ -14,6 +14,8 @@ func TestAdminControlsRequireSessionOriginCSRFAndStrictIntent(t *testing.T) {
 	maintenanceCalls := 0
 	bindingCalls := 0
 	searchCalls := 0
+	repositoryDocsSearchCalls := 0
+	repositoryDocsIndexCalls := 0
 	smokeCalls := 0
 	repairPlanCalls := 0
 	repairApplyCalls := 0
@@ -30,6 +32,14 @@ func TestAdminControlsRequireSessionOriginCSRFAndStrictIntent(t *testing.T) {
 		CompareSearch: func(_ context.Context, req SearchCompareRequest) (any, error) {
 			searchCalls++
 			return map[string]any{"query": req.Query}, nil
+		},
+		SearchRepositoryDocs: func(_ context.Context, req RepositoryDocsSearchRequest) (any, error) {
+			repositoryDocsSearchCalls++
+			return map[string]any{"registration_id": req.RegistrationID, "query": req.Query}, nil
+		},
+		IndexRepositoryDocs: func(_ context.Context, req RegistrationControlRequest) (any, error) {
+			repositoryDocsIndexCalls++
+			return map[string]any{"registration_id": req.RegistrationID}, nil
 		},
 		SmokeProvider: func(_ context.Context, req ProviderSmokeRequest) (any, error) {
 			smokeCalls++
@@ -87,6 +97,18 @@ func TestAdminControlsRequireSessionOriginCSRFAndStrictIntent(t *testing.T) {
 	if got := call("/api/admin/v1/search/compare", `{"cache_ref":"cache-a","repo_id":"owner/repo","query":"cache lifecycle"}`, true, validHeaders); got.Code != http.StatusOK {
 		t.Fatalf("search status=%d body=%s", got.Code, got.Body.String())
 	}
+	if got := call("/api/admin/v1/repository-docs/reg-docs/search", `{"query":"cache lifecycle","repository_path":"/private/repo"}`, true, validHeaders); got.Code != http.StatusBadRequest {
+		t.Fatalf("repository docs search accepted private path status=%d body=%s", got.Code, got.Body.String())
+	}
+	if got := call("/api/admin/v1/repository-docs/reg-docs/search", `{"query":"cache lifecycle","revision":"HEAD","mode":"fulltext","limit":5}`, true, validHeaders); got.Code != http.StatusOK || !strings.Contains(got.Body.String(), `"registration_id":"reg-docs"`) {
+		t.Fatalf("repository docs search status=%d body=%s", got.Code, got.Body.String())
+	}
+	if got := call("/api/admin/v1/repository-docs/reg-docs/index", `{}`, true, validHeaders); got.Code != http.StatusBadRequest {
+		t.Fatalf("repository docs index missing key status=%d body=%s", got.Code, got.Body.String())
+	}
+	if got := call("/api/admin/v1/repository-docs/reg-docs/index", `{"idempotency_key":"repo-docs-index-key"}`, true, validHeaders); got.Code != http.StatusOK || !strings.Contains(got.Body.String(), `"registration_id":"reg-docs"`) {
+		t.Fatalf("repository docs index status=%d body=%s", got.Code, got.Body.String())
+	}
 	if got := call("/api/admin/v1/rag/provider/smoke", `{"cache_ref":"cache-a","repo_id":"owner/repo"}`, true, validHeaders); got.Code != http.StatusOK {
 		t.Fatalf("smoke status=%d body=%s", got.Code, got.Body.String())
 	}
@@ -99,8 +121,8 @@ func TestAdminControlsRequireSessionOriginCSRFAndStrictIntent(t *testing.T) {
 	if got := call("/api/admin/v1/rag/repair/apply", `{"cache_ref":"cache-a","repo_id":"owner/repo","plan_id":"rag-plan-1","max_chunks":64,"idempotency_key":"repair-key-1"}`, true, validHeaders); got.Code != http.StatusOK {
 		t.Fatalf("repair apply status=%d body=%s", got.Code, got.Body.String())
 	}
-	if maintenanceCalls != 1 || bindingCalls != 1 || searchCalls != 1 || smokeCalls != 1 || repairPlanCalls != 1 || repairApplyCalls != 1 {
-		t.Fatalf("provider calls maintenance=%d binding=%d search=%d smoke=%d repair_plan=%d repair_apply=%d", maintenanceCalls, bindingCalls, searchCalls, smokeCalls, repairPlanCalls, repairApplyCalls)
+	if maintenanceCalls != 1 || bindingCalls != 1 || searchCalls != 1 || repositoryDocsSearchCalls != 1 || repositoryDocsIndexCalls != 1 || smokeCalls != 1 || repairPlanCalls != 1 || repairApplyCalls != 1 {
+		t.Fatalf("provider calls maintenance=%d binding=%d search=%d repository_docs_search=%d repository_docs_index=%d smoke=%d repair_plan=%d repair_apply=%d", maintenanceCalls, bindingCalls, searchCalls, repositoryDocsSearchCalls, repositoryDocsIndexCalls, smokeCalls, repairPlanCalls, repairApplyCalls)
 	}
 }
 

@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 17
+const currentSchemaVersion = 18
 const issueCommentSyncSchemaVersion = 16
 
 func CurrentSchemaVersion() int {
@@ -152,6 +152,7 @@ var migrations = []migration{
 	{version: 15, apply: applyRAGEmbeddingSchemaMigration},
 	{version: 16, apply: applyIssueCommentSyncMigration},
 	{version: 17, apply: applyMaintenanceLifecycleMigration},
+	{version: 18, apply: applyRepositoryDocsSchemaMigration},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB, ftsAvailable bool) error {
@@ -1011,6 +1012,95 @@ BEGIN
 	VALUES (OLD.repo_id, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 	ON CONFLICT(repo_id) DO UPDATE SET content_generation = content_generation + 1, content_changed_at = excluded.content_changed_at;
 END`,
+	}
+	for _, stmt := range statements {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyRepositoryDocsSchemaMigration(ctx context.Context, tx *sql.Tx, _ bool) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS repo_doc_revision_sets (
+	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+	revision_set_id TEXT NOT NULL,
+	git_store_ref TEXT NOT NULL,
+	worktree_ref TEXT NOT NULL DEFAULT '',
+	object_format TEXT NOT NULL,
+	commit_oid TEXT NOT NULL,
+	requested_revision TEXT NOT NULL DEFAULT '',
+	policy_hash TEXT NOT NULL,
+	policy_source TEXT NOT NULL,
+	config_digest TEXT NOT NULL DEFAULT '',
+	overlay_digest TEXT NOT NULL DEFAULT '',
+	chunk_policy_id TEXT NOT NULL,
+	namespace_id TEXT NOT NULL DEFAULT '',
+	state TEXT NOT NULL,
+	eligible_files INTEGER NOT NULL DEFAULT 0,
+	eligible_chunks INTEGER NOT NULL DEFAULT 0,
+	embedded_chunks INTEGER NOT NULL DEFAULT 0,
+	reused_chunks INTEGER NOT NULL DEFAULT 0,
+	failed_chunks INTEGER NOT NULL DEFAULT 0,
+	excluded_files INTEGER NOT NULL DEFAULT 0,
+	missing_objects INTEGER NOT NULL DEFAULT 0,
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	completed_at TEXT NOT NULL DEFAULT '',
+	last_error_class TEXT NOT NULL DEFAULT '',
+	PRIMARY KEY(repo_id, revision_set_id)
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_repo_doc_revision_sets_lookup ON repo_doc_revision_sets(repo_id, git_store_ref, commit_oid, policy_hash, overlay_digest, chunk_policy_id, state, updated_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_repo_doc_revision_sets_retention ON repo_doc_revision_sets(repo_id, state, completed_at, updated_at)`,
+		`CREATE TABLE IF NOT EXISTS repo_doc_chunks (
+	repo_id TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+	chunk_id TEXT NOT NULL,
+	object_format TEXT NOT NULL,
+	blob_oid TEXT NOT NULL DEFAULT '',
+	worktree_ref TEXT NOT NULL DEFAULT '',
+	content_digest TEXT NOT NULL,
+	byte_start INTEGER NOT NULL,
+	byte_end INTEGER NOT NULL,
+	line_start INTEGER NOT NULL,
+	line_end INTEGER NOT NULL,
+	raw_slice_digest TEXT NOT NULL,
+	embedding_input_digest TEXT NOT NULL,
+	chunk_policy_id TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, chunk_id)
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_repo_doc_chunks_content ON repo_doc_chunks(repo_id, object_format, blob_oid, content_digest, chunk_policy_id)`,
+		`CREATE TABLE IF NOT EXISTS repo_doc_membership (
+	repo_id TEXT NOT NULL,
+	revision_set_id TEXT NOT NULL,
+	path TEXT NOT NULL,
+	chunk_id TEXT NOT NULL,
+	authority TEXT NOT NULL,
+	ordinal INTEGER NOT NULL,
+	blob_oid TEXT NOT NULL DEFAULT '',
+	content_digest TEXT NOT NULL,
+	PRIMARY KEY(repo_id, revision_set_id, path, chunk_id),
+	FOREIGN KEY(repo_id, revision_set_id) REFERENCES repo_doc_revision_sets(repo_id, revision_set_id) ON DELETE CASCADE,
+	FOREIGN KEY(repo_id, chunk_id) REFERENCES repo_doc_chunks(repo_id, chunk_id) ON DELETE CASCADE
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_repo_doc_membership_chunk ON repo_doc_membership(repo_id, chunk_id, revision_set_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_repo_doc_membership_path ON repo_doc_membership(repo_id, revision_set_id, path, ordinal)`,
+		`CREATE TABLE IF NOT EXISTS repo_doc_vectors (
+	repo_id TEXT NOT NULL,
+	namespace_id TEXT NOT NULL,
+	chunk_id TEXT NOT NULL,
+	vector BLOB NOT NULL,
+	dimensions INTEGER NOT NULL,
+	dtype TEXT NOT NULL,
+	vector_hash TEXT NOT NULL,
+	embedded_at TEXT NOT NULL,
+	PRIMARY KEY(repo_id, namespace_id, chunk_id),
+	FOREIGN KEY(repo_id, namespace_id) REFERENCES embedding_namespaces(repo_id, namespace_id) ON DELETE CASCADE,
+	FOREIGN KEY(repo_id, chunk_id) REFERENCES repo_doc_chunks(repo_id, chunk_id) ON DELETE CASCADE
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_repo_doc_vectors_chunk ON repo_doc_vectors(repo_id, chunk_id, namespace_id)`,
 	}
 	for _, stmt := range statements {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {

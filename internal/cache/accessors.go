@@ -102,6 +102,28 @@ func (s *SQLiteStore) GetRepository(ctx context.Context, repoID string) (Reposit
 	return repos[0], nil
 }
 
+// ResolveRepositoryBinding returns the canonical repository binding for either
+// its stable repo_id or one of its configured aliases. Repository-scoped
+// derived state must always be written under the returned RepoID so aliases do
+// not accidentally fork cache identity.
+func (s *SQLiteStore) ResolveRepositoryBinding(ctx context.Context, value string) (RepositoryBinding, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return RepositoryBinding{}, notFoundErr("repository", value)
+	}
+	if repo, err := s.GetRepository(ctx, value); err == nil {
+		return repo, nil
+	}
+	var repoID string
+	if err := s.db.QueryRowContext(ctx, `SELECT repo_id FROM repo_aliases WHERE alias = ?`, value).Scan(&repoID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return RepositoryBinding{}, notFoundErr("repository", value)
+		}
+		return RepositoryBinding{}, err
+	}
+	return s.GetRepository(ctx, repoID)
+}
+
 func (s *SQLiteStore) ListRepositories(ctx context.Context) ([]RepositoryBinding, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, owner, name, api_base_url, scopes, display_name, created_at, updated_at FROM repos ORDER BY repo_id`)
 	if err != nil {
