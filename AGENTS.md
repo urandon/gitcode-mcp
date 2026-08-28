@@ -18,6 +18,8 @@ Use GitCode issues and pull requests for active planning and handoffs. Use the G
 
 Treat an existing GitCode issue title and description as the fixed task input. Do not edit either unless the user explicitly requests that exact metadata change. Publish design proposals, decisions, progress updates, verification evidence, handoffs, and later corrections as issue comments so the original input remains reviewable.
 
+When a proposal introduces a new user-visible resource, state, action, lifecycle, query scope, or remediation path, treat it as a UX cohort. The design and final decomposition must assess every supported product surface, including the embedded admin UI. For a user-facing cohort, create an explicit UI issue or task; it may be capability-gated or sequenced after backend work, but its dependencies and rollout gate must remain visible. If no UI work is required, record the reason in the issue comments instead of silently omitting that surface.
+
 Do not reference non-public source repositories, trackers, wiki names, raw credentials, cookies, internal URLs, or unsanitized API responses. Source systems should appear here only as generic concepts or sanitized fixtures.
 
 ## Read First

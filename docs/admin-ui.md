@@ -81,6 +81,14 @@ RAG repair is a separate explicit plan/confirm/apply action. Its ledger names th
 
 Ordinary responses expose `cache_ref` and a one-way path fingerprint, never an absolute cache path. Current coverage truth is kept separate from active contention, a scheduled retry, and the last stage error, so a transient maintenance failure cannot hide a still-current RAG namespace.
 
+## UX cohort coverage
+
+A feature creates a new UX cohort when it introduces a distinct user-visible resource, state, action, lifecycle, query scope, or remediation path. Its design and implementation decomposition must explicitly assess the embedded admin UI rather than assume that CLI or MCP coverage is sufficient.
+
+For a user-facing cohort, the decomposition must include an independently trackable admin-UI task. The task should cover observation and permitted controls, navigation and deep-link state, capability and API projection, loading/empty/partial/stale/error states, accessibility, tests, embedded asset checks, and release gates. The UI may be capability-gated or delivered after its backend dependency, but that dependency and rollout gate must be explicit.
+
+If a cohort is intentionally transport-only, internal, or CLI-only for safety, the active issue must record that rationale and describe any UI observation or handoff that remains necessary. A feature must not silently disappear from the operator console merely because its backend or CLI path shipped first.
+
 ## Read-only operator views
 
 The observation UI is organized around product state rather than CLI command groups:
@@ -88,6 +96,7 @@ The observation UI is organized around product state rather than CLI command gro
 - **Overview** leads with current attention, service/cache readiness, active work, cache/repository cohort summaries, and recovered failures.
 - **Caches** shows the safe cache → repository topology. Repository details keep head freshness, tail completeness, secondary coverage, projection generation, and RAG generation as five independent lanes.
 - **Collections** shows bounded per-kind counts and head/tail frontier evidence. A bounded tail stop is always labelled partial; only end-of-collection evidence is presented as complete.
+- **Documentation** shows repository-owned policy, exact commit or tracked-overlay authority, metadata/vector coverage, namespace, revision-set history, and daemon jobs. Because the browser cannot choose or receive arbitrary absolute filesystem paths, v1 exposes exact CLI handoffs for index/search from the intended worktree instead of pretending cached metadata contains source text.
 - **Search status / Search Lab** first explains full-text versus hybrid readiness, then lets an operator run a bounded side-by-side experiment. Score provenance, citations, fallback, namespace/generation coverage, provider smoke, and bounded repair remain distinct actions with explicit data boundaries.
 - **Activity** presents bounded structured history. **Maintenance** adds capability-derived policy and binding workbenches: edit intent, render the effect ledger, confirm the exact plan id, and inspect receipts or CLI handoffs. **Jobs** adds URL-preserved filters and detail, retained progress, throughput/ETA where derivable, rate-limit/retry/interruption state, and explicit cancel/retry controls only where the daemon reports them safe. Its lifecycle panel exposes the effective success/diagnostic TTLs, terminal and diagnostic caps, oldest retained time, and expiry/truncation evidence. An expired job deep link is explicitly labelled not retained and explains that cache/frontier/audit state is unaffected.
 - **Diagnostics** separates current from recovered typed failures, gives fixed public-safe CLI handoffs, and shows the capability/safety catalog.

@@ -10,6 +10,7 @@ Start with:
 - [test-intent-migration.md](test-intent-migration.md)
 - [cache-and-sync-model.md](cache-and-sync-model.md)
 - [rag.md](rag.md)
+- [repository-documentation-rag.md](repository-documentation-rag.md)
 - [gitcode-api-discovery.md](gitcode-api-discovery.md)
 - [install.md](install.md)
 - [release-process.md](release-process.md)

@@ -12,6 +12,7 @@ The project is self-contained and public-safe. Source repositories, trackers, an
 - Syncs issues, pull requests, comments, wiki pages, labels, and milestones into SQLite.
 - Searches cached sources with hybrid lexical/semantic retrieval by default and keeps deterministic full-text mode available.
 - Runs optional local RAG semantic/hybrid retrieval over cached chunks with model-scoped embeddings.
+- Searches versioned repository documentation directly from exact local Git revisions while persisting metadata and vectors—not document copies.
 - Maintains multiple enrolled caches with daemon-owned recent refresh, historical backfill, and content-generation-aware RAG repair.
 - Resolves stable local ids and remote aliases for links, snippets, backlinks, and exports.
 - Runs an MCP server over cached data for agent workflows.
@@ -36,6 +37,7 @@ go run ./cmd/gitcode-mcp maintenance enable --repo YOUR_OWNER/YOUR_REPO --yes --
 
 For MCP usage, start with [MCP Setup](docs/mcp-setup.md). For live credentials, start with [Secrets](docs/secrets.md) and [Config Reference](docs/config-reference.md).
 For semantic retrieval, start with [RAG Setup and Operation](docs/rag.md).
+For README/`docs/` retrieval across Git revisions, start with [Repository documentation RAG](docs/repository-documentation-rag.md).
 
 ## Common Workflows
 
@@ -50,6 +52,7 @@ For semantic retrieval, start with [RAG Setup and Operation](docs/rag.md).
 - Operate daemon maintenance: [Daemon Cache and RAG Maintenance](docs/cache-maintenance.md)
 - Open the embedded local operator console: [Admin UI](docs/admin-ui.md)
 - Set up semantic retrieval: [RAG Setup and Operation](docs/rag.md)
+- Search versioned repository docs: [Repository documentation RAG](docs/repository-documentation-rag.md)
 - Review live API findings: [GitCode API Discovery](docs/gitcode-api-discovery.md)
 - List, trigger, and monitor repository mirrors safely: [Push Mirror Operations](docs/push-mirrors.md)
 - Prepare and submit public-safe dogfood reports: [Structured Feedback](docs/feedback.md)
