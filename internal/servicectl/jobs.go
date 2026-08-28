@@ -163,7 +163,7 @@ func (m *JobManager) LoadAndMarkInterrupted() error {
 }
 
 func sanitizeStoredMaintenanceJob(job *Job) {
-	if job == nil || (job.Type != SyncJobType && job.Type != RAGIndexJobType) {
+	if job == nil || (job.Type != SyncJobType && job.Type != RAGIndexJobType && job.Type != RepositoryDocsIndexJobType) {
 		return
 	}
 	if job.Error != "" {
@@ -266,7 +266,7 @@ func (m *JobManager) activeCacheWriterLocked(cacheUUID string) (Job, bool) {
 }
 
 func isCacheWriterJob(jobType string) bool {
-	return jobType == SyncJobType || jobType == RAGIndexJobType
+	return jobType == SyncJobType || jobType == RAGIndexJobType || jobType == RepositoryDocsIndexJobType
 }
 
 func (m *JobManager) LatestCacheRepo(jobType, cacheUUID, repoID string) (Job, bool) {

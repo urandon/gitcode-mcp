@@ -858,6 +858,9 @@ func publicMaintenanceJobError(jobType, class string) string {
 	if jobType == RAGIndexJobType {
 		return "RAG maintenance failed"
 	}
+	if jobType == RepositoryDocsIndexJobType {
+		return "repository documentation indexing failed"
+	}
 	return "remote cache maintenance failed"
 }
 

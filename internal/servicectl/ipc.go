@@ -183,6 +183,14 @@ func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawM
 			}
 		}
 		return s.Jobs.StartRAGIndex(context.Background(), s.Manager, req)
+	case "Jobs.StartRepositoryDocsIndex":
+		var req StartRepositoryDocsIndexJobRequest
+		if len(params) > 0 {
+			if err := json.Unmarshal(params, &req); err != nil {
+				return nil, err
+			}
+		}
+		return s.Jobs.StartRepositoryDocsIndex(context.Background(), s.Manager, req)
 	case "Jobs.StartSync":
 		var req StartSyncJobRequest
 		if len(params) > 0 {

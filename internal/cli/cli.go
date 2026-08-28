@@ -28,6 +28,7 @@ import (
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/index"
 	"gitcode-mcp/internal/rag"
+	"gitcode-mcp/internal/repositorydocs"
 	"gitcode-mcp/internal/service"
 	"gitcode-mcp/internal/servicectl"
 )
@@ -82,6 +83,7 @@ var commands = []string{
 	"rag",
 	"rag-status",
 	"rag-search",
+	"repo-docs",
 	"doctor",
 	"migrate-cache",
 	"repo",
@@ -175,6 +177,8 @@ type options struct {
 	status            string
 	provenance        string
 	searchMode        string
+	revision          string
+	includeWorktree   bool
 	limit             int
 	offset            int
 	lineStart         int
@@ -352,7 +356,7 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 		fmt.Fprintf(stdout, "gitcode-mcp %s\n", buildinfo.Current().Version)
 		return 0
 	}
-	if args[0] == "config" || args[0] == "auth" || args[0] == "service" || args[0] == "admin" || args[0] == "maintenance" || args[0] == "rag" || args[0] == "rag-status" || args[0] == "rag-search" || args[0] == "doctor" || args[0] == "migrate-cache" {
+	if args[0] == "config" || args[0] == "auth" || args[0] == "service" || args[0] == "admin" || args[0] == "maintenance" || args[0] == "rag" || args[0] == "rag-status" || args[0] == "rag-search" || args[0] == "repo-docs" || args[0] == "doctor" || args[0] == "migrate-cache" {
 		return executeLocalCommand(ctx, args, stdout, stderr, deps)
 	}
 	if !isKnownCommand(args[0]) {
@@ -644,6 +648,8 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.status, "status", "", "source status")
 	flags.StringVar(&opts.provenance, "provenance", "", "source provenance")
 	flags.StringVar(&opts.searchMode, "mode", "", "search mode: hybrid or full_text")
+	flags.StringVar(&opts.revision, "revision", "", "local Git revision (defaults to HEAD)")
+	flags.BoolVar(&opts.includeWorktree, "include-worktree", false, "explicitly include tracked worktree changes")
 	flags.IntVar(&opts.limit, "limit", 0, "result limit")
 	flags.IntVar(&opts.offset, "offset", 0, "result offset")
 	flags.IntVar(&opts.lineStart, "line-start", 0, "snippet start line")
@@ -822,7 +828,7 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 	}
 	if opts.helpRequested {
 		sub, _ := firstArg(rest)
-		if sub != "" && (command == "config" || command == "auth" || command == "repo" || command == "service" || command == "admin" || command == "maintenance" || command == "rag") {
+		if sub != "" && (command == "config" || command == "auth" || command == "repo" || command == "service" || command == "admin" || command == "maintenance" || command == "rag" || command == "repo-docs") {
 			switch command + " " + sub {
 			case "config init", "config locate", "config show":
 				printLocalSubcommandHelp(command, sub, stdout)
@@ -839,6 +845,8 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 			case "maintenance plan", "maintenance enable":
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "rag setup", "rag enable", "rag index", "rag status", "rag search":
+				printLocalSubcommandHelp(command, sub, stdout)
+			case "repo-docs policy", "repo-docs status", "repo-docs plan", "repo-docs index", "repo-docs search":
 				printLocalSubcommandHelp(command, sub, stdout)
 			default:
 				printCommandHelp(command, stdout)
@@ -885,6 +893,9 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 	}
 	if command == "rag-search" {
 		return executeRAGSearchCommand(ctx, rest, opts, stdout, stderr, deps)
+	}
+	if command == "repo-docs" {
+		return executeRepositoryDocsCommand(ctx, rest, opts, stdout, stderr, deps)
 	}
 	sub, ok := firstArg(rest)
 	if !ok {
@@ -1143,6 +1154,178 @@ func executeRAGCommand(ctx context.Context, args []string, opts options, stdout 
 		return executeRAGSearchCommand(ctx, args[1:], opts, stdout, stderr, deps)
 	default:
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "rag", Message: "unknown subcommand"})
+	}
+}
+
+type repositoryDocsPlan struct {
+	RepoID          string                          `json:"repo_id"`
+	CommitOID       string                          `json:"commit_oid"`
+	Policy          repositorydocs.PolicyResolution `json:"policy"`
+	IncludeWorktree bool                            `json:"include_worktree"`
+	EligibleFiles   int                             `json:"eligible_files"`
+	EligibleBytes   int64                           `json:"eligible_bytes"`
+	TrackedChanges  int                             `json:"tracked_changes,omitempty"`
+	OverlayDigest   string                          `json:"overlay_digest,omitempty"`
+}
+
+type repositoryDocsStatus struct {
+	RepoID          string                           `json:"repo_id"`
+	CommitOID       string                           `json:"commit_oid"`
+	Policy          repositorydocs.PolicyResolution  `json:"policy"`
+	IncludeWorktree bool                             `json:"include_worktree"`
+	OverlayDigest   string                           `json:"overlay_digest,omitempty"`
+	RevisionSets    []cache.RepositoryDocRevisionSet `json:"revision_sets"`
+}
+
+func executeRepositoryDocsCommand(ctx context.Context, args []string, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+	sub, ok := firstArg(args)
+	if !ok {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "repo-docs", Message: "subcommand is required"})
+	}
+	if strings.TrimSpace(opts.repo) == "" {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "repo", Message: "repository id is required"})
+	}
+	repo, err := repositorydocs.OpenRepository(ctx, ".")
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	commitOID, policy, err := repositorydocs.ResolvePolicy(ctx, repo, opts.revision, opts.includeWorktree)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	overlayDigest, err := repositorydocs.ResolveOverlayDigest(ctx, repo, commitOID, policy.PolicyHash, opts.includeWorktree, repositorydocs.DefaultMaxDocumentBytes)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	eff, err := config.LoadEffective(deps.Source, config.Overrides{CachePath: opts.cachePath})
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	bindingStore, err := cache.NewSQLiteReadOnlyStore(ctx, eff.Config.CachePath)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	binding, err := bindingStore.ResolveRepositoryBinding(ctx, opts.repo)
+	_ = bindingStore.Close()
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	opts.repo = binding.RepoID
+	switch sub {
+	case "policy":
+		payload := struct {
+			RepoID          string                          `json:"repo_id"`
+			CommitOID       string                          `json:"commit_oid"`
+			Policy          repositorydocs.PolicyResolution `json:"policy"`
+			IncludeWorktree bool                            `json:"include_worktree"`
+			OverlayDigest   string                          `json:"overlay_digest,omitempty"`
+		}{opts.repo, commitOID, policy, opts.includeWorktree, overlayDigest}
+		return render(stdout, opts.format, payload, func(w io.Writer, value struct {
+			RepoID          string                          `json:"repo_id"`
+			CommitOID       string                          `json:"commit_oid"`
+			Policy          repositorydocs.PolicyResolution `json:"policy"`
+			IncludeWorktree bool                            `json:"include_worktree"`
+			OverlayDigest   string                          `json:"overlay_digest,omitempty"`
+		}) {
+			fmt.Fprintf(w, "repo_id: %s\ncommit_oid: %s\npolicy_status: %s\npolicy_source: %s\npolicy_hash: %s\ninclude_worktree: %t\n", value.RepoID, value.CommitOID, value.Policy.Status, value.Policy.Source, value.Policy.PolicyHash, value.IncludeWorktree)
+			if value.OverlayDigest != "" {
+				fmt.Fprintf(w, "overlay_digest: %s\n", value.OverlayDigest)
+			}
+		})
+	case "plan":
+		entries, listErr := repo.ListTree(ctx, commitOID)
+		if listErr != nil {
+			return writeError(stderr, opts.format, listErr)
+		}
+		plan := repositoryDocsPlan{RepoID: opts.repo, CommitOID: commitOID, Policy: policy, IncludeWorktree: opts.includeWorktree, OverlayDigest: overlayDigest}
+		for _, entry := range entries {
+			if entry.Type == "blob" && entry.Mode != "120000" && entry.Size >= 0 && entry.Size <= repositorydocs.DefaultMaxDocumentBytes && policy.Policy.Matches(entry.Path) {
+				plan.EligibleFiles++
+				plan.EligibleBytes += entry.Size
+			}
+		}
+		if opts.includeWorktree {
+			changes, changeErr := repo.TrackedChanges(ctx, repositorydocs.DefaultMaxDocumentBytes)
+			if changeErr != nil {
+				return writeError(stderr, opts.format, changeErr)
+			}
+			plan.TrackedChanges = len(changes)
+		}
+		return render(stdout, opts.format, plan, func(w io.Writer, value repositoryDocsPlan) {
+			fmt.Fprintf(w, "repo_id: %s\ncommit_oid: %s\npolicy_hash: %s\neligible_files: %d\neligible_bytes: %d\ninclude_worktree: %t\ntracked_changes: %d\n", value.RepoID, value.CommitOID, value.Policy.PolicyHash, value.EligibleFiles, value.EligibleBytes, value.IncludeWorktree, value.TrackedChanges)
+		})
+	case "status":
+		store, openErr := cache.NewSQLiteReadOnlyStore(ctx, eff.Config.CachePath)
+		if openErr != nil {
+			return writeError(stderr, opts.format, openErr)
+		}
+		defer store.Close()
+		sets, listErr := store.ListRepositoryDocRevisionSets(ctx, cache.RepositoryDocRevisionSetFilter{RepoID: opts.repo, GitStoreRef: repo.GitStoreRef, CommitOID: commitOID, PolicyHash: policy.PolicyHash, OverlayDigest: overlayDigest, ExactOverlay: true, ChunkPolicyID: repositorydocs.DefaultChunkPolicyID, Limit: 20})
+		if listErr != nil {
+			return writeError(stderr, opts.format, listErr)
+		}
+		status := repositoryDocsStatus{RepoID: opts.repo, CommitOID: commitOID, Policy: policy, IncludeWorktree: opts.includeWorktree, OverlayDigest: overlayDigest, RevisionSets: sets}
+		return render(stdout, opts.format, status, func(w io.Writer, value repositoryDocsStatus) {
+			fmt.Fprintf(w, "repo_id: %s\ncommit_oid: %s\npolicy_status: %s\nrevision_sets: %d\n", value.RepoID, value.CommitOID, value.Policy.Status, len(value.RevisionSets))
+			for _, set := range value.RevisionSets {
+				fmt.Fprintf(w, "set: %s state=%s coverage=%d/%d reused=%d failed=%d missing=%d\n", set.ID, set.State, set.EmbeddedChunks+set.ReusedChunks, set.EligibleChunks, set.ReusedChunks, set.FailedChunks, set.MissingObjects)
+			}
+		})
+	case "index":
+		manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version}
+		client, clientErr := manager.Client()
+		if clientErr != nil {
+			return writeError(stderr, opts.format, clientErr)
+		}
+		workingDirectory, pathErr := os.Getwd()
+		if pathErr != nil {
+			return writeError(stderr, opts.format, pathErr)
+		}
+		var job servicectl.Job
+		request := servicectl.StartRepositoryDocsIndexJobRequest{
+			RepoID: opts.repo, RepositoryPath: workingDirectory, Revision: opts.revision,
+			IncludeWorktree: opts.includeWorktree, Profile: opts.profile,
+			CachePath: eff.Config.CachePath, BatchSize: opts.batchSize,
+		}
+		if err := client.Call(ctx, "Jobs.StartRepositoryDocsIndex", request, &job); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		if opts.detach {
+			return render(stdout, opts.format, job, renderServiceJobText)
+		}
+		return attachServiceJob(ctx, client, job.ID, opts, stdout, stderr)
+	case "search":
+		if len(args) < 2 {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "query", Message: "query is required"})
+		}
+		store, openErr := cache.NewSQLiteReadOnlyStore(ctx, eff.Config.CachePath)
+		if openErr != nil {
+			return writeError(stderr, opts.format, openErr)
+		}
+		defer store.Close()
+		mode := strings.ReplaceAll(strings.ToLower(opts.searchMode), "_", "")
+		if mode == "" {
+			mode = repositorydocs.SearchModeHybrid
+		}
+		var provider rag.EmbeddingProvider
+		if mode != repositorydocs.SearchModeFullText {
+			provider, _ = rag.NewEmbeddingProviderFromConfig(eff.Config, opts.profile, rag.ProviderOptions{})
+		}
+		result, searchErr := repositorydocs.NewRetriever(store, provider).Search(ctx, repositorydocs.SearchRequest{RepoID: opts.repo, Repository: repo, Revision: opts.revision, IncludeWorktree: opts.includeWorktree, Query: strings.Join(args[1:], " "), Mode: mode, Limit: opts.limit})
+		if searchErr != nil {
+			return writeError(stderr, opts.format, searchErr)
+		}
+		return render(stdout, opts.format, result, func(w io.Writer, value repositorydocs.SearchResult) {
+			fmt.Fprintf(w, "repo_id: %s\ncorpus_kind: %s\neffective_revision: %s\nrequested_mode: %s\neffective_mode: %s\nauthority: %s\nrevision_set_id: %s\nresults: %d\n", value.RepoID, value.CorpusKind, value.EffectiveRevision, value.RequestedMode, value.EffectiveMode, value.Authority, value.RevisionSetID, len(value.Hits))
+			for _, hit := range value.Hits {
+				fmt.Fprintf(w, "%d. %s:%d-%d score=%.6f authority=%s\n%s\n", hit.Rank, hit.Citation.Path, hit.Citation.LineStart, hit.Citation.LineEnd, hit.Score, hit.Citation.Authority, hit.Snippet)
+			}
+			for _, warning := range value.Warnings {
+				fmt.Fprintf(w, "warning: %s\n", warning)
+			}
+		})
+	default:
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "repo-docs", Message: "unknown subcommand"})
 	}
 }
 
@@ -4998,6 +5181,24 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --policy POLICY     chunk policy namespace")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "repo-docs":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s SUBCOMMAND --repo REPO [flags]\n\n", command)
+		fmt.Fprintln(w, "Inspect, index, and search versioned repository documentation from the local Git object database.")
+		fmt.Fprintln(w, "Subcommands:")
+		fmt.Fprintln(w, "  policy      resolve the repository-owned policy at one revision")
+		fmt.Fprintln(w, "  plan        estimate eligible committed documents without embedding")
+		fmt.Fprintln(w, "  status      inspect revision-set identity and coverage")
+		fmt.Fprintln(w, "  index       submit daemon-owned indexing for one immutable revision set")
+		fmt.Fprintln(w, "  search      search one revision with verified Git citations")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO          configured repository id")
+		fmt.Fprintln(w, "  --revision REV       local Git revision (default HEAD)")
+		fmt.Fprintln(w, "  --include-worktree   explicitly include tracked dirty files")
+		fmt.Fprintln(w, "  --mode MODE          hybrid or fulltext (search)")
+		fmt.Fprintln(w, "  --profile PROFILE    embedding profile")
+		fmt.Fprintln(w, "  --detach             return the daemon job id without attaching")
+		fmt.Fprintln(w, "  --cache-path PATH    cache database path")
+		fmt.Fprintln(w, "  --format FORMAT      text or json")
 	case "doctor":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s [--repo REPO] [--offline|--fixture] [--runtime-audit] [--cache-path PATH]\n\n", command)
 		fmt.Fprintln(w, "Aggregate subsystem diagnostics with public-safe output.")
@@ -5126,6 +5327,8 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "  --policy POLICY     chunk policy namespace")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "repo-docs policy", "repo-docs status", "repo-docs plan", "repo-docs index", "repo-docs search":
+		printCommandHelp("repo-docs", w)
 	case "service install":
 		fmt.Fprintln(w, "Usage: gitcode-mcp service install [--overwrite] [--format FORMAT]")
 		fmt.Fprintln(w)
