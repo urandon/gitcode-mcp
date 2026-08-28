@@ -74,6 +74,22 @@ func TestTruncateUTF8BytesKeepsValidMultilingualSnippet(t *testing.T) {
 	}
 }
 
+func TestFuseRanksDoesNotBreakScoreTiesByPath(t *testing.T) {
+	lexical := map[string]rankedHit{
+		"en": {candidate: cache.RepositoryDocCandidate{RepositoryDocMembership: cache.RepositoryDocMembership{ChunkID: "en", Path: "docs/runtime-en.md"}}, score: 1, lexical: 1},
+		"zh": {candidate: cache.RepositoryDocCandidate{RepositoryDocMembership: cache.RepositoryDocMembership{ChunkID: "zh", Path: "docs/runtime-zh.md"}}, score: 1, lexical: 1},
+	}
+	semantic := map[string]rankedHit{
+		"en": {candidate: lexical["en"].candidate, score: 0.71, semantic: 0.71},
+		"zh": {candidate: lexical["zh"].candidate, score: 0.79, semantic: 0.79},
+	}
+
+	got := fuseRanks(lexical, semantic)
+	if len(got) != 2 || got[0].candidate.ChunkID != "zh" {
+		t.Fatalf("fused ranks = %#v, want semantic winner after lexical tie", got)
+	}
+}
+
 func repositoryDocsSearchStore(t *testing.T, ctx context.Context) *cache.SQLiteStore {
 	t.Helper()
 	store, err := cache.NewSQLiteStore(ctx, ":memory:")

@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -925,6 +926,148 @@ func TestRAGIndexCLIStartsDaemonJobOverIPC(t *testing.T) {
 		if !strings.Contains(progress, want) {
 			t.Fatalf("rag index progress missing %q: %q", want, progress)
 		}
+	}
+	cancel()
+	if code := <-runCode; code != 0 {
+		t.Fatalf("service run code=%d", code)
+	}
+}
+
+func TestRepositoryDocsIndexCLIHonorsConfiguredServiceRuntime(t *testing.T) {
+	root, err := shortCLITestRoot(t, "cli-repo-docs-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		if output, runErr := cmd.CombinedOutput(); runErr != nil {
+			t.Fatalf("git %v: %v\n%s", args, runErr, output)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("# Repository docs\n\nрусский 中文 English\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("init")
+	runGit("add", "README.md")
+	runGit("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+	originalDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(originalDirectory) })
+
+	cachePath := filepath.Join(root, "cache.db")
+	store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{
+		RepoID: "fixture-a", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api",
+		Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}, Aliases: []string{"fixture-alias"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runtimeDir, err := os.MkdirTemp("/private/tmp", "cli-repo-docs-runtime-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
+	configPath := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(strings.Join([]string{
+		"cache_path: " + cachePath,
+		"rag:",
+		"  default_profile: fake-rag",
+		"  providers:",
+		"    fake:",
+		"      type: fake",
+		"  profiles:",
+		"    fake-rag:",
+		"      provider: fake",
+		"      model: fake-embedding",
+		"      dimensions: 2",
+		"      batch_size: 1",
+		"  indexing:",
+		"    profile: fake-rag",
+		"",
+	}, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src := &repoInitLocalSource{
+		env: map[string]string{
+			config.EnvMCPConfigPath:       configPath,
+			config.EnvServiceRuntimeDir:   runtimeDir,
+			"GITCODE_MCP_SERVICE_NETWORK": "mem",
+		},
+		cwd: root, homeDir: filepath.Join(root, "h"), configDir: filepath.Join(root, "f"), cacheDir: filepath.Join(root, "c"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runCode := make(chan int, 1)
+	var runOut bytes.Buffer
+	var runErr bytes.Buffer
+	go func() {
+		runCode <- executeWithFactoryAndDepsContext(ctx, []string{"service", "run"}, &runOut, &runErr, nil, localCommandDeps{Source: src})
+	}()
+	manager := servicectl.Manager{Source: src, RuntimeDir: runtimeDir}
+	client, err := manager.Client()
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var status servicectl.Status
+		if callErr := client.Call(context.Background(), "Service.Status", nil, &status); callErr == nil && status.Status == servicectl.StatusRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("configured service runtime did not become ready: stdout=%q stderr=%q", runOut.String(), runErr.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	effective, err := config.LoadEffective(src, config.Overrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resolvedConfig servicectl.MaintenanceResolveConfigResult
+	if err := client.Call(context.Background(), "Maintenance.ResolveConfig", servicectl.MaintenanceResolveConfigRequest{
+		CachePath: cachePath, ConfigSnapshot: effective.Config,
+	}, &resolvedConfig); err != nil {
+		t.Fatal(err)
+	}
+	var registration servicectl.MaintenanceEntry
+	if err := client.Call(context.Background(), "Maintenance.Enroll", servicectl.MaintenanceEnrollRequest{
+		CachePath: cachePath, RepoID: "fixture-a", IdempotencyKey: "repo-docs-runtime-registration",
+		Policy: servicectl.MaintenancePolicy{}, ConfigSnapshot: effective.Config, ConfigHash: resolvedConfig.ConfigHash,
+	}, &registration); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := executeWithFactoryAndDeps([]string{"repo-docs", "index", "--repo", "fixture-alias", "--format", "json"}, &out, &errOut, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("repo-docs index code=%d stderr=%q", code, errOut.String())
+	}
+	var job servicectl.Job
+	if err := json.Unmarshal(out.Bytes(), &job); err != nil {
+		t.Fatalf("invalid job JSON: %v\n%s", err, out.String())
+	}
+	if job.Type != servicectl.RepositoryDocsIndexJobType || job.RepoID != "fixture-a" || job.Status != servicectl.JobStatusSucceeded {
+		t.Fatalf("repository-docs job=%#v", job)
+	}
+	var registrations servicectl.MaintenanceListResult
+	if err := client.Call(context.Background(), "Maintenance.List", nil, &registrations); err != nil {
+		t.Fatal(err)
+	}
+	if len(registrations.Entries) != 1 || registrations.Entries[0].RepositoryDocs == nil || registrations.Entries[0].RepositoryDocs.GitStoreRef == "" {
+		t.Fatalf("repository-docs registration=%#v", registrations)
 	}
 	cancel()
 	if code := <-runCode; code != 0 {

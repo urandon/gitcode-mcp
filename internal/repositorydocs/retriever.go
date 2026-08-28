@@ -352,16 +352,24 @@ func fuseRanks(lexical, semantic map[string]rankedHit) []rankedHit {
 	lex := sortedRanks(lexical)
 	sem := sortedRanks(semantic)
 	merged := map[string]rankedHit{}
-	for rank, item := range lex {
-		item.score = 1 / float64(60+rank+1)
+	lexicalRank := 1
+	for index, item := range lex {
+		if index > 0 && item.score != lex[index-1].score {
+			lexicalRank = index + 1
+		}
+		item.score = 1 / float64(60+lexicalRank)
 		merged[item.candidate.ChunkID] = item
 	}
-	for rank, item := range sem {
+	semanticRank := 1
+	for index, item := range sem {
+		if index > 0 && item.score != sem[index-1].score {
+			semanticRank = index + 1
+		}
 		current, ok := merged[item.candidate.ChunkID]
 		if !ok {
 			current = item
 		}
-		current.score += 1 / float64(60+rank+1)
+		current.score += 1 / float64(60+semanticRank)
 		current.semantic = item.semantic
 		merged[item.candidate.ChunkID] = current
 	}

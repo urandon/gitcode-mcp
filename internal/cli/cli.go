@@ -1272,7 +1272,10 @@ func executeRepositoryDocsCommand(ctx context.Context, args []string, opts optio
 			}
 		})
 	case "index":
-		manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version}
+		manager := servicectl.Manager{
+			Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version,
+			RuntimeDir: eff.Config.Service.RuntimeDir,
+		}
 		client, clientErr := manager.Client()
 		if clientErr != nil {
 			return writeError(stderr, opts.format, clientErr)
