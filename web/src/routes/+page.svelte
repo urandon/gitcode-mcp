@@ -1,7 +1,7 @@
 <script lang="ts">
   import './+page.css';
   import { onDestroy, onMount, tick } from 'svelte';
-  import { Activity, AlertTriangle, ArrowLeft, Blocks, CheckCircle2, ChevronRight, CircleGauge, Clipboard, Clock3, Database, FileCheck2, FolderCog, Gauge, GitFork, HeartPulse, History, Layers3, Monitor, Moon, Power, RefreshCw, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Sun, Wrench, XCircle, Zap } from '@lucide/svelte';
+  import { Activity, AlertTriangle, ArrowLeft, Blocks, CheckCircle2, ChevronRight, CircleGauge, Clipboard, Clock3, Database, FileCheck2, FileText, FolderCog, Gauge, GitFork, HeartPulse, History, Layers3, Monitor, Moon, Power, RefreshCw, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Sun, Wrench, XCircle, Zap } from '@lucide/svelte';
   import { applyTheme, normalizeTheme, themeStorageKey, type Theme } from '$lib/theme';
   import { adminApiVersion, cliHandoff, emptySnapshot, humanize, isSnapshotStale, laneSummary, type AdminView, type BindingIntent, type BindingPlan, type CacheObservation, type ControlFailure, type ControlReceipt, type Diagnostic, type Job, type JobAction, type JobActionReceipt, type Maintenance, type MaintenanceIntent, type MaintenancePlan, type ObservationSnapshot, type ProviderSmoke, type RAGRepairPlan, type Repository, type RepositoryTab, type SearchComparison } from '$lib/admin';
   import CoverageLaneCard from '$lib/CoverageLaneCard.svelte';
@@ -11,7 +11,7 @@
     { name: 'Overview', icon: CircleGauge }, { name: 'Caches', icon: Database }, { name: 'Jobs', icon: Activity }, { name: 'Maintenance', icon: Wrench }, { name: 'Diagnostics', icon: HeartPulse }
   ];
   const repositoryTabs: Array<{ value: RepositoryTab; label: string }> = [
-    { value: 'coverage', label: 'Coverage' }, { value: 'collections', label: 'Collections' }, { value: 'search', label: 'Search status' }, { value: 'activity', label: 'Activity' }
+    { value: 'coverage', label: 'Coverage' }, { value: 'collections', label: 'Collections' }, { value: 'documentation', label: 'Documentation' }, { value: 'search', label: 'Search status' }, { value: 'activity', label: 'Activity' }
   ];
   const themes = [
     { value: 'light' as Theme, label: 'Light', icon: Sun }, { value: 'dark' as Theme, label: 'Dark', icon: Moon }, { value: 'system' as Theme, label: 'System', icon: Monitor }
@@ -114,6 +114,7 @@
     value.job_retention ||= structuredClone(emptySnapshot.job_retention); value.job_retention.retained_by_status ||= [];
     for (const cache of value.caches) for (const repo of (cache.repositories ||= [])) {
       repo.collections ||= []; repo.recent_sync_events ||= []; repo.execution ||= {}; repo.counts.by_kind ||= [];
+      repo.documentation ||= { state: 'not_indexed', overlay: false, eligible_files: 0, eligible_chunks: 0, embedded_chunks: 0, reused_chunks: 0, failed_chunks: 0, missing_objects: 0, revision_set_count: 0, search_available: false };
     }
     return value;
   }
@@ -247,6 +248,13 @@
   }
   async function copyCommand(diagnostic: Diagnostic): Promise<void> {
     try { await navigator.clipboard.writeText(cliHandoff(diagnostic)); copied = diagnostic.id; window.setTimeout(() => (copied = ''), 1800); }
+    catch { copied = ''; }
+  }
+
+  async function copyDocumentationCommand(kind: 'index' | 'search'): Promise<void> {
+    const command = kind === 'index' ? selectedRepo?.documentation.index_handoff : selectedRepo?.documentation.search_handoff;
+    if (!command) return;
+    try { await navigator.clipboard.writeText(command); copied = `documentation-${kind}`; window.setTimeout(() => (copied = ''), 1800); }
     catch { copied = ''; }
   }
 
@@ -474,6 +482,23 @@
               <section class="repository-section" aria-labelledby="execution-title"><div class="section-heading"><div><p class="section-kicker">SEPARATE FROM COVERAGE</p><h2 id="execution-title">Execution context</h2></div></div><div class="context-grid"><article><span>Active jobs</span><strong>{selectedRepo.execution.active_job_ids?.length || 0}</strong><p>{selectedRepo.execution.active_job_ids?.join(', ') || 'No current work'}</p></article><article><span>Contention</span><strong>{selectedRepo.execution.contention ? humanize(selectedRepo.execution.contention.state) : 'None'}</strong><p>{selectedRepo.execution.contention?.operation ? `Waiting on ${selectedRepo.execution.contention.operation}` : 'No writer contention observed'}</p></article><article><span>Scheduled retry</span><strong>{selectedRepo.execution.scheduled_retry ? humanize(selectedRepo.execution.scheduled_retry.stage) : 'None'}</strong><p>{selectedRepo.execution.scheduled_retry ? new Date(selectedRepo.execution.scheduled_retry.at).toLocaleString() : 'No backoff scheduled'}</p></article></div>{#if selectedRepo.execution.last_stage_errors?.length}<div class="historical-note"><History size={17} /><div><strong>Last stage error is historical context</strong><p>{selectedRepo.execution.last_stage_errors.map((item) => `${humanize(item.stage)}: ${humanize(item.failure_class)}`).join(' · ')}. It does not replace current lane truth.</p></div></div>{/if}</section>
             {:else if repoTab === 'collections'}
               <section class="repository-section" aria-labelledby="collections-title"><div class="section-heading"><div><p class="section-kicker">CORPUS</p><h2 id="collections-title">Collections and frontiers</h2></div></div>{#if selectedRepo.collections.length === 0}<div class="empty-state"><Layers3 size={24} /><h3>No collection observations</h3><p>The binding exists, but no counts or frontiers have been observed.</p></div>{:else}<div class="table-wrap"><table><caption class="sr-only">Cached collection counts and coverage</caption><thead><tr><th>Collection</th><th>Cached</th><th>Head freshness</th><th>Tail completeness</th></tr></thead><tbody>{#each selectedRepo.collections as collection}<tr><th scope="row">{humanize(collection.kind)}</th><td>{collection.count.toLocaleString()}</td><td><StatusChip value={collection.head.state} label={laneSummary('head', collection.head)} /></td><td><StatusChip value={collection.tail.state} label={laneSummary('tail', collection.tail)} /></td></tr>{/each}</tbody></table></div>{/if}<div class="secondary-summary"><div><span>Secondary total</span><strong>{selectedRepo.counts.secondary.total.toLocaleString()}</strong></div><div><span>Pending</span><strong>{selectedRepo.counts.secondary.pending.toLocaleString()}</strong></div><div><span>Deferred</span><strong>{selectedRepo.counts.secondary.deferred.toLocaleString()}</strong></div><div><span>Complete</span><strong>{selectedRepo.counts.secondary.complete.toLocaleString()}</strong></div></div></section>
+            {:else if repoTab === 'documentation'}
+              <section class="repository-section" aria-labelledby="documentation-title">
+                <div class="section-heading"><div><p class="section-kicker">VERSIONED GIT AUTHORITY</p><h2 id="documentation-title">Repository documentation RAG</h2><p>Policy is committed with the repository. The cache keeps revision membership and vectors only; source text is hydrated from the exact Git blob or an explicit tracked worktree overlay.</p></div><StatusChip value={selectedRepo.documentation.state} /></div>
+                <div class="context-grid">
+                  <article><span>Revision sets</span><strong>{selectedRepo.documentation.revision_set_count}</strong><p>{selectedRepo.documentation.revision_set_id || 'No index published'}</p></article>
+                  <article><span>Coverage</span><strong>{selectedRepo.documentation.embedded_chunks + selectedRepo.documentation.reused_chunks}/{selectedRepo.documentation.eligible_chunks}</strong><p>{selectedRepo.documentation.eligible_files} files · {selectedRepo.documentation.failed_chunks} failed · {selectedRepo.documentation.missing_objects} missing</p></article>
+                  <article><span>Authority</span><strong>{selectedRepo.documentation.overlay ? 'Tracked overlay' : 'Committed Git'}</strong><p>{selectedRepo.documentation.commit_oid ? selectedRepo.documentation.commit_oid.slice(0, 12) : 'Run an index job from a worktree'}</p></article>
+                  <article><span>Policy</span><strong>{humanize(selectedRepo.documentation.policy_source || 'default preset')}</strong><p>{selectedRepo.documentation.policy_hash ? selectedRepo.documentation.policy_hash.slice(0, 16) : '.gitcode/gitcode-mcp.yaml or conventional docs preset'}</p></article>
+                  <article><span>Embedding namespace</span><strong>{selectedRepo.documentation.namespace_id ? 'Bound' : 'Not selected'}</strong><p>{selectedRepo.documentation.namespace_id || 'Provider namespace appears after indexing'}</p></article>
+                  <article><span>Updated</span><strong>{selectedRepo.documentation.updated_at ? new Date(selectedRepo.documentation.updated_at).toLocaleDateString() : 'Never'}</strong><p>{selectedRepo.documentation.updated_at ? new Date(selectedRepo.documentation.updated_at).toLocaleString() : 'No repository documentation metadata'}</p></article>
+                </div>
+                <div class="rag-operator-panel">
+                  <div><p class="section-kicker">LOCAL GIT HANDOFF</p><h3>Index and exact search</h3><p>The Admin UI does not receive absolute worktree paths. Until the daemon has an explicit local Git-store registration, start indexing or search from the intended worktree; aliases are canonicalized before metadata is written.</p></div>
+                  <div class="rag-action-form"><button onclick={() => void copyDocumentationCommand('index')} disabled={!selectedRepo.documentation.index_handoff}><FileText size={16} />{copied === 'documentation-index' ? 'Copied index command' : 'Copy index command'}</button><button onclick={() => void copyDocumentationCommand('search')} disabled={!selectedRepo.documentation.search_handoff}><Search size={16} />{copied === 'documentation-search' ? 'Copied search command' : 'Copy search command'}</button></div>
+                  <p class="privacy search-boundary"><ShieldCheck size={15} />No repository document or absolute filesystem path is exposed by this screen. Hybrid search sends only the query and bounded embedding inputs to the configured provider.</p>
+                </div>
+              </section>
             {:else if repoTab === 'search'}
               <section class="repository-section search-lab" aria-labelledby="search-title">
                 <div class="section-heading"><div><p class="section-kicker">OBSERVATION-ONLY EXPERIMENT</p><h2 id="search-title">Search Lab</h2><p>Compare deterministic full-text with requested hybrid retrieval. A query never syncs GitCode, starts provider setup, or repairs an index.</p></div><StatusChip value={selectedRepo.coverage.rag.state} label={`RAG ${humanize(selectedRepo.coverage.rag.state)}`} /></div>

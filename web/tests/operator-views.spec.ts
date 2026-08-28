@@ -21,6 +21,7 @@ const snapshot = {
       },
       execution: { active_job_ids: ['job-000001'], contention: { state: 'waiting', operation: 'rag' }, scheduled_retry: { stage: 'rag', at: new Date(Date.now() + 60000).toISOString() }, last_stage_errors: [{ stage: 'rag', failure_class: 'cache_busy', message: 'RAG maintenance recorded cache_busy.' }] },
       collections: [{ kind: 'issue', count: 30, head: { state: 'current', status: 'fresh' }, tail: { state: 'partial', status: 'backfilling', stop_reason: 'max_pages' } }, { kind: 'wiki', count: 12, head: { state: 'current', status: 'fresh' }, tail: { state: 'current', status: 'complete' } }],
+      documentation: { state: 'partial', revision_set_id: 'repo-doc-set-public', commit_oid: '0123456789abcdef0123456789abcdef01234567', requested_revision: 'HEAD', policy_source: 'committed', policy_hash: 'policy-public-safe', git_store_ref: 'git-store-public', overlay: false, namespace_id: 'embns-public', eligible_files: 4, eligible_chunks: 10, embedded_chunks: 6, reused_chunks: 2, failed_chunks: 1, missing_objects: 1, updated_at: new Date().toISOString(), revision_set_count: 2, search_available: false, index_handoff: 'gitcode-mcp repo-docs index --repo example/repo --detach', search_handoff: 'gitcode-mcp repo-docs search --repo example/repo "QUERY"' },
       recent_sync_events: [{ id: 'sync-1', kind: 'issue', status: 'succeeded', completed_at: new Date().toISOString(), zero_delta: false }]
     }]
   }],
@@ -102,6 +103,22 @@ test('operator views keep coverage truth, deep links, and recovery states', asyn
     await comparePage.screenshot({ path: path.join(qaOutput, 'operator-overview-comparison.png'), fullPage: true });
     await comparePage.close();
   }
+});
+
+test('repository documentation cohort exposes versioned authority, coverage, and safe handoffs', async ({ page }) => {
+  await mockAdmin(page);
+  await page.goto('/?view=Caches&cache=cache-111111112222&repo=example%2Frepo&tab=documentation');
+  await expect(page.getByRole('heading', { name: 'Repository documentation RAG' })).toBeVisible();
+  await expect(page.getByText('Committed Git')).toBeVisible();
+  await expect(page.getByText('8/10')).toBeVisible();
+  await expect(page.getByText('repo-doc-set-public')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Copy index command' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Copy search command' })).toBeEnabled();
+  await expect(page.getByText('No repository document or absolute filesystem path is exposed by this screen.')).toBeVisible();
+  await page.reload();
+  await expect(page).toHaveURL(/tab=documentation/);
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
 test('API version mismatch is explicit and blocks ordinary views', async ({ page }) => {

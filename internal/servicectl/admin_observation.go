@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -189,6 +190,8 @@ func buildAdminRepository(ctx context.Context, store *cache.SQLiteStore, reposit
 	for _, scope := range repository.Scopes {
 		view.Scopes = append(view.Scopes, string(scope))
 	}
+	documentation := repositoryDocumentationObservation(ctx, store, repository.RepoID)
+	view.Documentation = &documentation
 	if counts, err := store.RecordCounts(ctx, repository.RepoID); err == nil {
 		view.Counts.Records = counts.Records
 		view.Counts.Comments = counts.Comments
@@ -233,6 +236,42 @@ func buildAdminRepository(ctx context.Context, store *cache.SQLiteStore, reposit
 			})
 		}
 	}
+	return view
+}
+
+func repositoryDocumentationObservation(ctx context.Context, store *cache.SQLiteStore, repoID string) adminhttp.RepositoryDocumentationObservation {
+	view := adminhttp.RepositoryDocumentationObservation{
+		State:         "not_indexed",
+		IndexHandoff:  fmt.Sprintf("gitcode-mcp repo-docs index --repo %s", repoID),
+		SearchHandoff: fmt.Sprintf("gitcode-mcp repo-docs search --repo %s QUERY", repoID),
+	}
+	sets, err := store.ListRepositoryDocRevisionSets(ctx, cache.RepositoryDocRevisionSetFilter{RepoID: repoID})
+	if err != nil || len(sets) == 0 {
+		return view
+	}
+	set := sets[0]
+	view.State = set.State
+	view.RevisionSetID = set.ID
+	view.CommitOID = set.CommitOID
+	view.RequestedRevision = set.RequestedRevision
+	view.PolicySource = set.PolicySource
+	view.PolicyHash = set.PolicyHash
+	view.GitStoreRef = set.GitStoreRef
+	view.WorktreeRef = set.WorktreeRef
+	view.Overlay = set.OverlayDigest != ""
+	view.NamespaceID = set.NamespaceID
+	view.EligibleFiles = set.EligibleFiles
+	view.EligibleChunks = set.EligibleChunks
+	view.EmbeddedChunks = set.EmbeddedChunks
+	view.ReusedChunks = set.ReusedChunks
+	view.FailedChunks = set.FailedChunks
+	view.MissingObjects = set.MissingObjects
+	view.UpdatedAt = adminTimePointer(set.UpdatedAt)
+	view.RevisionSetCount = len(sets)
+	// Source bytes are intentionally absent from the cache. The browser cannot
+	// hydrate exact Git blobs until a local Git store is explicitly registered
+	// with the daemon, so v1 presents a safe CLI handoff instead of stale text.
+	view.SearchAvailable = false
 	return view
 }
 

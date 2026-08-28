@@ -38,6 +38,31 @@ export type Repository = {
   execution: Execution;
   collections: Array<{ kind: string; count: number; head: CoverageLane; tail: CoverageLane }>;
   recent_sync_events: Array<{ id: string; kind: string; status: string; completed_at: string; zero_delta: boolean }>;
+  documentation: RepositoryDocumentation;
+};
+
+export type RepositoryDocumentation = {
+  state: string;
+  revision_set_id?: string;
+  commit_oid?: string;
+  requested_revision?: string;
+  policy_source?: string;
+  policy_hash?: string;
+  git_store_ref?: string;
+  worktree_ref?: string;
+  overlay: boolean;
+  namespace_id?: string;
+  eligible_files: number;
+  eligible_chunks: number;
+  embedded_chunks: number;
+  reused_chunks: number;
+  failed_chunks: number;
+  missing_objects: number;
+  updated_at?: string;
+  revision_set_count: number;
+  search_available: boolean;
+  search_handoff?: string;
+  index_handoff?: string;
 };
 
 export type CacheObservation = {
@@ -351,7 +376,7 @@ export type ObservationSnapshot = {
 };
 
 export type AdminView = 'Overview' | 'Caches' | 'Jobs' | 'Maintenance' | 'Diagnostics';
-export type RepositoryTab = 'coverage' | 'collections' | 'search' | 'activity';
+export type RepositoryTab = 'coverage' | 'collections' | 'documentation' | 'search' | 'activity';
 
 export const emptySnapshot: ObservationSnapshot = {
   api_version: adminApiVersion,

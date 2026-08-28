@@ -92,16 +92,41 @@ type CacheObservation struct {
 }
 
 type RepositoryObservation struct {
-	RepoID       string                  `json:"repo_id"`
-	DisplayName  string                  `json:"display_name,omitempty"`
-	Aliases      []string                `json:"aliases,omitempty"`
-	Scopes       []string                `json:"scopes,omitempty"`
-	BindingState string                  `json:"binding_state"`
-	Counts       CollectionCounts        `json:"counts"`
-	Coverage     CoverageObservation     `json:"coverage"`
-	Execution    ExecutionObservation    `json:"execution"`
-	Collections  []CollectionObservation `json:"collections"`
-	RecentSync   []SyncEventObservation  `json:"recent_sync_events"`
+	RepoID        string                              `json:"repo_id"`
+	DisplayName   string                              `json:"display_name,omitempty"`
+	Aliases       []string                            `json:"aliases,omitempty"`
+	Scopes        []string                            `json:"scopes,omitempty"`
+	BindingState  string                              `json:"binding_state"`
+	Counts        CollectionCounts                    `json:"counts"`
+	Coverage      CoverageObservation                 `json:"coverage"`
+	Execution     ExecutionObservation                `json:"execution"`
+	Collections   []CollectionObservation             `json:"collections"`
+	RecentSync    []SyncEventObservation              `json:"recent_sync_events"`
+	Documentation *RepositoryDocumentationObservation `json:"documentation,omitempty"`
+}
+
+type RepositoryDocumentationObservation struct {
+	State             string     `json:"state"`
+	RevisionSetID     string     `json:"revision_set_id,omitempty"`
+	CommitOID         string     `json:"commit_oid,omitempty"`
+	RequestedRevision string     `json:"requested_revision,omitempty"`
+	PolicySource      string     `json:"policy_source,omitempty"`
+	PolicyHash        string     `json:"policy_hash,omitempty"`
+	GitStoreRef       string     `json:"git_store_ref,omitempty"`
+	WorktreeRef       string     `json:"worktree_ref,omitempty"`
+	Overlay           bool       `json:"overlay"`
+	NamespaceID       string     `json:"namespace_id,omitempty"`
+	EligibleFiles     int        `json:"eligible_files"`
+	EligibleChunks    int        `json:"eligible_chunks"`
+	EmbeddedChunks    int        `json:"embedded_chunks"`
+	ReusedChunks      int        `json:"reused_chunks"`
+	FailedChunks      int        `json:"failed_chunks"`
+	MissingObjects    int        `json:"missing_objects"`
+	UpdatedAt         *time.Time `json:"updated_at,omitempty"`
+	RevisionSetCount  int        `json:"revision_set_count"`
+	SearchAvailable   bool       `json:"search_available"`
+	SearchHandoff     string     `json:"search_handoff,omitempty"`
+	IndexHandoff      string     `json:"index_handoff,omitempty"`
 }
 
 type CollectionObservation struct {
