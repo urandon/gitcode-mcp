@@ -347,13 +347,13 @@ var ragCapabilities = []Capability{
 		ID: "repository_docs_search", Category: CategoryRAG, Safety: SafetyReadOnly,
 		CLIName: "repo-docs", MCPName: "repository_docs_search", ServiceCommand: "repository-docs-search",
 		Description: "Search one explicit local Git revision and return bounded digest-verified Git citations; full-text mode does not require an embedding provider.",
-		UI:          disabled("Admin v1 shows an exact CLI handoff because the browser is not allowed to choose or receive an absolute Git worktree path."), CLI: enabled("Available as `repo-docs search`."), MCP: enabled(),
+		UI:          disabled("Admin v1 shows registered Git authority and an exact CLI handoff; browser search is deferred so requests never carry an absolute worktree path."), CLI: enabled("Available as `repo-docs search`."), MCP: enabled(),
 	},
 	{
 		ID: "repository_docs_index", Category: CategoryRAG, Safety: SafetyBackgroundJob,
 		CLIName: "repo-docs", MCPName: "repository_docs_index", ServiceCommand: "repository-docs-index",
 		Description: "Build one immutable repository-document revision set as a daemon-owned job.",
-		UI:          disabled("Admin v1 observes daemon jobs and provides a CLI handoff; arbitrary filesystem selection remains outside the browser boundary."), CLI: enabled("Available as `repo-docs index`."), MCP: enabled("Starts the coordinator repository-document job contract."),
+		UI:          disabled("Admin v1 observes automatic reconciliation and daemon jobs and provides an immediate CLI handoff; filesystem selection remains outside the browser boundary."), CLI: enabled("Available as `repo-docs index`."), MCP: enabled("Starts the coordinator repository-document job contract."),
 	},
 	{
 		ID:             "rag_status",

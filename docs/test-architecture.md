@@ -90,7 +90,12 @@ repositories for revision, rename, and tracked-worktree behavior and inspect
 SQLite bytes for sentinels to prove that document text is not persisted.
 Historical revision, offline full-text, overlay staleness, alias
 canonicalization, daemon writer admission, resume/reuse, and deterministic
-retention are package-level release gates.
+retention are package-level release gates. Retention tests must cover the
+machine-local vector-byte ceiling, preserve the newest ready set under byte
+pressure, and prove that membership, chunks, and vectors have no orphans after
+GC. Maintenance tests register a private worktree, poll exact HEAD/policy
+identity, enqueue only on change, recover the registration after daemon
+restart, and assert that public JSON never contains the filesystem path.
 
 ## Before Committing
 

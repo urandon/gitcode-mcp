@@ -43,6 +43,12 @@ export type Repository = {
 
 export type RepositoryDocumentation = {
   state: string;
+  registered: boolean;
+  reconcile_state?: string;
+  target_commit_oid?: string;
+  next_poll_at?: string;
+  last_error_class?: string;
+  last_error?: string;
   revision_set_id?: string;
   commit_oid?: string;
   requested_revision?: string;

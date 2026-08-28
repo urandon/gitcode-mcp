@@ -190,7 +190,20 @@ func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawM
 				return nil, err
 			}
 		}
-		return s.Jobs.StartRepositoryDocsIndex(context.Background(), s.Manager, req)
+		job, err := s.Jobs.StartRepositoryDocsIndex(context.Background(), s.Manager, req)
+		if err != nil {
+			return nil, err
+		}
+		if s.Maintenance != nil {
+			entry, registered, registerErr := s.Maintenance.RegisterRepositoryDocsSource(context.Background(), job.CacheUUID, job.RepoID, req.RepositoryPath, req.Profile)
+			if registerErr != nil {
+				return nil, registerErr
+			}
+			if registered {
+				job = s.Jobs.SetWorkIdentity(job.ID, job.WorkKey, job.CacheUUID, entry.RegistrationID, job.NamespaceID)
+			}
+		}
+		return job, nil
 	case "Jobs.StartSync":
 		var req StartSyncJobRequest
 		if len(params) > 0 {

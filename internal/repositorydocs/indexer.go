@@ -50,6 +50,11 @@ type IndexResult struct {
 	FailedChunks   int    `json:"failed_chunks"`
 	ExcludedFiles  int    `json:"excluded_files"`
 	MissingObjects int    `json:"missing_objects"`
+	GCRevisionSets int64  `json:"gc_revision_sets_deleted,omitempty"`
+	GCChunks       int64  `json:"gc_chunks_deleted,omitempty"`
+	GCVectors      int64  `json:"gc_vectors_deleted,omitempty"`
+	GCBytesBefore  int64  `json:"gc_vector_bytes_before,omitempty"`
+	GCBytesAfter   int64  `json:"gc_vector_bytes_after,omitempty"`
 	Message        string `json:"message,omitempty"`
 }
 

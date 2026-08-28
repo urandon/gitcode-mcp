@@ -10,12 +10,18 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/rag"
 	"gitcode-mcp/internal/repositorydocs"
 	"gitcode-mcp/internal/service"
 )
 
 const RepositoryDocsIndexJobType = "repository-docs-index"
+
+const (
+	EnvRepositoryDocsVectorByteCeiling = "GITCODE_MCP_REPO_DOC_VECTOR_BYTES"
+	DefaultRepositoryDocsVectorBytes   = int64(512 << 20)
+)
 
 // StartRepositoryDocsIndexJobRequest carries the local authority needed by the
 // daemon. RepositoryPath and CachePath are accepted only over the local IPC
@@ -30,6 +36,7 @@ type StartRepositoryDocsIndexJobRequest struct {
 	BatchSize       int    `json:"batch_size,omitempty"`
 	MaxChunks       int    `json:"max_chunks,omitempty"`
 	CacheUUID       string `json:"cache_uuid,omitempty"`
+	RegistrationID  string `json:"registration_id,omitempty"`
 }
 
 func (m *JobManager) StartRepositoryDocsIndex(ctx context.Context, manager Manager, req StartRepositoryDocsIndexJobRequest) (Job, error) {
@@ -84,7 +91,7 @@ func (m *JobManager) StartRepositoryDocsIndex(ctx context.Context, manager Manag
 		"max=" + strconv.Itoa(req.MaxChunks),
 	}, ":")
 	jobCtx, cancel := context.WithCancel(ctx)
-	job, created, err := m.createCoalescedJob(RepositoryDocsIndexJobType, req.RepoID, strings.TrimSpace(req.Profile), 0, workKey, req.CacheUUID, "", "", cancel)
+	job, created, err := m.createCoalescedJob(RepositoryDocsIndexJobType, req.RepoID, strings.TrimSpace(req.Profile), 0, workKey, req.CacheUUID, req.RegistrationID, "", cancel)
 	if err != nil {
 		cancel()
 		return Job{}, err
@@ -139,6 +146,9 @@ func (m *JobManager) runRepositoryDocsIndexJob(ctx context.Context, manager Mana
 		job.Steps = result.EligibleChunks
 		job.Completed = result.EmbeddedChunks + result.ReusedChunks
 		job.NamespaceID = result.NamespaceID
+		if result.GCBytesBefore > 0 || result.GCRevisionSets > 0 {
+			job.Progress = append(job.Progress, service.ProgressEvent{Type: "gc", Phase: "gc", Collection: RepositoryDocsIndexJobType, RecordsDeleted: int(result.GCRevisionSets), RevisionSetsDeleted: int(result.GCRevisionSets), ChunksDeleted: int(result.GCChunks), VectorsDeleted: int(result.GCVectors), BytesBefore: result.GCBytesBefore, BytesAfter: result.GCBytesAfter, Message: "repository documentation derived-state retention reconciled"})
+		}
 		job.Progress = append(job.Progress, service.ProgressEvent{Type: status, Phase: status, Collection: RepositoryDocsIndexJobType, RecordsListed: result.EligibleChunks, RecordsFetched: result.EmbeddedChunks, RecordsSkipped: result.ReusedChunks, RecordsFailed: result.FailedChunks, Message: "repository documentation revision set published"})
 		delete(m.cancel, jobID)
 	})
@@ -169,13 +179,43 @@ func runRepositoryDocsIndex(ctx context.Context, manager Manager, req StartRepos
 	if err != nil {
 		return result, err
 	}
-	_, gcErr := store.PruneRepositoryDocRevisionSets(ctx, req.RepoID, cache.RepositoryDocRetentionPolicy{
-		RetainCommittedPerIdentity: 12,
-		RetainOverlaysPerIdentity:  2,
-		TerminalCutoff:             time.Now().UTC().Add(-7 * 24 * time.Hour),
+	vectorByteCeiling, err := repositoryDocsVectorByteCeiling(manager)
+	if err != nil {
+		return result, err
+	}
+	now := time.Now().UTC()
+	gcResult, gcErr := store.PruneRepositoryDocRevisionSets(ctx, req.RepoID, cache.RepositoryDocRetentionPolicy{
+		RetainCommittedPerIdentity: 8,
+		RetainOverlaysPerIdentity:  0,
+		CommittedCutoff:            now.Add(-30 * 24 * time.Hour),
+		OverlayCutoff:              now.Add(-24 * time.Hour),
+		TerminalCutoff:             now.Add(-7 * 24 * time.Hour),
+		MaxVectorBytes:             vectorByteCeiling,
+		ProtectedSetIDs:            []string{result.RevisionSetID},
 	})
 	if gcErr != nil {
 		return result, fmt.Errorf("repository docs: metadata retention: %w", gcErr)
 	}
+	result.GCRevisionSets = gcResult.RevisionSetsDeleted
+	result.GCChunks = gcResult.ChunksDeleted
+	result.GCVectors = gcResult.VectorsDeleted
+	result.GCBytesBefore = gcResult.VectorBytesBefore
+	result.GCBytesAfter = gcResult.VectorBytesAfter
 	return result, nil
+}
+
+func repositoryDocsVectorByteCeiling(manager Manager) (int64, error) {
+	src := manager.Source
+	if src == nil {
+		src = config.OSSource{}
+	}
+	raw := strings.TrimSpace(src.Env(EnvRepositoryDocsVectorByteCeiling))
+	if raw == "" {
+		return DefaultRepositoryDocsVectorBytes, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("repository docs: %s must be a positive byte count", EnvRepositoryDocsVectorByteCeiling)
+	}
+	return value, nil
 }

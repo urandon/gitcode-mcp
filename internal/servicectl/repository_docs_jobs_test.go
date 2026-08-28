@@ -108,6 +108,32 @@ func TestRepositoryDocsIndexJobCanonicalizesAliasAndPublishesMetadata(t *testing
 	}
 }
 
+func TestRepositoryDocsVectorByteCeiling(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    int64
+		wantErr bool
+	}{
+		{name: "default", want: DefaultRepositoryDocsVectorBytes},
+		{name: "configured", raw: "1048576", want: 1048576},
+		{name: "zero", raw: "0", wantErr: true},
+		{name: "negative", raw: "-1", wantErr: true},
+		{name: "invalid", raw: "one-megabyte", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := repositoryDocsVectorByteCeiling(Manager{Source: testSource{env: map[string]string{EnvRepositoryDocsVectorByteCeiling: test.raw}}})
+			if (err != nil) != test.wantErr {
+				t.Fatalf("repositoryDocsVectorByteCeiling() error = %v, wantErr=%v", err, test.wantErr)
+			}
+			if got != test.want {
+				t.Fatalf("repositoryDocsVectorByteCeiling() = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
 func runGitForRepositoryDocsJobTest(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)

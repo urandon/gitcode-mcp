@@ -123,13 +123,19 @@ type RepositoryDocCandidate struct {
 type RepositoryDocRetentionPolicy struct {
 	RetainCommittedPerIdentity int
 	RetainOverlaysPerIdentity  int
+	CommittedCutoff            time.Time
+	OverlayCutoff              time.Time
 	TerminalCutoff             time.Time
+	MaxVectorBytes             int64
+	ProtectedSetIDs            []string
 }
 
 type RepositoryDocGCResult struct {
 	RevisionSetsDeleted int64 `json:"revision_sets_deleted"`
 	ChunksDeleted       int64 `json:"chunks_deleted"`
 	VectorsDeleted      int64 `json:"vectors_deleted"`
+	VectorBytesBefore   int64 `json:"vector_bytes_before"`
+	VectorBytesAfter    int64 `json:"vector_bytes_after"`
 }
 
 func (s *SQLiteStore) UpsertRepositoryDocRevisionSet(ctx context.Context, set RepositoryDocRevisionSet) error {
@@ -341,36 +347,63 @@ func (s *SQLiteStore) PruneRepositoryDocRevisionSets(ctx context.Context, repoID
 		return RepositoryDocGCResult{}, fmt.Errorf("cache: repository document GC requires repo id")
 	}
 	if policy.RetainCommittedPerIdentity <= 0 {
-		policy.RetainCommittedPerIdentity = 12
+		policy.RetainCommittedPerIdentity = 8
 	}
-	if policy.RetainOverlaysPerIdentity <= 0 {
-		policy.RetainOverlaysPerIdentity = 2
+	if policy.RetainOverlaysPerIdentity < 0 {
+		policy.RetainOverlaysPerIdentity = 0
 	}
 	sets, err := s.ListRepositoryDocRevisionSets(ctx, RepositoryDocRevisionSetFilter{RepoID: repoID})
 	if err != nil {
 		return RepositoryDocGCResult{}, err
 	}
+	protected := make(map[string]bool, len(policy.ProtectedSetIDs))
+	for _, setID := range policy.ProtectedSetIDs {
+		if setID = strings.TrimSpace(setID); setID != "" {
+			protected[setID] = true
+		}
+	}
+	// ListRepositoryDocRevisionSets is newest-first. Protect the newest ready
+	// committed set for every exact local identity so byte/age GC cannot hide
+	// current searchable coverage. An active overlay is protected explicitly by
+	// the caller; inactive overlays remain eligible for their short grace period.
+	latestReady := map[string]bool{}
+	for _, set := range sets {
+		if set.State != RepoDocSetReady {
+			continue
+		}
+		kind := "commit"
+		if set.OverlayDigest != "" {
+			continue
+		}
+		key := strings.Join([]string{set.GitStoreRef, set.PolicyHash, set.ChunkPolicyID, set.NamespaceID, kind}, "\x00")
+		if !latestReady[key] {
+			latestReady[key] = true
+			protected[set.ID] = true
+		}
+	}
 	counts := map[string]int{}
 	var deleteIDs []string
 	for _, set := range sets {
-		if set.State == RepoDocSetBuilding {
+		terminalExpired := !policy.TerminalCutoff.IsZero() && set.UpdatedAt.Before(policy.TerminalCutoff) && set.State != RepoDocSetReady
+		if set.State == RepoDocSetBuilding && !terminalExpired {
 			continue
 		}
-		terminalExpired := !policy.TerminalCutoff.IsZero() && set.UpdatedAt.Before(policy.TerminalCutoff) && set.State != RepoDocSetReady
 		kind := "commit"
 		limit := policy.RetainCommittedPerIdentity
+		ageExpired := !policy.CommittedCutoff.IsZero() && set.UpdatedAt.Before(policy.CommittedCutoff)
 		if set.OverlayDigest != "" {
 			kind = "overlay"
 			limit = policy.RetainOverlaysPerIdentity
+			ageExpired = !policy.OverlayCutoff.IsZero() && set.UpdatedAt.Before(policy.OverlayCutoff)
 		}
 		key := strings.Join([]string{set.GitStoreRef, set.PolicyHash, set.ChunkPolicyID, set.NamespaceID, kind}, "\x00")
 		counts[key]++
-		if terminalExpired || counts[key] > limit {
+		if protected[set.ID] {
+			continue
+		}
+		if terminalExpired || ageExpired || (limit > 0 && counts[key] > limit) {
 			deleteIDs = append(deleteIDs, set.ID)
 		}
-	}
-	if len(deleteIDs) == 0 {
-		return RepositoryDocGCResult{}, nil
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -378,6 +411,10 @@ func (s *SQLiteStore) PruneRepositoryDocRevisionSets(ctx context.Context, repoID
 	}
 	defer tx.Rollback()
 	var result RepositoryDocGCResult
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(length(vector)), 0) FROM repo_doc_vectors WHERE repo_id = ?`, repoID).Scan(&result.VectorBytesBefore); err != nil {
+		return RepositoryDocGCResult{}, err
+	}
+	deletedSet := map[string]bool{}
 	for _, setID := range deleteIDs {
 		deleted, execErr := tx.ExecContext(ctx, `DELETE FROM repo_doc_revision_sets WHERE repo_id = ? AND revision_set_id = ?`, repoID, setID)
 		if execErr != nil {
@@ -385,17 +422,56 @@ func (s *SQLiteStore) PruneRepositoryDocRevisionSets(ctx context.Context, repoID
 		}
 		rows, _ := deleted.RowsAffected()
 		result.RevisionSetsDeleted += rows
+		deletedSet[setID] = rows > 0
 	}
-	vectors, err := tx.ExecContext(ctx, `DELETE FROM repo_doc_vectors WHERE repo_id = ? AND chunk_id NOT IN (SELECT DISTINCT chunk_id FROM repo_doc_membership WHERE repo_id = ?)`, repoID, repoID)
-	if err != nil {
+	cleanup := func() error {
+		vectors, cleanupErr := tx.ExecContext(ctx, `DELETE FROM repo_doc_vectors WHERE repo_id = ? AND chunk_id NOT IN (SELECT DISTINCT chunk_id FROM repo_doc_membership WHERE repo_id = ?)`, repoID, repoID)
+		if cleanupErr != nil {
+			return cleanupErr
+		}
+		chunks, cleanupErr := tx.ExecContext(ctx, `DELETE FROM repo_doc_chunks WHERE repo_id = ? AND chunk_id NOT IN (SELECT DISTINCT chunk_id FROM repo_doc_membership WHERE repo_id = ?)`, repoID, repoID)
+		if cleanupErr != nil {
+			return cleanupErr
+		}
+		vectorsDeleted, _ := vectors.RowsAffected()
+		chunksDeleted, _ := chunks.RowsAffected()
+		result.VectorsDeleted += vectorsDeleted
+		result.ChunksDeleted += chunksDeleted
+		return nil
+	}
+	if err := cleanup(); err != nil {
 		return RepositoryDocGCResult{}, err
 	}
-	chunks, err := tx.ExecContext(ctx, `DELETE FROM repo_doc_chunks WHERE repo_id = ? AND chunk_id NOT IN (SELECT DISTINCT chunk_id FROM repo_doc_membership WHERE repo_id = ?)`, repoID, repoID)
-	if err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(length(vector)), 0) FROM repo_doc_vectors WHERE repo_id = ?`, repoID).Scan(&result.VectorBytesAfter); err != nil {
 		return RepositoryDocGCResult{}, err
 	}
-	result.VectorsDeleted, _ = vectors.RowsAffected()
-	result.ChunksDeleted, _ = chunks.RowsAffected()
+	if policy.MaxVectorBytes > 0 && result.VectorBytesAfter > policy.MaxVectorBytes {
+		// The source list is newest-first, so byte-pressure eviction walks it in
+		// reverse order. Shared vectors are removed only after their last set
+		// membership disappears; recalculation keeps the decision deterministic.
+		for index := len(sets) - 1; index >= 0 && result.VectorBytesAfter > policy.MaxVectorBytes; index-- {
+			set := sets[index]
+			if deletedSet[set.ID] || protected[set.ID] || set.State == RepoDocSetBuilding {
+				continue
+			}
+			deleted, deleteErr := tx.ExecContext(ctx, `DELETE FROM repo_doc_revision_sets WHERE repo_id = ? AND revision_set_id = ?`, repoID, set.ID)
+			if deleteErr != nil {
+				return RepositoryDocGCResult{}, deleteErr
+			}
+			rows, _ := deleted.RowsAffected()
+			if rows == 0 {
+				continue
+			}
+			deletedSet[set.ID] = true
+			result.RevisionSetsDeleted += rows
+			if err := cleanup(); err != nil {
+				return RepositoryDocGCResult{}, err
+			}
+			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(length(vector)), 0) FROM repo_doc_vectors WHERE repo_id = ?`, repoID).Scan(&result.VectorBytesAfter); err != nil {
+				return RepositoryDocGCResult{}, err
+			}
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return RepositoryDocGCResult{}, err
 	}

@@ -107,6 +107,12 @@ type RepositoryObservation struct {
 
 type RepositoryDocumentationObservation struct {
 	State             string     `json:"state"`
+	Registered        bool       `json:"registered"`
+	ReconcileState    string     `json:"reconcile_state,omitempty"`
+	TargetCommitOID   string     `json:"target_commit_oid,omitempty"`
+	NextPollAt        *time.Time `json:"next_poll_at,omitempty"`
+	LastErrorClass    string     `json:"last_error_class,omitempty"`
+	LastError         string     `json:"last_error,omitempty"`
 	RevisionSetID     string     `json:"revision_set_id,omitempty"`
 	CommitOID         string     `json:"commit_oid,omitempty"`
 	RequestedRevision string     `json:"requested_revision,omitempty"`

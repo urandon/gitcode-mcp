@@ -78,10 +78,22 @@ gitcode-mcp repo-docs search --repo owner/repo --include-worktree "draft runbook
 ```
 
 `index` always submits daemon-owned work and returns or attaches to its public
-job id. Cache writers are serialized with sync and ordinary RAG indexing.
+job id. When the selected cache/repository already has a maintenance
+registration, this explicit local action also registers the worktree path in
+the daemon's private `0600` registry. Public status exposes only opaque Git
+store/worktree refs. The coordinator then polls committed `HEAD` and policy
+identity every minute and coalesces a new immutable-set job when either
+changes; it never fetches Git objects or contacts GitCode. Cache writers are
+serialized with sync and ordinary RAG indexing.
 Equivalent work coalesces. Interrupted sets are resumable, rename-identical
-chunks reuse vectors, and deterministic metadata GC retains committed and
-overlay history independently before removing unreferenced chunks/vectors.
+chunks reuse vectors, and deterministic metadata GC protects the current ready
+committed set and matching ready overlay before removing unreferenced derived
+state. Defaults retain at most eight committed sets for 30 days, retain an
+explicit overlay for a 24-hour diagnostic grace period, and retain orphaned
+terminal state for seven days. A machine-local vector-byte ceiling defaults to
+512 MiB and can be changed with `GITCODE_MCP_REPO_DOC_VECTOR_BYTES`; this
+resource limit is deliberately not part of the committed corpus policy. GC job
+events report deleted sets/chunks/vectors and vector bytes before/after.
 
 `fulltext` scans the exact Git blobs and needs neither an embedding index nor a
 provider. `hybrid` fuses lexical and semantic ranking when the matching
@@ -102,9 +114,11 @@ authority; job progress and completion use the ordinary service job tools.
 Admin UI repository details include a **Documentation** tab with policy,
 revision-set identity, coverage, commit/overlay authority, namespace, and
 daemon job observation. The browser is deliberately not allowed to select or
-receive arbitrary absolute filesystem paths. Until a separate explicit local
-Git-store registration lifecycle is available, exact index/search controls are
-shown as copyable CLI handoffs to run from the chosen worktree.
+receive arbitrary absolute filesystem paths. The first explicit CLI index from
+a worktree attaches that path to an existing daemon maintenance registration;
+Admin then shows registration/reconciliation state and next poll time. Exact
+index/search remain copyable CLI handoffs in v1, so browser requests never
+carry a filesystem path.
 
 Public surfaces expose only opaque `git_store_ref`, `worktree_ref`, `cache_ref`,
 commit/blob ids, repository-relative paths, line ranges, and digests. Absolute

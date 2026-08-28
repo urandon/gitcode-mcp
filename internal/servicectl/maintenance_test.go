@@ -156,6 +156,115 @@ func TestMaintenanceReconcileReadsGenerationWithoutStartingDisabledJobs(t *testi
 	}
 }
 
+func TestMaintenancePollsRegisteredRepositoryDocsSource(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+
+	repoPath := filepath.Join(dir, "repo")
+	if err := os.MkdirAll(filepath.Join(repoPath, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoPath, "docs", "guide.md"), []byte("# Guide\n\nfirst committed documentation\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitForRepositoryDocsJobTest(t, repoPath, "init")
+	runGitForRepositoryDocsJobTest(t, repoPath, "add", "docs/guide.md")
+	runGitForRepositoryDocsJobTest(t, repoPath, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "first")
+
+	cfg := adminFakeRAGConfig()
+	cfg.CachePath = cachePath
+	cfg.LockPath = cachePath + ".lock"
+	manager := Manager{EffectiveConfig: &cfg}
+	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+	registryPath := filepath.Join(dir, "managed-caches.json")
+	maintenance := NewMaintenanceManager(manager, jobs, registryPath)
+	enroll := testMaintenanceEnrollRequest(cachePath, "repo-docs-enroll", MaintenancePolicy{})
+	enroll.ConfigSnapshot = cfg
+	enroll.ConfigHash = maintenanceHash(cfg)
+	entry, err := maintenance.Enroll(ctx, enroll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok, err := maintenance.RegisterRepositoryDocsSource(ctx, identity.UUID, "owner/repo", repoPath, "")
+	if err != nil || !ok || registered.RepositoryDocs == nil || registered.RepositoryDocs.GitStoreRef == "" {
+		t.Fatalf("registration=%+v ok=%v err=%v", registered, ok, err)
+	}
+	publicJSON, _ := json.Marshal(registered)
+	if strings.Contains(string(publicJSON), repoPath) {
+		t.Fatalf("public registration leaked repository path: %s", publicJSON)
+	}
+	disk, err := os.ReadFile(registryPath)
+	if err != nil || !strings.Contains(string(disk), repoPath) {
+		t.Fatalf("private registry must retain repository path: %s err=%v", disk, err)
+	}
+
+	result, err := maintenance.ReconcileRegistration(ctx, entry.RegistrationID)
+	if err != nil || len(result.JobsStarted) != 1 {
+		t.Fatalf("initial reconcile=%+v err=%v", result, err)
+	}
+	waitForTerminalJob(t, jobs, result.JobsStarted[0])
+	result, err = maintenance.ReconcileRegistration(ctx, entry.RegistrationID)
+	if err != nil || len(result.JobsStarted) != 0 || len(result.Entries) != 1 || result.Entries[0].RepositoryDocs == nil || result.Entries[0].RepositoryDocs.State != "ready" {
+		t.Fatalf("ready reconcile=%+v err=%v", result, err)
+	}
+	firstSet := result.Entries[0].RepositoryDocs.RevisionSetID
+
+	if err := os.WriteFile(filepath.Join(repoPath, "docs", "guide.md"), []byte("# Guide\n\nsecond committed documentation\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitForRepositoryDocsJobTest(t, repoPath, "add", "docs/guide.md")
+	runGitForRepositoryDocsJobTest(t, repoPath, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "second")
+	result, err = maintenance.ReconcileRegistration(ctx, entry.RegistrationID)
+	if err != nil || len(result.JobsStarted) != 1 {
+		t.Fatalf("changed HEAD reconcile=%+v err=%v", result, err)
+	}
+	waitForTerminalJob(t, jobs, result.JobsStarted[0])
+	result, err = maintenance.ReconcileRegistration(ctx, entry.RegistrationID)
+	if err != nil || result.Entries[0].RepositoryDocs.State != "ready" || result.Entries[0].RepositoryDocs.RevisionSetID == firstSet {
+		t.Fatalf("updated ready reconcile=%+v err=%v", result, err)
+	}
+
+	reloaded := NewMaintenanceManager(manager, jobs, registryPath)
+	if err := reloaded.Load(); err != nil {
+		t.Fatal(err)
+	}
+	reloadedResult, err := reloaded.ReconcileRegistration(ctx, entry.RegistrationID)
+	if err != nil || len(reloadedResult.JobsStarted) != 0 || reloadedResult.Entries[0].RepositoryDocs.State != "ready" {
+		t.Fatalf("restart reconcile=%+v err=%v", reloadedResult, err)
+	}
+}
+
+func waitForTerminalJob(t *testing.T, jobs *JobManager, id string) Job {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		job, ok := jobs.Get(id)
+		if ok && jobTerminalStatus(job.Status) {
+			if job.Status != JobStatusSucceeded {
+				t.Fatalf("job %s finished as %s: %+v", id, job.Status, job)
+			}
+			return job
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job %s did not finish", id)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestMaintenanceReconcileRegistrationDoesNotTouchOtherCaches(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

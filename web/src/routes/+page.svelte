@@ -114,7 +114,7 @@
     value.job_retention ||= structuredClone(emptySnapshot.job_retention); value.job_retention.retained_by_status ||= [];
     for (const cache of value.caches) for (const repo of (cache.repositories ||= [])) {
       repo.collections ||= []; repo.recent_sync_events ||= []; repo.execution ||= {}; repo.counts.by_kind ||= [];
-      repo.documentation ||= { state: 'not_indexed', overlay: false, eligible_files: 0, eligible_chunks: 0, embedded_chunks: 0, reused_chunks: 0, failed_chunks: 0, missing_objects: 0, revision_set_count: 0, search_available: false };
+      repo.documentation ||= { state: 'not_indexed', registered: false, overlay: false, eligible_files: 0, eligible_chunks: 0, embedded_chunks: 0, reused_chunks: 0, failed_chunks: 0, missing_objects: 0, revision_set_count: 0, search_available: false };
     }
     return value;
   }
@@ -492,9 +492,10 @@
                   <article><span>Policy</span><strong>{humanize(selectedRepo.documentation.policy_source || 'default preset')}</strong><p>{selectedRepo.documentation.policy_hash ? selectedRepo.documentation.policy_hash.slice(0, 16) : '.gitcode/gitcode-mcp.yaml or conventional docs preset'}</p></article>
                   <article><span>Embedding namespace</span><strong>{selectedRepo.documentation.namespace_id ? 'Bound' : 'Not selected'}</strong><p>{selectedRepo.documentation.namespace_id || 'Provider namespace appears after indexing'}</p></article>
                   <article><span>Updated</span><strong>{selectedRepo.documentation.updated_at ? new Date(selectedRepo.documentation.updated_at).toLocaleDateString() : 'Never'}</strong><p>{selectedRepo.documentation.updated_at ? new Date(selectedRepo.documentation.updated_at).toLocaleString() : 'No repository documentation metadata'}</p></article>
+				  <article><span>Automatic reconciliation</span><strong>{selectedRepo.documentation.registered ? humanize(selectedRepo.documentation.reconcile_state || 'registered') : 'Not registered'}</strong><p>{selectedRepo.documentation.next_poll_at ? `Next HEAD/policy poll ${new Date(selectedRepo.documentation.next_poll_at).toLocaleString()}` : 'Run the index command once from the intended worktree to register it privately.'}</p></article>
                 </div>
                 <div class="rag-operator-panel">
-                  <div><p class="section-kicker">LOCAL GIT HANDOFF</p><h3>Index and exact search</h3><p>The Admin UI does not receive absolute worktree paths. Until the daemon has an explicit local Git-store registration, start indexing or search from the intended worktree; aliases are canonicalized before metadata is written.</p></div>
+				  <div><p class="section-kicker">LOCAL GIT HANDOFF</p><h3>Index and exact search</h3><p>{selectedRepo.documentation.registered ? 'This worktree is registered privately with daemon maintenance. HEAD and committed policy are polled without contacting GitCode; use the handoffs for an immediate run or exact search.' : 'The Admin UI does not receive absolute worktree paths. Run indexing once from the intended worktree to create a private daemon registration; aliases are canonicalized before metadata is written.'}</p></div>
                   <div class="rag-action-form"><button onclick={() => void copyDocumentationCommand('index')} disabled={!selectedRepo.documentation.index_handoff}><FileText size={16} />{copied === 'documentation-index' ? 'Copied index command' : 'Copy index command'}</button><button onclick={() => void copyDocumentationCommand('search')} disabled={!selectedRepo.documentation.search_handoff}><Search size={16} />{copied === 'documentation-search' ? 'Copied search command' : 'Copy search command'}</button></div>
                   <p class="privacy search-boundary"><ShieldCheck size={15} />No repository document or absolute filesystem path is exposed by this screen. Hybrid search sends only the query and bounded embedding inputs to the configured provider.</p>
                 </div>

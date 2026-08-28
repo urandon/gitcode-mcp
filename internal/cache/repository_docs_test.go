@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -141,6 +142,86 @@ func TestRepositoryDocumentGCSeparatesCommittedAndOverlayRetention(t *testing.T)
 		if !got[want] {
 			t.Fatalf("retained sets = %v, missing %s", got, want)
 		}
+	}
+}
+
+func TestRepositoryDocumentGCEnforcesVectorByteCeilingAndProtectsCurrentReadySet(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	namespace := mustRepositoryDocsNamespace(t, ctx, store)
+	base := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	for index, id := range []string{"oldest", "older", "current"} {
+		when := base.Add(time.Duration(index) * time.Hour)
+		setID := "set-" + id
+		chunkID := "chunk-" + id
+		if err := store.UpsertRepositoryDocRevisionSet(ctx, RepositoryDocRevisionSet{
+			RepoID: "fixture-a", ID: setID, GitStoreRef: "git-store:fixture-a", ObjectFormat: "sha1",
+			CommitOID: fmt.Sprintf("%040d", index+1), PolicyHash: "policy", PolicySource: "committed",
+			ChunkPolicyID: "repo-doc-markdown-v1", NamespaceID: namespace.ID, State: RepoDocSetReady,
+			CreatedAt: when, UpdatedAt: when, CompletedAt: when,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertRepositoryDocChunk(ctx, RepositoryDocChunk{
+			RepoID: "fixture-a", ID: chunkID, ObjectFormat: "sha1", BlobOID: fmt.Sprintf("%040d", index+11),
+			ContentDigest: "content-" + id, ByteEnd: 4, LineStart: 1, LineEnd: 1,
+			RawSliceDigest: "slice-" + id, EmbeddingInputDigest: "input-" + id,
+			ChunkPolicyID: "repo-doc-markdown-v1", CreatedAt: when, UpdatedAt: when,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.ReplaceRepositoryDocMembership(ctx, "fixture-a", setID, []RepositoryDocMembership{{Path: "docs/" + id + ".md", ChunkID: chunkID, Authority: "git", ContentDigest: "content-" + id}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertRepositoryDocVector(ctx, RepositoryDocVector{RepoID: "fixture-a", NamespaceID: namespace.ID, ChunkID: chunkID, Vector: []byte{1, 2, 3, 4}, Dimensions: 1, DType: "float32", EmbeddedAt: when}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := store.PruneRepositoryDocRevisionSets(ctx, "fixture-a", RepositoryDocRetentionPolicy{RetainCommittedPerIdentity: 10, MaxVectorBytes: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.VectorBytesBefore != 12 || result.VectorBytesAfter != 4 || result.RevisionSetsDeleted != 2 || result.VectorsDeleted != 2 || result.ChunksDeleted != 2 {
+		t.Fatalf("GC result = %#v", result)
+	}
+	sets, err := store.ListRepositoryDocRevisionSets(ctx, RepositoryDocRevisionSetFilter{RepoID: "fixture-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sets) != 1 || sets[0].ID != "set-current" {
+		t.Fatalf("retained sets = %#v", sets)
+	}
+}
+
+func TestRepositoryDocumentGCExpiresInactiveOverlayAndOrphanBuildingSet(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	namespace := mustRepositoryDocsNamespace(t, ctx, store)
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	for _, set := range []RepositoryDocRevisionSet{
+		{RepoID: "fixture-a", ID: "current", GitStoreRef: "git-store:fixture-a", ObjectFormat: "sha1", CommitOID: fmt.Sprintf("%040d", 1), PolicyHash: "policy", PolicySource: "committed", ChunkPolicyID: "repo-doc-markdown-v1", NamespaceID: namespace.ID, State: RepoDocSetReady, CreatedAt: now, UpdatedAt: now},
+		{RepoID: "fixture-a", ID: "inactive-overlay", GitStoreRef: "git-store:fixture-a", ObjectFormat: "sha1", CommitOID: fmt.Sprintf("%040d", 1), PolicyHash: "policy", PolicySource: "committed", OverlayDigest: "overlay-old", ChunkPolicyID: "repo-doc-markdown-v1", NamespaceID: namespace.ID, State: RepoDocSetReady, CreatedAt: now.Add(-48 * time.Hour), UpdatedAt: now.Add(-48 * time.Hour)},
+		{RepoID: "fixture-a", ID: "orphan-building", GitStoreRef: "git-store:fixture-a", ObjectFormat: "sha1", CommitOID: fmt.Sprintf("%040d", 2), PolicyHash: "policy", PolicySource: "committed", ChunkPolicyID: "repo-doc-markdown-v1", NamespaceID: namespace.ID, State: RepoDocSetBuilding, CreatedAt: now.Add(-8 * 24 * time.Hour), UpdatedAt: now.Add(-8 * 24 * time.Hour)},
+	} {
+		if err := store.UpsertRepositoryDocRevisionSet(ctx, set); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := store.PruneRepositoryDocRevisionSets(ctx, "fixture-a", RepositoryDocRetentionPolicy{
+		RetainCommittedPerIdentity: 8, OverlayCutoff: now.Add(-24 * time.Hour), TerminalCutoff: now.Add(-7 * 24 * time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RevisionSetsDeleted != 2 {
+		t.Fatalf("GC result=%+v", result)
+	}
+	sets, err := store.ListRepositoryDocRevisionSets(ctx, RepositoryDocRevisionSetFilter{RepoID: "fixture-a"})
+	if err != nil || len(sets) != 1 || sets[0].ID != "current" {
+		t.Fatalf("retained sets=%+v err=%v", sets, err)
 	}
 }
 

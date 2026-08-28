@@ -16,6 +16,7 @@ import (
 
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/repositorydocs"
 	"gitcode-mcp/internal/service"
 )
 
@@ -50,38 +51,57 @@ type MaintenanceStageState struct {
 }
 
 type MaintenanceEntry struct {
-	RegistrationID    string                      `json:"registration_id"`
-	CacheUUID         string                      `json:"cache_uuid"`
-	PathFingerprint   string                      `json:"path_fingerprint"`
-	RepoID            string                      `json:"repo_id"`
-	NamespaceID       string                      `json:"namespace_id,omitempty"`
-	Policy            MaintenancePolicy           `json:"policy"`
-	Enabled           bool                        `json:"enabled"`
-	Generation        int64                       `json:"generation"`
-	State             string                      `json:"state"`
-	ContentGeneration int64                       `json:"content_generation,omitempty"`
-	CoveredGeneration int64                       `json:"covered_generation,omitempty"`
-	RAGStatus         string                      `json:"rag_status,omitempty"`
-	ConfigHash        string                      `json:"config_hash,omitempty"`
-	Frontiers         []cache.MaintenanceFrontier `json:"frontiers,omitempty"`
-	ActiveJobs        []string                    `json:"active_jobs,omitempty"`
-	LastErrorClass    string                      `json:"last_error_class,omitempty"`
-	LastError         string                      `json:"last_error,omitempty"`
-	SyncStage         MaintenanceStageState       `json:"sync_stage,omitempty"`
-	RAGStage          MaintenanceStageState       `json:"rag_stage,omitempty"`
-	LastSeenAt        time.Time                   `json:"last_seen_at"`
-	LastReconciledAt  time.Time                   `json:"last_reconciled_at,omitempty"`
-	NextReconcileAt   time.Time                   `json:"next_reconcile_at,omitempty"`
+	RegistrationID    string                          `json:"registration_id"`
+	CacheUUID         string                          `json:"cache_uuid"`
+	PathFingerprint   string                          `json:"path_fingerprint"`
+	RepoID            string                          `json:"repo_id"`
+	NamespaceID       string                          `json:"namespace_id,omitempty"`
+	Policy            MaintenancePolicy               `json:"policy"`
+	Enabled           bool                            `json:"enabled"`
+	Generation        int64                           `json:"generation"`
+	State             string                          `json:"state"`
+	ContentGeneration int64                           `json:"content_generation,omitempty"`
+	CoveredGeneration int64                           `json:"covered_generation,omitempty"`
+	RAGStatus         string                          `json:"rag_status,omitempty"`
+	ConfigHash        string                          `json:"config_hash,omitempty"`
+	Frontiers         []cache.MaintenanceFrontier     `json:"frontiers,omitempty"`
+	ActiveJobs        []string                        `json:"active_jobs,omitempty"`
+	LastErrorClass    string                          `json:"last_error_class,omitempty"`
+	LastError         string                          `json:"last_error,omitempty"`
+	SyncStage         MaintenanceStageState           `json:"sync_stage,omitempty"`
+	RAGStage          MaintenanceStageState           `json:"rag_stage,omitempty"`
+	RepositoryDocs    *RepositoryDocsMaintenanceState `json:"repository_docs,omitempty"`
+	LastSeenAt        time.Time                       `json:"last_seen_at"`
+	LastReconciledAt  time.Time                       `json:"last_reconciled_at,omitempty"`
+	NextReconcileAt   time.Time                       `json:"next_reconcile_at,omitempty"`
 	cachePath         string
 	configReference   string
 	configSnapshot    config.Config
+	repositoryPath    string
+	repositoryProfile string
+}
+
+type RepositoryDocsMaintenanceState struct {
+	GitStoreRef    string                `json:"git_store_ref"`
+	WorktreeRef    string                `json:"worktree_ref,omitempty"`
+	CommitOID      string                `json:"commit_oid,omitempty"`
+	PolicyHash     string                `json:"policy_hash,omitempty"`
+	RevisionSetID  string                `json:"revision_set_id,omitempty"`
+	State          string                `json:"state"`
+	LastErrorClass string                `json:"last_error_class,omitempty"`
+	LastError      string                `json:"last_error,omitempty"`
+	Stage          MaintenanceStageState `json:"stage,omitempty"`
+	UpdatedAt      time.Time             `json:"updated_at,omitempty"`
+	NextPollAt     time.Time             `json:"next_poll_at,omitempty"`
 }
 
 type maintenanceDiskEntry struct {
 	MaintenanceEntry
-	CachePath       string        `json:"cache_path"`
-	ConfigReference string        `json:"config_reference,omitempty"`
-	ConfigSnapshot  config.Config `json:"config_snapshot"`
+	CachePath         string        `json:"cache_path"`
+	ConfigReference   string        `json:"config_reference,omitempty"`
+	ConfigSnapshot    config.Config `json:"config_snapshot"`
+	RepositoryPath    string        `json:"repository_path,omitempty"`
+	RepositoryProfile string        `json:"repository_profile,omitempty"`
 }
 
 type maintenanceRegistryFile struct {
@@ -197,6 +217,8 @@ func (m *MaintenanceManager) Load() error {
 		entry.cachePath = stored.CachePath
 		entry.configReference = stored.ConfigReference
 		entry.configSnapshot = stored.ConfigSnapshot
+		entry.repositoryPath = stored.RepositoryPath
+		entry.repositoryProfile = stored.RepositoryProfile
 		m.entries[entry.RegistrationID] = &entry
 	}
 	for _, receipt := range disk.Receipts {
@@ -493,6 +515,41 @@ func (m *MaintenanceManager) ResolveConfig(req MaintenanceResolveConfigRequest) 
 	return result, nil
 }
 
+// RegisterRepositoryDocsSource attaches a local Git worktree to an existing
+// cache/repository maintenance registration. The path stays only in the 0600
+// daemon registry; public state carries opaque Git identities.
+func (m *MaintenanceManager) RegisterRepositoryDocsSource(ctx context.Context, cacheUUID, repoID, repositoryPath, profile string) (MaintenanceEntry, bool, error) {
+	repo, err := repositorydocs.OpenRepository(ctx, repositoryPath)
+	if err != nil {
+		return MaintenanceEntry{}, false, err
+	}
+	policy, err := repositorydocs.InspectPolicy(ctx, repo, repositorydocs.PolicyRequest{RepoID: repoID})
+	if err != nil {
+		return MaintenanceEntry{}, false, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, entry := range m.entries {
+		if entry.CacheUUID != cacheUUID || entry.RepoID != repoID {
+			continue
+		}
+		entry.repositoryPath = repositoryPath
+		entry.repositoryProfile = strings.TrimSpace(profile)
+		entry.RepositoryDocs = &RepositoryDocsMaintenanceState{
+			GitStoreRef: policy.GitStoreRef, WorktreeRef: policy.WorktreeRef,
+			CommitOID: policy.CommitOID, PolicyHash: policy.Policy.PolicyHash,
+			State: "registered", UpdatedAt: m.now(), NextPollAt: m.now(),
+		}
+		entry.Generation++
+		m.generation++
+		if err := m.saveLocked(); err != nil {
+			return MaintenanceEntry{}, false, err
+		}
+		return cloneMaintenanceEntry(entry), true, nil
+	}
+	return MaintenanceEntry{}, false, nil
+}
+
 func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID string) (MaintenanceEntry, []string) {
 	m.mu.Lock()
 	entry := m.entries[registrationID]
@@ -526,8 +583,14 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	namespaces, _ := store.ListEmbeddingNamespaces(ctx, snapshot.RepoID)
 	latestSync, _ := m.jobs.LatestCacheRepo(SyncJobType, snapshot.CacheUUID, snapshot.RepoID)
 	latestRAG, _ := m.jobs.LatestCacheRepo(RAGIndexJobType, snapshot.CacheUUID, snapshot.RepoID)
+	latestRepositoryDocs, _ := m.jobs.LatestCacheRepo(RepositoryDocsIndexJobType, snapshot.CacheUUID, snapshot.RepoID)
 	snapshot.SyncStage = observeMaintenanceStage(snapshot.SyncStage, latestSync, now)
 	snapshot.RAGStage = observeMaintenanceStage(snapshot.RAGStage, latestRAG, now)
+	repositoryDocsNeedsIndex := false
+	if snapshot.RepositoryDocs != nil && snapshot.repositoryPath != "" {
+		snapshot.RepositoryDocs.Stage = observeMaintenanceStage(snapshot.RepositoryDocs.Stage, latestRepositoryDocs, now)
+		repositoryDocsNeedsIndex = reconcileRepositoryDocsState(ctx, store, &snapshot, now)
+	}
 	if (latestRAG.Status == JobStatusSucceeded || latestRAG.Status == JobStatusSuperseded) && latestRAG.NamespaceID != "" {
 		snapshot.NamespaceID = latestRAG.NamespaceID
 	}
@@ -552,11 +615,12 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	started := []string{}
 	activeSync, _ := m.jobs.ActiveCacheRepo(SyncJobType, snapshot.CacheUUID, snapshot.RepoID)
 	activeRAG, _ := m.jobs.ActiveCacheRepo(RAGIndexJobType, snapshot.CacheUUID, snapshot.RepoID)
+	activeRepositoryDocs, _ := m.jobs.ActiveCacheRepo(RepositoryDocsIndexJobType, snapshot.CacheUUID, snapshot.RepoID)
 	activeWriter, _ := m.jobs.ActiveCacheWriter(snapshot.CacheUUID)
 	ragInterval := time.Duration(snapshot.Policy.RAGIntervalSeconds) * time.Second
 	ragVerificationDue := maintenanceRAGVerificationDue(namespaceID, ragStatus, coverageUpdatedAt, ragInterval, now)
 	needsRAGRepair := contentState.ContentGeneration > covered || (contentState.ContentGeneration > 0 && ragStatus != "ready") || ragVerificationDue
-	if activeSync.ID == "" && activeRAG.ID == "" && activeWriter.ID == "" {
+	if activeSync.ID == "" && activeRAG.ID == "" && activeRepositoryDocs.ID == "" && activeWriter.ID == "" {
 		lane, page, maxPages := nextMaintenanceSyncLane(snapshot, frontiers, now)
 		syncReady := snapshot.SyncStage.RetryAfter.IsZero() || !now.Before(snapshot.SyncStage.RetryAfter)
 		ragReady := snapshot.RAGStage.RetryAfter.IsZero() || !now.Before(snapshot.RAGStage.RetryAfter)
@@ -574,7 +638,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 			if jobErr != nil {
 				var busy ErrCacheWriterBusy
 				if errors.As(jobErr, &busy) {
-					return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, now), nil
+					return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), nil
 				}
 				return m.updateEntryFailure(registrationID, "sync_schedule_failed", jobErr), nil
 			}
@@ -585,18 +649,32 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 			if jobErr != nil {
 				var busy ErrCacheWriterBusy
 				if errors.As(jobErr, &busy) {
-					return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, now), started
+					return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), started
 				}
 				return m.updateEntryFailure(registrationID, "rag_schedule_failed", jobErr), started
 			}
 			started = append(started, job.ID)
 			activeRAG = job
+		} else if repositoryDocsNeedsIndex {
+			job, jobErr := m.jobs.StartRepositoryDocsIndex(context.Background(), jobManager, StartRepositoryDocsIndexJobRequest{
+				RepoID: snapshot.RepoID, RepositoryPath: snapshot.repositoryPath, Profile: snapshot.repositoryProfile,
+				CachePath: path, CacheUUID: snapshot.CacheUUID, RegistrationID: snapshot.RegistrationID,
+			})
+			if jobErr != nil {
+				var busy ErrCacheWriterBusy
+				if errors.As(jobErr, &busy) {
+					return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), started
+				}
+				return m.updateRepositoryDocsFailure(registrationID, "repository_docs_schedule_failed"), started
+			}
+			started = append(started, job.ID)
+			activeRepositoryDocs = job
 		}
 	}
-	return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, now), started
+	return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), started
 }
 
-func (m *MaintenanceManager) finishReconcileEntry(registrationID string, snapshot MaintenanceEntry, contentGeneration, covered int64, ragStatus, namespaceID string, frontiers []cache.MaintenanceFrontier, activeSync, activeRAG Job, now time.Time) MaintenanceEntry {
+func (m *MaintenanceManager) finishReconcileEntry(registrationID string, snapshot MaintenanceEntry, contentGeneration, covered int64, ragStatus, namespaceID string, frontiers []cache.MaintenanceFrontier, activeSync, activeRAG, activeRepositoryDocs Job, now time.Time) MaintenanceEntry {
 	m.mu.Lock()
 	entry := m.entries[registrationID]
 	entry.ContentGeneration = contentGeneration
@@ -604,12 +682,13 @@ func (m *MaintenanceManager) finishReconcileEntry(registrationID string, snapsho
 	entry.RAGStatus = ragStatus
 	entry.SyncStage = snapshot.SyncStage
 	entry.RAGStage = snapshot.RAGStage
+	entry.RepositoryDocs = snapshot.RepositoryDocs
 	entry.NamespaceID = namespaceID
 	if activeRAG.NamespaceID != "" {
 		entry.NamespaceID = activeRAG.NamespaceID
 	}
 	entry.Frontiers = frontiers
-	entry.ActiveJobs = activeMaintenanceJobIDs(activeSync, activeRAG)
+	entry.ActiveJobs = activeMaintenanceJobIDs(activeSync, activeRAG, activeRepositoryDocs)
 	entry.LastErrorClass, entry.LastError = maintenanceEntryError(entry.Policy, entry.SyncStage, entry.RAGStage)
 	entry.State = deriveMaintenanceEntryState(*entry)
 	if activeSync.ID != "" {
@@ -619,6 +698,11 @@ func (m *MaintenanceManager) finishReconcileEntry(registrationID string, snapsho
 		}
 	} else if activeRAG.ID != "" {
 		entry.State = "indexing"
+	} else if activeRepositoryDocs.ID != "" {
+		entry.State = "indexing"
+		if entry.RepositoryDocs != nil {
+			entry.RepositoryDocs.State = "indexing"
+		}
 	}
 	entry.LastReconciledAt = now
 	entry.NextReconcileAt = now.Add(time.Minute)
@@ -626,6 +710,82 @@ func (m *MaintenanceManager) finishReconcileEntry(registrationID string, snapsho
 	updated := cloneMaintenanceEntry(entry)
 	m.mu.Unlock()
 	return updated
+}
+
+func reconcileRepositoryDocsState(ctx context.Context, store *cache.SQLiteStore, entry *MaintenanceEntry, now time.Time) bool {
+	state := entry.RepositoryDocs
+	if state == nil || entry.repositoryPath == "" {
+		return false
+	}
+	state.UpdatedAt = now
+	state.NextPollAt = now.Add(time.Minute)
+	repo, err := repositorydocs.OpenRepository(ctx, entry.repositoryPath)
+	if err != nil {
+		state.State = "degraded"
+		state.LastErrorClass = maintenanceJobErrorClass(err, "git_store_unavailable")
+		state.LastError = "registered Git store is unavailable"
+		return false
+	}
+	policy, err := repositorydocs.InspectPolicy(ctx, repo, repositorydocs.PolicyRequest{RepoID: entry.RepoID})
+	if err != nil {
+		state.State = "degraded"
+		state.LastErrorClass = maintenanceJobErrorClass(err, "repository_docs_policy_invalid")
+		state.LastError = "repository documentation policy cannot be resolved"
+		return false
+	}
+	state.GitStoreRef = policy.GitStoreRef
+	state.WorktreeRef = policy.WorktreeRef
+	state.CommitOID = policy.CommitOID
+	state.PolicyHash = policy.Policy.PolicyHash
+	state.LastErrorClass = state.Stage.LastErrorClass
+	state.LastError = state.Stage.LastError
+	if !policy.Policy.Policy.Enabled {
+		state.State = "disabled"
+		state.RevisionSetID = ""
+		return false
+	}
+	sets, err := store.ListRepositoryDocRevisionSets(ctx, cache.RepositoryDocRevisionSetFilter{
+		RepoID: entry.RepoID, GitStoreRef: policy.GitStoreRef, CommitOID: policy.CommitOID,
+		PolicyHash: policy.Policy.PolicyHash, ExactOverlay: true,
+		ChunkPolicyID: repositorydocs.DefaultChunkPolicyID, Limit: 20,
+	})
+	if err != nil {
+		state.State = "degraded"
+		state.LastErrorClass = "repository_docs_status_failed"
+		state.LastError = "repository documentation index state is unavailable"
+		return false
+	}
+	for _, set := range sets {
+		if set.State == cache.RepoDocSetReady {
+			state.State = "ready"
+			state.RevisionSetID = set.ID
+			return false
+		}
+	}
+	state.State = "not_indexed"
+	state.RevisionSetID = ""
+	return true
+}
+
+func (m *MaintenanceManager) updateRepositoryDocsFailure(id, class string) MaintenanceEntry {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	entry := m.entries[id]
+	if entry == nil {
+		return MaintenanceEntry{}
+	}
+	if entry.RepositoryDocs == nil {
+		entry.RepositoryDocs = &RepositoryDocsMaintenanceState{}
+	}
+	entry.RepositoryDocs.State = "degraded"
+	entry.RepositoryDocs.LastErrorClass = class
+	entry.RepositoryDocs.LastError = "repository documentation indexing could not be scheduled"
+	entry.RepositoryDocs.UpdatedAt = m.now()
+	entry.RepositoryDocs.NextPollAt = m.now().Add(time.Minute)
+	entry.LastReconciledAt = m.now()
+	entry.NextReconcileAt = entry.LastReconciledAt.Add(time.Minute)
+	_ = m.saveLocked()
+	return cloneMaintenanceEntry(entry)
 }
 
 func maintenanceRAGVerificationDue(namespaceID, status string, updatedAt time.Time, interval time.Duration, now time.Time) bool {
@@ -886,7 +1046,7 @@ func (m *MaintenanceManager) saveLocked() error {
 	}
 	disk := maintenanceRegistryFile{SchemaVersion: maintenanceRegistrySchema, Generation: m.generation}
 	for _, entry := range m.entries {
-		disk.Entries = append(disk.Entries, maintenanceDiskEntry{MaintenanceEntry: cloneMaintenanceEntry(entry), CachePath: entry.cachePath, ConfigReference: entry.configReference, ConfigSnapshot: entry.configSnapshot})
+		disk.Entries = append(disk.Entries, maintenanceDiskEntry{MaintenanceEntry: cloneMaintenanceEntry(entry), CachePath: entry.cachePath, ConfigReference: entry.configReference, ConfigSnapshot: entry.configSnapshot, RepositoryPath: entry.repositoryPath, RepositoryProfile: entry.repositoryProfile})
 	}
 	sort.Slice(disk.Entries, func(i, j int) bool { return disk.Entries[i].RegistrationID < disk.Entries[j].RegistrationID })
 	for _, receipt := range m.receipts {
@@ -1029,6 +1189,9 @@ func deriveMaintenanceEntryState(entry MaintenanceEntry) string {
 	if entry.LastErrorClass != "" {
 		return "degraded"
 	}
+	if entry.RepositoryDocs != nil && entry.RepositoryDocs.State == "degraded" {
+		return "degraded"
+	}
 	if entry.Policy.SyncEnabled {
 		selected := map[string]bool{}
 		for _, remoteType := range maintenanceRemoteTypes(entry.Policy) {
@@ -1043,6 +1206,9 @@ func deriveMaintenanceEntryState(entry MaintenanceEntry) string {
 	if entry.Policy.RAGEnabled && (entry.CoveredGeneration < entry.ContentGeneration || (entry.ContentGeneration > 0 && entry.RAGStatus != "ready")) {
 		return "indexing"
 	}
+	if entry.RepositoryDocs != nil && (entry.RepositoryDocs.State == "registered" || entry.RepositoryDocs.State == "not_indexed" || entry.RepositoryDocs.State == "indexing") {
+		return "indexing"
+	}
 	return "ready"
 }
 
@@ -1053,6 +1219,12 @@ func cloneMaintenanceEntry(entry *MaintenanceEntry) MaintenanceEntry {
 	copy := *entry
 	copy.Frontiers = append([]cache.MaintenanceFrontier(nil), entry.Frontiers...)
 	copy.ActiveJobs = append([]string(nil), entry.ActiveJobs...)
+	if entry.RepositoryDocs != nil {
+		repositoryDocs := *entry.RepositoryDocs
+		copy.RepositoryDocs = &repositoryDocs
+	}
 	copy.cachePath = ""
+	copy.repositoryPath = ""
+	copy.repositoryProfile = ""
 	return copy
 }
