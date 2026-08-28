@@ -533,15 +533,32 @@ func (m *MaintenanceManager) RegisterRepositoryDocsSource(ctx context.Context, c
 		if entry.CacheUUID != cacheUUID || entry.RepoID != repoID {
 			continue
 		}
+		profile = strings.TrimSpace(profile)
+		sameRegistration := entry.repositoryPath == repositoryPath && entry.repositoryProfile == profile && entry.RepositoryDocs != nil && entry.RepositoryDocs.GitStoreRef == policy.GitStoreRef && entry.RepositoryDocs.WorktreeRef == policy.WorktreeRef
+		sameTarget := sameRegistration && entry.RepositoryDocs.CommitOID == policy.CommitOID && entry.RepositoryDocs.PolicyHash == policy.Policy.PolicyHash
 		entry.repositoryPath = repositoryPath
-		entry.repositoryProfile = strings.TrimSpace(profile)
+		entry.repositoryProfile = profile
+		if sameTarget {
+			entry.RepositoryDocs.UpdatedAt = m.now()
+			entry.RepositoryDocs.NextPollAt = m.now()
+			if err := m.saveLocked(); err != nil {
+				return MaintenanceEntry{}, false, err
+			}
+			return cloneMaintenanceEntry(entry), true, nil
+		}
+		stage := MaintenanceStageState{}
+		if entry.RepositoryDocs != nil {
+			stage = entry.RepositoryDocs.Stage
+		}
 		entry.RepositoryDocs = &RepositoryDocsMaintenanceState{
 			GitStoreRef: policy.GitStoreRef, WorktreeRef: policy.WorktreeRef,
 			CommitOID: policy.CommitOID, PolicyHash: policy.Policy.PolicyHash,
-			State: "registered", UpdatedAt: m.now(), NextPollAt: m.now(),
+			State: "registered", Stage: stage, UpdatedAt: m.now(), NextPollAt: m.now(),
 		}
-		entry.Generation++
-		m.generation++
+		if !sameRegistration {
+			entry.Generation++
+			m.generation++
+		}
 		if err := m.saveLocked(); err != nil {
 			return MaintenanceEntry{}, false, err
 		}
@@ -620,11 +637,17 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	ragInterval := time.Duration(snapshot.Policy.RAGIntervalSeconds) * time.Second
 	ragVerificationDue := maintenanceRAGVerificationDue(namespaceID, ragStatus, coverageUpdatedAt, ragInterval, now)
 	needsRAGRepair := contentState.ContentGeneration > covered || (contentState.ContentGeneration > 0 && ragStatus != "ready") || ragVerificationDue
+	repositoryDocsReady := snapshot.RepositoryDocs == nil || snapshot.RepositoryDocs.Stage.RetryAfter.IsZero() || !now.Before(snapshot.RepositoryDocs.Stage.RetryAfter)
 	if activeSync.ID == "" && activeRAG.ID == "" && activeRepositoryDocs.ID == "" && activeWriter.ID == "" {
 		lane, page, maxPages := nextMaintenanceSyncLane(snapshot, frontiers, now)
 		syncReady := snapshot.SyncStage.RetryAfter.IsZero() || !now.Before(snapshot.SyncStage.RetryAfter)
 		ragReady := snapshot.RAGStage.RetryAfter.IsZero() || !now.Before(snapshot.RAGStage.RetryAfter)
 		stage := nextMaintenanceStage(snapshot.Policy, lane, needsRAGRepair, syncReady, ragReady)
+		// Preserve remote head freshness and ordinary RAG repair priority, but do
+		// not let historical tail backfill starve a changed local Git HEAD.
+		if repositoryDocsNeedsIndex && repositoryDocsReady && (stage == "" || stage == SyncJobType && lane == "tail") {
+			stage = RepositoryDocsIndexJobType
+		}
 		if stage == SyncJobType {
 			req := StartSyncJobRequest{
 				RepoID: snapshot.RepoID, ProviderMode: "live", CachePath: path,
@@ -655,7 +678,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 			}
 			started = append(started, job.ID)
 			activeRAG = job
-		} else if repositoryDocsNeedsIndex {
+		} else if stage == RepositoryDocsIndexJobType {
 			job, jobErr := m.jobs.StartRepositoryDocsIndex(context.Background(), jobManager, StartRepositoryDocsIndexJobRequest{
 				RepoID: snapshot.RepoID, RepositoryPath: snapshot.repositoryPath, Profile: snapshot.repositoryProfile,
 				CachePath: path, CacheUUID: snapshot.CacheUUID, RegistrationID: snapshot.RegistrationID,

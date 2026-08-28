@@ -202,6 +202,10 @@ func TestMaintenancePollsRegisteredRepositoryDocsSource(t *testing.T) {
 	if err != nil || !ok || registered.RepositoryDocs == nil || registered.RepositoryDocs.GitStoreRef == "" {
 		t.Fatalf("registration=%+v ok=%v err=%v", registered, ok, err)
 	}
+	replayed, ok, err := maintenance.RegisterRepositoryDocsSource(ctx, identity.UUID, "owner/repo", repoPath, "")
+	if err != nil || !ok || replayed.Generation != registered.Generation {
+		t.Fatalf("replayed registration=%+v ok=%v err=%v", replayed, ok, err)
+	}
 	publicJSON, _ := json.Marshal(registered)
 	if strings.Contains(string(publicJSON), repoPath) {
 		t.Fatalf("public registration leaked repository path: %s", publicJSON)
@@ -210,6 +214,12 @@ func TestMaintenancePollsRegisteredRepositoryDocsSource(t *testing.T) {
 	if err != nil || !strings.Contains(string(disk), repoPath) {
 		t.Fatalf("private registry must retain repository path: %s err=%v", disk, err)
 	}
+	maintenance.entries[entry.RegistrationID].RepositoryDocs.Stage.RetryAfter = time.Now().Add(time.Hour)
+	backedOff, err := maintenance.ReconcileRegistration(ctx, entry.RegistrationID)
+	if err != nil || len(backedOff.JobsStarted) != 0 {
+		t.Fatalf("backed-off reconcile=%+v err=%v", backedOff, err)
+	}
+	maintenance.entries[entry.RegistrationID].RepositoryDocs.Stage.RetryAfter = time.Time{}
 
 	result, err := maintenance.ReconcileRegistration(ctx, entry.RegistrationID)
 	if err != nil || len(result.JobsStarted) != 1 {
