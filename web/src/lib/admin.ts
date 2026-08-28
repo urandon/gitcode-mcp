@@ -324,6 +324,50 @@ export type SearchComparison = {
   generated_at: string;
 };
 
+export type RepositoryDocsSearchResult = {
+  repo_id: string;
+  corpus_kind: string;
+  query: string;
+  requested_revision: string;
+  effective_revision: string;
+  requested_mode: string;
+  effective_mode: string;
+  authority: string;
+  overlay_digest?: string;
+  revision_set_id?: string;
+  policy_hash: string;
+  policy_source: string;
+  namespace_id?: string;
+  coverage: {
+    state: string;
+    eligible_files: number;
+    eligible_chunks: number;
+    embedded_chunks: number;
+    reused_chunks: number;
+    failed_chunks: number;
+    missing_objects: number;
+  };
+  hits: Array<{
+    rank: number;
+    chunk_id: string;
+    snippet: string;
+    score: number;
+    lexical_score?: number;
+    semantic_score?: number;
+    citation: {
+      authority: string;
+      commit_oid: string;
+      blob_oid: string;
+      path: string;
+      line_start: number;
+      line_end: number;
+      raw_slice_digest: string;
+    };
+  }>;
+  warnings?: string[];
+  fallback?: string;
+};
+
 export type ProviderSmoke = {
   status: string;
   profile_id?: string;

@@ -111,6 +111,9 @@ func TestRepositoryBoundsAndMissingObjects(t *testing.T) {
 	if _, err := repo.ResolveRevision(ctx, "does-not-exist"); !errors.Is(err, ErrGitObjectUnavailable) {
 		t.Fatalf("missing revision err=%v", err)
 	}
+	if _, err := repo.ResolveRevision(ctx, "--help"); !errors.Is(err, ErrGitObjectUnavailable) {
+		t.Fatalf("option-like revision err=%v", err)
+	}
 	missingOID := strings.Repeat("0", len(entries[0].OID))
 	if _, err := repo.ReadBlob(ctx, missingOID, 1024); !errors.Is(err, ErrGitObjectUnavailable) {
 		t.Fatalf("missing blob read err=%v", err)

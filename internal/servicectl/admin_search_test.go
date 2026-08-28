@@ -2,14 +2,101 @@ package servicectl
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"gitcode-mcp/internal/adminhttp"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/repositorydocs"
 )
+
+func TestAdminRepositoryDocsSearchUsesPrivateRegistrationAuthority(t *testing.T) {
+	ctx := context.Background()
+	cachePath, _ := seedAdminSearchCache(t, ctx)
+	repositoryPath := filepath.Join(t.TempDir(), "worktree")
+	if err := os.MkdirAll(filepath.Join(repositoryPath, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repositoryPath, "docs", "architecture.md"), []byte("# Durable documents\n\nThe daemon resolves Git authority from a private registration.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitForRepositoryDocsJobTest(t, repositoryPath, "init")
+	runGitForRepositoryDocsJobTest(t, repositoryPath, "config", "user.email", "test@example.com")
+	runGitForRepositoryDocsJobTest(t, repositoryPath, "config", "user.name", "Test")
+	runGitForRepositoryDocsJobTest(t, repositoryPath, "add", "docs/architecture.md")
+	runGitForRepositoryDocsJobTest(t, repositoryPath, "commit", "-m", "docs")
+
+	manager := newTestManager(t, "darwin")
+	jobs := NewJobManager("")
+	maintenance := NewMaintenanceManager(manager, jobs, filepath.Join(t.TempDir(), "managed-caches.json"))
+	enroll := testMaintenanceEnrollRequest(cachePath, "admin-repo-docs", MaintenancePolicy{SyncMode: "off"})
+	enroll.ConfigSnapshot = adminFakeRAGConfig()
+	enroll.ConfigSnapshot.CachePath = cachePath
+	enroll.ConfigHash = maintenanceHash(enroll.ConfigSnapshot)
+	entry, err := maintenance.Enroll(ctx, enroll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, registered, err := maintenance.RegisterRepositoryDocsSource(ctx, entry.CacheUUID, entry.RepoID, repositoryPath, ""); err != nil || !registered {
+		t.Fatalf("register=%v err=%v", registered, err)
+	}
+	controls := NewAdminControlManager(manager, maintenance, jobs, NewAdminControlReceiptManager(""))
+	searched, err := controls.SearchRepositoryDocs(ctx, adminhttp.RepositoryDocsSearchRequest{
+		RegistrationID: entry.RegistrationID, Query: "private registration", Revision: "HEAD", Mode: "fulltext", Limit: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := searched.(repositorydocs.SearchResult)
+	if result.RepoID != "owner/repo" || result.EffectiveMode != "fulltext" || len(result.Hits) != 1 || result.Hits[0].Citation.Path != "docs/architecture.md" {
+		t.Fatalf("result=%+v", result)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), repositoryPath) || strings.Contains(string(encoded), cachePath) {
+		t.Fatalf("public result leaked private authority: %s", encoded)
+	}
+	indexRequest := adminhttp.RegistrationControlRequest{RegistrationID: entry.RegistrationID, IdempotencyKey: "admin-repo-docs-index-1"}
+	indexed, err := controls.IndexRepositoryDocs(ctx, indexRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := indexed.(map[string]any)
+	jobID, _ := receipt["job_id"].(string)
+	if jobID == "" || receipt["outcome"] != "accepted" {
+		t.Fatalf("receipt=%+v", receipt)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		job, ok := jobs.Get(jobID)
+		if ok && jobTerminalStatus(job.Status) {
+			if job.Type != RepositoryDocsIndexJobType || job.Status != JobStatusSucceeded {
+				t.Fatalf("job=%+v", job)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("repository docs job %s did not finish", jobID)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	for _, job := range jobs.List() {
+		if job.Type == SyncJobType || job.Type == RAGIndexJobType {
+			t.Fatalf("repository docs control started unrelated work: %+v", job)
+		}
+	}
+	replayed, err := controls.IndexRepositoryDocs(ctx, indexRequest)
+	if err != nil || replayed.(map[string]any)["replayed"] != true || replayed.(map[string]any)["job_id"] != jobID {
+		t.Fatalf("replay=%+v err=%v", replayed, err)
+	}
+}
 
 func TestAdminSearchCompareIsObservationOnlyAndExplainsFallback(t *testing.T) {
 	ctx := context.Background()

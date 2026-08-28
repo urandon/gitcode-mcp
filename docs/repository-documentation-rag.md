@@ -116,14 +116,20 @@ revision-set identity, coverage, commit/overlay authority, namespace, and
 daemon job observation. The browser is deliberately not allowed to select or
 receive arbitrary absolute filesystem paths. The first explicit CLI index from
 a worktree attaches that path to an existing daemon maintenance registration;
-Admin then shows registration/reconciliation state and next poll time. Exact
-index/search remain copyable CLI handoffs in v1, so browser requests never
-carry a filesystem path.
+Admin then shows registration/reconciliation state and next poll time. Once
+registered, the operator may confirm an immediate HEAD/policy reconciliation,
+open the resulting daemon job for attach/cancel supervision, or search an
+explicit Git revision. Those browser requests carry only the opaque
+registration id, revision, query, mode, limit, and tracked-overlay opt-in; the
+daemon resolves filesystem authority from its private `0600` registry. CLI
+handoffs remain available for initial worktree registration and automation.
 
 Public surfaces expose only opaque `git_store_ref`, `worktree_ref`, `cache_ref`,
 commit/blob ids, repository-relative paths, line ranges, and digests. Absolute
 paths and source bodies are not part of status, job, diagnostic, or Admin
-snapshot contracts.
+snapshot contracts. Search responses may contain bounded snippets hydrated
+from Git for the authenticated loopback session; those bytes are never written
+to the cache or maintenance registry.
 
 ## Failure and recovery model
 

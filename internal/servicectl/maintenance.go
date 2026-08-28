@@ -111,6 +111,16 @@ type maintenanceRegistryFile struct {
 	Receipts      []maintenanceReceipt   `json:"idempotency_receipts,omitempty"`
 }
 
+type repositoryDocsAdminSource struct {
+	RegistrationID string
+	CacheUUID      string
+	RepoID         string
+	RepositoryPath string
+	CachePath      string
+	Profile        string
+	Config         config.Config
+}
+
 type maintenanceReceipt struct {
 	KeyHash        string `json:"key_hash"`
 	RegistrationID string `json:"registration_id"`
@@ -565,6 +575,30 @@ func (m *MaintenanceManager) RegisterRepositoryDocsSource(ctx context.Context, c
 		return cloneMaintenanceEntry(entry), true, nil
 	}
 	return MaintenanceEntry{}, false, nil
+}
+
+// repositoryDocsSourceForAdmin resolves private local authority for an
+// authenticated Admin control without copying it into public observations.
+func (m *MaintenanceManager) repositoryDocsSourceForAdmin(registrationID string) (repositoryDocsAdminSource, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	entry := m.entries[strings.TrimSpace(registrationID)]
+	if entry == nil {
+		return repositoryDocsAdminSource{}, errors.New("maintenance: registration not found")
+	}
+	if !entry.Enabled {
+		return repositoryDocsAdminSource{}, errors.New("maintenance: registration is disabled")
+	}
+	if strings.TrimSpace(entry.repositoryPath) == "" || entry.RepositoryDocs == nil {
+		return repositoryDocsAdminSource{}, errors.New("maintenance: repository documentation source is not registered")
+	}
+	cfg := entry.configSnapshot
+	cfg.CachePath = entry.cachePath
+	return repositoryDocsAdminSource{
+		RegistrationID: entry.RegistrationID, CacheUUID: entry.CacheUUID,
+		RepoID: entry.RepoID, RepositoryPath: entry.repositoryPath,
+		CachePath: entry.cachePath, Profile: entry.repositoryProfile, Config: cfg,
+	}, nil
 }
 
 func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID string) (MaintenanceEntry, []string) {

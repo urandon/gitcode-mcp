@@ -46,8 +46,10 @@ persist an absolute worktree path in a public snapshot.
 - A daemon-owned repository-doc job participates in cache writer admission,
   coalescing, cancellation, terminal job retention, and metadata GC.
 - A raw SQLite-file sentinel scan finds no document or chunk text.
-- Admin UI exposes Documentation navigation/status/handoffs, survives empty and
-  partial state, and regenerated assets are committed.
+- Admin UI exposes Documentation navigation/status, pathless registered-source
+  reconcile/index, scoped job supervision, exact-revision search and CLI
+  handoffs; it survives empty and partial state, and regenerated assets are
+  committed.
 - CLI and all four MCP tools expose stable JSON/structured output without raw
   document bodies in status/job diagnostics.
 
@@ -79,8 +81,9 @@ changes require an issue comment when they exceed 25% on a comparable host.
   links for absolute paths, document bodies, credentials, or provider endpoints.
 - Use the Admin Documentation tab at desktop and 390 px widths, in Light, Dark,
   and System themes, with keyboard-only navigation and reduced motion.
-- Confirm Admin disables direct filesystem-dependent actions and explains the
-  exact CLI handoff instead of silently hiding the cohort.
+- Confirm Admin requires CLI for initial filesystem registration, then accepts
+  only opaque registration identity for reconcile/index and exact-revision
+  search. Verify request/response payloads contain no absolute path.
 - Restart the daemon during indexing; verify the retained job is interrupted
   and a fresh request resumes or safely republishes the revision set.
 

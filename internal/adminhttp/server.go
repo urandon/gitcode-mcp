@@ -66,6 +66,8 @@ type Config struct {
 	PlanBinding          BindingControlProvider
 	ApplyBinding         BindingControlProvider
 	CompareSearch        SearchCompareProvider
+	SearchRepositoryDocs RepositoryDocsSearchProvider
+	IndexRepositoryDocs  RegistrationControlProvider
 	SmokeProvider        ProviderSmokeProvider
 	PlanRAGRepair        RAGRepairProvider
 	ApplyRAGRepair       RAGRepairProvider
@@ -185,6 +187,8 @@ func (c *Controller) handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/v1/bindings/plan", c.planBinding)
 	mux.HandleFunc("POST /api/admin/v1/bindings/apply", c.applyBinding)
 	mux.HandleFunc("POST /api/admin/v1/search/compare", c.compareSearch)
+	mux.HandleFunc("POST /api/admin/v1/repository-docs/{registration_id}/search", c.searchRepositoryDocs)
+	mux.HandleFunc("POST /api/admin/v1/repository-docs/{registration_id}/index", c.indexRepositoryDocs)
 	mux.HandleFunc("POST /api/admin/v1/rag/provider/smoke", c.smokeProvider)
 	mux.HandleFunc("POST /api/admin/v1/rag/repair/plan", c.planRAGRepair)
 	mux.HandleFunc("POST /api/admin/v1/rag/repair/apply", c.applyRAGRepair)

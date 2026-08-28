@@ -131,7 +131,7 @@ func (r *Repository) ResolveRevision(ctx context.Context, revision string) (stri
 	if strings.TrimSpace(revision) == "" {
 		revision = "HEAD"
 	}
-	oid, err := gitOutput(ctx, r.root, "rev-parse", "--verify", revision+"^{commit}")
+	oid, err := gitOutput(ctx, r.root, "rev-parse", "--verify", "--end-of-options", revision+"^{commit}")
 	if err != nil {
 		return "", &GitObjectError{Object: revision, Reason: "revision cannot be resolved from the local object database"}
 	}

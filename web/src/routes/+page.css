@@ -426,6 +426,13 @@ table small { display: block; max-width: 280px; margin-top: 4px; overflow: hidde
 .rag-action-form label { min-width: 0; display: grid; gap: 6px; }
 .rag-action-form button { min-height: 38px; padding: 0 11px; border: 1px solid var(--line); border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; color: var(--text); background: var(--surface); font: inherit; font-size: 9px; font-weight: 680; cursor: pointer; }
 .rag-action-form button:disabled { opacity: .45; cursor: not-allowed; }
+.documentation-actions { grid-template-columns: repeat(3, minmax(150px, 1fr)); }
+.repository-docs-search-panel .search-query-form { grid-template-columns: minmax(240px, 2fr) minmax(150px, 1fr) minmax(110px, .65fr) minmax(80px, .4fr) auto; }
+.repository-docs-search-panel .worktree-toggle { grid-column: 1 / -1; display: flex; grid-auto-flow: column; grid-template-columns: 16px auto; align-items: center; justify-content: start; }
+.repository-docs-search-panel .worktree-toggle input { width: 14px; height: 14px; padding: 0; }
+.repository-docs-search-panel .worktree-toggle span { font-size: 9px; letter-spacing: 0; text-transform: none; }
+.repository-docs-results { margin-top: 16px; }
+.repository-docs-results > .blocker-list { margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--line-soft); }
 .rag-plan { box-shadow: none; }
 
 /* Shared density and icon roles. Keep every operator view on one readable scale. */
@@ -612,7 +619,7 @@ table small { font-size: var(--type-micro); }
   .binding-preview div:last-child { border-bottom: 0; }
   .registration-actions, .plan-footer { align-items: stretch; flex-wrap: wrap; }
   .registration-actions > div, .plan-footer > div { width: 100%; margin-bottom: 6px; }
-  .search-query-form, .rag-action-form { grid-template-columns: 1fr 1fr; }
+  .search-query-form, .rag-action-form, .repository-docs-search-panel .search-query-form { grid-template-columns: 1fr 1fr; }
   .search-query-form .search-query { grid-column: 1 / -1; }
   .search-compare-grid { grid-template-columns: 1fr; }
 }
@@ -649,7 +656,7 @@ table small { font-size: var(--type-micro); }
   .form-actions { align-items: stretch; flex-direction: column; }
   .form-actions > span { margin-right: 0; }
   .form-actions button, .plan-footer button, .registration-actions button { width: 100%; }
-  .search-query-form, .rag-action-form, .experiment-summary { grid-template-columns: 1fr; }
+  .search-query-form, .rag-action-form, .repository-docs-search-panel .search-query-form, .experiment-summary { grid-template-columns: 1fr; }
   .search-query-form .search-query { grid-column: auto; }
   .experiment-summary > div { border-right: 0; border-bottom: 1px solid var(--line-soft); }
   .experiment-summary > button { min-height: 42px; border-left: 0; }
