@@ -1,0 +1,467 @@
+package repositorydocs
+
+import (
+	"context"
+	"fmt"
+	"math"
+	"sort"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/rag"
+)
+
+const (
+	SearchModeFullText = "fulltext"
+	SearchModeHybrid   = "hybrid"
+)
+
+type SearchStore interface {
+	ListRepositoryDocRevisionSets(context.Context, cache.RepositoryDocRevisionSetFilter) ([]cache.RepositoryDocRevisionSet, error)
+	ListRepositoryDocCandidates(context.Context, string, string, string) ([]cache.RepositoryDocCandidate, error)
+}
+
+type SearchRequest struct {
+	RepoID          string      `json:"repo_id"`
+	Repository      *Repository `json:"-"`
+	Revision        string      `json:"revision,omitempty"`
+	IncludeWorktree bool        `json:"include_worktree,omitempty"`
+	Query           string      `json:"query"`
+	Mode            string      `json:"mode,omitempty"`
+	Limit           int         `json:"limit,omitempty"`
+}
+
+type SearchCoverage struct {
+	State          string `json:"state"`
+	EligibleFiles  int    `json:"eligible_files"`
+	EligibleChunks int    `json:"eligible_chunks"`
+	EmbeddedChunks int    `json:"embedded_chunks"`
+	ReusedChunks   int    `json:"reused_chunks"`
+	FailedChunks   int    `json:"failed_chunks"`
+	MissingObjects int    `json:"missing_objects"`
+}
+
+type Citation struct {
+	Authority      string `json:"authority"`
+	CommitOID      string `json:"commit_oid"`
+	BlobOID        string `json:"blob_oid"`
+	Path           string `json:"path"`
+	LineStart      int    `json:"line_start"`
+	LineEnd        int    `json:"line_end"`
+	RawSliceDigest string `json:"raw_slice_digest"`
+}
+
+type SearchHit struct {
+	Rank     int      `json:"rank"`
+	ChunkID  string   `json:"chunk_id"`
+	Snippet  string   `json:"snippet"`
+	Score    float64  `json:"score"`
+	Lexical  float64  `json:"lexical_score,omitempty"`
+	Semantic float64  `json:"semantic_score,omitempty"`
+	Citation Citation `json:"citation"`
+}
+
+type SearchResult struct {
+	RepoID            string         `json:"repo_id"`
+	CorpusKind        string         `json:"corpus_kind"`
+	Query             string         `json:"query"`
+	RequestedRevision string         `json:"requested_revision"`
+	EffectiveRevision string         `json:"effective_revision"`
+	Mode              string         `json:"mode"`
+	RequestedMode     string         `json:"requested_mode"`
+	EffectiveMode     string         `json:"effective_mode"`
+	Authority         string         `json:"authority"`
+	OverlayDigest     string         `json:"overlay_digest,omitempty"`
+	RevisionSetID     string         `json:"revision_set_id,omitempty"`
+	PolicyHash        string         `json:"policy_hash"`
+	PolicySource      string         `json:"policy_source"`
+	NamespaceID       string         `json:"namespace_id,omitempty"`
+	Coverage          SearchCoverage `json:"coverage"`
+	Hits              []SearchHit    `json:"hits"`
+	Warnings          []string       `json:"warnings,omitempty"`
+	Fallback          string         `json:"fallback,omitempty"`
+}
+
+type Retriever struct {
+	store    SearchStore
+	provider rag.EmbeddingProvider
+}
+
+func NewRetriever(store SearchStore, provider rag.EmbeddingProvider) *Retriever {
+	return &Retriever{store: store, provider: provider}
+}
+
+func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult, error) {
+	if r == nil || r.store == nil || req.Repository == nil || strings.TrimSpace(req.RepoID) == "" || strings.TrimSpace(req.Query) == "" {
+		return SearchResult{}, fmt.Errorf("repository docs: search requires repo id, Git repository, query, and cache")
+	}
+	if req.Mode == "" {
+		req.Mode = SearchModeHybrid
+	}
+	if req.Mode != SearchModeHybrid && req.Mode != SearchModeFullText {
+		return SearchResult{}, fmt.Errorf("repository docs: unsupported search mode %q", req.Mode)
+	}
+	if req.Limit <= 0 {
+		req.Limit = 10
+	}
+	commitOID, policy, err := ResolvePolicy(ctx, req.Repository, req.Revision, req.IncludeWorktree)
+	if err != nil {
+		return SearchResult{}, err
+	}
+	result := SearchResult{RepoID: req.RepoID, CorpusKind: "repository_docs", Query: req.Query, RequestedRevision: req.Revision, EffectiveRevision: commitOID, Mode: req.Mode, RequestedMode: req.Mode, EffectiveMode: req.Mode, Authority: "git", PolicyHash: policy.PolicyHash, PolicySource: policy.Source}
+	if policy.Status == PolicyStatusDisabled {
+		result.Fallback = PolicyStatusDisabled
+		result.Warnings = append(result.Warnings, "repository documentation search is disabled by the committed policy")
+		return result, nil
+	}
+	overlayDigest := ""
+	if req.IncludeWorktree {
+		changes, overlayErr := req.Repository.TrackedChanges(ctx, DefaultMaxDocumentBytes)
+		if overlayErr != nil {
+			return SearchResult{}, overlayErr
+		}
+		overlayDigest = worktreeOverlayDigest(req.Repository.WorktreeRef, commitOID, policy.PolicyHash, changes)
+		result.Authority = "worktree_overlay"
+		result.OverlayDigest = overlayDigest
+	}
+	sets, err := r.store.ListRepositoryDocRevisionSets(ctx, cache.RepositoryDocRevisionSetFilter{RepoID: req.RepoID, GitStoreRef: req.Repository.GitStoreRef, CommitOID: commitOID, PolicyHash: policy.PolicyHash, OverlayDigest: overlayDigest, ExactOverlay: true, ChunkPolicyID: DefaultChunkPolicyID, Limit: 20})
+	if err != nil {
+		return SearchResult{}, err
+	}
+	var selected cache.RepositoryDocRevisionSet
+	for _, set := range sets {
+		if set.State == cache.RepoDocSetReady || set.State == cache.RepoDocSetPartial {
+			selected = set
+			break
+		}
+	}
+	if selected.ID != "" {
+		result.RevisionSetID = selected.ID
+		result.NamespaceID = selected.NamespaceID
+		result.Coverage = SearchCoverage{State: selected.State, EligibleFiles: selected.EligibleFiles, EligibleChunks: selected.EligibleChunks, EmbeddedChunks: selected.EmbeddedChunks, ReusedChunks: selected.ReusedChunks, FailedChunks: selected.FailedChunks, MissingObjects: selected.MissingObjects}
+	} else if req.Mode == SearchModeHybrid {
+		result.EffectiveMode = SearchModeFullText
+		result.Fallback = "revision_set_unavailable"
+		if req.IncludeWorktree {
+			priorSets, priorErr := r.store.ListRepositoryDocRevisionSets(ctx, cache.RepositoryDocRevisionSetFilter{RepoID: req.RepoID, GitStoreRef: req.Repository.GitStoreRef, CommitOID: commitOID, PolicyHash: policy.PolicyHash, ChunkPolicyID: DefaultChunkPolicyID, Limit: 20})
+			if priorErr != nil {
+				return SearchResult{}, priorErr
+			}
+			for _, prior := range priorSets {
+				if prior.WorktreeRef == req.Repository.WorktreeRef && prior.OverlayDigest != "" && prior.OverlayDigest != overlayDigest {
+					result.Fallback = "worktree_overlay_stale"
+					break
+				}
+			}
+		}
+		if result.Fallback == "worktree_overlay_stale" {
+			result.Warnings = append(result.Warnings, "worktree_overlay_stale: tracked content changed; reindex the overlay")
+		} else {
+			result.Warnings = append(result.Warnings, "semantic revision set is unavailable; using Git-backed full-text retrieval")
+		}
+	}
+	lexical, lexicalCoverage, err := r.lexical(ctx, req.Repository, commitOID, policy.Policy, req.Query, req.IncludeWorktree, req.Limit)
+	if err != nil {
+		return SearchResult{}, err
+	}
+	if selected.ID == "" {
+		result.Coverage = lexicalCoverage
+	}
+	semantic := map[string]rankedHit{}
+	if req.Mode == SearchModeHybrid && selected.ID != "" && r.provider != nil {
+		semantic, err = r.semantic(ctx, req, selected)
+		if err != nil {
+			result.Fallback = "semantic_unavailable"
+			result.EffectiveMode = SearchModeFullText
+			result.Warnings = append(result.Warnings, "semantic retrieval unavailable; returning verified lexical results")
+			semantic = map[string]rankedHit{}
+		}
+	} else if req.Mode == SearchModeHybrid && r.provider == nil {
+		result.Fallback = "provider_unavailable"
+		result.EffectiveMode = SearchModeFullText
+		result.Warnings = append(result.Warnings, "embedding provider unavailable; returning verified lexical results")
+	}
+	merged := fuseRanks(lexical, semantic)
+	for _, item := range merged {
+		if len(result.Hits) >= req.Limit {
+			break
+		}
+		hit, ok, warning := r.hydrate(ctx, req.Repository, commitOID, item)
+		if warning != "" {
+			result.Warnings = append(result.Warnings, warning)
+		}
+		if !ok {
+			continue
+		}
+		hit.Rank = len(result.Hits) + 1
+		result.Hits = append(result.Hits, hit)
+	}
+	return result, nil
+}
+
+type rankedHit struct {
+	candidate cache.RepositoryDocCandidate
+	score     float64
+	lexical   float64
+	semantic  float64
+	text      string
+}
+
+func (r *Retriever) lexical(ctx context.Context, repo *Repository, commitOID string, policy Policy, query string, includeWorktree bool, limit int) (map[string]rankedHit, SearchCoverage, error) {
+	entries, err := repo.ListTree(ctx, commitOID)
+	if err != nil {
+		return nil, SearchCoverage{}, err
+	}
+	want := tokenize(query)
+	results := map[string]rankedHit{}
+	candidateLimit := boundedLexicalCandidateLimit(limit)
+	coverage := SearchCoverage{State: "lexical-only"}
+	changed := map[string]WorktreeChange{}
+	removed := map[string]bool{}
+	var changes []WorktreeChange
+	if includeWorktree {
+		changes, err = repo.TrackedChanges(ctx, DefaultMaxDocumentBytes)
+		if err != nil {
+			return nil, SearchCoverage{}, err
+		}
+		for _, change := range changes {
+			changed[change.Path] = change
+			if change.Deleted {
+				removed[change.Path] = true
+			}
+			if change.Renamed && change.OldPath != "" {
+				removed[change.OldPath] = true
+			}
+		}
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, SearchCoverage{}, err
+		}
+		if entry.Type != "blob" || entry.Mode == "120000" || removed[entry.Path] || changed[entry.Path].Path != "" || entry.Size < 0 || entry.Size > DefaultMaxDocumentBytes || !policy.Matches(entry.Path) {
+			continue
+		}
+		coverage.EligibleFiles++
+		data, err := repo.ReadBlob(ctx, entry.OID, DefaultMaxDocumentBytes)
+		if err != nil {
+			coverage.MissingObjects++
+			continue
+		}
+		chunks, err := ChunkDocument(digestBytes(data), data, DefaultChunkBytes)
+		if err != nil {
+			coverage.FailedChunks++
+			continue
+		}
+		coverage.EligibleChunks += len(chunks)
+		for ordinal, chunk := range chunks {
+			score := lexicalScore(chunk.Text, query, want, entry.Path)
+			if score <= 0 {
+				continue
+			}
+			candidate := cache.RepositoryDocCandidate{RepositoryDocMembership: cache.RepositoryDocMembership{Path: entry.Path, ChunkID: chunk.ID, Authority: "git", Ordinal: ordinal, BlobOID: entry.OID, ContentDigest: chunk.RawSliceDigest}, ObjectFormat: repo.ObjectFormat, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, RawSliceDigest: chunk.RawSliceDigest, EmbeddingInputDigest: chunk.EmbeddingInputDigest, ChunkPolicyID: DefaultChunkPolicyID}
+			results[chunk.ID] = rankedHit{candidate: candidate, score: score, lexical: score, text: chunk.Text}
+		}
+		results = trimRankedHits(results, candidateLimit)
+	}
+	for _, change := range changes {
+		if change.Deleted || !policy.Matches(change.Path) {
+			continue
+		}
+		coverage.EligibleFiles++
+		data, readErr := repo.ReadTrackedWorktreeFile(ctx, change.Path, DefaultMaxDocumentBytes)
+		if readErr != nil {
+			coverage.MissingObjects++
+			continue
+		}
+		chunks, chunkErr := ChunkDocument(digestBytes(data), data, DefaultChunkBytes)
+		if chunkErr != nil {
+			coverage.FailedChunks++
+			continue
+		}
+		coverage.EligibleChunks += len(chunks)
+		for ordinal, chunk := range chunks {
+			score := lexicalScore(chunk.Text, query, want, change.Path)
+			if score <= 0 {
+				continue
+			}
+			candidate := cache.RepositoryDocCandidate{RepositoryDocMembership: cache.RepositoryDocMembership{Path: change.Path, ChunkID: chunk.ID, Authority: "worktree", Ordinal: ordinal, ContentDigest: chunk.RawSliceDigest}, ObjectFormat: repo.ObjectFormat, WorktreeRef: repo.WorktreeRef, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, RawSliceDigest: chunk.RawSliceDigest, EmbeddingInputDigest: chunk.EmbeddingInputDigest, ChunkPolicyID: DefaultChunkPolicyID}
+			results[chunk.ID] = rankedHit{candidate: candidate, score: score, lexical: score, text: chunk.Text}
+		}
+		results = trimRankedHits(results, candidateLimit)
+	}
+	return results, coverage, nil
+}
+
+func boundedLexicalCandidateLimit(limit int) int {
+	if limit <= 0 {
+		limit = 10
+	}
+	value := limit * 8
+	if value < 64 {
+		value = 64
+	}
+	if value > 512 {
+		value = 512
+	}
+	return value
+}
+
+func trimRankedHits(values map[string]rankedHit, limit int) map[string]rankedHit {
+	if len(values) <= limit {
+		return values
+	}
+	ranked := sortedRanks(values)
+	trimmed := make(map[string]rankedHit, limit)
+	for _, item := range ranked[:limit] {
+		trimmed[item.candidate.ChunkID] = item
+	}
+	return trimmed
+}
+
+func (r *Retriever) semantic(ctx context.Context, req SearchRequest, set cache.RepositoryDocRevisionSet) (map[string]rankedHit, error) {
+	response, err := r.provider.Embed(ctx, rag.EmbedRequest{Inputs: []string{req.Query}})
+	if err != nil || len(response.Embeddings) != 1 {
+		if err == nil {
+			err = fmt.Errorf("repository docs: query embedding count is not one")
+		}
+		return nil, err
+	}
+	query := response.Embeddings[0]
+	candidates, err := r.store.ListRepositoryDocCandidates(ctx, req.RepoID, set.ID, set.NamespaceID)
+	if err != nil {
+		return nil, err
+	}
+	results := map[string]rankedHit{}
+	for _, candidate := range candidates {
+		if len(candidate.Vector) == 0 {
+			continue
+		}
+		vector, err := rag.DecodeFloat32Vector(candidate.Vector, candidate.Dimensions)
+		if err != nil || len(vector) != len(query) {
+			continue
+		}
+		score := cosine(query, vector)
+		results[candidate.ChunkID] = rankedHit{candidate: candidate, score: score, semantic: score}
+	}
+	return results, nil
+}
+
+func fuseRanks(lexical, semantic map[string]rankedHit) []rankedHit {
+	lex := sortedRanks(lexical)
+	sem := sortedRanks(semantic)
+	merged := map[string]rankedHit{}
+	for rank, item := range lex {
+		item.score = 1 / float64(60+rank+1)
+		merged[item.candidate.ChunkID] = item
+	}
+	for rank, item := range sem {
+		current, ok := merged[item.candidate.ChunkID]
+		if !ok {
+			current = item
+		}
+		current.score += 1 / float64(60+rank+1)
+		current.semantic = item.semantic
+		merged[item.candidate.ChunkID] = current
+	}
+	return sortedRanks(merged)
+}
+
+func sortedRanks(items map[string]rankedHit) []rankedHit {
+	out := make([]rankedHit, 0, len(items))
+	for _, item := range items {
+		out = append(out, item)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].score != out[j].score {
+			return out[i].score > out[j].score
+		}
+		if out[i].candidate.Path != out[j].candidate.Path {
+			return out[i].candidate.Path < out[j].candidate.Path
+		}
+		return out[i].candidate.ChunkID < out[j].candidate.ChunkID
+	})
+	return out
+}
+
+func (r *Retriever) hydrate(ctx context.Context, repo *Repository, commitOID string, item rankedHit) (SearchHit, bool, string) {
+	candidate := item.candidate
+	if candidate.Authority == "worktree" {
+		data, err := repo.ReadTrackedWorktreeFile(ctx, candidate.Path, DefaultMaxDocumentBytes)
+		if err != nil {
+			return SearchHit{}, false, "worktree_overlay_unavailable: reindex the tracked overlay"
+		}
+		if candidate.ByteStart < 0 || candidate.ByteEnd > len(data) || candidate.ByteStart >= candidate.ByteEnd || digestBytes(data[candidate.ByteStart:candidate.ByteEnd]) != candidate.RawSliceDigest {
+			return SearchHit{}, false, "worktree_overlay_stale: tracked content changed; reindex the overlay"
+		}
+		raw := data[candidate.ByteStart:candidate.ByteEnd]
+		snippet := truncateUTF8Bytes(strings.TrimSpace(string(raw)), 800)
+		return SearchHit{ChunkID: candidate.ChunkID, Snippet: snippet, Score: item.score, Lexical: item.lexical, Semantic: item.semantic, Citation: Citation{Authority: "worktree", CommitOID: commitOID, Path: candidate.Path, LineStart: candidate.LineStart, LineEnd: candidate.LineEnd, RawSliceDigest: candidate.RawSliceDigest}}, true, ""
+	}
+	data, err := repo.ReadBlob(ctx, candidate.BlobOID, DefaultMaxDocumentBytes)
+	if err != nil {
+		return SearchHit{}, false, "citation omitted: Git blob is unavailable"
+	}
+	if candidate.ByteStart < 0 || candidate.ByteEnd > len(data) || candidate.ByteStart >= candidate.ByteEnd {
+		return SearchHit{}, false, "citation omitted: stored chunk locator is invalid"
+	}
+	raw := data[candidate.ByteStart:candidate.ByteEnd]
+	if digestBytes(raw) != candidate.RawSliceDigest {
+		return SearchHit{}, false, "citation omitted: Git content failed digest verification"
+	}
+	snippet := truncateUTF8Bytes(strings.TrimSpace(string(raw)), 800)
+	return SearchHit{ChunkID: candidate.ChunkID, Snippet: snippet, Score: item.score, Lexical: item.lexical, Semantic: item.semantic, Citation: Citation{Authority: "git", CommitOID: commitOID, BlobOID: candidate.BlobOID, Path: candidate.Path, LineStart: candidate.LineStart, LineEnd: candidate.LineEnd, RawSliceDigest: candidate.RawSliceDigest}}, true, ""
+}
+
+func truncateUTF8Bytes(value string, maxBytes int) string {
+	if maxBytes <= 0 || len(value) <= maxBytes {
+		return value
+	}
+	end := maxBytes
+	for end > 0 && !utf8.ValidString(value[:end]) {
+		end--
+	}
+	return value[:end]
+}
+
+func lexicalScore(text, query string, queryTokens map[string]struct{}, path string) float64 {
+	lower := strings.ToLower(text)
+	score := 0.0
+	if strings.Contains(lower, strings.ToLower(strings.TrimSpace(query))) {
+		score += 4
+	}
+	tokens := tokenize(text)
+	for token := range queryTokens {
+		if _, ok := tokens[token]; ok {
+			score++
+		}
+	}
+	if strings.Contains(strings.ToLower(path), strings.ToLower(strings.TrimSpace(query))) {
+		score += 3
+	}
+	return score
+}
+
+func tokenize(value string) map[string]struct{} {
+	returnValue := map[string]struct{}{}
+	for _, token := range strings.FieldsFunc(strings.ToLower(value), func(r rune) bool { return unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r) }) {
+		if token != "" {
+			returnValue[token] = struct{}{}
+		}
+	}
+	return returnValue
+}
+
+func cosine(a, b []float32) float64 {
+	var dot, aa, bb float64
+	for idx := range a {
+		dot += float64(a[idx] * b[idx])
+		aa += float64(a[idx] * a[idx])
+		bb += float64(b[idx] * b[idx])
+	}
+	if aa == 0 || bb == 0 {
+		return 0
+	}
+	return dot / (math.Sqrt(aa) * math.Sqrt(bb))
+}
