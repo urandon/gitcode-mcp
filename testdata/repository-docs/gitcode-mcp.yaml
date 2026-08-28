@@ -1,0 +1,11 @@
+cache_mode: repo-local
+
+repository_docs:
+  schema: 1
+  enabled: true
+  preset: conventional-docs-v1
+  include:
+    - architecture/**
+    - runbooks/**/*.md
+  exclude:
+    - docs/generated/**

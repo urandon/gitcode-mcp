@@ -452,13 +452,13 @@ func assertV4SchemaTables(t *testing.T, ctx context.Context, path string) {
 		t.Fatalf("enable foreign keys: %v", err)
 	}
 	tables := tableNames(t, ctx, db)
-	for _, want := range []string{"repos", "sources", "chunks", "records", "record_comments", "audit_trail", "snapshots", "snapshot_chunks", "sync_events", "sync_frontiers", "issue_comment_sync", "remote_revisions", "embedding_namespaces", "chunk_embeddings", "rag_index_runs"} {
+	for _, want := range []string{"repos", "sources", "chunks", "records", "record_comments", "audit_trail", "snapshots", "snapshot_chunks", "sync_events", "sync_frontiers", "issue_comment_sync", "remote_revisions", "embedding_namespaces", "chunk_embeddings", "rag_index_runs", "repo_doc_revision_sets", "repo_doc_chunks", "repo_doc_membership", "repo_doc_vectors"} {
 		if !tables[want] {
 			t.Fatalf("missing table %s after migration", want)
 		}
 	}
 	indexes := indexNames(t, ctx, db)
-	for _, want := range []string{"idx_chunks_query", "idx_records_remote", "idx_records_remote_unique", "idx_snapshot_chunks_record", "idx_snapshot_chunks_order", "idx_sync_frontiers_repo", "idx_issue_comment_sync_queue", "idx_embedding_namespaces_identity", "idx_chunk_embeddings_coverage", "idx_rag_index_runs_status"} {
+	for _, want := range []string{"idx_chunks_query", "idx_records_remote", "idx_records_remote_unique", "idx_snapshot_chunks_record", "idx_snapshot_chunks_order", "idx_sync_frontiers_repo", "idx_issue_comment_sync_queue", "idx_embedding_namespaces_identity", "idx_chunk_embeddings_coverage", "idx_rag_index_runs_status", "idx_repo_doc_revision_sets_lookup", "idx_repo_doc_chunks_content", "idx_repo_doc_membership_chunk", "idx_repo_doc_vectors_chunk"} {
 		if !indexes[want] {
 			t.Fatalf("missing index %s after migration", want)
 		}
