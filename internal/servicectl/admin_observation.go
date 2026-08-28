@@ -477,7 +477,7 @@ func adminJobObservation(job Job) adminhttp.JobObservation {
 	}
 	active := job.Status == JobStatusQueued || job.Status == JobStatusRunning
 	terminal := jobTerminalStatus(job.Status)
-	view.Cancellable = active && (job.Type == SyncJobType || job.Type == RAGIndexJobType)
+	view.Cancellable = active && (job.Type == SyncJobType || job.Type == RAGIndexJobType || job.Type == RepositoryDocsIndexJobType)
 	view.Retryable = terminal && job.RegistrationID != "" && (job.Type == SyncJobType || job.Type == RAGIndexJobType)
 	if !view.Cancellable && !view.Retryable {
 		view.ActionReason = "No safe admin action is available for the current job type and state."

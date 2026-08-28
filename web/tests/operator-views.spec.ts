@@ -109,8 +109,13 @@ test('operator views keep coverage truth, deep links, and recovery states', asyn
 });
 
 test('repository documentation cohort exposes versioned authority, coverage, and safe handoffs', async ({ page }) => {
-  await mockAdmin(page);
+  const docsSnapshot = structuredClone(snapshot);
+  const docsJob = docsSnapshot.jobs.find((job) => job.id === 'job-000004')!;
+  docsJob.status = 'running'; docsJob.cancellable = true; docsJob.finished_at = undefined;
+  docsSnapshot.jobs.push({ ...docsJob, id: 'job-000099', repo_id: 'other/repository', work_ref: 'wrong-repository-work', updated_at: new Date(Date.now() + 60_000).toISOString() });
+  await mockAdmin(page, docsSnapshot);
   let indexBody: Record<string, string> = {};
+  let cancelledJob = '';
   await page.route('**/api/admin/v1/repository-docs/reg-1/index', async (route) => {
     indexBody = route.request().postDataJSON();
     expect(route.request().headers()['x-csrf-token']).toBe('csrf-test');
@@ -123,6 +128,14 @@ test('repository documentation cohort exposes versioned authority, coverage, and
       repo_id: 'example/repo', corpus_kind: 'repository_docs', query: 'private registration', requested_revision: 'HEAD', effective_revision: '0123456789abcdef0123456789abcdef01234567', requested_mode: 'hybrid', effective_mode: 'hybrid', authority: 'git', revision_set_id: 'repo-doc-set-public', policy_hash: 'policy-public-safe', policy_source: 'committed', namespace_id: 'embns-public', coverage: { state: 'ready', eligible_files: 4, eligible_chunks: 10, embedded_chunks: 8, reused_chunks: 2, failed_chunks: 0, missing_objects: 0 }, hits: [{ rank: 1, chunk_id: 'chunk-public-safe', snippet: 'The daemon resolves Git authority from a private registration.', score: 0.031, lexical_score: 1.2, semantic_score: 0.8, citation: { authority: 'git', commit_oid: '0123456789abcdef0123456789abcdef01234567', blob_oid: 'abcdef0123456789abcdef0123456789abcdef01', path: 'docs/architecture.md', line_start: 3, line_end: 4, raw_slice_digest: 'digest-public-safe' } }]
     } }) });
   });
+  await page.route('**/api/admin/v1/jobs/job-000004/cancel', async (route) => {
+    cancelledJob = 'job-000004';
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', receipt: { outcome: 'accepted', receipt_id: 'receipt-doc-cancel', target_job_id: 'job-000004', job_status: 'cancel_requested' } }) });
+  });
+  await page.route('**/api/admin/v1/jobs/job-000099/cancel', async (route) => {
+    cancelledJob = 'job-000099';
+    await route.fulfill({ status: 500, body: 'wrong repository job selected' });
+  });
   await page.goto('/?view=Caches&cache=cache-111111112222&repo=example%2Frepo&tab=documentation');
   await expect(page.getByRole('heading', { name: 'Repository documentation RAG' })).toBeVisible();
   await expect(page.getByText('Committed Git')).toBeVisible();
@@ -131,10 +144,17 @@ test('repository documentation cohort exposes versioned authority, coverage, and
   await expect(page.getByText('Automatic reconciliation')).toBeVisible();
   await page.getByRole('button', { name: 'Index current HEAD' }).click();
   await expect(page.getByRole('heading', { name: 'Resolve and index current HEAD?' })).toBeVisible();
-  await page.getByRole('button', { name: 'Confirm indexing' }).click();
+  await Promise.all([
+    page.waitForResponse((response) => response.url().endsWith('/api/admin/v1/repository-docs/reg-1/index') && response.status() === 200),
+    page.waitForResponse((response) => response.url().endsWith('/api/admin/v1/snapshot') && response.status() === 200),
+    page.getByRole('button', { name: 'Confirm indexing' }).click()
+  ]);
   expect(indexBody.idempotency_key).toMatch(/^admin-repository_docs_index-/);
   await page.getByLabel('Query').fill('private registration');
-  await page.getByRole('button', { name: 'Search Git' }).click();
+  await Promise.all([
+    page.waitForResponse((response) => response.url().endsWith('/api/admin/v1/repository-docs/reg-1/search') && response.status() === 200),
+    page.getByRole('button', { name: 'Search Git' }).click()
+  ]);
   await expect(page.getByText('The daemon resolves Git authority from a private registration.')).toBeVisible();
   await expect(page.getByText('docs/architecture.md:L3–L4')).toBeVisible();
   await expect(page.getByText('Digest-verified Git citation')).toBeVisible();
@@ -142,6 +162,10 @@ test('repository documentation cohort exposes versioned authority, coverage, and
   await page.getByRole('button', { name: 'Open index jobs' }).click();
   await expect(page.getByRole('heading', { name: 'Repository Docs Index' })).toBeVisible();
   await expect(page.getByText('repository-docs-public-work')).toBeVisible();
+  await expect(page.getByText('wrong-repository-work')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Cancel job' }).click();
+  await page.getByRole('button', { name: 'Confirm cancel' }).click();
+  expect(cancelledJob).toBe('job-000004');
   await page.goto('/?view=Caches&cache=cache-111111112222&repo=example%2Frepo&tab=documentation');
   await page.reload();
   await expect(page).toHaveURL(/tab=documentation/);

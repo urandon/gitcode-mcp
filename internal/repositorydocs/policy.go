@@ -1,7 +1,6 @@
 package repositorydocs
 
 import (
-	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,8 +8,9 @@ import (
 	"fmt"
 	"path"
 	"sort"
-	"strconv"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -83,63 +83,44 @@ func ParsePolicy(data []byte, source string) (PolicyResolution, error) {
 		return resolvedPolicy(policy, PolicySourceBuiltin, data), nil
 	}
 	policy := BuiltinPolicy()
+	if section.Kind != yaml.MappingNode {
+		return invalidPolicy(source, data, fmt.Errorf("repository_docs must be a YAML mapping"))
+	}
 	seen := map[string]bool{}
-	var listKey string
-	for _, line := range section {
-		trimmed := strings.TrimSpace(line.text)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
+	for index := 0; index < len(section.Content); index += 2 {
+		keyNode, valueNode := section.Content[index], section.Content[index+1]
+		if keyNode.Kind != yaml.ScalarNode || keyNode.Tag != "!!str" {
+			return invalidPolicy(source, data, fmt.Errorf("repository_docs keys must be strings"))
 		}
-		if strings.HasPrefix(trimmed, "-") {
-			if listKey == "" {
-				return invalidPolicy(source, data, fmt.Errorf("list item without include or exclude key"))
-			}
-			value, err := yamlScalar(strings.TrimSpace(strings.TrimPrefix(trimmed, "-")))
-			if err != nil || value == "" {
-				return invalidPolicy(source, data, fmt.Errorf("invalid %s entry", listKey))
-			}
-			if listKey == "include" {
-				policy.Include = append(policy.Include, value)
-			} else {
-				policy.Exclude = append(policy.Exclude, value)
-			}
-			continue
-		}
-		key, raw, ok := strings.Cut(trimmed, ":")
-		if !ok {
-			return invalidPolicy(source, data, fmt.Errorf("expected key: value"))
-		}
-		key = strings.TrimSpace(key)
-		raw = strings.TrimSpace(raw)
+		key := keyNode.Value
 		if seen[key] {
 			return invalidPolicy(source, data, fmt.Errorf("duplicate key %q", key))
 		}
 		seen[key] = true
-		listKey = ""
 		switch key {
 		case "schema":
-			value, err := strconv.Atoi(raw)
-			if err != nil {
+			if valueNode.Kind != yaml.ScalarNode || valueNode.Tag != "!!int" || valueNode.Decode(&policy.Schema) != nil {
 				return invalidPolicy(source, data, fmt.Errorf("schema must be an integer"))
 			}
-			policy.Schema = value
 		case "enabled":
-			value, err := strconv.ParseBool(strings.ToLower(raw))
-			if err != nil {
+			if valueNode.Kind != yaml.ScalarNode || valueNode.Tag != "!!bool" || valueNode.Decode(&policy.Enabled) != nil {
 				return invalidPolicy(source, data, fmt.Errorf("enabled must be true or false"))
 			}
-			policy.Enabled = value
 		case "preset":
-			value, err := yamlScalar(raw)
-			if err != nil {
+			if valueNode.Kind != yaml.ScalarNode || valueNode.Tag != "!!str" {
 				return invalidPolicy(source, data, fmt.Errorf("invalid preset"))
 			}
-			policy.Preset = value
+			policy.Preset = valueNode.Value
 		case "include", "exclude":
-			if raw != "" && raw != "[]" {
+			values, listErr := yamlStringList(valueNode)
+			if listErr != nil {
 				return invalidPolicy(source, data, fmt.Errorf("%s must be a YAML list", key))
 			}
-			listKey = key
+			if key == "include" {
+				policy.Include = values
+			} else {
+				policy.Exclude = values
+			}
 		case "":
 			return invalidPolicy(source, data, fmt.Errorf("empty key"))
 		default:
@@ -152,46 +133,46 @@ func ParsePolicy(data []byte, source string) (PolicyResolution, error) {
 	return resolvedPolicy(policy, source, data), nil
 }
 
-type yamlLine struct {
-	indent int
-	text   string
+func repositoryDocsSection(data []byte) (*yaml.Node, bool, error) {
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return nil, false, nil
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return nil, false, fmt.Errorf("invalid repository configuration YAML: %w", err)
+	}
+	if len(document.Content) != 1 {
+		return nil, false, fmt.Errorf("repository configuration must contain one YAML document")
+	}
+	root := document.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return nil, false, nil
+	}
+	var section *yaml.Node
+	for index := 0; index < len(root.Content); index += 2 {
+		key, value := root.Content[index], root.Content[index+1]
+		if key.Kind == yaml.ScalarNode && key.Tag == "!!str" && key.Value == "repository_docs" {
+			if section != nil {
+				return nil, false, fmt.Errorf("duplicate top-level repository_docs section")
+			}
+			section = value
+		}
+	}
+	return section, section != nil, nil
 }
 
-func repositoryDocsSection(data []byte) ([]yamlLine, bool, error) {
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
-	scanner.Buffer(make([]byte, 4096), 1<<20)
-	var section []yamlLine
-	found := false
-	sectionIndent := -1
-	for scanner.Scan() {
-		raw := strings.TrimRight(scanner.Text(), " \t\r")
-		trimmed := strings.TrimSpace(raw)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			if found {
-				section = append(section, yamlLine{indent: sectionIndent + 2, text: trimmed})
-			}
-			continue
-		}
-		if strings.Contains(raw[:len(raw)-len(strings.TrimLeft(raw, " \t"))], "\t") {
-			return nil, false, fmt.Errorf("tabs are not supported in repository_docs indentation")
-		}
-		indent := len(raw) - len(strings.TrimLeft(raw, " "))
-		if !found {
-			if trimmed == "repository_docs:" {
-				found = true
-				sectionIndent = indent
-			}
-			continue
-		}
-		if indent <= sectionIndent {
-			break
-		}
-		section = append(section, yamlLine{indent: indent, text: raw})
+func yamlStringList(node *yaml.Node) ([]string, error) {
+	if node.Kind != yaml.SequenceNode {
+		return nil, fmt.Errorf("expected sequence")
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, false, err
+	values := make([]string, 0, len(node.Content))
+	for _, item := range node.Content {
+		if item.Kind != yaml.ScalarNode || item.Tag != "!!str" || strings.TrimSpace(item.Value) == "" {
+			return nil, fmt.Errorf("list entries must be non-empty strings")
+		}
+		values = append(values, item.Value)
 	}
-	return section, found, nil
+	return values, nil
 }
 
 func normalizeAndValidatePolicy(policy *Policy) error {
@@ -244,23 +225,6 @@ func normalizePatterns(patterns []string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
-}
-
-func yamlScalar(raw string) (string, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", nil
-	}
-	if (strings.HasPrefix(raw, `"`) && strings.HasSuffix(raw, `"`)) || (strings.HasPrefix(raw, `'`) && strings.HasSuffix(raw, `'`)) {
-		if raw[0] == '\'' {
-			return strings.ReplaceAll(raw[1:len(raw)-1], "''", "'"), nil
-		}
-		return strconv.Unquote(raw)
-	}
-	if strings.ContainsAny(raw, "#{}[]") {
-		return "", fmt.Errorf("quote scalar values containing YAML control characters")
-	}
-	return raw, nil
 }
 
 func resolvedPolicy(policy Policy, source string, data []byte) PolicyResolution {

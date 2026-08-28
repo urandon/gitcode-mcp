@@ -26,14 +26,20 @@ type IndexStore interface {
 }
 
 type IndexRequest struct {
-	RepoID          string
-	Repository      *Repository
-	Revision        string
-	IncludeWorktree bool
-	MaxFileBytes    int64
-	ChunkBytes      int
-	BatchSize       int
-	MaxChunks       int
+	RepoID                  string
+	Repository              *Repository
+	Revision                string
+	IncludeWorktree         bool
+	MaxFileBytes            int64
+	ChunkBytes              int
+	BatchSize               int
+	MaxChunks               int
+	EnforceExpectedSnapshot bool
+	ExpectedCommitOID       string
+	ExpectedPolicyHash      string
+	ExpectedConfigDigest    string
+	ExpectedOverlayDigest   string
+	ExpectedNamespaceID     string
 }
 
 type IndexResult struct {
@@ -59,9 +65,10 @@ type IndexResult struct {
 }
 
 type Indexer struct {
-	store    IndexStore
-	provider rag.EmbeddingProvider
-	now      func() time.Time
+	store             IndexStore
+	provider          rag.EmbeddingProvider
+	now               func() time.Time
+	beforeOverlayRead func(string)
 }
 
 func NewIndexer(store IndexStore, provider rag.EmbeddingProvider) *Indexer {
@@ -98,11 +105,14 @@ func (i *Indexer) Run(ctx context.Context, req IndexRequest) (IndexResult, error
 	overlayDigest := ""
 	var initialChanges []WorktreeChange
 	if req.IncludeWorktree {
-		initialChanges, err = req.Repository.TrackedChanges(ctx, req.MaxFileBytes)
+		initialChanges, err = req.Repository.TrackedChangesAtFiltered(ctx, commitOID, req.MaxFileBytes, policyOverlayPathFilter(policyResolution.Policy))
 		if err != nil {
 			return IndexResult{}, err
 		}
 		overlayDigest = worktreeOverlayDigest(req.Repository.WorktreeRef, commitOID, policyResolution.PolicyHash, initialChanges)
+	}
+	if req.EnforceExpectedSnapshot && (commitOID != req.ExpectedCommitOID || policyResolution.PolicyHash != req.ExpectedPolicyHash || policyResolution.ConfigDigest != req.ExpectedConfigDigest || overlayDigest != req.ExpectedOverlayDigest || namespace.ID != req.ExpectedNamespaceID) {
+		return IndexResult{}, &IndexSnapshotStaleError{}
 	}
 	setID := revisionSetID(req.RepoID, req.Repository.GitStoreRef, commitOID, policyResolution.PolicyHash, overlayDigest, DefaultChunkPolicyID, namespace.ID)
 	result := IndexResult{RepoID: req.RepoID, RevisionSetID: setID, CommitOID: commitOID, PolicyHash: policyResolution.PolicyHash, NamespaceID: namespace.ID, State: cache.RepoDocSetBuilding}
@@ -133,6 +143,7 @@ func (i *Indexer) Run(ctx context.Context, req IndexRequest) (IndexResult, error
 		text string
 	}
 	var pending []pendingChunk
+	attemptedChunks := 0
 	flushPending := func() error {
 		if len(pending) == 0 {
 			return nil
@@ -209,10 +220,6 @@ func (i *Indexer) Run(ctx context.Context, req IndexRequest) (IndexResult, error
 		}
 		result.EligibleFiles++
 		for ordinal, chunk := range chunks {
-			if req.MaxChunks > 0 && result.EligibleChunks >= req.MaxChunks {
-				result.FailedChunks++
-				continue
-			}
 			meta := cache.RepositoryDocChunk{RepoID: req.RepoID, ID: chunk.ID, ObjectFormat: req.Repository.ObjectFormat, BlobOID: entry.OID, ContentDigest: chunk.RawSliceDigest, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, RawSliceDigest: chunk.RawSliceDigest, EmbeddingInputDigest: chunk.EmbeddingInputDigest, ChunkPolicyID: DefaultChunkPolicyID, CreatedAt: now, UpdatedAt: i.now()}
 			if err := i.store.UpsertRepositoryDocChunk(ctx, meta); err != nil {
 				return i.fail(ctx, set, result, "metadata_write_failed", err)
@@ -225,7 +232,12 @@ func (i *Indexer) Run(ctx context.Context, req IndexRequest) (IndexResult, error
 			} else if vectorErr != nil && !errors.Is(vectorErr, cache.ErrNotFound) {
 				return i.fail(ctx, set, result, "vector_read_failed", vectorErr)
 			}
+			if req.MaxChunks > 0 && attemptedChunks >= req.MaxChunks {
+				result.FailedChunks++
+				continue
+			}
 			pending = append(pending, pendingChunk{meta: meta, text: chunk.Text})
+			attemptedChunks++
 			if len(pending) >= req.BatchSize {
 				if err := flushPending(); err != nil {
 					return i.partial(ctx, set, result, memberships, err)
@@ -237,10 +249,15 @@ func (i *Indexer) Run(ctx context.Context, req IndexRequest) (IndexResult, error
 		if change.Deleted || !policyResolution.Policy.Matches(change.Path) {
 			continue
 		}
+		if i.beforeOverlayRead != nil {
+			i.beforeOverlayRead(change.Path)
+		}
 		data, readErr := req.Repository.ReadTrackedWorktreeFile(ctx, change.Path, req.MaxFileBytes)
 		if readErr != nil {
-			result.ExcludedFiles++
-			continue
+			return i.superseded(ctx, set, result, "tracked documentation became unreadable after the overlay snapshot")
+		}
+		if int64(len(data)) != change.Size || digestBytes(data) != change.Digest {
+			return i.superseded(ctx, set, result, "worktree changed while its documentation bytes were read")
 		}
 		contentDigest := digestBytes(data)
 		chunks, chunkErr := ChunkDocument(contentDigest, data, req.ChunkBytes)
@@ -250,10 +267,6 @@ func (i *Indexer) Run(ctx context.Context, req IndexRequest) (IndexResult, error
 		}
 		result.EligibleFiles++
 		for ordinal, chunk := range chunks {
-			if req.MaxChunks > 0 && result.EligibleChunks >= req.MaxChunks {
-				result.FailedChunks++
-				continue
-			}
 			meta := cache.RepositoryDocChunk{RepoID: req.RepoID, ID: chunk.ID, ObjectFormat: req.Repository.ObjectFormat, WorktreeRef: req.Repository.WorktreeRef, ContentDigest: chunk.RawSliceDigest, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, RawSliceDigest: chunk.RawSliceDigest, EmbeddingInputDigest: chunk.EmbeddingInputDigest, ChunkPolicyID: DefaultChunkPolicyID, CreatedAt: now, UpdatedAt: i.now()}
 			if err := i.store.UpsertRepositoryDocChunk(ctx, meta); err != nil {
 				return i.fail(ctx, set, result, "metadata_write_failed", err)
@@ -266,7 +279,12 @@ func (i *Indexer) Run(ctx context.Context, req IndexRequest) (IndexResult, error
 			} else if vectorErr != nil && !errors.Is(vectorErr, cache.ErrNotFound) {
 				return i.fail(ctx, set, result, "vector_read_failed", vectorErr)
 			}
+			if req.MaxChunks > 0 && attemptedChunks >= req.MaxChunks {
+				result.FailedChunks++
+				continue
+			}
 			pending = append(pending, pendingChunk{meta: meta, text: chunk.Text})
+			attemptedChunks++
 			if len(pending) >= req.BatchSize {
 				if err := flushPending(); err != nil {
 					return i.partial(ctx, set, result, memberships, err)
@@ -281,14 +299,10 @@ func (i *Indexer) Run(ctx context.Context, req IndexRequest) (IndexResult, error
 		return i.fail(ctx, set, result, "membership_write_failed", err)
 	}
 	if req.IncludeWorktree {
-		finalChanges, changeErr := req.Repository.TrackedChanges(ctx, req.MaxFileBytes)
-		if changeErr != nil || worktreeOverlayDigest(req.Repository.WorktreeRef, commitOID, policyResolution.PolicyHash, finalChanges) != overlayDigest {
-			result.State = cache.RepoDocSetSuperseded
-			result.Message = "worktree changed during indexing; reindex the current overlay"
-			set = mergeIndexResult(set, result, i.now())
-			set.LastErrorClass = "worktree_overlay_superseded"
-			_ = i.store.UpsertRepositoryDocRevisionSet(context.WithoutCancel(ctx), set)
-			return result, nil
+		finalCommitOID, finalPolicy, policyErr := ResolvePolicy(ctx, req.Repository, req.Revision, true)
+		finalChanges, changeErr := req.Repository.TrackedChangesAtFiltered(ctx, commitOID, req.MaxFileBytes, policyOverlayPathFilter(policyResolution.Policy))
+		if policyErr != nil || changeErr != nil || finalCommitOID != commitOID || finalPolicy.PolicyHash != policyResolution.PolicyHash || finalPolicy.ConfigDigest != policyResolution.ConfigDigest || worktreeOverlayDigest(req.Repository.WorktreeRef, commitOID, policyResolution.PolicyHash, finalChanges) != overlayDigest {
+			return i.superseded(ctx, set, result, "worktree or repository documentation policy changed during indexing")
 		}
 	}
 	result.State = cache.RepoDocSetReady
@@ -302,6 +316,15 @@ func (i *Indexer) Run(ctx context.Context, req IndexRequest) (IndexResult, error
 	if err := i.store.UpsertRepositoryDocRevisionSet(ctx, set); err != nil {
 		return IndexResult{}, err
 	}
+	return result, nil
+}
+
+func (i *Indexer) superseded(ctx context.Context, set cache.RepositoryDocRevisionSet, result IndexResult, message string) (IndexResult, error) {
+	result.State = cache.RepoDocSetSuperseded
+	result.Message = message + "; reindex the current overlay"
+	set = mergeIndexResult(set, result, i.now())
+	set.LastErrorClass = "worktree_overlay_superseded"
+	_ = i.store.UpsertRepositoryDocRevisionSet(context.WithoutCancel(ctx), set)
 	return result, nil
 }
 
@@ -371,13 +394,19 @@ func worktreeOverlayDigest(worktreeRef, commitOID, policyHash string, changes []
 
 // ResolveOverlayDigest returns the identity of the current explicit tracked
 // worktree overlay. Committed-only callers receive an empty digest.
-func ResolveOverlayDigest(ctx context.Context, repo *Repository, commitOID, policyHash string, includeWorktree bool, maxBytes int64) (string, error) {
+func ResolveOverlayDigest(ctx context.Context, repo *Repository, commitOID string, policy Policy, includeWorktree bool, maxBytes int64) (string, error) {
 	if !includeWorktree {
 		return "", nil
 	}
-	changes, err := repo.TrackedChanges(ctx, maxBytes)
+	changes, err := repo.TrackedChangesAtFiltered(ctx, commitOID, maxBytes, policyOverlayPathFilter(policy))
 	if err != nil {
 		return "", err
 	}
-	return worktreeOverlayDigest(repo.WorktreeRef, commitOID, policyHash, changes), nil
+	return worktreeOverlayDigest(repo.WorktreeRef, commitOID, PolicyHash(policy), changes), nil
+}
+
+func policyOverlayPathFilter(policy Policy) func(string) bool {
+	return func(repoPath string) bool {
+		return repoPath == PolicyConfigPath || policy.Matches(repoPath)
+	}
 }

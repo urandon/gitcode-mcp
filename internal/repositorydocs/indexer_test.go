@@ -76,12 +76,22 @@ func TestIndexerLeavesBoundedRunPartial(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider, _ := rag.NewFakeProvider(rag.EmbeddingProviderProfile{ProfileID: "repo-docs", ProviderID: "fake", ProviderType: "fake", Model: "fake", Dimensions: 4, BatchSize: 1, Timeout: time.Second})
-	result, err := NewIndexer(store, provider).Run(ctx, IndexRequest{RepoID: "owner/repo", Repository: repo, Revision: commit, ChunkBytes: 16, MaxChunks: 1})
-	if err != nil {
-		t.Fatal(err)
+	indexer := NewIndexer(store, provider)
+	var result IndexResult
+	for run := 0; run < 10; run++ {
+		result, err = indexer.Run(ctx, IndexRequest{RepoID: "owner/repo", Repository: repo, Revision: commit, ChunkBytes: 16, MaxChunks: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run == 0 && (result.State != cache.RepoDocSetPartial || result.FailedChunks == 0 || result.EmbeddedChunks != 1) {
+			t.Fatalf("first bounded result = %#v", result)
+		}
+		if result.State == cache.RepoDocSetReady {
+			break
+		}
 	}
-	if result.State != cache.RepoDocSetPartial || result.FailedChunks == 0 {
-		t.Fatalf("result = %#v", result)
+	if result.State != cache.RepoDocSetReady || result.ReusedChunks+result.EmbeddedChunks != result.EligibleChunks {
+		t.Fatalf("resumed result = %#v", result)
 	}
 }
 

@@ -23,20 +23,38 @@ const (
 	DefaultRepositoryDocsVectorBytes   = int64(512 << 20)
 )
 
+type RepositoryDocsProviderBoundaryError struct {
+	ProviderID string
+	Boundary   string
+}
+
+func (e RepositoryDocsProviderBoundaryError) Error() string {
+	return "repository docs: embedding repository content requires a local_process or local_network provider boundary"
+}
+
+func (e RepositoryDocsProviderBoundaryError) DiagnosticCode() string {
+	return "repository_docs_provider_boundary_blocked"
+}
+
 // StartRepositoryDocsIndexJobRequest carries the local authority needed by the
 // daemon. RepositoryPath and CachePath are accepted only over the local IPC
 // boundary and are never copied into the public Job representation.
 type StartRepositoryDocsIndexJobRequest struct {
-	RepoID          string `json:"repo_id"`
-	RepositoryPath  string `json:"repository_path"`
-	Revision        string `json:"revision,omitempty"`
-	IncludeWorktree bool   `json:"include_worktree,omitempty"`
-	Profile         string `json:"profile,omitempty"`
-	CachePath       string `json:"cache_path,omitempty"`
-	BatchSize       int    `json:"batch_size,omitempty"`
-	MaxChunks       int    `json:"max_chunks,omitempty"`
-	CacheUUID       string `json:"cache_uuid,omitempty"`
-	RegistrationID  string `json:"registration_id,omitempty"`
+	RepoID                string `json:"repo_id"`
+	RepositoryPath        string `json:"repository_path"`
+	Revision              string `json:"revision,omitempty"`
+	IncludeWorktree       bool   `json:"include_worktree,omitempty"`
+	Profile               string `json:"profile,omitempty"`
+	CachePath             string `json:"cache_path,omitempty"`
+	BatchSize             int    `json:"batch_size,omitempty"`
+	MaxChunks             int    `json:"max_chunks,omitempty"`
+	CacheUUID             string `json:"cache_uuid,omitempty"`
+	RegistrationID        string `json:"registration_id,omitempty"`
+	expectedCommitOID     string
+	expectedPolicyHash    string
+	expectedConfigDigest  string
+	expectedOverlayDigest string
+	expectedNamespaceID   string
 }
 
 func (m *JobManager) StartRepositoryDocsIndex(ctx context.Context, manager Manager, req StartRepositoryDocsIndexJobRequest) (Job, error) {
@@ -58,6 +76,11 @@ func (m *JobManager) StartRepositoryDocsIndex(ctx context.Context, manager Manag
 	if err != nil {
 		return Job{}, err
 	}
+	effectiveProfile, _, _, err := requireLocalRepositoryDocsProvider(eff.Config, req.Profile)
+	if err != nil {
+		return Job{}, err
+	}
+	req.Profile = effectiveProfile
 	store, err := cache.NewSQLiteReadOnlyStore(ctx, eff.Config.CachePath)
 	if err != nil {
 		return Job{}, err
@@ -81,17 +104,27 @@ func (m *JobManager) StartRepositoryDocsIndex(ctx context.Context, manager Manag
 	if err != nil {
 		return Job{}, err
 	}
-	commitOID, err := repo.ResolveRevision(ctx, req.Revision)
+	policy, err := repositorydocs.InspectPolicy(ctx, repo, repositorydocs.PolicyRequest{RepoID: req.RepoID, Revision: req.Revision, IncludeWorktree: req.IncludeWorktree})
 	if err != nil {
 		return Job{}, err
 	}
-	workKey := strings.Join([]string{
-		RepositoryDocsIndexJobType, req.CacheUUID, req.RepoID, repo.GitStoreRef,
-		commitOID, strconv.FormatBool(req.IncludeWorktree), strings.TrimSpace(req.Profile),
-		"max=" + strconv.Itoa(req.MaxChunks),
-	}, ":")
+	provider, err := rag.NewEmbeddingProviderFromConfig(eff.Config, effectiveProfile, rag.ProviderOptions{})
+	if err != nil {
+		return Job{}, err
+	}
+	namespaceIdentity, err := provider.NamespaceIdentity(ctx, rag.NamespaceRequest{RepoID: req.RepoID, ChunkPolicyID: repositorydocs.DefaultChunkPolicyID, LanguagePolicyID: rag.DefaultLanguagePolicyID, DocumentInstructionID: "repo-doc-v1", QueryInstructionID: "repo-doc-query-v1"})
+	if err != nil {
+		return Job{}, err
+	}
+	namespaceID := cache.EmbeddingNamespaceID(namespaceIdentity)
+	req.expectedCommitOID = policy.CommitOID
+	req.expectedPolicyHash = policy.Policy.PolicyHash
+	req.expectedConfigDigest = policy.Policy.ConfigDigest
+	req.expectedOverlayDigest = policy.OverlayDigest
+	req.expectedNamespaceID = namespaceID
+	workKey := repositoryDocsIndexWorkKey(req, repo, policy, namespaceID)
 	jobCtx, cancel := context.WithCancel(ctx)
-	job, created, err := m.createCoalescedJob(RepositoryDocsIndexJobType, req.RepoID, strings.TrimSpace(req.Profile), 0, workKey, req.CacheUUID, req.RegistrationID, "", cancel)
+	job, created, err := m.createCoalescedJob(RepositoryDocsIndexJobType, req.RepoID, strings.TrimSpace(req.Profile), 0, workKey, req.CacheUUID, req.RegistrationID, namespaceID, cancel)
 	if err != nil {
 		cancel()
 		return Job{}, err
@@ -104,6 +137,15 @@ func (m *JobManager) StartRepositoryDocsIndex(ctx context.Context, manager Manag
 	return job, nil
 }
 
+func repositoryDocsIndexWorkKey(req StartRepositoryDocsIndexJobRequest, repo *repositorydocs.Repository, policy repositorydocs.PolicyResult, namespaceID string) string {
+	return strings.Join([]string{
+		RepositoryDocsIndexJobType, req.CacheUUID, req.RepoID, repo.GitStoreRef,
+		policy.CommitOID, policy.Policy.PolicyHash, policy.Policy.ConfigDigest, policy.OverlayDigest,
+		strconv.FormatBool(req.IncludeWorktree), strings.TrimSpace(req.Profile), namespaceID, req.RegistrationID,
+		"max=" + strconv.Itoa(req.MaxChunks),
+	}, ":")
+}
+
 func (m *JobManager) runRepositoryDocsIndexJob(ctx context.Context, manager Manager, jobID string, req StartRepositoryDocsIndexJobRequest) {
 	m.updateJob(jobID, func(job *Job, now time.Time) {
 		job.Status = JobStatusRunning
@@ -113,12 +155,7 @@ func (m *JobManager) runRepositoryDocsIndexJob(ctx context.Context, manager Mana
 	})
 	result, err := runRepositoryDocsIndex(ctx, manager, req)
 	if err != nil {
-		status := JobStatusFailed
-		class := maintenanceJobErrorClass(err, "repository_docs_index_failed")
-		if errors.Is(err, context.Canceled) {
-			status = JobStatusCancelled
-			class = "cancelled"
-		}
+		status, class := repositoryDocsIndexErrorStatus(err)
 		m.updateJob(jobID, func(job *Job, now time.Time) {
 			job.Status = status
 			job.UpdatedAt = now
@@ -154,8 +191,22 @@ func (m *JobManager) runRepositoryDocsIndexJob(ctx context.Context, manager Mana
 	})
 }
 
+func repositoryDocsIndexErrorStatus(err error) (string, string) {
+	if errors.Is(err, repositorydocs.ErrIndexSnapshotStale) {
+		return JobStatusSuperseded, "repository_docs_snapshot_stale"
+	}
+	if errors.Is(err, context.Canceled) {
+		return JobStatusCancelled, "cancelled"
+	}
+	return JobStatusFailed, maintenanceJobErrorClass(err, "repository_docs_index_failed")
+}
+
 func runRepositoryDocsIndex(ctx context.Context, manager Manager, req StartRepositoryDocsIndexJobRequest) (repositorydocs.IndexResult, error) {
 	eff, err := effectiveJobConfig(manager, req.CachePath)
+	if err != nil {
+		return repositorydocs.IndexResult{}, err
+	}
+	effectiveProfile, _, _, err := requireLocalRepositoryDocsProvider(eff.Config, req.Profile)
 	if err != nil {
 		return repositorydocs.IndexResult{}, err
 	}
@@ -164,7 +215,7 @@ func runRepositoryDocsIndex(ctx context.Context, manager Manager, req StartRepos
 		return repositorydocs.IndexResult{}, err
 	}
 	defer store.Close()
-	provider, err := rag.NewEmbeddingProviderFromConfig(eff.Config, req.Profile, rag.ProviderOptions{})
+	provider, err := rag.NewEmbeddingProviderFromConfig(eff.Config, effectiveProfile, rag.ProviderOptions{})
 	if err != nil {
 		return repositorydocs.IndexResult{}, err
 	}
@@ -175,6 +226,9 @@ func runRepositoryDocsIndex(ctx context.Context, manager Manager, req StartRepos
 	result, err := repositorydocs.NewIndexer(store, provider).Run(ctx, repositorydocs.IndexRequest{
 		RepoID: req.RepoID, Repository: repo, Revision: req.Revision,
 		IncludeWorktree: req.IncludeWorktree, BatchSize: req.BatchSize, MaxChunks: req.MaxChunks,
+		EnforceExpectedSnapshot: true, ExpectedCommitOID: req.expectedCommitOID,
+		ExpectedPolicyHash: req.expectedPolicyHash, ExpectedConfigDigest: req.expectedConfigDigest,
+		ExpectedOverlayDigest: req.expectedOverlayDigest, ExpectedNamespaceID: req.expectedNamespaceID,
 	})
 	if err != nil {
 		return result, err
@@ -202,6 +256,30 @@ func runRepositoryDocsIndex(ctx context.Context, manager Manager, req StartRepos
 	result.GCBytesBefore = gcResult.VectorBytesBefore
 	result.GCBytesAfter = gcResult.VectorBytesAfter
 	return result, nil
+}
+
+func requireLocalRepositoryDocsProvider(cfg config.Config, requestedProfile string) (string, string, string, error) {
+	profileID := strings.TrimSpace(requestedProfile)
+	if profileID == "" {
+		profileID = strings.TrimSpace(cfg.RAG.Indexing.Profile)
+	}
+	if profileID == "" {
+		profileID = strings.TrimSpace(cfg.RAG.DefaultProfile)
+	}
+	profile, ok := cfg.RAG.Profiles[profileID]
+	if !ok {
+		return "", "", "", fmt.Errorf("repository docs: embedding profile %q is not configured", profileID)
+	}
+	providerID := strings.TrimSpace(profile.Provider)
+	provider, ok := cfg.RAG.Providers[providerID]
+	if !ok || providerID == "" {
+		return "", "", "", fmt.Errorf("repository docs: embedding provider for profile %q is not configured", profileID)
+	}
+	boundary := strings.TrimSpace(provider.DataBoundary)
+	if boundary != "local_process" && boundary != "local_network" {
+		return profileID, providerID, boundary, RepositoryDocsProviderBoundaryError{ProviderID: providerID, Boundary: boundary}
+	}
+	return profileID, providerID, boundary, nil
 }
 
 func repositoryDocsVectorByteCeiling(manager Manager) (int64, error) {

@@ -2,6 +2,7 @@ package repositorydocs
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +67,33 @@ func TestRetrieverFullTextWorksWithoutIndexOrProvider(t *testing.T) {
 	}
 }
 
+func TestRetrieverDoesNotScoreARevisionSetFromAnotherEmbeddingNamespace(t *testing.T) {
+	ctx := context.Background()
+	root := initTestRepository(t)
+	writeTestFile(t, root, "README.md", "namespace sentinel remains available lexically\n")
+	commit := commitTestRepository(t, root, "base")
+	repo, err := OpenRepository(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := repositoryDocsSearchStore(t, ctx)
+	defer store.Close()
+	providerA, _ := rag.NewFakeProvider(rag.EmbeddingProviderProfile{ProfileID: "a", ProviderID: "fake", ProviderType: "fake", Model: "model-a", Dimensions: 8, BatchSize: 2, Timeout: time.Second})
+	providerB, _ := rag.NewFakeProvider(rag.EmbeddingProviderProfile{ProfileID: "b", ProviderID: "fake", ProviderType: "fake", Model: "model-b", Dimensions: 8, BatchSize: 2, Timeout: time.Second})
+	indexed, err := NewIndexer(store, providerA).Run(ctx, IndexRequest{RepoID: "owner/repo", Repository: repo, Revision: commit})
+	if err != nil || indexed.State != cache.RepoDocSetReady {
+		t.Fatalf("indexed=%#v err=%v", indexed, err)
+	}
+
+	result, err := NewRetriever(store, providerB).Search(ctx, SearchRequest{RepoID: "owner/repo", Repository: repo, Revision: commit, Query: "namespace sentinel", Mode: SearchModeHybrid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RevisionSetID != "" || result.NamespaceID != "" || result.EffectiveMode != SearchModeFullText || result.Fallback != "revision_set_unavailable" || len(result.Hits) == 0 {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
 func TestTruncateUTF8BytesKeepsValidMultilingualSnippet(t *testing.T) {
 	value := strings.Repeat("中文 русский ", 100)
 	got := truncateUTF8Bytes(value, 800)
@@ -87,6 +115,46 @@ func TestFuseRanksDoesNotBreakScoreTiesByPath(t *testing.T) {
 	got := fuseRanks(lexical, semantic)
 	if len(got) != 2 || got[0].candidate.ChunkID != "zh" {
 		t.Fatalf("fused ranks = %#v, want semantic winner after lexical tie", got)
+	}
+}
+
+func TestFuseRanksKeepsSemanticOnlyScoresOnRRFScaleAndDistinctPaths(t *testing.T) {
+	left := cache.RepositoryDocCandidate{RepositoryDocMembership: cache.RepositoryDocMembership{ChunkID: "shared", Path: "docs/left.md"}}
+	right := cache.RepositoryDocCandidate{RepositoryDocMembership: cache.RepositoryDocMembership{ChunkID: "shared", Path: "docs/right.md"}}
+	semantic := map[string]rankedHit{
+		candidateRankKey(left):  {candidate: left, score: 0.99, semantic: 0.99},
+		candidateRankKey(right): {candidate: right, score: 0.50, semantic: 0.50},
+	}
+
+	got := fuseRanks(nil, semantic)
+	if len(got) != 2 || got[0].candidate.Path != "docs/left.md" {
+		t.Fatalf("fused ranks = %#v", got)
+	}
+	if got[0].score >= 0.1 || got[1].score >= 0.1 {
+		t.Fatalf("semantic-only scores escaped reciprocal-rank scale: %#v", got)
+	}
+}
+
+func TestTrimRankedHitsKeepsDistinctPathsWithTheSameChunkID(t *testing.T) {
+	left := cache.RepositoryDocCandidate{RepositoryDocMembership: cache.RepositoryDocMembership{ChunkID: "shared", Path: "docs/left.md"}}
+	right := cache.RepositoryDocCandidate{RepositoryDocMembership: cache.RepositoryDocMembership{ChunkID: "shared", Path: "docs/right.md"}}
+	values := map[string]rankedHit{
+		candidateRankKey(left):  {candidate: left, score: 100},
+		candidateRankKey(right): {candidate: right, score: 99},
+	}
+	for index := 0; index < 64; index++ {
+		candidate := cache.RepositoryDocCandidate{RepositoryDocMembership: cache.RepositoryDocMembership{ChunkID: fmt.Sprintf("chunk-%02d", index), Path: fmt.Sprintf("docs/%02d.md", index)}}
+		values[candidateRankKey(candidate)] = rankedHit{candidate: candidate, score: float64(64 - index)}
+	}
+	trimmed := trimRankedHits(values, 64)
+	if len(trimmed) != 64 {
+		t.Fatalf("trimmed size=%d, want 64", len(trimmed))
+	}
+	if _, ok := trimmed[candidateRankKey(left)]; !ok {
+		t.Fatal("left path with shared chunk id was dropped")
+	}
+	if _, ok := trimmed[candidateRankKey(right)]; !ok {
+		t.Fatal("right path with shared chunk id was dropped")
 	}
 }
 

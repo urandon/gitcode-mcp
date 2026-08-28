@@ -21,6 +21,8 @@ const DefaultMaxDocumentBytes int64 = 1 << 20
 var (
 	ErrGitObjectUnavailable = errors.New("git object is unavailable")
 	ErrWorktreeUnavailable  = errors.New("worktree content is unavailable")
+	ErrWorktreeOverlayStale = errors.New("worktree overlay changed during the operation")
+	ErrIndexSnapshotStale   = errors.New("repository documentation index snapshot changed before execution")
 )
 
 type GitObjectError struct {
@@ -54,6 +56,22 @@ func (e *WorktreeError) Error() string {
 func (e *WorktreeError) Unwrap() error { return ErrWorktreeUnavailable }
 
 func (e *WorktreeError) DiagnosticCode() string { return "worktree_overlay_unavailable" }
+
+type WorktreeOverlayStaleError struct{}
+
+func (e *WorktreeOverlayStaleError) Error() string { return ErrWorktreeOverlayStale.Error() }
+
+func (e *WorktreeOverlayStaleError) Unwrap() error { return ErrWorktreeOverlayStale }
+
+func (e *WorktreeOverlayStaleError) DiagnosticCode() string { return "worktree_overlay_stale" }
+
+type IndexSnapshotStaleError struct{}
+
+func (e *IndexSnapshotStaleError) Error() string { return ErrIndexSnapshotStale.Error() }
+
+func (e *IndexSnapshotStaleError) Unwrap() error { return ErrIndexSnapshotStale }
+
+func (e *IndexSnapshotStaleError) DiagnosticCode() string { return "repository_docs_snapshot_stale" }
 
 type Repository struct {
 	root         string
@@ -146,7 +164,7 @@ func (r *Repository) ListTree(ctx context.Context, commitOID string) ([]TreeEntr
 	if !validOID(commitOID, r.ObjectFormat) {
 		return nil, &GitObjectError{Object: commitOID, Reason: "invalid commit object id"}
 	}
-	cmd := exec.CommandContext(ctx, "git", "-C", r.root, "ls-tree", "-r", "-l", "-z", "--full-tree", commitOID)
+	cmd := gitCommandContext(ctx, "-C", r.root, "ls-tree", "-r", "-l", "-z", "--full-tree", commitOID)
 	data, err := cmd.Output()
 	if err != nil {
 		return nil, &GitObjectError{Object: commitOID, Reason: "commit tree is not available locally"}
@@ -182,7 +200,7 @@ func (r *Repository) OpenBlob(ctx context.Context, oid string) (io.ReadCloser, e
 	if !validOID(oid, r.ObjectFormat) {
 		return nil, &GitObjectError{Object: oid, Reason: "invalid blob object id"}
 	}
-	cmd := exec.CommandContext(ctx, "git", "-C", r.root, "cat-file", "blob", oid)
+	cmd := gitCommandContext(ctx, "-C", r.root, "cat-file", "blob", oid)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -253,10 +271,31 @@ func (r *Repository) ReadFileAtCommit(ctx context.Context, commitOID, repoPath s
 }
 
 func (r *Repository) TrackedChanges(ctx context.Context, maxBytes int64) ([]WorktreeChange, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", r.root, "status", "--porcelain=v1", "-z", "--untracked-files=no")
+	commitOID, err := r.ResolveRevision(ctx, "HEAD")
+	if err != nil {
+		return nil, err
+	}
+	return r.TrackedChangesAt(ctx, commitOID, maxBytes)
+}
+
+// TrackedChangesAt returns the tracked worktree overlay relative to the exact
+// commit that the caller will use as its base. This differs intentionally from
+// `git status`, whose comparison base is always the current HEAD.
+func (r *Repository) TrackedChangesAt(ctx context.Context, commitOID string, maxBytes int64) ([]WorktreeChange, error) {
+	return r.TrackedChangesAtFiltered(ctx, commitOID, maxBytes, nil)
+}
+
+// TrackedChangesAtFiltered limits content reads and overlay identity to paths
+// relevant to the caller's corpus. Git still computes one local name-status
+// diff, but an unrelated large tracked file cannot fail documentation work.
+func (r *Repository) TrackedChangesAtFiltered(ctx context.Context, commitOID string, maxBytes int64, include func(string) bool) ([]WorktreeChange, error) {
+	if !validOID(commitOID, r.ObjectFormat) {
+		return nil, &GitObjectError{Object: commitOID, Reason: "invalid overlay base commit"}
+	}
+	cmd := gitCommandContext(ctx, "-C", r.root, "diff", "--name-status", "-z", "--find-renames", "--no-ext-diff", "--no-textconv", commitOID, "--")
 	data, err := cmd.Output()
 	if err != nil {
-		return nil, &WorktreeError{Reason: "tracked worktree status is unavailable"}
+		return nil, &WorktreeError{Reason: "tracked worktree comparison is unavailable"}
 	}
 	parts := bytes.Split(data, []byte{0})
 	changes := make([]WorktreeChange, 0, len(parts))
@@ -265,18 +304,27 @@ func (r *Repository) TrackedChanges(ctx context.Context, maxBytes int64) ([]Work
 		if len(part) == 0 {
 			continue
 		}
-		if len(part) < 4 || part[2] != ' ' {
-			return nil, fmt.Errorf("repository docs: malformed git status entry")
+		status := string(part)
+		if len(status) == 0 {
+			return nil, fmt.Errorf("repository docs: malformed git diff status entry")
 		}
-		change := WorktreeChange{IndexState: part[0], TreeState: part[1], Path: normalizeRepoPath(string(part[3:]))}
-		change.Deleted = change.IndexState == 'D' || change.TreeState == 'D'
-		change.Renamed = change.IndexState == 'R' || change.TreeState == 'R'
+		idx++
+		if idx >= len(parts) || len(parts[idx]) == 0 {
+			return nil, fmt.Errorf("repository docs: malformed git diff path entry")
+		}
+		change := WorktreeChange{IndexState: status[0], TreeState: status[0], Path: normalizeRepoPath(string(parts[idx]))}
+		change.Deleted = status[0] == 'D'
+		change.Renamed = status[0] == 'R'
 		if change.Renamed {
 			idx++
 			if idx >= len(parts) || len(parts[idx]) == 0 {
-				return nil, fmt.Errorf("repository docs: malformed rename status entry")
+				return nil, fmt.Errorf("repository docs: malformed rename diff entry")
 			}
-			change.OldPath = normalizeRepoPath(string(parts[idx]))
+			change.OldPath = change.Path
+			change.Path = normalizeRepoPath(string(parts[idx]))
+		}
+		if include != nil && !include(change.Path) && (change.OldPath == "" || !include(change.OldPath)) {
+			continue
 		}
 		if !change.Deleted {
 			content, err := r.ReadTrackedWorktreeFile(ctx, change.Path, maxBytes)
@@ -296,7 +344,7 @@ func (r *Repository) ReadTrackedWorktreeFile(ctx context.Context, repoPath strin
 	if repoPath == "" || strings.HasPrefix(repoPath, "../") || strings.Contains(repoPath, "/../") {
 		return nil, &WorktreeError{Path: repoPath, Reason: "unsafe repository-relative path"}
 	}
-	if err := exec.CommandContext(ctx, "git", "-C", r.root, "ls-files", "--error-unmatch", "--", repoPath).Run(); err != nil {
+	if err := gitCommandContext(ctx, "-C", r.root, "ls-files", "--error-unmatch", "--", repoPath).Run(); err != nil {
 		return nil, &WorktreeError{Path: repoPath, Reason: "path is not tracked"}
 	}
 	fullPath := filepath.Join(r.root, filepath.FromSlash(repoPath))
@@ -338,7 +386,9 @@ func ResolvePolicy(ctx context.Context, repo *Repository, revision string, inclu
 		data = nil
 	}
 	if includeWorktree {
-		changes, err := repo.TrackedChanges(ctx, DefaultMaxDocumentBytes)
+		changes, err := repo.TrackedChangesAtFiltered(ctx, commitOID, DefaultMaxDocumentBytes, func(repoPath string) bool {
+			return repoPath == PolicyConfigPath
+		})
 		if err != nil {
 			return "", PolicyResolution{}, err
 		}
@@ -385,8 +435,14 @@ func (r *commandReadCloser) Close() error {
 
 func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
 	cmdArgs := append([]string{"-C", dir}, args...)
-	data, err := exec.CommandContext(ctx, "git", cmdArgs...).Output()
+	data, err := gitCommandContext(ctx, cmdArgs...).Output()
 	return string(data), err
+}
+
+func gitCommandContext(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Env = append(os.Environ(), "GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0")
+	return cmd
 }
 
 func opaqueRef(prefix, value string) string {

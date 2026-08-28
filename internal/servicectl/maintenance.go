@@ -722,7 +722,16 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 				if errors.As(jobErr, &busy) {
 					return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), started
 				}
-				return m.updateRepositoryDocsFailure(registrationID, "repository_docs_schedule_failed"), started
+				class := "repository_docs_schedule_failed"
+				message := "repository documentation indexing could not be scheduled"
+				var coded interface{ DiagnosticCode() string }
+				if errors.As(jobErr, &coded) && strings.TrimSpace(coded.DiagnosticCode()) != "" {
+					class = strings.TrimSpace(coded.DiagnosticCode())
+				}
+				if class == "repository_docs_provider_boundary_blocked" {
+					message = "repository documentation indexing requires an effective local_process or local_network provider boundary"
+				}
+				return m.updateRepositoryDocsFailure(registrationID, class, message), started
 			}
 			started = append(started, job.ID)
 			activeRepositoryDocs = job
@@ -824,7 +833,7 @@ func reconcileRepositoryDocsState(ctx context.Context, store *cache.SQLiteStore,
 	return true
 }
 
-func (m *MaintenanceManager) updateRepositoryDocsFailure(id, class string) MaintenanceEntry {
+func (m *MaintenanceManager) updateRepositoryDocsFailure(id, class, message string) MaintenanceEntry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entry := m.entries[id]
@@ -836,7 +845,7 @@ func (m *MaintenanceManager) updateRepositoryDocsFailure(id, class string) Maint
 	}
 	entry.RepositoryDocs.State = "degraded"
 	entry.RepositoryDocs.LastErrorClass = class
-	entry.RepositoryDocs.LastError = "repository documentation indexing could not be scheduled"
+	entry.RepositoryDocs.LastError = message
 	entry.RepositoryDocs.UpdatedAt = m.now()
 	entry.RepositoryDocs.NextPollAt = m.now().Add(time.Minute)
 	entry.LastReconciledAt = m.now()

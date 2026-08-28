@@ -84,11 +84,11 @@ the daemon's private `0600` registry. Public status exposes only opaque Git
 store/worktree refs. The coordinator then polls committed `HEAD` and policy
 identity every minute and coalesces a new immutable-set job when either
 changes; it never fetches Git objects or contacts GitCode. Cache writers are
-serialized with sync and ordinary RAG indexing.
+bounded, but cross-process writer-lease integration remains a release gate.
 Equivalent work coalesces. Interrupted sets are resumable, rename-identical
-chunks reuse vectors, and deterministic metadata GC protects the current ready
-committed set and matching ready overlay before removing unreferenced derived
-state. Defaults retain at most eight committed sets for 30 days, retain an
+chunks reuse vectors, and deterministic metadata GC removes unreferenced
+derived state under the configured retention limits. Defaults retain at most
+eight committed sets for 30 days, retain an
 explicit overlay for a 24-hour diagnostic grace period, and retain orphaned
 terminal state for seven days. A machine-local vector-byte ceiling defaults to
 512 MiB and can be changed with `GITCODE_MCP_REPO_DOC_VECTOR_BYTES`; this
@@ -104,12 +104,19 @@ authority, and include the overlay digest when applicable. Every result is
 hydrated from the exact blob or verified tracked overlay range and
 digest-checked before its bounded snippet and citation are returned.
 
+Indexing repository content is allowed only through a provider whose effective
+`data_boundary` is `local_process` or `local_network`. Profiles declared as
+`remote`, `unknown`, or without an explicit boundary are rejected before a job
+is created. Full-text search remains available without an embedding provider.
+
 ## MCP and Admin UI
 
 MCP exposes `repository_docs_policy`, `repository_docs_status`,
 `repository_docs_search`, and the asynchronous `repository_docs_index` job
 submission tool. The caller's MCP working directory supplies local Git
-authority; job progress and completion use the ordinary service job tools.
+authority; generic service-job list/status tools expose bounded public job
+state. MCP planning and repository-document-specific attach/cancel operations
+remain explicit release-gate work rather than being implied by this interface.
 
 Admin UI repository details include a **Documentation** tab with policy,
 revision-set identity, coverage, commit/overlay authority, namespace, and

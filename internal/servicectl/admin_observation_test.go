@@ -109,6 +109,14 @@ func TestAdminJobObservationDropsRawProgressMessagesAndEndpoints(t *testing.T) {
 	}
 }
 
+func TestAdminRepositoryDocsJobIsCancellableButNotGenericallyRetryable(t *testing.T) {
+	now := time.Now().UTC()
+	view := adminJobObservation(Job{ID: "job-repo-docs", Type: RepositoryDocsIndexJobType, RegistrationID: "reg-1", Status: JobStatusRunning, CreatedAt: now, UpdatedAt: now})
+	if !view.Cancellable || view.Retryable {
+		t.Fatalf("view=%+v", view)
+	}
+}
+
 func TestAdminCoverageNeverPromotesBoundedTailToComplete(t *testing.T) {
 	now := time.Now().UTC()
 	entry := MaintenanceEntry{

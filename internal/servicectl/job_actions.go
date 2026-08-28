@@ -105,7 +105,7 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 	if !ok {
 		return adminhttp.JobActionReceipt{}, jobActionError(http.StatusNotFound, "job_not_retained", "The selected job has expired or is not retained by this daemon.", "Return to the bounded job list; cached repository data and audit evidence are unaffected.")
 	}
-	if job.Type != SyncJobType && job.Type != RAGIndexJobType {
+	if job.Type != SyncJobType && job.Type != RAGIndexJobType && !(action == "cancel" && job.Type == RepositoryDocsIndexJobType) {
 		return adminhttp.JobActionReceipt{}, jobActionError(http.StatusForbidden, "capability_unavailable", "This job type does not support the requested admin action.", "Use the capability catalog or CLI for supported operations.")
 	}
 	receipt := adminhttp.JobActionReceipt{ReceiptID: "receipt-" + keyHash[:16], Action: action, TargetJob: job.ID, CreatedAt: m.now()}

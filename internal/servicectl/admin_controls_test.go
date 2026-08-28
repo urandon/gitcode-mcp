@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gitcode-mcp/internal/adminhttp"
@@ -135,6 +136,14 @@ func TestAdminControlErrorMapsBindingConflict(t *testing.T) {
 	var typed adminhttp.ControlError
 	if !errors.As(err, &typed) || typed.Status != http.StatusConflict || typed.Code != "binding_conflict" {
 		t.Fatalf("err=%T %[1]v", err)
+	}
+}
+
+func TestAdminControlErrorExplainsRepositoryDocsProviderBoundary(t *testing.T) {
+	err := adminControlError(RepositoryDocsProviderBoundaryError{ProviderID: "remote", Boundary: "remote"})
+	var typed adminhttp.ControlError
+	if !errors.As(err, &typed) || typed.Status != http.StatusConflict || typed.Code != "repository_docs_provider_boundary_blocked" || !strings.Contains(typed.Remediation, "local_process or local_network") {
+		t.Fatalf("err=%T %[1]v typed=%+v", err, typed)
 	}
 }
 

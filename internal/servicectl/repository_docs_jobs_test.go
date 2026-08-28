@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/repositorydocs"
 )
 
 func TestRepositoryDocsIndexJobCanonicalizesAliasAndPublishesMetadata(t *testing.T) {
@@ -57,6 +60,9 @@ func TestRepositoryDocsIndexJobCanonicalizesAliasAndPublishesMetadata(t *testing
 	}
 	if job.RepoID != "owner/canonical" {
 		t.Fatalf("job repo id = %q, want canonical binding", job.RepoID)
+	}
+	if job.ProfileID != cfg.RAG.Indexing.Profile {
+		t.Fatalf("job profile id = %q, want effective indexing profile %q", job.ProfileID, cfg.RAG.Indexing.Profile)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -105,6 +111,84 @@ func TestRepositoryDocsIndexJobCanonicalizesAliasAndPublishesMetadata(t *testing
 	aliasSets, err := store.ListRepositoryDocRevisionSets(ctx, cache.RepositoryDocRevisionSetFilter{RepoID: "urandon/sessionless"})
 	if err != nil || len(aliasSets) != 0 {
 		t.Fatalf("alias revision sets = %#v, err=%v", aliasSets, err)
+	}
+}
+
+func TestRepositoryDocsIndexRejectsRemoteOrUnknownProviderBoundary(t *testing.T) {
+	for _, boundary := range []string{"remote", "unknown", ""} {
+		t.Run(boundary, func(t *testing.T) {
+			cfg := adminFakeRAGConfig()
+			profile := cfg.RAG.Profiles[cfg.RAG.Indexing.Profile]
+			provider := cfg.RAG.Providers[profile.Provider]
+			provider.DataBoundary = boundary
+			cfg.RAG.Providers[profile.Provider] = provider
+			_, _, _, err := requireLocalRepositoryDocsProvider(cfg, cfg.RAG.Indexing.Profile)
+			var blocked RepositoryDocsProviderBoundaryError
+			if !errors.As(err, &blocked) || blocked.DiagnosticCode() != "repository_docs_provider_boundary_blocked" {
+				t.Fatalf("boundary=%q err=%T %v", boundary, err, err)
+			}
+		})
+	}
+}
+
+func TestRepositoryDocsAdmissionSnapshotChangeIsSupersededNotFailed(t *testing.T) {
+	status, class := repositoryDocsIndexErrorStatus(&repositorydocs.IndexSnapshotStaleError{})
+	if status != JobStatusSuperseded || class != "repository_docs_snapshot_stale" {
+		t.Fatalf("status=%q class=%q", status, class)
+	}
+}
+
+func TestRepositoryDocsIndexUsesTheGuardedEffectiveProfile(t *testing.T) {
+	cfg := adminFakeRAGConfig()
+	localProfileID := cfg.RAG.Indexing.Profile
+	cfg.RAG.DefaultProfile = "remote-default"
+	cfg.RAG.Providers["remote-provider"] = config.RAGProviderConfig{Type: "fake", DataBoundary: "remote"}
+	cfg.RAG.Profiles["remote-default"] = config.RAGProfileConfig{Provider: "remote-provider", Model: "remote-model", Dimensions: 2}
+	profileID, providerID, boundary, err := requireLocalRepositoryDocsProvider(cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profileID != localProfileID || providerID != cfg.RAG.Profiles[localProfileID].Provider || boundary == "remote" {
+		t.Fatalf("effective profile=%q provider=%q boundary=%q", profileID, providerID, boundary)
+	}
+}
+
+func TestRepositoryDocsWorkKeyChangesWithTrackedOverlay(t *testing.T) {
+	ctx := context.Background()
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(value string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repoPath, "README.md"), []byte(value), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("base\n")
+	runGitForRepositoryDocsJobTest(t, repoPath, "init")
+	runGitForRepositoryDocsJobTest(t, repoPath, "add", "README.md")
+	runGitForRepositoryDocsJobTest(t, repoPath, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "base")
+	repo, err := repositorydocs.OpenRepository(ctx, repoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := StartRepositoryDocsIndexJobRequest{RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", IncludeWorktree: true}
+	write("overlay one\n")
+	one, err := repositorydocs.InspectPolicy(ctx, repo, repositorydocs.PolicyRequest{RepoID: req.RepoID, IncludeWorktree: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	write("overlay two\n")
+	two, err := repositorydocs.InspectPolicy(ctx, repo, repositorydocs.PolicyRequest{RepoID: req.RepoID, IncludeWorktree: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repositoryDocsIndexWorkKey(req, repo, one, "namespace-1") == repositoryDocsIndexWorkKey(req, repo, two, "namespace-1") {
+		t.Fatal("distinct tracked overlay generations coalesced to one work key")
+	}
+	if repositoryDocsIndexWorkKey(req, repo, two, "namespace-1") == repositoryDocsIndexWorkKey(req, repo, two, "namespace-2") {
+		t.Fatal("distinct embedding namespaces coalesced to one work key")
 	}
 }
 

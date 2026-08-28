@@ -85,6 +85,10 @@ func TestParsePolicyNormalizesAndHashesDeterministically(t *testing.T) {
 func TestParsePolicyFailsClosed(t *testing.T) {
 	tests := []string{
 		"repository_docs:\n  schema: 2\n",
+		"repository_docs: {schema: 2, enabled: true}\n",
+		"'repository_docs': {schema: 2}\n",
+		"repository_docs: null\n",
+		"repository_docs:\n  schema: 1\nrepository_docs:\n  schema: 1\n",
 		"repository_docs:\n  preset: future\n",
 		"repository_docs:\n  preset: none\n",
 		"repository_docs:\n  include:\n    - ../secret.md\n",
@@ -95,6 +99,17 @@ func TestParsePolicyFailsClosed(t *testing.T) {
 		if !errors.Is(err, ErrPolicyInvalid) || result.Status != PolicyStatusInvalid {
 			t.Fatalf("input=%q result=%#v err=%v", input, result, err)
 		}
+	}
+}
+
+func TestParsePolicySupportsStandardYAMLForms(t *testing.T) {
+	result, err := ParsePolicy([]byte(`"repository_docs": {schema: 1, enabled: true, preset: none, include: ["docs/**", 'architecture/#notes.md']} # inline comment
+`), PolicySourceCommitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != PolicyStatusReady || !result.Policy.Matches("docs/guide.md") || !result.Policy.Matches("architecture/#notes.md") {
+		t.Fatalf("result = %#v", result)
 	}
 }
 

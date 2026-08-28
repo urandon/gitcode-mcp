@@ -487,6 +487,9 @@ func adminControlError(err error) error {
 	}
 	if coded, ok := err.(interface{ DiagnosticCode() string }); ok {
 		code := coded.DiagnosticCode()
+		if code == "repository_docs_provider_boundary_blocked" {
+			return controlError(http.StatusConflict, code, "Repository documentation indexing requires a local embedding boundary.", "Configure or select an indexing profile whose provider data_boundary is local_process or local_network, then retry.")
+		}
 		return controlError(http.StatusConflict, code, "The requested control was rejected by current state.", "Refresh diagnostics and render a new plan.")
 	}
 	var conflict service.ErrConflict

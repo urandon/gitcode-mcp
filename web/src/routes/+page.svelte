@@ -238,8 +238,10 @@
   function closeJob(): void { selectedJobID = ''; pendingConfirmation = ''; pendingIdempotencyKey = ''; actionError = ''; actionReceipt = undefined; updateLocation(); }
   function openRepositoryDocsJobs(): void {
     if (!selectedCache || !selectedRepo) return;
-    active = 'Jobs'; jobCacheFilter = selectedCache.cache_ref; jobRepoFilter = selectedRepo.repo_id; jobTypeFilter = 'repository-docs-index';
-    const latest = [...scopedJobs].filter((job) => job.type === 'repository-docs-index').sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
+	const cacheRef = selectedCache.cache_ref;
+	const repoID = selectedRepo.repo_id;
+    active = 'Jobs'; jobCacheFilter = cacheRef; jobRepoFilter = repoID; jobTypeFilter = 'repository-docs-index';
+    const latest = snapshot.jobs.filter((job) => job.cache_ref === cacheRef && job.repo_id === repoID && job.type === 'repository-docs-index').sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
     selectedJobID = latest?.id || ''; updateLocation();
   }
   async function confirmJobAction(action: JobAction, trigger: HTMLButtonElement): Promise<void> {
@@ -553,7 +555,7 @@
                     </article>
                   {/if}
                 </div>
-                {#if pendingControl === 'repository_docs_index'}<dialog bind:this={controlDialog} class="confirmation-dialog control-confirmation" aria-labelledby="confirm-repo-docs-reconcile-title" oncancel={(event) => { event.preventDefault(); void cancelControlConfirmation(); }}><span class="dialog-icon"><RotateCcw size={21} /></span><div><p class="section-kicker">CONFIRM LOCAL GIT RECONCILIATION</p><h2 id="confirm-repo-docs-reconcile-title">Resolve and index current HEAD?</h2><p>The daemon will inspect the registered worktree and committed policy, then coalesce or start only the immutable repository-document index job. It will not fetch GitCode, start remote sync, or persist document bodies.</p><dl><div><dt>Target</dt><dd>{selectedRepo.repo_id}</dd></div><div><dt>Cache</dt><dd>{selectedCache?.cache_ref}</dd></div><div><dt>Registration</dt><dd>{selectedMaintenance?.registration_id}</dd></div></dl><div class="dialog-actions"><button onclick={() => void cancelControlConfirmation()} disabled={controlRunning}>Keep current state</button><button bind:this={controlConfirmButton} class="primary-action" onclick={() => void executeControl()} disabled={controlRunning}>{controlRunning ? 'Submitting…' : 'Confirm indexing'}</button></div></div></dialog>{/if}
+                {#if pendingControl === 'repository_docs_index'}<dialog bind:this={controlDialog} class="confirmation-dialog control-confirmation" aria-labelledby="confirm-repo-docs-reconcile-title" oncancel={(event) => { event.preventDefault(); void cancelControlConfirmation(); }}><span class="dialog-icon"><RotateCcw size={21} /></span><div><p class="section-kicker">CONFIRM LOCAL GIT RECONCILIATION</p><h2 id="confirm-repo-docs-reconcile-title">Resolve and index current HEAD?</h2><p>The daemon will inspect the registered worktree and committed policy, then coalesce or start only the immutable repository-document index job. It will not fetch GitCode, start remote sync, or persist document bodies.</p><p>Embedding is permitted only when the effective provider declares a <code>local_process</code> or <code>local_network</code> data boundary. Remote, unknown, and undeclared boundaries are rejected before scheduling.</p><dl><div><dt>Target</dt><dd>{selectedRepo.repo_id}</dd></div><div><dt>Cache</dt><dd>{selectedCache?.cache_ref}</dd></div><div><dt>Registration</dt><dd>{selectedMaintenance?.registration_id}</dd></div></dl><div class="dialog-actions"><button onclick={() => void cancelControlConfirmation()} disabled={controlRunning}>Keep current state</button><button bind:this={controlConfirmButton} class="primary-action" onclick={() => void executeControl()} disabled={controlRunning}>{controlRunning ? 'Submitting…' : 'Confirm indexing'}</button></div></div></dialog>{/if}
               </section>
             {:else if repoTab === 'search'}
               <section class="repository-section search-lab" aria-labelledby="search-title">

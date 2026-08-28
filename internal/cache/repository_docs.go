@@ -58,6 +58,7 @@ type RepositoryDocRevisionSetFilter struct {
 	OverlayDigest string
 	ExactOverlay  bool
 	ChunkPolicyID string
+	NamespaceID   string
 	State         string
 	Limit         int
 }
@@ -165,7 +166,7 @@ func (s *SQLiteStore) ListRepositoryDocRevisionSets(ctx context.Context, filter 
 	for _, item := range []struct {
 		column string
 		value  string
-	}{{"git_store_ref", filter.GitStoreRef}, {"commit_oid", filter.CommitOID}, {"policy_hash", filter.PolicyHash}, {"overlay_digest", filter.OverlayDigest}, {"chunk_policy_id", filter.ChunkPolicyID}, {"state", filter.State}} {
+	}{{"git_store_ref", filter.GitStoreRef}, {"commit_oid", filter.CommitOID}, {"policy_hash", filter.PolicyHash}, {"overlay_digest", filter.OverlayDigest}, {"chunk_policy_id", filter.ChunkPolicyID}, {"namespace_id", filter.NamespaceID}, {"state", filter.State}} {
 		if item.value != "" {
 			query += ` AND ` + item.column + ` = ?`
 			args = append(args, item.value)

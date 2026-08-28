@@ -1193,7 +1193,7 @@ func executeRepositoryDocsCommand(ctx context.Context, args []string, opts optio
 	if err != nil {
 		return writeError(stderr, opts.format, err)
 	}
-	overlayDigest, err := repositorydocs.ResolveOverlayDigest(ctx, repo, commitOID, policy.PolicyHash, opts.includeWorktree, repositorydocs.DefaultMaxDocumentBytes)
+	overlayDigest, err := repositorydocs.ResolveOverlayDigest(ctx, repo, commitOID, policy.Policy, opts.includeWorktree, repositorydocs.DefaultMaxDocumentBytes)
 	if err != nil {
 		return writeError(stderr, opts.format, err)
 	}

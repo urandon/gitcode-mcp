@@ -528,8 +528,8 @@ func MCPRAGCapabilities() []Capability {
 
 func MCPWriteToolNames() map[string]bool {
 	names := map[string]bool{}
-	for _, cap := range MCPWriteCapabilities() {
-		if cap.Safety == SafetyReadOnly {
+	for _, cap := range Capabilities() {
+		if !cap.MCP.Enabled || cap.MCPName == "" || cap.Safety == SafetyReadOnly {
 			continue
 		}
 		names[cap.MCPName] = true

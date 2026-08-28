@@ -1475,6 +1475,20 @@ func TestMCPWriteCapabilitiesComeFromRegistry(t *testing.T) {
 	}
 }
 
+func TestMCPReadModeClassifiesEveryEnabledMutationBySafety(t *testing.T) {
+	for _, cap := range capability.Capabilities() {
+		if !cap.MCP.Enabled || cap.MCPName == "" || cap.Safety == capability.SafetyReadOnly {
+			continue
+		}
+		if !writeToolNames[cap.MCPName] {
+			t.Fatalf("read-mode mutation filter missing %s (%s, safety=%s)", cap.ID, cap.MCPName, cap.Safety)
+		}
+	}
+	if !writeToolNames["repository_docs_index"] {
+		t.Fatal("repository_docs_index must be hidden and blocked in read-only MCP mode")
+	}
+}
+
 func TestMCPRAGCapabilitiesComeFromRegistry(t *testing.T) {
 	spy := &writeLifecycleSpyService{}
 	srv := NewWithToolAccess(io.Reader(strings.NewReader("")), io.Discard, io.Discard, spy, nil, ToolAccessWrite)

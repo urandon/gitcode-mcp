@@ -117,18 +117,36 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 		return result, nil
 	}
 	overlayDigest := ""
+	var initialChanges []WorktreeChange
 	if req.IncludeWorktree {
-		changes, overlayErr := req.Repository.TrackedChanges(ctx, DefaultMaxDocumentBytes)
+		changes, overlayErr := req.Repository.TrackedChangesAtFiltered(ctx, commitOID, DefaultMaxDocumentBytes, policyOverlayPathFilter(policy.Policy))
 		if overlayErr != nil {
 			return SearchResult{}, overlayErr
 		}
+		initialChanges = changes
 		overlayDigest = worktreeOverlayDigest(req.Repository.WorktreeRef, commitOID, policy.PolicyHash, changes)
 		result.Authority = "worktree_overlay"
 		result.OverlayDigest = overlayDigest
 	}
-	sets, err := r.store.ListRepositoryDocRevisionSets(ctx, cache.RepositoryDocRevisionSetFilter{RepoID: req.RepoID, GitStoreRef: req.Repository.GitStoreRef, CommitOID: commitOID, PolicyHash: policy.PolicyHash, OverlayDigest: overlayDigest, ExactOverlay: true, ChunkPolicyID: DefaultChunkPolicyID, Limit: 20})
-	if err != nil {
-		return SearchResult{}, err
+	semanticAvailable := req.Mode == SearchModeHybrid && r.provider != nil
+	expectedNamespaceID := ""
+	if semanticAvailable {
+		identity, identityErr := r.provider.NamespaceIdentity(ctx, rag.NamespaceRequest{RepoID: req.RepoID, ChunkPolicyID: DefaultChunkPolicyID, LanguagePolicyID: rag.DefaultLanguagePolicyID, DocumentInstructionID: "repo-doc-v1", QueryInstructionID: "repo-doc-query-v1"})
+		if identityErr != nil {
+			semanticAvailable = false
+			result.Fallback = "provider_unavailable"
+			result.EffectiveMode = SearchModeFullText
+			result.Warnings = append(result.Warnings, "embedding provider identity unavailable; returning verified lexical results")
+		} else {
+			expectedNamespaceID = cache.EmbeddingNamespaceID(identity)
+		}
+	}
+	var sets []cache.RepositoryDocRevisionSet
+	if semanticAvailable {
+		sets, err = r.store.ListRepositoryDocRevisionSets(ctx, cache.RepositoryDocRevisionSetFilter{RepoID: req.RepoID, GitStoreRef: req.Repository.GitStoreRef, CommitOID: commitOID, PolicyHash: policy.PolicyHash, OverlayDigest: overlayDigest, ExactOverlay: true, ChunkPolicyID: DefaultChunkPolicyID, NamespaceID: expectedNamespaceID, Limit: 20})
+		if err != nil {
+			return SearchResult{}, err
+		}
 	}
 	var selected cache.RepositoryDocRevisionSet
 	for _, set := range sets {
@@ -141,7 +159,7 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 		result.RevisionSetID = selected.ID
 		result.NamespaceID = selected.NamespaceID
 		result.Coverage = SearchCoverage{State: selected.State, EligibleFiles: selected.EligibleFiles, EligibleChunks: selected.EligibleChunks, EmbeddedChunks: selected.EmbeddedChunks, ReusedChunks: selected.ReusedChunks, FailedChunks: selected.FailedChunks, MissingObjects: selected.MissingObjects}
-	} else if req.Mode == SearchModeHybrid {
+	} else if req.Mode == SearchModeHybrid && semanticAvailable {
 		result.EffectiveMode = SearchModeFullText
 		result.Fallback = "revision_set_unavailable"
 		if req.IncludeWorktree {
@@ -162,7 +180,7 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 			result.Warnings = append(result.Warnings, "semantic revision set is unavailable; using Git-backed full-text retrieval")
 		}
 	}
-	lexical, lexicalCoverage, err := r.lexical(ctx, req.Repository, commitOID, policy.Policy, req.Query, req.IncludeWorktree, req.Limit)
+	lexical, lexicalCoverage, err := r.lexical(ctx, req.Repository, commitOID, policy.Policy, req.Query, initialChanges, req.Limit)
 	if err != nil {
 		return SearchResult{}, err
 	}
@@ -170,7 +188,7 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 		result.Coverage = lexicalCoverage
 	}
 	semantic := map[string]rankedHit{}
-	if req.Mode == SearchModeHybrid && selected.ID != "" && r.provider != nil {
+	if req.Mode == SearchModeHybrid && selected.ID != "" && semanticAvailable {
 		semantic, err = r.semantic(ctx, req, selected)
 		if err != nil {
 			result.Fallback = "semantic_unavailable"
@@ -178,7 +196,7 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 			result.Warnings = append(result.Warnings, "semantic retrieval unavailable; returning verified lexical results")
 			semantic = map[string]rankedHit{}
 		}
-	} else if req.Mode == SearchModeHybrid && r.provider == nil {
+	} else if req.Mode == SearchModeHybrid && !semanticAvailable && result.Fallback == "" {
 		result.Fallback = "provider_unavailable"
 		result.EffectiveMode = SearchModeFullText
 		result.Warnings = append(result.Warnings, "embedding provider unavailable; returning verified lexical results")
@@ -198,6 +216,19 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 		hit.Rank = len(result.Hits) + 1
 		result.Hits = append(result.Hits, hit)
 	}
+	if req.IncludeWorktree {
+		finalCommitOID, finalPolicy, resolveErr := ResolvePolicy(ctx, req.Repository, req.Revision, true)
+		if resolveErr != nil {
+			return SearchResult{}, resolveErr
+		}
+		finalChanges, changeErr := req.Repository.TrackedChangesAtFiltered(ctx, commitOID, DefaultMaxDocumentBytes, policyOverlayPathFilter(policy.Policy))
+		if changeErr != nil {
+			return SearchResult{}, changeErr
+		}
+		if finalCommitOID != commitOID || finalPolicy.PolicyHash != policy.PolicyHash || finalPolicy.ConfigDigest != policy.ConfigDigest || worktreeOverlayDigest(req.Repository.WorktreeRef, commitOID, policy.PolicyHash, finalChanges) != overlayDigest {
+			return SearchResult{}, &WorktreeOverlayStaleError{}
+		}
+	}
 	return result, nil
 }
 
@@ -209,7 +240,7 @@ type rankedHit struct {
 	text      string
 }
 
-func (r *Retriever) lexical(ctx context.Context, repo *Repository, commitOID string, policy Policy, query string, includeWorktree bool, limit int) (map[string]rankedHit, SearchCoverage, error) {
+func (r *Retriever) lexical(ctx context.Context, repo *Repository, commitOID string, policy Policy, query string, changes []WorktreeChange, limit int) (map[string]rankedHit, SearchCoverage, error) {
 	entries, err := repo.ListTree(ctx, commitOID)
 	if err != nil {
 		return nil, SearchCoverage{}, err
@@ -220,12 +251,7 @@ func (r *Retriever) lexical(ctx context.Context, repo *Repository, commitOID str
 	coverage := SearchCoverage{State: "lexical-only"}
 	changed := map[string]WorktreeChange{}
 	removed := map[string]bool{}
-	var changes []WorktreeChange
-	if includeWorktree {
-		changes, err = repo.TrackedChanges(ctx, DefaultMaxDocumentBytes)
-		if err != nil {
-			return nil, SearchCoverage{}, err
-		}
+	if changes != nil {
 		for _, change := range changes {
 			changed[change.Path] = change
 			if change.Deleted {
@@ -261,7 +287,7 @@ func (r *Retriever) lexical(ctx context.Context, repo *Repository, commitOID str
 				continue
 			}
 			candidate := cache.RepositoryDocCandidate{RepositoryDocMembership: cache.RepositoryDocMembership{Path: entry.Path, ChunkID: chunk.ID, Authority: "git", Ordinal: ordinal, BlobOID: entry.OID, ContentDigest: chunk.RawSliceDigest}, ObjectFormat: repo.ObjectFormat, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, RawSliceDigest: chunk.RawSliceDigest, EmbeddingInputDigest: chunk.EmbeddingInputDigest, ChunkPolicyID: DefaultChunkPolicyID}
-			results[chunk.ID] = rankedHit{candidate: candidate, score: score, lexical: score, text: chunk.Text}
+			results[candidateRankKey(candidate)] = rankedHit{candidate: candidate, score: score, lexical: score, text: chunk.Text}
 		}
 		results = trimRankedHits(results, candidateLimit)
 	}
@@ -275,6 +301,9 @@ func (r *Retriever) lexical(ctx context.Context, repo *Repository, commitOID str
 			coverage.MissingObjects++
 			continue
 		}
+		if int64(len(data)) != change.Size || digestBytes(data) != change.Digest {
+			return nil, SearchCoverage{}, &WorktreeOverlayStaleError{}
+		}
 		chunks, chunkErr := ChunkDocument(digestBytes(data), data, DefaultChunkBytes)
 		if chunkErr != nil {
 			coverage.FailedChunks++
@@ -287,7 +316,7 @@ func (r *Retriever) lexical(ctx context.Context, repo *Repository, commitOID str
 				continue
 			}
 			candidate := cache.RepositoryDocCandidate{RepositoryDocMembership: cache.RepositoryDocMembership{Path: change.Path, ChunkID: chunk.ID, Authority: "worktree", Ordinal: ordinal, ContentDigest: chunk.RawSliceDigest}, ObjectFormat: repo.ObjectFormat, WorktreeRef: repo.WorktreeRef, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, RawSliceDigest: chunk.RawSliceDigest, EmbeddingInputDigest: chunk.EmbeddingInputDigest, ChunkPolicyID: DefaultChunkPolicyID}
-			results[chunk.ID] = rankedHit{candidate: candidate, score: score, lexical: score, text: chunk.Text}
+			results[candidateRankKey(candidate)] = rankedHit{candidate: candidate, score: score, lexical: score, text: chunk.Text}
 		}
 		results = trimRankedHits(results, candidateLimit)
 	}
@@ -315,7 +344,7 @@ func trimRankedHits(values map[string]rankedHit, limit int) map[string]rankedHit
 	ranked := sortedRanks(values)
 	trimmed := make(map[string]rankedHit, limit)
 	for _, item := range ranked[:limit] {
-		trimmed[item.candidate.ChunkID] = item
+		trimmed[candidateRankKey(item.candidate)] = item
 	}
 	return trimmed
 }
@@ -343,7 +372,7 @@ func (r *Retriever) semantic(ctx context.Context, req SearchRequest, set cache.R
 			continue
 		}
 		score := cosine(query, vector)
-		results[candidate.ChunkID] = rankedHit{candidate: candidate, score: score, semantic: score}
+		results[candidateRankKey(candidate)] = rankedHit{candidate: candidate, score: score, semantic: score}
 	}
 	return results, nil
 }
@@ -358,22 +387,28 @@ func fuseRanks(lexical, semantic map[string]rankedHit) []rankedHit {
 			lexicalRank = index + 1
 		}
 		item.score = 1 / float64(60+lexicalRank)
-		merged[item.candidate.ChunkID] = item
+		merged[candidateRankKey(item.candidate)] = item
 	}
 	semanticRank := 1
 	for index, item := range sem {
 		if index > 0 && item.score != sem[index-1].score {
 			semanticRank = index + 1
 		}
-		current, ok := merged[item.candidate.ChunkID]
+		key := candidateRankKey(item.candidate)
+		current, ok := merged[key]
 		if !ok {
 			current = item
+			current.score = 0
 		}
 		current.score += 1 / float64(60+semanticRank)
 		current.semantic = item.semantic
-		merged[item.candidate.ChunkID] = current
+		merged[key] = current
 	}
 	return sortedRanks(merged)
+}
+
+func candidateRankKey(candidate cache.RepositoryDocCandidate) string {
+	return candidate.Path + "\x00" + candidate.ChunkID
 }
 
 func sortedRanks(items map[string]rankedHit) []rankedHit {

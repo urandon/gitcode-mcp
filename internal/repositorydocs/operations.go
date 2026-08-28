@@ -34,7 +34,7 @@ func InspectPolicy(ctx context.Context, repo *Repository, req PolicyRequest) (Po
 	if err != nil {
 		return PolicyResult{}, err
 	}
-	overlayDigest, err := ResolveOverlayDigest(ctx, repo, commitOID, policy.PolicyHash, req.IncludeWorktree, DefaultMaxDocumentBytes)
+	overlayDigest, err := ResolveOverlayDigest(ctx, repo, commitOID, policy.Policy, req.IncludeWorktree, DefaultMaxDocumentBytes)
 	if err != nil {
 		return PolicyResult{}, err
 	}
