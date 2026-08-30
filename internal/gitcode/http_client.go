@@ -480,6 +480,29 @@ func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, op
 		return WriteResult[Issue]{}, err
 	}
 	req.State = wireState
+	preserveMilestone := len(req.Milestone) == 0
+	preserveLabels := len(req.Labels) == 0
+	var preimage Issue
+	if preserveMilestone || preserveLabels {
+		var err error
+		preimage, err = c.GetIssue(ctx, IssueRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
+		if err != nil {
+			return WriteResult[Issue]{}, err
+		}
+		if strings.TrimSpace(preimage.ID) == "" || preimage.Number != req.Number {
+			return WriteResult[Issue]{}, ErrValidationFailed{Field: "response", Message: "issue update preimage requires id and matching number"}
+		}
+		// GitCode currently clears an assigned milestone when the field is
+		// omitted from an otherwise valid issue PATCH. Keep public patch
+		// semantics at the adapter boundary by sending the live preimage.
+		if preserveMilestone && preimage.Milestone != nil {
+			milestoneID := strings.TrimSpace(preimage.Milestone.RemoteID)
+			if milestoneID == "" {
+				return WriteResult[Issue]{}, &ErrSchemaDecode{Field: "issue.milestone.id", Expected: "non-empty positive integer", Received: "missing"}
+			}
+			req.Milestone = EncodeIssueMilestone(milestoneID)
+		}
+	}
 	target := req.Owner + "/" + req.Repo + "/" + strconv.Itoa(req.Number)
 	endpoint := updateIssueEndpoint(req.Owner, req.Repo, req.Number)
 	result, err := writeConfirmedJSON[Issue](ctx, c, http.MethodPatch, endpoint, "UpdateIssue", target, updateIssuePayload(req), opts, func(result WriteResult[Issue]) (WriteResult[Issue], error) {
@@ -491,18 +514,48 @@ func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, op
 		result.RemoteNumber = issue.Number
 		return result, nil
 	})
-	if err != nil || expectedState == "" {
+	if err != nil {
 		return result, err
 	}
 	readback, err := c.GetIssue(ctx, IssueRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
 	if err != nil {
-		return WriteResult[Issue]{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "issue state update requires readback", Cause: err}
+		return WriteResult[Issue]{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "issue update requires canonical readback", Cause: err}
 	}
 	if strings.TrimSpace(readback.ID) == "" || readback.Number != req.Number {
 		return WriteResult[Issue]{}, ErrValidationFailed{Field: "response", Message: "issue state update readback requires id and matching number"}
 	}
-	if strings.TrimSpace(readback.State) != expectedState {
+	if req.Title != "" && readback.Title != req.Title {
+		return WriteResult[Issue]{}, ErrValidationFailed{Field: "title", Message: fmt.Sprintf("issue update readback = %q, want %q", readback.Title, req.Title)}
+	}
+	if req.Body != "" && readback.Body != req.Body {
+		return WriteResult[Issue]{}, ErrValidationFailed{Field: "body", Message: "issue update readback does not match the requested body"}
+	}
+	if expectedState != "" && strings.TrimSpace(readback.State) != expectedState {
 		return WriteResult[Issue]{}, ErrValidationFailed{Field: "state", Message: fmt.Sprintf("issue state update readback = %q, want %q", readback.State, expectedState)}
+	}
+	if preserveMilestone && issueMilestoneRemoteID(readback.Milestone) != issueMilestoneRemoteID(preimage.Milestone) {
+		return WriteResult[Issue]{}, ErrValidationFailed{Field: "milestone", Message: "issue update did not preserve the omitted milestone"}
+	}
+	if !preserveMilestone {
+		expectedMilestone, err := requestedIssueMilestoneRemoteID(req.Milestone)
+		if err != nil {
+			return WriteResult[Issue]{}, err
+		}
+		if issueMilestoneRemoteID(readback.Milestone) != expectedMilestone {
+			return WriteResult[Issue]{}, ErrValidationFailed{Field: "milestone", Message: "issue update readback does not match the requested milestone"}
+		}
+	}
+	if preserveLabels && !sameStrings(readback.Labels, preimage.Labels) {
+		return WriteResult[Issue]{}, ErrValidationFailed{Field: "labels", Message: "issue update did not preserve omitted labels"}
+	}
+	if !preserveLabels {
+		expectedLabels, err := requestedIssueLabels(req.Labels)
+		if err != nil {
+			return WriteResult[Issue]{}, err
+		}
+		if !sameStrings(readback.Labels, expectedLabels) {
+			return WriteResult[Issue]{}, ErrValidationFailed{Field: "labels", Message: "issue update readback does not match the requested labels"}
+		}
 	}
 	result.Record = readback
 	result.RemoteID = readback.ID
@@ -512,6 +565,56 @@ func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, op
 		result.RemoteRevision = readback.UpdatedAt.UTC().Format(time.RFC3339Nano)
 	}
 	return result, nil
+}
+
+func issueMilestoneRemoteID(milestone *Milestone) string {
+	if milestone == nil {
+		return ""
+	}
+	return strings.TrimSpace(milestone.RemoteID)
+}
+
+func requestedIssueMilestoneRemoteID(raw json.RawMessage) (string, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "null" {
+		return "", nil
+	}
+	id, err := strconv.Atoi(trimmed)
+	if err != nil || id <= 0 {
+		return "", ErrValidationFailed{Field: "milestone", Message: "milestone must be a positive integer or null"}
+	}
+	return strconv.Itoa(id), nil
+}
+
+func requestedIssueLabels(raw json.RawMessage) ([]string, error) {
+	var joined string
+	if err := json.Unmarshal(raw, &joined); err != nil {
+		return nil, ErrValidationFailed{Field: "labels", Message: "labels must be a comma-separated JSON string"}
+	}
+	parts := strings.Split(joined, ",")
+	labels := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if label := strings.TrimSpace(part); label != "" {
+			labels = append(labels, label)
+		}
+	}
+	return labels, nil
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftCopy := append([]string(nil), left...)
+	rightCopy := append([]string(nil), right...)
+	sort.Strings(leftCopy)
+	sort.Strings(rightCopy)
+	for i := range leftCopy {
+		if leftCopy[i] != rightCopy[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *HTTPClient) CreateIssueComment(ctx context.Context, req CreateIssueCommentRequest, opts WriteOptions) (WriteResult[Comment], error) {

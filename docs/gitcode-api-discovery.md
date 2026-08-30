@@ -31,6 +31,27 @@ Discovery status for metadata-first sync:
 | Milestones | Adapter model includes `UpdatedAt`, but list behavior and persistence are not verified for collection sync. | Not yet a first-class bulk collection surface; do not report `skipped_by_revision`. |
 | Push remote mirrors | The v5 list exposes stable `id`, `project_id`, destination `url`, force/private flags, update status, failure count/message, and update timestamps. The v5 item POST accepts `{"force":true}` for a manual trigger. | Implemented as explicit list, audited trigger, and bounded wait surfaces with sanitized cache projection. It is not a bulk frontier collection. |
 
+## Issue Update Patch Compatibility
+
+A live compatibility observation on 2026-08-30 showed that the v5 issue update
+route can clear an assigned milestone when an otherwise valid JSON PATCH omits
+`milestone`. The public API documentation describes the update fields but does
+not document an `ETag`, `If-Match`, revision token, or another conditional-write
+precondition for this route.
+
+The adapter therefore treats omitted fields as public patch semantics while
+handling the provider quirk at its boundary. Before a partial issue update it
+reads the canonical issue, carries the existing milestone into the provider
+payload, and leaves omitted labels absent. It then requires canonical readback
+to confirm every requested field and to verify that the omitted milestone and
+labels remain unchanged. A 2xx response alone is not write confirmation.
+
+This read-modify-write compatibility path is not a claim of serializable
+external writes. Without a provider precondition, another client can change an
+issue between the preimage read and PATCH. Durable in-flight recovery and
+typed conflict handling belong to the service reliability contract; callers
+must not infer provider-level compare-and-swap from the preservation check.
+
 ## Repository Push Remote Mirrors
 
 The repository list route is:

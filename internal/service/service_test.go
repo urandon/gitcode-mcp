@@ -1466,6 +1466,85 @@ func TestUpdateIssueClearMilestoneReturnsClearedReceipt(t *testing.T) {
 	}
 }
 
+func TestUpdateIssueBodyOnlyPreservesLiveMilestoneAndCachedLink(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	now := time.Date(2026, 8, 30, 5, 0, 0, 0, time.UTC)
+	if err := store.UpsertRecordGraph(ctx, cache.RecordGraph{
+		Record:           cache.Record{RepoID: "fixture-a", ID: "ISSUE-42", Type: "issue", Path: "issues/42.md", Title: "Issue", Body: "Original", Status: "open", ContentHash: "issue-original", Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: "42", CreatedAt: now, UpdatedAt: now},
+		RelatedRecords:   []cache.Record{{RepoID: "fixture-a", ID: "MILESTONE-7", Type: "milestone", Path: "milestones/7.md", Title: "Release 7", Status: "open", ContentHash: "milestone-7", Provenance: cache.ProvenanceRemote, RemoteType: "milestone", RemoteID: "7", CreatedAt: now, UpdatedAt: now}},
+		ReplaceLinkKinds: []string{"milestone"},
+		Links:            []cache.Link{{TargetID: "MILESTONE-7", Kind: "milestone", Text: "Release 7"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	patchCalls := 0
+	body := "Original"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v5/repos/owner-a/repo-a/issues/42" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		writeIssue := func() {
+			fmt.Fprintf(w, `{"id":"42","number":42,"title":"Issue","body":%q,"state":"open","labels":[{"id":1,"name":"bug"}],"milestone":{"id":7,"title":"Release 7","state":"open"},"created_at":"2026-08-30T05:00:00Z","updated_at":"2026-08-30T05:00:00Z"}`, body)
+		}
+		switch r.Method {
+		case http.MethodGet:
+			writeIssue()
+		case http.MethodPatch:
+			patchCalls++
+			var payload map[string]json.RawMessage
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode PATCH: %v", err)
+			}
+			if string(payload["milestone"]) != "7" {
+				t.Fatalf("PATCH milestone=%s, want live preimage 7", payload["milestone"])
+			}
+			if err := json.Unmarshal(payload["body"], &body); err != nil {
+				t.Fatalf("decode PATCH body: %v", err)
+			}
+			writeIssue()
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	}))
+	defer server.Close()
+
+	svc, err := NewWithMode(store, gitcode.ProviderModeLive, "test-token", ServiceConfig{BaseURL: server.URL, LockPath: filepath.Join(t.TempDir(), "service.lock")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 42, Body: "Updated", IdempotencyKey: "issue-125-body-only"}
+	result, err := svc.UpdateIssue(ctx, req)
+	if err != nil {
+		t.Fatalf("UpdateIssue: %v", err)
+	}
+	if result.ID != "ISSUE-42" || patchCalls != 1 {
+		t.Fatalf("result=%#v patch_calls=%d", result, patchCalls)
+	}
+	links, err := store.ListLinks(ctx, cache.LinkFilter{RepoID: "fixture-a", SourceID: "ISSUE-42"})
+	if err != nil || len(links) != 1 || links[0].TargetID != "MILESTONE-7" {
+		t.Fatalf("milestone links=%#v err=%v", links, err)
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", "ISSUE-42")
+	if err != nil || record.Body != "Updated" || !reflect.DeepEqual(record.Labels, []string{"bug"}) || record.RemoteRevision == "" {
+		t.Fatalf("cached record=%#v err=%v", record, err)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", req.IdempotencyKey)
+	if err != nil || entry == nil || entry.Status != "succeeded" || entry.RemoteID != "42" || entry.PayloadHash == "" {
+		t.Fatalf("audit entry=%#v err=%v", entry, err)
+	}
+	replayed, err := svc.UpdateIssue(ctx, req)
+	if err != nil || !replayed.Replayed || patchCalls != 1 {
+		t.Fatalf("replay=%#v err=%v patch_calls=%d", replayed, err, patchCalls)
+	}
+}
+
 func TestUpdateIssueRejectsMilestoneAndClearMilestone(t *testing.T) {
 	ctx := context.Background()
 	svc := seededSyncService(t, ctx, &fakeGitCodeClient{})
