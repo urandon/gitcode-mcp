@@ -311,6 +311,7 @@ func NewMaintenanceManager(manager Manager, jobs *JobManager, path string) *Main
 	maintenance := &MaintenanceManager{manager: manager, jobs: jobs, path: path, entries: map[string]*MaintenanceEntry{}, receipts: map[string]maintenanceReceipt{}, admissions: map[string]repositoryDocsAdmissionIntent{}, sources: map[string]map[string]*repositoryDocsRegisteredSource{}, now: func() time.Time { return time.Now().UTC() }, writeFile: durableAtomicWriteFile}
 	if jobs != nil {
 		jobs.onRepositoryDocsCancelled = maintenance.cancelRepositoryDocsAdmission
+		jobs.repositoryDocsCancellationCommitted = maintenance.repositoryDocsCancellationCommitted
 	}
 	return maintenance
 }
@@ -891,6 +892,17 @@ func (m *MaintenanceManager) cancelRepositoryDocsAdmission(job Job) error {
 		return RepositoryDocsSourceUnavailableError{code: "repository_docs_cancel_persist_failed"}
 	}
 	return nil
+}
+
+func (m *MaintenanceManager) repositoryDocsCancellationCommitted(job Job) bool {
+	if job.Type != RepositoryDocsIndexJobType || strings.TrimSpace(job.RegistrationID) == "" || strings.TrimSpace(job.SourceRegistrationID) == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	intent, ok := m.admissions[repositoryDocsAdmissionKey(job.RegistrationID, job.SourceRegistrationID)]
+	return ok && intent.Disposition == repositoryDocsAdmissionCancelled && intent.JobID == job.ID &&
+		intent.SourceRegistrationGeneration == job.SourceRegistrationGeneration && intent.ExpectedRevisionSetID == job.ExpectedRevisionSetID
 }
 
 func (m *MaintenanceManager) completeRepositoryDocsAdmission(registrationID, sourceRegistrationID string, sourceGeneration int64, expectedSetID string) error {

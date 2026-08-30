@@ -55,20 +55,29 @@ type Job struct {
 }
 
 type JobManager struct {
-	mu                        sync.Mutex
-	jobs                      map[string]*Job
-	cancel                    map[string]context.CancelFunc
-	cancelResolution          map[string]chan struct{}
-	nextID                    int
-	snapshotPath              string
-	now                       func() time.Time
-	retention                 config.ServiceJobRetentionConfig
-	expiredTotal              int
-	truncatedTotal            int
-	lastExpired               int
-	lastTruncated             int
-	lastPrunedAt              *time.Time
-	onRepositoryDocsCancelled func(Job) error
+	mu                                  sync.Mutex
+	jobs                                map[string]*Job
+	cancel                              map[string]context.CancelFunc
+	cancelResolution                    map[string]*jobCancellationResolution
+	nextID                              int
+	snapshotPath                        string
+	now                                 func() time.Time
+	writeFile                           func(string, []byte, os.FileMode) error
+	retention                           config.ServiceJobRetentionConfig
+	expiredTotal                        int
+	truncatedTotal                      int
+	lastExpired                         int
+	lastTruncated                       int
+	lastPrunedAt                        *time.Time
+	onRepositoryDocsCancelled           func(Job) error
+	repositoryDocsCancellationCommitted func(Job) bool
+}
+
+type jobCancellationResolution struct {
+	done  chan struct{}
+	job   Job
+	found bool
+	err   error
 }
 
 type JobRetentionSnapshot struct {
@@ -90,6 +99,7 @@ type ErrCacheWriterBusy struct {
 }
 
 var ErrJobAdmissionPersistence = errors.New("service job admission could not be persisted")
+var ErrJobSnapshotPersistence = errors.New("service job terminal snapshot could not be persisted")
 
 type JobAdmissionPersistenceError struct{}
 
@@ -99,6 +109,16 @@ func (e JobAdmissionPersistenceError) Unwrap() error { return ErrJobAdmissionPer
 
 func (e JobAdmissionPersistenceError) DiagnosticCode() string {
 	return "job_admission_persistence_failed"
+}
+
+type JobSnapshotPersistenceError struct{}
+
+func (e JobSnapshotPersistenceError) Error() string { return ErrJobSnapshotPersistence.Error() }
+
+func (e JobSnapshotPersistenceError) Unwrap() error { return ErrJobSnapshotPersistence }
+
+func (e JobSnapshotPersistenceError) DiagnosticCode() string {
+	return "job_snapshot_persistence_failed"
 }
 
 func (e ErrCacheWriterBusy) Error() string {
@@ -130,9 +150,10 @@ func NewJobManagerWithRetention(snapshotPath string, retention config.ServiceJob
 	return &JobManager{
 		jobs:             map[string]*Job{},
 		cancel:           map[string]context.CancelFunc{},
-		cancelResolution: map[string]chan struct{}{},
+		cancelResolution: map[string]*jobCancellationResolution{},
 		snapshotPath:     snapshotPath,
 		now:              func() time.Time { return time.Now().UTC() },
+		writeFile:        durableAtomicWriteFile,
 		retention:        retention,
 	}
 }
@@ -158,7 +179,14 @@ func (m *JobManager) LoadAndMarkInterrupted() error {
 	maxID := 0
 	for i := range jobs {
 		job := jobs[i]
-		if jobActiveStatus(job.Status) {
+		if job.Status == JobStatusCancelling && m.repositoryDocsCancellationCommitted != nil && m.repositoryDocsCancellationCommitted(job) {
+			job.Status = JobStatusCancelled
+			job.UpdatedAt = now
+			job.FinishedAt = &now
+			job.ErrorClass = "cancelled"
+			job.Error = publicMaintenanceJobError(job.Type, job.ErrorClass)
+			job.Progress = append(job.Progress, service.ProgressEvent{Type: JobStatusCancelled, Phase: JobStatusCancelled, Collection: job.Type, Message: "durable cancellation recovered after service restart"})
+		} else if jobActiveStatus(job.Status) {
 			job.Status = JobStatusInterrupted
 			job.UpdatedAt = now
 			job.FinishedAt = &now
@@ -519,8 +547,13 @@ func (m *JobManager) Cancel(id string) (Job, bool, error) {
 		return current, found, nil
 	}
 	if job.Status == JobStatusCancelling {
+		resolution := m.cancelResolution[id]
 		m.mu.Unlock()
-		return m.waitForTerminalJob(id)
+		if resolution == nil {
+			return job, true, JobSnapshotPersistenceError{}
+		}
+		<-resolution.done
+		return resolution.job, resolution.found, resolution.err
 	}
 	if job.Type != RepositoryDocsIndexJobType {
 		m.mu.Unlock()
@@ -529,17 +562,18 @@ func (m *JobManager) Cancel(id string) (Job, bool, error) {
 	}
 	onRepositoryDocsCancelled := m.onRepositoryDocsCancelled
 	previous := job
-	resolution := make(chan struct{})
+	resolution := &jobCancellationResolution{done: make(chan struct{})}
 	stored.Status = JobStatusCancelling
 	stored.UpdatedAt = m.now()
 	stored.Progress = append(stored.Progress, service.ProgressEvent{Type: JobStatusCancelling, Phase: JobStatusCancelling, Collection: stored.Type, Message: "durable cancellation is being committed"})
 	m.cancelResolution[id] = resolution
 	if err := m.saveLocked(); err != nil {
 		*stored = previous
+		resolution.job, resolution.found, resolution.err = previous, true, JobAdmissionPersistenceError{}
 		delete(m.cancelResolution, id)
-		close(resolution)
+		close(resolution.done)
 		m.mu.Unlock()
-		return previous, true, JobAdmissionPersistenceError{}
+		return resolution.job, resolution.found, resolution.err
 	}
 	job = cloneJob(stored)
 	m.mu.Unlock()
@@ -554,11 +588,12 @@ func (m *JobManager) Cancel(id string) (Job, bool, error) {
 				*current = previous
 				_ = m.saveLocked()
 			}
-			delete(m.cancelResolution, id)
-			close(resolution)
 			current := cloneJob(m.jobs[id])
+			resolution.job, resolution.found, resolution.err = current, current.ID != "", err
+			delete(m.cancelResolution, id)
+			close(resolution.done)
 			m.mu.Unlock()
-			return current, current.ID != "", err
+			return resolution.job, resolution.found, resolution.err
 		}
 	}
 	m.mu.Lock()
@@ -573,16 +608,20 @@ func (m *JobManager) Cancel(id string) (Job, bool, error) {
 		current.Progress = append(current.Progress, service.ProgressEvent{Type: JobStatusCancelled, Phase: JobStatusCancelled, Collection: current.Type, Message: current.Error})
 		delete(m.cancel, id)
 	}
-	delete(m.cancelResolution, id)
-	close(resolution)
 	saveErr := m.saveLocked()
 	currentJob := cloneJob(current)
-	m.mu.Unlock()
-	cancel()
+	resolution.job, resolution.found = currentJob, currentJob.ID != ""
 	if saveErr != nil {
-		return currentJob, currentJob.ID != "", JobAdmissionPersistenceError{}
+		resolution.err = JobSnapshotPersistenceError{}
 	}
-	return m.waitForTerminalJob(id)
+	// Signal the worker before publishing the shared resolution. Concurrent
+	// callers may return as soon as done closes, so the public result must not
+	// claim a worker signal that is still pending.
+	cancel()
+	delete(m.cancelResolution, id)
+	close(resolution.done)
+	m.mu.Unlock()
+	return resolution.job, resolution.found, resolution.err
 }
 
 func (m *JobManager) waitForTerminalJob(id string) (Job, bool, error) {
@@ -614,7 +653,7 @@ func (m *JobManager) updateRepositoryDocsTerminalJob(id string, fn func(*Job, ti
 			resolution := m.cancelResolution[id]
 			m.mu.Unlock()
 			if resolution != nil {
-				<-resolution
+				<-resolution.done
 				continue
 			}
 			time.Sleep(time.Millisecond)
@@ -783,7 +822,7 @@ func (m *JobManager) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	return durableAtomicWriteFile(m.snapshotPath, append(data, '\n'), 0o600)
+	return m.writeFile(m.snapshotPath, append(data, '\n'), 0o600)
 }
 
 func (m *JobManager) pruneLocked() {

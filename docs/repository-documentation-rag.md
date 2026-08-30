@@ -114,6 +114,11 @@ same public job identity while observing bounded exponential retry backoff.
 The cancel operation acknowledges a repository-document job only after its
 durable admission tombstone is committed; a state-write failure leaves the
 worker running and returns a typed retryable error instead of false success.
+Concurrent cancel callers share that same durable resolution without a polling
+timeout. If the tombstone commits but the terminal job-history snapshot cannot
+be written, the worker is still signalled and the error reports that narrower
+snapshot failure; restart recovery reconstructs `cancelled` from the tombstone
+instead of misclassifying the job as `interrupted`.
 An in-flight semantic query first loads one exact published revision-set
 snapshot (membership, chunk locators, and vectors) transactionally. Retention
 may evict historical cache rows after that snapshot is loaded without

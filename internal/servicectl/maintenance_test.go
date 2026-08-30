@@ -800,6 +800,132 @@ func TestRepositoryDocsCancellationFenceWinsConcurrentWorkerSuccess(t *testing.T
 	}
 }
 
+func TestRepositoryDocsConcurrentCancellationSharesDurableFailure(t *testing.T) {
+	jobs := NewJobManager("")
+	jobCtx, cancel := context.WithCancel(context.Background())
+	job, created, err := jobs.createCoalescedJobWithIntent(
+		RepositoryDocsIndexJobType, "owner/repo", "profile", 0, "work", "cache", "registration", "namespace",
+		JobRecoveryIntent{SourceRegistrationID: "source", SourceRegistrationGeneration: 1, ExpectedRevisionSetID: "set"}, cancel,
+	)
+	if err != nil || !created {
+		t.Fatalf("job=%+v created=%t err=%v", job, created, err)
+	}
+	jobs.updateJob(job.ID, func(stored *Job, now time.Time) { stored.Status = JobStatusRunning })
+
+	tombstoneEntered := make(chan struct{})
+	releaseTombstone := make(chan struct{})
+	wantErr := errors.New("injected cancellation tombstone failure")
+	jobs.onRepositoryDocsCancelled = func(Job) error {
+		close(tombstoneEntered)
+		<-releaseTombstone
+		return wantErr
+	}
+	type cancelOutcome struct {
+		job   Job
+		found bool
+		err   error
+	}
+	primary := make(chan cancelOutcome, 1)
+	duplicate := make(chan cancelOutcome, 1)
+	go func() {
+		cancelled, found, cancelErr := jobs.Cancel(job.ID)
+		primary <- cancelOutcome{job: cancelled, found: found, err: cancelErr}
+	}()
+	<-tombstoneEntered
+	go func() {
+		cancelled, found, cancelErr := jobs.Cancel(job.ID)
+		duplicate <- cancelOutcome{job: cancelled, found: found, err: cancelErr}
+	}()
+	select {
+	case result := <-duplicate:
+		t.Fatalf("duplicate returned before durable resolution: %+v", result)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(releaseTombstone)
+	for name, outcomes := range map[string]<-chan cancelOutcome{"primary": primary, "duplicate": duplicate} {
+		select {
+		case result := <-outcomes:
+			if !result.found || result.job.Status != JobStatusRunning || !errors.Is(result.err, wantErr) {
+				t.Fatalf("%s outcome=%+v", name, result)
+			}
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("%s did not receive the shared cancellation resolution", name)
+		}
+	}
+	select {
+	case <-jobCtx.Done():
+		t.Fatal("failed durable cancellation signalled the worker")
+	default:
+	}
+}
+
+func TestRepositoryDocsCancellationRecoversCommittedTombstoneAfterSnapshotFailure(t *testing.T) {
+	dir := t.TempDir()
+	jobsPath := filepath.Join(dir, "jobs.json")
+	registryPath := filepath.Join(dir, "registry.json")
+	jobs := NewJobManager(jobsPath)
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), jobs, registryPath)
+	registrationID, sourceID := "reg-cancel-recover", "source-cancel-recover"
+	maintenance.entries[registrationID] = &MaintenanceEntry{RegistrationID: registrationID, RepoID: "owner/repo"}
+	maintenance.sources[registrationID] = map[string]*repositoryDocsRegisteredSource{sourceID: {
+		State:          RepositoryDocsMaintenanceState{SourceRegistrationID: sourceID, SourceRegistrationGeneration: 1, State: "indexing"},
+		RepositoryPath: filepath.Join(dir, "repo"),
+	}}
+	maintenance.admissions[repositoryDocsAdmissionKey(registrationID, sourceID)] = repositoryDocsAdmissionIntent{
+		RegistrationID: registrationID, SourceRegistrationID: sourceID, SourceRegistrationGeneration: 1,
+		RepoID: "owner/repo", WorkKey: "work", ExpectedRevisionSetID: "set", Disposition: repositoryDocsAdmissionPending, CreatedAt: time.Now().UTC(),
+	}
+	jobCtx, cancel := context.WithCancel(context.Background())
+	job, created, err := jobs.createCoalescedJobWithIntent(
+		RepositoryDocsIndexJobType, "owner/repo", "profile", 0, "work", "cache", registrationID, "namespace",
+		JobRecoveryIntent{SourceRegistrationID: sourceID, SourceRegistrationGeneration: 1, ExpectedRevisionSetID: "set"}, cancel,
+	)
+	if err != nil || !created {
+		t.Fatalf("job=%+v created=%t err=%v", job, created, err)
+	}
+	jobs.updateJob(job.ID, func(stored *Job, now time.Time) { stored.Status = JobStatusRunning })
+
+	writes := 0
+	jobs.writeFile = func(path string, data []byte, mode os.FileMode) error {
+		writes++
+		if writes == 2 {
+			return errors.New("injected terminal snapshot failure")
+		}
+		return durableAtomicWriteFile(path, data, mode)
+	}
+	_, actionErr := NewJobActionManager("", jobs, nil).Cancel(context.Background(), adminhttp.JobActionRequest{JobID: job.ID, IdempotencyKey: "cancel-snapshot-failure"})
+	var publicErr adminhttp.JobActionError
+	if !errors.As(actionErr, &publicErr) || publicErr.Code != "repository_docs_cancel_snapshot_failed" || !strings.Contains(publicErr.Message, "Cancellation is durable") {
+		t.Fatalf("public snapshot error=%T %+v", actionErr, publicErr)
+	}
+	current, found := jobs.Get(job.ID)
+	if !found || current.Status != JobStatusCancelled {
+		t.Fatalf("in-memory terminal cancellation=%+v found=%t", current, found)
+	}
+	select {
+	case <-jobCtx.Done():
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("worker was not signalled after the durable tombstone")
+	}
+
+	restartedJobs := NewJobManager(jobsPath)
+	restartedMaintenance := NewMaintenanceManager(newTestManager(t, "darwin"), restartedJobs, registryPath)
+	if err := restartedMaintenance.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if err := restartedJobs.LoadAndMarkInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	recovered, found := restartedJobs.Get(job.ID)
+	if !found || recovered.Status != JobStatusCancelled || recovered.ErrorClass != "cancelled" {
+		t.Fatalf("recovered cancellation=%+v found=%t", recovered, found)
+	}
+	intent, ok := restartedMaintenance.repositoryDocsAdmission(registrationID, sourceID)
+	if !ok || intent.Disposition != repositoryDocsAdmissionCancelled || intent.JobID != job.ID {
+		t.Fatalf("recovered tombstone=%+v ok=%t", intent, ok)
+	}
+}
+
 func TestRepositoryDocsGenerationFenceSuppressesLateCancellationPersistence(t *testing.T) {
 	jobs := NewJobManager("")
 	now := time.Now().UTC()

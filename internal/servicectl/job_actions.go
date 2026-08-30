@@ -116,6 +116,9 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		}
 		cancelled, found, cancelErr := m.jobs.Cancel(job.ID)
 		if cancelErr != nil {
+			if errors.Is(cancelErr, ErrJobSnapshotPersistence) {
+				return adminhttp.JobActionReceipt{}, jobActionError(http.StatusServiceUnavailable, "repository_docs_cancel_snapshot_failed", "Cancellation is durable and the worker was signalled, but terminal job history could not be saved.", "Refresh the job after service storage is writable; a restart reconciles the terminal state from the durable cancellation tombstone.")
+			}
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusServiceUnavailable, "repository_docs_cancel_persist_failed", "Cancellation could not be made durable, so the job was left running.", "Retry cancellation after durable service state is writable.")
 		}
 		if !found {
