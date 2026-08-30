@@ -20,7 +20,10 @@ import (
 	"gitcode-mcp/internal/service"
 )
 
-const maintenanceRegistrySchema = "gitcode-mcp.managed-caches.v1"
+const (
+	legacyMaintenanceRegistrySchema = "gitcode-mcp.managed-caches.v1"
+	maintenanceRegistrySchema       = "gitcode-mcp.managed-caches.v2"
+)
 
 type MaintenancePolicy struct {
 	SyncEnabled         bool   `json:"sync_enabled"`
@@ -51,36 +54,60 @@ type MaintenanceStageState struct {
 }
 
 type MaintenanceEntry struct {
-	RegistrationID        string                           `json:"registration_id"`
-	CacheUUID             string                           `json:"cache_uuid"`
-	PathFingerprint       string                           `json:"path_fingerprint"`
-	RepoID                string                           `json:"repo_id"`
-	NamespaceID           string                           `json:"namespace_id,omitempty"`
-	Policy                MaintenancePolicy                `json:"policy"`
-	Enabled               bool                             `json:"enabled"`
-	Generation            int64                            `json:"generation"`
-	State                 string                           `json:"state"`
-	ContentGeneration     int64                            `json:"content_generation,omitempty"`
-	CoveredGeneration     int64                            `json:"covered_generation,omitempty"`
-	RAGStatus             string                           `json:"rag_status,omitempty"`
-	ConfigHash            string                           `json:"config_hash,omitempty"`
-	Frontiers             []cache.MaintenanceFrontier      `json:"frontiers,omitempty"`
-	ActiveJobs            []string                         `json:"active_jobs,omitempty"`
-	LastErrorClass        string                           `json:"last_error_class,omitempty"`
-	LastError             string                           `json:"last_error,omitempty"`
-	SyncStage             MaintenanceStageState            `json:"sync_stage,omitempty"`
-	RAGStage              MaintenanceStageState            `json:"rag_stage,omitempty"`
-	RepositoryDocs        *RepositoryDocsMaintenanceState  `json:"repository_docs,omitempty"`
-	RepositoryDocsSources []RepositoryDocsMaintenanceState `json:"repository_docs_sources,omitempty"`
-	LastSeenAt            time.Time                        `json:"last_seen_at"`
-	LastReconciledAt      time.Time                        `json:"last_reconciled_at,omitempty"`
-	NextReconcileAt       time.Time                        `json:"next_reconcile_at,omitempty"`
-	cachePath             string
-	configReference       string
-	configSnapshot        config.Config
-	repositoryPath        string
-	repositoryProfile     string
-	repositorySourceID    string
+	RegistrationID            string                           `json:"registration_id"`
+	CacheUUID                 string                           `json:"cache_uuid"`
+	PathFingerprint           string                           `json:"path_fingerprint"`
+	RepoID                    string                           `json:"repo_id"`
+	Aliases                   []string                         `json:"aliases,omitempty"`
+	LegacyRegistrationIDs     []string                         `json:"legacy_registration_ids,omitempty"`
+	IdentityConflict          *MaintenanceIdentityConflict     `json:"identity_conflict,omitempty"`
+	NamespaceID               string                           `json:"namespace_id,omitempty"`
+	Policy                    MaintenancePolicy                `json:"policy"`
+	Enabled                   bool                             `json:"enabled"`
+	Generation                int64                            `json:"generation"`
+	State                     string                           `json:"state"`
+	ContentGeneration         int64                            `json:"content_generation,omitempty"`
+	CoveredGeneration         int64                            `json:"covered_generation,omitempty"`
+	RAGStatus                 string                           `json:"rag_status,omitempty"`
+	ConfigHash                string                           `json:"config_hash,omitempty"`
+	Frontiers                 []cache.MaintenanceFrontier      `json:"frontiers,omitempty"`
+	ActiveJobs                []string                         `json:"active_jobs,omitempty"`
+	LastErrorClass            string                           `json:"last_error_class,omitempty"`
+	LastError                 string                           `json:"last_error,omitempty"`
+	SyncStage                 MaintenanceStageState            `json:"sync_stage,omitempty"`
+	RAGStage                  MaintenanceStageState            `json:"rag_stage,omitempty"`
+	RepositoryDocs            *RepositoryDocsMaintenanceState  `json:"repository_docs,omitempty"`
+	RepositoryDocsSources     []RepositoryDocsMaintenanceState `json:"repository_docs_sources,omitempty"`
+	LastSeenAt                time.Time                        `json:"last_seen_at"`
+	LastReconciledAt          time.Time                        `json:"last_reconciled_at,omitempty"`
+	NextReconcileAt           time.Time                        `json:"next_reconcile_at,omitempty"`
+	cachePath                 string
+	configReference           string
+	configSnapshot            config.Config
+	repositoryPath            string
+	repositoryProfile         string
+	repositorySourceID        string
+	identityBlockedWasEnabled bool
+}
+
+type MaintenanceIdentityConflict struct {
+	Kind                     string                         `json:"kind,omitempty"`
+	CandidateRegistrationIDs []string                       `json:"candidate_registration_ids"`
+	PolicyHashes             []string                       `json:"policy_hashes"`
+	ConfigHashes             []string                       `json:"config_hashes"`
+	PathFingerprints         []string                       `json:"path_fingerprints,omitempty"`
+	Candidates               []MaintenanceIdentityCandidate `json:"candidates,omitempty"`
+}
+
+type MaintenanceIdentityCandidate struct {
+	RegistrationID string            `json:"registration_id"`
+	Policy         MaintenancePolicy `json:"policy"`
+	ConfigHash     string            `json:"config_hash,omitempty"`
+}
+
+type MaintenanceRegistrationRedirect struct {
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
 type RepositoryDocsMaintenanceState struct {
@@ -101,12 +128,13 @@ type RepositoryDocsMaintenanceState struct {
 
 type maintenanceDiskEntry struct {
 	MaintenanceEntry
-	CachePath             string                     `json:"cache_path"`
-	ConfigReference       string                     `json:"config_reference,omitempty"`
-	ConfigSnapshot        config.Config              `json:"config_snapshot"`
-	RepositoryPath        string                     `json:"repository_path,omitempty"`
-	RepositoryProfile     string                     `json:"repository_profile,omitempty"`
-	RepositoryDocsSources []repositoryDocsDiskSource `json:"repository_docs_sources,omitempty"`
+	CachePath                 string                     `json:"cache_path"`
+	ConfigReference           string                     `json:"config_reference,omitempty"`
+	ConfigSnapshot            config.Config              `json:"config_snapshot"`
+	RepositoryPath            string                     `json:"repository_path,omitempty"`
+	RepositoryProfile         string                     `json:"repository_profile,omitempty"`
+	RepositoryDocsSources     []repositoryDocsDiskSource `json:"repository_docs_sources,omitempty"`
+	IdentityBlockedWasEnabled bool                       `json:"identity_blocked_was_enabled,omitempty"`
 }
 
 type repositoryDocsDiskSource struct {
@@ -122,11 +150,12 @@ type repositoryDocsRegisteredSource struct {
 }
 
 type maintenanceRegistryFile struct {
-	SchemaVersion                string                          `json:"schema_version"`
-	Generation                   int64                           `json:"generation"`
-	Entries                      []maintenanceDiskEntry          `json:"entries"`
-	Receipts                     []maintenanceReceipt            `json:"idempotency_receipts,omitempty"`
-	RepositoryDocsAdmissionQueue []repositoryDocsAdmissionIntent `json:"repository_docs_admission_queue,omitempty"`
+	SchemaVersion                string                            `json:"schema_version"`
+	Generation                   int64                             `json:"generation"`
+	Entries                      []maintenanceDiskEntry            `json:"entries"`
+	Receipts                     []maintenanceReceipt              `json:"idempotency_receipts,omitempty"`
+	RepositoryDocsAdmissionQueue []repositoryDocsAdmissionIntent   `json:"repository_docs_admission_queue,omitempty"`
+	RegistrationRedirects        []MaintenanceRegistrationRedirect `json:"registration_redirects,omitempty"`
 }
 
 // repositoryDocsAdmissionIntent is the durable handoff between private source
@@ -270,6 +299,22 @@ func (MaintenanceIdempotencyConflictError) Error() string {
 
 func (MaintenanceIdempotencyConflictError) DiagnosticCode() string { return "idempotency_conflict" }
 
+type MaintenanceIdentityConflictError struct{ kind string }
+
+func (e MaintenanceIdentityConflictError) Error() string {
+	if e.kind == "cache_clone_conflict" {
+		return "maintenance: cache identity is registered at multiple locations; resolve the clone conflict before enrollment"
+	}
+	return "maintenance: canonical repository identity has conflicting policies; resolve the conflict before enrollment"
+}
+
+func (e MaintenanceIdentityConflictError) DiagnosticCode() string {
+	if strings.TrimSpace(e.kind) != "" {
+		return e.kind
+	}
+	return "identity_conflict"
+}
+
 type MaintenanceListResult struct {
 	SchemaVersion string             `json:"schema_version"`
 	Generation    int64              `json:"generation"`
@@ -303,12 +348,13 @@ type MaintenanceManager struct {
 	receipts    map[string]maintenanceReceipt
 	admissions  map[string]repositoryDocsAdmissionIntent
 	sources     map[string]map[string]*repositoryDocsRegisteredSource
+	redirects   map[string]string
 	now         func() time.Time
 	writeFile   func(string, []byte, os.FileMode) error
 }
 
 func NewMaintenanceManager(manager Manager, jobs *JobManager, path string) *MaintenanceManager {
-	maintenance := &MaintenanceManager{manager: manager, jobs: jobs, path: path, entries: map[string]*MaintenanceEntry{}, receipts: map[string]maintenanceReceipt{}, admissions: map[string]repositoryDocsAdmissionIntent{}, sources: map[string]map[string]*repositoryDocsRegisteredSource{}, now: func() time.Time { return time.Now().UTC() }, writeFile: durableAtomicWriteFile}
+	maintenance := &MaintenanceManager{manager: manager, jobs: jobs, path: path, entries: map[string]*MaintenanceEntry{}, receipts: map[string]maintenanceReceipt{}, admissions: map[string]repositoryDocsAdmissionIntent{}, sources: map[string]map[string]*repositoryDocsRegisteredSource{}, redirects: map[string]string{}, now: func() time.Time { return time.Now().UTC() }, writeFile: durableAtomicWriteFile}
 	if jobs != nil {
 		jobs.onRepositoryDocsCancelled = maintenance.cancelRepositoryDocsAdmission
 		jobs.repositoryDocsCancellationCommitted = maintenance.repositoryDocsCancellationCommitted
@@ -330,7 +376,7 @@ func (m *MaintenanceManager) Load() error {
 	if err := json.Unmarshal(data, &disk); err != nil {
 		return err
 	}
-	if disk.SchemaVersion != maintenanceRegistrySchema {
+	if disk.SchemaVersion != maintenanceRegistrySchema && disk.SchemaVersion != legacyMaintenanceRegistrySchema {
 		return fmt.Errorf("maintenance: unsupported registry schema %q", disk.SchemaVersion)
 	}
 	m.generation = disk.Generation
@@ -344,6 +390,7 @@ func (m *MaintenanceManager) Load() error {
 		entry.configSnapshot = stored.ConfigSnapshot
 		entry.repositoryPath = stored.RepositoryPath
 		entry.repositoryProfile = stored.RepositoryProfile
+		entry.identityBlockedWasEnabled = stored.IdentityBlockedWasEnabled
 		if entry.RepositoryDocs != nil {
 			if entry.RepositoryDocs.SourceRegistrationID == "" {
 				entry.RepositoryDocs.SourceRegistrationID = repositoryDocsSourceRegistrationID(entry.RegistrationID, entry.RepositoryDocs.GitStoreRef, entry.RepositoryDocs.WorktreeRef, entry.repositoryProfile)
@@ -373,6 +420,11 @@ func (m *MaintenanceManager) Load() error {
 	for _, receipt := range disk.Receipts {
 		m.receipts[receipt.KeyHash] = receipt
 	}
+	for _, redirect := range disk.RegistrationRedirects {
+		if redirect.From != "" && redirect.To != "" && redirect.From != redirect.To {
+			m.redirects[redirect.From] = redirect.To
+		}
+	}
 	for _, admission := range disk.RepositoryDocsAdmissionQueue {
 		entry := m.entries[admission.RegistrationID]
 		source := m.sources[admission.RegistrationID][admission.SourceRegistrationID]
@@ -383,7 +435,266 @@ func (m *MaintenanceManager) Load() error {
 		}
 		m.admissions[repositoryDocsAdmissionKey(admission.RegistrationID, admission.SourceRegistrationID)] = admission
 	}
+	migrated := m.canonicalizeLoadedEntriesLocked(context.Background())
+	if disk.SchemaVersion == legacyMaintenanceRegistrySchema || migrated {
+		m.generation++
+		if err := m.saveLocked(); err != nil {
+			return err
+		}
+	}
+	if m.jobs != nil {
+		m.jobs.SetRegistrationRedirects(m.redirects, m.canonicalRepoIDsLocked())
+	}
 	return nil
+}
+
+func (m *MaintenanceManager) canonicalizeLoadedEntriesLocked(ctx context.Context) bool {
+	type candidate struct {
+		id      string
+		entry   *MaintenanceEntry
+		repoID  string
+		aliases []string
+	}
+	groups := map[string][]candidate{}
+	changed := false
+	ids := make([]string, 0, len(m.entries))
+	for id := range m.entries {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		entry := m.entries[id]
+		store, err := cache.NewSQLiteReadOnlyStore(ctx, entry.cachePath)
+		if err != nil {
+			changed = blockMaintenanceIdentity(entry, "identity_unresolved") || changed
+			continue
+		}
+		identity, identityErr := store.CacheIdentity(ctx)
+		binding, bindingErr := store.ResolveRepositoryBinding(ctx, entry.RepoID)
+		_ = store.Close()
+		if identityErr != nil || bindingErr != nil || identity.UUID != entry.CacheUUID {
+			changed = blockMaintenanceIdentity(entry, "identity_unresolved") || changed
+			continue
+		}
+		if entry.State == "identity_unresolved" {
+			entry.Enabled = entry.identityBlockedWasEnabled
+			entry.identityBlockedWasEnabled = false
+			entry.State = "enrolled"
+			entry.LastErrorClass = ""
+			entry.LastError = ""
+			changed = true
+		}
+		canonicalID := maintenanceRegistrationID(identity.UUID, binding.RepoID)
+		groups[canonicalID] = append(groups[canonicalID], candidate{id: id, entry: entry, repoID: binding.RepoID, aliases: append([]string(nil), binding.Aliases...)})
+	}
+	canonicalIDs := make([]string, 0, len(groups))
+	for id := range groups {
+		canonicalIDs = append(canonicalIDs, id)
+	}
+	sort.Strings(canonicalIDs)
+	for _, canonicalID := range canonicalIDs {
+		candidates := groups[canonicalID]
+		sort.Slice(candidates, func(i, j int) bool { return candidates[i].id < candidates[j].id })
+		base := candidates[0]
+		for _, item := range candidates {
+			if item.id == canonicalID {
+				base = item
+				break
+			}
+		}
+		merged := cloneMaintenanceEntryPrivate(base.entry)
+		merged.RegistrationID = canonicalID
+		merged.RepoID = candidates[0].repoID
+		merged.Aliases = sortedUniqueStrings(candidates[0].aliases)
+		if len(candidates) > 1 {
+			merged.LegacyRegistrationIDs = nil
+			merged.IdentityConflict = nil
+		}
+		compatible := true
+		candidateIDs, policyHashes, configHashes, pathFingerprints := []string{}, []string{}, []string{}, []string{}
+		identityCandidates := []MaintenanceIdentityCandidate{}
+		maxGeneration := merged.Generation
+		mergedSources := map[string]*repositoryDocsRegisteredSource{}
+		for _, item := range candidates {
+			candidateIDs = append(candidateIDs, item.id)
+			policyHashes = append(policyHashes, maintenanceHash(item.entry.Policy))
+			configHashes = append(configHashes, item.entry.ConfigHash)
+			pathFingerprints = append(pathFingerprints, pathFingerprint(item.entry.cachePath))
+			identityCandidates = append(identityCandidates, MaintenanceIdentityCandidate{RegistrationID: item.id, Policy: item.entry.Policy, ConfigHash: item.entry.ConfigHash})
+			if item.entry.Policy != base.entry.Policy || item.entry.ConfigHash != base.entry.ConfigHash || !maintenanceSourceSetsCompatible(m.sources[base.id], m.sources[item.id]) {
+				compatible = false
+			}
+			if item.entry.Generation > maxGeneration {
+				maxGeneration = item.entry.Generation
+			}
+			merged.LastSeenAt = laterTime(merged.LastSeenAt, item.entry.LastSeenAt)
+			merged.LastReconciledAt = laterTime(merged.LastReconciledAt, item.entry.LastReconciledAt)
+			merged.SyncStage = conservativeMaintenanceStage(merged.SyncStage, item.entry.SyncStage)
+			merged.RAGStage = conservativeMaintenanceStage(merged.RAGStage, item.entry.RAGStage)
+			for sourceID, source := range m.sources[item.id] {
+				if source != nil {
+					copy := *source
+					mergedSources[sourceID] = &copy
+				}
+			}
+			if item.id != canonicalID {
+				merged.LegacyRegistrationIDs = append(merged.LegacyRegistrationIDs, item.id)
+				m.redirects[item.id] = canonicalID
+			}
+		}
+		merged.LegacyRegistrationIDs = sortedUniqueStrings(merged.LegacyRegistrationIDs)
+		if len(candidates) > 1 {
+			merged.Generation = maxGeneration + 1
+			merged.ActiveJobs = nil
+			changed = true
+		}
+		conflictKind := "identity_conflict"
+		if len(sortedUniqueStrings(pathFingerprints)) > 1 {
+			compatible = false
+			conflictKind = "cache_clone_conflict"
+		}
+		if !compatible {
+			merged.Enabled, merged.State, merged.ActiveJobs = false, conflictKind, nil
+			merged.LastErrorClass = conflictKind
+			merged.LastError = publicMaintenanceError(conflictKind)
+			sort.Slice(identityCandidates, func(i, j int) bool {
+				return identityCandidates[i].RegistrationID < identityCandidates[j].RegistrationID
+			})
+			merged.IdentityConflict = &MaintenanceIdentityConflict{Kind: conflictKind, CandidateRegistrationIDs: sortedUniqueStrings(candidateIDs), PolicyHashes: sortedUniqueStrings(policyHashes), ConfigHashes: sortedUniqueStrings(configHashes), PathFingerprints: sortedUniqueStrings(pathFingerprints), Candidates: identityCandidates}
+		}
+		if merged.RepoID != base.entry.RepoID || !stringSlicesEqual(merged.Aliases, base.entry.Aliases) || canonicalID != base.id {
+			changed = true
+		}
+		for _, item := range candidates {
+			delete(m.entries, item.id)
+			delete(m.sources, item.id)
+		}
+		m.entries[canonicalID] = &merged
+		m.sources[canonicalID] = mergedSources
+		m.refreshLegacyRepositoryDocsLocked(&merged)
+	}
+	for key, receipt := range m.receipts {
+		canonicalID := m.resolveRegistrationIDLocked(receipt.RegistrationID)
+		if canonicalID != receipt.RegistrationID {
+			receipt.RegistrationID = canonicalID
+			if entry := m.entries[canonicalID]; entry != nil {
+				receipt.IntentHash = maintenanceEnrollmentIntentHash(canonicalID, entry.Policy, entry.ConfigHash)
+			}
+			m.receipts[key], changed = receipt, true
+		}
+	}
+	for key, admission := range m.admissions {
+		if m.resolveRegistrationIDLocked(admission.RegistrationID) != admission.RegistrationID {
+			delete(m.admissions, key)
+			changed = true
+		}
+	}
+	return changed
+}
+
+func blockMaintenanceIdentity(entry *MaintenanceEntry, state string) bool {
+	if entry == nil {
+		return false
+	}
+	changed := entry.State != state || entry.Enabled || entry.LastErrorClass != state
+	if entry.State != state {
+		entry.identityBlockedWasEnabled = entry.Enabled
+	}
+	entry.Enabled = false
+	entry.State = state
+	entry.LastErrorClass = state
+	entry.LastError = publicMaintenanceError(state)
+	return changed
+}
+
+func maintenanceSourceSetsCompatible(left, right map[string]*repositoryDocsRegisteredSource) bool {
+	if len(left) == 0 || len(right) == 0 {
+		return true
+	}
+	return maintenanceHash(publicMaintenanceSourceSet(left)) == maintenanceHash(publicMaintenanceSourceSet(right))
+}
+
+func publicMaintenanceSourceSet(sources map[string]*repositoryDocsRegisteredSource) []RepositoryDocsMaintenanceState {
+	out := make([]RepositoryDocsMaintenanceState, 0, len(sources))
+	for _, source := range sources {
+		if source != nil {
+			out = append(out, source.State)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].SourceRegistrationID < out[j].SourceRegistrationID })
+	return out
+}
+
+func conservativeMaintenanceStage(left, right MaintenanceStageState) MaintenanceStageState {
+	selected := left
+	if right.UpdatedAt.After(left.UpdatedAt) {
+		selected = right
+	}
+	if maintenanceStageFailed(left) && maintenanceStageFailed(right) {
+		if right.RetryAfter.After(selected.RetryAfter) {
+			selected.RetryAfter = right.RetryAfter
+		}
+		if left.RetryAfter.After(selected.RetryAfter) {
+			selected.RetryAfter = left.RetryAfter
+		}
+		if right.ConsecutiveFailures > selected.ConsecutiveFailures {
+			selected.ConsecutiveFailures = right.ConsecutiveFailures
+		}
+		if left.ConsecutiveFailures > selected.ConsecutiveFailures {
+			selected.ConsecutiveFailures = left.ConsecutiveFailures
+		}
+	}
+	return selected
+}
+
+func maintenanceStageFailed(state MaintenanceStageState) bool {
+	return state.LastErrorClass != "" || state.Status == JobStatusFailed || state.Status == "retry_scheduled"
+}
+
+func laterTime(left, right time.Time) time.Time {
+	if right.After(left) {
+		return right
+	}
+	return left
+}
+
+func sortedUniqueStrings(values []string) []string {
+	seen := map[string]bool{}
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			seen[value] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for value := range seen {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func stringSlicesEqual(left, right []string) bool {
+	return strings.Join(sortedUniqueStrings(left), "\x00") == strings.Join(sortedUniqueStrings(right), "\x00")
+}
+
+func (m *MaintenanceManager) resolveRegistrationIDLocked(value string) string {
+	value = strings.TrimSpace(value)
+	seen := map[string]bool{}
+	for m.redirects[value] != "" && !seen[value] {
+		seen[value] = true
+		value = m.redirects[value]
+	}
+	return value
+}
+
+func (m *MaintenanceManager) canonicalRepoIDsLocked() map[string]string {
+	result := map[string]string{}
+	for registrationID, entry := range m.entries {
+		if entry != nil {
+			result[registrationID] = entry.RepoID
+		}
+	}
+	return result
 }
 
 func (m *MaintenanceManager) Run(ctx context.Context) {
@@ -424,20 +735,11 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 	if err != nil {
 		return MaintenanceEntry{}, err
 	}
-	repos, err := store.ListRepositories(ctx)
+	binding, err := store.ResolveRepositoryBinding(ctx, req.RepoID)
 	if err != nil {
-		return MaintenanceEntry{}, err
-	}
-	var binding cache.RepositoryBinding
-	for _, repo := range repos {
-		if repo.RepoID == req.RepoID {
-			binding = repo
-			break
-		}
-	}
-	if binding.RepoID == "" {
 		return MaintenanceEntry{}, fmt.Errorf("maintenance: repository %q is not bound in selected cache", req.RepoID)
 	}
+	req.RepoID = binding.RepoID
 	policy, err := normalizeMaintenancePolicy(req.Policy, binding)
 	if err != nil {
 		return MaintenanceEntry{}, err
@@ -451,6 +753,18 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.canonicalizeLoadedEntriesLocked(ctx) {
+		m.generation++
+		if m.jobs != nil {
+			m.jobs.SetRegistrationRedirects(m.redirects, m.canonicalRepoIDsLocked())
+		}
+		if err := m.saveLocked(); err != nil {
+			return MaintenanceEntry{}, err
+		}
+	}
+	if existing := m.entries[registrationID]; existing != nil && existing.IdentityConflict != nil {
+		return MaintenanceEntry{}, MaintenanceIdentityConflictError{kind: existing.IdentityConflict.Kind}
+	}
 	if receipt, ok := m.receipts[keyHash]; ok {
 		if receipt.RegistrationID != registrationID || (receipt.IntentHash != "" && receipt.IntentHash != intentHash) {
 			return MaintenanceEntry{}, MaintenanceIdempotencyConflictError{}
@@ -512,7 +826,7 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 		}
 		return cloneMaintenanceEntry(existing), nil
 	}
-	entry := &MaintenanceEntry{RegistrationID: registrationID, CacheUUID: identity.UUID, PathFingerprint: pathFingerprint(path), RepoID: req.RepoID, Policy: policy, ConfigHash: strings.TrimSpace(req.ConfigHash), Enabled: true, Generation: 1, State: "enrolled", LastSeenAt: now, cachePath: path, configReference: strings.TrimSpace(req.ConfigReference), configSnapshot: req.ConfigSnapshot}
+	entry := &MaintenanceEntry{RegistrationID: registrationID, CacheUUID: identity.UUID, PathFingerprint: pathFingerprint(path), RepoID: req.RepoID, Aliases: append([]string(nil), binding.Aliases...), Policy: policy, ConfigHash: strings.TrimSpace(req.ConfigHash), Enabled: true, Generation: 1, State: "enrolled", LastSeenAt: now, cachePath: path, configReference: strings.TrimSpace(req.ConfigReference), configSnapshot: req.ConfigSnapshot}
 	m.entries[registrationID] = entry
 	m.receipts[keyHash] = maintenanceReceipt{KeyHash: keyHash, RegistrationID: registrationID, IntentHash: intentHash}
 	m.generation++
@@ -555,7 +869,7 @@ func (m *MaintenanceManager) Disable(ctx context.Context, registrationID string)
 	_ = ctx
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	entry := m.entries[strings.TrimSpace(registrationID)]
+	entry := m.entries[m.resolveRegistrationIDLocked(registrationID)]
 	if entry == nil {
 		return MaintenanceEntry{}, errors.New("maintenance: registration not found")
 	}
@@ -629,6 +943,7 @@ func (m *MaintenanceManager) ReconcileRegistration(ctx context.Context, registra
 		return MaintenanceReconcileResult{}, errors.New("maintenance: registration_id is required")
 	}
 	m.mu.Lock()
+	registrationID = m.resolveRegistrationIDLocked(registrationID)
 	registered := m.entries[registrationID]
 	var snapshot MaintenanceEntry
 	if registered != nil {
@@ -1747,7 +2062,7 @@ func (m *MaintenanceManager) updateEntryFailure(id, class string, _ error) Maint
 func (m *MaintenanceManager) saveLocked() error {
 	disk := maintenanceRegistryFile{SchemaVersion: maintenanceRegistrySchema, Generation: m.generation}
 	for _, entry := range m.entries {
-		stored := maintenanceDiskEntry{MaintenanceEntry: cloneMaintenanceEntry(entry), CachePath: entry.cachePath, ConfigReference: entry.configReference, ConfigSnapshot: entry.configSnapshot, RepositoryPath: entry.repositoryPath, RepositoryProfile: entry.repositoryProfile}
+		stored := maintenanceDiskEntry{MaintenanceEntry: cloneMaintenanceEntry(entry), CachePath: entry.cachePath, ConfigReference: entry.configReference, ConfigSnapshot: entry.configSnapshot, RepositoryPath: entry.repositoryPath, RepositoryProfile: entry.repositoryProfile, IdentityBlockedWasEnabled: entry.identityBlockedWasEnabled}
 		ids := make([]string, 0, len(m.sources[entry.RegistrationID]))
 		for id := range m.sources[entry.RegistrationID] {
 			ids = append(ids, id)
@@ -1766,6 +2081,10 @@ func (m *MaintenanceManager) saveLocked() error {
 		disk.Receipts = append(disk.Receipts, receipt)
 	}
 	sort.Slice(disk.Receipts, func(i, j int) bool { return disk.Receipts[i].KeyHash < disk.Receipts[j].KeyHash })
+	for from, to := range m.redirects {
+		disk.RegistrationRedirects = append(disk.RegistrationRedirects, MaintenanceRegistrationRedirect{From: from, To: to})
+	}
+	sort.Slice(disk.RegistrationRedirects, func(i, j int) bool { return disk.RegistrationRedirects[i].From < disk.RegistrationRedirects[j].From })
 	for _, admission := range m.admissions {
 		disk.RepositoryDocsAdmissionQueue = append(disk.RepositoryDocsAdmissionQueue, admission)
 	}
@@ -1843,6 +2162,12 @@ func bindingHasScope(binding cache.RepositoryBinding, scope cache.RepositoryScop
 
 func publicMaintenanceError(class string) string {
 	switch class {
+	case "identity_unresolved":
+		return "managed cache repository identity is unavailable"
+	case "identity_conflict":
+		return "managed cache repository identity has conflicting policies"
+	case "cache_clone_conflict":
+		return "managed cache identity is registered at multiple locations"
 	case "cache_unreadable":
 		return "managed cache is unavailable"
 	case "cache_replaced":
@@ -1952,6 +2277,17 @@ func cloneMaintenanceEntry(entry *MaintenanceEntry) MaintenanceEntry {
 		return MaintenanceEntry{}
 	}
 	copy := *entry
+	copy.Aliases = append([]string(nil), entry.Aliases...)
+	copy.LegacyRegistrationIDs = append([]string(nil), entry.LegacyRegistrationIDs...)
+	if entry.IdentityConflict != nil {
+		conflict := *entry.IdentityConflict
+		conflict.CandidateRegistrationIDs = append([]string(nil), entry.IdentityConflict.CandidateRegistrationIDs...)
+		conflict.PolicyHashes = append([]string(nil), entry.IdentityConflict.PolicyHashes...)
+		conflict.ConfigHashes = append([]string(nil), entry.IdentityConflict.ConfigHashes...)
+		conflict.PathFingerprints = append([]string(nil), entry.IdentityConflict.PathFingerprints...)
+		conflict.Candidates = append([]MaintenanceIdentityCandidate(nil), entry.IdentityConflict.Candidates...)
+		copy.IdentityConflict = &conflict
+	}
 	copy.Frontiers = append([]cache.MaintenanceFrontier(nil), entry.Frontiers...)
 	copy.ActiveJobs = append([]string(nil), entry.ActiveJobs...)
 	copy.RepositoryDocsSources = append([]RepositoryDocsMaintenanceState(nil), entry.RepositoryDocsSources...)
@@ -2024,6 +2360,17 @@ func cloneMaintenanceEntryPrivate(entry *MaintenanceEntry) MaintenanceEntry {
 		return MaintenanceEntry{}
 	}
 	copy := *entry
+	copy.Aliases = append([]string(nil), entry.Aliases...)
+	copy.LegacyRegistrationIDs = append([]string(nil), entry.LegacyRegistrationIDs...)
+	if entry.IdentityConflict != nil {
+		conflict := *entry.IdentityConflict
+		conflict.CandidateRegistrationIDs = append([]string(nil), entry.IdentityConflict.CandidateRegistrationIDs...)
+		conflict.PolicyHashes = append([]string(nil), entry.IdentityConflict.PolicyHashes...)
+		conflict.ConfigHashes = append([]string(nil), entry.IdentityConflict.ConfigHashes...)
+		conflict.PathFingerprints = append([]string(nil), entry.IdentityConflict.PathFingerprints...)
+		conflict.Candidates = append([]MaintenanceIdentityCandidate(nil), entry.IdentityConflict.Candidates...)
+		copy.IdentityConflict = &conflict
+	}
 	copy.Frontiers = append([]cache.MaintenanceFrontier(nil), entry.Frontiers...)
 	copy.ActiveJobs = append([]string(nil), entry.ActiveJobs...)
 	copy.RepositoryDocsSources = append([]RepositoryDocsMaintenanceState(nil), entry.RepositoryDocsSources...)

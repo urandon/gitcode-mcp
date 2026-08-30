@@ -50,7 +50,7 @@ The authenticated `/api/admin/v1` surface is an in-process transport over the co
 | `GET /jobs` and `/jobs/{job_id}` | Structured bounded job history and progress; list filters accept state, type, cache, repository, and failure class. |
 | `POST /jobs/{job_id}/cancel` | Request graceful cancellation of an active daemon-owned sync or RAG job. |
 | `POST /jobs/{job_id}/retry` | Request one safe current maintenance reconciliation for a terminal sync or RAG job; equivalent active work is coalesced. |
-| `GET /maintenance` | Read-only registrations and policy summaries. |
+| `GET /maintenance` | Read-only canonical registrations, aliases, legacy redirects, conflict state, and policy summaries. |
 | `POST /maintenance/plan` | Render the current maintenance policy effect ledger for one opaque cache/repository target. |
 | `POST /maintenance/apply` | Re-plan and apply the exact confirmed maintenance plan with an idempotency key. |
 | `POST /maintenance/{registration_id}/disable` | Disable one retained registration and return a durable receipt. |
@@ -69,7 +69,7 @@ Event cursors are opaque and monotonic. A reconnect within the retained window r
 
 Every mutation requires the authenticated session cookie, a same-origin request, the session CSRF value returned by `GET /session`, a public target id, and a fresh idempotency key. The daemon persists only hashes of idempotency material and bounded sets of 256 public receipts. Replaying a retained key returns the original receipt after restart; reusing it for a different target, action, or plan is rejected. A cancel receipt distinguishes a completed cancellation from a request still converging. Retry and reconcile do not force an identical historical execution: they reconcile current truth, then report whether work was created, coalesced, or no longer needed.
 
-Maintenance apply always renders the plan again and rejects changes to cache identity, repository binding, effective non-secret configuration, provider/model revision, daemon protocol/state, or requested policy as `stale_plan`. Its effect ledger labels inspection, local configuration writes, job enqueueing, provider data transfer, local service changes, and downloads separately. Machine-level effects remain blocked with an exact CLI handoff.
+Maintenance apply always renders the plan again and rejects changes to cache identity, canonical repository binding, effective non-secret configuration, provider/model revision, daemon protocol/state, or requested policy as `stale_plan`. Its effect ledger labels inspection, local configuration writes, job enqueueing, provider data transfer, local service changes, and downloads separately. Machine-level effects remain blocked with an exact CLI handoff. Alias-derived legacy registrations render as one canonical row with known aliases; old public registration references redirect to that row. A conflicting migrated policy remains disabled until the dedicated conflict-resolution plan is rendered and confirmed, and the UI must never infer a winner from recency or display order.
 
 Binding plan/apply accepts `cache_ref`, never `cache_path`. An omitted API URL uses the effective GitCode v5 default for a new binding and preserves an existing custom route on update. Owner/name derivation, normalized scopes, unique aliases, schema compatibility, and ambiguous cache identity are checked before the atomic SQLite transaction. Applying a stale plan, an alias collision, or a reused key with changed intent produces a typed conflict. Unbind remains deliberately unavailable.
 

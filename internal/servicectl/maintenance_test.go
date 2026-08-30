@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,6 +90,421 @@ func TestMaintenanceRegistryEnrollReplayAndSanitize(t *testing.T) {
 	reloadedList, _ := reloaded.List(ctx)
 	if len(reloadedList.Entries) != 1 || reloadedList.Entries[0].RegistrationID != first.RegistrationID {
 		t.Fatalf("reloaded=%+v", reloadedList)
+	}
+}
+
+func TestMaintenanceEnrollCanonicalizesAliasBeforeIdentityAndReplay(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Aliases: []string{"legacy/repo"}, Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(filepath.Join(dir, "jobs.json")), filepath.Join(dir, "registry.json"))
+	canonicalReq := testMaintenanceEnrollRequest(cachePath, "shared-replay", MaintenancePolicy{})
+	canonical, err := maintenance.Enroll(ctx, canonicalReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliasReq := canonicalReq
+	aliasReq.RepoID = "legacy/repo"
+	alias, err := maintenance.Enroll(ctx, aliasReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errCh := make(chan error, 12)
+	for i := 0; i < 12; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			req := testMaintenanceEnrollRequest(cachePath, fmt.Sprintf("concurrent-%d", i), MaintenancePolicy{})
+			if i%2 == 1 {
+				req.RepoID = "legacy/repo"
+			}
+			entry, enrollErr := maintenance.Enroll(ctx, req)
+			if enrollErr != nil {
+				errCh <- enrollErr
+				return
+			}
+			if entry.RegistrationID != canonical.RegistrationID || entry.RepoID != "owner/repo" {
+				errCh <- fmt.Errorf("non-canonical concurrent entry: %+v", entry)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
+	listed, err := maintenance.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alias.RegistrationID != canonical.RegistrationID || alias.RepoID != "owner/repo" || len(listed.Entries) != 1 || len(canonical.Aliases) != 1 || canonical.Aliases[0] != "legacy/repo" {
+		t.Fatalf("canonical=%+v alias=%+v listed=%+v", canonical, alias, listed)
+	}
+}
+
+func TestMaintenanceLoadMigratesCompatibleAliasDuplicatesAndJobLinks(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Aliases: []string{"legacy/repo"}, Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.CachePath = cachePath
+	configHash := maintenanceHash(cfg)
+	policy := MaintenancePolicy{SyncEnabled: true, SyncMode: "head", Issues: true, HeadIntervalSeconds: 900, RAGIntervalSeconds: 900, HeadMaxPages: 3, TailSlicePages: 10, PerPage: 100}
+	canonicalID := maintenanceRegistrationID(identity.UUID, "owner/repo")
+	legacyID := maintenanceRegistrationID(identity.UUID, "legacy/repo")
+	now := time.Date(2026, 8, 30, 7, 0, 0, 0, time.UTC)
+	legacyRetry := now.Add(45 * time.Minute)
+	registryPath := filepath.Join(dir, "managed-caches.json")
+	disk := maintenanceRegistryFile{
+		SchemaVersion: legacyMaintenanceRegistrySchema,
+		Generation:    7,
+		Entries: []maintenanceDiskEntry{
+			{MaintenanceEntry: MaintenanceEntry{RegistrationID: canonicalID, CacheUUID: identity.UUID, RepoID: "owner/repo", Policy: policy, ConfigHash: configHash, Enabled: true, Generation: 2, State: "ready", LastSeenAt: now}, CachePath: cachePath, ConfigSnapshot: cfg},
+			{MaintenanceEntry: MaintenanceEntry{RegistrationID: legacyID, CacheUUID: identity.UUID, RepoID: "legacy/repo", Policy: policy, ConfigHash: configHash, Enabled: true, Generation: 4, State: "degraded", SyncStage: MaintenanceStageState{Status: JobStatusFailed, ConsecutiveFailures: 3, RetryAfter: legacyRetry, UpdatedAt: now.Add(time.Minute)}, LastSeenAt: now.Add(time.Minute)}, CachePath: cachePath, ConfigSnapshot: cfg},
+		},
+		Receipts: []maintenanceReceipt{{KeyHash: maintenanceIdempotencyKeyHash("legacy-enroll"), RegistrationID: legacyID, IntentHash: maintenanceEnrollmentIntentHash(legacyID, policy, configHash)}},
+	}
+	data, _ := json.Marshal(disk)
+	if err := os.WriteFile(registryPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jobsPath := filepath.Join(dir, "jobs.json")
+	jobsData, _ := json.Marshal([]Job{{ID: "job-000001", Type: SyncJobType, RepoID: "legacy/repo", CacheUUID: identity.UUID, RegistrationID: legacyID, Status: JobStatusSucceeded, CreatedAt: now, UpdatedAt: now}})
+	if err := os.WriteFile(jobsPath, jobsData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jobs := NewJobManager(jobsPath)
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), jobs, registryPath)
+	if err := maintenance.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.LoadAndMarkInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := maintenance.List(ctx)
+	if err != nil || len(listed.Entries) != 1 {
+		t.Fatalf("listed=%+v err=%v", listed, err)
+	}
+	entry := listed.Entries[0]
+	if entry.RegistrationID != canonicalID || entry.RepoID != "owner/repo" || len(entry.Aliases) != 1 || entry.Aliases[0] != "legacy/repo" || len(entry.LegacyRegistrationIDs) != 1 || entry.LegacyRegistrationIDs[0] != legacyID || !entry.SyncStage.RetryAfter.Equal(legacyRetry) || entry.Generation != 5 {
+		t.Fatalf("migrated entry=%+v", entry)
+	}
+	job, ok := jobs.Get("job-000001")
+	if !ok || job.RegistrationID != canonicalID || job.RepoID != "owner/repo" || job.ID != "job-000001" {
+		t.Fatalf("migrated job=%+v ok=%v", job, ok)
+	}
+	disabled, err := maintenance.Disable(ctx, legacyID)
+	if err != nil || disabled.RegistrationID != canonicalID || disabled.Enabled {
+		t.Fatalf("redirect disable=%+v err=%v", disabled, err)
+	}
+	persisted, err := os.ReadFile(registryPath)
+	if err != nil || !strings.Contains(string(persisted), maintenanceRegistrySchema) || !strings.Contains(string(persisted), legacyID) {
+		t.Fatalf("persisted=%s err=%v", persisted, err)
+	}
+}
+
+func TestMaintenanceCanonicalIdentityKeepsDistinctRepositoriesSeparate(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, binding := range []cache.RepositoryBinding{
+		{RepoID: "owner/first", Owner: "owner", Name: "first", Aliases: []string{"legacy/first"}},
+		{RepoID: "owner/second", Owner: "owner", Name: "second", Aliases: []string{"legacy/second"}},
+	} {
+		if err := store.AddRepository(ctx, binding); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(filepath.Join(dir, "jobs.json")), filepath.Join(dir, "registry.json"))
+	firstRequest := testMaintenanceEnrollRequest(cachePath, "first", MaintenancePolicy{})
+	firstRequest.RepoID = "legacy/first"
+	first, err := maintenance.Enroll(ctx, firstRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRequest := testMaintenanceEnrollRequest(cachePath, "second", MaintenancePolicy{})
+	secondRequest.RepoID = "owner/second"
+	second, err := maintenance.Enroll(ctx, secondRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, err := maintenance.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.RepoID != "owner/first" || second.RepoID != "owner/second" || first.RegistrationID == second.RegistrationID || len(listed.Entries) != 2 {
+		t.Fatalf("first=%+v second=%+v listed=%+v", first, second, listed)
+	}
+}
+
+func TestConservativeMaintenanceStageUsesLatestSuccessToClearOlderFailure(t *testing.T) {
+	failedAt := time.Date(2026, 8, 30, 8, 0, 0, 0, time.UTC)
+	succeededAt := failedAt.Add(time.Minute)
+	failed := MaintenanceStageState{Status: JobStatusFailed, LastErrorClass: "sync_failed", ConsecutiveFailures: 3, RetryAfter: failedAt.Add(time.Hour), UpdatedAt: failedAt}
+	succeeded := MaintenanceStageState{Status: JobStatusSucceeded, UpdatedAt: succeededAt}
+	merged := conservativeMaintenanceStage(failed, succeeded)
+	if merged.Status != JobStatusSucceeded || merged.LastErrorClass != "" || merged.ConsecutiveFailures != 0 || !merged.RetryAfter.IsZero() {
+		t.Fatalf("latest success did not clear older failure: %+v", merged)
+	}
+}
+
+func TestMaintenanceRegistryMigrationFailureLeavesV1RecoverableAndRetryIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.CachePath = cachePath
+	registrationID := maintenanceRegistrationID(identity.UUID, "owner/repo")
+	disk := maintenanceRegistryFile{SchemaVersion: legacyMaintenanceRegistrySchema, Generation: 4, Entries: []maintenanceDiskEntry{{
+		MaintenanceEntry: MaintenanceEntry{RegistrationID: registrationID, CacheUUID: identity.UUID, RepoID: "owner/repo", Policy: MaintenancePolicy{}, ConfigHash: maintenanceHash(cfg), Enabled: true, Generation: 1, State: "ready"},
+		CachePath:        cachePath, ConfigSnapshot: cfg,
+	}}}
+	original, _ := json.Marshal(disk)
+	registryPath := filepath.Join(dir, "managed-caches.json")
+	if err := os.WriteFile(registryPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected migration persistence failure")
+	failing := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), registryPath)
+	failing.writeFile = func(string, []byte, os.FileMode) error { return injected }
+	if err := failing.Load(); !errors.Is(err, injected) {
+		t.Fatalf("migration error=%v", err)
+	}
+	afterFailure, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterFailure, original) {
+		t.Fatalf("failed migration changed durable v1 registry: before=%s after=%s", original, afterFailure)
+	}
+
+	first := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), registryPath)
+	if err := first.Load(); err != nil {
+		t.Fatal(err)
+	}
+	firstList, err := first.List(ctx)
+	if err != nil || firstList.SchemaVersion != maintenanceRegistrySchema || firstList.Generation != 5 || len(firstList.Entries) != 1 {
+		t.Fatalf("first migration=%+v err=%v", firstList, err)
+	}
+	second := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), registryPath)
+	if err := second.Load(); err != nil {
+		t.Fatal(err)
+	}
+	secondList, err := second.List(ctx)
+	if err != nil || secondList.Generation != firstList.Generation || len(secondList.Entries) != 1 || secondList.Entries[0].RegistrationID != registrationID {
+		t.Fatalf("repeated migration=%+v err=%v", secondList, err)
+	}
+}
+
+func TestMaintenanceLoadBlocksAliasPolicyConflictWithoutScheduling(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Aliases: []string{"legacy/repo"}, Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	identity, _ := store.CacheIdentity(ctx)
+	_ = store.Close()
+	cfg := config.Default()
+	cfg.CachePath = cachePath
+	configHash := maintenanceHash(cfg)
+	canonicalID := maintenanceRegistrationID(identity.UUID, "owner/repo")
+	legacyID := maintenanceRegistrationID(identity.UUID, "legacy/repo")
+	disk := maintenanceRegistryFile{SchemaVersion: legacyMaintenanceRegistrySchema, Entries: []maintenanceDiskEntry{
+		{MaintenanceEntry: MaintenanceEntry{RegistrationID: canonicalID, CacheUUID: identity.UUID, RepoID: "owner/repo", Policy: MaintenancePolicy{SyncEnabled: true, SyncMode: "head", Issues: true}, ConfigHash: configHash, Enabled: true, Generation: 1}, CachePath: cachePath, ConfigSnapshot: cfg},
+		{MaintenanceEntry: MaintenanceEntry{RegistrationID: legacyID, CacheUUID: identity.UUID, RepoID: "legacy/repo", Policy: MaintenancePolicy{SyncEnabled: false, SyncMode: "off"}, ConfigHash: configHash, Enabled: true, Generation: 1}, CachePath: cachePath, ConfigSnapshot: cfg},
+	}}
+	data, _ := json.Marshal(disk)
+	registryPath := filepath.Join(dir, "managed-caches.json")
+	if err := os.WriteFile(registryPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), jobs, registryPath)
+	if err := maintenance.Load(); err != nil {
+		t.Fatal(err)
+	}
+	listed, _ := maintenance.List(ctx)
+	if len(listed.Entries) != 1 || listed.Entries[0].Enabled || listed.Entries[0].State != "identity_conflict" || listed.Entries[0].IdentityConflict == nil || len(listed.Entries[0].IdentityConflict.CandidateRegistrationIDs) != 2 {
+		t.Fatalf("conflict list=%+v", listed)
+	}
+	reconciled, err := maintenance.Reconcile(ctx)
+	if err != nil || len(reconciled.JobsStarted) != 0 || len(jobs.List()) != 0 {
+		t.Fatalf("reconcile=%+v jobs=%+v err=%v", reconciled, jobs.List(), err)
+	}
+	request := testMaintenanceEnrollRequest(cachePath, "must-not-resolve-silently", MaintenancePolicy{SyncEnabled: true, SyncMode: "head", Issues: true})
+	if _, err := maintenance.Enroll(ctx, request); err == nil {
+		t.Fatal("ordinary enrollment silently resolved identity conflict")
+	} else if coded, ok := err.(interface{ DiagnosticCode() string }); !ok || coded.DiagnosticCode() != "identity_conflict" {
+		t.Fatalf("conflict enrollment error=%T %v", err, err)
+	}
+}
+
+func TestMaintenanceLoadBlocksCacheCloneConflict(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	firstPath := filepath.Join(dir, "first.db")
+	secondPath := filepath.Join(dir, "second.db")
+	store, err := cache.NewSQLiteStore(ctx, firstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Aliases: []string{"legacy/repo"}, Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	bytes, err := os.ReadFile(firstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondPath, bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.CachePath = firstPath
+	configHash := maintenanceHash(cfg)
+	policy := MaintenancePolicy{SyncEnabled: true, SyncMode: "head", Issues: true}
+	canonicalID := maintenanceRegistrationID(identity.UUID, "owner/repo")
+	legacyID := maintenanceRegistrationID(identity.UUID, "legacy/repo")
+	disk := maintenanceRegistryFile{SchemaVersion: legacyMaintenanceRegistrySchema, Entries: []maintenanceDiskEntry{
+		{MaintenanceEntry: MaintenanceEntry{RegistrationID: canonicalID, CacheUUID: identity.UUID, RepoID: "owner/repo", Policy: policy, ConfigHash: configHash, Enabled: true}, CachePath: firstPath, ConfigSnapshot: cfg},
+		{MaintenanceEntry: MaintenanceEntry{RegistrationID: legacyID, CacheUUID: identity.UUID, RepoID: "legacy/repo", Policy: policy, ConfigHash: configHash, Enabled: true}, CachePath: secondPath, ConfigSnapshot: cfg},
+	}}
+	data, _ := json.Marshal(disk)
+	registryPath := filepath.Join(dir, "managed-caches.json")
+	if err := os.WriteFile(registryPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), jobs, registryPath)
+	if err := maintenance.Load(); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := maintenance.List(ctx)
+	if err != nil || len(listed.Entries) != 1 {
+		t.Fatalf("listed=%+v err=%v", listed, err)
+	}
+	entry := listed.Entries[0]
+	if entry.Enabled || entry.State != "cache_clone_conflict" || entry.LastErrorClass != "cache_clone_conflict" || entry.IdentityConflict == nil || entry.IdentityConflict.Kind != "cache_clone_conflict" || len(entry.IdentityConflict.PathFingerprints) != 2 {
+		t.Fatalf("clone conflict=%+v", entry)
+	}
+	request := testMaintenanceEnrollRequest(firstPath, "clone-must-not-resolve", policy)
+	if _, err := maintenance.Enroll(ctx, request); err == nil {
+		t.Fatal("ordinary enrollment silently resolved cache clone conflict")
+	} else if coded, ok := err.(interface{ DiagnosticCode() string }); !ok || coded.DiagnosticCode() != "cache_clone_conflict" {
+		t.Fatalf("clone enrollment error=%T %v", err, err)
+	}
+	result, err := maintenance.Reconcile(ctx)
+	if err != nil || len(result.JobsStarted) != 0 || len(jobs.List()) != 0 {
+		t.Fatalf("reconcile=%+v jobs=%+v err=%v", result, jobs.List(), err)
+	}
+}
+
+func TestMaintenanceIdentityUnresolvedRestoresPriorEnabledStateAfterCacheReturns(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	unavailablePath := filepath.Join(dir, "cache.unavailable")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(cachePath, unavailablePath); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.CachePath = cachePath
+	registrationID := maintenanceRegistrationID(identity.UUID, "owner/repo")
+	disk := maintenanceRegistryFile{SchemaVersion: maintenanceRegistrySchema, Generation: 1, Entries: []maintenanceDiskEntry{{MaintenanceEntry: MaintenanceEntry{RegistrationID: registrationID, CacheUUID: identity.UUID, RepoID: "owner/repo", Policy: MaintenancePolicy{}, ConfigHash: maintenanceHash(cfg), Enabled: true, State: "ready"}, CachePath: cachePath, ConfigSnapshot: cfg}}}
+	data, _ := json.Marshal(disk)
+	registryPath := filepath.Join(dir, "managed-caches.json")
+	if err := os.WriteFile(registryPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	blocked := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), registryPath)
+	if err := blocked.Load(); err != nil {
+		t.Fatal(err)
+	}
+	blockedList, _ := blocked.List(ctx)
+	if len(blockedList.Entries) != 1 || blockedList.Entries[0].Enabled || blockedList.Entries[0].State != "identity_unresolved" || blockedList.Entries[0].LastErrorClass != "identity_unresolved" {
+		t.Fatalf("blocked=%+v", blockedList)
+	}
+	if err := os.Rename(unavailablePath, cachePath); err != nil {
+		t.Fatal(err)
+	}
+	recovered := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), registryPath)
+	if err := recovered.Load(); err != nil {
+		t.Fatal(err)
+	}
+	recoveredList, _ := recovered.List(ctx)
+	if len(recoveredList.Entries) != 1 || !recoveredList.Entries[0].Enabled || recoveredList.Entries[0].State != "enrolled" || recoveredList.Entries[0].LastErrorClass != "" {
+		t.Fatalf("recovered=%+v", recoveredList)
 	}
 }
 

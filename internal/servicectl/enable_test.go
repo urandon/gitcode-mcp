@@ -61,6 +61,39 @@ func TestMaintenancePlanIsDeterministicAndPathSafe(t *testing.T) {
 	}
 }
 
+func TestMaintenancePlanCanonicalizesRepositoryAlias(t *testing.T) {
+	ctx := context.Background()
+	manager, client, cachePath, stop := runningMaintenanceSetupFixture(t)
+	defer stop()
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := store.GetRepository(ctx, "owner/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding.Aliases = []string{"legacy/repo"}
+	if err := store.UpdateRepository(ctx, binding); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	setup := MaintenanceSetup{Manager: manager, Config: config.Default(), CachePath: cachePath, Client: func() (*RPCClient, error) { return client, nil }}
+	canonical, err := setup.Plan(ctx, MaintenanceSetupRequest{RepoID: "owner/repo", SyncMode: "off", RAGMode: "off"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alias, err := setup.Plan(ctx, MaintenanceSetupRequest{RepoID: "legacy/repo", SyncMode: "off", RAGMode: "off"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alias.RepoID != "owner/repo" || alias.Cache.Ref != canonical.Cache.Ref || alias.PlanID != canonical.PlanID {
+		t.Fatalf("canonical=%+v alias=%+v", canonical, alias)
+	}
+}
+
 func TestMaintenanceEnableRejectsStalePlanAndReplaysSafely(t *testing.T) {
 	ctx := context.Background()
 	manager, client, cachePath, stop := runningMaintenanceSetupFixture(t)

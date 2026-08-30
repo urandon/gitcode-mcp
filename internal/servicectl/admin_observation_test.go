@@ -100,6 +100,25 @@ func TestAdminObservationUsesOpaqueCacheReferences(t *testing.T) {
 	}
 }
 
+func TestAdminMaintenanceObservationExposesCanonicalAliasesAndSanitizedConflict(t *testing.T) {
+	entry := MaintenanceEntry{
+		RegistrationID: "cache-reg-canonical", CacheUUID: "11111111-2222-3333-4444-555555555555", RepoID: "owner/repo",
+		Aliases: []string{"legacy/repo"}, LegacyRegistrationIDs: []string{"cache-reg-legacy"}, State: "identity_conflict",
+		IdentityConflict: &MaintenanceIdentityConflict{
+			CandidateRegistrationIDs: []string{"cache-reg-canonical", "cache-reg-legacy"},
+			PolicyHashes:             []string{"sha256:policy-a", "sha256:policy-b"}, ConfigHashes: []string{"sha256:config"},
+		},
+	}
+	view := adminMaintenanceObservation(entry)
+	data, _ := json.Marshal(view)
+	if len(view.Aliases) != 1 || view.Aliases[0] != "legacy/repo" || len(view.LegacyRegistrationIDs) != 1 || view.IdentityConflict == nil || len(view.IdentityConflict.CandidateRegistrationIDs) != 2 {
+		t.Fatalf("view=%+v", view)
+	}
+	if strings.Contains(string(data), "cache_path") || strings.Contains(string(data), "config_snapshot") {
+		t.Fatalf("private migration state leaked: %s", data)
+	}
+}
+
 func TestAdminJobObservationDropsRawProgressMessagesAndEndpoints(t *testing.T) {
 	job := Job{ID: "job-000001", Type: "sync", RegistrationID: "reg-1", Status: JobStatusFailed, Error: "/private/cache.db failed", ErrorClass: "cache_busy"}
 	job.Progress = append(job.Progress, service.ProgressEvent{Type: "page", Endpoint: "/private/api", Message: "raw log"}, service.ProgressEvent{Type: "failed", Collection: "wiki", RecordsFailed: 1, RetryAfter: "30s"})

@@ -299,15 +299,26 @@ type ProgressObservation struct {
 }
 
 type MaintenanceObservation struct {
-	RegistrationID  string                `json:"registration_id"`
-	CacheRef        string                `json:"cache_ref"`
-	RepoID          string                `json:"repo_id"`
-	NamespaceID     string                `json:"namespace_id,omitempty"`
-	Enabled         bool                  `json:"enabled"`
-	State           string                `json:"state"`
-	Generation      int64                 `json:"generation"`
-	Policy          MaintenancePolicyView `json:"policy"`
-	NextReconcileAt *time.Time            `json:"next_reconcile_at,omitempty"`
+	RegistrationID        string                                  `json:"registration_id"`
+	CacheRef              string                                  `json:"cache_ref"`
+	RepoID                string                                  `json:"repo_id"`
+	Aliases               []string                                `json:"aliases,omitempty"`
+	LegacyRegistrationIDs []string                                `json:"legacy_registration_ids,omitempty"`
+	IdentityConflict      *MaintenanceIdentityConflictObservation `json:"identity_conflict,omitempty"`
+	NamespaceID           string                                  `json:"namespace_id,omitempty"`
+	Enabled               bool                                    `json:"enabled"`
+	State                 string                                  `json:"state"`
+	Generation            int64                                   `json:"generation"`
+	Policy                MaintenancePolicyView                   `json:"policy"`
+	NextReconcileAt       *time.Time                              `json:"next_reconcile_at,omitempty"`
+}
+
+type MaintenanceIdentityConflictObservation struct {
+	Kind                     string   `json:"kind,omitempty"`
+	CandidateRegistrationIDs []string `json:"candidate_registration_ids"`
+	PolicyHashes             []string `json:"policy_hashes"`
+	ConfigHashes             []string `json:"config_hashes"`
+	PathFingerprints         []string `json:"path_fingerprints,omitempty"`
 }
 
 type MaintenancePolicyView struct {
@@ -487,6 +498,14 @@ func sortSnapshot(snapshot *ObservationSnapshot) {
 	})
 	for i := range snapshot.Maintenance {
 		sort.Strings(snapshot.Maintenance[i].Policy.Collections)
+		sort.Strings(snapshot.Maintenance[i].Aliases)
+		sort.Strings(snapshot.Maintenance[i].LegacyRegistrationIDs)
+		if conflict := snapshot.Maintenance[i].IdentityConflict; conflict != nil {
+			sort.Strings(conflict.CandidateRegistrationIDs)
+			sort.Strings(conflict.PolicyHashes)
+			sort.Strings(conflict.ConfigHashes)
+			sort.Strings(conflict.PathFingerprints)
+		}
 	}
 	sort.Slice(snapshot.Diagnostics, func(i, j int) bool { return snapshot.Diagnostics[i].ID < snapshot.Diagnostics[j].ID })
 	sort.Slice(snapshot.Capabilities, func(i, j int) bool { return snapshot.Capabilities[i].ID < snapshot.Capabilities[j].ID })

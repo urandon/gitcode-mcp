@@ -42,7 +42,9 @@ Only one sync lane and one RAG writer may be active for a `(cache_uuid, repo_id)
 
 ## Registry and protocol
 
-The daemon owns a versioned per-user `managed-caches.json` registry next to its runtime state. Enrollment resolves the real cache path, validates current schema, reads the durable cache identity, verifies the repository binding, and stores the registry with mode `0600`. It also stores the exact non-secret effective configuration snapshot and its hash privately with the registration. Jobs therefore use the configuration that was planned and confirmed instead of rediscovering profiles from the daemon's working directory or environment. Neither the snapshot nor its local config reference is present in public status output. A cache copied to a different path with the same UUID is reported as a clone instead of being silently treated as a new cache.
+The daemon owns a versioned per-user `managed-caches.json` registry next to its runtime state. Enrollment resolves the real cache path, validates current schema, reads the durable cache identity, and resolves the requested repository through the cache binding before deriving the registration id. The scheduler identity is therefore `(cache_uuid, canonical_repo_id)`; aliases are retained only as sanitized lookup/display metadata and cannot create a second schedule. The registry is stored with mode `0600`. It also stores the exact non-secret effective configuration snapshot and its hash privately with the registration. Jobs therefore use the configuration that was planned and confirmed instead of rediscovering profiles from the daemon's working directory or environment. Neither the snapshot nor its local config reference is present in public status output. A cache copied to a different path with the same UUID is reported as a clone instead of being silently treated as a new cache.
+
+Registry version 2 migrates older alias-derived registrations on load. Compatible duplicates coalesce deterministically into the canonical registration while preserving the newest lifecycle evidence, conservative failed-stage backoff, idempotency receipts, terminal job ids, and durable redirects from legacy registration ids. A later successful stage supersedes an older failure. Conflicting policy/config/source candidates fail closed as one disabled `identity_conflict`; ordinary enrollment and reconciliation cannot silently select a winner. Public observations expose the canonical id, known aliases, legacy registration ids, and sanitized candidate hashes. The Admin conflict-resolution plan/confirm control is a separate rollout gate; until that capability is present, the conflict remains disabled and requires an explicit supported resolution rather than manual registry editing.
 
 Low-level JSON-RPC methods are:
 
@@ -83,7 +85,7 @@ gitcode-mcp service maintenance --format json
 gitcode-mcp service reconcile
 ```
 
-Agents can call the read-only MCP tool `maintenance_status`. Results include cache UUID, a path fingerprint, repository, policy, generations, frontiers, jobs, and typed degraded state. They never include the raw cache path, provider credentials, cookies, or destination URLs.
+Agents can call the read-only MCP tool `maintenance_status`. Results include cache UUID, a path fingerprint, canonical repository id, known aliases and legacy registration references, policy, generations, frontiers, jobs, and typed degraded state. They never include the raw cache path, provider credentials, cookies, or destination URLs.
 
 ## Failure and restart behavior
 

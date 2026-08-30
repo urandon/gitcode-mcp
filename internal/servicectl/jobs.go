@@ -68,6 +68,8 @@ type JobManager struct {
 	truncatedTotal                      int
 	lastExpired                         int
 	lastTruncated                       int
+	registrationRedirects               map[string]string
+	canonicalRepoByRegistration         map[string]string
 	lastPrunedAt                        *time.Time
 	onRepositoryDocsCancelled           func(Job) error
 	repositoryDocsCancellationCommitted func(Job) bool
@@ -148,13 +150,48 @@ func NewJobManagerWithRetention(snapshotPath string, retention config.ServiceJob
 		panic(err)
 	}
 	return &JobManager{
-		jobs:             map[string]*Job{},
-		cancel:           map[string]context.CancelFunc{},
-		cancelResolution: map[string]*jobCancellationResolution{},
-		snapshotPath:     snapshotPath,
-		now:              func() time.Time { return time.Now().UTC() },
-		writeFile:        durableAtomicWriteFile,
-		retention:        retention,
+		jobs:                        map[string]*Job{},
+		cancel:                      map[string]context.CancelFunc{},
+		cancelResolution:            map[string]*jobCancellationResolution{},
+		snapshotPath:                snapshotPath,
+		now:                         func() time.Time { return time.Now().UTC() },
+		writeFile:                   durableAtomicWriteFile,
+		registrationRedirects:       map[string]string{},
+		canonicalRepoByRegistration: map[string]string{},
+		retention:                   retention,
+	}
+}
+
+func (m *JobManager) SetRegistrationRedirects(redirects map[string]string, repoIDs map[string]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.registrationRedirects = map[string]string{}
+	m.canonicalRepoByRegistration = map[string]string{}
+	for from, to := range redirects {
+		from, to = strings.TrimSpace(from), strings.TrimSpace(to)
+		if from != "" && to != "" && from != to {
+			m.registrationRedirects[from] = to
+		}
+	}
+	for registrationID, repoID := range repoIDs {
+		if registrationID, repoID = strings.TrimSpace(registrationID), strings.TrimSpace(repoID); registrationID != "" && repoID != "" {
+			m.canonicalRepoByRegistration[registrationID] = repoID
+		}
+	}
+	for _, job := range m.jobs {
+		m.projectCanonicalRegistrationLocked(job)
+	}
+}
+
+func (m *JobManager) projectCanonicalRegistrationLocked(job *Job) {
+	if job == nil {
+		return
+	}
+	if canonical := m.registrationRedirects[job.RegistrationID]; canonical != "" {
+		job.RegistrationID = canonical
+	}
+	if canonicalRepo := m.canonicalRepoByRegistration[job.RegistrationID]; canonicalRepo != "" {
+		job.RepoID = canonicalRepo
 	}
 }
 
@@ -179,6 +216,7 @@ func (m *JobManager) LoadAndMarkInterrupted() error {
 	maxID := 0
 	for i := range jobs {
 		job := jobs[i]
+		m.projectCanonicalRegistrationLocked(&job)
 		if job.Status == JobStatusCancelling && m.repositoryDocsCancellationCommitted != nil && m.repositoryDocsCancellationCommitted(job) {
 			job.Status = JobStatusCancelled
 			job.UpdatedAt = now

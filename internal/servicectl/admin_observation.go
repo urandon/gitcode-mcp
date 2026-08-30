@@ -610,8 +610,9 @@ func adminMaintenanceObservation(entry MaintenanceEntry) adminhttp.MaintenanceOb
 			collections = append(collections, collection.name)
 		}
 	}
-	return adminhttp.MaintenanceObservation{
+	view := adminhttp.MaintenanceObservation{
 		RegistrationID: entry.RegistrationID, CacheRef: publicCacheRef(entry.CacheUUID, ""), RepoID: entry.RepoID,
+		Aliases: append([]string(nil), entry.Aliases...), LegacyRegistrationIDs: append([]string(nil), entry.LegacyRegistrationIDs...),
 		NamespaceID: entry.NamespaceID, Enabled: entry.Enabled, State: entry.State, Generation: entry.Generation,
 		NextReconcileAt: adminTimePointer(entry.NextReconcileAt),
 		Policy: adminhttp.MaintenancePolicyView{
@@ -621,6 +622,16 @@ func adminMaintenanceObservation(entry MaintenanceEntry) adminhttp.MaintenanceOb
 			TailSlicePages: entry.Policy.TailSlicePages, PerPage: entry.Policy.PerPage, Profile: entry.Policy.Profile,
 		},
 	}
+	if entry.IdentityConflict != nil {
+		view.IdentityConflict = &adminhttp.MaintenanceIdentityConflictObservation{
+			Kind:                     entry.IdentityConflict.Kind,
+			CandidateRegistrationIDs: append([]string(nil), entry.IdentityConflict.CandidateRegistrationIDs...),
+			PolicyHashes:             append([]string(nil), entry.IdentityConflict.PolicyHashes...),
+			ConfigHashes:             append([]string(nil), entry.IdentityConflict.ConfigHashes...),
+			PathFingerprints:         append([]string(nil), entry.IdentityConflict.PathFingerprints...),
+		}
+	}
+	return view
 }
 
 func adminStageDiagnostics(entry MaintenanceEntry) []adminhttp.DiagnosticObservation {
