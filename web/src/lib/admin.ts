@@ -220,6 +220,7 @@ export type Maintenance = {
 
 export type MaintenanceIdentityCandidate = {
   candidate_ref: string;
+  selection_kind?: string;
   registration_id: string;
   repo_id: string;
   policy: Maintenance['policy'];
@@ -229,6 +230,9 @@ export type MaintenanceIdentityCandidate = {
   source_authority_hash?: string;
   source_refs?: string[];
   was_enabled: boolean;
+  cohort_registration_ids?: string[];
+  cohort_repo_ids?: string[];
+  members?: MaintenanceIdentityCandidate[];
 };
 
 export type MaintenanceConflictResolutionPlan = {
@@ -237,6 +241,7 @@ export type MaintenanceConflictResolutionPlan = {
   status: string;
   registration_id: string;
   canonical_registration_id: string;
+  result_registration_ids?: string[];
   conflict_kind: string;
   expected_generation: number;
   selected: MaintenanceIdentityCandidate;

@@ -45,6 +45,37 @@ func TestHelpReturnsSuccess(t *testing.T) {
 	}
 }
 
+func TestRenderMaintenanceListTextExposesCanonicalIdentityEvidence(t *testing.T) {
+	var output bytes.Buffer
+	renderMaintenanceListText(&output, servicectl.MaintenanceListResult{
+		SchemaVersion: "managed-cache-registry-v2",
+		Generation:    7,
+		Entries: []servicectl.MaintenanceEntry{{
+			RegistrationID:        "maintenance-canonical",
+			RepoID:                "owner/repository",
+			State:                 "identity_conflict",
+			Aliases:               []string{"owner/alias"},
+			LegacyRegistrationIDs: []string{"maintenance-legacy"},
+			IdentityConflict: &servicectl.MaintenanceIdentityConflict{
+				Kind:             "cache_clone_conflict",
+				DetailsAvailable: true,
+				Candidates:       []servicectl.MaintenanceIdentityCandidate{{CandidateRef: "candidate-a"}, {CandidateRef: "candidate-b"}},
+				PathFingerprints: []string{"path-a", "path-b"},
+			},
+		}},
+	})
+
+	for _, want := range []string{
+		"aliases: owner/alias",
+		"legacy_registration_ids: maintenance-legacy",
+		"identity_conflict: cache_clone_conflict details_available=true candidates=2 paths=2",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("maintenance text missing %q:\n%s", want, output.String())
+		}
+	}
+}
+
 func TestCLIWriteCapabilitiesComeFromRegistry(t *testing.T) {
 	known := map[string]bool{}
 	for _, command := range commands {

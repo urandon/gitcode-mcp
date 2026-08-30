@@ -157,6 +157,165 @@ func TestMaintenanceCloneResolutionRetiresUnselectedPath(t *testing.T) {
 	}
 }
 
+func TestMaintenanceCloneResolutionRetainsEveryRepositoryOnSelectedPath(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	firstPath, secondPath := filepath.Join(dir, "first.db"), filepath.Join(dir, "second.db")
+	store, err := cache.NewSQLiteStore(ctx, firstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, binding := range []cache.RepositoryBinding{
+		{RepoID: "owner/first", Owner: "owner", Name: "first"},
+		{RepoID: "owner/second", Owner: "owner", Name: "second"},
+	} {
+		if err := store.AddRepository(ctx, binding); err != nil {
+			t.Fatal(err)
+		}
+	}
+	identity, _ := store.CacheIdentity(ctx)
+	_ = store.Close()
+	bytes, _ := os.ReadFile(firstPath)
+	if err := os.WriteFile(secondPath, bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.CachePath = firstPath
+	firstID := maintenanceRegistrationID(identity.UUID, "owner/first")
+	secondID := maintenanceRegistrationID(identity.UUID, "owner/second")
+	entries := []maintenanceDiskEntry{}
+	for _, cachePath := range []string{firstPath, secondPath} {
+		entries = append(entries,
+			maintenanceDiskEntry{MaintenanceEntry: MaintenanceEntry{RegistrationID: firstID, CacheUUID: identity.UUID, RepoID: "owner/first", Policy: MaintenancePolicy{SyncEnabled: true, SyncMode: "head", Issues: true}, ConfigHash: maintenanceHash(cfg), Enabled: true}, CachePath: cachePath, ConfigSnapshot: cfg},
+			maintenanceDiskEntry{MaintenanceEntry: MaintenanceEntry{RegistrationID: secondID, CacheUUID: identity.UUID, RepoID: "owner/second", Policy: MaintenancePolicy{SyncMode: "off"}, ConfigHash: maintenanceHash(cfg), Enabled: false}, CachePath: cachePath, ConfigSnapshot: cfg},
+		)
+	}
+	data, _ := json.Marshal(maintenanceRegistryFile{SchemaVersion: legacyMaintenanceRegistrySchema, Entries: entries})
+	registryPath := filepath.Join(dir, "managed-caches.json")
+	_ = os.WriteFile(registryPath, data, 0o600)
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), registryPath)
+	if err := maintenance.Load(); err != nil {
+		t.Fatal(err)
+	}
+	listed, _ := maintenance.List(ctx)
+	if len(listed.Entries) != 1 || listed.Entries[0].IdentityConflict == nil {
+		t.Fatalf("clone cohort=%+v", listed.Entries)
+	}
+	conflict := listed.Entries[0]
+	if len(conflict.IdentityConflict.Candidates) != 2 {
+		t.Fatalf("path candidates=%+v", conflict.IdentityConflict.Candidates)
+	}
+	var selected MaintenanceIdentityCandidate
+	for _, candidate := range conflict.IdentityConflict.Candidates {
+		if candidate.PathFingerprint == pathFingerprint(maintenanceCanonicalPathKey(firstPath)) {
+			selected = candidate
+		}
+	}
+	if len(selected.Members) != 2 || len(selected.CohortRepoIDs) != 2 {
+		t.Fatalf("selected path cohort=%+v", selected)
+	}
+	req := MaintenanceConflictResolutionRequest{RegistrationID: conflict.RegistrationID, CandidateRef: selected.CandidateRef, ExpectedGeneration: conflict.Generation}
+	plan, err := maintenance.PlanConflictResolution(ctx, req)
+	if err != nil || len(plan.ResultRegistrationIDs) != 2 || plan.CanonicalRegistrationID != "" {
+		t.Fatalf("plan=%+v err=%v", plan, err)
+	}
+	req.PlanID, req.IdempotencyKey = plan.PlanID, "multi-repo-clone-resolution"
+	result, err := maintenance.ApplyConflictResolution(ctx, req)
+	if err != nil || len(result.RegistrationIDs) != 2 || result.RetiredClonePaths != 1 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	after, _ := maintenance.List(ctx)
+	if len(after.Entries) != 2 {
+		t.Fatalf("resolved entries=%+v", after.Entries)
+	}
+	byRepo := map[string]MaintenanceEntry{}
+	for _, entry := range after.Entries {
+		byRepo[entry.RepoID] = entry
+	}
+	if !byRepo["owner/first"].Enabled || byRepo["owner/first"].Policy.SyncMode != "head" || byRepo["owner/second"].Enabled || byRepo["owner/second"].Policy.SyncMode != "off" {
+		t.Fatalf("per-repository state=%+v", byRepo)
+	}
+}
+
+func TestMaintenanceConflictResolutionBlocksActiveCacheWriter(t *testing.T) {
+	ctx := context.Background()
+	maintenance, _, _ := newMaintenanceIdentityConflictFixture(t)
+	listed, _ := maintenance.List(ctx)
+	conflict := listed.Entries[0]
+	job, created, err := maintenance.jobs.createCoalescedJob(SyncJobType, conflict.RepoID, "", 0, "active-conflict-writer", conflict.CacheUUID, conflict.RegistrationID, "", func() {})
+	if err != nil || !created {
+		t.Fatalf("active job=%+v created=%t err=%v", job, created, err)
+	}
+	req := MaintenanceConflictResolutionRequest{RegistrationID: conflict.RegistrationID, CandidateRef: conflict.IdentityConflict.Candidates[0].CandidateRef, ExpectedGeneration: conflict.Generation}
+	if _, err := maintenance.PlanConflictResolution(ctx, req); err == nil {
+		t.Fatal("active writer did not block plan")
+	} else if coded, ok := err.(interface{ DiagnosticCode() string }); !ok || coded.DiagnosticCode() != "conflict_jobs_active" {
+		t.Fatalf("active writer error=%T %v", err, err)
+	}
+	maintenance.jobs.finishJob(job.ID, JobStatusSucceeded, "done")
+	plan, err := maintenance.PlanConflictResolution(ctx, req)
+	if err != nil {
+		t.Fatalf("plan after quiescence=%v", err)
+	}
+	late, created, err := maintenance.jobs.createCoalescedJob(RAGIndexJobType, conflict.RepoID, "profile", 0, "late-conflict-writer", conflict.CacheUUID, conflict.RegistrationID, "namespace", func() {})
+	if err != nil || !created {
+		t.Fatalf("late job=%+v created=%t err=%v", late, created, err)
+	}
+	req.PlanID, req.IdempotencyKey = plan.PlanID, "active-writer-apply"
+	if _, err := maintenance.ApplyConflictResolution(ctx, req); err == nil {
+		t.Fatal("writer admitted after plan did not block apply")
+	} else if coded, ok := err.(interface{ DiagnosticCode() string }); !ok || coded.DiagnosticCode() != "conflict_jobs_active" {
+		t.Fatalf("late writer apply error=%T %v", err, err)
+	}
+	if len(maintenance.resolutionReceipts) != 0 {
+		t.Fatalf("blocked apply persisted receipts=%+v", maintenance.resolutionReceipts)
+	}
+	maintenance.jobs.finishJob(late.ID, JobStatusSucceeded, "done")
+	if _, err := maintenance.ApplyConflictResolution(ctx, req); err != nil {
+		t.Fatalf("apply after worker quiescence=%v", err)
+	}
+}
+
+func TestMaintenanceConflictResolutionBindsIdempotencyToRequestedTarget(t *testing.T) {
+	ctx := context.Background()
+	maintenance, _, _ := newMaintenanceIdentityConflictFixture(t)
+	listed, _ := maintenance.List(ctx)
+	conflict := listed.Entries[0]
+	req := MaintenanceConflictResolutionRequest{RegistrationID: conflict.RegistrationID, CandidateRef: conflict.IdentityConflict.Candidates[0].CandidateRef, ExpectedGeneration: conflict.Generation}
+	plan, err := maintenance.PlanConflictResolution(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.PlanID, req.IdempotencyKey = plan.PlanID, "target-bound-key"
+	if _, err := maintenance.ApplyConflictResolution(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	req.RegistrationID = "different-registration"
+	if _, err := maintenance.ApplyConflictResolution(ctx, req); err == nil {
+		t.Fatal("idempotency replay crossed requested target")
+	} else if _, ok := err.(MaintenanceIdempotencyConflictError); !ok {
+		t.Fatalf("cross-target error=%T %v", err, err)
+	}
+}
+
+func TestMaintenanceConflictResolutionRejectsConfigSnapshotTamper(t *testing.T) {
+	ctx := context.Background()
+	maintenance, _, _ := newMaintenanceIdentityConflictFixture(t)
+	listed, _ := maintenance.List(ctx)
+	conflict := listed.Entries[0]
+	selected := conflict.IdentityConflict.Candidates[0]
+	maintenance.mu.Lock()
+	maintenance.conflictCandidates[conflict.RegistrationID][0].ConfigSnapshot.CachePath = "tampered.db"
+	maintenance.mu.Unlock()
+	_, err := maintenance.PlanConflictResolution(ctx, MaintenanceConflictResolutionRequest{RegistrationID: conflict.RegistrationID, CandidateRef: selected.CandidateRef, ExpectedGeneration: conflict.Generation})
+	if err == nil {
+		t.Fatal("tampered config snapshot produced a plan")
+	}
+	if coded, ok := err.(interface{ DiagnosticCode() string }); !ok || coded.DiagnosticCode() != "conflict_candidate_identity_changed" {
+		t.Fatalf("tamper error=%T %v", err, err)
+	}
+}
+
 func TestMaintenanceConflictResolutionRejectsLossyLegacyConflict(t *testing.T) {
 	dir := t.TempDir()
 	registryPath := filepath.Join(dir, "managed-caches.json")

@@ -550,6 +550,8 @@ func adminControlError(err error) error {
 			return controlError(http.StatusConflict, code, "This migrated conflict predates lossless candidate storage.", "Keep it disabled and recover from a current registry backup or re-enroll only after manual identity inspection.")
 		case "conflict_generation_stale", "stale_plan":
 			return controlError(http.StatusConflict, code, "The conflict candidate set changed after it was reviewed.", "Refresh maintenance state, select one candidate explicitly, and render a new plan.")
+		case "conflict_jobs_active":
+			return controlError(http.StatusConflict, code, "Conflict resolution is waiting for cache writers to quiesce.", "Cancel or wait for active jobs on this cache, then render and confirm the plan again.")
 		case "conflict_candidate_unavailable", "conflict_candidate_identity_changed":
 			return controlError(http.StatusConflict, code, "The selected private candidate can no longer be verified.", "Restore the candidate cache authority, refresh maintenance state, and render a new plan.")
 		case "cache_clone_retired":

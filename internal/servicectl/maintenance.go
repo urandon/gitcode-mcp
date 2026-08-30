@@ -101,16 +101,20 @@ type MaintenanceIdentityConflict struct {
 }
 
 type MaintenanceIdentityCandidate struct {
-	CandidateRef        string            `json:"candidate_ref"`
-	RegistrationID      string            `json:"registration_id"`
-	RepoID              string            `json:"repo_id"`
-	Policy              MaintenancePolicy `json:"policy"`
-	PolicyHash          string            `json:"policy_hash"`
-	ConfigHash          string            `json:"config_hash,omitempty"`
-	PathFingerprint     string            `json:"path_fingerprint"`
-	SourceAuthorityHash string            `json:"source_authority_hash,omitempty"`
-	SourceRefs          []string          `json:"source_refs,omitempty"`
-	WasEnabled          bool              `json:"was_enabled"`
+	CandidateRef          string                         `json:"candidate_ref"`
+	SelectionKind         string                         `json:"selection_kind,omitempty"`
+	RegistrationID        string                         `json:"registration_id"`
+	RepoID                string                         `json:"repo_id"`
+	Policy                MaintenancePolicy              `json:"policy"`
+	PolicyHash            string                         `json:"policy_hash"`
+	ConfigHash            string                         `json:"config_hash,omitempty"`
+	PathFingerprint       string                         `json:"path_fingerprint"`
+	SourceAuthorityHash   string                         `json:"source_authority_hash,omitempty"`
+	SourceRefs            []string                       `json:"source_refs,omitempty"`
+	WasEnabled            bool                           `json:"was_enabled"`
+	CohortRegistrationIDs []string                       `json:"cohort_registration_ids,omitempty"`
+	CohortRepoIDs         []string                       `json:"cohort_repo_ids,omitempty"`
+	Members               []MaintenanceIdentityCandidate `json:"members,omitempty"`
 }
 
 type MaintenanceRegistrationRedirect struct {
@@ -395,7 +399,16 @@ func NewMaintenanceManager(manager Manager, jobs *JobManager, path string) *Main
 
 func (m *MaintenanceManager) Load() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	err := m.loadLocked()
+	redirects, sourceRedirects, repoIDs := cloneStringMap(m.redirects), cloneStringMap(m.sourceRedirects), m.canonicalRepoIDsLocked()
+	m.mu.Unlock()
+	if err == nil && m.jobs != nil {
+		m.jobs.SetRegistrationRedirects(redirects, sourceRedirects, repoIDs)
+	}
+	return err
+}
+
+func (m *MaintenanceManager) loadLocked() error {
 	data, err := os.ReadFile(m.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -430,7 +443,17 @@ func (m *MaintenanceManager) Load() error {
 				entry.RepositoryDocs.SourceRegistrationGeneration = 1
 			}
 		}
-		m.entries[entry.RegistrationID] = &entry
+		loadID := entry.RegistrationID
+		if _, exists := m.entries[loadID]; exists {
+			// Legacy registries can contain the same logical registration for
+			// multiple physical clones. Keep both rows until UUID/path
+			// canonicalization constructs the lossless clone cohort.
+			loadID = maintenanceDuplicateLoadID(entry.RegistrationID, stored.CachePath)
+			for suffix := 2; m.entries[loadID] != nil; suffix++ {
+				loadID = fmt.Sprintf("%s-%d", maintenanceDuplicateLoadID(entry.RegistrationID, stored.CachePath), suffix)
+			}
+		}
+		m.entries[loadID] = &entry
 		registeredSources := map[string]*repositoryDocsRegisteredSource{}
 		for _, diskSource := range stored.RepositoryDocsSources {
 			state := diskSource.State
@@ -445,21 +468,18 @@ func (m *MaintenanceManager) Load() error {
 			state := *entry.RepositoryDocs
 			registeredSources[state.SourceRegistrationID] = &repositoryDocsRegisteredSource{State: state, RepositoryPath: entry.repositoryPath, Profile: entry.repositoryProfile}
 		}
-		m.sources[entry.RegistrationID] = registeredSources
-		m.refreshLegacyRepositoryDocsLocked(&entry)
+		m.sources[loadID] = registeredSources
+		m.refreshLegacyRepositoryDocsForKeyLocked(&entry, loadID)
 		if len(stored.IdentityConflictCandidates) > 0 {
 			candidates := cloneMaintenanceConflictCandidates(stored.IdentityConflictCandidates)
 			for index := range candidates {
 				candidates[index].CandidateRef = maintenanceConflictCandidateRef(candidates[index])
 			}
 			sort.Slice(candidates, func(i, j int) bool { return candidates[i].CandidateRef < candidates[j].CandidateRef })
-			m.conflictCandidates[entry.RegistrationID] = candidates
+			m.conflictCandidates[loadID] = candidates
 			if entry.IdentityConflict != nil {
 				entry.IdentityConflict.DetailsAvailable = true
-				entry.IdentityConflict.Candidates = entry.IdentityConflict.Candidates[:0]
-				for _, candidate := range candidates {
-					entry.IdentityConflict.Candidates = append(entry.IdentityConflict.Candidates, publicMaintenanceConflictCandidate(candidate))
-				}
+				entry.IdentityConflict.Candidates = publicMaintenanceConflictSelections(entry.IdentityConflict.Kind, candidates)
 			}
 		}
 	}
@@ -476,6 +496,8 @@ func (m *MaintenanceManager) Load() error {
 			m.sourceRedirects[redirect.From] = redirect.To
 		}
 	}
+	m.redirects = discardCyclicRedirects(m.redirects)
+	m.sourceRedirects = discardCyclicRedirects(m.sourceRedirects)
 	for _, receipt := range disk.ConflictResolutionReceipts {
 		if receipt.KeyHash != "" {
 			m.resolutionReceipts[receipt.KeyHash] = receipt
@@ -491,11 +513,8 @@ func (m *MaintenanceManager) Load() error {
 		m.retiredClonePaths[retired.CacheUUID][retired.PathFingerprint] = true
 	}
 	for _, admission := range disk.RepositoryDocsAdmissionQueue {
-		entry := m.entries[admission.RegistrationID]
-		source := m.sources[admission.RegistrationID][admission.SourceRegistrationID]
-		if entry == nil || source == nil ||
-			admission.SourceRegistrationGeneration != source.State.SourceRegistrationGeneration ||
-			strings.TrimSpace(admission.ExpectedRevisionSetID) == "" || strings.TrimSpace(admission.WorkKey) == "" {
+		if strings.TrimSpace(admission.RegistrationID) == "" || strings.TrimSpace(admission.SourceRegistrationID) == "" ||
+			admission.SourceRegistrationGeneration <= 0 || strings.TrimSpace(admission.ExpectedRevisionSetID) == "" || strings.TrimSpace(admission.WorkKey) == "" {
 			continue
 		}
 		m.admissions[repositoryDocsAdmissionKey(admission.RegistrationID, admission.SourceRegistrationID)] = admission
@@ -506,9 +525,6 @@ func (m *MaintenanceManager) Load() error {
 		if err := m.saveLocked(); err != nil {
 			return err
 		}
-	}
-	if m.jobs != nil {
-		m.jobs.SetRegistrationRedirects(m.redirects, m.sourceRedirects, m.canonicalRepoIDsLocked())
 	}
 	return nil
 }
@@ -698,18 +714,12 @@ func (m *MaintenanceManager) canonicalizeLoadedEntriesLocked(ctx context.Context
 		canonicalID := m.resolveRegistrationIDLocked(receipt.RegistrationID)
 		if canonicalID != receipt.RegistrationID {
 			receipt.RegistrationID = canonicalID
-			if entry := m.entries[canonicalID]; entry != nil {
-				receipt.IntentHash = maintenanceEnrollmentIntentHash(canonicalID, entry.Policy, entry.ConfigHash)
-			}
+			// Preserve the original intent hash. Redirecting an idempotency key
+			// must never authorize a policy/config intent it did not create.
 			m.receipts[key], changed = receipt, true
 		}
 	}
-	for key, admission := range m.admissions {
-		if m.resolveRegistrationIDLocked(admission.RegistrationID) != admission.RegistrationID {
-			delete(m.admissions, key)
-			changed = true
-		}
-	}
+	changed = m.remapRepositoryDocsAdmissionsLocked() || changed
 	return changed
 }
 
@@ -736,7 +746,6 @@ func (m *MaintenanceManager) installMaintenanceConflictLocked(registrationID str
 	merged.LastErrorClass, merged.LastError = kind, publicMaintenanceError(kind)
 	maxGeneration := merged.Generation
 	privateCandidates := make([]maintenanceIdentityConflictCandidate, 0, len(candidates))
-	publicCandidates := make([]MaintenanceIdentityCandidate, 0, len(candidates))
 	candidateIDs, policyHashes, configHashes, pathFingerprints := []string{}, []string{}, []string{}, []string{}
 	for _, pathKey := range allPathKeys {
 		pathFingerprints = append(pathFingerprints, pathFingerprint(pathKey))
@@ -751,20 +760,21 @@ func (m *MaintenanceManager) installMaintenanceConflictLocked(registrationID str
 		merged.RAGStage = conservativeMaintenanceStage(merged.RAGStage, item.entry.RAGStage)
 		private := maintenanceConflictCandidate(item.entry, m.sources[item.id])
 		privateCandidates = append(privateCandidates, private)
-		publicCandidates = append(publicCandidates, publicMaintenanceConflictCandidate(private))
-		candidateIDs = append(candidateIDs, item.id)
+		candidateIDs = append(candidateIDs, item.entry.RegistrationID)
 		policyHashes = append(policyHashes, maintenanceHash(item.entry.Policy))
 		configHashes = append(configHashes, item.entry.ConfigHash)
 		pathFingerprints = append(pathFingerprints, pathFingerprint(maintenanceCanonicalPathKey(item.entry.cachePath)))
-		if item.id != registrationID {
-			merged.LegacyRegistrationIDs = append(merged.LegacyRegistrationIDs, item.id)
-			m.redirects[item.id] = registrationID
+		if item.entry.RegistrationID != registrationID {
+			merged.LegacyRegistrationIDs = append(merged.LegacyRegistrationIDs, item.entry.RegistrationID)
+			if item.id == item.entry.RegistrationID {
+				m.redirects[item.id] = registrationID
+			}
 		}
 	}
 	merged.Generation = maxGeneration + 1
 	merged.LegacyRegistrationIDs = sortedUniqueStrings(merged.LegacyRegistrationIDs)
-	sort.Slice(publicCandidates, func(i, j int) bool { return publicCandidates[i].CandidateRef < publicCandidates[j].CandidateRef })
 	sort.Slice(privateCandidates, func(i, j int) bool { return privateCandidates[i].CandidateRef < privateCandidates[j].CandidateRef })
+	publicCandidates := publicMaintenanceConflictSelections(kind, privateCandidates)
 	merged.IdentityConflict = &MaintenanceIdentityConflict{Kind: kind, DetailsAvailable: true, CandidateRegistrationIDs: sortedUniqueStrings(candidateIDs), PolicyHashes: sortedUniqueStrings(policyHashes), ConfigHashes: sortedUniqueStrings(configHashes), PathFingerprints: sortedUniqueStrings(pathFingerprints), Candidates: publicCandidates}
 	baseSources := cloneRepositoryDocsSources(m.sources[base.id])
 	for _, item := range candidates {
@@ -813,9 +823,55 @@ func maintenanceConflictCandidateRef(private maintenanceIdentityConflictCandidat
 		PolicyHash          string `json:"policy_hash"`
 		ConfigHash          string `json:"config_hash"`
 		SourceAuthorityHash string `json:"source_authority_hash"`
-	}{private.Entry.RegistrationID, private.Entry.RepoID, pathFingerprint(maintenanceCanonicalPathKey(private.CachePath)), maintenanceHash(private.Entry.Policy), private.Entry.ConfigHash, maintenanceDiskSourceAuthorityHash(private.RepositorySources)}
+		ConfigSnapshotHash  string `json:"config_snapshot_hash"`
+	}{private.Entry.RegistrationID, private.Entry.RepoID, pathFingerprint(maintenanceCanonicalPathKey(private.CachePath)), maintenanceHash(private.Entry.Policy), private.Entry.ConfigHash, maintenanceDiskSourceAuthorityHash(private.RepositorySources), maintenanceHash(private.ConfigSnapshot)}
 	hash := strings.TrimPrefix(maintenanceHash(payload), "sha256:")
 	return "conflict-candidate-" + hash[:16]
+}
+
+func maintenanceDuplicateLoadID(registrationID, cachePath string) string {
+	hash := strings.TrimPrefix(maintenanceHash(struct {
+		RegistrationID  string `json:"registration_id"`
+		PathFingerprint string `json:"path_fingerprint"`
+	}{registrationID, pathFingerprint(maintenanceCanonicalPathKey(cachePath))}), "sha256:")
+	return "maintenance-load-candidate-" + hash[:16]
+}
+
+func (m *MaintenanceManager) remapRepositoryDocsAdmissionsLocked() bool {
+	if len(m.admissions) == 0 {
+		return false
+	}
+	changed := false
+	next := make(map[string]repositoryDocsAdmissionIntent, len(m.admissions))
+	keys := make([]string, 0, len(m.admissions))
+	for key := range m.admissions {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		intent := m.admissions[key]
+		registrationID := m.resolveRegistrationIDLocked(intent.RegistrationID)
+		sourceID := m.resolveSourceRegistrationIDLocked(intent.SourceRegistrationID)
+		if registrationID != intent.RegistrationID || sourceID != intent.SourceRegistrationID {
+			intent.RegistrationID, intent.SourceRegistrationID = registrationID, sourceID
+			changed = true
+		}
+		mappedKey := repositoryDocsAdmissionKey(intent.RegistrationID, intent.SourceRegistrationID)
+		if previous, exists := next[mappedKey]; exists {
+			// Cancellation is the stronger durable disposition. Otherwise keep
+			// the newest exact admission deterministically.
+			if previous.Disposition == repositoryDocsAdmissionCancelled && intent.Disposition != repositoryDocsAdmissionCancelled {
+				continue
+			}
+			if previous.Disposition == intent.Disposition && !intent.CreatedAt.After(previous.CreatedAt) {
+				continue
+			}
+			changed = true
+		}
+		next[mappedKey] = intent
+	}
+	m.admissions = next
+	return changed
 }
 
 func (m *MaintenanceManager) expandRecoveredUnresolvedCandidatesLocked(ctx context.Context) bool {
@@ -1039,6 +1095,27 @@ func (m *MaintenanceManager) resolveRegistrationIDLocked(value string) string {
 	return value
 }
 
+func discardCyclicRedirects(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for from, to := range in {
+		seen := map[string]bool{}
+		value := from
+		cyclic := false
+		for value != "" {
+			if seen[value] {
+				cyclic = true
+				break
+			}
+			seen[value] = true
+			value = in[value]
+		}
+		if !cyclic {
+			out[from] = to
+		}
+	}
+	return out
+}
+
 func (m *MaintenanceManager) resolveSourceRegistrationIDLocked(value string) string {
 	value = strings.TrimSpace(value)
 	seen := map[string]bool{}
@@ -1112,16 +1189,20 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 		return MaintenanceEntry{}, errors.New("maintenance: config snapshot hash mismatch")
 	}
 	now := m.now()
+	var redirectSnapshot, sourceRedirectSnapshot, repoIDSnapshot map[string]string
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		if redirectSnapshot != nil && m.jobs != nil {
+			m.jobs.SetRegistrationRedirects(redirectSnapshot, sourceRedirectSnapshot, repoIDSnapshot)
+		}
+	}()
 	if m.canonicalizeLoadedEntriesLocked(ctx) {
 		m.generation++
-		if m.jobs != nil {
-			m.jobs.SetRegistrationRedirects(m.redirects, m.sourceRedirects, m.canonicalRepoIDsLocked())
-		}
 		if err := m.saveLocked(); err != nil {
 			return MaintenanceEntry{}, err
 		}
+		redirectSnapshot, sourceRedirectSnapshot, repoIDSnapshot = cloneStringMap(m.redirects), cloneStringMap(m.sourceRedirects), m.canonicalRepoIDsLocked()
 	}
 	if m.isRetiredClonePathLocked(identity.UUID, path) {
 		return MaintenanceEntry{}, MaintenanceConflictResolutionError{code: "cache_clone_retired"}
@@ -2743,6 +2824,9 @@ func cloneMaintenanceIdentityCandidates(in []MaintenanceIdentityCandidate) []Mai
 	for i, candidate := range in {
 		out[i] = candidate
 		out[i].SourceRefs = append([]string(nil), candidate.SourceRefs...)
+		out[i].CohortRegistrationIDs = append([]string(nil), candidate.CohortRegistrationIDs...)
+		out[i].CohortRepoIDs = append([]string(nil), candidate.CohortRepoIDs...)
+		out[i].Members = cloneMaintenanceIdentityCandidates(candidate.Members)
 	}
 	return out
 }
@@ -2751,7 +2835,14 @@ func (m *MaintenanceManager) refreshLegacyRepositoryDocsLocked(entry *Maintenanc
 	if entry == nil {
 		return
 	}
-	registered := m.sources[entry.RegistrationID]
+	m.refreshLegacyRepositoryDocsForKeyLocked(entry, entry.RegistrationID)
+}
+
+func (m *MaintenanceManager) refreshLegacyRepositoryDocsForKeyLocked(entry *MaintenanceEntry, registrationKey string) {
+	if entry == nil {
+		return
+	}
+	registered := m.sources[registrationKey]
 	ids := make([]string, 0, len(registered))
 	for id := range registered {
 		ids = append(ids, id)

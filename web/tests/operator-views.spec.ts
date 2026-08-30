@@ -58,8 +58,8 @@ test('canonical registration deep links redirect and conflict resolution require
     identity_conflict: {
       kind: 'identity_conflict', details_available: true, candidate_registration_ids: ['reg-canonical', 'reg-legacy'], policy_hashes: ['policy-a', 'policy-b'], config_hashes: ['config-a', 'config-b'], path_fingerprints: ['path-a'],
       candidates: [
-        { candidate_ref: 'candidate-a', registration_id: 'reg-canonical', repo_id: 'example/repo', policy: { sync_enabled: true, sync_mode: 'head', rag_enabled: false, collections: ['issues'] }, policy_hash: 'policy-a', config_hash: 'config-a', path_fingerprint: 'path-a', was_enabled: true },
-        { candidate_ref: 'candidate-b', registration_id: 'reg-legacy', repo_id: 'legacy/repo', policy: { sync_enabled: false, sync_mode: 'off', rag_enabled: false, collections: [] }, policy_hash: 'policy-b', config_hash: 'config-b', path_fingerprint: 'path-a', was_enabled: false }
+        { candidate_ref: 'candidate-a', registration_id: 'reg-canonical', repo_id: 'example/repo', policy: { sync_enabled: true, sync_mode: 'head', rag_enabled: false, collections: ['issues'] }, policy_hash: 'policy-a', config_hash: 'config-a', path_fingerprint: 'path-a', source_authority_hash: 'source-authority-a', source_refs: ['source-docs-a'], was_enabled: true },
+        { candidate_ref: 'candidate-b', registration_id: 'reg-legacy', repo_id: 'legacy/repo', policy: { sync_enabled: false, sync_mode: 'off', rag_enabled: false, collections: [] }, policy_hash: 'policy-b', config_hash: 'config-b', path_fingerprint: 'path-a', source_authority_hash: 'source-authority-b', source_refs: ['source-docs-b'], was_enabled: false }
       ]
     }
   }];
@@ -78,6 +78,8 @@ test('canonical registration deep links redirect and conflict resolution require
   await expect(page).toHaveURL(/registration=reg-canonical/);
   await expect(page.getByText('Redirected legacy registration reg-legacy to canonical reg-canonical.')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Policy or source conflict' })).toBeVisible();
+  await expect(page.getByText(/source source-authority-a/)).toBeVisible();
+  await expect(page.getByText(/source-docs-a/)).toBeVisible();
   const candidateRadios = page.getByRole('radio', { name: /previously/ });
   await expect(candidateRadios).toHaveCount(2);
   await expect(candidateRadios.nth(0)).not.toBeChecked();
@@ -93,6 +95,51 @@ test('canonical registration deep links redirect and conflict resolution require
   expect(applyBody).toMatchObject({ candidate_ref: 'candidate-a', expected_generation: 7, plan_id: 'conflict-plan-1' });
   expect(String(applyBody.idempotency_key)).toMatch(/^admin-conflict_resolution_apply-/);
   await expect(page.getByText('Receipt maintenance-conflict-receipt-1')).toBeVisible();
+});
+
+test('stale conflict apply closes confirmation, refreshes candidates, and requires a new plan', async ({ page }) => {
+  const conflictSnapshot: any = structuredClone(snapshot);
+  conflictSnapshot.maintenance = [{
+    registration_id: 'reg-canonical', cache_ref: 'cache-111111112222', repo_id: 'example/repo', enabled: false, state: 'identity_conflict', generation: 7,
+    policy: { sync_enabled: true, sync_mode: 'head', rag_enabled: false, collections: ['issues'] },
+    identity_conflict: { kind: 'identity_conflict', details_available: true, candidate_registration_ids: ['reg-canonical', 'reg-legacy'], policy_hashes: ['a', 'b'], config_hashes: ['a', 'b'], path_fingerprints: ['path-a'], candidates: [
+      { candidate_ref: 'candidate-a', registration_id: 'reg-canonical', repo_id: 'example/repo', policy: { sync_enabled: true, sync_mode: 'head', rag_enabled: false, collections: ['issues'] }, policy_hash: 'a', config_hash: 'a', path_fingerprint: 'path-a', source_authority_hash: 'source-a', source_refs: ['docs-a'], was_enabled: true },
+      { candidate_ref: 'candidate-b', registration_id: 'reg-legacy', repo_id: 'legacy/repo', policy: { sync_enabled: false, sync_mode: 'off', rag_enabled: false, collections: [] }, policy_hash: 'b', config_hash: 'b', path_fingerprint: 'path-a', source_authority_hash: 'source-b', source_refs: ['docs-b'], was_enabled: false }
+    ] }
+  }];
+  await mockAdmin(page, conflictSnapshot);
+  await page.route('**/api/admin/v1/maintenance/reg-canonical/conflict-resolution/plan', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { schema_version: 'gitcode-mcp.maintenance-conflict-resolution-plan.v1', plan_id: 'stale-conflict-plan', status: 'ready', registration_id: 'reg-canonical', canonical_registration_id: 'reg-canonical', result_registration_ids: ['reg-canonical'], conflict_kind: 'identity_conflict', expected_generation: 7, selected: conflictSnapshot.maintenance[0].identity_conflict.candidates[0], effects: [{ class: 'identity', summary: 'Promote selected candidate.', status: 'planned' }] } }) }));
+  await page.route('**/api/admin/v1/maintenance/reg-canonical/conflict-resolution/apply', (route) => route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: { code: 'stale_plan', message: 'Candidate generation changed.', remediation: 'Refresh and render a new plan.' } }) }));
+  await page.goto('/?view=Maintenance&registration=reg-canonical');
+  await page.getByRole('radio', { name: /example\/repo/ }).check();
+  await page.getByRole('button', { name: 'Review selected candidate' }).click();
+  await page.getByRole('button', { name: 'Confirm resolution' }).click();
+  await page.getByRole('button', { name: 'Confirm selected candidate' }).click();
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+  await expect(page.getByRole('alert').filter({ hasText: 'Conflict resolution failed' })).toContainText('Refresh and render a new plan.');
+  await expect(page.getByText('stale-conflict-plan')).not.toBeVisible();
+  await expect(page.getByRole('button', { name: 'Review selected candidate' })).toBeEnabled();
+});
+
+test('clone conflict choices are physical path cohorts and show every retained repository authority', async ({ page }) => {
+  const cloneSnapshot: any = structuredClone(snapshot);
+  const member = (repo: string, registration: string, source: string) => ({ candidate_ref: `member-${registration}`, registration_id: registration, repo_id: repo, policy: { sync_enabled: repo.endsWith('first'), sync_mode: repo.endsWith('first') ? 'head' : 'off', rag_enabled: false, collections: [] }, policy_hash: `policy-${registration}`, config_hash: `config-${registration}`, path_fingerprint: 'path-a', source_authority_hash: source, source_refs: [`${source}-ref`], was_enabled: true });
+  const pathA = [member('owner/first', 'reg-first', 'source-first'), member('owner/second', 'reg-second', 'source-second')];
+  const pathB = pathA.map((value: any) => ({ ...value, candidate_ref: `${value.candidate_ref}-clone`, path_fingerprint: 'path-b' }));
+  cloneSnapshot.maintenance = [{ registration_id: 'clone-conflict-1', cache_ref: 'cache-111111112222', repo_id: 'owner/first', enabled: false, state: 'cache_clone_conflict', generation: 9, policy: pathA[0].policy, identity_conflict: { kind: 'cache_clone_conflict', details_available: true, candidate_registration_ids: ['reg-first', 'reg-second'], policy_hashes: ['p'], config_hashes: ['c'], path_fingerprints: ['path-a', 'path-b'], candidates: [
+    { candidate_ref: 'clone-path-a', selection_kind: 'physical_cache_authority', registration_id: '', repo_id: '', policy: {}, policy_hash: '', path_fingerprint: 'path-a', source_authority_hash: 'cohort-source-a', was_enabled: true, cohort_registration_ids: ['reg-first', 'reg-second'], cohort_repo_ids: ['owner/first', 'owner/second'], members: pathA },
+    { candidate_ref: 'clone-path-b', selection_kind: 'physical_cache_authority', registration_id: '', repo_id: '', policy: {}, policy_hash: '', path_fingerprint: 'path-b', source_authority_hash: 'cohort-source-b', was_enabled: true, cohort_registration_ids: ['reg-first', 'reg-second'], cohort_repo_ids: ['owner/first', 'owner/second'], members: pathB }
+  ] } }];
+  await mockAdmin(page, cloneSnapshot);
+  await page.goto('/?view=Maintenance&registration=clone-conflict-1');
+  await expect(page.getByRole('heading', { name: 'Cache clone conflict' })).toBeVisible();
+  await expect(page.getByText('Select one physical cache authority')).toBeVisible();
+  const cloneChoices = page.locator('input[name="conflict-candidate"]');
+  await expect(cloneChoices).toHaveCount(2);
+  await expect(page.getByText(/owner\/first · Head sync/).first()).toBeVisible();
+  await expect(page.getByText(/owner\/second · Off sync/).first()).toBeVisible();
+  await expect(page.getByText(/source-first/).first()).toBeVisible();
+  await expect(cloneChoices.first()).not.toBeChecked();
 });
 
 async function mockAdmin(page: Page, value = snapshot) {

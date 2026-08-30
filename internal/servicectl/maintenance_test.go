@@ -483,10 +483,12 @@ func TestMaintenanceLoadCanonicalizesEquivalentRepositoryDocsSourceAuthorities(t
 	source := func(id string) repositoryDocsDiskSource {
 		return repositoryDocsDiskSource{State: RepositoryDocsMaintenanceState{SourceRegistrationID: id, SourceRegistrationGeneration: 1, GitStoreRef: "refs/docs", WorktreeRef: "HEAD", State: "ready"}, RepositoryPath: repositoryPath, Profile: "docs"}
 	}
+	admissionWorkKey := "repository-docs-index:durable-migration"
+	admissionSetID := "repo-doc-set-durable-migration"
 	disk := maintenanceRegistryFile{SchemaVersion: legacyMaintenanceRegistrySchema, Entries: []maintenanceDiskEntry{
 		{MaintenanceEntry: MaintenanceEntry{RegistrationID: canonicalID, CacheUUID: identity.UUID, RepoID: "owner/repo", Policy: policy, ConfigHash: maintenanceHash(cfg), Enabled: true}, CachePath: cachePath, ConfigSnapshot: cfg, RepositoryDocsSources: []repositoryDocsDiskSource{source(canonicalSourceID)}},
 		{MaintenanceEntry: MaintenanceEntry{RegistrationID: legacyID, CacheUUID: identity.UUID, RepoID: "legacy/repo", Policy: policy, ConfigHash: maintenanceHash(cfg), Enabled: true}, CachePath: cachePath, ConfigSnapshot: cfg, RepositoryDocsSources: []repositoryDocsDiskSource{source(legacySourceID)}},
-	}}
+	}, RepositoryDocsAdmissionQueue: []repositoryDocsAdmissionIntent{{RegistrationID: legacyID, SourceRegistrationID: legacySourceID, SourceRegistrationGeneration: 1, RepoID: "owner/repo", WorkKey: admissionWorkKey, ExpectedRevisionSetID: admissionSetID, JobID: "job-cancelling", Disposition: repositoryDocsAdmissionCancelled, CreatedAt: time.Now().UTC()}}}
 	data, _ := json.Marshal(disk)
 	registryPath := filepath.Join(dir, "managed-caches.json")
 	if err := os.WriteFile(registryPath, data, 0o600); err != nil {
@@ -507,6 +509,13 @@ func TestMaintenanceLoadCanonicalizesEquivalentRepositoryDocsSourceAuthorities(t
 	}
 	if maintenance.sourceRedirects[legacySourceID] != canonicalSourceID {
 		t.Fatalf("source redirects=%+v", maintenance.sourceRedirects)
+	}
+	admission, ok := maintenance.admissions[repositoryDocsAdmissionKey(canonicalID, canonicalSourceID)]
+	if !ok || admission.Disposition != repositoryDocsAdmissionCancelled || admission.JobID != "job-cancelling" {
+		t.Fatalf("migrated admission=%+v ok=%t", admission, ok)
+	}
+	if !maintenance.repositoryDocsCancellationCommitted(Job{ID: "job-cancelling", Type: RepositoryDocsIndexJobType, RegistrationID: canonicalID, SourceRegistrationID: canonicalSourceID, SourceRegistrationGeneration: 1, RepoID: "owner/repo", ExpectedRevisionSetID: admissionSetID, WorkRef: publicWorkRef(admissionWorkKey)}) {
+		t.Fatal("durable cancellation tombstone was not preserved")
 	}
 	selected, err := maintenance.repositoryDocsSourceForSelector(RepositoryDocsSourceSelector{RegistrationID: legacyID, SourceRegistrationID: legacySourceID, SourceRegistrationGeneration: 2})
 	if err != nil || selected.RegistrationID != canonicalID || selected.SourceRegistrationID != canonicalSourceID {

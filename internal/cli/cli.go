@@ -1985,6 +1985,15 @@ func renderMaintenanceListText(w io.Writer, result servicectl.MaintenanceListRes
 	fmt.Fprintf(w, "managed_caches: %d\n", len(result.Entries))
 	for _, entry := range result.Entries {
 		fmt.Fprintf(w, "%s\t%s\t%s\tcontent=%d covered=%d\n", entry.RegistrationID, entry.RepoID, entry.State, entry.ContentGeneration, entry.CoveredGeneration)
+		if len(entry.Aliases) > 0 {
+			fmt.Fprintf(w, "  aliases: %s\n", strings.Join(entry.Aliases, ", "))
+		}
+		if len(entry.LegacyRegistrationIDs) > 0 {
+			fmt.Fprintf(w, "  legacy_registration_ids: %s\n", strings.Join(entry.LegacyRegistrationIDs, ", "))
+		}
+		if entry.IdentityConflict != nil {
+			fmt.Fprintf(w, "  identity_conflict: %s details_available=%t candidates=%d paths=%d\n", entry.IdentityConflict.Kind, entry.IdentityConflict.DetailsAvailable, len(entry.IdentityConflict.Candidates), len(entry.IdentityConflict.PathFingerprints))
+		}
 	}
 }
 

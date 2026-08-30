@@ -215,6 +215,8 @@ func repositoryDocsRevisionSetIdentity(req StartRepositoryDocsIndexJobRequest, r
 }
 
 func (m *JobManager) runRepositoryDocsIndexJob(ctx context.Context, manager Manager, jobID string, req StartRepositoryDocsIndexJobRequest) {
+	m.markWorkerStarted(jobID)
+	defer m.markWorkerFinished(jobID)
 	if !m.beginRepositoryDocsJob(jobID) {
 		return
 	}

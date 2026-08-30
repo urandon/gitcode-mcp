@@ -74,6 +74,8 @@ type JobManager struct {
 	lastPrunedAt                        *time.Time
 	onRepositoryDocsCancelled           func(Job) error
 	repositoryDocsCancellationCommitted func(Job) bool
+	cacheMutationFences                 map[string]bool
+	inflightWorkers                     map[string]bool
 }
 
 type jobCancellationResolution struct {
@@ -160,6 +162,8 @@ func NewJobManagerWithRetention(snapshotPath string, retention config.ServiceJob
 		registrationRedirects:       map[string]string{},
 		sourceRegistrationRedirects: map[string]string{},
 		canonicalRepoByRegistration: map[string]string{},
+		cacheMutationFences:         map[string]bool{},
+		inflightWorkers:             map[string]bool{},
 		retention:                   retention,
 	}
 }
@@ -196,15 +200,73 @@ func (m *JobManager) projectCanonicalRegistrationLocked(job *Job) {
 	if job == nil {
 		return
 	}
-	if canonical := m.registrationRedirects[job.RegistrationID]; canonical != "" {
-		job.RegistrationID = canonical
-	}
+	job.RegistrationID = resolveJobRedirect(job.RegistrationID, m.registrationRedirects)
 	if canonicalRepo := m.canonicalRepoByRegistration[job.RegistrationID]; canonicalRepo != "" {
 		job.RepoID = canonicalRepo
 	}
-	if canonicalSource := m.sourceRegistrationRedirects[job.SourceRegistrationID]; canonicalSource != "" {
-		job.SourceRegistrationID = canonicalSource
+	job.SourceRegistrationID = resolveJobRedirect(job.SourceRegistrationID, m.sourceRegistrationRedirects)
+}
+
+func resolveJobRedirect(value string, redirects map[string]string) string {
+	original := value
+	seen := map[string]bool{}
+	for redirects[value] != "" {
+		if seen[value] {
+			return original
+		}
+		seen[value] = true
+		value = redirects[value]
 	}
+	return value
+}
+
+type CacheMutationFenceError struct{}
+
+func (CacheMutationFenceError) Error() string          { return "service: cache authority is being changed" }
+func (CacheMutationFenceError) DiagnosticCode() string { return "cache_authority_fenced" }
+
+// BeginCacheMutationFence prevents a new writer admission and reports both
+// public active jobs and workers that are still unwinding after cancellation.
+// It never calls MaintenanceManager while holding the job lock.
+func (m *JobManager) BeginCacheMutationFence(cacheUUID string) (func(), []string) {
+	cacheUUID = strings.TrimSpace(cacheUUID)
+	if cacheUUID == "" {
+		return func() {}, []string{"unknown-cache-authority"}
+	}
+	m.mu.Lock()
+	if m.cacheMutationFences[cacheUUID] {
+		m.mu.Unlock()
+		return func() {}, []string{"concurrent-conflict-resolution"}
+	}
+	m.cacheMutationFences[cacheUUID] = true
+	blocked := []string{}
+	for id, job := range m.jobs {
+		if job != nil && job.CacheUUID == cacheUUID && (jobActiveStatus(job.Status) || m.inflightWorkers[id]) {
+			blocked = append(blocked, id)
+		}
+	}
+	sort.Strings(blocked)
+	m.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.mu.Lock()
+			delete(m.cacheMutationFences, cacheUUID)
+			m.mu.Unlock()
+		})
+	}, blocked
+}
+
+func (m *JobManager) markWorkerStarted(jobID string) {
+	m.mu.Lock()
+	m.inflightWorkers[jobID] = true
+	m.mu.Unlock()
+}
+
+func (m *JobManager) markWorkerFinished(jobID string) {
+	m.mu.Lock()
+	delete(m.inflightWorkers, jobID)
+	m.mu.Unlock()
 }
 
 func (m *JobManager) LoadAndMarkInterrupted() error {
@@ -222,14 +284,15 @@ func (m *JobManager) LoadAndMarkInterrupted() error {
 	if err := json.Unmarshal(data, &jobs); err != nil {
 		return err
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	now := m.now()
 	maxID := 0
 	for i := range jobs {
 		job := jobs[i]
+		m.mu.Lock()
 		m.projectCanonicalRegistrationLocked(&job)
-		if job.Status == JobStatusCancelling && m.repositoryDocsCancellationCommitted != nil && m.repositoryDocsCancellationCommitted(job) {
+		cancellationCommitted := m.repositoryDocsCancellationCommitted
+		m.mu.Unlock()
+		if job.Status == JobStatusCancelling && cancellationCommitted != nil && cancellationCommitted(job) {
 			job.Status = JobStatusCancelled
 			job.UpdatedAt = now
 			job.FinishedAt = &now
@@ -250,8 +313,12 @@ func (m *JobManager) LoadAndMarkInterrupted() error {
 			maxID = idNum
 		}
 		jobCopy := job
+		m.mu.Lock()
 		m.jobs[job.ID] = &jobCopy
+		m.mu.Unlock()
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if maxID > m.nextID {
 		m.nextID = maxID
 	}
@@ -495,6 +562,9 @@ type JobRecoveryIntent struct {
 func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID string, steps int, workKey, cacheUUID, registrationID, namespaceID string, intent JobRecoveryIntent, cancel context.CancelFunc) (Job, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if cacheUUID = strings.TrimSpace(cacheUUID); cacheUUID != "" && m.cacheMutationFences[cacheUUID] {
+		return Job{}, false, CacheMutationFenceError{}
+	}
 	for _, job := range m.jobs {
 		if job.WorkKey == workKey && jobActiveStatus(job.Status) {
 			return cloneJob(job), false, nil

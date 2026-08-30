@@ -3,16 +3,50 @@ package servicectl
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/service"
 )
 
 type admissionSyncService struct {
 	calls []string
 	err   error
+}
+
+func TestDirectCacheWritersNormalizeIdentityAndRespectAuthorityFence(t *testing.T) {
+	ctx := context.Background()
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	identity, _ := store.CacheIdentity(ctx)
+	_ = store.Close()
+	manager := newTestManager(t, "darwin")
+	cfg := config.Default()
+	manager.EffectiveConfig = &cfg
+	jobs := NewJobManager("")
+	release, blockers := jobs.BeginCacheMutationFence(identity.UUID)
+	defer release()
+	if len(blockers) != 0 {
+		t.Fatalf("unexpected blockers=%v", blockers)
+	}
+	_, err = jobs.StartSync(ctx, manager, StartSyncJobRequest{RepoID: "owner/repo", CachePath: cachePath, Issues: true})
+	var fenced CacheMutationFenceError
+	if !errors.As(err, &fenced) {
+		t.Fatalf("missing-uuid writer error=%T %v", err, err)
+	}
+	_, err = jobs.StartRAGIndex(ctx, manager, StartRAGIndexJobRequest{RepoID: "owner/repo", CachePath: cachePath, CacheUUID: "wrong-uuid"})
+	if err == nil || err.Error() != "service: cache uuid does not match the selected cache authority" {
+		t.Fatalf("wrong-uuid writer error=%T %v", err, err)
+	}
 }
 
 func (s *admissionSyncService) result(name string) (*service.SyncResourcesResult, error) {

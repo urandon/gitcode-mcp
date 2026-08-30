@@ -32,6 +32,9 @@ func (m *JobManager) StartRAGIndex(ctx context.Context, manager Manager, req Sta
 	if req.RepoID == "" {
 		return Job{}, errors.New("repo_id is required")
 	}
+	if err := normalizeCacheWriterIdentity(ctx, manager, &req.CachePath, &req.CacheUUID, &req.RegistrationID, &req.RepoID); err != nil {
+		return Job{}, err
+	}
 	workKey := ragIndexWorkKey(req)
 	ctx, cancel := context.WithCancel(ctx)
 	profile := strings.TrimSpace(req.Profile)
@@ -57,6 +60,8 @@ func ragIndexWorkKey(req StartRAGIndexJobRequest) string {
 }
 
 func (m *JobManager) runRAGIndexJob(ctx context.Context, manager Manager, jobID string, req StartRAGIndexJobRequest) {
+	m.markWorkerStarted(jobID)
+	defer m.markWorkerFinished(jobID)
 	m.updateJob(jobID, func(job *Job, now time.Time) {
 		job.Status = JobStatusRunning
 		job.StartedAt = &now
