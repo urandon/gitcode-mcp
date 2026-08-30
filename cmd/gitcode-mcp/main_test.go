@@ -193,6 +193,23 @@ func TestEntrypointDefaultModeDependencyHandoff(t *testing.T) {
 	}
 }
 
+func TestRunForwardsCLIStdinForRAGEnablePrompt(t *testing.T) {
+	src := newTestSource(t)
+	input := strings.NewReader("yes\n")
+	old := cliRoute
+	defer func() { cliRoute = old }()
+	cliRoute = func(_ context.Context, _ []string, _ io.Writer, _ io.Writer, deps StartupDeps) int {
+		if deps.Stdin != input {
+			t.Fatalf("CLI stdin was not forwarded: got %T", deps.Stdin)
+		}
+		return 0
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"rag", "enable", "--repo", "owner/repo"}, input, &stdout, &stderr, src); code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+}
+
 func TestEntrypointServiceRunOutlivesDefaultOperationTimeout(t *testing.T) {
 	src := newTestSource(t)
 	configPath := filepath.Join(src.homeDir, "startup.json")

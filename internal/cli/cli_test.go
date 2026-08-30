@@ -762,6 +762,239 @@ func TestServiceHelpShowsLifecycleSubcommands(t *testing.T) {
 	}
 }
 
+func TestRAGEnableTTYPlansPromptsAndReplaysGeneratedOperation(t *testing.T) {
+	src, cachePath, client, stop := runningMaintenanceCLIFixture(t)
+	defer stop()
+	args := []string{"rag", "enable", "--repo", "owner/repo", "--cache-path", cachePath, "--sync", "off", "--rag", "off"}
+	run := func(answer string) (string, string) {
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps(args, &stdout, &stderr, nil, localCommandDeps{
+			Source: src, Stdin: strings.NewReader(answer), IsTerminal: func() bool { return true },
+		})
+		if code != 0 {
+			t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "plan_id:") || !strings.Contains(stderr.String(), "Apply this maintenance plan? [y/N]") {
+			t.Fatalf("plan/prompt missing stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+		if strings.Contains(stdout.String(), "cli-maintenance-") || strings.Contains(stderr.String(), "cli-maintenance-") {
+			t.Fatalf("generated idempotency key leaked stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+		return stdout.String(), maintenanceOutputField(stdout.String(), "audit_receipt")
+	}
+	firstOutput, firstReceipt := run("yes\n")
+	_, secondReceipt := run("y\n")
+	if firstReceipt == "" || firstReceipt != secondReceipt || !strings.Contains(firstOutput, "registration_id:") {
+		t.Fatalf("generated operation was not replay-safe: first=%q second=%q output=%q", firstReceipt, secondReceipt, firstOutput)
+	}
+	var list servicectl.MaintenanceListResult
+	if err := client.Call(context.Background(), "Maintenance.List", nil, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Entries) != 1 {
+		t.Fatalf("entries=%d want 1", len(list.Entries))
+	}
+}
+
+func TestRAGEnableTTYDeclineAndEOFFailClosed(t *testing.T) {
+	src, cachePath, client, stop := runningMaintenanceCLIFixture(t)
+	defer stop()
+	args := []string{"rag", "enable", "--repo", "owner/repo", "--cache-path", cachePath, "--sync", "off", "--rag", "off"}
+	for _, answer := range []string{"n\n", "", "maybe\n"} {
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps(args, &stdout, &stderr, nil, localCommandDeps{
+			Source: src, Stdin: strings.NewReader(answer), IsTerminal: func() bool { return true },
+		})
+		if code != 4 || !strings.Contains(stderr.String(), "failure_class: invalid_query") || strings.Contains(stdout.String(), "audit_receipt:") {
+			t.Fatalf("answer=%q code=%d stdout=%q stderr=%q", answer, code, stdout.String(), stderr.String())
+		}
+	}
+	var list servicectl.MaintenanceListResult
+	if err := client.Call(context.Background(), "Maintenance.List", nil, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Entries) != 0 {
+		t.Fatalf("declined operations mutated registry: %+v", list.Entries)
+	}
+}
+
+func TestRAGEnableNonTTYRequiresExplicitKeyAndConfirmation(t *testing.T) {
+	src, cachePath, client, stop := runningMaintenanceCLIFixture(t)
+	defer stop()
+	base := []string{"rag", "enable", "--repo", "owner/repo", "--cache-path", cachePath, "--sync", "off", "--rag", "off", "--format", "json"}
+	tests := []struct {
+		name  string
+		extra []string
+		want  string
+	}{
+		{name: "neither", want: "--yes and --idempotency-key KEY"},
+		{name: "confirmation only", extra: []string{"--yes"}, want: "--idempotency-key KEY"},
+		{name: "key only", extra: []string{"--idempotency-key", "stable-key"}, want: "--yes and --idempotency-key KEY"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			args := append(append([]string(nil), base...), tt.extra...)
+			code := executeWithFactoryAndDeps(args, &stdout, &stderr, nil, localCommandDeps{Source: src, Stdin: strings.NewReader(""), IsTerminal: func() bool { return false }})
+			if code != 4 || stdout.Len() != 0 || !strings.Contains(stderr.String(), `"failure_class":"invalid_query"`) || !strings.Contains(stderr.String(), tt.want) {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+		})
+	}
+	var list servicectl.MaintenanceListResult
+	if err := client.Call(context.Background(), "Maintenance.List", nil, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Entries) != 0 {
+		t.Fatalf("invalid non-TTY operations mutated registry: %+v", list.Entries)
+	}
+}
+
+func TestRAGEnableNonTTYRejectsMissingKeyBeforeCachePlanning(t *testing.T) {
+	sentinel := filepath.Join(t.TempDir(), "private-sentinel", "unavailable-cache.db")
+	src := &repoInitLocalSource{
+		env: map[string]string{}, cwd: t.TempDir(), homeDir: t.TempDir(), configDir: t.TempDir(), cacheDir: t.TempDir(),
+	}
+	var stdout, stderr bytes.Buffer
+	code := executeWithFactoryAndDeps(
+		[]string{"rag", "enable", "--repo", "owner/repo", "--cache-path", sentinel, "--yes", "--format", "json"},
+		&stdout, &stderr, nil,
+		localCommandDeps{Source: src, Stdin: strings.NewReader(""), IsTerminal: func() bool { return false }},
+	)
+	if code != 4 || stdout.Len() != 0 || !strings.Contains(stderr.String(), `"failure_class":"invalid_query"`) || !strings.Contains(stderr.String(), "--idempotency-key KEY") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), sentinel) || strings.Contains(stderr.String(), "unavailable-cache.db") {
+		t.Fatalf("preflight leaked cache path: %q", stderr.String())
+	}
+}
+
+func TestGeneratedMaintenanceKeyTracksStableIntentNotMachineReadiness(t *testing.T) {
+	base := servicectl.MaintenancePlan{
+		SchemaVersion:     "maintenance-plan-v1",
+		PlanID:            "maintenance-plan-before",
+		ConfigurationHash: "sha256:config",
+		RepoID:            "owner/repo",
+		Cache:             servicectl.MaintenanceCachePlan{UUID: "cache-uuid", RepositoryBinding: "sha256:binding"},
+		Policy:            servicectl.MaintenancePolicy{SyncEnabled: true, SyncMode: "head", Issues: true, HeadIntervalSeconds: 900},
+		Service:           servicectl.Status{Status: servicectl.StatusInstalledStopped, Installed: true},
+		Provider:          servicectl.MaintenanceProviderPlan{Provider: "ollama", Installed: false, Running: false, ModelAvailable: false},
+		Actions:           []servicectl.MaintenancePlanAction{{ID: "start-service", Status: "required"}, {ID: "download-model", Status: "required"}},
+	}
+	after := base
+	after.PlanID = "maintenance-plan-after"
+	after.Service = servicectl.Status{Status: servicectl.StatusRunning, Installed: true, Running: true, PIDAlive: true, SocketPresent: true}
+	after.Provider.Installed = true
+	after.Provider.Running = true
+	after.Provider.ModelAvailable = true
+	after.Provider.EmbeddingSmokeStatus = "ready"
+	after.Actions = []servicectl.MaintenancePlanAction{{ID: "validate-daemon-protocol", Status: "complete"}, {ID: "verify-provider-smoke", Status: "complete"}}
+
+	beforeKey := generatedMaintenanceIdempotencyKey(base)
+	afterKey := generatedMaintenanceIdempotencyKey(after)
+	if beforeKey == "" || beforeKey != afterKey {
+		t.Fatalf("machine readiness changed operation identity: before=%q after=%q", beforeKey, afterKey)
+	}
+	changed := after
+	changed.Policy.SyncMode = "head-and-backfill"
+	if changedKey := generatedMaintenanceIdempotencyKey(changed); changedKey == beforeKey {
+		t.Fatalf("policy change reused operation identity: %q", changedKey)
+	}
+}
+
+func TestRAGEnableExplicitKeyReplayReturnsSameReceipt(t *testing.T) {
+	src, cachePath, client, stop := runningMaintenanceCLIFixture(t)
+	defer stop()
+	args := []string{"rag", "enable", "--repo", "owner/repo", "--cache-path", cachePath, "--sync", "off", "--rag", "off", "--yes", "--idempotency-key", "stable-enable-1"}
+	var receipts []string
+	for range 2 {
+		var stdout, stderr bytes.Buffer
+		code := executeWithFactoryAndDeps(args, &stdout, &stderr, nil, localCommandDeps{Source: src, IsTerminal: func() bool { return false }})
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%q", code, stderr.String())
+		}
+		receipts = append(receipts, maintenanceOutputField(stdout.String(), "audit_receipt"))
+	}
+	if receipts[0] == "" || receipts[0] != receipts[1] {
+		t.Fatalf("receipts=%v", receipts)
+	}
+	var list servicectl.MaintenanceListResult
+	if err := client.Call(context.Background(), "Maintenance.List", nil, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Entries) != 1 {
+		t.Fatalf("entries=%d want 1", len(list.Entries))
+	}
+}
+
+func TestRAGEnableMissingRepoAndHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := executeWithFactoryAndDeps([]string{"rag", "enable", "--yes", "--idempotency-key", "key", "--format", "json"}, &stdout, &stderr, nil, localCommandDeps{Source: config.OSSource{}, IsTerminal: func() bool { return false }})
+	if code != 4 || !strings.Contains(stderr.String(), `"failure_class":"invalid_query"`) || !strings.Contains(stderr.String(), "repository id is required") {
+		t.Fatalf("missing repo code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Execute([]string{"rag", "enable", "--help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("help code=%d stderr=%q", code, stderr.String())
+	}
+	for _, want := range []string{"rag enable --repo REPO", "Interactive terminals", "--yes --idempotency-key KEY", "owner-repo-rag-enable-1"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("help missing %q in %q", want, stdout.String())
+		}
+	}
+}
+
+func maintenanceOutputField(output, name string) string {
+	prefix := name + ":"
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
+	return ""
+}
+
+func runningMaintenanceCLIFixture(t *testing.T) (*repoInitLocalSource, string, *servicectl.RPCClient, func()) {
+	t.Helper()
+	root := t.TempDir()
+	src := &repoInitLocalSource{
+		env: map[string]string{
+			"GITCODE_MCP_SERVICE_NETWORK": "mem",
+			"GITCODE_MCP_SERVICE_ADDRESS": "cli-maintenance-" + filepath.Base(root),
+		},
+		cwd: root, homeDir: filepath.Join(root, "home"), configDir: filepath.Join(root, "config"), cacheDir: filepath.Join(root, "cache"),
+	}
+	cachePath := filepath.Join(root, "cache.db")
+	store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	manager := servicectl.Manager{Source: src, BinaryPath: os.Args[0], Version: "test"}
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- manager.Run(ctx) }()
+	waitForServiceSocket(t, src)
+	client, err := manager.Client()
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	stop := func() {
+		cancel()
+		if err := <-errCh; err != nil && err != context.Canceled {
+			t.Errorf("service stop: %v", err)
+		}
+	}
+	return src, cachePath, client, stop
+}
+
 func TestServiceCLIControlsFakeJobOverIPC(t *testing.T) {
 	root, err := shortCLITestRoot(t, "cli-svc-")
 	if err != nil {

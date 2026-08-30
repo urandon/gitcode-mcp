@@ -116,10 +116,19 @@ For the normal end-to-end setup, prefer the maintenance plan/apply flow. It also
 
 ```sh
 gitcode-mcp maintenance plan --repo YOUR_OWNER/YOUR_REPO
-gitcode-mcp maintenance enable --repo YOUR_OWNER/YOUR_REPO --yes --idempotency-key setup-1
+gitcode-mcp rag enable --repo YOUR_OWNER/YOUR_REPO
 ```
 
-`gitcode-mcp rag enable ...` remains an alias for the same flow. `rag setup` is still useful as the narrower provider/model diagnostic.
+In an interactive terminal, `rag enable` renders the exact plan and asks for confirmation. After `yes`, the CLI derives a replay-safe opaque operation key from that plan and returns a safe `audit_receipt`; the raw key is not printed. Automation must make confirmation and retry identity explicit:
+
+```sh
+gitcode-mcp rag enable \
+  --repo YOUR_OWNER/YOUR_REPO \
+  --yes \
+  --idempotency-key your-repo-rag-enable-1
+```
+
+Reuse the same explicit key when retrying the same automation operation. Piped/non-terminal input never generates a fresh key. `rag enable` remains an alias for `maintenance enable`; `rag setup` is still useful as the narrower provider/model diagnostic.
 
 ## Model Storage
 

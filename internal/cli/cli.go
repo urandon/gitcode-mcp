@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -16,6 +19,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/mattn/go-isatty"
 
 	"gitcode-mcp/internal/adminhttp"
 	"gitcode-mcp/internal/buildinfo"
@@ -154,6 +159,8 @@ type localCommandDeps struct {
 	CredentialReporter config.CredentialStatusReporter
 	RAGRuntime         rag.Runtime
 	OpenURL            func(string) error
+	Stdin              io.Reader
+	IsTerminal         func() bool
 }
 
 type startupPlan struct {
@@ -317,6 +324,10 @@ func ExecuteWithSource(args []string, stdout io.Writer, stderr io.Writer, src co
 
 func ExecuteWithSourceContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, src config.Source) int {
 	return executeWithFactoryAndDepsContext(ctx, args, stdout, stderr, nil, localCommandDeps{Source: src})
+}
+
+func ExecuteWithSourceContextAndInput(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src config.Source) int {
+	return executeWithFactoryAndDepsContext(ctx, args, stdout, stderr, nil, localCommandDeps{Source: src, Stdin: stdin})
 }
 
 func ExecuteWithClient(args []string, stdout io.Writer, stderr io.Writer, client gitcode.Client) int {
@@ -1014,6 +1025,21 @@ func executeMaintenanceCommand(ctx context.Context, args []string, opts options,
 	if sub != "plan" && sub != "enable" {
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "maintenance", Message: "unknown subcommand"})
 	}
+	if strings.TrimSpace(opts.repo) == "" {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "repo", Message: "repository id is required"})
+	}
+	interactive := maintenanceInputIsTerminal(deps)
+	if sub == "enable" && !opts.dryRun {
+		if !interactive && !opts.yes {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "confirmation", Message: "non-interactive enable requires --yes and --idempotency-key KEY"})
+		}
+		if !interactive && strings.TrimSpace(opts.idempotencyKey) == "" {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "idempotency_key", Message: "non-interactive enable requires --idempotency-key KEY; reuse the same key when retrying"})
+		}
+		if interactive && !opts.yes && opts.format != "text" {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "format", Message: "interactive confirmation requires --format text; use --yes for structured output"})
+		}
+	}
 	eff, err := config.LoadEffective(deps.Source, config.Overrides{CachePath: opts.cachePath})
 	if err != nil {
 		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), deps.Source))
@@ -1043,8 +1069,23 @@ func executeMaintenanceCommand(ctx context.Context, args []string, opts options,
 	if sub == "plan" || opts.dryRun {
 		return render(stdout, opts.format, plan, renderMaintenancePlanText)
 	}
+	if !opts.yes {
+		if code := render(stdout, opts.format, plan, renderMaintenancePlanText); code != 0 {
+			return code
+		}
+		confirmed, promptErr := confirmMaintenancePlan(deps, stderr)
+		if promptErr != nil {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "confirmation", Message: promptErr.Error()})
+		}
+		if !confirmed {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "confirmation", Message: "plan was not confirmed; no changes were applied"})
+		}
+	}
+	if strings.TrimSpace(req.IdempotencyKey) == "" {
+		req.IdempotencyKey = generatedMaintenanceIdempotencyKey(plan)
+	}
 	req.PlanID = plan.PlanID
-	req.Confirmed = opts.yes
+	req.Confirmed = true
 	req.AllowMachineChange = true
 	result, err := setup.Apply(ctx, req)
 	if err != nil {
@@ -1055,6 +1096,57 @@ func executeMaintenanceCommand(ctx context.Context, args []string, opts options,
 		return 1
 	}
 	return code
+}
+
+func maintenanceInputIsTerminal(deps localCommandDeps) bool {
+	if deps.IsTerminal != nil {
+		return deps.IsTerminal()
+	}
+	input := deps.Stdin
+	if input == nil {
+		input = os.Stdin
+	}
+	file, ok := input.(*os.File)
+	if !ok {
+		return false
+	}
+	fd := file.Fd()
+	return isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
+}
+
+func confirmMaintenancePlan(deps localCommandDeps, prompt io.Writer) (bool, error) {
+	input := deps.Stdin
+	if input == nil {
+		input = os.Stdin
+	}
+	fmt.Fprint(prompt, "Apply this maintenance plan? [y/N] ")
+	answer, err := bufio.NewReader(input).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, errors.New("could not read confirmation")
+	}
+	answer = strings.ToLower(strings.TrimSpace(answer))
+	return answer == "y" || answer == "yes", nil
+}
+
+func generatedMaintenanceIdempotencyKey(plan servicectl.MaintenancePlan) string {
+	intent := struct {
+		SchemaVersion     string                       `json:"schema_version"`
+		RepoID            string                       `json:"repo_id"`
+		CacheUUID         string                       `json:"cache_uuid"`
+		RepositoryBinding string                       `json:"repository_binding_hash"`
+		ConfigurationHash string                       `json:"configuration_hash"`
+		Policy            servicectl.MaintenancePolicy `json:"policy"`
+	}{
+		SchemaVersion:     plan.SchemaVersion,
+		RepoID:            plan.RepoID,
+		CacheUUID:         plan.Cache.UUID,
+		RepositoryBinding: plan.Cache.RepositoryBinding,
+		ConfigurationHash: plan.ConfigurationHash,
+		Policy:            plan.Policy,
+	}
+	value, _ := json.Marshal(intent)
+	digest := sha256.Sum256(value)
+	return "cli-maintenance-" + hex.EncodeToString(digest[:16])
 }
 
 func maintenanceConfigReference(eff config.EffectiveConfig) string {
@@ -5112,9 +5204,12 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "Run gitcode-mcp admin SUBCOMMAND --help for details.")
 	case "maintenance":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s plan --repo REPO [flags]\n", command)
-		fmt.Fprintf(w, "       gitcode-mcp %s enable --repo REPO --yes --idempotency-key KEY [flags]\n\n", command)
+		fmt.Fprintf(w, "       gitcode-mcp %s enable --repo REPO [flags]\n", command)
+		fmt.Fprintf(w, "       gitcode-mcp %s enable --repo REPO --yes --idempotency-key KEY [flags]  # automation\n\n", command)
 		fmt.Fprintln(w, "Plan and enable daemon-managed cache refresh, historical backfill, and RAG repair.")
 		fmt.Fprintln(w, "Plan is read-only. Enable revalidates the rendered plan before any local effect.")
+		fmt.Fprintln(w, "In a terminal, enable renders the plan, prompts for confirmation, and derives a replay-safe opaque key.")
+		fmt.Fprintln(w, "Non-interactive callers must provide both --yes and a stable --idempotency-key.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO                 configured repository id")
 		fmt.Fprintln(w, "  --cache-path PATH           selected cache (CLI only)")
@@ -5265,8 +5360,24 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "  --owner OWNER       repository owner (for auth probe)")
 		fmt.Fprintln(w, "  --repo REPO         repository id (for auth probe)")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
-	case "maintenance plan", "maintenance enable", "rag enable":
+	case "maintenance plan", "maintenance enable":
 		printCommandHelp("maintenance", w)
+	case "rag enable":
+		fmt.Fprintln(w, "Usage: gitcode-mcp rag enable --repo REPO [flags]")
+		fmt.Fprintln(w, "       gitcode-mcp rag enable --repo REPO --yes --idempotency-key KEY [flags]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Interactive terminals render the plan, ask for confirmation, and derive a replay-safe opaque operation key from that exact plan.")
+		fmt.Fprintln(w, "Automation must provide --yes plus a stable --idempotency-key and reuse the same key when retrying.")
+		fmt.Fprintln(w, "Examples:")
+		fmt.Fprintln(w, "  gitcode-mcp rag enable --repo owner/repo")
+		fmt.Fprintln(w, "  gitcode-mcp rag enable --repo owner/repo --yes --idempotency-key owner-repo-rag-enable-1")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO                 configured repository id")
+		fmt.Fprintln(w, "  --yes                       confirm the rendered plan non-interactively")
+		fmt.Fprintln(w, "  --idempotency-key KEY       stable automation/retry identity")
+		fmt.Fprintln(w, "  --profile PROFILE           RAG profile")
+		fmt.Fprintln(w, "  --sync MODE                 off, head, or head-and-backfill")
+		fmt.Fprintln(w, "  --format FORMAT             text or json")
 	case "rag setup":
 		fmt.Fprintln(w, "Usage: gitcode-mcp rag setup [--profile PROFILE] [--dry-run] [--yes] [--format FORMAT]")
 		fmt.Fprintln(w)

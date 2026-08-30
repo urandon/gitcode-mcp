@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -129,6 +130,92 @@ func TestMaintenanceWaitsForDaemonReadiness(t *testing.T) {
 	cancel()
 	if err := <-errCh; err != nil && err != context.Canceled {
 		t.Fatal(err)
+	}
+}
+
+func TestMaintenanceApplyMissingKeyIsTypedInvalidQuery(t *testing.T) {
+	setup := MaintenanceSetup{}
+	_, err := setup.Apply(context.Background(), MaintenanceSetupRequest{RepoID: "owner/repo", Confirmed: true})
+	var typed MaintenanceSetupInputError
+	if !errors.As(err, &typed) || typed.DiagnosticCode() != "invalid_query" || typed.Field != "idempotency_key" {
+		t.Fatalf("error=%T %v", err, err)
+	}
+}
+
+func TestMaintenanceReadinessFailureHasOnePublicSafeRecovery(t *testing.T) {
+	setup := MaintenanceSetup{
+		StartupTimeout: time.Millisecond,
+		Client: func() (*RPCClient, error) {
+			return nil, errors.New("dial unix /private/sentinel/control.sock: connection refused")
+		},
+	}
+	_, _, err := setup.waitForMaintenanceDaemon(context.Background())
+	var typed MaintenanceServiceReadinessError
+	if !errors.As(err, &typed) || typed.DiagnosticCode() != "service_not_ready" {
+		t.Fatalf("error=%T %v", err, err)
+	}
+	message := err.Error()
+	if strings.Count(message, "gitcode-mcp service repair") != 1 || strings.Contains(message, "control.sock") || strings.Contains(message, "/private/sentinel") {
+		t.Fatalf("unsafe or ambiguous readiness error: %q", message)
+	}
+}
+
+func TestMaintenancePlanOldDaemonHasOnePublicSafeRecovery(t *testing.T) {
+	ctx := context.Background()
+	manager := newTestManager(t, "darwin")
+	src := manager.Source.(testSource)
+	src.env = map[string]string{"GITCODE_MCP_SERVICE_NETWORK": "mem", "GITCODE_MCP_SERVICE_ADDRESS": "maintenance-old-daemon-" + filepath.Base(t.TempDir())}
+	manager.Source = src
+	paths, err := manager.ResolvePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePathDirs(paths); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := writeState(paths, State{PID: os.Getpid(), SocketPath: paths.SocketPath, StartedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	setup := MaintenanceSetup{
+		Manager:   manager,
+		Config:    config.Default(),
+		CachePath: cachePath,
+		Client: func() (*RPCClient, error) {
+			return nil, errors.New("dial unix /private/sentinel/control.sock: connection refused")
+		},
+	}
+	plan, err := setup.Plan(ctx, MaintenanceSetupRequest{RepoID: "owner/repo", SyncMode: "off", RAGMode: "off"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, action := range plan.Actions {
+		if action.ID != "upgrade-service" {
+			continue
+		}
+		found = true
+		if action.Handoff != "gitcode-mcp service repair" || action.Status != "blocked" {
+			t.Fatalf("upgrade action=%+v", action)
+		}
+	}
+	data, _ := json.Marshal(plan)
+	message := string(data)
+	if !found || strings.Count(message, "gitcode-mcp service repair") != 1 || strings.Contains(message, "control.sock") || strings.Contains(message, "/private/sentinel") {
+		t.Fatalf("unsafe or ambiguous old-daemon plan: %s", data)
 	}
 }
 
