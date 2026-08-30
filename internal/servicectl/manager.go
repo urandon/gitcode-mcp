@@ -1,10 +1,13 @@
 package servicectl
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -92,9 +95,13 @@ type Manager struct {
 	EffectiveConfig *config.Config
 	GOOS            string
 	Runner          CommandRunner
+	OutputRunner    CommandOutputRunner
+	StartupTimeout  time.Duration
+	StartupInterval time.Duration
 }
 
 type CommandRunner func(context.Context, string, ...string) error
+type CommandOutputRunner func(context.Context, string, ...string) (string, error)
 
 func effectiveJobConfig(manager Manager, cachePath string) (config.EffectiveConfig, error) {
 	if manager.EffectiveConfig != nil {
@@ -179,12 +186,12 @@ func (m Manager) Install(overwrite bool) (Status, error) {
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return Status{}, err
 	}
-	binary := strings.TrimSpace(m.BinaryPath)
-	if binary == "" {
-		binary = ServiceName
+	binary, err := resolveInstallExecutable(m.BinaryPath)
+	if err != nil {
+		return Status{}, err
 	}
 	content := installFileContent(paths.InstallKind, binary, paths)
-	if err := os.WriteFile(paths.InstallPath, []byte(content), 0o600); err != nil {
+	if err := writeInstallDefinition(paths.InstallPath, []byte(content)); err != nil {
 		return Status{}, err
 	}
 	return m.Status()
@@ -211,7 +218,7 @@ func (m Manager) Status() (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	socketPresent := paths.Network != "unix" || fileExists(paths.SocketPath)
+	socketPresent := paths.Network != "unix" || unixSocketExists(paths.SocketPath)
 	pidAlive := stateOK && processAlive(state.PID)
 	status := Status{
 		Status:        StatusNotInstalled,
@@ -256,6 +263,13 @@ func (m Manager) Doctor() (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
+	if status.Installed {
+		if err := validateInstalledDefinition(status.InstallKind, status.InstallPath); err != nil {
+			status.Status = StatusUnhealthy
+			status.Running = false
+			status.Message = "installed service executable is not usable; run gitcode-mcp service repair"
+		}
+	}
 	src := m.Source
 	if src == nil {
 		src = config.OSSource{}
@@ -290,12 +304,27 @@ func (m Manager) Start(ctx context.Context) (Status, error) {
 	if err := m.runStartCommand(ctx, paths); err != nil {
 		return Status{}, err
 	}
-	status, err := m.Status()
+	return m.waitForHealthy(ctx, paths)
+}
+
+// Repair replaces both the on-disk service definition and the platform
+// manager's loaded copy. Merely overwriting a plist is insufficient on macOS:
+// launchd keeps executing the definition it bootstrapped earlier.
+func (m Manager) Repair(ctx context.Context) (Status, error) {
+	paths, err := m.ResolvePaths()
 	if err != nil {
 		return Status{}, err
 	}
-	status.Message = "service start command submitted to " + paths.InstallKind
-	return status, nil
+	if _, err := resolveInstallExecutable(m.BinaryPath); err != nil {
+		return Status{}, fmt.Errorf("service: repair cannot use the current executable: %w", err)
+	}
+	if err := m.unloadForRepair(ctx, paths); err != nil {
+		return Status{}, err
+	}
+	if _, err := m.Install(true); err != nil {
+		return Status{}, err
+	}
+	return m.Start(ctx)
 }
 
 func (m Manager) Stop(ctx context.Context) (Status, error) {
@@ -329,6 +358,11 @@ func (m Manager) Run(ctx context.Context) error {
 	}
 	if err := ensurePathDirs(paths); err != nil {
 		return err
+	}
+	if paths.Network == "unix" {
+		// Remove a socket left by a prior process before publishing this PID. A
+		// new live PID plus an old socket inode must never look ready.
+		_ = os.Remove(paths.SocketPath)
 	}
 	now := time.Now().UTC()
 	state := State{PID: os.Getpid(), SocketPath: paths.SocketPath, StartedAt: now, UpdatedAt: now, Version: m.Version}
@@ -463,27 +497,214 @@ func installFileContent(kind, binary string, paths Paths) string {
   <array><string>%s</string><string>service</string><string>run</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>EnvironmentVariables</key>
+  <dict><key>GITCODE_MCP_SERVICE_RUNTIME_DIR</key><string>%s</string></dict>
   <key>StandardOutPath</key><string>%s</string>
   <key>StandardErrorPath</key><string>%s</string>
 </dict>
 </plist>
-`, binary, filepath.Join(paths.LogDir, "service.out.log"), filepath.Join(paths.LogDir, "service.err.log"))
+`, escapeXMLText(binary), escapeXMLText(paths.RuntimeDir), escapeXMLText(filepath.Join(paths.LogDir, "service.out.log")), escapeXMLText(filepath.Join(paths.LogDir, "service.err.log")))
 	case "systemd-user":
 		return fmt.Sprintf(`[Unit]
 Description=gitcode-mcp local service
 
 [Service]
 ExecStart=%s service run
+Environment=%s
 Restart=on-failure
 RuntimeDirectory=gitcode-mcp
 
 [Install]
 WantedBy=default.target
-`, binary)
+`, quoteSystemdArgument(binary), quoteSystemdArgument("GITCODE_MCP_SERVICE_RUNTIME_DIR="+paths.RuntimeDir))
 	default:
 		data, _ := json.MarshalIndent(map[string]string{"binary": binary, "kind": kind}, "", "  ")
 		return string(data) + "\n"
 	}
+}
+
+func writeInstallDefinition(path string, content []byte) error {
+	temp, err := os.CreateTemp(filepath.Dir(path), ".gitcode-mcp-service-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err := temp.Chmod(0o600); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if _, err := temp.Write(content); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, path)
+}
+
+func resolveInstallExecutable(raw string) (string, error) {
+	binary := strings.TrimSpace(raw)
+	if binary == "" {
+		return "", fmt.Errorf("service: executable path is empty; invoke service install through the installed gitcode-mcp binary")
+	}
+	if strings.ContainsAny(binary, "\x00\r\n") {
+		return "", fmt.Errorf("service: executable path contains unsupported control characters")
+	}
+	if !filepath.IsAbs(binary) {
+		if strings.ContainsRune(binary, filepath.Separator) {
+			return "", fmt.Errorf("service: executable path must be absolute or a command resolvable through PATH")
+		}
+		resolved, err := exec.LookPath(binary)
+		if err != nil {
+			return "", fmt.Errorf("service: executable %q is not resolvable through PATH; invoke service install through an absolute binary path", binary)
+		}
+		binary, err = filepath.Abs(resolved)
+		if err != nil {
+			return "", fmt.Errorf("service: resolve executable path: %w", err)
+		}
+	}
+	binary = filepath.Clean(binary)
+	if err := validateExecutable(binary); err != nil {
+		return "", err
+	}
+	return binary, nil
+}
+
+func validateExecutable(binary string) error {
+	if !filepath.IsAbs(binary) {
+		return fmt.Errorf("service: installed executable path must be absolute")
+	}
+	info, err := os.Stat(binary)
+	if err != nil {
+		return fmt.Errorf("service: installed executable is unavailable; recovery: invoke service install through an existing absolute executable: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("service: installed executable is not an executable regular file; recovery: invoke service install through an existing absolute executable")
+	}
+	return nil
+}
+
+func validateInstalledDefinition(kind, path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var binary string
+	switch kind {
+	case "launchagent":
+		binary, err = launchAgentProgram(data)
+	case "systemd-user":
+		binary, err = systemdProgram(data)
+	default:
+		return fmt.Errorf("unsupported service definition kind %q", kind)
+	}
+	if err != nil {
+		return err
+	}
+	return validateExecutable(binary)
+}
+
+func launchAgentProgram(data []byte) (string, error) {
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	wantArguments := false
+	inArguments := false
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return "", err
+		}
+		switch value := token.(type) {
+		case xml.StartElement:
+			switch value.Name.Local {
+			case "key":
+				var key string
+				if err := decoder.DecodeElement(&key, &value); err != nil {
+					return "", err
+				}
+				wantArguments = key == "ProgramArguments"
+			case "array":
+				if wantArguments {
+					inArguments = true
+					wantArguments = false
+				}
+			case "string":
+				if inArguments {
+					var program string
+					if err := decoder.DecodeElement(&program, &value); err != nil {
+						return "", err
+					}
+					if strings.TrimSpace(program) == "" {
+						return "", errors.New("empty ProgramArguments[0]")
+					}
+					return program, nil
+				}
+			}
+		case xml.EndElement:
+			if value.Name.Local == "array" && inArguments {
+				inArguments = false
+			}
+		}
+	}
+	return "", errors.New("ProgramArguments[0] is missing")
+}
+
+func systemdProgram(data []byte) (string, error) {
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "ExecStart=") {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(line, "ExecStart="))
+		if value == "" {
+			return "", errors.New("ExecStart executable is empty")
+		}
+		if value[0] != '"' {
+			return strings.Fields(value)[0], nil
+		}
+		var builder strings.Builder
+		escaped := false
+		for i := 1; i < len(value); i++ {
+			ch := value[i]
+			if escaped {
+				builder.WriteByte(ch)
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == '"' {
+				return strings.ReplaceAll(strings.ReplaceAll(builder.String(), "$$", "$"), "%%", "%"), nil
+			}
+			builder.WriteByte(ch)
+		}
+		return "", errors.New("unterminated ExecStart executable")
+	}
+	return "", errors.New("ExecStart is missing")
+}
+
+func escapeXMLText(value string) string {
+	var buffer bytes.Buffer
+	_ = xml.EscapeText(&buffer, []byte(value))
+	return buffer.String()
+}
+
+func quoteSystemdArgument(value string) string {
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+	value = strings.ReplaceAll(value, "\"", "\\\"")
+	value = strings.ReplaceAll(value, "$", "$$")
+	value = strings.ReplaceAll(value, "%", "%%")
+	return "\"" + value + "\""
 }
 
 func readState(path string) (State, bool, error) {
@@ -516,11 +737,16 @@ func (m Manager) runStartCommand(ctx context.Context, paths Paths) error {
 	switch paths.InstallKind {
 	case "launchagent":
 		domain := fmt.Sprintf("gui/%d", os.Getuid())
-		if err := m.runCommand(ctx, "launchctl", "bootstrap", domain, paths.InstallPath); err != nil {
-			return fmt.Errorf("service: launchctl bootstrap failed: %w", err)
+		target := domain + "/com.gitcode.gitcode-mcp"
+		if _, err := m.runCommandOutput(ctx, "launchctl", "print", target); err != nil {
+			if err := m.runCommand(ctx, "launchctl", "bootstrap", domain, paths.InstallPath); err != nil {
+				if _, printErr := m.runCommandOutput(ctx, "launchctl", "print", target); printErr != nil {
+					return fmt.Errorf("service: launchagent could not be loaded (%s); recovery: gitcode-mcp service repair", commandFailureReason(err))
+				}
+			}
 		}
-		if err := m.runCommand(ctx, "launchctl", "kickstart", "-k", domain+"/com.gitcode.gitcode-mcp"); err != nil {
-			return fmt.Errorf("service: launchctl kickstart failed: %w", err)
+		if err := m.runCommand(ctx, "launchctl", "kickstart", "-k", target); err != nil {
+			return fmt.Errorf("service: launchagent could not be started (%s); recovery: gitcode-mcp service doctor", commandFailureReason(err))
 		}
 		return nil
 	case "systemd-user":
@@ -533,6 +759,28 @@ func (m Manager) runStartCommand(ctx context.Context, paths Paths) error {
 		return nil
 	default:
 		return fmt.Errorf("service: start is not supported for install kind %q", paths.InstallKind)
+	}
+}
+
+func (m Manager) unloadForRepair(ctx context.Context, paths Paths) error {
+	switch paths.InstallKind {
+	case "launchagent":
+		domain := fmt.Sprintf("gui/%d", os.Getuid())
+		target := domain + "/com.gitcode.gitcode-mcp"
+		if _, err := m.runCommandOutput(ctx, "launchctl", "print", target); err != nil {
+			return nil
+		}
+		if err := m.runCommand(ctx, "launchctl", "bootout", target); err != nil {
+			return fmt.Errorf("service: could not unload the existing launchagent (%s); recovery: gitcode-mcp service doctor", commandFailureReason(err))
+		}
+		return nil
+	case "systemd-user":
+		if err := m.runCommand(ctx, "systemctl", "--user", "stop", "gitcode-mcp.service"); err != nil {
+			return fmt.Errorf("service: systemctl stop before repair failed: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("service: repair is not supported for install kind %q", paths.InstallKind)
 	}
 }
 
@@ -561,12 +809,114 @@ func (m Manager) runCommand(ctx context.Context, name string, args ...string) er
 	return exec.CommandContext(ctx, name, args...).Run()
 }
 
+func (m Manager) runCommandOutput(ctx context.Context, name string, args ...string) (string, error) {
+	if m.OutputRunner != nil {
+		return m.OutputRunner(ctx, name, args...)
+	}
+	if m.Runner != nil {
+		return "", m.Runner(ctx, name, args...)
+	}
+	output, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	return string(output), err
+}
+
+func (m Manager) waitForHealthy(ctx context.Context, paths Paths) (Status, error) {
+	timeout := m.StartupTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	interval := m.StartupInterval
+	if interval <= 0 {
+		interval = 100 * time.Millisecond
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		status, err := m.Status()
+		if err != nil {
+			return Status{}, err
+		}
+		if status.Running {
+			status.Message = "service is running under " + paths.InstallKind
+			return status, nil
+		}
+		select {
+		case <-ctx.Done():
+			return status, ctx.Err()
+		case <-timer.C:
+			reason := m.startupFailureReason(ctx, paths, status)
+			status.Status = StatusUnhealthy
+			status.Running = false
+			status.Message = fmt.Sprintf("service did not become healthy within %s (%s); recovery: gitcode-mcp service doctor", timeout, reason)
+			return status, errors.New(status.Message)
+		case <-ticker.C:
+		}
+	}
+}
+
+func (m Manager) startupFailureReason(ctx context.Context, paths Paths, status Status) string {
+	if err := validateInstalledDefinition(paths.InstallKind, paths.InstallPath); err != nil {
+		return "installed executable is unusable"
+	}
+	if paths.InstallKind == "launchagent" {
+		target := fmt.Sprintf("gui/%d/com.gitcode.gitcode-mcp", os.Getuid())
+		if output, err := m.runCommandOutput(ctx, "launchctl", "print", target); err == nil {
+			if summary := launchctlStateSummary(output); summary != "" {
+				return summary
+			}
+		}
+	}
+	if strings.TrimSpace(status.Message) != "" {
+		return status.Message
+	}
+	return "status=" + status.Status
+}
+
+func launchctlStateSummary(output string) string {
+	parts := make([]string, 0, 2)
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "state =") || strings.HasPrefix(line, "last exit code =") {
+			parts = append(parts, line)
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+func commandFailureReason(err error) string {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if exitErr.ExitCode() == 5 {
+			return "launchd rejected the definition or the job changed state while loading"
+		}
+		return fmt.Sprintf("process exited with status %d", exitErr.ExitCode())
+	}
+	message := strings.TrimSpace(err.Error())
+	if strings.Contains(message, "exit status 5") {
+		return "launchd rejected the definition or the job changed state while loading"
+	}
+	if message == "" {
+		return "command failed"
+	}
+	return message
+}
+
 func fileExists(path string) bool {
 	if path == "" {
 		return false
 	}
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func unixSocketExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode()&os.ModeSocket != 0
 }
 
 func processAlive(pid int) bool {

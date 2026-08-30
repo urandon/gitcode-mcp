@@ -846,7 +846,7 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "repo init-local":
 				printLocalSubcommandHelp(command, sub, stdout)
-			case "service run", "service install", "service uninstall", "service start", "service stop", "service status", "service doctor", "service maintenance", "service reconcile", "service fake-job", "service jobs", "service job", "service attach", "service cancel":
+			case "service run", "service install", "service repair", "service uninstall", "service start", "service stop", "service status", "service doctor", "service maintenance", "service reconcile", "service fake-job", "service jobs", "service job", "service attach", "service cancel":
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "admin open", "admin status":
 				printLocalSubcommandHelp(command, sub, stdout)
@@ -1555,6 +1555,8 @@ func executeServiceCommand(ctx context.Context, args []string, opts options, std
 	switch sub {
 	case "install":
 		status, err = manager.Install(opts.overwrite)
+	case "repair":
+		status, err = manager.Repair(ctx)
 	case "uninstall":
 		status, err = manager.Uninstall()
 	case "start":
@@ -5084,8 +5086,9 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "Manage the local gitcode-mcp service coordinator.")
 		fmt.Fprintln(w, "Subcommands:")
 		fmt.Fprintln(w, "  install     write the user service definition")
+		fmt.Fprintln(w, "  repair      replace the definition, reload it, and verify readiness")
 		fmt.Fprintln(w, "  uninstall   remove the user service definition")
-		fmt.Fprintln(w, "  start       report how to start the installed service")
+		fmt.Fprintln(w, "  start       start the installed service and wait for bounded readiness")
 		fmt.Fprintln(w, "  stop        report how to stop the installed service")
 		fmt.Fprintln(w, "  status      inspect runtime state")
 		fmt.Fprintln(w, "  doctor      inspect service health")
@@ -5315,9 +5318,17 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 	case "service install":
 		fmt.Fprintln(w, "Usage: gitcode-mcp service install [--overwrite] [--format FORMAT]")
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Write the platform user-service definition for gitcode-mcp service run.")
+		fmt.Fprintln(w, "Resolve the current executable to a validated absolute path and write the platform user-service definition.")
+		fmt.Fprintln(w, "Use service repair when an already-loaded definition is broken; overwrite alone does not reload it.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --overwrite         replace an existing service definition")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "service repair":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service repair [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Validate the current executable, unload any loaded definition, replace it, restart it, and wait for readiness.")
+		fmt.Fprintln(w, "This is the supported one-command recovery for a broken or stale service definition.")
+		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "service uninstall":
 		fmt.Fprintln(w, "Usage: gitcode-mcp service uninstall [--format FORMAT]")
@@ -5328,7 +5339,7 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 	case "service start":
 		fmt.Fprintln(w, "Usage: gitcode-mcp service start [--format FORMAT]")
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Report current service state and the platform-manager start boundary.")
+		fmt.Fprintln(w, "Start the platform user service and wait for PID plus control-socket readiness.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "service stop":
@@ -5346,7 +5357,8 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 	case "service doctor":
 		fmt.Fprintln(w, "Usage: gitcode-mcp service doctor [--format FORMAT]")
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Inspect service health using the same state model as service status.")
+		fmt.Fprintln(w, "Inspect service health and validate the installed executable definition.")
+		fmt.Fprintln(w, "A broken definition reports gitcode-mcp service repair as the supported recovery.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "service maintenance":

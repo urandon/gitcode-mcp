@@ -729,7 +729,7 @@ func TestServiceHelpShowsLifecycleSubcommands(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
-	for _, want := range []string{"install", "uninstall", "start", "stop", "status", "doctor", "run"} {
+	for _, want := range []string{"install", "repair", "uninstall", "start", "stop", "status", "doctor", "run"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("service help missing %q in %q", want, stdout.String())
 		}
@@ -745,6 +745,20 @@ func TestServiceHelpShowsLifecycleSubcommands(t *testing.T) {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("service status help missing %q in %q", want, stdout.String())
 		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"service", "repair", "--help"}, &stdout, &stderr)
+	if code != 0 || !strings.Contains(stdout.String(), "unload") || !strings.Contains(stdout.String(), "readiness") {
+		t.Fatalf("service repair help code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Execute([]string{"service", "doctor", "--help"}, &stdout, &stderr)
+	if code != 0 || !strings.Contains(stdout.String(), "service repair") {
+		t.Fatalf("service doctor help code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
 
