@@ -640,12 +640,19 @@ func TestRepositoryDocsCancellationIsDurableAndSuppressesReconcileSelection(t *t
 		t.Fatalf("job=%+v created=%t err=%v", job, created, err)
 	}
 	jobs.updateJob(job.ID, func(stored *Job, now time.Time) { stored.Status = JobStatusRunning })
+	workerDone := make(chan struct{})
 	go func() {
+		defer close(workerDone)
 		<-jobCtx.Done()
 		jobs.finishJob(job.ID, JobStatusCancelled, "cancelled")
 	}()
 	if cancelled, ok, cancelErr := jobs.Cancel(job.ID); cancelErr != nil || !ok || cancelled.Status != JobStatusCancelled {
 		t.Fatalf("cancelled=%+v ok=%t err=%v", cancelled, ok, cancelErr)
+	}
+	select {
+	case <-workerDone:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled worker did not finish before test cleanup")
 	}
 	intent, ok := maintenance.repositoryDocsAdmission(registrationID, sourceID)
 	if !ok || intent.Disposition != repositoryDocsAdmissionCancelled || intent.JobID != job.ID || intent.FinishedAt.IsZero() {
