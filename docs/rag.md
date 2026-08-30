@@ -66,6 +66,7 @@ Install the local service once per user:
 
 ```sh
 gitcode-mcp service install
+gitcode-mcp service start
 gitcode-mcp service status
 gitcode-mcp service doctor
 ```
@@ -74,9 +75,11 @@ Useful service commands:
 
 | Command | Purpose |
 |---|---|
-| `gitcode-mcp service install` | Writes the platform user-service definition for `gitcode-mcp service run`. |
+| `gitcode-mcp service install` | Resolves and validates the current executable, then atomically writes an absolute platform user-service definition for `gitcode-mcp service run`. `--overwrite` replaces the file but deliberately does not claim to reload an already-loaded service. |
+| `gitcode-mcp service repair` | Validates the current executable, unloads an already-loaded definition, rewrites it, restarts it, and waits for PID plus Unix-socket readiness. Use this one-command recovery for a broken definition. |
+| `gitcode-mcp service start` | Loads or kickstarts the user service and waits for PID plus control-socket readiness; startup failures include a bounded manager-state diagnosis. |
 | `gitcode-mcp service status` | Shows whether the local service is installed and running. |
-| `gitcode-mcp service doctor` | Uses the same state model as status, with health diagnostics. |
+| `gitcode-mcp service doctor` | Uses the same state model as status, validates the installed executable, and reports `gitcode-mcp service repair` as the supported recovery for a broken definition. |
 | `gitcode-mcp service run` | Runs the service in the foreground for debugging. |
 | `gitcode-mcp service uninstall` | Removes the user-service definition. |
 
