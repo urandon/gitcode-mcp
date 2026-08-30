@@ -106,33 +106,66 @@ type RepositoryObservation struct {
 }
 
 type RepositoryDocumentationObservation struct {
-	State             string     `json:"state"`
-	Registered        bool       `json:"registered"`
-	ReconcileState    string     `json:"reconcile_state,omitempty"`
-	TargetCommitOID   string     `json:"target_commit_oid,omitempty"`
-	NextPollAt        *time.Time `json:"next_poll_at,omitempty"`
-	LastErrorClass    string     `json:"last_error_class,omitempty"`
-	LastError         string     `json:"last_error,omitempty"`
-	RevisionSetID     string     `json:"revision_set_id,omitempty"`
-	CommitOID         string     `json:"commit_oid,omitempty"`
-	RequestedRevision string     `json:"requested_revision,omitempty"`
-	PolicySource      string     `json:"policy_source,omitempty"`
-	PolicyHash        string     `json:"policy_hash,omitempty"`
-	GitStoreRef       string     `json:"git_store_ref,omitempty"`
-	WorktreeRef       string     `json:"worktree_ref,omitempty"`
-	Overlay           bool       `json:"overlay"`
-	NamespaceID       string     `json:"namespace_id,omitempty"`
-	EligibleFiles     int        `json:"eligible_files"`
-	EligibleChunks    int        `json:"eligible_chunks"`
-	EmbeddedChunks    int        `json:"embedded_chunks"`
-	ReusedChunks      int        `json:"reused_chunks"`
-	FailedChunks      int        `json:"failed_chunks"`
-	MissingObjects    int        `json:"missing_objects"`
-	UpdatedAt         *time.Time `json:"updated_at,omitempty"`
-	RevisionSetCount  int        `json:"revision_set_count"`
-	SearchAvailable   bool       `json:"search_available"`
-	SearchHandoff     string     `json:"search_handoff,omitempty"`
-	IndexHandoff      string     `json:"index_handoff,omitempty"`
+	State             string                                  `json:"state"`
+	Registered        bool                                    `json:"registered"`
+	RegistrationID    string                                  `json:"registration_id,omitempty"`
+	SourceID          string                                  `json:"source_registration_id,omitempty"`
+	SourceGeneration  int64                                   `json:"source_registration_generation,omitempty"`
+	ReconcileState    string                                  `json:"reconcile_state,omitempty"`
+	TargetCommitOID   string                                  `json:"target_commit_oid,omitempty"`
+	NextPollAt        *time.Time                              `json:"next_poll_at,omitempty"`
+	LastErrorClass    string                                  `json:"last_error_class,omitempty"`
+	LastError         string                                  `json:"last_error,omitempty"`
+	RevisionSetID     string                                  `json:"revision_set_id,omitempty"`
+	CommitOID         string                                  `json:"commit_oid,omitempty"`
+	RequestedRevision string                                  `json:"requested_revision,omitempty"`
+	PolicySource      string                                  `json:"policy_source,omitempty"`
+	PolicyHash        string                                  `json:"policy_hash,omitempty"`
+	GitStoreRef       string                                  `json:"git_store_ref,omitempty"`
+	WorktreeRef       string                                  `json:"worktree_ref,omitempty"`
+	Overlay           bool                                    `json:"overlay"`
+	NamespaceID       string                                  `json:"namespace_id,omitempty"`
+	EligibleFiles     int                                     `json:"eligible_files"`
+	EligibleChunks    int                                     `json:"eligible_chunks"`
+	EmbeddedChunks    int                                     `json:"embedded_chunks"`
+	ReusedChunks      int                                     `json:"reused_chunks"`
+	FailedChunks      int                                     `json:"failed_chunks"`
+	MissingObjects    int                                     `json:"missing_objects"`
+	ExcludedFiles     int                                     `json:"excluded_files"`
+	Exclusions        []RepositoryDocumentationExclusionCount `json:"exclusions,omitempty"`
+	ActiveSetID       string                                  `json:"active_revision_set_id,omitempty"`
+	ActiveState       string                                  `json:"active_state,omitempty"`
+	LastFailureClass  string                                  `json:"last_failure_class,omitempty"`
+	UpdatedAt         *time.Time                              `json:"updated_at,omitempty"`
+	RevisionSetCount  int                                     `json:"revision_set_count"`
+	SearchAvailable   bool                                    `json:"search_available"`
+	SemanticAvailable bool                                    `json:"semantic_available"`
+	SearchHandoff     string                                  `json:"search_handoff,omitempty"`
+	IndexHandoff      string                                  `json:"index_handoff,omitempty"`
+	Sources           []RepositoryDocumentationSource         `json:"sources,omitempty"`
+	Retention         RepositoryDocumentationRetention        `json:"retention"`
+}
+
+type RepositoryDocumentationRetention struct {
+	CommittedSetsPerIdentity int   `json:"committed_sets_per_identity"`
+	OverlayMaxAgeHours       int   `json:"overlay_max_age_hours"`
+	TerminalMaxAgeHours      int   `json:"terminal_max_age_hours"`
+	VectorByteCeiling        int64 `json:"vector_byte_ceiling"`
+}
+
+type RepositoryDocumentationSource struct {
+	SourceID         string `json:"source_registration_id"`
+	SourceGeneration int64  `json:"source_registration_generation"`
+	State            string `json:"state"`
+	GitStoreRef      string `json:"git_store_ref,omitempty"`
+	WorktreeRef      string `json:"worktree_ref,omitempty"`
+	CommitOID        string `json:"commit_oid,omitempty"`
+	PolicyHash       string `json:"policy_hash,omitempty"`
+}
+
+type RepositoryDocumentationExclusionCount struct {
+	Reason string `json:"reason"`
+	Count  int    `json:"count"`
 }
 
 type CollectionObservation struct {

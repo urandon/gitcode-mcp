@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 18
+const currentSchemaVersion = 19
 const issueCommentSyncSchemaVersion = 16
 
 func CurrentSchemaVersion() int {
@@ -153,6 +153,7 @@ var migrations = []migration{
 	{version: 16, apply: applyIssueCommentSyncMigration},
 	{version: 17, apply: applyMaintenanceLifecycleMigration},
 	{version: 18, apply: applyRepositoryDocsSchemaMigration},
+	{version: 19, apply: applyRepositoryDocsIdentityMigration},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB, ftsAvailable bool) error {
@@ -1080,6 +1081,7 @@ func applyRepositoryDocsSchemaMigration(ctx context.Context, tx *sql.Tx, _ bool)
 	authority TEXT NOT NULL,
 	ordinal INTEGER NOT NULL,
 	blob_oid TEXT NOT NULL DEFAULT '',
+	worktree_ref TEXT NOT NULL DEFAULT '',
 	content_digest TEXT NOT NULL,
 	PRIMARY KEY(repo_id, revision_set_id, path, chunk_id),
 	FOREIGN KEY(repo_id, revision_set_id) REFERENCES repo_doc_revision_sets(repo_id, revision_set_id) ON DELETE CASCADE,
@@ -1103,6 +1105,57 @@ func applyRepositoryDocsSchemaMigration(ctx context.Context, tx *sql.Tx, _ bool)
 		`CREATE INDEX IF NOT EXISTS idx_repo_doc_vectors_chunk ON repo_doc_vectors(repo_id, chunk_id, namespace_id)`,
 	}
 	for _, stmt := range statements {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyRepositoryDocsIdentityMigration(ctx context.Context, tx *sql.Tx, _ bool) error {
+	columns, err := tableColumns(ctx, tx, "repo_doc_revision_sets")
+	if err != nil {
+		return err
+	}
+	for _, column := range []struct {
+		name string
+		sql  string
+	}{
+		{"source_registration_id", `ALTER TABLE repo_doc_revision_sets ADD COLUMN source_registration_id TEXT NOT NULL DEFAULT ''`},
+		{"source_registration_generation", `ALTER TABLE repo_doc_revision_sets ADD COLUMN source_registration_generation INTEGER NOT NULL DEFAULT 0`},
+		{"processing_policy_id", `ALTER TABLE repo_doc_revision_sets ADD COLUMN processing_policy_id TEXT NOT NULL DEFAULT ''`},
+	} {
+		if columns[column.name] {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, column.sql); err != nil {
+			return err
+		}
+	}
+	membershipColumns, err := tableColumns(ctx, tx, "repo_doc_membership")
+	if err != nil {
+		return err
+	}
+	if !membershipColumns["worktree_ref"] {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE repo_doc_membership ADD COLUMN worktree_ref TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	for _, stmt := range []string{
+		`DROP INDEX IF EXISTS idx_repo_doc_revision_sets_lookup`,
+		`CREATE INDEX idx_repo_doc_revision_sets_lookup ON repo_doc_revision_sets(repo_id, source_registration_id, source_registration_generation, git_store_ref, commit_oid, policy_hash, overlay_digest, processing_policy_id, namespace_id, state, updated_at)`,
+		`CREATE TABLE IF NOT EXISTS repo_doc_exclusions (
+	repo_id TEXT NOT NULL,
+	revision_set_id TEXT NOT NULL,
+	path TEXT NOT NULL,
+	authority TEXT NOT NULL,
+	blob_oid TEXT NOT NULL DEFAULT '',
+	reason_code TEXT NOT NULL,
+	PRIMARY KEY(repo_id, revision_set_id, path, reason_code),
+	FOREIGN KEY(repo_id, revision_set_id) REFERENCES repo_doc_revision_sets(repo_id, revision_set_id) ON DELETE CASCADE
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_repo_doc_exclusions_reason ON repo_doc_exclusions(repo_id, revision_set_id, reason_code, path)`,
+	} {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return err
 		}

@@ -55,7 +55,7 @@ func TestAdminObservationReadsCacheWithoutExposingItsPath(t *testing.T) {
 		t.Fatalf("cache topology=%+v", snapshot.Caches)
 	}
 	documentation := snapshot.Caches[0].Repositories[0].Documentation
-	if documentation == nil || documentation.State != "not_indexed" || documentation.IndexHandoff != "gitcode-mcp repo-docs index --repo example/repo" || documentation.SearchAvailable {
+	if documentation == nil || documentation.State != "not_indexed" || documentation.IndexHandoff != "" || documentation.SearchAvailable {
 		t.Fatalf("repository documentation observation=%+v", documentation)
 	}
 	if snapshot.JobRetention.SuccessTTLSeconds != int64(config.DefaultJobSuccessTTL.Seconds()) || snapshot.JobRetention.MaxTerminalJobs != config.DefaultJobMaxTerminal {
@@ -106,6 +106,69 @@ func TestAdminJobObservationDropsRawProgressMessagesAndEndpoints(t *testing.T) {
 	view := adminJobObservation(job)
 	if strings.Contains(view.FailureMessage, "/private/") || len(view.Progress) != 2 || view.FailureCollection != "wiki" || view.RetryAfter != "30s" || view.InspectCommand != "gitcode-mcp service job job-000001 --format json" || view.RemediationCommand != "gitcode-mcp service maintenance --format json" {
 		t.Fatalf("sanitized job=%+v", view)
+	}
+}
+
+func TestAdminRepositoryDocsJobIsCancellableButNotGenericallyRetryable(t *testing.T) {
+	now := time.Now().UTC()
+	view := adminJobObservation(Job{ID: "job-repo-docs", Type: RepositoryDocsIndexJobType, RegistrationID: "reg-1", Status: JobStatusRunning, CreatedAt: now, UpdatedAt: now})
+	if !view.Cancellable || view.Retryable {
+		t.Fatalf("view=%+v", view)
+	}
+}
+
+func TestAdminRepositoryDocsObservationExposesOpaqueAuthoritiesAndRetention(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewSQLiteStore(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	entry := &MaintenanceEntry{
+		RegistrationID: "reg-docs",
+		RepositoryDocsSources: []RepositoryDocsMaintenanceState{
+			{SourceRegistrationID: "source-b", SourceRegistrationGeneration: 2, State: "registered", GitStoreRef: "git-store-b", WorktreeRef: "worktree-b"},
+			{SourceRegistrationID: "source-a", SourceRegistrationGeneration: 4, State: "ready", GitStoreRef: "git-store-a", WorktreeRef: "worktree-a"},
+		},
+	}
+	view := repositoryDocumentationObservation(ctx, store, "owner/repo", entry, 123456)
+	if len(view.Sources) != 2 || view.Sources[0].SourceID != "source-a" || view.Sources[1].SourceID != "source-b" {
+		t.Fatalf("sources=%+v", view.Sources)
+	}
+	if view.Retention.CommittedSetsPerIdentity != 8 || view.Retention.OverlayMaxAgeHours != 24 || view.Retention.TerminalMaxAgeHours != 168 || view.Retention.VectorByteCeiling != 123456 {
+		t.Fatalf("retention=%+v", view.Retention)
+	}
+	encoded, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes := string(encoded); strings.Contains(bytes, "/Users/") || strings.Contains(bytes, "repository_path") {
+		t.Fatalf("private authority leaked: %s", bytes)
+	}
+}
+
+func TestAdminRepositoryDocsObservationEnablesFullTextWithoutSemanticSet(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewSQLiteStore(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	state := RepositoryDocsMaintenanceState{
+		SourceRegistrationID: "source-local", SourceRegistrationGeneration: 3,
+		State: "registered", GitStoreRef: "git-store-local", CommitOID: "0123456789abcdef0123456789abcdef01234567",
+	}
+	entry := &MaintenanceEntry{
+		RegistrationID: "reg-docs", RepositoryDocs: &state,
+		RepositoryDocsSources: []RepositoryDocsMaintenanceState{state},
+	}
+
+	view := repositoryDocumentationObservation(ctx, store, "owner/repo", entry, 123456)
+	if !view.Registered || !view.SearchAvailable || view.SemanticAvailable || view.State != "not_indexed" {
+		t.Fatalf("registered lexical-only observation=%+v", view)
+	}
+	if view.SearchHandoff == "" || view.IndexHandoff == "" {
+		t.Fatalf("registered handoffs=%+v", view)
 	}
 }
 

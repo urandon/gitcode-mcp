@@ -73,6 +73,28 @@ func TestJobActionCancelPersistsAndReplaysReceipt(t *testing.T) {
 	}
 }
 
+func TestJobActionCanCancelRepositoryDocsIndex(t *testing.T) {
+	jobs := NewJobManager("")
+	jobContext, cancel := context.WithCancel(context.Background())
+	job, created, err := jobs.createCoalescedJob(RepositoryDocsIndexJobType, "owner/repo", "profile", 0, "repo-doc-work", "cache-1", "reg-1", "", cancel)
+	if err != nil || !created {
+		t.Fatalf("job=%+v created=%t err=%v", job, created, err)
+	}
+	jobs.updateJob(job.ID, func(stored *Job, now time.Time) {
+		stored.Status = JobStatusRunning
+		stored.StartedAt = &now
+	})
+	go func() {
+		<-jobContext.Done()
+		jobs.finishJob(job.ID, JobStatusCancelled, "cancelled")
+	}()
+
+	receipt, err := NewJobActionManager("", jobs, nil).Cancel(context.Background(), adminhttp.JobActionRequest{JobID: job.ID, IdempotencyKey: "cancel-repo-docs"})
+	if err != nil || receipt.Outcome != "cancelled" || receipt.JobStatus != JobStatusCancelled {
+		t.Fatalf("receipt=%+v err=%v", receipt, err)
+	}
+}
+
 func TestJobActionRetryCoalescesEquivalentWork(t *testing.T) {
 	jobs := NewJobManager("")
 	now := time.Now().UTC()

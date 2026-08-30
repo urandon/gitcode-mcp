@@ -105,7 +105,7 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 	if !ok {
 		return adminhttp.JobActionReceipt{}, jobActionError(http.StatusNotFound, "job_not_retained", "The selected job has expired or is not retained by this daemon.", "Return to the bounded job list; cached repository data and audit evidence are unaffected.")
 	}
-	if job.Type != SyncJobType && job.Type != RAGIndexJobType {
+	if job.Type != SyncJobType && job.Type != RAGIndexJobType && !(action == "cancel" && job.Type == RepositoryDocsIndexJobType) {
 		return adminhttp.JobActionReceipt{}, jobActionError(http.StatusForbidden, "capability_unavailable", "This job type does not support the requested admin action.", "Use the capability catalog or CLI for supported operations.")
 	}
 	receipt := adminhttp.JobActionReceipt{ReceiptID: "receipt-" + keyHash[:16], Action: action, TargetJob: job.ID, CreatedAt: m.now()}
@@ -114,7 +114,13 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		if job.Status != JobStatusQueued && job.Status != JobStatusRunning {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "job_not_active", "Only queued or running jobs can be cancelled.", "Refresh the job and inspect its terminal state.")
 		}
-		cancelled, found := m.jobs.Cancel(job.ID)
+		cancelled, found, cancelErr := m.jobs.Cancel(job.ID)
+		if cancelErr != nil {
+			if errors.Is(cancelErr, ErrJobSnapshotPersistence) {
+				return adminhttp.JobActionReceipt{}, jobActionError(http.StatusServiceUnavailable, "repository_docs_cancel_snapshot_failed", "Cancellation is durable and the worker was signalled, but terminal job history could not be saved.", "Refresh the job after service storage is writable; a restart reconciles the terminal state from the durable cancellation tombstone.")
+			}
+			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusServiceUnavailable, "repository_docs_cancel_persist_failed", "Cancellation could not be made durable, so the job was left running.", "Retry cancellation after durable service state is writable.")
+		}
 		if !found {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusNotFound, "job_not_retained", "The selected job is no longer retained.", "Return to the bounded job list; cached repository data and audit evidence are unaffected.")
 		}

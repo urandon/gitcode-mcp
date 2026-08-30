@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -45,6 +46,13 @@ func (m Manager) adminObservation(ctx context.Context, jobs *JobManager, mainten
 	}
 	entries := maintenance.adminEntries()
 	jobList := jobs.List()
+	vectorByteCeiling, ceilingErr := repositoryDocsVectorByteCeiling(m)
+	if ceilingErr != nil {
+		// Observation remains available for remediation even when the optional
+		// machine-local override is malformed. Never report a misleading zero
+		// byte policy that the indexing path would reject.
+		vectorByteCeiling = DefaultRepositoryDocsVectorBytes
+	}
 	retention := jobs.RetentionSnapshot()
 	snapshot.JobRetention = adminhttp.JobRetentionObservation{
 		SuccessTTLSeconds: int64(retention.Policy.SuccessTTL.Seconds()), DiagnosticTTLSeconds: int64(retention.Policy.DiagnosticTTL.Seconds()),
@@ -59,7 +67,7 @@ func (m Manager) adminObservation(ctx context.Context, jobs *JobManager, mainten
 	}
 	cacheGroups := groupAdminCaches(m.AdminCachePath, entries)
 	for _, group := range cacheGroups {
-		cacheView, diagnostics := buildAdminCache(ctx, group, entries, jobList)
+		cacheView, diagnostics := buildAdminCache(ctx, group, entries, jobList, vectorByteCeiling)
 		snapshot.Caches = append(snapshot.Caches, cacheView)
 		snapshot.Diagnostics = append(snapshot.Diagnostics, diagnostics...)
 	}
@@ -95,13 +103,13 @@ type adminCacheGroup struct {
 func groupAdminCaches(primaryPath string, entries []adminMaintenanceEntry) []adminCacheGroup {
 	byPath := map[string]adminCacheGroup{}
 	for _, item := range entries {
-		path := strings.TrimSpace(item.path)
+		path := canonicalAdminCachePath(item.path)
 		if path == "" {
 			continue
 		}
 		byPath[path] = adminCacheGroup{path: path, uuid: item.entry.CacheUUID, fingerprint: item.entry.PathFingerprint}
 	}
-	primaryPath = strings.TrimSpace(primaryPath)
+	primaryPath = canonicalAdminCachePath(primaryPath)
 	if primaryPath != "" && primaryPath != ":memory:" {
 		if _, ok := byPath[primaryPath]; !ok {
 			byPath[primaryPath] = adminCacheGroup{path: primaryPath, fingerprint: pathFingerprint(primaryPath)}
@@ -115,7 +123,21 @@ func groupAdminCaches(primaryPath string, entries []adminMaintenanceEntry) []adm
 	return groups
 }
 
-func buildAdminCache(ctx context.Context, group adminCacheGroup, entries []adminMaintenanceEntry, jobs []Job) (adminhttp.CacheObservation, []adminhttp.DiagnosticObservation) {
+func canonicalAdminCachePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" || path == ":memory:" {
+		return path
+	}
+	if absolute, err := filepath.Abs(path); err == nil {
+		path = absolute
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	return path
+}
+
+func buildAdminCache(ctx context.Context, group adminCacheGroup, entries []adminMaintenanceEntry, jobs []Job, vectorByteCeiling int64) (adminhttp.CacheObservation, []adminhttp.DiagnosticObservation) {
 	view := adminhttp.CacheObservation{
 		CacheRef: publicCacheRef(group.uuid, group.path), PathFingerprint: group.fingerprint,
 		StorageMode: "managed", Readiness: "unavailable",
@@ -163,7 +185,7 @@ func buildAdminCache(ctx context.Context, group adminCacheGroup, entries []admin
 	}
 	for _, repository := range repositories {
 		entry := findAdminEntry(entries, group.path, repository.RepoID)
-		repoView := buildAdminRepository(ctx, store, repository, entry, jobs)
+		repoView := buildAdminRepository(ctx, store, repository, entry, jobs, vectorByteCeiling)
 		view.Repositories = append(view.Repositories, repoView)
 		view.RecordCount += repoView.Counts.Records
 		view.ChunkCount += repoView.Counts.Chunks
@@ -182,7 +204,7 @@ func buildAdminCache(ctx context.Context, group adminCacheGroup, entries []admin
 	return view, diagnostics
 }
 
-func buildAdminRepository(ctx context.Context, store *cache.SQLiteStore, repository cache.RepositoryBinding, entry *MaintenanceEntry, jobs []Job) adminhttp.RepositoryObservation {
+func buildAdminRepository(ctx context.Context, store *cache.SQLiteStore, repository cache.RepositoryBinding, entry *MaintenanceEntry, jobs []Job, vectorByteCeiling int64) adminhttp.RepositoryObservation {
 	view := adminhttp.RepositoryObservation{
 		RepoID: repository.RepoID, DisplayName: repository.DisplayName, Aliases: append([]string(nil), repository.Aliases...),
 		BindingState: "bound",
@@ -190,7 +212,7 @@ func buildAdminRepository(ctx context.Context, store *cache.SQLiteStore, reposit
 	for _, scope := range repository.Scopes {
 		view.Scopes = append(view.Scopes, string(scope))
 	}
-	documentation := repositoryDocumentationObservation(ctx, store, repository.RepoID, entry)
+	documentation := repositoryDocumentationObservation(ctx, store, repository.RepoID, entry, vectorByteCeiling)
 	view.Documentation = &documentation
 	if counts, err := store.RecordCounts(ctx, repository.RepoID); err == nil {
 		view.Counts.Records = counts.Records
@@ -239,15 +261,23 @@ func buildAdminRepository(ctx context.Context, store *cache.SQLiteStore, reposit
 	return view
 }
 
-func repositoryDocumentationObservation(ctx context.Context, store *cache.SQLiteStore, repoID string, entry *MaintenanceEntry) adminhttp.RepositoryDocumentationObservation {
+func repositoryDocumentationObservation(ctx context.Context, store *cache.SQLiteStore, repoID string, entry *MaintenanceEntry, vectorByteCeiling int64) adminhttp.RepositoryDocumentationObservation {
 	view := adminhttp.RepositoryDocumentationObservation{
-		State:         "not_indexed",
-		IndexHandoff:  fmt.Sprintf("gitcode-mcp repo-docs index --repo %s", repoID),
-		SearchHandoff: fmt.Sprintf("gitcode-mcp repo-docs search --repo %s QUERY", repoID),
+		State: "not_indexed", Retention: adminhttp.RepositoryDocumentationRetention{CommittedSetsPerIdentity: 8, OverlayMaxAgeHours: 24, TerminalMaxAgeHours: 24 * 7, VectorByteCeiling: vectorByteCeiling},
+	}
+	filter := cache.RepositoryDocRevisionSetFilter{RepoID: repoID}
+	if entry != nil {
+		for _, source := range entry.RepositoryDocsSources {
+			view.Sources = append(view.Sources, adminhttp.RepositoryDocumentationSource{SourceID: source.SourceRegistrationID, SourceGeneration: source.SourceRegistrationGeneration, State: source.State, GitStoreRef: source.GitStoreRef, WorktreeRef: source.WorktreeRef, CommitOID: source.CommitOID, PolicyHash: source.PolicyHash})
+		}
+		sort.Slice(view.Sources, func(i, j int) bool { return view.Sources[i].SourceID < view.Sources[j].SourceID })
 	}
 	if entry != nil && entry.RepositoryDocs != nil {
 		state := entry.RepositoryDocs
 		view.Registered = true
+		view.RegistrationID = entry.RegistrationID
+		view.SourceID = state.SourceRegistrationID
+		view.SourceGeneration = state.SourceRegistrationGeneration
 		view.ReconcileState = state.State
 		view.TargetCommitOID = state.CommitOID
 		view.NextPollAt = adminTimePointer(state.NextPollAt)
@@ -255,12 +285,40 @@ func repositoryDocumentationObservation(ctx context.Context, store *cache.SQLite
 		view.LastError = state.LastError
 		view.GitStoreRef = state.GitStoreRef
 		view.WorktreeRef = state.WorktreeRef
+		filter.SourceRegistrationID = state.SourceRegistrationID
+		filter.SourceRegistrationGeneration = state.SourceRegistrationGeneration
+		selector := fmt.Sprintf("--registration-id %s --source-registration-id %s --source-registration-generation %d", entry.RegistrationID, state.SourceRegistrationID, state.SourceRegistrationGeneration)
+		view.IndexHandoff = fmt.Sprintf("gitcode-mcp repo-docs index --repo %s %s", repoID, selector)
+		view.SearchHandoff = fmt.Sprintf("gitcode-mcp repo-docs search --repo %s %s QUERY", repoID, selector)
+		// Full-text search hydrates directly from the registered Git authority
+		// and does not depend on semantic derived state.
+		view.SearchAvailable = true
 	}
-	sets, err := store.ListRepositoryDocRevisionSets(ctx, cache.RepositoryDocRevisionSetFilter{RepoID: repoID})
+	sets, err := store.ListRepositoryDocRevisionSets(ctx, filter)
 	if err != nil || len(sets) == 0 {
 		return view
 	}
-	set := sets[0]
+	var set *cache.RepositoryDocRevisionSet
+	for index := range sets {
+		candidate := &sets[index]
+		if candidate.State == cache.RepoDocSetBuilding || candidate.State == cache.RepoDocSetPartial {
+			if view.ActiveSetID == "" {
+				view.ActiveSetID = candidate.ID
+				view.ActiveState = candidate.State
+			}
+		}
+		if view.LastFailureClass == "" && candidate.LastErrorClass != "" {
+			view.LastFailureClass = candidate.LastErrorClass
+		}
+		if set == nil && candidate.State == cache.RepoDocSetReady {
+			set = candidate
+		}
+	}
+	view.RevisionSetCount = len(sets)
+	if set == nil {
+		view.State = sets[0].State
+		return view
+	}
 	view.State = set.State
 	view.RevisionSetID = set.ID
 	view.CommitOID = set.CommitOID
@@ -277,12 +335,21 @@ func repositoryDocumentationObservation(ctx context.Context, store *cache.SQLite
 	view.ReusedChunks = set.ReusedChunks
 	view.FailedChunks = set.FailedChunks
 	view.MissingObjects = set.MissingObjects
+	view.ExcludedFiles = set.ExcludedFiles
 	view.UpdatedAt = adminTimePointer(set.UpdatedAt)
-	view.RevisionSetCount = len(sets)
-	// Source bytes are intentionally absent from the cache. The browser cannot
-	// hydrate exact Git blobs until a local Git store is explicitly registered
-	// with the daemon, so v1 presents a safe CLI handoff instead of stale text.
-	view.SearchAvailable = false
+	if exclusions, exclusionErr := store.ListRepositoryDocExclusions(ctx, repoID, set.ID); exclusionErr == nil {
+		counts := map[string]int{}
+		for _, exclusion := range exclusions {
+			counts[exclusion.ReasonCode]++
+		}
+		for reason, count := range counts {
+			view.Exclusions = append(view.Exclusions, adminhttp.RepositoryDocumentationExclusionCount{Reason: reason, Count: count})
+		}
+		sort.Slice(view.Exclusions, func(i, j int) bool { return view.Exclusions[i].Reason < view.Exclusions[j].Reason })
+	}
+	// Semantic ranking is a separate capability of the exact published set.
+	// Hybrid requests may still fall back to the always-local full-text path.
+	view.SemanticAvailable = true
 	return view
 }
 
@@ -477,7 +544,7 @@ func adminJobObservation(job Job) adminhttp.JobObservation {
 	}
 	active := job.Status == JobStatusQueued || job.Status == JobStatusRunning
 	terminal := jobTerminalStatus(job.Status)
-	view.Cancellable = active && (job.Type == SyncJobType || job.Type == RAGIndexJobType)
+	view.Cancellable = active && (job.Type == SyncJobType || job.Type == RAGIndexJobType || job.Type == RepositoryDocsIndexJobType)
 	view.Retryable = terminal && job.RegistrationID != "" && (job.Type == SyncJobType || job.Type == RAGIndexJobType)
 	if !view.Cancellable && !view.Retryable {
 		view.ActionReason = "No safe admin action is available for the current job type and state."
@@ -590,7 +657,7 @@ func adminCapabilityObservation(cap capability.Capability) adminhttp.CapabilityO
 
 func findAdminEntry(entries []adminMaintenanceEntry, path, repoID string) *MaintenanceEntry {
 	for _, item := range entries {
-		if item.path == path && item.entry.RepoID == repoID {
+		if canonicalAdminCachePath(item.path) == canonicalAdminCachePath(path) && item.entry.RepoID == repoID {
 			copy := item.entry
 			return &copy
 		}

@@ -340,11 +340,14 @@ func (m Manager) Run(ctx context.Context) error {
 		retention = *m.JobRetention
 	}
 	jobs := NewJobManagerWithRetention(paths.JobsPath, retention)
-	if err := jobs.LoadAndMarkInterrupted(); err != nil {
-		return err
-	}
 	maintenance := NewMaintenanceManager(m, jobs, paths.RegistryPath)
 	if err := maintenance.Load(); err != nil {
+		return err
+	}
+	// Load the durable admission registry before recovering jobs so a persisted
+	// repository-document cancellation tombstone can distinguish a committed
+	// cancellation from a crash that happened before the tombstone write.
+	if err := jobs.LoadAndMarkInterrupted(); err != nil {
 		return err
 	}
 	jobActions := NewJobActionManager(paths.JobsPath+".actions", jobs, maintenance)
@@ -376,6 +379,7 @@ func (m Manager) Run(ctx context.Context) error {
 		ApplyBinding:         adminControls.ApplyBinding,
 		CompareSearch:        adminControls.CompareSearch,
 		SearchRepositoryDocs: adminControls.SearchRepositoryDocs,
+		PlanRepositoryDocs:   adminControls.PlanRepositoryDocs,
 		IndexRepositoryDocs:  adminControls.IndexRepositoryDocs,
 		SmokeProvider:        adminControls.SmokeProvider,
 		PlanRAGRepair:        adminControls.PlanRAGRepair,

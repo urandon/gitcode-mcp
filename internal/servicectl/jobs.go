@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -19,6 +18,7 @@ import (
 const (
 	JobStatusQueued      = "queued"
 	JobStatusRunning     = "running"
+	JobStatusCancelling  = "cancelling"
 	JobStatusSucceeded   = "succeeded"
 	JobStatusSuperseded  = "superseded"
 	JobStatusFailed      = "failed"
@@ -30,40 +30,54 @@ const (
 )
 
 type Job struct {
-	ID             string                  `json:"id"`
-	Type           string                  `json:"type"`
-	RepoID         string                  `json:"repo_id,omitempty"`
-	ProfileID      string                  `json:"profile_id,omitempty"`
-	CacheUUID      string                  `json:"cache_uuid,omitempty"`
-	RegistrationID string                  `json:"registration_id,omitempty"`
-	NamespaceID    string                  `json:"namespace_id,omitempty"`
-	WorkKey        string                  `json:"-"`
-	WorkRef        string                  `json:"work_ref,omitempty"`
-	Status         string                  `json:"status"`
-	CreatedAt      time.Time               `json:"created_at"`
-	StartedAt      *time.Time              `json:"started_at,omitempty"`
-	UpdatedAt      time.Time               `json:"updated_at"`
-	FinishedAt     *time.Time              `json:"finished_at,omitempty"`
-	Steps          int                     `json:"steps,omitempty"`
-	Completed      int                     `json:"completed,omitempty"`
-	Error          string                  `json:"error,omitempty"`
-	ErrorClass     string                  `json:"error_class,omitempty"`
-	Progress       []service.ProgressEvent `json:"progress,omitempty"`
+	ID                           string                  `json:"id"`
+	Type                         string                  `json:"type"`
+	RepoID                       string                  `json:"repo_id,omitempty"`
+	ProfileID                    string                  `json:"profile_id,omitempty"`
+	CacheUUID                    string                  `json:"cache_uuid,omitempty"`
+	RegistrationID               string                  `json:"registration_id,omitempty"`
+	NamespaceID                  string                  `json:"namespace_id,omitempty"`
+	SourceRegistrationID         string                  `json:"source_registration_id,omitempty"`
+	SourceRegistrationGeneration int64                   `json:"source_registration_generation,omitempty"`
+	ExpectedRevisionSetID        string                  `json:"expected_revision_set_id,omitempty"`
+	WorkKey                      string                  `json:"-"`
+	WorkRef                      string                  `json:"work_ref,omitempty"`
+	Status                       string                  `json:"status"`
+	CreatedAt                    time.Time               `json:"created_at"`
+	StartedAt                    *time.Time              `json:"started_at,omitempty"`
+	UpdatedAt                    time.Time               `json:"updated_at"`
+	FinishedAt                   *time.Time              `json:"finished_at,omitempty"`
+	Steps                        int                     `json:"steps,omitempty"`
+	Completed                    int                     `json:"completed,omitempty"`
+	Error                        string                  `json:"error,omitempty"`
+	ErrorClass                   string                  `json:"error_class,omitempty"`
+	Progress                     []service.ProgressEvent `json:"progress,omitempty"`
 }
 
 type JobManager struct {
-	mu             sync.Mutex
-	jobs           map[string]*Job
-	cancel         map[string]context.CancelFunc
-	nextID         int
-	snapshotPath   string
-	now            func() time.Time
-	retention      config.ServiceJobRetentionConfig
-	expiredTotal   int
-	truncatedTotal int
-	lastExpired    int
-	lastTruncated  int
-	lastPrunedAt   *time.Time
+	mu                                  sync.Mutex
+	jobs                                map[string]*Job
+	cancel                              map[string]context.CancelFunc
+	cancelResolution                    map[string]*jobCancellationResolution
+	nextID                              int
+	snapshotPath                        string
+	now                                 func() time.Time
+	writeFile                           func(string, []byte, os.FileMode) error
+	retention                           config.ServiceJobRetentionConfig
+	expiredTotal                        int
+	truncatedTotal                      int
+	lastExpired                         int
+	lastTruncated                       int
+	lastPrunedAt                        *time.Time
+	onRepositoryDocsCancelled           func(Job) error
+	repositoryDocsCancellationCommitted func(Job) bool
+}
+
+type jobCancellationResolution struct {
+	done  chan struct{}
+	job   Job
+	found bool
+	err   error
 }
 
 type JobRetentionSnapshot struct {
@@ -82,6 +96,29 @@ type JobRetentionSnapshot struct {
 type ErrCacheWriterBusy struct {
 	ActiveJobID string
 	ActiveType  string
+}
+
+var ErrJobAdmissionPersistence = errors.New("service job admission could not be persisted")
+var ErrJobSnapshotPersistence = errors.New("service job terminal snapshot could not be persisted")
+
+type JobAdmissionPersistenceError struct{}
+
+func (e JobAdmissionPersistenceError) Error() string { return ErrJobAdmissionPersistence.Error() }
+
+func (e JobAdmissionPersistenceError) Unwrap() error { return ErrJobAdmissionPersistence }
+
+func (e JobAdmissionPersistenceError) DiagnosticCode() string {
+	return "job_admission_persistence_failed"
+}
+
+type JobSnapshotPersistenceError struct{}
+
+func (e JobSnapshotPersistenceError) Error() string { return ErrJobSnapshotPersistence.Error() }
+
+func (e JobSnapshotPersistenceError) Unwrap() error { return ErrJobSnapshotPersistence }
+
+func (e JobSnapshotPersistenceError) DiagnosticCode() string {
+	return "job_snapshot_persistence_failed"
 }
 
 func (e ErrCacheWriterBusy) Error() string {
@@ -111,11 +148,13 @@ func NewJobManagerWithRetention(snapshotPath string, retention config.ServiceJob
 		panic(err)
 	}
 	return &JobManager{
-		jobs:         map[string]*Job{},
-		cancel:       map[string]context.CancelFunc{},
-		snapshotPath: snapshotPath,
-		now:          func() time.Time { return time.Now().UTC() },
-		retention:    retention,
+		jobs:             map[string]*Job{},
+		cancel:           map[string]context.CancelFunc{},
+		cancelResolution: map[string]*jobCancellationResolution{},
+		snapshotPath:     snapshotPath,
+		now:              func() time.Time { return time.Now().UTC() },
+		writeFile:        durableAtomicWriteFile,
+		retention:        retention,
 	}
 }
 
@@ -140,7 +179,14 @@ func (m *JobManager) LoadAndMarkInterrupted() error {
 	maxID := 0
 	for i := range jobs {
 		job := jobs[i]
-		if job.Status == JobStatusQueued || job.Status == JobStatusRunning {
+		if job.Status == JobStatusCancelling && m.repositoryDocsCancellationCommitted != nil && m.repositoryDocsCancellationCommitted(job) {
+			job.Status = JobStatusCancelled
+			job.UpdatedAt = now
+			job.FinishedAt = &now
+			job.ErrorClass = "cancelled"
+			job.Error = publicMaintenanceJobError(job.Type, job.ErrorClass)
+			job.Progress = append(job.Progress, service.ProgressEvent{Type: JobStatusCancelled, Phase: JobStatusCancelled, Collection: job.Type, Message: "durable cancellation recovered after service restart"})
+		} else if jobActiveStatus(job.Status) {
 			job.Status = JobStatusInterrupted
 			job.UpdatedAt = now
 			job.FinishedAt = &now
@@ -197,7 +243,7 @@ func (m *JobManager) ActiveJob(jobType, repoID string) (Job, bool) {
 		if job.Type != jobType || job.RepoID != repoID {
 			continue
 		}
-		if job.Status == JobStatusQueued || job.Status == JobStatusRunning {
+		if jobActiveStatus(job.Status) {
 			return cloneJob(job), true
 		}
 	}
@@ -215,7 +261,7 @@ func (m *JobManager) ActiveWork(workKey string) (Job, bool) {
 		if candidate != workKey {
 			continue
 		}
-		if job.Status == JobStatusQueued || job.Status == JobStatusRunning {
+		if jobActiveStatus(job.Status) {
 			return cloneJob(job), true
 		}
 	}
@@ -233,7 +279,7 @@ func (m *JobManager) ActiveCacheRepo(jobType, cacheUUID, repoID string) (Job, bo
 		if job.Type != jobType || job.CacheUUID != cacheUUID || job.RepoID != repoID {
 			continue
 		}
-		if job.Status == JobStatusQueued || job.Status == JobStatusRunning {
+		if jobActiveStatus(job.Status) {
 			return cloneJob(job), true
 		}
 	}
@@ -258,7 +304,7 @@ func (m *JobManager) activeCacheWriterLocked(cacheUUID string) (Job, bool) {
 		if job.CacheUUID != cacheUUID || !isCacheWriterJob(job.Type) {
 			continue
 		}
-		if job.Status == JobStatusQueued || job.Status == JobStatusRunning {
+		if jobActiveStatus(job.Status) {
 			return cloneJob(job), true
 		}
 	}
@@ -287,6 +333,93 @@ func (m *JobManager) LatestCacheRepo(jobType, cacheUUID, repoID string) (Job, bo
 	return cloneJob(latest), true
 }
 
+func (m *JobManager) ActiveRepositoryDocsSource(cacheUUID, repoID, sourceRegistrationID string, generation int64) (Job, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, job := range m.jobs {
+		if job.Type == RepositoryDocsIndexJobType && job.CacheUUID == cacheUUID && job.RepoID == repoID &&
+			job.SourceRegistrationID == sourceRegistrationID && job.SourceRegistrationGeneration == generation && jobActiveStatus(job.Status) {
+			return cloneJob(job), true
+		}
+	}
+	return Job{}, false
+}
+
+func (m *JobManager) LatestRepositoryDocsSource(cacheUUID, repoID, sourceRegistrationID string, generation int64) (Job, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var latest *Job
+	for _, job := range m.jobs {
+		if job.Type != RepositoryDocsIndexJobType || job.CacheUUID != cacheUUID || job.RepoID != repoID || job.SourceRegistrationID != sourceRegistrationID || job.SourceRegistrationGeneration != generation {
+			continue
+		}
+		if latest == nil || parseJobIDNumber(job.ID) > parseJobIDNumber(latest.ID) {
+			latest = job
+		}
+	}
+	if latest == nil {
+		return Job{}, false
+	}
+	return cloneJob(latest), true
+}
+
+// ResumeRepositoryDocsAdmission reuses the public identity already durably
+// allocated for an interrupted or failed admission. Exact opaque intent
+// matching fences unrelated or stale work from being revived; callers remain
+// responsible for enforcing the durable retry window before invoking it.
+func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, sourceRegistrationID string, generation int64, expectedSetID, workKey string, cancel context.CancelFunc) (Job, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job := m.jobs[strings.TrimSpace(jobID)]
+	if job == nil || job.Type != RepositoryDocsIndexJobType || !repositoryDocsAdmissionRecoverable(job.Status) ||
+		job.RegistrationID != strings.TrimSpace(registrationID) || job.SourceRegistrationID != strings.TrimSpace(sourceRegistrationID) ||
+		job.SourceRegistrationGeneration != generation || job.ExpectedRevisionSetID != strings.TrimSpace(expectedSetID) || job.WorkRef != publicWorkRef(workKey) {
+		return Job{}, false, nil
+	}
+	previous := cloneJob(job)
+	job.WorkKey = workKey
+	job.Status = JobStatusQueued
+	job.StartedAt = nil
+	job.FinishedAt = nil
+	job.Error = ""
+	job.ErrorClass = ""
+	job.Steps = 0
+	job.Completed = 0
+	job.UpdatedAt = m.now()
+	job.Progress = append(job.Progress, service.ProgressEvent{Type: "resumed", Phase: "queued", Collection: RepositoryDocsIndexJobType, Message: "durable repository documentation admission resumed"})
+	m.cancel[job.ID] = cancel
+	if err := m.saveLocked(); err != nil {
+		*job = previous
+		delete(m.cancel, job.ID)
+		return Job{}, false, JobAdmissionPersistenceError{}
+	}
+	return cloneJob(job), true, nil
+}
+
+func (m *JobManager) RecoverableRepositoryDocsAdmission(registrationID, sourceRegistrationID string, generation int64, expectedSetID, workKey string) (Job, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var latest *Job
+	for _, job := range m.jobs {
+		if job.Type != RepositoryDocsIndexJobType || !repositoryDocsAdmissionRecoverable(job.Status) || job.RegistrationID != strings.TrimSpace(registrationID) ||
+			job.SourceRegistrationID != strings.TrimSpace(sourceRegistrationID) || job.SourceRegistrationGeneration != generation ||
+			job.ExpectedRevisionSetID != strings.TrimSpace(expectedSetID) || job.WorkRef != publicWorkRef(workKey) {
+			continue
+		}
+		if latest == nil || parseJobIDNumber(job.ID) > parseJobIDNumber(latest.ID) {
+			latest = job
+		}
+	}
+	if latest == nil {
+		return Job{}, false
+	}
+	return cloneJob(latest), true
+}
+
+func repositoryDocsAdmissionRecoverable(status string) bool {
+	return status == JobStatusInterrupted || status == JobStatusFailed
+}
+
 func (m *JobManager) SetWorkIdentity(id, workKey, cacheUUID, registrationID, namespaceID string) Job {
 	m.updateJob(id, func(job *Job, now time.Time) {
 		job.WorkKey = workKey
@@ -300,10 +433,20 @@ func (m *JobManager) SetWorkIdentity(id, workKey, cacheUUID, registrationID, nam
 }
 
 func (m *JobManager) createCoalescedJob(jobType, repoID, profileID string, steps int, workKey, cacheUUID, registrationID, namespaceID string, cancel context.CancelFunc) (Job, bool, error) {
+	return m.createCoalescedJobWithIntent(jobType, repoID, profileID, steps, workKey, cacheUUID, registrationID, namespaceID, JobRecoveryIntent{}, cancel)
+}
+
+type JobRecoveryIntent struct {
+	SourceRegistrationID         string
+	SourceRegistrationGeneration int64
+	ExpectedRevisionSetID        string
+}
+
+func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID string, steps int, workKey, cacheUUID, registrationID, namespaceID string, intent JobRecoveryIntent, cancel context.CancelFunc) (Job, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, job := range m.jobs {
-		if job.WorkKey == workKey && (job.Status == JobStatusQueued || job.Status == JobStatusRunning) {
+		if job.WorkKey == workKey && jobActiveStatus(job.Status) {
 			return cloneJob(job), false, nil
 		}
 	}
@@ -318,11 +461,17 @@ func (m *JobManager) createCoalescedJob(jobType, repoID, profileID string, steps
 	job := &Job{
 		ID: id, Type: jobType, RepoID: repoID, ProfileID: profileID,
 		CacheUUID: cacheUUID, RegistrationID: registrationID, NamespaceID: namespaceID, WorkKey: workKey,
+		SourceRegistrationID: intent.SourceRegistrationID, SourceRegistrationGeneration: intent.SourceRegistrationGeneration, ExpectedRevisionSetID: intent.ExpectedRevisionSetID,
 		Status: JobStatusQueued, CreatedAt: now, UpdatedAt: now, Steps: steps, WorkRef: publicWorkRef(workKey),
 	}
 	m.jobs[id] = job
 	m.cancel[id] = cancel
-	_ = m.saveLocked()
+	if err := m.saveLocked(); err != nil {
+		delete(m.jobs, id)
+		delete(m.cancel, id)
+		m.nextID--
+		return Job{}, false, JobAdmissionPersistenceError{}
+	}
 	return cloneJob(job), true, nil
 }
 
@@ -384,32 +533,196 @@ func (m *JobManager) Get(id string) (Job, bool) {
 	return cloneJob(job), true
 }
 
-func (m *JobManager) Cancel(id string) (Job, bool) {
+func (m *JobManager) Cancel(id string) (Job, bool, error) {
 	m.mu.Lock()
 	cancel, ok := m.cancel[id]
-	job := m.jobs[id]
-	m.mu.Unlock()
-	if !ok || job == nil {
-		if job == nil {
-			return Job{}, false
+	stored := m.jobs[id]
+	job := cloneJob(stored)
+	if !ok || job.ID == "" {
+		m.mu.Unlock()
+		if job.ID == "" {
+			return Job{}, false, nil
 		}
-		return m.Get(id)
+		current, found := m.Get(id)
+		return current, found, nil
 	}
+	if job.Status == JobStatusCancelling {
+		resolution := m.cancelResolution[id]
+		m.mu.Unlock()
+		if resolution == nil {
+			return job, true, JobSnapshotPersistenceError{}
+		}
+		<-resolution.done
+		return resolution.job, resolution.found, resolution.err
+	}
+	if job.Type != RepositoryDocsIndexJobType {
+		m.mu.Unlock()
+		cancel()
+		return m.waitForTerminalJob(id)
+	}
+	onRepositoryDocsCancelled := m.onRepositoryDocsCancelled
+	previous := job
+	resolution := &jobCancellationResolution{done: make(chan struct{})}
+	stored.Status = JobStatusCancelling
+	stored.UpdatedAt = m.now()
+	stored.Progress = append(stored.Progress, service.ProgressEvent{Type: JobStatusCancelling, Phase: JobStatusCancelling, Collection: stored.Type, Message: "durable cancellation is being committed"})
+	m.cancelResolution[id] = resolution
+	if err := m.saveLocked(); err != nil {
+		*stored = previous
+		resolution.job, resolution.found, resolution.err = previous, true, JobAdmissionPersistenceError{}
+		delete(m.cancelResolution, id)
+		close(resolution.done)
+		m.mu.Unlock()
+		return resolution.job, resolution.found, resolution.err
+	}
+	job = cloneJob(stored)
+	m.mu.Unlock()
+
+	// Persist the cancellation disposition before publishing a terminal job or
+	// signalling the worker. Repository-document terminalization observes the
+	// cancelling fence and cannot race this write-ahead decision.
+	if onRepositoryDocsCancelled != nil {
+		if err := onRepositoryDocsCancelled(job); err != nil {
+			m.mu.Lock()
+			if current := m.jobs[id]; current != nil && current.Status == JobStatusCancelling {
+				*current = previous
+				_ = m.saveLocked()
+			}
+			current := cloneJob(m.jobs[id])
+			resolution.job, resolution.found, resolution.err = current, current.ID != "", err
+			delete(m.cancelResolution, id)
+			close(resolution.done)
+			m.mu.Unlock()
+			return resolution.job, resolution.found, resolution.err
+		}
+	}
+	m.mu.Lock()
+	current := m.jobs[id]
+	if current != nil && current.Status == JobStatusCancelling {
+		now := m.now()
+		current.Status = JobStatusCancelled
+		current.UpdatedAt = now
+		current.FinishedAt = &now
+		current.ErrorClass = "cancelled"
+		current.Error = publicMaintenanceJobError(current.Type, current.ErrorClass)
+		current.Progress = append(current.Progress, service.ProgressEvent{Type: JobStatusCancelled, Phase: JobStatusCancelled, Collection: current.Type, Message: current.Error})
+		delete(m.cancel, id)
+	}
+	saveErr := m.saveLocked()
+	currentJob := cloneJob(current)
+	resolution.job, resolution.found = currentJob, currentJob.ID != ""
+	if saveErr != nil {
+		resolution.err = JobSnapshotPersistenceError{}
+	}
+	// Signal the worker before publishing the shared resolution. Concurrent
+	// callers may return as soon as done closes, so the public result must not
+	// claim a worker signal that is still pending.
 	cancel()
+	delete(m.cancelResolution, id)
+	close(resolution.done)
+	m.mu.Unlock()
+	return resolution.job, resolution.found, resolution.err
+}
+
+func (m *JobManager) waitForTerminalJob(id string) (Job, bool, error) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		current, found := m.Get(id)
 		if !found {
-			return Job{}, false
+			return Job{}, false, nil
 		}
 		if jobTerminalStatus(current.Status) {
-			return current, true
+			return current, true, nil
 		}
 		if time.Now().After(deadline) {
-			return current, true
+			return current, true, nil
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+func (m *JobManager) updateRepositoryDocsTerminalJob(id string, fn func(*Job, time.Time)) {
+	for {
+		m.mu.Lock()
+		job := m.jobs[id]
+		if job == nil || jobTerminalStatus(job.Status) {
+			m.mu.Unlock()
+			return
+		}
+		if job.Status == JobStatusCancelling {
+			resolution := m.cancelResolution[id]
+			m.mu.Unlock()
+			if resolution != nil {
+				<-resolution.done
+				continue
+			}
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		now := m.now()
+		fn(job, now)
+		trimJobProgress(job, m.retention.MaxProgressEvents)
+		_ = m.saveLocked()
+		m.mu.Unlock()
+		return
+	}
+}
+
+// FenceRepositoryDocsSourceGeneration makes work admitted under a replaced
+// private source generation terminal before cancelling its worker. The source
+// generation remains part of the durable job intent, so a restarted daemon
+// cannot mistake the old work for the current authority.
+func (m *JobManager) FenceRepositoryDocsSourceGeneration(registrationID, sourceRegistrationID string, generation int64) {
+	registrationID = strings.TrimSpace(registrationID)
+	sourceRegistrationID = strings.TrimSpace(sourceRegistrationID)
+	if registrationID == "" || sourceRegistrationID == "" || generation <= 0 {
+		return
+	}
+	m.mu.Lock()
+	now := m.now()
+	var cancels []context.CancelFunc
+	for id, job := range m.jobs {
+		if job == nil || job.Type != RepositoryDocsIndexJobType || job.RegistrationID != registrationID ||
+			job.SourceRegistrationID != sourceRegistrationID || job.SourceRegistrationGeneration != generation ||
+			!jobActiveStatus(job.Status) {
+			continue
+		}
+		job.Status = JobStatusSuperseded
+		job.UpdatedAt = now
+		job.FinishedAt = &now
+		job.ErrorClass = "repository_docs_source_generation_superseded"
+		job.Error = publicMaintenanceJobError(job.Type, job.ErrorClass)
+		job.Progress = append(job.Progress, service.ProgressEvent{Type: JobStatusSuperseded, Phase: JobStatusSuperseded, Collection: job.Type, Message: job.Error})
+		if cancel := m.cancel[id]; cancel != nil {
+			cancels = append(cancels, cancel)
+		}
+		delete(m.cancel, id)
+	}
+	_ = m.saveLocked()
+	m.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func jobActiveStatus(status string) bool {
+	return status == JobStatusQueued || status == JobStatusRunning || status == JobStatusCancelling
+}
+
+func (m *JobManager) beginRepositoryDocsJob(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job := m.jobs[id]
+	if job == nil || job.Status != JobStatusQueued {
+		return false
+	}
+	now := m.now()
+	job.Status = JobStatusRunning
+	job.StartedAt = &now
+	job.UpdatedAt = now
+	job.Progress = append(job.Progress, service.ProgressEvent{Type: "started", Phase: "indexing", Collection: RepositoryDocsIndexJobType, Message: "repository documentation indexing started"})
+	_ = m.saveLocked()
+	return true
 }
 
 func (m *JobManager) createJob(jobType string, steps int, cancel context.CancelFunc) Job {
@@ -500,9 +813,6 @@ func (m *JobManager) saveLocked() error {
 	if m.snapshotPath == "" {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(m.snapshotPath), 0o700); err != nil {
-		return err
-	}
 	jobs := make([]Job, 0, len(m.jobs))
 	for _, job := range m.jobs {
 		jobs = append(jobs, cloneJob(job))
@@ -512,10 +822,7 @@ func (m *JobManager) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(m.snapshotPath, append(data, '\n'), 0o600); err != nil {
-		return err
-	}
-	return os.Chmod(m.snapshotPath, 0o600)
+	return m.writeFile(m.snapshotPath, append(data, '\n'), 0o600)
 }
 
 func (m *JobManager) pruneLocked() {

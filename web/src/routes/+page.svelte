@@ -3,7 +3,7 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import { Activity, AlertTriangle, ArrowLeft, Blocks, CheckCircle2, ChevronRight, CircleGauge, Clipboard, Clock3, Database, FileCheck2, FileText, FolderCog, Gauge, GitFork, HeartPulse, History, Layers3, Monitor, Moon, Power, RefreshCw, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Sun, Wrench, XCircle, Zap } from '@lucide/svelte';
   import { applyTheme, normalizeTheme, themeStorageKey, type Theme } from '$lib/theme';
-  import { adminApiVersion, cliHandoff, emptySnapshot, humanize, isSnapshotStale, laneSummary, type AdminView, type BindingIntent, type BindingPlan, type CacheObservation, type ControlFailure, type ControlReceipt, type Diagnostic, type Job, type JobAction, type JobActionReceipt, type Maintenance, type MaintenanceIntent, type MaintenancePlan, type ObservationSnapshot, type ProviderSmoke, type RAGRepairPlan, type Repository, type RepositoryDocsSearchResult, type RepositoryTab, type SearchComparison } from '$lib/admin';
+  import { adminApiVersion, cliHandoff, emptySnapshot, humanize, isSnapshotStale, laneSummary, type AdminView, type BindingIntent, type BindingPlan, type CacheObservation, type ControlFailure, type ControlReceipt, type Diagnostic, type Job, type JobAction, type JobActionReceipt, type Maintenance, type MaintenanceIntent, type MaintenancePlan, type ObservationSnapshot, type ProviderSmoke, type RAGRepairPlan, type Repository, type RepositoryDocsPlan, type RepositoryDocsSearchResult, type RepositoryTab, type SearchComparison } from '$lib/admin';
   import CoverageLaneCard from '$lib/CoverageLaneCard.svelte';
   import StatusChip from '$lib/StatusChip.svelte';
 
@@ -16,7 +16,7 @@
   const themes = [
     { value: 'light' as Theme, label: 'Light', icon: Sun }, { value: 'dark' as Theme, label: 'Dark', icon: Moon }, { value: 'system' as Theme, label: 'System', icon: Monitor }
   ];
-  const activeJobStates = new Set(['queued', 'running']);
+  const activeJobStates = new Set(['queued', 'running', 'cancelling']);
 
   let theme: Theme = 'system';
   let active: AdminView = 'Overview';
@@ -98,6 +98,11 @@
   let repositoryDocsRunning = false;
   let repositoryDocsError = '';
   let repositoryDocsResult: RepositoryDocsSearchResult | undefined;
+  let repositoryDocsPlan: RepositoryDocsPlan | undefined;
+  let repositoryDocsPlanRunning = false;
+  let repositoryDocsSourceID = '';
+  let repositoryDocsSources: NonNullable<Repository['documentation']['sources']> = [];
+  let selectedRepositoryDocsSource: NonNullable<Repository['documentation']['sources']>[number] | undefined;
   let repoTargets: Array<{ key: string; cache: CacheObservation; repo: Repository }> = [];
 
   $: selectedCache = snapshot.caches.find((cache) => cache.cache_ref === selectedCacheRef);
@@ -116,7 +121,10 @@
   $: searchCompareEnabled = snapshot.capabilities.some((item) => item.id === 'admin_search_compare' && item.ui_enabled);
   $: providerSmokeEnabled = snapshot.capabilities.some((item) => item.id === 'admin_provider_smoke' && item.ui_enabled);
   $: ragRepairEnabled = snapshot.capabilities.some((item) => item.id === 'admin_rag_bounded_repair' && item.ui_enabled);
-  $: repositoryDocsSearchEnabled = snapshot.capabilities.some((item) => item.id === 'repository_docs_search' && item.ui_enabled);
+  $: repositoryDocsSearchEnabled = snapshot.capabilities.some((item) => item.id === 'repository_docs_search' && item.ui_enabled) && Boolean(selectedRepo?.documentation.search_available);
+  $: repositoryDocsSources = selectedRepo?.documentation.sources || [];
+  $: if (!repositoryDocsSources.some((source) => source.source_registration_id === repositoryDocsSourceID)) repositoryDocsSourceID = repositoryDocsSources[0]?.source_registration_id || '';
+  $: selectedRepositoryDocsSource = repositoryDocsSources.find((source) => source.source_registration_id === repositoryDocsSourceID);
   $: repoTargets = snapshot.caches.flatMap((cache) => cache.repositories.map((repo) => ({ key: `${cache.cache_ref}\u0000${repo.repo_id}`, cache, repo })));
 
   function normalizeSnapshot(value: ObservationSnapshot): ObservationSnapshot {
@@ -124,7 +132,8 @@
     value.job_retention ||= structuredClone(emptySnapshot.job_retention); value.job_retention.retained_by_status ||= [];
     for (const cache of value.caches) for (const repo of (cache.repositories ||= [])) {
       repo.collections ||= []; repo.recent_sync_events ||= []; repo.execution ||= {}; repo.counts.by_kind ||= [];
-      repo.documentation ||= { state: 'not_indexed', registered: false, overlay: false, eligible_files: 0, eligible_chunks: 0, embedded_chunks: 0, reused_chunks: 0, failed_chunks: 0, missing_objects: 0, revision_set_count: 0, search_available: false };
+      repo.documentation ||= { state: 'not_indexed', registered: false, overlay: false, eligible_files: 0, eligible_chunks: 0, embedded_chunks: 0, reused_chunks: 0, failed_chunks: 0, missing_objects: 0, excluded_files: 0, revision_set_count: 0, search_available: false, retention: { committed_sets_per_identity: 0, overlay_max_age_hours: 0, terminal_max_age_hours: 0, vector_byte_ceiling: 0 } };
+	  repo.documentation.exclusions ||= []; repo.documentation.sources ||= []; repo.documentation.retention ||= { committed_sets_per_identity: 0, overlay_max_age_hours: 0, terminal_max_age_hours: 0, vector_byte_ceiling: 0 };
     }
     return value;
   }
@@ -226,7 +235,7 @@
     if (view !== 'Jobs') selectedJobID = '';
     updateLocation();
   }
-  function openRepository(cache: CacheObservation, repo: Repository): void { active = 'Caches'; selectedCacheRef = cache.cache_ref; selectedRepoID = repo.repo_id; maintenanceTargetKey = `${cache.cache_ref}\u0000${repo.repo_id}`; repoTab = 'coverage'; searchComparison = undefined; searchError = ''; providerSmoke = undefined; repairPlan = undefined; repairReceipt = undefined; repositoryDocsResult = undefined; repositoryDocsError = ''; updateLocation(); }
+  function openRepository(cache: CacheObservation, repo: Repository): void { active = 'Caches'; selectedCacheRef = cache.cache_ref; selectedRepoID = repo.repo_id; maintenanceTargetKey = `${cache.cache_ref}\u0000${repo.repo_id}`; repoTab = 'coverage'; searchComparison = undefined; searchError = ''; providerSmoke = undefined; repairPlan = undefined; repairReceipt = undefined; repositoryDocsResult = undefined; repositoryDocsPlan = undefined; repositoryDocsError = ''; updateLocation(); }
   function closeRepository(): void { selectedRepoID = ''; repoTab = 'coverage'; updateLocation(); }
   function selectRepositoryTab(value: RepositoryTab): void { repoTab = value; updateLocation(); }
   function selectDiagnosticFilter(value: 'current' | 'recovered' | 'all'): void { diagnosticsFilter = value; updateLocation(); }
@@ -238,8 +247,10 @@
   function closeJob(): void { selectedJobID = ''; pendingConfirmation = ''; pendingIdempotencyKey = ''; actionError = ''; actionReceipt = undefined; updateLocation(); }
   function openRepositoryDocsJobs(): void {
     if (!selectedCache || !selectedRepo) return;
-    active = 'Jobs'; jobCacheFilter = selectedCache.cache_ref; jobRepoFilter = selectedRepo.repo_id; jobTypeFilter = 'repository-docs-index';
-    const latest = [...scopedJobs].filter((job) => job.type === 'repository-docs-index').sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
+	const cacheRef = selectedCache.cache_ref;
+	const repoID = selectedRepo.repo_id;
+    active = 'Jobs'; jobCacheFilter = cacheRef; jobRepoFilter = repoID; jobTypeFilter = 'repository-docs-index';
+    const latest = snapshot.jobs.filter((job) => job.cache_ref === cacheRef && job.repo_id === repoID && job.type === 'repository-docs-index').sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
     selectedJobID = latest?.id || ''; updateLocation();
   }
   async function confirmJobAction(action: JobAction, trigger: HTMLButtonElement): Promise<void> {
@@ -275,16 +286,57 @@
     catch { copied = ''; }
   }
 
+  async function copyRepositoryDocsConfig(): Promise<void> {
+    if (!repositoryDocsPlan) return;
+    const policy = repositoryDocsPlan.policy.policy;
+    const yamlList = (name: string, values: string[]): string => values.length
+      ? `  ${name}:\n${values.map((value) => `    - ${JSON.stringify(value)}`).join('\n')}`
+      : `  ${name}: []`;
+    const config = [
+      'repository_docs:',
+      `  schema: ${policy.schema}`,
+      `  enabled: ${policy.enabled}`,
+      `  preset: ${policy.preset}`,
+      yamlList('include', policy.include || []),
+      yamlList('exclude', policy.exclude || []),
+      ''
+    ].join('\n');
+    try { await navigator.clipboard.writeText(config); copied = 'documentation-config'; window.setTimeout(() => (copied = ''), 1800); }
+    catch { copied = ''; }
+  }
+
+  function repositoryDocsSelector(): Record<string, string | number> {
+    return selectedRepositoryDocsSource ? { source_registration_id: selectedRepositoryDocsSource.source_registration_id, source_registration_generation: selectedRepositoryDocsSource.source_registration_generation } : {};
+  }
+
+  async function copyRepositoryDocsRebind(): Promise<void> {
+    if (!selectedRepo || !selectedMaintenance || !selectedRepositoryDocsSource) return;
+    const command = `gitcode-mcp repo-docs rebind --repo ${JSON.stringify(selectedRepo.repo_id)} --registration-id ${JSON.stringify(selectedMaintenance.registration_id)} --source-registration-id ${JSON.stringify(selectedRepositoryDocsSource.source_registration_id)} --source-registration-generation ${selectedRepositoryDocsSource.source_registration_generation} --repository-path /new/worktree`;
+    try { await navigator.clipboard.writeText(command); copied = 'documentation-rebind'; window.setTimeout(() => (copied = ''), 1800); }
+    catch { copied = ''; }
+  }
+
   async function runRepositoryDocsSearch(): Promise<void> {
     if (!csrfToken || !repositoryDocsSearchEnabled || !selectedMaintenance || !repositoryDocsQuery.trim()) return;
     repositoryDocsRunning = true; repositoryDocsError = ''; repositoryDocsResult = undefined;
     try {
       repositoryDocsResult = await controlPost<RepositoryDocsSearchResult>(`/api/admin/v1/repository-docs/${encodeURIComponent(selectedMaintenance.registration_id)}/search`, {
         query: repositoryDocsQuery.trim(), revision: repositoryDocsRevision.trim(), mode: repositoryDocsMode,
-        limit: repositoryDocsLimit, include_worktree: repositoryDocsIncludeWorktree
+        limit: repositoryDocsLimit, include_worktree: repositoryDocsIncludeWorktree, ...repositoryDocsSelector()
       });
     } catch (value) { repositoryDocsError = value instanceof Error ? value.message : 'Repository documentation search failed.'; }
     finally { repositoryDocsRunning = false; }
+  }
+
+  async function runRepositoryDocsPlan(): Promise<void> {
+    if (!csrfToken || !selectedMaintenance || !selectedRepo?.documentation.registered) return;
+    repositoryDocsPlanRunning = true; repositoryDocsError = ''; repositoryDocsPlan = undefined;
+    try {
+      repositoryDocsPlan = await controlPost<RepositoryDocsPlan>(`/api/admin/v1/repository-docs/${encodeURIComponent(selectedMaintenance.registration_id)}/plan`, {
+        revision: repositoryDocsRevision.trim(), include_worktree: repositoryDocsIncludeWorktree, ...repositoryDocsSelector()
+      });
+    } catch (value) { repositoryDocsError = value instanceof Error ? value.message : 'Repository documentation plan failed.'; }
+    finally { repositoryDocsPlanRunning = false; }
   }
 
   function ensureControlSelections(): void {
@@ -426,7 +478,7 @@
       } else if ((pendingControl === 'disable' || pendingControl === 'reconcile') && selectedMaintenance) {
         maintenanceReceipt = await controlPost<ControlReceipt>(`/api/admin/v1/maintenance/${encodeURIComponent(selectedMaintenance.registration_id)}/${pendingControl}`, { idempotency_key: pendingControlKey });
       } else if (pendingControl === 'repository_docs_index' && selectedMaintenance) {
-        maintenanceReceipt = await controlPost<ControlReceipt>(`/api/admin/v1/repository-docs/${encodeURIComponent(selectedMaintenance.registration_id)}/index`, { idempotency_key: pendingControlKey });
+        maintenanceReceipt = await controlPost<ControlReceipt>(`/api/admin/v1/repository-docs/${encodeURIComponent(selectedMaintenance.registration_id)}/index`, { idempotency_key: pendingControlKey, ...repositoryDocsSelector() });
       }
       controlDialog?.close(); pendingControl = ''; pendingControlKey = ''; await refresh(); await tick(); controlTriggerButton?.focus();
     } catch (value) {
@@ -518,21 +570,28 @@
                 <div class="section-heading"><div><p class="section-kicker">VERSIONED GIT AUTHORITY</p><h2 id="documentation-title">Repository documentation RAG</h2><p>Policy is committed with the repository. The cache keeps revision membership and vectors only; source text is hydrated from the exact Git blob or an explicit tracked worktree overlay.</p></div><StatusChip value={selectedRepo.documentation.state} /></div>
                 <div class="context-grid">
                   <article><span>Revision sets</span><strong>{selectedRepo.documentation.revision_set_count}</strong><p>{selectedRepo.documentation.revision_set_id || 'No index published'}</p></article>
-                  <article><span>Coverage</span><strong>{selectedRepo.documentation.embedded_chunks + selectedRepo.documentation.reused_chunks}/{selectedRepo.documentation.eligible_chunks}</strong><p>{selectedRepo.documentation.eligible_files} files · {selectedRepo.documentation.failed_chunks} failed · {selectedRepo.documentation.missing_objects} missing</p></article>
+                  <article><span>Coverage</span><strong>{selectedRepo.documentation.embedded_chunks + selectedRepo.documentation.reused_chunks}/{selectedRepo.documentation.eligible_chunks}</strong><p>{selectedRepo.documentation.eligible_files} files · {selectedRepo.documentation.excluded_files} excluded · {selectedRepo.documentation.failed_chunks} failed · {selectedRepo.documentation.missing_objects} missing</p></article>
                   <article><span>Authority</span><strong>{selectedRepo.documentation.overlay ? 'Tracked overlay' : 'Committed Git'}</strong><p>{selectedRepo.documentation.commit_oid ? selectedRepo.documentation.commit_oid.slice(0, 12) : 'Run an index job from a worktree'}</p></article>
                   <article><span>Policy</span><strong>{humanize(selectedRepo.documentation.policy_source || 'default preset')}</strong><p>{selectedRepo.documentation.policy_hash ? selectedRepo.documentation.policy_hash.slice(0, 16) : '.gitcode/gitcode-mcp.yaml or conventional docs preset'}</p></article>
                   <article><span>Embedding namespace</span><strong>{selectedRepo.documentation.namespace_id ? 'Bound' : 'Not selected'}</strong><p>{selectedRepo.documentation.namespace_id || 'Provider namespace appears after indexing'}</p></article>
                   <article><span>Updated</span><strong>{selectedRepo.documentation.updated_at ? new Date(selectedRepo.documentation.updated_at).toLocaleDateString() : 'Never'}</strong><p>{selectedRepo.documentation.updated_at ? new Date(selectedRepo.documentation.updated_at).toLocaleString() : 'No repository documentation metadata'}</p></article>
 				  <article><span>Automatic reconciliation</span><strong>{selectedRepo.documentation.registered ? humanize(selectedRepo.documentation.reconcile_state || 'registered') : 'Not registered'}</strong><p>{selectedRepo.documentation.next_poll_at ? `Next HEAD/policy poll ${new Date(selectedRepo.documentation.next_poll_at).toLocaleString()}` : 'Run the index command once from the intended worktree to register it privately.'}</p></article>
+				  <article><span>Source generation</span><strong>{selectedRepo.documentation.source_registration_generation || 'Not registered'}</strong><p>{selectedRepo.documentation.source_registration_id || 'No private Git authority selected'}</p></article>
+				  <article><span>Derived-state retention</span><strong>{selectedRepo.documentation.retention.committed_sets_per_identity || '—'} committed sets</strong><p>Overlays {selectedRepo.documentation.retention.overlay_max_age_hours || '—'}h · terminal evidence {selectedRepo.documentation.retention.terminal_max_age_hours || '—'}h · vectors ≤ {selectedRepo.documentation.retention.vector_byte_ceiling ? `${Math.round(selectedRepo.documentation.retention.vector_byte_ceiling / (1024 * 1024))} MiB` : '—'}. Git remains the document store.</p></article>
+				  <article><span>Active attempt</span><strong>{humanize(selectedRepo.documentation.active_state || 'idle')}</strong><p>{selectedRepo.documentation.active_revision_set_id || selectedRepo.documentation.last_failure_class || 'No competing generation'}</p></article>
                 </div>
+				{#if selectedRepo.documentation.exclusions?.length}<div class="cohort-strip" aria-label="Repository documentation exclusion reasons">{#each selectedRepo.documentation.exclusions as exclusion}<div><span>{humanize(exclusion.reason)}</span><strong>{exclusion.count}</strong></div>{/each}</div>{/if}
                 <div class="rag-operator-panel">
-				  <div><p class="section-kicker">REGISTERED GIT AUTHORITY</p><h3>Index and supervise</h3><p>{selectedRepo.documentation.registered ? 'Reconcile resolves current HEAD and committed policy from the private daemon registration, schedules an immutable revision-set job when needed, and never fetches GitCode.' : 'The Admin UI never accepts an absolute worktree path. Run indexing once from the intended worktree to create the private registration, then controls become available here.'}</p></div>
-                  <div class="rag-action-form documentation-actions"><button class="primary-action" disabled={!csrfToken || !registrationControlsEnabled || !selectedMaintenance || !selectedRepo.documentation.registered || controlRunning} onclick={(event) => void confirmControl('repository_docs_index', event.currentTarget)}><RotateCcw size={16} />Index current HEAD</button><button onclick={openRepositoryDocsJobs} disabled={!selectedRepo.documentation.registered}><Activity size={16} />Open index jobs</button><button onclick={() => void copyDocumentationCommand('index')} disabled={!selectedRepo.documentation.index_handoff}><FileText size={16} />{copied === 'documentation-index' ? 'Copied index command' : 'Copy CLI handoff'}</button></div>
+				  <div><p class="section-kicker">REGISTERED GIT AUTHORITY</p><h3>Index and supervise</h3><p>{selectedRepo.documentation.registered ? 'Reconcile resolves current HEAD and committed policy from the selected private daemon authority, schedules an immutable revision-set job when needed, and never fetches GitCode.' : 'The Admin UI never accepts an absolute worktree path. Run indexing once from the intended worktree to create the private registration, then controls become available here.'}</p></div>
+                  {#if repositoryDocsSources.length > 0}<label><span>Git authority</span><select bind:value={repositoryDocsSourceID}>{#each repositoryDocsSources as source}<option value={source.source_registration_id}>{source.source_registration_id.slice(0, 24)} · generation {source.source_registration_generation} · {humanize(source.state)}</option>{/each}</select></label>{/if}
+                  <div class="rag-action-form documentation-actions"><button disabled={!csrfToken || !selectedMaintenance || !selectedRepo.documentation.registered || repositoryDocsPlanRunning} onclick={() => void runRepositoryDocsPlan()}><FileCheck2 size={16} />{repositoryDocsPlanRunning ? 'Planning…' : 'Preview exact plan'}</button><button class="primary-action" disabled={!csrfToken || !registrationControlsEnabled || !selectedMaintenance || !selectedRepo.documentation.registered || controlRunning} onclick={(event) => void confirmControl('repository_docs_index', event.currentTarget)}><RotateCcw size={16} />Index current HEAD</button><button onclick={openRepositoryDocsJobs} disabled={!selectedRepo.documentation.registered}><Activity size={16} />Open index jobs</button><button onclick={() => void copyDocumentationCommand('index')} disabled={!selectedRepo.documentation.index_handoff}><FileText size={16} />{copied === 'documentation-index' ? 'Copied index command' : 'Copy CLI handoff'}</button><button onclick={() => void copyRepositoryDocsRebind()} disabled={!selectedRepositoryDocsSource}><GitFork size={16} />{copied === 'documentation-rebind' ? 'Copied rebind command' : 'Copy rebind command'}</button></div>
                   <p class="privacy search-boundary"><ShieldCheck size={15} />The browser sends only the opaque registration id. Filesystem authority remains in the daemon's private registry.</p>
+				  {#if repositoryDocsPlan}<div class="action-result" role="status"><FileCheck2 size={17} /><div><strong>{repositoryDocsPlan.eligible_files} eligible files · {repositoryDocsPlan.eligible_bytes} bytes</strong><span>{repositoryDocsPlan.excluded_files} excluded · {repositoryDocsPlan.missing_objects} missing · commit {repositoryDocsPlan.commit_oid.slice(0, 12)}{repositoryDocsPlan.tracked_changes ? ` · ${repositoryDocsPlan.tracked_changes} tracked changes` : ''}</span><span>Effective include: {(repositoryDocsPlan.effective_include || []).join(', ') || 'none'} · exclude: {(repositoryDocsPlan.effective_exclude || []).join(', ') || 'none'}</span><button onclick={() => void copyRepositoryDocsConfig()}><Clipboard size={15} />{copied === 'documentation-config' ? 'Copied committed config' : 'Copy committed config'}</button></div></div>{/if}
                 </div>
 
                 <div class="rag-operator-panel repository-docs-search-panel">
                   <div><p class="section-kicker">EXACT REVISION SEARCH</p><h3>Search repository documentation</h3><p>Select a Git ref or object id. Results are hydrated from Git and carry blob, line, and raw-slice digest citations; document bodies are not persisted in the cache.</p></div>
+                  <div class="cohort-strip" aria-label="Repository documentation search availability"><div><span>Offline full text</span><strong>{selectedRepo.documentation.search_available ? 'Available' : 'Unavailable'}</strong></div><div><span>Semantic ranking</span><strong>{selectedRepo.documentation.semantic_available ? 'Ready' : 'Lexical fallback'}</strong></div></div>
                   <form class="search-query-form" onsubmit={(event) => { event.preventDefault(); void runRepositoryDocsSearch(); }}>
                     <label class="search-query"><span>Query</span><input required maxlength="512" bind:value={repositoryDocsQuery} placeholder="How is repository documentation indexed?" /></label>
                     <label><span>Revision</span><input maxlength="256" bind:value={repositoryDocsRevision} placeholder="HEAD or object id" /></label>
@@ -541,19 +600,19 @@
                     <button class="primary-action" type="submit" disabled={!csrfToken || !repositoryDocsSearchEnabled || !selectedMaintenance || repositoryDocsRunning}><Search size={16} />{repositoryDocsRunning ? 'Searching…' : 'Search Git'}</button>
                     <label class="worktree-toggle"><input type="checkbox" bind:checked={repositoryDocsIncludeWorktree} /><span>Include tracked worktree overlay</span></label>
                   </form>
-                  <p class="privacy search-boundary"><ShieldCheck size={15} />Full-text stays local. Hybrid sends only the query to the configured embedding provider; Git document text remains local authority.</p>
+                  <p class="privacy search-boundary"><ShieldCheck size={15} />Full-text stays local and needs no index. Hybrid sends only the query to the configured embedding provider and falls back to lexical retrieval when semantic state is unavailable; Git document text remains local authority.</p>
                   {#if repositoryDocsError}<div class="action-result error" role="alert"><AlertTriangle size={17} /><div><strong>Repository documentation search failed</strong><span>{repositoryDocsError}</span></div></div>{/if}
                   {#if repositoryDocsResult}
                     <article class="search-mode-column repository-docs-results">
                       <header><div><p class="section-kicker">{repositoryDocsResult.authority.toUpperCase()}</p><h3>{humanize(repositoryDocsResult.effective_mode)} · {repositoryDocsResult.effective_revision.slice(0, 12)}</h3></div><StatusChip value={repositoryDocsResult.fallback ? 'partial' : 'ready'} label={repositoryDocsResult.fallback ? humanize(repositoryDocsResult.fallback) : `${repositoryDocsResult.hits.length} results`} /></header>
-                      {#if repositoryDocsResult.warnings?.length}<ul class="blocker-list">{#each repositoryDocsResult.warnings as warning}<li><AlertTriangle size={15} />{warning}</li>{/each}</ul>{/if}
+                      {#if repositoryDocsResult.warning_details?.length}<ul class="blocker-list">{#each repositoryDocsResult.warning_details as warning}<li><AlertTriangle size={15} /><div><strong>{humanize(warning.code)}</strong><span>{warning.message}</span></div></li>{/each}</ul>{:else if repositoryDocsResult.warnings?.length}<ul class="blocker-list">{#each repositoryDocsResult.warnings as warning}<li><AlertTriangle size={15} />{warning}</li>{/each}</ul>{/if}
                       {#if repositoryDocsResult.hits.length === 0}<div class="empty-inline"><Search size={18} /><div><strong>No Git-backed match</strong><span>The selected revision and committed policy produced an empty result.</span></div></div>{:else}
                         <ol class="search-result-list">{#each repositoryDocsResult.hits as hit}<li><div class="search-result-heading"><span class="result-rank">#{hit.rank}</span><div><strong>{hit.citation.path}</strong><small>{hit.chunk_id.slice(0, 12)} · {humanize(hit.citation.authority)}</small></div></div><p>{hit.snippet}</p><dl class="score-row"><div><dt>Lexical</dt><dd>{(hit.lexical_score || 0).toFixed(4)}</dd></div><div><dt>Semantic</dt><dd>{(hit.semantic_score || 0).toFixed(4)}</dd></div><div><dt>Fusion</dt><dd>{hit.score.toFixed(6)}</dd></div></dl><div class="result-location"><code>{hit.citation.path}:L{hit.citation.line_start}–L{hit.citation.line_end}</code><span>{hit.citation.raw_slice_digest.slice(0, 12)}</span></div><details><summary>Digest-verified Git citation</summary><ul><li><code>{hit.citation.commit_oid.slice(0, 12)} · blob {hit.citation.blob_oid.slice(0, 12)}</code><p>Raw slice digest {hit.citation.raw_slice_digest}</p></li></ul></details></li>{/each}</ol>
                       {/if}
                     </article>
                   {/if}
                 </div>
-                {#if pendingControl === 'repository_docs_index'}<dialog bind:this={controlDialog} class="confirmation-dialog control-confirmation" aria-labelledby="confirm-repo-docs-reconcile-title" oncancel={(event) => { event.preventDefault(); void cancelControlConfirmation(); }}><span class="dialog-icon"><RotateCcw size={21} /></span><div><p class="section-kicker">CONFIRM LOCAL GIT RECONCILIATION</p><h2 id="confirm-repo-docs-reconcile-title">Resolve and index current HEAD?</h2><p>The daemon will inspect the registered worktree and committed policy, then coalesce or start only the immutable repository-document index job. It will not fetch GitCode, start remote sync, or persist document bodies.</p><dl><div><dt>Target</dt><dd>{selectedRepo.repo_id}</dd></div><div><dt>Cache</dt><dd>{selectedCache?.cache_ref}</dd></div><div><dt>Registration</dt><dd>{selectedMaintenance?.registration_id}</dd></div></dl><div class="dialog-actions"><button onclick={() => void cancelControlConfirmation()} disabled={controlRunning}>Keep current state</button><button bind:this={controlConfirmButton} class="primary-action" onclick={() => void executeControl()} disabled={controlRunning}>{controlRunning ? 'Submitting…' : 'Confirm indexing'}</button></div></div></dialog>{/if}
+                {#if pendingControl === 'repository_docs_index'}<dialog bind:this={controlDialog} class="confirmation-dialog control-confirmation" aria-labelledby="confirm-repo-docs-reconcile-title" oncancel={(event) => { event.preventDefault(); void cancelControlConfirmation(); }}><span class="dialog-icon"><RotateCcw size={21} /></span><div><p class="section-kicker">CONFIRM LOCAL GIT RECONCILIATION</p><h2 id="confirm-repo-docs-reconcile-title">Resolve and index current HEAD?</h2><p>The daemon will inspect the registered worktree and committed policy, then coalesce or start only the immutable repository-document index job. It will not fetch GitCode, start remote sync, or persist document bodies.</p><p>Embedding is permitted only when the effective provider declares a <code>local_process</code> or <code>local_network</code> data boundary. Remote, unknown, and undeclared boundaries are rejected before scheduling.</p><dl><div><dt>Target</dt><dd>{selectedRepo.repo_id}</dd></div><div><dt>Cache</dt><dd>{selectedCache?.cache_ref}</dd></div><div><dt>Registration</dt><dd>{selectedMaintenance?.registration_id}</dd></div></dl><div class="dialog-actions"><button onclick={() => void cancelControlConfirmation()} disabled={controlRunning}>Keep current state</button><button bind:this={controlConfirmButton} class="primary-action" onclick={() => void executeControl()} disabled={controlRunning}>{controlRunning ? 'Submitting…' : 'Confirm indexing'}</button></div></div></dialog>{/if}
               </section>
             {:else if repoTab === 'search'}
               <section class="repository-section search-lab" aria-labelledby="search-title">

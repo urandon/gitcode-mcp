@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -136,7 +137,8 @@ func (s RPCServer) handleRequest(ctx context.Context, req RPCRequest) RPCRespons
 	result, err := s.dispatch(ctx, req.Method, req.Params)
 	if err != nil {
 		resp.Error = &RPCError{Code: -32000, Message: err.Error()}
-		if coded, ok := err.(interface{ DiagnosticCode() string }); ok {
+		var coded interface{ DiagnosticCode() string }
+		if errors.As(err, &coded) {
 			resp.Error.DiagnosticCode = coded.DiagnosticCode()
 		}
 		return resp
@@ -190,20 +192,89 @@ func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawM
 				return nil, err
 			}
 		}
-		job, err := s.Jobs.StartRepositoryDocsIndex(context.Background(), s.Manager, req)
+		if s.Maintenance == nil {
+			return nil, RepositoryDocsSourceUnavailableError{code: "repository_docs_registration_unavailable"}
+		}
+		if strings.TrimSpace(req.RegistrationID) != "" && strings.TrimSpace(req.RepositoryPath) == "" {
+			source, err := s.Maintenance.repositoryDocsSourceForSelector(RepositoryDocsSourceSelector{
+				RegistrationID: req.RegistrationID, SourceRegistrationID: req.SourceRegistrationID,
+				SourceRegistrationGeneration: req.SourceRegistrationGeneration,
+			})
+			if err != nil {
+				return nil, err
+			}
+			if !repositoryDocsSourceMatchesRepo(ctx, source, req.RepoID) {
+				return nil, RepositoryDocsSourceUnavailableError{code: "repository_docs_source_repo_conflict"}
+			}
+			req.RepoID, req.RepositoryPath, req.Profile = source.RepoID, source.RepositoryPath, source.Profile
+			req.CachePath, req.CacheUUID = source.CachePath, source.CacheUUID
+		}
+		prepared, err := prepareRepositoryDocsIndex(ctx, s.Manager, req)
 		if err != nil {
 			return nil, err
 		}
-		if s.Maintenance != nil {
-			entry, registered, registerErr := s.Maintenance.RegisterRepositoryDocsSource(context.Background(), job.CacheUUID, job.RepoID, req.RepositoryPath, req.Profile)
-			if registerErr != nil {
-				return nil, registerErr
-			}
-			if registered {
-				job = s.Jobs.SetWorkIdentity(job.ID, job.WorkKey, job.CacheUUID, entry.RegistrationID, job.NamespaceID)
-			}
+		entry, prepared, registered, registerErr := s.Maintenance.registerAndRecordRepositoryDocsAdmission(prepared)
+		if registerErr != nil {
+			return nil, registerErr
 		}
+		if !registered || entry.RepositoryDocs == nil || entry.RepositoryDocs.SourceRegistrationID == "" || entry.RepositoryDocs.SourceRegistrationGeneration <= 0 {
+			return nil, RepositoryDocsSourceUnavailableError{code: "repository_docs_registration_unavailable"}
+		}
+		job, err := s.Jobs.startPreparedRepositoryDocsIndex(context.Background(), s.Manager, prepared)
+		if err != nil {
+			// The durable admission remains queued in the maintenance registry;
+			// reconciliation can retry it after a transient writer or snapshot
+			// persistence failure without re-accepting private authority.
+			return nil, err
+		}
+		if err := s.Maintenance.bindRepositoryDocsAdmissionJob(prepared.request.RegistrationID, prepared.request.SourceRegistrationID, job.ID); err != nil {
+			return nil, err
+		}
+		// Keep the durable handoff until reconciliation observes a successful
+		// terminal job. It is the exact recovery source if the daemon exits
+		// after queueing or while the job is running.
 		return job, nil
+	case "RepositoryDocs.RegisterSource":
+		var req RegisterRepositoryDocsSourceRequest
+		if err := json.Unmarshal(params, &req); err != nil {
+			return nil, err
+		}
+		return s.registerRepositoryDocsSource(ctx, req)
+	case "RepositoryDocs.RebindSource":
+		if s.Maintenance == nil {
+			return nil, RepositoryDocsSourceUnavailableError{code: "repository_docs_registration_unavailable"}
+		}
+		var req RepositoryDocsSourceRebindRequest
+		if err := json.Unmarshal(params, &req); err != nil {
+			return nil, err
+		}
+		selectorGeneration := req.ExpectedGeneration
+		if strings.TrimSpace(req.SourceRegistrationID) == "" {
+			selectorGeneration = 0
+		}
+		source, err := s.Maintenance.repositoryDocsSourceForSelector(RepositoryDocsSourceSelector{RegistrationID: req.RegistrationID, SourceRegistrationID: req.SourceRegistrationID, SourceRegistrationGeneration: selectorGeneration})
+		if err != nil {
+			return nil, err
+		}
+		if !repositoryDocsSourceMatchesRepo(ctx, source, req.RepoID) {
+			return nil, RepositoryDocsSourceUnavailableError{code: "repository_docs_source_repo_conflict"}
+		}
+		return s.Maintenance.RebindRepositoryDocsSource(ctx, req)
+	case "RepositoryDocs.Policy", "RepositoryDocs.Plan", "RepositoryDocs.Status", "RepositoryDocs.Search":
+		var req RepositoryDocsQueryRequest
+		if err := json.Unmarshal(params, &req); err != nil {
+			return nil, err
+		}
+		switch method {
+		case "RepositoryDocs.Policy":
+			return s.repositoryDocsPolicy(ctx, req)
+		case "RepositoryDocs.Plan":
+			return s.repositoryDocsPlan(ctx, req)
+		case "RepositoryDocs.Status":
+			return s.repositoryDocsStatus(ctx, req)
+		default:
+			return s.repositoryDocsSearch(ctx, req)
+		}
 	case "Jobs.StartSync":
 		var req StartSyncJobRequest
 		if len(params) > 0 {
@@ -229,7 +300,10 @@ func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawM
 		if err != nil {
 			return nil, err
 		}
-		job, ok := s.Jobs.Cancel(id)
+		job, ok, cancelErr := s.Jobs.Cancel(id)
+		if cancelErr != nil {
+			return nil, cancelErr
+		}
 		if !ok {
 			return nil, fmt.Errorf("job not found: %s", id)
 		}

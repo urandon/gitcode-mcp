@@ -1,0 +1,152 @@
+package servicectl
+
+import (
+	"context"
+	"strings"
+
+	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/rag"
+	"gitcode-mcp/internal/repositorydocs"
+)
+
+type RepositoryDocsQueryRequest struct {
+	RepositoryDocsSourceSelector
+	RepoID          string `json:"repo_id"`
+	Revision        string `json:"revision,omitempty"`
+	IncludeWorktree bool   `json:"include_worktree,omitempty"`
+	Query           string `json:"query,omitempty"`
+	Mode            string `json:"mode,omitempty"`
+	Limit           int    `json:"limit,omitempty"`
+}
+
+type RegisterRepositoryDocsSourceRequest struct {
+	RepoID         string `json:"repo_id"`
+	RepositoryPath string `json:"repository_path"`
+	Profile        string `json:"profile,omitempty"`
+	CachePath      string `json:"cache_path,omitempty"`
+}
+
+func (s RPCServer) repositoryDocsPolicy(ctx context.Context, req RepositoryDocsQueryRequest) (repositorydocs.PolicyResult, error) {
+	source, repo, err := s.repositoryDocsQuerySource(ctx, req)
+	if err != nil {
+		return repositorydocs.PolicyResult{}, err
+	}
+	return repositorydocs.InspectPolicy(ctx, repo, repositorydocs.PolicyRequest{
+		RepoID: source.RepoID, RegistrationID: source.RegistrationID, SourceRegistrationID: source.SourceRegistrationID,
+		SourceRegistrationGeneration: source.SourceRegistrationGeneration, Revision: req.Revision, IncludeWorktree: req.IncludeWorktree,
+	})
+}
+
+func (s RPCServer) repositoryDocsPlan(ctx context.Context, req RepositoryDocsQueryRequest) (repositorydocs.PlanResult, error) {
+	source, repo, err := s.repositoryDocsQuerySource(ctx, req)
+	if err != nil {
+		return repositorydocs.PlanResult{}, err
+	}
+	return repositorydocs.InspectPlan(ctx, repo, repositorydocs.PlanRequest{
+		RepoID: source.RepoID, RegistrationID: source.RegistrationID, SourceRegistrationID: source.SourceRegistrationID,
+		SourceRegistrationGeneration: source.SourceRegistrationGeneration, Revision: req.Revision, IncludeWorktree: req.IncludeWorktree,
+	})
+}
+
+func (s RPCServer) repositoryDocsStatus(ctx context.Context, req RepositoryDocsQueryRequest) (repositorydocs.StatusResult, error) {
+	source, repo, err := s.repositoryDocsQuerySource(ctx, req)
+	if err != nil {
+		return repositorydocs.StatusResult{}, err
+	}
+	store, err := cache.NewSQLiteReadOnlyStore(ctx, source.CachePath)
+	if err != nil {
+		return repositorydocs.StatusResult{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_cache_unavailable"}
+	}
+	defer store.Close()
+	return repositorydocs.InspectStatus(ctx, store, repo, repositorydocs.StatusRequest{
+		RepoID: source.RepoID, RegistrationID: source.RegistrationID, SourceRegistrationID: source.SourceRegistrationID,
+		SourceRegistrationGeneration: source.SourceRegistrationGeneration, Revision: req.Revision, IncludeWorktree: req.IncludeWorktree,
+	})
+}
+
+func (s RPCServer) repositoryDocsSearch(ctx context.Context, req RepositoryDocsQueryRequest) (repositorydocs.SearchResult, error) {
+	source, repo, err := s.repositoryDocsQuerySource(ctx, req)
+	if err != nil {
+		return repositorydocs.SearchResult{}, err
+	}
+	store, err := cache.NewSQLiteReadOnlyStore(ctx, source.CachePath)
+	if err != nil {
+		return repositorydocs.SearchResult{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_cache_unavailable"}
+	}
+	defer store.Close()
+	var provider rag.EmbeddingProvider
+	mode := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(req.Mode)), "_", "")
+	if mode == "" || mode == repositorydocs.SearchModeHybrid {
+		provider, _ = rag.NewEmbeddingProviderFromConfig(source.Config, source.Profile, rag.ProviderOptions{})
+	}
+	return repositorydocs.NewRetriever(store, provider).Search(ctx, repositorydocs.SearchRequest{
+		RepoID: source.RepoID, RegistrationID: source.RegistrationID, SourceRegistrationID: source.SourceRegistrationID,
+		SourceRegistrationGeneration: source.SourceRegistrationGeneration, Repository: repo, Revision: req.Revision,
+		IncludeWorktree: req.IncludeWorktree, Query: req.Query, Mode: mode, Limit: req.Limit,
+	})
+}
+
+func (s RPCServer) repositoryDocsQuerySource(ctx context.Context, req RepositoryDocsQueryRequest) (repositoryDocsAdminSource, *repositorydocs.Repository, error) {
+	if s.Maintenance == nil {
+		return repositoryDocsAdminSource{}, nil, RepositoryDocsSourceUnavailableError{code: "repository_docs_registration_unavailable"}
+	}
+	source, err := s.Maintenance.repositoryDocsSourceForSelector(req.RepositoryDocsSourceSelector)
+	if err != nil {
+		return repositoryDocsAdminSource{}, nil, err
+	}
+	if !repositoryDocsSourceMatchesRepo(ctx, source, req.RepoID) {
+		return repositoryDocsAdminSource{}, nil, RepositoryDocsSourceUnavailableError{code: "repository_docs_source_repo_conflict"}
+	}
+	repo, err := repositorydocs.OpenRepository(ctx, source.RepositoryPath)
+	if err != nil {
+		return repositoryDocsAdminSource{}, nil, RepositoryDocsSourceUnavailableError{}
+	}
+	return source, repo, nil
+}
+
+func repositoryDocsSourceMatchesRepo(ctx context.Context, source repositoryDocsAdminSource, requested string) bool {
+	requested = strings.TrimSpace(requested)
+	if requested == "" || requested == source.RepoID {
+		return true
+	}
+	store, err := cache.NewSQLiteReadOnlyStore(ctx, source.CachePath)
+	if err != nil {
+		return false
+	}
+	defer store.Close()
+	binding, err := store.ResolveRepositoryBinding(ctx, requested)
+	return err == nil && binding.RepoID == source.RepoID
+}
+
+func (s RPCServer) registerRepositoryDocsSource(ctx context.Context, req RegisterRepositoryDocsSourceRequest) (MaintenanceEntry, error) {
+	if s.Maintenance == nil {
+		return MaintenanceEntry{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_registration_unavailable"}
+	}
+	eff, err := effectiveJobConfig(s.Manager, req.CachePath)
+	if err != nil {
+		return MaintenanceEntry{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_configuration_unavailable"}
+	}
+	effectiveProfile := strings.TrimSpace(req.Profile)
+	if effectiveProfile == "" {
+		effectiveProfile = strings.TrimSpace(eff.Config.RAG.Indexing.Profile)
+	}
+	if effectiveProfile == "" {
+		effectiveProfile = strings.TrimSpace(eff.Config.RAG.DefaultProfile)
+	}
+	store, err := cache.NewSQLiteReadOnlyStore(ctx, eff.Config.CachePath)
+	if err != nil {
+		return MaintenanceEntry{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_cache_unavailable"}
+	}
+	binding, err := store.ResolveRepositoryBinding(ctx, strings.TrimSpace(req.RepoID))
+	if err != nil {
+		store.Close()
+		return MaintenanceEntry{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_binding_unavailable"}
+	}
+	identity, err := store.CacheIdentity(ctx)
+	store.Close()
+	if err != nil {
+		return MaintenanceEntry{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_cache_unavailable"}
+	}
+	entry, _, err := s.Maintenance.RegisterRepositoryDocsSource(ctx, identity.UUID, binding.RepoID, req.RepositoryPath, effectiveProfile)
+	return entry, err
+}

@@ -178,7 +178,7 @@ func TestInitialMigration(t *testing.T) {
 	defer store.Close()
 
 	tables := tableNames(t, ctx, store.db)
-	for _, want := range []string{"schema_version", "repos", "repo_aliases", "sources", "identity_map", "links", "remote_revisions", "sync_events", "sync_frontiers", "issue_comment_sync", "conflicts", "chunks", "records", "record_comments", "pr_review_comments", "pr_review_discussions", "pr_review_positions", "audit_trail", "cache_confirmations", "snapshots", "snapshot_chunks", "embedding_namespaces", "chunk_embeddings", "rag_index_runs", "cache_identity", "repo_content_state", "rag_coverage_state", "maintenance_frontiers", "repo_doc_revision_sets", "repo_doc_chunks", "repo_doc_membership", "repo_doc_vectors"} {
+	for _, want := range []string{"schema_version", "repos", "repo_aliases", "sources", "identity_map", "links", "remote_revisions", "sync_events", "sync_frontiers", "issue_comment_sync", "conflicts", "chunks", "records", "record_comments", "pr_review_comments", "pr_review_discussions", "pr_review_positions", "audit_trail", "cache_confirmations", "snapshots", "snapshot_chunks", "embedding_namespaces", "chunk_embeddings", "rag_index_runs", "cache_identity", "repo_content_state", "rag_coverage_state", "maintenance_frontiers", "repo_doc_revision_sets", "repo_doc_chunks", "repo_doc_membership", "repo_doc_vectors", "repo_doc_exclusions"} {
 		if !tables[want] {
 			t.Fatalf("missing table %s; tables=%v", want, tables)
 		}
@@ -187,12 +187,26 @@ func TestInitialMigration(t *testing.T) {
 		t.Fatalf("FTS enabled store missing fts_index table")
 	}
 	indexes := indexNames(t, ctx, store.db)
-	for _, want := range []string{"idx_repo_aliases_repo", "idx_sources_kind_status", "idx_identity_source", "idx_identity_remote", "idx_links_target", "idx_sync_events_source", "idx_sync_frontiers_repo", "idx_issue_comment_sync_queue", "idx_chunks_source", "idx_records_type_status", "idx_records_remote", "idx_records_remote_unique", "idx_record_comments_record", "idx_pr_review_comments_pr", "idx_pr_review_comments_discussion", "idx_pr_review_discussions_pr", "idx_pr_review_positions_discussion", "idx_pr_review_positions_new_line", "idx_pr_review_positions_old_line", "idx_audit_trail_record", "idx_audit_trail_idempotency_unique", "idx_cache_confirmations_record", "idx_cache_confirmations_remote", "idx_snapshot_chunks_record", "idx_embedding_namespaces_identity", "idx_embedding_namespaces_profile", "idx_chunk_embeddings_chunk", "idx_chunk_embeddings_coverage", "idx_rag_index_runs_namespace", "idx_rag_index_runs_status", "idx_maintenance_frontiers_state", "idx_repo_doc_revision_sets_lookup", "idx_repo_doc_revision_sets_retention", "idx_repo_doc_chunks_content", "idx_repo_doc_membership_chunk", "idx_repo_doc_membership_path", "idx_repo_doc_vectors_chunk"} {
+	for _, want := range []string{"idx_repo_aliases_repo", "idx_sources_kind_status", "idx_identity_source", "idx_identity_remote", "idx_links_target", "idx_sync_events_source", "idx_sync_frontiers_repo", "idx_issue_comment_sync_queue", "idx_chunks_source", "idx_records_type_status", "idx_records_remote", "idx_records_remote_unique", "idx_record_comments_record", "idx_pr_review_comments_pr", "idx_pr_review_discussions_pr", "idx_pr_review_positions_discussion", "idx_pr_review_positions_new_line", "idx_pr_review_positions_old_line", "idx_audit_trail_record", "idx_audit_trail_idempotency_unique", "idx_cache_confirmations_record", "idx_cache_confirmations_remote", "idx_snapshot_chunks_record", "idx_embedding_namespaces_identity", "idx_embedding_namespaces_profile", "idx_chunk_embeddings_chunk", "idx_chunk_embeddings_coverage", "idx_rag_index_runs_namespace", "idx_rag_index_runs_status", "idx_maintenance_frontiers_state", "idx_repo_doc_revision_sets_lookup", "idx_repo_doc_revision_sets_retention", "idx_repo_doc_chunks_content", "idx_repo_doc_membership_chunk", "idx_repo_doc_membership_path", "idx_repo_doc_vectors_chunk", "idx_repo_doc_exclusions_reason"} {
 		if !indexes[want] {
 			t.Fatalf("missing index %s; indexes=%v", want, indexes)
 		}
 	}
 	assertEmbeddingNullable(t, ctx, store.db)
+	tx, err := store.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	columns, err := tableColumns(ctx, tx, "repo_doc_revision_sets")
+	_ = tx.Rollback()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"source_registration_id", "source_registration_generation", "processing_policy_id"} {
+		if !columns[want] {
+			t.Fatalf("repo_doc_revision_sets missing v19 identity column %s: %v", want, columns)
+		}
+	}
 }
 
 func TestMigrationZeroDelta(t *testing.T) {
