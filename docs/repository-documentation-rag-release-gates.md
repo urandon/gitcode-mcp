@@ -50,7 +50,9 @@ persist an absolute worktree path in a public snapshot.
   coalescing, cancellation, terminal job retention, durable vector-only replay,
   generation fencing, and metadata GC.
 - Explicit cancellation survives restart without reconciliation relaunch, and
-  repeated failures do not bypass the recorded retry window.
+  a failed tombstone write returns an error without signalling the worker.
+  Repeated failures do not bypass the recorded retry window and resume with the
+  same public job identity when that window opens.
 - Provider output fetched before writer contention or request cancellation is
   replayed from the vector-only checkpoint without a second provider call.
 - Corrupt checkpoints recover as a cache miss; age, byte, and orphan pruning

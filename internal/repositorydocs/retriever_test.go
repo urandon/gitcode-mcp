@@ -140,6 +140,43 @@ func TestRetrieverDoesNotScoreARevisionSetFromAnotherEmbeddingNamespace(t *testi
 	}
 }
 
+type mismatchedQueryEmbeddingProvider struct {
+	*rag.FakeProvider
+}
+
+func (p mismatchedQueryEmbeddingProvider) Embed(context.Context, rag.EmbedRequest) (rag.EmbedResponse, error) {
+	return rag.EmbedResponse{Model: "fake", Revision: "fake-v1", Dimensions: 3, Embeddings: [][]float32{{1, 0, 0}}}, nil
+}
+
+func TestRetrieverFallsBackWithTypedWarningOnQueryDimensionMismatch(t *testing.T) {
+	ctx := context.Background()
+	root := initTestRepository(t)
+	writeTestFile(t, root, "README.md", "dimension mismatch remains available through verified lexical retrieval\n")
+	commit := commitTestRepository(t, root, "dimension fallback")
+	repo, err := OpenRepository(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := repositoryDocsSearchStore(t, ctx)
+	defer store.Close()
+	provider := repositoryDocsSearchProvider(t)
+	indexed, err := NewIndexer(store, provider).Run(ctx, IndexRequest{RepoID: "owner/repo", Repository: repo, Revision: commit})
+	if err != nil || indexed.State != cache.RepoDocSetReady {
+		t.Fatalf("indexed=%#v err=%v", indexed, err)
+	}
+
+	result, err := NewRetriever(store, mismatchedQueryEmbeddingProvider{FakeProvider: provider}).Search(ctx, SearchRequest{RepoID: "owner/repo", Repository: repo, Revision: commit, Query: "dimension mismatch", Mode: SearchModeHybrid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.EffectiveMode != SearchModeFullText || result.Fallback != "query_embedding_dimension_mismatch" || len(result.Hits) == 0 {
+		t.Fatalf("fallback result=%#v", result)
+	}
+	if len(result.WarningDetails) != 1 || result.WarningDetails[0].Code != "query_embedding_dimension_mismatch" || result.WarningDetails[0].Message != result.Warnings[0] {
+		t.Fatalf("typed warnings=%#v legacy=%#v", result.WarningDetails, result.Warnings)
+	}
+}
+
 type pruningSearchStore struct {
 	*cache.SQLiteStore
 	pruned bool

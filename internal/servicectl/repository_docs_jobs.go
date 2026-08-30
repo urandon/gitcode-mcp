@@ -251,7 +251,16 @@ func (m *JobManager) runRepositoryDocsIndexJob(ctx context.Context, manager Mana
 				// Bind durable cancellation to the terminal worker transition, not
 				// only to Cancel's bounded wait. A slow provider therefore cannot
 				// be relaunched after it eventually unwinds.
-				m.onRepositoryDocsCancelled(cancelled)
+				if persistErr := m.onRepositoryDocsCancelled(cancelled); persistErr != nil {
+					m.updateJob(jobID, func(job *Job, now time.Time) {
+						job.Status = JobStatusFailed
+						job.UpdatedAt = now
+						job.FinishedAt = &now
+						job.ErrorClass = "repository_docs_cancel_persist_failed"
+						job.Error = publicMaintenanceJobError(RepositoryDocsIndexJobType, job.ErrorClass)
+						job.Progress = append(job.Progress, service.ProgressEvent{Type: JobStatusFailed, Phase: JobStatusFailed, Collection: RepositoryDocsIndexJobType, Message: job.Error})
+					})
+				}
 			}
 		}
 		return

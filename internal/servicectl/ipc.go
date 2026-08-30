@@ -300,7 +300,10 @@ func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawM
 		if err != nil {
 			return nil, err
 		}
-		job, ok := s.Jobs.Cancel(id)
+		job, ok, cancelErr := s.Jobs.Cancel(id)
+		if cancelErr != nil {
+			return nil, cancelErr
+		}
 		if !ok {
 			return nil, fmt.Errorf("job not found: %s", id)
 		}

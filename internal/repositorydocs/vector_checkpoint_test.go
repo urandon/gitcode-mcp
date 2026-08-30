@@ -72,8 +72,7 @@ func TestFileVectorCheckpointStorePrunesOrphansAgeAndBytes(t *testing.T) {
 			t.Fatalf("stale checkpoint %s remains: %v", filepath.Base(path), err)
 		}
 	}
-	info, err := os.Stat(activePath)
-	if err != nil {
+	if _, err := os.Stat(activePath); err != nil {
 		t.Fatal(err)
 	}
 	older := time.Now().Add(-time.Hour)
@@ -81,11 +80,18 @@ func TestFileVectorCheckpointStorePrunesOrphansAgeAndBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	newerPath := save("newer")
-	result, err = store.Prune(ctx, VectorCheckpointRetentionPolicy{MaxBytes: info.Size()})
+	newerInfo, err := os.Stat(newerPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.FilesDeleted != 1 || result.BytesRetained > info.Size() {
+	// JSON timestamp length is not fixed, so size the ceiling from the exact
+	// newest fixture rather than an older checkpoint. The policy can retain the
+	// newest file while still being forced to evict the older one.
+	result, err = store.Prune(ctx, VectorCheckpointRetentionPolicy{MaxBytes: newerInfo.Size()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FilesDeleted != 1 || result.BytesRetained > newerInfo.Size() {
 		t.Fatalf("byte prune result = %#v", result)
 	}
 	if _, err := os.Stat(newerPath); err != nil {

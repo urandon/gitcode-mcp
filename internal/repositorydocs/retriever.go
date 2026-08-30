@@ -75,6 +75,21 @@ type SearchWarning struct {
 	Message string `json:"message"`
 }
 
+type SemanticProviderContractError struct {
+	code string
+}
+
+func (e SemanticProviderContractError) Error() string {
+	return "repository docs: semantic provider output does not match the published embedding namespace"
+}
+
+func (e SemanticProviderContractError) DiagnosticCode() string {
+	if e.code != "" {
+		return e.code
+	}
+	return "semantic_provider_contract_invalid"
+}
+
 type SearchResult struct {
 	RepoID            string          `json:"repo_id"`
 	CorpusKind        string          `json:"corpus_kind"`
@@ -216,9 +231,16 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 	if req.Mode == SearchModeHybrid && selected.ID != "" && semanticAvailable {
 		semantic, err = r.semantic(ctx, req, selected)
 		if err != nil {
-			result.Fallback = "semantic_unavailable"
+			code := "semantic_retrieval_unavailable"
+			message := "semantic retrieval unavailable; returning verified lexical results"
+			var coded interface{ DiagnosticCode() string }
+			if errors.As(err, &coded) && strings.TrimSpace(coded.DiagnosticCode()) != "" {
+				code = strings.TrimSpace(coded.DiagnosticCode())
+				message = "semantic provider contract mismatch; returning verified lexical results"
+			}
+			result.Fallback = code
 			result.EffectiveMode = SearchModeFullText
-			result.addWarning("semantic_retrieval_unavailable", "semantic retrieval unavailable; returning verified lexical results")
+			result.addWarning(code, message)
 			semantic = map[string]rankedHit{}
 		}
 	} else if req.Mode == SearchModeHybrid && !semanticAvailable && result.Fallback == "" {
@@ -409,6 +431,9 @@ func (r *Retriever) semantic(ctx context.Context, req SearchRequest, set cache.R
 		return nil, err
 	}
 	query := response.Embeddings[0]
+	if response.Dimensions <= 0 || len(query) != response.Dimensions {
+		return nil, SemanticProviderContractError{code: "query_embedding_dimension_mismatch"}
+	}
 	snapshot, err := r.store.LoadRepositoryDocSearchSnapshot(ctx, req.RepoID, set.ID, set.NamespaceID)
 	if err != nil {
 		return nil, err
@@ -418,9 +443,12 @@ func (r *Retriever) semantic(ctx context.Context, req SearchRequest, set cache.R
 		if len(candidate.Vector) == 0 {
 			continue
 		}
+		if candidate.Dimensions != len(query) {
+			return nil, SemanticProviderContractError{code: "query_embedding_dimension_mismatch"}
+		}
 		vector, err := rag.DecodeFloat32Vector(candidate.Vector, candidate.Dimensions)
 		if err != nil || len(vector) != len(query) {
-			continue
+			return nil, SemanticProviderContractError{code: "semantic_vector_contract_invalid"}
 		}
 		score := cosine(query, vector)
 		results[candidateRankKey(candidate)] = rankedHit{candidate: candidate, score: score, semantic: score}

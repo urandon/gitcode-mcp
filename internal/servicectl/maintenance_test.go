@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"gitcode-mcp/internal/adminhttp"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/service"
@@ -643,8 +644,8 @@ func TestRepositoryDocsCancellationIsDurableAndSuppressesReconcileSelection(t *t
 		<-jobCtx.Done()
 		jobs.finishJob(job.ID, JobStatusCancelled, "cancelled")
 	}()
-	if cancelled, ok := jobs.Cancel(job.ID); !ok || cancelled.Status != JobStatusCancelled {
-		t.Fatalf("cancelled=%+v ok=%t", cancelled, ok)
+	if cancelled, ok, cancelErr := jobs.Cancel(job.ID); cancelErr != nil || !ok || cancelled.Status != JobStatusCancelled {
+		t.Fatalf("cancelled=%+v ok=%t err=%v", cancelled, ok, cancelErr)
 	}
 	intent, ok := maintenance.repositoryDocsAdmission(registrationID, sourceID)
 	if !ok || intent.Disposition != repositoryDocsAdmissionCancelled || intent.JobID != job.ID || intent.FinishedAt.IsZero() {
@@ -668,6 +669,63 @@ func TestRepositoryDocsCancellationIsDurableAndSuppressesReconcileSelection(t *t
 	}
 }
 
+func TestRepositoryDocsCancellationFailsClosedWhenTombstoneCannotPersist(t *testing.T) {
+	dir := t.TempDir()
+	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), jobs, filepath.Join(dir, "registry.json"))
+	registrationID, sourceID := "reg-cancel-fail", "source-cancel-fail"
+	maintenance.entries[registrationID] = &MaintenanceEntry{RegistrationID: registrationID, RepoID: "owner/repo"}
+	maintenance.sources[registrationID] = map[string]*repositoryDocsRegisteredSource{sourceID: {State: RepositoryDocsMaintenanceState{SourceRegistrationID: sourceID, SourceRegistrationGeneration: 1, State: "indexing"}}}
+	maintenance.admissions[repositoryDocsAdmissionKey(registrationID, sourceID)] = repositoryDocsAdmissionIntent{RegistrationID: registrationID, SourceRegistrationID: sourceID, SourceRegistrationGeneration: 1, RepoID: "owner/repo", WorkKey: "work", ExpectedRevisionSetID: "set", Disposition: repositoryDocsAdmissionPending, CreatedAt: time.Now().UTC()}
+	jobCtx, cancel := context.WithCancel(context.Background())
+	job, created, err := jobs.createCoalescedJobWithIntent(RepositoryDocsIndexJobType, "owner/repo", "profile", 0, "work", "cache", registrationID, "namespace", JobRecoveryIntent{SourceRegistrationID: sourceID, SourceRegistrationGeneration: 1, ExpectedRevisionSetID: "set"}, cancel)
+	if err != nil || !created {
+		t.Fatalf("job=%+v created=%t err=%v", job, created, err)
+	}
+	jobs.updateJob(job.ID, func(stored *Job, now time.Time) { stored.Status = JobStatusRunning })
+	done := make(chan struct{})
+	go func() {
+		<-jobCtx.Done()
+		jobs.finishJob(job.ID, JobStatusCancelled, "cancelled")
+		close(done)
+	}()
+
+	maintenance.writeFile = func(string, []byte, os.FileMode) error { return errors.New("injected durable write failure") }
+	actionsPath := filepath.Join(dir, "actions.json")
+	_, actionErr := NewJobActionManager(actionsPath, jobs, nil).Cancel(context.Background(), adminhttp.JobActionRequest{JobID: job.ID, IdempotencyKey: "cancel-persist-failure"})
+	var publicErr adminhttp.JobActionError
+	if !errors.As(actionErr, &publicErr) || publicErr.Status != 503 || publicErr.Code != "repository_docs_cancel_persist_failed" {
+		t.Fatalf("public cancel error=%T %v", actionErr, actionErr)
+	}
+	current, found := jobs.Get(job.ID)
+	if !found || current.Status != JobStatusRunning {
+		t.Fatalf("failed-closed cancel current=%+v found=%t", current, found)
+	}
+	if _, err := os.Stat(actionsPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed cancellation persisted a success receipt: %v", err)
+	}
+	select {
+	case <-done:
+		t.Fatal("worker was cancelled before its durable tombstone was committed")
+	default:
+	}
+	intent, ok := maintenance.repositoryDocsAdmission(registrationID, sourceID)
+	if !ok || intent.Disposition != repositoryDocsAdmissionPending {
+		t.Fatalf("failed tombstone mutated admission=%+v ok=%t", intent, ok)
+	}
+
+	maintenance.writeFile = durableAtomicWriteFile
+	cancelled, found, cancelErr := jobs.Cancel(job.ID)
+	if cancelErr != nil || !found || cancelled.Status != JobStatusCancelled {
+		t.Fatalf("retry cancel=%+v found=%t err=%v", cancelled, found, cancelErr)
+	}
+	<-done
+	intent, ok = maintenance.repositoryDocsAdmission(registrationID, sourceID)
+	if !ok || intent.Disposition != repositoryDocsAdmissionCancelled || intent.JobID != job.ID {
+		t.Fatalf("durable retry tombstone=%+v ok=%t", intent, ok)
+	}
+}
+
 func TestRepositoryDocsPendingAdmissionRespectsFailureBackoff(t *testing.T) {
 	now := time.Date(2026, 8, 30, 10, 0, 0, 0, time.UTC)
 	state := RepositoryDocsMaintenanceState{}
@@ -684,6 +742,91 @@ func TestRepositoryDocsPendingAdmissionRespectsFailureBackoff(t *testing.T) {
 	}
 	if !repositoryDocsRetryReady(&state, state.Stage.RetryAfter) {
 		t.Fatalf("retry was not released at %s", state.Stage.RetryAfter)
+	}
+}
+
+func TestRepositoryDocsFailedAdmissionResumesAfterBackoffWithSameJobID(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	repoPath := createRepositoryDocsRegistrationRepo(t, filepath.Join(dir, "repo"), "failed admission retry")
+	cfg := adminFakeRAGConfig()
+	cfg.CachePath = cachePath
+	cfg.LockPath = cachePath + ".lock"
+	manager := Manager{EffectiveConfig: &cfg}
+	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+	maintenance := NewMaintenanceManager(manager, jobs, filepath.Join(dir, "managed-caches.json"))
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	maintenance.now = func() time.Time { return now }
+	enroll := testMaintenanceEnrollRequest(cachePath, "failed-retry", MaintenancePolicy{})
+	enroll.ConfigSnapshot = cfg
+	enroll.ConfigHash = maintenanceHash(cfg)
+	if _, err := maintenance.Enroll(ctx, enroll); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := prepareRepositoryDocsIndex(ctx, manager, StartRepositoryDocsIndexJobRequest{RepoID: "owner/repo", RepositoryPath: repoPath, CachePath: cachePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, prepared, registered, err := maintenance.registerAndRecordRepositoryDocsAdmission(prepared)
+	if err != nil || !registered || entry.RepositoryDocs == nil {
+		t.Fatalf("registration=%+v registered=%t err=%v", entry, registered, err)
+	}
+	wantSetID := repositoryDocsRevisionSetIdentity(prepared.request, prepared.repository, prepared.policy, prepared.namespaceID).ID()
+	wantWorkKey := repositoryDocsIndexWorkKey(prepared.request, prepared.repository, prepared.policy, prepared.namespaceID)
+	failed, created, err := jobs.createCoalescedJobWithIntent(RepositoryDocsIndexJobType, prepared.request.RepoID, prepared.request.Profile, 0, wantWorkKey, prepared.request.CacheUUID, prepared.request.RegistrationID, prepared.namespaceID, JobRecoveryIntent{SourceRegistrationID: prepared.request.SourceRegistrationID, SourceRegistrationGeneration: prepared.request.SourceRegistrationGeneration, ExpectedRevisionSetID: wantSetID}, func() {})
+	if err != nil || !created {
+		t.Fatalf("failed job created=%t err=%v", created, err)
+	}
+	jobs.updateJob(failed.ID, func(job *Job, observed time.Time) {
+		job.Status = JobStatusFailed
+		job.UpdatedAt = observed
+		job.FinishedAt = &observed
+		job.ErrorClass = "provider_timeout"
+		delete(jobs.cancel, job.ID)
+	})
+	if err := maintenance.bindRepositoryDocsAdmissionJob(prepared.request.RegistrationID, prepared.request.SourceRegistrationID, failed.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	blocked, err := maintenance.ReconcileRegistration(ctx, entry.RegistrationID)
+	if err != nil || len(blocked.JobsStarted) != 0 || len(blocked.Entries) != 1 || blocked.Entries[0].RepositoryDocs == nil {
+		t.Fatalf("backoff reconcile=%+v err=%v", blocked, err)
+	}
+	retryAt := blocked.Entries[0].RepositoryDocs.Stage.RetryAfter
+	if retryAt.IsZero() || !retryAt.After(now) {
+		t.Fatalf("retry window=%s stage=%+v", retryAt, blocked.Entries[0].RepositoryDocs.Stage)
+	}
+	now = retryAt
+	resumed, err := maintenance.ReconcileRegistration(ctx, entry.RegistrationID)
+	if err != nil || len(resumed.JobsStarted) != 1 || resumed.JobsStarted[0] != failed.ID {
+		t.Fatalf("resume reconcile=%+v err=%v", resumed, err)
+	}
+	terminal := waitForTerminalJob(t, jobs, failed.ID)
+	if terminal.Status != JobStatusSucceeded || terminal.ExpectedRevisionSetID != wantSetID {
+		t.Fatalf("resumed terminal=%+v", terminal)
+	}
+	now = now.Add(time.Second)
+	settled, err := maintenance.ReconcileRegistration(ctx, entry.RegistrationID)
+	if err != nil || len(settled.JobsStarted) != 0 || len(settled.Entries) != 1 || settled.Entries[0].RepositoryDocs == nil {
+		t.Fatalf("settled reconcile=%+v err=%v", settled, err)
+	}
+	stage := settled.Entries[0].RepositoryDocs.Stage
+	if stage.Status != JobStatusSucceeded || stage.ConsecutiveFailures != 0 || !stage.RetryAfter.IsZero() {
+		t.Fatalf("same-id success was not observed: %+v", stage)
+	}
+	if _, ok := maintenance.repositoryDocsAdmission(entry.RegistrationID, prepared.request.SourceRegistrationID); ok {
+		t.Fatal("successful resumed admission remained durable")
 	}
 }
 

@@ -114,7 +114,10 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		if job.Status != JobStatusQueued && job.Status != JobStatusRunning {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "job_not_active", "Only queued or running jobs can be cancelled.", "Refresh the job and inspect its terminal state.")
 		}
-		cancelled, found := m.jobs.Cancel(job.ID)
+		cancelled, found, cancelErr := m.jobs.Cancel(job.ID)
+		if cancelErr != nil {
+			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusServiceUnavailable, "repository_docs_cancel_persist_failed", "Cancellation could not be made durable, so the job was left running.", "Retry cancellation after durable service state is writable.")
+		}
 		if !found {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusNotFound, "job_not_retained", "The selected job is no longer retained.", "Return to the bounded job list; cached repository data and audit evidence are unaffected.")
 		}

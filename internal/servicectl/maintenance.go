@@ -304,10 +304,11 @@ type MaintenanceManager struct {
 	admissions  map[string]repositoryDocsAdmissionIntent
 	sources     map[string]map[string]*repositoryDocsRegisteredSource
 	now         func() time.Time
+	writeFile   func(string, []byte, os.FileMode) error
 }
 
 func NewMaintenanceManager(manager Manager, jobs *JobManager, path string) *MaintenanceManager {
-	maintenance := &MaintenanceManager{manager: manager, jobs: jobs, path: path, entries: map[string]*MaintenanceEntry{}, receipts: map[string]maintenanceReceipt{}, admissions: map[string]repositoryDocsAdmissionIntent{}, sources: map[string]map[string]*repositoryDocsRegisteredSource{}, now: func() time.Time { return time.Now().UTC() }}
+	maintenance := &MaintenanceManager{manager: manager, jobs: jobs, path: path, entries: map[string]*MaintenanceEntry{}, receipts: map[string]maintenanceReceipt{}, admissions: map[string]repositoryDocsAdmissionIntent{}, sources: map[string]map[string]*repositoryDocsRegisteredSource{}, now: func() time.Time { return time.Now().UTC() }, writeFile: durableAtomicWriteFile}
 	if jobs != nil {
 		jobs.onRepositoryDocsCancelled = maintenance.cancelRepositoryDocsAdmission
 	}
@@ -866,16 +867,19 @@ func (m *MaintenanceManager) repositoryDocsAdmissionForPrepared(prepared prepare
 	return intent, nil
 }
 
-func (m *MaintenanceManager) cancelRepositoryDocsAdmission(job Job) {
+func (m *MaintenanceManager) cancelRepositoryDocsAdmission(job Job) error {
 	if job.Type != RepositoryDocsIndexJobType || strings.TrimSpace(job.RegistrationID) == "" || strings.TrimSpace(job.SourceRegistrationID) == "" {
-		return
+		return nil
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key := repositoryDocsAdmissionKey(job.RegistrationID, job.SourceRegistrationID)
 	intent, ok := m.admissions[key]
 	if !ok || intent.SourceRegistrationGeneration != job.SourceRegistrationGeneration || intent.ExpectedRevisionSetID != job.ExpectedRevisionSetID {
-		return
+		return RepositoryDocsSourceUnavailableError{code: "repository_docs_cancel_admission_missing"}
+	}
+	if intent.Disposition == repositoryDocsAdmissionCancelled && intent.JobID == job.ID {
+		return nil
 	}
 	previous := intent
 	intent.Disposition = repositoryDocsAdmissionCancelled
@@ -884,7 +888,9 @@ func (m *MaintenanceManager) cancelRepositoryDocsAdmission(job Job) {
 	m.admissions[key] = intent
 	if err := m.saveLocked(); err != nil {
 		m.admissions[key] = previous
+		return RepositoryDocsSourceUnavailableError{code: "repository_docs_cancel_persist_failed"}
 	}
+	return nil
 }
 
 func (m *MaintenanceManager) completeRepositoryDocsAdmission(registrationID, sourceRegistrationID string, sourceGeneration int64, expectedSetID string) error {
@@ -1291,8 +1297,8 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 				recoveryExpectedWorkKey = pendingRepositoryDocsAdmission.WorkKey
 				recoveryJobID = pendingRepositoryDocsAdmission.JobID
 				if recoveryJobID == "" {
-					if interrupted, ok := m.jobs.InterruptedRepositoryDocsAdmission(registrationID, pendingRepositoryDocsAdmission.SourceRegistrationID, pendingRepositoryDocsAdmission.SourceRegistrationGeneration, pendingRepositoryDocsAdmission.ExpectedRevisionSetID, pendingRepositoryDocsAdmission.WorkKey); ok {
-						recoveryJobID = interrupted.ID
+					if recoverable, ok := m.jobs.RecoverableRepositoryDocsAdmission(registrationID, pendingRepositoryDocsAdmission.SourceRegistrationID, pendingRepositoryDocsAdmission.SourceRegistrationGeneration, pendingRepositoryDocsAdmission.ExpectedRevisionSetID, pendingRepositoryDocsAdmission.WorkKey); ok {
+						recoveryJobID = recoverable.ID
 					}
 				}
 			}
@@ -1596,15 +1602,22 @@ func nextMaintenanceStage(policy MaintenancePolicy, lane string, needsRAGRepair,
 }
 
 func observeMaintenanceStage(state MaintenanceStageState, job Job, now time.Time) MaintenanceStageState {
-	if job.ID == "" || job.ID == state.LastJobID || !jobTerminalStatus(job.Status) {
+	if job.ID == "" || !jobTerminalStatus(job.Status) {
+		return state
+	}
+	observedAt := job.UpdatedAt
+	if job.FinishedAt != nil {
+		observedAt = *job.FinishedAt
+	}
+	// Durable retries intentionally retain one public job id. Deduplicate one
+	// exact terminal observation, while still accepting a later terminal
+	// transition of the same job after it has been resumed.
+	if job.ID == state.LastJobID && job.Status == state.Status && !observedAt.After(state.UpdatedAt) {
 		return state
 	}
 	state.LastJobID = job.ID
 	state.Status = job.Status
-	state.UpdatedAt = job.UpdatedAt
-	if job.FinishedAt != nil {
-		state.UpdatedAt = *job.FinishedAt
-	}
+	state.UpdatedAt = observedAt
 	if job.NamespaceID != "" {
 		state.NamespaceID = job.NamespaceID
 	}
@@ -1754,7 +1767,11 @@ func (m *MaintenanceManager) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	return durableAtomicWriteFile(m.path, append(data, '\n'), 0o600)
+	writeFile := m.writeFile
+	if writeFile == nil {
+		writeFile = durableAtomicWriteFile
+	}
+	return writeFile(m.path, append(data, '\n'), 0o600)
 }
 
 func normalizeMaintenancePolicy(policy MaintenancePolicy, binding cache.RepositoryBinding) (MaintenancePolicy, error) {

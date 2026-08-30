@@ -66,7 +66,7 @@ type JobManager struct {
 	lastExpired               int
 	lastTruncated             int
 	lastPrunedAt              *time.Time
-	onRepositoryDocsCancelled func(Job)
+	onRepositoryDocsCancelled func(Job) error
 }
 
 type JobRetentionSnapshot struct {
@@ -333,13 +333,14 @@ func (m *JobManager) LatestRepositoryDocsSource(cacheUUID, repoID, sourceRegistr
 }
 
 // ResumeRepositoryDocsAdmission reuses the public identity already durably
-// allocated for an interrupted admission. Exact opaque intent matching fences
-// unrelated or stale work from being revived.
+// allocated for an interrupted or failed admission. Exact opaque intent
+// matching fences unrelated or stale work from being revived; callers remain
+// responsible for enforcing the durable retry window before invoking it.
 func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, sourceRegistrationID string, generation int64, expectedSetID, workKey string, cancel context.CancelFunc) (Job, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	job := m.jobs[strings.TrimSpace(jobID)]
-	if job == nil || job.Type != RepositoryDocsIndexJobType || job.Status != JobStatusInterrupted ||
+	if job == nil || job.Type != RepositoryDocsIndexJobType || !repositoryDocsAdmissionRecoverable(job.Status) ||
 		job.RegistrationID != strings.TrimSpace(registrationID) || job.SourceRegistrationID != strings.TrimSpace(sourceRegistrationID) ||
 		job.SourceRegistrationGeneration != generation || job.ExpectedRevisionSetID != strings.TrimSpace(expectedSetID) || job.WorkRef != publicWorkRef(workKey) {
 		return Job{}, false, nil
@@ -364,12 +365,12 @@ func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, source
 	return cloneJob(job), true, nil
 }
 
-func (m *JobManager) InterruptedRepositoryDocsAdmission(registrationID, sourceRegistrationID string, generation int64, expectedSetID, workKey string) (Job, bool) {
+func (m *JobManager) RecoverableRepositoryDocsAdmission(registrationID, sourceRegistrationID string, generation int64, expectedSetID, workKey string) (Job, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var latest *Job
 	for _, job := range m.jobs {
-		if job.Type != RepositoryDocsIndexJobType || job.Status != JobStatusInterrupted || job.RegistrationID != strings.TrimSpace(registrationID) ||
+		if job.Type != RepositoryDocsIndexJobType || !repositoryDocsAdmissionRecoverable(job.Status) || job.RegistrationID != strings.TrimSpace(registrationID) ||
 			job.SourceRegistrationID != strings.TrimSpace(sourceRegistrationID) || job.SourceRegistrationGeneration != generation ||
 			job.ExpectedRevisionSetID != strings.TrimSpace(expectedSetID) || job.WorkRef != publicWorkRef(workKey) {
 			continue
@@ -382,6 +383,10 @@ func (m *JobManager) InterruptedRepositoryDocsAdmission(registrationID, sourceRe
 		return Job{}, false
 	}
 	return cloneJob(latest), true
+}
+
+func repositoryDocsAdmissionRecoverable(status string) bool {
+	return status == JobStatusInterrupted || status == JobStatusFailed
 }
 
 func (m *JobManager) SetWorkIdentity(id, workKey, cacheUUID, registrationID, namespaceID string) Job {
@@ -497,32 +502,40 @@ func (m *JobManager) Get(id string) (Job, bool) {
 	return cloneJob(job), true
 }
 
-func (m *JobManager) Cancel(id string) (Job, bool) {
+func (m *JobManager) Cancel(id string) (Job, bool, error) {
 	m.mu.Lock()
 	cancel, ok := m.cancel[id]
-	job := m.jobs[id]
+	job := cloneJob(m.jobs[id])
+	onRepositoryDocsCancelled := m.onRepositoryDocsCancelled
 	m.mu.Unlock()
-	if !ok || job == nil {
-		if job == nil {
-			return Job{}, false
+	if !ok || job.ID == "" {
+		if job.ID == "" {
+			return Job{}, false, nil
 		}
-		return m.Get(id)
+		current, found := m.Get(id)
+		return current, found, nil
+	}
+	// Persist the cancellation disposition before signalling the worker. A
+	// successful public cancellation can therefore never be followed by a
+	// restart that revives the still-pending durable admission.
+	if job.Type == RepositoryDocsIndexJobType && onRepositoryDocsCancelled != nil {
+		if err := onRepositoryDocsCancelled(job); err != nil {
+			current, found := m.Get(id)
+			return current, found, err
+		}
 	}
 	cancel()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		current, found := m.Get(id)
 		if !found {
-			return Job{}, false
+			return Job{}, false, nil
 		}
 		if jobTerminalStatus(current.Status) {
-			if current.Type == RepositoryDocsIndexJobType && current.Status == JobStatusCancelled && m.onRepositoryDocsCancelled != nil {
-				m.onRepositoryDocsCancelled(current)
-			}
-			return current, true
+			return current, true, nil
 		}
 		if time.Now().After(deadline) {
-			return current, true
+			return current, true, nil
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

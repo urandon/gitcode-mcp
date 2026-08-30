@@ -111,6 +111,9 @@ discard corrupt derived checkpoints so the exact provider request can be
 recomputed. Explicit job cancellation is written to the durable admission
 registry and is not relaunched by reconciliation; repeated failures retain the
 same public job identity while observing bounded exponential retry backoff.
+The cancel operation acknowledges a repository-document job only after its
+durable admission tombstone is committed; a state-write failure leaves the
+worker running and returns a typed retryable error instead of false success.
 An in-flight semantic query first loads one exact published revision-set
 snapshot (membership, chunk locators, and vectors) transactionally. Retention
 may evict historical cache rows after that snapshot is loaded without
