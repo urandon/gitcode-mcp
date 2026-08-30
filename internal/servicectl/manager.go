@@ -376,6 +376,7 @@ func (m Manager) Run(ctx context.Context) error {
 		ApplyBinding:         adminControls.ApplyBinding,
 		CompareSearch:        adminControls.CompareSearch,
 		SearchRepositoryDocs: adminControls.SearchRepositoryDocs,
+		PlanRepositoryDocs:   adminControls.PlanRepositoryDocs,
 		IndexRepositoryDocs:  adminControls.IndexRepositoryDocs,
 		SmokeProvider:        adminControls.SmokeProvider,
 		PlanRAGRepair:        adminControls.PlanRAGRepair,

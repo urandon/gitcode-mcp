@@ -9,7 +9,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -357,6 +356,7 @@ func buildWriteToolNames() map[string]bool {
 	names["sync_live"] = true
 	names["index_repo"] = true
 	names["enable_cache_maintenance"] = true
+	names["service_job_cancel"] = true
 	return names
 }
 
@@ -635,6 +635,22 @@ var toolDefs = []toolDefinition{
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{"job_id": {Type: "string", Description: "Service job id.", MinLength: 1}}, Required: []string{"job_id"}},
 	},
 	{
+		Name:        "service_job_attach",
+		Description: "Wait up to a bounded interval for one local coordinator job and return its latest progress or terminal state.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
+			"job_id":       {Type: "string", Description: "Service job id.", MinLength: 1},
+			"wait_seconds": {Type: "integer", Description: "Bounded wait in seconds (1-30).", Minimum: float64Ptr(1), Maximum: float64Ptr(30), Default: 30},
+		}, Required: []string{"job_id"}},
+	},
+	{
+		Name:        "service_job_cancel",
+		Description: "Explicitly cancel one local coordinator job. Job identity makes repeated cancellation idempotent.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
+			"job_id":     {Type: "string", Description: "Service job id.", MinLength: 1},
+			"write_mode": {Type: "string", Description: "Required explicit local write intent.", Enum: []string{"live"}},
+		}, Required: []string{"job_id", "write_mode"}},
+	},
+	{
 		Name:        "rag_status",
 		Description: "Report RAG provider readiness, namespace coverage, last index run, and active daemon job state.",
 		InputSchema: inputSchema{
@@ -669,43 +685,67 @@ var toolDefs = []toolDefinition{
 		Name:        "repository_docs_policy",
 		Description: "Resolve the versioned repository-document policy at one local Git revision. No fetch or GitCode call is performed.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
-			"repo_id":          {Type: "string", Description: "Configured repository id.", MinLength: 1},
-			"revision":         {Type: "string", Description: "Local Git revision; defaults to HEAD."},
-			"include_worktree": {Type: "boolean", Description: "Explicitly apply tracked worktree changes.", Default: false},
-		}, Required: []string{"repo_id"}},
+			"repo_id":                        {Type: "string", Description: "Configured repository id.", MinLength: 1},
+			"registration_id":                {Type: "string", Description: "Opaque daemon repository-document registration id.", MinLength: 1},
+			"source_registration_id":         {Type: "string", Description: "Opaque private Git authority id.", MinLength: 1},
+			"source_registration_generation": {Type: "integer", Description: "Exact private Git authority generation.", Minimum: float64Ptr(1)},
+			"revision":                       {Type: "string", Description: "Local Git revision; defaults to HEAD."},
+			"include_worktree":               {Type: "boolean", Description: "Explicitly apply tracked worktree changes.", Default: false},
+		}, Required: []string{"repo_id", "registration_id"}},
+	},
+	{
+		Name:        "repository_docs_plan",
+		Description: "Plan bounded repository-document indexing cost and typed exclusions for one explicitly registered Git authority. No embedding provider call is performed.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
+			"repo_id":                        {Type: "string", Description: "Configured repository id.", MinLength: 1},
+			"registration_id":                {Type: "string", Description: "Opaque daemon repository-document registration id.", MinLength: 1},
+			"source_registration_id":         {Type: "string", Description: "Opaque private Git authority id.", MinLength: 1},
+			"source_registration_generation": {Type: "integer", Description: "Exact private Git authority generation.", Minimum: float64Ptr(1)},
+			"revision":                       {Type: "string", Description: "Local Git revision; defaults to HEAD."},
+			"include_worktree":               {Type: "boolean", Description: "Explicitly plan tracked worktree changes.", Default: false},
+		}, Required: []string{"repo_id", "registration_id"}},
 	},
 	{
 		Name:        "repository_docs_status",
 		Description: "Inspect repository-document revision-set identity and vector coverage using public-safe opaque Git references.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
-			"repo_id":          {Type: "string", Description: "Configured repository id.", MinLength: 1},
-			"revision":         {Type: "string", Description: "Local Git revision; defaults to HEAD."},
-			"include_worktree": {Type: "boolean", Description: "Explicitly select the tracked worktree overlay.", Default: false},
-		}, Required: []string{"repo_id"}},
+			"repo_id":                        {Type: "string", Description: "Configured repository id.", MinLength: 1},
+			"registration_id":                {Type: "string", Description: "Opaque daemon repository-document registration id.", MinLength: 1},
+			"source_registration_id":         {Type: "string", Description: "Opaque private Git authority id.", MinLength: 1},
+			"source_registration_generation": {Type: "integer", Description: "Exact private Git authority generation.", Minimum: float64Ptr(1)},
+			"revision":                       {Type: "string", Description: "Local Git revision; defaults to HEAD."},
+			"include_worktree":               {Type: "boolean", Description: "Explicitly select the tracked worktree overlay.", Default: false},
+		}, Required: []string{"repo_id", "registration_id"}},
 	},
 	{
 		Name:        "repository_docs_search",
 		Description: "Search one local Git revision and return bounded digest-verified citations. Fulltext mode does not require an embedding provider.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
-			"repo_id":          {Type: "string", Description: "Configured repository id.", MinLength: 1},
-			"query":            {Type: "string", Description: "Repository documentation query.", MinLength: 1},
-			"revision":         {Type: "string", Description: "Local Git revision; defaults to HEAD."},
-			"include_worktree": {Type: "boolean", Description: "Explicitly search tracked dirty files.", Default: false},
-			"mode":             {Type: "string", Description: "Retrieval mode.", Enum: []string{"hybrid", "fulltext"}, Default: "hybrid"},
-			"limit":            {Type: "integer", Description: "Maximum verified results.", Minimum: float64Ptr(1), Maximum: float64Ptr(50), Default: 10.0},
-		}, Required: []string{"repo_id", "query"}},
+			"repo_id":                        {Type: "string", Description: "Configured repository id.", MinLength: 1},
+			"registration_id":                {Type: "string", Description: "Opaque daemon repository-document registration id.", MinLength: 1},
+			"source_registration_id":         {Type: "string", Description: "Opaque private Git authority id.", MinLength: 1},
+			"source_registration_generation": {Type: "integer", Description: "Exact private Git authority generation.", Minimum: float64Ptr(1)},
+			"query":                          {Type: "string", Description: "Repository documentation query.", MinLength: 1},
+			"revision":                       {Type: "string", Description: "Local Git revision; defaults to HEAD."},
+			"include_worktree":               {Type: "boolean", Description: "Explicitly search tracked dirty files.", Default: false},
+			"mode":                           {Type: "string", Description: "Retrieval mode.", Enum: []string{"hybrid", "fulltext"}, Default: "hybrid"},
+			"limit":                          {Type: "integer", Description: "Maximum verified results.", Minimum: float64Ptr(1), Maximum: float64Ptr(50), Default: 10.0},
+		}, Required: []string{"repo_id", "registration_id", "query"}},
 	},
 	{
 		Name:        "repository_docs_index",
 		Description: "Start a daemon-owned repository-document indexing job for one local Git revision. The job stores metadata and vectors only.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
-			"repo_id":          {Type: "string", Description: "Configured repository id or alias; canonicalized before writing.", MinLength: 1},
-			"revision":         {Type: "string", Description: "Local Git revision; defaults to HEAD."},
-			"include_worktree": {Type: "boolean", Description: "Explicitly index tracked dirty files.", Default: false},
-			"profile":          {Type: "string", Description: "RAG profile name."},
-			"batch_size":       {Type: "integer", Description: "Provider batch size.", Minimum: float64Ptr(1), Maximum: float64Ptr(512)},
-			"max_chunks":       {Type: "integer", Description: "Optional bounded chunk cap.", Minimum: float64Ptr(1)},
-		}, Required: []string{"repo_id"}},
+			"repo_id":                        {Type: "string", Description: "Configured repository id or alias; canonicalized before writing.", MinLength: 1},
+			"registration_id":                {Type: "string", Description: "Opaque daemon repository-document registration id.", MinLength: 1},
+			"source_registration_id":         {Type: "string", Description: "Opaque private Git authority id.", MinLength: 1},
+			"source_registration_generation": {Type: "integer", Description: "Exact private Git authority generation.", Minimum: float64Ptr(1)},
+			"revision":                       {Type: "string", Description: "Local Git revision; defaults to HEAD."},
+			"include_worktree":               {Type: "boolean", Description: "Explicitly index tracked dirty files.", Default: false},
+			"profile":                        {Type: "string", Description: "RAG profile name."},
+			"batch_size":                     {Type: "integer", Description: "Provider batch size.", Minimum: float64Ptr(1), Maximum: float64Ptr(512)},
+			"max_chunks":                     {Type: "integer", Description: "Optional bounded chunk cap.", Minimum: float64Ptr(1)},
+		}, Required: []string{"repo_id", "registration_id"}},
 	},
 	{
 		Name:        "list_pr_discussions",
@@ -902,6 +942,8 @@ var preWriteToolListOrder = []string{
 	"enable_cache_maintenance",
 	"service_jobs",
 	"service_job_status",
+	"service_job_attach",
+	"service_job_cancel",
 	"list_pr_discussions",
 	"sync_live",
 }
@@ -950,6 +992,8 @@ func (s *Server) ragToolHandler(cap capability.Capability) toolHandler {
 		return s.callRAGSearch
 	case "repository_docs_policy":
 		return s.callRepositoryDocsPolicy
+	case "repository_docs_plan":
+		return s.callRepositoryDocsPlan
 	case "repository_docs_status":
 		return s.callRepositoryDocsStatus
 	case "repository_docs_search":
@@ -991,6 +1035,8 @@ func (s *Server) toolRegistry() toolRegistry {
 	registerTool(registry, "enable_cache_maintenance", s.callEnableCacheMaintenance)
 	registerTool(registry, "service_jobs", s.callServiceJobs)
 	registerTool(registry, "service_job_status", s.callServiceJobStatus)
+	registerTool(registry, "service_job_attach", s.callServiceJobAttach)
+	registerTool(registry, "service_job_cancel", s.callServiceJobCancel)
 	for _, cap := range capability.MCPRAGCapabilities() {
 		registerTool(registry, cap.MCPName, s.ragToolHandler(cap))
 	}
@@ -1455,7 +1501,9 @@ func (s *Server) callCacheStatus(ctx context.Context, id *json.RawMessage, args 
 }
 
 type serviceJobStatusArgs struct {
-	JobID string `json:"job_id"`
+	JobID       string `json:"job_id"`
+	WaitSeconds int    `json:"wait_seconds,omitempty"`
+	WriteMode   string `json:"write_mode,omitempty"`
 }
 
 type ragStatusArgs struct {
@@ -1476,15 +1524,18 @@ type ragSearchArgs struct {
 }
 
 type repositoryDocsArgs struct {
-	RepoID          string `json:"repo_id"`
-	Query           string `json:"query,omitempty"`
-	Revision        string `json:"revision,omitempty"`
-	IncludeWorktree bool   `json:"include_worktree,omitempty"`
-	Mode            string `json:"mode,omitempty"`
-	Limit           int    `json:"limit,omitempty"`
-	Profile         string `json:"profile,omitempty"`
-	BatchSize       int    `json:"batch_size,omitempty"`
-	MaxChunks       int    `json:"max_chunks,omitempty"`
+	RepoID                       string `json:"repo_id"`
+	RegistrationID               string `json:"registration_id"`
+	SourceRegistrationID         string `json:"source_registration_id"`
+	SourceRegistrationGeneration int64  `json:"source_registration_generation"`
+	Query                        string `json:"query,omitempty"`
+	Revision                     string `json:"revision,omitempty"`
+	IncludeWorktree              bool   `json:"include_worktree,omitempty"`
+	Mode                         string `json:"mode,omitempty"`
+	Limit                        int    `json:"limit,omitempty"`
+	Profile                      string `json:"profile,omitempty"`
+	BatchSize                    int    `json:"batch_size,omitempty"`
+	MaxChunks                    int    `json:"max_chunks,omitempty"`
 }
 
 func (s *Server) callServiceStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
@@ -1615,6 +1666,82 @@ func (s *Server) callServiceJobStatus(ctx context.Context, id *json.RawMessage, 
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 }
 
+type serviceJobAttachResult struct {
+	Job      servicectl.Job `json:"job"`
+	TimedOut bool           `json:"timed_out"`
+}
+
+func (s *Server) callServiceJobAttach(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a serviceJobStatusArgs
+	if err := json.Unmarshal(args, &a); err != nil || strings.TrimSpace(a.JobID) == "" || a.WaitSeconds < 0 || a.WaitSeconds > 30 {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "job_id is required; optional wait_seconds must be between 1 and 30"})
+		return
+	}
+	if a.WaitSeconds == 0 {
+		a.WaitSeconds = 30
+	}
+	client, err := s.localServiceClient()
+	if err != nil {
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "service_job_attach", Subsystem: "service"})
+		return
+	}
+	deadline := time.NewTimer(time.Duration(a.WaitSeconds) * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	result := serviceJobAttachResult{}
+	for {
+		if err := client.Call(ctx, "Jobs.Get", map[string]string{"job_id": a.JobID}, &result.Job); err != nil {
+			s.writeOperationalError(id, err, domainErrorContext{Operation: "service_job_attach", Subsystem: "service"})
+			return
+		}
+		if serviceJobTerminal(result.Job.Status) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			s.writeOperationalError(id, ctx.Err(), domainErrorContext{Operation: "service_job_attach", Subsystem: "service"})
+			return
+		case <-deadline.C:
+			result.TimedOut = true
+			goto done
+		case <-ticker.C:
+		}
+	}
+done:
+	text := fmt.Sprintf("job_id=%s status=%s completed=%d/%d timed_out=%t", result.Job.ID, result.Job.Status, result.Job.Completed, result.Job.Steps, result.TimedOut)
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func (s *Server) callServiceJobCancel(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a serviceJobStatusArgs
+	if err := json.Unmarshal(args, &a); err != nil || strings.TrimSpace(a.JobID) == "" || a.WriteMode != "live" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "job_id and write_mode=live are required"})
+		return
+	}
+	client, err := s.localServiceClient()
+	if err != nil {
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "service_job_cancel", Subsystem: "service"})
+		return
+	}
+	var result servicectl.Job
+	if err := client.Call(ctx, "Jobs.Cancel", map[string]string{"job_id": a.JobID}, &result); err != nil {
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "service_job_cancel", Subsystem: "service"})
+		return
+	}
+	text := fmt.Sprintf("job_id=%s status=%s completed=%d/%d", result.ID, result.Status, result.Completed, result.Steps)
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func serviceJobTerminal(status string) bool {
+	switch status {
+	case servicectl.JobStatusSucceeded, servicectl.JobStatusSuperseded, servicectl.JobStatusFailed, servicectl.JobStatusCancelled, servicectl.JobStatusInterrupted:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Server) callRAGStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	var a ragStatusArgs
 	if err := json.Unmarshal(args, &a); err != nil {
@@ -1682,15 +1809,15 @@ func (s *Server) callRAGSearch(ctx context.Context, id *json.RawMessage, args js
 
 func (s *Server) callRepositoryDocsPolicy(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	var a repositoryDocsArgs
-	if err := json.Unmarshal(args, &a); err != nil || strings.TrimSpace(a.RepoID) == "" {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+	if err := json.Unmarshal(args, &a); err != nil || !validRepositoryDocsSelector(a) {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id and exact repository documentation source selector are required"})
 		return
 	}
 	if s.repositoryDocsPolicy == nil {
 		s.writeError(id, -32000, "Server error", &errorData{Code: "repository_docs_policy_unavailable", Message: "repository documentation policy provider is not configured"})
 		return
 	}
-	result, err := s.repositoryDocsPolicy(ctx, repositorydocs.PolicyRequest{RepoID: a.RepoID, Revision: a.Revision, IncludeWorktree: a.IncludeWorktree})
+	result, err := s.repositoryDocsPolicy(ctx, repositorydocs.PolicyRequest{RepoID: a.RepoID, RegistrationID: a.RegistrationID, SourceRegistrationID: a.SourceRegistrationID, SourceRegistrationGeneration: a.SourceRegistrationGeneration, Revision: a.Revision, IncludeWorktree: a.IncludeWorktree})
 	if err != nil {
 		s.writeOperationalError(id, err, domainErrorContext{Operation: "repository_docs_policy", RepoID: a.RepoID})
 		return
@@ -1699,17 +1826,38 @@ func (s *Server) callRepositoryDocsPolicy(ctx context.Context, id *json.RawMessa
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 }
 
+func (s *Server) callRepositoryDocsPlan(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a repositoryDocsArgs
+	if err := json.Unmarshal(args, &a); err != nil || !validRepositoryDocsSelector(a) {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id and exact repository documentation source selector are required"})
+		return
+	}
+	client, err := s.localServiceClient()
+	if err != nil {
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "repository_docs_plan", RepoID: a.RepoID, Subsystem: "service"})
+		return
+	}
+	var result repositorydocs.PlanResult
+	req := servicectl.RepositoryDocsQueryRequest{RepositoryDocsSourceSelector: servicectl.RepositoryDocsSourceSelector{RegistrationID: a.RegistrationID, SourceRegistrationID: a.SourceRegistrationID, SourceRegistrationGeneration: a.SourceRegistrationGeneration}, RepoID: a.RepoID, Revision: a.Revision, IncludeWorktree: a.IncludeWorktree}
+	if err := client.Call(ctx, "RepositoryDocs.Plan", req, &result); err != nil {
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "repository_docs_plan", RepoID: a.RepoID, Subsystem: "service"})
+		return
+	}
+	text := fmt.Sprintf("repository_docs_plan commit=%s eligible_files=%d eligible_bytes=%d excluded=%d missing=%d", result.CommitOID, result.EligibleFiles, result.EligibleBytes, result.ExcludedFiles, result.MissingObjects)
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
 func (s *Server) callRepositoryDocsStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	var a repositoryDocsArgs
-	if err := json.Unmarshal(args, &a); err != nil || strings.TrimSpace(a.RepoID) == "" {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+	if err := json.Unmarshal(args, &a); err != nil || !validRepositoryDocsSelector(a) {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id and exact repository documentation source selector are required"})
 		return
 	}
 	if s.repositoryDocsStatus == nil {
 		s.writeError(id, -32000, "Server error", &errorData{Code: "repository_docs_status_unavailable", Message: "repository documentation status provider is not configured"})
 		return
 	}
-	result, err := s.repositoryDocsStatus(ctx, repositorydocs.StatusRequest{RepoID: a.RepoID, Revision: a.Revision, IncludeWorktree: a.IncludeWorktree})
+	result, err := s.repositoryDocsStatus(ctx, repositorydocs.StatusRequest{RepoID: a.RepoID, RegistrationID: a.RegistrationID, SourceRegistrationID: a.SourceRegistrationID, SourceRegistrationGeneration: a.SourceRegistrationGeneration, Revision: a.Revision, IncludeWorktree: a.IncludeWorktree})
 	if err != nil {
 		s.writeOperationalError(id, err, domainErrorContext{Operation: "repository_docs_status", RepoID: a.RepoID})
 		return
@@ -1720,8 +1868,8 @@ func (s *Server) callRepositoryDocsStatus(ctx context.Context, id *json.RawMessa
 
 func (s *Server) callRepositoryDocsSearch(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	var a repositoryDocsArgs
-	if err := json.Unmarshal(args, &a); err != nil || strings.TrimSpace(a.RepoID) == "" || strings.TrimSpace(a.Query) == "" {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id and query are required"})
+	if err := json.Unmarshal(args, &a); err != nil || !validRepositoryDocsSelector(a) || strings.TrimSpace(a.Query) == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id, query, and exact repository documentation source selector are required"})
 		return
 	}
 	if a.Limit < 0 {
@@ -1732,7 +1880,7 @@ func (s *Server) callRepositoryDocsSearch(ctx context.Context, id *json.RawMessa
 		s.writeError(id, -32000, "Server error", &errorData{Code: "repository_docs_search_unavailable", Message: "repository documentation search provider is not configured"})
 		return
 	}
-	result, err := s.repositoryDocsSearch(ctx, repositorydocs.SearchRequest{RepoID: a.RepoID, Query: a.Query, Revision: a.Revision, IncludeWorktree: a.IncludeWorktree, Mode: a.Mode, Limit: a.Limit})
+	result, err := s.repositoryDocsSearch(ctx, repositorydocs.SearchRequest{RepoID: a.RepoID, RegistrationID: a.RegistrationID, SourceRegistrationID: a.SourceRegistrationID, SourceRegistrationGeneration: a.SourceRegistrationGeneration, Query: a.Query, Revision: a.Revision, IncludeWorktree: a.IncludeWorktree, Mode: a.Mode, Limit: a.Limit})
 	if err != nil {
 		s.writeOperationalError(id, err, domainErrorContext{Operation: "repository_docs_search", RepoID: a.RepoID})
 		return
@@ -1743,17 +1891,12 @@ func (s *Server) callRepositoryDocsSearch(ctx context.Context, id *json.RawMessa
 
 func (s *Server) callRepositoryDocsIndex(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	var a repositoryDocsArgs
-	if err := json.Unmarshal(args, &a); err != nil || strings.TrimSpace(a.RepoID) == "" {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id is required"})
+	if err := json.Unmarshal(args, &a); err != nil || !validRepositoryDocsSelector(a) {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id and exact repository documentation source selector are required"})
 		return
 	}
 	if a.BatchSize < 0 || a.MaxChunks < 0 {
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "batch_size and max_chunks must be non-negative"})
-		return
-	}
-	workingDirectory, err := os.Getwd()
-	if err != nil {
-		s.writeOperationalError(id, err, domainErrorContext{Operation: "repository_docs_index", RepoID: a.RepoID})
 		return
 	}
 	client, err := s.localServiceClient()
@@ -1763,7 +1906,7 @@ func (s *Server) callRepositoryDocsIndex(ctx context.Context, id *json.RawMessag
 	}
 	var job servicectl.Job
 	request := servicectl.StartRepositoryDocsIndexJobRequest{
-		RepoID: a.RepoID, RepositoryPath: workingDirectory, Revision: a.Revision,
+		RepoID: a.RepoID, RegistrationID: a.RegistrationID, SourceRegistrationID: a.SourceRegistrationID, SourceRegistrationGeneration: a.SourceRegistrationGeneration, Revision: a.Revision,
 		IncludeWorktree: a.IncludeWorktree, Profile: a.Profile,
 		CachePath: s.runtimeContext.EffectiveCachePath, BatchSize: a.BatchSize, MaxChunks: a.MaxChunks,
 	}
@@ -1773,6 +1916,15 @@ func (s *Server) callRepositoryDocsIndex(ctx context.Context, id *json.RawMessag
 	}
 	text := fmt.Sprintf("repository_docs_index job=%s status=%s repo=%s", job.ID, job.Status, job.RepoID)
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: job})
+}
+
+func validRepositoryDocsSelector(a repositoryDocsArgs) bool {
+	if strings.TrimSpace(a.RepoID) == "" || strings.TrimSpace(a.RegistrationID) == "" {
+		return false
+	}
+	hasID := strings.TrimSpace(a.SourceRegistrationID) != ""
+	hasGeneration := a.SourceRegistrationGeneration > 0
+	return hasID == hasGeneration
 }
 
 func lookupMCPRAGServiceState(ctx context.Context, repoID string) (*rag.ServiceStatus, *rag.JobStatus) {

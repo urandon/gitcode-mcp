@@ -338,6 +338,12 @@ var ragCapabilities = []Capability{
 		UI:          enabled("Available in the Admin Repository documentation cohort."), CLI: enabled("Available as `repo-docs policy`."), MCP: enabled(),
 	},
 	{
+		ID: "repository_docs_plan", Category: CategoryRAG, Safety: SafetyReadOnly,
+		CLIName: "repo-docs", MCPName: "repository_docs_plan", ServiceCommand: "repository-docs-plan",
+		Description: "Plan bounded repository-document indexing cost and typed exclusions for one explicit registered Git authority without embedding calls.",
+		UI:          enabled("Available in the Admin Repository documentation cohort."), CLI: enabled("Available as `repo-docs plan`."), MCP: enabled(),
+	},
+	{
 		ID: "repository_docs_status", Category: CategoryRAG, Safety: SafetyReadOnly,
 		CLIName: "repo-docs", MCPName: "repository_docs_status", ServiceCommand: "repository-docs-status",
 		Description: "Inspect revision-set identity and repository-document vector coverage using opaque Git/worktree references.",

@@ -22,6 +22,12 @@ func TestChunkDocumentDeterministicBoundedAndMultilingual(t *testing.T) {
 		if first[idx].ID != second[idx].ID || first[idx].ByteEnd-first[idx].ByteStart > 80 || first[idx].Text == "" {
 			t.Fatalf("chunk[%d] = %#v", idx, first[idx])
 		}
+		if first[idx].ByteStart < 0 || first[idx].ByteEnd > len(data) || first[idx].LineStart < 1 || first[idx].LineEnd < first[idx].LineStart || first[idx].RawSliceDigest == "" || first[idx].EmbeddingInputDigest == "" {
+			t.Fatalf("chunk[%d] has invalid multilingual metadata: %#v", idx, first[idx])
+		}
+		if got := digestBytes(data[first[idx].ByteStart:first[idx].ByteEnd]); got != first[idx].RawSliceDigest {
+			t.Fatalf("chunk[%d] raw digest=%q, want %q", idx, first[idx].RawSliceDigest, got)
+		}
 	}
 }
 

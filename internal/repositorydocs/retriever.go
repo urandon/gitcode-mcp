@@ -2,6 +2,7 @@ package repositorydocs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -19,18 +20,24 @@ const (
 )
 
 type SearchStore interface {
+	GetRepositoryDocRevisionSet(context.Context, string, string) (cache.RepositoryDocRevisionSet, error)
 	ListRepositoryDocRevisionSets(context.Context, cache.RepositoryDocRevisionSetFilter) ([]cache.RepositoryDocRevisionSet, error)
-	ListRepositoryDocCandidates(context.Context, string, string, string) ([]cache.RepositoryDocCandidate, error)
+	LoadRepositoryDocSearchSnapshot(context.Context, string, string, string) (cache.RepositoryDocSearchSnapshot, error)
 }
 
 type SearchRequest struct {
-	RepoID          string      `json:"repo_id"`
-	Repository      *Repository `json:"-"`
-	Revision        string      `json:"revision,omitempty"`
-	IncludeWorktree bool        `json:"include_worktree,omitempty"`
-	Query           string      `json:"query"`
-	Mode            string      `json:"mode,omitempty"`
-	Limit           int         `json:"limit,omitempty"`
+	RepoID                       string      `json:"repo_id"`
+	RegistrationID               string      `json:"registration_id,omitempty"`
+	SourceRegistrationID         string      `json:"source_registration_id,omitempty"`
+	SourceRegistrationGeneration int64       `json:"source_registration_generation,omitempty"`
+	Repository                   *Repository `json:"-"`
+	Revision                     string      `json:"revision,omitempty"`
+	IncludeWorktree              bool        `json:"include_worktree,omitempty"`
+	Query                        string      `json:"query"`
+	Mode                         string      `json:"mode,omitempty"`
+	Limit                        int         `json:"limit,omitempty"`
+	MaxFileBytes                 int64       `json:"max_file_bytes,omitempty"`
+	ChunkBytes                   int         `json:"chunk_bytes,omitempty"`
 }
 
 type SearchCoverage struct {
@@ -63,25 +70,41 @@ type SearchHit struct {
 	Citation Citation `json:"citation"`
 }
 
+type SearchWarning struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 type SearchResult struct {
-	RepoID            string         `json:"repo_id"`
-	CorpusKind        string         `json:"corpus_kind"`
-	Query             string         `json:"query"`
-	RequestedRevision string         `json:"requested_revision"`
-	EffectiveRevision string         `json:"effective_revision"`
-	Mode              string         `json:"mode"`
-	RequestedMode     string         `json:"requested_mode"`
-	EffectiveMode     string         `json:"effective_mode"`
-	Authority         string         `json:"authority"`
-	OverlayDigest     string         `json:"overlay_digest,omitempty"`
-	RevisionSetID     string         `json:"revision_set_id,omitempty"`
-	PolicyHash        string         `json:"policy_hash"`
-	PolicySource      string         `json:"policy_source"`
-	NamespaceID       string         `json:"namespace_id,omitempty"`
-	Coverage          SearchCoverage `json:"coverage"`
-	Hits              []SearchHit    `json:"hits"`
-	Warnings          []string       `json:"warnings,omitempty"`
-	Fallback          string         `json:"fallback,omitempty"`
+	RepoID            string          `json:"repo_id"`
+	CorpusKind        string          `json:"corpus_kind"`
+	Query             string          `json:"query"`
+	RequestedRevision string          `json:"requested_revision"`
+	EffectiveRevision string          `json:"effective_revision"`
+	Mode              string          `json:"mode"`
+	RequestedMode     string          `json:"requested_mode"`
+	EffectiveMode     string          `json:"effective_mode"`
+	Authority         string          `json:"authority"`
+	OverlayDigest     string          `json:"overlay_digest,omitempty"`
+	RevisionSetID     string          `json:"revision_set_id,omitempty"`
+	PolicyHash        string          `json:"policy_hash"`
+	PolicySource      string          `json:"policy_source"`
+	NamespaceID       string          `json:"namespace_id,omitempty"`
+	Coverage          SearchCoverage  `json:"coverage"`
+	Hits              []SearchHit     `json:"hits"`
+	Warnings          []string        `json:"warnings,omitempty"`
+	WarningDetails    []SearchWarning `json:"warning_details,omitempty"`
+	Fallback          string          `json:"fallback,omitempty"`
+}
+
+func (r *SearchResult) addWarning(code, message string) {
+	code = strings.TrimSpace(code)
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return
+	}
+	r.Warnings = append(r.Warnings, message)
+	r.WarningDetails = append(r.WarningDetails, SearchWarning{Code: code, Message: message})
 }
 
 type Retriever struct {
@@ -106,6 +129,8 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 	if req.Limit <= 0 {
 		req.Limit = 10
 	}
+	processingPolicy := ProcessingPolicyFor(req.MaxFileBytes, req.ChunkBytes)
+	chunkPolicyID := processingPolicy.ID()
 	commitOID, policy, err := ResolvePolicy(ctx, req.Repository, req.Revision, req.IncludeWorktree)
 	if err != nil {
 		return SearchResult{}, err
@@ -113,13 +138,13 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 	result := SearchResult{RepoID: req.RepoID, CorpusKind: "repository_docs", Query: req.Query, RequestedRevision: req.Revision, EffectiveRevision: commitOID, Mode: req.Mode, RequestedMode: req.Mode, EffectiveMode: req.Mode, Authority: "git", PolicyHash: policy.PolicyHash, PolicySource: policy.Source}
 	if policy.Status == PolicyStatusDisabled {
 		result.Fallback = PolicyStatusDisabled
-		result.Warnings = append(result.Warnings, "repository documentation search is disabled by the committed policy")
+		result.addWarning("repository_docs_disabled", "repository documentation search is disabled by the committed policy")
 		return result, nil
 	}
 	overlayDigest := ""
 	var initialChanges []WorktreeChange
 	if req.IncludeWorktree {
-		changes, overlayErr := req.Repository.TrackedChangesAtFiltered(ctx, commitOID, DefaultMaxDocumentBytes, policyOverlayPathFilter(policy.Policy))
+		changes, overlayErr := req.Repository.TrackedChangesAtFiltered(ctx, commitOID, processingPolicy.MaxFileBytes, policyOverlayPathFilter(policy.Policy))
 		if overlayErr != nil {
 			return SearchResult{}, overlayErr
 		}
@@ -131,28 +156,25 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 	semanticAvailable := req.Mode == SearchModeHybrid && r.provider != nil
 	expectedNamespaceID := ""
 	if semanticAvailable {
-		identity, identityErr := r.provider.NamespaceIdentity(ctx, rag.NamespaceRequest{RepoID: req.RepoID, ChunkPolicyID: DefaultChunkPolicyID, LanguagePolicyID: rag.DefaultLanguagePolicyID, DocumentInstructionID: "repo-doc-v1", QueryInstructionID: "repo-doc-query-v1"})
+		identity, identityErr := r.provider.NamespaceIdentity(ctx, rag.NamespaceRequest{RepoID: req.RepoID, ChunkPolicyID: chunkPolicyID, LanguagePolicyID: rag.DefaultLanguagePolicyID, DocumentInstructionID: "repo-doc-v1", QueryInstructionID: "repo-doc-query-v1"})
 		if identityErr != nil {
 			semanticAvailable = false
 			result.Fallback = "provider_unavailable"
 			result.EffectiveMode = SearchModeFullText
-			result.Warnings = append(result.Warnings, "embedding provider identity unavailable; returning verified lexical results")
+			result.addWarning("embedding_provider_identity_unavailable", "embedding provider identity unavailable; returning verified lexical results")
 		} else {
 			expectedNamespaceID = cache.EmbeddingNamespaceID(identity)
 		}
 	}
-	var sets []cache.RepositoryDocRevisionSet
+	var selected cache.RepositoryDocRevisionSet
 	if semanticAvailable {
-		sets, err = r.store.ListRepositoryDocRevisionSets(ctx, cache.RepositoryDocRevisionSetFilter{RepoID: req.RepoID, GitStoreRef: req.Repository.GitStoreRef, CommitOID: commitOID, PolicyHash: policy.PolicyHash, OverlayDigest: overlayDigest, ExactOverlay: true, ChunkPolicyID: DefaultChunkPolicyID, NamespaceID: expectedNamespaceID, Limit: 20})
-		if err != nil {
+		expectedSetID := NewRevisionSetIdentity(req.RepoID, req.SourceRegistrationID, req.SourceRegistrationGeneration, req.Repository, commitOID, policy, overlayDigest, processingPolicy, expectedNamespaceID).ID()
+		selected, err = r.store.GetRepositoryDocRevisionSet(ctx, req.RepoID, expectedSetID)
+		if err != nil && !errors.Is(err, cache.ErrNotFound) {
 			return SearchResult{}, err
 		}
-	}
-	var selected cache.RepositoryDocRevisionSet
-	for _, set := range sets {
-		if set.State == cache.RepoDocSetReady || set.State == cache.RepoDocSetPartial {
-			selected = set
-			break
+		if errors.Is(err, cache.ErrNotFound) || selected.State != cache.RepoDocSetReady {
+			selected = cache.RepositoryDocRevisionSet{}
 		}
 	}
 	if selected.ID != "" {
@@ -163,7 +185,7 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 		result.EffectiveMode = SearchModeFullText
 		result.Fallback = "revision_set_unavailable"
 		if req.IncludeWorktree {
-			priorSets, priorErr := r.store.ListRepositoryDocRevisionSets(ctx, cache.RepositoryDocRevisionSetFilter{RepoID: req.RepoID, GitStoreRef: req.Repository.GitStoreRef, CommitOID: commitOID, PolicyHash: policy.PolicyHash, ChunkPolicyID: DefaultChunkPolicyID, Limit: 20})
+			priorSets, priorErr := r.store.ListRepositoryDocRevisionSets(ctx, cache.RepositoryDocRevisionSetFilter{RepoID: req.RepoID, SourceRegistrationID: req.SourceRegistrationID, SourceRegistrationGeneration: req.SourceRegistrationGeneration, GitStoreRef: req.Repository.GitStoreRef, CommitOID: commitOID, PolicyHash: policy.PolicyHash, ChunkPolicyID: chunkPolicyID, Limit: 20})
 			if priorErr != nil {
 				return SearchResult{}, priorErr
 			}
@@ -175,14 +197,17 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 			}
 		}
 		if result.Fallback == "worktree_overlay_stale" {
-			result.Warnings = append(result.Warnings, "worktree_overlay_stale: tracked content changed; reindex the overlay")
+			result.addWarning("worktree_overlay_stale", "worktree_overlay_stale: tracked content changed; reindex the overlay")
 		} else {
-			result.Warnings = append(result.Warnings, "semantic revision set is unavailable; using Git-backed full-text retrieval")
+			result.addWarning("revision_set_unavailable", "semantic revision set is unavailable; using Git-backed full-text retrieval")
 		}
 	}
-	lexical, lexicalCoverage, err := r.lexical(ctx, req.Repository, commitOID, policy.Policy, req.Query, initialChanges, req.Limit)
+	lexical, lexicalCoverage, lexicalWarnings, err := r.lexical(ctx, req.Repository, commitOID, policy.Policy, processingPolicy, req.Query, initialChanges, req.Limit)
 	if err != nil {
 		return SearchResult{}, err
+	}
+	for _, warning := range lexicalWarnings {
+		result.addWarning(warning.Code, warning.Message)
 	}
 	if selected.ID == "" {
 		result.Coverage = lexicalCoverage
@@ -193,13 +218,13 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 		if err != nil {
 			result.Fallback = "semantic_unavailable"
 			result.EffectiveMode = SearchModeFullText
-			result.Warnings = append(result.Warnings, "semantic retrieval unavailable; returning verified lexical results")
+			result.addWarning("semantic_retrieval_unavailable", "semantic retrieval unavailable; returning verified lexical results")
 			semantic = map[string]rankedHit{}
 		}
 	} else if req.Mode == SearchModeHybrid && !semanticAvailable && result.Fallback == "" {
 		result.Fallback = "provider_unavailable"
 		result.EffectiveMode = SearchModeFullText
-		result.Warnings = append(result.Warnings, "embedding provider unavailable; returning verified lexical results")
+		result.addWarning("embedding_provider_unavailable", "embedding provider unavailable; returning verified lexical results")
 	}
 	merged := fuseRanks(lexical, semantic)
 	for _, item := range merged {
@@ -207,8 +232,8 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 			break
 		}
 		hit, ok, warning := r.hydrate(ctx, req.Repository, commitOID, item)
-		if warning != "" {
-			result.Warnings = append(result.Warnings, warning)
+		if warning.Message != "" {
+			result.addWarning(warning.Code, warning.Message)
 		}
 		if !ok {
 			continue
@@ -221,7 +246,7 @@ func (r *Retriever) Search(ctx context.Context, req SearchRequest) (SearchResult
 		if resolveErr != nil {
 			return SearchResult{}, resolveErr
 		}
-		finalChanges, changeErr := req.Repository.TrackedChangesAtFiltered(ctx, commitOID, DefaultMaxDocumentBytes, policyOverlayPathFilter(policy.Policy))
+		finalChanges, changeErr := req.Repository.TrackedChangesAtFiltered(ctx, commitOID, processingPolicy.MaxFileBytes, policyOverlayPathFilter(policy.Policy))
 		if changeErr != nil {
 			return SearchResult{}, changeErr
 		}
@@ -240,15 +265,22 @@ type rankedHit struct {
 	text      string
 }
 
-func (r *Retriever) lexical(ctx context.Context, repo *Repository, commitOID string, policy Policy, query string, changes []WorktreeChange, limit int) (map[string]rankedHit, SearchCoverage, error) {
-	entries, err := repo.ListTree(ctx, commitOID)
-	if err != nil {
-		return nil, SearchCoverage{}, err
-	}
+func (r *Retriever) lexical(ctx context.Context, repo *Repository, commitOID string, policy Policy, processing ProcessingPolicy, query string, changes []WorktreeChange, limit int) (map[string]rankedHit, SearchCoverage, []SearchWarning, error) {
+	processing = processing.normalized()
+	chunkPolicyID := processing.ID()
 	want := tokenize(query)
 	results := map[string]rankedHit{}
 	candidateLimit := boundedLexicalCandidateLimit(limit)
 	coverage := SearchCoverage{State: "lexical-only"}
+	warnings := map[string]SearchWarning{}
+	recordAvailabilityWarning := func(err error) {
+		var objectErr *GitObjectError
+		if errors.As(err, &objectErr) {
+			warnings[objectErr.DiagnosticCode()] = SearchWarning{Code: objectErr.DiagnosticCode(), Message: objectErr.Remediation()}
+			return
+		}
+		warnings["git_object_unavailable"] = SearchWarning{Code: "git_object_unavailable", Message: "repository object unavailable; fetch the required Git objects and retry"}
+	}
 	changed := map[string]WorktreeChange{}
 	removed := map[string]bool{}
 	if changes != nil {
@@ -262,23 +294,28 @@ func (r *Retriever) lexical(ctx context.Context, repo *Repository, commitOID str
 			}
 		}
 	}
-	for _, entry := range entries {
+	err := repo.WalkTree(ctx, commitOID, func(entry TreeEntry) error {
 		if err := ctx.Err(); err != nil {
-			return nil, SearchCoverage{}, err
+			return err
 		}
-		if entry.Type != "blob" || entry.Mode == "120000" || removed[entry.Path] || changed[entry.Path].Path != "" || entry.Size < 0 || entry.Size > DefaultMaxDocumentBytes || !policy.Matches(entry.Path) {
-			continue
+		if entry.Type != "blob" || entry.Mode == "120000" || removed[entry.Path] || changed[entry.Path].Path != "" || entry.Size < 0 || entry.Size > processing.MaxFileBytes || !policy.Matches(entry.Path) {
+			return nil
 		}
 		coverage.EligibleFiles++
-		data, err := repo.ReadBlob(ctx, entry.OID, DefaultMaxDocumentBytes)
+		data, err := repo.ReadBlob(ctx, entry.OID, processing.MaxFileBytes)
 		if err != nil {
 			coverage.MissingObjects++
-			continue
+			recordAvailabilityWarning(err)
+			return nil
 		}
-		chunks, err := ChunkDocument(digestBytes(data), data, DefaultChunkBytes)
+		if ClassifyDocumentContent(entry, data) != DocumentContentRegular {
+			coverage.EligibleFiles--
+			return nil
+		}
+		chunks, err := ChunkDocumentWithPolicy(digestBytes(data), data, processing)
 		if err != nil {
 			coverage.FailedChunks++
-			continue
+			return nil
 		}
 		coverage.EligibleChunks += len(chunks)
 		for ordinal, chunk := range chunks {
@@ -286,25 +323,34 @@ func (r *Retriever) lexical(ctx context.Context, repo *Repository, commitOID str
 			if score <= 0 {
 				continue
 			}
-			candidate := cache.RepositoryDocCandidate{RepositoryDocMembership: cache.RepositoryDocMembership{Path: entry.Path, ChunkID: chunk.ID, Authority: "git", Ordinal: ordinal, BlobOID: entry.OID, ContentDigest: chunk.RawSliceDigest}, ObjectFormat: repo.ObjectFormat, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, RawSliceDigest: chunk.RawSliceDigest, EmbeddingInputDigest: chunk.EmbeddingInputDigest, ChunkPolicyID: DefaultChunkPolicyID}
+			candidate := cache.RepositoryDocCandidate{RepositoryDocMembership: cache.RepositoryDocMembership{Path: entry.Path, ChunkID: chunk.ID, Authority: "git", Ordinal: ordinal, BlobOID: entry.OID, ContentDigest: chunk.RawSliceDigest}, ObjectFormat: repo.ObjectFormat, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, RawSliceDigest: chunk.RawSliceDigest, EmbeddingInputDigest: chunk.EmbeddingInputDigest, ChunkPolicyID: chunkPolicyID}
 			results[candidateRankKey(candidate)] = rankedHit{candidate: candidate, score: score, lexical: score, text: chunk.Text}
 		}
 		results = trimRankedHits(results, candidateLimit)
+		return nil
+	})
+	if err != nil {
+		return nil, SearchCoverage{}, nil, err
 	}
 	for _, change := range changes {
 		if change.Deleted || !policy.Matches(change.Path) {
 			continue
 		}
 		coverage.EligibleFiles++
-		data, readErr := repo.ReadTrackedWorktreeFile(ctx, change.Path, DefaultMaxDocumentBytes)
+		data, readErr := repo.ReadTrackedWorktreeFile(ctx, change.Path, processing.MaxFileBytes)
 		if readErr != nil {
 			coverage.MissingObjects++
+			warnings["worktree_overlay_unavailable"] = SearchWarning{Code: "worktree_overlay_unavailable", Message: "tracked worktree content unavailable; restore the registered worktree and retry"}
 			continue
 		}
 		if int64(len(data)) != change.Size || digestBytes(data) != change.Digest {
-			return nil, SearchCoverage{}, &WorktreeOverlayStaleError{}
+			return nil, SearchCoverage{}, nil, &WorktreeOverlayStaleError{}
 		}
-		chunks, chunkErr := ChunkDocument(digestBytes(data), data, DefaultChunkBytes)
+		if ClassifyDocumentContent(TreeEntry{Mode: "100644", Type: "blob"}, data) != DocumentContentRegular {
+			coverage.EligibleFiles--
+			continue
+		}
+		chunks, chunkErr := ChunkDocumentWithPolicy(digestBytes(data), data, processing)
 		if chunkErr != nil {
 			coverage.FailedChunks++
 			continue
@@ -315,12 +361,17 @@ func (r *Retriever) lexical(ctx context.Context, repo *Repository, commitOID str
 			if score <= 0 {
 				continue
 			}
-			candidate := cache.RepositoryDocCandidate{RepositoryDocMembership: cache.RepositoryDocMembership{Path: change.Path, ChunkID: chunk.ID, Authority: "worktree", Ordinal: ordinal, ContentDigest: chunk.RawSliceDigest}, ObjectFormat: repo.ObjectFormat, WorktreeRef: repo.WorktreeRef, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, RawSliceDigest: chunk.RawSliceDigest, EmbeddingInputDigest: chunk.EmbeddingInputDigest, ChunkPolicyID: DefaultChunkPolicyID}
+			candidate := cache.RepositoryDocCandidate{RepositoryDocMembership: cache.RepositoryDocMembership{Path: change.Path, ChunkID: chunk.ID, Authority: "worktree", Ordinal: ordinal, ContentDigest: chunk.RawSliceDigest}, ObjectFormat: repo.ObjectFormat, WorktreeRef: repo.WorktreeRef, ByteStart: chunk.ByteStart, ByteEnd: chunk.ByteEnd, LineStart: chunk.LineStart, LineEnd: chunk.LineEnd, RawSliceDigest: chunk.RawSliceDigest, EmbeddingInputDigest: chunk.EmbeddingInputDigest, ChunkPolicyID: chunkPolicyID}
 			results[candidateRankKey(candidate)] = rankedHit{candidate: candidate, score: score, lexical: score, text: chunk.Text}
 		}
 		results = trimRankedHits(results, candidateLimit)
 	}
-	return results, coverage, nil
+	warningList := make([]SearchWarning, 0, len(warnings))
+	for _, warning := range warnings {
+		warningList = append(warningList, warning)
+	}
+	sort.Slice(warningList, func(i, j int) bool { return warningList[i].Code < warningList[j].Code })
+	return results, coverage, warningList, nil
 }
 
 func boundedLexicalCandidateLimit(limit int) int {
@@ -358,12 +409,12 @@ func (r *Retriever) semantic(ctx context.Context, req SearchRequest, set cache.R
 		return nil, err
 	}
 	query := response.Embeddings[0]
-	candidates, err := r.store.ListRepositoryDocCandidates(ctx, req.RepoID, set.ID, set.NamespaceID)
+	snapshot, err := r.store.LoadRepositoryDocSearchSnapshot(ctx, req.RepoID, set.ID, set.NamespaceID)
 	if err != nil {
 		return nil, err
 	}
 	results := map[string]rankedHit{}
-	for _, candidate := range candidates {
+	for _, candidate := range snapshot.Candidates {
 		if len(candidate.Vector) == 0 {
 			continue
 		}
@@ -428,33 +479,33 @@ func sortedRanks(items map[string]rankedHit) []rankedHit {
 	return out
 }
 
-func (r *Retriever) hydrate(ctx context.Context, repo *Repository, commitOID string, item rankedHit) (SearchHit, bool, string) {
+func (r *Retriever) hydrate(ctx context.Context, repo *Repository, commitOID string, item rankedHit) (SearchHit, bool, SearchWarning) {
 	candidate := item.candidate
 	if candidate.Authority == "worktree" {
 		data, err := repo.ReadTrackedWorktreeFile(ctx, candidate.Path, DefaultMaxDocumentBytes)
 		if err != nil {
-			return SearchHit{}, false, "worktree_overlay_unavailable: reindex the tracked overlay"
+			return SearchHit{}, false, SearchWarning{Code: "worktree_overlay_unavailable", Message: "worktree_overlay_unavailable: reindex the tracked overlay"}
 		}
 		if candidate.ByteStart < 0 || candidate.ByteEnd > len(data) || candidate.ByteStart >= candidate.ByteEnd || digestBytes(data[candidate.ByteStart:candidate.ByteEnd]) != candidate.RawSliceDigest {
-			return SearchHit{}, false, "worktree_overlay_stale: tracked content changed; reindex the overlay"
+			return SearchHit{}, false, SearchWarning{Code: "worktree_overlay_stale", Message: "worktree_overlay_stale: tracked content changed; reindex the overlay"}
 		}
 		raw := data[candidate.ByteStart:candidate.ByteEnd]
 		snippet := truncateUTF8Bytes(strings.TrimSpace(string(raw)), 800)
-		return SearchHit{ChunkID: candidate.ChunkID, Snippet: snippet, Score: item.score, Lexical: item.lexical, Semantic: item.semantic, Citation: Citation{Authority: "worktree", CommitOID: commitOID, Path: candidate.Path, LineStart: candidate.LineStart, LineEnd: candidate.LineEnd, RawSliceDigest: candidate.RawSliceDigest}}, true, ""
+		return SearchHit{ChunkID: candidate.ChunkID, Snippet: snippet, Score: item.score, Lexical: item.lexical, Semantic: item.semantic, Citation: Citation{Authority: "worktree", CommitOID: commitOID, Path: candidate.Path, LineStart: candidate.LineStart, LineEnd: candidate.LineEnd, RawSliceDigest: candidate.RawSliceDigest}}, true, SearchWarning{}
 	}
 	data, err := repo.ReadBlob(ctx, candidate.BlobOID, DefaultMaxDocumentBytes)
 	if err != nil {
-		return SearchHit{}, false, "citation omitted: Git blob is unavailable"
+		return SearchHit{}, false, SearchWarning{Code: "citation_blob_unavailable", Message: "citation omitted: Git blob is unavailable"}
 	}
 	if candidate.ByteStart < 0 || candidate.ByteEnd > len(data) || candidate.ByteStart >= candidate.ByteEnd {
-		return SearchHit{}, false, "citation omitted: stored chunk locator is invalid"
+		return SearchHit{}, false, SearchWarning{Code: "citation_locator_invalid", Message: "citation omitted: stored chunk locator is invalid"}
 	}
 	raw := data[candidate.ByteStart:candidate.ByteEnd]
 	if digestBytes(raw) != candidate.RawSliceDigest {
-		return SearchHit{}, false, "citation omitted: Git content failed digest verification"
+		return SearchHit{}, false, SearchWarning{Code: "citation_digest_mismatch", Message: "citation omitted: Git content failed digest verification"}
 	}
 	snippet := truncateUTF8Bytes(strings.TrimSpace(string(raw)), 800)
-	return SearchHit{ChunkID: candidate.ChunkID, Snippet: snippet, Score: item.score, Lexical: item.lexical, Semantic: item.semantic, Citation: Citation{Authority: "git", CommitOID: commitOID, BlobOID: candidate.BlobOID, Path: candidate.Path, LineStart: candidate.LineStart, LineEnd: candidate.LineEnd, RawSliceDigest: candidate.RawSliceDigest}}, true, ""
+	return SearchHit{ChunkID: candidate.ChunkID, Snippet: snippet, Score: item.score, Lexical: item.lexical, Semantic: item.semantic, Citation: Citation{Authority: "git", CommitOID: commitOID, BlobOID: candidate.BlobOID, Path: candidate.Path, LineStart: candidate.LineStart, LineEnd: candidate.LineEnd, RawSliceDigest: candidate.RawSliceDigest}}, true, SearchWarning{}
 }
 
 func truncateUTF8Bytes(value string, maxBytes int) string {

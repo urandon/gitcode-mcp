@@ -44,6 +44,9 @@ export type Repository = {
 export type RepositoryDocumentation = {
   state: string;
   registered: boolean;
+  registration_id?: string;
+  source_registration_id?: string;
+  source_registration_generation?: number;
   reconcile_state?: string;
   target_commit_oid?: string;
   next_poll_at?: string;
@@ -64,11 +67,35 @@ export type RepositoryDocumentation = {
   reused_chunks: number;
   failed_chunks: number;
   missing_objects: number;
+  excluded_files: number;
+  exclusions?: Array<{ reason: string; count: number }>;
+  active_revision_set_id?: string;
+  active_state?: string;
+  last_failure_class?: string;
   updated_at?: string;
   revision_set_count: number;
   search_available: boolean;
   search_handoff?: string;
   index_handoff?: string;
+  sources?: Array<{ source_registration_id: string; source_registration_generation: number; state: string; git_store_ref?: string; worktree_ref?: string; commit_oid?: string; policy_hash?: string }>;
+  retention: { committed_sets_per_identity: number; overlay_max_age_hours: number; terminal_max_age_hours: number; vector_byte_ceiling: number };
+};
+
+export type RepositoryDocsPlan = {
+  repo_id: string;
+  commit_oid: string;
+  include_worktree: boolean;
+  git_store_ref: string;
+  worktree_ref?: string;
+  overlay_digest?: string;
+  eligible_files: number;
+  eligible_bytes: number;
+  excluded_files: number;
+  missing_objects: number;
+  tracked_changes?: number;
+  effective_include: string[];
+  effective_exclude: string[];
+  policy: { source: string; policy_hash: string; policy: { schema: number; enabled: boolean; preset: string; include?: string[]; exclude?: string[] } };
 };
 
 export type CacheObservation = {
@@ -365,6 +392,7 @@ export type RepositoryDocsSearchResult = {
     };
   }>;
   warnings?: string[];
+  warning_details?: Array<{ code: string; message: string }>;
   fallback?: string;
 };
 

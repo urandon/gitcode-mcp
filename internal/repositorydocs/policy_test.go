@@ -122,3 +122,40 @@ func TestDisabledPolicy(t *testing.T) {
 		t.Fatalf("result=%#v", result)
 	}
 }
+
+func TestPolicyMatcherIsSlashNormalizedCaseSensitiveAndMultilingual(t *testing.T) {
+	result, err := ParsePolicy([]byte(`repository_docs:
+  preset: none
+  include:
+    - docs/**
+    - архитектура/**
+    - 中文资料/**
+  exclude:
+    - docs/generated/**
+`), PolicySourceCommitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: `docs\guide.md`, want: true},
+		{path: "./docs/guide.md", want: true},
+		{path: "docs/generated/api.md", want: false},
+		{path: "Docs/guide.md", want: false},
+		{path: "архитектура/обзор.md", want: true},
+		{path: "中文资料/设计.md", want: true},
+		{path: ".git/config", want: false},
+		{path: ".gitcode/mcp/cache.db", want: false},
+	}
+	for _, test := range tests {
+		if got := result.Policy.Matches(test.path); got != test.want {
+			t.Errorf("Matches(%q)=%t, want %t", test.path, got, test.want)
+		}
+	}
+	builtinInclude, builtinExclude := BuiltinPolicy().EffectiveMatchers()
+	if !reflect.DeepEqual(builtinInclude, []string{"README*", "AGENTS.md", "docs/**"}) || len(builtinExclude) != 0 {
+		t.Fatalf("builtin effective matchers include=%v exclude=%v", builtinInclude, builtinExclude)
+	}
+}

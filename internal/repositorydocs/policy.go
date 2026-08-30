@@ -291,6 +291,16 @@ func (p Policy) Matches(repoPath string) bool {
 	return true
 }
 
+// EffectiveMatchers expands the versioned preset for observation and planning
+// while leaving the committed policy itself unchanged.
+func (p Policy) EffectiveMatchers() ([]string, []string) {
+	include := append([]string(nil), p.Include...)
+	if p.Preset == DefaultPolicyPreset {
+		include = append([]string{"README*", "AGENTS.md", "docs/**"}, include...)
+	}
+	return include, append([]string(nil), p.Exclude...)
+}
+
 func globMatch(pattern, value string) bool {
 	return matchSegments(strings.Split(pattern, "/"), strings.Split(value, "/"))
 }

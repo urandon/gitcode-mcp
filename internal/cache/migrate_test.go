@@ -145,6 +145,76 @@ func assertV2DataPreserved(t *testing.T, path string) {
 	}
 }
 
+func TestMigrateRepositoryDocsV18ToV19PreservesDerivedMetadata(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "cache-v18.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE schema_version (version INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	ftsAvailable := detectFTS5(ctx, db)
+	for _, migration := range migrations {
+		if migration.version > 18 {
+			break
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := migration.apply(ctx, tx, ftsAvailable); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("migration v%d: %v", migration.version, err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM schema_version`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_version(version) VALUES (?)`, migration.version); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO repos(repo_id, owner, name, api_base_url, scopes, display_name, created_at, updated_at) VALUES ('owner/repo','owner','repo','https://example.invalid','issues','Repo','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO repo_doc_revision_sets(repo_id,revision_set_id,git_store_ref,object_format,commit_oid,policy_hash,policy_source,chunk_policy_id,state,eligible_files,eligible_chunks,created_at,updated_at) VALUES ('owner/repo','set-v18','git-ref','sha1','1111111111111111111111111111111111111111','policy','committed','chunk-v1','ready',1,1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO repo_doc_chunks(repo_id,chunk_id,object_format,blob_oid,content_digest,byte_start,byte_end,line_start,line_end,raw_slice_digest,embedding_input_digest,chunk_policy_id,created_at,updated_at) VALUES ('owner/repo','chunk-v18','sha1','2222222222222222222222222222222222222222','content',0,8,1,1,'slice','input','chunk-v1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO repo_doc_membership(repo_id,revision_set_id,path,chunk_id,authority,ordinal,blob_oid,content_digest) VALUES ('owner/repo','set-v18','docs/a.md','chunk-v18','git',0,'2222222222222222222222222222222222222222','content')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MigrateCacheWithConfirm(ctx, path, false, Confirmation{Confirmed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FromVersion != 18 || result.ToVersion != 19 {
+		t.Fatalf("migration result=%+v", result)
+	}
+	store, err := NewSQLiteReadOnlyStore(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	set, err := store.GetRepositoryDocRevisionSet(ctx, "owner/repo", "set-v18")
+	if err != nil || set.CommitOID != "1111111111111111111111111111111111111111" || set.SourceRegistrationGeneration != 0 {
+		t.Fatalf("preserved set=%+v err=%v", set, err)
+	}
+	memberships, err := store.ListRepositoryDocMembership(ctx, "owner/repo", "set-v18")
+	if err != nil || len(memberships) != 1 || memberships[0].Path != "docs/a.md" {
+		t.Fatalf("preserved membership=%+v err=%v", memberships, err)
+	}
+}
+
 func TestMigrateFromVersion2ToVersion4(t *testing.T) {
 	ctx := context.Background()
 	path := createFullVersion2Cache(t)
@@ -452,13 +522,13 @@ func assertV4SchemaTables(t *testing.T, ctx context.Context, path string) {
 		t.Fatalf("enable foreign keys: %v", err)
 	}
 	tables := tableNames(t, ctx, db)
-	for _, want := range []string{"repos", "sources", "chunks", "records", "record_comments", "audit_trail", "snapshots", "snapshot_chunks", "sync_events", "sync_frontiers", "issue_comment_sync", "remote_revisions", "embedding_namespaces", "chunk_embeddings", "rag_index_runs", "repo_doc_revision_sets", "repo_doc_chunks", "repo_doc_membership", "repo_doc_vectors"} {
+	for _, want := range []string{"repos", "sources", "chunks", "records", "record_comments", "audit_trail", "snapshots", "snapshot_chunks", "sync_events", "sync_frontiers", "issue_comment_sync", "remote_revisions", "embedding_namespaces", "chunk_embeddings", "rag_index_runs", "repo_doc_revision_sets", "repo_doc_chunks", "repo_doc_membership", "repo_doc_vectors", "repo_doc_exclusions"} {
 		if !tables[want] {
 			t.Fatalf("missing table %s after migration", want)
 		}
 	}
 	indexes := indexNames(t, ctx, db)
-	for _, want := range []string{"idx_chunks_query", "idx_records_remote", "idx_records_remote_unique", "idx_snapshot_chunks_record", "idx_snapshot_chunks_order", "idx_sync_frontiers_repo", "idx_issue_comment_sync_queue", "idx_embedding_namespaces_identity", "idx_chunk_embeddings_coverage", "idx_rag_index_runs_status", "idx_repo_doc_revision_sets_lookup", "idx_repo_doc_chunks_content", "idx_repo_doc_membership_chunk", "idx_repo_doc_vectors_chunk"} {
+	for _, want := range []string{"idx_chunks_query", "idx_records_remote", "idx_records_remote_unique", "idx_snapshot_chunks_record", "idx_snapshot_chunks_order", "idx_sync_frontiers_repo", "idx_issue_comment_sync_queue", "idx_embedding_namespaces_identity", "idx_chunk_embeddings_coverage", "idx_rag_index_runs_status", "idx_repo_doc_revision_sets_lookup", "idx_repo_doc_chunks_content", "idx_repo_doc_membership_chunk", "idx_repo_doc_vectors_chunk", "idx_repo_doc_exclusions_reason"} {
 		if !indexes[want] {
 			t.Fatalf("missing index %s after migration", want)
 		}

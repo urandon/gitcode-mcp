@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"gitcode-mcp/internal/feedback"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/rag"
+	"gitcode-mcp/internal/repositorydocs"
 	"gitcode-mcp/internal/service"
 	"gitcode-mcp/internal/servicectl"
 )
@@ -1053,7 +1055,34 @@ func TestRepositoryDocsIndexCLIHonorsConfiguredServiceRuntime(t *testing.T) {
 
 	var out bytes.Buffer
 	var errOut bytes.Buffer
-	code := executeWithFactoryAndDeps([]string{"repo-docs", "index", "--repo", "fixture-alias", "--format", "json"}, &out, &errOut, nil, localCommandDeps{Source: src})
+	code := executeWithFactoryAndDeps([]string{"repo-docs", "register", "--repo", "fixture-alias", "--repository-path", root, "--format", "json"}, &out, &errOut, nil, localCommandDeps{Source: src})
+	if code != 0 {
+		t.Fatalf("repo-docs register code=%d stderr=%q", code, errOut.String())
+	}
+	var source servicectl.MaintenanceEntry
+	if err := json.Unmarshal(out.Bytes(), &source); err != nil || source.RepositoryDocs == nil {
+		t.Fatalf("invalid source registration JSON: %v\n%s", err, out.String())
+	}
+	// Public repository-doc commands must use only the exact opaque selector;
+	// the process cwd is intentionally unrelated to the registered worktree.
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	selectorArgs := []string{"--registration-id", source.RegistrationID, "--source-registration-id", source.RepositoryDocs.SourceRegistrationID, "--source-registration-generation", strconv.FormatInt(source.RepositoryDocs.SourceRegistrationGeneration, 10)}
+	out.Reset()
+	errOut.Reset()
+	planArgs := append([]string{"repo-docs", "plan", "--repo", "fixture-alias"}, selectorArgs...)
+	planArgs = append(planArgs, "--format", "json")
+	if code := executeWithFactoryAndDeps(planArgs, &out, &errOut, nil, localCommandDeps{Source: src}); code != 0 {
+		t.Fatalf("repo-docs plan code=%d stderr=%q", code, errOut.String())
+	}
+	var plan repositorydocs.PlanResult
+	if err := json.Unmarshal(out.Bytes(), &plan); err != nil || plan.EligibleFiles != 1 {
+		t.Fatalf("invalid plan JSON: %v\n%s", err, out.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	code = executeWithFactoryAndDeps([]string{"repo-docs", "index", "--repo", "fixture-alias", "--registration-id", source.RegistrationID, "--source-registration-id", source.RepositoryDocs.SourceRegistrationID, "--source-registration-generation", strconv.FormatInt(source.RepositoryDocs.SourceRegistrationGeneration, 10), "--format", "json"}, &out, &errOut, nil, localCommandDeps{Source: src})
 	if code != 0 {
 		t.Fatalf("repo-docs index code=%d stderr=%q", code, errOut.String())
 	}
@@ -1070,6 +1099,27 @@ func TestRepositoryDocsIndexCLIHonorsConfiguredServiceRuntime(t *testing.T) {
 	}
 	if len(registrations.Entries) != 1 || registrations.Entries[0].RepositoryDocs == nil || registrations.Entries[0].RepositoryDocs.GitStoreRef == "" {
 		t.Fatalf("repository-docs registration=%#v", registrations)
+	}
+	sibling := filepath.Join(t.TempDir(), "sibling")
+	if output, err := exec.Command("git", "clone", "--no-local", root, sibling).CombinedOutput(); err != nil {
+		t.Fatalf("clone sibling: %v\n%s", err, output)
+	}
+	out.Reset()
+	errOut.Reset()
+	rebindArgs := []string{"repo-docs", "rebind", "--repo", "fixture-alias", "--registration-id", source.RegistrationID, "--source-registration-generation", strconv.FormatInt(source.RepositoryDocs.SourceRegistrationGeneration, 10), "--repository-path", sibling, "--format", "json"}
+	if code := executeWithFactoryAndDeps(rebindArgs, &out, &errOut, nil, localCommandDeps{Source: src}); code != 0 {
+		t.Fatalf("repo-docs rebind code=%d stderr=%q", code, errOut.String())
+	}
+	var rebound servicectl.MaintenanceEntry
+	if err := json.Unmarshal(out.Bytes(), &rebound); err != nil || rebound.RepositoryDocs == nil || rebound.RepositoryDocs.SourceRegistrationID != source.RepositoryDocs.SourceRegistrationID || rebound.RepositoryDocs.SourceRegistrationGeneration != source.RepositoryDocs.SourceRegistrationGeneration+1 {
+		t.Fatalf("invalid rebind JSON: %v\n%s", err, out.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	staleArgs := append([]string{"repo-docs", "policy", "--repo", "fixture-alias"}, selectorArgs...)
+	staleArgs = append(staleArgs, "--format", "json")
+	if code := executeWithFactoryAndDeps(staleArgs, &out, &errOut, nil, localCommandDeps{Source: src}); code == 0 || !strings.Contains(errOut.String(), "repository_docs_source_generation_conflict") {
+		t.Fatalf("stale selector code=%d stderr=%q", code, errOut.String())
 	}
 	cancel()
 	if code := <-runCode; code != 0 {
@@ -1924,7 +1974,7 @@ func TestRepoRegistryCLI(t *testing.T) {
 		t.Fatalf("repo status code=%d stderr=%q", code, statusErr.String())
 	}
 	out := statusOut.String()
-	for _, want := range []string{"repo_id: fixture-a", "owner: owner-a", "name: repo-a", "api_base_url: https://example.invalid/api?safe=1", "scopes: issues,wiki", "aliases: proj", "binding_state: ready", "alias_conflict_state: none", "cache_state: ready", "index_state: unknown", "binary_version:", "binary_version_source:", "cache_schema_version: 18", "expected_cache_schema_version: 18", "issue_records: 0", "issue_comments: 0", "issue_comment_queue_state: available", "issue_comment_queue: pending=0 deferred=0 complete=0 total=0"} {
+	for _, want := range []string{"repo_id: fixture-a", "owner: owner-a", "name: repo-a", "api_base_url: https://example.invalid/api?safe=1", "scopes: issues,wiki", "aliases: proj", "binding_state: ready", "alias_conflict_state: none", "cache_state: ready", "index_state: unknown", "binary_version:", "binary_version_source:", "cache_schema_version: 19", "expected_cache_schema_version: 19", "issue_records: 0", "issue_comments: 0", "issue_comment_queue_state: available", "issue_comment_queue: pending=0 deferred=0 complete=0 total=0"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("status output missing %q in %q", want, out)
 		}
@@ -1983,7 +2033,7 @@ func TestRepoStatusReadsCompatibleOlderSchemaForDiagnostics(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	for _, want := range []string{`"cache_state": "migration_required"`, `"cache_schema_version": 15`, `"expected_cache_schema_version": 18`, `"binary_version"`, `"issue_comment_queue_state": "schema_unavailable"`} {
+	for _, want := range []string{`"cache_state": "migration_required"`, `"cache_schema_version": 15`, `"expected_cache_schema_version": 19`, `"binary_version"`, `"issue_comment_queue_state": "schema_unavailable"`} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("repo status missing %q in %q", want, stdout.String())
 		}

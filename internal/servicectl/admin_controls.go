@@ -128,7 +128,7 @@ func (m *AdminControlManager) SearchRepositoryDocs(ctx context.Context, req admi
 	if req.Limit < 1 || req.Limit > 20 {
 		return nil, controlError(http.StatusBadRequest, "invalid_request", "limit must be between 1 and 20.", "Select a bounded result limit.")
 	}
-	source, err := m.maintenance.repositoryDocsSourceForAdmin(req.RegistrationID)
+	source, err := m.maintenance.repositoryDocsSourceForSelector(RepositoryDocsSourceSelector{RegistrationID: req.RegistrationID, SourceRegistrationID: req.SourceRegistrationID, SourceRegistrationGeneration: req.SourceRegistrationGeneration})
 	if err != nil {
 		return nil, adminControlError(err)
 	}
@@ -146,7 +146,7 @@ func (m *AdminControlManager) SearchRepositoryDocs(ctx context.Context, req admi
 		provider, _ = rag.NewEmbeddingProviderFromConfig(source.Config, source.Profile, rag.ProviderOptions{})
 	}
 	result, err := repositorydocs.NewRetriever(store, provider).Search(ctx, repositorydocs.SearchRequest{
-		RepoID: source.RepoID, Repository: repo, Revision: req.Revision,
+		RepoID: source.RepoID, SourceRegistrationID: source.SourceRegistrationID, SourceRegistrationGeneration: source.SourceRegistrationGeneration, Repository: repo, Revision: req.Revision,
 		IncludeWorktree: req.IncludeWorktree, Query: req.Query, Mode: req.Mode, Limit: req.Limit,
 	})
 	if err != nil {
@@ -155,24 +155,50 @@ func (m *AdminControlManager) SearchRepositoryDocs(ctx context.Context, req admi
 	return result, nil
 }
 
+func (m *AdminControlManager) PlanRepositoryDocs(ctx context.Context, req adminhttp.RepositoryDocsPlanRequest) (any, error) {
+	if m.maintenance == nil {
+		return nil, controlError(http.StatusNotImplemented, "capability_unavailable", "Repository documentation planning is unavailable.", "Use the CLI repository documentation surface.")
+	}
+	if len(strings.TrimSpace(req.Revision)) > 256 {
+		return nil, controlError(http.StatusBadRequest, "invalid_request", "revision is too long.", "Use a Git ref or object id with at most 256 characters.")
+	}
+	source, err := m.maintenance.repositoryDocsSourceForSelector(RepositoryDocsSourceSelector{RegistrationID: req.RegistrationID, SourceRegistrationID: req.SourceRegistrationID, SourceRegistrationGeneration: req.SourceRegistrationGeneration})
+	if err != nil {
+		return nil, adminControlError(err)
+	}
+	repo, err := repositorydocs.OpenRepository(ctx, source.RepositoryPath)
+	if err != nil {
+		return nil, adminControlError(err)
+	}
+	return repositorydocs.InspectPlan(ctx, repo, repositorydocs.PlanRequest{
+		RepoID: source.RepoID, RegistrationID: source.RegistrationID,
+		SourceRegistrationID: source.SourceRegistrationID, SourceRegistrationGeneration: source.SourceRegistrationGeneration,
+		Revision: req.Revision, IncludeWorktree: req.IncludeWorktree,
+	})
+}
+
 func (m *AdminControlManager) IndexRepositoryDocs(ctx context.Context, req adminhttp.RegistrationControlRequest) (any, error) {
 	if m.maintenance == nil || m.jobs == nil {
 		return nil, controlError(http.StatusNotImplemented, "capability_unavailable", "Repository documentation indexing is unavailable.", "Use the CLI repository documentation surface.")
 	}
-	source, err := m.maintenance.repositoryDocsSourceForAdmin(req.RegistrationID)
+	source, err := m.maintenance.repositoryDocsSourceForSelector(RepositoryDocsSourceSelector{RegistrationID: req.RegistrationID, SourceRegistrationID: req.SourceRegistrationID, SourceRegistrationGeneration: req.SourceRegistrationGeneration})
 	if err != nil {
 		return nil, adminControlError(err)
 	}
 	intent := struct {
-		RegistrationID string `json:"registration_id"`
-		CommitScope    string `json:"commit_scope"`
-	}{source.RegistrationID, "HEAD"}
+		RegistrationID               string `json:"registration_id"`
+		SourceRegistrationID         string `json:"source_registration_id"`
+		SourceRegistrationGeneration int64  `json:"source_registration_generation"`
+		CommitScope                  string `json:"commit_scope"`
+	}{source.RegistrationID, source.SourceRegistrationID, source.SourceRegistrationGeneration, "HEAD"}
 	return m.receipts.Apply(ctx, "repository_docs_index", source.RegistrationID, req.IdempotencyKey, intent, func() (map[string]any, error) {
 		jobManager := m.manager
 		jobManager.EffectiveConfig = &source.Config
 		job, err := m.jobs.StartRepositoryDocsIndex(context.Background(), jobManager, StartRepositoryDocsIndexJobRequest{
 			RepoID: source.RepoID, RepositoryPath: source.RepositoryPath, Profile: source.Profile,
 			CachePath: source.CachePath, CacheUUID: source.CacheUUID, RegistrationID: source.RegistrationID,
+			SourceRegistrationID:         source.SourceRegistrationID,
+			SourceRegistrationGeneration: source.SourceRegistrationGeneration,
 		})
 		if err != nil {
 			return nil, adminControlError(err)

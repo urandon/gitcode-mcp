@@ -37,27 +37,56 @@ persist an absolute worktree path in a public snapshot.
 - Built-in and committed policy resolve deterministically; invalid policy fails
   closed and the published YAML fixture is parsed by tests.
 - Historical queries still cite the requested commit after `HEAD` moves.
+- Bare repositories, linked worktrees, and symlinked worktree paths resolve to
+  stable opaque Git/worktree identities without exposing filesystem paths.
 - Full-text search succeeds with no provider and no semantic revision set.
 - Hybrid search selects one exact revision set and transparently reports lexical
-  fallback for missing/stale semantic coverage.
+  fallback for missing/stale semantic coverage, with stable typed warning
+  codes as well as compatible warning text.
 - Dirty-worktree behavior is opt-in, tracked-only, and rejects stale overlay
   bytes. Rename-identical and later-committed content reuse vectors.
 - Repository aliases produce no parallel revision-set identity.
 - A daemon-owned repository-doc job participates in cache writer admission,
-  coalescing, cancellation, terminal job retention, and metadata GC.
+  coalescing, cancellation, terminal job retention, durable vector-only replay,
+  generation fencing, and metadata GC.
+- Explicit cancellation survives restart without reconciliation relaunch, and
+  repeated failures do not bypass the recorded retry window.
+- Provider output fetched before writer contention or request cancellation is
+  replayed from the vector-only checkpoint without a second provider call.
+- Corrupt checkpoints recover as a cache miss; age, byte, and orphan pruning
+  keep the vector-only handoff bounded. Orphan detection is derived from
+  metadata-backed building/partial/blocked membership with no published vector.
+- An in-flight exact historical search completes from its transactional
+  snapshot even if metadata retention evicts that historical set afterward.
+- Schema v18→v19 preserves existing revision/chunk membership metadata while
+  new exact-source fields fail closed until a current generation is published.
+- Public CLI/MCP/Admin operations resolve only an explicit opaque source
+  selector; compare-and-swap rebind invalidates the old generation.
 - A raw SQLite-file sentinel scan finds no document or chunk text.
 - Admin UI exposes Documentation navigation/status, pathless registered-source
   reconcile/index, scoped job supervision, exact-revision search and CLI
   handoffs; it survives empty and partial state, and regenerated assets are
   committed.
-- CLI and all four MCP tools expose stable JSON/structured output without raw
+- CLI and repository-document MCP query/job lifecycle tools expose stable JSON/structured output without raw
   document bodies in status/job diagnostics.
 
 ## Performance and storage checks
 
-Run the chunking benchmark twice on the same host. Record toolchain, CPU, and
-`ns/op`, `B/op`, and allocations in the pull-request handoff. The benchmark is
-bounded synthetic input and must not write source text to SQLite.
+Run the chunking and full-text retrieval benchmarks twice on the same host.
+Record toolchain, CPU, corpus size, `ns/op`, `B/op`, and allocations in the
+pull-request handoff. The benchmark is bounded synthetic input and must not
+write source text to SQLite. The V1 comparable-host budgets are:
+
+- chunking throughput at least 100 MiB/s;
+- full-text retrieval over the 96-document multilingual synthetic fixture in
+  less than 2 seconds with fewer than 32 MiB allocated per query;
+- deterministic RU/ZH/EN lexical and hybrid top-1 citation accuracy of 3/3;
+- an unchanged immediate reindex reuses 100% of eligible vectors.
+
+The 2026-08-30 Apple M4 Pro / darwin-arm64 one-iteration baseline was
+165.67 MiB/s and 2.06 MiB allocated for chunking, and 865 ms with 8.55 MiB
+allocated for full-text retrieval. These are regression evidence, not portable
+absolute performance promises.
 
 For a representative public repository, record:
 
@@ -74,8 +103,9 @@ changes require an issue comment when they exceed 25% on a comparable host.
 
 ## Manual product checks
 
-- Run policy/plan/index/status/search from the repository root and a nested
-  directory; verify both resolve the same Git store.
+- Run policy/plan/index/status/search from unrelated working directories with
+  the same opaque selector; verify cwd is irrelevant and the same Git store is
+  resolved. Verify the previous selector fails after an explicit rebind.
 - Repeat status/search at a tag and with an explicit tracked overlay.
 - Inspect job output, diagnostics, Admin snapshot, copied handoffs, and deep
   links for absolute paths, document bodies, credentials, or provider endpoints.

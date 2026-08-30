@@ -144,7 +144,7 @@ func TestMCPRepoStatusIncludesRuntimeAndIssueCommentDiagnostics(t *testing.T) {
 	if structured.Status == nil || structured.Status.BinaryVersion != buildinfo.Current().Version || structured.Status.CacheSchemaVersion != cache.CurrentSchemaVersion() || structured.Status.ExpectedCacheSchemaVersion != cache.CurrentSchemaVersion() || structured.Status.CacheState != "ready" || structured.Status.IssueCommentQueueState != "available" || structured.Status.IssueCommentQueue == nil {
 		t.Fatalf("repo status=%#v", structured)
 	}
-	if len(result.Content) != 1 || !strings.Contains(result.Content[0].Text, "binary_version=") || !strings.Contains(result.Content[0].Text, "cache_schema=18/18") || !strings.Contains(result.Content[0].Text, "issue_comments=") {
+	if len(result.Content) != 1 || !strings.Contains(result.Content[0].Text, "binary_version=") || !strings.Contains(result.Content[0].Text, "cache_schema=19/19") || !strings.Contains(result.Content[0].Text, "issue_comments=") {
 		t.Fatalf("repo status content=%#v", result.Content)
 	}
 }
@@ -408,19 +408,121 @@ func TestMCPRepositoryDocumentationToolsReturnRevisionScopedStructuredContent(t 
 		return result
 	}
 	var gotPolicy repositorydocs.PolicyResult
-	decodeStructured(t, call("repository_docs_policy", `{"repo_id":"fixture-a","revision":"v1"}`), &gotPolicy)
+	selector := `"registration_id":"reg-a","source_registration_id":"source-a","source_registration_generation":1`
+	decodeStructured(t, call("repository_docs_policy", `{"repo_id":"fixture-a",`+selector+`,"revision":"v1"}`), &gotPolicy)
 	if gotPolicy.CommitOID != policy.CommitOID || gotPolicy.GitStoreRef != "git-store-opaque" {
 		t.Fatalf("policy=%#v", gotPolicy)
 	}
 	var gotStatus repositorydocs.StatusResult
-	decodeStructured(t, call("repository_docs_status", `{"repo_id":"fixture-a"}`), &gotStatus)
+	decodeStructured(t, call("repository_docs_status", `{"repo_id":"fixture-a",`+selector+`}`), &gotStatus)
 	if len(gotStatus.RevisionSets) != 1 {
 		t.Fatalf("status=%#v", gotStatus)
 	}
 	var gotSearch repositorydocs.SearchResult
-	decodeStructured(t, call("repository_docs_search", `{"repo_id":"fixture-a","query":"offline","mode":"fulltext"}`), &gotSearch)
+	decodeStructured(t, call("repository_docs_search", `{"repo_id":"fixture-a",`+selector+`,"query":"offline","mode":"fulltext"}`), &gotSearch)
 	if len(gotSearch.Hits) != 1 || gotSearch.RequestedMode != repositorydocs.SearchModeFullText || gotSearch.EffectiveMode != repositorydocs.SearchModeFullText || gotSearch.Authority != "git" || gotSearch.Hits[0].Citation.Path != "docs/guide.md" {
 		t.Fatalf("search=%#v", gotSearch)
+	}
+}
+
+func TestMCPServiceJobAttachAndCancelUseCoordinatorLifecycle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	jobs := servicectl.NewJobManager("")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- (servicectl.RPCServer{Jobs: jobs}).Serve(ctx, listener)
+	}()
+	client := &servicectl.RPCClient{Network: "tcp", Address: listener.Addr().String()}
+
+	call := func(method, arguments string) (response, toolCallResult) {
+		t.Helper()
+		var output bytes.Buffer
+		server := &Server{writer: &output, stderr: io.Discard, serviceClient: func() (*servicectl.RPCClient, error) { return client, nil }}
+		id := json.RawMessage(`1`)
+		switch method {
+		case "attach":
+			server.callServiceJobAttach(context.Background(), &id, json.RawMessage(arguments))
+		case "cancel":
+			server.callServiceJobCancel(context.Background(), &id, json.RawMessage(arguments))
+		default:
+			t.Fatalf("unknown test method %q", method)
+		}
+		var rpcResponse response
+		if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &rpcResponse); err != nil {
+			t.Fatalf("decode response %q: %v", output.String(), err)
+		}
+		var result toolCallResult
+		if rpcResponse.Error == nil {
+			if err := json.Unmarshal(rpcResponse.Result, &result); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return rpcResponse, result
+	}
+
+	finishing, err := jobs.StartFake(context.Background(), servicectl.StartFakeJobRequest{Steps: 2, IntervalMS: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rpcResponse, attached := call("attach", fmt.Sprintf(`{"job_id":%q,"wait_seconds":2}`, finishing.ID))
+	if rpcResponse.Error != nil {
+		t.Fatalf("attach error=%#v", rpcResponse.Error)
+	}
+	var attachResult serviceJobAttachResult
+	decodeStructured(t, attached, &attachResult)
+	if attachResult.TimedOut || attachResult.Job.ID != finishing.ID || attachResult.Job.Status != servicectl.JobStatusSucceeded || len(attachResult.Job.Progress) == 0 {
+		t.Fatalf("attach=%#v", attachResult)
+	}
+
+	cancellable, err := jobs.StartFake(context.Background(), servicectl.StartFakeJobRequest{Steps: 100, IntervalMS: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rpcResponse, cancelled := call("cancel", fmt.Sprintf(`{"job_id":%q,"write_mode":"live"}`, cancellable.ID))
+	if rpcResponse.Error != nil {
+		t.Fatalf("cancel error=%#v", rpcResponse.Error)
+	}
+	var cancelledJob servicectl.Job
+	decodeStructured(t, cancelled, &cancelledJob)
+	if cancelledJob.ID != cancellable.ID || cancelledJob.Status != servicectl.JobStatusCancelled {
+		t.Fatalf("cancelled job=%#v", cancelledJob)
+	}
+
+	rpcResponse, _ = call("cancel", fmt.Sprintf(`{"job_id":%q,"write_mode":"dry-run"}`, cancellable.ID))
+	if rpcResponse.Error == nil || rpcResponse.Error.Code != -32602 {
+		t.Fatalf("cancel without live write mode response=%#v", rpcResponse)
+	}
+	cancel()
+	select {
+	case serveErr := <-errCh:
+		if serveErr != nil {
+			t.Fatal(serveErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("service RPC server did not stop")
+	}
+}
+
+func TestMCPServiceJobTerminalIncludesSuperseded(t *testing.T) {
+	for _, status := range []string{
+		servicectl.JobStatusSucceeded,
+		servicectl.JobStatusSuperseded,
+		servicectl.JobStatusFailed,
+		servicectl.JobStatusCancelled,
+		servicectl.JobStatusInterrupted,
+	} {
+		if !serviceJobTerminal(status) {
+			t.Fatalf("status %q must terminate attach", status)
+		}
+	}
+	if serviceJobTerminal(servicectl.JobStatusRunning) {
+		t.Fatal("running job must not terminate attach")
 	}
 }
 

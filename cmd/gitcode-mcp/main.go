@@ -598,8 +598,13 @@ func newMCPRAGSearchProvider(store cache.Store, deps StartupDeps) mcp.RAGSearchP
 }
 
 func setMCPRepositoryDocsProviders(set func(mcp.RepositoryDocsPolicyProvider, mcp.RepositoryDocsStatusProvider, mcp.RepositoryDocsSearchProvider), store *cache.SQLiteStore, deps StartupDeps) {
-	open := func(ctx context.Context) (*repositorydocs.Repository, error) {
-		return repositorydocs.OpenRepository(ctx, ".")
+	call := func(ctx context.Context, method string, req any, out any) error {
+		manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, RuntimeDir: deps.Config.Service.RuntimeDir}
+		client, err := manager.Client()
+		if err != nil {
+			return err
+		}
+		return client.Call(ctx, method, req, out)
 	}
 	policy := func(ctx context.Context, req repositorydocs.PolicyRequest) (repositorydocs.PolicyResult, error) {
 		binding, err := store.ResolveRepositoryBinding(ctx, req.RepoID)
@@ -607,11 +612,9 @@ func setMCPRepositoryDocsProviders(set func(mcp.RepositoryDocsPolicyProvider, mc
 			return repositorydocs.PolicyResult{}, err
 		}
 		req.RepoID = binding.RepoID
-		repo, err := open(ctx)
-		if err != nil {
-			return repositorydocs.PolicyResult{}, err
-		}
-		return repositorydocs.InspectPolicy(ctx, repo, req)
+		var result repositorydocs.PolicyResult
+		err = call(ctx, "RepositoryDocs.Policy", servicectl.RepositoryDocsQueryRequest{RepositoryDocsSourceSelector: servicectl.RepositoryDocsSourceSelector{RegistrationID: req.RegistrationID, SourceRegistrationID: req.SourceRegistrationID, SourceRegistrationGeneration: req.SourceRegistrationGeneration}, RepoID: req.RepoID, Revision: req.Revision, IncludeWorktree: req.IncludeWorktree}, &result)
+		return result, err
 	}
 	status := func(ctx context.Context, req repositorydocs.StatusRequest) (repositorydocs.StatusResult, error) {
 		binding, err := store.ResolveRepositoryBinding(ctx, req.RepoID)
@@ -619,11 +622,9 @@ func setMCPRepositoryDocsProviders(set func(mcp.RepositoryDocsPolicyProvider, mc
 			return repositorydocs.StatusResult{}, err
 		}
 		req.RepoID = binding.RepoID
-		repo, err := open(ctx)
-		if err != nil {
-			return repositorydocs.StatusResult{}, err
-		}
-		return repositorydocs.InspectStatus(ctx, store, repo, req)
+		var result repositorydocs.StatusResult
+		err = call(ctx, "RepositoryDocs.Status", servicectl.RepositoryDocsQueryRequest{RepositoryDocsSourceSelector: servicectl.RepositoryDocsSourceSelector{RegistrationID: req.RegistrationID, SourceRegistrationID: req.SourceRegistrationID, SourceRegistrationGeneration: req.SourceRegistrationGeneration}, RepoID: req.RepoID, Revision: req.Revision, IncludeWorktree: req.IncludeWorktree}, &result)
+		return result, err
 	}
 	search := func(ctx context.Context, req repositorydocs.SearchRequest) (repositorydocs.SearchResult, error) {
 		binding, err := store.ResolveRepositoryBinding(ctx, req.RepoID)
@@ -631,16 +632,9 @@ func setMCPRepositoryDocsProviders(set func(mcp.RepositoryDocsPolicyProvider, mc
 			return repositorydocs.SearchResult{}, err
 		}
 		req.RepoID = binding.RepoID
-		repo, err := open(ctx)
-		if err != nil {
-			return repositorydocs.SearchResult{}, err
-		}
-		req.Repository = repo
-		var provider rag.EmbeddingProvider
-		if req.Mode == "" || req.Mode == repositorydocs.SearchModeHybrid {
-			provider, _ = rag.NewEmbeddingProviderFromConfig(deps.Config, "", rag.ProviderOptions{})
-		}
-		return repositorydocs.NewRetriever(store, provider).Search(ctx, req)
+		var result repositorydocs.SearchResult
+		err = call(ctx, "RepositoryDocs.Search", servicectl.RepositoryDocsQueryRequest{RepositoryDocsSourceSelector: servicectl.RepositoryDocsSourceSelector{RegistrationID: req.RegistrationID, SourceRegistrationID: req.SourceRegistrationID, SourceRegistrationGeneration: req.SourceRegistrationGeneration}, RepoID: req.RepoID, Revision: req.Revision, IncludeWorktree: req.IncludeWorktree, Query: req.Query, Mode: req.Mode, Limit: req.Limit}, &result)
+		return result, err
 	}
 	set(policy, status, search)
 }

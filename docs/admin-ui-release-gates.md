@@ -22,7 +22,7 @@ git diff --check
 
 `npm run licenses` inspects every package locked in `web/package-lock.json`, including build/test-only dependencies. The accepted set is MIT, ISC, Apache-2.0, and BSD-3-Clause. A missing or newly introduced license fails closed. Human-readable scope notes live in `web/THIRD_PARTY_NOTICES.md`.
 
-The Playwright matrix covers authenticated loading, URL-preserved navigation and filters, Light/Dark/System themes, narrow layout, keyboard focus, reduced motion, observation-only Search Lab comparison, repository-document policy/revision/coverage, pathless registered-source reconciliation, scoped index-job navigation, exact-revision Git search and CLI handoffs, typed fallback, citations and score explanation, provider smoke, bounded repair confirmation, and idempotent interrupted retry. One live-environment smoke remains opt-in because it requires a running daemon and local browser session.
+The Playwright matrix covers authenticated loading, URL-preserved navigation and filters, Light/Dark/System themes, narrow layout, keyboard focus, reduced motion, observation-only Search Lab comparison, repository-document exact-generation policy/revision/coverage, typed exclusions and plan preview, pathless registered-source reconciliation, scoped index-job navigation, exact-revision Git search and CLI handoffs, typed fallback, citations and score explanation, provider smoke, bounded repair confirmation, and idempotent interrupted retry. One live-environment smoke remains opt-in because it requires a running daemon and local browser session.
 
 ## Resource budgets
 

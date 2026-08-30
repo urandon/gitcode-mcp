@@ -26,8 +26,10 @@ type MaintenanceControlRequest struct {
 }
 
 type RegistrationControlRequest struct {
-	RegistrationID string `json:"-"`
-	IdempotencyKey string `json:"idempotency_key"`
+	RegistrationID               string `json:"-"`
+	SourceRegistrationID         string `json:"source_registration_id,omitempty"`
+	SourceRegistrationGeneration int64  `json:"source_registration_generation,omitempty"`
+	IdempotencyKey               string `json:"idempotency_key"`
 }
 
 type BindingControlRequest struct {
@@ -56,12 +58,22 @@ type SearchCompareRequest struct {
 // daemon resolves local Git and cache authority from its private maintenance
 // registration after authenticating the loopback Admin session.
 type RepositoryDocsSearchRequest struct {
-	RegistrationID  string `json:"-"`
-	Query           string `json:"query"`
-	Revision        string `json:"revision,omitempty"`
-	Mode            string `json:"mode,omitempty"`
-	Limit           int    `json:"limit,omitempty"`
-	IncludeWorktree bool   `json:"include_worktree,omitempty"`
+	RegistrationID               string `json:"-"`
+	SourceRegistrationID         string `json:"source_registration_id,omitempty"`
+	SourceRegistrationGeneration int64  `json:"source_registration_generation,omitempty"`
+	Query                        string `json:"query"`
+	Revision                     string `json:"revision,omitempty"`
+	Mode                         string `json:"mode,omitempty"`
+	Limit                        int    `json:"limit,omitempty"`
+	IncludeWorktree              bool   `json:"include_worktree,omitempty"`
+}
+
+type RepositoryDocsPlanRequest struct {
+	RegistrationID               string `json:"-"`
+	SourceRegistrationID         string `json:"source_registration_id,omitempty"`
+	SourceRegistrationGeneration int64  `json:"source_registration_generation,omitempty"`
+	Revision                     string `json:"revision,omitempty"`
+	IncludeWorktree              bool   `json:"include_worktree,omitempty"`
 }
 
 type ProviderSmokeRequest struct {
@@ -84,6 +96,7 @@ type RegistrationControlProvider func(context.Context, RegistrationControlReques
 type BindingControlProvider func(context.Context, BindingControlRequest) (any, error)
 type SearchCompareProvider func(context.Context, SearchCompareRequest) (any, error)
 type RepositoryDocsSearchProvider func(context.Context, RepositoryDocsSearchRequest) (any, error)
+type RepositoryDocsPlanProvider func(context.Context, RepositoryDocsPlanRequest) (any, error)
 type ProviderSmokeProvider func(context.Context, ProviderSmokeRequest) (any, error)
 type RAGRepairProvider func(context.Context, RAGRepairRequest) (any, error)
 
@@ -132,6 +145,11 @@ func (c *Controller) compareSearch(w http.ResponseWriter, r *http.Request) {
 func (c *Controller) searchRepositoryDocs(w http.ResponseWriter, r *http.Request) {
 	req := RepositoryDocsSearchRequest{RegistrationID: strings.TrimSpace(r.PathValue("registration_id"))}
 	applyControl(c, w, r, c.cfg.SearchRepositoryDocs, req, false)
+}
+
+func (c *Controller) planRepositoryDocs(w http.ResponseWriter, r *http.Request) {
+	req := RepositoryDocsPlanRequest{RegistrationID: strings.TrimSpace(r.PathValue("registration_id"))}
+	applyControl(c, w, r, c.cfg.PlanRepositoryDocs, req, false)
 }
 
 func (c *Controller) indexRepositoryDocs(w http.ResponseWriter, r *http.Request) {

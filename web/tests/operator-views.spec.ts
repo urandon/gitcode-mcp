@@ -21,7 +21,7 @@ const snapshot = {
       },
       execution: { active_job_ids: ['job-000001'], contention: { state: 'waiting', operation: 'rag' }, scheduled_retry: { stage: 'rag', at: new Date(Date.now() + 60000).toISOString() }, last_stage_errors: [{ stage: 'rag', failure_class: 'cache_busy', message: 'RAG maintenance recorded cache_busy.' }] },
       collections: [{ kind: 'issue', count: 30, head: { state: 'current', status: 'fresh' }, tail: { state: 'partial', status: 'backfilling', stop_reason: 'max_pages' } }, { kind: 'wiki', count: 12, head: { state: 'current', status: 'fresh' }, tail: { state: 'current', status: 'complete' } }],
-      documentation: { state: 'partial', registered: true, reconcile_state: 'ready', target_commit_oid: '0123456789abcdef0123456789abcdef01234567', next_poll_at: new Date(Date.now() + 60_000).toISOString(), revision_set_id: 'repo-doc-set-public', commit_oid: '0123456789abcdef0123456789abcdef01234567', requested_revision: 'HEAD', policy_source: 'committed', policy_hash: 'policy-public-safe', git_store_ref: 'git-store-public', overlay: false, namespace_id: 'embns-public', eligible_files: 4, eligible_chunks: 10, embedded_chunks: 6, reused_chunks: 2, failed_chunks: 1, missing_objects: 1, updated_at: new Date().toISOString(), revision_set_count: 2, search_available: false, index_handoff: 'gitcode-mcp repo-docs index --repo example/repo --detach', search_handoff: 'gitcode-mcp repo-docs search --repo example/repo "QUERY"' },
+      documentation: { state: 'ready', registered: true, registration_id: 'reg-1', source_registration_id: 'source-docs', source_registration_generation: 3, sources: [{ source_registration_id: 'source-docs', source_registration_generation: 3, state: 'ready', git_store_ref: 'git-store-public' }, { source_registration_id: 'source-secondary', source_registration_generation: 1, state: 'registered', git_store_ref: 'git-store-secondary' }], reconcile_state: 'ready', target_commit_oid: '0123456789abcdef0123456789abcdef01234567', next_poll_at: new Date(Date.now() + 60_000).toISOString(), revision_set_id: 'repo-doc-set-public', commit_oid: '0123456789abcdef0123456789abcdef01234567', requested_revision: 'HEAD', policy_source: 'committed', policy_hash: 'policy-public-safe', git_store_ref: 'git-store-public', overlay: false, namespace_id: 'embns-public', eligible_files: 4, eligible_chunks: 10, embedded_chunks: 8, reused_chunks: 2, failed_chunks: 0, excluded_files: 2, exclusions: [{ reason: 'lfs_pointer', count: 1 }, { reason: 'too_large', count: 1 }], missing_objects: 0, updated_at: new Date().toISOString(), revision_set_count: 2, search_available: true, retention: { committed_sets_per_identity: 8, overlay_max_age_hours: 24, terminal_max_age_hours: 168, vector_byte_ceiling: 536870912 }, index_handoff: 'gitcode-mcp repo-docs index --repo example/repo --registration-id reg-1 --source-registration-id source-docs --source-registration-generation 3', search_handoff: 'gitcode-mcp repo-docs search --repo example/repo --registration-id reg-1 --source-registration-id source-docs --source-registration-generation 3 "QUERY"' },
       recent_sync_events: [{ id: 'sync-1', kind: 'issue', status: 'succeeded', completed_at: new Date().toISOString(), zero_delta: false }]
     }]
   }],
@@ -123,9 +123,19 @@ test('repository documentation cohort exposes versioned authority, coverage, and
   });
   await page.route('**/api/admin/v1/repository-docs/reg-1/search', async (route) => {
     expect(route.request().headers()['x-csrf-token']).toBe('csrf-test');
-    expect(route.request().postDataJSON()).toMatchObject({ query: 'private registration', revision: 'HEAD', mode: 'hybrid', limit: 8, include_worktree: false });
+    expect(route.request().postDataJSON()).toMatchObject({ query: 'private registration', revision: 'HEAD', mode: 'hybrid', limit: 8, include_worktree: false, source_registration_id: 'source-docs', source_registration_generation: 3 });
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: {
-      repo_id: 'example/repo', corpus_kind: 'repository_docs', query: 'private registration', requested_revision: 'HEAD', effective_revision: '0123456789abcdef0123456789abcdef01234567', requested_mode: 'hybrid', effective_mode: 'hybrid', authority: 'git', revision_set_id: 'repo-doc-set-public', policy_hash: 'policy-public-safe', policy_source: 'committed', namespace_id: 'embns-public', coverage: { state: 'ready', eligible_files: 4, eligible_chunks: 10, embedded_chunks: 8, reused_chunks: 2, failed_chunks: 0, missing_objects: 0 }, hits: [{ rank: 1, chunk_id: 'chunk-public-safe', snippet: 'The daemon resolves Git authority from a private registration.', score: 0.031, lexical_score: 1.2, semantic_score: 0.8, citation: { authority: 'git', commit_oid: '0123456789abcdef0123456789abcdef01234567', blob_oid: 'abcdef0123456789abcdef0123456789abcdef01', path: 'docs/architecture.md', line_start: 3, line_end: 4, raw_slice_digest: 'digest-public-safe' } }]
+      repo_id: 'example/repo', corpus_kind: 'repository_docs', query: 'private registration', requested_revision: 'HEAD', effective_revision: '0123456789abcdef0123456789abcdef01234567', requested_mode: 'hybrid', effective_mode: 'hybrid', authority: 'git', revision_set_id: 'repo-doc-set-public', policy_hash: 'policy-public-safe', policy_source: 'committed', namespace_id: 'embns-public', coverage: { state: 'ready', eligible_files: 4, eligible_chunks: 10, embedded_chunks: 8, reused_chunks: 2, failed_chunks: 0, missing_objects: 0 }, warning_details: [{ code: 'git_object_unavailable', message: 'Fetch the required object and retry.' }], hits: [{ rank: 1, chunk_id: 'chunk-public-safe', snippet: 'The daemon resolves Git authority from a private registration.', score: 0.031, lexical_score: 1.2, semantic_score: 0.8, citation: { authority: 'git', commit_oid: '0123456789abcdef0123456789abcdef01234567', blob_oid: 'abcdef0123456789abcdef0123456789abcdef01', path: 'docs/architecture.md', line_start: 3, line_end: 4, raw_slice_digest: 'digest-public-safe' } }]
+    } }) });
+  });
+  await page.route('**/api/admin/v1/repository-docs/reg-1/plan', async (route) => {
+    expect(route.request().headers()['x-csrf-token']).toBe('csrf-test');
+    expect(route.request().postDataJSON()).toMatchObject({ revision: 'HEAD', include_worktree: false, source_registration_id: 'source-docs', source_registration_generation: 3 });
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: {
+      repo_id: 'example/repo', commit_oid: '0123456789abcdef0123456789abcdef01234567', include_worktree: false,
+      git_store_ref: 'git-store-public', eligible_files: 4, eligible_bytes: 8192, excluded_files: 2, missing_objects: 0,
+      effective_include: ['README*', 'AGENTS.md', 'docs/**'], effective_exclude: [],
+      policy: { source: 'committed', policy_hash: 'policy-public-safe', policy: { schema: 1, enabled: true, preset: 'conventional-docs-v1', include: [], exclude: [] } }
     } }) });
   });
   await page.route('**/api/admin/v1/jobs/job-000004/cancel', async (route) => {
@@ -139,9 +149,21 @@ test('repository documentation cohort exposes versioned authority, coverage, and
   await page.goto('/?view=Caches&cache=cache-111111112222&repo=example%2Frepo&tab=documentation');
   await expect(page.getByRole('heading', { name: 'Repository documentation RAG' })).toBeVisible();
   await expect(page.getByText('Committed Git')).toBeVisible();
-  await expect(page.getByText('8/10')).toBeVisible();
+  await expect(page.getByText('10/10')).toBeVisible();
   await expect(page.getByText('repo-doc-set-public')).toBeVisible();
   await expect(page.getByText('Automatic reconciliation')).toBeVisible();
+  await expect(page.getByText('Source generation')).toBeVisible();
+  await expect(page.getByText('Derived-state retention')).toBeVisible();
+  await expect(page.getByText('8 committed sets')).toBeVisible();
+  await expect(page.getByText(/vectors ≤ 512 MiB/)).toBeVisible();
+  await expect(page.getByLabel('Git authority')).toHaveValue('source-docs');
+  await expect(page.getByText('Lfs Pointer')).toBeVisible();
+  await Promise.all([
+    page.waitForResponse((response) => response.url().endsWith('/api/admin/v1/repository-docs/reg-1/plan') && response.status() === 200),
+    page.getByRole('button', { name: 'Preview exact plan' }).click()
+  ]);
+  await expect(page.getByText('4 eligible files · 8192 bytes')).toBeVisible();
+  await expect(page.getByText('Effective include: README*, AGENTS.md, docs/** · exclude: none')).toBeVisible();
   await page.getByRole('button', { name: 'Index current HEAD' }).click();
   await expect(page.getByRole('heading', { name: 'Resolve and index current HEAD?' })).toBeVisible();
   await Promise.all([
@@ -150,6 +172,7 @@ test('repository documentation cohort exposes versioned authority, coverage, and
     page.getByRole('button', { name: 'Confirm indexing' }).click()
   ]);
   expect(indexBody.idempotency_key).toMatch(/^admin-repository_docs_index-/);
+  expect(indexBody).toMatchObject({ source_registration_id: 'source-docs', source_registration_generation: 3 });
   await page.getByLabel('Query').fill('private registration');
   await Promise.all([
     page.waitForResponse((response) => response.url().endsWith('/api/admin/v1/repository-docs/reg-1/search') && response.status() === 200),
@@ -158,6 +181,7 @@ test('repository documentation cohort exposes versioned authority, coverage, and
   await expect(page.getByText('The daemon resolves Git authority from a private registration.')).toBeVisible();
   await expect(page.getByText('docs/architecture.md:L3–L4')).toBeVisible();
   await expect(page.getByText('Digest-verified Git citation')).toBeVisible();
+  await expect(page.getByText('Git Object Unavailable')).toBeVisible();
   await expect(page.getByText("The browser sends only the opaque registration id. Filesystem authority remains in the daemon's private registry.")).toBeVisible();
   await page.getByRole('button', { name: 'Open index jobs' }).click();
   await expect(page.getByRole('heading', { name: 'Repository Docs Index' })).toBeVisible();

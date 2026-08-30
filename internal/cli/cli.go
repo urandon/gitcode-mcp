@@ -172,126 +172,130 @@ type startupPlan struct {
 }
 
 type options struct {
-	format            string
-	kind              string
-	status            string
-	provenance        string
-	searchMode        string
-	revision          string
-	includeWorktree   bool
-	limit             int
-	offset            int
-	lineStart         int
-	lineEnd           int
-	cachePath         string
-	strict            bool
-	base              string
-	head              string
-	full              bool
-	incremental       bool
-	issues            bool
-	wiki              bool
-	pulls             bool
-	comments          bool
-	issueComments     bool
-	prComments        bool
-	syncIndex         bool
-	maxPages          int
-	maxRecords        int
-	perPage           int
-	progress          string
-	quiet             bool
-	details           bool
-	input             string
-	output            string
-	owner             string
-	repo              string
-	name              string
-	id                string
-	issueID           string
-	mirrorID          string
-	after             string
-	timeoutSeconds    int
-	number            int
-	commentID         string
-	discussionID      string
-	parentID          string
-	slug              string
-	path              string
-	line              int
-	startLine         int
-	endLine           int
-	position          int
-	sha               string
-	strategy          string
-	title             string
-	body              string
-	description       string
-	dueOn             string
-	milestone         string
-	clearMilestone    bool
-	state             string
-	label             string
-	labels            string
-	tag               string
-	ref               string
-	profile           string
-	asset             multiFlag
-	idempotencyKey    string
-	dryRun            bool
-	live              bool
-	offline           bool
-	fixture           bool
-	overwrite         bool
-	redacted          bool
-	runtimeAudit      bool
-	unresolvedOnly    bool
-	apiBaseURL        string
-	scopes            string
-	alias             multiFlag
-	displayName       string
-	policy            string
-	chunkID           string
-	sourceID          string
-	recordID          string
-	snapshotID        string
-	confirm           bool
-	yes               bool
-	helpRequested     bool
-	steps             int
-	intervalMS        int
-	batchSize         int
-	topK              int
-	category          string
-	surface           string
-	reporterType      string
-	observed          string
-	expected          string
-	impact            string
-	fallbackUsed      string
-	workaround        string
-	relatedTask       string
-	acceptanceSignal  string
-	proposal          string
-	toolName          string
-	errorCode         string
-	failureClass      string
-	correlationID     string
-	jobID             string
-	duplicateOverride string
-	reproductionSteps multiFlag
-	evidence          multiFlag
-	detach            bool
-	daemon            bool
-	syncMode          string
-	ragMode           string
-	collections       string
-	noServiceInstall  bool
-	noModelDownload   bool
-	noBrowser         bool
-	admin             bool
-	adminBind         string
-	adminUnsafe       bool
+	format                       string
+	kind                         string
+	status                       string
+	provenance                   string
+	searchMode                   string
+	revision                     string
+	includeWorktree              bool
+	registrationID               string
+	sourceRegistrationID         string
+	sourceRegistrationGeneration int64
+	repositoryPath               string
+	limit                        int
+	offset                       int
+	lineStart                    int
+	lineEnd                      int
+	cachePath                    string
+	strict                       bool
+	base                         string
+	head                         string
+	full                         bool
+	incremental                  bool
+	issues                       bool
+	wiki                         bool
+	pulls                        bool
+	comments                     bool
+	issueComments                bool
+	prComments                   bool
+	syncIndex                    bool
+	maxPages                     int
+	maxRecords                   int
+	perPage                      int
+	progress                     string
+	quiet                        bool
+	details                      bool
+	input                        string
+	output                       string
+	owner                        string
+	repo                         string
+	name                         string
+	id                           string
+	issueID                      string
+	mirrorID                     string
+	after                        string
+	timeoutSeconds               int
+	number                       int
+	commentID                    string
+	discussionID                 string
+	parentID                     string
+	slug                         string
+	path                         string
+	line                         int
+	startLine                    int
+	endLine                      int
+	position                     int
+	sha                          string
+	strategy                     string
+	title                        string
+	body                         string
+	description                  string
+	dueOn                        string
+	milestone                    string
+	clearMilestone               bool
+	state                        string
+	label                        string
+	labels                       string
+	tag                          string
+	ref                          string
+	profile                      string
+	asset                        multiFlag
+	idempotencyKey               string
+	dryRun                       bool
+	live                         bool
+	offline                      bool
+	fixture                      bool
+	overwrite                    bool
+	redacted                     bool
+	runtimeAudit                 bool
+	unresolvedOnly               bool
+	apiBaseURL                   string
+	scopes                       string
+	alias                        multiFlag
+	displayName                  string
+	policy                       string
+	chunkID                      string
+	sourceID                     string
+	recordID                     string
+	snapshotID                   string
+	confirm                      bool
+	yes                          bool
+	helpRequested                bool
+	steps                        int
+	intervalMS                   int
+	batchSize                    int
+	topK                         int
+	category                     string
+	surface                      string
+	reporterType                 string
+	observed                     string
+	expected                     string
+	impact                       string
+	fallbackUsed                 string
+	workaround                   string
+	relatedTask                  string
+	acceptanceSignal             string
+	proposal                     string
+	toolName                     string
+	errorCode                    string
+	failureClass                 string
+	correlationID                string
+	jobID                        string
+	duplicateOverride            string
+	reproductionSteps            multiFlag
+	evidence                     multiFlag
+	detach                       bool
+	daemon                       bool
+	syncMode                     string
+	ragMode                      string
+	collections                  string
+	noServiceInstall             bool
+	noModelDownload              bool
+	noBrowser                    bool
+	admin                        bool
+	adminBind                    string
+	adminUnsafe                  bool
 }
 
 type multiFlag []string
@@ -650,6 +654,10 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.searchMode, "mode", "", "search mode: hybrid or full_text")
 	flags.StringVar(&opts.revision, "revision", "", "local Git revision (defaults to HEAD)")
 	flags.BoolVar(&opts.includeWorktree, "include-worktree", false, "explicitly include tracked worktree changes")
+	flags.StringVar(&opts.registrationID, "registration-id", "", "opaque repository documentation registration id")
+	flags.StringVar(&opts.sourceRegistrationID, "source-registration-id", "", "opaque repository documentation source id")
+	flags.Int64Var(&opts.sourceRegistrationGeneration, "source-registration-generation", 0, "repository documentation source generation")
+	flags.StringVar(&opts.repositoryPath, "repository-path", "", "local Git repository path for explicit source registration")
 	flags.IntVar(&opts.limit, "limit", 0, "result limit")
 	flags.IntVar(&opts.offset, "offset", 0, "result offset")
 	flags.IntVar(&opts.lineStart, "line-start", 0, "snippet start line")
@@ -846,7 +854,7 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "rag setup", "rag enable", "rag index", "rag status", "rag search":
 				printLocalSubcommandHelp(command, sub, stdout)
-			case "repo-docs policy", "repo-docs status", "repo-docs plan", "repo-docs index", "repo-docs search":
+			case "repo-docs register", "repo-docs rebind", "repo-docs policy", "repo-docs status", "repo-docs plan", "repo-docs index", "repo-docs search":
 				printLocalSubcommandHelp(command, sub, stdout)
 			default:
 				printCommandHelp(command, stdout)
@@ -1185,110 +1193,84 @@ func executeRepositoryDocsCommand(ctx context.Context, args []string, opts optio
 	if strings.TrimSpace(opts.repo) == "" {
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "repo", Message: "repository id is required"})
 	}
-	repo, err := repositorydocs.OpenRepository(ctx, ".")
-	if err != nil {
-		return writeError(stderr, opts.format, err)
-	}
-	commitOID, policy, err := repositorydocs.ResolvePolicy(ctx, repo, opts.revision, opts.includeWorktree)
-	if err != nil {
-		return writeError(stderr, opts.format, err)
-	}
-	overlayDigest, err := repositorydocs.ResolveOverlayDigest(ctx, repo, commitOID, policy.Policy, opts.includeWorktree, repositorydocs.DefaultMaxDocumentBytes)
-	if err != nil {
-		return writeError(stderr, opts.format, err)
-	}
 	eff, err := config.LoadEffective(deps.Source, config.Overrides{CachePath: opts.cachePath})
 	if err != nil {
 		return writeError(stderr, opts.format, err)
 	}
-	bindingStore, err := cache.NewSQLiteReadOnlyStore(ctx, eff.Config.CachePath)
+	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, RuntimeDir: eff.Config.Service.RuntimeDir}
+	client, err := manager.Client()
 	if err != nil {
 		return writeError(stderr, opts.format, err)
 	}
-	binding, err := bindingStore.ResolveRepositoryBinding(ctx, opts.repo)
-	_ = bindingStore.Close()
-	if err != nil {
-		return writeError(stderr, opts.format, err)
+	if sub == "register" {
+		if strings.TrimSpace(opts.repositoryPath) == "" {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "repository-path", Message: "repository path is required for explicit source registration"})
+		}
+		var entry servicectl.MaintenanceEntry
+		if err := client.Call(ctx, "RepositoryDocs.RegisterSource", servicectl.RegisterRepositoryDocsSourceRequest{RepoID: opts.repo, RepositoryPath: opts.repositoryPath, Profile: opts.profile, CachePath: eff.Config.CachePath}, &entry); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, entry, func(w io.Writer, value servicectl.MaintenanceEntry) {
+			fmt.Fprintf(w, "registration_id: %s\nrepo_id: %s\nsource_registration_id: %s\nsource_registration_generation: %d\n", value.RegistrationID, value.RepoID, value.RepositoryDocs.SourceRegistrationID, value.RepositoryDocs.SourceRegistrationGeneration)
+		})
 	}
-	opts.repo = binding.RepoID
+	if sub == "rebind" {
+		if strings.TrimSpace(opts.registrationID) == "" || opts.sourceRegistrationGeneration <= 0 || strings.TrimSpace(opts.repositoryPath) == "" {
+			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "repository-docs-source", Message: "registration-id, source-registration-generation, and repository-path are required for explicit rebind"})
+		}
+		var entry servicectl.MaintenanceEntry
+		if err := client.Call(ctx, "RepositoryDocs.RebindSource", servicectl.RepositoryDocsSourceRebindRequest{
+			RepoID: opts.repo, RegistrationID: opts.registrationID, SourceRegistrationID: opts.sourceRegistrationID, ExpectedGeneration: opts.sourceRegistrationGeneration,
+			RepositoryPath: opts.repositoryPath, Profile: opts.profile,
+		}, &entry); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, entry, func(w io.Writer, value servicectl.MaintenanceEntry) {
+			fmt.Fprintf(w, "registration_id: %s\nrepo_id: %s\nsource_registration_id: %s\nsource_registration_generation: %d\n", value.RegistrationID, value.RepoID, value.RepositoryDocs.SourceRegistrationID, value.RepositoryDocs.SourceRegistrationGeneration)
+		})
+	}
+	selector := servicectl.RepositoryDocsSourceSelector{RegistrationID: opts.registrationID, SourceRegistrationID: opts.sourceRegistrationID, SourceRegistrationGeneration: opts.sourceRegistrationGeneration}
+	if selector.RegistrationID == "" || (selector.SourceRegistrationID == "") != (selector.SourceRegistrationGeneration <= 0) {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "repository-docs-source", Message: "registration-id is required; source-registration-id and source-registration-generation must be supplied together when selecting among multiple authorities"})
+	}
+	queryRequest := servicectl.RepositoryDocsQueryRequest{RepositoryDocsSourceSelector: selector, RepoID: opts.repo, Revision: opts.revision, IncludeWorktree: opts.includeWorktree, Mode: opts.searchMode, Limit: opts.limit}
 	switch sub {
 	case "policy":
-		payload := struct {
-			RepoID          string                          `json:"repo_id"`
-			CommitOID       string                          `json:"commit_oid"`
-			Policy          repositorydocs.PolicyResolution `json:"policy"`
-			IncludeWorktree bool                            `json:"include_worktree"`
-			OverlayDigest   string                          `json:"overlay_digest,omitempty"`
-		}{opts.repo, commitOID, policy, opts.includeWorktree, overlayDigest}
-		return render(stdout, opts.format, payload, func(w io.Writer, value struct {
-			RepoID          string                          `json:"repo_id"`
-			CommitOID       string                          `json:"commit_oid"`
-			Policy          repositorydocs.PolicyResolution `json:"policy"`
-			IncludeWorktree bool                            `json:"include_worktree"`
-			OverlayDigest   string                          `json:"overlay_digest,omitempty"`
-		}) {
+		var value repositorydocs.PolicyResult
+		if err := client.Call(ctx, "RepositoryDocs.Policy", queryRequest, &value); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, value, func(w io.Writer, value repositorydocs.PolicyResult) {
 			fmt.Fprintf(w, "repo_id: %s\ncommit_oid: %s\npolicy_status: %s\npolicy_source: %s\npolicy_hash: %s\ninclude_worktree: %t\n", value.RepoID, value.CommitOID, value.Policy.Status, value.Policy.Source, value.Policy.PolicyHash, value.IncludeWorktree)
 			if value.OverlayDigest != "" {
 				fmt.Fprintf(w, "overlay_digest: %s\n", value.OverlayDigest)
 			}
 		})
 	case "plan":
-		entries, listErr := repo.ListTree(ctx, commitOID)
-		if listErr != nil {
-			return writeError(stderr, opts.format, listErr)
+		var value repositorydocs.PlanResult
+		if err := client.Call(ctx, "RepositoryDocs.Plan", queryRequest, &value); err != nil {
+			return writeError(stderr, opts.format, err)
 		}
-		plan := repositoryDocsPlan{RepoID: opts.repo, CommitOID: commitOID, Policy: policy, IncludeWorktree: opts.includeWorktree, OverlayDigest: overlayDigest}
-		for _, entry := range entries {
-			if entry.Type == "blob" && entry.Mode != "120000" && entry.Size >= 0 && entry.Size <= repositorydocs.DefaultMaxDocumentBytes && policy.Policy.Matches(entry.Path) {
-				plan.EligibleFiles++
-				plan.EligibleBytes += entry.Size
-			}
-		}
-		if opts.includeWorktree {
-			changes, changeErr := repo.TrackedChanges(ctx, repositorydocs.DefaultMaxDocumentBytes)
-			if changeErr != nil {
-				return writeError(stderr, opts.format, changeErr)
-			}
-			plan.TrackedChanges = len(changes)
-		}
-		return render(stdout, opts.format, plan, func(w io.Writer, value repositoryDocsPlan) {
+		return render(stdout, opts.format, value, func(w io.Writer, value repositorydocs.PlanResult) {
 			fmt.Fprintf(w, "repo_id: %s\ncommit_oid: %s\npolicy_hash: %s\neligible_files: %d\neligible_bytes: %d\ninclude_worktree: %t\ntracked_changes: %d\n", value.RepoID, value.CommitOID, value.Policy.PolicyHash, value.EligibleFiles, value.EligibleBytes, value.IncludeWorktree, value.TrackedChanges)
 		})
 	case "status":
-		store, openErr := cache.NewSQLiteReadOnlyStore(ctx, eff.Config.CachePath)
-		if openErr != nil {
-			return writeError(stderr, opts.format, openErr)
+		var value repositorydocs.StatusResult
+		if err := client.Call(ctx, "RepositoryDocs.Status", queryRequest, &value); err != nil {
+			return writeError(stderr, opts.format, err)
 		}
-		defer store.Close()
-		sets, listErr := store.ListRepositoryDocRevisionSets(ctx, cache.RepositoryDocRevisionSetFilter{RepoID: opts.repo, GitStoreRef: repo.GitStoreRef, CommitOID: commitOID, PolicyHash: policy.PolicyHash, OverlayDigest: overlayDigest, ExactOverlay: true, ChunkPolicyID: repositorydocs.DefaultChunkPolicyID, Limit: 20})
-		if listErr != nil {
-			return writeError(stderr, opts.format, listErr)
-		}
-		status := repositoryDocsStatus{RepoID: opts.repo, CommitOID: commitOID, Policy: policy, IncludeWorktree: opts.includeWorktree, OverlayDigest: overlayDigest, RevisionSets: sets}
-		return render(stdout, opts.format, status, func(w io.Writer, value repositoryDocsStatus) {
+		return render(stdout, opts.format, value, func(w io.Writer, value repositorydocs.StatusResult) {
 			fmt.Fprintf(w, "repo_id: %s\ncommit_oid: %s\npolicy_status: %s\nrevision_sets: %d\n", value.RepoID, value.CommitOID, value.Policy.Status, len(value.RevisionSets))
 			for _, set := range value.RevisionSets {
 				fmt.Fprintf(w, "set: %s state=%s coverage=%d/%d reused=%d failed=%d missing=%d\n", set.ID, set.State, set.EmbeddedChunks+set.ReusedChunks, set.EligibleChunks, set.ReusedChunks, set.FailedChunks, set.MissingObjects)
 			}
 		})
 	case "index":
-		manager := servicectl.Manager{
-			Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version,
-			RuntimeDir: eff.Config.Service.RuntimeDir,
-		}
-		client, clientErr := manager.Client()
-		if clientErr != nil {
-			return writeError(stderr, opts.format, clientErr)
-		}
-		workingDirectory, pathErr := os.Getwd()
-		if pathErr != nil {
-			return writeError(stderr, opts.format, pathErr)
-		}
 		var job servicectl.Job
 		request := servicectl.StartRepositoryDocsIndexJobRequest{
-			RepoID: opts.repo, RepositoryPath: workingDirectory, Revision: opts.revision,
+			RepoID: opts.repo, RegistrationID: selector.RegistrationID, SourceRegistrationID: selector.SourceRegistrationID, SourceRegistrationGeneration: selector.SourceRegistrationGeneration, Revision: opts.revision,
 			IncludeWorktree: opts.includeWorktree, Profile: opts.profile,
-			CachePath: eff.Config.CachePath, BatchSize: opts.batchSize,
+			BatchSize: opts.batchSize,
 		}
 		if err := client.Call(ctx, "Jobs.StartRepositoryDocsIndex", request, &job); err != nil {
 			return writeError(stderr, opts.format, err)
@@ -1301,30 +1283,18 @@ func executeRepositoryDocsCommand(ctx context.Context, args []string, opts optio
 		if len(args) < 2 {
 			return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "query", Message: "query is required"})
 		}
-		store, openErr := cache.NewSQLiteReadOnlyStore(ctx, eff.Config.CachePath)
-		if openErr != nil {
-			return writeError(stderr, opts.format, openErr)
-		}
-		defer store.Close()
-		mode := strings.ReplaceAll(strings.ToLower(opts.searchMode), "_", "")
-		if mode == "" {
-			mode = repositorydocs.SearchModeHybrid
-		}
-		var provider rag.EmbeddingProvider
-		if mode != repositorydocs.SearchModeFullText {
-			provider, _ = rag.NewEmbeddingProviderFromConfig(eff.Config, opts.profile, rag.ProviderOptions{})
-		}
-		result, searchErr := repositorydocs.NewRetriever(store, provider).Search(ctx, repositorydocs.SearchRequest{RepoID: opts.repo, Repository: repo, Revision: opts.revision, IncludeWorktree: opts.includeWorktree, Query: strings.Join(args[1:], " "), Mode: mode, Limit: opts.limit})
-		if searchErr != nil {
-			return writeError(stderr, opts.format, searchErr)
+		queryRequest.Query = strings.Join(args[1:], " ")
+		var result repositorydocs.SearchResult
+		if err := client.Call(ctx, "RepositoryDocs.Search", queryRequest, &result); err != nil {
+			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, func(w io.Writer, value repositorydocs.SearchResult) {
 			fmt.Fprintf(w, "repo_id: %s\ncorpus_kind: %s\neffective_revision: %s\nrequested_mode: %s\neffective_mode: %s\nauthority: %s\nrevision_set_id: %s\nresults: %d\n", value.RepoID, value.CorpusKind, value.EffectiveRevision, value.RequestedMode, value.EffectiveMode, value.Authority, value.RevisionSetID, len(value.Hits))
 			for _, hit := range value.Hits {
 				fmt.Fprintf(w, "%d. %s:%d-%d score=%.6f authority=%s\n%s\n", hit.Rank, hit.Citation.Path, hit.Citation.LineStart, hit.Citation.LineEnd, hit.Score, hit.Citation.Authority, hit.Snippet)
 			}
-			for _, warning := range value.Warnings {
-				fmt.Fprintf(w, "warning: %s\n", warning)
+			for _, warning := range value.WarningDetails {
+				fmt.Fprintf(w, "warning: %s: %s\n", warning.Code, warning.Message)
 			}
 		})
 	default:
@@ -4124,6 +4094,10 @@ func failureClass(err error) string {
 	if errors.As(err, &schemaErr) {
 		return "cache_schema_blocked"
 	}
+	var coded interface{ DiagnosticCode() string }
+	if errors.As(err, &coded) && strings.TrimSpace(coded.DiagnosticCode()) != "" {
+		return strings.TrimSpace(coded.DiagnosticCode())
+	}
 	if isStrictFinding(err) {
 		return "validation_failed"
 	}
@@ -5186,8 +5160,10 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "repo-docs":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s SUBCOMMAND --repo REPO [flags]\n\n", command)
-		fmt.Fprintln(w, "Inspect, index, and search versioned repository documentation from the local Git object database.")
+		fmt.Fprintln(w, "Inspect, index, and search versioned repository documentation through an explicitly registered private Git authority.")
 		fmt.Fprintln(w, "Subcommands:")
+		fmt.Fprintln(w, "  register    explicitly register a private local Git authority")
+		fmt.Fprintln(w, "  rebind      compare-and-swap the private Git authority at an exact generation")
 		fmt.Fprintln(w, "  policy      resolve the repository-owned policy at one revision")
 		fmt.Fprintln(w, "  plan        estimate eligible committed documents without embedding")
 		fmt.Fprintln(w, "  status      inspect revision-set identity and coverage")
@@ -5195,6 +5171,10 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  search      search one revision with verified Git citations")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO          configured repository id")
+		fmt.Fprintln(w, "  --repository-path PATH  local Git path (register only)")
+		fmt.Fprintln(w, "  --registration-id ID   opaque daemon registration id")
+		fmt.Fprintln(w, "  --source-registration-id ID  opaque private Git authority id")
+		fmt.Fprintln(w, "  --source-registration-generation N  exact authority generation")
 		fmt.Fprintln(w, "  --revision REV       local Git revision (default HEAD)")
 		fmt.Fprintln(w, "  --include-worktree   explicitly include tracked dirty files")
 		fmt.Fprintln(w, "  --mode MODE          hybrid or fulltext (search)")
@@ -5330,7 +5310,7 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "  --policy POLICY     chunk policy namespace")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
-	case "repo-docs policy", "repo-docs status", "repo-docs plan", "repo-docs index", "repo-docs search":
+	case "repo-docs register", "repo-docs rebind", "repo-docs policy", "repo-docs status", "repo-docs plan", "repo-docs index", "repo-docs search":
 		printCommandHelp("repo-docs", w)
 	case "service install":
 		fmt.Fprintln(w, "Usage: gitcode-mcp service install [--overwrite] [--format FORMAT]")

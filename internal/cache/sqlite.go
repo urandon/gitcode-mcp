@@ -14,12 +14,13 @@ import (
 )
 
 type SQLiteStore struct {
-	db         *sql.DB
-	useFTS     bool
-	forceNoFTS bool
-	cachePath  string
-	lockPath   string
-	cacheRef   string
+	db            *sql.DB
+	useFTS        bool
+	forceNoFTS    bool
+	cachePath     string
+	lockPath      string
+	cacheRef      string
+	ephemeralLock bool
 }
 
 type LockHandle struct {
@@ -62,6 +63,12 @@ func newSQLiteStore(ctx context.Context, dataSourceName string, forceNoFTS bool)
 	cachePath := cachePathForDataSource(dataSourceName)
 	lockPath := writerLockPath(cachePath)
 	store := &SQLiteStore{db: db, forceNoFTS: forceNoFTS, cachePath: cachePath, lockPath: lockPath}
+	if dataSourceName == ":memory:" {
+		// Independent in-memory stores do not share state and therefore must not
+		// contend on the process-global fallback lock used for legacy callers.
+		store.lockPath = filepath.Join(os.TempDir(), fmt.Sprintf("gitcode-mcp-memory-writer-%p.lock", store))
+		store.ephemeralLock = true
+	}
 	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -183,7 +190,11 @@ func (s *SQLiteStore) loadCacheRef(ctx context.Context) {
 }
 
 func (s *SQLiteStore) Close() error {
-	return s.db.Close()
+	err := s.db.Close()
+	if s.ephemeralLock {
+		_ = os.Remove(s.lockPath)
+	}
+	return err
 }
 
 func marshalJSON(v any) (string, error) {

@@ -42,10 +42,20 @@ func TestAdminRepositoryDocsSearchUsesPrivateRegistrationAuthority(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, registered, err := maintenance.RegisterRepositoryDocsSource(ctx, entry.CacheUUID, entry.RepoID, repositoryPath, ""); err != nil || !registered {
+	registeredEntry, registered, err := maintenance.RegisterRepositoryDocsSource(ctx, entry.CacheUUID, entry.RepoID, repositoryPath, "")
+	if err != nil || !registered {
 		t.Fatalf("register=%v err=%v", registered, err)
 	}
+	entry = registeredEntry
 	controls := NewAdminControlManager(manager, maintenance, jobs, NewAdminControlReceiptManager(""))
+	planned, err := controls.PlanRepositoryDocs(ctx, adminhttp.RepositoryDocsPlanRequest{RegistrationID: entry.RegistrationID, Revision: "HEAD"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := planned.(repositorydocs.PlanResult)
+	if plan.RepoID != "owner/repo" || plan.EligibleFiles != 1 || plan.CommitOID == "" {
+		t.Fatalf("plan=%+v", plan)
+	}
 	searched, err := controls.SearchRepositoryDocs(ctx, adminhttp.RepositoryDocsSearchRequest{
 		RegistrationID: entry.RegistrationID, Query: "private registration", Revision: "HEAD", Mode: "fulltext", Limit: 5,
 	})
@@ -92,9 +102,69 @@ func TestAdminRepositoryDocsSearchUsesPrivateRegistrationAuthority(t *testing.T)
 			t.Fatalf("repository docs control started unrelated work: %+v", job)
 		}
 	}
+	manager.AdminCachePath = cachePath
+	snapshot, err := manager.adminObservation(ctx, jobs, maintenance, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	docs := snapshot.Caches[0].Repositories[0].Documentation
+	if docs == nil || !docs.SearchAvailable || docs.SourceID != entry.RepositoryDocs.SourceRegistrationID || docs.SourceGeneration != entry.RepositoryDocs.SourceRegistrationGeneration || !strings.Contains(docs.IndexHandoff, "--source-registration-generation") {
+		t.Fatalf("documentation observation=%+v entries=%+v cache=%q", docs, maintenance.adminEntries(), cachePath)
+	}
+	public, err := json.Marshal(docs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(public), repositoryPath) || strings.Contains(string(public), cachePath) {
+		t.Fatalf("documentation observation leaked private authority: %s", public)
+	}
 	replayed, err := controls.IndexRepositoryDocs(ctx, indexRequest)
 	if err != nil || replayed.(map[string]any)["replayed"] != true || replayed.(map[string]any)["job_id"] != jobID {
 		t.Fatalf("replay=%+v err=%v", replayed, err)
+	}
+}
+
+func TestRPCRepositoryDocsRegistrationAllowsFullTextWithoutEmbeddingProvider(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	repositoryPath := createRepositoryDocsRegistrationRepo(t, filepath.Join(dir, "repo"), "full text works without embeddings")
+	cfg := config.Default()
+	cfg.CachePath = cachePath
+	cfg.LockPath = cachePath + ".lock"
+	cfg.RAG.DefaultProfile = ""
+	cfg.RAG.Indexing.Profile = ""
+	cfg.RAG.Profiles = nil
+	cfg.RAG.Providers = nil
+	manager := Manager{EffectiveConfig: &cfg}
+	jobs := NewJobManager("")
+	maintenance := NewMaintenanceManager(manager, jobs, filepath.Join(dir, "managed-caches.json"))
+	enroll := testMaintenanceEnrollRequest(cachePath, "fulltext-no-provider", MaintenancePolicy{SyncMode: "off"})
+	enroll.ConfigSnapshot = cfg
+	enroll.ConfigHash = maintenanceHash(cfg)
+	entry, err := maintenance.Enroll(ctx, enroll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := RPCServer{Manager: manager, Jobs: jobs, Maintenance: maintenance}
+	registered, err := server.registerRepositoryDocsSource(ctx, RegisterRepositoryDocsSourceRequest{RepoID: "owner/repo", RepositoryPath: repositoryPath, CachePath: cachePath})
+	if err != nil || registered.RepositoryDocs == nil {
+		t.Fatalf("registered=%+v err=%v", registered, err)
+	}
+	result, err := server.repositoryDocsSearch(ctx, RepositoryDocsQueryRequest{RepositoryDocsSourceSelector: RepositoryDocsSourceSelector{RegistrationID: entry.RegistrationID, SourceRegistrationID: registered.RepositoryDocs.SourceRegistrationID, SourceRegistrationGeneration: registered.RepositoryDocs.SourceRegistrationGeneration}, RepoID: "owner/repo", Query: "without embeddings", Mode: repositorydocs.SearchModeFullText})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.EffectiveMode != repositorydocs.SearchModeFullText || len(result.Hits) != 1 {
+		t.Fatalf("fulltext result=%+v", result)
 	}
 }
 

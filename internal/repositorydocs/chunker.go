@@ -10,9 +10,12 @@ import (
 )
 
 const (
-	DefaultChunkPolicyID = "repo-doc-markdown-v1"
-	DefaultChunkBytes    = 4096
+	DefaultChunkBytes = 4096
 )
+
+// DefaultChunkPolicyID identifies the complete default processing policy, not
+// just the chunker family. Custom chunk sizes and guards receive distinct IDs.
+var DefaultChunkPolicyID = DefaultProcessingPolicy().ID()
 
 type Chunk struct {
 	ID                   string
@@ -28,9 +31,15 @@ type Chunk struct {
 // ChunkDocument creates deterministic, bounded chunks. Source text lives only
 // in the returned in-memory value and must be discarded after provider use.
 func ChunkDocument(objectIdentity string, data []byte, maxBytes int) ([]Chunk, error) {
-	if maxBytes <= 0 {
-		maxBytes = DefaultChunkBytes
-	}
+	return ChunkDocumentWithPolicy(objectIdentity, data, ProcessingPolicyFor(0, maxBytes))
+}
+
+// ChunkDocumentWithPolicy creates chunks whose IDs name the exact processing
+// policy that produced them.
+func ChunkDocumentWithPolicy(objectIdentity string, data []byte, policy ProcessingPolicy) ([]Chunk, error) {
+	policy = policy.normalized()
+	maxBytes := policy.ChunkBytes
+	policyID := policy.ID()
 	if !utf8.Valid(data) {
 		return nil, fmt.Errorf("repository docs: document is not valid UTF-8")
 	}
@@ -67,7 +76,7 @@ func ChunkDocument(objectIdentity string, data []byte, maxBytes int) ([]Chunk, e
 			if len(raw) > 0 && raw[len(raw)-1] == '\n' && lineEnd > lineStart {
 				lineEnd--
 			}
-			idSum := sha256.Sum256([]byte(strings.Join([]string{objectIdentity, fmt.Sprint(start), fmt.Sprint(end), rawDigest, inputDigest, DefaultChunkPolicyID}, "\x00")))
+			idSum := sha256.Sum256([]byte(strings.Join([]string{objectIdentity, fmt.Sprint(start), fmt.Sprint(end), rawDigest, inputDigest, policyID}, "\x00")))
 			chunks = append(chunks, Chunk{ID: "repo-doc-chunk-" + hex.EncodeToString(idSum[:]), ByteStart: start, ByteEnd: end, LineStart: lineStart, LineEnd: lineEnd, RawSliceDigest: rawDigest, EmbeddingInputDigest: inputDigest, Text: normalized})
 		}
 		start = end

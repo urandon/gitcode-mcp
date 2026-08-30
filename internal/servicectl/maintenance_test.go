@@ -1,6 +1,7 @@
 package servicectl
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -102,7 +103,8 @@ func TestMaintenancePolicyChangeClearsInheritedSyncFailureAndIgnoresDeselectedFr
 		t.Fatal(err)
 	}
 	store.Close()
-	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), filepath.Join(dir, "managed-caches.json"))
+	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), jobs, filepath.Join(dir, "managed-caches.json"))
 	before, err := maintenance.Enroll(ctx, testMaintenanceEnrollRequest(cachePath, "enroll-wiki", MaintenancePolicy{SyncEnabled: true, SyncMode: "head-and-backfill", Issues: true, Wiki: true}))
 	if err != nil {
 		t.Fatal(err)
@@ -255,6 +257,448 @@ func TestMaintenancePollsRegisteredRepositoryDocsSource(t *testing.T) {
 	if err != nil || len(reloadedResult.JobsStarted) != 0 || reloadedResult.Entries[0].RepositoryDocs.State != "ready" {
 		t.Fatalf("restart reconcile=%+v err=%v", reloadedResult, err)
 	}
+}
+
+func TestRepositoryDocsSourceRegistrationSupportsMultipleAuthorities(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	repoA := createRepositoryDocsRegistrationRepo(t, filepath.Join(dir, "repo-a"), "alpha")
+	repoB := createRepositoryDocsRegistrationRepo(t, filepath.Join(dir, "repo-b"), "beta")
+	registryPath := filepath.Join(dir, "managed-caches.json")
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), registryPath)
+	entry, err := maintenance.Enroll(ctx, testMaintenanceEnrollRequest(cachePath, "enroll-source-conflict", MaintenancePolicy{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, ok, err := maintenance.RegisterRepositoryDocsSource(ctx, identity.UUID, entry.RepoID, repoA, "profile-a")
+	if err != nil || !ok || registered.RepositoryDocs == nil || registered.RepositoryDocs.SourceRegistrationID == "" || registered.RepositoryDocs.SourceRegistrationGeneration < 1 {
+		t.Fatalf("registered=%+v ok=%v err=%v", registered, ok, err)
+	}
+	sole, err := maintenance.repositoryDocsSourceForAdmin(entry.RegistrationID)
+	if err != nil || sole.SourceRegistrationID != registered.RepositoryDocs.SourceRegistrationID {
+		t.Fatalf("sole no-selector source=%+v err=%v", sole, err)
+	}
+
+	second, ok, err := maintenance.RegisterRepositoryDocsSource(ctx, identity.UUID, entry.RepoID, repoB, "profile-a")
+	if err != nil || !ok || second.RepositoryDocs == nil || second.RepositoryDocs.SourceRegistrationID == registered.RepositoryDocs.SourceRegistrationID {
+		t.Fatalf("second=%+v ok=%v err=%v", second, ok, err)
+	}
+	replayed, ok, err := maintenance.RegisterRepositoryDocsSource(ctx, identity.UUID, entry.RepoID, repoB, "profile-a")
+	if err != nil || !ok || replayed.RepositoryDocs.SourceRegistrationID != second.RepositoryDocs.SourceRegistrationID || replayed.RepositoryDocs.SourceRegistrationGeneration != second.RepositoryDocs.SourceRegistrationGeneration {
+		t.Fatalf("replayed=%+v ok=%v err=%v", replayed, ok, err)
+	}
+	_, err = maintenance.repositoryDocsSourceForAdmin(entry.RegistrationID)
+	var ambiguous RepositoryDocsSourceAmbiguousError
+	if !errors.As(err, &ambiguous) || ambiguous.DiagnosticCode() != "repository_docs_source_ambiguous" {
+		t.Fatalf("no-selector error=%T %v", err, err)
+	}
+	selected, err := maintenance.repositoryDocsSourceForSelector(RepositoryDocsSourceSelector{RegistrationID: entry.RegistrationID, SourceRegistrationID: registered.RepositoryDocs.SourceRegistrationID, SourceRegistrationGeneration: registered.RepositoryDocs.SourceRegistrationGeneration})
+	if err != nil || selected.SourceRegistrationID != registered.RepositoryDocs.SourceRegistrationID {
+		t.Fatalf("selected=%+v err=%v", selected, err)
+	}
+	listed, err := maintenance.List(ctx)
+	if err != nil || len(listed.Entries) != 1 || listed.Entries[0].RepositoryDocs == nil || len(listed.Entries[0].RepositoryDocsSources) != 2 {
+		t.Fatalf("listed=%+v err=%v", listed, err)
+	}
+	if got := listed.Entries[0]; got.Generation <= registered.Generation {
+		t.Fatalf("second authority did not advance registration generation: before=%+v after=%+v", registered, got)
+	}
+	disk, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(disk, []byte(repoA)) || !bytes.Contains(disk, []byte(repoB)) {
+		t.Fatalf("registry did not retain both private bindings: %s", disk)
+	}
+	reloaded := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), registryPath)
+	if err := reloaded.Load(); err != nil {
+		t.Fatal(err)
+	}
+	replayedAfterRestart, ok, err := reloaded.RegisterRepositoryDocsSource(ctx, identity.UUID, entry.RepoID, repoB, "profile-a")
+	if err != nil || !ok || replayedAfterRestart.RepositoryDocs.SourceRegistrationID != second.RepositoryDocs.SourceRegistrationID || replayedAfterRestart.RepositoryDocs.SourceRegistrationGeneration != second.RepositoryDocs.SourceRegistrationGeneration {
+		t.Fatalf("restart replay=%+v ok=%v err=%v", replayedAfterRestart, ok, err)
+	}
+}
+
+func TestRepositoryDocsSourceRebindUsesGenerationCAS(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	repoA := createRepositoryDocsRegistrationRepo(t, filepath.Join(dir, "repo-a"), "alpha")
+	repoB := createRepositoryDocsRegistrationRepo(t, filepath.Join(dir, "repo-b"), "beta")
+	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), jobs, filepath.Join(dir, "managed-caches.json"))
+	entry, err := maintenance.Enroll(ctx, testMaintenanceEnrollRequest(cachePath, "enroll-rebind", MaintenancePolicy{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, _, err := maintenance.RegisterRepositoryDocsSource(ctx, identity.UUID, entry.RepoID, repoA, "profile-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, created, err := jobs.createCoalescedJobWithIntent(
+		RepositoryDocsIndexJobType, registered.RepoID, "profile-a", 0, "old-source-work", registered.CacheUUID, registered.RegistrationID, "namespace-old",
+		JobRecoveryIntent{SourceRegistrationID: registered.RepositoryDocs.SourceRegistrationID, SourceRegistrationGeneration: registered.RepositoryDocs.SourceRegistrationGeneration, ExpectedRevisionSetID: "set-old"},
+		func() {},
+	)
+	if err != nil || !created {
+		t.Fatalf("old generation job created=%v err=%v", created, err)
+	}
+	maintenance.mu.Lock()
+	maintenance.admissions[registered.RegistrationID] = repositoryDocsAdmissionIntent{
+		RegistrationID: registered.RegistrationID, SourceRegistrationID: registered.RepositoryDocs.SourceRegistrationID,
+		SourceRegistrationGeneration: registered.RepositoryDocs.SourceRegistrationGeneration,
+		RepoID:                       registered.RepoID, WorkKey: "old-source-pending-work", ExpectedRevisionSetID: "set-old-pending", CreatedAt: time.Now().UTC(),
+	}
+	if err := maintenance.saveLocked(); err != nil {
+		maintenance.mu.Unlock()
+		t.Fatal(err)
+	}
+	maintenance.mu.Unlock()
+
+	_, err = maintenance.RebindRepositoryDocsSource(ctx, RepositoryDocsSourceRebindRequest{
+		RegistrationID: registered.RegistrationID, ExpectedGeneration: registered.RepositoryDocs.SourceRegistrationGeneration - 1,
+		RepositoryPath: repoB, Profile: "profile-b",
+	})
+	var generationConflict RepositoryDocsSourceGenerationConflictError
+	if !errors.As(err, &generationConflict) || generationConflict.DiagnosticCode() != "repository_docs_source_generation_conflict" {
+		t.Fatalf("stale rebind error=%T %v", err, err)
+	}
+	rebound, err := maintenance.RebindRepositoryDocsSource(ctx, RepositoryDocsSourceRebindRequest{
+		RegistrationID: registered.RegistrationID, ExpectedGeneration: registered.RepositoryDocs.SourceRegistrationGeneration,
+		RepositoryPath: repoB, Profile: "profile-b",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rebound.RepositoryDocs.SourceRegistrationID != registered.RepositoryDocs.SourceRegistrationID || rebound.RepositoryDocs.SourceRegistrationGeneration != registered.RepositoryDocs.SourceRegistrationGeneration+1 || rebound.RepositoryDocs.GitStoreRef == registered.RepositoryDocs.GitStoreRef {
+		t.Fatalf("rebound=%+v registered=%+v", rebound, registered)
+	}
+	oldJob, ok := jobs.ActiveWork("old-source-work")
+	if ok {
+		t.Fatalf("old source generation remained active after rebind: %+v", oldJob)
+	}
+	listedJobs := jobs.List()
+	if len(listedJobs) != 1 || listedJobs[0].Status != JobStatusSuperseded || listedJobs[0].ErrorClass != "repository_docs_source_generation_superseded" {
+		t.Fatalf("old source generation was not durably fenced: %+v", listedJobs)
+	}
+	if pending, ok := maintenance.repositoryDocsAdmission(registered.RegistrationID); ok {
+		t.Fatalf("old source generation admission survived rebind: %+v", pending)
+	}
+	registryBytes, err := os.ReadFile(maintenance.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(registryBytes, []byte("set-old-pending")) {
+		t.Fatalf("old source generation admission remained durable after rebind: %s", registryBytes)
+	}
+	replayed, err := maintenance.RebindRepositoryDocsSource(ctx, RepositoryDocsSourceRebindRequest{
+		RegistrationID: rebound.RegistrationID, ExpectedGeneration: rebound.RepositoryDocs.SourceRegistrationGeneration,
+		RepositoryPath: repoB, Profile: "profile-b",
+	})
+	if err != nil || replayed.RepositoryDocs.SourceRegistrationGeneration != rebound.RepositoryDocs.SourceRegistrationGeneration {
+		t.Fatalf("idempotent rebind=%+v err=%v", replayed, err)
+	}
+	repoC := createRepositoryDocsRegistrationRepo(t, filepath.Join(dir, "repo-c"), "gamma")
+	repoD := createRepositoryDocsRegistrationRepo(t, filepath.Join(dir, "repo-d"), "delta")
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for _, repositoryPath := range []string{repoC, repoD} {
+		repositoryPath := repositoryPath
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, rebindErr := maintenance.RebindRepositoryDocsSource(ctx, RepositoryDocsSourceRebindRequest{
+				RegistrationID: rebound.RegistrationID, ExpectedGeneration: rebound.RepositoryDocs.SourceRegistrationGeneration,
+				RepositoryPath: repositoryPath, Profile: "profile-b",
+			})
+			errs <- rebindErr
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	succeeded, conflicted := 0, 0
+	for err := range errs {
+		if err == nil {
+			succeeded++
+			continue
+		}
+		var stale RepositoryDocsSourceGenerationConflictError
+		if errors.As(err, &stale) {
+			conflicted++
+			continue
+		}
+		t.Fatalf("concurrent rebind error=%T %v", err, err)
+	}
+	if succeeded != 1 || conflicted != 1 {
+		t.Fatalf("concurrent rebind outcomes succeeded=%d conflicted=%d", succeeded, conflicted)
+	}
+}
+
+func TestRepositoryDocsPendingAdmissionReplaysAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	repoPath := createRepositoryDocsRegistrationRepo(t, filepath.Join(dir, "repo"), "restart replay")
+	cfg := adminFakeRAGConfig()
+	cfg.CachePath = cachePath
+	cfg.LockPath = cachePath + ".lock"
+	manager := Manager{EffectiveConfig: &cfg}
+	registryPath := filepath.Join(dir, "managed-caches.json")
+	jobsPath := filepath.Join(dir, "jobs.json")
+	beforeJobs := NewJobManager(jobsPath)
+	before := NewMaintenanceManager(manager, beforeJobs, registryPath)
+	enroll := testMaintenanceEnrollRequest(cachePath, "pending-restart", MaintenancePolicy{})
+	enroll.ConfigSnapshot = cfg
+	enroll.ConfigHash = maintenanceHash(cfg)
+	if _, err := before.Enroll(ctx, enroll); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := prepareRepositoryDocsIndex(ctx, manager, StartRepositoryDocsIndexJobRequest{RepoID: "owner/repo", RepositoryPath: repoPath, CachePath: cachePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, prepared, registered, err := before.registerAndRecordRepositoryDocsAdmission(prepared)
+	if err != nil || !registered || entry.RepositoryDocs == nil {
+		t.Fatalf("registration=%+v registered=%v err=%v", entry, registered, err)
+	}
+	wantSetID := repositoryDocsRevisionSetIdentity(prepared.request, prepared.repository, prepared.policy, prepared.namespaceID).ID()
+	wantWorkKey := repositoryDocsIndexWorkKey(prepared.request, prepared.repository, prepared.policy, prepared.namespaceID)
+	queuedBeforeRestart, created, err := beforeJobs.createCoalescedJobWithIntent(
+		RepositoryDocsIndexJobType, prepared.request.RepoID, prepared.request.Profile, 0, wantWorkKey, prepared.request.CacheUUID, prepared.request.RegistrationID, prepared.namespaceID,
+		JobRecoveryIntent{SourceRegistrationID: prepared.request.SourceRegistrationID, SourceRegistrationGeneration: prepared.request.SourceRegistrationGeneration, ExpectedRevisionSetID: wantSetID}, func() {},
+	)
+	if err != nil || !created {
+		t.Fatalf("durable queued job created=%v err=%v", created, err)
+	}
+
+	afterJobs := NewJobManager(jobsPath)
+	if err := afterJobs.LoadAndMarkInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	interrupted, ok := afterJobs.Get(queuedBeforeRestart.ID)
+	if !ok || interrupted.Status != JobStatusInterrupted || interrupted.WorkRef != queuedBeforeRestart.WorkRef {
+		t.Fatalf("restart did not retain interrupted durable work identity: before=%+v after=%+v", queuedBeforeRestart, interrupted)
+	}
+	after := NewMaintenanceManager(manager, afterJobs, registryPath)
+	if err := after.Load(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := after.ReconcileRegistration(ctx, entry.RegistrationID)
+	if err != nil || len(result.JobsStarted) != 1 {
+		t.Fatalf("reconcile=%+v err=%v", result, err)
+	}
+	var job Job
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		job, _ = afterJobs.Get(result.JobsStarted[0])
+		if jobTerminalStatus(job.Status) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("replayed job did not terminate: %+v", job)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if job.ID != queuedBeforeRestart.ID || job.WorkRef != queuedBeforeRestart.WorkRef || job.ExpectedRevisionSetID != wantSetID || job.SourceRegistrationID != entry.RepositoryDocs.SourceRegistrationID || job.SourceRegistrationGeneration != entry.RepositoryDocs.SourceRegistrationGeneration {
+		t.Fatalf("replayed job=%+v", job)
+	}
+	settled, err := after.ReconcileRegistration(ctx, entry.RegistrationID)
+	if err != nil || len(settled.JobsStarted) != 0 {
+		t.Fatalf("settled reconcile=%+v err=%v", settled, err)
+	}
+	if pending, ok := after.repositoryDocsAdmission(entry.RegistrationID); ok {
+		t.Fatalf("completed durable handoff remained pending: %+v", pending)
+	}
+	jobsInfo, err := os.Stat(jobsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if jobsInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("jobs snapshot mode=%#o", jobsInfo.Mode().Perm())
+	}
+}
+
+func TestRepositoryDocsPendingAdmissionRejectsChangedSnapshotBeforeRelaunch(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	repoPath := createRepositoryDocsRegistrationRepo(t, filepath.Join(dir, "repo"), "before crash")
+	cfg := adminFakeRAGConfig()
+	cfg.CachePath = cachePath
+	cfg.LockPath = cachePath + ".lock"
+	manager := Manager{EffectiveConfig: &cfg}
+	registryPath := filepath.Join(dir, "managed-caches.json")
+	before := NewMaintenanceManager(manager, NewJobManager(filepath.Join(dir, "jobs-before.json")), registryPath)
+	enroll := testMaintenanceEnrollRequest(cachePath, "pending-stale", MaintenancePolicy{})
+	enroll.ConfigSnapshot = cfg
+	enroll.ConfigHash = maintenanceHash(cfg)
+	if _, err := before.Enroll(ctx, enroll); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := prepareRepositoryDocsIndex(ctx, manager, StartRepositoryDocsIndexJobRequest{RepoID: "owner/repo", RepositoryPath: repoPath, CachePath: cachePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, prepared, registered, err := before.registerAndRecordRepositoryDocsAdmission(prepared)
+	if err != nil || !registered {
+		t.Fatalf("registration=%+v registered=%v err=%v", entry, registered, err)
+	}
+	wantSetID := repositoryDocsRevisionSetIdentity(prepared.request, prepared.repository, prepared.policy, prepared.namespaceID).ID()
+	if err := os.WriteFile(filepath.Join(repoPath, "docs", "guide.md"), []byte("# Guide\n\nafter crash\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitForRepositoryDocsJobTest(t, repoPath, "add", "docs/guide.md")
+	runGitForRepositoryDocsJobTest(t, repoPath, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "changed while daemon down")
+
+	afterJobs := NewJobManager(filepath.Join(dir, "jobs-after.json"))
+	after := NewMaintenanceManager(manager, afterJobs, registryPath)
+	if err := after.Load(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := after.ReconcileRegistration(ctx, entry.RegistrationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.JobsStarted) != 0 || len(afterJobs.List()) != 0 {
+		t.Fatalf("changed durable intent relaunched work: result=%+v jobs=%+v", result, afterJobs.List())
+	}
+	if len(result.Entries) != 1 || result.Entries[0].RepositoryDocs == nil || result.Entries[0].RepositoryDocs.LastErrorClass != "repository_docs_admission_stale" {
+		t.Fatalf("stale admission was not terminalized: %+v", result)
+	}
+	if pending, ok := after.repositoryDocsAdmission(entry.RegistrationID); ok {
+		t.Fatalf("stale admission remained queued: %+v", pending)
+	}
+	registryBytes, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(registryBytes, []byte(wantSetID)) {
+		t.Fatalf("stale expected set remained durable: %s", registryBytes)
+	}
+}
+
+func TestRepositoryDocsCancellationIsDurableAndSuppressesReconcileSelection(t *testing.T) {
+	dir := t.TempDir()
+	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), jobs, filepath.Join(dir, "registry.json"))
+	registrationID, sourceID := "reg-cancel", "source-cancel"
+	maintenance.entries[registrationID] = &MaintenanceEntry{RegistrationID: registrationID, RepoID: "owner/repo"}
+	maintenance.sources[registrationID] = map[string]*repositoryDocsRegisteredSource{sourceID: &repositoryDocsRegisteredSource{State: RepositoryDocsMaintenanceState{SourceRegistrationID: sourceID, SourceRegistrationGeneration: 1, State: "indexing"}}}
+	maintenance.admissions[repositoryDocsAdmissionKey(registrationID, sourceID)] = repositoryDocsAdmissionIntent{RegistrationID: registrationID, SourceRegistrationID: sourceID, SourceRegistrationGeneration: 1, RepoID: "owner/repo", WorkKey: "work", ExpectedRevisionSetID: "set", JobID: "", Disposition: repositoryDocsAdmissionPending, CreatedAt: time.Now().UTC()}
+	jobCtx, cancel := context.WithCancel(context.Background())
+	job, created, err := jobs.createCoalescedJobWithIntent(RepositoryDocsIndexJobType, "owner/repo", "profile", 0, "work", "cache", registrationID, "namespace", JobRecoveryIntent{SourceRegistrationID: sourceID, SourceRegistrationGeneration: 1, ExpectedRevisionSetID: "set"}, cancel)
+	if err != nil || !created {
+		t.Fatalf("job=%+v created=%t err=%v", job, created, err)
+	}
+	jobs.updateJob(job.ID, func(stored *Job, now time.Time) { stored.Status = JobStatusRunning })
+	go func() {
+		<-jobCtx.Done()
+		jobs.finishJob(job.ID, JobStatusCancelled, "cancelled")
+	}()
+	if cancelled, ok := jobs.Cancel(job.ID); !ok || cancelled.Status != JobStatusCancelled {
+		t.Fatalf("cancelled=%+v ok=%t", cancelled, ok)
+	}
+	intent, ok := maintenance.repositoryDocsAdmission(registrationID, sourceID)
+	if !ok || intent.Disposition != repositoryDocsAdmissionCancelled || intent.JobID != job.ID || intent.FinishedAt.IsZero() {
+		t.Fatalf("durable cancellation=%+v ok=%t", intent, ok)
+	}
+	maintenance.mu.Lock()
+	selected, _, pending := maintenance.selectRepositoryDocsSourceForReconcileLocked(registrationID)
+	maintenance.mu.Unlock()
+	if selected != nil || pending {
+		t.Fatalf("cancelled source selected=%+v pending=%t", selected, pending)
+	}
+	restarted := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(filepath.Join(dir, "jobs-restarted.json")), filepath.Join(dir, "registry.json"))
+	if err := restarted.Load(); err != nil {
+		t.Fatal(err)
+	}
+	restarted.mu.Lock()
+	selected, _, pending = restarted.selectRepositoryDocsSourceForReconcileLocked(registrationID)
+	restarted.mu.Unlock()
+	if selected != nil || pending {
+		t.Fatalf("restart revived cancelled source selected=%+v pending=%t", selected, pending)
+	}
+}
+
+func TestRepositoryDocsPendingAdmissionRespectsFailureBackoff(t *testing.T) {
+	now := time.Date(2026, 8, 30, 10, 0, 0, 0, time.UTC)
+	state := RepositoryDocsMaintenanceState{}
+	first := Job{ID: "job-1", Type: RepositoryDocsIndexJobType, Status: JobStatusFailed, ErrorClass: "provider_timeout", UpdatedAt: now}
+	state.Stage = observeMaintenanceStage(state.Stage, first, now)
+	if state.Stage.ConsecutiveFailures != 1 || repositoryDocsRetryReady(&state, now) {
+		t.Fatalf("first failure stage=%+v", state.Stage)
+	}
+	secondAt := state.Stage.RetryAfter
+	second := Job{ID: "job-2", Type: RepositoryDocsIndexJobType, Status: JobStatusFailed, ErrorClass: "provider_timeout", UpdatedAt: secondAt}
+	state.Stage = observeMaintenanceStage(state.Stage, second, secondAt)
+	if state.Stage.ConsecutiveFailures != 2 || !state.Stage.RetryAfter.Equal(secondAt.Add(2*time.Minute)) || repositoryDocsRetryReady(&state, secondAt) {
+		t.Fatalf("second failure stage=%+v", state.Stage)
+	}
+	if !repositoryDocsRetryReady(&state, state.Stage.RetryAfter) {
+		t.Fatalf("retry was not released at %s", state.Stage.RetryAfter)
+	}
+}
+
+func createRepositoryDocsRegistrationRepo(t *testing.T, path, body string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(path, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "docs", "guide.md"), []byte("# Guide\n\n"+body+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitForRepositoryDocsJobTest(t, path, "init")
+	runGitForRepositoryDocsJobTest(t, path, "add", "docs/guide.md")
+	runGitForRepositoryDocsJobTest(t, path, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "docs")
+	return path
 }
 
 func waitForTerminalJob(t *testing.T, jobs *JobManager, id string) Job {
