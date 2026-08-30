@@ -111,10 +111,12 @@ func TestMaintenanceCloneResolutionRetiresUnselectedPath(t *testing.T) {
 	legacyID := maintenanceRegistrationID(identity.UUID, "legacy/repo")
 	cfg := config.Default()
 	cfg.CachePath = firstPath
+	secondCfg := cfg
+	secondCfg.CachePath = secondPath
 	policy := MaintenancePolicy{SyncMode: "off"}
 	disk := maintenanceRegistryFile{SchemaVersion: legacyMaintenanceRegistrySchema, Entries: []maintenanceDiskEntry{
 		{MaintenanceEntry: MaintenanceEntry{RegistrationID: canonicalID, CacheUUID: identity.UUID, RepoID: "owner/repo", Policy: policy, ConfigHash: maintenanceHash(cfg), Enabled: true}, CachePath: firstPath, ConfigSnapshot: cfg},
-		{MaintenanceEntry: MaintenanceEntry{RegistrationID: legacyID, CacheUUID: identity.UUID, RepoID: "legacy/repo", Policy: policy, ConfigHash: maintenanceHash(cfg), Enabled: true}, CachePath: secondPath, ConfigSnapshot: cfg},
+		{MaintenanceEntry: MaintenanceEntry{RegistrationID: legacyID, CacheUUID: identity.UUID, RepoID: "legacy/repo", Policy: policy, ConfigHash: maintenanceHash(secondCfg), Enabled: true}, CachePath: secondPath, ConfigSnapshot: secondCfg},
 	}}
 	data, _ := json.Marshal(disk)
 	registryPath := filepath.Join(dir, "managed-caches.json")
@@ -157,6 +159,106 @@ func TestMaintenanceCloneResolutionRetiresUnselectedPath(t *testing.T) {
 	}
 }
 
+func TestMaintenanceCloneResolutionRetiresInvalidSnapshotAuthorityAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	invalidPath, validPath := filepath.Join(dir, "invalid.db"), filepath.Join(dir, "valid.db")
+	store, err := cache.NewSQLiteStore(ctx, invalidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	identity, _ := store.CacheIdentity(ctx)
+	_ = store.Close()
+	bytes, _ := os.ReadFile(invalidPath)
+	if err := os.WriteFile(validPath, bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invalidConfig := config.Default()
+	invalidConfig.CachePath = validPath // Deliberately belongs to the other authority.
+	validConfig := config.Default()
+	validConfig.CachePath = validPath
+	registrationID := maintenanceRegistrationID(identity.UUID, "owner/repo")
+	policy := MaintenancePolicy{SyncMode: "off"}
+	disk := maintenanceRegistryFile{SchemaVersion: legacyMaintenanceRegistrySchema, Entries: []maintenanceDiskEntry{
+		{MaintenanceEntry: MaintenanceEntry{RegistrationID: registrationID, CacheUUID: identity.UUID, RepoID: "owner/repo", Policy: policy, ConfigHash: maintenanceHash(invalidConfig), Enabled: true}, CachePath: invalidPath, ConfigSnapshot: invalidConfig},
+		{MaintenanceEntry: MaintenanceEntry{RegistrationID: registrationID, CacheUUID: identity.UUID, RepoID: "owner/repo", Policy: policy, ConfigHash: maintenanceHash(validConfig), Enabled: true}, CachePath: validPath, ConfigSnapshot: validConfig},
+	}}
+	data, _ := json.Marshal(disk)
+	registryPath := filepath.Join(dir, "managed-caches.json")
+	if err := os.WriteFile(registryPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), registryPath)
+	if err := maintenance.Load(); err != nil {
+		t.Fatal(err)
+	}
+	listed, _ := maintenance.List(ctx)
+	if len(listed.Entries) != 1 || listed.Entries[0].IdentityConflict == nil || len(listed.Entries[0].IdentityConflict.Candidates) != 2 {
+		t.Fatalf("mixed clone cohort=%+v", listed.Entries)
+	}
+	conflict := listed.Entries[0]
+	invalidFingerprint := pathFingerprint(maintenanceCanonicalPathKey(invalidPath))
+	validFingerprint := pathFingerprint(maintenanceCanonicalPathKey(validPath))
+	var invalidCandidate MaintenanceIdentityCandidate
+	for _, candidate := range conflict.IdentityConflict.Candidates {
+		switch candidate.PathFingerprint {
+		case invalidFingerprint:
+			invalidCandidate = candidate
+		case validFingerprint:
+			// The valid selection is intentionally recovered after restart below.
+		}
+	}
+	if invalidCandidate.CandidateRef == "" {
+		t.Fatalf("missing invalid authority evidence: %+v", conflict.IdentityConflict.Candidates)
+	}
+	if _, err := maintenance.PlanConflictResolution(ctx, MaintenanceConflictResolutionRequest{RegistrationID: conflict.RegistrationID, CandidateRef: invalidCandidate.CandidateRef, ExpectedGeneration: conflict.Generation}); err == nil {
+		t.Fatal("invalid snapshot authority was selectable")
+	} else if coded, ok := err.(interface{ DiagnosticCode() string }); !ok || coded.DiagnosticCode() != "conflict_candidate_identity_changed" {
+		t.Fatalf("invalid selection error=%T %v", err, err)
+	}
+
+	restarted := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), registryPath)
+	if err := restarted.Load(); err != nil {
+		t.Fatal(err)
+	}
+	listed, _ = restarted.List(ctx)
+	conflict = listed.Entries[0]
+	var validCandidate MaintenanceIdentityCandidate
+	for _, candidate := range conflict.IdentityConflict.Candidates {
+		if candidate.PathFingerprint == validFingerprint {
+			validCandidate = candidate
+		}
+	}
+	if validCandidate.CandidateRef == "" || len(conflict.IdentityConflict.Candidates) != 2 {
+		t.Fatalf("restarted mixed clone cohort=%+v", conflict.IdentityConflict.Candidates)
+	}
+	req := MaintenanceConflictResolutionRequest{RegistrationID: conflict.RegistrationID, CandidateRef: validCandidate.CandidateRef, ExpectedGeneration: conflict.Generation}
+	plan, err := restarted.PlanConflictResolution(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.PlanID, req.IdempotencyKey = plan.PlanID, "resolve-valid-clone-authority"
+	result, err := restarted.ApplyConflictResolution(ctx, req)
+	if err != nil || result.RetiredClonePaths != 1 {
+		t.Fatalf("resolve valid authority=%+v err=%v", result, err)
+	}
+
+	afterRestart := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), registryPath)
+	if err := afterRestart.Load(); err != nil {
+		t.Fatal(err)
+	}
+	repairedEnroll := testMaintenanceEnrollRequest(invalidPath, "repaired-invalid-clone", policy)
+	if _, err := afterRestart.Enroll(ctx, repairedEnroll); err == nil {
+		t.Fatal("repaired invalid clone authority resurrected after retirement")
+	} else if coded, ok := err.(interface{ DiagnosticCode() string }); !ok || coded.DiagnosticCode() != "cache_clone_retired" {
+		t.Fatalf("retired repaired clone error=%T %v", err, err)
+	}
+}
+
 func TestMaintenanceCloneResolutionRetainsEveryRepositoryOnSelectedPath(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -179,12 +281,12 @@ func TestMaintenanceCloneResolutionRetainsEveryRepositoryOnSelectedPath(t *testi
 	if err := os.WriteFile(secondPath, bytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.Default()
-	cfg.CachePath = firstPath
 	firstID := maintenanceRegistrationID(identity.UUID, "owner/first")
 	secondID := maintenanceRegistrationID(identity.UUID, "owner/second")
 	entries := []maintenanceDiskEntry{}
 	for _, cachePath := range []string{firstPath, secondPath} {
+		cfg := config.Default()
+		cfg.CachePath = cachePath
 		entries = append(entries,
 			maintenanceDiskEntry{MaintenanceEntry: MaintenanceEntry{RegistrationID: firstID, CacheUUID: identity.UUID, RepoID: "owner/first", Policy: MaintenancePolicy{SyncEnabled: true, SyncMode: "head", Issues: true}, ConfigHash: maintenanceHash(cfg), Enabled: true}, CachePath: cachePath, ConfigSnapshot: cfg},
 			maintenanceDiskEntry{MaintenanceEntry: MaintenanceEntry{RegistrationID: secondID, CacheUUID: identity.UUID, RepoID: "owner/second", Policy: MaintenancePolicy{SyncMode: "off"}, ConfigHash: maintenanceHash(cfg), Enabled: false}, CachePath: cachePath, ConfigSnapshot: cfg},
@@ -193,9 +295,26 @@ func TestMaintenanceCloneResolutionRetainsEveryRepositoryOnSelectedPath(t *testi
 	data, _ := json.Marshal(maintenanceRegistryFile{SchemaVersion: legacyMaintenanceRegistrySchema, Entries: entries})
 	registryPath := filepath.Join(dir, "managed-caches.json")
 	_ = os.WriteFile(registryPath, data, 0o600)
-	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), registryPath)
+	jobsPath := filepath.Join(dir, "jobs.json")
+	now := time.Now().UTC()
+	jobsData, _ := json.Marshal([]Job{
+		{ID: "job-000001", Type: SyncJobType, RepoID: "owner/first", CacheUUID: identity.UUID, RegistrationID: firstID, Status: JobStatusSucceeded, CreatedAt: now, UpdatedAt: now},
+		{ID: "job-000002", Type: SyncJobType, RepoID: "owner/second", CacheUUID: identity.UUID, RegistrationID: secondID, Status: JobStatusSucceeded, CreatedAt: now, UpdatedAt: now},
+	})
+	_ = os.WriteFile(jobsPath, jobsData, 0o600)
+	jobs := NewJobManager(jobsPath)
+	if err := jobs.LoadAndMarkInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), jobs, registryPath)
 	if err := maintenance.Load(); err != nil {
 		t.Fatal(err)
+	}
+	for id, wantRepo := range map[string]string{"job-000001": "owner/first", "job-000002": "owner/second"} {
+		job, ok := jobs.Get(id)
+		if !ok || job.RepoID != wantRepo || job.RegistrationID != maintenanceRegistrationID(identity.UUID, wantRepo) {
+			t.Fatalf("clone conflict relabeled historical job %s: %+v", id, job)
+		}
 	}
 	listed, _ := maintenance.List(ctx)
 	if len(listed.Entries) != 1 || listed.Entries[0].IdentityConflict == nil {
@@ -235,6 +354,136 @@ func TestMaintenanceCloneResolutionRetainsEveryRepositoryOnSelectedPath(t *testi
 	if !byRepo["owner/first"].Enabled || byRepo["owner/first"].Policy.SyncMode != "head" || byRepo["owner/second"].Enabled || byRepo["owner/second"].Policy.SyncMode != "off" {
 		t.Fatalf("per-repository state=%+v", byRepo)
 	}
+	for id, wantRepo := range map[string]string{"job-000001": "owner/first", "job-000002": "owner/second"} {
+		job, _ := jobs.Get(id)
+		if job.RepoID != wantRepo || job.RegistrationID != maintenanceRegistrationID(identity.UUID, wantRepo) {
+			t.Fatalf("clone apply relabeled historical job %s: %+v", id, job)
+		}
+	}
+	restartedJobs := NewJobManager(jobsPath)
+	restarted := NewMaintenanceManager(newTestManager(t, "darwin"), restartedJobs, registryPath)
+	if err := restarted.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if err := restartedJobs.LoadAndMarkInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	for id, wantRepo := range map[string]string{"job-000001": "owner/first", "job-000002": "owner/second"} {
+		job, _ := restartedJobs.Get(id)
+		if job.RepoID != wantRepo || job.RegistrationID != maintenanceRegistrationID(identity.UUID, wantRepo) {
+			t.Fatalf("restart relabeled historical job %s: %+v", id, job)
+		}
+	}
+}
+
+func TestMaintenanceCloneResolutionRestoresOnlySelectedPathAuthorities(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	firstPath, secondPath := filepath.Join(dir, "first.db"), filepath.Join(dir, "second.db")
+	store, err := cache.NewSQLiteStore(ctx, firstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}
+	if err := store.AddRepository(ctx, binding); err != nil {
+		t.Fatal(err)
+	}
+	identity, _ := store.CacheIdentity(ctx)
+	_ = store.Close()
+	bytes, _ := os.ReadFile(firstPath)
+	if err := os.WriteFile(secondPath, bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	registrationID := maintenanceRegistrationID(identity.UUID, "owner/repo")
+	sourceID := "repository-docs-source-shared"
+	firstConfig, secondConfig := config.Default(), config.Default()
+	firstConfig.CachePath, secondConfig.CachePath = firstPath, secondPath
+	firstPolicy, _ := normalizeMaintenancePolicy(MaintenancePolicy{SyncMode: "off"}, binding)
+	secondPolicy, _ := normalizeMaintenancePolicy(MaintenancePolicy{SyncEnabled: true, SyncMode: "head", Issues: true}, binding)
+	source := func(repositoryPath string) repositoryDocsDiskSource {
+		return repositoryDocsDiskSource{State: RepositoryDocsMaintenanceState{SourceRegistrationID: sourceID, SourceRegistrationGeneration: 1, GitStoreRef: "git-common-dir", State: "registered"}, RepositoryPath: repositoryPath}
+	}
+	selectedAdmission := repositoryDocsAdmissionIntent{RegistrationID: registrationID, SourceRegistrationID: sourceID, SourceRegistrationGeneration: 1, AuthorityPathFingerprint: pathFingerprint(maintenanceCanonicalPathKey(firstPath)), RepoID: "owner/repo", WorkKey: "selected-work", ExpectedRevisionSetID: "selected-set", Disposition: repositoryDocsAdmissionPending, CreatedAt: time.Now().Add(-time.Minute).UTC()}
+	rejectedAdmission := repositoryDocsAdmissionIntent{RegistrationID: registrationID, SourceRegistrationID: sourceID, SourceRegistrationGeneration: 1, AuthorityPathFingerprint: pathFingerprint(maintenanceCanonicalPathKey(secondPath)), RepoID: "owner/repo", WorkKey: "rejected-work", ExpectedRevisionSetID: "rejected-set", Disposition: repositoryDocsAdmissionCancelled, CreatedAt: time.Now().UTC()}
+	legacyAdmission := repositoryDocsAdmissionIntent{RegistrationID: registrationID, SourceRegistrationID: sourceID, SourceRegistrationGeneration: 1, RepoID: "owner/repo", WorkKey: "legacy-work", ExpectedRevisionSetID: "legacy-set", Disposition: repositoryDocsAdmissionPending, CreatedAt: time.Now().Add(time.Minute).UTC()}
+	selectedReceipt := maintenanceReceipt{KeyHash: maintenanceIdempotencyKeyHash("selected-receipt"), RegistrationID: registrationID, IntentHash: maintenanceEnrollmentIntentHash(registrationID, firstPolicy, maintenanceHash(firstConfig))}
+	rejectedReceipt := maintenanceReceipt{KeyHash: maintenanceIdempotencyKeyHash("rejected-receipt"), RegistrationID: registrationID, IntentHash: maintenanceEnrollmentIntentHash(registrationID, secondPolicy, maintenanceHash(secondConfig))}
+	disk := maintenanceRegistryFile{SchemaVersion: legacyMaintenanceRegistrySchema, Entries: []maintenanceDiskEntry{
+		{MaintenanceEntry: MaintenanceEntry{RegistrationID: registrationID, CacheUUID: identity.UUID, RepoID: "owner/repo", Policy: firstPolicy, ConfigHash: maintenanceHash(firstConfig), Enabled: true}, CachePath: firstPath, ConfigSnapshot: firstConfig, RepositoryDocsSources: []repositoryDocsDiskSource{source(filepath.Join(dir, "repo-first"))}},
+		{MaintenanceEntry: MaintenanceEntry{RegistrationID: registrationID, CacheUUID: identity.UUID, RepoID: "owner/repo", Policy: secondPolicy, ConfigHash: maintenanceHash(secondConfig), Enabled: true}, CachePath: secondPath, ConfigSnapshot: secondConfig, RepositoryDocsSources: []repositoryDocsDiskSource{source(filepath.Join(dir, "repo-second"))}},
+	}, Receipts: []maintenanceReceipt{selectedReceipt, rejectedReceipt}, RepositoryDocsAdmissionQueue: []repositoryDocsAdmissionIntent{selectedAdmission, rejectedAdmission, legacyAdmission}}
+	registryPath := filepath.Join(dir, "managed-caches.json")
+	data, _ := json.Marshal(disk)
+	if err := os.WriteFile(registryPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), registryPath)
+	if err := maintenance.Load(); err != nil {
+		t.Fatal(err)
+	}
+	listed, _ := maintenance.List(ctx)
+	conflict := listed.Entries[0]
+	var selected MaintenanceIdentityCandidate
+	for _, candidate := range conflict.IdentityConflict.Candidates {
+		if candidate.PathFingerprint == pathFingerprint(maintenanceCanonicalPathKey(firstPath)) {
+			selected = candidate
+		}
+	}
+	req := MaintenanceConflictResolutionRequest{RegistrationID: conflict.RegistrationID, CandidateRef: selected.CandidateRef, ExpectedGeneration: conflict.Generation}
+	plan, err := maintenance.PlanConflictResolution(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.PlanID, req.IdempotencyKey = plan.PlanID, "restore-authorities"
+	if _, err := maintenance.ApplyConflictResolution(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	selectedSourceID := maintenance.entries[registrationID].RepositoryDocs.SourceRegistrationID
+	current, ok := maintenance.repositoryDocsAdmission(registrationID, selectedSourceID)
+	if !ok || current.WorkKey != selectedAdmission.WorkKey || current.ExpectedRevisionSetID != selectedAdmission.ExpectedRevisionSetID {
+		t.Fatalf("selected admission=%+v ok=%t", current, ok)
+	}
+	selectedEnroll := testMaintenanceEnrollRequest(firstPath, "selected-receipt", firstPolicy)
+	if _, err := maintenance.Enroll(ctx, selectedEnroll); err != nil {
+		t.Fatalf("selected receipt replay=%v receipt=%+v entry=%+v request_hash=%s", err, maintenance.receipts[maintenanceIdempotencyKeyHash("selected-receipt")], maintenance.entries[registrationID], maintenanceHash(selectedEnroll.ConfigSnapshot))
+	}
+	rejectedEnroll := testMaintenanceEnrollRequest(firstPath, "rejected-receipt", firstPolicy)
+	if _, err := maintenance.Enroll(ctx, rejectedEnroll); err == nil {
+		t.Fatal("rejected clone receipt authorized selected path")
+	}
+	restarted := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), registryPath)
+	if err := restarted.Load(); err != nil {
+		t.Fatal(err)
+	}
+	selectedSourceID = restarted.entries[registrationID].RepositoryDocs.SourceRegistrationID
+	current, ok = restarted.repositoryDocsAdmission(registrationID, selectedSourceID)
+	if !ok || current.WorkKey != selectedAdmission.WorkKey {
+		t.Fatalf("restarted selected admission=%+v ok=%t", current, ok)
+	}
+	if _, err := restarted.Enroll(ctx, selectedEnroll); err != nil {
+		t.Fatalf("restarted selected receipt replay=%v", err)
+	}
+}
+
+func TestCloneAuthorityRestorePrefersExactSourceOverAliasRepoMatch(t *testing.T) {
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), "")
+	oldID, canonicalID, aliasID := "clone-conflict", "canonical-reg", "alias-reg"
+	fingerprint := "sha256:selected"
+	intent := repositoryDocsAdmissionIntent{RegistrationID: oldID, SourceRegistrationID: "source-alias", SourceRegistrationGeneration: 2, AuthorityPathFingerprint: fingerprint, RepoID: "owner/repo", WorkKey: "work", ExpectedRevisionSetID: "set", Disposition: repositoryDocsAdmissionPending, CreatedAt: time.Now().UTC()}
+	maintenance.admissions[repositoryDocsAdmissionKey(oldID, intent.SourceRegistrationID, fingerprint)] = intent
+	selected := []maintenanceIdentityConflictCandidate{
+		{Entry: MaintenanceEntry{RegistrationID: canonicalID, RepoID: "owner/repo"}, RepositorySources: []repositoryDocsDiskSource{{State: RepositoryDocsMaintenanceState{SourceRegistrationID: "source-canonical", SourceRegistrationGeneration: 2}}}},
+		{Entry: MaintenanceEntry{RegistrationID: aliasID, RepoID: "legacy/repo"}, RepositorySources: []repositoryDocsDiskSource{{State: RepositoryDocsMaintenanceState{SourceRegistrationID: "source-alias", SourceRegistrationGeneration: 2}}}},
+	}
+	bindings := []cache.RepositoryBinding{
+		{RepoID: "owner/repo", Aliases: []string{"legacy/repo"}},
+		{RepoID: "owner/repo", Aliases: []string{"legacy/repo"}},
+	}
+	maintenance.restoreSelectedCloneAuthoritiesLocked(oldID, fingerprint, selected, bindings)
+	restored, ok := maintenance.admissions[repositoryDocsAdmissionKey(aliasID, intent.SourceRegistrationID, fingerprint)]
+	if !ok || restored.RegistrationID != aliasID {
+		t.Fatalf("source-specific alias admission=%+v ok=%t admissions=%+v", restored, ok, maintenance.admissions)
+	}
 }
 
 func TestMaintenanceConflictResolutionBlocksActiveCacheWriter(t *testing.T) {
@@ -253,6 +502,7 @@ func TestMaintenanceConflictResolutionBlocksActiveCacheWriter(t *testing.T) {
 		t.Fatalf("active writer error=%T %v", err, err)
 	}
 	maintenance.jobs.finishJob(job.ID, JobStatusSucceeded, "done")
+	maintenance.jobs.markWorkerFinished(job.ID)
 	plan, err := maintenance.PlanConflictResolution(ctx, req)
 	if err != nil {
 		t.Fatalf("plan after quiescence=%v", err)
@@ -271,8 +521,101 @@ func TestMaintenanceConflictResolutionBlocksActiveCacheWriter(t *testing.T) {
 		t.Fatalf("blocked apply persisted receipts=%+v", maintenance.resolutionReceipts)
 	}
 	maintenance.jobs.finishJob(late.ID, JobStatusSucceeded, "done")
+	maintenance.jobs.markWorkerFinished(late.ID)
 	if _, err := maintenance.ApplyConflictResolution(ctx, req); err != nil {
 		t.Fatalf("apply after worker quiescence=%v", err)
+	}
+}
+
+func TestCacheMutationFenceWaitsForCancelledWorkerThatHasNotStarted(t *testing.T) {
+	jobs := NewJobManager(filepath.Join(t.TempDir(), "jobs.json"))
+	job, created, err := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 0, "late-start", "cache-1", "reg-1", "", func() {})
+	if err != nil || !created {
+		t.Fatalf("job=%+v created=%t err=%v", job, created, err)
+	}
+	jobs.finishJob(job.ID, JobStatusCancelled, "cancelled before scheduler start")
+	release, blocked := jobs.BeginCacheMutationFence("cache-1")
+	if len(blocked) != 1 || blocked[0] != job.ID {
+		t.Fatalf("cancelled late worker was not fenced: %v", blocked)
+	}
+	release()
+	jobs.markWorkerFinished(job.ID)
+	release, blocked = jobs.BeginCacheMutationFence("cache-1")
+	defer release()
+	if len(blocked) != 0 {
+		t.Fatalf("quiesced worker still blocked fence: %v", blocked)
+	}
+}
+
+func TestCacheMutationFenceRejectsRepositoryDocsResume(t *testing.T) {
+	jobs := NewJobManager(filepath.Join(t.TempDir(), "jobs.json"))
+	job, created, err := jobs.createCoalescedJobWithIntent(RepositoryDocsIndexJobType, "owner/repo", "profile", 0, "docs-work", "cache-1", "reg-1", "namespace", JobRecoveryIntent{
+		SourceRegistrationID: "source-1", SourceRegistrationGeneration: 3, ExpectedRevisionSetID: "set-1",
+	}, func() {})
+	if err != nil || !created {
+		t.Fatalf("job=%+v created=%t err=%v", job, created, err)
+	}
+	jobs.finishJob(job.ID, JobStatusFailed, "retry")
+	jobs.markWorkerFinished(job.ID)
+	release, blocked := jobs.BeginCacheMutationFence("cache-1")
+	if len(blocked) != 0 {
+		t.Fatalf("terminal worker unexpectedly blocked initial fence: %v", blocked)
+	}
+	defer release()
+	if _, resumed, err := jobs.ResumeRepositoryDocsAdmission(job.ID, "reg-1", "source-1", 3, "set-1", "docs-work", func() {}); err == nil || resumed {
+		t.Fatalf("resume crossed fence: resumed=%t err=%v", resumed, err)
+	} else if _, ok := err.(CacheMutationFenceError); !ok {
+		t.Fatalf("resume fence error=%T %v", err, err)
+	}
+}
+
+func TestRepositoryDocsResumeSharesAtomicWriterAdmission(t *testing.T) {
+	jobs := NewJobManager(filepath.Join(t.TempDir(), "jobs.json"))
+	docs, created, err := jobs.createCoalescedJobWithIntent(RepositoryDocsIndexJobType, "owner/repo", "profile", 0, "docs-resume", "cache-1", "reg-1", "namespace", JobRecoveryIntent{
+		SourceRegistrationID: "source-1", SourceRegistrationGeneration: 3, ExpectedRevisionSetID: "set-1",
+	}, func() {})
+	if err != nil || !created {
+		t.Fatalf("docs=%+v created=%t err=%v", docs, created, err)
+	}
+	jobs.finishJob(docs.ID, JobStatusFailed, "retry")
+	if _, resumed, err := jobs.ResumeRepositoryDocsAdmission(docs.ID, "reg-1", "source-1", 3, "set-1", "docs-resume", func() {}); err == nil || resumed {
+		t.Fatalf("resume overlapped unwinding worker: resumed=%t err=%v", resumed, err)
+	}
+	jobs.markWorkerFinished(docs.ID)
+	syncJob, created, err := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 0, "sync-active", "cache-1", "reg-1", "", func() {})
+	if err != nil || !created {
+		t.Fatalf("sync=%+v created=%t err=%v", syncJob, created, err)
+	}
+	if _, resumed, err := jobs.ResumeRepositoryDocsAdmission(docs.ID, "reg-1", "source-1", 3, "set-1", "docs-resume", func() {}); err == nil || resumed {
+		t.Fatalf("resume overlapped daemon writer: resumed=%t err=%v", resumed, err)
+	}
+	jobs.finishJob(syncJob.ID, JobStatusSucceeded, "done")
+	jobs.markWorkerFinished(syncJob.ID)
+	releaseDirect, err := jobs.BeginDirectCacheWriter("cache-1", "admin-binding-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, resumed, err := jobs.ResumeRepositoryDocsAdmission(docs.ID, "reg-1", "source-1", 3, "set-1", "docs-resume", func() {}); err == nil || resumed {
+		t.Fatalf("resume overlapped direct writer: resumed=%t err=%v", resumed, err)
+	}
+	releaseDirect()
+	resumedJob, resumed, err := jobs.ResumeRepositoryDocsAdmission(docs.ID, "reg-1", "source-1", 3, "set-1", "docs-resume", func() {})
+	if err != nil || !resumed || resumedJob.ID != docs.ID {
+		t.Fatalf("resume after quiescence=%+v resumed=%t err=%v", resumedJob, resumed, err)
+	}
+	jobs.markWorkerFinished(docs.ID)
+}
+
+func TestJobRedirectResolutionIsTransitiveAndCycleSafe(t *testing.T) {
+	if got := resolveJobRedirect("legacy-a", map[string]string{"legacy-a": "legacy-b", "legacy-b": "canonical"}); got != "canonical" {
+		t.Fatalf("transitive redirect=%q", got)
+	}
+	if got := resolveJobRedirect("legacy-a", map[string]string{"legacy-a": "legacy-b", "legacy-b": "legacy-a"}); got != "legacy-a" {
+		t.Fatalf("cycle did not fail closed to original identity: %q", got)
+	}
+	cleaned := discardCyclicRedirects(map[string]string{"legacy-a": "legacy-b", "legacy-b": "legacy-a", "safe": "canonical"})
+	if cleaned["legacy-a"] != "" || cleaned["legacy-b"] != "" || cleaned["safe"] != "canonical" {
+		t.Fatalf("cycle cleanup=%v", cleaned)
 	}
 }
 
@@ -305,7 +648,9 @@ func TestMaintenanceConflictResolutionRejectsConfigSnapshotTamper(t *testing.T) 
 	conflict := listed.Entries[0]
 	selected := conflict.IdentityConflict.Candidates[0]
 	maintenance.mu.Lock()
-	maintenance.conflictCandidates[conflict.RegistrationID][0].ConfigSnapshot.CachePath = "tampered.db"
+	tampered := &maintenance.conflictCandidates[conflict.RegistrationID][0]
+	tampered.ConfigSnapshot.CachePath = filepath.Join(t.TempDir(), "self-consistent-other-cache.db")
+	tampered.Entry.ConfigHash = maintenanceHash(tampered.ConfigSnapshot)
 	maintenance.mu.Unlock()
 	_, err := maintenance.PlanConflictResolution(ctx, MaintenanceConflictResolutionRequest{RegistrationID: conflict.RegistrationID, CandidateRef: selected.CandidateRef, ExpectedGeneration: conflict.Generation})
 	if err == nil {

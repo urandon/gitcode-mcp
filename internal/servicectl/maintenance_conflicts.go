@@ -149,6 +149,11 @@ func (m *MaintenanceManager) planConflictResolutionLocked(ctx context.Context, r
 		if candidate.Entry.ConfigHash == "" || candidate.Entry.ConfigHash != maintenanceHash(candidate.ConfigSnapshot) {
 			return MaintenanceConflictResolutionPlan{}, nil, nil, MaintenanceConflictResolutionError{code: "conflict_candidate_identity_changed"}
 		}
+		snapshotPath, snapshotErr := canonicalCachePath(candidate.ConfigSnapshot.CachePath)
+		candidatePath, candidateErr := canonicalCachePath(candidate.CachePath)
+		if snapshotErr != nil || candidateErr != nil || snapshotPath != candidatePath {
+			return MaintenanceConflictResolutionPlan{}, nil, nil, MaintenanceConflictResolutionError{code: "conflict_candidate_identity_changed"}
+		}
 		store, err := cache.NewSQLiteReadOnlyStore(ctx, candidate.CachePath)
 		if err != nil {
 			return MaintenanceConflictResolutionPlan{}, nil, nil, MaintenanceConflictResolutionError{code: "conflict_candidate_unavailable"}
@@ -274,12 +279,8 @@ func (m *MaintenanceManager) conflictHasActiveJobs(cacheUUID string) bool {
 	if m.jobs == nil || strings.TrimSpace(cacheUUID) == "" {
 		return false
 	}
-	for _, job := range m.jobs.List() {
-		if job.CacheUUID == cacheUUID && jobActiveStatus(job.Status) {
-			return true
-		}
-	}
-	return false
+	_, active := m.jobs.ActiveCacheWriter(cacheUUID)
+	return active
 }
 
 func (m *MaintenanceManager) ApplyConflictResolution(ctx context.Context, req MaintenanceConflictResolutionRequest) (MaintenanceConflictResolutionResult, error) {
@@ -343,7 +344,7 @@ func (m *MaintenanceManager) ApplyConflictResolution(ctx context.Context, req Ma
 		if applyErr != nil {
 			return MaintenanceConflictResolutionResult{}, applyErr
 		}
-		redirects, sourceRedirects, repoIDs := cloneStringMap(m.redirects), cloneStringMap(m.sourceRedirects), m.canonicalRepoIDsLocked()
+		redirects, sourceRedirects, repoIDs := m.jobProjectionRedirectsLocked(), cloneStringMap(m.sourceRedirects), m.canonicalRepoIDsLocked()
 		m.mu.Unlock()
 		locked = false
 		if m.jobs != nil {
@@ -467,7 +468,7 @@ func (m *MaintenanceManager) ApplyConflictResolution(ctx context.Context, req Ma
 		return MaintenanceConflictResolutionResult{}, err
 	}
 	result := maintenanceConflictResult(receipt, false)
-	redirects, sourceRedirects, repoIDs := cloneStringMap(m.redirects), cloneStringMap(m.sourceRedirects), m.canonicalRepoIDsLocked()
+	redirects, sourceRedirects, repoIDs := m.jobProjectionRedirectsLocked(), cloneStringMap(m.sourceRedirects), m.canonicalRepoIDsLocked()
 	m.mu.Unlock()
 	locked = false
 	if m.jobs != nil {
@@ -500,6 +501,8 @@ func (m *MaintenanceManager) applyCloneConflictResolutionLocked(
 			return MaintenanceConflictResolutionResult{}, MaintenanceConflictResolutionError{code: "conflict_candidate_identity_changed"}
 		}
 	}
+	selectedFingerprint := pathFingerprint(selectedPath)
+	m.restoreSelectedCloneAuthoritiesLocked(oldRegistrationID, selectedFingerprint, selected, bindings)
 
 	// Remove only the temporary redirects into the synthetic clone row. A
 	// rejected repository keeps its historical identity; selected aliases are
@@ -548,7 +551,6 @@ func (m *MaintenanceManager) applyCloneConflictResolutionLocked(
 	if m.retiredClonePaths[conflictEntry.CacheUUID] == nil {
 		m.retiredClonePaths[conflictEntry.CacheUUID] = map[string]bool{}
 	}
-	selectedFingerprint := pathFingerprint(selectedPath)
 	for _, candidate := range allCandidates {
 		fingerprint := pathFingerprint(maintenanceCanonicalPathKey(candidate.CachePath))
 		if fingerprint != selectedFingerprint && !m.retiredClonePaths[conflictEntry.CacheUUID][fingerprint] {
@@ -588,6 +590,109 @@ func (m *MaintenanceManager) applyCloneConflictResolutionLocked(
 		return MaintenanceConflictResolutionResult{}, err
 	}
 	return maintenanceConflictResult(receipt, false), nil
+}
+
+// restoreSelectedCloneAuthoritiesLocked projects only authority records proven
+// to belong to the selected physical path back to their repository rows. The
+// rejected path and ambiguous legacy records remain attached to the retired
+// synthetic cohort and therefore cannot authorize future work or replays.
+func (m *MaintenanceManager) restoreSelectedCloneAuthoritiesLocked(oldRegistrationID, selectedFingerprint string, selected []maintenanceIdentityConflictCandidate, bindings []cache.RepositoryBinding) {
+	targetForAdmission := func(intent repositoryDocsAdmissionIntent) (string, bool) {
+		sourceMatches := map[string]bool{}
+		repoMatches := map[string]bool{}
+		for index, candidate := range selected {
+			sourceMatch := false
+			for _, source := range candidate.RepositorySources {
+				if source.State.SourceRegistrationID == intent.SourceRegistrationID && source.State.SourceRegistrationGeneration == intent.SourceRegistrationGeneration {
+					sourceMatch = true
+					break
+				}
+			}
+			repoMatch := candidate.Entry.RepoID == intent.RepoID
+			if index < len(bindings) {
+				binding := bindings[index]
+				repoMatch = repoMatch || binding.RepoID == intent.RepoID
+				for _, alias := range binding.Aliases {
+					repoMatch = repoMatch || alias == intent.RepoID
+				}
+			}
+			if sourceMatch {
+				sourceMatches[candidate.Entry.RegistrationID] = true
+			}
+			if repoMatch {
+				repoMatches[candidate.Entry.RegistrationID] = true
+			}
+		}
+		matches := sourceMatches
+		if len(matches) == 0 {
+			matches = repoMatches
+		}
+		if len(matches) != 1 {
+			return "", false
+		}
+		for registrationID := range matches {
+			return registrationID, true
+		}
+		return "", false
+	}
+
+	nextAdmissions := make(map[string]repositoryDocsAdmissionIntent, len(m.admissions))
+	exactAdmissions := make(map[string]bool, len(m.admissions))
+	keys := make([]string, 0, len(m.admissions))
+	for key := range m.admissions {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		intent := m.admissions[key]
+		exactAuthority := intent.AuthorityPathFingerprint == selectedFingerprint
+		selectedAuthority := intent.AuthorityPathFingerprint == selectedFingerprint || strings.HasPrefix(intent.AuthorityPathFingerprint, "legacy-ambiguous-")
+		if intent.RegistrationID == oldRegistrationID && selectedAuthority {
+			if registrationID, ok := targetForAdmission(intent); ok {
+				intent.RegistrationID = registrationID
+				intent.AuthorityPathFingerprint = selectedFingerprint
+			}
+		}
+		mappedKey := repositoryDocsAdmissionKey(intent.RegistrationID, intent.SourceRegistrationID, intent.AuthorityPathFingerprint)
+		if previous, exists := nextAdmissions[mappedKey]; exists {
+			previousExact := exactAdmissions[mappedKey]
+			preferIntent := false
+			switch {
+			case previous.Disposition != intent.Disposition:
+				preferIntent = intent.Disposition == repositoryDocsAdmissionCancelled
+			case previousExact != exactAuthority:
+				preferIntent = exactAuthority
+			case intent.CreatedAt.After(previous.CreatedAt):
+				preferIntent = true
+			}
+			if !preferIntent {
+				continue
+			}
+		}
+		nextAdmissions[mappedKey] = intent
+		exactAdmissions[mappedKey] = exactAuthority
+	}
+	m.admissions = nextAdmissions
+
+	for key, receipt := range m.receipts {
+		selectedAuthority := receipt.AuthorityPathFingerprint == selectedFingerprint || strings.HasPrefix(receipt.AuthorityPathFingerprint, "legacy-ambiguous-")
+		if receipt.RegistrationID != oldRegistrationID || !selectedAuthority || receipt.IntentHash == "" {
+			continue
+		}
+		matches := map[string]bool{}
+		for _, candidate := range selected {
+			if receipt.IntentHash == maintenanceEnrollmentIntentHash(candidate.Entry.RegistrationID, candidate.Entry.Policy, candidate.Entry.ConfigHash) {
+				matches[candidate.Entry.RegistrationID] = true
+			}
+		}
+		if len(matches) == 1 {
+			for registrationID := range matches {
+				receipt.RegistrationID = registrationID
+			}
+			receipt.AuthorityPathFingerprint = selectedFingerprint
+			m.receipts[key] = receipt
+		}
+	}
 }
 
 func cloneStringMap(in map[string]string) map[string]string {

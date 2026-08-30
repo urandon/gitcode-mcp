@@ -61,6 +61,13 @@ func TestMaintenanceRegistryEnrollReplayAndSanitize(t *testing.T) {
 	if err != nil || !updated.Policy.RAGEnabled || updated.Generation <= first.Generation {
 		t.Fatalf("updated=%+v err=%v", updated, err)
 	}
+	wantAuthority := pathFingerprint(maintenanceCanonicalPathKey(cachePath))
+	for _, key := range []string{"enroll-1", "enroll-2"} {
+		receipt := maintenance.receipts[maintenanceIdempotencyKeyHash(key)]
+		if receipt.AuthorityPathFingerprint != wantAuthority {
+			t.Fatalf("receipt %q authority=%q want=%q", key, receipt.AuthorityPathFingerprint, wantAuthority)
+		}
+	}
 	listed, err := maintenance.List(ctx)
 	if err != nil || len(listed.Entries) != 1 {
 		t.Fatalf("listed=%+v err=%v", listed, err)
@@ -90,6 +97,106 @@ func TestMaintenanceRegistryEnrollReplayAndSanitize(t *testing.T) {
 	reloadedList, _ := reloaded.List(ctx)
 	if len(reloadedList.Entries) != 1 || reloadedList.Entries[0].RegistrationID != first.RegistrationID {
 		t.Fatalf("reloaded=%+v", reloadedList)
+	}
+}
+
+func TestMaintenanceRejectsConfigSnapshotFromAnotherCacheAuthority(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	firstPath, secondPath := filepath.Join(dir, "first.db"), filepath.Join(dir, "second.db")
+	for _, path := range []string{firstPath, secondPath} {
+		store, err := cache.NewSQLiteStore(ctx, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+			t.Fatal(err)
+		}
+		_ = store.Close()
+	}
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), filepath.Join(dir, "managed-caches.json"))
+	req := testMaintenanceEnrollRequest(firstPath, "wrong-config-authority", MaintenancePolicy{})
+	req.ConfigSnapshot.CachePath = secondPath
+	req.ConfigHash = maintenanceHash(req.ConfigSnapshot)
+	_, err := maintenance.Enroll(ctx, req)
+	if err == nil || strings.Contains(err.Error(), firstPath) || strings.Contains(err.Error(), secondPath) || !strings.Contains(err.Error(), "config snapshot cache authority mismatch") {
+		t.Fatalf("config authority error=%T %v", err, err)
+	}
+	if listed, _ := maintenance.List(ctx); len(listed.Entries) != 0 {
+		t.Fatalf("rejected enrollment mutated registry: %+v", listed.Entries)
+	}
+}
+
+func TestMaintenanceLoadBlocksConfigSnapshotFromAnotherCacheAuthority(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	firstPath, secondPath := filepath.Join(dir, "first.db"), filepath.Join(dir, "second.db")
+	firstStore, err := cache.NewSQLiteStore(ctx, firstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := firstStore.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	identity, _ := firstStore.CacheIdentity(ctx)
+	_ = firstStore.Close()
+	secondStore, err := cache.NewSQLiteStore(ctx, secondPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = secondStore.Close()
+	wrongConfig := config.Default()
+	wrongConfig.CachePath = secondPath
+	registrationID := maintenanceRegistrationID(identity.UUID, "owner/repo")
+	disk := maintenanceRegistryFile{SchemaVersion: maintenanceRegistrySchema, Entries: []maintenanceDiskEntry{{
+		MaintenanceEntry: MaintenanceEntry{RegistrationID: registrationID, CacheUUID: identity.UUID, RepoID: "owner/repo", Policy: MaintenancePolicy{SyncMode: "off"}, ConfigHash: maintenanceHash(wrongConfig), Enabled: true, State: "enrolled"},
+		CachePath:        firstPath, ConfigSnapshot: wrongConfig,
+	}}}
+	registryPath := filepath.Join(dir, "managed-caches.json")
+	data, _ := json.Marshal(disk)
+	if err := os.WriteFile(registryPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), jobs, registryPath)
+	if err := maintenance.Load(); err != nil {
+		t.Fatal(err)
+	}
+	listed, _ := maintenance.List(ctx)
+	if len(listed.Entries) != 1 || listed.Entries[0].Enabled || listed.Entries[0].State != "config_snapshot_invalid" || listed.Entries[0].LastErrorClass != "config_snapshot_invalid" {
+		t.Fatalf("mismatched loaded config was not blocked: %+v", listed.Entries)
+	}
+	result, err := maintenance.ReconcileRegistration(ctx, registrationID)
+	if err != nil || len(result.JobsStarted) != 0 || len(jobs.List()) != 0 {
+		t.Fatalf("blocked config scheduled work: result=%+v jobs=%+v err=%v", result, jobs.List(), err)
+	}
+	publicJSON, _ := json.Marshal(listed)
+	if strings.Contains(string(publicJSON), firstPath) || strings.Contains(string(publicJSON), secondPath) {
+		t.Fatalf("blocked config observation leaked authority: %s", publicJSON)
+	}
+	persistedData, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted maintenanceRegistryFile
+	if err := json.Unmarshal(persistedData, &persisted); err != nil || len(persisted.Entries) != 1 {
+		t.Fatalf("persisted blocked registry=%+v err=%v", persisted, err)
+	}
+	repairedConfig := wrongConfig
+	repairedConfig.CachePath = firstPath
+	persisted.Entries[0].ConfigSnapshot = repairedConfig
+	persisted.Entries[0].ConfigHash = maintenanceHash(repairedConfig)
+	repairedData, _ := json.Marshal(persisted)
+	if err := os.WriteFile(registryPath, repairedData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repaired := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), registryPath)
+	if err := repaired.Load(); err != nil {
+		t.Fatal(err)
+	}
+	repairedList, _ := repaired.List(ctx)
+	if len(repairedList.Entries) != 1 || !repairedList.Entries[0].Enabled || repairedList.Entries[0].State != "enrolled" || repairedList.Entries[0].LastErrorClass != "" {
+		t.Fatalf("repaired config did not restore prior intent: %+v", repairedList.Entries)
 	}
 }
 
@@ -217,6 +324,13 @@ func TestMaintenanceLoadMigratesCompatibleAliasDuplicatesAndJobLinks(t *testing.
 	job, ok := jobs.Get("job-000001")
 	if !ok || job.RegistrationID != canonicalID || job.RepoID != "owner/repo" || job.ID != "job-000001" {
 		t.Fatalf("migrated job=%+v ok=%v", job, ok)
+	}
+	replayed, err := maintenance.Enroll(ctx, MaintenanceEnrollRequest{
+		CachePath: cachePath, RepoID: "legacy/repo", Policy: policy, IdempotencyKey: "legacy-enroll",
+		ConfigHash: configHash, ConfigSnapshot: cfg,
+	})
+	if err != nil || replayed.RegistrationID != canonicalID {
+		t.Fatalf("legacy receipt canonical replay=%+v err=%v", replayed, err)
 	}
 	disabled, err := maintenance.Disable(ctx, legacyID)
 	if err != nil || disabled.RegistrationID != canonicalID || disabled.Enabled {
@@ -418,13 +532,15 @@ func TestMaintenanceLoadBlocksCacheCloneConflict(t *testing.T) {
 	}
 	cfg := config.Default()
 	cfg.CachePath = firstPath
+	secondCfg := cfg
+	secondCfg.CachePath = secondPath
 	configHash := maintenanceHash(cfg)
 	policy := MaintenancePolicy{SyncEnabled: true, SyncMode: "head", Issues: true}
 	canonicalID := maintenanceRegistrationID(identity.UUID, "owner/repo")
 	legacyID := maintenanceRegistrationID(identity.UUID, "legacy/repo")
 	disk := maintenanceRegistryFile{SchemaVersion: legacyMaintenanceRegistrySchema, Entries: []maintenanceDiskEntry{
 		{MaintenanceEntry: MaintenanceEntry{RegistrationID: canonicalID, CacheUUID: identity.UUID, RepoID: "owner/repo", Policy: policy, ConfigHash: configHash, Enabled: true}, CachePath: firstPath, ConfigSnapshot: cfg},
-		{MaintenanceEntry: MaintenanceEntry{RegistrationID: legacyID, CacheUUID: identity.UUID, RepoID: "legacy/repo", Policy: policy, ConfigHash: configHash, Enabled: true}, CachePath: secondPath, ConfigSnapshot: cfg},
+		{MaintenanceEntry: MaintenanceEntry{RegistrationID: legacyID, CacheUUID: identity.UUID, RepoID: "legacy/repo", Policy: policy, ConfigHash: maintenanceHash(secondCfg), Enabled: true}, CachePath: secondPath, ConfigSnapshot: secondCfg},
 	}}
 	data, _ := json.Marshal(disk)
 	registryPath := filepath.Join(dir, "managed-caches.json")
@@ -510,7 +626,9 @@ func TestMaintenanceLoadCanonicalizesEquivalentRepositoryDocsSourceAuthorities(t
 	if maintenance.sourceRedirects[legacySourceID] != canonicalSourceID {
 		t.Fatalf("source redirects=%+v", maintenance.sourceRedirects)
 	}
-	admission, ok := maintenance.admissions[repositoryDocsAdmissionKey(canonicalID, canonicalSourceID)]
+	maintenance.mu.Lock()
+	_, admission, ok := maintenance.repositoryDocsAdmissionForCurrentAuthorityLocked(canonicalID, canonicalSourceID)
+	maintenance.mu.Unlock()
 	if !ok || admission.Disposition != repositoryDocsAdmissionCancelled || admission.JobID != "job-cancelling" {
 		t.Fatalf("migrated admission=%+v ok=%t", admission, ok)
 	}
@@ -658,9 +776,11 @@ func TestMaintenanceCloneConflictGroupsWholeUUIDAcrossRepositoryBindings(t *test
 	secondID := maintenanceRegistrationID(identity.UUID, "owner/second")
 	cfg := config.Default()
 	cfg.CachePath = firstPath
+	secondCfg := cfg
+	secondCfg.CachePath = secondPath
 	disk := maintenanceRegistryFile{SchemaVersion: legacyMaintenanceRegistrySchema, Entries: []maintenanceDiskEntry{
 		{MaintenanceEntry: MaintenanceEntry{RegistrationID: firstID, CacheUUID: identity.UUID, RepoID: "owner/first", Policy: MaintenancePolicy{SyncMode: "off"}, ConfigHash: maintenanceHash(cfg), Enabled: true}, CachePath: firstPath, ConfigSnapshot: cfg},
-		{MaintenanceEntry: MaintenanceEntry{RegistrationID: secondID, CacheUUID: identity.UUID, RepoID: "owner/second", Policy: MaintenancePolicy{SyncMode: "off"}, ConfigHash: maintenanceHash(cfg), Enabled: true}, CachePath: secondPath, ConfigSnapshot: cfg},
+		{MaintenanceEntry: MaintenanceEntry{RegistrationID: secondID, CacheUUID: identity.UUID, RepoID: "owner/second", Policy: MaintenancePolicy{SyncMode: "off"}, ConfigHash: maintenanceHash(secondCfg), Enabled: true}, CachePath: secondPath, ConfigSnapshot: secondCfg},
 	}}
 	data, _ := json.Marshal(disk)
 	registryPath := filepath.Join(dir, "managed-caches.json")
@@ -1781,6 +1901,7 @@ func TestRepositoryDocsFailedAdmissionResumesAfterBackoffWithSameJobID(t *testin
 		job.ErrorClass = "provider_timeout"
 		delete(jobs.cancel, job.ID)
 	})
+	jobs.markWorkerFinished(failed.ID)
 	if err := maintenance.bindRepositoryDocsAdmissionJob(prepared.request.RegistrationID, prepared.request.SourceRegistrationID, failed.ID); err != nil {
 		t.Fatal(err)
 	}

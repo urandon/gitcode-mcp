@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,6 +47,55 @@ func TestDirectCacheWritersNormalizeIdentityAndRespectAuthorityFence(t *testing.
 	_, err = jobs.StartRAGIndex(ctx, manager, StartRAGIndexJobRequest{RepoID: "owner/repo", CachePath: cachePath, CacheUUID: "wrong-uuid"})
 	if err == nil || err.Error() != "service: cache uuid does not match the selected cache authority" {
 		t.Fatalf("wrong-uuid writer error=%T %v", err, err)
+	}
+}
+
+func TestNormalizeCacheWriterIdentityDoesNotExposePrivateCachePath(t *testing.T) {
+	manager := newTestManager(t, "darwin")
+	cfg := config.Default()
+	manager.EffectiveConfig = &cfg
+	privatePath := "/private/sentinel-user/cache-authority/missing.db"
+	cachePath, cacheUUID, registrationID, repoID := privatePath, "", "", "owner/repo"
+	err := normalizeCacheWriterIdentity(context.Background(), manager, &cachePath, &cacheUUID, &registrationID, &repoID)
+	if err == nil || strings.Contains(err.Error(), privatePath) || strings.Contains(err.Error(), "sentinel-user") {
+		t.Fatalf("public error leaked cache authority: %T %v", err, err)
+	}
+	coded, ok := err.(interface{ DiagnosticCode() string })
+	if !ok || coded.DiagnosticCode() != "cache_authority_unavailable" {
+		t.Fatalf("diagnostic=%T %v", err, err)
+	}
+}
+
+func TestDirectCacheWriterBlocksConflictFenceAndDaemonAdmission(t *testing.T) {
+	ctx := context.Background()
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	identity, _ := store.CacheIdentity(ctx)
+	_ = store.Close()
+	jobs := NewJobManager("")
+	releaseWriter, err := jobs.BeginDirectCacheWriter(identity.UUID, "admin-binding-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseWriter()
+	releaseFence, blocked := jobs.BeginCacheMutationFence(identity.UUID)
+	if len(blocked) != 1 || blocked[0] != "admin-binding-test" {
+		t.Fatalf("direct writer did not block conflict fence: %v", blocked)
+	}
+	releaseFence()
+	manager := newTestManager(t, "darwin")
+	cfg := config.Default()
+	manager.EffectiveConfig = &cfg
+	_, err = jobs.StartSync(ctx, manager, StartSyncJobRequest{RepoID: "owner/repo", CachePath: cachePath, Issues: true})
+	var busy ErrCacheWriterBusy
+	if !errors.As(err, &busy) || busy.ActiveType != "direct_cache_write" {
+		t.Fatalf("daemon writer crossed direct reservation: %T %v", err, err)
 	}
 }
 

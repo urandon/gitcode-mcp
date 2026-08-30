@@ -255,9 +255,34 @@ func (m *AdminControlManager) ApplyBinding(ctx context.Context, req adminhttp.Bi
 		PlanID   string `json:"plan_id"`
 	}{strings.TrimSpace(req.CacheRef), strings.TrimSpace(req.RepoID), strings.TrimSpace(req.PlanID)}
 	return m.receipts.Apply(ctx, "binding_apply", intent.CacheRef+"/"+intent.RepoID, req.IdempotencyKey, intent, func() (map[string]any, error) {
-		plan, path, err := m.bindingPlan(ctx, req)
+		path, err := m.resolveManagedCachePath(ctx, intent.CacheRef)
 		if err != nil {
 			return nil, err
+		}
+		identityStore, err := cache.NewSQLiteReadOnlyStore(ctx, path)
+		if err != nil {
+			return nil, adminControlError(err)
+		}
+		identity, identityErr := identityStore.CacheIdentity(ctx)
+		_ = identityStore.Close()
+		if identityErr != nil {
+			return nil, adminControlError(identityErr)
+		}
+		releaseWriter := func() {}
+		if m.jobs != nil {
+			writerHash := strings.TrimPrefix(maintenanceHash(intent), "sha256:")
+			releaseWriter, err = m.jobs.BeginDirectCacheWriter(identity.UUID, "admin-binding-"+writerHash[:16])
+			if err != nil {
+				return nil, adminControlError(err)
+			}
+		}
+		defer releaseWriter()
+		plan, plannedPath, err := m.bindingPlan(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		if plannedPath != path {
+			return nil, controlError(http.StatusConflict, "stale_plan", "The reviewed cache authority changed before apply.", "Render and confirm a new binding plan.")
 		}
 		if req.PlanID != plan.PlanID {
 			return nil, controlError(http.StatusConflict, "stale_plan", "The reviewed binding plan no longer matches current cache state.", "Render and confirm a new binding plan.")

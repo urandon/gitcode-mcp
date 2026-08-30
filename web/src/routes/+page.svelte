@@ -538,8 +538,7 @@
         if (failure?.code === 'stale_plan' || failure?.code === 'conflict_generation_stale' || failure?.code === 'conflict_candidate_identity_changed') {
           conflictResolutionPlan = undefined;
           await refresh();
-          const available = selectedMaintenance?.identity_conflict?.candidates?.some((candidate) => candidate.candidate_ref === selectedConflictCandidateRef);
-          if (!available) selectedConflictCandidateRef = '';
+          selectedConflictCandidateRef = '';
         }
         await tick(); controlTriggerButton?.focus();
       } else maintenanceError = maintenanceFailure?.message || message;

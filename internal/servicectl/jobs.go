@@ -76,6 +76,7 @@ type JobManager struct {
 	repositoryDocsCancellationCommitted func(Job) bool
 	cacheMutationFences                 map[string]bool
 	inflightWorkers                     map[string]bool
+	directCacheWriters                  map[string]string
 }
 
 type jobCancellationResolution struct {
@@ -164,6 +165,7 @@ func NewJobManagerWithRetention(snapshotPath string, retention config.ServiceJob
 		canonicalRepoByRegistration: map[string]string{},
 		cacheMutationFences:         map[string]bool{},
 		inflightWorkers:             map[string]bool{},
+		directCacheWriters:          map[string]string{},
 		retention:                   retention,
 	}
 }
@@ -245,6 +247,9 @@ func (m *JobManager) BeginCacheMutationFence(cacheUUID string) (func(), []string
 			blocked = append(blocked, id)
 		}
 	}
+	if writerID := m.directCacheWriters[cacheUUID]; writerID != "" {
+		blocked = append(blocked, writerID)
+	}
 	sort.Strings(blocked)
 	m.mu.Unlock()
 	var once sync.Once
@@ -255,6 +260,41 @@ func (m *JobManager) BeginCacheMutationFence(cacheUUID string) (func(), []string
 			m.mu.Unlock()
 		})
 	}, blocked
+}
+
+// BeginDirectCacheWriter reserves the same logical-cache writer lane used by
+// daemon jobs for a bounded synchronous mutation such as Admin binding apply.
+// The returned release must be called after the SQLite mutation completes.
+func (m *JobManager) BeginDirectCacheWriter(cacheUUID, writerID string) (func(), error) {
+	cacheUUID, writerID = strings.TrimSpace(cacheUUID), strings.TrimSpace(writerID)
+	if cacheUUID == "" || writerID == "" {
+		return func() {}, CacheWriterIdentityError{code: "cache_authority_unavailable"}
+	}
+	m.mu.Lock()
+	if m.cacheMutationFences[cacheUUID] {
+		m.mu.Unlock()
+		return func() {}, CacheMutationFenceError{}
+	}
+	if active, ok := m.activeCacheWriterLocked(cacheUUID); ok {
+		m.mu.Unlock()
+		return func() {}, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
+	}
+	if activeID := m.directCacheWriters[cacheUUID]; activeID != "" {
+		m.mu.Unlock()
+		return func() {}, ErrCacheWriterBusy{ActiveJobID: activeID, ActiveType: "direct_cache_write"}
+	}
+	m.directCacheWriters[cacheUUID] = writerID
+	m.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.mu.Lock()
+			if m.directCacheWriters[cacheUUID] == writerID {
+				delete(m.directCacheWriters, cacheUUID)
+			}
+			m.mu.Unlock()
+		})
+	}, nil
 }
 
 func (m *JobManager) markWorkerStarted(jobID string) {
@@ -417,11 +457,14 @@ func (m *JobManager) activeCacheWriterLocked(cacheUUID string) (Job, bool) {
 	if cacheUUID == "" {
 		return Job{}, false
 	}
-	for _, job := range m.jobs {
+	if writerID := m.directCacheWriters[cacheUUID]; writerID != "" {
+		return Job{ID: writerID, Type: "direct_cache_write", CacheUUID: cacheUUID, Status: JobStatusRunning}, true
+	}
+	for id, job := range m.jobs {
 		if job.CacheUUID != cacheUUID || !isCacheWriterJob(job.Type) {
 			continue
 		}
-		if jobActiveStatus(job.Status) {
+		if jobActiveStatus(job.Status) || m.inflightWorkers[id] {
 			return cloneJob(job), true
 		}
 	}
@@ -493,6 +536,15 @@ func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, source
 		job.SourceRegistrationGeneration != generation || job.ExpectedRevisionSetID != strings.TrimSpace(expectedSetID) || job.WorkRef != publicWorkRef(workKey) {
 		return Job{}, false, nil
 	}
+	if m.cacheMutationFences[strings.TrimSpace(job.CacheUUID)] {
+		return Job{}, false, CacheMutationFenceError{}
+	}
+	if activeID := m.directCacheWriters[strings.TrimSpace(job.CacheUUID)]; activeID != "" {
+		return Job{}, false, ErrCacheWriterBusy{ActiveJobID: activeID, ActiveType: "direct_cache_write"}
+	}
+	if active, ok := m.activeCacheWriterLocked(job.CacheUUID); ok {
+		return Job{}, false, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
+	}
 	previous := cloneJob(job)
 	job.WorkKey = workKey
 	job.Status = JobStatusQueued
@@ -505,9 +557,11 @@ func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, source
 	job.UpdatedAt = m.now()
 	job.Progress = append(job.Progress, service.ProgressEvent{Type: "resumed", Phase: "queued", Collection: RepositoryDocsIndexJobType, Message: "durable repository documentation admission resumed"})
 	m.cancel[job.ID] = cancel
+	m.inflightWorkers[job.ID] = true
 	if err := m.saveLocked(); err != nil {
 		*job = previous
 		delete(m.cancel, job.ID)
+		delete(m.inflightWorkers, job.ID)
 		return Job{}, false, JobAdmissionPersistenceError{}
 	}
 	return cloneJob(job), true, nil
@@ -570,7 +624,11 @@ func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID str
 			return cloneJob(job), false, nil
 		}
 	}
-	if isCacheWriterJob(jobType) {
+	writer := isCacheWriterJob(jobType)
+	if writer {
+		if activeID := m.directCacheWriters[cacheUUID]; activeID != "" {
+			return Job{}, false, ErrCacheWriterBusy{ActiveJobID: activeID, ActiveType: "direct_cache_write"}
+		}
 		if active, ok := m.activeCacheWriterLocked(cacheUUID); ok {
 			return Job{}, false, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
 		}
@@ -586,9 +644,16 @@ func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID str
 	}
 	m.jobs[id] = job
 	m.cancel[id] = cancel
+	if writer {
+		// Reserve the worker while admission is still atomic. A cancellation can
+		// publish a terminal status before the goroutine is scheduled, but the
+		// cache-authority fence must still wait for that possible late starter.
+		m.inflightWorkers[id] = true
+	}
 	if err := m.saveLocked(); err != nil {
 		delete(m.jobs, id)
 		delete(m.cancel, id)
+		delete(m.inflightWorkers, id)
 		m.nextID--
 		return Job{}, false, JobAdmissionPersistenceError{}
 	}

@@ -118,7 +118,8 @@ test('stale conflict apply closes confirmation, refreshes candidates, and requir
   await expect(page.getByRole('dialog')).not.toBeVisible();
   await expect(page.getByRole('alert').filter({ hasText: 'Conflict resolution failed' })).toContainText('Refresh and render a new plan.');
   await expect(page.getByText('stale-conflict-plan')).not.toBeVisible();
-  await expect(page.getByRole('button', { name: 'Review selected candidate' })).toBeEnabled();
+  await expect(page.locator('input[name="conflict-candidate"]:checked')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Review selected candidate' })).toBeDisabled();
 });
 
 test('clone conflict choices are physical path cohorts and show every retained repository authority', async ({ page }) => {

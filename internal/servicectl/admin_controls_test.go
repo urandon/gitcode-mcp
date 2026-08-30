@@ -131,6 +131,47 @@ func TestAdminBindingRejectsStalePlanAliasConflictAndPrivatePath(t *testing.T) {
 	}
 }
 
+func TestAdminBindingApplySharesCacheMutationFence(t *testing.T) {
+	ctx := context.Background()
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Close()
+	manager := newTestManager(t, "darwin")
+	manager.AdminCachePath = cachePath
+	cfg := config.Default()
+	manager.EffectiveConfig = &cfg
+	jobs := NewJobManager("")
+	maintenance := NewMaintenanceManager(manager, jobs, "")
+	controls := NewAdminControlManager(manager, maintenance, jobs, NewAdminControlReceiptManager(""))
+	req := adminhttp.BindingControlRequest{CacheRef: publicCacheRef(identity.UUID, cachePath), RepoID: "owner/repo", Scopes: []string{"issues"}}
+	planned, err := controls.PlanBinding(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.PlanID, req.IdempotencyKey = planned.(AdminBindingPlan).PlanID, "binding-fence-1"
+	releaseFence, blocked := jobs.BeginCacheMutationFence(identity.UUID)
+	if len(blocked) != 0 {
+		t.Fatalf("unexpected blockers=%v", blocked)
+	}
+	_, err = controls.ApplyBinding(ctx, req)
+	var fenced adminhttp.ControlError
+	if !errors.As(err, &fenced) || fenced.Code != "cache_authority_fenced" {
+		t.Fatalf("binding apply crossed conflict fence: %T %v", err, err)
+	}
+	releaseFence()
+	result, err := controls.ApplyBinding(ctx, req)
+	if err != nil || result.(map[string]any)["outcome"] != "added" {
+		t.Fatalf("binding after fence=%+v err=%v", result, err)
+	}
+}
+
 func TestAdminControlErrorMapsBindingConflict(t *testing.T) {
 	err := adminControlError(service.ErrConflict{Kind: "repository", ID: "owner/repo"})
 	var typed adminhttp.ControlError

@@ -59,20 +59,64 @@ func TestRenderMaintenanceListTextExposesCanonicalIdentityEvidence(t *testing.T)
 			IdentityConflict: &servicectl.MaintenanceIdentityConflict{
 				Kind:             "cache_clone_conflict",
 				DetailsAvailable: true,
-				Candidates:       []servicectl.MaintenanceIdentityCandidate{{CandidateRef: "candidate-a"}, {CandidateRef: "candidate-b"}},
+				Candidates: []servicectl.MaintenanceIdentityCandidate{
+					{CandidateRef: "candidate-b", RegistrationID: "maintenance-b", RepoID: "owner/b", PathFingerprint: "sha256:path-b", PolicyHash: "sha256:policy-b", ConfigHash: "sha256:config-b", SourceAuthorityHash: "sha256:source-b", SourceRefs: []string{"source-b"}},
+					{CandidateRef: "candidate-a", SelectionKind: "physical_cache_authority", PathFingerprint: "sha256:path-a", SourceAuthorityHash: "sha256:cohort-source", CohortRegistrationIDs: []string{"maintenance-a", "maintenance-legacy"}, CohortRepoIDs: []string{"owner/a", "owner/alias"}, WasEnabled: true, Members: []servicectl.MaintenanceIdentityCandidate{
+						{CandidateRef: "member-b", RegistrationID: "maintenance-legacy", RepoID: "owner/alias", PathFingerprint: "sha256:path-a", PolicyHash: "sha256:policy-legacy", ConfigHash: "sha256:config-a", SourceAuthorityHash: "sha256:source-legacy", SourceRefs: []string{"source-legacy"}},
+						{CandidateRef: "member-a", RegistrationID: "maintenance-a", RepoID: "owner/a", PathFingerprint: "sha256:path-a", PolicyHash: "sha256:policy-a", ConfigHash: "sha256:config-a", SourceAuthorityHash: "sha256:source-a", SourceRefs: []string{"source-a"}, WasEnabled: true},
+					}},
+				},
 				PathFingerprints: []string{"path-a", "path-b"},
 			},
 		}},
 	})
 
-	for _, want := range []string{
-		"aliases: owner/alias",
-		"legacy_registration_ids: maintenance-legacy",
-		"identity_conflict: cache_clone_conflict details_available=true candidates=2 paths=2",
-	} {
-		if !strings.Contains(output.String(), want) {
-			t.Fatalf("maintenance text missing %q:\n%s", want, output.String())
-		}
+	want := strings.ReplaceAll(`schema_version: managed-cache-registry-v2
+generation: 7
+managed_caches: 1
+maintenance-canonical\towner/repository\tidentity_conflict\tcontent=0 covered=0
+  aliases: owner/alias
+  legacy_registration_ids: maintenance-legacy
+  identity_conflict: cache_clone_conflict details_available=true candidates=2 paths=2
+    candidate: candidate-a
+      selection_kind: physical_cache_authority
+      path_fingerprint: sha256:path-a
+      source_authority_hash: sha256:cohort-source
+      cohort_registration_ids: maintenance-a, maintenance-legacy
+      cohort_repo_ids: owner/a, owner/alias
+      was_enabled: true
+      member:
+        candidate: member-a
+          registration_id: maintenance-a
+          repo_id: owner/a
+          path_fingerprint: sha256:path-a
+          policy_hash: sha256:policy-a
+          config_hash: sha256:config-a
+          source_authority_hash: sha256:source-a
+          source_refs: source-a
+          was_enabled: true
+      member:
+        candidate: member-b
+          registration_id: maintenance-legacy
+          repo_id: owner/alias
+          path_fingerprint: sha256:path-a
+          policy_hash: sha256:policy-legacy
+          config_hash: sha256:config-a
+          source_authority_hash: sha256:source-legacy
+          source_refs: source-legacy
+          was_enabled: false
+    candidate: candidate-b
+      registration_id: maintenance-b
+      repo_id: owner/b
+      path_fingerprint: sha256:path-b
+      policy_hash: sha256:policy-b
+      config_hash: sha256:config-b
+      source_authority_hash: sha256:source-b
+      source_refs: source-b
+      was_enabled: false
+`, `\t`, "\t")
+	if output.String() != want {
+		t.Fatalf("maintenance text mismatch:\n--- got ---\n%s--- want ---\n%s", output.String(), want)
 	}
 }
 

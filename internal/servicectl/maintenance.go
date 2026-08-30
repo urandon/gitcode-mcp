@@ -197,6 +197,7 @@ type repositoryDocsAdmissionIntent struct {
 	RegistrationID               string    `json:"registration_id"`
 	SourceRegistrationID         string    `json:"source_registration_id"`
 	SourceRegistrationGeneration int64     `json:"source_registration_generation"`
+	AuthorityPathFingerprint     string    `json:"authority_path_fingerprint,omitempty"`
 	RepoID                       string    `json:"repo_id"`
 	WorkKey                      string    `json:"work_key"`
 	ExpectedRevisionSetID        string    `json:"expected_revision_set_id"`
@@ -226,9 +227,10 @@ type repositoryDocsAdminSource struct {
 }
 
 type maintenanceReceipt struct {
-	KeyHash        string `json:"key_hash"`
-	RegistrationID string `json:"registration_id"`
-	IntentHash     string `json:"intent_hash,omitempty"`
+	KeyHash                  string `json:"key_hash"`
+	RegistrationID           string `json:"registration_id"`
+	IntentHash               string `json:"intent_hash,omitempty"`
+	AuthorityPathFingerprint string `json:"authority_path_fingerprint,omitempty"`
 }
 
 type MaintenanceEnrollRequest struct {
@@ -400,7 +402,7 @@ func NewMaintenanceManager(manager Manager, jobs *JobManager, path string) *Main
 func (m *MaintenanceManager) Load() error {
 	m.mu.Lock()
 	err := m.loadLocked()
-	redirects, sourceRedirects, repoIDs := cloneStringMap(m.redirects), cloneStringMap(m.sourceRedirects), m.canonicalRepoIDsLocked()
+	redirects, sourceRedirects, repoIDs := m.jobProjectionRedirectsLocked(), cloneStringMap(m.sourceRedirects), m.canonicalRepoIDsLocked()
 	m.mu.Unlock()
 	if err == nil && m.jobs != nil {
 		m.jobs.SetRegistrationRedirects(redirects, sourceRedirects, repoIDs)
@@ -517,7 +519,12 @@ func (m *MaintenanceManager) loadLocked() error {
 			admission.SourceRegistrationGeneration <= 0 || strings.TrimSpace(admission.ExpectedRevisionSetID) == "" || strings.TrimSpace(admission.WorkKey) == "" {
 			continue
 		}
-		m.admissions[repositoryDocsAdmissionKey(admission.RegistrationID, admission.SourceRegistrationID)] = admission
+		key := repositoryDocsAdmissionKey(admission.RegistrationID, admission.SourceRegistrationID, admission.AuthorityPathFingerprint)
+		if _, exists := m.admissions[key]; exists {
+			admission.AuthorityPathFingerprint = legacyAmbiguousAdmissionAuthority(admission)
+			key = repositoryDocsAdmissionKey(admission.RegistrationID, admission.SourceRegistrationID, admission.AuthorityPathFingerprint)
+		}
+		m.admissions[key] = admission
 	}
 	migrated := m.canonicalizeLoadedEntriesLocked(context.Background())
 	if disk.SchemaVersion == legacyMaintenanceRegistrySchema || migrated {
@@ -581,14 +588,35 @@ func (m *MaintenanceManager) canonicalizeLoadedEntriesLocked(ctx context.Context
 			uuidCandidates[entry.CacheUUID] = append(uuidCandidates[entry.CacheUUID], item)
 			continue
 		}
-		if entry.State == "identity_unresolved" {
+		item.repoID = binding.RepoID
+		item.aliases = append([]string(nil), binding.Aliases...)
+		snapshotPath, snapshotErr := canonicalCachePath(entry.configSnapshot.CachePath)
+		if entry.ConfigHash == "" || entry.ConfigHash != maintenanceHash(entry.configSnapshot) || snapshotErr != nil || snapshotPath != maintenanceCanonicalPathKey(entry.cachePath) {
+			changed = blockMaintenanceIdentity(entry, "config_snapshot_invalid") || changed
+			// The snapshot cannot authorize work, but the physical cache still
+			// belongs to this UUID cohort. Preserve it as private conflict
+			// evidence so selecting another path retires this authority and a
+			// later snapshot repair cannot resurrect an untracked clone.
+			uuidCandidates[entry.CacheUUID] = append(uuidCandidates[entry.CacheUUID], item)
+			continue
+		}
+		fingerprint := pathFingerprint(pathKey)
+		if entry.PathFingerprint != "" && entry.PathFingerprint != fingerprint {
+			unresolved[entry.CacheUUID+"\x00"+pathKey] = append(unresolved[entry.CacheUUID+"\x00"+pathKey], item)
+			uuidCandidates[entry.CacheUUID] = append(uuidCandidates[entry.CacheUUID], item)
+			changed = blockMaintenanceIdentity(entry, "identity_unresolved") || changed
+			continue
+		}
+		if entry.PathFingerprint == "" {
+			entry.PathFingerprint = fingerprint
+			changed = true
+		}
+		if entry.State == "identity_unresolved" || entry.State == "config_snapshot_invalid" {
 			entry.Enabled = entry.identityBlockedWasEnabled
 			entry.identityBlockedWasEnabled = false
 			entry.State, entry.LastErrorClass, entry.LastError = "enrolled", "", ""
 			changed = true
 		}
-		item.repoID = binding.RepoID
-		item.aliases = append([]string(nil), binding.Aliases...)
 		uuidCandidates[entry.CacheUUID] = append(uuidCandidates[entry.CacheUUID], item)
 		canonicalID := maintenanceRegistrationID(identity.UUID, binding.RepoID)
 		groups[canonicalID] = append(groups[canonicalID], item)
@@ -690,6 +718,12 @@ func (m *MaintenanceManager) canonicalizeLoadedEntriesLocked(ctx context.Context
 				merged.LegacyRegistrationIDs = append(merged.LegacyRegistrationIDs, item.id)
 				m.redirects[item.id] = canonicalID
 			}
+			for _, legacyID := range item.entry.LegacyRegistrationIDs {
+				if legacyID != "" && legacyID != canonicalID {
+					merged.LegacyRegistrationIDs = append(merged.LegacyRegistrationIDs, legacyID)
+					m.redirects[legacyID] = canonicalID
+				}
+			}
 		}
 		merged.LegacyRegistrationIDs = sortedUniqueStrings(merged.LegacyRegistrationIDs)
 		mergedSources := m.mergeMaintenanceSourcesLocked(canonicalID, candidates)
@@ -712,12 +746,40 @@ func (m *MaintenanceManager) canonicalizeLoadedEntriesLocked(ctx context.Context
 	}
 	for key, receipt := range m.receipts {
 		canonicalID := m.resolveRegistrationIDLocked(receipt.RegistrationID)
+		if strings.TrimSpace(receipt.AuthorityPathFingerprint) == "" {
+			paths := map[string]bool{}
+			for _, candidates := range m.conflictCandidates {
+				for _, candidate := range candidates {
+					if m.resolveRegistrationIDLocked(candidate.Entry.RegistrationID) != canonicalID {
+						continue
+					}
+					if receipt.IntentHash != "" && receipt.IntentHash != maintenanceEnrollmentIntentHash(candidate.Entry.RegistrationID, candidate.Entry.Policy, candidate.Entry.ConfigHash) {
+						continue
+					}
+					paths[pathFingerprint(maintenanceCanonicalPathKey(candidate.CachePath))] = true
+				}
+			}
+			switch len(paths) {
+			case 1:
+				for fingerprint := range paths {
+					receipt.AuthorityPathFingerprint = fingerprint
+				}
+			case 0:
+				if entry := m.entries[canonicalID]; entry != nil {
+					receipt.AuthorityPathFingerprint = entry.PathFingerprint
+				}
+			default:
+				receipt.AuthorityPathFingerprint = legacyAmbiguousReceiptAuthority(receipt)
+			}
+			changed = true
+		}
 		if canonicalID != receipt.RegistrationID {
 			receipt.RegistrationID = canonicalID
 			// Preserve the original intent hash. Redirecting an idempotency key
 			// must never authorize a policy/config intent it did not create.
-			m.receipts[key], changed = receipt, true
+			changed = true
 		}
+		m.receipts[key] = receipt
 	}
 	changed = m.remapRepositoryDocsAdmissionsLocked() || changed
 	return changed
@@ -856,7 +918,34 @@ func (m *MaintenanceManager) remapRepositoryDocsAdmissionsLocked() bool {
 			intent.RegistrationID, intent.SourceRegistrationID = registrationID, sourceID
 			changed = true
 		}
-		mappedKey := repositoryDocsAdmissionKey(intent.RegistrationID, intent.SourceRegistrationID)
+		if strings.TrimSpace(intent.AuthorityPathFingerprint) == "" {
+			paths := map[string]bool{}
+			for _, candidates := range m.conflictCandidates {
+				for _, candidate := range candidates {
+					if m.resolveRegistrationIDLocked(candidate.Entry.RegistrationID) != intent.RegistrationID {
+						continue
+					}
+					for _, source := range candidate.RepositorySources {
+						if m.resolveSourceRegistrationIDLocked(source.State.SourceRegistrationID) == intent.SourceRegistrationID {
+							paths[pathFingerprint(maintenanceCanonicalPathKey(candidate.CachePath))] = true
+						}
+					}
+				}
+			}
+			if len(paths) == 1 {
+				for fingerprint := range paths {
+					intent.AuthorityPathFingerprint = fingerprint
+				}
+				changed = true
+			} else if len(paths) > 1 {
+				intent.AuthorityPathFingerprint = legacyAmbiguousAdmissionAuthority(intent)
+				changed = true
+			} else if entry := m.entries[intent.RegistrationID]; entry != nil && entry.PathFingerprint != "" {
+				intent.AuthorityPathFingerprint = entry.PathFingerprint
+				changed = true
+			}
+		}
+		mappedKey := repositoryDocsAdmissionKey(intent.RegistrationID, intent.SourceRegistrationID, intent.AuthorityPathFingerprint)
 		if previous, exists := next[mappedKey]; exists {
 			// Cancellation is the stronger durable disposition. Otherwise keep
 			// the newest exact admission deterministically.
@@ -872,6 +961,25 @@ func (m *MaintenanceManager) remapRepositoryDocsAdmissionsLocked() bool {
 	}
 	m.admissions = next
 	return changed
+}
+
+func legacyAmbiguousAdmissionAuthority(intent repositoryDocsAdmissionIntent) string {
+	hash := strings.TrimPrefix(maintenanceHash(struct {
+		WorkKey   string `json:"work_key"`
+		SetID     string `json:"set_id"`
+		JobID     string `json:"job_id"`
+		CreatedAt string `json:"created_at"`
+	}{intent.WorkKey, intent.ExpectedRevisionSetID, intent.JobID, intent.CreatedAt.UTC().Format(time.RFC3339Nano)}), "sha256:")
+	return "legacy-ambiguous-" + hash[:16]
+}
+
+func legacyAmbiguousReceiptAuthority(receipt maintenanceReceipt) string {
+	hash := strings.TrimPrefix(maintenanceHash(struct {
+		KeyHash        string `json:"key_hash"`
+		RegistrationID string `json:"registration_id"`
+		IntentHash     string `json:"intent_hash"`
+	}{receipt.KeyHash, receipt.RegistrationID, receipt.IntentHash}), "sha256:")
+	return "legacy-ambiguous-" + hash[:16]
 }
 
 func (m *MaintenanceManager) expandRecoveredUnresolvedCandidatesLocked(ctx context.Context) bool {
@@ -1136,6 +1244,21 @@ func (m *MaintenanceManager) canonicalRepoIDsLocked() map[string]string {
 	return result
 }
 
+// jobProjectionRedirectsLocked excludes synthetic clone-conflict rows. Those
+// rows are operator-selection cohorts, not repository identities, and must
+// never relabel durable historical jobs from distinct repositories.
+func (m *MaintenanceManager) jobProjectionRedirectsLocked() map[string]string {
+	result := map[string]string{}
+	for from, to := range m.redirects {
+		resolved := m.resolveRegistrationIDLocked(to)
+		if entry := m.entries[resolved]; entry != nil && entry.IdentityConflict != nil && entry.IdentityConflict.Kind == "cache_clone_conflict" {
+			continue
+		}
+		result[from] = to
+	}
+	return result
+}
+
 func (m *MaintenanceManager) Run(ctx context.Context) {
 	_, _ = m.Reconcile(ctx)
 	ticker := time.NewTicker(time.Minute)
@@ -1157,6 +1280,13 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 	path, err := canonicalCachePath(req.CachePath)
 	if err != nil {
 		return MaintenanceEntry{}, err
+	}
+	if req.ConfigHash == "" || req.ConfigHash != maintenanceHash(req.ConfigSnapshot) {
+		return MaintenanceEntry{}, errors.New("maintenance: config snapshot hash mismatch")
+	}
+	snapshotPath, snapshotErr := canonicalCachePath(req.ConfigSnapshot.CachePath)
+	if snapshotErr != nil || snapshotPath != path {
+		return MaintenanceEntry{}, errors.New("maintenance: config snapshot cache authority mismatch")
 	}
 	store, err := cache.NewSQLiteReadOnlyStore(ctx, path)
 	if err != nil {
@@ -1185,9 +1315,6 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 	}
 	registrationID := maintenanceRegistrationID(identity.UUID, req.RepoID)
 	keyHash := maintenanceIdempotencyKeyHash(req.IdempotencyKey)
-	if req.ConfigHash == "" || req.ConfigHash != maintenanceHash(req.ConfigSnapshot) {
-		return MaintenanceEntry{}, errors.New("maintenance: config snapshot hash mismatch")
-	}
 	now := m.now()
 	var redirectSnapshot, sourceRedirectSnapshot, repoIDSnapshot map[string]string
 	m.mu.Lock()
@@ -1202,18 +1329,21 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 		if err := m.saveLocked(); err != nil {
 			return MaintenanceEntry{}, err
 		}
-		redirectSnapshot, sourceRedirectSnapshot, repoIDSnapshot = cloneStringMap(m.redirects), cloneStringMap(m.sourceRedirects), m.canonicalRepoIDsLocked()
+		redirectSnapshot, sourceRedirectSnapshot, repoIDSnapshot = m.jobProjectionRedirectsLocked(), cloneStringMap(m.sourceRedirects), m.canonicalRepoIDsLocked()
 	}
 	if m.isRetiredClonePathLocked(identity.UUID, path) {
 		return MaintenanceEntry{}, MaintenanceConflictResolutionError{code: "cache_clone_retired"}
 	}
 	registrationID = m.resolveRegistrationIDLocked(registrationID)
 	intentHash := maintenanceEnrollmentIntentHash(registrationID, policy, req.ConfigHash)
-	if existing := m.entries[registrationID]; existing != nil && existing.IdentityConflict != nil {
+	existing := m.entries[registrationID]
+	if existing != nil && existing.IdentityConflict != nil {
 		return MaintenanceEntry{}, MaintenanceIdentityConflictError{kind: existing.IdentityConflict.Kind}
 	}
 	if receipt, ok := m.receipts[keyHash]; ok {
-		if receipt.RegistrationID != registrationID || (receipt.IntentHash != "" && receipt.IntentHash != intentHash) {
+		if receipt.RegistrationID != registrationID ||
+			(receipt.AuthorityPathFingerprint != "" && receipt.AuthorityPathFingerprint != pathFingerprint(path)) ||
+			(receipt.IntentHash != "" && !maintenanceReceiptAcceptsIntent(receipt, intentHash, existing)) {
 			return MaintenanceEntry{}, MaintenanceIdempotencyConflictError{}
 		}
 		if existing := m.entries[registrationID]; existing != nil {
@@ -1235,7 +1365,7 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 		if existing.Policy == policy && existing.ConfigHash == strings.TrimSpace(req.ConfigHash) && existing.Enabled {
 			previousSeen := existing.LastSeenAt
 			existing.LastSeenAt = now
-			m.receipts[keyHash] = maintenanceReceipt{KeyHash: keyHash, RegistrationID: registrationID, IntentHash: intentHash}
+			m.receipts[keyHash] = maintenanceReceipt{KeyHash: keyHash, RegistrationID: registrationID, IntentHash: intentHash, AuthorityPathFingerprint: pathFingerprint(path)}
 			m.generation++
 			if err := m.saveLocked(); err != nil {
 				existing.LastSeenAt = previousSeen
@@ -1263,7 +1393,7 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 		existing.Generation++
 		existing.State = "enrolled"
 		existing.LastSeenAt = now
-		m.receipts[keyHash] = maintenanceReceipt{KeyHash: keyHash, RegistrationID: registrationID, IntentHash: intentHash}
+		m.receipts[keyHash] = maintenanceReceipt{KeyHash: keyHash, RegistrationID: registrationID, IntentHash: intentHash, AuthorityPathFingerprint: pathFingerprint(path)}
 		m.generation++
 		if err := m.saveLocked(); err != nil {
 			*existing = previous
@@ -1275,7 +1405,7 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 	}
 	entry := &MaintenanceEntry{RegistrationID: registrationID, CacheUUID: identity.UUID, PathFingerprint: pathFingerprint(path), RepoID: req.RepoID, Aliases: append([]string(nil), binding.Aliases...), Policy: policy, ConfigHash: strings.TrimSpace(req.ConfigHash), Enabled: true, Generation: 1, State: "enrolled", LastSeenAt: now, cachePath: path, configReference: strings.TrimSpace(req.ConfigReference), configSnapshot: req.ConfigSnapshot}
 	m.entries[registrationID] = entry
-	m.receipts[keyHash] = maintenanceReceipt{KeyHash: keyHash, RegistrationID: registrationID, IntentHash: intentHash}
+	m.receipts[keyHash] = maintenanceReceipt{KeyHash: keyHash, RegistrationID: registrationID, IntentHash: intentHash, AuthorityPathFingerprint: pathFingerprint(path)}
 	m.generation++
 	if err := m.saveLocked(); err != nil {
 		delete(m.entries, registrationID)
@@ -1584,7 +1714,7 @@ func (m *MaintenanceManager) registerAndRecordRepositoryDocsAdmission(prepared p
 		m.generation = previousManagerGeneration
 		return MaintenanceEntry{}, preparedRepositoryDocsIndex{}, false, err
 	}
-	admissionKey := repositoryDocsAdmissionKey(entry.RegistrationID, source.State.SourceRegistrationID)
+	admissionKey := repositoryDocsAdmissionKey(entry.RegistrationID, source.State.SourceRegistrationID, intent.AuthorityPathFingerprint)
 	previousAdmission, hadPreviousAdmission := m.admissions[admissionKey]
 	m.admissions[admissionKey] = intent
 	// An explicit fresh admission is the only operation that revives a
@@ -1616,6 +1746,7 @@ func (m *MaintenanceManager) repositoryDocsAdmissionForPrepared(prepared prepare
 		RegistrationID:               strings.TrimSpace(req.RegistrationID),
 		SourceRegistrationID:         strings.TrimSpace(req.SourceRegistrationID),
 		SourceRegistrationGeneration: req.SourceRegistrationGeneration,
+		AuthorityPathFingerprint:     pathFingerprint(maintenanceCanonicalPathKey(req.CachePath)),
 		RepoID:                       strings.TrimSpace(req.RepoID),
 		WorkKey:                      repositoryDocsIndexWorkKey(req, prepared.repository, prepared.policy, prepared.namespaceID),
 		ExpectedRevisionSetID:        repositoryDocsRevisionSetIdentity(req, prepared.repository, prepared.policy, prepared.namespaceID).ID(),
@@ -1636,9 +1767,11 @@ func (m *MaintenanceManager) cancelRepositoryDocsAdmission(job Job) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	key := repositoryDocsAdmissionKey(job.RegistrationID, job.SourceRegistrationID)
-	intent, ok := m.admissions[key]
-	if !ok || intent.SourceRegistrationGeneration != job.SourceRegistrationGeneration || intent.ExpectedRevisionSetID != job.ExpectedRevisionSetID {
+	key, intent, ok := m.repositoryDocsAdmissionMatchingLocked(job.RegistrationID, job.SourceRegistrationID, func(candidate repositoryDocsAdmissionIntent) bool {
+		return candidate.SourceRegistrationGeneration == job.SourceRegistrationGeneration && candidate.ExpectedRevisionSetID == job.ExpectedRevisionSetID &&
+			candidate.RepoID == job.RepoID && publicWorkRef(candidate.WorkKey) == job.WorkRef && (candidate.JobID == "" || candidate.JobID == job.ID)
+	})
+	if !ok {
 		return RepositoryDocsSourceUnavailableError{code: "repository_docs_cancel_admission_missing"}
 	}
 	if intent.Disposition == repositoryDocsAdmissionCancelled && intent.JobID == job.ID {
@@ -1662,20 +1795,24 @@ func (m *MaintenanceManager) repositoryDocsCancellationCommitted(job Job) bool {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	intent, ok := m.admissions[repositoryDocsAdmissionKey(job.RegistrationID, job.SourceRegistrationID)]
+	_, intent, ok := m.repositoryDocsAdmissionMatchingLocked(job.RegistrationID, job.SourceRegistrationID, func(candidate repositoryDocsAdmissionIntent) bool {
+		return candidate.Disposition == repositoryDocsAdmissionCancelled && candidate.JobID == job.ID && candidate.RepoID == job.RepoID &&
+			candidate.SourceRegistrationGeneration == job.SourceRegistrationGeneration && candidate.ExpectedRevisionSetID == job.ExpectedRevisionSetID && job.WorkRef == publicWorkRef(candidate.WorkKey)
+	})
 	return ok && intent.Disposition == repositoryDocsAdmissionCancelled && intent.JobID == job.ID &&
 		intent.RepoID == job.RepoID && intent.SourceRegistrationGeneration == job.SourceRegistrationGeneration &&
 		intent.ExpectedRevisionSetID == job.ExpectedRevisionSetID && job.WorkRef == publicWorkRef(intent.WorkKey)
 }
 
-func (m *MaintenanceManager) completeRepositoryDocsAdmission(registrationID, sourceRegistrationID string, sourceGeneration int64, expectedSetID string) error {
+func (m *MaintenanceManager) completeRepositoryDocsAdmission(registrationID, sourceRegistrationID string, sourceGeneration int64, expectedSetID, authorityPathFingerprint string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	registrationID = strings.TrimSpace(registrationID)
-	key := repositoryDocsAdmissionKey(registrationID, strings.TrimSpace(sourceRegistrationID))
-	intent, ok := m.admissions[key]
-	if !ok || intent.SourceRegistrationID != strings.TrimSpace(sourceRegistrationID) ||
-		intent.SourceRegistrationGeneration != sourceGeneration || intent.ExpectedRevisionSetID != strings.TrimSpace(expectedSetID) {
+	key, intent, ok := m.repositoryDocsAdmissionMatchingLocked(registrationID, sourceRegistrationID, func(candidate repositoryDocsAdmissionIntent) bool {
+		return candidate.SourceRegistrationGeneration == sourceGeneration && candidate.ExpectedRevisionSetID == strings.TrimSpace(expectedSetID) &&
+			(strings.TrimSpace(authorityPathFingerprint) == "" || candidate.AuthorityPathFingerprint == strings.TrimSpace(authorityPathFingerprint))
+	})
+	if !ok {
 		return nil
 	}
 	delete(m.admissions, key)
@@ -1690,12 +1827,13 @@ func (m *MaintenanceManager) repositoryDocsAdmission(registrationID string, sour
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(sourceRegistrationIDs) > 0 && strings.TrimSpace(sourceRegistrationIDs[0]) != "" {
-		intent, ok := m.admissions[repositoryDocsAdmissionKey(registrationID, sourceRegistrationIDs[0])]
+		_, intent, ok := m.repositoryDocsAdmissionForCurrentAuthorityLocked(registrationID, sourceRegistrationIDs[0])
 		return intent, ok
 	}
 	var keys []string
+	currentPath := m.currentAuthorityPathFingerprintLocked(registrationID)
 	for key, intent := range m.admissions {
-		if intent.RegistrationID == strings.TrimSpace(registrationID) {
+		if intent.RegistrationID == strings.TrimSpace(registrationID) && (intent.AuthorityPathFingerprint == currentPath || intent.AuthorityPathFingerprint == "") {
 			keys = append(keys, key)
 		}
 	}
@@ -1709,8 +1847,7 @@ func (m *MaintenanceManager) repositoryDocsAdmission(registrationID string, sour
 func (m *MaintenanceManager) bindRepositoryDocsAdmissionJob(registrationID, sourceRegistrationID, jobID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	key := repositoryDocsAdmissionKey(registrationID, sourceRegistrationID)
-	intent, ok := m.admissions[key]
+	key, intent, ok := m.repositoryDocsAdmissionForCurrentAuthorityLocked(registrationID, sourceRegistrationID)
 	if !ok || intent.JobID == strings.TrimSpace(jobID) {
 		return nil
 	}
@@ -1724,8 +1861,50 @@ func (m *MaintenanceManager) bindRepositoryDocsAdmissionJob(registrationID, sour
 	return nil
 }
 
-func repositoryDocsAdmissionKey(registrationID, sourceRegistrationID string) string {
-	return strings.TrimSpace(registrationID) + "\x00" + strings.TrimSpace(sourceRegistrationID)
+func repositoryDocsAdmissionKey(registrationID, sourceRegistrationID string, authorityPathFingerprint ...string) string {
+	path := ""
+	if len(authorityPathFingerprint) > 0 {
+		path = strings.TrimSpace(authorityPathFingerprint[0])
+	}
+	return strings.TrimSpace(registrationID) + "\x00" + strings.TrimSpace(sourceRegistrationID) + "\x00" + path
+}
+
+func (m *MaintenanceManager) currentAuthorityPathFingerprintLocked(registrationID string) string {
+	registrationID = m.resolveRegistrationIDLocked(strings.TrimSpace(registrationID))
+	if entry := m.entries[registrationID]; entry != nil {
+		return entry.PathFingerprint
+	}
+	return ""
+}
+
+func (m *MaintenanceManager) repositoryDocsAdmissionMatchingLocked(registrationID, sourceRegistrationID string, match func(repositoryDocsAdmissionIntent) bool) (string, repositoryDocsAdmissionIntent, bool) {
+	registrationID, sourceRegistrationID = strings.TrimSpace(registrationID), strings.TrimSpace(sourceRegistrationID)
+	keys := make([]string, 0)
+	for key, intent := range m.admissions {
+		if intent.RegistrationID == registrationID && intent.SourceRegistrationID == sourceRegistrationID && (match == nil || match(intent)) {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) == 0 {
+		return "", repositoryDocsAdmissionIntent{}, false
+	}
+	sort.Strings(keys)
+	return keys[0], m.admissions[keys[0]], true
+}
+
+func (m *MaintenanceManager) repositoryDocsAdmissionForCurrentAuthorityLocked(registrationID, sourceRegistrationID string) (string, repositoryDocsAdmissionIntent, bool) {
+	registrationID = m.resolveRegistrationIDLocked(strings.TrimSpace(registrationID))
+	sourceRegistrationID = m.resolveSourceRegistrationIDLocked(strings.TrimSpace(sourceRegistrationID))
+	path := m.currentAuthorityPathFingerprintLocked(registrationID)
+	if intent, ok := m.admissions[repositoryDocsAdmissionKey(registrationID, sourceRegistrationID, path)]; ok {
+		return repositoryDocsAdmissionKey(registrationID, sourceRegistrationID, path), intent, true
+	}
+	// A pre-v2 admission without authority is safe only when it was not marked
+	// ambiguous during clone migration.
+	if intent, ok := m.admissions[repositoryDocsAdmissionKey(registrationID, sourceRegistrationID)]; ok {
+		return repositoryDocsAdmissionKey(registrationID, sourceRegistrationID), intent, true
+	}
+	return "", repositoryDocsAdmissionIntent{}, false
 }
 
 // RebindRepositoryDocsSource explicitly replaces a registered private Git
@@ -1750,7 +1929,13 @@ func (m *MaintenanceManager) RebindRepositoryDocsSource(ctx context.Context, req
 		return MaintenanceEntry{}, err
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	fenceGeneration := int64(0)
+	defer func() {
+		m.mu.Unlock()
+		if fenceGeneration > 0 && m.jobs != nil {
+			m.jobs.FenceRepositoryDocsSourceGeneration(registrationID, selected.SourceRegistrationID, fenceGeneration)
+		}
+	}()
 	entry := m.entries[registrationID]
 	source := m.sources[registrationID][selected.SourceRegistrationID]
 	if entry == nil || source == nil {
@@ -1770,8 +1955,7 @@ func (m *MaintenanceManager) RebindRepositoryDocsSource(ctx context.Context, req
 	previousEntry := cloneMaintenanceEntryPrivate(entry)
 	previousSources := cloneRepositoryDocsSources(m.sources[registrationID])
 	previousManagerGeneration := m.generation
-	admissionKey := repositoryDocsAdmissionKey(registrationID, selected.SourceRegistrationID)
-	previousAdmission, hadPreviousAdmission := m.admissions[admissionKey]
+	admissionKey, previousAdmission, hadPreviousAdmission := m.repositoryDocsAdmissionForCurrentAuthorityLocked(registrationID, selected.SourceRegistrationID)
 	legacyAdmission, hadLegacyAdmission := m.admissions[registrationID]
 	oldGeneration := source.State.SourceRegistrationGeneration
 	source.RepositoryPath = resolved.repositoryPath
@@ -1805,7 +1989,7 @@ func (m *MaintenanceManager) RebindRepositoryDocsSource(ctx context.Context, req
 		return MaintenanceEntry{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_registration_persist_failed"}
 	}
 	result := cloneMaintenanceEntryForSource(entry, source)
-	m.jobs.FenceRepositoryDocsSourceGeneration(registrationID, selected.SourceRegistrationID, oldGeneration)
+	fenceGeneration = oldGeneration
 	return result, nil
 }
 
@@ -1876,13 +2060,13 @@ func (m *MaintenanceManager) selectRepositoryDocsSourceForReconcileLocked(regist
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
-		if admission, ok := m.admissions[repositoryDocsAdmissionKey(registrationID, id)]; ok && admission.Disposition != repositoryDocsAdmissionCancelled {
+		if _, admission, ok := m.repositoryDocsAdmissionForCurrentAuthorityLocked(registrationID, id); ok && admission.Disposition != repositoryDocsAdmissionCancelled {
 			copy := *registered[id]
 			return &copy, admission, true
 		}
 	}
 	for _, id := range ids {
-		if admission, ok := m.admissions[repositoryDocsAdmissionKey(registrationID, id)]; ok && admission.Disposition == repositoryDocsAdmissionCancelled {
+		if _, admission, ok := m.repositoryDocsAdmissionForCurrentAuthorityLocked(registrationID, id); ok && admission.Disposition == repositoryDocsAdmissionCancelled {
 			continue
 		}
 		state := registered[id].State
@@ -1892,7 +2076,7 @@ func (m *MaintenanceManager) selectRepositoryDocsSourceForReconcileLocked(regist
 		}
 	}
 	for _, id := range ids {
-		if admission, ok := m.admissions[repositoryDocsAdmissionKey(registrationID, id)]; ok && admission.Disposition == repositoryDocsAdmissionCancelled {
+		if _, admission, ok := m.repositoryDocsAdmissionForCurrentAuthorityLocked(registrationID, id); ok && admission.Disposition == repositoryDocsAdmissionCancelled {
 			continue
 		}
 		state := registered[id].State
@@ -1902,7 +2086,7 @@ func (m *MaintenanceManager) selectRepositoryDocsSourceForReconcileLocked(regist
 		}
 	}
 	for _, id := range ids {
-		if admission, ok := m.admissions[repositoryDocsAdmissionKey(registrationID, id)]; ok && admission.Disposition == repositoryDocsAdmissionCancelled {
+		if _, admission, ok := m.repositoryDocsAdmissionForCurrentAuthorityLocked(registrationID, id); ok && admission.Disposition == repositoryDocsAdmissionCancelled {
 			continue
 		}
 		copy := *registered[id]
@@ -1975,7 +2159,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 		latestRepositoryDocs.SourceRegistrationID == pendingRepositoryDocsAdmission.SourceRegistrationID &&
 		latestRepositoryDocs.SourceRegistrationGeneration == pendingRepositoryDocsAdmission.SourceRegistrationGeneration &&
 		latestRepositoryDocs.ExpectedRevisionSetID == pendingRepositoryDocsAdmission.ExpectedRevisionSetID {
-		if err := m.completeRepositoryDocsAdmission(registrationID, pendingRepositoryDocsAdmission.SourceRegistrationID, pendingRepositoryDocsAdmission.SourceRegistrationGeneration, pendingRepositoryDocsAdmission.ExpectedRevisionSetID); err == nil {
+		if err := m.completeRepositoryDocsAdmission(registrationID, pendingRepositoryDocsAdmission.SourceRegistrationID, pendingRepositoryDocsAdmission.SourceRegistrationGeneration, pendingRepositoryDocsAdmission.ExpectedRevisionSetID, pendingRepositoryDocsAdmission.AuthorityPathFingerprint); err == nil {
 			hasPendingRepositoryDocsAdmission = false
 		}
 	}
@@ -2093,7 +2277,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 			if jobErr != nil {
 				var staleAdmission RepositoryDocsAdmissionStaleError
 				if hasPendingRepositoryDocsAdmission && errors.As(jobErr, &staleAdmission) {
-					_ = m.completeRepositoryDocsAdmission(registrationID, pendingRepositoryDocsAdmission.SourceRegistrationID, pendingRepositoryDocsAdmission.SourceRegistrationGeneration, pendingRepositoryDocsAdmission.ExpectedRevisionSetID)
+					_ = m.completeRepositoryDocsAdmission(registrationID, pendingRepositoryDocsAdmission.SourceRegistrationID, pendingRepositoryDocsAdmission.SourceRegistrationGeneration, pendingRepositoryDocsAdmission.ExpectedRevisionSetID, pendingRepositoryDocsAdmission.AuthorityPathFingerprint)
 					return m.updateRepositoryDocsFailure(registrationID, snapshot.repositorySourceID, staleAdmission.DiagnosticCode(), "queued repository documentation work was superseded before it started"), started
 				}
 				var busy ErrCacheWriterBusy
@@ -2650,6 +2834,8 @@ func publicMaintenanceError(class string) string {
 		return "managed cache repository identity has conflicting policies"
 	case "cache_clone_conflict":
 		return "managed cache identity is registered at multiple locations"
+	case "config_snapshot_invalid":
+		return "managed cache configuration does not match its cache authority"
 	case "cache_unreadable":
 		return "managed cache is unavailable"
 	case "cache_replaced":
@@ -2712,6 +2898,26 @@ func maintenanceEnrollmentIntentHash(registrationID string, policy MaintenancePo
 	}{registrationID, policy, strings.TrimSpace(configHash)})
 	sum := sha256.Sum256(payload)
 	return "sha256:" + hex.EncodeToString(sum[:16])
+}
+
+func maintenanceReceiptAcceptsIntent(receipt maintenanceReceipt, canonicalIntentHash string, entry *MaintenanceEntry) bool {
+	if receipt.IntentHash == canonicalIntentHash {
+		return true
+	}
+	if entry == nil {
+		return false
+	}
+	// A compatible alias migration changes only the registration component of
+	// the intent. Preserve the original hash as audit evidence and accept the
+	// canonical replay only when the exact current policy/config recomputes that
+	// historical hash. A rejected policy/config candidate therefore cannot gain
+	// authority through an alias redirect.
+	for _, legacyID := range entry.LegacyRegistrationIDs {
+		if receipt.IntentHash == maintenanceEnrollmentIntentHash(legacyID, entry.Policy, entry.ConfigHash) {
+			return true
+		}
+	}
+	return false
 }
 
 func deriveMaintenanceEntryState(entry MaintenanceEntry) string {
