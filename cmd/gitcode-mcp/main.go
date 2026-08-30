@@ -34,6 +34,7 @@ type StartupDeps struct {
 	CachePathSource    string
 	ConfigReference    string
 	CredentialResolver *auth.CredentialResolver
+	Stdin              io.Reader
 }
 
 type CacheStartup struct {
@@ -152,6 +153,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 		deps.ConfigReference = eff.Location.Path
 	}
 	deps.CredentialResolver = credentialResolver
+	deps.Stdin = stdin
 	if opts.mcpServe {
 		return mcpServeRoute(context.Background(), stdin, stdout, stderr, deps, opts.mcpTransport, opts.mcpBind)
 	}
@@ -463,7 +465,7 @@ func runCLICompatibility(ctx context.Context, args []string, stdout io.Writer, s
 	if len(cliArgs) > 0 && deps.GitCode.Offline && !hasCLIFlag(cliArgs[1:], "--offline") && !hasCLIFlag(cliArgs[1:], "--fixture") {
 		cliArgs = append(cliArgs, "--offline")
 	}
-	return cli.ExecuteWithSourceContext(ctx, cliArgs, stdout, stderr, deps.Source)
+	return cli.ExecuteWithSourceContextAndInput(ctx, cliArgs, deps.Stdin, stdout, stderr, deps.Source)
 }
 
 func hasCLIFlag(args []string, name string) bool {

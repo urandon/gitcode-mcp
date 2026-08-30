@@ -128,7 +128,7 @@ type MaintenanceSetup struct {
 type MaintenanceServiceReadinessError struct{}
 
 func (MaintenanceServiceReadinessError) Error() string {
-	return "maintenance: service did not expose the required maintenance protocol before the readiness deadline"
+	return "maintenance: service did not expose the required maintenance protocol before the readiness deadline; run gitcode-mcp service repair"
 }
 
 func (MaintenanceServiceReadinessError) DiagnosticCode() string { return "service_not_ready" }
@@ -203,7 +203,7 @@ func (s MaintenanceSetup) Plan(ctx context.Context, req MaintenanceSetupRequest)
 			var capabilities MaintenanceCapabilities
 			if clientErr != nil || client.Call(ctx, "Maintenance.Capabilities", nil, &capabilities) != nil {
 				plan.Blockers = append(plan.Blockers, "running daemon does not expose the required maintenance protocol; reinstall or restart it with the current binary")
-				plan.Actions = append(plan.Actions, MaintenancePlanAction{ID: "upgrade-service", Class: "local_service_change", Status: "blocked", Summary: "restart the daemon with a binary that exposes Maintenance.Capabilities", ConfirmationRequired: true, Handoff: "gitcode-mcp service stop && gitcode-mcp service start"})
+				plan.Actions = append(plan.Actions, MaintenancePlanAction{ID: "upgrade-service", Class: "local_service_change", Status: "blocked", Summary: "repair and reload the daemon with the current binary", ConfirmationRequired: true, Handoff: "gitcode-mcp service repair"})
 			} else if capabilities.RegistryProtocol != maintenanceRegistrySchema {
 				plan.Blockers = append(plan.Blockers, fmt.Sprintf("daemon registry protocol %q is incompatible with %q", capabilities.RegistryProtocol, maintenanceRegistrySchema))
 			} else {
@@ -237,7 +237,7 @@ func (s MaintenanceSetup) Plan(ctx context.Context, req MaintenanceSetupRequest)
 
 func (s MaintenanceSetup) Apply(ctx context.Context, req MaintenanceSetupRequest) (MaintenanceApplyResult, error) {
 	if strings.TrimSpace(req.IdempotencyKey) == "" {
-		return MaintenanceApplyResult{}, errors.New("maintenance enable: idempotency_key is required")
+		return MaintenanceApplyResult{}, MaintenanceSetupInputError{Field: "idempotency_key", Message: "is required"}
 	}
 	current, err := s.Plan(ctx, req)
 	if err != nil {
@@ -341,6 +341,17 @@ func (s MaintenanceSetup) Apply(ctx context.Context, req MaintenanceSetupRequest
 	result.NextAction = maintenanceApplyNextAction(result.Status, req.Detach)
 	return result, nil
 }
+
+type MaintenanceSetupInputError struct {
+	Field   string
+	Message string
+}
+
+func (e MaintenanceSetupInputError) Error() string {
+	return fmt.Sprintf("maintenance: invalid query %s: %s", e.Field, e.Message)
+}
+
+func (MaintenanceSetupInputError) DiagnosticCode() string { return "invalid_query" }
 
 func (s MaintenanceSetup) providerPlan(ctx context.Context, req MaintenanceSetupRequest) (MaintenanceProviderPlan, []MaintenancePlanAction, []string, error) {
 	if req.RAGMode == "off" {

@@ -3,6 +3,7 @@ module gitcode-mcp
 go 1.22
 
 require (
+	github.com/mattn/go-isatty v0.0.20
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/sys v0.27.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -15,7 +16,6 @@ require (
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51 // indirect
-	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	golang.org/x/mod v0.17.0 // indirect
