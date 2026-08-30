@@ -118,7 +118,8 @@ Concurrent cancel callers share that same durable resolution without a polling
 timeout. If the tombstone commits but the terminal job-history snapshot cannot
 be written, the worker is still signalled and the error reports that narrower
 snapshot failure; restart recovery reconstructs `cancelled` from the tombstone
-instead of misclassifying the job as `interrupted`.
+only when its job, repository, source generation, revision set, and work
+identity all match, instead of misclassifying unrelated work as cancelled.
 An in-flight semantic query first loads one exact published revision-set
 snapshot (membership, chunk locators, and vectors) transactionally. Retention
 may evict historical cache rows after that snapshot is loaded without

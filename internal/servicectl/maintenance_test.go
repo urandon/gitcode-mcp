@@ -926,6 +926,57 @@ func TestRepositoryDocsCancellationRecoversCommittedTombstoneAfterSnapshotFailur
 	}
 }
 
+func TestRepositoryDocsCancellationRecoveryRequiresExactWorkIdentity(t *testing.T) {
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), nil, "")
+	intent := repositoryDocsAdmissionIntent{
+		RegistrationID: "registration", SourceRegistrationID: "source", SourceRegistrationGeneration: 3,
+		RepoID: "owner/repo", WorkKey: "private-work-key", ExpectedRevisionSetID: "set", JobID: "job-1",
+		Disposition: repositoryDocsAdmissionCancelled,
+	}
+	maintenance.admissions[repositoryDocsAdmissionKey(intent.RegistrationID, intent.SourceRegistrationID)] = intent
+	matching := Job{
+		ID: "job-1", Type: RepositoryDocsIndexJobType, RepoID: "owner/repo", RegistrationID: "registration",
+		SourceRegistrationID: "source", SourceRegistrationGeneration: 3, ExpectedRevisionSetID: "set",
+		WorkRef: publicWorkRef(intent.WorkKey), Status: JobStatusCancelling,
+	}
+	if !maintenance.repositoryDocsCancellationCommitted(matching) {
+		t.Fatal("exact durable cancellation identity was not recognized")
+	}
+	wrongRepo := matching
+	wrongRepo.RepoID = "other/repo"
+	if maintenance.repositoryDocsCancellationCommitted(wrongRepo) {
+		t.Fatal("repository mismatch accepted a cancellation tombstone")
+	}
+	wrongWork := matching
+	wrongWork.WorkRef = publicWorkRef("different-private-work-key")
+	if maintenance.repositoryDocsCancellationCommitted(wrongWork) {
+		t.Fatal("work identity mismatch accepted a cancellation tombstone")
+	}
+}
+
+func TestRepositoryDocsCancellingWithoutCommittedTombstoneRecoversInterrupted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.json")
+	before := NewJobManager(path)
+	now := time.Now().UTC()
+	before.jobs["job-1"] = &Job{
+		ID: "job-1", Type: RepositoryDocsIndexJobType, RepoID: "owner/repo", RegistrationID: "registration",
+		SourceRegistrationID: "source", SourceRegistrationGeneration: 1, ExpectedRevisionSetID: "set",
+		WorkRef: publicWorkRef("work"), Status: JobStatusCancelling, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := before.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	after := NewJobManager(path)
+	after.repositoryDocsCancellationCommitted = func(Job) bool { return false }
+	if err := after.LoadAndMarkInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	recovered, found := after.Get("job-1")
+	if !found || recovered.Status != JobStatusInterrupted {
+		t.Fatalf("uncommitted cancellation recovery=%+v found=%t", recovered, found)
+	}
+}
+
 func TestRepositoryDocsGenerationFenceSuppressesLateCancellationPersistence(t *testing.T) {
 	jobs := NewJobManager("")
 	now := time.Now().UTC()

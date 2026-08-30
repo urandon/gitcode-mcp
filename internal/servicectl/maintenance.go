@@ -902,7 +902,8 @@ func (m *MaintenanceManager) repositoryDocsCancellationCommitted(job Job) bool {
 	defer m.mu.Unlock()
 	intent, ok := m.admissions[repositoryDocsAdmissionKey(job.RegistrationID, job.SourceRegistrationID)]
 	return ok && intent.Disposition == repositoryDocsAdmissionCancelled && intent.JobID == job.ID &&
-		intent.SourceRegistrationGeneration == job.SourceRegistrationGeneration && intent.ExpectedRevisionSetID == job.ExpectedRevisionSetID
+		intent.RepoID == job.RepoID && intent.SourceRegistrationGeneration == job.SourceRegistrationGeneration &&
+		intent.ExpectedRevisionSetID == job.ExpectedRevisionSetID && job.WorkRef == publicWorkRef(intent.WorkKey)
 }
 
 func (m *MaintenanceManager) completeRepositoryDocsAdmission(registrationID, sourceRegistrationID string, sourceGeneration int64, expectedSetID string) error {
