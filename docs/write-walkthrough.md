@@ -98,6 +98,10 @@ The generic `create-issue` and `update-issue` commands use the same resolver and
 readback contract. A milestone selector may be a numeric remote id, stable
 `MILESTONE-<id>`, or exact title. Live receipts include the resolved stable id,
 remote id, and title; clear operations include an explicit cleared marker.
+For partial `update-issue` writes, omitted milestone and labels mean preserve,
+not clear. The adapter reads the live preimage to work around the provider's
+omitted-milestone behavior and accepts success only after canonical readback
+matches every requested field and the unrelated fields remain unchanged.
 
 ### Create wiki page (dry-run)
 

@@ -1043,12 +1043,13 @@ func TestWriteUsesEndpointBuilders(t *testing.T) {
 
 func TestConfirmedWriteOperations(t *testing.T) {
 	tests := []struct {
-		name      string
-		method    string
-		path      string
-		body      string
-		invoke    func(*HTTPClient) (WriteResult[any], error)
-		assertion func(t *testing.T, result WriteResult[any])
+		name             string
+		method           string
+		path             string
+		body             string
+		expectedProvider string
+		invoke           func(*HTTPClient) (WriteResult[any], error)
+		assertion        func(t *testing.T, result WriteResult[any])
 	}{
 		{
 			name:   "write-confirm-create-issue",
@@ -1066,10 +1067,11 @@ func TestConfirmedWriteOperations(t *testing.T) {
 			},
 		},
 		{
-			name:   "write-confirm-update-issue",
-			method: http.MethodPatch,
-			path:   updateIssueEndpoint("example-owner", "example-repo", 42),
-			body:   `{"id":"ISSUE-42","number":42,"title":"updated"}`,
+			name:             "write-confirm-update-issue",
+			method:           http.MethodPatch,
+			path:             updateIssueEndpoint("example-owner", "example-repo", 42),
+			body:             `{"id":"ISSUE-42","number":42,"title":"updated"}`,
+			expectedProvider: "2xx-readback",
 			invoke: func(client *HTTPClient) (WriteResult[any], error) {
 				result, err := client.UpdateIssue(context.Background(), UpdateIssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42, Title: "updated"}, WriteOptions{IdempotencyKey: "key-update-issue"})
 				return anyWriteResult(result), err
@@ -1148,6 +1150,10 @@ func TestConfirmedWriteOperations(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tt.name == "write-confirm-update-issue" && r.Method == http.MethodGet && r.URL.Path == tt.path {
+					fmt.Fprint(w, tt.body)
+					return
+				}
 				if r.Method != tt.method || r.URL.Path != tt.path {
 					t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 				}
@@ -1162,7 +1168,11 @@ func TestConfirmedWriteOperations(t *testing.T) {
 			if err != nil {
 				t.Fatalf("write returned error: %v", err)
 			}
-			if !result.Confirmed || result.Operation == "" || result.Target == "" || result.ProviderStatus != "201" || result.IdempotencyKey == "" || result.ResponseHash == "" || result.ConfirmedAt.IsZero() || result.ProviderPayloadFingerprint == "" {
+			expectedProvider := tt.expectedProvider
+			if expectedProvider == "" {
+				expectedProvider = "201"
+			}
+			if !result.Confirmed || result.Operation == "" || result.Target == "" || result.ProviderStatus != expectedProvider || result.IdempotencyKey == "" || result.ResponseHash == "" || result.ConfirmedAt.IsZero() || result.ProviderPayloadFingerprint == "" {
 				t.Fatalf("missing confirmation metadata: %+v", result)
 			}
 			tt.assertion(t, result)
@@ -2756,6 +2766,10 @@ func TestScenario013001CreateIssueLabelsAsJSONString(t *testing.T) {
 func TestScenario013002UpdateIssueLabelsAsJSONString(t *testing.T) {
 	var sawBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues/42" {
+			fmt.Fprint(w, `{"id":"42","number":42,"title":"Updated","labels":[{"id":1,"name":"bug","color":"#FF0000"}]}`)
+			return
+		}
 		if r.Method == http.MethodPatch && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues/42" {
 			buf := make([]byte, 4096)
 			n, _ := r.Body.Read(buf)
@@ -2877,17 +2891,25 @@ func TestScenario016CreateIssueLabelsOmitted(t *testing.T) {
 
 func TestScenario016UpdateIssueTitleOnlyLabelsOmitted(t *testing.T) {
 	var sawBody []byte
+	title := "Original"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPatch && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues/42" {
+		if r.URL.Path != "/api/v5/repos/example-owner/example-repo/issues/42" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		switch r.Method {
+		case http.MethodGet:
+			fmt.Fprintf(w, `{"id":"42","number":42,"title":%q,"state":"open"}`, title)
+		case http.MethodPatch:
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
 				t.Fatalf("read request body: %v", err)
 			}
 			sawBody = body
+			title = "Updated"
 			fmt.Fprint(w, `{"id":"42","number":42,"title":"Updated"}`)
-			return
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
-		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 	}))
 	defer server.Close()
 	client := newTestClient(t, server.URL, Config{})
@@ -2904,6 +2926,129 @@ func TestScenario016UpdateIssueTitleOnlyLabelsOmitted(t *testing.T) {
 		t.Fatal("expected confirmed result")
 	}
 	assertJSONKeyAbsent(t, sawBody, "labels")
+}
+
+func TestScenario125BodyOnlyUpdatePreservesMilestoneAndLabels(t *testing.T) {
+	var getCalls, patchCalls int
+	milestonePresent := true
+	body := "Original body"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v5/repos/example-owner/example-repo/issues/42" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		writeIssue := func() {
+			milestone := "null"
+			if milestonePresent {
+				milestone = `{"id":7,"title":"Release 7","state":"open"}`
+			}
+			fmt.Fprintf(w, `{"id":"42","number":42,"title":"Issue","body":%q,"state":"open","labels":[{"id":1,"name":"bug","color":"#ff0000"}],"milestone":%s}`, body, milestone)
+		}
+		switch r.Method {
+		case http.MethodGet:
+			getCalls++
+			writeIssue()
+		case http.MethodPatch:
+			patchCalls++
+			var payload map[string]json.RawMessage
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode update body: %v", err)
+			}
+			if raw, ok := payload["body"]; ok {
+				if err := json.Unmarshal(raw, &body); err != nil {
+					t.Fatalf("decode body field: %v", err)
+				}
+			}
+			// Captured GitCode compatibility behavior: omitting milestone from an
+			// otherwise valid PATCH clears the current milestone.
+			if raw, ok := payload["milestone"]; !ok {
+				milestonePresent = false
+			} else if string(raw) != "7" {
+				t.Fatalf("milestone payload=%s, want 7", raw)
+			}
+			writeIssue()
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	}))
+	defer server.Close()
+
+	result, err := newTestClient(t, server.URL, Config{}).UpdateIssue(context.Background(), UpdateIssueRequest{
+		Owner: "example-owner", Repo: "example-repo", Number: 42, Body: "Updated body",
+	}, WriteOptions{IdempotencyKey: "scenario-125-body-only"})
+	if err != nil {
+		t.Fatalf("UpdateIssue error: %v", err)
+	}
+	if getCalls != 2 || patchCalls != 1 {
+		t.Fatalf("calls GET=%d PATCH=%d, want live preimage + PATCH + canonical readback", getCalls, patchCalls)
+	}
+	if result.Record.Body != "Updated body" || result.Record.Milestone == nil || result.Record.Milestone.RemoteID != "7" || !reflect.DeepEqual(result.Record.Labels, []string{"bug"}) {
+		t.Fatalf("result=%#v, want body update with preserved milestone and labels", result.Record)
+	}
+	if result.ProviderStatus != "2xx-readback" {
+		t.Fatalf("provider status=%q, want 2xx-readback", result.ProviderStatus)
+	}
+}
+
+func TestScenario125RejectsCanonicalReadbackThatIgnoredRequestedBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v5/repos/example-owner/example-repo/issues/42" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		fmt.Fprint(w, `{"id":"42","number":42,"title":"Issue","body":"Original body","state":"open","labels":[{"id":1,"name":"bug"}],"milestone":{"id":7,"title":"Release 7","state":"open"}}`)
+	}))
+	defer server.Close()
+
+	_, err := newTestClient(t, server.URL, Config{}).UpdateIssue(context.Background(), UpdateIssueRequest{
+		Owner: "example-owner", Repo: "example-repo", Number: 42, Body: "Updated body",
+	}, WriteOptions{IdempotencyKey: "scenario-125-ignored-body"})
+	var mismatch ErrValidationFailed
+	if !errors.As(err, &mismatch) || mismatch.Field != "body" {
+		t.Fatalf("error=%T %v, want body readback mismatch", err, err)
+	}
+}
+
+func TestUpdateIssueCanonicalReadbackConfirmsExplicitLabelsAndMilestone(t *testing.T) {
+	tests := []struct {
+		name      string
+		request   UpdateIssueRequest
+		response  string
+		wantField string
+	}{
+		{
+			name:      "labels mismatch",
+			request:   UpdateIssueRequest{Labels: EncodeIssueLabels([]string{"bug"})},
+			response:  `{"id":"42","number":42,"title":"Issue","labels":[{"id":2,"name":"enhancement"}]}`,
+			wantField: "labels",
+		},
+		{
+			name:      "milestone set mismatch",
+			request:   UpdateIssueRequest{Milestone: EncodeIssueMilestone("8")},
+			response:  `{"id":"42","number":42,"title":"Issue","milestone":{"id":7,"title":"Release 7","state":"open"}}`,
+			wantField: "milestone",
+		},
+		{
+			name:      "milestone clear mismatch",
+			request:   UpdateIssueRequest{Milestone: EncodeIssueMilestone("null")},
+			response:  `{"id":"42","number":42,"title":"Issue","milestone":{"id":7,"title":"Release 7","state":"open"}}`,
+			wantField: "milestone",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprint(w, tt.response)
+			}))
+			defer server.Close()
+			tt.request.Owner = "example-owner"
+			tt.request.Repo = "example-repo"
+			tt.request.Number = 42
+			_, err := newTestClient(t, server.URL, Config{}).UpdateIssue(context.Background(), tt.request, WriteOptions{IdempotencyKey: "readback-" + strings.ReplaceAll(tt.name, " ", "-")})
+			var mismatch ErrValidationFailed
+			if !errors.As(err, &mismatch) || mismatch.Field != tt.wantField {
+				t.Fatalf("error=%T %v, want %s readback mismatch", err, err, tt.wantField)
+			}
+		})
+	}
 }
 
 func TestScenario062UpdateIssueNormalizesStateAndRequiresReadback(t *testing.T) {
@@ -2952,8 +3097,8 @@ func TestScenario062UpdateIssueNormalizesStateAndRequiresReadback(t *testing.T) 
 			if err != nil {
 				t.Fatalf("UpdateIssue state %q: %v", tt.publicState, err)
 			}
-			if !reflect.DeepEqual(calls, []string{http.MethodPatch, http.MethodGet}) {
-				t.Fatalf("calls=%v, want PATCH then GET", calls)
+			if !reflect.DeepEqual(calls, []string{http.MethodGet, http.MethodPatch, http.MethodGet}) {
+				t.Fatalf("calls=%v, want GET preimage, PATCH, then GET readback", calls)
 			}
 			if result.Record.State != tt.readbackState || result.Record.Title != "Preserved title" || result.Record.Body != "Preserved body" || !reflect.DeepEqual(result.Record.Labels, []string{"bug"}) {
 				t.Fatalf("readback result=%#v", result.Record)
@@ -3001,6 +3146,10 @@ func TestScenario062UpdateIssueRejectsStateReadbackMismatch(t *testing.T) {
 func TestScenario016ExplicitLabelsPreserved(t *testing.T) {
 	var sawBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues/42" {
+			fmt.Fprint(w, `{"id":"42","number":42,"title":"Updated","labels":[{"id":1,"name":"bug","color":"#FF0000"}]}`)
+			return
+		}
 		if r.Method == http.MethodPatch && r.URL.Path == "/api/v5/repos/example-owner/example-repo/issues/42" {
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
