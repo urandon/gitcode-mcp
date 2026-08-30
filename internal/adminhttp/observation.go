@@ -314,11 +314,26 @@ type MaintenanceObservation struct {
 }
 
 type MaintenanceIdentityConflictObservation struct {
-	Kind                     string   `json:"kind,omitempty"`
-	CandidateRegistrationIDs []string `json:"candidate_registration_ids"`
-	PolicyHashes             []string `json:"policy_hashes"`
-	ConfigHashes             []string `json:"config_hashes"`
-	PathFingerprints         []string `json:"path_fingerprints,omitempty"`
+	Kind                     string                                    `json:"kind,omitempty"`
+	DetailsAvailable         bool                                      `json:"details_available"`
+	CandidateRegistrationIDs []string                                  `json:"candidate_registration_ids"`
+	PolicyHashes             []string                                  `json:"policy_hashes"`
+	ConfigHashes             []string                                  `json:"config_hashes"`
+	PathFingerprints         []string                                  `json:"path_fingerprints,omitempty"`
+	Candidates               []MaintenanceIdentityCandidateObservation `json:"candidates,omitempty"`
+}
+
+type MaintenanceIdentityCandidateObservation struct {
+	CandidateRef        string                `json:"candidate_ref"`
+	RegistrationID      string                `json:"registration_id"`
+	RepoID              string                `json:"repo_id"`
+	Policy              MaintenancePolicyView `json:"policy"`
+	PolicyHash          string                `json:"policy_hash"`
+	ConfigHash          string                `json:"config_hash,omitempty"`
+	PathFingerprint     string                `json:"path_fingerprint"`
+	SourceAuthorityHash string                `json:"source_authority_hash,omitempty"`
+	SourceRefs          []string              `json:"source_refs,omitempty"`
+	WasEnabled          bool                  `json:"was_enabled"`
 }
 
 type MaintenancePolicyView struct {
@@ -505,6 +520,11 @@ func sortSnapshot(snapshot *ObservationSnapshot) {
 			sort.Strings(conflict.PolicyHashes)
 			sort.Strings(conflict.ConfigHashes)
 			sort.Strings(conflict.PathFingerprints)
+			sort.Slice(conflict.Candidates, func(i, j int) bool { return conflict.Candidates[i].CandidateRef < conflict.Candidates[j].CandidateRef })
+			for candidateIndex := range conflict.Candidates {
+				sort.Strings(conflict.Candidates[candidateIndex].Policy.Collections)
+				sort.Strings(conflict.Candidates[candidateIndex].SourceRefs)
+			}
 		}
 	}
 	sort.Slice(snapshot.Diagnostics, func(i, j int) bool { return snapshot.Diagnostics[i].ID < snapshot.Diagnostics[j].ID })

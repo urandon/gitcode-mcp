@@ -625,10 +625,33 @@ func adminMaintenanceObservation(entry MaintenanceEntry) adminhttp.MaintenanceOb
 	if entry.IdentityConflict != nil {
 		view.IdentityConflict = &adminhttp.MaintenanceIdentityConflictObservation{
 			Kind:                     entry.IdentityConflict.Kind,
+			DetailsAvailable:         entry.IdentityConflict.DetailsAvailable,
 			CandidateRegistrationIDs: append([]string(nil), entry.IdentityConflict.CandidateRegistrationIDs...),
 			PolicyHashes:             append([]string(nil), entry.IdentityConflict.PolicyHashes...),
 			ConfigHashes:             append([]string(nil), entry.IdentityConflict.ConfigHashes...),
 			PathFingerprints:         append([]string(nil), entry.IdentityConflict.PathFingerprints...),
+		}
+		for _, candidate := range entry.IdentityConflict.Candidates {
+			candidateCollections := []string{}
+			for _, collection := range []struct {
+				name    string
+				enabled bool
+			}{{"issues", candidate.Policy.Issues}, {"issue_comments", candidate.Policy.IssueComments}, {"wiki", candidate.Policy.Wiki}, {"pulls", candidate.Policy.Pulls}, {"pr_comments", candidate.Policy.PRComments}} {
+				if collection.enabled {
+					candidateCollections = append(candidateCollections, collection.name)
+				}
+			}
+			view.IdentityConflict.Candidates = append(view.IdentityConflict.Candidates, adminhttp.MaintenanceIdentityCandidateObservation{
+				CandidateRef: candidate.CandidateRef, RegistrationID: candidate.RegistrationID, RepoID: candidate.RepoID,
+				Policy: adminhttp.MaintenancePolicyView{
+					SyncEnabled: candidate.Policy.SyncEnabled, SyncMode: candidate.Policy.SyncMode, RAGEnabled: candidate.Policy.RAGEnabled,
+					Collections: candidateCollections, HeadIntervalSeconds: candidate.Policy.HeadIntervalSeconds,
+					RAGIntervalSeconds: candidate.Policy.RAGIntervalSeconds, HeadMaxPages: candidate.Policy.HeadMaxPages,
+					TailSlicePages: candidate.Policy.TailSlicePages, PerPage: candidate.Policy.PerPage, Profile: candidate.Policy.Profile,
+				},
+				PolicyHash: candidate.PolicyHash, ConfigHash: candidate.ConfigHash, PathFingerprint: candidate.PathFingerprint,
+				SourceAuthorityHash: candidate.SourceAuthorityHash, SourceRefs: append([]string(nil), candidate.SourceRefs...), WasEnabled: candidate.WasEnabled,
+			})
 		}
 	}
 	return view

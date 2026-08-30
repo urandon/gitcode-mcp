@@ -3,7 +3,7 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import { Activity, AlertTriangle, ArrowLeft, Blocks, CheckCircle2, ChevronRight, CircleGauge, Clipboard, Clock3, Database, FileCheck2, FileText, FolderCog, Gauge, GitFork, HeartPulse, History, Layers3, Monitor, Moon, Power, RefreshCw, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Sun, Wrench, XCircle, Zap } from '@lucide/svelte';
   import { applyTheme, normalizeTheme, themeStorageKey, type Theme } from '$lib/theme';
-  import { adminApiVersion, cliHandoff, emptySnapshot, humanize, isSnapshotStale, laneSummary, type AdminView, type BindingIntent, type BindingPlan, type CacheObservation, type ControlFailure, type ControlReceipt, type Diagnostic, type Job, type JobAction, type JobActionReceipt, type Maintenance, type MaintenanceIntent, type MaintenancePlan, type ObservationSnapshot, type ProviderSmoke, type RAGRepairPlan, type Repository, type RepositoryDocsPlan, type RepositoryDocsSearchResult, type RepositoryTab, type SearchComparison } from '$lib/admin';
+  import { adminApiVersion, cliHandoff, emptySnapshot, humanize, isSnapshotStale, laneSummary, type AdminView, type BindingIntent, type BindingPlan, type CacheObservation, type ControlFailure, type ControlReceipt, type Diagnostic, type Job, type JobAction, type JobActionReceipt, type Maintenance, type MaintenanceConflictResolutionPlan, type MaintenanceIntent, type MaintenancePlan, type ObservationSnapshot, type ProviderSmoke, type RAGRepairPlan, type Repository, type RepositoryDocsPlan, type RepositoryDocsSearchResult, type RepositoryTab, type SearchComparison } from '$lib/admin';
   import CoverageLaneCard from '$lib/CoverageLaneCard.svelte';
   import StatusChip from '$lib/StatusChip.svelte';
 
@@ -64,7 +64,7 @@
   let bindingReceipt: ControlReceipt | undefined;
   let bindingError = '';
   let controlRunning = false;
-  let pendingControl: 'maintenance_apply' | 'binding_apply' | 'rag_repair_apply' | 'disable' | 'reconcile' | 'repository_docs_index' | '' = '';
+  let pendingControl: 'maintenance_apply' | 'binding_apply' | 'rag_repair_apply' | 'conflict_resolution_apply' | 'disable' | 'reconcile' | 'repository_docs_index' | '' = '';
   let pendingControlKey = '';
   let controlDialog: HTMLDialogElement | undefined;
   let controlConfirmButton: HTMLButtonElement | undefined;
@@ -76,6 +76,13 @@
   let searchCompareEnabled = false;
   let providerSmokeEnabled = false;
   let ragRepairEnabled = false;
+  let conflictResolutionEnabled = false;
+  let selectedConflictCandidateRef = '';
+  let conflictResolutionPlan: MaintenanceConflictResolutionPlan | undefined;
+  let conflictResolutionReceipt: ControlReceipt | undefined;
+  let conflictResolutionError = '';
+  let requestedRegistrationID = '';
+  let registrationRedirectNotice = '';
   let searchQuery = '';
   let searchKind = '';
   let searchProvenance = '';
@@ -121,6 +128,7 @@
   $: searchCompareEnabled = snapshot.capabilities.some((item) => item.id === 'admin_search_compare' && item.ui_enabled);
   $: providerSmokeEnabled = snapshot.capabilities.some((item) => item.id === 'admin_provider_smoke' && item.ui_enabled);
   $: ragRepairEnabled = snapshot.capabilities.some((item) => item.id === 'admin_rag_bounded_repair' && item.ui_enabled);
+  $: conflictResolutionEnabled = snapshot.capabilities.some((item) => item.id === 'admin_maintenance_conflict_resolution' && item.ui_enabled);
   $: repositoryDocsSearchEnabled = snapshot.capabilities.some((item) => item.id === 'repository_docs_search' && item.ui_enabled) && Boolean(selectedRepo?.documentation.search_available);
   $: repositoryDocsSources = selectedRepo?.documentation.sources || [];
   $: if (!repositoryDocsSources.some((source) => source.source_registration_id === repositoryDocsSourceID)) repositoryDocsSourceID = repositoryDocsSources[0]?.source_registration_id || '';
@@ -134,6 +142,10 @@
       repo.collections ||= []; repo.recent_sync_events ||= []; repo.execution ||= {}; repo.counts.by_kind ||= [];
       repo.documentation ||= { state: 'not_indexed', registered: false, overlay: false, eligible_files: 0, eligible_chunks: 0, embedded_chunks: 0, reused_chunks: 0, failed_chunks: 0, missing_objects: 0, excluded_files: 0, revision_set_count: 0, search_available: false, retention: { committed_sets_per_identity: 0, overlay_max_age_hours: 0, terminal_max_age_hours: 0, vector_byte_ceiling: 0 } };
 	  repo.documentation.exclusions ||= []; repo.documentation.sources ||= []; repo.documentation.retention ||= { committed_sets_per_identity: 0, overlay_max_age_hours: 0, terminal_max_age_hours: 0, vector_byte_ceiling: 0 };
+    }
+    for (const registration of value.maintenance) {
+      registration.aliases ||= []; registration.legacy_registration_ids ||= [];
+      if (registration.identity_conflict) registration.identity_conflict.candidates ||= [];
     }
     return value;
   }
@@ -180,6 +192,7 @@
       snapshot = normalizeSnapshot(await response.json());
       if (selectedCacheRef && selectedRepoID) maintenanceTargetKey = `${selectedCacheRef}\u0000${selectedRepoID}`;
       ensureControlSelections();
+      canonicalizeRegistrationDeepLink();
     } catch (value) { error = value instanceof Error ? value.message : 'Observation is unavailable.'; }
     finally { loading = false; }
   }
@@ -201,6 +214,7 @@
     const requestedFilter = params.get('diagnostics');
     if (requestedFilter === 'current' || requestedFilter === 'recovered' || requestedFilter === 'all') diagnosticsFilter = requestedFilter;
     selectedJobID = params.get('job') || '';
+    requestedRegistrationID = params.get('registration') || '';
     jobStateFilter = params.get('job_state') || ''; jobTypeFilter = params.get('job_type') || '';
     jobCacheFilter = params.get('job_cache') || ''; jobRepoFilter = params.get('job_repo') || ''; jobFailureFilter = params.get('job_failure') || '';
   }
@@ -218,6 +232,7 @@
       if (searchLimit !== 8) params.set('limit', String(searchLimit));
     }
     if (active === 'Diagnostics' && diagnosticsFilter !== 'current') params.set('diagnostics', diagnosticsFilter);
+    if (active === 'Maintenance' && requestedRegistrationID) params.set('registration', requestedRegistrationID);
     if (active === 'Jobs') {
       if (selectedJobID) params.set('job', selectedJobID);
       if (jobStateFilter) params.set('job_state', jobStateFilter);
@@ -233,6 +248,7 @@
     active = view;
     if (view !== 'Caches') { selectedCacheRef = ''; selectedRepoID = ''; }
     if (view !== 'Jobs') selectedJobID = '';
+    if (view !== 'Maintenance') { requestedRegistrationID = ''; registrationRedirectNotice = ''; }
     updateLocation();
   }
   function openRepository(cache: CacheObservation, repo: Repository): void { active = 'Caches'; selectedCacheRef = cache.cache_ref; selectedRepoID = repo.repo_id; maintenanceTargetKey = `${cache.cache_ref}\u0000${repo.repo_id}`; repoTab = 'coverage'; searchComparison = undefined; searchError = ''; providerSmoke = undefined; repairPlan = undefined; repairReceipt = undefined; repositoryDocsResult = undefined; repositoryDocsPlan = undefined; repositoryDocsError = ''; updateLocation(); }
@@ -344,12 +360,25 @@
     if (!targets.some((target) => target.key === maintenanceTargetKey)) {
       const registration = snapshot.maintenance[0];
       const target = registration ? targets.find((item) => item.cache.cache_ref === registration.cache_ref && item.repo.repo_id === registration.repo_id) : targets[0];
-      if (target) loadMaintenanceTarget(target.key);
+      if (target) loadMaintenanceTarget(target.key, false);
     }
     if (!bindingIntent.cache_ref && snapshot.caches[0]) bindingIntent = { ...bindingIntent, cache_ref: snapshot.caches[0].cache_ref };
   }
 
-  function loadMaintenanceTarget(key: string): void {
+  function canonicalizeRegistrationDeepLink(): void {
+    if (!requestedRegistrationID) return;
+    const registration = snapshot.maintenance.find((item) => item.registration_id === requestedRegistrationID || item.legacy_registration_ids?.includes(requestedRegistrationID));
+    if (!registration) return;
+    const previous = requestedRegistrationID;
+    active = 'Maintenance';
+    const nextTargetKey = `${registration.cache_ref}\u0000${registration.repo_id}`;
+    requestedRegistrationID = registration.registration_id;
+    registrationRedirectNotice = previous === registration.registration_id ? '' : `Redirected legacy registration ${previous} to canonical ${registration.registration_id}.`;
+    if (maintenanceTargetKey !== nextTargetKey) loadMaintenanceTarget(nextTargetKey, false);
+    if (previous !== requestedRegistrationID) updateLocation(true);
+  }
+
+  function loadMaintenanceTarget(key: string, updateDeepLink = true): void {
     maintenanceTargetKey = key;
     const [cacheRef, repoID] = key.split('\u0000');
     const registration = snapshot.maintenance.find((item) => item.cache_ref === cacheRef && item.repo_id === repoID);
@@ -363,6 +392,12 @@
       head_max_pages: registration?.policy.head_max_pages || 0, tail_slice_pages: registration?.policy.tail_slice_pages || 0, per_page: registration?.policy.per_page || 0
     };
     maintenancePlan = undefined; maintenanceReceipt = undefined; maintenanceError = ''; maintenanceFailure = undefined;
+    selectedConflictCandidateRef = ''; conflictResolutionPlan = undefined; conflictResolutionReceipt = undefined; conflictResolutionError = '';
+    if (updateDeepLink && registration) {
+      requestedRegistrationID = registration.registration_id;
+      registrationRedirectNotice = '';
+      updateLocation();
+    }
   }
 
   function toggleCollection(name: string, checked: boolean): void {
@@ -407,6 +442,16 @@
       maintenanceError = maintenanceFailure?.message || (value instanceof Error ? value.message : 'Maintenance planning failed.');
     }
     finally { controlRunning = false; }
+  }
+
+  async function renderConflictResolutionPlan(): Promise<void> {
+    if (!csrfToken || !conflictResolutionEnabled || !selectedMaintenance?.identity_conflict || !selectedConflictCandidateRef) return;
+    controlRunning = true; conflictResolutionError = ''; conflictResolutionReceipt = undefined;
+    try {
+      conflictResolutionPlan = await controlPost<MaintenanceConflictResolutionPlan>(`/api/admin/v1/maintenance/${encodeURIComponent(selectedMaintenance.registration_id)}/conflict-resolution/plan`, { candidate_ref: selectedConflictCandidateRef, expected_generation: selectedMaintenance.generation });
+    } catch (value) {
+      conflictResolutionPlan = undefined; conflictResolutionError = value instanceof Error ? value.message : 'Conflict resolution planning failed.';
+    } finally { controlRunning = false; }
   }
 
   async function renderBindingPlan(): Promise<void> {
@@ -475,6 +520,8 @@
         bindingReceipt = await controlPost<ControlReceipt>('/api/admin/v1/bindings/apply', { ...bindingIntent, plan_id: bindingPlan.plan_id, idempotency_key: pendingControlKey });
       } else if (pendingControl === 'rag_repair_apply' && repairPlan && selectedCache && selectedRepo) {
         repairReceipt = await controlPost<ControlReceipt>('/api/admin/v1/rag/repair/apply', { cache_ref: selectedCache.cache_ref, repo_id: selectedRepo.repo_id, profile: repairProfile, max_chunks: repairMaxChunks, plan_id: repairPlan.plan_id, idempotency_key: pendingControlKey });
+      } else if (pendingControl === 'conflict_resolution_apply' && conflictResolutionPlan && selectedMaintenance) {
+        conflictResolutionReceipt = await controlPost<ControlReceipt>(`/api/admin/v1/maintenance/${encodeURIComponent(selectedMaintenance.registration_id)}/conflict-resolution/apply`, { candidate_ref: conflictResolutionPlan.selected.candidate_ref, expected_generation: conflictResolutionPlan.expected_generation, plan_id: conflictResolutionPlan.plan_id, idempotency_key: pendingControlKey });
       } else if ((pendingControl === 'disable' || pendingControl === 'reconcile') && selectedMaintenance) {
         maintenanceReceipt = await controlPost<ControlReceipt>(`/api/admin/v1/maintenance/${encodeURIComponent(selectedMaintenance.registration_id)}/${pendingControl}`, { idempotency_key: pendingControlKey });
       } else if (pendingControl === 'repository_docs_index' && selectedMaintenance) {
@@ -483,10 +530,10 @@
       controlDialog?.close(); pendingControl = ''; pendingControlKey = ''; await refresh(); await tick(); controlTriggerButton?.focus();
     } catch (value) {
       const message = value instanceof Error ? value.message : 'The confirmed control failed.';
-      if (pendingControl !== 'binding_apply' && pendingControl !== 'rag_repair_apply') {
+      if (pendingControl !== 'binding_apply' && pendingControl !== 'rag_repair_apply' && pendingControl !== 'conflict_resolution_apply') {
         maintenanceFailure = value instanceof Error && 'failure' in value ? (value as Error & { failure: ControlFailure }).failure : undefined;
       }
-      if (pendingControl === 'binding_apply') bindingError = message; else if (pendingControl === 'rag_repair_apply') searchError = message; else maintenanceError = maintenanceFailure?.message || message;
+      if (pendingControl === 'binding_apply') bindingError = message; else if (pendingControl === 'rag_repair_apply') searchError = message; else if (pendingControl === 'conflict_resolution_apply') conflictResolutionError = message; else maintenanceError = maintenanceFailure?.message || message;
     } finally { controlRunning = false; }
   }
   function selectTheme(value: Theme): void { theme = value; applyTheme(value); }
@@ -715,6 +762,25 @@
         {:else if active === 'Maintenance'}
           <div class="intro section-intro"><p class="eyebrow">POLICY & BINDINGS</p><h1>Maintenance</h1><p>Render every local effect before it runs. Browser controls never install services, download models, accept cache paths, or contact GitCode for binding changes.</p></div>
           {#if !csrfToken}<div class="state-panel warning-panel"><ShieldCheck size={20} /><div><strong>Controls need an authenticated admin session</strong><p>Reopen the console with <code>gitcode-mcp admin open</code>. Observation remains available.</p></div></div>{/if}
+          {#if registrationRedirectNotice}<div class="state-panel" role="status"><GitFork size={20} /><div><strong>Canonical registration redirect</strong><p>{registrationRedirectNotice}</p></div></div>{/if}
+
+          {#if selectedMaintenance}
+            <section class="control-workbench identity-workbench" aria-labelledby="identity-title">
+              <div class="control-heading"><div><span class="large-icon"><GitFork size={22} /></span><div><p class="section-kicker">CANONICAL IDENTITY</p><h2 id="identity-title">{selectedMaintenance.repo_id}</h2><p>Registration <code>{selectedMaintenance.registration_id}</code></p></div></div><StatusChip value={selectedMaintenance.identity_conflict?.kind || (selectedMaintenance.aliases?.length ? 'alias' : 'canonical')} label={selectedMaintenance.identity_conflict ? humanize(selectedMaintenance.identity_conflict.kind) : selectedMaintenance.aliases?.length ? 'Harmless aliases' : 'Canonical'} /></div>
+              <dl class="binding-preview"><div><dt>Canonical repository</dt><dd>{selectedMaintenance.repo_id}</dd></div><div><dt>Known aliases</dt><dd>{selectedMaintenance.aliases?.join(', ') || 'None'}</dd></div><div><dt>Legacy registrations</dt><dd>{selectedMaintenance.legacy_registration_ids?.join(', ') || 'None'}</dd></div></dl>
+              {#if !selectedMaintenance.identity_conflict && selectedMaintenance.aliases?.length}<div class="action-result" role="status"><CheckCircle2 size={17} /><div><strong>Aliases resolve safely</strong><span>These names point to the same cache-backed repository binding; no policy choice is required.</span></div></div>{/if}
+              {#if selectedMaintenance.identity_conflict}
+                <div class="action-result error" role="alert"><AlertTriangle size={17} /><div><h3>{selectedMaintenance.identity_conflict.kind === 'cache_clone_conflict' ? 'Cache clone conflict' : selectedMaintenance.identity_conflict.kind === 'identity_unresolved' ? 'Repository identity unavailable' : 'Policy or source conflict'}</h3><span>Ordinary reconciliation and policy updates remain blocked until one retained candidate is explicitly selected.</span></div></div>
+                {#if !selectedMaintenance.identity_conflict.details_available}<div class="state-panel warning-panel"><AlertTriangle size={20} /><div><strong>Candidate details unavailable</strong><p>This row predates lossless conflict storage. Keep it blocked and recover from a current registry backup or re-enroll after manual inspection.</p></div></div>{:else}
+                  <fieldset class="conflict-candidates"><legend>Select exactly one candidate</legend>{#each selectedMaintenance.identity_conflict.candidates || [] as candidate}<label class:selected={selectedConflictCandidateRef === candidate.candidate_ref}><input type="radio" name="conflict-candidate" value={candidate.candidate_ref} checked={selectedConflictCandidateRef === candidate.candidate_ref} onchange={() => { selectedConflictCandidateRef = candidate.candidate_ref; conflictResolutionPlan = undefined; conflictResolutionReceipt = undefined; conflictResolutionError = ''; }} /><span><strong>{candidate.repo_id}</strong><code>{candidate.registration_id}</code><small>{candidate.path_fingerprint} · {candidate.was_enabled ? 'previously enabled' : 'previously disabled'}</small><small>{humanize(candidate.policy.sync_mode || 'off')} sync · RAG {candidate.policy.rag_enabled ? 'on' : 'off'} · config {candidate.config_hash || 'none'}</small></span></label>{/each}</fieldset>
+                  <div class="form-actions"><span>{conflictResolutionEnabled ? 'No candidate is preselected; the reviewed generation is fenced.' : 'Conflict resolution capability is unavailable in this daemon.'}</span><button class="primary-action" disabled={!csrfToken || !conflictResolutionEnabled || !selectedConflictCandidateRef || controlRunning} onclick={() => void renderConflictResolutionPlan()}><FileCheck2 size={16} />{controlRunning ? 'Planning…' : 'Review selected candidate'}</button></div>
+                  {#if conflictResolutionError}<div class="action-result error" role="alert"><AlertTriangle size={17} /><div><strong>Conflict resolution failed</strong><span>{conflictResolutionError}</span></div></div>{/if}
+                  {#if conflictResolutionPlan}<div class="plan-panel"><div class="plan-summary"><div><p class="section-kicker">EXACT CANDIDATE PLAN</p><h3>{conflictResolutionPlan.selected.repo_id}</h3><code>{conflictResolutionPlan.plan_id}</code></div><StatusChip value={conflictResolutionPlan.status} /></div><div class="effect-ledger">{#each conflictResolutionPlan.effects as effect}<article><span class="effect-icon"><Zap size={15} /></span><div><strong>{effect.summary}</strong><small>{humanize(effect.class)}</small></div><StatusChip value={effect.status} /></article>{/each}</div><div class="plan-footer"><div><strong>Canonical result</strong><span>{conflictResolutionPlan.canonical_registration_id}</span></div><button class="primary-action" disabled={controlRunning} onclick={(event) => void confirmControl('conflict_resolution_apply', event.currentTarget)}><Power size={16} />Confirm resolution</button></div></div>{/if}
+                  {#if conflictResolutionReceipt}<div class="action-result" role="status"><CheckCircle2 size={17} /><div><strong>Conflict resolved</strong><span>{conflictResolutionReceipt.receipt_id ? `Receipt ${conflictResolutionReceipt.receipt_id}` : 'Atomic receipt persisted.'}{conflictResolutionReceipt.replayed ? ' · replayed safely' : ''}</span></div></div>{/if}
+                {/if}
+              {/if}
+            </section>
+          {/if}
 
           <section class="control-workbench" aria-labelledby="policy-editor-title">
             <div class="control-heading"><div><span class="large-icon"><SlidersHorizontal size={22} /></span><div><p class="section-kicker">PLAN → CONFIRM → APPLY</p><h2 id="policy-editor-title">Maintenance policy</h2><p>Change a managed repository policy, review the effect ledger, then confirm the exact plan id.</p></div></div><StatusChip value={maintenancePlan?.status || selectedMaintenance?.state || 'not_planned'} label={maintenancePlan ? humanize(maintenancePlan.status) : selectedMaintenance ? humanize(selectedMaintenance.state) : 'Not planned'} /></div>
@@ -730,14 +796,14 @@
                 <label><span>Head pages</span><input type="number" min="0" max="1000" bind:value={maintenanceIntent.head_max_pages} /></label>
                 <label><span>Tail slice</span><input type="number" min="0" max="1000" bind:value={maintenanceIntent.tail_slice_pages} /></label>
                 <label><span>Per page</span><input type="number" min="0" max="100" bind:value={maintenanceIntent.per_page} /></label>
-                <div class="form-actions span-two"><span>{maintenanceControlsEnabled ? 'Capability available in this daemon.' : 'Capability registry does not expose maintenance controls.'}</span><button class="primary-action" type="submit" disabled={!csrfToken || !maintenanceControlsEnabled || controlRunning}><FileCheck2 size={16} />{controlRunning ? 'Planning…' : 'Render plan'}</button></div>
+                <div class="form-actions span-two"><span>{maintenanceControlsEnabled ? 'Capability available in this daemon.' : 'Capability registry does not expose maintenance controls.'}</span><button class="primary-action" type="submit" disabled={!csrfToken || !maintenanceControlsEnabled || !!selectedMaintenance?.identity_conflict || controlRunning}><FileCheck2 size={16} />{controlRunning ? 'Planning…' : 'Render plan'}</button></div>
               </form>
             {/if}
 
             {#if maintenanceError}<div class="action-result error" role="alert"><AlertTriangle size={17} /><div><strong>Maintenance control failed{maintenanceFailure?.field ? ` · ${humanize(maintenanceFailure.field)}` : ''}</strong><span>{maintenanceError}</span>{#if maintenanceFailure?.remediation}<span>{maintenanceFailure.remediation}</span>{/if}{#if maintenanceFailure?.blockers?.length}<ul class="blocker-list">{#each maintenanceFailure.blockers as blocker}<li>{blocker}</li>{/each}</ul>{/if}{#if maintenanceFailure?.cli_handoff}<code>{maintenanceFailure.cli_handoff}</code>{/if}</div></div>{/if}
             {#if maintenancePlan}<div class="plan-panel"><div class="plan-summary"><div><p class="section-kicker">REVIEWED INTENT</p><h3>{maintenancePlan.repo_id}</h3><code>{maintenancePlan.plan_id}</code></div><StatusChip value={maintenancePlan.status} /></div>{#if maintenancePlan.blockers?.length}<ul class="blocker-list">{#each maintenancePlan.blockers as blocker}<li><AlertTriangle size={15} />{blocker}</li>{/each}</ul>{/if}<div class="effect-ledger">{#each maintenancePlan.actions as effect}<article><span class="effect-icon"><Zap size={15} /></span><div><strong>{effect.summary}</strong><small>{humanize(effect.class)}{effect.data_boundary ? ` · ${humanize(effect.data_boundary)}` : ''}</small>{#if effect.handoff}<code>{effect.handoff}</code>{/if}</div><StatusChip value={effect.status} /></article>{/each}</div><div class="plan-footer"><div><strong>Next safe action</strong><span>{maintenancePlan.next_action || 'Confirm this exact plan.'}</span></div><button class="primary-action" disabled={maintenancePlan.status === 'blocked' || controlRunning} onclick={(event) => void confirmControl('maintenance_apply', event.currentTarget)}><Power size={16} />Confirm & apply</button></div></div>{/if}
             {#if maintenanceReceipt}<div class="action-result" role="status"><CheckCircle2 size={17} /><div><strong>{humanize(maintenanceReceipt.outcome || maintenanceReceipt.status || 'applied')}</strong><span>{maintenanceReceipt.receipt_id ? `Receipt ${maintenanceReceipt.receipt_id}` : maintenanceReceipt.audit_receipt ? `Audit ${maintenanceReceipt.audit_receipt}` : 'The confirmed plan was accepted.'}{maintenanceReceipt.replayed ? ' · replayed safely' : ''}{maintenanceReceipt.jobs_started?.length ? ` · jobs ${maintenanceReceipt.jobs_started.join(', ')}` : ''}</span></div></div>{/if}
-            {#if selectedMaintenance}<div class="registration-actions"><div><strong>Registration {selectedMaintenance.registration_id}</strong><span>Generation {selectedMaintenance.generation} · {selectedMaintenance.enabled ? 'enabled' : 'disabled'} · {registrationControlsEnabled ? 'reconcile is coalesced with active work.' : 'registration controls are unavailable in this daemon.'}</span></div><button disabled={!csrfToken || !registrationControlsEnabled || controlRunning} onclick={(event) => void confirmControl('reconcile', event.currentTarget)}><RotateCcw size={15} />Reconcile now</button><button class="danger-action" disabled={!csrfToken || !registrationControlsEnabled || !selectedMaintenance.enabled || controlRunning} onclick={(event) => void confirmControl('disable', event.currentTarget)}><Power size={15} />Disable</button></div>{/if}
+            {#if selectedMaintenance}<div class="registration-actions"><div><strong>Registration {selectedMaintenance.registration_id}</strong><span>Generation {selectedMaintenance.generation} · {selectedMaintenance.enabled ? 'enabled' : 'disabled'} · {registrationControlsEnabled ? 'reconcile is coalesced with active work.' : 'registration controls are unavailable in this daemon.'}</span></div><button disabled={!csrfToken || !registrationControlsEnabled || !!selectedMaintenance.identity_conflict || controlRunning} onclick={(event) => void confirmControl('reconcile', event.currentTarget)}><RotateCcw size={15} />Reconcile now</button><button class="danger-action" disabled={!csrfToken || !registrationControlsEnabled || !selectedMaintenance.enabled || !!selectedMaintenance.identity_conflict || controlRunning} onclick={(event) => void confirmControl('disable', event.currentTarget)}><Power size={15} />Disable</button></div>{/if}
           </section>
 
           <section class="control-workbench" aria-labelledby="binding-editor-title">
@@ -761,7 +827,7 @@
             {#if bindingReceipt}<div class="action-result" role="status"><CheckCircle2 size={17} /><div><strong>{humanize(bindingReceipt.outcome)}</strong><span>Receipt {bindingReceipt.receipt_id}{bindingReceipt.replayed ? ' · replayed safely' : ''}</span></div></div>{/if}
           </section>
 
-          {#if pendingControl}<dialog bind:this={controlDialog} class="confirmation-dialog control-confirmation" aria-labelledby="confirm-control-title" oncancel={(event) => { event.preventDefault(); void cancelControlConfirmation(); }}><span class:danger={pendingControl === 'disable'} class="dialog-icon">{#if pendingControl === 'binding_apply'}<GitFork size={21} />{:else if pendingControl === 'reconcile'}<RotateCcw size={21} />{:else}<Power size={21} />{/if}</span><div><p class="section-kicker">CONFIRM LOCAL CONTROL</p><h2 id="confirm-control-title">{pendingControl === 'maintenance_apply' ? 'Apply this maintenance plan?' : pendingControl === 'binding_apply' ? 'Write this repository binding?' : pendingControl === 'disable' ? 'Disable this registration?' : 'Reconcile this registration now?'}</h2><p>The daemon will validate current state again. A stale plan is rejected; an interrupted retry reuses the same durable idempotency key.</p><dl><div><dt>Target</dt><dd>{pendingControl === 'binding_apply' ? bindingIntent.repo_id : maintenanceIntent.repo_id}</dd></div><div><dt>Cache</dt><dd>{pendingControl === 'binding_apply' ? bindingIntent.cache_ref : maintenanceIntent.cache_ref}</dd></div><div><dt>Plan</dt><dd>{pendingControl === 'binding_apply' ? bindingPlan?.plan_id : pendingControl === 'maintenance_apply' ? maintenancePlan?.plan_id : selectedMaintenance?.registration_id}</dd></div></dl><div class="dialog-actions"><button onclick={() => void cancelControlConfirmation()} disabled={controlRunning}>Keep current state</button><button bind:this={controlConfirmButton} class:danger-action={pendingControl === 'disable'} class="primary-action" onclick={() => void executeControl()} disabled={controlRunning}>{controlRunning ? 'Submitting…' : 'Confirm action'}</button></div></div></dialog>{/if}
+          {#if pendingControl}<dialog bind:this={controlDialog} class="confirmation-dialog control-confirmation" aria-labelledby="confirm-control-title" oncancel={(event) => { event.preventDefault(); void cancelControlConfirmation(); }}><span class:danger={pendingControl === 'disable'} class="dialog-icon">{#if pendingControl === 'binding_apply' || pendingControl === 'conflict_resolution_apply'}<GitFork size={21} />{:else if pendingControl === 'reconcile'}<RotateCcw size={21} />{:else}<Power size={21} />{/if}</span><div><p class="section-kicker">CONFIRM LOCAL CONTROL</p><h2 id="confirm-control-title">{pendingControl === 'conflict_resolution_apply' ? 'Resolve this identity conflict?' : pendingControl === 'maintenance_apply' ? 'Apply this maintenance plan?' : pendingControl === 'binding_apply' ? 'Write this repository binding?' : pendingControl === 'disable' ? 'Disable this registration?' : 'Reconcile this registration now?'}</h2><p>The daemon will validate current state again. A stale plan is rejected; an interrupted retry reuses the same durable idempotency key.</p><dl><div><dt>Target</dt><dd>{pendingControl === 'conflict_resolution_apply' ? conflictResolutionPlan?.selected.repo_id : pendingControl === 'binding_apply' ? bindingIntent.repo_id : maintenanceIntent.repo_id}</dd></div><div><dt>Cache</dt><dd>{pendingControl === 'binding_apply' ? bindingIntent.cache_ref : maintenanceIntent.cache_ref}</dd></div><div><dt>Plan</dt><dd>{pendingControl === 'conflict_resolution_apply' ? conflictResolutionPlan?.plan_id : pendingControl === 'binding_apply' ? bindingPlan?.plan_id : pendingControl === 'maintenance_apply' ? maintenancePlan?.plan_id : selectedMaintenance?.registration_id}</dd></div></dl><div class="dialog-actions"><button onclick={() => void cancelControlConfirmation()} disabled={controlRunning}>Keep current state</button><button bind:this={controlConfirmButton} class:danger-action={pendingControl === 'disable'} class="primary-action" onclick={() => void executeControl()} disabled={controlRunning}>{controlRunning ? 'Submitting…' : pendingControl === 'conflict_resolution_apply' ? 'Confirm selected candidate' : 'Confirm action'}</button></div></div></dialog>{/if}
 
         {:else}
           <div class="intro section-intro"><p class="eyebrow">GOVERNANCE & RECOVERY</p><h1>Diagnostics</h1><p>Typed failures, recovered state, exact remediation, and capability boundaries.</p></div>

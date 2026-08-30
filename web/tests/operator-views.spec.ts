@@ -39,6 +39,7 @@ const snapshot = {
   capabilities: [
     { id: 'rag_search', category: 'rag', safety_class: 'read_only', description: 'Search cached RAG chunks.', ui_enabled: false, ui_reason: 'Search lab is delivered separately.', cli_name: 'rag-search', cli_enabled: true, mcp_name: 'rag_search', mcp_enabled: true },
     { id: 'admin_maintenance_plan_apply', category: 'admin', safety_class: 'background_job', description: 'Plan and apply maintenance.', ui_enabled: true, cli_name: 'maintenance', cli_enabled: true, mcp_enabled: false },
+    { id: 'admin_maintenance_conflict_resolution', category: 'admin', safety_class: 'audited_write', description: 'Resolve maintenance identity conflicts.', ui_enabled: true, cli_enabled: false, mcp_enabled: false },
     { id: 'admin_binding_plan_apply', category: 'admin', safety_class: 'audited_write', description: 'Plan and apply bindings.', ui_enabled: true, cli_name: 'repo', cli_enabled: true, mcp_enabled: false },
     { id: 'admin_registration_controls', category: 'admin', safety_class: 'background_job', description: 'Reconcile and disable registrations.', ui_enabled: true, cli_name: 'maintenance', cli_enabled: true, mcp_enabled: false },
     { id: 'admin_search_compare', category: 'admin', safety_class: 'read_only', description: 'Compare search modes.', ui_enabled: true, cli_name: 'search_sources', cli_enabled: true, mcp_enabled: false },
@@ -48,6 +49,51 @@ const snapshot = {
     { id: 'repository_docs_index', category: 'rag', safety_class: 'background_job', description: 'Index registered repository docs.', ui_enabled: true, cli_name: 'repo-docs', cli_enabled: true, mcp_name: 'repository_docs_index', mcp_enabled: true }
   ]
 };
+
+test('canonical registration deep links redirect and conflict resolution requires an explicit candidate', async ({ page }) => {
+  const conflictSnapshot: any = structuredClone(snapshot);
+  conflictSnapshot.maintenance = [{
+    registration_id: 'reg-canonical', cache_ref: 'cache-111111112222', repo_id: 'example/repo', aliases: ['legacy/repo'], legacy_registration_ids: ['reg-legacy'], enabled: false, state: 'identity_conflict', generation: 7,
+    policy: { sync_enabled: true, sync_mode: 'head', rag_enabled: false, collections: ['issues'] },
+    identity_conflict: {
+      kind: 'identity_conflict', details_available: true, candidate_registration_ids: ['reg-canonical', 'reg-legacy'], policy_hashes: ['policy-a', 'policy-b'], config_hashes: ['config-a', 'config-b'], path_fingerprints: ['path-a'],
+      candidates: [
+        { candidate_ref: 'candidate-a', registration_id: 'reg-canonical', repo_id: 'example/repo', policy: { sync_enabled: true, sync_mode: 'head', rag_enabled: false, collections: ['issues'] }, policy_hash: 'policy-a', config_hash: 'config-a', path_fingerprint: 'path-a', was_enabled: true },
+        { candidate_ref: 'candidate-b', registration_id: 'reg-legacy', repo_id: 'legacy/repo', policy: { sync_enabled: false, sync_mode: 'off', rag_enabled: false, collections: [] }, policy_hash: 'policy-b', config_hash: 'config-b', path_fingerprint: 'path-a', was_enabled: false }
+      ]
+    }
+  }];
+  await mockAdmin(page, conflictSnapshot);
+  let planBody: Record<string, unknown> = {};
+  let applyBody: Record<string, unknown> = {};
+  await page.route('**/api/admin/v1/maintenance/reg-canonical/conflict-resolution/plan', async (route) => {
+    planBody = route.request().postDataJSON();
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { schema_version: 'gitcode-mcp.maintenance-conflict-resolution-plan.v1', plan_id: 'conflict-plan-1', status: 'ready', registration_id: 'reg-canonical', canonical_registration_id: 'reg-canonical', conflict_kind: 'identity_conflict', expected_generation: 7, selected: conflictSnapshot.maintenance[0].identity_conflict!.candidates![0], effects: [{ class: 'identity', summary: 'Promote the selected candidate.', status: 'planned' }] } }) });
+  });
+  await page.route('**/api/admin/v1/maintenance/reg-canonical/conflict-resolution/apply', async (route) => {
+    applyBody = route.request().postDataJSON();
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { outcome: 'resolved', receipt_id: 'maintenance-conflict-receipt-1', plan_id: 'conflict-plan-1', registration_id: 'reg-canonical', replayed: false } }) });
+  });
+  await page.goto('/?view=Maintenance&registration=reg-legacy');
+  await expect(page).toHaveURL(/registration=reg-canonical/);
+  await expect(page.getByText('Redirected legacy registration reg-legacy to canonical reg-canonical.')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Policy or source conflict' })).toBeVisible();
+  const candidateRadios = page.getByRole('radio', { name: /previously/ });
+  await expect(candidateRadios).toHaveCount(2);
+  await expect(candidateRadios.nth(0)).not.toBeChecked();
+  await expect(candidateRadios.nth(1)).not.toBeChecked();
+  await expect(page.getByRole('button', { name: 'Review selected candidate' })).toBeDisabled();
+  await candidateRadios.nth(0).check();
+  await page.getByRole('button', { name: 'Review selected candidate' }).click();
+  expect(planBody).toEqual({ candidate_ref: 'candidate-a', expected_generation: 7 });
+  await expect(page.getByText('conflict-plan-1')).toBeVisible();
+  await page.getByRole('button', { name: 'Confirm resolution' }).click();
+  await expect(page.getByRole('heading', { name: 'Resolve this identity conflict?' })).toBeVisible();
+  await page.getByRole('button', { name: 'Confirm selected candidate' }).click();
+  expect(applyBody).toMatchObject({ candidate_ref: 'candidate-a', expected_generation: 7, plan_id: 'conflict-plan-1' });
+  expect(String(applyBody.idempotency_key)).toMatch(/^admin-conflict_resolution_apply-/);
+  await expect(page.getByText('Receipt maintenance-conflict-receipt-1')).toBeVisible();
+});
 
 async function mockAdmin(page: Page, value = snapshot) {
   await page.route('**/api/admin/v1/session', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', csrf_token: 'csrf-test' }) }));

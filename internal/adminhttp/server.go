@@ -49,29 +49,31 @@ type OpenRequest struct {
 }
 
 type Config struct {
-	Bind                 string
-	AllowNonLoopback     bool
-	SessionTTL           time.Duration
-	Assets               fs.FS
-	Readiness            func(context.Context) Readiness
-	Snapshot             SnapshotProvider
-	EventCapacity        int
-	EventPollInterval    time.Duration
-	CancelJob            JobActionProvider
-	RetryJob             JobActionProvider
-	PlanMaintenance      MaintenanceControlProvider
-	ApplyMaintenance     MaintenanceControlProvider
-	DisableMaintenance   RegistrationControlProvider
-	ReconcileMaintenance RegistrationControlProvider
-	PlanBinding          BindingControlProvider
-	ApplyBinding         BindingControlProvider
-	CompareSearch        SearchCompareProvider
-	SearchRepositoryDocs RepositoryDocsSearchProvider
-	PlanRepositoryDocs   RepositoryDocsPlanProvider
-	IndexRepositoryDocs  RegistrationControlProvider
-	SmokeProvider        ProviderSmokeProvider
-	PlanRAGRepair        RAGRepairProvider
-	ApplyRAGRepair       RAGRepairProvider
+	Bind                               string
+	AllowNonLoopback                   bool
+	SessionTTL                         time.Duration
+	Assets                             fs.FS
+	Readiness                          func(context.Context) Readiness
+	Snapshot                           SnapshotProvider
+	EventCapacity                      int
+	EventPollInterval                  time.Duration
+	CancelJob                          JobActionProvider
+	RetryJob                           JobActionProvider
+	PlanMaintenance                    MaintenanceControlProvider
+	ApplyMaintenance                   MaintenanceControlProvider
+	DisableMaintenance                 RegistrationControlProvider
+	ReconcileMaintenance               RegistrationControlProvider
+	PlanMaintenanceConflictResolution  MaintenanceConflictResolutionProvider
+	ApplyMaintenanceConflictResolution MaintenanceConflictResolutionProvider
+	PlanBinding                        BindingControlProvider
+	ApplyBinding                       BindingControlProvider
+	CompareSearch                      SearchCompareProvider
+	SearchRepositoryDocs               RepositoryDocsSearchProvider
+	PlanRepositoryDocs                 RepositoryDocsPlanProvider
+	IndexRepositoryDocs                RegistrationControlProvider
+	SmokeProvider                      ProviderSmokeProvider
+	PlanRAGRepair                      RAGRepairProvider
+	ApplyRAGRepair                     RAGRepairProvider
 }
 
 type Controller struct {
@@ -185,6 +187,8 @@ func (c *Controller) handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/v1/maintenance/apply", c.applyMaintenance)
 	mux.HandleFunc("POST /api/admin/v1/maintenance/{registration_id}/disable", c.disableMaintenance)
 	mux.HandleFunc("POST /api/admin/v1/maintenance/{registration_id}/reconcile", c.reconcileMaintenance)
+	mux.HandleFunc("POST /api/admin/v1/maintenance/{registration_id}/conflict-resolution/plan", c.planMaintenanceConflictResolution)
+	mux.HandleFunc("POST /api/admin/v1/maintenance/{registration_id}/conflict-resolution/apply", c.applyMaintenanceConflictResolution)
 	mux.HandleFunc("POST /api/admin/v1/bindings/plan", c.planBinding)
 	mux.HandleFunc("POST /api/admin/v1/bindings/apply", c.applyBinding)
 	mux.HandleFunc("POST /api/admin/v1/search/compare", c.compareSearch)

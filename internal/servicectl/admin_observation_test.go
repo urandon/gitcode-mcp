@@ -105,13 +105,18 @@ func TestAdminMaintenanceObservationExposesCanonicalAliasesAndSanitizedConflict(
 		RegistrationID: "cache-reg-canonical", CacheUUID: "11111111-2222-3333-4444-555555555555", RepoID: "owner/repo",
 		Aliases: []string{"legacy/repo"}, LegacyRegistrationIDs: []string{"cache-reg-legacy"}, State: "identity_conflict",
 		IdentityConflict: &MaintenanceIdentityConflict{
+			DetailsAvailable:         true,
 			CandidateRegistrationIDs: []string{"cache-reg-canonical", "cache-reg-legacy"},
 			PolicyHashes:             []string{"sha256:policy-a", "sha256:policy-b"}, ConfigHashes: []string{"sha256:config"},
+			Candidates: []MaintenanceIdentityCandidate{
+				{CandidateRef: "candidate-a", RegistrationID: "cache-reg-canonical", RepoID: "owner/repo", Policy: MaintenancePolicy{SyncEnabled: true, Issues: true}, PolicyHash: "sha256:policy-a", ConfigHash: "sha256:config", PathFingerprint: "sha256:path-a", WasEnabled: true},
+				{CandidateRef: "candidate-b", RegistrationID: "cache-reg-legacy", RepoID: "legacy/repo", Policy: MaintenancePolicy{SyncMode: "off"}, PolicyHash: "sha256:policy-b", ConfigHash: "sha256:config", PathFingerprint: "sha256:path-b"},
+			},
 		},
 	}
 	view := adminMaintenanceObservation(entry)
 	data, _ := json.Marshal(view)
-	if len(view.Aliases) != 1 || view.Aliases[0] != "legacy/repo" || len(view.LegacyRegistrationIDs) != 1 || view.IdentityConflict == nil || len(view.IdentityConflict.CandidateRegistrationIDs) != 2 {
+	if len(view.Aliases) != 1 || view.Aliases[0] != "legacy/repo" || len(view.LegacyRegistrationIDs) != 1 || view.IdentityConflict == nil || !view.IdentityConflict.DetailsAvailable || len(view.IdentityConflict.Candidates) != 2 || view.IdentityConflict.Candidates[0].CandidateRef != "candidate-a" {
 		t.Fatalf("view=%+v", view)
 	}
 	if strings.Contains(string(data), "cache_path") || strings.Contains(string(data), "config_snapshot") {

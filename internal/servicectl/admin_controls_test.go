@@ -147,6 +147,63 @@ func TestAdminControlErrorExplainsRepositoryDocsProviderBoundary(t *testing.T) {
 	}
 }
 
+func TestAdminControlErrorExplainsLossyAndStaleConflictRecovery(t *testing.T) {
+	for _, test := range []struct {
+		code string
+		want string
+	}{
+		{code: "conflict_details_unavailable", want: "registry backup"},
+		{code: "conflict_generation_stale", want: "render a new plan"},
+		{code: "conflict_candidate_identity_changed", want: "Restore the candidate cache authority"},
+		{code: "cache_clone_retired", want: "retained canonical cache authority"},
+	} {
+		err := adminControlError(MaintenanceConflictResolutionError{code: test.code})
+		var typed adminhttp.ControlError
+		if !errors.As(err, &typed) || typed.Status != http.StatusConflict || typed.Code != test.code || !strings.Contains(typed.Remediation, test.want) {
+			t.Fatalf("code=%s err=%T %[2]v typed=%+v", test.code, err, typed)
+		}
+	}
+}
+
+func TestAdminMaintenanceConflictResolutionUsesDomainAtomicReceipt(t *testing.T) {
+	ctx := context.Background()
+	maintenance, registryPath, canonicalID := newMaintenanceIdentityConflictFixture(t)
+	listed, err := maintenance.List(ctx)
+	if err != nil || len(listed.Entries) != 1 || listed.Entries[0].IdentityConflict == nil {
+		t.Fatalf("conflict=%+v err=%v", listed.Entries, err)
+	}
+	conflict := listed.Entries[0]
+	var selected MaintenanceIdentityCandidate
+	for _, candidate := range conflict.IdentityConflict.Candidates {
+		if candidate.RegistrationID == canonicalID {
+			selected = candidate
+		}
+	}
+	controls := NewAdminControlManager(newTestManager(t, "darwin"), maintenance, NewJobManager(""), NewAdminControlReceiptManager(filepath.Join(t.TempDir(), "generic-controls.json")))
+	req := adminhttp.MaintenanceConflictResolutionRequest{RegistrationID: conflict.RegistrationID, CandidateRef: selected.CandidateRef, ExpectedGeneration: conflict.Generation}
+	planned, err := controls.PlanMaintenanceConflictResolution(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := planned.(MaintenanceConflictResolutionPlan)
+	req.PlanID, req.IdempotencyKey = plan.PlanID, "admin-domain-atomic"
+	applied, err := controls.ApplyMaintenanceConflictResolution(ctx, req)
+	result, ok := applied.(MaintenanceConflictResolutionResult)
+	if err != nil || !ok || result.RegistrationID != canonicalID || result.ReceiptID == "" || result.Replayed {
+		t.Fatalf("applied=%T %+v err=%v", applied, applied, err)
+	}
+	restarted := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), registryPath)
+	if err := restarted.Load(); err != nil {
+		t.Fatal(err)
+	}
+	replayedControls := NewAdminControlManager(newTestManager(t, "darwin"), restarted, NewJobManager(""), NewAdminControlReceiptManager(""))
+	replayedAny, err := replayedControls.ApplyMaintenanceConflictResolution(ctx, req)
+	replayed, ok := replayedAny.(MaintenanceConflictResolutionResult)
+	if err != nil || !ok || !replayed.Replayed || replayed.ReceiptID != result.ReceiptID {
+		t.Fatalf("replayed=%+v err=%v", replayed, err)
+	}
+}
+
 func TestValidateAdminMaintenanceRequestReturnsFieldSpecificFailure(t *testing.T) {
 	err := validateAdminMaintenanceRequest(adminhttp.MaintenanceControlRequest{RepoID: "owner/repo", SyncMode: "forever"})
 	var typed adminhttp.ControlError

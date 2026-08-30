@@ -69,6 +69,7 @@ type JobManager struct {
 	lastExpired                         int
 	lastTruncated                       int
 	registrationRedirects               map[string]string
+	sourceRegistrationRedirects         map[string]string
 	canonicalRepoByRegistration         map[string]string
 	lastPrunedAt                        *time.Time
 	onRepositoryDocsCancelled           func(Job) error
@@ -157,20 +158,28 @@ func NewJobManagerWithRetention(snapshotPath string, retention config.ServiceJob
 		now:                         func() time.Time { return time.Now().UTC() },
 		writeFile:                   durableAtomicWriteFile,
 		registrationRedirects:       map[string]string{},
+		sourceRegistrationRedirects: map[string]string{},
 		canonicalRepoByRegistration: map[string]string{},
 		retention:                   retention,
 	}
 }
 
-func (m *JobManager) SetRegistrationRedirects(redirects map[string]string, repoIDs map[string]string) {
+func (m *JobManager) SetRegistrationRedirects(redirects, sourceRedirects map[string]string, repoIDs map[string]string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.registrationRedirects = map[string]string{}
+	m.sourceRegistrationRedirects = map[string]string{}
 	m.canonicalRepoByRegistration = map[string]string{}
 	for from, to := range redirects {
 		from, to = strings.TrimSpace(from), strings.TrimSpace(to)
 		if from != "" && to != "" && from != to {
 			m.registrationRedirects[from] = to
+		}
+	}
+	for from, to := range sourceRedirects {
+		from, to = strings.TrimSpace(from), strings.TrimSpace(to)
+		if from != "" && to != "" && from != to {
+			m.sourceRegistrationRedirects[from] = to
 		}
 	}
 	for registrationID, repoID := range repoIDs {
@@ -192,6 +201,9 @@ func (m *JobManager) projectCanonicalRegistrationLocked(job *Job) {
 	}
 	if canonicalRepo := m.canonicalRepoByRegistration[job.RegistrationID]; canonicalRepo != "" {
 		job.RepoID = canonicalRepo
+	}
+	if canonicalSource := m.sourceRegistrationRedirects[job.SourceRegistrationID]; canonicalSource != "" {
+		job.SourceRegistrationID = canonicalSource
 	}
 }
 

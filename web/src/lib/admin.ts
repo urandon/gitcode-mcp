@@ -188,6 +188,17 @@ export type Maintenance = {
   registration_id: string;
   cache_ref: string;
   repo_id: string;
+  aliases?: string[];
+  legacy_registration_ids?: string[];
+  identity_conflict?: {
+    kind: string;
+    details_available: boolean;
+    candidate_registration_ids: string[];
+    policy_hashes: string[];
+    config_hashes: string[];
+    path_fingerprints?: string[];
+    candidates?: MaintenanceIdentityCandidate[];
+  };
   namespace_id?: string;
   enabled: boolean;
   state: string;
@@ -205,6 +216,31 @@ export type Maintenance = {
     per_page?: number;
     profile?: string;
   };
+};
+
+export type MaintenanceIdentityCandidate = {
+  candidate_ref: string;
+  registration_id: string;
+  repo_id: string;
+  policy: Maintenance['policy'];
+  policy_hash: string;
+  config_hash?: string;
+  path_fingerprint: string;
+  source_authority_hash?: string;
+  source_refs?: string[];
+  was_enabled: boolean;
+};
+
+export type MaintenanceConflictResolutionPlan = {
+  schema_version: string;
+  plan_id: string;
+  status: string;
+  registration_id: string;
+  canonical_registration_id: string;
+  conflict_kind: string;
+  expected_generation: number;
+  selected: MaintenanceIdentityCandidate;
+  effects: Array<{ class: string; summary: string; status: string }>;
 };
 
 export type ControlEffect = {
