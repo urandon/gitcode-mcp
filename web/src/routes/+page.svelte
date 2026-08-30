@@ -16,7 +16,7 @@
   const themes = [
     { value: 'light' as Theme, label: 'Light', icon: Sun }, { value: 'dark' as Theme, label: 'Dark', icon: Moon }, { value: 'system' as Theme, label: 'System', icon: Monitor }
   ];
-  const activeJobStates = new Set(['queued', 'running']);
+  const activeJobStates = new Set(['queued', 'running', 'cancelling']);
 
   let theme: Theme = 'system';
   let active: AdminView = 'Overview';
@@ -591,6 +591,7 @@
 
                 <div class="rag-operator-panel repository-docs-search-panel">
                   <div><p class="section-kicker">EXACT REVISION SEARCH</p><h3>Search repository documentation</h3><p>Select a Git ref or object id. Results are hydrated from Git and carry blob, line, and raw-slice digest citations; document bodies are not persisted in the cache.</p></div>
+                  <div class="cohort-strip" aria-label="Repository documentation search availability"><div><span>Offline full text</span><strong>{selectedRepo.documentation.search_available ? 'Available' : 'Unavailable'}</strong></div><div><span>Semantic ranking</span><strong>{selectedRepo.documentation.semantic_available ? 'Ready' : 'Lexical fallback'}</strong></div></div>
                   <form class="search-query-form" onsubmit={(event) => { event.preventDefault(); void runRepositoryDocsSearch(); }}>
                     <label class="search-query"><span>Query</span><input required maxlength="512" bind:value={repositoryDocsQuery} placeholder="How is repository documentation indexed?" /></label>
                     <label><span>Revision</span><input maxlength="256" bind:value={repositoryDocsRevision} placeholder="HEAD or object id" /></label>
@@ -599,7 +600,7 @@
                     <button class="primary-action" type="submit" disabled={!csrfToken || !repositoryDocsSearchEnabled || !selectedMaintenance || repositoryDocsRunning}><Search size={16} />{repositoryDocsRunning ? 'Searching…' : 'Search Git'}</button>
                     <label class="worktree-toggle"><input type="checkbox" bind:checked={repositoryDocsIncludeWorktree} /><span>Include tracked worktree overlay</span></label>
                   </form>
-                  <p class="privacy search-boundary"><ShieldCheck size={15} />Full-text stays local. Hybrid sends only the query to the configured embedding provider; Git document text remains local authority.</p>
+                  <p class="privacy search-boundary"><ShieldCheck size={15} />Full-text stays local and needs no index. Hybrid sends only the query to the configured embedding provider and falls back to lexical retrieval when semantic state is unavailable; Git document text remains local authority.</p>
                   {#if repositoryDocsError}<div class="action-result error" role="alert"><AlertTriangle size={17} /><div><strong>Repository documentation search failed</strong><span>{repositoryDocsError}</span></div></div>{/if}
                   {#if repositoryDocsResult}
                     <article class="search-mode-column repository-docs-results">

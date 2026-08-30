@@ -170,13 +170,14 @@ snapshot contracts. Search responses may contain bounded snippets hydrated
 from Git for the authenticated loopback session; those bytes are never written
 to the cache or maintenance registry.
 
-The UI state model keeps three lanes separate: the current ready revision set
-remains searchable, a building/partial set is shown as the active attempt, and
-the most recent failure class remains diagnostic history. A failed refresh
-never hides an older exact ready set. Search is enabled only when the current
-source registration generation has a ready set; a stale generation is shown as
-a re-registration/rebind requirement rather than silently selecting another
-local repository.
+The UI state model keeps three lanes separate: registered Git authority enables
+offline full-text search, a current ready revision set additionally enables
+semantic ranking, and a building/partial set is shown as the active attempt
+without hiding the most recent failure class. A failed refresh never hides an
+older exact ready set. When no ready set exists, full-text remains enabled and
+hybrid requests visibly use lexical fallback. A stale source generation is
+shown as a re-registration/rebind requirement rather than silently selecting
+another local repository.
 
 ## Failure and recovery model
 

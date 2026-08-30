@@ -139,6 +139,7 @@ type RepositoryDocumentationObservation struct {
 	UpdatedAt         *time.Time                              `json:"updated_at,omitempty"`
 	RevisionSetCount  int                                     `json:"revision_set_count"`
 	SearchAvailable   bool                                    `json:"search_available"`
+	SemanticAvailable bool                                    `json:"semantic_available"`
 	SearchHandoff     string                                  `json:"search_handoff,omitempty"`
 	IndexHandoff      string                                  `json:"index_handoff,omitempty"`
 	Sources           []RepositoryDocumentationSource         `json:"sources,omitempty"`

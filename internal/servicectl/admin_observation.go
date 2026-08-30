@@ -290,6 +290,9 @@ func repositoryDocumentationObservation(ctx context.Context, store *cache.SQLite
 		selector := fmt.Sprintf("--registration-id %s --source-registration-id %s --source-registration-generation %d", entry.RegistrationID, state.SourceRegistrationID, state.SourceRegistrationGeneration)
 		view.IndexHandoff = fmt.Sprintf("gitcode-mcp repo-docs index --repo %s %s", repoID, selector)
 		view.SearchHandoff = fmt.Sprintf("gitcode-mcp repo-docs search --repo %s %s QUERY", repoID, selector)
+		// Full-text search hydrates directly from the registered Git authority
+		// and does not depend on semantic derived state.
+		view.SearchAvailable = true
 	}
 	sets, err := store.ListRepositoryDocRevisionSets(ctx, filter)
 	if err != nil || len(sets) == 0 {
@@ -344,9 +347,9 @@ func repositoryDocumentationObservation(ctx context.Context, store *cache.SQLite
 		}
 		sort.Slice(view.Exclusions, func(i, j int) bool { return view.Exclusions[i].Reason < view.Exclusions[j].Reason })
 	}
-	// Search is available only when the current private source generation has
-	// an exact published set. Git remains the source-byte authority.
-	view.SearchAvailable = view.Registered
+	// Semantic ranking is a separate capability of the exact published set.
+	// Hybrid requests may still fall back to the always-local full-text path.
+	view.SemanticAvailable = true
 	return view
 }
 

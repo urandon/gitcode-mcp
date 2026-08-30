@@ -108,7 +108,7 @@ func TestAdminRepositoryDocsSearchUsesPrivateRegistrationAuthority(t *testing.T)
 		t.Fatal(err)
 	}
 	docs := snapshot.Caches[0].Repositories[0].Documentation
-	if docs == nil || !docs.SearchAvailable || docs.SourceID != entry.RepositoryDocs.SourceRegistrationID || docs.SourceGeneration != entry.RepositoryDocs.SourceRegistrationGeneration || !strings.Contains(docs.IndexHandoff, "--source-registration-generation") {
+	if docs == nil || !docs.SearchAvailable || !docs.SemanticAvailable || docs.SourceID != entry.RepositoryDocs.SourceRegistrationID || docs.SourceGeneration != entry.RepositoryDocs.SourceRegistrationGeneration || !strings.Contains(docs.IndexHandoff, "--source-registration-generation") {
 		t.Fatalf("documentation observation=%+v entries=%+v cache=%q", docs, maintenance.adminEntries(), cachePath)
 	}
 	public, err := json.Marshal(docs)

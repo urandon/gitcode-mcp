@@ -18,6 +18,7 @@ import (
 const (
 	JobStatusQueued      = "queued"
 	JobStatusRunning     = "running"
+	JobStatusCancelling  = "cancelling"
 	JobStatusSucceeded   = "succeeded"
 	JobStatusSuperseded  = "superseded"
 	JobStatusFailed      = "failed"
@@ -57,6 +58,7 @@ type JobManager struct {
 	mu                        sync.Mutex
 	jobs                      map[string]*Job
 	cancel                    map[string]context.CancelFunc
+	cancelResolution          map[string]chan struct{}
 	nextID                    int
 	snapshotPath              string
 	now                       func() time.Time
@@ -126,11 +128,12 @@ func NewJobManagerWithRetention(snapshotPath string, retention config.ServiceJob
 		panic(err)
 	}
 	return &JobManager{
-		jobs:         map[string]*Job{},
-		cancel:       map[string]context.CancelFunc{},
-		snapshotPath: snapshotPath,
-		now:          func() time.Time { return time.Now().UTC() },
-		retention:    retention,
+		jobs:             map[string]*Job{},
+		cancel:           map[string]context.CancelFunc{},
+		cancelResolution: map[string]chan struct{}{},
+		snapshotPath:     snapshotPath,
+		now:              func() time.Time { return time.Now().UTC() },
+		retention:        retention,
 	}
 }
 
@@ -155,7 +158,7 @@ func (m *JobManager) LoadAndMarkInterrupted() error {
 	maxID := 0
 	for i := range jobs {
 		job := jobs[i]
-		if job.Status == JobStatusQueued || job.Status == JobStatusRunning {
+		if jobActiveStatus(job.Status) {
 			job.Status = JobStatusInterrupted
 			job.UpdatedAt = now
 			job.FinishedAt = &now
@@ -212,7 +215,7 @@ func (m *JobManager) ActiveJob(jobType, repoID string) (Job, bool) {
 		if job.Type != jobType || job.RepoID != repoID {
 			continue
 		}
-		if job.Status == JobStatusQueued || job.Status == JobStatusRunning {
+		if jobActiveStatus(job.Status) {
 			return cloneJob(job), true
 		}
 	}
@@ -230,7 +233,7 @@ func (m *JobManager) ActiveWork(workKey string) (Job, bool) {
 		if candidate != workKey {
 			continue
 		}
-		if job.Status == JobStatusQueued || job.Status == JobStatusRunning {
+		if jobActiveStatus(job.Status) {
 			return cloneJob(job), true
 		}
 	}
@@ -248,7 +251,7 @@ func (m *JobManager) ActiveCacheRepo(jobType, cacheUUID, repoID string) (Job, bo
 		if job.Type != jobType || job.CacheUUID != cacheUUID || job.RepoID != repoID {
 			continue
 		}
-		if job.Status == JobStatusQueued || job.Status == JobStatusRunning {
+		if jobActiveStatus(job.Status) {
 			return cloneJob(job), true
 		}
 	}
@@ -273,7 +276,7 @@ func (m *JobManager) activeCacheWriterLocked(cacheUUID string) (Job, bool) {
 		if job.CacheUUID != cacheUUID || !isCacheWriterJob(job.Type) {
 			continue
 		}
-		if job.Status == JobStatusQueued || job.Status == JobStatusRunning {
+		if jobActiveStatus(job.Status) {
 			return cloneJob(job), true
 		}
 	}
@@ -307,7 +310,7 @@ func (m *JobManager) ActiveRepositoryDocsSource(cacheUUID, repoID, sourceRegistr
 	defer m.mu.Unlock()
 	for _, job := range m.jobs {
 		if job.Type == RepositoryDocsIndexJobType && job.CacheUUID == cacheUUID && job.RepoID == repoID &&
-			job.SourceRegistrationID == sourceRegistrationID && job.SourceRegistrationGeneration == generation && (job.Status == JobStatusQueued || job.Status == JobStatusRunning) {
+			job.SourceRegistrationID == sourceRegistrationID && job.SourceRegistrationGeneration == generation && jobActiveStatus(job.Status) {
 			return cloneJob(job), true
 		}
 	}
@@ -415,7 +418,7 @@ func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID str
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, job := range m.jobs {
-		if job.WorkKey == workKey && (job.Status == JobStatusQueued || job.Status == JobStatusRunning) {
+		if job.WorkKey == workKey && jobActiveStatus(job.Status) {
 			return cloneJob(job), false, nil
 		}
 	}
@@ -505,26 +508,84 @@ func (m *JobManager) Get(id string) (Job, bool) {
 func (m *JobManager) Cancel(id string) (Job, bool, error) {
 	m.mu.Lock()
 	cancel, ok := m.cancel[id]
-	job := cloneJob(m.jobs[id])
-	onRepositoryDocsCancelled := m.onRepositoryDocsCancelled
-	m.mu.Unlock()
+	stored := m.jobs[id]
+	job := cloneJob(stored)
 	if !ok || job.ID == "" {
+		m.mu.Unlock()
 		if job.ID == "" {
 			return Job{}, false, nil
 		}
 		current, found := m.Get(id)
 		return current, found, nil
 	}
-	// Persist the cancellation disposition before signalling the worker. A
-	// successful public cancellation can therefore never be followed by a
-	// restart that revives the still-pending durable admission.
-	if job.Type == RepositoryDocsIndexJobType && onRepositoryDocsCancelled != nil {
+	if job.Status == JobStatusCancelling {
+		m.mu.Unlock()
+		return m.waitForTerminalJob(id)
+	}
+	if job.Type != RepositoryDocsIndexJobType {
+		m.mu.Unlock()
+		cancel()
+		return m.waitForTerminalJob(id)
+	}
+	onRepositoryDocsCancelled := m.onRepositoryDocsCancelled
+	previous := job
+	resolution := make(chan struct{})
+	stored.Status = JobStatusCancelling
+	stored.UpdatedAt = m.now()
+	stored.Progress = append(stored.Progress, service.ProgressEvent{Type: JobStatusCancelling, Phase: JobStatusCancelling, Collection: stored.Type, Message: "durable cancellation is being committed"})
+	m.cancelResolution[id] = resolution
+	if err := m.saveLocked(); err != nil {
+		*stored = previous
+		delete(m.cancelResolution, id)
+		close(resolution)
+		m.mu.Unlock()
+		return previous, true, JobAdmissionPersistenceError{}
+	}
+	job = cloneJob(stored)
+	m.mu.Unlock()
+
+	// Persist the cancellation disposition before publishing a terminal job or
+	// signalling the worker. Repository-document terminalization observes the
+	// cancelling fence and cannot race this write-ahead decision.
+	if onRepositoryDocsCancelled != nil {
 		if err := onRepositoryDocsCancelled(job); err != nil {
-			current, found := m.Get(id)
-			return current, found, err
+			m.mu.Lock()
+			if current := m.jobs[id]; current != nil && current.Status == JobStatusCancelling {
+				*current = previous
+				_ = m.saveLocked()
+			}
+			delete(m.cancelResolution, id)
+			close(resolution)
+			current := cloneJob(m.jobs[id])
+			m.mu.Unlock()
+			return current, current.ID != "", err
 		}
 	}
+	m.mu.Lock()
+	current := m.jobs[id]
+	if current != nil && current.Status == JobStatusCancelling {
+		now := m.now()
+		current.Status = JobStatusCancelled
+		current.UpdatedAt = now
+		current.FinishedAt = &now
+		current.ErrorClass = "cancelled"
+		current.Error = publicMaintenanceJobError(current.Type, current.ErrorClass)
+		current.Progress = append(current.Progress, service.ProgressEvent{Type: JobStatusCancelled, Phase: JobStatusCancelled, Collection: current.Type, Message: current.Error})
+		delete(m.cancel, id)
+	}
+	delete(m.cancelResolution, id)
+	close(resolution)
+	saveErr := m.saveLocked()
+	currentJob := cloneJob(current)
+	m.mu.Unlock()
 	cancel()
+	if saveErr != nil {
+		return currentJob, currentJob.ID != "", JobAdmissionPersistenceError{}
+	}
+	return m.waitForTerminalJob(id)
+}
+
+func (m *JobManager) waitForTerminalJob(id string) (Job, bool, error) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		current, found := m.Get(id)
@@ -538,6 +599,33 @@ func (m *JobManager) Cancel(id string) (Job, bool, error) {
 			return current, true, nil
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func (m *JobManager) updateRepositoryDocsTerminalJob(id string, fn func(*Job, time.Time)) {
+	for {
+		m.mu.Lock()
+		job := m.jobs[id]
+		if job == nil || jobTerminalStatus(job.Status) {
+			m.mu.Unlock()
+			return
+		}
+		if job.Status == JobStatusCancelling {
+			resolution := m.cancelResolution[id]
+			m.mu.Unlock()
+			if resolution != nil {
+				<-resolution
+				continue
+			}
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		now := m.now()
+		fn(job, now)
+		trimJobProgress(job, m.retention.MaxProgressEvents)
+		_ = m.saveLocked()
+		m.mu.Unlock()
+		return
 	}
 }
 
@@ -557,7 +645,7 @@ func (m *JobManager) FenceRepositoryDocsSourceGeneration(registrationID, sourceR
 	for id, job := range m.jobs {
 		if job == nil || job.Type != RepositoryDocsIndexJobType || job.RegistrationID != registrationID ||
 			job.SourceRegistrationID != sourceRegistrationID || job.SourceRegistrationGeneration != generation ||
-			(job.Status != JobStatusQueued && job.Status != JobStatusRunning) {
+			!jobActiveStatus(job.Status) {
 			continue
 		}
 		job.Status = JobStatusSuperseded
@@ -576,6 +664,10 @@ func (m *JobManager) FenceRepositoryDocsSourceGeneration(registrationID, sourceR
 	for _, cancel := range cancels {
 		cancel()
 	}
+}
+
+func jobActiveStatus(status string) bool {
+	return status == JobStatusQueued || status == JobStatusRunning || status == JobStatusCancelling
 }
 
 func (m *JobManager) beginRepositoryDocsJob(id string) bool {

@@ -147,6 +147,31 @@ func TestAdminRepositoryDocsObservationExposesOpaqueAuthoritiesAndRetention(t *t
 	}
 }
 
+func TestAdminRepositoryDocsObservationEnablesFullTextWithoutSemanticSet(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewSQLiteStore(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	state := RepositoryDocsMaintenanceState{
+		SourceRegistrationID: "source-local", SourceRegistrationGeneration: 3,
+		State: "registered", GitStoreRef: "git-store-local", CommitOID: "0123456789abcdef0123456789abcdef01234567",
+	}
+	entry := &MaintenanceEntry{
+		RegistrationID: "reg-docs", RepositoryDocs: &state,
+		RepositoryDocsSources: []RepositoryDocsMaintenanceState{state},
+	}
+
+	view := repositoryDocumentationObservation(ctx, store, "owner/repo", entry, 123456)
+	if !view.Registered || !view.SearchAvailable || view.SemanticAvailable || view.State != "not_indexed" {
+		t.Fatalf("registered lexical-only observation=%+v", view)
+	}
+	if view.SearchHandoff == "" || view.IndexHandoff == "" {
+		t.Fatalf("registered handoffs=%+v", view)
+	}
+}
+
 func TestAdminCoverageNeverPromotesBoundedTailToComplete(t *testing.T) {
 	now := time.Now().UTC()
 	entry := MaintenanceEntry{

@@ -50,7 +50,9 @@ persist an absolute worktree path in a public snapshot.
   coalescing, cancellation, terminal job retention, durable vector-only replay,
   generation fencing, and metadata GC.
 - Explicit cancellation survives restart without reconciliation relaunch, and
-  a failed tombstone write returns an error without signalling the worker.
+  a failed tombstone write returns an error without signalling the worker. A
+  durable `cancelling` fence serializes the tombstone with worker completion;
+  source-generation supersession remains authoritative during rebind.
   Repeated failures do not bypass the recorded retry window and resume with the
   same public job identity when that window opens.
 - Provider output fetched before writer contention or request cancellation is
@@ -67,7 +69,10 @@ persist an absolute worktree path in a public snapshot.
 - A raw SQLite-file sentinel scan finds no document or chunk text.
 - Admin UI exposes Documentation navigation/status, pathless registered-source
   reconcile/index, scoped job supervision, exact-revision search and CLI
-  handoffs; it survives empty and partial state, and regenerated assets are
+  handoffs. Its committed visual matrix covers disabled, unavailable, empty,
+  partial, building, blocked, superseded, stale, registered-without-ready-set,
+  and ready states. Registered Git authority enables offline full-text before
+  semantic publication; regenerated assets and screenshot baselines are
   committed.
 - CLI and repository-document MCP query/job lifecycle tools expose stable JSON/structured output without raw
   document bodies in status/job diagnostics.

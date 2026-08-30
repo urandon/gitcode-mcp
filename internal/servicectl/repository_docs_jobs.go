@@ -231,7 +231,7 @@ func (m *JobManager) runRepositoryDocsIndexJob(ctx context.Context, manager Mana
 	})
 	if err != nil {
 		status, class := repositoryDocsIndexErrorStatus(err)
-		m.updateJob(jobID, func(job *Job, now time.Time) {
+		m.updateRepositoryDocsTerminalJob(jobID, func(job *Job, now time.Time) {
 			if repositoryDocsJobSourceFenced(job) {
 				return
 			}
@@ -247,21 +247,7 @@ func (m *JobManager) runRepositoryDocsIndexJob(ctx context.Context, manager Mana
 			delete(m.cancel, jobID)
 		})
 		if status == JobStatusCancelled {
-			if cancelled, ok := m.Get(jobID); ok && m.onRepositoryDocsCancelled != nil {
-				// Bind durable cancellation to the terminal worker transition, not
-				// only to Cancel's bounded wait. A slow provider therefore cannot
-				// be relaunched after it eventually unwinds.
-				if persistErr := m.onRepositoryDocsCancelled(cancelled); persistErr != nil {
-					m.updateJob(jobID, func(job *Job, now time.Time) {
-						job.Status = JobStatusFailed
-						job.UpdatedAt = now
-						job.FinishedAt = &now
-						job.ErrorClass = "repository_docs_cancel_persist_failed"
-						job.Error = publicMaintenanceJobError(RepositoryDocsIndexJobType, job.ErrorClass)
-						job.Progress = append(job.Progress, service.ProgressEvent{Type: JobStatusFailed, Phase: JobStatusFailed, Collection: RepositoryDocsIndexJobType, Message: job.Error})
-					})
-				}
-			}
+			m.persistRepositoryDocsTerminalCancellation(jobID)
 		}
 		return
 	}
@@ -271,7 +257,7 @@ func (m *JobManager) runRepositoryDocsIndexJob(ctx context.Context, manager Mana
 	} else if result.State == cache.RepoDocSetBlocked || result.State == cache.RepoDocSetPartial {
 		status = JobStatusFailed
 	}
-	m.updateJob(jobID, func(job *Job, now time.Time) {
+	m.updateRepositoryDocsTerminalJob(jobID, func(job *Job, now time.Time) {
 		if repositoryDocsJobSourceFenced(job) {
 			return
 		}
@@ -287,6 +273,30 @@ func (m *JobManager) runRepositoryDocsIndexJob(ctx context.Context, manager Mana
 		job.Progress = append(job.Progress, service.ProgressEvent{Type: status, Phase: status, Collection: RepositoryDocsIndexJobType, RecordsListed: result.EligibleChunks, RecordsFetched: result.EmbeddedChunks, RecordsSkipped: result.ReusedChunks, RecordsFailed: result.FailedChunks, Message: "repository documentation revision set published"})
 		delete(m.cancel, jobID)
 	})
+}
+
+// persistRepositoryDocsTerminalCancellation covers cancellations originating
+// outside JobManager.Cancel (for example, daemon shutdown). It deliberately
+// re-reads the committed terminal state: a generation rebind or a concurrent
+// durable Cancel may have won while the worker was unwinding.
+func (m *JobManager) persistRepositoryDocsTerminalCancellation(jobID string) {
+	cancelled, ok := m.Get(jobID)
+	if !ok || cancelled.Status != JobStatusCancelled || m.onRepositoryDocsCancelled == nil {
+		return
+	}
+	if persistErr := m.onRepositoryDocsCancelled(cancelled); persistErr != nil {
+		m.updateJob(jobID, func(job *Job, now time.Time) {
+			if repositoryDocsJobSourceFenced(job) || job.Status != JobStatusCancelled {
+				return
+			}
+			job.Status = JobStatusFailed
+			job.UpdatedAt = now
+			job.FinishedAt = &now
+			job.ErrorClass = "repository_docs_cancel_persist_failed"
+			job.Error = publicMaintenanceJobError(RepositoryDocsIndexJobType, job.ErrorClass)
+			job.Progress = append(job.Progress, service.ProgressEvent{Type: JobStatusFailed, Phase: JobStatusFailed, Collection: RepositoryDocsIndexJobType, Message: job.Error})
+		})
+	}
 }
 
 func repositoryDocsJobSourceFenced(job *Job) bool {

@@ -726,6 +726,105 @@ func TestRepositoryDocsCancellationFailsClosedWhenTombstoneCannotPersist(t *test
 	}
 }
 
+func TestRepositoryDocsCancellationFenceWinsConcurrentWorkerSuccess(t *testing.T) {
+	jobs := NewJobManager("")
+	jobCtx, cancel := context.WithCancel(context.Background())
+	job, created, err := jobs.createCoalescedJobWithIntent(
+		RepositoryDocsIndexJobType, "owner/repo", "profile", 0, "work", "cache", "registration", "namespace",
+		JobRecoveryIntent{SourceRegistrationID: "source", SourceRegistrationGeneration: 1, ExpectedRevisionSetID: "set"}, cancel,
+	)
+	if err != nil || !created {
+		t.Fatalf("job=%+v created=%t err=%v", job, created, err)
+	}
+	jobs.updateJob(job.ID, func(stored *Job, now time.Time) { stored.Status = JobStatusRunning })
+
+	tombstoneEntered := make(chan struct{})
+	releaseTombstone := make(chan struct{})
+	jobs.onRepositoryDocsCancelled = func(Job) error {
+		close(tombstoneEntered)
+		<-releaseTombstone
+		return nil
+	}
+	cancelResult := make(chan Job, 1)
+	cancelErr := make(chan error, 1)
+	go func() {
+		cancelled, _, err := jobs.Cancel(job.ID)
+		cancelResult <- cancelled
+		cancelErr <- err
+	}()
+	<-tombstoneEntered
+	coalescedCancelResult := make(chan Job, 1)
+	coalescedCancelErr := make(chan error, 1)
+	go func() {
+		cancelled, _, err := jobs.Cancel(job.ID)
+		coalescedCancelResult <- cancelled
+		coalescedCancelErr <- err
+	}()
+
+	workerFinished := make(chan struct{})
+	go func() {
+		jobs.updateRepositoryDocsTerminalJob(job.ID, func(stored *Job, now time.Time) {
+			stored.Status = JobStatusSucceeded
+			stored.UpdatedAt = now
+			stored.FinishedAt = &now
+			delete(jobs.cancel, job.ID)
+		})
+		close(workerFinished)
+	}()
+	select {
+	case <-workerFinished:
+		t.Fatal("worker published success while durable cancellation was unresolved")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(releaseTombstone)
+	if err := <-cancelErr; err != nil {
+		t.Fatal(err)
+	}
+	cancelled := <-cancelResult
+	if err := <-coalescedCancelErr; err != nil {
+		t.Fatal(err)
+	}
+	coalescedCancelled := <-coalescedCancelResult
+	<-workerFinished
+	if cancelled.Status != JobStatusCancelled || coalescedCancelled.Status != JobStatusCancelled {
+		t.Fatalf("cancel results primary=%+v coalesced=%+v", cancelled, coalescedCancelled)
+	}
+	current, ok := jobs.Get(job.ID)
+	if !ok || current.Status != JobStatusCancelled {
+		t.Fatalf("concurrent terminal state=%+v found=%t", current, ok)
+	}
+	select {
+	case <-jobCtx.Done():
+	default:
+		t.Fatal("worker cancellation was not signalled after durable tombstone")
+	}
+}
+
+func TestRepositoryDocsGenerationFenceSuppressesLateCancellationPersistence(t *testing.T) {
+	jobs := NewJobManager("")
+	now := time.Now().UTC()
+	jobs.jobs["job-fenced"] = &Job{
+		ID: "job-fenced", Type: RepositoryDocsIndexJobType, Status: JobStatusSuperseded,
+		RegistrationID: "registration", SourceRegistrationID: "source", SourceRegistrationGeneration: 1,
+		ExpectedRevisionSetID: "set", UpdatedAt: now, FinishedAt: &now,
+		ErrorClass: "repository_docs_source_generation_superseded",
+	}
+	called := false
+	jobs.onRepositoryDocsCancelled = func(Job) error {
+		called = true
+		return errors.New("late cancellation persistence")
+	}
+
+	jobs.persistRepositoryDocsTerminalCancellation("job-fenced")
+	if called {
+		t.Fatal("superseded generation attempted late cancellation persistence")
+	}
+	current, ok := jobs.Get("job-fenced")
+	if !ok || current.Status != JobStatusSuperseded || current.ErrorClass != "repository_docs_source_generation_superseded" {
+		t.Fatalf("generation fence was overwritten: %+v found=%t", current, ok)
+	}
+}
+
 func TestRepositoryDocsPendingAdmissionRespectsFailureBackoff(t *testing.T) {
 	now := time.Date(2026, 8, 30, 10, 0, 0, 0, time.UTC)
 	state := RepositoryDocsMaintenanceState{}

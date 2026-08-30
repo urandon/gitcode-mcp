@@ -75,6 +75,7 @@ export type RepositoryDocumentation = {
   updated_at?: string;
   revision_set_count: number;
   search_available: boolean;
+  semantic_available?: boolean;
   search_handoff?: string;
   index_handoff?: string;
   sources?: Array<{ source_registration_id: string; source_registration_generation: number; state: string; git_store_ref?: string; worktree_ref?: string; commit_oid?: string; policy_hash?: string }>;
@@ -495,6 +496,7 @@ export function statusTone(value: string | undefined): 'good' | 'warn' | 'bad' |
     case 'degraded':
     case 'warning':
     case 'queued':
+    case 'cancelling':
     case 'retry_scheduled':
     case 'backfilling':
     case 'deferred':

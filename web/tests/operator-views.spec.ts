@@ -21,7 +21,7 @@ const snapshot = {
       },
       execution: { active_job_ids: ['job-000001'], contention: { state: 'waiting', operation: 'rag' }, scheduled_retry: { stage: 'rag', at: new Date(Date.now() + 60000).toISOString() }, last_stage_errors: [{ stage: 'rag', failure_class: 'cache_busy', message: 'RAG maintenance recorded cache_busy.' }] },
       collections: [{ kind: 'issue', count: 30, head: { state: 'current', status: 'fresh' }, tail: { state: 'partial', status: 'backfilling', stop_reason: 'max_pages' } }, { kind: 'wiki', count: 12, head: { state: 'current', status: 'fresh' }, tail: { state: 'current', status: 'complete' } }],
-      documentation: { state: 'ready', registered: true, registration_id: 'reg-1', source_registration_id: 'source-docs', source_registration_generation: 3, sources: [{ source_registration_id: 'source-docs', source_registration_generation: 3, state: 'ready', git_store_ref: 'git-store-public' }, { source_registration_id: 'source-secondary', source_registration_generation: 1, state: 'registered', git_store_ref: 'git-store-secondary' }], reconcile_state: 'ready', target_commit_oid: '0123456789abcdef0123456789abcdef01234567', next_poll_at: new Date(Date.now() + 60_000).toISOString(), revision_set_id: 'repo-doc-set-public', commit_oid: '0123456789abcdef0123456789abcdef01234567', requested_revision: 'HEAD', policy_source: 'committed', policy_hash: 'policy-public-safe', git_store_ref: 'git-store-public', overlay: false, namespace_id: 'embns-public', eligible_files: 4, eligible_chunks: 10, embedded_chunks: 8, reused_chunks: 2, failed_chunks: 0, excluded_files: 2, exclusions: [{ reason: 'lfs_pointer', count: 1 }, { reason: 'too_large', count: 1 }], missing_objects: 0, updated_at: new Date().toISOString(), revision_set_count: 2, search_available: true, retention: { committed_sets_per_identity: 8, overlay_max_age_hours: 24, terminal_max_age_hours: 168, vector_byte_ceiling: 536870912 }, index_handoff: 'gitcode-mcp repo-docs index --repo example/repo --registration-id reg-1 --source-registration-id source-docs --source-registration-generation 3', search_handoff: 'gitcode-mcp repo-docs search --repo example/repo --registration-id reg-1 --source-registration-id source-docs --source-registration-generation 3 "QUERY"' },
+      documentation: { state: 'ready', registered: true, registration_id: 'reg-1', source_registration_id: 'source-docs', source_registration_generation: 3, sources: [{ source_registration_id: 'source-docs', source_registration_generation: 3, state: 'ready', git_store_ref: 'git-store-public' }, { source_registration_id: 'source-secondary', source_registration_generation: 1, state: 'registered', git_store_ref: 'git-store-secondary' }], reconcile_state: 'ready', target_commit_oid: '0123456789abcdef0123456789abcdef01234567', next_poll_at: new Date(Date.now() + 60_000).toISOString(), revision_set_id: 'repo-doc-set-public', commit_oid: '0123456789abcdef0123456789abcdef01234567', requested_revision: 'HEAD', policy_source: 'committed', policy_hash: 'policy-public-safe', git_store_ref: 'git-store-public', overlay: false, namespace_id: 'embns-public', eligible_files: 4, eligible_chunks: 10, embedded_chunks: 8, reused_chunks: 2, failed_chunks: 0, excluded_files: 2, exclusions: [{ reason: 'lfs_pointer', count: 1 }, { reason: 'too_large', count: 1 }], missing_objects: 0, updated_at: new Date().toISOString(), revision_set_count: 2, search_available: true, semantic_available: true, retention: { committed_sets_per_identity: 8, overlay_max_age_hours: 24, terminal_max_age_hours: 168, vector_byte_ceiling: 536870912 }, index_handoff: 'gitcode-mcp repo-docs index --repo example/repo --registration-id reg-1 --source-registration-id source-docs --source-registration-generation 3', search_handoff: 'gitcode-mcp repo-docs search --repo example/repo --registration-id reg-1 --source-registration-id source-docs --source-registration-generation 3 "QUERY"' },
       recent_sync_events: [{ id: 'sync-1', kind: 'issue', status: 'succeeded', completed_at: new Date().toISOString(), zero_delta: false }]
     }]
   }],
@@ -196,6 +196,82 @@ test('repository documentation cohort exposes versioned authority, coverage, and
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
+
+const repositoryDocsStateMatrix = [
+  { name: 'disabled', state: 'disabled', reconcile: 'disabled', registered: true, lexical: true, semantic: false, active: '' },
+  { name: 'unavailable', state: 'unavailable', reconcile: 'unavailable', registered: false, lexical: false, semantic: false, active: '' },
+  { name: 'empty', state: 'ready', reconcile: 'ready', registered: true, lexical: true, semantic: true, active: '', empty: true },
+  { name: 'partial', state: 'partial', reconcile: 'partial', registered: true, lexical: true, semantic: false, active: 'partial' },
+  { name: 'building', state: 'building', reconcile: 'indexing', registered: true, lexical: true, semantic: false, active: 'building' },
+  { name: 'blocked', state: 'blocked', reconcile: 'blocked', registered: true, lexical: true, semantic: false, active: 'blocked' },
+  { name: 'superseded', state: 'superseded', reconcile: 'registered', registered: true, lexical: true, semantic: false, active: 'superseded' },
+  { name: 'stale', state: 'ready', reconcile: 'stale', registered: true, lexical: true, semantic: true, active: 'superseded' },
+  { name: 'registered-without-ready-set', state: 'not_indexed', reconcile: 'registered', registered: true, lexical: true, semantic: false, active: '' },
+  { name: 'ready', state: 'ready', reconcile: 'ready', registered: true, lexical: true, semantic: true, active: '' }
+] as const;
+
+for (const scenario of repositoryDocsStateMatrix) {
+  test(`repository documentation visual state: ${scenario.name}`, async ({ page }) => {
+    const stateSnapshot = structuredClone(snapshot);
+    const docs = stateSnapshot.caches[0].repositories[0].documentation as Record<string, unknown>;
+    Object.assign(docs, {
+      state: scenario.state,
+      registered: scenario.registered,
+      reconcile_state: scenario.reconcile,
+      search_available: scenario.lexical,
+      semantic_available: scenario.semantic,
+      active_state: scenario.active || undefined,
+      active_revision_set_id: scenario.active ? `active-${scenario.name}` : undefined,
+      next_poll_at: undefined,
+      updated_at: undefined,
+      last_error_class: scenario.reconcile === 'unavailable' ? 'repository_docs_source_unavailable' : undefined,
+      last_failure_class: scenario.state === 'blocked' ? 'repository_docs_provider_boundary_blocked' : undefined
+    });
+    if (!scenario.registered) {
+      Object.assign(docs, {
+        registration_id: undefined, source_registration_id: undefined, source_registration_generation: undefined,
+        sources: [], search_handoff: undefined, index_handoff: undefined
+      });
+    }
+    const hasReadySet = scenario.semantic;
+    if (!hasReadySet) {
+      Object.assign(docs, {
+        revision_set_id: undefined, commit_oid: undefined, namespace_id: undefined, policy_hash: undefined,
+        eligible_files: 0, eligible_chunks: 0, embedded_chunks: 0, reused_chunks: 0, failed_chunks: 0,
+        missing_objects: 0, excluded_files: 0, exclusions: [], revision_set_count: scenario.active ? 1 : 0
+      });
+    }
+    if ('empty' in scenario && scenario.empty) {
+      Object.assign(docs, { eligible_files: 0, eligible_chunks: 0, embedded_chunks: 0, reused_chunks: 0, excluded_files: 0, exclusions: [] });
+    }
+
+    await mockAdmin(page, stateSnapshot);
+    if (scenario.name === 'registered-without-ready-set') {
+      await page.route('**/api/admin/v1/repository-docs/reg-1/search', async (route) => {
+        expect(route.request().postDataJSON()).toMatchObject({ mode: 'fulltext', query: 'offline lexical contract' });
+        await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: {
+          repo_id: 'example/repo', corpus_kind: 'repository_docs', query: 'offline lexical contract', requested_revision: 'HEAD',
+          effective_revision: '0123456789abcdef0123456789abcdef01234567', requested_mode: 'fulltext', effective_mode: 'fulltext',
+          authority: 'git', coverage: { state: 'not_indexed', eligible_files: 0, eligible_chunks: 0, embedded_chunks: 0, reused_chunks: 0, failed_chunks: 0, missing_objects: 0 }, hits: []
+        } }) });
+      });
+    }
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto('/?view=Caches&cache=cache-111111112222&repo=example%2Frepo&tab=documentation');
+    const availability = page.getByLabel('Repository documentation search availability');
+    await expect(availability).toContainText(scenario.lexical ? 'Offline full textAvailable' : 'Offline full textUnavailable');
+    await expect(availability).toContainText(scenario.semantic ? 'Semantic rankingReady' : 'Semantic rankingLexical fallback');
+    if (scenario.lexical) await expect(page.getByRole('button', { name: 'Search Git' })).toBeEnabled();
+    else await expect(page.getByRole('button', { name: 'Search Git' })).toBeDisabled();
+    await expect(page.locator('section[aria-labelledby="documentation-title"]')).toHaveScreenshot(`repository-docs-${scenario.name}.png`, { animations: 'disabled' });
+    if (scenario.name === 'registered-without-ready-set') {
+      await page.getByLabel('Mode').selectOption('fulltext');
+      await page.getByLabel('Query').fill('offline lexical contract');
+      await page.getByRole('button', { name: 'Search Git' }).click();
+      await expect(page.getByText('No Git-backed match')).toBeVisible();
+    }
+  });
+}
 
 test('API version mismatch is explicit and blocks ordinary views', async ({ page }) => {
   await mockAdmin(page, { ...snapshot, api_version: '2' });
