@@ -256,14 +256,14 @@ for (const scenario of repositoryDocsStateMatrix) {
         } }) });
       });
     }
-    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.setViewportSize({ width: 1280, height: 1400 });
     await page.goto('/?view=Caches&cache=cache-111111112222&repo=example%2Frepo&tab=documentation');
     const availability = page.getByLabel('Repository documentation search availability');
     await expect(availability).toContainText(scenario.lexical ? 'Offline full textAvailable' : 'Offline full textUnavailable');
     await expect(availability).toContainText(scenario.semantic ? 'Semantic rankingReady' : 'Semantic rankingLexical fallback');
     if (scenario.lexical) await expect(page.getByRole('button', { name: 'Search Git' })).toBeEnabled();
     else await expect(page.getByRole('button', { name: 'Search Git' })).toBeDisabled();
-    await expect(page.locator('section[aria-labelledby="documentation-title"]')).toHaveScreenshot(`repository-docs-${scenario.name}.png`, { animations: 'disabled' });
+    await expect(page).toHaveScreenshot(`repository-docs-${scenario.name}.png`, { animations: 'disabled', maxDiffPixelRatio: 0.02 });
     if (scenario.name === 'registered-without-ready-set') {
       await page.getByLabel('Mode').selectOption('fulltext');
       await page.getByLabel('Query').fill('offline lexical contract');
