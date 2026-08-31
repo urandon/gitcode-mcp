@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -2410,6 +2412,186 @@ func TestCacheWriterAdmissionRestartReleasesInterruptedWriter(t *testing.T) {
 	}
 }
 
+func TestMaintenanceReconcileRotatesSameCacheRepositoriesAfterRepeatedContention(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, repoID := range []string{"owner/left", "owner/right"} {
+		parts := strings.Split(repoID, "/")
+		if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: repoID, Owner: parts[0], Name: parts[1], Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	started := make(chan string, 4)
+	release := make(chan struct{}, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started <- r.URL.Path
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer server.Close()
+
+	manager := newTestManager(t, "darwin")
+	source := manager.Source.(testSource)
+	source.env[config.EnvToken] = "test-token"
+	manager.Source = source
+	jobsPath := filepath.Join(dir, "jobs.json")
+	registryPath := filepath.Join(dir, "managed-caches.json")
+	jobs := NewJobManager(jobsPath)
+	maintenance := NewMaintenanceManager(manager, jobs, registryPath)
+	entries := map[string]MaintenanceEntry{}
+	for _, repoID := range []string{"owner/left", "owner/right"} {
+		req := schedulerSyncEnrollRequest(cachePath, server.URL, repoID, "enroll-"+strings.TrimPrefix(repoID, "owner/"))
+		entry, err := maintenance.Enroll(ctx, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries[entry.RegistrationID] = entry
+	}
+
+	firstTick, err := maintenance.Reconcile(ctx)
+	if err != nil || len(firstTick.JobsStarted) != 1 {
+		t.Fatalf("first tick=%+v err=%v", firstTick, err)
+	}
+	firstJob, ok := jobs.Get(firstTick.JobsStarted[0])
+	if !ok || firstJob.CacheUUID == "" || firstJob.RegistrationID == "" {
+		t.Fatalf("first job=%+v found=%t", firstJob, ok)
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first sync did not reach provider")
+	}
+
+	for tick := 0; tick < 3; tick++ {
+		blocked, err := maintenance.Reconcile(ctx)
+		if err != nil || len(blocked.JobsStarted) != 0 {
+			t.Fatalf("contention tick %d=%+v err=%v", tick, blocked, err)
+		}
+		for _, entry := range blocked.Entries {
+			if entry.RegistrationID != firstJob.RegistrationID && (entry.LastErrorClass != "" || entry.State == "degraded") {
+				t.Fatalf("contention degraded waiting registration: %+v", entry)
+			}
+		}
+	}
+
+	release <- struct{}{}
+	waitForTerminalJob(t, jobs, firstJob.ID)
+	secondTick, err := maintenance.Reconcile(ctx)
+	if err != nil || len(secondTick.JobsStarted) != 1 {
+		t.Fatalf("second tick=%+v err=%v", secondTick, err)
+	}
+	secondJob, ok := jobs.Get(secondTick.JobsStarted[0])
+	if !ok || secondJob.RegistrationID == firstJob.RegistrationID || secondJob.CacheUUID != firstJob.CacheUUID {
+		t.Fatalf("second job=%+v first=%+v found=%t", secondJob, firstJob, ok)
+	}
+	if _, known := entries[secondJob.RegistrationID]; !known {
+		t.Fatalf("second job lost registration intent: %+v entries=%v", secondJob, entries)
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("second sync did not reach provider")
+	}
+	release <- struct{}{}
+	waitForTerminalJob(t, jobs, secondJob.ID)
+
+	settled, err := maintenance.Reconcile(ctx)
+	if err != nil || len(settled.JobsStarted) != 0 {
+		t.Fatalf("settled=%+v err=%v", settled, err)
+	}
+	for _, entry := range settled.Entries {
+		if entry.LastErrorClass != "" || entry.State == "degraded" {
+			t.Fatalf("settled registration retained false contention failure: %+v", entry)
+		}
+	}
+}
+
+func TestMaintenanceReconcileRestartReschedulesInterruptedSameCacheIntent(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer server.Close()
+
+	manager := newTestManager(t, "darwin")
+	source := manager.Source.(testSource)
+	source.env[config.EnvToken] = "test-token"
+	manager.Source = source
+	jobsPath := filepath.Join(dir, "jobs.json")
+	registryPath := filepath.Join(dir, "managed-caches.json")
+	beforeJobs := NewJobManager(jobsPath)
+	beforeMaintenance := NewMaintenanceManager(manager, beforeJobs, registryPath)
+	entry, err := beforeMaintenance.Enroll(ctx, schedulerSyncEnrollRequest(cachePath, server.URL, "owner/repo", "restart-enroll"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, created, err := beforeJobs.createCoalescedJob(SyncJobType, entry.RepoID, "", 0, "sync:"+entry.CacheUUID+":"+entry.RepoID+":head", entry.CacheUUID, entry.RegistrationID, "", func() {})
+	if err != nil || !created {
+		t.Fatalf("old=%+v created=%t err=%v", old, created, err)
+	}
+
+	restartedJobs := NewJobManager(jobsPath)
+	if err := restartedJobs.LoadAndMarkInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	interrupted, ok := restartedJobs.Get(old.ID)
+	if !ok || interrupted.Status != JobStatusInterrupted {
+		t.Fatalf("interrupted=%+v found=%t", interrupted, ok)
+	}
+	restartedMaintenance := NewMaintenanceManager(manager, restartedJobs, registryPath)
+	if err := restartedMaintenance.Load(); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := restartedMaintenance.Reconcile(ctx)
+	if err != nil || len(result.JobsStarted) != 1 {
+		t.Fatalf("restart reconcile=%+v err=%v", result, err)
+	}
+	resumed, ok := restartedJobs.Get(result.JobsStarted[0])
+	if !ok || resumed.ID == old.ID || resumed.RegistrationID != old.RegistrationID || resumed.CacheUUID != old.CacheUUID {
+		t.Fatalf("resumed=%+v old=%+v found=%t", resumed, old, ok)
+	}
+	active, ok := restartedJobs.ActiveCacheWriter(old.CacheUUID)
+	if !ok || active.ID != resumed.ID {
+		t.Fatalf("active after restart=%+v found=%t", active, ok)
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("restarted sync did not reach provider")
+	}
+	release <- struct{}{}
+	waitForTerminalJob(t, restartedJobs, resumed.ID)
+}
+
 func TestMaintenanceReconcileOrderPrefersOldestWriterIntentPerCache(t *testing.T) {
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	entries := []MaintenanceEntry{
@@ -2714,6 +2896,20 @@ func testMaintenanceEnrollRequest(cachePath, key string, policy MaintenancePolic
 	cfg.CachePath = cachePath
 	return MaintenanceEnrollRequest{
 		CachePath: cachePath, RepoID: "owner/repo", IdempotencyKey: key, Policy: policy,
+		ConfigHash: maintenanceHash(cfg), ConfigSnapshot: cfg,
+	}
+}
+
+func schedulerSyncEnrollRequest(cachePath, baseURL, repoID, key string) MaintenanceEnrollRequest {
+	cfg := config.Default()
+	cfg.CachePath = cachePath
+	cfg.LockPath = cachePath + ".lock"
+	cfg.GitCodeBaseURL = baseURL
+	cfg.MaxRetries = 0
+	cfg.DefaultTimeout = 5 * time.Second
+	return MaintenanceEnrollRequest{
+		CachePath: cachePath, RepoID: repoID, IdempotencyKey: key,
+		Policy:     MaintenancePolicy{SyncEnabled: true, SyncMode: "head", Issues: true},
 		ConfigHash: maintenanceHash(cfg), ConfigSnapshot: cfg,
 	}
 }
