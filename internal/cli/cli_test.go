@@ -2536,6 +2536,172 @@ func TestQueryCommandsUseServiceOnly(t *testing.T) {
 	}
 }
 
+func TestMarkdownBodyFileCommandsNormalizeAndReportSafeMetadata(t *testing.T) {
+	bodyPath := filepath.Join(t.TempDir(), "body.md")
+	original := "## Результат\r\n\r\n```text\r\npath\\name\r\n```\r\n"
+	if err := os.WriteFile(bodyPath, []byte(original), 0o600); err != nil {
+		t.Fatalf("write body fixture: %v", err)
+	}
+	wantBody := "## Результат\n\n```text\npath\\name\n```\n"
+
+	cases := []struct {
+		command string
+		args    []string
+		method  string
+	}{
+		{command: "create-issue", args: []string{"--title", "title"}, method: "CreateIssue"},
+		{command: "update-issue", args: []string{"--issue-id", "ISSUE-1"}, method: "UpdateIssue"},
+		{command: "add-comment", args: []string{"--number", "1"}, method: "AddComment"},
+		{command: "update-comment", args: []string{"--comment-id", "comment-1"}, method: "UpdateComment"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.command, func(t *testing.T) {
+			spy := &spyService{}
+			factory := func(context.Context, string) (queryService, func() error, error) { return spy, nil, nil }
+			args := append([]string{tc.command, "--repo", "fixture-a", "--body-file", bodyPath, "--dry-run", "--format", "json"}, tc.args...)
+			var stdout, stderr bytes.Buffer
+			code := executeWithFactoryAndDeps(args, &stdout, &stderr, factory, localCommandDeps{Source: config.OSSource{}})
+			if code != 0 {
+				t.Fatalf("code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+			}
+			request := spy.lastWriteRequest[tc.method]
+			if request.Body != wantBody {
+				t.Fatalf("body=%q want=%q", request.Body, wantBody)
+			}
+			var result service.WriteCommandResult
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("decode result: %v output=%q", err, stdout.String())
+			}
+			if result.BodyInput == nil || result.BodyInput.Source != "file" || result.BodyInput.ActualNewlineCount != 5 || result.BodyInput.LiteralBackslashNCount != 1 || !result.BodyInput.CarriageReturnsNormalized || !result.BodyInput.TrailingNewlinePreserved {
+				t.Fatalf("metadata=%#v", result.BodyInput)
+			}
+			if strings.Contains(stdout.String(), "Результат") || strings.Contains(stdout.String(), "path") {
+				t.Fatalf("dry-run output leaked body content: %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestMarkdownBodyStdinPreservesUTF8BackslashesAndTrailingNewline(t *testing.T) {
+	spy := &spyService{}
+	factory := func(context.Context, string) (queryService, func() error, error) { return spy, nil, nil }
+	body := "## Résultat\n\n- один\\два\n"
+	var stdout, stderr bytes.Buffer
+	code := executeWithFactoryAndDeps(
+		[]string{"add-comment", "--repo", "fixture-a", "--number", "1", "--body-file", "-", "--dry-run", "--format", "json"},
+		&stdout,
+		&stderr,
+		factory,
+		localCommandDeps{Source: config.OSSource{}, Stdin: strings.NewReader(body)},
+	)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if got := spy.lastWriteRequest["AddComment"].Body; got != body {
+		t.Fatalf("body=%q want=%q", got, body)
+	}
+	var result service.WriteCommandResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if result.BodyInput == nil || result.BodyInput.Source != "stdin" || result.BodyInput.ActualNewlineCount != 3 || result.BodyInput.ByteCount != len([]byte(body)) {
+		t.Fatalf("metadata=%#v", result.BodyInput)
+	}
+}
+
+func TestMarkdownBodyInputRejectsAmbiguousAndUnsafeFormsBeforeWrite(t *testing.T) {
+	factoryCalls := 0
+	factory := func(context.Context, string) (queryService, func() error, error) {
+		factoryCalls++
+		return &spyService{}, nil, nil
+	}
+	cases := []struct {
+		name  string
+		args  []string
+		stdin io.Reader
+		want  string
+	}{
+		{name: "mutually exclusive", args: []string{"create-issue", "--repo", "fixture-a", "--title", "t", "--body", "x", "--body-file", "-", "--dry-run"}, stdin: strings.NewReader("y"), want: "mutually exclusive"},
+		{name: "suspicious literal escapes", args: []string{"add-comment", "--repo", "fixture-a", "--number", "1", "--body", `one\n\ntwo`, "--dry-run"}, want: "multiple literal \\n sequences"},
+		{name: "double escaped remains suspicious", args: []string{"add-comment", "--repo", "fixture-a", "--number", "1", "--body", `one\\n\\ntwo`, "--dry-run"}, want: "multiple literal \\n sequences"},
+		{name: "empty stdin", args: []string{"add-comment", "--repo", "fixture-a", "--number", "1", "--body-file", "-", "--dry-run"}, stdin: strings.NewReader(""), want: "body input is empty"},
+		{name: "body file unsupported", args: []string{"create-pr", "--repo", "fixture-a", "--title", "t", "--head", "h", "--base", "b", "--body-file", "-", "--dry-run"}, stdin: strings.NewReader("x"), want: "supported by create-issue"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := executeWithFactoryAndDeps(tc.args, &stdout, &stderr, factory, localCommandDeps{Source: config.OSSource{}, Stdin: tc.stdin})
+			if code == 0 || !strings.Contains(stderr.String(), tc.want) {
+				t.Fatalf("code=%d stderr=%q want=%q", code, stderr.String(), tc.want)
+			}
+		})
+	}
+	if factoryCalls != 0 {
+		t.Fatalf("factory calls=%d want 0; validation must precede writes", factoryCalls)
+	}
+}
+
+func TestMarkdownBodyInlineOverridePreservesLiteralSequences(t *testing.T) {
+	spy := &spyService{}
+	factory := func(context.Context, string) (queryService, func() error, error) { return spy, nil, nil }
+	body := `one\n\ntwo`
+	var stdout, stderr bytes.Buffer
+	code := executeWithFactoryAndDeps(
+		[]string{"add-comment", "--repo", "fixture-a", "--number", "1", "--body", body, "--allow-literal-backslash-n", "--dry-run", "--format", "json"},
+		&stdout,
+		&stderr,
+		factory,
+		localCommandDeps{Source: config.OSSource{}},
+	)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if got := spy.lastWriteRequest["AddComment"].Body; got != body {
+		t.Fatalf("body=%q want=%q", got, body)
+	}
+	var result service.WriteCommandResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if result.BodyInput == nil || result.BodyInput.Source != "inline" || result.BodyInput.LiteralBackslashNCount != 2 || result.BodyInput.ActualNewlineCount != 0 {
+		t.Fatalf("metadata=%#v", result.BodyInput)
+	}
+}
+
+func TestMarkdownBodyInputRejectsOversizedAndInvalidUTF8(t *testing.T) {
+	oversized := strings.NewReader(strings.Repeat("x", int(maxMarkdownBodyBytes)+1))
+	if _, err := resolveMarkdownBodyInput("add-comment", options{bodyFile: "-", bodyFileSet: true}, oversized); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized error=%v", err)
+	}
+	invalidPath := filepath.Join(t.TempDir(), "invalid.md")
+	if err := os.WriteFile(invalidPath, []byte{0xff, 0xfe}, 0o600); err != nil {
+		t.Fatalf("write invalid fixture: %v", err)
+	}
+	if _, err := resolveMarkdownBodyInput("update-issue", options{bodyFile: invalidPath, bodyFileSet: true}, nil); err == nil || !strings.Contains(err.Error(), "valid UTF-8") {
+		t.Fatalf("invalid UTF-8 error=%v", err)
+	}
+}
+
+func TestMarkdownBodyFileResolutionIsRetryStable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "body.md")
+	body := "# Retry\n\nbody \\ value\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write body: %v", err)
+	}
+	input := options{bodyFile: path, bodyFileSet: true}
+	first, err := resolveMarkdownBodyInput("update-comment", input, nil)
+	if err != nil {
+		t.Fatalf("first resolution: %v", err)
+	}
+	second, err := resolveMarkdownBodyInput("update-comment", input, nil)
+	if err != nil {
+		t.Fatalf("second resolution: %v", err)
+	}
+	if first.body != second.body || *first.bodyInput != *second.bodyInput {
+		t.Fatalf("retry changed body or metadata: first=%#v second=%#v", first, second)
+	}
+}
+
 func TestBulkSyncRequestUsesTraversalBoundsByDefault(t *testing.T) {
 	req := bulkSyncRequest(options{repo: "fixture-a"})
 	if req.Bounds == nil {
@@ -3087,8 +3253,12 @@ func (s *spyService) DeletePage(context.Context, service.WriteCommandRequest) (s
 	s.called("DeletePage")
 	return service.WriteCommandResult{Command: "delete-page", Status: "dry_run_valid", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
 }
-func (s *spyService) AddComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error) {
+func (s *spyService) AddComment(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
 	s.called("AddComment")
+	if s.lastWriteRequest == nil {
+		s.lastWriteRequest = map[string]service.WriteCommandRequest{}
+	}
+	s.lastWriteRequest["AddComment"] = req
 	return service.WriteCommandResult{Command: "add-comment", Status: "dry_run_valid", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
 }
 func (s *spyService) AddPRReviewComment(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
@@ -3109,6 +3279,9 @@ func (s *spyService) ReplyPRReviewComment(_ context.Context, req service.WriteCo
 }
 func (s *spyService) UpdateComment(_ context.Context, req service.WriteCommandRequest) (service.WriteCommandResult, error) {
 	s.called("UpdateComment")
+	if s.lastWriteRequest == nil {
+		s.lastWriteRequest = map[string]service.WriteCommandRequest{}
+	}
 	s.lastWriteRequest["UpdateComment"] = req
 	return service.WriteCommandResult{Command: "update-comment", Status: "dry_run_valid", IdempotencyKey: "key", GeneratedAt: time.Now()}, nil
 }
@@ -3168,6 +3341,22 @@ func TestCommandHelpExitsZero(t *testing.T) {
 			}
 			if strings.Contains(stdout.String(), "invalid_query") {
 				t.Fatalf("help output contains invalid_query: %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestMarkdownWriteHelpRecommendsFileOrStdin(t *testing.T) {
+	for _, command := range []string{"create-issue", "update-issue", "add-comment", "update-comment"} {
+		t.Run(command, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := Execute([]string{command, "--help"}, &stdout, &stderr); code != 0 {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			for _, invariant := range []string{"--body-file PATH|-", "UTF-8", "multiline Markdown", "--allow-literal-backslash-n"} {
+				if !strings.Contains(stdout.String(), invariant) {
+					t.Fatalf("help missing %q: %q", invariant, stdout.String())
+				}
 			}
 		})
 	}

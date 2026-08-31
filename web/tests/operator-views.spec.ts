@@ -2,8 +2,11 @@ import { expect, test, type Page } from '@playwright/test';
 import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-const qaOutput = process.env.ADMIN_VIEW_QA_OUTPUT;
-const qaReference = process.env.ADMIN_QA_REFERENCE;
+// Raster captures and image references are local review aids only. CI validates
+// semantic DOM/API/action/accessibility invariants even if a runner happens to
+// inherit one of the local QA environment variables.
+const qaOutput = process.env.CI ? undefined : process.env.ADMIN_VIEW_QA_OUTPUT;
+const qaReference = process.env.CI ? undefined : process.env.ADMIN_QA_REFERENCE;
 const visualBaselines = process.env.ADMIN_VISUAL_BASELINES === '1' && !process.env.CI;
 
 const snapshot = {

@@ -985,8 +985,20 @@ type WriteCommandResult struct {
 	Replayed          bool                    `json:"replayed,omitempty"`
 	Milestone         *WriteMilestoneReceipt  `json:"milestone,omitempty"`
 	PushMirror        *WritePushMirrorReceipt `json:"push_mirror,omitempty"`
+	BodyInput         *WriteBodyInputMetadata `json:"body_input,omitempty"`
 	Evidence          string                  `json:"evidence,omitempty"`
 	GeneratedAt       time.Time               `json:"generated_at"`
+}
+
+// WriteBodyInputMetadata describes a Markdown body without exposing its content.
+// The CLI attaches it to dry-run results only.
+type WriteBodyInputMetadata struct {
+	Source                    string `json:"source"`
+	ByteCount                 int    `json:"byte_count"`
+	ActualNewlineCount        int    `json:"actual_newline_count"`
+	LiteralBackslashNCount    int    `json:"literal_backslash_n_count"`
+	CarriageReturnsNormalized bool   `json:"carriage_returns_normalized"`
+	TrailingNewlinePreserved  bool   `json:"trailing_newline_preserved"`
 }
 
 type WriteMilestoneReceipt struct {
