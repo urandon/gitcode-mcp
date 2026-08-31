@@ -216,7 +216,7 @@ const humanizedState = (value: string) => value
   .replace(/\b\w/g, (letter) => letter.toUpperCase());
 
 for (const scenario of repositoryDocsStateMatrix) {
-  test(`repository documentation visual state: ${scenario.name}`, async ({ page }) => {
+  test(`repository documentation state invariants: ${scenario.name}`, async ({ page }) => {
     const stateSnapshot = structuredClone(snapshot);
     const docs = stateSnapshot.caches[0].repositories[0].documentation as Record<string, unknown>;
     Object.assign(docs, {
