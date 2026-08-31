@@ -2,9 +2,10 @@ import { expect, test } from '@playwright/test';
 import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-const launchURL = process.env.ADMIN_QA_URL;
-const outputDir = process.env.ADMIN_QA_OUTPUT;
-const referencePath = process.env.ADMIN_QA_REFERENCE;
+const localVisualQA = !process.env.CI;
+const launchURL = localVisualQA ? process.env.ADMIN_QA_URL : undefined;
+const outputDir = localVisualQA ? process.env.ADMIN_QA_OUTPUT : undefined;
+const referencePath = localVisualQA ? process.env.ADMIN_QA_REFERENCE : undefined;
 
 test('embedded admin launch, controls, and theme states', async ({ page, context }) => {
   test.skip(!launchURL || !outputDir, 'requires an explicit one-time local QA launch URL and output directory');

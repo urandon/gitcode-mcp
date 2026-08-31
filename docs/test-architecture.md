@@ -103,6 +103,12 @@ failed-stage retry evidence without reviving superseded failures, and prove
 that genuinely different repositories in one cache remain separate. Admin
 browser coverage gates conflict plan/confirm, legacy deep-link redirect, and
 recovery before the canonical-identity UX cohort is considered complete.
+Browser CI is semantic-only: assert DOM roles/text, ARIA state, API JSON,
+status/count values, navigation, and action outcomes. Screenshot capture,
+reference composition, and pixel baselines are local opt-in QA and must be
+disabled whenever `CI` is set, even if their local environment variables leak
+into the runner. CI carries sentinel visual-QA variables and fails if an image
+output directory is created.
 
 ## Before Committing
 
