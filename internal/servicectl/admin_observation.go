@@ -601,26 +601,62 @@ func publicWorkRef(value string) string {
 }
 
 func adminMaintenanceObservation(entry MaintenanceEntry) adminhttp.MaintenanceObservation {
+	view := adminhttp.MaintenanceObservation{
+		RegistrationID: entry.RegistrationID, CacheRef: publicCacheRef(entry.CacheUUID, ""), RepoID: entry.RepoID,
+		Aliases: append([]string(nil), entry.Aliases...), LegacyRegistrationIDs: append([]string(nil), entry.LegacyRegistrationIDs...),
+		NamespaceID: entry.NamespaceID, Enabled: entry.Enabled, State: entry.State, Generation: entry.Generation,
+		NextReconcileAt: adminTimePointer(entry.NextReconcileAt),
+		Policy:          adminMaintenancePolicyObservation(entry.Policy),
+	}
+	if entry.IdentityConflict != nil {
+		view.IdentityConflict = &adminhttp.MaintenanceIdentityConflictObservation{
+			Kind:                     entry.IdentityConflict.Kind,
+			DetailsAvailable:         entry.IdentityConflict.DetailsAvailable,
+			CandidateRegistrationIDs: append([]string(nil), entry.IdentityConflict.CandidateRegistrationIDs...),
+			PolicyHashes:             append([]string(nil), entry.IdentityConflict.PolicyHashes...),
+			ConfigHashes:             append([]string(nil), entry.IdentityConflict.ConfigHashes...),
+			PathFingerprints:         append([]string(nil), entry.IdentityConflict.PathFingerprints...),
+		}
+		for _, candidate := range entry.IdentityConflict.Candidates {
+			view.IdentityConflict.Candidates = append(view.IdentityConflict.Candidates, adminMaintenanceCandidateObservation(candidate))
+		}
+	}
+	return view
+}
+
+func adminMaintenancePolicyObservation(policy MaintenancePolicy) adminhttp.MaintenancePolicyView {
 	collections := make([]string, 0, 5)
 	for _, collection := range []struct {
-		enabled bool
 		name    string
-	}{{entry.Policy.Issues, "issues"}, {entry.Policy.IssueComments, "issue_comments"}, {entry.Policy.Wiki, "wiki"}, {entry.Policy.Pulls, "pulls"}, {entry.Policy.PRComments, "pr_comments"}} {
+		enabled bool
+	}{{"issues", policy.Issues}, {"issue_comments", policy.IssueComments}, {"wiki", policy.Wiki}, {"pulls", policy.Pulls}, {"pr_comments", policy.PRComments}} {
 		if collection.enabled {
 			collections = append(collections, collection.name)
 		}
 	}
-	return adminhttp.MaintenanceObservation{
-		RegistrationID: entry.RegistrationID, CacheRef: publicCacheRef(entry.CacheUUID, ""), RepoID: entry.RepoID,
-		NamespaceID: entry.NamespaceID, Enabled: entry.Enabled, State: entry.State, Generation: entry.Generation,
-		NextReconcileAt: adminTimePointer(entry.NextReconcileAt),
-		Policy: adminhttp.MaintenancePolicyView{
-			SyncEnabled: entry.Policy.SyncEnabled, SyncMode: entry.Policy.SyncMode, RAGEnabled: entry.Policy.RAGEnabled,
-			Collections: collections, HeadIntervalSeconds: entry.Policy.HeadIntervalSeconds,
-			RAGIntervalSeconds: entry.Policy.RAGIntervalSeconds, HeadMaxPages: entry.Policy.HeadMaxPages,
-			TailSlicePages: entry.Policy.TailSlicePages, PerPage: entry.Policy.PerPage, Profile: entry.Policy.Profile,
-		},
+	return adminhttp.MaintenancePolicyView{
+		SyncEnabled: policy.SyncEnabled, SyncMode: policy.SyncMode, RAGEnabled: policy.RAGEnabled,
+		Collections: collections, HeadIntervalSeconds: policy.HeadIntervalSeconds,
+		RAGIntervalSeconds: policy.RAGIntervalSeconds, HeadMaxPages: policy.HeadMaxPages,
+		TailSlicePages: policy.TailSlicePages, PerPage: policy.PerPage, Profile: policy.Profile,
 	}
+}
+
+func adminMaintenanceCandidateObservation(candidate MaintenanceIdentityCandidate) adminhttp.MaintenanceIdentityCandidateObservation {
+	view := adminhttp.MaintenanceIdentityCandidateObservation{
+		CandidateRef: candidate.CandidateRef, SelectionKind: candidate.SelectionKind,
+		RegistrationID: candidate.RegistrationID, RepoID: candidate.RepoID,
+		Policy: adminMaintenancePolicyObservation(candidate.Policy), PolicyHash: candidate.PolicyHash,
+		ConfigHash: candidate.ConfigHash, PathFingerprint: candidate.PathFingerprint,
+		SourceAuthorityHash: candidate.SourceAuthorityHash, SourceRefs: append([]string(nil), candidate.SourceRefs...),
+		WasEnabled:            candidate.WasEnabled,
+		CohortRegistrationIDs: append([]string(nil), candidate.CohortRegistrationIDs...),
+		CohortRepoIDs:         append([]string(nil), candidate.CohortRepoIDs...),
+	}
+	for _, member := range candidate.Members {
+		view.Members = append(view.Members, adminMaintenanceCandidateObservation(member))
+	}
+	return view
 }
 
 func adminStageDiagnostics(entry MaintenanceEntry) []adminhttp.DiagnosticObservation {

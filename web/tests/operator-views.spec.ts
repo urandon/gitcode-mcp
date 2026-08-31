@@ -4,6 +4,7 @@ import path from 'node:path';
 
 const qaOutput = process.env.ADMIN_VIEW_QA_OUTPUT;
 const qaReference = process.env.ADMIN_QA_REFERENCE;
+const visualBaselines = process.env.ADMIN_VISUAL_BASELINES === '1' && !process.env.CI;
 
 const snapshot = {
   api_version: '1', revision: 'snapshot-operator', generated_at: new Date().toISOString(),
@@ -39,6 +40,7 @@ const snapshot = {
   capabilities: [
     { id: 'rag_search', category: 'rag', safety_class: 'read_only', description: 'Search cached RAG chunks.', ui_enabled: false, ui_reason: 'Search lab is delivered separately.', cli_name: 'rag-search', cli_enabled: true, mcp_name: 'rag_search', mcp_enabled: true },
     { id: 'admin_maintenance_plan_apply', category: 'admin', safety_class: 'background_job', description: 'Plan and apply maintenance.', ui_enabled: true, cli_name: 'maintenance', cli_enabled: true, mcp_enabled: false },
+    { id: 'admin_maintenance_conflict_resolution', category: 'admin', safety_class: 'audited_write', description: 'Resolve maintenance identity conflicts.', ui_enabled: true, cli_enabled: false, mcp_enabled: false },
     { id: 'admin_binding_plan_apply', category: 'admin', safety_class: 'audited_write', description: 'Plan and apply bindings.', ui_enabled: true, cli_name: 'repo', cli_enabled: true, mcp_enabled: false },
     { id: 'admin_registration_controls', category: 'admin', safety_class: 'background_job', description: 'Reconcile and disable registrations.', ui_enabled: true, cli_name: 'maintenance', cli_enabled: true, mcp_enabled: false },
     { id: 'admin_search_compare', category: 'admin', safety_class: 'read_only', description: 'Compare search modes.', ui_enabled: true, cli_name: 'search_sources', cli_enabled: true, mcp_enabled: false },
@@ -49,10 +51,167 @@ const snapshot = {
   ]
 };
 
-async function mockAdmin(page: Page, value = snapshot) {
+test('canonical registration deep links redirect and conflict resolution requires an explicit candidate', async ({ page }) => {
+  const conflictSnapshot: any = structuredClone(snapshot);
+  conflictSnapshot.maintenance = [{
+    registration_id: 'reg-canonical', cache_ref: 'cache-111111112222', repo_id: 'example/repo', aliases: ['legacy/repo'], legacy_registration_ids: ['reg-legacy'], enabled: false, state: 'identity_conflict', generation: 7,
+    policy: { sync_enabled: true, sync_mode: 'head', rag_enabled: false, collections: ['issues'] },
+    identity_conflict: {
+      kind: 'identity_conflict', details_available: true, candidate_registration_ids: ['reg-canonical', 'reg-legacy'], policy_hashes: ['policy-a', 'policy-b'], config_hashes: ['config-a', 'config-b'], path_fingerprints: ['path-a'],
+      candidates: [
+        { candidate_ref: 'candidate-a', registration_id: 'reg-canonical', repo_id: 'example/repo', policy: { sync_enabled: true, sync_mode: 'head', rag_enabled: false, collections: ['issues'] }, policy_hash: 'policy-a', config_hash: 'config-a', path_fingerprint: 'path-a', source_authority_hash: 'source-authority-a', source_refs: ['source-docs-a'], was_enabled: true },
+        { candidate_ref: 'candidate-b', registration_id: 'reg-legacy', repo_id: 'legacy/repo', policy: { sync_enabled: false, sync_mode: 'off', rag_enabled: false, collections: [] }, policy_hash: 'policy-b', config_hash: 'config-b', path_fingerprint: 'path-a', source_authority_hash: 'source-authority-b', source_refs: ['source-docs-b'], was_enabled: false }
+      ]
+    }
+  }];
+  await mockAdmin(page, conflictSnapshot);
+  let planBody: Record<string, unknown> = {};
+  let applyBody: Record<string, unknown> = {};
+  await page.route('**/api/admin/v1/maintenance/reg-canonical/conflict-resolution/plan', async (route) => {
+    planBody = route.request().postDataJSON();
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { schema_version: 'gitcode-mcp.maintenance-conflict-resolution-plan.v1', plan_id: 'conflict-plan-1', status: 'ready', registration_id: 'reg-canonical', canonical_registration_id: 'reg-canonical', conflict_kind: 'identity_conflict', expected_generation: 7, selected: conflictSnapshot.maintenance[0].identity_conflict!.candidates![0], effects: [{ class: 'identity', summary: 'Promote the selected candidate.', status: 'planned' }] } }) });
+  });
+  await page.route('**/api/admin/v1/maintenance/reg-canonical/conflict-resolution/apply', async (route) => {
+    applyBody = route.request().postDataJSON();
+	delete conflictSnapshot.maintenance[0].identity_conflict;
+	Object.assign(conflictSnapshot.maintenance[0], { enabled: true, state: 'enrolled', generation: 8 });
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { outcome: 'resolved', receipt_id: 'maintenance-conflict-receipt-1', plan_id: 'conflict-plan-1', registration_id: 'reg-canonical', replayed: false } }) });
+  });
+  await page.goto('/?view=Maintenance&registration=reg-legacy');
+  await expect(page).toHaveURL(/registration=reg-canonical/);
+  await expect(page.getByText('Redirected legacy registration reg-legacy to canonical reg-canonical.')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Policy or source conflict' })).toBeVisible();
+  await expect(page.getByText(/source source-authority-a/)).toBeVisible();
+  await expect(page.getByText(/source-docs-a/)).toBeVisible();
+  const candidateRadios = page.getByRole('radio', { name: /previously/ });
+  await expect(candidateRadios).toHaveCount(2);
+  await expect(candidateRadios.nth(0)).not.toBeChecked();
+  await expect(candidateRadios.nth(1)).not.toBeChecked();
+  await expect(page.getByRole('button', { name: 'Review selected candidate' })).toBeDisabled();
+  await candidateRadios.nth(0).check();
+  await page.getByRole('button', { name: 'Review selected candidate' }).click();
+  expect(planBody).toEqual({ candidate_ref: 'candidate-a', expected_generation: 7 });
+  await expect(page.getByText('conflict-plan-1')).toBeVisible();
+  await page.getByRole('button', { name: 'Confirm resolution' }).click();
+  await expect(page.getByRole('heading', { name: 'Resolve this identity conflict?' })).toBeVisible();
+  await page.getByRole('button', { name: 'Confirm selected candidate' }).click();
+  expect(applyBody).toMatchObject({ candidate_ref: 'candidate-a', expected_generation: 7, plan_id: 'conflict-plan-1' });
+  expect(String(applyBody.idempotency_key)).toMatch(/^admin-conflict_resolution_apply-/);
+	await expect(page.getByRole('heading', { name: 'Policy or source conflict' })).toHaveCount(0);
+  await expect(page.getByText('Receipt maintenance-conflict-receipt-1')).toBeVisible();
+});
+
+test('stale conflict apply closes confirmation, refreshes candidates, and requires a new plan', async ({ page }) => {
+  const conflictSnapshot: any = structuredClone(snapshot);
+  conflictSnapshot.maintenance = [{
+    registration_id: 'reg-canonical', cache_ref: 'cache-111111112222', repo_id: 'example/repo', enabled: false, state: 'identity_conflict', generation: 7,
+    policy: { sync_enabled: true, sync_mode: 'head', rag_enabled: false, collections: ['issues'] },
+    identity_conflict: { kind: 'identity_conflict', details_available: true, candidate_registration_ids: ['reg-canonical', 'reg-legacy'], policy_hashes: ['a', 'b'], config_hashes: ['a', 'b'], path_fingerprints: ['path-a'], candidates: [
+      { candidate_ref: 'candidate-a', registration_id: 'reg-canonical', repo_id: 'example/repo', policy: { sync_enabled: true, sync_mode: 'head', rag_enabled: false, collections: ['issues'] }, policy_hash: 'a', config_hash: 'a', path_fingerprint: 'path-a', source_authority_hash: 'source-a', source_refs: ['docs-a'], was_enabled: true },
+      { candidate_ref: 'candidate-b', registration_id: 'reg-legacy', repo_id: 'legacy/repo', policy: { sync_enabled: false, sync_mode: 'off', rag_enabled: false, collections: [] }, policy_hash: 'b', config_hash: 'b', path_fingerprint: 'path-a', source_authority_hash: 'source-b', source_refs: ['docs-b'], was_enabled: false }
+    ] }
+  }];
+  await mockAdmin(page, conflictSnapshot);
+  await page.route('**/api/admin/v1/maintenance/reg-canonical/conflict-resolution/plan', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { schema_version: 'gitcode-mcp.maintenance-conflict-resolution-plan.v1', plan_id: 'stale-conflict-plan', status: 'ready', registration_id: 'reg-canonical', canonical_registration_id: 'reg-canonical', result_registration_ids: ['reg-canonical'], conflict_kind: 'identity_conflict', expected_generation: 7, selected: conflictSnapshot.maintenance[0].identity_conflict.candidates[0], effects: [{ class: 'identity', summary: 'Promote selected candidate.', status: 'planned' }] } }) }));
+  await page.route('**/api/admin/v1/maintenance/reg-canonical/conflict-resolution/apply', (route) => route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: { code: 'stale_plan', message: 'Candidate generation changed.', remediation: 'Refresh and render a new plan.' } }) }));
+  await page.goto('/?view=Maintenance&registration=reg-canonical');
+  await page.getByRole('radio', { name: /example\/repo/ }).check();
+  await page.getByRole('button', { name: 'Review selected candidate' }).click();
+  await page.getByRole('button', { name: 'Confirm resolution' }).click();
+  await page.getByRole('button', { name: 'Confirm selected candidate' }).click();
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+  await expect(page.getByRole('alert').filter({ hasText: 'Conflict resolution failed' })).toContainText('Refresh and render a new plan.');
+  await expect(page.getByText('stale-conflict-plan')).not.toBeVisible();
+  await expect(page.locator('input[name="conflict-candidate"]:checked')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Review selected candidate' })).toBeDisabled();
+});
+
+test('ambiguous conflict apply keeps the exact plan and idempotency key for replay', async ({ page }) => {
+	const conflictSnapshot: any = structuredClone(snapshot);
+	conflictSnapshot.caches[0].repositories.push({ ...structuredClone(conflictSnapshot.caches[0].repositories[0]), repo_id: 'example/second', display_name: 'Second repository' });
+	const member = (repo: string, registration: string) => ({ candidate_ref: `member-${registration}`, registration_id: registration, repo_id: repo, policy: { sync_enabled: false, sync_mode: 'off', rag_enabled: false, collections: [] }, policy_hash: `policy-${registration}`, config_hash: `config-${registration}`, path_fingerprint: 'path-a', source_authority_hash: `source-${registration}`, source_refs: [`docs-${registration}`], was_enabled: true });
+	const retainedMembers = [member('example/repo', 'reg-retained-first'), member('example/second', 'reg-retained-second')];
+	conflictSnapshot.maintenance = [{
+		registration_id: 'clone-conflict-retry', cache_ref: 'cache-111111112222', repo_id: 'example/repo', enabled: false, state: 'cache_clone_conflict', generation: 7,
+		policy: { sync_enabled: true, sync_mode: 'head', rag_enabled: false, collections: ['issues'] },
+		identity_conflict: { kind: 'cache_clone_conflict', details_available: true, candidate_registration_ids: ['reg-retained-first', 'reg-retained-second'], policy_hashes: ['a'], config_hashes: ['a'], path_fingerprints: ['path-a'], candidates: [
+			{ candidate_ref: 'clone-path-a', selection_kind: 'physical_cache_authority', registration_id: '', repo_id: '', policy: {}, policy_hash: '', config_hash: '', path_fingerprint: 'path-a', source_authority_hash: 'source-path-a', source_refs: [], was_enabled: true, cohort_registration_ids: ['reg-retained-first', 'reg-retained-second'], cohort_repo_ids: ['example/repo', 'example/second'], members: retainedMembers }
+		] }
+	}];
+	let emitSnapshotChanged!: () => void;
+	const snapshotChanged = new Promise<void>((resolve) => { emitSnapshotChanged = resolve; });
+	await mockAdmin(page, conflictSnapshot, snapshotChanged);
+	const reviewedCandidate = structuredClone(conflictSnapshot.maintenance[0].identity_conflict.candidates[0]);
+	await page.route('**/api/admin/v1/maintenance/clone-conflict-retry/conflict-resolution/plan', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { schema_version: 'gitcode-mcp.maintenance-conflict-resolution-plan.v1', plan_id: 'retry-conflict-plan', status: 'ready', registration_id: 'clone-conflict-retry', canonical_registration_id: 'clone-conflict-retry', result_registration_ids: ['reg-retained-first', 'reg-retained-second'], conflict_kind: 'cache_clone_conflict', expected_generation: 7, selected: reviewedCandidate, effects: [{ class: 'identity', summary: 'Promote selected physical authority.', status: 'planned' }] } }) }));
+	const applyBodies: Array<Record<string, unknown>> = [];
+	const applyURLs: string[] = [];
+	await page.route('**/api/admin/v1/maintenance/*/conflict-resolution/apply', async (route) => {
+		applyURLs.push(route.request().url());
+		applyBodies.push(route.request().postDataJSON());
+		if (applyBodies.length === 1) {
+			conflictSnapshot.maintenance = retainedMembers.map((candidate: any, index: number) => ({ registration_id: candidate.registration_id, cache_ref: 'cache-111111112222', repo_id: candidate.repo_id, enabled: true, state: 'enrolled', generation: 8 + index, policy: candidate.policy }));
+			await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'temporarily_unavailable', message: 'Receipt delivery was interrupted.', remediation: 'Retry this confirmation.' } }) });
+			emitSnapshotChanged();
+			return;
+		}
+		await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { outcome: 'resolved', receipt_id: 'maintenance-conflict-receipt-replayed', plan_id: 'retry-conflict-plan', registration_id: 'clone-conflict-retry', registration_ids: ['reg-retained-first', 'reg-retained-second'], replayed: true } }) });
+	});
+	await page.goto('/?view=Maintenance&registration=clone-conflict-retry');
+	await page.locator('input[name="conflict-candidate"]').check();
+	await page.getByRole('button', { name: 'Review selected candidate' }).click();
+	await page.getByRole('button', { name: 'Confirm resolution' }).click();
+	await page.getByRole('button', { name: 'Confirm selected candidate' }).click();
+	const dialog = page.getByRole('dialog');
+	await expect(dialog).toBeVisible();
+	await expect(dialog.getByRole('alert')).toContainText('Receipt delivery was interrupted.');
+	await expect(dialog).toContainText('retry-conflict-plan');
+	await expect(page.getByRole('heading', { name: 'Cache clone conflict' })).toHaveCount(0);
+	await dialog.getByRole('button', { name: 'Confirm selected candidate' }).click();
+	await expect(dialog).not.toBeVisible();
+	expect(applyBodies).toHaveLength(2);
+	expect(applyBodies[1]).toEqual(applyBodies[0]);
+	expect(applyBodies[1]).toMatchObject({ plan_id: 'retry-conflict-plan', idempotency_key: applyBodies[0].idempotency_key });
+	expect(applyURLs).toEqual([
+		'http://127.0.0.1:4173/api/admin/v1/maintenance/clone-conflict-retry/conflict-resolution/apply',
+		'http://127.0.0.1:4173/api/admin/v1/maintenance/clone-conflict-retry/conflict-resolution/apply'
+	]);
+	await expect(page.getByRole('status').filter({ hasText: 'maintenance-conflict-receipt-replayed' })).toContainText('replayed safely');
+});
+
+test('clone conflict choices are physical path cohorts and show every retained repository authority', async ({ page }) => {
+  const cloneSnapshot: any = structuredClone(snapshot);
+  const member = (repo: string, registration: string, source: string) => ({ candidate_ref: `member-${registration}`, registration_id: registration, repo_id: repo, policy: { sync_enabled: repo.endsWith('first'), sync_mode: repo.endsWith('first') ? 'head' : 'off', rag_enabled: false, collections: [] }, policy_hash: `policy-${registration}`, config_hash: `config-${registration}`, path_fingerprint: 'path-a', source_authority_hash: source, source_refs: [`${source}-ref`], was_enabled: true });
+  const pathA = [member('owner/first', 'reg-first', 'source-first'), member('owner/second', 'reg-second', 'source-second')];
+  const pathB = pathA.map((value: any) => ({ ...value, candidate_ref: `${value.candidate_ref}-clone`, path_fingerprint: 'path-b' }));
+  cloneSnapshot.maintenance = [{ registration_id: 'clone-conflict-1', legacy_registration_ids: ['deep-legacy-reg-first'], cache_ref: 'cache-111111112222', repo_id: 'owner/first', enabled: false, state: 'cache_clone_conflict', generation: 9, policy: pathA[0].policy, identity_conflict: { kind: 'cache_clone_conflict', details_available: true, candidate_registration_ids: ['reg-first', 'reg-second'], policy_hashes: ['p'], config_hashes: ['c'], path_fingerprints: ['path-a', 'path-b'], candidates: [
+    { candidate_ref: 'clone-path-a', selection_kind: 'physical_cache_authority', registration_id: '', repo_id: '', policy: {}, policy_hash: '', path_fingerprint: 'path-a', source_authority_hash: 'cohort-source-a', was_enabled: true, cohort_registration_ids: ['reg-first', 'reg-second'], cohort_repo_ids: ['owner/first', 'owner/second'], members: pathA },
+    { candidate_ref: 'clone-path-b', selection_kind: 'physical_cache_authority', registration_id: '', repo_id: '', policy: {}, policy_hash: '', path_fingerprint: 'path-b', source_authority_hash: 'cohort-source-b', was_enabled: true, cohort_registration_ids: ['reg-first', 'reg-second'], cohort_repo_ids: ['owner/first', 'owner/second'], members: pathB }
+  ] } }];
+  await mockAdmin(page, cloneSnapshot);
+  await page.goto('/?view=Maintenance&registration=deep-legacy-reg-first');
+  await expect(page.getByRole('heading', { name: 'Cache clone conflict' })).toBeVisible();
+  await expect(page.getByText('Select one physical cache authority')).toBeVisible();
+  const cloneChoices = page.locator('input[name="conflict-candidate"]');
+  await expect(cloneChoices).toHaveCount(2);
+  await expect(page.getByText(/owner\/first · Head sync/).first()).toBeVisible();
+  await expect(page.getByText(/owner\/second · Off sync/).first()).toBeVisible();
+  await expect(page.getByText(/source-first/).first()).toBeVisible();
+  await expect(cloneChoices.first()).not.toBeChecked();
+});
+
+async function mockAdmin(page: Page, value = snapshot, snapshotChanged?: Promise<void>) {
   await page.route('**/api/admin/v1/session', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', csrf_token: 'csrf-test' }) }));
   await page.route('**/api/admin/v1/snapshot', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify(value) }));
-  await page.route('**/api/admin/v1/events', (route) => route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': ready\n\n' }));
+	let emittedSnapshotChanged = false;
+	await page.route('**/api/admin/v1/events', async (route) => {
+		if (snapshotChanged && !emittedSnapshotChanged) {
+			emittedSnapshotChanged = true;
+			await snapshotChanged;
+			await route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'event: snapshot_changed\ndata: {}\n\n' });
+			return;
+		}
+		await route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': ready\n\n' });
+	});
 }
 
 test('operator views keep coverage truth, deep links, and recovery states', async ({ page }) => {
@@ -275,7 +434,7 @@ for (const scenario of repositoryDocsStateMatrix) {
     const activeAttempt = documentation.locator('article').filter({ hasText: 'Active attempt' });
     await expect(activeAttempt.locator('strong')).toHaveText(humanizedState(scenario.active || 'idle'));
     await expect(activeAttempt.locator('p')).toHaveText(scenario.active ? `active-${scenario.name}` : 'No competing generation');
-    if (!process.env.CI) {
+    if (visualBaselines) {
       await expect(page).toHaveScreenshot(`repository-docs-${scenario.name}.png`, { animations: 'disabled', maxDiffPixelRatio: 0.02 });
     }
     if (scenario.name === 'registered-without-ready-set') {

@@ -100,6 +100,34 @@ func TestAdminObservationUsesOpaqueCacheReferences(t *testing.T) {
 	}
 }
 
+func TestAdminMaintenanceObservationExposesCanonicalAliasesAndSanitizedConflict(t *testing.T) {
+	entry := MaintenanceEntry{
+		RegistrationID: "cache-reg-canonical", CacheUUID: "11111111-2222-3333-4444-555555555555", RepoID: "owner/repo",
+		Aliases: []string{"legacy/repo"}, LegacyRegistrationIDs: []string{"cache-reg-legacy"}, State: "identity_conflict",
+		IdentityConflict: &MaintenanceIdentityConflict{
+			DetailsAvailable:         true,
+			CandidateRegistrationIDs: []string{"cache-reg-canonical", "cache-reg-legacy"},
+			PolicyHashes:             []string{"sha256:policy-a", "sha256:policy-b"}, ConfigHashes: []string{"sha256:config"},
+			Candidates: []MaintenanceIdentityCandidate{
+				{CandidateRef: "candidate-a", SelectionKind: "physical_cache_authority", RegistrationID: "cache-reg-canonical", RepoID: "owner/repo", Policy: MaintenancePolicy{SyncEnabled: true, Issues: true}, PolicyHash: "sha256:policy-a", ConfigHash: "sha256:config", PathFingerprint: "sha256:path-a", WasEnabled: true, CohortRegistrationIDs: []string{"cache-reg-canonical", "cache-reg-member"}, CohortRepoIDs: []string{"owner/repo", "owner/member"}, Members: []MaintenanceIdentityCandidate{{CandidateRef: "member-a", RegistrationID: "cache-reg-member", RepoID: "owner/member", Policy: MaintenancePolicy{SyncMode: "off"}, PolicyHash: "sha256:member", PathFingerprint: "sha256:path-a"}}},
+				{CandidateRef: "candidate-b", RegistrationID: "cache-reg-legacy", RepoID: "legacy/repo", Policy: MaintenancePolicy{SyncMode: "off"}, PolicyHash: "sha256:policy-b", ConfigHash: "sha256:config", PathFingerprint: "sha256:path-b"},
+			},
+		},
+	}
+	view := adminMaintenanceObservation(entry)
+	data, _ := json.Marshal(view)
+	if len(view.Aliases) != 1 || view.Aliases[0] != "legacy/repo" || len(view.LegacyRegistrationIDs) != 1 || view.IdentityConflict == nil || !view.IdentityConflict.DetailsAvailable || len(view.IdentityConflict.Candidates) != 2 || view.IdentityConflict.Candidates[0].CandidateRef != "candidate-a" {
+		t.Fatalf("view=%+v", view)
+	}
+	clone := view.IdentityConflict.Candidates[0]
+	if clone.SelectionKind != "physical_cache_authority" || len(clone.CohortRegistrationIDs) != 2 || len(clone.CohortRepoIDs) != 2 || len(clone.Members) != 1 || clone.Members[0].RepoID != "owner/member" {
+		t.Fatalf("clone cohort DTO lost recursive authority data: %+v", clone)
+	}
+	if strings.Contains(string(data), "cache_path") || strings.Contains(string(data), "config_snapshot") {
+		t.Fatalf("private migration state leaked: %s", data)
+	}
+}
+
 func TestAdminJobObservationDropsRawProgressMessagesAndEndpoints(t *testing.T) {
 	job := Job{ID: "job-000001", Type: "sync", RegistrationID: "reg-1", Status: JobStatusFailed, Error: "/private/cache.db failed", ErrorClass: "cache_busy"}
 	job.Progress = append(job.Progress, service.ProgressEvent{Type: "page", Endpoint: "/private/api", Message: "raw log"}, service.ProgressEvent{Type: "failed", Collection: "wiki", RecordsFailed: 1, RetryAfter: "30s"})

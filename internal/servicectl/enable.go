@@ -140,7 +140,7 @@ func (s MaintenanceSetup) Plan(ctx context.Context, req MaintenanceSetupRequest)
 	}
 	configSnapshot := s.Config
 	configSnapshot.CachePath = s.CachePath
-	plan := MaintenancePlan{SchemaVersion: MaintenancePlanSchema, RepoID: req.RepoID, DaemonProtocol: maintenanceRegistrySchema, ConfigurationHash: maintenanceHash(configSnapshot)}
+	plan := MaintenancePlan{SchemaVersion: MaintenancePlanSchema, DaemonProtocol: maintenanceRegistrySchema, ConfigurationHash: maintenanceHash(configSnapshot)}
 	store, err := cache.NewSQLiteReadOnlyStore(ctx, s.CachePath)
 	if err != nil {
 		return MaintenancePlan{}, fmt.Errorf("maintenance plan: selected cache is unavailable: %w", err)
@@ -154,6 +154,8 @@ func (s MaintenanceSetup) Plan(ctx context.Context, req MaintenanceSetupRequest)
 	if err != nil {
 		return MaintenancePlan{}, err
 	}
+	req.RepoID = binding.RepoID
+	plan.RepoID = binding.RepoID
 	policy, err := setupMaintenancePolicy(req, binding)
 	if err != nil {
 		return MaintenancePlan{}, err
@@ -318,7 +320,7 @@ func (s MaintenanceSetup) Apply(ctx context.Context, req MaintenanceSetupRequest
 	}
 	result.CompletedStages = append(result.CompletedStages, "daemon_config_verified")
 	var entry MaintenanceEntry
-	if err := client.Call(ctx, "Maintenance.Enroll", MaintenanceEnrollRequest{CachePath: s.CachePath, RepoID: req.RepoID, Policy: current.Policy, IdempotencyKey: req.IdempotencyKey, ConfigReference: s.ConfigReference, ConfigHash: configHash, ConfigSnapshot: configSnapshot}, &entry); err != nil {
+	if err := client.Call(ctx, "Maintenance.Enroll", MaintenanceEnrollRequest{CachePath: s.CachePath, RepoID: current.RepoID, Policy: current.Policy, IdempotencyKey: req.IdempotencyKey, ConfigReference: s.ConfigReference, ConfigHash: configHash, ConfigSnapshot: configSnapshot}, &entry); err != nil {
 		return MaintenanceApplyResult{}, err
 	}
 	result.Registration = &entry
@@ -511,16 +513,11 @@ func setupMaintenancePolicy(req MaintenanceSetupRequest, binding cache.Repositor
 }
 
 func maintenanceBinding(ctx context.Context, store *cache.SQLiteStore, repoID string) (cache.RepositoryBinding, error) {
-	repos, err := store.ListRepositories(ctx)
+	binding, err := store.ResolveRepositoryBinding(ctx, repoID)
 	if err != nil {
-		return cache.RepositoryBinding{}, err
+		return cache.RepositoryBinding{}, fmt.Errorf("maintenance: repository %q is not bound in selected cache", repoID)
 	}
-	for _, binding := range repos {
-		if binding.RepoID == repoID {
-			return binding, nil
-		}
-	}
-	return cache.RepositoryBinding{}, fmt.Errorf("maintenance: repository %q is not bound in selected cache", repoID)
+	return binding, nil
 }
 
 func maintenanceScopes(binding cache.RepositoryBinding) []string {

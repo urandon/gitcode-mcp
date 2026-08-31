@@ -96,6 +96,13 @@ pressure, and prove that membership, chunks, and vectors have no orphans after
 GC. Maintenance tests register a private worktree, poll exact HEAD/policy
 identity, enqueue only on change, recover the registration after daemon
 restart, and assert that public JSON never contains the filesystem path.
+Maintenance identity tests also enroll canonical and alias repository ids
+concurrently, migrate compatible and conflicting version-1 registry entries,
+project legacy registration/job references to the canonical identity, preserve
+failed-stage retry evidence without reviving superseded failures, and prove
+that genuinely different repositories in one cache remain separate. Admin
+browser coverage gates conflict plan/confirm, legacy deep-link redirect, and
+recovery before the canonical-identity UX cohort is considered complete.
 
 ## Before Committing
 

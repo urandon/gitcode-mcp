@@ -366,6 +366,16 @@ table small { display: block; max-width: 280px; margin-top: 4px; overflow: hidde
 .binding-preview div:last-child { border-right: 0; }
 .binding-preview dt { color: var(--muted); font-size: 9px; }
 .binding-preview dd { margin: 0; overflow: hidden; font: 600 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.identity-workbench { border-color: color-mix(in srgb, var(--accent) 32%, var(--line)); }
+.conflict-candidates { margin: 16px 0 0; padding: 12px; border: 1px solid var(--line-soft); border-radius: 8px; display: grid; gap: 9px; }
+.conflict-candidates legend { padding: 0 6px; color: var(--muted); font-size: 9px; font-weight: 680; text-transform: uppercase; letter-spacing: .06em; }
+.conflict-candidates label { min-width: 0; padding: 12px; border: 1px solid var(--line-soft); border-radius: 7px; display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 10px; cursor: pointer; background: var(--surface-soft); }
+.conflict-candidates label.selected { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent); }
+.conflict-candidates input { margin-top: 2px; accent-color: var(--accent-dark); }
+.conflict-candidates span { min-width: 0; display: grid; gap: 4px; }
+.conflict-candidates strong { font-size: 12px; }
+.conflict-candidates code, .conflict-candidates small { overflow-wrap: anywhere; }
+.conflict-candidates small { color: var(--muted); font-size: 10px; }
 .control-confirmation { z-index: 30; }
 .filter-bar { width: fit-content; margin-bottom: 28px; }
 .filter-bar button { min-width: 92px; }

@@ -1985,6 +1985,61 @@ func renderMaintenanceListText(w io.Writer, result servicectl.MaintenanceListRes
 	fmt.Fprintf(w, "managed_caches: %d\n", len(result.Entries))
 	for _, entry := range result.Entries {
 		fmt.Fprintf(w, "%s\t%s\t%s\tcontent=%d covered=%d\n", entry.RegistrationID, entry.RepoID, entry.State, entry.ContentGeneration, entry.CoveredGeneration)
+		if len(entry.Aliases) > 0 {
+			fmt.Fprintf(w, "  aliases: %s\n", strings.Join(entry.Aliases, ", "))
+		}
+		if len(entry.LegacyRegistrationIDs) > 0 {
+			fmt.Fprintf(w, "  legacy_registration_ids: %s\n", strings.Join(entry.LegacyRegistrationIDs, ", "))
+		}
+		if entry.IdentityConflict != nil {
+			fmt.Fprintf(w, "  identity_conflict: %s details_available=%t candidates=%d paths=%d\n", entry.IdentityConflict.Kind, entry.IdentityConflict.DetailsAvailable, len(entry.IdentityConflict.Candidates), len(entry.IdentityConflict.PathFingerprints))
+			candidates := append([]servicectl.MaintenanceIdentityCandidate(nil), entry.IdentityConflict.Candidates...)
+			sort.Slice(candidates, func(i, j int) bool { return candidates[i].CandidateRef < candidates[j].CandidateRef })
+			for _, candidate := range candidates {
+				renderMaintenanceIdentityCandidateText(w, "    ", candidate)
+			}
+		}
+	}
+}
+
+func renderMaintenanceIdentityCandidateText(w io.Writer, indent string, candidate servicectl.MaintenanceIdentityCandidate) {
+	fmt.Fprintf(w, "%scandidate: %s\n", indent, candidate.CandidateRef)
+	if candidate.SelectionKind != "" {
+		fmt.Fprintf(w, "%s  selection_kind: %s\n", indent, candidate.SelectionKind)
+	}
+	if candidate.RegistrationID != "" {
+		fmt.Fprintf(w, "%s  registration_id: %s\n", indent, candidate.RegistrationID)
+	}
+	if candidate.RepoID != "" {
+		fmt.Fprintf(w, "%s  repo_id: %s\n", indent, candidate.RepoID)
+	}
+	if candidate.PathFingerprint != "" {
+		fmt.Fprintf(w, "%s  path_fingerprint: %s\n", indent, candidate.PathFingerprint)
+	}
+	if candidate.PolicyHash != "" {
+		fmt.Fprintf(w, "%s  policy_hash: %s\n", indent, candidate.PolicyHash)
+	}
+	if candidate.ConfigHash != "" {
+		fmt.Fprintf(w, "%s  config_hash: %s\n", indent, candidate.ConfigHash)
+	}
+	if candidate.SourceAuthorityHash != "" {
+		fmt.Fprintf(w, "%s  source_authority_hash: %s\n", indent, candidate.SourceAuthorityHash)
+	}
+	if len(candidate.SourceRefs) > 0 {
+		fmt.Fprintf(w, "%s  source_refs: %s\n", indent, strings.Join(candidate.SourceRefs, ", "))
+	}
+	if len(candidate.CohortRegistrationIDs) > 0 {
+		fmt.Fprintf(w, "%s  cohort_registration_ids: %s\n", indent, strings.Join(candidate.CohortRegistrationIDs, ", "))
+	}
+	if len(candidate.CohortRepoIDs) > 0 {
+		fmt.Fprintf(w, "%s  cohort_repo_ids: %s\n", indent, strings.Join(candidate.CohortRepoIDs, ", "))
+	}
+	fmt.Fprintf(w, "%s  was_enabled: %t\n", indent, candidate.WasEnabled)
+	members := append([]servicectl.MaintenanceIdentityCandidate(nil), candidate.Members...)
+	sort.Slice(members, func(i, j int) bool { return members[i].CandidateRef < members[j].CandidateRef })
+	for _, member := range members {
+		fmt.Fprintf(w, "%s  member:\n", indent)
+		renderMaintenanceIdentityCandidateText(w, indent+"    ", member)
 	}
 }
 

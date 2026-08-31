@@ -76,10 +76,10 @@ func TestRAGCapabilitiesDeclareSafeSurfacePolicy(t *testing.T) {
 
 func TestAdminCapabilitiesDeclareBrowserAndFallbackSurfaces(t *testing.T) {
 	for _, cap := range AdminCapabilities() {
-		if cap.Category != CategoryAdmin || !cap.UI.Enabled || !cap.CLI.Enabled || cap.MCP.Enabled {
+		if cap.Category != CategoryAdmin || !cap.UI.Enabled || cap.MCP.Enabled {
 			t.Fatalf("admin capability has unsafe surfaces: %#v", cap)
 		}
-		if cap.UI.EnabledReason == "" || cap.MCP.DisabledReason == "" {
+		if cap.UI.EnabledReason == "" || cap.MCP.DisabledReason == "" || (!cap.CLI.Enabled && cap.CLI.DisabledReason == "") {
 			t.Fatalf("admin capability lacks surface rationale: %#v", cap)
 		}
 	}

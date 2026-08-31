@@ -32,6 +32,14 @@ type RegistrationControlRequest struct {
 	IdempotencyKey               string `json:"idempotency_key"`
 }
 
+type MaintenanceConflictResolutionRequest struct {
+	RegistrationID     string `json:"-"`
+	CandidateRef       string `json:"candidate_ref"`
+	ExpectedGeneration int64  `json:"expected_generation"`
+	PlanID             string `json:"plan_id,omitempty"`
+	IdempotencyKey     string `json:"idempotency_key,omitempty"`
+}
+
 type BindingControlRequest struct {
 	CacheRef       string   `json:"cache_ref"`
 	RepoID         string   `json:"repo_id"`
@@ -93,6 +101,7 @@ type RAGRepairRequest struct {
 
 type MaintenanceControlProvider func(context.Context, MaintenanceControlRequest) (any, error)
 type RegistrationControlProvider func(context.Context, RegistrationControlRequest) (any, error)
+type MaintenanceConflictResolutionProvider func(context.Context, MaintenanceConflictResolutionRequest) (any, error)
 type BindingControlProvider func(context.Context, BindingControlRequest) (any, error)
 type SearchCompareProvider func(context.Context, SearchCompareRequest) (any, error)
 type RepositoryDocsSearchProvider func(context.Context, RepositoryDocsSearchRequest) (any, error)
@@ -128,6 +137,16 @@ func (c *Controller) disableMaintenance(w http.ResponseWriter, r *http.Request) 
 func (c *Controller) reconcileMaintenance(w http.ResponseWriter, r *http.Request) {
 	req := RegistrationControlRequest{RegistrationID: strings.TrimSpace(r.PathValue("registration_id"))}
 	applyControl(c, w, r, c.cfg.ReconcileMaintenance, req, true)
+}
+
+func (c *Controller) planMaintenanceConflictResolution(w http.ResponseWriter, r *http.Request) {
+	req := MaintenanceConflictResolutionRequest{RegistrationID: strings.TrimSpace(r.PathValue("registration_id"))}
+	applyControl(c, w, r, c.cfg.PlanMaintenanceConflictResolution, req, false)
+}
+
+func (c *Controller) applyMaintenanceConflictResolution(w http.ResponseWriter, r *http.Request) {
+	req := MaintenanceConflictResolutionRequest{RegistrationID: strings.TrimSpace(r.PathValue("registration_id"))}
+	applyControl(c, w, r, c.cfg.ApplyMaintenanceConflictResolution, req, true)
 }
 
 func (c *Controller) planBinding(w http.ResponseWriter, r *http.Request) {
@@ -232,6 +251,8 @@ func controlIdempotencyKey(value any) string {
 	case MaintenanceControlRequest:
 		return strings.TrimSpace(req.IdempotencyKey)
 	case RegistrationControlRequest:
+		return strings.TrimSpace(req.IdempotencyKey)
+	case MaintenanceConflictResolutionRequest:
 		return strings.TrimSpace(req.IdempotencyKey)
 	case BindingControlRequest:
 		return strings.TrimSpace(req.IdempotencyKey)

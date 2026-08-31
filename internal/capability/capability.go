@@ -442,6 +442,12 @@ var ragCapabilities = []Capability{
 
 var adminCapabilities = []Capability{
 	{
+		ID: "admin_maintenance_conflict_resolution", Category: CategoryAdmin, Safety: SafetyAuditedWrite,
+		CLIName: "maintenance", ServiceCommand: "maintenance-conflict-resolution",
+		Description: "Plan and atomically resolve canonical registration or cache-clone conflicts from retained candidate bundles.",
+		UI:          enabled("Available for conflict-blocked maintenance registrations."), CLI: disabled("The v1 resolution workflow is intentionally browser-confirmed."), MCP: disabled("Identity conflict resolution is not exposed through MCP."),
+	},
+	{
 		ID: "admin_maintenance_plan_apply", Category: CategoryAdmin, Safety: SafetyBackgroundJob,
 		CLIName: "maintenance", ServiceCommand: "maintenance-enable",
 		Description: "Plan and apply bounded cache maintenance policy through explicit browser confirmation and durable receipts.",

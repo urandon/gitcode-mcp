@@ -131,6 +131,47 @@ func TestAdminBindingRejectsStalePlanAliasConflictAndPrivatePath(t *testing.T) {
 	}
 }
 
+func TestAdminBindingApplySharesCacheMutationFence(t *testing.T) {
+	ctx := context.Background()
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Close()
+	manager := newTestManager(t, "darwin")
+	manager.AdminCachePath = cachePath
+	cfg := config.Default()
+	manager.EffectiveConfig = &cfg
+	jobs := NewJobManager("")
+	maintenance := NewMaintenanceManager(manager, jobs, "")
+	controls := NewAdminControlManager(manager, maintenance, jobs, NewAdminControlReceiptManager(""))
+	req := adminhttp.BindingControlRequest{CacheRef: publicCacheRef(identity.UUID, cachePath), RepoID: "owner/repo", Scopes: []string{"issues"}}
+	planned, err := controls.PlanBinding(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.PlanID, req.IdempotencyKey = planned.(AdminBindingPlan).PlanID, "binding-fence-1"
+	releaseFence, blocked := jobs.BeginCacheMutationFence(identity.UUID)
+	if len(blocked) != 0 {
+		t.Fatalf("unexpected blockers=%v", blocked)
+	}
+	_, err = controls.ApplyBinding(ctx, req)
+	var fenced adminhttp.ControlError
+	if !errors.As(err, &fenced) || fenced.Code != "cache_authority_fenced" {
+		t.Fatalf("binding apply crossed conflict fence: %T %v", err, err)
+	}
+	releaseFence()
+	result, err := controls.ApplyBinding(ctx, req)
+	if err != nil || result.(map[string]any)["outcome"] != "added" {
+		t.Fatalf("binding after fence=%+v err=%v", result, err)
+	}
+}
+
 func TestAdminControlErrorMapsBindingConflict(t *testing.T) {
 	err := adminControlError(service.ErrConflict{Kind: "repository", ID: "owner/repo"})
 	var typed adminhttp.ControlError
@@ -144,6 +185,63 @@ func TestAdminControlErrorExplainsRepositoryDocsProviderBoundary(t *testing.T) {
 	var typed adminhttp.ControlError
 	if !errors.As(err, &typed) || typed.Status != http.StatusConflict || typed.Code != "repository_docs_provider_boundary_blocked" || !strings.Contains(typed.Remediation, "local_process or local_network") {
 		t.Fatalf("err=%T %[1]v typed=%+v", err, typed)
+	}
+}
+
+func TestAdminControlErrorExplainsLossyAndStaleConflictRecovery(t *testing.T) {
+	for _, test := range []struct {
+		code string
+		want string
+	}{
+		{code: "conflict_details_unavailable", want: "registry backup"},
+		{code: "conflict_generation_stale", want: "render a new plan"},
+		{code: "conflict_candidate_identity_changed", want: "Restore the candidate cache authority"},
+		{code: "cache_clone_retired", want: "retained canonical cache authority"},
+	} {
+		err := adminControlError(MaintenanceConflictResolutionError{code: test.code})
+		var typed adminhttp.ControlError
+		if !errors.As(err, &typed) || typed.Status != http.StatusConflict || typed.Code != test.code || !strings.Contains(typed.Remediation, test.want) {
+			t.Fatalf("code=%s err=%T %[2]v typed=%+v", test.code, err, typed)
+		}
+	}
+}
+
+func TestAdminMaintenanceConflictResolutionUsesDomainAtomicReceipt(t *testing.T) {
+	ctx := context.Background()
+	maintenance, registryPath, canonicalID := newMaintenanceIdentityConflictFixture(t)
+	listed, err := maintenance.List(ctx)
+	if err != nil || len(listed.Entries) != 1 || listed.Entries[0].IdentityConflict == nil {
+		t.Fatalf("conflict=%+v err=%v", listed.Entries, err)
+	}
+	conflict := listed.Entries[0]
+	var selected MaintenanceIdentityCandidate
+	for _, candidate := range conflict.IdentityConflict.Candidates {
+		if candidate.RegistrationID == canonicalID {
+			selected = candidate
+		}
+	}
+	controls := NewAdminControlManager(newTestManager(t, "darwin"), maintenance, NewJobManager(""), NewAdminControlReceiptManager(filepath.Join(t.TempDir(), "generic-controls.json")))
+	req := adminhttp.MaintenanceConflictResolutionRequest{RegistrationID: conflict.RegistrationID, CandidateRef: selected.CandidateRef, ExpectedGeneration: conflict.Generation}
+	planned, err := controls.PlanMaintenanceConflictResolution(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := planned.(MaintenanceConflictResolutionPlan)
+	req.PlanID, req.IdempotencyKey = plan.PlanID, "admin-domain-atomic"
+	applied, err := controls.ApplyMaintenanceConflictResolution(ctx, req)
+	result, ok := applied.(MaintenanceConflictResolutionResult)
+	if err != nil || !ok || result.RegistrationID != canonicalID || result.ReceiptID == "" || result.Replayed {
+		t.Fatalf("applied=%T %+v err=%v", applied, applied, err)
+	}
+	restarted := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), registryPath)
+	if err := restarted.Load(); err != nil {
+		t.Fatal(err)
+	}
+	replayedControls := NewAdminControlManager(newTestManager(t, "darwin"), restarted, NewJobManager(""), NewAdminControlReceiptManager(""))
+	replayedAny, err := replayedControls.ApplyMaintenanceConflictResolution(ctx, req)
+	replayed, ok := replayedAny.(MaintenanceConflictResolutionResult)
+	if err != nil || !ok || !replayed.Replayed || replayed.ReceiptID != result.ReceiptID {
+		t.Fatalf("replayed=%+v err=%v", replayed, err)
 	}
 }
 

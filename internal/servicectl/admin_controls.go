@@ -103,6 +103,36 @@ func (m *AdminControlManager) ReconcileMaintenance(ctx context.Context, req admi
 	})
 }
 
+func (m *AdminControlManager) PlanMaintenanceConflictResolution(ctx context.Context, req adminhttp.MaintenanceConflictResolutionRequest) (any, error) {
+	if m.maintenance == nil {
+		return nil, controlError(http.StatusNotImplemented, "capability_unavailable", "Maintenance conflict resolution is unavailable.", "Use a daemon that exposes the canonical identity resolution capability.")
+	}
+	mapped := MaintenanceConflictResolutionRequest{RegistrationID: req.RegistrationID, CandidateRef: req.CandidateRef, ExpectedGeneration: req.ExpectedGeneration}
+	if err := validateMaintenanceConflictResolutionRequest(mapped, false); err != nil {
+		return nil, controlError(http.StatusBadRequest, "invalid_request", "registration, candidate, and current generation are required.", "Refresh maintenance state and select one explicit candidate.")
+	}
+	plan, err := m.maintenance.PlanConflictResolution(ctx, mapped)
+	if err != nil {
+		return nil, adminControlError(err)
+	}
+	return plan, nil
+}
+
+func (m *AdminControlManager) ApplyMaintenanceConflictResolution(ctx context.Context, req adminhttp.MaintenanceConflictResolutionRequest) (any, error) {
+	if m.maintenance == nil {
+		return nil, controlError(http.StatusNotImplemented, "capability_unavailable", "Maintenance conflict resolution is unavailable.", "Use a daemon that exposes the canonical identity resolution capability.")
+	}
+	mapped := MaintenanceConflictResolutionRequest{RegistrationID: req.RegistrationID, CandidateRef: req.CandidateRef, ExpectedGeneration: req.ExpectedGeneration, PlanID: req.PlanID, IdempotencyKey: req.IdempotencyKey}
+	if err := validateMaintenanceConflictResolutionRequest(mapped, true); err != nil {
+		return nil, controlError(http.StatusBadRequest, "invalid_request", "candidate, generation, plan_id, and idempotency_key are required.", "Render and confirm one current conflict resolution plan.")
+	}
+	result, err := m.maintenance.ApplyConflictResolution(ctx, mapped)
+	if err != nil {
+		return nil, adminControlError(err)
+	}
+	return result, nil
+}
+
 func (m *AdminControlManager) SearchRepositoryDocs(ctx context.Context, req adminhttp.RepositoryDocsSearchRequest) (any, error) {
 	if m.maintenance == nil {
 		return nil, controlError(http.StatusNotImplemented, "capability_unavailable", "Repository documentation search is unavailable.", "Use the CLI repository documentation surface.")
@@ -225,9 +255,34 @@ func (m *AdminControlManager) ApplyBinding(ctx context.Context, req adminhttp.Bi
 		PlanID   string `json:"plan_id"`
 	}{strings.TrimSpace(req.CacheRef), strings.TrimSpace(req.RepoID), strings.TrimSpace(req.PlanID)}
 	return m.receipts.Apply(ctx, "binding_apply", intent.CacheRef+"/"+intent.RepoID, req.IdempotencyKey, intent, func() (map[string]any, error) {
-		plan, path, err := m.bindingPlan(ctx, req)
+		path, err := m.resolveManagedCachePath(ctx, intent.CacheRef)
 		if err != nil {
 			return nil, err
+		}
+		identityStore, err := cache.NewSQLiteReadOnlyStore(ctx, path)
+		if err != nil {
+			return nil, adminControlError(err)
+		}
+		identity, identityErr := identityStore.CacheIdentity(ctx)
+		_ = identityStore.Close()
+		if identityErr != nil {
+			return nil, adminControlError(identityErr)
+		}
+		releaseWriter := func() {}
+		if m.jobs != nil {
+			writerHash := strings.TrimPrefix(maintenanceHash(intent), "sha256:")
+			releaseWriter, err = m.jobs.BeginDirectCacheWriter(identity.UUID, "admin-binding-"+writerHash[:16])
+			if err != nil {
+				return nil, adminControlError(err)
+			}
+		}
+		defer releaseWriter()
+		plan, plannedPath, err := m.bindingPlan(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		if plannedPath != path {
+			return nil, controlError(http.StatusConflict, "stale_plan", "The reviewed cache authority changed before apply.", "Render and confirm a new binding plan.")
 		}
 		if req.PlanID != plan.PlanID {
 			return nil, controlError(http.StatusConflict, "stale_plan", "The reviewed binding plan no longer matches current cache state.", "Render and confirm a new binding plan.")
@@ -513,8 +568,19 @@ func adminControlError(err error) error {
 	}
 	if coded, ok := err.(interface{ DiagnosticCode() string }); ok {
 		code := coded.DiagnosticCode()
-		if code == "repository_docs_provider_boundary_blocked" {
+		switch code {
+		case "repository_docs_provider_boundary_blocked":
 			return controlError(http.StatusConflict, code, "Repository documentation indexing requires a local embedding boundary.", "Configure or select an indexing profile whose provider data_boundary is local_process or local_network, then retry.")
+		case "conflict_details_unavailable":
+			return controlError(http.StatusConflict, code, "This migrated conflict predates lossless candidate storage.", "Keep it disabled and recover from a current registry backup or re-enroll only after manual identity inspection.")
+		case "conflict_generation_stale", "stale_plan":
+			return controlError(http.StatusConflict, code, "The conflict candidate set changed after it was reviewed.", "Refresh maintenance state, select one candidate explicitly, and render a new plan.")
+		case "conflict_jobs_active":
+			return controlError(http.StatusConflict, code, "Conflict resolution is waiting for cache writers to quiesce.", "Cancel or wait for active jobs on this cache, then render and confirm the plan again.")
+		case "conflict_candidate_unavailable", "conflict_candidate_identity_changed":
+			return controlError(http.StatusConflict, code, "The selected private candidate can no longer be verified.", "Restore the candidate cache authority, refresh maintenance state, and render a new plan.")
+		case "cache_clone_retired":
+			return controlError(http.StatusConflict, code, "This cache clone path was retired by an earlier confirmed resolution.", "Use the retained canonical cache authority instead of re-enrolling the retired clone.")
 		}
 		return controlError(http.StatusConflict, code, "The requested control was rejected by current state.", "Refresh diagnostics and render a new plan.")
 	}

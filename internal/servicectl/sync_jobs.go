@@ -15,6 +15,26 @@ import (
 
 const SyncJobType = "sync"
 
+// CacheWriterIdentityError deliberately carries no underlying error. Cache
+// authority discovery can fail with messages containing private absolute
+// paths, which must not cross the IPC/CLI public diagnostic boundary.
+type CacheWriterIdentityError struct{ code string }
+
+func (e CacheWriterIdentityError) Error() string {
+	switch e.code {
+	case "cache_uuid_mismatch":
+		return "service: cache uuid does not match the selected cache authority"
+	case "registration_id_mismatch":
+		return "service: registration id does not match the selected cache repository"
+	case "repository_binding_unavailable":
+		return "service: repository binding is unavailable"
+	default:
+		return "service: selected cache authority is unavailable"
+	}
+}
+
+func (e CacheWriterIdentityError) DiagnosticCode() string { return e.code }
+
 type StartSyncJobRequest struct {
 	RepoID         string `json:"repo_id"`
 	ProviderMode   string `json:"provider_mode,omitempty"`
@@ -35,10 +55,45 @@ type StartSyncJobRequest struct {
 	Lane           string `json:"lane,omitempty"`
 }
 
+func normalizeCacheWriterIdentity(ctx context.Context, manager Manager, cachePath, cacheUUID, registrationID, repoID *string) error {
+	eff, err := effectiveJobConfig(manager, strings.TrimSpace(*cachePath))
+	if err != nil {
+		return CacheWriterIdentityError{code: "cache_authority_unavailable"}
+	}
+	store, err := cache.NewSQLiteReadOnlyStore(ctx, eff.Config.CachePath)
+	if err != nil {
+		return CacheWriterIdentityError{code: "cache_authority_unavailable"}
+	}
+	defer store.Close()
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		return CacheWriterIdentityError{code: "cache_authority_unavailable"}
+	}
+	if provided := strings.TrimSpace(*cacheUUID); provided != "" && provided != identity.UUID {
+		return CacheWriterIdentityError{code: "cache_uuid_mismatch"}
+	}
+	binding, err := store.ResolveRepositoryBinding(ctx, strings.TrimSpace(*repoID))
+	if err != nil {
+		return CacheWriterIdentityError{code: "repository_binding_unavailable"}
+	}
+	*cachePath = eff.Config.CachePath
+	*cacheUUID = identity.UUID
+	*repoID = binding.RepoID
+	wantRegistration := maintenanceRegistrationID(identity.UUID, binding.RepoID)
+	if provided := strings.TrimSpace(*registrationID); provided != "" && provided != wantRegistration {
+		return CacheWriterIdentityError{code: "registration_id_mismatch"}
+	}
+	*registrationID = wantRegistration
+	return nil
+}
+
 func (m *JobManager) StartSync(ctx context.Context, manager Manager, req StartSyncJobRequest) (Job, error) {
 	req.RepoID = strings.TrimSpace(req.RepoID)
 	if req.RepoID == "" {
 		return Job{}, errors.New("repo_id is required")
+	}
+	if err := normalizeCacheWriterIdentity(ctx, manager, &req.CachePath, &req.CacheUUID, &req.RegistrationID, &req.RepoID); err != nil {
+		return Job{}, err
 	}
 	workKey := syncWorkKey(req)
 	ctx, cancel := context.WithCancel(ctx)
@@ -69,6 +124,7 @@ func syncWorkKey(req StartSyncJobRequest) string {
 }
 
 func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID string, req StartSyncJobRequest) {
+	defer m.markWorkerFinished(jobID)
 	m.updateJob(jobID, func(job *Job, now time.Time) {
 		job.Status = JobStatusRunning
 		job.StartedAt = &now
