@@ -66,6 +66,7 @@ jobs:
           npm run test:e2e
           test ! -e "$ADMIN_QA_OUTPUT"
           test ! -e "$ADMIN_VIEW_QA_OUTPUT"
+          test -z "$(find test-results -type f \( -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' -o -name '*.webp' -o -name '*.zip' -o -name '*.webm' \) -print -quit 2>/dev/null)"
 
       - name: Run tests
         run: go test ./...

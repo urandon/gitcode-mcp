@@ -14,7 +14,9 @@ export default defineConfig({
   reporter: 'line',
   use: {
     baseURL: 'http://127.0.0.1:4173',
-    trace: 'on-first-retry'
+    // Playwright's string trace modes include raster screenshots. CI keeps
+    // browser gates machine-readable, so traces remain a local-only aid.
+    trace: process.env.CI ? 'off' : 'on-first-retry'
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {

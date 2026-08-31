@@ -1652,6 +1652,59 @@ func TestIssue133AmbiguousUpdateRecoverySurvivesStoreRestart(t *testing.T) {
 	}
 }
 
+func TestIssue133PartialCacheReplayHydratesCanonicalIssueAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedStore(t, ctx, store)
+	canonical := gitcode.Issue{
+		ID: "42", Number: 42, Title: "Canonical title", Body: "updated body", State: "closed",
+		Labels:    []string{"bug", "reliability"},
+		Milestone: &gitcode.Milestone{RemoteID: "7", SourceID: "MILESTONE-7", Title: "Release 7", Status: "open"},
+	}
+	client := &fakeGitCodeClient{
+		issue:             gitcode.Issue{ID: "42", Number: 42, Title: "Canonical title", Body: "before", State: "open", Labels: []string{"bug"}, Milestone: canonical.Milestone},
+		updateIssueResult: gitcode.WriteResult[gitcode.Issue]{Record: canonical, Confirmed: true, Operation: "UpdateIssue", RemoteID: "42", RemoteNumber: 42, ConfirmedAt: time.Now().UTC()},
+	}
+	wrapped := &writeRefreshFailStore{Store: store, failNextRefresh: true}
+	svc := NewWithClient(wrapped, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 42, Body: "updated body", State: "closed", IdempotencyKey: "issue-133-partial-restart"}
+	_, err = svc.UpdateIssue(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_partial_cache_refresh_failed" {
+		t.Fatalf("first error=%T %v", err, err)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", req.IdempotencyKey)
+	if err != nil || entry == nil || entry.Status != audit.StatusRemoteConfirmedCacheRefreshFailed || entry.RequestMetadata["write_phase"] != "canonical_readback_confirmed" {
+		t.Fatalf("partial audit=%#v err=%v", entry, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	client.issue = canonical
+	result, err := NewWithClient(store, client).UpdateIssue(ctx, req)
+	if err != nil || !result.Replayed || client.updateIssueMutationCalls != 1 {
+		t.Fatalf("replay=%#v err=%v mutation_calls=%d", result, err, client.updateIssueMutationCalls)
+	}
+	record, err := store.GetRecord(ctx, "fixture-a", "ISSUE-42")
+	if err != nil || record.Title != canonical.Title || record.Body != canonical.Body || record.Status != canonical.State || !reflect.DeepEqual(record.Labels, canonical.Labels) {
+		t.Fatalf("record=%#v err=%v", record, err)
+	}
+	links, err := store.ListLinks(ctx, cache.LinkFilter{RepoID: "fixture-a", SourceID: "ISSUE-42"})
+	if err != nil || len(links) != 1 || links[0].TargetID != "MILESTONE-7" {
+		t.Fatalf("links=%#v err=%v", links, err)
+	}
+}
+
 func TestIssue133ChangedPreimageReturnsConflictBeforeRetryMutation(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)
@@ -1676,6 +1729,33 @@ func TestIssue133ChangedPreimageReturnsConflictBeforeRetryMutation(t *testing.T)
 	_, err = svc.UpdateIssue(ctx, req)
 	if !errors.As(err, &writeErr) || writeErr.Code != "write_conflict" || client.updateIssueMutationCalls != 1 {
 		t.Fatalf("retry error=%T %v mutation_calls=%d", err, err, client.updateIssueMutationCalls)
+	}
+}
+
+func TestIssue133PreTransportFailureAllowsSameKeyRetry(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &preTransportFailureIssueClient{fakeGitCodeClient: &fakeGitCodeClient{issue: gitcode.Issue{ID: "42", Number: 42, Title: "Issue", Body: "before", State: "open"}}}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 42, Body: "after", IdempotencyKey: "issue-133-pre-transport"}
+	_, err = svc.UpdateIssue(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_network_unavailable" {
+		t.Fatalf("first error=%T %v", err, err)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", req.IdempotencyKey)
+	if err != nil || entry == nil || entry.Status != audit.StatusFailed || entry.RequestMetadata["write_phase"] != "failed_before_or_rejected_patch" {
+		t.Fatalf("first audit=%#v err=%v", entry, err)
+	}
+	result, err := svc.UpdateIssue(ctx, req)
+	if err != nil || result.Status != "succeeded" || client.calls != 2 || client.mutations != 1 {
+		t.Fatalf("retry=%#v err=%v calls=%d mutations=%d", result, err, client.calls, client.mutations)
 	}
 }
 
@@ -4619,6 +4699,29 @@ type blockingIssueUpdateClient struct {
 	claimed   chan struct{}
 	release   chan struct{}
 	mutations int
+}
+
+type preTransportFailureIssueClient struct {
+	*fakeGitCodeClient
+	calls     int
+	mutations int
+}
+
+func (c *preTransportFailureIssueClient) UpdateIssue(_ context.Context, req gitcode.UpdateIssueRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
+	c.calls++
+	if opts.BeforeIssueUpdateMutation != nil {
+		if err := opts.BeforeIssueUpdateMutation(c.issue); err != nil {
+			return gitcode.WriteResult[gitcode.Issue]{}, err
+		}
+	}
+	if c.calls == 1 {
+		return gitcode.WriteResult[gitcode.Issue]{}, gitcode.ErrWriteMutationPhase{Endpoint: "/issues/42", Phase: "patch", MutationAttempted: false, Cause: gitcode.ErrNetworkUnavailable{Endpoint: "/issues/42", Attempts: 0, Cause: context.Canceled}}
+	}
+	c.mutations++
+	updated := c.issue
+	updated.Body = req.Body
+	c.issue = updated
+	return gitcode.WriteResult[gitcode.Issue]{Record: updated, Confirmed: true, Operation: "UpdateIssue", RemoteID: updated.ID, RemoteNumber: updated.Number, ConfirmedAt: time.Now().UTC()}, nil
 }
 
 func (c *blockingIssueUpdateClient) UpdateIssue(_ context.Context, req gitcode.UpdateIssueRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {

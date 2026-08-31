@@ -3051,6 +3051,56 @@ func TestIssue133UpdateIssueReadbackFailureMarksMutationAttempted(t *testing.T) 
 	}
 }
 
+func TestIssue133UpdateIssuePatchUsesOneTransportAttempt(t *testing.T) {
+	patchCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			fmt.Fprint(w, `{"id":"42","number":42,"title":"Issue","body":"before","state":"open"}`)
+		case http.MethodPatch:
+			patchCalls++
+			http.Error(w, `{"message":"ambiguous upstream failure"}`, http.StatusInternalServerError)
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	}))
+	defer server.Close()
+	_, err := newTestClient(t, server.URL, Config{MaxRetries: 2}).UpdateIssue(context.Background(), UpdateIssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42, Body: "after"}, WriteOptions{IdempotencyKey: "issue-133-single-patch-attempt"})
+	var phase ErrWriteMutationPhase
+	if !errors.As(err, &phase) || !phase.MutationAttempted || phase.Phase != "patch" {
+		t.Fatalf("error=%T %v phase=%#v", err, err, phase)
+	}
+	if patchCalls != 1 {
+		t.Fatalf("PATCH calls=%d want 1 with MaxRetries=2", patchCalls)
+	}
+}
+
+func TestIssue133UpdateIssueCancellationBeforeTransportIsNotAmbiguous(t *testing.T) {
+	patchCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			patchCalls++
+		}
+		fmt.Fprint(w, `{"id":"42","number":42,"title":"Issue","body":"before","state":"open"}`)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	_, err := newTestClient(t, server.URL, Config{MaxRetries: 2}).UpdateIssue(ctx, UpdateIssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42, Body: "after"}, WriteOptions{
+		IdempotencyKey: "issue-133-cancel-before-transport",
+		BeforeIssueUpdateMutation: func(Issue) error {
+			cancel()
+			return nil
+		},
+	})
+	var phase ErrWriteMutationPhase
+	if !errors.As(err, &phase) || phase.MutationAttempted || phase.Phase != "patch" {
+		t.Fatalf("error=%T %v phase=%#v", err, err, phase)
+	}
+	if patchCalls != 0 {
+		t.Fatalf("PATCH calls=%d want 0", patchCalls)
+	}
+}
+
 func TestScenario125RejectsCanonicalReadbackThatIgnoredRequestedBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v5/repos/example-owner/example-repo/issues/42" {

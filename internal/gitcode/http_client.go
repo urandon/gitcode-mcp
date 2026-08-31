@@ -508,6 +508,9 @@ func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, op
 	}
 	target := req.Owner + "/" + req.Repo + "/" + strconv.Itoa(req.Number)
 	endpoint := updateIssueEndpoint(req.Owner, req.Repo, req.Number)
+	mutationAttempted := false
+	opts.singleTransportAttempt = true
+	opts.beforeTransportAttempt = func() { mutationAttempted = true }
 	result, err := writeConfirmedJSON[Issue](ctx, c, http.MethodPatch, endpoint, "UpdateIssue", target, updateIssuePayload(req), opts, func(result WriteResult[Issue]) (WriteResult[Issue], error) {
 		issue := result.Record
 		if strings.TrimSpace(issue.ID) == "" || issue.Number != req.Number {
@@ -518,7 +521,7 @@ func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, op
 		return result, nil
 	})
 	if err != nil {
-		return result, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "patch", MutationAttempted: true, Cause: err}
+		return result, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "patch", MutationAttempted: mutationAttempted, Cause: err}
 	}
 	readback, err := c.GetIssue(ctx, IssueRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
 	if err != nil {
@@ -1334,6 +1337,7 @@ type requestOptions struct {
 	idempotencyKey   string
 	localPayload     []byte
 	noRetry          bool
+	beforeAttempt    func()
 }
 
 func (c *HTTPClient) getJSON(ctx context.Context, endpoint string, values url.Values, out any) error {
@@ -1584,7 +1588,7 @@ func writeConfirmedWithDecoder[T any](ctx context.Context, c *HTTPClient, method
 	if strings.TrimSpace(key) == "" {
 		return WriteResult[T]{}, ErrValidationFailed{Field: "idempotency_key", Message: "idempotency key is required"}
 	}
-	respBody, headers, err := c.bytesWithOptions(ctx, method, endpoint, nil, body, requestOptions{idempotencyKey: key, localPayload: body})
+	respBody, headers, err := c.bytesWithOptions(ctx, method, endpoint, nil, body, requestOptions{idempotencyKey: key, localPayload: body, noRetry: opts.singleTransportAttempt, beforeAttempt: opts.beforeTransportAttempt})
 	if err != nil {
 		return WriteResult[T]{}, err
 	}
@@ -2248,6 +2252,9 @@ func (c *HTTPClient) do(ctx context.Context, method, endpoint string, values url
 		req.Header.Set("Idempotency-Key", opts.idempotencyKey)
 	}
 	req.Header.Set("User-Agent", c.userAgent)
+	if opts.beforeAttempt != nil {
+		opts.beforeAttempt()
+	}
 	return c.client.Do(req)
 }
 

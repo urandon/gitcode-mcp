@@ -5660,16 +5660,25 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	}
 	if err := s.store.UpsertRecordGraph(ctx, graph); err != nil {
 		partial := withWriteAuditMetadata(audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()), command, key, fingerprint, graph.Record.RemoteType, confirmed)
+		if command == "update-issue" {
+			partial = audit.WithRequestMetadata(partial, auditEntry.RequestMetadata)
+		}
 		_ = s.store.RecordAuditEvent(ctx, partial)
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
 	}
 	if err := s.refreshIssueCommentWriteCache(ctx, command, graph); err != nil {
 		partial := withWriteAuditMetadata(audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()), command, key, fingerprint, graph.Record.RemoteType, confirmed)
+		if command == "update-issue" {
+			partial = audit.WithRequestMetadata(partial, auditEntry.RequestMetadata)
+		}
 		_ = s.store.RecordAuditEvent(ctx, partial)
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
 	}
 	if err := s.recordCacheConfirmation(ctx, command, route.RepoID, key, fingerprint, graph, confirmed.remoteID, "succeeded", confirmed.completedAt); err != nil {
 		partial := withWriteAuditMetadata(audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()), command, key, fingerprint, graph.Record.RemoteType, confirmed)
+		if command == "update-issue" {
+			partial = audit.WithRequestMetadata(partial, auditEntry.RequestMetadata)
+		}
 		_ = s.store.RecordAuditEvent(ctx, partial)
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
 	}
@@ -6273,7 +6282,24 @@ func (s *Service) issueSourceForNumber(ctx context.Context, repoID string, numbe
 func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID string, req WriteCommandRequest, prior cache.AuditTrailEntry) (cache.RecordGraph, error) {
 	now := s.now().UTC()
 	switch command {
-	case "create-issue", "update-issue", "add-label", "set-issue-milestone", "clear-issue-milestone":
+	case "update-issue":
+		route, err := s.BuildAdapterRoute(ctx, repoID, RepositoryScopeIssues)
+		if err != nil {
+			return cache.RecordGraph{}, err
+		}
+		number := req.Number
+		if number == 0 {
+			number, _ = strconv.Atoi(prior.RemoteID)
+		}
+		issue, err := s.client.GetIssue(ctx, gitcode.IssueRequest{Owner: route.Owner, Repo: route.Name, Number: number})
+		if err != nil {
+			return cache.RecordGraph{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: repoID, RemoteID: prior.RemoteID, IdempotencyKey: prior.IdempotencyKey, Cause: err}
+		}
+		remoteID := firstNonEmptyString(issue.ID, prior.RemoteID, strconv.Itoa(issue.Number))
+		result := gitcode.WriteResult[gitcode.Issue]{Record: issue, Confirmed: true, Operation: "UpdateIssuePartialReplayReadback", RemoteID: remoteID, RemoteNumber: issue.Number, ConfirmedAt: now}
+		_, graph := s.issueWriteGraph(repoID, issue, result, now)
+		return graph, nil
+	case "create-issue", "add-label", "set-issue-milestone", "clear-issue-milestone":
 		number, _ := strconv.Atoi(prior.RemoteID)
 		issue := gitcode.Issue{ID: prior.RemoteID, Number: number, Title: strings.TrimSpace(req.Title), Body: req.Body, State: firstNonEmptyString(req.State, "open"), CreatedAt: now, UpdatedAt: now}
 		if receipt := milestoneReceiptFromAudit(prior); receipt != nil && !receipt.Cleared {

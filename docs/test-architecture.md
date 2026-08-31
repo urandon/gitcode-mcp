@@ -107,8 +107,9 @@ Browser CI is semantic-only: assert DOM roles/text, ARIA state, API JSON,
 status/count values, navigation, and action outcomes. Screenshot capture,
 reference composition, and pixel baselines are local opt-in QA and must be
 disabled whenever `CI` is set, even if their local environment variables leak
-into the runner. CI carries sentinel visual-QA variables and fails if an image
-output directory is created.
+into the runner. Playwright trace capture is also disabled in CI because its
+archive embeds raster screenshots. CI carries sentinel visual-QA variables and
+fails if an image output directory or raster/trace/video artifact is created.
 
 ## Before Committing
 

@@ -32,6 +32,9 @@ const (
 	CodeWriteConfirmationMissing   Code = "write_confirmation_incomplete"
 	CodeDiscussionReplyUnavailable Code = "discussion_reply_unavailable"
 	CodeParentPRNotCached          Code = "parent_pr_not_cached"
+	CodeWriteAmbiguousRemote       Code = "write_ambiguous_remote"
+	CodeWriteAmbiguousReadback     Code = "write_ambiguous_readback_failed"
+	CodeWriteConflict              Code = "write_conflict"
 )
 
 type Diagnostic struct {
@@ -119,6 +122,15 @@ func classifyCode(err error, ctx CommandContext) Code {
 	}
 	if hasCode(err, "write_confirmation_incomplete") {
 		return CodeWriteConfirmationMissing
+	}
+	if hasCode(err, "write_ambiguous_remote") {
+		return CodeWriteAmbiguousRemote
+	}
+	if hasCode(err, "write_ambiguous_readback_failed") {
+		return CodeWriteAmbiguousReadback
+	}
+	if hasCode(err, "write_conflict") {
+		return CodeWriteConflict
 	}
 	if hasCode(err, "invalid_query") {
 		return CodeInvalidQuery
@@ -238,6 +250,12 @@ func codeFromError(err error) Code {
 			return CodeDiscussionReplyUnavailable
 		case "parent_pr_not_cached":
 			return CodeParentPRNotCached
+		case "write_ambiguous_remote":
+			return CodeWriteAmbiguousRemote
+		case "write_ambiguous_readback_failed":
+			return CodeWriteAmbiguousReadback
+		case "write_conflict":
+			return CodeWriteConflict
 		}
 	}
 	return CodeConfigurationError
@@ -291,7 +309,7 @@ func isConfigurationInputBug(err error) bool {
 
 func httpAttemptedFor(code Code, ctx CommandContext) bool {
 	switch code {
-	case CodeLiveAuthFailure, CodeLiveTransportFailure, CodeLiveAPIFailure, CodeAPIFailure, CodeSchemaDecode, CodePushMirrorSyncInProgress, CodePRReviewAnchorMismatch, CodeWriteConfirmationMissing, CodeDiscussionReplyUnavailable:
+	case CodeLiveAuthFailure, CodeLiveTransportFailure, CodeLiveAPIFailure, CodeAPIFailure, CodeSchemaDecode, CodePushMirrorSyncInProgress, CodePRReviewAnchorMismatch, CodeWriteConfirmationMissing, CodeDiscussionReplyUnavailable, CodeWriteAmbiguousRemote, CodeWriteAmbiguousReadback, CodeWriteConflict:
 		return ctx.HTTPAttempted
 	case CodeConfigCredential:
 		return false
@@ -301,7 +319,7 @@ func httpAttemptedFor(code Code, ctx CommandContext) bool {
 }
 
 func retryableFor(code Code) bool {
-	return code == CodeLiveTransportFailure || code == CodeCacheBusy || code == CodePushMirrorSyncInProgress
+	return code == CodeLiveTransportFailure || code == CodeCacheBusy || code == CodePushMirrorSyncInProgress || code == CodeWriteAmbiguousRemote || code == CodeWriteAmbiguousReadback
 }
 
 func exitClassFor(code Code) string {
@@ -314,7 +332,7 @@ func exitClassFor(code Code) string {
 		return "transport"
 	case CodeLiveAPIFailure, CodeAPIFailure, CodePushMirrorSyncInProgress:
 		return "provider"
-	case CodePRReviewAnchorMismatch, CodeWriteConfirmationMissing:
+	case CodePRReviewAnchorMismatch, CodeWriteConfirmationMissing, CodeWriteAmbiguousRemote, CodeWriteAmbiguousReadback, CodeWriteConflict:
 		return "provider"
 	case CodeInvalidQuery:
 		return "input"
@@ -382,6 +400,12 @@ func messageFor(code Code, err error) string {
 		base += ": provider discussion identity is unavailable for a safe reply"
 	case CodeParentPRNotCached:
 		base += ": inline review write requires its parent pull request in the selected cache"
+	case CodeWriteAmbiguousRemote:
+		base += ": issue update outcome is ambiguous; retry the same idempotency key for GET-only recovery"
+	case CodeWriteAmbiguousReadback:
+		base += ": canonical GET-only recovery could not complete"
+	case CodeWriteConflict:
+		base += ": canonical issue state changed across a safely rejected update"
 	}
 	if err != nil {
 		return base + ": " + err.Error()
