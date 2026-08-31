@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -257,6 +258,117 @@ func TestMaintenanceEnrollCanonicalizesAliasBeforeIdentityAndReplay(t *testing.T
 	}
 	if alias.RegistrationID != canonical.RegistrationID || alias.RepoID != "owner/repo" || len(listed.Entries) != 1 || len(canonical.Aliases) != 1 || canonical.Aliases[0] != "legacy/repo" {
 		t.Fatalf("canonical=%+v alias=%+v listed=%+v", canonical, alias, listed)
+	}
+}
+
+func TestMaintenanceEnrollRollsBackLiveCanonicalizationWhenPersistenceFails(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Aliases: []string{"legacy/repo"}, Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}
+	if err := store.AddRepository(ctx, binding); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.CachePath = cachePath
+	canonicalPath, err := canonicalCachePath(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := normalizeMaintenancePolicy(MaintenancePolicy{}, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyID := maintenanceRegistrationID(identity.UUID, "legacy/repo")
+	canonicalID := maintenanceRegistrationID(identity.UUID, "owner/repo")
+	legacySourceID := repositoryDocsSourceRegistrationID(legacyID, "git-common-dir", "HEAD", "docs")
+	registrationFingerprint := pathFingerprint(canonicalPath)
+	registryPath := filepath.Join(dir, "managed-caches.json")
+	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), jobs, registryPath)
+	maintenance.generation = 7
+	maintenance.entries[legacyID] = &MaintenanceEntry{
+		RegistrationID: legacyID, CacheUUID: identity.UUID, PathFingerprint: registrationFingerprint,
+		RepoID: "legacy/repo", Policy: policy, ConfigHash: maintenanceHash(cfg), Enabled: true,
+		Generation: 2, State: "enrolled", cachePath: canonicalPath, configSnapshot: cfg,
+	}
+	maintenance.receipts["legacy-receipt"] = maintenanceReceipt{KeyHash: "legacy-receipt", RegistrationID: legacyID, AuthorityPathFingerprint: registrationFingerprint}
+	maintenance.sources[legacyID] = map[string]*repositoryDocsRegisteredSource{
+		legacySourceID: {State: RepositoryDocsMaintenanceState{SourceRegistrationID: legacySourceID, SourceRegistrationGeneration: 1, GitStoreRef: "git-common-dir", WorktreeRef: "HEAD", State: "ready"}, RepositoryPath: filepath.Join(dir, "repository"), Profile: "docs"},
+	}
+	maintenance.admissions[repositoryDocsAdmissionKey(legacyID, legacySourceID)] = repositoryDocsAdmissionIntent{RegistrationID: legacyID, SourceRegistrationID: legacySourceID, SourceRegistrationGeneration: 1, AuthorityPathFingerprint: registrationFingerprint, RepoID: "legacy/repo", WorkKey: "legacy-work", ExpectedRevisionSetID: "legacy-set", Disposition: repositoryDocsAdmissionPending, CreatedAt: time.Now().UTC()}
+	if err := maintenance.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	jobs.SetRegistrationRedirects(maintenance.jobProjectionRedirectsLocked(), cloneStringMap(maintenance.sourceRedirects), maintenance.canonicalRepoIDsLocked())
+
+	before := maintenance.snapshotConflictMutationLocked()
+	beforeDisk, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs.mu.Lock()
+	beforeJobRedirects := cloneStringMap(jobs.registrationRedirects)
+	beforeJobSourceRedirects := cloneStringMap(jobs.sourceRegistrationRedirects)
+	beforeJobRepoIDs := cloneStringMap(jobs.canonicalRepoByRegistration)
+	jobs.mu.Unlock()
+
+	injected := errors.New("injected live canonicalization persistence failure")
+	maintenance.writeFile = func(string, []byte, os.FileMode) error { return injected }
+	if _, err := maintenance.Enroll(ctx, testMaintenanceEnrollRequest(cachePath, "canonicalize-fails", MaintenancePolicy{})); !errors.Is(err, injected) {
+		t.Fatalf("enroll error=%v", err)
+	}
+	after := maintenance.snapshotConflictMutationLocked()
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("failed canonicalization mutated manager state:\nbefore=%+v\nafter=%+v", before, after)
+	}
+	afterDisk, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterDisk, beforeDisk) {
+		t.Fatalf("failed canonicalization changed durable registry: before=%s after=%s", beforeDisk, afterDisk)
+	}
+	jobs.mu.Lock()
+	if !reflect.DeepEqual(jobs.registrationRedirects, beforeJobRedirects) || !reflect.DeepEqual(jobs.sourceRegistrationRedirects, beforeJobSourceRedirects) || !reflect.DeepEqual(jobs.canonicalRepoByRegistration, beforeJobRepoIDs) {
+		t.Fatalf("failed canonicalization changed job projection: registrations=%v sources=%v repos=%v", jobs.registrationRedirects, jobs.sourceRegistrationRedirects, jobs.canonicalRepoByRegistration)
+	}
+	jobs.mu.Unlock()
+
+	maintenance.writeFile = durableAtomicWriteFile
+	entry, err := maintenance.Enroll(ctx, testMaintenanceEnrollRequest(cachePath, "canonicalize-retry", MaintenancePolicy{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.RegistrationID != canonicalID || entry.RepoID != "owner/repo" || maintenance.redirects[legacyID] != canonicalID {
+		t.Fatalf("retry did not converge canonical state: entry=%+v redirects=%v", entry, maintenance.redirects)
+	}
+	jobs.mu.Lock()
+	if jobs.registrationRedirects[legacyID] != canonicalID || jobs.canonicalRepoByRegistration[canonicalID] != "owner/repo" {
+		t.Fatalf("retry did not publish canonical job projection: registrations=%v repos=%v", jobs.registrationRedirects, jobs.canonicalRepoByRegistration)
+	}
+	jobs.mu.Unlock()
+
+	restartedJobs := NewJobManager(filepath.Join(dir, "jobs-restarted.json"))
+	restarted := NewMaintenanceManager(newTestManager(t, "darwin"), restartedJobs, registryPath)
+	if err := restarted.Load(); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := restarted.List(ctx)
+	if err != nil || len(listed.Entries) != 1 || listed.Entries[0].RegistrationID != canonicalID || restarted.redirects[legacyID] != canonicalID {
+		t.Fatalf("restart did not retain canonical state: listed=%+v redirects=%v err=%v", listed, restarted.redirects, err)
 	}
 }
 

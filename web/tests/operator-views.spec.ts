@@ -73,6 +73,8 @@ test('canonical registration deep links redirect and conflict resolution require
   });
   await page.route('**/api/admin/v1/maintenance/reg-canonical/conflict-resolution/apply', async (route) => {
     applyBody = route.request().postDataJSON();
+	delete conflictSnapshot.maintenance[0].identity_conflict;
+	Object.assign(conflictSnapshot.maintenance[0], { enabled: true, state: 'enrolled', generation: 8 });
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { outcome: 'resolved', receipt_id: 'maintenance-conflict-receipt-1', plan_id: 'conflict-plan-1', registration_id: 'reg-canonical', replayed: false } }) });
   });
   await page.goto('/?view=Maintenance&registration=reg-legacy');
@@ -95,6 +97,7 @@ test('canonical registration deep links redirect and conflict resolution require
   await page.getByRole('button', { name: 'Confirm selected candidate' }).click();
   expect(applyBody).toMatchObject({ candidate_ref: 'candidate-a', expected_generation: 7, plan_id: 'conflict-plan-1' });
   expect(String(applyBody.idempotency_key)).toMatch(/^admin-conflict_resolution_apply-/);
+	await expect(page.getByRole('heading', { name: 'Policy or source conflict' })).toHaveCount(0);
   await expect(page.getByText('Receipt maintenance-conflict-receipt-1')).toBeVisible();
 });
 
@@ -121,6 +124,42 @@ test('stale conflict apply closes confirmation, refreshes candidates, and requir
   await expect(page.getByText('stale-conflict-plan')).not.toBeVisible();
   await expect(page.locator('input[name="conflict-candidate"]:checked')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Review selected candidate' })).toBeDisabled();
+});
+
+test('ambiguous conflict apply keeps the exact plan and idempotency key for replay', async ({ page }) => {
+	const conflictSnapshot: any = structuredClone(snapshot);
+	conflictSnapshot.maintenance = [{
+		registration_id: 'reg-canonical', cache_ref: 'cache-111111112222', repo_id: 'example/repo', enabled: false, state: 'identity_conflict', generation: 7,
+		policy: { sync_enabled: true, sync_mode: 'head', rag_enabled: false, collections: ['issues'] },
+		identity_conflict: { kind: 'identity_conflict', details_available: true, candidate_registration_ids: ['reg-canonical'], policy_hashes: ['a'], config_hashes: ['a'], path_fingerprints: ['path-a'], candidates: [
+			{ candidate_ref: 'candidate-a', registration_id: 'reg-canonical', repo_id: 'example/repo', policy: { sync_enabled: true, sync_mode: 'head', rag_enabled: false, collections: ['issues'] }, policy_hash: 'a', config_hash: 'a', path_fingerprint: 'path-a', source_authority_hash: 'source-a', source_refs: ['docs-a'], was_enabled: true }
+		] }
+	}];
+	await mockAdmin(page, conflictSnapshot);
+	await page.route('**/api/admin/v1/maintenance/reg-canonical/conflict-resolution/plan', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { schema_version: 'gitcode-mcp.maintenance-conflict-resolution-plan.v1', plan_id: 'retry-conflict-plan', status: 'ready', registration_id: 'reg-canonical', canonical_registration_id: 'reg-canonical', result_registration_ids: ['reg-canonical'], conflict_kind: 'identity_conflict', expected_generation: 7, selected: conflictSnapshot.maintenance[0].identity_conflict.candidates[0], effects: [{ class: 'identity', summary: 'Promote selected candidate.', status: 'planned' }] } }) }));
+	const applyBodies: Array<Record<string, unknown>> = [];
+	await page.route('**/api/admin/v1/maintenance/reg-canonical/conflict-resolution/apply', async (route) => {
+		applyBodies.push(route.request().postDataJSON());
+		if (applyBodies.length === 1) {
+			await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'temporarily_unavailable', message: 'Receipt delivery was interrupted.', remediation: 'Retry this confirmation.' } }) });
+			return;
+		}
+		await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { outcome: 'resolved', receipt_id: 'maintenance-conflict-receipt-replayed', plan_id: 'retry-conflict-plan', registration_id: 'reg-canonical', replayed: true } }) });
+	});
+	await page.goto('/?view=Maintenance&registration=reg-canonical');
+	await page.getByRole('radio', { name: /example\/repo/ }).check();
+	await page.getByRole('button', { name: 'Review selected candidate' }).click();
+	await page.getByRole('button', { name: 'Confirm resolution' }).click();
+	await page.getByRole('button', { name: 'Confirm selected candidate' }).click();
+	const dialog = page.getByRole('dialog');
+	await expect(dialog).toBeVisible();
+	await expect(dialog.getByRole('alert')).toContainText('Receipt delivery was interrupted.');
+	await expect(dialog).toContainText('retry-conflict-plan');
+	await dialog.getByRole('button', { name: 'Confirm selected candidate' }).click();
+	await expect(dialog).not.toBeVisible();
+	expect(applyBodies).toHaveLength(2);
+	expect(applyBodies[1]).toMatchObject({ plan_id: 'retry-conflict-plan', idempotency_key: applyBodies[0].idempotency_key });
+	await expect(page.getByRole('status').filter({ hasText: 'maintenance-conflict-receipt-replayed' })).toContainText('replayed safely');
 });
 
 test('clone conflict choices are physical path cohorts and show every retained repository authority', async ({ page }) => {

@@ -1386,9 +1386,11 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 			m.jobs.SetRegistrationRedirects(redirectSnapshot, sourceRedirectSnapshot, repoIDSnapshot)
 		}
 	}()
+	canonicalizationSnapshot := m.snapshotConflictMutationLocked()
 	if m.canonicalizeLoadedEntriesLocked(ctx) {
 		m.generation++
 		if err := m.saveLocked(); err != nil {
+			m.restoreConflictMutationLocked(canonicalizationSnapshot)
 			return MaintenanceEntry{}, err
 		}
 		redirectSnapshot, sourceRedirectSnapshot, repoIDSnapshot = m.jobProjectionRedirectsLocked(), cloneStringMap(m.sourceRedirects), m.canonicalRepoIDsLocked()

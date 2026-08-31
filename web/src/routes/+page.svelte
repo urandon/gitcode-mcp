@@ -513,6 +513,8 @@
   async function executeControl(): Promise<void> {
     if (!pendingControl || !csrfToken) return;
     controlRunning = true;
+	if (pendingControl === 'conflict_resolution_apply') conflictResolutionError = '';
+	let retainedConflictReceipt: ControlReceipt | undefined;
     try {
       if (pendingControl === 'maintenance_apply' && maintenancePlan) {
         maintenanceReceipt = await controlPost<ControlReceipt>('/api/admin/v1/maintenance/apply', { ...maintenanceIntent, plan_id: maintenancePlan.plan_id, idempotency_key: pendingControlKey });
@@ -522,25 +524,32 @@
         repairReceipt = await controlPost<ControlReceipt>('/api/admin/v1/rag/repair/apply', { cache_ref: selectedCache.cache_ref, repo_id: selectedRepo.repo_id, profile: repairProfile, max_chunks: repairMaxChunks, plan_id: repairPlan.plan_id, idempotency_key: pendingControlKey });
       } else if (pendingControl === 'conflict_resolution_apply' && conflictResolutionPlan && selectedMaintenance) {
         conflictResolutionReceipt = await controlPost<ControlReceipt>(`/api/admin/v1/maintenance/${encodeURIComponent(selectedMaintenance.registration_id)}/conflict-resolution/apply`, { candidate_ref: conflictResolutionPlan.selected.candidate_ref, expected_generation: conflictResolutionPlan.expected_generation, plan_id: conflictResolutionPlan.plan_id, idempotency_key: pendingControlKey });
+		retainedConflictReceipt = conflictResolutionReceipt;
       } else if ((pendingControl === 'disable' || pendingControl === 'reconcile') && selectedMaintenance) {
         maintenanceReceipt = await controlPost<ControlReceipt>(`/api/admin/v1/maintenance/${encodeURIComponent(selectedMaintenance.registration_id)}/${pendingControl}`, { idempotency_key: pendingControlKey });
       } else if (pendingControl === 'repository_docs_index' && selectedMaintenance) {
         maintenanceReceipt = await controlPost<ControlReceipt>(`/api/admin/v1/repository-docs/${encodeURIComponent(selectedMaintenance.registration_id)}/index`, { idempotency_key: pendingControlKey, ...repositoryDocsSelector() });
       }
-      controlDialog?.close(); pendingControl = ''; pendingControlKey = ''; await refresh(); await tick(); controlTriggerButton?.focus();
+      controlDialog?.close(); pendingControl = ''; pendingControlKey = ''; await refresh();
+	  if (retainedConflictReceipt) conflictResolutionReceipt = retainedConflictReceipt;
+	  await tick(); controlTriggerButton?.focus();
     } catch (value) {
       const message = value instanceof Error ? value.message : 'The confirmed control failed.';
       const failure = value instanceof Error && 'failure' in value ? (value as Error & { failure: ControlFailure }).failure : undefined;
       if (pendingControl !== 'binding_apply' && pendingControl !== 'rag_repair_apply' && pendingControl !== 'conflict_resolution_apply') maintenanceFailure = failure;
       if (pendingControl === 'binding_apply') bindingError = message; else if (pendingControl === 'rag_repair_apply') searchError = message; else if (pendingControl === 'conflict_resolution_apply') {
         conflictResolutionError = message;
-        controlDialog?.close(); pendingControl = ''; pendingControlKey = '';
         if (failure?.code === 'stale_plan' || failure?.code === 'conflict_generation_stale' || failure?.code === 'conflict_candidate_identity_changed') {
+		  controlDialog?.close(); pendingControl = ''; pendingControlKey = '';
           conflictResolutionPlan = undefined;
           await refresh();
           selectedConflictCandidateRef = '';
+		  await tick(); controlTriggerButton?.focus();
+		} else {
+		  // The daemon may have committed even when delivery failed. Keep the
+		  // exact plan and idempotency key in the open dialog for safe replay.
+		  await tick(); controlConfirmButton?.focus();
         }
-        await tick(); controlTriggerButton?.focus();
       } else maintenanceError = maintenanceFailure?.message || message;
     } finally { controlRunning = false; }
   }
@@ -784,9 +793,9 @@
                   <div class="form-actions"><span>{conflictResolutionEnabled ? 'No candidate is preselected; the reviewed generation is fenced.' : 'Conflict resolution capability is unavailable in this daemon.'}</span><button class="primary-action" disabled={!csrfToken || !conflictResolutionEnabled || !selectedConflictCandidateRef || controlRunning} onclick={() => void renderConflictResolutionPlan()}><FileCheck2 size={16} />{controlRunning ? 'Planning…' : 'Review selected candidate'}</button></div>
                   {#if conflictResolutionError}<div class="action-result error" role="alert"><AlertTriangle size={17} /><div><strong>Conflict resolution failed</strong><span>{conflictResolutionError}</span></div></div>{/if}
                   {#if conflictResolutionPlan}<div class="plan-panel"><div class="plan-summary"><div><p class="section-kicker">EXACT CANDIDATE PLAN</p><h3>{conflictResolutionPlan.selected.cohort_repo_ids?.join(', ') || conflictResolutionPlan.selected.repo_id}</h3><code>{conflictResolutionPlan.plan_id}</code></div><StatusChip value={conflictResolutionPlan.status} /></div><div class="effect-ledger">{#each conflictResolutionPlan.effects as effect}<article><span class="effect-icon"><Zap size={15} /></span><div><strong>{effect.summary}</strong><small>{humanize(effect.class)}</small></div><StatusChip value={effect.status} /></article>{/each}</div><div class="plan-footer"><div><strong>Canonical result{(conflictResolutionPlan.result_registration_ids?.length || 0) > 1 ? 's' : ''}</strong><span>{conflictResolutionPlan.result_registration_ids?.join(', ') || conflictResolutionPlan.canonical_registration_id}</span></div><button class="primary-action" disabled={controlRunning} onclick={(event) => void confirmControl('conflict_resolution_apply', event.currentTarget)}><Power size={16} />Confirm resolution</button></div></div>{/if}
-                  {#if conflictResolutionReceipt}<div class="action-result" role="status"><CheckCircle2 size={17} /><div><strong>Conflict resolved</strong><span>{conflictResolutionReceipt.receipt_id ? `Receipt ${conflictResolutionReceipt.receipt_id}` : 'Atomic receipt persisted.'}{conflictResolutionReceipt.replayed ? ' · replayed safely' : ''}</span></div></div>{/if}
                 {/if}
               {/if}
+			  {#if conflictResolutionReceipt}<div class="action-result" role="status"><CheckCircle2 size={17} /><div><strong>Conflict resolved</strong><span>{conflictResolutionReceipt.receipt_id ? `Receipt ${conflictResolutionReceipt.receipt_id}` : 'Atomic receipt persisted.'}{conflictResolutionReceipt.replayed ? ' · replayed safely' : ''}</span></div></div>{/if}
             </section>
           {/if}
 
@@ -835,7 +844,7 @@
             {#if bindingReceipt}<div class="action-result" role="status"><CheckCircle2 size={17} /><div><strong>{humanize(bindingReceipt.outcome)}</strong><span>Receipt {bindingReceipt.receipt_id}{bindingReceipt.replayed ? ' · replayed safely' : ''}</span></div></div>{/if}
           </section>
 
-          {#if pendingControl}<dialog bind:this={controlDialog} class="confirmation-dialog control-confirmation" aria-labelledby="confirm-control-title" oncancel={(event) => { event.preventDefault(); void cancelControlConfirmation(); }}><span class:danger={pendingControl === 'disable'} class="dialog-icon">{#if pendingControl === 'binding_apply' || pendingControl === 'conflict_resolution_apply'}<GitFork size={21} />{:else if pendingControl === 'reconcile'}<RotateCcw size={21} />{:else}<Power size={21} />{/if}</span><div><p class="section-kicker">CONFIRM LOCAL CONTROL</p><h2 id="confirm-control-title">{pendingControl === 'conflict_resolution_apply' ? 'Resolve this identity conflict?' : pendingControl === 'maintenance_apply' ? 'Apply this maintenance plan?' : pendingControl === 'binding_apply' ? 'Write this repository binding?' : pendingControl === 'disable' ? 'Disable this registration?' : 'Reconcile this registration now?'}</h2><p>The daemon will validate current state again. A stale plan is rejected; an interrupted retry reuses the same durable idempotency key.</p><dl><div><dt>Target</dt><dd>{pendingControl === 'conflict_resolution_apply' ? (conflictResolutionPlan?.selected.cohort_repo_ids?.join(', ') || conflictResolutionPlan?.selected.repo_id) : pendingControl === 'binding_apply' ? bindingIntent.repo_id : maintenanceIntent.repo_id}</dd></div><div><dt>Cache</dt><dd>{pendingControl === 'binding_apply' ? bindingIntent.cache_ref : maintenanceIntent.cache_ref}</dd></div><div><dt>Plan</dt><dd>{pendingControl === 'conflict_resolution_apply' ? conflictResolutionPlan?.plan_id : pendingControl === 'binding_apply' ? bindingPlan?.plan_id : pendingControl === 'maintenance_apply' ? maintenancePlan?.plan_id : selectedMaintenance?.registration_id}</dd></div></dl><div class="dialog-actions"><button onclick={() => void cancelControlConfirmation()} disabled={controlRunning}>Keep current state</button><button bind:this={controlConfirmButton} class:danger-action={pendingControl === 'disable'} class="primary-action" onclick={() => void executeControl()} disabled={controlRunning}>{controlRunning ? 'Submitting…' : pendingControl === 'conflict_resolution_apply' ? 'Confirm selected candidate' : 'Confirm action'}</button></div></div></dialog>{/if}
+          {#if pendingControl}<dialog bind:this={controlDialog} class="confirmation-dialog control-confirmation" aria-labelledby="confirm-control-title" oncancel={(event) => { event.preventDefault(); void cancelControlConfirmation(); }}><span class:danger={pendingControl === 'disable'} class="dialog-icon">{#if pendingControl === 'binding_apply' || pendingControl === 'conflict_resolution_apply'}<GitFork size={21} />{:else if pendingControl === 'reconcile'}<RotateCcw size={21} />{:else}<Power size={21} />{/if}</span><div><p class="section-kicker">CONFIRM LOCAL CONTROL</p><h2 id="confirm-control-title">{pendingControl === 'conflict_resolution_apply' ? 'Resolve this identity conflict?' : pendingControl === 'maintenance_apply' ? 'Apply this maintenance plan?' : pendingControl === 'binding_apply' ? 'Write this repository binding?' : pendingControl === 'disable' ? 'Disable this registration?' : 'Reconcile this registration now?'}</h2><p>The daemon will validate current state again. A stale plan is rejected; an interrupted retry reuses the same durable idempotency key.</p><dl><div><dt>Target</dt><dd>{pendingControl === 'conflict_resolution_apply' ? (conflictResolutionPlan?.selected.cohort_repo_ids?.join(', ') || conflictResolutionPlan?.selected.repo_id) : pendingControl === 'binding_apply' ? bindingIntent.repo_id : maintenanceIntent.repo_id}</dd></div><div><dt>Cache</dt><dd>{pendingControl === 'binding_apply' ? bindingIntent.cache_ref : maintenanceIntent.cache_ref}</dd></div><div><dt>Plan</dt><dd>{pendingControl === 'conflict_resolution_apply' ? conflictResolutionPlan?.plan_id : pendingControl === 'binding_apply' ? bindingPlan?.plan_id : pendingControl === 'maintenance_apply' ? maintenancePlan?.plan_id : selectedMaintenance?.registration_id}</dd></div></dl>{#if pendingControl === 'conflict_resolution_apply' && conflictResolutionError}<div class="action-result error" role="alert"><AlertTriangle size={17} /><div><strong>Result delivery was not confirmed</strong><span>{conflictResolutionError}</span><span>Retry below to reuse this exact plan and durable key.</span></div></div>{/if}<div class="dialog-actions"><button onclick={() => void cancelControlConfirmation()} disabled={controlRunning}>Keep current state</button><button bind:this={controlConfirmButton} class:danger-action={pendingControl === 'disable'} class="primary-action" onclick={() => void executeControl()} disabled={controlRunning}>{controlRunning ? 'Submitting…' : pendingControl === 'conflict_resolution_apply' ? 'Confirm selected candidate' : 'Confirm action'}</button></div></div></dialog>{/if}
 
         {:else}
           <div class="intro section-intro"><p class="eyebrow">GOVERNANCE & RECOVERY</p><h1>Diagnostics</h1><p>Typed failures, recovered state, exact remediation, and capability boundaries.</p></div>
