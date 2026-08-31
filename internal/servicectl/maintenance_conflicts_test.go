@@ -283,16 +283,31 @@ func TestMaintenanceCloneResolutionRetainsEveryRepositoryOnSelectedPath(t *testi
 	}
 	firstID := maintenanceRegistrationID(identity.UUID, "owner/first")
 	secondID := maintenanceRegistrationID(identity.UUID, "owner/second")
+	legacyFirstID, legacySecondID := "maintenance-legacy-first-v0", "maintenance-legacy-second-v0"
+	sourceIDs := map[string]string{
+		firstID:  repositoryDocsSourceRegistrationID(firstID, "git-common-dir", "HEAD", "docs"),
+		secondID: repositoryDocsSourceRegistrationID(secondID, "git-common-dir", "HEAD", "docs"),
+	}
 	entries := []maintenanceDiskEntry{}
+	admissions := []repositoryDocsAdmissionIntent{}
 	for _, cachePath := range []string{firstPath, secondPath} {
 		cfg := config.Default()
 		cfg.CachePath = cachePath
+		fingerprint := pathFingerprint(maintenanceCanonicalPathKey(cachePath))
+		firstSource := repositoryDocsDiskSource{State: RepositoryDocsMaintenanceState{SourceRegistrationID: sourceIDs[firstID], SourceRegistrationGeneration: 1, GitStoreRef: "git-common-dir", WorktreeRef: "HEAD", State: "ready"}, RepositoryPath: filepath.Join(dir, "repo-first"), Profile: "docs"}
+		secondSource := repositoryDocsDiskSource{State: RepositoryDocsMaintenanceState{SourceRegistrationID: sourceIDs[secondID], SourceRegistrationGeneration: 1, GitStoreRef: "git-common-dir", WorktreeRef: "HEAD", State: "ready"}, RepositoryPath: filepath.Join(dir, "repo-second"), Profile: "docs"}
 		entries = append(entries,
-			maintenanceDiskEntry{MaintenanceEntry: MaintenanceEntry{RegistrationID: firstID, CacheUUID: identity.UUID, RepoID: "owner/first", Policy: MaintenancePolicy{SyncEnabled: true, SyncMode: "head", Issues: true}, ConfigHash: maintenanceHash(cfg), Enabled: true}, CachePath: cachePath, ConfigSnapshot: cfg},
-			maintenanceDiskEntry{MaintenanceEntry: MaintenanceEntry{RegistrationID: secondID, CacheUUID: identity.UUID, RepoID: "owner/second", Policy: MaintenancePolicy{SyncMode: "off"}, ConfigHash: maintenanceHash(cfg), Enabled: false}, CachePath: cachePath, ConfigSnapshot: cfg},
+			maintenanceDiskEntry{MaintenanceEntry: MaintenanceEntry{RegistrationID: firstID, LegacyRegistrationIDs: []string{legacyFirstID}, CacheUUID: identity.UUID, RepoID: "owner/first", Policy: MaintenancePolicy{SyncEnabled: true, SyncMode: "head", Issues: true}, ConfigHash: maintenanceHash(cfg), Enabled: true}, CachePath: cachePath, ConfigSnapshot: cfg, RepositoryDocsSources: []repositoryDocsDiskSource{firstSource}},
+			maintenanceDiskEntry{MaintenanceEntry: MaintenanceEntry{RegistrationID: secondID, LegacyRegistrationIDs: []string{legacySecondID}, CacheUUID: identity.UUID, RepoID: "owner/second", Policy: MaintenancePolicy{SyncMode: "off"}, ConfigHash: maintenanceHash(cfg), Enabled: false}, CachePath: cachePath, ConfigSnapshot: cfg, RepositoryDocsSources: []repositoryDocsDiskSource{secondSource}},
 		)
+		if cachePath == firstPath {
+			admissions = append(admissions,
+				repositoryDocsAdmissionIntent{RegistrationID: firstID, SourceRegistrationID: sourceIDs[firstID], SourceRegistrationGeneration: 1, AuthorityPathFingerprint: fingerprint, RepoID: "owner/first", WorkKey: "clone-first-work", ExpectedRevisionSetID: "clone-first-set", JobID: "job-000003", Disposition: repositoryDocsAdmissionCancelled, CreatedAt: time.Now().UTC()},
+				repositoryDocsAdmissionIntent{RegistrationID: secondID, SourceRegistrationID: sourceIDs[secondID], SourceRegistrationGeneration: 1, AuthorityPathFingerprint: fingerprint, RepoID: "owner/second", WorkKey: "clone-second-work", ExpectedRevisionSetID: "clone-second-set", JobID: "job-000004", Disposition: repositoryDocsAdmissionCancelled, CreatedAt: time.Now().UTC()},
+			)
+		}
 	}
-	data, _ := json.Marshal(maintenanceRegistryFile{SchemaVersion: legacyMaintenanceRegistrySchema, Entries: entries})
+	data, _ := json.Marshal(maintenanceRegistryFile{SchemaVersion: legacyMaintenanceRegistrySchema, Entries: entries, RepositoryDocsAdmissionQueue: admissions})
 	registryPath := filepath.Join(dir, "managed-caches.json")
 	_ = os.WriteFile(registryPath, data, 0o600)
 	jobsPath := filepath.Join(dir, "jobs.json")
@@ -300,14 +315,16 @@ func TestMaintenanceCloneResolutionRetainsEveryRepositoryOnSelectedPath(t *testi
 	jobsData, _ := json.Marshal([]Job{
 		{ID: "job-000001", Type: SyncJobType, RepoID: "owner/first", CacheUUID: identity.UUID, RegistrationID: firstID, Status: JobStatusSucceeded, CreatedAt: now, UpdatedAt: now},
 		{ID: "job-000002", Type: SyncJobType, RepoID: "owner/second", CacheUUID: identity.UUID, RegistrationID: secondID, Status: JobStatusSucceeded, CreatedAt: now, UpdatedAt: now},
+		{ID: "job-000003", Type: RepositoryDocsIndexJobType, RepoID: "owner/first", CacheUUID: identity.UUID, RegistrationID: firstID, SourceRegistrationID: sourceIDs[firstID], SourceRegistrationGeneration: 1, ExpectedRevisionSetID: "clone-first-set", WorkRef: publicWorkRef("clone-first-work"), Status: JobStatusCancelling, CreatedAt: now, UpdatedAt: now},
+		{ID: "job-000004", Type: RepositoryDocsIndexJobType, RepoID: "owner/second", CacheUUID: identity.UUID, RegistrationID: secondID, SourceRegistrationID: sourceIDs[secondID], SourceRegistrationGeneration: 1, ExpectedRevisionSetID: "clone-second-set", WorkRef: publicWorkRef("clone-second-work"), Status: JobStatusCancelling, CreatedAt: now, UpdatedAt: now},
 	})
 	_ = os.WriteFile(jobsPath, jobsData, 0o600)
 	jobs := NewJobManager(jobsPath)
-	if err := jobs.LoadAndMarkInterrupted(); err != nil {
-		t.Fatal(err)
-	}
 	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), jobs, registryPath)
 	if err := maintenance.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.LoadAndMarkInterrupted(); err != nil {
 		t.Fatal(err)
 	}
 	for id, wantRepo := range map[string]string{"job-000001": "owner/first", "job-000002": "owner/second"} {
@@ -321,6 +338,15 @@ func TestMaintenanceCloneResolutionRetainsEveryRepositoryOnSelectedPath(t *testi
 		t.Fatalf("clone cohort=%+v", listed.Entries)
 	}
 	conflict := listed.Entries[0]
+	if !stringSlicesEqual(conflict.LegacyRegistrationIDs, []string{firstID, secondID, legacyFirstID, legacySecondID}) {
+		t.Fatalf("clone cohort lost transitive legacy ids: %v", conflict.LegacyRegistrationIDs)
+	}
+	for id, wantRegistration := range map[string]string{"job-000003": firstID, "job-000004": secondID} {
+		job, ok := jobs.Get(id)
+		if !ok || job.Status != JobStatusCancelled || job.RegistrationID != wantRegistration {
+			t.Fatalf("clone cancellation recovery %s=%+v found=%t", id, job, ok)
+		}
+	}
 	if len(conflict.IdentityConflict.Candidates) != 2 {
 		t.Fatalf("path candidates=%+v", conflict.IdentityConflict.Candidates)
 	}
@@ -372,6 +398,12 @@ func TestMaintenanceCloneResolutionRetainsEveryRepositoryOnSelectedPath(t *testi
 		job, _ := restartedJobs.Get(id)
 		if job.RepoID != wantRepo || job.RegistrationID != maintenanceRegistrationID(identity.UUID, wantRepo) {
 			t.Fatalf("restart relabeled historical job %s: %+v", id, job)
+		}
+	}
+	for id, wantRegistration := range map[string]string{"job-000003": firstID, "job-000004": secondID} {
+		job, ok := restartedJobs.Get(id)
+		if !ok || job.Status != JobStatusCancelled || job.RegistrationID != wantRegistration {
+			t.Fatalf("restart clone cancellation %s=%+v found=%t", id, job, ok)
 		}
 	}
 }

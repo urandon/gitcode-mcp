@@ -109,7 +109,7 @@ func TestAdminMaintenanceObservationExposesCanonicalAliasesAndSanitizedConflict(
 			CandidateRegistrationIDs: []string{"cache-reg-canonical", "cache-reg-legacy"},
 			PolicyHashes:             []string{"sha256:policy-a", "sha256:policy-b"}, ConfigHashes: []string{"sha256:config"},
 			Candidates: []MaintenanceIdentityCandidate{
-				{CandidateRef: "candidate-a", RegistrationID: "cache-reg-canonical", RepoID: "owner/repo", Policy: MaintenancePolicy{SyncEnabled: true, Issues: true}, PolicyHash: "sha256:policy-a", ConfigHash: "sha256:config", PathFingerprint: "sha256:path-a", WasEnabled: true},
+				{CandidateRef: "candidate-a", SelectionKind: "physical_cache_authority", RegistrationID: "cache-reg-canonical", RepoID: "owner/repo", Policy: MaintenancePolicy{SyncEnabled: true, Issues: true}, PolicyHash: "sha256:policy-a", ConfigHash: "sha256:config", PathFingerprint: "sha256:path-a", WasEnabled: true, CohortRegistrationIDs: []string{"cache-reg-canonical", "cache-reg-member"}, CohortRepoIDs: []string{"owner/repo", "owner/member"}, Members: []MaintenanceIdentityCandidate{{CandidateRef: "member-a", RegistrationID: "cache-reg-member", RepoID: "owner/member", Policy: MaintenancePolicy{SyncMode: "off"}, PolicyHash: "sha256:member", PathFingerprint: "sha256:path-a"}}},
 				{CandidateRef: "candidate-b", RegistrationID: "cache-reg-legacy", RepoID: "legacy/repo", Policy: MaintenancePolicy{SyncMode: "off"}, PolicyHash: "sha256:policy-b", ConfigHash: "sha256:config", PathFingerprint: "sha256:path-b"},
 			},
 		},
@@ -118,6 +118,10 @@ func TestAdminMaintenanceObservationExposesCanonicalAliasesAndSanitizedConflict(
 	data, _ := json.Marshal(view)
 	if len(view.Aliases) != 1 || view.Aliases[0] != "legacy/repo" || len(view.LegacyRegistrationIDs) != 1 || view.IdentityConflict == nil || !view.IdentityConflict.DetailsAvailable || len(view.IdentityConflict.Candidates) != 2 || view.IdentityConflict.Candidates[0].CandidateRef != "candidate-a" {
 		t.Fatalf("view=%+v", view)
+	}
+	clone := view.IdentityConflict.Candidates[0]
+	if clone.SelectionKind != "physical_cache_authority" || len(clone.CohortRegistrationIDs) != 2 || len(clone.CohortRepoIDs) != 2 || len(clone.Members) != 1 || clone.Members[0].RepoID != "owner/member" {
+		t.Fatalf("clone cohort DTO lost recursive authority data: %+v", clone)
 	}
 	if strings.Contains(string(data), "cache_path") || strings.Contains(string(data), "config_snapshot") {
 		t.Fatalf("private migration state leaked: %s", data)

@@ -744,6 +744,7 @@ func (m *MaintenanceManager) canonicalizeLoadedEntriesLocked(ctx context.Context
 		delete(m.conflictCandidates, canonicalID)
 		m.refreshLegacyRepositoryDocsLocked(&merged)
 	}
+	changed = m.normalizeRedirectsLocked() || changed
 	for key, receipt := range m.receipts {
 		canonicalID := m.resolveRegistrationIDLocked(receipt.RegistrationID)
 		if strings.TrimSpace(receipt.AuthorityPathFingerprint) == "" {
@@ -826,11 +827,14 @@ func (m *MaintenanceManager) installMaintenanceConflictLocked(registrationID str
 		policyHashes = append(policyHashes, maintenanceHash(item.entry.Policy))
 		configHashes = append(configHashes, item.entry.ConfigHash)
 		pathFingerprints = append(pathFingerprints, pathFingerprint(maintenanceCanonicalPathKey(item.entry.cachePath)))
-		if item.entry.RegistrationID != registrationID {
-			merged.LegacyRegistrationIDs = append(merged.LegacyRegistrationIDs, item.entry.RegistrationID)
-			if item.id == item.entry.RegistrationID {
-				m.redirects[item.id] = registrationID
+		legacyIDs := append([]string{item.entry.RegistrationID}, item.entry.LegacyRegistrationIDs...)
+		for _, legacyID := range legacyIDs {
+			legacyID = strings.TrimSpace(legacyID)
+			if legacyID == "" || legacyID == registrationID {
+				continue
 			}
+			merged.LegacyRegistrationIDs = append(merged.LegacyRegistrationIDs, legacyID)
+			m.redirects[legacyID] = registrationID
 		}
 	}
 	merged.Generation = maxGeneration + 1
@@ -904,6 +908,7 @@ func (m *MaintenanceManager) remapRepositoryDocsAdmissionsLocked() bool {
 		return false
 	}
 	changed := false
+	registrationRedirects := m.jobProjectionRedirectsLocked()
 	next := make(map[string]repositoryDocsAdmissionIntent, len(m.admissions))
 	keys := make([]string, 0, len(m.admissions))
 	for key := range m.admissions {
@@ -912,7 +917,7 @@ func (m *MaintenanceManager) remapRepositoryDocsAdmissionsLocked() bool {
 	sort.Strings(keys)
 	for _, key := range keys {
 		intent := m.admissions[key]
-		registrationID := m.resolveRegistrationIDLocked(intent.RegistrationID)
+		registrationID := resolveMaintenanceRedirect(intent.RegistrationID, registrationRedirects)
 		sourceID := m.resolveSourceRegistrationIDLocked(intent.SourceRegistrationID)
 		if registrationID != intent.RegistrationID || sourceID != intent.SourceRegistrationID {
 			intent.RegistrationID, intent.SourceRegistrationID = registrationID, sourceID
@@ -922,7 +927,7 @@ func (m *MaintenanceManager) remapRepositoryDocsAdmissionsLocked() bool {
 			paths := map[string]bool{}
 			for _, candidates := range m.conflictCandidates {
 				for _, candidate := range candidates {
-					if m.resolveRegistrationIDLocked(candidate.Entry.RegistrationID) != intent.RegistrationID {
+					if resolveMaintenanceRedirect(candidate.Entry.RegistrationID, registrationRedirects) != intent.RegistrationID {
 						continue
 					}
 					for _, source := range candidate.RepositorySources {
@@ -1194,11 +1199,15 @@ func stringSlicesEqual(left, right []string) bool {
 }
 
 func (m *MaintenanceManager) resolveRegistrationIDLocked(value string) string {
+	return resolveMaintenanceRedirect(value, m.redirects)
+}
+
+func resolveMaintenanceRedirect(value string, redirects map[string]string) string {
 	value = strings.TrimSpace(value)
 	seen := map[string]bool{}
-	for m.redirects[value] != "" && !seen[value] {
+	for redirects[value] != "" && !seen[value] {
 		seen[value] = true
-		value = m.redirects[value]
+		value = redirects[value]
 	}
 	return value
 }
@@ -1224,14 +1233,67 @@ func discardCyclicRedirects(in map[string]string) map[string]string {
 	return out
 }
 
-func (m *MaintenanceManager) resolveSourceRegistrationIDLocked(value string) string {
-	value = strings.TrimSpace(value)
-	seen := map[string]bool{}
-	for m.sourceRedirects[value] != "" && !seen[value] {
-		seen[value] = true
-		value = m.sourceRedirects[value]
+// normalizeRedirectsLocked flattens every public selector onto an authority
+// that still exists after canonicalization. Redirects from a current authority
+// are discarded, so a newly introduced old -> new -> old cycle converges on
+// the retained row instead of surviving into durable state.
+func (m *MaintenanceManager) normalizeRedirectsLocked() bool {
+	registrationAuthorities := make(map[string]bool, len(m.entries))
+	for registrationID := range m.entries {
+		registrationAuthorities[registrationID] = true
 	}
-	return value
+	sourceAuthorities := map[string]bool{}
+	for _, sources := range m.sources {
+		for sourceID := range sources {
+			sourceAuthorities[sourceID] = true
+		}
+	}
+	registrations := normalizeMaintenanceRedirects(m.redirects, registrationAuthorities)
+	sources := normalizeMaintenanceRedirects(m.sourceRedirects, sourceAuthorities)
+	changed := !stringMapsEqual(m.redirects, registrations) || !stringMapsEqual(m.sourceRedirects, sources)
+	m.redirects, m.sourceRedirects = registrations, sources
+	return changed
+}
+
+func normalizeMaintenanceRedirects(in map[string]string, authorities map[string]bool) map[string]string {
+	out := map[string]string{}
+	keys := make([]string, 0, len(in))
+	for key := range in {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, from := range keys {
+		from = strings.TrimSpace(from)
+		if from == "" || authorities[from] {
+			continue
+		}
+		value := from
+		seen := map[string]bool{}
+		for value != "" && !seen[value] && !authorities[value] {
+			seen[value] = true
+			value = strings.TrimSpace(in[value])
+		}
+		if authorities[value] && value != from {
+			out[from] = value
+		}
+	}
+	return out
+}
+
+func stringMapsEqual(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *MaintenanceManager) resolveSourceRegistrationIDLocked(value string) string {
+	return resolveMaintenanceRedirect(value, m.sourceRedirects)
 }
 
 func (m *MaintenanceManager) canonicalRepoIDsLocked() map[string]string {

@@ -324,16 +324,20 @@ type MaintenanceIdentityConflictObservation struct {
 }
 
 type MaintenanceIdentityCandidateObservation struct {
-	CandidateRef        string                `json:"candidate_ref"`
-	RegistrationID      string                `json:"registration_id"`
-	RepoID              string                `json:"repo_id"`
-	Policy              MaintenancePolicyView `json:"policy"`
-	PolicyHash          string                `json:"policy_hash"`
-	ConfigHash          string                `json:"config_hash,omitempty"`
-	PathFingerprint     string                `json:"path_fingerprint"`
-	SourceAuthorityHash string                `json:"source_authority_hash,omitempty"`
-	SourceRefs          []string              `json:"source_refs,omitempty"`
-	WasEnabled          bool                  `json:"was_enabled"`
+	CandidateRef          string                                    `json:"candidate_ref"`
+	SelectionKind         string                                    `json:"selection_kind,omitempty"`
+	RegistrationID        string                                    `json:"registration_id"`
+	RepoID                string                                    `json:"repo_id"`
+	Policy                MaintenancePolicyView                     `json:"policy"`
+	PolicyHash            string                                    `json:"policy_hash"`
+	ConfigHash            string                                    `json:"config_hash,omitempty"`
+	PathFingerprint       string                                    `json:"path_fingerprint"`
+	SourceAuthorityHash   string                                    `json:"source_authority_hash,omitempty"`
+	SourceRefs            []string                                  `json:"source_refs,omitempty"`
+	WasEnabled            bool                                      `json:"was_enabled"`
+	CohortRegistrationIDs []string                                  `json:"cohort_registration_ids,omitempty"`
+	CohortRepoIDs         []string                                  `json:"cohort_repo_ids,omitempty"`
+	Members               []MaintenanceIdentityCandidateObservation `json:"members,omitempty"`
 }
 
 type MaintenancePolicyView struct {

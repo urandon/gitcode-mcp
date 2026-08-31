@@ -4,6 +4,7 @@ import path from 'node:path';
 
 const qaOutput = process.env.ADMIN_VIEW_QA_OUTPUT;
 const qaReference = process.env.ADMIN_QA_REFERENCE;
+const visualBaselines = process.env.ADMIN_VISUAL_BASELINES === '1' && !process.env.CI;
 
 const snapshot = {
   api_version: '1', revision: 'snapshot-operator', generated_at: new Date().toISOString(),
@@ -127,12 +128,12 @@ test('clone conflict choices are physical path cohorts and show every retained r
   const member = (repo: string, registration: string, source: string) => ({ candidate_ref: `member-${registration}`, registration_id: registration, repo_id: repo, policy: { sync_enabled: repo.endsWith('first'), sync_mode: repo.endsWith('first') ? 'head' : 'off', rag_enabled: false, collections: [] }, policy_hash: `policy-${registration}`, config_hash: `config-${registration}`, path_fingerprint: 'path-a', source_authority_hash: source, source_refs: [`${source}-ref`], was_enabled: true });
   const pathA = [member('owner/first', 'reg-first', 'source-first'), member('owner/second', 'reg-second', 'source-second')];
   const pathB = pathA.map((value: any) => ({ ...value, candidate_ref: `${value.candidate_ref}-clone`, path_fingerprint: 'path-b' }));
-  cloneSnapshot.maintenance = [{ registration_id: 'clone-conflict-1', cache_ref: 'cache-111111112222', repo_id: 'owner/first', enabled: false, state: 'cache_clone_conflict', generation: 9, policy: pathA[0].policy, identity_conflict: { kind: 'cache_clone_conflict', details_available: true, candidate_registration_ids: ['reg-first', 'reg-second'], policy_hashes: ['p'], config_hashes: ['c'], path_fingerprints: ['path-a', 'path-b'], candidates: [
+  cloneSnapshot.maintenance = [{ registration_id: 'clone-conflict-1', legacy_registration_ids: ['deep-legacy-reg-first'], cache_ref: 'cache-111111112222', repo_id: 'owner/first', enabled: false, state: 'cache_clone_conflict', generation: 9, policy: pathA[0].policy, identity_conflict: { kind: 'cache_clone_conflict', details_available: true, candidate_registration_ids: ['reg-first', 'reg-second'], policy_hashes: ['p'], config_hashes: ['c'], path_fingerprints: ['path-a', 'path-b'], candidates: [
     { candidate_ref: 'clone-path-a', selection_kind: 'physical_cache_authority', registration_id: '', repo_id: '', policy: {}, policy_hash: '', path_fingerprint: 'path-a', source_authority_hash: 'cohort-source-a', was_enabled: true, cohort_registration_ids: ['reg-first', 'reg-second'], cohort_repo_ids: ['owner/first', 'owner/second'], members: pathA },
     { candidate_ref: 'clone-path-b', selection_kind: 'physical_cache_authority', registration_id: '', repo_id: '', policy: {}, policy_hash: '', path_fingerprint: 'path-b', source_authority_hash: 'cohort-source-b', was_enabled: true, cohort_registration_ids: ['reg-first', 'reg-second'], cohort_repo_ids: ['owner/first', 'owner/second'], members: pathB }
   ] } }];
   await mockAdmin(page, cloneSnapshot);
-  await page.goto('/?view=Maintenance&registration=clone-conflict-1');
+  await page.goto('/?view=Maintenance&registration=deep-legacy-reg-first');
   await expect(page.getByRole('heading', { name: 'Cache clone conflict' })).toBeVisible();
   await expect(page.getByText('Select one physical cache authority')).toBeVisible();
   const cloneChoices = page.locator('input[name="conflict-candidate"]');
@@ -369,7 +370,7 @@ for (const scenario of repositoryDocsStateMatrix) {
     const activeAttempt = documentation.locator('article').filter({ hasText: 'Active attempt' });
     await expect(activeAttempt.locator('strong')).toHaveText(humanizedState(scenario.active || 'idle'));
     await expect(activeAttempt.locator('p')).toHaveText(scenario.active ? `active-${scenario.name}` : 'No competing generation');
-    if (!process.env.CI) {
+    if (visualBaselines) {
       await expect(page).toHaveScreenshot(`repository-docs-${scenario.name}.png`, { animations: 'disabled', maxDiffPixelRatio: 0.02 });
     }
     if (scenario.name === 'registered-without-ready-set') {

@@ -648,6 +648,62 @@ func TestMaintenanceLoadCanonicalizesEquivalentRepositoryDocsSourceAuthorities(t
 	}
 }
 
+func TestMaintenanceLoadNormalizesRedirectCyclesIntroducedByCanonicalization(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	identity, _ := store.CacheIdentity(ctx)
+	_ = store.Close()
+	registrationID := maintenanceRegistrationID(identity.UUID, "owner/repo")
+	legacyRegistrationID := "maintenance-future-alias"
+	canonicalSourceID := repositoryDocsSourceRegistrationID(registrationID, "git-common-dir", "HEAD", "docs")
+	legacySourceID := "repository-docs-future-alias"
+	cfg := config.Default()
+	cfg.CachePath = cachePath
+	source := repositoryDocsDiskSource{State: RepositoryDocsMaintenanceState{SourceRegistrationID: legacySourceID, SourceRegistrationGeneration: 1, GitStoreRef: "git-common-dir", WorktreeRef: "HEAD", State: "ready"}, RepositoryPath: filepath.Join(dir, "repository"), Profile: "docs"}
+	disk := maintenanceRegistryFile{
+		SchemaVersion: legacyMaintenanceRegistrySchema,
+		Entries: []maintenanceDiskEntry{{
+			MaintenanceEntry: MaintenanceEntry{RegistrationID: registrationID, LegacyRegistrationIDs: []string{legacyRegistrationID}, CacheUUID: identity.UUID, RepoID: "owner/repo", Policy: MaintenancePolicy{SyncMode: "off"}, ConfigHash: maintenanceHash(cfg), Enabled: true},
+			CachePath:        cachePath, ConfigSnapshot: cfg, RepositoryDocsSources: []repositoryDocsDiskSource{source},
+		}},
+		RegistrationRedirects:       []MaintenanceRegistrationRedirect{{From: registrationID, To: legacyRegistrationID}},
+		SourceRegistrationRedirects: []MaintenanceRegistrationRedirect{{From: canonicalSourceID, To: legacySourceID}},
+	}
+	registryPath := filepath.Join(dir, "managed-caches.json")
+	data, _ := json.Marshal(disk)
+	if err := os.WriteFile(registryPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	assertNormalized := func(stage string, maintenance *MaintenanceManager) {
+		t.Helper()
+		if got := maintenance.redirects[legacyRegistrationID]; got != registrationID || maintenance.redirects[registrationID] != "" {
+			t.Fatalf("%s registration redirects=%v", stage, maintenance.redirects)
+		}
+		if got := maintenance.sourceRedirects[legacySourceID]; got != canonicalSourceID || maintenance.sourceRedirects[canonicalSourceID] != "" {
+			t.Fatalf("%s source redirects=%v", stage, maintenance.sourceRedirects)
+		}
+	}
+	first := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), registryPath)
+	if err := first.Load(); err != nil {
+		t.Fatal(err)
+	}
+	assertNormalized("first load", first)
+	second := NewMaintenanceManager(newTestManager(t, "darwin"), NewJobManager(""), registryPath)
+	if err := second.Load(); err != nil {
+		t.Fatal(err)
+	}
+	assertNormalized("restart", second)
+}
+
 func TestMaintenanceLoadBlocksDifferentRepositoryDocsSourceAuthorities(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

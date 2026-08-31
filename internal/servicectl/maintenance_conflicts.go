@@ -441,6 +441,7 @@ func (m *MaintenanceManager) ApplyConflictResolution(ctx context.Context, req Ma
 			m.receipts[key] = receipt
 		}
 	}
+	m.normalizeRedirectsLocked()
 	m.remapRepositoryDocsAdmissionsLocked()
 	retired := 0
 	if plan.ConflictKind == "cache_clone_conflict" {
