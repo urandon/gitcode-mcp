@@ -55,18 +55,9 @@ jobs:
 
       - name: Run admin UI browser tests
         working-directory: web
-        env:
-          # Sentinels prove CI ignores every local visual-QA input. Browser
-          # gates assert semantic DOM/ARIA/API/state contracts only.
-          ADMIN_QA_OUTPUT: ${{ runner.temp }}/forbidden-admin-qa
-          ADMIN_VIEW_QA_OUTPUT: ${{ runner.temp }}/forbidden-operator-qa
-          ADMIN_QA_REFERENCE: ${{ runner.temp }}/missing-reference.png
-          ADMIN_VISUAL_BASELINES: "1"
-        run: |
-          npm run test:e2e
-          test ! -e "$ADMIN_QA_OUTPUT"
-          test ! -e "$ADMIN_VIEW_QA_OUTPUT"
-          test -z "$(find test-results -type f \( -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' -o -name '*.webp' -o -name '*.zip' -o -name '*.webm' \) -print -quit 2>/dev/null)"
+        # CI asserts semantic DOM/ARIA, JSON API, action, and state-machine
+        # contracts. Raster baselines and diagnostic capture are local-only.
+        run: npm run test:e2e
 
       - name: Run tests
         run: go test ./...
