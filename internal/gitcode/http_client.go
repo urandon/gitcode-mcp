@@ -482,16 +482,19 @@ func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, op
 	req.State = wireState
 	preserveMilestone := len(req.Milestone) == 0
 	preserveLabels := len(req.Labels) == 0
-	var preimage Issue
-	if preserveMilestone || preserveLabels {
-		var err error
-		preimage, err = c.GetIssue(ctx, IssueRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
-		if err != nil {
+	preimage, err := c.GetIssue(ctx, IssueRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
+	if err != nil {
+		return WriteResult[Issue]{}, err
+	}
+	if strings.TrimSpace(preimage.ID) == "" || preimage.Number != req.Number {
+		return WriteResult[Issue]{}, ErrValidationFailed{Field: "response", Message: "issue update preimage requires id and matching number"}
+	}
+	if opts.BeforeIssueUpdateMutation != nil {
+		if err := opts.BeforeIssueUpdateMutation(preimage); err != nil {
 			return WriteResult[Issue]{}, err
 		}
-		if strings.TrimSpace(preimage.ID) == "" || preimage.Number != req.Number {
-			return WriteResult[Issue]{}, ErrValidationFailed{Field: "response", Message: "issue update preimage requires id and matching number"}
-		}
+	}
+	if preserveMilestone || preserveLabels {
 		// GitCode currently clears an assigned milestone when the field is
 		// omitted from an otherwise valid issue PATCH. Keep public patch
 		// semantics at the adapter boundary by sending the live preimage.
@@ -515,26 +518,26 @@ func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, op
 		return result, nil
 	})
 	if err != nil {
-		return result, err
+		return result, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "patch", MutationAttempted: true, Cause: err}
 	}
 	readback, err := c.GetIssue(ctx, IssueRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
 	if err != nil {
-		return WriteResult[Issue]{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "issue update requires canonical readback", Cause: err}
+		return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "issue update requires canonical readback", Cause: err}}
 	}
 	if strings.TrimSpace(readback.ID) == "" || readback.Number != req.Number {
-		return WriteResult[Issue]{}, ErrValidationFailed{Field: "response", Message: "issue state update readback requires id and matching number"}
+		return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "response", Message: "issue state update readback requires id and matching number"}}
 	}
 	if req.Title != "" && readback.Title != req.Title {
-		return WriteResult[Issue]{}, ErrValidationFailed{Field: "title", Message: fmt.Sprintf("issue update readback = %q, want %q", readback.Title, req.Title)}
+		return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "title", Message: fmt.Sprintf("issue update readback = %q, want %q", readback.Title, req.Title)}}
 	}
 	if req.Body != "" && readback.Body != req.Body {
-		return WriteResult[Issue]{}, ErrValidationFailed{Field: "body", Message: "issue update readback does not match the requested body"}
+		return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "body", Message: "issue update readback does not match the requested body"}}
 	}
 	if expectedState != "" && strings.TrimSpace(readback.State) != expectedState {
-		return WriteResult[Issue]{}, ErrValidationFailed{Field: "state", Message: fmt.Sprintf("issue state update readback = %q, want %q", readback.State, expectedState)}
+		return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "state", Message: fmt.Sprintf("issue state update readback = %q, want %q", readback.State, expectedState)}}
 	}
 	if preserveMilestone && issueMilestoneRemoteID(readback.Milestone) != issueMilestoneRemoteID(preimage.Milestone) {
-		return WriteResult[Issue]{}, ErrValidationFailed{Field: "milestone", Message: "issue update did not preserve the omitted milestone"}
+		return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "milestone", Message: "issue update did not preserve the omitted milestone"}}
 	}
 	if !preserveMilestone {
 		expectedMilestone, err := requestedIssueMilestoneRemoteID(req.Milestone)
@@ -542,11 +545,11 @@ func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, op
 			return WriteResult[Issue]{}, err
 		}
 		if issueMilestoneRemoteID(readback.Milestone) != expectedMilestone {
-			return WriteResult[Issue]{}, ErrValidationFailed{Field: "milestone", Message: "issue update readback does not match the requested milestone"}
+			return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "milestone", Message: "issue update readback does not match the requested milestone"}}
 		}
 	}
 	if preserveLabels && !sameStrings(readback.Labels, preimage.Labels) {
-		return WriteResult[Issue]{}, ErrValidationFailed{Field: "labels", Message: "issue update did not preserve omitted labels"}
+		return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "labels", Message: "issue update did not preserve omitted labels"}}
 	}
 	if !preserveLabels {
 		expectedLabels, err := requestedIssueLabels(req.Labels)
@@ -554,7 +557,7 @@ func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, op
 			return WriteResult[Issue]{}, err
 		}
 		if !sameStrings(readback.Labels, expectedLabels) {
-			return WriteResult[Issue]{}, ErrValidationFailed{Field: "labels", Message: "issue update readback does not match the requested labels"}
+			return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "labels", Message: "issue update readback does not match the requested labels"}}
 		}
 	}
 	result.Record = readback

@@ -122,9 +122,9 @@ flowchart TD
 
 1. Caller invokes a write command or enabled MCP write tool.
 2. Service layer validates repo scope, write mode, idempotency, and required fields.
-3. Live provider performs the GitCode API call and confirms the remote result.
+3. Live provider performs the GitCode API call and confirms the remote result. For issue updates it first supplies the canonical preimage to the service's durable claim callback; a changed previously claimed preimage fails before PATCH.
 4. Service layer writes audit evidence and updates cache state.
-5. CLI or MCP returns a sanitized confirmation.
+5. CLI or MCP returns a sanitized confirmation. Ambiguous issue-update recovery is GET-only and returns `recovered_after_ambiguous_write` only when requested and preserved-field invariants match.
 
 ### Snapshot And Diff
 

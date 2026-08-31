@@ -1555,6 +1555,166 @@ func TestUpdateIssueRejectsMilestoneAndClearMilestone(t *testing.T) {
 	}
 }
 
+func TestIssue133AmbiguousUpdateRecoversByReadbackWithoutSecondMutation(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	preimage := gitcode.Issue{ID: "42", Number: 42, Title: "Issue", Body: "before", State: "open", Labels: []string{"bug"}}
+	client := &fakeGitCodeClient{
+		issue:  preimage,
+		errors: []error{gitcode.ErrWriteMutationPhase{Endpoint: "/issues/42", Phase: "readback", MutationAttempted: true, Cause: gitcode.ErrNetworkUnavailable{Endpoint: "/issues/42", Attempts: 1}}},
+	}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 42, Body: "after", IdempotencyKey: "issue-133-ambiguous-recovery"}
+	_, err = svc.UpdateIssue(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_ambiguous_remote" {
+		t.Fatalf("first error=%T %v", err, err)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", req.IdempotencyKey)
+	if err != nil || entry == nil || entry.Status != audit.StatusInProgress || entry.RequestMetadata["write_phase"] != "readback_ambiguous" {
+		t.Fatalf("ambiguous audit=%#v err=%v", entry, err)
+	}
+	client.issue = gitcode.Issue{ID: "42", Number: 42, Title: "Issue", Body: "after", State: "open", Labels: []string{"bug"}}
+	recovered, err := svc.UpdateIssue(ctx, req)
+	if err != nil {
+		t.Fatalf("recovery: %v", err)
+	}
+	if recovered.Status != "recovered_after_ambiguous_write" || !recovered.Replayed || client.updateIssueMutationCalls != 1 {
+		t.Fatalf("recovered=%#v mutation_calls=%d", recovered, client.updateIssueMutationCalls)
+	}
+	entry, err = store.GetAuditEventByKey(ctx, "fixture-a", req.IdempotencyKey)
+	if err != nil || entry == nil || entry.Status != audit.StatusSucceeded || entry.RequestMetadata["write_phase"] != "recovered_by_canonical_readback" {
+		t.Fatalf("recovered audit=%#v err=%v", entry, err)
+	}
+}
+
+func TestIssue133AmbiguousUpdateMismatchStaysFenced(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{
+		issue:  gitcode.Issue{ID: "42", Number: 42, Title: "Issue", Body: "before", State: "open"},
+		errors: []error{gitcode.ErrWriteMutationPhase{Endpoint: "/issues/42", Phase: "patch", MutationAttempted: true, Cause: gitcode.ErrNetworkUnavailable{Endpoint: "/issues/42", Attempts: 1}}},
+	}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 42, Body: "after", IdempotencyKey: "issue-133-ambiguous-fenced"}
+	_, _ = svc.UpdateIssue(ctx, req)
+	client.issue = gitcode.Issue{ID: "42", Number: 42, Title: "externally changed", Body: "other", State: "open"}
+	_, err = svc.UpdateIssue(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_ambiguous_remote" || client.updateIssueMutationCalls != 1 {
+		t.Fatalf("error=%T %v mutation_calls=%d", err, err, client.updateIssueMutationCalls)
+	}
+}
+
+func TestIssue133AmbiguousUpdateRecoverySurvivesStoreRestart(t *testing.T) {
+	ctx := context.Background()
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{
+		issue:  gitcode.Issue{ID: "42", Number: 42, Title: "Issue", Body: "before", State: "open"},
+		errors: []error{gitcode.ErrWriteMutationPhase{Endpoint: "/issues/42", Phase: "readback", MutationAttempted: true, Cause: gitcode.ErrNetworkUnavailable{Endpoint: "/issues/42", Attempts: 1}}},
+	}
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 42, Body: "after", IdempotencyKey: "issue-133-restart"}
+	_, err = NewWithClient(store, client).UpdateIssue(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_ambiguous_remote" {
+		t.Fatalf("first error=%T %v", err, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	client.issue = gitcode.Issue{ID: "42", Number: 42, Title: "Issue", Body: "after", State: "open"}
+	result, err := NewWithClient(store, client).UpdateIssue(ctx, req)
+	if err != nil || result.Status != "recovered_after_ambiguous_write" || client.updateIssueMutationCalls != 1 {
+		t.Fatalf("restart recovery=%#v err=%v mutation_calls=%d", result, err, client.updateIssueMutationCalls)
+	}
+}
+
+func TestIssue133ChangedPreimageReturnsConflictBeforeRetryMutation(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &fakeGitCodeClient{
+		issue:  gitcode.Issue{ID: "42", Number: 42, Title: "Issue", Body: "before", State: "open"},
+		errors: []error{gitcode.ErrRateLimited{Endpoint: "/issues/42", RetryAfter: time.Second, Attempts: 1}},
+	}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 42, Body: "after", IdempotencyKey: "issue-133-preimage-conflict"}
+	_, err = svc.UpdateIssue(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_rate_limited" {
+		t.Fatalf("first error=%T %v", err, err)
+	}
+	client.issue = gitcode.Issue{ID: "42", Number: 42, Title: "external", Body: "before", State: "open"}
+	_, err = svc.UpdateIssue(ctx, req)
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_conflict" || client.updateIssueMutationCalls != 1 {
+		t.Fatalf("retry error=%T %v mutation_calls=%d", err, err, client.updateIssueMutationCalls)
+	}
+}
+
+func TestIssue133ConcurrentSameKeyIssuesOneMutation(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	client := &blockingIssueUpdateClient{
+		fakeGitCodeClient: &fakeGitCodeClient{issue: gitcode.Issue{ID: "42", Number: 42, Title: "Issue", Body: "before", State: "open"}},
+		claimed:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 42, Body: "after", IdempotencyKey: "issue-133-concurrent"}
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := svc.UpdateIssue(ctx, req)
+		firstDone <- err
+	}()
+	<-client.claimed
+	_, err = svc.UpdateIssue(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_ambiguous_remote" {
+		t.Fatalf("concurrent error=%T %v", err, err)
+	}
+	close(client.release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first update: %v", err)
+	}
+	if client.mutations != 1 {
+		t.Fatalf("mutations=%d want 1", client.mutations)
+	}
+}
+
 func TestScenario017AddCommentLiveShapeCachesComment(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)
@@ -4383,6 +4543,7 @@ type fakeGitCodeClient struct {
 	createIssueResult            gitcode.WriteResult[gitcode.Issue]
 	createIssueResults           []gitcode.WriteResult[gitcode.Issue]
 	updateIssueCalls             int
+	updateIssueMutationCalls     int
 	updateIssueResult            gitcode.WriteResult[gitcode.Issue]
 	createIssueCommentResult     gitcode.WriteResult[gitcode.Comment]
 	updateIssueCommentResult     gitcode.WriteResult[gitcode.Comment]
@@ -4451,6 +4612,27 @@ type fakeGitCodeClient struct {
 	lastUpdateReleaseReq         gitcode.ReleaseWriteRequest
 	onCreateIssue                func(gitcode.CreateIssueRequest, gitcode.WriteOptions)
 	onCreatePRReviewComment      func(gitcode.CreatePRReviewCommentRequest, gitcode.WriteOptions)
+}
+
+type blockingIssueUpdateClient struct {
+	*fakeGitCodeClient
+	claimed   chan struct{}
+	release   chan struct{}
+	mutations int
+}
+
+func (c *blockingIssueUpdateClient) UpdateIssue(_ context.Context, req gitcode.UpdateIssueRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Issue], error) {
+	if opts.BeforeIssueUpdateMutation != nil {
+		if err := opts.BeforeIssueUpdateMutation(c.issue); err != nil {
+			return gitcode.WriteResult[gitcode.Issue]{}, err
+		}
+	}
+	c.mutations++
+	close(c.claimed)
+	<-c.release
+	updated := c.issue
+	updated.Body = req.Body
+	return gitcode.WriteResult[gitcode.Issue]{Record: updated, Confirmed: true, Operation: "UpdateIssue", RemoteID: updated.ID, RemoteNumber: updated.Number, ConfirmedAt: time.Now().UTC()}, nil
 }
 
 func (f *fakeGitCodeClient) nextError() error {
@@ -4588,6 +4770,21 @@ func (f *fakeGitCodeClient) UpdateIssue(_ context.Context, req gitcode.UpdateIss
 	f.updateIssueCalls++
 	f.lastUpdateIssueRequest = req
 	f.lastWriteOptions = opts
+	if opts.BeforeIssueUpdateMutation != nil {
+		preimage := f.issue
+		if f.issuesByNumber != nil {
+			if issue, ok := f.issuesByNumber[req.Number]; ok {
+				preimage = issue
+			}
+		}
+		if preimage.Number == 0 {
+			preimage = f.updateIssueResult.Record
+		}
+		if err := opts.BeforeIssueUpdateMutation(preimage); err != nil {
+			return gitcode.WriteResult[gitcode.Issue]{}, err
+		}
+	}
+	f.updateIssueMutationCalls++
 	if err := f.nextError(); err != nil {
 		return gitcode.WriteResult[gitcode.Issue]{}, err
 	}

@@ -2989,6 +2989,68 @@ func TestScenario125BodyOnlyUpdatePreservesMilestoneAndLabels(t *testing.T) {
 	}
 }
 
+func TestIssue133UpdateIssueClaimsAfterPreimageBeforePatch(t *testing.T) {
+	var claimed bool
+	var methods []string
+	body := "before"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method)
+		switch r.Method {
+		case http.MethodGet:
+			fmt.Fprintf(w, `{"id":"42","number":42,"title":"Issue","body":%q,"state":"open"}`, body)
+		case http.MethodPatch:
+			if !claimed {
+				t.Fatal("PATCH crossed the durable claim callback")
+			}
+			body = "after"
+			fmt.Fprint(w, `{"id":"42","number":42,"title":"Issue","body":"after","state":"open"}`)
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+	_, err := client.UpdateIssue(context.Background(), UpdateIssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42, Body: "after"}, WriteOptions{
+		IdempotencyKey: "issue-133-claim-order",
+		BeforeIssueUpdateMutation: func(issue Issue) error {
+			if len(methods) != 1 || methods[0] != http.MethodGet || issue.Body != "before" {
+				t.Fatalf("callback methods=%v issue=%#v", methods, issue)
+			}
+			claimed = true
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpdateIssue: %v", err)
+	}
+	if !reflect.DeepEqual(methods, []string{http.MethodGet, http.MethodPatch, http.MethodGet}) {
+		t.Fatalf("methods=%v", methods)
+	}
+}
+
+func TestIssue133UpdateIssueReadbackFailureMarksMutationAttempted(t *testing.T) {
+	getCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			getCalls++
+			if getCalls == 1 {
+				fmt.Fprint(w, `{"id":"42","number":42,"title":"Issue","body":"before","state":"open"}`)
+				return
+			}
+			fmt.Fprint(w, `{not-json`)
+		case http.MethodPatch:
+			fmt.Fprint(w, `{"id":"42","number":42,"title":"Issue","body":"after","state":"open"}`)
+		}
+	}))
+	defer server.Close()
+	_, err := newTestClient(t, server.URL, Config{}).UpdateIssue(context.Background(), UpdateIssueRequest{Owner: "example-owner", Repo: "example-repo", Number: 42, Body: "after"}, WriteOptions{IdempotencyKey: "issue-133-readback-phase"})
+	var phase ErrWriteMutationPhase
+	if !errors.As(err, &phase) || !phase.MutationAttempted || phase.Phase != "readback" {
+		t.Fatalf("error=%T %v phase=%#v", err, err, phase)
+	}
+}
+
 func TestScenario125RejectsCanonicalReadbackThatIgnoredRequestedBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v5/repos/example-owner/example-repo/issues/42" {
