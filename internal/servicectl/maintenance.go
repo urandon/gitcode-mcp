@@ -1,6 +1,7 @@
 package servicectl
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -2829,8 +2830,15 @@ func (m *MaintenanceManager) saveLocked() error {
 	if writeFile == nil {
 		writeFile = durableAtomicWriteFile
 	}
-	if err := writeFile(m.path, append(data, '\n'), 0o600); err != nil {
-		return err
+	payload := append(data, '\n')
+	if err := writeFile(m.path, payload, 0o600); err != nil {
+		// Atomic replace can report a directory-fsync error after rename has
+		// already committed the exact payload. Confirm that boundary before a
+		// caller rolls memory back; otherwise disk and the live manager split.
+		persisted, readErr := os.ReadFile(m.path)
+		if readErr != nil || !bytes.Equal(persisted, payload) {
+			return err
+		}
 	}
 	m.pruneConflictResolutionReceiptsLocked()
 	return nil

@@ -522,8 +522,11 @@
         bindingReceipt = await controlPost<ControlReceipt>('/api/admin/v1/bindings/apply', { ...bindingIntent, plan_id: bindingPlan.plan_id, idempotency_key: pendingControlKey });
       } else if (pendingControl === 'rag_repair_apply' && repairPlan && selectedCache && selectedRepo) {
         repairReceipt = await controlPost<ControlReceipt>('/api/admin/v1/rag/repair/apply', { cache_ref: selectedCache.cache_ref, repo_id: selectedRepo.repo_id, profile: repairProfile, max_chunks: repairMaxChunks, plan_id: repairPlan.plan_id, idempotency_key: pendingControlKey });
-      } else if (pendingControl === 'conflict_resolution_apply' && conflictResolutionPlan && selectedMaintenance) {
-        conflictResolutionReceipt = await controlPost<ControlReceipt>(`/api/admin/v1/maintenance/${encodeURIComponent(selectedMaintenance.registration_id)}/conflict-resolution/apply`, { candidate_ref: conflictResolutionPlan.selected.candidate_ref, expected_generation: conflictResolutionPlan.expected_generation, plan_id: conflictResolutionPlan.plan_id, idempotency_key: pendingControlKey });
+	  } else if (pendingControl === 'conflict_resolution_apply' && conflictResolutionPlan) {
+		// The reviewed registration is part of the durable intent. A clone
+		// resolution can replace the selected row through SSE before a lost
+		// response is retried, so never recompute this endpoint from snapshot.
+		conflictResolutionReceipt = await controlPost<ControlReceipt>(`/api/admin/v1/maintenance/${encodeURIComponent(conflictResolutionPlan.registration_id)}/conflict-resolution/apply`, { candidate_ref: conflictResolutionPlan.selected.candidate_ref, expected_generation: conflictResolutionPlan.expected_generation, plan_id: conflictResolutionPlan.plan_id, idempotency_key: pendingControlKey });
 		retainedConflictReceipt = conflictResolutionReceipt;
       } else if ((pendingControl === 'disable' || pendingControl === 'reconcile') && selectedMaintenance) {
         maintenanceReceipt = await controlPost<ControlReceipt>(`/api/admin/v1/maintenance/${encodeURIComponent(selectedMaintenance.registration_id)}/${pendingControl}`, { idempotency_key: pendingControlKey });

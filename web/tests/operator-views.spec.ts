@@ -128,26 +128,36 @@ test('stale conflict apply closes confirmation, refreshes candidates, and requir
 
 test('ambiguous conflict apply keeps the exact plan and idempotency key for replay', async ({ page }) => {
 	const conflictSnapshot: any = structuredClone(snapshot);
+	conflictSnapshot.caches[0].repositories.push({ ...structuredClone(conflictSnapshot.caches[0].repositories[0]), repo_id: 'example/second', display_name: 'Second repository' });
+	const member = (repo: string, registration: string) => ({ candidate_ref: `member-${registration}`, registration_id: registration, repo_id: repo, policy: { sync_enabled: false, sync_mode: 'off', rag_enabled: false, collections: [] }, policy_hash: `policy-${registration}`, config_hash: `config-${registration}`, path_fingerprint: 'path-a', source_authority_hash: `source-${registration}`, source_refs: [`docs-${registration}`], was_enabled: true });
+	const retainedMembers = [member('example/repo', 'reg-retained-first'), member('example/second', 'reg-retained-second')];
 	conflictSnapshot.maintenance = [{
-		registration_id: 'reg-canonical', cache_ref: 'cache-111111112222', repo_id: 'example/repo', enabled: false, state: 'identity_conflict', generation: 7,
+		registration_id: 'clone-conflict-retry', cache_ref: 'cache-111111112222', repo_id: 'example/repo', enabled: false, state: 'cache_clone_conflict', generation: 7,
 		policy: { sync_enabled: true, sync_mode: 'head', rag_enabled: false, collections: ['issues'] },
-		identity_conflict: { kind: 'identity_conflict', details_available: true, candidate_registration_ids: ['reg-canonical'], policy_hashes: ['a'], config_hashes: ['a'], path_fingerprints: ['path-a'], candidates: [
-			{ candidate_ref: 'candidate-a', registration_id: 'reg-canonical', repo_id: 'example/repo', policy: { sync_enabled: true, sync_mode: 'head', rag_enabled: false, collections: ['issues'] }, policy_hash: 'a', config_hash: 'a', path_fingerprint: 'path-a', source_authority_hash: 'source-a', source_refs: ['docs-a'], was_enabled: true }
+		identity_conflict: { kind: 'cache_clone_conflict', details_available: true, candidate_registration_ids: ['reg-retained-first', 'reg-retained-second'], policy_hashes: ['a'], config_hashes: ['a'], path_fingerprints: ['path-a'], candidates: [
+			{ candidate_ref: 'clone-path-a', selection_kind: 'physical_cache_authority', registration_id: '', repo_id: '', policy: {}, policy_hash: '', config_hash: '', path_fingerprint: 'path-a', source_authority_hash: 'source-path-a', source_refs: [], was_enabled: true, cohort_registration_ids: ['reg-retained-first', 'reg-retained-second'], cohort_repo_ids: ['example/repo', 'example/second'], members: retainedMembers }
 		] }
 	}];
-	await mockAdmin(page, conflictSnapshot);
-	await page.route('**/api/admin/v1/maintenance/reg-canonical/conflict-resolution/plan', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { schema_version: 'gitcode-mcp.maintenance-conflict-resolution-plan.v1', plan_id: 'retry-conflict-plan', status: 'ready', registration_id: 'reg-canonical', canonical_registration_id: 'reg-canonical', result_registration_ids: ['reg-canonical'], conflict_kind: 'identity_conflict', expected_generation: 7, selected: conflictSnapshot.maintenance[0].identity_conflict.candidates[0], effects: [{ class: 'identity', summary: 'Promote selected candidate.', status: 'planned' }] } }) }));
+	let emitSnapshotChanged!: () => void;
+	const snapshotChanged = new Promise<void>((resolve) => { emitSnapshotChanged = resolve; });
+	await mockAdmin(page, conflictSnapshot, snapshotChanged);
+	const reviewedCandidate = structuredClone(conflictSnapshot.maintenance[0].identity_conflict.candidates[0]);
+	await page.route('**/api/admin/v1/maintenance/clone-conflict-retry/conflict-resolution/plan', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { schema_version: 'gitcode-mcp.maintenance-conflict-resolution-plan.v1', plan_id: 'retry-conflict-plan', status: 'ready', registration_id: 'clone-conflict-retry', canonical_registration_id: 'clone-conflict-retry', result_registration_ids: ['reg-retained-first', 'reg-retained-second'], conflict_kind: 'cache_clone_conflict', expected_generation: 7, selected: reviewedCandidate, effects: [{ class: 'identity', summary: 'Promote selected physical authority.', status: 'planned' }] } }) }));
 	const applyBodies: Array<Record<string, unknown>> = [];
-	await page.route('**/api/admin/v1/maintenance/reg-canonical/conflict-resolution/apply', async (route) => {
+	const applyURLs: string[] = [];
+	await page.route('**/api/admin/v1/maintenance/*/conflict-resolution/apply', async (route) => {
+		applyURLs.push(route.request().url());
 		applyBodies.push(route.request().postDataJSON());
 		if (applyBodies.length === 1) {
+			conflictSnapshot.maintenance = retainedMembers.map((candidate: any, index: number) => ({ registration_id: candidate.registration_id, cache_ref: 'cache-111111112222', repo_id: candidate.repo_id, enabled: true, state: 'enrolled', generation: 8 + index, policy: candidate.policy }));
 			await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'temporarily_unavailable', message: 'Receipt delivery was interrupted.', remediation: 'Retry this confirmation.' } }) });
+			emitSnapshotChanged();
 			return;
 		}
-		await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { outcome: 'resolved', receipt_id: 'maintenance-conflict-receipt-replayed', plan_id: 'retry-conflict-plan', registration_id: 'reg-canonical', replayed: true } }) });
+		await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { outcome: 'resolved', receipt_id: 'maintenance-conflict-receipt-replayed', plan_id: 'retry-conflict-plan', registration_id: 'clone-conflict-retry', registration_ids: ['reg-retained-first', 'reg-retained-second'], replayed: true } }) });
 	});
-	await page.goto('/?view=Maintenance&registration=reg-canonical');
-	await page.getByRole('radio', { name: /example\/repo/ }).check();
+	await page.goto('/?view=Maintenance&registration=clone-conflict-retry');
+	await page.locator('input[name="conflict-candidate"]').check();
 	await page.getByRole('button', { name: 'Review selected candidate' }).click();
 	await page.getByRole('button', { name: 'Confirm resolution' }).click();
 	await page.getByRole('button', { name: 'Confirm selected candidate' }).click();
@@ -155,10 +165,16 @@ test('ambiguous conflict apply keeps the exact plan and idempotency key for repl
 	await expect(dialog).toBeVisible();
 	await expect(dialog.getByRole('alert')).toContainText('Receipt delivery was interrupted.');
 	await expect(dialog).toContainText('retry-conflict-plan');
+	await expect(page.getByRole('heading', { name: 'Cache clone conflict' })).toHaveCount(0);
 	await dialog.getByRole('button', { name: 'Confirm selected candidate' }).click();
 	await expect(dialog).not.toBeVisible();
 	expect(applyBodies).toHaveLength(2);
+	expect(applyBodies[1]).toEqual(applyBodies[0]);
 	expect(applyBodies[1]).toMatchObject({ plan_id: 'retry-conflict-plan', idempotency_key: applyBodies[0].idempotency_key });
+	expect(applyURLs).toEqual([
+		'http://127.0.0.1:4173/api/admin/v1/maintenance/clone-conflict-retry/conflict-resolution/apply',
+		'http://127.0.0.1:4173/api/admin/v1/maintenance/clone-conflict-retry/conflict-resolution/apply'
+	]);
 	await expect(page.getByRole('status').filter({ hasText: 'maintenance-conflict-receipt-replayed' })).toContainText('replayed safely');
 });
 
@@ -183,10 +199,19 @@ test('clone conflict choices are physical path cohorts and show every retained r
   await expect(cloneChoices.first()).not.toBeChecked();
 });
 
-async function mockAdmin(page: Page, value = snapshot) {
+async function mockAdmin(page: Page, value = snapshot, snapshotChanged?: Promise<void>) {
   await page.route('**/api/admin/v1/session', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', csrf_token: 'csrf-test' }) }));
   await page.route('**/api/admin/v1/snapshot', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify(value) }));
-  await page.route('**/api/admin/v1/events', (route) => route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': ready\n\n' }));
+	let emittedSnapshotChanged = false;
+	await page.route('**/api/admin/v1/events', async (route) => {
+		if (snapshotChanged && !emittedSnapshotChanged) {
+			emittedSnapshotChanged = true;
+			await snapshotChanged;
+			await route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'event: snapshot_changed\ndata: {}\n\n' });
+			return;
+		}
+		await route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': ready\n\n' });
+	});
 }
 
 test('operator views keep coverage truth, deep links, and recovery states', async ({ page }) => {

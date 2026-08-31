@@ -347,10 +347,16 @@ func TestMaintenanceEnrollRollsBackLiveCanonicalizationWhenPersistenceFails(t *t
 	}
 	jobs.mu.Unlock()
 
-	maintenance.writeFile = durableAtomicWriteFile
+	postCommit := errors.New("injected post-rename durability uncertainty")
+	maintenance.writeFile = func(path string, data []byte, mode os.FileMode) error {
+		if err := durableAtomicWriteFile(path, data, mode); err != nil {
+			return err
+		}
+		return postCommit
+	}
 	entry, err := maintenance.Enroll(ctx, testMaintenanceEnrollRequest(cachePath, "canonicalize-retry", MaintenancePolicy{}))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("commit-confirmed retry returned post-rename error: %v", err)
 	}
 	if entry.RegistrationID != canonicalID || entry.RepoID != "owner/repo" || maintenance.redirects[legacyID] != canonicalID {
 		t.Fatalf("retry did not converge canonical state: entry=%+v redirects=%v", entry, maintenance.redirects)
@@ -360,6 +366,7 @@ func TestMaintenanceEnrollRollsBackLiveCanonicalizationWhenPersistenceFails(t *t
 		t.Fatalf("retry did not publish canonical job projection: registrations=%v repos=%v", jobs.registrationRedirects, jobs.canonicalRepoByRegistration)
 	}
 	jobs.mu.Unlock()
+	maintenance.writeFile = durableAtomicWriteFile
 
 	restartedJobs := NewJobManager(filepath.Join(dir, "jobs-restarted.json"))
 	restarted := NewMaintenanceManager(newTestManager(t, "darwin"), restartedJobs, registryPath)
