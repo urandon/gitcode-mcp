@@ -2348,6 +2348,68 @@ func TestCacheWriterAdmissionSerializesIndependentWork(t *testing.T) {
 	}
 }
 
+func TestCacheWriterAdmissionRetainsIndependentIntentAcrossRepeatedContention(t *testing.T) {
+	jobs := NewJobManager(filepath.Join(t.TempDir(), "jobs.json"))
+	first, created, err := jobs.createCoalescedJob(SyncJobType, "owner/left", "", 0, "sync:cache-1:owner/left:head", "cache-1", "reg-left", "", func() {})
+	if err != nil || !created {
+		t.Fatalf("first=%+v created=%t err=%v", first, created, err)
+	}
+
+	const independentWork = "rag:cache-1:owner/right:profile"
+	for attempt := 0; attempt < 3; attempt++ {
+		_, created, err = jobs.createCoalescedJob(RAGIndexJobType, "owner/right", "profile", 0, independentWork, "cache-1", "reg-right", "ns", func() {})
+		var busy ErrCacheWriterBusy
+		if created || !errors.As(err, &busy) || busy.ActiveJobID != first.ID {
+			t.Fatalf("attempt=%d created=%t err=%T %v busy=%+v", attempt, created, err, err, busy)
+		}
+		if listed := jobs.List(); len(listed) != 1 || listed[0].WorkKey != first.WorkKey {
+			t.Fatalf("contention changed durable intent: %+v", listed)
+		}
+	}
+
+	// Publishing a terminal state is not enough to admit a possible late
+	// starter. The cache remains fenced until the worker has actually unwound.
+	jobs.updateJob(first.ID, func(job *Job, now time.Time) {
+		job.Status = JobStatusSucceeded
+		job.UpdatedAt = now
+		job.FinishedAt = &now
+	})
+	_, created, err = jobs.createCoalescedJob(RAGIndexJobType, "owner/right", "profile", 0, independentWork, "cache-1", "reg-right", "ns", func() {})
+	var busy ErrCacheWriterBusy
+	if created || !errors.As(err, &busy) || busy.ActiveJobID != first.ID {
+		t.Fatalf("terminal worker still in flight: created=%t err=%T %v busy=%+v", created, err, err, busy)
+	}
+
+	jobs.markWorkerFinished(first.ID)
+	next, created, err := jobs.createCoalescedJob(RAGIndexJobType, "owner/right", "profile", 0, independentWork, "cache-1", "reg-right", "ns", func() {})
+	if err != nil || !created || next.WorkKey != independentWork || next.RepoID != "owner/right" || next.Type != RAGIndexJobType {
+		t.Fatalf("independent intent after release=%+v created=%t err=%v", next, created, err)
+	}
+}
+
+func TestCacheWriterAdmissionRestartReleasesInterruptedWriter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.json")
+	jobs := NewJobManager(path)
+	first, created, err := jobs.createCoalescedJob(SyncJobType, "owner/left", "", 0, "sync:cache-1:owner/left:head", "cache-1", "reg-left", "", func() {})
+	if err != nil || !created {
+		t.Fatalf("first=%+v created=%t err=%v", first, created, err)
+	}
+
+	restarted := NewJobManager(path)
+	if err := restarted.LoadAndMarkInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	interrupted, ok := restarted.Get(first.ID)
+	if !ok || interrupted.Status != JobStatusInterrupted || interrupted.FinishedAt == nil {
+		t.Fatalf("interrupted=%+v found=%t", interrupted, ok)
+	}
+
+	next, created, err := restarted.createCoalescedJob(RAGIndexJobType, "owner/right", "profile", 0, "rag:cache-1:owner/right:profile", "cache-1", "reg-right", "ns", func() {})
+	if err != nil || !created || next.ID == first.ID || next.CacheUUID != first.CacheUUID {
+		t.Fatalf("post-restart writer=%+v created=%t err=%v", next, created, err)
+	}
+}
+
 func TestMaintenanceReconcileOrderPrefersOldestWriterIntentPerCache(t *testing.T) {
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	entries := []MaintenanceEntry{
