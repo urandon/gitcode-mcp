@@ -1224,7 +1224,13 @@ func TestRepositoryDocsIndexCLIHonorsConfiguredServiceRuntime(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	runtimeDir, err := os.MkdirTemp("/private/tmp", "cli-repo-docs-runtime-")
+	runtimeBase := os.TempDir()
+	if _, statErr := os.Stat("/private/tmp"); statErr == nil {
+		// macOS exposes this short path, which keeps Unix socket paths below the
+		// platform limit. Linux runners commonly expose only /tmp.
+		runtimeBase = "/private/tmp"
+	}
+	runtimeDir, err := os.MkdirTemp(runtimeBase, "cli-repo-docs-runtime-")
 	if err != nil {
 		t.Fatal(err)
 	}
