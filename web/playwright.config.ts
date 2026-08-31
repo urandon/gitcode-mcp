@@ -1,4 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
+import { resolveBrowserTestPolicy } from './src/lib/browser-test-policy';
+
+const browserPolicy = resolveBrowserTestPolicy(process.env);
 
 export default defineConfig({
   testDir: './tests',
@@ -10,18 +13,18 @@ export default defineConfig({
   // API routes and exercises multi-request control lifecycles; parallel files
   // still run concurrently without stampeding Vite's first-page transform.
   fullyParallel: false,
-  retries: process.env.CI ? 2 : 0,
+  retries: browserPolicy.ci ? 2 : 0,
   reporter: 'line',
   use: {
     baseURL: 'http://127.0.0.1:4173',
     // Playwright's string trace modes include raster screenshots. CI keeps
     // browser gates machine-readable, so traces remain a local-only aid.
-    trace: process.env.CI ? 'off' : 'on-first-retry'
+    trace: browserPolicy.trace
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {
     command: 'npm run dev -- --host 127.0.0.1 --port 4173',
     url: 'http://127.0.0.1:4173',
-    reuseExistingServer: !process.env.CI
+    reuseExistingServer: !browserPolicy.ci
   }
 });

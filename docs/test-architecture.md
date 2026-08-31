@@ -108,8 +108,10 @@ status/count values, navigation, and action outcomes. Screenshot capture,
 reference composition, and pixel baselines are local opt-in QA and must be
 disabled whenever `CI` is set, even if their local environment variables leak
 into the runner. Playwright trace capture is also disabled in CI because its
-archive embeds raster screenshots. CI carries sentinel visual-QA variables and
-fails if an image output directory or raster/trace/video artifact is created.
+archive embeds raster screenshots. A pure configuration unit test feeds every
+local visual-QA variable into the CI policy and asserts that output/reference
+paths and pixel baselines are disabled and trace mode is `off`; it generates
+and compares no raster artifact.
 
 ## Before Committing
 
