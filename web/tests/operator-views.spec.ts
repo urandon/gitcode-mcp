@@ -210,6 +210,11 @@ const repositoryDocsStateMatrix = [
   { name: 'ready', state: 'ready', reconcile: 'ready', registered: true, lexical: true, semantic: true, active: '' }
 ] as const;
 
+const humanizedState = (value: string) => value
+  .replaceAll('_', ' ')
+  .replaceAll('-', ' ')
+  .replace(/\b\w/g, (letter) => letter.toUpperCase());
+
 for (const scenario of repositoryDocsStateMatrix) {
   test(`repository documentation visual state: ${scenario.name}`, async ({ page }) => {
     const stateSnapshot = structuredClone(snapshot);
@@ -263,7 +268,16 @@ for (const scenario of repositoryDocsStateMatrix) {
     await expect(availability).toContainText(scenario.semantic ? 'Semantic rankingReady' : 'Semantic rankingLexical fallback');
     if (scenario.lexical) await expect(page.getByRole('button', { name: 'Search Git' })).toBeEnabled();
     else await expect(page.getByRole('button', { name: 'Search Git' })).toBeDisabled();
-    await expect(page).toHaveScreenshot(`repository-docs-${scenario.name}.png`, { animations: 'disabled', maxDiffPixelRatio: 0.02 });
+    const documentation = page.getByRole('region', { name: 'Repository documentation RAG' });
+    await expect(documentation.locator('.section-heading .status-chip')).toHaveText(scenario.state.replaceAll('_', ' '));
+    const reconciliation = documentation.locator('article').filter({ hasText: 'Automatic reconciliation' });
+    await expect(reconciliation.locator('strong')).toHaveText(scenario.registered ? humanizedState(scenario.reconcile) : 'Not registered');
+    const activeAttempt = documentation.locator('article').filter({ hasText: 'Active attempt' });
+    await expect(activeAttempt.locator('strong')).toHaveText(humanizedState(scenario.active || 'idle'));
+    await expect(activeAttempt.locator('p')).toHaveText(scenario.active ? `active-${scenario.name}` : 'No competing generation');
+    if (!process.env.CI) {
+      await expect(page).toHaveScreenshot(`repository-docs-${scenario.name}.png`, { animations: 'disabled', maxDiffPixelRatio: 0.02 });
+    }
     if (scenario.name === 'registered-without-ready-set') {
       await page.getByLabel('Mode').selectOption('fulltext');
       await page.getByLabel('Query').fill('offline lexical contract');

@@ -50,6 +50,45 @@ func TestConcurrentSearchSources(t *testing.T) {
 	}
 }
 
+func TestInMemoryStoreUsesOneMigratedConnectionConcurrently(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if got := store.db.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("MaxOpenConnections=%d want 1 for :memory:", got)
+	}
+	if err := store.AddRepository(ctx, RepositoryBinding{RepoID: "memory-concurrent", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 32)
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				if _, err := store.ListRepositories(ctx); err != nil {
+					errs <- err
+					return
+				}
+				if _, _, err := store.GetSyncFrontier(ctx, "memory-concurrent", "issue", "updated_at_desc", "state=all"); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent in-memory query: %v", err)
+	}
+}
+
 func TestWriterHoldReadersUnblocked(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "cache.db")

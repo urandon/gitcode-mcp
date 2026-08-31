@@ -2,9 +2,8 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './tests',
-  // State-matrix baselines are shared by local macOS and Ubuntu CI. Tests use
-  // a fixed viewport and bounded pixel tolerance so the gate detects layout
-  // regressions without treating platform font antialiasing as product drift.
+  // Visual baselines are a local, opt-in review aid. CI gates behavior and
+  // accessibility without comparing platform-specific browser rasterization.
   snapshotPathTemplate: '{testDir}/{testFilePath}-snapshots/{arg}{ext}',
   // Keep the stateful operator-flow suite serial within its file. Each test owns
   // API routes and exercises multi-request control lifecycles; parallel files

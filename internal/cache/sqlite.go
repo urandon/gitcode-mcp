@@ -60,6 +60,13 @@ func newSQLiteStore(ctx context.Context, dataSourceName string, forceNoFTS bool)
 	}
 	db.SetMaxOpenConns(8)
 	db.SetMaxIdleConns(4)
+	if dataSourceName == ":memory:" {
+		// Each SQLite :memory: connection owns a different database. Restrict the
+		// pool to one connection so concurrent callers cannot observe a fresh,
+		// unmigrated schema selected nondeterministically by database/sql.
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+	}
 	cachePath := cachePathForDataSource(dataSourceName)
 	lockPath := writerLockPath(cachePath)
 	store := &SQLiteStore{db: db, forceNoFTS: forceNoFTS, cachePath: cachePath, lockPath: lockPath}
