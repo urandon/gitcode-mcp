@@ -64,6 +64,7 @@ jobs:
 
       - name: Enforce semantic-only browser artifacts
         # A future implicit failure capture or trace/video setting must fail CI.
+        if: ${{ always() }}
         run: ./scripts/check-browser-ci-artifacts.sh
 
       - name: Run tests
