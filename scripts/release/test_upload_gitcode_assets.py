@@ -1,7 +1,9 @@
 import importlib.util
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("upload_gitcode_assets.py")
@@ -154,6 +156,69 @@ class UploadGitCodeAssetsTest(unittest.TestCase):
                 )
         self.assertNotIn("upload-secret", str(failure.exception))
         self.assertNotIn("secret-callback", str(failure.exception))
+
+    def test_put_retries_transient_timeout_with_transfer_budget(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"{}"
+        with mock.patch.object(upload.urllib.request, "urlopen", side_effect=[TimeoutError(), response]) as urlopen:
+            with mock.patch.object(upload.time, "sleep") as sleep:
+                result = upload._urllib_request("PUT", "https://storage.example/object", {}, b"payload")
+        self.assertEqual(result, {})
+        self.assertEqual(urlopen.call_count, 2)
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], upload.TRANSFER_REQUEST_TIMEOUT_SECONDS)
+        sleep.assert_called_once_with(upload.TRANSPORT_RETRY_DELAY_SECONDS)
+
+    def test_non_replay_safe_request_is_not_retried(self):
+        with mock.patch.object(upload.urllib.request, "urlopen", side_effect=TimeoutError()) as urlopen:
+            with mock.patch.object(upload.time, "sleep") as sleep:
+                with self.assertRaisesRegex(upload.UploadError, "transport_error"):
+                    upload._urllib_request("POST", "https://api.example/release", {}, b"payload")
+        self.assertEqual(urlopen.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_put_retry_exhaustion_is_bounded_and_public_safe(self):
+        with mock.patch.object(upload.urllib.request, "urlopen", side_effect=TimeoutError()) as urlopen:
+            with mock.patch.object(upload.time, "sleep") as sleep:
+                with self.assertRaisesRegex(upload.UploadError, "transport_error") as failure:
+                    upload._urllib_request("PUT", "https://storage.example/upload-secret", {"x-secret": "value"}, b"payload")
+        self.assertEqual(urlopen.call_count, upload.TRANSPORT_ATTEMPTS)
+        self.assertEqual(
+            [call.args[0] for call in sleep.call_args_list],
+            [upload.TRANSPORT_RETRY_DELAY_SECONDS, upload.TRANSPORT_RETRY_DELAY_SECONDS * 2],
+        )
+        self.assertNotIn("upload-secret", str(failure.exception))
+        self.assertNotIn("x-secret", str(failure.exception))
+
+    def test_non_retryable_http_error_fails_once(self):
+        failure = urllib.error.HTTPError("https://storage.example/upload-secret", 403, "forbidden", {}, None)
+        with mock.patch.object(upload.urllib.request, "urlopen", side_effect=failure) as urlopen:
+            with mock.patch.object(upload.time, "sleep") as sleep:
+                with self.assertRaisesRegex(upload.UploadError, "403"):
+                    upload._urllib_request("PUT", "https://storage.example/upload-secret", {}, b"payload")
+        self.assertEqual(urlopen.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_download_size_uses_content_range_without_full_download(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.headers = {"Content-Range": "bytes 0-0/6419356"}
+        response.__enter__.return_value.read.return_value = b"x"
+        with mock.patch.object(upload.urllib.request, "urlopen", return_value=response) as urlopen:
+            size = upload._urllib_download_size("https://download.example/artifact")
+        self.assertEqual(size, 6419356)
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.get_header("Range"), "bytes=0-0")
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], upload.TRANSFER_REQUEST_TIMEOUT_SECONDS)
+
+    def test_download_size_retries_transient_timeout(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.headers = {"Content-Range": "bytes 0-0/8"}
+        response.__enter__.return_value.read.return_value = b"x"
+        with mock.patch.object(upload.urllib.request, "urlopen", side_effect=[TimeoutError(), response]) as urlopen:
+            with mock.patch.object(upload.time, "sleep") as sleep:
+                size = upload._urllib_download_size("https://download.example/artifact")
+        self.assertEqual(size, 8)
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(upload.TRANSPORT_RETRY_DELAY_SECONDS)
 
 
 if __name__ == "__main__":
