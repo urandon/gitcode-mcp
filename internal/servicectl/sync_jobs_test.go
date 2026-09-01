@@ -402,6 +402,78 @@ func TestRecoveredStageRejectsMissingCacheBeforeWritableOpen(t *testing.T) {
 	}
 }
 
+func TestSyncStageTargetRejectsReplacementSchemaBindingAndRegistration(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	cachePath := filepath.Join(root, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	identity, _ := store.CacheIdentity(ctx)
+	schema, _ := store.SchemaVersion(ctx)
+	stage := SyncStageEnvelope{CacheUUID: identity.UUID, CacheSchema: schema, CachePath: cachePath, RepoID: "owner/repo", RegistrationID: maintenanceRegistrationID(identity.UUID, "owner/repo")}
+	if err := validateSyncStageTargetReadOnly(ctx, stage); err != nil {
+		t.Fatalf("valid target rejected: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		edit func(*SyncStageEnvelope)
+		code string
+	}{
+		{name: "schema", edit: func(stage *SyncStageEnvelope) { stage.CacheSchema-- }, code: "cache_schema_mismatch"},
+		{name: "binding", edit: func(stage *SyncStageEnvelope) { stage.RepoID = "owner/missing" }, code: "repository_binding_unavailable"},
+		{name: "registration", edit: func(stage *SyncStageEnvelope) { stage.RegistrationID = "wrong-registration" }, code: "registration_id_mismatch"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := stage
+			tc.edit(&candidate)
+			err := validateSyncStageTargetReadOnly(ctx, candidate)
+			coded, ok := err.(interface{ DiagnosticCode() string })
+			if !ok || coded.DiagnosticCode() != tc.code {
+				t.Fatalf("error=%T %v code=%q", err, err, tc.code)
+			}
+		})
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(cachePath, cachePath+".replaced"); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := replacement.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Close()
+	err = validateSyncStageTargetReadOnly(ctx, stage)
+	coded, ok := err.(interface{ DiagnosticCode() string })
+	if !ok || coded.DiagnosticCode() != "cache_uuid_mismatch" {
+		t.Fatalf("replacement error=%T %v", err, err)
+	}
+}
+
+func TestDurableRecoveryCollectionAllowlistIncludesEveryDaemonSelector(t *testing.T) {
+	for _, collection := range []string{"issues", "issue_comments", "wiki", "pulls", "pr_comments"} {
+		if !supportedDurableSyncCollection(collection) {
+			t.Fatalf("durable recovery rejects selected collection %q", collection)
+		}
+	}
+	for _, collection := range []string{"", "all", "comments", "unknown"} {
+		if supportedDurableSyncCollection(collection) {
+			t.Fatalf("durable recovery accepts ambiguous collection %q", collection)
+		}
+	}
+}
+
 func TestSyncCommitAdmissionIsFIFOAcrossRepositoriesSharingCache(t *testing.T) {
 	ctx := context.Background()
 	jobs := NewJobManager("")

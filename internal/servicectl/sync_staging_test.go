@@ -318,3 +318,26 @@ func TestSyncCommitRetryIsDeterministicCappedAndBudgeted(t *testing.T) {
 		t.Fatalf("exhausted = %+v retry=%t", exhausted, retry)
 	}
 }
+
+func TestCancelledStageRetainsPayloadAndBecomesOneTerminalEnvelope(t *testing.T) {
+	journal := NewSyncStageJournal(t.TempDir(), SyncStageLimits{})
+	created, err := journal.Create(testSyncStageEnvelope())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejected := rejectCancelledSyncStage(journal, created)
+	if rejected.State.Phase != SyncStageRejected || rejected.State.TerminalReason != "cancelled" || !rejected.State.RetryAfter.IsZero() {
+		t.Fatalf("cancelled stage=%+v", rejected.State)
+	}
+	loaded, err := journal.Load(created.StageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(loaded.Payload) != string(created.Payload) || loaded.Checksum != created.Checksum {
+		t.Fatal("cancellation mutated the retained staged response")
+	}
+	stages, err := journal.List()
+	if err != nil || len(stages) != 1 || stages[0].State.TerminalReason != "cancelled" {
+		t.Fatalf("terminal stages=%+v err=%v", stages, err)
+	}
+}

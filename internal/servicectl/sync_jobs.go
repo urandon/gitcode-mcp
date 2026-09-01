@@ -579,7 +579,7 @@ func (m *JobManager) RecoverSyncStages(ctx context.Context, manager Manager) err
 			m.rejectInterruptedSyncStage(updated, state.TerminalReason)
 			continue
 		}
-		if stage.Collection != "issues" && stage.Collection != "issue_comments" && stage.Collection != "wiki" && stage.Collection != "pulls" && stage.Collection != "pr_comments" {
+		if !supportedDurableSyncCollection(stage.Collection) {
 			state := stage.State
 			state.Phase, state.TerminalReason = SyncStageRejected, "unsupported_stage_collection"
 			updated, err := journal.UpdateState(stage.StageID, state)
@@ -608,6 +608,15 @@ func (m *JobManager) RecoverSyncStages(ctx context.Context, manager Manager) err
 		go m.runRecoveredSyncStage(workerCtx, manager, journal, stage)
 	}
 	return nil
+}
+
+func supportedDurableSyncCollection(collection string) bool {
+	switch collection {
+	case "issues", "issue_comments", "wiki", "pulls", "pr_comments":
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *JobManager) rejectInterruptedSyncStage(stage SyncStageEnvelope, reason string) {
