@@ -125,6 +125,36 @@ func TestSyncStagePublicViewCannotExposePayloadOrFilesystemState(t *testing.T) {
 	}
 }
 
+func TestAdminJobSyncStageProjectionIsSemanticAndPublicSafe(t *testing.T) {
+	journal := NewSyncStageJournal(t.TempDir(), SyncStageLimits{})
+	created, err := journal.Create(testSyncStageEnvelope())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	state, retry := nextSyncCommitRetry(created.StageID, created.State, time.Now().UTC())
+	if !retry {
+		t.Fatal("expected retry")
+	}
+	created.State = state
+	public := created.PublicView()
+	job := Job{ID: "job-1", Type: SyncJobType, CacheUUID: created.CacheUUID, RepoID: created.RepoID, Status: JobStatusRunning, CreatedAt: created.CreatedAt, UpdatedAt: state.UpdatedAt, SyncStage: &public}
+	data, err := json.Marshal(adminJobObservation(job))
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	contract := string(data)
+	for _, want := range []string{`"sync_stage":{`, `"phase":"waiting_commit"`, `"fetched":2`, `"staged":2`, `"attempt":1`, `"retry_budget":6`, `"blocker_class":"cache_busy"`} {
+		if !strings.Contains(contract, want) {
+			t.Fatalf("contract missing %q: %s", want, contract)
+		}
+	}
+	for _, forbidden := range []string{"private source body", "payload", "checksum", "idempotency", "sync-stages"} {
+		if strings.Contains(contract, forbidden) {
+			t.Fatalf("contract contains %q: %s", forbidden, contract)
+		}
+	}
+}
+
 func TestSyncStageGCOnlyRemovesExpiredTerminalStages(t *testing.T) {
 	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	journal := NewSyncStageJournal(t.TempDir(), SyncStageLimits{MaxAge: time.Hour})

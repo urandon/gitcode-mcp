@@ -296,6 +296,7 @@ type JobObservation struct {
 	FailureMessage      string                `json:"failure_message,omitempty"`
 	FailureCollection   string                `json:"failure_collection,omitempty"`
 	RetryAfter          string                `json:"retry_after,omitempty"`
+	SyncStage           *SyncStageObservation `json:"sync_stage,omitempty"`
 	InspectCommand      string                `json:"inspect_command,omitempty"`
 	RemediationCommand  string                `json:"remediation_command,omitempty"`
 	Progress            []ProgressObservation `json:"progress,omitempty"`
@@ -307,6 +308,23 @@ type JobObservation struct {
 	ProgressLimit       int                   `json:"progress_limit"`
 	ThroughputPerSecond float64               `json:"throughput_per_second,omitempty"`
 	ETASeconds          int                   `json:"eta_seconds,omitempty"`
+}
+
+type SyncStageObservation struct {
+	StageRef      string    `json:"stage_ref"`
+	Phase         string    `json:"phase"`
+	Fetched       int       `json:"fetched"`
+	Staged        int       `json:"staged"`
+	Committed     int       `json:"committed"`
+	Attempt       int       `json:"attempt,omitempty"`
+	RetryBudget   int       `json:"retry_budget,omitempty"`
+	RetryAfter    time.Time `json:"retry_after,omitempty"`
+	BlockerClass  string    `json:"blocker_class,omitempty"`
+	BlockingOp    string    `json:"blocking_operation,omitempty"`
+	FetchedAt     time.Time `json:"fetched_at,omitempty"`
+	StagedAt      time.Time `json:"staged_at,omitempty"`
+	CommittedAt   time.Time `json:"committed_at,omitempty"`
+	TerminalCause string    `json:"terminal_reason,omitempty"`
 }
 
 type ProgressObservation struct {

@@ -51,6 +51,7 @@ type Job struct {
 	Completed                    int                     `json:"completed,omitempty"`
 	Error                        string                  `json:"error,omitempty"`
 	ErrorClass                   string                  `json:"error_class,omitempty"`
+	SyncStage                    *SyncStageView          `json:"sync_stage,omitempty"`
 	Progress                     []service.ProgressEvent `json:"progress,omitempty"`
 }
 
