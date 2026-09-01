@@ -81,21 +81,42 @@ type AttentionItem struct {
 }
 
 type CacheObservation struct {
-	CacheRef              string                  `json:"cache_ref"`
-	PathFingerprint       string                  `json:"path_fingerprint,omitempty"`
-	StorageMode           string                  `json:"storage_mode,omitempty"`
-	Readiness             string                  `json:"readiness"`
-	SchemaVersion         int                     `json:"schema_version,omitempty"`
-	ExpectedSchemaVersion int                     `json:"expected_schema_version,omitempty"`
-	DaemonBinaryVersion   string                  `json:"daemon_binary_version,omitempty"`
-	DaemonBinaryCommit    string                  `json:"daemon_binary_commit,omitempty"`
-	QuiesceState          string                  `json:"quiesce_state,omitempty"`
-	WALCapable            bool                    `json:"wal_capable"`
-	JournalMode           string                  `json:"journal_mode,omitempty"`
-	RecordCount           int                     `json:"record_count"`
-	ChunkCount            int                     `json:"chunk_count"`
-	RepositoryCount       int                     `json:"repository_count"`
-	Repositories          []RepositoryObservation `json:"repositories"`
+	CacheRef              string                     `json:"cache_ref"`
+	PathFingerprint       string                     `json:"path_fingerprint,omitempty"`
+	StorageMode           string                     `json:"storage_mode,omitempty"`
+	Readiness             string                     `json:"readiness"`
+	SchemaVersion         int                        `json:"schema_version,omitempty"`
+	ExpectedSchemaVersion int                        `json:"expected_schema_version,omitempty"`
+	DaemonBinaryVersion   string                     `json:"daemon_binary_version,omitempty"`
+	DaemonBinaryCommit    string                     `json:"daemon_binary_commit,omitempty"`
+	QuiesceState          string                     `json:"quiesce_state,omitempty"`
+	SchemaRecovery        *SchemaRecoveryObservation `json:"schema_recovery,omitempty"`
+	WALCapable            bool                       `json:"wal_capable"`
+	JournalMode           string                     `json:"journal_mode,omitempty"`
+	RecordCount           int                        `json:"record_count"`
+	ChunkCount            int                        `json:"chunk_count"`
+	RepositoryCount       int                        `json:"repository_count"`
+	Repositories          []RepositoryObservation    `json:"repositories"`
+}
+
+// SchemaRecoveryObservation is the public, path-free lifecycle view for a
+// cache schema handoff. It deliberately exposes states and binary identity,
+// never the cache or backup filesystem locations used by the CLI.
+type SchemaRecoveryObservation struct {
+	State               string `json:"state"`
+	Phase               string `json:"phase"`
+	TargetSchemaVersion int    `json:"target_schema_version"`
+	TargetBinaryVersion string `json:"target_binary_version,omitempty"`
+	TargetBinaryCommit  string `json:"target_binary_commit,omitempty"`
+	TargetSchemaMin     int    `json:"target_schema_min,omitempty"`
+	TargetSchemaMax     int    `json:"target_schema_max,omitempty"`
+	TargetCompatible    bool   `json:"target_compatible"`
+	BackupState         string `json:"backup_state"`
+	MigrationState      string `json:"migration_state"`
+	RestartState        string `json:"restart_state"`
+	DataState           string `json:"data_state"`
+	IdentityState       string `json:"identity_state"`
+	Remediation         string `json:"remediation,omitempty"`
 }
 
 type RepositoryObservation struct {

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/adminhttp"
-	"gitcode-mcp/internal/cache"
 )
 
 const jsonrpcVersion = "2.0"
@@ -378,7 +377,8 @@ func (s RPCServer) health(ctx context.Context) (ServiceHealth, error) {
 	if err != nil {
 		return ServiceHealth{}, err
 	}
-	health := ServiceHealth{Status: status.Status, Healthy: status.Status == StatusRunning && status.CacheReadiness != "cache_schema_blocked", CheckedAt: time.Now().UTC(), BinaryVersion: s.Manager.Version, BinaryCommit: s.Manager.Commit, SchemaMin: cache.CurrentSchemaVersion(), SchemaMax: cache.CurrentSchemaVersion(), CacheReadiness: status.CacheReadiness, CacheSchemaBlocks: status.CacheSchemaBlocks}
+	schemaMin, schemaMax := s.Manager.schemaRange()
+	health := ServiceHealth{Status: status.Status, Healthy: status.Status == StatusRunning && status.CacheReadiness != "cache_schema_blocked", CheckedAt: time.Now().UTC(), BinaryVersion: s.Manager.Version, BinaryCommit: s.Manager.Commit, SchemaMin: schemaMin, SchemaMax: schemaMax, CacheReadiness: status.CacheReadiness, CacheSchemaBlocks: status.CacheSchemaBlocks}
 	if !health.Healthy {
 		health.Message = status.Message
 	}
@@ -410,6 +410,7 @@ func (s RPCServer) cacheSchemaBlocks(ctx context.Context) ([]CacheSchemaBlock, e
 	if err != nil {
 		return nil, err
 	}
+	schemaMin, schemaMax := s.Manager.schemaRange()
 	blocks := make([]CacheSchemaBlock, 0)
 	for _, entry := range result.Entries {
 		if entry.State != "cache_schema_blocked" {
@@ -419,7 +420,7 @@ func (s RPCServer) cacheSchemaBlocks(ctx context.Context) ([]CacheSchemaBlock, e
 			RegistrationID: entry.RegistrationID, RepoID: entry.RepoID, CacheUUID: entry.CacheUUID,
 			DetectedVersion: entry.DetectedSchemaVersion, ExpectedVersion: entry.ExpectedSchemaVersion,
 			DaemonBinaryVersion: entry.DaemonBinaryVersion, DaemonBinaryCommit: entry.DaemonBinaryCommit,
-			DaemonSchemaMin: cache.CurrentSchemaVersion(), DaemonSchemaMax: cache.CurrentSchemaVersion(), QuiesceState: entry.QuiesceState,
+			DaemonSchemaMin: schemaMin, DaemonSchemaMax: schemaMax, QuiesceState: entry.QuiesceState,
 		})
 	}
 	return blocks, nil

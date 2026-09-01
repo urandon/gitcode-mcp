@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -38,8 +40,9 @@ func (m *MaintenanceManager) adminEntries() []adminMaintenanceEntry {
 
 func (m Manager) adminObservation(ctx context.Context, jobs *JobManager, maintenance *MaintenanceManager, startedAt time.Time) (adminhttp.ObservationSnapshot, error) {
 	now := time.Now().UTC()
+	schemaMin, schemaMax := m.schemaRange()
 	snapshot := adminhttp.ObservationSnapshot{Service: adminhttp.ServiceObservation{
-		Version: m.Version, Commit: m.Commit, SchemaMin: cache.CurrentSchemaVersion(), SchemaMax: cache.CurrentSchemaVersion(), Protocol: "admin.v1", Running: true, StartedAt: adminTimePointer(startedAt), AdminSecure: true,
+		Version: m.Version, Commit: m.Commit, SchemaMin: schemaMin, SchemaMax: schemaMax, Protocol: "admin.v1", Running: true, StartedAt: adminTimePointer(startedAt), AdminSecure: true,
 	}}
 	if status, err := m.Status(); err == nil {
 		snapshot.Service.Installed = status.Installed
@@ -68,7 +71,7 @@ func (m Manager) adminObservation(ctx context.Context, jobs *JobManager, mainten
 	}
 	cacheGroups := groupAdminCaches(m.AdminCachePath, entries)
 	for _, group := range cacheGroups {
-		cacheView, diagnostics := buildAdminCache(ctx, group, entries, jobList, vectorByteCeiling, m.Version, m.Commit)
+		cacheView, diagnostics := buildAdminCache(ctx, group, entries, jobList, vectorByteCeiling, m.Version, m.Commit, schemaMin, schemaMax)
 		snapshot.Caches = append(snapshot.Caches, cacheView)
 		snapshot.Diagnostics = append(snapshot.Diagnostics, diagnostics...)
 	}
@@ -99,6 +102,159 @@ type adminCacheGroup struct {
 	path        string
 	uuid        string
 	fingerprint string
+}
+
+type adminCacheMigrationRecovery struct {
+	SchemaVersion     string `json:"schema_version"`
+	TargetSchema      int    `json:"target_schema"`
+	Phase             string `json:"phase"`
+	BackupVerified    bool   `json:"backup_verified"`
+	IdentityPreserved bool   `json:"identity_preserved"`
+}
+
+const adminCacheMigrationRecoverySchema = "gitcode-mcp.cache-migration-recovery.v1"
+
+type adminCacheMigrationReceipt struct {
+	SchemaVersion       string    `json:"schema_version"`
+	TargetSchema        int       `json:"target_schema"`
+	Phase               string    `json:"phase"`
+	BackupVerified      bool      `json:"backup_verified"`
+	IdentityPreserved   bool      `json:"identity_preserved"`
+	TargetBinaryVersion string    `json:"target_binary_version"`
+	TargetBinaryCommit  string    `json:"target_binary_commit"`
+	TargetSchemaMin     int       `json:"target_schema_min"`
+	TargetSchemaMax     int       `json:"target_schema_max"`
+	CompletedAt         time.Time `json:"completed_at"`
+}
+
+const adminCacheMigrationReceiptSchema = "gitcode-mcp.cache-migration-receipt.v1"
+
+func readAdminCacheMigrationRecovery(cachePath string) (adminCacheMigrationRecovery, bool, error) {
+	data, err := os.ReadFile(cachePath + ".migration-recovery.json")
+	if errors.Is(err, os.ErrNotExist) {
+		return adminCacheMigrationRecovery{}, false, nil
+	}
+	if err != nil {
+		return adminCacheMigrationRecovery{}, true, err
+	}
+	var recovery adminCacheMigrationRecovery
+	if err := json.Unmarshal(data, &recovery); err != nil {
+		return adminCacheMigrationRecovery{}, true, err
+	}
+	if recovery.SchemaVersion != adminCacheMigrationRecoverySchema || recovery.TargetSchema <= 0 {
+		return adminCacheMigrationRecovery{}, true, errors.New("unsupported cache migration recovery intent")
+	}
+	return recovery, true, nil
+}
+
+func readAdminCacheMigrationReceipt(cachePath string) (adminCacheMigrationReceipt, bool, error) {
+	data, err := os.ReadFile(cachePath + ".migration-receipt.json")
+	if errors.Is(err, os.ErrNotExist) {
+		return adminCacheMigrationReceipt{}, false, nil
+	}
+	if err != nil {
+		return adminCacheMigrationReceipt{}, true, err
+	}
+	var receipt adminCacheMigrationReceipt
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		return adminCacheMigrationReceipt{}, true, err
+	}
+	if receipt.SchemaVersion != adminCacheMigrationReceiptSchema || receipt.TargetSchema <= 0 || receipt.Phase != "healthy" || receipt.CompletedAt.IsZero() {
+		return adminCacheMigrationReceipt{}, true, errors.New("unsupported cache migration receipt")
+	}
+	return receipt, true, nil
+}
+
+func adminSchemaRecovery(binaryVersion, binaryCommit string, schemaMin, schemaMax, detected, expected int, recovery adminCacheMigrationRecovery, pending bool, recoveryErr error, receipt adminCacheMigrationReceipt, receiptPresent bool, receiptErr error, identityObserved bool) *adminhttp.SchemaRecoveryObservation {
+	target := expected
+	if recovery.TargetSchema > 0 {
+		target = recovery.TargetSchema
+	}
+	view := &adminhttp.SchemaRecoveryObservation{
+		State:               "migration_required",
+		Phase:               "awaiting_confirmation",
+		TargetSchemaVersion: target,
+		TargetBinaryVersion: binaryVersion,
+		TargetBinaryCommit:  binaryCommit,
+		TargetSchemaMin:     schemaMin,
+		TargetSchemaMax:     schemaMax,
+		TargetCompatible:    target >= schemaMin && target <= schemaMax,
+		BackupState:         "pending",
+		MigrationState:      "pending",
+		RestartState:        "pending",
+		DataState:           "intact",
+		IdentityState:       "retained",
+		Remediation:         "Run gitcode-mcp migrate-cache --confirm with the compatible binary.",
+	}
+	if detected > target {
+		view.State = "unsafe_refused"
+		view.Phase = "refused"
+		view.TargetCompatible = false
+		view.BackupState = "not_started"
+		view.MigrationState = "refused"
+		view.RestartState = "not_started"
+		view.Remediation = "Install a binary whose published schema range includes the detected cache schema; downgrade migration is refused."
+		return view
+	}
+	if recoveryErr != nil {
+		view.State = "interrupted_upgrade"
+		view.Phase = "recovery_intent_unreadable"
+		view.RestartState = "blocked"
+		view.Remediation = "Inspect service diagnostics, then resume the confirmed cache migration handoff."
+		return view
+	}
+	if pending {
+		view.State = "interrupted_upgrade"
+		view.Phase = recovery.Phase
+		view.BackupState = "pending"
+		view.MigrationState = "pending"
+		view.RestartState = "pending"
+		if recovery.BackupVerified {
+			view.BackupState = "verified"
+		}
+		if recovery.IdentityPreserved {
+			view.IdentityState = "preserved"
+		}
+		switch recovery.Phase {
+		case "migration_committed", "migration_complete_service_install_failed", "migration_complete_service_restart_failed", "migration_complete_service_health_failed", "migration_complete_recovery_intent_failed", "compatible_service_installed":
+			view.MigrationState = "complete"
+		}
+		switch recovery.Phase {
+		case "migration_complete_service_install_failed", "migration_complete_service_restart_failed", "migration_complete_service_health_failed", "migration_complete_recovery_intent_failed":
+			view.RestartState = "interrupted"
+		}
+		return view
+	}
+	if receiptErr != nil {
+		view.State = "interrupted_upgrade"
+		view.Phase = "recovery_receipt_unreadable"
+		view.BackupState = "unknown"
+		view.MigrationState = "unknown"
+		view.RestartState = "verification_required"
+		view.Remediation = "Inspect service diagnostics before allowing cache writers to resume."
+		return view
+	}
+	if receiptPresent && receipt.TargetSchema == detected && detected == expected && receipt.TargetBinaryVersion == binaryVersion && receipt.TargetBinaryCommit == binaryCommit && detected >= receipt.TargetSchemaMin && detected <= receipt.TargetSchemaMax {
+		view.State = "compatible_restart"
+		view.Phase = "healthy"
+		view.TargetSchemaVersion = receipt.TargetSchema
+		view.TargetBinaryVersion = receipt.TargetBinaryVersion
+		view.TargetBinaryCommit = receipt.TargetBinaryCommit
+		view.TargetSchemaMin = receipt.TargetSchemaMin
+		view.TargetSchemaMax = receipt.TargetSchemaMax
+		view.TargetCompatible = true
+		view.BackupState = "verified"
+		view.MigrationState = "complete"
+		view.RestartState = "compatible"
+		view.DataState = "available"
+		view.IdentityState = "observed"
+		if identityObserved {
+			view.IdentityState = "preserved"
+		}
+		view.Remediation = ""
+		return view
+	}
+	return nil
 }
 
 func groupAdminCaches(primaryPath string, entries []adminMaintenanceEntry) []adminCacheGroup {
@@ -138,12 +294,14 @@ func canonicalAdminCachePath(path string) string {
 	return path
 }
 
-func buildAdminCache(ctx context.Context, group adminCacheGroup, entries []adminMaintenanceEntry, jobs []Job, vectorByteCeiling int64, binaryVersion, binaryCommit string) (adminhttp.CacheObservation, []adminhttp.DiagnosticObservation) {
+func buildAdminCache(ctx context.Context, group adminCacheGroup, entries []adminMaintenanceEntry, jobs []Job, vectorByteCeiling int64, binaryVersion, binaryCommit string, schemaMin, schemaMax int) (adminhttp.CacheObservation, []adminhttp.DiagnosticObservation) {
 	view := adminhttp.CacheObservation{
 		CacheRef: publicCacheRef(group.uuid, group.path), PathFingerprint: group.fingerprint,
 		StorageMode: "managed", Readiness: "unavailable", ExpectedSchemaVersion: cache.CurrentSchemaVersion(),
 		DaemonBinaryVersion: binaryVersion, DaemonBinaryCommit: binaryCommit,
 	}
+	recovery, recoveryPending, recoveryErr := readAdminCacheMigrationRecovery(group.path)
+	receipt, receiptPresent, receiptErr := readAdminCacheMigrationReceipt(group.path)
 	var diagnostics []adminhttp.DiagnosticObservation
 	store, err := cache.NewSQLiteReadOnlyStore(ctx, group.path)
 	if err != nil {
@@ -153,6 +311,7 @@ func buildAdminCache(ctx context.Context, group adminCacheGroup, entries []admin
 			view.SchemaVersion = schemaErr.Compat.DetectedVersion
 			view.ExpectedSchemaVersion = schemaErr.Compat.ExpectedVersion
 			view.QuiesceState = "required"
+			view.SchemaRecovery = adminSchemaRecovery(binaryVersion, binaryCommit, schemaMin, schemaMax, view.SchemaVersion, view.ExpectedSchemaVersion, recovery, recoveryPending, recoveryErr, receipt, receiptPresent, receiptErr, group.uuid != "")
 			return view, []adminhttp.DiagnosticObservation{{
 				ID: "cache-schema-" + view.CacheRef, Severity: "error", EntityType: "cache", EntityID: view.CacheRef,
 				FailureClass: "cache_schema_blocked", Message: "The managed cache schema requires a compatible service binary before writers can resume.", Current: true,
@@ -167,8 +326,10 @@ func buildAdminCache(ctx context.Context, group adminCacheGroup, entries []admin
 	}
 	defer store.Close()
 	if identity, identityErr := store.CacheIdentity(ctx); identityErr == nil && identity.UUID != "" {
+		identityObserved := group.uuid == "" || group.uuid == identity.UUID
 		group.uuid = identity.UUID
 		view.CacheRef = publicCacheRef(identity.UUID, group.path)
+		view.SchemaRecovery = adminSchemaRecovery(binaryVersion, binaryCommit, schemaMin, schemaMax, cache.CurrentSchemaVersion(), cache.CurrentSchemaVersion(), recovery, recoveryPending, recoveryErr, receipt, receiptPresent, receiptErr, identityObserved)
 	}
 	view.Readiness = "ready"
 	view.SchemaVersion, err = store.SchemaVersion(ctx)

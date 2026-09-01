@@ -4437,8 +4437,27 @@ type cacheMigrationRecovery struct {
 
 const cacheMigrationRecoverySchema = "gitcode-mcp.cache-migration-recovery.v1"
 
+type cacheMigrationReceipt struct {
+	SchemaVersion       string    `json:"schema_version"`
+	TargetSchema        int       `json:"target_schema"`
+	Phase               string    `json:"phase"`
+	BackupVerified      bool      `json:"backup_verified"`
+	IdentityPreserved   bool      `json:"identity_preserved"`
+	TargetBinaryVersion string    `json:"target_binary_version"`
+	TargetBinaryCommit  string    `json:"target_binary_commit,omitempty"`
+	TargetSchemaMin     int       `json:"target_schema_min"`
+	TargetSchemaMax     int       `json:"target_schema_max"`
+	CompletedAt         time.Time `json:"completed_at"`
+}
+
+const cacheMigrationReceiptSchema = "gitcode-mcp.cache-migration-receipt.v1"
+
 func cacheMigrationRecoveryPath(cachePath string) string {
 	return cachePath + ".migration-recovery.json"
+}
+
+func cacheMigrationReceiptPath(cachePath string) string {
+	return cachePath + ".migration-receipt.json"
 }
 
 func readCacheMigrationRecovery(cachePath string) (cacheMigrationRecovery, bool, error) {
@@ -4483,6 +4502,24 @@ func clearCacheMigrationRecovery(cachePath string) error {
 		return nil
 	}
 	return err
+}
+
+func writeCacheMigrationReceipt(cachePath string, receipt cacheMigrationReceipt) error {
+	receipt.SchemaVersion = cacheMigrationReceiptSchema
+	data, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := cacheMigrationReceiptPath(cachePath)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
+		return fmt.Errorf("cache migration receipt cannot be written: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("cache migration receipt cannot be committed: %w", err)
+	}
+	return nil
 }
 
 type repoLocalInitResult struct {
@@ -4758,6 +4795,9 @@ func executeMigrateCacheCommand(ctx context.Context, opts options, stdout io.Wri
 		mr.RecoveryState = recovery.Phase
 	}
 	needsMigration := inspection.Compatibility.Compatible && inspection.FromVersion > 1 && inspection.FromVersion < inspection.ToVersion
+	if recoveryPending && !opts.confirm {
+		return writeMigrateCacheRecoveryFailure(stdout, stderr, opts.format, mr, "cache_schema_recovery_confirmation_required")
+	}
 	if opts.confirm && needsMigration && !recoveryPending && (serviceStatus.Installed || serviceStatus.Running || serviceStatus.PIDAlive) {
 		recovery = cacheMigrationRecovery{
 			TargetSchema: inspection.ToVersion, Phase: "coordination_planned",
@@ -4809,6 +4849,7 @@ func executeMigrateCacheCommand(ctx context.Context, opts options, stdout io.Wri
 		}
 	}
 	if opts.confirm && recoveryPending {
+		var compatibleService servicectl.Status
 		if recovery.ServiceInstalled {
 			if _, err := migrationService.Install(true); err != nil {
 				mr.RecoveryState = "migration_complete_service_install_failed"
@@ -4834,7 +4875,24 @@ func executeMigrateCacheCommand(ctx context.Context, opts options, stdout io.Wri
 				_ = writeCacheMigrationRecovery(cachePath, recovery)
 				return writeMigrateCacheRecoveryFailure(stdout, stderr, opts.format, mr, "cache_schema_service_health_failed")
 			}
+			compatibleService = started
 			mr.ServiceRestarted = true
+			mr.DaemonVersion = started.BinaryVersion
+			mr.DaemonCommit = started.BinaryCommit
+			mr.DaemonSchemaMin = started.SchemaMin
+			mr.DaemonSchemaMax = started.SchemaMax
+		}
+		if err := writeCacheMigrationReceipt(cachePath, cacheMigrationReceipt{
+			TargetSchema: recovery.TargetSchema, Phase: "healthy",
+			BackupVerified: recovery.BackupVerified, IdentityPreserved: recovery.IdentityPreserved,
+			TargetBinaryVersion: compatibleService.BinaryVersion, TargetBinaryCommit: compatibleService.BinaryCommit,
+			TargetSchemaMin: compatibleService.SchemaMin, TargetSchemaMax: compatibleService.SchemaMax,
+			CompletedAt: time.Now().UTC(),
+		}); err != nil {
+			mr.RecoveryState = "healthy_receipt_failed"
+			recovery.Phase = mr.RecoveryState
+			_ = writeCacheMigrationRecovery(cachePath, recovery)
+			return writeMigrateCacheRecoveryFailure(stdout, stderr, opts.format, mr, "cache_schema_recovery_receipt_failed")
 		}
 		if err := clearCacheMigrationRecovery(cachePath); err != nil {
 			mr.RecoveryState = "healthy_recovery_intent_cleanup_failed"

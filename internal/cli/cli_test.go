@@ -9,12 +9,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -129,6 +130,8 @@ func (f *fakeCacheMigrationService) Start(context.Context) (servicectl.Status, e
 	}
 	f.status.Running = true
 	f.status.PIDAlive = true
+	f.status.BinaryVersion = "0.4.0"
+	f.status.BinaryCommit = "compatible-commit"
 	f.status.SchemaMin = cache.CurrentSchemaVersion()
 	f.status.SchemaMax = cache.CurrentSchemaVersion()
 	return f.status, nil
@@ -196,6 +199,128 @@ func TestMigrateCacheCoordinatesDaemonAndReportsVerifiedRecovery(t *testing.T) {
 	}
 }
 
+// TestMigrateCacheDaemonProcess is a subprocess entry point used by the
+// migration E2E below. It runs the real servicectl coordinator (RPC listener,
+// durable state, job recovery, and maintenance scheduler) in a separate OS
+// process. The heartbeat makes the scheduler lifecycle externally observable:
+// after bootout returns, the old process must never emit another tick.
+func TestMigrateCacheDaemonProcess(t *testing.T) {
+	if os.Getenv("GITCODE_MCP_MIGRATION_DAEMON") != "1" {
+		return
+	}
+	schemaVersion, err := strconv.Atoi(os.Getenv("GITCODE_MCP_DAEMON_SCHEMA"))
+	if err != nil || schemaVersion <= 0 {
+		t.Fatalf("invalid helper schema %q: %v", os.Getenv("GITCODE_MCP_DAEMON_SCHEMA"), err)
+	}
+	src := &repoInitLocalSource{
+		env: map[string]string{}, cwd: os.Getenv("GITCODE_MCP_DAEMON_ROOT"),
+		homeDir: os.Getenv("GITCODE_MCP_DAEMON_HOME"), configDir: os.Getenv("GITCODE_MCP_DAEMON_CONFIG"), cacheDir: os.Getenv("GITCODE_MCP_DAEMON_CACHE"),
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	heartbeatPath := os.Getenv("GITCODE_MCP_DAEMON_HEARTBEAT")
+	identity := os.Getenv("GITCODE_MCP_DAEMON_COMMIT")
+	go func() {
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				file, openErr := os.OpenFile(heartbeatPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+				if openErr == nil {
+					_, _ = fmt.Fprintln(file, identity)
+					_ = file.Close()
+				}
+			}
+		}
+	}()
+	manager := servicectl.Manager{
+		Source: src, Version: os.Getenv("GITCODE_MCP_DAEMON_VERSION"), Commit: identity,
+		SchemaMin: schemaVersion, SchemaMax: schemaVersion, GOOS: "darwin",
+	}
+	if err := manager.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}
+
+func copyMigrationTestBinary(t *testing.T, destination string) {
+	t.Helper()
+	source, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := os.Open(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	out, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		t.Fatal(err)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func migrationDaemonCommand(binary string, src *repoInitLocalSource, heartbeatPath, version, commit string, schemaVersion int) (*exec.Cmd, *bytes.Buffer) {
+	cmd := exec.Command(binary, "-test.run=^TestMigrateCacheDaemonProcess$")
+	cmd.Env = append(os.Environ(),
+		"GITCODE_MCP_MIGRATION_DAEMON=1",
+		"GITCODE_MCP_DAEMON_ROOT="+src.cwd,
+		"GITCODE_MCP_DAEMON_HOME="+src.homeDir,
+		"GITCODE_MCP_DAEMON_CONFIG="+src.configDir,
+		"GITCODE_MCP_DAEMON_CACHE="+src.cacheDir,
+		"GITCODE_MCP_DAEMON_HEARTBEAT="+heartbeatPath,
+		"GITCODE_MCP_DAEMON_VERSION="+version,
+		"GITCODE_MCP_DAEMON_COMMIT="+commit,
+		"GITCODE_MCP_DAEMON_SCHEMA="+strconv.Itoa(schemaVersion),
+	)
+	logs := &bytes.Buffer{}
+	cmd.Stdout = logs
+	cmd.Stderr = logs
+	return cmd, logs
+}
+
+func waitForMigrationDaemon(t *testing.T, manager servicectl.Manager, version, commit string, schemaVersion int) servicectl.Status {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		status, err := manager.Status()
+		if err == nil && status.Running && status.BinaryVersion == version && status.BinaryCommit == commit && status.SchemaMin == schemaVersion && status.SchemaMax == schemaVersion {
+			return status
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	status, err := manager.Status()
+	t.Fatalf("daemon did not publish healthy identity %s/%s schema=%d: status=%+v err=%v", version, commit, schemaVersion, status, err)
+	return servicectl.Status{}
+}
+
+func heartbeatCount(t *testing.T, path, identity string) int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == identity {
+			count++
+		}
+	}
+	return count
+}
+
 func TestMigrateCacheEndToEndReplacesOldDaemonAfterSchemaUpgrade(t *testing.T) {
 	ctx := context.Background()
 	dir, err := os.MkdirTemp("/tmp", "gcm-migration-e2e-")
@@ -229,11 +354,10 @@ func TestMigrateCacheEndToEndReplacesOldDaemonAfterSchemaUpgrade(t *testing.T) {
 	oldBinary := filepath.Join(dir, "gitcode-mcp-old")
 	newBinary := filepath.Join(dir, "gitcode-mcp-new")
 	for _, binary := range []string{oldBinary, newBinary} {
-		if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-			t.Fatal(err)
-		}
+		copyMigrationTestBinary(t, binary)
 	}
-	oldManager := servicectl.Manager{Source: src, BinaryPath: oldBinary, Version: "0.3.0", Commit: "old-daemon", GOOS: "darwin"}
+	heartbeatPath := filepath.Join(dir, "scheduler-heartbeats.log")
+	oldManager := servicectl.Manager{Source: src, BinaryPath: oldBinary, Version: "0.3.0", Commit: "old-daemon", SchemaMin: 18, SchemaMax: 18, GOOS: "darwin"}
 	if _, err := oldManager.Install(false); err != nil {
 		t.Fatal(err)
 	}
@@ -241,33 +365,27 @@ func TestMigrateCacheEndToEndReplacesOldDaemonAfterSchemaUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(paths.RuntimeDir, 0o700); err != nil {
+	oldDaemon, oldLogs := migrationDaemonCommand(oldBinary, src, heartbeatPath, "0.3.0", "old-daemon", 18)
+	if err := oldDaemon.Start(); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC()
-	oldState := servicectl.State{PID: os.Getpid(), SocketPath: paths.SocketPath, StartedAt: now, UpdatedAt: now, Version: "0.3.0", Commit: "old-daemon", SchemaMin: 18, SchemaMax: 18}
-	stateData, err := json.MarshalIndent(oldState, "", "  ")
-	if err != nil {
-		t.Fatal(err)
+	oldWaited := false
+	oldStatus := waitForMigrationDaemon(t, oldManager, "0.3.0", "old-daemon", 18)
+	deadline := time.Now().Add(time.Second)
+	for heartbeatCount(t, heartbeatPath, "old-daemon") == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
 	}
-	if err := os.WriteFile(paths.StatePath, append(stateData, '\n'), 0o600); err != nil {
-		t.Fatal(err)
+	if heartbeatCount(t, heartbeatPath, "old-daemon") == 0 {
+		t.Fatalf("old daemon scheduler emitted no heartbeat; logs=%s", oldLogs.String())
 	}
-	if err := os.WriteFile(paths.PIDPath, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	oldListener, err := net.Listen("unix", paths.SocketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = oldListener.Close(); _ = os.Remove(paths.SocketPath) })
 
 	loaded := true
-	var replacementListener net.Listener
+	var replacementDaemon *exec.Cmd
+	var replacementLogs *bytes.Buffer
 	var platformCalls []string
 	manager := servicectl.Manager{
-		Source: src, BinaryPath: newBinary, Version: "0.4.0", Commit: "new-daemon", GOOS: "darwin",
-		StartupTimeout: time.Second, StartupInterval: time.Millisecond,
+		Source: src, BinaryPath: newBinary, Version: "0.4.0", Commit: "new-daemon", SchemaMin: cache.CurrentSchemaVersion(), SchemaMax: cache.CurrentSchemaVersion(), GOOS: "darwin",
+		StartupTimeout: 5 * time.Second, StartupInterval: 5 * time.Millisecond,
 	}
 	manager.OutputRunner = func(_ context.Context, name string, args ...string) (string, error) {
 		platformCalls = append(platformCalls, strings.Join(append([]string{name}, args...), " "))
@@ -284,33 +402,35 @@ func TestMigrateCacheEndToEndReplacesOldDaemonAfterSchemaUpgrade(t *testing.T) {
 		switch args[0] {
 		case "bootout":
 			loaded = false
-			_ = oldListener.Close()
-			_ = os.Remove(paths.SocketPath)
-			_ = os.Remove(paths.StatePath)
-			_ = os.Remove(paths.PIDPath)
+			if oldDaemon.Process == nil {
+				return errors.New("old daemon was not started")
+			}
+			if err := oldDaemon.Process.Signal(syscall.SIGTERM); err != nil {
+				return err
+			}
+			if err := oldDaemon.Wait(); err != nil {
+				return fmt.Errorf("old daemon did not stop cleanly: %w; logs=%s", err, oldLogs.String())
+			}
+			oldWaited = true
 		case "bootstrap":
+			if !oldWaited || oldDaemon.ProcessState == nil || !oldDaemon.ProcessState.Exited() {
+				return errors.New("refusing migration bootstrap while old daemon scheduler is still alive")
+			}
 			loaded = true
 		case "kickstart":
-			started := time.Now().UTC()
-			state := servicectl.State{PID: os.Getpid(), SocketPath: paths.SocketPath, StartedAt: started, UpdatedAt: started, Version: manager.Version, Commit: manager.Commit, SchemaMin: cache.CurrentSchemaVersion(), SchemaMax: cache.CurrentSchemaVersion()}
-			data, marshalErr := json.MarshalIndent(state, "", "  ")
-			if marshalErr != nil {
-				return marshalErr
-			}
-			if writeErr := os.WriteFile(paths.StatePath, append(data, '\n'), 0o600); writeErr != nil {
-				return writeErr
-			}
-			if writeErr := os.WriteFile(paths.PIDPath, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); writeErr != nil {
-				return writeErr
-			}
-			replacementListener, err = net.Listen("unix", paths.SocketPath)
-			return err
+			replacementDaemon, replacementLogs = migrationDaemonCommand(newBinary, src, heartbeatPath, manager.Version, manager.Commit, cache.CurrentSchemaVersion())
+			return replacementDaemon.Start()
 		}
 		return nil
 	}
 	t.Cleanup(func() {
-		if replacementListener != nil {
-			_ = replacementListener.Close()
+		if !oldWaited && oldDaemon.Process != nil {
+			_ = oldDaemon.Process.Signal(syscall.SIGTERM)
+			_ = oldDaemon.Wait()
+		}
+		if replacementDaemon != nil && replacementDaemon.Process != nil {
+			_ = replacementDaemon.Process.Signal(syscall.SIGTERM)
+			_ = replacementDaemon.Wait()
 		}
 	})
 
@@ -326,6 +446,20 @@ func TestMigrateCacheEndToEndReplacesOldDaemonAfterSchemaUpgrade(t *testing.T) {
 	if result.Status != "migrated" || result.RecoveryState != "healthy" || !result.ServiceQuiesced || !result.ServiceRestarted || !result.BackupVerified || !result.IdentityPreserved {
 		t.Fatalf("result=%+v", result)
 	}
+	if result.DaemonVersion != manager.Version || result.DaemonCommit != manager.Commit {
+		t.Fatalf("migration did not report compatible target identity: %+v", result)
+	}
+	receiptData, err := os.ReadFile(cacheMigrationReceiptPath(cachePath))
+	if err != nil {
+		t.Fatalf("read migration receipt: %v", err)
+	}
+	var receipt cacheMigrationReceipt
+	if err := json.Unmarshal(receiptData, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if receipt.SchemaVersion != cacheMigrationReceiptSchema || receipt.Phase != "healthy" || receipt.TargetBinaryVersion != manager.Version || receipt.TargetBinaryCommit != manager.Commit || receipt.TargetSchema != cache.CurrentSchemaVersion() || !receipt.BackupVerified || !receipt.IdentityPreserved || receipt.CompletedAt.IsZero() {
+		t.Fatalf("migration receipt=%+v", receipt)
+	}
 	installed, err := os.ReadFile(paths.InstallPath)
 	if err != nil {
 		t.Fatal(err)
@@ -338,7 +472,19 @@ func TestMigrateCacheEndToEndReplacesOldDaemonAfterSchemaUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !status.Running || status.BinaryVersion != manager.Version || status.BinaryCommit != manager.Commit || status.SchemaMin != cache.CurrentSchemaVersion() || status.SchemaMax != cache.CurrentSchemaVersion() {
-		t.Fatalf("replacement daemon status=%+v", status)
+		t.Fatalf("replacement daemon status=%+v logs=%s", status, replacementLogs.String())
+	}
+	if status.PID == oldStatus.PID || replacementDaemon == nil || replacementDaemon.Process == nil || status.PID != replacementDaemon.Process.Pid {
+		t.Fatalf("replacement process identity is not authoritative: old_pid=%d new_pid=%d status_pid=%d", oldStatus.PID, replacementDaemon.Process.Pid, status.PID)
+	}
+	oldHeartbeats := heartbeatCount(t, heartbeatPath, "old-daemon")
+	newHeartbeats := heartbeatCount(t, heartbeatPath, "new-daemon")
+	time.Sleep(40 * time.Millisecond)
+	if got := heartbeatCount(t, heartbeatPath, "old-daemon"); got != oldHeartbeats {
+		t.Fatalf("old daemon continued scheduling after migration: before=%d after=%d", oldHeartbeats, got)
+	}
+	if got := heartbeatCount(t, heartbeatPath, "new-daemon"); got <= newHeartbeats {
+		t.Fatalf("replacement daemon scheduler did not advance: before=%d after=%d logs=%s", newHeartbeats, got, replacementLogs.String())
 	}
 	joined := strings.Join(platformCalls, "\n")
 	if !strings.Contains(joined, "launchctl bootout") || !strings.Contains(joined, "launchctl bootstrap") || !strings.Contains(joined, "launchctl kickstart") {
@@ -391,6 +537,30 @@ func TestMigrateCacheResumesServiceRecoveryAfterCommittedMigration(t *testing.T)
 		t.Fatalf("durable recovery intent missing: %v", err)
 	}
 
+	coordinator.calls = nil
+	stdout.Reset()
+	stderr.Reset()
+	code = executeWithFactoryAndDepsContext(ctx, []string{"migrate-cache", "--cache-path", cachePath, "--format", "json"}, &stdout, &stderr, nil, localCommandDeps{Source: src, MigrationService: coordinator})
+	if code == 0 {
+		t.Fatalf("unconfirmed recovery unexpectedly succeeded: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	var unconfirmed migrateCacheResult
+	if err := json.Unmarshal(stdout.Bytes(), &unconfirmed); err != nil {
+		t.Fatalf("decode unconfirmed recovery result: %v output=%q", err, stdout.String())
+	}
+	if unconfirmed.Status != "recovery_required" || unconfirmed.RecoveryState != "migration_complete_service_install_failed" {
+		t.Fatalf("unconfirmed recovery result=%+v", unconfirmed)
+	}
+	if !strings.Contains(unconfirmed.Remediation, "migrate-cache --confirm") {
+		t.Fatalf("unconfirmed recovery remediation=%q", unconfirmed.Remediation)
+	}
+	if got, want := strings.Join(coordinator.calls, ","), "status"; got != want {
+		t.Fatalf("unconfirmed recovery calls=%q want=%q", got, want)
+	}
+	if _, err := os.Stat(cacheMigrationRecoveryPath(cachePath)); err != nil {
+		t.Fatalf("unconfirmed recovery removed durable intent: %v", err)
+	}
+
 	coordinator.installErr = nil
 	coordinator.calls = nil
 	stdout.Reset()
@@ -411,6 +581,13 @@ func TestMigrateCacheResumesServiceRecoveryAfterCommittedMigration(t *testing.T)
 	}
 	if _, err := os.Stat(cacheMigrationRecoveryPath(cachePath)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("recovery intent retained after health verification: %v", err)
+	}
+	receiptData, err := os.ReadFile(cacheMigrationReceiptPath(cachePath))
+	if err != nil {
+		t.Fatalf("successful retry did not publish recovery receipt: %v", err)
+	}
+	if strings.Contains(string(receiptData), cachePath) || strings.Contains(string(receiptData), failed.BackupPath) {
+		t.Fatalf("migration receipt leaked a filesystem path: %s", receiptData)
 	}
 }
 

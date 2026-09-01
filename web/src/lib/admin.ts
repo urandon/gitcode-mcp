@@ -109,6 +109,22 @@ export type CacheObservation = {
   daemon_binary_version?: string;
   daemon_binary_commit?: string;
   quiesce_state?: string;
+  schema_recovery?: {
+    state: 'migration_required' | 'unsafe_refused' | 'interrupted_upgrade' | 'compatible_restart';
+    phase: string;
+    target_schema_version: number;
+    target_binary_version?: string;
+    target_binary_commit?: string;
+    target_schema_min?: number;
+    target_schema_max?: number;
+    target_compatible: boolean;
+    backup_state: string;
+    migration_state: string;
+    restart_state: string;
+    data_state: string;
+    identity_state: string;
+    remediation?: string;
+  };
   wal_capable: boolean;
   journal_mode?: string;
   record_count: number;

@@ -86,10 +86,16 @@ type Status struct {
 }
 
 type Manager struct {
-	Source                config.Source
-	BinaryPath            string
-	Version               string
-	Commit                string
+	Source     config.Source
+	BinaryPath string
+	Version    string
+	Commit     string
+	// SchemaMin/SchemaMax describe the cache contract published by this daemon
+	// binary. Zero values select the schema compiled into the current binary.
+	// Explicit values are useful to launch compatibility fixtures as real daemon
+	// processes instead of faking their state files.
+	SchemaMin             int
+	SchemaMax             int
 	RuntimeDir            string
 	AdminBind             string
 	AdminAutoStart        bool
@@ -112,6 +118,17 @@ type Manager struct {
 
 type CommandRunner func(context.Context, string, ...string) error
 type CommandOutputRunner func(context.Context, string, ...string) (string, error)
+
+func (m Manager) schemaRange() (int, int) {
+	minimum, maximum := m.SchemaMin, m.SchemaMax
+	if minimum <= 0 {
+		minimum = cache.CurrentSchemaVersion()
+	}
+	if maximum <= 0 {
+		maximum = cache.CurrentSchemaVersion()
+	}
+	return minimum, maximum
+}
 
 func effectiveJobConfig(manager Manager, cachePath string) (config.EffectiveConfig, error) {
 	if manager.EffectiveConfig != nil {
@@ -230,6 +247,7 @@ func (m Manager) Status() (Status, error) {
 	}
 	socketPresent := paths.Network != "unix" || unixSocketExists(paths.SocketPath)
 	pidAlive := stateOK && processAlive(state.PID)
+	schemaMin, schemaMax := m.schemaRange()
 	status := Status{
 		Status:        StatusNotInstalled,
 		Installed:     installed,
@@ -243,8 +261,8 @@ func (m Manager) Status() (Status, error) {
 		InstallKind:   paths.InstallKind,
 		BinaryVersion: m.Version,
 		BinaryCommit:  m.Commit,
-		SchemaMin:     cache.CurrentSchemaVersion(),
-		SchemaMax:     cache.CurrentSchemaVersion(),
+		SchemaMin:     schemaMin,
+		SchemaMax:     schemaMax,
 	}
 	if stateOK {
 		status.PID = state.PID
@@ -445,7 +463,8 @@ func (m Manager) Run(ctx context.Context) error {
 		_ = os.Remove(paths.SocketPath)
 	}
 	now := time.Now().UTC()
-	state := State{PID: os.Getpid(), SocketPath: paths.SocketPath, StartedAt: now, UpdatedAt: now, Version: m.Version, Commit: m.Commit, SchemaMin: cache.CurrentSchemaVersion(), SchemaMax: cache.CurrentSchemaVersion()}
+	schemaMin, schemaMax := m.schemaRange()
+	state := State{PID: os.Getpid(), SocketPath: paths.SocketPath, StartedAt: now, UpdatedAt: now, Version: m.Version, Commit: m.Commit, SchemaMin: schemaMin, SchemaMax: schemaMax}
 	if err := writeState(paths, state); err != nil {
 		return err
 	}
