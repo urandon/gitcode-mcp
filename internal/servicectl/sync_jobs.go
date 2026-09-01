@@ -389,7 +389,7 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 			state = stage.State
 			state.Phase = SyncStageCommitted
 			state.CommittedAt = time.Now().UTC()
-			state.BlockerClass, state.BlockingOp = "", ""
+			state.BlockerClass, state.BlockingOp, state.BlockingJobRef = "", "", ""
 			stage, err = journal.UpdateState(stage.StageID, state)
 			if err != nil {
 				collection := syncCollectionResult{RemoteType: work.remoteType, Result: result, Err: err}
@@ -411,6 +411,7 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 		}
 		state, retry := nextSyncCommitRetry(stage.StageID, stage.State, time.Now().UTC())
 		state.BlockingOp = contention.PublicOperation()
+		state.BlockingJobRef = m.blockingCacheWriterRef(jobID, stage.CacheUUID)
 		stage, err = journal.UpdateState(stage.StageID, state)
 		if err != nil {
 			collection := syncCollectionResult{RemoteType: work.remoteType, Result: result, Err: err}
@@ -649,7 +650,7 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 		if commitErr == nil {
 			state = stage.State
 			state.Phase, state.CommittedAt = SyncStageCommitted, time.Now().UTC()
-			state.BlockerClass, state.BlockingOp, state.RetryAfter = "", "", time.Time{}
+			state.BlockerClass, state.BlockingOp, state.BlockingJobRef, state.RetryAfter = "", "", "", time.Time{}
 			stage, err = journal.UpdateState(stage.StageID, state)
 			if err == nil {
 				m.setJobSyncStage(stage.JobID, stage, "recovered staged batch committed")
@@ -665,6 +666,7 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 		}
 		state, retry := nextSyncCommitRetry(stage.StageID, stage.State, time.Now().UTC())
 		state.BlockingOp = contention.PublicOperation()
+		state.BlockingJobRef = m.blockingCacheWriterRef(stage.JobID, stage.CacheUUID)
 		stage, err = journal.UpdateState(stage.StageID, state)
 		if err != nil || !retry {
 			if err != nil {
@@ -683,6 +685,30 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 			continue
 		}
 	}
+}
+
+// blockingCacheWriterRef exposes only the retained public job identifier. It
+// deliberately excludes the current durable sync worker and never returns a
+// cache path or other private writer metadata.
+func (m *JobManager) blockingCacheWriterRef(currentJobID, cacheUUID string) string {
+	cacheUUID = strings.TrimSpace(cacheUUID)
+	if cacheUUID == "" {
+		return ""
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if writerID := m.directCacheWriters[cacheUUID]; writerID != "" && writerID != currentJobID {
+		return writerID
+	}
+	for id, job := range m.jobs {
+		if id == currentJobID || job.CacheUUID != cacheUUID || !isCacheWriterJob(job.Type) {
+			continue
+		}
+		if jobActiveStatus(job.Status) || m.inflightWorkers[id] {
+			return job.ID
+		}
+	}
+	return ""
 }
 
 // acquireSyncCommitTurn provides FIFO admission among staged commits sharing a

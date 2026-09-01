@@ -175,6 +175,7 @@ export type Job = {
     retry_after?: string;
     blocker_class?: string;
     blocking_operation?: string;
+    blocking_job_ref?: string;
     fetched_at?: string;
     staged_at?: string;
     committed_at?: string;

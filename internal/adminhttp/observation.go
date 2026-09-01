@@ -311,21 +311,22 @@ type JobObservation struct {
 }
 
 type SyncStageObservation struct {
-	StageRef      string    `json:"stage_ref"`
-	Phase         string    `json:"phase"`
-	Fetched       int       `json:"fetched"`
-	Staged        int       `json:"staged"`
-	Committed     int       `json:"committed"`
-	StagedBytes   int64     `json:"staged_bytes,omitempty"`
-	Attempt       int       `json:"attempt,omitempty"`
-	RetryBudget   int       `json:"retry_budget,omitempty"`
-	RetryAfter    time.Time `json:"retry_after,omitempty"`
-	BlockerClass  string    `json:"blocker_class,omitempty"`
-	BlockingOp    string    `json:"blocking_operation,omitempty"`
-	FetchedAt     time.Time `json:"fetched_at,omitempty"`
-	StagedAt      time.Time `json:"staged_at,omitempty"`
-	CommittedAt   time.Time `json:"committed_at,omitempty"`
-	TerminalCause string    `json:"terminal_reason,omitempty"`
+	StageRef       string    `json:"stage_ref"`
+	Phase          string    `json:"phase"`
+	Fetched        int       `json:"fetched"`
+	Staged         int       `json:"staged"`
+	Committed      int       `json:"committed"`
+	StagedBytes    int64     `json:"staged_bytes,omitempty"`
+	Attempt        int       `json:"attempt,omitempty"`
+	RetryBudget    int       `json:"retry_budget,omitempty"`
+	RetryAfter     time.Time `json:"retry_after,omitempty"`
+	BlockerClass   string    `json:"blocker_class,omitempty"`
+	BlockingOp     string    `json:"blocking_operation,omitempty"`
+	BlockingJobRef string    `json:"blocking_job_ref,omitempty"`
+	FetchedAt      time.Time `json:"fetched_at,omitempty"`
+	StagedAt       time.Time `json:"staged_at,omitempty"`
+	CommittedAt    time.Time `json:"committed_at,omitempty"`
+	TerminalCause  string    `json:"terminal_reason,omitempty"`
 }
 
 type ProgressObservation struct {

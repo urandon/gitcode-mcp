@@ -754,7 +754,7 @@ func adminJobObservation(job Job) adminhttp.JobObservation {
 			StageRef: stage.StageRef, Phase: string(stage.Phase), Fetched: stage.Fetched,
 			Staged: stage.Staged, Committed: stage.Committed, StagedBytes: stage.StagedBytes, Attempt: stage.Attempt,
 			RetryBudget: stage.RetryBudget, RetryAfter: stage.RetryAfter,
-			BlockerClass: stage.BlockerClass, BlockingOp: stage.BlockingOp,
+			BlockerClass: stage.BlockerClass, BlockingOp: stage.BlockingOp, BlockingJobRef: stage.BlockingJobRef,
 			FetchedAt: stage.FetchedAt, StagedAt: stage.StagedAt,
 			CommittedAt: stage.CommittedAt, TerminalCause: stage.TerminalCause,
 		}

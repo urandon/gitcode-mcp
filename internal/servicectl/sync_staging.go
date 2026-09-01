@@ -47,6 +47,7 @@ type SyncStageState struct {
 	RetryAfter     time.Time      `json:"retry_after,omitempty"`
 	BlockerClass   string         `json:"blocker_class,omitempty"`
 	BlockingOp     string         `json:"blocking_operation,omitempty"`
+	BlockingJobRef string         `json:"blocking_job_ref,omitempty"`
 	FetchedAt      time.Time      `json:"fetched_at,omitempty"`
 	StagedAt       time.Time      `json:"staged_at,omitempty"`
 	CommittedAt    time.Time      `json:"committed_at,omitempty"`
@@ -81,25 +82,26 @@ type SyncStageEnvelope struct {
 // SyncStageView is the complete public contract. It deliberately has no local
 // path, idempotency key, checksum, checkpoint, provider revision, or payload.
 type SyncStageView struct {
-	StageRef      string         `json:"stage_ref"`
-	CacheRef      string         `json:"cache_ref"`
-	RepoID        string         `json:"repo_id"`
-	Collection    string         `json:"collection"`
-	Phase         SyncStagePhase `json:"phase"`
-	Fetched       int            `json:"fetched"`
-	Staged        int            `json:"staged"`
-	Committed     int            `json:"committed"`
-	StagedBytes   int64          `json:"staged_bytes,omitempty"`
-	Attempt       int            `json:"attempt,omitempty"`
-	RetryBudget   int            `json:"retry_budget,omitempty"`
-	RetryAfter    time.Time      `json:"retry_after,omitempty"`
-	BlockerClass  string         `json:"blocker_class,omitempty"`
-	BlockingOp    string         `json:"blocking_operation,omitempty"`
-	FetchedAt     time.Time      `json:"fetched_at,omitempty"`
-	StagedAt      time.Time      `json:"staged_at,omitempty"`
-	CommittedAt   time.Time      `json:"committed_at,omitempty"`
-	UpdatedAt     time.Time      `json:"updated_at"`
-	TerminalCause string         `json:"terminal_reason,omitempty"`
+	StageRef       string         `json:"stage_ref"`
+	CacheRef       string         `json:"cache_ref"`
+	RepoID         string         `json:"repo_id"`
+	Collection     string         `json:"collection"`
+	Phase          SyncStagePhase `json:"phase"`
+	Fetched        int            `json:"fetched"`
+	Staged         int            `json:"staged"`
+	Committed      int            `json:"committed"`
+	StagedBytes    int64          `json:"staged_bytes,omitempty"`
+	Attempt        int            `json:"attempt,omitempty"`
+	RetryBudget    int            `json:"retry_budget,omitempty"`
+	RetryAfter     time.Time      `json:"retry_after,omitempty"`
+	BlockerClass   string         `json:"blocker_class,omitempty"`
+	BlockingOp     string         `json:"blocking_operation,omitempty"`
+	BlockingJobRef string         `json:"blocking_job_ref,omitempty"`
+	FetchedAt      time.Time      `json:"fetched_at,omitempty"`
+	StagedAt       time.Time      `json:"staged_at,omitempty"`
+	CommittedAt    time.Time      `json:"committed_at,omitempty"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+	TerminalCause  string         `json:"terminal_reason,omitempty"`
 }
 
 func (e SyncStageEnvelope) PublicView() SyncStageView {
@@ -108,7 +110,7 @@ func (e SyncStageEnvelope) PublicView() SyncStageView {
 		RepoID: e.RepoID, Collection: e.Collection, Phase: e.State.Phase, StagedBytes: e.ByteCount,
 		Attempt: e.State.Attempt, RetryBudget: e.State.RetryBudget,
 		RetryAfter: e.State.RetryAfter, BlockerClass: e.State.BlockerClass,
-		BlockingOp: e.State.BlockingOp, FetchedAt: e.State.FetchedAt,
+		BlockingOp: e.State.BlockingOp, BlockingJobRef: e.State.BlockingJobRef, FetchedAt: e.State.FetchedAt,
 		StagedAt: e.State.StagedAt, CommittedAt: e.State.CommittedAt,
 		UpdatedAt: e.State.UpdatedAt, TerminalCause: e.State.TerminalReason,
 	}

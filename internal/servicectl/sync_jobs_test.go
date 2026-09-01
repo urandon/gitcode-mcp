@@ -369,6 +369,24 @@ func TestSyncCommitAdmissionIsFIFOAcrossRepositoriesSharingCache(t *testing.T) {
 	waitForSyncCommitQueueLength(t, jobs, "cache-shared", 0)
 }
 
+func TestBlockingCacheWriterRefIsPublicAndExcludesCurrentSync(t *testing.T) {
+	jobs := NewJobManager("")
+	jobs.jobs["sync-current"] = &Job{ID: "sync-current", Type: SyncJobType, CacheUUID: "cache-shared", Status: JobStatusRunning}
+	jobs.jobs["rag-blocker"] = &Job{ID: "rag-blocker", Type: RAGIndexJobType, CacheUUID: "cache-shared", Status: JobStatusRunning}
+	jobs.inflightWorkers["sync-current"] = true
+	jobs.inflightWorkers["rag-blocker"] = true
+	if got := jobs.blockingCacheWriterRef("sync-current", "cache-shared"); got != "rag-blocker" {
+		t.Fatalf("blocking ref=%q, want rag-blocker", got)
+	}
+	jobs.directCacheWriters["cache-shared"] = "admin-binding-public"
+	if got := jobs.blockingCacheWriterRef("sync-current", "cache-shared"); got != "admin-binding-public" {
+		t.Fatalf("direct blocking ref=%q, want admin-binding-public", got)
+	}
+	if got := jobs.blockingCacheWriterRef("sync-current", ""); got != "" {
+		t.Fatalf("empty cache blocking ref=%q", got)
+	}
+}
+
 func waitForSyncCommitQueueLength(t *testing.T, jobs *JobManager, cacheUUID string, want int) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
