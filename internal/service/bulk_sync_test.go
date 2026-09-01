@@ -78,6 +78,57 @@ func TestDurableIssueBatchFetchDoesNotHoldTargetWriterAndCommitDoesNotRefetch(t 
 	}
 }
 
+func TestDurablePullAndWikiBatchesCommitWithoutProviderReplay(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		listPRPages:   []gitcode.Page[gitcode.PullRequest]{{Items: []gitcode.PullRequest{{ID: "pr-7", Number: 7, Title: "Durable PR", Body: "pull body", State: "open", CreatedAt: base, UpdatedAt: base}}, Page: 1, PerPage: 100}},
+		listWikiPages: []gitcode.Page[gitcode.WikiPage]{{Items: []gitcode.WikiPage{{ID: "wiki-home", Slug: "Home", Title: "Home", Body: "wiki body", Revision: "rev-1", CreatedAt: base, UpdatedAt: base}}, Page: 1, PerPage: 100}},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "durable-mixed", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	held, err := store.AcquireWriter(ctx, cache.WriterRequest{Operation: "external-writer", RepoID: "durable-mixed", LockPath: svc.lockPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pulls, err := svc.FetchPullSyncBatch(ctx, BulkSyncRequest{RepoID: "durable-mixed", PerPage: 100, Bounds: &SyncBounds{MaxPages: 1}})
+	if err != nil {
+		t.Fatalf("FetchPullSyncBatch: %v", err)
+	}
+	wiki, err := svc.FetchWikiSyncBatch(ctx, BulkSyncRequest{RepoID: "durable-mixed", PerPage: 100, Bounds: &SyncBounds{MaxPages: 1}})
+	if err != nil {
+		t.Fatalf("FetchWikiSyncBatch: %v", err)
+	}
+	if _, err := svc.CommitPullSyncBatch(ctx, pulls, nil); err == nil {
+		t.Fatal("pull commit succeeded under external writer")
+	}
+	if _, err := svc.CommitWikiSyncBatch(ctx, wiki, nil); err == nil {
+		t.Fatal("wiki commit succeeded under external writer")
+	}
+	if client.listPRCalls != 1 || client.listWikiPagesCallCount != 1 {
+		t.Fatalf("provider calls after contention: pulls=%d wiki=%d", client.listPRCalls, client.listWikiPagesCallCount)
+	}
+	if err := store.ReleaseWriter(ctx, held); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := svc.CommitPullSyncBatch(ctx, pulls, nil); err != nil || result.SuccessCount != 1 {
+		t.Fatalf("CommitPullSyncBatch result=%+v err=%v", result, err)
+	}
+	if result, err := svc.CommitWikiSyncBatch(ctx, wiki, nil); err != nil || result.SuccessCount != 1 {
+		t.Fatalf("CommitWikiSyncBatch result=%+v err=%v", result, err)
+	}
+	if client.listPRCalls != 1 || client.listWikiPagesCallCount != 1 || client.wikiCalls != 0 {
+		t.Fatalf("commit replay called provider: pulls=%d wiki-list=%d wiki-detail=%d", client.listPRCalls, client.listWikiPagesCallCount, client.wikiCalls)
+	}
+}
+
 type aggregateIssueCommentClient struct {
 	*fakeGitCodeClient
 	pages    map[int]gitcode.Page[gitcode.Comment]

@@ -154,8 +154,8 @@ func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID stri
 	var result *service.SyncResourcesResult
 	var collections []syncCollectionResult
 	var err error
-	if syncIssuesOnly(req) {
-		result, collections, err = m.runDurableIssueSync(ctx, manager, jobID, req, progressCh)
+	if syncDurableCollections(req) {
+		result, collections, err = m.runDurableSync(ctx, manager, jobID, req, progressCh)
 	} else {
 		result, collections, err = runSync(ctx, manager, req, progressCh)
 	}
@@ -204,11 +204,26 @@ func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID stri
 	})
 }
 
-func syncIssuesOnly(req StartSyncJobRequest) bool {
-	return req.Issues && !req.Wiki && !req.Pulls && !req.Comments && !req.IssueComments && !req.PRComments
+func syncDurableCollections(req StartSyncJobRequest) bool {
+	return (req.Issues || req.Wiki || req.Pulls) && !req.Comments && !req.IssueComments && !req.PRComments
 }
 
-func (m *JobManager) runDurableIssueSync(ctx context.Context, manager Manager, jobID string, req StartSyncJobRequest, progressCh chan<- service.ProgressEvent) (*service.SyncResourcesResult, []syncCollectionResult, error) {
+type durableCollectionBatch struct {
+	payload          []byte
+	recordCount      int
+	checkpoint       string
+	providerRevision string
+	fetchedAt        time.Time
+}
+
+type durableCollectionWork struct {
+	collection string
+	remoteType string
+	fetch      func(context.Context) (durableCollectionBatch, error)
+	commit     func(context.Context, []byte) (*service.SyncResourcesResult, error)
+}
+
+func (m *JobManager) runDurableSync(ctx context.Context, manager Manager, jobID string, req StartSyncJobRequest, progressCh chan<- service.ProgressEvent) (*service.SyncResourcesResult, []syncCollectionResult, error) {
 	store, svc, err := newSyncJobService(ctx, manager, req)
 	if err != nil {
 		return nil, nil, err
@@ -219,17 +234,96 @@ func (m *JobManager) runDurableIssueSync(ctx context.Context, manager Manager, j
 		return nil, nil, err
 	}
 	bulkReq := syncBulkRequest(req, progressCh)
-	m.updateJob(jobID, func(job *Job, now time.Time) {
-		job.SyncStage = &SyncStageView{RepoID: req.RepoID, Collection: "issues", Phase: SyncStageFetching, UpdatedAt: now}
-		job.Progress = append(job.Progress, service.ProgressEvent{Type: "phase", Phase: string(SyncStageFetching), Collection: "issues", Message: "collection fetch started"})
-	})
-	batch, fetchErr := svc.FetchIssueSyncBatch(ctx, bulkReq)
-	if fetchErr != nil && batch.RecordCount() == 0 {
-		return nil, []syncCollectionResult{{RemoteType: "issue", Err: fetchErr}}, fetchErr
+	works := durableCollectionWorks(svc, bulkReq, req)
+	aggregate := &service.SyncResourcesResult{Results: []service.SyncResult{}, Failures: []service.ResourceError{}}
+	collections := make([]syncCollectionResult, 0, len(works))
+	var syncErr error
+	for _, work := range works {
+		result, collection, collectionErr := m.runDurableCollection(ctx, manager, jobID, req, schema, work)
+		mergeSyncResources(aggregate, result)
+		collections = append(collections, collection)
+		syncErr = mergeSyncError(syncErr, result, collectionErr)
+		if errors.Is(ctx.Err(), context.Canceled) {
+			break
+		}
 	}
-	payload, err := json.Marshal(batch)
-	if err != nil {
-		return nil, nil, err
+	return aggregate, collections, syncErr
+}
+
+func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncRequest, req StartSyncJobRequest) []durableCollectionWork {
+	works := make([]durableCollectionWork, 0, 3)
+	if req.Issues {
+		works = append(works, durableCollectionWork{
+			collection: "issues", remoteType: "issue",
+			fetch: func(ctx context.Context) (durableCollectionBatch, error) {
+				batch, err := svc.FetchIssueSyncBatch(ctx, bulkReq)
+				payload, marshalErr := json.Marshal(batch)
+				if marshalErr != nil {
+					return durableCollectionBatch{}, marshalErr
+				}
+				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.HighUpdatedAt.Format(time.RFC3339Nano), fetchedAt: batch.FetchedAt}, err
+			},
+			commit: func(ctx context.Context, payload []byte) (*service.SyncResourcesResult, error) {
+				var batch service.DurableIssueSyncBatch
+				if err := json.Unmarshal(payload, &batch); err != nil {
+					return nil, err
+				}
+				return svc.CommitIssueSyncBatch(ctx, batch, bulkReq.ProgressChan)
+			},
+		})
+	}
+	if req.Wiki {
+		works = append(works, durableCollectionWork{
+			collection: "wiki", remoteType: "wiki",
+			fetch: func(ctx context.Context) (durableCollectionBatch, error) {
+				batch, err := svc.FetchWikiSyncBatch(ctx, bulkReq)
+				payload, marshalErr := json.Marshal(batch)
+				if marshalErr != nil {
+					return durableCollectionBatch{}, marshalErr
+				}
+				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, fetchedAt: batch.FetchedAt}, err
+			},
+			commit: func(ctx context.Context, payload []byte) (*service.SyncResourcesResult, error) {
+				var batch service.DurableWikiSyncBatch
+				if err := json.Unmarshal(payload, &batch); err != nil {
+					return nil, err
+				}
+				return svc.CommitWikiSyncBatch(ctx, batch, bulkReq.ProgressChan)
+			},
+		})
+	}
+	if req.Pulls {
+		works = append(works, durableCollectionWork{
+			collection: "pulls", remoteType: "pull_request",
+			fetch: func(ctx context.Context) (durableCollectionBatch, error) {
+				batch, err := svc.FetchPullSyncBatch(ctx, bulkReq)
+				payload, marshalErr := json.Marshal(batch)
+				if marshalErr != nil {
+					return durableCollectionBatch{}, marshalErr
+				}
+				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.HighUpdatedAt.Format(time.RFC3339Nano), fetchedAt: batch.FetchedAt}, err
+			},
+			commit: func(ctx context.Context, payload []byte) (*service.SyncResourcesResult, error) {
+				var batch service.DurablePullSyncBatch
+				if err := json.Unmarshal(payload, &batch); err != nil {
+					return nil, err
+				}
+				return svc.CommitPullSyncBatch(ctx, batch, bulkReq.ProgressChan)
+			},
+		})
+	}
+	return works
+}
+
+func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, jobID string, req StartSyncJobRequest, schema int, work durableCollectionWork) (*service.SyncResourcesResult, syncCollectionResult, error) {
+	m.updateJob(jobID, func(job *Job, now time.Time) {
+		job.SyncStage = &SyncStageView{RepoID: req.RepoID, Collection: work.collection, Phase: SyncStageFetching, UpdatedAt: now}
+		job.Progress = append(job.Progress, service.ProgressEvent{Type: "phase", Phase: string(SyncStageFetching), Collection: work.collection, Message: "collection fetch started"})
+	})
+	batch, fetchErr := work.fetch(ctx)
+	if fetchErr != nil && batch.recordCount == 0 {
+		collection := syncCollectionResult{RemoteType: work.remoteType, Err: fetchErr}
+		return nil, collection, fetchErr
 	}
 	runtimeDir := strings.TrimSpace(manager.RuntimeDir)
 	if runtimeDir == "" && strings.TrimSpace(m.snapshotPath) != "" {
@@ -238,38 +332,49 @@ func (m *JobManager) runDurableIssueSync(ctx context.Context, manager Manager, j
 	journal := NewSyncStageJournal(runtimeDir, SyncStageLimits{})
 	stage, err := journal.Create(SyncStageEnvelope{
 		CacheUUID: req.CacheUUID, CacheSchema: schema, RegistrationID: req.RegistrationID,
-		RepoID: req.RepoID, Collection: "issues", Checkpoint: batch.StopReason,
-		ProviderRevision: batch.HighUpdatedAt.Format(time.RFC3339Nano),
-		IdempotencyKey:   req.IdempotencyKey, RecordCount: batch.RecordCount(), Payload: payload,
-		State: SyncStageState{Phase: SyncStageStaged, RetryBudget: defaultSyncCommitRetries, FetchedAt: batch.FetchedAt},
+		RepoID: req.RepoID, Collection: work.collection, Checkpoint: batch.checkpoint,
+		ProviderRevision: batch.providerRevision,
+		IdempotencyKey:   req.IdempotencyKey, RecordCount: batch.recordCount, Payload: batch.payload,
+		State: SyncStageState{Phase: SyncStageStaged, RetryBudget: defaultSyncCommitRetries, FetchedAt: batch.fetchedAt},
 	})
 	if err != nil {
-		return nil, nil, err
+		collection := syncCollectionResult{RemoteType: work.remoteType, Err: err}
+		return nil, collection, err
 	}
 	m.setJobSyncStage(jobID, stage, "collection batch staged")
 
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, []syncCollectionResult{{RemoteType: "issue", Err: err}}, err
+			collection := syncCollectionResult{RemoteType: work.remoteType, Err: err}
+			return nil, collection, err
 		}
-		identity, identityErr := store.CacheIdentity(ctx)
-		currentSchema, schemaErr := store.SchemaVersion(ctx)
+		identityStore, openErr := cache.NewSQLiteReadOnlyStore(ctx, req.CachePath)
+		if openErr != nil {
+			collection := syncCollectionResult{RemoteType: work.remoteType, Err: openErr}
+			return nil, collection, openErr
+		}
+		identity, identityErr := identityStore.CacheIdentity(ctx)
+		currentSchema, schemaErr := identityStore.SchemaVersion(ctx)
+		_ = identityStore.Close()
 		if identityErr != nil || schemaErr != nil || identity.UUID != stage.CacheUUID || currentSchema != stage.CacheSchema {
 			state := stage.State
 			state.Phase = SyncStageRejected
 			state.TerminalReason = "cache_identity_or_schema_changed"
 			stage, _ = journal.UpdateState(stage.StageID, state)
 			m.setJobSyncStage(jobID, stage, "staged batch rejected")
-			return nil, []syncCollectionResult{{RemoteType: "issue", Err: CacheWriterIdentityError{code: "cache_uuid_mismatch"}}}, CacheWriterIdentityError{code: "cache_uuid_mismatch"}
+			identityErr := CacheWriterIdentityError{code: "cache_uuid_mismatch"}
+			collection := syncCollectionResult{RemoteType: work.remoteType, Err: identityErr}
+			return nil, collection, identityErr
 		}
 		state := stage.State
 		state.Phase = SyncStageCommitting
 		stage, err = journal.UpdateState(stage.StageID, state)
 		if err != nil {
-			return nil, nil, err
+			collection := syncCollectionResult{RemoteType: work.remoteType, Err: err}
+			return nil, collection, err
 		}
 		m.setJobSyncStage(jobID, stage, "staged batch commit started")
-		result, commitErr := svc.CommitIssueSyncBatch(ctx, batch, progressCh)
+		result, commitErr := work.commit(ctx, stage.Payload)
 		if commitErr == nil {
 			state = stage.State
 			state.Phase = SyncStageCommitted
@@ -277,11 +382,13 @@ func (m *JobManager) runDurableIssueSync(ctx context.Context, manager Manager, j
 			state.BlockerClass, state.BlockingOp = "", ""
 			stage, err = journal.UpdateState(stage.StageID, state)
 			if err != nil {
-				return result, []syncCollectionResult{{RemoteType: "issue", Result: result, Err: err}}, err
+				collection := syncCollectionResult{RemoteType: work.remoteType, Result: result, Err: err}
+				return result, collection, err
 			}
 			m.setJobSyncStage(jobID, stage, "staged batch committed")
 			collectionErr := fetchErr
-			return result, []syncCollectionResult{{RemoteType: "issue", Result: result, Err: collectionErr}}, collectionErr
+			collection := syncCollectionResult{RemoteType: work.remoteType, Result: result, Err: collectionErr}
+			return result, collection, collectionErr
 		}
 		var contention cache.ErrLockContention
 		if !errors.As(commitErr, &contention) {
@@ -289,17 +396,20 @@ func (m *JobManager) runDurableIssueSync(ctx context.Context, manager Manager, j
 			state.Phase, state.TerminalReason = SyncStageRejected, maintenanceJobErrorClass(commitErr, "sync_commit_failed")
 			stage, _ = journal.UpdateState(stage.StageID, state)
 			m.setJobSyncStage(jobID, stage, "staged batch commit rejected")
-			return result, []syncCollectionResult{{RemoteType: "issue", Result: result, Err: commitErr}}, commitErr
+			collection := syncCollectionResult{RemoteType: work.remoteType, Result: result, Err: commitErr}
+			return result, collection, commitErr
 		}
 		state, retry := nextSyncCommitRetry(stage.StageID, stage.State, time.Now().UTC())
 		state.BlockingOp = contention.PublicOperation()
 		stage, err = journal.UpdateState(stage.StageID, state)
 		if err != nil {
-			return result, nil, err
+			collection := syncCollectionResult{RemoteType: work.remoteType, Result: result, Err: err}
+			return result, collection, err
 		}
 		m.setJobSyncStage(jobID, stage, "waiting for cache writer")
 		if !retry {
-			return result, []syncCollectionResult{{RemoteType: "issue", Result: result, Err: commitErr}}, commitErr
+			collection := syncCollectionResult{RemoteType: work.remoteType, Result: result, Err: commitErr}
+			return result, collection, commitErr
 		}
 		wait := time.Until(stage.State.RetryAfter)
 		if wait < 0 {
@@ -311,7 +421,8 @@ func (m *JobManager) runDurableIssueSync(ctx context.Context, manager Manager, j
 			if !timer.Stop() {
 				<-timer.C
 			}
-			return result, []syncCollectionResult{{RemoteType: "issue", Result: result, Err: ctx.Err()}}, ctx.Err()
+			collection := syncCollectionResult{RemoteType: work.remoteType, Result: result, Err: ctx.Err()}
+			return result, collection, ctx.Err()
 		case <-timer.C:
 		}
 	}
