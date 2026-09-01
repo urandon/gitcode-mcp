@@ -165,7 +165,7 @@ class UploadGitCodeAssetsTest(unittest.TestCase):
                 result = upload._urllib_request("PUT", "https://storage.example/object", {}, b"payload")
         self.assertEqual(result, {})
         self.assertEqual(urlopen.call_count, 2)
-        self.assertEqual(urlopen.call_args.kwargs["timeout"], upload.TRANSFER_REQUEST_TIMEOUT_SECONDS)
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], upload.UPLOAD_REQUEST_TIMEOUT_SECONDS)
         sleep.assert_called_once_with(upload.TRANSPORT_RETRY_DELAY_SECONDS)
 
     def test_non_replay_safe_request_is_not_retried(self):
@@ -198,8 +198,25 @@ class UploadGitCodeAssetsTest(unittest.TestCase):
         self.assertEqual(urlopen.call_count, 1)
         sleep.assert_not_called()
 
+    def test_header_validation_failure_is_sanitized_without_retry(self):
+        validation = ValueError("Invalid header value b'secret-callback\\nleak'")
+        with mock.patch.object(upload.urllib.request, "urlopen", side_effect=validation) as urlopen:
+            with mock.patch.object(upload.time, "sleep") as sleep:
+                with self.assertRaisesRegex(upload.UploadError, "transport_error") as failure:
+                    upload._urllib_request(
+                        "PUT",
+                        "https://storage.example/upload-secret",
+                        {"x-obs-callback": "secret-callback\\nleak"},
+                        b"payload",
+                    )
+        self.assertEqual(urlopen.call_count, 1)
+        sleep.assert_not_called()
+        self.assertNotIn("secret-callback", str(failure.exception))
+        self.assertNotIn("upload-secret", str(failure.exception))
+
     def test_download_size_uses_content_range_without_full_download(self):
         response = mock.MagicMock()
+        response.__enter__.return_value.status = 206
         response.__enter__.return_value.headers = {"Content-Range": "bytes 0-0/6419356"}
         response.__enter__.return_value.read.return_value = b"x"
         with mock.patch.object(upload.urllib.request, "urlopen", return_value=response) as urlopen:
@@ -207,10 +224,29 @@ class UploadGitCodeAssetsTest(unittest.TestCase):
         self.assertEqual(size, 6419356)
         request = urlopen.call_args.args[0]
         self.assertEqual(request.get_header("Range"), "bytes=0-0")
-        self.assertEqual(urlopen.call_args.kwargs["timeout"], upload.TRANSFER_REQUEST_TIMEOUT_SECONDS)
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], upload.READBACK_REQUEST_TIMEOUT_SECONDS)
+
+    def test_malformed_partial_range_fails_closed(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.status = 206
+        response.__enter__.return_value.headers = {}
+        response.__enter__.return_value.read.return_value = b"x"
+        with mock.patch.object(upload.urllib.request, "urlopen", return_value=response):
+            with self.assertRaisesRegex(upload.UploadError, "download verification failed"):
+                upload._urllib_download_size("https://download.example/artifact")
+
+    def test_range_ignored_200_counts_the_full_body(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.status = 200
+        response.__enter__.return_value.headers = {}
+        response.__enter__.return_value.read.side_effect = [b"full", b"-body", b""]
+        with mock.patch.object(upload.urllib.request, "urlopen", return_value=response):
+            size = upload._urllib_download_size("https://download.example/artifact")
+        self.assertEqual(size, 9)
 
     def test_download_size_retries_transient_timeout(self):
         response = mock.MagicMock()
+        response.__enter__.return_value.status = 206
         response.__enter__.return_value.headers = {"Content-Range": "bytes 0-0/8"}
         response.__enter__.return_value.read.return_value = b"x"
         with mock.patch.object(upload.urllib.request, "urlopen", side_effect=[TimeoutError(), response]) as urlopen:

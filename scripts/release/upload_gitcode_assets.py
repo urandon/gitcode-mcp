@@ -23,7 +23,8 @@ Request = Callable[[str, str, Dict[str, str], Optional[bytes]], Any]
 DownloadSize = Callable[[str], int]
 
 API_REQUEST_TIMEOUT_SECONDS = 120
-TRANSFER_REQUEST_TIMEOUT_SECONDS = 600
+UPLOAD_REQUEST_TIMEOUT_SECONDS = 600
+READBACK_REQUEST_TIMEOUT_SECONDS = 60
 TRANSPORT_ATTEMPTS = 3
 TRANSPORT_RETRY_DELAY_SECONDS = 1.0
 RETRYABLE_HTTP_STATUSES = {408, 425, 429, 500, 502, 503, 504}
@@ -43,15 +44,15 @@ def _retryable_transport_error(exc: BaseException) -> bool:
 def _urllib_request(method: str, url: str, headers: Dict[str, str], body: Optional[bytes]) -> Any:
     replay_safe = method in {"GET", "PUT"}
     attempts = TRANSPORT_ATTEMPTS if replay_safe else 1
-    timeout = TRANSFER_REQUEST_TIMEOUT_SECONDS if method == "PUT" else API_REQUEST_TIMEOUT_SECONDS
+    timeout = UPLOAD_REQUEST_TIMEOUT_SECONDS if method == "PUT" else API_REQUEST_TIMEOUT_SECONDS
     payload = b""
     for attempt in range(attempts):
-        request = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
+            request = urllib.request.Request(url, data=body, headers=headers, method=method)
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 payload = response.read()
             break
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
             if attempt + 1 >= attempts or not _retryable_transport_error(exc):
                 status = getattr(exc, "code", "transport_error")
                 raise UploadError(f"release asset request failed ({status})") from None
@@ -107,20 +108,24 @@ def _urllib_download_size(url: str) -> int:
     if urllib.parse.urlparse(url).scheme != "https":
         raise UploadError("GitCode release asset did not return an HTTPS download URL")
     for attempt in range(TRANSPORT_ATTEMPTS):
-        request = urllib.request.Request(url, headers={"Range": "bytes=0-0"}, method="GET")
         try:
-            with urllib.request.urlopen(request, timeout=TRANSFER_REQUEST_TIMEOUT_SECONDS) as response:
+            request = urllib.request.Request(url, headers={"Range": "bytes=0-0"}, method="GET")
+            with urllib.request.urlopen(request, timeout=READBACK_REQUEST_TIMEOUT_SECONDS) as response:
+                status = int(getattr(response, "status", 0) or 0)
                 total = _content_range_total(str(response.headers.get("Content-Range") or ""))
-                if total is not None:
-                    response.read()
+                if status == 206:
+                    if total is None or len(response.read(2)) != 1:
+                        raise UploadError("GitCode release asset download verification failed")
                     return total
+                if status != 200:
+                    raise UploadError("GitCode release asset download verification failed")
                 size = 0
                 while True:
                     chunk = response.read(1024 * 1024)
                     if not chunk:
                         return size
                     size += len(chunk)
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as exc:
             if attempt + 1 >= TRANSPORT_ATTEMPTS or not _retryable_transport_error(exc):
                 raise UploadError("GitCode release asset download verification failed") from None
             time.sleep(TRANSPORT_RETRY_DELAY_SECONDS * (2**attempt))
