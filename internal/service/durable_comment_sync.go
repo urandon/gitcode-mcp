@@ -62,9 +62,12 @@ func (s *Service) FetchIssueCommentSyncBatch(ctx context.Context, req BulkSyncRe
 	// admission depend on an available SQLite writer.
 	limit := 0
 	if req.Bounds != nil {
-		limit = req.Bounds.MaxRecords
-		if limit <= 0 && req.Bounds.MaxPages > 0 {
-			limit = req.Bounds.MaxPages
+		// A page is one queue parent for this compatibility endpoint. Limiting
+		// parents by MaxRecords permits multiplicative comment fan-out before a
+		// stage exists (for example 100 parents x 100 comments).
+		limit = req.Bounds.MaxPages
+		if limit <= 0 {
+			limit = 1
 		}
 	}
 	pending, err := s.store.ListIssueCommentSync(ctx, cache.IssueCommentSyncFilter{RepoID: repoID, Statuses: []string{"pending", "deferred"}, Limit: limit})
@@ -102,7 +105,24 @@ func (s *Service) FetchIssueCommentSyncBatch(ctx context.Context, req BulkSyncRe
 				return batch, s.liveGraphError("comment parent issue id is unreconciled")
 			}
 		}
-		batch.Groups = append(batch.Groups, DurableIssueCommentGroup{Parent: item, Comments: page.Items})
+		group := DurableIssueCommentGroup{Parent: item, Comments: page.Items}
+		candidate := batch
+		candidate.Groups = append(append([]DurableIssueCommentGroup(nil), batch.Groups...), group)
+		if req.Bounds != nil && req.Bounds.MaxRecords > 0 && candidate.RecordCount() > req.Bounds.MaxRecords {
+			if len(batch.Groups) == 0 {
+				return batch, durableBatchBoundError("issue comments", "record")
+			}
+			batch.StopReason, batch.TraversalStatus = "max_records", "bounded"
+			break
+		}
+		if !durableBatchFitsByteBound(req.Bounds, candidate) {
+			if len(batch.Groups) == 0 {
+				return batch, durableBatchBoundError("issue comments", "byte")
+			}
+			batch.StopReason, batch.TraversalStatus = "max_bytes", "bounded"
+			break
+		}
+		batch.Groups = append(batch.Groups, group)
 		batch.PagesListed++
 		batch.RecordsListed += len(page.Items)
 		batch.StopReason = "queue_drained"
@@ -321,24 +341,30 @@ func (s *Service) FetchPRCommentSyncBatch(ctx context.Context, req BulkSyncReque
 			batch.ProviderRevision = durablePRCommentProviderRevision(batch.Items)
 			return batch, s.normalizeSyncFailure(listErr, SyncRequest{RepoID: repoID, RemoteAlias: fmt.Sprintf("pr_comment:%d:*", number)}, "pr_comments", strconv.Itoa(number))
 		}
-		items := page.Items
-		if req.Bounds != nil && req.Bounds.MaxRecords > 0 {
-			remaining := req.Bounds.MaxRecords - len(batch.Items)
-			if remaining <= 0 {
-				batch.StopReason, batch.TraversalStatus = "max_records", "bounded"
-				break
-			}
-			if len(items) > remaining {
-				items = items[:remaining]
-				batch.StopReason, batch.TraversalStatus = "max_records", "bounded"
-			}
+		items := make([]DurablePRCommentItem, 0, len(page.Items))
+		for _, comment := range page.Items {
+			items = append(items, DurablePRCommentItem{PRNumber: number, ParentSourceID: source.ID, Comment: comment})
 		}
-		for _, comment := range items {
-			batch.Items = append(batch.Items, DurablePRCommentItem{PRNumber: number, ParentSourceID: source.ID, Comment: comment})
+		candidate := batch
+		candidate.Items = append(append([]DurablePRCommentItem(nil), batch.Items...), items...)
+		if req.Bounds != nil && req.Bounds.MaxRecords > 0 && candidate.RecordCount() > req.Bounds.MaxRecords {
+			if len(batch.Items) == 0 {
+				return batch, durableBatchBoundError("pull request comments", "record")
+			}
+			batch.StopReason, batch.TraversalStatus = "max_records", "bounded"
+			break
 		}
+		if !durableBatchFitsByteBound(req.Bounds, candidate) {
+			if len(batch.Items) == 0 {
+				return batch, durableBatchBoundError("pull request comments", "byte")
+			}
+			batch.StopReason, batch.TraversalStatus = "max_bytes", "bounded"
+			break
+		}
+		batch.Items = append(batch.Items, items...)
 		batch.PagesListed++
-		batch.RecordsListed += len(items)
-		emitProgress(req.ProgressChan, ProgressEvent{Collection: "pr_comments", Phase: "fetching", Page: index + 1, RecordsListed: len(items), RecordsFetched: len(items)})
+		batch.RecordsListed += len(page.Items)
+		emitProgress(req.ProgressChan, ProgressEvent{Collection: "pr_comments", Phase: "fetching", Page: index + 1, RecordsListed: len(page.Items), RecordsFetched: len(page.Items)})
 	}
 	batch.ProviderRevision = durablePRCommentProviderRevision(batch.Items)
 	return batch, nil

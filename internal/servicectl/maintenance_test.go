@@ -2410,20 +2410,20 @@ func TestCreateCoalescedJobIsAtomic(t *testing.T) {
 
 func TestCacheWriterAdmissionSerializesIndependentWork(t *testing.T) {
 	jobs := NewJobManager(filepath.Join(t.TempDir(), "jobs.json"))
-	first, created, err := jobs.createCoalescedJob(SyncJobType, "owner/left", "", 0, "sync:cache-1:owner/left:head", "cache-1", "reg-left", "", func() {})
+	first, created, err := jobs.createCoalescedJob(RAGIndexJobType, "owner/left", "profile", 0, "rag:cache-1:owner/left", "cache-1", "reg-left", "ns-left", func() {})
 	if err != nil || !created {
 		t.Fatalf("first=%+v created=%t err=%v", first, created, err)
 	}
-	coalesced, created, err := jobs.createCoalescedJob(SyncJobType, "owner/left", "", 0, "sync:cache-1:owner/left:head", "cache-1", "reg-left", "", func() {})
+	coalesced, created, err := jobs.createCoalescedJob(RAGIndexJobType, "owner/left", "profile", 0, "rag:cache-1:owner/left", "cache-1", "reg-left", "ns-left", func() {})
 	if err != nil || created || coalesced.ID != first.ID {
 		t.Fatalf("coalesced=%+v created=%t err=%v", coalesced, created, err)
 	}
-	_, created, err = jobs.createCoalescedJob(RAGIndexJobType, "owner/right", "profile", 0, "rag:cache-1:owner/right", "cache-1", "reg-right", "ns", func() {})
+	_, created, err = jobs.createCoalescedJob(RepositoryDocsIndexJobType, "owner/right", "profile", 0, "docs:cache-1:owner/right", "cache-1", "reg-right", "ns", func() {})
 	var busy ErrCacheWriterBusy
 	if created || !errors.As(err, &busy) || busy.ActiveJobID != first.ID || busy.DiagnosticCode() != "cache_writer_busy" {
 		t.Fatalf("created=%t err=%T %v busy=%+v", created, err, err, busy)
 	}
-	other, created, err := jobs.createCoalescedJob(RAGIndexJobType, "owner/right", "profile", 0, "rag:cache-2:owner/right", "cache-2", "reg-right", "ns", func() {})
+	other, created, err := jobs.createCoalescedJob(RepositoryDocsIndexJobType, "owner/right", "profile", 0, "docs:cache-2:owner/right", "cache-2", "reg-right", "ns", func() {})
 	if err != nil || !created || other.CacheUUID != "cache-2" {
 		t.Fatalf("other=%+v created=%t err=%v", other, created, err)
 	}
@@ -2431,14 +2431,14 @@ func TestCacheWriterAdmissionSerializesIndependentWork(t *testing.T) {
 
 func TestCacheWriterAdmissionRetainsIndependentIntentAcrossRepeatedContention(t *testing.T) {
 	jobs := NewJobManager(filepath.Join(t.TempDir(), "jobs.json"))
-	first, created, err := jobs.createCoalescedJob(SyncJobType, "owner/left", "", 0, "sync:cache-1:owner/left:head", "cache-1", "reg-left", "", func() {})
+	first, created, err := jobs.createCoalescedJob(RAGIndexJobType, "owner/left", "profile", 0, "rag:cache-1:owner/left", "cache-1", "reg-left", "ns-left", func() {})
 	if err != nil || !created {
 		t.Fatalf("first=%+v created=%t err=%v", first, created, err)
 	}
 
-	const independentWork = "rag:cache-1:owner/right:profile"
+	const independentWork = "docs:cache-1:owner/right:profile"
 	for attempt := 0; attempt < 3; attempt++ {
-		_, created, err = jobs.createCoalescedJob(RAGIndexJobType, "owner/right", "profile", 0, independentWork, "cache-1", "reg-right", "ns", func() {})
+		_, created, err = jobs.createCoalescedJob(RepositoryDocsIndexJobType, "owner/right", "profile", 0, independentWork, "cache-1", "reg-right", "ns", func() {})
 		var busy ErrCacheWriterBusy
 		if created || !errors.As(err, &busy) || busy.ActiveJobID != first.ID {
 			t.Fatalf("attempt=%d created=%t err=%T %v busy=%+v", attempt, created, err, err, busy)
@@ -2455,15 +2455,15 @@ func TestCacheWriterAdmissionRetainsIndependentIntentAcrossRepeatedContention(t 
 		job.UpdatedAt = now
 		job.FinishedAt = &now
 	})
-	_, created, err = jobs.createCoalescedJob(RAGIndexJobType, "owner/right", "profile", 0, independentWork, "cache-1", "reg-right", "ns", func() {})
+	_, created, err = jobs.createCoalescedJob(RepositoryDocsIndexJobType, "owner/right", "profile", 0, independentWork, "cache-1", "reg-right", "ns", func() {})
 	var busy ErrCacheWriterBusy
 	if created || !errors.As(err, &busy) || busy.ActiveJobID != first.ID {
 		t.Fatalf("terminal worker still in flight: created=%t err=%T %v busy=%+v", created, err, err, busy)
 	}
 
 	jobs.markWorkerFinished(first.ID)
-	next, created, err := jobs.createCoalescedJob(RAGIndexJobType, "owner/right", "profile", 0, independentWork, "cache-1", "reg-right", "ns", func() {})
-	if err != nil || !created || next.WorkKey != independentWork || next.RepoID != "owner/right" || next.Type != RAGIndexJobType {
+	next, created, err := jobs.createCoalescedJob(RepositoryDocsIndexJobType, "owner/right", "profile", 0, independentWork, "cache-1", "reg-right", "ns", func() {})
+	if err != nil || !created || next.WorkKey != independentWork || next.RepoID != "owner/right" || next.Type != RepositoryDocsIndexJobType {
 		t.Fatalf("independent intent after release=%+v created=%t err=%v", next, created, err)
 	}
 }

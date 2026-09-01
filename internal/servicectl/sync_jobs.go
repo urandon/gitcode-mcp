@@ -234,6 +234,13 @@ type durableCollectionWork struct {
 	commit     func(context.Context, SyncStageEnvelope) (*service.SyncResourcesResult, error)
 }
 
+func validateDurableFetchedPayload(payload []byte, records int) error {
+	if records < 0 || records > defaultSyncStageMaxRecords || int64(len(payload)) > defaultSyncStageMaxBytes {
+		return ErrSyncStageBound
+	}
+	return nil
+}
+
 func (m *JobManager) runDurableSync(ctx context.Context, manager Manager, jobID string, req StartSyncJobRequest, progressCh chan<- service.ProgressEvent) (*service.SyncResourcesResult, []syncCollectionResult, error) {
 	req = normalizeDurableSyncRequest(req)
 	store, svc, err := newSyncJobService(ctx, manager, req)
@@ -289,6 +296,9 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 				if marshalErr != nil {
 					return durableCollectionBatch{}, marshalErr
 				}
+				if boundErr := validateDurableFetchedPayload(payload, batch.RecordCount()); boundErr != nil {
+					return durableCollectionBatch{}, boundErr
+				}
 				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.HighUpdatedAt.Format(time.RFC3339Nano), idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt, pagesListed: batch.PagesListed, recordsListed: batch.RecordsListed, traversalStatus: batch.TraversalStatus, highUpdatedAt: batch.HighUpdatedAt, highRemoteID: batch.HighRemoteID, highNumber: batch.HighNumber}, err
 			},
 			commit: func(ctx context.Context, stage SyncStageEnvelope) (*service.SyncResourcesResult, error) {
@@ -309,6 +319,9 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 				payload, marshalErr := json.Marshal(batch)
 				if marshalErr != nil {
 					return durableCollectionBatch{}, marshalErr
+				}
+				if boundErr := validateDurableFetchedPayload(payload, batch.RecordCount()); boundErr != nil {
+					return durableCollectionBatch{}, boundErr
 				}
 				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.ProviderRevision, idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt, pagesListed: batch.PagesListed, recordsListed: batch.RecordsListed, traversalStatus: batch.TraversalStatus}, err
 			},
@@ -331,6 +344,9 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 				if marshalErr != nil {
 					return durableCollectionBatch{}, marshalErr
 				}
+				if boundErr := validateDurableFetchedPayload(payload, batch.RecordCount()); boundErr != nil {
+					return durableCollectionBatch{}, boundErr
+				}
 				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.ProviderRevision, idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt, pagesListed: batch.PagesListed, recordsListed: batch.RecordsListed, traversalStatus: batch.TraversalStatus}, err
 			},
 			commit: func(ctx context.Context, stage SyncStageEnvelope) (*service.SyncResourcesResult, error) {
@@ -352,6 +368,9 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 				if marshalErr != nil {
 					return durableCollectionBatch{}, marshalErr
 				}
+				if boundErr := validateDurableFetchedPayload(payload, batch.RecordCount()); boundErr != nil {
+					return durableCollectionBatch{}, boundErr
+				}
 				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.HighUpdatedAt.Format(time.RFC3339Nano), idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt, pagesListed: batch.PagesListed, recordsListed: batch.RecordsListed, traversalStatus: batch.TraversalStatus, highUpdatedAt: batch.HighUpdatedAt, highRemoteID: batch.HighRemoteID, highNumber: batch.HighNumber}, err
 			},
 			commit: func(ctx context.Context, stage SyncStageEnvelope) (*service.SyncResourcesResult, error) {
@@ -372,6 +391,9 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 				payload, marshalErr := json.Marshal(batch)
 				if marshalErr != nil {
 					return durableCollectionBatch{}, marshalErr
+				}
+				if boundErr := validateDurableFetchedPayload(payload, batch.RecordCount()); boundErr != nil {
+					return durableCollectionBatch{}, boundErr
 				}
 				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.ProviderRevision, idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt, pagesListed: batch.PagesListed, recordsListed: batch.RecordsListed, traversalStatus: batch.TraversalStatus}, err
 			},
@@ -1320,19 +1342,24 @@ func newSyncJobService(ctx context.Context, manager Manager, req StartSyncJobReq
 func syncBulkRequest(req StartSyncJobRequest, progressCh chan<- service.ProgressEvent) service.BulkSyncRequest {
 	maxPages, maxRecords := req.MaxPages, req.MaxRecords
 	// A daemon sync never interprets omitted user bounds as an unbounded
-	// provider traversal. One provider page (up to the configured per-page
-	// size) is the durable staging chunk; maintenance checkpoints advance the
-	// next run without constructing an oversized in-memory batch first.
-	if maxPages <= 0 {
+	// provider traversal. A durable stage is always at most one provider page;
+	// caller bounds can tighten that chunk, but cannot enlarge it beyond the
+	// staging envelope. Maintenance checkpoints advance the next run.
+	if maxPages <= 0 || maxPages > 1 {
 		maxPages = 1
 	}
 	if maxRecords <= 0 {
-		maxRecords = 100
+		maxRecords = defaultSyncStageMaxRecords
+	} else if maxRecords > defaultSyncStageMaxRecords {
+		maxRecords = defaultSyncStageMaxRecords
 	}
-	bulkReq := service.BulkSyncRequest{RepoID: req.RepoID, IdempotencyKey: strings.TrimSpace(req.IdempotencyKey), Page: req.Page, PerPage: req.PerPage, Bounds: &service.SyncBounds{MaxPages: maxPages, MaxRecords: maxRecords, ProgressChan: progressCh}, ProgressChan: progressCh, IncrementalQueue: strings.TrimSpace(req.Lane) != ""}
+	bulkReq := service.BulkSyncRequest{RepoID: req.RepoID, IdempotencyKey: strings.TrimSpace(req.IdempotencyKey), Page: req.Page, PerPage: req.PerPage, Bounds: &service.SyncBounds{MaxPages: maxPages, MaxRecords: maxRecords, MaxBytes: defaultSyncStageMaxBytes, ProgressChan: progressCh}, ProgressChan: progressCh, IncrementalQueue: strings.TrimSpace(req.Lane) != ""}
 	if bulkReq.PerPage <= 0 {
 		bulkReq.PerPage = 100
+	} else if bulkReq.PerPage > 100 {
+		bulkReq.PerPage = 100
 	}
+	bulkReq.PerPage = min(bulkReq.PerPage, maxRecords)
 	return bulkReq
 }
 

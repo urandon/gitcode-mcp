@@ -154,7 +154,7 @@ func TestDirectCacheWriterBlocksConflictFenceButAllowsDurableFetchAdmission(t *t
 	}
 }
 
-func TestDurableSyncAdmissionsShareCacheButRemainBlockedByOtherWriters(t *testing.T) {
+func TestDurableSyncFetchDoesNotReserveWriterAdmission(t *testing.T) {
 	jobs := NewJobManager("")
 	_, cancelA := context.WithCancel(context.Background())
 	defer cancelA()
@@ -168,12 +168,30 @@ func TestDurableSyncAdmissionsShareCacheButRemainBlockedByOtherWriters(t *testin
 	if err != nil || !created || second.ID == first.ID {
 		t.Fatalf("second sync admission job=%+v created=%t err=%v", second, created, err)
 	}
+	releaseDirect, err := jobs.BeginDirectCacheWriter("cache-shared", "admin-arrived-during-fetch")
+	if err != nil {
+		t.Fatalf("direct writer was blocked by provider-only sync admission: %v", err)
+	}
+	releaseDirect()
+	jobs.updateJob(first.ID, func(job *Job, _ time.Time) {
+		job.SyncStage = &SyncStageView{Phase: SyncStageCommitting}
+	})
+	if _, err := jobs.BeginDirectCacheWriter("cache-shared", "admin-during-commit"); err == nil {
+		t.Fatal("direct writer overlapped an active durable commit")
+	} else {
+		var busy ErrCacheWriterBusy
+		if !errors.As(err, &busy) || busy.ActiveJobID != first.ID {
+			t.Fatalf("commit writer blocker=%T %v", err, err)
+		}
+	}
+	jobs.updateJob(first.ID, func(job *Job, _ time.Time) {
+		job.SyncStage = &SyncStageView{Phase: SyncStageFetching}
+	})
 	_, cancelRAG := context.WithCancel(context.Background())
 	defer cancelRAG()
-	_, _, err = jobs.createCoalescedJob(RAGIndexJobType, "owner/third", "", 0, "rag-third", "cache-shared", "reg-third", "", cancelRAG)
-	var busy ErrCacheWriterBusy
-	if !errors.As(err, &busy) || busy.ActiveType != SyncJobType {
-		t.Fatalf("exclusive writer crossed active durable syncs: %T %v", err, err)
+	third, created, err := jobs.createCoalescedJob(RAGIndexJobType, "owner/third", "", 0, "rag-third", "cache-shared", "reg-third", "", cancelRAG)
+	if err != nil || !created || third.Type != RAGIndexJobType {
+		t.Fatalf("RAG writer was blocked by provider-only sync admission: job=%+v created=%t err=%v", third, created, err)
 	}
 }
 
@@ -575,12 +593,16 @@ func TestSyncStageTargetRejectsReplacementSchemaBindingAndRegistration(t *testin
 
 func TestDurableSyncDefaultsBoundProviderBatchBeforeStaging(t *testing.T) {
 	bounded := syncBulkRequest(StartSyncJobRequest{RepoID: "owner/repo"}, nil)
-	if bounded.Bounds == nil || bounded.Bounds.MaxPages != 1 || bounded.Bounds.MaxRecords != 100 || bounded.PerPage != 100 {
+	if bounded.Bounds == nil || bounded.Bounds.MaxPages != 1 || bounded.Bounds.MaxRecords != defaultSyncStageMaxRecords || bounded.Bounds.MaxBytes != defaultSyncStageMaxBytes || bounded.PerPage != 100 {
 		t.Fatalf("implicit durable bounds=%+v per_page=%d", bounded.Bounds, bounded.PerPage)
 	}
 	explicit := syncBulkRequest(StartSyncJobRequest{RepoID: "owner/repo", MaxPages: 3, MaxRecords: 41, PerPage: 17}, nil)
-	if explicit.Bounds.MaxPages != 3 || explicit.Bounds.MaxRecords != 41 || explicit.PerPage != 17 {
-		t.Fatalf("explicit durable bounds changed: %+v per_page=%d", explicit.Bounds, explicit.PerPage)
+	if explicit.Bounds.MaxPages != 1 || explicit.Bounds.MaxRecords != 41 || explicit.Bounds.MaxBytes != defaultSyncStageMaxBytes || explicit.PerPage != 17 {
+		t.Fatalf("explicit durable bounds escaped stage clamp: %+v per_page=%d", explicit.Bounds, explicit.PerPage)
+	}
+	oversized := syncBulkRequest(StartSyncJobRequest{RepoID: "owner/repo", MaxPages: 500, MaxRecords: 50_000, PerPage: 1_000}, nil)
+	if oversized.Bounds.MaxPages != 1 || oversized.Bounds.MaxRecords != defaultSyncStageMaxRecords || oversized.PerPage != 100 {
+		t.Fatalf("oversized durable bounds escaped hard ceiling: %+v per_page=%d", oversized.Bounds, oversized.PerPage)
 	}
 }
 

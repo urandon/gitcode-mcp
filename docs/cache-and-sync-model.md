@@ -78,12 +78,15 @@ Stages are bound to cache UUID, schema, an exact fingerprint of the remote
 repository route (`owner`, `name`, API base, and scopes), registration,
 collection checkpoint, provider revision, and idempotency key; recovery rejects
 a changed or missing target before opening it writable. An omitted daemon bound
-means one provider page and at most 100 records per durable stage, rather than
-an unbounded in-memory traversal. Explicit smaller or larger bounds remain
-visible in the request. Per-stage limits are enforced together with a 64
-MiB/50,000-record/256-active-stage aggregate runtime budget. Committed stages
-leave active capacity immediately; cancelled/rejected evidence remains bounded
-by retention. Issues, issue comments, wiki, pull requests, and pull request
+means one provider page (normally at most 100 list items) per durable stage,
+rather than an unbounded traversal. Caller bounds can tighten that chunk but
+cannot enlarge it past one provider page, 10,000 produced records, the provider
+response ceiling, or the 16 MiB stage envelope. Comment fan-out is checked as
+produced records and serialized bytes before it can accumulate across parents.
+Per-stage limits are enforced together with a 64 MiB/50,000-record/256-stage
+aggregate runtime budget. Committed stages leave capacity immediately;
+cancelled/rejected evidence continues consuming all aggregate quotas until its
+retention expires. Issues, issue comments, wiki, pull requests, and pull request
 comments all use this daemon protocol. Foreground sync retains its synchronous
 compatibility behavior.
 
@@ -93,8 +96,10 @@ receipt. The receipt is the authority if the process commits SQLite but cannot
 atomically rename the terminal journal update (for example, ENOSPC): restart
 reports the job as committed without provider refetch or a false rejection.
 Optional post-commit queue-summary reads cannot downgrade that committed state.
-Provider fetch admission is allowed while another cache writer is active; only
-the short commit phase joins the per-cache FIFO and bounded contention backoff.
+Provider fetch admission is allowed while another cache writer is active, and a
+writer arriving during provider fetch is admitted because sync has not reserved
+the writer lane. Only the short commit phase joins the per-cache FIFO and
+bounded contention backoff.
 
 Service job state is stored separately from the cache in the mode-`0600` service runtime `jobs.json` snapshot. It is operational state, not cache content. Active jobs (`queued`, `running`, and the short durable `cancelling` transition) have no TTL and remain visible as active work in the Admin UI. By default, succeeded/superseded jobs expire after 48 hours; failed/interrupted/cancelled jobs expire after 14 days. The latest significant failure per maintenance registration or work stream survives its ordinary TTL inside a separately bounded diagnostic cohort. A final 128-terminal-job cap and 256-progress-event cap keep the snapshot bounded. Pruning runs on load, job updates/completion, and idle maintenance reconciliation. It never deletes cached GitCode records, sync frontiers, maintenance policy, RAG indexes, or audit receipts.
 

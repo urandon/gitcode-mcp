@@ -213,6 +213,12 @@ func TestDurableCommentBatchesCommitWithoutProviderReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := NewWithClient(store, client)
+	if batch, err := svc.FetchIssueCommentSyncBatch(ctx, BulkSyncRequest{RepoID: repoID, Bounds: &SyncBounds{MaxPages: 1, MaxRecords: 1, MaxBytes: 1 << 20}}); err == nil || len(batch.Groups) != 0 {
+		t.Fatalf("issue comment record fan-out escaped pre-stage bound: batch=%+v err=%v", batch, err)
+	}
+	if batch, err := svc.FetchIssueCommentSyncBatch(ctx, BulkSyncRequest{RepoID: repoID, Bounds: &SyncBounds{MaxPages: 1, MaxRecords: 10, MaxBytes: 1}}); err == nil || len(batch.Groups) != 0 {
+		t.Fatalf("issue comment bytes escaped pre-stage bound: batch=%+v err=%v", batch, err)
+	}
 	issueBatch, err := svc.FetchIssueCommentSyncBatch(ctx, BulkSyncRequest{RepoID: repoID, Bounds: &SyncBounds{MaxRecords: 10}})
 	if err != nil {
 		t.Fatalf("FetchIssueCommentSyncBatch: %v", err)
@@ -221,7 +227,7 @@ func TestDurableCommentBatchesCommitWithoutProviderReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchPRCommentSyncBatch: %v", err)
 	}
-	if issueBatch.RecordCount() != 2 || prBatch.RecordCount() != 1 || client.commentCalls != 1 || client.prCommentCalls != 1 {
+	if issueBatch.RecordCount() != 2 || prBatch.RecordCount() != 1 || client.commentCalls != 3 || client.prCommentCalls != 1 {
 		t.Fatalf("batches issue=%+v pr=%+v calls issue=%d pr=%d", issueBatch, prBatch, client.commentCalls, client.prCommentCalls)
 	}
 	if result, err := svc.CommitIssueCommentSyncBatch(ctx, issueBatch, nil); err != nil || result.SuccessCount != 1 {
@@ -230,7 +236,7 @@ func TestDurableCommentBatchesCommitWithoutProviderReplay(t *testing.T) {
 	if result, err := svc.CommitPRCommentSyncBatch(ctx, prBatch, nil); err != nil || result.SuccessCount != 1 {
 		t.Fatalf("CommitPRCommentSyncBatch result=%+v err=%v", result, err)
 	}
-	if client.commentCalls != 1 || client.prCommentCalls != 1 {
+	if client.commentCalls != 3 || client.prCommentCalls != 1 {
 		t.Fatalf("comment commit refetched provider: issue=%d pr=%d", client.commentCalls, client.prCommentCalls)
 	}
 	if _, err := store.GetSourceScoped(ctx, repoID, issueCommentStableID(7, "ic-1")); err != nil {

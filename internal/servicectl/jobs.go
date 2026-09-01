@@ -283,7 +283,10 @@ func (m *JobManager) BeginDirectCacheWriter(cacheUUID, writerID string) (func(),
 		m.mu.Unlock()
 		return func() {}, CacheMutationFenceError{}
 	}
-	if active, ok := m.activeCacheWriterLocked(cacheUUID); ok {
+	// A durable sync job is read/provider-only until its staged commit. A direct
+	// writer arriving during that fetch may proceed; the sync commit observes
+	// directCacheWriters and waits at the real writer boundary.
+	if active, ok := m.activeReservedWriterLocked(cacheUUID); ok {
 		m.mu.Unlock()
 		return func() {}, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
 	}
@@ -479,6 +482,27 @@ func (m *JobManager) activeCacheWriterLocked(cacheUUID string) (Job, bool) {
 	return Job{}, false
 }
 
+func (m *JobManager) activeReservedWriterLocked(cacheUUID string) (Job, bool) {
+	cacheUUID = strings.TrimSpace(cacheUUID)
+	if cacheUUID == "" {
+		return Job{}, false
+	}
+	for id, job := range m.jobs {
+		if job.CacheUUID != cacheUUID || !isCacheWriterJob(job.Type) {
+			continue
+		}
+		// A sync reserves no writer while queued, fetching, staged, waiting, or
+		// backing off. Its committing phase is the exact logical writer lease.
+		if job.Type == SyncJobType && (job.SyncStage == nil || job.SyncStage.Phase != SyncStageCommitting) {
+			continue
+		}
+		if jobActiveStatus(job.Status) || m.inflightWorkers[id] {
+			return cloneJob(job), true
+		}
+	}
+	return Job{}, false
+}
+
 func isCacheWriterJob(jobType string) bool {
 	return jobType == SyncJobType || jobType == RAGIndexJobType || jobType == RepositoryDocsIndexJobType
 }
@@ -550,7 +574,7 @@ func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, source
 	if activeID := m.directCacheWriters[strings.TrimSpace(job.CacheUUID)]; activeID != "" {
 		return Job{}, false, ErrCacheWriterBusy{ActiveJobID: activeID, ActiveType: "direct_cache_write"}
 	}
-	if active, ok := m.activeCacheWriterLocked(job.CacheUUID); ok {
+	if active, ok := m.activeReservedWriterLocked(job.CacheUUID); ok {
 		return Job{}, false, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
 	}
 	previous := cloneJob(job)
@@ -644,7 +668,7 @@ func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID str
 		if activeID := m.directCacheWriters[cacheUUID]; activeID != "" {
 			return Job{}, false, ErrCacheWriterBusy{ActiveJobID: activeID, ActiveType: "direct_cache_write"}
 		}
-		if active, ok := m.activeCacheWriterLocked(cacheUUID); ok {
+		if active, ok := m.activeReservedWriterLocked(cacheUUID); ok {
 			return Job{}, false, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
 		}
 	}

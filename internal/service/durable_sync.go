@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -13,6 +14,18 @@ import (
 )
 
 const DurableSyncBatchVersion = 1
+
+func durableBatchFitsByteBound(bounds *SyncBounds, batch any) bool {
+	if bounds == nil || bounds.MaxBytes <= 0 {
+		return true
+	}
+	payload, err := json.Marshal(batch)
+	return err == nil && int64(len(payload)) <= bounds.MaxBytes
+}
+
+func durableBatchBoundError(collection, dimension string) error {
+	return ErrInvalidQuery{Field: "bounds", Message: collection + " provider response exceeds durable stage " + dimension + " limit"}
+}
 
 // DurableIssueSyncBatch is the provider-complete, cache-uncommitted form of a
 // bounded issue collection traversal. It is JSON-safe for the daemon-private

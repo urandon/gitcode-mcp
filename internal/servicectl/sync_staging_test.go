@@ -163,9 +163,14 @@ func TestSyncStageJournalEnforcesAggregateBudgetAndIdempotentReplay(t *testing.T
 
 func TestSyncStageCreateRunsTerminalGCBeforeCapacityCheck(t *testing.T) {
 	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
-	journal := NewSyncStageJournal(t.TempDir(), SyncStageLimits{MaxAge: time.Hour, MaxStages: 1})
+	envelope := testSyncStageEnvelope()
+	journal := NewSyncStageJournal(t.TempDir(), SyncStageLimits{
+		MaxAge: time.Hour, MaxStages: 10,
+		MaxTotalBytes:   int64(len(envelope.Payload)) + 1,
+		MaxTotalRecords: envelope.RecordCount,
+	})
 	journal.now = func() time.Time { return now }
-	first, err := journal.Create(testSyncStageEnvelope())
+	first, err := journal.Create(envelope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,6 +188,28 @@ func TestSyncStageCreateRunsTerminalGCBeforeCapacityCheck(t *testing.T) {
 	}
 	if _, err := journal.Load(created.StageID); err != nil {
 		t.Fatalf("new stage missing: %v", err)
+	}
+}
+
+func TestSyncStageRetainedTerminalEvidenceConsumesAggregateBudget(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	journal := NewSyncStageJournal(t.TempDir(), SyncStageLimits{MaxAge: time.Hour, MaxStages: 1})
+	journal.now = func() time.Time { return now }
+	first, err := journal.Create(testSyncStageEnvelope())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.UpdateState(first.StageID, SyncStageState{Phase: SyncStageRejected, FetchedAt: now, StagedAt: now, TerminalReason: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	second := testSyncStageEnvelope()
+	second.IdempotencyKey = "retained-terminal-budget"
+	if _, err := journal.Create(second); !errors.Is(err, ErrSyncStageBound) {
+		t.Fatalf("retained rejected stage bypassed aggregate budget: %v", err)
+	}
+	journal.now = func() time.Time { return now.Add(2 * time.Hour) }
+	if _, err := journal.Create(second); err != nil {
+		t.Fatalf("expired rejected stage did not release aggregate budget: %v", err)
 	}
 }
 

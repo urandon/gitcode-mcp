@@ -260,7 +260,10 @@ func (j *SyncStageJournal) aggregateUsage() (bytes int64, records, stages int, e
 		return 0, 0, 0, err
 	}
 	for _, envelope := range envelopes {
-		if syncStageTerminal(envelope.State.Phase) {
+		// Committed payloads are deleted immediately by GC and have an atomic
+		// SQLite receipt. Rejected/cancelled payloads remain diagnostic evidence,
+		// so they must continue consuming every aggregate quota until expiry.
+		if envelope.State.Phase == SyncStageCommitted {
 			continue
 		}
 		bytes += envelope.ByteCount
