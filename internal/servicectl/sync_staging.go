@@ -1,0 +1,399 @@
+package servicectl
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+const (
+	syncStageEnvelopeVersion   = 1
+	defaultSyncStageMaxBytes   = int64(16 << 20)
+	defaultSyncStageMaxRecords = 10_000
+	defaultSyncStageMaxAge     = 24 * time.Hour
+	defaultSyncCommitRetries   = 6
+	defaultSyncCommitBaseDelay = time.Second
+	defaultSyncCommitMaxDelay  = time.Minute
+)
+
+var (
+	ErrSyncStageCorrupt = errors.New("sync stage is corrupt")
+	ErrSyncStageBound   = errors.New("sync stage exceeds configured bounds")
+)
+
+type SyncStagePhase string
+
+const (
+	SyncStageFetching      SyncStagePhase = "fetching"
+	SyncStageStaged        SyncStagePhase = "staged"
+	SyncStageWaitingCommit SyncStagePhase = "waiting_commit"
+	SyncStageCommitting    SyncStagePhase = "committing"
+	SyncStageCommitted     SyncStagePhase = "committed"
+	SyncStageSuperseded    SyncStagePhase = "superseded"
+	SyncStageRejected      SyncStagePhase = "rejected"
+)
+
+type SyncStageState struct {
+	Phase          SyncStagePhase `json:"phase"`
+	Attempt        int            `json:"attempt,omitempty"`
+	RetryBudget    int            `json:"retry_budget,omitempty"`
+	RetryAfter     time.Time      `json:"retry_after,omitempty"`
+	BlockerClass   string         `json:"blocker_class,omitempty"`
+	BlockingOp     string         `json:"blocking_operation,omitempty"`
+	FetchedAt      time.Time      `json:"fetched_at,omitempty"`
+	StagedAt       time.Time      `json:"staged_at,omitempty"`
+	CommittedAt    time.Time      `json:"committed_at,omitempty"`
+	TerminalReason string         `json:"terminal_reason,omitempty"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+}
+
+// SyncStageEnvelope is private daemon state. Payload may contain source bodies
+// and must never be projected through IPC, Admin, logs, or CLI diagnostics.
+type SyncStageEnvelope struct {
+	Version          int             `json:"version"`
+	StageID          string          `json:"stage_id"`
+	CacheUUID        string          `json:"cache_uuid"`
+	CacheSchema      int             `json:"cache_schema"`
+	RegistrationID   string          `json:"registration_id"`
+	RepoID           string          `json:"repo_id"`
+	Collection       string          `json:"collection"`
+	Checkpoint       string          `json:"checkpoint,omitempty"`
+	ProviderRevision string          `json:"provider_revision,omitempty"`
+	IdempotencyKey   string          `json:"idempotency_key"`
+	CreatedAt        time.Time       `json:"created_at"`
+	ExpiresAt        time.Time       `json:"expires_at"`
+	RecordCount      int             `json:"record_count"`
+	ByteCount        int64           `json:"byte_count"`
+	Payload          json.RawMessage `json:"payload"`
+	Checksum         string          `json:"checksum"`
+	State            SyncStageState  `json:"state"`
+}
+
+// SyncStageView is the complete public contract. It deliberately has no local
+// path, idempotency key, checksum, checkpoint, provider revision, or payload.
+type SyncStageView struct {
+	StageRef      string         `json:"stage_ref"`
+	CacheRef      string         `json:"cache_ref"`
+	RepoID        string         `json:"repo_id"`
+	Collection    string         `json:"collection"`
+	Phase         SyncStagePhase `json:"phase"`
+	Fetched       int            `json:"fetched"`
+	Staged        int            `json:"staged"`
+	Committed     int            `json:"committed"`
+	Attempt       int            `json:"attempt,omitempty"`
+	RetryBudget   int            `json:"retry_budget,omitempty"`
+	RetryAfter    time.Time      `json:"retry_after,omitempty"`
+	BlockerClass  string         `json:"blocker_class,omitempty"`
+	BlockingOp    string         `json:"blocking_operation,omitempty"`
+	FetchedAt     time.Time      `json:"fetched_at,omitempty"`
+	StagedAt      time.Time      `json:"staged_at,omitempty"`
+	CommittedAt   time.Time      `json:"committed_at,omitempty"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	TerminalCause string         `json:"terminal_reason,omitempty"`
+}
+
+func (e SyncStageEnvelope) PublicView() SyncStageView {
+	view := SyncStageView{
+		StageRef: publicStageRef(e.StageID), CacheRef: publicCacheRef(e.CacheUUID, ""),
+		RepoID: e.RepoID, Collection: e.Collection, Phase: e.State.Phase,
+		Attempt: e.State.Attempt, RetryBudget: e.State.RetryBudget,
+		RetryAfter: e.State.RetryAfter, BlockerClass: e.State.BlockerClass,
+		BlockingOp: e.State.BlockingOp, FetchedAt: e.State.FetchedAt,
+		StagedAt: e.State.StagedAt, CommittedAt: e.State.CommittedAt,
+		UpdatedAt: e.State.UpdatedAt, TerminalCause: e.State.TerminalReason,
+	}
+	if !e.State.FetchedAt.IsZero() {
+		view.Fetched = e.RecordCount
+	}
+	if e.State.Phase != SyncStageFetching {
+		view.Staged = e.RecordCount
+	}
+	if e.State.Phase == SyncStageCommitted {
+		view.Committed = e.RecordCount
+	}
+	return view
+}
+
+type SyncStageLimits struct {
+	MaxBytes   int64
+	MaxRecords int
+	MaxAge     time.Duration
+}
+
+type SyncStageJournal struct {
+	dir       string
+	limits    SyncStageLimits
+	now       func() time.Time
+	writeFile func(string, []byte, os.FileMode) error
+}
+
+func NewSyncStageJournal(runtimeDir string, limits SyncStageLimits) *SyncStageJournal {
+	if limits.MaxBytes <= 0 {
+		limits.MaxBytes = defaultSyncStageMaxBytes
+	}
+	if limits.MaxRecords <= 0 {
+		limits.MaxRecords = defaultSyncStageMaxRecords
+	}
+	if limits.MaxAge <= 0 {
+		limits.MaxAge = defaultSyncStageMaxAge
+	}
+	return &SyncStageJournal{
+		dir: filepath.Join(runtimeDir, "sync-stages"), limits: limits,
+		now: func() time.Time { return time.Now().UTC() }, writeFile: durableAtomicWriteFile,
+	}
+}
+
+func (j *SyncStageJournal) Create(envelope SyncStageEnvelope) (SyncStageEnvelope, error) {
+	now := j.now().UTC()
+	envelope.Version = syncStageEnvelopeVersion
+	envelope.CacheUUID = strings.TrimSpace(envelope.CacheUUID)
+	envelope.RegistrationID = strings.TrimSpace(envelope.RegistrationID)
+	envelope.RepoID = strings.TrimSpace(envelope.RepoID)
+	envelope.Collection = strings.TrimSpace(envelope.Collection)
+	envelope.IdempotencyKey = strings.TrimSpace(envelope.IdempotencyKey)
+	if envelope.CacheUUID == "" || envelope.RegistrationID == "" || envelope.RepoID == "" || envelope.Collection == "" || envelope.IdempotencyKey == "" || envelope.CacheSchema <= 0 {
+		return SyncStageEnvelope{}, fmt.Errorf("%w: incomplete stage identity", ErrSyncStageCorrupt)
+	}
+	if !json.Valid(envelope.Payload) {
+		return SyncStageEnvelope{}, fmt.Errorf("%w: payload is not valid json", ErrSyncStageCorrupt)
+	}
+	envelope.ByteCount = int64(len(envelope.Payload))
+	if envelope.RecordCount < 0 || envelope.RecordCount > j.limits.MaxRecords || envelope.ByteCount > j.limits.MaxBytes {
+		return SyncStageEnvelope{}, ErrSyncStageBound
+	}
+	if envelope.CreatedAt.IsZero() {
+		envelope.CreatedAt = now
+	}
+	if envelope.ExpiresAt.IsZero() {
+		envelope.ExpiresAt = envelope.CreatedAt.Add(j.limits.MaxAge)
+	}
+	if envelope.ExpiresAt.After(envelope.CreatedAt.Add(j.limits.MaxAge)) || !envelope.ExpiresAt.After(envelope.CreatedAt) {
+		return SyncStageEnvelope{}, ErrSyncStageBound
+	}
+	if envelope.State.Phase == "" {
+		envelope.State.Phase = SyncStageStaged
+	}
+	if envelope.State.FetchedAt.IsZero() {
+		envelope.State.FetchedAt = now
+	}
+	if envelope.State.StagedAt.IsZero() {
+		envelope.State.StagedAt = now
+	}
+	envelope.State.UpdatedAt = now
+	envelope.Checksum = syncStageChecksum(envelope)
+	envelope.StageID = "stage-" + envelope.Checksum[:24]
+	if err := j.persist(envelope); err != nil {
+		return SyncStageEnvelope{}, err
+	}
+	return envelope, nil
+}
+
+func (j *SyncStageJournal) Load(stageID string) (SyncStageEnvelope, error) {
+	path, err := j.path(stageID)
+	if err != nil {
+		return SyncStageEnvelope{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return SyncStageEnvelope{}, err
+	}
+	var envelope SyncStageEnvelope
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return SyncStageEnvelope{}, fmt.Errorf("%w: invalid envelope", ErrSyncStageCorrupt)
+	}
+	if err := j.validate(envelope, stageID); err != nil {
+		return SyncStageEnvelope{}, err
+	}
+	return envelope, nil
+}
+
+func (j *SyncStageJournal) UpdateState(stageID string, state SyncStageState) (SyncStageEnvelope, error) {
+	envelope, err := j.Load(stageID)
+	if err != nil {
+		return SyncStageEnvelope{}, err
+	}
+	state.UpdatedAt = j.now().UTC()
+	envelope.State = state
+	if err := j.persist(envelope); err != nil {
+		return SyncStageEnvelope{}, err
+	}
+	return envelope, nil
+}
+
+func (j *SyncStageJournal) List() ([]SyncStageEnvelope, error) {
+	entries, err := os.ReadDir(j.dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	stages := make([]SyncStageEnvelope, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		stage, err := j.Load(strings.TrimSuffix(entry.Name(), ".json"))
+		if err != nil {
+			return nil, err
+		}
+		stages = append(stages, stage)
+	}
+	sort.Slice(stages, func(a, b int) bool {
+		if stages[a].State.UpdatedAt.Equal(stages[b].State.UpdatedAt) {
+			return stages[a].StageID < stages[b].StageID
+		}
+		return stages[a].State.UpdatedAt.Before(stages[b].State.UpdatedAt)
+	})
+	return stages, nil
+}
+
+func (j *SyncStageJournal) GC() (int, error) {
+	stages, err := j.List()
+	if err != nil {
+		return 0, err
+	}
+	now := j.now().UTC()
+	removed := 0
+	for _, stage := range stages {
+		if !syncStageTerminal(stage.State.Phase) || now.Before(stage.ExpiresAt) {
+			continue
+		}
+		path, err := j.path(stage.StageID)
+		if err != nil {
+			return removed, err
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
+}
+
+func (j *SyncStageJournal) validate(envelope SyncStageEnvelope, expectedID string) error {
+	if envelope.Version != syncStageEnvelopeVersion || envelope.StageID != expectedID || !json.Valid(envelope.Payload) {
+		return ErrSyncStageCorrupt
+	}
+	if envelope.ByteCount != int64(len(envelope.Payload)) {
+		return ErrSyncStageCorrupt
+	}
+	if envelope.ByteCount > j.limits.MaxBytes || envelope.RecordCount < 0 || envelope.RecordCount > j.limits.MaxRecords {
+		return ErrSyncStageBound
+	}
+	checksum := syncStageChecksum(envelope)
+	if checksum != envelope.Checksum || expectedID != "stage-"+checksum[:24] {
+		return ErrSyncStageCorrupt
+	}
+	return nil
+}
+
+func (j *SyncStageJournal) persist(envelope SyncStageEnvelope) error {
+	path, err := j.path(envelope.StageID)
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		return err
+	}
+	return j.writeFile(path, append(data, '\n'), 0o600)
+}
+
+func (j *SyncStageJournal) path(stageID string) (string, error) {
+	if !validStageID(stageID) {
+		return "", fmt.Errorf("%w: invalid stage id", ErrSyncStageCorrupt)
+	}
+	return filepath.Join(j.dir, stageID+".json"), nil
+}
+
+func validStageID(stageID string) bool {
+	if len(stageID) != len("stage-")+24 || !strings.HasPrefix(stageID, "stage-") {
+		return false
+	}
+	_, err := hex.DecodeString(strings.TrimPrefix(stageID, "stage-"))
+	return err == nil
+}
+
+func syncStageChecksum(envelope SyncStageEnvelope) string {
+	immutable := struct {
+		Version          int             `json:"version"`
+		CacheUUID        string          `json:"cache_uuid"`
+		CacheSchema      int             `json:"cache_schema"`
+		RegistrationID   string          `json:"registration_id"`
+		RepoID           string          `json:"repo_id"`
+		Collection       string          `json:"collection"`
+		Checkpoint       string          `json:"checkpoint,omitempty"`
+		ProviderRevision string          `json:"provider_revision,omitempty"`
+		IdempotencyKey   string          `json:"idempotency_key"`
+		CreatedAt        time.Time       `json:"created_at"`
+		ExpiresAt        time.Time       `json:"expires_at"`
+		RecordCount      int             `json:"record_count"`
+		ByteCount        int64           `json:"byte_count"`
+		Payload          json.RawMessage `json:"payload"`
+	}{
+		envelope.Version, envelope.CacheUUID, envelope.CacheSchema,
+		envelope.RegistrationID, envelope.RepoID, envelope.Collection,
+		envelope.Checkpoint, envelope.ProviderRevision, envelope.IdempotencyKey,
+		envelope.CreatedAt.UTC(), envelope.ExpiresAt.UTC(), envelope.RecordCount,
+		envelope.ByteCount, envelope.Payload,
+	}
+	data, _ := json.Marshal(immutable)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func syncStageTerminal(phase SyncStagePhase) bool {
+	switch phase {
+	case SyncStageCommitted, SyncStageSuperseded, SyncStageRejected:
+		return true
+	default:
+		return false
+	}
+}
+
+// nextSyncCommitRetry returns a deterministic, capped backoff. The stage id
+// supplies stable jitter so daemon restart cannot collapse retries into a hot
+// loop or change an already observable retry schedule.
+func nextSyncCommitRetry(stageID string, previous SyncStageState, now time.Time) (SyncStageState, bool) {
+	budget := previous.RetryBudget
+	if budget <= 0 {
+		budget = defaultSyncCommitRetries
+	}
+	attempt := previous.Attempt + 1
+	if attempt > budget {
+		previous.Phase = SyncStageRejected
+		previous.Attempt = attempt
+		previous.RetryBudget = budget
+		previous.RetryAfter = time.Time{}
+		previous.TerminalReason = "commit_retry_budget_exhausted"
+		previous.UpdatedAt = now.UTC()
+		return previous, false
+	}
+	delay := defaultSyncCommitBaseDelay << min(attempt-1, 16)
+	if delay > defaultSyncCommitMaxDelay {
+		delay = defaultSyncCommitMaxDelay
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d", stageID, attempt)))
+	jitter := time.Duration(uint16(sum[0])<<8|uint16(sum[1])) * (delay / 4) / time.Duration(^uint16(0))
+	previous.Phase = SyncStageWaitingCommit
+	previous.Attempt = attempt
+	previous.RetryBudget = budget
+	previous.RetryAfter = now.UTC().Add(delay + jitter)
+	previous.BlockerClass = "cache_busy"
+	previous.TerminalReason = ""
+	previous.UpdatedAt = now.UTC()
+	return previous, true
+}
+
+func publicStageRef(stageID string) string {
+	sum := sha256.Sum256([]byte("sync-stage\x00" + stageID))
+	return "stage-" + hex.EncodeToString(sum[:6])
+}
