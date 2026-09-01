@@ -331,7 +331,7 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 	}
 	journal := NewSyncStageJournal(runtimeDir, SyncStageLimits{})
 	stage, err := journal.Create(SyncStageEnvelope{
-		CacheUUID: req.CacheUUID, CacheSchema: schema, RegistrationID: req.RegistrationID,
+		JobID: jobID, CacheUUID: req.CacheUUID, CacheSchema: schema, CachePath: req.CachePath, RegistrationID: req.RegistrationID,
 		RepoID: req.RepoID, Collection: work.collection, Checkpoint: batch.checkpoint,
 		ProviderRevision: batch.providerRevision,
 		IdempotencyKey:   req.IdempotencyKey, RecordCount: batch.recordCount, Payload: batch.payload,
@@ -345,6 +345,8 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 
 	for {
 		if err := ctx.Err(); err != nil {
+			stage = rejectCancelledSyncStage(journal, stage)
+			m.setJobSyncStage(jobID, stage, "staged batch cancelled")
 			collection := syncCollectionResult{RemoteType: work.remoteType, Err: err}
 			return nil, collection, err
 		}
@@ -421,9 +423,220 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 			if !timer.Stop() {
 				<-timer.C
 			}
+			stage = rejectCancelledSyncStage(journal, stage)
+			m.setJobSyncStage(jobID, stage, "staged batch cancelled")
 			collection := syncCollectionResult{RemoteType: work.remoteType, Result: result, Err: ctx.Err()}
 			return result, collection, ctx.Err()
 		case <-timer.C:
+		}
+	}
+}
+
+func rejectCancelledSyncStage(journal *SyncStageJournal, stage SyncStageEnvelope) SyncStageEnvelope {
+	state := stage.State
+	state.Phase = SyncStageRejected
+	state.RetryAfter = time.Time{}
+	state.TerminalReason = "cancelled"
+	updated, err := journal.UpdateState(stage.StageID, state)
+	if err == nil {
+		return updated
+	}
+	return stage
+}
+
+// RecoverSyncStages resumes private, checksummed batches after the durable job
+// snapshot has been loaded and active jobs have been marked interrupted. No
+// provider client is constructed: recovery is a cache-only commit replay.
+func (m *JobManager) RecoverSyncStages(ctx context.Context, manager Manager) error {
+	runtimeDir := strings.TrimSpace(manager.RuntimeDir)
+	if runtimeDir == "" {
+		paths, err := manager.ResolvePaths()
+		if err != nil {
+			return err
+		}
+		runtimeDir = paths.RuntimeDir
+	}
+	journal := NewSyncStageJournal(runtimeDir, SyncStageLimits{})
+	stages, err := journal.List()
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for _, stage := range stages {
+		if syncStageTerminal(stage.State.Phase) {
+			continue
+		}
+		if !stage.ExpiresAt.After(now) {
+			state := stage.State
+			state.Phase, state.TerminalReason, state.RetryAfter = SyncStageRejected, "stale_stage_expired", time.Time{}
+			if _, err := journal.UpdateState(stage.StageID, state); err != nil {
+				return err
+			}
+			continue
+		}
+		if stage.Collection != "issues" && stage.Collection != "wiki" && stage.Collection != "pulls" {
+			state := stage.State
+			state.Phase, state.TerminalReason = SyncStageRejected, "unsupported_stage_collection"
+			if _, err := journal.UpdateState(stage.StageID, state); err != nil {
+				return err
+			}
+			continue
+		}
+		job, ok := m.Get(stage.JobID)
+		if !ok || job.Type != SyncJobType || job.Status != JobStatusInterrupted {
+			state := stage.State
+			state.Phase, state.TerminalReason = SyncStageRejected, "orphaned_or_incompatible_job"
+			if _, err := journal.UpdateState(stage.StageID, state); err != nil {
+				return err
+			}
+			continue
+		}
+		workerCtx, cancel := context.WithCancel(ctx)
+		if err := m.resumeInterruptedSyncStage(stage, cancel); err != nil {
+			cancel()
+			return err
+		}
+		go m.runRecoveredSyncStage(workerCtx, manager, journal, stage)
+	}
+	return nil
+}
+
+func (m *JobManager) resumeInterruptedSyncStage(stage SyncStageEnvelope, cancel context.CancelFunc) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job := m.jobs[stage.JobID]
+	now := m.now().UTC()
+	view := stage.PublicView()
+	job.Status, job.Error, job.ErrorClass = JobStatusRunning, "", ""
+	job.FinishedAt = nil
+	job.UpdatedAt = now
+	job.SyncStage = &view
+	job.Progress = append(job.Progress, service.ProgressEvent{Type: "recovered", Phase: string(stage.State.Phase), Collection: stage.Collection, RecordsListed: stage.RecordCount, RecordsFetched: stage.RecordCount, Message: "staged batch recovered after service restart"})
+	m.cancel[job.ID] = cancel
+	m.inflightWorkers[job.ID] = true
+	return m.saveLocked()
+}
+
+func (m *JobManager) runRecoveredSyncStage(ctx context.Context, manager Manager, journal *SyncStageJournal, stage SyncStageEnvelope) {
+	defer m.markWorkerFinished(stage.JobID)
+	result, finalStage, err := m.commitRecoveredSyncStage(ctx, manager, journal, stage)
+	if result == nil {
+		result = &service.SyncResourcesResult{}
+	}
+	status := JobStatusSucceeded
+	errorClass, publicError := "", ""
+	if err != nil {
+		status = JobStatusFailed
+		errorClass = maintenanceJobErrorClass(err, "sync_commit_failed")
+		publicError = publicMaintenanceJobError(SyncJobType, errorClass)
+		if errors.Is(ctx.Err(), context.Canceled) {
+			status, errorClass = JobStatusCancelled, "cancelled"
+			publicError = publicMaintenanceJobError(SyncJobType, errorClass)
+		}
+	}
+	view := finalStage.PublicView()
+	m.updateJob(stage.JobID, func(job *Job, now time.Time) {
+		job.Status, job.ErrorClass, job.Error = status, errorClass, publicError
+		job.UpdatedAt, job.FinishedAt, job.SyncStage = now, &now, &view
+		job.Steps, job.Completed = result.RecordsListed, result.SuccessCount
+		job.Progress = append(job.Progress, service.ProgressEvent{Type: status, Phase: status, Collection: stage.Collection, RecordsListed: result.RecordsListed, RecordsFetched: result.SuccessCount, RecordsFailed: result.FailureCount, Message: map[bool]string{true: "recovered staged batch committed", false: publicError}[err == nil]})
+		delete(m.cancel, job.ID)
+	})
+}
+
+func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manager, journal *SyncStageJournal, stage SyncStageEnvelope) (*service.SyncResourcesResult, SyncStageEnvelope, error) {
+	eff, err := effectiveJobConfig(manager, stage.CachePath)
+	if err != nil {
+		return nil, stage, err
+	}
+	store, err := cache.NewSQLiteStore(ctx, stage.CachePath)
+	if err != nil {
+		return nil, stage, err
+	}
+	defer store.Close()
+	svc := service.NewWithClientConfig(store, nil, service.ServiceConfig{LockPath: eff.Config.LockPath})
+	commit := func() (*service.SyncResourcesResult, error) {
+		switch stage.Collection {
+		case "issues":
+			var batch service.DurableIssueSyncBatch
+			if err := json.Unmarshal(stage.Payload, &batch); err != nil {
+				return nil, err
+			}
+			return svc.CommitIssueSyncBatch(ctx, batch, nil)
+		case "wiki":
+			var batch service.DurableWikiSyncBatch
+			if err := json.Unmarshal(stage.Payload, &batch); err != nil {
+				return nil, err
+			}
+			return svc.CommitWikiSyncBatch(ctx, batch, nil)
+		case "pulls":
+			var batch service.DurablePullSyncBatch
+			if err := json.Unmarshal(stage.Payload, &batch); err != nil {
+				return nil, err
+			}
+			return svc.CommitPullSyncBatch(ctx, batch, nil)
+		default:
+			return nil, ErrSyncStageCorrupt
+		}
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			stage = rejectCancelledSyncStage(journal, stage)
+			m.setJobSyncStage(stage.JobID, stage, "recovered staged batch cancelled")
+			return nil, stage, err
+		}
+		identity, identityErr := store.CacheIdentity(ctx)
+		currentSchema, schemaErr := store.SchemaVersion(ctx)
+		if identityErr != nil || schemaErr != nil || identity.UUID != stage.CacheUUID || currentSchema != stage.CacheSchema {
+			state := stage.State
+			state.Phase, state.TerminalReason = SyncStageRejected, "cache_identity_or_schema_changed"
+			stage, _ = journal.UpdateState(stage.StageID, state)
+			m.setJobSyncStage(stage.JobID, stage, "recovered staged batch rejected")
+			return nil, stage, CacheWriterIdentityError{code: "cache_uuid_mismatch"}
+		}
+		state := stage.State
+		state.Phase = SyncStageCommitting
+		stage, err = journal.UpdateState(stage.StageID, state)
+		if err != nil {
+			return nil, stage, err
+		}
+		m.setJobSyncStage(stage.JobID, stage, "recovered staged batch commit started")
+		result, commitErr := commit()
+		if commitErr == nil {
+			state = stage.State
+			state.Phase, state.CommittedAt = SyncStageCommitted, time.Now().UTC()
+			state.BlockerClass, state.BlockingOp, state.RetryAfter = "", "", time.Time{}
+			stage, err = journal.UpdateState(stage.StageID, state)
+			if err == nil {
+				m.setJobSyncStage(stage.JobID, stage, "recovered staged batch committed")
+			}
+			return result, stage, err
+		}
+		var contention cache.ErrLockContention
+		if !errors.As(commitErr, &contention) {
+			state = stage.State
+			state.Phase, state.TerminalReason = SyncStageRejected, maintenanceJobErrorClass(commitErr, "sync_commit_failed")
+			stage, _ = journal.UpdateState(stage.StageID, state)
+			return result, stage, commitErr
+		}
+		state, retry := nextSyncCommitRetry(stage.StageID, stage.State, time.Now().UTC())
+		state.BlockingOp = contention.PublicOperation()
+		stage, err = journal.UpdateState(stage.StageID, state)
+		if err != nil || !retry {
+			if err != nil {
+				return result, stage, err
+			}
+			return result, stage, commitErr
+		}
+		m.setJobSyncStage(stage.JobID, stage, "recovered stage waiting for cache writer")
+		timer := time.NewTimer(max(time.Until(stage.State.RetryAfter), 0))
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+		case <-timer.C:
+			continue
 		}
 	}
 }

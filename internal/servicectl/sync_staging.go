@@ -59,8 +59,10 @@ type SyncStageState struct {
 type SyncStageEnvelope struct {
 	Version          int             `json:"version"`
 	StageID          string          `json:"stage_id"`
+	JobID            string          `json:"job_id"`
 	CacheUUID        string          `json:"cache_uuid"`
 	CacheSchema      int             `json:"cache_schema"`
+	CachePath        string          `json:"cache_path"`
 	RegistrationID   string          `json:"registration_id"`
 	RepoID           string          `json:"repo_id"`
 	Collection       string          `json:"collection"`
@@ -87,6 +89,7 @@ type SyncStageView struct {
 	Fetched       int            `json:"fetched"`
 	Staged        int            `json:"staged"`
 	Committed     int            `json:"committed"`
+	StagedBytes   int64          `json:"staged_bytes,omitempty"`
 	Attempt       int            `json:"attempt,omitempty"`
 	RetryBudget   int            `json:"retry_budget,omitempty"`
 	RetryAfter    time.Time      `json:"retry_after,omitempty"`
@@ -102,7 +105,7 @@ type SyncStageView struct {
 func (e SyncStageEnvelope) PublicView() SyncStageView {
 	view := SyncStageView{
 		StageRef: publicStageRef(e.StageID), CacheRef: publicCacheRef(e.CacheUUID, ""),
-		RepoID: e.RepoID, Collection: e.Collection, Phase: e.State.Phase,
+		RepoID: e.RepoID, Collection: e.Collection, Phase: e.State.Phase, StagedBytes: e.ByteCount,
 		Attempt: e.State.Attempt, RetryBudget: e.State.RetryBudget,
 		RetryAfter: e.State.RetryAfter, BlockerClass: e.State.BlockerClass,
 		BlockingOp: e.State.BlockingOp, FetchedAt: e.State.FetchedAt,
@@ -157,12 +160,14 @@ func NewSyncStageJournal(runtimeDir string, limits SyncStageLimits) *SyncStageJo
 func (j *SyncStageJournal) Create(envelope SyncStageEnvelope) (SyncStageEnvelope, error) {
 	now := j.now().UTC()
 	envelope.Version = syncStageEnvelopeVersion
+	envelope.JobID = strings.TrimSpace(envelope.JobID)
 	envelope.CacheUUID = strings.TrimSpace(envelope.CacheUUID)
+	envelope.CachePath = strings.TrimSpace(envelope.CachePath)
 	envelope.RegistrationID = strings.TrimSpace(envelope.RegistrationID)
 	envelope.RepoID = strings.TrimSpace(envelope.RepoID)
 	envelope.Collection = strings.TrimSpace(envelope.Collection)
 	envelope.IdempotencyKey = strings.TrimSpace(envelope.IdempotencyKey)
-	if envelope.CacheUUID == "" || envelope.RegistrationID == "" || envelope.RepoID == "" || envelope.Collection == "" || envelope.IdempotencyKey == "" || envelope.CacheSchema <= 0 {
+	if envelope.JobID == "" || envelope.CacheUUID == "" || envelope.CachePath == "" || envelope.RegistrationID == "" || envelope.RepoID == "" || envelope.Collection == "" || envelope.IdempotencyKey == "" || envelope.CacheSchema <= 0 {
 		return SyncStageEnvelope{}, fmt.Errorf("%w: incomplete stage identity", ErrSyncStageCorrupt)
 	}
 	if !json.Valid(envelope.Payload) {
@@ -286,6 +291,9 @@ func (j *SyncStageJournal) validate(envelope SyncStageEnvelope, expectedID strin
 	if envelope.Version != syncStageEnvelopeVersion || envelope.StageID != expectedID || !json.Valid(envelope.Payload) {
 		return ErrSyncStageCorrupt
 	}
+	if strings.TrimSpace(envelope.JobID) == "" || strings.TrimSpace(envelope.CacheUUID) == "" || strings.TrimSpace(envelope.CachePath) == "" || strings.TrimSpace(envelope.RegistrationID) == "" || strings.TrimSpace(envelope.RepoID) == "" || strings.TrimSpace(envelope.Collection) == "" || strings.TrimSpace(envelope.IdempotencyKey) == "" || envelope.CacheSchema <= 0 {
+		return ErrSyncStageCorrupt
+	}
 	if envelope.ByteCount != int64(len(envelope.Payload)) {
 		return ErrSyncStageCorrupt
 	}
@@ -332,8 +340,10 @@ func validStageID(stageID string) bool {
 func syncStageChecksum(envelope SyncStageEnvelope) string {
 	immutable := struct {
 		Version          int             `json:"version"`
+		JobID            string          `json:"job_id"`
 		CacheUUID        string          `json:"cache_uuid"`
 		CacheSchema      int             `json:"cache_schema"`
+		CachePath        string          `json:"cache_path"`
 		RegistrationID   string          `json:"registration_id"`
 		RepoID           string          `json:"repo_id"`
 		Collection       string          `json:"collection"`
@@ -346,7 +356,7 @@ func syncStageChecksum(envelope SyncStageEnvelope) string {
 		ByteCount        int64           `json:"byte_count"`
 		Payload          json.RawMessage `json:"payload"`
 	}{
-		envelope.Version, envelope.CacheUUID, envelope.CacheSchema,
+		envelope.Version, envelope.JobID, envelope.CacheUUID, envelope.CacheSchema, envelope.CachePath,
 		envelope.RegistrationID, envelope.RepoID, envelope.Collection,
 		envelope.Checkpoint, envelope.ProviderRevision, envelope.IdempotencyKey,
 		envelope.CreatedAt.UTC(), envelope.ExpiresAt.UTC(), envelope.RecordCount,

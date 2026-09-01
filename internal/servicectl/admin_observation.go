@@ -752,7 +752,7 @@ func adminJobObservation(job Job) adminhttp.JobObservation {
 	if stage := job.SyncStage; stage != nil {
 		view.SyncStage = &adminhttp.SyncStageObservation{
 			StageRef: stage.StageRef, Phase: string(stage.Phase), Fetched: stage.Fetched,
-			Staged: stage.Staged, Committed: stage.Committed, Attempt: stage.Attempt,
+			Staged: stage.Staged, Committed: stage.Committed, StagedBytes: stage.StagedBytes, Attempt: stage.Attempt,
 			RetryBudget: stage.RetryBudget, RetryAfter: stage.RetryAfter,
 			BlockerClass: stage.BlockerClass, BlockingOp: stage.BlockingOp,
 			FetchedAt: stage.FetchedAt, StagedAt: stage.StagedAt,

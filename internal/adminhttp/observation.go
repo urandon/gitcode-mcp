@@ -316,6 +316,7 @@ type SyncStageObservation struct {
 	Fetched       int       `json:"fetched"`
 	Staged        int       `json:"staged"`
 	Committed     int       `json:"committed"`
+	StagedBytes   int64     `json:"staged_bytes,omitempty"`
 	Attempt       int       `json:"attempt,omitempty"`
 	RetryBudget   int       `json:"retry_budget,omitempty"`
 	RetryAfter    time.Time `json:"retry_after,omitempty"`

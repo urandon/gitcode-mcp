@@ -2,6 +2,7 @@ package servicectl
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -231,4 +232,98 @@ func TestIssueOnlyDaemonSyncWaitsForWriterAndCommitsRetainedStage(t *testing.T) 
 		t.Fatalf("stages=%+v err=%v", stages, err)
 	}
 	_ = store.Close()
+}
+
+func TestDaemonRestartRecoversStagedBatchWithoutProvider(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	root := t.TempDir()
+	cachePath := filepath.Join(root, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema, err := store.SchemaVersion(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := service.New(store).FetchIssueSyncBatch(ctx, service.BulkSyncRequest{RepoID: "owner/repo", IdempotencyKey: "restart-stage", Bounds: &service.SyncBounds{MaxPages: 1}, PerPage: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registrationID := maintenanceRegistrationID(identity.UUID, "owner/repo")
+	journal := NewSyncStageJournal(root, SyncStageLimits{})
+	stage, err := journal.Create(SyncStageEnvelope{
+		JobID: "job-000001", CacheUUID: identity.UUID, CacheSchema: schema, CachePath: cachePath,
+		RegistrationID: registrationID, RepoID: "owner/repo", Collection: "issues",
+		IdempotencyKey: "restart-stage", RecordCount: batch.RecordCount(), Payload: payload,
+		State: SyncStageState{Phase: SyncStageStaged, RetryBudget: defaultSyncCommitRetries, FetchedAt: batch.FetchedAt},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := stage.PublicView()
+	jobsPath := filepath.Join(root, "jobs.json")
+	before := NewJobManager(jobsPath)
+	createdAt := time.Now().UTC().Add(-time.Minute)
+	before.jobs[stage.JobID] = &Job{ID: stage.JobID, Type: SyncJobType, RepoID: "owner/repo", CacheUUID: identity.UUID, RegistrationID: registrationID, Status: JobStatusRunning, CreatedAt: createdAt, UpdatedAt: createdAt, SyncStage: &view}
+	before.nextID = 1
+	if err := before.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	held, err := store.AcquireWriter(ctx, cache.WriterRequest{Operation: "rag-index", RepoID: "owner/repo", LockPath: cachePath + ".lock"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewJobManager(jobsPath)
+	if err := restarted.LoadAndMarkInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	manager := newTestManager(t, "darwin")
+	manager.RuntimeDir = root
+	cfg := config.Default()
+	manager.EffectiveConfig = &cfg
+	if err := restarted.RecoverSyncStages(ctx, manager); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var job Job
+	for time.Now().Before(deadline) {
+		job, _ = restarted.Get(stage.JobID)
+		if job.SyncStage != nil && job.SyncStage.Phase == SyncStageWaitingCommit {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if job.Status != JobStatusRunning || job.SyncStage == nil || job.SyncStage.Phase != SyncStageWaitingCommit {
+		t.Fatalf("recovered waiting job = %+v", job)
+	}
+	if err := store.ReleaseWriter(ctx, held); err != nil {
+		t.Fatal(err)
+	}
+	for time.Now().Before(deadline) {
+		job, _ = restarted.Get(stage.JobID)
+		if job.Status == JobStatusSucceeded {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if job.Status != JobStatusSucceeded || job.SyncStage == nil || job.SyncStage.Phase != SyncStageCommitted {
+		t.Fatalf("recovered terminal job = %+v", job)
+	}
+	if _, err := store.GetSourceScoped(ctx, "owner/repo", "ISSUE-42"); err != nil {
+		t.Fatalf("recovered commit missing source: %v", err)
+	}
 }

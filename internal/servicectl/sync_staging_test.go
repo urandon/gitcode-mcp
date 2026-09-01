@@ -12,7 +12,7 @@ import (
 
 func testSyncStageEnvelope() SyncStageEnvelope {
 	return SyncStageEnvelope{
-		CacheUUID: "cache-uuid", CacheSchema: 19, RegistrationID: "registration-1",
+		JobID: "job-1", CacheUUID: "cache-uuid", CacheSchema: 19, CachePath: "/private/cache.db", RegistrationID: "registration-1",
 		RepoID: "owner/repo", Collection: "issues", IdempotencyKey: "sync-1",
 		RecordCount: 2, Payload: json.RawMessage(`{"items":[{"body":"private source body"}]}`),
 	}
@@ -113,7 +113,7 @@ func TestSyncStagePublicViewCannotExposePayloadOrFilesystemState(t *testing.T) {
 		t.Fatalf("Marshal: %v", err)
 	}
 	public := string(data)
-	for _, forbidden := range []string{"private source body", "payload", "checksum", "idempotency", "sync-stages", string(os.PathSeparator) + "tmp"} {
+	for _, forbidden := range []string{"private source body", "payload", "checksum", "idempotency", "sync-stages", "cache.db", "job_id", string(os.PathSeparator) + "tmp"} {
 		if strings.Contains(public, forbidden) {
 			t.Fatalf("public view contains %q: %s", forbidden, public)
 		}
