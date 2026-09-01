@@ -13,6 +13,8 @@ describe('browser CI artifact policy', () => {
     })).toEqual({
       ci: true,
       trace: 'off',
+      screenshot: 'off',
+      video: 'off',
       adminLaunchURL: undefined,
       adminQAOutput: undefined,
       operatorQAOutput: undefined,
@@ -31,6 +33,8 @@ describe('browser CI artifact policy', () => {
     })).toMatchObject({
       ci: false,
       trace: 'on-first-retry',
+      screenshot: 'off',
+      video: 'off',
       adminLaunchURL: 'http://127.0.0.1/local-launch',
       adminQAOutput: '/tmp/admin-qa',
       operatorQAOutput: '/tmp/operator-qa',

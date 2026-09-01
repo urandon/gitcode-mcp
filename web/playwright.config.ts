@@ -19,7 +19,11 @@ export default defineConfig({
     baseURL: 'http://127.0.0.1:4173',
     // Playwright's string trace modes include raster screenshots. CI keeps
     // browser gates machine-readable, so traces remain a local-only aid.
-    trace: browserPolicy.trace
+    trace: browserPolicy.trace,
+    // Explicitly prevent implicit failure artifacts. Local visual QA uses only
+    // the opt-in, path-bound captures in the browser suites.
+    screenshot: browserPolicy.screenshot,
+    video: browserPolicy.video
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {
