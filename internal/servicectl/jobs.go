@@ -78,6 +78,12 @@ type JobManager struct {
 	cacheMutationFences                 map[string]bool
 	inflightWorkers                     map[string]bool
 	directCacheWriters                  map[string]string
+	syncCommitQueues                    map[string][]syncCommitWaiter
+}
+
+type syncCommitWaiter struct {
+	stageID string
+	ready   chan struct{}
 }
 
 type jobCancellationResolution struct {
@@ -167,6 +173,7 @@ func NewJobManagerWithRetention(snapshotPath string, retention config.ServiceJob
 		cacheMutationFences:         map[string]bool{},
 		inflightWorkers:             map[string]bool{},
 		directCacheWriters:          map[string]string{},
+		syncCommitQueues:            map[string][]syncCommitWaiter{},
 		retention:                   retention,
 	}
 }

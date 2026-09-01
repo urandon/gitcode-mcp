@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"gitcode-mcp/internal/cache"
@@ -368,15 +369,22 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 			collection := syncCollectionResult{RemoteType: work.remoteType, Err: identityErr}
 			return nil, collection, identityErr
 		}
+		releaseTurn, turnErr := m.acquireSyncCommitTurn(ctx, stage.CacheUUID, stage.StageID)
+		if turnErr != nil {
+			collection := syncCollectionResult{RemoteType: work.remoteType, Err: turnErr}
+			return nil, collection, turnErr
+		}
 		state := stage.State
 		state.Phase = SyncStageCommitting
 		stage, err = journal.UpdateState(stage.StageID, state)
 		if err != nil {
+			releaseTurn()
 			collection := syncCollectionResult{RemoteType: work.remoteType, Err: err}
 			return nil, collection, err
 		}
 		m.setJobSyncStage(jobID, stage, "staged batch commit started")
 		result, commitErr := work.commit(ctx, stage.Payload)
+		releaseTurn()
 		if commitErr == nil {
 			state = stage.State
 			state.Phase = SyncStageCommitted
@@ -596,12 +604,18 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 		}
 		state := stage.State
 		state.Phase = SyncStageCommitting
+		releaseTurn, turnErr := m.acquireSyncCommitTurn(ctx, stage.CacheUUID, stage.StageID)
+		if turnErr != nil {
+			return nil, stage, turnErr
+		}
 		stage, err = journal.UpdateState(stage.StageID, state)
 		if err != nil {
+			releaseTurn()
 			return nil, stage, err
 		}
 		m.setJobSyncStage(stage.JobID, stage, "recovered staged batch commit started")
 		result, commitErr := commit()
+		releaseTurn()
 		if commitErr == nil {
 			state = stage.State
 			state.Phase, state.CommittedAt = SyncStageCommitted, time.Now().UTC()
@@ -638,6 +652,56 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 		case <-timer.C:
 			continue
 		}
+	}
+}
+
+// acquireSyncCommitTurn provides FIFO admission among staged commits sharing a
+// cache UUID. The turn is held only for one cache-local commit attempt and is
+// released before contention backoff, so one repository cannot monopolize the
+// retry loop or block unrelated provider fetches.
+func (m *JobManager) acquireSyncCommitTurn(ctx context.Context, cacheUUID, stageID string) (func(), error) {
+	waiter := syncCommitWaiter{stageID: stageID, ready: make(chan struct{})}
+	m.mu.Lock()
+	queue := append(m.syncCommitQueues[cacheUUID], waiter)
+	m.syncCommitQueues[cacheUUID] = queue
+	if len(queue) == 1 {
+		close(waiter.ready)
+	}
+	m.mu.Unlock()
+
+	select {
+	case <-waiter.ready:
+		var once sync.Once
+		return func() { once.Do(func() { m.releaseSyncCommitTurn(cacheUUID, stageID) }) }, nil
+	case <-ctx.Done():
+		m.removeSyncCommitWaiter(cacheUUID, stageID)
+		return nil, ctx.Err()
+	}
+}
+
+func (m *JobManager) releaseSyncCommitTurn(cacheUUID, stageID string) {
+	m.removeSyncCommitWaiter(cacheUUID, stageID)
+}
+
+func (m *JobManager) removeSyncCommitWaiter(cacheUUID, stageID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	queue := m.syncCommitQueues[cacheUUID]
+	for index, waiter := range queue {
+		if waiter.stageID != stageID {
+			continue
+		}
+		wasHead := index == 0
+		queue = append(queue[:index], queue[index+1:]...)
+		if len(queue) == 0 {
+			delete(m.syncCommitQueues, cacheUUID)
+			return
+		}
+		m.syncCommitQueues[cacheUUID] = queue
+		if wasHead {
+			close(queue[0].ready)
+		}
+		return
 	}
 }
 

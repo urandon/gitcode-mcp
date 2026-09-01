@@ -327,3 +327,59 @@ func TestDaemonRestartRecoversStagedBatchWithoutProvider(t *testing.T) {
 		t.Fatalf("recovered commit missing source: %v", err)
 	}
 }
+
+func TestSyncCommitAdmissionIsFIFOAcrossRepositoriesSharingCache(t *testing.T) {
+	ctx := context.Background()
+	jobs := NewJobManager("")
+	releaseA, err := jobs.acquireSyncCommitTurn(ctx, "cache-shared", "repo-a-stage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type admission struct {
+		stage   string
+		release func()
+		err     error
+	}
+	admitted := make(chan admission, 2)
+	request := func(stage string) {
+		release, err := jobs.acquireSyncCommitTurn(ctx, "cache-shared", stage)
+		admitted <- admission{stage: stage, release: release, err: err}
+	}
+	go request("repo-b-stage")
+	waitForSyncCommitQueueLength(t, jobs, "cache-shared", 2)
+	go request("repo-c-stage")
+	waitForSyncCommitQueueLength(t, jobs, "cache-shared", 3)
+
+	releaseA()
+	first := <-admitted
+	if first.err != nil || first.stage != "repo-b-stage" {
+		t.Fatalf("first admission=%+v, want repo-b-stage", first)
+	}
+	select {
+	case next := <-admitted:
+		t.Fatalf("repo-c admitted before repo-b released: %+v", next)
+	case <-time.After(20 * time.Millisecond):
+	}
+	first.release()
+	second := <-admitted
+	if second.err != nil || second.stage != "repo-c-stage" {
+		t.Fatalf("second admission=%+v, want repo-c-stage", second)
+	}
+	second.release()
+	waitForSyncCommitQueueLength(t, jobs, "cache-shared", 0)
+}
+
+func waitForSyncCommitQueueLength(t *testing.T, jobs *JobManager, cacheUUID string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		jobs.mu.Lock()
+		got := len(jobs.syncCommitQueues[cacheUUID])
+		jobs.mu.Unlock()
+		if got == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("sync commit queue did not reach length %d", want)
+}
