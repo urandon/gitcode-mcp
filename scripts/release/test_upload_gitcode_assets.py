@@ -226,6 +226,28 @@ class UploadGitCodeAssetsTest(unittest.TestCase):
         self.assertEqual(request.get_header("Range"), "bytes=0-0")
         self.assertEqual(urlopen.call_args.kwargs["timeout"], upload.READBACK_REQUEST_TIMEOUT_SECONDS)
 
+    def test_content_range_parser_requires_exact_requested_range(self):
+        valid = {
+            "bytes 0-0/6419356": 6419356,
+            " Bytes\t0 - 0 / 8 ": 8,
+        }
+        invalid = [
+            "garbage/6419356",
+            "bytes */6419356",
+            "bytes 1-1/6419356",
+            "bytes 0-1/6419356",
+            "items 0-0/6419356",
+            "bytes 0-0/0",
+            "bytes 0-0/*",
+            "",
+        ]
+        for value, expected in valid.items():
+            with self.subTest(value=value):
+                self.assertEqual(upload._content_range_total(value), expected)
+        for value in invalid:
+            with self.subTest(value=value):
+                self.assertIsNone(upload._content_range_total(value))
+
     def test_malformed_partial_range_fails_closed(self):
         response = mock.MagicMock()
         response.__enter__.return_value.status = 206

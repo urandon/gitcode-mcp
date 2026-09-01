@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -98,10 +99,10 @@ def _release_assets(payload: Any) -> Dict[str, ReleaseAsset]:
 
 
 def _content_range_total(value: str) -> Optional[int]:
-    _, separator, total = value.strip().rpartition("/")
-    if not separator or not total.isdigit():
+    match = re.fullmatch(r"bytes\s+0\s*-\s*0\s*/\s*([1-9][0-9]*)", value.strip(), flags=re.IGNORECASE)
+    if match is None:
         return None
-    return int(total)
+    return int(match.group(1))
 
 
 def _urllib_download_size(url: str) -> int:
