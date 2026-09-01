@@ -280,6 +280,18 @@ type MaintenanceFrontier struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
+// SyncCommitReceipt is the cache-local proof that a private staged batch and
+// its frontier were published in the same SQLite transaction. The daemon can
+// use it to recover truthfully when the filesystem journal cannot persist the
+// post-commit terminal state.
+type SyncCommitReceipt struct {
+	StageID     string
+	Checksum    string
+	RepoID      string
+	Collection  string
+	CommittedAt time.Time
+}
+
 type IssueCommentSync struct {
 	RepoID         string
 	SourceID       string
@@ -450,6 +462,8 @@ type SyncGraph struct {
 type SyncBatch struct {
 	Graphs                 []SyncGraph
 	Frontier               *SyncFrontier
+	MaintenanceFrontier    *MaintenanceFrontier
+	Receipt                *SyncCommitReceipt
 	IssueCommentSyncs      []IssueCommentSync
 	ClearRecordCommentRefs []RecordRef
 	ReplaceRecordComments  []RecordCommentsReplacement

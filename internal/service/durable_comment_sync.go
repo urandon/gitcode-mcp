@@ -18,17 +18,19 @@ import (
 // checksummed staging journal until CommitIssueCommentSyncBatch publishes the
 // normalized cache graphs atomically.
 type DurableIssueCommentSyncBatch struct {
-	Version          int                        `json:"version"`
-	RepoID           string                     `json:"repo_id"`
-	Collection       string                     `json:"collection"`
-	IdempotencyKey   string                     `json:"idempotency_key"`
-	Groups           []DurableIssueCommentGroup `json:"groups"`
-	PagesListed      int                        `json:"pages_listed"`
-	RecordsListed    int                        `json:"records_listed"`
-	StopReason       string                     `json:"stop_reason"`
-	TraversalStatus  string                     `json:"traversal_status"`
-	ProviderRevision string                     `json:"provider_revision"`
-	FetchedAt        time.Time                  `json:"fetched_at"`
+	Version             int                        `json:"version"`
+	RepoID              string                     `json:"repo_id"`
+	Collection          string                     `json:"collection"`
+	IdempotencyKey      string                     `json:"idempotency_key"`
+	Groups              []DurableIssueCommentGroup `json:"groups"`
+	PagesListed         int                        `json:"pages_listed"`
+	RecordsListed       int                        `json:"records_listed"`
+	StopReason          string                     `json:"stop_reason"`
+	TraversalStatus     string                     `json:"traversal_status"`
+	ProviderRevision    string                     `json:"provider_revision"`
+	FetchedAt           time.Time                  `json:"fetched_at"`
+	MaintenanceFrontier *cache.MaintenanceFrontier `json:"-"`
+	CommitReceipt       *cache.SyncCommitReceipt   `json:"-"`
 }
 
 type DurableIssueCommentGroup struct {
@@ -55,29 +57,9 @@ func (s *Service) FetchIssueCommentSyncBatch(ctx context.Context, req BulkSyncRe
 		return DurableIssueCommentSyncBatch{}, err
 	}
 
-	// Queue repair is cache-local and intentionally releases the writer before
-	// the first provider request. Slow or unavailable networks never pin SQLite.
-	prepCtx, releaseWriter, err := s.acquireBulkWriter(ctx, repoID, "bulk-sync-issue-comments-prepare")
-	if err != nil {
-		return DurableIssueCommentSyncBatch{}, err
-	}
-	var repaired []string
-	if repairer, ok := s.store.(interface {
-		RepairIssueProviderPlaceholders(context.Context, string) ([]string, error)
-	}); ok {
-		repaired, err = repairer.RepairIssueProviderPlaceholders(prepCtx, repoID)
-	}
-	if err == nil {
-		err = s.projectRepairedIssueCommentCache(prepCtx, repoID, repaired)
-	}
-	if err == nil {
-		err = s.seedLegacyIssueCommentQueue(prepCtx, repoID)
-	}
-	releaseWriter()
-	if err != nil {
-		return DurableIssueCommentSyncBatch{}, err
-	}
-
+	// Fetch is strictly read/provider-only. Legacy queue repair remains a
+	// separate cache-local maintenance concern; it must never make remote fetch
+	// admission depend on an available SQLite writer.
 	limit := 0
 	if req.Bounds != nil {
 		limit = req.Bounds.MaxRecords
@@ -208,14 +190,14 @@ func (s *Service) CommitIssueCommentSyncBatch(ctx context.Context, batch Durable
 		result.TraversalStatus = "partial"
 		return result, &PartialSyncError{Errors: result.Failures, FailureCount: result.FailureCount}
 	}
+	commit.MaintenanceFrontier = batch.MaintenanceFrontier
+	commit.Receipt = batch.CommitReceipt
 	if err := s.commitDurableSyncBatch(ctx, commit); err != nil {
 		return bulkSyncFailureResult(err, "issue_comment:*", "issue_comments")
 	}
 	result.SuccessCount = len(result.Results)
 	emitProgress(progress, ProgressEvent{Collection: "issue_comments", Phase: "committing", RecordsListed: batch.RecordsListed, RecordsFetched: result.SuccessCount})
-	if err := s.attachIssueCommentQueueSummary(ctx, result, repoID, "drain"); err != nil {
-		return result, err
-	}
+	_ = s.attachIssueCommentQueueSummary(ctx, result, repoID, "drain")
 	return result, nil
 }
 
@@ -243,17 +225,19 @@ func durableIssueCommentProviderRevision(groups []DurableIssueCommentGroup) stri
 }
 
 type DurablePRCommentSyncBatch struct {
-	Version          int                    `json:"version"`
-	RepoID           string                 `json:"repo_id"`
-	Collection       string                 `json:"collection"`
-	IdempotencyKey   string                 `json:"idempotency_key"`
-	Items            []DurablePRCommentItem `json:"items"`
-	PagesListed      int                    `json:"pages_listed"`
-	RecordsListed    int                    `json:"records_listed"`
-	StopReason       string                 `json:"stop_reason"`
-	TraversalStatus  string                 `json:"traversal_status"`
-	ProviderRevision string                 `json:"provider_revision"`
-	FetchedAt        time.Time              `json:"fetched_at"`
+	Version             int                        `json:"version"`
+	RepoID              string                     `json:"repo_id"`
+	Collection          string                     `json:"collection"`
+	IdempotencyKey      string                     `json:"idempotency_key"`
+	Items               []DurablePRCommentItem     `json:"items"`
+	PagesListed         int                        `json:"pages_listed"`
+	RecordsListed       int                        `json:"records_listed"`
+	StopReason          string                     `json:"stop_reason"`
+	TraversalStatus     string                     `json:"traversal_status"`
+	ProviderRevision    string                     `json:"provider_revision"`
+	FetchedAt           time.Time                  `json:"fetched_at"`
+	MaintenanceFrontier *cache.MaintenanceFrontier `json:"-"`
+	CommitReceipt       *cache.SyncCommitReceipt   `json:"-"`
 }
 
 type DurablePRCommentItem struct {
@@ -409,7 +393,7 @@ func (s *Service) CommitPRCommentSyncBatch(ctx context.Context, batch DurablePRC
 		abortDurablePlans(result, plans, "pr_comment")
 		return result, &PartialSyncError{Errors: result.Failures, FailureCount: result.FailureCount}
 	}
-	if err := s.commitDurableSyncBatch(ctx, cache.SyncBatch{Graphs: graphs}); err != nil {
+	if err := s.commitDurableSyncBatch(ctx, cache.SyncBatch{Graphs: graphs, MaintenanceFrontier: batch.MaintenanceFrontier, Receipt: batch.CommitReceipt}); err != nil {
 		return bulkSyncFailureResult(err, "pr_comment:*", "pr_comments")
 	}
 	result.Results = durableResults(plans)

@@ -197,7 +197,7 @@ func TestMigrateRepositoryDocsV18ToV19PreservesDerivedMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.FromVersion != 18 || result.ToVersion != 19 {
+	if result.FromVersion != 18 || result.ToVersion != 20 {
 		t.Fatalf("migration result=%+v", result)
 	}
 	store, err := NewSQLiteReadOnlyStore(ctx, path)

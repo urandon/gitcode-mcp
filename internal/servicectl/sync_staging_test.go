@@ -13,7 +13,7 @@ import (
 func testSyncStageEnvelope() SyncStageEnvelope {
 	return SyncStageEnvelope{
 		JobID: "job-1", CacheUUID: "cache-uuid", CacheSchema: 19, CachePath: "/private/cache.db", RegistrationID: "registration-1",
-		RepoID: "owner/repo", Collection: "issues", IdempotencyKey: "sync-1",
+		RepoID: "owner/repo", BindingFingerprint: "sha256:test-binding", Collection: "issues", IdempotencyKey: "sync-1",
 		RecordCount: 2, Payload: json.RawMessage(`{"items":[{"body":"private source body"}]}`),
 	}
 }
@@ -172,7 +172,6 @@ func TestSyncStageCreateRunsTerminalGCBeforeCapacityCheck(t *testing.T) {
 	if _, err := journal.UpdateState(first.StageID, SyncStageState{Phase: SyncStageCommitted, FetchedAt: now, StagedAt: now, CommittedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	journal.now = func() time.Time { return now.Add(2 * time.Hour) }
 	second := testSyncStageEnvelope()
 	second.IdempotencyKey = "after-production-gc"
 	created, err := journal.Create(second)
@@ -180,7 +179,7 @@ func TestSyncStageCreateRunsTerminalGCBeforeCapacityCheck(t *testing.T) {
 		t.Fatalf("Create after production GC: %v", err)
 	}
 	if _, err := journal.Load(first.StageID); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("expired terminal stage retained: %v", err)
+		t.Fatalf("committed terminal stage retained in active capacity: %v", err)
 	}
 	if _, err := journal.Load(created.StageID); err != nil {
 		t.Fatalf("new stage missing: %v", err)

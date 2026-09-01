@@ -2,10 +2,13 @@ package servicectl
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +34,8 @@ func (e CacheWriterIdentityError) Error() string {
 		return "service: registration id does not match the selected cache repository"
 	case "repository_binding_unavailable":
 		return "service: repository binding is unavailable"
+	case "repository_binding_changed":
+		return "service: repository binding changed after the staged fetch"
 	default:
 		return "service: selected cache authority is unavailable"
 	}
@@ -165,11 +170,6 @@ func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID stri
 	if result == nil {
 		result = &service.SyncResourcesResult{}
 	}
-	if strings.TrimSpace(req.Lane) != "" {
-		if frontierErr := recordMaintenanceSyncFrontiers(context.Background(), req, collections); frontierErr != nil && err == nil {
-			err = fmt.Errorf("record maintenance frontier: %w", frontierErr)
-		}
-	}
 	if err != nil {
 		status := JobStatusFailed
 		if errors.Is(ctx.Err(), context.Canceled) {
@@ -219,13 +219,19 @@ type durableCollectionBatch struct {
 	providerRevision string
 	idempotencyKey   string
 	fetchedAt        time.Time
+	pagesListed      int
+	recordsListed    int
+	traversalStatus  string
+	highUpdatedAt    time.Time
+	highRemoteID     string
+	highNumber       int
 }
 
 type durableCollectionWork struct {
 	collection string
 	remoteType string
 	fetch      func(context.Context) (durableCollectionBatch, error)
-	commit     func(context.Context, []byte) (*service.SyncResourcesResult, error)
+	commit     func(context.Context, SyncStageEnvelope) (*service.SyncResourcesResult, error)
 }
 
 func (m *JobManager) runDurableSync(ctx context.Context, manager Manager, jobID string, req StartSyncJobRequest, progressCh chan<- service.ProgressEvent) (*service.SyncResourcesResult, []syncCollectionResult, error) {
@@ -239,13 +245,18 @@ func (m *JobManager) runDurableSync(ctx context.Context, manager Manager, jobID 
 	if err != nil {
 		return nil, nil, err
 	}
+	binding, err := store.ResolveRepositoryBinding(ctx, req.RepoID)
+	if err != nil {
+		return nil, nil, err
+	}
+	bindingFingerprint := syncRepositoryBindingFingerprint(binding)
 	bulkReq := syncBulkRequest(req, progressCh)
 	works := durableCollectionWorks(svc, bulkReq, req)
 	aggregate := &service.SyncResourcesResult{Results: []service.SyncResult{}, Failures: []service.ResourceError{}}
 	collections := make([]syncCollectionResult, 0, len(works))
 	var syncErr error
 	for _, work := range works {
-		result, collection, collectionErr := m.runDurableCollection(ctx, manager, jobID, req, schema, work)
+		result, collection, collectionErr := m.runDurableCollection(ctx, manager, jobID, req, schema, bindingFingerprint, work)
 		mergeSyncResources(aggregate, result)
 		collections = append(collections, collection)
 		syncErr = mergeSyncError(syncErr, result, collectionErr)
@@ -278,13 +289,14 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 				if marshalErr != nil {
 					return durableCollectionBatch{}, marshalErr
 				}
-				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.HighUpdatedAt.Format(time.RFC3339Nano), idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt}, err
+				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.HighUpdatedAt.Format(time.RFC3339Nano), idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt, pagesListed: batch.PagesListed, recordsListed: batch.RecordsListed, traversalStatus: batch.TraversalStatus, highUpdatedAt: batch.HighUpdatedAt, highRemoteID: batch.HighRemoteID, highNumber: batch.HighNumber}, err
 			},
-			commit: func(ctx context.Context, payload []byte) (*service.SyncResourcesResult, error) {
+			commit: func(ctx context.Context, stage SyncStageEnvelope) (*service.SyncResourcesResult, error) {
 				var batch service.DurableIssueSyncBatch
-				if err := json.Unmarshal(payload, &batch); err != nil {
+				if err := json.Unmarshal(stage.Payload, &batch); err != nil {
 					return nil, err
 				}
+				batch.MaintenanceFrontier, batch.CommitReceipt = stage.MaintenanceFrontier, syncStageCommitReceipt(stage)
 				return svc.CommitIssueSyncBatch(ctx, batch, bulkReq.ProgressChan)
 			},
 		})
@@ -298,13 +310,14 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 				if marshalErr != nil {
 					return durableCollectionBatch{}, marshalErr
 				}
-				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.ProviderRevision, idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt}, err
+				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.ProviderRevision, idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt, pagesListed: batch.PagesListed, recordsListed: batch.RecordsListed, traversalStatus: batch.TraversalStatus}, err
 			},
-			commit: func(ctx context.Context, payload []byte) (*service.SyncResourcesResult, error) {
+			commit: func(ctx context.Context, stage SyncStageEnvelope) (*service.SyncResourcesResult, error) {
 				var batch service.DurableIssueCommentSyncBatch
-				if err := json.Unmarshal(payload, &batch); err != nil {
+				if err := json.Unmarshal(stage.Payload, &batch); err != nil {
 					return nil, err
 				}
+				batch.MaintenanceFrontier, batch.CommitReceipt = stage.MaintenanceFrontier, syncStageCommitReceipt(stage)
 				return svc.CommitIssueCommentSyncBatch(ctx, batch, bulkReq.ProgressChan)
 			},
 		})
@@ -318,13 +331,14 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 				if marshalErr != nil {
 					return durableCollectionBatch{}, marshalErr
 				}
-				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.ProviderRevision, idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt}, err
+				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.ProviderRevision, idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt, pagesListed: batch.PagesListed, recordsListed: batch.RecordsListed, traversalStatus: batch.TraversalStatus}, err
 			},
-			commit: func(ctx context.Context, payload []byte) (*service.SyncResourcesResult, error) {
+			commit: func(ctx context.Context, stage SyncStageEnvelope) (*service.SyncResourcesResult, error) {
 				var batch service.DurableWikiSyncBatch
-				if err := json.Unmarshal(payload, &batch); err != nil {
+				if err := json.Unmarshal(stage.Payload, &batch); err != nil {
 					return nil, err
 				}
+				batch.MaintenanceFrontier, batch.CommitReceipt = stage.MaintenanceFrontier, syncStageCommitReceipt(stage)
 				return svc.CommitWikiSyncBatch(ctx, batch, bulkReq.ProgressChan)
 			},
 		})
@@ -338,13 +352,14 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 				if marshalErr != nil {
 					return durableCollectionBatch{}, marshalErr
 				}
-				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.HighUpdatedAt.Format(time.RFC3339Nano), idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt}, err
+				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.HighUpdatedAt.Format(time.RFC3339Nano), idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt, pagesListed: batch.PagesListed, recordsListed: batch.RecordsListed, traversalStatus: batch.TraversalStatus, highUpdatedAt: batch.HighUpdatedAt, highRemoteID: batch.HighRemoteID, highNumber: batch.HighNumber}, err
 			},
-			commit: func(ctx context.Context, payload []byte) (*service.SyncResourcesResult, error) {
+			commit: func(ctx context.Context, stage SyncStageEnvelope) (*service.SyncResourcesResult, error) {
 				var batch service.DurablePullSyncBatch
-				if err := json.Unmarshal(payload, &batch); err != nil {
+				if err := json.Unmarshal(stage.Payload, &batch); err != nil {
 					return nil, err
 				}
+				batch.MaintenanceFrontier, batch.CommitReceipt = stage.MaintenanceFrontier, syncStageCommitReceipt(stage)
 				return svc.CommitPullSyncBatch(ctx, batch, bulkReq.ProgressChan)
 			},
 		})
@@ -358,13 +373,14 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 				if marshalErr != nil {
 					return durableCollectionBatch{}, marshalErr
 				}
-				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.ProviderRevision, idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt}, err
+				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.ProviderRevision, idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt, pagesListed: batch.PagesListed, recordsListed: batch.RecordsListed, traversalStatus: batch.TraversalStatus}, err
 			},
-			commit: func(ctx context.Context, payload []byte) (*service.SyncResourcesResult, error) {
+			commit: func(ctx context.Context, stage SyncStageEnvelope) (*service.SyncResourcesResult, error) {
 				var batch service.DurablePRCommentSyncBatch
-				if err := json.Unmarshal(payload, &batch); err != nil {
+				if err := json.Unmarshal(stage.Payload, &batch); err != nil {
 					return nil, err
 				}
+				batch.MaintenanceFrontier, batch.CommitReceipt = stage.MaintenanceFrontier, syncStageCommitReceipt(stage)
 				return svc.CommitPRCommentSyncBatch(ctx, batch, bulkReq.ProgressChan)
 			},
 		})
@@ -372,7 +388,85 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 	return works
 }
 
-func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, jobID string, req StartSyncJobRequest, schema int, work durableCollectionWork) (*service.SyncResourcesResult, syncCollectionResult, error) {
+func syncRepositoryBindingFingerprint(binding cache.RepositoryBinding) string {
+	scopes := make([]string, 0, len(binding.Scopes))
+	for _, scope := range binding.Scopes {
+		scopes = append(scopes, string(scope))
+	}
+	sort.Strings(scopes)
+	data, _ := json.Marshal(struct {
+		RepoID     string   `json:"repo_id"`
+		Owner      string   `json:"owner"`
+		Name       string   `json:"name"`
+		APIBaseURL string   `json:"api_base_url"`
+		Scopes     []string `json:"scopes"`
+	}{strings.TrimSpace(binding.RepoID), strings.TrimSpace(binding.Owner), strings.TrimSpace(binding.Name), strings.TrimSpace(binding.APIBaseURL), scopes})
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func syncStageCommitReceipt(stage SyncStageEnvelope) *cache.SyncCommitReceipt {
+	return &cache.SyncCommitReceipt{StageID: stage.StageID, Checksum: stage.Checksum, RepoID: stage.RepoID, Collection: stage.Collection, CommittedAt: time.Now().UTC()}
+}
+
+func syncStageReceiptExists(ctx context.Context, stage SyncStageEnvelope) (bool, error) {
+	store, err := cache.NewSQLiteReadOnlyStore(ctx, stage.CachePath)
+	if err != nil {
+		return false, err
+	}
+	defer store.Close()
+	receipt, ok, err := store.GetSyncCommitReceipt(ctx, stage.StageID)
+	if err != nil || !ok {
+		return false, err
+	}
+	return receipt.Checksum == stage.Checksum && receipt.RepoID == stage.RepoID && receipt.Collection == stage.Collection, nil
+}
+
+func stagedMaintenanceFrontier(ctx context.Context, req StartSyncJobRequest, remoteType string, batch durableCollectionBatch) (*cache.MaintenanceFrontier, error) {
+	if strings.TrimSpace(req.Lane) == "" {
+		return nil, nil
+	}
+	store, err := cache.NewSQLiteReadOnlyStore(ctx, req.CachePath)
+	if err != nil {
+		return nil, err
+	}
+	defer store.Close()
+	var previous cache.MaintenanceFrontier
+	frontiers, err := store.ListMaintenanceFrontiers(ctx, req.RepoID)
+	if err != nil {
+		return nil, err
+	}
+	for _, candidate := range frontiers {
+		if candidate.RemoteType == remoteType && candidate.Lane == req.Lane {
+			previous = candidate
+			break
+		}
+	}
+	status := "fresh"
+	if req.Lane == "tail" {
+		status = "backfilling"
+		if batch.traversalStatus == "complete" {
+			status = "complete"
+		}
+	} else if batch.traversalStatus != "complete" {
+		status = "partial"
+	}
+	result := &service.SyncResourcesResult{PagesListed: batch.pagesListed, RecordsListed: batch.recordsListed, StopReason: batch.checkpoint, TraversalStatus: batch.traversalStatus}
+	collection := syncCollectionResult{RemoteType: remoteType, Result: result}
+	frontier := &cache.MaintenanceFrontier{
+		RepoID: req.RepoID, RemoteType: remoteType, Ordering: "updated_at_desc", FilterKey: "all", Lane: req.Lane,
+		Status: status, HighUpdatedAt: previous.HighUpdatedAt, HighRemoteID: previous.HighRemoteID, HighNumber: previous.HighNumber,
+		StopReason: batch.checkpoint, PagesListed: batch.pagesListed, RecordsListed: batch.recordsListed,
+		Checkpoint: nextMaintenanceCheckpoint(req, collection), UpdatedAt: time.Now().UTC(),
+	}
+	observeMaintenanceHigh(frontier, batch.highUpdatedAt, batch.highRemoteID, batch.highNumber)
+	if req.Lane == "tail" && status == "backfilling" && checkpointPage(previous.Checkpoint) > checkpointPage(frontier.Checkpoint) {
+		frontier.Checkpoint = previous.Checkpoint
+	}
+	return frontier, nil
+}
+
+func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, jobID string, req StartSyncJobRequest, schema int, bindingFingerprint string, work durableCollectionWork) (*service.SyncResourcesResult, syncCollectionResult, error) {
 	m.updateJob(jobID, func(job *Job, now time.Time) {
 		job.SyncStage = &SyncStageView{RepoID: req.RepoID, Collection: work.collection, Phase: SyncStageFetching, UpdatedAt: now}
 		job.Progress = append(job.Progress, service.ProgressEvent{Type: "phase", Phase: string(SyncStageFetching), Collection: work.collection, Message: "collection fetch started"})
@@ -388,12 +482,19 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 		runtimeDir = filepath.Dir(m.snapshotPath)
 	}
 	journal := NewSyncStageJournal(runtimeDir, SyncStageLimits{})
+	frontier, frontierErr := stagedMaintenanceFrontier(ctx, req, work.remoteType, batch)
+	if frontierErr != nil {
+		m.rejectUnpersistedSyncStage(jobID, maintenanceJobErrorClass(frontierErr, "frontier_prepare_failed"))
+		collection := syncCollectionResult{RemoteType: work.remoteType, Err: frontierErr}
+		return nil, collection, frontierErr
+	}
 	stage, err := journal.Create(SyncStageEnvelope{
 		JobID: jobID, CacheUUID: req.CacheUUID, CacheSchema: schema, CachePath: req.CachePath, RegistrationID: req.RegistrationID,
-		RepoID: req.RepoID, Collection: work.collection, Checkpoint: batch.checkpoint,
+		RepoID: req.RepoID, BindingFingerprint: bindingFingerprint, Collection: work.collection, Checkpoint: batch.checkpoint,
 		ProviderRevision: batch.providerRevision,
 		IdempotencyKey:   batch.idempotencyKey, RecordCount: batch.recordCount, Payload: batch.payload,
-		State: SyncStageState{Phase: SyncStageStaged, RetryBudget: defaultSyncCommitRetries, FetchedAt: batch.fetchedAt},
+		MaintenanceFrontier: frontier,
+		State:               SyncStageState{Phase: SyncStageStaged, RetryBudget: defaultSyncCommitRetries, FetchedAt: batch.fetchedAt},
 	})
 	if err != nil {
 		m.rejectUnpersistedSyncStage(jobID, maintenanceJobErrorClass(err, "stage_persist_failed"))
@@ -424,6 +525,27 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 			collection := syncCollectionResult{RemoteType: work.remoteType, Err: turnErr}
 			return nil, collection, turnErr
 		}
+		if blockingOp, blockingRef, blocked := m.blockingExternalCacheWriter(jobID, stage.CacheUUID); blocked {
+			releaseTurn()
+			state, retry := nextSyncCommitRetry(stage.StageID, stage.State, time.Now().UTC())
+			state.BlockingOp, state.BlockingJobRef = blockingOp, blockingRef
+			stage, err = journal.UpdateState(stage.StageID, state)
+			if err != nil || !retry {
+				if err == nil {
+					err = ErrCacheWriterBusy{ActiveJobID: blockingRef, ActiveType: blockingOp}
+				}
+				collection := syncCollectionResult{RemoteType: work.remoteType, Err: err}
+				return nil, collection, err
+			}
+			m.setJobSyncStage(jobID, stage, "waiting for admitted cache writer")
+			if err := waitForSyncRetry(ctx, stage.State.RetryAfter); err != nil {
+				stage = rejectCancelledSyncStage(journal, stage)
+				m.setJobSyncStage(jobID, stage, "staged batch cancelled")
+				collection := syncCollectionResult{RemoteType: work.remoteType, Err: err}
+				return nil, collection, err
+			}
+			continue
+		}
 		state := stage.State
 		state.Phase = SyncStageCommitting
 		stage, err = journal.UpdateState(stage.StageID, state)
@@ -433,7 +555,7 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 			return nil, collection, err
 		}
 		m.setJobSyncStage(jobID, stage, "staged batch commit started")
-		result, commitErr := work.commit(ctx, stage.Payload)
+		result, commitErr := work.commit(ctx, stage)
 		releaseTurn()
 		if commitErr == nil {
 			state = stage.State
@@ -442,6 +564,12 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 			state.BlockerClass, state.BlockingOp, state.BlockingJobRef = "", "", ""
 			stage, err = journal.UpdateState(stage.StageID, state)
 			if err != nil {
+				if committed, receiptErr := syncStageReceiptExists(context.Background(), stage); receiptErr == nil && committed {
+					stage.State = state
+					m.setJobSyncStage(jobID, stage, "staged batch committed; journal terminal write deferred")
+					collection := syncCollectionResult{RemoteType: work.remoteType, Result: result, Err: fetchErr}
+					return result, collection, fetchErr
+				}
 				collection := syncCollectionResult{RemoteType: work.remoteType, Result: result, Err: err}
 				return result, collection, err
 			}
@@ -525,6 +653,9 @@ func validateSyncStageTargetReadOnly(ctx context.Context, stage SyncStageEnvelop
 	if err != nil || binding.RepoID != stage.RepoID {
 		return CacheWriterIdentityError{code: "repository_binding_unavailable"}
 	}
+	if syncRepositoryBindingFingerprint(binding) != stage.BindingFingerprint {
+		return CacheWriterIdentityError{code: "repository_binding_changed"}
+	}
 	if maintenanceRegistrationID(identity.UUID, binding.RepoID) != stage.RegistrationID {
 		return CacheWriterIdentityError{code: "registration_id_mismatch"}
 	}
@@ -569,6 +700,17 @@ func (m *JobManager) RecoverSyncStages(ctx context.Context, manager Manager) err
 		if syncStageTerminal(stage.State.Phase) {
 			continue
 		}
+		if committed, receiptErr := syncStageReceiptExists(ctx, stage); receiptErr == nil && committed {
+			state := stage.State
+			state.Phase, state.CommittedAt, state.RetryAfter = SyncStageCommitted, now, time.Time{}
+			if updated, updateErr := journal.UpdateState(stage.StageID, state); updateErr == nil {
+				stage = updated
+			} else {
+				stage.State = state
+			}
+			m.completeInterruptedSyncStageFromReceipt(stage)
+			continue
+		}
 		if !stage.ExpiresAt.After(now) {
 			state := stage.State
 			state.Phase, state.TerminalReason, state.RetryAfter = SyncStageRejected, "stale_stage_expired", time.Time{}
@@ -608,6 +750,23 @@ func (m *JobManager) RecoverSyncStages(ctx context.Context, manager Manager) err
 		go m.runRecoveredSyncStage(workerCtx, manager, journal, stage)
 	}
 	return nil
+}
+
+func (m *JobManager) completeInterruptedSyncStageFromReceipt(stage SyncStageEnvelope) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job, ok := m.jobs[stage.JobID]
+	if !ok || job.Type != SyncJobType {
+		return
+	}
+	now := m.now().UTC()
+	view := stage.PublicView()
+	job.Status, job.Error, job.ErrorClass = JobStatusSucceeded, "", ""
+	job.UpdatedAt, job.FinishedAt, job.SyncStage = now, &now, &view
+	job.Steps, job.Completed = stage.RecordCount, stage.RecordCount
+	job.Progress = append(job.Progress, service.ProgressEvent{Type: "recovered", Phase: string(SyncStageCommitted), Collection: stage.Collection, RecordsListed: stage.RecordCount, RecordsFetched: stage.RecordCount, Message: "cache commit receipt recovered after journal interruption"})
+	delete(m.cancel, job.ID)
+	_ = m.saveLocked()
 }
 
 func supportedDurableSyncCollection(collection string) bool {
@@ -712,30 +871,35 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 			if err := json.Unmarshal(stage.Payload, &batch); err != nil {
 				return nil, err
 			}
+			batch.MaintenanceFrontier, batch.CommitReceipt = stage.MaintenanceFrontier, syncStageCommitReceipt(stage)
 			return svc.CommitIssueSyncBatch(ctx, batch, nil)
 		case "wiki":
 			var batch service.DurableWikiSyncBatch
 			if err := json.Unmarshal(stage.Payload, &batch); err != nil {
 				return nil, err
 			}
+			batch.MaintenanceFrontier, batch.CommitReceipt = stage.MaintenanceFrontier, syncStageCommitReceipt(stage)
 			return svc.CommitWikiSyncBatch(ctx, batch, nil)
 		case "pulls":
 			var batch service.DurablePullSyncBatch
 			if err := json.Unmarshal(stage.Payload, &batch); err != nil {
 				return nil, err
 			}
+			batch.MaintenanceFrontier, batch.CommitReceipt = stage.MaintenanceFrontier, syncStageCommitReceipt(stage)
 			return svc.CommitPullSyncBatch(ctx, batch, nil)
 		case "issue_comments":
 			var batch service.DurableIssueCommentSyncBatch
 			if err := json.Unmarshal(stage.Payload, &batch); err != nil {
 				return nil, err
 			}
+			batch.MaintenanceFrontier, batch.CommitReceipt = stage.MaintenanceFrontier, syncStageCommitReceipt(stage)
 			return svc.CommitIssueCommentSyncBatch(ctx, batch, nil)
 		case "pr_comments":
 			var batch service.DurablePRCommentSyncBatch
 			if err := json.Unmarshal(stage.Payload, &batch); err != nil {
 				return nil, err
 			}
+			batch.MaintenanceFrontier, batch.CommitReceipt = stage.MaintenanceFrontier, syncStageCommitReceipt(stage)
 			return svc.CommitPRCommentSyncBatch(ctx, batch, nil)
 		default:
 			return nil, ErrSyncStageCorrupt
@@ -762,6 +926,23 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 		if turnErr != nil {
 			return nil, stage, turnErr
 		}
+		if blockingOp, blockingRef, blocked := m.blockingExternalCacheWriter(stage.JobID, stage.CacheUUID); blocked {
+			releaseTurn()
+			state, retry := nextSyncCommitRetry(stage.StageID, stage.State, time.Now().UTC())
+			state.BlockingOp, state.BlockingJobRef = blockingOp, blockingRef
+			stage, err = journal.UpdateState(stage.StageID, state)
+			if err != nil {
+				return nil, stage, err
+			}
+			if !retry {
+				return nil, stage, ErrCacheWriterBusy{ActiveJobID: blockingRef, ActiveType: blockingOp}
+			}
+			m.setJobSyncStage(stage.JobID, stage, "recovered stage waiting for admitted cache writer")
+			if err := waitForSyncRetry(ctx, stage.State.RetryAfter); err != nil {
+				return nil, stage, err
+			}
+			continue
+		}
 		stage, err = journal.UpdateState(stage.StageID, state)
 		if err != nil {
 			releaseTurn()
@@ -777,6 +958,9 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 			stage, err = journal.UpdateState(stage.StageID, state)
 			if err == nil {
 				m.setJobSyncStage(stage.JobID, stage, "recovered staged batch committed")
+			} else if committed, receiptErr := syncStageReceiptExists(context.Background(), stage); receiptErr == nil && committed {
+				stage.State = state
+				err = nil
 			}
 			return result, stage, err
 		}
@@ -832,6 +1016,38 @@ func (m *JobManager) blockingCacheWriterRef(currentJobID, cacheUUID string) stri
 		}
 	}
 	return ""
+}
+
+func (m *JobManager) blockingExternalCacheWriter(currentJobID, cacheUUID string) (operation, ref string, blocked bool) {
+	cacheUUID = strings.TrimSpace(cacheUUID)
+	if cacheUUID == "" {
+		return "", "", false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if writerID := m.directCacheWriters[cacheUUID]; writerID != "" && writerID != currentJobID {
+		return "direct_cache_write", writerID, true
+	}
+	for id, job := range m.jobs {
+		if id == currentJobID || job.CacheUUID != cacheUUID || job.Type == SyncJobType || !isCacheWriterJob(job.Type) {
+			continue
+		}
+		if jobActiveStatus(job.Status) || m.inflightWorkers[id] {
+			return job.Type, job.ID, true
+		}
+	}
+	return "", "", false
+}
+
+func waitForSyncRetry(ctx context.Context, retryAt time.Time) error {
+	timer := time.NewTimer(max(time.Until(retryAt), 0))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // acquireSyncCommitTurn provides FIFO admission among staged commits sharing a
@@ -1102,7 +1318,18 @@ func newSyncJobService(ctx context.Context, manager Manager, req StartSyncJobReq
 }
 
 func syncBulkRequest(req StartSyncJobRequest, progressCh chan<- service.ProgressEvent) service.BulkSyncRequest {
-	bulkReq := service.BulkSyncRequest{RepoID: req.RepoID, IdempotencyKey: strings.TrimSpace(req.IdempotencyKey), Page: req.Page, PerPage: req.PerPage, Bounds: &service.SyncBounds{MaxPages: req.MaxPages, MaxRecords: req.MaxRecords, ProgressChan: progressCh}, ProgressChan: progressCh, IncrementalQueue: strings.TrimSpace(req.Lane) != ""}
+	maxPages, maxRecords := req.MaxPages, req.MaxRecords
+	// A daemon sync never interprets omitted user bounds as an unbounded
+	// provider traversal. One provider page (up to the configured per-page
+	// size) is the durable staging chunk; maintenance checkpoints advance the
+	// next run without constructing an oversized in-memory batch first.
+	if maxPages <= 0 {
+		maxPages = 1
+	}
+	if maxRecords <= 0 {
+		maxRecords = 100
+	}
+	bulkReq := service.BulkSyncRequest{RepoID: req.RepoID, IdempotencyKey: strings.TrimSpace(req.IdempotencyKey), Page: req.Page, PerPage: req.PerPage, Bounds: &service.SyncBounds{MaxPages: maxPages, MaxRecords: maxRecords, ProgressChan: progressCh}, ProgressChan: progressCh, IncrementalQueue: strings.TrimSpace(req.Lane) != ""}
 	if bulkReq.PerPage <= 0 {
 		bulkReq.PerPage = 100
 	}

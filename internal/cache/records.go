@@ -206,6 +206,16 @@ func (s *SQLiteStore) CommitSyncBatch(ctx context.Context, batch SyncBatch) (err
 			return err
 		}
 	}
+	if batch.MaintenanceFrontier != nil {
+		if err = upsertMaintenanceFrontierTx(ctx, tx, *batch.MaintenanceFrontier); err != nil {
+			return err
+		}
+	}
+	if batch.Receipt != nil {
+		if err = upsertSyncCommitReceiptTx(ctx, tx, *batch.Receipt); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 

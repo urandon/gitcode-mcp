@@ -2875,7 +2875,7 @@ func TestRepoRegistryCLI(t *testing.T) {
 		t.Fatalf("repo status code=%d stderr=%q", code, statusErr.String())
 	}
 	out := statusOut.String()
-	for _, want := range []string{"repo_id: fixture-a", "owner: owner-a", "name: repo-a", "api_base_url: https://example.invalid/api?safe=1", "scopes: issues,wiki", "aliases: proj", "binding_state: ready", "alias_conflict_state: none", "cache_state: ready", "index_state: unknown", "binary_version:", "binary_version_source:", "cache_schema_version: 19", "expected_cache_schema_version: 19", "issue_records: 0", "issue_comments: 0", "issue_comment_queue_state: available", "issue_comment_queue: pending=0 deferred=0 complete=0 total=0"} {
+	for _, want := range []string{"repo_id: fixture-a", "owner: owner-a", "name: repo-a", "api_base_url: https://example.invalid/api?safe=1", "scopes: issues,wiki", "aliases: proj", "binding_state: ready", "alias_conflict_state: none", "cache_state: ready", "index_state: unknown", "binary_version:", "binary_version_source:", "cache_schema_version: 20", "expected_cache_schema_version: 20", "issue_records: 0", "issue_comments: 0", "issue_comment_queue_state: available", "issue_comment_queue: pending=0 deferred=0 complete=0 total=0"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("status output missing %q in %q", want, out)
 		}
@@ -2934,7 +2934,7 @@ func TestRepoStatusReadsCompatibleOlderSchemaForDiagnostics(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	for _, want := range []string{`"cache_state": "migration_required"`, `"cache_schema_version": 15`, `"expected_cache_schema_version": 19`, `"binary_version"`, `"issue_comment_queue_state": "schema_unavailable"`} {
+	for _, want := range []string{`"cache_state": "migration_required"`, `"cache_schema_version": 15`, `"expected_cache_schema_version": 20`, `"binary_version"`, `"issue_comment_queue_state": "schema_unavailable"`} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("repo status missing %q in %q", want, stdout.String())
 		}

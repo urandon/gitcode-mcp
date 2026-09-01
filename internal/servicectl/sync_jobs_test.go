@@ -91,14 +91,15 @@ func TestNormalizeCacheWriterIdentityDoesNotExposePrivateCachePath(t *testing.T)
 	}
 }
 
-func TestDirectCacheWriterBlocksConflictFenceAndDaemonAdmission(t *testing.T) {
+func TestDirectCacheWriterBlocksConflictFenceButAllowsDurableFetchAdmission(t *testing.T) {
 	ctx := context.Background()
-	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	root := t.TempDir()
+	cachePath := filepath.Join(root, "cache.db")
 	store, err := cache.NewSQLiteStore(ctx, cachePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
 		t.Fatal(err)
 	}
 	identity, _ := store.CacheIdentity(ctx)
@@ -108,19 +109,48 @@ func TestDirectCacheWriterBlocksConflictFenceAndDaemonAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer releaseWriter()
+	releasedWriter := false
+	defer func() {
+		if !releasedWriter {
+			releaseWriter()
+		}
+	}()
 	releaseFence, blocked := jobs.BeginCacheMutationFence(identity.UUID)
 	if len(blocked) != 1 || blocked[0] != "admin-binding-test" {
 		t.Fatalf("direct writer did not block conflict fence: %v", blocked)
 	}
 	releaseFence()
 	manager := newTestManager(t, "darwin")
+	manager.RuntimeDir = root
 	cfg := config.Default()
 	manager.EffectiveConfig = &cfg
-	_, err = jobs.StartSync(ctx, manager, StartSyncJobRequest{RepoID: "owner/repo", CachePath: cachePath, Issues: true})
-	var busy ErrCacheWriterBusy
-	if !errors.As(err, &busy) || busy.ActiveType != "direct_cache_write" {
-		t.Fatalf("daemon writer crossed direct reservation: %T %v", err, err)
+	job, err := jobs.StartSync(ctx, manager, StartSyncJobRequest{RepoID: "owner/repo", CachePath: cachePath, Issues: true, ProviderMode: "fixture", MaxPages: 1})
+	if err != nil {
+		t.Fatalf("durable fetch admission failed: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var observed Job
+	for time.Now().Before(deadline) {
+		observed, _ = jobs.Get(job.ID)
+		if observed.SyncStage != nil && observed.SyncStage.Phase == SyncStageWaitingCommit {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if observed.SyncStage == nil || observed.SyncStage.Phase != SyncStageWaitingCommit || observed.SyncStage.BlockingOp != "direct_cache_write" {
+		t.Fatalf("durable sync did not stage behind direct writer: %+v", observed)
+	}
+	releaseWriter()
+	releasedWriter = true
+	for time.Now().Before(deadline) {
+		observed, _ = jobs.Get(job.ID)
+		if observed.Status == JobStatusSucceeded {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if observed.Status != JobStatusSucceeded {
+		t.Fatalf("durable sync did not commit after direct writer release: %+v", observed)
 	}
 }
 
@@ -275,7 +305,7 @@ func TestIssueOnlyDaemonSyncWaitsForWriterAndCommitsRetainedStage(t *testing.T) 
 		t.Fatalf("committed source missing: %v", err)
 	}
 	stages, err := NewSyncStageJournal(root, SyncStageLimits{}).List()
-	if err != nil || len(stages) != 1 || stages[0].State.Phase != SyncStageCommitted {
+	if err != nil || len(stages) != 0 {
 		t.Fatalf("stages=%+v err=%v", stages, err)
 	}
 	_ = store.Close()
@@ -314,7 +344,7 @@ func TestDaemonRestartRecoversStagedBatchWithoutProvider(t *testing.T) {
 	journal := NewSyncStageJournal(root, SyncStageLimits{})
 	stage, err := journal.Create(SyncStageEnvelope{
 		JobID: "job-000001", CacheUUID: identity.UUID, CacheSchema: schema, CachePath: cachePath,
-		RegistrationID: registrationID, RepoID: "owner/repo", Collection: "issues",
+		RegistrationID: registrationID, RepoID: "owner/repo", BindingFingerprint: syncRepositoryBindingFingerprint(cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}), Collection: "issues",
 		IdempotencyKey: "restart-stage", RecordCount: batch.RecordCount(), Payload: payload,
 		State: SyncStageState{Phase: SyncStageStaged, RetryBudget: defaultSyncCommitRetries, FetchedAt: batch.FetchedAt},
 	})
@@ -375,6 +405,76 @@ func TestDaemonRestartRecoversStagedBatchWithoutProvider(t *testing.T) {
 	}
 }
 
+func TestDaemonRestartUsesAtomicReceiptWhenJournalMissedCommitTerminal(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	cachePath := filepath.Join(root, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	binding := cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}
+	if err := store.AddRepository(ctx, binding); err != nil {
+		t.Fatal(err)
+	}
+	identity, _ := store.CacheIdentity(ctx)
+	schema, _ := store.SchemaVersion(ctx)
+	svc := service.New(store)
+	batch, err := svc.FetchIssueSyncBatch(ctx, service.BulkSyncRequest{RepoID: binding.RepoID, IdempotencyKey: "receipt-recovery", Bounds: &service.SyncBounds{MaxPages: 1, MaxRecords: 100}, PerPage: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registrationID := maintenanceRegistrationID(identity.UUID, binding.RepoID)
+	journal := NewSyncStageJournal(root, SyncStageLimits{})
+	stage, err := journal.Create(SyncStageEnvelope{
+		JobID: "job-000001", CacheUUID: identity.UUID, CacheSchema: schema, CachePath: cachePath,
+		RegistrationID: registrationID, RepoID: binding.RepoID, BindingFingerprint: syncRepositoryBindingFingerprint(binding),
+		Collection: "issues", IdempotencyKey: batch.IdempotencyKey, RecordCount: batch.RecordCount(), Payload: payload,
+		State: SyncStageState{Phase: SyncStageCommitting, RetryBudget: defaultSyncCommitRetries, FetchedAt: batch.FetchedAt},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch.CommitReceipt = syncStageCommitReceipt(stage)
+	if _, err := svc.CommitIssueSyncBatch(ctx, batch, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate ENOSPC/rename failure after SQLite commit: the private sidecar is
+	// still nonterminal while the transaction receipt already proves success.
+	view := stage.PublicView()
+	jobsPath := filepath.Join(root, "jobs.json")
+	before := NewJobManager(jobsPath)
+	now := time.Now().UTC()
+	before.jobs[stage.JobID] = &Job{ID: stage.JobID, Type: SyncJobType, RepoID: binding.RepoID, CacheUUID: identity.UUID, RegistrationID: registrationID, Status: JobStatusRunning, CreatedAt: now, UpdatedAt: now, SyncStage: &view}
+	before.nextID = 1
+	if err := before.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewJobManager(jobsPath)
+	if err := restarted.LoadAndMarkInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	manager := newTestManager(t, "darwin")
+	manager.RuntimeDir = root
+	cfg := config.Default()
+	manager.EffectiveConfig = &cfg
+	if err := restarted.RecoverSyncStages(ctx, manager); err != nil {
+		t.Fatal(err)
+	}
+	job, ok := restarted.Get(stage.JobID)
+	if !ok || job.Status != JobStatusSucceeded || job.SyncStage == nil || job.SyncStage.Phase != SyncStageCommitted {
+		t.Fatalf("receipt recovery job=%+v ok=%t", job, ok)
+	}
+	if stages, err := journal.List(); err != nil || len(stages) != 0 {
+		t.Fatalf("receipt-confirmed terminal stage retained: %+v err=%v", stages, err)
+	}
+}
+
 func TestRecoveredStageRejectsMissingCacheBeforeWritableOpen(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -382,7 +482,7 @@ func TestRecoveredStageRejectsMissingCacheBeforeWritableOpen(t *testing.T) {
 	journal := NewSyncStageJournal(root, SyncStageLimits{})
 	stage, err := journal.Create(SyncStageEnvelope{
 		JobID: "job-000001", CacheUUID: "removed-cache-uuid", CacheSchema: cache.CurrentSchemaVersion(), CachePath: missing,
-		RegistrationID: maintenanceRegistrationID("removed-cache-uuid", "owner/repo"), RepoID: "owner/repo", Collection: "issues",
+		RegistrationID: maintenanceRegistrationID("removed-cache-uuid", "owner/repo"), RepoID: "owner/repo", BindingFingerprint: "sha256:removed-binding", Collection: "issues",
 		IdempotencyKey: "removed-cache-stage", RecordCount: 0, Payload: json.RawMessage(`{"version":1}`),
 		State: SyncStageState{Phase: SyncStageStaged, RetryBudget: defaultSyncCommitRetries, FetchedAt: time.Now().UTC()},
 	})
@@ -415,7 +515,8 @@ func TestSyncStageTargetRejectsReplacementSchemaBindingAndRegistration(t *testin
 	}
 	identity, _ := store.CacheIdentity(ctx)
 	schema, _ := store.SchemaVersion(ctx)
-	stage := SyncStageEnvelope{CacheUUID: identity.UUID, CacheSchema: schema, CachePath: cachePath, RepoID: "owner/repo", RegistrationID: maintenanceRegistrationID(identity.UUID, "owner/repo")}
+	binding := cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}
+	stage := SyncStageEnvelope{CacheUUID: identity.UUID, CacheSchema: schema, CachePath: cachePath, RepoID: "owner/repo", RegistrationID: maintenanceRegistrationID(identity.UUID, "owner/repo"), BindingFingerprint: syncRepositoryBindingFingerprint(binding)}
 	if err := validateSyncStageTargetReadOnly(ctx, stage); err != nil {
 		t.Fatalf("valid target rejected: %v", err)
 	}
@@ -427,6 +528,7 @@ func TestSyncStageTargetRejectsReplacementSchemaBindingAndRegistration(t *testin
 	}{
 		{name: "schema", edit: func(stage *SyncStageEnvelope) { stage.CacheSchema-- }, code: "cache_schema_mismatch"},
 		{name: "binding", edit: func(stage *SyncStageEnvelope) { stage.RepoID = "owner/missing" }, code: "repository_binding_unavailable"},
+		{name: "binding route", edit: func(stage *SyncStageEnvelope) { stage.BindingFingerprint = "sha256:old-route" }, code: "repository_binding_changed"},
 		{name: "registration", edit: func(stage *SyncStageEnvelope) { stage.RegistrationID = "wrong-registration" }, code: "registration_id_mismatch"},
 	}
 	for _, tc := range cases {
@@ -439,6 +541,16 @@ func TestSyncStageTargetRejectsReplacementSchemaBindingAndRegistration(t *testin
 				t.Fatalf("error=%T %v code=%q", err, err, tc.code)
 			}
 		})
+	}
+	changed := binding
+	changed.Owner = "different-owner"
+	if err := store.UpdateRepository(ctx, changed); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSyncStageTargetReadOnly(ctx, stage); err == nil {
+		t.Fatal("same repo_id with a changed remote route accepted the stale stage")
+	} else if coded, ok := err.(interface{ DiagnosticCode() string }); !ok || coded.DiagnosticCode() != "repository_binding_changed" {
+		t.Fatalf("route change error=%T %v", err, err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -458,6 +570,17 @@ func TestSyncStageTargetRejectsReplacementSchemaBindingAndRegistration(t *testin
 	coded, ok := err.(interface{ DiagnosticCode() string })
 	if !ok || coded.DiagnosticCode() != "cache_uuid_mismatch" {
 		t.Fatalf("replacement error=%T %v", err, err)
+	}
+}
+
+func TestDurableSyncDefaultsBoundProviderBatchBeforeStaging(t *testing.T) {
+	bounded := syncBulkRequest(StartSyncJobRequest{RepoID: "owner/repo"}, nil)
+	if bounded.Bounds == nil || bounded.Bounds.MaxPages != 1 || bounded.Bounds.MaxRecords != 100 || bounded.PerPage != 100 {
+		t.Fatalf("implicit durable bounds=%+v per_page=%d", bounded.Bounds, bounded.PerPage)
+	}
+	explicit := syncBulkRequest(StartSyncJobRequest{RepoID: "owner/repo", MaxPages: 3, MaxRecords: 41, PerPage: 17}, nil)
+	if explicit.Bounds.MaxPages != 3 || explicit.Bounds.MaxRecords != 41 || explicit.PerPage != 17 {
+		t.Fatalf("explicit durable bounds changed: %+v per_page=%d", explicit.Bounds, explicit.PerPage)
 	}
 }
 

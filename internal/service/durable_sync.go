@@ -18,22 +18,24 @@ const DurableSyncBatchVersion = 1
 // bounded issue collection traversal. It is JSON-safe for the daemon-private
 // checksummed journal. CommitIssueSyncBatch performs no provider calls.
 type DurableIssueSyncBatch struct {
-	Version            int                `json:"version"`
-	RepoID             string             `json:"repo_id"`
-	Collection         string             `json:"collection"`
-	IdempotencyKey     string             `json:"idempotency_key"`
-	Items              []DurableIssueItem `json:"items"`
-	PagesListed        int                `json:"pages_listed"`
-	RecordsListed      int                `json:"records_listed"`
-	SkippedByWatermark int                `json:"skipped_by_watermark,omitempty"`
-	StopReason         string             `json:"stop_reason"`
-	TraversalStatus    string             `json:"traversal_status"`
-	WatermarkStatus    string             `json:"watermark_status"`
-	WatermarkReason    string             `json:"watermark_reason"`
-	HighUpdatedAt      time.Time          `json:"high_updated_at,omitempty"`
-	HighRemoteID       string             `json:"high_remote_id,omitempty"`
-	HighNumber         int                `json:"high_number,omitempty"`
-	FetchedAt          time.Time          `json:"fetched_at"`
+	Version             int                        `json:"version"`
+	RepoID              string                     `json:"repo_id"`
+	Collection          string                     `json:"collection"`
+	IdempotencyKey      string                     `json:"idempotency_key"`
+	Items               []DurableIssueItem         `json:"items"`
+	PagesListed         int                        `json:"pages_listed"`
+	RecordsListed       int                        `json:"records_listed"`
+	SkippedByWatermark  int                        `json:"skipped_by_watermark,omitempty"`
+	StopReason          string                     `json:"stop_reason"`
+	TraversalStatus     string                     `json:"traversal_status"`
+	WatermarkStatus     string                     `json:"watermark_status"`
+	WatermarkReason     string                     `json:"watermark_reason"`
+	HighUpdatedAt       time.Time                  `json:"high_updated_at,omitempty"`
+	HighRemoteID        string                     `json:"high_remote_id,omitempty"`
+	HighNumber          int                        `json:"high_number,omitempty"`
+	FetchedAt           time.Time                  `json:"fetched_at"`
+	MaintenanceFrontier *cache.MaintenanceFrontier `json:"-"`
+	CommitReceipt       *cache.SyncCommitReceipt   `json:"-"`
 }
 
 // DurableIssueItem is a daemon-journal wire type. Provider models deliberately
@@ -239,14 +241,14 @@ func (s *Service) CommitIssueSyncBatch(ctx context.Context, batch DurableIssueSy
 	if err != nil {
 		return bulkSyncFailureResult(err, "issue:*", "issues")
 	}
-	if err := s.commitDurableSyncBatch(ctx, cache.SyncBatch{Graphs: graphs, Frontier: frontier, IssueCommentSyncs: queue, ClearRecordCommentRefs: clearComments}); err != nil {
+	if err := s.commitDurableSyncBatch(ctx, cache.SyncBatch{Graphs: graphs, Frontier: frontier, MaintenanceFrontier: batch.MaintenanceFrontier, Receipt: batch.CommitReceipt, IssueCommentSyncs: queue, ClearRecordCommentRefs: clearComments}); err != nil {
 		return bulkSyncFailureResult(err, "issue:*", "issues")
 	}
 	result.Results = durableResults(plans)
 	emitProgress(progress, ProgressEvent{Collection: "issues", Phase: "committing", RecordsListed: len(batch.Items), RecordsFetched: len(result.Results)})
-	if summaryErr := s.attachIssueCommentQueueSummary(ctx, result, repoID, "parent_backfill"); summaryErr != nil {
-		return result, summaryErr
-	}
+	// The transaction above is authoritative. Queue summary is optional UX
+	// enrichment and cannot turn a committed batch into a reported failure.
+	_ = s.attachIssueCommentQueueSummary(ctx, result, repoID, "parent_backfill")
 	return result, nil
 }
 
@@ -266,22 +268,24 @@ func validateDurableIssueBatch(batch DurableIssueSyncBatch) error {
 }
 
 type DurablePullSyncBatch struct {
-	Version            int               `json:"version"`
-	RepoID             string            `json:"repo_id"`
-	Collection         string            `json:"collection"`
-	IdempotencyKey     string            `json:"idempotency_key"`
-	Items              []DurablePullItem `json:"items"`
-	PagesListed        int               `json:"pages_listed"`
-	RecordsListed      int               `json:"records_listed"`
-	SkippedByWatermark int               `json:"skipped_by_watermark,omitempty"`
-	StopReason         string            `json:"stop_reason"`
-	TraversalStatus    string            `json:"traversal_status"`
-	WatermarkStatus    string            `json:"watermark_status"`
-	WatermarkReason    string            `json:"watermark_reason"`
-	HighUpdatedAt      time.Time         `json:"high_updated_at,omitempty"`
-	HighRemoteID       string            `json:"high_remote_id,omitempty"`
-	HighNumber         int               `json:"high_number,omitempty"`
-	FetchedAt          time.Time         `json:"fetched_at"`
+	Version             int                        `json:"version"`
+	RepoID              string                     `json:"repo_id"`
+	Collection          string                     `json:"collection"`
+	IdempotencyKey      string                     `json:"idempotency_key"`
+	Items               []DurablePullItem          `json:"items"`
+	PagesListed         int                        `json:"pages_listed"`
+	RecordsListed       int                        `json:"records_listed"`
+	SkippedByWatermark  int                        `json:"skipped_by_watermark,omitempty"`
+	StopReason          string                     `json:"stop_reason"`
+	TraversalStatus     string                     `json:"traversal_status"`
+	WatermarkStatus     string                     `json:"watermark_status"`
+	WatermarkReason     string                     `json:"watermark_reason"`
+	HighUpdatedAt       time.Time                  `json:"high_updated_at,omitempty"`
+	HighRemoteID        string                     `json:"high_remote_id,omitempty"`
+	HighNumber          int                        `json:"high_number,omitempty"`
+	FetchedAt           time.Time                  `json:"fetched_at"`
+	MaintenanceFrontier *cache.MaintenanceFrontier `json:"-"`
+	CommitReceipt       *cache.SyncCommitReceipt   `json:"-"`
 }
 
 type DurablePullItem struct {
@@ -443,7 +447,7 @@ func (s *Service) CommitPullSyncBatch(ctx context.Context, batch DurablePullSync
 	if err != nil {
 		return bulkSyncFailureResult(err, "pull_request:*", "pull_request")
 	}
-	if err := s.commitDurableSyncBatch(ctx, cache.SyncBatch{Graphs: graphs, Frontier: frontier}); err != nil {
+	if err := s.commitDurableSyncBatch(ctx, cache.SyncBatch{Graphs: graphs, Frontier: frontier, MaintenanceFrontier: batch.MaintenanceFrontier, Receipt: batch.CommitReceipt}); err != nil {
 		return bulkSyncFailureResult(err, "pull_request:*", "pull_request")
 	}
 	result.Results = durableResults(plans)
@@ -464,17 +468,19 @@ func validateDurablePullBatch(batch DurablePullSyncBatch) error {
 }
 
 type DurableWikiSyncBatch struct {
-	Version          int                `json:"version"`
-	RepoID           string             `json:"repo_id"`
-	Collection       string             `json:"collection"`
-	IdempotencyKey   string             `json:"idempotency_key"`
-	Items            []gitcode.WikiPage `json:"items"`
-	PagesListed      int                `json:"pages_listed"`
-	RecordsListed    int                `json:"records_listed"`
-	StopReason       string             `json:"stop_reason"`
-	TraversalStatus  string             `json:"traversal_status"`
-	ProviderRevision string             `json:"provider_revision"`
-	FetchedAt        time.Time          `json:"fetched_at"`
+	Version             int                        `json:"version"`
+	RepoID              string                     `json:"repo_id"`
+	Collection          string                     `json:"collection"`
+	IdempotencyKey      string                     `json:"idempotency_key"`
+	Items               []gitcode.WikiPage         `json:"items"`
+	PagesListed         int                        `json:"pages_listed"`
+	RecordsListed       int                        `json:"records_listed"`
+	StopReason          string                     `json:"stop_reason"`
+	TraversalStatus     string                     `json:"traversal_status"`
+	ProviderRevision    string                     `json:"provider_revision"`
+	FetchedAt           time.Time                  `json:"fetched_at"`
+	MaintenanceFrontier *cache.MaintenanceFrontier `json:"-"`
+	CommitReceipt       *cache.SyncCommitReceipt   `json:"-"`
 }
 
 func (b DurableWikiSyncBatch) RecordCount() int { return len(b.Items) }
@@ -568,7 +574,7 @@ func (s *Service) CommitWikiSyncBatch(ctx context.Context, batch DurableWikiSync
 		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
 	}
 	result.SuccessCount = len(plans)
-	if err := s.commitDurableSyncBatch(ctx, cache.SyncBatch{Graphs: graphs}); err != nil {
+	if err := s.commitDurableSyncBatch(ctx, cache.SyncBatch{Graphs: graphs, MaintenanceFrontier: batch.MaintenanceFrontier, Receipt: batch.CommitReceipt}); err != nil {
 		return bulkSyncFailureResult(err, "wiki:*", "wiki")
 	}
 	result.Results = durableResults(plans)

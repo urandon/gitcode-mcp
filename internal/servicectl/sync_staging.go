@@ -12,10 +12,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gitcode-mcp/internal/cache"
 )
 
 const (
-	syncStageEnvelopeVersion     = 1
+	syncStageEnvelopeVersion     = 2
 	defaultSyncStageMaxBytes     = int64(16 << 20)
 	defaultSyncStageMaxRecords   = 10_000
 	defaultSyncStageTotalBytes   = int64(64 << 20)
@@ -64,25 +66,27 @@ type SyncStageState struct {
 // SyncStageEnvelope is private daemon state. Payload may contain source bodies
 // and must never be projected through IPC, Admin, logs, or CLI diagnostics.
 type SyncStageEnvelope struct {
-	Version          int             `json:"version"`
-	StageID          string          `json:"stage_id"`
-	JobID            string          `json:"job_id"`
-	CacheUUID        string          `json:"cache_uuid"`
-	CacheSchema      int             `json:"cache_schema"`
-	CachePath        string          `json:"cache_path"`
-	RegistrationID   string          `json:"registration_id"`
-	RepoID           string          `json:"repo_id"`
-	Collection       string          `json:"collection"`
-	Checkpoint       string          `json:"checkpoint,omitempty"`
-	ProviderRevision string          `json:"provider_revision,omitempty"`
-	IdempotencyKey   string          `json:"idempotency_key"`
-	CreatedAt        time.Time       `json:"created_at"`
-	ExpiresAt        time.Time       `json:"expires_at"`
-	RecordCount      int             `json:"record_count"`
-	ByteCount        int64           `json:"byte_count"`
-	Payload          json.RawMessage `json:"payload"`
-	Checksum         string          `json:"checksum"`
-	State            SyncStageState  `json:"state"`
+	Version             int                        `json:"version"`
+	StageID             string                     `json:"stage_id"`
+	JobID               string                     `json:"job_id"`
+	CacheUUID           string                     `json:"cache_uuid"`
+	CacheSchema         int                        `json:"cache_schema"`
+	CachePath           string                     `json:"cache_path"`
+	RegistrationID      string                     `json:"registration_id"`
+	RepoID              string                     `json:"repo_id"`
+	BindingFingerprint  string                     `json:"binding_fingerprint"`
+	Collection          string                     `json:"collection"`
+	Checkpoint          string                     `json:"checkpoint,omitempty"`
+	ProviderRevision    string                     `json:"provider_revision,omitempty"`
+	IdempotencyKey      string                     `json:"idempotency_key"`
+	CreatedAt           time.Time                  `json:"created_at"`
+	ExpiresAt           time.Time                  `json:"expires_at"`
+	RecordCount         int                        `json:"record_count"`
+	ByteCount           int64                      `json:"byte_count"`
+	Payload             json.RawMessage            `json:"payload"`
+	MaintenanceFrontier *cache.MaintenanceFrontier `json:"maintenance_frontier,omitempty"`
+	Checksum            string                     `json:"checksum"`
+	State               SyncStageState             `json:"state"`
 }
 
 // SyncStageView is the complete public contract. It deliberately has no local
@@ -192,9 +196,10 @@ func (j *SyncStageJournal) Create(envelope SyncStageEnvelope) (SyncStageEnvelope
 	envelope.CachePath = strings.TrimSpace(envelope.CachePath)
 	envelope.RegistrationID = strings.TrimSpace(envelope.RegistrationID)
 	envelope.RepoID = strings.TrimSpace(envelope.RepoID)
+	envelope.BindingFingerprint = strings.TrimSpace(envelope.BindingFingerprint)
 	envelope.Collection = strings.TrimSpace(envelope.Collection)
 	envelope.IdempotencyKey = strings.TrimSpace(envelope.IdempotencyKey)
-	if envelope.JobID == "" || envelope.CacheUUID == "" || envelope.CachePath == "" || envelope.RegistrationID == "" || envelope.RepoID == "" || envelope.Collection == "" || envelope.IdempotencyKey == "" || envelope.CacheSchema <= 0 {
+	if envelope.JobID == "" || envelope.CacheUUID == "" || envelope.CachePath == "" || envelope.RegistrationID == "" || envelope.RepoID == "" || envelope.BindingFingerprint == "" || envelope.Collection == "" || envelope.IdempotencyKey == "" || envelope.CacheSchema <= 0 {
 		return SyncStageEnvelope{}, fmt.Errorf("%w: incomplete stage identity", ErrSyncStageCorrupt)
 	}
 	if !json.Valid(envelope.Payload) {
@@ -255,6 +260,9 @@ func (j *SyncStageJournal) aggregateUsage() (bytes int64, records, stages int, e
 		return 0, 0, 0, err
 	}
 	for _, envelope := range envelopes {
+		if syncStageTerminal(envelope.State.Phase) {
+			continue
+		}
 		bytes += envelope.ByteCount
 		records += envelope.RecordCount
 		stages++
@@ -385,7 +393,7 @@ func (j *SyncStageJournal) GC() (int, error) {
 	now := j.now().UTC()
 	removed := 0
 	for _, stage := range stages {
-		if !syncStageTerminal(stage.State.Phase) || now.Before(stage.ExpiresAt) {
+		if !syncStageTerminal(stage.State.Phase) || stage.State.Phase != SyncStageCommitted && now.Before(stage.ExpiresAt) {
 			continue
 		}
 		path, err := j.path(stage.StageID)
@@ -424,7 +432,7 @@ func (j *SyncStageJournal) validate(envelope SyncStageEnvelope, expectedID strin
 	if envelope.Version != syncStageEnvelopeVersion || envelope.StageID != expectedID || !json.Valid(envelope.Payload) {
 		return ErrSyncStageCorrupt
 	}
-	if strings.TrimSpace(envelope.JobID) == "" || strings.TrimSpace(envelope.CacheUUID) == "" || strings.TrimSpace(envelope.CachePath) == "" || strings.TrimSpace(envelope.RegistrationID) == "" || strings.TrimSpace(envelope.RepoID) == "" || strings.TrimSpace(envelope.Collection) == "" || strings.TrimSpace(envelope.IdempotencyKey) == "" || envelope.CacheSchema <= 0 {
+	if strings.TrimSpace(envelope.JobID) == "" || strings.TrimSpace(envelope.CacheUUID) == "" || strings.TrimSpace(envelope.CachePath) == "" || strings.TrimSpace(envelope.RegistrationID) == "" || strings.TrimSpace(envelope.RepoID) == "" || strings.TrimSpace(envelope.BindingFingerprint) == "" || strings.TrimSpace(envelope.Collection) == "" || strings.TrimSpace(envelope.IdempotencyKey) == "" || envelope.CacheSchema <= 0 {
 		return ErrSyncStageCorrupt
 	}
 	if envelope.ByteCount != int64(len(envelope.Payload)) {
@@ -472,28 +480,30 @@ func validStageID(stageID string) bool {
 
 func syncStageChecksum(envelope SyncStageEnvelope) string {
 	immutable := struct {
-		Version          int             `json:"version"`
-		JobID            string          `json:"job_id"`
-		CacheUUID        string          `json:"cache_uuid"`
-		CacheSchema      int             `json:"cache_schema"`
-		CachePath        string          `json:"cache_path"`
-		RegistrationID   string          `json:"registration_id"`
-		RepoID           string          `json:"repo_id"`
-		Collection       string          `json:"collection"`
-		Checkpoint       string          `json:"checkpoint,omitempty"`
-		ProviderRevision string          `json:"provider_revision,omitempty"`
-		IdempotencyKey   string          `json:"idempotency_key"`
-		CreatedAt        time.Time       `json:"created_at"`
-		ExpiresAt        time.Time       `json:"expires_at"`
-		RecordCount      int             `json:"record_count"`
-		ByteCount        int64           `json:"byte_count"`
-		Payload          json.RawMessage `json:"payload"`
+		Version             int                        `json:"version"`
+		JobID               string                     `json:"job_id"`
+		CacheUUID           string                     `json:"cache_uuid"`
+		CacheSchema         int                        `json:"cache_schema"`
+		CachePath           string                     `json:"cache_path"`
+		RegistrationID      string                     `json:"registration_id"`
+		RepoID              string                     `json:"repo_id"`
+		BindingFingerprint  string                     `json:"binding_fingerprint"`
+		Collection          string                     `json:"collection"`
+		Checkpoint          string                     `json:"checkpoint,omitempty"`
+		ProviderRevision    string                     `json:"provider_revision,omitempty"`
+		IdempotencyKey      string                     `json:"idempotency_key"`
+		CreatedAt           time.Time                  `json:"created_at"`
+		ExpiresAt           time.Time                  `json:"expires_at"`
+		RecordCount         int                        `json:"record_count"`
+		ByteCount           int64                      `json:"byte_count"`
+		Payload             json.RawMessage            `json:"payload"`
+		MaintenanceFrontier *cache.MaintenanceFrontier `json:"maintenance_frontier,omitempty"`
 	}{
 		envelope.Version, envelope.JobID, envelope.CacheUUID, envelope.CacheSchema, envelope.CachePath,
-		envelope.RegistrationID, envelope.RepoID, envelope.Collection,
+		envelope.RegistrationID, envelope.RepoID, envelope.BindingFingerprint, envelope.Collection,
 		envelope.Checkpoint, envelope.ProviderRevision, envelope.IdempotencyKey,
 		envelope.CreatedAt.UTC(), envelope.ExpiresAt.UTC(), envelope.RecordCount,
-		envelope.ByteCount, envelope.Payload,
+		envelope.ByteCount, envelope.Payload, envelope.MaintenanceFrontier,
 	}
 	data, _ := json.Marshal(immutable)
 	sum := sha256.Sum256(data)
@@ -502,17 +512,18 @@ func syncStageChecksum(envelope SyncStageEnvelope) string {
 
 func syncStageIdentity(envelope SyncStageEnvelope) string {
 	identity := struct {
-		CacheUUID        string `json:"cache_uuid"`
-		CacheSchema      int    `json:"cache_schema"`
-		RegistrationID   string `json:"registration_id"`
-		RepoID           string `json:"repo_id"`
-		Collection       string `json:"collection"`
-		Checkpoint       string `json:"checkpoint,omitempty"`
-		ProviderRevision string `json:"provider_revision,omitempty"`
-		IdempotencyKey   string `json:"idempotency_key"`
+		CacheUUID          string `json:"cache_uuid"`
+		CacheSchema        int    `json:"cache_schema"`
+		RegistrationID     string `json:"registration_id"`
+		RepoID             string `json:"repo_id"`
+		BindingFingerprint string `json:"binding_fingerprint"`
+		Collection         string `json:"collection"`
+		Checkpoint         string `json:"checkpoint,omitempty"`
+		ProviderRevision   string `json:"provider_revision,omitempty"`
+		IdempotencyKey     string `json:"idempotency_key"`
 	}{
 		envelope.CacheUUID, envelope.CacheSchema, envelope.RegistrationID,
-		envelope.RepoID, envelope.Collection, envelope.Checkpoint,
+		envelope.RepoID, envelope.BindingFingerprint, envelope.Collection, envelope.Checkpoint,
 		envelope.ProviderRevision, envelope.IdempotencyKey,
 	}
 	data, _ := json.Marshal(identity)
@@ -523,6 +534,7 @@ func syncStageIdentity(envelope SyncStageEnvelope) string {
 func sameSyncStageBatch(first, second SyncStageEnvelope) bool {
 	return first.CacheUUID == second.CacheUUID && first.CacheSchema == second.CacheSchema &&
 		first.RegistrationID == second.RegistrationID && first.RepoID == second.RepoID &&
+		first.BindingFingerprint == second.BindingFingerprint &&
 		first.Collection == second.Collection && first.Checkpoint == second.Checkpoint &&
 		first.ProviderRevision == second.ProviderRevision && first.IdempotencyKey == second.IdempotencyKey &&
 		first.RecordCount == second.RecordCount && first.ByteCount == second.ByteCount &&

@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 19
+const currentSchemaVersion = 20
 const issueCommentSyncSchemaVersion = 16
 
 func CurrentSchemaVersion() int {
@@ -154,6 +154,7 @@ var migrations = []migration{
 	{version: 17, apply: applyMaintenanceLifecycleMigration},
 	{version: 18, apply: applyRepositoryDocsSchemaMigration},
 	{version: 19, apply: applyRepositoryDocsIdentityMigration},
+	{version: 20, apply: applySyncCommitReceiptsMigration},
 }
 
 func runMigrations(ctx context.Context, db *sql.DB, ftsAvailable bool) error {
@@ -1161,6 +1162,18 @@ func applyRepositoryDocsIdentityMigration(ctx context.Context, tx *sql.Tx, _ boo
 		}
 	}
 	return nil
+}
+
+func applySyncCommitReceiptsMigration(ctx context.Context, tx *sql.Tx, _ bool) error {
+	_, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS sync_commit_receipts (
+	stage_id TEXT PRIMARY KEY,
+	checksum TEXT NOT NULL,
+	repo_id TEXT NOT NULL,
+	collection TEXT NOT NULL,
+	committed_at TEXT NOT NULL,
+	FOREIGN KEY(repo_id) REFERENCES repos(repo_id) ON DELETE CASCADE
+)`)
+	return err
 }
 
 func tableColumns(ctx context.Context, tx *sql.Tx, table string) (map[string]bool, error) {

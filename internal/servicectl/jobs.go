@@ -637,15 +637,15 @@ func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID str
 	// writer lease for one staged commit. They may therefore share admission
 	// with other sync workers for the same cache; commit fairness is enforced by
 	// the per-cache FIFO in sync_jobs.go. Other writer jobs remain exclusive.
-	exclusiveWriter := cacheWriter && jobType != SyncJobType
-	if cacheWriter {
+	// Durable sync is admitted while another cache writer is active because its
+	// provider-fetch phase is read-only. The short commit lease later joins the
+	// per-cache FIFO instead of failing the whole sync before a stage exists.
+	if cacheWriter && jobType != SyncJobType {
 		if activeID := m.directCacheWriters[cacheUUID]; activeID != "" {
 			return Job{}, false, ErrCacheWriterBusy{ActiveJobID: activeID, ActiveType: "direct_cache_write"}
 		}
 		if active, ok := m.activeCacheWriterLocked(cacheUUID); ok {
-			if exclusiveWriter || active.Type != SyncJobType {
-				return Job{}, false, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
-			}
+			return Job{}, false, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
 		}
 	}
 	m.nextID++

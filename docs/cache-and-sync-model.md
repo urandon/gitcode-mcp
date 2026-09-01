@@ -74,13 +74,27 @@ uses a collection-level `fetching → staged → waiting_commit/retrying → com
 → committed|rejected|superseded` protocol. Provider requests finish before the
 checksummed stage is admitted to the cache writer queue. A contended commit
 replays the persisted normalized response and never repeats provider traffic.
-Stages are bound to cache UUID, schema, repository binding, registration,
+Stages are bound to cache UUID, schema, an exact fingerprint of the remote
+repository route (`owner`, `name`, API base, and scopes), registration,
 collection checkpoint, provider revision, and idempotency key; recovery rejects
-a changed or missing target before opening it writable. Per-stage limits are
-enforced together with a 64 MiB/50,000-record/256-stage aggregate runtime
-budget, and terminal stages are collected deterministically. Issues, issue
-comments, wiki, pull requests, and pull request comments all use this daemon
-protocol. Foreground sync retains its synchronous compatibility behavior.
+a changed or missing target before opening it writable. An omitted daemon bound
+means one provider page and at most 100 records per durable stage, rather than
+an unbounded in-memory traversal. Explicit smaller or larger bounds remain
+visible in the request. Per-stage limits are enforced together with a 64
+MiB/50,000-record/256-active-stage aggregate runtime budget. Committed stages
+leave active capacity immediately; cancelled/rejected evidence remains bounded
+by retention. Issues, issue comments, wiki, pull requests, and pull request
+comments all use this daemon protocol. Foreground sync retains its synchronous
+compatibility behavior.
+
+Each SQLite publication transaction includes normalized graphs, collection and
+maintenance frontier/checkpoint updates, and a checksum-bound sync commit
+receipt. The receipt is the authority if the process commits SQLite but cannot
+atomically rename the terminal journal update (for example, ENOSPC): restart
+reports the job as committed without provider refetch or a false rejection.
+Optional post-commit queue-summary reads cannot downgrade that committed state.
+Provider fetch admission is allowed while another cache writer is active; only
+the short commit phase joins the per-cache FIFO and bounded contention backoff.
 
 Service job state is stored separately from the cache in the mode-`0600` service runtime `jobs.json` snapshot. It is operational state, not cache content. Active jobs (`queued`, `running`, and the short durable `cancelling` transition) have no TTL and remain visible as active work in the Admin UI. By default, succeeded/superseded jobs expire after 48 hours; failed/interrupted/cancelled jobs expire after 14 days. The latest significant failure per maintenance registration or work stream survives its ordinary TTL inside a separately bounded diagnostic cohort. A final 128-terminal-job cap and 256-progress-event cap keep the snapshot bounded. Pruning runs on load, job updates/completion, and idle maintenance reconciliation. It never deletes cached GitCode records, sync frontiers, maintenance policy, RAG indexes, or audit receipts.
 
@@ -96,7 +110,7 @@ The sync command supports these live sync selectors:
 - `--id ID` and `--input ALIAS` sync exactly one stable record or remote alias. A matching surface selector such as `--issues --input issue:42` is accepted as a type assertion and still uses the single-record adapter path; mismatched or multiple collection selectors are rejected before any provider or cache access.
 - `--index` builds the local index after sync.
 - `--idempotency-key KEY` supplies a deterministic sync event key.
-- `--max-pages`, `--max-records`, and `--per-page` bound collection sync when the selected surface supports collection bounds. They are rejected with `--id` or `--input` because an exact read has no pagination. If no max bound is supplied, collection sync traverses until `end_of_collection` or a complete frontier watermark proves the remaining tail is already cache-covered.
+- `--max-pages`, `--max-records`, and `--per-page` bound collection sync when the selected surface supports collection bounds. They are rejected with `--id` or `--input` because an exact read has no pagination. Foreground collection sync without a max bound traverses until `end_of_collection` or a complete frontier watermark proves the remaining tail is already cache-covered; daemon sync applies the durable one-page/100-record staging chunk described above.
 
 The MCP `sync_live` surface also exposes explicit `issue_comments` and
 `pr_comments` selectors. Its legacy `comments` selector resolves from the
@@ -289,5 +303,10 @@ Schema version 17 adds a durable random cache UUID, independent maintenance head
 Schema version 18 adds metadata-only repository-document revision sets, chunk identities, revision membership, and namespace-scoped vectors. It records Git object ids, content digests, byte and line ranges, policies, coverage, and lifecycle state; document bytes remain authoritative in Git and are read on demand.
 
 Schema version 19 binds each revision set to an opaque source registration and generation, records the processing-policy identity, preserves worktree authority on membership rows, and adds typed exclusion metadata. Existing version-18 rows receive neutral defaults and remain inspectable; a fresh plan/index establishes the current registration identity before promotion to a ready set.
+
+Schema version 20 adds checksum-bound durable sync commit receipts. A receipt is
+written in the same transaction as cache graphs and frontiers so restart can
+distinguish “SQLite committed, journal terminal write failed” from an uncommitted
+stage without repeating provider traffic.
 
 Opening an older compatible cache without migration is read-compatible but write-blocked so operators can inspect the cache and run diagnostics before applying the migration. New caches are initialized directly at the current schema version.
