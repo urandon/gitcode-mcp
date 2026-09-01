@@ -135,6 +135,58 @@ func TestSyncStageJournalEnforcesBoundsBeforePersistence(t *testing.T) {
 	}
 }
 
+func TestSyncStageJournalEnforcesAggregateBudgetAndIdempotentReplay(t *testing.T) {
+	runtimeDir := t.TempDir()
+	envelope := testSyncStageEnvelope()
+	journal := NewSyncStageJournal(runtimeDir, SyncStageLimits{
+		MaxBytes: int64(len(envelope.Payload)) + 1, MaxRecords: 10,
+		MaxTotalBytes: int64(len(envelope.Payload)) + 1, MaxTotalRecords: 2, MaxStages: 1,
+	})
+	first, err := journal.Create(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := journal.Create(envelope)
+	if err != nil || replayed.StageID != first.StageID {
+		t.Fatalf("idempotent replay=%+v err=%v", replayed, err)
+	}
+	second := envelope
+	second.IdempotencyKey = "sync-2"
+	if _, err := journal.Create(second); !errors.Is(err, ErrSyncStageBound) {
+		t.Fatalf("aggregate bound error=%v", err)
+	}
+	stages, err := journal.List()
+	if err != nil || len(stages) != 1 || stages[0].StageID != first.StageID {
+		t.Fatalf("stages=%+v err=%v", stages, err)
+	}
+}
+
+func TestSyncStageCreateRunsTerminalGCBeforeCapacityCheck(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	journal := NewSyncStageJournal(t.TempDir(), SyncStageLimits{MaxAge: time.Hour, MaxStages: 1})
+	journal.now = func() time.Time { return now }
+	first, err := journal.Create(testSyncStageEnvelope())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.UpdateState(first.StageID, SyncStageState{Phase: SyncStageCommitted, FetchedAt: now, StagedAt: now, CommittedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	journal.now = func() time.Time { return now.Add(2 * time.Hour) }
+	second := testSyncStageEnvelope()
+	second.IdempotencyKey = "after-production-gc"
+	created, err := journal.Create(second)
+	if err != nil {
+		t.Fatalf("Create after production GC: %v", err)
+	}
+	if _, err := journal.Load(first.StageID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired terminal stage retained: %v", err)
+	}
+	if _, err := journal.Load(created.StageID); err != nil {
+		t.Fatalf("new stage missing: %v", err)
+	}
+}
+
 func TestSyncStageStateRetryMutationPreservesChecksumAndPayload(t *testing.T) {
 	journal := NewSyncStageJournal(t.TempDir(), SyncStageLimits{})
 	created, err := journal.Create(testSyncStageEnvelope())

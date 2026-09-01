@@ -345,6 +345,7 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 		collection := syncCollectionResult{RemoteType: work.remoteType, Err: err}
 		return nil, collection, err
 	}
+	defer func() { _, _ = journal.GC() }()
 	m.setJobSyncStage(jobID, stage, "collection batch staged")
 
 	for {
@@ -500,6 +501,7 @@ func (m *JobManager) RecoverSyncStages(ctx context.Context, manager Manager) err
 		runtimeDir = paths.RuntimeDir
 	}
 	journal := NewSyncStageJournal(runtimeDir, SyncStageLimits{})
+	defer func() { _, _ = journal.GC() }()
 	stages, rejections, err := journal.ListForRecovery()
 	if err != nil {
 		return err
@@ -591,6 +593,7 @@ func (m *JobManager) resumeInterruptedSyncStage(stage SyncStageEnvelope, cancel 
 }
 
 func (m *JobManager) runRecoveredSyncStage(ctx context.Context, manager Manager, journal *SyncStageJournal, stage SyncStageEnvelope) {
+	defer func() { _, _ = journal.GC() }()
 	defer m.markWorkerFinished(stage.JobID)
 	result, finalStage, err := m.commitRecoveredSyncStage(ctx, manager, journal, stage)
 	if result == nil {

@@ -10,18 +10,24 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
-	syncStageEnvelopeVersion   = 1
-	defaultSyncStageMaxBytes   = int64(16 << 20)
-	defaultSyncStageMaxRecords = 10_000
-	defaultSyncStageMaxAge     = 24 * time.Hour
-	defaultSyncCommitRetries   = 6
-	defaultSyncCommitBaseDelay = time.Second
-	defaultSyncCommitMaxDelay  = time.Minute
+	syncStageEnvelopeVersion     = 1
+	defaultSyncStageMaxBytes     = int64(16 << 20)
+	defaultSyncStageMaxRecords   = 10_000
+	defaultSyncStageTotalBytes   = int64(64 << 20)
+	defaultSyncStageTotalRecords = 50_000
+	defaultSyncStageMaxCount     = 256
+	defaultSyncStageMaxAge       = 24 * time.Hour
+	defaultSyncCommitRetries     = 6
+	defaultSyncCommitBaseDelay   = time.Second
+	defaultSyncCommitMaxDelay    = time.Minute
 )
+
+var syncStageCapacityMu sync.Mutex
 
 var (
 	ErrSyncStageCorrupt = errors.New("sync stage is corrupt")
@@ -127,9 +133,12 @@ func (e SyncStageEnvelope) PublicView() SyncStageView {
 }
 
 type SyncStageLimits struct {
-	MaxBytes   int64
-	MaxRecords int
-	MaxAge     time.Duration
+	MaxBytes        int64
+	MaxRecords      int
+	MaxTotalBytes   int64
+	MaxTotalRecords int
+	MaxStages       int
+	MaxAge          time.Duration
 }
 
 type SyncStageJournal struct {
@@ -151,6 +160,15 @@ func NewSyncStageJournal(runtimeDir string, limits SyncStageLimits) *SyncStageJo
 	if limits.MaxRecords <= 0 {
 		limits.MaxRecords = defaultSyncStageMaxRecords
 	}
+	if limits.MaxTotalBytes <= 0 {
+		limits.MaxTotalBytes = defaultSyncStageTotalBytes
+	}
+	if limits.MaxTotalRecords <= 0 {
+		limits.MaxTotalRecords = defaultSyncStageTotalRecords
+	}
+	if limits.MaxStages <= 0 {
+		limits.MaxStages = defaultSyncStageMaxCount
+	}
 	if limits.MaxAge <= 0 {
 		limits.MaxAge = defaultSyncStageMaxAge
 	}
@@ -165,6 +183,8 @@ func NewSyncStageJournal(runtimeDir string, limits SyncStageLimits) *SyncStageJo
 }
 
 func (j *SyncStageJournal) Create(envelope SyncStageEnvelope) (SyncStageEnvelope, error) {
+	syncStageCapacityMu.Lock()
+	defer syncStageCapacityMu.Unlock()
 	now := j.now().UTC()
 	envelope.Version = syncStageEnvelopeVersion
 	envelope.JobID = strings.TrimSpace(envelope.JobID)
@@ -204,11 +224,42 @@ func (j *SyncStageJournal) Create(envelope SyncStageEnvelope) (SyncStageEnvelope
 	}
 	envelope.State.UpdatedAt = now
 	envelope.Checksum = syncStageChecksum(envelope)
-	envelope.StageID = "stage-" + envelope.Checksum[:24]
+	envelope.StageID = syncStageIdentity(envelope)
+	if existing, err := j.Load(envelope.StageID); err == nil {
+		if sameSyncStageBatch(existing, envelope) {
+			return existing, nil
+		}
+		return SyncStageEnvelope{}, fmt.Errorf("%w: stage identity collision", ErrSyncStageCorrupt)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return SyncStageEnvelope{}, err
+	}
+	if _, err := j.GC(); err != nil {
+		return SyncStageEnvelope{}, err
+	}
+	bytes, records, stages, err := j.aggregateUsage()
+	if err != nil {
+		return SyncStageEnvelope{}, err
+	}
+	if bytes+envelope.ByteCount > j.limits.MaxTotalBytes || records+envelope.RecordCount > j.limits.MaxTotalRecords || stages+1 > j.limits.MaxStages {
+		return SyncStageEnvelope{}, ErrSyncStageBound
+	}
 	if err := j.persist(envelope); err != nil {
 		return SyncStageEnvelope{}, err
 	}
 	return envelope, nil
+}
+
+func (j *SyncStageJournal) aggregateUsage() (bytes int64, records, stages int, err error) {
+	envelopes, _, err := j.ListForRecovery()
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	for _, envelope := range envelopes {
+		bytes += envelope.ByteCount
+		records += envelope.RecordCount
+		stages++
+	}
+	return bytes, records, stages, nil
 }
 
 func (j *SyncStageJournal) Load(stageID string) (SyncStageEnvelope, error) {
@@ -383,7 +434,7 @@ func (j *SyncStageJournal) validate(envelope SyncStageEnvelope, expectedID strin
 		return ErrSyncStageBound
 	}
 	checksum := syncStageChecksum(envelope)
-	if checksum != envelope.Checksum || expectedID != "stage-"+checksum[:24] {
+	if checksum != envelope.Checksum || expectedID != syncStageIdentity(envelope) {
 		return ErrSyncStageCorrupt
 	}
 	return nil
@@ -447,6 +498,35 @@ func syncStageChecksum(envelope SyncStageEnvelope) string {
 	data, _ := json.Marshal(immutable)
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+func syncStageIdentity(envelope SyncStageEnvelope) string {
+	identity := struct {
+		CacheUUID        string `json:"cache_uuid"`
+		CacheSchema      int    `json:"cache_schema"`
+		RegistrationID   string `json:"registration_id"`
+		RepoID           string `json:"repo_id"`
+		Collection       string `json:"collection"`
+		Checkpoint       string `json:"checkpoint,omitempty"`
+		ProviderRevision string `json:"provider_revision,omitempty"`
+		IdempotencyKey   string `json:"idempotency_key"`
+	}{
+		envelope.CacheUUID, envelope.CacheSchema, envelope.RegistrationID,
+		envelope.RepoID, envelope.Collection, envelope.Checkpoint,
+		envelope.ProviderRevision, envelope.IdempotencyKey,
+	}
+	data, _ := json.Marshal(identity)
+	sum := sha256.Sum256(data)
+	return "stage-" + hex.EncodeToString(sum[:12])
+}
+
+func sameSyncStageBatch(first, second SyncStageEnvelope) bool {
+	return first.CacheUUID == second.CacheUUID && first.CacheSchema == second.CacheSchema &&
+		first.RegistrationID == second.RegistrationID && first.RepoID == second.RepoID &&
+		first.Collection == second.Collection && first.Checkpoint == second.Checkpoint &&
+		first.ProviderRevision == second.ProviderRevision && first.IdempotencyKey == second.IdempotencyKey &&
+		first.RecordCount == second.RecordCount && first.ByteCount == second.ByteCount &&
+		string(first.Payload) == string(second.Payload)
 }
 
 func syncStageTerminal(phase SyncStagePhase) bool {
