@@ -59,6 +59,11 @@ jobs:
         # contracts. Raster baselines and diagnostic capture are local-only.
         run: npm run test:e2e
 
+      - name: Enforce semantic-only browser artifacts
+        # A future explicit page.screenshot()/trace/video call must fail CI even
+        # if it bypasses the shared Playwright policy by mistake.
+        run: ./scripts/check-browser-ci-artifacts.sh
+
       - name: Run tests
         run: go test ./...
 
