@@ -465,9 +465,12 @@ func (m *JobManager) RecoverSyncStages(ctx context.Context, manager Manager) err
 		runtimeDir = paths.RuntimeDir
 	}
 	journal := NewSyncStageJournal(runtimeDir, SyncStageLimits{})
-	stages, err := journal.List()
+	stages, rejections, err := journal.ListForRecovery()
 	if err != nil {
 		return err
+	}
+	for _, rejection := range rejections {
+		m.rejectInterruptedSyncStageByRef(rejection.StageRef, rejection.Reason)
 	}
 	now := time.Now().UTC()
 	for _, stage := range stages {
@@ -477,26 +480,32 @@ func (m *JobManager) RecoverSyncStages(ctx context.Context, manager Manager) err
 		if !stage.ExpiresAt.After(now) {
 			state := stage.State
 			state.Phase, state.TerminalReason, state.RetryAfter = SyncStageRejected, "stale_stage_expired", time.Time{}
-			if _, err := journal.UpdateState(stage.StageID, state); err != nil {
+			updated, err := journal.UpdateState(stage.StageID, state)
+			if err != nil {
 				return err
 			}
+			m.rejectInterruptedSyncStage(updated, state.TerminalReason)
 			continue
 		}
 		if stage.Collection != "issues" && stage.Collection != "wiki" && stage.Collection != "pulls" {
 			state := stage.State
 			state.Phase, state.TerminalReason = SyncStageRejected, "unsupported_stage_collection"
-			if _, err := journal.UpdateState(stage.StageID, state); err != nil {
+			updated, err := journal.UpdateState(stage.StageID, state)
+			if err != nil {
 				return err
 			}
+			m.rejectInterruptedSyncStage(updated, state.TerminalReason)
 			continue
 		}
 		job, ok := m.Get(stage.JobID)
 		if !ok || job.Type != SyncJobType || job.Status != JobStatusInterrupted {
 			state := stage.State
 			state.Phase, state.TerminalReason = SyncStageRejected, "orphaned_or_incompatible_job"
-			if _, err := journal.UpdateState(stage.StageID, state); err != nil {
+			updated, err := journal.UpdateState(stage.StageID, state)
+			if err != nil {
 				return err
 			}
+			m.rejectInterruptedSyncStage(updated, state.TerminalReason)
 			continue
 		}
 		workerCtx, cancel := context.WithCancel(ctx)
@@ -507,6 +516,27 @@ func (m *JobManager) RecoverSyncStages(ctx context.Context, manager Manager) err
 		go m.runRecoveredSyncStage(workerCtx, manager, journal, stage)
 	}
 	return nil
+}
+
+func (m *JobManager) rejectInterruptedSyncStage(stage SyncStageEnvelope, reason string) {
+	m.rejectInterruptedSyncStageByRef(stage.PublicView().StageRef, reason)
+}
+
+func (m *JobManager) rejectInterruptedSyncStageByRef(stageRef, reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now().UTC()
+	for _, job := range m.jobs {
+		if job.Status != JobStatusInterrupted || job.SyncStage == nil || job.SyncStage.StageRef != stageRef {
+			continue
+		}
+		job.Status, job.ErrorClass = JobStatusFailed, reason
+		job.Error = publicMaintenanceJobError(SyncJobType, reason)
+		job.UpdatedAt, job.FinishedAt = now, &now
+		job.SyncStage.Phase, job.SyncStage.TerminalCause, job.SyncStage.RetryAfter = SyncStageRejected, reason, time.Time{}
+		job.Progress = append(job.Progress, service.ProgressEvent{Type: JobStatusFailed, Phase: string(SyncStageRejected), Collection: job.SyncStage.Collection, Message: "staged batch rejected during restart recovery"})
+	}
+	_ = m.saveLocked()
 }
 
 func (m *JobManager) resumeInterruptedSyncStage(stage SyncStageEnvelope, cancel context.CancelFunc) error {

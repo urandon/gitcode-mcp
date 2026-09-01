@@ -137,6 +137,11 @@ type SyncStageJournal struct {
 	writeFile func(string, []byte, os.FileMode) error
 }
 
+type SyncStageLoadRejection struct {
+	StageRef string
+	Reason   string
+}
+
 func NewSyncStageJournal(runtimeDir string, limits SyncStageLimits) *SyncStageJournal {
 	if limits.MaxBytes <= 0 {
 		limits.MaxBytes = defaultSyncStageMaxBytes
@@ -264,8 +269,63 @@ func (j *SyncStageJournal) List() ([]SyncStageEnvelope, error) {
 	return stages, nil
 }
 
+// ListForRecovery isolates corrupt private envelopes and continues returning
+// valid work. A single torn or tampered sidecar must not prevent the daemon or
+// unrelated repositories from recovering.
+func (j *SyncStageJournal) ListForRecovery() ([]SyncStageEnvelope, []SyncStageLoadRejection, error) {
+	entries, err := os.ReadDir(j.dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	stages := make([]SyncStageEnvelope, 0, len(entries))
+	rejections := make([]SyncStageLoadRejection, 0)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		stageID := strings.TrimSuffix(entry.Name(), ".json")
+		stage, loadErr := j.Load(stageID)
+		if loadErr == nil {
+			stages = append(stages, stage)
+			continue
+		}
+		reason := "corrupt_stage"
+		if errors.Is(loadErr, ErrSyncStageBound) {
+			reason = "stage_bounds_exceeded"
+		} else if !errors.Is(loadErr, ErrSyncStageCorrupt) {
+			return nil, rejections, loadErr
+		}
+		if err := j.quarantine(entry.Name()); err != nil {
+			return nil, rejections, err
+		}
+		rejections = append(rejections, SyncStageLoadRejection{StageRef: publicStageRef(stageID), Reason: reason})
+	}
+	sort.Slice(stages, func(a, b int) bool {
+		if stages[a].State.UpdatedAt.Equal(stages[b].State.UpdatedAt) {
+			return stages[a].StageID < stages[b].StageID
+		}
+		return stages[a].State.UpdatedAt.Before(stages[b].State.UpdatedAt)
+	})
+	return stages, rejections, nil
+}
+
+func (j *SyncStageJournal) quarantine(name string) error {
+	if strings.TrimSpace(j.dir) == "" || filepath.Base(name) != name || !strings.HasSuffix(name, ".json") {
+		return ErrSyncStageCorrupt
+	}
+	from := filepath.Join(j.dir, name)
+	to := strings.TrimSuffix(from, ".json") + ".rejected"
+	if err := os.Rename(from, to); err != nil {
+		return err
+	}
+	return os.Chmod(to, 0o600)
+}
+
 func (j *SyncStageJournal) GC() (int, error) {
-	stages, err := j.List()
+	stages, _, err := j.ListForRecovery()
 	if err != nil {
 		return 0, err
 	}
@@ -280,6 +340,26 @@ func (j *SyncStageJournal) GC() (int, error) {
 			return removed, err
 		}
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return removed, err
+		}
+		removed++
+	}
+	entries, readErr := os.ReadDir(j.dir)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return removed, readErr
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".rejected") {
+			continue
+		}
+		info, statErr := entry.Info()
+		if statErr != nil {
+			return removed, statErr
+		}
+		if now.Before(info.ModTime().UTC().Add(j.limits.MaxAge)) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(j.dir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return removed, err
 		}
 		removed++

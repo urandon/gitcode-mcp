@@ -70,6 +70,59 @@ func TestSyncStageJournalRejectsCorruptionAndTraversal(t *testing.T) {
 	}
 }
 
+func TestSyncStageRecoveryQuarantinesCorruptionWithoutBlockingValidStage(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	runtimeDir := t.TempDir()
+	journal := NewSyncStageJournal(runtimeDir, SyncStageLimits{MaxAge: time.Hour})
+	journal.now = func() time.Time { return now }
+	corrupt, err := journal.Create(testSyncStageEnvelope())
+	if err != nil {
+		t.Fatal(err)
+	}
+	validEnvelope := testSyncStageEnvelope()
+	validEnvelope.IdempotencyKey = "sync-valid"
+	valid, err := journal.Create(validEnvelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	corruptPath := filepath.Join(runtimeDir, "sync-stages", corrupt.StageID+".json")
+	data, err := os.ReadFile(corruptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(corruptPath, []byte(strings.Replace(string(data), "private source body", "tampered source body", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stages, rejections, err := journal.ListForRecovery()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stages) != 1 || stages[0].StageID != valid.StageID {
+		t.Fatalf("recoverable stages=%+v", stages)
+	}
+	if len(rejections) != 1 || rejections[0].StageRef != publicStageRef(corrupt.StageID) || rejections[0].Reason != "corrupt_stage" {
+		t.Fatalf("rejections=%+v", rejections)
+	}
+	quarantined := filepath.Join(runtimeDir, "sync-stages", corrupt.StageID+".rejected")
+	if info, err := os.Stat(quarantined); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("quarantined info=%+v err=%v", info, err)
+	}
+	if _, err := os.Stat(corruptPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("corrupt active sidecar still exists: %v", err)
+	}
+	if err := os.Chtimes(quarantined, now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := journal.GC()
+	if err != nil || removed != 1 {
+		t.Fatalf("GC removed=%d err=%v", removed, err)
+	}
+	if _, err := journal.Load(valid.StageID); err != nil {
+		t.Fatalf("valid nonterminal stage removed: %v", err)
+	}
+}
+
 func TestSyncStageJournalEnforcesBoundsBeforePersistence(t *testing.T) {
 	runtimeDir := t.TempDir()
 	journal := NewSyncStageJournal(runtimeDir, SyncStageLimits{MaxBytes: 8, MaxRecords: 1, MaxAge: time.Hour})
