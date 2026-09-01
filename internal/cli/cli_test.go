@@ -4007,6 +4007,28 @@ func TestAliasCommandHelpExitsZero(t *testing.T) {
 	}
 }
 
+func TestRenderServiceJobTextIncludesPublicDurableSyncState(t *testing.T) {
+	now := time.Date(2026, 9, 1, 3, 0, 0, 0, time.UTC)
+	job := servicectl.Job{ID: "job-public", Type: servicectl.SyncJobType, Status: servicectl.JobStatusRunning, CreatedAt: now, UpdatedAt: now, SyncStage: &servicectl.SyncStageView{
+		StageRef: "stage-public", CacheRef: "cache-public", Collection: "issues", Phase: servicectl.SyncStageWaitingCommit,
+		Fetched: 12, Staged: 12, StagedBytes: 8192, Attempt: 2, RetryBudget: 6, RetryAfter: now.Add(time.Minute),
+		BlockerClass: "cache_busy", BlockingOp: "rag-index", BlockingJobRef: "job-blocker", FetchedAt: now, StagedAt: now.Add(time.Second),
+	}}
+	var out bytes.Buffer
+	renderServiceJobText(&out, job)
+	text := out.String()
+	for _, want := range []string{"sync_phase: waiting_commit", "sync_stage_ref: stage-public", "sync_cache_ref: cache-public", "sync_staged_bytes: 8192", "sync_retry: 2/6", "sync_blocking_job_ref: job-blocker"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("output missing %q: %s", want, text)
+		}
+	}
+	for _, forbidden := range []string{"/Users/", "private source body", "idempotency_key", "checksum"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("output contains %q: %s", forbidden, text)
+		}
+	}
+}
+
 func TestHelpDoesNotCreateService(t *testing.T) {
 	factoryCalls := 0
 	factory := func(ctx context.Context, path string) (queryService, func() error, error) {

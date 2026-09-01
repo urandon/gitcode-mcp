@@ -509,6 +509,25 @@ func TestMCPServiceJobAttachAndCancelUseCoordinatorLifecycle(t *testing.T) {
 	}
 }
 
+func TestServiceJobSummaryTextIncludesPublicDurableSyncState(t *testing.T) {
+	now := time.Date(2026, 9, 1, 3, 0, 0, 0, time.UTC)
+	text := serviceJobSummaryText(servicectl.Job{ID: "job-public", Status: servicectl.JobStatusRunning, Completed: 4, Steps: 10, SyncStage: &servicectl.SyncStageView{
+		StageRef: "stage-public", CacheRef: "cache-public", Collection: "issues", Phase: servicectl.SyncStageWaitingCommit,
+		Fetched: 10, Staged: 10, StagedBytes: 4096, Attempt: 3, RetryBudget: 6, RetryAfter: now,
+		BlockerClass: "cache_busy", BlockingOp: "rag-index", BlockingJobRef: "job-blocker",
+	}})
+	for _, want := range []string{"job_id=job-public", "sync_phase=waiting_commit", "sync_stage_ref=stage-public", "sync_cache_ref=cache-public", "sync_staged_bytes=4096", "sync_retry=3/6", "sync_blocking_job_ref=job-blocker"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("summary missing %q: %s", want, text)
+		}
+	}
+	for _, forbidden := range []string{"/Users/", "private source body", "idempotency_key", "checksum"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("summary contains %q: %s", forbidden, text)
+		}
+	}
+}
+
 func TestMCPServiceJobTerminalIncludesSuperseded(t *testing.T) {
 	for _, status := range []string{
 		servicectl.JobStatusSucceeded,
