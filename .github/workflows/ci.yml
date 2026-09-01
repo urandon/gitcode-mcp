@@ -40,6 +40,9 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
+      - name: Check product documentation contracts
+        run: ./scripts/check-product-docs.sh
+
       - name: Check embedded admin UI assets
         run: ./scripts/check-admin-ui-assets.sh
 
