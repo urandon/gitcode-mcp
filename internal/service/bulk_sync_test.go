@@ -159,6 +159,9 @@ func TestDurablePullAndWikiBatchesCommitWithoutProviderReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchWikiSyncBatch: %v", err)
 	}
+	if wiki.ProviderRevision == "" {
+		t.Fatal("FetchWikiSyncBatch omitted provider revision")
+	}
 	if _, err := svc.CommitPullSyncBatch(ctx, pulls, nil); err == nil {
 		t.Fatal("pull commit succeeded under external writer")
 	}

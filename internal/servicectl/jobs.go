@@ -632,13 +632,20 @@ func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID str
 			return cloneJob(job), false, nil
 		}
 	}
-	writer := isCacheWriterJob(jobType)
-	if writer {
+	cacheWriter := isCacheWriterJob(jobType)
+	// Durable sync workers perform provider I/O before taking a short cache
+	// writer lease for one staged commit. They may therefore share admission
+	// with other sync workers for the same cache; commit fairness is enforced by
+	// the per-cache FIFO in sync_jobs.go. Other writer jobs remain exclusive.
+	exclusiveWriter := cacheWriter && jobType != SyncJobType
+	if cacheWriter {
 		if activeID := m.directCacheWriters[cacheUUID]; activeID != "" {
 			return Job{}, false, ErrCacheWriterBusy{ActiveJobID: activeID, ActiveType: "direct_cache_write"}
 		}
 		if active, ok := m.activeCacheWriterLocked(cacheUUID); ok {
-			return Job{}, false, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
+			if exclusiveWriter || active.Type != SyncJobType {
+				return Job{}, false, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
+			}
 		}
 	}
 	m.nextID++
@@ -652,7 +659,7 @@ func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID str
 	}
 	m.jobs[id] = job
 	m.cancel[id] = cancel
-	if writer {
+	if cacheWriter {
 		// Reserve the worker while admission is still atomic. A cancellation can
 		// publish a terminal status before the goroutine is scheduled, but the
 		// cache-authority fence must still wait for that possible late starter.

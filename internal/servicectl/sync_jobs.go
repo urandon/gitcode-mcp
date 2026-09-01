@@ -283,7 +283,7 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 				if marshalErr != nil {
 					return durableCollectionBatch{}, marshalErr
 				}
-				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt}, err
+				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.ProviderRevision, idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt}, err
 			},
 			commit: func(ctx context.Context, payload []byte) (*service.SyncResourcesResult, error) {
 				var batch service.DurableWikiSyncBatch
@@ -324,6 +324,7 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 	})
 	batch, fetchErr := work.fetch(ctx)
 	if fetchErr != nil && batch.recordCount == 0 {
+		m.rejectUnpersistedSyncStage(jobID, maintenanceJobErrorClass(fetchErr, "provider_fetch_failed"))
 		collection := syncCollectionResult{RemoteType: work.remoteType, Err: fetchErr}
 		return nil, collection, fetchErr
 	}
@@ -340,6 +341,7 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 		State: SyncStageState{Phase: SyncStageStaged, RetryBudget: defaultSyncCommitRetries, FetchedAt: batch.fetchedAt},
 	})
 	if err != nil {
+		m.rejectUnpersistedSyncStage(jobID, maintenanceJobErrorClass(err, "stage_persist_failed"))
 		collection := syncCollectionResult{RemoteType: work.remoteType, Err: err}
 		return nil, collection, err
 	}
@@ -352,23 +354,14 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 			collection := syncCollectionResult{RemoteType: work.remoteType, Err: err}
 			return nil, collection, err
 		}
-		identityStore, openErr := cache.NewSQLiteReadOnlyStore(ctx, req.CachePath)
-		if openErr != nil {
-			collection := syncCollectionResult{RemoteType: work.remoteType, Err: openErr}
-			return nil, collection, openErr
-		}
-		identity, identityErr := identityStore.CacheIdentity(ctx)
-		currentSchema, schemaErr := identityStore.SchemaVersion(ctx)
-		_ = identityStore.Close()
-		if identityErr != nil || schemaErr != nil || identity.UUID != stage.CacheUUID || currentSchema != stage.CacheSchema {
+		if targetErr := validateSyncStageTargetReadOnly(ctx, stage); targetErr != nil {
 			state := stage.State
 			state.Phase = SyncStageRejected
 			state.TerminalReason = "cache_identity_or_schema_changed"
 			stage, _ = journal.UpdateState(stage.StageID, state)
 			m.setJobSyncStage(jobID, stage, "staged batch rejected")
-			identityErr := CacheWriterIdentityError{code: "cache_uuid_mismatch"}
-			collection := syncCollectionResult{RemoteType: work.remoteType, Err: identityErr}
-			return nil, collection, identityErr
+			collection := syncCollectionResult{RemoteType: work.remoteType, Err: targetErr}
+			return nil, collection, targetErr
 		}
 		releaseTurn, turnErr := m.acquireSyncCommitTurn(ctx, stage.CacheUUID, stage.StageID)
 		if turnErr != nil {
@@ -440,6 +433,46 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 		case <-timer.C:
 		}
 	}
+}
+
+func (m *JobManager) rejectUnpersistedSyncStage(jobID, reason string) {
+	m.updateJob(jobID, func(job *Job, now time.Time) {
+		if job.SyncStage == nil {
+			job.SyncStage = &SyncStageView{}
+		}
+		job.SyncStage.Phase = SyncStageRejected
+		job.SyncStage.TerminalCause = strings.TrimSpace(reason)
+		job.SyncStage.RetryAfter = time.Time{}
+		job.SyncStage.UpdatedAt = now
+	})
+}
+
+// validateSyncStageTargetReadOnly proves the exact cache and repository
+// authority before any writable SQLite open. This prevents recovery from
+// creating a removed cache or migrating a replacement cache that does not own
+// the staged batch.
+func validateSyncStageTargetReadOnly(ctx context.Context, stage SyncStageEnvelope) error {
+	store, err := cache.NewSQLiteReadOnlyStore(ctx, stage.CachePath)
+	if err != nil {
+		return CacheWriterIdentityError{code: "cache_authority_unavailable"}
+	}
+	defer store.Close()
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil || identity.UUID != stage.CacheUUID {
+		return CacheWriterIdentityError{code: "cache_uuid_mismatch"}
+	}
+	schema, err := store.SchemaVersion(ctx)
+	if err != nil || schema != stage.CacheSchema {
+		return CacheWriterIdentityError{code: "cache_schema_mismatch"}
+	}
+	binding, err := store.ResolveRepositoryBinding(ctx, stage.RepoID)
+	if err != nil || binding.RepoID != stage.RepoID {
+		return CacheWriterIdentityError{code: "repository_binding_unavailable"}
+	}
+	if maintenanceRegistrationID(identity.UUID, binding.RepoID) != stage.RegistrationID {
+		return CacheWriterIdentityError{code: "registration_id_mismatch"}
+	}
+	return nil
 }
 
 func rejectCancelledSyncStage(journal *SyncStageJournal, stage SyncStageEnvelope) SyncStageEnvelope {
@@ -587,6 +620,16 @@ func (m *JobManager) runRecoveredSyncStage(ctx context.Context, manager Manager,
 func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manager, journal *SyncStageJournal, stage SyncStageEnvelope) (*service.SyncResourcesResult, SyncStageEnvelope, error) {
 	eff, err := effectiveJobConfig(manager, stage.CachePath)
 	if err != nil {
+		return nil, stage, err
+	}
+	if err := validateSyncStageTargetReadOnly(ctx, stage); err != nil {
+		state := stage.State
+		state.Phase, state.TerminalReason = SyncStageRejected, "cache_identity_schema_or_binding_changed"
+		updated, updateErr := journal.UpdateState(stage.StageID, state)
+		if updateErr == nil {
+			stage = updated
+			m.setJobSyncStage(stage.JobID, stage, "recovered staged batch rejected before writable open")
+		}
 		return nil, stage, err
 	}
 	store, err := cache.NewSQLiteStore(ctx, stage.CachePath)

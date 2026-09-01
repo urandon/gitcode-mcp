@@ -399,6 +399,13 @@ func (s *Service) CommitPullSyncBatch(ctx context.Context, batch DurablePullSync
 	if err := validateDurablePullBatch(batch); err != nil {
 		return nil, err
 	}
+	repoID, err := s.requireRepo(ctx, batch.RepoID, "bulk-sync-pulls-commit")
+	if err != nil {
+		return nil, err
+	}
+	if repoID != batch.RepoID {
+		return nil, ErrInvalidQuery{Field: "repo_id", Message: "staged repository binding changed before commit"}
+	}
 	ctx, releaseWriter, err := s.acquireBulkWriter(ctx, batch.RepoID, "bulk-sync-pulls-commit")
 	if err != nil {
 		return nil, err
@@ -457,16 +464,17 @@ func validateDurablePullBatch(batch DurablePullSyncBatch) error {
 }
 
 type DurableWikiSyncBatch struct {
-	Version         int                `json:"version"`
-	RepoID          string             `json:"repo_id"`
-	Collection      string             `json:"collection"`
-	IdempotencyKey  string             `json:"idempotency_key"`
-	Items           []gitcode.WikiPage `json:"items"`
-	PagesListed     int                `json:"pages_listed"`
-	RecordsListed   int                `json:"records_listed"`
-	StopReason      string             `json:"stop_reason"`
-	TraversalStatus string             `json:"traversal_status"`
-	FetchedAt       time.Time          `json:"fetched_at"`
+	Version          int                `json:"version"`
+	RepoID           string             `json:"repo_id"`
+	Collection       string             `json:"collection"`
+	IdempotencyKey   string             `json:"idempotency_key"`
+	Items            []gitcode.WikiPage `json:"items"`
+	PagesListed      int                `json:"pages_listed"`
+	RecordsListed    int                `json:"records_listed"`
+	StopReason       string             `json:"stop_reason"`
+	TraversalStatus  string             `json:"traversal_status"`
+	ProviderRevision string             `json:"provider_revision"`
+	FetchedAt        time.Time          `json:"fetched_at"`
 }
 
 func (b DurableWikiSyncBatch) RecordCount() int { return len(b.Items) }
@@ -498,7 +506,7 @@ func (s *Service) FetchWikiSyncBatch(ctx context.Context, req BulkSyncRequest) (
 	}
 	wikiBounds := &gitcode.WikiBounds{MaxRecords: maxRecords}
 	page, err := s.client.ListWikiPages(ctx, gitcode.WikiListRequest{Owner: route.Owner, Repo: route.Name, Page: req.Page, PerPage: req.PerPage, Bounds: wikiBounds})
-	batch := DurableWikiSyncBatch{Version: DurableSyncBatchVersion, RepoID: repoID, Collection: "wiki", IdempotencyKey: req.IdempotencyKey, Items: page.Items, RecordsListed: len(page.Items), FetchedAt: s.now().UTC()}
+	batch := DurableWikiSyncBatch{Version: DurableSyncBatchVersion, RepoID: repoID, Collection: "wiki", IdempotencyKey: req.IdempotencyKey, Items: page.Items, RecordsListed: len(page.Items), ProviderRevision: durableWikiProviderRevision(page.Items), FetchedAt: s.now().UTC()}
 	perPage := req.PerPage
 	if perPage < 1 {
 		perPage = max(1, len(page.Items))
@@ -522,6 +530,13 @@ func (s *Service) FetchWikiSyncBatch(ctx context.Context, req BulkSyncRequest) (
 func (s *Service) CommitWikiSyncBatch(ctx context.Context, batch DurableWikiSyncBatch, progress chan<- ProgressEvent) (*SyncResourcesResult, error) {
 	if err := validateDurableWikiBatch(batch); err != nil {
 		return nil, err
+	}
+	repoID, err := s.requireRepo(ctx, batch.RepoID, "bulk-sync-wiki-commit")
+	if err != nil {
+		return nil, err
+	}
+	if repoID != batch.RepoID {
+		return nil, ErrInvalidQuery{Field: "repo_id", Message: "staged repository binding changed before commit"}
 	}
 	ctx, releaseWriter, err := s.acquireBulkWriter(ctx, batch.RepoID, "bulk-sync-wiki-commit")
 	if err != nil {
@@ -562,7 +577,7 @@ func (s *Service) CommitWikiSyncBatch(ctx context.Context, batch DurableWikiSync
 }
 
 func validateDurableWikiBatch(batch DurableWikiSyncBatch) error {
-	if batch.Version != DurableSyncBatchVersion || strings.TrimSpace(batch.RepoID) == "" || batch.Collection != "wiki" || strings.TrimSpace(batch.IdempotencyKey) == "" {
+	if batch.Version != DurableSyncBatchVersion || strings.TrimSpace(batch.RepoID) == "" || batch.Collection != "wiki" || strings.TrimSpace(batch.IdempotencyKey) == "" || strings.TrimSpace(batch.ProviderRevision) == "" {
 		return ErrInvalidQuery{Field: "batch", Message: "staged wiki batch is incompatible or incomplete"}
 	}
 	for index, item := range batch.Items {
@@ -571,6 +586,15 @@ func validateDurableWikiBatch(batch DurableWikiSyncBatch) error {
 		}
 	}
 	return nil
+}
+
+func durableWikiProviderRevision(items []gitcode.WikiPage) string {
+	parts := make([]any, 0, 1+len(items)*3)
+	parts = append(parts, "wiki-batch")
+	for _, item := range items {
+		parts = append(parts, strings.TrimSpace(item.Slug), strings.TrimSpace(item.Revision), item.UpdatedAt.UTC())
+	}
+	return contentHash(parts...)
 }
 
 type durableSyncBatchStore interface {

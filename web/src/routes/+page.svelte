@@ -173,6 +173,7 @@
 
   function syncLifecyclePhase(job: Job): string {
     const phase = job.sync_stage?.phase;
+    if (job.status === 'failed' || job.status === 'cancelled' || job.status === 'succeeded' || job.status === 'interrupted') return 'terminal';
     if (!phase) {
       if (job.status === 'queued') return 'queued';
       if (job.status === 'running' || job.status === 'cancelling') return 'admitted';

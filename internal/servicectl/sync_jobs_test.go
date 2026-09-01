@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -97,6 +98,29 @@ func TestDirectCacheWriterBlocksConflictFenceAndDaemonAdmission(t *testing.T) {
 	var busy ErrCacheWriterBusy
 	if !errors.As(err, &busy) || busy.ActiveType != "direct_cache_write" {
 		t.Fatalf("daemon writer crossed direct reservation: %T %v", err, err)
+	}
+}
+
+func TestDurableSyncAdmissionsShareCacheButRemainBlockedByOtherWriters(t *testing.T) {
+	jobs := NewJobManager("")
+	_, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	first, created, err := jobs.createCoalescedJob(SyncJobType, "owner/first", "", 0, "sync-first", "cache-shared", "reg-first", "", cancelA)
+	if err != nil || !created {
+		t.Fatalf("first sync admission job=%+v created=%t err=%v", first, created, err)
+	}
+	_, cancelB := context.WithCancel(context.Background())
+	defer cancelB()
+	second, created, err := jobs.createCoalescedJob(SyncJobType, "owner/second", "", 0, "sync-second", "cache-shared", "reg-second", "", cancelB)
+	if err != nil || !created || second.ID == first.ID {
+		t.Fatalf("second sync admission job=%+v created=%t err=%v", second, created, err)
+	}
+	_, cancelRAG := context.WithCancel(context.Background())
+	defer cancelRAG()
+	_, _, err = jobs.createCoalescedJob(RAGIndexJobType, "owner/third", "", 0, "rag-third", "cache-shared", "reg-third", "", cancelRAG)
+	var busy ErrCacheWriterBusy
+	if !errors.As(err, &busy) || busy.ActiveType != SyncJobType {
+		t.Fatalf("exclusive writer crossed active durable syncs: %T %v", err, err)
 	}
 }
 
@@ -325,6 +349,33 @@ func TestDaemonRestartRecoversStagedBatchWithoutProvider(t *testing.T) {
 	}
 	if _, err := store.GetSourceScoped(ctx, "owner/repo", "ISSUE-42"); err != nil {
 		t.Fatalf("recovered commit missing source: %v", err)
+	}
+}
+
+func TestRecoveredStageRejectsMissingCacheBeforeWritableOpen(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	missing := filepath.Join(root, "removed-cache.db")
+	journal := NewSyncStageJournal(root, SyncStageLimits{})
+	stage, err := journal.Create(SyncStageEnvelope{
+		JobID: "job-000001", CacheUUID: "removed-cache-uuid", CacheSchema: cache.CurrentSchemaVersion(), CachePath: missing,
+		RegistrationID: maintenanceRegistrationID("removed-cache-uuid", "owner/repo"), RepoID: "owner/repo", Collection: "issues",
+		IdempotencyKey: "removed-cache-stage", RecordCount: 0, Payload: json.RawMessage(`{"version":1}`),
+		State: SyncStageState{Phase: SyncStageStaged, RetryBudget: defaultSyncCommitRetries, FetchedAt: time.Now().UTC()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := newTestManager(t, "darwin")
+	cfg := config.Default()
+	manager.EffectiveConfig = &cfg
+	jobs := NewJobManager("")
+	_, rejected, err := jobs.commitRecoveredSyncStage(ctx, manager, journal, stage)
+	if err == nil || rejected.State.Phase != SyncStageRejected {
+		t.Fatalf("recovery result stage=%+v err=%v", rejected, err)
+	}
+	if _, statErr := os.Stat(missing); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("recovery created or mutated removed cache: %v", statErr)
 	}
 }
 
