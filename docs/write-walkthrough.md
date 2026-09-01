@@ -102,6 +102,12 @@ For partial `update-issue` writes, omitted milestone and labels mean preserve,
 not clear. The adapter reads the live preimage to work around the provider's
 omitted-milestone behavior and accepts success only after canonical readback
 matches every requested field and the unrelated fields remain unchanged.
+Before PATCH, the service durably claims the idempotency key against hashes of
+that canonical preimage. A timeout after PATCH or during readback is therefore
+not a normal retry: the next same-key call performs GET-only recovery. It
+returns `recovered_after_ambiguous_write` when requested and preserved fields
+match, `write_ambiguous_remote` when they do not, or `write_conflict` when a
+safely retryable attempt sees that its previously captured preimage changed.
 
 ### Create wiki page (dry-run)
 

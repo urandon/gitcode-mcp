@@ -123,6 +123,21 @@ transport, provider, or readback failures remain `in_progress`, so sequential
 or concurrent replay of the same idempotency key cannot issue an unsafe
 duplicate operation.
 
+Issue updates use the same durable-claim principle around PATCH. The HTTP
+adapter reads a canonical issue preimage, invokes the service claim callback,
+and does not attempt PATCH unless that claim succeeds. The audit stores hashes
+of the preimage fields and a machine-readable phase, never the duplicated issue
+document. Failures known to occur before PATCH, and provider rejections that
+prove no mutation, become retryable `failed` entries. Transport uncertainty
+after PATCH and all canonical-readback failures remain `in_progress`. A
+same-key replay performs canonical GET only: if requested fields match and all
+omitted fields still match their preimage hashes, it finalizes as
+`recovered_after_ambiguous_write`; otherwise it returns
+`write_ambiguous_remote` without a second PATCH. If a safely retryable attempt
+observes a changed preimage before its next mutation, it returns the typed
+`write_conflict` diagnostic. These records survive service restart in the
+shared audit table.
+
 Milestone-aware issue writes also refresh a deterministic `milestone` link from
 the cached issue source to the resolved `MILESTONE-<id>` source. The link kind
 is replaced atomically for each issue write, so assignment changes do not leave

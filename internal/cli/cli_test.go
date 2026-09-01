@@ -875,6 +875,33 @@ func TestDiscussionReplyUnavailableReportsLiveReadAttempt(t *testing.T) {
 	}
 }
 
+func TestIssue133WriteStatesRemainMachineReadableInCLI(t *testing.T) {
+	tests := []struct {
+		code      string
+		retryable bool
+	}{
+		{code: "write_ambiguous_remote", retryable: true},
+		{code: "write_ambiguous_readback_failed", retryable: true},
+		{code: "write_conflict", retryable: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.code, func(t *testing.T) {
+			var stderr bytes.Buffer
+			err := service.ErrWriteFailure{Code: tt.code, RepoID: "fixture-a", IdempotencyKey: "issue-133-key"}
+			if code := writeCommandError(&stderr, "json", startupPlan{ProviderMode: "live-http", Command: "update-issue", APIBaseURL: "https://api.gitcode.com/api/v5"}, err); code != 1 {
+				t.Fatalf("exit=%d", code)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["failure_class"] != tt.code || payload["http_attempted"] != true || payload["retryable"] != tt.retryable {
+				t.Fatalf("payload=%#v", payload)
+			}
+		})
+	}
+}
+
 func TestAddLabelDryRunValidates(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

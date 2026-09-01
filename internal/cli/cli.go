@@ -4126,7 +4126,7 @@ func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {
 	}
 	var writeErr service.ErrWriteFailure
 	if errors.As(err, &writeErr) {
-		ctx.HTTPAttempted = writeErr.Code == "write_unauthorized" || writeErr.Code == "write_network_unavailable" || writeErr.Code == "write_provider_error" || writeErr.Code == "write_conflict" || writeErr.Code == "schema_decode" || writeErr.Code == "pr_review_anchor_mismatch" || writeErr.Code == "write_confirmation_incomplete" || writeErr.Code == "discussion_reply_unavailable"
+		ctx.HTTPAttempted = writeErr.Code == "write_unauthorized" || writeErr.Code == "write_network_unavailable" || writeErr.Code == "write_provider_error" || writeErr.Code == "write_conflict" || writeErr.Code == "write_ambiguous_remote" || writeErr.Code == "write_ambiguous_readback_failed" || writeErr.Code == "schema_decode" || writeErr.Code == "pr_review_anchor_mismatch" || writeErr.Code == "write_confirmation_incomplete" || writeErr.Code == "discussion_reply_unavailable"
 		ctx.FixtureFallbackSentinel = writeErr.Code == "write_fixture_fallback_detected"
 		ctx.MissingCredential = writeErr.Code == "write_missing_credential"
 		ctx.UnsupportedPayload = writeErr.Code == "live_graph_invalid" || writeErr.Code == "unsupported_mock_payload"

@@ -800,6 +800,18 @@ type AttachmentBody struct {
 type WriteOptions struct {
 	IdempotencyKey   string
 	IdempotencyNonce string
+
+	// BeforeIssueUpdateMutation runs after the canonical issue preimage has
+	// been read and immediately before the PATCH is attempted. The service
+	// uses this hook to durably claim and fence the mutation.
+	BeforeIssueUpdateMutation func(Issue) error
+
+	// Issue-update transport controls are intentionally package-private. They
+	// let UpdateIssue distinguish a proven pre-request failure from an
+	// ambiguous request and prevent the generic read retry policy from ever
+	// replaying its PATCH.
+	singleTransportAttempt bool
+	beforeTransportAttempt func()
 }
 
 type WriteResult[T any] struct {

@@ -274,6 +274,12 @@ Repository binding diagnostics use the runtime context captured when the MCP ser
 
 Issue read results make identity roles explicit. `get_source`, `list_sources`, `recent_changes`, and `resolve_id` return `stable_source_id` for cache links and `issue_number` for GitCode's repository-local write route; legacy `id` and `remote_alias` remain for compatibility. Issue-targeting MCP writes accept either `number` or `issue_id`. Use `number` only for the repository-local issue number. Use `issue_id` for a stable id such as `ISSUE-76` or a known cached alias such as `issue:76` or `gitcode_issue_id:...`. Resolution is cache-first. If both selectors are present they must identify the same issue, and a cached provider id accidentally supplied as `number` is rejected with an `invalid_query` hint before any remote write.
 
+`update_issue` durably claims its canonical preimage before PATCH. Ambiguous
+PATCH/readback outcomes remain fenced; same-key recovery is GET-only and
+reports `recovered_after_ambiguous_write`, `write_ambiguous_remote`,
+`write_ambiguous_readback_failed`, or `write_conflict` as machine-readable
+states.
+
 ### Operational error contract
 
 Domain and local-operational failures use JSON-RPC code `-32000`, with a

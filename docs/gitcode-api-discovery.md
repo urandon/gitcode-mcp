@@ -51,6 +51,12 @@ external writes. Without a provider precondition, another client can change an
 issue between the preimage read and PATCH. Durable in-flight recovery and
 typed conflict handling belong to the service reliability contract; callers
 must not infer provider-level compare-and-swap from the preservation check.
+The service closes the local replay/concurrency gap by atomically claiming the
+idempotency key after that preimage GET and before PATCH, storing only hashed
+field invariants. It can detect a changed preimage before a later safe retry and
+can recover an ambiguous completed write through GET-only canonical readback.
+It still cannot eliminate the provider's residual GET-to-PATCH race; only a
+future GitCode conditional-write primitive could provide that guarantee.
 
 ## Repository Push Remote Mirrors
 

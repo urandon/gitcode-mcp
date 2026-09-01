@@ -70,7 +70,7 @@ source ingest -> local cache -> CLI / MCP reads
 GitCode adapter <-> tracker/wiki remote state
 ```
 
-Writes flow through explicit CLI or MCP live-write commands, require idempotency keys or deterministic write fingerprints, call the live GitCode adapter for provider confirmation, and then record audit/cache evidence. Routine reads continue to flow through the local cache and never trigger background writes.
+Writes flow through explicit CLI or MCP live-write commands, require idempotency keys or deterministic write fingerprints, call the live GitCode adapter for provider confirmation, and then record audit/cache evidence. Issue updates add a durable pre-mutation fence: the adapter reads the canonical preimage, the service atomically claims the key with hashed preimage invariants, and only then may the PATCH start. Ambiguous PATCH/readback outcomes remain fenced until canonical readback proves the requested state; they are never replayed as a second blind PATCH. Routine reads continue to flow through the local cache and never trigger background writes.
 
 Repository documentation follows a separate local-authority path:
 

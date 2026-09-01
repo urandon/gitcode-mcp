@@ -55,6 +55,8 @@ jobs:
 
       - name: Run admin UI browser tests
         working-directory: web
+        # CI asserts semantic DOM/ARIA, JSON API, action, and state-machine
+        # contracts. Raster baselines and diagnostic capture are local-only.
         run: npm run test:e2e
 
       - name: Run tests
