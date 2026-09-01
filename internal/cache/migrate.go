@@ -15,11 +15,32 @@ type Confirmation struct {
 }
 
 type MigrateCacheResult struct {
-	FromVersion   int
-	ToVersion     int
-	Applied       []int
-	BackupPath    string
-	Compatibility VersionCompatibility
+	FromVersion       int
+	ToVersion         int
+	Applied           []int
+	BackupPath        string
+	BackupVerified    bool
+	IdentityPreserved bool
+	Compatibility     VersionCompatibility
+}
+
+func InspectCacheMigration(ctx context.Context, dataSourceName string) (*MigrateCacheResult, error) {
+	if _, err := os.Stat(dataSourceName); err != nil {
+		if os.IsNotExist(err) {
+			return &MigrateCacheResult{FromVersion: 0, ToVersion: currentSchemaVersion}, nil
+		}
+		return nil, fmt.Errorf("cache: cannot access cache file: %w", err)
+	}
+	db, err := sql.Open("sqlite", dataSourceName+"?mode=ro")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	compat, err := CheckVersionCompatibility(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	return &MigrateCacheResult{FromVersion: compat.DetectedVersion, ToVersion: currentSchemaVersion, Compatibility: compat}, nil
 }
 
 func MigrateCache(ctx context.Context, dataSourceName string, forceNoFTS bool) (*MigrateCacheResult, error) {
@@ -79,23 +100,34 @@ func MigrateCacheWithConfirm(ctx context.Context, dataSourceName string, forceNo
 			Compatibility: compat,
 		}, nil
 	}
+	if _, err := db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		return nil, fmt.Errorf("cache: failed to checkpoint WAL before migration: %w", err)
+	}
 
 	backupPath, err := backupCache(dataSourceName)
 	if err != nil {
 		return nil, fmt.Errorf("cache: failed to create backup before migration: %w", err)
 	}
+	backupVersion, backupIdentity, err := verifyCacheBackup(ctx, backupPath)
+	if err != nil {
+		_ = os.Remove(backupPath)
+		return nil, fmt.Errorf("cache: failed to verify backup before migration: %w", err)
+	}
+	if backupVersion != beforeVersion {
+		_ = os.Remove(backupPath)
+		return nil, fmt.Errorf("cache: backup schema version %d does not match source version %d", backupVersion, beforeVersion)
+	}
 
 	useFTS := !forceNoFTS && detectFTS5(ctx, db)
 
 	applied := make([]int, 0)
-
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
 	for _, m := range migrations {
 		if m.version <= beforeVersion {
 			continue
-		}
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			return nil, err
 		}
 		if err = m.apply(ctx, tx, useFTS); err != nil {
 			_ = tx.Rollback()
@@ -113,19 +145,77 @@ func MigrateCacheWithConfirm(ctx context.Context, dataSourceName string, forceNo
 			_ = tx.Rollback()
 			return nil, err
 		}
-		if err = tx.Commit(); err != nil {
-			return nil, err
-		}
 		applied = append(applied, m.version)
+	}
+	identityPreserved, err := verifyMigrationTransaction(ctx, tx, backupIdentity)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
 	}
 
 	return &MigrateCacheResult{
-		FromVersion:   beforeVersion,
-		ToVersion:     currentSchemaVersion,
-		Applied:       applied,
-		BackupPath:    backupPath,
-		Compatibility: compat,
+		FromVersion:       beforeVersion,
+		ToVersion:         currentSchemaVersion,
+		Applied:           applied,
+		BackupPath:        backupPath,
+		BackupVerified:    true,
+		IdentityPreserved: identityPreserved,
+		Compatibility:     compat,
 	}, nil
+}
+
+func verifyCacheBackup(ctx context.Context, path string) (int, string, error) {
+	db, err := sql.Open("sqlite", path+"?mode=ro")
+	if err != nil {
+		return 0, "", err
+	}
+	defer db.Close()
+	var integrity string
+	if err := db.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&integrity); err != nil {
+		return 0, "", err
+	}
+	if integrity != "ok" {
+		return 0, "", fmt.Errorf("integrity_check returned %q", integrity)
+	}
+	version, err := schemaVersion(ctx, db)
+	if err != nil {
+		return 0, "", err
+	}
+	var identity string
+	if version >= 17 {
+		if err := db.QueryRowContext(ctx, `SELECT cache_uuid FROM cache_identity WHERE identity_key = 1`).Scan(&identity); err != nil {
+			return 0, "", err
+		}
+	}
+	return version, identity, nil
+}
+
+func verifyMigrationTransaction(ctx context.Context, tx *sql.Tx, expectedIdentity string) (bool, error) {
+	var version int
+	if err := tx.QueryRowContext(ctx, `SELECT version FROM schema_version`).Scan(&version); err != nil {
+		return false, err
+	}
+	if version != currentSchemaVersion {
+		return false, fmt.Errorf("cache: migration verification found schema version %d, expected %d", version, currentSchemaVersion)
+	}
+	var integrity string
+	if err := tx.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&integrity); err != nil {
+		return false, err
+	}
+	if integrity != "ok" {
+		return false, fmt.Errorf("cache: migration integrity_check returned %q", integrity)
+	}
+	var identity string
+	if err := tx.QueryRowContext(ctx, `SELECT cache_uuid FROM cache_identity WHERE identity_key = 1`).Scan(&identity); err != nil {
+		return false, err
+	}
+	if expectedIdentity != "" && identity != expectedIdentity {
+		return false, fmt.Errorf("cache: migration changed cache identity")
+	}
+	return expectedIdentity == "" || identity == expectedIdentity, nil
 }
 
 func backupCache(sourcePath string) (string, error) {

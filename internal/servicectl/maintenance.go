@@ -75,6 +75,11 @@ type MaintenanceEntry struct {
 	ActiveJobs                []string                         `json:"active_jobs,omitempty"`
 	LastErrorClass            string                           `json:"last_error_class,omitempty"`
 	LastError                 string                           `json:"last_error,omitempty"`
+	DetectedSchemaVersion     int                              `json:"detected_schema_version,omitempty"`
+	ExpectedSchemaVersion     int                              `json:"expected_schema_version,omitempty"`
+	DaemonBinaryVersion       string                           `json:"daemon_binary_version,omitempty"`
+	DaemonBinaryCommit        string                           `json:"daemon_binary_commit,omitempty"`
+	QuiesceState              string                           `json:"quiesce_state,omitempty"`
 	SyncStage                 MaintenanceStageState            `json:"sync_stage,omitempty"`
 	RAGStage                  MaintenanceStageState            `json:"rag_stage,omitempty"`
 	RepositoryDocs            *RepositoryDocsMaintenanceState  `json:"repository_docs,omitempty"`
@@ -2197,9 +2202,14 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	}
 	m.mu.Unlock()
 	now := m.now()
+	activeSync, activeRAG, activeRepositoryDocs := m.activeJobsForSnapshot(snapshot)
 	store, err := cache.NewSQLiteReadOnlyStore(ctx, path)
 	if err != nil {
-		return m.updateEntryFailure(registrationID, "cache_unreadable", err), nil
+		var schemaErr *cache.SchemaVersionError
+		if errors.As(err, &schemaErr) {
+			return m.updateEntrySchemaBlocked(registrationID, schemaErr.Compat, activeSync, activeRAG, activeRepositoryDocs), nil
+		}
+		return m.updateEntryFailureWithJobs(registrationID, "cache_unreadable", err, activeSync, activeRAG, activeRepositoryDocs), nil
 	}
 	identity, err := store.CacheIdentity(ctx)
 	if err != nil || identity.UUID != snapshot.CacheUUID {
@@ -2207,12 +2217,12 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 		if err == nil {
 			err = errors.New("cache identity changed")
 		}
-		return m.updateEntryFailure(registrationID, "cache_replaced", err), nil
+		return m.updateEntryFailureWithJobs(registrationID, "cache_replaced", err, activeSync, activeRAG, activeRepositoryDocs), nil
 	}
 	contentState, err := store.GetRepoContentState(ctx, snapshot.RepoID)
 	if err != nil {
 		store.Close()
-		return m.updateEntryFailure(registrationID, "content_state_failed", err), nil
+		return m.updateEntryFailureWithJobs(registrationID, "content_state_failed", err, activeSync, activeRAG, activeRepositoryDocs), nil
 	}
 	frontiers, _ := store.ListMaintenanceFrontiers(ctx, snapshot.RepoID)
 	namespaces, _ := store.ListEmbeddingNamespaces(ctx, snapshot.RepoID)
@@ -2257,9 +2267,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	}
 	store.Close()
 	started := []string{}
-	activeSync, _ := m.jobs.ActiveCacheRepo(SyncJobType, snapshot.CacheUUID, snapshot.RepoID)
-	activeRAG, _ := m.jobs.ActiveCacheRepo(RAGIndexJobType, snapshot.CacheUUID, snapshot.RepoID)
-	activeRepositoryDocs, _ := m.jobs.ActiveRepositoryDocsSource(snapshot.CacheUUID, snapshot.RepoID, snapshot.repositorySourceID, repositoryDocsSourceGeneration(snapshot))
+	activeSync, activeRAG, activeRepositoryDocs = m.activeJobsForSnapshot(snapshot)
 	activeWriter, _ := m.jobs.ActiveCacheWriter(snapshot.CacheUUID)
 	ragInterval := time.Duration(snapshot.Policy.RAGIntervalSeconds) * time.Second
 	ragVerificationDue := maintenanceRAGVerificationDue(namespaceID, ragStatus, coverageUpdatedAt, ragInterval, now)
@@ -2390,6 +2398,11 @@ func (m *MaintenanceManager) finishReconcileEntry(registrationID string, snapsho
 	entry.Frontiers = frontiers
 	entry.ActiveJobs = activeMaintenanceJobIDs(activeSync, activeRAG, activeRepositoryDocs)
 	entry.LastErrorClass, entry.LastError = maintenanceEntryError(entry.Policy, entry.SyncStage, entry.RAGStage)
+	entry.DetectedSchemaVersion = 0
+	entry.ExpectedSchemaVersion = 0
+	entry.DaemonBinaryVersion = ""
+	entry.DaemonBinaryCommit = ""
+	entry.QuiesceState = ""
 	entry.State = deriveMaintenanceEntryState(*entry)
 	if activeSync.ID != "" {
 		entry.State = "refreshing"
@@ -2531,6 +2544,13 @@ func activeMaintenanceJobIDs(jobs ...Job) []string {
 		}
 	}
 	return ids
+}
+
+func (m *MaintenanceManager) activeJobsForSnapshot(snapshot MaintenanceEntry) (Job, Job, Job) {
+	activeSync, _ := m.jobs.ActiveCacheRepo(SyncJobType, snapshot.CacheUUID, snapshot.RepoID)
+	activeRAG, _ := m.jobs.ActiveCacheRepo(RAGIndexJobType, snapshot.CacheUUID, snapshot.RepoID)
+	activeRepositoryDocs, _ := m.jobs.ActiveRepositoryDocsSource(snapshot.CacheUUID, snapshot.RepoID, snapshot.repositorySourceID, repositoryDocsSourceGeneration(snapshot))
+	return activeSync, activeRAG, activeRepositoryDocs
 }
 
 func nextMaintenanceSyncLane(entry MaintenanceEntry, frontiers []cache.MaintenanceFrontier, now time.Time) (string, int, int) {
@@ -2742,6 +2762,10 @@ func publicMaintenanceJobError(jobType, class string) string {
 }
 
 func (m *MaintenanceManager) updateEntryFailure(id, class string, _ error) MaintenanceEntry {
+	return m.updateEntryFailureWithJobs(id, class, nil)
+}
+
+func (m *MaintenanceManager) updateEntryFailureWithJobs(id, class string, _ error, jobs ...Job) MaintenanceEntry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entry := m.entries[id]
@@ -2751,6 +2775,29 @@ func (m *MaintenanceManager) updateEntryFailure(id, class string, _ error) Maint
 	entry.State = "degraded"
 	entry.LastErrorClass = class
 	entry.LastError = publicMaintenanceError(class)
+	entry.ActiveJobs = activeMaintenanceJobIDs(jobs...)
+	entry.LastReconciledAt = m.now()
+	entry.NextReconcileAt = entry.LastReconciledAt.Add(time.Minute)
+	_ = m.saveLocked()
+	return cloneMaintenanceEntry(entry)
+}
+
+func (m *MaintenanceManager) updateEntrySchemaBlocked(id string, compat cache.VersionCompatibility, jobs ...Job) MaintenanceEntry {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	entry := m.entries[id]
+	if entry == nil {
+		return MaintenanceEntry{}
+	}
+	entry.State = "cache_schema_blocked"
+	entry.LastErrorClass = "cache_schema_blocked"
+	entry.LastError = publicMaintenanceError("cache_schema_blocked")
+	entry.DetectedSchemaVersion = compat.DetectedVersion
+	entry.ExpectedSchemaVersion = compat.ExpectedVersion
+	entry.DaemonBinaryVersion = m.manager.Version
+	entry.DaemonBinaryCommit = m.manager.Commit
+	entry.QuiesceState = "required"
+	entry.ActiveJobs = activeMaintenanceJobIDs(jobs...)
 	entry.LastReconciledAt = m.now()
 	entry.NextReconcileAt = entry.LastReconciledAt.Add(time.Minute)
 	_ = m.saveLocked()
@@ -2910,6 +2957,8 @@ func publicMaintenanceError(class string) string {
 		return "managed cache configuration does not match its cache authority"
 	case "cache_unreadable":
 		return "managed cache is unavailable"
+	case "cache_schema_blocked":
+		return "managed cache schema requires a compatible service binary"
 	case "cache_replaced":
 		return "managed cache identity changed"
 	case "content_state_failed":

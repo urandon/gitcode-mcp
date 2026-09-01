@@ -365,6 +365,53 @@ func TestLaunchAgentStartHandlesAlreadyLoadedAndWaitsForHealth(t *testing.T) {
 	}
 }
 
+func TestQuiesceForCacheMigrationRefusesUnownedForegroundCoordinator(t *testing.T) {
+	manager := newTestManager(t, "darwin")
+	src := manager.Source.(testSource)
+	src.env = map[string]string{"GITCODE_MCP_SERVICE_NETWORK": "mem", "GITCODE_MCP_SERVICE_ADDRESS": "migration-foreground"}
+	manager.Source = src
+	paths, err := manager.ResolvePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePathDirs(paths); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := writeState(paths, State{PID: os.Getpid(), SocketPath: paths.SocketPath, StartedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = manager.QuiesceForCacheMigration(context.Background())
+	var coded RPCDomainError
+	if !errors.As(err, &coded) || coded.DiagnosticCode() != "cache_schema_coordination_required" {
+		t.Fatalf("quiesce error=%T %v", err, err)
+	}
+}
+
+func TestQuiesceForCacheMigrationUnloadsInstalledStoppedCoordinator(t *testing.T) {
+	manager := newTestManager(t, "darwin")
+	paths, err := manager.ResolvePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePathDirs(paths); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.InstallPath, []byte("installed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager.OutputRunner = func(context.Context, string, ...string) (string, error) {
+		return "", errors.New("not loaded")
+	}
+	status, err := manager.QuiesceForCacheMigration(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.PIDAlive || status.SocketPresent || status.Running || status.Message != "service is quiesced for cache migration" {
+		t.Fatalf("quiesced status=%+v", status)
+	}
+}
+
 func TestLaunchAgentStartReportsBoundedFailureState(t *testing.T) {
 	manager := newTestManager(t, "darwin")
 	manager.StartupTimeout = 10 * time.Millisecond
@@ -471,6 +518,9 @@ func TestStatusDistinguishesRuntimeStates(t *testing.T) {
 	}
 	if status.Status != StatusStaleSocket || !status.PIDAlive || status.SocketPresent || status.Running {
 		t.Fatalf("stale socket status = %#v", status)
+	}
+	if status.BinaryVersion != "" || status.BinaryCommit != "" || status.SchemaMin != 0 || status.SchemaMax != 0 {
+		t.Fatalf("legacy daemon state borrowed inspecting binary compatibility: %#v", status)
 	}
 
 	if err := os.WriteFile(paths.SocketPath, []byte("socket placeholder"), 0o600); err != nil {
