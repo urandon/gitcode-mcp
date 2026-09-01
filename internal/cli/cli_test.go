@@ -45,6 +45,145 @@ func TestHelpReturnsSuccess(t *testing.T) {
 	}
 }
 
+type fakeCacheMigrationService struct {
+	status     servicectl.Status
+	calls      []string
+	quiesceErr error
+}
+
+func (f *fakeCacheMigrationService) Status() (servicectl.Status, error) {
+	f.calls = append(f.calls, "status")
+	return f.status, nil
+}
+
+func (f *fakeCacheMigrationService) QuiesceForCacheMigration(context.Context) (servicectl.Status, error) {
+	f.calls = append(f.calls, "quiesce")
+	if f.quiesceErr != nil {
+		return f.status, f.quiesceErr
+	}
+	f.status.Running = false
+	f.status.PIDAlive = false
+	return f.status, nil
+}
+
+func TestMigrateCacheDoesNotMutateWhenDaemonQuiesceFails(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE schema_version SET version = 18`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	src := &repoInitLocalSource{env: map[string]string{}, cwd: dir, homeDir: dir, configDir: filepath.Join(dir, "config"), cacheDir: filepath.Join(dir, "cache")}
+	coordinator := &fakeCacheMigrationService{status: servicectl.Status{Installed: true, Running: true, PIDAlive: true}, quiesceErr: servicectl.RPCDomainError{Code: "cache_schema_quiesce_failed", Message: "still running"}}
+	var stdout, stderr bytes.Buffer
+	code := executeWithFactoryAndDepsContext(ctx, []string{"migrate-cache", "--confirm", "--cache-path", cachePath, "--format", "json"}, &stdout, &stderr, nil, localCommandDeps{Source: src, MigrationService: coordinator})
+	if code == 0 || strings.Join(coordinator.calls, ",") != "status,quiesce" {
+		t.Fatalf("code=%d calls=%v stdout=%q stderr=%q", code, coordinator.calls, stdout.String(), stderr.String())
+	}
+	check, err := sql.Open("sqlite", cachePath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	if err := check.QueryRow(`SELECT version FROM schema_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	_ = check.Close()
+	if version != 18 {
+		t.Fatalf("schema mutated after failed quiesce: %d", version)
+	}
+	if backups, _ := filepath.Glob(cachePath + ".backup-*"); len(backups) != 0 {
+		t.Fatalf("backup/mutation phase started after failed quiesce: %v", backups)
+	}
+}
+
+func (f *fakeCacheMigrationService) Install(overwrite bool) (servicectl.Status, error) {
+	f.calls = append(f.calls, fmt.Sprintf("install:%t", overwrite))
+	return f.status, nil
+}
+
+func (f *fakeCacheMigrationService) Start(context.Context) (servicectl.Status, error) {
+	f.calls = append(f.calls, "start")
+	f.status.Running = true
+	return f.status, nil
+}
+
+func TestMigrateCacheCoordinatesDaemonAndReportsVerifiedRecovery(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE schema_version SET version = 18`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 18`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	src := &repoInitLocalSource{env: map[string]string{}, cwd: dir, homeDir: dir, configDir: filepath.Join(dir, "config"), cacheDir: filepath.Join(dir, "cache")}
+	coordinator := &fakeCacheMigrationService{status: servicectl.Status{
+		Installed: true, Running: true, PIDAlive: true, BinaryVersion: "0.3.0", BinaryCommit: "old-commit", SchemaMin: 18, SchemaMax: 18,
+	}}
+	var stdout, stderr bytes.Buffer
+	code := executeWithFactoryAndDepsContext(ctx, []string{"migrate-cache", "--confirm", "--cache-path", cachePath, "--format", "json"}, &stdout, &stderr, nil, localCommandDeps{Source: src, MigrationService: coordinator})
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q stdout=%q calls=%v", code, stderr.String(), stdout.String(), coordinator.calls)
+	}
+	if got, want := strings.Join(coordinator.calls, ","), "status,quiesce,install:true,start"; got != want {
+		t.Fatalf("coordination order=%q want=%q", got, want)
+	}
+	var result migrateCacheResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "migrated" || !result.BackupVerified || !result.IdentityPreserved || !result.ServiceQuiesced || !result.ServiceRestarted || result.RecoveryState != "healthy" {
+		t.Fatalf("migration result=%+v", result)
+	}
+	reopened, err := cache.NewSQLiteReadOnlyStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveredIdentity, err := reopened.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = reopened.Close()
+	if recoveredIdentity.UUID != identity.UUID {
+		t.Fatalf("cache identity changed: before=%q after=%q", identity.UUID, recoveredIdentity.UUID)
+	}
+}
+
 func TestRenderMaintenanceListTextExposesCanonicalIdentityEvidence(t *testing.T) {
 	var output bytes.Buffer
 	renderMaintenanceListText(&output, servicectl.MaintenanceListResult{

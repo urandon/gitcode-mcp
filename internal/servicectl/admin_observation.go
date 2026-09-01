@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -38,7 +39,7 @@ func (m *MaintenanceManager) adminEntries() []adminMaintenanceEntry {
 func (m Manager) adminObservation(ctx context.Context, jobs *JobManager, maintenance *MaintenanceManager, startedAt time.Time) (adminhttp.ObservationSnapshot, error) {
 	now := time.Now().UTC()
 	snapshot := adminhttp.ObservationSnapshot{Service: adminhttp.ServiceObservation{
-		Version: m.Version, Protocol: "admin.v1", Running: true, StartedAt: adminTimePointer(startedAt), AdminSecure: true,
+		Version: m.Version, Commit: m.Commit, SchemaMin: cache.CurrentSchemaVersion(), SchemaMax: cache.CurrentSchemaVersion(), Protocol: "admin.v1", Running: true, StartedAt: adminTimePointer(startedAt), AdminSecure: true,
 	}}
 	if status, err := m.Status(); err == nil {
 		snapshot.Service.Installed = status.Installed
@@ -67,7 +68,7 @@ func (m Manager) adminObservation(ctx context.Context, jobs *JobManager, mainten
 	}
 	cacheGroups := groupAdminCaches(m.AdminCachePath, entries)
 	for _, group := range cacheGroups {
-		cacheView, diagnostics := buildAdminCache(ctx, group, entries, jobList, vectorByteCeiling)
+		cacheView, diagnostics := buildAdminCache(ctx, group, entries, jobList, vectorByteCeiling, m.Version, m.Commit)
 		snapshot.Caches = append(snapshot.Caches, cacheView)
 		snapshot.Diagnostics = append(snapshot.Diagnostics, diagnostics...)
 	}
@@ -137,14 +138,27 @@ func canonicalAdminCachePath(path string) string {
 	return path
 }
 
-func buildAdminCache(ctx context.Context, group adminCacheGroup, entries []adminMaintenanceEntry, jobs []Job, vectorByteCeiling int64) (adminhttp.CacheObservation, []adminhttp.DiagnosticObservation) {
+func buildAdminCache(ctx context.Context, group adminCacheGroup, entries []adminMaintenanceEntry, jobs []Job, vectorByteCeiling int64, binaryVersion, binaryCommit string) (adminhttp.CacheObservation, []adminhttp.DiagnosticObservation) {
 	view := adminhttp.CacheObservation{
 		CacheRef: publicCacheRef(group.uuid, group.path), PathFingerprint: group.fingerprint,
-		StorageMode: "managed", Readiness: "unavailable",
+		StorageMode: "managed", Readiness: "unavailable", ExpectedSchemaVersion: cache.CurrentSchemaVersion(),
+		CompatibleBinaryVersion: binaryVersion, CompatibleBinaryCommit: binaryCommit,
 	}
 	var diagnostics []adminhttp.DiagnosticObservation
 	store, err := cache.NewSQLiteReadOnlyStore(ctx, group.path)
 	if err != nil {
+		var schemaErr *cache.SchemaVersionError
+		if errors.As(err, &schemaErr) {
+			view.Readiness = "cache_schema_blocked"
+			view.SchemaVersion = schemaErr.Compat.DetectedVersion
+			view.ExpectedSchemaVersion = schemaErr.Compat.ExpectedVersion
+			view.QuiesceState = "required"
+			return view, []adminhttp.DiagnosticObservation{{
+				ID: "cache-schema-" + view.CacheRef, Severity: "error", EntityType: "cache", EntityID: view.CacheRef,
+				FailureClass: "cache_schema_blocked", Message: "The managed cache schema requires a compatible service binary before writers can resume.", Current: true,
+				ObservedAt: adminTimePointer(time.Now().UTC()), Remediation: "Quiesce the service and run the confirmed cache migration workflow.",
+			}}
+		}
 		return view, []adminhttp.DiagnosticObservation{{
 			ID: "cache-unreadable-" + view.CacheRef, Severity: "error", EntityType: "cache", EntityID: view.CacheRef,
 			FailureClass: "cache_unreadable", Message: "The managed cache cannot be opened read-only.", Current: true,

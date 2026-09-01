@@ -63,6 +63,57 @@ func TestAdminObservationReadsCacheWithoutExposingItsPath(t *testing.T) {
 	}
 }
 
+func TestAdminObservationPublishesSchemaBlockAsStructuredPublicState(t *testing.T) {
+	root, err := shortWorkspaceTemp(t, "admin-schema-blocked-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(root, "private", "cache.db")
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	setMaintenanceTestSchemaVersion(t, cachePath, cache.CurrentSchemaVersion()+1)
+
+	manager := newTestManager(t, "darwin")
+	manager.Version = "0.3.0"
+	manager.Commit = "compatible-commit"
+	manager.AdminCachePath = cachePath
+	jobs := NewJobManager("")
+	maintenance := NewMaintenanceManager(manager, jobs, filepath.Join(root, "registry.json"))
+	snapshot, err := manager.adminObservation(ctx, jobs, maintenance, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Service.Commit != manager.Commit || snapshot.Service.SchemaMin != cache.CurrentSchemaVersion() || snapshot.Service.SchemaMax != cache.CurrentSchemaVersion() {
+		t.Fatalf("service compatibility contract=%+v", snapshot.Service)
+	}
+	if len(snapshot.Caches) != 1 {
+		t.Fatalf("cache observations=%+v", snapshot.Caches)
+	}
+	view := snapshot.Caches[0]
+	if view.Readiness != "cache_schema_blocked" || view.SchemaVersion != cache.CurrentSchemaVersion()+1 || view.ExpectedSchemaVersion != cache.CurrentSchemaVersion() || view.CompatibleBinaryVersion != manager.Version || view.CompatibleBinaryCommit != manager.Commit || view.QuiesceState != "required" {
+		t.Fatalf("schema-blocked cache contract=%+v", view)
+	}
+	if len(snapshot.Diagnostics) != 1 || snapshot.Diagnostics[0].FailureClass != "cache_schema_blocked" {
+		t.Fatalf("schema-blocked diagnostics=%+v", snapshot.Diagnostics)
+	}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), root) || strings.Contains(string(data), "cache.db") {
+		t.Fatalf("absolute cache path leaked: %s", data)
+	}
+}
+
 func TestAdminObservationKeepsCurrentRAGSeparateFromLastErrorAndRetry(t *testing.T) {
 	now := time.Now().UTC()
 	entry := MaintenanceEntry{

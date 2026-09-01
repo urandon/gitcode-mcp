@@ -59,6 +59,9 @@ type JobStatusCount struct {
 
 type ServiceObservation struct {
 	Version     string     `json:"version"`
+	Commit      string     `json:"commit,omitempty"`
+	SchemaMin   int        `json:"schema_min,omitempty"`
+	SchemaMax   int        `json:"schema_max,omitempty"`
 	Protocol    string     `json:"protocol"`
 	Running     bool       `json:"running"`
 	Installed   bool       `json:"installed"`
@@ -78,17 +81,21 @@ type AttentionItem struct {
 }
 
 type CacheObservation struct {
-	CacheRef        string                  `json:"cache_ref"`
-	PathFingerprint string                  `json:"path_fingerprint,omitempty"`
-	StorageMode     string                  `json:"storage_mode,omitempty"`
-	Readiness       string                  `json:"readiness"`
-	SchemaVersion   int                     `json:"schema_version,omitempty"`
-	WALCapable      bool                    `json:"wal_capable"`
-	JournalMode     string                  `json:"journal_mode,omitempty"`
-	RecordCount     int                     `json:"record_count"`
-	ChunkCount      int                     `json:"chunk_count"`
-	RepositoryCount int                     `json:"repository_count"`
-	Repositories    []RepositoryObservation `json:"repositories"`
+	CacheRef                string                  `json:"cache_ref"`
+	PathFingerprint         string                  `json:"path_fingerprint,omitempty"`
+	StorageMode             string                  `json:"storage_mode,omitempty"`
+	Readiness               string                  `json:"readiness"`
+	SchemaVersion           int                     `json:"schema_version,omitempty"`
+	ExpectedSchemaVersion   int                     `json:"expected_schema_version,omitempty"`
+	CompatibleBinaryVersion string                  `json:"compatible_binary_version,omitempty"`
+	CompatibleBinaryCommit  string                  `json:"compatible_binary_commit,omitempty"`
+	QuiesceState            string                  `json:"quiesce_state,omitempty"`
+	WALCapable              bool                    `json:"wal_capable"`
+	JournalMode             string                  `json:"journal_mode,omitempty"`
+	RecordCount             int                     `json:"record_count"`
+	ChunkCount              int                     `json:"chunk_count"`
+	RepositoryCount         int                     `json:"repository_count"`
+	Repositories            []RepositoryObservation `json:"repositories"`
 }
 
 type RepositoryObservation struct {

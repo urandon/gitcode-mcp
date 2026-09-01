@@ -215,6 +215,61 @@ func TestMigrateRepositoryDocsV18ToV19PreservesDerivedMetadata(t *testing.T) {
 	}
 }
 
+func TestMigrateFailureRollsBackWholeSchemaAndKeepsVerifiedBackup(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "cache-v18-broken.db")
+	store, err := NewSQLiteStore(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setSchemaVersion(t, ctx, db, 18)
+	if _, err := db.ExecContext(ctx, `DROP TABLE repo_doc_revision_sets`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := MigrateCacheWithConfirm(ctx, path, false, Confirmation{Confirmed: true}); err == nil {
+		t.Fatal("broken v18 migration unexpectedly succeeded")
+	}
+	check, err := sql.Open("sqlite", path+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err := schemaVersion(ctx, check)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recoveredUUID string
+	if err := check.QueryRowContext(ctx, `SELECT cache_uuid FROM cache_identity WHERE identity_key = 1`).Scan(&recoveredUUID); err != nil {
+		t.Fatal(err)
+	}
+	_ = check.Close()
+	if version != 18 || recoveredUUID != identity.UUID {
+		t.Fatalf("failed migration mutated source: version=%d uuid=%q want=%q", version, recoveredUUID, identity.UUID)
+	}
+	backups, err := filepath.Glob(path + ".backup-*")
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("verified backup files=%v err=%v", backups, err)
+	}
+	backupVersion, backupUUID, err := verifyCacheBackup(ctx, backups[0])
+	if err != nil || backupVersion != 18 || backupUUID != identity.UUID {
+		t.Fatalf("backup verification version=%d uuid=%q err=%v", backupVersion, backupUUID, err)
+	}
+}
+
 func TestMigrateFromVersion2ToVersion4(t *testing.T) {
 	ctx := context.Background()
 	path := createFullVersion2Cache(t)

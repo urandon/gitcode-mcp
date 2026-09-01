@@ -10,12 +10,14 @@ import (
 	"testing"
 	"time"
 
+	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/service"
 )
 
 func TestRPCServiceStatusAndFakeJobLifecycle(t *testing.T) {
 	manager := newTestManager(t, "darwin")
+	manager.Commit = "test-commit"
 	src := manager.Source.(testSource)
 	src.env = map[string]string{"GITCODE_MCP_SERVICE_NETWORK": "mem", "GITCODE_MCP_SERVICE_ADDRESS": "test-ipc-lifecycle"}
 	manager.Source = src
@@ -33,6 +35,16 @@ func TestRPCServiceStatusAndFakeJobLifecycle(t *testing.T) {
 	}
 	if status.Status != StatusRunning || !status.Running || !status.SocketPresent {
 		t.Fatalf("service status = %#v", status)
+	}
+	if status.BinaryVersion != manager.Version || status.BinaryCommit != manager.Commit || status.SchemaMin != cache.CurrentSchemaVersion() || status.SchemaMax != cache.CurrentSchemaVersion() {
+		t.Fatalf("service status compatibility contract = %#v", status)
+	}
+	var health ServiceHealth
+	if err := client.Call(context.Background(), "Service.Health", nil, &health); err != nil {
+		t.Fatal(err)
+	}
+	if !health.Healthy || health.BinaryVersion != manager.Version || health.BinaryCommit != manager.Commit || health.SchemaMin != cache.CurrentSchemaVersion() || health.SchemaMax != cache.CurrentSchemaVersion() {
+		t.Fatalf("service health compatibility contract = %#v", health)
 	}
 	var capabilities MaintenanceCapabilities
 	if err := client.Call(context.Background(), "Maintenance.Capabilities", nil, &capabilities); err != nil {

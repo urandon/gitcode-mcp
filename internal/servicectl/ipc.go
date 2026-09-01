@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/adminhttp"
+	"gitcode-mcp/internal/cache"
 )
 
 const jsonrpcVersion = "2.0"
@@ -49,10 +50,14 @@ type JobListResult struct {
 }
 
 type ServiceHealth struct {
-	Status    string    `json:"status"`
-	Healthy   bool      `json:"healthy"`
-	CheckedAt time.Time `json:"checked_at"`
-	Message   string    `json:"message,omitempty"`
+	Status        string    `json:"status"`
+	Healthy       bool      `json:"healthy"`
+	CheckedAt     time.Time `json:"checked_at"`
+	Message       string    `json:"message,omitempty"`
+	BinaryVersion string    `json:"binary_version,omitempty"`
+	BinaryCommit  string    `json:"binary_commit,omitempty"`
+	SchemaMin     int       `json:"schema_min"`
+	SchemaMax     int       `json:"schema_max"`
 }
 
 type RPCServer struct {
@@ -348,7 +353,7 @@ func (s RPCServer) health(ctx context.Context) (ServiceHealth, error) {
 	if err != nil {
 		return ServiceHealth{}, err
 	}
-	health := ServiceHealth{Status: status.Status, Healthy: status.Status == StatusRunning, CheckedAt: time.Now().UTC()}
+	health := ServiceHealth{Status: status.Status, Healthy: status.Status == StatusRunning, CheckedAt: time.Now().UTC(), BinaryVersion: s.Manager.Version, BinaryCommit: s.Manager.Commit, SchemaMin: cache.CurrentSchemaVersion(), SchemaMax: cache.CurrentSchemaVersion()}
 	if !health.Healthy {
 		health.Message = status.Message
 	}

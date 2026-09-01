@@ -56,6 +56,9 @@ type State struct {
 	StartedAt  time.Time `json:"started_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 	Version    string    `json:"version,omitempty"`
+	Commit     string    `json:"commit,omitempty"`
+	SchemaMin  int       `json:"schema_min,omitempty"`
+	SchemaMax  int       `json:"schema_max,omitempty"`
 }
 
 type Status struct {
@@ -74,12 +77,17 @@ type Status struct {
 	RAG           *rag.SetupResult `json:"rag,omitempty"`
 	UpdatedAt     *time.Time       `json:"updated_at,omitempty"`
 	Message       string           `json:"message,omitempty"`
+	BinaryVersion string           `json:"binary_version,omitempty"`
+	BinaryCommit  string           `json:"binary_commit,omitempty"`
+	SchemaMin     int              `json:"schema_min,omitempty"`
+	SchemaMax     int              `json:"schema_max,omitempty"`
 }
 
 type Manager struct {
 	Source                config.Source
 	BinaryPath            string
 	Version               string
+	Commit                string
 	RuntimeDir            string
 	AdminBind             string
 	AdminAutoStart        bool
@@ -231,10 +239,21 @@ func (m Manager) Status() (Status, error) {
 		StatePath:     paths.StatePath,
 		InstallPath:   paths.InstallPath,
 		InstallKind:   paths.InstallKind,
+		BinaryVersion: m.Version,
+		BinaryCommit:  m.Commit,
+		SchemaMin:     cache.CurrentSchemaVersion(),
+		SchemaMax:     cache.CurrentSchemaVersion(),
 	}
 	if stateOK {
 		status.PID = state.PID
 		status.UpdatedAt = &state.UpdatedAt
+		// Once a daemon state file exists it is the authority. Zero-valued
+		// compatibility fields mean an older daemon did not publish that
+		// contract; substituting the inspecting CLI's range would be unsafe.
+		status.BinaryVersion = state.Version
+		status.BinaryCommit = state.Commit
+		status.SchemaMin = state.SchemaMin
+		status.SchemaMax = state.SchemaMax
 	}
 	switch {
 	case pidAlive && socketPresent:
@@ -351,6 +370,65 @@ func (m Manager) Stop(ctx context.Context) (Status, error) {
 	return status, nil
 }
 
+// QuiesceForCacheMigration unloads the installed coordinator and waits until
+// both its process and control socket are gone. A foreground coordinator that
+// is not owned by the installed service is refused: the migrator cannot prove
+// that it controls that writer lifecycle.
+func (m Manager) QuiesceForCacheMigration(ctx context.Context) (Status, error) {
+	status, err := m.Status()
+	if err != nil {
+		return Status{}, err
+	}
+	if !status.Installed {
+		if status.Running || status.PIDAlive {
+			return status, RPCDomainError{Code: "cache_schema_coordination_required", Message: "cache migration requires the running coordinator to be installed so it can be quiesced safely"}
+		}
+		status.Message = "no installed coordinator requires quiescing"
+		return status, nil
+	}
+	paths, err := m.ResolvePaths()
+	if err != nil {
+		return Status{}, err
+	}
+	if err := m.unloadForRepair(ctx, paths); err != nil {
+		return status, RPCDomainError{Code: "cache_schema_quiesce_failed", Message: "cache migration could not quiesce the installed coordinator: " + err.Error()}
+	}
+	return m.waitForStopped(ctx, paths)
+}
+
+func (m Manager) waitForStopped(ctx context.Context, paths Paths) (Status, error) {
+	timeout := m.StartupTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	interval := m.StartupInterval
+	if interval <= 0 {
+		interval = 100 * time.Millisecond
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		status, err := m.Status()
+		if err != nil {
+			return Status{}, err
+		}
+		if !status.PIDAlive && (paths.Network != "unix" || !status.SocketPresent) {
+			status.Running = false
+			status.Message = "service is quiesced for cache migration"
+			return status, nil
+		}
+		select {
+		case <-ctx.Done():
+			return status, ctx.Err()
+		case <-timer.C:
+			return status, RPCDomainError{Code: "cache_schema_quiesce_timeout", Message: fmt.Sprintf("coordinator did not quiesce within %s", timeout)}
+		case <-ticker.C:
+		}
+	}
+}
+
 func (m Manager) Run(ctx context.Context) error {
 	paths, err := m.ResolvePaths()
 	if err != nil {
@@ -365,7 +443,7 @@ func (m Manager) Run(ctx context.Context) error {
 		_ = os.Remove(paths.SocketPath)
 	}
 	now := time.Now().UTC()
-	state := State{PID: os.Getpid(), SocketPath: paths.SocketPath, StartedAt: now, UpdatedAt: now, Version: m.Version}
+	state := State{PID: os.Getpid(), SocketPath: paths.SocketPath, StartedAt: now, UpdatedAt: now, Version: m.Version, Commit: m.Commit, SchemaMin: cache.CurrentSchemaVersion(), SchemaMax: cache.CurrentSchemaVersion()}
 	if err := writeState(paths, state); err != nil {
 		return err
 	}
