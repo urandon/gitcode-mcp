@@ -155,9 +155,12 @@ func TestDurablePullAndWikiBatchesCommitWithoutProviderReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchPullSyncBatch: %v", err)
 	}
-	wiki, err := svc.FetchWikiSyncBatch(ctx, BulkSyncRequest{RepoID: "durable-mixed", PerPage: 100, Bounds: &SyncBounds{MaxPages: 1}})
+	wiki, err := svc.FetchWikiSyncBatch(ctx, BulkSyncRequest{RepoID: "durable-mixed", PerPage: 17, Bounds: &SyncBounds{MaxPages: 1, MaxRecords: 10_000, MaxBytes: 1234}})
 	if err != nil {
 		t.Fatalf("FetchWikiSyncBatch: %v", err)
+	}
+	if got := client.lastListWikiRequest.Bounds; got == nil || got.MaxRecords != 17 || got.MaxBytes != 1234 {
+		t.Fatalf("wiki provider bounds=%+v", got)
 	}
 	if wiki.ProviderRevision == "" {
 		t.Fatal("FetchWikiSyncBatch omitted provider revision")

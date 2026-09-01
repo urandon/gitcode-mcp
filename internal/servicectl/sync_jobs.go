@@ -234,6 +234,11 @@ type durableCollectionWork struct {
 	commit     func(context.Context, SyncStageEnvelope) (*service.SyncResourcesResult, error)
 }
 
+const (
+	durableSyncPayloadMaxBytes  = defaultSyncStageMaxBytes - (512 << 10)
+	durableSyncResponseMaxBytes = (defaultSyncStageMaxBytes / 2) - (512 << 10)
+)
+
 func validateDurableFetchedPayload(payload []byte, records int) error {
 	if records < 0 || records > defaultSyncStageMaxRecords || int64(len(payload)) > defaultSyncStageMaxBytes {
 		return ErrSyncStageBound
@@ -547,7 +552,17 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 			collection := syncCollectionResult{RemoteType: work.remoteType, Err: turnErr}
 			return nil, collection, turnErr
 		}
-		if blockingOp, blockingRef, blocked := m.blockingExternalCacheWriter(jobID, stage.CacheUUID); blocked {
+		state := stage.State
+		state.Phase = SyncStageCommitting
+		reservedStage := stage
+		reservedStage.State = state
+		reservation, blockingOp, blockingRef, reserved, reserveErr := m.tryReserveSyncCommit(jobID, reservedStage, "staged batch commit reserved")
+		if reserveErr != nil {
+			releaseTurn()
+			collection := syncCollectionResult{RemoteType: work.remoteType, Err: reserveErr}
+			return nil, collection, reserveErr
+		}
+		if !reserved {
 			releaseTurn()
 			state, retry := nextSyncCommitRetry(stage.StageID, stage.State, time.Now().UTC())
 			state.BlockingOp, state.BlockingJobRef = blockingOp, blockingRef
@@ -568,10 +583,9 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 			}
 			continue
 		}
-		state := stage.State
-		state.Phase = SyncStageCommitting
 		stage, err = journal.UpdateState(stage.StageID, state)
 		if err != nil {
+			m.rollbackSyncCommitReservation(jobID, reservation)
 			releaseTurn()
 			collection := syncCollectionResult{RemoteType: work.remoteType, Err: err}
 			return nil, collection, err
@@ -948,7 +962,14 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 		if turnErr != nil {
 			return nil, stage, turnErr
 		}
-		if blockingOp, blockingRef, blocked := m.blockingExternalCacheWriter(stage.JobID, stage.CacheUUID); blocked {
+		reservedStage := stage
+		reservedStage.State = state
+		reservation, blockingOp, blockingRef, reserved, reserveErr := m.tryReserveSyncCommit(stage.JobID, reservedStage, "recovered staged batch commit reserved")
+		if reserveErr != nil {
+			releaseTurn()
+			return nil, stage, reserveErr
+		}
+		if !reserved {
 			releaseTurn()
 			state, retry := nextSyncCommitRetry(stage.StageID, stage.State, time.Now().UTC())
 			state.BlockingOp, state.BlockingJobRef = blockingOp, blockingRef
@@ -967,6 +988,7 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 		}
 		stage, err = journal.UpdateState(stage.StageID, state)
 		if err != nil {
+			m.rollbackSyncCommitReservation(stage.JobID, reservation)
 			releaseTurn()
 			return nil, stage, err
 		}
@@ -1040,25 +1062,76 @@ func (m *JobManager) blockingCacheWriterRef(currentJobID, cacheUUID string) stri
 	return ""
 }
 
-func (m *JobManager) blockingExternalCacheWriter(currentJobID, cacheUUID string) (operation, ref string, blocked bool) {
-	cacheUUID = strings.TrimSpace(cacheUUID)
-	if cacheUUID == "" {
-		return "", "", false
+type syncCommitReservation struct {
+	previous         *SyncStageView
+	previousProgress []service.ProgressEvent
+	stageRef         string
+}
+
+// tryReserveSyncCommit combines the external-writer comparison and public
+// committing transition under the JobManager lock. Writer admission therefore
+// observes either the pre-commit stage or the exclusive committing lease,
+// never the gap between two separate operations.
+func (m *JobManager) tryReserveSyncCommit(jobID string, stage SyncStageEnvelope, message string) (syncCommitReservation, string, string, bool, error) {
+	if stage.State.Phase != SyncStageCommitting {
+		return syncCommitReservation{}, "", "", false, fmt.Errorf("reserve sync commit: %w", ErrSyncStageCorrupt)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if writerID := m.directCacheWriters[cacheUUID]; writerID != "" && writerID != currentJobID {
-		return "direct_cache_write", writerID, true
+	if writerID := m.directCacheWriters[stage.CacheUUID]; writerID != "" && writerID != jobID {
+		return syncCommitReservation{}, "direct_cache_write", writerID, false, nil
 	}
-	for id, job := range m.jobs {
-		if id == currentJobID || job.CacheUUID != cacheUUID || job.Type == SyncJobType || !isCacheWriterJob(job.Type) {
+	for id, candidate := range m.jobs {
+		if id == jobID || candidate.CacheUUID != stage.CacheUUID || !isCacheWriterJob(candidate.Type) {
 			continue
 		}
-		if jobActiveStatus(job.Status) || m.inflightWorkers[id] {
-			return job.Type, job.ID, true
+		if candidate.Type == SyncJobType && (candidate.SyncStage == nil || candidate.SyncStage.Phase != SyncStageCommitting) {
+			continue
+		}
+		if jobActiveStatus(candidate.Status) || m.inflightWorkers[id] {
+			return syncCommitReservation{}, candidate.Type, candidate.ID, false, nil
 		}
 	}
-	return "", "", false
+	job := m.jobs[jobID]
+	if job == nil {
+		return syncCommitReservation{}, "", "", false, fmt.Errorf("reserve sync commit: job %s is unavailable", jobID)
+	}
+	reservation := syncCommitReservation{
+		previousProgress: append([]service.ProgressEvent(nil), job.Progress...),
+		stageRef:         publicStageRef(stage.StageID),
+	}
+	if job.SyncStage != nil {
+		previous := *job.SyncStage
+		reservation.previous = &previous
+	}
+	view := stage.PublicView()
+	job.SyncStage = &view
+	job.UpdatedAt = m.now()
+	job.Progress = append(job.Progress, service.ProgressEvent{
+		Type: "phase", Phase: string(view.Phase), Collection: stage.Collection,
+		RecordsListed: view.Staged, RecordsFetched: view.Fetched,
+		RetryAfter: formatOptionalTime(view.RetryAfter), Attempt: view.Attempt, Message: message,
+	})
+	trimJobProgress(job, m.retention.MaxProgressEvents)
+	if err := m.saveLocked(); err != nil {
+		job.SyncStage = reservation.previous
+		job.Progress = reservation.previousProgress
+		return syncCommitReservation{}, "", "", false, JobAdmissionPersistenceError{}
+	}
+	return reservation, "", "", true, nil
+}
+
+func (m *JobManager) rollbackSyncCommitReservation(jobID string, reservation syncCommitReservation) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job := m.jobs[jobID]
+	if job == nil || job.SyncStage == nil || job.SyncStage.Phase != SyncStageCommitting || job.SyncStage.StageRef != reservation.stageRef {
+		return
+	}
+	job.SyncStage = reservation.previous
+	job.Progress = reservation.previousProgress
+	job.UpdatedAt = m.now()
+	_ = m.saveLocked()
 }
 
 func waitForSyncRetry(ctx context.Context, retryAt time.Time) error {
@@ -1323,11 +1396,12 @@ func newSyncJobService(ctx context.Context, manager Manager, req StartSyncJobReq
 		}
 		token = secret.Value()
 	}
+	maxResponseSize := durableSyncResponseLimit(eff.Config.MaxResponseSize)
 	svc, err := service.NewWithMode(store, mode, token, service.ServiceConfig{
 		BaseURL:         eff.Config.GitCodeBaseURL,
 		LockPath:        eff.Config.LockPath,
 		Timeout:         eff.Config.DefaultTimeout,
-		MaxResponseSize: eff.Config.MaxResponseSize,
+		MaxResponseSize: maxResponseSize,
 		MaxRetries:      eff.Config.MaxRetries,
 		RateLimitRPS:    eff.Config.RateLimitRPS,
 		RateLimitBurst:  eff.Config.RateLimitBurst,
@@ -1337,6 +1411,13 @@ func newSyncJobService(ctx context.Context, manager Manager, req StartSyncJobReq
 		return nil, nil, err
 	}
 	return store, svc, nil
+}
+
+func durableSyncResponseLimit(configured int64) int64 {
+	if configured <= 0 || configured > durableSyncResponseMaxBytes {
+		return durableSyncResponseMaxBytes
+	}
+	return configured
 }
 
 func syncBulkRequest(req StartSyncJobRequest, progressCh chan<- service.ProgressEvent) service.BulkSyncRequest {
@@ -1353,7 +1434,7 @@ func syncBulkRequest(req StartSyncJobRequest, progressCh chan<- service.Progress
 	} else if maxRecords > defaultSyncStageMaxRecords {
 		maxRecords = defaultSyncStageMaxRecords
 	}
-	bulkReq := service.BulkSyncRequest{RepoID: req.RepoID, IdempotencyKey: strings.TrimSpace(req.IdempotencyKey), Page: req.Page, PerPage: req.PerPage, Bounds: &service.SyncBounds{MaxPages: maxPages, MaxRecords: maxRecords, MaxBytes: defaultSyncStageMaxBytes, ProgressChan: progressCh}, ProgressChan: progressCh, IncrementalQueue: strings.TrimSpace(req.Lane) != ""}
+	bulkReq := service.BulkSyncRequest{RepoID: req.RepoID, IdempotencyKey: strings.TrimSpace(req.IdempotencyKey), Page: req.Page, PerPage: req.PerPage, Bounds: &service.SyncBounds{MaxPages: maxPages, MaxRecords: maxRecords, MaxBytes: durableSyncPayloadMaxBytes, ProgressChan: progressCh}, ProgressChan: progressCh, IncrementalQueue: strings.TrimSpace(req.Lane) != ""}
 	if bulkReq.PerPage <= 0 {
 		bulkReq.PerPage = 100
 	} else if bulkReq.PerPage > 100 {

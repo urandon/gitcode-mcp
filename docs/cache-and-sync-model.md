@@ -81,8 +81,13 @@ a changed or missing target before opening it writable. An omitted daemon bound
 means one provider page (normally at most 100 list items) per durable stage,
 rather than an unbounded traversal. Caller bounds can tighten that chunk but
 cannot enlarge it past one provider page, 10,000 produced records, the provider
-response ceiling, or the 16 MiB stage envelope. Comment fan-out is checked as
-produced records and serialized bytes before it can accumulate across parents.
+response ceiling, or the 16 MiB stage envelope. The daemon lowers its individual
+HTTP response ceiling to 7.5 MiB and its normalized payload ceiling to 15.5 MiB,
+leaving explicit space for the staged JSON envelope. Wiki traversal applies the
+same record-page clamp and a cumulative serialized-page byte budget while it
+fetches bodies; a recursive tree cannot escape the durable batch boundary.
+Comment fan-out is checked as produced records and serialized bytes before it
+can accumulate across parents.
 Per-stage limits are enforced together with a 64 MiB/50,000-record/256-stage
 aggregate runtime budget. Committed stages leave capacity immediately;
 cancelled/rejected evidence continues consuming all aggregate quotas until its
@@ -99,7 +104,10 @@ Optional post-commit queue-summary reads cannot downgrade that committed state.
 Provider fetch admission is allowed while another cache writer is active, and a
 writer arriving during provider fetch is admitted because sync has not reserved
 the writer lane. Only the short commit phase joins the per-cache FIFO and
-bounded contention backoff.
+bounded contention backoff. The external-writer comparison and transition to
+the public `committing` lease happen under one job-manager lock, so a direct,
+RAG, or repository-document writer cannot enter between the check and commit
+reservation. Recovery uses the same atomic admission path.
 
 Service job state is stored separately from the cache in the mode-`0600` service runtime `jobs.json` snapshot. It is operational state, not cache content. Active jobs (`queued`, `running`, and the short durable `cancelling` transition) have no TTL and remain visible as active work in the Admin UI. By default, succeeded/superseded jobs expire after 48 hours; failed/interrupted/cancelled jobs expire after 14 days. The latest significant failure per maintenance registration or work stream survives its ordinary TTL inside a separately bounded diagnostic cohort. A final 128-terminal-job cap and 256-progress-event cap keep the snapshot bounded. Pruning runs on load, job updates/completion, and idle maintenance reconciliation. It never deletes cached GitCode records, sync frontiers, maintenance policy, RAG indexes, or audit receipts.
 

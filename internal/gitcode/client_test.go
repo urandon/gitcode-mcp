@@ -3476,6 +3476,45 @@ func TestBoundedWikiTreeTraversalMaxRecords(t *testing.T) {
 	}
 }
 
+func TestBoundedWikiTreeTraversalMaxBytes(t *testing.T) {
+	bodyFetches := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents":
+			fmt.Fprint(w, `[{"path":"A.md","type":"file","sha":"rev-a"},{"path":"B.md","type":"file","sha":"rev-b"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/A.md", "/api/v5/repos/example-owner/example-repo.wiki/contents/B.md":
+			path := strings.TrimPrefix(r.URL.Path, "/api/v5/repos/example-owner/example-repo.wiki/contents/")
+			fmt.Fprintf(w, `{"path":%q,"type":"file","sha":"rev"}`, path)
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/A.md", "/api/v5/repos/example-owner/example-repo.wiki/raw/B.md":
+			bodyFetches++
+			fmt.Fprint(w, "# document body")
+		default:
+			t.Fatalf("unexpected wiki path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+
+	_, err := client.ListWikiPages(context.Background(), WikiListRequest{
+		Owner: "example-owner",
+		Repo:  "example-repo",
+		Bounds: &WikiBounds{
+			MaxRecords: 2,
+			MaxBytes:   1,
+		},
+	})
+	var tooLarge ErrPayloadTooLarge
+	if !errors.As(err, &tooLarge) {
+		t.Fatalf("expected ErrPayloadTooLarge, got %T %v", err, err)
+	}
+	if tooLarge.Source != "durable_batch_limit" || tooLarge.Limit != 1 || tooLarge.Size <= tooLarge.Limit {
+		t.Fatalf("payload error=%+v", tooLarge)
+	}
+	if bodyFetches != 1 {
+		t.Fatalf("wiki body fetches=%d want=1", bodyFetches)
+	}
+}
+
 func TestBoundedWikiTreeTraversalResumesWithoutRefetchingSkippedBodies(t *testing.T) {
 	fetchedBodies := map[string]int{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

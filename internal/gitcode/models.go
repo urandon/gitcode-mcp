@@ -135,6 +135,7 @@ type WikiListRequest struct {
 
 type WikiBounds struct {
 	MaxRecords   int
+	MaxBytes     int64
 	ProgressChan chan<- WikiProgressEvent
 }
 

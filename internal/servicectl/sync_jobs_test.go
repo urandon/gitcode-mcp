@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -593,16 +594,92 @@ func TestSyncStageTargetRejectsReplacementSchemaBindingAndRegistration(t *testin
 
 func TestDurableSyncDefaultsBoundProviderBatchBeforeStaging(t *testing.T) {
 	bounded := syncBulkRequest(StartSyncJobRequest{RepoID: "owner/repo"}, nil)
-	if bounded.Bounds == nil || bounded.Bounds.MaxPages != 1 || bounded.Bounds.MaxRecords != defaultSyncStageMaxRecords || bounded.Bounds.MaxBytes != defaultSyncStageMaxBytes || bounded.PerPage != 100 {
+	if bounded.Bounds == nil || bounded.Bounds.MaxPages != 1 || bounded.Bounds.MaxRecords != defaultSyncStageMaxRecords || bounded.Bounds.MaxBytes != durableSyncPayloadMaxBytes || bounded.PerPage != 100 {
 		t.Fatalf("implicit durable bounds=%+v per_page=%d", bounded.Bounds, bounded.PerPage)
 	}
 	explicit := syncBulkRequest(StartSyncJobRequest{RepoID: "owner/repo", MaxPages: 3, MaxRecords: 41, PerPage: 17}, nil)
-	if explicit.Bounds.MaxPages != 1 || explicit.Bounds.MaxRecords != 41 || explicit.Bounds.MaxBytes != defaultSyncStageMaxBytes || explicit.PerPage != 17 {
+	if explicit.Bounds.MaxPages != 1 || explicit.Bounds.MaxRecords != 41 || explicit.Bounds.MaxBytes != durableSyncPayloadMaxBytes || explicit.PerPage != 17 {
 		t.Fatalf("explicit durable bounds escaped stage clamp: %+v per_page=%d", explicit.Bounds, explicit.PerPage)
 	}
 	oversized := syncBulkRequest(StartSyncJobRequest{RepoID: "owner/repo", MaxPages: 500, MaxRecords: 50_000, PerPage: 1_000}, nil)
 	if oversized.Bounds.MaxPages != 1 || oversized.Bounds.MaxRecords != defaultSyncStageMaxRecords || oversized.PerPage != 100 {
 		t.Fatalf("oversized durable bounds escaped hard ceiling: %+v per_page=%d", oversized.Bounds, oversized.PerPage)
+	}
+}
+
+func TestDurableSyncResponseLimitIsAlwaysInsideStageEnvelope(t *testing.T) {
+	for _, configured := range []int64{0, -1, durableSyncResponseMaxBytes + 1, defaultSyncStageMaxBytes} {
+		if got := durableSyncResponseLimit(configured); got != durableSyncResponseMaxBytes {
+			t.Fatalf("configured=%d limit=%d want=%d", configured, got, durableSyncResponseMaxBytes)
+		}
+	}
+	const smaller = int64(1 << 20)
+	if got := durableSyncResponseLimit(smaller); got != smaller {
+		t.Fatalf("smaller configured limit=%d want=%d", got, smaller)
+	}
+	if durableSyncResponseMaxBytes >= durableSyncPayloadMaxBytes || durableSyncPayloadMaxBytes >= defaultSyncStageMaxBytes {
+		t.Fatalf("invalid byte ceilings response=%d payload=%d stage=%d", durableSyncResponseMaxBytes, durableSyncPayloadMaxBytes, defaultSyncStageMaxBytes)
+	}
+}
+
+func TestSyncCommitReservationIsAtomicWithDirectWriterAdmission(t *testing.T) {
+	type commitResult struct {
+		reservation syncCommitReservation
+		blockedOp   string
+		blockedRef  string
+		reserved    bool
+		err         error
+	}
+	type directResult struct {
+		release func()
+		err     error
+	}
+	for iteration := 0; iteration < 100; iteration++ {
+		jobs := NewJobManager("")
+		job, created, err := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 0, fmt.Sprintf("sync-%d", iteration), "cache-shared", "reg-1", "", func() {})
+		if err != nil || !created {
+			t.Fatalf("iteration %d: create job=%+v created=%t err=%v", iteration, job, created, err)
+		}
+		stage := testSyncStageEnvelope()
+		stage.JobID = job.ID
+		stage.CacheUUID = "cache-shared"
+		stage.StageID = fmt.Sprintf("stage-%d", iteration)
+		stage.State.Phase = SyncStageCommitting
+
+		start := make(chan struct{})
+		commitDone := make(chan commitResult, 1)
+		directDone := make(chan directResult, 1)
+		go func() {
+			<-start
+			reservation, op, ref, reserved, err := jobs.tryReserveSyncCommit(job.ID, stage, "test reservation")
+			commitDone <- commitResult{reservation: reservation, blockedOp: op, blockedRef: ref, reserved: reserved, err: err}
+		}()
+		go func() {
+			<-start
+			release, err := jobs.BeginDirectCacheWriter("cache-shared", fmt.Sprintf("direct-%d", iteration))
+			directDone <- directResult{release: release, err: err}
+		}()
+		close(start)
+		commit, direct := <-commitDone, <-directDone
+		if commit.err != nil {
+			t.Fatalf("iteration %d: reserve error: %v", iteration, commit.err)
+		}
+		directReserved := direct.err == nil
+		if commit.reserved == directReserved {
+			t.Fatalf("iteration %d: exclusive admission violated: commit=%t direct=%t commit_blocker=%s/%s direct_err=%v", iteration, commit.reserved, directReserved, commit.blockedOp, commit.blockedRef, direct.err)
+		}
+		if commit.reserved {
+			var busy ErrCacheWriterBusy
+			if !errors.As(direct.err, &busy) || busy.ActiveJobID != job.ID {
+				t.Fatalf("iteration %d: direct admission blocker=%T %v", iteration, direct.err, direct.err)
+			}
+			jobs.rollbackSyncCommitReservation(job.ID, commit.reservation)
+		} else {
+			if commit.blockedOp != "direct_cache_write" || commit.blockedRef == "" {
+				t.Fatalf("iteration %d: commit blocker=%s/%s", iteration, commit.blockedOp, commit.blockedRef)
+			}
+			direct.release()
+		}
 	}
 }
 

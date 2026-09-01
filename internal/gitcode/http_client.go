@@ -400,6 +400,7 @@ func (c *HTTPClient) ListWikiPages(ctx context.Context, req WikiListRequest) (Pa
 			walker.skipRecords = (pageNumber - 1) * perPage
 		}
 		walker.maxRecords = req.Bounds.MaxRecords
+		walker.maxBytes = req.Bounds.MaxBytes
 		walker.progressChan = req.Bounds.ProgressChan
 	}
 	items, err := walker.walk(ctx, "", 0)
@@ -1032,6 +1033,8 @@ type wikiTraversal struct {
 	seenFiles    map[string]bool
 	skipRecords  int
 	maxRecords   int
+	maxBytes     int64
+	bytesFetched int64
 	hasMore      bool
 	progressChan chan<- WikiProgressEvent
 }
@@ -1078,6 +1081,17 @@ func (w *wikiTraversal) walk(ctx context.Context, dir string, depth int) ([]Wiki
 			page, err := w.client.getWikiPageByPath(ctx, w.owner, w.repo, current.entryPath)
 			if err != nil {
 				return out, err
+			}
+			if w.maxBytes > 0 {
+				encoded, encodeErr := json.Marshal(page)
+				if encodeErr != nil {
+					return out, encodeErr
+				}
+				projected := w.bytesFetched + int64(len(encoded))
+				if projected > w.maxBytes {
+					return out, ErrPayloadTooLarge{Endpoint: wikiContentsRootEndpoint(w.owner, w.repo), Limit: w.maxBytes, Size: projected, Source: "durable_batch_limit"}
+				}
+				w.bytesFetched = projected
 			}
 			out = append(out, page)
 			continue

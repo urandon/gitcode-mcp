@@ -513,17 +513,26 @@ func (s *Service) FetchWikiSyncBatch(ctx context.Context, req BulkSyncRequest) (
 		return DurableWikiSyncBatch{}, err
 	}
 	maxRecords := 0
+	maxBytes := int64(0)
 	if req.Bounds != nil {
 		maxRecords = req.Bounds.MaxRecords
-		if maxRecords <= 0 && req.Bounds.MaxPages > 0 {
+		maxBytes = req.Bounds.MaxBytes
+		if req.Bounds.MaxPages > 0 {
 			perPage := req.PerPage
 			if perPage < 1 {
 				perPage = 100
 			}
-			maxRecords = req.Bounds.MaxPages * perPage
+			maxInt := int(^uint(0) >> 1)
+			pageBound := maxInt
+			if req.Bounds.MaxPages <= maxInt/perPage {
+				pageBound = req.Bounds.MaxPages * perPage
+			}
+			if maxRecords <= 0 || maxRecords > pageBound {
+				maxRecords = pageBound
+			}
 		}
 	}
-	wikiBounds := &gitcode.WikiBounds{MaxRecords: maxRecords}
+	wikiBounds := &gitcode.WikiBounds{MaxRecords: maxRecords, MaxBytes: maxBytes}
 	page, err := s.client.ListWikiPages(ctx, gitcode.WikiListRequest{Owner: route.Owner, Repo: route.Name, Page: req.Page, PerPage: req.PerPage, Bounds: wikiBounds})
 	batch := DurableWikiSyncBatch{Version: DurableSyncBatchVersion, RepoID: repoID, Collection: "wiki", IdempotencyKey: req.IdempotencyKey, Items: page.Items, RecordsListed: len(page.Items), ProviderRevision: durableWikiProviderRevision(page.Items), FetchedAt: s.now().UTC()}
 	perPage := req.PerPage
