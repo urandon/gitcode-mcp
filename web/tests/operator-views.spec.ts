@@ -625,8 +625,9 @@ test('retry coalescing, filters, interruption, and structured wait state are obs
   await expect(page.getByRole('alert')).toContainText('Receipt delivery was interrupted.');
   await expect(page.getByRole('alert')).toContainText('Retry this confirmation.');
   await page.getByRole('button', { name: 'Confirm retry' }).click();
-  await expect(page.getByRole('status')).toContainText('Coalesced');
-  await expect(page.getByRole('status')).toContainText('job-000001');
+  const retryReceipt = page.getByRole('status').filter({ hasText: 'Coalesced' });
+  await expect(retryReceipt).toContainText('Coalesced');
+  await expect(retryReceipt).toContainText('job-000001');
   expect(retryKeys).toHaveLength(2);
   expect(retryKeys[1]).toBe(retryKeys[0]);
 });
