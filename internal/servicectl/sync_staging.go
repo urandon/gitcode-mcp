@@ -144,8 +144,12 @@ func NewSyncStageJournal(runtimeDir string, limits SyncStageLimits) *SyncStageJo
 	if limits.MaxAge <= 0 {
 		limits.MaxAge = defaultSyncStageMaxAge
 	}
+	dir := ""
+	if runtimeDir = strings.TrimSpace(runtimeDir); runtimeDir != "" {
+		dir = filepath.Join(runtimeDir, "sync-stages")
+	}
 	return &SyncStageJournal{
-		dir: filepath.Join(runtimeDir, "sync-stages"), limits: limits,
+		dir: dir, limits: limits,
 		now: func() time.Time { return time.Now().UTC() }, writeFile: durableAtomicWriteFile,
 	}
 }
@@ -308,6 +312,9 @@ func (j *SyncStageJournal) persist(envelope SyncStageEnvelope) error {
 }
 
 func (j *SyncStageJournal) path(stageID string) (string, error) {
+	if strings.TrimSpace(j.dir) == "" {
+		return "", errors.New("sync stage journal requires service runtime directory")
+	}
 	if !validStageID(stageID) {
 		return "", fmt.Errorf("%w: invalid stage id", ErrSyncStageCorrupt)
 	}

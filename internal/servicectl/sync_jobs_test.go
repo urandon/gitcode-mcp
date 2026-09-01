@@ -169,3 +169,66 @@ func TestFailedSyncCollectionProgressNamesEachFailedCollection(t *testing.T) {
 		t.Fatalf("events=%+v", events)
 	}
 }
+
+func TestIssueOnlyDaemonSyncWaitsForWriterAndCommitsRetainedStage(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	cachePath := filepath.Join(root, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := store.AcquireWriter(ctx, cache.WriterRequest{Operation: "rag-index", RepoID: "owner/repo", LockPath: cachePath + ".lock"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := newTestManager(t, "darwin")
+	manager.RuntimeDir = root
+	cfg := config.Default()
+	manager.EffectiveConfig = &cfg
+	jobs := NewJobManager(filepath.Join(root, "jobs.json"))
+	job, err := jobs.StartSync(ctx, manager, StartSyncJobRequest{RepoID: "owner/repo", CachePath: cachePath, CacheUUID: identity.UUID, Issues: true, ProviderMode: "fixture", IdempotencyKey: "durable-daemon-issues", MaxPages: 1, PerPage: 100})
+	if err != nil {
+		t.Fatalf("StartSync: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var waiting Job
+	for time.Now().Before(deadline) {
+		waiting, _ = jobs.Get(job.ID)
+		if waiting.SyncStage != nil && waiting.SyncStage.Phase == SyncStageWaitingCommit {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if waiting.SyncStage == nil || waiting.SyncStage.Phase != SyncStageWaitingCommit || waiting.Status != JobStatusRunning || waiting.SyncStage.BlockerClass != "cache_busy" || waiting.SyncStage.BlockingOp != "rag-index" {
+		t.Fatalf("waiting job = %+v", waiting)
+	}
+	if err := store.ReleaseWriter(ctx, held); err != nil {
+		t.Fatal(err)
+	}
+	for time.Now().Before(deadline) {
+		waiting, _ = jobs.Get(job.ID)
+		if waiting.Status == JobStatusSucceeded {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if waiting.Status != JobStatusSucceeded || waiting.SyncStage == nil || waiting.SyncStage.Phase != SyncStageCommitted || waiting.SyncStage.Committed != 1 {
+		t.Fatalf("terminal job = %+v", waiting)
+	}
+	if _, err := store.GetSourceScoped(ctx, "owner/repo", "ISSUE-42"); err != nil {
+		t.Fatalf("committed source missing: %v", err)
+	}
+	stages, err := NewSyncStageJournal(root, SyncStageLimits{}).List()
+	if err != nil || len(stages) != 1 || stages[0].State.Phase != SyncStageCommitted {
+		t.Fatalf("stages=%+v err=%v", stages, err)
+	}
+	_ = store.Close()
+}

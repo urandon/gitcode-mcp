@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -11,6 +12,71 @@ import (
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/gitcode"
 )
+
+func TestDurableIssueBatchFetchDoesNotHoldTargetWriterAndCommitDoesNotRefetch(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{{
+		Items: []gitcode.IssueSummary{{ID: "provider-42", Number: 42, Title: "Fetched once", Body: "durable body", State: "open", CreatedAt: base, UpdatedAt: base}},
+		Page:  1, PerPage: 100,
+	}}}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "durable-issues", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	held, err := store.AcquireWriter(ctx, cache.WriterRequest{Operation: "external-writer", RepoID: "durable-issues", LockPath: svc.lockPath})
+	if err != nil {
+		t.Fatalf("AcquireWriter: %v", err)
+	}
+	batch, err := svc.FetchIssueSyncBatch(ctx, BulkSyncRequest{RepoID: "durable-issues", PerPage: 100, Bounds: &SyncBounds{MaxPages: 1}})
+	if err != nil {
+		t.Fatalf("FetchIssueSyncBatch while target writer held: %v", err)
+	}
+	if len(client.listIssueRequests) != 1 || batch.RecordCount() != 1 || batch.TraversalStatus != "complete" {
+		t.Fatalf("fetch calls=%d batch=%+v", len(client.listIssueRequests), batch)
+	}
+	encoded, err := json.Marshal(batch)
+	if err != nil {
+		t.Fatalf("Marshal batch: %v", err)
+	}
+	var replay DurableIssueSyncBatch
+	if err := json.Unmarshal(encoded, &replay); err != nil {
+		t.Fatalf("Unmarshal batch: %v", err)
+	}
+	if _, err := svc.CommitIssueSyncBatch(ctx, replay, nil); err == nil {
+		t.Fatal("commit succeeded while target writer was held")
+	} else {
+		var contention cache.ErrLockContention
+		if !errors.As(err, &contention) {
+			t.Fatalf("commit error = %T %v, want cache contention", err, err)
+		}
+	}
+	if len(client.listIssueRequests) != 1 {
+		t.Fatalf("contended commit refetched provider: calls=%d", len(client.listIssueRequests))
+	}
+	if err := store.ReleaseWriter(ctx, held); err != nil {
+		t.Fatalf("ReleaseWriter: %v", err)
+	}
+	result, err := svc.CommitIssueSyncBatch(ctx, replay, nil)
+	if err != nil {
+		t.Fatalf("CommitIssueSyncBatch retry: %v", err)
+	}
+	if result.SuccessCount != 1 || len(client.listIssueRequests) != 1 {
+		t.Fatalf("result=%+v provider calls=%d", result, len(client.listIssueRequests))
+	}
+	stored, err := store.GetSourceScoped(ctx, "durable-issues", "ISSUE-42")
+	if err != nil {
+		t.Fatalf("GetSourceScoped: %v", err)
+	}
+	if stored.Body != "durable body" {
+		t.Fatalf("stored body = %q", stored.Body)
+	}
+}
 
 type aggregateIssueCommentClient struct {
 	*fakeGitCodeClient
