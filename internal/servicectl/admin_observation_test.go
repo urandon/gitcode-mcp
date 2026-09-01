@@ -99,7 +99,7 @@ func TestAdminObservationPublishesSchemaBlockAsStructuredPublicState(t *testing.
 		t.Fatalf("cache observations=%+v", snapshot.Caches)
 	}
 	view := snapshot.Caches[0]
-	if view.Readiness != "cache_schema_blocked" || view.SchemaVersion != cache.CurrentSchemaVersion()+1 || view.ExpectedSchemaVersion != cache.CurrentSchemaVersion() || view.CompatibleBinaryVersion != manager.Version || view.CompatibleBinaryCommit != manager.Commit || view.QuiesceState != "required" {
+	if view.Readiness != "cache_schema_blocked" || view.SchemaVersion != cache.CurrentSchemaVersion()+1 || view.ExpectedSchemaVersion != cache.CurrentSchemaVersion() || view.DaemonBinaryVersion != manager.Version || view.DaemonBinaryCommit != manager.Commit || view.QuiesceState != "required" {
 		t.Fatalf("schema-blocked cache contract=%+v", view)
 	}
 	if len(snapshot.Diagnostics) != 1 || snapshot.Diagnostics[0].FailureClass != "cache_schema_blocked" {

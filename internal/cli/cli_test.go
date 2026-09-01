@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -49,6 +50,8 @@ type fakeCacheMigrationService struct {
 	status     servicectl.Status
 	calls      []string
 	quiesceErr error
+	installErr error
+	startErr   error
 }
 
 func (f *fakeCacheMigrationService) Status() (servicectl.Status, error) {
@@ -113,12 +116,21 @@ func TestMigrateCacheDoesNotMutateWhenDaemonQuiesceFails(t *testing.T) {
 
 func (f *fakeCacheMigrationService) Install(overwrite bool) (servicectl.Status, error) {
 	f.calls = append(f.calls, fmt.Sprintf("install:%t", overwrite))
+	if f.installErr != nil {
+		return f.status, f.installErr
+	}
 	return f.status, nil
 }
 
 func (f *fakeCacheMigrationService) Start(context.Context) (servicectl.Status, error) {
 	f.calls = append(f.calls, "start")
+	if f.startErr != nil {
+		return f.status, f.startErr
+	}
 	f.status.Running = true
+	f.status.PIDAlive = true
+	f.status.SchemaMin = cache.CurrentSchemaVersion()
+	f.status.SchemaMax = cache.CurrentSchemaVersion()
 	return f.status, nil
 }
 
@@ -181,6 +193,224 @@ func TestMigrateCacheCoordinatesDaemonAndReportsVerifiedRecovery(t *testing.T) {
 	_ = reopened.Close()
 	if recoveredIdentity.UUID != identity.UUID {
 		t.Fatalf("cache identity changed: before=%q after=%q", identity.UUID, recoveredIdentity.UUID)
+	}
+}
+
+func TestMigrateCacheEndToEndReplacesOldDaemonAfterSchemaUpgrade(t *testing.T) {
+	ctx := context.Background()
+	dir, err := os.MkdirTemp("/tmp", "gcm-migration-e2e-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE schema_version SET version = 18`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 18`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	src := &repoInitLocalSource{env: map[string]string{}, cwd: dir, homeDir: filepath.Join(dir, "home"), configDir: filepath.Join(dir, "config"), cacheDir: filepath.Join(dir, "cache")}
+	oldBinary := filepath.Join(dir, "gitcode-mcp-old")
+	newBinary := filepath.Join(dir, "gitcode-mcp-new")
+	for _, binary := range []string{oldBinary, newBinary} {
+		if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldManager := servicectl.Manager{Source: src, BinaryPath: oldBinary, Version: "0.3.0", Commit: "old-daemon", GOOS: "darwin"}
+	if _, err := oldManager.Install(false); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := oldManager.ResolvePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(paths.RuntimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	oldState := servicectl.State{PID: os.Getpid(), SocketPath: paths.SocketPath, StartedAt: now, UpdatedAt: now, Version: "0.3.0", Commit: "old-daemon", SchemaMin: 18, SchemaMax: 18}
+	stateData, err := json.MarshalIndent(oldState, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.StatePath, append(stateData, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.PIDPath, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldListener, err := net.Listen("unix", paths.SocketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = oldListener.Close(); _ = os.Remove(paths.SocketPath) })
+
+	loaded := true
+	var replacementListener net.Listener
+	var platformCalls []string
+	manager := servicectl.Manager{
+		Source: src, BinaryPath: newBinary, Version: "0.4.0", Commit: "new-daemon", GOOS: "darwin",
+		StartupTimeout: time.Second, StartupInterval: time.Millisecond,
+	}
+	manager.OutputRunner = func(_ context.Context, name string, args ...string) (string, error) {
+		platformCalls = append(platformCalls, strings.Join(append([]string{name}, args...), " "))
+		if loaded {
+			return "state = running", nil
+		}
+		return "", errors.New("not loaded")
+	}
+	manager.Runner = func(_ context.Context, name string, args ...string) error {
+		platformCalls = append(platformCalls, strings.Join(append([]string{name}, args...), " "))
+		if name != "launchctl" || len(args) == 0 {
+			return nil
+		}
+		switch args[0] {
+		case "bootout":
+			loaded = false
+			_ = oldListener.Close()
+			_ = os.Remove(paths.SocketPath)
+			_ = os.Remove(paths.StatePath)
+			_ = os.Remove(paths.PIDPath)
+		case "bootstrap":
+			loaded = true
+		case "kickstart":
+			started := time.Now().UTC()
+			state := servicectl.State{PID: os.Getpid(), SocketPath: paths.SocketPath, StartedAt: started, UpdatedAt: started, Version: manager.Version, Commit: manager.Commit, SchemaMin: cache.CurrentSchemaVersion(), SchemaMax: cache.CurrentSchemaVersion()}
+			data, marshalErr := json.MarshalIndent(state, "", "  ")
+			if marshalErr != nil {
+				return marshalErr
+			}
+			if writeErr := os.WriteFile(paths.StatePath, append(data, '\n'), 0o600); writeErr != nil {
+				return writeErr
+			}
+			if writeErr := os.WriteFile(paths.PIDPath, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); writeErr != nil {
+				return writeErr
+			}
+			replacementListener, err = net.Listen("unix", paths.SocketPath)
+			return err
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		if replacementListener != nil {
+			_ = replacementListener.Close()
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := executeWithFactoryAndDepsContext(ctx, []string{"migrate-cache", "--confirm", "--cache-path", cachePath, "--format", "json"}, &stdout, &stderr, nil, localCommandDeps{Source: src, MigrationService: &manager})
+	if code != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q platform_calls=%v", code, stdout.String(), stderr.String(), platformCalls)
+	}
+	var result migrateCacheResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "migrated" || result.RecoveryState != "healthy" || !result.ServiceQuiesced || !result.ServiceRestarted || !result.BackupVerified || !result.IdentityPreserved {
+		t.Fatalf("result=%+v", result)
+	}
+	installed, err := os.ReadFile(paths.InstallPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(installed, []byte(newBinary)) || bytes.Contains(installed, []byte(oldBinary)) {
+		t.Fatalf("installed definition did not select compatible binary: %s", installed)
+	}
+	status, err := manager.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Running || status.BinaryVersion != manager.Version || status.BinaryCommit != manager.Commit || status.SchemaMin != cache.CurrentSchemaVersion() || status.SchemaMax != cache.CurrentSchemaVersion() {
+		t.Fatalf("replacement daemon status=%+v", status)
+	}
+	joined := strings.Join(platformCalls, "\n")
+	if !strings.Contains(joined, "launchctl bootout") || !strings.Contains(joined, "launchctl bootstrap") || !strings.Contains(joined, "launchctl kickstart") {
+		t.Fatalf("coordinated platform sequence missing:\n%s", joined)
+	}
+}
+
+func TestMigrateCacheResumesServiceRecoveryAfterCommittedMigration(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE schema_version SET version = 18`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 18`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	src := &repoInitLocalSource{env: map[string]string{}, cwd: dir, homeDir: dir, configDir: filepath.Join(dir, "config"), cacheDir: filepath.Join(dir, "cache")}
+	coordinator := &fakeCacheMigrationService{status: servicectl.Status{
+		Installed: true, Running: true, PIDAlive: true, BinaryVersion: "0.3.0", BinaryCommit: "old-commit", SchemaMin: 18, SchemaMax: 18,
+	}, installErr: errors.New("injected install failure")}
+	var stdout, stderr bytes.Buffer
+	code := executeWithFactoryAndDepsContext(ctx, []string{"migrate-cache", "--confirm", "--cache-path", cachePath, "--format", "json"}, &stdout, &stderr, nil, localCommandDeps{Source: src, MigrationService: coordinator})
+	if code == 0 {
+		t.Fatalf("first attempt unexpectedly succeeded: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	var failed migrateCacheResult
+	if err := json.Unmarshal(stdout.Bytes(), &failed); err != nil {
+		t.Fatalf("decode recovery result: %v output=%q", err, stdout.String())
+	}
+	if failed.Status != "recovery_required" || failed.RecoveryState != "migration_complete_service_install_failed" || !failed.BackupVerified || !failed.IdentityPreserved {
+		t.Fatalf("failed recovery result=%+v", failed)
+	}
+	if _, err := os.Stat(cacheMigrationRecoveryPath(cachePath)); err != nil {
+		t.Fatalf("durable recovery intent missing: %v", err)
+	}
+
+	coordinator.installErr = nil
+	coordinator.calls = nil
+	stdout.Reset()
+	stderr.Reset()
+	code = executeWithFactoryAndDepsContext(ctx, []string{"migrate-cache", "--confirm", "--cache-path", cachePath, "--format", "json"}, &stdout, &stderr, nil, localCommandDeps{Source: src, MigrationService: coordinator})
+	if code != 0 {
+		t.Fatalf("retry code=%d stdout=%q stderr=%q calls=%v", code, stdout.String(), stderr.String(), coordinator.calls)
+	}
+	if got, want := strings.Join(coordinator.calls, ","), "status,install:true,start"; got != want {
+		t.Fatalf("retry calls=%q want=%q", got, want)
+	}
+	var recovered migrateCacheResult
+	if err := json.Unmarshal(stdout.Bytes(), &recovered); err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Status != "up_to_date" || recovered.RecoveryState != "healthy" || !recovered.ServiceRestarted || !recovered.BackupVerified || !recovered.IdentityPreserved {
+		t.Fatalf("recovered result=%+v", recovered)
+	}
+	if _, err := os.Stat(cacheMigrationRecoveryPath(cachePath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovery intent retained after health verification: %v", err)
 	}
 }
 

@@ -46,18 +46,35 @@ func (e RPCDomainError) Error() string          { return e.Message }
 func (e RPCDomainError) DiagnosticCode() string { return e.Code }
 
 type JobListResult struct {
-	Jobs []Job `json:"jobs"`
+	Jobs              []Job              `json:"jobs"`
+	CacheReadiness    string             `json:"cache_readiness,omitempty"`
+	CacheSchemaBlocks []CacheSchemaBlock `json:"cache_schema_blocks,omitempty"`
+}
+
+type CacheSchemaBlock struct {
+	RegistrationID      string `json:"registration_id,omitempty"`
+	RepoID              string `json:"repo_id,omitempty"`
+	CacheUUID           string `json:"cache_uuid,omitempty"`
+	DetectedVersion     int    `json:"detected_schema_version"`
+	ExpectedVersion     int    `json:"expected_schema_version"`
+	DaemonBinaryVersion string `json:"daemon_binary_version,omitempty"`
+	DaemonBinaryCommit  string `json:"daemon_binary_commit,omitempty"`
+	DaemonSchemaMin     int    `json:"daemon_schema_min,omitempty"`
+	DaemonSchemaMax     int    `json:"daemon_schema_max,omitempty"`
+	QuiesceState        string `json:"quiesce_state,omitempty"`
 }
 
 type ServiceHealth struct {
-	Status        string    `json:"status"`
-	Healthy       bool      `json:"healthy"`
-	CheckedAt     time.Time `json:"checked_at"`
-	Message       string    `json:"message,omitempty"`
-	BinaryVersion string    `json:"binary_version,omitempty"`
-	BinaryCommit  string    `json:"binary_commit,omitempty"`
-	SchemaMin     int       `json:"schema_min"`
-	SchemaMax     int       `json:"schema_max"`
+	Status            string             `json:"status"`
+	Healthy           bool               `json:"healthy"`
+	CheckedAt         time.Time          `json:"checked_at"`
+	Message           string             `json:"message,omitempty"`
+	BinaryVersion     string             `json:"binary_version,omitempty"`
+	BinaryCommit      string             `json:"binary_commit,omitempty"`
+	SchemaMin         int                `json:"schema_min"`
+	SchemaMax         int                `json:"schema_max"`
+	CacheReadiness    string             `json:"cache_readiness,omitempty"`
+	CacheSchemaBlocks []CacheSchemaBlock `json:"cache_schema_blocks,omitempty"`
 }
 
 type RPCServer struct {
@@ -155,7 +172,7 @@ func (s RPCServer) handleRequest(ctx context.Context, req RPCRequest) RPCRespons
 func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawMessage) (any, error) {
 	switch method {
 	case "Service.Status":
-		return s.Manager.Status()
+		return s.serviceStatus(ctx)
 	case "Service.Health":
 		return s.health(ctx)
 	case "Service.Doctor":
@@ -289,7 +306,15 @@ func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawM
 		}
 		return s.Jobs.StartSync(context.Background(), s.Manager, req)
 	case "Jobs.List":
-		return JobListResult{Jobs: s.Jobs.List()}, nil
+		blocks, err := s.cacheSchemaBlocks(ctx)
+		if err != nil {
+			return nil, err
+		}
+		result := JobListResult{Jobs: s.Jobs.List(), CacheSchemaBlocks: blocks}
+		if len(blocks) > 0 {
+			result.CacheReadiness = "cache_schema_blocked"
+		}
+		return result, nil
 	case "Jobs.Get":
 		id, err := decodeJobID(params)
 		if err != nil {
@@ -349,15 +374,55 @@ func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawM
 }
 
 func (s RPCServer) health(ctx context.Context) (ServiceHealth, error) {
-	status, err := s.Manager.Status()
+	status, err := s.serviceStatus(ctx)
 	if err != nil {
 		return ServiceHealth{}, err
 	}
-	health := ServiceHealth{Status: status.Status, Healthy: status.Status == StatusRunning, CheckedAt: time.Now().UTC(), BinaryVersion: s.Manager.Version, BinaryCommit: s.Manager.Commit, SchemaMin: cache.CurrentSchemaVersion(), SchemaMax: cache.CurrentSchemaVersion()}
+	health := ServiceHealth{Status: status.Status, Healthy: status.Status == StatusRunning && status.CacheReadiness != "cache_schema_blocked", CheckedAt: time.Now().UTC(), BinaryVersion: s.Manager.Version, BinaryCommit: s.Manager.Commit, SchemaMin: cache.CurrentSchemaVersion(), SchemaMax: cache.CurrentSchemaVersion(), CacheReadiness: status.CacheReadiness, CacheSchemaBlocks: status.CacheSchemaBlocks}
 	if !health.Healthy {
 		health.Message = status.Message
 	}
 	return health, nil
+}
+
+func (s RPCServer) serviceStatus(ctx context.Context) (Status, error) {
+	status, err := s.Manager.Status()
+	if err != nil {
+		return Status{}, err
+	}
+	blocks, err := s.cacheSchemaBlocks(ctx)
+	if err != nil {
+		return Status{}, err
+	}
+	status.CacheSchemaBlocks = blocks
+	if len(blocks) > 0 {
+		status.CacheReadiness = "cache_schema_blocked"
+		status.Message = "one or more managed caches require a compatible service binary before writers can resume"
+	}
+	return status, nil
+}
+
+func (s RPCServer) cacheSchemaBlocks(ctx context.Context) ([]CacheSchemaBlock, error) {
+	if s.Maintenance == nil {
+		return nil, nil
+	}
+	result, err := s.Maintenance.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	blocks := make([]CacheSchemaBlock, 0)
+	for _, entry := range result.Entries {
+		if entry.State != "cache_schema_blocked" {
+			continue
+		}
+		blocks = append(blocks, CacheSchemaBlock{
+			RegistrationID: entry.RegistrationID, RepoID: entry.RepoID, CacheUUID: entry.CacheUUID,
+			DetectedVersion: entry.DetectedSchemaVersion, ExpectedVersion: entry.ExpectedSchemaVersion,
+			DaemonBinaryVersion: entry.DaemonBinaryVersion, DaemonBinaryCommit: entry.DaemonBinaryCommit,
+			DaemonSchemaMin: cache.CurrentSchemaVersion(), DaemonSchemaMax: cache.CurrentSchemaVersion(), QuiesceState: entry.QuiesceState,
+		})
+	}
+	return blocks, nil
 }
 
 func decodeJobID(params json.RawMessage) (string, error) {

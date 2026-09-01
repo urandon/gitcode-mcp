@@ -216,6 +216,42 @@ async function mockAdmin(page: Page, value = snapshot, snapshotChanged?: Promise
 	});
 }
 
+test('schema-blocked cache exposes a path-free confirmed CLI handoff', async ({ page }) => {
+  const blocked: any = structuredClone(snapshot);
+  blocked.service = { ...blocked.service, version: '0.3.0', commit: 'daemon-commit-abcdef', schema_min: 18, schema_max: 18 };
+  blocked.caches = [{
+    cache_ref: 'cache-public-schema', path_fingerprint: 'sha256:public-schema', storage_mode: 'managed', readiness: 'cache_schema_blocked',
+    schema_version: 19, expected_schema_version: 18, daemon_binary_version: '0.3.0', daemon_binary_commit: 'daemon-commit-abcdef', quiesce_state: 'required',
+    wal_capable: false, record_count: 0, chunk_count: 0, repository_count: 0, repositories: []
+  }];
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (value: string) => { (window as Window & { __schemaRecoveryCopied?: string }).__schemaRecoveryCopied = value; } } });
+  });
+  await mockAdmin(page, blocked);
+  await page.goto('/?view=Caches');
+
+  const panel = page.locator('.schema-recovery-panel');
+  await expect(panel.getByRole('heading', { name: 'Cache schema upgrade required' })).toBeVisible();
+  await expect(panel).toContainText('Detected19');
+  await expect(panel).toContainText('Expected18');
+  await expect(panel).toContainText('0.3.0 · daemon-commi');
+  await expect(panel).toContainText('18..18');
+  await expect(panel).toContainText('Required');
+  await expect(panel.getByText('gitcode-mcp migrate-cache --confirm')).toBeVisible();
+  await expect(page.locator('body')).not.toContainText('/Users/');
+  await expect(page.locator('body')).not.toContainText('/private/');
+
+  await panel.getByRole('button', { name: 'Review upgrade handoff' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Copy confirmed migration handoff?' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText('19 → 18');
+  await expect(dialog).toContainText('18..18');
+  await dialog.getByRole('button', { name: 'Copy confirmed handoff' }).click();
+  await expect(dialog).not.toBeVisible();
+  expect(await page.evaluate(() => (window as Window & { __schemaRecoveryCopied?: string }).__schemaRecoveryCopied)).toBe('gitcode-mcp migrate-cache --confirm');
+  await expect(panel.getByRole('button', { name: 'Copied recovery handoff' })).toBeFocused();
+});
+
 test('operator views keep coverage truth, deep links, and recovery states', async ({ page }) => {
   await mockAdmin(page);
   await page.goto('/');

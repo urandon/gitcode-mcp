@@ -142,7 +142,7 @@ func buildAdminCache(ctx context.Context, group adminCacheGroup, entries []admin
 	view := adminhttp.CacheObservation{
 		CacheRef: publicCacheRef(group.uuid, group.path), PathFingerprint: group.fingerprint,
 		StorageMode: "managed", Readiness: "unavailable", ExpectedSchemaVersion: cache.CurrentSchemaVersion(),
-		CompatibleBinaryVersion: binaryVersion, CompatibleBinaryCommit: binaryCommit,
+		DaemonBinaryVersion: binaryVersion, DaemonBinaryCommit: binaryCommit,
 	}
 	var diagnostics []adminhttp.DiagnosticObservation
 	store, err := cache.NewSQLiteReadOnlyStore(ctx, group.path)

@@ -77,8 +77,9 @@ type MaintenanceEntry struct {
 	LastError                 string                           `json:"last_error,omitempty"`
 	DetectedSchemaVersion     int                              `json:"detected_schema_version,omitempty"`
 	ExpectedSchemaVersion     int                              `json:"expected_schema_version,omitempty"`
-	CompatibleBinaryVersion   string                           `json:"compatible_binary_version,omitempty"`
-	CompatibleBinaryCommit    string                           `json:"compatible_binary_commit,omitempty"`
+	DaemonBinaryVersion       string                           `json:"daemon_binary_version,omitempty"`
+	DaemonBinaryCommit        string                           `json:"daemon_binary_commit,omitempty"`
+	QuiesceState              string                           `json:"quiesce_state,omitempty"`
 	SyncStage                 MaintenanceStageState            `json:"sync_stage,omitempty"`
 	RAGStage                  MaintenanceStageState            `json:"rag_stage,omitempty"`
 	RepositoryDocs            *RepositoryDocsMaintenanceState  `json:"repository_docs,omitempty"`
@@ -2399,8 +2400,9 @@ func (m *MaintenanceManager) finishReconcileEntry(registrationID string, snapsho
 	entry.LastErrorClass, entry.LastError = maintenanceEntryError(entry.Policy, entry.SyncStage, entry.RAGStage)
 	entry.DetectedSchemaVersion = 0
 	entry.ExpectedSchemaVersion = 0
-	entry.CompatibleBinaryVersion = ""
-	entry.CompatibleBinaryCommit = ""
+	entry.DaemonBinaryVersion = ""
+	entry.DaemonBinaryCommit = ""
+	entry.QuiesceState = ""
 	entry.State = deriveMaintenanceEntryState(*entry)
 	if activeSync.ID != "" {
 		entry.State = "refreshing"
@@ -2792,8 +2794,9 @@ func (m *MaintenanceManager) updateEntrySchemaBlocked(id string, compat cache.Ve
 	entry.LastError = publicMaintenanceError("cache_schema_blocked")
 	entry.DetectedSchemaVersion = compat.DetectedVersion
 	entry.ExpectedSchemaVersion = compat.ExpectedVersion
-	entry.CompatibleBinaryVersion = m.manager.Version
-	entry.CompatibleBinaryCommit = m.manager.Commit
+	entry.DaemonBinaryVersion = m.manager.Version
+	entry.DaemonBinaryCommit = m.manager.Commit
+	entry.QuiesceState = "required"
 	entry.ActiveJobs = activeMaintenanceJobIDs(jobs...)
 	entry.LastReconciledAt = m.now()
 	entry.NextReconcileAt = entry.LastReconciledAt.Add(time.Minute)

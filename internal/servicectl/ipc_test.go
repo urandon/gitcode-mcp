@@ -88,6 +88,60 @@ func TestRPCServiceStatusAndFakeJobLifecycle(t *testing.T) {
 	}
 }
 
+func TestRPCStatusHealthAndJobsExposeCacheSchemaBlocks(t *testing.T) {
+	manager := newTestManager(t, "darwin")
+	manager.Commit = "daemon-commit"
+	jobs := NewJobManager("")
+	maintenance := NewMaintenanceManager(manager, jobs, filepath.Join(t.TempDir(), "managed-caches.json"))
+	maintenance.mu.Lock()
+	maintenance.entries["maintenance-schema"] = &MaintenanceEntry{
+		RegistrationID: "maintenance-schema", RepoID: "owner/repository", CacheUUID: "cache-public-id",
+		State: "cache_schema_blocked", DetectedSchemaVersion: cache.CurrentSchemaVersion() + 1,
+		ExpectedSchemaVersion: cache.CurrentSchemaVersion(), DaemonBinaryVersion: manager.Version,
+		DaemonBinaryCommit: manager.Commit, QuiesceState: "required",
+	}
+	maintenance.mu.Unlock()
+	server := RPCServer{Manager: manager, Jobs: jobs, Maintenance: maintenance}
+
+	statusValue, err := server.dispatch(context.Background(), "Service.Status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := statusValue.(Status)
+	if status.CacheReadiness != "cache_schema_blocked" || len(status.CacheSchemaBlocks) != 1 {
+		t.Fatalf("status schema contract=%#v", status)
+	}
+	block := status.CacheSchemaBlocks[0]
+	if block.DetectedVersion != cache.CurrentSchemaVersion()+1 || block.ExpectedVersion != cache.CurrentSchemaVersion() || block.DaemonBinaryVersion != manager.Version || block.DaemonBinaryCommit != manager.Commit || block.QuiesceState != "required" {
+		t.Fatalf("status schema block=%#v", block)
+	}
+
+	healthValue, err := server.dispatch(context.Background(), "Service.Health", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	health := healthValue.(ServiceHealth)
+	if health.Healthy || health.CacheReadiness != "cache_schema_blocked" || len(health.CacheSchemaBlocks) != 1 {
+		t.Fatalf("health schema contract=%#v", health)
+	}
+
+	jobsValue, err := server.dispatch(context.Background(), "Jobs.List", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobList := jobsValue.(JobListResult)
+	if jobList.CacheReadiness != "cache_schema_blocked" || len(jobList.CacheSchemaBlocks) != 1 {
+		t.Fatalf("jobs schema contract=%#v", jobList)
+	}
+	raw, err := json.Marshal(jobList)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), string(filepath.Separator)+"private") {
+		t.Fatalf("jobs schema contract leaked a path: %s", raw)
+	}
+}
+
 func TestJobManagerMarksRunningSnapshotInterrupted(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "jobs.json")

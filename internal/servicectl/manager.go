@@ -62,25 +62,27 @@ type State struct {
 }
 
 type Status struct {
-	Status        string           `json:"status"`
-	Installed     bool             `json:"installed"`
-	Running       bool             `json:"running"`
-	PIDAlive      bool             `json:"pid_alive"`
-	SocketPresent bool             `json:"socket_present"`
-	PID           int              `json:"pid,omitempty"`
-	SocketPath    string           `json:"socket_path"`
-	RuntimeDir    string           `json:"runtime_dir"`
-	LogDir        string           `json:"log_dir"`
-	StatePath     string           `json:"state_path"`
-	InstallPath   string           `json:"install_path"`
-	InstallKind   string           `json:"install_kind"`
-	RAG           *rag.SetupResult `json:"rag,omitempty"`
-	UpdatedAt     *time.Time       `json:"updated_at,omitempty"`
-	Message       string           `json:"message,omitempty"`
-	BinaryVersion string           `json:"binary_version,omitempty"`
-	BinaryCommit  string           `json:"binary_commit,omitempty"`
-	SchemaMin     int              `json:"schema_min,omitempty"`
-	SchemaMax     int              `json:"schema_max,omitempty"`
+	Status            string             `json:"status"`
+	Installed         bool               `json:"installed"`
+	Running           bool               `json:"running"`
+	PIDAlive          bool               `json:"pid_alive"`
+	SocketPresent     bool               `json:"socket_present"`
+	PID               int                `json:"pid,omitempty"`
+	SocketPath        string             `json:"socket_path"`
+	RuntimeDir        string             `json:"runtime_dir"`
+	LogDir            string             `json:"log_dir"`
+	StatePath         string             `json:"state_path"`
+	InstallPath       string             `json:"install_path"`
+	InstallKind       string             `json:"install_kind"`
+	RAG               *rag.SetupResult   `json:"rag,omitempty"`
+	UpdatedAt         *time.Time         `json:"updated_at,omitempty"`
+	Message           string             `json:"message,omitempty"`
+	BinaryVersion     string             `json:"binary_version,omitempty"`
+	BinaryCommit      string             `json:"binary_commit,omitempty"`
+	SchemaMin         int                `json:"schema_min,omitempty"`
+	SchemaMax         int                `json:"schema_max,omitempty"`
+	CacheReadiness    string             `json:"cache_readiness,omitempty"`
+	CacheSchemaBlocks []CacheSchemaBlock `json:"cache_schema_blocks,omitempty"`
 }
 
 type Manager struct {

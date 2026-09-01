@@ -64,7 +64,7 @@ func TestMaintenanceReconcilePublishesSchemaBlockedAndClearsTerminalActiveJobs(t
 	if blocked.DetectedSchemaVersion != cache.CurrentSchemaVersion()+1 || blocked.ExpectedSchemaVersion != cache.CurrentSchemaVersion() {
 		t.Fatalf("blocked schema contract=%+v", blocked)
 	}
-	if blocked.CompatibleBinaryVersion != manager.Version || blocked.CompatibleBinaryCommit != manager.Commit {
+	if blocked.DaemonBinaryVersion != manager.Version || blocked.DaemonBinaryCommit != manager.Commit || blocked.QuiesceState != "required" {
 		t.Fatalf("blocked binary identity=%+v", blocked)
 	}
 	if len(blocked.ActiveJobs) != 0 {
@@ -79,7 +79,7 @@ func TestMaintenanceReconcilePublishesSchemaBlockedAndClearsTerminalActiveJobs(t
 	if len(started) != 0 || recovered.State == "cache_schema_blocked" || recovered.LastErrorClass == "cache_schema_blocked" {
 		t.Fatalf("recovery did not clear schema block: entry=%+v started=%v", recovered, started)
 	}
-	if recovered.CacheUUID != identity.UUID || recovered.DetectedSchemaVersion != 0 || recovered.ExpectedSchemaVersion != 0 || recovered.CompatibleBinaryVersion != "" || recovered.CompatibleBinaryCommit != "" {
+	if recovered.CacheUUID != identity.UUID || recovered.DetectedSchemaVersion != 0 || recovered.ExpectedSchemaVersion != 0 || recovered.DaemonBinaryVersion != "" || recovered.DaemonBinaryCommit != "" || recovered.QuiesceState != "" {
 		t.Fatalf("recovery changed identity or retained blocked metadata: %+v", recovered)
 	}
 }
