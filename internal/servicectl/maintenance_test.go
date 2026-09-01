@@ -3,6 +3,7 @@ package servicectl
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,84 @@ import (
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/service"
 )
+
+func TestMaintenanceReconcilePublishesSchemaBlockedAndClearsTerminalActiveJobs(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := newTestManager(t, "darwin")
+	manager.Version = "0.3.0"
+	manager.Commit = "old-daemon-commit"
+	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+	maintenance := NewMaintenanceManager(manager, jobs, filepath.Join(dir, "managed-caches.json"))
+	enrolled, err := maintenance.Enroll(ctx, testMaintenanceEnrollRequest(cachePath, "schema-enroll", MaintenancePolicy{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal := Job{ID: "terminal-job", Type: SyncJobType, CacheUUID: identity.UUID, RepoID: enrolled.RepoID, RegistrationID: enrolled.RegistrationID, Status: JobStatusFailed}
+	jobs.jobs[terminal.ID] = &terminal
+	maintenance.entries[enrolled.RegistrationID].ActiveJobs = []string{terminal.ID}
+
+	setMaintenanceTestSchemaVersion(t, cachePath, cache.CurrentSchemaVersion()+1)
+	blocked, started := maintenance.reconcileEntry(ctx, enrolled.RegistrationID)
+	if len(started) != 0 {
+		t.Fatalf("schema-blocked reconcile started writer jobs: %v", started)
+	}
+	if blocked.State != "cache_schema_blocked" || blocked.LastErrorClass != "cache_schema_blocked" {
+		t.Fatalf("blocked state=%+v", blocked)
+	}
+	if blocked.DetectedSchemaVersion != cache.CurrentSchemaVersion()+1 || blocked.ExpectedSchemaVersion != cache.CurrentSchemaVersion() {
+		t.Fatalf("blocked schema contract=%+v", blocked)
+	}
+	if blocked.DaemonBinaryVersion != manager.Version || blocked.DaemonBinaryCommit != manager.Commit || blocked.QuiesceState != "required" {
+		t.Fatalf("blocked binary identity=%+v", blocked)
+	}
+	if len(blocked.ActiveJobs) != 0 {
+		t.Fatalf("terminal jobs retained as active: %v", blocked.ActiveJobs)
+	}
+	if got := len(jobs.List()); got != 1 {
+		t.Fatalf("schema-blocked reconcile created jobs: got=%d", got)
+	}
+
+	setMaintenanceTestSchemaVersion(t, cachePath, cache.CurrentSchemaVersion())
+	recovered, started := maintenance.reconcileEntry(ctx, enrolled.RegistrationID)
+	if len(started) != 0 || recovered.State == "cache_schema_blocked" || recovered.LastErrorClass == "cache_schema_blocked" {
+		t.Fatalf("recovery did not clear schema block: entry=%+v started=%v", recovered, started)
+	}
+	if recovered.CacheUUID != identity.UUID || recovered.DetectedSchemaVersion != 0 || recovered.ExpectedSchemaVersion != 0 || recovered.DaemonBinaryVersion != "" || recovered.DaemonBinaryCommit != "" || recovered.QuiesceState != "" {
+		t.Fatalf("recovery changed identity or retained blocked metadata: %+v", recovered)
+	}
+}
+
+func setMaintenanceTestSchemaVersion(t *testing.T, path string, version int) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE schema_version SET version = ?`, version); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", version)); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestMaintenanceRegistryEnrollReplayAndSanitize(t *testing.T) {
 	ctx := context.Background()

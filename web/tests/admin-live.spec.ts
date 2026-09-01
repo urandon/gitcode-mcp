@@ -1,10 +1,12 @@
 import { expect, test } from '@playwright/test';
 import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { resolveBrowserTestPolicy } from '../src/lib/browser-test-policy';
 
-const launchURL = process.env.ADMIN_QA_URL;
-const outputDir = process.env.ADMIN_QA_OUTPUT;
-const referencePath = process.env.ADMIN_QA_REFERENCE;
+const browserPolicy = resolveBrowserTestPolicy(process.env);
+const launchURL = browserPolicy.adminLaunchURL;
+const outputDir = browserPolicy.adminQAOutput;
+const referencePath = browserPolicy.referencePath;
 
 test('embedded admin launch, controls, and theme states', async ({ page, context }) => {
   test.skip(!launchURL || !outputDir, 'requires an explicit one-time local QA launch URL and output directory');

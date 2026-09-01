@@ -3,6 +3,7 @@ package servicectl
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,8 +52,14 @@ func TestAdminObservationReadsCacheWithoutExposingItsPath(t *testing.T) {
 	if strings.Contains(string(data), root) || strings.Contains(string(data), "cache.db") {
 		t.Fatalf("absolute cache path leaked: %s", data)
 	}
+	if strings.Contains(string(data), `"schema_recovery"`) || strings.Contains(string(data), "backup_path") {
+		t.Fatalf("ordinary ready cache exposed a recovery lifecycle or path: %s", data)
+	}
 	if len(snapshot.Caches) != 1 || len(snapshot.Caches[0].Repositories) != 1 || snapshot.Caches[0].Repositories[0].RepoID != "example/repo" {
 		t.Fatalf("cache topology=%+v", snapshot.Caches)
+	}
+	if snapshot.Caches[0].SchemaRecovery != nil {
+		t.Fatalf("ordinary ready cache must not claim a completed migration: %+v", snapshot.Caches[0].SchemaRecovery)
 	}
 	documentation := snapshot.Caches[0].Repositories[0].Documentation
 	if documentation == nil || documentation.State != "not_indexed" || documentation.IndexHandoff != "" || documentation.SearchAvailable {
@@ -60,6 +67,247 @@ func TestAdminObservationReadsCacheWithoutExposingItsPath(t *testing.T) {
 	}
 	if snapshot.JobRetention.SuccessTTLSeconds != int64(config.DefaultJobSuccessTTL.Seconds()) || snapshot.JobRetention.MaxTerminalJobs != config.DefaultJobMaxTerminal {
 		t.Fatalf("job retention observation=%+v", snapshot.JobRetention)
+	}
+}
+
+func TestAdminObservationPublishesSchemaBlockAsStructuredPublicState(t *testing.T) {
+	root, err := shortWorkspaceTemp(t, "admin-schema-blocked-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(root, "private", "cache.db")
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	setMaintenanceTestSchemaVersion(t, cachePath, cache.CurrentSchemaVersion()+1)
+
+	manager := newTestManager(t, "darwin")
+	manager.Version = "0.3.0"
+	manager.Commit = "compatible-commit"
+	manager.AdminCachePath = cachePath
+	jobs := NewJobManager("")
+	maintenance := NewMaintenanceManager(manager, jobs, filepath.Join(root, "registry.json"))
+	snapshot, err := manager.adminObservation(ctx, jobs, maintenance, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Service.Commit != manager.Commit || snapshot.Service.SchemaMin != cache.CurrentSchemaVersion() || snapshot.Service.SchemaMax != cache.CurrentSchemaVersion() {
+		t.Fatalf("service compatibility contract=%+v", snapshot.Service)
+	}
+	if len(snapshot.Caches) != 1 {
+		t.Fatalf("cache observations=%+v", snapshot.Caches)
+	}
+	view := snapshot.Caches[0]
+	if view.Readiness != "cache_schema_blocked" || view.SchemaVersion != cache.CurrentSchemaVersion()+1 || view.ExpectedSchemaVersion != cache.CurrentSchemaVersion() || view.DaemonBinaryVersion != manager.Version || view.DaemonBinaryCommit != manager.Commit || view.QuiesceState != "required" {
+		t.Fatalf("schema-blocked cache contract=%+v", view)
+	}
+	if view.SchemaRecovery == nil || view.SchemaRecovery.State != "unsafe_refused" || view.SchemaRecovery.MigrationState != "refused" || view.SchemaRecovery.TargetCompatible || view.SchemaRecovery.DataState != "intact" {
+		t.Fatalf("unsafe schema refusal=%+v", view.SchemaRecovery)
+	}
+	if len(snapshot.Diagnostics) != 1 || snapshot.Diagnostics[0].FailureClass != "cache_schema_blocked" {
+		t.Fatalf("schema-blocked diagnostics=%+v", snapshot.Diagnostics)
+	}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), root) || strings.Contains(string(data), "cache.db") {
+		t.Fatalf("absolute cache path leaked: %s", data)
+	}
+}
+
+func TestAdminObservationPublishesInterruptedSchemaLifecycleWithoutPaths(t *testing.T) {
+	root, err := shortWorkspaceTemp(t, "admin-schema-interrupted-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(root, "private", "cache.db")
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	intent := `{"schema_version":"gitcode-mcp.cache-migration-recovery.v1","target_schema":` + fmt.Sprint(cache.CurrentSchemaVersion()) + `,"phase":"migration_complete_service_restart_failed","backup_verified":true,"identity_preserved":true}`
+	if err := os.WriteFile(cachePath+".migration-recovery.json", []byte(intent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := newTestManager(t, "darwin")
+	manager.Version = "0.4.0"
+	manager.Commit = "compatible-target-commit"
+	manager.AdminCachePath = cachePath
+	jobs := NewJobManager("")
+	maintenance := NewMaintenanceManager(manager, jobs, filepath.Join(root, "registry.json"))
+	snapshot, err := manager.adminObservation(ctx, jobs, maintenance, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Caches) != 1 {
+		t.Fatalf("cache observations=%+v", snapshot.Caches)
+	}
+	view := snapshot.Caches[0]
+	recovery := view.SchemaRecovery
+	if recovery == nil || recovery.State != "interrupted_upgrade" || recovery.Phase != "migration_complete_service_restart_failed" || recovery.BackupState != "verified" || recovery.MigrationState != "complete" || recovery.RestartState != "interrupted" || recovery.IdentityState != "preserved" || recovery.TargetBinaryVersion != manager.Version || recovery.TargetBinaryCommit != manager.Commit {
+		t.Fatalf("interrupted lifecycle=%+v", recovery)
+	}
+	if view.CacheRef == "" || identity.UUID == "" {
+		t.Fatal("cache identity was not observed")
+	}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), root) || strings.Contains(string(data), "cache.db") || strings.Contains(string(data), ".backup-") {
+		t.Fatalf("migration lifecycle leaked a filesystem path: %s", data)
+	}
+	for _, want := range []string{`"state":"interrupted_upgrade"`, `"backup_state":"verified"`, `"migration_state":"complete"`, `"restart_state":"interrupted"`, `"identity_state":"preserved"`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("migration lifecycle JSON missing %s: %s", want, data)
+		}
+	}
+}
+
+func TestAdminObservationPublishesVerifiedCompatibleRestartReceiptWithoutPaths(t *testing.T) {
+	root, err := shortWorkspaceTemp(t, "admin-schema-recovered-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(root, "private", "cache.db")
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	manager := newTestManager(t, "darwin")
+	manager.Version = "0.4.0"
+	manager.Commit = "compatible-target-commit"
+	manager.AdminCachePath = cachePath
+	receipt := fmt.Sprintf(`{"schema_version":"gitcode-mcp.cache-migration-receipt.v1","cache_uuid":%q,"target_schema":%d,"phase":"healthy","backup_verified":true,"identity_preserved":true,"target_binary_version":%q,"target_binary_commit":%q,"target_schema_min":%d,"target_schema_max":%d,"completed_at":%q}`,
+		identity.UUID, cache.CurrentSchemaVersion(), manager.Version, manager.Commit, cache.CurrentSchemaVersion(), cache.CurrentSchemaVersion(), time.Now().UTC().Format(time.RFC3339Nano))
+	if err := os.WriteFile(cachePath+".migration-receipt.json", []byte(receipt), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jobs := NewJobManager("")
+	maintenance := NewMaintenanceManager(manager, jobs, filepath.Join(root, "registry.json"))
+	snapshot, err := manager.adminObservation(ctx, jobs, maintenance, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Caches) != 1 {
+		t.Fatalf("cache observations=%+v", snapshot.Caches)
+	}
+	recovery := snapshot.Caches[0].SchemaRecovery
+	if recovery == nil || recovery.State != "compatible_restart" || recovery.Phase != "healthy" || recovery.BackupState != "verified" || recovery.MigrationState != "complete" || recovery.RestartState != "compatible" || recovery.DataState != "available" || recovery.IdentityState != "preserved" || recovery.TargetBinaryVersion != manager.Version || recovery.TargetBinaryCommit != manager.Commit || !recovery.TargetCompatible {
+		t.Fatalf("compatible restart lifecycle=%+v", recovery)
+	}
+	if identity.UUID == "" || snapshot.Caches[0].CacheRef == "" {
+		t.Fatal("cache identity was not preserved")
+	}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), root) || strings.Contains(string(data), "cache.db") || strings.Contains(string(data), ".backup-") {
+		t.Fatalf("compatible restart leaked a filesystem path: %s", data)
+	}
+}
+
+func TestAdminObservationRejectsStaleOrUnverifiedRecoveryReceipt(t *testing.T) {
+	tests := []struct {
+		name              string
+		staleUUID         bool
+		backupVerified    bool
+		identityPreserved bool
+		wantPhase         string
+	}{
+		{name: "stale cache UUID", staleUUID: true, backupVerified: true, identityPreserved: true, wantPhase: "recovery_receipt_verification_failed"},
+		{name: "backup not verified", backupVerified: false, identityPreserved: true, wantPhase: "recovery_receipt_invalid"},
+		{name: "identity not preserved", backupVerified: true, identityPreserved: false, wantPhase: "recovery_receipt_invalid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root, err := shortWorkspaceTemp(t, "admin-schema-receipt-negative-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			cachePath := filepath.Join(root, "private", "cache.db")
+			if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			store, err := cache.NewSQLiteStore(ctx, cachePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity, err := store.CacheIdentity(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			receiptUUID := identity.UUID
+			if tt.staleUUID {
+				receiptUUID = "stale-replaced-cache-uuid"
+			}
+			manager := newTestManager(t, "darwin")
+			manager.Version = "0.4.0"
+			manager.Commit = "compatible-target-commit"
+			manager.AdminCachePath = cachePath
+			receipt := fmt.Sprintf(`{"schema_version":"gitcode-mcp.cache-migration-receipt.v1","cache_uuid":%q,"target_schema":%d,"phase":"healthy","backup_verified":%t,"identity_preserved":%t,"target_binary_version":%q,"target_binary_commit":%q,"target_schema_min":%d,"target_schema_max":%d,"completed_at":%q}`,
+				receiptUUID, cache.CurrentSchemaVersion(), tt.backupVerified, tt.identityPreserved, manager.Version, manager.Commit, cache.CurrentSchemaVersion(), cache.CurrentSchemaVersion(), time.Now().UTC().Format(time.RFC3339Nano))
+			if err := os.WriteFile(cachePath+".migration-receipt.json", []byte(receipt), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			jobs := NewJobManager("")
+			maintenance := NewMaintenanceManager(manager, jobs, filepath.Join(root, "registry.json"))
+			snapshot, err := manager.adminObservation(ctx, jobs, maintenance, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(snapshot.Caches) != 1 || snapshot.Caches[0].SchemaRecovery == nil {
+				t.Fatalf("missing typed receipt refusal: %+v", snapshot.Caches)
+			}
+			recovery := snapshot.Caches[0].SchemaRecovery
+			if recovery.State != "interrupted_upgrade" || recovery.Phase != tt.wantPhase || recovery.RestartState != "verification_required" || recovery.State == "compatible_restart" {
+				t.Fatalf("receipt was not rejected: %+v", recovery)
+			}
+			data, err := json.Marshal(snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), receiptUUID) || strings.Contains(string(data), identity.UUID) || strings.Contains(string(data), root) || strings.Contains(string(data), "cache.db") {
+				t.Fatalf("receipt refusal leaked private identity or path: %s", data)
+			}
+		})
 	}
 }
 
