@@ -13,6 +13,33 @@ import (
 	"gitcode-mcp/internal/gitcode"
 )
 
+func TestDurableOfflineFixtureIssueBatchCommits(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := NewWithMode(store, gitcode.ProviderModeFixture, "", ServiceConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := svc.FetchIssueSyncBatch(ctx, BulkSyncRequest{RepoID: "fixture-a", PerPage: 100, Bounds: &SyncBounds{MaxPages: 1}})
+	if err != nil {
+		t.Fatalf("FetchIssueSyncBatch: %v", err)
+	}
+	result, err := svc.CommitIssueSyncBatch(ctx, batch, nil)
+	if err != nil {
+		t.Fatalf("CommitIssueSyncBatch: %T %v; batch=%+v result=%+v", err, err, batch, result)
+	}
+	if result.SuccessCount != 1 {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
 func TestDurableIssueBatchFetchDoesNotHoldTargetWriterAndCommitDoesNotRefetch(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)

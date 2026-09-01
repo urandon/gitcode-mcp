@@ -214,6 +214,7 @@ type durableCollectionBatch struct {
 	recordCount      int
 	checkpoint       string
 	providerRevision string
+	idempotencyKey   string
 	fetchedAt        time.Time
 }
 
@@ -262,7 +263,7 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 				if marshalErr != nil {
 					return durableCollectionBatch{}, marshalErr
 				}
-				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.HighUpdatedAt.Format(time.RFC3339Nano), fetchedAt: batch.FetchedAt}, err
+				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.HighUpdatedAt.Format(time.RFC3339Nano), idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt}, err
 			},
 			commit: func(ctx context.Context, payload []byte) (*service.SyncResourcesResult, error) {
 				var batch service.DurableIssueSyncBatch
@@ -282,7 +283,7 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 				if marshalErr != nil {
 					return durableCollectionBatch{}, marshalErr
 				}
-				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, fetchedAt: batch.FetchedAt}, err
+				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt}, err
 			},
 			commit: func(ctx context.Context, payload []byte) (*service.SyncResourcesResult, error) {
 				var batch service.DurableWikiSyncBatch
@@ -302,7 +303,7 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 				if marshalErr != nil {
 					return durableCollectionBatch{}, marshalErr
 				}
-				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.HighUpdatedAt.Format(time.RFC3339Nano), fetchedAt: batch.FetchedAt}, err
+				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.HighUpdatedAt.Format(time.RFC3339Nano), idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt}, err
 			},
 			commit: func(ctx context.Context, payload []byte) (*service.SyncResourcesResult, error) {
 				var batch service.DurablePullSyncBatch
@@ -335,7 +336,7 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 		JobID: jobID, CacheUUID: req.CacheUUID, CacheSchema: schema, CachePath: req.CachePath, RegistrationID: req.RegistrationID,
 		RepoID: req.RepoID, Collection: work.collection, Checkpoint: batch.checkpoint,
 		ProviderRevision: batch.providerRevision,
-		IdempotencyKey:   req.IdempotencyKey, RecordCount: batch.recordCount, Payload: batch.payload,
+		IdempotencyKey:   batch.idempotencyKey, RecordCount: batch.recordCount, Payload: batch.payload,
 		State: SyncStageState{Phase: SyncStageStaged, RetryBudget: defaultSyncCommitRetries, FetchedAt: batch.fetchedAt},
 	})
 	if err != nil {

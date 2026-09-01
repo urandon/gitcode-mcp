@@ -195,7 +195,7 @@ func TestIssueOnlyDaemonSyncWaitsForWriterAndCommitsRetainedStage(t *testing.T) 
 	cfg := config.Default()
 	manager.EffectiveConfig = &cfg
 	jobs := NewJobManager(filepath.Join(root, "jobs.json"))
-	job, err := jobs.StartSync(ctx, manager, StartSyncJobRequest{RepoID: "owner/repo", CachePath: cachePath, CacheUUID: identity.UUID, Issues: true, ProviderMode: "fixture", IdempotencyKey: "durable-daemon-issues", MaxPages: 1, PerPage: 100})
+	job, err := jobs.StartSync(ctx, manager, StartSyncJobRequest{RepoID: "owner/repo", CachePath: cachePath, CacheUUID: identity.UUID, Issues: true, ProviderMode: "fixture", MaxPages: 1, PerPage: 100})
 	if err != nil {
 		t.Fatalf("StartSync: %v", err)
 	}
