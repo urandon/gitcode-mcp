@@ -270,7 +270,8 @@ func (m *JobManager) runDurableSync(ctx context.Context, manager Manager, jobID 
 	collections := make([]syncCollectionResult, 0, len(works))
 	var syncErr error
 	for _, work := range works {
-		result, collection, collectionErr := m.runDurableCollection(ctx, manager, jobID, req, schema, bindingFingerprint, work)
+		workReq := durableCollectionJobRequest(req, work.remoteType)
+		result, collection, collectionErr := m.runDurableCollection(ctx, manager, jobID, workReq, schema, bindingFingerprint, work)
 		mergeSyncResources(aggregate, result)
 		collections = append(collections, collection)
 		syncErr = mergeSyncError(syncErr, result, collectionErr)
@@ -279,6 +280,14 @@ func (m *JobManager) runDurableSync(ctx context.Context, manager Manager, jobID 
 		}
 	}
 	return aggregate, collections, syncErr
+}
+
+func durableCollectionJobRequest(req StartSyncJobRequest, remoteType string) StartSyncJobRequest {
+	request := req
+	if page := req.collectionPages[remoteType]; page > 0 {
+		request.Page = page
+	}
+	return request
 }
 
 func normalizeDurableSyncRequest(req StartSyncJobRequest) StartSyncJobRequest {

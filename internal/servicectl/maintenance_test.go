@@ -2835,6 +2835,80 @@ func TestMaintenanceMixedCollectionsKeepIndependentContinuationUnits(t *testing.
 	}
 }
 
+func TestMaintenanceMixedCollectionsPublishCollectionLocalCheckpoints(t *testing.T) {
+	for _, lane := range []string{"head", "tail"} {
+		t.Run(lane, func(t *testing.T) {
+			ctx := context.Background()
+			cachePath := filepath.Join(t.TempDir(), "cache.db")
+			store, err := cache.NewSQLiteStore(ctx, cachePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+				t.Fatal(err)
+			}
+			status := "partial"
+			if lane == "tail" {
+				status = "backfilling"
+			}
+			now := time.Now().UTC()
+			frontiers := []cache.MaintenanceFrontier{
+				{RepoID: "owner/repo", RemoteType: "issue", Ordering: "updated_at_desc", FilterKey: "all", Lane: lane, Status: status, Checkpoint: "next_page:11", UpdatedAt: now},
+				{RepoID: "owner/repo", RemoteType: "wiki", Ordering: "updated_at_desc", FilterKey: "all", Lane: lane, Status: status, Checkpoint: "next_page:2", UpdatedAt: now},
+			}
+			for _, frontier := range frontiers {
+				if err := store.UpsertMaintenanceFrontier(ctx, frontier); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			selection := maintenanceSyncSelection(MaintenancePolicy{Issues: true, Wiki: true, HeadIntervalSeconds: 900}, frontiers, lane, now)
+			req := StartSyncJobRequest{
+				RepoID: "owner/repo", CachePath: cachePath, Lane: lane, Page: 2, MaxPages: 1,
+				collectionPages: selection.collectionPages,
+			}
+			issueReq := durableCollectionJobRequest(req, "issue")
+			if issueReq.Page != 11 {
+				t.Fatalf("effective issue page=%d want=11; pages=%v", issueReq.Page, selection.collectionPages)
+			}
+			frontier, err := stagedMaintenanceFrontier(ctx, issueReq, "issue", durableCollectionBatch{
+				checkpoint: "max_pages", pagesListed: 1, recordsListed: 100, traversalStatus: "bounded",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if frontier.Checkpoint != "next_page:12" {
+				t.Fatalf("staged issue checkpoint=%q want=next_page:12", frontier.Checkpoint)
+			}
+
+			store, err = cache.NewSQLiteStore(ctx, cachePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			if err := store.UpsertMaintenanceFrontier(ctx, *frontier); err != nil {
+				t.Fatal(err)
+			}
+			committed, err := store.ListMaintenanceFrontiers(ctx, "owner/repo")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, candidate := range committed {
+				if candidate.RemoteType == "issue" && candidate.Lane == lane {
+					if candidate.Checkpoint != "next_page:12" {
+						t.Fatalf("committed issue checkpoint=%q want=next_page:12", candidate.Checkpoint)
+					}
+					return
+				}
+			}
+			t.Fatalf("committed issue %s frontier missing: %+v", lane, committed)
+		})
+	}
+}
+
 func TestMaintenanceCheckpointAdvancesWithOnePageOverlap(t *testing.T) {
 	req := StartSyncJobRequest{Lane: "tail", Page: 21, MaxPages: 10}
 	collection := syncCollectionResult{Result: &service.SyncResourcesResult{TraversalStatus: "bounded", PagesListed: 10}}
