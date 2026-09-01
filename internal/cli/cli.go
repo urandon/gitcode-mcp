@@ -4439,6 +4439,7 @@ const cacheMigrationRecoverySchema = "gitcode-mcp.cache-migration-recovery.v1"
 
 type cacheMigrationReceipt struct {
 	SchemaVersion       string    `json:"schema_version"`
+	CacheUUID           string    `json:"cache_uuid"`
 	TargetSchema        int       `json:"target_schema"`
 	Phase               string    `json:"phase"`
 	BackupVerified      bool      `json:"backup_verified"`
@@ -4882,7 +4883,29 @@ func executeMigrateCacheCommand(ctx context.Context, opts options, stdout io.Wri
 			mr.DaemonSchemaMin = started.SchemaMin
 			mr.DaemonSchemaMax = started.SchemaMax
 		}
+		if !recovery.BackupVerified || !recovery.IdentityPreserved {
+			mr.RecoveryState = "healthy_evidence_verification_failed"
+			recovery.Phase = mr.RecoveryState
+			_ = writeCacheMigrationRecovery(cachePath, recovery)
+			return writeMigrateCacheRecoveryFailure(stdout, stderr, opts.format, mr, "cache_schema_recovery_evidence_failed")
+		}
+		identityStore, err := cache.NewSQLiteReadOnlyStore(ctx, cachePath)
+		if err != nil {
+			mr.RecoveryState = "healthy_identity_read_failed"
+			recovery.Phase = mr.RecoveryState
+			_ = writeCacheMigrationRecovery(cachePath, recovery)
+			return writeMigrateCacheRecoveryFailure(stdout, stderr, opts.format, mr, "cache_schema_recovery_identity_failed")
+		}
+		identity, identityErr := identityStore.CacheIdentity(ctx)
+		closeErr := identityStore.Close()
+		if identityErr != nil || closeErr != nil || strings.TrimSpace(identity.UUID) == "" {
+			mr.RecoveryState = "healthy_identity_read_failed"
+			recovery.Phase = mr.RecoveryState
+			_ = writeCacheMigrationRecovery(cachePath, recovery)
+			return writeMigrateCacheRecoveryFailure(stdout, stderr, opts.format, mr, "cache_schema_recovery_identity_failed")
+		}
 		if err := writeCacheMigrationReceipt(cachePath, cacheMigrationReceipt{
+			CacheUUID:    identity.UUID,
 			TargetSchema: recovery.TargetSchema, Phase: "healthy",
 			BackupVerified: recovery.BackupVerified, IdentityPreserved: recovery.IdentityPreserved,
 			TargetBinaryVersion: compatibleService.BinaryVersion, TargetBinaryCommit: compatibleService.BinaryCommit,

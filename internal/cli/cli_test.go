@@ -457,7 +457,7 @@ func TestMigrateCacheEndToEndReplacesOldDaemonAfterSchemaUpgrade(t *testing.T) {
 	if err := json.Unmarshal(receiptData, &receipt); err != nil {
 		t.Fatal(err)
 	}
-	if receipt.SchemaVersion != cacheMigrationReceiptSchema || receipt.Phase != "healthy" || receipt.TargetBinaryVersion != manager.Version || receipt.TargetBinaryCommit != manager.Commit || receipt.TargetSchema != cache.CurrentSchemaVersion() || !receipt.BackupVerified || !receipt.IdentityPreserved || receipt.CompletedAt.IsZero() {
+	if receipt.SchemaVersion != cacheMigrationReceiptSchema || receipt.CacheUUID == "" || receipt.Phase != "healthy" || receipt.TargetBinaryVersion != manager.Version || receipt.TargetBinaryCommit != manager.Commit || receipt.TargetSchema != cache.CurrentSchemaVersion() || !receipt.BackupVerified || !receipt.IdentityPreserved || receipt.CompletedAt.IsZero() {
 		t.Fatalf("migration receipt=%+v", receipt)
 	}
 	installed, err := os.ReadFile(paths.InstallPath)

@@ -210,8 +210,8 @@ func TestAdminObservationPublishesVerifiedCompatibleRestartReceiptWithoutPaths(t
 	manager.Version = "0.4.0"
 	manager.Commit = "compatible-target-commit"
 	manager.AdminCachePath = cachePath
-	receipt := fmt.Sprintf(`{"schema_version":"gitcode-mcp.cache-migration-receipt.v1","target_schema":%d,"phase":"healthy","backup_verified":true,"identity_preserved":true,"target_binary_version":%q,"target_binary_commit":%q,"target_schema_min":%d,"target_schema_max":%d,"completed_at":%q}`,
-		cache.CurrentSchemaVersion(), manager.Version, manager.Commit, cache.CurrentSchemaVersion(), cache.CurrentSchemaVersion(), time.Now().UTC().Format(time.RFC3339Nano))
+	receipt := fmt.Sprintf(`{"schema_version":"gitcode-mcp.cache-migration-receipt.v1","cache_uuid":%q,"target_schema":%d,"phase":"healthy","backup_verified":true,"identity_preserved":true,"target_binary_version":%q,"target_binary_commit":%q,"target_schema_min":%d,"target_schema_max":%d,"completed_at":%q}`,
+		identity.UUID, cache.CurrentSchemaVersion(), manager.Version, manager.Commit, cache.CurrentSchemaVersion(), cache.CurrentSchemaVersion(), time.Now().UTC().Format(time.RFC3339Nano))
 	if err := os.WriteFile(cachePath+".migration-receipt.json", []byte(receipt), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -237,6 +237,77 @@ func TestAdminObservationPublishesVerifiedCompatibleRestartReceiptWithoutPaths(t
 	}
 	if strings.Contains(string(data), root) || strings.Contains(string(data), "cache.db") || strings.Contains(string(data), ".backup-") {
 		t.Fatalf("compatible restart leaked a filesystem path: %s", data)
+	}
+}
+
+func TestAdminObservationRejectsStaleOrUnverifiedRecoveryReceipt(t *testing.T) {
+	tests := []struct {
+		name              string
+		staleUUID         bool
+		backupVerified    bool
+		identityPreserved bool
+		wantPhase         string
+	}{
+		{name: "stale cache UUID", staleUUID: true, backupVerified: true, identityPreserved: true, wantPhase: "recovery_receipt_verification_failed"},
+		{name: "backup not verified", backupVerified: false, identityPreserved: true, wantPhase: "recovery_receipt_invalid"},
+		{name: "identity not preserved", backupVerified: true, identityPreserved: false, wantPhase: "recovery_receipt_invalid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root, err := shortWorkspaceTemp(t, "admin-schema-receipt-negative-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			cachePath := filepath.Join(root, "private", "cache.db")
+			if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			store, err := cache.NewSQLiteStore(ctx, cachePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity, err := store.CacheIdentity(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			receiptUUID := identity.UUID
+			if tt.staleUUID {
+				receiptUUID = "stale-replaced-cache-uuid"
+			}
+			manager := newTestManager(t, "darwin")
+			manager.Version = "0.4.0"
+			manager.Commit = "compatible-target-commit"
+			manager.AdminCachePath = cachePath
+			receipt := fmt.Sprintf(`{"schema_version":"gitcode-mcp.cache-migration-receipt.v1","cache_uuid":%q,"target_schema":%d,"phase":"healthy","backup_verified":%t,"identity_preserved":%t,"target_binary_version":%q,"target_binary_commit":%q,"target_schema_min":%d,"target_schema_max":%d,"completed_at":%q}`,
+				receiptUUID, cache.CurrentSchemaVersion(), tt.backupVerified, tt.identityPreserved, manager.Version, manager.Commit, cache.CurrentSchemaVersion(), cache.CurrentSchemaVersion(), time.Now().UTC().Format(time.RFC3339Nano))
+			if err := os.WriteFile(cachePath+".migration-receipt.json", []byte(receipt), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			jobs := NewJobManager("")
+			maintenance := NewMaintenanceManager(manager, jobs, filepath.Join(root, "registry.json"))
+			snapshot, err := manager.adminObservation(ctx, jobs, maintenance, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(snapshot.Caches) != 1 || snapshot.Caches[0].SchemaRecovery == nil {
+				t.Fatalf("missing typed receipt refusal: %+v", snapshot.Caches)
+			}
+			recovery := snapshot.Caches[0].SchemaRecovery
+			if recovery.State != "interrupted_upgrade" || recovery.Phase != tt.wantPhase || recovery.RestartState != "verification_required" || recovery.State == "compatible_restart" {
+				t.Fatalf("receipt was not rejected: %+v", recovery)
+			}
+			data, err := json.Marshal(snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), receiptUUID) || strings.Contains(string(data), identity.UUID) || strings.Contains(string(data), root) || strings.Contains(string(data), "cache.db") {
+				t.Fatalf("receipt refusal leaked private identity or path: %s", data)
+			}
+		})
 	}
 }
 

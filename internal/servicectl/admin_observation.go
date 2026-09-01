@@ -116,6 +116,7 @@ const adminCacheMigrationRecoverySchema = "gitcode-mcp.cache-migration-recovery.
 
 type adminCacheMigrationReceipt struct {
 	SchemaVersion       string    `json:"schema_version"`
+	CacheUUID           string    `json:"cache_uuid"`
 	TargetSchema        int       `json:"target_schema"`
 	Phase               string    `json:"phase"`
 	BackupVerified      bool      `json:"backup_verified"`
@@ -159,13 +160,13 @@ func readAdminCacheMigrationReceipt(cachePath string) (adminCacheMigrationReceip
 	if err := json.Unmarshal(data, &receipt); err != nil {
 		return adminCacheMigrationReceipt{}, true, err
 	}
-	if receipt.SchemaVersion != adminCacheMigrationReceiptSchema || receipt.TargetSchema <= 0 || receipt.Phase != "healthy" || receipt.CompletedAt.IsZero() {
+	if receipt.SchemaVersion != adminCacheMigrationReceiptSchema || strings.TrimSpace(receipt.CacheUUID) == "" || receipt.TargetSchema <= 0 || receipt.Phase != "healthy" || !receipt.BackupVerified || !receipt.IdentityPreserved || strings.TrimSpace(receipt.TargetBinaryVersion) == "" || receipt.TargetSchemaMin <= 0 || receipt.TargetSchemaMax < receipt.TargetSchemaMin || receipt.TargetSchema < receipt.TargetSchemaMin || receipt.TargetSchema > receipt.TargetSchemaMax || receipt.CompletedAt.IsZero() {
 		return adminCacheMigrationReceipt{}, true, errors.New("unsupported cache migration receipt")
 	}
 	return receipt, true, nil
 }
 
-func adminSchemaRecovery(binaryVersion, binaryCommit string, schemaMin, schemaMax, detected, expected int, recovery adminCacheMigrationRecovery, pending bool, recoveryErr error, receipt adminCacheMigrationReceipt, receiptPresent bool, receiptErr error, identityObserved bool) *adminhttp.SchemaRecoveryObservation {
+func adminSchemaRecovery(binaryVersion, binaryCommit string, schemaMin, schemaMax, detected, expected int, recovery adminCacheMigrationRecovery, pending bool, recoveryErr error, receipt adminCacheMigrationReceipt, receiptPresent bool, receiptErr error, liveCacheUUID string) *adminhttp.SchemaRecoveryObservation {
 	target := expected
 	if recovery.TargetSchema > 0 {
 		target = recovery.TargetSchema
@@ -227,14 +228,14 @@ func adminSchemaRecovery(binaryVersion, binaryCommit string, schemaMin, schemaMa
 	}
 	if receiptErr != nil {
 		view.State = "interrupted_upgrade"
-		view.Phase = "recovery_receipt_unreadable"
+		view.Phase = "recovery_receipt_invalid"
 		view.BackupState = "unknown"
 		view.MigrationState = "unknown"
 		view.RestartState = "verification_required"
 		view.Remediation = "Inspect service diagnostics before allowing cache writers to resume."
 		return view
 	}
-	if receiptPresent && receipt.TargetSchema == detected && detected == expected && receipt.TargetBinaryVersion == binaryVersion && receipt.TargetBinaryCommit == binaryCommit && detected >= receipt.TargetSchemaMin && detected <= receipt.TargetSchemaMax {
+	if receiptPresent && receipt.CacheUUID == liveCacheUUID && receipt.TargetSchema == detected && detected == expected && receipt.TargetBinaryVersion == binaryVersion && receipt.TargetBinaryCommit == binaryCommit && receipt.TargetSchemaMin == schemaMin && receipt.TargetSchemaMax == schemaMax && detected >= receipt.TargetSchemaMin && detected <= receipt.TargetSchemaMax {
 		view.State = "compatible_restart"
 		view.Phase = "healthy"
 		view.TargetSchemaVersion = receipt.TargetSchema
@@ -247,11 +248,19 @@ func adminSchemaRecovery(binaryVersion, binaryCommit string, schemaMin, schemaMa
 		view.MigrationState = "complete"
 		view.RestartState = "compatible"
 		view.DataState = "available"
-		view.IdentityState = "observed"
-		if identityObserved {
-			view.IdentityState = "preserved"
-		}
+		view.IdentityState = "preserved"
 		view.Remediation = ""
+		return view
+	}
+	if receiptPresent {
+		view.State = "interrupted_upgrade"
+		view.Phase = "recovery_receipt_verification_failed"
+		view.BackupState = "verified"
+		view.MigrationState = "complete"
+		view.RestartState = "verification_required"
+		view.DataState = "available"
+		view.IdentityState = "mismatch"
+		view.Remediation = "The recovery receipt does not match the live cache or daemon identity; inspect service diagnostics before resuming writers."
 		return view
 	}
 	return nil
@@ -311,7 +320,7 @@ func buildAdminCache(ctx context.Context, group adminCacheGroup, entries []admin
 			view.SchemaVersion = schemaErr.Compat.DetectedVersion
 			view.ExpectedSchemaVersion = schemaErr.Compat.ExpectedVersion
 			view.QuiesceState = "required"
-			view.SchemaRecovery = adminSchemaRecovery(binaryVersion, binaryCommit, schemaMin, schemaMax, view.SchemaVersion, view.ExpectedSchemaVersion, recovery, recoveryPending, recoveryErr, receipt, receiptPresent, receiptErr, group.uuid != "")
+			view.SchemaRecovery = adminSchemaRecovery(binaryVersion, binaryCommit, schemaMin, schemaMax, view.SchemaVersion, view.ExpectedSchemaVersion, recovery, recoveryPending, recoveryErr, receipt, receiptPresent, receiptErr, group.uuid)
 			return view, []adminhttp.DiagnosticObservation{{
 				ID: "cache-schema-" + view.CacheRef, Severity: "error", EntityType: "cache", EntityID: view.CacheRef,
 				FailureClass: "cache_schema_blocked", Message: "The managed cache schema requires a compatible service binary before writers can resume.", Current: true,
@@ -326,10 +335,9 @@ func buildAdminCache(ctx context.Context, group adminCacheGroup, entries []admin
 	}
 	defer store.Close()
 	if identity, identityErr := store.CacheIdentity(ctx); identityErr == nil && identity.UUID != "" {
-		identityObserved := group.uuid == "" || group.uuid == identity.UUID
 		group.uuid = identity.UUID
 		view.CacheRef = publicCacheRef(identity.UUID, group.path)
-		view.SchemaRecovery = adminSchemaRecovery(binaryVersion, binaryCommit, schemaMin, schemaMax, cache.CurrentSchemaVersion(), cache.CurrentSchemaVersion(), recovery, recoveryPending, recoveryErr, receipt, receiptPresent, receiptErr, identityObserved)
+		view.SchemaRecovery = adminSchemaRecovery(binaryVersion, binaryCommit, schemaMin, schemaMax, cache.CurrentSchemaVersion(), cache.CurrentSchemaVersion(), recovery, recoveryPending, recoveryErr, receipt, receiptPresent, receiptErr, identity.UUID)
 	}
 	view.Readiness = "ready"
 	view.SchemaVersion, err = store.SchemaVersion(ctx)
