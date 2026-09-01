@@ -62,11 +62,11 @@ while every normal read stays independent from current network health.
 | --- | --- | --- |
 | **CLI** | Setup, sync, search, diagnostics, explicit writes, migrations, and release operations | Human-readable or JSON output over the shared service layer |
 | **MCP** | Agent search, citations, cached context, status, and policy-gated writes | stdio or HTTP/SSE with read-only and write-enabled discovery modes |
-| **Admin UI** | Operating caches, jobs, coverage, documentation indexes, conflicts, and remediation | Session-protected, loopback-only UI embedded in the coordinator binary |
+| **Admin UI** | Operating caches, jobs, coverage, documentation indexes, conflicts, and remediation | Session-protected UI embedded in the coordinator binary; loopback by default, with an explicit unsafe non-loopback development override |
 
 All three surfaces expose the same cache identities and typed lifecycle state.
 Machine-changing actions remain capability-gated; the browser never receives
-arbitrary filesystem paths or credentials.
+arbitrary filesystem paths or provider credentials.
 
 ## Quick Start
 

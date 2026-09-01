@@ -39,8 +39,15 @@ awk '
 	END { exit flowchart ? 0 : 1 }
 ' README.md || fail "README.md Mermaid block must declare a flowchart"
 
-links=$(grep -Eo '\]\([^)]+\)' README.md AGENTS.md | sed -E 's/^[^:]+:\]\((.*)\)$/\1/' | sort -u)
-for link in $links
+awk '
+	{
+		line=$0
+		while (match(line, /\]\([^)]*\)/)) {
+			print substr(line, RSTART+2, RLENGTH-3)
+			line=substr(line, RSTART+RLENGTH)
+		}
+	}
+' README.md AGENTS.md | sort -u | while IFS= read -r link
 do
 	case "$link" in
 		http://*|https://*|mailto:*|'#'*) continue ;;

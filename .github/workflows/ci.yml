@@ -62,6 +62,10 @@ jobs:
         # contracts. Raster baselines and diagnostic capture are local-only.
         run: npm run test:e2e
 
+      - name: Enforce semantic-only browser artifacts
+        # A future implicit failure capture or trace/video setting must fail CI.
+        run: ./scripts/check-browser-ci-artifacts.sh
+
       - name: Run tests
         run: go test ./...
 
