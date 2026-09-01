@@ -601,7 +601,7 @@ func newMCPRAGSearchProvider(store cache.Store, deps StartupDeps) mcp.RAGSearchP
 
 func setMCPRepositoryDocsProviders(set func(mcp.RepositoryDocsPolicyProvider, mcp.RepositoryDocsStatusProvider, mcp.RepositoryDocsSearchProvider), store *cache.SQLiteStore, deps StartupDeps) {
 	call := func(ctx context.Context, method string, req any, out any) error {
-		manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, RuntimeDir: deps.Config.Service.RuntimeDir}
+		manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, Commit: buildinfo.Current().Commit, RuntimeDir: deps.Config.Service.RuntimeDir}
 		client, err := manager.Client()
 		if err != nil {
 			return err
@@ -643,7 +643,7 @@ func setMCPRepositoryDocsProviders(set func(mcp.RepositoryDocsPolicyProvider, mc
 
 func setMCPMaintenanceProviders(set func(mcp.MaintenancePlanProvider, mcp.MaintenanceApplyProvider), deps StartupDeps) {
 	setup := servicectl.MaintenanceSetup{
-		Manager:         servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, RuntimeDir: deps.Config.Service.RuntimeDir},
+		Manager:         servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, Commit: buildinfo.Current().Commit, RuntimeDir: deps.Config.Service.RuntimeDir},
 		Config:          deps.Config,
 		CachePath:       deps.Config.CachePath,
 		CachePathSource: deps.CachePathSource,

@@ -11,9 +11,11 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -42,6 +44,550 @@ func TestHelpReturnsSuccess(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+type fakeCacheMigrationService struct {
+	status     servicectl.Status
+	calls      []string
+	quiesceErr error
+	installErr error
+	startErr   error
+}
+
+func (f *fakeCacheMigrationService) Status() (servicectl.Status, error) {
+	f.calls = append(f.calls, "status")
+	return f.status, nil
+}
+
+func (f *fakeCacheMigrationService) QuiesceForCacheMigration(context.Context) (servicectl.Status, error) {
+	f.calls = append(f.calls, "quiesce")
+	if f.quiesceErr != nil {
+		return f.status, f.quiesceErr
+	}
+	f.status.Running = false
+	f.status.PIDAlive = false
+	return f.status, nil
+}
+
+func TestMigrateCacheDoesNotMutateWhenDaemonQuiesceFails(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE schema_version SET version = 18`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	src := &repoInitLocalSource{env: map[string]string{}, cwd: dir, homeDir: dir, configDir: filepath.Join(dir, "config"), cacheDir: filepath.Join(dir, "cache")}
+	coordinator := &fakeCacheMigrationService{status: servicectl.Status{Installed: true, Running: true, PIDAlive: true}, quiesceErr: servicectl.RPCDomainError{Code: "cache_schema_quiesce_failed", Message: "still running"}}
+	var stdout, stderr bytes.Buffer
+	code := executeWithFactoryAndDepsContext(ctx, []string{"migrate-cache", "--confirm", "--cache-path", cachePath, "--format", "json"}, &stdout, &stderr, nil, localCommandDeps{Source: src, MigrationService: coordinator})
+	if code == 0 || strings.Join(coordinator.calls, ",") != "status,quiesce" {
+		t.Fatalf("code=%d calls=%v stdout=%q stderr=%q", code, coordinator.calls, stdout.String(), stderr.String())
+	}
+	check, err := sql.Open("sqlite", cachePath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	if err := check.QueryRow(`SELECT version FROM schema_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	_ = check.Close()
+	if version != 18 {
+		t.Fatalf("schema mutated after failed quiesce: %d", version)
+	}
+	if backups, _ := filepath.Glob(cachePath + ".backup-*"); len(backups) != 0 {
+		t.Fatalf("backup/mutation phase started after failed quiesce: %v", backups)
+	}
+}
+
+func (f *fakeCacheMigrationService) Install(overwrite bool) (servicectl.Status, error) {
+	f.calls = append(f.calls, fmt.Sprintf("install:%t", overwrite))
+	if f.installErr != nil {
+		return f.status, f.installErr
+	}
+	return f.status, nil
+}
+
+func (f *fakeCacheMigrationService) Start(context.Context) (servicectl.Status, error) {
+	f.calls = append(f.calls, "start")
+	if f.startErr != nil {
+		return f.status, f.startErr
+	}
+	f.status.Running = true
+	f.status.PIDAlive = true
+	f.status.BinaryVersion = "0.4.0"
+	f.status.BinaryCommit = "compatible-commit"
+	f.status.SchemaMin = cache.CurrentSchemaVersion()
+	f.status.SchemaMax = cache.CurrentSchemaVersion()
+	return f.status, nil
+}
+
+func TestMigrateCacheCoordinatesDaemonAndReportsVerifiedRecovery(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE schema_version SET version = 18`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 18`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	src := &repoInitLocalSource{env: map[string]string{}, cwd: dir, homeDir: dir, configDir: filepath.Join(dir, "config"), cacheDir: filepath.Join(dir, "cache")}
+	coordinator := &fakeCacheMigrationService{status: servicectl.Status{
+		Installed: true, Running: true, PIDAlive: true, BinaryVersion: "0.3.0", BinaryCommit: "old-commit", SchemaMin: 18, SchemaMax: 18,
+	}}
+	var stdout, stderr bytes.Buffer
+	code := executeWithFactoryAndDepsContext(ctx, []string{"migrate-cache", "--confirm", "--cache-path", cachePath, "--format", "json"}, &stdout, &stderr, nil, localCommandDeps{Source: src, MigrationService: coordinator})
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q stdout=%q calls=%v", code, stderr.String(), stdout.String(), coordinator.calls)
+	}
+	if got, want := strings.Join(coordinator.calls, ","), "status,quiesce,install:true,start"; got != want {
+		t.Fatalf("coordination order=%q want=%q", got, want)
+	}
+	var result migrateCacheResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "migrated" || !result.BackupVerified || !result.IdentityPreserved || !result.ServiceQuiesced || !result.ServiceRestarted || result.RecoveryState != "healthy" {
+		t.Fatalf("migration result=%+v", result)
+	}
+	reopened, err := cache.NewSQLiteReadOnlyStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveredIdentity, err := reopened.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = reopened.Close()
+	if recoveredIdentity.UUID != identity.UUID {
+		t.Fatalf("cache identity changed: before=%q after=%q", identity.UUID, recoveredIdentity.UUID)
+	}
+}
+
+// TestMigrateCacheDaemonProcess is a subprocess entry point used by the
+// migration E2E below. It runs the real servicectl coordinator (RPC listener,
+// durable state, job recovery, and maintenance scheduler) in a separate OS
+// process. The heartbeat makes the scheduler lifecycle externally observable:
+// after bootout returns, the old process must never emit another tick.
+func TestMigrateCacheDaemonProcess(t *testing.T) {
+	if os.Getenv("GITCODE_MCP_MIGRATION_DAEMON") != "1" {
+		return
+	}
+	schemaVersion, err := strconv.Atoi(os.Getenv("GITCODE_MCP_DAEMON_SCHEMA"))
+	if err != nil || schemaVersion <= 0 {
+		t.Fatalf("invalid helper schema %q: %v", os.Getenv("GITCODE_MCP_DAEMON_SCHEMA"), err)
+	}
+	src := &repoInitLocalSource{
+		env: map[string]string{}, cwd: os.Getenv("GITCODE_MCP_DAEMON_ROOT"),
+		homeDir: os.Getenv("GITCODE_MCP_DAEMON_HOME"), configDir: os.Getenv("GITCODE_MCP_DAEMON_CONFIG"), cacheDir: os.Getenv("GITCODE_MCP_DAEMON_CACHE"),
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	heartbeatPath := os.Getenv("GITCODE_MCP_DAEMON_HEARTBEAT")
+	identity := os.Getenv("GITCODE_MCP_DAEMON_COMMIT")
+	go func() {
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				file, openErr := os.OpenFile(heartbeatPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+				if openErr == nil {
+					_, _ = fmt.Fprintln(file, identity)
+					_ = file.Close()
+				}
+			}
+		}
+	}()
+	manager := servicectl.Manager{
+		Source: src, Version: os.Getenv("GITCODE_MCP_DAEMON_VERSION"), Commit: identity,
+		SchemaMin: schemaVersion, SchemaMax: schemaVersion, GOOS: "darwin",
+	}
+	if err := manager.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}
+
+func copyMigrationTestBinary(t *testing.T, destination string) {
+	t.Helper()
+	source, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := os.Open(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	out, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		t.Fatal(err)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func migrationDaemonCommand(binary string, src *repoInitLocalSource, heartbeatPath, version, commit string, schemaVersion int) (*exec.Cmd, *bytes.Buffer) {
+	cmd := exec.Command(binary, "-test.run=^TestMigrateCacheDaemonProcess$")
+	cmd.Env = append(os.Environ(),
+		"GITCODE_MCP_MIGRATION_DAEMON=1",
+		"GITCODE_MCP_DAEMON_ROOT="+src.cwd,
+		"GITCODE_MCP_DAEMON_HOME="+src.homeDir,
+		"GITCODE_MCP_DAEMON_CONFIG="+src.configDir,
+		"GITCODE_MCP_DAEMON_CACHE="+src.cacheDir,
+		"GITCODE_MCP_DAEMON_HEARTBEAT="+heartbeatPath,
+		"GITCODE_MCP_DAEMON_VERSION="+version,
+		"GITCODE_MCP_DAEMON_COMMIT="+commit,
+		"GITCODE_MCP_DAEMON_SCHEMA="+strconv.Itoa(schemaVersion),
+	)
+	logs := &bytes.Buffer{}
+	cmd.Stdout = logs
+	cmd.Stderr = logs
+	return cmd, logs
+}
+
+func waitForMigrationDaemon(t *testing.T, manager servicectl.Manager, version, commit string, schemaVersion int) servicectl.Status {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		status, err := manager.Status()
+		if err == nil && status.Running && status.BinaryVersion == version && status.BinaryCommit == commit && status.SchemaMin == schemaVersion && status.SchemaMax == schemaVersion {
+			return status
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	status, err := manager.Status()
+	t.Fatalf("daemon did not publish healthy identity %s/%s schema=%d: status=%+v err=%v", version, commit, schemaVersion, status, err)
+	return servicectl.Status{}
+}
+
+func heartbeatCount(t *testing.T, path, identity string) int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == identity {
+			count++
+		}
+	}
+	return count
+}
+
+func TestMigrateCacheEndToEndReplacesOldDaemonAfterSchemaUpgrade(t *testing.T) {
+	ctx := context.Background()
+	dir, err := os.MkdirTemp("/tmp", "gcm-migration-e2e-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE schema_version SET version = 18`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 18`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	src := &repoInitLocalSource{env: map[string]string{}, cwd: dir, homeDir: filepath.Join(dir, "home"), configDir: filepath.Join(dir, "config"), cacheDir: filepath.Join(dir, "cache")}
+	oldBinary := filepath.Join(dir, "gitcode-mcp-old")
+	newBinary := filepath.Join(dir, "gitcode-mcp-new")
+	for _, binary := range []string{oldBinary, newBinary} {
+		copyMigrationTestBinary(t, binary)
+	}
+	heartbeatPath := filepath.Join(dir, "scheduler-heartbeats.log")
+	oldManager := servicectl.Manager{Source: src, BinaryPath: oldBinary, Version: "0.3.0", Commit: "old-daemon", SchemaMin: 18, SchemaMax: 18, GOOS: "darwin"}
+	if _, err := oldManager.Install(false); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := oldManager.ResolvePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldDaemon, oldLogs := migrationDaemonCommand(oldBinary, src, heartbeatPath, "0.3.0", "old-daemon", 18)
+	if err := oldDaemon.Start(); err != nil {
+		t.Fatal(err)
+	}
+	oldWaited := false
+	oldStatus := waitForMigrationDaemon(t, oldManager, "0.3.0", "old-daemon", 18)
+	deadline := time.Now().Add(time.Second)
+	for heartbeatCount(t, heartbeatPath, "old-daemon") == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if heartbeatCount(t, heartbeatPath, "old-daemon") == 0 {
+		t.Fatalf("old daemon scheduler emitted no heartbeat; logs=%s", oldLogs.String())
+	}
+
+	loaded := true
+	var replacementDaemon *exec.Cmd
+	var replacementLogs *bytes.Buffer
+	var platformCalls []string
+	manager := servicectl.Manager{
+		Source: src, BinaryPath: newBinary, Version: "0.4.0", Commit: "new-daemon", SchemaMin: cache.CurrentSchemaVersion(), SchemaMax: cache.CurrentSchemaVersion(), GOOS: "darwin",
+		StartupTimeout: 5 * time.Second, StartupInterval: 5 * time.Millisecond,
+	}
+	manager.OutputRunner = func(_ context.Context, name string, args ...string) (string, error) {
+		platformCalls = append(platformCalls, strings.Join(append([]string{name}, args...), " "))
+		if loaded {
+			return "state = running", nil
+		}
+		return "", errors.New("not loaded")
+	}
+	manager.Runner = func(_ context.Context, name string, args ...string) error {
+		platformCalls = append(platformCalls, strings.Join(append([]string{name}, args...), " "))
+		if name != "launchctl" || len(args) == 0 {
+			return nil
+		}
+		switch args[0] {
+		case "bootout":
+			loaded = false
+			if oldDaemon.Process == nil {
+				return errors.New("old daemon was not started")
+			}
+			if err := oldDaemon.Process.Signal(syscall.SIGTERM); err != nil {
+				return err
+			}
+			if err := oldDaemon.Wait(); err != nil {
+				return fmt.Errorf("old daemon did not stop cleanly: %w; logs=%s", err, oldLogs.String())
+			}
+			oldWaited = true
+		case "bootstrap":
+			if !oldWaited || oldDaemon.ProcessState == nil || !oldDaemon.ProcessState.Exited() {
+				return errors.New("refusing migration bootstrap while old daemon scheduler is still alive")
+			}
+			loaded = true
+		case "kickstart":
+			replacementDaemon, replacementLogs = migrationDaemonCommand(newBinary, src, heartbeatPath, manager.Version, manager.Commit, cache.CurrentSchemaVersion())
+			return replacementDaemon.Start()
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		if !oldWaited && oldDaemon.Process != nil {
+			_ = oldDaemon.Process.Signal(syscall.SIGTERM)
+			_ = oldDaemon.Wait()
+		}
+		if replacementDaemon != nil && replacementDaemon.Process != nil {
+			_ = replacementDaemon.Process.Signal(syscall.SIGTERM)
+			_ = replacementDaemon.Wait()
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := executeWithFactoryAndDepsContext(ctx, []string{"migrate-cache", "--confirm", "--cache-path", cachePath, "--format", "json"}, &stdout, &stderr, nil, localCommandDeps{Source: src, MigrationService: &manager})
+	if code != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q platform_calls=%v", code, stdout.String(), stderr.String(), platformCalls)
+	}
+	var result migrateCacheResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "migrated" || result.RecoveryState != "healthy" || !result.ServiceQuiesced || !result.ServiceRestarted || !result.BackupVerified || !result.IdentityPreserved {
+		t.Fatalf("result=%+v", result)
+	}
+	if result.DaemonVersion != manager.Version || result.DaemonCommit != manager.Commit {
+		t.Fatalf("migration did not report compatible target identity: %+v", result)
+	}
+	receiptData, err := os.ReadFile(cacheMigrationReceiptPath(cachePath))
+	if err != nil {
+		t.Fatalf("read migration receipt: %v", err)
+	}
+	var receipt cacheMigrationReceipt
+	if err := json.Unmarshal(receiptData, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if receipt.SchemaVersion != cacheMigrationReceiptSchema || receipt.CacheUUID == "" || receipt.Phase != "healthy" || receipt.TargetBinaryVersion != manager.Version || receipt.TargetBinaryCommit != manager.Commit || receipt.TargetSchema != cache.CurrentSchemaVersion() || !receipt.BackupVerified || !receipt.IdentityPreserved || receipt.CompletedAt.IsZero() {
+		t.Fatalf("migration receipt=%+v", receipt)
+	}
+	installed, err := os.ReadFile(paths.InstallPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(installed, []byte(newBinary)) || bytes.Contains(installed, []byte(oldBinary)) {
+		t.Fatalf("installed definition did not select compatible binary: %s", installed)
+	}
+	status, err := manager.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Running || status.BinaryVersion != manager.Version || status.BinaryCommit != manager.Commit || status.SchemaMin != cache.CurrentSchemaVersion() || status.SchemaMax != cache.CurrentSchemaVersion() {
+		t.Fatalf("replacement daemon status=%+v logs=%s", status, replacementLogs.String())
+	}
+	if status.PID == oldStatus.PID || replacementDaemon == nil || replacementDaemon.Process == nil || status.PID != replacementDaemon.Process.Pid {
+		t.Fatalf("replacement process identity is not authoritative: old_pid=%d new_pid=%d status_pid=%d", oldStatus.PID, replacementDaemon.Process.Pid, status.PID)
+	}
+	oldHeartbeats := heartbeatCount(t, heartbeatPath, "old-daemon")
+	newHeartbeats := heartbeatCount(t, heartbeatPath, "new-daemon")
+	time.Sleep(40 * time.Millisecond)
+	if got := heartbeatCount(t, heartbeatPath, "old-daemon"); got != oldHeartbeats {
+		t.Fatalf("old daemon continued scheduling after migration: before=%d after=%d", oldHeartbeats, got)
+	}
+	if got := heartbeatCount(t, heartbeatPath, "new-daemon"); got <= newHeartbeats {
+		t.Fatalf("replacement daemon scheduler did not advance: before=%d after=%d logs=%s", newHeartbeats, got, replacementLogs.String())
+	}
+	joined := strings.Join(platformCalls, "\n")
+	if !strings.Contains(joined, "launchctl bootout") || !strings.Contains(joined, "launchctl bootstrap") || !strings.Contains(joined, "launchctl kickstart") {
+		t.Fatalf("coordinated platform sequence missing:\n%s", joined)
+	}
+}
+
+func TestMigrateCacheResumesServiceRecoveryAfterCommittedMigration(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE schema_version SET version = 18`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 18`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	src := &repoInitLocalSource{env: map[string]string{}, cwd: dir, homeDir: dir, configDir: filepath.Join(dir, "config"), cacheDir: filepath.Join(dir, "cache")}
+	coordinator := &fakeCacheMigrationService{status: servicectl.Status{
+		Installed: true, Running: true, PIDAlive: true, BinaryVersion: "0.3.0", BinaryCommit: "old-commit", SchemaMin: 18, SchemaMax: 18,
+	}, installErr: errors.New("injected install failure")}
+	var stdout, stderr bytes.Buffer
+	code := executeWithFactoryAndDepsContext(ctx, []string{"migrate-cache", "--confirm", "--cache-path", cachePath, "--format", "json"}, &stdout, &stderr, nil, localCommandDeps{Source: src, MigrationService: coordinator})
+	if code == 0 {
+		t.Fatalf("first attempt unexpectedly succeeded: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	var failed migrateCacheResult
+	if err := json.Unmarshal(stdout.Bytes(), &failed); err != nil {
+		t.Fatalf("decode recovery result: %v output=%q", err, stdout.String())
+	}
+	if failed.Status != "recovery_required" || failed.RecoveryState != "migration_complete_service_install_failed" || !failed.BackupVerified || !failed.IdentityPreserved {
+		t.Fatalf("failed recovery result=%+v", failed)
+	}
+	if _, err := os.Stat(cacheMigrationRecoveryPath(cachePath)); err != nil {
+		t.Fatalf("durable recovery intent missing: %v", err)
+	}
+
+	coordinator.calls = nil
+	stdout.Reset()
+	stderr.Reset()
+	code = executeWithFactoryAndDepsContext(ctx, []string{"migrate-cache", "--cache-path", cachePath, "--format", "json"}, &stdout, &stderr, nil, localCommandDeps{Source: src, MigrationService: coordinator})
+	if code == 0 {
+		t.Fatalf("unconfirmed recovery unexpectedly succeeded: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	var unconfirmed migrateCacheResult
+	if err := json.Unmarshal(stdout.Bytes(), &unconfirmed); err != nil {
+		t.Fatalf("decode unconfirmed recovery result: %v output=%q", err, stdout.String())
+	}
+	if unconfirmed.Status != "recovery_required" || unconfirmed.RecoveryState != "migration_complete_service_install_failed" {
+		t.Fatalf("unconfirmed recovery result=%+v", unconfirmed)
+	}
+	if !strings.Contains(unconfirmed.Remediation, "migrate-cache --confirm") {
+		t.Fatalf("unconfirmed recovery remediation=%q", unconfirmed.Remediation)
+	}
+	if got, want := strings.Join(coordinator.calls, ","), "status"; got != want {
+		t.Fatalf("unconfirmed recovery calls=%q want=%q", got, want)
+	}
+	if _, err := os.Stat(cacheMigrationRecoveryPath(cachePath)); err != nil {
+		t.Fatalf("unconfirmed recovery removed durable intent: %v", err)
+	}
+
+	coordinator.installErr = nil
+	coordinator.calls = nil
+	stdout.Reset()
+	stderr.Reset()
+	code = executeWithFactoryAndDepsContext(ctx, []string{"migrate-cache", "--confirm", "--cache-path", cachePath, "--format", "json"}, &stdout, &stderr, nil, localCommandDeps{Source: src, MigrationService: coordinator})
+	if code != 0 {
+		t.Fatalf("retry code=%d stdout=%q stderr=%q calls=%v", code, stdout.String(), stderr.String(), coordinator.calls)
+	}
+	if got, want := strings.Join(coordinator.calls, ","), "status,install:true,start"; got != want {
+		t.Fatalf("retry calls=%q want=%q", got, want)
+	}
+	var recovered migrateCacheResult
+	if err := json.Unmarshal(stdout.Bytes(), &recovered); err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Status != "up_to_date" || recovered.RecoveryState != "healthy" || !recovered.ServiceRestarted || !recovered.BackupVerified || !recovered.IdentityPreserved {
+		t.Fatalf("recovered result=%+v", recovered)
+	}
+	if _, err := os.Stat(cacheMigrationRecoveryPath(cachePath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovery intent retained after health verification: %v", err)
+	}
+	receiptData, err := os.ReadFile(cacheMigrationReceiptPath(cachePath))
+	if err != nil {
+		t.Fatalf("successful retry did not publish recovery receipt: %v", err)
+	}
+	if strings.Contains(string(receiptData), cachePath) || strings.Contains(string(receiptData), failed.BackupPath) {
+		t.Fatalf("migration receipt leaked a filesystem path: %s", receiptData)
 	}
 }
 

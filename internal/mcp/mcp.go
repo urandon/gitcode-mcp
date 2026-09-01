@@ -1549,7 +1549,7 @@ func (s *Server) callServiceStatus(ctx context.Context, id *json.RawMessage, arg
 		s.writeOperationalError(id, err, domainErrorContext{Operation: "service_status", Subsystem: "service"})
 		return
 	}
-	text := fmt.Sprintf("service status=%s running=%t", result.Status, result.Running)
+	text := fmt.Sprintf("service status=%s running=%t cache_readiness=%s schema_blocks=%d", result.Status, result.Running, result.CacheReadiness, len(result.CacheSchemaBlocks))
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 }
 
@@ -1638,7 +1638,7 @@ func (s *Server) callServiceJobs(ctx context.Context, id *json.RawMessage, args 
 		s.writeOperationalError(id, err, domainErrorContext{Operation: "service_jobs", Subsystem: "service"})
 		return
 	}
-	text := fmt.Sprintf("jobs=%d", len(result.Jobs))
+	text := fmt.Sprintf("jobs=%d cache_readiness=%s schema_blocks=%d", len(result.Jobs), result.CacheReadiness, len(result.CacheSchemaBlocks))
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 }
 

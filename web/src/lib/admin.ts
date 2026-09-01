@@ -105,6 +105,26 @@ export type CacheObservation = {
   storage_mode?: string;
   readiness: string;
   schema_version?: number;
+  expected_schema_version?: number;
+  daemon_binary_version?: string;
+  daemon_binary_commit?: string;
+  quiesce_state?: string;
+  schema_recovery?: {
+    state: 'migration_required' | 'unsafe_refused' | 'interrupted_upgrade' | 'compatible_restart';
+    phase: string;
+    target_schema_version: number;
+    target_binary_version?: string;
+    target_binary_commit?: string;
+    target_schema_min?: number;
+    target_schema_max?: number;
+    target_compatible: boolean;
+    backup_state: string;
+    migration_state: string;
+    restart_state: string;
+    data_state: string;
+    identity_state: string;
+    remediation?: string;
+  };
   wal_capable: boolean;
   journal_mode?: string;
   record_count: number;
@@ -470,7 +490,7 @@ export type ObservationSnapshot = {
   api_version: string;
   revision: string;
   generated_at: string;
-  service: { version: string; protocol: string; running: boolean; installed: boolean; install_kind?: string; started_at?: string; admin_secure: boolean };
+  service: { version: string; commit?: string; schema_min?: number; schema_max?: number; protocol: string; running: boolean; installed: boolean; install_kind?: string; started_at?: string; admin_secure: boolean };
   attention: Array<{ id: string; severity: string; entity_type: string; entity_id: string; code: string; message: string; remediation?: string }>;
   caches: CacheObservation[];
   jobs: Job[];
@@ -531,6 +551,7 @@ export function statusTone(value: string | undefined): 'good' | 'warn' | 'bad' |
     case 'failed':
     case 'error':
     case 'blocked':
+    case 'cache_schema_blocked':
     case 'unavailable':
       return 'bad';
     case 'partial':
