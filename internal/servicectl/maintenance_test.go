@@ -2809,6 +2809,32 @@ func TestMaintenanceLaneTracksEveryCollectionFrontier(t *testing.T) {
 	}
 }
 
+func TestMaintenanceMixedCollectionsKeepIndependentContinuationUnits(t *testing.T) {
+	now := time.Now().UTC()
+	policy := MaintenancePolicy{Issues: true, Wiki: true, HeadIntervalSeconds: 900}
+	frontiers := []cache.MaintenanceFrontier{
+		{RemoteType: "issue", Lane: "head", Status: "partial", Checkpoint: "next_page:2", UpdatedAt: now},
+		{RemoteType: "wiki", Lane: "head", Status: "partial", Checkpoint: "next_page:11", UpdatedAt: now},
+	}
+	selection := maintenanceSyncSelection(policy, frontiers, "head", now)
+	if !selection.Issues || !selection.Wiki || len(selection.collectionPages) != 2 {
+		t.Fatalf("selection=%+v pages=%v", selection, selection.collectionPages)
+	}
+	base := service.BulkSyncRequest{Page: 2, PerPage: 100}
+	if got := durableCollectionRequest(base, selection, "issue").Page; got != 2 {
+		t.Fatalf("issue page=%d want=2", got)
+	}
+	if got := durableCollectionRequest(base, selection, "wiki").Page; got != 11 {
+		t.Fatalf("wiki offset=%d want=11", got)
+	}
+
+	frontiers[1] = cache.MaintenanceFrontier{RemoteType: "wiki", Lane: "head", Status: "fresh", UpdatedAt: now}
+	selection = maintenanceSyncSelection(policy, frontiers, "head", now)
+	if !selection.Issues || selection.Wiki {
+		t.Fatalf("fresh wiki was unnecessarily selected: %+v", selection)
+	}
+}
+
 func TestMaintenanceCheckpointAdvancesWithOnePageOverlap(t *testing.T) {
 	req := StartSyncJobRequest{Lane: "tail", Page: 21, MaxPages: 10}
 	collection := syncCollectionResult{Result: &service.SyncResourcesResult{TraversalStatus: "bounded", PagesListed: 10}}

@@ -44,23 +44,24 @@ func (e CacheWriterIdentityError) Error() string {
 func (e CacheWriterIdentityError) DiagnosticCode() string { return e.code }
 
 type StartSyncJobRequest struct {
-	RepoID         string `json:"repo_id"`
-	ProviderMode   string `json:"provider_mode,omitempty"`
-	CachePath      string `json:"cache_path,omitempty"`
-	Issues         bool   `json:"issues,omitempty"`
-	Wiki           bool   `json:"wiki,omitempty"`
-	Pulls          bool   `json:"pulls,omitempty"`
-	Comments       bool   `json:"comments,omitempty"`
-	IssueComments  bool   `json:"issue_comments,omitempty"`
-	PRComments     bool   `json:"pr_comments,omitempty"`
-	IdempotencyKey string `json:"idempotency_key,omitempty"`
-	MaxPages       int    `json:"max_pages,omitempty"`
-	MaxRecords     int    `json:"max_records,omitempty"`
-	PerPage        int    `json:"per_page,omitempty"`
-	Page           int    `json:"page,omitempty"`
-	CacheUUID      string `json:"cache_uuid,omitempty"`
-	RegistrationID string `json:"registration_id,omitempty"`
-	Lane           string `json:"lane,omitempty"`
+	RepoID          string `json:"repo_id"`
+	ProviderMode    string `json:"provider_mode,omitempty"`
+	CachePath       string `json:"cache_path,omitempty"`
+	Issues          bool   `json:"issues,omitempty"`
+	Wiki            bool   `json:"wiki,omitempty"`
+	Pulls           bool   `json:"pulls,omitempty"`
+	Comments        bool   `json:"comments,omitempty"`
+	IssueComments   bool   `json:"issue_comments,omitempty"`
+	PRComments      bool   `json:"pr_comments,omitempty"`
+	IdempotencyKey  string `json:"idempotency_key,omitempty"`
+	MaxPages        int    `json:"max_pages,omitempty"`
+	MaxRecords      int    `json:"max_records,omitempty"`
+	PerPage         int    `json:"per_page,omitempty"`
+	Page            int    `json:"page,omitempty"`
+	CacheUUID       string `json:"cache_uuid,omitempty"`
+	RegistrationID  string `json:"registration_id,omitempty"`
+	Lane            string `json:"lane,omitempty"`
+	collectionPages map[string]int
 }
 
 func normalizeCacheWriterIdentity(ctx context.Context, manager Manager, cachePath, cacheUUID, registrationID, repoID *string) error {
@@ -297,7 +298,7 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 		works = append(works, durableCollectionWork{
 			collection: "issues", remoteType: "issue",
 			fetch: func(ctx context.Context) (durableCollectionBatch, error) {
-				batch, err := svc.FetchIssueSyncBatch(ctx, bulkReq)
+				batch, err := svc.FetchIssueSyncBatch(ctx, durableCollectionRequest(bulkReq, req, "issue"))
 				payload, marshalErr := json.Marshal(batch)
 				if marshalErr != nil {
 					return durableCollectionBatch{}, marshalErr
@@ -321,7 +322,7 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 		works = append(works, durableCollectionWork{
 			collection: "issue_comments", remoteType: "issue_comment",
 			fetch: func(ctx context.Context) (durableCollectionBatch, error) {
-				batch, err := svc.FetchIssueCommentSyncBatch(ctx, bulkReq)
+				batch, err := svc.FetchIssueCommentSyncBatch(ctx, durableCollectionRequest(bulkReq, req, "issue_comment"))
 				payload, marshalErr := json.Marshal(batch)
 				if marshalErr != nil {
 					return durableCollectionBatch{}, marshalErr
@@ -345,7 +346,7 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 		works = append(works, durableCollectionWork{
 			collection: "wiki", remoteType: "wiki",
 			fetch: func(ctx context.Context) (durableCollectionBatch, error) {
-				batch, err := svc.FetchWikiSyncBatch(ctx, bulkReq)
+				batch, err := svc.FetchWikiSyncBatch(ctx, durableCollectionRequest(bulkReq, req, "wiki"))
 				payload, marshalErr := json.Marshal(batch)
 				if marshalErr != nil {
 					return durableCollectionBatch{}, marshalErr
@@ -369,7 +370,7 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 		works = append(works, durableCollectionWork{
 			collection: "pulls", remoteType: "pull_request",
 			fetch: func(ctx context.Context) (durableCollectionBatch, error) {
-				batch, err := svc.FetchPullSyncBatch(ctx, bulkReq)
+				batch, err := svc.FetchPullSyncBatch(ctx, durableCollectionRequest(bulkReq, req, "pull_request"))
 				payload, marshalErr := json.Marshal(batch)
 				if marshalErr != nil {
 					return durableCollectionBatch{}, marshalErr
@@ -393,7 +394,7 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 		works = append(works, durableCollectionWork{
 			collection: "pr_comments", remoteType: "pr_comment",
 			fetch: func(ctx context.Context) (durableCollectionBatch, error) {
-				batch, err := svc.FetchPRCommentSyncBatch(ctx, bulkReq)
+				batch, err := svc.FetchPRCommentSyncBatch(ctx, durableCollectionRequest(bulkReq, req, "pr_comment"))
 				payload, marshalErr := json.Marshal(batch)
 				if marshalErr != nil {
 					return durableCollectionBatch{}, marshalErr
@@ -414,6 +415,14 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 		})
 	}
 	return works
+}
+
+func durableCollectionRequest(base service.BulkSyncRequest, req StartSyncJobRequest, remoteType string) service.BulkSyncRequest {
+	request := base
+	if page := req.collectionPages[remoteType]; page > 0 {
+		request.Page = page
+	}
+	return request
 }
 
 func syncRepositoryBindingFingerprint(binding cache.RepositoryBinding) string {

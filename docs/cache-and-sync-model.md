@@ -90,6 +90,11 @@ When the next wiki document would cross that budget, the already bounded prefix
 is committed and the maintenance frontier records an exact record offset. The
 next run resumes at that offset; only a single document that cannot fit by
 itself is terminally rejected.
+Maintenance keeps that wiki offset separate from issue, comment, and pull
+request provider-page checkpoints. A mixed/default sync may still process the
+collections in one job, but each selected collection receives its own cursor;
+already-fresh collections are omitted instead of being replayed because another
+collection needs work.
 Comment fan-out is checked as produced records and serialized bytes before it
 can accumulate across parents.
 Per-stage limits are enforced together with a 64 MiB/50,000-record/256-stage
