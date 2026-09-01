@@ -194,26 +194,58 @@ func (s *Service) CommitIssueSyncBatch(ctx context.Context, batch DurableIssueSy
 		Ordering: syncOrderingUpdatedAtDesc, WatermarkStatus: batch.WatermarkStatus,
 		WatermarkReason: batch.WatermarkReason,
 	}
-	req := BulkSyncRequest{RepoID: repoID, IdempotencyKey: batch.IdempotencyKey, ProgressChan: progress}
-	before := len(result.Results)
-	items := make([]gitcode.IssueSummary, 0, len(batch.Items))
+	graphs := make([]cache.SyncGraph, 0, len(batch.Items))
+	queue := make([]cache.IssueCommentSync, 0, len(batch.Items))
+	clearComments := make([]cache.RecordRef, 0)
+	plans := make([]durableResultPlan, 0, len(batch.Items))
 	for _, item := range batch.Items {
-		items = append(items, item.providerItem())
+		issue := item.providerItem()
+		remoteID := strconv.Itoa(issue.Number)
+		syncReq := SyncRequest{RepoID: repoID, AliasType: "issue", AliasID: remoteID, IdempotencyKey: scopedBulkSyncKey(batch.IdempotencyKey, "issue", remoteID)}
+		graph, counts, stageErr := s.stageIssueParent(ctx, syncReq, "issue", remoteID, gitcode.Issue{ID: issue.ID, Number: issue.Number, Title: issue.Title, Body: issue.Body, Status: issue.Status, State: issue.State, Comments: issue.Comments, Labels: issue.Labels, CreatedAt: issue.CreatedAt, UpdatedAt: issue.UpdatedAt})
+		if stageErr != nil {
+			result.Failures = append(result.Failures, newResourceError(remoteID, "issue", stageErr))
+			continue
+		}
+		counts.Listed = 1
+		completedAt := s.now().UTC()
+		eventID := syncEventID(syncReq.IdempotencyKey)
+		zeroDelta := durableZeroDelta(counts)
+		graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: "issue", RemoteID: remoteID, RemoteRevision: graph.SyncStatus.RemoteRevision, Status: "succeeded", IdempotencyKey: syncReq.IdempotencyKey, Message: syncEventMessage(counts), CreatedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: zeroDelta})
+		queueItem, shouldClear, queued, queueErr := s.prepareIssueCommentSync(ctx, graph, gitcode.Issue{ID: issue.ID, Number: issue.Number, Comments: issue.Comments})
+		if queueErr != nil {
+			result.Failures = append(result.Failures, newResourceError(remoteID, "issue_comments", queueErr))
+			continue
+		}
+		if queued {
+			counts.Deferred++
+		}
+		if shouldClear {
+			clearComments = append(clearComments, cache.RecordRef{RepoID: repoID, RecordID: graph.Source.ID})
+		}
+		graphs = append(graphs, s.syncGraphFromSourceGraph(repoID, graph))
+		queue = append(queue, queueItem)
+		plans = append(plans, durableResultPlan{graph: graph, remoteID: remoteID, counts: counts, idempotencyKey: syncReq.IdempotencyKey, eventID: eventID, completedAt: completedAt, zeroDelta: zeroDelta})
 	}
-	s.stageIssuePage(ctx, req, items, result, 0)
-	emitProgress(progress, ProgressEvent{Collection: "issues", Phase: "committing", RecordsListed: len(batch.Items), RecordsFetched: len(result.Results) - before})
-	result.SuccessCount, result.FailureCount = len(result.Results), len(result.Failures)
-	if summaryErr := s.attachIssueCommentQueueSummary(ctx, result, repoID, "parent_backfill"); summaryErr != nil {
-		return result, summaryErr
-	}
+	result.FailureCount = len(result.Failures)
 	high := syncHighWatermark{UpdatedAt: batch.HighUpdatedAt, RemoteID: batch.HighRemoteID, Number: batch.HighNumber}
 	if result.FailureCount > 0 {
 		result.TraversalStatus = "partial"
-		s.recordSyncFrontierBestEffort(ctx, repoID, "issue", result, high)
+		abortDurablePlans(result, plans, "issue")
 		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
 	}
-	if err := s.recordSyncFrontier(ctx, repoID, "issue", result, high); err != nil {
+	result.SuccessCount = len(plans)
+	frontier, err := s.syncFrontierForResult(ctx, repoID, "issue", result, high)
+	if err != nil {
 		return bulkSyncFailureResult(err, "issue:*", "issues")
+	}
+	if err := s.commitDurableSyncBatch(ctx, cache.SyncBatch{Graphs: graphs, Frontier: frontier, IssueCommentSyncs: queue, ClearRecordCommentRefs: clearComments}); err != nil {
+		return bulkSyncFailureResult(err, "issue:*", "issues")
+	}
+	result.Results = durableResults(plans)
+	emitProgress(progress, ProgressEvent{Collection: "issues", Phase: "committing", RecordsListed: len(batch.Items), RecordsFetched: len(result.Results)})
+	if summaryErr := s.attachIssueCommentQueueSummary(ctx, result, repoID, "parent_backfill"); summaryErr != nil {
+		return result, summaryErr
 	}
 	return result, nil
 }
@@ -364,8 +396,8 @@ func (s *Service) FetchPullSyncBatch(ctx context.Context, req BulkSyncRequest) (
 }
 
 func (s *Service) CommitPullSyncBatch(ctx context.Context, batch DurablePullSyncBatch, progress chan<- ProgressEvent) (*SyncResourcesResult, error) {
-	if batch.Version != DurableSyncBatchVersion || strings.TrimSpace(batch.RepoID) == "" || batch.Collection != "pulls" || strings.TrimSpace(batch.IdempotencyKey) == "" {
-		return nil, ErrInvalidQuery{Field: "batch", Message: "staged pull request batch is incompatible or incomplete"}
+	if err := validateDurablePullBatch(batch); err != nil {
+		return nil, err
 	}
 	ctx, releaseWriter, err := s.acquireBulkWriter(ctx, batch.RepoID, "bulk-sync-pulls-commit")
 	if err != nil {
@@ -373,23 +405,55 @@ func (s *Service) CommitPullSyncBatch(ctx context.Context, batch DurablePullSync
 	}
 	defer releaseWriter()
 	result := &SyncResourcesResult{Results: []SyncResult{}, Failures: []ResourceError{}, PagesListed: batch.PagesListed, RecordsListed: batch.RecordsListed, SkippedByWatermark: batch.SkippedByWatermark, StopReason: batch.StopReason, TraversalStatus: batch.TraversalStatus, Ordering: syncOrderingUpdatedAtDesc, WatermarkStatus: batch.WatermarkStatus, WatermarkReason: batch.WatermarkReason}
-	items := make([]gitcode.PullRequest, 0, len(batch.Items))
+	graphs := make([]cache.SyncGraph, 0, len(batch.Items))
+	plans := make([]durableResultPlan, 0, len(batch.Items))
 	for _, item := range batch.Items {
-		items = append(items, item.providerItem())
+		pr := item.providerItem()
+		remoteID := strconv.Itoa(pr.Number)
+		syncReq := SyncRequest{RepoID: batch.RepoID, AliasType: "pull_request", AliasID: remoteID, IdempotencyKey: scopedBulkSyncKey(batch.IdempotencyKey, "pull_request", remoteID)}
+		graph, counts, stageErr := s.stagePullRequest(ctx, syncReq, "pull_request", remoteID, pr)
+		if stageErr != nil {
+			result.Failures = append(result.Failures, newResourceError(remoteID, "pull_request", stageErr))
+			continue
+		}
+		counts.Listed = 1
+		completedAt := s.now().UTC()
+		eventID := syncEventID(syncReq.IdempotencyKey)
+		zeroDelta := durableZeroDelta(counts)
+		graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: "pull_request", RemoteID: remoteID, RemoteRevision: graph.SyncStatus.RemoteRevision, Status: "succeeded", IdempotencyKey: syncReq.IdempotencyKey, Message: syncEventMessage(counts), CreatedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: zeroDelta})
+		graphs = append(graphs, s.syncGraphFromSourceGraph(batch.RepoID, graph))
+		plans = append(plans, durableResultPlan{graph: graph, remoteID: remoteID, counts: counts, idempotencyKey: syncReq.IdempotencyKey, eventID: eventID, completedAt: completedAt, zeroDelta: zeroDelta})
 	}
-	s.stagePullRequestPage(ctx, BulkSyncRequest{RepoID: batch.RepoID, IdempotencyKey: batch.IdempotencyKey}, items, result)
-	emitProgress(progress, ProgressEvent{Collection: "pulls", Phase: "committing", RecordsListed: len(batch.Items), RecordsFetched: len(result.Results)})
-	result.SuccessCount, result.FailureCount = len(result.Results), len(result.Failures)
+	result.FailureCount = len(result.Failures)
 	high := syncHighWatermark{UpdatedAt: batch.HighUpdatedAt, RemoteID: batch.HighRemoteID, Number: batch.HighNumber}
 	if result.FailureCount > 0 {
 		result.TraversalStatus = "partial"
-		s.recordSyncFrontierBestEffort(ctx, batch.RepoID, "pull_request", result, high)
+		abortDurablePlans(result, plans, "pull_request")
 		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
 	}
-	if err := s.recordSyncFrontier(ctx, batch.RepoID, "pull_request", result, high); err != nil {
+	result.SuccessCount = len(plans)
+	frontier, err := s.syncFrontierForResult(ctx, batch.RepoID, "pull_request", result, high)
+	if err != nil {
 		return bulkSyncFailureResult(err, "pull_request:*", "pull_request")
 	}
+	if err := s.commitDurableSyncBatch(ctx, cache.SyncBatch{Graphs: graphs, Frontier: frontier}); err != nil {
+		return bulkSyncFailureResult(err, "pull_request:*", "pull_request")
+	}
+	result.Results = durableResults(plans)
+	emitProgress(progress, ProgressEvent{Collection: "pulls", Phase: "committing", RecordsListed: len(batch.Items), RecordsFetched: len(result.Results)})
 	return result, nil
+}
+
+func validateDurablePullBatch(batch DurablePullSyncBatch) error {
+	if batch.Version != DurableSyncBatchVersion || strings.TrimSpace(batch.RepoID) == "" || batch.Collection != "pulls" || strings.TrimSpace(batch.IdempotencyKey) == "" {
+		return ErrInvalidQuery{Field: "batch", Message: "staged pull request batch is incompatible or incomplete"}
+	}
+	for index, item := range batch.Items {
+		if item.Number <= 0 {
+			return ErrInvalidQuery{Field: "batch.items", Message: fmt.Sprintf("staged pull request %d has invalid number %s", index, strconv.Itoa(item.Number))}
+		}
+	}
+	return nil
 }
 
 type DurableWikiSyncBatch struct {
@@ -456,8 +520,8 @@ func (s *Service) FetchWikiSyncBatch(ctx context.Context, req BulkSyncRequest) (
 }
 
 func (s *Service) CommitWikiSyncBatch(ctx context.Context, batch DurableWikiSyncBatch, progress chan<- ProgressEvent) (*SyncResourcesResult, error) {
-	if batch.Version != DurableSyncBatchVersion || strings.TrimSpace(batch.RepoID) == "" || batch.Collection != "wiki" || strings.TrimSpace(batch.IdempotencyKey) == "" {
-		return nil, ErrInvalidQuery{Field: "batch", Message: "staged wiki batch is incompatible or incomplete"}
+	if err := validateDurableWikiBatch(batch); err != nil {
+		return nil, err
 	}
 	ctx, releaseWriter, err := s.acquireBulkWriter(ctx, batch.RepoID, "bulk-sync-wiki-commit")
 	if err != nil {
@@ -465,6 +529,8 @@ func (s *Service) CommitWikiSyncBatch(ctx context.Context, batch DurableWikiSync
 	}
 	defer releaseWriter()
 	result := &SyncResourcesResult{Results: []SyncResult{}, Failures: []ResourceError{}, PagesListed: batch.PagesListed, RecordsListed: batch.RecordsListed, StopReason: batch.StopReason, TraversalStatus: batch.TraversalStatus, Ordering: "path_asc"}
+	graphs := make([]cache.SyncGraph, 0, len(batch.Items))
+	plans := make([]durableResultPlan, 0, len(batch.Items))
 	for _, page := range batch.Items {
 		remoteID := strings.TrimSpace(page.Slug)
 		req := SyncRequest{RepoID: batch.RepoID, AliasType: "wiki", AliasID: remoteID, IdempotencyKey: scopedBulkSyncKey(batch.IdempotencyKey, "wiki", remoteID)}
@@ -476,23 +542,77 @@ func (s *Service) CommitWikiSyncBatch(ctx context.Context, batch DurableWikiSync
 		counts.Listed, counts.FetchedDetail = 1, 1
 		completedAt := s.now().UTC()
 		eventID := syncEventID(req.IdempotencyKey)
-		zeroDelta := counts.Fetched > 0 && counts.Skipped == counts.Fetched && counts.Updated == 0 && counts.Inserted == 0 && counts.Conflicts == 0
+		zeroDelta := durableZeroDelta(counts)
 		graph.SyncEvents = append(graph.SyncEvents, cache.SyncEvent{ID: eventID, SourceID: graph.Source.ID, RemoteType: "wiki", RemoteID: remoteID, RemoteRevision: graph.SyncStatus.RemoteRevision, Status: "succeeded", IdempotencyKey: req.IdempotencyKey, Message: syncEventMessage(counts), CreatedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: zeroDelta})
-		if err := s.store.UpsertSyncGraph(ctx, s.syncGraphFromSourceGraph(batch.RepoID, graph)); err != nil {
-			result.Failures = append(result.Failures, newResourceError(remoteID, "wiki", err))
-			continue
-		}
-		stored, err := s.store.GetSourceScoped(ctx, batch.RepoID, graph.Source.ID)
-		if err != nil {
-			result.Failures = append(result.Failures, newResourceError(remoteID, "wiki", err))
-			continue
-		}
-		result.Results = append(result.Results, SyncResult{IdempotencyKey: req.IdempotencyKey, Status: "succeeded", Counts: counts, SyncEventID: eventID, Freshness: string(FreshnessFresh), Record: sourceSummary(stored), GeneratedAt: completedAt, StartedAt: completedAt, CompletedAt: completedAt, ZeroDelta: zeroDelta})
+		graphs = append(graphs, s.syncGraphFromSourceGraph(batch.RepoID, graph))
+		plans = append(plans, durableResultPlan{graph: graph, remoteID: remoteID, counts: counts, idempotencyKey: req.IdempotencyKey, eventID: eventID, completedAt: completedAt, zeroDelta: zeroDelta})
 	}
-	emitProgress(progress, ProgressEvent{Collection: "wiki", Phase: "committing", RecordsListed: len(batch.Items), RecordsFetched: len(result.Results)})
-	result.SuccessCount, result.FailureCount = len(result.Results), len(result.Failures)
+	result.FailureCount = len(result.Failures)
 	if result.FailureCount > 0 {
+		abortDurablePlans(result, plans, "wiki")
 		return result, &PartialSyncError{Errors: result.Failures, SuccessCount: result.SuccessCount, FailureCount: result.FailureCount}
 	}
+	result.SuccessCount = len(plans)
+	if err := s.commitDurableSyncBatch(ctx, cache.SyncBatch{Graphs: graphs}); err != nil {
+		return bulkSyncFailureResult(err, "wiki:*", "wiki")
+	}
+	result.Results = durableResults(plans)
+	emitProgress(progress, ProgressEvent{Collection: "wiki", Phase: "committing", RecordsListed: len(batch.Items), RecordsFetched: len(result.Results)})
 	return result, nil
+}
+
+func validateDurableWikiBatch(batch DurableWikiSyncBatch) error {
+	if batch.Version != DurableSyncBatchVersion || strings.TrimSpace(batch.RepoID) == "" || batch.Collection != "wiki" || strings.TrimSpace(batch.IdempotencyKey) == "" {
+		return ErrInvalidQuery{Field: "batch", Message: "staged wiki batch is incompatible or incomplete"}
+	}
+	for index, item := range batch.Items {
+		if strings.TrimSpace(item.Slug) == "" {
+			return ErrInvalidQuery{Field: "batch.items", Message: fmt.Sprintf("staged wiki page %d has an empty slug", index)}
+		}
+	}
+	return nil
+}
+
+type durableSyncBatchStore interface {
+	CommitSyncBatch(context.Context, cache.SyncBatch) error
+}
+
+type durableResultPlan struct {
+	graph          cache.SourceGraph
+	remoteID       string
+	counts         SyncCounts
+	idempotencyKey string
+	eventID        string
+	completedAt    time.Time
+	zeroDelta      bool
+}
+
+func abortDurablePlans(result *SyncResourcesResult, plans []durableResultPlan, remoteType string) {
+	for _, plan := range plans {
+		result.Failures = append(result.Failures, newResourceError(plan.remoteID, remoteType, errors.New("atomic staged batch rejected because another item failed validation")))
+	}
+	result.SuccessCount = 0
+	result.FailureCount = len(result.Failures)
+}
+
+func (s *Service) commitDurableSyncBatch(ctx context.Context, batch cache.SyncBatch) error {
+	store, ok := s.store.(durableSyncBatchStore)
+	if !ok {
+		return errors.New("cache store does not support atomic durable sync batches")
+	}
+	return store.CommitSyncBatch(ctx, batch)
+}
+
+func durableZeroDelta(counts SyncCounts) bool {
+	return counts.Fetched > 0 && counts.Skipped == counts.Fetched && counts.Updated == 0 && counts.Inserted == 0 && counts.Conflicts == 0
+}
+
+func durableResults(plans []durableResultPlan) []SyncResult {
+	results := make([]SyncResult, 0, len(plans))
+	for _, plan := range plans {
+		source := plan.graph.Source
+		source.Aliases = append([]cache.Identity(nil), plan.graph.Identities...)
+		results = append(results, SyncResult{IdempotencyKey: plan.idempotencyKey, Status: "succeeded", Counts: plan.counts, SyncEventID: plan.eventID, Freshness: string(FreshnessFresh), Record: sourceSummary(source), GeneratedAt: plan.completedAt, StartedAt: plan.completedAt, CompletedAt: plan.completedAt, ZeroDelta: plan.zeroDelta})
+	}
+	return results
 }

@@ -444,6 +444,21 @@ type SyncGraph struct {
 	SyncEvents          []SyncEvent
 }
 
+// SyncBatch is the cache-local publication unit for a provider-complete sync
+// batch. It intentionally contains no remote response bodies beyond the
+// normalized graphs that are already destined for the cache.
+type SyncBatch struct {
+	Graphs                 []SyncGraph
+	Frontier               *SyncFrontier
+	IssueCommentSyncs      []IssueCommentSync
+	ClearRecordCommentRefs []RecordRef
+}
+
+type RecordRef struct {
+	RepoID   string
+	RecordID string
+}
+
 type Source struct {
 	RepoID      string
 	ID          string

@@ -76,6 +76,32 @@ func TestDurableIssueBatchFetchDoesNotHoldTargetWriterAndCommitDoesNotRefetch(t 
 	if stored.Body != "durable body" {
 		t.Fatalf("stored body = %q", stored.Body)
 	}
+	frontier, ok, err := store.GetSyncFrontier(ctx, "durable-issues", "issue", syncOrderingUpdatedAtDesc, syncFilterStateAll)
+	if err != nil || !ok || frontier.Status != "complete" || frontier.RecordsListed != 1 {
+		t.Fatalf("frontier=%+v ok=%v err=%v", frontier, ok, err)
+	}
+}
+
+func TestDurableIssueBatchValidatesWholeBatchBeforePublishing(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "durable-atomic-validation", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	batch := DurableIssueSyncBatch{Version: DurableSyncBatchVersion, RepoID: "durable-atomic-validation", Collection: "issues", IdempotencyKey: "atomic-validation", Items: []DurableIssueItem{{Number: 1, Title: "valid first"}, {Number: 0, Title: "invalid second"}}, PagesListed: 1, RecordsListed: 2, StopReason: "end_of_collection", TraversalStatus: "complete"}
+	if _, err := NewWithClient(store, &fakeGitCodeClient{}).CommitIssueSyncBatch(ctx, batch, nil); err == nil {
+		t.Fatal("CommitIssueSyncBatch accepted invalid staged item")
+	}
+	if _, err := store.GetSourceScoped(ctx, batch.RepoID, "ISSUE-1"); err == nil {
+		t.Fatal("valid first item was published before full-batch validation")
+	}
+	if _, ok, err := store.GetSyncFrontier(ctx, batch.RepoID, "issue", syncOrderingUpdatedAtDesc, syncFilterStateAll); err != nil || ok {
+		t.Fatalf("frontier ok=%v err=%v after rejected batch", ok, err)
+	}
 }
 
 func TestDurablePullAndWikiBatchesCommitWithoutProviderReplay(t *testing.T) {

@@ -134,6 +134,38 @@ func TestSyncFrontierRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCommitSyncBatchRollsBackGraphsAndFrontierTogether(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	now := time.Date(2026, 9, 1, 8, 0, 0, 0, time.UTC)
+	valid := SyncGraph{RepoID: "fixture-a", Record: Record{RepoID: "fixture-a", ID: "ISSUE-ATOMIC-1", Type: "issue", Path: "issues/atomic-1.md", Title: "Atomic one", Body: "body", Status: "open", ContentHash: "atomic-1", Provenance: ProvenanceRemote, CreatedAt: now, UpdatedAt: now}}
+	invalid := SyncGraph{RepoID: "missing-repository", Record: Record{ID: "ISSUE-ATOMIC-2", Type: "issue", Path: "issues/atomic-2.md", Title: "Atomic two", Body: "body", Status: "open", ContentHash: "atomic-2", Provenance: ProvenanceRemote, CreatedAt: now, UpdatedAt: now}}
+	frontier := SyncFrontier{RepoID: "fixture-a", RemoteType: "issue", Ordering: "updated_at_desc", FilterKey: "state=all", Status: "complete", HighUpdatedAt: now, HighRemoteID: "2", HighNumber: 2, StopReason: "end_of_collection", PagesListed: 1, RecordsListed: 2, UpdatedAt: now}
+	clearTarget := SyncGraph{RepoID: "fixture-a", Record: Record{RepoID: "fixture-a", ID: "ISSUE-ATOMIC-CLEAR", Type: "issue", Path: "issues/atomic-clear.md", Title: "Preserve comment", Status: "open", ContentHash: "atomic-clear", Provenance: ProvenanceRemote, CreatedAt: now, UpdatedAt: now}, Comments: []RecordComment{{CommentID: "keep-me", Body: "preserved", CreatedAt: now, UpdatedAt: now}}}
+	if err := store.UpsertSyncGraph(ctx, clearTarget); err != nil {
+		t.Fatal(err)
+	}
+
+	queueItem := IssueCommentSync{RepoID: "fixture-a", SourceID: valid.Record.ID, IssueNumber: 1, RemoteID: "1", RemoteRevision: "rev-1", Status: "pending", UpdatedAt: now}
+	if err := store.CommitSyncBatch(ctx, SyncBatch{Graphs: []SyncGraph{valid, invalid}, Frontier: &frontier, IssueCommentSyncs: []IssueCommentSync{queueItem}, ClearRecordCommentRefs: []RecordRef{{RepoID: "fixture-a", RecordID: clearTarget.Record.ID}}}); err == nil {
+		t.Fatal("CommitSyncBatch succeeded with an invalid second graph")
+	}
+	if _, err := store.GetSourceScoped(ctx, "fixture-a", valid.Record.ID); err == nil {
+		t.Fatal("first graph survived a failed atomic batch")
+	}
+	if _, ok, err := store.GetSyncFrontier(ctx, "fixture-a", "issue", "updated_at_desc", "state=all"); err != nil || ok {
+		t.Fatalf("frontier ok=%v err=%v after failed atomic batch", ok, err)
+	}
+	if _, ok, err := store.GetIssueCommentSync(ctx, "fixture-a", valid.Record.ID); err != nil || ok {
+		t.Fatalf("comment queue ok=%v err=%v after failed atomic batch", ok, err)
+	}
+	preserved, err := store.GetRecord(ctx, "fixture-a", clearTarget.Record.ID)
+	if err != nil || len(preserved.Comments) != 1 || preserved.Comments[0].CommentID != "keep-me" {
+		t.Fatalf("preserved record=%+v err=%v after failed atomic batch", preserved, err)
+	}
+}
+
 func TestRecentCompletedSyncEventsAreBoundedAndNewestFirst(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)
