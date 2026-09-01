@@ -136,7 +136,7 @@ func TestDurablePullAndWikiBatchesCommitWithoutProviderReplay(t *testing.T) {
 	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
 	client := &fakeGitCodeClient{
 		listPRPages:   []gitcode.Page[gitcode.PullRequest]{{Items: []gitcode.PullRequest{{ID: "pr-7", Number: 7, Title: "Durable PR", Body: "pull body", State: "open", CreatedAt: base, UpdatedAt: base}}, Page: 1, PerPage: 100}},
-		listWikiPages: []gitcode.Page[gitcode.WikiPage]{{Items: []gitcode.WikiPage{{ID: "wiki-home", Slug: "Home", Title: "Home", Body: "wiki body", Revision: "rev-1", CreatedAt: base, UpdatedAt: base}}, Page: 1, PerPage: 100}},
+		listWikiPages: []gitcode.Page[gitcode.WikiPage]{{Items: []gitcode.WikiPage{{ID: "wiki-home", Slug: "Home", Title: "Home", Body: "wiki body", Revision: "rev-1", CreatedAt: base, UpdatedAt: base}}, Page: 1, PerPage: 100, NextPage: 18}},
 	}
 	store, err := cache.NewInMemorySQLiteStore(ctx)
 	if err != nil {
@@ -159,8 +159,11 @@ func TestDurablePullAndWikiBatchesCommitWithoutProviderReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchWikiSyncBatch: %v", err)
 	}
-	if got := client.lastListWikiRequest.Bounds; got == nil || got.MaxRecords != 17 || got.MaxBytes != 1234 {
+	if got := client.lastListWikiRequest.Bounds; got == nil || got.MaxRecords != 17 || got.MaxBytes != 1234 || !got.OffsetPaging {
 		t.Fatalf("wiki provider bounds=%+v", got)
+	}
+	if wiki.NextPage != 18 || wiki.TraversalStatus != "bounded" {
+		t.Fatalf("wiki continuation=%+v", wiki)
 	}
 	if wiki.ProviderRevision == "" {
 		t.Fatal("FetchWikiSyncBatch omitted provider revision")

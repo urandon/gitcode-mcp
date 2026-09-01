@@ -622,6 +622,29 @@ func TestDurableSyncResponseLimitIsAlwaysInsideStageEnvelope(t *testing.T) {
 	}
 }
 
+func TestWikiByteChunkCarriesExactOffsetIntoMaintenanceCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	frontier, err := stagedMaintenanceFrontier(ctx, StartSyncJobRequest{
+		RepoID: "owner/repo", CachePath: cachePath, Lane: "head", Page: 1,
+	}, "wiki", durableCollectionBatch{
+		checkpoint: "max_records", traversalStatus: "bounded", pagesListed: 1, recordsListed: 2, nextPage: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frontier == nil || frontier.Checkpoint != "next_page:3" || frontier.Status != "partial" {
+		t.Fatalf("frontier=%+v", frontier)
+	}
+}
+
 func TestSyncCommitReservationIsAtomicWithDirectWriterAdmission(t *testing.T) {
 	type commitResult struct {
 		reservation syncCommitReservation

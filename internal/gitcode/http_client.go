@@ -392,7 +392,9 @@ func (c *HTTPClient) ListWikiPages(ctx context.Context, req WikiListRequest) (Pa
 		if perPage <= 0 {
 			perPage = firstPositive(req.Bounds.MaxRecords, 1)
 		}
-		if pageNumber > 1 && perPage > 0 {
+		if req.Bounds.OffsetPaging {
+			walker.skipRecords = pageNumber - 1
+		} else if pageNumber > 1 && perPage > 0 {
 			maxInt := int(^uint(0) >> 1)
 			if pageNumber-1 > maxInt/perPage {
 				return Page[WikiPage]{}, ErrValidationFailed{Field: "page", Message: "wiki page offset is too large"}
@@ -409,8 +411,12 @@ func (c *HTTPClient) ListWikiPages(ctx context.Context, req WikiListRequest) (Pa
 	}
 	nextPage := 0
 	if req.Bounds != nil && req.Bounds.MaxRecords > 0 && walker.hasMore {
-		logicalPages := (len(items) + perPage - 1) / perPage
-		nextPage = pageNumber + logicalPages
+		if req.Bounds.OffsetPaging {
+			nextPage = pageNumber + len(items)
+		} else {
+			logicalPages := (len(items) + perPage - 1) / perPage
+			nextPage = pageNumber + logicalPages
+		}
 	}
 	return Page[WikiPage]{Items: items, Page: pageNumber, PerPage: firstPositive(perPage, len(items)), TotalCount: len(items), NextPage: nextPage}, nil
 }
@@ -1089,6 +1095,10 @@ func (w *wikiTraversal) walk(ctx context.Context, dir string, depth int) ([]Wiki
 				}
 				projected := w.bytesFetched + int64(len(encoded))
 				if projected > w.maxBytes {
+					if len(out) > 0 {
+						w.hasMore = true
+						break
+					}
 					return out, ErrPayloadTooLarge{Endpoint: wikiContentsRootEndpoint(w.owner, w.repo), Limit: w.maxBytes, Size: projected, Source: "durable_batch_limit"}
 				}
 				w.bytesFetched = projected

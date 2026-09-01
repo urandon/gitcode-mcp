@@ -3515,6 +3515,62 @@ func TestBoundedWikiTreeTraversalMaxBytes(t *testing.T) {
 	}
 }
 
+func TestBoundedWikiTreeTraversalMaxBytesReturnsProgressSafeChunks(t *testing.T) {
+	bodyFetches := map[string]int{}
+	body := strings.Repeat("x", 128)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents":
+			fmt.Fprint(w, `[{"path":"A.md","type":"file","sha":"rev-a"},{"path":"B.md","type":"file","sha":"rev-b"},{"path":"C.md","type":"file","sha":"rev-c"}]`)
+		case "/api/v5/repos/example-owner/example-repo.wiki/contents/A.md", "/api/v5/repos/example-owner/example-repo.wiki/contents/B.md", "/api/v5/repos/example-owner/example-repo.wiki/contents/C.md":
+			path := strings.TrimPrefix(r.URL.Path, "/api/v5/repos/example-owner/example-repo.wiki/contents/")
+			fmt.Fprintf(w, `{"path":%q,"type":"file","sha":%q}`, path, "rev-"+strings.ToLower(strings.TrimSuffix(path, ".md")))
+		case "/api/v5/repos/example-owner/example-repo.wiki/raw/A.md", "/api/v5/repos/example-owner/example-repo.wiki/raw/B.md", "/api/v5/repos/example-owner/example-repo.wiki/raw/C.md":
+			path := strings.TrimPrefix(r.URL.Path, "/api/v5/repos/example-owner/example-repo.wiki/raw/")
+			bodyFetches[path]++
+			fmt.Fprint(w, body)
+		default:
+			t.Fatalf("unexpected wiki path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL, Config{})
+
+	calibration, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo", Page: 1, PerPage: 1, Bounds: &WikiBounds{MaxRecords: 1, OffsetPaging: true}})
+	if err != nil || len(calibration.Items) != 1 {
+		t.Fatalf("calibration=%+v err=%v", calibration, err)
+	}
+	encoded, err := json.Marshal(calibration.Items[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	limit := int64(len(encoded) + 1)
+	bodyFetches = map[string]int{}
+
+	next := 1
+	var slugs []string
+	for next > 0 {
+		page, err := client.ListWikiPages(context.Background(), WikiListRequest{
+			Owner: "example-owner", Repo: "example-repo", Page: next, PerPage: 3,
+			Bounds: &WikiBounds{MaxRecords: 3, MaxBytes: limit, OffsetPaging: true},
+		})
+		if err != nil {
+			t.Fatalf("offset %d: %v", next, err)
+		}
+		if len(page.Items) != 1 {
+			t.Fatalf("offset %d items=%d want=1", next, len(page.Items))
+		}
+		slugs = append(slugs, page.Items[0].Slug)
+		next = page.NextPage
+	}
+	if got := strings.Join(slugs, ","); got != "A.md,B.md,C.md" {
+		t.Fatalf("committed chunks=%q", got)
+	}
+	if bodyFetches["A.md"] != 1 || bodyFetches["B.md"] != 2 || bodyFetches["C.md"] != 2 {
+		t.Fatalf("body fetches=%v", bodyFetches)
+	}
+}
+
 func TestBoundedWikiTreeTraversalResumesWithoutRefetchingSkippedBodies(t *testing.T) {
 	fetchedBodies := map[string]int{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -222,6 +222,7 @@ type durableCollectionBatch struct {
 	pagesListed      int
 	recordsListed    int
 	traversalStatus  string
+	nextPage         int
 	highUpdatedAt    time.Time
 	highRemoteID     string
 	highNumber       int
@@ -352,7 +353,7 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 				if boundErr := validateDurableFetchedPayload(payload, batch.RecordCount()); boundErr != nil {
 					return durableCollectionBatch{}, boundErr
 				}
-				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.ProviderRevision, idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt, pagesListed: batch.PagesListed, recordsListed: batch.RecordsListed, traversalStatus: batch.TraversalStatus}, err
+				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.ProviderRevision, idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt, pagesListed: batch.PagesListed, recordsListed: batch.RecordsListed, traversalStatus: batch.TraversalStatus, nextPage: batch.NextPage}, err
 			},
 			commit: func(ctx context.Context, stage SyncStageEnvelope) (*service.SyncResourcesResult, error) {
 				var batch service.DurableWikiSyncBatch
@@ -485,6 +486,9 @@ func stagedMaintenanceFrontier(ctx context.Context, req StartSyncJobRequest, rem
 		Status: status, HighUpdatedAt: previous.HighUpdatedAt, HighRemoteID: previous.HighRemoteID, HighNumber: previous.HighNumber,
 		StopReason: batch.checkpoint, PagesListed: batch.pagesListed, RecordsListed: batch.recordsListed,
 		Checkpoint: nextMaintenanceCheckpoint(req, collection), UpdatedAt: time.Now().UTC(),
+	}
+	if batch.nextPage > 0 && (req.Lane == "head" || req.Lane == "tail") {
+		frontier.Checkpoint = fmt.Sprintf("next_page:%d", batch.nextPage)
 	}
 	observeMaintenanceHigh(frontier, batch.highUpdatedAt, batch.highRemoteID, batch.highNumber)
 	if req.Lane == "tail" && status == "backfilling" && checkpointPage(previous.Checkpoint) > checkpointPage(frontier.Checkpoint) {

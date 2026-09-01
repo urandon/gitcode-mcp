@@ -490,6 +490,7 @@ type DurableWikiSyncBatch struct {
 	RecordsListed       int                        `json:"records_listed"`
 	StopReason          string                     `json:"stop_reason"`
 	TraversalStatus     string                     `json:"traversal_status"`
+	NextPage            int                        `json:"next_page,omitempty"`
 	ProviderRevision    string                     `json:"provider_revision"`
 	FetchedAt           time.Time                  `json:"fetched_at"`
 	MaintenanceFrontier *cache.MaintenanceFrontier `json:"-"`
@@ -532,9 +533,9 @@ func (s *Service) FetchWikiSyncBatch(ctx context.Context, req BulkSyncRequest) (
 			}
 		}
 	}
-	wikiBounds := &gitcode.WikiBounds{MaxRecords: maxRecords, MaxBytes: maxBytes}
+	wikiBounds := &gitcode.WikiBounds{MaxRecords: maxRecords, MaxBytes: maxBytes, OffsetPaging: true}
 	page, err := s.client.ListWikiPages(ctx, gitcode.WikiListRequest{Owner: route.Owner, Repo: route.Name, Page: req.Page, PerPage: req.PerPage, Bounds: wikiBounds})
-	batch := DurableWikiSyncBatch{Version: DurableSyncBatchVersion, RepoID: repoID, Collection: "wiki", IdempotencyKey: req.IdempotencyKey, Items: page.Items, RecordsListed: len(page.Items), ProviderRevision: durableWikiProviderRevision(page.Items), FetchedAt: s.now().UTC()}
+	batch := DurableWikiSyncBatch{Version: DurableSyncBatchVersion, RepoID: repoID, Collection: "wiki", IdempotencyKey: req.IdempotencyKey, Items: page.Items, RecordsListed: len(page.Items), NextPage: page.NextPage, ProviderRevision: durableWikiProviderRevision(page.Items), FetchedAt: s.now().UTC()}
 	perPage := req.PerPage
 	if perPage < 1 {
 		perPage = max(1, len(page.Items))

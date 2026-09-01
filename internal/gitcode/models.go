@@ -136,6 +136,7 @@ type WikiListRequest struct {
 type WikiBounds struct {
 	MaxRecords   int
 	MaxBytes     int64
+	OffsetPaging bool
 	ProgressChan chan<- WikiProgressEvent
 }
 

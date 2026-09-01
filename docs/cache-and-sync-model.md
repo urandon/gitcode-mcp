@@ -86,6 +86,10 @@ HTTP response ceiling to 7.5 MiB and its normalized payload ceiling to 15.5 MiB,
 leaving explicit space for the staged JSON envelope. Wiki traversal applies the
 same record-page clamp and a cumulative serialized-page byte budget while it
 fetches bodies; a recursive tree cannot escape the durable batch boundary.
+When the next wiki document would cross that budget, the already bounded prefix
+is committed and the maintenance frontier records an exact record offset. The
+next run resumes at that offset; only a single document that cannot fit by
+itself is terminally rejected.
 Comment fan-out is checked as produced records and serialized bytes before it
 can accumulate across parents.
 Per-stage limits are enforced together with a 64 MiB/50,000-record/256-stage
