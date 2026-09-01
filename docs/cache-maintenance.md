@@ -38,7 +38,7 @@ The maintenance dependency order is:
 validate identity -> sync head/tail -> observe content generation -> RAG repair -> publish status
 ```
 
-Only one sync lane and one RAG writer may be active for a `(cache_uuid, repo_id)` pair. The same repository in a different cache is independent. Job coalescing also includes lane, profile, and namespace/chunk policy, preventing accidental cross-cache reuse.
+Only one cache writer may be active for a `cache_uuid`, across every repository binding and writer type (sync, ordinary RAG, repository-document indexing, and bounded synchronous Admin mutations). Identical work coalesces; different work retains its own repository and stage intent and receives typed `cache_writer_busy` admission until the active worker has fully unwound. Daemon reconciliation revisits same-cache registrations in oldest-writer-first order, while a different cache UUID remains independent. Job identity also includes lane, profile, namespace, and chunk policy, preventing accidental cross-cache or cross-stage reuse.
 
 ## Registry and protocol
 
