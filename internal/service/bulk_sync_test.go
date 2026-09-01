@@ -185,6 +185,62 @@ func TestDurablePullAndWikiBatchesCommitWithoutProviderReplay(t *testing.T) {
 	}
 }
 
+func TestDurableCommentBatchesCommitWithoutProviderReplay(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 9, 1, 11, 0, 0, 0, time.UTC)
+	client := &fakeGitCodeClient{
+		commentsByIssue: map[int][]gitcode.Comment{7: {{ID: "ic-1", IssueID: "provider-7", IssueNumber: 7, Author: "alice", Body: "issue comment", CreatedAt: base, UpdatedAt: base}}},
+		prCommentsByPR:  map[int][]gitcode.PRComment{9: {{ID: "pc-1", Author: "bob", Body: "PR comment", CreatedAt: base, UpdatedAt: base}}},
+	}
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	const repoID = "durable-comments"
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: repoID, Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	issue := cache.Source{RepoID: repoID, ID: "ISSUE-7", Kind: "issue", Path: "issues/7.md", Title: "Issue 7", ContentHash: "issue", CreatedAt: base, UpdatedAt: base}
+	if err := store.UpsertRecordGraph(ctx, cache.RecordGraph{Record: cache.Record{RepoID: repoID, ID: issue.ID, Type: issue.Kind, Path: issue.Path, Title: issue.Title, ContentHash: issue.ContentHash, CreatedAt: base, UpdatedAt: base}, Identities: []cache.Identity{{RepoID: repoID, SourceID: issue.ID, AliasType: "issue", Alias: "7"}, {RepoID: repoID, SourceID: issue.ID, AliasType: "gitcode_issue_id", Alias: "provider-7"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertIssueCommentSync(ctx, cache.IssueCommentSync{RepoID: repoID, SourceID: issue.ID, IssueNumber: 7, RemoteID: "7", ProviderID: "provider-7", RemoteRevision: "issue-r1", ExpectedCount: 1, Status: "pending", UpdatedAt: base}); err != nil {
+		t.Fatal(err)
+	}
+	pull := cache.Source{RepoID: repoID, ID: "PR-9", Kind: "pull_request", Path: "pulls/9.md", Title: "PR 9", ContentHash: "pull", CreatedAt: base, UpdatedAt: base}
+	if err := store.UpsertSourceGraph(ctx, cache.SourceGraph{Source: pull, Identities: []cache.Identity{{RepoID: repoID, SourceID: pull.ID, AliasType: "pull_request", Alias: "9"}}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewWithClient(store, client)
+	issueBatch, err := svc.FetchIssueCommentSyncBatch(ctx, BulkSyncRequest{RepoID: repoID, Bounds: &SyncBounds{MaxRecords: 10}})
+	if err != nil {
+		t.Fatalf("FetchIssueCommentSyncBatch: %v", err)
+	}
+	prBatch, err := svc.FetchPRCommentSyncBatch(ctx, BulkSyncRequest{RepoID: repoID, Bounds: &SyncBounds{MaxRecords: 10}})
+	if err != nil {
+		t.Fatalf("FetchPRCommentSyncBatch: %v", err)
+	}
+	if issueBatch.RecordCount() != 2 || prBatch.RecordCount() != 1 || client.commentCalls != 1 || client.prCommentCalls != 1 {
+		t.Fatalf("batches issue=%+v pr=%+v calls issue=%d pr=%d", issueBatch, prBatch, client.commentCalls, client.prCommentCalls)
+	}
+	if result, err := svc.CommitIssueCommentSyncBatch(ctx, issueBatch, nil); err != nil || result.SuccessCount != 1 {
+		t.Fatalf("CommitIssueCommentSyncBatch result=%+v err=%v", result, err)
+	}
+	if result, err := svc.CommitPRCommentSyncBatch(ctx, prBatch, nil); err != nil || result.SuccessCount != 1 {
+		t.Fatalf("CommitPRCommentSyncBatch result=%+v err=%v", result, err)
+	}
+	if client.commentCalls != 1 || client.prCommentCalls != 1 {
+		t.Fatalf("comment commit refetched provider: issue=%d pr=%d", client.commentCalls, client.prCommentCalls)
+	}
+	if _, err := store.GetSourceScoped(ctx, repoID, issueCommentStableID(7, "ic-1")); err != nil {
+		t.Fatalf("issue comment projection: %v", err)
+	}
+	if _, err := store.GetSourceScoped(ctx, repoID, prCommentStableID(9, "pc-1")); err != nil {
+		t.Fatalf("PR comment projection: %v", err)
+	}
+}
+
 type aggregateIssueCommentClient struct {
 	*fakeGitCodeClient
 	pages    map[int]gitcode.Page[gitcode.Comment]

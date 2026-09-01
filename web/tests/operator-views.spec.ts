@@ -600,6 +600,46 @@ test('durable sync wait is recoverable machine-readable progress', async ({ page
   await expect(page.locator('body')).not.toContainText('private source body');
 });
 
+test('durable sync lifecycle matrix is exposed through semantic DOM state', async ({ page }) => {
+  const lifecycleSnapshot: any = structuredClone(snapshot);
+  const base = {
+    type: 'sync', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1',
+    created_at: new Date(Date.now() - 60_000).toISOString(), updated_at: new Date().toISOString(),
+    work_ref: 'durable-lifecycle', cancellable: true, retryable: false, progress_retained: 0, progress_limit: 256
+  };
+  const staged = { stage_ref: 'stage-semantic', collection: 'issues', fetched: 4, staged: 4, committed: 0, staged_bytes: 2048, attempt: 0, retry_budget: 6 };
+  lifecycleSnapshot.jobs = [
+    { ...base, id: 'life-queued', status: 'queued' },
+    { ...base, id: 'life-admitted', status: 'running' },
+    { ...base, id: 'life-fetching', status: 'running', sync_stage: { ...staged, phase: 'fetching' } },
+    { ...base, id: 'life-staged', status: 'running', sync_stage: { ...staged, phase: 'staged' } },
+    { ...base, id: 'life-waiting', status: 'running', sync_stage: { ...staged, phase: 'waiting_commit' } },
+    { ...base, id: 'life-retrying', status: 'running', sync_stage: { ...staged, phase: 'waiting_commit', attempt: 2, blocker_class: 'cache_busy' } },
+    { ...base, id: 'life-committing', status: 'running', sync_stage: { ...staged, phase: 'committing' } },
+    { ...base, id: 'life-terminal', status: 'succeeded', cancellable: false, sync_stage: { ...staged, phase: 'committed', committed: 4 } },
+    { ...base, id: 'life-interrupted', status: 'interrupted', cancellable: false }
+  ];
+  await mockAdmin(page, lifecycleSnapshot);
+  const cases = [
+    ['life-queued', 'Queued for durable sync', 'Queued', 'Not Staged'],
+    ['life-admitted', 'Admitted for durable sync', 'Admitted', 'Not Staged'],
+    ['life-fetching', 'Fetching', 'Fetching', 'Fetching'],
+    ['life-staged', 'Staged', 'Staged', 'Staged'],
+    ['life-waiting', 'Waiting for cache writer', 'Waiting Commit', 'Waiting Commit'],
+    ['life-retrying', 'Waiting for cache writer', 'Retrying', 'Waiting Commit'],
+    ['life-committing', 'Committing', 'Committing', 'Committing'],
+    ['life-terminal', 'Committed', 'Terminal', 'Committed'],
+    ['life-interrupted', 'Terminal sync outcome', 'Terminal', 'Not Staged']
+  ] as const;
+  for (const [id, heading, lifecycle, raw] of cases) {
+    await page.goto(`/?view=Jobs&job=${id}`);
+    const panel = page.getByRole('status', { name: 'Durable sync phase' });
+    await expect(panel.getByRole('heading', { name: heading })).toBeVisible();
+    await expect(panel.locator('dl')).toContainText(`Lifecycle${lifecycle}`);
+    await expect(panel.locator('dl')).toContainText(`Raw phase${raw}`);
+  }
+});
+
 test('retry coalescing, filters, interruption, and structured wait state are observable', async ({ page }) => {
   await mockAdmin(page);
   const retryKeys: string[] = [];

@@ -206,7 +206,10 @@ func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID stri
 }
 
 func syncDurableCollections(req StartSyncJobRequest) bool {
-	return (req.Issues || req.Wiki || req.Pulls) && !req.Comments && !req.IssueComments && !req.PRComments
+	// Every daemon sync uses the same fetch -> durable stage -> atomic commit
+	// protocol. Selector combinations must not silently fall back to the legacy
+	// writer-held network path.
+	return true
 }
 
 type durableCollectionBatch struct {
@@ -226,6 +229,7 @@ type durableCollectionWork struct {
 }
 
 func (m *JobManager) runDurableSync(ctx context.Context, manager Manager, jobID string, req StartSyncJobRequest, progressCh chan<- service.ProgressEvent) (*service.SyncResourcesResult, []syncCollectionResult, error) {
+	req = normalizeDurableSyncRequest(req)
 	store, svc, err := newSyncJobService(ctx, manager, req)
 	if err != nil {
 		return nil, nil, err
@@ -252,8 +256,19 @@ func (m *JobManager) runDurableSync(ctx context.Context, manager Manager, jobID 
 	return aggregate, collections, syncErr
 }
 
+func normalizeDurableSyncRequest(req StartSyncJobRequest) StartSyncJobRequest {
+	if !req.Issues && !req.Wiki && !req.Pulls && !req.Comments && !req.IssueComments && !req.PRComments {
+		// Preserve the historical default selection of BulkSyncAll.
+		req.Issues, req.Wiki = true, true
+	}
+	if req.Comments {
+		req.PRComments = true
+	}
+	return req
+}
+
 func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncRequest, req StartSyncJobRequest) []durableCollectionWork {
-	works := make([]durableCollectionWork, 0, 3)
+	works := make([]durableCollectionWork, 0, 5)
 	if req.Issues {
 		works = append(works, durableCollectionWork{
 			collection: "issues", remoteType: "issue",
@@ -271,6 +286,26 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 					return nil, err
 				}
 				return svc.CommitIssueSyncBatch(ctx, batch, bulkReq.ProgressChan)
+			},
+		})
+	}
+	if req.IssueComments {
+		works = append(works, durableCollectionWork{
+			collection: "issue_comments", remoteType: "issue_comment",
+			fetch: func(ctx context.Context) (durableCollectionBatch, error) {
+				batch, err := svc.FetchIssueCommentSyncBatch(ctx, bulkReq)
+				payload, marshalErr := json.Marshal(batch)
+				if marshalErr != nil {
+					return durableCollectionBatch{}, marshalErr
+				}
+				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.ProviderRevision, idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt}, err
+			},
+			commit: func(ctx context.Context, payload []byte) (*service.SyncResourcesResult, error) {
+				var batch service.DurableIssueCommentSyncBatch
+				if err := json.Unmarshal(payload, &batch); err != nil {
+					return nil, err
+				}
+				return svc.CommitIssueCommentSyncBatch(ctx, batch, bulkReq.ProgressChan)
 			},
 		})
 	}
@@ -311,6 +346,26 @@ func durableCollectionWorks(svc *service.Service, bulkReq service.BulkSyncReques
 					return nil, err
 				}
 				return svc.CommitPullSyncBatch(ctx, batch, bulkReq.ProgressChan)
+			},
+		})
+	}
+	if req.PRComments {
+		works = append(works, durableCollectionWork{
+			collection: "pr_comments", remoteType: "pr_comment",
+			fetch: func(ctx context.Context) (durableCollectionBatch, error) {
+				batch, err := svc.FetchPRCommentSyncBatch(ctx, bulkReq)
+				payload, marshalErr := json.Marshal(batch)
+				if marshalErr != nil {
+					return durableCollectionBatch{}, marshalErr
+				}
+				return durableCollectionBatch{payload: payload, recordCount: batch.RecordCount(), checkpoint: batch.StopReason, providerRevision: batch.ProviderRevision, idempotencyKey: batch.IdempotencyKey, fetchedAt: batch.FetchedAt}, err
+			},
+			commit: func(ctx context.Context, payload []byte) (*service.SyncResourcesResult, error) {
+				var batch service.DurablePRCommentSyncBatch
+				if err := json.Unmarshal(payload, &batch); err != nil {
+					return nil, err
+				}
+				return svc.CommitPRCommentSyncBatch(ctx, batch, bulkReq.ProgressChan)
 			},
 		})
 	}
@@ -524,7 +579,7 @@ func (m *JobManager) RecoverSyncStages(ctx context.Context, manager Manager) err
 			m.rejectInterruptedSyncStage(updated, state.TerminalReason)
 			continue
 		}
-		if stage.Collection != "issues" && stage.Collection != "wiki" && stage.Collection != "pulls" {
+		if stage.Collection != "issues" && stage.Collection != "issue_comments" && stage.Collection != "wiki" && stage.Collection != "pulls" && stage.Collection != "pr_comments" {
 			state := stage.State
 			state.Phase, state.TerminalReason = SyncStageRejected, "unsupported_stage_collection"
 			updated, err := journal.UpdateState(stage.StageID, state)
@@ -661,6 +716,18 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 				return nil, err
 			}
 			return svc.CommitPullSyncBatch(ctx, batch, nil)
+		case "issue_comments":
+			var batch service.DurableIssueCommentSyncBatch
+			if err := json.Unmarshal(stage.Payload, &batch); err != nil {
+				return nil, err
+			}
+			return svc.CommitIssueCommentSyncBatch(ctx, batch, nil)
+		case "pr_comments":
+			var batch service.DurablePRCommentSyncBatch
+			if err := json.Unmarshal(stage.Payload, &batch); err != nil {
+				return nil, err
+			}
+			return svc.CommitPRCommentSyncBatch(ctx, batch, nil)
 		default:
 			return nil, ErrSyncStageCorrupt
 		}

@@ -184,6 +184,23 @@ func (s *SQLiteStore) CommitSyncBatch(ctx context.Context, batch SyncBatch) (err
 			return err
 		}
 	}
+	for _, replacement := range batch.ReplaceRecordComments {
+		if _, err = tx.ExecContext(ctx, `DELETE FROM record_comments WHERE repo_id = ? AND record_id = ?`, replacement.RepoID, replacement.RecordID); err != nil {
+			return err
+		}
+		for _, comment := range replacement.Comments {
+			comment.RepoID = replacement.RepoID
+			comment.RecordID = replacement.RecordID
+			if err = upsertRecordCommentTx(ctx, tx, comment); err != nil {
+				return err
+			}
+		}
+	}
+	for _, reconciliation := range batch.ReconcileChildren {
+		if err = s.reconcileChildSourcesTx(ctx, tx, reconciliation.RepoID, reconciliation.ParentID, reconciliation.Kind, reconciliation.KeepSourceIDs); err != nil {
+			return err
+		}
+	}
 	if batch.Frontier != nil {
 		if err = upsertSyncFrontierTx(ctx, tx, *batch.Frontier); err != nil {
 			return err

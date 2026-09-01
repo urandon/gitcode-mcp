@@ -20,6 +20,29 @@ type admissionSyncService struct {
 	err   error
 }
 
+func TestDurableSyncSelectorInvariantCoversDefaultAndComments(t *testing.T) {
+	if !syncDurableCollections(StartSyncJobRequest{}) || !syncDurableCollections(StartSyncJobRequest{IssueComments: true, PRComments: true}) {
+		t.Fatal("daemon selector combination escaped durable staging")
+	}
+	defaultReq := normalizeDurableSyncRequest(StartSyncJobRequest{})
+	if !defaultReq.Issues || !defaultReq.Wiki || defaultReq.Pulls || defaultReq.IssueComments || defaultReq.PRComments {
+		t.Fatalf("default durable selection=%+v", defaultReq)
+	}
+	commentsReq := normalizeDurableSyncRequest(StartSyncJobRequest{Comments: true})
+	if !commentsReq.PRComments {
+		t.Fatalf("legacy comments selector was not normalized: %+v", commentsReq)
+	}
+	works := durableCollectionWorks(nil, service.BulkSyncRequest{}, StartSyncJobRequest{Issues: true, IssueComments: true, Wiki: true, Pulls: true, PRComments: true})
+	got := make([]string, 0, len(works))
+	for _, work := range works {
+		got = append(got, work.collection)
+	}
+	want := []string{"issues", "issue_comments", "wiki", "pulls", "pr_comments"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("durable collection order=%v want=%v", got, want)
+	}
+}
+
 func TestDirectCacheWritersNormalizeIdentityAndRespectAuthorityFence(t *testing.T) {
 	ctx := context.Background()
 	cachePath := filepath.Join(t.TempDir(), "cache.db")

@@ -452,11 +452,26 @@ type SyncBatch struct {
 	Frontier               *SyncFrontier
 	IssueCommentSyncs      []IssueCommentSync
 	ClearRecordCommentRefs []RecordRef
+	ReplaceRecordComments  []RecordCommentsReplacement
+	ReconcileChildren      []ChildSourceReconciliation
 }
 
 type RecordRef struct {
 	RepoID   string
 	RecordID string
+}
+
+type RecordCommentsReplacement struct {
+	RepoID   string
+	RecordID string
+	Comments []RecordComment
+}
+
+type ChildSourceReconciliation struct {
+	RepoID        string
+	ParentID      string
+	Kind          string
+	KeepSourceIDs []string
 }
 
 type Source struct {

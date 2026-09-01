@@ -2499,14 +2499,28 @@ func cachedIssueComment(comment gitcode.Comment, item cache.IssueCommentSync, no
 }
 
 func (s *Service) upsertIssueCommentProjection(ctx context.Context, item cache.IssueCommentSync, comment cache.RecordComment) (string, error) {
+	graph, stableID, err := s.stageIssueCommentProjection(ctx, item, comment)
+	if err != nil {
+		return "", err
+	}
+	if err := s.store.UpsertSyncGraph(ctx, s.syncGraphFromSourceGraph(item.RepoID, graph)); err != nil {
+		return "", err
+	}
+	return stableID, nil
+}
+
+// stageIssueCommentProjection validates and normalizes an issue comment without
+// publishing it. Durable sync uses this to assemble the complete parent batch
+// before entering the cache's single atomic commit.
+func (s *Service) stageIssueCommentProjection(ctx context.Context, item cache.IssueCommentSync, comment cache.RecordComment) (cache.SourceGraph, string, error) {
 	commentID := strings.TrimSpace(comment.CommentID)
 	if commentID == "" {
-		return "", s.liveGraphError("comment missing provider id")
+		return cache.SourceGraph{}, "", s.liveGraphError("comment missing provider id")
 	}
 	remoteID := issueCommentRemoteID(item.IssueNumber, commentID)
 	stableID := s.resolveOrFallback(ctx, item.RepoID, "issue_comment", remoteID, issueCommentStableID(item.IssueNumber, commentID))
 	if err := s.guardRemoteAlias(ctx, item.RepoID, "issue_comment", remoteID, stableID); err != nil {
-		return "", err
+		return cache.SourceGraph{}, "", err
 	}
 	now := s.now().UTC()
 	updated := comment.UpdatedAt.UTC()
@@ -2545,10 +2559,7 @@ func (s *Service) upsertIssueCommentProjection(ctx context.Context, item cache.I
 		ReplaceChunks: true,
 		SyncStatus:    &cache.SyncStatus{RepoID: item.RepoID, SourceID: stableID, RemoteType: "issue_comment", RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now},
 	}
-	if err := s.store.UpsertSyncGraph(ctx, s.syncGraphFromSourceGraph(item.RepoID, graph)); err != nil {
-		return "", err
-	}
-	return stableID, nil
+	return graph, stableID, nil
 }
 
 func (s *Service) projectIssueComments(ctx context.Context, item cache.IssueCommentSync, comments []cache.RecordComment) error {

@@ -2,22 +2,30 @@ package cache
 
 import (
 	"context"
+	"database/sql"
 )
 
 // ReconcileChildSources removes stale child source projections only after the
 // caller has proved complete coverage for the parent collection.
 func (s *SQLiteStore) ReconcileChildSources(ctx context.Context, repoID, parentID, kind string, keepSourceIDs []string) (err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer txRollbackOnError(tx, &err)
+	if err = s.reconcileChildSourcesTx(ctx, tx, repoID, parentID, kind, keepSourceIDs); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *SQLiteStore) reconcileChildSourcesTx(ctx context.Context, tx *sql.Tx, repoID, parentID, kind string, keepSourceIDs []string) error {
 	keep := make(map[string]struct{}, len(keepSourceIDs))
 	for _, id := range keepSourceIDs {
 		if id != "" {
 			keep[id] = struct{}{}
 		}
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer txRollbackOnError(tx, &err)
 	rows, err := tx.QueryContext(ctx, `SELECT s.id
 FROM sources s
 JOIN links l ON l.repo_id = s.repo_id AND l.source_id = s.id
@@ -56,5 +64,5 @@ ORDER BY s.id`, repoID, kind, parentID)
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
