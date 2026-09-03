@@ -134,6 +134,78 @@ func TestSyncFrontierRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCommitSyncBatchRollsBackGraphsAndFrontierTogether(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	now := time.Date(2026, 9, 1, 8, 0, 0, 0, time.UTC)
+	valid := SyncGraph{RepoID: "fixture-a", Record: Record{RepoID: "fixture-a", ID: "ISSUE-ATOMIC-1", Type: "issue", Path: "issues/atomic-1.md", Title: "Atomic one", Body: "body", Status: "open", ContentHash: "atomic-1", Provenance: ProvenanceRemote, CreatedAt: now, UpdatedAt: now}}
+	frontier := SyncFrontier{RepoID: "fixture-a", RemoteType: "issue", Ordering: "updated_at_desc", FilterKey: "state=all", Status: "complete", HighUpdatedAt: now, HighRemoteID: "2", HighNumber: 2, StopReason: "end_of_collection", PagesListed: 1, RecordsListed: 2, UpdatedAt: now}
+	invalidFrontier := frontier
+	invalidFrontier.RepoID = "missing-repository"
+	clearTarget := SyncGraph{RepoID: "fixture-a", Record: Record{RepoID: "fixture-a", ID: "ISSUE-ATOMIC-CLEAR", Type: "issue", Path: "issues/atomic-clear.md", Title: "Preserve comment", Status: "open", ContentHash: "atomic-clear", Provenance: ProvenanceRemote, CreatedAt: now, UpdatedAt: now}, Comments: []RecordComment{{CommentID: "keep-me", Body: "preserved", CreatedAt: now, UpdatedAt: now}}}
+	if err := store.UpsertSyncGraph(ctx, clearTarget); err != nil {
+		t.Fatal(err)
+	}
+	child := SyncGraph{RepoID: "fixture-a", Record: Record{RepoID: "fixture-a", ID: "ISSUECOMMENT-ATOMIC-KEEP", Type: "issue_comment", Path: "issues/atomic-clear/comments/keep.md", Title: "Preserve projection", Body: "preserved", Status: "current", ContentHash: "atomic-child", Provenance: ProvenanceProjection, CreatedAt: now, UpdatedAt: now}, Links: []Link{{RepoID: "fixture-a", SourceID: "ISSUECOMMENT-ATOMIC-KEEP", TargetID: clearTarget.Record.ID, Kind: "parent"}}}
+	if err := store.UpsertSyncGraph(ctx, child); err != nil {
+		t.Fatal(err)
+	}
+
+	queueItem := IssueCommentSync{RepoID: "fixture-a", SourceID: valid.Record.ID, IssueNumber: 1, RemoteID: "1", RemoteRevision: "rev-1", Status: "pending", UpdatedAt: now}
+	maintenance := MaintenanceFrontier{RepoID: "fixture-a", RemoteType: "issue", Ordering: "updated_at_desc", FilterKey: "all", Lane: "head", Status: "fresh", UpdatedAt: now}
+	receipt := SyncCommitReceipt{StageID: "stage-atomic", Checksum: "checksum", RepoID: "fixture-a", Collection: "issues", CommittedAt: now}
+	if err := store.CommitSyncBatch(ctx, SyncBatch{Graphs: []SyncGraph{valid}, Frontier: &invalidFrontier, MaintenanceFrontier: &maintenance, Receipt: &receipt, IssueCommentSyncs: []IssueCommentSync{queueItem}, ClearRecordCommentRefs: []RecordRef{{RepoID: "fixture-a", RecordID: clearTarget.Record.ID}}, ReplaceRecordComments: []RecordCommentsReplacement{{RepoID: "fixture-a", RecordID: clearTarget.Record.ID, Comments: []RecordComment{{CommentID: "replace-me", Body: "must roll back", CreatedAt: now, UpdatedAt: now}}}}, ReconcileChildren: []ChildSourceReconciliation{{RepoID: "fixture-a", ParentID: clearTarget.Record.ID, Kind: "issue_comment"}}}); err == nil {
+		t.Fatal("CommitSyncBatch succeeded with an invalid terminal frontier")
+	}
+	if _, err := store.GetSourceScoped(ctx, "fixture-a", valid.Record.ID); err == nil {
+		t.Fatal("first graph survived a failed atomic batch")
+	}
+	if _, ok, err := store.GetSyncFrontier(ctx, "fixture-a", "issue", "updated_at_desc", "state=all"); err != nil || ok {
+		t.Fatalf("frontier ok=%v err=%v after failed atomic batch", ok, err)
+	}
+	if _, ok, err := store.GetIssueCommentSync(ctx, "fixture-a", valid.Record.ID); err != nil || ok {
+		t.Fatalf("comment queue ok=%v err=%v after failed atomic batch", ok, err)
+	}
+	if frontiers, err := store.ListMaintenanceFrontiers(ctx, "fixture-a"); err != nil || len(frontiers) != 0 {
+		t.Fatalf("maintenance frontiers=%+v err=%v after failed atomic batch", frontiers, err)
+	}
+	if _, ok, err := store.GetSyncCommitReceipt(ctx, receipt.StageID); err != nil || ok {
+		t.Fatalf("receipt ok=%v err=%v after failed atomic batch", ok, err)
+	}
+	preserved, err := store.GetRecord(ctx, "fixture-a", clearTarget.Record.ID)
+	if err != nil || len(preserved.Comments) != 1 || preserved.Comments[0].CommentID != "keep-me" {
+		t.Fatalf("preserved record=%+v err=%v after failed atomic batch", preserved, err)
+	}
+	if _, err := store.GetSourceScoped(ctx, "fixture-a", child.Record.ID); err != nil {
+		t.Fatalf("child reconciliation escaped failed atomic batch: %v", err)
+	}
+}
+
+func TestCommitSyncBatchPublishesGraphFrontierAndReceiptTogether(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	now := time.Date(2026, 9, 1, 8, 30, 0, 0, time.UTC)
+	graph := SyncGraph{RepoID: "fixture-a", Record: Record{RepoID: "fixture-a", ID: "ISSUE-ATOMIC-RECEIPT", Type: "issue", Path: "issues/atomic-receipt.md", Title: "Atomic receipt", Status: "open", ContentHash: "atomic-receipt", Provenance: ProvenanceRemote, CreatedAt: now, UpdatedAt: now}}
+	maintenance := MaintenanceFrontier{RepoID: "fixture-a", RemoteType: "issue", Ordering: "updated_at_desc", FilterKey: "all", Lane: "head", Status: "fresh", Checkpoint: "next_page:2", UpdatedAt: now}
+	receipt := SyncCommitReceipt{StageID: "stage-atomic-receipt", Checksum: "checksum-atomic", RepoID: "fixture-a", Collection: "issues", CommittedAt: now}
+	if err := store.CommitSyncBatch(ctx, SyncBatch{Graphs: []SyncGraph{graph}, MaintenanceFrontier: &maintenance, Receipt: &receipt}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetSourceScoped(ctx, "fixture-a", graph.Record.ID); err != nil {
+		t.Fatal(err)
+	}
+	frontiers, err := store.ListMaintenanceFrontiers(ctx, "fixture-a")
+	if err != nil || len(frontiers) != 1 || frontiers[0].Checkpoint != "next_page:2" {
+		t.Fatalf("frontiers=%+v err=%v", frontiers, err)
+	}
+	got, ok, err := store.GetSyncCommitReceipt(ctx, receipt.StageID)
+	if err != nil || !ok || got.Checksum != receipt.Checksum || !got.CommittedAt.Equal(now) {
+		t.Fatalf("receipt=%+v ok=%v err=%v", got, ok, err)
+	}
+}
+
 func TestRecentCompletedSyncEventsAreBoundedAndNewestFirst(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)

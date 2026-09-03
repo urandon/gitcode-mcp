@@ -149,6 +149,77 @@ func (s *SQLiteStore) UpsertRecordGraph(ctx context.Context, graph RecordGraph) 
 }
 
 func (s *SQLiteStore) UpsertSyncGraph(ctx context.Context, graph SyncGraph) (err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer txRollbackOnError(tx, &err)
+	if err = s.upsertSyncGraphTx(ctx, tx, graph); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// CommitSyncBatch publishes a staged collection batch and its traversal
+// frontier in one SQLite transaction. A failed graph or frontier leaves both
+// records and checkpoint unchanged, so restart replay is idempotent.
+func (s *SQLiteStore) CommitSyncBatch(ctx context.Context, batch SyncBatch) (err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer txRollbackOnError(tx, &err)
+	for _, graph := range batch.Graphs {
+		if err = s.upsertSyncGraphTx(ctx, tx, graph); err != nil {
+			return err
+		}
+	}
+	for _, item := range batch.IssueCommentSyncs {
+		if err = upsertIssueCommentSyncTx(ctx, tx, item); err != nil {
+			return err
+		}
+	}
+	for _, ref := range batch.ClearRecordCommentRefs {
+		if _, err = tx.ExecContext(ctx, `DELETE FROM record_comments WHERE repo_id = ? AND record_id = ?`, ref.RepoID, ref.RecordID); err != nil {
+			return err
+		}
+	}
+	for _, replacement := range batch.ReplaceRecordComments {
+		if _, err = tx.ExecContext(ctx, `DELETE FROM record_comments WHERE repo_id = ? AND record_id = ?`, replacement.RepoID, replacement.RecordID); err != nil {
+			return err
+		}
+		for _, comment := range replacement.Comments {
+			comment.RepoID = replacement.RepoID
+			comment.RecordID = replacement.RecordID
+			if err = upsertRecordCommentTx(ctx, tx, comment); err != nil {
+				return err
+			}
+		}
+	}
+	for _, reconciliation := range batch.ReconcileChildren {
+		if err = s.reconcileChildSourcesTx(ctx, tx, reconciliation.RepoID, reconciliation.ParentID, reconciliation.Kind, reconciliation.KeepSourceIDs); err != nil {
+			return err
+		}
+	}
+	if batch.Frontier != nil {
+		if err = upsertSyncFrontierTx(ctx, tx, *batch.Frontier); err != nil {
+			return err
+		}
+	}
+	if batch.MaintenanceFrontier != nil {
+		if err = upsertMaintenanceFrontierTx(ctx, tx, *batch.MaintenanceFrontier); err != nil {
+			return err
+		}
+	}
+	if batch.Receipt != nil {
+		if err = upsertSyncCommitReceiptTx(ctx, tx, *batch.Receipt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *SQLiteStore) upsertSyncGraphTx(ctx context.Context, tx *sql.Tx, graph SyncGraph) error {
 	repoID := strings.TrimSpace(graph.RepoID)
 	if repoID == "" {
 		repoID = graph.Record.RepoID
@@ -156,12 +227,7 @@ func (s *SQLiteStore) UpsertSyncGraph(ctx context.Context, graph SyncGraph) (err
 	if repoID == "" {
 		return notFoundErr("repository", "")
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer txRollbackOnError(tx, &err)
-	if err = requireRepoTx(ctx, tx, repoID); err != nil {
+	if err := requireRepoTx(ctx, tx, repoID); err != nil {
 		return err
 	}
 	graph.Record.RepoID = repoID
@@ -173,13 +239,13 @@ func (s *SQLiteStore) UpsertSyncGraph(ctx context.Context, graph SyncGraph) (err
 	}
 	originRecord := graph.Record
 	originRecord.Provenance = graph.Provenance
-	if err = upsertSourceTx(ctx, tx, sourceFromRecord(originRecord)); err != nil {
+	if err := upsertSourceTx(ctx, tx, sourceFromRecord(originRecord)); err != nil {
 		return err
 	}
-	if err = upsertSearchProjectionTx(ctx, tx, sourceFromRecord(originRecord), s.useFTS); err != nil {
+	if err := upsertSearchProjectionTx(ctx, tx, sourceFromRecord(originRecord), s.useFTS); err != nil {
 		return err
 	}
-	if err = upsertRecordTx(ctx, tx, graph.Record); err != nil {
+	if err := upsertRecordTx(ctx, tx, graph.Record); err != nil {
 		return err
 	}
 	for _, comment := range graph.Comments {
@@ -189,7 +255,7 @@ func (s *SQLiteStore) UpsertSyncGraph(ctx context.Context, graph SyncGraph) (err
 		if comment.RecordID == "" {
 			comment.RecordID = graph.Record.ID
 		}
-		if err = upsertRecordCommentTx(ctx, tx, comment); err != nil {
+		if err := upsertRecordCommentTx(ctx, tx, comment); err != nil {
 			return err
 		}
 	}
@@ -200,7 +266,7 @@ func (s *SQLiteStore) UpsertSyncGraph(ctx context.Context, graph SyncGraph) (err
 		if review.SourceID == "" {
 			review.SourceID = graph.Record.ID
 		}
-		if err = upsertPRReviewCommentTx(ctx, tx, review); err != nil {
+		if err := upsertPRReviewCommentTx(ctx, tx, review); err != nil {
 			return err
 		}
 	}
@@ -208,7 +274,7 @@ func (s *SQLiteStore) UpsertSyncGraph(ctx context.Context, graph SyncGraph) (err
 		if discussion.RepoID == "" {
 			discussion.RepoID = repoID
 		}
-		if err = upsertPRReviewDiscussionTx(ctx, tx, discussion); err != nil {
+		if err := upsertPRReviewDiscussionTx(ctx, tx, discussion); err != nil {
 			return err
 		}
 	}
@@ -216,7 +282,7 @@ func (s *SQLiteStore) UpsertSyncGraph(ctx context.Context, graph SyncGraph) (err
 		if position.RepoID == "" {
 			position.RepoID = repoID
 		}
-		if err = upsertPRReviewPositionTx(ctx, tx, position); err != nil {
+		if err := upsertPRReviewPositionTx(ctx, tx, position); err != nil {
 			return err
 		}
 	}
@@ -227,7 +293,7 @@ func (s *SQLiteStore) UpsertSyncGraph(ctx context.Context, graph SyncGraph) (err
 		if identity.SourceID == "" {
 			identity.SourceID = graph.Record.ID
 		}
-		if err = upsertIdentityTx(ctx, tx, identity); err != nil {
+		if err := upsertIdentityTx(ctx, tx, identity); err != nil {
 			return err
 		}
 	}
@@ -238,7 +304,7 @@ func (s *SQLiteStore) UpsertSyncGraph(ctx context.Context, graph SyncGraph) (err
 		if link.SourceID == "" {
 			link.SourceID = graph.Record.ID
 		}
-		if err = upsertLinkTx(ctx, tx, link); err != nil {
+		if err := upsertLinkTx(ctx, tx, link); err != nil {
 			return err
 		}
 	}
@@ -249,12 +315,12 @@ func (s *SQLiteStore) UpsertSyncGraph(ctx context.Context, graph SyncGraph) (err
 		if revision.RecordID == "" {
 			revision.RecordID = graph.Record.ID
 		}
-		if err = upsertRemoteRevisionTx(ctx, tx, revision); err != nil {
+		if err := upsertRemoteRevisionTx(ctx, tx, revision); err != nil {
 			return err
 		}
 	}
 	if graph.ReplaceChunks {
-		if err = reconcileSourceChunksTx(ctx, tx, repoID, graph.Record.ID, graph.Chunks); err != nil {
+		if err := reconcileSourceChunksTx(ctx, tx, repoID, graph.Record.ID, graph.Chunks); err != nil {
 			return err
 		}
 	}
@@ -265,7 +331,7 @@ func (s *SQLiteStore) UpsertSyncGraph(ctx context.Context, graph SyncGraph) (err
 		if chunk.SourceID == "" {
 			chunk.SourceID = graph.Record.ID
 		}
-		if _, err = upsertChunkTx(ctx, tx, chunk); err != nil {
+		if _, err := upsertChunkTx(ctx, tx, chunk); err != nil {
 			return err
 		}
 	}
@@ -276,11 +342,11 @@ func (s *SQLiteStore) UpsertSyncGraph(ctx context.Context, graph SyncGraph) (err
 		if event.SourceID == "" {
 			event.SourceID = graph.Record.ID
 		}
-		if err = recordSyncEventTx(ctx, tx, event); err != nil {
+		if err := recordSyncEventTx(ctx, tx, event); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func requireRepoTx(ctx context.Context, tx *sql.Tx, repoID string) error {

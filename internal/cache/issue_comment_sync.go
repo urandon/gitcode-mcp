@@ -8,6 +8,16 @@ import (
 )
 
 func (s *SQLiteStore) UpsertIssueCommentSync(ctx context.Context, item IssueCommentSync) error {
+	return upsertIssueCommentSyncExec(ctx, s.db, item)
+}
+
+func upsertIssueCommentSyncTx(ctx context.Context, tx *sql.Tx, item IssueCommentSync) error {
+	return upsertIssueCommentSyncExec(ctx, tx, item)
+}
+
+func upsertIssueCommentSyncExec(ctx context.Context, executor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, item IssueCommentSync) error {
 	if item.UpdatedAt.IsZero() {
 		item.UpdatedAt = time.Now().UTC()
 	}
@@ -15,7 +25,7 @@ func (s *SQLiteStore) UpsertIssueCommentSync(ctx context.Context, item IssueComm
 	if !item.LastAttemptAt.IsZero() {
 		lastAttempt = item.LastAttemptAt.UTC().Format(time.RFC3339Nano)
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO issue_comment_sync (repo_id, source_id, issue_number, remote_id, provider_id, remote_revision, expected_count, status, attempts, last_error_class, retry_after, last_attempt_at, updated_at)
+	_, err := executor.ExecContext(ctx, `INSERT INTO issue_comment_sync (repo_id, source_id, issue_number, remote_id, provider_id, remote_revision, expected_count, status, attempts, last_error_class, retry_after, last_attempt_at, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(repo_id, source_id) DO UPDATE SET issue_number = excluded.issue_number, remote_id = excluded.remote_id, provider_id = excluded.provider_id, remote_revision = excluded.remote_revision, expected_count = excluded.expected_count, status = excluded.status, attempts = excluded.attempts, last_error_class = excluded.last_error_class, retry_after = excluded.retry_after, last_attempt_at = excluded.last_attempt_at, updated_at = excluded.updated_at`,
 		item.RepoID, item.SourceID, item.IssueNumber, item.RemoteID, item.ProviderID, item.RemoteRevision, item.ExpectedCount, item.Status, item.Attempts, item.LastErrorClass, item.RetryAfter, lastAttempt, item.UpdatedAt.UTC().Format(time.RFC3339Nano))

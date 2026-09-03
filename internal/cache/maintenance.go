@@ -63,17 +63,58 @@ ON CONFLICT(repo_id, namespace_id) DO UPDATE SET covered_generation = excluded.c
 }
 
 func (s *SQLiteStore) UpsertMaintenanceFrontier(ctx context.Context, frontier MaintenanceFrontier) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := upsertMaintenanceFrontierTx(ctx, tx, frontier); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func upsertMaintenanceFrontierTx(ctx context.Context, tx *sql.Tx, frontier MaintenanceFrontier) error {
 	if frontier.RepoID == "" || frontier.RemoteType == "" || frontier.Ordering == "" || frontier.FilterKey == "" || frontier.Lane == "" || frontier.Status == "" {
 		return fmt.Errorf("cache: maintenance frontier identity and status are required")
 	}
 	if frontier.UpdatedAt.IsZero() {
 		frontier.UpdatedAt = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO maintenance_frontiers (repo_id, remote_type, ordering, filter_key, lane, status, high_updated_at, high_remote_id, high_number, stop_reason, pages_listed, records_listed, checkpoint, last_error_class, updated_at)
+	_, err := tx.ExecContext(ctx, `INSERT INTO maintenance_frontiers (repo_id, remote_type, ordering, filter_key, lane, status, high_updated_at, high_remote_id, high_number, stop_reason, pages_listed, records_listed, checkpoint, last_error_class, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(repo_id, remote_type, ordering, filter_key, lane) DO UPDATE SET status = excluded.status, high_updated_at = excluded.high_updated_at, high_remote_id = excluded.high_remote_id, high_number = excluded.high_number, stop_reason = excluded.stop_reason, pages_listed = excluded.pages_listed, records_listed = excluded.records_listed, checkpoint = excluded.checkpoint, last_error_class = excluded.last_error_class, updated_at = excluded.updated_at`,
 		frontier.RepoID, frontier.RemoteType, frontier.Ordering, frontier.FilterKey, frontier.Lane, frontier.Status, formatTimeOrEmpty(frontier.HighUpdatedAt), frontier.HighRemoteID, frontier.HighNumber, frontier.StopReason, frontier.PagesListed, frontier.RecordsListed, frontier.Checkpoint, frontier.LastErrorClass, frontier.UpdatedAt.Format(time.RFC3339Nano))
 	return err
+}
+
+func upsertSyncCommitReceiptTx(ctx context.Context, tx *sql.Tx, receipt SyncCommitReceipt) error {
+	if receipt.StageID == "" || receipt.Checksum == "" || receipt.RepoID == "" || receipt.Collection == "" {
+		return fmt.Errorf("cache: sync commit receipt identity is required")
+	}
+	if receipt.CommittedAt.IsZero() {
+		receipt.CommittedAt = time.Now().UTC()
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO sync_commit_receipts (stage_id, checksum, repo_id, collection, committed_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(stage_id) DO UPDATE SET checksum = excluded.checksum, repo_id = excluded.repo_id, collection = excluded.collection, committed_at = excluded.committed_at`,
+		receipt.StageID, receipt.Checksum, receipt.RepoID, receipt.Collection, receipt.CommittedAt.UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *SQLiteStore) GetSyncCommitReceipt(ctx context.Context, stageID string) (SyncCommitReceipt, bool, error) {
+	var receipt SyncCommitReceipt
+	var committedRaw string
+	err := s.db.QueryRowContext(ctx, `SELECT stage_id, checksum, repo_id, collection, committed_at FROM sync_commit_receipts WHERE stage_id = ?`, stageID).
+		Scan(&receipt.StageID, &receipt.Checksum, &receipt.RepoID, &receipt.Collection, &committedRaw)
+	if err == sql.ErrNoRows {
+		return SyncCommitReceipt{}, false, nil
+	}
+	if err != nil {
+		return SyncCommitReceipt{}, false, err
+	}
+	receipt.CommittedAt = parseTimeOrZero(committedRaw)
+	return receipt, true, nil
 }
 
 func (s *SQLiteStore) ListMaintenanceFrontiers(ctx context.Context, repoID string) ([]MaintenanceFrontier, error) {

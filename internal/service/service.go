@@ -1962,8 +1962,24 @@ func (s *Service) stageIssuePage(ctx context.Context, req BulkSyncRequest, items
 }
 
 func (s *Service) enqueueIssueCommentSync(ctx context.Context, graph cache.SourceGraph, issue gitcode.Issue) (bool, error) {
+	item, clearComments, queued, err := s.prepareIssueCommentSync(ctx, graph, issue)
+	if err != nil {
+		return false, err
+	}
+	if clearComments {
+		if err := s.store.ReplaceRecordComments(ctx, item.RepoID, item.SourceID, nil); err != nil {
+			return false, err
+		}
+	}
+	if err := s.store.UpsertIssueCommentSync(ctx, item); err != nil {
+		return false, err
+	}
+	return queued, nil
+}
+
+func (s *Service) prepareIssueCommentSync(ctx context.Context, graph cache.SourceGraph, issue gitcode.Issue) (cache.IssueCommentSync, bool, bool, error) {
 	if graph.SyncStatus == nil {
-		return false, errors.New("issue comment queue requires parent sync status")
+		return cache.IssueCommentSync{}, false, false, errors.New("issue comment queue requires parent sync status")
 	}
 	now := s.now().UTC()
 	item := cache.IssueCommentSync{
@@ -1979,13 +1995,10 @@ func (s *Service) enqueueIssueCommentSync(ctx context.Context, graph cache.Sourc
 	}
 	if issue.Comments == 0 {
 		item.Status = "complete"
-		if err := s.store.ReplaceRecordComments(ctx, item.RepoID, item.SourceID, nil); err != nil {
-			return false, err
-		}
 	}
 	existing, ok, err := s.store.GetIssueCommentSync(ctx, item.RepoID, item.SourceID)
 	if err != nil {
-		return false, err
+		return cache.IssueCommentSync{}, false, false, err
 	}
 	if ok && existing.RemoteRevision == item.RemoteRevision {
 		existing.IssueNumber = item.IssueNumber
@@ -1998,15 +2011,9 @@ func (s *Service) enqueueIssueCommentSync(ctx context.Context, graph cache.Sourc
 			existing.LastErrorClass = ""
 			existing.RetryAfter = ""
 		}
-		if err := s.store.UpsertIssueCommentSync(ctx, existing); err != nil {
-			return false, err
-		}
-		return existing.Status != "complete", nil
+		return existing, issue.Comments == 0, existing.Status != "complete", nil
 	}
-	if err := s.store.UpsertIssueCommentSync(ctx, item); err != nil {
-		return false, err
-	}
-	return item.Status != "complete", nil
+	return item, issue.Comments == 0, item.Status != "complete", nil
 }
 
 func (s *Service) BulkSyncIssueComments(ctx context.Context, req BulkSyncRequest) (*SyncResourcesResult, error) {
@@ -2492,14 +2499,28 @@ func cachedIssueComment(comment gitcode.Comment, item cache.IssueCommentSync, no
 }
 
 func (s *Service) upsertIssueCommentProjection(ctx context.Context, item cache.IssueCommentSync, comment cache.RecordComment) (string, error) {
+	graph, stableID, err := s.stageIssueCommentProjection(ctx, item, comment)
+	if err != nil {
+		return "", err
+	}
+	if err := s.store.UpsertSyncGraph(ctx, s.syncGraphFromSourceGraph(item.RepoID, graph)); err != nil {
+		return "", err
+	}
+	return stableID, nil
+}
+
+// stageIssueCommentProjection validates and normalizes an issue comment without
+// publishing it. Durable sync uses this to assemble the complete parent batch
+// before entering the cache's single atomic commit.
+func (s *Service) stageIssueCommentProjection(ctx context.Context, item cache.IssueCommentSync, comment cache.RecordComment) (cache.SourceGraph, string, error) {
 	commentID := strings.TrimSpace(comment.CommentID)
 	if commentID == "" {
-		return "", s.liveGraphError("comment missing provider id")
+		return cache.SourceGraph{}, "", s.liveGraphError("comment missing provider id")
 	}
 	remoteID := issueCommentRemoteID(item.IssueNumber, commentID)
 	stableID := s.resolveOrFallback(ctx, item.RepoID, "issue_comment", remoteID, issueCommentStableID(item.IssueNumber, commentID))
 	if err := s.guardRemoteAlias(ctx, item.RepoID, "issue_comment", remoteID, stableID); err != nil {
-		return "", err
+		return cache.SourceGraph{}, "", err
 	}
 	now := s.now().UTC()
 	updated := comment.UpdatedAt.UTC()
@@ -2538,10 +2559,7 @@ func (s *Service) upsertIssueCommentProjection(ctx context.Context, item cache.I
 		ReplaceChunks: true,
 		SyncStatus:    &cache.SyncStatus{RepoID: item.RepoID, SourceID: stableID, RemoteType: "issue_comment", RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now},
 	}
-	if err := s.store.UpsertSyncGraph(ctx, s.syncGraphFromSourceGraph(item.RepoID, graph)); err != nil {
-		return "", err
-	}
-	return stableID, nil
+	return graph, stableID, nil
 }
 
 func (s *Service) projectIssueComments(ctx context.Context, item cache.IssueCommentSync, comments []cache.RecordComment) error {
@@ -2944,6 +2962,14 @@ func filterPullRequestsByCompleteWatermark(items []gitcode.PullRequest, frontier
 }
 
 func (s *Service) recordSyncFrontier(ctx context.Context, repoID, remoteType string, result *SyncResourcesResult, high syncHighWatermark) error {
+	frontier, err := s.syncFrontierForResult(ctx, repoID, remoteType, result, high)
+	if err != nil || frontier == nil {
+		return err
+	}
+	return s.store.UpsertSyncFrontier(ctx, *frontier)
+}
+
+func (s *Service) syncFrontierForResult(ctx context.Context, repoID, remoteType string, result *SyncResourcesResult, high syncHighWatermark) (*cache.SyncFrontier, error) {
 	status := result.TraversalStatus
 	if result.StopReason == "watermark" || result.StopReason == "end_of_collection" {
 		status = "complete"
@@ -2953,15 +2979,15 @@ func (s *Service) recordSyncFrontier(ctx context.Context, repoID, remoteType str
 	}
 	previous, ok, err := s.store.GetSyncFrontier(ctx, repoID, remoteType, syncOrderingUpdatedAtDesc, syncFilterStateAll)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if ok && previous.Status == "complete" && status != "complete" {
 		// Keep the last proven full-corpus watermark while a bounded head pass is
 		// still working toward it. Maintenance stores the in-progress checkpoint
 		// and candidate high watermark separately.
-		return nil
+		return nil, nil
 	}
-	return s.store.UpsertSyncFrontier(ctx, cache.SyncFrontier{
+	frontier := cache.SyncFrontier{
 		RepoID:        repoID,
 		RemoteType:    remoteType,
 		Ordering:      syncOrderingUpdatedAtDesc,
@@ -2974,7 +3000,8 @@ func (s *Service) recordSyncFrontier(ctx context.Context, repoID, remoteType str
 		PagesListed:   result.PagesListed,
 		RecordsListed: result.RecordsListed,
 		UpdatedAt:     s.now().UTC(),
-	})
+	}
+	return &frontier, nil
 }
 
 func (s *Service) recordSyncFrontierBestEffort(ctx context.Context, repoID, remoteType string, result *SyncResourcesResult, high syncHighWatermark) {

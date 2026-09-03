@@ -618,9 +618,18 @@ func TestRepositoryDocsResumeSharesAtomicWriterAdmission(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("sync=%+v created=%t err=%v", syncJob, created, err)
 	}
-	if _, resumed, err := jobs.ResumeRepositoryDocsAdmission(docs.ID, "reg-1", "source-1", 3, "set-1", "docs-resume", func() {}); err == nil || resumed {
-		t.Fatalf("resume overlapped daemon writer: resumed=%t err=%v", resumed, err)
+	resumedJob, resumed, err := jobs.ResumeRepositoryDocsAdmission(docs.ID, "reg-1", "source-1", 3, "set-1", "docs-resume", func() {})
+	if err != nil || !resumed || resumedJob.ID != docs.ID {
+		t.Fatalf("provider-only sync reserved docs writer admission: job=%+v resumed=%t err=%v", resumedJob, resumed, err)
 	}
+	jobs.finishJob(docs.ID, JobStatusSucceeded, "done")
+	jobs.markWorkerFinished(docs.ID)
+	jobs.updateJob(docs.ID, func(job *Job, now time.Time) {
+		job.Status = JobStatusFailed
+		job.Error = "retry"
+		job.UpdatedAt = now
+		job.FinishedAt = &now
+	})
 	jobs.finishJob(syncJob.ID, JobStatusSucceeded, "done")
 	jobs.markWorkerFinished(syncJob.ID)
 	releaseDirect, err := jobs.BeginDirectCacheWriter("cache-1", "admin-binding-test")
@@ -631,7 +640,7 @@ func TestRepositoryDocsResumeSharesAtomicWriterAdmission(t *testing.T) {
 		t.Fatalf("resume overlapped direct writer: resumed=%t err=%v", resumed, err)
 	}
 	releaseDirect()
-	resumedJob, resumed, err := jobs.ResumeRepositoryDocsAdmission(docs.ID, "reg-1", "source-1", 3, "set-1", "docs-resume", func() {})
+	resumedJob, resumed, err = jobs.ResumeRepositoryDocsAdmission(docs.ID, "reg-1", "source-1", 3, "set-1", "docs-resume", func() {})
 	if err != nil || !resumed || resumedJob.ID != docs.ID {
 		t.Fatalf("resume after quiescence=%+v resumed=%t err=%v", resumedJob, resumed, err)
 	}

@@ -171,6 +171,28 @@
     return [...new Set(values.filter((value): value is string => Boolean(value)))].sort();
   }
 
+  function syncLifecyclePhase(job: Job): string {
+    const phase = job.sync_stage?.phase;
+    if (job.status === 'failed' || job.status === 'cancelled' || job.status === 'succeeded' || job.status === 'interrupted') return 'terminal';
+    if (!phase) {
+      if (job.status === 'queued') return 'queued';
+      if (job.status === 'running' || job.status === 'cancelling') return 'admitted';
+      return 'terminal';
+    }
+    if (phase === 'waiting_commit' && (job.sync_stage?.attempt || 0) > 0) return 'retrying';
+    if (phase === 'committed' || phase === 'superseded' || phase === 'rejected') return 'terminal';
+    return phase;
+  }
+
+  function syncPhaseHeading(job: Job): string {
+    if (job.sync_stage?.phase === 'waiting_commit') return 'Waiting for cache writer';
+    const phase = syncLifecyclePhase(job);
+    if (phase === 'queued') return 'Queued for durable sync';
+    if (phase === 'admitted') return 'Admitted for durable sync';
+    if (phase === 'terminal' && !job.sync_stage?.phase) return 'Terminal sync outcome';
+    return humanize(job.sync_stage?.phase || phase);
+  }
+
   async function establishSession(): Promise<void> {
     const launchToken = new URLSearchParams(location.hash.slice(1)).get('launch');
     const response = launchToken
@@ -767,8 +789,16 @@
               <section class="job-state-card" aria-labelledby="job-state-title">
                 <div class="job-state-heading"><div><span class="entity-icon"><Gauge size={18} /></span><div><p class="section-kicker">CURRENT STATE</p><h2 id="job-state-title">{humanize(selectedJob.status)}</h2></div></div><StatusChip value={selectedJob.status} /></div>
                 <div class="job-progress" aria-label={`Job progress ${selectedJob.completed || 0} of ${selectedJob.steps || 0}`}><span style={`width: ${selectedJob.steps ? Math.min(100, ((selectedJob.completed || 0) / selectedJob.steps) * 100) : 0}%`}></span></div>
-                <dl class="job-metrics"><div><dt>Progress</dt><dd>{selectedJob.completed || 0}/{selectedJob.steps || '—'}</dd></div><div><dt>Throughput</dt><dd>{selectedJob.throughput_per_second ? `${selectedJob.throughput_per_second.toFixed(2)}/s` : 'Not enough data'}</dd></div><div><dt>ETA</dt><dd>{selectedJob.eta_seconds ? `${selectedJob.eta_seconds}s` : 'Not available'}</dd></div><div><dt>Work identity</dt><dd>{selectedJob.work_ref || 'Legacy job'}</dd></div></dl>
-                <div class="job-actions">
+				<dl class="job-metrics"><div><dt>Progress</dt><dd>{selectedJob.completed || 0}/{selectedJob.steps || '—'}</dd></div><div><dt>Throughput</dt><dd>{selectedJob.throughput_per_second ? `${selectedJob.throughput_per_second.toFixed(2)}/s` : 'Not enough data'}</dd></div><div><dt>ETA</dt><dd>{selectedJob.eta_seconds ? `${selectedJob.eta_seconds}s` : 'Not available'}</dd></div><div><dt>Work identity</dt><dd>{selectedJob.work_ref || 'Legacy job'}</dd></div></dl>
+				{#if selectedJob.type === 'sync'}
+				  <section class="sync-stage-panel" role="status" aria-label="Durable sync phase">
+					<div><p class="section-kicker">DURABLE FETCH → COMMIT</p><h3>{syncPhaseHeading(selectedJob)}</h3><span>{selectedJob.sync_stage ? `${humanize(selectedJob.sync_stage.collection || 'collection')} · ${selectedJob.sync_stage.stage_ref}` : 'Stage not created yet'}</span></div>
+					<StatusChip value={syncLifecyclePhase(selectedJob)} />
+					<dl class="job-context"><div><dt>Lifecycle</dt><dd>{humanize(syncLifecyclePhase(selectedJob))}</dd></div><div><dt>Raw phase</dt><dd>{humanize(selectedJob.sync_stage?.phase || 'not staged')}</dd></div><div><dt>Fetched</dt><dd>{selectedJob.sync_stage?.fetched || 0}</dd></div><div><dt>Staged</dt><dd>{selectedJob.sync_stage?.staged || 0} · {(selectedJob.sync_stage?.staged_bytes || 0).toLocaleString()} bytes</dd></div><div><dt>Committed</dt><dd>{selectedJob.sync_stage?.committed || 0}</dd></div><div><dt>Retry budget</dt><dd>{selectedJob.sync_stage?.attempt || 0}/{selectedJob.sync_stage?.retry_budget || '—'}</dd></div><div><dt>Next retry</dt><dd>{selectedJob.sync_stage?.retry_after ? new Date(selectedJob.sync_stage.retry_after).toLocaleString() : 'Not scheduled'}</dd></div><div><dt>Blocking operation</dt><dd>{selectedJob.sync_stage?.blocking_operation ? `${humanize(selectedJob.sync_stage.blocking_operation)} · ${selectedJob.cache_ref || 'cache'}` : 'None'}</dd></div><div><dt>Blocking job</dt><dd>{selectedJob.sync_stage?.blocking_job_ref || 'External or not retained'}</dd></div><div><dt>Fetched at</dt><dd>{selectedJob.sync_stage?.fetched_at ? new Date(selectedJob.sync_stage.fetched_at).toLocaleString() : 'Not fetched'}</dd></div><div><dt>Staged at</dt><dd>{selectedJob.sync_stage?.staged_at ? new Date(selectedJob.sync_stage.staged_at).toLocaleString() : 'Not staged'}</dd></div><div><dt>Last commit</dt><dd>{selectedJob.sync_stage?.committed_at ? new Date(selectedJob.sync_stage.committed_at).toLocaleString() : 'No successful commit'}</dd></div></dl>
+					{#if selectedJob.sync_stage?.terminal_reason}<p class="sync-stage-terminal">{humanize(selectedJob.sync_stage.terminal_reason)}</p>{/if}
+				  </section>
+				{/if}
+				<div class="job-actions">
                   <div><strong>Safe controls</strong><span>{selectedJob.action_reason || 'Available for this daemon-owned work.'}</span></div>
                   <button class="danger-action" disabled={!selectedJob.cancellable || !csrfToken || actionRunning} onclick={(event) => void confirmJobAction('cancel', event.currentTarget)}><XCircle size={16} />Cancel job</button>
                   <button disabled={!selectedJob.retryable || !csrfToken || actionRunning} onclick={(event) => void confirmJobAction('retry', event.currentTarget)}><RotateCcw size={16} />Retry job</button>

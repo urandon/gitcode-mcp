@@ -2150,6 +2150,41 @@ func renderServiceJobText(w io.Writer, job servicectl.Job) {
 	if job.Error != "" {
 		fmt.Fprintf(w, "message: %s\n", job.Error)
 	}
+	if stage := job.SyncStage; stage != nil {
+		fmt.Fprintf(w, "sync_phase: %s\n", stage.Phase)
+		fmt.Fprintf(w, "sync_collection: %s\n", stage.Collection)
+		fmt.Fprintf(w, "sync_stage_ref: %s\n", stage.StageRef)
+		fmt.Fprintf(w, "sync_cache_ref: %s\n", stage.CacheRef)
+		fmt.Fprintf(w, "sync_fetched: %d\n", stage.Fetched)
+		fmt.Fprintf(w, "sync_staged: %d\n", stage.Staged)
+		fmt.Fprintf(w, "sync_staged_bytes: %d\n", stage.StagedBytes)
+		fmt.Fprintf(w, "sync_committed: %d\n", stage.Committed)
+		fmt.Fprintf(w, "sync_retry: %d/%d\n", stage.Attempt, stage.RetryBudget)
+		if !stage.RetryAfter.IsZero() {
+			fmt.Fprintf(w, "sync_retry_after: %s\n", stage.RetryAfter.Format(time.RFC3339))
+		}
+		if stage.BlockerClass != "" {
+			fmt.Fprintf(w, "sync_blocker_class: %s\n", stage.BlockerClass)
+		}
+		if stage.BlockingOp != "" {
+			fmt.Fprintf(w, "sync_blocking_operation: %s\n", stage.BlockingOp)
+		}
+		if stage.BlockingJobRef != "" {
+			fmt.Fprintf(w, "sync_blocking_job_ref: %s\n", stage.BlockingJobRef)
+		}
+		if !stage.FetchedAt.IsZero() {
+			fmt.Fprintf(w, "sync_fetched_at: %s\n", stage.FetchedAt.Format(time.RFC3339))
+		}
+		if !stage.StagedAt.IsZero() {
+			fmt.Fprintf(w, "sync_staged_at: %s\n", stage.StagedAt.Format(time.RFC3339))
+		}
+		if !stage.CommittedAt.IsZero() {
+			fmt.Fprintf(w, "sync_committed_at: %s\n", stage.CommittedAt.Format(time.RFC3339))
+		}
+		if stage.TerminalCause != "" {
+			fmt.Fprintf(w, "sync_terminal_reason: %s\n", stage.TerminalCause)
+		}
+	}
 	if len(job.Progress) > 0 {
 		fmt.Fprintf(w, "progress_events: %d\n", len(job.Progress))
 	}

@@ -2411,20 +2411,20 @@ func TestCreateCoalescedJobIsAtomic(t *testing.T) {
 
 func TestCacheWriterAdmissionSerializesIndependentWork(t *testing.T) {
 	jobs := NewJobManager(filepath.Join(t.TempDir(), "jobs.json"))
-	first, created, err := jobs.createCoalescedJob(SyncJobType, "owner/left", "", 0, "sync:cache-1:owner/left:head", "cache-1", "reg-left", "", func() {})
+	first, created, err := jobs.createCoalescedJob(RAGIndexJobType, "owner/left", "profile", 0, "rag:cache-1:owner/left", "cache-1", "reg-left", "ns-left", func() {})
 	if err != nil || !created {
 		t.Fatalf("first=%+v created=%t err=%v", first, created, err)
 	}
-	coalesced, created, err := jobs.createCoalescedJob(SyncJobType, "owner/left", "", 0, "sync:cache-1:owner/left:head", "cache-1", "reg-left", "", func() {})
+	coalesced, created, err := jobs.createCoalescedJob(RAGIndexJobType, "owner/left", "profile", 0, "rag:cache-1:owner/left", "cache-1", "reg-left", "ns-left", func() {})
 	if err != nil || created || coalesced.ID != first.ID {
 		t.Fatalf("coalesced=%+v created=%t err=%v", coalesced, created, err)
 	}
-	_, created, err = jobs.createCoalescedJob(RAGIndexJobType, "owner/right", "profile", 0, "rag:cache-1:owner/right", "cache-1", "reg-right", "ns", func() {})
+	_, created, err = jobs.createCoalescedJob(RepositoryDocsIndexJobType, "owner/right", "profile", 0, "docs:cache-1:owner/right", "cache-1", "reg-right", "ns", func() {})
 	var busy ErrCacheWriterBusy
 	if created || !errors.As(err, &busy) || busy.ActiveJobID != first.ID || busy.DiagnosticCode() != "cache_writer_busy" {
 		t.Fatalf("created=%t err=%T %v busy=%+v", created, err, err, busy)
 	}
-	other, created, err := jobs.createCoalescedJob(RAGIndexJobType, "owner/right", "profile", 0, "rag:cache-2:owner/right", "cache-2", "reg-right", "ns", func() {})
+	other, created, err := jobs.createCoalescedJob(RepositoryDocsIndexJobType, "owner/right", "profile", 0, "docs:cache-2:owner/right", "cache-2", "reg-right", "ns", func() {})
 	if err != nil || !created || other.CacheUUID != "cache-2" {
 		t.Fatalf("other=%+v created=%t err=%v", other, created, err)
 	}
@@ -2432,14 +2432,14 @@ func TestCacheWriterAdmissionSerializesIndependentWork(t *testing.T) {
 
 func TestCacheWriterAdmissionRetainsIndependentIntentAcrossRepeatedContention(t *testing.T) {
 	jobs := NewJobManager(filepath.Join(t.TempDir(), "jobs.json"))
-	first, created, err := jobs.createCoalescedJob(SyncJobType, "owner/left", "", 0, "sync:cache-1:owner/left:head", "cache-1", "reg-left", "", func() {})
+	first, created, err := jobs.createCoalescedJob(RAGIndexJobType, "owner/left", "profile", 0, "rag:cache-1:owner/left", "cache-1", "reg-left", "ns-left", func() {})
 	if err != nil || !created {
 		t.Fatalf("first=%+v created=%t err=%v", first, created, err)
 	}
 
-	const independentWork = "rag:cache-1:owner/right:profile"
+	const independentWork = "docs:cache-1:owner/right:profile"
 	for attempt := 0; attempt < 3; attempt++ {
-		_, created, err = jobs.createCoalescedJob(RAGIndexJobType, "owner/right", "profile", 0, independentWork, "cache-1", "reg-right", "ns", func() {})
+		_, created, err = jobs.createCoalescedJob(RepositoryDocsIndexJobType, "owner/right", "profile", 0, independentWork, "cache-1", "reg-right", "ns", func() {})
 		var busy ErrCacheWriterBusy
 		if created || !errors.As(err, &busy) || busy.ActiveJobID != first.ID {
 			t.Fatalf("attempt=%d created=%t err=%T %v busy=%+v", attempt, created, err, err, busy)
@@ -2456,15 +2456,15 @@ func TestCacheWriterAdmissionRetainsIndependentIntentAcrossRepeatedContention(t 
 		job.UpdatedAt = now
 		job.FinishedAt = &now
 	})
-	_, created, err = jobs.createCoalescedJob(RAGIndexJobType, "owner/right", "profile", 0, independentWork, "cache-1", "reg-right", "ns", func() {})
+	_, created, err = jobs.createCoalescedJob(RepositoryDocsIndexJobType, "owner/right", "profile", 0, independentWork, "cache-1", "reg-right", "ns", func() {})
 	var busy ErrCacheWriterBusy
 	if created || !errors.As(err, &busy) || busy.ActiveJobID != first.ID {
 		t.Fatalf("terminal worker still in flight: created=%t err=%T %v busy=%+v", created, err, err, busy)
 	}
 
 	jobs.markWorkerFinished(first.ID)
-	next, created, err := jobs.createCoalescedJob(RAGIndexJobType, "owner/right", "profile", 0, independentWork, "cache-1", "reg-right", "ns", func() {})
-	if err != nil || !created || next.WorkKey != independentWork || next.RepoID != "owner/right" || next.Type != RAGIndexJobType {
+	next, created, err := jobs.createCoalescedJob(RepositoryDocsIndexJobType, "owner/right", "profile", 0, independentWork, "cache-1", "reg-right", "ns", func() {})
+	if err != nil || !created || next.WorkKey != independentWork || next.RepoID != "owner/right" || next.Type != RepositoryDocsIndexJobType {
 		t.Fatalf("independent intent after release=%+v created=%t err=%v", next, created, err)
 	}
 }
@@ -2807,6 +2807,106 @@ func TestMaintenanceLaneTracksEveryCollectionFrontier(t *testing.T) {
 	frontiers = append(frontiers, cache.MaintenanceFrontier{RemoteType: "wiki", Lane: "head", Status: "fresh", UpdatedAt: now})
 	if lane, page, pages := nextMaintenanceSyncLane(entry, frontiers, now); lane != "tail" || page != 21 || pages != 10 {
 		t.Fatalf("wiki tail lane=%q page=%d pages=%d", lane, page, pages)
+	}
+}
+
+func TestMaintenanceMixedCollectionsKeepIndependentContinuationUnits(t *testing.T) {
+	now := time.Now().UTC()
+	policy := MaintenancePolicy{Issues: true, Wiki: true, HeadIntervalSeconds: 900}
+	frontiers := []cache.MaintenanceFrontier{
+		{RemoteType: "issue", Lane: "head", Status: "partial", Checkpoint: "next_page:2", UpdatedAt: now},
+		{RemoteType: "wiki", Lane: "head", Status: "partial", Checkpoint: "next_page:11", UpdatedAt: now},
+	}
+	selection := maintenanceSyncSelection(policy, frontiers, "head", now)
+	if !selection.Issues || !selection.Wiki || len(selection.collectionPages) != 2 {
+		t.Fatalf("selection=%+v pages=%v", selection, selection.collectionPages)
+	}
+	base := service.BulkSyncRequest{Page: 2, PerPage: 100}
+	if got := durableCollectionRequest(base, selection, "issue").Page; got != 2 {
+		t.Fatalf("issue page=%d want=2", got)
+	}
+	if got := durableCollectionRequest(base, selection, "wiki").Page; got != 11 {
+		t.Fatalf("wiki offset=%d want=11", got)
+	}
+
+	frontiers[1] = cache.MaintenanceFrontier{RemoteType: "wiki", Lane: "head", Status: "fresh", UpdatedAt: now}
+	selection = maintenanceSyncSelection(policy, frontiers, "head", now)
+	if !selection.Issues || selection.Wiki {
+		t.Fatalf("fresh wiki was unnecessarily selected: %+v", selection)
+	}
+}
+
+func TestMaintenanceMixedCollectionsPublishCollectionLocalCheckpoints(t *testing.T) {
+	for _, lane := range []string{"head", "tail"} {
+		t.Run(lane, func(t *testing.T) {
+			ctx := context.Background()
+			cachePath := filepath.Join(t.TempDir(), "cache.db")
+			store, err := cache.NewSQLiteStore(ctx, cachePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+				t.Fatal(err)
+			}
+			status := "partial"
+			if lane == "tail" {
+				status = "backfilling"
+			}
+			now := time.Now().UTC()
+			frontiers := []cache.MaintenanceFrontier{
+				{RepoID: "owner/repo", RemoteType: "issue", Ordering: "updated_at_desc", FilterKey: "all", Lane: lane, Status: status, Checkpoint: "next_page:11", UpdatedAt: now},
+				{RepoID: "owner/repo", RemoteType: "wiki", Ordering: "updated_at_desc", FilterKey: "all", Lane: lane, Status: status, Checkpoint: "next_page:2", UpdatedAt: now},
+			}
+			for _, frontier := range frontiers {
+				if err := store.UpsertMaintenanceFrontier(ctx, frontier); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			selection := maintenanceSyncSelection(MaintenancePolicy{Issues: true, Wiki: true, HeadIntervalSeconds: 900}, frontiers, lane, now)
+			req := StartSyncJobRequest{
+				RepoID: "owner/repo", CachePath: cachePath, Lane: lane, Page: 2, MaxPages: 1,
+				collectionPages: selection.collectionPages,
+			}
+			issueReq := durableCollectionJobRequest(req, "issue")
+			if issueReq.Page != 11 {
+				t.Fatalf("effective issue page=%d want=11; pages=%v", issueReq.Page, selection.collectionPages)
+			}
+			frontier, err := stagedMaintenanceFrontier(ctx, issueReq, "issue", durableCollectionBatch{
+				checkpoint: "max_pages", pagesListed: 1, recordsListed: 100, traversalStatus: "bounded",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if frontier.Checkpoint != "next_page:12" {
+				t.Fatalf("staged issue checkpoint=%q want=next_page:12", frontier.Checkpoint)
+			}
+
+			store, err = cache.NewSQLiteStore(ctx, cachePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			if err := store.UpsertMaintenanceFrontier(ctx, *frontier); err != nil {
+				t.Fatal(err)
+			}
+			committed, err := store.ListMaintenanceFrontiers(ctx, "owner/repo")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, candidate := range committed {
+				if candidate.RemoteType == "issue" && candidate.Lane == lane {
+					if candidate.Checkpoint != "next_page:12" {
+						t.Fatalf("committed issue checkpoint=%q want=next_page:12", candidate.Checkpoint)
+					}
+					return
+				}
+			}
+			t.Fatalf("committed issue %s frontier missing: %+v", lane, committed)
+		})
 	}
 }
 

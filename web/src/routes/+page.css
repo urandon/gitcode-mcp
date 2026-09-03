@@ -284,6 +284,11 @@ table small { display: block; max-width: 280px; margin-top: 4px; overflow: hidde
 .job-metrics dd, .job-context dd { margin: 0; overflow: hidden; font: 620 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .job-context { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .job-context div:nth-child(n+4) { border-top: 1px solid var(--line-soft); }
+.sync-stage-panel { margin-top: 16px; padding: 14px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--surface-raised); display: grid; grid-template-columns: 1fr auto; gap: 12px; }
+.sync-stage-panel h3 { margin: 2px 0; font-size: 16px; }
+.sync-stage-panel > div > span, .sync-stage-terminal { color: var(--muted); font-size: 11px; }
+.sync-stage-panel .job-context { grid-column: 1 / -1; }
+.sync-stage-terminal { grid-column: 1 / -1; margin: 0; }
 .job-actions { margin-top: 18px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .job-actions > div { margin-right: auto; display: grid; gap: 4px; }
 .job-actions strong { font-size: 11px; }

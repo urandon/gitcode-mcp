@@ -162,6 +162,25 @@ export type Job = {
   progress_limit: number;
   throughput_per_second?: number;
   eta_seconds?: number;
+  sync_stage?: {
+    stage_ref: string;
+    collection?: string;
+    phase: string;
+    fetched: number;
+    staged: number;
+    committed: number;
+    staged_bytes?: number;
+    attempt?: number;
+    retry_budget?: number;
+    retry_after?: string;
+    blocker_class?: string;
+    blocking_operation?: string;
+    blocking_job_ref?: string;
+    fetched_at?: string;
+    staged_at?: string;
+    committed_at?: string;
+    terminal_reason?: string;
+  };
   progress?: Array<{ type?: string; phase?: string; collection?: string; page?: number; records_listed?: number; records_fetched?: number; records_inserted?: number; records_updated?: number; records_skipped?: number; records_deferred?: number; records_failed?: number; retry_after?: string; attempt?: number; rate_limit_state?: string }>;
 };
 

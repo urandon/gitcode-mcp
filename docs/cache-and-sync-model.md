@@ -67,7 +67,67 @@ gitcode-mcp service attach JOB_ID
 gitcode-mcp service cancel JOB_ID
 ```
 
-`--daemon` starts a service-owned sync job and keeps the CLI attached to compact sync progress. `--detach` starts the same service-owned job and returns the job id immediately. The daemon path is collection-oriented; targeted `--id`/`--input` sync remains a foreground operation. Jobs use the same bulk sync service paths as foreground sync, so existing frontiers/checkpoints still drive resumability after bounded or interrupted collection sync.
+`--daemon` starts a service-owned sync job and keeps the CLI attached to compact sync progress. `--detach` starts the same service-owned job and returns the job id immediately. The daemon path is collection-oriented; targeted `--id`/`--input` sync remains a foreground operation. Existing frontiers/checkpoints still drive resumability after bounded or interrupted collection sync.
+
+Every daemon selector combination, including the default issues+wiki selection,
+uses a collection-level `fetching → staged → waiting_commit/retrying → committing
+→ committed|rejected|superseded` protocol. Provider requests finish before the
+checksummed stage is admitted to the cache writer queue. A contended commit
+replays the persisted normalized response and never repeats provider traffic.
+Stages are bound to cache UUID, schema, an exact fingerprint of the remote
+repository route (`owner`, `name`, API base, and scopes), registration,
+collection checkpoint, provider revision, and idempotency key; recovery rejects
+a changed or missing target before opening it writable. An omitted daemon bound
+means one provider page (normally at most 100 list items) per durable stage,
+rather than an unbounded traversal. Caller bounds can tighten that chunk but
+cannot enlarge it past one provider page, 10,000 produced records, the provider
+response ceiling, or the 16 MiB stage envelope. The daemon lowers its individual
+HTTP response ceiling to 7.5 MiB and its normalized payload ceiling to 15.5 MiB,
+leaving explicit space for the staged JSON envelope. Wiki traversal applies the
+same record-page clamp and a cumulative serialized-page byte budget while it
+fetches bodies; a recursive tree cannot escape the durable batch boundary.
+When the next wiki document would cross that budget, the already bounded prefix
+is committed and the maintenance frontier records an exact record offset. The
+next run resumes at that offset; only a single document that cannot fit by
+itself is terminally rejected.
+Maintenance keeps that wiki offset separate from issue, comment, and pull
+request provider-page checkpoints. A mixed/default sync persists its ordered
+collection workflow with every stage. The newest committed stage remains the
+restart checkpoint until the next collection is durably staged or the terminal
+job snapshot is saved. Recovery selects the furthest staged collection, treats
+a receipt as proof for that collection only, and continues the remaining
+suffix without refetching any committed prefix. Every workflow checkpoint also
+stores a content-free aggregate outcome (counts plus sanitized failure class
+and collection), so a partially fetched but successfully committed prefix
+cannot become a false success after restart. Each selected collection still
+receives its own cursor; already-fresh collections are omitted instead of being
+replayed because another collection needs work.
+Comment fan-out is checked as produced records and serialized bytes before it
+can accumulate across parents.
+Per-stage limits are enforced together with a 64 MiB/50,000-record/256-stage
+aggregate runtime budget. Committed predecessor stages leave capacity after a
+successor is durable; the one newest workflow checkpoint is removed when the
+job becomes terminal and otherwise expires at the stage age limit. That retained
+committed checkpoint, like cancelled/rejected evidence, continues consuming all
+aggregate quotas while it exists. Checkpoint deletion is ordered after a
+successful durable terminal `jobs.json` write; a snapshot write failure leaves
+the checkpoint recoverable. Issues, issue comments, wiki, pull requests, and
+pull request comments all use this daemon protocol. Foreground sync retains its
+synchronous compatibility behavior.
+
+Each SQLite publication transaction includes normalized graphs, collection and
+maintenance frontier/checkpoint updates, and a checksum-bound sync commit
+receipt. The receipt is the authority if the process commits SQLite but cannot
+atomically rename the terminal journal update (for example, ENOSPC): restart
+reports the job as committed without provider refetch or a false rejection.
+Optional post-commit queue-summary reads cannot downgrade that committed state.
+Provider fetch admission is allowed while another cache writer is active, and a
+writer arriving during provider fetch is admitted because sync has not reserved
+the writer lane. Only the short commit phase joins the per-cache FIFO and
+bounded contention backoff. The external-writer comparison and transition to
+the public `committing` lease happen under one job-manager lock, so a direct,
+RAG, or repository-document writer cannot enter between the check and commit
+reservation. Recovery uses the same atomic admission path.
 
 Service job state is stored separately from the cache in the mode-`0600` service runtime `jobs.json` snapshot. It is operational state, not cache content. Active jobs (`queued`, `running`, and the short durable `cancelling` transition) have no TTL and remain visible as active work in the Admin UI. By default, succeeded/superseded jobs expire after 48 hours; failed/interrupted/cancelled jobs expire after 14 days. The latest significant failure per maintenance registration or work stream survives its ordinary TTL inside a separately bounded diagnostic cohort. A final 128-terminal-job cap and 256-progress-event cap keep the snapshot bounded. Pruning runs on load, job updates/completion, and idle maintenance reconciliation. It never deletes cached GitCode records, sync frontiers, maintenance policy, RAG indexes, or audit receipts.
 
@@ -83,7 +143,7 @@ The sync command supports these live sync selectors:
 - `--id ID` and `--input ALIAS` sync exactly one stable record or remote alias. A matching surface selector such as `--issues --input issue:42` is accepted as a type assertion and still uses the single-record adapter path; mismatched or multiple collection selectors are rejected before any provider or cache access.
 - `--index` builds the local index after sync.
 - `--idempotency-key KEY` supplies a deterministic sync event key.
-- `--max-pages`, `--max-records`, and `--per-page` bound collection sync when the selected surface supports collection bounds. They are rejected with `--id` or `--input` because an exact read has no pagination. If no max bound is supplied, collection sync traverses until `end_of_collection` or a complete frontier watermark proves the remaining tail is already cache-covered.
+- `--max-pages`, `--max-records`, and `--per-page` bound collection sync when the selected surface supports collection bounds. They are rejected with `--id` or `--input` because an exact read has no pagination. Foreground collection sync without a max bound traverses until `end_of_collection` or a complete frontier watermark proves the remaining tail is already cache-covered; daemon sync applies the durable one-page/100-record staging chunk described above.
 
 The MCP `sync_live` surface also exposes explicit `issue_comments` and
 `pr_comments` selectors. Its legacy `comments` selector resolves from the
@@ -99,7 +159,7 @@ parent selector is allowed, collection bounds and mismatched selectors are
 rejected before service invocation, and the single-record path never falls
 through to collection listing.
 
-Bulk sync treats issues, wiki pages, pull requests, and pull request comments as bounded collections. Issue and pull request sync page through list APIs and commit each returned record independently. Bounded issue and pull request sync request recent-update descending order and record collection frontier metadata in `sync_frontiers`. A bounded, timed-out, or partially failed run only proves that the current invocation traversed a slice; it must not poison later traversal by causing early-stop before older records are backfilled. A later run can use a high-watermark stop condition only when the previous frontier for the same repo, surface, ordering, and filter scope is `complete`. Issue collection sync is parent-first: it persists list-provided issue records and updates `issue_comment_sync`, but never calls a per-issue comment endpoint. With a complete parent frontier, issue-comment sync pages through the repository-wide collection, upserts each page idempotently, reconciles every comment through both provider issue id and issue number, and marks parent queue items complete only after reaching the collection tail. Each synchronized comment is also projected as a first-class `issue_comment` source with stable id `ISSUECOMMENT-<issue-number>-<comment-id>`, a parent link to the issue, chunks, full-text search content, and a remote alias. A bounded or interrupted aggregate run leaves the queue pending and restarts from page 1; this conservative replay avoids page-number drift and is cheap because page upserts are idempotent. Only a successful full pass removes stale cached comments and stale issue-comment source projections. Unknown or conflicting parents are explicit retryable reconciliation failures. If the aggregate route is unavailable, or if the parent frontier is incomplete, the service retains the per-issue compatibility path. Wiki sync passes record bounds into the wiki provider traversal before committing individual pages, then uses list-level wiki revision metadata before deciding whether a page body fetch is necessary. Pull request comment sync walks cached pull request records and applies record bounds across the resulting comment records. PR review metadata from the comment payload is stored separately from the searchable comment body so cached reads can group review discussions without live network access. Schema version 13 stores review discussion rows and per-comment diff positions so inline review comments can be matched to changed paths and lines using GitCode position metadata. Schema version 14 stores issue and pull request collection frontier metadata. Schema version 16 adds the durable issue-comment queue. Schema version 17 adds daemon maintenance identity, head/tail frontiers, and content-generation-based RAG coverage. Schema versions 18 and 19 add repository-document revision, chunk, membership, vector, exclusion, and source-registration identity metadata without storing document bodies. Live adapter route construction stays behind the provider boundary, and operator docs should use sanitized placeholders rather than real repository coordinates.
+Bulk sync treats issues, wiki pages, pull requests, and pull request comments as bounded collections. Foreground compatibility paths may publish records incrementally; daemon jobs publish each provider-complete collection stage in one SQLite transaction, including issue-comment replacement/reconciliation and PR review metadata. Bounded issue and pull request sync request recent-update descending order and record collection frontier metadata in `sync_frontiers`. A bounded, timed-out, or partially failed run only proves that the current invocation traversed a slice; it must not poison later traversal by causing early-stop before older records are backfilled. A later run can use a high-watermark stop condition only when the previous frontier for the same repo, surface, ordering, and filter scope is `complete`. Issue collection sync is parent-first: it persists list-provided issue records and updates `issue_comment_sync`, but never calls a per-issue comment endpoint. With a complete parent frontier, foreground issue-comment sync pages through the repository-wide collection, upserts each page idempotently, reconciles every comment through both provider issue id and issue number, and marks parent queue items complete only after reaching the collection tail. The daemon's durable comment stage uses bounded parent-scoped responses so the complete response for every selected parent can be retried without another network call. Each synchronized comment is also projected as a first-class `issue_comment` source with stable id `ISSUECOMMENT-<issue-number>-<comment-id>`, a parent link to the issue, chunks, full-text search content, and a remote alias. A bounded or interrupted aggregate run leaves the queue pending and restarts from page 1; this conservative replay avoids page-number drift and is cheap because page upserts are idempotent. Only a successful full pass removes stale cached comments and stale issue-comment source projections. Unknown or conflicting parents are explicit retryable reconciliation failures. If the aggregate route is unavailable, or if the parent frontier is incomplete, the service retains the per-issue compatibility path. Wiki sync passes record bounds into the wiki provider traversal before committing individual pages, then uses list-level wiki revision metadata before deciding whether a page body fetch is necessary. Pull request comment sync walks cached pull request records and applies record bounds across the resulting comment records. PR review metadata from the comment payload is stored separately from the searchable comment body so cached reads can group review discussions without live network access. Schema version 13 stores review discussion rows and per-comment diff positions so inline review comments can be matched to changed paths and lines using GitCode position metadata. Schema version 14 stores issue and pull request collection frontier metadata. Schema version 16 adds the durable issue-comment queue. Schema version 17 adds daemon maintenance identity, head/tail frontiers, and content-generation-based RAG coverage. Schema versions 18 and 19 add repository-document revision, chunk, membership, vector, exclusion, and source-registration identity metadata without storing document bodies. Live adapter route construction stays behind the provider boundary, and operator docs should use sanitized placeholders rather than real repository coordinates.
 
 Parent restart behavior is intentionally conservative because the public issue API is page/per-page, not cursor based. If a bounded run cached 5,000 issues while 10,000 remain, the next `--issues` run starts at page 1 because the previous frontier is not complete; resuming directly at a stored page number could skip records when newer issues shift page boundaries. Already cached parent revisions take the cheap `skipped_by_revision` path, do not trigger comment reads, and do not consume the next run's `--max-records`/`--max-pages` coverage budget. The run can therefore scan through the known 5,000 and spend its bound on the missing tail. `pages_listed` and `records_listed` still report actual list traffic, while the per-record `skipped_by_revision` counter explains the rescan. Comment work remains durable and independent in `issue_comment_sync`; `--issue-comments` drains pending/deferred items later and can be bounded with `--max-records` or `--max-pages`. Repository aggregate progress reports `aggregate_requests`, `comments_listed`, reconciliation failures, and `parent_requests_avoided`. A rate limit defers aggregate traversal without fanning out into per-issue requests; the next foreground or daemon run safely replays from page 1.
 
@@ -276,5 +336,10 @@ Schema version 17 adds a durable random cache UUID, independent maintenance head
 Schema version 18 adds metadata-only repository-document revision sets, chunk identities, revision membership, and namespace-scoped vectors. It records Git object ids, content digests, byte and line ranges, policies, coverage, and lifecycle state; document bytes remain authoritative in Git and are read on demand.
 
 Schema version 19 binds each revision set to an opaque source registration and generation, records the processing-policy identity, preserves worktree authority on membership rows, and adds typed exclusion metadata. Existing version-18 rows receive neutral defaults and remain inspectable; a fresh plan/index establishes the current registration identity before promotion to a ready set.
+
+Schema version 20 adds checksum-bound durable sync commit receipts. A receipt is
+written in the same transaction as cache graphs and frontiers so restart can
+distinguish “SQLite committed, journal terminal write failed” from an uncommitted
+stage without repeating provider traffic.
 
 Opening an older compatible cache without migration is read-compatible but write-blocked so operators can inspect the cache and run diagnostics before applying the migration. New caches are initialized directly at the current schema version.

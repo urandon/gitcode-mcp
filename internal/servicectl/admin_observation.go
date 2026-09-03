@@ -749,6 +749,19 @@ func adminJobObservation(job Job) adminhttp.JobObservation {
 			view.RemediationCommand = "gitcode-mcp service doctor"
 		}
 	}
+	if stage := job.SyncStage; stage != nil {
+		view.SyncStage = &adminhttp.SyncStageObservation{
+			StageRef: stage.StageRef, Phase: string(stage.Phase), Fetched: stage.Fetched,
+			Staged: stage.Staged, Committed: stage.Committed, StagedBytes: stage.StagedBytes, Attempt: stage.Attempt,
+			RetryBudget: stage.RetryBudget, RetryAfter: stage.RetryAfter,
+			BlockerClass: stage.BlockerClass, BlockingOp: stage.BlockingOp, BlockingJobRef: stage.BlockingJobRef,
+			FetchedAt: stage.FetchedAt, StagedAt: stage.StagedAt,
+			CommittedAt: stage.CommittedAt, TerminalCause: stage.TerminalCause,
+		}
+		if !stage.RetryAfter.IsZero() {
+			view.RetryAfter = stage.RetryAfter.Format(time.RFC3339)
+		}
+	}
 	for _, event := range job.Progress {
 		if event.Collection != "" && event.Collection != SyncJobType && event.RecordsFailed > 0 {
 			view.FailureCollection = event.Collection

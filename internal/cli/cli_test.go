@@ -2877,7 +2877,7 @@ func TestRepoRegistryCLI(t *testing.T) {
 		t.Fatalf("repo status code=%d stderr=%q", code, statusErr.String())
 	}
 	out := statusOut.String()
-	for _, want := range []string{"repo_id: fixture-a", "owner: owner-a", "name: repo-a", "api_base_url: https://example.invalid/api?safe=1", "scopes: issues,wiki", "aliases: proj", "binding_state: ready", "alias_conflict_state: none", "cache_state: ready", "index_state: unknown", "binary_version:", "binary_version_source:", "cache_schema_version: 19", "expected_cache_schema_version: 19", "issue_records: 0", "issue_comments: 0", "issue_comment_queue_state: available", "issue_comment_queue: pending=0 deferred=0 complete=0 total=0"} {
+	for _, want := range []string{"repo_id: fixture-a", "owner: owner-a", "name: repo-a", "api_base_url: https://example.invalid/api?safe=1", "scopes: issues,wiki", "aliases: proj", "binding_state: ready", "alias_conflict_state: none", "cache_state: ready", "index_state: unknown", "binary_version:", "binary_version_source:", "cache_schema_version: 20", "expected_cache_schema_version: 20", "issue_records: 0", "issue_comments: 0", "issue_comment_queue_state: available", "issue_comment_queue: pending=0 deferred=0 complete=0 total=0"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("status output missing %q in %q", want, out)
 		}
@@ -2936,7 +2936,7 @@ func TestRepoStatusReadsCompatibleOlderSchemaForDiagnostics(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	for _, want := range []string{`"cache_state": "migration_required"`, `"cache_schema_version": 15`, `"expected_cache_schema_version": 19`, `"binary_version"`, `"issue_comment_queue_state": "schema_unavailable"`} {
+	for _, want := range []string{`"cache_state": "migration_required"`, `"cache_schema_version": 15`, `"expected_cache_schema_version": 20`, `"binary_version"`, `"issue_comment_queue_state": "schema_unavailable"`} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("repo status missing %q in %q", want, stdout.String())
 		}
@@ -4195,6 +4195,28 @@ func TestAliasCommandHelpExitsZero(t *testing.T) {
 				t.Fatalf("empty help output")
 			}
 		})
+	}
+}
+
+func TestRenderServiceJobTextIncludesPublicDurableSyncState(t *testing.T) {
+	now := time.Date(2026, 9, 1, 3, 0, 0, 0, time.UTC)
+	job := servicectl.Job{ID: "job-public", Type: servicectl.SyncJobType, Status: servicectl.JobStatusRunning, CreatedAt: now, UpdatedAt: now, SyncStage: &servicectl.SyncStageView{
+		StageRef: "stage-public", CacheRef: "cache-public", Collection: "issues", Phase: servicectl.SyncStageWaitingCommit,
+		Fetched: 12, Staged: 12, StagedBytes: 8192, Attempt: 2, RetryBudget: 6, RetryAfter: now.Add(time.Minute),
+		BlockerClass: "cache_busy", BlockingOp: "rag-index", BlockingJobRef: "job-blocker", FetchedAt: now, StagedAt: now.Add(time.Second),
+	}}
+	var out bytes.Buffer
+	renderServiceJobText(&out, job)
+	text := out.String()
+	for _, want := range []string{"sync_phase: waiting_commit", "sync_stage_ref: stage-public", "sync_cache_ref: cache-public", "sync_staged_bytes: 8192", "sync_retry: 2/6", "sync_blocking_job_ref: job-blocker"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("output missing %q: %s", want, text)
+		}
+	}
+	for _, forbidden := range []string{"/Users/", "private source body", "idempotency_key", "checksum"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("output contains %q: %s", forbidden, text)
+		}
 	}
 }
 

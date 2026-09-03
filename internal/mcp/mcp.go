@@ -1662,7 +1662,7 @@ func (s *Server) callServiceJobStatus(ctx context.Context, id *json.RawMessage, 
 		s.writeOperationalError(id, err, domainErrorContext{Operation: "service_job_status", Subsystem: "service"})
 		return
 	}
-	text := fmt.Sprintf("job_id=%s status=%s completed=%d/%d", result.ID, result.Status, result.Completed, result.Steps)
+	text := serviceJobSummaryText(result)
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 }
 
@@ -1709,7 +1709,7 @@ func (s *Server) callServiceJobAttach(ctx context.Context, id *json.RawMessage, 
 		}
 	}
 done:
-	text := fmt.Sprintf("job_id=%s status=%s completed=%d/%d timed_out=%t", result.Job.ID, result.Job.Status, result.Job.Completed, result.Job.Steps, result.TimedOut)
+	text := fmt.Sprintf("%s timed_out=%t", serviceJobSummaryText(result.Job), result.TimedOut)
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 }
 
@@ -1729,8 +1729,33 @@ func (s *Server) callServiceJobCancel(ctx context.Context, id *json.RawMessage, 
 		s.writeOperationalError(id, err, domainErrorContext{Operation: "service_job_cancel", Subsystem: "service"})
 		return
 	}
-	text := fmt.Sprintf("job_id=%s status=%s completed=%d/%d", result.ID, result.Status, result.Completed, result.Steps)
+	text := serviceJobSummaryText(result)
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
+func serviceJobSummaryText(job servicectl.Job) string {
+	text := fmt.Sprintf("job_id=%s status=%s completed=%d/%d", job.ID, job.Status, job.Completed, job.Steps)
+	stage := job.SyncStage
+	if stage == nil {
+		return text
+	}
+	text += fmt.Sprintf(" sync_phase=%s sync_collection=%s sync_stage_ref=%s sync_cache_ref=%s sync_fetched=%d sync_staged=%d sync_staged_bytes=%d sync_committed=%d sync_retry=%d/%d", stage.Phase, stage.Collection, stage.StageRef, stage.CacheRef, stage.Fetched, stage.Staged, stage.StagedBytes, stage.Committed, stage.Attempt, stage.RetryBudget)
+	if !stage.RetryAfter.IsZero() {
+		text += " sync_retry_after=" + stage.RetryAfter.Format(time.RFC3339)
+	}
+	if stage.BlockerClass != "" {
+		text += " sync_blocker_class=" + stage.BlockerClass
+	}
+	if stage.BlockingOp != "" {
+		text += " sync_blocking_operation=" + stage.BlockingOp
+	}
+	if stage.BlockingJobRef != "" {
+		text += " sync_blocking_job_ref=" + stage.BlockingJobRef
+	}
+	if stage.TerminalCause != "" {
+		text += " sync_terminal_reason=" + stage.TerminalCause
+	}
+	return text
 }
 
 func serviceJobTerminal(status string) bool {

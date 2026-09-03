@@ -51,6 +51,7 @@ type Job struct {
 	Completed                    int                     `json:"completed,omitempty"`
 	Error                        string                  `json:"error,omitempty"`
 	ErrorClass                   string                  `json:"error_class,omitempty"`
+	SyncStage                    *SyncStageView          `json:"sync_stage,omitempty"`
 	Progress                     []service.ProgressEvent `json:"progress,omitempty"`
 }
 
@@ -77,6 +78,12 @@ type JobManager struct {
 	cacheMutationFences                 map[string]bool
 	inflightWorkers                     map[string]bool
 	directCacheWriters                  map[string]string
+	syncCommitQueues                    map[string][]syncCommitWaiter
+}
+
+type syncCommitWaiter struct {
+	stageID string
+	ready   chan struct{}
 }
 
 type jobCancellationResolution struct {
@@ -166,6 +173,7 @@ func NewJobManagerWithRetention(snapshotPath string, retention config.ServiceJob
 		cacheMutationFences:         map[string]bool{},
 		inflightWorkers:             map[string]bool{},
 		directCacheWriters:          map[string]string{},
+		syncCommitQueues:            map[string][]syncCommitWaiter{},
 		retention:                   retention,
 	}
 }
@@ -275,7 +283,10 @@ func (m *JobManager) BeginDirectCacheWriter(cacheUUID, writerID string) (func(),
 		m.mu.Unlock()
 		return func() {}, CacheMutationFenceError{}
 	}
-	if active, ok := m.activeCacheWriterLocked(cacheUUID); ok {
+	// A durable sync job is read/provider-only until its staged commit. A direct
+	// writer arriving during that fetch may proceed; the sync commit observes
+	// directCacheWriters and waits at the real writer boundary.
+	if active, ok := m.activeReservedWriterLocked(cacheUUID); ok {
 		m.mu.Unlock()
 		return func() {}, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
 	}
@@ -471,6 +482,27 @@ func (m *JobManager) activeCacheWriterLocked(cacheUUID string) (Job, bool) {
 	return Job{}, false
 }
 
+func (m *JobManager) activeReservedWriterLocked(cacheUUID string) (Job, bool) {
+	cacheUUID = strings.TrimSpace(cacheUUID)
+	if cacheUUID == "" {
+		return Job{}, false
+	}
+	for id, job := range m.jobs {
+		if job.CacheUUID != cacheUUID || !isCacheWriterJob(job.Type) {
+			continue
+		}
+		// A sync reserves no writer while queued, fetching, staged, waiting, or
+		// backing off. Its committing phase is the exact logical writer lease.
+		if job.Type == SyncJobType && (job.SyncStage == nil || job.SyncStage.Phase != SyncStageCommitting) {
+			continue
+		}
+		if jobActiveStatus(job.Status) || m.inflightWorkers[id] {
+			return cloneJob(job), true
+		}
+	}
+	return Job{}, false
+}
+
 func isCacheWriterJob(jobType string) bool {
 	return jobType == SyncJobType || jobType == RAGIndexJobType || jobType == RepositoryDocsIndexJobType
 }
@@ -542,7 +574,7 @@ func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, source
 	if activeID := m.directCacheWriters[strings.TrimSpace(job.CacheUUID)]; activeID != "" {
 		return Job{}, false, ErrCacheWriterBusy{ActiveJobID: activeID, ActiveType: "direct_cache_write"}
 	}
-	if active, ok := m.activeCacheWriterLocked(job.CacheUUID); ok {
+	if active, ok := m.activeReservedWriterLocked(job.CacheUUID); ok {
 		return Job{}, false, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
 	}
 	previous := cloneJob(job)
@@ -624,12 +656,19 @@ func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID str
 			return cloneJob(job), false, nil
 		}
 	}
-	writer := isCacheWriterJob(jobType)
-	if writer {
+	cacheWriter := isCacheWriterJob(jobType)
+	// Durable sync workers perform provider I/O before taking a short cache
+	// writer lease for one staged commit. They may therefore share admission
+	// with other sync workers for the same cache; commit fairness is enforced by
+	// the per-cache FIFO in sync_jobs.go. Other writer jobs remain exclusive.
+	// Durable sync is admitted while another cache writer is active because its
+	// provider-fetch phase is read-only. The short commit lease later joins the
+	// per-cache FIFO instead of failing the whole sync before a stage exists.
+	if cacheWriter && jobType != SyncJobType {
 		if activeID := m.directCacheWriters[cacheUUID]; activeID != "" {
 			return Job{}, false, ErrCacheWriterBusy{ActiveJobID: activeID, ActiveType: "direct_cache_write"}
 		}
-		if active, ok := m.activeCacheWriterLocked(cacheUUID); ok {
+		if active, ok := m.activeReservedWriterLocked(cacheUUID); ok {
 			return Job{}, false, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
 		}
 	}
@@ -644,7 +683,7 @@ func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID str
 	}
 	m.jobs[id] = job
 	m.cancel[id] = cancel
-	if writer {
+	if cacheWriter {
 		// Reserve the worker while admission is still atomic. A cancellation can
 		// publish a terminal status before the goroutine is scheduled, but the
 		// cache-authority fence must still wait for that possible late starter.
@@ -983,6 +1022,26 @@ func (m *JobManager) updateJob(id string, fn func(*Job, time.Time)) {
 	fn(job, m.now())
 	trimJobProgress(job, m.retention.MaxProgressEvents)
 	_ = m.saveLocked()
+}
+
+// updateJobPersisted reports whether the mutated snapshot reached durable
+// storage. Callers that are about to discard independent recovery evidence
+// must only do so after this method succeeds.
+func (m *JobManager) updateJobPersisted(id string, fn func(*Job, time.Time)) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job := m.jobs[id]
+	if job == nil {
+		return nil
+	}
+	previous := cloneJob(job)
+	fn(job, m.now())
+	trimJobProgress(job, m.retention.MaxProgressEvents)
+	if err := m.saveLocked(); err != nil {
+		*job = previous
+		return err
+	}
+	return nil
 }
 
 func (m *JobManager) mustGet(id string) Job {

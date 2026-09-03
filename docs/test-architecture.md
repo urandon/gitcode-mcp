@@ -111,7 +111,9 @@ into the runner. Playwright trace capture is also disabled in CI because its
 archive embeds raster screenshots. A pure configuration unit test feeds every
 local visual-QA variable into the CI policy and asserts that output/reference
 paths and pixel baselines are disabled and trace mode is `off`; it generates
-and compares no raster artifact.
+and compares no raster artifact. After the browser suite, CI also scans its
+result directories and fails if any raster image, video, or Playwright trace
+archive was produced, including by a test that bypassed the shared policy.
 
 ## Before Committing
 

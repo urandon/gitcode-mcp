@@ -593,14 +593,18 @@ func (s *SQLiteStore) UpsertSyncFrontier(ctx context.Context, frontier SyncFront
 		return err
 	}
 	defer txRollbackOnError(tx, &err)
+	if err = upsertSyncFrontierTx(ctx, tx, frontier); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func upsertSyncFrontierTx(ctx context.Context, tx *sql.Tx, frontier SyncFrontier) error {
 	if frontier.UpdatedAt.IsZero() {
 		frontier.UpdatedAt = time.Unix(0, 0).UTC()
 	}
 	highUpdatedAt := formatTimeOrEmpty(frontier.HighUpdatedAt)
-	if err = execTx(ctx, tx, `INSERT INTO sync_frontiers (repo_id, remote_type, ordering, filter_key, status, high_updated_at, high_remote_id, high_number, stop_reason, pages_listed, records_listed, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, remote_type, ordering, filter_key) DO UPDATE SET status = excluded.status, high_updated_at = excluded.high_updated_at, high_remote_id = excluded.high_remote_id, high_number = excluded.high_number, stop_reason = excluded.stop_reason, pages_listed = excluded.pages_listed, records_listed = excluded.records_listed, updated_at = excluded.updated_at`, frontier.RepoID, frontier.RemoteType, frontier.Ordering, frontier.FilterKey, frontier.Status, highUpdatedAt, frontier.HighRemoteID, frontier.HighNumber, frontier.StopReason, frontier.PagesListed, frontier.RecordsListed, frontier.UpdatedAt.Format(time.RFC3339Nano)); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return execTx(ctx, tx, `INSERT INTO sync_frontiers (repo_id, remote_type, ordering, filter_key, status, high_updated_at, high_remote_id, high_number, stop_reason, pages_listed, records_listed, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, remote_type, ordering, filter_key) DO UPDATE SET status = excluded.status, high_updated_at = excluded.high_updated_at, high_remote_id = excluded.high_remote_id, high_number = excluded.high_number, stop_reason = excluded.stop_reason, pages_listed = excluded.pages_listed, records_listed = excluded.records_listed, updated_at = excluded.updated_at`, frontier.RepoID, frontier.RemoteType, frontier.Ordering, frontier.FilterKey, frontier.Status, highUpdatedAt, frontier.HighRemoteID, frontier.HighNumber, frontier.StopReason, frontier.PagesListed, frontier.RecordsListed, frontier.UpdatedAt.Format(time.RFC3339Nano))
 }
 
 func (s *SQLiteStore) GetSyncFrontier(ctx context.Context, repoID, remoteType, ordering, filterKey string) (SyncFrontier, bool, error) {

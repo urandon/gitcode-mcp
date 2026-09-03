@@ -2289,13 +2289,15 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 			stage = RepositoryDocsIndexJobType
 		}
 		if stage == SyncJobType {
+			selection := maintenanceSyncSelection(snapshot.Policy, frontiers, lane, now)
 			req := StartSyncJobRequest{
 				RepoID: snapshot.RepoID, ProviderMode: "live", CachePath: path,
 				CacheUUID: snapshot.CacheUUID, RegistrationID: snapshot.RegistrationID, Lane: lane,
-				Issues: snapshot.Policy.Issues, IssueComments: snapshot.Policy.IssueComments,
-				Wiki: snapshot.Policy.Wiki, Pulls: snapshot.Policy.Pulls, PRComments: snapshot.Policy.PRComments,
+				Issues: selection.Issues, IssueComments: selection.IssueComments,
+				Wiki: selection.Wiki, Pulls: selection.Pulls, PRComments: selection.PRComments,
 				MaxPages: maxPages, PerPage: snapshot.Policy.PerPage,
 				Page: page, IdempotencyKey: fmt.Sprintf("maintenance-%s-%s-%d-%d", snapshot.RegistrationID, lane, page, now.Unix()/60),
+				collectionPages: selection.collectionPages,
 			}
 			job, jobErr := m.jobs.StartSync(context.Background(), jobManager, req)
 			if jobErr != nil {
@@ -2612,6 +2614,53 @@ func nextMaintenanceSyncLane(entry MaintenanceEntry, frontiers []cache.Maintenan
 		return "tail", nextPage, entry.Policy.TailSlicePages
 	}
 	return "", 0, 0
+}
+
+// maintenanceSyncSelection keeps continuation units collection-local. Wiki
+// uses exact record offsets while issues and pull requests use provider page
+// numbers; comparing those values is useful only to choose a wake-up, never as
+// the request cursor for every selected collection.
+func maintenanceSyncSelection(policy MaintenancePolicy, frontiers []cache.MaintenanceFrontier, lane string, now time.Time) StartSyncJobRequest {
+	selection := StartSyncJobRequest{collectionPages: map[string]int{}}
+	byKey := make(map[string]cache.MaintenanceFrontier, len(frontiers))
+	for _, frontier := range frontiers {
+		byKey[frontier.RemoteType+"\x00"+frontier.Lane] = frontier
+	}
+	interval := time.Duration(policy.HeadIntervalSeconds) * time.Second
+	for _, remoteType := range maintenanceRemoteTypes(policy) {
+		frontier, ok := byKey[remoteType+"\x00"+lane]
+		needed := false
+		switch lane {
+		case "head":
+			needed = !ok || frontier.Status != "fresh" || frontier.UpdatedAt.Add(interval).Before(now)
+		case "tail":
+			needed = !ok || frontier.Status != "complete"
+		}
+		if !needed {
+			continue
+		}
+		page := 1
+		if ok {
+			page = checkpointPage(frontier.Checkpoint)
+			if page <= 0 {
+				page = 1
+			}
+		}
+		selection.collectionPages[remoteType] = page
+		switch remoteType {
+		case "issue":
+			selection.Issues = true
+		case "issue_comment":
+			selection.IssueComments = true
+		case "wiki":
+			selection.Wiki = true
+		case "pull_request":
+			selection.Pulls = true
+		case "pr_comment":
+			selection.PRComments = true
+		}
+	}
+	return selection
 }
 
 func maintenanceRemoteTypes(policy MaintenancePolicy) []string {

@@ -15,6 +15,7 @@ type ProgressEvent = progress.Event
 type SyncBounds struct {
 	MaxPages     int                  `json:"-"`
 	MaxRecords   int                  `json:"-"`
+	MaxBytes     int64                `json:"-"`
 	ProgressChan chan<- ProgressEvent `json:"-"`
 }
 

@@ -483,6 +483,9 @@ func (m Manager) Run(ctx context.Context) error {
 	if err := jobs.LoadAndMarkInterrupted(); err != nil {
 		return err
 	}
+	if err := jobs.RecoverSyncStages(ctx, m); err != nil {
+		return err
+	}
 	jobActions := NewJobActionManager(paths.JobsPath+".actions", jobs, maintenance)
 	if err := jobActions.Load(); err != nil {
 		return err

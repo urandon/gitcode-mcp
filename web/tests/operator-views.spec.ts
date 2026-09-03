@@ -32,7 +32,8 @@ const snapshot = {
     { id: 'job-000001', type: 'rag-index', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'running', created_at: new Date(Date.now() - 120000).toISOString(), started_at: new Date(Date.now() - 110000).toISOString(), updated_at: new Date().toISOString(), steps: 80, completed: 40, work_ref: 'work-active', cancellable: true, retryable: false, progress_retained: 2, progress_limit: 256, throughput_per_second: 0.36, eta_seconds: 111, progress: [{ type: 'started', phase: 'running', collection: 'rag-index' }, { type: 'records', phase: 'running', collection: 'rag-index', records_fetched: 40, rate_limit_state: 'ready' }] },
     { id: 'job-000002', type: 'sync', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'failed', created_at: new Date(Date.now() - 240000).toISOString(), updated_at: new Date(Date.now() - 180000).toISOString(), finished_at: new Date(Date.now() - 180000).toISOString(), failure_class: 'provider_unavailable', failure_collection: 'issues', failure_message: 'The provider was unavailable while syncing issues.', retry_after: '30s', inspect_command: 'gitcode-mcp service job job-000002 --format json', remediation_command: 'gitcode-mcp service maintenance --format json', work_ref: 'work-terminal', cancellable: false, retryable: true, progress_retained: 1, progress_limit: 256, progress: [{ type: 'failed', phase: 'failed', collection: 'issues', records_failed: 1, retry_after: '30s', attempt: 2, rate_limit_state: 'waiting' }] },
     { id: 'job-000003', type: 'sync', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'interrupted', created_at: new Date(Date.now() - 360000).toISOString(), updated_at: new Date(Date.now() - 300000).toISOString(), finished_at: new Date(Date.now() - 300000).toISOString(), work_ref: 'work-interrupted', cancellable: false, retryable: true, progress_retained: 1, progress_limit: 256, progress: [{ type: 'interrupted', phase: 'interrupted', collection: 'sync' }] },
-    { id: 'job-000004', type: 'repository-docs-index', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'succeeded', created_at: new Date(Date.now() - 90_000).toISOString(), started_at: new Date(Date.now() - 85_000).toISOString(), updated_at: new Date(Date.now() - 60_000).toISOString(), finished_at: new Date(Date.now() - 60_000).toISOString(), steps: 10, completed: 8, work_ref: 'repository-docs-public-work', cancellable: false, retryable: false, progress_retained: 2, progress_limit: 256, progress: [{ type: 'started', phase: 'indexing', collection: 'repository-docs-index' }, { type: 'succeeded', phase: 'succeeded', collection: 'repository-docs-index', records_fetched: 6, records_skipped: 2 }] }
+    { id: 'job-000004', type: 'repository-docs-index', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'succeeded', created_at: new Date(Date.now() - 90_000).toISOString(), started_at: new Date(Date.now() - 85_000).toISOString(), updated_at: new Date(Date.now() - 60_000).toISOString(), finished_at: new Date(Date.now() - 60_000).toISOString(), steps: 10, completed: 8, work_ref: 'repository-docs-public-work', cancellable: false, retryable: false, progress_retained: 2, progress_limit: 256, progress: [{ type: 'started', phase: 'indexing', collection: 'repository-docs-index' }, { type: 'succeeded', phase: 'succeeded', collection: 'repository-docs-index', records_fetched: 6, records_skipped: 2 }] },
+    { id: 'job-000005', type: 'sync', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'running', created_at: new Date(Date.now() - 45_000).toISOString(), started_at: new Date(Date.now() - 40_000).toISOString(), updated_at: new Date().toISOString(), steps: 12, completed: 12, work_ref: 'durable-sync-public-work', cancellable: true, retryable: false, progress_retained: 3, progress_limit: 256, sync_stage: { stage_ref: 'stage-public-safe', collection: 'issues', phase: 'waiting_commit', fetched: 12, staged: 12, committed: 0, staged_bytes: 8192, attempt: 2, retry_budget: 6, retry_after: new Date(Date.now() + 60_000).toISOString(), blocker_class: 'cache_busy', blocking_operation: 'rag-index', blocking_job_ref: 'job-000001', fetched_at: new Date(Date.now() - 35_000).toISOString(), staged_at: new Date(Date.now() - 34_000).toISOString() }, progress: [{ type: 'phase', phase: 'fetching', collection: 'issues', records_fetched: 12 }, { type: 'phase', phase: 'staged', collection: 'issues', records_fetched: 12 }, { type: 'phase', phase: 'waiting_commit', collection: 'issues', retry_after: new Date(Date.now() + 60_000).toISOString(), attempt: 2 }] }
   ],
   maintenance: [{ registration_id: 'reg-1', cache_ref: 'cache-111111112222', repo_id: 'example/repo', enabled: true, state: 'retry_scheduled', generation: 4, policy: { sync_enabled: true, sync_mode: 'head-and-backfill', rag_enabled: true, collections: ['issues', 'wiki'], head_max_pages: 3, tail_slice_pages: 10, profile: 'easy-rag' } }],
   diagnostics: [
@@ -582,6 +583,63 @@ test('job detail deep links and cancel uses explicit CSRF-bound confirmation', a
   expect(actionBody.idempotency_key).toMatch(/^admin-cancel-/);
 });
 
+test('durable sync wait is recoverable machine-readable progress', async ({ page }) => {
+  await mockAdmin(page);
+  await page.goto('/?view=Jobs&job=job-000005');
+  const stage = page.getByRole('status', { name: 'Durable sync phase' });
+  await expect(stage.getByRole('heading', { name: 'Waiting for cache writer' })).toBeVisible();
+  await expect(stage).toContainText('Issues · stage-public-safe');
+  await expect(stage).toContainText('12 · 8,192 bytes');
+  await expect(stage).toContainText('2/6');
+  await expect(stage).toContainText('Rag Index · cache-111111112222');
+  await expect(stage).toContainText('Retrying');
+  await expect(stage).toContainText('job-000001');
+  await expect(stage).toContainText('No successful commit');
+  await expect(page.getByRole('heading', { name: 'Failed' })).toHaveCount(0);
+  await expect(page.locator('body')).not.toContainText('/Users/');
+  await expect(page.locator('body')).not.toContainText('private source body');
+});
+
+test('durable sync lifecycle matrix is exposed through semantic DOM state', async ({ page }) => {
+  const lifecycleSnapshot: any = structuredClone(snapshot);
+  const base = {
+    type: 'sync', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1',
+    created_at: new Date(Date.now() - 60_000).toISOString(), updated_at: new Date().toISOString(),
+    work_ref: 'durable-lifecycle', cancellable: true, retryable: false, progress_retained: 0, progress_limit: 256
+  };
+  const staged = { stage_ref: 'stage-semantic', collection: 'issues', fetched: 4, staged: 4, committed: 0, staged_bytes: 2048, attempt: 0, retry_budget: 6 };
+  lifecycleSnapshot.jobs = [
+    { ...base, id: 'life-queued', status: 'queued' },
+    { ...base, id: 'life-admitted', status: 'running' },
+    { ...base, id: 'life-fetching', status: 'running', sync_stage: { ...staged, phase: 'fetching' } },
+    { ...base, id: 'life-staged', status: 'running', sync_stage: { ...staged, phase: 'staged' } },
+    { ...base, id: 'life-waiting', status: 'running', sync_stage: { ...staged, phase: 'waiting_commit' } },
+    { ...base, id: 'life-retrying', status: 'running', sync_stage: { ...staged, phase: 'waiting_commit', attempt: 2, blocker_class: 'cache_busy' } },
+    { ...base, id: 'life-committing', status: 'running', sync_stage: { ...staged, phase: 'committing' } },
+    { ...base, id: 'life-terminal', status: 'succeeded', cancellable: false, sync_stage: { ...staged, phase: 'committed', committed: 4 } },
+    { ...base, id: 'life-interrupted', status: 'interrupted', cancellable: false }
+  ];
+  await mockAdmin(page, lifecycleSnapshot);
+  const cases = [
+    ['life-queued', 'Queued for durable sync', 'Queued', 'Not Staged'],
+    ['life-admitted', 'Admitted for durable sync', 'Admitted', 'Not Staged'],
+    ['life-fetching', 'Fetching', 'Fetching', 'Fetching'],
+    ['life-staged', 'Staged', 'Staged', 'Staged'],
+    ['life-waiting', 'Waiting for cache writer', 'Waiting Commit', 'Waiting Commit'],
+    ['life-retrying', 'Waiting for cache writer', 'Retrying', 'Waiting Commit'],
+    ['life-committing', 'Committing', 'Committing', 'Committing'],
+    ['life-terminal', 'Committed', 'Terminal', 'Committed'],
+    ['life-interrupted', 'Terminal sync outcome', 'Terminal', 'Not Staged']
+  ] as const;
+  for (const [id, heading, lifecycle, raw] of cases) {
+    await page.goto(`/?view=Jobs&job=${id}`);
+    const panel = page.getByRole('status', { name: 'Durable sync phase' });
+    await expect(panel.getByRole('heading', { name: heading })).toBeVisible();
+    await expect(panel.locator('dl')).toContainText(`Lifecycle${lifecycle}`);
+    await expect(panel.locator('dl')).toContainText(`Raw phase${raw}`);
+  }
+});
+
 test('retry coalescing, filters, interruption, and structured wait state are observable', async ({ page }) => {
   await mockAdmin(page);
   const retryKeys: string[] = [];
@@ -607,8 +665,9 @@ test('retry coalescing, filters, interruption, and structured wait state are obs
   await expect(page.getByRole('alert')).toContainText('Receipt delivery was interrupted.');
   await expect(page.getByRole('alert')).toContainText('Retry this confirmation.');
   await page.getByRole('button', { name: 'Confirm retry' }).click();
-  await expect(page.getByRole('status')).toContainText('Coalesced');
-  await expect(page.getByRole('status')).toContainText('job-000001');
+  const retryReceipt = page.getByRole('status').filter({ hasText: 'Coalesced' });
+  await expect(retryReceipt).toContainText('Coalesced');
+  await expect(retryReceipt).toContainText('job-000001');
   expect(retryKeys).toHaveLength(2);
   expect(retryKeys[1]).toBe(retryKeys[0]);
 });

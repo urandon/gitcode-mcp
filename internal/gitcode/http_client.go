@@ -392,7 +392,9 @@ func (c *HTTPClient) ListWikiPages(ctx context.Context, req WikiListRequest) (Pa
 		if perPage <= 0 {
 			perPage = firstPositive(req.Bounds.MaxRecords, 1)
 		}
-		if pageNumber > 1 && perPage > 0 {
+		if req.Bounds.OffsetPaging {
+			walker.skipRecords = pageNumber - 1
+		} else if pageNumber > 1 && perPage > 0 {
 			maxInt := int(^uint(0) >> 1)
 			if pageNumber-1 > maxInt/perPage {
 				return Page[WikiPage]{}, ErrValidationFailed{Field: "page", Message: "wiki page offset is too large"}
@@ -400,6 +402,7 @@ func (c *HTTPClient) ListWikiPages(ctx context.Context, req WikiListRequest) (Pa
 			walker.skipRecords = (pageNumber - 1) * perPage
 		}
 		walker.maxRecords = req.Bounds.MaxRecords
+		walker.maxBytes = req.Bounds.MaxBytes
 		walker.progressChan = req.Bounds.ProgressChan
 	}
 	items, err := walker.walk(ctx, "", 0)
@@ -408,8 +411,12 @@ func (c *HTTPClient) ListWikiPages(ctx context.Context, req WikiListRequest) (Pa
 	}
 	nextPage := 0
 	if req.Bounds != nil && req.Bounds.MaxRecords > 0 && walker.hasMore {
-		logicalPages := (len(items) + perPage - 1) / perPage
-		nextPage = pageNumber + logicalPages
+		if req.Bounds.OffsetPaging {
+			nextPage = pageNumber + len(items)
+		} else {
+			logicalPages := (len(items) + perPage - 1) / perPage
+			nextPage = pageNumber + logicalPages
+		}
 	}
 	return Page[WikiPage]{Items: items, Page: pageNumber, PerPage: firstPositive(perPage, len(items)), TotalCount: len(items), NextPage: nextPage}, nil
 }
@@ -1032,6 +1039,8 @@ type wikiTraversal struct {
 	seenFiles    map[string]bool
 	skipRecords  int
 	maxRecords   int
+	maxBytes     int64
+	bytesFetched int64
 	hasMore      bool
 	progressChan chan<- WikiProgressEvent
 }
@@ -1078,6 +1087,21 @@ func (w *wikiTraversal) walk(ctx context.Context, dir string, depth int) ([]Wiki
 			page, err := w.client.getWikiPageByPath(ctx, w.owner, w.repo, current.entryPath)
 			if err != nil {
 				return out, err
+			}
+			if w.maxBytes > 0 {
+				encoded, encodeErr := json.Marshal(page)
+				if encodeErr != nil {
+					return out, encodeErr
+				}
+				projected := w.bytesFetched + int64(len(encoded))
+				if projected > w.maxBytes {
+					if len(out) > 0 {
+						w.hasMore = true
+						break
+					}
+					return out, ErrPayloadTooLarge{Endpoint: wikiContentsRootEndpoint(w.owner, w.repo), Limit: w.maxBytes, Size: projected, Source: "durable_batch_limit"}
+				}
+				w.bytesFetched = projected
 			}
 			out = append(out, page)
 			continue
