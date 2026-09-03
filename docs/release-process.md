@@ -156,9 +156,15 @@ GitCode attachments use a separate presigned upload flow. The workflow first
 creates or updates release metadata, requests an HTTPS upload contract for each
 filename, then sends the artifact bytes with exactly the returned object-store
 headers. It never forwards `GITCODE_TOKEN` to the presigned URL and never prints
-the URL or contract headers. A rerun skips an existing name only when its byte
-size matches; a mismatch fails closed. The final release asset inventory is
-polled for a bounded period and verified by name and size.
+the URL or contract headers. API calls, long-running object uploads, and small
+object-size readbacks have separate bounded time budgets. Replay-safe contract
+reads, attachment reads, and presigned `PUT` uploads use limited
+exponential-backoff retries; other methods are never retried implicitly. A
+rerun skips an existing name only when its byte size matches; a mismatch fails
+closed. Size readback prefers a one-byte HTTPS range request and its total
+object length, avoiding a second full download on a poor network. The final
+release asset inventory is polled for a bounded period and verified by name and
+size.
 
 ## GitCode Token
 

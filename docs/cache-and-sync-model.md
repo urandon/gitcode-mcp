@@ -123,6 +123,21 @@ transport, provider, or readback failures remain `in_progress`, so sequential
 or concurrent replay of the same idempotency key cannot issue an unsafe
 duplicate operation.
 
+Issue updates use the same durable-claim principle around PATCH. The HTTP
+adapter reads a canonical issue preimage, invokes the service claim callback,
+and does not attempt PATCH unless that claim succeeds. The audit stores hashes
+of the preimage fields and a machine-readable phase, never the duplicated issue
+document. Failures known to occur before PATCH, and provider rejections that
+prove no mutation, become retryable `failed` entries. Transport uncertainty
+after PATCH and all canonical-readback failures remain `in_progress`. A
+same-key replay performs canonical GET only: if requested fields match and all
+omitted fields still match their preimage hashes, it finalizes as
+`recovered_after_ambiguous_write`; otherwise it returns
+`write_ambiguous_remote` without a second PATCH. If a safely retryable attempt
+observes a changed preimage before its next mutation, it returns the typed
+`write_conflict` diagnostic. These records survive service restart in the
+shared audit table.
+
 Milestone-aware issue writes also refresh a deterministic `milestone` link from
 the cached issue source to the resolved `MILESTONE-<id>` source. The link kind
 is replaced atomically for each issue write, so assignment changes do not leave
@@ -244,7 +259,9 @@ Compatibility policy:
 | 0, missing, or empty `schema_version` in a non-empty cache | Block as pre-schema-versioning or unknown | Confirm the selected cache path, move aside or delete only that cache file, then re-sync |
 | Greater than 19 | Block as newer than this binary supports | Upgrade `gitcode-mcp` to a binary that supports the schema |
 
-`gitcode-mcp migrate-cache --confirm` runs supported older-version migrations in place from the selected effective cache path, including repo-local cache selection when run from a repo-local workspace. Explicit `--cache-path` still overrides repo-local discovery for emergency repair. The command creates a backup at `{cache-path}.backup-{timestamp}` before applying changes. Each migration step runs in a transaction and advances both `schema_version` and `PRAGMA user_version` only after that step succeeds.
+`gitcode-mcp migrate-cache --confirm` runs supported older-version migrations in place from the selected effective cache path, including repo-local cache selection when run from a repo-local workspace. Explicit `--cache-path` still overrides repo-local discovery for emergency repair. Before any schema mutation, the command inspects the coordinator identity and supported schema range. An installed coordinator is unloaded and observed until both its process and control socket are gone; an unowned foreground coordinator makes migration fail closed. The WAL is checkpointed, a backup is created at `{cache-path}.backup-{timestamp}`, and that backup must pass `integrity_check`, schema-version, and cache-identity verification. All pending schema steps then commit as one transaction, so a failed step leaves the original schema and identity intact. A private cache-adjacent recovery intent is written before coordination and retained until compatible service installation, restart, and schema-range health verification complete. While that intent exists, an invocation without `--confirm` returns `recovery_required` and cannot report `up_to_date`; re-running the confirmed command resumes the intent even when the schema transaction already committed. After verified restart, the CLI atomically publishes a completion receipt containing the private cache UUID, target binary identity/range, and backup/identity verification results, then clears the pending intent. Admin never exposes the UUID or filesystem locations: it accepts the receipt as success evidence only when both verification flags are true and its UUID, schema, binary identity, and range exactly match the live cache and daemon. Machine-readable output records quiesce, backup verification, identity preservation, compatible target identity, restart, and recovery state.
+
+The daemon health and status contracts publish `binary_version`, sanitized `binary_commit`, and the exact operational `schema_min..schema_max` range. A mismatch is `cache_schema_blocked`, not generic `cache_unreadable`: maintenance suppresses new writers, recomputes `active_jobs` from genuinely active jobs, and publishes path-free detected/expected schema, running-daemon identity, range, and quiesce state through service status/health, jobs, maintenance, CLI, MCP, and Admin DTOs. The Admin lifecycle distinguishes migration required, unsafe downgrade refusal, interrupted recovery, and a compatible restart backed by the durable completion receipt; it exposes backup/migration/restart, data, and identity states without filesystem locations. Machine-changing work remains an explicit dialog that only copies the fixed `gitcode-mcp migrate-cache --confirm` handoff; browser controls never accept cache paths or perform schema mutation. Browser CI asserts text, DOM/ARIA, JSON, and command invariants only, with screenshots, traces, video, and visual baselines disabled.
 
 Schema version 13 adds `pr_review_discussions` and `pr_review_positions`. The migration creates empty tables and does not invent position metadata for comments already cached under older schemas. A later pull request comment sync, `add-pr-review-comment`, or `reply-pr-review-comment` write refreshes the affected comment rows and position tables. PR comment `content_hash` includes position metadata, so a resync can update stale rows when the adapter merges richer v4 discussion data with v5 parent/reply relationships.
 

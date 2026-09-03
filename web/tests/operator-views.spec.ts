@@ -1,13 +1,12 @@
 import { expect, test, type Page } from '@playwright/test';
 import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { resolveBrowserTestPolicy } from '../src/lib/browser-test-policy';
 
-// Raster captures and image references are local review aids only. CI validates
-// semantic DOM/API/action/accessibility invariants even if a runner happens to
-// inherit one of the local QA environment variables.
-const qaOutput = process.env.CI ? undefined : process.env.ADMIN_VIEW_QA_OUTPUT;
-const qaReference = process.env.CI ? undefined : process.env.ADMIN_QA_REFERENCE;
-const visualBaselines = process.env.ADMIN_VISUAL_BASELINES === '1' && !process.env.CI;
+const browserPolicy = resolveBrowserTestPolicy(process.env);
+const qaOutput = browserPolicy.operatorQAOutput;
+const qaReference = browserPolicy.referencePath;
+const visualBaselines = browserPolicy.visualBaselines;
 
 const snapshot = {
   api_version: '1', revision: 'snapshot-operator', generated_at: new Date().toISOString(),
@@ -216,6 +215,82 @@ async function mockAdmin(page: Page, value = snapshot, snapshotChanged?: Promise
 		await route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': ready\n\n' });
 	});
 }
+
+test('schema-blocked cache exposes a path-free confirmed CLI handoff', async ({ page }) => {
+  const blocked: any = structuredClone(snapshot);
+  blocked.service = { ...blocked.service, version: '0.4.0', commit: 'target-commit-abcdef', schema_min: 19, schema_max: 19 };
+  blocked.caches = [{
+    cache_ref: 'cache-public-schema', path_fingerprint: 'sha256:public-schema', storage_mode: 'managed', readiness: 'cache_schema_blocked',
+    schema_version: 18, expected_schema_version: 19, daemon_binary_version: '0.3.0', daemon_binary_commit: 'daemon-commit-abcdef', quiesce_state: 'required',
+    schema_recovery: { state: 'migration_required', phase: 'awaiting_confirmation', target_schema_version: 19, target_binary_version: '0.4.0', target_binary_commit: 'target-commit-abcdef', target_schema_min: 19, target_schema_max: 19, target_compatible: true, backup_state: 'pending', migration_state: 'pending', restart_state: 'pending', data_state: 'intact', identity_state: 'retained' },
+    wal_capable: false, record_count: 0, chunk_count: 0, repository_count: 0, repositories: []
+  }];
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (value: string) => { (window as Window & { __schemaRecoveryCopied?: string }).__schemaRecoveryCopied = value; } } });
+  });
+  await mockAdmin(page, blocked);
+  await page.goto('/?view=Caches');
+
+  const panel = page.locator('.schema-recovery-panel');
+  await expect(panel.getByRole('heading', { name: 'Cache schema upgrade required' })).toBeVisible();
+  await expect(panel).toContainText('Detected18');
+  await expect(panel).toContainText('Target19');
+  await expect(panel).toContainText('0.4.0 · target-commi');
+  await expect(panel).toContainText('19..19');
+  await expect(panel).toContainText('Required');
+  await expect(panel).toContainText('BackupPending');
+  await expect(panel).toContainText('MigrationPending');
+  await expect(panel).toContainText('RestartPending');
+  await expect(panel.getByText('gitcode-mcp migrate-cache --confirm')).toBeVisible();
+  await expect(page.locator('body')).not.toContainText('/Users/');
+  await expect(page.locator('body')).not.toContainText('/private/');
+
+  await panel.getByRole('button', { name: 'Review upgrade handoff' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Copy confirmed migration handoff?' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText('18 → 19');
+  await expect(dialog).toContainText('19..19');
+  await expect(dialog).toContainText('0.4.0 · target-commi');
+  await dialog.getByRole('button', { name: 'Copy confirmed handoff' }).click();
+  await expect(dialog).not.toBeVisible();
+  expect(await page.evaluate(() => (window as Window & { __schemaRecoveryCopied?: string }).__schemaRecoveryCopied)).toBe('gitcode-mcp migrate-cache --confirm');
+  await expect(panel.getByRole('button', { name: 'Copied recovery handoff' })).toBeFocused();
+});
+
+test('schema recovery distinguishes unsafe refusal, interrupted upgrade, and compatible restart', async ({ page }) => {
+  const lifecycle: any = structuredClone(snapshot);
+  lifecycle.caches = [
+    { cache_ref: 'cache-unsafe', readiness: 'cache_schema_blocked', schema_version: 20, expected_schema_version: 19, quiesce_state: 'required', schema_recovery: { state: 'unsafe_refused', phase: 'refused', target_schema_version: 19, target_schema_min: 19, target_schema_max: 19, target_compatible: false, backup_state: 'not_started', migration_state: 'refused', restart_state: 'not_started', data_state: 'intact', identity_state: 'retained', remediation: 'Install a compatible binary.' }, wal_capable: false, record_count: 0, chunk_count: 0, repository_count: 0, repositories: [] },
+    { cache_ref: 'cache-interrupted', readiness: 'cache_schema_blocked', schema_version: 19, expected_schema_version: 19, quiesce_state: 'complete', schema_recovery: { state: 'interrupted_upgrade', phase: 'migration_complete_service_restart_failed', target_schema_version: 19, target_binary_version: '0.4.0', target_binary_commit: 'target-commit-abcdef', target_schema_min: 19, target_schema_max: 19, target_compatible: true, backup_state: 'verified', migration_state: 'complete', restart_state: 'interrupted', data_state: 'intact', identity_state: 'preserved' }, wal_capable: false, record_count: 42, chunk_count: 80, repository_count: 0, repositories: [] },
+    { cache_ref: 'cache-restarted', readiness: 'ready', schema_version: 19, expected_schema_version: 19, schema_recovery: { state: 'compatible_restart', phase: 'healthy', target_schema_version: 19, target_binary_version: '0.4.0', target_binary_commit: 'target-commit-abcdef', target_schema_min: 19, target_schema_max: 19, target_compatible: true, backup_state: 'verified', migration_state: 'complete', restart_state: 'compatible', data_state: 'available', identity_state: 'preserved' }, wal_capable: true, journal_mode: 'wal', record_count: 42, chunk_count: 80, repository_count: 0, repositories: [] }
+  ];
+  await mockAdmin(page, lifecycle);
+  await page.goto('/?view=Caches');
+
+  const unsafe = page.locator('.topology-cache').filter({ hasText: 'cache-unsafe' });
+  await expect(unsafe.getByRole('heading', { name: 'Cache downgrade refused' })).toBeVisible();
+  await expect(unsafe).toContainText('UNSAFE MIGRATION REFUSED · DATA INTACT');
+  await expect(unsafe).toContainText('Compatible targetUnavailable for this daemon');
+  await expect(unsafe).toContainText('MigrationRefused');
+  await expect(unsafe.getByRole('button', { name: /handoff/ })).toHaveCount(0);
+
+  const interrupted = page.locator('.topology-cache').filter({ hasText: 'cache-interrupted' });
+  await expect(interrupted.getByRole('heading', { name: 'Cache schema recovery needs resume' })).toBeVisible();
+  await expect(interrupted).toContainText('BackupVerified');
+  await expect(interrupted).toContainText('MigrationComplete');
+  await expect(interrupted).toContainText('RestartInterrupted');
+  await expect(interrupted).toContainText('IdentityPreserved');
+  await expect(interrupted.getByRole('button', { name: 'Review resume handoff' })).toBeVisible();
+
+  const restarted = page.locator('.topology-cache').filter({ hasText: 'cache-restarted' });
+  await expect(restarted.getByRole('heading', { name: 'Cache schema recovery complete' })).toBeVisible();
+  await expect(restarted).toContainText('COMPATIBLE RESTART · DATA AVAILABLE');
+  await expect(restarted).toContainText('RestartCompatible');
+  await expect(restarted).toContainText('DataAvailable');
+  await expect(restarted).toContainText('IdentityPreserved');
+  await expect(page.locator('body')).not.toContainText('/Users/');
+  await expect(page.locator('body')).not.toContainText('/private/');
+});
 
 test('operator views keep coverage truth, deep links, and recovery states', async ({ page }) => {
   await mockAdmin(page);

@@ -961,9 +961,10 @@ type WriteCommandRequest struct {
 	Strategy       string    `json:"strategy,omitempty"`
 	IdempotencyKey string    `json:"idempotency_key,omitempty"`
 
-	pushMirrorPreviousStatus string
-	idempotencyFingerprint   string
-	parentSourceID           string
+	pushMirrorPreviousStatus  string
+	idempotencyFingerprint    string
+	parentSourceID            string
+	beforeIssueUpdateMutation func(gitcode.Issue) error
 }
 
 type WriteCommandResult struct {

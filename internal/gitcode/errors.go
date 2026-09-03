@@ -204,6 +204,40 @@ type ErrWriteConfirmationIncomplete struct {
 	Cause    error
 }
 
+// ErrWriteMutationPhase preserves whether the mutating request crossed the
+// transport boundary. Readback failures and most PATCH transport failures are
+// ambiguous and must not be retried as fresh mutations.
+type ErrWriteMutationPhase struct {
+	Endpoint          string
+	Phase             string
+	MutationAttempted bool
+	Cause             error
+}
+
+func (e ErrWriteMutationPhase) Error() string {
+	return fmt.Sprintf("gitcode: issue update %s failed for %s: %v", e.Phase, e.Endpoint, e.Cause)
+}
+
+func (e ErrWriteMutationPhase) Unwrap() error { return e.Cause }
+
+func (e ErrWriteMutationPhase) DiagnosticCode() string { return "write_mutation_phase" }
+
+// ErrWritePreconditionConflict reports a changed canonical preimage without
+// exposing either issue body in diagnostics.
+type ErrWritePreconditionConflict struct {
+	Endpoint            string
+	ExpectedFingerprint string
+	ActualFingerprint   string
+}
+
+func (e ErrWritePreconditionConflict) Error() string {
+	return fmt.Sprintf("gitcode: issue preimage changed before update for %s", e.Endpoint)
+}
+
+func (e ErrWritePreconditionConflict) DiagnosticCode() string {
+	return "write_precondition_conflict"
+}
+
 type ErrDiscussionReplyUnavailable struct {
 	DiscussionID    string
 	ParentCommentID string

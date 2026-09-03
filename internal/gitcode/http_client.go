@@ -482,16 +482,19 @@ func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, op
 	req.State = wireState
 	preserveMilestone := len(req.Milestone) == 0
 	preserveLabels := len(req.Labels) == 0
-	var preimage Issue
-	if preserveMilestone || preserveLabels {
-		var err error
-		preimage, err = c.GetIssue(ctx, IssueRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
-		if err != nil {
+	preimage, err := c.GetIssue(ctx, IssueRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
+	if err != nil {
+		return WriteResult[Issue]{}, err
+	}
+	if strings.TrimSpace(preimage.ID) == "" || preimage.Number != req.Number {
+		return WriteResult[Issue]{}, ErrValidationFailed{Field: "response", Message: "issue update preimage requires id and matching number"}
+	}
+	if opts.BeforeIssueUpdateMutation != nil {
+		if err := opts.BeforeIssueUpdateMutation(preimage); err != nil {
 			return WriteResult[Issue]{}, err
 		}
-		if strings.TrimSpace(preimage.ID) == "" || preimage.Number != req.Number {
-			return WriteResult[Issue]{}, ErrValidationFailed{Field: "response", Message: "issue update preimage requires id and matching number"}
-		}
+	}
+	if preserveMilestone || preserveLabels {
 		// GitCode currently clears an assigned milestone when the field is
 		// omitted from an otherwise valid issue PATCH. Keep public patch
 		// semantics at the adapter boundary by sending the live preimage.
@@ -505,6 +508,9 @@ func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, op
 	}
 	target := req.Owner + "/" + req.Repo + "/" + strconv.Itoa(req.Number)
 	endpoint := updateIssueEndpoint(req.Owner, req.Repo, req.Number)
+	mutationAttempted := false
+	opts.singleTransportAttempt = true
+	opts.beforeTransportAttempt = func() { mutationAttempted = true }
 	result, err := writeConfirmedJSON[Issue](ctx, c, http.MethodPatch, endpoint, "UpdateIssue", target, updateIssuePayload(req), opts, func(result WriteResult[Issue]) (WriteResult[Issue], error) {
 		issue := result.Record
 		if strings.TrimSpace(issue.ID) == "" || issue.Number != req.Number {
@@ -515,26 +521,26 @@ func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, op
 		return result, nil
 	})
 	if err != nil {
-		return result, err
+		return result, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "patch", MutationAttempted: mutationAttempted, Cause: err}
 	}
 	readback, err := c.GetIssue(ctx, IssueRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
 	if err != nil {
-		return WriteResult[Issue]{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "issue update requires canonical readback", Cause: err}
+		return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "issue update requires canonical readback", Cause: err}}
 	}
 	if strings.TrimSpace(readback.ID) == "" || readback.Number != req.Number {
-		return WriteResult[Issue]{}, ErrValidationFailed{Field: "response", Message: "issue state update readback requires id and matching number"}
+		return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "response", Message: "issue state update readback requires id and matching number"}}
 	}
 	if req.Title != "" && readback.Title != req.Title {
-		return WriteResult[Issue]{}, ErrValidationFailed{Field: "title", Message: fmt.Sprintf("issue update readback = %q, want %q", readback.Title, req.Title)}
+		return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "title", Message: fmt.Sprintf("issue update readback = %q, want %q", readback.Title, req.Title)}}
 	}
 	if req.Body != "" && readback.Body != req.Body {
-		return WriteResult[Issue]{}, ErrValidationFailed{Field: "body", Message: "issue update readback does not match the requested body"}
+		return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "body", Message: "issue update readback does not match the requested body"}}
 	}
 	if expectedState != "" && strings.TrimSpace(readback.State) != expectedState {
-		return WriteResult[Issue]{}, ErrValidationFailed{Field: "state", Message: fmt.Sprintf("issue state update readback = %q, want %q", readback.State, expectedState)}
+		return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "state", Message: fmt.Sprintf("issue state update readback = %q, want %q", readback.State, expectedState)}}
 	}
 	if preserveMilestone && issueMilestoneRemoteID(readback.Milestone) != issueMilestoneRemoteID(preimage.Milestone) {
-		return WriteResult[Issue]{}, ErrValidationFailed{Field: "milestone", Message: "issue update did not preserve the omitted milestone"}
+		return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "milestone", Message: "issue update did not preserve the omitted milestone"}}
 	}
 	if !preserveMilestone {
 		expectedMilestone, err := requestedIssueMilestoneRemoteID(req.Milestone)
@@ -542,11 +548,11 @@ func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, op
 			return WriteResult[Issue]{}, err
 		}
 		if issueMilestoneRemoteID(readback.Milestone) != expectedMilestone {
-			return WriteResult[Issue]{}, ErrValidationFailed{Field: "milestone", Message: "issue update readback does not match the requested milestone"}
+			return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "milestone", Message: "issue update readback does not match the requested milestone"}}
 		}
 	}
 	if preserveLabels && !sameStrings(readback.Labels, preimage.Labels) {
-		return WriteResult[Issue]{}, ErrValidationFailed{Field: "labels", Message: "issue update did not preserve omitted labels"}
+		return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "labels", Message: "issue update did not preserve omitted labels"}}
 	}
 	if !preserveLabels {
 		expectedLabels, err := requestedIssueLabels(req.Labels)
@@ -554,7 +560,7 @@ func (c *HTTPClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest, op
 			return WriteResult[Issue]{}, err
 		}
 		if !sameStrings(readback.Labels, expectedLabels) {
-			return WriteResult[Issue]{}, ErrValidationFailed{Field: "labels", Message: "issue update readback does not match the requested labels"}
+			return WriteResult[Issue]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "labels", Message: "issue update readback does not match the requested labels"}}
 		}
 	}
 	result.Record = readback
@@ -1331,6 +1337,7 @@ type requestOptions struct {
 	idempotencyKey   string
 	localPayload     []byte
 	noRetry          bool
+	beforeAttempt    func()
 }
 
 func (c *HTTPClient) getJSON(ctx context.Context, endpoint string, values url.Values, out any) error {
@@ -1581,7 +1588,7 @@ func writeConfirmedWithDecoder[T any](ctx context.Context, c *HTTPClient, method
 	if strings.TrimSpace(key) == "" {
 		return WriteResult[T]{}, ErrValidationFailed{Field: "idempotency_key", Message: "idempotency key is required"}
 	}
-	respBody, headers, err := c.bytesWithOptions(ctx, method, endpoint, nil, body, requestOptions{idempotencyKey: key, localPayload: body})
+	respBody, headers, err := c.bytesWithOptions(ctx, method, endpoint, nil, body, requestOptions{idempotencyKey: key, localPayload: body, noRetry: opts.singleTransportAttempt, beforeAttempt: opts.beforeTransportAttempt})
 	if err != nil {
 		return WriteResult[T]{}, err
 	}
@@ -2245,6 +2252,9 @@ func (c *HTTPClient) do(ctx context.Context, method, endpoint string, values url
 		req.Header.Set("Idempotency-Key", opts.idempotencyKey)
 	}
 	req.Header.Set("User-Agent", c.userAgent)
+	if opts.beforeAttempt != nil {
+		opts.beforeAttempt()
+	}
 	return c.client.Do(req)
 }
 

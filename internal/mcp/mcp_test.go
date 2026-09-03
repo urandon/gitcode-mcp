@@ -582,6 +582,9 @@ func TestMCPErrorOutputCanonicalFailureClass(t *testing.T) {
 		{name: "SCN-MCP-ERROR-OUTPUT-TIMEOUT", err: service.ErrSyncFailure{Mode: "network_timeout", Target: "issue:*", Cause: gitcode.ErrNetworkUnavailable{Endpoint: "/api/v5/repos/owner/repo/issues", Attempts: 1}}, want: string(diagnostics.CodeLiveTransportFailure)},
 		{name: "SCN-MCP-ERROR-OUTPUT-500", err: gitcode.ErrNetworkUnavailable{Endpoint: "/api/v5/repos/owner/repo/issues", Status: http.StatusInternalServerError, Attempts: 1}, want: string(diagnostics.CodeLiveTransportFailure)},
 		{name: "SCN-MCP-ERROR-OUTPUT-DISCUSSION-REPLY", err: service.ErrWriteFailure{Code: "discussion_reply_unavailable", Cause: gitcode.ErrDiscussionReplyUnavailable{DiscussionID: "comment:301", ParentCommentID: "301"}}, want: string(diagnostics.CodeDiscussionReplyUnavailable)},
+		{name: "SCN-MCP-ERROR-OUTPUT-WRITE-AMBIGUOUS", err: service.ErrWriteFailure{Code: "write_ambiguous_remote"}, want: string(diagnostics.CodeWriteAmbiguousRemote)},
+		{name: "SCN-MCP-ERROR-OUTPUT-WRITE-READBACK", err: service.ErrWriteFailure{Code: "write_ambiguous_readback_failed"}, want: string(diagnostics.CodeWriteAmbiguousReadback)},
+		{name: "SCN-MCP-ERROR-OUTPUT-WRITE-CONFLICT", err: service.ErrWriteFailure{Code: "write_conflict"}, want: string(diagnostics.CodeWriteConflict)},
 		{name: "SCN-MCP-ERROR-OUTPUT-PARENT-PR-NOT-CACHED", err: service.ErrParentPRNotCached{RepoID: "fixture-a", Number: 7}, want: string(diagnostics.CodeParentPRNotCached)},
 	}
 	for _, tt := range tests {

@@ -164,6 +164,14 @@ type localCommandDeps struct {
 	OpenURL            func(string) error
 	Stdin              io.Reader
 	IsTerminal         func() bool
+	MigrationService   cacheMigrationService
+}
+
+type cacheMigrationService interface {
+	Status() (servicectl.Status, error)
+	QuiesceForCacheMigration(context.Context) (servicectl.Status, error)
+	Install(bool) (servicectl.Status, error)
+	Start(context.Context) (servicectl.Status, error)
 }
 
 type startupPlan struct {
@@ -1068,7 +1076,7 @@ func executeMaintenanceCommand(ctx context.Context, args []string, opts options,
 		return 1
 	}
 	setup := servicectl.MaintenanceSetup{
-		Manager:         servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, RuntimeDir: eff.Config.Service.RuntimeDir},
+		Manager:         servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, Commit: buildinfo.Current().Commit, RuntimeDir: eff.Config.Service.RuntimeDir},
 		Config:          eff.Config,
 		CachePath:       eff.Config.CachePath,
 		CachePathSource: eff.CachePathSource,
@@ -1257,7 +1265,7 @@ func executeRAGCommand(ctx context.Context, args []string, opts options, stdout 
 		}
 		return code
 	case "index":
-		manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version}
+		manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, Commit: buildinfo.Current().Commit}
 		client, clientErr := manager.Client()
 		if clientErr != nil {
 			return writeError(stderr, opts.format, clientErr)
@@ -1311,7 +1319,7 @@ func executeRepositoryDocsCommand(ctx context.Context, args []string, opts optio
 	if err != nil {
 		return writeError(stderr, opts.format, err)
 	}
-	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, RuntimeDir: eff.Config.Service.RuntimeDir}
+	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, Commit: buildinfo.Current().Commit, RuntimeDir: eff.Config.Service.RuntimeDir}
 	client, err := manager.Client()
 	if err != nil {
 		return writeError(stderr, opts.format, err)
@@ -1459,7 +1467,7 @@ func executeRAGStatusCommand(ctx context.Context, opts options, stdout io.Writer
 		return writeError(stderr, opts.format, err)
 	}
 	defer store.Close()
-	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, RuntimeDir: eff.Config.Service.RuntimeDir}
+	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, Commit: buildinfo.Current().Commit, RuntimeDir: eff.Config.Service.RuntimeDir}
 	ops := rag.NewOperations(store, eff.Config, rag.OperationsOptions{ServiceState: func(ctx context.Context, repoID string) (*rag.ServiceStatus, *rag.JobStatus) {
 		return lookupRAGServiceState(ctx, manager, repoID)
 	}})
@@ -1661,7 +1669,7 @@ func executeServiceCommand(ctx context.Context, args []string, opts options, std
 	if configErr != nil {
 		return writeError(stderr, opts.format, configErr)
 	}
-	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, RuntimeDir: eff.Config.Service.RuntimeDir, AdminBind: opts.adminBind, AdminAutoStart: opts.admin, AdminAllowNonLoopback: opts.adminUnsafe, AdminCachePath: eff.Config.CachePath, JobRetention: &eff.Config.Service.JobRetention}
+	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, Commit: buildinfo.Current().Commit, RuntimeDir: eff.Config.Service.RuntimeDir, AdminBind: opts.adminBind, AdminAutoStart: opts.admin, AdminAllowNonLoopback: opts.adminUnsafe, AdminCachePath: eff.Config.CachePath, JobRetention: &eff.Config.Service.JobRetention}
 	var (
 		status servicectl.Status
 		err    error
@@ -1679,6 +1687,14 @@ func executeServiceCommand(ctx context.Context, args []string, opts options, std
 		status, err = manager.Stop(ctx)
 	case "status":
 		status, err = manager.Status()
+		if err == nil && status.Running {
+			if client, clientErr := manager.Client(); clientErr == nil {
+				var remote servicectl.Status
+				if callErr := client.Call(ctx, "Service.Status", nil, &remote); callErr == nil {
+					status = remote
+				}
+			}
+		}
 	case "doctor":
 		status, err = manager.Doctor()
 	case "run":
@@ -1769,7 +1785,7 @@ func executeAdminCommand(ctx context.Context, args []string, opts options, stdou
 	if err != nil {
 		return writeError(stderr, opts.format, err)
 	}
-	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, RuntimeDir: eff.Config.Service.RuntimeDir}
+	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, Commit: buildinfo.Current().Commit, RuntimeDir: eff.Config.Service.RuntimeDir}
 	client, err := manager.Client()
 	if err != nil {
 		return writeError(stderr, opts.format, err)
@@ -1993,9 +2009,21 @@ func renderServiceStatusText(w io.Writer, status servicectl.Status) {
 	if status.Message != "" {
 		fmt.Fprintf(w, "message: %s\n", status.Message)
 	}
+	if status.CacheReadiness != "" {
+		fmt.Fprintf(w, "cache_readiness: %s\n", status.CacheReadiness)
+	}
+	for _, block := range status.CacheSchemaBlocks {
+		renderCacheSchemaBlockText(w, "cache_schema_block", block)
+	}
 }
 
 func renderServiceJobListText(w io.Writer, result servicectl.JobListResult) {
+	if result.CacheReadiness != "" {
+		fmt.Fprintf(w, "cache_readiness: %s\n", result.CacheReadiness)
+	}
+	for _, block := range result.CacheSchemaBlocks {
+		renderCacheSchemaBlockText(w, "cache_schema_block", block)
+	}
 	for _, job := range result.Jobs {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%d/%d\n", job.ID, job.Type, job.Status, job.Completed, job.Steps)
 	}
@@ -2013,6 +2041,14 @@ func renderMaintenanceListText(w io.Writer, result servicectl.MaintenanceListRes
 		if len(entry.LegacyRegistrationIDs) > 0 {
 			fmt.Fprintf(w, "  legacy_registration_ids: %s\n", strings.Join(entry.LegacyRegistrationIDs, ", "))
 		}
+		if entry.State == "cache_schema_blocked" {
+			renderCacheSchemaBlockText(w, "  schema_block", servicectl.CacheSchemaBlock{
+				RegistrationID: entry.RegistrationID, RepoID: entry.RepoID, CacheUUID: entry.CacheUUID,
+				DetectedVersion: entry.DetectedSchemaVersion, ExpectedVersion: entry.ExpectedSchemaVersion,
+				DaemonBinaryVersion: entry.DaemonBinaryVersion, DaemonBinaryCommit: entry.DaemonBinaryCommit,
+				QuiesceState: entry.QuiesceState,
+			})
+		}
 		if entry.IdentityConflict != nil {
 			fmt.Fprintf(w, "  identity_conflict: %s details_available=%t candidates=%d paths=%d\n", entry.IdentityConflict.Kind, entry.IdentityConflict.DetailsAvailable, len(entry.IdentityConflict.Candidates), len(entry.IdentityConflict.PathFingerprints))
 			candidates := append([]servicectl.MaintenanceIdentityCandidate(nil), entry.IdentityConflict.Candidates...)
@@ -2022,6 +2058,29 @@ func renderMaintenanceListText(w io.Writer, result servicectl.MaintenanceListRes
 			}
 		}
 	}
+}
+
+func renderCacheSchemaBlockText(w io.Writer, prefix string, block servicectl.CacheSchemaBlock) {
+	fmt.Fprintf(w, "%s: detected=%d expected=%d", prefix, block.DetectedVersion, block.ExpectedVersion)
+	if block.RegistrationID != "" {
+		fmt.Fprintf(w, " registration_id=%s", block.RegistrationID)
+	}
+	if block.RepoID != "" {
+		fmt.Fprintf(w, " repo_id=%s", block.RepoID)
+	}
+	if block.DaemonBinaryVersion != "" {
+		fmt.Fprintf(w, " daemon_version=%s", block.DaemonBinaryVersion)
+	}
+	if block.DaemonBinaryCommit != "" {
+		fmt.Fprintf(w, " daemon_commit=%s", block.DaemonBinaryCommit)
+	}
+	if block.DaemonSchemaMin != 0 || block.DaemonSchemaMax != 0 {
+		fmt.Fprintf(w, " daemon_schema_range=%d..%d", block.DaemonSchemaMin, block.DaemonSchemaMax)
+	}
+	if block.QuiesceState != "" {
+		fmt.Fprintf(w, " quiesce_state=%s", block.QuiesceState)
+	}
+	fmt.Fprintln(w)
 }
 
 func renderMaintenanceIdentityCandidateText(w io.Writer, indent string, candidate servicectl.MaintenanceIdentityCandidate) {
@@ -2428,7 +2487,7 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			if opts.id != "" || opts.input != "" {
 				return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "sync", Message: "daemon sync supports collection selectors only; omit --id/--input"})
 			}
-			manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version}
+			manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, Commit: buildinfo.Current().Commit}
 			client, clientErr := manager.Client()
 			if clientErr != nil {
 				return writeError(stderr, opts.format, clientErr)
@@ -4192,7 +4251,7 @@ func diagnosticContext(plan startupPlan, err error) diagnostics.CommandContext {
 	}
 	var writeErr service.ErrWriteFailure
 	if errors.As(err, &writeErr) {
-		ctx.HTTPAttempted = writeErr.Code == "write_unauthorized" || writeErr.Code == "write_network_unavailable" || writeErr.Code == "write_provider_error" || writeErr.Code == "write_conflict" || writeErr.Code == "schema_decode" || writeErr.Code == "pr_review_anchor_mismatch" || writeErr.Code == "write_confirmation_incomplete" || writeErr.Code == "discussion_reply_unavailable"
+		ctx.HTTPAttempted = writeErr.Code == "write_unauthorized" || writeErr.Code == "write_network_unavailable" || writeErr.Code == "write_provider_error" || writeErr.Code == "write_conflict" || writeErr.Code == "write_ambiguous_remote" || writeErr.Code == "write_ambiguous_readback_failed" || writeErr.Code == "schema_decode" || writeErr.Code == "pr_review_anchor_mismatch" || writeErr.Code == "write_confirmation_incomplete" || writeErr.Code == "discussion_reply_unavailable"
 		ctx.FixtureFallbackSentinel = writeErr.Code == "write_fixture_fallback_detected"
 		ctx.MissingCredential = writeErr.Code == "write_missing_credential"
 		ctx.UnsupportedPayload = writeErr.Code == "live_graph_invalid" || writeErr.Code == "unsupported_mock_payload"
@@ -4470,13 +4529,123 @@ func executeDoctorCommand(ctx context.Context, opts options, plan startupPlan, s
 }
 
 type migrateCacheResult struct {
-	CachePath   string `json:"cache_path"`
-	FromVersion int    `json:"from_version"`
-	ToVersion   int    `json:"to_version"`
-	Status      string `json:"status"`
-	Applied     []int  `json:"applied,omitempty"`
-	BackupPath  string `json:"backup_path,omitempty"`
-	Remediation string `json:"remediation,omitempty"`
+	CachePath         string `json:"cache_path"`
+	FromVersion       int    `json:"from_version"`
+	ToVersion         int    `json:"to_version"`
+	Status            string `json:"status"`
+	Applied           []int  `json:"applied,omitempty"`
+	BackupPath        string `json:"backup_path,omitempty"`
+	BackupVerified    bool   `json:"backup_verified"`
+	IdentityPreserved bool   `json:"identity_preserved"`
+	ServiceInstalled  bool   `json:"service_installed"`
+	ServiceWasRunning bool   `json:"service_was_running"`
+	ServiceQuiesced   bool   `json:"service_quiesced"`
+	ServiceRestarted  bool   `json:"service_restarted"`
+	DaemonVersion     string `json:"daemon_version,omitempty"`
+	DaemonCommit      string `json:"daemon_commit,omitempty"`
+	DaemonSchemaMin   int    `json:"daemon_schema_min,omitempty"`
+	DaemonSchemaMax   int    `json:"daemon_schema_max,omitempty"`
+	RecoveryState     string `json:"recovery_state,omitempty"`
+	Remediation       string `json:"remediation,omitempty"`
+}
+
+type cacheMigrationRecovery struct {
+	SchemaVersion     string `json:"schema_version"`
+	TargetSchema      int    `json:"target_schema"`
+	Phase             string `json:"phase"`
+	ServiceInstalled  bool   `json:"service_installed"`
+	ServiceWasRunning bool   `json:"service_was_running"`
+	BackupPath        string `json:"backup_path,omitempty"`
+	BackupVerified    bool   `json:"backup_verified"`
+	IdentityPreserved bool   `json:"identity_preserved"`
+}
+
+const cacheMigrationRecoverySchema = "gitcode-mcp.cache-migration-recovery.v1"
+
+type cacheMigrationReceipt struct {
+	SchemaVersion       string    `json:"schema_version"`
+	CacheUUID           string    `json:"cache_uuid"`
+	TargetSchema        int       `json:"target_schema"`
+	Phase               string    `json:"phase"`
+	BackupVerified      bool      `json:"backup_verified"`
+	IdentityPreserved   bool      `json:"identity_preserved"`
+	TargetBinaryVersion string    `json:"target_binary_version"`
+	TargetBinaryCommit  string    `json:"target_binary_commit,omitempty"`
+	TargetSchemaMin     int       `json:"target_schema_min"`
+	TargetSchemaMax     int       `json:"target_schema_max"`
+	CompletedAt         time.Time `json:"completed_at"`
+}
+
+const cacheMigrationReceiptSchema = "gitcode-mcp.cache-migration-receipt.v1"
+
+func cacheMigrationRecoveryPath(cachePath string) string {
+	return cachePath + ".migration-recovery.json"
+}
+
+func cacheMigrationReceiptPath(cachePath string) string {
+	return cachePath + ".migration-receipt.json"
+}
+
+func readCacheMigrationRecovery(cachePath string) (cacheMigrationRecovery, bool, error) {
+	data, err := os.ReadFile(cacheMigrationRecoveryPath(cachePath))
+	if errors.Is(err, os.ErrNotExist) {
+		return cacheMigrationRecovery{}, false, nil
+	}
+	if err != nil {
+		return cacheMigrationRecovery{}, false, fmt.Errorf("cache migration recovery intent cannot be read: %w", err)
+	}
+	var recovery cacheMigrationRecovery
+	if err := json.Unmarshal(data, &recovery); err != nil {
+		return cacheMigrationRecovery{}, false, fmt.Errorf("cache migration recovery intent is invalid: %w", err)
+	}
+	if recovery.SchemaVersion != cacheMigrationRecoverySchema || recovery.TargetSchema <= 0 {
+		return cacheMigrationRecovery{}, false, errors.New("cache migration recovery intent has an unsupported schema")
+	}
+	return recovery, true, nil
+}
+
+func writeCacheMigrationRecovery(cachePath string, recovery cacheMigrationRecovery) error {
+	recovery.SchemaVersion = cacheMigrationRecoverySchema
+	data, err := json.MarshalIndent(recovery, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := cacheMigrationRecoveryPath(cachePath)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
+		return fmt.Errorf("cache migration recovery intent cannot be written: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("cache migration recovery intent cannot be committed: %w", err)
+	}
+	return nil
+}
+
+func clearCacheMigrationRecovery(cachePath string) error {
+	err := os.Remove(cacheMigrationRecoveryPath(cachePath))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func writeCacheMigrationReceipt(cachePath string, receipt cacheMigrationReceipt) error {
+	receipt.SchemaVersion = cacheMigrationReceiptSchema
+	data, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := cacheMigrationReceiptPath(cachePath)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
+		return fmt.Errorf("cache migration receipt cannot be written: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("cache migration receipt cannot be committed: %w", err)
+	}
+	return nil
 }
 
 type repoLocalInitResult struct {
@@ -4717,18 +4886,171 @@ func executeMigrateCacheCommand(ctx context.Context, opts options, stdout io.Wri
 		return writeError(stderr, opts.format, err)
 	}
 
-	result, err := cache.MigrateCacheWithConfirm(ctx, cachePath, false, cache.Confirmation{Confirmed: opts.confirm})
+	inspection, err := cache.InspectCacheMigration(ctx, cachePath)
 	if err != nil {
 		return writeError(stderr, opts.format, err)
 	}
-
-	mr := migrateCacheResult{
-		CachePath:   cachePath,
-		FromVersion: result.FromVersion,
-		ToVersion:   result.ToVersion,
-		Applied:     result.Applied,
-		BackupPath:  result.BackupPath,
+	var migrationService cacheMigrationService = deps.MigrationService
+	if migrationService == nil {
+		migrationService = &servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, Commit: buildinfo.Current().Commit, RuntimeDir: eff.Config.Service.RuntimeDir}
 	}
+	serviceStatus, err := migrationService.Status()
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	recovery, recoveryPending, err := readCacheMigrationRecovery(cachePath)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	if recoveryPending && recovery.TargetSchema != inspection.ToVersion {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "migration-recovery", Message: "pending cache migration recovery targets a different schema; restore the recorded backup or use a compatible gitcode-mcp binary"})
+	}
+	mr := migrateCacheResult{
+		CachePath: cachePath, FromVersion: inspection.FromVersion, ToVersion: inspection.ToVersion,
+		ServiceInstalled: serviceStatus.Installed, ServiceWasRunning: serviceStatus.Running,
+		DaemonVersion: serviceStatus.BinaryVersion, DaemonCommit: serviceStatus.BinaryCommit,
+		DaemonSchemaMin: serviceStatus.SchemaMin, DaemonSchemaMax: serviceStatus.SchemaMax,
+	}
+	if recoveryPending {
+		mr.ServiceInstalled = recovery.ServiceInstalled
+		mr.ServiceWasRunning = recovery.ServiceWasRunning
+		mr.ServiceQuiesced = true
+		mr.BackupPath = recovery.BackupPath
+		mr.BackupVerified = recovery.BackupVerified
+		mr.IdentityPreserved = recovery.IdentityPreserved
+		mr.RecoveryState = recovery.Phase
+	}
+	needsMigration := inspection.Compatibility.Compatible && inspection.FromVersion > 1 && inspection.FromVersion < inspection.ToVersion
+	if recoveryPending && !opts.confirm {
+		return writeMigrateCacheRecoveryFailure(stdout, stderr, opts.format, mr, "cache_schema_recovery_confirmation_required")
+	}
+	if opts.confirm && needsMigration && !recoveryPending && (serviceStatus.Installed || serviceStatus.Running || serviceStatus.PIDAlive) {
+		recovery = cacheMigrationRecovery{
+			TargetSchema: inspection.ToVersion, Phase: "coordination_planned",
+			ServiceInstalled: serviceStatus.Installed, ServiceWasRunning: serviceStatus.Running,
+		}
+		if err := writeCacheMigrationRecovery(cachePath, recovery); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		recoveryPending = true
+	}
+	if opts.confirm && (needsMigration || recoveryPending) && (serviceStatus.Running || serviceStatus.PIDAlive) {
+		if _, err := migrationService.QuiesceForCacheMigration(ctx); err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		mr.ServiceQuiesced = true
+		mr.RecoveryState = "coordinator_quiesced"
+		if recoveryPending {
+			recovery.Phase = mr.RecoveryState
+			if err := writeCacheMigrationRecovery(cachePath, recovery); err != nil {
+				return writeMigrateCacheRecoveryFailure(stdout, stderr, opts.format, mr, "cache_schema_recovery_intent_failed")
+			}
+		}
+	}
+	result := inspection
+	if opts.confirm && needsMigration {
+		result, err = cache.MigrateCacheWithConfirm(ctx, cachePath, false, cache.Confirmation{Confirmed: true})
+		if err != nil {
+			if recoveryPending && recovery.ServiceInstalled && recovery.ServiceWasRunning {
+				if _, restartErr := migrationService.Start(ctx); restartErr == nil {
+					_ = clearCacheMigrationRecovery(cachePath)
+				}
+			} else if recoveryPending {
+				_ = clearCacheMigrationRecovery(cachePath)
+			}
+			return writeError(stderr, opts.format, err)
+		}
+		mr.BackupVerified = result.BackupVerified
+		mr.IdentityPreserved = result.IdentityPreserved
+		mr.BackupPath = result.BackupPath
+		if recoveryPending {
+			recovery.Phase = "migration_committed"
+			recovery.BackupPath = result.BackupPath
+			recovery.BackupVerified = result.BackupVerified
+			recovery.IdentityPreserved = result.IdentityPreserved
+			if err := writeCacheMigrationRecovery(cachePath, recovery); err != nil {
+				mr.RecoveryState = "migration_complete_recovery_intent_failed"
+				return writeMigrateCacheRecoveryFailure(stdout, stderr, opts.format, mr, "cache_schema_recovery_intent_failed")
+			}
+		}
+	}
+	if opts.confirm && recoveryPending {
+		var compatibleService servicectl.Status
+		if recovery.ServiceInstalled {
+			if _, err := migrationService.Install(true); err != nil {
+				mr.RecoveryState = "migration_complete_service_install_failed"
+				recovery.Phase = mr.RecoveryState
+				_ = writeCacheMigrationRecovery(cachePath, recovery)
+				return writeMigrateCacheRecoveryFailure(stdout, stderr, opts.format, mr, "cache_schema_service_install_failed")
+			}
+			recovery.Phase = "compatible_service_installed"
+			if err := writeCacheMigrationRecovery(cachePath, recovery); err != nil {
+				mr.RecoveryState = "migration_complete_recovery_intent_failed"
+				return writeMigrateCacheRecoveryFailure(stdout, stderr, opts.format, mr, "cache_schema_recovery_intent_failed")
+			}
+			started, err := migrationService.Start(ctx)
+			if err != nil {
+				mr.RecoveryState = "migration_complete_service_restart_failed"
+				recovery.Phase = mr.RecoveryState
+				_ = writeCacheMigrationRecovery(cachePath, recovery)
+				return writeMigrateCacheRecoveryFailure(stdout, stderr, opts.format, mr, "cache_schema_service_restart_failed")
+			}
+			if !started.Running || started.SchemaMin == 0 || started.SchemaMax == 0 || recovery.TargetSchema < started.SchemaMin || recovery.TargetSchema > started.SchemaMax {
+				mr.RecoveryState = "migration_complete_service_health_failed"
+				recovery.Phase = mr.RecoveryState
+				_ = writeCacheMigrationRecovery(cachePath, recovery)
+				return writeMigrateCacheRecoveryFailure(stdout, stderr, opts.format, mr, "cache_schema_service_health_failed")
+			}
+			compatibleService = started
+			mr.ServiceRestarted = true
+			mr.DaemonVersion = started.BinaryVersion
+			mr.DaemonCommit = started.BinaryCommit
+			mr.DaemonSchemaMin = started.SchemaMin
+			mr.DaemonSchemaMax = started.SchemaMax
+		}
+		if !recovery.BackupVerified || !recovery.IdentityPreserved {
+			mr.RecoveryState = "healthy_evidence_verification_failed"
+			recovery.Phase = mr.RecoveryState
+			_ = writeCacheMigrationRecovery(cachePath, recovery)
+			return writeMigrateCacheRecoveryFailure(stdout, stderr, opts.format, mr, "cache_schema_recovery_evidence_failed")
+		}
+		identityStore, err := cache.NewSQLiteReadOnlyStore(ctx, cachePath)
+		if err != nil {
+			mr.RecoveryState = "healthy_identity_read_failed"
+			recovery.Phase = mr.RecoveryState
+			_ = writeCacheMigrationRecovery(cachePath, recovery)
+			return writeMigrateCacheRecoveryFailure(stdout, stderr, opts.format, mr, "cache_schema_recovery_identity_failed")
+		}
+		identity, identityErr := identityStore.CacheIdentity(ctx)
+		closeErr := identityStore.Close()
+		if identityErr != nil || closeErr != nil || strings.TrimSpace(identity.UUID) == "" {
+			mr.RecoveryState = "healthy_identity_read_failed"
+			recovery.Phase = mr.RecoveryState
+			_ = writeCacheMigrationRecovery(cachePath, recovery)
+			return writeMigrateCacheRecoveryFailure(stdout, stderr, opts.format, mr, "cache_schema_recovery_identity_failed")
+		}
+		if err := writeCacheMigrationReceipt(cachePath, cacheMigrationReceipt{
+			CacheUUID:    identity.UUID,
+			TargetSchema: recovery.TargetSchema, Phase: "healthy",
+			BackupVerified: recovery.BackupVerified, IdentityPreserved: recovery.IdentityPreserved,
+			TargetBinaryVersion: compatibleService.BinaryVersion, TargetBinaryCommit: compatibleService.BinaryCommit,
+			TargetSchemaMin: compatibleService.SchemaMin, TargetSchemaMax: compatibleService.SchemaMax,
+			CompletedAt: time.Now().UTC(),
+		}); err != nil {
+			mr.RecoveryState = "healthy_receipt_failed"
+			recovery.Phase = mr.RecoveryState
+			_ = writeCacheMigrationRecovery(cachePath, recovery)
+			return writeMigrateCacheRecoveryFailure(stdout, stderr, opts.format, mr, "cache_schema_recovery_receipt_failed")
+		}
+		if err := clearCacheMigrationRecovery(cachePath); err != nil {
+			mr.RecoveryState = "healthy_recovery_intent_cleanup_failed"
+			return writeMigrateCacheRecoveryFailure(stdout, stderr, opts.format, mr, "cache_schema_recovery_cleanup_failed")
+		}
+		mr.RecoveryState = "healthy"
+	}
+
+	mr.Applied = result.Applied
+	mr.BackupPath = result.BackupPath
 
 	if !result.Compatibility.Compatible && result.Compatibility.Remediation != "" {
 		mr.Status = "incompatible"
@@ -4765,6 +5087,18 @@ func executeMigrateCacheCommand(ctx context.Context, opts options, stdout io.Wri
 	return 0
 }
 
+func writeMigrateCacheRecoveryFailure(stdout, stderr io.Writer, format string, result migrateCacheResult, failureClass string) int {
+	result.Status = "recovery_required"
+	result.Remediation = "re-run gitcode-mcp migrate-cache --confirm with the compatible binary; the durable recovery intent will resume install, restart, and health verification"
+	if format == "json" {
+		_ = renderJSON(stdout, result)
+	} else {
+		renderMigrateCacheText(stdout, result)
+	}
+	fmt.Fprintf(stderr, "cache migration recovery is incomplete\nfailure_class: %s\n", failureClass)
+	return 1
+}
+
 func renderMigrateCacheText(w io.Writer, mr migrateCacheResult) {
 	fmt.Fprintf(w, "cache_path: %s\n", mr.CachePath)
 	fmt.Fprintf(w, "from_version: %d\n", mr.FromVersion)
@@ -4779,6 +5113,20 @@ func renderMigrateCacheText(w io.Writer, mr migrateCacheResult) {
 	}
 	if mr.BackupPath != "" {
 		fmt.Fprintf(w, "backup_path: %s\n", mr.BackupPath)
+	}
+	fmt.Fprintf(w, "backup_verified: %t\nidentity_preserved: %t\n", mr.BackupVerified, mr.IdentityPreserved)
+	fmt.Fprintf(w, "service_installed: %t\nservice_was_running: %t\nservice_quiesced: %t\nservice_restarted: %t\n", mr.ServiceInstalled, mr.ServiceWasRunning, mr.ServiceQuiesced, mr.ServiceRestarted)
+	if mr.DaemonVersion != "" {
+		fmt.Fprintf(w, "daemon_version: %s\n", mr.DaemonVersion)
+	}
+	if mr.DaemonCommit != "" {
+		fmt.Fprintf(w, "daemon_commit: %s\n", mr.DaemonCommit)
+	}
+	if mr.DaemonSchemaMin != 0 || mr.DaemonSchemaMax != 0 {
+		fmt.Fprintf(w, "daemon_schema_range: %d..%d\n", mr.DaemonSchemaMin, mr.DaemonSchemaMax)
+	}
+	if mr.RecoveryState != "" {
+		fmt.Fprintf(w, "recovery_state: %s\n", mr.RecoveryState)
 	}
 	if mr.Remediation != "" {
 		fmt.Fprintf(w, "remediation: %s\n", mr.Remediation)
@@ -5486,8 +5834,8 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "migrate-cache":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s --confirm [--cache-path PATH]\n\n", command)
-		fmt.Fprintln(w, "Run cache schema migration from supported older versions.")
-		fmt.Fprintln(w, "A backup is created before migration at {cache-path}.backup-{timestamp}.")
+		fmt.Fprintln(w, "Quiesce the installed coordinator and migrate a supported older cache schema.")
+		fmt.Fprintln(w, "The WAL is checkpointed and a verified backup is created at {cache-path}.backup-{timestamp} before one atomic migration transaction.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --confirm           required to apply migration")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")

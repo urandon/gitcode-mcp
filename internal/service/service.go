@@ -5430,8 +5430,10 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	if err != nil {
 		return WriteCommandResult{}, err
 	}
+	var priorEntry *cache.AuditTrailEntry
 	if lookup.Entry != nil {
 		prior := *lookup.Entry
+		priorEntry = &prior
 		if lookup.Conflict {
 			return WriteCommandResult{}, ErrWriteFailure{Code: "write_idempotency_conflict", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
 		}
@@ -5466,10 +5468,55 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 			return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
 		}
 		if lookup.InProgress {
+			if command == "update-issue" {
+				if recovered, ok, recoverErr := s.recoverAmbiguousIssueUpdate(ctx, route, req, prior, fingerprint); recoverErr != nil {
+					return WriteCommandResult{}, recoverErr
+				} else if ok {
+					return recovered, nil
+				}
+				return WriteCommandResult{}, ErrWriteFailure{Code: "write_ambiguous_remote", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
+			}
 			return WriteCommandResult{}, ErrWriteFailure{Code: "write_idempotency_in_progress", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
 		}
 		if lookup.Unsafe {
 			return WriteCommandResult{}, ErrWriteFailure{Code: firstNonEmptyString(prior.Message, "write_ambiguous_remote"), RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
+		}
+		if prior.Status == audit.StatusFailed && prior.Message == "write_conflict" {
+			return WriteCommandResult{}, ErrWriteFailure{Code: "write_conflict", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
+		}
+	}
+	var issueUpdateClaimMetadata map[string]string
+	if command == "update-issue" {
+		req.beforeIssueUpdateMutation = func(preimage gitcode.Issue) error {
+			metadata := issueUpdatePreimageMetadata(preimage)
+			metadata["method"] = "PATCH"
+			metadata["idempotency_key"] = key
+			metadata["remote_number"] = strconv.Itoa(req.Number)
+			metadata["remote_type"] = "issue"
+			metadata["provider"] = "gitcode-http"
+			metadata["provider_mode"] = string(gitcode.ProviderModeLive)
+			metadata["source_fingerprint"] = fingerprint
+			metadata["write_phase"] = "preimage_captured"
+			issueUpdateClaimMetadata = metadata
+			if priorEntry != nil {
+				expected := strings.TrimSpace(priorEntry.RequestMetadata["issue_preimage_fingerprint"])
+				actual := metadata["issue_preimage_fingerprint"]
+				if expected != "" && expected != actual {
+					return gitcode.ErrWritePreconditionConflict{Endpoint: "issues/" + strconv.Itoa(req.Number), ExpectedFingerprint: expected, ActualFingerprint: actual}
+				}
+			}
+			entry := audit.WithRequestMetadata(audit.InProgress(route.RepoID, key, command, req.IssueID, "issue", strconv.Itoa(req.Number), fingerprint, "issue update claimed before PATCH", s.now().UTC()), metadata)
+			if claimer, ok := s.store.(auditClaimStore); ok {
+				claimed, claimErr := claimer.ClaimAuditEvent(ctx, entry)
+				if claimErr != nil {
+					return claimErr
+				}
+				if !claimed {
+					return ErrWriteFailure{Code: "write_idempotency_in_progress", RepoID: route.RepoID, RemoteID: strconv.Itoa(req.Number), IdempotencyKey: key}
+				}
+				return nil
+			}
+			return s.store.RecordAuditEvent(ctx, entry)
 		}
 	}
 	if command == "create-issue" || command == "add-pr-review-comment" {
@@ -5533,6 +5580,35 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	if err != nil {
 		code := s.writeAdapterErrorCode(req.Mode, err)
 		remoteID := remoteWriteID(err)
+		if command == "update-issue" {
+			var claimFailure ErrWriteFailure
+			if errors.As(err, &claimFailure) && claimFailure.Code == "write_idempotency_in_progress" {
+				return WriteCommandResult{}, claimFailure
+			}
+			var precondition gitcode.ErrWritePreconditionConflict
+			if errors.As(err, &precondition) {
+				metadata := issueUpdateClaimMetadata
+				if priorEntry != nil && len(priorEntry.RequestMetadata) > 0 {
+					metadata = priorEntry.RequestMetadata
+				}
+				entry := audit.WithRequestMetadata(audit.Failure(route.RepoID, key, command, fingerprint, "write_conflict", s.now().UTC()), metadata)
+				_ = s.store.RecordAuditEvent(ctx, entry)
+				return WriteCommandResult{}, ErrWriteFailure{Code: "write_conflict", RepoID: route.RepoID, RemoteID: strconv.Itoa(req.Number), IdempotencyKey: key, Cause: err}
+			}
+			if phase, attempted := issueUpdateMutationPhase(err); attempted && !safeIssueUpdateMutationFailure(phase, err) {
+				metadata := cloneStringMap(issueUpdateClaimMetadata)
+				metadata["write_phase"] = phase + "_ambiguous"
+				entry := audit.WithRequestMetadata(audit.InProgress(route.RepoID, key, command, req.IssueID, "issue", strconv.Itoa(req.Number), fingerprint, "write_ambiguous_remote", s.now().UTC()), metadata)
+				_ = s.store.RecordAuditEvent(ctx, entry)
+				return WriteCommandResult{}, ErrWriteFailure{Code: "write_ambiguous_remote", RepoID: route.RepoID, RemoteID: strconv.Itoa(req.Number), IdempotencyKey: key, PayloadSource: failureSource(err), Cause: err}
+			}
+			if len(issueUpdateClaimMetadata) > 0 {
+				metadata := cloneStringMap(issueUpdateClaimMetadata)
+				metadata["write_phase"] = "failed_before_or_rejected_patch"
+				_ = s.store.RecordAuditEvent(ctx, audit.WithRequestMetadata(audit.Failure(route.RepoID, key, command, fingerprint, code, s.now().UTC()), metadata))
+				return WriteCommandResult{}, ErrWriteFailure{Code: code, RepoID: route.RepoID, IdempotencyKey: key, PayloadSource: failureSource(err), Cause: writeFailureCause(code, err)}
+			}
+		}
 		if remoteID != "" {
 			remoteType := writeCommandRemoteType(command)
 			entry := audit.RemoteConfirmedUnsafe(route.RepoID, key, command, fallbackSourceID(remoteType, remoteID), remoteType, remoteID, fingerprint, code, s.now().UTC())
@@ -5550,6 +5626,12 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 		return WriteCommandResult{}, ErrWriteFailure{Code: code, RepoID: route.RepoID, IdempotencyKey: key, PayloadSource: failureSource(err), Cause: writeFailureCause(code, err)}
 	}
 	if !confirmed.confirmed || confirmed.remoteID == "" {
+		if command == "update-issue" && len(issueUpdateClaimMetadata) > 0 {
+			metadata := cloneStringMap(issueUpdateClaimMetadata)
+			metadata["write_phase"] = "patch_unconfirmed"
+			_ = s.store.RecordAuditEvent(ctx, audit.WithRequestMetadata(audit.InProgress(route.RepoID, key, command, req.IssueID, "issue", strconv.Itoa(req.Number), fingerprint, "write_ambiguous_remote", s.now().UTC()), metadata))
+			return WriteCommandResult{}, ErrWriteFailure{Code: "write_ambiguous_remote", RepoID: route.RepoID, RemoteID: strconv.Itoa(req.Number), IdempotencyKey: key}
+		}
 		_ = s.store.RecordAuditEvent(ctx, audit.Failure(route.RepoID, key, command, fingerprint, "write_unconfirmed_remote", s.now().UTC()))
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_unconfirmed_remote", RepoID: route.RepoID, IdempotencyKey: key}
 	}
@@ -5563,6 +5645,14 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 		auditEntry = entry
 	}
 	auditEntry = withWriteAuditMetadata(auditEntry, command, key, fingerprint, graph.Record.RemoteType, confirmed)
+	if command == "update-issue" && len(issueUpdateClaimMetadata) > 0 {
+		metadata := cloneStringMap(issueUpdateClaimMetadata)
+		for metadataKey, metadataValue := range auditEntry.RequestMetadata {
+			metadata[metadataKey] = metadataValue
+		}
+		metadata["write_phase"] = "canonical_readback_confirmed"
+		auditEntry = audit.WithRequestMetadata(auditEntry, metadata)
+	}
 	if err := s.store.RecordAuditEvent(ctx, auditEntry); err != nil {
 		partial := withWriteAuditMetadata(audit.RemoteConfirmedAuditFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()), command, key, fingerprint, graph.Record.RemoteType, confirmed)
 		_ = s.store.RecordAuditEvent(ctx, partial)
@@ -5570,16 +5660,25 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	}
 	if err := s.store.UpsertRecordGraph(ctx, graph); err != nil {
 		partial := withWriteAuditMetadata(audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()), command, key, fingerprint, graph.Record.RemoteType, confirmed)
+		if command == "update-issue" {
+			partial = audit.WithRequestMetadata(partial, auditEntry.RequestMetadata)
+		}
 		_ = s.store.RecordAuditEvent(ctx, partial)
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
 	}
 	if err := s.refreshIssueCommentWriteCache(ctx, command, graph); err != nil {
 		partial := withWriteAuditMetadata(audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()), command, key, fingerprint, graph.Record.RemoteType, confirmed)
+		if command == "update-issue" {
+			partial = audit.WithRequestMetadata(partial, auditEntry.RequestMetadata)
+		}
 		_ = s.store.RecordAuditEvent(ctx, partial)
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
 	}
 	if err := s.recordCacheConfirmation(ctx, command, route.RepoID, key, fingerprint, graph, confirmed.remoteID, "succeeded", confirmed.completedAt); err != nil {
 		partial := withWriteAuditMetadata(audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()), command, key, fingerprint, graph.Record.RemoteType, confirmed)
+		if command == "update-issue" {
+			partial = audit.WithRequestMetadata(partial, auditEntry.RequestMetadata)
+		}
 		_ = s.store.RecordAuditEvent(ctx, partial)
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
 	}
@@ -5687,7 +5786,7 @@ func (s *Service) hasWriteCredential() bool {
 }
 
 func (s *Service) callWriteAdapter(ctx context.Context, command string, route RepositoryRoute, req WriteCommandRequest, key string) (writeConfirmation, cache.RecordGraph, error) {
-	opts := gitcode.WriteOptions{IdempotencyKey: key}
+	opts := gitcode.WriteOptions{IdempotencyKey: key, BeforeIssueUpdateMutation: req.beforeIssueUpdateMutation}
 	now := s.now().UTC()
 	switch command {
 	case "create-issue":
@@ -6183,7 +6282,24 @@ func (s *Service) issueSourceForNumber(ctx context.Context, repoID string, numbe
 func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID string, req WriteCommandRequest, prior cache.AuditTrailEntry) (cache.RecordGraph, error) {
 	now := s.now().UTC()
 	switch command {
-	case "create-issue", "update-issue", "add-label", "set-issue-milestone", "clear-issue-milestone":
+	case "update-issue":
+		route, err := s.BuildAdapterRoute(ctx, repoID, RepositoryScopeIssues)
+		if err != nil {
+			return cache.RecordGraph{}, err
+		}
+		number := req.Number
+		if number == 0 {
+			number, _ = strconv.Atoi(prior.RemoteID)
+		}
+		issue, err := s.client.GetIssue(ctx, gitcode.IssueRequest{Owner: route.Owner, Repo: route.Name, Number: number})
+		if err != nil {
+			return cache.RecordGraph{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: repoID, RemoteID: prior.RemoteID, IdempotencyKey: prior.IdempotencyKey, Cause: err}
+		}
+		remoteID := firstNonEmptyString(issue.ID, prior.RemoteID, strconv.Itoa(issue.Number))
+		result := gitcode.WriteResult[gitcode.Issue]{Record: issue, Confirmed: true, Operation: "UpdateIssuePartialReplayReadback", RemoteID: remoteID, RemoteNumber: issue.Number, ConfirmedAt: now}
+		_, graph := s.issueWriteGraph(repoID, issue, result, now)
+		return graph, nil
+	case "create-issue", "add-label", "set-issue-milestone", "clear-issue-milestone":
 		number, _ := strconv.Atoi(prior.RemoteID)
 		issue := gitcode.Issue{ID: prior.RemoteID, Number: number, Title: strings.TrimSpace(req.Title), Body: req.Body, State: firstNonEmptyString(req.State, "open"), CreatedAt: now, UpdatedAt: now}
 		if receipt := milestoneReceiptFromAudit(prior); receipt != nil && !receipt.Cleared {
@@ -6277,6 +6393,139 @@ func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID s
 	default:
 		return cache.RecordGraph{}, ErrWriteFailure{Code: "write_unsupported_deferred", RepoID: repoID, RemoteID: prior.RemoteID, IdempotencyKey: prior.IdempotencyKey}
 	}
+}
+
+func issueUpdatePreimageMetadata(issue gitcode.Issue) map[string]string {
+	labels := append([]string(nil), issue.Labels...)
+	sort.Strings(labels)
+	milestone := ""
+	if issue.Milestone != nil {
+		milestone = firstNonEmptyString(issue.Milestone.RemoteID, issue.Milestone.SourceID, issue.Milestone.Title)
+	}
+	metadata := map[string]string{
+		"issue_preimage_title_hash":     hashWriteInvariant(issue.Title),
+		"issue_preimage_body_hash":      hashWriteInvariant(issue.Body),
+		"issue_preimage_state_hash":     hashWriteInvariant(strings.TrimSpace(issue.State)),
+		"issue_preimage_labels_hash":    hashWriteInvariant(strings.Join(labels, "\x00")),
+		"issue_preimage_milestone_hash": hashWriteInvariant(milestone),
+	}
+	metadata["issue_preimage_fingerprint"] = hashWriteInvariant(strings.Join([]string{
+		metadata["issue_preimage_title_hash"],
+		metadata["issue_preimage_body_hash"],
+		metadata["issue_preimage_state_hash"],
+		metadata["issue_preimage_labels_hash"],
+		metadata["issue_preimage_milestone_hash"],
+	}, "\x00"))
+	return metadata
+}
+
+func hashWriteInvariant(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in)+1)
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func (s *Service) recoverAmbiguousIssueUpdate(ctx context.Context, route RepositoryRoute, req WriteCommandRequest, prior cache.AuditTrailEntry, fingerprint string) (WriteCommandResult, bool, error) {
+	issue, err := s.client.GetIssue(ctx, gitcode.IssueRequest{Owner: route.Owner, Repo: route.Name, Number: req.Number})
+	if err != nil {
+		return WriteCommandResult{}, false, ErrWriteFailure{Code: "write_ambiguous_readback_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: prior.IdempotencyKey, Cause: err}
+	}
+	matched, err := s.issueUpdateRecoveryMatches(ctx, route, req, issue, prior.RequestMetadata)
+	if err != nil {
+		return WriteCommandResult{}, false, err
+	}
+	if !matched {
+		return WriteCommandResult{}, false, nil
+	}
+	now := s.now().UTC()
+	remoteID := firstNonEmptyString(issue.ID, strconv.Itoa(issue.Number))
+	providerResult := gitcode.WriteResult[gitcode.Issue]{Record: issue, Confirmed: true, Operation: "UpdateIssueRecoveryReadback", RemoteID: remoteID, RemoteNumber: issue.Number, ProviderStatus: "readback-recovered", IdempotencyKey: prior.IdempotencyKey, ConfirmedAt: now}
+	confirmation, graph := s.issueWriteGraph(route.RepoID, issue, providerResult, now)
+	metadata := cloneStringMap(prior.RequestMetadata)
+	metadata["write_phase"] = "recovered_by_canonical_readback"
+	completed := audit.WithRequestMetadata(audit.Success(route.RepoID, prior.IdempotencyKey, "update-issue", graph.Record.ID, graph.Record.RemoteType, remoteID, fingerprint, "recovered_by_canonical_readback", now), metadata)
+	if err := s.store.RecordAuditEvent(ctx, completed); err != nil {
+		return WriteCommandResult{}, false, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: remoteID, IdempotencyKey: prior.IdempotencyKey, Cause: err}
+	}
+	if err := s.store.UpsertRecordGraph(ctx, graph); err != nil {
+		partial := audit.WithRequestMetadata(audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, prior.IdempotencyKey, "update-issue", graph.Record.ID, graph.Record.RemoteType, remoteID, fingerprint, err.Error(), now), metadata)
+		_ = s.store.RecordAuditEvent(ctx, partial)
+		return WriteCommandResult{}, false, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: remoteID, IdempotencyKey: prior.IdempotencyKey, Cause: err}
+	}
+	if err := s.recordCacheConfirmation(ctx, "update-issue", route.RepoID, prior.IdempotencyKey, fingerprint, graph, remoteID, "succeeded", now); err != nil {
+		return WriteCommandResult{}, false, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: remoteID, IdempotencyKey: prior.IdempotencyKey, Cause: err}
+	}
+	result := replayWriteResult("update-issue", req, completed, fingerprint, now)
+	result.Status = "recovered_after_ambiguous_write"
+	result.ID = graph.Record.ID
+	result.RemoteID = remoteID
+	result.RemoteNumber = confirmation.remoteNumber
+	result.Replayed = true
+	result.Evidence = "canonical readback matched requested state; no second PATCH issued"
+	return result, true, nil
+}
+
+func (s *Service) issueUpdateRecoveryMatches(ctx context.Context, route RepositoryRoute, req WriteCommandRequest, issue gitcode.Issue, metadata map[string]string) (bool, error) {
+	current := issueUpdatePreimageMetadata(issue)
+	checks := []struct {
+		requested bool
+		actual    string
+		expected  string
+	}{
+		{req.Title != "", issue.Title, req.Title},
+		{req.Body != "", issue.Body, req.Body},
+		{req.State != "", strings.TrimSpace(issue.State), strings.TrimSpace(req.State)},
+	}
+	for _, check := range checks {
+		if check.requested && check.actual != check.expected {
+			return false, nil
+		}
+	}
+	preserved := []struct {
+		omitted bool
+		key     string
+	}{
+		{req.Title == "", "issue_preimage_title_hash"},
+		{req.Body == "", "issue_preimage_body_hash"},
+		{req.State == "", "issue_preimage_state_hash"},
+		{len(req.Labels) == 0, "issue_preimage_labels_hash"},
+		{strings.TrimSpace(req.Milestone) == "" && !req.ClearMilestone, "issue_preimage_milestone_hash"},
+	}
+	for _, check := range preserved {
+		if check.omitted && (metadata[check.key] == "" || current[check.key] != metadata[check.key]) {
+			return false, nil
+		}
+	}
+	if len(req.Labels) > 0 {
+		want := append([]string(nil), req.Labels...)
+		got := append([]string(nil), issue.Labels...)
+		sort.Strings(want)
+		sort.Strings(got)
+		if strings.Join(want, "\x00") != strings.Join(got, "\x00") {
+			return false, nil
+		}
+	}
+	if req.ClearMilestone {
+		if issue.Milestone != nil && firstNonEmptyString(issue.Milestone.RemoteID, issue.Milestone.SourceID, issue.Milestone.Title) != "" {
+			return false, nil
+		}
+	} else if strings.TrimSpace(req.Milestone) != "" {
+		milestone, err := s.resolveMilestone(ctx, route, req.Milestone)
+		if err != nil {
+			return false, err
+		}
+		if issue.Milestone == nil || firstNonEmptyString(issue.Milestone.RemoteID, issue.Milestone.SourceID) != firstNonEmptyString(milestone.RemoteID, milestone.SourceID) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (s *Service) issueWriteGraph(repoID string, issue gitcode.Issue, result gitcode.WriteResult[gitcode.Issue], now time.Time) (writeConfirmation, cache.RecordGraph) {
@@ -6874,7 +7123,43 @@ func (s *Service) writeAdapterErrorCode(mode WriteMode, err error) string {
 	return writeErrorCode(err)
 }
 
+func issueUpdateMutationPhase(err error) (string, bool) {
+	var phase gitcode.ErrWriteMutationPhase
+	if !errors.As(err, &phase) || !phase.MutationAttempted {
+		return "", false
+	}
+	return firstNonEmptyString(phase.Phase, "patch"), true
+}
+
+func safeIssueUpdateMutationFailure(phase string, err error) bool {
+	if phase == "readback" {
+		return false
+	}
+	var auth gitcode.ErrAuthExpired
+	if errors.As(err, &auth) {
+		return true
+	}
+	var forbidden gitcode.ErrForbidden
+	if errors.As(err, &forbidden) {
+		return true
+	}
+	var conflict gitcode.ErrConflict
+	if errors.As(err, &conflict) {
+		return true
+	}
+	var validation gitcode.ErrAPIValidation
+	if errors.As(err, &validation) {
+		return true
+	}
+	var limited gitcode.ErrRateLimited
+	return errors.As(err, &limited)
+}
+
 func writeErrorCode(err error) string {
+	var precondition gitcode.ErrWritePreconditionConflict
+	if errors.As(err, &precondition) {
+		return "write_conflict"
+	}
 	var replyUnavailable gitcode.ErrDiscussionReplyUnavailable
 	if errors.As(err, &replyUnavailable) {
 		return "discussion_reply_unavailable"

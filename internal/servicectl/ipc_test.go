@@ -10,12 +10,14 @@ import (
 	"testing"
 	"time"
 
+	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/service"
 )
 
 func TestRPCServiceStatusAndFakeJobLifecycle(t *testing.T) {
 	manager := newTestManager(t, "darwin")
+	manager.Commit = "test-commit"
 	src := manager.Source.(testSource)
 	src.env = map[string]string{"GITCODE_MCP_SERVICE_NETWORK": "mem", "GITCODE_MCP_SERVICE_ADDRESS": "test-ipc-lifecycle"}
 	manager.Source = src
@@ -33,6 +35,16 @@ func TestRPCServiceStatusAndFakeJobLifecycle(t *testing.T) {
 	}
 	if status.Status != StatusRunning || !status.Running || !status.SocketPresent {
 		t.Fatalf("service status = %#v", status)
+	}
+	if status.BinaryVersion != manager.Version || status.BinaryCommit != manager.Commit || status.SchemaMin != cache.CurrentSchemaVersion() || status.SchemaMax != cache.CurrentSchemaVersion() {
+		t.Fatalf("service status compatibility contract = %#v", status)
+	}
+	var health ServiceHealth
+	if err := client.Call(context.Background(), "Service.Health", nil, &health); err != nil {
+		t.Fatal(err)
+	}
+	if !health.Healthy || health.BinaryVersion != manager.Version || health.BinaryCommit != manager.Commit || health.SchemaMin != cache.CurrentSchemaVersion() || health.SchemaMax != cache.CurrentSchemaVersion() {
+		t.Fatalf("service health compatibility contract = %#v", health)
 	}
 	var capabilities MaintenanceCapabilities
 	if err := client.Call(context.Background(), "Maintenance.Capabilities", nil, &capabilities); err != nil {
@@ -73,6 +85,60 @@ func TestRPCServiceStatusAndFakeJobLifecycle(t *testing.T) {
 	cancel()
 	if err := <-errCh; err != nil && err != context.Canceled {
 		t.Fatalf("service run returned %v", err)
+	}
+}
+
+func TestRPCStatusHealthAndJobsExposeCacheSchemaBlocks(t *testing.T) {
+	manager := newTestManager(t, "darwin")
+	manager.Commit = "daemon-commit"
+	jobs := NewJobManager("")
+	maintenance := NewMaintenanceManager(manager, jobs, filepath.Join(t.TempDir(), "managed-caches.json"))
+	maintenance.mu.Lock()
+	maintenance.entries["maintenance-schema"] = &MaintenanceEntry{
+		RegistrationID: "maintenance-schema", RepoID: "owner/repository", CacheUUID: "cache-public-id",
+		State: "cache_schema_blocked", DetectedSchemaVersion: cache.CurrentSchemaVersion() + 1,
+		ExpectedSchemaVersion: cache.CurrentSchemaVersion(), DaemonBinaryVersion: manager.Version,
+		DaemonBinaryCommit: manager.Commit, QuiesceState: "required",
+	}
+	maintenance.mu.Unlock()
+	server := RPCServer{Manager: manager, Jobs: jobs, Maintenance: maintenance}
+
+	statusValue, err := server.dispatch(context.Background(), "Service.Status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := statusValue.(Status)
+	if status.CacheReadiness != "cache_schema_blocked" || len(status.CacheSchemaBlocks) != 1 {
+		t.Fatalf("status schema contract=%#v", status)
+	}
+	block := status.CacheSchemaBlocks[0]
+	if block.DetectedVersion != cache.CurrentSchemaVersion()+1 || block.ExpectedVersion != cache.CurrentSchemaVersion() || block.DaemonBinaryVersion != manager.Version || block.DaemonBinaryCommit != manager.Commit || block.QuiesceState != "required" {
+		t.Fatalf("status schema block=%#v", block)
+	}
+
+	healthValue, err := server.dispatch(context.Background(), "Service.Health", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	health := healthValue.(ServiceHealth)
+	if health.Healthy || health.CacheReadiness != "cache_schema_blocked" || len(health.CacheSchemaBlocks) != 1 {
+		t.Fatalf("health schema contract=%#v", health)
+	}
+
+	jobsValue, err := server.dispatch(context.Background(), "Jobs.List", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobList := jobsValue.(JobListResult)
+	if jobList.CacheReadiness != "cache_schema_blocked" || len(jobList.CacheSchemaBlocks) != 1 {
+		t.Fatalf("jobs schema contract=%#v", jobList)
+	}
+	raw, err := json.Marshal(jobList)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), string(filepath.Separator)+"private") {
+		t.Fatalf("jobs schema contract leaked a path: %s", raw)
 	}
 }
 
