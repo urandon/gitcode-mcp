@@ -1024,6 +1024,26 @@ func (m *JobManager) updateJob(id string, fn func(*Job, time.Time)) {
 	_ = m.saveLocked()
 }
 
+// updateJobPersisted reports whether the mutated snapshot reached durable
+// storage. Callers that are about to discard independent recovery evidence
+// must only do so after this method succeeds.
+func (m *JobManager) updateJobPersisted(id string, fn func(*Job, time.Time)) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job := m.jobs[id]
+	if job == nil {
+		return nil
+	}
+	previous := cloneJob(job)
+	fn(job, m.now())
+	trimJobProgress(job, m.retention.MaxProgressEvents)
+	if err := m.saveLocked(); err != nil {
+		*job = previous
+		return err
+	}
+	return nil
+}
+
 func (m *JobManager) mustGet(id string) Job {
 	job, ok := m.Get(id)
 	if !ok {

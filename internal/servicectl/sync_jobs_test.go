@@ -21,6 +21,11 @@ type admissionSyncService struct {
 	err   error
 }
 
+type codedSyncTestError struct{ code string }
+
+func (e codedSyncTestError) Error() string          { return e.code }
+func (e codedSyncTestError) DiagnosticCode() string { return e.code }
+
 func TestDurableSyncSelectorInvariantCoversDefaultAndComments(t *testing.T) {
 	if !syncDurableCollections(StartSyncJobRequest{}) || !syncDurableCollections(StartSyncJobRequest{IssueComments: true, PRComments: true}) {
 		t.Fatal("daemon selector combination escaped durable staging")
@@ -41,6 +46,61 @@ func TestDurableSyncSelectorInvariantCoversDefaultAndComments(t *testing.T) {
 	want := []string{"issues", "issue_comments", "wiki", "pulls", "pr_comments"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("durable collection order=%v want=%v", got, want)
+	}
+}
+
+func TestDurableCollectionPersistsPartialFetchOutcomeBeforeCommit(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	cachePath := filepath.Join(root, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}
+	if err := store.AddRepository(ctx, binding); err != nil {
+		t.Fatal(err)
+	}
+	identity, _ := store.CacheIdentity(ctx)
+	schema, _ := store.SchemaVersion(ctx)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	jobID := "job-000001"
+	jobs := NewJobManager(filepath.Join(root, "jobs.json"))
+	now := time.Now().UTC()
+	jobs.jobs[jobID] = &Job{ID: jobID, Type: SyncJobType, RepoID: binding.RepoID, CacheUUID: identity.UUID, Status: JobStatusRunning, CreatedAt: now, UpdatedAt: now}
+	jobs.nextID = 1
+	if err := jobs.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	manager := newTestManager(t, "darwin")
+	manager.RuntimeDir = root
+	workflow := &SyncStageWorkflow{Collections: []string{"issues", "wiki"}, Current: 0, ProviderMode: "fixture"}
+	fetchErr := codedSyncTestError{code: "provider_failure"}
+	result, _, err := jobs.runDurableCollection(ctx, manager, jobID, StartSyncJobRequest{
+		RepoID: binding.RepoID, CachePath: cachePath, CacheUUID: identity.UUID,
+		RegistrationID: maintenanceRegistrationID(identity.UUID, binding.RepoID),
+	}, schema, syncRepositoryBindingFingerprint(binding), durableCollectionWork{
+		collection: "issues", remoteType: "issue",
+		fetch: func(context.Context) (durableCollectionBatch, error) {
+			return durableCollectionBatch{payload: json.RawMessage(`{"items":[1,2]}`), recordCount: 2, recordsListed: 3, idempotencyKey: "partial-fetch", fetchedAt: now}, fetchErr
+		},
+		commit: func(context.Context, SyncStageEnvelope) (*service.SyncResourcesResult, error) {
+			return &service.SyncResourcesResult{RecordsListed: 3, SuccessCount: 2}, nil
+		},
+	}, workflow)
+	if !errors.Is(err, fetchErr) || result == nil || result.SuccessCount != 2 {
+		t.Fatalf("durable partial result=%+v err=%v", result, err)
+	}
+	stages, err := NewSyncStageJournal(root, SyncStageLimits{}).List()
+	if err != nil || len(stages) != 1 || stages[0].Workflow == nil || stages[0].Workflow.Outcome == nil {
+		t.Fatalf("persisted stages=%+v err=%v", stages, err)
+	}
+	outcome := *stages[0].Workflow.Outcome
+	if outcome.RecordsListed != 3 || outcome.SuccessCount != 2 || outcome.ErrorClass != "provider_failure" || outcome.ErrorCollection != "issue" {
+		t.Fatalf("persisted partial outcome=%+v", outcome)
 	}
 }
 
@@ -495,12 +555,18 @@ func TestDaemonRestartUsesAtomicReceiptWhenJournalMissedCommitTerminal(t *testin
 }
 
 func TestDaemonRestartContinuesMixedWorkflowAfterCommittedCollection(t *testing.T) {
-	for _, terminalSidecar := range []bool{false, true} {
-		name := "receipt_only"
-		if terminalSidecar {
-			name = "terminal_sidecar"
-		}
-		t.Run(name, func(t *testing.T) {
+	tests := []struct {
+		name            string
+		terminalSidecar bool
+		prefixError     bool
+	}{
+		{name: "receipt_only"},
+		{name: "terminal_sidecar", terminalSidecar: true},
+		{name: "receipt_only_partial_provider_failure", prefixError: true},
+		{name: "terminal_sidecar_partial_provider_failure", terminalSidecar: true, prefixError: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			root := t.TempDir()
 			cachePath := filepath.Join(root, "cache.db")
@@ -526,11 +592,16 @@ func TestDaemonRestartContinuesMixedWorkflowAfterCommittedCollection(t *testing.
 				t.Fatal(err)
 			}
 			journal := NewSyncStageJournal(root, SyncStageLimits{})
+			workflow := syncStageWorkflowFromRequest(request, []string{"issues", "wiki"}, 0)
+			workflow.Outcome = &SyncStageWorkflowOutcome{RecordsListed: batch.RecordsListed, SuccessCount: batch.RecordCount()}
+			if tc.prefixError {
+				workflow.Outcome.ErrorClass, workflow.Outcome.ErrorCollection = "provider_failure", "issue"
+			}
 			stage, err := journal.Create(SyncStageEnvelope{
 				JobID: "job-000001", CacheUUID: identity.UUID, CacheSchema: schema, CachePath: cachePath,
 				RegistrationID: request.RegistrationID, RepoID: binding.RepoID, BindingFingerprint: syncRepositoryBindingFingerprint(binding),
 				Collection: "issues", IdempotencyKey: batch.IdempotencyKey, RecordCount: batch.RecordCount(), Payload: payload,
-				Workflow: syncStageWorkflowFromRequest(request, []string{"issues", "wiki"}, 0),
+				Workflow: workflow,
 				State:    SyncStageState{Phase: SyncStageCommitting, RetryBudget: defaultSyncCommitRetries, FetchedAt: batch.FetchedAt},
 			})
 			if err != nil {
@@ -540,7 +611,7 @@ func TestDaemonRestartContinuesMixedWorkflowAfterCommittedCollection(t *testing.
 			if _, err := svc.CommitIssueSyncBatch(ctx, batch, nil); err != nil {
 				t.Fatal(err)
 			}
-			if terminalSidecar {
+			if tc.terminalSidecar {
 				state := stage.State
 				state.Phase, state.CommittedAt = SyncStageCommitted, time.Now().UTC()
 				stage, err = journal.UpdateState(stage.StageID, state)
@@ -578,7 +649,11 @@ func TestDaemonRestartContinuesMixedWorkflowAfterCommittedCollection(t *testing.
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
-			if recovered.Status != JobStatusSucceeded || recovered.SyncStage == nil || recovered.SyncStage.Collection != "wiki" || recovered.SyncStage.Phase != SyncStageCommitted {
+			wantStatus, wantErrorClass := JobStatusSucceeded, ""
+			if tc.prefixError {
+				wantStatus, wantErrorClass = JobStatusFailed, "provider_failure"
+			}
+			if recovered.Status != wantStatus || recovered.ErrorClass != wantErrorClass || recovered.SyncStage == nil || recovered.SyncStage.Collection != "wiki" || recovered.SyncStage.Phase != SyncStageCommitted {
 				t.Fatalf("mixed recovery stopped after first collection: %+v", recovered)
 			}
 			if _, err := store.GetSourceScoped(ctx, binding.RepoID, "WIKI-HOME"); err != nil {
@@ -588,6 +663,61 @@ func TestDaemonRestartContinuesMixedWorkflowAfterCommittedCollection(t *testing.
 				t.Fatalf("completed workflow retained stages=%+v err=%v", stages, err)
 			}
 		})
+	}
+}
+
+func TestRecoveredWorkflowRetainsCheckpointUntilTerminalSnapshotIsDurable(t *testing.T) {
+	root := t.TempDir()
+	journal := NewSyncStageJournal(root, SyncStageLimits{})
+	envelope := testSyncStageEnvelope()
+	envelope.CachePath = filepath.Join(root, "cache.db")
+	envelope.Workflow = &SyncStageWorkflow{
+		Collections: []string{"issues"}, Current: 0, ProviderMode: "fixture",
+		Outcome: &SyncStageWorkflowOutcome{RecordsListed: 2, SuccessCount: 2},
+	}
+	stage, err := journal.Create(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := stage.State
+	state.Phase, state.CommittedAt = SyncStageCommitted, time.Now().UTC()
+	stage, err = journal.UpdateState(stage.StageID, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	jobsPath := filepath.Join(root, "jobs.json")
+	jobs := NewJobManager(jobsPath)
+	now := time.Now().UTC()
+	view := stage.PublicView()
+	jobs.jobs[stage.JobID] = &Job{ID: stage.JobID, Type: SyncJobType, Status: JobStatusInterrupted, CreatedAt: now, UpdatedAt: now, SyncStage: &view}
+	jobs.nextID = 1
+	if err := jobs.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("injected terminal snapshot failure")
+	jobs.writeFile = func(string, []byte, os.FileMode) error { return injected }
+	manager := newTestManager(t, "darwin")
+	manager.RuntimeDir = root
+	if err := jobs.resumeCommittedSyncWorkflow(context.Background(), manager, journal, stage); !errors.Is(err, injected) {
+		t.Fatalf("terminal snapshot error=%v", err)
+	}
+	if _, err := journal.Load(stage.StageID); err != nil {
+		t.Fatalf("checkpoint removed before terminal snapshot became durable: %v", err)
+	}
+	if job, _ := jobs.Get(stage.JobID); job.Status != JobStatusInterrupted {
+		t.Fatalf("failed terminal persistence left unrecoverable in-memory status: %+v", job)
+	}
+
+	jobs.writeFile = durableAtomicWriteFile
+	if err := jobs.resumeCommittedSyncWorkflow(context.Background(), manager, journal, stage); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.Load(stage.StageID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("checkpoint retained after terminal snapshot became durable: %v", err)
+	}
+	if job, _ := jobs.Get(stage.JobID); job.Status != JobStatusSucceeded {
+		t.Fatalf("terminal retry did not complete job: %+v", job)
 	}
 }
 

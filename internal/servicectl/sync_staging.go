@@ -67,16 +67,29 @@ type SyncStageState struct {
 // It contains only the request controls needed to continue with the next
 // collection; source bodies remain confined to Payload.
 type SyncStageWorkflow struct {
-	Collections           []string       `json:"collections,omitempty"`
-	Current               int            `json:"current,omitempty"`
-	ProviderMode          string         `json:"provider_mode,omitempty"`
-	RequestIdempotencyKey string         `json:"request_idempotency_key,omitempty"`
-	MaxPages              int            `json:"max_pages,omitempty"`
-	MaxRecords            int            `json:"max_records,omitempty"`
-	PerPage               int            `json:"per_page,omitempty"`
-	Page                  int            `json:"page,omitempty"`
-	Lane                  string         `json:"lane,omitempty"`
-	CollectionPages       map[string]int `json:"collection_pages,omitempty"`
+	Collections           []string                  `json:"collections,omitempty"`
+	Current               int                       `json:"current,omitempty"`
+	ProviderMode          string                    `json:"provider_mode,omitempty"`
+	RequestIdempotencyKey string                    `json:"request_idempotency_key,omitempty"`
+	MaxPages              int                       `json:"max_pages,omitempty"`
+	MaxRecords            int                       `json:"max_records,omitempty"`
+	PerPage               int                       `json:"per_page,omitempty"`
+	Page                  int                       `json:"page,omitempty"`
+	Lane                  string                    `json:"lane,omitempty"`
+	CollectionPages       map[string]int            `json:"collection_pages,omitempty"`
+	Outcome               *SyncStageWorkflowOutcome `json:"outcome,omitempty"`
+}
+
+// SyncStageWorkflowOutcome is the compact, content-free outcome of the
+// committed workflow prefix ending at Current. It lets restart recovery keep
+// the same terminal status and counters as uninterrupted execution without
+// exposing or duplicating source documents.
+type SyncStageWorkflowOutcome struct {
+	RecordsListed   int    `json:"records_listed,omitempty"`
+	SuccessCount    int    `json:"success_count,omitempty"`
+	FailureCount    int    `json:"failure_count,omitempty"`
+	ErrorClass      string `json:"error_class,omitempty"`
+	ErrorCollection string `json:"error_collection,omitempty"`
 }
 
 func (w *SyncStageWorkflow) hasRemaining() bool {
@@ -284,12 +297,10 @@ func (j *SyncStageJournal) aggregateUsage() (bytes int64, records, stages int, e
 		return 0, 0, 0, err
 	}
 	for _, envelope := range envelopes {
-		// Committed payloads are deleted immediately by GC and have an atomic
-		// SQLite receipt. Rejected/cancelled payloads remain diagnostic evidence,
-		// so they must continue consuming every aggregate quota until expiry.
-		if envelope.State.Phase == SyncStageCommitted {
-			continue
-		}
+		// GC removes ordinary committed payloads before this calculation. A
+		// committed envelope still present here is a deliberately retained
+		// workflow checkpoint and must consume every aggregate quota until its
+		// terminal job snapshot is durable or the checkpoint expires.
 		bytes += envelope.ByteCount
 		records += envelope.RecordCount
 		stages++
@@ -530,6 +541,38 @@ func validSyncStageWorkflow(workflow *SyncStageWorkflow, collection string) bool
 			return false
 		}
 		seen[candidate] = true
+	}
+	if outcome := workflow.Outcome; outcome != nil {
+		if outcome.RecordsListed < 0 || outcome.SuccessCount < 0 || outcome.FailureCount < 0 {
+			return false
+		}
+		if !validSyncWorkflowErrorClass(outcome.ErrorClass) || !validSyncWorkflowErrorCollection(outcome.ErrorCollection) {
+			return false
+		}
+	}
+	return true
+}
+
+func validSyncWorkflowErrorCollection(value string) bool {
+	switch value {
+	case "", "issue", "issue_comment", "wiki", "pull_request", "pr_comment":
+		return true
+	default:
+		return false
+	}
+}
+
+func validSyncWorkflowErrorClass(value string) bool {
+	if value == "" {
+		return true
+	}
+	if len(value) > 64 {
+		return false
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' && r != '-' {
+			return false
+		}
 	}
 	return true
 }

@@ -259,6 +259,35 @@ func TestSyncStageRetainedTerminalEvidenceConsumesAggregateBudget(t *testing.T) 
 	}
 }
 
+func TestSyncStageRetainedCommittedWorkflowCheckpointConsumesAggregateBudget(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	envelope := testSyncStageEnvelope()
+	envelope.Workflow = &SyncStageWorkflow{Collections: []string{"issues", "wiki"}, Current: 0, ProviderMode: "fixture"}
+	journal := NewSyncStageJournal(t.TempDir(), SyncStageLimits{
+		MaxAge: time.Hour, MaxStages: 1,
+		MaxTotalBytes: int64(len(envelope.Payload)) + 1, MaxTotalRecords: envelope.RecordCount,
+	})
+	journal.now = func() time.Time { return now }
+	first, err := journal.Create(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := first.State
+	state.Phase, state.CommittedAt = SyncStageCommitted, now
+	if _, err := journal.UpdateState(first.StageID, state); err != nil {
+		t.Fatal(err)
+	}
+	second := testSyncStageEnvelope()
+	second.JobID, second.IdempotencyKey = "job-2", "retained-committed-budget"
+	if _, err := journal.Create(second); !errors.Is(err, ErrSyncStageBound) {
+		t.Fatalf("retained committed workflow checkpoint bypassed aggregate budget: %v", err)
+	}
+	journal.now = func() time.Time { return now.Add(2 * time.Hour) }
+	if _, err := journal.Create(second); err != nil {
+		t.Fatalf("expired workflow checkpoint did not release aggregate budget: %v", err)
+	}
+}
+
 func TestSyncStageStateRetryMutationPreservesChecksumAndPayload(t *testing.T) {
 	journal := NewSyncStageJournal(t.TempDir(), SyncStageLimits{})
 	created, err := journal.Create(testSyncStageEnvelope())

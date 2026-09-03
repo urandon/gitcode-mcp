@@ -96,7 +96,10 @@ collection workflow with every stage. The newest committed stage remains the
 restart checkpoint until the next collection is durably staged or the terminal
 job snapshot is saved. Recovery selects the furthest staged collection, treats
 a receipt as proof for that collection only, and continues the remaining
-suffix without refetching any committed prefix. Each selected collection still
+suffix without refetching any committed prefix. Every workflow checkpoint also
+stores a content-free aggregate outcome (counts plus sanitized failure class
+and collection), so a partially fetched but successfully committed prefix
+cannot become a false success after restart. Each selected collection still
 receives its own cursor; already-fresh collections are omitted instead of being
 replayed because another collection needs work.
 Comment fan-out is checked as produced records and serialized bytes before it
@@ -104,11 +107,13 @@ can accumulate across parents.
 Per-stage limits are enforced together with a 64 MiB/50,000-record/256-stage
 aggregate runtime budget. Committed predecessor stages leave capacity after a
 successor is durable; the one newest workflow checkpoint is removed when the
-job becomes terminal and otherwise expires at the stage age limit.
-cancelled/rejected evidence continues consuming all aggregate quotas until its
-retention expires. Issues, issue comments, wiki, pull requests, and pull request
-comments all use this daemon protocol. Foreground sync retains its synchronous
-compatibility behavior.
+job becomes terminal and otherwise expires at the stage age limit. That retained
+committed checkpoint, like cancelled/rejected evidence, continues consuming all
+aggregate quotas while it exists. Checkpoint deletion is ordered after a
+successful durable terminal `jobs.json` write; a snapshot write failure leaves
+the checkpoint recoverable. Issues, issue comments, wiki, pull requests, and
+pull request comments all use this daemon protocol. Foreground sync retains its
+synchronous compatibility behavior.
 
 Each SQLite publication transaction includes normalized graphs, collection and
 maintenance frontier/checkpoint updates, and a checksum-bound sync commit
