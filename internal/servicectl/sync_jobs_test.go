@@ -13,6 +13,7 @@ import (
 
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/service"
 )
 
@@ -581,7 +582,11 @@ func TestDaemonRestartContinuesMixedWorkflowAfterCommittedCollection(t *testing.
 			}
 			identity, _ := store.CacheIdentity(ctx)
 			schema, _ := store.SchemaVersion(ctx)
-			svc := service.New(store)
+			lockPath := filepath.Join(root, "sync.lock")
+			svc, err := service.NewWithMode(store, gitcode.ProviderModeFixture, "", service.ServiceConfig{LockPath: lockPath})
+			if err != nil {
+				t.Fatal(err)
+			}
 			request := StartSyncJobRequest{RepoID: binding.RepoID, CachePath: cachePath, CacheUUID: identity.UUID, RegistrationID: maintenanceRegistrationID(identity.UUID, binding.RepoID), ProviderMode: "fixture", Issues: true, Wiki: true, IdempotencyKey: "mixed-recovery", MaxPages: 1, PerPage: 100}
 			batch, err := svc.FetchIssueSyncBatch(ctx, service.BulkSyncRequest{RepoID: binding.RepoID, IdempotencyKey: request.IdempotencyKey, Bounds: &service.SyncBounds{MaxPages: 1}, PerPage: 100})
 			if err != nil {
@@ -636,6 +641,7 @@ func TestDaemonRestartContinuesMixedWorkflowAfterCommittedCollection(t *testing.
 			manager := newTestManager(t, "darwin")
 			manager.RuntimeDir = root
 			cfg := config.Default()
+			cfg.LockPath = lockPath
 			manager.EffectiveConfig = &cfg
 			if err := restarted.RecoverSyncStages(ctx, manager); err != nil {
 				t.Fatal(err)
