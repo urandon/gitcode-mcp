@@ -674,7 +674,13 @@ func TestDaemonRestartContinuesMixedWorkflowAfterCommittedCollection(t *testing.
 			if _, err := store.GetSourceScoped(ctx, binding.RepoID, "WIKI-HOME"); err != nil {
 				t.Fatalf("remaining wiki collection was not committed: %v", err)
 			}
-			if stages, err := journal.List(); err != nil || len(stages) != 0 {
+			cleanupDeadline := time.Now().Add(5 * time.Second)
+			stages, err := journal.List()
+			for err == nil && len(stages) != 0 && time.Now().Before(cleanupDeadline) {
+				time.Sleep(20 * time.Millisecond)
+				stages, err = journal.List()
+			}
+			if err != nil || len(stages) != 0 {
 				t.Fatalf("completed workflow retained stages=%+v err=%v", stages, err)
 			}
 		})
