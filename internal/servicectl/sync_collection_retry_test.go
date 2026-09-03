@@ -129,3 +129,60 @@ func TestCloneJobDeepCopiesSyncCollections(t *testing.T) {
 		t.Fatalf("clone shared sync collection backing storage: %+v", original.SyncCollections)
 	}
 }
+
+func TestRunSyncCollectionWithRetryIsolatedAndBounded(t *testing.T) {
+	clock := time.Unix(1_700_000_000, 0).UTC()
+	attempts := 0
+	observed := []SyncCollectionView{}
+	waits := []time.Duration{}
+	result, collection, err := runSyncCollectionWithRetry(
+		context.Background(), "cache-a", "owner/repo", "issues", "page:1", 4,
+		func() (*service.SyncResourcesResult, syncCollectionResult, error) {
+			attempts++
+			if attempts == 1 {
+				err := gitcode.ErrNetworkUnavailable{Status: 503}
+				return nil, syncCollectionResult{RemoteType: "issue", Err: err}, err
+			}
+			result := &service.SyncResourcesResult{RecordsListed: 2, SuccessCount: 2}
+			return result, syncCollectionResult{RemoteType: "issue", Result: result}, nil
+		},
+		func(view SyncCollectionView) { observed = append(observed, view) },
+		func(_ context.Context, delay time.Duration) error {
+			waits = append(waits, delay)
+			clock = clock.Add(delay)
+			return nil
+		},
+		func() time.Time { return clock },
+	)
+	if err != nil || result == nil || result.SuccessCount != 2 || collection.Err != nil {
+		t.Fatalf("result=%+v collection=%+v err=%v", result, collection, err)
+	}
+	if attempts != 2 || len(waits) != 1 || len(observed) != 2 {
+		t.Fatalf("attempts=%d waits=%v observed=%+v", attempts, waits, observed)
+	}
+	if observed[0].Outcome != SyncCollectionRetryScheduled || observed[0].RetryAfter == nil || observed[0].ErrorClass != "network_unavailable" {
+		t.Fatalf("retry observation=%+v", observed[0])
+	}
+	if observed[1].Outcome != SyncCollectionSuccess || observed[1].LastSuccessAt == nil || observed[1].Attempt != 2 {
+		t.Fatalf("success observation=%+v", observed[1])
+	}
+}
+
+func TestRunSyncCollectionWithRetryDoesNotRetryPermanentFailure(t *testing.T) {
+	attempts := 0
+	_, _, err := runSyncCollectionWithRetry(
+		context.Background(), "cache-a", "owner/repo", "wiki", "page:1", 4,
+		func() (*service.SyncResourcesResult, syncCollectionResult, error) {
+			attempts++
+			err := gitcode.ErrPartialResponse{Message: "wiki file metadata requires path and sha"}
+			return nil, syncCollectionResult{RemoteType: "wiki", Err: err}, err
+		}, nil,
+		func(context.Context, time.Duration) error {
+			t.Fatal("permanent failure must not wait for a retry")
+			return nil
+		}, nil,
+	)
+	if err == nil || attempts != 1 {
+		t.Fatalf("err=%v attempts=%d", err, attempts)
+	}
+}

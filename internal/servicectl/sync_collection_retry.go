@@ -89,6 +89,107 @@ type syncCollectionFailurePolicy struct {
 	RetryAfter time.Duration
 }
 
+type syncCollectionAttempt func() (*service.SyncResourcesResult, syncCollectionResult, error)
+type syncCollectionObserver func(SyncCollectionView)
+type syncCollectionWait func(context.Context, time.Duration) error
+
+func runSyncCollectionWithRetry(
+	ctx context.Context,
+	cacheUUID, repoID, collection, privateFrontier string,
+	budget int,
+	attempt syncCollectionAttempt,
+	observe syncCollectionObserver,
+	wait syncCollectionWait,
+	now func() time.Time,
+) (*service.SyncResourcesResult, syncCollectionResult, error) {
+	if budget <= 0 {
+		budget = defaultSyncCollectionRetryBudget
+	}
+	if now == nil {
+		now = func() time.Time { return time.Now().UTC() }
+	}
+	if wait == nil {
+		wait = waitForSyncCollectionRetry
+	}
+	frontierRef := publicSyncFrontierRef(cacheUUID, repoID, collection, privateFrontier)
+	for number := 1; number <= budget; number++ {
+		result, collectionResult, err := attempt()
+		view := syncCollectionViewForAttempt(collection, frontierRef, number, budget, result, err, now())
+		if err == nil {
+			if observe != nil {
+				observe(view)
+			}
+			return result, collectionResult, nil
+		}
+		policy := classifySyncCollectionFailure(err)
+		if policy.Transient && number < budget && ctx.Err() == nil {
+			delay := syncCollectionRetryDelay(cacheUUID, repoID, collection, frontierRef, number, policy.RetryAfter)
+			retryAt := now().Add(delay)
+			view.Outcome = SyncCollectionRetryScheduled
+			view.RetryAfter = &retryAt
+			if observe != nil {
+				observe(view)
+			}
+			if waitErr := wait(ctx, delay); waitErr != nil {
+				cancelled := syncCollectionViewForAttempt(collection, frontierRef, number, budget, result, waitErr, now())
+				if observe != nil {
+					observe(cancelled)
+				}
+				collectionResult.Err = waitErr
+				return result, collectionResult, waitErr
+			}
+			continue
+		}
+		if observe != nil {
+			observe(view)
+		}
+		return result, collectionResult, err
+	}
+	panic("unreachable sync collection retry loop")
+}
+
+func syncCollectionViewForAttempt(collection, frontierRef string, attempt, budget int, result *service.SyncResourcesResult, err error, now time.Time) SyncCollectionView {
+	view := SyncCollectionView{
+		Collection: collection, FrontierRef: frontierRef, Attempt: attempt, RetryBudget: budget, UpdatedAt: now.UTC(),
+	}
+	if result != nil {
+		view.RecordsListed = result.RecordsListed
+		view.Committed = result.SuccessCount
+		view.Failed = result.FailureCount
+	}
+	if err == nil {
+		view.Outcome = SyncCollectionSuccess
+		if result == nil || result.RecordsListed == 0 {
+			view.Outcome = SyncCollectionNoChange
+		}
+		succeededAt := now.UTC()
+		view.LastSuccessAt = &succeededAt
+		return view
+	}
+	policy := classifySyncCollectionFailure(err)
+	view.ErrorClass = policy.ErrorClass
+	switch {
+	case errors.Is(err, context.Canceled):
+		view.Outcome = SyncCollectionCancelled
+	case result != nil && result.SuccessCount > 0:
+		view.Outcome = SyncCollectionPartial
+	default:
+		view.Outcome = SyncCollectionPermanentFailure
+	}
+	return view
+}
+
+func waitForSyncCollectionRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(max(delay, 0))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 // classifySyncCollectionFailure is deliberately allow-list based. Unknown,
 // authentication, permission, query, schema, and validation errors must not be
 // hidden behind a network retry loop.

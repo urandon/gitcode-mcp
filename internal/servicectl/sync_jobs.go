@@ -176,11 +176,20 @@ func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID stri
 	}
 	if err != nil {
 		status := JobStatusFailed
+		health := SyncHealthFailed
+		if current, ok := m.Get(jobID); ok {
+			health = aggregateSyncCollectionOutcome(current.SyncCollections)
+			if health == SyncHealthPartial {
+				status = JobStatusSucceeded
+			}
+		}
 		if errors.Is(ctx.Err(), context.Canceled) {
 			status = JobStatusCancelled
+			health = SyncHealthCancelled
 		}
 		persistErr := m.updateJobPersisted(jobID, func(job *Job, now time.Time) {
 			job.Status = status
+			job.SyncHealth = health
 			job.UpdatedAt = now
 			job.FinishedAt = &now
 			job.ErrorClass = maintenanceJobErrorClass(err, "sync_failed")
@@ -189,7 +198,11 @@ func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID stri
 			}
 			job.Error = publicMaintenanceJobError(SyncJobType, job.ErrorClass)
 			job.Progress = append(job.Progress, failedSyncCollectionProgress(collections)...)
-			job.Progress = append(job.Progress, service.ProgressEvent{Type: status, Phase: status, Collection: SyncJobType, RecordsListed: result.RecordsListed, RecordsFetched: result.SuccessCount, RecordsFailed: result.FailureCount, Message: job.Error})
+			message := job.Error
+			if status == JobStatusSucceeded {
+				message = "sync job finished with usable partial results"
+			}
+			job.Progress = append(job.Progress, service.ProgressEvent{Type: status, Phase: status, Collection: SyncJobType, RecordsListed: result.RecordsListed, RecordsFetched: result.SuccessCount, RecordsFailed: result.FailureCount, Message: message})
 			delete(m.cancel, jobID)
 		})
 		if persistErr == nil {
@@ -199,6 +212,7 @@ func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID stri
 	}
 	persistErr := m.updateJobPersisted(jobID, func(job *Job, now time.Time) {
 		job.Status = JobStatusSucceeded
+		job.SyncHealth = aggregateSyncCollectionOutcome(job.SyncCollections)
 		job.UpdatedAt = now
 		job.FinishedAt = &now
 		if result.RecordsListed > 0 {
@@ -297,7 +311,16 @@ func (m *JobManager) runDurableSync(ctx context.Context, manager Manager, jobID 
 	for offset, work := range works {
 		workReq := durableCollectionJobRequest(req, work.remoteType)
 		workflow := syncStageWorkflowFromRequest(req, workflowCollections, req.workflowStart+offset)
-		result, collection, collectionErr := m.runDurableCollection(ctx, manager, jobID, workReq, schema, bindingFingerprint, work, workflow)
+		privateFrontier := fmt.Sprintf("%s:%d", work.remoteType, workReq.Page)
+		result, collection, collectionErr := runSyncCollectionWithRetry(
+			ctx, req.CacheUUID, req.RepoID, work.collection, privateFrontier, defaultSyncCollectionRetryBudget,
+			func() (*service.SyncResourcesResult, syncCollectionResult, error) {
+				return m.runDurableCollection(ctx, manager, jobID, workReq, schema, bindingFingerprint, work, workflow)
+			},
+			func(view SyncCollectionView) { m.observeSyncCollection(jobID, view) },
+			nil,
+			nil,
+		)
 		mergeSyncResources(aggregate, result)
 		collections = append(collections, collection)
 		syncErr = mergeSyncError(syncErr, result, collectionErr)
@@ -307,6 +330,39 @@ func (m *JobManager) runDurableSync(ctx context.Context, manager Manager, jobID 
 		}
 	}
 	return aggregate, collections, syncErr
+}
+
+func (m *JobManager) observeSyncCollection(jobID string, view SyncCollectionView) {
+	m.updateJob(jobID, func(job *Job, now time.Time) {
+		replaced := false
+		for i := range job.SyncCollections {
+			if job.SyncCollections[i].Collection == view.Collection {
+				job.SyncCollections[i] = view
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			job.SyncCollections = append(job.SyncCollections, view)
+		}
+		job.SyncHealth = aggregateSyncCollectionOutcome(job.SyncCollections)
+		job.UpdatedAt = now
+		if view.Outcome == SyncCollectionRetryScheduled {
+			job.Progress = append(job.Progress, service.ProgressEvent{
+				Type: "retry_scheduled", Phase: JobStatusRunning, Collection: view.Collection,
+				RecordsListed: view.RecordsListed, RecordsFetched: view.Committed, RecordsFailed: view.Failed,
+				RetryAfter: formatOptionalTimePointer(view.RetryAfter), Attempt: view.Attempt,
+				Message: "collection retry scheduled",
+			})
+		}
+	})
+}
+
+func formatOptionalTimePointer(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339)
 }
 
 func syncStageWorkflowFromRequest(req StartSyncJobRequest, collections []string, current int) *SyncStageWorkflow {
