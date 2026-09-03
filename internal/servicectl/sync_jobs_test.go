@@ -332,6 +332,7 @@ func TestIssueOnlyDaemonSyncWaitsForWriterAndCommitsRetainedStage(t *testing.T) 
 	ctx := context.Background()
 	root := t.TempDir()
 	cachePath := filepath.Join(root, "cache.db")
+	lockPath := cachePath + ".lock"
 	store, err := cache.NewSQLiteStore(ctx, cachePath)
 	if err != nil {
 		t.Fatal(err)
@@ -343,13 +344,14 @@ func TestIssueOnlyDaemonSyncWaitsForWriterAndCommitsRetainedStage(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	held, err := store.AcquireWriter(ctx, cache.WriterRequest{Operation: "rag-index", RepoID: "owner/repo", LockPath: cachePath + ".lock"})
+	held, err := store.AcquireWriter(ctx, cache.WriterRequest{Operation: "rag-index", RepoID: "owner/repo", LockPath: lockPath})
 	if err != nil {
 		t.Fatal(err)
 	}
 	manager := newTestManager(t, "darwin")
 	manager.RuntimeDir = root
 	cfg := config.Default()
+	cfg.LockPath = lockPath
 	manager.EffectiveConfig = &cfg
 	jobs := NewJobManager(filepath.Join(root, "jobs.json"))
 	job, err := jobs.StartSync(ctx, manager, StartSyncJobRequest{RepoID: "owner/repo", CachePath: cachePath, CacheUUID: identity.UUID, Issues: true, ProviderMode: "fixture", MaxPages: 1, PerPage: 100})
@@ -396,6 +398,7 @@ func TestDaemonRestartRecoversStagedBatchWithoutProvider(t *testing.T) {
 	defer cancel()
 	root := t.TempDir()
 	cachePath := filepath.Join(root, "cache.db")
+	lockPath := cachePath + ".lock"
 	store, err := cache.NewSQLiteStore(ctx, cachePath)
 	if err != nil {
 		t.Fatal(err)
@@ -440,7 +443,7 @@ func TestDaemonRestartRecoversStagedBatchWithoutProvider(t *testing.T) {
 	if err := before.saveLocked(); err != nil {
 		t.Fatal(err)
 	}
-	held, err := store.AcquireWriter(ctx, cache.WriterRequest{Operation: "rag-index", RepoID: "owner/repo", LockPath: cachePath + ".lock"})
+	held, err := store.AcquireWriter(ctx, cache.WriterRequest{Operation: "rag-index", RepoID: "owner/repo", LockPath: lockPath})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,6 +454,7 @@ func TestDaemonRestartRecoversStagedBatchWithoutProvider(t *testing.T) {
 	manager := newTestManager(t, "darwin")
 	manager.RuntimeDir = root
 	cfg := config.Default()
+	cfg.LockPath = lockPath
 	manager.EffectiveConfig = &cfg
 	if err := restarted.RecoverSyncStages(ctx, manager); err != nil {
 		t.Fatal(err)
@@ -489,6 +493,7 @@ func TestDaemonRestartUsesAtomicReceiptWhenJournalMissedCommitTerminal(t *testin
 	ctx := context.Background()
 	root := t.TempDir()
 	cachePath := filepath.Join(root, "cache.db")
+	lockPath := cachePath + ".lock"
 	store, err := cache.NewSQLiteStore(ctx, cachePath)
 	if err != nil {
 		t.Fatal(err)
@@ -500,7 +505,10 @@ func TestDaemonRestartUsesAtomicReceiptWhenJournalMissedCommitTerminal(t *testin
 	}
 	identity, _ := store.CacheIdentity(ctx)
 	schema, _ := store.SchemaVersion(ctx)
-	svc := service.New(store)
+	svc, err := service.NewWithMode(store, gitcode.ProviderModeFixture, "", service.ServiceConfig{LockPath: lockPath})
+	if err != nil {
+		t.Fatal(err)
+	}
 	batch, err := svc.FetchIssueSyncBatch(ctx, service.BulkSyncRequest{RepoID: binding.RepoID, IdempotencyKey: "receipt-recovery", Bounds: &service.SyncBounds{MaxPages: 1, MaxRecords: 100}, PerPage: 100})
 	if err != nil {
 		t.Fatal(err)
@@ -542,6 +550,7 @@ func TestDaemonRestartUsesAtomicReceiptWhenJournalMissedCommitTerminal(t *testin
 	manager := newTestManager(t, "darwin")
 	manager.RuntimeDir = root
 	cfg := config.Default()
+	cfg.LockPath = lockPath
 	manager.EffectiveConfig = &cfg
 	if err := restarted.RecoverSyncStages(ctx, manager); err != nil {
 		t.Fatal(err)
@@ -582,7 +591,7 @@ func TestDaemonRestartContinuesMixedWorkflowAfterCommittedCollection(t *testing.
 			}
 			identity, _ := store.CacheIdentity(ctx)
 			schema, _ := store.SchemaVersion(ctx)
-			lockPath := filepath.Join(root, "sync.lock")
+			lockPath := cachePath + ".lock"
 			svc, err := service.NewWithMode(store, gitcode.ProviderModeFixture, "", service.ServiceConfig{LockPath: lockPath})
 			if err != nil {
 				t.Fatal(err)
