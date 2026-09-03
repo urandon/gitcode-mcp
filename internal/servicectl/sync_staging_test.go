@@ -191,6 +191,52 @@ func TestSyncStageCreateRunsTerminalGCBeforeCapacityCheck(t *testing.T) {
 	}
 }
 
+func TestSyncStageJournalKeepsOnlyLatestWorkflowCheckpointUntilTerminalSnapshot(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	journal := NewSyncStageJournal(t.TempDir(), SyncStageLimits{MaxAge: time.Hour})
+	journal.now = func() time.Time { return now }
+	firstEnvelope := testSyncStageEnvelope()
+	firstEnvelope.Workflow = &SyncStageWorkflow{Collections: []string{"issues", "wiki"}, Current: 0, ProviderMode: "fixture"}
+	first, err := journal.Create(firstEnvelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstState := first.State
+	firstState.Phase, firstState.CommittedAt = SyncStageCommitted, now
+	if first, err = journal.UpdateState(first.StageID, firstState); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := journal.GC(); err != nil || removed != 0 {
+		t.Fatalf("latest committed workflow checkpoint removed=%d err=%v", removed, err)
+	}
+
+	secondEnvelope := testSyncStageEnvelope()
+	secondEnvelope.Collection = "wiki"
+	secondEnvelope.IdempotencyKey = "sync-wiki"
+	secondEnvelope.Workflow = &SyncStageWorkflow{Collections: []string{"issues", "wiki"}, Current: 1, ProviderMode: "fixture"}
+	second, err := journal.Create(secondEnvelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := journal.GC(); err != nil || removed != 1 {
+		t.Fatalf("committed predecessor GC removed=%d err=%v", removed, err)
+	}
+	if _, err := journal.Load(first.StageID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("committed predecessor retained after successor became durable: %v", err)
+	}
+	secondState := second.State
+	secondState.Phase, secondState.CommittedAt = SyncStageCommitted, now
+	if _, err := journal.UpdateState(second.StageID, secondState); err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.RemoveJobStages(second.JobID); err != nil {
+		t.Fatal(err)
+	}
+	if stages, err := journal.List(); err != nil || len(stages) != 0 {
+		t.Fatalf("terminal workflow snapshot cleanup stages=%+v err=%v", stages, err)
+	}
+}
+
 func TestSyncStageRetainedTerminalEvidenceConsumesAggregateBudget(t *testing.T) {
 	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	journal := NewSyncStageJournal(t.TempDir(), SyncStageLimits{MaxAge: time.Hour, MaxStages: 1})

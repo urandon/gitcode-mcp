@@ -63,6 +63,26 @@ type SyncStageState struct {
 	UpdatedAt      time.Time      `json:"updated_at"`
 }
 
+// SyncStageWorkflow is private restart state for a multi-collection sync job.
+// It contains only the request controls needed to continue with the next
+// collection; source bodies remain confined to Payload.
+type SyncStageWorkflow struct {
+	Collections           []string       `json:"collections,omitempty"`
+	Current               int            `json:"current,omitempty"`
+	ProviderMode          string         `json:"provider_mode,omitempty"`
+	RequestIdempotencyKey string         `json:"request_idempotency_key,omitempty"`
+	MaxPages              int            `json:"max_pages,omitempty"`
+	MaxRecords            int            `json:"max_records,omitempty"`
+	PerPage               int            `json:"per_page,omitempty"`
+	Page                  int            `json:"page,omitempty"`
+	Lane                  string         `json:"lane,omitempty"`
+	CollectionPages       map[string]int `json:"collection_pages,omitempty"`
+}
+
+func (w *SyncStageWorkflow) hasRemaining() bool {
+	return w != nil && w.Current >= 0 && w.Current+1 < len(w.Collections)
+}
+
 // SyncStageEnvelope is private daemon state. Payload may contain source bodies
 // and must never be projected through IPC, Admin, logs, or CLI diagnostics.
 type SyncStageEnvelope struct {
@@ -85,6 +105,7 @@ type SyncStageEnvelope struct {
 	ByteCount           int64                      `json:"byte_count"`
 	Payload             json.RawMessage            `json:"payload"`
 	MaintenanceFrontier *cache.MaintenanceFrontier `json:"maintenance_frontier,omitempty"`
+	Workflow            *SyncStageWorkflow         `json:"workflow,omitempty"`
 	Checksum            string                     `json:"checksum"`
 	State               SyncStageState             `json:"state"`
 }
@@ -201,6 +222,9 @@ func (j *SyncStageJournal) Create(envelope SyncStageEnvelope) (SyncStageEnvelope
 	envelope.IdempotencyKey = strings.TrimSpace(envelope.IdempotencyKey)
 	if envelope.JobID == "" || envelope.CacheUUID == "" || envelope.CachePath == "" || envelope.RegistrationID == "" || envelope.RepoID == "" || envelope.BindingFingerprint == "" || envelope.Collection == "" || envelope.IdempotencyKey == "" || envelope.CacheSchema <= 0 {
 		return SyncStageEnvelope{}, fmt.Errorf("%w: incomplete stage identity", ErrSyncStageCorrupt)
+	}
+	if !validSyncStageWorkflow(envelope.Workflow, envelope.Collection) {
+		return SyncStageEnvelope{}, fmt.Errorf("%w: invalid workflow checkpoint", ErrSyncStageCorrupt)
 	}
 	if !json.Valid(envelope.Payload) {
 		return SyncStageEnvelope{}, fmt.Errorf("%w: payload is not valid json", ErrSyncStageCorrupt)
@@ -394,9 +418,24 @@ func (j *SyncStageJournal) GC() (int, error) {
 		return 0, err
 	}
 	now := j.now().UTC()
+	latestWorkflowIndex := map[string]int{}
+	for _, stage := range stages {
+		if stage.Workflow == nil {
+			continue
+		}
+		if current, ok := latestWorkflowIndex[stage.JobID]; !ok || stage.Workflow.Current > current {
+			latestWorkflowIndex[stage.JobID] = stage.Workflow.Current
+		}
+	}
 	removed := 0
 	for _, stage := range stages {
 		if !syncStageTerminal(stage.State.Phase) || stage.State.Phase != SyncStageCommitted && now.Before(stage.ExpiresAt) {
+			continue
+		}
+		// Keep the newest committed stage for each active workflow until the
+		// durable job snapshot is terminal. It is the restart checkpoint for
+		// the crash window before the next collection is staged.
+		if stage.State.Phase == SyncStageCommitted && stage.Workflow != nil && stage.Workflow.Current >= latestWorkflowIndex[stage.JobID] && now.Before(stage.ExpiresAt) {
 			continue
 		}
 		path, err := j.path(stage.StageID)
@@ -431,11 +470,38 @@ func (j *SyncStageJournal) GC() (int, error) {
 	return removed, nil
 }
 
+func (j *SyncStageJournal) RemoveJobStages(jobID string) error {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return nil
+	}
+	stages, _, err := j.ListForRecovery()
+	if err != nil {
+		return err
+	}
+	for _, stage := range stages {
+		if stage.JobID != jobID {
+			continue
+		}
+		path, pathErr := j.path(stage.StageID)
+		if pathErr != nil {
+			return pathErr
+		}
+		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return removeErr
+		}
+	}
+	return nil
+}
+
 func (j *SyncStageJournal) validate(envelope SyncStageEnvelope, expectedID string) error {
 	if envelope.Version != syncStageEnvelopeVersion || envelope.StageID != expectedID || !json.Valid(envelope.Payload) {
 		return ErrSyncStageCorrupt
 	}
 	if strings.TrimSpace(envelope.JobID) == "" || strings.TrimSpace(envelope.CacheUUID) == "" || strings.TrimSpace(envelope.CachePath) == "" || strings.TrimSpace(envelope.RegistrationID) == "" || strings.TrimSpace(envelope.RepoID) == "" || strings.TrimSpace(envelope.BindingFingerprint) == "" || strings.TrimSpace(envelope.Collection) == "" || strings.TrimSpace(envelope.IdempotencyKey) == "" || envelope.CacheSchema <= 0 {
+		return ErrSyncStageCorrupt
+	}
+	if !validSyncStageWorkflow(envelope.Workflow, envelope.Collection) {
 		return ErrSyncStageCorrupt
 	}
 	if envelope.ByteCount != int64(len(envelope.Payload)) {
@@ -449,6 +515,23 @@ func (j *SyncStageJournal) validate(envelope SyncStageEnvelope, expectedID strin
 		return ErrSyncStageCorrupt
 	}
 	return nil
+}
+
+func validSyncStageWorkflow(workflow *SyncStageWorkflow, collection string) bool {
+	if workflow == nil {
+		return true
+	}
+	if workflow.Current < 0 || workflow.Current >= len(workflow.Collections) || workflow.Collections[workflow.Current] != collection {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, candidate := range workflow.Collections {
+		if !supportedDurableSyncCollection(candidate) || seen[candidate] {
+			return false
+		}
+		seen[candidate] = true
+	}
+	return true
 }
 
 func (j *SyncStageJournal) persist(envelope SyncStageEnvelope) error {
@@ -501,12 +584,13 @@ func syncStageChecksum(envelope SyncStageEnvelope) string {
 		ByteCount           int64                      `json:"byte_count"`
 		Payload             json.RawMessage            `json:"payload"`
 		MaintenanceFrontier *cache.MaintenanceFrontier `json:"maintenance_frontier,omitempty"`
+		Workflow            *SyncStageWorkflow         `json:"workflow,omitempty"`
 	}{
 		envelope.Version, envelope.JobID, envelope.CacheUUID, envelope.CacheSchema, envelope.CachePath,
 		envelope.RegistrationID, envelope.RepoID, envelope.BindingFingerprint, envelope.Collection,
 		envelope.Checkpoint, envelope.ProviderRevision, envelope.IdempotencyKey,
 		envelope.CreatedAt.UTC(), envelope.ExpiresAt.UTC(), envelope.RecordCount,
-		envelope.ByteCount, envelope.Payload, envelope.MaintenanceFrontier,
+		envelope.ByteCount, envelope.Payload, envelope.MaintenanceFrontier, envelope.Workflow,
 	}
 	data, _ := json.Marshal(immutable)
 	sum := sha256.Sum256(data)
@@ -541,7 +625,13 @@ func sameSyncStageBatch(first, second SyncStageEnvelope) bool {
 		first.Collection == second.Collection && first.Checkpoint == second.Checkpoint &&
 		first.ProviderRevision == second.ProviderRevision && first.IdempotencyKey == second.IdempotencyKey &&
 		first.RecordCount == second.RecordCount && first.ByteCount == second.ByteCount &&
-		string(first.Payload) == string(second.Payload)
+		string(first.Payload) == string(second.Payload) && sameSyncStageWorkflow(first.Workflow, second.Workflow)
+}
+
+func sameSyncStageWorkflow(first, second *SyncStageWorkflow) bool {
+	left, _ := json.Marshal(first)
+	right, _ := json.Marshal(second)
+	return string(left) == string(right)
 }
 
 func syncStageTerminal(phase SyncStagePhase) bool {

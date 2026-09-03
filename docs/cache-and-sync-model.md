@@ -91,14 +91,20 @@ is committed and the maintenance frontier records an exact record offset. The
 next run resumes at that offset; only a single document that cannot fit by
 itself is terminally rejected.
 Maintenance keeps that wiki offset separate from issue, comment, and pull
-request provider-page checkpoints. A mixed/default sync may still process the
-collections in one job, but each selected collection receives its own cursor;
-already-fresh collections are omitted instead of being replayed because another
-collection needs work.
+request provider-page checkpoints. A mixed/default sync persists its ordered
+collection workflow with every stage. The newest committed stage remains the
+restart checkpoint until the next collection is durably staged or the terminal
+job snapshot is saved. Recovery selects the furthest staged collection, treats
+a receipt as proof for that collection only, and continues the remaining
+suffix without refetching any committed prefix. Each selected collection still
+receives its own cursor; already-fresh collections are omitted instead of being
+replayed because another collection needs work.
 Comment fan-out is checked as produced records and serialized bytes before it
 can accumulate across parents.
 Per-stage limits are enforced together with a 64 MiB/50,000-record/256-stage
-aggregate runtime budget. Committed stages leave capacity immediately;
+aggregate runtime budget. Committed predecessor stages leave capacity after a
+successor is durable; the one newest workflow checkpoint is removed when the
+job becomes terminal and otherwise expires at the stage age limit.
 cancelled/rejected evidence continues consuming all aggregate quotas until its
 retention expires. Issues, issue comments, wiki, pull requests, and pull request
 comments all use this daemon protocol. Foreground sync retains its synchronous

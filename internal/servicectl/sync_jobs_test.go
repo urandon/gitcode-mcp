@@ -494,6 +494,103 @@ func TestDaemonRestartUsesAtomicReceiptWhenJournalMissedCommitTerminal(t *testin
 	}
 }
 
+func TestDaemonRestartContinuesMixedWorkflowAfterCommittedCollection(t *testing.T) {
+	for _, terminalSidecar := range []bool{false, true} {
+		name := "receipt_only"
+		if terminalSidecar {
+			name = "terminal_sidecar"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			cachePath := filepath.Join(root, "cache.db")
+			store, err := cache.NewSQLiteStore(ctx, cachePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			binding := cache.RepositoryBinding{RepoID: "fixture-a", Owner: "fixture", Name: "a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki}}
+			if err := store.AddRepository(ctx, binding); err != nil {
+				t.Fatal(err)
+			}
+			identity, _ := store.CacheIdentity(ctx)
+			schema, _ := store.SchemaVersion(ctx)
+			svc := service.New(store)
+			request := StartSyncJobRequest{RepoID: binding.RepoID, CachePath: cachePath, CacheUUID: identity.UUID, RegistrationID: maintenanceRegistrationID(identity.UUID, binding.RepoID), ProviderMode: "fixture", Issues: true, Wiki: true, IdempotencyKey: "mixed-recovery", MaxPages: 1, PerPage: 100}
+			batch, err := svc.FetchIssueSyncBatch(ctx, service.BulkSyncRequest{RepoID: binding.RepoID, IdempotencyKey: request.IdempotencyKey, Bounds: &service.SyncBounds{MaxPages: 1}, PerPage: 100})
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err := json.Marshal(batch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			journal := NewSyncStageJournal(root, SyncStageLimits{})
+			stage, err := journal.Create(SyncStageEnvelope{
+				JobID: "job-000001", CacheUUID: identity.UUID, CacheSchema: schema, CachePath: cachePath,
+				RegistrationID: request.RegistrationID, RepoID: binding.RepoID, BindingFingerprint: syncRepositoryBindingFingerprint(binding),
+				Collection: "issues", IdempotencyKey: batch.IdempotencyKey, RecordCount: batch.RecordCount(), Payload: payload,
+				Workflow: syncStageWorkflowFromRequest(request, []string{"issues", "wiki"}, 0),
+				State:    SyncStageState{Phase: SyncStageCommitting, RetryBudget: defaultSyncCommitRetries, FetchedAt: batch.FetchedAt},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			batch.CommitReceipt = syncStageCommitReceipt(stage)
+			if _, err := svc.CommitIssueSyncBatch(ctx, batch, nil); err != nil {
+				t.Fatal(err)
+			}
+			if terminalSidecar {
+				state := stage.State
+				state.Phase, state.CommittedAt = SyncStageCommitted, time.Now().UTC()
+				stage, err = journal.UpdateState(stage.StageID, state)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			view := stage.PublicView()
+			jobsPath := filepath.Join(root, "jobs.json")
+			before := NewJobManager(jobsPath)
+			now := time.Now().UTC()
+			before.jobs[stage.JobID] = &Job{ID: stage.JobID, Type: SyncJobType, RepoID: binding.RepoID, CacheUUID: identity.UUID, RegistrationID: request.RegistrationID, Status: JobStatusRunning, CreatedAt: now, UpdatedAt: now, SyncStage: &view}
+			before.nextID = 1
+			if err := before.saveLocked(); err != nil {
+				t.Fatal(err)
+			}
+
+			restarted := NewJobManager(jobsPath)
+			if err := restarted.LoadAndMarkInterrupted(); err != nil {
+				t.Fatal(err)
+			}
+			manager := newTestManager(t, "darwin")
+			manager.RuntimeDir = root
+			cfg := config.Default()
+			manager.EffectiveConfig = &cfg
+			if err := restarted.RecoverSyncStages(ctx, manager); err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			var recovered Job
+			for time.Now().Before(deadline) {
+				recovered, _ = restarted.Get(stage.JobID)
+				if jobTerminalStatus(recovered.Status) {
+					break
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if recovered.Status != JobStatusSucceeded || recovered.SyncStage == nil || recovered.SyncStage.Collection != "wiki" || recovered.SyncStage.Phase != SyncStageCommitted {
+				t.Fatalf("mixed recovery stopped after first collection: %+v", recovered)
+			}
+			if _, err := store.GetSourceScoped(ctx, binding.RepoID, "WIKI-HOME"); err != nil {
+				t.Fatalf("remaining wiki collection was not committed: %v", err)
+			}
+			if stages, err := journal.List(); err != nil || len(stages) != 0 {
+				t.Fatalf("completed workflow retained stages=%+v err=%v", stages, err)
+			}
+		})
+	}
+}
+
 func TestRecoveredStageRejectsMissingCacheBeforeWritableOpen(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
