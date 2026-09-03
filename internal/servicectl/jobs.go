@@ -52,6 +52,7 @@ type Job struct {
 	Error                        string                  `json:"error,omitempty"`
 	ErrorClass                   string                  `json:"error_class,omitempty"`
 	SyncStage                    *SyncStageView          `json:"sync_stage,omitempty"`
+	SyncCollections              []SyncCollectionView    `json:"sync_collections,omitempty"`
 	Progress                     []service.ProgressEvent `json:"progress,omitempty"`
 }
 

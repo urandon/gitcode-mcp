@@ -59,3 +59,26 @@ func TestSyncCollectionRetryDelayIsDeterministicBoundedAndHonorsRetryAfter(t *te
 		t.Fatalf("Retry-After was not honored: %s", got)
 	}
 }
+
+func TestAggregateSyncCollectionOutcomePreservesUsableProgress(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []SyncCollectionView
+		want string
+	}{
+		{name: "success", in: []SyncCollectionView{{Outcome: SyncCollectionSuccess}}, want: JobStatusSucceeded},
+		{name: "no_change", in: []SyncCollectionView{{Outcome: SyncCollectionNoChange}}, want: JobStatusSucceeded},
+		{name: "retrying", in: []SyncCollectionView{{Outcome: SyncCollectionSuccess, Committed: 2}, {Outcome: SyncCollectionRetryScheduled}}, want: "partial/retrying"},
+		{name: "usable_partial", in: []SyncCollectionView{{Outcome: SyncCollectionSuccess, Committed: 2}, {Outcome: SyncCollectionPermanentFailure}}, want: "partial"},
+		{name: "partial_batch", in: []SyncCollectionView{{Outcome: SyncCollectionPartial, Committed: 2}}, want: "partial"},
+		{name: "total_failure", in: []SyncCollectionView{{Outcome: SyncCollectionPermanentFailure}}, want: JobStatusFailed},
+		{name: "cancelled", in: []SyncCollectionView{{Outcome: SyncCollectionCancelled}}, want: JobStatusCancelled},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := aggregateSyncCollectionOutcome(tc.in); got != tc.want {
+				t.Fatalf("aggregate=%q want=%q", got, tc.want)
+			}
+		})
+	}
+}

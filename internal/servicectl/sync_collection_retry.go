@@ -18,6 +18,62 @@ const (
 	maxSyncCollectionRetryDelay      = time.Minute
 )
 
+type SyncCollectionOutcome string
+
+const (
+	SyncCollectionSuccess          SyncCollectionOutcome = "success"
+	SyncCollectionNoChange         SyncCollectionOutcome = "no_change"
+	SyncCollectionPartial          SyncCollectionOutcome = "partial"
+	SyncCollectionRetryScheduled   SyncCollectionOutcome = "retry_scheduled"
+	SyncCollectionPermanentFailure SyncCollectionOutcome = "permanent_failure"
+	SyncCollectionCancelled        SyncCollectionOutcome = "cancelled"
+)
+
+// SyncCollectionView is the public, content-free health contract for one
+// remote collection. FrontierRef is an opaque fingerprint, never a provider
+// URL, cursor, local path, or source payload.
+type SyncCollectionView struct {
+	Collection    string                `json:"collection"`
+	Outcome       SyncCollectionOutcome `json:"outcome"`
+	FrontierRef   string                `json:"frontier_ref,omitempty"`
+	RecordsListed int                   `json:"records_listed,omitempty"`
+	Committed     int                   `json:"committed,omitempty"`
+	Failed        int                   `json:"failed,omitempty"`
+	ErrorClass    string                `json:"error_class,omitempty"`
+	Attempt       int                   `json:"attempt,omitempty"`
+	RetryBudget   int                   `json:"retry_budget,omitempty"`
+	RetryAfter    time.Time             `json:"retry_after,omitempty"`
+	LastSuccessAt time.Time             `json:"last_success_at,omitempty"`
+	UpdatedAt     time.Time             `json:"updated_at"`
+}
+
+func aggregateSyncCollectionOutcome(collections []SyncCollectionView) string {
+	usable, failed, retrying, cancelled := false, false, false, false
+	for _, collection := range collections {
+		usable = usable || collection.Committed > 0 || collection.Outcome == SyncCollectionSuccess || collection.Outcome == SyncCollectionNoChange
+		switch collection.Outcome {
+		case SyncCollectionRetryScheduled:
+			retrying = true
+		case SyncCollectionPartial, SyncCollectionPermanentFailure:
+			failed = true
+		case SyncCollectionCancelled:
+			cancelled = true
+		}
+	}
+	switch {
+	case retrying:
+		return "partial/retrying"
+	case failed && usable:
+		return "partial"
+	case failed:
+		return JobStatusFailed
+	case cancelled:
+		return JobStatusCancelled
+	default:
+		return JobStatusSucceeded
+	}
+}
+
 type syncCollectionFailurePolicy struct {
 	ErrorClass string
 	Transient  bool
