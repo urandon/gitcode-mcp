@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +21,7 @@ const (
 )
 
 type SyncCollectionOutcome string
+type SyncAggregateHealth string
 
 const (
 	SyncCollectionSuccess          SyncCollectionOutcome = "success"
@@ -27,6 +30,12 @@ const (
 	SyncCollectionRetryScheduled   SyncCollectionOutcome = "retry_scheduled"
 	SyncCollectionPermanentFailure SyncCollectionOutcome = "permanent_failure"
 	SyncCollectionCancelled        SyncCollectionOutcome = "cancelled"
+
+	SyncHealthSucceeded       SyncAggregateHealth = "succeeded"
+	SyncHealthPartialRetrying SyncAggregateHealth = "partial/retrying"
+	SyncHealthPartial         SyncAggregateHealth = "partial"
+	SyncHealthFailed          SyncAggregateHealth = "failed"
+	SyncHealthCancelled       SyncAggregateHealth = "cancelled"
 )
 
 // SyncCollectionView is the public, content-free health contract for one
@@ -42,12 +51,12 @@ type SyncCollectionView struct {
 	ErrorClass    string                `json:"error_class,omitempty"`
 	Attempt       int                   `json:"attempt,omitempty"`
 	RetryBudget   int                   `json:"retry_budget,omitempty"`
-	RetryAfter    time.Time             `json:"retry_after,omitempty"`
-	LastSuccessAt time.Time             `json:"last_success_at,omitempty"`
+	RetryAfter    *time.Time            `json:"retry_after,omitempty"`
+	LastSuccessAt *time.Time            `json:"last_success_at,omitempty"`
 	UpdatedAt     time.Time             `json:"updated_at"`
 }
 
-func aggregateSyncCollectionOutcome(collections []SyncCollectionView) string {
+func aggregateSyncCollectionOutcome(collections []SyncCollectionView) SyncAggregateHealth {
 	usable, failed, retrying, cancelled := false, false, false, false
 	for _, collection := range collections {
 		usable = usable || collection.Committed > 0 || collection.Outcome == SyncCollectionSuccess || collection.Outcome == SyncCollectionNoChange
@@ -62,15 +71,15 @@ func aggregateSyncCollectionOutcome(collections []SyncCollectionView) string {
 	}
 	switch {
 	case retrying:
-		return "partial/retrying"
+		return SyncHealthPartialRetrying
 	case failed && usable:
-		return "partial"
+		return SyncHealthPartial
 	case failed:
-		return JobStatusFailed
+		return SyncHealthFailed
 	case cancelled:
-		return JobStatusCancelled
+		return SyncHealthCancelled
 	default:
-		return JobStatusSucceeded
+		return SyncHealthSucceeded
 	}
 }
 
@@ -103,11 +112,11 @@ func classifySyncCollectionFailure(err error) syncCollectionFailurePolicy {
 		if errors.Is(unavailable.Cause, context.DeadlineExceeded) {
 			class = "network_timeout"
 		}
-		return syncCollectionFailurePolicy{ErrorClass: class, Transient: unavailable.Status == 0 || unavailable.Status >= 500}
+		return syncCollectionFailurePolicy{ErrorClass: class, Transient: unavailable.Status == 0 || unavailable.Status >= 500 && unavailable.Status <= 599}
 	}
 	var partial gitcode.ErrPartialResponse
 	if errors.As(err, &partial) {
-		return syncCollectionFailurePolicy{ErrorClass: "partial_response", Transient: true}
+		return syncCollectionFailurePolicy{ErrorClass: "partial_response", Transient: transientPartialResponse(partial)}
 	}
 	var syncFailure service.ErrSyncFailure
 	if errors.As(err, &syncFailure) {
@@ -122,10 +131,33 @@ func classifySyncCollectionFailure(err error) syncCollectionFailurePolicy {
 		}
 	}
 	class := "sync_failed"
-	if coded, ok := err.(interface{ DiagnosticCode() string }); ok {
+	var coded interface{ DiagnosticCode() string }
+	if errors.As(err, &coded) {
 		class = sanitizeMaintenanceErrorClass(coded.DiagnosticCode(), class)
 	}
 	return syncCollectionFailurePolicy{ErrorClass: class}
+}
+
+func transientPartialResponse(partial gitcode.ErrPartialResponse) bool {
+	if partial.Expected > 0 && partial.Got >= 0 && partial.Got < partial.Expected {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(partial.Message), "truncated JSON") {
+		return true
+	}
+	if partial.Cause == nil {
+		return false
+	}
+	if errors.Is(partial.Cause, io.EOF) || errors.Is(partial.Cause, io.ErrUnexpectedEOF) || errors.Is(partial.Cause, context.DeadlineExceeded) {
+		return true
+	}
+	var unavailable gitcode.ErrNetworkUnavailable
+	return errors.As(partial.Cause, &unavailable) && (unavailable.Status == 0 || unavailable.Status >= 500 && unavailable.Status <= 599)
+}
+
+func publicSyncFrontierRef(cacheUUID, repoID, collection, privateFrontier string) string {
+	digest := sha256.Sum256([]byte(strings.Join([]string{cacheUUID, repoID, collection, privateFrontier}, "\x00")))
+	return "frontier-" + hex.EncodeToString(digest[:12])
 }
 
 func syncCollectionRetryDelay(cacheUUID, repoID, collection, frontier string, attempt int, retryAfter time.Duration) time.Duration {
@@ -133,10 +165,14 @@ func syncCollectionRetryDelay(cacheUUID, repoID, collection, frontier string, at
 		attempt = 1
 	}
 	shift := min(attempt-1, 6)
-	base := min(time.Second*time.Duration(1<<shift), maxSyncCollectionRetryDelay)
+	base := time.Second * time.Duration(1<<shift)
+	jitterWindow := max(base/4, time.Millisecond)
+	if base+jitterWindow > maxSyncCollectionRetryDelay {
+		jitterWindow = max(maxSyncCollectionRetryDelay/4, time.Millisecond)
+		base = maxSyncCollectionRetryDelay - jitterWindow
+	}
 	seed := strings.Join([]string{cacheUUID, repoID, collection, frontier, strconv.Itoa(attempt)}, "\x00")
 	digest := sha256.Sum256([]byte(seed))
-	jitterWindow := max(base/4, time.Millisecond)
 	jitter := time.Duration(binary.BigEndian.Uint64(digest[:8]) % uint64(jitterWindow))
-	return max(min(base+jitter, maxSyncCollectionRetryDelay), retryAfter)
+	return max(base+jitter, retryAfter)
 }

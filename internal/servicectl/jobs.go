@@ -52,6 +52,7 @@ type Job struct {
 	Error                        string                  `json:"error,omitempty"`
 	ErrorClass                   string                  `json:"error_class,omitempty"`
 	SyncStage                    *SyncStageView          `json:"sync_stage,omitempty"`
+	SyncHealth                   SyncAggregateHealth     `json:"sync_health,omitempty"`
 	SyncCollections              []SyncCollectionView    `json:"sync_collections,omitempty"`
 	Progress                     []service.ProgressEvent `json:"progress,omitempty"`
 }
@@ -1223,6 +1224,7 @@ func cloneJob(job *Job) Job {
 		out.FinishedAt = &finished
 	}
 	out.Progress = append([]service.ProgressEvent(nil), job.Progress...)
+	out.SyncCollections = append([]SyncCollectionView(nil), job.SyncCollections...)
 	return out
 }
 
