@@ -103,10 +103,17 @@ Execute a live issue create only after credentials and binding are ready:
 gitcode-mcp create-issue --idempotency-key "ik-001" --title "Test"
 ```
 
-Include an issue body when needed:
+Include a short issue body inline when needed:
 
 ```sh
 gitcode-mcp create-issue --idempotency-key "ik-001" --title "Test" --body "Body"
+```
+
+For multiline Markdown, prefer a UTF-8 file or stdin so JSON and shell escaping cannot turn real line breaks into literal `\n` text:
+
+```sh
+gitcode-mcp create-issue --idempotency-key "ik-002" --title "Multiline" --body-file ./issue.md
+gitcode-mcp update-issue --number 42 --idempotency-key "ik-003" --body-file - < ./issue.md
 ```
 
 Validate without mutating the remote by using dry-run:
@@ -115,7 +122,7 @@ Validate without mutating the remote by using dry-run:
 gitcode-mcp create-issue --dry-run --idempotency-key "ik-001" --title "Test" --body "Body"
 ```
 
-`create-issue --help` documents `--live`, `--dry-run`, `--idempotency-key`, `--title`, `--body`, and `--milestone`. `--dry-run` validates without mutation, `--idempotency-key` supports audited retries, `--title` is required, `--body` supplies the issue body, and `--milestone` accepts a remote id, stable `MILESTONE-<id>`, or exact title. `update-issue` accepts the same selector or `--clear-milestone`.
+`create-issue --help` documents `--live`, `--dry-run`, `--idempotency-key`, `--title`, `--body`, `--body-file`, and `--milestone`. `--dry-run` validates without mutation and reports only safe body-input metadata, `--idempotency-key` supports audited retries, `--title` is required, and `--milestone` accepts a remote id, stable `MILESTONE-<id>`, or exact title. `update-issue` accepts the same selector or `--clear-milestone`. `--body` and `--body-file` are mutually exclusive; suspicious inline literal `\n` sequences fail before external writes unless explicitly allowed.
 
 Create a pull request through the same audited CLI write lifecycle:
 
