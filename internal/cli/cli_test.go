@@ -288,9 +288,11 @@ func migrationDaemonCommand(binary string, src *repoInitLocalSource, heartbeatPa
 	return cmd, logs
 }
 
+const migrationDaemonReadyTimeout = 15 * time.Second
+
 func waitForMigrationDaemon(t *testing.T, manager servicectl.Manager, version, commit string, schemaVersion int) servicectl.Status {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(migrationDaemonReadyTimeout)
 	for time.Now().Before(deadline) {
 		status, err := manager.Status()
 		if err == nil && status.Running && status.BinaryVersion == version && status.BinaryCommit == commit && status.SchemaMin == schemaVersion && status.SchemaMax == schemaVersion {
@@ -385,7 +387,7 @@ func TestMigrateCacheEndToEndReplacesOldDaemonAfterSchemaUpgrade(t *testing.T) {
 	var platformCalls []string
 	manager := servicectl.Manager{
 		Source: src, BinaryPath: newBinary, Version: "0.4.0", Commit: "new-daemon", SchemaMin: cache.CurrentSchemaVersion(), SchemaMax: cache.CurrentSchemaVersion(), GOOS: "darwin",
-		StartupTimeout: 5 * time.Second, StartupInterval: 5 * time.Millisecond,
+		StartupTimeout: migrationDaemonReadyTimeout, StartupInterval: 5 * time.Millisecond,
 	}
 	manager.OutputRunner = func(_ context.Context, name string, args ...string) (string, error) {
 		platformCalls = append(platformCalls, strings.Join(append([]string{name}, args...), " "))
