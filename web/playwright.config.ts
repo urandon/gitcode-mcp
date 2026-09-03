@@ -21,7 +21,7 @@ export default defineConfig({
     // browser gates machine-readable, so traces remain a local-only aid.
     trace: browserPolicy.trace,
     // Explicitly prevent implicit failure artifacts. Local visual QA uses only
-    // the opt-in, path-bound captures in operator-views.spec.ts.
+    // the opt-in, path-bound captures in the browser suites.
     screenshot: browserPolicy.screenshot,
     video: browserPolicy.video
   },

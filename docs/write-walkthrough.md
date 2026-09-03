@@ -24,6 +24,28 @@ This walkthrough covers the explicit, gated write path for GitCode operations.
 - No write can succeed without reaching the remote adapter.
 - Idempotency keys prevent duplicate writes.
 
+## Multiline Markdown bodies
+
+For multiline issue and issue-comment Markdown, use a UTF-8 file or stdin instead of shell-escaped inline text:
+
+```sh
+gitcode-mcp add-comment \
+  --repo example-owner/example-repo \
+  --number 42 \
+  --body-file ./comment.md \
+  --idempotency-key issue-42-comment
+
+gitcode-mcp update-comment \
+  --repo example-owner/example-repo \
+  --comment-id 2002 \
+  --body-file - \
+  --idempotency-key comment-2002-update < ./comment.md
+```
+
+`create-issue`, `update-issue`, `add-comment`, and `update-comment` accept at most one of `--body` or `--body-file`; comment writes still require a non-empty body, while issue writes may omit it. `--body-file -` reads stdin. File/stdin inputs are bounded to 10 MiB and must be non-empty valid UTF-8. CRLF and lone CR line endings normalize to LF; all trailing newlines are otherwise preserved. The CLI never unescapes backslashes.
+
+An inline body containing two or more literal `\n` sequences and no real newline fails before service startup or an external write. Use `--body-file` for intended Markdown, or `--allow-literal-backslash-n` when those literal characters are intentional. Dry-run output exposes only safe input metadata—source, byte count, real-newline count, literal-`\n` count, and normalization flags—not the body itself.
+
 ## Dry-run mode
 
 All write commands support `--dry-run` for pre-flight validation.
@@ -142,7 +164,7 @@ gitcode-mcp update-comment \
   --repo example-owner/example-repo \
   --comment-id 2002 \
   --number 42 \
-  --body $'Updated comment\nwith real Markdown newlines.' \
+  --body-file ./updated-comment.md \
   --dry-run
 ```
 
@@ -228,7 +250,7 @@ gitcode-mcp update-comment \
   --repo example-owner/example-repo \
   --comment-id 2002 \
   --number 42 \
-  --body $'Updated comment\nwith real Markdown newlines.'
+  --body-file ./updated-comment.md
 ```
 
 Expected: existing issue comment updated on remote through `PATCH /api/v5/repos/{owner}/{repo}/issues/comments/{comment_id}`, audit row recorded, and the cached `record_comments` row upserted instead of duplicated.

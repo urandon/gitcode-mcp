@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mattn/go-isatty"
 
@@ -94,6 +95,8 @@ var commands = []string{
 	"repo",
 	"bind",
 }
+
+const maxMarkdownBodyBytes int64 = 10 << 20
 
 type queryService interface {
 	Ingest(context.Context, service.OperationRequest) (service.OperationResult, error)
@@ -245,6 +248,11 @@ type options struct {
 	strategy                     string
 	title                        string
 	body                         string
+	bodyFile                     string
+	bodySet                      bool
+	bodyFileSet                  bool
+	allowLiteralBackslashN       bool
+	bodyInput                    *service.WriteBodyInputMetadata
 	description                  string
 	dueOn                        string
 	milestone                    string
@@ -405,6 +413,10 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 		}
 		printCommandHelp(command, stdout)
 		return 0
+	}
+	opts, err = resolveMarkdownBodyInput(command, opts, deps.Stdin)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
 	}
 	if command == "bind" {
 		owner := strings.TrimSpace(opts.owner)
@@ -728,6 +740,8 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.strategy, "strategy", "", "merge strategy: merge, squash, or rebase")
 	flags.StringVar(&opts.title, "title", "", "title")
 	flags.StringVar(&opts.body, "body", "", "body")
+	flags.StringVar(&opts.bodyFile, "body-file", "", "UTF-8 Markdown body file, or - for stdin")
+	flags.BoolVar(&opts.allowLiteralBackslashN, "allow-literal-backslash-n", false, "allow suspicious inline bodies containing literal backslash-n sequences")
 	flags.StringVar(&opts.description, "description", "", "description")
 	flags.StringVar(&opts.dueOn, "due-on", "", "due date YYYY-MM-DD")
 	flags.StringVar(&opts.milestone, "milestone", "", "milestone id or title")
@@ -799,6 +813,14 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	if err := flags.Parse(reorderFlags(args)); err != nil {
 		return opts, nil, service.ErrInvalidQuery{Field: "flags", Message: err.Error()}
 	}
+	flags.Visit(func(current *flag.Flag) {
+		switch current.Name {
+		case "body":
+			opts.bodySet = true
+		case "body-file":
+			opts.bodyFileSet = true
+		}
+	})
 	opts.format = strings.ToLower(opts.format)
 	if opts.format != "text" && opts.format != "markdown" && opts.format != "json" {
 		return opts, nil, service.ErrInvalidQuery{Field: "format", Message: "format must be text, markdown, or json"}
@@ -822,7 +844,7 @@ func reorderFlags(args []string) []string {
 		arg := args[i]
 		if strings.HasPrefix(arg, "--") {
 			flags = append(flags, arg)
-			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--issue-comments" || arg == "--pr-comments" || arg == "--index" || arg == "--quiet" || arg == "--dry-run" || arg == "--live" || arg == "--offline" || arg == "--fixture" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" || arg == "--yes" || arg == "--detach" || arg == "--daemon" || arg == "--no-service-install" || arg == "--no-model-download" || arg == "--no-browser" || arg == "--admin" || arg == "--admin-unsafe-allow-non-loopback" {
+			if strings.Contains(arg, "=") || arg == "--strict" || arg == "--full" || arg == "--incremental" || arg == "--issues" || arg == "--wiki" || arg == "--pulls" || arg == "--comments" || arg == "--issue-comments" || arg == "--pr-comments" || arg == "--index" || arg == "--quiet" || arg == "--dry-run" || arg == "--live" || arg == "--offline" || arg == "--fixture" || arg == "--overwrite" || arg == "--redacted" || arg == "--runtime-audit" || arg == "--confirm" || arg == "--yes" || arg == "--detach" || arg == "--daemon" || arg == "--no-service-install" || arg == "--no-model-download" || arg == "--no-browser" || arg == "--admin" || arg == "--admin-unsafe-allow-non-loopback" || arg == "--allow-literal-backslash-n" {
 				continue
 			}
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
@@ -2871,7 +2893,98 @@ func dispatchWrite(ctx context.Context, handler func(context.Context, service.Wr
 	if err != nil {
 		return writeCommandError(stderr, opts.format, plan, err)
 	}
+	if opts.dryRun && opts.bodyInput != nil {
+		result.BodyInput = opts.bodyInput
+	}
 	return render(stdout, opts.format, result, renderWriteText)
+}
+
+func resolveMarkdownBodyInput(command string, opts options, stdin io.Reader) (options, error) {
+	supported := command == "create-issue" || command == "update-issue" || command == "add-comment" || command == "update-comment"
+	if !supported {
+		if opts.bodyFileSet || opts.allowLiteralBackslashN {
+			return opts, service.ErrInvalidQuery{Field: "body_input", Message: "--body-file and --allow-literal-backslash-n are supported by create-issue, update-issue, add-comment, and update-comment"}
+		}
+		return opts, nil
+	}
+	if opts.bodySet && opts.bodyFileSet {
+		return opts, service.ErrInvalidQuery{Field: "body_input", Message: "--body and --body-file are mutually exclusive"}
+	}
+	if opts.bodyFileSet && strings.TrimSpace(opts.bodyFile) == "" {
+		return opts, service.ErrInvalidQuery{Field: "body_file", Message: "--body-file requires a path or - for stdin"}
+	}
+	if opts.allowLiteralBackslashN && !opts.bodySet {
+		return opts, service.ErrInvalidQuery{Field: "body_input", Message: "--allow-literal-backslash-n requires an inline --body"}
+	}
+
+	source := ""
+	body := opts.body
+	if opts.bodyFileSet {
+		source = "file"
+		var reader io.Reader
+		var closeReader func() error
+		if opts.bodyFile == "-" {
+			source = "stdin"
+			if stdin == nil {
+				return opts, service.ErrInvalidQuery{Field: "body_file", Message: "--body-file - requires stdin"}
+			}
+			reader = stdin
+		} else {
+			file, err := os.Open(opts.bodyFile)
+			if err != nil {
+				return opts, service.ErrInvalidQuery{Field: "body_file", Message: fmt.Sprintf("cannot read body file: %v", err)}
+			}
+			reader = file
+			closeReader = file.Close
+		}
+		data, err := io.ReadAll(io.LimitReader(reader, maxMarkdownBodyBytes+1))
+		if closeReader != nil {
+			closeErr := closeReader()
+			if err == nil {
+				err = closeErr
+			}
+		}
+		if err != nil {
+			return opts, service.ErrInvalidQuery{Field: "body_file", Message: fmt.Sprintf("cannot read body input: %v", err)}
+		}
+		if int64(len(data)) > maxMarkdownBodyBytes {
+			return opts, service.ErrInvalidQuery{Field: "body_file", Message: fmt.Sprintf("body input exceeds %d bytes", maxMarkdownBodyBytes)}
+		}
+		if !utf8.Valid(data) {
+			return opts, service.ErrInvalidQuery{Field: "body_file", Message: "body input must be valid UTF-8"}
+		}
+		body = string(data)
+	} else if opts.bodySet {
+		source = "inline"
+	}
+	if source == "" {
+		return opts, nil
+	}
+	if source != "inline" && len(body) == 0 {
+		return opts, service.ErrInvalidQuery{Field: "body_file", Message: "body input is empty"}
+	}
+
+	normalizedCarriageReturns := strings.Contains(body, "\r")
+	body = strings.ReplaceAll(body, "\r\n", "\n")
+	body = strings.ReplaceAll(body, "\r", "\n")
+	actualNewlines := strings.Count(body, "\n")
+	literalBackslashNs := strings.Count(body, `\n`)
+	if source == "inline" && actualNewlines == 0 && literalBackslashNs >= 2 && !opts.allowLiteralBackslashN {
+		return opts, service.ErrInvalidQuery{
+			Field:   "body",
+			Message: "inline body contains multiple literal \\n sequences and no real newlines; use --body-file PATH, --body-file -, or --allow-literal-backslash-n if the text is intentional",
+		}
+	}
+	opts.body = body
+	opts.bodyInput = &service.WriteBodyInputMetadata{
+		Source:                    source,
+		ByteCount:                 len([]byte(body)),
+		ActualNewlineCount:        actualNewlines,
+		LiteralBackslashNCount:    literalBackslashNs,
+		CarriageReturnsNormalized: normalizedCarriageReturns,
+		TrailingNewlinePreserved:  strings.HasSuffix(body, "\n"),
+	}
+	return opts, nil
 }
 
 func validateWriteOptions(command string, opts options) error {
@@ -3925,6 +4038,18 @@ func renderDiffText(w io.Writer, result service.DiffSnapshotResult) {
 
 func renderWriteText(w io.Writer, result service.WriteCommandResult) {
 	fmt.Fprintf(w, "%s: %s id=%s idempotency_key=%s evidence=%s\n", result.Command, result.Status, result.ID, result.IdempotencyKey, result.Evidence)
+	if result.BodyInput != nil {
+		fmt.Fprintf(
+			w,
+			"body_input: source=%s bytes=%d actual_newlines=%d literal_backslash_n=%d carriage_returns_normalized=%t trailing_newline_preserved=%t\n",
+			result.BodyInput.Source,
+			result.BodyInput.ByteCount,
+			result.BodyInput.ActualNewlineCount,
+			result.BodyInput.LiteralBackslashNCount,
+			result.BodyInput.CarriageReturnsNormalized,
+			result.BodyInput.TrailingNewlinePreserved,
+		)
+	}
 	if result.StableSourceID != "" || result.IssueNumber > 0 {
 		fmt.Fprintf(w, "issue_identity: stable_source_id=%s issue_number=%d\n", result.StableSourceID, result.IssueNumber)
 	}
@@ -5082,7 +5207,8 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --owner OWNER --repo REPO --name NAME --api-base-url URL --scopes issues,wiki --alias ALIAS")
 	fmt.Fprintln(w, "  --number N --slug SLUG")
 	fmt.Fprintln(w, "  record IDs are positional for get, backlinks, and snippet commands")
-	fmt.Fprintln(w, "  --title TITLE --body BODY --label LABEL --labels A,B --tag TAG")
+	fmt.Fprintln(w, "  --title TITLE --body BODY --body-file PATH|- --label LABEL --labels A,B --tag TAG")
+	fmt.Fprintln(w, "  --body-file is scoped to issue and issue-comment Markdown writes")
 	fmt.Fprintln(w, "  --idempotency-key KEY")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Global options:")
@@ -5309,12 +5435,15 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH cache database path")
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
 	case "create-issue":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --title TITLE [--body BODY] [--labels A,B] [--milestone ID_OR_TITLE] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --title TITLE [--body BODY | --body-file PATH|-] [--labels A,B] [--milestone ID_OR_TITLE] [--idempotency-key KEY]\n\n", command)
 		fmt.Fprintln(w, "Create a new issue. Executes live by default; use --dry-run for no-mutation validation.")
+		fmt.Fprintln(w, "Use --body-file for multiline Markdown; CRLF/CR are normalized to LF and trailing newlines are preserved.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --title TITLE       issue title (required)")
 		fmt.Fprintln(w, "  --body BODY         issue body")
+		fmt.Fprintln(w, "  --body-file PATH|-  UTF-8 issue body file, or stdin with -")
+		fmt.Fprintln(w, "  --allow-literal-backslash-n  allow intentional inline literal \\n sequences")
 		fmt.Fprintln(w, "  --labels A,B        comma-separated labels")
 		fmt.Fprintln(w, "  --milestone VALUE   milestone remote id, stable MILESTONE-id, or exact title")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
@@ -5323,14 +5452,17 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "update-issue":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO (--number N | --issue-id ISSUE_OR_ALIAS) [--title TITLE] [--body BODY] [--state open|closed] [--labels A,B] [--milestone ID_OR_TITLE | --clear-milestone] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO (--number N | --issue-id ISSUE_OR_ALIAS) [--title TITLE] [--body BODY | --body-file PATH|-] [--state open|closed] [--labels A,B] [--milestone ID_OR_TITLE | --clear-milestone] [--idempotency-key KEY]\n\n", command)
 		fmt.Fprintln(w, "Update an existing issue. Executes live by default; use --dry-run for no-mutation validation.")
+		fmt.Fprintln(w, "Use --body-file for multiline Markdown; CRLF/CR are normalized to LF and trailing newlines are preserved.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --number N          repository-local issue number; not a provider id")
 		fmt.Fprintln(w, "  --issue-id VALUE    stable source id or known cached issue alias")
 		fmt.Fprintln(w, "  --title TITLE       updated title")
 		fmt.Fprintln(w, "  --body BODY         updated body")
+		fmt.Fprintln(w, "  --body-file PATH|-  UTF-8 updated body file, or stdin with -")
+		fmt.Fprintln(w, "  --allow-literal-backslash-n  allow intentional inline literal \\n sequences")
 		fmt.Fprintln(w, "  --state STATE       updated state: open or closed")
 		fmt.Fprintln(w, "  --labels A,B        comma-separated labels")
 		fmt.Fprintln(w, "  --milestone VALUE   milestone remote id, stable MILESTONE-id, or exact title")
@@ -5508,13 +5640,16 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "add-comment":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO (--number N | --issue-id ISSUE_OR_ALIAS) --body BODY [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO (--number N | --issue-id ISSUE_OR_ALIAS) (--body BODY | --body-file PATH|-) [--idempotency-key KEY]\n\n", command)
 		fmt.Fprintln(w, "Add a comment to an issue. Executes live by default; use --dry-run for no-mutation validation.")
+		fmt.Fprintln(w, "Use --body-file for multiline Markdown; CRLF/CR are normalized to LF and trailing newlines are preserved.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --number N          repository-local issue number; not a provider id")
 		fmt.Fprintln(w, "  --issue-id VALUE    stable source id or known cached issue alias")
 		fmt.Fprintln(w, "  --body BODY         comment body (required)")
+		fmt.Fprintln(w, "  --body-file PATH|-  UTF-8 comment body file, or stdin with -")
+		fmt.Fprintln(w, "  --allow-literal-backslash-n  allow intentional inline literal \\n sequences")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
 		fmt.Fprintln(w, "  --live              compatibility alias for live write")
@@ -5553,13 +5688,16 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH       cache database path")
 		fmt.Fprintln(w, "  --format FORMAT         output format (text, json)")
 	case "update-comment":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --comment-id ID --body BODY [--number N] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --comment-id ID (--body BODY | --body-file PATH|-) [--number N] [--idempotency-key KEY]\n\n", command)
 		fmt.Fprintln(w, "Update an existing issue comment. Executes live by default; use --dry-run for no-mutation validation.")
+		fmt.Fprintln(w, "Use --body-file for multiline Markdown; CRLF/CR are normalized to LF and trailing newlines are preserved.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --comment-id ID     issue comment id (required)")
 		fmt.Fprintln(w, "  --number N          issue number hint for cache parent resolution")
 		fmt.Fprintln(w, "  --body BODY         updated comment body (required)")
+		fmt.Fprintln(w, "  --body-file PATH|-  UTF-8 updated body file, or stdin with -")
+		fmt.Fprintln(w, "  --allow-literal-backslash-n  allow intentional inline literal \\n sequences")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
 		fmt.Fprintln(w, "  --live              compatibility alias for live write")

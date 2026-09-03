@@ -506,6 +506,7 @@ func TestMaintenanceLoadMigratesCompatibleAliasDuplicatesAndJobLinks(t *testing.
 		t.Fatal(err)
 	}
 	jobs := NewJobManager(jobsPath)
+	jobs.now = func() time.Time { return now }
 	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), jobs, registryPath)
 	if err := maintenance.Load(); err != nil {
 		t.Fatal(err)
