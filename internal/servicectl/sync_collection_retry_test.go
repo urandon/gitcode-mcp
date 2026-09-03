@@ -130,6 +130,42 @@ func TestCloneJobDeepCopiesSyncCollections(t *testing.T) {
 	}
 }
 
+func TestMaintenanceCollectionRetrySelectionIsExactAndPolicyGated(t *testing.T) {
+	policy := MaintenancePolicy{Issues: true, IssueComments: true, Wiki: true, Pulls: true, PRComments: true}
+	tests := []struct {
+		collection string
+		remoteType string
+		selected   func(StartSyncJobRequest) bool
+	}{
+		{"issues", "issue", func(req StartSyncJobRequest) bool { return req.Issues }},
+		{"issue_comments", "issue_comment", func(req StartSyncJobRequest) bool { return req.IssueComments }},
+		{"wiki", "wiki", func(req StartSyncJobRequest) bool { return req.Wiki }},
+		{"pulls", "pull_request", func(req StartSyncJobRequest) bool { return req.Pulls }},
+		{"pr_comments", "pr_comment", func(req StartSyncJobRequest) bool { return req.PRComments }},
+	}
+	for _, test := range tests {
+		remoteType, req, ok := maintenanceCollectionRetrySelection(policy, test.collection)
+		if !ok || remoteType != test.remoteType || !test.selected(req) {
+			t.Fatalf("collection=%s remote=%s selected=%+v ok=%t", test.collection, remoteType, req, ok)
+		}
+		selected := 0
+		for _, value := range []bool{req.Issues, req.IssueComments, req.Wiki, req.Pulls, req.PRComments} {
+			if value {
+				selected++
+			}
+		}
+		if selected != 1 {
+			t.Fatalf("collection=%s selected %d cohorts: %+v", test.collection, selected, req)
+		}
+	}
+	if _, _, ok := maintenanceCollectionRetrySelection(MaintenancePolicy{}, "wiki"); ok {
+		t.Fatal("disabled collection was retryable")
+	}
+	if _, _, ok := maintenanceCollectionRetrySelection(policy, "unknown"); ok {
+		t.Fatal("unknown collection was retryable")
+	}
+}
+
 func TestRunSyncCollectionWithRetryIsolatedAndBounded(t *testing.T) {
 	clock := time.Unix(1_700_000_000, 0).UTC()
 	attempts := 0
@@ -184,5 +220,66 @@ func TestRunSyncCollectionWithRetryDoesNotRetryPermanentFailure(t *testing.T) {
 	)
 	if err == nil || attempts != 1 {
 		t.Fatalf("err=%v attempts=%d", err, attempts)
+	}
+}
+
+func TestRunSyncCollectionScheduleDoesNotBlockOrRepeatDueCollections(t *testing.T) {
+	clock := time.Unix(1_700_000_000, 0).UTC()
+	order := []string{}
+	observed := []SyncCollectionView{}
+	issueAttempts := 0
+	waitedAfter := ""
+	tasks := []syncCollectionTask{
+		{
+			Collection: "issues", RemoteType: "issue", PrivateFrontier: "page:1",
+			Attempt: func(attempt int) (*service.SyncResourcesResult, syncCollectionResult, error) {
+				issueAttempts++
+				order = append(order, fmt.Sprintf("issues:%d", attempt))
+				if attempt == 1 {
+					err := gitcode.ErrNetworkUnavailable{Status: 503}
+					result := &service.SyncResourcesResult{RecordsListed: 1, SuccessCount: 1}
+					return result, syncCollectionResult{RemoteType: "issue", Result: result, Err: err}, err
+				}
+				result := &service.SyncResourcesResult{RecordsListed: 1, SuccessCount: 1}
+				return result, syncCollectionResult{RemoteType: "issue", Result: result}, nil
+			},
+		},
+		{
+			Collection: "wiki", RemoteType: "wiki", PrivateFrontier: "page:1",
+			Attempt: func(attempt int) (*service.SyncResourcesResult, syncCollectionResult, error) {
+				order = append(order, fmt.Sprintf("wiki:%d", attempt))
+				result := &service.SyncResourcesResult{RecordsListed: 2, SuccessCount: 2}
+				return result, syncCollectionResult{RemoteType: "wiki", Result: result}, nil
+			},
+		},
+	}
+	executions := runSyncCollectionSchedule(
+		context.Background(), "cache-a", "owner/repo", tasks, 4, func(view SyncCollectionView) { observed = append(observed, view) },
+		func(_ context.Context, delay time.Duration) error {
+			waitedAfter = order[len(order)-1]
+			clock = clock.Add(delay)
+			return nil
+		},
+		func() time.Time { return clock }, nil,
+	)
+	if got, want := strings.Join(order, ","), "issues:1,wiki:1,issues:2"; got != want {
+		t.Fatalf("attempt order=%q want=%q", got, want)
+	}
+	if waitedAfter != "wiki:1" {
+		t.Fatalf("backoff waited before another due collection: waited_after=%q", waitedAfter)
+	}
+	if issueAttempts != 2 || len(executions) != 2 {
+		t.Fatalf("issue_attempts=%d executions=%+v", issueAttempts, executions)
+	}
+	if len(observed) != 3 || observed[0].Collection != "issues" || observed[0].Outcome != SyncCollectionRetryScheduled || observed[0].Committed != 1 {
+		t.Fatalf("partial committed progress was not retained while retrying: %+v", observed)
+	}
+	for _, execution := range executions {
+		if execution.Err != nil {
+			t.Fatalf("terminal execution failed: %+v", execution)
+		}
+		if execution.Collection.RemoteType == "issue" && (execution.Result == nil || execution.Result.SuccessCount != 1) {
+			t.Fatalf("retry replay counts were summed: %+v", execution)
+		}
 	}
 }

@@ -4200,7 +4200,8 @@ func TestAliasCommandHelpExitsZero(t *testing.T) {
 
 func TestRenderServiceJobTextIncludesPublicDurableSyncState(t *testing.T) {
 	now := time.Date(2026, 9, 1, 3, 0, 0, 0, time.UTC)
-	job := servicectl.Job{ID: "job-public", Type: servicectl.SyncJobType, Status: servicectl.JobStatusRunning, CreatedAt: now, UpdatedAt: now, SyncStage: &servicectl.SyncStageView{
+	retryAt := now.Add(time.Minute)
+	job := servicectl.Job{ID: "job-public", Type: servicectl.SyncJobType, Status: servicectl.JobStatusRunning, CreatedAt: now, UpdatedAt: now, SyncHealth: servicectl.SyncHealthPartialRetrying, SyncCollections: []servicectl.SyncCollectionView{{Collection: "issues", Outcome: servicectl.SyncCollectionSuccess, FrontierRef: "frontier-public", RecordsListed: 12, Committed: 12, Attempt: 1, RetryBudget: 4, LastSuccessAt: &now, UpdatedAt: now}, {Collection: "wiki", Outcome: servicectl.SyncCollectionRetryScheduled, ErrorClass: "provider_timeout", Attempt: 2, RetryBudget: 4, RetryAfter: &retryAt, UpdatedAt: now}}, SyncStage: &servicectl.SyncStageView{
 		StageRef: "stage-public", CacheRef: "cache-public", Collection: "issues", Phase: servicectl.SyncStageWaitingCommit,
 		Fetched: 12, Staged: 12, StagedBytes: 8192, Attempt: 2, RetryBudget: 6, RetryAfter: now.Add(time.Minute),
 		BlockerClass: "cache_busy", BlockingOp: "rag-index", BlockingJobRef: "job-blocker", FetchedAt: now, StagedAt: now.Add(time.Second),
@@ -4208,7 +4209,7 @@ func TestRenderServiceJobTextIncludesPublicDurableSyncState(t *testing.T) {
 	var out bytes.Buffer
 	renderServiceJobText(&out, job)
 	text := out.String()
-	for _, want := range []string{"sync_phase: waiting_commit", "sync_stage_ref: stage-public", "sync_cache_ref: cache-public", "sync_staged_bytes: 8192", "sync_retry: 2/6", "sync_blocking_job_ref: job-blocker"} {
+	for _, want := range []string{"sync_health: partial/retrying", "collection=issues outcome=success frontier=frontier-public", "collection=wiki outcome=retry_scheduled", "error_class=provider_timeout", "sync_phase: waiting_commit", "sync_stage_ref: stage-public", "sync_cache_ref: cache-public", "sync_staged_bytes: 8192", "sync_retry: 2/6", "sync_blocking_job_ref: job-blocker"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("output missing %q: %s", want, text)
 		}

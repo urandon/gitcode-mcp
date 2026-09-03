@@ -102,6 +102,21 @@ and collection), so a partially fetched but successfully committed prefix
 cannot become a false success after restart. Each selected collection still
 receives its own cursor; already-fresh collections are omitted instead of being
 replayed because another collection needs work.
+
+Provider retries are isolated by collection and frontier. A transient timeout,
+rate limit, or provider 5xx schedules only that collection with bounded,
+jittered backoff; other due collections continue immediately and publish their
+successful cache transactions. Authentication, permission, query, schema, and
+data-validation failures are terminal for the affected collection. Public job
+state exposes a content-free aggregate health plus per-collection outcome,
+opaque frontier reference, counts, retry budget, next attempt, and last success
+time. The private service journal persists only retry authority and request
+selectors—never fetched response bodies—and lets a restarted daemon resume the
+pending collection without replaying successful siblings. CLI, MCP, and the
+admin Jobs view project the same state. The admin UI additionally supports a
+URL-backed aggregate-health filter and an explicit action that retries one
+failed collection while retaining the others.
+
 Comment fan-out is checked as produced records and serialized bytes before it
 can accumulate across parents.
 Per-stage limits are enforced together with a 64 MiB/50,000-record/256-stage

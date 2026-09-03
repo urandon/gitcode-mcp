@@ -511,12 +511,12 @@ func TestMCPServiceJobAttachAndCancelUseCoordinatorLifecycle(t *testing.T) {
 
 func TestServiceJobSummaryTextIncludesPublicDurableSyncState(t *testing.T) {
 	now := time.Date(2026, 9, 1, 3, 0, 0, 0, time.UTC)
-	text := serviceJobSummaryText(servicectl.Job{ID: "job-public", Status: servicectl.JobStatusRunning, Completed: 4, Steps: 10, SyncStage: &servicectl.SyncStageView{
+	text := serviceJobSummaryText(servicectl.Job{ID: "job-public", Status: servicectl.JobStatusRunning, Completed: 4, Steps: 10, SyncHealth: servicectl.SyncHealthPartialRetrying, SyncCollections: []servicectl.SyncCollectionView{{Collection: "issues", Outcome: servicectl.SyncCollectionSuccess, Attempt: 1, RetryBudget: 4}, {Collection: "wiki", Outcome: servicectl.SyncCollectionRetryScheduled, ErrorClass: "provider_timeout", Attempt: 2, RetryBudget: 4}}, SyncStage: &servicectl.SyncStageView{
 		StageRef: "stage-public", CacheRef: "cache-public", Collection: "issues", Phase: servicectl.SyncStageWaitingCommit,
 		Fetched: 10, Staged: 10, StagedBytes: 4096, Attempt: 3, RetryBudget: 6, RetryAfter: now,
 		BlockerClass: "cache_busy", BlockingOp: "rag-index", BlockingJobRef: "job-blocker",
 	}})
-	for _, want := range []string{"job_id=job-public", "sync_phase=waiting_commit", "sync_stage_ref=stage-public", "sync_cache_ref=cache-public", "sync_staged_bytes=4096", "sync_retry=3/6", "sync_blocking_job_ref=job-blocker"} {
+	for _, want := range []string{"job_id=job-public", "sync_health=partial/retrying", "sync_collections=[issues:success:1/4,wiki:retry_scheduled:2/4:provider_timeout]", "sync_phase=waiting_commit", "sync_stage_ref=stage-public", "sync_cache_ref=cache-public", "sync_staged_bytes=4096", "sync_retry=3/6", "sync_blocking_job_ref=job-blocker"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("summary missing %q: %s", want, text)
 		}

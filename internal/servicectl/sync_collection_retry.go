@@ -93,6 +93,149 @@ type syncCollectionAttempt func() (*service.SyncResourcesResult, syncCollectionR
 type syncCollectionObserver func(SyncCollectionView)
 type syncCollectionWait func(context.Context, time.Duration) error
 
+type syncCollectionTask struct {
+	Collection      string
+	RemoteType      string
+	PrivateFrontier string
+	AttemptStart    int
+	DueAt           time.Time
+	Attempt         func(int) (*service.SyncResourcesResult, syncCollectionResult, error)
+}
+
+type syncCollectionRetryHooks struct {
+	Scheduled func(syncCollectionTask, int, time.Time) error
+	Terminal  func(syncCollectionTask) error
+}
+
+type syncCollectionExecution struct {
+	Result     *service.SyncResourcesResult
+	Collection syncCollectionResult
+	Err        error
+}
+
+type pendingSyncCollection struct {
+	task    syncCollectionTask
+	attempt int
+	dueAt   time.Time
+	result  *service.SyncResourcesResult
+}
+
+// runSyncCollectionSchedule walks every due collection before sleeping for a
+// delayed retry. A timeout in one frontier therefore cannot hold up unrelated
+// collections that are ready now.
+func runSyncCollectionSchedule(
+	ctx context.Context,
+	cacheUUID, repoID string,
+	tasks []syncCollectionTask,
+	budget int,
+	observe syncCollectionObserver,
+	wait syncCollectionWait,
+	now func() time.Time,
+	hooks *syncCollectionRetryHooks,
+) []syncCollectionExecution {
+	if budget <= 0 {
+		budget = defaultSyncCollectionRetryBudget
+	}
+	if now == nil {
+		now = func() time.Time { return time.Now().UTC() }
+	}
+	if wait == nil {
+		wait = waitForSyncCollectionRetry
+	}
+	pending := make([]pendingSyncCollection, 0, len(tasks))
+	for _, task := range tasks {
+		pending = append(pending, pendingSyncCollection{task: task, attempt: task.AttemptStart, dueAt: task.DueAt})
+	}
+	executions := make([]syncCollectionExecution, 0, len(tasks))
+	for len(pending) > 0 {
+		current := -1
+		observedAt := now()
+		for i := range pending {
+			if pending[i].dueAt.IsZero() || !pending[i].dueAt.After(observedAt) {
+				current = i
+				break
+			}
+		}
+		if current < 0 {
+			current = 0
+			for i := 1; i < len(pending); i++ {
+				if pending[i].dueAt.Before(pending[current].dueAt) {
+					current = i
+				}
+			}
+		}
+		item := pending[current]
+		pending = append(pending[:current], pending[current+1:]...)
+		if delay := item.dueAt.Sub(now()); !item.dueAt.IsZero() && delay > 0 {
+			if err := wait(ctx, delay); err != nil {
+				view := syncCollectionViewForAttempt(item.task.Collection, publicSyncFrontierRef(cacheUUID, repoID, item.task.Collection, item.task.PrivateFrontier), item.attempt, budget, nil, err, now())
+				if hooks != nil && hooks.Terminal != nil {
+					_ = hooks.Terminal(item.task)
+				}
+				if observe != nil {
+					observe(view)
+				}
+				executions = append(executions, syncCollectionExecution{Result: item.result, Collection: syncCollectionResult{RemoteType: item.task.RemoteType, Result: item.result, Err: err}, Err: err})
+				continue
+			}
+		}
+		item.attempt++
+		result, collectionResult, err := item.task.Attempt(item.attempt)
+		if result != nil {
+			// Attempts describe the same frontier. Keep the newest observation
+			// instead of double-counting replayed idempotent commits.
+			item.result = result
+		}
+		frontierRef := publicSyncFrontierRef(cacheUUID, repoID, item.task.Collection, item.task.PrivateFrontier)
+		view := syncCollectionViewForAttempt(item.task.Collection, frontierRef, item.attempt, budget, item.result, err, now())
+		policy := classifySyncCollectionFailure(err)
+		if err != nil && policy.Transient && item.attempt < budget && ctx.Err() == nil {
+			delay := syncCollectionRetryDelay(cacheUUID, repoID, item.task.Collection, frontierRef, item.attempt, policy.RetryAfter)
+			retryAt := now().Add(delay)
+			view.Outcome, view.RetryAfter = SyncCollectionRetryScheduled, &retryAt
+			if hooks != nil && hooks.Scheduled != nil {
+				if persistErr := hooks.Scheduled(item.task, item.attempt, retryAt); persistErr != nil {
+					view.Outcome, view.RetryAfter, view.ErrorClass = SyncCollectionPermanentFailure, nil, "retry_checkpoint_persist_failed"
+					if observe != nil {
+						observe(view)
+					}
+					collectionResult.Err = persistErr
+					executions = append(executions, syncCollectionExecution{Result: item.result, Collection: collectionResult, Err: persistErr})
+					continue
+				}
+			}
+			if observe != nil {
+				observe(view)
+			}
+			item.dueAt = retryAt
+			pending = append(pending, item)
+			continue
+		}
+		if hooks != nil && hooks.Terminal != nil {
+			if clearErr := hooks.Terminal(item.task); clearErr != nil {
+				view.ErrorClass = "retry_checkpoint_persist_failed"
+				if item.result != nil && item.result.SuccessCount > 0 {
+					view.Outcome = SyncCollectionPartial
+				} else {
+					view.Outcome = SyncCollectionPermanentFailure
+				}
+				if observe != nil {
+					observe(view)
+				}
+				collectionResult.Err = clearErr
+				executions = append(executions, syncCollectionExecution{Result: item.result, Collection: collectionResult, Err: clearErr})
+				continue
+			}
+		}
+		if observe != nil {
+			observe(view)
+		}
+		collectionResult.Result = item.result
+		executions = append(executions, syncCollectionExecution{Result: item.result, Collection: collectionResult, Err: err})
+	}
+	return executions
+}
+
 func runSyncCollectionWithRetry(
 	ctx context.Context,
 	cacheUUID, repoID, collection, privateFrontier string,

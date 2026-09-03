@@ -1607,6 +1607,87 @@ func (m *MaintenanceManager) ReconcileRegistration(ctx context.Context, registra
 	return MaintenanceReconcileResult{Entries: []MaintenanceEntry{entry}, JobsStarted: started, CheckedAt: m.now()}, nil
 }
 
+// RetrySyncCollection starts one explicit collection/frontier without
+// advancing or replaying unrelated successful collections.
+func (m *MaintenanceManager) RetrySyncCollection(ctx context.Context, registrationID, collection string) (MaintenanceReconcileResult, error) {
+	m.reconcileMu.Lock()
+	defer m.reconcileMu.Unlock()
+	registrationID, collection = strings.TrimSpace(registrationID), strings.TrimSpace(collection)
+	if registrationID == "" || collection == "" {
+		return MaintenanceReconcileResult{}, errors.New("maintenance: registration_id and collection are required")
+	}
+	m.mu.Lock()
+	registrationID = m.resolveRegistrationIDLocked(registrationID)
+	registered := m.entries[registrationID]
+	snapshot := cloneMaintenanceEntryPrivate(registered)
+	m.mu.Unlock()
+	if registered == nil {
+		return MaintenanceReconcileResult{}, errors.New("maintenance: registration not found")
+	}
+	if !snapshot.Enabled || snapshot.IdentityConflict != nil {
+		return MaintenanceReconcileResult{}, errors.New("maintenance: registration is not available for collection retry")
+	}
+	remoteType, selected, ok := maintenanceCollectionRetrySelection(snapshot.Policy, collection)
+	if !ok {
+		return MaintenanceReconcileResult{}, errors.New("maintenance: collection is not enabled by policy")
+	}
+	store, err := cache.NewSQLiteReadOnlyStore(ctx, snapshot.cachePath)
+	if err != nil {
+		return MaintenanceReconcileResult{}, err
+	}
+	frontiers, frontierErr := store.ListMaintenanceFrontiers(ctx, snapshot.RepoID)
+	store.Close()
+	if frontierErr != nil {
+		return MaintenanceReconcileResult{}, frontierErr
+	}
+	page := 1
+	for _, frontier := range frontiers {
+		if frontier.RemoteType == remoteType && frontier.Lane == "head" {
+			if checkpoint := checkpointPage(frontier.Checkpoint); checkpoint > 0 {
+				page = checkpoint
+			}
+			break
+		}
+	}
+	selected.RepoID, selected.ProviderMode, selected.CachePath = snapshot.RepoID, "live", snapshot.cachePath
+	selected.CacheUUID, selected.RegistrationID, selected.Lane = snapshot.CacheUUID, snapshot.RegistrationID, "head"
+	selected.MaxPages, selected.PerPage, selected.Page = 1, snapshot.Policy.PerPage, page
+	selected.collectionPages = map[string]int{remoteType: page}
+	selected.IdempotencyKey = fmt.Sprintf("maintenance-collection-retry-%s-%s-%d", snapshot.RegistrationID, remoteType, m.now().Unix()/60)
+	jobManager := m.manager
+	if snapshot.ConfigHash != "" {
+		jobManager.EffectiveConfig = &snapshot.configSnapshot
+	}
+	job, err := m.jobs.StartSync(context.Background(), jobManager, selected)
+	if err != nil {
+		return MaintenanceReconcileResult{}, err
+	}
+	return MaintenanceReconcileResult{Entries: []MaintenanceEntry{cloneMaintenanceEntry(&snapshot)}, JobsStarted: []string{job.ID}, CheckedAt: m.now()}, nil
+}
+
+func maintenanceCollectionRetrySelection(policy MaintenancePolicy, collection string) (string, StartSyncJobRequest, bool) {
+	selection := StartSyncJobRequest{}
+	switch collection {
+	case "issues":
+		selection.Issues = true
+		return "issue", selection, policy.Issues
+	case "issue_comments":
+		selection.IssueComments = true
+		return "issue_comment", selection, policy.IssueComments
+	case "wiki":
+		selection.Wiki = true
+		return "wiki", selection, policy.Wiki
+	case "pulls":
+		selection.Pulls = true
+		return "pull_request", selection, policy.Pulls
+	case "pr_comments":
+		selection.PRComments = true
+		return "pr_comment", selection, policy.PRComments
+	default:
+		return "", selection, false
+	}
+}
+
 func (m *MaintenanceManager) ResolveConfig(req MaintenanceResolveConfigRequest) (MaintenanceResolveConfigResult, error) {
 	if strings.TrimSpace(req.CachePath) == "" {
 		return MaintenanceResolveConfigResult{}, errors.New("maintenance: cache_path is required")

@@ -116,12 +116,12 @@ func TestJobActionRetryCreatesCurrentMaintenanceWork(t *testing.T) {
 	jobs := NewJobManager("")
 	now := time.Now().UTC()
 	finished := now.Add(-time.Minute)
-	jobs.jobs["job-000001"] = &Job{ID: "job-000001", Type: SyncJobType, RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", Status: JobStatusFailed, CreatedAt: finished, UpdatedAt: finished, FinishedAt: &finished}
+	jobs.jobs["job-000001"] = &Job{ID: "job-000001", Type: SyncJobType, RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", Status: JobStatusFailed, CreatedAt: finished, UpdatedAt: finished, FinishedAt: &finished, SyncCollections: []SyncCollectionView{{Collection: "wiki", Outcome: SyncCollectionPermanentFailure}}}
 	jobs.nextID = 1
 	actions := NewJobActionManager("", jobs, nil)
-	actions.reconcile = func(_ context.Context, registrationID string) (MaintenanceReconcileResult, error) {
-		if registrationID != "reg-1" {
-			t.Fatalf("registration=%q", registrationID)
+	actions.reconcile = func(_ context.Context, registrationID, collection string) (MaintenanceReconcileResult, error) {
+		if registrationID != "reg-1" || collection != "wiki" {
+			t.Fatalf("registration=%q collection=%q", registrationID, collection)
 		}
 		created, _, err := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 10, "new-sync-work", "cache-1", "reg-1", "", func() {})
 		if err != nil {
@@ -129,7 +129,7 @@ func TestJobActionRetryCreatesCurrentMaintenanceWork(t *testing.T) {
 		}
 		return MaintenanceReconcileResult{JobsStarted: []string{created.ID}}, nil
 	}
-	receipt, err := actions.Retry(context.Background(), adminhttp.JobActionRequest{JobID: "job-000001", IdempotencyKey: "retry-new"})
+	receipt, err := actions.Retry(context.Background(), adminhttp.JobActionRequest{JobID: "job-000001", Collection: "wiki", IdempotencyKey: "retry-new"})
 	if err != nil || receipt.Outcome != "created" || receipt.ResultJob != "job-000002" || receipt.JobStatus != JobStatusQueued {
 		t.Fatalf("receipt=%+v err=%v", receipt, err)
 	}
@@ -160,6 +160,10 @@ func TestJobActionStateAndCapabilityBoundaries(t *testing.T) {
 	assertCode("cancel", adminhttp.JobActionRequest{JobID: "terminal", IdempotencyKey: "b"}, "job_not_active")
 	assertCode("retry", adminhttp.JobActionRequest{JobID: "active", IdempotencyKey: "c"}, "job_not_terminal")
 	assertCode("retry", adminhttp.JobActionRequest{JobID: "terminal", IdempotencyKey: "d"}, "retry_unavailable")
+	jobs.jobs["terminal"].RegistrationID = "reg"
+	jobs.jobs["terminal"].SyncCollections = []SyncCollectionView{{Collection: "wiki", Outcome: SyncCollectionSuccess}}
+	assertCode("retry", adminhttp.JobActionRequest{JobID: "terminal", Collection: "wiki", IdempotencyKey: "e"}, "collection_retry_unavailable")
+	assertCode("retry", adminhttp.JobActionRequest{JobID: "terminal", Collection: "unknown", IdempotencyKey: "f"}, "collection_retry_unavailable")
 }
 
 func TestJobActionReceiptsAreBounded(t *testing.T) {

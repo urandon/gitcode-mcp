@@ -162,6 +162,22 @@ export type Job = {
   progress_limit: number;
   throughput_per_second?: number;
   eta_seconds?: number;
+  sync_health?: string;
+  sync_collections?: Array<{
+    collection: string;
+    outcome: string;
+    frontier_ref?: string;
+    records_listed?: number;
+    committed?: number;
+    failed?: number;
+    error_class?: string;
+    attempt?: number;
+    retry_budget?: number;
+    retry_after?: string;
+    last_success_at?: string;
+    updated_at: string;
+    retryable: boolean;
+  }>;
   sync_stage?: {
     stage_ref: string;
     collection?: string;

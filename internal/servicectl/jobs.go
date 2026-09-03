@@ -59,6 +59,7 @@ type Job struct {
 
 type JobManager struct {
 	mu                                  sync.Mutex
+	syncRetryMu                         sync.Mutex
 	jobs                                map[string]*Job
 	cancel                              map[string]context.CancelFunc
 	cancelResolution                    map[string]*jobCancellationResolution

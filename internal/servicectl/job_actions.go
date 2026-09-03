@@ -37,7 +37,7 @@ type JobActionManager struct {
 	mu        sync.Mutex
 	path      string
 	jobs      *JobManager
-	reconcile func(context.Context, string) (MaintenanceReconcileResult, error)
+	reconcile func(context.Context, string, string) (MaintenanceReconcileResult, error)
 	receipts  map[string]jobActionReceiptDisk
 	now       func() time.Time
 }
@@ -45,7 +45,12 @@ type JobActionManager struct {
 func NewJobActionManager(path string, jobs *JobManager, maintenance *MaintenanceManager) *JobActionManager {
 	manager := &JobActionManager{path: path, jobs: jobs, receipts: map[string]jobActionReceiptDisk{}, now: func() time.Time { return time.Now().UTC() }}
 	if maintenance != nil {
-		manager.reconcile = maintenance.ReconcileRegistration
+		manager.reconcile = func(ctx context.Context, registrationID, collection string) (MaintenanceReconcileResult, error) {
+			if strings.TrimSpace(collection) != "" {
+				return maintenance.RetrySyncCollection(ctx, registrationID, collection)
+			}
+			return maintenance.ReconcileRegistration(ctx, registrationID)
+		}
 	}
 	return manager
 }
@@ -87,12 +92,13 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	req.JobID = strings.TrimSpace(req.JobID)
+	req.Collection = strings.TrimSpace(req.Collection)
 	req.IdempotencyKey = strings.TrimSpace(req.IdempotencyKey)
 	if req.JobID == "" || req.IdempotencyKey == "" {
 		return adminhttp.JobActionReceipt{}, jobActionError(http.StatusBadRequest, "invalid_request", "job_id and idempotency_key are required.", "Refresh the job and generate a new action key.")
 	}
 	keyHash := hashJobAction(req.IdempotencyKey)
-	intentHash := hashJobAction(action + "\x00" + req.JobID)
+	intentHash := hashJobAction(action + "\x00" + req.JobID + "\x00" + req.Collection)
 	if stored, ok := m.receipts[keyHash]; ok {
 		if stored.IntentHash != intentHash {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "idempotency_conflict", "The idempotency key was already used for a different job action.", "Generate a new key for the changed intent.")
@@ -136,6 +142,9 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		if job.RegistrationID == "" {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "retry_unavailable", "The retained job has no maintenance registration to reconcile.", "Use the maintenance setup CLI for this repository.")
 		}
+		if req.Collection != "" && (job.Type != SyncJobType || !retryableSyncCollection(job, req.Collection)) {
+			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "collection_retry_unavailable", "The selected collection is not a failed terminal collection on this sync job.", "Refresh the job and choose a partial or permanently failed collection.")
+		}
 		if active, found := m.jobs.ActiveCacheRepo(job.Type, job.CacheUUID, job.RepoID); found {
 			receipt.ResultJob, receipt.Outcome, receipt.JobStatus = active.ID, "coalesced", active.Status
 			break
@@ -143,7 +152,7 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		if m.reconcile == nil {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusNotImplemented, "capability_unavailable", "Retry is not available in the running daemon.", "Use the maintenance CLI for this registration.")
 		}
-		result, err := m.reconcile(ctx, job.RegistrationID)
+		result, err := m.reconcile(ctx, job.RegistrationID, req.Collection)
 		if err != nil {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "retry_failed", "The maintenance registration could not be reconciled.", "Refresh maintenance status and resolve its typed diagnostic.")
 		}
@@ -226,6 +235,16 @@ func (m *JobActionManager) pruneLocked() {
 func hashJobAction(value string) string {
 	hash := sha256.Sum256([]byte(strings.TrimSpace(value)))
 	return hex.EncodeToString(hash[:])
+}
+
+func retryableSyncCollection(job Job, collection string) bool {
+	for _, state := range job.SyncCollections {
+		if state.Collection != collection {
+			continue
+		}
+		return state.Outcome == SyncCollectionPartial || state.Outcome == SyncCollectionPermanentFailure
+	}
+	return false
 }
 
 func jobActionError(status int, code, message, remediation string) error {

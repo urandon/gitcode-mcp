@@ -12,6 +12,7 @@ import (
 
 type JobActionRequest struct {
 	JobID          string `json:"job_id"`
+	Collection     string `json:"collection,omitempty"`
 	IdempotencyKey string `json:"idempotency_key"`
 }
 

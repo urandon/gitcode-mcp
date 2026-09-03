@@ -50,6 +50,82 @@ func TestDurableSyncSelectorInvariantCoversDefaultAndComments(t *testing.T) {
 	}
 }
 
+func TestDaemonRestartResumesOnlyPendingCollectionRetry(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	cachePath := filepath.Join(root, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := cache.RepositoryBinding{
+		RepoID: "owner/repo", Owner: "owner", Name: "repo",
+		Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki},
+	}
+	if err := store.AddRepository(ctx, binding); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	jobsPath := filepath.Join(root, "jobs.json")
+	before := NewJobManager(jobsPath)
+	now := time.Now().UTC()
+	retryAt := now.Add(-time.Second)
+	jobID := "job-000001"
+	before.jobs[jobID] = &Job{
+		ID: jobID, Type: SyncJobType, RepoID: binding.RepoID, CacheUUID: identity.UUID,
+		RegistrationID: maintenanceRegistrationID(identity.UUID, binding.RepoID),
+		Status:         JobStatusRunning, CreatedAt: now.Add(-time.Minute), UpdatedAt: now,
+		SyncHealth: SyncHealthPartialRetrying,
+		SyncCollections: []SyncCollectionView{
+			{Collection: "issues", Outcome: SyncCollectionSuccess, Attempt: 1, UpdatedAt: now},
+			{Collection: "wiki", Outcome: SyncCollectionRetryScheduled, Attempt: 1, RetryBudget: 4, RetryAfter: &retryAt, UpdatedAt: now},
+		},
+	}
+	before.nextID = 1
+	if err := before.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	journal := newSyncCollectionRetryJournal(root)
+	if err := journal.Upsert(syncCollectionRetryCheckpoint{
+		JobID: jobID, Collection: "wiki", RemoteType: "wiki", Attempt: 1, RetryAt: retryAt,
+		Request: syncCollectionRetryRequest{
+			RepoID: binding.RepoID, ProviderMode: "fixture", CachePath: cachePath,
+			Issues: true, Wiki: true, MaxPages: 1, PerPage: 100,
+			CacheUUID: identity.UUID, RegistrationID: maintenanceRegistrationID(identity.UUID, binding.RepoID),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := NewJobManager(jobsPath)
+	if err := restarted.LoadAndMarkInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	manager := newTestManager(t, "darwin")
+	manager.RuntimeDir = root
+	if err := restarted.RecoverSyncStages(ctx, manager); err != nil {
+		t.Fatal(err)
+	}
+	job := waitForManagerJobTerminal(t, restarted, jobID)
+	if job.Status != JobStatusSucceeded || job.SyncHealth != SyncHealthSucceeded {
+		t.Fatalf("recovered retry job=%+v", job)
+	}
+	if len(job.SyncCollections) != 2 || job.SyncCollections[0].Collection != "issues" || job.SyncCollections[0].Attempt != 1 || job.SyncCollections[1].Collection != "wiki" || job.SyncCollections[1].Attempt != 2 {
+		t.Fatalf("restart repeated a successful collection or lost retry attempt: %+v", job.SyncCollections)
+	}
+	checkpoints, err := journal.List()
+	if err != nil || len(checkpoints) != 0 {
+		t.Fatalf("terminal retry checkpoints=%+v err=%v", checkpoints, err)
+	}
+}
+
 func TestDurableCollectionPersistsPartialFetchOutcomeBeforeCommit(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

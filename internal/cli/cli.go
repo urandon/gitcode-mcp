@@ -2150,6 +2150,22 @@ func renderServiceJobText(w io.Writer, job servicectl.Job) {
 	if job.Error != "" {
 		fmt.Fprintf(w, "message: %s\n", job.Error)
 	}
+	if job.SyncHealth != "" {
+		fmt.Fprintf(w, "sync_health: %s\n", job.SyncHealth)
+	}
+	for _, collection := range job.SyncCollections {
+		fmt.Fprintf(w, "sync_collection_health: collection=%s outcome=%s frontier=%s committed=%d listed=%d failed=%d retry=%d/%d", collection.Collection, collection.Outcome, collection.FrontierRef, collection.Committed, collection.RecordsListed, collection.Failed, collection.Attempt, collection.RetryBudget)
+		if collection.ErrorClass != "" {
+			fmt.Fprintf(w, " error_class=%s", collection.ErrorClass)
+		}
+		if collection.RetryAfter != nil {
+			fmt.Fprintf(w, " retry_after=%s", collection.RetryAfter.Format(time.RFC3339))
+		}
+		if collection.LastSuccessAt != nil {
+			fmt.Fprintf(w, " last_success_at=%s", collection.LastSuccessAt.Format(time.RFC3339))
+		}
+		fmt.Fprintln(w)
+	}
 	if stage := job.SyncStage; stage != nil {
 		fmt.Fprintf(w, "sync_phase: %s\n", stage.Phase)
 		fmt.Fprintf(w, "sync_collection: %s\n", stage.Collection)
