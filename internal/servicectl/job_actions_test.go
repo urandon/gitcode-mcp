@@ -99,7 +99,7 @@ func TestJobActionRetryCoalescesEquivalentWork(t *testing.T) {
 	jobs := NewJobManager("")
 	now := time.Now().UTC()
 	finished := now.Add(-time.Minute)
-	jobs.jobs["job-000001"] = &Job{ID: "job-000001", Type: RAGIndexJobType, RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", Status: JobStatusFailed, CreatedAt: finished, UpdatedAt: finished, FinishedAt: &finished}
+	jobs.jobs["job-000001"] = &Job{ID: "job-000001", Type: RAGIndexJobType, RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", WorkRef: publicWorkRef("rag-work"), Status: JobStatusFailed, CreatedAt: finished, UpdatedAt: finished, FinishedAt: &finished}
 	jobs.nextID = 1
 	active, _, err := jobs.createCoalescedJob(RAGIndexJobType, "owner/repo", "profile", 10, "rag-work", "cache-1", "reg-1", "ns-1", func() {})
 	if err != nil {
@@ -240,6 +240,41 @@ func TestJobActionRetryPreparedReceiptRedrivesCrashBeforeMutation(t *testing.T) 
 	}
 }
 
+func TestJobActionWholeRetryPendingReceiptRequiresExactRetainedWork(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "actions.json")
+	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+	now := time.Now().UTC()
+	headWork := syncWorkKey(StartSyncJobRequest{RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", Lane: "head", Issues: true})
+	jobs.jobs["job-000001"] = &Job{ID: "job-000001", Type: SyncJobType, RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", WorkRef: publicWorkRef(headWork), Status: JobStatusFailed, CreatedAt: now.Add(-time.Minute), UpdatedAt: now.Add(-time.Minute)}
+	jobs.nextID = 1
+	req := adminhttp.JobActionRequest{JobID: "job-000001", IdempotencyKey: "whole-retry"}
+	keyHash := hashJobAction(req.IdempotencyKey)
+	intentHash := hashJobAction("retry\x00" + req.JobID + "\x00")
+	actions := NewJobActionManager(path, jobs, nil)
+	actions.receipts[keyHash] = jobActionReceiptDisk{KeyHash: keyHash, IntentHash: intentHash, Receipt: adminhttp.JobActionReceipt{
+		ReceiptID: "receipt-" + keyHash[:16], Action: "retry", TargetJob: req.JobID, Outcome: "pending", JobStatus: JobStatusFailed, CreatedAt: now,
+	}}
+	wrong, _, err := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 1, syncWorkKey(StartSyncJobRequest{RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", Lane: "tail", Wiki: true}), "cache-1", "reg-1", "", func() {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs.finishJob(wrong.ID, JobStatusInterrupted, "restart")
+	runs := 0
+	actions.reconcile = func(context.Context, string, string) (MaintenanceReconcileResult, error) {
+		runs++
+		created, _, createErr := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 1, headWork, "cache-1", "reg-1", "", func() {})
+		if createErr != nil {
+			return MaintenanceReconcileResult{}, createErr
+		}
+		return MaintenanceReconcileResult{JobsStarted: []string{created.ID}}, nil
+	}
+	receipt, err := actions.Retry(context.Background(), req)
+	if err != nil || receipt.ResultJob == wrong.ID || receipt.Outcome != "created" || runs != 1 {
+		t.Fatalf("receipt=%+v wrong=%+v runs=%d err=%v", receipt, wrong, runs, err)
+	}
+}
+
 func TestJobActionCollectionRetryDoesNotCoalesceDifferentActiveCollection(t *testing.T) {
 	jobs := NewJobManager("")
 	now := time.Now().UTC()
@@ -354,7 +389,7 @@ func TestJobActionReceiptPruningNeverEvictsPendingIntent(t *testing.T) {
 func TestJobActionRetryFailsClosedWhenPendingIntentCapacityIsFull(t *testing.T) {
 	jobs := NewJobManager("")
 	now := time.Now().UTC()
-	jobs.jobs["job-000001"] = &Job{ID: "job-000001", Type: SyncJobType, RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", Status: JobStatusFailed, CreatedAt: now, UpdatedAt: now}
+	jobs.jobs["job-000001"] = &Job{ID: "job-000001", Type: SyncJobType, RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", WorkRef: publicWorkRef("sync-work"), Status: JobStatusFailed, CreatedAt: now, UpdatedAt: now}
 	actions := NewJobActionManager("", jobs, nil)
 	for index := 0; index < maxJobActionReceipts; index++ {
 		key := hashJobAction("pending-" + time.Duration(index).String())

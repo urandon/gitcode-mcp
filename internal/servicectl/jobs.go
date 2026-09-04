@@ -644,6 +644,10 @@ func (m *JobManager) SetWorkIdentity(id, workKey, cacheUUID, registrationID, nam
 // but their persisted identity still proves that replay must not admit the
 // same work again.
 func (m *JobManager) RetainedRetryIntentResult(source Job, workRef string, notBefore time.Time) (Job, bool) {
+	workRef = strings.TrimSpace(workRef)
+	if workRef == "" {
+		return Job{}, false
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var matched *Job
@@ -651,11 +655,7 @@ func (m *JobManager) RetainedRetryIntentResult(source Job, workRef string, notBe
 		if candidate.ID == source.ID || candidate.CacheUUID != source.CacheUUID || candidate.RepoID != source.RepoID || candidate.RegistrationID != source.RegistrationID || candidate.CreatedAt.Before(notBefore) {
 			continue
 		}
-		if workRef != "" {
-			if candidate.Type != SyncJobType || candidate.WorkRef != workRef {
-				continue
-			}
-		} else if candidate.Type != source.Type {
+		if candidate.Type != source.Type || candidate.WorkRef != workRef {
 			continue
 		}
 		if matched == nil || candidate.CreatedAt.Before(matched.CreatedAt) || candidate.CreatedAt.Equal(matched.CreatedAt) && parseJobIDNumber(candidate.ID) < parseJobIDNumber(matched.ID) {

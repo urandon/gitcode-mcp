@@ -171,11 +171,14 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		if job.RegistrationID == "" {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "retry_unavailable", "The retained job has no maintenance registration to reconcile.", "Use the maintenance setup CLI for this repository.")
 		}
+		if req.Collection == "" && strings.TrimSpace(job.WorkRef) == "" {
+			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "retry_identity_unavailable", "The retained job has no durable work identity for restart-safe retry.", "Run maintenance reconciliation directly; newer jobs retain the identity required for Admin retry.")
+		}
 		if req.Collection != "" && (job.Type != SyncJobType || !retryableSyncCollection(job, req.Collection)) {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "collection_retry_unavailable", "The selected collection is not a failed terminal collection on this sync job.", "Refresh the job and choose a partial or permanently failed collection.")
 		}
 		if preparedReceipt != nil {
-			workRef := ""
+			workRef := job.WorkRef
 			if req.Collection != "" {
 				workRef = adminCollectionRetryWorkRef(job, req.Collection)
 			}
