@@ -33,6 +33,7 @@ type HTTPClient struct {
 	maxRetries      int
 	userAgent       string
 	client          *http.Client
+	now             func() time.Time
 	pagination      PaginationConfig
 	rateLimiter     *clientRateLimiter
 	rateLimiterMu   sync.Mutex
@@ -66,6 +67,7 @@ func NewHTTPClient(cfg Config) (*HTTPClient, error) {
 		maxRetries:      cfg.MaxRetries,
 		userAgent:       ua,
 		client:          client,
+		now:             time.Now,
 		pagination:      cfg.Pagination,
 		rateLimiter:     newClientRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst),
 	}, nil
@@ -1233,7 +1235,7 @@ func (c *HTTPClient) getWikiPageByPath(ctx context.Context, owner, repo, wikiPat
 		}
 		body = decoded
 	}
-	return wikiPageFromMetadata(meta, string(body)), nil
+	return wikiPageFromMetadata(meta, string(body), c.nowUTC()), nil
 }
 
 func (c *HTTPClient) getWikiMetadata(ctx context.Context, owner, repo, wikiPath string) (WikiContentsFile, error) {
@@ -1274,7 +1276,7 @@ func (c *HTTPClient) writeWikiContent(ctx context.Context, method, endpoint, ope
 	if err != nil {
 		return WriteResult[WikiPage]{}, err
 	}
-	page := wikiPageFromMetadata(result.Record, body)
+	page := wikiPageFromMetadata(result.Record, body, c.nowUTC())
 	return WriteResult[WikiPage]{Record: page, Confirmed: result.Confirmed, Operation: result.Operation, Target: result.Target, ProviderStatus: result.ProviderStatus, RemoteID: result.RemoteID, RemoteSlug: result.RemoteSlug, RemoteRevision: result.RemoteRevision, APIPath: result.APIPath, CachePath: result.CachePath, BrowserURL: result.BrowserURL, IdempotencyKey: result.IdempotencyKey, ResponseHash: result.ResponseHash, ConfirmedAt: result.ConfirmedAt, ProviderPayloadFingerprint: result.ProviderPayloadFingerprint}, nil
 }
 
@@ -1302,7 +1304,7 @@ func (c *HTTPClient) deleteWikiContent(ctx context.Context, endpoint, operation,
 	if err != nil {
 		return WriteResult[WikiPage]{}, err
 	}
-	page := wikiPageFromMetadata(result.Record, "")
+	page := wikiPageFromMetadata(result.Record, "", c.nowUTC())
 	return WriteResult[WikiPage]{Record: page, Confirmed: result.Confirmed, Operation: result.Operation, Target: result.Target, ProviderStatus: result.ProviderStatus, RemoteID: result.RemoteID, RemoteSlug: result.RemoteSlug, RemoteRevision: result.RemoteRevision, APIPath: result.APIPath, CachePath: result.CachePath, BrowserURL: result.BrowserURL, IdempotencyKey: result.IdempotencyKey, ResponseHash: result.ResponseHash, ConfirmedAt: result.ConfirmedAt, ProviderPayloadFingerprint: result.ProviderPayloadFingerprint}, nil
 }
 
@@ -2065,9 +2067,16 @@ func isImportableWikiMarkdown(wikiPath string) bool {
 	}
 }
 
-func wikiPageFromMetadata(meta WikiContentsFile, body string) WikiPage {
+func (c *HTTPClient) nowUTC() time.Time {
+	if c.now == nil {
+		return time.Now().UTC()
+	}
+	return c.now().UTC()
+}
+
+func wikiPageFromMetadata(meta WikiContentsFile, body string, updatedAt time.Time) WikiPage {
 	wikiPath := normalizeWikiPath(meta.Path)
-	return WikiPage{ID: wikiPath, Slug: wikiPath, Title: wikiTitleFromPath(wikiPath), Body: body, Revision: strings.TrimSpace(meta.Sha), UpdatedAt: time.Now().UTC()}
+	return WikiPage{ID: wikiPath, Slug: wikiPath, Title: wikiTitleFromPath(wikiPath), Body: body, Revision: strings.TrimSpace(meta.Sha), UpdatedAt: updatedAt.UTC()}
 }
 
 func wikiTitleFromPath(wikiPath string) string {
