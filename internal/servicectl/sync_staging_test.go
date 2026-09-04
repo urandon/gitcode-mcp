@@ -442,3 +442,30 @@ func TestCancelledStageRetainsPayloadAndBecomesOneTerminalEnvelope(t *testing.T)
 		t.Fatalf("terminal stages=%+v err=%v", stages, err)
 	}
 }
+
+func TestSyncStageJournalRemoveCollectionStagesKeepsSiblingRecoveryAuthority(t *testing.T) {
+	root := t.TempDir()
+	journal := NewSyncStageJournal(root, SyncStageLimits{})
+	base := SyncStageEnvelope{
+		JobID: "job-000001", CacheUUID: "cache-a", CacheSchema: 1, CachePath: filepath.Join(root, "cache.db"),
+		RegistrationID: "reg-a", RepoID: "owner/repo", BindingFingerprint: "binding-a", Checkpoint: "complete",
+		RecordCount: 1, Payload: json.RawMessage(`{}`), State: SyncStageState{Phase: SyncStageCommitted},
+	}
+	issues := base
+	issues.Collection, issues.IdempotencyKey = "issues", "issues-commit"
+	if _, err := journal.Create(issues); err != nil {
+		t.Fatal(err)
+	}
+	wiki := base
+	wiki.Collection, wiki.IdempotencyKey = "wiki", "wiki-commit"
+	if _, err := journal.Create(wiki); err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.RemoveCollectionStages(base.JobID, "issues"); err != nil {
+		t.Fatal(err)
+	}
+	stages, err := journal.List()
+	if err != nil || len(stages) != 1 || stages[0].Collection != "wiki" {
+		t.Fatalf("stages=%+v err=%v", stages, err)
+	}
+}

@@ -361,9 +361,10 @@ type MaintenanceListResult struct {
 }
 
 type MaintenanceReconcileResult struct {
-	Entries     []MaintenanceEntry `json:"entries"`
-	JobsStarted []string           `json:"jobs_started,omitempty"`
-	CheckedAt   time.Time          `json:"checked_at"`
+	Entries       []MaintenanceEntry `json:"entries"`
+	JobsStarted   []string           `json:"jobs_started,omitempty"`
+	JobsCoalesced []string           `json:"jobs_coalesced,omitempty"`
+	CheckedAt     time.Time          `json:"checked_at"`
 }
 
 type MaintenanceCapabilities struct {
@@ -1658,11 +1659,17 @@ func (m *MaintenanceManager) RetrySyncCollection(ctx context.Context, registrati
 	if snapshot.ConfigHash != "" {
 		jobManager.EffectiveConfig = &snapshot.configSnapshot
 	}
-	job, err := m.jobs.StartSync(context.Background(), jobManager, selected)
+	job, created, err := m.jobs.startSync(context.Background(), jobManager, selected)
 	if err != nil {
 		return MaintenanceReconcileResult{}, err
 	}
-	return MaintenanceReconcileResult{Entries: []MaintenanceEntry{cloneMaintenanceEntry(&snapshot)}, JobsStarted: []string{job.ID}, CheckedAt: m.now()}, nil
+	result := MaintenanceReconcileResult{Entries: []MaintenanceEntry{cloneMaintenanceEntry(&snapshot)}, CheckedAt: m.now()}
+	if created {
+		result.JobsStarted = []string{job.ID}
+	} else {
+		result.JobsCoalesced = []string{job.ID}
+	}
+	return result, nil
 }
 
 func maintenanceCollectionRetrySelection(policy MaintenancePolicy, collection string) (string, StartSyncJobRequest, bool) {

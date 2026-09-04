@@ -569,7 +569,7 @@ export const emptySnapshot: ObservationSnapshot = {
 
 export function humanize(value: string | undefined): string {
   if (!value) return 'Unknown';
-  return value.replaceAll('_', ' ').replaceAll('-', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+  return value.replaceAll('_', ' ').replaceAll('-', ' ').replaceAll('/', ' / ').replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 export function statusTone(value: string | undefined): 'good' | 'warn' | 'bad' | 'neutral' {
@@ -590,6 +590,7 @@ export function statusTone(value: string | undefined): 'good' | 'warn' | 'bad' |
     case 'unavailable':
       return 'bad';
     case 'partial':
+    case 'partial/retrying':
     case 'degraded':
     case 'warning':
     case 'queued':

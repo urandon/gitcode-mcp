@@ -99,7 +99,7 @@ func (m *AdminControlManager) ReconcileMaintenance(ctx context.Context, req admi
 		if err != nil {
 			return nil, adminControlError(err)
 		}
-		return map[string]any{"outcome": maintenanceReconcileOutcome(result), "jobs_started": result.JobsStarted, "checked_at": result.CheckedAt}, nil
+		return map[string]any{"outcome": maintenanceReconcileOutcome(result), "jobs_started": result.JobsStarted, "jobs_coalesced": result.JobsCoalesced, "checked_at": result.CheckedAt}, nil
 	})
 }
 
@@ -557,6 +557,9 @@ func controlFieldError(field, message, remediation string) error {
 func maintenanceReconcileOutcome(result MaintenanceReconcileResult) string {
 	if len(result.JobsStarted) > 0 {
 		return "created"
+	}
+	if len(result.JobsCoalesced) > 0 {
+		return "coalesced"
 	}
 	return "no_work_needed"
 }

@@ -9,9 +9,11 @@ describe('admin presentation helpers', () => {
 
   it('maps status and staleness without relying on color', () => {
     expect(statusTone('degraded')).toBe('warn');
+    expect(statusTone('partial/retrying')).toBe('warn');
     expect(statusTone('cancelling')).toBe('warn');
     expect(statusTone('cache_schema_blocked')).toBe('bad');
     expect(humanize('retry_scheduled')).toBe('Retry Scheduled');
+    expect(humanize('partial/retrying')).toBe('Partial / Retrying');
     expect(isSnapshotStale('2026-08-25T10:00:00Z', Date.parse('2026-08-25T10:06:00Z'))).toBe(true);
   });
 

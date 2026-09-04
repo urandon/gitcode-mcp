@@ -165,6 +165,13 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 			} else {
 				receipt.ResultJob, receipt.Outcome, receipt.JobStatus = result.JobsStarted[0], "created", "not_retained"
 			}
+		} else if len(result.JobsCoalesced) > 0 {
+			coalesced, found := m.jobs.Get(result.JobsCoalesced[0])
+			if found {
+				receipt.ResultJob, receipt.Outcome, receipt.JobStatus = coalesced.ID, "coalesced", coalesced.Status
+			} else {
+				receipt.ResultJob, receipt.Outcome, receipt.JobStatus = result.JobsCoalesced[0], "coalesced", "not_retained"
+			}
 		} else if req.Collection == "" {
 			if active, found := m.jobs.ActiveCacheRepo(job.Type, job.CacheUUID, job.RepoID); found {
 				receipt.ResultJob, receipt.Outcome, receipt.JobStatus = active.ID, "coalesced", active.Status

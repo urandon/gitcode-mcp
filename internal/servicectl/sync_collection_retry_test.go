@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/gitcode"
 	"gitcode-mcp/internal/service"
 )
@@ -223,6 +224,38 @@ func TestRunSyncCollectionWithRetryDoesNotRetryPermanentFailure(t *testing.T) {
 	}
 }
 
+func TestCollectionFailureRetainsLastDurableSuccess(t *testing.T) {
+	clock := time.Unix(1_700_000_000, 0).UTC()
+	lastSuccess := clock.Add(-2 * time.Hour)
+	observed := []SyncCollectionView{}
+	runSyncCollectionSchedule(
+		context.Background(), "cache-a", "owner/repo",
+		[]syncCollectionTask{{
+			Collection: "wiki", RemoteType: "wiki", PrivateFrontier: "page:2", LastSuccessAt: lastSuccess,
+			Attempt: func(int) (*service.SyncResourcesResult, syncCollectionResult, error) {
+				err := gitcode.ErrForbidden{Status: 403}
+				return nil, syncCollectionResult{RemoteType: "wiki", Err: err}, err
+			},
+		}},
+		4, func(view SyncCollectionView) { observed = append(observed, view) }, nil, func() time.Time { return clock }, nil,
+	)
+	if len(observed) != 1 || observed[0].Outcome != SyncCollectionPermanentFailure || observed[0].LastSuccessAt == nil || !observed[0].LastSuccessAt.Equal(lastSuccess) {
+		t.Fatalf("failed collection lost last durable success: %+v", observed)
+	}
+}
+
+func TestLastSuccessfulMaintenanceFrontiersIgnoresNewerDegradation(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0).UTC()
+	got := lastSuccessfulMaintenanceFrontiers([]cache.MaintenanceFrontier{
+		{RemoteType: "wiki", Lane: "tail", Status: "complete", UpdatedAt: base},
+		{RemoteType: "wiki", Lane: "head", Status: "degraded", LastErrorClass: "network_timeout", UpdatedAt: base.Add(time.Hour)},
+		{RemoteType: "issue", Lane: "head", Status: "partial", UpdatedAt: base.Add(2 * time.Hour)},
+	})
+	if !got["wiki"].Equal(base) || !got["issue"].Equal(base.Add(2*time.Hour)) {
+		t.Fatalf("last successful frontiers=%+v", got)
+	}
+}
+
 func TestRunSyncCollectionScheduleDoesNotBlockOrRepeatDueCollections(t *testing.T) {
 	clock := time.Unix(1_700_000_000, 0).UTC()
 	order := []string{}
@@ -281,5 +314,53 @@ func TestRunSyncCollectionScheduleDoesNotBlockOrRepeatDueCollections(t *testing.
 		if execution.Collection.RemoteType == "issue" && (execution.Result == nil || execution.Result.SuccessCount != 1) {
 			t.Fatalf("retry replay counts were summed: %+v", execution)
 		}
+	}
+}
+
+func TestRunSyncCollectionScheduleSettlesCompletedCollectionBeforeSiblingBackoff(t *testing.T) {
+	clock := time.Unix(1_700_000_000, 0).UTC()
+	settled := []string{}
+	wikiAttempts := 0
+	tasks := []syncCollectionTask{
+		{
+			Collection: "issues", RemoteType: "issue", PrivateFrontier: "page:1",
+			Attempt: func(int) (*service.SyncResourcesResult, syncCollectionResult, error) {
+				result := &service.SyncResourcesResult{RecordsListed: 2, SuccessCount: 2}
+				return result, syncCollectionResult{RemoteType: "issue", Result: result}, nil
+			},
+		},
+		{
+			Collection: "wiki", RemoteType: "wiki", PrivateFrontier: "page:1",
+			Attempt: func(int) (*service.SyncResourcesResult, syncCollectionResult, error) {
+				wikiAttempts++
+				if wikiAttempts == 1 {
+					err := gitcode.ErrNetworkUnavailable{Status: 503}
+					return nil, syncCollectionResult{RemoteType: "wiki", Err: err}, err
+				}
+				result := &service.SyncResourcesResult{RecordsListed: 1, SuccessCount: 1}
+				return result, syncCollectionResult{RemoteType: "wiki", Result: result}, nil
+			},
+		},
+	}
+	hooks := &syncCollectionRetryHooks{
+		Scheduled: func(syncCollectionTask, int, time.Time) error { return nil },
+		Settled: func(task syncCollectionTask, _ SyncCollectionView) error {
+			settled = append(settled, task.Collection)
+			return nil
+		},
+	}
+	executions := runSyncCollectionSchedule(
+		context.Background(), "cache-a", "owner/repo", tasks, 4, nil,
+		func(_ context.Context, delay time.Duration) error {
+			if got := strings.Join(settled, ","); got != "issues" {
+				t.Fatalf("settled checkpoints before sibling wait=%q want issues", got)
+			}
+			clock = clock.Add(delay)
+			return nil
+		},
+		func() time.Time { return clock }, hooks,
+	)
+	if len(executions) != 2 || strings.Join(settled, ",") != "issues,wiki" {
+		t.Fatalf("executions=%+v settled=%v", executions, settled)
 	}
 }

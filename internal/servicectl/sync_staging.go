@@ -505,6 +505,38 @@ func (j *SyncStageJournal) RemoveJobStages(jobID string) error {
 	return nil
 }
 
+func (j *SyncStageJournal) RemoveStage(stageID string) error {
+	path, err := j.path(strings.TrimSpace(stageID))
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (j *SyncStageJournal) RemoveCollectionStages(jobID, collection string) error {
+	jobID = strings.TrimSpace(jobID)
+	collection = strings.TrimSpace(collection)
+	if jobID == "" || collection == "" {
+		return nil
+	}
+	stages, _, err := j.ListForRecovery()
+	if err != nil {
+		return err
+	}
+	for _, stage := range stages {
+		if stage.JobID != jobID || stage.Collection != collection {
+			continue
+		}
+		if err := j.RemoveStage(stage.StageID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (j *SyncStageJournal) validate(envelope SyncStageEnvelope, expectedID string) error {
 	if envelope.Version != syncStageEnvelopeVersion || envelope.StageID != expectedID || !json.Valid(envelope.Payload) {
 		return ErrSyncStageCorrupt

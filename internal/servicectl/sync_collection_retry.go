@@ -97,6 +97,7 @@ type syncCollectionTask struct {
 	Collection      string
 	RemoteType      string
 	PrivateFrontier string
+	LastSuccessAt   time.Time
 	AttemptStart    int
 	DueAt           time.Time
 	Attempt         func(int) (*service.SyncResourcesResult, syncCollectionResult, error)
@@ -104,6 +105,7 @@ type syncCollectionTask struct {
 
 type syncCollectionRetryHooks struct {
 	Scheduled func(syncCollectionTask, int, time.Time) error
+	Settled   func(syncCollectionTask, SyncCollectionView) error
 }
 
 type syncCollectionExecution struct {
@@ -184,6 +186,10 @@ func runSyncCollectionSchedule(
 		}
 		frontierRef := publicSyncFrontierRef(cacheUUID, repoID, item.task.Collection, item.task.PrivateFrontier)
 		view := syncCollectionViewForAttempt(item.task.Collection, frontierRef, item.attempt, budget, item.result, err, now())
+		if view.LastSuccessAt == nil && !item.task.LastSuccessAt.IsZero() {
+			lastSuccessAt := item.task.LastSuccessAt.UTC()
+			view.LastSuccessAt = &lastSuccessAt
+		}
 		policy := classifySyncCollectionFailure(err)
 		if err != nil && policy.Transient && item.attempt < budget && ctx.Err() == nil {
 			delay := syncCollectionRetryDelay(cacheUUID, repoID, item.task.Collection, frontierRef, item.attempt, policy.RetryAfter)
@@ -207,7 +213,13 @@ func runSyncCollectionSchedule(
 			pending = append(pending, item)
 			continue
 		}
-		if observe != nil {
+		if hooks != nil && hooks.Settled != nil {
+			if persistErr := hooks.Settled(item.task, view); persistErr != nil {
+				collectionResult.Err = persistErr
+				executions = append(executions, syncCollectionExecution{Result: item.result, Collection: collectionResult, Err: persistErr})
+				continue
+			}
+		} else if observe != nil {
 			observe(view)
 		}
 		collectionResult.Result = item.result

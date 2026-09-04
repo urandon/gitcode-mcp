@@ -164,6 +164,26 @@ func TestJobActionCollectionRetryDoesNotCoalesceDifferentActiveCollection(t *tes
 	}
 }
 
+func TestJobActionCollectionRetryReportsExactWorkCoalescing(t *testing.T) {
+	jobs := NewJobManager("")
+	now := time.Now().UTC()
+	finished := now.Add(-time.Minute)
+	jobs.jobs["job-000001"] = &Job{ID: "job-000001", Type: SyncJobType, RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", Status: JobStatusSucceeded, SyncHealth: SyncHealthPartial, CreatedAt: finished, UpdatedAt: finished, FinishedAt: &finished, SyncCollections: []SyncCollectionView{{Collection: "issues", Outcome: SyncCollectionPermanentFailure}}}
+	jobs.nextID = 1
+	active, created, err := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 0, "sync:cache-1:owner/repo:head:truefalsefalsefalsefalse", "cache-1", "reg-1", "", func() {})
+	if err != nil || !created {
+		t.Fatalf("active=%+v created=%t err=%v", active, created, err)
+	}
+	actions := NewJobActionManager("", jobs, nil)
+	actions.reconcile = func(context.Context, string, string) (MaintenanceReconcileResult, error) {
+		return MaintenanceReconcileResult{JobsCoalesced: []string{active.ID}}, nil
+	}
+	receipt, err := actions.Retry(context.Background(), adminhttp.JobActionRequest{JobID: "job-000001", Collection: "issues", IdempotencyKey: "retry-issues-coalesced"})
+	if err != nil || receipt.Outcome != "coalesced" || receipt.ResultJob != active.ID || receipt.JobStatus != JobStatusQueued {
+		t.Fatalf("receipt=%+v active=%+v err=%v", receipt, active, err)
+	}
+}
+
 func TestJobActionStateAndCapabilityBoundaries(t *testing.T) {
 	jobs := NewJobManager("")
 	now := time.Now().UTC()
