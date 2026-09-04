@@ -169,11 +169,22 @@ func runSyncCollectionSchedule(
 		pending = append(pending[:current], pending[current+1:]...)
 		if delay := item.dueAt.Sub(now()); !item.dueAt.IsZero() && delay > 0 {
 			if err := wait(ctx, delay); err != nil {
-				view := syncCollectionViewForAttempt(item.task.Collection, publicSyncFrontierRef(cacheUUID, repoID, item.task.Collection, item.task.PrivateFrontier), item.attempt, budget, nil, err, now())
-				if observe != nil {
+				view := syncCollectionViewForAttempt(item.task.Collection, publicSyncFrontierRef(cacheUUID, repoID, item.task.Collection, item.task.PrivateFrontier), item.attempt, budget, item.result, err, now())
+				if view.LastSuccessAt == nil && !item.task.LastSuccessAt.IsZero() {
+					lastSuccessAt := item.task.LastSuccessAt.UTC()
+					view.LastSuccessAt = &lastSuccessAt
+				}
+				collectionResult := syncCollectionResult{RemoteType: item.task.RemoteType, Result: item.result, Err: err}
+				if hooks != nil && hooks.Settled != nil {
+					if persistErr := hooks.Settled(item.task, view); persistErr != nil {
+						collectionResult.Err = persistErr
+						executions = append(executions, syncCollectionExecution{Result: item.result, Collection: collectionResult, Err: persistErr})
+						continue
+					}
+				} else if observe != nil {
 					observe(view)
 				}
-				executions = append(executions, syncCollectionExecution{Result: item.result, Collection: syncCollectionResult{RemoteType: item.task.RemoteType, Result: item.result, Err: err}, Err: err})
+				executions = append(executions, syncCollectionExecution{Result: item.result, Collection: collectionResult, Err: err})
 				continue
 			}
 		}

@@ -38,16 +38,42 @@ func TestSyncWorkKeyIsFrontierAndBoundsExact(t *testing.T) {
 	if syncWorkKey(base) != syncWorkKey(same) {
 		t.Fatalf("map iteration changed work identity: %q != %q", syncWorkKey(base), syncWorkKey(same))
 	}
-	variants := []StartSyncJobRequest{base, base, base, base, base}
-	variants[0].Page++
-	variants[1].MaxPages++
-	variants[2].MaxRecords++
-	variants[3].PerPage++
-	variants[4].collectionPages = map[string]int{"issue": 5, "wiki": 7}
+	variants := []StartSyncJobRequest{base, base, base}
+	variants[0].MaxRecords = 101
+	variants[1].PerPage = 49
+	variants[2].collectionPages = map[string]int{"issue": 5, "wiki": 7}
 	for index, variant := range variants {
 		if syncWorkKey(base) == syncWorkKey(variant) {
 			t.Fatalf("variant %d was not frontier-exact: %q", index, syncWorkKey(variant))
 		}
+	}
+	pageFour := base
+	pageFour.collectionPages = nil
+	pageFive := pageFour
+	pageFive.Page = 5
+	if syncWorkKey(pageFour) == syncWorkKey(pageFive) {
+		t.Fatal("different effective collection pages shared one work identity")
+	}
+	fixture := base
+	fixture.ProviderMode = "fixture"
+	if syncWorkKey(base) == syncWorkKey(fixture) {
+		t.Fatal("live and fixture provider authority shared one work identity")
+	}
+	equivalent := base
+	equivalent.ProviderMode = "live"
+	equivalent.Page = 4
+	equivalent.MaxPages = 99
+	equivalent.MaxRecords = defaultSyncStageMaxRecords + 99
+	equivalent.PerPage = 999
+	equivalent.collectionPages = map[string]int{"issue": 4}
+	canonical := base
+	canonical.ProviderMode = ""
+	canonical.MaxPages = 1
+	canonical.MaxRecords = defaultSyncStageMaxRecords
+	canonical.PerPage = 100
+	canonical.collectionPages = map[string]int{"issue": 4}
+	if syncWorkKey(equivalent) != syncWorkKey(canonical) {
+		t.Fatalf("semantically equivalent effective bounds did not coalesce:\n%s\n%s", syncWorkKey(equivalent), syncWorkKey(canonical))
 	}
 }
 
@@ -1402,12 +1428,74 @@ func TestWikiByteChunkCarriesExactOffsetIntoMaintenanceCheckpoint(t *testing.T) 
 		RepoID: "owner/repo", CachePath: cachePath, Lane: "head", Page: 1,
 	}, "wiki", durableCollectionBatch{
 		checkpoint: "max_records", traversalStatus: "bounded", pagesListed: 1, recordsListed: 2, nextPage: 3,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if frontier == nil || frontier.Checkpoint != "next_page:3" || frontier.Status != "partial" {
 		t.Fatalf("frontier=%+v", frontier)
+	}
+}
+
+func TestStagedMaintenanceFrontierPersistsPartialFailureAndAdvancesLastSuccess(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		previous time.Time
+	}{
+		{name: "first_partial_commit"},
+		{name: "advances_prior_success", previous: time.Now().UTC().Add(-time.Hour)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			cachePath := filepath.Join(t.TempDir(), "cache.db")
+			store, err := cache.NewSQLiteStore(ctx, cachePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+				t.Fatal(err)
+			}
+			if !tc.previous.IsZero() {
+				err = store.UpsertMaintenanceFrontier(ctx, cache.MaintenanceFrontier{
+					RepoID: "owner/repo", RemoteType: "issue", Ordering: "updated_at_desc", FilterKey: "all", Lane: "head",
+					Status: "fresh", LastSuccessAt: tc.previous, UpdatedAt: tc.previous,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			fetchErr := gitcode.ErrNetworkUnavailable{Status: 503}
+			frontier, err := stagedMaintenanceFrontier(ctx, StartSyncJobRequest{
+				RepoID: "owner/repo", CachePath: cachePath, Lane: "head", Page: 1,
+			}, "issue", durableCollectionBatch{
+				recordCount: 2, checkpoint: "provider_partial", traversalStatus: "partial", pagesListed: 1, recordsListed: 3,
+			}, fetchErr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if frontier.Status != "degraded" || frontier.LastErrorClass != "network_unavailable" || frontier.LastSuccessAt.IsZero() || !tc.previous.IsZero() && !frontier.LastSuccessAt.After(tc.previous) {
+				t.Fatalf("prepared frontier=%+v previous=%v", frontier, tc.previous)
+			}
+
+			store, err = cache.NewSQLiteStore(ctx, cachePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.UpsertMaintenanceFrontier(ctx, *frontier); err != nil {
+				t.Fatal(err)
+			}
+			persisted, err := store.ListMaintenanceFrontiers(ctx, "owner/repo")
+			if closeErr := store.Close(); err == nil {
+				err = closeErr
+			}
+			if err != nil || len(persisted) != 1 || persisted[0].Status != "degraded" || persisted[0].LastErrorClass != "network_unavailable" || persisted[0].LastSuccessAt.IsZero() || !tc.previous.IsZero() && !persisted[0].LastSuccessAt.After(tc.previous) {
+				t.Fatalf("persisted=%+v err=%v previous=%v", persisted, err, tc.previous)
+			}
+		})
 	}
 }
 

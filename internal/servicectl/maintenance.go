@@ -2468,6 +2468,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 			if jobErr != nil {
 				var busy ErrCacheWriterBusy
 				if errors.As(jobErr, &busy) {
+					recordJobActionIntentError(ctx, jobErr)
 					return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), nil
 				}
 				recordJobActionIntentError(ctx, jobErr)
@@ -2480,6 +2481,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 			if jobErr != nil {
 				var busy ErrCacheWriterBusy
 				if errors.As(jobErr, &busy) {
+					recordJobActionIntentError(ctx, jobErr)
 					return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), started
 				}
 				recordJobActionIntentError(ctx, jobErr)
@@ -2526,6 +2528,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 				}
 				var busy ErrCacheWriterBusy
 				if errors.As(jobErr, &busy) {
+					recordJobActionIntentError(ctx, jobErr)
 					return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), started
 				}
 				recordJobActionIntentError(ctx, jobErr)

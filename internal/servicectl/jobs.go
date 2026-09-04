@@ -744,8 +744,7 @@ func (m *JobManager) ReleaseActionIntent(actionIntentRef string) error {
 		}
 		return err
 	}
-	m.pruneLocked()
-	return m.writeSnapshotLocked()
+	return m.saveLocked()
 }
 
 func containsString(values []string, want string) bool {
@@ -1208,8 +1207,43 @@ func (m *JobManager) mustGet(id string) Job {
 }
 
 func (m *JobManager) saveLocked() error {
+	type retainedJob struct {
+		pointer *Job
+		state   Job
+	}
+	jobsBeforePrune := make(map[string]retainedJob, len(m.jobs))
+	for id, job := range m.jobs {
+		jobsBeforePrune[id] = retainedJob{pointer: job, state: cloneJob(job)}
+	}
+	cancelBeforePrune := make(map[string]context.CancelFunc, len(m.cancel))
+	for id, cancel := range m.cancel {
+		cancelBeforePrune[id] = cancel
+	}
+	lastPrunedBefore := m.lastPrunedAt
+	if m.lastPrunedAt != nil {
+		value := *m.lastPrunedAt
+		lastPrunedBefore = &value
+	}
+	expiredTotalBefore, truncatedTotalBefore := m.expiredTotal, m.truncatedTotal
+	lastExpiredBefore, lastTruncatedBefore := m.lastExpired, m.lastTruncated
 	m.pruneLocked()
-	return m.writeSnapshotLocked()
+	if err := m.writeSnapshotLocked(); err != nil {
+		m.jobs = make(map[string]*Job, len(jobsBeforePrune))
+		for id, retained := range jobsBeforePrune {
+			if retained.pointer == nil {
+				m.jobs[id] = nil
+				continue
+			}
+			*retained.pointer = retained.state
+			m.jobs[id] = retained.pointer
+		}
+		m.cancel = cancelBeforePrune
+		m.lastPrunedAt = lastPrunedBefore
+		m.expiredTotal, m.truncatedTotal = expiredTotalBefore, truncatedTotalBefore
+		m.lastExpired, m.lastTruncated = lastExpiredBefore, lastTruncatedBefore
+		return err
+	}
+	return nil
 }
 
 func (m *JobManager) writeSnapshotLocked() error {

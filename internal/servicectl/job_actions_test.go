@@ -96,6 +96,48 @@ func TestJobActionCanCancelRepositoryDocsIndex(t *testing.T) {
 	}
 }
 
+func TestJobActionCancelReconstructsDurableOutcomeAfterReceiptWriteFailure(t *testing.T) {
+	dir := t.TempDir()
+	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+	jobContext, cancel := context.WithCancel(context.Background())
+	job, created, err := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 1, "cancel-recovery-work", "cache-1", "reg-1", "", cancel)
+	if err != nil || !created {
+		t.Fatalf("job=%+v created=%t err=%v", job, created, err)
+	}
+	jobs.updateJob(job.ID, func(stored *Job, now time.Time) {
+		stored.Status = JobStatusRunning
+		stored.StartedAt = &now
+	})
+	go func() {
+		<-jobContext.Done()
+		jobs.finishJob(job.ID, JobStatusCancelled, "cancelled")
+	}()
+
+	path := filepath.Join(dir, "actions.json")
+	actions := NewJobActionManager(path, jobs, nil)
+	actions.writeFile = func(string, []byte, os.FileMode) error { return errors.New("receipt unavailable") }
+	req := adminhttp.JobActionRequest{JobID: job.ID, IdempotencyKey: "cancel-recover-final-save"}
+	if _, err := actions.Cancel(context.Background(), req); err == nil {
+		t.Fatal("expected final receipt persistence failure")
+	}
+	if _, retained := actions.receipts[hashJobAction(req.IdempotencyKey)]; retained {
+		t.Fatal("failed final write retained a non-durable receipt")
+	}
+	stored, ok := jobs.Get(job.ID)
+	if !ok || stored.Status != JobStatusCancelled {
+		t.Fatalf("durable cancellation outcome=%+v retained=%t", stored, ok)
+	}
+
+	actions.writeFile = durableAtomicWriteFile
+	recovered, err := actions.Cancel(context.Background(), req)
+	if err != nil || recovered.Outcome != "cancelled" || recovered.JobStatus != JobStatusCancelled {
+		t.Fatalf("recovered=%+v err=%v", recovered, err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("reconstructed receipt was not persisted: %v", err)
+	}
+}
+
 func TestJobActionRetryCoalescesEquivalentWork(t *testing.T) {
 	jobs := NewJobManager("")
 	now := time.Now().UTC()
@@ -540,6 +582,67 @@ func TestJobActionAdmissionEvictsOldestSettledReceiptAtCapacity(t *testing.T) {
 	}
 	if _, retained := actions.receipts[oldestKey]; retained {
 		t.Fatal("oldest evictable settled receipt was retained")
+	}
+}
+
+func TestJobActionCapacityPruningDoesNotMutateOnInvalidRequest(t *testing.T) {
+	actions := NewJobActionManager("", NewJobManager(""), nil)
+	now := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
+	oldestRawKey := "oldest-valid-replay"
+	oldestKey := hashJobAction(oldestRawKey)
+	oldestIntent := hashJobAction("retry\x00job-oldest\x00")
+	for index := 0; index < maxJobActionReceipts; index++ {
+		key := hashJobAction(fmt.Sprintf("invalid-capacity-%d", index))
+		actions.receipts[key] = jobActionReceiptDisk{KeyHash: key, Receipt: adminhttp.JobActionReceipt{Outcome: "created", CreatedAt: now.Add(time.Duration(index+1) * time.Second)}}
+	}
+	actions.receipts[oldestKey] = jobActionReceiptDisk{KeyHash: oldestKey, IntentHash: oldestIntent, Receipt: adminhttp.JobActionReceipt{ReceiptID: "receipt-oldest", Action: "retry", TargetJob: "job-oldest", Outcome: "no_work_needed", JobStatus: JobStatusFailed, CreatedAt: now}}
+	delete(actions.receipts, hashJobAction("invalid-capacity-0"))
+
+	_, err := actions.Retry(context.Background(), adminhttp.JobActionRequest{JobID: "missing", IdempotencyKey: "invalid-new-request"})
+	var typed adminhttp.JobActionError
+	if !errors.As(err, &typed) || typed.Code != "job_not_retained" {
+		t.Fatalf("invalid request error=%T %v", err, err)
+	}
+	if _, retained := actions.receipts[oldestKey]; !retained || len(actions.receipts) != maxJobActionReceipts {
+		t.Fatalf("invalid request mutated retained receipts: retained=%t len=%d", retained, len(actions.receipts))
+	}
+	replayed, err := actions.Retry(context.Background(), adminhttp.JobActionRequest{JobID: "job-oldest", IdempotencyKey: oldestRawKey})
+	if err != nil || !replayed.Replayed || replayed.ReceiptID != "receipt-oldest" {
+		t.Fatalf("oldest replay=%+v err=%v", replayed, err)
+	}
+}
+
+func TestJobActionCapacityPruningRollsBackWhenPendingWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	jobs := NewJobManager("")
+	now := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
+	jobs.jobs["job-source"] = &Job{ID: "job-source", Type: SyncJobType, RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", Status: JobStatusFailed, CreatedAt: now, UpdatedAt: now}
+	actions := NewJobActionManager(filepath.Join(dir, "actions.json"), jobs, nil)
+	oldestRawKey := "oldest-write-failure-replay"
+	oldestKey := hashJobAction(oldestRawKey)
+	oldestIntent := hashJobAction("retry\x00job-oldest\x00")
+	for index := 0; index < maxJobActionReceipts; index++ {
+		key := hashJobAction(fmt.Sprintf("write-capacity-%d", index))
+		actions.receipts[key] = jobActionReceiptDisk{KeyHash: key, Receipt: adminhttp.JobActionReceipt{Outcome: "created", CreatedAt: now.Add(time.Duration(index+1) * time.Second)}}
+	}
+	actions.receipts[oldestKey] = jobActionReceiptDisk{KeyHash: oldestKey, IntentHash: oldestIntent, Receipt: adminhttp.JobActionReceipt{ReceiptID: "receipt-oldest-write", Action: "retry", TargetJob: "job-oldest", Outcome: "no_work_needed", JobStatus: JobStatusFailed, CreatedAt: now}}
+	delete(actions.receipts, hashJobAction("write-capacity-0"))
+	actions.writeFile = func(string, []byte, os.FileMode) error { return errors.New("pending unavailable") }
+	actions.reconcile = func(context.Context, string, string, string) (MaintenanceReconcileResult, error) {
+		t.Fatal("reconcile crossed failed pending receipt boundary")
+		return MaintenanceReconcileResult{}, nil
+	}
+	_, err := actions.Retry(context.Background(), adminhttp.JobActionRequest{JobID: "job-source", IdempotencyKey: "new-write-failure"})
+	if err == nil {
+		t.Fatal("expected pending receipt persistence failure")
+	}
+	if _, retained := actions.receipts[oldestKey]; !retained || len(actions.receipts) != maxJobActionReceipts {
+		t.Fatalf("failed write mutated retained receipts: retained=%t len=%d", retained, len(actions.receipts))
+	}
+	actions.writeFile = durableAtomicWriteFile
+	replayed, err := actions.Retry(context.Background(), adminhttp.JobActionRequest{JobID: "job-oldest", IdempotencyKey: oldestRawKey})
+	if err != nil || !replayed.Replayed || replayed.ReceiptID != "receipt-oldest-write" {
+		t.Fatalf("oldest replay=%+v err=%v", replayed, err)
 	}
 }
 

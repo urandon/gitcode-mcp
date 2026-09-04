@@ -128,6 +128,11 @@ func (m *JobManager) startSync(ctx context.Context, manager Manager, req StartSy
 	if err := normalizeCacheWriterIdentity(ctx, manager, &req.CachePath, &req.CacheUUID, &req.RegistrationID, &req.RepoID); err != nil {
 		return Job{}, false, err
 	}
+	var err error
+	req, err = normalizeSyncAdmissionRequest(req)
+	if err != nil {
+		return Job{}, false, err
+	}
 	workKey := syncWorkKey(req)
 	ctx, cancel := context.WithCancel(ctx)
 	job, created, err := m.createCoalescedJobWithIntent(SyncJobType, req.RepoID, "", 0, workKey, req.CacheUUID, req.RegistrationID, "", JobRecoveryIntent{ActionIntentRef: req.ActionIntentRef}, cancel)
@@ -150,6 +155,10 @@ func (m *JobManager) startSync(ctx context.Context, manager Manager, req StartSy
 }
 
 func syncWorkKey(req StartSyncJobRequest) string {
+	// Keep direct identity construction canonical as well as startSync callers;
+	// invalid provider modes remain distinct and are rejected before admission.
+	canonical, _ := normalizeSyncAdmissionRequest(req)
+	req = canonical
 	cacheID := strings.TrimSpace(req.CacheUUID)
 	if cacheID == "" {
 		cacheID = strings.TrimSpace(req.CachePath)
@@ -168,8 +177,44 @@ func syncWorkKey(req StartSyncJobRequest) string {
 	for _, collection := range frontierKeys {
 		frontiers = append(frontiers, fmt.Sprintf("%s=%d", collection, req.collectionPages[collection]))
 	}
-	bounds := fmt.Sprintf("page=%d,max-pages=%d,max-records=%d,per-page=%d,frontiers=%s", req.Page, req.MaxPages, req.MaxRecords, req.PerPage, strings.Join(frontiers, ","))
-	return strings.Join([]string{SyncJobType, cacheID, strings.TrimSpace(req.RepoID), lane, collections, bounds}, ":")
+	bounds := fmt.Sprintf("max-pages=%d,max-records=%d,per-page=%d,frontiers=%s", req.MaxPages, req.MaxRecords, req.PerPage, strings.Join(frontiers, ","))
+	return strings.Join([]string{SyncJobType, cacheID, strings.TrimSpace(req.RepoID), strings.TrimSpace(req.ProviderMode), lane, collections, bounds}, ":")
+}
+
+func normalizeSyncAdmissionRequest(req StartSyncJobRequest) (StartSyncJobRequest, error) {
+	req = normalizeDurableSyncRequest(req)
+	mode, modeErr := syncJobProviderMode(req)
+	if modeErr == nil {
+		req.ProviderMode = string(mode)
+	} else {
+		req.ProviderMode = strings.TrimSpace(req.ProviderMode)
+	}
+	bulk := syncBulkRequest(req, nil)
+	req.Page = bulk.Page
+	if req.Page < 1 {
+		req.Page = 1
+	}
+	req.PerPage = bulk.PerPage
+	req.MaxPages = bulk.Bounds.MaxPages
+	req.MaxRecords = bulk.Bounds.MaxRecords
+	pages := map[string]int{}
+	addPage := func(selected bool, remoteType string) {
+		if !selected {
+			return
+		}
+		page := req.collectionPages[remoteType]
+		if page < 1 {
+			page = req.Page
+		}
+		pages[remoteType] = page
+	}
+	addPage(req.Issues, "issue")
+	addPage(req.IssueComments, "issue_comment")
+	addPage(req.Wiki, "wiki")
+	addPage(req.Pulls, "pull_request")
+	addPage(req.PRComments, "pr_comment")
+	req.collectionPages = pages
+	return req, modeErr
 }
 
 func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID string, req StartSyncJobRequest) {
@@ -897,7 +942,7 @@ func syncStageReceiptExists(ctx context.Context, stage SyncStageEnvelope) (bool,
 	return receipt.Checksum == stage.Checksum && receipt.RepoID == stage.RepoID && receipt.Collection == stage.Collection, nil
 }
 
-func stagedMaintenanceFrontier(ctx context.Context, req StartSyncJobRequest, remoteType string, batch durableCollectionBatch) (*cache.MaintenanceFrontier, error) {
+func stagedMaintenanceFrontier(ctx context.Context, req StartSyncJobRequest, remoteType string, batch durableCollectionBatch, fetchErr error) (*cache.MaintenanceFrontier, error) {
 	if strings.TrimSpace(req.Lane) == "" {
 		return nil, nil
 	}
@@ -933,6 +978,13 @@ func stagedMaintenanceFrontier(ctx context.Context, req StartSyncJobRequest, rem
 		Status: status, HighUpdatedAt: previous.HighUpdatedAt, HighRemoteID: previous.HighRemoteID, HighNumber: previous.HighNumber,
 		StopReason: batch.checkpoint, PagesListed: batch.pagesListed, RecordsListed: batch.recordsListed,
 		Checkpoint: nextMaintenanceCheckpoint(req, collection), UpdatedAt: time.Now().UTC(),
+	}
+	if batch.recordCount > 0 {
+		frontier.LastSuccessAt = frontier.UpdatedAt
+	}
+	if fetchErr != nil {
+		frontier.Status = "degraded"
+		frontier.LastErrorClass = maintenanceJobErrorClass(fetchErr, "provider_fetch_failed")
 	}
 	if batch.nextPage > 0 && (req.Lane == "head" || req.Lane == "tail") {
 		frontier.Checkpoint = fmt.Sprintf("next_page:%d", batch.nextPage)
@@ -970,7 +1022,7 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 		runtimeDir = filepath.Dir(m.snapshotPath)
 	}
 	journal := NewSyncStageJournal(runtimeDir, SyncStageLimits{})
-	frontier, frontierErr := stagedMaintenanceFrontier(ctx, req, work.remoteType, batch)
+	frontier, frontierErr := stagedMaintenanceFrontier(ctx, req, work.remoteType, batch, fetchErr)
 	if frontierErr != nil {
 		m.rejectUnpersistedSyncStage(jobID, maintenanceJobErrorClass(frontierErr, "frontier_prepare_failed"))
 		collection := syncCollectionResult{RemoteType: work.remoteType, Err: frontierErr}
@@ -2358,6 +2410,12 @@ func recordMaintenanceSyncFrontiers(ctx context.Context, req StartSyncJobRequest
 			frontier.PagesListed = collection.Result.PagesListed
 			frontier.RecordsListed = collection.Result.RecordsListed
 			observeMaintenanceResultHigh(&frontier, collection.Result.Results)
+			if collection.Result.SuccessCount > 0 {
+				// A partial provider outcome can still commit usable records. Treat
+				// that durable cache advance as a current success even while the
+				// frontier remains degraded for the failed remainder.
+				frontier.LastSuccessAt = frontier.UpdatedAt
+			}
 		}
 		frontier.Checkpoint = nextMaintenanceCheckpoint(req, collection)
 		if req.Lane == "tail" && frontier.Status == "backfilling" {

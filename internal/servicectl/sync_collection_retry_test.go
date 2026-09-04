@@ -354,6 +354,38 @@ func TestRunSyncCollectionScheduleDoesNotBlockOrRepeatDueCollections(t *testing.
 	}
 }
 
+func TestRunSyncCollectionScheduleCancellationDuringBackoffPreservesPartialResult(t *testing.T) {
+	clock := time.Unix(1_700_000_000, 0).UTC()
+	partial := &service.SyncResourcesResult{RecordsListed: 3, SuccessCount: 2, FailureCount: 1}
+	var settled SyncCollectionView
+	executions := runSyncCollectionSchedule(
+		context.Background(), "cache-a", "owner/repo",
+		[]syncCollectionTask{{
+			Collection: "issues", RemoteType: "issue", PrivateFrontier: "page:1",
+			Attempt: func(int) (*service.SyncResourcesResult, syncCollectionResult, error) {
+				err := gitcode.ErrNetworkUnavailable{Status: 503}
+				return partial, syncCollectionResult{RemoteType: "issue", Result: partial, Err: err}, err
+			},
+		}},
+		4, nil,
+		func(context.Context, time.Duration) error { return context.Canceled },
+		func() time.Time { return clock },
+		&syncCollectionRetryHooks{
+			Scheduled: func(syncCollectionTask, int, time.Time) error { return nil },
+			Settled: func(_ syncCollectionTask, view SyncCollectionView) error {
+				settled = view
+				return nil
+			},
+		},
+	)
+	if len(executions) != 1 || !errors.Is(executions[0].Err, context.Canceled) || executions[0].Result != partial || executions[0].Collection.Result != partial {
+		t.Fatalf("executions=%+v", executions)
+	}
+	if settled.Outcome != SyncCollectionCancelled || settled.RecordsListed != 3 || settled.Committed != 2 || settled.Failed != 1 || settled.LastSuccessAt == nil {
+		t.Fatalf("cancelled collection lost partial progress: %+v", settled)
+	}
+}
+
 func TestRunSyncCollectionScheduleSettlesCompletedCollectionBeforeSiblingBackoff(t *testing.T) {
 	clock := time.Unix(1_700_000_000, 0).UTC()
 	settled := []string{}

@@ -230,7 +230,6 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 	actionIntentRef := hashJobAction(keyHash + "\x00" + intentHash)
 	var preparedReceipt *adminhttp.JobActionReceipt
 	var preparedDisk *jobActionReceiptDisk
-	_, hadStored := m.receipts[keyHash]
 	if stored, ok := m.receipts[keyHash]; ok {
 		if stored.IntentHash != intentHash {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "idempotency_conflict", "The idempotency key was already used for a different job action.", "Generate a new key for the changed intent.")
@@ -266,15 +265,6 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 			return receipt, nil
 		}
 	}
-	if !hadStored {
-		// Reserve one slot before persisting a new mutation intent. Pruning to
-		// the ordinary retention limit is insufficient when the journal is
-		// exactly full but contains an evictable settled receipt.
-		m.pruneToLimitLocked(maxJobActionReceipts - 1)
-		if len(m.receipts) >= maxJobActionReceipts {
-			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusServiceUnavailable, "job_action_receipt_capacity", "The durable job-action receipt journal is full.", "Restart after service storage is writable so settled retry correlations can be released, or replay unresolved Admin actions.")
-		}
-	}
 	job, ok := m.jobs.Get(req.JobID)
 	if !ok && preparedDisk != nil {
 		job, ok = preparedDisk.RetrySource.job(preparedDisk.Receipt)
@@ -293,36 +283,53 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		if preparedReceipt != nil {
 			return nil
 		}
+		previousReceipts := cloneJobActionReceipts(m.receipts)
+		// Reserve one slot only after request validation, then atomically
+		// replace an evictable receipt with the new durable mutation intent.
+		m.pruneToLimitLocked(maxJobActionReceipts - 1)
+		if len(m.receipts) >= maxJobActionReceipts {
+			m.receipts = previousReceipts
+			return jobActionError(http.StatusServiceUnavailable, "job_action_receipt_capacity", "The durable job-action receipt journal is full.", "Restart after service storage is writable so settled retry correlations can be released, or replay unresolved Admin actions.")
+		}
 		pending := receipt
 		pending.Outcome, pending.JobStatus = "pending", job.Status
 		m.receipts[keyHash] = jobActionReceiptDisk{KeyHash: keyHash, IntentHash: intentHash, Receipt: pending, RetrySource: retrySourceFromJob(job, req.Collection)}
 		m.pruneLocked()
 		if err := m.saveLocked(); err != nil {
-			delete(m.receipts, keyHash)
+			m.receipts = previousReceipts
 			return err
 		}
 		return nil
 	}
 	switch action {
 	case "cancel":
-		if job.Status != JobStatusQueued && job.Status != JobStatusRunning {
+		if !m.canAdmitJobActionReceiptLocked() {
+			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusServiceUnavailable, "job_action_receipt_capacity", "The durable job-action receipt journal is full.", "Restart after service storage is writable so settled retry correlations can be released, or replay unresolved Admin actions.")
+		}
+		if job.Status == JobStatusCancelled {
+			// Job cancellation is made durable by JobManager before the action
+			// receipt is written. If that final write failed, a replay can safely
+			// reconstruct the same semantic outcome from the terminal job state.
+			receipt.ResultJob, receipt.Outcome, receipt.JobStatus = job.ID, "cancelled", job.Status
+		} else if job.Status != JobStatusQueued && job.Status != JobStatusRunning {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "job_not_active", "Only queued or running jobs can be cancelled.", "Refresh the job and inspect its terminal state.")
-		}
-		cancelled, found, cancelErr := m.jobs.Cancel(job.ID)
-		if cancelErr != nil {
-			if errors.Is(cancelErr, ErrJobSnapshotPersistence) {
-				return adminhttp.JobActionReceipt{}, jobActionError(http.StatusServiceUnavailable, "repository_docs_cancel_snapshot_failed", "Cancellation is durable and the worker was signalled, but terminal job history could not be saved.", "Refresh the job after service storage is writable; a restart reconciles the terminal state from the durable cancellation tombstone.")
+		} else {
+			cancelled, found, cancelErr := m.jobs.Cancel(job.ID)
+			if cancelErr != nil {
+				if errors.Is(cancelErr, ErrJobSnapshotPersistence) {
+					return adminhttp.JobActionReceipt{}, jobActionError(http.StatusServiceUnavailable, "repository_docs_cancel_snapshot_failed", "Cancellation is durable and the worker was signalled, but terminal job history could not be saved.", "Refresh the job after service storage is writable; a restart reconciles the terminal state from the durable cancellation tombstone.")
+				}
+				return adminhttp.JobActionReceipt{}, jobActionError(http.StatusServiceUnavailable, "repository_docs_cancel_persist_failed", "Cancellation could not be made durable, so the job was left running.", "Retry cancellation after durable service state is writable.")
 			}
-			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusServiceUnavailable, "repository_docs_cancel_persist_failed", "Cancellation could not be made durable, so the job was left running.", "Retry cancellation after durable service state is writable.")
+			if !found {
+				return adminhttp.JobActionReceipt{}, jobActionError(http.StatusNotFound, "job_not_retained", "The selected job is no longer retained.", "Return to the bounded job list; cached repository data and audit evidence are unaffected.")
+			}
+			outcome := "cancellation_requested"
+			if cancelled.Status == JobStatusCancelled {
+				outcome = "cancelled"
+			}
+			receipt.ResultJob, receipt.Outcome, receipt.JobStatus = cancelled.ID, outcome, cancelled.Status
 		}
-		if !found {
-			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusNotFound, "job_not_retained", "The selected job is no longer retained.", "Return to the bounded job list; cached repository data and audit evidence are unaffected.")
-		}
-		outcome := "cancellation_requested"
-		if cancelled.Status == JobStatusCancelled {
-			outcome = "cancelled"
-		}
-		receipt.ResultJob, receipt.Outcome, receipt.JobStatus = cancelled.ID, outcome, cancelled.Status
 	case "retry":
 		if !jobTerminalStatus(job.Status) {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "job_not_terminal", "Retry requires a terminal job.", "Wait for completion or cancel active work first.")
@@ -354,16 +361,14 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 	default:
 		return adminhttp.JobActionReceipt{}, jobActionError(http.StatusBadRequest, "invalid_action", "Unknown job action.", "Refresh the admin UI.")
 	}
-	previous, hadPrevious := m.receipts[keyHash]
+	previousReceipts := cloneJobActionReceipts(m.receipts)
 	m.receipts[keyHash] = jobActionReceiptDisk{KeyHash: keyHash, IntentHash: intentHash, Receipt: receipt}
 	m.pruneLocked()
 	if err := m.saveLocked(); err != nil {
-		// A retry mutation is correlated with its admitted job. Restore the
-		// pending intent in memory when terminal receipt persistence fails so a
-		// same-process replay follows the same durable recovery path as restart.
-		if action == "retry" && hadPrevious {
-			m.receipts[keyHash] = previous
-		}
+		// Receipt replacement and retention pruning are one durable transition.
+		// Restore the complete pre-write view so a failed save cannot silently
+		// evict replay evidence or discard a prepared retry intent.
+		m.receipts = previousReceipts
 		return adminhttp.JobActionReceipt{}, err
 	}
 	if action == "retry" {
@@ -426,6 +431,18 @@ func (m *JobActionManager) pruneLocked() {
 	m.pruneToLimitLocked(maxJobActionReceipts)
 }
 
+func (m *JobActionManager) canAdmitJobActionReceiptLocked() bool {
+	if len(m.receipts) < maxJobActionReceipts {
+		return true
+	}
+	before := len(m.receipts)
+	copy := cloneJobActionReceipts(m.receipts)
+	m.pruneToLimitLocked(maxJobActionReceipts - 1)
+	canAdmit := len(m.receipts) < before
+	m.receipts = copy
+	return canAdmit
+}
+
 func (m *JobActionManager) pruneToLimitLocked(limit int) {
 	if limit < 0 {
 		limit = 0
@@ -460,6 +477,19 @@ func (m *JobActionManager) pruneToLimitLocked(limit int) {
 	for _, receipt := range settled[:remove] {
 		delete(m.receipts, receipt.KeyHash)
 	}
+}
+
+func cloneJobActionReceipts(source map[string]jobActionReceiptDisk) map[string]jobActionReceiptDisk {
+	cloned := make(map[string]jobActionReceiptDisk, len(source))
+	for key, receipt := range source {
+		copy := receipt
+		if receipt.RetrySource != nil {
+			retrySource := *receipt.RetrySource
+			copy.RetrySource = &retrySource
+		}
+		cloned[key] = copy
+	}
+	return cloned
 }
 
 func hashJobAction(value string) string {

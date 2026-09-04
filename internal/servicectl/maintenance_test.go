@@ -3043,7 +3043,7 @@ func TestMaintenanceMixedCollectionsPublishCollectionLocalCheckpoints(t *testing
 			}
 			frontier, err := stagedMaintenanceFrontier(ctx, issueReq, "issue", durableCollectionBatch{
 				checkpoint: "max_pages", pagesListed: 1, recordsListed: 100, traversalStatus: "bounded",
-			})
+			}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

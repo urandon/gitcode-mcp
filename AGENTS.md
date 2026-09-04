@@ -164,6 +164,19 @@ fixture boundary; do not report it as passed.
   binary version. Never move or reuse a published tag. A failed or ambiguous
   publisher leaves the release task open for fix-forward recovery.
 
+## Session Handoff Safepoint
+
+- When a session must be restarted, the default safepoint is the boundary of
+  the current issue: implementation complete, exact-SHA review clear, PR and
+  required CI green, merged, resulting `main` CI green, and the issue closed
+  with final evidence. Do not begin the next issue before handing off.
+- If an external blocker prevents reaching that boundary, leave a clean pushed
+  branch and record the exact SHA, remaining findings, failed or pending gates,
+  reproduction commands, and next action in an issue comment. Never represent
+  this fallback handoff as a completed issue.
+- A resumed session starts from the issue/PR record and remote exact SHA, then
+  re-runs the recovery checks in step 1 before editing.
+
 ## UX Cohort Rule
 
 When a proposal introduces a new user-visible resource, state, action,
