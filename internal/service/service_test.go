@@ -2659,38 +2659,112 @@ func TestProjectRepairedIssueCommentCacheLeavesUnrelatedQueueUntouched(t *testin
 	}
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	for _, item := range []struct {
-		id     string
+		number         int
+		providerNumber int
+		providerID     string
+	}{
+		{number: 88, providerNumber: 4277488, providerID: "4277488"},
+		{number: 89, providerNumber: 4277489, providerID: "4277489"},
+	} {
+		canonicalID := fmt.Sprintf("ISSUE-%d", item.number)
+		canonical := cache.Record{RepoID: "repair", ID: canonicalID, Type: "issue", Path: fmt.Sprintf("issues/%d.md", item.number), Title: canonicalID, Status: "open", ContentHash: canonicalID, Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: fmt.Sprint(item.number), CreatedAt: now, UpdatedAt: now}
+		if err := store.UpsertRecordGraph(ctx, cache.RecordGraph{Record: canonical, Identities: []cache.Identity{
+			{RepoID: "repair", SourceID: canonicalID, AliasType: "issue", Alias: fmt.Sprint(item.number), Remote: cache.RemoteAlias{Type: "issue", ID: fmt.Sprint(item.number)}},
+			{RepoID: "repair", SourceID: canonicalID, AliasType: "gitcode_issue_id", Alias: item.providerID, Remote: cache.RemoteAlias{Type: "gitcode_issue_id", ID: item.providerID}},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		placeholderID := "ISSUE-" + item.providerID
+		placeholder := cache.Record{RepoID: "repair", ID: placeholderID, Type: "issue", Path: "issues/" + item.providerID + ".md", Title: "Issue " + item.providerID, Status: "open", ContentHash: placeholderID, Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: item.providerID, CreatedAt: now, UpdatedAt: now}
+		commentID := fmt.Sprintf("comment-%d", item.number)
+		comment := cache.RecordComment{RepoID: "repair", RecordID: placeholderID, CommentID: commentID, Body: "comment " + canonicalID, ContentHash: canonicalID + "-comment", CreatedAt: now, UpdatedAt: now}
+		if err := store.UpsertRecordGraph(ctx, cache.RecordGraph{Record: placeholder, Comments: []cache.RecordComment{comment}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertIssueCommentSync(ctx, cache.IssueCommentSync{RepoID: "repair", SourceID: placeholderID, IssueNumber: item.providerNumber, RemoteID: item.providerID, Status: "pending", UpdatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, item := range []struct {
 		number int
 		status string
 	}{
-		{id: "ISSUE-88", number: 88, status: "pending"},
-		{id: "ISSUE-89", number: 89, status: "deferred"},
-		{id: "ISSUE-90", number: 90, status: "pending"},
+		{number: 90, status: "pending"},
+		{number: 91, status: "deferred"},
 	} {
-		record := cache.Record{RepoID: "repair", ID: item.id, Type: "issue", Path: fmt.Sprintf("issues/%d.md", item.number), Title: item.id, Status: "open", ContentHash: item.id, Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: fmt.Sprint(item.number), CreatedAt: now, UpdatedAt: now}
-		comment := cache.RecordComment{RepoID: "repair", RecordID: item.id, CommentID: "comment-1", Body: "comment " + item.id, ContentHash: item.id + "-comment", CreatedAt: now, UpdatedAt: now}
+		id := fmt.Sprintf("ISSUE-%d", item.number)
+		record := cache.Record{RepoID: "repair", ID: id, Type: "issue", Path: fmt.Sprintf("issues/%d.md", item.number), Title: id, Status: "open", ContentHash: id, Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: fmt.Sprint(item.number), CreatedAt: now, UpdatedAt: now}
+		comment := cache.RecordComment{RepoID: "repair", RecordID: id, CommentID: "comment-1", Body: "comment " + id, ContentHash: id + "-comment", CreatedAt: now, UpdatedAt: now}
 		if err := store.UpsertRecordGraph(ctx, cache.RecordGraph{Record: record, Comments: []cache.RecordComment{comment}}); err != nil {
 			t.Fatal(err)
 		}
-		if err := store.UpsertIssueCommentSync(ctx, cache.IssueCommentSync{RepoID: "repair", SourceID: item.id, IssueNumber: item.number, RemoteID: fmt.Sprint(item.number), Status: item.status, UpdatedAt: now}); err != nil {
+		if err := store.UpsertIssueCommentSync(ctx, cache.IssueCommentSync{RepoID: "repair", SourceID: id, IssueNumber: item.number, RemoteID: fmt.Sprint(item.number), Status: item.status, UpdatedAt: now}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	svc := New(store)
-	if err := svc.projectRepairedIssueCommentCache(ctx, "repair", []string{"ISSUE-88", "ISSUE-89"}); err != nil {
+	repairedSourceIDs, err := store.RepairIssueProviderPlaceholders(ctx, "repair")
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, sourceID := range []string{"ISSUECOMMENT-88-comment-1", "ISSUECOMMENT-89-comment-1"} {
-		if _, err := store.GetSourceScoped(ctx, "repair", sourceID); err != nil {
-			t.Fatalf("repaired projection %s missing: %v", sourceID, err)
+	if want := []string{"ISSUE-88", "ISSUE-89"}; !reflect.DeepEqual(repairedSourceIDs, want) {
+		t.Fatalf("repaired source ids=%v want %v", repairedSourceIDs, want)
+	}
+	svc := New(store)
+	if err := svc.projectRepairedIssueCommentCache(ctx, "repair", repairedSourceIDs); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct {
+		parentID   string
+		sourceID   string
+		body       string
+		queueState string
+	}{
+		{parentID: "ISSUE-88", sourceID: "ISSUECOMMENT-88-comment-88", body: "comment ISSUE-88", queueState: "pending"},
+		{parentID: "ISSUE-89", sourceID: "ISSUECOMMENT-89-comment-89", body: "comment ISSUE-89", queueState: "pending"},
+	} {
+		source, err := store.GetSourceScoped(ctx, "repair", item.sourceID)
+		if err != nil {
+			t.Fatalf("repaired projection %s missing: %v", item.sourceID, err)
+		}
+		if source.Body != item.body {
+			t.Fatalf("repaired projection %s body=%q want %q", item.sourceID, source.Body, item.body)
+		}
+		links, err := store.ListLinks(ctx, cache.LinkFilter{RepoID: "repair", SourceID: item.sourceID})
+		if err != nil || len(links) != 1 || links[0].TargetID != item.parentID || links[0].Kind != "parent" {
+			t.Fatalf("repaired projection %s links=%#v err=%v", item.sourceID, links, err)
+		}
+		chunks, err := store.GetChunksScoped(ctx, "repair", item.sourceID)
+		if err != nil || len(chunks) == 0 {
+			t.Fatalf("repaired projection %s chunks=%#v err=%v", item.sourceID, chunks, err)
+		}
+		queue, ok, err := store.GetIssueCommentSync(ctx, "repair", item.parentID)
+		if err != nil || !ok || queue.Status != item.queueState {
+			t.Fatalf("repaired queue %s=%+v ok=%t err=%v", item.parentID, queue, ok, err)
 		}
 	}
-	if _, err := store.GetSourceScoped(ctx, "repair", "ISSUECOMMENT-90-comment-1"); err == nil {
-		t.Fatal("unrelated pending issue comment was projected")
+	for _, item := range []struct {
+		parentID string
+		sourceID string
+		status   string
+	}{
+		{parentID: "ISSUE-90", sourceID: "ISSUECOMMENT-90-comment-1", status: "pending"},
+		{parentID: "ISSUE-91", sourceID: "ISSUECOMMENT-91-comment-1", status: "deferred"},
+	} {
+		if _, err := store.GetSourceScoped(ctx, "repair", item.sourceID); !errors.Is(err, cache.ErrNotFound) {
+			t.Fatalf("unrelated projection %s err=%v, want not found", item.sourceID, err)
+		}
+		queue, ok, err := store.GetIssueCommentSync(ctx, "repair", item.parentID)
+		if err != nil || !ok || queue.Status != item.status {
+			t.Fatalf("unrelated queue %s=%+v ok=%t err=%v", item.parentID, queue, ok, err)
+		}
 	}
-	queue, ok, err := store.GetIssueCommentSync(ctx, "repair", "ISSUE-90")
-	if err != nil || !ok || queue.Status != "pending" {
-		t.Fatalf("unrelated queue=%+v ok=%t err=%v", queue, ok, err)
+	for _, placeholderID := range []string{"ISSUE-4277488", "ISSUE-4277489"} {
+		if _, err := store.GetRecord(ctx, "repair", placeholderID); !errors.Is(err, cache.ErrNotFound) {
+			t.Fatalf("placeholder %s err=%v, want not found", placeholderID, err)
+		}
+		if _, ok, err := store.GetIssueCommentSync(ctx, "repair", placeholderID); err != nil || ok {
+			t.Fatalf("placeholder queue %s exists=%t err=%v", placeholderID, ok, err)
+		}
 	}
 }
 
