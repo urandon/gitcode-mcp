@@ -195,6 +195,22 @@ func TestAdminControlErrorExplainsRepositoryDocsProviderBoundary(t *testing.T) {
 	}
 }
 
+func TestAdminControlErrorMapsMaintenanceScopeAndUnknownFailuresTruthfully(t *testing.T) {
+	for _, scope := range []cache.RepositoryScope{cache.RepositoryScopeIssues, cache.RepositoryScopeWiki} {
+		err := adminControlError(maintenancePolicyScopeError{Scope: scope})
+		var typed adminhttp.ControlError
+		if !errors.As(err, &typed) || typed.Status != http.StatusBadRequest || typed.Code != "invalid_policy" || typed.Field != "collections" || len(typed.Blockers) != 1 || !strings.Contains(typed.Blockers[0], string(scope)+" repository scope") || typed.CLIHandoff != "" {
+			t.Fatalf("scope=%s err=%T %[2]v typed=%+v", scope, err, typed)
+		}
+	}
+
+	err := adminControlError(errors.New("planner exploded"))
+	var typed adminhttp.ControlError
+	if !errors.As(err, &typed) || typed.Code != "invalid_request" || typed.CLIHandoff != "" || strings.Contains(strings.ToLower(typed.Remediation), "handoff") {
+		t.Fatalf("unknown err=%T %[1]v typed=%+v", err, typed)
+	}
+}
+
 func TestAdminControlErrorExplainsLossyAndStaleConflictRecovery(t *testing.T) {
 	for _, test := range []struct {
 		code string
@@ -319,5 +335,36 @@ func TestAdminMaintenanceSetupMapsBoundedPolicy(t *testing.T) {
 	}
 	if !mapped.NoServiceInstall || !mapped.NoModelDownload || !mapped.Detach || mapped.AllowMachineChange {
 		t.Fatalf("browser safety flags=%+v", mapped)
+	}
+}
+
+func TestAdminMaintenancePlanReportsRepositoryScopeMismatch(t *testing.T) {
+	ctx := context.Background()
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", APIBaseURL: "https://api.gitcode.com/api/v5", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	manager := newTestManager(t, "darwin")
+	manager.AdminCachePath = cachePath
+	cfg := config.Default()
+	manager.EffectiveConfig = &cfg
+	controls := NewAdminControlManager(manager, NewMaintenanceManager(manager, NewJobManager(""), ""), NewJobManager(""), NewAdminControlReceiptManager(""))
+	_, err = controls.PlanMaintenance(ctx, adminhttp.MaintenanceControlRequest{
+		CacheRef: publicCacheRef(identity.UUID, cachePath), RepoID: "owner/repo", SyncMode: "head", Collections: []string{"wiki"}, RAGMode: "off",
+	})
+	var typed adminhttp.ControlError
+	if !errors.As(err, &typed) || typed.Status != http.StatusBadRequest || typed.Code != "invalid_policy" || typed.Field != "collections" || len(typed.Blockers) != 1 || !strings.Contains(typed.Blockers[0], "wiki repository scope") || typed.CLIHandoff != "" {
+		t.Fatalf("err=%T %v typed=%+v", err, err, typed)
 	}
 }

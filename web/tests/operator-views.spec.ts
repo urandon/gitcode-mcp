@@ -785,22 +785,39 @@ test('failed jobs are discoverable and expose exact inspect and remediation comm
   await expect(page.getByText('gitcode-mcp service maintenance --format json')).toBeVisible();
 });
 
-test('maintenance validation identifies the field and omits an unavailable CLI handoff', async ({ page }) => {
+test('maintenance scope validation identifies collections and omits an unavailable CLI handoff', async ({ page }) => {
   await mockAdmin(page);
   await page.route('**/api/admin/v1/maintenance/plan', async (route) => {
     await route.fulfill({ status: 422, contentType: 'application/json', body: JSON.stringify({ error: {
       code: 'invalid_policy',
-      field: 'head_interval_seconds',
-      message: 'head interval must be at least 60 seconds',
-      remediation: 'Increase the head interval and render the plan again.',
-      blockers: ['head_interval_seconds must be greater than or equal to 60']
+      field: 'collections',
+      message: 'The selected collections are incompatible with the repository binding.',
+      remediation: 'Remove collections outside the configured repository scopes, or update the binding scopes and render a new plan.',
+      blockers: ['The selected collections require the wiki repository scope.']
     } }) });
   });
   await page.goto('/?view=Maintenance');
   await page.getByRole('button', { name: 'Render plan' }).click();
   const alert = page.getByRole('alert');
-  await expect(alert).toContainText('Maintenance control failed · Head Interval Seconds');
-  await expect(alert).toContainText('head_interval_seconds must be greater than or equal to 60');
+  await expect(alert).toContainText('Maintenance control failed · Collections');
+  await expect(alert).toContainText('The selected collections require the wiki repository scope.');
+  await expect(alert.locator('code')).toHaveCount(0);
+});
+
+test('unknown maintenance planning failure gives truthful remediation without a phantom handoff', async ({ page }) => {
+  await mockAdmin(page);
+  await page.route('**/api/admin/v1/maintenance/plan', async (route) => {
+    await route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: {
+      code: 'invalid_request',
+      message: 'The requested policy cannot be planned safely.',
+      remediation: 'Review the selected repository and policy fields, then render a new plan.'
+    } }) });
+  });
+  await page.goto('/?view=Maintenance');
+  await page.getByRole('button', { name: 'Render plan' }).click();
+  const alert = page.getByRole('alert');
+  await expect(alert).toContainText('Review the selected repository and policy fields, then render a new plan.');
+  await expect(alert).not.toContainText('handoff');
   await expect(alert.locator('code')).toHaveCount(0);
 });
 
