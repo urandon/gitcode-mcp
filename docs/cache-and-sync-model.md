@@ -134,6 +134,11 @@ the original idempotency key. Settlement atomically replaces the pending
 receipt with a terminal receipt and durably releases the job-retention pin. A
 release write failure keeps both sides recoverable and rejects further receipt
 admission when the bounded journal cannot safely evict them.
+Selective sync identities include the exact collection frontier and request
+bounds, so work for a different page cannot satisfy or coalesce the retry.
+An unrelated active writer or an early cache/schema health failure leaves the
+receipt pending for same-key replay; neither condition is terminally reported
+as `no_work_needed`.
 Pending intents are never evicted by settled-receipt retention. If unresolved
 intents fill the bounded journal, admission fails closed before starting a new
 mutation and returns a typed remediation diagnostic.

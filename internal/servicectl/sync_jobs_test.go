@@ -27,6 +27,30 @@ type codedSyncTestError struct{ code string }
 func (e codedSyncTestError) Error() string          { return e.code }
 func (e codedSyncTestError) DiagnosticCode() string { return e.code }
 
+func TestSyncWorkKeyIsFrontierAndBoundsExact(t *testing.T) {
+	base := StartSyncJobRequest{
+		RepoID: "owner/repo", CacheUUID: "cache-1", Lane: "head", Issues: true,
+		Page: 4, MaxPages: 1, MaxRecords: 100, PerPage: 50,
+		collectionPages: map[string]int{"wiki": 7, "issue": 4},
+	}
+	same := base
+	same.collectionPages = map[string]int{"issue": 4, "wiki": 7}
+	if syncWorkKey(base) != syncWorkKey(same) {
+		t.Fatalf("map iteration changed work identity: %q != %q", syncWorkKey(base), syncWorkKey(same))
+	}
+	variants := []StartSyncJobRequest{base, base, base, base, base}
+	variants[0].Page++
+	variants[1].MaxPages++
+	variants[2].MaxRecords++
+	variants[3].PerPage++
+	variants[4].collectionPages = map[string]int{"issue": 5, "wiki": 7}
+	for index, variant := range variants {
+		if syncWorkKey(base) == syncWorkKey(variant) {
+			t.Fatalf("variant %d was not frontier-exact: %q", index, syncWorkKey(variant))
+		}
+	}
+}
+
 func TestDurableSyncSelectorInvariantCoversDefaultAndComments(t *testing.T) {
 	if !syncDurableCollections(StartSyncJobRequest{}) || !syncDurableCollections(StartSyncJobRequest{IssueComments: true, PRComments: true}) {
 		t.Fatal("daemon selector combination escaped durable staging")

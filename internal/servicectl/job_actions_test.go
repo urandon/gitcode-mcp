@@ -313,6 +313,13 @@ func TestJobActionSettledRetryCorrelationSurvivesReleaseFailure(t *testing.T) {
 	if _, retained := actions.receipts[keyHash]; !retained {
 		t.Fatal("settled receipt was evicted while its retry correlation remained pinned")
 	}
+	for key, stored := range actions.receipts {
+		if key == keyHash {
+			continue
+		}
+		stored.Receipt.Outcome = "pending"
+		actions.receipts[key] = stored
+	}
 	if _, err := actions.Retry(context.Background(), adminhttp.JobActionRequest{JobID: "job-000001", IdempotencyKey: "blocked-by-pinned-capacity"}); err == nil {
 		t.Fatal("expected bounded journal to fail closed while settled correlation is pinned")
 	} else if actionErr, ok := err.(adminhttp.JobActionError); !ok || actionErr.Code != "job_action_receipt_capacity" || runs != 1 {
@@ -505,6 +512,34 @@ func TestJobActionReceiptsAreBounded(t *testing.T) {
 	actions.pruneLocked()
 	if len(actions.receipts) != maxJobActionReceipts {
 		t.Fatalf("receipts=%d want=%d", len(actions.receipts), maxJobActionReceipts)
+	}
+}
+
+func TestJobActionAdmissionEvictsOldestSettledReceiptAtCapacity(t *testing.T) {
+	jobs := NewJobManager("")
+	now := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
+	jobs.jobs["job-000001"] = &Job{ID: "job-000001", Type: SyncJobType, RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", WorkRef: publicWorkRef("sync-work"), Status: JobStatusFailed, CreatedAt: now, UpdatedAt: now}
+	actions := NewJobActionManager("", jobs, nil)
+	oldestKey := ""
+	for index := 0; index < maxJobActionReceipts; index++ {
+		key := hashJobAction("settled-at-capacity-" + time.Duration(index).String())
+		if index == 0 {
+			oldestKey = key
+		}
+		actions.receipts[key] = jobActionReceiptDisk{KeyHash: key, Receipt: adminhttp.JobActionReceipt{Outcome: "created", CreatedAt: now.Add(time.Duration(index) * time.Second)}}
+	}
+	actions.reconcile = func(context.Context, string, string, string) (MaintenanceReconcileResult, error) {
+		return MaintenanceReconcileResult{}, nil
+	}
+	receipt, err := actions.Retry(context.Background(), adminhttp.JobActionRequest{JobID: "job-000001", IdempotencyKey: "new-at-capacity"})
+	if err != nil || receipt.Outcome != "no_work_needed" {
+		t.Fatalf("receipt=%+v err=%v", receipt, err)
+	}
+	if len(actions.receipts) != maxJobActionReceipts {
+		t.Fatalf("receipts=%d want=%d", len(actions.receipts), maxJobActionReceipts)
+	}
+	if _, retained := actions.receipts[oldestKey]; retained {
+		t.Fatal("oldest evictable settled receipt was retained")
 	}
 }
 

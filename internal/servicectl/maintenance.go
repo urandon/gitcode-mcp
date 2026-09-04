@@ -2295,6 +2295,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	activeSync, activeRAG, activeRepositoryDocs := m.activeJobsForSnapshot(snapshot)
 	store, err := cache.NewSQLiteReadOnlyStore(ctx, path)
 	if err != nil {
+		recordJobActionIntentError(ctx, err)
 		var schemaErr *cache.SchemaVersionError
 		if errors.As(err, &schemaErr) {
 			return m.updateEntrySchemaBlocked(registrationID, schemaErr.Compat, activeSync, activeRAG, activeRepositoryDocs), nil
@@ -2307,11 +2308,13 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 		if err == nil {
 			err = errors.New("cache identity changed")
 		}
+		recordJobActionIntentError(ctx, err)
 		return m.updateEntryFailureWithJobs(registrationID, "cache_replaced", err, activeSync, activeRAG, activeRepositoryDocs), nil
 	}
 	contentState, err := store.GetRepoContentState(ctx, snapshot.RepoID)
 	if err != nil {
 		store.Close()
+		recordJobActionIntentError(ctx, err)
 		return m.updateEntryFailureWithJobs(registrationID, "content_state_failed", err, activeSync, activeRAG, activeRepositoryDocs), nil
 	}
 	frontiers, _ := store.ListMaintenanceFrontiers(ctx, snapshot.RepoID)
@@ -2366,7 +2369,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	// policy. Repeated failures remain bounded by the same backoff as other
 	// daemon work and are resumed only when their retry window opens.
 	repositoryDocsReady := repositoryDocsRetryReady(snapshot.RepositoryDocs, now)
-	if actionIntentRef != "" && (activeSync.ID != "" || activeRAG.ID != "" || activeRepositoryDocs.ID != "") {
+	if actionIntentRef != "" && (activeSync.ID != "" || activeRAG.ID != "" || activeRepositoryDocs.ID != "" || activeWriter.ID != "") {
 		lane, page, maxPages := nextMaintenanceSyncLane(snapshot, frontiers, now)
 		syncReady := snapshot.SyncStage.RetryAfter.IsZero() || !now.Before(snapshot.SyncStage.RetryAfter)
 		ragReady := snapshot.RAGStage.RetryAfter.IsZero() || !now.Before(snapshot.RAGStage.RetryAfter)
@@ -2423,6 +2426,19 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 			activeSync, activeRAG, activeRepositoryDocs = m.activeJobsForSnapshot(snapshot)
 			activeWriter, _ = m.jobs.ActiveCacheWriter(snapshot.CacheUUID)
 		}
+	}
+	if actionIntentRef != "" && (activeSync.ID != "" || activeRAG.ID != "" || activeRepositoryDocs.ID != "" || activeWriter.ID != "") {
+		blocker := activeWriter
+		if blocker.ID == "" {
+			for _, active := range []Job{activeSync, activeRAG, activeRepositoryDocs} {
+				if active.ID != "" {
+					blocker = active
+					break
+				}
+			}
+		}
+		recordJobActionIntentError(ctx, ErrCacheWriterBusy{ActiveJobID: blocker.ID, ActiveType: blocker.Type})
+		return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), nil
 	}
 	if activeSync.ID == "" && activeRAG.ID == "" && activeRepositoryDocs.ID == "" && activeWriter.ID == "" {
 		lane, page, maxPages := nextMaintenanceSyncLane(snapshot, frontiers, now)

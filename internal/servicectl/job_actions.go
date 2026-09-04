@@ -267,7 +267,10 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		}
 	}
 	if !hadStored {
-		m.pruneLocked()
+		// Reserve one slot before persisting a new mutation intent. Pruning to
+		// the ordinary retention limit is insufficient when the journal is
+		// exactly full but contains an evictable settled receipt.
+		m.pruneToLimitLocked(maxJobActionReceipts - 1)
 		if len(m.receipts) >= maxJobActionReceipts {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusServiceUnavailable, "job_action_receipt_capacity", "The durable job-action receipt journal is full.", "Restart after service storage is writable so settled retry correlations can be released, or replay unresolved Admin actions.")
 		}
@@ -420,7 +423,14 @@ func (m *JobActionManager) saveLocked() error {
 }
 
 func (m *JobActionManager) pruneLocked() {
-	if maxJobActionReceipts <= 0 || len(m.receipts) <= maxJobActionReceipts {
+	m.pruneToLimitLocked(maxJobActionReceipts)
+}
+
+func (m *JobActionManager) pruneToLimitLocked(limit int) {
+	if limit < 0 {
+		limit = 0
+	}
+	if len(m.receipts) <= limit {
 		return
 	}
 	// Pending entries are mutation intents, not disposable history. A settled
@@ -446,7 +456,7 @@ func (m *JobActionManager) pruneLocked() {
 		}
 		return settled[i].Receipt.CreatedAt.Before(settled[j].Receipt.CreatedAt)
 	})
-	remove := min(len(settled), len(m.receipts)-maxJobActionReceipts)
+	remove := min(len(settled), len(m.receipts)-limit)
 	for _, receipt := range settled[:remove] {
 		delete(m.receipts, receipt.KeyHash)
 	}

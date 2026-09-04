@@ -133,6 +133,125 @@ func TestMaintenanceRetryCorrelatesExactActiveCurrentWork(t *testing.T) {
 	}
 }
 
+func TestMaintenanceAdminRetryKeepsIntentPendingBehindUnrelatedWriter(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+	maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), jobs, filepath.Join(dir, "managed-caches.json"))
+	enrolled, err := maintenance.Enroll(ctx, testMaintenanceEnrollRequest(cachePath, "busy-enroll", MaintenancePolicy{SyncEnabled: true, SyncMode: "head", Issues: true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	jobs.jobs["job-source"] = &Job{ID: "job-source", Type: SyncJobType, RepoID: enrolled.RepoID, CacheUUID: enrolled.CacheUUID, RegistrationID: enrolled.RegistrationID, Status: JobStatusFailed, CreatedAt: now, UpdatedAt: now}
+	release, err := jobs.BeginDirectCacheWriter(enrolled.CacheUUID, "unrelated-admin-write")
+	if err != nil {
+		t.Fatal(err)
+	}
+	actions := NewJobActionManager(filepath.Join(dir, "actions.json"), jobs, maintenance)
+	req := adminhttp.JobActionRequest{JobID: "job-source", IdempotencyKey: "retry-behind-unrelated-writer"}
+	_, err = actions.Retry(ctx, req)
+	var typed adminhttp.JobActionError
+	if !errors.As(err, &typed) || typed.Code != "retry_failed" {
+		t.Fatalf("busy retry error=%T %v", err, err)
+	}
+	keyHash := hashJobAction(req.IdempotencyKey)
+	if stored := actions.receipts[keyHash]; stored.Receipt.Outcome != "pending" {
+		t.Fatalf("busy retry was terminally consumed: %+v", stored.Receipt)
+	}
+
+	release()
+	maintenance.mu.Lock()
+	maintenance.entries[enrolled.RegistrationID].Policy.SyncEnabled = false
+	maintenance.entries[enrolled.RegistrationID].Policy.SyncMode = "off"
+	maintenance.mu.Unlock()
+	replayed, err := actions.Retry(ctx, req)
+	if err != nil || !replayed.Replayed || replayed.Outcome != "no_work_needed" {
+		t.Fatalf("replayed=%+v err=%v", replayed, err)
+	}
+}
+
+func TestMaintenanceAdminRetryDoesNotConsumeIntentOnEarlyCacheFailure(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		breakIt func(*testing.T, string) func()
+	}{
+		{
+			name: "schema blocked",
+			breakIt: func(t *testing.T, path string) func() {
+				setMaintenanceTestSchemaVersion(t, path, cache.CurrentSchemaVersion()+1)
+				return func() { setMaintenanceTestSchemaVersion(t, path, cache.CurrentSchemaVersion()) }
+			},
+		},
+		{
+			name: "cache unreadable",
+			breakIt: func(t *testing.T, path string) func() {
+				backup := path + ".missing"
+				if err := os.Rename(path, backup); err != nil {
+					t.Fatal(err)
+				}
+				return func() {
+					if err := os.Rename(backup, path); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			cachePath := filepath.Join(dir, "cache.db")
+			store, err := cache.NewSQLiteStore(ctx, cachePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+			maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), jobs, filepath.Join(dir, "managed-caches.json"))
+			enrolled, err := maintenance.Enroll(ctx, testMaintenanceEnrollRequest(cachePath, "early-enroll", MaintenancePolicy{}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			jobs.jobs["job-source"] = &Job{ID: "job-source", Type: SyncJobType, RepoID: enrolled.RepoID, CacheUUID: enrolled.CacheUUID, RegistrationID: enrolled.RegistrationID, Status: JobStatusFailed, CreatedAt: now, UpdatedAt: now}
+			actions := NewJobActionManager(filepath.Join(dir, "actions.json"), jobs, maintenance)
+			req := adminhttp.JobActionRequest{JobID: "job-source", IdempotencyKey: "retry-after-" + test.name}
+			restore := test.breakIt(t, cachePath)
+			_, err = actions.Retry(ctx, req)
+			var typed adminhttp.JobActionError
+			if !errors.As(err, &typed) || typed.Code != "retry_failed" {
+				t.Fatalf("early failure error=%T %v", err, err)
+			}
+			if stored := actions.receipts[hashJobAction(req.IdempotencyKey)]; stored.Receipt.Outcome != "pending" {
+				t.Fatalf("early failure consumed retry intent: %+v", stored.Receipt)
+			}
+			restore()
+			replayed, err := actions.Retry(ctx, req)
+			if err != nil || !replayed.Replayed || replayed.Outcome != "no_work_needed" {
+				t.Fatalf("replayed=%+v err=%v", replayed, err)
+			}
+		})
+	}
+}
+
 func setMaintenanceTestSchemaVersion(t *testing.T, path string, version int) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)

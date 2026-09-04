@@ -159,7 +159,17 @@ func syncWorkKey(req StartSyncJobRequest) string {
 		lane = "manual"
 	}
 	collections := fmt.Sprintf("%t%t%t%t%t", req.Issues, req.Wiki, req.Pulls, req.IssueComments, req.PRComments || req.Comments)
-	return strings.Join([]string{SyncJobType, cacheID, strings.TrimSpace(req.RepoID), lane, collections}, ":")
+	frontierKeys := make([]string, 0, len(req.collectionPages))
+	for collection := range req.collectionPages {
+		frontierKeys = append(frontierKeys, collection)
+	}
+	sort.Strings(frontierKeys)
+	frontiers := make([]string, 0, len(frontierKeys))
+	for _, collection := range frontierKeys {
+		frontiers = append(frontiers, fmt.Sprintf("%s=%d", collection, req.collectionPages[collection]))
+	}
+	bounds := fmt.Sprintf("page=%d,max-pages=%d,max-records=%d,per-page=%d,frontiers=%s", req.Page, req.MaxPages, req.MaxRecords, req.PerPage, strings.Join(frontiers, ","))
+	return strings.Join([]string{SyncJobType, cacheID, strings.TrimSpace(req.RepoID), lane, collections, bounds}, ":")
 }
 
 func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID string, req StartSyncJobRequest) {
