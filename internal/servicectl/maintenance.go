@@ -1653,6 +1653,7 @@ func (m *MaintenanceManager) RetrySyncCollection(ctx context.Context, registrati
 	selected.RepoID, selected.ProviderMode, selected.CachePath = snapshot.RepoID, "live", snapshot.cachePath
 	selected.CacheUUID, selected.RegistrationID, selected.Lane = snapshot.CacheUUID, snapshot.RegistrationID, "head"
 	selected.MaxPages, selected.PerPage, selected.Page = 1, snapshot.Policy.PerPage, page
+	selected.ActionIntentRef = jobActionIntentFromContext(ctx)
 	selected.collectionPages = map[string]int{remoteType: page}
 	selected.IdempotencyKey = fmt.Sprintf("maintenance-collection-retry-%s-%s-%d", snapshot.RegistrationID, remoteType, m.now().Unix()/60)
 	jobManager := m.manager
@@ -2261,6 +2262,7 @@ func repositoryDocsSourceGeneration(entry MaintenanceEntry) int64 {
 }
 
 func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID string) (MaintenanceEntry, []string) {
+	actionIntentRef := jobActionIntentFromContext(ctx)
 	m.mu.Lock()
 	entry := m.entries[registrationID]
 	if entry == nil {
@@ -2385,6 +2387,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 				Wiki: selection.Wiki, Pulls: selection.Pulls, PRComments: selection.PRComments,
 				MaxPages: maxPages, PerPage: snapshot.Policy.PerPage,
 				Page: page, IdempotencyKey: fmt.Sprintf("maintenance-%s-%s-%d-%d", snapshot.RegistrationID, lane, page, now.Unix()/60),
+				ActionIntentRef: actionIntentRef,
 				collectionPages: selection.collectionPages,
 			}
 			job, jobErr := m.jobs.StartSync(context.Background(), jobManager, req)
@@ -2398,7 +2401,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 			started = append(started, job.ID)
 			activeSync = job
 		} else if stage == RAGIndexJobType {
-			job, jobErr := m.jobs.StartRAGIndex(context.Background(), jobManager, StartRAGIndexJobRequest{RepoID: snapshot.RepoID, Profile: effectiveProfile, CachePath: path, CacheUUID: snapshot.CacheUUID, RegistrationID: snapshot.RegistrationID})
+			job, jobErr := m.jobs.StartRAGIndex(context.Background(), jobManager, StartRAGIndexJobRequest{RepoID: snapshot.RepoID, Profile: effectiveProfile, CachePath: path, CacheUUID: snapshot.CacheUUID, RegistrationID: snapshot.RegistrationID, ActionIntentRef: actionIntentRef})
 			if jobErr != nil {
 				var busy ErrCacheWriterBusy
 				if errors.As(jobErr, &busy) {
@@ -2431,6 +2434,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 				CachePath: path, CacheUUID: snapshot.CacheUUID, RegistrationID: snapshot.RegistrationID,
 				SourceRegistrationID:          snapshot.RepositoryDocs.SourceRegistrationID,
 				SourceRegistrationGeneration:  snapshot.RepositoryDocs.SourceRegistrationGeneration,
+				ActionIntentRef:               actionIntentRef,
 				Revision:                      revision,
 				IncludeWorktree:               includeWorktree,
 				recoveryExpectedRevisionSetID: recoveryExpectedSetID,

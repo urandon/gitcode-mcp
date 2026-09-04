@@ -61,6 +61,7 @@ type StartSyncJobRequest struct {
 	CacheUUID           string `json:"cache_uuid,omitempty"`
 	RegistrationID      string `json:"registration_id,omitempty"`
 	Lane                string `json:"lane,omitempty"`
+	ActionIntentRef     string `json:"-"`
 	collectionPages     map[string]int
 	workflowCollections []string
 	workflowStart       int
@@ -129,7 +130,7 @@ func (m *JobManager) startSync(ctx context.Context, manager Manager, req StartSy
 	}
 	workKey := syncWorkKey(req)
 	ctx, cancel := context.WithCancel(ctx)
-	job, created, err := m.createCoalescedJob(SyncJobType, req.RepoID, "", 0, workKey, req.CacheUUID, req.RegistrationID, "", cancel)
+	job, created, err := m.createCoalescedJobWithIntent(SyncJobType, req.RepoID, "", 0, workKey, req.CacheUUID, req.RegistrationID, "", JobRecoveryIntent{ActionIntentRef: req.ActionIntentRef}, cancel)
 	if err != nil {
 		cancel()
 		return Job{}, false, err

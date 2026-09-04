@@ -23,9 +23,29 @@ const (
 )
 
 type jobActionReceiptDisk struct {
-	KeyHash    string                     `json:"key_hash"`
-	IntentHash string                     `json:"intent_hash"`
-	Receipt    adminhttp.JobActionReceipt `json:"receipt"`
+	KeyHash     string                     `json:"key_hash"`
+	IntentHash  string                     `json:"intent_hash"`
+	Receipt     adminhttp.JobActionReceipt `json:"receipt"`
+	RetrySource *jobActionRetrySource      `json:"retry_source,omitempty"`
+}
+
+type jobActionRetrySource struct {
+	Type           string `json:"type"`
+	RepoID         string `json:"repo_id"`
+	CacheUUID      string `json:"cache_uuid"`
+	RegistrationID string `json:"registration_id"`
+	Collection     string `json:"collection,omitempty"`
+}
+
+func retrySourceFromJob(job Job, collection string) *jobActionRetrySource {
+	return &jobActionRetrySource{Type: job.Type, RepoID: job.RepoID, CacheUUID: job.CacheUUID, RegistrationID: job.RegistrationID, Collection: strings.TrimSpace(collection)}
+}
+
+func (source *jobActionRetrySource) job(receipt adminhttp.JobActionReceipt) (Job, bool) {
+	if source == nil || strings.TrimSpace(source.Type) == "" || strings.TrimSpace(source.RegistrationID) == "" {
+		return Job{}, false
+	}
+	return Job{ID: receipt.TargetJob, Type: source.Type, RepoID: source.RepoID, CacheUUID: source.CacheUUID, RegistrationID: source.RegistrationID, Status: receipt.JobStatus}, true
 }
 
 type jobActionReceiptFile struct {
@@ -33,11 +53,22 @@ type jobActionReceiptFile struct {
 	Receipts []jobActionReceiptDisk `json:"receipts"`
 }
 
+type jobActionIntentContextKey struct{}
+
+func withJobActionIntent(ctx context.Context, ref string) context.Context {
+	return context.WithValue(ctx, jobActionIntentContextKey{}, strings.TrimSpace(ref))
+}
+
+func jobActionIntentFromContext(ctx context.Context) string {
+	ref, _ := ctx.Value(jobActionIntentContextKey{}).(string)
+	return strings.TrimSpace(ref)
+}
+
 type JobActionManager struct {
 	mu        sync.Mutex
 	path      string
 	jobs      *JobManager
-	reconcile func(context.Context, string, string) (MaintenanceReconcileResult, error)
+	reconcile func(context.Context, string, string, string) (MaintenanceReconcileResult, error)
 	receipts  map[string]jobActionReceiptDisk
 	now       func() time.Time
 	writeFile func(string, []byte, os.FileMode) error
@@ -46,7 +77,8 @@ type JobActionManager struct {
 func NewJobActionManager(path string, jobs *JobManager, maintenance *MaintenanceManager) *JobActionManager {
 	manager := &JobActionManager{path: path, jobs: jobs, receipts: map[string]jobActionReceiptDisk{}, now: func() time.Time { return time.Now().UTC() }, writeFile: durableAtomicWriteFile}
 	if maintenance != nil {
-		manager.reconcile = func(ctx context.Context, registrationID, collection string) (MaintenanceReconcileResult, error) {
+		manager.reconcile = func(ctx context.Context, registrationID, collection, actionIntentRef string) (MaintenanceReconcileResult, error) {
+			ctx = withJobActionIntent(ctx, actionIntentRef)
 			if strings.TrimSpace(collection) != "" {
 				return maintenance.RetrySyncCollection(ctx, registrationID, collection)
 			}
@@ -77,8 +109,65 @@ func (m *JobActionManager) Load() error {
 	for _, receipt := range file.Receipts {
 		m.receipts[receipt.KeyHash] = receipt
 	}
+	changed := m.recoverPendingLocked(context.Background())
 	m.pruneLocked()
+	if changed {
+		if err := m.saveLocked(); err != nil {
+			return err
+		}
+	}
+	for _, receipt := range m.receipts {
+		if receipt.Receipt.Action == "retry" && receipt.Receipt.Outcome != "pending" {
+			_ = m.jobs.ReleaseActionIntent(hashJobAction(receipt.KeyHash + "\x00" + receipt.IntentHash))
+		}
+	}
 	return nil
+}
+
+func (m *JobActionManager) recoverPendingLocked(ctx context.Context) bool {
+	ordered := make([]jobActionReceiptDisk, 0, len(m.receipts))
+	for _, receipt := range m.receipts {
+		if receipt.Receipt.Action == "retry" && receipt.Receipt.Outcome == "pending" {
+			ordered = append(ordered, receipt)
+		}
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].Receipt.CreatedAt.Equal(ordered[j].Receipt.CreatedAt) {
+			return ordered[i].KeyHash < ordered[j].KeyHash
+		}
+		return ordered[i].Receipt.CreatedAt.Before(ordered[j].Receipt.CreatedAt)
+	})
+	changed := false
+	for _, stored := range ordered {
+		actionIntentRef := hashJobAction(stored.KeyHash + "\x00" + stored.IntentHash)
+		receipt := stored.Receipt
+		receipt.Replayed = true
+		if admitted, found := m.jobs.RetainedRetryIntentResult(actionIntentRef); found {
+			receipt.ResultJob, receipt.Outcome, receipt.JobStatus = admitted.ID, "coalesced", admitted.Status
+		} else {
+			// Legacy v1 pending receipts did not retain collection scope. They
+			// remain fail-closed unless an exact admitted-job correlation exists.
+			if stored.RetrySource == nil {
+				continue
+			}
+			source, found := m.jobs.Get(receipt.TargetJob)
+			if !found {
+				source, found = stored.RetrySource.job(receipt)
+			}
+			if !found || m.reconcile == nil {
+				continue
+			}
+			result, err := m.reconcile(ctx, source.RegistrationID, stored.RetrySource.Collection, actionIntentRef)
+			if err != nil {
+				continue
+			}
+			m.applyRetryResult(&receipt, source, result)
+		}
+		stored.Receipt = receipt
+		m.receipts[stored.KeyHash] = stored
+		changed = true
+	}
+	return changed
 }
 
 func (m *JobActionManager) Cancel(ctx context.Context, req adminhttp.JobActionRequest) (adminhttp.JobActionReceipt, error) {
@@ -100,7 +189,9 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 	}
 	keyHash := hashJobAction(req.IdempotencyKey)
 	intentHash := hashJobAction(action + "\x00" + req.JobID + "\x00" + req.Collection)
+	actionIntentRef := hashJobAction(keyHash + "\x00" + intentHash)
 	var preparedReceipt *adminhttp.JobActionReceipt
+	var preparedDisk *jobActionReceiptDisk
 	if stored, ok := m.receipts[keyHash]; ok {
 		if stored.IntentHash != intentHash {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "idempotency_conflict", "The idempotency key was already used for a different job action.", "Generate a new key for the changed intent.")
@@ -108,15 +199,34 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		receipt := stored.Receipt
 		receipt.Replayed = true
 		if action != "retry" || receipt.Outcome != "pending" {
+			if action == "retry" {
+				_ = m.jobs.ReleaseActionIntent(actionIntentRef)
+			}
 			return receipt, nil
 		}
-		// A pending retry is a durable intent, not a terminal receipt. Re-drive
-		// the idempotent maintenance reconcile so a crash before the mutation
-		// cannot turn every replay into a permanent no-op. If the mutation had
-		// already happened, ordinary work coalescing returns its durable job.
+		// A pending retry is a durable intent, not a terminal receipt. First
+		// resolve the exact action correlation attached during job admission;
+		// only an intent that crashed before admission is re-driven.
 		preparedReceipt = &receipt
+		storedCopy := stored
+		preparedDisk = &storedCopy
+		if admitted, found := m.jobs.RetainedRetryIntentResult(actionIntentRef); found {
+			receipt.ResultJob, receipt.Outcome, receipt.JobStatus = admitted.ID, "coalesced", admitted.Status
+			storedCopy.Receipt = receipt
+			m.receipts[keyHash] = storedCopy
+			m.pruneLocked()
+			if err := m.saveLocked(); err != nil {
+				m.receipts[keyHash] = *preparedDisk
+				return adminhttp.JobActionReceipt{}, err
+			}
+			_ = m.jobs.ReleaseActionIntent(actionIntentRef)
+			return receipt, nil
+		}
 	}
 	job, ok := m.jobs.Get(req.JobID)
+	if !ok && preparedDisk != nil {
+		job, ok = preparedDisk.RetrySource.job(preparedDisk.Receipt)
+	}
 	if !ok {
 		return adminhttp.JobActionReceipt{}, jobActionError(http.StatusNotFound, "job_not_retained", "The selected job has expired or is not retained by this daemon.", "Return to the bounded job list; cached repository data and audit evidence are unaffected.")
 	}
@@ -136,7 +246,7 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		}
 		pending := receipt
 		pending.Outcome, pending.JobStatus = "pending", job.Status
-		m.receipts[keyHash] = jobActionReceiptDisk{KeyHash: keyHash, IntentHash: intentHash, Receipt: pending}
+		m.receipts[keyHash] = jobActionReceiptDisk{KeyHash: keyHash, IntentHash: intentHash, Receipt: pending, RetrySource: retrySourceFromJob(job, req.Collection)}
 		m.pruneLocked()
 		if err := m.saveLocked(); err != nil {
 			delete(m.receipts, keyHash)
@@ -171,27 +281,8 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		if job.RegistrationID == "" {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "retry_unavailable", "The retained job has no maintenance registration to reconcile.", "Use the maintenance setup CLI for this repository.")
 		}
-		if req.Collection == "" && strings.TrimSpace(job.WorkRef) == "" {
-			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "retry_identity_unavailable", "The retained job has no durable work identity for restart-safe retry.", "Run maintenance reconciliation directly; newer jobs retain the identity required for Admin retry.")
-		}
-		if req.Collection != "" && (job.Type != SyncJobType || !retryableSyncCollection(job, req.Collection)) {
+		if preparedReceipt == nil && req.Collection != "" && (job.Type != SyncJobType || !retryableSyncCollection(job, req.Collection)) {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "collection_retry_unavailable", "The selected collection is not a failed terminal collection on this sync job.", "Refresh the job and choose a partial or permanently failed collection.")
-		}
-		if preparedReceipt != nil {
-			workRef := job.WorkRef
-			if req.Collection != "" {
-				workRef = adminCollectionRetryWorkRef(job, req.Collection)
-			}
-			if admitted, found := m.jobs.RetainedRetryIntentResult(job, workRef, receipt.CreatedAt); found {
-				receipt.ResultJob, receipt.Outcome, receipt.JobStatus = admitted.ID, "coalesced", admitted.Status
-				break
-			}
-		}
-		if req.Collection == "" {
-			if active, found := m.jobs.ActiveCacheRepo(job.Type, job.CacheUUID, job.RepoID); found {
-				receipt.ResultJob, receipt.Outcome, receipt.JobStatus = active.ID, "coalesced", active.Status
-				break
-			}
 		}
 		if m.reconcile == nil {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusNotImplemented, "capability_unavailable", "Retry is not available in the running daemon.", "Use the maintenance CLI for this registration.")
@@ -199,67 +290,53 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		if err := prepare(); err != nil {
 			return adminhttp.JobActionReceipt{}, err
 		}
-		result, err := m.reconcile(ctx, job.RegistrationID, req.Collection)
+		result, err := m.reconcile(ctx, job.RegistrationID, req.Collection, actionIntentRef)
 		if err != nil {
 			// Keep the prepared intent. Reconcile can fail after crossing its
 			// mutation boundary, so deleting the claim would permit a new key to
 			// duplicate work instead of retrying/coalescing this exact intent.
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "retry_failed", "The maintenance registration could not be reconciled.", "Refresh maintenance status and resolve its typed diagnostic.")
 		}
-		if len(result.JobsStarted) > 0 {
-			started, found := m.jobs.Get(result.JobsStarted[0])
-			if found {
-				receipt.ResultJob, receipt.Outcome, receipt.JobStatus = started.ID, "created", started.Status
-			} else {
-				receipt.ResultJob, receipt.Outcome, receipt.JobStatus = result.JobsStarted[0], "created", "not_retained"
-			}
-		} else if len(result.JobsCoalesced) > 0 {
-			coalesced, found := m.jobs.Get(result.JobsCoalesced[0])
-			if found {
-				receipt.ResultJob, receipt.Outcome, receipt.JobStatus = coalesced.ID, "coalesced", coalesced.Status
-			} else {
-				receipt.ResultJob, receipt.Outcome, receipt.JobStatus = result.JobsCoalesced[0], "coalesced", "not_retained"
-			}
-		} else if req.Collection == "" {
-			if active, found := m.jobs.ActiveCacheRepo(job.Type, job.CacheUUID, job.RepoID); found {
-				receipt.ResultJob, receipt.Outcome, receipt.JobStatus = active.ID, "coalesced", active.Status
-			} else {
-				receipt.ResultJob, receipt.Outcome, receipt.JobStatus = job.ID, "no_work_needed", job.Status
-			}
-		} else {
-			receipt.ResultJob, receipt.Outcome, receipt.JobStatus = job.ID, "no_work_needed", job.Status
-		}
+		m.applyRetryResult(&receipt, job, result)
 	default:
 		return adminhttp.JobActionReceipt{}, jobActionError(http.StatusBadRequest, "invalid_action", "Unknown job action.", "Refresh the admin UI.")
 	}
+	previous, hadPrevious := m.receipts[keyHash]
 	m.receipts[keyHash] = jobActionReceiptDisk{KeyHash: keyHash, IntentHash: intentHash, Receipt: receipt}
 	m.pruneLocked()
 	if err := m.saveLocked(); err != nil {
-		// The mutation has already happened. Keep the in-process receipt so a
-		// repeated browser request cannot perform it twice even if persistence
-		// is temporarily unavailable.
+		// A retry mutation is correlated with its admitted job. Restore the
+		// pending intent in memory when terminal receipt persistence fails so a
+		// same-process replay follows the same durable recovery path as restart.
+		if action == "retry" && hadPrevious {
+			m.receipts[keyHash] = previous
+		}
 		return adminhttp.JobActionReceipt{}, err
+	}
+	if action == "retry" {
+		_ = m.jobs.ReleaseActionIntent(actionIntentRef)
 	}
 	return receipt, nil
 }
 
-func adminCollectionRetryWorkRef(job Job, collection string) string {
-	req := StartSyncJobRequest{RepoID: job.RepoID, CacheUUID: job.CacheUUID, RegistrationID: job.RegistrationID, Lane: "head"}
-	switch collection {
-	case "issues":
-		req.Issues = true
-	case "wiki":
-		req.Wiki = true
-	case "pulls":
-		req.Pulls = true
-	case "issue_comments":
-		req.IssueComments = true
-	case "pr_comments":
-		req.PRComments = true
-	default:
-		return ""
+func (m *JobActionManager) applyRetryResult(receipt *adminhttp.JobActionReceipt, source Job, result MaintenanceReconcileResult) {
+	if len(result.JobsStarted) > 0 {
+		started, found := m.jobs.Get(result.JobsStarted[0])
+		if found {
+			receipt.ResultJob, receipt.Outcome, receipt.JobStatus = started.ID, "created", started.Status
+		} else {
+			receipt.ResultJob, receipt.Outcome, receipt.JobStatus = result.JobsStarted[0], "created", "not_retained"
+		}
+	} else if len(result.JobsCoalesced) > 0 {
+		coalesced, found := m.jobs.Get(result.JobsCoalesced[0])
+		if found {
+			receipt.ResultJob, receipt.Outcome, receipt.JobStatus = coalesced.ID, "coalesced", coalesced.Status
+		} else {
+			receipt.ResultJob, receipt.Outcome, receipt.JobStatus = result.JobsCoalesced[0], "coalesced", "not_retained"
+		}
+	} else {
+		receipt.ResultJob, receipt.Outcome, receipt.JobStatus = source.ID, "no_work_needed", source.Status
 	}
-	return publicWorkRef(syncWorkKey(req))
 }
 
 func (m *JobActionManager) saveLocked() error {

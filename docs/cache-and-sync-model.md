@@ -122,9 +122,14 @@ metadata, and 24 hours. Recovery reconciles an exact staged transaction or
 SQLite commit receipt before applying age-based checkpoint cleanup, so durable
 cache truth cannot be downgraded to an expired retry. Admin retry actions first
 persist a hashed, intent-bound `pending` receipt. Replaying that intent after a
-restart re-drives the idempotent maintenance reconcile: it either creates work
-that never started or coalesces work already created, then atomically replaces
-the pending intent with a terminal receipt.
+restart first resolves an exact opaque action-intent reference that is attached
+atomically to whichever current maintenance job was created or coalesced. Jobs
+carrying an unresolved reference are protected from history pruning. If no job
+was admitted before the crash, the private receipt's minimal registration
+authority remains sufficient to re-drive reconciliation even after the source
+job expires; daemon startup performs that recovery without requiring the
+browser to retain the original idempotency key. Settlement atomically replaces
+the pending receipt with a terminal receipt and releases the job-retention pin.
 Pending intents are never evicted by settled-receipt retention. If unresolved
 intents fill the bounded journal, admission fails closed before starting a new
 mutation and returns a typed remediation diagnostic.

@@ -16,15 +16,16 @@ import (
 const RAGIndexJobType = "rag-index"
 
 type StartRAGIndexJobRequest struct {
-	RepoID         string `json:"repo_id"`
-	Profile        string `json:"profile,omitempty"`
-	CachePath      string `json:"cache_path,omitempty"`
-	BatchSize      int    `json:"batch_size,omitempty"`
-	MaxChunks      int    `json:"max_chunks,omitempty"`
-	ChunkPolicy    string `json:"chunk_policy,omitempty"`
-	CacheUUID      string `json:"cache_uuid,omitempty"`
-	RegistrationID string `json:"registration_id,omitempty"`
-	NamespaceID    string `json:"namespace_id,omitempty"`
+	RepoID          string `json:"repo_id"`
+	Profile         string `json:"profile,omitempty"`
+	CachePath       string `json:"cache_path,omitempty"`
+	BatchSize       int    `json:"batch_size,omitempty"`
+	MaxChunks       int    `json:"max_chunks,omitempty"`
+	ChunkPolicy     string `json:"chunk_policy,omitempty"`
+	CacheUUID       string `json:"cache_uuid,omitempty"`
+	RegistrationID  string `json:"registration_id,omitempty"`
+	NamespaceID     string `json:"namespace_id,omitempty"`
+	ActionIntentRef string `json:"-"`
 }
 
 func (m *JobManager) StartRAGIndex(ctx context.Context, manager Manager, req StartRAGIndexJobRequest) (Job, error) {
@@ -38,7 +39,7 @@ func (m *JobManager) StartRAGIndex(ctx context.Context, manager Manager, req Sta
 	workKey := ragIndexWorkKey(req)
 	ctx, cancel := context.WithCancel(ctx)
 	profile := strings.TrimSpace(req.Profile)
-	job, created, err := m.createCoalescedJob(RAGIndexJobType, req.RepoID, profile, 0, workKey, req.CacheUUID, req.RegistrationID, req.NamespaceID, cancel)
+	job, created, err := m.createCoalescedJobWithIntent(RAGIndexJobType, req.RepoID, profile, 0, workKey, req.CacheUUID, req.RegistrationID, req.NamespaceID, JobRecoveryIntent{ActionIntentRef: req.ActionIntentRef}, cancel)
 	if err != nil {
 		cancel()
 		return Job{}, err

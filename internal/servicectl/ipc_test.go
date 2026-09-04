@@ -355,6 +355,44 @@ func TestJobManagerPrunesOnCompletion(t *testing.T) {
 	}
 }
 
+func TestJobManagerRetentionPinsUnsettledActionIntent(t *testing.T) {
+	now := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	manager := NewJobManagerWithRetention(filepath.Join(t.TempDir(), "jobs.json"), config.ServiceJobRetentionConfig{
+		SuccessTTL: time.Hour, DiagnosticTTL: time.Hour,
+		MaxTerminalJobs: 1, MaxDiagnosticJobs: 1, MaxProgressEvents: 8,
+	})
+	manager.now = func() time.Time { return now }
+	old := now.Add(-2 * time.Hour)
+	manager.jobs["job-pinned"] = &Job{ID: "job-pinned", Type: SyncJobType, Status: JobStatusSucceeded, CreatedAt: old, UpdatedAt: old, FinishedAt: &old, ActionIntentRefs: []string{"intent-ref"}}
+	manager.jobs["job-recent"] = &Job{ID: "job-recent", Type: SyncJobType, Status: JobStatusSucceeded, CreatedAt: now, UpdatedAt: now, FinishedAt: &now}
+	if err := manager.Prune(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := manager.Get("job-pinned"); !ok {
+		t.Fatal("unsettled action correlation was pruned")
+	}
+	if err := manager.ReleaseActionIntent("intent-ref"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := manager.Get("job-pinned"); ok {
+		t.Fatal("settled action correlation did not release expired job")
+	}
+}
+
+func TestJobManagerReleaseActionIntentKeepsPinWhenPersistenceFails(t *testing.T) {
+	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs.json"))
+	manager.jobs["job-pinned"] = &Job{ID: "job-pinned", Type: SyncJobType, Status: JobStatusFailed, ActionIntentRefs: []string{"intent-ref"}}
+	manager.writeFile = func(string, []byte, os.FileMode) error { return fmt.Errorf("disk unavailable") }
+
+	if err := manager.ReleaseActionIntent("intent-ref"); err == nil {
+		t.Fatal("expected persistence failure")
+	}
+	job, ok := manager.Get("job-pinned")
+	if !ok || len(job.ActionIntentRefs) != 1 || job.ActionIntentRefs[0] != "intent-ref" {
+		t.Fatalf("failed release must retain correlation pin: %+v, retained=%t", job, ok)
+	}
+}
+
 func TestJobManagerIdleReconcilePrunesExpiredHistory(t *testing.T) {
 	now := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
 	jobs := NewJobManagerWithRetention(filepath.Join(t.TempDir(), "jobs.json"), config.ServiceJobRetentionConfig{
