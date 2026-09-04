@@ -835,7 +835,7 @@ func adminMaintenancePolicyObservation(policy MaintenancePolicy) adminhttp.Maint
 	for _, collection := range []struct {
 		name    string
 		enabled bool
-	}{{"issues", policy.Issues}, {"issue_comments", policy.IssueComments}, {"wiki", policy.Wiki}, {"pulls", policy.Pulls}, {"pr_comments", policy.PRComments}} {
+	}{{"issues", policy.Issues}, {"issue-comments", policy.IssueComments}, {"wiki", policy.Wiki}, {"pulls", policy.Pulls}, {"pr-comments", policy.PRComments}} {
 		if collection.enabled {
 			collections = append(collections, collection.name)
 		}
