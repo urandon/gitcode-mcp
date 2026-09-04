@@ -31,7 +31,7 @@ func InspectCacheMigration(ctx context.Context, dataSourceName string) (*Migrate
 		}
 		return nil, fmt.Errorf("cache: cannot access cache file: %w", err)
 	}
-	db, err := sql.Open("sqlite", dataSourceName+"?mode=ro")
+	db, err := sql.Open("sqlite", sqliteReadOnlyDSN(dataSourceName))
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +168,7 @@ func MigrateCacheWithConfirm(ctx context.Context, dataSourceName string, forceNo
 }
 
 func verifyCacheBackup(ctx context.Context, path string) (int, string, error) {
-	db, err := sql.Open("sqlite", path+"?mode=ro")
+	db, err := sql.Open("sqlite", sqliteImmutableReadOnlyDSN(path))
 	if err != nil {
 		return 0, "", err
 	}

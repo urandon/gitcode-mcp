@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,7 +136,7 @@ func NewSQLiteReadOnlyStore(ctx context.Context, dataSourceName string) (*SQLite
 	if _, err := os.Stat(dataSourceName); err != nil {
 		return nil, fmt.Errorf("cache: cannot open read-only store: %w", err)
 	}
-	dsn := dataSourceName + "?mode=ro&_journal_mode=WAL"
+	dsn := sqliteReadOnlyDSN(dataSourceName)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -161,6 +162,25 @@ func NewSQLiteReadOnlyStore(ctx context.Context, dataSourceName string) (*SQLite
 	}
 	useFTS := detectFTS5(ctx, db)
 	return &SQLiteStore{db: db, useFTS: useFTS, forceNoFTS: false, cachePath: dataSourceName, lockPath: ""}, nil
+}
+
+func sqliteReadOnlyDSN(dataSourceName string) string {
+	return sqliteFileDSN(dataSourceName, false)
+}
+
+func sqliteImmutableReadOnlyDSN(dataSourceName string) string {
+	return sqliteFileDSN(dataSourceName, true)
+}
+
+func sqliteFileDSN(dataSourceName string, immutable bool) string {
+	uri := url.URL{Scheme: "file", Path: dataSourceName}
+	query := uri.Query()
+	query.Set("mode", "ro")
+	if immutable {
+		query.Set("immutable", "1")
+	}
+	uri.RawQuery = query.Encode()
+	return uri.String()
 }
 
 func (s *SQLiteStore) SchemaVersion(ctx context.Context) (int, error) {
