@@ -268,6 +268,11 @@ func TestMigrateFailureRollsBackWholeSchemaAndKeepsVerifiedBackup(t *testing.T) 
 	if err != nil || backupVersion != 18 || backupUUID != identity.UUID {
 		t.Fatalf("backup verification version=%d uuid=%q err=%v", backupVersion, backupUUID, err)
 	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Stat(backups[0] + suffix); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read-only backup verification created %s sidecar or stat failed: %v", suffix, err)
+		}
+	}
 }
 
 func TestMigrateFromVersion2ToVersion4(t *testing.T) {
@@ -492,6 +497,69 @@ func TestReadOnlyStoreAcceptsVersionTwo(t *testing.T) {
 	}
 	if len(sources) < 1 {
 		t.Fatalf("ListSources returned %d sources, want >= 1", len(sources))
+	}
+}
+
+func TestReadOnlyStoreUsesSQLiteReadOnlyURI(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	originalPath := filepath.Join(dir, "original.db")
+	path := filepath.Join(dir, "cache ? #.db")
+
+	writable, err := NewSQLiteStore(ctx, originalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writable.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(originalPath, path); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := InspectCacheMigration(ctx, path)
+	if err != nil {
+		t.Fatalf("InspectCacheMigration returned error: %v", err)
+	}
+	if inspection.FromVersion != currentSchemaVersion || inspection.ToVersion != currentSchemaVersion {
+		t.Fatalf("InspectCacheMigration = %+v; want schema %d", inspection, currentSchemaVersion)
+	}
+
+	store, err := NewSQLiteReadOnlyStore(ctx, path)
+	if err != nil {
+		t.Fatalf("NewSQLiteReadOnlyStore returned error: %v", err)
+	}
+	if version, err := store.SchemaVersion(ctx); err != nil || version != currentSchemaVersion {
+		t.Fatalf("SchemaVersion = %d, %v; want %d, nil", version, err, currentSchemaVersion)
+	}
+	if _, err := store.db.ExecContext(ctx, `CREATE TABLE readonly_probe (id INTEGER)`); err == nil {
+		t.Fatal("read-only store allowed a schema mutation")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	workingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativePath, err := filepath.Rel(workingDir, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativeStore, err := NewSQLiteReadOnlyStore(ctx, relativePath)
+	if err != nil {
+		t.Fatalf("NewSQLiteReadOnlyStore with relative path returned error: %v", err)
+	}
+	if version, err := relativeStore.SchemaVersion(ctx); err != nil || version != currentSchemaVersion {
+		t.Fatalf("relative SchemaVersion = %d, %v; want %d, nil", version, err, currentSchemaVersion)
+	}
+	if err := relativeStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Before file: URI encoding, the driver stripped everything after the first
+	// question mark and silently targeted a different writable database.
+	if _, err := os.Stat(filepath.Join(dir, "cache ")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unescaped DSN alias exists or stat failed: %v", err)
 	}
 }
 
