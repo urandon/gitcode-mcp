@@ -125,6 +125,9 @@ persist a hashed, intent-bound `pending` receipt. Replaying that intent after a
 restart re-drives the idempotent maintenance reconcile: it either creates work
 that never started or coalesces work already created, then atomically replaces
 the pending intent with a terminal receipt.
+Pending intents are never evicted by settled-receipt retention. If unresolved
+intents fill the bounded journal, admission fails closed before starting a new
+mutation and returns a typed remediation diagnostic.
 
 Comment fan-out is checked as produced records and serialized bytes before it
 can accumulate across parents.

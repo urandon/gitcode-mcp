@@ -149,7 +149,8 @@ func TestJobActionRetryPreparedReceiptPreventsRestartDuplicateAfterFinalSaveFail
 	runs := 0
 	actions.reconcile = func(context.Context, string, string) (MaintenanceReconcileResult, error) {
 		runs++
-		created, _, err := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 1, "retry-work", "cache-1", "reg-1", "", func() {})
+		workKey := syncWorkKey(StartSyncJobRequest{RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", Lane: "head", Wiki: true})
+		created, _, err := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 1, workKey, "cache-1", "reg-1", "", func() {})
 		if err != nil {
 			return MaintenanceReconcileResult{}, err
 		}
@@ -168,20 +169,25 @@ func TestJobActionRetryPreparedReceiptPreventsRestartDuplicateAfterFinalSaveFail
 		t.Fatalf("first retry err=%v runs=%d", err, runs)
 	}
 
-	restarted := NewJobActionManager(path, jobs, nil)
+	restartedJobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+	if err := restartedJobs.LoadAndMarkInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	interrupted, ok := restartedJobs.Get("job-000002")
+	if !ok || interrupted.Status != JobStatusInterrupted {
+		t.Fatalf("admitted job after restart=%+v found=%t", interrupted, ok)
+	}
+	restarted := NewJobActionManager(path, restartedJobs, nil)
 	if err := restarted.Load(); err != nil {
 		t.Fatal(err)
 	}
 	restarted.reconcile = func(context.Context, string, string) (MaintenanceReconcileResult, error) {
 		runs++
-		coalesced, created, err := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 1, "retry-work", "cache-1", "reg-1", "", func() {})
-		if err != nil || created {
-			t.Fatalf("replay coalescing job=%+v created=%t err=%v", coalesced, created, err)
-		}
-		return MaintenanceReconcileResult{JobsCoalesced: []string{coalesced.ID}}, nil
+		t.Fatal("durably admitted work must settle the pending intent without reconcile")
+		return MaintenanceReconcileResult{}, nil
 	}
 	replay, err := restarted.Retry(context.Background(), req)
-	if err != nil || !replay.Replayed || replay.Outcome != "coalesced" || replay.ResultJob != "job-000002" || runs != 2 {
+	if err != nil || !replay.Replayed || replay.Outcome != "coalesced" || replay.ResultJob != "job-000002" || replay.JobStatus != JobStatusInterrupted || runs != 1 {
 		t.Fatalf("restart replay=%+v err=%v runs=%d", replay, err, runs)
 	}
 }
@@ -324,5 +330,47 @@ func TestJobActionReceiptsAreBounded(t *testing.T) {
 	actions.pruneLocked()
 	if len(actions.receipts) != maxJobActionReceipts {
 		t.Fatalf("receipts=%d want=%d", len(actions.receipts), maxJobActionReceipts)
+	}
+}
+
+func TestJobActionReceiptPruningNeverEvictsPendingIntent(t *testing.T) {
+	actions := NewJobActionManager("", NewJobManager(""), nil)
+	base := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
+	pendingKey := hashJobAction("oldest-pending")
+	actions.receipts[pendingKey] = jobActionReceiptDisk{KeyHash: pendingKey, Receipt: adminhttp.JobActionReceipt{Outcome: "pending", CreatedAt: base}}
+	for index := 0; index < maxJobActionReceipts+3; index++ {
+		key := hashJobAction("settled-" + time.Duration(index).String())
+		actions.receipts[key] = jobActionReceiptDisk{KeyHash: key, Receipt: adminhttp.JobActionReceipt{Outcome: "created", CreatedAt: base.Add(time.Duration(index+1) * time.Second)}}
+	}
+	actions.pruneLocked()
+	if _, retained := actions.receipts[pendingKey]; !retained {
+		t.Fatal("pending mutation intent was evicted")
+	}
+	if len(actions.receipts) != maxJobActionReceipts {
+		t.Fatalf("receipts=%d want=%d", len(actions.receipts), maxJobActionReceipts)
+	}
+}
+
+func TestJobActionRetryFailsClosedWhenPendingIntentCapacityIsFull(t *testing.T) {
+	jobs := NewJobManager("")
+	now := time.Now().UTC()
+	jobs.jobs["job-000001"] = &Job{ID: "job-000001", Type: SyncJobType, RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", Status: JobStatusFailed, CreatedAt: now, UpdatedAt: now}
+	actions := NewJobActionManager("", jobs, nil)
+	for index := 0; index < maxJobActionReceipts; index++ {
+		key := hashJobAction("pending-" + time.Duration(index).String())
+		actions.receipts[key] = jobActionReceiptDisk{KeyHash: key, Receipt: adminhttp.JobActionReceipt{Outcome: "pending", CreatedAt: now}}
+	}
+	reconciled := false
+	actions.reconcile = func(context.Context, string, string) (MaintenanceReconcileResult, error) {
+		reconciled = true
+		return MaintenanceReconcileResult{}, nil
+	}
+	_, err := actions.Retry(context.Background(), adminhttp.JobActionRequest{JobID: "job-000001", IdempotencyKey: "over-capacity"})
+	var typed adminhttp.JobActionError
+	if !errors.As(err, &typed) || typed.Status != http.StatusServiceUnavailable || typed.Code != "job_action_receipt_capacity" {
+		t.Fatalf("capacity error=%T %v", err, err)
+	}
+	if reconciled {
+		t.Fatal("retry mutation started despite full pending-intent journal")
 	}
 }

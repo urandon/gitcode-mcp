@@ -131,6 +131,9 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		if preparedReceipt != nil {
 			return nil
 		}
+		if m.pendingCountLocked() >= maxJobActionReceipts {
+			return jobActionError(http.StatusServiceUnavailable, "job_action_receipt_capacity", "The durable job-action intent journal is full.", "Resolve or replay pending Admin actions before submitting another mutation.")
+		}
 		pending := receipt
 		pending.Outcome, pending.JobStatus = "pending", job.Status
 		m.receipts[keyHash] = jobActionReceiptDisk{KeyHash: keyHash, IntentHash: intentHash, Receipt: pending}
@@ -170,6 +173,16 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		}
 		if req.Collection != "" && (job.Type != SyncJobType || !retryableSyncCollection(job, req.Collection)) {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "collection_retry_unavailable", "The selected collection is not a failed terminal collection on this sync job.", "Refresh the job and choose a partial or permanently failed collection.")
+		}
+		if preparedReceipt != nil {
+			workRef := ""
+			if req.Collection != "" {
+				workRef = adminCollectionRetryWorkRef(job, req.Collection)
+			}
+			if admitted, found := m.jobs.RetainedRetryIntentResult(job, workRef, receipt.CreatedAt); found {
+				receipt.ResultJob, receipt.Outcome, receipt.JobStatus = admitted.ID, "coalesced", admitted.Status
+				break
+			}
 		}
 		if req.Collection == "" {
 			if active, found := m.jobs.ActiveCacheRepo(job.Type, job.CacheUUID, job.RepoID); found {
@@ -227,6 +240,25 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 	return receipt, nil
 }
 
+func adminCollectionRetryWorkRef(job Job, collection string) string {
+	req := StartSyncJobRequest{RepoID: job.RepoID, CacheUUID: job.CacheUUID, RegistrationID: job.RegistrationID, Lane: "head"}
+	switch collection {
+	case "issues":
+		req.Issues = true
+	case "wiki":
+		req.Wiki = true
+	case "pulls":
+		req.Pulls = true
+	case "issue_comments":
+		req.IssueComments = true
+	case "pr_comments":
+		req.PRComments = true
+	default:
+		return ""
+	}
+	return publicWorkRef(syncWorkKey(req))
+}
+
 func (m *JobActionManager) saveLocked() error {
 	if m.path == "" {
 		return nil
@@ -255,19 +287,41 @@ func (m *JobActionManager) pruneLocked() {
 	if maxJobActionReceipts <= 0 || len(m.receipts) <= maxJobActionReceipts {
 		return
 	}
-	ordered := make([]jobActionReceiptDisk, 0, len(m.receipts))
+	// Pending entries are mutation intents, not disposable history. Retention
+	// may evict only settled receipts; admission fails closed when pending
+	// intents alone fill the bounded journal.
+	settled := make([]jobActionReceiptDisk, 0, len(m.receipts))
+	pending := 0
 	for _, receipt := range m.receipts {
-		ordered = append(ordered, receipt)
-	}
-	sort.Slice(ordered, func(i, j int) bool {
-		if ordered[i].Receipt.CreatedAt.Equal(ordered[j].Receipt.CreatedAt) {
-			return ordered[i].KeyHash < ordered[j].KeyHash
+		if receipt.Receipt.Outcome == "pending" {
+			pending++
+			continue
 		}
-		return ordered[i].Receipt.CreatedAt.Before(ordered[j].Receipt.CreatedAt)
+		settled = append(settled, receipt)
+	}
+	sort.Slice(settled, func(i, j int) bool {
+		if settled[i].Receipt.CreatedAt.Equal(settled[j].Receipt.CreatedAt) {
+			return settled[i].KeyHash < settled[j].KeyHash
+		}
+		return settled[i].Receipt.CreatedAt.Before(settled[j].Receipt.CreatedAt)
 	})
-	for _, receipt := range ordered[:len(ordered)-maxJobActionReceipts] {
+	keepSettled := maxJobActionReceipts - pending
+	if keepSettled < 0 {
+		keepSettled = 0
+	}
+	for _, receipt := range settled[:max(0, len(settled)-keepSettled)] {
 		delete(m.receipts, receipt.KeyHash)
 	}
+}
+
+func (m *JobActionManager) pendingCountLocked() int {
+	pending := 0
+	for _, receipt := range m.receipts {
+		if receipt.Receipt.Outcome == "pending" {
+			pending++
+		}
+	}
+	return pending
 }
 
 func hashJobAction(value string) string {

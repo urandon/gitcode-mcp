@@ -638,6 +638,36 @@ func (m *JobManager) SetWorkIdentity(id, workKey, cacheUUID, registrationID, nam
 	return m.mustGet(id)
 }
 
+// RetainedRetryIntentResult finds durable evidence that an Admin retry intent
+// already crossed job admission. It intentionally includes interrupted and
+// terminal jobs: after a daemon restart active jobs are marked interrupted,
+// but their persisted identity still proves that replay must not admit the
+// same work again.
+func (m *JobManager) RetainedRetryIntentResult(source Job, workRef string, notBefore time.Time) (Job, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var matched *Job
+	for _, candidate := range m.jobs {
+		if candidate.ID == source.ID || candidate.CacheUUID != source.CacheUUID || candidate.RepoID != source.RepoID || candidate.RegistrationID != source.RegistrationID || candidate.CreatedAt.Before(notBefore) {
+			continue
+		}
+		if workRef != "" {
+			if candidate.Type != SyncJobType || candidate.WorkRef != workRef {
+				continue
+			}
+		} else if candidate.Type != source.Type {
+			continue
+		}
+		if matched == nil || candidate.CreatedAt.Before(matched.CreatedAt) || candidate.CreatedAt.Equal(matched.CreatedAt) && parseJobIDNumber(candidate.ID) < parseJobIDNumber(matched.ID) {
+			matched = candidate
+		}
+	}
+	if matched == nil {
+		return Job{}, false
+	}
+	return cloneJob(matched), true
+}
+
 func (m *JobManager) createCoalescedJob(jobType, repoID, profileID string, steps int, workKey, cacheUUID, registrationID, namespaceID string, cancel context.CancelFunc) (Job, bool, error) {
 	return m.createCoalescedJobWithIntent(jobType, repoID, profileID, steps, workKey, cacheUUID, registrationID, namespaceID, JobRecoveryIntent{}, cancel)
 }
