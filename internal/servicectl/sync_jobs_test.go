@@ -86,11 +86,8 @@ func TestDaemonRestartResumesOnlyPendingCollectionRetry(t *testing.T) {
 		ID: jobID, Type: SyncJobType, RepoID: binding.RepoID, CacheUUID: identity.UUID,
 		RegistrationID: maintenanceRegistrationID(identity.UUID, binding.RepoID),
 		Status:         JobStatusRunning, CreatedAt: now.Add(-time.Minute), UpdatedAt: now,
-		SyncHealth: SyncHealthPartialRetrying,
-		SyncCollections: []SyncCollectionView{
-			{Collection: "issues", Outcome: SyncCollectionSuccess, Attempt: 1, UpdatedAt: now},
-			{Collection: "wiki", Outcome: SyncCollectionRetryScheduled, Attempt: 1, RetryBudget: 4, RetryAfter: &retryAt, UpdatedAt: now},
-		},
+		SyncHealth:      SyncHealthPartialRetrying,
+		SyncCollections: []SyncCollectionView{{Collection: "wiki", Outcome: SyncCollectionRetryScheduled, Attempt: 1, RetryBudget: 4, RetryAfter: &retryAt, UpdatedAt: now}},
 	}
 	before.nextID = 1
 	if err := before.saveLocked(); err != nil {
@@ -115,7 +112,7 @@ func TestDaemonRestartResumesOnlyPendingCollectionRetry(t *testing.T) {
 		JobID: jobID, CacheUUID: identity.UUID, CacheSchema: schema, CachePath: cachePath,
 		RegistrationID: maintenanceRegistrationID(identity.UUID, binding.RepoID), RepoID: binding.RepoID,
 		BindingFingerprint: syncRepositoryBindingFingerprint(binding), Collection: "issues",
-		IdempotencyKey: "committed-before-wiki-retry", RecordCount: 0, Payload: json.RawMessage(`{}`),
+		IdempotencyKey: "committed-before-wiki-retry", RecordCount: 5, CollectionAttempt: 1, CollectionListed: 5, Payload: json.RawMessage(`{}`),
 		State: SyncStageState{Phase: SyncStageCommitted, CommittedAt: committedAt},
 	}); err != nil {
 		t.Fatal(err)
@@ -134,7 +131,11 @@ func TestDaemonRestartResumesOnlyPendingCollectionRetry(t *testing.T) {
 	if job.Status != JobStatusSucceeded || job.SyncHealth != SyncHealthSucceeded {
 		t.Fatalf("recovered retry job=%+v", job)
 	}
-	if len(job.SyncCollections) != 2 || job.SyncCollections[0].Collection != "issues" || job.SyncCollections[0].Attempt != 1 || job.SyncCollections[1].Collection != "wiki" || job.SyncCollections[1].Attempt != 2 {
+	collections := map[string]SyncCollectionView{}
+	for _, collection := range job.SyncCollections {
+		collections[collection.Collection] = collection
+	}
+	if len(job.SyncCollections) != 2 || collections["issues"].Attempt != 1 || collections["issues"].Committed != 5 || collections["wiki"].Attempt != 2 {
 		t.Fatalf("restart repeated a successful collection or lost retry attempt: %+v", job.SyncCollections)
 	}
 	deadline := time.Now().Add(2 * time.Second)
@@ -192,7 +193,7 @@ func TestDaemonRestartReconcilesCommittedRetryStageBeforeProviderReplay(t *testi
 	retryJournal := newSyncCollectionRetryJournal(root)
 	if err := retryJournal.Upsert(syncCollectionRetryCheckpoint{
 		JobID: jobID, Collection: "wiki", RemoteType: "wiki", Attempt: 1, RetryAt: retryAt,
-		Request: syncCollectionRetryRequest{RepoID: binding.RepoID, ProviderMode: "fixture", CachePath: cachePath, Wiki: true, MaxPages: 1, PerPage: 100, CacheUUID: identity.UUID, RegistrationID: registrationID},
+		Request: syncCollectionRetryRequest{RepoID: binding.RepoID, ProviderMode: "fixture", CachePath: cachePath, Wiki: true, IdempotencyKey: "wiki-retry-commit", MaxPages: 1, PerPage: 100, CacheUUID: identity.UUID, RegistrationID: registrationID},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +201,7 @@ func TestDaemonRestartReconcilesCommittedRetryStageBeforeProviderReplay(t *testi
 	if _, err := stageJournal.Create(SyncStageEnvelope{
 		JobID: jobID, CacheUUID: identity.UUID, CacheSchema: schema, CachePath: cachePath, RegistrationID: registrationID,
 		RepoID: binding.RepoID, BindingFingerprint: syncRepositoryBindingFingerprint(binding), Collection: "wiki",
-		Checkpoint: "complete", IdempotencyKey: "wiki-retry-commit", RecordCount: 3, Payload: json.RawMessage(`{}`),
+		Checkpoint: "complete", IdempotencyKey: "wiki-retry-commit", RecordCount: 3, CollectionAttempt: 2, CollectionListed: 3, Payload: json.RawMessage(`{}`),
 		Workflow: &SyncStageWorkflow{Collections: []string{"wiki"}, Current: 0, Outcome: &SyncStageWorkflowOutcome{RecordsListed: 3, SuccessCount: 3}},
 		State:    SyncStageState{Phase: SyncStageCommitted, CommittedAt: now},
 	}); err != nil {
@@ -305,6 +306,84 @@ func TestDaemonRestartFinalizesSettledRetryProjectionWithoutCheckpoint(t *testin
 	}
 }
 
+func TestSyncFailureBeforeFirstCollectionKeepsFailedAggregateHealth(t *testing.T) {
+	root := t.TempDir()
+	jobs := NewJobManager(filepath.Join(root, "jobs.json"))
+	now := time.Now().UTC()
+	jobs.jobs["job-000001"] = &Job{ID: "job-000001", Type: SyncJobType, RepoID: "owner/repo", CacheUUID: "cache-a", RegistrationID: "reg-a", Status: JobStatusQueued, CreatedAt: now, UpdatedAt: now}
+	jobs.nextID = 1
+	manager := newTestManager(t, "darwin")
+	manager.RuntimeDir = root
+	jobs.runSyncJob(context.Background(), manager, "job-000001", StartSyncJobRequest{RepoID: "owner/repo", CachePath: filepath.Join(root, "missing", "cache.db"), CacheUUID: "cache-a", RegistrationID: "reg-a", Issues: true})
+	job, _ := jobs.Get("job-000001")
+	if job.Status != JobStatusFailed || job.SyncHealth != SyncHealthFailed || len(job.SyncCollections) != 0 {
+		t.Fatalf("pre-collection failure=%+v", job)
+	}
+}
+
+func TestSettledRetryProjectionSurvivesAggregateSnapshotFailureWithoutStageReplay(t *testing.T) {
+	root := t.TempDir()
+	jobsPath := filepath.Join(root, "jobs.json")
+	now := time.Now().UTC()
+	retryAt := now.Add(-time.Minute)
+	jobID := "job-000001"
+	before := NewJobManager(jobsPath)
+	before.jobs[jobID] = &Job{
+		ID: jobID, Type: SyncJobType, RepoID: "owner/repo", CacheUUID: "cache-a", RegistrationID: "reg-a",
+		Status: JobStatusRunning, SyncHealth: SyncHealthSucceeded, CreatedAt: now.Add(-time.Hour), UpdatedAt: now,
+		SyncCollections: []SyncCollectionView{{Collection: "wiki", Outcome: SyncCollectionSuccess, RecordsListed: 3, Committed: 3, Attempt: 2, UpdatedAt: now}},
+	}
+	before.nextID = 1
+	if err := before.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	retryJournal := newSyncCollectionRetryJournal(root)
+	if err := retryJournal.Upsert(syncCollectionRetryCheckpoint{
+		JobID: jobID, Collection: "wiki", RemoteType: "wiki", Attempt: 1, RetryAt: retryAt,
+		Request: syncCollectionRetryRequest{RepoID: "owner/repo", CachePath: filepath.Join(root, "cache.db"), CacheUUID: "cache-a", RegistrationID: "reg-a", Wiki: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stageJournal := NewSyncStageJournal(root, SyncStageLimits{})
+	if _, err := stageJournal.Create(SyncStageEnvelope{
+		JobID: jobID, CacheUUID: "cache-a", CacheSchema: 1, CachePath: filepath.Join(root, "cache.db"), RegistrationID: "reg-a",
+		RepoID: "owner/repo", BindingFingerprint: "binding-a", Collection: "wiki", Checkpoint: "complete", IdempotencyKey: "wiki-retry",
+		RecordCount: 3, Payload: json.RawMessage(`{}`), State: SyncStageState{Phase: SyncStageCommitted},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	firstRestart := NewJobManager(jobsPath)
+	if err := firstRestart.LoadAndMarkInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	firstRestart.writeFile = func(string, []byte, os.FileMode) error { return errors.New("aggregate snapshot unavailable") }
+	manager := newTestManager(t, "darwin")
+	manager.RuntimeDir = root
+	recoveryErr := firstRestart.RecoverSyncStages(context.Background(), manager)
+	if recoveryErr == nil {
+		t.Fatal("aggregate snapshot failure was not reported")
+	}
+	if stages, err := stageJournal.List(); err != nil || len(stages) != 0 {
+		t.Fatalf("settled stage remained replayable: stages=%+v err=%v", stages, err)
+	}
+	if checkpoints, err := retryJournal.List(); err != nil || len(checkpoints) != 0 {
+		t.Fatalf("settled checkpoint remained replayable: checkpoints=%+v err=%v recovery_err=%v", checkpoints, err, recoveryErr)
+	}
+
+	secondRestart := NewJobManager(jobsPath)
+	if err := secondRestart.LoadAndMarkInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	if err := secondRestart.RecoverSyncStages(context.Background(), manager); err != nil {
+		t.Fatal(err)
+	}
+	job, _ := secondRestart.Get(jobID)
+	if job.Status != JobStatusSucceeded || job.SyncHealth != SyncHealthSucceeded || job.Completed != 3 {
+		t.Fatalf("second recovery=%+v", job)
+	}
+}
+
 func TestTerminalRetryCheckpointSurvivesJobSnapshotFailure(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -365,6 +444,100 @@ func TestTerminalRetryCheckpointSurvivesJobSnapshotFailure(t *testing.T) {
 	}
 }
 
+func TestRetryRecoveryGarbageCollectsOrphanCheckpoint(t *testing.T) {
+	root := t.TempDir()
+	journal := newSyncCollectionRetryJournal(root)
+	if err := journal.Upsert(syncCollectionRetryCheckpoint{
+		JobID: "job-missing", Collection: "wiki", RemoteType: "wiki", Attempt: 1, RetryAt: time.Now().UTC(),
+		Request: syncCollectionRetryRequest{RepoID: "owner/repo", CachePath: filepath.Join(root, "cache.db"), CacheUUID: "cache-a", RegistrationID: "reg-a", Wiki: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manager := newTestManager(t, "darwin")
+	manager.RuntimeDir = root
+	if err := NewJobManager(filepath.Join(root, "jobs.json")).RecoverSyncStages(context.Background(), manager); err != nil {
+		t.Fatal(err)
+	}
+	if checkpoints, err := journal.List(); err != nil || len(checkpoints) != 0 {
+		t.Fatalf("orphan checkpoints=%+v err=%v", checkpoints, err)
+	}
+}
+
+func TestRetryRecoveryExpiresOldCheckpointAndPreservesUsablePartial(t *testing.T) {
+	root := t.TempDir()
+	jobsPath := filepath.Join(root, "jobs.json")
+	now := time.Now().UTC()
+	lastSuccess := now.Add(-2 * time.Hour)
+	retryAt := now.Add(-25 * time.Hour)
+	jobID := "job-000001"
+	before := NewJobManager(jobsPath)
+	before.jobs[jobID] = &Job{
+		ID: jobID, Type: SyncJobType, RepoID: "owner/repo", CacheUUID: "cache-a", RegistrationID: "reg-a",
+		Status: JobStatusRunning, SyncHealth: SyncHealthPartialRetrying, CreatedAt: now.Add(-48 * time.Hour), UpdatedAt: retryAt,
+		SyncCollections: []SyncCollectionView{
+			{Collection: "issues", Outcome: SyncCollectionSuccess, RecordsListed: 4, Committed: 4, Attempt: 1, LastSuccessAt: &lastSuccess, UpdatedAt: lastSuccess},
+			{Collection: "wiki", Outcome: SyncCollectionRetryScheduled, Attempt: 1, RetryBudget: 4, RetryAfter: &retryAt, LastSuccessAt: &lastSuccess, UpdatedAt: retryAt},
+		},
+	}
+	before.nextID = 1
+	if err := before.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	journal := newSyncCollectionRetryJournal(root)
+	if err := journal.Upsert(syncCollectionRetryCheckpoint{
+		JobID: jobID, Collection: "wiki", RemoteType: "wiki", Attempt: 1, RetryAt: retryAt,
+		Request: syncCollectionRetryRequest{RepoID: "owner/repo", CachePath: filepath.Join(root, "cache.db"), CacheUUID: "cache-a", RegistrationID: "reg-a", IdempotencyKey: "expired-retry", Wiki: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewJobManager(jobsPath)
+	if err := restarted.LoadAndMarkInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	manager := newTestManager(t, "darwin")
+	manager.RuntimeDir = root
+	if err := restarted.RecoverSyncStages(context.Background(), manager); err != nil {
+		t.Fatal(err)
+	}
+	job, _ := restarted.Get(jobID)
+	if job.Status != JobStatusSucceeded || job.SyncHealth != SyncHealthPartial || job.ErrorClass != "retry_checkpoint_expired" || job.Completed != 4 || job.Steps != 4 {
+		t.Fatalf("expired retry recovery=%+v", job)
+	}
+	if len(job.SyncCollections) != 2 || job.SyncCollections[1].Outcome != SyncCollectionPermanentFailure || job.SyncCollections[1].LastSuccessAt == nil || !job.SyncCollections[1].LastSuccessAt.Equal(lastSuccess) {
+		t.Fatalf("expired collection=%+v", job.SyncCollections)
+	}
+	if checkpoints, err := journal.List(); err != nil || len(checkpoints) != 0 {
+		t.Fatalf("expired checkpoints=%+v err=%v", checkpoints, err)
+	}
+}
+
+func TestRetryStageRecoveryRequiresExactCheckpointAuthority(t *testing.T) {
+	now := time.Now().UTC()
+	checkpoint := syncCollectionRetryCheckpoint{
+		JobID: "job-000001", Collection: "wiki", RemoteType: "wiki", Attempt: 1, RetryAt: now,
+		Request: syncCollectionRetryRequest{RepoID: "owner/repo", CachePath: "/cache.db", CacheUUID: "cache-a", RegistrationID: "reg-a", IdempotencyKey: "sync-a", Wiki: true},
+	}
+	exact := SyncStageEnvelope{JobID: checkpoint.JobID, Collection: "wiki", RepoID: "owner/repo", CacheUUID: "cache-a", RegistrationID: "reg-a", IdempotencyKey: "sync-a", CollectionAttempt: 2, State: SyncStageState{UpdatedAt: now.Add(time.Second)}}
+	if _, ok := latestSyncRetryStage([]SyncStageEnvelope{exact}, checkpoint); !ok {
+		t.Fatal("exact retry stage was not matched")
+	}
+	mutations := []func(*SyncStageEnvelope){
+		func(stage *SyncStageEnvelope) { stage.CacheUUID = "cache-b" },
+		func(stage *SyncStageEnvelope) { stage.RepoID = "other/repo" },
+		func(stage *SyncStageEnvelope) { stage.RegistrationID = "reg-b" },
+		func(stage *SyncStageEnvelope) { stage.IdempotencyKey = "sync-b" },
+		func(stage *SyncStageEnvelope) { stage.CollectionAttempt = 1 },
+		func(stage *SyncStageEnvelope) { stage.CollectionAttempt = 3 },
+	}
+	for index, mutate := range mutations {
+		candidate := exact
+		mutate(&candidate)
+		if _, ok := latestSyncRetryStage([]SyncStageEnvelope{candidate}, checkpoint); ok {
+			t.Fatalf("mismatched retry authority %d was accepted: %+v", index, candidate)
+		}
+	}
+}
+
 func TestDurableCollectionPersistsPartialFetchOutcomeBeforeCommit(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -406,7 +579,7 @@ func TestDurableCollectionPersistsPartialFetchOutcomeBeforeCommit(t *testing.T) 
 		commit: func(context.Context, SyncStageEnvelope) (*service.SyncResourcesResult, error) {
 			return &service.SyncResourcesResult{RecordsListed: 3, SuccessCount: 2}, nil
 		},
-	}, workflow)
+	}, workflow, 1)
 	if !errors.Is(err, fetchErr) || result == nil || result.SuccessCount != 2 {
 		t.Fatalf("durable partial result=%+v err=%v", result, err)
 	}
@@ -837,7 +1010,8 @@ func TestDaemonRestartUsesAtomicReceiptWhenJournalMissedCommitTerminal(t *testin
 	stage, err := journal.Create(SyncStageEnvelope{
 		JobID: "job-000001", CacheUUID: identity.UUID, CacheSchema: schema, CachePath: cachePath,
 		RegistrationID: registrationID, RepoID: binding.RepoID, BindingFingerprint: syncRepositoryBindingFingerprint(binding),
-		Collection: "issues", IdempotencyKey: batch.IdempotencyKey, RecordCount: batch.RecordCount(), Payload: payload,
+		Collection: "issues", IdempotencyKey: batch.IdempotencyKey, RecordCount: batch.RecordCount(), CollectionAttempt: 1,
+		CollectionListed: batch.RecordsListed, CollectionFailed: max(batch.RecordsListed-batch.RecordCount(), 0), Payload: payload,
 		State: SyncStageState{Phase: SyncStageCommitting, RetryBudget: defaultSyncCommitRetries, FetchedAt: batch.FetchedAt},
 	})
 	if err != nil {
@@ -979,12 +1153,15 @@ func TestDaemonRestartContinuesMixedWorkflowAfterCommittedCollection(t *testing.
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
-			wantStatus, wantErrorClass := JobStatusSucceeded, ""
+			wantStatus, wantHealth, wantErrorClass := JobStatusSucceeded, SyncHealthSucceeded, ""
 			if tc.prefixError {
-				wantStatus, wantErrorClass = JobStatusFailed, "provider_failure"
+				wantHealth, wantErrorClass = SyncHealthPartial, "provider_failure"
 			}
-			if recovered.Status != wantStatus || recovered.ErrorClass != wantErrorClass || recovered.SyncStage == nil || recovered.SyncStage.Collection != "wiki" || recovered.SyncStage.Phase != SyncStageCommitted {
+			if recovered.Status != wantStatus || recovered.SyncHealth != wantHealth || recovered.ErrorClass != wantErrorClass || recovered.SyncStage == nil || recovered.SyncStage.Collection != "wiki" || recovered.SyncStage.Phase != SyncStageCommitted {
 				t.Fatalf("mixed recovery stopped after first collection: %+v", recovered)
+			}
+			if len(recovered.SyncCollections) != 2 || recovered.SyncCollections[0].Collection != "issues" || recovered.SyncCollections[0].Attempt != 1 || recovered.SyncCollections[0].Committed != batch.RecordCount() || recovered.SyncCollections[0].LastSuccessAt == nil || recovered.SyncCollections[1].Collection != "wiki" || recovered.SyncCollections[1].Outcome != SyncCollectionSuccess || recovered.Steps != recovered.SyncCollections[0].RecordsListed+recovered.SyncCollections[1].RecordsListed || recovered.Completed != recovered.SyncCollections[0].Committed+recovered.SyncCollections[1].Committed {
+				t.Fatalf("mixed recovery lost collection projection: %+v", recovered)
 			}
 			if _, err := store.GetSourceScoped(ctx, binding.RepoID, "WIKI-HOME"); err != nil {
 				t.Fatalf("remaining wiki collection was not committed: %v", err)

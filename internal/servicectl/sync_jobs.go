@@ -138,6 +138,12 @@ func (m *JobManager) startSync(ctx context.Context, manager Manager, req StartSy
 		cancel()
 		return job, false, nil
 	}
+	if strings.TrimSpace(req.IdempotencyKey) == "" {
+		// Manual callers may omit a provider key. Bind every durable fetch and
+		// restart checkpoint to the retained job so recovery still has an exact,
+		// non-empty request identity instead of accepting an ambiguous stage.
+		req.IdempotencyKey = "service-sync-" + job.ID
+	}
 	go m.runSyncJob(ctx, manager, job.ID, req)
 	return job, true, nil
 }
@@ -204,9 +210,11 @@ func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID stri
 		status := JobStatusFailed
 		health := SyncHealthFailed
 		if current, ok := m.Get(jobID); ok {
-			health = aggregateSyncCollectionOutcome(current.SyncCollections)
-			if health == SyncHealthPartial {
-				status = JobStatusSucceeded
+			if len(current.SyncCollections) > 0 {
+				health = aggregateSyncCollectionOutcome(current.SyncCollections)
+				if health == SyncHealthPartial {
+					status = JobStatusSucceeded
+				}
 			}
 		}
 		if errors.Is(ctx.Err(), context.Canceled) {
@@ -393,7 +401,7 @@ func (m *JobManager) runDurableSync(ctx context.Context, manager Manager, jobID 
 					isolatedReq.workflowOutcome = SyncStageWorkflowOutcome{}
 					workflow = syncStageWorkflowFromRequest(isolatedReq, []string{work.collection}, 0)
 				}
-				return m.runDurableCollection(ctx, manager, jobID, workReq, schema, bindingFingerprint, work, workflow)
+				return m.runDurableCollection(ctx, manager, jobID, workReq, schema, bindingFingerprint, work, workflow, attempt)
 			},
 		})
 	}
@@ -447,11 +455,12 @@ func (m *JobManager) runDurableSync(ctx context.Context, manager Manager, jobID 
 func lastSuccessfulMaintenanceFrontiers(frontiers []cache.MaintenanceFrontier) map[string]time.Time {
 	result := map[string]time.Time{}
 	for _, frontier := range frontiers {
-		if frontier.UpdatedAt.IsZero() || strings.TrimSpace(frontier.LastErrorClass) != "" || strings.EqualFold(strings.TrimSpace(frontier.Status), "degraded") {
-			continue
+		lastSuccess := frontier.LastSuccessAt.UTC()
+		if lastSuccess.IsZero() && strings.TrimSpace(frontier.LastErrorClass) == "" && !strings.EqualFold(strings.TrimSpace(frontier.Status), "degraded") {
+			lastSuccess = frontier.UpdatedAt.UTC()
 		}
-		if frontier.UpdatedAt.After(result[frontier.RemoteType]) {
-			result[frontier.RemoteType] = frontier.UpdatedAt.UTC()
+		if lastSuccess.After(result[frontier.RemoteType]) {
+			result[frontier.RemoteType] = lastSuccess
 		}
 	}
 	return result
@@ -598,6 +607,85 @@ func recoveredSyncWorkflowOutcome(stage SyncStageEnvelope) (*service.SyncResourc
 	err := recoveredSyncWorkflowError{code: outcome.ErrorClass}
 	collections := []syncCollectionResult{{RemoteType: firstNonEmpty(outcome.ErrorCollection, stage.Collection), Err: err}}
 	return result, err, collections
+}
+
+func recoveredSyncCollectionView(stage SyncStageEnvelope, attempt int, previous *SyncCollectionView) SyncCollectionView {
+	listed := stage.CollectionListed
+	if listed == 0 && stage.MaintenanceFrontier != nil {
+		listed = stage.MaintenanceFrontier.RecordsListed
+	}
+	if listed == 0 {
+		listed = stage.RecordCount
+	}
+	failed := stage.CollectionFailed
+	errorClass := strings.TrimSpace(stage.CollectionError)
+	remoteType := syncRemoteType(stage.Collection)
+	if errorClass == "" && stage.Workflow != nil && stage.Workflow.Outcome != nil && stage.Workflow.Current == 0 && stage.Workflow.Outcome.ErrorCollection == remoteType {
+		errorClass = stage.Workflow.Outcome.ErrorClass
+		failed = max(failed, stage.Workflow.Outcome.FailureCount)
+	}
+	when := stage.State.CommittedAt.UTC()
+	if when.IsZero() {
+		when = stage.State.UpdatedAt.UTC()
+	}
+	if when.IsZero() {
+		when = stage.CreatedAt.UTC()
+	}
+	if attempt <= 0 {
+		attempt = 1
+	}
+	result := &service.SyncResourcesResult{RecordsListed: listed, SuccessCount: stage.RecordCount, FailureCount: failed}
+	var outcomeErr error
+	if errorClass != "" {
+		outcomeErr = recoveredSyncWorkflowError{code: errorClass}
+	}
+	view := syncCollectionViewForAttempt(stage.Collection, publicSyncFrontierRef(stage.CacheUUID, stage.RepoID, stage.Collection, stage.Checkpoint), attempt, defaultSyncCollectionRetryBudget, result, outcomeErr, when)
+	if view.LastSuccessAt == nil && previous != nil && previous.LastSuccessAt != nil {
+		lastSuccess := previous.LastSuccessAt.UTC()
+		view.LastSuccessAt = &lastSuccess
+	}
+	return view
+}
+
+func syncRemoteType(collection string) string {
+	switch collection {
+	case "issues":
+		return "issue"
+	case "pulls":
+		return "pull_request"
+	case "issue_comments":
+		return "issue_comment"
+	case "pr_comments":
+		return "pr_comment"
+	default:
+		return collection
+	}
+}
+
+func (m *JobManager) persistRecoveredSyncCollection(stage SyncStageEnvelope, attempt int) error {
+	if current, ok := m.Get(stage.JobID); ok {
+		candidate := recoveredSyncCollectionView(stage, attempt, nil)
+		for _, previous := range current.SyncCollections {
+			if previous.Collection == stage.Collection && (previous.Attempt > candidate.Attempt || previous.Attempt == candidate.Attempt && !previous.UpdatedAt.Before(candidate.UpdatedAt)) {
+				return nil
+			}
+		}
+	}
+	return m.updateJobPersisted(stage.JobID, func(job *Job, now time.Time) {
+		var previous *SyncCollectionView
+		for i := range job.SyncCollections {
+			if job.SyncCollections[i].Collection == stage.Collection {
+				copy := job.SyncCollections[i]
+				previous = &copy
+				break
+			}
+		}
+		view := recoveredSyncCollectionView(stage, attempt, previous)
+		if previous != nil && (previous.Attempt > view.Attempt || previous.Attempt == view.Attempt && !previous.UpdatedAt.Before(view.UpdatedAt)) {
+			return
+		}
+		applySyncCollectionObservation(job, view, now)
+	})
 }
 
 func appendSyncCollectionPages(source map[string]int) map[string]int {
@@ -845,7 +933,7 @@ func stagedMaintenanceFrontier(ctx context.Context, req StartSyncJobRequest, rem
 	return frontier, nil
 }
 
-func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, jobID string, req StartSyncJobRequest, schema int, bindingFingerprint string, work durableCollectionWork, workflow *SyncStageWorkflow) (*service.SyncResourcesResult, syncCollectionResult, error) {
+func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, jobID string, req StartSyncJobRequest, schema int, bindingFingerprint string, work durableCollectionWork, workflow *SyncStageWorkflow, collectionAttempt int) (*service.SyncResourcesResult, syncCollectionResult, error) {
 	m.updateJob(jobID, func(job *Job, now time.Time) {
 		job.SyncStage = &SyncStageView{RepoID: req.RepoID, Collection: work.collection, Phase: SyncStageFetching, UpdatedAt: now}
 		job.Progress = append(job.Progress, service.ProgressEvent{Type: "phase", Phase: string(SyncStageFetching), Collection: work.collection, Message: "collection fetch started"})
@@ -877,11 +965,16 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 		collection := syncCollectionResult{RemoteType: work.remoteType, Err: frontierErr}
 		return nil, collection, frontierErr
 	}
+	collectionError := ""
+	if fetchErr != nil {
+		collectionError = maintenanceJobErrorClass(fetchErr, "provider_fetch_failed")
+	}
 	stage, err := journal.Create(SyncStageEnvelope{
 		JobID: jobID, CacheUUID: req.CacheUUID, CacheSchema: schema, CachePath: req.CachePath, RegistrationID: req.RegistrationID,
 		RepoID: req.RepoID, BindingFingerprint: bindingFingerprint, Collection: work.collection, Checkpoint: batch.checkpoint,
 		ProviderRevision: batch.providerRevision,
-		IdempotencyKey:   batch.idempotencyKey, RecordCount: batch.recordCount, Payload: batch.payload,
+		IdempotencyKey:   batch.idempotencyKey, RecordCount: batch.recordCount, CollectionAttempt: collectionAttempt,
+		CollectionListed: batch.recordsListed, CollectionFailed: max(batch.recordsListed-batch.recordCount, 0), CollectionError: collectionError, Payload: batch.payload,
 		MaintenanceFrontier: frontier,
 		Workflow:            workflow,
 		State:               SyncStageState{Phase: SyncStageStaged, RetryBudget: defaultSyncCommitRetries, FetchedAt: batch.fetchedAt},
@@ -1128,6 +1221,15 @@ func (m *JobManager) RecoverSyncStages(ctx context.Context, manager Manager) err
 			}
 			continue
 		}
+		if ok && job.Type == SyncJobType && job.Status == JobStatusInterrupted && !syncStageMatchesJob(stage, job) {
+			if err := m.failInterruptedSyncRetry(stage.JobID, "stage_identity_mismatch"); err != nil {
+				return err
+			}
+			if err := journal.RemoveJobStages(stage.JobID); err != nil {
+				return err
+			}
+			continue
+		}
 		if stage.State.Phase == SyncStageCommitted {
 			if !ok || job.Type != SyncJobType || job.Status != JobStatusInterrupted {
 				continue
@@ -1254,6 +1356,9 @@ func (m *JobManager) recoverSyncCollectionRetries(ctx context.Context, manager M
 	for jobID, group := range groups {
 		job, ok := m.Get(jobID)
 		if !ok || job.Type != SyncJobType {
+			if err := m.removeSyncRetryCheckpoint(retryJournal, jobID, ""); err != nil {
+				return err
+			}
 			continue
 		}
 		if job.Status != JobStatusInterrupted {
@@ -1264,9 +1369,36 @@ func (m *JobManager) recoverSyncCollectionRetries(ctx context.Context, manager M
 			}
 			continue
 		}
+		fresh := group[:0]
+		for _, checkpoint := range group {
+			if checkpoint.RetryAt.IsZero() || checkpoint.RetryAt.Before(time.Now().UTC().Add(-maxSyncCollectionCheckpointAge)) {
+				if err := m.expireSyncRetryCheckpoint(job, checkpoint); err != nil {
+					return err
+				}
+				if err := m.removeSyncRetryCheckpoint(retryJournal, jobID, checkpoint.Collection); err != nil {
+					return err
+				}
+				continue
+			}
+			fresh = append(fresh, checkpoint)
+		}
+		group = fresh
+		if len(group) == 0 {
+			if err := m.completeInterruptedSyncRetry(jobID); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := m.reconcileSyncStagesBeforeRetry(ctx, manager, stageJournal, stages, job, group); err != nil {
+			return err
+		}
+		job, _ = m.Get(jobID)
 		pending := make([]syncCollectionRetryCheckpoint, 0, len(group))
 		for _, checkpoint := range group {
 			if syncCollectionProjectionSettlesCheckpoint(job.SyncCollections, checkpoint) {
+				if err := stageJournal.RemoveCollectionStages(jobID, checkpoint.Collection); err != nil {
+					return err
+				}
 				if err := m.removeSyncRetryCheckpoint(retryJournal, jobID, checkpoint.Collection); err != nil {
 					return err
 				}
@@ -1344,6 +1476,24 @@ func (m *JobManager) recoverSyncCollectionRetries(ctx context.Context, manager M
 	return nil
 }
 
+func (m *JobManager) expireSyncRetryCheckpoint(job Job, checkpoint syncCollectionRetryCheckpoint) error {
+	now := time.Now().UTC()
+	view := SyncCollectionView{
+		Collection: checkpoint.Collection, Outcome: SyncCollectionPermanentFailure,
+		FrontierRef: publicSyncFrontierRef(checkpoint.Request.CacheUUID, checkpoint.Request.RepoID, checkpoint.Collection, checkpoint.RemoteType),
+		ErrorClass:  "retry_checkpoint_expired", Attempt: checkpoint.Attempt,
+		RetryBudget: defaultSyncCollectionRetryBudget, UpdatedAt: now,
+	}
+	for _, existing := range job.SyncCollections {
+		if existing.Collection == checkpoint.Collection && existing.LastSuccessAt != nil {
+			lastSuccess := existing.LastSuccessAt.UTC()
+			view.LastSuccessAt = &lastSuccess
+			break
+		}
+	}
+	return m.observeSyncCollectionPersisted(job.ID, view)
+}
+
 func (m *JobManager) removeSyncRetryCheckpoint(journal *syncCollectionRetryJournal, jobID, collection string) error {
 	m.syncRetryMu.Lock()
 	defer m.syncRetryMu.Unlock()
@@ -1366,7 +1516,7 @@ func latestSyncRetryStage(stages []SyncStageEnvelope, checkpoint syncCollectionR
 	var latest SyncStageEnvelope
 	found := false
 	for _, stage := range stages {
-		if stage.JobID != checkpoint.JobID || stage.Collection != checkpoint.Collection || stage.State.UpdatedAt.Before(checkpoint.RetryAt) {
+		if !syncRetryStageMatchesCheckpoint(stage, checkpoint) {
 			continue
 		}
 		if !found || laterSyncWorkflowStage(stage, latest) {
@@ -1374,6 +1524,98 @@ func latestSyncRetryStage(stages []SyncStageEnvelope, checkpoint syncCollectionR
 		}
 	}
 	return latest, found
+}
+
+func syncRetryStageMatchesCheckpoint(stage SyncStageEnvelope, checkpoint syncCollectionRetryCheckpoint) bool {
+	request := checkpoint.Request
+	if stage.JobID != checkpoint.JobID || stage.Collection != checkpoint.Collection || stage.State.UpdatedAt.Before(checkpoint.RetryAt) {
+		return false
+	}
+	if stage.CacheUUID != request.CacheUUID || stage.RepoID != request.RepoID || stage.RegistrationID != request.RegistrationID {
+		return false
+	}
+	if strings.TrimSpace(request.IdempotencyKey) == "" || stage.IdempotencyKey != request.IdempotencyKey {
+		return false
+	}
+	return stage.CollectionAttempt == checkpoint.Attempt+1
+}
+
+func syncStageMatchesJob(stage SyncStageEnvelope, job Job) bool {
+	return stage.JobID == job.ID && stage.CacheUUID == job.CacheUUID && stage.RepoID == job.RepoID && stage.RegistrationID == job.RegistrationID
+}
+
+// Before a recovered retry worker is allowed to fetch, reconcile every exact
+// sibling stage that already reached SQLite. This turns cache-local truth into
+// the public collection projection used to subtract selectors from the retry
+// request, so a crash cannot make an already committed sibling hit the
+// provider again.
+func (m *JobManager) reconcileSyncStagesBeforeRetry(ctx context.Context, manager Manager, journal *SyncStageJournal, stages []SyncStageEnvelope, job Job, checkpoints []syncCollectionRetryCheckpoint) error {
+	checkpointByCollection := map[string]syncCollectionRetryCheckpoint{}
+	for _, checkpoint := range checkpoints {
+		checkpointByCollection[checkpoint.Collection] = checkpoint
+	}
+	candidates := make([]SyncStageEnvelope, 0, len(stages))
+	for _, stage := range stages {
+		if syncStageMatchesJob(stage, job) && stage.State.Phase != SyncStageRejected && stage.State.Phase != SyncStageSuperseded {
+			candidates = append(candidates, stage)
+		}
+	}
+	sort.Slice(candidates, func(i, k int) bool {
+		leftIndex, rightIndex := -1, -1
+		if candidates[i].Workflow != nil {
+			leftIndex = candidates[i].Workflow.Current
+		}
+		if candidates[k].Workflow != nil {
+			rightIndex = candidates[k].Workflow.Current
+		}
+		if leftIndex != rightIndex {
+			return leftIndex < rightIndex
+		}
+		if !candidates[i].State.UpdatedAt.Equal(candidates[k].State.UpdatedAt) {
+			return candidates[i].State.UpdatedAt.Before(candidates[k].State.UpdatedAt)
+		}
+		return candidates[i].StageID < candidates[k].StageID
+	})
+	for _, stage := range candidates {
+		if checkpoint, ok := checkpointByCollection[stage.Collection]; ok && syncCollectionProjectionSettlesCheckpoint(job.SyncCollections, checkpoint) {
+			continue
+		}
+		committed := stage.State.Phase == SyncStageCommitted
+		if !committed {
+			receipt, err := syncStageReceiptExists(ctx, stage)
+			if err == nil && receipt {
+				state := stage.State
+				state.Phase, state.CommittedAt, state.RetryAfter = SyncStageCommitted, time.Now().UTC(), time.Time{}
+				updated, updateErr := journal.UpdateState(stage.StageID, state)
+				if updateErr != nil {
+					return updateErr
+				}
+				stage, committed = updated, true
+			}
+		}
+		if !committed {
+			if !stage.ExpiresAt.After(time.Now().UTC()) {
+				continue
+			}
+			_, updated, err := m.commitRecoveredSyncStage(ctx, manager, journal, stage)
+			if err != nil {
+				return err
+			}
+			stage, committed = updated, updated.State.Phase == SyncStageCommitted
+		}
+		if !committed {
+			continue
+		}
+		attempt := stage.CollectionAttempt
+		if checkpoint, ok := checkpointByCollection[stage.Collection]; ok && syncRetryStageMatchesCheckpoint(stage, checkpoint) {
+			attempt = checkpoint.Attempt + 1
+		}
+		if err := m.persistRecoveredSyncCollection(stage, attempt); err != nil {
+			return err
+		}
+		job, _ = m.Get(job.ID)
+	}
+	return nil
 }
 
 func (m *JobManager) reconcileSyncRetryStage(ctx context.Context, manager Manager, stageJournal *SyncStageJournal, retryJournal *syncCollectionRetryJournal, checkpoint syncCollectionRetryCheckpoint, stage SyncStageEnvelope) (bool, error) {
@@ -1537,21 +1779,29 @@ func (m *JobManager) resumeCommittedSyncWorkflow(ctx context.Context, manager Ma
 }
 
 func (m *JobManager) completeInterruptedSyncStageFromReceipt(stage SyncStageEnvelope) error {
+	if err := m.persistRecoveredSyncCollection(stage, stage.CollectionAttempt); err != nil {
+		return err
+	}
 	view := stage.PublicView()
-	result, outcomeErr, _ := recoveredSyncWorkflowOutcome(stage)
 	return m.updateJobPersisted(stage.JobID, func(job *Job, now time.Time) {
 		if job.Type != SyncJobType {
 			return
 		}
+		job.SyncHealth = aggregateSyncCollectionOutcome(job.SyncCollections)
 		job.Status, job.Error, job.ErrorClass = JobStatusSucceeded, "", ""
-		if outcomeErr != nil {
+		if job.SyncHealth == SyncHealthFailed {
 			job.Status = JobStatusFailed
-			job.ErrorClass = maintenanceJobErrorClass(outcomeErr, "sync_failed")
+		} else if job.SyncHealth == SyncHealthCancelled {
+			job.Status = JobStatusCancelled
+		}
+		job.ErrorClass, _ = syncCollectionAggregateFailure(job.SyncCollections)
+		if job.ErrorClass != "" {
 			job.Error = publicMaintenanceJobError(SyncJobType, job.ErrorClass)
 		}
 		job.UpdatedAt, job.FinishedAt, job.SyncStage = now, &now, &view
-		job.Steps, job.Completed = result.RecordsListed, result.SuccessCount
-		job.Progress = append(job.Progress, service.ProgressEvent{Type: job.Status, Phase: job.Status, Collection: stage.Collection, RecordsListed: result.RecordsListed, RecordsFetched: result.SuccessCount, RecordsFailed: result.FailureCount, Message: firstNonEmpty(job.Error, "cache commit receipt recovered after journal interruption")})
+		listed, committed, failed := syncCollectionTotals(job.SyncCollections)
+		job.Steps, job.Completed = listed, committed
+		job.Progress = append(job.Progress, service.ProgressEvent{Type: job.Status, Phase: job.Status, Collection: stage.Collection, RecordsListed: listed, RecordsFetched: committed, RecordsFailed: failed, Message: firstNonEmpty(job.Error, "cache commit receipt recovered after journal interruption")})
 		delete(m.cancel, job.ID)
 	})
 }
@@ -1622,6 +1872,11 @@ func (m *JobManager) runRecoveredSyncWorkflow(ctx context.Context, manager Manag
 	if result == nil {
 		result = &service.SyncResourcesResult{}
 	}
+	if commitErr == nil {
+		if projectionErr := m.persistRecoveredSyncCollection(finalStage, finalStage.CollectionAttempt); projectionErr != nil {
+			return
+		}
+	}
 	err := commitErr
 	if err == nil {
 		err = prefixErr
@@ -1638,25 +1893,36 @@ func (m *JobManager) runRecoveredSyncWorkflow(ctx context.Context, manager Manag
 			}
 		}
 	}
-	status := JobStatusSucceeded
-	errorClass, publicError := "", ""
-	if err != nil {
-		status = JobStatusFailed
-		errorClass = maintenanceJobErrorClass(err, "sync_commit_failed")
-		publicError = publicMaintenanceJobError(SyncJobType, errorClass)
-		if errors.Is(ctx.Err(), context.Canceled) {
-			status, errorClass = JobStatusCancelled, "cancelled"
-			publicError = publicMaintenanceJobError(SyncJobType, errorClass)
-		}
-	}
 	view := finalStage.PublicView()
 	if current, ok := m.Get(stage.JobID); ok && current.SyncStage != nil {
 		view = *current.SyncStage
 	}
 	persistErr := m.updateJobPersisted(stage.JobID, func(job *Job, now time.Time) {
+		health := aggregateSyncCollectionOutcome(job.SyncCollections)
+		status := JobStatusSucceeded
+		if health == SyncHealthFailed {
+			status = JobStatusFailed
+		} else if health == SyncHealthCancelled || errors.Is(ctx.Err(), context.Canceled) {
+			status, health = JobStatusCancelled, SyncHealthCancelled
+		}
+		errorClass, _ := syncCollectionAggregateFailure(job.SyncCollections)
+		if errorClass == "" && err != nil {
+			errorClass = maintenanceJobErrorClass(err, "sync_commit_failed")
+		}
+		publicError := ""
+		if errorClass != "" {
+			publicError = publicMaintenanceJobError(SyncJobType, errorClass)
+		}
 		job.Status, job.ErrorClass, job.Error = status, errorClass, publicError
+		job.SyncHealth = health
 		job.UpdatedAt, job.FinishedAt, job.SyncStage = now, &now, &view
-		job.Steps, job.Completed = result.RecordsListed, result.SuccessCount
+		listed, committed, failed := syncCollectionTotals(job.SyncCollections)
+		if len(job.SyncCollections) > 0 {
+			job.Steps, job.Completed = listed, committed
+			result.RecordsListed, result.SuccessCount, result.FailureCount = listed, committed, failed
+		} else {
+			job.Steps, job.Completed = result.RecordsListed, result.SuccessCount
+		}
 		job.Progress = append(job.Progress, failedSyncCollectionProgress(collections)...)
 		job.Progress = append(job.Progress, service.ProgressEvent{Type: status, Phase: status, Collection: SyncJobType, RecordsListed: result.RecordsListed, RecordsFetched: result.SuccessCount, RecordsFailed: result.FailureCount, Message: map[bool]string{true: "recovered sync workflow finished", false: publicError}[err == nil]})
 		delete(m.cancel, job.ID)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -71,8 +72,44 @@ func TestSyncCollectionRetryDelayIsDeterministicBoundedAndHonorsRetryAfter(t *te
 	if cappedA == cappedB {
 		t.Fatalf("capped retry jitter collapsed: %s", cappedA)
 	}
-	if got := syncCollectionRetryDelay("cache-a", "owner/repo", "wiki", "next_page:2", 99, 2*time.Minute); got != 2*time.Minute {
-		t.Fatalf("Retry-After was not honored: %s", got)
+	if got := syncCollectionRetryDelay("cache-a", "owner/repo", "wiki", "next_page:2", 99, 2*time.Minute); got != maxSyncCollectionRetryDelay {
+		t.Fatalf("Retry-After was not capped: %s", got)
+	}
+}
+
+func TestSyncCollectionRetryJournalRejectsUnboundedGrowth(t *testing.T) {
+	journal := newSyncCollectionRetryJournal(t.TempDir())
+	now := time.Now().UTC()
+	for index := 0; index < maxSyncCollectionCheckpoints; index++ {
+		checkpoint := syncCollectionRetryCheckpoint{
+			JobID: fmt.Sprintf("job-%06d", index), Collection: "wiki", RemoteType: "wiki", Attempt: 1, RetryAt: now,
+			Request: syncCollectionRetryRequest{RepoID: "owner/repo", CachePath: "/private/cache.db", CacheUUID: "cache-a", RegistrationID: "reg-a", Wiki: true},
+		}
+		if err := journal.Upsert(checkpoint); err != nil {
+			t.Fatalf("checkpoint %d: %v", index, err)
+		}
+	}
+	overflow := syncCollectionRetryCheckpoint{JobID: "job-overflow", Collection: "wiki", RemoteType: "wiki", Attempt: 1, RetryAt: now, Request: syncCollectionRetryRequest{RepoID: "owner/repo", CachePath: "/private/cache.db", CacheUUID: "cache-a", RegistrationID: "reg-a", Wiki: true}}
+	if err := journal.Upsert(overflow); err == nil {
+		t.Fatal("retry journal accepted an entry beyond its durable quota")
+	}
+	checkpoints, err := journal.List()
+	if err != nil || len(checkpoints) != maxSyncCollectionCheckpoints {
+		t.Fatalf("bounded checkpoints=%d err=%v", len(checkpoints), err)
+	}
+}
+
+func TestSyncCollectionRetryJournalRejectsOversizedSingleCheckpoint(t *testing.T) {
+	journal := newSyncCollectionRetryJournal(t.TempDir())
+	checkpoint := syncCollectionRetryCheckpoint{
+		JobID: "job-000001", Collection: "wiki", RemoteType: "wiki", Attempt: 1, RetryAt: time.Now().UTC(),
+		Request: syncCollectionRetryRequest{RepoID: "owner/repo", CachePath: "/" + strings.Repeat("x", maxSyncCollectionJournalBytes), CacheUUID: "cache-a", RegistrationID: "reg-a", Wiki: true},
+	}
+	if err := journal.Upsert(checkpoint); err == nil {
+		t.Fatal("retry journal accepted a checkpoint beyond its byte quota")
+	}
+	if _, err := os.Stat(journal.path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("oversized journal was written: %v", err)
 	}
 }
 

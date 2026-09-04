@@ -327,12 +327,12 @@ Compatibility policy:
 
 | Detected version | Behavior | Operator action |
 | --- | --- | --- |
-| New empty cache | Initialize normally at schema version 19 | None |
-| 19 | Open normally; reads and writes are allowed | None |
-| 2-18 | Open read-compatible but writes are blocked until migration | Run `gitcode-mcp migrate-cache --confirm` |
+| New empty cache | Initialize normally at schema version 21 | None |
+| 21 | Open normally; reads and writes are allowed | None |
+| 2-20 | Open read-compatible but writes are blocked until migration | Run `gitcode-mcp migrate-cache --confirm` |
 | 1 | Block migration as pre-supported/iteration-1-equivalent | Confirm the selected cache path, move aside or delete only that cache file, then re-sync |
 | 0, missing, or empty `schema_version` in a non-empty cache | Block as pre-schema-versioning or unknown | Confirm the selected cache path, move aside or delete only that cache file, then re-sync |
-| Greater than 19 | Block as newer than this binary supports | Upgrade `gitcode-mcp` to a binary that supports the schema |
+| Greater than 21 | Block as newer than this binary supports | Upgrade `gitcode-mcp` to a binary that supports the schema |
 
 `gitcode-mcp migrate-cache --confirm` runs supported older-version migrations in place from the selected effective cache path, including repo-local cache selection when run from a repo-local workspace. Explicit `--cache-path` still overrides repo-local discovery for emergency repair. Before any schema mutation, the command inspects the coordinator identity and supported schema range. An installed coordinator is unloaded and observed until both its process and control socket are gone; an unowned foreground coordinator makes migration fail closed. The WAL is checkpointed, a backup is created at `{cache-path}.backup-{timestamp}`, and that backup must pass `integrity_check`, schema-version, and cache-identity verification. All pending schema steps then commit as one transaction, so a failed step leaves the original schema and identity intact. A private cache-adjacent recovery intent is written before coordination and retained until compatible service installation, restart, and schema-range health verification complete. While that intent exists, an invocation without `--confirm` returns `recovery_required` and cannot report `up_to_date`; re-running the confirmed command resumes the intent even when the schema transaction already committed. After verified restart, the CLI atomically publishes a completion receipt containing the private cache UUID, target binary identity/range, and backup/identity verification results, then clears the pending intent. Admin never exposes the UUID or filesystem locations: it accepts the receipt as success evidence only when both verification flags are true and its UUID, schema, binary identity, and range exactly match the live cache and daemon. Machine-readable output records quiesce, backup verification, identity preservation, compatible target identity, restart, and recovery state.
 
@@ -356,5 +356,9 @@ Schema version 20 adds checksum-bound durable sync commit receipts. A receipt is
 written in the same transaction as cache graphs and frontiers so restart can
 distinguish “SQLite committed, journal terminal write failed” from an uncommitted
 stage without repeating provider traffic.
+
+Schema version 21 adds `last_success_at` to maintenance frontiers. A degraded
+observation can replace the current status and error while retaining the most
+recent durable successful-sync timestamp for retry diagnostics and Admin UI.
 
 Opening an older compatible cache without migration is read-compatible but write-blocked so operators can inspect the cache and run diagnostics before applying the migration. New caches are initialized directly at the current schema version.

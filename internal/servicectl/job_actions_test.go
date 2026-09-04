@@ -135,6 +135,53 @@ func TestJobActionRetryCreatesCurrentMaintenanceWork(t *testing.T) {
 	}
 }
 
+func TestJobActionRetryPreparedReceiptPreventsRestartDuplicateAfterFinalSaveFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "actions.json")
+	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+	now := time.Now().UTC()
+	jobs.jobs["job-000001"] = &Job{ID: "job-000001", Type: SyncJobType, RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", Status: JobStatusSucceeded, SyncHealth: SyncHealthPartial, CreatedAt: now, UpdatedAt: now, FinishedAt: &now, SyncCollections: []SyncCollectionView{{Collection: "wiki", Outcome: SyncCollectionPermanentFailure}}}
+	jobs.nextID = 1
+	if err := jobs.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	actions := NewJobActionManager(path, jobs, nil)
+	runs := 0
+	actions.reconcile = func(context.Context, string, string) (MaintenanceReconcileResult, error) {
+		runs++
+		created, _, err := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 1, "retry-work", "cache-1", "reg-1", "", func() {})
+		if err != nil {
+			return MaintenanceReconcileResult{}, err
+		}
+		return MaintenanceReconcileResult{JobsStarted: []string{created.ID}}, nil
+	}
+	writes := 0
+	actions.writeFile = func(target string, data []byte, mode os.FileMode) error {
+		writes++
+		if writes == 2 {
+			return errors.New("final receipt unavailable")
+		}
+		return durableAtomicWriteFile(target, data, mode)
+	}
+	req := adminhttp.JobActionRequest{JobID: "job-000001", Collection: "wiki", IdempotencyKey: "retry-crash-window"}
+	if _, err := actions.Retry(context.Background(), req); err == nil || runs != 1 {
+		t.Fatalf("first retry err=%v runs=%d", err, runs)
+	}
+
+	restarted := NewJobActionManager(path, jobs, nil)
+	if err := restarted.Load(); err != nil {
+		t.Fatal(err)
+	}
+	restarted.reconcile = func(context.Context, string, string) (MaintenanceReconcileResult, error) {
+		runs++
+		return MaintenanceReconcileResult{}, nil
+	}
+	replay, err := restarted.Retry(context.Background(), req)
+	if err != nil || !replay.Replayed || replay.Outcome != "pending" || runs != 1 {
+		t.Fatalf("restart replay=%+v err=%v runs=%d", replay, err, runs)
+	}
+}
+
 func TestJobActionCollectionRetryDoesNotCoalesceDifferentActiveCollection(t *testing.T) {
 	jobs := NewJobManager("")
 	now := time.Now().UTC()

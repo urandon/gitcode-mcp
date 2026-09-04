@@ -303,6 +303,10 @@ func syncCollectionViewForAttempt(collection, frontierRef string, attempt, budge
 	}
 	policy := classifySyncCollectionFailure(err)
 	view.ErrorClass = policy.ErrorClass
+	if result != nil && result.SuccessCount > 0 {
+		succeededAt := now.UTC()
+		view.LastSuccessAt = &succeededAt
+	}
 	switch {
 	case errors.Is(err, context.Canceled):
 		view.Outcome = SyncCollectionCancelled
@@ -410,5 +414,5 @@ func syncCollectionRetryDelay(cacheUUID, repoID, collection, frontier string, at
 	seed := strings.Join([]string{cacheUUID, repoID, collection, frontier, strconv.Itoa(attempt)}, "\x00")
 	digest := sha256.Sum256([]byte(seed))
 	jitter := time.Duration(binary.BigEndian.Uint64(digest[:8]) % uint64(jitterWindow))
-	return max(base+jitter, retryAfter)
+	return min(max(base+jitter, retryAfter), maxSyncCollectionRetryDelay)
 }

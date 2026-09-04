@@ -277,6 +277,7 @@ type MaintenanceFrontier struct {
 	RecordsListed  int       `json:"records_listed,omitempty"`
 	Checkpoint     string    `json:"checkpoint,omitempty"`
 	LastErrorClass string    `json:"last_error_class,omitempty"`
+	LastSuccessAt  time.Time `json:"last_success_at,omitempty"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 

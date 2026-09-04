@@ -115,6 +115,10 @@ type SyncStageEnvelope struct {
 	CreatedAt           time.Time                  `json:"created_at"`
 	ExpiresAt           time.Time                  `json:"expires_at"`
 	RecordCount         int                        `json:"record_count"`
+	CollectionAttempt   int                        `json:"collection_attempt,omitempty"`
+	CollectionListed    int                        `json:"collection_records_listed,omitempty"`
+	CollectionFailed    int                        `json:"collection_records_failed,omitempty"`
+	CollectionError     string                     `json:"collection_error_class,omitempty"`
 	ByteCount           int64                      `json:"byte_count"`
 	Payload             json.RawMessage            `json:"payload"`
 	MaintenanceFrontier *cache.MaintenanceFrontier `json:"maintenance_frontier,omitempty"`
@@ -656,6 +660,10 @@ func syncStageChecksum(envelope SyncStageEnvelope) string {
 		CreatedAt           time.Time                  `json:"created_at"`
 		ExpiresAt           time.Time                  `json:"expires_at"`
 		RecordCount         int                        `json:"record_count"`
+		CollectionAttempt   int                        `json:"collection_attempt,omitempty"`
+		CollectionListed    int                        `json:"collection_records_listed,omitempty"`
+		CollectionFailed    int                        `json:"collection_records_failed,omitempty"`
+		CollectionError     string                     `json:"collection_error_class,omitempty"`
 		ByteCount           int64                      `json:"byte_count"`
 		Payload             json.RawMessage            `json:"payload"`
 		MaintenanceFrontier *cache.MaintenanceFrontier `json:"maintenance_frontier,omitempty"`
@@ -665,6 +673,7 @@ func syncStageChecksum(envelope SyncStageEnvelope) string {
 		envelope.RegistrationID, envelope.RepoID, envelope.BindingFingerprint, envelope.Collection,
 		envelope.Checkpoint, envelope.ProviderRevision, envelope.IdempotencyKey,
 		envelope.CreatedAt.UTC(), envelope.ExpiresAt.UTC(), envelope.RecordCount,
+		envelope.CollectionAttempt, envelope.CollectionListed, envelope.CollectionFailed, envelope.CollectionError,
 		envelope.ByteCount, envelope.Payload, envelope.MaintenanceFrontier, envelope.Workflow,
 	}
 	data, _ := json.Marshal(immutable)
@@ -683,10 +692,11 @@ func syncStageIdentity(envelope SyncStageEnvelope) string {
 		Checkpoint         string `json:"checkpoint,omitempty"`
 		ProviderRevision   string `json:"provider_revision,omitempty"`
 		IdempotencyKey     string `json:"idempotency_key"`
+		CollectionAttempt  int    `json:"collection_attempt,omitempty"`
 	}{
 		envelope.CacheUUID, envelope.CacheSchema, envelope.RegistrationID,
 		envelope.RepoID, envelope.BindingFingerprint, envelope.Collection, envelope.Checkpoint,
-		envelope.ProviderRevision, envelope.IdempotencyKey,
+		envelope.ProviderRevision, envelope.IdempotencyKey, envelope.CollectionAttempt,
 	}
 	data, _ := json.Marshal(identity)
 	sum := sha256.Sum256(data)
@@ -699,6 +709,8 @@ func sameSyncStageBatch(first, second SyncStageEnvelope) bool {
 		first.BindingFingerprint == second.BindingFingerprint &&
 		first.Collection == second.Collection && first.Checkpoint == second.Checkpoint &&
 		first.ProviderRevision == second.ProviderRevision && first.IdempotencyKey == second.IdempotencyKey &&
+		first.CollectionAttempt == second.CollectionAttempt && first.CollectionListed == second.CollectionListed &&
+		first.CollectionFailed == second.CollectionFailed && first.CollectionError == second.CollectionError &&
 		first.RecordCount == second.RecordCount && first.ByteCount == second.ByteCount &&
 		string(first.Payload) == string(second.Payload) && sameSyncStageWorkflow(first.Workflow, second.Workflow)
 }

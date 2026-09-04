@@ -10,7 +10,12 @@ import (
 	"time"
 )
 
-const syncCollectionRetrySchema = "gitcode-mcp.sync-collection-retries.v1"
+const (
+	syncCollectionRetrySchema      = "gitcode-mcp.sync-collection-retries.v1"
+	maxSyncCollectionCheckpoints   = 256
+	maxSyncCollectionJournalBytes  = 1 << 20
+	maxSyncCollectionCheckpointAge = 24 * time.Hour
+)
 
 type syncCollectionRetryCheckpointError struct{}
 
@@ -131,6 +136,9 @@ func (j *syncCollectionRetryJournal) load() (syncCollectionRetryFile, error) {
 
 func (j *syncCollectionRetryJournal) save(file syncCollectionRetryFile) error {
 	file.Schema = syncCollectionRetrySchema
+	if len(file.Checkpoints) > maxSyncCollectionCheckpoints {
+		return syncCollectionRetryCheckpointError{}
+	}
 	sort.Slice(file.Checkpoints, func(i, k int) bool {
 		left, right := file.Checkpoints[i], file.Checkpoints[k]
 		if left.JobID == right.JobID {
@@ -140,6 +148,9 @@ func (j *syncCollectionRetryJournal) save(file syncCollectionRetryFile) error {
 	})
 	data, err := json.MarshalIndent(file, "", "  ")
 	if err != nil {
+		return syncCollectionRetryCheckpointError{}
+	}
+	if len(data)+1 > maxSyncCollectionJournalBytes {
 		return syncCollectionRetryCheckpointError{}
 	}
 	if err := j.writeFile(j.path, append(data, '\n'), 0o600); err != nil {

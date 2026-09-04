@@ -78,6 +78,34 @@ func TestMaintenanceFrontiersKeepHeadAndTailIndependent(t *testing.T) {
 	}
 }
 
+func TestMaintenanceFrontierPreservesLastSuccessAcrossSameLaneDegradation(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, RepositoryBinding{RepoID: "repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	succeededAt := time.Now().UTC().Add(-time.Hour)
+	key := MaintenanceFrontier{RepoID: "repo", RemoteType: "wiki", Ordering: "updated_at_desc", FilterKey: "all", Lane: "head"}
+	success := key
+	success.Status, success.UpdatedAt = "fresh", succeededAt
+	if err := store.UpsertMaintenanceFrontier(ctx, success); err != nil {
+		t.Fatal(err)
+	}
+	degraded := key
+	degraded.Status, degraded.LastErrorClass, degraded.UpdatedAt = "degraded", "network_timeout", succeededAt.Add(time.Hour)
+	if err := store.UpsertMaintenanceFrontier(ctx, degraded); err != nil {
+		t.Fatal(err)
+	}
+	frontiers, err := store.ListMaintenanceFrontiers(ctx, "repo")
+	if err != nil || len(frontiers) != 1 || !frontiers[0].LastSuccessAt.Equal(succeededAt) {
+		t.Fatalf("degraded frontier=%+v err=%v", frontiers, err)
+	}
+}
+
 func TestVersion17MigrationSeedsExistingContentGeneration(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "cache.db")

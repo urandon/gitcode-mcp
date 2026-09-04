@@ -40,10 +40,11 @@ type JobActionManager struct {
 	reconcile func(context.Context, string, string) (MaintenanceReconcileResult, error)
 	receipts  map[string]jobActionReceiptDisk
 	now       func() time.Time
+	writeFile func(string, []byte, os.FileMode) error
 }
 
 func NewJobActionManager(path string, jobs *JobManager, maintenance *MaintenanceManager) *JobActionManager {
-	manager := &JobActionManager{path: path, jobs: jobs, receipts: map[string]jobActionReceiptDisk{}, now: func() time.Time { return time.Now().UTC() }}
+	manager := &JobActionManager{path: path, jobs: jobs, receipts: map[string]jobActionReceiptDisk{}, now: func() time.Time { return time.Now().UTC() }, writeFile: durableAtomicWriteFile}
 	if maintenance != nil {
 		manager.reconcile = func(ctx context.Context, registrationID, collection string) (MaintenanceReconcileResult, error) {
 			if strings.TrimSpace(collection) != "" {
@@ -115,6 +116,26 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		return adminhttp.JobActionReceipt{}, jobActionError(http.StatusForbidden, "capability_unavailable", "This job type does not support the requested admin action.", "Use the capability catalog or CLI for supported operations.")
 	}
 	receipt := adminhttp.JobActionReceipt{ReceiptID: "receipt-" + keyHash[:16], Action: action, TargetJob: job.ID, CreatedAt: m.now()}
+	prepared := false
+	prepare := func() error {
+		pending := receipt
+		pending.Outcome, pending.JobStatus = "pending", job.Status
+		m.receipts[keyHash] = jobActionReceiptDisk{KeyHash: keyHash, IntentHash: intentHash, Receipt: pending}
+		m.pruneLocked()
+		if err := m.saveLocked(); err != nil {
+			delete(m.receipts, keyHash)
+			return err
+		}
+		prepared = true
+		return nil
+	}
+	rollbackPrepared := func() {
+		if !prepared {
+			return
+		}
+		delete(m.receipts, keyHash)
+		_ = m.saveLocked()
+	}
 	switch action {
 	case "cancel":
 		if job.Status != JobStatusQueued && job.Status != JobStatusRunning {
@@ -154,8 +175,12 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		if m.reconcile == nil {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusNotImplemented, "capability_unavailable", "Retry is not available in the running daemon.", "Use the maintenance CLI for this registration.")
 		}
+		if err := prepare(); err != nil {
+			return adminhttp.JobActionReceipt{}, err
+		}
 		result, err := m.reconcile(ctx, job.RegistrationID, req.Collection)
 		if err != nil {
+			rollbackPrepared()
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "retry_failed", "The maintenance registration could not be reconciled.", "Refresh maintenance status and resolve its typed diagnostic.")
 		}
 		if len(result.JobsStarted) > 0 {
@@ -216,14 +241,7 @@ func (m *JobActionManager) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	tmp := m.path + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, m.path)
+	return m.writeFile(m.path, append(data, '\n'), 0o600)
 }
 
 func (m *JobActionManager) pruneLocked() {
