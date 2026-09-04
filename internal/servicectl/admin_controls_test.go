@@ -260,6 +260,29 @@ func TestValidateAdminMaintenanceRequestReturnsFieldSpecificFailure(t *testing.T
 	}
 }
 
+func TestAdminMaintenanceObservationCollectionsRoundTripToPlan(t *testing.T) {
+	view := adminMaintenancePolicyObservation(MaintenancePolicy{
+		Issues: true, IssueComments: true, Wiki: true, Pulls: true, PRComments: true,
+	})
+	want := "issues,issue-comments,wiki,pulls,pr-comments"
+	if got := strings.Join(view.Collections, ","); got != want {
+		t.Fatalf("observation collections=%q want %q", got, want)
+	}
+	if err := validateAdminMaintenanceRequest(adminhttp.MaintenanceControlRequest{
+		RepoID: "owner/repo", Collections: view.Collections,
+	}); err != nil {
+		t.Fatalf("observed collections do not round-trip into plan validation: %v", err)
+	}
+
+	err := validateAdminMaintenanceRequest(adminhttp.MaintenanceControlRequest{
+		RepoID: "owner/repo", Collections: []string{"issue_comments"},
+	})
+	var typed adminhttp.ControlError
+	if !errors.As(err, &typed) || typed.Code != "invalid_policy" || typed.Field != "collections" {
+		t.Fatalf("underscore alias err=%T %v typed=%+v", err, err, typed)
+	}
+}
+
 func TestAdminMaintenanceSetupMapsBoundedPolicy(t *testing.T) {
 	ctx := context.Background()
 	cachePath := filepath.Join(t.TempDir(), "cache.db")

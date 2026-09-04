@@ -804,6 +804,32 @@ test('maintenance validation identifies the field and omits an unavailable CLI h
   await expect(alert.locator('code')).toHaveCount(0);
 });
 
+test('existing maintenance comment collections round-trip into a valid plan request', async ({ page }) => {
+  const allCollections = ['issues', 'issue-comments', 'wiki', 'pulls', 'pr-comments'];
+  const registered: any = structuredClone(snapshot);
+  registered.maintenance[0].policy.collections = allCollections;
+  await mockAdmin(page, registered);
+  let plannedBody: Record<string, unknown> = {};
+  await page.route('**/api/admin/v1/maintenance/plan', async (route) => {
+    plannedBody = route.request().postDataJSON();
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: {
+      schema_version: 'gitcode-mcp.maintenance-plan.v1', plan_id: 'maintenance-plan-all-collections', configuration_hash: 'sha256:cfg', status: 'confirmation_required', repo_id: 'example/repo',
+      cache: { cache_ref: 'cache-111111112222', path_fingerprint: 'sha256:public', location_kind: 'managed', schema_version: 17, scopes: ['issues', 'wiki'] },
+      provider: { embedding_smoke_status: 'skipped' }, policy: { sync_enabled: true }, actions: [], blockers: [], next_action: 'confirm'
+    } }) });
+  });
+
+  await page.goto('/?view=Maintenance');
+  const collections = page.getByRole('group', { name: 'Collections' });
+  for (const name of ['Issues', 'Issue Comments', 'Wiki', 'Pulls', 'Pr Comments']) {
+    await expect(collections.getByRole('checkbox', { name, exact: true })).toBeChecked();
+  }
+  await page.getByRole('button', { name: 'Render plan' }).click();
+  expect(plannedBody.collections).toEqual(allCollections);
+  expect((plannedBody.collections as string[]).some((value) => value.includes('_'))).toBe(false);
+  await expect(page.getByText('maintenance-plan-all-collections')).toBeVisible();
+});
+
 test('maintenance plan/apply renders every effect and safely retries one confirmed intent', async ({ page }) => {
   await mockAdmin(page);
   let plannedBody: Record<string, unknown> = {};
