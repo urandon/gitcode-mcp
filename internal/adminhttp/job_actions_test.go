@@ -55,6 +55,30 @@ func TestJobActionsRequireSessionOriginCSRFAndIdempotency(t *testing.T) {
 	}
 }
 
+func TestRetryJobTransportsExactCollection(t *testing.T) {
+	var received JobActionRequest
+	c := New(Config{
+		Assets: fstest.MapFS{"index.html": {Data: []byte("index")}},
+		RetryJob: func(_ context.Context, req JobActionRequest) (JobActionReceipt, error) {
+			received = req
+			return JobActionReceipt{ReceiptID: "receipt-collection", Action: "retry", TargetJob: req.JobID, Outcome: "started", JobStatus: "queued", CreatedAt: time.Now().UTC()}, nil
+		},
+	})
+	cookie := authorizeObservationController(c, time.Now().Add(time.Hour))
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/admin/v1/jobs/job-1/retry", strings.NewReader(`{"idempotency_key":"key-collection","collection":"issues"}`))
+	req.AddCookie(cookie)
+	req.Header.Set("Origin", "http://127.0.0.1:8080")
+	req.Header.Set("X-CSRF-Token", "csrf")
+	result := httptest.NewRecorder()
+	c.handler().ServeHTTP(result, req)
+	if result.Code != http.StatusOK {
+		t.Fatalf("retry status=%d body=%s", result.Code, result.Body.String())
+	}
+	if received.JobID != "job-1" || received.Collection != "issues" || received.IdempotencyKey != "key-collection" {
+		t.Fatalf("provider request=%+v", received)
+	}
+}
+
 func TestJobActionTypedErrorsAndUnavailableCapability(t *testing.T) {
 	c := New(Config{
 		Assets: fstest.MapFS{"index.html": {Data: []byte("index")}},

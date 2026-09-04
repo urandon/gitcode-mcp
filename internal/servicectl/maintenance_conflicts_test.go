@@ -594,7 +594,7 @@ func TestCacheMutationFenceRejectsRepositoryDocsResume(t *testing.T) {
 		t.Fatalf("terminal worker unexpectedly blocked initial fence: %v", blocked)
 	}
 	defer release()
-	if _, resumed, err := jobs.ResumeRepositoryDocsAdmission(job.ID, "reg-1", "source-1", 3, "set-1", "docs-work", func() {}); err == nil || resumed {
+	if _, resumed, err := jobs.ResumeRepositoryDocsAdmission(job.ID, "reg-1", "source-1", 3, "set-1", "docs-work", "", func() {}); err == nil || resumed {
 		t.Fatalf("resume crossed fence: resumed=%t err=%v", resumed, err)
 	} else if _, ok := err.(CacheMutationFenceError); !ok {
 		t.Fatalf("resume fence error=%T %v", err, err)
@@ -610,7 +610,7 @@ func TestRepositoryDocsResumeSharesAtomicWriterAdmission(t *testing.T) {
 		t.Fatalf("docs=%+v created=%t err=%v", docs, created, err)
 	}
 	jobs.finishJob(docs.ID, JobStatusFailed, "retry")
-	if _, resumed, err := jobs.ResumeRepositoryDocsAdmission(docs.ID, "reg-1", "source-1", 3, "set-1", "docs-resume", func() {}); err == nil || resumed {
+	if _, resumed, err := jobs.ResumeRepositoryDocsAdmission(docs.ID, "reg-1", "source-1", 3, "set-1", "docs-resume", "", func() {}); err == nil || resumed {
 		t.Fatalf("resume overlapped unwinding worker: resumed=%t err=%v", resumed, err)
 	}
 	jobs.markWorkerFinished(docs.ID)
@@ -618,7 +618,7 @@ func TestRepositoryDocsResumeSharesAtomicWriterAdmission(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("sync=%+v created=%t err=%v", syncJob, created, err)
 	}
-	resumedJob, resumed, err := jobs.ResumeRepositoryDocsAdmission(docs.ID, "reg-1", "source-1", 3, "set-1", "docs-resume", func() {})
+	resumedJob, resumed, err := jobs.ResumeRepositoryDocsAdmission(docs.ID, "reg-1", "source-1", 3, "set-1", "docs-resume", "", func() {})
 	if err != nil || !resumed || resumedJob.ID != docs.ID {
 		t.Fatalf("provider-only sync reserved docs writer admission: job=%+v resumed=%t err=%v", resumedJob, resumed, err)
 	}
@@ -636,15 +636,41 @@ func TestRepositoryDocsResumeSharesAtomicWriterAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, resumed, err := jobs.ResumeRepositoryDocsAdmission(docs.ID, "reg-1", "source-1", 3, "set-1", "docs-resume", func() {}); err == nil || resumed {
+	if _, resumed, err := jobs.ResumeRepositoryDocsAdmission(docs.ID, "reg-1", "source-1", 3, "set-1", "docs-resume", "", func() {}); err == nil || resumed {
 		t.Fatalf("resume overlapped direct writer: resumed=%t err=%v", resumed, err)
 	}
 	releaseDirect()
-	resumedJob, resumed, err = jobs.ResumeRepositoryDocsAdmission(docs.ID, "reg-1", "source-1", 3, "set-1", "docs-resume", func() {})
+	resumedJob, resumed, err = jobs.ResumeRepositoryDocsAdmission(docs.ID, "reg-1", "source-1", 3, "set-1", "docs-resume", "", func() {})
 	if err != nil || !resumed || resumedJob.ID != docs.ID {
 		t.Fatalf("resume after quiescence=%+v resumed=%t err=%v", resumedJob, resumed, err)
 	}
 	jobs.markWorkerFinished(docs.ID)
+}
+
+func TestRepositoryDocsResumePersistsActionIntentCorrelation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.json")
+	jobs := NewJobManager(path)
+	docs, created, err := jobs.createCoalescedJobWithIntent(RepositoryDocsIndexJobType, "owner/repo", "profile", 0, "docs-resume", "cache-1", "reg-1", "namespace", JobRecoveryIntent{
+		SourceRegistrationID: "source-1", SourceRegistrationGeneration: 3, ExpectedRevisionSetID: "set-1",
+	}, func() {})
+	if err != nil || !created {
+		t.Fatalf("docs=%+v created=%t err=%v", docs, created, err)
+	}
+	jobs.finishJob(docs.ID, JobStatusFailed, "retry")
+	jobs.markWorkerFinished(docs.ID)
+	resumed, ok, err := jobs.ResumeRepositoryDocsAdmission(docs.ID, "reg-1", "source-1", 3, "set-1", "docs-resume", "action-ref", func() {})
+	if err != nil || !ok || resumed.Status != JobStatusQueued {
+		t.Fatalf("resumed=%+v ok=%t err=%v", resumed, ok, err)
+	}
+
+	restarted := NewJobManager(path)
+	if err := restarted.LoadAndMarkInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	correlated, outcome, found := restarted.RetainedRetryIntentResult("action-ref")
+	if !found || correlated.ID != docs.ID || correlated.Status != JobStatusInterrupted || outcome != "created" {
+		t.Fatalf("correlated=%+v outcome=%q found=%t", correlated, outcome, found)
+	}
 }
 
 func TestJobRedirectResolutionIsTransitiveAndCycleSafe(t *testing.T) {

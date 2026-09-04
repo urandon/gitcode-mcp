@@ -52,6 +52,7 @@ type StartRepositoryDocsIndexJobRequest struct {
 	RegistrationID                string `json:"registration_id,omitempty"`
 	SourceRegistrationID          string `json:"source_registration_id,omitempty"`
 	SourceRegistrationGeneration  int64  `json:"source_registration_generation,omitempty"`
+	ActionIntentRef               string `json:"-"`
 	expectedCommitOID             string
 	expectedPolicyHash            string
 	expectedConfigDigest          string
@@ -176,7 +177,7 @@ func (m *JobManager) startPreparedRepositoryDocsIndex(ctx context.Context, manag
 	expectedSetID := repositoryDocsRevisionSetIdentity(req, prepared.repository, prepared.policy, prepared.namespaceID).ID()
 	jobCtx, cancel := context.WithCancel(ctx)
 	if strings.TrimSpace(req.recoveryJobID) != "" {
-		job, resumed, err := m.ResumeRepositoryDocsAdmission(req.recoveryJobID, req.RegistrationID, req.SourceRegistrationID, req.SourceRegistrationGeneration, expectedSetID, workKey, cancel)
+		job, resumed, err := m.ResumeRepositoryDocsAdmission(req.recoveryJobID, req.RegistrationID, req.SourceRegistrationID, req.SourceRegistrationGeneration, expectedSetID, workKey, req.ActionIntentRef, cancel)
 		if err != nil {
 			cancel()
 			return Job{}, err
@@ -189,7 +190,7 @@ func (m *JobManager) startPreparedRepositoryDocsIndex(ctx context.Context, manag
 		return Job{}, RepositoryDocsAdmissionStaleError{}
 	}
 	job, created, err := m.createCoalescedJobWithIntent(RepositoryDocsIndexJobType, req.RepoID, strings.TrimSpace(req.Profile), 0, workKey, req.CacheUUID, req.RegistrationID, prepared.namespaceID, JobRecoveryIntent{
-		SourceRegistrationID: req.SourceRegistrationID, SourceRegistrationGeneration: req.SourceRegistrationGeneration, ExpectedRevisionSetID: expectedSetID,
+		SourceRegistrationID: req.SourceRegistrationID, SourceRegistrationGeneration: req.SourceRegistrationGeneration, ExpectedRevisionSetID: expectedSetID, ActionIntentRef: req.ActionIntentRef,
 	}, cancel)
 	if err != nil {
 		cancel()

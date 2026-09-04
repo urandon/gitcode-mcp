@@ -42,6 +42,8 @@ type Job struct {
 	ExpectedRevisionSetID        string                  `json:"expected_revision_set_id,omitempty"`
 	WorkKey                      string                  `json:"-"`
 	WorkRef                      string                  `json:"work_ref,omitempty"`
+	ActionIntentRefs             []string                `json:"-"`
+	ActionIntentOutcomes         map[string]string       `json:"-"`
 	Status                       string                  `json:"status"`
 	CreatedAt                    time.Time               `json:"created_at"`
 	StartedAt                    *time.Time              `json:"started_at,omitempty"`
@@ -52,11 +54,14 @@ type Job struct {
 	Error                        string                  `json:"error,omitempty"`
 	ErrorClass                   string                  `json:"error_class,omitempty"`
 	SyncStage                    *SyncStageView          `json:"sync_stage,omitempty"`
+	SyncHealth                   SyncAggregateHealth     `json:"sync_health,omitempty"`
+	SyncCollections              []SyncCollectionView    `json:"sync_collections,omitempty"`
 	Progress                     []service.ProgressEvent `json:"progress,omitempty"`
 }
 
 type JobManager struct {
 	mu                                  sync.Mutex
+	syncRetryMu                         sync.Mutex
 	jobs                                map[string]*Job
 	cancel                              map[string]context.CancelFunc
 	cancelResolution                    map[string]*jobCancellationResolution
@@ -79,6 +84,14 @@ type JobManager struct {
 	inflightWorkers                     map[string]bool
 	directCacheWriters                  map[string]string
 	syncCommitQueues                    map[string][]syncCommitWaiter
+}
+
+// jobSnapshotDisk keeps retry-correlation metadata in the private daemon
+// snapshot without adding it to the public Job JSON returned over RPC.
+type jobSnapshotDisk struct {
+	Job
+	ActionIntentRefs     []string          `json:"action_intent_refs,omitempty"`
+	ActionIntentOutcomes map[string]string `json:"action_intent_outcomes,omitempty"`
 }
 
 type syncCommitWaiter struct {
@@ -331,14 +344,16 @@ func (m *JobManager) LoadAndMarkInterrupted() error {
 	if err != nil {
 		return err
 	}
-	var jobs []Job
-	if err := json.Unmarshal(data, &jobs); err != nil {
+	var snapshots []jobSnapshotDisk
+	if err := json.Unmarshal(data, &snapshots); err != nil {
 		return err
 	}
 	now := m.now()
 	maxID := 0
-	for i := range jobs {
-		job := jobs[i]
+	for i := range snapshots {
+		job := snapshots[i].Job
+		job.ActionIntentRefs = append([]string(nil), snapshots[i].ActionIntentRefs...)
+		job.ActionIntentOutcomes = cloneStringMap(snapshots[i].ActionIntentOutcomes)
 		m.mu.Lock()
 		m.projectCanonicalRegistrationLocked(&job)
 		cancellationCommitted := m.repositoryDocsCancellationCommitted
@@ -559,7 +574,7 @@ func (m *JobManager) LatestRepositoryDocsSource(cacheUUID, repoID, sourceRegistr
 // allocated for an interrupted or failed admission. Exact opaque intent
 // matching fences unrelated or stale work from being revived; callers remain
 // responsible for enforcing the durable retry window before invoking it.
-func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, sourceRegistrationID string, generation int64, expectedSetID, workKey string, cancel context.CancelFunc) (Job, bool, error) {
+func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, sourceRegistrationID string, generation int64, expectedSetID, workKey, actionIntentRef string, cancel context.CancelFunc) (Job, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	job := m.jobs[strings.TrimSpace(jobID)]
@@ -586,6 +601,7 @@ func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, source
 	job.ErrorClass = ""
 	job.Steps = 0
 	job.Completed = 0
+	attachActionIntent(job, actionIntentRef, "created")
 	job.UpdatedAt = m.now()
 	job.Progress = append(job.Progress, service.ProgressEvent{Type: "resumed", Phase: "queued", Collection: RepositoryDocsIndexJobType, Message: "durable repository documentation admission resumed"})
 	m.cancel[job.ID] = cancel
@@ -635,6 +651,132 @@ func (m *JobManager) SetWorkIdentity(id, workKey, cacheUUID, registrationID, nam
 	return m.mustGet(id)
 }
 
+// RetainedRetryIntentResult finds durable evidence that an Admin retry intent
+// already crossed job admission. It intentionally includes interrupted and
+// terminal jobs: after a daemon restart active jobs are marked interrupted,
+// but their persisted identity still proves that replay must not admit the
+// same work again.
+func (m *JobManager) RetainedRetryIntentResult(actionIntentRef string) (Job, string, bool) {
+	actionIntentRef = strings.TrimSpace(actionIntentRef)
+	if actionIntentRef == "" {
+		return Job{}, "", false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var matched *Job
+	for _, candidate := range m.jobs {
+		if !containsString(candidate.ActionIntentRefs, actionIntentRef) {
+			continue
+		}
+		if matched == nil || candidate.CreatedAt.Before(matched.CreatedAt) || candidate.CreatedAt.Equal(matched.CreatedAt) && parseJobIDNumber(candidate.ID) < parseJobIDNumber(matched.ID) {
+			matched = candidate
+		}
+	}
+	if matched == nil {
+		return Job{}, "", false
+	}
+	outcome := strings.TrimSpace(matched.ActionIntentOutcomes[actionIntentRef])
+	if outcome == "" {
+		outcome = "coalesced"
+	}
+	return cloneJob(matched), outcome, true
+}
+
+func (m *JobManager) AttachActionIntent(jobID, actionIntentRef, outcome string) (Job, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job := m.jobs[strings.TrimSpace(jobID)]
+	if job == nil || !jobActiveStatus(job.Status) {
+		return Job{}, false, nil
+	}
+	previous := cloneJob(job)
+	if !attachActionIntent(job, actionIntentRef, outcome) {
+		return cloneJob(job), true, nil
+	}
+	if err := m.writeSnapshotLocked(); err != nil {
+		*job = previous
+		return Job{}, false, JobAdmissionPersistenceError{}
+	}
+	return cloneJob(job), true, nil
+}
+
+func (m *JobManager) ReleaseActionIntent(actionIntentRef string) error {
+	actionIntentRef = strings.TrimSpace(actionIntentRef)
+	if actionIntentRef == "" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	changed := false
+	type actionIntentState struct {
+		refs     []string
+		outcomes map[string]string
+	}
+	previous := map[string]actionIntentState{}
+	for _, job := range m.jobs {
+		if job == nil {
+			continue
+		}
+		previous[job.ID] = actionIntentState{refs: append([]string(nil), job.ActionIntentRefs...), outcomes: cloneStringMap(job.ActionIntentOutcomes)}
+		filtered := job.ActionIntentRefs[:0]
+		for _, current := range job.ActionIntentRefs {
+			if current == actionIntentRef {
+				changed = true
+				continue
+			}
+			filtered = append(filtered, current)
+		}
+		job.ActionIntentRefs = filtered
+		delete(job.ActionIntentOutcomes, actionIntentRef)
+	}
+	if !changed {
+		return nil
+	}
+	// Persist the released pin before pruning. If the first write fails, restore
+	// the in-memory refs so a later prune cannot discard the only durable
+	// correlation while the snapshot still says it is unresolved.
+	if err := m.writeSnapshotLocked(); err != nil {
+		for id, state := range previous {
+			if job := m.jobs[id]; job != nil {
+				job.ActionIntentRefs = state.refs
+				job.ActionIntentOutcomes = state.outcomes
+			}
+		}
+		return err
+	}
+	return m.saveLocked()
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func appendActionIntentRef(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" || containsString(values, value) {
+		return values
+	}
+	return append(values, value)
+}
+
+func attachActionIntent(job *Job, ref, outcome string) bool {
+	ref = strings.TrimSpace(ref)
+	if job == nil || ref == "" || containsString(job.ActionIntentRefs, ref) {
+		return false
+	}
+	job.ActionIntentRefs = append(job.ActionIntentRefs, ref)
+	if job.ActionIntentOutcomes == nil {
+		job.ActionIntentOutcomes = map[string]string{}
+	}
+	job.ActionIntentOutcomes[ref] = strings.TrimSpace(outcome)
+	return true
+}
+
 func (m *JobManager) createCoalescedJob(jobType, repoID, profileID string, steps int, workKey, cacheUUID, registrationID, namespaceID string, cancel context.CancelFunc) (Job, bool, error) {
 	return m.createCoalescedJobWithIntent(jobType, repoID, profileID, steps, workKey, cacheUUID, registrationID, namespaceID, JobRecoveryIntent{}, cancel)
 }
@@ -643,6 +785,7 @@ type JobRecoveryIntent struct {
 	SourceRegistrationID         string
 	SourceRegistrationGeneration int64
 	ExpectedRevisionSetID        string
+	ActionIntentRef              string
 }
 
 func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID string, steps int, workKey, cacheUUID, registrationID, namespaceID string, intent JobRecoveryIntent, cancel context.CancelFunc) (Job, bool, error) {
@@ -653,6 +796,13 @@ func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID str
 	}
 	for _, job := range m.jobs {
 		if job.WorkKey == workKey && jobActiveStatus(job.Status) {
+			if intentRef := strings.TrimSpace(intent.ActionIntentRef); attachActionIntent(job, intentRef, "coalesced") {
+				if err := m.saveLocked(); err != nil {
+					job.ActionIntentRefs = job.ActionIntentRefs[:len(job.ActionIntentRefs)-1]
+					delete(job.ActionIntentOutcomes, intentRef)
+					return Job{}, false, JobAdmissionPersistenceError{}
+				}
+			}
 			return cloneJob(job), false, nil
 		}
 	}
@@ -679,7 +829,11 @@ func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID str
 		ID: id, Type: jobType, RepoID: repoID, ProfileID: profileID,
 		CacheUUID: cacheUUID, RegistrationID: registrationID, NamespaceID: namespaceID, WorkKey: workKey,
 		SourceRegistrationID: intent.SourceRegistrationID, SourceRegistrationGeneration: intent.SourceRegistrationGeneration, ExpectedRevisionSetID: intent.ExpectedRevisionSetID,
-		Status: JobStatusQueued, CreatedAt: now, UpdatedAt: now, Steps: steps, WorkRef: publicWorkRef(workKey),
+		ActionIntentRefs: appendActionIntentRef(nil, intent.ActionIntentRef),
+		Status:           JobStatusQueued, CreatedAt: now, UpdatedAt: now, Steps: steps, WorkRef: publicWorkRef(workKey),
+	}
+	if intentRef := strings.TrimSpace(intent.ActionIntentRef); intentRef != "" {
+		job.ActionIntentOutcomes = map[string]string{intentRef: "created"}
 	}
 	m.jobs[id] = job
 	m.cancel[id] = cancel
@@ -1053,15 +1207,55 @@ func (m *JobManager) mustGet(id string) Job {
 }
 
 func (m *JobManager) saveLocked() error {
+	type retainedJob struct {
+		pointer *Job
+		state   Job
+	}
+	jobsBeforePrune := make(map[string]retainedJob, len(m.jobs))
+	for id, job := range m.jobs {
+		jobsBeforePrune[id] = retainedJob{pointer: job, state: cloneJob(job)}
+	}
+	cancelBeforePrune := make(map[string]context.CancelFunc, len(m.cancel))
+	for id, cancel := range m.cancel {
+		cancelBeforePrune[id] = cancel
+	}
+	lastPrunedBefore := m.lastPrunedAt
+	if m.lastPrunedAt != nil {
+		value := *m.lastPrunedAt
+		lastPrunedBefore = &value
+	}
+	expiredTotalBefore, truncatedTotalBefore := m.expiredTotal, m.truncatedTotal
+	lastExpiredBefore, lastTruncatedBefore := m.lastExpired, m.lastTruncated
 	m.pruneLocked()
+	if err := m.writeSnapshotLocked(); err != nil {
+		m.jobs = make(map[string]*Job, len(jobsBeforePrune))
+		for id, retained := range jobsBeforePrune {
+			if retained.pointer == nil {
+				m.jobs[id] = nil
+				continue
+			}
+			*retained.pointer = retained.state
+			m.jobs[id] = retained.pointer
+		}
+		m.cancel = cancelBeforePrune
+		m.lastPrunedAt = lastPrunedBefore
+		m.expiredTotal, m.truncatedTotal = expiredTotalBefore, truncatedTotalBefore
+		m.lastExpired, m.lastTruncated = lastExpiredBefore, lastTruncatedBefore
+		return err
+	}
+	return nil
+}
+
+func (m *JobManager) writeSnapshotLocked() error {
 	if m.snapshotPath == "" {
 		return nil
 	}
-	jobs := make([]Job, 0, len(m.jobs))
+	jobs := make([]jobSnapshotDisk, 0, len(m.jobs))
 	for _, job := range m.jobs {
-		jobs = append(jobs, cloneJob(job))
+		cloned := cloneJob(job)
+		jobs = append(jobs, jobSnapshotDisk{Job: cloned, ActionIntentRefs: append([]string(nil), cloned.ActionIntentRefs...), ActionIntentOutcomes: cloneStringMap(cloned.ActionIntentOutcomes)})
 	}
-	sortJobs(jobs)
+	sort.Slice(jobs, func(i, j int) bool { return jobs[i].ID < jobs[j].ID })
 	data, err := json.MarshalIndent(jobs, "", "  ")
 	if err != nil {
 		return err
@@ -1083,6 +1277,11 @@ func (m *JobManager) pruneLocked() {
 	}
 
 	protected := m.protectedDiagnosticJobs(terminal)
+	for _, job := range terminal {
+		if len(job.ActionIntentRefs) > 0 {
+			protected[job.ID] = true
+		}
+	}
 	expired := 0
 	for _, job := range terminal {
 		ttl := m.retention.SuccessTTL
@@ -1105,12 +1304,15 @@ func (m *JobManager) pruneLocked() {
 	sort.Slice(terminal, func(i, j int) bool { return terminalJobLess(terminal[i], terminal[j]) })
 	truncated := 0
 	for len(terminal) > m.retention.MaxTerminalJobs {
-		index := 0
+		index := -1
 		for i, job := range terminal {
 			if !protected[job.ID] {
 				index = i
 				break
 			}
+		}
+		if index < 0 {
+			break
 		}
 		job := terminal[index]
 		delete(m.jobs, job.ID)
@@ -1222,6 +1424,9 @@ func cloneJob(job *Job) Job {
 		out.FinishedAt = &finished
 	}
 	out.Progress = append([]service.ProgressEvent(nil), job.Progress...)
+	out.SyncCollections = append([]SyncCollectionView(nil), job.SyncCollections...)
+	out.ActionIntentRefs = append([]string(nil), job.ActionIntentRefs...)
+	out.ActionIntentOutcomes = cloneStringMap(job.ActionIntentOutcomes)
 	return out
 }
 

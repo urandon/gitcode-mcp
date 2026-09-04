@@ -3,6 +3,7 @@ package servicectl
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,6 +68,52 @@ func TestSyncStageJournalRejectsCorruptionAndTraversal(t *testing.T) {
 	}
 	if _, err := journal.Load("../jobs"); !errors.Is(err, ErrSyncStageCorrupt) {
 		t.Fatalf("Load traversal error = %v", err)
+	}
+}
+
+func TestSyncStageJournalListingToleratesConcurrentRemoval(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		list func(*SyncStageJournal) error
+	}{
+		{
+			name: "ordinary",
+			list: func(journal *SyncStageJournal) error {
+				stages, err := journal.List()
+				if err == nil && len(stages) != 0 {
+					return fmt.Errorf("stages=%+v", stages)
+				}
+				return err
+			},
+		},
+		{
+			name: "recovery",
+			list: func(journal *SyncStageJournal) error {
+				stages, rejections, err := journal.ListForRecovery()
+				if err == nil && (len(stages) != 0 || len(rejections) != 0) {
+					return fmt.Errorf("stages=%+v rejections=%+v", stages, rejections)
+				}
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			journal := NewSyncStageJournal(t.TempDir(), SyncStageLimits{})
+			created, err := journal.Create(testSyncStageEnvelope())
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			originalRead := journal.readFile
+			journal.readFile = func(path string) ([]byte, error) {
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("Remove(%s): %v", created.StageID, err)
+				}
+				return originalRead(path)
+			}
+			if err := tc.list(journal); err != nil {
+				t.Fatalf("List after concurrent removal: %v", err)
+			}
+		})
 	}
 }
 
@@ -440,5 +487,32 @@ func TestCancelledStageRetainsPayloadAndBecomesOneTerminalEnvelope(t *testing.T)
 	stages, err := journal.List()
 	if err != nil || len(stages) != 1 || stages[0].State.TerminalReason != "cancelled" {
 		t.Fatalf("terminal stages=%+v err=%v", stages, err)
+	}
+}
+
+func TestSyncStageJournalRemoveCollectionStagesKeepsSiblingRecoveryAuthority(t *testing.T) {
+	root := t.TempDir()
+	journal := NewSyncStageJournal(root, SyncStageLimits{})
+	base := SyncStageEnvelope{
+		JobID: "job-000001", CacheUUID: "cache-a", CacheSchema: 1, CachePath: filepath.Join(root, "cache.db"),
+		RegistrationID: "reg-a", RepoID: "owner/repo", BindingFingerprint: "binding-a", Checkpoint: "complete",
+		RecordCount: 1, Payload: json.RawMessage(`{}`), State: SyncStageState{Phase: SyncStageCommitted},
+	}
+	issues := base
+	issues.Collection, issues.IdempotencyKey = "issues", "issues-commit"
+	if _, err := journal.Create(issues); err != nil {
+		t.Fatal(err)
+	}
+	wiki := base
+	wiki.Collection, wiki.IdempotencyKey = "wiki", "wiki-commit"
+	if _, err := journal.Create(wiki); err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.RemoveCollectionStages(base.JobID, "issues"); err != nil {
+		t.Fatal(err)
+	}
+	stages, err := journal.List()
+	if err != nil || len(stages) != 1 || stages[0].Collection != "wiki" {
+		t.Fatalf("stages=%+v err=%v", stages, err)
 	}
 }

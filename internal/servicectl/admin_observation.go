@@ -723,10 +723,20 @@ func adminJobObservation(job Job) adminhttp.JobObservation {
 		ProfileID: job.ProfileID, NamespaceID: job.NamespaceID, RegistrationID: job.RegistrationID,
 		Status: job.Status, CreatedAt: job.CreatedAt, StartedAt: job.StartedAt, UpdatedAt: job.UpdatedAt,
 		FinishedAt: job.FinishedAt, Steps: job.Steps, Completed: job.Completed, FailureClass: job.ErrorClass,
-		WorkRef: firstNonEmpty(job.WorkRef, publicWorkRef(job.WorkKey)), ProgressRetained: len(job.Progress), ProgressLimit: maxStoredProgressEvents,
+		SyncHealth: string(job.SyncHealth),
+		WorkRef:    firstNonEmpty(job.WorkRef, publicWorkRef(job.WorkKey)), ProgressRetained: len(job.Progress), ProgressLimit: maxStoredProgressEvents,
 	}
 	active := job.Status == JobStatusQueued || job.Status == JobStatusRunning
 	terminal := jobTerminalStatus(job.Status)
+	for _, collection := range job.SyncCollections {
+		view.SyncCollections = append(view.SyncCollections, adminhttp.SyncCollectionObservation{
+			Collection: collection.Collection, Outcome: string(collection.Outcome), FrontierRef: collection.FrontierRef,
+			RecordsListed: collection.RecordsListed, Committed: collection.Committed, Failed: collection.Failed,
+			ErrorClass: collection.ErrorClass, Attempt: collection.Attempt, RetryBudget: collection.RetryBudget,
+			RetryAfter: collection.RetryAfter, LastSuccessAt: collection.LastSuccessAt, UpdatedAt: collection.UpdatedAt,
+			Retryable: terminal && job.RegistrationID != "" && (collection.Outcome == SyncCollectionPartial || collection.Outcome == SyncCollectionPermanentFailure),
+		})
+	}
 	view.Cancellable = active && (job.Type == SyncJobType || job.Type == RAGIndexJobType || job.Type == RepositoryDocsIndexJobType)
 	view.Retryable = terminal && job.RegistrationID != "" && (job.Type == SyncJobType || job.Type == RAGIndexJobType)
 	if !view.Cancellable && !view.Retryable {

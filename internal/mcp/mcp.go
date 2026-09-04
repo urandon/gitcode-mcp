@@ -1735,6 +1735,20 @@ func (s *Server) callServiceJobCancel(ctx context.Context, id *json.RawMessage, 
 
 func serviceJobSummaryText(job servicectl.Job) string {
 	text := fmt.Sprintf("job_id=%s status=%s completed=%d/%d", job.ID, job.Status, job.Completed, job.Steps)
+	if job.SyncHealth != "" {
+		text += " sync_health=" + string(job.SyncHealth)
+	}
+	if len(job.SyncCollections) > 0 {
+		parts := make([]string, 0, len(job.SyncCollections))
+		for _, collection := range job.SyncCollections {
+			part := fmt.Sprintf("%s:%s:%d/%d", collection.Collection, collection.Outcome, collection.Attempt, collection.RetryBudget)
+			if collection.ErrorClass != "" {
+				part += ":" + collection.ErrorClass
+			}
+			parts = append(parts, part)
+		}
+		text += " sync_collections=[" + strings.Join(parts, ",") + "]"
+	}
 	stage := job.SyncStage
 	if stage == nil {
 		return text

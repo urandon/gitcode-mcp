@@ -115,6 +115,10 @@ type SyncStageEnvelope struct {
 	CreatedAt           time.Time                  `json:"created_at"`
 	ExpiresAt           time.Time                  `json:"expires_at"`
 	RecordCount         int                        `json:"record_count"`
+	CollectionAttempt   int                        `json:"collection_attempt,omitempty"`
+	CollectionListed    int                        `json:"collection_records_listed,omitempty"`
+	CollectionFailed    int                        `json:"collection_records_failed,omitempty"`
+	CollectionError     string                     `json:"collection_error_class,omitempty"`
 	ByteCount           int64                      `json:"byte_count"`
 	Payload             json.RawMessage            `json:"payload"`
 	MaintenanceFrontier *cache.MaintenanceFrontier `json:"maintenance_frontier,omitempty"`
@@ -183,6 +187,7 @@ type SyncStageJournal struct {
 	dir       string
 	limits    SyncStageLimits
 	now       func() time.Time
+	readFile  func(string) ([]byte, error)
 	writeFile func(string, []byte, os.FileMode) error
 }
 
@@ -216,7 +221,7 @@ func NewSyncStageJournal(runtimeDir string, limits SyncStageLimits) *SyncStageJo
 	}
 	return &SyncStageJournal{
 		dir: dir, limits: limits,
-		now: func() time.Time { return time.Now().UTC() }, writeFile: durableAtomicWriteFile,
+		now: func() time.Time { return time.Now().UTC() }, readFile: os.ReadFile, writeFile: durableAtomicWriteFile,
 	}
 }
 
@@ -313,7 +318,7 @@ func (j *SyncStageJournal) Load(stageID string) (SyncStageEnvelope, error) {
 	if err != nil {
 		return SyncStageEnvelope{}, err
 	}
-	data, err := os.ReadFile(path)
+	data, err := j.readFile(path)
 	if err != nil {
 		return SyncStageEnvelope{}, err
 	}
@@ -354,6 +359,11 @@ func (j *SyncStageJournal) List() ([]SyncStageEnvelope, error) {
 			continue
 		}
 		stage, err := j.Load(strings.TrimSuffix(entry.Name(), ".json"))
+		if errors.Is(err, os.ErrNotExist) {
+			// Removal after ReadDir is a successful concurrent cleanup, not a
+			// journal failure. A later listing observes the new directory state.
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -391,13 +401,23 @@ func (j *SyncStageJournal) ListForRecovery() ([]SyncStageEnvelope, []SyncStageLo
 			stages = append(stages, stage)
 			continue
 		}
+		if errors.Is(loadErr, os.ErrNotExist) {
+			continue
+		}
 		reason := "corrupt_stage"
 		if errors.Is(loadErr, ErrSyncStageBound) {
 			reason = "stage_bounds_exceeded"
 		} else if !errors.Is(loadErr, ErrSyncStageCorrupt) {
 			return nil, rejections, loadErr
 		}
-		if err := j.quarantine(entry.Name()); err != nil {
+		if err := j.quarantine(entry.Name()); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, rejections, err
+		}
+		if _, err := os.Stat(filepath.Join(j.dir, strings.TrimSuffix(entry.Name(), ".json")+".rejected")); errors.Is(err, os.ErrNotExist) {
+			// A concurrent cleanup won the race after the failed load; there is
+			// no rejected artifact (and therefore no rejection) to report.
+			continue
+		} else if err != nil {
 			return nil, rejections, err
 		}
 		rejections = append(rejections, SyncStageLoadRejection{StageRef: publicStageRef(stageID), Reason: reason})
@@ -500,6 +520,38 @@ func (j *SyncStageJournal) RemoveJobStages(jobID string) error {
 		}
 		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			return removeErr
+		}
+	}
+	return nil
+}
+
+func (j *SyncStageJournal) RemoveStage(stageID string) error {
+	path, err := j.path(strings.TrimSpace(stageID))
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (j *SyncStageJournal) RemoveCollectionStages(jobID, collection string) error {
+	jobID = strings.TrimSpace(jobID)
+	collection = strings.TrimSpace(collection)
+	if jobID == "" || collection == "" {
+		return nil
+	}
+	stages, _, err := j.ListForRecovery()
+	if err != nil {
+		return err
+	}
+	for _, stage := range stages {
+		if stage.JobID != jobID || stage.Collection != collection {
+			continue
+		}
+		if err := j.RemoveStage(stage.StageID); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -624,6 +676,10 @@ func syncStageChecksum(envelope SyncStageEnvelope) string {
 		CreatedAt           time.Time                  `json:"created_at"`
 		ExpiresAt           time.Time                  `json:"expires_at"`
 		RecordCount         int                        `json:"record_count"`
+		CollectionAttempt   int                        `json:"collection_attempt,omitempty"`
+		CollectionListed    int                        `json:"collection_records_listed,omitempty"`
+		CollectionFailed    int                        `json:"collection_records_failed,omitempty"`
+		CollectionError     string                     `json:"collection_error_class,omitempty"`
 		ByteCount           int64                      `json:"byte_count"`
 		Payload             json.RawMessage            `json:"payload"`
 		MaintenanceFrontier *cache.MaintenanceFrontier `json:"maintenance_frontier,omitempty"`
@@ -633,6 +689,7 @@ func syncStageChecksum(envelope SyncStageEnvelope) string {
 		envelope.RegistrationID, envelope.RepoID, envelope.BindingFingerprint, envelope.Collection,
 		envelope.Checkpoint, envelope.ProviderRevision, envelope.IdempotencyKey,
 		envelope.CreatedAt.UTC(), envelope.ExpiresAt.UTC(), envelope.RecordCount,
+		envelope.CollectionAttempt, envelope.CollectionListed, envelope.CollectionFailed, envelope.CollectionError,
 		envelope.ByteCount, envelope.Payload, envelope.MaintenanceFrontier, envelope.Workflow,
 	}
 	data, _ := json.Marshal(immutable)
@@ -651,10 +708,11 @@ func syncStageIdentity(envelope SyncStageEnvelope) string {
 		Checkpoint         string `json:"checkpoint,omitempty"`
 		ProviderRevision   string `json:"provider_revision,omitempty"`
 		IdempotencyKey     string `json:"idempotency_key"`
+		CollectionAttempt  int    `json:"collection_attempt,omitempty"`
 	}{
 		envelope.CacheUUID, envelope.CacheSchema, envelope.RegistrationID,
 		envelope.RepoID, envelope.BindingFingerprint, envelope.Collection, envelope.Checkpoint,
-		envelope.ProviderRevision, envelope.IdempotencyKey,
+		envelope.ProviderRevision, envelope.IdempotencyKey, envelope.CollectionAttempt,
 	}
 	data, _ := json.Marshal(identity)
 	sum := sha256.Sum256(data)
@@ -667,6 +725,8 @@ func sameSyncStageBatch(first, second SyncStageEnvelope) bool {
 		first.BindingFingerprint == second.BindingFingerprint &&
 		first.Collection == second.Collection && first.Checkpoint == second.Checkpoint &&
 		first.ProviderRevision == second.ProviderRevision && first.IdempotencyKey == second.IdempotencyKey &&
+		first.CollectionAttempt == second.CollectionAttempt && first.CollectionListed == second.CollectionListed &&
+		first.CollectionFailed == second.CollectionFailed && first.CollectionError == second.CollectionError &&
 		first.RecordCount == second.RecordCount && first.ByteCount == second.ByteCount &&
 		string(first.Payload) == string(second.Payload) && sameSyncStageWorkflow(first.Workflow, second.Workflow)
 }

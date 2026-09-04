@@ -81,10 +81,13 @@ func upsertMaintenanceFrontierTx(ctx context.Context, tx *sql.Tx, frontier Maint
 	if frontier.UpdatedAt.IsZero() {
 		frontier.UpdatedAt = time.Now().UTC()
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO maintenance_frontiers (repo_id, remote_type, ordering, filter_key, lane, status, high_updated_at, high_remote_id, high_number, stop_reason, pages_listed, records_listed, checkpoint, last_error_class, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(repo_id, remote_type, ordering, filter_key, lane) DO UPDATE SET status = excluded.status, high_updated_at = excluded.high_updated_at, high_remote_id = excluded.high_remote_id, high_number = excluded.high_number, stop_reason = excluded.stop_reason, pages_listed = excluded.pages_listed, records_listed = excluded.records_listed, checkpoint = excluded.checkpoint, last_error_class = excluded.last_error_class, updated_at = excluded.updated_at`,
-		frontier.RepoID, frontier.RemoteType, frontier.Ordering, frontier.FilterKey, frontier.Lane, frontier.Status, formatTimeOrEmpty(frontier.HighUpdatedAt), frontier.HighRemoteID, frontier.HighNumber, frontier.StopReason, frontier.PagesListed, frontier.RecordsListed, frontier.Checkpoint, frontier.LastErrorClass, frontier.UpdatedAt.Format(time.RFC3339Nano))
+	if frontier.LastSuccessAt.IsZero() && frontier.LastErrorClass == "" && frontier.Status != "degraded" {
+		frontier.LastSuccessAt = frontier.UpdatedAt
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO maintenance_frontiers (repo_id, remote_type, ordering, filter_key, lane, status, high_updated_at, high_remote_id, high_number, stop_reason, pages_listed, records_listed, checkpoint, last_error_class, last_success_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(repo_id, remote_type, ordering, filter_key, lane) DO UPDATE SET status = excluded.status, high_updated_at = excluded.high_updated_at, high_remote_id = excluded.high_remote_id, high_number = excluded.high_number, stop_reason = excluded.stop_reason, pages_listed = excluded.pages_listed, records_listed = excluded.records_listed, checkpoint = excluded.checkpoint, last_error_class = excluded.last_error_class, last_success_at = CASE WHEN excluded.last_success_at <> '' THEN excluded.last_success_at ELSE maintenance_frontiers.last_success_at END, updated_at = excluded.updated_at`,
+		frontier.RepoID, frontier.RemoteType, frontier.Ordering, frontier.FilterKey, frontier.Lane, frontier.Status, formatTimeOrEmpty(frontier.HighUpdatedAt), frontier.HighRemoteID, frontier.HighNumber, frontier.StopReason, frontier.PagesListed, frontier.RecordsListed, frontier.Checkpoint, frontier.LastErrorClass, formatTimeOrEmpty(frontier.LastSuccessAt), frontier.UpdatedAt.Format(time.RFC3339Nano))
 	return err
 }
 
@@ -118,7 +121,7 @@ func (s *SQLiteStore) GetSyncCommitReceipt(ctx context.Context, stageID string) 
 }
 
 func (s *SQLiteStore) ListMaintenanceFrontiers(ctx context.Context, repoID string) ([]MaintenanceFrontier, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, remote_type, ordering, filter_key, lane, status, high_updated_at, high_remote_id, high_number, stop_reason, pages_listed, records_listed, checkpoint, last_error_class, updated_at FROM maintenance_frontiers WHERE (? = '' OR repo_id = ?) ORDER BY repo_id, remote_type, lane`, repoID, repoID)
+	rows, err := s.db.QueryContext(ctx, `SELECT repo_id, remote_type, ordering, filter_key, lane, status, high_updated_at, high_remote_id, high_number, stop_reason, pages_listed, records_listed, checkpoint, last_error_class, last_success_at, updated_at FROM maintenance_frontiers WHERE (? = '' OR repo_id = ?) ORDER BY repo_id, remote_type, lane`, repoID, repoID)
 	if err != nil {
 		return nil, err
 	}
@@ -126,11 +129,12 @@ func (s *SQLiteStore) ListMaintenanceFrontiers(ctx context.Context, repoID strin
 	var out []MaintenanceFrontier
 	for rows.Next() {
 		var frontier MaintenanceFrontier
-		var highRaw, updatedRaw string
-		if err := rows.Scan(&frontier.RepoID, &frontier.RemoteType, &frontier.Ordering, &frontier.FilterKey, &frontier.Lane, &frontier.Status, &highRaw, &frontier.HighRemoteID, &frontier.HighNumber, &frontier.StopReason, &frontier.PagesListed, &frontier.RecordsListed, &frontier.Checkpoint, &frontier.LastErrorClass, &updatedRaw); err != nil {
+		var highRaw, lastSuccessRaw, updatedRaw string
+		if err := rows.Scan(&frontier.RepoID, &frontier.RemoteType, &frontier.Ordering, &frontier.FilterKey, &frontier.Lane, &frontier.Status, &highRaw, &frontier.HighRemoteID, &frontier.HighNumber, &frontier.StopReason, &frontier.PagesListed, &frontier.RecordsListed, &frontier.Checkpoint, &frontier.LastErrorClass, &lastSuccessRaw, &updatedRaw); err != nil {
 			return nil, err
 		}
 		frontier.HighUpdatedAt = parseTimeOrZero(highRaw)
+		frontier.LastSuccessAt = parseTimeOrZero(lastSuccessRaw)
 		frontier.UpdatedAt = parseTimeOrZero(updatedRaw)
 		out = append(out, frontier)
 	}

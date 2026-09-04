@@ -12,6 +12,7 @@ import (
 
 type JobActionRequest struct {
 	JobID          string `json:"job_id"`
+	Collection     string `json:"collection,omitempty"`
 	IdempotencyKey string `json:"idempotency_key"`
 }
 
@@ -70,6 +71,7 @@ func (c *Controller) applyJobAction(w http.ResponseWriter, r *http.Request, acti
 	}
 	var body struct {
 		IdempotencyKey string `json:"idempotency_key"`
+		Collection     string `json:"collection,omitempty"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
 	decoder.DisallowUnknownFields()
@@ -77,7 +79,7 @@ func (c *Controller) applyJobAction(w http.ResponseWriter, r *http.Request, acti
 		writeAPIError(w, http.StatusBadRequest, "invalid_request", "A bounded idempotency_key is required.", "Generate a new action key up to 256 characters and retry once.")
 		return
 	}
-	receipt, err := provider(r.Context(), JobActionRequest{JobID: strings.TrimSpace(r.PathValue("job_id")), IdempotencyKey: strings.TrimSpace(body.IdempotencyKey)})
+	receipt, err := provider(r.Context(), JobActionRequest{JobID: strings.TrimSpace(r.PathValue("job_id")), Collection: strings.TrimSpace(body.Collection), IdempotencyKey: strings.TrimSpace(body.IdempotencyKey)})
 	if err != nil {
 		var actionErr JobActionError
 		if errors.As(err, &actionErr) {

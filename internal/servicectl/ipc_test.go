@@ -355,6 +355,114 @@ func TestJobManagerPrunesOnCompletion(t *testing.T) {
 	}
 }
 
+func TestJobManagerPruneRollsBackWholeLiveStateWhenSnapshotWriteFails(t *testing.T) {
+	now := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	manager := NewJobManagerWithRetention(filepath.Join(t.TempDir(), "jobs.json"), config.ServiceJobRetentionConfig{
+		SuccessTTL: time.Hour, DiagnosticTTL: 24 * time.Hour,
+		MaxTerminalJobs: 8, MaxDiagnosticJobs: 2, MaxProgressEvents: 1,
+	})
+	manager.now = func() time.Time { return now }
+	old := now.Add(-2 * time.Hour)
+	manager.jobs["job-expired"] = &Job{
+		ID: "job-expired", Type: SyncJobType, Status: JobStatusSucceeded, CreatedAt: old, UpdatedAt: old, FinishedAt: &old,
+		Progress: []service.ProgressEvent{{Type: "one"}, {Type: "two"}},
+	}
+	manager.cancel["job-expired"] = func() {}
+	manager.writeFile = func(string, []byte, os.FileMode) error { return fmt.Errorf("snapshot unavailable") }
+
+	if err := manager.Prune(); err == nil {
+		t.Fatal("expected snapshot write failure")
+	}
+	retained, ok := manager.Get("job-expired")
+	if !ok || len(retained.Progress) != 2 {
+		t.Fatalf("failed prune changed live job state: retained=%t job=%+v", ok, retained)
+	}
+	if _, ok := manager.cancel["job-expired"]; !ok {
+		t.Fatal("failed prune removed live cancellation state")
+	}
+	snapshot := manager.RetentionSnapshot()
+	if snapshot.ExpiredTotal != 0 || snapshot.TruncatedTotal != 0 || snapshot.LastPrunedAt != nil {
+		t.Fatalf("failed prune advanced retention counters: %+v", snapshot)
+	}
+
+	manager.writeFile = durableAtomicWriteFile
+	if err := manager.Prune(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := manager.Get("job-expired"); ok {
+		t.Fatal("successful retry did not prune expired job")
+	}
+}
+
+func TestJobManagerRetentionPinsUnsettledActionIntent(t *testing.T) {
+	now := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
+	manager := NewJobManagerWithRetention(filepath.Join(t.TempDir(), "jobs.json"), config.ServiceJobRetentionConfig{
+		SuccessTTL: time.Hour, DiagnosticTTL: time.Hour,
+		MaxTerminalJobs: 1, MaxDiagnosticJobs: 1, MaxProgressEvents: 8,
+	})
+	manager.now = func() time.Time { return now }
+	old := now.Add(-2 * time.Hour)
+	manager.jobs["job-pinned"] = &Job{ID: "job-pinned", Type: SyncJobType, Status: JobStatusSucceeded, CreatedAt: old, UpdatedAt: old, FinishedAt: &old, ActionIntentRefs: []string{"intent-ref"}}
+	manager.jobs["job-recent"] = &Job{ID: "job-recent", Type: SyncJobType, Status: JobStatusSucceeded, CreatedAt: now, UpdatedAt: now, FinishedAt: &now}
+	if err := manager.Prune(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := manager.Get("job-pinned"); !ok {
+		t.Fatal("unsettled action correlation was pruned")
+	}
+	if err := manager.ReleaseActionIntent("intent-ref"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := manager.Get("job-pinned"); ok {
+		t.Fatal("settled action correlation did not release expired job")
+	}
+}
+
+func TestJobManagerReleaseActionIntentKeepsPinWhenPersistenceFails(t *testing.T) {
+	manager := NewJobManager(filepath.Join(t.TempDir(), "jobs.json"))
+	manager.jobs["job-pinned"] = &Job{ID: "job-pinned", Type: SyncJobType, Status: JobStatusFailed, ActionIntentRefs: []string{"intent-ref"}}
+	manager.writeFile = func(string, []byte, os.FileMode) error { return fmt.Errorf("disk unavailable") }
+
+	if err := manager.ReleaseActionIntent("intent-ref"); err == nil {
+		t.Fatal("expected persistence failure")
+	}
+	job, ok := manager.Get("job-pinned")
+	if !ok || len(job.ActionIntentRefs) != 1 || job.ActionIntentRefs[0] != "intent-ref" {
+		t.Fatalf("failed release must retain correlation pin: %+v, retained=%t", job, ok)
+	}
+}
+
+func TestJobActionIntentCorrelationIsPrivateSnapshotState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.json")
+	manager := NewJobManager(path)
+	manager.jobs["job-pinned"] = &Job{ID: "job-pinned", Type: SyncJobType, Status: JobStatusFailed, ActionIntentRefs: []string{"intent-ref"}, ActionIntentOutcomes: map[string]string{"intent-ref": "created"}}
+	if err := manager.Prune(); err != nil {
+		t.Fatal(err)
+	}
+	publicJSON, err := json.Marshal(manager.mustGet("job-pinned"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(publicJSON), "action_intent") || strings.Contains(string(publicJSON), "intent-ref") {
+		t.Fatalf("public job JSON leaked retry correlation: %s", publicJSON)
+	}
+	privateJSON, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(privateJSON), "action_intent_refs") || !strings.Contains(string(privateJSON), "action_intent_outcomes") {
+		t.Fatalf("private snapshot omitted durable retry correlation: %s", privateJSON)
+	}
+	restarted := NewJobManager(path)
+	if err := restarted.LoadAndMarkInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	_, outcome, found := restarted.RetainedRetryIntentResult("intent-ref")
+	if !found || outcome != "created" {
+		t.Fatalf("private correlation was not recovered: outcome=%q found=%t", outcome, found)
+	}
+}
+
 func TestJobManagerIdleReconcilePrunesExpiredHistory(t *testing.T) {
 	now := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
 	jobs := NewJobManagerWithRetention(filepath.Join(t.TempDir(), "jobs.json"), config.ServiceJobRetentionConfig{

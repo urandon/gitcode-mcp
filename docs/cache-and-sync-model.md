@@ -102,6 +102,47 @@ and collection), so a partially fetched but successfully committed prefix
 cannot become a false success after restart. Each selected collection still
 receives its own cursor; already-fresh collections are omitted instead of being
 replayed because another collection needs work.
+
+Provider retries are isolated by collection and frontier. A transient timeout,
+rate limit, or provider 5xx schedules only that collection with bounded,
+jittered backoff; other due collections continue immediately and publish their
+successful cache transactions. Authentication, permission, query, schema, and
+data-validation failures are terminal for the affected collection. Public job
+state exposes a content-free aggregate health plus per-collection outcome,
+opaque frontier reference, counts, retry budget, next attempt, and last success
+time. The private service journal persists only retry authority and request
+selectors—never fetched response bodies—and lets a restarted daemon resume the
+pending collection without replaying successful siblings. CLI, MCP, and the
+admin Jobs view project the same state. The admin UI additionally supports a
+URL-backed aggregate-health filter and an explicit action that retries one
+failed collection while retaining the others.
+
+Collection retry checkpoints are bounded to 256 entries, 1 MiB of private
+metadata, and 24 hours. Recovery reconciles an exact staged transaction or
+SQLite commit receipt before applying age-based checkpoint cleanup, so durable
+cache truth cannot be downgraded to an expired retry. Admin retry actions first
+persist a hashed, intent-bound `pending` receipt. Replaying that intent after a
+restart first resolves an exact opaque action-intent reference that is attached
+atomically to whichever current maintenance job was created, resumed, or
+coalesced, together with that admission disposition. Jobs carrying an
+unresolved reference are protected from history pruning, while the private
+correlation metadata is excluded from public job JSON. If no job was admitted
+before the crash, the private receipt's minimal registration authority remains
+sufficient to re-drive reconciliation even after the source job expires;
+daemon startup performs that recovery without requiring the browser to retain
+the original idempotency key. Settlement atomically replaces the pending
+receipt with a terminal receipt and durably releases the job-retention pin. A
+release write failure keeps both sides recoverable and rejects further receipt
+admission when the bounded journal cannot safely evict them.
+Selective sync identities include the exact collection frontier and request
+bounds, so work for a different page cannot satisfy or coalesce the retry.
+An unrelated active writer or an early cache/schema health failure leaves the
+receipt pending for same-key replay; neither condition is terminally reported
+as `no_work_needed`.
+Pending intents are never evicted by settled-receipt retention. If unresolved
+intents fill the bounded journal, admission fails closed before starting a new
+mutation and returns a typed remediation diagnostic.
+
 Comment fan-out is checked as produced records and serialized bytes before it
 can accumulate across parents.
 Per-stage limits are enforced together with a 64 MiB/50,000-record/256-stage
@@ -292,7 +333,7 @@ The older `chunks.embedding` column is a legacy placeholder. It is nullable and 
 
 ## Cache Migration
 
-The implemented cache schema version is `19`, matching `currentSchemaVersion` in `internal/cache/schema.go`.
+The implemented cache schema version is `21`, matching `currentSchemaVersion` in `internal/cache/schema.go`.
 
 The primary version source is the SQLite `schema_version` table. Migrations also update `PRAGMA user_version` as an additive SQLite diagnostic bridge, but cache compatibility decisions use `schema_version`.
 
@@ -312,12 +353,12 @@ Compatibility policy:
 
 | Detected version | Behavior | Operator action |
 | --- | --- | --- |
-| New empty cache | Initialize normally at schema version 19 | None |
-| 19 | Open normally; reads and writes are allowed | None |
-| 2-18 | Open read-compatible but writes are blocked until migration | Run `gitcode-mcp migrate-cache --confirm` |
+| New empty cache | Initialize normally at schema version 21 | None |
+| 21 | Open normally; reads and writes are allowed | None |
+| 2-20 | Open read-compatible but writes are blocked until migration | Run `gitcode-mcp migrate-cache --confirm` |
 | 1 | Block migration as pre-supported/iteration-1-equivalent | Confirm the selected cache path, move aside or delete only that cache file, then re-sync |
 | 0, missing, or empty `schema_version` in a non-empty cache | Block as pre-schema-versioning or unknown | Confirm the selected cache path, move aside or delete only that cache file, then re-sync |
-| Greater than 19 | Block as newer than this binary supports | Upgrade `gitcode-mcp` to a binary that supports the schema |
+| Greater than 21 | Block as newer than this binary supports | Upgrade `gitcode-mcp` to a binary that supports the schema |
 
 `gitcode-mcp migrate-cache --confirm` runs supported older-version migrations in place from the selected effective cache path, including repo-local cache selection when run from a repo-local workspace. Explicit `--cache-path` still overrides repo-local discovery for emergency repair. Before any schema mutation, the command inspects the coordinator identity and supported schema range. An installed coordinator is unloaded and observed until both its process and control socket are gone; an unowned foreground coordinator makes migration fail closed. The WAL is checkpointed, a backup is created at `{cache-path}.backup-{timestamp}`, and that backup must pass `integrity_check`, schema-version, and cache-identity verification. All pending schema steps then commit as one transaction, so a failed step leaves the original schema and identity intact. A private cache-adjacent recovery intent is written before coordination and retained until compatible service installation, restart, and schema-range health verification complete. While that intent exists, an invocation without `--confirm` returns `recovery_required` and cannot report `up_to_date`; re-running the confirmed command resumes the intent even when the schema transaction already committed. After verified restart, the CLI atomically publishes a completion receipt containing the private cache UUID, target binary identity/range, and backup/identity verification results, then clears the pending intent. Admin never exposes the UUID or filesystem locations: it accepts the receipt as success evidence only when both verification flags are true and its UUID, schema, binary identity, and range exactly match the live cache and daemon. Machine-readable output records quiesce, backup verification, identity preservation, compatible target identity, restart, and recovery state.
 
@@ -341,5 +382,9 @@ Schema version 20 adds checksum-bound durable sync commit receipts. A receipt is
 written in the same transaction as cache graphs and frontiers so restart can
 distinguish “SQLite committed, journal terminal write failed” from an uncommitted
 stage without repeating provider traffic.
+
+Schema version 21 adds `last_success_at` to maintenance frontiers. A degraded
+observation can replace the current status and error while retaining the most
+recent durable successful-sync timestamp for retry diagnostics and Admin UI.
 
 Opening an older compatible cache without migration is read-compatible but write-blocked so operators can inspect the cache and run diagnostics before applying the migration. New caches are initialized directly at the current schema version.

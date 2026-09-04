@@ -14,6 +14,13 @@ import (
 	"gitcode-mcp/internal/service"
 )
 
+func TestMaintenanceReconcileOutcomeReportsCoalescedWork(t *testing.T) {
+	result := MaintenanceReconcileResult{JobsCoalesced: []string{"job-000001"}}
+	if got := maintenanceReconcileOutcome(result); got != "coalesced" {
+		t.Fatalf("outcome=%q", got)
+	}
+}
+
 func TestAdminBindingPlanApplyDefaultsAPIAndReplays(t *testing.T) {
 	ctx := context.Background()
 	cachePath := filepath.Join(t.TempDir(), "cache.db")

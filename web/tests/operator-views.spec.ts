@@ -30,7 +30,7 @@ const snapshot = {
   }],
   jobs: [
     { id: 'job-000001', type: 'rag-index', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'running', created_at: new Date(Date.now() - 120000).toISOString(), started_at: new Date(Date.now() - 110000).toISOString(), updated_at: new Date().toISOString(), steps: 80, completed: 40, work_ref: 'work-active', cancellable: true, retryable: false, progress_retained: 2, progress_limit: 256, throughput_per_second: 0.36, eta_seconds: 111, progress: [{ type: 'started', phase: 'running', collection: 'rag-index' }, { type: 'records', phase: 'running', collection: 'rag-index', records_fetched: 40, rate_limit_state: 'ready' }] },
-    { id: 'job-000002', type: 'sync', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'failed', created_at: new Date(Date.now() - 240000).toISOString(), updated_at: new Date(Date.now() - 180000).toISOString(), finished_at: new Date(Date.now() - 180000).toISOString(), failure_class: 'provider_unavailable', failure_collection: 'issues', failure_message: 'The provider was unavailable while syncing issues.', retry_after: '30s', inspect_command: 'gitcode-mcp service job job-000002 --format json', remediation_command: 'gitcode-mcp service maintenance --format json', work_ref: 'work-terminal', cancellable: false, retryable: true, progress_retained: 1, progress_limit: 256, progress: [{ type: 'failed', phase: 'failed', collection: 'issues', records_failed: 1, retry_after: '30s', attempt: 2, rate_limit_state: 'waiting' }] },
+    { id: 'job-000002', type: 'sync', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'failed', created_at: new Date(Date.now() - 240000).toISOString(), updated_at: new Date(Date.now() - 180000).toISOString(), finished_at: new Date(Date.now() - 180000).toISOString(), failure_class: 'provider_unavailable', failure_collection: 'issues', failure_message: 'The provider was unavailable while syncing issues.', retry_after: '30s', inspect_command: 'gitcode-mcp service job job-000002 --format json', remediation_command: 'gitcode-mcp service maintenance --format json', work_ref: 'work-terminal', cancellable: false, retryable: true, sync_health: 'failed', sync_collections: [{ collection: 'issues', outcome: 'permanent_failure', frontier_ref: 'frontier-public-issues', records_listed: 3, committed: 0, failed: 1, error_class: 'provider_unavailable', attempt: 2, retry_budget: 4, retryable: true, updated_at: new Date(Date.now() - 180000).toISOString() }], progress_retained: 1, progress_limit: 256, progress: [{ type: 'failed', phase: 'failed', collection: 'issues', records_failed: 1, retry_after: '30s', attempt: 2, rate_limit_state: 'waiting' }] },
     { id: 'job-000003', type: 'sync', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'interrupted', created_at: new Date(Date.now() - 360000).toISOString(), updated_at: new Date(Date.now() - 300000).toISOString(), finished_at: new Date(Date.now() - 300000).toISOString(), work_ref: 'work-interrupted', cancellable: false, retryable: true, progress_retained: 1, progress_limit: 256, progress: [{ type: 'interrupted', phase: 'interrupted', collection: 'sync' }] },
     { id: 'job-000004', type: 'repository-docs-index', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'succeeded', created_at: new Date(Date.now() - 90_000).toISOString(), started_at: new Date(Date.now() - 85_000).toISOString(), updated_at: new Date(Date.now() - 60_000).toISOString(), finished_at: new Date(Date.now() - 60_000).toISOString(), steps: 10, completed: 8, work_ref: 'repository-docs-public-work', cancellable: false, retryable: false, progress_retained: 2, progress_limit: 256, progress: [{ type: 'started', phase: 'indexing', collection: 'repository-docs-index' }, { type: 'succeeded', phase: 'succeeded', collection: 'repository-docs-index', records_fetched: 6, records_skipped: 2 }] },
     { id: 'job-000005', type: 'sync', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'running', created_at: new Date(Date.now() - 45_000).toISOString(), started_at: new Date(Date.now() - 40_000).toISOString(), updated_at: new Date().toISOString(), steps: 12, completed: 12, work_ref: 'durable-sync-public-work', cancellable: true, retryable: false, progress_retained: 3, progress_limit: 256, sync_stage: { stage_ref: 'stage-public-safe', collection: 'issues', phase: 'waiting_commit', fetched: 12, staged: 12, committed: 0, staged_bytes: 8192, attempt: 2, retry_budget: 6, retry_after: new Date(Date.now() + 60_000).toISOString(), blocker_class: 'cache_busy', blocking_operation: 'rag-index', blocking_job_ref: 'job-000001', fetched_at: new Date(Date.now() - 35_000).toISOString(), staged_at: new Date(Date.now() - 34_000).toISOString() }, progress: [{ type: 'phase', phase: 'fetching', collection: 'issues', records_fetched: 12 }, { type: 'phase', phase: 'staged', collection: 'issues', records_fetched: 12 }, { type: 'phase', phase: 'waiting_commit', collection: 'issues', retry_after: new Date(Date.now() + 60_000).toISOString(), attempt: 2 }] }
@@ -617,7 +617,10 @@ test('durable sync lifecycle matrix is exposed through semantic DOM state', asyn
     { ...base, id: 'life-retrying', status: 'running', sync_stage: { ...staged, phase: 'waiting_commit', attempt: 2, blocker_class: 'cache_busy' } },
     { ...base, id: 'life-committing', status: 'running', sync_stage: { ...staged, phase: 'committing' } },
     { ...base, id: 'life-terminal', status: 'succeeded', cancellable: false, sync_stage: { ...staged, phase: 'committed', committed: 4 } },
-    { ...base, id: 'life-interrupted', status: 'interrupted', cancellable: false }
+    { ...base, id: 'life-interrupted', status: 'interrupted', cancellable: false },
+    { ...base, id: 'life-cancelled', status: 'cancelled', cancellable: false, sync_stage: { ...staged, phase: 'rejected', terminal_reason: 'cancelled' } },
+    { ...base, id: 'life-exhausted', status: 'failed', cancellable: false, sync_stage: { ...staged, phase: 'rejected', attempt: 6, retry_budget: 6, terminal_reason: 'commit_retry_budget_exhausted' } },
+    { ...base, id: 'life-recovered', status: 'running', sync_stage: { ...staged, phase: 'waiting_commit', attempt: 1, blocking_job_ref: 'job-prior-writer', blocking_operation: 'sync' }, progress: [{ type: 'recovered', phase: 'running', collection: 'sync' }] }
   ];
   await mockAdmin(page, lifecycleSnapshot);
   const cases = [
@@ -629,7 +632,10 @@ test('durable sync lifecycle matrix is exposed through semantic DOM state', asyn
     ['life-retrying', 'Waiting for cache writer', 'Retrying', 'Waiting Commit'],
     ['life-committing', 'Committing', 'Committing', 'Committing'],
     ['life-terminal', 'Committed', 'Terminal', 'Committed'],
-    ['life-interrupted', 'Terminal sync outcome', 'Terminal', 'Not Staged']
+    ['life-interrupted', 'Terminal sync outcome', 'Terminal', 'Not Staged'],
+    ['life-cancelled', 'Rejected', 'Terminal', 'Rejected'],
+    ['life-exhausted', 'Rejected', 'Terminal', 'Rejected'],
+    ['life-recovered', 'Waiting for cache writer', 'Retrying', 'Waiting Commit']
   ] as const;
   for (const [id, heading, lifecycle, raw] of cases) {
     await page.goto(`/?view=Jobs&job=${id}`);
@@ -638,9 +644,34 @@ test('durable sync lifecycle matrix is exposed through semantic DOM state', asyn
     await expect(panel.locator('dl')).toContainText(`Lifecycle${lifecycle}`);
     await expect(panel.locator('dl')).toContainText(`Raw phase${raw}`);
   }
+  await page.goto('/?view=Jobs&job=life-exhausted');
+  await expect(page.getByRole('status', { name: 'Durable sync phase' })).toContainText('Commit Retry Budget Exhausted');
+  await expect(page.getByRole('status', { name: 'Durable sync phase' }).locator('dl')).toContainText('Retry budget6/6');
+  await page.goto('/?view=Jobs&job=life-cancelled');
+  await expect(page.getByRole('status', { name: 'Durable sync phase' })).toContainText('Cancelled');
+  await page.goto('/?view=Jobs&job=life-recovered');
+  await expect(page.getByRole('status', { name: 'Durable sync phase' }).locator('dl')).toContainText('Blocking jobjob-prior-writer');
+  await expect(page.locator('section[aria-labelledby="job-timeline-title"]')).toContainText('Running');
 });
 
-test('retry coalescing, filters, interruption, and structured wait state are observable', async ({ page }) => {
+test('separate cache writers remain independently visible while both are active', async ({ page }) => {
+  const concurrentSnapshot: any = structuredClone(snapshot);
+  const now = new Date().toISOString();
+  concurrentSnapshot.jobs = [
+    { id: 'cache-a-sync', type: 'sync', cache_ref: 'cache-aaaaaaaaaaaa', repo_id: 'example/one', status: 'running', created_at: now, updated_at: now, work_ref: 'work-cache-a', cancellable: true, retryable: false, progress_retained: 0, progress_limit: 256 },
+    { id: 'cache-b-sync', type: 'sync', cache_ref: 'cache-bbbbbbbbbbbb', repo_id: 'example/two', status: 'running', created_at: now, updated_at: now, work_ref: 'work-cache-b', cancellable: true, retryable: false, progress_retained: 0, progress_limit: 256 }
+  ];
+  await mockAdmin(page, concurrentSnapshot);
+  await page.goto('/?view=Jobs');
+  const first = page.getByRole('row').filter({ hasText: 'cache-a-sync' });
+  const second = page.getByRole('row').filter({ hasText: 'cache-b-sync' });
+  await expect(first).toContainText('cache-aaaaaaaaaaaa');
+  await expect(second).toContainText('cache-bbbbbbbbbbbb');
+  await expect(first.getByText('Running')).toBeVisible();
+  await expect(second.getByText('Running')).toBeVisible();
+});
+
+test('retry delivery replay preserves one key and exposes restart-safe coalescing', async ({ page }) => {
   await mockAdmin(page);
   const retryKeys: string[] = [];
   await page.route('**/api/admin/v1/jobs/job-000002/retry', async (route) => {
@@ -650,7 +681,7 @@ test('retry coalescing, filters, interruption, and structured wait state are obs
       await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'temporarily_unavailable', message: 'Receipt delivery was interrupted.', remediation: 'Retry this confirmation.' } }) });
       return;
     }
-    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', action: 'retry', receipt: { receipt_id: 'receipt-retry', action: 'retry', target_job_id: 'job-000002', result_job_id: 'job-000001', outcome: 'coalesced', job_status: 'running', replayed: false, created_at: new Date().toISOString() } }) });
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', action: 'retry', receipt: { receipt_id: 'receipt-retry', action: 'retry', target_job_id: 'job-000002', result_job_id: 'job-000008', outcome: 'coalesced', job_status: 'queued', replayed: true, created_at: new Date().toISOString() } }) });
   });
   await page.goto('/?view=Jobs');
   await page.getByLabel('State').selectOption('interrupted');
@@ -667,9 +698,77 @@ test('retry coalescing, filters, interruption, and structured wait state are obs
   await page.getByRole('button', { name: 'Confirm retry' }).click();
   const retryReceipt = page.getByRole('status').filter({ hasText: 'Coalesced' });
   await expect(retryReceipt).toContainText('Coalesced');
-  await expect(retryReceipt).toContainText('job-000001');
+  await expect(retryReceipt).toContainText('job-000008');
+  await expect(retryReceipt).toContainText('replayed safely');
   expect(retryKeys).toHaveLength(2);
   expect(retryKeys[1]).toBe(retryKeys[0]);
+});
+
+test('collection health is URL-filterable and retries only the selected failed collection', async ({ page }) => {
+  const collectionSnapshot: any = structuredClone(snapshot);
+  const collectionRetryAt = '2030-01-02T03:04:05.000Z';
+  collectionSnapshot.jobs.push({
+    ...structuredClone(collectionSnapshot.jobs[1]), id: 'job-000006', status: 'running', finished_at: undefined,
+    failure_class: undefined, failure_collection: undefined, failure_message: undefined, retryable: false,
+    sync_health: 'partial/retrying', sync_collections: [
+      { collection: 'issues', outcome: 'success', frontier_ref: 'frontier-public-issues', records_listed: 3, committed: 3, attempt: 1, retry_budget: 4, retryable: false, last_success_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+      { collection: 'pulls', outcome: 'success', frontier_ref: 'frontier-public-pulls', records_listed: 5, committed: 5, attempt: 1, retry_budget: 4, retryable: false, last_success_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+      { collection: 'wiki', outcome: 'retry_scheduled', frontier_ref: 'frontier-public-wiki', records_listed: 2, committed: 0, failed: 1, error_class: 'network_timeout', attempt: 2, retry_budget: 4, retry_after: collectionRetryAt, retryable: false, updated_at: new Date().toISOString() }
+    ]
+  });
+  collectionSnapshot.jobs.push({
+    ...structuredClone(collectionSnapshot.jobs[1]), id: 'job-000007', status: 'succeeded', failure_collection: 'wiki', retryable: true,
+    sync_health: 'partial', sync_collections: [
+      { collection: 'issues', outcome: 'success', frontier_ref: 'frontier-public-issues', records_listed: 3, committed: 3, attempt: 1, retry_budget: 4, retryable: false, last_success_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+      { collection: 'pulls', outcome: 'success', frontier_ref: 'frontier-public-pulls', records_listed: 5, committed: 5, attempt: 1, retry_budget: 4, retryable: false, last_success_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+      { collection: 'wiki', outcome: 'permanent_failure', frontier_ref: 'frontier-public-wiki', records_listed: 2, committed: 0, failed: 1, error_class: 'retry_budget_exhausted', attempt: 4, retry_budget: 4, retryable: true, last_success_at: new Date(Date.now() - 3_600_000).toISOString(), updated_at: new Date().toISOString() }
+    ]
+  });
+  await mockAdmin(page, collectionSnapshot);
+  let actionBody: Record<string, unknown> = {};
+  await page.route('**/api/admin/v1/jobs/job-000007/retry', async (route) => {
+    actionBody = route.request().postDataJSON();
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', action: 'retry', receipt: { receipt_id: 'receipt-collection-retry', action: 'retry', target_job_id: 'job-000007', result_job_id: 'job-000006', outcome: 'created', job_status: 'queued', replayed: false, created_at: new Date().toISOString() } }) });
+  });
+  await page.goto('/?view=Jobs');
+  await page.getByLabel('Sync health').selectOption('partial/retrying');
+  await page.getByLabel('Collection').selectOption('wiki');
+  await expect(page).toHaveURL(/job_sync_health=partial%2Fretrying/);
+  await expect(page).toHaveURL(/job_collection=wiki/);
+  const retryingRow = page.getByRole('row').filter({ hasText: 'job-000006' });
+  await expect(retryingRow).toBeVisible();
+  await expect(retryingRow).toContainText('Sync health: Partial / Retrying');
+  await expect(page.getByText('job-000002')).toHaveCount(0);
+  await page.getByText('job-000006').click();
+  const retryingCollections = page.getByLabel('Collection sync health');
+  await expect(retryingCollections).toContainText('Issues');
+  await expect(retryingCollections).toContainText('Pulls');
+  await expect(retryingCollections).toContainText('Wiki');
+  await expect(retryingCollections).toContainText('Network Timeout');
+  await expect(retryingCollections).toContainText('attempt 2/4');
+  await expect(retryingCollections).toContainText(`retry ${new Date(collectionRetryAt).toLocaleString()}`);
+  await expect(retryingCollections.getByRole('button', { name: 'Retry Wiki' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Back to retained jobs' }).click();
+  await page.getByLabel('Sync health').selectOption('partial');
+  await expect(page.getByText('job-000007')).toBeVisible();
+  await expect(page.getByText('job-000001')).toHaveCount(0);
+  await page.getByText('job-000007').click();
+  await expect(page.getByRole('heading', { name: 'Succeeded' })).toBeVisible();
+  await expect(page.getByText('Sync health: Partial')).toBeVisible();
+  const collections = page.getByLabel('Collection sync health');
+  await expect(collections).toContainText('Issues');
+  await expect(collections).toContainText('Pulls');
+  await expect(collections).toContainText('Wiki');
+  await expect(collections).toContainText('Retry Budget Exhausted');
+  await expect(collections).toContainText('attempt 4/4');
+  await collections.getByRole('button', { name: 'Retry Wiki' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByRole('heading', { name: 'Retry Wiki only?' })).toBeVisible();
+  await expect(dialog).toContainText('Successful collection results remain committed');
+  await dialog.getByRole('button', { name: 'Retry Wiki', exact: true }).click();
+  expect(actionBody).toMatchObject({ collection: 'wiki' });
+  expect(String(actionBody.idempotency_key)).toMatch(/^admin-retry-wiki-/);
+  await expect(page.getByRole('status').filter({ hasText: 'receipt-collection-retry' })).toContainText('job-000006');
 });
 
 test('failed jobs are discoverable and expose exact inspect and remediation commands', async ({ page }) => {
