@@ -252,6 +252,97 @@ func TestMaintenanceAdminRetryDoesNotConsumeIntentOnEarlyCacheFailure(t *testing
 	}
 }
 
+func TestMaintenanceAdminRetryDoesNotConsumeIntentOnObservationQueryFailure(t *testing.T) {
+	for _, table := range []string{"maintenance_frontiers", "embedding_namespaces", "rag_coverage_state"} {
+		t.Run(table, func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			cachePath := filepath.Join(dir, "cache.db")
+			store, err := cache.NewSQLiteStore(ctx, cachePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+				t.Fatal(err)
+			}
+			cfg := config.Default()
+			namespace, err := store.UpsertEmbeddingNamespace(ctx, cache.EmbeddingNamespace{EmbeddingNamespaceIdentity: cache.EmbeddingNamespaceIdentity{
+				RepoID: "owner/repo", ProfileID: cfg.RAG.DefaultProfile, ProviderID: "test-provider", ProviderType: "test",
+				ModelID: "test-model", ModelRevision: "test-revision", Dimensions: 2, DType: "float32", Normalization: "l2",
+				DocumentInstructionID: "doc", QueryInstructionID: "query", ChunkPolicyID: "heading-v1", LanguagePolicyID: "default", ConfigHash: "test-config",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.UpsertRAGCoverageState(ctx, cache.RAGCoverageState{RepoID: "owner/repo", NamespaceID: namespace.ID, Status: "ready", UpdatedAt: time.Now().UTC()}); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+			maintenance := NewMaintenanceManager(newTestManager(t, "darwin"), jobs, filepath.Join(dir, "managed-caches.json"))
+			enrolled, err := maintenance.Enroll(ctx, testMaintenanceEnrollRequest(cachePath, "observation-enroll-"+table, MaintenancePolicy{}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			maintenance.mu.Lock()
+			maintenance.entries[enrolled.RegistrationID].NamespaceID = namespace.ID
+			maintenance.mu.Unlock()
+			now := time.Now().UTC()
+			jobs.jobs["job-source"] = &Job{ID: "job-source", Type: SyncJobType, RepoID: enrolled.RepoID, CacheUUID: enrolled.CacheUUID, RegistrationID: enrolled.RegistrationID, Status: JobStatusFailed, CreatedAt: now, UpdatedAt: now}
+			actions := NewJobActionManager(filepath.Join(dir, "actions.json"), jobs, maintenance)
+			restore := renameMaintenanceTestTable(t, cachePath, table)
+
+			req := adminhttp.JobActionRequest{JobID: "job-source", IdempotencyKey: "retry-observation-" + table}
+			_, err = actions.Retry(ctx, req)
+			var typed adminhttp.JobActionError
+			if !errors.As(err, &typed) || typed.Code != "retry_failed" {
+				t.Fatalf("observation failure error=%T %v", err, err)
+			}
+			if stored := actions.receipts[hashJobAction(req.IdempotencyKey)]; stored.Receipt.Outcome != "pending" {
+				t.Fatalf("observation failure consumed retry intent: %+v", stored.Receipt)
+			}
+			if len(jobs.List()) != 1 {
+				t.Fatalf("observation failure admitted work: %+v", jobs.List())
+			}
+
+			restore()
+			replayed, err := actions.Retry(ctx, req)
+			if err != nil || !replayed.Replayed || replayed.Outcome != "no_work_needed" {
+				t.Fatalf("replayed=%+v err=%v", replayed, err)
+			}
+		})
+	}
+}
+
+func renameMaintenanceTestTable(t *testing.T, path, table string) func() {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := table + "_unavailable"
+	if _, err := db.Exec(`ALTER TABLE ` + table + ` RENAME TO ` + missing); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if _, err := db.Exec(`ALTER TABLE ` + missing + ` RENAME TO ` + table); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func setMaintenanceTestSchemaVersion(t *testing.T, path string, version int) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)

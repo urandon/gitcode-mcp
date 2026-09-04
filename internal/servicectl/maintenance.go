@@ -2317,8 +2317,18 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 		recordJobActionIntentError(ctx, err)
 		return m.updateEntryFailureWithJobs(registrationID, "content_state_failed", err, activeSync, activeRAG, activeRepositoryDocs), nil
 	}
-	frontiers, _ := store.ListMaintenanceFrontiers(ctx, snapshot.RepoID)
-	namespaces, _ := store.ListEmbeddingNamespaces(ctx, snapshot.RepoID)
+	frontiers, err := store.ListMaintenanceFrontiers(ctx, snapshot.RepoID)
+	if err != nil {
+		store.Close()
+		recordJobActionIntentError(ctx, err)
+		return m.updateEntryFailureWithJobs(registrationID, "maintenance_frontiers_read_failed", err, activeSync, activeRAG, activeRepositoryDocs), nil
+	}
+	namespaces, err := store.ListEmbeddingNamespaces(ctx, snapshot.RepoID)
+	if err != nil {
+		store.Close()
+		recordJobActionIntentError(ctx, err)
+		return m.updateEntryFailureWithJobs(registrationID, "embedding_namespaces_read_failed", err, activeSync, activeRAG, activeRepositoryDocs), nil
+	}
 	latestSync, _ := m.jobs.LatestCacheRepo(SyncJobType, snapshot.CacheUUID, snapshot.RepoID)
 	latestRAG, _ := m.jobs.LatestCacheRepo(RAGIndexJobType, snapshot.CacheUUID, snapshot.RepoID)
 	latestRepositoryDocs, _ := m.jobs.LatestRepositoryDocsSource(snapshot.CacheUUID, snapshot.RepoID, snapshot.repositorySourceID, repositoryDocsSourceGeneration(snapshot))
@@ -2351,7 +2361,12 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	ragStatus := "missing"
 	coverageUpdatedAt := time.Time{}
 	if namespaceID != "" {
-		state, ok, _ := store.GetRAGCoverageState(ctx, snapshot.RepoID, namespaceID)
+		state, ok, coverageErr := store.GetRAGCoverageState(ctx, snapshot.RepoID, namespaceID)
+		if coverageErr != nil {
+			store.Close()
+			recordJobActionIntentError(ctx, coverageErr)
+			return m.updateEntryFailureWithJobs(registrationID, "rag_coverage_read_failed", coverageErr, activeSync, activeRAG, activeRepositoryDocs), nil
+		}
 		if ok {
 			covered = state.CoveredGeneration
 			ragStatus = state.Status
