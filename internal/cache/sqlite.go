@@ -136,7 +136,10 @@ func NewSQLiteReadOnlyStore(ctx context.Context, dataSourceName string) (*SQLite
 	if _, err := os.Stat(dataSourceName); err != nil {
 		return nil, fmt.Errorf("cache: cannot open read-only store: %w", err)
 	}
-	dsn := sqliteReadOnlyDSN(dataSourceName)
+	dsn, err := sqliteReadOnlyDSN(dataSourceName)
+	if err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -164,23 +167,31 @@ func NewSQLiteReadOnlyStore(ctx context.Context, dataSourceName string) (*SQLite
 	return &SQLiteStore{db: db, useFTS: useFTS, forceNoFTS: false, cachePath: dataSourceName, lockPath: ""}, nil
 }
 
-func sqliteReadOnlyDSN(dataSourceName string) string {
+func sqliteReadOnlyDSN(dataSourceName string) (string, error) {
 	return sqliteFileDSN(dataSourceName, false)
 }
 
-func sqliteImmutableReadOnlyDSN(dataSourceName string) string {
+func sqliteImmutableReadOnlyDSN(dataSourceName string) (string, error) {
 	return sqliteFileDSN(dataSourceName, true)
 }
 
-func sqliteFileDSN(dataSourceName string, immutable bool) string {
-	uri := url.URL{Scheme: "file", Path: dataSourceName}
+func sqliteFileDSN(dataSourceName string, immutable bool) (string, error) {
+	absolutePath, err := filepath.Abs(dataSourceName)
+	if err != nil {
+		return "", fmt.Errorf("cache: resolve read-only store path: %w", err)
+	}
+	uriPath := filepath.ToSlash(absolutePath)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	uri := url.URL{Scheme: "file", Path: uriPath}
 	query := uri.Query()
 	query.Set("mode", "ro")
 	if immutable {
 		query.Set("immutable", "1")
 	}
 	uri.RawQuery = query.Encode()
-	return uri.String()
+	return uri.String(), nil
 }
 
 func (s *SQLiteStore) SchemaVersion(ctx context.Context) (int, error) {

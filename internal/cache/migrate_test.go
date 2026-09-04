@@ -537,6 +537,24 @@ func TestReadOnlyStoreUsesSQLiteReadOnlyURI(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
+	workingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativePath, err := filepath.Rel(workingDir, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativeStore, err := NewSQLiteReadOnlyStore(ctx, relativePath)
+	if err != nil {
+		t.Fatalf("NewSQLiteReadOnlyStore with relative path returned error: %v", err)
+	}
+	if version, err := relativeStore.SchemaVersion(ctx); err != nil || version != currentSchemaVersion {
+		t.Fatalf("relative SchemaVersion = %d, %v; want %d, nil", version, err, currentSchemaVersion)
+	}
+	if err := relativeStore.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	// Before file: URI encoding, the driver stripped everything after the first
 	// question mark and silently targeted a different writable database.
