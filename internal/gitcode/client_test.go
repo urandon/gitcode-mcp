@@ -3535,6 +3535,8 @@ func TestBoundedWikiTreeTraversalMaxBytesReturnsProgressSafeChunks(t *testing.T)
 	}))
 	defer server.Close()
 	client := newTestClient(t, server.URL, Config{})
+	fixedUpdatedAt := time.Date(2026, time.September, 5, 0, 0, 0, 123456789, time.UTC)
+	client.now = func() time.Time { return fixedUpdatedAt }
 
 	calibration, err := client.ListWikiPages(context.Background(), WikiListRequest{Owner: "example-owner", Repo: "example-repo", Page: 1, PerPage: 1, Bounds: &WikiBounds{MaxRecords: 1, OffsetPaging: true}})
 	if err != nil || len(calibration.Items) != 1 {
