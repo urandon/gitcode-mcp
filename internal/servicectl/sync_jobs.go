@@ -1369,8 +1369,25 @@ func (m *JobManager) recoverSyncCollectionRetries(ctx context.Context, manager M
 			}
 			continue
 		}
+		// A retry checkpoint is only scheduling metadata. Reconcile any exact
+		// stage or SQLite commit receipt first, even when the checkpoint itself
+		// is old enough for GC; committed cache truth must win over age-based
+		// cleanup after a projection crash.
+		if err := m.reconcileSyncStagesBeforeRetry(ctx, manager, stageJournal, stages, job, group); err != nil {
+			return err
+		}
+		job, _ = m.Get(jobID)
 		fresh := group[:0]
 		for _, checkpoint := range group {
+			if syncCollectionProjectionSettlesCheckpoint(job.SyncCollections, checkpoint) {
+				if err := stageJournal.RemoveCollectionStages(jobID, checkpoint.Collection); err != nil {
+					return err
+				}
+				if err := m.removeSyncRetryCheckpoint(retryJournal, jobID, checkpoint.Collection); err != nil {
+					return err
+				}
+				continue
+			}
 			if checkpoint.RetryAt.IsZero() || checkpoint.RetryAt.Before(time.Now().UTC().Add(-maxSyncCollectionCheckpointAge)) {
 				if err := m.expireSyncRetryCheckpoint(job, checkpoint); err != nil {
 					return err
@@ -1389,10 +1406,6 @@ func (m *JobManager) recoverSyncCollectionRetries(ctx context.Context, manager M
 			}
 			continue
 		}
-		if err := m.reconcileSyncStagesBeforeRetry(ctx, manager, stageJournal, stages, job, group); err != nil {
-			return err
-		}
-		job, _ = m.Get(jobID)
 		pending := make([]syncCollectionRetryCheckpoint, 0, len(group))
 		for _, checkpoint := range group {
 			if syncCollectionProjectionSettlesCheckpoint(job.SyncCollections, checkpoint) {

@@ -171,7 +171,9 @@ func TestDaemonRestartReconcilesCommittedRetryStageBeforeProviderReplay(t *testi
 	}
 
 	now := time.Now().UTC()
-	retryAt := now.Add(-time.Minute)
+	// The scheduling checkpoint is old enough for GC, but the newer committed
+	// stage is authoritative and must be projected before age-based cleanup.
+	retryAt := now.Add(-25 * time.Hour)
 	jobID := "job-000001"
 	registrationID := maintenanceRegistrationID(identity.UUID, binding.RepoID)
 	jobsPath := filepath.Join(root, "jobs.json")

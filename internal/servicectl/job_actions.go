@@ -100,13 +100,21 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 	}
 	keyHash := hashJobAction(req.IdempotencyKey)
 	intentHash := hashJobAction(action + "\x00" + req.JobID + "\x00" + req.Collection)
+	var preparedReceipt *adminhttp.JobActionReceipt
 	if stored, ok := m.receipts[keyHash]; ok {
 		if stored.IntentHash != intentHash {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "idempotency_conflict", "The idempotency key was already used for a different job action.", "Generate a new key for the changed intent.")
 		}
 		receipt := stored.Receipt
 		receipt.Replayed = true
-		return receipt, nil
+		if action != "retry" || receipt.Outcome != "pending" {
+			return receipt, nil
+		}
+		// A pending retry is a durable intent, not a terminal receipt. Re-drive
+		// the idempotent maintenance reconcile so a crash before the mutation
+		// cannot turn every replay into a permanent no-op. If the mutation had
+		// already happened, ordinary work coalescing returns its durable job.
+		preparedReceipt = &receipt
 	}
 	job, ok := m.jobs.Get(req.JobID)
 	if !ok {
@@ -116,8 +124,13 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		return adminhttp.JobActionReceipt{}, jobActionError(http.StatusForbidden, "capability_unavailable", "This job type does not support the requested admin action.", "Use the capability catalog or CLI for supported operations.")
 	}
 	receipt := adminhttp.JobActionReceipt{ReceiptID: "receipt-" + keyHash[:16], Action: action, TargetJob: job.ID, CreatedAt: m.now()}
-	prepared := false
+	if preparedReceipt != nil {
+		receipt = *preparedReceipt
+	}
 	prepare := func() error {
+		if preparedReceipt != nil {
+			return nil
+		}
 		pending := receipt
 		pending.Outcome, pending.JobStatus = "pending", job.Status
 		m.receipts[keyHash] = jobActionReceiptDisk{KeyHash: keyHash, IntentHash: intentHash, Receipt: pending}
@@ -126,15 +139,7 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 			delete(m.receipts, keyHash)
 			return err
 		}
-		prepared = true
 		return nil
-	}
-	rollbackPrepared := func() {
-		if !prepared {
-			return
-		}
-		delete(m.receipts, keyHash)
-		_ = m.saveLocked()
 	}
 	switch action {
 	case "cancel":
@@ -180,7 +185,9 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		}
 		result, err := m.reconcile(ctx, job.RegistrationID, req.Collection)
 		if err != nil {
-			rollbackPrepared()
+			// Keep the prepared intent. Reconcile can fail after crossing its
+			// mutation boundary, so deleting the claim would permit a new key to
+			// duplicate work instead of retrying/coalescing this exact intent.
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "retry_failed", "The maintenance registration could not be reconciled.", "Refresh maintenance status and resolve its typed diagnostic.")
 		}
 		if len(result.JobsStarted) > 0 {

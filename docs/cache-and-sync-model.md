@@ -117,6 +117,15 @@ admin Jobs view project the same state. The admin UI additionally supports a
 URL-backed aggregate-health filter and an explicit action that retries one
 failed collection while retaining the others.
 
+Collection retry checkpoints are bounded to 256 entries, 1 MiB of private
+metadata, and 24 hours. Recovery reconciles an exact staged transaction or
+SQLite commit receipt before applying age-based checkpoint cleanup, so durable
+cache truth cannot be downgraded to an expired retry. Admin retry actions first
+persist a hashed, intent-bound `pending` receipt. Replaying that intent after a
+restart re-drives the idempotent maintenance reconcile: it either creates work
+that never started or coalesces work already created, then atomically replaces
+the pending intent with a terminal receipt.
+
 Comment fan-out is checked as produced records and serialized bytes before it
 can accumulate across parents.
 Per-stage limits are enforced together with a 64 MiB/50,000-record/256-stage
@@ -307,7 +316,7 @@ The older `chunks.embedding` column is a legacy placeholder. It is nullable and 
 
 ## Cache Migration
 
-The implemented cache schema version is `19`, matching `currentSchemaVersion` in `internal/cache/schema.go`.
+The implemented cache schema version is `21`, matching `currentSchemaVersion` in `internal/cache/schema.go`.
 
 The primary version source is the SQLite `schema_version` table. Migrations also update `PRAGMA user_version` as an additive SQLite diagnostic bridge, but cache compatibility decisions use `schema_version`.
 

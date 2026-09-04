@@ -671,7 +671,7 @@ test('separate cache writers remain independently visible while both are active'
   await expect(second.getByText('Running')).toBeVisible();
 });
 
-test('retry delivery replay preserves one key and exposes a restart-safe pending receipt', async ({ page }) => {
+test('retry delivery replay preserves one key and exposes restart-safe coalescing', async ({ page }) => {
   await mockAdmin(page);
   const retryKeys: string[] = [];
   await page.route('**/api/admin/v1/jobs/job-000002/retry', async (route) => {
@@ -681,7 +681,7 @@ test('retry delivery replay preserves one key and exposes a restart-safe pending
       await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'temporarily_unavailable', message: 'Receipt delivery was interrupted.', remediation: 'Retry this confirmation.' } }) });
       return;
     }
-    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', action: 'retry', receipt: { receipt_id: 'receipt-retry', action: 'retry', target_job_id: 'job-000002', outcome: 'pending', job_status: 'failed', replayed: true, created_at: new Date().toISOString() } }) });
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', action: 'retry', receipt: { receipt_id: 'receipt-retry', action: 'retry', target_job_id: 'job-000002', result_job_id: 'job-000008', outcome: 'coalesced', job_status: 'queued', replayed: true, created_at: new Date().toISOString() } }) });
   });
   await page.goto('/?view=Jobs');
   await page.getByLabel('State').selectOption('interrupted');
@@ -696,8 +696,9 @@ test('retry delivery replay preserves one key and exposes a restart-safe pending
   await expect(page.getByRole('alert')).toContainText('Receipt delivery was interrupted.');
   await expect(page.getByRole('alert')).toContainText('Retry this confirmation.');
   await page.getByRole('button', { name: 'Confirm retry' }).click();
-  const retryReceipt = page.getByRole('status').filter({ hasText: 'Pending' });
-  await expect(retryReceipt).toContainText('Pending');
+  const retryReceipt = page.getByRole('status').filter({ hasText: 'Coalesced' });
+  await expect(retryReceipt).toContainText('Coalesced');
+  await expect(retryReceipt).toContainText('job-000008');
   await expect(retryReceipt).toContainText('replayed safely');
   expect(retryKeys).toHaveLength(2);
   expect(retryKeys[1]).toBe(retryKeys[0]);

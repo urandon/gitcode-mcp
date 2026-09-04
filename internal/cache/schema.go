@@ -1182,10 +1182,16 @@ func applyMaintenanceLastSuccessMigration(ctx context.Context, tx *sql.Tx, _ boo
 	if err != nil {
 		return err
 	}
-	if columns["last_success_at"] {
-		return nil
+	if !columns["last_success_at"] {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE maintenance_frontiers ADD COLUMN last_success_at TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
 	}
-	_, err = tx.ExecContext(ctx, `ALTER TABLE maintenance_frontiers ADD COLUMN last_success_at TEXT NOT NULL DEFAULT ''`)
+	// Version-20 rows only retained the latest observation timestamp. Seed
+	// successful rows before a later degraded observation can overwrite it.
+	_, err = tx.ExecContext(ctx, `UPDATE maintenance_frontiers
+SET last_success_at = updated_at
+WHERE last_success_at = '' AND last_error_class = '' AND lower(trim(status)) <> 'degraded'`)
 	return err
 }
 

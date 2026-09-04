@@ -174,11 +174,63 @@ func TestJobActionRetryPreparedReceiptPreventsRestartDuplicateAfterFinalSaveFail
 	}
 	restarted.reconcile = func(context.Context, string, string) (MaintenanceReconcileResult, error) {
 		runs++
-		return MaintenanceReconcileResult{}, nil
+		coalesced, created, err := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 1, "retry-work", "cache-1", "reg-1", "", func() {})
+		if err != nil || created {
+			t.Fatalf("replay coalescing job=%+v created=%t err=%v", coalesced, created, err)
+		}
+		return MaintenanceReconcileResult{JobsCoalesced: []string{coalesced.ID}}, nil
 	}
 	replay, err := restarted.Retry(context.Background(), req)
-	if err != nil || !replay.Replayed || replay.Outcome != "pending" || runs != 1 {
+	if err != nil || !replay.Replayed || replay.Outcome != "coalesced" || replay.ResultJob != "job-000002" || runs != 2 {
 		t.Fatalf("restart replay=%+v err=%v runs=%d", replay, err, runs)
+	}
+}
+
+func TestJobActionRetryPreparedReceiptRedrivesCrashBeforeMutation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "actions.json")
+	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+	now := time.Now().UTC()
+	jobs.jobs["job-000001"] = &Job{ID: "job-000001", Type: SyncJobType, RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", Status: JobStatusSucceeded, SyncHealth: SyncHealthPartial, CreatedAt: now, UpdatedAt: now, FinishedAt: &now, SyncCollections: []SyncCollectionView{{Collection: "wiki", Outcome: SyncCollectionPermanentFailure}}}
+	jobs.nextID = 1
+	if err := jobs.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	req := adminhttp.JobActionRequest{JobID: "job-000001", Collection: "wiki", IdempotencyKey: "retry-before-mutation"}
+	keyHash := hashJobAction(req.IdempotencyKey)
+	intentHash := hashJobAction("retry\x00" + req.JobID + "\x00" + req.Collection)
+	before := NewJobActionManager(path, jobs, nil)
+	before.receipts[keyHash] = jobActionReceiptDisk{KeyHash: keyHash, IntentHash: intentHash, Receipt: adminhttp.JobActionReceipt{
+		ReceiptID: "receipt-" + keyHash[:16], Action: "retry", TargetJob: req.JobID, Outcome: "pending", JobStatus: JobStatusSucceeded, CreatedAt: now,
+	}}
+	if err := before.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := NewJobActionManager(path, jobs, nil)
+	if err := restarted.Load(); err != nil {
+		t.Fatal(err)
+	}
+	runs := 0
+	restarted.reconcile = func(context.Context, string, string) (MaintenanceReconcileResult, error) {
+		runs++
+		created, _, err := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 1, "retry-before-work", "cache-1", "reg-1", "", func() {})
+		if err != nil {
+			return MaintenanceReconcileResult{}, err
+		}
+		return MaintenanceReconcileResult{JobsStarted: []string{created.ID}}, nil
+	}
+	receipt, err := restarted.Retry(context.Background(), req)
+	if err != nil || !receipt.Replayed || receipt.Outcome != "created" || receipt.ResultJob != "job-000002" || runs != 1 {
+		t.Fatalf("redriven receipt=%+v err=%v runs=%d", receipt, err, runs)
+	}
+	settled := NewJobActionManager(path, jobs, nil)
+	if err := settled.Load(); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := settled.Retry(context.Background(), req)
+	if err != nil || !replayed.Replayed || replayed.Outcome != "created" || runs != 1 {
+		t.Fatalf("settled replay=%+v err=%v runs=%d", replayed, err, runs)
 	}
 }
 
