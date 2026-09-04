@@ -86,6 +86,53 @@ func TestMaintenanceReconcilePublishesSchemaBlockedAndClearsTerminalActiveJobs(t
 	}
 }
 
+func TestMaintenanceRetryCorrelatesExactActiveCurrentWork(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := newTestManager(t, "darwin")
+	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+	maintenance := NewMaintenanceManager(manager, jobs, filepath.Join(dir, "managed-caches.json"))
+	enrolled, err := maintenance.Enroll(ctx, testMaintenanceEnrollRequest(cachePath, "active-exact", MaintenancePolicy{SyncEnabled: true, SyncMode: "head", Issues: true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lane, page, maxPages := nextMaintenanceSyncLane(enrolled, nil, maintenance.now())
+	selection := maintenanceSyncSelection(enrolled.Policy, nil, lane, maintenance.now())
+	req := StartSyncJobRequest{
+		RepoID: enrolled.RepoID, ProviderMode: "live", CachePath: cachePath,
+		CacheUUID: enrolled.CacheUUID, RegistrationID: enrolled.RegistrationID, Lane: lane,
+		Issues: selection.Issues, IssueComments: selection.IssueComments,
+		Wiki: selection.Wiki, Pulls: selection.Pulls, PRComments: selection.PRComments,
+		MaxPages: maxPages, PerPage: enrolled.Policy.PerPage, Page: page,
+		collectionPages: selection.collectionPages,
+	}
+	active, created, err := jobs.createCoalescedJob(SyncJobType, enrolled.RepoID, "", 0, syncWorkKey(req), enrolled.CacheUUID, enrolled.RegistrationID, "", func() {})
+	if err != nil || !created {
+		t.Fatalf("active=%+v created=%t err=%v", active, created, err)
+	}
+
+	result, err := maintenance.ReconcileRegistration(withJobActionIntent(ctx, "action-ref"), enrolled.RegistrationID)
+	if err != nil || len(result.JobsStarted) != 0 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	correlated, outcome, found := jobs.RetainedRetryIntentResult("action-ref")
+	if !found || correlated.ID != active.ID || outcome != "coalesced" {
+		t.Fatalf("correlated=%+v outcome=%q found=%t", correlated, outcome, found)
+	}
+}
+
 func setMaintenanceTestSchemaVersion(t *testing.T, path string, version int) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)

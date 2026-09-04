@@ -177,7 +177,7 @@ func (m *JobManager) startPreparedRepositoryDocsIndex(ctx context.Context, manag
 	expectedSetID := repositoryDocsRevisionSetIdentity(req, prepared.repository, prepared.policy, prepared.namespaceID).ID()
 	jobCtx, cancel := context.WithCancel(ctx)
 	if strings.TrimSpace(req.recoveryJobID) != "" {
-		job, resumed, err := m.ResumeRepositoryDocsAdmission(req.recoveryJobID, req.RegistrationID, req.SourceRegistrationID, req.SourceRegistrationGeneration, expectedSetID, workKey, cancel)
+		job, resumed, err := m.ResumeRepositoryDocsAdmission(req.recoveryJobID, req.RegistrationID, req.SourceRegistrationID, req.SourceRegistrationGeneration, expectedSetID, workKey, req.ActionIntentRef, cancel)
 		if err != nil {
 			cancel()
 			return Job{}, err

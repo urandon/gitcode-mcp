@@ -393,6 +393,37 @@ func TestJobManagerReleaseActionIntentKeepsPinWhenPersistenceFails(t *testing.T)
 	}
 }
 
+func TestJobActionIntentCorrelationIsPrivateSnapshotState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.json")
+	manager := NewJobManager(path)
+	manager.jobs["job-pinned"] = &Job{ID: "job-pinned", Type: SyncJobType, Status: JobStatusFailed, ActionIntentRefs: []string{"intent-ref"}, ActionIntentOutcomes: map[string]string{"intent-ref": "created"}}
+	if err := manager.Prune(); err != nil {
+		t.Fatal(err)
+	}
+	publicJSON, err := json.Marshal(manager.mustGet("job-pinned"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(publicJSON), "action_intent") || strings.Contains(string(publicJSON), "intent-ref") {
+		t.Fatalf("public job JSON leaked retry correlation: %s", publicJSON)
+	}
+	privateJSON, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(privateJSON), "action_intent_refs") || !strings.Contains(string(privateJSON), "action_intent_outcomes") {
+		t.Fatalf("private snapshot omitted durable retry correlation: %s", privateJSON)
+	}
+	restarted := NewJobManager(path)
+	if err := restarted.LoadAndMarkInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	_, outcome, found := restarted.RetainedRetryIntentResult("intent-ref")
+	if !found || outcome != "created" {
+		t.Fatalf("private correlation was not recovered: outcome=%q found=%t", outcome, found)
+	}
+}
+
 func TestJobManagerIdleReconcilePrunesExpiredHistory(t *testing.T) {
 	now := time.Date(2026, 8, 26, 10, 0, 0, 0, time.UTC)
 	jobs := NewJobManagerWithRetention(filepath.Join(t.TempDir(), "jobs.json"), config.ServiceJobRetentionConfig{

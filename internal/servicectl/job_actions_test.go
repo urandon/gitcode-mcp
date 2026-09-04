@@ -3,6 +3,7 @@ package servicectl
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -142,6 +143,31 @@ func TestJobActionRetryCreatesCurrentMaintenanceWork(t *testing.T) {
 	}
 }
 
+func TestJobActionRetryUsesAdmissionDispositionAfterConcurrentCoalescing(t *testing.T) {
+	jobs := NewJobManager("")
+	now := time.Now().UTC()
+	jobs.jobs["job-000001"] = &Job{ID: "job-000001", Type: SyncJobType, RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", Status: JobStatusFailed, CreatedAt: now, UpdatedAt: now, FinishedAt: &now}
+	jobs.nextID = 1
+	actions := NewJobActionManager("", jobs, nil)
+	actions.reconcile = func(_ context.Context, _, _, actionIntentRef string) (MaintenanceReconcileResult, error) {
+		active, created, err := jobs.createCoalescedJob(RAGIndexJobType, "owner/repo", "profile", 1, "current-rag", "cache-1", "reg-1", "namespace", func() {})
+		if err != nil || !created {
+			t.Fatalf("concurrent active=%+v created=%t err=%v", active, created, err)
+		}
+		coalesced, created, err := jobs.createCoalescedJobWithIntent(RAGIndexJobType, "owner/repo", "profile", 1, "current-rag", "cache-1", "reg-1", "namespace", JobRecoveryIntent{ActionIntentRef: actionIntentRef}, func() {})
+		if err != nil || created || coalesced.ID != active.ID {
+			t.Fatalf("coalesced=%+v created=%t err=%v", coalesced, created, err)
+		}
+		// ReconcileRegistration historically reports this TOCTOU result in
+		// JobsStarted because its public StartRAGIndex wrapper omits disposition.
+		return MaintenanceReconcileResult{JobsStarted: []string{coalesced.ID}}, nil
+	}
+	receipt, err := actions.Retry(context.Background(), adminhttp.JobActionRequest{JobID: "job-000001", IdempotencyKey: "toctou-coalesce"})
+	if err != nil || receipt.Outcome != "coalesced" || receipt.ResultJob != "job-000002" {
+		t.Fatalf("receipt=%+v err=%v", receipt, err)
+	}
+}
+
 func TestJobActionRetryPreparedReceiptPreventsRestartDuplicateAfterFinalSaveFailure(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "actions.json")
@@ -193,7 +219,7 @@ func TestJobActionRetryPreparedReceiptPreventsRestartDuplicateAfterFinalSaveFail
 		return MaintenanceReconcileResult{}, nil
 	}
 	replay, err := restarted.Retry(context.Background(), req)
-	if err != nil || !replay.Replayed || replay.Outcome != "coalesced" || replay.ResultJob != "job-000002" || replay.JobStatus != JobStatusInterrupted || runs != 1 {
+	if err != nil || !replay.Replayed || replay.Outcome != "created" || replay.ResultJob != "job-000002" || replay.JobStatus != JobStatusInterrupted || runs != 1 {
 		t.Fatalf("restart replay=%+v err=%v runs=%d", replay, err, runs)
 	}
 	settledJob, _ := restartedJobs.Get("job-000002")
@@ -249,6 +275,57 @@ func TestJobActionRetryCorrelationSurvivesCoalescedCurrentStageCrash(t *testing.
 	replay, err := restarted.Retry(context.Background(), req)
 	if err != nil || replay.Outcome != "coalesced" || replay.ResultJob != active.ID || replay.JobStatus != JobStatusInterrupted {
 		t.Fatalf("replay=%+v err=%v", replay, err)
+	}
+}
+
+func TestJobActionSettledRetryCorrelationSurvivesReleaseFailure(t *testing.T) {
+	dir := t.TempDir()
+	jobs := NewJobManager(filepath.Join(dir, "jobs.json"))
+	now := time.Now().UTC()
+	jobs.jobs["job-000001"] = &Job{ID: "job-000001", Type: SyncJobType, RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", Status: JobStatusFailed, CreatedAt: now, UpdatedAt: now, FinishedAt: &now}
+	jobs.nextID = 1
+	if err := jobs.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	actions := NewJobActionManager(filepath.Join(dir, "actions.json"), jobs, nil)
+	runs := 0
+	actions.reconcile = func(_ context.Context, _, _, actionIntentRef string) (MaintenanceReconcileResult, error) {
+		runs++
+		created, _, err := jobs.createCoalescedJobWithIntent(RAGIndexJobType, "owner/repo", "profile", 1, "rag-work", "cache-1", "reg-1", "namespace", JobRecoveryIntent{ActionIntentRef: actionIntentRef}, func() {})
+		if err != nil {
+			return MaintenanceReconcileResult{}, err
+		}
+		jobs.writeFile = func(string, []byte, os.FileMode) error { return errors.New("release unavailable") }
+		return MaintenanceReconcileResult{JobsStarted: []string{created.ID}}, nil
+	}
+	req := adminhttp.JobActionRequest{JobID: "job-000001", IdempotencyKey: "release-failure"}
+	if _, err := actions.Retry(context.Background(), req); err == nil {
+		t.Fatal("expected correlation release failure")
+	} else if actionErr, ok := err.(adminhttp.JobActionError); !ok || actionErr.Code != "job_action_correlation_release_failed" {
+		t.Fatalf("error=%T %v", err, err)
+	}
+	keyHash := hashJobAction(req.IdempotencyKey)
+	for index := 0; index < maxJobActionReceipts+3; index++ {
+		key := hashJobAction(fmt.Sprintf("settled-%d", index))
+		actions.receipts[key] = jobActionReceiptDisk{KeyHash: key, Receipt: adminhttp.JobActionReceipt{Outcome: "created", CreatedAt: now.Add(time.Duration(index+1) * time.Second)}}
+	}
+	actions.pruneLocked()
+	if _, retained := actions.receipts[keyHash]; !retained {
+		t.Fatal("settled receipt was evicted while its retry correlation remained pinned")
+	}
+	if _, err := actions.Retry(context.Background(), adminhttp.JobActionRequest{JobID: "job-000001", IdempotencyKey: "blocked-by-pinned-capacity"}); err == nil {
+		t.Fatal("expected bounded journal to fail closed while settled correlation is pinned")
+	} else if actionErr, ok := err.(adminhttp.JobActionError); !ok || actionErr.Code != "job_action_receipt_capacity" || runs != 1 {
+		t.Fatalf("capacity error=%T %v runs=%d", err, err, runs)
+	}
+
+	jobs.writeFile = durableAtomicWriteFile
+	replayed, err := actions.Retry(context.Background(), req)
+	if err != nil || !replayed.Replayed || replayed.Outcome != "created" || runs != 1 {
+		t.Fatalf("replayed=%+v err=%v runs=%d", replayed, err, runs)
+	}
+	if correlated, _, found := jobs.RetainedRetryIntentResult(hashJobAction(keyHash + "\x00" + hashJobAction("retry\x00job-000001\x00"))); found {
+		t.Fatalf("settled correlation was not released: %+v", correlated)
 	}
 }
 

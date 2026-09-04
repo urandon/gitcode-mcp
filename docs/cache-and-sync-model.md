@@ -123,13 +123,17 @@ SQLite commit receipt before applying age-based checkpoint cleanup, so durable
 cache truth cannot be downgraded to an expired retry. Admin retry actions first
 persist a hashed, intent-bound `pending` receipt. Replaying that intent after a
 restart first resolves an exact opaque action-intent reference that is attached
-atomically to whichever current maintenance job was created or coalesced. Jobs
-carrying an unresolved reference are protected from history pruning. If no job
-was admitted before the crash, the private receipt's minimal registration
-authority remains sufficient to re-drive reconciliation even after the source
-job expires; daemon startup performs that recovery without requiring the
-browser to retain the original idempotency key. Settlement atomically replaces
-the pending receipt with a terminal receipt and releases the job-retention pin.
+atomically to whichever current maintenance job was created, resumed, or
+coalesced, together with that admission disposition. Jobs carrying an
+unresolved reference are protected from history pruning, while the private
+correlation metadata is excluded from public job JSON. If no job was admitted
+before the crash, the private receipt's minimal registration authority remains
+sufficient to re-drive reconciliation even after the source job expires;
+daemon startup performs that recovery without requiring the browser to retain
+the original idempotency key. Settlement atomically replaces the pending
+receipt with a terminal receipt and durably releases the job-retention pin. A
+release write failure keeps both sides recoverable and rejects further receipt
+admission when the bounded journal cannot safely evict them.
 Pending intents are never evicted by settled-receipt retention. If unresolved
 intents fill the bounded journal, admission fails closed before starting a new
 mutation and returns a typed remediation diagnostic.

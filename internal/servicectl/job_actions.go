@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -55,13 +56,36 @@ type jobActionReceiptFile struct {
 
 type jobActionIntentContextKey struct{}
 
+type jobActionIntentContext struct {
+	ref string
+	err error
+}
+
 func withJobActionIntent(ctx context.Context, ref string) context.Context {
-	return context.WithValue(ctx, jobActionIntentContextKey{}, strings.TrimSpace(ref))
+	return context.WithValue(ctx, jobActionIntentContextKey{}, &jobActionIntentContext{ref: strings.TrimSpace(ref)})
 }
 
 func jobActionIntentFromContext(ctx context.Context) string {
-	ref, _ := ctx.Value(jobActionIntentContextKey{}).(string)
-	return strings.TrimSpace(ref)
+	state, _ := ctx.Value(jobActionIntentContextKey{}).(*jobActionIntentContext)
+	if state == nil {
+		return ""
+	}
+	return strings.TrimSpace(state.ref)
+}
+
+func recordJobActionIntentError(ctx context.Context, err error) {
+	state, _ := ctx.Value(jobActionIntentContextKey{}).(*jobActionIntentContext)
+	if state != nil && state.err == nil {
+		state.err = err
+	}
+}
+
+func jobActionIntentErrorFromContext(ctx context.Context) error {
+	state, _ := ctx.Value(jobActionIntentContextKey{}).(*jobActionIntentContext)
+	if state == nil {
+		return nil
+	}
+	return state.err
 }
 
 type JobActionManager struct {
@@ -79,10 +103,17 @@ func NewJobActionManager(path string, jobs *JobManager, maintenance *Maintenance
 	if maintenance != nil {
 		manager.reconcile = func(ctx context.Context, registrationID, collection, actionIntentRef string) (MaintenanceReconcileResult, error) {
 			ctx = withJobActionIntent(ctx, actionIntentRef)
+			var result MaintenanceReconcileResult
+			var err error
 			if strings.TrimSpace(collection) != "" {
-				return maintenance.RetrySyncCollection(ctx, registrationID, collection)
+				result, err = maintenance.RetrySyncCollection(ctx, registrationID, collection)
+			} else {
+				result, err = maintenance.ReconcileRegistration(ctx, registrationID)
 			}
-			return maintenance.ReconcileRegistration(ctx, registrationID)
+			if err == nil {
+				err = jobActionIntentErrorFromContext(ctx)
+			}
+			return result, err
 		}
 	}
 	return manager
@@ -118,8 +149,15 @@ func (m *JobActionManager) Load() error {
 	}
 	for _, receipt := range m.receipts {
 		if receipt.Receipt.Action == "retry" && receipt.Receipt.Outcome != "pending" {
-			_ = m.jobs.ReleaseActionIntent(hashJobAction(receipt.KeyHash + "\x00" + receipt.IntentHash))
+			if err := m.jobs.ReleaseActionIntent(hashJobAction(receipt.KeyHash + "\x00" + receipt.IntentHash)); err != nil {
+				return fmt.Errorf("job actions: release settled retry correlation: %w", err)
+			}
 		}
+	}
+	before := len(m.receipts)
+	m.pruneLocked()
+	if len(m.receipts) != before {
+		return m.saveLocked()
 	}
 	return nil
 }
@@ -142,8 +180,8 @@ func (m *JobActionManager) recoverPendingLocked(ctx context.Context) bool {
 		actionIntentRef := hashJobAction(stored.KeyHash + "\x00" + stored.IntentHash)
 		receipt := stored.Receipt
 		receipt.Replayed = true
-		if admitted, found := m.jobs.RetainedRetryIntentResult(actionIntentRef); found {
-			receipt.ResultJob, receipt.Outcome, receipt.JobStatus = admitted.ID, "coalesced", admitted.Status
+		if admitted, outcome, found := m.jobs.RetainedRetryIntentResult(actionIntentRef); found {
+			receipt.ResultJob, receipt.Outcome, receipt.JobStatus = admitted.ID, outcome, admitted.Status
 		} else {
 			// Legacy v1 pending receipts did not retain collection scope. They
 			// remain fail-closed unless an exact admitted-job correlation exists.
@@ -192,6 +230,7 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 	actionIntentRef := hashJobAction(keyHash + "\x00" + intentHash)
 	var preparedReceipt *adminhttp.JobActionReceipt
 	var preparedDisk *jobActionReceiptDisk
+	_, hadStored := m.receipts[keyHash]
 	if stored, ok := m.receipts[keyHash]; ok {
 		if stored.IntentHash != intentHash {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "idempotency_conflict", "The idempotency key was already used for a different job action.", "Generate a new key for the changed intent.")
@@ -200,7 +239,9 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		receipt.Replayed = true
 		if action != "retry" || receipt.Outcome != "pending" {
 			if action == "retry" {
-				_ = m.jobs.ReleaseActionIntent(actionIntentRef)
+				if err := m.jobs.ReleaseActionIntent(actionIntentRef); err != nil {
+					return adminhttp.JobActionReceipt{}, actionIntentReleaseError()
+				}
 			}
 			return receipt, nil
 		}
@@ -210,8 +251,8 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		preparedReceipt = &receipt
 		storedCopy := stored
 		preparedDisk = &storedCopy
-		if admitted, found := m.jobs.RetainedRetryIntentResult(actionIntentRef); found {
-			receipt.ResultJob, receipt.Outcome, receipt.JobStatus = admitted.ID, "coalesced", admitted.Status
+		if admitted, outcome, found := m.jobs.RetainedRetryIntentResult(actionIntentRef); found {
+			receipt.ResultJob, receipt.Outcome, receipt.JobStatus = admitted.ID, outcome, admitted.Status
 			storedCopy.Receipt = receipt
 			m.receipts[keyHash] = storedCopy
 			m.pruneLocked()
@@ -219,8 +260,16 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 				m.receipts[keyHash] = *preparedDisk
 				return adminhttp.JobActionReceipt{}, err
 			}
-			_ = m.jobs.ReleaseActionIntent(actionIntentRef)
+			if err := m.jobs.ReleaseActionIntent(actionIntentRef); err != nil {
+				return adminhttp.JobActionReceipt{}, actionIntentReleaseError()
+			}
 			return receipt, nil
+		}
+	}
+	if !hadStored {
+		m.pruneLocked()
+		if len(m.receipts) >= maxJobActionReceipts {
+			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusServiceUnavailable, "job_action_receipt_capacity", "The durable job-action receipt journal is full.", "Restart after service storage is writable so settled retry correlations can be released, or replay unresolved Admin actions.")
 		}
 	}
 	job, ok := m.jobs.Get(req.JobID)
@@ -240,9 +289,6 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 	prepare := func() error {
 		if preparedReceipt != nil {
 			return nil
-		}
-		if m.pendingCountLocked() >= maxJobActionReceipts {
-			return jobActionError(http.StatusServiceUnavailable, "job_action_receipt_capacity", "The durable job-action intent journal is full.", "Resolve or replay pending Admin actions before submitting another mutation.")
 		}
 		pending := receipt
 		pending.Outcome, pending.JobStatus = "pending", job.Status
@@ -297,7 +343,11 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 			// duplicate work instead of retrying/coalescing this exact intent.
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "retry_failed", "The maintenance registration could not be reconciled.", "Refresh maintenance status and resolve its typed diagnostic.")
 		}
-		m.applyRetryResult(&receipt, job, result)
+		if admitted, outcome, found := m.jobs.RetainedRetryIntentResult(actionIntentRef); found {
+			receipt.ResultJob, receipt.Outcome, receipt.JobStatus = admitted.ID, outcome, admitted.Status
+		} else {
+			m.applyRetryResult(&receipt, job, result)
+		}
 	default:
 		return adminhttp.JobActionReceipt{}, jobActionError(http.StatusBadRequest, "invalid_action", "Unknown job action.", "Refresh the admin UI.")
 	}
@@ -314,9 +364,15 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		return adminhttp.JobActionReceipt{}, err
 	}
 	if action == "retry" {
-		_ = m.jobs.ReleaseActionIntent(actionIntentRef)
+		if err := m.jobs.ReleaseActionIntent(actionIntentRef); err != nil {
+			return adminhttp.JobActionReceipt{}, actionIntentReleaseError()
+		}
 	}
 	return receipt, nil
+}
+
+func actionIntentReleaseError() error {
+	return jobActionError(http.StatusServiceUnavailable, "job_action_correlation_release_failed", "The retry receipt is durable, but its retention correlation could not be released.", "Retry the same action key after service storage is writable; no provider work will be repeated.")
 }
 
 func (m *JobActionManager) applyRetryResult(receipt *adminhttp.JobActionReceipt, source Job, result MaintenanceReconcileResult) {
@@ -367,15 +423,20 @@ func (m *JobActionManager) pruneLocked() {
 	if maxJobActionReceipts <= 0 || len(m.receipts) <= maxJobActionReceipts {
 		return
 	}
-	// Pending entries are mutation intents, not disposable history. Retention
-	// may evict only settled receipts; admission fails closed when pending
-	// intents alone fill the bounded journal.
+	// Pending entries are mutation intents, not disposable history. A settled
+	// retry whose job still carries the exact correlation is also protected: a
+	// release write may have failed, and evicting its receipt would turn that
+	// recoverable state into an irreversible retention leak.
 	settled := make([]jobActionReceiptDisk, 0, len(m.receipts))
-	pending := 0
 	for _, receipt := range m.receipts {
 		if receipt.Receipt.Outcome == "pending" {
-			pending++
 			continue
+		}
+		if receipt.Receipt.Action == "retry" && m.jobs != nil {
+			ref := hashJobAction(receipt.KeyHash + "\x00" + receipt.IntentHash)
+			if _, _, pinned := m.jobs.RetainedRetryIntentResult(ref); pinned {
+				continue
+			}
 		}
 		settled = append(settled, receipt)
 	}
@@ -385,23 +446,10 @@ func (m *JobActionManager) pruneLocked() {
 		}
 		return settled[i].Receipt.CreatedAt.Before(settled[j].Receipt.CreatedAt)
 	})
-	keepSettled := maxJobActionReceipts - pending
-	if keepSettled < 0 {
-		keepSettled = 0
-	}
-	for _, receipt := range settled[:max(0, len(settled)-keepSettled)] {
+	remove := min(len(settled), len(m.receipts)-maxJobActionReceipts)
+	for _, receipt := range settled[:remove] {
 		delete(m.receipts, receipt.KeyHash)
 	}
-}
-
-func (m *JobActionManager) pendingCountLocked() int {
-	pending := 0
-	for _, receipt := range m.receipts {
-		if receipt.Receipt.Outcome == "pending" {
-			pending++
-		}
-	}
-	return pending
 }
 
 func hashJobAction(value string) string {

@@ -2366,6 +2366,64 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	// policy. Repeated failures remain bounded by the same backoff as other
 	// daemon work and are resumed only when their retry window opens.
 	repositoryDocsReady := repositoryDocsRetryReady(snapshot.RepositoryDocs, now)
+	if actionIntentRef != "" && (activeSync.ID != "" || activeRAG.ID != "" || activeRepositoryDocs.ID != "") {
+		lane, page, maxPages := nextMaintenanceSyncLane(snapshot, frontiers, now)
+		syncReady := snapshot.SyncStage.RetryAfter.IsZero() || !now.Before(snapshot.SyncStage.RetryAfter)
+		ragReady := snapshot.RAGStage.RetryAfter.IsZero() || !now.Before(snapshot.RAGStage.RetryAfter)
+		stage := nextMaintenanceStage(snapshot.Policy, lane, needsRAGRepair, syncReady, ragReady)
+		if hasPendingRepositoryDocsAdmission && repositoryDocsReady {
+			stage = RepositoryDocsIndexJobType
+		} else if repositoryDocsNeedsIndex && repositoryDocsReady && (stage == "" || stage == SyncJobType && lane == "tail") {
+			stage = RepositoryDocsIndexJobType
+		}
+		candidate := Job{}
+		switch stage {
+		case SyncJobType:
+			selection := maintenanceSyncSelection(snapshot.Policy, frontiers, lane, now)
+			req := StartSyncJobRequest{
+				RepoID: snapshot.RepoID, ProviderMode: "live", CachePath: path,
+				CacheUUID: snapshot.CacheUUID, RegistrationID: snapshot.RegistrationID, Lane: lane,
+				Issues: selection.Issues, IssueComments: selection.IssueComments,
+				Wiki: selection.Wiki, Pulls: selection.Pulls, PRComments: selection.PRComments,
+				MaxPages: maxPages, PerPage: snapshot.Policy.PerPage, Page: page,
+				collectionPages: selection.collectionPages,
+			}
+			if exact, found := m.jobs.ActiveWork(syncWorkKey(req)); found {
+				candidate = exact
+			}
+		case RAGIndexJobType:
+			req := StartRAGIndexJobRequest{RepoID: snapshot.RepoID, Profile: effectiveProfile, CachePath: path, CacheUUID: snapshot.CacheUUID, RegistrationID: snapshot.RegistrationID}
+			if exact, found := m.jobs.ActiveWork(ragIndexWorkKey(req)); found {
+				candidate = exact
+			}
+		case RepositoryDocsIndexJobType:
+			if hasPendingRepositoryDocsAdmission {
+				if exact, found := m.jobs.ActiveWork(pendingRepositoryDocsAdmission.WorkKey); found && exact.ExpectedRevisionSetID == pendingRepositoryDocsAdmission.ExpectedRevisionSetID {
+					candidate = exact
+				}
+			}
+		}
+		if candidate.ID != "" {
+			correlated, attached, err := m.jobs.AttachActionIntent(candidate.ID, actionIntentRef, "coalesced")
+			if err != nil {
+				recordJobActionIntentError(ctx, err)
+				return m.updateEntryFailure(registrationID, "retry_correlation_persist_failed", err), nil
+			}
+			if attached {
+				switch correlated.Type {
+				case SyncJobType:
+					activeSync = correlated
+				case RAGIndexJobType:
+					activeRAG = correlated
+				case RepositoryDocsIndexJobType:
+					activeRepositoryDocs = correlated
+				}
+				return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), nil
+			}
+			activeSync, activeRAG, activeRepositoryDocs = m.activeJobsForSnapshot(snapshot)
+			activeWriter, _ = m.jobs.ActiveCacheWriter(snapshot.CacheUUID)
+		}
+	}
 	if activeSync.ID == "" && activeRAG.ID == "" && activeRepositoryDocs.ID == "" && activeWriter.ID == "" {
 		lane, page, maxPages := nextMaintenanceSyncLane(snapshot, frontiers, now)
 		syncReady := snapshot.SyncStage.RetryAfter.IsZero() || !now.Before(snapshot.SyncStage.RetryAfter)
@@ -2396,6 +2454,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 				if errors.As(jobErr, &busy) {
 					return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), nil
 				}
+				recordJobActionIntentError(ctx, jobErr)
 				return m.updateEntryFailure(registrationID, "sync_schedule_failed", jobErr), nil
 			}
 			started = append(started, job.ID)
@@ -2407,6 +2466,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 				if errors.As(jobErr, &busy) {
 					return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), started
 				}
+				recordJobActionIntentError(ctx, jobErr)
 				return m.updateEntryFailure(registrationID, "rag_schedule_failed", jobErr), started
 			}
 			started = append(started, job.ID)
@@ -2445,12 +2505,14 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 				var staleAdmission RepositoryDocsAdmissionStaleError
 				if hasPendingRepositoryDocsAdmission && errors.As(jobErr, &staleAdmission) {
 					_ = m.completeRepositoryDocsAdmission(registrationID, pendingRepositoryDocsAdmission.SourceRegistrationID, pendingRepositoryDocsAdmission.SourceRegistrationGeneration, pendingRepositoryDocsAdmission.ExpectedRevisionSetID, pendingRepositoryDocsAdmission.AuthorityPathFingerprint)
+					recordJobActionIntentError(ctx, jobErr)
 					return m.updateRepositoryDocsFailure(registrationID, snapshot.repositorySourceID, staleAdmission.DiagnosticCode(), "queued repository documentation work was superseded before it started"), started
 				}
 				var busy ErrCacheWriterBusy
 				if errors.As(jobErr, &busy) {
 					return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), started
 				}
+				recordJobActionIntentError(ctx, jobErr)
 				class := "repository_docs_schedule_failed"
 				message := "repository documentation indexing could not be scheduled"
 				var coded interface{ DiagnosticCode() string }
