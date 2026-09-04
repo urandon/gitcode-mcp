@@ -569,6 +569,18 @@ func adminControlError(err error) error {
 	if errors.As(err, &stale) {
 		return controlError(http.StatusConflict, "stale_plan", "The reviewed plan no longer matches current state.", "Render and confirm a new plan.")
 	}
+	var scopeErr maintenancePolicyScopeError
+	if errors.As(err, &scopeErr) {
+		scope := string(scopeErr.Scope)
+		return adminhttp.ControlError{
+			Status:      http.StatusBadRequest,
+			Code:        "invalid_policy",
+			Field:       "collections",
+			Message:     "The selected collections are incompatible with the repository binding.",
+			Remediation: "Remove collections outside the configured repository scopes, or update the binding scopes and render a new plan.",
+			Blockers:    []string{"The selected collections require the " + scope + " repository scope."},
+		}
+	}
 	if coded, ok := err.(interface{ DiagnosticCode() string }); ok {
 		code := coded.DiagnosticCode()
 		switch code {
@@ -599,7 +611,7 @@ func adminControlError(err error) error {
 	if strings.Contains(message, "not found") || strings.Contains(message, "not bound") {
 		return controlError(http.StatusNotFound, "target_not_found", "The selected binding or registration is unavailable.", "Refresh managed caches and bindings.")
 	}
-	return controlError(http.StatusBadRequest, "invalid_request", "The requested policy cannot be planned safely.", "Correct the policy or follow the returned CLI handoff.")
+	return controlError(http.StatusBadRequest, "invalid_request", "The requested policy cannot be planned safely.", "Review the selected repository and policy fields, then render a new plan.")
 }
 
 func controlError(status int, code, message, remediation string) error {

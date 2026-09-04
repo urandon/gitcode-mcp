@@ -354,6 +354,16 @@ func (e MaintenanceIdentityConflictError) DiagnosticCode() string {
 	return "identity_conflict"
 }
 
+type maintenancePolicyScopeError struct {
+	Scope cache.RepositoryScope
+}
+
+func (e maintenancePolicyScopeError) Error() string {
+	return "maintenance: " + string(e.Scope) + " scope is not enabled for selected repository"
+}
+
+func (maintenancePolicyScopeError) DiagnosticCode() string { return "invalid_policy" }
+
 type MaintenanceListResult struct {
 	SchemaVersion string             `json:"schema_version"`
 	Generation    int64              `json:"generation"`
@@ -3172,10 +3182,10 @@ func normalizeMaintenancePolicy(policy MaintenancePolicy, binding cache.Reposito
 		}
 	}
 	if (policy.Issues || policy.IssueComments || policy.Pulls || policy.PRComments) && !bindingHasScope(binding, cache.RepositoryScopeIssues) {
-		return MaintenancePolicy{}, errors.New("maintenance: issues scope is not enabled for selected repository")
+		return MaintenancePolicy{}, maintenancePolicyScopeError{Scope: cache.RepositoryScopeIssues}
 	}
 	if policy.Wiki && !bindingHasScope(binding, cache.RepositoryScopeWiki) {
-		return MaintenancePolicy{}, errors.New("maintenance: wiki scope is not enabled for selected repository")
+		return MaintenancePolicy{}, maintenancePolicyScopeError{Scope: cache.RepositoryScopeWiki}
 	}
 	return policy, nil
 }
