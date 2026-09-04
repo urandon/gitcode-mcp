@@ -30,6 +30,7 @@
   let jobRepoFilter = '';
   let jobFailureFilter = '';
   let jobSyncHealthFilter = '';
+  let jobCollectionFilter = '';
   let selectedJobID = '';
   let csrfToken = '';
   let pendingConfirmation: JobAction | '' = '';
@@ -125,7 +126,7 @@
   $: failedJobs = snapshot.jobs.filter((job) => job.status === 'failed');
   $: scopedJobs = snapshot.jobs.filter((job) => job.cache_ref === selectedCache?.cache_ref && job.repo_id === selectedRepo?.repo_id);
   $: visibleDiagnostics = snapshot.diagnostics.filter((item) => diagnosticsFilter === 'all' || (diagnosticsFilter === 'current' ? item.current : !item.current));
-  $: filteredJobs = snapshot.jobs.filter((job) => (!jobStateFilter || job.status === jobStateFilter) && (!jobTypeFilter || job.type === jobTypeFilter) && (!jobCacheFilter || job.cache_ref === jobCacheFilter) && (!jobRepoFilter || job.repo_id === jobRepoFilter) && (!jobFailureFilter || job.failure_class === jobFailureFilter) && (!jobSyncHealthFilter || job.sync_health === jobSyncHealthFilter));
+  $: filteredJobs = snapshot.jobs.filter((job) => (!jobStateFilter || job.status === jobStateFilter) && (!jobTypeFilter || job.type === jobTypeFilter) && (!jobCacheFilter || job.cache_ref === jobCacheFilter) && (!jobRepoFilter || job.repo_id === jobRepoFilter) && (!jobFailureFilter || job.failure_class === jobFailureFilter) && (!jobSyncHealthFilter || job.sync_health === jobSyncHealthFilter) && (!jobCollectionFilter || job.sync_collections?.some((collection) => collection.collection === jobCollectionFilter)));
   $: selectedJob = snapshot.jobs.find((job) => job.id === selectedJobID);
   $: stale = snapshot.revision !== '' && isSnapshotStale(snapshot.generated_at);
   $: selectedMaintenance = snapshot.maintenance.find((item) => `${item.cache_ref}\u0000${item.repo_id}` === maintenanceTargetKey);
@@ -248,6 +249,7 @@
     jobStateFilter = params.get('job_state') || ''; jobTypeFilter = params.get('job_type') || '';
     jobCacheFilter = params.get('job_cache') || ''; jobRepoFilter = params.get('job_repo') || ''; jobFailureFilter = params.get('job_failure') || '';
     jobSyncHealthFilter = params.get('job_sync_health') || '';
+    jobCollectionFilter = params.get('job_collection') || '';
   }
 
   function updateLocation(replace = false): void {
@@ -272,6 +274,7 @@
       if (jobRepoFilter) params.set('job_repo', jobRepoFilter);
       if (jobFailureFilter) params.set('job_failure', jobFailureFilter);
       if (jobSyncHealthFilter) params.set('job_sync_health', jobSyncHealthFilter);
+      if (jobCollectionFilter) params.set('job_collection', jobCollectionFilter);
     }
     history[replace ? 'replaceState' : 'pushState'](null, '', `${location.pathname}${params.size ? `?${params}` : ''}`);
   }
@@ -287,8 +290,8 @@
   function closeRepository(): void { selectedRepoID = ''; repoTab = 'coverage'; updateLocation(); }
   function selectRepositoryTab(value: RepositoryTab): void { repoTab = value; updateLocation(); }
   function selectDiagnosticFilter(value: 'current' | 'recovered' | 'all'): void { diagnosticsFilter = value; updateLocation(); }
-  function setJobFilter(kind: 'state' | 'type' | 'cache' | 'repo' | 'failure' | 'sync-health', value: string): void {
-    if (kind === 'state') jobStateFilter = value; else if (kind === 'type') jobTypeFilter = value; else if (kind === 'cache') jobCacheFilter = value; else if (kind === 'repo') jobRepoFilter = value; else if (kind === 'failure') jobFailureFilter = value; else jobSyncHealthFilter = value;
+  function setJobFilter(kind: 'state' | 'type' | 'cache' | 'repo' | 'failure' | 'sync-health' | 'collection', value: string): void {
+    if (kind === 'state') jobStateFilter = value; else if (kind === 'type') jobTypeFilter = value; else if (kind === 'cache') jobCacheFilter = value; else if (kind === 'repo') jobRepoFilter = value; else if (kind === 'failure') jobFailureFilter = value; else if (kind === 'sync-health') jobSyncHealthFilter = value; else jobCollectionFilter = value;
     selectedJobID = ''; updateLocation();
   }
   function openJob(job: Job): void { selectedJobID = job.id; pendingConfirmation = ''; pendingIdempotencyKey = ''; pendingCollection = ''; actionError = ''; actionReceipt = undefined; updateLocation(); }
@@ -845,6 +848,7 @@
               <label><span>Repository</span><select value={jobRepoFilter} onchange={(event) => setJobFilter('repo', event.currentTarget.value)}><option value="">All repositories</option>{#each uniqueJobValues(snapshot.jobs.map((job) => job.repo_id)) as value}<option value={value}>{value}</option>{/each}</select></label>
               <label><span>Failure</span><select value={jobFailureFilter} onchange={(event) => setJobFilter('failure', event.currentTarget.value)}><option value="">All failures</option>{#each uniqueJobValues(snapshot.jobs.map((job) => job.failure_class)) as value}<option value={value}>{humanize(value)}</option>{/each}</select></label>
               <label><span>Sync health</span><select value={jobSyncHealthFilter} onchange={(event) => setJobFilter('sync-health', event.currentTarget.value)}><option value="">All sync health</option>{#each uniqueJobValues(snapshot.jobs.map((job) => job.sync_health)) as value}<option value={value}>{humanize(value)}</option>{/each}</select></label>
+              <label><span>Collection</span><select value={jobCollectionFilter} onchange={(event) => setJobFilter('collection', event.currentTarget.value)}><option value="">All collections</option>{#each uniqueJobValues(snapshot.jobs.flatMap((job) => job.sync_collections?.map((collection) => collection.collection) || [])) as value}<option value={value}>{humanize(value)}</option>{/each}</select></label>
             </div>
             {#if snapshot.jobs.length === 0}<div class="empty-state large-empty"><Activity size={27} /><h2>No retained jobs</h2><p>The coordinator has no active or terminal work.</p></div>{:else if filteredJobs.length === 0}<div class="empty-state large-empty"><Search size={27} /><h2>No jobs match these filters</h2><p>Change one or more filters to return to retained work.</p></div>{:else}<div class="table-wrap"><table><caption class="sr-only">Coordinator jobs</caption><thead><tr><th>Job</th><th>Scope</th><th>Status</th><th>Progress</th><th>Updated</th></tr></thead><tbody>{#each [...filteredJobs].reverse() as job}<tr><th scope="row"><button class="job-link" onclick={() => openJob(job)}><span class="table-primary">{job.id}</span><small>{humanize(job.type)} · {job.work_ref || 'legacy identity'}</small></button></th><td><span class="table-primary">{job.repo_id || 'service-wide'}</span><small>{job.cache_ref || 'unscoped'}</small></td><td><StatusChip value={job.status} /></td><td>{job.completed || 0}/{job.steps || '—'}</td><td>{new Date(job.updated_at).toLocaleString()}</td></tr>{/each}</tbody></table></div>{/if}
           {/if}

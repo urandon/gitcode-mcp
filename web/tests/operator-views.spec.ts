@@ -673,15 +673,29 @@ test('retry coalescing, filters, interruption, and structured wait state are obs
 });
 
 test('collection health is URL-filterable and retries only the selected failed collection', async ({ page }) => {
-  await mockAdmin(page);
+  const collectionSnapshot: any = structuredClone(snapshot);
+  collectionSnapshot.jobs.push({
+    ...structuredClone(collectionSnapshot.jobs[1]), id: 'job-000006', status: 'running', finished_at: undefined,
+    failure_class: undefined, failure_collection: undefined, failure_message: undefined, retryable: false,
+    sync_health: 'partial_retrying', sync_collections: [
+      { collection: 'issues', outcome: 'retry_scheduled', frontier_ref: 'frontier-public-issues', records_listed: 3, committed: 0, failed: 1, error_class: 'network_unavailable', attempt: 2, retry_budget: 4, retry_after: new Date(Date.now() + 30_000).toISOString(), retryable: false, updated_at: new Date().toISOString() },
+      { collection: 'wiki', outcome: 'success', frontier_ref: 'frontier-public-wiki', records_listed: 8, committed: 8, attempt: 1, retry_budget: 4, retryable: false, last_success_at: new Date().toISOString(), updated_at: new Date().toISOString() }
+    ]
+  });
+  await mockAdmin(page, collectionSnapshot);
   let actionBody: Record<string, unknown> = {};
   await page.route('**/api/admin/v1/jobs/job-000002/retry', async (route) => {
     actionBody = route.request().postDataJSON();
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', action: 'retry', receipt: { receipt_id: 'receipt-collection-retry', action: 'retry', target_job_id: 'job-000002', result_job_id: 'job-000006', outcome: 'started', job_status: 'queued', replayed: false, created_at: new Date().toISOString() } }) });
   });
   await page.goto('/?view=Jobs');
+  await page.getByLabel('Sync health').selectOption('partial_retrying');
+  await page.getByLabel('Collection').selectOption('issues');
+  await expect(page).toHaveURL(/job_sync_health=partial_retrying/);
+  await expect(page).toHaveURL(/job_collection=issues/);
+  await expect(page.getByText('job-000006')).toBeVisible();
+  await expect(page.getByText('job-000002')).toHaveCount(0);
   await page.getByLabel('Sync health').selectOption('partial');
-  await expect(page).toHaveURL(/job_sync_health=partial/);
   await expect(page.getByText('job-000002')).toBeVisible();
   await expect(page.getByText('job-000001')).toHaveCount(0);
   await page.getByText('job-000002').click();

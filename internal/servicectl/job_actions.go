@@ -145,9 +145,11 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		if req.Collection != "" && (job.Type != SyncJobType || !retryableSyncCollection(job, req.Collection)) {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "collection_retry_unavailable", "The selected collection is not a failed terminal collection on this sync job.", "Refresh the job and choose a partial or permanently failed collection.")
 		}
-		if active, found := m.jobs.ActiveCacheRepo(job.Type, job.CacheUUID, job.RepoID); found {
-			receipt.ResultJob, receipt.Outcome, receipt.JobStatus = active.ID, "coalesced", active.Status
-			break
+		if req.Collection == "" {
+			if active, found := m.jobs.ActiveCacheRepo(job.Type, job.CacheUUID, job.RepoID); found {
+				receipt.ResultJob, receipt.Outcome, receipt.JobStatus = active.ID, "coalesced", active.Status
+				break
+			}
 		}
 		if m.reconcile == nil {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusNotImplemented, "capability_unavailable", "Retry is not available in the running daemon.", "Use the maintenance CLI for this registration.")
@@ -163,8 +165,12 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 			} else {
 				receipt.ResultJob, receipt.Outcome, receipt.JobStatus = result.JobsStarted[0], "created", "not_retained"
 			}
-		} else if active, found := m.jobs.ActiveCacheRepo(job.Type, job.CacheUUID, job.RepoID); found {
-			receipt.ResultJob, receipt.Outcome, receipt.JobStatus = active.ID, "coalesced", active.Status
+		} else if req.Collection == "" {
+			if active, found := m.jobs.ActiveCacheRepo(job.Type, job.CacheUUID, job.RepoID); found {
+				receipt.ResultJob, receipt.Outcome, receipt.JobStatus = active.ID, "coalesced", active.Status
+			} else {
+				receipt.ResultJob, receipt.Outcome, receipt.JobStatus = job.ID, "no_work_needed", job.Status
+			}
 		} else {
 			receipt.ResultJob, receipt.Outcome, receipt.JobStatus = job.ID, "no_work_needed", job.Status
 		}

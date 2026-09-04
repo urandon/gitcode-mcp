@@ -3016,6 +3016,20 @@ func TestMaintenanceStageFailureBackoffPersistsUntilSuccess(t *testing.T) {
 	}
 }
 
+func TestMaintenanceStageRetainsPartialSyncDegradation(t *testing.T) {
+	now := time.Now().UTC()
+	finished := now.Add(-time.Second)
+	job := Job{
+		ID: "job-partial", Type: SyncJobType, Status: JobStatusSucceeded,
+		SyncHealth: SyncHealthPartial, ErrorClass: "provider_unavailable",
+		UpdatedAt: finished, FinishedAt: &finished,
+	}
+	state := observeMaintenanceStage(MaintenanceStageState{}, job, now)
+	if state.Status != JobStatusSucceeded || state.ConsecutiveFailures != 1 || state.LastErrorClass != "provider_unavailable" || state.RetryAfter.IsZero() {
+		t.Fatalf("partial sync maintenance state=%+v", state)
+	}
+}
+
 func TestMaintenanceJobDiagnosticsArePublicSafe(t *testing.T) {
 	secret := "/Users/private/cache.db?token=secret"
 	event := sanitizeMaintenanceProgress(RAGIndexJobType, service.ProgressEvent{Type: "records", Phase: "running", RecordsFailed: 1, Message: secret})

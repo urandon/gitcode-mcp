@@ -238,6 +238,9 @@ func (m *JobManager) removeTerminalSyncStages(manager Manager, jobID string) {
 	}
 	if runtimeDir != "" {
 		_ = NewSyncStageJournal(runtimeDir, SyncStageLimits{}).RemoveJobStages(jobID)
+		m.syncRetryMu.Lock()
+		_ = newSyncCollectionRetryJournal(runtimeDir).Remove(jobID, "")
+		m.syncRetryMu.Unlock()
 	}
 }
 
@@ -342,11 +345,6 @@ func (m *JobManager) runDurableSync(ctx context.Context, manager Manager, jobID 
 				m.syncRetryMu.Lock()
 				defer m.syncRetryMu.Unlock()
 				return retryJournal.Upsert(checkpoint)
-			},
-			Terminal: func(task syncCollectionTask) error {
-				m.syncRetryMu.Lock()
-				defer m.syncRetryMu.Unlock()
-				return retryJournal.Remove(jobID, task.Collection)
 			},
 		}
 	}
@@ -984,6 +982,14 @@ func (m *JobManager) RecoverSyncStages(ctx context.Context, manager Manager) err
 		}
 		runtimeDir = paths.RuntimeDir
 	}
+	// Pending collection retries are the newest durable workflow authority. A
+	// retained committed stage belongs to an older successful sibling and must
+	// not resume the broader workflow before the retry checkpoint narrows it.
+	// Recover retries first so stage recovery observes the job as running (or
+	// terminal when the checkpoint is invalid) and cannot discard that state.
+	if err := m.recoverSyncCollectionRetries(ctx, manager, runtimeDir); err != nil {
+		return err
+	}
 	journal := NewSyncStageJournal(runtimeDir, SyncStageLimits{})
 	defer func() { _, _ = journal.GC() }()
 	stages, rejections, err := journal.ListForRecovery()
@@ -1081,7 +1087,7 @@ func (m *JobManager) RecoverSyncStages(ctx context.Context, manager Manager) err
 		}
 		go m.runRecoveredSyncStage(workerCtx, manager, journal, stage)
 	}
-	return m.recoverSyncCollectionRetries(ctx, manager, runtimeDir)
+	return nil
 }
 
 func (m *JobManager) recoverSyncCollectionRetries(ctx context.Context, manager Manager, runtimeDir string) error {

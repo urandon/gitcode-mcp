@@ -135,6 +135,35 @@ func TestJobActionRetryCreatesCurrentMaintenanceWork(t *testing.T) {
 	}
 }
 
+func TestJobActionCollectionRetryDoesNotCoalesceDifferentActiveCollection(t *testing.T) {
+	jobs := NewJobManager("")
+	now := time.Now().UTC()
+	finished := now.Add(-time.Minute)
+	jobs.jobs["job-000001"] = &Job{ID: "job-000001", Type: SyncJobType, RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1", Status: JobStatusSucceeded, SyncHealth: SyncHealthPartial, CreatedAt: finished, UpdatedAt: finished, FinishedAt: &finished, SyncCollections: []SyncCollectionView{{Collection: "issues", Outcome: SyncCollectionPermanentFailure}}}
+	jobs.nextID = 1
+	active, created, err := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 0, "sync:cache-1:owner/repo:head:wiki", "cache-1", "reg-1", "", func() {})
+	if err != nil || !created {
+		t.Fatalf("active=%+v created=%t err=%v", active, created, err)
+	}
+	actions := NewJobActionManager("", jobs, nil)
+	reconciled := false
+	actions.reconcile = func(_ context.Context, registrationID, collection string) (MaintenanceReconcileResult, error) {
+		reconciled = true
+		if registrationID != "reg-1" || collection != "issues" {
+			t.Fatalf("registration=%q collection=%q", registrationID, collection)
+		}
+		started, created, err := jobs.createCoalescedJob(SyncJobType, "owner/repo", "", 0, "sync:cache-1:owner/repo:head:issues", "cache-1", "reg-1", "", func() {})
+		if err != nil || !created {
+			return MaintenanceReconcileResult{}, err
+		}
+		return MaintenanceReconcileResult{JobsStarted: []string{started.ID}}, nil
+	}
+	receipt, err := actions.Retry(context.Background(), adminhttp.JobActionRequest{JobID: "job-000001", Collection: "issues", IdempotencyKey: "retry-issues"})
+	if err != nil || !reconciled || receipt.Outcome != "created" || receipt.ResultJob == active.ID {
+		t.Fatalf("receipt=%+v reconciled=%t active=%+v err=%v", receipt, reconciled, active, err)
+	}
+}
+
 func TestJobActionStateAndCapabilityBoundaries(t *testing.T) {
 	jobs := NewJobManager("")
 	now := time.Now().UTC()

@@ -69,6 +69,10 @@ func TestDaemonRestartResumesOnlyPendingCollectionRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	schema, err := store.SchemaVersion(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -103,6 +107,19 @@ func TestDaemonRestartResumesOnlyPendingCollectionRetry(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// A successful sibling may leave a committed stage checkpoint beside the
+	// newer collection retry journal. The retry checkpoint must win on restart.
+	stageJournal := NewSyncStageJournal(root, SyncStageLimits{})
+	committedAt := now.Add(-2 * time.Second)
+	if _, err := stageJournal.Create(SyncStageEnvelope{
+		JobID: jobID, CacheUUID: identity.UUID, CacheSchema: schema, CachePath: cachePath,
+		RegistrationID: maintenanceRegistrationID(identity.UUID, binding.RepoID), RepoID: binding.RepoID,
+		BindingFingerprint: syncRepositoryBindingFingerprint(binding), Collection: "issues",
+		IdempotencyKey: "committed-before-wiki-retry", RecordCount: 0, Payload: json.RawMessage(`{}`),
+		State: SyncStageState{Phase: SyncStageCommitted, CommittedAt: committedAt},
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	restarted := NewJobManager(jobsPath)
 	if err := restarted.LoadAndMarkInterrupted(); err != nil {
@@ -120,9 +137,77 @@ func TestDaemonRestartResumesOnlyPendingCollectionRetry(t *testing.T) {
 	if len(job.SyncCollections) != 2 || job.SyncCollections[0].Collection != "issues" || job.SyncCollections[0].Attempt != 1 || job.SyncCollections[1].Collection != "wiki" || job.SyncCollections[1].Attempt != 2 {
 		t.Fatalf("restart repeated a successful collection or lost retry attempt: %+v", job.SyncCollections)
 	}
-	checkpoints, err := journal.List()
+	deadline := time.Now().Add(2 * time.Second)
+	var checkpoints []syncCollectionRetryCheckpoint
+	for time.Now().Before(deadline) {
+		checkpoints, err = journal.List()
+		if err == nil && len(checkpoints) == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err != nil || len(checkpoints) != 0 {
 		t.Fatalf("terminal retry checkpoints=%+v err=%v", checkpoints, err)
+	}
+}
+
+func TestTerminalRetryCheckpointSurvivesJobSnapshotFailure(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	cachePath := filepath.Join(root, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Scopes: []cache.RepositoryScope{cache.RepositoryScopeWiki}}
+	if err := store.AddRepository(ctx, binding); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	jobID := "job-000001"
+	now := time.Now().UTC()
+	retryAt := now.Add(-time.Second)
+	registrationID := maintenanceRegistrationID(identity.UUID, binding.RepoID)
+	checkpoint := syncCollectionRetryCheckpoint{
+		JobID: jobID, Collection: "wiki", RemoteType: "wiki", Attempt: 1, RetryAt: retryAt,
+		Request: syncCollectionRetryRequest{
+			RepoID: binding.RepoID, ProviderMode: "fixture", CachePath: cachePath, Wiki: true,
+			MaxPages: 1, PerPage: 100, CacheUUID: identity.UUID, RegistrationID: registrationID,
+		},
+	}
+	journal := newSyncCollectionRetryJournal(root)
+	if err := journal.Upsert(checkpoint); err != nil {
+		t.Fatal(err)
+	}
+
+	jobs := NewJobManager(filepath.Join(root, "jobs.json"))
+	jobs.jobs[jobID] = &Job{
+		ID: jobID, Type: SyncJobType, RepoID: binding.RepoID, CacheUUID: identity.UUID, RegistrationID: registrationID,
+		Status: JobStatusRunning, CreatedAt: now.Add(-time.Minute), UpdatedAt: now,
+		SyncHealth: SyncHealthPartialRetrying, SyncCollections: []SyncCollectionView{{Collection: "wiki", Outcome: SyncCollectionRetryScheduled, Attempt: 1, RetryBudget: 4, RetryAfter: &retryAt, UpdatedAt: now}},
+	}
+	jobs.nextID = 1
+	if err := jobs.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	jobs.writeFile = func(string, []byte, os.FileMode) error { return errors.New("snapshot unavailable") }
+	req := checkpoint.Request.startRequest()
+	req.collectionAttempts = map[string]int{"wiki": checkpoint.Attempt}
+	req.collectionRetryAt = map[string]time.Time{"wiki": checkpoint.RetryAt}
+	manager := newTestManager(t, "darwin")
+	manager.RuntimeDir = root
+	jobs.runSyncJob(ctx, manager, jobID, req)
+
+	checkpoints, err := journal.List()
+	if err != nil || len(checkpoints) != 1 || checkpoints[0].Collection != "wiki" {
+		t.Fatalf("checkpoint after terminal snapshot failure=%+v err=%v", checkpoints, err)
 	}
 }
 

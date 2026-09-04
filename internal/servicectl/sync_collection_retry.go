@@ -104,7 +104,6 @@ type syncCollectionTask struct {
 
 type syncCollectionRetryHooks struct {
 	Scheduled func(syncCollectionTask, int, time.Time) error
-	Terminal  func(syncCollectionTask) error
 }
 
 type syncCollectionExecution struct {
@@ -169,9 +168,6 @@ func runSyncCollectionSchedule(
 		if delay := item.dueAt.Sub(now()); !item.dueAt.IsZero() && delay > 0 {
 			if err := wait(ctx, delay); err != nil {
 				view := syncCollectionViewForAttempt(item.task.Collection, publicSyncFrontierRef(cacheUUID, repoID, item.task.Collection, item.task.PrivateFrontier), item.attempt, budget, nil, err, now())
-				if hooks != nil && hooks.Terminal != nil {
-					_ = hooks.Terminal(item.task)
-				}
 				if observe != nil {
 					observe(view)
 				}
@@ -210,22 +206,6 @@ func runSyncCollectionSchedule(
 			item.dueAt = retryAt
 			pending = append(pending, item)
 			continue
-		}
-		if hooks != nil && hooks.Terminal != nil {
-			if clearErr := hooks.Terminal(item.task); clearErr != nil {
-				view.ErrorClass = "retry_checkpoint_persist_failed"
-				if item.result != nil && item.result.SuccessCount > 0 {
-					view.Outcome = SyncCollectionPartial
-				} else {
-					view.Outcome = SyncCollectionPermanentFailure
-				}
-				if observe != nil {
-					observe(view)
-				}
-				collectionResult.Err = clearErr
-				executions = append(executions, syncCollectionExecution{Result: item.result, Collection: collectionResult, Err: clearErr})
-				continue
-			}
 		}
 		if observe != nil {
 			observe(view)

@@ -2799,10 +2799,17 @@ func observeMaintenanceStage(state MaintenanceStageState, job Job, now time.Time
 	}
 	switch job.Status {
 	case JobStatusSucceeded, JobStatusSuperseded:
-		state.ConsecutiveFailures = 0
-		state.LastErrorClass = ""
-		state.LastError = ""
-		state.RetryAfter = time.Time{}
+		if job.Type == SyncJobType && (job.SyncHealth == SyncHealthPartial || job.SyncHealth == SyncHealthFailed) {
+			state.ConsecutiveFailures++
+			state.LastErrorClass = sanitizeMaintenanceErrorClass(job.ErrorClass, "sync_partial")
+			state.LastError = publicMaintenanceJobError(job.Type, state.LastErrorClass)
+			state.RetryAfter = now.Add(maintenanceStageBackoff(state.ConsecutiveFailures))
+		} else {
+			state.ConsecutiveFailures = 0
+			state.LastErrorClass = ""
+			state.LastError = ""
+			state.RetryAfter = time.Time{}
+		}
 	case JobStatusInterrupted:
 		// A daemon restart is not a failed attempt. Durable work resumes with the
 		// same public identity immediately after recovery.
