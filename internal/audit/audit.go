@@ -162,6 +162,8 @@ func sanitizedMetadata(metadata map[string]string) map[string]string {
 		"issue_preimage_state_hash":     true,
 		"issue_preimage_labels_hash":    true,
 		"issue_preimage_milestone_hash": true,
+		"merge_preimage_head_sha_hash":  true,
+		"merge_preimage_state_hash":     true,
 		"write_phase":                   true,
 	}
 	out := map[string]string{}

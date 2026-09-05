@@ -53,7 +53,9 @@ gitcode-mcp merge-pr \
   --idempotency-key ik-pr-merge-001
 ```
 
-`merge-pr` accepts `merge`, `squash`, or `rebase`; `merge-mr` is an equivalent alias. The optional `--sha` guard rejects a stale head before mutation. A successful provider response is followed by a PR readback that must report `state=merged`; rerunning against an already merged PR produces an audited idempotent success.
+`merge-pr` accepts `merge`, `squash`, or `rebase`; `merge-mr` is an equivalent alias. The optional `--sha` guard rejects a stale head before mutation. After reading that canonical preimage, the service atomically claims the idempotency key and sends at most one merge PUT. A successful provider response is followed by a PR readback that must report `state=merged`; rerunning against an already merged PR produces an audited idempotent success.
+
+Transport, 5xx, rate-limit, and readback ambiguity never cause another merge PUT. They retain an in-progress fence. Replaying the same key performs only canonical GET recovery and succeeds when the merged PR still has the head SHA captured by the claim; otherwise it returns `write_ambiguous_remote` for operator investigation.
 
 Use the MCP write lifecycle for agent workflows:
 

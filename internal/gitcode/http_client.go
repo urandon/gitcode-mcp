@@ -315,21 +315,33 @@ func (c *HTTPClient) MergePR(ctx context.Context, req MergePRRequest, opts Write
 	if strings.EqualFold(strings.TrimSpace(before.State), "merged") {
 		return confirmedExistingPRMerge(before, target, key)
 	}
-	merged, err := writeConfirmedJSON[MergePRResponse](ctx, c, http.MethodPut, mergePREndpoint(req.Owner, req.Repo, req.Number), "MergePR", target, req, opts, func(result WriteResult[MergePRResponse]) (WriteResult[MergePRResponse], error) {
+	if strings.TrimSpace(before.ID) == "" || before.Number != req.Number || strings.TrimSpace(before.HeadSHA) == "" {
+		return WriteResult[PullRequest]{}, ErrValidationFailed{Field: "response", Message: "pull request merge preimage requires id, matching number, and head SHA"}
+	}
+	if opts.BeforeMergePRMutation != nil {
+		if err := opts.BeforeMergePRMutation(before); err != nil {
+			return WriteResult[PullRequest]{}, err
+		}
+	}
+	endpoint := mergePREndpoint(req.Owner, req.Repo, req.Number)
+	mutationAttempted := false
+	opts.singleTransportAttempt = true
+	opts.beforeTransportAttempt = func() { mutationAttempted = true }
+	merged, err := writeConfirmedJSON[MergePRResponse](ctx, c, http.MethodPut, endpoint, "MergePR", target, req, opts, func(result WriteResult[MergePRResponse]) (WriteResult[MergePRResponse], error) {
 		if !mergeResponseConfirmed(result.Record.Merged) {
 			return WriteResult[MergePRResponse]{}, ErrValidationFailed{Field: "response.merged", Message: "merge confirmation requires merged=true"}
 		}
 		return result, nil
 	})
 	if err != nil {
-		return WriteResult[PullRequest]{}, err
+		return WriteResult[PullRequest]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "put", MutationAttempted: mutationAttempted, Cause: err}
 	}
 	pr, err := c.GetPR(ctx, PRRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
 	if err != nil {
-		return WriteResult[PullRequest]{}, ErrPartialResponse{Endpoint: mergePREndpoint(req.Owner, req.Repo, req.Number), Cause: err, Message: "merge succeeded but pull request readback failed"}
+		return WriteResult[PullRequest]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrWriteConfirmationIncomplete{Endpoint: endpoint, Cause: err, Message: "merge succeeded but pull request readback failed"}}
 	}
 	if pr.Number != req.Number || strings.TrimSpace(pr.ID) == "" || !strings.EqualFold(strings.TrimSpace(pr.State), "merged") {
-		return WriteResult[PullRequest]{}, ErrPartialResponse{Endpoint: mergePREndpoint(req.Owner, req.Repo, req.Number), Cause: ErrValidationFailed{Field: "readback.state", Message: "merged pull request readback requires state=merged"}, Message: "merge succeeded but readback did not confirm state=merged"}
+		return WriteResult[PullRequest]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrValidationFailed{Field: "readback.state", Message: "merged pull request readback requires id, matching number, and state=merged"}}
 	}
 	return WriteResult[PullRequest]{Record: pr, Confirmed: merged.Confirmed, Operation: merged.Operation, Target: merged.Target, ProviderStatus: merged.ProviderStatus, RemoteID: pr.ID, RemoteNumber: pr.Number, RemoteRevision: strings.TrimSpace(merged.Record.SHA), BrowserURL: pr.HTMLURL, IdempotencyKey: merged.IdempotencyKey, ResponseHash: merged.ResponseHash, ConfirmedAt: merged.ConfirmedAt, ProviderPayloadFingerprint: merged.ProviderPayloadFingerprint}, nil
 }

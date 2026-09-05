@@ -58,6 +58,32 @@ can recover an ambiguous completed write through GET-only canonical readback.
 It still cannot eliminate the provider's residual GET-to-PATCH race; only a
 future GitCode conditional-write primitive could provide that guarantee.
 
+## Pull Request Merge Write Boundary
+
+GitCode pull request merge uses the v5 route:
+
+```http
+PUT /api/v5/repos/{owner}/{repo}/pulls/{number}/merge
+Authorization: Bearer $GITCODE_TOKEN
+Content-Type: application/json
+
+{"merge_method":"merge"}
+```
+
+The provider does not expose a demonstrated conditional or server-side
+idempotency primitive for this mutation. The adapter therefore reads the
+canonical PR first, checks the optional expected head SHA, invokes the
+service's atomic claim callback, and makes exactly one PUT attempt. It then
+requires canonical PR readback with the same number, a non-empty provider id,
+and `state=merged`.
+
+Transport failures, 5xx, 429, and readback failures are ambiguous even when a
+response was received; the generic retry transport must not replay the PUT.
+The service stores a hash of the claimed head SHA and keeps the audit row
+`in_progress`. Same-key recovery is GET-only and can finalize success only when
+the canonical merged PR still matches that head hash. This is a local duplicate
+mutation fence, not a claim of provider-level compare-and-swap.
+
 ## Repository Push Remote Mirrors
 
 The repository list route is:

@@ -1918,6 +1918,30 @@ func TestScenario016PRLifecycleWrites(t *testing.T) {
 		}
 	})
 
+	t.Run("merge-pr-rejects-unusable-preimage-before-claim", func(t *testing.T) {
+		puts := 0
+		claimed := false
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPut {
+				puts++
+			}
+			fmt.Fprint(w, `{"id":9001,"number":7,"title":"merge me","state":"open"}`)
+		}))
+		defer server.Close()
+
+		_, err := newTestClient(t, server.URL, Config{}).MergePR(context.Background(), MergePRRequest{Owner: "example-owner", Repo: "example-repo", Number: 7}, WriteOptions{
+			IdempotencyKey: "issue-104-missing-head",
+			BeforeMergePRMutation: func(PullRequest) error {
+				claimed = true
+				return nil
+			},
+		})
+		var invalid ErrValidationFailed
+		if !errors.As(err, &invalid) || puts != 0 || claimed {
+			t.Fatalf("err=%#v puts=%d claimed=%t", err, puts, claimed)
+		}
+	})
+
 	t.Run("merge-pr-already-merged-is-idempotent", func(t *testing.T) {
 		puts := 0
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1931,6 +1955,102 @@ func TestScenario016PRLifecycleWrites(t *testing.T) {
 		result, err := newTestClient(t, server.URL, Config{}).MergePR(context.Background(), MergePRRequest{Owner: "example-owner", Repo: "example-repo", Number: 7}, WriteOptions{IdempotencyKey: "key-existing-merge"})
 		if err != nil || puts != 0 || result.ProviderStatus != "readback-existing" || !result.Confirmed {
 			t.Fatalf("err=%v puts=%d result=%+v", err, puts, result)
+		}
+	})
+
+	t.Run("merge-pr-claims-before-one-put-attempt", func(t *testing.T) {
+		for _, status := range []int{http.StatusInternalServerError, http.StatusTooManyRequests} {
+			t.Run(strconv.Itoa(status), func(t *testing.T) {
+				gets := 0
+				puts := 0
+				claimed := false
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.Method {
+					case http.MethodGet:
+						gets++
+						fmt.Fprint(w, `{"id":9001,"number":7,"title":"merge me","state":"open","head":{"ref":"topic","sha":"abc123"}}`)
+					case http.MethodPut:
+						puts++
+						if !claimed {
+							t.Fatal("merge PUT crossed the durable claim callback")
+						}
+						if status == http.StatusTooManyRequests {
+							w.Header().Set("Retry-After", "1")
+						}
+						http.Error(w, `{"message":"ambiguous upstream failure"}`, status)
+					default:
+						t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+					}
+				}))
+				defer server.Close()
+
+				_, err := newTestClient(t, server.URL, Config{MaxRetries: 2}).MergePR(context.Background(), MergePRRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, HeadSHA: "abc123"}, WriteOptions{
+					IdempotencyKey: "issue-104-one-put-" + strconv.Itoa(status),
+					BeforeMergePRMutation: func(pr PullRequest) error {
+						if gets != 1 || puts != 0 || pr.HeadSHA != "abc123" {
+							t.Fatalf("callback gets=%d puts=%d pr=%#v", gets, puts, pr)
+						}
+						claimed = true
+						return nil
+					},
+				})
+				var phase ErrWriteMutationPhase
+				if !errors.As(err, &phase) || phase.Phase != "put" || !phase.MutationAttempted {
+					t.Fatalf("error=%T %v phase=%#v", err, err, phase)
+				}
+				if gets != 1 || puts != 1 {
+					t.Fatalf("GET=%d PUT=%d, want one preimage and one mutation despite retries", gets, puts)
+				}
+			})
+		}
+	})
+
+	t.Run("merge-pr-cancellation-before-transport-is-not-attempted", func(t *testing.T) {
+		puts := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPut {
+				puts++
+			}
+			fmt.Fprint(w, `{"id":9001,"number":7,"title":"merge me","state":"open","head":{"ref":"topic","sha":"abc123"}}`)
+		}))
+		defer server.Close()
+		ctx, cancel := context.WithCancel(context.Background())
+		_, err := newTestClient(t, server.URL, Config{MaxRetries: 2}).MergePR(ctx, MergePRRequest{Owner: "example-owner", Repo: "example-repo", Number: 7}, WriteOptions{
+			IdempotencyKey: "issue-104-cancel-before-put",
+			BeforeMergePRMutation: func(PullRequest) error {
+				cancel()
+				return nil
+			},
+		})
+		var phase ErrWriteMutationPhase
+		if !errors.As(err, &phase) || phase.Phase != "put" || phase.MutationAttempted {
+			t.Fatalf("error=%T %v phase=%#v", err, err, phase)
+		}
+		if puts != 0 {
+			t.Fatalf("PUT calls=%d want 0", puts)
+		}
+	})
+
+	t.Run("merge-pr-readback-failure-is-ambiguous", func(t *testing.T) {
+		gets := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				gets++
+				if gets == 1 {
+					fmt.Fprint(w, `{"id":9001,"number":7,"title":"merge me","state":"open","head":{"ref":"topic","sha":"abc123"}}`)
+					return
+				}
+				fmt.Fprint(w, `{not-json`)
+			case http.MethodPut:
+				fmt.Fprint(w, `{"sha":"merged-sha","merged":true,"message":"merged"}`)
+			}
+		}))
+		defer server.Close()
+		_, err := newTestClient(t, server.URL, Config{}).MergePR(context.Background(), MergePRRequest{Owner: "example-owner", Repo: "example-repo", Number: 7}, WriteOptions{IdempotencyKey: "issue-104-readback"})
+		var phase ErrWriteMutationPhase
+		if !errors.As(err, &phase) || phase.Phase != "readback" || !phase.MutationAttempted {
+			t.Fatalf("error=%T %v phase=%#v", err, err, phase)
 		}
 	})
 

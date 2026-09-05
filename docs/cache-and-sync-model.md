@@ -243,6 +243,16 @@ observes a changed preimage before its next mutation, it returns the typed
 `write_conflict` diagnostic. These records survive service restart in the
 shared audit table.
 
+Pull request merge uses a parallel, merge-specific fence. The adapter reads the
+canonical PR, validates the optional expected head SHA, and invokes the atomic
+claim immediately before its single PUT attempt. The audit persists only the
+head/state hashes plus public-safe identifiers. Transport errors, 5xx, 429, and
+canonical-readback failures remain `in_progress`; a same-key replay performs
+GET-only recovery and finalizes only when `state=merged` and the claimed head
+hash still matches. A concurrent losing claimant returns
+`write_idempotency_in_progress` without sending PUT. Known provider rejections
+may become `failed` and can be explicitly retried through the same claim path.
+
 Milestone-aware issue writes also refresh a deterministic `milestone` link from
 the cached issue source to the resolved `MILESTONE-<id>` source. The link kind
 is replaced atomically for each issue write, so assignment changes do not leave
