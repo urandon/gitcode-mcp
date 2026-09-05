@@ -12,16 +12,17 @@ import (
 )
 
 type ServiceConfig struct {
-	BaseURL         string
-	LockPath        string
-	Timeout         time.Duration
-	MaxResponseSize int64
-	MaxRetries      int
-	UserAgent       string
-	Pagination      gitcode.PaginationConfig
-	RateLimitRPS    float64
-	RateLimitBurst  int
-	Feedback        feedback.Config
+	BaseURL                string
+	LockPath               string
+	Timeout                time.Duration
+	MaxResponseSize        int64
+	MaxRetries             int
+	UserAgent              string
+	Pagination             gitcode.PaginationConfig
+	RateLimitRPS           float64
+	RateLimitBurst         int
+	Feedback               feedback.Config
+	WriteCredentialPresent bool
 }
 
 type RepositoryScope string

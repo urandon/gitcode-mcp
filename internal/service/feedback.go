@@ -9,6 +9,7 @@ import (
 	"gitcode-mcp/internal/buildinfo"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/feedback"
+	"gitcode-mcp/internal/gitcode"
 )
 
 type SubmitFeedbackRequest struct {
@@ -64,6 +65,7 @@ func (s gitCodeIssueFeedbackSink) Submit(ctx context.Context, prepared feedback.
 		Replayed:       write.Replayed,
 		Evidence:       firstNonEmptyString(write.Evidence, "adapter-confirmed issue write with sanitized readback and audit evidence"),
 		GeneratedAt:    write.GeneratedAt,
+		Readiness:      prepared.Readiness,
 	}, nil
 }
 
@@ -91,7 +93,39 @@ func (s *Service) PrepareFeedback(ctx context.Context, draft feedback.Draft) (fe
 	if err != nil {
 		return feedback.PreparedReport{}, err
 	}
+	readiness, err := s.FeedbackReadiness(ctx)
+	if err != nil {
+		return feedback.PreparedReport{}, err
+	}
+	prepared.Readiness = readiness
+	if !readiness.SubmitAvailable {
+		prepared.Status = "configuration_required"
+		prepared.Configured = false
+		prepared.Remediation = readiness.Remediation
+	}
 	return prepared, nil
+}
+
+func (s *Service) FeedbackReadiness(ctx context.Context) (feedback.Readiness, error) {
+	if err := ctx.Err(); err != nil {
+		return feedback.Readiness{}, err
+	}
+	repositoryBound := false
+	repoID := strings.TrimSpace(s.feedbackConfig.RepoID)
+	if s.store != nil && repoID != "" {
+		if _, err := s.store.GetRepository(ctx, repoID); err == nil {
+			repositoryBound = true
+		} else if !isCacheNotFound(err) {
+			return feedback.Readiness{}, normalizeError(err, "feedback readiness", repoID)
+		}
+	}
+	mode := s.ProviderMode()
+	return feedback.EvaluateReadiness(feedback.ReadinessInput{
+		Config:            s.feedbackConfig,
+		RepositoryBound:   repositoryBound,
+		CredentialPresent: s.writeCredentialPresent,
+		ProviderAvailable: mode == gitcode.ProviderModeLive || mode == gitcode.ProviderMode("custom"),
+	}), nil
 }
 
 func (s *Service) SubmitFeedback(ctx context.Context, req SubmitFeedbackRequest) (feedback.SubmissionResult, error) {
@@ -106,8 +140,8 @@ func (s *Service) SubmitFeedback(ctx context.Context, req SubmitFeedbackRequest)
 	if err != nil {
 		return feedback.SubmissionResult{}, err
 	}
-	base := feedback.SubmissionResult{Status: prepared.Status, Sink: prepared.Sink, RepoID: prepared.RepoID, Fingerprint: prepared.Fingerprint, DedupeDecision: prepared.DedupeDecision, Candidates: prepared.Candidates, IdempotencyKey: key, Remediation: prepared.Remediation, GeneratedAt: s.now().UTC()}
-	if !prepared.Configured {
+	base := feedback.SubmissionResult{Status: prepared.Status, Sink: prepared.Sink, RepoID: prepared.RepoID, Fingerprint: prepared.Fingerprint, DedupeDecision: prepared.DedupeDecision, Candidates: prepared.Candidates, IdempotencyKey: key, Remediation: prepared.Remediation, GeneratedAt: s.now().UTC(), Readiness: prepared.Readiness}
+	if !prepared.Readiness.SubmitAvailable {
 		return base, nil
 	}
 	if prepared.Status == "duplicate" && len(prepared.Candidates) > 0 {

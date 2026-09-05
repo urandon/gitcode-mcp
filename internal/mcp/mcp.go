@@ -81,6 +81,18 @@ type serviceInterface interface {
 	SubmitFeedback(context.Context, service.SubmitFeedbackRequest) (feedback.SubmissionResult, error)
 }
 
+type feedbackReadinessProvider interface {
+	FeedbackReadiness(context.Context) (feedback.Readiness, error)
+}
+
+func (s *Server) feedbackReadiness(ctx context.Context) (feedback.Readiness, error) {
+	provider, ok := s.svc.(feedbackReadinessProvider)
+	if !ok || provider == nil {
+		return feedback.Readiness{}, service.ErrInvalidQuery{Field: "feedback", Message: "readiness provider is unavailable"}
+	}
+	return provider.FeedbackReadiness(ctx)
+}
+
 type RPCHandler struct {
 	svc                  serviceInterface
 	startupDiagnostic    StartupDiagnostic
@@ -278,9 +290,10 @@ type errorData struct {
 }
 
 type toolDefinition struct {
-	Name        string      `json:"name"`
-	Description string      `json:"description"`
-	InputSchema inputSchema `json:"inputSchema"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	InputSchema inputSchema    `json:"inputSchema"`
+	Meta        map[string]any `json:"_meta,omitempty"`
 }
 
 type inputSchema struct {
@@ -833,7 +846,7 @@ func (s *Server) handle(ctx context.Context, req request, isNotification bool) {
 		}
 		s.writeError(req.ID, -32601, "Method not found", nil)
 	case "tools/list":
-		s.toolsList(req)
+		s.toolsList(ctx, req)
 	case "tools/call":
 		s.toolsCall(ctx, req)
 	default:
@@ -859,7 +872,7 @@ func (s *Server) init(req request) {
 	s.writeResponse(req.ID, b)
 }
 
-func (s *Server) toolsList(req request) {
+func (s *Server) toolsList(ctx context.Context, req request) {
 	registry := s.toolRegistry()
 	tools := make([]toolDefinition, 0, len(registry))
 	for _, name := range toolListOrder {
@@ -870,7 +883,24 @@ func (s *Server) toolsList(req request) {
 		if s.toolDisabledByPolicy(name) {
 			continue
 		}
-		tools = append(tools, tool.definition)
+		definition := tool.definition
+		if name == "submit_feedback" {
+			readiness, err := s.feedbackReadiness(ctx)
+			if err != nil {
+				readiness = feedback.Readiness{
+					State:            feedback.ReadinessProviderUnavailable,
+					PrepareAvailable: true,
+					SubmitAvailable:  false,
+					Remediation:      "submission readiness could not be evaluated; inspect feedback_status and local diagnostics",
+				}
+			}
+			definition.Description += " Current submission readiness: " + readiness.State + "."
+			if readiness.Remediation != "" {
+				definition.Description += " " + readiness.Remediation + "."
+			}
+			definition.Meta = map[string]any{"gitcode_mcp": map[string]any{"availability": readiness}}
+		}
+		tools = append(tools, definition)
 	}
 	result := toolsListResult{Tools: tools}
 	if s.startupDiagnostic.present() {

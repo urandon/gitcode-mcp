@@ -1555,7 +1555,7 @@ func TestMCPRegistryIsNameBased(t *testing.T) {
 
 	var out bytes.Buffer
 	srv.writer = &out
-	srv.toolsList(request{JSONRPC: "2.0"})
+	srv.toolsList(context.Background(), request{JSONRPC: "2.0"})
 	var resp response
 	if err := json.Unmarshal(bytesTrimSpace(out.Bytes()), &resp); err != nil {
 		t.Fatal(err)

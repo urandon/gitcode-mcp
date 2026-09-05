@@ -65,6 +65,8 @@ func writeToolDefinition(cap capability.Capability) toolDefinition {
 
 func writeToolInputSchema(id string) inputSchema {
 	switch id {
+	case "feedback_status":
+		return inputSchema{Type: "object", Properties: map[string]schemaProp{}}
 	case "prepare_feedback":
 		return feedbackInputSchema(false)
 	case "submit_feedback":
@@ -160,6 +162,8 @@ func feedbackInputSchema(submit bool) inputSchema {
 
 func (s *Server) writeToolHandler(cap capability.Capability) toolHandler {
 	switch cap.ID {
+	case "feedback_status":
+		return s.callFeedbackStatus
 	case "prepare_feedback":
 		return s.callPrepareFeedback
 	case "submit_feedback":
@@ -213,6 +217,21 @@ func (s *Server) writeToolHandler(cap capability.Capability) toolHandler {
 			s.writeError(id, -32601, "Method not found", &errorData{Code: "unsupported_capability", Message: fmt.Sprintf("%q is declared but has no MCP handler", cap.MCPName)})
 		}
 	}
+}
+
+func (s *Server) callFeedbackStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var input map[string]any
+	if err := json.Unmarshal(args, &input); err != nil || len(input) != 0 {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "feedback_status arguments must be an empty object"})
+		return
+	}
+	result, err := s.feedbackReadiness(ctx)
+	if err != nil {
+		s.writeDomainError(id, err)
+		return
+	}
+	text := fmt.Sprintf("state=%s prepare_available=%t submit_available=%t", result.State, result.PrepareAvailable, result.SubmitAvailable)
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 }
 
 func (s *Server) callPrepareFeedback(ctx context.Context, id *json.RawMessage, args json.RawMessage) {

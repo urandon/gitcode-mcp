@@ -104,7 +104,7 @@ rag:
 | `max_retries` | int | `2` | Maximum retries for API calls |
 | `format` | string | `text` | Default output format (`text` or `json`) |
 | `mcp.tools.access` | string | `write` | MCP discovery policy. `write` exposes read and write tools; `read` explicitly selects the read/status-only surface. Write calls still require `write_mode: "live"` and the normal readiness/audit gates. |
-| `feedback.enabled` | bool | `false` | Enables submission to the trusted feedback sink. Preparation remains available while disabled. |
+| `feedback.enabled` | bool | `false` | Enables submission to the trusted feedback sink. Preparation and `feedback status` remain available while disabled. |
 | `feedback.sink` | string | `gitcode_issues` | Feedback destination adapter. The first supported sink is GitCode issues. |
 | `service.job_retention.success_ttl` | duration | `48h` | TTL for succeeded and superseded jobs; bounded to 1 minute–90 days. |
 | `service.job_retention.diagnostic_ttl` | duration | `336h` | TTL for failed, interrupted, and cancelled jobs; must be at least the success TTL and at most 365 days. |
@@ -249,6 +249,13 @@ Each provider should declare `data_boundary` as `local_process`, `local_network`
 ## Structured feedback
 
 The feedback sink is disabled by default. Configure it only in a trusted global configuration because it authorizes where `submit_feedback` may create issues. Neither MCP nor CLI accepts an arbitrary destination repository. See [Structured Feedback](feedback.md) for preparation, redaction, duplicate handling, and submission examples.
+
+`gitcode-mcp feedback setup --repo OWNER/REPO` renders a path-free plan for an
+already bound repository. Applying it requires `--yes`, the exact `--plan-id`,
+and an idempotency key. The atomic update preserves unrelated YAML and comments,
+uses private file permissions, and never stores a credential. Generic binaries
+remain destination-neutral; trusted bundles may use this same global contract
+to supply their feedback repository.
 
 ## Runtime audit
 

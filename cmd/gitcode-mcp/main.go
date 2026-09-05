@@ -431,7 +431,7 @@ func resolveService(store cache.Store, deps StartupDeps) (*service.Service, erro
 	var svc *service.Service
 	var err error
 	if !deps.GitCode.Live {
-		svc, err = service.NewWithMode(store, gitcode.ProviderModeFixture, "", service.ServiceConfig{LockPath: deps.Cache.LockPath, Feedback: deps.Config.Feedback})
+		svc, err = service.NewWithMode(store, gitcode.ProviderModeFixture, "", service.ServiceConfig{LockPath: deps.Cache.LockPath, Feedback: deps.Config.Feedback, WriteCredentialPresent: strings.TrimSpace(deps.GitCode.Token) != ""})
 	} else {
 		svc, err = service.NewWithMode(store, gitcode.ProviderModeLive, deps.GitCode.Token, service.ServiceConfig{
 			BaseURL:         deps.GitCode.BaseURL,

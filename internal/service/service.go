@@ -82,6 +82,7 @@ func NewWithClientConfig(store cache.Store, client gitcode.Client, cfg ServiceCo
 	svc := New(store)
 	svc.client = client
 	svc.providerMode = gitcode.ProviderMode("custom")
+	svc.writeCredentialPresent = true
 	svc.lockPath = serviceLockPath(cfg.LockPath)
 	svc.ConfigureFeedback(cfg.Feedback)
 	return svc
@@ -98,12 +99,13 @@ func NewWithMode(store cache.Store, mode gitcode.ProviderMode, token string, cfg
 	switch mode {
 	case gitcode.ProviderModeFixture:
 		return &Service{
-			store:          store,
-			client:         sanitizedFixtureClient{},
-			now:            func() time.Time { return time.Now().UTC() },
-			lockPath:       serviceLockPath(cfg.LockPath),
-			providerMode:   gitcode.ProviderModeFixture,
-			feedbackConfig: normalizeFeedbackConfig(cfg.Feedback),
+			store:                  store,
+			client:                 sanitizedFixtureClient{},
+			now:                    func() time.Time { return time.Now().UTC() },
+			lockPath:               serviceLockPath(cfg.LockPath),
+			providerMode:           gitcode.ProviderModeFixture,
+			feedbackConfig:         normalizeFeedbackConfig(cfg.Feedback),
+			writeCredentialPresent: cfg.WriteCredentialPresent,
 		}, nil
 	case gitcode.ProviderModeLive:
 		token = strings.TrimSpace(token)

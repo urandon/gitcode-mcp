@@ -1,10 +1,43 @@
 # Structured Feedback
 
-`gitcode-mcp` can turn reproducible agent or human dogfood friction into a consistent, public-safe issue. The feature is opt-in and deliberately separates preparation from submission.
+`gitcode-mcp` can turn reproducible agent or human dogfood friction into a consistent, public-safe issue. The feature is opt-in and deliberately separates preparation from submission. Report preparation is always available; external submission has an explicit runtime readiness state.
 
 Use feedback for reusable product observations: an MCP action required a CLI, browser, or human fallback; an error was generic or misleading; setup was hidden; retries were required; useful evidence was missing; or a workflow exposed a feature gap. Do not use it for raw prompts, conversation transcripts, credentials, cookies, private repository content, environment dumps, or full API payloads.
 
 ## Configure the trusted sink
+
+Inspect readiness before preparing a report:
+
+```sh
+gitcode-mcp feedback status --format json
+```
+
+The stable states, in blocking precedence order, are `disabled`,
+`sink_missing`, `repository_unbound`, `credential_missing`,
+`provider_unavailable`, and `ready`. Status is cache-first and side-effect-free:
+it does not probe GitCode, start a provider, or write configuration.
+
+For a repository already bound in the selected cache, render and apply the
+trusted global setup plan:
+
+```sh
+gitcode-mcp feedback setup --repo example-owner/feedback-repo --format json
+
+gitcode-mcp feedback setup \
+  --repo example-owner/feedback-repo \
+  --yes \
+  --plan-id feedback-plan-EXACT_PLAN_ID \
+  --idempotency-key feedback-setup-example \
+  --format json
+```
+
+The first command does not mutate configuration. The second requires the exact
+current plan id, updates only the global YAML feedback section through an
+atomic private-permission replacement, preserves unrelated YAML and comments,
+and verifies the effective policy. It never writes a credential or accepts an
+endpoint. A safe replay reports `already_configured`.
+
+The same configuration can also be supplied by a trusted installer or bundle:
 
 Add this to the global config:
 
@@ -21,7 +54,11 @@ The sink repository is configuration-owned. `prepare_feedback`, `submit_feedback
 
 ## MCP workflow
 
-First call `prepare_feedback`. It is read-only and is available even in read-only MCP sessions:
+First call `feedback_status` when submission may be needed. It is read-only and
+available in read-only MCP sessions. `tools/list` also annotates
+`submit_feedback` with the current state and remediation, so agents can avoid
+selecting an unavailable write. Then call `prepare_feedback`; preparation is
+also read-only and remains available in every state:
 
 ```json
 {
@@ -43,10 +80,10 @@ First call `prepare_feedback`. It is read-only and is available even in read-onl
 }
 ```
 
-Preparation validates the shape, redacts secrets, replaces URLs outside approved public GitCode/GitHub hosts, strips URL credentials/query/fragment components and private paths, records sanitized runtime context, renders deterministic Markdown, computes a fingerprint, and checks cached open feedback issues. It returns one of:
+Preparation validates the shape, redacts secrets, replaces URLs outside approved public GitCode/GitHub hosts, strips URL credentials/query/fragment components and private paths, records sanitized runtime context, renders deterministic Markdown, computes a fingerprint, and checks cached open feedback issues. The result includes the same readiness DTO and returns one of:
 
 - `prepared`: ready to submit;
-- `configuration_required`: useful draft, but no sink is enabled;
+- `configuration_required`: useful draft, but one or more submission prerequisites are unavailable;
 - `duplicate`: exact fingerprint match, so no new issue is needed;
 - `duplicate_candidates`: likely matches require review.
 

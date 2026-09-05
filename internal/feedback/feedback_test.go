@@ -140,3 +140,30 @@ func TestPrepareRejectsUnsafeEvidenceAndExplainsMissingSetup(t *testing.T) {
 		t.Fatalf("missing setup result: %#v", prepared)
 	}
 }
+
+func TestEvaluateReadinessPrecedence(t *testing.T) {
+	readyConfig := Config{Enabled: true, Sink: SinkGitCodeIssues, RepoID: "example/feedback"}
+	tests := []struct {
+		name  string
+		input ReadinessInput
+		want  string
+	}{
+		{name: "disabled", input: ReadinessInput{Config: DefaultConfig()}, want: ReadinessDisabled},
+		{name: "sink missing", input: ReadinessInput{Config: Config{Enabled: true, RepoID: "example/feedback"}, RepositoryBound: true, CredentialPresent: true, ProviderAvailable: true}, want: ReadinessSinkMissing},
+		{name: "repository unbound", input: ReadinessInput{Config: readyConfig, CredentialPresent: true, ProviderAvailable: true}, want: ReadinessRepositoryUnbound},
+		{name: "credential missing", input: ReadinessInput{Config: readyConfig, RepositoryBound: true, ProviderAvailable: true}, want: ReadinessCredentialMissing},
+		{name: "provider unavailable", input: ReadinessInput{Config: readyConfig, RepositoryBound: true, CredentialPresent: true}, want: ReadinessProviderUnavailable},
+		{name: "ready", input: ReadinessInput{Config: readyConfig, RepositoryBound: true, CredentialPresent: true, ProviderAvailable: true}, want: ReadinessReady},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := EvaluateReadiness(tt.input)
+			if got.State != tt.want || !got.PrepareAvailable || got.SubmitAvailable != (tt.want == ReadinessReady) || len(got.Checks) != 5 {
+				t.Fatalf("readiness=%#v", got)
+			}
+			if tt.want != ReadinessReady && (got.Remediation == "" || got.Handoff == "") {
+				t.Fatalf("blocked readiness lacks remediation: %#v", got)
+			}
+		})
+	}
+}

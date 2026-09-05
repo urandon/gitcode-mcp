@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/rag"
 )
@@ -391,6 +392,118 @@ func TestConfigCommandDoesNotOpenService(t *testing.T) {
 	}
 	if called {
 		t.Fatalf("local command opened service")
+	}
+}
+
+func TestFeedbackStatusAndTrustedSetupFlow(t *testing.T) {
+	src := newCLIConfigSource(t)
+	configPath := filepath.Join(src.configDir, "gitcode-mcp", "config.yaml")
+	cachePath := filepath.Join(src.cacheDir, "gitcode-mcp", "cache.db")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("# retained operator note\ncache_path: "+cachePath+"\nformat: text\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src.env[config.EnvMCPConfigPath] = configPath
+	store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "example/feedback", Owner: "example", Name: "feedback", APIBaseURL: "https://api.gitcode.com/api/v5", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Close()
+	reporter := statusReporter{status: config.CredentialStatus{Source: "keyring", Present: true, StoreMode: "auto"}}
+	deps := localCommandDeps{Source: src, CredentialReporter: reporter}
+	var stdout, stderr bytes.Buffer
+	if code := executeWithFactoryAndDeps([]string{"feedback", "status", "--format", "json"}, &stdout, &stderr, nil, deps); code != 0 || !strings.Contains(stdout.String(), `"state": "disabled"`) || !strings.Contains(stdout.String(), `"prepare_available": true`) {
+		t.Fatalf("status code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := executeWithFactoryAndDeps([]string{"feedback", "setup", "--repo", "example/feedback", "--format", "json"}, &stdout, &stderr, nil, deps); code != 0 || !strings.Contains(stdout.String(), `"status": "confirmation_required"`) {
+		t.Fatalf("plan code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var renderedPlan config.FeedbackSetupPlan
+	if err := json.Unmarshal(stdout.Bytes(), &renderedPlan); err != nil || renderedPlan.PlanID == "" {
+		t.Fatalf("plan decode=%#v err=%v", renderedPlan, err)
+	}
+	beforeApply, _ := os.ReadFile(configPath)
+	if strings.Contains(string(beforeApply), "feedback:") {
+		t.Fatalf("plan mutated config: %s", beforeApply)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := executeWithFactoryAndDeps([]string{"feedback", "setup", "--repo", "example/feedback", "--yes", "--plan-id", renderedPlan.PlanID, "--idempotency-key", "feedback-setup-example", "--format", "json"}, &stdout, &stderr, nil, deps); code != 0 || !strings.Contains(stdout.String(), `"status": "configured"`) || !strings.Contains(stdout.String(), `"state": "ready"`) {
+		t.Fatalf("apply code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil || !strings.Contains(string(after), "# retained operator note") || !strings.Contains(string(after), "repo_id: example/feedback") {
+		t.Fatalf("config=%s err=%v", after, err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	replayPlan, err := config.PlanFeedbackSetup(src, "example/feedback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := executeWithFactoryAndDeps([]string{"feedback", "setup", "--repo", "example/feedback", "--yes", "--plan-id", replayPlan.PlanID, "--idempotency-key", "feedback-setup-example", "--format", "json"}, &stdout, &stderr, nil, deps); code != 0 || !strings.Contains(stdout.String(), `"status": "already_configured"`) {
+		t.Fatalf("replay code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := executeWithFactoryAndDeps([]string{"feedback", "--format", "json", "--offline", "status"}, &stdout, &stderr, nil, deps); code != 0 || !strings.Contains(stdout.String(), `"state": "provider_unavailable"`) {
+		t.Fatalf("reordered offline status code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	missingCredentialDeps := deps
+	missingCredentialDeps.CredentialReporter = statusReporter{status: config.CredentialStatus{Source: "none", Present: false}}
+	if code := executeWithFactoryAndDeps([]string{"feedback", "status", "--format", "json"}, &stdout, &stderr, nil, missingCredentialDeps); code != 0 || !strings.Contains(stdout.String(), `"state": "credential_missing"`) {
+		t.Fatalf("missing credential status code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestFeedbackSetupRejectsUnboundTargetAndWrongConfirmationWithoutMutation(t *testing.T) {
+	src := newCLIConfigSource(t)
+	configPath := filepath.Join(src.configDir, "gitcode-mcp", "config.yaml")
+	cachePath := filepath.Join(src.cacheDir, "gitcode-mcp", "cache.db")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	before := "cache_path: " + cachePath + "\nformat: text\n"
+	if err := os.WriteFile(configPath, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src.env[config.EnvMCPConfigPath] = configPath
+	store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "example/bound", Owner: "example", Name: "bound"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Close()
+	deps := localCommandDeps{Source: src, CredentialReporter: statusReporter{status: config.CredentialStatus{Present: true}}}
+	for _, args := range [][]string{
+		{"feedback", "setup", "--repo", "example/unbound", "--format", "json"},
+		{"feedback", "setup", "--repo", "example/bound", "--yes", "--plan-id", "wrong-plan", "--idempotency-key", "setup-bound", "--format", "json"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := executeWithFactoryAndDeps(args, &stdout, &stderr, nil, deps); code == 0 {
+			t.Fatalf("args=%v unexpectedly succeeded: %s", args, stdout.String())
+		}
+		after, err := os.ReadFile(configPath)
+		if err != nil || string(after) != before {
+			t.Fatalf("args=%v mutated config: %q err=%v stderr=%s", args, after, err, stderr.String())
+		}
 	}
 }
 
