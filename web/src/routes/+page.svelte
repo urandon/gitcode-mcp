@@ -52,6 +52,9 @@
   let copied = '';
   let snapshot: ObservationSnapshot = structuredClone(emptySnapshot);
   let eventStream: EventSource | undefined;
+  let eventConnection: 'connecting' | 'connected' | 'disconnected' = 'connecting';
+  let freshnessNow = Date.now();
+  let freshnessTimer: number | undefined;
   let selectedCache: CacheObservation | undefined;
   let selectedRepo: Repository | undefined;
   let activeJobs = snapshot.jobs.filter((job) => activeJobStates.has(job.status));
@@ -135,7 +138,7 @@
   $: visibleDiagnostics = snapshot.diagnostics.filter((item) => diagnosticsFilter === 'all' || (diagnosticsFilter === 'current' ? item.current : !item.current));
   $: filteredJobs = snapshot.jobs.filter((job) => (!jobStateFilter || job.status === jobStateFilter) && (!jobTypeFilter || job.type === jobTypeFilter) && (!jobCacheFilter || job.cache_ref === jobCacheFilter) && (!jobRepoFilter || job.repo_id === jobRepoFilter) && (!jobFailureFilter || job.failure_class === jobFailureFilter) && (!jobSyncHealthFilter || job.sync_health === jobSyncHealthFilter) && (!jobCollectionFilter || job.sync_collections?.some((collection) => collection.collection === jobCollectionFilter)));
   $: selectedJob = snapshot.jobs.find((job) => job.id === selectedJobID);
-  $: stale = snapshot.revision !== '' && isSnapshotStale(snapshot.generated_at);
+  $: stale = snapshot.revision !== '' && isSnapshotStale(snapshot.generated_at, freshnessNow);
   $: selectedMaintenance = snapshot.maintenance.find((item) => `${item.cache_ref}\u0000${item.repo_id}` === maintenanceTargetKey);
   $: maintenanceControlsEnabled = snapshot.capabilities.some((item) => item.id === 'admin_maintenance_plan_apply' && item.ui_enabled);
   $: bindingControlsEnabled = snapshot.capabilities.some((item) => item.id === 'admin_binding_plan_apply' && item.ui_enabled);
@@ -241,7 +244,9 @@
   }
 
   function connectEvents(): void {
-    eventStream?.close(); eventStream = new EventSource('/api/admin/v1/events');
+    eventStream?.close(); eventConnection = 'connecting'; eventStream = new EventSource('/api/admin/v1/events');
+    eventStream.addEventListener('open', () => { eventConnection = 'connected'; });
+    eventStream.addEventListener('error', () => { eventConnection = 'disconnected'; });
     for (const kind of ['snapshot_changed', 'snapshot_required']) eventStream.addEventListener(kind, () => void refresh());
   }
 
@@ -695,10 +700,11 @@
 
   onMount(async () => {
     theme = normalizeTheme(localStorage.getItem(themeStorageKey)); applyTheme(theme); hydrateLocation(); window.addEventListener('popstate', onPopState);
+    freshnessTimer = window.setInterval(() => { freshnessNow = Date.now(); }, 5_000);
     try { await establishSession(); await refresh(); connectEvents(); }
     catch (value) { error = value instanceof Error ? value.message : 'Admin session is unavailable.'; loading = false; }
   });
-  onDestroy(() => { eventStream?.close(); window.removeEventListener('popstate', onPopState); });
+  onDestroy(() => { eventStream?.close(); if (freshnessTimer !== undefined) window.clearInterval(freshnessTimer); window.removeEventListener('popstate', onPopState); });
 </script>
 
 <svelte:head><title>gitcode-mcp · Local operator console</title></svelte:head>
@@ -719,6 +725,7 @@
         <section class="state-panel danger-panel" role="alert"><AlertTriangle size={22} /><div><strong>UI/API version mismatch</strong><p>This UI expects API v{adminApiVersion}, but the daemon returned v{snapshot.api_version || 'unknown'}. Update browser assets and daemon together.</p></div></section>
       {:else}
         {#if error}<section class="state-panel danger-panel" role="alert"><AlertTriangle size={22} /><div><strong>Observation unavailable</strong><p>{error}</p></div></section>{/if}
+        {#if eventConnection === 'disconnected'}<section class="state-panel warning-panel" role="status" aria-label="Live observation connection"><AlertTriangle size={21} /><div><strong>Live updates disconnected</strong><p>The browser is retrying the local event stream. Refresh the snapshot before acting if this state persists.</p><button class="text-action" onclick={refresh} disabled={loading}>Refresh snapshot</button></div></section>{/if}
         {#if stale}<section class="state-panel warning-panel" role="status"><Clock3 size={21} /><div><strong>Snapshot may be stale</strong><p>Last observation was {new Date(snapshot.generated_at).toLocaleString()}. Recheck before acting.</p></div></section>{/if}
 
         {#if active === 'Overview'}
@@ -879,7 +886,7 @@
 				  <section class="sync-stage-panel" role="status" aria-label="Durable sync phase">
 					<div><p class="section-kicker">DURABLE FETCH → COMMIT</p><h3>{syncPhaseHeading(selectedJob)}</h3><span>{selectedJob.sync_stage ? `${humanize(selectedJob.sync_stage.collection || 'collection')} · ${selectedJob.sync_stage.stage_ref}` : 'Stage not created yet'}</span></div>
 					<StatusChip value={syncLifecyclePhase(selectedJob)} />
-					<dl class="job-context"><div><dt>Lifecycle</dt><dd>{humanize(syncLifecyclePhase(selectedJob))}</dd></div><div><dt>Raw phase</dt><dd>{humanize(selectedJob.sync_stage?.phase || 'not staged')}</dd></div><div><dt>Fetched</dt><dd>{selectedJob.sync_stage?.fetched || 0}</dd></div><div><dt>Staged</dt><dd>{selectedJob.sync_stage?.staged || 0} · {(selectedJob.sync_stage?.staged_bytes || 0).toLocaleString()} bytes</dd></div><div><dt>Committed</dt><dd>{selectedJob.sync_stage?.committed || 0}</dd></div><div><dt>Retry budget</dt><dd>{selectedJob.sync_stage?.attempt || 0}/{selectedJob.sync_stage?.retry_budget || '—'}</dd></div><div><dt>Next retry</dt><dd>{selectedJob.sync_stage?.retry_after ? new Date(selectedJob.sync_stage.retry_after).toLocaleString() : 'Not scheduled'}</dd></div><div><dt>Blocking operation</dt><dd>{selectedJob.sync_stage?.blocking_operation ? `${humanize(selectedJob.sync_stage.blocking_operation)} · ${selectedJob.cache_ref || 'cache'}` : 'None'}</dd></div><div><dt>Blocking job</dt><dd>{selectedJob.sync_stage?.blocking_job_ref || 'External or not retained'}</dd></div><div><dt>Fetched at</dt><dd>{selectedJob.sync_stage?.fetched_at ? new Date(selectedJob.sync_stage.fetched_at).toLocaleString() : 'Not fetched'}</dd></div><div><dt>Staged at</dt><dd>{selectedJob.sync_stage?.staged_at ? new Date(selectedJob.sync_stage.staged_at).toLocaleString() : 'Not staged'}</dd></div><div><dt>Last commit</dt><dd>{selectedJob.sync_stage?.committed_at ? new Date(selectedJob.sync_stage.committed_at).toLocaleString() : 'No successful commit'}</dd></div></dl>
+					<dl class="job-context"><div><dt>Lifecycle</dt><dd>{humanize(syncLifecyclePhase(selectedJob))}</dd></div><div><dt>Raw phase</dt><dd>{humanize(selectedJob.sync_stage?.phase || 'not staged')}</dd></div><div><dt>Fetched</dt><dd>{selectedJob.sync_stage?.fetched || 0}</dd></div><div><dt>Staged</dt><dd>{selectedJob.sync_stage?.staged || 0} · {(selectedJob.sync_stage?.staged_bytes || 0).toLocaleString()} bytes</dd></div><div><dt>Committed</dt><dd>{selectedJob.sync_stage?.committed || 0}</dd></div><div><dt>Retry budget</dt><dd>{selectedJob.sync_stage?.attempt || 0}/{selectedJob.sync_stage?.retry_budget || '—'}</dd></div><div><dt>Next retry</dt><dd>{selectedJob.sync_stage?.retry_after ? new Date(selectedJob.sync_stage.retry_after).toLocaleString() : 'Not scheduled'}</dd></div><div><dt>Blocking operation</dt><dd>{selectedJob.sync_stage?.blocking_operation ? `${humanize(selectedJob.sync_stage.blocking_operation)} · ${selectedJob.cache_ref || 'cache'}` : 'None'}</dd></div><div><dt>Blocking job</dt><dd>{selectedJob.sync_stage?.blocking_job_ref || 'External or not retained'}</dd></div><div><dt>Fetched at</dt><dd>{selectedJob.sync_stage?.fetched_at ? new Date(selectedJob.sync_stage.fetched_at).toLocaleString() : 'Not fetched'}</dd></div><div><dt>Staged at</dt><dd>{selectedJob.sync_stage?.staged_at ? new Date(selectedJob.sync_stage.staged_at).toLocaleString() : 'Not staged'}</dd></div><div><dt>Stage updated</dt><dd>{selectedJob.sync_stage?.updated_at ? new Date(selectedJob.sync_stage.updated_at).toLocaleString() : 'Not recorded'}</dd></div><div><dt>Last commit</dt><dd>{selectedJob.sync_stage?.committed_at ? new Date(selectedJob.sync_stage.committed_at).toLocaleString() : 'No successful commit'}</dd></div></dl>
 					{#if selectedJob.sync_stage?.terminal_reason}<p class="sync-stage-terminal">{humanize(selectedJob.sync_stage.terminal_reason)}</p>{/if}
 					{#if selectedJob.sync_collections?.length}
 					  <div class="sync-collection-list" aria-label="Collection sync health">
