@@ -809,9 +809,9 @@ type WriteOptions struct {
 	BeforeIssueUpdateMutation func(Issue) error
 
 	// BeforeMergePRMutation runs after the canonical pull request preimage and
-	// optional head-SHA guard have been checked, immediately before the merge
-	// PUT is attempted. The service uses this hook to durably claim and fence
-	// the mutation.
+	// optional head-SHA guard have been checked. It runs before either returning
+	// an already-merged confirmation or attempting the merge PUT. The service
+	// uses this hook to durably claim settlement and fence any mutation.
 	BeforeMergePRMutation func(PullRequest) error
 
 	// Mutation transport controls are intentionally package-private. They let

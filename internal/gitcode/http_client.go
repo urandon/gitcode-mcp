@@ -309,14 +309,22 @@ func (c *HTTPClient) MergePR(ctx context.Context, req MergePRRequest, opts Write
 	if err != nil {
 		return WriteResult[PullRequest]{}, err
 	}
+	if strings.TrimSpace(before.ID) == "" || before.Number != req.Number {
+		return WriteResult[PullRequest]{}, ErrValidationFailed{Field: "response", Message: "pull request merge preimage requires id and matching number"}
+	}
 	if strings.TrimSpace(req.HeadSHA) != "" && !strings.EqualFold(strings.TrimSpace(req.HeadSHA), strings.TrimSpace(before.HeadSHA)) {
 		return WriteResult[PullRequest]{}, ErrConflict{Endpoint: mergePREndpoint(req.Owner, req.Repo, req.Number), Status: http.StatusConflict, Message: "pull request head SHA changed before merge"}
 	}
 	if strings.EqualFold(strings.TrimSpace(before.State), "merged") {
+		if opts.BeforeMergePRMutation != nil {
+			if err := opts.BeforeMergePRMutation(before); err != nil {
+				return WriteResult[PullRequest]{}, err
+			}
+		}
 		return confirmedExistingPRMerge(before, target, key)
 	}
-	if strings.TrimSpace(before.ID) == "" || before.Number != req.Number || strings.TrimSpace(before.HeadSHA) == "" {
-		return WriteResult[PullRequest]{}, ErrValidationFailed{Field: "response", Message: "pull request merge preimage requires id, matching number, and head SHA"}
+	if strings.TrimSpace(before.HeadSHA) == "" {
+		return WriteResult[PullRequest]{}, ErrValidationFailed{Field: "response", Message: "open pull request merge preimage requires head SHA"}
 	}
 	if opts.BeforeMergePRMutation != nil {
 		if err := opts.BeforeMergePRMutation(before); err != nil {

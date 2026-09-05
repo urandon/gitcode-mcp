@@ -90,7 +90,9 @@ preimage request, which prevents a delayed concurrent caller from reclaiming a
 failure it did not observe. Once readback confirms the merge, the audit records
 a cache-refresh-pending state before any cache write and records `succeeded`
 only after cache confirmation; restart recovery repeats GET and cache repair,
-never PUT.
+never PUT. An already-merged preimage invokes the same local claim callback
+before returning its no-PUT confirmation, so a cache-settlement failure still
+retains the head fingerprint required by recovery.
 
 ## Repository Push Remote Mirrors
 

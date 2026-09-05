@@ -2519,6 +2519,67 @@ func TestIssue104MergePRCacheRefreshCrashWindowsRecoverWithoutSecondPUT(t *testi
 	}
 }
 
+func TestIssue104MergePRAlreadyMergedCacheFailureRecoversWithoutPUT(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	gets := 0
+	puts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			gets++
+			fmt.Fprint(w, `{"id":9001,"number":103,"title":"already merged","state":"merged","head":{"ref":"topic","sha":"head-sha"}}`)
+		case http.MethodPut:
+			puts++
+			http.Error(w, "unexpected merge PUT", http.StatusInternalServerError)
+		default:
+			http.Error(w, "unexpected request", http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+	client, err := gitcode.NewHTTPClient(gitcode.Config{BaseURL: server.URL, MaxRetries: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := &writeRefreshFailStore{Store: store, failNextRefresh: true}
+	svc := NewWithClient(wrapper, client)
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.writeCredentialPresent = true
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 103, Sha: "head-sha", Strategy: "squash", IdempotencyKey: "issue-104-already-merged-cache-failure"}
+
+	_, err = svc.MergePR(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_partial_cache_refresh_failed" {
+		t.Fatalf("initial error=%#v", err)
+	}
+	entry, lookupErr := store.GetAuditEventByKey(ctx, "fixture-a", req.IdempotencyKey)
+	if lookupErr != nil || entry == nil || entry.Status != audit.StatusRemoteConfirmedCacheRefreshFailed || entry.RequestMetadata["merge_preimage_head_sha_hash"] == "" {
+		t.Fatalf("partial audit=%#v err=%v", entry, lookupErr)
+	}
+	if gets != 1 || puts != 0 {
+		t.Fatalf("initial calls: GET=%d PUT=%d", gets, puts)
+	}
+
+	recovered, err := svc.MergePR(ctx, req)
+	if err != nil || recovered.Status != "succeeded" || !recovered.Replayed {
+		t.Fatalf("recovered=%#v err=%v", recovered, err)
+	}
+	if gets != 2 || puts != 0 {
+		t.Fatalf("recovery calls: GET=%d PUT=%d", gets, puts)
+	}
+	entry, lookupErr = store.GetAuditEventByKey(ctx, "fixture-a", req.IdempotencyKey)
+	if lookupErr != nil || entry == nil || entry.Status != audit.StatusSucceeded {
+		t.Fatalf("completed audit=%#v err=%v", entry, lookupErr)
+	}
+}
+
 func TestIssue104MergePRAmbiguousReplayRecoversByCanonicalReadbackOnly(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)

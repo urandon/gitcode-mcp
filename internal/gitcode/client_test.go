@@ -1950,17 +1950,24 @@ func TestScenario016PRLifecycleWrites(t *testing.T) {
 
 	t.Run("merge-pr-already-merged-is-idempotent", func(t *testing.T) {
 		puts := 0
+		claimed := false
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodPut {
 				puts++
 			}
-			fmt.Fprint(w, `{"id":9001,"number":7,"title":"merged","state":"merged"}`)
+			fmt.Fprint(w, `{"id":9001,"number":7,"title":"merged","state":"merged","head":{"ref":"topic","sha":"abc123"}}`)
 		}))
 		defer server.Close()
 
-		result, err := newTestClient(t, server.URL, Config{}).MergePR(context.Background(), MergePRRequest{Owner: "example-owner", Repo: "example-repo", Number: 7}, WriteOptions{IdempotencyKey: "key-existing-merge"})
-		if err != nil || puts != 0 || result.ProviderStatus != "readback-existing" || !result.Confirmed {
-			t.Fatalf("err=%v puts=%d result=%+v", err, puts, result)
+		result, err := newTestClient(t, server.URL, Config{}).MergePR(context.Background(), MergePRRequest{Owner: "example-owner", Repo: "example-repo", Number: 7}, WriteOptions{
+			IdempotencyKey: "key-existing-merge",
+			BeforeMergePRMutation: func(pr PullRequest) error {
+				claimed = pr.State == "merged" && pr.HeadSHA == "abc123"
+				return nil
+			},
+		})
+		if err != nil || puts != 0 || !claimed || result.ProviderStatus != "readback-existing" || !result.Confirmed {
+			t.Fatalf("err=%v puts=%d claimed=%t result=%+v", err, puts, claimed, result)
 		}
 	})
 

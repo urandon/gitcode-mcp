@@ -263,7 +263,9 @@ Canonical merge confirmation is durably ordered as
 `succeeded`. If either the primary path or a later recovery stops between those
 steps, the next same-key call repeats canonical GET and cache repair only. A
 cache failure becomes `remote_confirmed_cache_refresh_failed`; neither pending
-nor failed cache settlement is a terminal success receipt.
+nor failed cache settlement is a terminal success receipt. The same ordering
+and preimage fingerprint apply when the canonical preflight reports an already
+merged PR: that path performs no PUT, but remains restart-safe for cache repair.
 
 Milestone-aware issue writes also refresh a deterministic `milestone` link from
 the cached issue source to the resolved `MILESTONE-<id>` source. The link kind
