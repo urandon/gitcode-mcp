@@ -21,6 +21,12 @@ import (
 	"gitcode-mcp/internal/testnet"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 func TestScenario004ReadRouteContract(t *testing.T) {
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2002,6 +2008,60 @@ func TestScenario016PRLifecycleWrites(t *testing.T) {
 					t.Fatalf("GET=%d PUT=%d, want one preimage and one mutation despite retries", gets, puts)
 				}
 			})
+		}
+	})
+
+	t.Run("merge-pr-disables-net-http-body-replay", func(t *testing.T) {
+		client, err := NewHTTPClient(Config{BaseURL: "https://example.invalid", MaxRetries: 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		puts := 0
+		client.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.Method {
+			case http.MethodGet:
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"id":9001,"number":7,"title":"merge me","state":"open","head":{"ref":"topic","sha":"abc123"}}`)), ContentLength: -1}, nil
+			case http.MethodPut:
+				puts++
+				if req.GetBody != nil {
+					t.Fatal("guarded merge request remains replayable through Request.GetBody")
+				}
+				return nil, io.ErrUnexpectedEOF
+			default:
+				t.Fatalf("unexpected method %s", req.Method)
+				return nil, nil
+			}
+		})
+		_, err = client.MergePR(context.Background(), MergePRRequest{Owner: "example-owner", Repo: "example-repo", Number: 7}, WriteOptions{IdempotencyKey: "issue-104-transport-replay"})
+		var phase ErrWriteMutationPhase
+		if !errors.As(err, &phase) || !phase.MutationAttempted || puts != 1 {
+			t.Fatalf("error=%#v puts=%d", err, puts)
+		}
+	})
+
+	t.Run("merge-pr-does-not-follow-body-preserving-redirect", func(t *testing.T) {
+		puts := 0
+		redirected := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet:
+				fmt.Fprint(w, `{"id":9001,"number":7,"title":"merge me","state":"open","head":{"ref":"topic","sha":"abc123"}}`)
+			case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/merge"):
+				puts++
+				w.Header().Set("Location", "/redirected-merge")
+				w.WriteHeader(http.StatusTemporaryRedirect)
+			case r.URL.Path == "/redirected-merge":
+				redirected++
+				fmt.Fprint(w, `{"sha":"duplicate","merged":true}`)
+			default:
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+		}))
+		defer server.Close()
+		_, err := newTestClient(t, server.URL, Config{}).MergePR(context.Background(), MergePRRequest{Owner: "example-owner", Repo: "example-repo", Number: 7}, WriteOptions{IdempotencyKey: "issue-104-no-redirect-replay"})
+		var phase ErrWriteMutationPhase
+		if !errors.As(err, &phase) || !phase.MutationAttempted || puts != 1 || redirected != 0 {
+			t.Fatalf("error=%#v puts=%d redirected=%d", err, puts, redirected)
 		}
 	})
 

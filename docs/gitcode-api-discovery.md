@@ -79,10 +79,18 @@ and `state=merged`.
 
 Transport failures, 5xx, 429, and readback failures are ambiguous even when a
 response was received; the generic retry transport must not replay the PUT.
+The merge request clears Go's replayable-body hook, so the standard client also
+cannot transparently replay it or follow a body-preserving 307/308 redirect.
 The service stores a hash of the claimed head SHA and keeps the audit row
 `in_progress`. Same-key recovery is GET-only and can finalize success only when
 the canonical merged PR still matches that head hash. This is a local duplicate
-mutation fence, not a claim of provider-level compare-and-swap.
+mutation fence, not a claim of provider-level compare-and-swap. Retry claims
+compare-and-swap the exact failed audit generation observed before the
+preimage request, which prevents a delayed concurrent caller from reclaiming a
+failure it did not observe. Once readback confirms the merge, the audit records
+a cache-refresh-pending state before any cache write and records `succeeded`
+only after cache confirmation; restart recovery repeats GET and cache repair,
+never PUT.
 
 ## Repository Push Remote Mirrors
 

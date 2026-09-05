@@ -2284,6 +2284,13 @@ func (c *HTTPClient) do(ctx context.Context, method, endpoint string, values url
 	if err != nil {
 		return nil, err
 	}
+	if opts.noRetry && req.Body != nil && req.Body != http.NoBody {
+		// NewRequest makes bytes.Reader bodies replayable by assigning GetBody.
+		// Clearing it prevents net/http.Transport from transparently retrying an
+		// idempotency-keyed write and prevents 307/308 redirect body replay inside
+		// a single Client.Do call. The outer request loop is already one attempt.
+		req.GetBody = nil
+	}
 	if c.token != "" && v4Request {
 		req.Header.Set("PRIVATE-TOKEN", c.token)
 	} else if c.token != "" {

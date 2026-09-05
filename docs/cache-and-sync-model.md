@@ -245,13 +245,25 @@ shared audit table.
 
 Pull request merge uses a parallel, merge-specific fence. The adapter reads the
 canonical PR, validates the optional expected head SHA, and invokes the atomic
-claim immediately before its single PUT attempt. The audit persists only the
-head/state hashes plus public-safe identifiers. Transport errors, 5xx, 429, and
-canonical-readback failures remain `in_progress`; a same-key replay performs
-GET-only recovery and finalizes only when `state=merged` and the claimed head
-hash still matches. A concurrent losing claimant returns
-`write_idempotency_in_progress` without sending PUT. Known provider rejections
-may become `failed` and can be explicitly retried through the same claim path.
+claim immediately before its single PUT attempt. The request has no replayable
+body factory, so neither the adapter retry loop nor Go redirect/auth replay can
+send the body again. The audit persists only the head/state hashes plus
+public-safe identifiers. Claiming a retry uses compare-and-swap against the
+exact failed generation observed before provider preflight; a delayed
+concurrent caller cannot consume a newer failure and issue another PUT.
+Transport errors, 5xx, 429, and canonical-readback failures remain
+`in_progress`; a same-key replay performs GET-only recovery and finalizes only
+when `state=merged` and the claimed head hash still matches. A concurrent
+losing claimant returns `write_idempotency_in_progress` without sending PUT.
+Known provider rejections may become `failed` and can be explicitly retried
+through the same generation-aware claim path.
+
+Canonical merge confirmation is durably ordered as
+`remote_confirmed_cache_refresh_pending` → cache graph and confirmation →
+`succeeded`. If either the primary path or a later recovery stops between those
+steps, the next same-key call repeats canonical GET and cache repair only. A
+cache failure becomes `remote_confirmed_cache_refresh_failed`; neither pending
+nor failed cache settlement is a terminal success receipt.
 
 Milestone-aware issue writes also refresh a deterministic `milestone` link from
 the cached issue source to the resolved `MILESTONE-<id>` source. The link kind

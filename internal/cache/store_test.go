@@ -666,6 +666,39 @@ func TestAuditClaimIsAtomicAndOnlyFailedAttemptCanRetry(t *testing.T) {
 	}
 }
 
+func TestAuditGenerationClaimCannotConsumeFailurePublishedAfterLookup(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	started := time.Date(2026, 9, 5, 3, 0, 0, 0, time.UTC)
+	entry := AuditTrailEntry{RepoID: "fixture-a", ID: "write-generation-key", Operation: "merge-pr", Command: "merge-pr", Mode: "live", RecordID: "PR-7", RemoteType: "pull_request", RemoteID: "7", IdempotencyKey: "generation-key", Status: "in_progress", PayloadHash: "payload-hash", CreatedAt: started}
+	claimed, err := store.ClaimAuditEventGeneration(ctx, entry, nil)
+	if err != nil || !claimed {
+		t.Fatalf("initial claim=%t err=%v", claimed, err)
+	}
+	failed := entry
+	failed.Status = "failed"
+	failed.CreatedAt = started.Add(time.Second)
+	if err := store.RecordAuditEvent(ctx, failed); err != nil {
+		t.Fatal(err)
+	}
+	delayed := entry
+	delayed.CreatedAt = started.Add(2 * time.Second)
+	claimed, err = store.ClaimAuditEventGeneration(ctx, delayed, nil)
+	if err != nil || claimed {
+		t.Fatalf("delayed caller without observed generation claim=%t err=%v", claimed, err)
+	}
+	observed, err := store.GetAuditEventByKey(ctx, "fixture-a", "generation-key")
+	if err != nil || observed == nil || observed.Status != "failed" {
+		t.Fatalf("observed failed generation=%#v err=%v", observed, err)
+	}
+	expected := observed.CreatedAt
+	claimed, err = store.ClaimAuditEventGeneration(ctx, delayed, &expected)
+	if err != nil || !claimed {
+		t.Fatalf("caller with exact failed generation claim=%t err=%v", claimed, err)
+	}
+}
+
 func TestScenario008CacheConfirmationIdempotentUpsert(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)

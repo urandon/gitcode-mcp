@@ -61,6 +61,10 @@ type auditClaimStore interface {
 	ClaimAuditEvent(context.Context, cache.AuditTrailEntry) (bool, error)
 }
 
+type auditGenerationClaimStore interface {
+	ClaimAuditEventGeneration(context.Context, cache.AuditTrailEntry, *time.Time) (bool, error)
+}
+
 func New(store cache.Store) *Service {
 	svc, err := NewWithMode(store, gitcode.ProviderModeFixture, "", ServiceConfig{})
 	if err != nil {
@@ -5468,6 +5472,14 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 			return replayWriteResult(command, req, prior, fingerprint, s.now().UTC()), nil
 		}
 		if lookup.Partial {
+			if command == "merge-pr" {
+				if recovered, ok, recoverErr := s.recoverAmbiguousMergePR(ctx, route, req, prior, fingerprint); recoverErr != nil {
+					return WriteCommandResult{}, recoverErr
+				} else if ok {
+					return recovered, nil
+				}
+				return WriteCommandResult{}, ErrWriteFailure{Code: "write_ambiguous_remote", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
+			}
 			graph, err := s.replayWriteGraph(ctx, command, route.RepoID, req, prior)
 			if err != nil {
 				return WriteCommandResult{}, err
@@ -5560,7 +5572,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 		}
 	}
 	if command == "merge-pr" {
-		claimer, ok := s.store.(auditClaimStore)
+		claimer, ok := s.store.(auditGenerationClaimStore)
 		if !ok {
 			return WriteCommandResult{}, ErrWriteFailure{Code: "write_audit_start_failed", RepoID: route.RepoID, RemoteID: strconv.Itoa(req.Number), IdempotencyKey: key, Cause: errors.New("atomic audit claim support is unavailable")}
 		}
@@ -5583,7 +5595,12 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 				}
 			}
 			entry := audit.WithRequestMetadata(audit.InProgress(route.RepoID, key, command, fallbackSourceID("pull_request", strconv.Itoa(req.Number)), "pull_request", strconv.Itoa(req.Number), fingerprint, "pull request merge claimed before PUT", s.now().UTC()), metadata)
-			claimed, claimErr := claimer.ClaimAuditEvent(ctx, entry)
+			var expectedFailedAt *time.Time
+			if priorEntry != nil && priorEntry.Status == audit.StatusFailed {
+				expected := priorEntry.CreatedAt
+				expectedFailedAt = &expected
+			}
+			claimed, claimErr := claimer.ClaimAuditEventGeneration(ctx, entry, expectedFailedAt)
 			if claimErr != nil {
 				return ErrWriteFailure{Code: "write_audit_start_failed", RepoID: route.RepoID, RemoteID: strconv.Itoa(req.Number), IdempotencyKey: key, Cause: claimErr}
 			}
@@ -5770,7 +5787,11 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 		metadata["write_phase"] = "canonical_readback_confirmed"
 		auditEntry = audit.WithRequestMetadata(auditEntry, metadata)
 	}
-	if err := s.store.RecordAuditEvent(ctx, auditEntry); err != nil {
+	initialAuditEntry := auditEntry
+	if command == "merge-pr" {
+		initialAuditEntry = audit.WithRequestMetadata(audit.RemoteConfirmedCacheRefreshPending(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, "remote merge confirmed; cache refresh pending", confirmed.completedAt), auditEntry.RequestMetadata)
+	}
+	if err := s.store.RecordAuditEvent(ctx, initialAuditEntry); err != nil {
 		partial := withWriteAuditMetadata(audit.RemoteConfirmedAuditFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()), command, key, fingerprint, graph.Record.RemoteType, confirmed)
 		if command == "update-issue" || command == "merge-pr" {
 			partial = audit.WithRequestMetadata(partial, auditEntry.RequestMetadata)
@@ -5801,6 +5822,13 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 		}
 		_ = s.store.RecordAuditEvent(ctx, partial)
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
+	}
+	if command == "merge-pr" {
+		if err := s.store.RecordAuditEvent(ctx, auditEntry); err != nil {
+			partial := audit.WithRequestMetadata(audit.RemoteConfirmedAuditFailed(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, err.Error(), s.now().UTC()), auditEntry.RequestMetadata)
+			_ = s.store.RecordAuditEvent(ctx, partial)
+			return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
+		}
 	}
 	base.Status = "succeeded"
 	base.ID = graph.Record.ID
@@ -6586,7 +6614,8 @@ func (s *Service) recoverAmbiguousMergePR(ctx context.Context, route RepositoryR
 	metadata := cloneStringMap(prior.RequestMetadata)
 	metadata["write_phase"] = "recovered_by_canonical_readback"
 	completed := audit.WithRequestMetadata(audit.Success(route.RepoID, prior.IdempotencyKey, "merge-pr", graph.Record.ID, graph.Record.RemoteType, confirmation.remoteID, fingerprint, "recovered_by_canonical_readback", now), metadata)
-	if err := s.store.RecordAuditEvent(ctx, completed); err != nil {
+	pending := audit.WithRequestMetadata(audit.RemoteConfirmedCacheRefreshPending(route.RepoID, prior.IdempotencyKey, "merge-pr", graph.Record.ID, graph.Record.RemoteType, confirmation.remoteID, fingerprint, "canonical merge readback confirmed; cache refresh pending", now), metadata)
+	if err := s.store.RecordAuditEvent(ctx, pending); err != nil {
 		return WriteCommandResult{}, false, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: confirmation.remoteID, IdempotencyKey: prior.IdempotencyKey, Cause: err}
 	}
 	if err := s.store.UpsertRecordGraph(ctx, graph); err != nil {
@@ -6595,10 +6624,21 @@ func (s *Service) recoverAmbiguousMergePR(ctx context.Context, route RepositoryR
 		return WriteCommandResult{}, false, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: confirmation.remoteID, IdempotencyKey: prior.IdempotencyKey, Cause: err}
 	}
 	if err := s.recordCacheConfirmation(ctx, "merge-pr", route.RepoID, prior.IdempotencyKey, fingerprint, graph, confirmation.remoteID, "succeeded", now); err != nil {
+		partial := audit.WithRequestMetadata(audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, prior.IdempotencyKey, "merge-pr", graph.Record.ID, graph.Record.RemoteType, confirmation.remoteID, fingerprint, err.Error(), now), metadata)
+		_ = s.store.RecordAuditEvent(ctx, partial)
 		return WriteCommandResult{}, false, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: confirmation.remoteID, IdempotencyKey: prior.IdempotencyKey, Cause: err}
 	}
+	if err := s.store.RecordAuditEvent(ctx, completed); err != nil {
+		partial := audit.WithRequestMetadata(audit.RemoteConfirmedAuditFailed(route.RepoID, prior.IdempotencyKey, "merge-pr", graph.Record.ID, graph.Record.RemoteType, confirmation.remoteID, fingerprint, err.Error(), now), metadata)
+		_ = s.store.RecordAuditEvent(ctx, partial)
+		return WriteCommandResult{}, false, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: confirmation.remoteID, IdempotencyKey: prior.IdempotencyKey, Cause: err}
+	}
 	result := replayWriteResult("merge-pr", req, completed, fingerprint, now)
-	result.Status = "recovered_after_ambiguous_write"
+	if prior.Status == audit.StatusInProgress {
+		result.Status = "recovered_after_ambiguous_write"
+	} else {
+		result.Status = "succeeded"
+	}
 	result.ID = graph.Record.ID
 	result.RemoteID = confirmation.remoteID
 	result.RemoteNumber = confirmation.remoteNumber
