@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cliHandoff, humanize, isSnapshotStale, laneSummary, relativeAge, statusTone } from './admin';
+import { cliHandoff, humanize, isSnapshotStale, jobNextAction, laneSummary, relativeAge, statusTone } from './admin';
 
 describe('admin presentation helpers', () => {
   it('keeps bounded tail language explicitly partial', () => {
@@ -23,6 +23,14 @@ describe('admin presentation helpers', () => {
     expect(relativeAge('2030-01-01T02:04:05Z', now)).toBe('1 day ago');
     expect(relativeAge('2030-01-02T02:34:05Z', now)).toBe('in 30 minutes');
     expect(relativeAge('invalid', now)).toBe('not recorded');
+  });
+
+  it('derives a typed list action without treating active backoff as retryable', () => {
+    const now = Date.parse('2030-01-02T02:04:05Z');
+    const failed = { status: 'failed', failure_class: 'provider_unavailable', failure_collection: 'wiki', retryable: true };
+    expect(jobNextAction(failed, now)).toBe('Review Wiki and retry');
+    expect(jobNextAction({ ...failed, retryable: false, retry_after: '2030-01-02T03:04:05Z' }, now)).toBe('Wait for scheduled retry in 1 hour');
+    expect(jobNextAction({ ...failed, retryable: false, inspect_command: 'gitcode-mcp service job job-1 --format json' }, now)).toBe('Inspect retained failure');
   });
 
   it('builds only fixed public-safe CLI handoffs', () => {

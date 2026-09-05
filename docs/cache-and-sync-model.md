@@ -116,7 +116,10 @@ only retry authority and request selectors—never fetched response bodies—and
 pending collection without replaying successful siblings. CLI, MCP, and the
 admin Jobs view project the same state. The admin UI additionally supports a
 URL-backed aggregate-health filter and an explicit action that retries one
-failed collection while retaining the others.
+failed collection while retaining the others. A retained future retry deadline
+suppresses both whole-job and affected-collection retry in the public action
+contract; the write handler enforces the same deadline before reserving a new
+idempotency receipt or reconciling maintenance.
 
 Collection retry checkpoints are bounded to 256 entries, 1 MiB of private
 metadata, and 24 hours. Recovery reconciles an exact staged transaction or

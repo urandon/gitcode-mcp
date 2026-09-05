@@ -786,11 +786,36 @@ test('failed jobs are discoverable and expose exact inspect and remediation comm
   await expect(page.getByText('1').first()).toBeVisible();
   await page.getByRole('button', { name: 'Show failed' }).click();
   await expect(page).toHaveURL(/job_state=failed/);
-  await expect(page.getByText('job-000002')).toBeVisible();
-  await page.getByText('job-000002').click();
+  const failedRow = page.getByRole('row').filter({ hasText: 'job-000002' });
+  await expect(failedRow).toContainText('Provider Unavailable');
+  await expect(failedRow).toContainText('Issues · Review Issues and retry');
+  await expect(failedRow).toContainText('View details');
+  await failedRow.getByRole('button', { name: /View details/ }).click();
   await expect(page.getByText('Provider Unavailable · Issues')).toBeVisible();
   await expect(page.getByText('gitcode-mcp service job job-000002 --format json')).toBeVisible();
   await expect(page.getByText('gitcode-mcp service maintenance --format json')).toBeVisible();
+});
+
+test('active retry backoff is explicit and blocks whole and collection retry', async ({ page }) => {
+  const backoffSnapshot: any = structuredClone(snapshot);
+  const now = '2030-01-02T02:04:05.000Z';
+  const retryAt = '2030-01-02T03:04:05.000Z';
+  const failed = backoffSnapshot.jobs.find((job: any) => job.id === 'job-000002');
+  failed.retryable = false;
+  failed.retry_after = retryAt;
+  failed.action_reason = `Automatic retry is scheduled for ${retryAt}; equivalent active work remains coalesced.`;
+  failed.sync_collections[0].retryable = false;
+  failed.sync_collections[0].retry_after = retryAt;
+  await mockAdmin(page, backoffSnapshot);
+  await page.clock.setFixedTime(new Date(now));
+  await page.goto('/?view=Jobs');
+
+  const failedRow = page.getByRole('row').filter({ hasText: 'job-000002' });
+  await expect(failedRow).toContainText('Wait for scheduled retry in 1 hour');
+  await failedRow.getByRole('button', { name: /View details/ }).click();
+  await expect(page.getByText(/Automatic retry is scheduled for .* equivalent active work remains coalesced/)).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Retry job' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Retry Issues' })).toHaveCount(0);
 });
 
 test('maintenance scope validation identifies collections and omits an unavailable CLI handoff', async ({ page }) => {
