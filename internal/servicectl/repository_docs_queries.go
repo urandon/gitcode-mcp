@@ -122,15 +122,10 @@ func (s RPCServer) repositoryDocsSourceForRequest(ctx context.Context, repoID, c
 	if s.Maintenance == nil {
 		return repositoryDocsAdminSource{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_registration_unavailable"}
 	}
-	hasRegistration := strings.TrimSpace(selector.RegistrationID) != ""
-	hasSource := strings.TrimSpace(selector.SourceRegistrationID) != ""
-	hasGeneration := selector.SourceRegistrationGeneration > 0
-	allOmitted := !hasRegistration && !hasSource && selector.SourceRegistrationGeneration == 0
-	complete := hasRegistration && hasSource && hasGeneration
-	if !allOmitted && !complete {
-		return repositoryDocsAdminSource{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_source_selector_required"}
+	if err := validateRepositoryDocsSourceSelector(selector); err != nil {
+		return repositoryDocsAdminSource{}, err
 	}
-	if complete {
+	if strings.TrimSpace(selector.RegistrationID) != "" {
 		source, err := s.Maintenance.repositoryDocsSourceForSelector(selector)
 		if err != nil {
 			return repositoryDocsAdminSource{}, err
@@ -145,6 +140,18 @@ func (s RPCServer) repositoryDocsSourceForRequest(ctx context.Context, repoID, c
 		return repositoryDocsAdminSource{}, err
 	}
 	return s.Maintenance.repositoryDocsSourceForCacheRepo(cacheUUID, canonicalRepoID)
+}
+
+func validateRepositoryDocsSourceSelector(selector RepositoryDocsSourceSelector) error {
+	hasRegistration := strings.TrimSpace(selector.RegistrationID) != ""
+	hasSource := strings.TrimSpace(selector.SourceRegistrationID) != ""
+	hasGeneration := selector.SourceRegistrationGeneration > 0
+	allOmitted := !hasRegistration && !hasSource && selector.SourceRegistrationGeneration == 0
+	complete := hasRegistration && hasSource && hasGeneration
+	if !allOmitted && !complete {
+		return RepositoryDocsSourceUnavailableError{code: "repository_docs_source_selector_required"}
+	}
+	return nil
 }
 
 func (s RPCServer) repositoryDocsSources(ctx context.Context, req RepositoryDocsSourceListRequest) (RepositoryDocsSourceListResult, error) {

@@ -56,7 +56,7 @@ func TestRepositoryDocsIndexJobCanonicalizesAliasAndPublishesMetadata(t *testing
 	jobs := NewJobManager(jobSnapshotPath)
 	job, err := jobs.StartRepositoryDocsIndex(ctx, manager, StartRepositoryDocsIndexJobRequest{
 		RepoID: "urandon/sessionless", RepositoryPath: repoPath, CachePath: cachePath,
-		SourceRegistrationID: "repo-doc-source-test", SourceRegistrationGeneration: 1,
+		RegistrationID: "repo-doc-registration-test", SourceRegistrationID: "repo-doc-source-test", SourceRegistrationGeneration: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -114,6 +114,56 @@ func TestRepositoryDocsIndexJobCanonicalizesAliasAndPublishesMetadata(t *testing
 	aliasSets, err := store.ListRepositoryDocRevisionSets(ctx, cache.RepositoryDocRevisionSetFilter{RepoID: "urandon/sessionless"})
 	if err != nil || len(aliasSets) != 0 {
 		t.Fatalf("alias revision sets = %#v, err=%v", aliasSets, err)
+	}
+}
+
+func TestRepositoryDocsIndexDaemonBoundaryRequiresAllEmptyOrCompleteSelector(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	repoPath := createRepositoryDocsRegistrationRepo(t, filepath.Join(dir, "repo"), "selector boundary")
+	cfg := adminFakeRAGConfig()
+	cfg.CachePath = cachePath
+	cfg.LockPath = cachePath + ".lock"
+	manager := Manager{EffectiveConfig: &cfg}
+
+	tests := []struct {
+		name     string
+		selector RepositoryDocsSourceSelector
+		wantCode string
+	}{
+		{name: "all omitted"},
+		{name: "registration only", selector: RepositoryDocsSourceSelector{RegistrationID: "registration-1"}, wantCode: "repository_docs_source_selector_required"},
+		{name: "source pair without registration", selector: RepositoryDocsSourceSelector{SourceRegistrationID: "source-1", SourceRegistrationGeneration: 1}, wantCode: "repository_docs_source_selector_required"},
+		{name: "complete", selector: RepositoryDocsSourceSelector{RegistrationID: "registration-1", SourceRegistrationID: "source-1", SourceRegistrationGeneration: 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := prepareRepositoryDocsIndex(ctx, manager, StartRepositoryDocsIndexJobRequest{
+				RepoID: "owner/repo", RepositoryPath: repoPath, CachePath: cachePath,
+				RegistrationID: tt.selector.RegistrationID, SourceRegistrationID: tt.selector.SourceRegistrationID,
+				SourceRegistrationGeneration: tt.selector.SourceRegistrationGeneration,
+			})
+			if tt.wantCode == "" {
+				if err != nil {
+					t.Fatalf("valid selector rejected: %T %v", err, err)
+				}
+				return
+			}
+			if coded, ok := err.(interface{ DiagnosticCode() string }); !ok || coded.DiagnosticCode() != tt.wantCode {
+				t.Fatalf("selector error=%T %v, want code %q", err, err, tt.wantCode)
+			}
+		})
 	}
 }
 

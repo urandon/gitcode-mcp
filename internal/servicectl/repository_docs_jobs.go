@@ -91,6 +91,12 @@ type preparedRepositoryDocsIndex struct {
 func prepareRepositoryDocsIndex(ctx context.Context, manager Manager, req StartRepositoryDocsIndexJobRequest) (preparedRepositoryDocsIndex, error) {
 	req.RepoID = strings.TrimSpace(req.RepoID)
 	req.RepositoryPath = strings.TrimSpace(req.RepositoryPath)
+	if err := validateRepositoryDocsSourceSelector(RepositoryDocsSourceSelector{
+		RegistrationID: req.RegistrationID, SourceRegistrationID: req.SourceRegistrationID,
+		SourceRegistrationGeneration: req.SourceRegistrationGeneration,
+	}); err != nil {
+		return preparedRepositoryDocsIndex{}, err
+	}
 	if req.RepoID == "" || req.RepositoryPath == "" {
 		return preparedRepositoryDocsIndex{}, errors.New("repo_id and repository_path are required")
 	}
