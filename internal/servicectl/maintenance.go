@@ -2448,6 +2448,10 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 		snapshot.repositorySourceID = ""
 	}
 	m.mu.Unlock()
+	if m.jobs != nil && m.jobs.CacheRecoveryPending(snapshot.CacheUUID) {
+		recordJobActionIntentError(ctx, CacheRecoveryFenceError{})
+		return cloneMaintenanceEntry(&snapshot), nil
+	}
 	now := m.now()
 	activeSync, activeRAG, activeRepositoryDocs := m.activeJobsForSnapshot(snapshot)
 	store, err := cache.NewSQLiteReadOnlyStore(ctx, path)
@@ -2638,8 +2642,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 			}
 			job, jobErr := m.jobs.StartSync(context.Background(), jobManager, req)
 			if jobErr != nil {
-				var busy ErrCacheWriterBusy
-				if errors.As(jobErr, &busy) {
+				if transientCacheWriterAdmission(jobErr) {
 					recordJobActionIntentError(ctx, jobErr)
 					return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), nil
 				}
@@ -2651,8 +2654,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 		} else if stage == RAGIndexJobType {
 			job, jobErr := m.jobs.StartRAGIndex(context.Background(), jobManager, StartRAGIndexJobRequest{RepoID: snapshot.RepoID, Profile: effectiveProfile, CachePath: path, CacheUUID: snapshot.CacheUUID, RegistrationID: snapshot.RegistrationID, ActionIntentRef: actionIntentRef})
 			if jobErr != nil {
-				var busy ErrCacheWriterBusy
-				if errors.As(jobErr, &busy) {
+				if transientCacheWriterAdmission(jobErr) {
 					recordJobActionIntentError(ctx, jobErr)
 					return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), started
 				}
@@ -2698,8 +2700,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 					recordJobActionIntentError(ctx, jobErr)
 					return m.updateRepositoryDocsFailure(registrationID, snapshot.repositorySourceID, staleAdmission.DiagnosticCode(), "queued repository documentation work was superseded before it started"), started
 				}
-				var busy ErrCacheWriterBusy
-				if errors.As(jobErr, &busy) {
+				if transientCacheWriterAdmission(jobErr) {
 					recordJobActionIntentError(ctx, jobErr)
 					return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), started
 				}
@@ -2720,6 +2721,13 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 		}
 	}
 	return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), started
+}
+
+func transientCacheWriterAdmission(err error) bool {
+	var busy ErrCacheWriterBusy
+	var mutationFence CacheMutationFenceError
+	var recoveryFence CacheRecoveryFenceError
+	return errors.As(err, &busy) || errors.As(err, &mutationFence) || errors.As(err, &recoveryFence)
 }
 
 func repositoryDocsRetryReady(state *RepositoryDocsMaintenanceState, now time.Time) bool {

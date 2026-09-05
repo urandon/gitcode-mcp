@@ -161,13 +161,21 @@ func TestIssue141BlockedCacheInspectionDoesNotBlockControlPlane(t *testing.T) {
 		t.Fatal(err)
 	}
 	jobID := "job-000001"
+	repositoryDocsJobID := "job-000002"
+	repositoryDocsWorkKey := "issue-141-repository-docs-work"
 	registrationID := maintenanceRegistrationID(identities[healthyPath].UUID, "owner/repo")
 	seedJobs := NewJobManager(paths.JobsPath)
 	seedJobs.jobs[jobID] = &Job{
 		ID: jobID, Type: SyncJobType, RepoID: "owner/repo", CacheUUID: identities[healthyPath].UUID,
 		RegistrationID: registrationID, Status: JobStatusRunning, CreatedAt: time.Now().Add(-time.Minute).UTC(), UpdatedAt: time.Now().UTC(),
 	}
-	seedJobs.nextID = 1
+	seedJobs.jobs[repositoryDocsJobID] = &Job{
+		ID: repositoryDocsJobID, Type: RepositoryDocsIndexJobType, RepoID: "owner/repo", CacheUUID: identities[healthyPath].UUID,
+		RegistrationID: registrationID, SourceRegistrationID: "source-1", SourceRegistrationGeneration: 1,
+		ExpectedRevisionSetID: "set-1", WorkRef: publicWorkRef(repositoryDocsWorkKey),
+		Status: JobStatusRunning, CreatedAt: time.Now().Add(-time.Minute).UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	seedJobs.nextID = 2
 	if err := seedJobs.saveLocked(); err != nil {
 		t.Fatal(err)
 	}
@@ -217,9 +225,13 @@ func TestIssue141BlockedCacheInspectionDoesNotBlockControlPlane(t *testing.T) {
 			releaseWriter()
 			return errors.New("durable recovery cache authority was not writer-fenced")
 		}
-		var fenceErr CacheMutationFenceError
+		var fenceErr CacheRecoveryFenceError
 		if !errors.As(writerErr, &fenceErr) {
 			return fmt.Errorf("durable recovery writer fence error=%T %v", writerErr, writerErr)
+		}
+		_, resumed, resumeErr := jobs.ResumeRepositoryDocsAdmission(repositoryDocsJobID, registrationID, "source-1", 1, "set-1", repositoryDocsWorkKey, "", func() {})
+		if resumed || !errors.As(resumeErr, &fenceErr) {
+			return fmt.Errorf("repository-docs recovery bypassed sync fence: resumed=%t err=%T %v", resumed, resumeErr, resumeErr)
 		}
 		close(recoveryStarted)
 		<-releaseBlockedRecovery
@@ -276,8 +288,15 @@ func TestIssue141BlockedCacheInspectionDoesNotBlockControlPlane(t *testing.T) {
 	if err := client.Call(ctx, "Jobs.List", nil, &jobsList); err != nil {
 		t.Fatal(err)
 	}
-	if len(jobsList.Jobs) != 1 || jobsList.Jobs[0].Status != JobStatusInterrupted {
+	if len(jobsList.Jobs) != 2 || jobsList.Jobs[0].Status != JobStatusInterrupted || jobsList.Jobs[1].Status != JobStatusInterrupted {
 		t.Fatalf("durable recovery did not remain observable while blocked: %+v", jobsList.Jobs)
+	}
+	var reconciled MaintenanceReconcileResult
+	if err := client.Call(ctx, "Maintenance.ReconcileRegistration", MaintenanceRegistrationRequest{RegistrationID: registrationID}, &reconciled); err != nil {
+		t.Fatal(err)
+	}
+	if len(reconciled.Entries) != 1 || !reconciled.Entries[0].Enabled || reconciled.Entries[0].LastErrorClass != "" || len(reconciled.JobsStarted) != 0 {
+		t.Fatalf("recovery-fenced reconciliation changed healthy state: %+v", reconciled)
 	}
 
 	cancel()

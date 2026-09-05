@@ -250,6 +250,11 @@ type CacheMutationFenceError struct{}
 func (CacheMutationFenceError) Error() string          { return "service: cache authority is being changed" }
 func (CacheMutationFenceError) DiagnosticCode() string { return "cache_authority_fenced" }
 
+type CacheRecoveryFenceError struct{}
+
+func (CacheRecoveryFenceError) Error() string          { return "service: cache recovery is still in progress" }
+func (CacheRecoveryFenceError) DiagnosticCode() string { return "cache_recovery_pending" }
+
 // BeginCacheMutationFence prevents a new writer admission and reports both
 // public active jobs and workers that are still unwinding after cancellation.
 // It never calls MaintenanceManager while holding the job lock.
@@ -259,7 +264,11 @@ func (m *JobManager) BeginCacheMutationFence(cacheUUID string) (func(), []string
 		return func() {}, []string{"unknown-cache-authority"}
 	}
 	m.mu.Lock()
-	if m.cacheMutationFences[cacheUUID] || m.syncRecoveryFences[cacheUUID] {
+	if m.syncRecoveryFences[cacheUUID] {
+		m.mu.Unlock()
+		return func() {}, []string{"sync-recovery-pending"}
+	}
+	if m.cacheMutationFences[cacheUUID] {
 		m.mu.Unlock()
 		return func() {}, []string{"concurrent-conflict-resolution"}
 	}
@@ -294,7 +303,11 @@ func (m *JobManager) BeginDirectCacheWriter(cacheUUID, writerID string) (func(),
 		return func() {}, CacheWriterIdentityError{code: "cache_authority_unavailable"}
 	}
 	m.mu.Lock()
-	if m.cacheMutationFences[cacheUUID] || m.syncRecoveryFences[cacheUUID] {
+	if m.syncRecoveryFences[cacheUUID] {
+		m.mu.Unlock()
+		return func() {}, CacheRecoveryFenceError{}
+	}
+	if m.cacheMutationFences[cacheUUID] {
 		m.mu.Unlock()
 		return func() {}, CacheMutationFenceError{}
 	}
@@ -585,6 +598,9 @@ func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, source
 		job.SourceRegistrationGeneration != generation || job.ExpectedRevisionSetID != strings.TrimSpace(expectedSetID) || job.WorkRef != publicWorkRef(workKey) {
 		return Job{}, false, nil
 	}
+	if m.syncRecoveryFences[strings.TrimSpace(job.CacheUUID)] {
+		return Job{}, false, CacheRecoveryFenceError{}
+	}
 	if m.cacheMutationFences[strings.TrimSpace(job.CacheUUID)] {
 		return Job{}, false, CacheMutationFenceError{}
 	}
@@ -615,6 +631,12 @@ func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, source
 		return Job{}, false, JobAdmissionPersistenceError{}
 	}
 	return cloneJob(job), true, nil
+}
+
+func (m *JobManager) CacheRecoveryPending(cacheUUID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.syncRecoveryFences[strings.TrimSpace(cacheUUID)]
 }
 
 func (m *JobManager) RecoverableRepositoryDocsAdmission(registrationID, sourceRegistrationID string, generation int64, expectedSetID, workKey string) (Job, bool) {
@@ -793,7 +815,10 @@ type JobRecoveryIntent struct {
 func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID string, steps int, workKey, cacheUUID, registrationID, namespaceID string, intent JobRecoveryIntent, cancel context.CancelFunc) (Job, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if cacheUUID = strings.TrimSpace(cacheUUID); cacheUUID != "" && (m.cacheMutationFences[cacheUUID] || m.syncRecoveryFences[cacheUUID]) {
+	if cacheUUID = strings.TrimSpace(cacheUUID); cacheUUID != "" && m.syncRecoveryFences[cacheUUID] {
+		return Job{}, false, CacheRecoveryFenceError{}
+	}
+	if cacheUUID != "" && m.cacheMutationFences[cacheUUID] {
 		return Job{}, false, CacheMutationFenceError{}
 	}
 	for _, job := range m.jobs {
