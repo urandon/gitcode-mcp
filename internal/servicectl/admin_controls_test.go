@@ -71,6 +71,20 @@ func TestAdminFeedbackSetupPlanApplyAndReplay(t *testing.T) {
 	if !replay.Replayed || replay.Status != "configured" || replay.PlanID != applied.PlanID {
 		t.Fatalf("replay=%+v", replay)
 	}
+	configured, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, append(configured, []byte("format: markdown\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staleReq := req
+	staleReq.IdempotencyKey = "admin-feedback-setup-stale"
+	_, err = controls.ApplyFeedbackSetup(ctx, staleReq)
+	var stale adminhttp.ControlError
+	if !errors.As(err, &stale) || stale.Status != http.StatusConflict || stale.Code != "stale_plan" {
+		t.Fatalf("stale feedback setup err=%T %[1]v", err)
+	}
 	encodedBytes, err := json.Marshal([]any{plan, applied})
 	if err != nil {
 		t.Fatal(err)

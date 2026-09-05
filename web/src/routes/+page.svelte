@@ -229,7 +229,10 @@
     try {
       const response = await fetch('/api/admin/v1/snapshot');
       if (!response.ok) throw new Error(response.status === 401 ? 'Admin session required. Run admin open again.' : 'Observation is unavailable.');
-      snapshot = normalizeSnapshot(await response.json());
+      const previousRevision = snapshot.revision;
+      const nextSnapshot = normalizeSnapshot(await response.json());
+      snapshot = nextSnapshot;
+      await invalidateFeedbackPlanForSnapshotChange(previousRevision, nextSnapshot.revision);
       if (selectedCacheRef && selectedRepoID) maintenanceTargetKey = `${selectedCacheRef}\u0000${selectedRepoID}`;
       ensureControlSelections();
       canonicalizeRegistrationDeepLink();
@@ -491,6 +494,19 @@
     feedbackPlan = undefined; feedbackReceipt = undefined; feedbackError = ''; feedbackFailure = undefined;
   }
 
+  async function invalidateFeedbackPlanForSnapshotChange(previousRevision: string, nextRevision: string): Promise<void> {
+    if (!feedbackPlan || !previousRevision || previousRevision === nextRevision) return;
+    // A write may have committed even when its response was lost. Preserve the
+    // exact reviewed plan and key while that request is in flight, and after an
+    // ambiguous response, so the only available retry remains idempotent.
+    if (pendingControl === 'feedback_setup_apply' && (controlRunning || feedbackError)) return;
+    const closeConfirmation = pendingControl === 'feedback_setup_apply';
+    invalidateFeedbackPlan();
+    if (!closeConfirmation) return;
+    controlDialog?.close(); pendingControl = ''; pendingControlKey = '';
+    await tick(); controlTriggerButton?.focus();
+  }
+
   function loadBinding(cache: CacheObservation, repo?: Repository): void {
     const [owner = '', name = ''] = (repo?.repo_id || '').split('/');
     bindingIntent = { cache_ref: cache.cache_ref, repo_id: repo?.repo_id || '', owner, name, api_base_url: '', scopes: [...(repo?.scopes || ['issues'])], aliases: [...(repo?.aliases || [])], display_name: repo?.display_name || '' };
@@ -541,7 +557,16 @@
   async function renderFeedbackPlan(): Promise<void> {
     if (!csrfToken || !feedbackSetupEnabled || !feedbackRepoID) return;
     controlRunning = true; feedbackError = ''; feedbackFailure = undefined; feedbackReceipt = undefined;
-    try { feedbackPlan = await controlPost<FeedbackSetupPlan>('/api/admin/v1/feedback/setup/plan', { repo_id: feedbackRepoID }); }
+    const plannedRevision = snapshot.revision;
+    try {
+      const rendered = await controlPost<FeedbackSetupPlan>('/api/admin/v1/feedback/setup/plan', { repo_id: feedbackRepoID });
+      if (snapshot.revision !== plannedRevision) {
+        feedbackPlan = undefined;
+        feedbackError = 'Feedback readiness changed while the plan was rendered. Review the current state and render a new plan.';
+      } else {
+        feedbackPlan = rendered;
+      }
+    }
     catch (value) {
       feedbackPlan = undefined;
       feedbackFailure = value instanceof Error && 'failure' in value ? (value as Error & { failure: ControlFailure }).failure : undefined;

@@ -1696,7 +1696,7 @@ func executeServiceCommand(ctx context.Context, args []string, opts options, std
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "service", Message: "subcommand is required"})
 	}
 	rest := args[1:]
-	eff, configErr := config.LoadEffective(deps.Source, config.Overrides{})
+	eff, configErr := config.LoadEffective(deps.Source, config.Overrides{CachePath: opts.cachePath})
 	if configErr != nil {
 		return writeError(stderr, opts.format, configErr)
 	}

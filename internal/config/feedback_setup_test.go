@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -87,7 +88,7 @@ func TestFeedbackSetupRejectsStalePlanAndInvalidTarget(t *testing.T) {
 	if err := os.WriteFile(path, []byte("format: markdown\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ApplyFeedbackSetup(plan, "stale-plan", time.Now()); err == nil || !strings.Contains(err.Error(), "changed after planning") {
+	if _, err := ApplyFeedbackSetup(plan, "stale-plan", time.Now()); err == nil || !errors.Is(err, ErrFeedbackSetupStalePlan) || !strings.Contains(err.Error(), "changed after planning") {
 		t.Fatalf("err=%v", err)
 	}
 }
@@ -310,7 +311,7 @@ func TestFeedbackSetupExpectedPlanAllowsOnlyRetainedReplay(t *testing.T) {
 	configBefore, _ := os.ReadFile(path)
 	journalPath := path + ".feedback-setup-receipts.json"
 	journalBefore, _ := os.ReadFile(journalPath)
-	if _, err := ApplyFeedbackSetupWithExpectedPlan(current, original.PlanID, "new-stale-key", time.Now()); err == nil || !strings.Contains(err.Error(), "plan id") {
+	if _, err := ApplyFeedbackSetupWithExpectedPlan(current, original.PlanID, "new-stale-key", time.Now()); err == nil || !errors.Is(err, ErrFeedbackSetupStalePlan) || !strings.Contains(err.Error(), "plan id") {
 		t.Fatalf("stale new key err=%v", err)
 	}
 	configAfter, _ := os.ReadFile(path)

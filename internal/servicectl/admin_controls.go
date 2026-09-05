@@ -109,7 +109,7 @@ func (m *AdminControlManager) ApplyFeedbackSetup(ctx context.Context, req adminh
 	}
 	result, err := config.ApplyFeedbackSetupWithExpectedPlan(plan, strings.TrimSpace(req.PlanID), strings.TrimSpace(req.IdempotencyKey), time.Now().UTC())
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "plan id") {
+		if errors.Is(err, config.ErrFeedbackSetupStalePlan) {
 			return nil, adminhttp.ControlError{Status: http.StatusConflict, Code: "stale_plan", Field: "plan_id", Message: "The reviewed feedback setup plan no longer matches current configuration or a retained receipt.", Remediation: "Refresh feedback readiness and render a new plan."}
 		}
 		return nil, adminControlError(err)

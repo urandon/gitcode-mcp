@@ -25,6 +25,12 @@ const (
 	feedbackSetupReceiptTTL   = 90 * 24 * time.Hour
 )
 
+// ErrFeedbackSetupStalePlan identifies a reviewed setup plan whose trusted
+// configuration snapshot changed before apply. Transports use this sentinel
+// to return a recoverable stale-plan response instead of treating the race as
+// malformed caller input.
+var ErrFeedbackSetupStalePlan = errors.New("feedback setup: stale plan")
+
 type FeedbackSetupEffect struct {
 	ID                   string `json:"id"`
 	Class                string `json:"class"`
@@ -165,7 +171,7 @@ func ApplyFeedbackSetupWithExpectedPlan(plan FeedbackSetupPlan, expectedPlanID, 
 		}
 		if claim.Status == "succeeded" {
 			if strings.TrimSpace(expectedPlanID) != plan.PlanID && strings.TrimSpace(expectedPlanID) != claim.PlanID {
-				return FeedbackSetupResult{}, fmt.Errorf("feedback setup: confirmed plan id no longer matches current state or the retained receipt")
+				return FeedbackSetupResult{}, fmt.Errorf("%w: confirmed plan id no longer matches current state or the retained receipt", ErrFeedbackSetupStalePlan)
 			}
 			base.PlanID = claim.PlanID
 			base.Status = claim.ResultStatus
@@ -181,10 +187,10 @@ func ApplyFeedbackSetupWithExpectedPlan(plan FeedbackSetupPlan, expectedPlanID, 
 		}
 	}
 	if strings.TrimSpace(expectedPlanID) == "" || strings.TrimSpace(expectedPlanID) != plan.PlanID {
-		return FeedbackSetupResult{}, fmt.Errorf("feedback setup: confirmed plan id no longer matches current state or a retained receipt")
+		return FeedbackSetupResult{}, fmt.Errorf("%w: confirmed plan id no longer matches current state or a retained receipt", ErrFeedbackSetupStalePlan)
 	}
 	if currentDigest != plan.beforeDigest {
-		return FeedbackSetupResult{}, fmt.Errorf("feedback setup: configuration changed after planning; render a new plan")
+		return FeedbackSetupResult{}, fmt.Errorf("%w: configuration changed after planning; render a new plan", ErrFeedbackSetupStalePlan)
 	}
 	if _, exists := journal.Claims[keyDigest]; !exists {
 		if _, err := reserveFeedbackSetupJournalSlot(&journal); err != nil {

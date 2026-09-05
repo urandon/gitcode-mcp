@@ -9,6 +9,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -19,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"gitcode-mcp/internal/adminhttp"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/capability"
 	"gitcode-mcp/internal/config"
@@ -1317,6 +1321,108 @@ func TestAdminCLIUsesExistingDaemon(t *testing.T) {
 	}
 	if !status.Running || strings.Contains(status.URL, "launch=") {
 		t.Fatalf("sanitized admin status=%+v", status)
+	}
+
+	cancel()
+	if code := <-runCode; code != 0 {
+		t.Fatalf("service run code=%d", code)
+	}
+}
+
+func TestServiceCachePathOverrideControlsAdminFeedbackBindings(t *testing.T) {
+	root, err := shortCLITestRoot(t, "cli-admin-cache-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	globalCache := filepath.Join(root, "global.db")
+	activeCache := filepath.Join(root, "active.db")
+	addBinding := func(path, repoID string) {
+		t.Helper()
+		store, storeErr := cache.NewSQLiteStore(context.Background(), path)
+		if storeErr != nil {
+			t.Fatal(storeErr)
+		}
+		owner, name, _ := strings.Cut(repoID, "/")
+		if storeErr = store.UpsertRepo(context.Background(), cache.RepositoryBinding{RepoID: repoID, Owner: owner, Name: name, Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); storeErr != nil {
+			_ = store.Close()
+			t.Fatal(storeErr)
+		}
+		if storeErr = store.Close(); storeErr != nil {
+			t.Fatal(storeErr)
+		}
+	}
+	addBinding(globalCache, "owner/global")
+	addBinding(activeCache, "owner/active")
+	configPath := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("cache_path: "+globalCache+"\nfeedback:\n  enabled: false\n  sink: gitcode_issues\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src := &repoInitLocalSource{
+		env: map[string]string{
+			"GITCODE_MCP_SERVICE_NETWORK": "mem",
+			"GITCODE_MCP_SERVICE_ADDRESS": "test-cli-admin-cache-override",
+			config.EnvMCPConfigPath:       configPath,
+		},
+		cwd: root, homeDir: filepath.Join(root, "h"), configDir: filepath.Join(root, "f"), cacheDir: filepath.Join(root, "c"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runCode := make(chan int, 1)
+	go func() {
+		runCode <- executeWithFactoryAndDepsContext(ctx, []string{"service", "run", "--cache-path", activeCache}, io.Discard, io.Discard, nil, localCommandDeps{Source: src})
+	}()
+	waitForServiceSocket(t, src)
+
+	var opened string
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	if code := executeWithFactoryAndDeps([]string{"admin", "open", "--format", "json"}, &out, &errOut, nil, localCommandDeps{Source: src, OpenURL: func(value string) error {
+		opened = value
+		return nil
+	}}); code != 0 {
+		t.Fatalf("admin open code=%d stderr=%q", code, errOut.String())
+	}
+	launchURL, err := url.Parse(opened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launchValues, err := url.ParseQuery(launchURL.Fragment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launchURL.Fragment = ""
+	baseURL := strings.TrimSuffix(launchURL.String(), "/")
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Jar: jar, Timeout: 2 * time.Second}
+	sessionBody, _ := json.Marshal(map[string]string{"launch_token": launchValues.Get("launch")})
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/api/admin/v1/session", bytes.NewReader(sessionBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", baseURL)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("session status=%d", resp.StatusCode)
+	}
+	resp, err = client.Get(baseURL + "/api/admin/v1/snapshot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var snapshot adminhttp.ObservationSnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(snapshot.Feedback.SetupRepositories, ","); got != "owner/active" {
+		t.Fatalf("feedback setup repositories=%q, want active override only", got)
 	}
 
 	cancel()

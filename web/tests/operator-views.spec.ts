@@ -249,7 +249,9 @@ test('feedback delivery renders every readiness state without exposing private c
 test('feedback setup plans a bound target and safely replays ambiguous apply', async ({ page }) => {
   const view: any = structuredClone(snapshot);
   view.feedback = { state: 'disabled', prepare_available: true, submit_available: false, checks: [{ id: 'enabled', status: 'blocked' }], remediation: 'Enable a trusted feedback sink.', handoff: 'gitcode-mcp feedback setup --repo OWNER/REPO', setup_repositories: ['example/repo'], setup_available: true };
-  await mockAdmin(page, view);
+  let emitSnapshotChanged!: () => void;
+  const snapshotChanged = new Promise<void>((resolve) => { emitSnapshotChanged = resolve; });
+  await mockAdmin(page, view, snapshotChanged);
   let planBody: Record<string, unknown> = {};
   await page.route('**/api/admin/v1/feedback/setup/plan', async (route) => {
     planBody = route.request().postDataJSON();
@@ -278,6 +280,11 @@ test('feedback setup plans a bound target and safely replays ambiguous apply', a
   await expect(dialog).toContainText('It will not submit an issue or write credentials.');
   await dialog.getByRole('button', { name: 'Confirm feedback setup' }).click();
   await expect(dialog.getByRole('alert')).toContainText('Retry this confirmation.');
+  const refreshed = page.waitForResponse((response) => response.url().endsWith('/api/admin/v1/snapshot') && response.status() === 200);
+  view.revision = 'snapshot-after-ambiguous-feedback-apply';
+  emitSnapshotChanged();
+  await refreshed;
+  await expect(dialog.getByRole('alert')).toContainText('Retry this confirmation.');
   await dialog.getByRole('button', { name: 'Confirm feedback setup' }).click();
   await expect(dialog).not.toBeVisible();
   expect(applyBodies).toHaveLength(2);
@@ -286,6 +293,31 @@ test('feedback setup plans a bound target and safely replays ambiguous apply', a
   expect(String(applyBodies[0].idempotency_key)).toMatch(/^admin-feedback_setup_apply-/);
   await expect(workbench).toContainText('Issue submissionAvailable');
   await expect(workbench).toContainText('replayed safely');
+});
+
+test('snapshot changes invalidate an unconfirmed feedback setup plan', async ({ page }) => {
+  const view: any = structuredClone(snapshot);
+  view.feedback = { state: 'disabled', prepare_available: true, submit_available: false, checks: [{ id: 'enabled', status: 'blocked' }], remediation: 'Enable a trusted feedback sink.', setup_repositories: ['example/repo'], setup_available: true };
+  let emitSnapshotChanged!: () => void;
+  const snapshotChanged = new Promise<void>((resolve) => { emitSnapshotChanged = resolve; });
+  await mockAdmin(page, view, snapshotChanged);
+  await page.route('**/api/admin/v1/feedback/setup/plan', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { status: 'confirmation_required', plan_id: 'feedback-plan-stale-snapshot', repo_id: 'example/repo', sink: 'gitcode_issues', labels: ['agent-feedback'], duplicate_policy: 'suggest', effects: [{ id: 'configure-feedback-sink', class: 'trusted_local_config_write', summary: 'enable the configured GitCode issue feedback sink', confirmation_required: true }], confirmation_required: true } }) }));
+  await page.goto('/?view=Maintenance');
+  const workbench = page.locator('section[aria-labelledby="feedback-delivery-title"]');
+  await workbench.getByRole('button', { name: 'Render feedback setup plan' }).click();
+  await workbench.getByRole('button', { name: 'Review feedback setup' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+
+  const refreshed = page.waitForResponse((response) => response.url().endsWith('/api/admin/v1/snapshot') && response.status() === 200);
+  view.revision = 'snapshot-feedback-plan-invalidated';
+  view.feedback.state = 'sink_missing';
+  emitSnapshotChanged();
+  await refreshed;
+
+  await expect(dialog).not.toBeVisible();
+  await expect(workbench).not.toContainText('feedback-plan-stale-snapshot');
+  await expect(workbench.getByRole('button', { name: 'Render feedback setup plan' })).toBeVisible();
 });
 
 test('schema-blocked cache exposes a path-free confirmed CLI handoff', async ({ page }) => {
