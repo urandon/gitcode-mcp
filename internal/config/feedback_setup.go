@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -21,6 +22,7 @@ import (
 const (
 	feedbackSetupSchema       = "gitcode-mcp.feedback-setup.v1"
 	feedbackSetupJournalLimit = 256
+	feedbackSetupReceiptTTL   = 90 * 24 * time.Hour
 )
 
 type FeedbackSetupEffect struct {
@@ -147,6 +149,7 @@ func ApplyFeedbackSetup(plan FeedbackSetupPlan, idempotencyKey string, now time.
 	if err != nil {
 		return FeedbackSetupResult{}, err
 	}
+	journalChanged = pruneExpiredFeedbackSetupClaims(&journal, now.UTC()) || journalChanged
 	if journalChanged {
 		if err := writeFeedbackSetupJournal(journalPath, journal); err != nil {
 			return FeedbackSetupResult{}, err
@@ -169,8 +172,10 @@ func ApplyFeedbackSetup(plan FeedbackSetupPlan, idempotencyKey string, now time.
 	if currentDigest != plan.beforeDigest {
 		return FeedbackSetupResult{}, fmt.Errorf("feedback setup: configuration changed after planning; render a new plan")
 	}
-	if _, exists := journal.Claims[keyDigest]; !exists && len(journal.Claims) >= feedbackSetupJournalLimit {
-		return FeedbackSetupResult{}, fmt.Errorf("feedback setup: idempotency journal is full; operator maintenance is required")
+	if _, exists := journal.Claims[keyDigest]; !exists {
+		if _, err := reserveFeedbackSetupJournalSlot(&journal); err != nil {
+			return FeedbackSetupResult{}, err
+		}
 	}
 	resultStatus := "configured"
 	if plan.Status == "already_configured" {
@@ -270,6 +275,47 @@ func reconcileFeedbackSetupJournal(journal *feedbackSetupJournal, currentDigest 
 		changed = true
 	}
 	return changed, nil
+}
+
+func pruneExpiredFeedbackSetupClaims(journal *feedbackSetupJournal, now time.Time) bool {
+	cutoff := now.Add(-feedbackSetupReceiptTTL)
+	changed := false
+	for key, claim := range journal.Claims {
+		if claim.Status == "pending" || !claim.GeneratedAt.Before(cutoff) {
+			continue
+		}
+		delete(journal.Claims, key)
+		changed = true
+	}
+	return changed
+}
+
+func reserveFeedbackSetupJournalSlot(journal *feedbackSetupJournal) (bool, error) {
+	if len(journal.Claims) < feedbackSetupJournalLimit {
+		return false, nil
+	}
+	type terminalClaim struct {
+		key         string
+		generatedAt time.Time
+	}
+	candidates := make([]terminalClaim, 0, len(journal.Claims))
+	for key, claim := range journal.Claims {
+		if claim.Status == "pending" {
+			continue
+		}
+		candidates = append(candidates, terminalClaim{key: key, generatedAt: claim.GeneratedAt})
+	}
+	if len(candidates) == 0 {
+		return false, fmt.Errorf("feedback setup: idempotency journal has no safely compactable terminal receipt")
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].generatedAt.Equal(candidates[j].generatedAt) {
+			return candidates[i].key < candidates[j].key
+		}
+		return candidates[i].generatedAt.Before(candidates[j].generatedAt)
+	})
+	delete(journal.Claims, candidates[0].key)
+	return true, nil
 }
 
 func readFeedbackSetupConfig(src Source, location ConfigLocation) ([]byte, error) {

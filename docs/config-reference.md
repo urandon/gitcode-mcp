@@ -255,7 +255,9 @@ already bound repository. Applying it requires `--yes`, the exact `--plan-id`,
 and an idempotency key. The atomic update preserves unrelated YAML and comments,
 uses private file permissions, and records a bounded durable receipt keyed by a
 SHA-256 digest rather than the raw idempotency key. It never stores a credential
-or accepts an endpoint. Generic binaries
+or accepts an endpoint. Terminal receipts are retained for 90 days subject to a
+256-claim journal bound; capacity compaction removes the oldest terminal receipt
+only after pending claims have been reconciled from config digests. Generic binaries
 remain destination-neutral; trusted bundles may use this same global contract
 to supply their feedback repository.
 

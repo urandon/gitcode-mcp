@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -204,5 +205,87 @@ func TestFeedbackSetupRecoversPendingReceiptFromConfigDigest(t *testing.T) {
 	result, err := ApplyFeedbackSetup(plan, key, time.Now())
 	if err != nil || !result.Replayed || result.Status != "configured" || !result.GeneratedAt.Equal(generated) {
 		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
+func TestFeedbackSetupCompactsOldestTerminalReceiptAtCapacity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := "feedback:\n  enabled: true\n  sink: gitcode_issues\n  repo_id: example/feedback\n  labels: feedback|dogfood\n  duplicate_policy: suggest\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvMCPConfigPath, path)
+	plan, err := PlanFeedbackSetup(OSSource{}, "example/feedback")
+	if err != nil || plan.Status != "already_configured" {
+		t.Fatalf("plan=%#v err=%v", plan, err)
+	}
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	oldestKey := digestBytes([]byte("capacity-key-000"))
+	retainedKey := digestBytes([]byte("capacity-key-255"))
+	journal := feedbackSetupJournal{Schema: feedbackSetupSchema, Claims: make(map[string]feedbackSetupClaim, feedbackSetupJournalLimit)}
+	for i := 0; i < feedbackSetupJournalLimit; i++ {
+		key := digestBytes([]byte(fmt.Sprintf("capacity-key-%03d", i)))
+		journal.Claims[key] = feedbackSetupClaim{
+			PlanID: plan.PlanID, IntentDigest: plan.intentDigest, BeforeDigest: plan.beforeDigest, AfterDigest: plan.afterDigest,
+			Status: "succeeded", ResultStatus: "already_configured", GeneratedAt: now.Add(time.Duration(i-feedbackSetupJournalLimit) * time.Minute),
+		}
+	}
+	journalPath := path + ".feedback-setup-receipts.json"
+	if err := writeFeedbackSetupJournal(journalPath, journal); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ApplyFeedbackSetup(plan, "capacity-new-key", now)
+	if err != nil || result.Status != "already_configured" || result.Replayed {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	journal, err = readFeedbackSetupJournal(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(journal.Claims) != feedbackSetupJournalLimit {
+		t.Fatalf("claims=%d", len(journal.Claims))
+	}
+	if _, exists := journal.Claims[oldestKey]; exists {
+		t.Fatal("oldest terminal receipt was not compacted")
+	}
+	if _, exists := journal.Claims[retainedKey]; !exists {
+		t.Fatal("recent retained receipt was compacted")
+	}
+	replay, err := ApplyFeedbackSetup(plan, "capacity-key-255", now.Add(time.Minute))
+	if err != nil || !replay.Replayed || replay.PlanID != plan.PlanID {
+		t.Fatalf("retained replay=%#v err=%v", replay, err)
+	}
+	different, err := PlanFeedbackSetup(OSSource{}, "example/different")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyFeedbackSetup(different, "capacity-key-255", now.Add(2*time.Minute)); err == nil || !strings.Contains(err.Error(), "different setup intent") {
+		t.Fatalf("retained conflict err=%v", err)
+	}
+}
+
+func TestFeedbackSetupReceiptRetentionNeverPrunesPendingClaims(t *testing.T) {
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-feedbackSetupReceiptTTL - time.Second)
+	journal := feedbackSetupJournal{Schema: feedbackSetupSchema, Claims: map[string]feedbackSetupClaim{
+		"pending":   {Status: "pending", GeneratedAt: old},
+		"succeeded": {Status: "succeeded", GeneratedAt: old},
+		"abandoned": {Status: "abandoned", GeneratedAt: old},
+		"recent":    {Status: "succeeded", GeneratedAt: now.Add(-time.Hour)},
+	}}
+	if !pruneExpiredFeedbackSetupClaims(&journal, now) {
+		t.Fatal("expected expired terminal receipts to be pruned")
+	}
+	if _, exists := journal.Claims["pending"]; !exists {
+		t.Fatal("pending claim was pruned")
+	}
+	if _, exists := journal.Claims["recent"]; !exists {
+		t.Fatal("recent terminal claim was pruned")
+	}
+	if _, exists := journal.Claims["succeeded"]; exists {
+		t.Fatal("expired succeeded claim was retained")
+	}
+	if _, exists := journal.Claims["abandoned"]; exists {
+		t.Fatal("expired abandoned claim was retained")
 	}
 }

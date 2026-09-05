@@ -37,7 +37,13 @@ of the caller key, updates only the global YAML feedback section through an
 atomic private-permission replacement, preserves unrelated YAML and comments,
 and verifies the effective policy. It never writes a credential or accepts an
 endpoint. Reusing a key for a different sink intent is rejected; retrying the
-same intent returns the original receipt without another config write.
+same intent returns the original receipt without another config write while
+that receipt is retained. Terminal receipts have a 90-day retention window and
+the journal holds at most 256 total claims. At capacity the oldest terminal
+receipt is compacted; pending crash-recovery claims are reconciled against the
+current config digest before retention runs and are never discarded blindly.
+After a terminal receipt leaves that bounded window, its caller key may be used
+as a new operation key, so automation should retry promptly with the same key.
 
 The same configuration can also be supplied by a trusted installer or bundle:
 
