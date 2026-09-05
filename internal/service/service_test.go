@@ -1771,6 +1771,71 @@ func TestIssue146LateAmbiguousOwnerCannotDowngradeRecoveredSuccess(t *testing.T)
 	}
 }
 
+func TestIssue146PreflightFailureCannotOverwriteConcurrentClaim(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	preimage := gitcode.PullRequest{ID: "9001", Number: 7, Title: "PR", Body: "before", State: "open", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	client := &stalePreflightPRUpdateClient{
+		fakeGitCodeClient: &fakeGitCodeClient{prsByNumber: map[int]gitcode.PullRequest{7: preimage}},
+		preimage:          preimage,
+		firstPreflight:    make(chan struct{}),
+		releasePreflight:  make(chan struct{}),
+		claimed:           make(chan struct{}),
+		releaseMutation:   make(chan struct{}),
+	}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 7, Body: "after", IdempotencyKey: "issue-146-stale-preflight"}
+
+	firstErr := make(chan error, 1)
+	go func() {
+		_, err := svc.UpdatePR(ctx, req)
+		firstErr <- err
+	}()
+	<-client.firstPreflight
+
+	secondResult := make(chan WriteCommandResult, 1)
+	secondErr := make(chan error, 1)
+	go func() {
+		result, err := svc.UpdatePR(ctx, req)
+		secondResult <- result
+		secondErr <- err
+	}()
+	<-client.claimed
+	close(client.releasePreflight)
+	if err := <-firstErr; err == nil {
+		t.Fatal("stale preflight caller unexpectedly succeeded")
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", req.IdempotencyKey)
+	if err != nil || entry == nil || entry.Status != audit.StatusInProgress {
+		t.Fatalf("concurrent claim was overwritten: audit=%#v err=%v", entry, err)
+	}
+
+	_, err = svc.UpdatePR(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_ambiguous_remote" {
+		t.Fatalf("third caller error=%T %v", err, err)
+	}
+	if got := client.mutationCount(); got != 1 {
+		t.Fatalf("mutations before release=%d, want one", got)
+	}
+	close(client.releaseMutation)
+	if err := <-secondErr; err != nil {
+		t.Fatalf("claimed update: %v", err)
+	}
+	if result := <-secondResult; result.Status != "succeeded" {
+		t.Fatalf("claimed result=%#v", result)
+	}
+	if got := client.mutationCount(); got != 1 {
+		t.Fatalf("mutations=%d, want exactly one", got)
+	}
+}
+
 func TestIssue133AmbiguousUpdateRecoverySurvivesStoreRestart(t *testing.T) {
 	ctx := context.Background()
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
@@ -5582,6 +5647,52 @@ type lateAmbiguousPRUpdateClient struct {
 	applyOnce sync.Once
 	mu        sync.Mutex
 	mutations int
+}
+
+type stalePreflightPRUpdateClient struct {
+	*fakeGitCodeClient
+	preimage         gitcode.PullRequest
+	firstPreflight   chan struct{}
+	releasePreflight chan struct{}
+	claimed          chan struct{}
+	releaseMutation  chan struct{}
+	callOnce         sync.Once
+	claimOnce        sync.Once
+	mu               sync.Mutex
+	calls            int
+	mutations        int
+}
+
+func (c *stalePreflightPRUpdateClient) UpdatePR(_ context.Context, req gitcode.UpdatePRRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PullRequest], error) {
+	c.mu.Lock()
+	c.calls++
+	call := c.calls
+	c.mu.Unlock()
+	if call == 1 {
+		c.callOnce.Do(func() { close(c.firstPreflight) })
+		<-c.releasePreflight
+		return gitcode.WriteResult[gitcode.PullRequest]{}, gitcode.ErrNetworkUnavailable{Endpoint: "/pulls/7", Attempts: 1}
+	}
+	if opts.BeforePRUpdateMutation != nil {
+		if err := opts.BeforePRUpdateMutation(c.preimage); err != nil {
+			return gitcode.WriteResult[gitcode.PullRequest]{}, err
+		}
+	}
+	c.mu.Lock()
+	c.mutations++
+	c.mu.Unlock()
+	c.claimOnce.Do(func() { close(c.claimed) })
+	<-c.releaseMutation
+	updated := c.preimage
+	updated.Body = req.Body
+	updated.UpdatedAt = updated.UpdatedAt.Add(time.Second)
+	return gitcode.WriteResult[gitcode.PullRequest]{Record: updated, Confirmed: true, Operation: "UpdatePR", ProviderStatus: "2xx-readback", RemoteID: updated.ID, RemoteNumber: updated.Number, RemoteRevision: updated.UpdatedAt.Format(time.RFC3339Nano), IdempotencyKey: opts.IdempotencyKey, ConfirmedAt: time.Now().UTC()}, nil
+}
+
+func (c *stalePreflightPRUpdateClient) mutationCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.mutations
 }
 
 func (c *lateAmbiguousPRUpdateClient) GetPR(_ context.Context, req gitcode.PRRequest) (gitcode.PullRequest, error) {

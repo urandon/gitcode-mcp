@@ -5775,6 +5775,12 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 			if errors.As(err, &precondition) {
 				return WriteCommandResult{}, ErrWriteFailure{Code: "write_conflict", RepoID: route.RepoID, RemoteID: strconv.Itoa(req.Number), IdempotencyKey: key, Cause: err}
 			}
+			if !prUpdateClaimed {
+				// Provider preflight failed before this caller acquired the
+				// generation-aware claim. It does not own the audit row and must
+				// not overwrite a concurrent claimant's in-progress fence.
+				return WriteCommandResult{}, ErrWriteFailure{Code: code, RepoID: route.RepoID, RemoteID: strconv.Itoa(req.Number), IdempotencyKey: key, PayloadSource: failureSource(err), Cause: writeFailureCause(code, err)}
+			}
 			if prUpdateClaimed {
 				if phase, attempted := writeMutationPhase(err); attempted && !safePRUpdateMutationFailure(phase, err) {
 					metadata := cloneStringMap(prUpdateClaimMetadata)
