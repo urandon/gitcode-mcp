@@ -140,3 +140,57 @@ func TestPrepareRejectsUnsafeEvidenceAndExplainsMissingSetup(t *testing.T) {
 		t.Fatalf("missing setup result: %#v", prepared)
 	}
 }
+
+func TestEvaluateReadinessPrecedence(t *testing.T) {
+	readyConfig := Config{Enabled: true, Sink: SinkGitCodeIssues, RepoID: "example/feedback"}
+	tests := []struct {
+		name  string
+		input ReadinessInput
+		want  string
+	}{
+		{name: "disabled", input: ReadinessInput{Config: DefaultConfig()}, want: ReadinessDisabled},
+		{name: "sink missing", input: ReadinessInput{Config: Config{Enabled: true, RepoID: "example/feedback"}, RepositoryBound: true, CredentialPresent: true, ProviderAvailable: true}, want: ReadinessSinkMissing},
+		{name: "repository unbound", input: ReadinessInput{Config: readyConfig, CredentialPresent: true, ProviderAvailable: true}, want: ReadinessRepositoryUnbound},
+		{name: "credential missing", input: ReadinessInput{Config: readyConfig, RepositoryBound: true, ProviderAvailable: true}, want: ReadinessCredentialMissing},
+		{name: "provider unavailable", input: ReadinessInput{Config: readyConfig, RepositoryBound: true, CredentialPresent: true}, want: ReadinessProviderUnavailable},
+		{name: "ready", input: ReadinessInput{Config: readyConfig, RepositoryBound: true, CredentialPresent: true, ProviderAvailable: true}, want: ReadinessReady},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := EvaluateReadiness(tt.input)
+			if got.State != tt.want || !got.PrepareAvailable || got.SubmitAvailable != (tt.want == ReadinessReady) || len(got.Checks) != 5 {
+				t.Fatalf("readiness=%#v", got)
+			}
+			if tt.want != ReadinessReady && (got.Remediation == "" || got.Handoff == "") {
+				t.Fatalf("blocked readiness lacks remediation: %#v", got)
+			}
+		})
+	}
+}
+
+func TestExplicitEmptySinkRemainsVisibleToReadiness(t *testing.T) {
+	cfg, err := NormalizeConfig(Config{Enabled: true, SinkExplicit: true, RepoID: "example/feedback"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sink != "" {
+		t.Fatalf("explicit empty sink normalized to %q", cfg.Sink)
+	}
+	result := EvaluateReadiness(ReadinessInput{Config: cfg, RepositoryBound: true, CredentialPresent: true, ProviderAvailable: true})
+	if result.State != ReadinessSinkMissing {
+		t.Fatalf("readiness=%#v", result)
+	}
+}
+
+func TestFeedbackSetupHandoffRejectsShellMetacharacters(t *testing.T) {
+	for _, repoID := range []string{"example/repo;command", "example/repo`command`", "example/repo$(command)", "example/.hidden", "example/repo"} {
+		handoff := feedbackSetupHandoff(repoID)
+		valid := repoID == "example/repo"
+		if valid && handoff != "gitcode-mcp feedback setup --repo example/repo" {
+			t.Fatalf("valid handoff=%q", handoff)
+		}
+		if !valid && handoff != "gitcode-mcp feedback setup --repo OWNER/REPO" {
+			t.Fatalf("unsafe handoff for %q: %q", repoID, handoff)
+		}
+	}
+}

@@ -22,6 +22,13 @@ const (
 	DuplicatePolicySuggest  = "suggest"
 	DuplicatePolicyReturn   = "return_existing"
 	DuplicateOverrideCreate = "create"
+
+	ReadinessDisabled            = "disabled"
+	ReadinessSinkMissing         = "sink_missing"
+	ReadinessRepositoryUnbound   = "repository_unbound"
+	ReadinessCredentialMissing   = "credential_missing"
+	ReadinessProviderUnavailable = "provider_unavailable"
+	ReadinessReady               = "ready"
 )
 
 var (
@@ -37,6 +44,109 @@ type Config struct {
 	RepoID          string   `json:"repo_id"`
 	Labels          []string `json:"labels,omitempty"`
 	DuplicatePolicy string   `json:"duplicate_policy"`
+	SinkExplicit    bool     `json:"-"`
+}
+
+type ReadinessCheck struct {
+	ID      string `json:"id"`
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
+}
+
+// Readiness is a side-effect-free projection of feedback preparation and
+// submission availability. It deliberately reports prerequisites rather than
+// probing the remote provider from capability discovery.
+type Readiness struct {
+	State            string           `json:"state"`
+	PrepareAvailable bool             `json:"prepare_available"`
+	SubmitAvailable  bool             `json:"submit_available"`
+	Sink             string           `json:"sink,omitempty"`
+	RepoID           string           `json:"repo_id,omitempty"`
+	Checks           []ReadinessCheck `json:"checks"`
+	Remediation      string           `json:"remediation,omitempty"`
+	Handoff          string           `json:"handoff,omitempty"`
+}
+
+type ReadinessInput struct {
+	Config            Config
+	RepositoryBound   bool
+	CredentialPresent bool
+	ProviderAvailable bool
+}
+
+func EvaluateReadiness(input ReadinessInput) Readiness {
+	cfg := input.Config
+	result := Readiness{
+		PrepareAvailable: true,
+		Sink:             strings.TrimSpace(cfg.Sink),
+		RepoID:           strings.TrimSpace(cfg.RepoID),
+		Checks: []ReadinessCheck{
+			{ID: "enabled", Status: checkStatus(cfg.Enabled)},
+			{ID: "sink", Status: checkStatus(strings.TrimSpace(cfg.Sink) == SinkGitCodeIssues)},
+			{ID: "repository_binding", Status: checkStatus(input.RepositoryBound)},
+			{ID: "credential", Status: checkStatus(input.CredentialPresent)},
+			{ID: "provider", Status: checkStatus(input.ProviderAvailable)},
+		},
+	}
+	switch {
+	case !cfg.Enabled:
+		result.State = ReadinessDisabled
+		result.Remediation = "enable a trusted feedback sink before submission"
+		result.Handoff = "gitcode-mcp feedback setup --repo OWNER/REPO"
+	case strings.TrimSpace(cfg.Sink) != SinkGitCodeIssues:
+		result.State = ReadinessSinkMissing
+		result.Remediation = "select the supported gitcode_issues sink in trusted global configuration"
+		result.Handoff = feedbackSetupHandoff(result.RepoID)
+	case result.RepoID == "" || !input.RepositoryBound:
+		result.State = ReadinessRepositoryUnbound
+		result.Remediation = "configure and bind the trusted feedback repository before submission"
+		result.Handoff = feedbackSetupHandoff(result.RepoID)
+	case !input.CredentialPresent:
+		result.State = ReadinessCredentialMissing
+		result.Remediation = "configure a GitCode credential, then re-check feedback readiness"
+		result.Handoff = "gitcode-mcp auth status"
+	case !input.ProviderAvailable:
+		result.State = ReadinessProviderUnavailable
+		result.Remediation = "start gitcode-mcp with the live provider enabled, then re-check feedback readiness"
+		result.Handoff = "gitcode-mcp feedback status"
+	default:
+		result.State = ReadinessReady
+		result.SubmitAvailable = true
+	}
+	return result
+}
+
+func feedbackSetupHandoff(repoID string) string {
+	if !ValidRepositoryID(repoID) {
+		return "gitcode-mcp feedback setup --repo OWNER/REPO"
+	}
+	return "gitcode-mcp feedback setup --repo " + strings.TrimSpace(repoID)
+}
+
+func ValidRepositoryID(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 255 || strings.Count(value, "/") != 1 {
+		return false
+	}
+	for _, part := range strings.Split(value, "/") {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+		for index, char := range part {
+			if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '_' || char == '-' || (char == '.' && index > 0) {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func checkStatus(ok bool) string {
+	if ok {
+		return "passed"
+	}
+	return "blocked"
 }
 
 func DefaultConfig() Config {
@@ -113,6 +223,7 @@ type PreparedReport struct {
 	Context           RuntimeContext `json:"context"`
 	RedactionsApplied int            `json:"redactions_applied,omitempty"`
 	Remediation       string         `json:"remediation,omitempty"`
+	Readiness         Readiness      `json:"readiness"`
 }
 
 type SubmissionResult struct {
@@ -130,6 +241,7 @@ type SubmissionResult struct {
 	Evidence       string      `json:"evidence,omitempty"`
 	Remediation    string      `json:"remediation,omitempty"`
 	GeneratedAt    time.Time   `json:"generated_at"`
+	Readiness      Readiness   `json:"readiness"`
 }
 
 type ValidationError struct {
@@ -141,10 +253,11 @@ func (e ValidationError) Error() string          { return "feedback: " + e.Field
 func (e ValidationError) DiagnosticCode() string { return "invalid_feedback" }
 
 func NormalizeConfig(cfg Config) (Config, error) {
-	if strings.TrimSpace(cfg.Sink) == "" {
+	cfg.Sink = strings.TrimSpace(cfg.Sink)
+	if cfg.Sink == "" && !cfg.SinkExplicit {
 		cfg.Sink = SinkGitCodeIssues
 	}
-	if cfg.Sink != SinkGitCodeIssues {
+	if cfg.Sink != "" && cfg.Sink != SinkGitCodeIssues {
 		return Config{}, fmt.Errorf("feedback: unsupported sink %q", cfg.Sink)
 	}
 	if strings.TrimSpace(cfg.DuplicatePolicy) == "" {
@@ -182,7 +295,7 @@ func Prepare(draft Draft, context RuntimeContext, cfg Config, existing []Existin
 	title := renderTitle(normalized)
 	body := renderBody(normalized, context, fingerprint)
 	candidates, decision := findCandidates(fingerprint, normalized, existing)
-	configured := cfg.Enabled && cfg.RepoID != ""
+	configured := cfg.Enabled && cfg.Sink == SinkGitCodeIssues && cfg.RepoID != ""
 	status := "prepared"
 	remediation := ""
 	if !configured {

@@ -55,6 +55,17 @@ func disabled(reason string) Surface {
 
 var writeCapabilities = []Capability{
 	{
+		ID:             "feedback_status",
+		Category:       CategoryWrite,
+		Safety:         SafetyReadOnly,
+		CLIName:        "feedback",
+		MCPName:        "feedback_status",
+		ServiceCommand: "feedback-status",
+		Description:    "Report side-effect-free feedback preparation and submission readiness, including the exact trusted setup handoff when submission is unavailable.",
+		CLI:            enabled("Available as the grouped CLI command `feedback status`."),
+		MCP:            enabled(),
+	},
+	{
 		ID:             "prepare_feedback",
 		Category:       CategoryWrite,
 		Safety:         SafetyReadOnly,

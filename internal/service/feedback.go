@@ -9,6 +9,7 @@ import (
 	"gitcode-mcp/internal/buildinfo"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/feedback"
+	"gitcode-mcp/internal/gitcode"
 )
 
 type SubmitFeedbackRequest struct {
@@ -64,6 +65,7 @@ func (s gitCodeIssueFeedbackSink) Submit(ctx context.Context, prepared feedback.
 		Replayed:       write.Replayed,
 		Evidence:       firstNonEmptyString(write.Evidence, "adapter-confirmed issue write with sanitized readback and audit evidence"),
 		GeneratedAt:    write.GeneratedAt,
+		Readiness:      prepared.Readiness,
 	}, nil
 }
 
@@ -76,6 +78,11 @@ func normalizeFeedbackConfig(cfg feedback.Config) feedback.Config {
 
 func (s *Service) ConfigureFeedback(cfg feedback.Config) {
 	s.feedbackConfig = normalizeFeedbackConfig(cfg)
+}
+
+func (s *Service) ConfigureFeedbackReadiness(credentialPresent, providerAvailable bool) {
+	s.writeCredentialPresent = credentialPresent
+	s.feedbackProviderAvailable = providerAvailable
 }
 
 func (s *Service) PrepareFeedback(ctx context.Context, draft feedback.Draft) (feedback.PreparedReport, error) {
@@ -91,7 +98,33 @@ func (s *Service) PrepareFeedback(ctx context.Context, draft feedback.Draft) (fe
 	if err != nil {
 		return feedback.PreparedReport{}, err
 	}
+	readiness, err := s.FeedbackReadiness(ctx)
+	if err != nil {
+		return feedback.PreparedReport{}, err
+	}
+	prepared.Readiness = readiness
 	return prepared, nil
+}
+
+func (s *Service) FeedbackReadiness(ctx context.Context) (feedback.Readiness, error) {
+	if err := ctx.Err(); err != nil {
+		return feedback.Readiness{}, err
+	}
+	repositoryBound := false
+	repoID := strings.TrimSpace(s.feedbackConfig.RepoID)
+	if s.store != nil && repoID != "" {
+		if _, err := s.store.GetRepository(ctx, repoID); err == nil {
+			repositoryBound = true
+		} else if !isCacheNotFound(err) {
+			return feedback.Readiness{}, normalizeError(err, "feedback readiness", repoID)
+		}
+	}
+	return feedback.EvaluateReadiness(feedback.ReadinessInput{
+		Config:            s.feedbackConfig,
+		RepositoryBound:   repositoryBound,
+		CredentialPresent: s.writeCredentialPresent,
+		ProviderAvailable: s.feedbackProviderAvailable || s.ProviderMode() == gitcode.ProviderModeLive || s.ProviderMode() == gitcode.ProviderMode("custom"),
+	}), nil
 }
 
 func (s *Service) SubmitFeedback(ctx context.Context, req SubmitFeedbackRequest) (feedback.SubmissionResult, error) {
@@ -106,10 +139,7 @@ func (s *Service) SubmitFeedback(ctx context.Context, req SubmitFeedbackRequest)
 	if err != nil {
 		return feedback.SubmissionResult{}, err
 	}
-	base := feedback.SubmissionResult{Status: prepared.Status, Sink: prepared.Sink, RepoID: prepared.RepoID, Fingerprint: prepared.Fingerprint, DedupeDecision: prepared.DedupeDecision, Candidates: prepared.Candidates, IdempotencyKey: key, Remediation: prepared.Remediation, GeneratedAt: s.now().UTC()}
-	if !prepared.Configured {
-		return base, nil
-	}
+	base := feedback.SubmissionResult{Status: prepared.Status, Sink: prepared.Sink, RepoID: prepared.RepoID, Fingerprint: prepared.Fingerprint, DedupeDecision: prepared.DedupeDecision, Candidates: prepared.Candidates, IdempotencyKey: key, Remediation: prepared.Remediation, GeneratedAt: s.now().UTC(), Readiness: prepared.Readiness}
 	if prepared.Status == "duplicate" && len(prepared.Candidates) > 0 {
 		candidate := prepared.Candidates[0]
 		base.Status = "duplicate"
@@ -125,6 +155,11 @@ func (s *Service) SubmitFeedback(ctx context.Context, req SubmitFeedbackRequest)
 	}
 	if prepared.Status == "duplicate_candidates" {
 		base.Evidence = "likely duplicates found in the configured feedback cache; no write performed"
+		return base, nil
+	}
+	if !prepared.Readiness.SubmitAvailable {
+		base.Status = "submission_unavailable"
+		base.Remediation = prepared.Readiness.Remediation
 		return base, nil
 	}
 	sink, err := s.feedbackSink()

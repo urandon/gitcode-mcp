@@ -265,6 +265,7 @@ type options struct {
 	profile                      string
 	asset                        multiFlag
 	idempotencyKey               string
+	planID                       string
 	dryRun                       bool
 	live                         bool
 	offline                      bool
@@ -387,7 +388,8 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 		fmt.Fprintf(stdout, "gitcode-mcp %s\n", buildinfo.Current().Version)
 		return 0
 	}
-	if args[0] == "config" || args[0] == "auth" || args[0] == "service" || args[0] == "admin" || args[0] == "maintenance" || args[0] == "rag" || args[0] == "rag-status" || args[0] == "rag-search" || args[0] == "repo-docs" || args[0] == "doctor" || args[0] == "migrate-cache" {
+	feedbackControl := isFeedbackControlCommand(args)
+	if args[0] == "config" || args[0] == "auth" || args[0] == "service" || args[0] == "admin" || args[0] == "maintenance" || args[0] == "rag" || args[0] == "rag-status" || args[0] == "rag-search" || args[0] == "repo-docs" || args[0] == "doctor" || args[0] == "migrate-cache" || feedbackControl {
 		return executeLocalCommand(ctx, args, stdout, stderr, deps)
 	}
 	if !isKnownCommand(args[0]) {
@@ -470,6 +472,18 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 	return dispatch(ctx, svc, command, rest, opts, stdout, stderr, plan, deps)
 }
 
+func isFeedbackControlCommand(args []string) bool {
+	if len(args) == 0 || args[0] != "feedback" {
+		return false
+	}
+	_, rest, err := parseOptions("feedback", args[1:])
+	if err != nil {
+		return len(args) > 1 && (args[1] == "status" || args[1] == "setup")
+	}
+	sub, ok := firstArg(rest)
+	return ok && (sub == "status" || sub == "setup")
+}
+
 func firstPositional(args []string) string {
 	value, _ := firstArg(args)
 	return value
@@ -508,6 +522,12 @@ func buildStartupPlan(ctx context.Context, command string, opts options, deps lo
 	plan.RAGConfig = eff.Config
 	plan.MCPToolAccess = eff.Config.MCPToolAccess
 	plan.ServiceConfig = service.ServiceConfig{LockPath: eff.Config.LockPath, Feedback: eff.Config.Feedback}
+	if command == "prepare-feedback" {
+		status := deps.CredentialReporter.Status(ctx, eff)
+		plan.CredentialStatus = status
+		plan.ServiceConfig.WriteCredentialPresent = status.Present
+		plan.ServiceConfig.FeedbackProviderAvailable = !explicitOffline
+	}
 	if command == "submit-feedback" {
 		plan.RepoID = eff.Config.Feedback.RepoID
 	}
@@ -596,6 +616,9 @@ func serviceFromStartupPlan(ctx context.Context, plan startupPlan, factory servi
 		if err == nil {
 			if configurable, ok := svc.(interface{ ConfigureFeedback(feedback.Config) }); ok {
 				configurable.ConfigureFeedback(plan.ServiceConfig.Feedback)
+			}
+			if configurable, ok := svc.(interface{ ConfigureFeedbackReadiness(bool, bool) }); ok {
+				configurable.ConfigureFeedbackReadiness(plan.ServiceConfig.WriteCredentialPresent, plan.ServiceConfig.FeedbackProviderAvailable)
 			}
 			if configureRAG {
 				if configurable, ok := svc.(interface{ ConfigureRAGSearch(config.Config) }); ok {
@@ -755,6 +778,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.Var(&opts.asset, "asset", "release asset link as name=url")
 	flags.Var(&opts.asset, "asset-url", "release asset link as name=url")
 	flags.StringVar(&opts.idempotencyKey, "idempotency-key", "", "idempotency key")
+	flags.StringVar(&opts.planID, "plan-id", "", "exact rendered plan id")
 	flags.BoolVar(&opts.dryRun, "dry-run", false, "validate write without mutation")
 	flags.BoolVar(&opts.live, "live", false, "execute live write")
 	flags.BoolVar(&opts.offline, "offline", false, "use explicit offline/fixture provider")
@@ -877,7 +901,7 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 	}
 	if opts.helpRequested {
 		sub, _ := firstArg(rest)
-		if sub != "" && (command == "config" || command == "auth" || command == "repo" || command == "service" || command == "admin" || command == "maintenance" || command == "rag" || command == "repo-docs") {
+		if sub != "" && (command == "config" || command == "auth" || command == "repo" || command == "service" || command == "admin" || command == "maintenance" || command == "rag" || command == "repo-docs" || command == "feedback") {
 			switch command + " " + sub {
 			case "config init", "config locate", "config show":
 				printLocalSubcommandHelp(command, sub, stdout)
@@ -896,6 +920,8 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 			case "rag setup", "rag enable", "rag index", "rag status", "rag search":
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "repo-docs register", "repo-docs rebind", "repo-docs policy", "repo-docs status", "repo-docs plan", "repo-docs index", "repo-docs search":
+				printLocalSubcommandHelp(command, sub, stdout)
+			case "feedback status", "feedback setup":
 				printLocalSubcommandHelp(command, sub, stdout)
 			default:
 				printCommandHelp(command, stdout)
@@ -942,6 +968,11 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 	}
 	if command == "rag-search" {
 		return executeRAGSearchCommand(ctx, rest, opts, stdout, stderr, deps)
+	}
+	if command == "feedback" {
+		if sub, ok := firstArg(rest); ok && (sub == "status" || sub == "setup") {
+			return executeFeedbackControlCommand(ctx, sub, opts, stdout, stderr, deps)
+		}
 	}
 	if command == "repo-docs" {
 		return executeRepositoryDocsCommand(ctx, rest, opts, stdout, stderr, deps)
@@ -2799,6 +2830,128 @@ func dispatchFeedback(ctx context.Context, svc queryService, args []string, opts
 		return writeCommandError(stderr, opts.format, plan, err)
 	}
 	return render(stdout, opts.format, result, renderFeedbackSubmissionText)
+}
+
+type feedbackSetupOutput struct {
+	config.FeedbackSetupResult
+	Readiness feedback.Readiness `json:"readiness"`
+}
+
+func executeFeedbackControlCommand(ctx context.Context, sub string, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {
+	if opts.live || opts.dryRun {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "write_mode", Message: "feedback status/setup are local operations; omit --live and --dry-run"})
+	}
+	eff, err := config.LoadEffective(deps.Source, config.Overrides{CachePath: opts.cachePath})
+	if err != nil {
+		fmt.Fprintln(stderr, config.RedactDiagnostic(err.Error(), deps.Source))
+		return 1
+	}
+	credential := deps.CredentialReporter.Status(ctx, eff)
+	if sub == "status" {
+		result, err := localFeedbackReadiness(ctx, eff, credential.Present, !opts.offline && !opts.fixture)
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, renderFeedbackReadinessText)
+	}
+	if strings.TrimSpace(opts.repo) == "" {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "repo", Message: "feedback setup requires --repo OWNER/REPO"})
+	}
+	if err := requireFeedbackRepositoryBinding(ctx, eff.Config.CachePath, opts.repo); err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	setupPlan, err := config.PlanFeedbackSetup(deps.Source, opts.repo)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	if !opts.yes {
+		return render(stdout, opts.format, setupPlan, renderFeedbackSetupPlanText)
+	}
+	if strings.TrimSpace(opts.idempotencyKey) == "" {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "idempotency_key", Message: "feedback setup --yes requires --idempotency-key KEY"})
+	}
+	if strings.TrimSpace(opts.planID) == "" || opts.planID != setupPlan.PlanID {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "plan_id", Message: "feedback setup --yes requires the exact current --plan-id from feedback setup"})
+	}
+	result, err := config.ApplyFeedbackSetup(setupPlan, opts.idempotencyKey, time.Now().UTC())
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	verified, err := config.LoadEffective(deps.Source, config.Overrides{CachePath: opts.cachePath})
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	readiness, err := localFeedbackReadiness(ctx, verified, credential.Present, !opts.offline && !opts.fixture)
+	if err != nil {
+		return writeError(stderr, opts.format, err)
+	}
+	return render(stdout, opts.format, feedbackSetupOutput{FeedbackSetupResult: result, Readiness: readiness}, renderFeedbackSetupResultText)
+}
+
+func localFeedbackReadiness(ctx context.Context, eff config.EffectiveConfig, credentialPresent, providerAvailable bool) (feedback.Readiness, error) {
+	repositoryBound := false
+	repoID := strings.TrimSpace(eff.Config.Feedback.RepoID)
+	if eff.Config.Feedback.Enabled && repoID != "" {
+		store, err := cache.NewSQLiteReadOnlyStore(ctx, eff.Config.CachePath)
+		if err == nil {
+			defer store.Close()
+			_, err = store.GetRepository(ctx, repoID)
+			if err == nil {
+				repositoryBound = true
+			}
+		}
+	}
+	return feedback.EvaluateReadiness(feedback.ReadinessInput{Config: eff.Config.Feedback, RepositoryBound: repositoryBound, CredentialPresent: credentialPresent, ProviderAvailable: providerAvailable}), nil
+}
+
+func requireFeedbackRepositoryBinding(ctx context.Context, cachePath, repoID string) error {
+	if !feedback.ValidRepositoryID(repoID) {
+		return service.ErrInvalidQuery{Field: "repo", Message: "feedback setup requires a safe exact owner/repository id"}
+	}
+	store, err := cache.NewSQLiteReadOnlyStore(ctx, cachePath)
+	if err == nil {
+		defer store.Close()
+		if _, err = store.GetRepository(ctx, repoID); err == nil {
+			return nil
+		}
+	}
+	parts := strings.SplitN(repoID, "/", 2)
+	handoff := "gitcode-mcp repo add --repo " + repoID
+	if len(parts) == 2 {
+		handoff += " --owner " + parts[0] + " --name " + parts[1]
+	}
+	return service.ErrInvalidQuery{Field: "repo", Message: "trusted feedback repository is not bound; run " + handoff + " before feedback setup"}
+}
+
+func renderFeedbackReadinessText(w io.Writer, result feedback.Readiness) {
+	fmt.Fprintf(w, "state: %s\nprepare_available: %t\nsubmit_available: %t\n", result.State, result.PrepareAvailable, result.SubmitAvailable)
+	if result.Sink != "" {
+		fmt.Fprintf(w, "sink: %s\n", result.Sink)
+	}
+	if result.RepoID != "" {
+		fmt.Fprintf(w, "repo_id: %s\n", result.RepoID)
+	}
+	if result.Remediation != "" {
+		fmt.Fprintf(w, "remediation: %s\n", result.Remediation)
+	}
+	if result.Handoff != "" {
+		fmt.Fprintf(w, "handoff: %s\n", result.Handoff)
+	}
+}
+
+func renderFeedbackSetupPlanText(w io.Writer, plan config.FeedbackSetupPlan) {
+	fmt.Fprintf(w, "status: %s\nplan_id: %s\nrepo_id: %s\nsink: %s\nconfirmation_required: %t\n", plan.Status, plan.PlanID, plan.RepoID, plan.Sink, plan.ConfirmationRequired)
+	for _, effect := range plan.Effects {
+		fmt.Fprintf(w, "effect: %s [%s] %s\n", effect.ID, effect.Class, effect.Summary)
+	}
+	if plan.ConfirmationRequired {
+		fmt.Fprintf(w, "handoff: rerun with --yes --plan-id %s --idempotency-key KEY to confirm this exact rendered state\n", plan.PlanID)
+	}
+}
+
+func renderFeedbackSetupResultText(w io.Writer, output feedbackSetupOutput) {
+	fmt.Fprintf(w, "status: %s\nplan_id: %s\nrepo_id: %s\nsink: %s\nidempotency_key: %s\nevidence: %s\n", output.Status, output.PlanID, output.RepoID, output.Sink, output.IdempotencyKey, output.Evidence)
+	renderFeedbackReadinessText(w, output.Readiness)
 }
 
 func feedbackDraftFromOptions(opts options) (feedback.Draft, error) {
@@ -5253,7 +5406,9 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH cache database path")
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
 	case "feedback":
-		fmt.Fprintln(w, "Usage: gitcode-mcp feedback prepare [--input PATH | structured flags] [--format FORMAT]")
+		fmt.Fprintln(w, "Usage: gitcode-mcp feedback status [--format FORMAT]")
+		fmt.Fprintln(w, "       gitcode-mcp feedback setup --repo OWNER/REPO [--yes --plan-id PLAN --idempotency-key KEY] [--format FORMAT]")
+		fmt.Fprintln(w, "       gitcode-mcp feedback prepare [--input PATH | structured flags] [--format FORMAT]")
 		fmt.Fprintln(w, "       gitcode-mcp feedback submit [--input PATH | structured flags] --live --idempotency-key KEY [--format FORMAT]")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Prepare or submit a structured, redacted dogfood report to the configured feedback sink.")
@@ -5923,6 +6078,15 @@ func printCommandHelp(command string, w io.Writer) {
 
 func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 	switch command + " " + sub {
+	case "feedback status":
+		fmt.Fprintln(w, "Usage: gitcode-mcp feedback status [--offline|--fixture] [--cache-path PATH] [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Report side-effect-free feedback preparation and submission readiness.")
+	case "feedback setup":
+		fmt.Fprintln(w, "Usage: gitcode-mcp feedback setup --repo OWNER/REPO [--yes --plan-id PLAN --idempotency-key KEY] [--cache-path PATH] [--format FORMAT]")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Render a trusted global feedback-sink plan; --yes applies the exact rendered state atomically.")
+		fmt.Fprintln(w, "The repository must already be bound. No credential or arbitrary endpoint is written.")
 	case "config init":
 		fmt.Fprintln(w, "Usage: gitcode-mcp config init [--overwrite]")
 		fmt.Fprintln(w)

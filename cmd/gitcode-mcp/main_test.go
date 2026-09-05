@@ -30,7 +30,10 @@ func TestResolveServiceKeepsFeedbackConfigOffline(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	svc, err := resolveService(store, StartupDeps{Config: config.Config{Feedback: feedback.Config{Enabled: true, Sink: feedback.SinkGitCodeIssues, RepoID: "example/feedback"}}, Cache: CacheStartup{LockPath: filepath.Join(t.TempDir(), "cache.lock")}})
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "example/feedback", Owner: "example", Name: "feedback"}); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := resolveService(store, StartupDeps{Config: config.Config{Feedback: feedback.Config{Enabled: true, Sink: feedback.SinkGitCodeIssues, RepoID: "example/feedback"}}, Cache: CacheStartup{LockPath: filepath.Join(t.TempDir(), "cache.lock")}, GitCode: GitCodeStartup{Token: "fixture-credential"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +41,7 @@ func TestResolveServiceKeepsFeedbackConfigOffline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !prepared.Configured || prepared.Status != "prepared" || prepared.RepoID != "example/feedback" {
+	if !prepared.Configured || prepared.Status != "prepared" || prepared.RepoID != "example/feedback" || prepared.Readiness.State != feedback.ReadinessProviderUnavailable {
 		t.Fatalf("prepared=%#v", prepared)
 	}
 }

@@ -136,6 +136,20 @@ func TestConfigLoading(t *testing.T) {
 		}
 	})
 
+	t.Run("SCN-CONFIG-FEEDBACK-EXPLICIT-EMPTY-SINK", func(t *testing.T) {
+		src := newMemorySource(t)
+		configPath := filepath.Join(t.TempDir(), "startup.yaml")
+		src.env[EnvMCPConfigPath] = configPath
+		src.files[configPath] = []byte("feedback:\n  enabled: true\n  sink: \"\"\n  repo_id: example/feedback\n")
+		cfg, err := Load(src, Overrides{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Feedback.Sink != "" || !cfg.Feedback.SinkExplicit {
+			t.Fatalf("explicit empty sink was hidden: %#v", cfg.Feedback)
+		}
+	})
+
 	t.Run("SCN-CONFIG-EXPLICIT-MISSING", func(t *testing.T) {
 		src := newMemorySource(t)
 		missing := filepath.Join(src.homeDir, "missing.json")

@@ -34,14 +34,15 @@ const (
 type RAGSearchProvider func(context.Context, rag.SearchRequest) (rag.SearchResult, error)
 
 type Service struct {
-	store                  cache.Store
-	client                 gitcode.Client
-	now                    func() time.Time
-	lockPath               string
-	providerMode           gitcode.ProviderMode
-	writeCredentialPresent bool
-	feedbackConfig         feedback.Config
-	ragSearch              RAGSearchProvider
+	store                     cache.Store
+	client                    gitcode.Client
+	now                       func() time.Time
+	lockPath                  string
+	providerMode              gitcode.ProviderMode
+	writeCredentialPresent    bool
+	feedbackProviderAvailable bool
+	feedbackConfig            feedback.Config
+	ragSearch                 RAGSearchProvider
 }
 
 func (s *Service) ConfigureRAGSearch(cfg config.Config) {
@@ -82,6 +83,8 @@ func NewWithClientConfig(store cache.Store, client gitcode.Client, cfg ServiceCo
 	svc := New(store)
 	svc.client = client
 	svc.providerMode = gitcode.ProviderMode("custom")
+	svc.writeCredentialPresent = true
+	svc.feedbackProviderAvailable = true
 	svc.lockPath = serviceLockPath(cfg.LockPath)
 	svc.ConfigureFeedback(cfg.Feedback)
 	return svc
@@ -98,12 +101,14 @@ func NewWithMode(store cache.Store, mode gitcode.ProviderMode, token string, cfg
 	switch mode {
 	case gitcode.ProviderModeFixture:
 		return &Service{
-			store:          store,
-			client:         sanitizedFixtureClient{},
-			now:            func() time.Time { return time.Now().UTC() },
-			lockPath:       serviceLockPath(cfg.LockPath),
-			providerMode:   gitcode.ProviderModeFixture,
-			feedbackConfig: normalizeFeedbackConfig(cfg.Feedback),
+			store:                     store,
+			client:                    sanitizedFixtureClient{},
+			now:                       func() time.Time { return time.Now().UTC() },
+			lockPath:                  serviceLockPath(cfg.LockPath),
+			providerMode:              gitcode.ProviderModeFixture,
+			feedbackConfig:            normalizeFeedbackConfig(cfg.Feedback),
+			writeCredentialPresent:    cfg.WriteCredentialPresent,
+			feedbackProviderAvailable: cfg.FeedbackProviderAvailable,
 		}, nil
 	case gitcode.ProviderModeLive:
 		token = strings.TrimSpace(token)
@@ -139,13 +144,14 @@ func NewWithMode(store cache.Store, mode gitcode.ProviderMode, token string, cfg
 			return nil, err
 		}
 		return &Service{
-			store:                  store,
-			client:                 gitcode.Client(client),
-			now:                    func() time.Time { return time.Now().UTC() },
-			lockPath:               serviceLockPath(cfg.LockPath),
-			providerMode:           gitcode.ProviderModeLive,
-			writeCredentialPresent: true,
-			feedbackConfig:         normalizeFeedbackConfig(cfg.Feedback),
+			store:                     store,
+			client:                    gitcode.Client(client),
+			now:                       func() time.Time { return time.Now().UTC() },
+			lockPath:                  serviceLockPath(cfg.LockPath),
+			providerMode:              gitcode.ProviderModeLive,
+			writeCredentialPresent:    true,
+			feedbackProviderAvailable: true,
+			feedbackConfig:            normalizeFeedbackConfig(cfg.Feedback),
 		}, nil
 	case gitcode.ProviderModeUnavailable:
 		return nil, gitcode.ErrProviderUnavailable{Reason: "provider unavailable"}
