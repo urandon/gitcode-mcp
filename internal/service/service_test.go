@@ -2612,6 +2612,64 @@ func TestIssue104MergePRCallbackConflictCannotOverwriteConcurrentClaim(t *testin
 	}
 }
 
+func TestIssue104MergePRLateOwnerOutcomeCannotDowngradeRecoveredSuccess(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		outcome  error
+		wantCode string
+	}{
+		{name: "ambiguous", outcome: gitcode.ErrWriteMutationPhase{Endpoint: "/pulls/103/merge", Phase: "put", MutationAttempted: true, Cause: gitcode.ErrNetworkUnavailable{Endpoint: "/pulls/103/merge", Attempts: 1}}, wantCode: "write_ambiguous_remote"},
+		{name: "conflict", outcome: gitcode.ErrWriteMutationPhase{Endpoint: "/pulls/103/merge", Phase: "put", MutationAttempted: true, Cause: gitcode.ErrConflict{Endpoint: "/pulls/103/merge", Status: http.StatusConflict}}, wantCode: "write_conflict"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := cache.NewInMemorySQLiteStore(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+				t.Fatal(err)
+			}
+			preimage := gitcode.PullRequest{ID: "9001", Number: 103, Title: "Release batch", State: "open", HeadSHA: "head-sha", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+			client := &lateMergeOutcomeClient{fakeGitCodeClient: &fakeGitCodeClient{}, preimage: preimage, outcome: tc.outcome, applied: make(chan struct{}), release: make(chan struct{})}
+			svc := NewWithClient(store, client)
+			svc.providerMode = gitcode.ProviderModeLive
+			svc.writeCredentialPresent = true
+			req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 103, Sha: "head-sha", Strategy: "squash", IdempotencyKey: "issue-104-late-owner-" + tc.name}
+
+			ownerErr := make(chan error, 1)
+			go func() {
+				_, err := svc.MergePR(ctx, req)
+				ownerErr <- err
+			}()
+			<-client.applied
+
+			recovered, err := svc.MergePR(ctx, req)
+			if err != nil || recovered.Status != "recovered_after_ambiguous_write" || !recovered.Replayed {
+				t.Fatalf("recovery=%#v err=%v", recovered, err)
+			}
+			entry, err := store.GetAuditEventByKey(ctx, "fixture-a", req.IdempotencyKey)
+			if err != nil || entry == nil || entry.Status != audit.StatusSucceeded {
+				t.Fatalf("recovered audit=%#v err=%v", entry, err)
+			}
+
+			close(client.release)
+			var writeErr ErrWriteFailure
+			if err := <-ownerErr; !errors.As(err, &writeErr) || writeErr.Code != tc.wantCode {
+				t.Fatalf("late owner error=%#v", err)
+			}
+			entry, err = store.GetAuditEventByKey(ctx, "fixture-a", req.IdempotencyKey)
+			if err != nil || entry == nil || entry.Status != audit.StatusSucceeded {
+				t.Fatalf("late owner downgraded audit=%#v err=%v", entry, err)
+			}
+			if mutations, readbacks := client.counts(); mutations != 1 || readbacks != 1 {
+				t.Fatalf("mutations=%d readbacks=%d", mutations, readbacks)
+			}
+		})
+	}
+}
+
 func TestIssue104MergePRCacheRefreshCrashWindowsRecoverWithoutSecondPUT(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)
@@ -5423,6 +5481,46 @@ func (c *claimedMergeConcurrentCallerClient) counts() (calls, mutations, readbac
 	return c.calls, c.mutations, c.readbacks
 }
 
+type lateMergeOutcomeClient struct {
+	*fakeGitCodeClient
+	preimage  gitcode.PullRequest
+	outcome   error
+	applied   chan struct{}
+	release   chan struct{}
+	mu        sync.Mutex
+	mutations int
+	readbacks int
+}
+
+func (c *lateMergeOutcomeClient) MergePR(_ context.Context, _ gitcode.MergePRRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PullRequest], error) {
+	if opts.BeforeMergePRMutation != nil {
+		if err := opts.BeforeMergePRMutation(c.preimage); err != nil {
+			return gitcode.WriteResult[gitcode.PullRequest]{}, err
+		}
+	}
+	c.mu.Lock()
+	c.mutations++
+	c.mu.Unlock()
+	close(c.applied)
+	<-c.release
+	return gitcode.WriteResult[gitcode.PullRequest]{}, c.outcome
+}
+
+func (c *lateMergeOutcomeClient) GetPR(context.Context, gitcode.PRRequest) (gitcode.PullRequest, error) {
+	c.mu.Lock()
+	c.readbacks++
+	c.mu.Unlock()
+	merged := c.preimage
+	merged.State = "merged"
+	return merged, nil
+}
+
+func (c *lateMergeOutcomeClient) counts() (mutations, readbacks int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.mutations, c.readbacks
+}
+
 func (c *ambiguousMergePRClient) MergePR(_ context.Context, req gitcode.MergePRRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PullRequest], error) {
 	if opts.BeforeMergePRMutation != nil {
 		if err := opts.BeforeMergePRMutation(c.preimage); err != nil {
@@ -5871,6 +5969,16 @@ func (s *writeRefreshFailStore) ClaimAuditEventGeneration(ctx context.Context, e
 		return false, errors.New("atomic generation claim unavailable")
 	}
 	return claimer.ClaimAuditEventGeneration(ctx, entry, expectedFailedAt)
+}
+
+func (s *writeRefreshFailStore) TransitionAuditEventGeneration(ctx context.Context, entry cache.AuditTrailEntry, expectedCreatedAt time.Time, expectedStatus string) (bool, error) {
+	transitioner, ok := s.Store.(interface {
+		TransitionAuditEventGeneration(context.Context, cache.AuditTrailEntry, time.Time, string) (bool, error)
+	})
+	if !ok {
+		return false, errors.New("atomic generation transition unavailable")
+	}
+	return transitioner.TransitionAuditEventGeneration(ctx, entry, expectedCreatedAt, expectedStatus)
 }
 
 type corruptingStore struct {

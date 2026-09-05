@@ -699,6 +699,34 @@ func TestAuditGenerationClaimCannotConsumeFailurePublishedAfterLookup(t *testing
 	}
 }
 
+func TestAuditGenerationTransitionCannotDowngradeSettledGeneration(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	createdAt := time.Date(2026, 9, 5, 5, 0, 0, 0, time.UTC)
+	inProgress := AuditTrailEntry{RepoID: "fixture-a", ID: "write-transition-key", Operation: "merge-pr", Command: "merge-pr", Mode: "live", RecordID: "PR-7", RemoteType: "pull_request", RemoteID: "7", IdempotencyKey: "transition-key", Status: "in_progress", PayloadHash: "payload-hash", CreatedAt: createdAt}
+	claimed, err := store.ClaimAuditEventGeneration(ctx, inProgress, nil)
+	if err != nil || !claimed {
+		t.Fatalf("claim=%t err=%v", claimed, err)
+	}
+	succeeded := inProgress
+	succeeded.Status = "succeeded"
+	transitioned, err := store.TransitionAuditEventGeneration(ctx, succeeded, createdAt, "in_progress")
+	if err != nil || !transitioned {
+		t.Fatalf("success transition=%t err=%v", transitioned, err)
+	}
+	lateFailure := inProgress
+	lateFailure.Status = "failed"
+	transitioned, err = store.TransitionAuditEventGeneration(ctx, lateFailure, createdAt, "in_progress")
+	if err != nil || transitioned {
+		t.Fatalf("late downgrade=%t err=%v", transitioned, err)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", "transition-key")
+	if err != nil || entry == nil || entry.Status != "succeeded" {
+		t.Fatalf("settled entry=%#v err=%v", entry, err)
+	}
+}
+
 func TestScenario008CacheConfirmationIdempotentUpsert(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t, ctx)

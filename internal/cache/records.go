@@ -515,6 +515,29 @@ WHERE ? <> '' AND audit_trail.status = 'failed' AND audit_trail.payload_hash = e
 	return affected == 1, nil
 }
 
+// TransitionAuditEventGeneration updates only the exact audit generation and
+// status owned or observed by the caller. It prevents a late provider outcome
+// from downgrading a newer recovery settlement.
+func (s *SQLiteStore) TransitionAuditEventGeneration(ctx context.Context, entry AuditTrailEntry, expectedCreatedAt time.Time, expectedStatus string) (bool, error) {
+	metadata, err := marshalJSON(entry.RequestMetadata)
+	if err != nil {
+		return false, err
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE audit_trail SET
+	operation = ?, command = ?, mode = ?, record_id = ?, remote_type = ?, remote_id = ?, idempotency_key = ?, status = ?, message = ?, payload_hash = ?, request_metadata = ?
+WHERE repo_id = ? AND id = ? AND created_at = ? AND status = ?`,
+		entry.Operation, entry.Command, entry.Mode, entry.RecordID, entry.RemoteType, entry.RemoteID, entry.IdempotencyKey, entry.Status, entry.Message, entry.PayloadHash, metadata,
+		entry.RepoID, entry.ID, expectedCreatedAt.UTC().Format(time.RFC3339Nano), expectedStatus)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
+}
+
 func (s *SQLiteStore) GetAuditEventByKey(ctx context.Context, repoID, key string) (*AuditTrailEntry, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT repo_id, id, operation, command, mode, record_id, remote_type, remote_id, idempotency_key, status, message, payload_hash, request_metadata, created_at FROM audit_trail WHERE repo_id = ? AND idempotency_key = ? ORDER BY created_at DESC LIMIT 1`, repoID, key)
 	entry, err := scanAuditTrailRow(row)

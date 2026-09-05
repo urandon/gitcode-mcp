@@ -94,7 +94,9 @@ a cache-refresh-pending state before any cache write and records `succeeded`
 only after cache confirmation; restart recovery repeats GET and cache repair,
 never PUT. An already-merged preimage invokes the same local claim callback
 before returning its no-PUT confirmation, so a cache-settlement failure still
-retains the head fingerprint required by recovery.
+retains the head fingerprint required by recovery. Post-claim audit transitions
+also compare the owned generation and expected status; late PUT outcomes cannot
+overwrite a recovery settlement that has already advanced the row.
 
 ## Repository Push Remote Mirrors
 

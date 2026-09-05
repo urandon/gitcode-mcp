@@ -269,6 +269,9 @@ cache failure becomes `remote_confirmed_cache_refresh_failed`; neither pending
 nor failed cache settlement is a terminal success receipt. The same ordering
 and preimage fingerprint apply when the canonical preflight reports an already
 merged PR: that path performs no PUT, but remains restart-safe for cache repair.
+Every post-claim transition is compare-and-swap fenced by the claim generation
+and expected status. A late provider error therefore cannot downgrade a
+`pending` or `succeeded` row already advanced by canonical recovery.
 
 Milestone-aware issue writes also refresh a deterministic `milestone` link from
 the cached issue source to the resolved `MILESTONE-<id>` source. The link kind
