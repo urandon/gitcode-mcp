@@ -118,6 +118,14 @@ func PlanFeedbackSetup(src Source, repoID string) (FeedbackSetupPlan, error) {
 }
 
 func ApplyFeedbackSetup(plan FeedbackSetupPlan, idempotencyKey string, now time.Time) (FeedbackSetupResult, error) {
+	return ApplyFeedbackSetupWithExpectedPlan(plan, plan.PlanID, idempotencyKey, now)
+}
+
+// ApplyFeedbackSetupWithExpectedPlan permits an interrupted caller to present
+// the exact id of a retained succeeded claim even after the current config has
+// advanced to the already-configured plan. A stale id with no matching receipt
+// is rejected before any config or journal mutation for the new intent.
+func ApplyFeedbackSetupWithExpectedPlan(plan FeedbackSetupPlan, expectedPlanID, idempotencyKey string, now time.Time) (FeedbackSetupResult, error) {
 	key := strings.TrimSpace(idempotencyKey)
 	if key == "" {
 		return FeedbackSetupResult{}, fmt.Errorf("feedback setup: idempotency key is required")
@@ -150,24 +158,30 @@ func ApplyFeedbackSetup(plan FeedbackSetupPlan, idempotencyKey string, now time.
 		return FeedbackSetupResult{}, err
 	}
 	journalChanged = pruneExpiredFeedbackSetupClaims(&journal, now.UTC()) || journalChanged
-	if journalChanged {
-		if err := writeFeedbackSetupJournal(journalPath, journal); err != nil {
-			return FeedbackSetupResult{}, err
-		}
-	}
 	keyDigest := digestBytes([]byte(key))
 	if claim, exists := journal.Claims[keyDigest]; exists {
 		if claim.IntentDigest != plan.intentDigest {
 			return FeedbackSetupResult{}, fmt.Errorf("feedback setup: idempotency key is already claimed for a different setup intent")
 		}
 		if claim.Status == "succeeded" {
+			if strings.TrimSpace(expectedPlanID) != plan.PlanID && strings.TrimSpace(expectedPlanID) != claim.PlanID {
+				return FeedbackSetupResult{}, fmt.Errorf("feedback setup: confirmed plan id no longer matches current state or the retained receipt")
+			}
 			base.PlanID = claim.PlanID
 			base.Status = claim.ResultStatus
 			base.GeneratedAt = claim.GeneratedAt
 			base.Replayed = true
 			base.Evidence = "durable idempotency receipt matched the setup intent; no write performed"
+			if journalChanged {
+				if err := writeFeedbackSetupJournal(journalPath, journal); err != nil {
+					return FeedbackSetupResult{}, err
+				}
+			}
 			return base, nil
 		}
+	}
+	if strings.TrimSpace(expectedPlanID) == "" || strings.TrimSpace(expectedPlanID) != plan.PlanID {
+		return FeedbackSetupResult{}, fmt.Errorf("feedback setup: confirmed plan id no longer matches current state or a retained receipt")
 	}
 	if currentDigest != plan.beforeDigest {
 		return FeedbackSetupResult{}, fmt.Errorf("feedback setup: configuration changed after planning; render a new plan")

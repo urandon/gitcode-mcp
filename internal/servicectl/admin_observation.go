@@ -16,6 +16,8 @@ import (
 	"gitcode-mcp/internal/adminhttp"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/capability"
+	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/feedback"
 )
 
 type adminMaintenanceEntry struct {
@@ -44,6 +46,7 @@ func (m Manager) adminObservation(ctx context.Context, jobs *JobManager, mainten
 	snapshot := adminhttp.ObservationSnapshot{Service: adminhttp.ServiceObservation{
 		Version: m.Version, Commit: m.Commit, SchemaMin: schemaMin, SchemaMax: schemaMax, Protocol: "admin.v1", Running: true, StartedAt: adminTimePointer(startedAt), AdminSecure: true,
 	}}
+	snapshot.Feedback = m.adminFeedbackObservation(ctx)
 	if status, err := m.Status(); err == nil {
 		snapshot.Service.Installed = status.Installed
 		snapshot.Service.InstallKind = status.InstallKind
@@ -96,6 +99,56 @@ func (m Manager) adminObservation(ctx context.Context, jobs *JobManager, mainten
 		})
 	}
 	return adminhttp.FinalizeSnapshot(snapshot, now), nil
+}
+
+func (m Manager) adminFeedbackObservation(ctx context.Context) adminhttp.FeedbackObservation {
+	src := m.Source
+	if src == nil {
+		src = config.OSSource{}
+	}
+	effective, err := config.LoadEffective(src, config.Overrides{})
+	if err != nil {
+		return adminhttp.FeedbackObservation{Readiness: feedback.EvaluateReadiness(feedback.ReadinessInput{Config: feedback.DefaultConfig()}), SetupRepositories: []string{}}
+	}
+	bound := false
+	repositories := []string{}
+	cachePath := effective.Config.CachePath
+	if strings.TrimSpace(m.AdminCachePath) != "" {
+		cachePath = m.AdminCachePath
+	}
+	if store, openErr := cache.NewSQLiteReadOnlyStore(ctx, cachePath); openErr == nil {
+		defer store.Close()
+		if bindings, listErr := store.ListRepositories(ctx); listErr == nil {
+			for _, binding := range bindings {
+				if feedback.ValidRepositoryID(binding.RepoID) {
+					repositories = append(repositories, binding.RepoID)
+				}
+			}
+		}
+		repoID := strings.TrimSpace(effective.Config.Feedback.RepoID)
+		if effective.Config.Feedback.Enabled && repoID != "" {
+			_, getErr := store.GetRepository(ctx, repoID)
+			bound = getErr == nil
+		}
+	}
+	sort.Strings(repositories)
+	credentialPresent := false
+	feedbackConfig := effective.Config.Feedback
+	if feedbackConfig.Enabled && strings.TrimSpace(feedbackConfig.Sink) == feedback.SinkGitCodeIssues && strings.TrimSpace(feedbackConfig.RepoID) != "" && bound {
+		reporter := m.CredentialReporter
+		if reporter == nil {
+			reporter = config.DefaultCredentialProvider(src)
+		}
+		credentialPresent = reporter.Status(ctx, effective).Present
+	}
+	return adminhttp.FeedbackObservation{
+		Readiness: feedback.EvaluateReadiness(feedback.ReadinessInput{
+			Config: feedbackConfig, RepositoryBound: bound,
+			CredentialPresent: credentialPresent, ProviderAvailable: !m.Offline,
+		}),
+		SetupRepositories: repositories,
+		SetupAvailable:    len(repositories) > 0,
+	}
 }
 
 type adminCacheGroup struct {

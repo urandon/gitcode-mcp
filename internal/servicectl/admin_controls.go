@@ -10,6 +10,8 @@ import (
 
 	"gitcode-mcp/internal/adminhttp"
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/feedback"
 	"gitcode-mcp/internal/rag"
 	"gitcode-mcp/internal/repositorydocs"
 	"gitcode-mcp/internal/service"
@@ -34,6 +36,11 @@ type AdminControlManager struct {
 	maintenance *MaintenanceManager
 	jobs        *JobManager
 	receipts    *AdminControlReceiptManager
+}
+
+type AdminFeedbackSetupResult struct {
+	config.FeedbackSetupResult
+	Feedback adminhttp.FeedbackObservation `json:"feedback"`
 }
 
 func NewAdminControlManager(manager Manager, maintenance *MaintenanceManager, jobs *JobManager, receipts *AdminControlReceiptManager) *AdminControlManager {
@@ -71,6 +78,72 @@ func (m *AdminControlManager) ApplyMaintenance(ctx context.Context, req adminhtt
 		return nil, adminControlError(err)
 	}
 	return result, nil
+}
+
+func (m *AdminControlManager) PlanFeedbackSetup(ctx context.Context, req adminhttp.FeedbackSetupRequest) (any, error) {
+	repoID := strings.TrimSpace(req.RepoID)
+	if !feedback.ValidRepositoryID(repoID) {
+		return nil, adminhttp.ControlError{Status: http.StatusBadRequest, Code: "invalid_request", Field: "repo_id", Message: "repo_id must be an exact owner/repository identity.", Remediation: "Select a repository already bound in the effective cache."}
+	}
+	if _, err := m.feedbackSetupEffective(ctx, repoID); err != nil {
+		return nil, err
+	}
+	plan, err := config.PlanFeedbackSetup(m.manager.Source, repoID)
+	if err != nil {
+		return nil, controlError(http.StatusConflict, "feedback_setup_unavailable", "Trusted feedback setup is unavailable for the current global configuration.", "Use a global YAML configuration and run gitcode-mcp feedback setup from a trusted terminal.")
+	}
+	return plan, nil
+}
+
+func (m *AdminControlManager) ApplyFeedbackSetup(ctx context.Context, req adminhttp.FeedbackSetupRequest) (any, error) {
+	repoID := strings.TrimSpace(req.RepoID)
+	if strings.TrimSpace(req.PlanID) == "" {
+		return nil, adminhttp.ControlError{Status: http.StatusBadRequest, Code: "invalid_request", Field: "plan_id", Message: "plan_id is required.", Remediation: "Render and review a current feedback setup plan."}
+	}
+	if _, err := m.feedbackSetupEffective(ctx, repoID); err != nil {
+		return nil, err
+	}
+	plan, err := config.PlanFeedbackSetup(m.manager.Source, repoID)
+	if err != nil {
+		return nil, controlError(http.StatusConflict, "feedback_setup_unavailable", "Trusted feedback setup is unavailable for the current global configuration.", "Use a global YAML configuration and run gitcode-mcp feedback setup from a trusted terminal.")
+	}
+	result, err := config.ApplyFeedbackSetupWithExpectedPlan(plan, strings.TrimSpace(req.PlanID), strings.TrimSpace(req.IdempotencyKey), time.Now().UTC())
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "plan id") {
+			return nil, adminhttp.ControlError{Status: http.StatusConflict, Code: "stale_plan", Field: "plan_id", Message: "The reviewed feedback setup plan no longer matches current configuration or a retained receipt.", Remediation: "Refresh feedback readiness and render a new plan."}
+		}
+		return nil, adminControlError(err)
+	}
+	return AdminFeedbackSetupResult{FeedbackSetupResult: result, Feedback: m.manager.adminFeedbackObservation(ctx)}, nil
+}
+
+func (m *AdminControlManager) feedbackSetupEffective(ctx context.Context, repoID string) (config.EffectiveConfig, error) {
+	if !feedback.ValidRepositoryID(repoID) {
+		return config.EffectiveConfig{}, adminhttp.ControlError{Status: http.StatusBadRequest, Code: "invalid_request", Field: "repo_id", Message: "repo_id must be an exact owner/repository identity.", Remediation: "Select a repository already bound in the effective cache."}
+	}
+	src := m.manager.Source
+	if src == nil {
+		src = config.OSSource{}
+	}
+	effective, err := config.LoadEffective(src, config.Overrides{})
+	if err != nil {
+		return config.EffectiveConfig{}, controlError(http.StatusConflict, "feedback_setup_unavailable", "Trusted feedback configuration cannot be loaded.", "Repair the global configuration from a trusted terminal, then refresh Admin.")
+	}
+	cachePath := effective.Config.CachePath
+	if strings.TrimSpace(m.manager.AdminCachePath) != "" {
+		cachePath = m.manager.AdminCachePath
+	}
+	store, err := cache.NewSQLiteReadOnlyStore(ctx, cachePath)
+	if err != nil {
+		return config.EffectiveConfig{}, controlError(http.StatusConflict, "repository_unbound", "The selected feedback repository is not available in the effective cache.", "Bind the repository in the effective cache before feedback setup.")
+	}
+	defer store.Close()
+	if _, err := store.GetRepository(ctx, repoID); err != nil {
+		parts := strings.Split(repoID, "/")
+		handoff := "gitcode-mcp repo add --repo " + repoID + " --owner " + parts[0] + " --name " + parts[1] + " --scopes issues"
+		return config.EffectiveConfig{}, adminhttp.ControlError{Status: http.StatusConflict, Code: "repository_unbound", Field: "repo_id", Message: "The selected feedback repository is not bound in the effective cache.", Remediation: "Bind the repository in the effective cache, then render a new feedback setup plan.", CLIHandoff: handoff}
+	}
+	return effective, nil
 }
 
 func (m *AdminControlManager) DisableMaintenance(ctx context.Context, req adminhttp.RegistrationControlRequest) (any, error) {

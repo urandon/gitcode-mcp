@@ -1700,7 +1700,7 @@ func executeServiceCommand(ctx context.Context, args []string, opts options, std
 	if configErr != nil {
 		return writeError(stderr, opts.format, configErr)
 	}
-	manager := servicectl.Manager{Source: deps.Source, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, Commit: buildinfo.Current().Commit, RuntimeDir: eff.Config.Service.RuntimeDir, AdminBind: opts.adminBind, AdminAutoStart: opts.admin, AdminAllowNonLoopback: opts.adminUnsafe, AdminCachePath: eff.Config.CachePath, JobRetention: &eff.Config.Service.JobRetention}
+	manager := servicectl.Manager{Source: deps.Source, CredentialReporter: deps.CredentialReporter, BinaryPath: os.Args[0], Version: buildinfo.Current().Version, Commit: buildinfo.Current().Commit, RuntimeDir: eff.Config.Service.RuntimeDir, AdminBind: opts.adminBind, AdminAutoStart: opts.admin, AdminAllowNonLoopback: opts.adminUnsafe, AdminCachePath: eff.Config.CachePath, JobRetention: &eff.Config.Service.JobRetention, Offline: opts.offline || opts.fixture}
 	var (
 		status servicectl.Status
 		err    error

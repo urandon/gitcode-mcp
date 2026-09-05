@@ -13,6 +13,8 @@ import (
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"gitcode-mcp/internal/feedback"
 )
 
 func TestObservationSnapshotContractAndResourceBoundaries(t *testing.T) {
@@ -136,6 +138,38 @@ func TestObservationSnapshotGolden(t *testing.T) {
 	}
 	if !bytes.Equal(append(actual, '\n'), expected) {
 		t.Fatalf("snapshot contract changed\nactual:\n%s\nexpected:\n%s", actual, expected)
+	}
+}
+
+func TestObservationSnapshotPreservesEveryFeedbackReadinessState(t *testing.T) {
+	tests := []struct {
+		name  string
+		input feedback.ReadinessInput
+		state string
+	}{
+		{name: "disabled", input: feedback.ReadinessInput{Config: feedback.DefaultConfig(), RepositoryBound: true, CredentialPresent: true, ProviderAvailable: true}, state: feedback.ReadinessDisabled},
+		{name: "sink missing", input: feedback.ReadinessInput{Config: feedback.Config{Enabled: true, SinkExplicit: true, RepoID: "owner/repo"}, RepositoryBound: true, CredentialPresent: true, ProviderAvailable: true}, state: feedback.ReadinessSinkMissing},
+		{name: "repository unbound", input: feedback.ReadinessInput{Config: feedback.Config{Enabled: true, Sink: feedback.SinkGitCodeIssues, RepoID: "owner/repo"}, CredentialPresent: true, ProviderAvailable: true}, state: feedback.ReadinessRepositoryUnbound},
+		{name: "credential missing", input: feedback.ReadinessInput{Config: feedback.Config{Enabled: true, Sink: feedback.SinkGitCodeIssues, RepoID: "owner/repo"}, RepositoryBound: true, ProviderAvailable: true}, state: feedback.ReadinessCredentialMissing},
+		{name: "provider unavailable", input: feedback.ReadinessInput{Config: feedback.Config{Enabled: true, Sink: feedback.SinkGitCodeIssues, RepoID: "owner/repo"}, RepositoryBound: true, CredentialPresent: true}, state: feedback.ReadinessProviderUnavailable},
+		{name: "ready", input: feedback.ReadinessInput{Config: feedback.Config{Enabled: true, Sink: feedback.SinkGitCodeIssues, RepoID: "owner/repo"}, RepositoryBound: true, CredentialPresent: true, ProviderAvailable: true}, state: feedback.ReadinessReady},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := FinalizeSnapshot(ObservationSnapshot{Feedback: FeedbackObservation{Readiness: feedback.EvaluateReadiness(test.input), SetupRepositories: []string{"owner/repo"}, SetupAvailable: true}}, time.Now())
+			if snapshot.Feedback.State != test.state || !snapshot.Feedback.PrepareAvailable || (snapshot.Feedback.SubmitAvailable != (test.state == feedback.ReadinessReady)) {
+				t.Fatalf("feedback=%+v", snapshot.Feedback)
+			}
+			data, err := json.Marshal(snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, forbidden := range []string{"credential_source", "provider_endpoint", "cache_path", "/private/"} {
+				if strings.Contains(string(data), forbidden) {
+					t.Fatalf("state %s leaked %q: %s", test.state, forbidden, data)
+				}
+			}
+		})
 	}
 }
 

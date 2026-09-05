@@ -62,6 +62,7 @@ var writeCapabilities = []Capability{
 		MCPName:        "feedback_status",
 		ServiceCommand: "feedback-status",
 		Description:    "Report side-effect-free feedback preparation and submission readiness, including the exact trusted setup handoff when submission is unavailable.",
+		UI:             enabled("Visible in the loopback Admin feedback delivery workbench."),
 		CLI:            enabled("Available as the grouped CLI command `feedback status`."),
 		MCP:            enabled(),
 	},
@@ -452,6 +453,12 @@ var ragCapabilities = []Capability{
 }
 
 var adminCapabilities = []Capability{
+	{
+		ID: "admin_feedback_setup", Category: CategoryAdmin, Safety: SafetyAuditedWrite,
+		CLIName: "feedback", ServiceCommand: "feedback-setup",
+		Description: "Plan and atomically configure a trusted feedback sink using only a repository already bound in the effective cache.",
+		UI:          enabled("Available in the loopback Admin feedback delivery workbench."), CLI: enabled("Available as `feedback setup`."), MCP: disabled("Trusted global setup is a local CLI or loopback Admin operation."),
+	},
 	{
 		ID: "admin_maintenance_conflict_resolution", Category: CategoryAdmin, Safety: SafetyAuditedWrite,
 		CLIName: "maintenance", ServiceCommand: "maintenance-conflict-resolution",

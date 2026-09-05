@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gitcode-mcp/internal/feedback"
 )
 
 const observationAPIVersion = "1"
@@ -33,6 +35,13 @@ type ObservationSnapshot struct {
 	Maintenance  []MaintenanceObservation `json:"maintenance"`
 	Diagnostics  []DiagnosticObservation  `json:"diagnostics"`
 	Capabilities []CapabilityObservation  `json:"capabilities"`
+	Feedback     FeedbackObservation      `json:"feedback"`
+}
+
+type FeedbackObservation struct {
+	feedback.Readiness
+	SetupRepositories []string `json:"setup_repositories"`
+	SetupAvailable    bool     `json:"setup_available"`
 }
 
 type JobRetentionObservation struct {
@@ -518,6 +527,16 @@ func FinalizeSnapshot(snapshot ObservationSnapshot, now time.Time) ObservationSn
 }
 
 func normalizeSnapshotSlices(snapshot *ObservationSnapshot) {
+	if snapshot.Feedback.State == "" {
+		snapshot.Feedback.Readiness = feedback.EvaluateReadiness(feedback.ReadinessInput{Config: feedback.DefaultConfig()})
+	}
+	if snapshot.Feedback.Checks == nil {
+		snapshot.Feedback.Checks = []feedback.ReadinessCheck{}
+	}
+	if snapshot.Feedback.SetupRepositories == nil {
+		snapshot.Feedback.SetupRepositories = []string{}
+	}
+	sort.Strings(snapshot.Feedback.SetupRepositories)
 	if snapshot.Attention == nil {
 		snapshot.Attention = []AttentionItem{}
 	}

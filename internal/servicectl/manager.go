@@ -86,10 +86,11 @@ type Status struct {
 }
 
 type Manager struct {
-	Source     config.Source
-	BinaryPath string
-	Version    string
-	Commit     string
+	Source             config.Source
+	CredentialReporter config.CredentialStatusReporter
+	BinaryPath         string
+	Version            string
+	Commit             string
 	// SchemaMin/SchemaMax describe the cache contract published by this daemon
 	// binary. Zero values select the schema compiled into the current binary.
 	// Explicit values are useful to launch compatibility fixtures as real daemon
@@ -102,6 +103,9 @@ type Manager struct {
 	AdminAllowNonLoopback bool
 	AdminSessionTTL       time.Duration
 	AdminCachePath        string
+	// Offline suppresses live-provider feedback readiness for an explicitly
+	// fixture-only daemon. The zero value keeps normal installed daemons live-capable.
+	Offline bool
 	// JobRetention is the daemon-owned terminal job history policy. Keep it
 	// separate from EffectiveConfig: daemon jobs deliberately resolve their
 	// cache-scoped provider configuration at execution time.
@@ -515,6 +519,8 @@ func (m Manager) Run(ctx context.Context) error {
 		ApplyMaintenanceConflictResolution: adminControls.ApplyMaintenanceConflictResolution,
 		PlanBinding:                        adminControls.PlanBinding,
 		ApplyBinding:                       adminControls.ApplyBinding,
+		PlanFeedbackSetup:                  adminControls.PlanFeedbackSetup,
+		ApplyFeedbackSetup:                 adminControls.ApplyFeedbackSetup,
 		CompareSearch:                      adminControls.CompareSearch,
 		SearchRepositoryDocs:               adminControls.SearchRepositoryDocs,
 		PlanRepositoryDocs:                 adminControls.PlanRepositoryDocs,
