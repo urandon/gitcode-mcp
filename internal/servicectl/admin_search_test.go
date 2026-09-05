@@ -3,6 +3,7 @@ package servicectl
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,7 +133,7 @@ func TestRPCRepositoryDocsRegistrationAllowsFullTextWithoutEmbeddingProvider(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Aliases: []string{"legacy/repo"}}); err != nil {
 		t.Fatal(err)
 	}
 	store.Close()
@@ -159,12 +160,196 @@ func TestRPCRepositoryDocsRegistrationAllowsFullTextWithoutEmbeddingProvider(t *
 	if err != nil || registered.RepositoryDocs == nil {
 		t.Fatalf("registered=%+v err=%v", registered, err)
 	}
-	result, err := server.repositoryDocsSearch(ctx, RepositoryDocsQueryRequest{RepositoryDocsSourceSelector: RepositoryDocsSourceSelector{RegistrationID: entry.RegistrationID, SourceRegistrationID: registered.RepositoryDocs.SourceRegistrationID, SourceRegistrationGeneration: registered.RepositoryDocs.SourceRegistrationGeneration}, RepoID: "owner/repo", Query: "without embeddings", Mode: repositorydocs.SearchModeFullText})
+	result, err := server.repositoryDocsSearch(ctx, RepositoryDocsQueryRequest{RepoID: "legacy/repo", CachePath: cachePath, Query: "without embeddings", Mode: repositorydocs.SearchModeFullText})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.EffectiveMode != repositorydocs.SearchModeFullText || len(result.Hits) != 1 {
+	if result.RepoID != "owner/repo" || result.EffectiveMode != repositorydocs.SearchModeFullText || len(result.Hits) != 1 {
 		t.Fatalf("fulltext result=%+v", result)
+	}
+	_, err = server.repositoryDocsSourceForRequest(ctx, "owner/repo", cachePath, RepositoryDocsSourceSelector{RegistrationID: entry.RegistrationID})
+	var incomplete RepositoryDocsSourceUnavailableError
+	if !errors.As(err, &incomplete) || incomplete.DiagnosticCode() != "repository_docs_source_selector_required" {
+		t.Fatalf("registration-only selector error=%T %v", err, err)
+	}
+
+	repositoryPathB := createRepositoryDocsRegistrationRepo(t, filepath.Join(dir, "repo-b"), "second authority")
+	second, ok, err := maintenance.RegisterRepositoryDocsSource(ctx, entry.CacheUUID, entry.RepoID, repositoryPathB, "")
+	if err != nil || !ok || second.RepositoryDocs == nil {
+		t.Fatalf("second registration=%+v ok=%v err=%v", second, ok, err)
+	}
+	_, err = server.repositoryDocsSearch(ctx, RepositoryDocsQueryRequest{RepoID: "owner/repo", CachePath: cachePath, Query: "authority", Mode: repositorydocs.SearchModeFullText})
+	var ambiguous RepositoryDocsSourceAmbiguousError
+	if !errors.As(err, &ambiguous) {
+		t.Fatalf("ambiguous error=%T %v", err, err)
+	}
+	_, err = server.repositoryDocsSearch(ctx, RepositoryDocsQueryRequest{
+		RepositoryDocsSourceSelector: RepositoryDocsSourceSelector{
+			RegistrationID: entry.RegistrationID, SourceRegistrationID: registered.RepositoryDocs.SourceRegistrationID,
+			SourceRegistrationGeneration: registered.RepositoryDocs.SourceRegistrationGeneration + 1,
+		},
+		RepoID: "owner/repo", CachePath: cachePath, Query: "authority", Mode: repositorydocs.SearchModeFullText,
+	})
+	var stale RepositoryDocsSourceGenerationConflictError
+	if !errors.As(err, &stale) {
+		t.Fatalf("stale selector error=%T %v", err, err)
+	}
+}
+
+func TestRPCRepositoryDocsRepoOnlyResolutionReportsMissingRegistration(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	cfg := config.Default()
+	cfg.CachePath = cachePath
+	server := RPCServer{Manager: Manager{EffectiveConfig: &cfg}, Maintenance: NewMaintenanceManager(Manager{EffectiveConfig: &cfg}, NewJobManager(""), "")}
+	_, err = server.repositoryDocsSourceForRequest(ctx, "owner/repo", cachePath, RepositoryDocsSourceSelector{})
+	var unavailable RepositoryDocsSourceUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.DiagnosticCode() != "repository_docs_registration_not_found" {
+		t.Fatalf("missing registration error=%T %v", err, err)
+	}
+}
+
+func TestRPCRepositoryDocsRepoOnlyResolutionStaysInsideSelectedCache(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.RAG.DefaultProfile = ""
+	cfg.RAG.Indexing.Profile = ""
+	cfg.RAG.Profiles = nil
+	cfg.RAG.Providers = nil
+	manager := Manager{EffectiveConfig: &cfg}
+	maintenance := NewMaintenanceManager(manager, NewJobManager(""), filepath.Join(dir, "managed-caches.json"))
+	server := RPCServer{Manager: manager, Maintenance: maintenance}
+
+	register := func(name, content string) (string, MaintenanceEntry) {
+		t.Helper()
+		cachePath := filepath.Join(dir, name+".db")
+		store, err := cache.NewSQLiteStore(ctx, cachePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+			t.Fatal(err)
+		}
+		store.Close()
+		localCfg := cfg
+		localCfg.CachePath = cachePath
+		localCfg.LockPath = cachePath + ".lock"
+		enroll := testMaintenanceEnrollRequest(cachePath, "selected-cache-"+name, MaintenancePolicy{SyncMode: "off"})
+		enroll.ConfigSnapshot = localCfg
+		enroll.ConfigHash = maintenanceHash(localCfg)
+		entry, err := maintenance.Enroll(ctx, enroll)
+		if err != nil {
+			t.Fatal(err)
+		}
+		repositoryPath := createRepositoryDocsRegistrationRepo(t, filepath.Join(dir, "repo-"+name), content)
+		registered, ok, err := maintenance.RegisterRepositoryDocsSource(ctx, entry.CacheUUID, entry.RepoID, repositoryPath, "")
+		if err != nil || !ok || registered.RepositoryDocs == nil {
+			t.Fatalf("register %s=%+v ok=%v err=%v", name, registered, ok, err)
+		}
+		return cachePath, registered
+	}
+
+	firstCache, firstEntry := register("first", "first-cache-only-token")
+	_, secondEntry := register("second", "second-cache-only-token")
+	result, err := server.repositoryDocsSearch(ctx, RepositoryDocsQueryRequest{RepoID: "owner/repo", CachePath: firstCache, Query: "first-cache-only-token", Mode: repositorydocs.SearchModeFullText})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Hits) != 1 || !strings.Contains(result.Hits[0].Snippet, "first-cache-only-token") {
+		t.Fatalf("selected-cache search=%+v", result)
+	}
+	thirdPath := createRepositoryDocsRegistrationRepo(t, filepath.Join(dir, "repo-first-second-authority"), "first-cache-second-authority")
+	thirdEntry, ok, err := maintenance.RegisterRepositoryDocsSource(ctx, firstEntry.CacheUUID, firstEntry.RepoID, thirdPath, "")
+	if err != nil || !ok || thirdEntry.RepositoryDocs == nil {
+		t.Fatalf("third registration=%+v ok=%v err=%v", thirdEntry, ok, err)
+	}
+	params, err := json.Marshal(RepositoryDocsSourceListRequest{RepoID: "owner/repo", CachePath: firstCache})
+	if err != nil {
+		t.Fatal(err)
+	}
+	discoveryValue, err := server.dispatch(ctx, "RepositoryDocs.Sources", params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	discovered, ok := discoveryValue.(RepositoryDocsSourceListResult)
+	if !ok {
+		t.Fatalf("discovery type=%T", discoveryValue)
+	}
+	if discovered.RegistrationID != firstEntry.RegistrationID || discovered.RegistrationID == secondEntry.RegistrationID || len(discovered.Sources) != 2 {
+		t.Fatalf("selected-cache discovery=%+v first=%+v second=%+v", discovered, firstEntry, secondEntry)
+	}
+	for _, source := range discovered.Sources {
+		if source.SourceRegistrationID == secondEntry.RepositoryDocs.SourceRegistrationID {
+			t.Fatalf("discovery leaked other-cache source: %+v", discovered)
+		}
+	}
+}
+
+func TestRepoOnlyIndexMaterializesAuthorityFenceBeforeAdmission(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	cfg := adminFakeRAGConfig()
+	cfg.CachePath = cachePath
+	cfg.LockPath = cachePath + ".lock"
+	manager := Manager{EffectiveConfig: &cfg}
+	maintenance := NewMaintenanceManager(manager, NewJobManager(""), filepath.Join(dir, "managed-caches.json"))
+	enroll := testMaintenanceEnrollRequest(cachePath, "repo-only-index-fence", MaintenancePolicy{SyncMode: "off"})
+	enroll.ConfigSnapshot = cfg
+	enroll.ConfigHash = maintenanceHash(cfg)
+	entry, err := maintenance.Enroll(ctx, enroll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repositoryPathA := createRepositoryDocsRegistrationRepo(t, filepath.Join(dir, "repo-a"), "authority-a")
+	repositoryPathB := createRepositoryDocsRegistrationRepo(t, filepath.Join(dir, "repo-b"), "authority-b")
+	registered, ok, err := maintenance.RegisterRepositoryDocsSource(ctx, entry.CacheUUID, entry.RepoID, repositoryPathA, "")
+	if err != nil || !ok || registered.RepositoryDocs == nil {
+		t.Fatalf("registered=%+v ok=%v err=%v", registered, ok, err)
+	}
+	server := RPCServer{Manager: manager, Maintenance: maintenance}
+	source, err := server.repositoryDocsSourceForRequest(ctx, "owner/repo", cachePath, RepositoryDocsSourceSelector{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := StartRepositoryDocsIndexJobRequest{RepoID: "owner/repo", CachePath: cachePath}
+	applyRepositoryDocsIndexSource(&request, source)
+	if request.RegistrationID != registered.RegistrationID || request.SourceRegistrationID != registered.RepositoryDocs.SourceRegistrationID || request.SourceRegistrationGeneration != registered.RepositoryDocs.SourceRegistrationGeneration {
+		t.Fatalf("materialized request=%+v registered=%+v", request, registered.RepositoryDocs)
+	}
+	prepared, err := prepareRepositoryDocsIndex(ctx, manager, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = maintenance.RebindRepositoryDocsSource(ctx, RepositoryDocsSourceRebindRequest{
+		RepoID: "owner/repo", RegistrationID: source.RegistrationID, SourceRegistrationID: source.SourceRegistrationID,
+		ExpectedGeneration: source.SourceRegistrationGeneration, RepositoryPath: repositoryPathB, Profile: source.Profile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err = maintenance.registerAndRecordRepositoryDocsAdmission(prepared)
+	var stale RepositoryDocsSourceGenerationConflictError
+	if !errors.As(err, &stale) {
+		t.Fatalf("stale auto-resolved admission error=%T %v", err, err)
 	}
 }
 

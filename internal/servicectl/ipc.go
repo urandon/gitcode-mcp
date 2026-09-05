@@ -216,19 +216,15 @@ func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawM
 		if s.Maintenance == nil {
 			return nil, RepositoryDocsSourceUnavailableError{code: "repository_docs_registration_unavailable"}
 		}
-		if strings.TrimSpace(req.RegistrationID) != "" && strings.TrimSpace(req.RepositoryPath) == "" {
-			source, err := s.Maintenance.repositoryDocsSourceForSelector(RepositoryDocsSourceSelector{
+		if strings.TrimSpace(req.RepositoryPath) == "" {
+			source, err := s.repositoryDocsSourceForRequest(ctx, req.RepoID, req.CachePath, RepositoryDocsSourceSelector{
 				RegistrationID: req.RegistrationID, SourceRegistrationID: req.SourceRegistrationID,
 				SourceRegistrationGeneration: req.SourceRegistrationGeneration,
 			})
 			if err != nil {
 				return nil, err
 			}
-			if !repositoryDocsSourceMatchesRepo(ctx, source, req.RepoID) {
-				return nil, RepositoryDocsSourceUnavailableError{code: "repository_docs_source_repo_conflict"}
-			}
-			req.RepoID, req.RepositoryPath, req.Profile = source.RepoID, source.RepositoryPath, source.Profile
-			req.CachePath, req.CacheUUID = source.CachePath, source.CacheUUID
+			applyRepositoryDocsIndexSource(&req, source)
 		}
 		prepared, err := prepareRepositoryDocsIndex(ctx, s.Manager, req)
 		if err != nil {
@@ -261,6 +257,12 @@ func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawM
 			return nil, err
 		}
 		return s.registerRepositoryDocsSource(ctx, req)
+	case "RepositoryDocs.Sources":
+		var req RepositoryDocsSourceListRequest
+		if err := json.Unmarshal(params, &req); err != nil {
+			return nil, err
+		}
+		return s.repositoryDocsSources(ctx, req)
 	case "RepositoryDocs.RebindSource":
 		if s.Maintenance == nil {
 			return nil, RepositoryDocsSourceUnavailableError{code: "repository_docs_registration_unavailable"}
@@ -370,6 +372,17 @@ func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawM
 	default:
 		return nil, fmt.Errorf("unknown method: %s", method)
 	}
+}
+
+func applyRepositoryDocsIndexSource(req *StartRepositoryDocsIndexJobRequest, source repositoryDocsAdminSource) {
+	if req == nil {
+		return
+	}
+	req.RepoID, req.RepositoryPath, req.Profile = source.RepoID, source.RepositoryPath, source.Profile
+	req.CachePath, req.CacheUUID = source.CachePath, source.CacheUUID
+	req.RegistrationID = source.RegistrationID
+	req.SourceRegistrationID = source.SourceRegistrationID
+	req.SourceRegistrationGeneration = source.SourceRegistrationGeneration
 }
 
 func (s RPCServer) health(ctx context.Context) (ServiceHealth, error) {

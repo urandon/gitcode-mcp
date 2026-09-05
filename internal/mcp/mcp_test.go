@@ -53,6 +53,24 @@ func TestIssueUpdateStateSchemaUsesPublicValues(t *testing.T) {
 	}
 }
 
+func TestRepositoryDocsSchemasAllowRepoOnlyAuthorityResolution(t *testing.T) {
+	for _, name := range []string{"repository_docs_sources", "repository_docs_policy", "repository_docs_plan", "repository_docs_status", "repository_docs_search", "repository_docs_index"} {
+		schema := toolDefinitionByName(name).InputSchema
+		if !containsString(schema.Required, "repo_id") {
+			t.Fatalf("%s required=%v, want repo_id", name, schema.Required)
+		}
+		if containsString(schema.Required, "registration_id") || containsString(schema.Required, "source_registration_id") || containsString(schema.Required, "source_registration_generation") {
+			t.Fatalf("%s unexpectedly requires opaque selector: %v", name, schema.Required)
+		}
+	}
+	if !containsString(toolDefinitionByName("repository_docs_search").InputSchema.Required, "query") {
+		t.Fatal("repository_docs_search must still require query")
+	}
+	if registered, ok := (&Server{}).toolRegistry()["repository_docs_sources"]; !ok || registered.handler == nil || registered.definition.Name != "repository_docs_sources" {
+		t.Fatalf("repository_docs_sources is not callable through the MCP registry: registered=%+v ok=%t", registered.definition, ok)
+	}
+}
+
 func TestIssueWriteSchemasDistinguishNumberFromStableID(t *testing.T) {
 	for _, name := range []string{"add_issue_comment", "update_issue_comment", "update_issue", "set_issue_milestone", "clear_issue_milestone", "link_pr_issue", "add_label"} {
 		schema := writeToolInputSchema(name)
@@ -372,7 +390,7 @@ func TestMCPRepositoryDocumentationToolsReturnRevisionScopedStructuredContent(t 
 	policy := repositorydocs.PolicyResult{RepoID: "fixture-a", CommitOID: strings.Repeat("a", 40), GitStoreRef: "git-store-opaque", Policy: repositorydocs.PolicyResolution{Policy: repositorydocs.BuiltinPolicy(), Source: repositorydocs.PolicySourceBuiltin, Status: repositorydocs.PolicyStatusReady, PolicyHash: "policy-1"}}
 	handler.SetRepositoryDocsProviders(
 		func(_ context.Context, req repositorydocs.PolicyRequest) (repositorydocs.PolicyResult, error) {
-			if req.RepoID != "fixture-a" || req.Revision != "v1" {
+			if req.RepoID != "fixture-a" || req.Revision != "v1" || req.RegistrationID != "" || req.SourceRegistrationID != "" || req.SourceRegistrationGeneration != 0 {
 				t.Fatalf("policy req=%#v", req)
 			}
 			return policy, nil
@@ -409,20 +427,63 @@ func TestMCPRepositoryDocumentationToolsReturnRevisionScopedStructuredContent(t 
 		return result
 	}
 	var gotPolicy repositorydocs.PolicyResult
-	selector := `"registration_id":"reg-a","source_registration_id":"source-a","source_registration_generation":1`
-	decodeStructured(t, call("repository_docs_policy", `{"repo_id":"fixture-a",`+selector+`,"revision":"v1"}`), &gotPolicy)
+	decodeStructured(t, call("repository_docs_policy", `{"repo_id":"fixture-a","revision":"v1"}`), &gotPolicy)
 	if gotPolicy.CommitOID != policy.CommitOID || gotPolicy.GitStoreRef != "git-store-opaque" {
 		t.Fatalf("policy=%#v", gotPolicy)
 	}
 	var gotStatus repositorydocs.StatusResult
-	decodeStructured(t, call("repository_docs_status", `{"repo_id":"fixture-a",`+selector+`}`), &gotStatus)
+	decodeStructured(t, call("repository_docs_status", `{"repo_id":"fixture-a"}`), &gotStatus)
 	if len(gotStatus.RevisionSets) != 1 {
 		t.Fatalf("status=%#v", gotStatus)
 	}
 	var gotSearch repositorydocs.SearchResult
-	decodeStructured(t, call("repository_docs_search", `{"repo_id":"fixture-a",`+selector+`,"query":"offline","mode":"fulltext"}`), &gotSearch)
+	decodeStructured(t, call("repository_docs_search", `{"repo_id":"fixture-a","query":"offline","mode":"fulltext"}`), &gotSearch)
 	if len(gotSearch.Hits) != 1 || gotSearch.RequestedMode != repositorydocs.SearchModeFullText || gotSearch.EffectiveMode != repositorydocs.SearchModeFullText || gotSearch.Authority != "git" || gotSearch.Hits[0].Citation.Path != "docs/guide.md" {
 		t.Fatalf("search=%#v", gotSearch)
+	}
+}
+
+func TestMCPRepositoryDocumentationRejectsPartialAuthoritySelector(t *testing.T) {
+	store := populatedStore(t)
+	defer store.Close()
+	handler := NewRPCHandler(service.New(store))
+	for _, arguments := range []string{
+		`{"repo_id":"fixture-a","registration_id":"reg-a"}`,
+		`{"repo_id":"fixture-a","source_registration_id":"source-a"}`,
+		`{"repo_id":"fixture-a","registration_id":"reg-a","source_registration_id":"source-a"}`,
+	} {
+		id := json.RawMessage(`1`)
+		params := json.RawMessage(fmt.Sprintf(`{"name":"repository_docs_status","arguments":%s}`, arguments))
+		resp, ok := handler.Handle(context.Background(), request{JSONRPC: "2.0", ID: &id, Method: "tools/call", Params: &params})
+		if !ok || resp == nil || resp.Error == nil || resp.Error.Data == nil {
+			t.Fatalf("arguments=%s response=%#v", arguments, resp)
+		}
+		if resp.Error.Data.Code != "repository_docs_source_selector_required" || !strings.Contains(resp.Error.Data.Remediation, "repository_docs_sources") {
+			t.Fatalf("arguments=%s error=%+v", arguments, resp.Error.Data)
+		}
+	}
+}
+
+func TestRepositoryDocsRPCDiagnosticsAreActionable(t *testing.T) {
+	tests := []struct {
+		code string
+		want string
+	}{
+		{code: "repository_docs_registration_not_found", want: "repo-docs register"},
+		{code: "repository_docs_registration_disabled", want: "enable_cache_maintenance"},
+		{code: "repository_docs_source_ambiguous", want: "repository_docs_sources"},
+		{code: "repository_docs_source_generation_conflict", want: "current opaque source selector"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.code, func(t *testing.T) {
+			data := classifyDomainError(servicectl.RPCDomainError{Code: tt.code, Message: "private daemon detail"}, domainErrorContext{Operation: "repository_docs_search", RepoID: "owner/repo", Subsystem: "service"})
+			if data.Code != tt.code || data.Message == "" || !strings.Contains(data.Remediation, tt.want) {
+				t.Fatalf("diagnostic=%+v", data)
+			}
+			if title := domainErrorTitle(data.Code); title != "Repository documentation authority unavailable" {
+				t.Fatalf("title=%q", title)
+			}
+		})
 	}
 }
 

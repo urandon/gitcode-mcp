@@ -615,7 +615,7 @@ func setMCPRepositoryDocsProviders(set func(mcp.RepositoryDocsPolicyProvider, mc
 		}
 		req.RepoID = binding.RepoID
 		var result repositorydocs.PolicyResult
-		err = call(ctx, "RepositoryDocs.Policy", servicectl.RepositoryDocsQueryRequest{RepositoryDocsSourceSelector: servicectl.RepositoryDocsSourceSelector{RegistrationID: req.RegistrationID, SourceRegistrationID: req.SourceRegistrationID, SourceRegistrationGeneration: req.SourceRegistrationGeneration}, RepoID: req.RepoID, Revision: req.Revision, IncludeWorktree: req.IncludeWorktree}, &result)
+		err = call(ctx, "RepositoryDocs.Policy", servicectl.RepositoryDocsQueryRequest{RepositoryDocsSourceSelector: servicectl.RepositoryDocsSourceSelector{RegistrationID: req.RegistrationID, SourceRegistrationID: req.SourceRegistrationID, SourceRegistrationGeneration: req.SourceRegistrationGeneration}, RepoID: req.RepoID, CachePath: deps.Config.CachePath, Revision: req.Revision, IncludeWorktree: req.IncludeWorktree}, &result)
 		return result, err
 	}
 	status := func(ctx context.Context, req repositorydocs.StatusRequest) (repositorydocs.StatusResult, error) {
@@ -625,7 +625,7 @@ func setMCPRepositoryDocsProviders(set func(mcp.RepositoryDocsPolicyProvider, mc
 		}
 		req.RepoID = binding.RepoID
 		var result repositorydocs.StatusResult
-		err = call(ctx, "RepositoryDocs.Status", servicectl.RepositoryDocsQueryRequest{RepositoryDocsSourceSelector: servicectl.RepositoryDocsSourceSelector{RegistrationID: req.RegistrationID, SourceRegistrationID: req.SourceRegistrationID, SourceRegistrationGeneration: req.SourceRegistrationGeneration}, RepoID: req.RepoID, Revision: req.Revision, IncludeWorktree: req.IncludeWorktree}, &result)
+		err = call(ctx, "RepositoryDocs.Status", servicectl.RepositoryDocsQueryRequest{RepositoryDocsSourceSelector: servicectl.RepositoryDocsSourceSelector{RegistrationID: req.RegistrationID, SourceRegistrationID: req.SourceRegistrationID, SourceRegistrationGeneration: req.SourceRegistrationGeneration}, RepoID: req.RepoID, CachePath: deps.Config.CachePath, Revision: req.Revision, IncludeWorktree: req.IncludeWorktree}, &result)
 		return result, err
 	}
 	search := func(ctx context.Context, req repositorydocs.SearchRequest) (repositorydocs.SearchResult, error) {
@@ -635,7 +635,7 @@ func setMCPRepositoryDocsProviders(set func(mcp.RepositoryDocsPolicyProvider, mc
 		}
 		req.RepoID = binding.RepoID
 		var result repositorydocs.SearchResult
-		err = call(ctx, "RepositoryDocs.Search", servicectl.RepositoryDocsQueryRequest{RepositoryDocsSourceSelector: servicectl.RepositoryDocsSourceSelector{RegistrationID: req.RegistrationID, SourceRegistrationID: req.SourceRegistrationID, SourceRegistrationGeneration: req.SourceRegistrationGeneration}, RepoID: req.RepoID, Revision: req.Revision, IncludeWorktree: req.IncludeWorktree, Query: req.Query, Mode: req.Mode, Limit: req.Limit}, &result)
+		err = call(ctx, "RepositoryDocs.Search", servicectl.RepositoryDocsQueryRequest{RepositoryDocsSourceSelector: servicectl.RepositoryDocsSourceSelector{RegistrationID: req.RegistrationID, SourceRegistrationID: req.SourceRegistrationID, SourceRegistrationGeneration: req.SourceRegistrationGeneration}, RepoID: req.RepoID, CachePath: deps.Config.CachePath, Revision: req.Revision, IncludeWorktree: req.IncludeWorktree, Query: req.Query, Mode: req.Mode, Limit: req.Limit}, &result)
 		return result, err
 	}
 	set(policy, status, search)

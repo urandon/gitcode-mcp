@@ -344,6 +344,12 @@ var writeCapabilities = []Capability{
 
 var ragCapabilities = []Capability{
 	{
+		ID: "repository_docs_sources", Category: CategoryRAG, Safety: SafetyReadOnly,
+		CLIName: "repo-docs", MCPName: "repository_docs_sources", ServiceCommand: "repository-docs-sources",
+		Description: "Discover public-safe opaque repository-document selectors for one repository inside the selected cache.",
+		UI:          enabled("Admin already exposes the same opaque repository-document authority state."), CLI: disabled("CLI workflows already receive selectors from `repo-docs register` and can inspect maintenance state."), MCP: enabled(),
+	},
+	{
 		ID: "repository_docs_policy", Category: CategoryRAG, Safety: SafetyReadOnly,
 		CLIName: "repo-docs", MCPName: "repository_docs_policy", ServiceCommand: "repository-docs-policy",
 		Description: "Resolve the repository-owned documentation policy at one local Git revision without fetching or copying document bodies.",

@@ -695,8 +695,15 @@ var toolDefs = []toolDefinition{
 		},
 	},
 	{
+		Name:        "repository_docs_sources",
+		Description: "Discover public-safe opaque repository-document authority selectors for repo_id inside the selected cache. No filesystem path, provider call, fetch, or GitCode call is exposed.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
+			"repo_id": {Type: "string", Description: "Configured repository id or alias in the selected cache.", MinLength: 1},
+		}, Required: []string{"repo_id"}},
+	},
+	{
 		Name:        "repository_docs_policy",
-		Description: "Resolve the versioned repository-document policy at one local Git revision. No fetch or GitCode call is performed.",
+		Description: "Resolve the versioned repository-document policy at one local Git revision. The sole authority in the selected cache is resolved from repo_id when the opaque selector is omitted. No fetch or GitCode call is performed.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
 			"repo_id":                        {Type: "string", Description: "Configured repository id.", MinLength: 1},
 			"registration_id":                {Type: "string", Description: "Opaque daemon repository-document registration id.", MinLength: 1},
@@ -704,11 +711,11 @@ var toolDefs = []toolDefinition{
 			"source_registration_generation": {Type: "integer", Description: "Exact private Git authority generation.", Minimum: float64Ptr(1)},
 			"revision":                       {Type: "string", Description: "Local Git revision; defaults to HEAD."},
 			"include_worktree":               {Type: "boolean", Description: "Explicitly apply tracked worktree changes.", Default: false},
-		}, Required: []string{"repo_id", "registration_id"}},
+		}, Required: []string{"repo_id"}},
 	},
 	{
 		Name:        "repository_docs_plan",
-		Description: "Plan bounded repository-document indexing cost and typed exclusions for one explicitly registered Git authority. No embedding provider call is performed.",
+		Description: "Plan bounded repository-document indexing cost and typed exclusions. The sole authority in the selected cache is resolved from repo_id when the opaque selector is omitted. No embedding provider call is performed.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
 			"repo_id":                        {Type: "string", Description: "Configured repository id.", MinLength: 1},
 			"registration_id":                {Type: "string", Description: "Opaque daemon repository-document registration id.", MinLength: 1},
@@ -716,11 +723,11 @@ var toolDefs = []toolDefinition{
 			"source_registration_generation": {Type: "integer", Description: "Exact private Git authority generation.", Minimum: float64Ptr(1)},
 			"revision":                       {Type: "string", Description: "Local Git revision; defaults to HEAD."},
 			"include_worktree":               {Type: "boolean", Description: "Explicitly plan tracked worktree changes.", Default: false},
-		}, Required: []string{"repo_id", "registration_id"}},
+		}, Required: []string{"repo_id"}},
 	},
 	{
 		Name:        "repository_docs_status",
-		Description: "Inspect repository-document revision-set identity and vector coverage using public-safe opaque Git references.",
+		Description: "Inspect repository-document revision-set identity and vector coverage using public-safe opaque Git references. The sole authority in the selected cache is resolved from repo_id when the opaque selector is omitted.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
 			"repo_id":                        {Type: "string", Description: "Configured repository id.", MinLength: 1},
 			"registration_id":                {Type: "string", Description: "Opaque daemon repository-document registration id.", MinLength: 1},
@@ -728,11 +735,11 @@ var toolDefs = []toolDefinition{
 			"source_registration_generation": {Type: "integer", Description: "Exact private Git authority generation.", Minimum: float64Ptr(1)},
 			"revision":                       {Type: "string", Description: "Local Git revision; defaults to HEAD."},
 			"include_worktree":               {Type: "boolean", Description: "Explicitly select the tracked worktree overlay.", Default: false},
-		}, Required: []string{"repo_id", "registration_id"}},
+		}, Required: []string{"repo_id"}},
 	},
 	{
 		Name:        "repository_docs_search",
-		Description: "Search one local Git revision and return bounded digest-verified citations. Fulltext mode does not require an embedding provider.",
+		Description: "Search one local Git revision and return bounded digest-verified citations. The sole authority in the selected cache is resolved from repo_id when the opaque selector is omitted. Fulltext mode does not require an embedding provider.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
 			"repo_id":                        {Type: "string", Description: "Configured repository id.", MinLength: 1},
 			"registration_id":                {Type: "string", Description: "Opaque daemon repository-document registration id.", MinLength: 1},
@@ -743,11 +750,11 @@ var toolDefs = []toolDefinition{
 			"include_worktree":               {Type: "boolean", Description: "Explicitly search tracked dirty files.", Default: false},
 			"mode":                           {Type: "string", Description: "Retrieval mode.", Enum: []string{"hybrid", "fulltext"}, Default: "hybrid"},
 			"limit":                          {Type: "integer", Description: "Maximum verified results.", Minimum: float64Ptr(1), Maximum: float64Ptr(50), Default: 10.0},
-		}, Required: []string{"repo_id", "registration_id", "query"}},
+		}, Required: []string{"repo_id", "query"}},
 	},
 	{
 		Name:        "repository_docs_index",
-		Description: "Start a daemon-owned repository-document indexing job for one local Git revision. The job stores metadata and vectors only.",
+		Description: "Start a daemon-owned repository-document indexing job for one local Git revision. The sole authority in the selected cache is resolved from repo_id when the opaque selector is omitted. The job stores metadata and vectors only.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
 			"repo_id":                        {Type: "string", Description: "Configured repository id or alias; canonicalized before writing.", MinLength: 1},
 			"registration_id":                {Type: "string", Description: "Opaque daemon repository-document registration id.", MinLength: 1},
@@ -758,7 +765,7 @@ var toolDefs = []toolDefinition{
 			"profile":                        {Type: "string", Description: "RAG profile name."},
 			"batch_size":                     {Type: "integer", Description: "Provider batch size.", Minimum: float64Ptr(1), Maximum: float64Ptr(512)},
 			"max_chunks":                     {Type: "integer", Description: "Optional bounded chunk cap.", Minimum: float64Ptr(1)},
-		}, Required: []string{"repo_id", "registration_id"}},
+		}, Required: []string{"repo_id"}},
 	},
 	{
 		Name:        "list_pr_discussions",
@@ -1020,6 +1027,8 @@ func (s *Server) ragToolHandler(cap capability.Capability) toolHandler {
 		return s.callRAGStatus
 	case "rag_search":
 		return s.callRAGSearch
+	case "repository_docs_sources":
+		return s.callRepositoryDocsSources
 	case "repository_docs_policy":
 		return s.callRepositoryDocsPolicy
 	case "repository_docs_plan":
@@ -1876,10 +1885,34 @@ func (s *Server) callRAGSearch(ctx context.Context, id *json.RawMessage, args js
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 }
 
+func (s *Server) callRepositoryDocsSources(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a repositoryDocsArgs
+	if err := json.Unmarshal(args, &a); err != nil || strings.TrimSpace(a.RepoID) == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "repo_required", Message: "repo_id is required"})
+		return
+	}
+	client, err := s.localServiceClient()
+	if err != nil {
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "repository_docs_sources", RepoID: a.RepoID, Subsystem: "service"})
+		return
+	}
+	var result servicectl.RepositoryDocsSourceListResult
+	if err := client.Call(ctx, "RepositoryDocs.Sources", servicectl.RepositoryDocsSourceListRequest{RepoID: a.RepoID, CachePath: s.runtimeContext.EffectiveCachePath}, &result); err != nil {
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "repository_docs_sources", RepoID: a.RepoID, Subsystem: "service"})
+		return
+	}
+	text := fmt.Sprintf("repository_docs_sources repo=%s registration=%s enabled=%t sources=%d", result.RepoID, result.RegistrationID, result.Enabled, len(result.Sources))
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
 func (s *Server) callRepositoryDocsPolicy(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	var a repositoryDocsArgs
-	if err := json.Unmarshal(args, &a); err != nil || !validRepositoryDocsSelector(a) {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id and exact repository documentation source selector are required"})
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if validation := validateRepositoryDocsSelector(a); validation != nil {
+		s.writeError(id, -32602, "Invalid params", validation)
 		return
 	}
 	if s.repositoryDocsPolicy == nil {
@@ -1897,8 +1930,12 @@ func (s *Server) callRepositoryDocsPolicy(ctx context.Context, id *json.RawMessa
 
 func (s *Server) callRepositoryDocsPlan(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	var a repositoryDocsArgs
-	if err := json.Unmarshal(args, &a); err != nil || !validRepositoryDocsSelector(a) {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id and exact repository documentation source selector are required"})
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if validation := validateRepositoryDocsSelector(a); validation != nil {
+		s.writeError(id, -32602, "Invalid params", validation)
 		return
 	}
 	client, err := s.localServiceClient()
@@ -1907,7 +1944,7 @@ func (s *Server) callRepositoryDocsPlan(ctx context.Context, id *json.RawMessage
 		return
 	}
 	var result repositorydocs.PlanResult
-	req := servicectl.RepositoryDocsQueryRequest{RepositoryDocsSourceSelector: servicectl.RepositoryDocsSourceSelector{RegistrationID: a.RegistrationID, SourceRegistrationID: a.SourceRegistrationID, SourceRegistrationGeneration: a.SourceRegistrationGeneration}, RepoID: a.RepoID, Revision: a.Revision, IncludeWorktree: a.IncludeWorktree}
+	req := servicectl.RepositoryDocsQueryRequest{RepositoryDocsSourceSelector: servicectl.RepositoryDocsSourceSelector{RegistrationID: a.RegistrationID, SourceRegistrationID: a.SourceRegistrationID, SourceRegistrationGeneration: a.SourceRegistrationGeneration}, RepoID: a.RepoID, CachePath: s.runtimeContext.EffectiveCachePath, Revision: a.Revision, IncludeWorktree: a.IncludeWorktree}
 	if err := client.Call(ctx, "RepositoryDocs.Plan", req, &result); err != nil {
 		s.writeOperationalError(id, err, domainErrorContext{Operation: "repository_docs_plan", RepoID: a.RepoID, Subsystem: "service"})
 		return
@@ -1918,8 +1955,12 @@ func (s *Server) callRepositoryDocsPlan(ctx context.Context, id *json.RawMessage
 
 func (s *Server) callRepositoryDocsStatus(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	var a repositoryDocsArgs
-	if err := json.Unmarshal(args, &a); err != nil || !validRepositoryDocsSelector(a) {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id and exact repository documentation source selector are required"})
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if validation := validateRepositoryDocsSelector(a); validation != nil {
+		s.writeError(id, -32602, "Invalid params", validation)
 		return
 	}
 	if s.repositoryDocsStatus == nil {
@@ -1937,8 +1978,16 @@ func (s *Server) callRepositoryDocsStatus(ctx context.Context, id *json.RawMessa
 
 func (s *Server) callRepositoryDocsSearch(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	var a repositoryDocsArgs
-	if err := json.Unmarshal(args, &a); err != nil || !validRepositoryDocsSelector(a) || strings.TrimSpace(a.Query) == "" {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id, query, and exact repository documentation source selector are required"})
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if validation := validateRepositoryDocsSelector(a); validation != nil {
+		s.writeError(id, -32602, "Invalid params", validation)
+		return
+	}
+	if strings.TrimSpace(a.Query) == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "query is required"})
 		return
 	}
 	if a.Limit < 0 {
@@ -1960,8 +2009,12 @@ func (s *Server) callRepositoryDocsSearch(ctx context.Context, id *json.RawMessa
 
 func (s *Server) callRepositoryDocsIndex(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	var a repositoryDocsArgs
-	if err := json.Unmarshal(args, &a); err != nil || !validRepositoryDocsSelector(a) {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "repo_id and exact repository documentation source selector are required"})
+	if err := json.Unmarshal(args, &a); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	if validation := validateRepositoryDocsSelector(a); validation != nil {
+		s.writeError(id, -32602, "Invalid params", validation)
 		return
 	}
 	if a.BatchSize < 0 || a.MaxChunks < 0 {
@@ -1987,13 +2040,23 @@ func (s *Server) callRepositoryDocsIndex(ctx context.Context, id *json.RawMessag
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: job})
 }
 
-func validRepositoryDocsSelector(a repositoryDocsArgs) bool {
-	if strings.TrimSpace(a.RepoID) == "" || strings.TrimSpace(a.RegistrationID) == "" {
-		return false
+func validateRepositoryDocsSelector(a repositoryDocsArgs) *errorData {
+	if strings.TrimSpace(a.RepoID) == "" {
+		return &errorData{Code: "repo_required", Message: "repo_id is required"}
 	}
+	hasRegistration := strings.TrimSpace(a.RegistrationID) != ""
 	hasID := strings.TrimSpace(a.SourceRegistrationID) != ""
 	hasGeneration := a.SourceRegistrationGeneration > 0
-	return hasID == hasGeneration
+	allOmitted := !hasRegistration && !hasID && a.SourceRegistrationGeneration == 0
+	complete := hasRegistration && hasID && hasGeneration
+	if !allOmitted && !complete {
+		return &errorData{
+			Code:        "repository_docs_source_selector_required",
+			Message:     "omit the authority selector for automatic sole-authority resolution, or supply registration_id with source_registration_id and source_registration_generation together",
+			Remediation: "omit all three selector fields; if multiple authorities are reported, call repository_docs_sources and retry with one complete opaque selector",
+		}
+	}
+	return nil
 }
 
 func lookupMCPRAGServiceState(ctx context.Context, repoID string) (*rag.ServiceStatus, *rag.JobStatus) {
@@ -2563,8 +2626,13 @@ func classifyDomainError(err error, ctx domainErrorContext) *errorData {
 		data.Remediation = fmt.Sprintf("call sync_live with repo_id=%q, pulls=true, remote_alias=%q; CLI fallback: %s", parentMissing.RepoID, fmt.Sprintf("pr:%d", parentMissing.Number), parentMissing.Remediation())
 	case errors.As(err, &rpcErr) && strings.TrimSpace(rpcErr.Code) != "":
 		data.Code = strings.TrimSpace(rpcErr.Code)
-		data.Message = fmt.Sprintf("local service reported %s", data.Code)
-		data.Remediation = serviceRemediation(ctx.Operation)
+		if message, remediation, ok := repositoryDocsDiagnostic(data.Code, data.RepoID); ok {
+			data.Message = message
+			data.Remediation = remediation
+		} else {
+			data.Message = fmt.Sprintf("local service reported %s", data.Code)
+			data.Remediation = serviceRemediation(ctx.Operation)
+		}
 	case errors.Is(err, context.DeadlineExceeded):
 		data.Code = "operation_timeout"
 		data.Message = "the operation exceeded its deadline"
@@ -2585,7 +2653,12 @@ func classifyDomainError(err error, ctx domainErrorContext) *errorData {
 		var coded interface{ DiagnosticCode() string }
 		if errors.As(err, &coded) && strings.TrimSpace(coded.DiagnosticCode()) != "" {
 			data.Code = strings.TrimSpace(coded.DiagnosticCode())
-			data.Message = err.Error()
+			if message, remediation, ok := repositoryDocsDiagnostic(data.Code, data.RepoID); ok {
+				data.Message = message
+				data.Remediation = remediation
+			} else {
+				data.Message = err.Error()
+			}
 		} else if ctx.Subsystem == "cache" {
 			data.Code = "cache_unavailable"
 			data.Message = "the selected cache could not complete the operation"
@@ -2603,6 +2676,31 @@ func classifyDomainError(err error, ctx domainErrorContext) *errorData {
 	return data
 }
 
+func repositoryDocsDiagnostic(code, repoID string) (string, string, bool) {
+	switch strings.TrimSpace(code) {
+	case "repository_docs_registration_not_found", "repository_docs_registration_unavailable", "repository_docs_source_not_registered":
+		return "no enabled repository-document authority is registered for the selected cache and repository",
+			remediationForRepo("register the local Git authority, then retry", repoID, "gitcode-mcp repo-docs register --repository-path PATH"), true
+	case "repository_docs_registration_disabled":
+		return "repository-document authority belongs to a disabled maintenance registration",
+			remediationForRepo("call maintenance_plan, then apply the reviewed plan with enable_cache_maintenance", repoID, "gitcode-mcp maintenance enable"), true
+	case "repository_docs_source_ambiguous":
+		return "multiple repository-document authorities are registered for this cache and repository",
+			"call repository_docs_sources with the same repo_id, select one source, and retry with the returned registration_id, source_registration_id, and source_registration_generation", true
+	case "repository_docs_source_generation_conflict":
+		return "the selected repository-document authority generation is stale",
+			"call repository_docs_sources with the same repo_id and retry with the current opaque source selector", true
+	case "repository_docs_source_selector_required":
+		return "the repository-document authority selector is incomplete",
+			"omit all selector fields for automatic sole-authority resolution, or call repository_docs_sources and supply all three opaque selector fields", true
+	case "repository_docs_binding_unavailable":
+		return "the repository is not bound in the selected cache",
+			remediationForRepo("call repo_status and configure the repository binding", repoID, "gitcode-mcp doctor --format json"), true
+	default:
+		return "", "", false
+	}
+}
+
 func domainErrorTitle(code string) string {
 	switch code {
 	case "missing_repository_binding":
@@ -2617,6 +2715,8 @@ func domainErrorTitle(code string) string {
 		return "Invalid request"
 	case "not_found":
 		return "Resource not found"
+	case "repository_docs_registration_not_found", "repository_docs_registration_unavailable", "repository_docs_registration_disabled", "repository_docs_source_not_registered", "repository_docs_source_ambiguous", "repository_docs_source_generation_conflict", "repository_docs_source_selector_required", "repository_docs_binding_unavailable":
+		return "Repository documentation authority unavailable"
 	default:
 		return "Operation failed"
 	}

@@ -234,11 +234,12 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 | `maintenance_status` | Report sanitized daemon-managed cache, backfill frontier, content generation, and RAG coverage state |
 | `maintenance_plan` | Build a deterministic, path-free plan for the selected MCP cache and requested refresh/RAG policy |
 | `enable_cache_maintenance` | Apply an already rendered plan with `write_mode=live` and an idempotency key; machine-level installs/downloads return a CLI handoff |
-| `repository_docs_policy` | Resolve the committed repository-document corpus policy at an exact local Git revision without fetching |
-| `repository_docs_plan` | Plan bounded index cost and typed exclusions for one explicitly registered Git authority without embedding calls |
-| `repository_docs_status` | Inspect metadata-only revision-set and vector coverage using opaque Git/worktree references |
-| `repository_docs_search` | Search exact local Git blobs with bounded digest-verified citations; `mode=fulltext` requires no provider or index |
-| `repository_docs_index` | Submit daemon-owned indexing for an exact opaque registration/source/generation selector; document text is never persisted |
+| `repository_docs_sources` | Discover opaque repository-document selectors for `repo_id`, scoped to the MCP process's selected cache; no local path is returned |
+| `repository_docs_policy` | Resolve the committed repository-document corpus policy at an exact local Git revision without fetching; `repo_id` auto-selects a sole authority |
+| `repository_docs_plan` | Plan bounded index cost and typed exclusions without embedding calls; `repo_id` auto-selects a sole authority |
+| `repository_docs_status` | Inspect metadata-only revision-set and vector coverage using opaque Git/worktree references; `repo_id` auto-selects a sole authority |
+| `repository_docs_search` | Search exact local Git blobs with bounded digest-verified citations; `repo_id` auto-selects a sole authority and `mode=fulltext` requires no provider or index |
+| `repository_docs_index` | Submit daemon-owned indexing; `repo_id` auto-selects a sole authority, while ambiguous cases require an exact opaque selector; document text is never persisted |
 | `sync_live` | Synchronize selected issue, issue-comment, pull-request, pull-request-comment, or wiki collections into the cache |
 | `feedback_status` | Report side-effect-free preparation/submission readiness and the trusted CLI setup handoff |
 | `prepare_feedback` | Prepare and deduplicate a structured public-safe dogfood report without creating an issue |
