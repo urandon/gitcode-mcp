@@ -9,55 +9,65 @@ import (
 // Exact stage/collection timestamps are authoritative. Legacy progress events
 // may retain a duration instead; anchor those to the job update that persisted
 // the event so callers can distinguish active backoff from historical context.
+// Precedence is per collection: one collection's exact evidence must not hide
+// another collection's legacy fallback from a whole-job retry check.
 func jobRetryDeadline(job Job, collection string) (time.Time, bool) {
 	collection = strings.TrimSpace(collection)
-	var exactDeadline time.Time
-	observeExact := func(candidate time.Time) {
-		if !candidate.IsZero() && candidate.After(exactDeadline) {
-			exactDeadline = candidate.UTC()
+	type deadlineEvidence struct {
+		exact  time.Time
+		legacy time.Time
+	}
+	buckets := map[string]deadlineEvidence{}
+	observe := func(scope string, candidate time.Time, exact bool) {
+		scope = strings.TrimSpace(scope)
+		if candidate.IsZero() || (collection != "" && scope != collection) {
+			return
 		}
+		evidence := buckets[scope]
+		if exact && candidate.After(evidence.exact) {
+			evidence.exact = candidate.UTC()
+		}
+		if !exact && candidate.After(evidence.legacy) {
+			evidence.legacy = candidate.UTC()
+		}
+		buckets[scope] = evidence
 	}
 
-	if job.SyncStage != nil && (collection == "" || job.SyncStage.Collection == collection) {
-		observeExact(job.SyncStage.RetryAfter)
+	if job.SyncStage != nil {
+		observe(job.SyncStage.Collection, job.SyncStage.RetryAfter, true)
 	}
 	for _, state := range job.SyncCollections {
-		if collection != "" && state.Collection != collection {
-			continue
-		}
 		if state.RetryAfter != nil {
-			observeExact(*state.RetryAfter)
+			observe(state.Collection, *state.RetryAfter, true)
 		}
 	}
 
-	var legacyDeadline time.Time
-	observeLegacy := func(candidate time.Time) {
-		if !candidate.IsZero() && candidate.After(legacyDeadline) {
-			legacyDeadline = candidate.UTC()
-		}
-	}
 	anchor := job.UpdatedAt
 	if anchor.IsZero() {
 		anchor = job.CreatedAt
 	}
 	for _, event := range job.Progress {
-		if collection != "" && event.Collection != collection {
-			continue
-		}
 		value := strings.TrimSpace(event.RetryAfter)
 		if value == "" {
 			continue
 		}
 		if exact, err := time.Parse(time.RFC3339, value); err == nil {
-			observeExact(exact)
+			observe(event.Collection, exact, true)
 			continue
 		}
 		if delay, err := time.ParseDuration(value); err == nil && !anchor.IsZero() {
-			observeLegacy(anchor.Add(delay))
+			observe(event.Collection, anchor.Add(delay), false)
 		}
 	}
-	if !exactDeadline.IsZero() {
-		return exactDeadline, true
+	var deadline time.Time
+	for _, evidence := range buckets {
+		candidate := evidence.exact
+		if candidate.IsZero() {
+			candidate = evidence.legacy
+		}
+		if candidate.After(deadline) {
+			deadline = candidate
+		}
 	}
-	return legacyDeadline, !legacyDeadline.IsZero()
+	return deadline, !deadline.IsZero()
 }

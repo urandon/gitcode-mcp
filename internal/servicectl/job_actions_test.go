@@ -249,6 +249,39 @@ func TestJobRetryDeadlinePrefersExactEvidenceOverLegacyDuration(t *testing.T) {
 	}
 }
 
+func TestJobRetryDeadlineAggregatesResolvedCollectionBuckets(t *testing.T) {
+	updated := time.Date(2030, 1, 2, 4, 0, 0, 0, time.UTC)
+	wikiExact := updated.Add(-time.Hour)
+	issuesLegacy := updated.Add(30 * time.Minute)
+	job := Job{
+		UpdatedAt:       updated,
+		SyncCollections: []SyncCollectionView{{Collection: "wiki", Outcome: SyncCollectionPartial, RetryAfter: &wikiExact, UpdatedAt: updated}},
+		Progress:        []service.ProgressEvent{{Collection: "issues", RetryAfter: "30m"}},
+	}
+	for _, test := range []struct {
+		collection string
+		want       time.Time
+	}{{"", issuesLegacy}, {"wiki", wikiExact}, {"issues", issuesLegacy}} {
+		deadline, ok := jobRetryDeadline(job, test.collection)
+		if !ok || !deadline.Equal(test.want) {
+			t.Fatalf("collection=%q deadline=%s want=%s ok=%t", test.collection, deadline, test.want, ok)
+		}
+	}
+}
+
+func TestJobRetryDeadlineTreatsRFC3339ProgressAsExactEvidence(t *testing.T) {
+	updated := time.Date(2030, 1, 2, 4, 0, 0, 0, time.UTC)
+	exact := updated.Add(-time.Hour)
+	job := Job{UpdatedAt: updated, Progress: []service.ProgressEvent{
+		{Collection: "issues", RetryAfter: exact.Format(time.RFC3339)},
+		{Collection: "issues", RetryAfter: "30m"},
+	}}
+	deadline, ok := jobRetryDeadline(job, "issues")
+	if !ok || !deadline.Equal(exact) {
+		t.Fatalf("deadline=%s want=%s ok=%t", deadline, exact, ok)
+	}
+}
+
 func TestJobActionRetryUsesAdmissionDispositionAfterConcurrentCoalescing(t *testing.T) {
 	jobs := NewJobManager("")
 	now := time.Now().UTC()
