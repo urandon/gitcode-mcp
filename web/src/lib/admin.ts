@@ -627,6 +627,7 @@ export function statusTone(value: string | undefined): 'good' | 'warn' | 'bad' |
     case 'succeeded':
     case 'secure':
     case 'bound':
+    case 'passed':
       return 'good';
     case 'failed':
     case 'error':

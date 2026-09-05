@@ -12,6 +12,7 @@ describe('admin presentation helpers', () => {
     expect(statusTone('partial/retrying')).toBe('warn');
     expect(statusTone('cancelling')).toBe('warn');
     expect(statusTone('cache_schema_blocked')).toBe('bad');
+    expect(statusTone('passed')).toBe('good');
     expect(statusTone('credential_missing')).toBe('warn');
     expect(statusTone('provider_unavailable')).toBe('warn');
     expect(humanize('retry_scheduled')).toBe('Retry Scheduled');

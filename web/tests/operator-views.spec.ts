@@ -36,7 +36,7 @@ const snapshot = {
     { id: 'job-000005', type: 'sync', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'running', created_at: new Date(Date.now() - 45_000).toISOString(), started_at: new Date(Date.now() - 40_000).toISOString(), updated_at: new Date().toISOString(), steps: 12, completed: 12, work_ref: 'durable-sync-public-work', cancellable: true, retryable: false, progress_retained: 3, progress_limit: 256, sync_stage: { stage_ref: 'stage-public-safe', collection: 'issues', phase: 'waiting_commit', fetched: 12, staged: 12, committed: 0, staged_bytes: 8192, attempt: 2, retry_budget: 6, retry_after: new Date(Date.now() + 60_000).toISOString(), blocker_class: 'cache_busy', blocking_operation: 'rag-index', blocking_job_ref: 'job-000001', fetched_at: new Date(Date.now() - 35_000).toISOString(), staged_at: new Date(Date.now() - 34_000).toISOString() }, progress: [{ type: 'phase', phase: 'fetching', collection: 'issues', records_fetched: 12 }, { type: 'phase', phase: 'staged', collection: 'issues', records_fetched: 12 }, { type: 'phase', phase: 'waiting_commit', collection: 'issues', retry_after: new Date(Date.now() + 60_000).toISOString(), attempt: 2 }] }
   ],
   maintenance: [{ registration_id: 'reg-1', cache_ref: 'cache-111111112222', repo_id: 'example/repo', enabled: true, state: 'retry_scheduled', generation: 4, policy: { sync_enabled: true, sync_mode: 'head-and-backfill', rag_enabled: true, collections: ['issues', 'wiki'], head_max_pages: 3, tail_slice_pages: 10, profile: 'easy-rag' } }],
-  feedback: { state: 'ready', prepare_available: true, submit_available: true, sink: 'gitcode_issues', repo_id: 'example/repo', checks: [{ id: 'enabled', status: 'ready' }, { id: 'sink', status: 'ready' }, { id: 'repository_binding', status: 'ready' }, { id: 'credential', status: 'ready' }, { id: 'provider', status: 'ready' }], setup_repositories: ['example/repo'], setup_available: true },
+  feedback: { state: 'ready', prepare_available: true, submit_available: true, sink: 'gitcode_issues', repo_id: 'example/repo', checks: [{ id: 'enabled', status: 'passed' }, { id: 'sink', status: 'passed' }, { id: 'repository_binding', status: 'passed' }, { id: 'credential', status: 'passed' }, { id: 'provider', status: 'passed' }], setup_repositories: ['example/repo'], setup_available: true },
   diagnostics: [
     { id: 'diag-current', severity: 'warning', entity_type: 'maintenance', entity_id: 'reg-1', failure_class: 'cache_busy', message: 'A cache writer is active.', retryable: true, current: true, remediation: 'Wait for the scheduled retry.' },
     { id: 'diag-recovered', severity: 'warning', entity_type: 'cache', entity_id: 'cache-111111112222', failure_class: 'provider_unavailable', message: 'The provider recovered.', retryable: true, current: false }
@@ -227,7 +227,7 @@ test('feedback delivery renders every readiness state without exposing private c
     view.feedback = {
       state, prepare_available: true, submit_available: state === 'ready',
       sink: state === 'disabled' ? '' : 'gitcode_issues', repo_id: state === 'repository_unbound' ? 'example/missing' : 'example/repo',
-      checks: [{ id: 'enabled', status: state === 'disabled' ? 'missing' : 'ready' }, { id: 'sink', status: state === 'sink_missing' ? 'missing' : 'ready' }, { id: 'repository_binding', status: state === 'repository_unbound' ? 'missing' : 'ready' }, { id: 'credential', status: state === 'credential_missing' ? 'missing' : 'ready' }, { id: 'provider', status: state === 'provider_unavailable' ? 'missing' : 'ready' }],
+      checks: [{ id: 'enabled', status: state === 'disabled' ? 'blocked' : 'passed' }, { id: 'sink', status: state === 'sink_missing' ? 'blocked' : 'passed' }, { id: 'repository_binding', status: state === 'repository_unbound' ? 'blocked' : 'passed' }, { id: 'credential', status: state === 'credential_missing' ? 'blocked' : 'passed' }, { id: 'provider', status: state === 'provider_unavailable' ? 'blocked' : 'passed' }],
       remediation: state === 'ready' ? '' : `Resolve ${state}.`, handoff: state === 'ready' ? '' : 'gitcode-mcp feedback status',
       setup_repositories: ['example/repo'], setup_available: true
     };
@@ -238,6 +238,8 @@ test('feedback delivery renders every readiness state without exposing private c
     await expect(workbench).toContainText('Report preparationAvailable');
     await expect(workbench).toContainText(`Issue submission${state === 'ready' ? 'Available' : 'Unavailable'}`);
     await expect(workbench.getByLabel('Feedback readiness checks').locator('article')).toHaveCount(5);
+    await expect(workbench.getByLabel('Feedback readiness checks').locator('.status-chip.good')).toHaveCount(state === 'ready' ? 5 : 4);
+    await expect(workbench.getByLabel('Feedback readiness checks').locator('.status-chip.bad')).toHaveCount(state === 'ready' ? 0 : 1);
     await expect(workbench).not.toContainText('/Users/');
     await expect(workbench).not.toContainText('Authorization:');
     await expect(workbench).not.toContainText('api.gitcode.com');
@@ -246,7 +248,7 @@ test('feedback delivery renders every readiness state without exposing private c
 
 test('feedback setup plans a bound target and safely replays ambiguous apply', async ({ page }) => {
   const view: any = structuredClone(snapshot);
-  view.feedback = { state: 'disabled', prepare_available: true, submit_available: false, checks: [{ id: 'enabled', status: 'missing' }], remediation: 'Enable a trusted feedback sink.', handoff: 'gitcode-mcp feedback setup --repo OWNER/REPO', setup_repositories: ['example/repo'], setup_available: true };
+  view.feedback = { state: 'disabled', prepare_available: true, submit_available: false, checks: [{ id: 'enabled', status: 'blocked' }], remediation: 'Enable a trusted feedback sink.', handoff: 'gitcode-mcp feedback setup --repo OWNER/REPO', setup_repositories: ['example/repo'], setup_available: true };
   await mockAdmin(page, view);
   let planBody: Record<string, unknown> = {};
   await page.route('**/api/admin/v1/feedback/setup/plan', async (route) => {
@@ -260,7 +262,7 @@ test('feedback setup plans a bound target and safely replays ambiguous apply', a
       await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'temporarily_unavailable', message: 'Receipt delivery was interrupted.', remediation: 'Retry this confirmation.' } }) });
       return;
     }
-    view.feedback = { state: 'ready', prepare_available: true, submit_available: true, sink: 'gitcode_issues', repo_id: 'example/repo', checks: [{ id: 'enabled', status: 'ready' }], setup_repositories: ['example/repo'], setup_available: true };
+    view.feedback = { state: 'ready', prepare_available: true, submit_available: true, sink: 'gitcode_issues', repo_id: 'example/repo', checks: [{ id: 'enabled', status: 'passed' }], setup_repositories: ['example/repo'], setup_available: true };
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { status: 'configured', plan_id: 'feedback-plan-0123456789abcdef01234567', repo_id: 'example/repo', sink: 'gitcode_issues', labels: ['agent-feedback'], duplicate_policy: 'suggest', idempotency_key: applyBodies[0].idempotency_key, evidence: 'trusted configuration applied; no credential was written', generated_at: new Date().toISOString(), replayed: true, feedback: view.feedback } }) });
   });
   await page.goto('/?view=Maintenance');
