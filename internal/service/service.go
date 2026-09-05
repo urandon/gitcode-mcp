@@ -5538,6 +5538,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	}
 	var issueUpdateClaimMetadata map[string]string
 	var mergePRClaimMetadata map[string]string
+	mergePRClaimed := false
 	if command == "update-issue" {
 		req.beforeIssueUpdateMutation = func(preimage gitcode.Issue) error {
 			metadata := issueUpdatePreimageMetadata(preimage)
@@ -5607,6 +5608,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 			if !claimed {
 				return ErrWriteFailure{Code: "write_idempotency_in_progress", RepoID: route.RepoID, RemoteID: strconv.Itoa(req.Number), IdempotencyKey: key}
 			}
+			mergePRClaimed = true
 			return nil
 		}
 	}
@@ -5707,15 +5709,13 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 			}
 			var precondition gitcode.ErrWritePreconditionConflict
 			if errors.As(err, &precondition) {
-				metadata := mergePRClaimMetadata
-				if priorEntry != nil && len(priorEntry.RequestMetadata) > 0 {
-					metadata = priorEntry.RequestMetadata
+				if mergePRClaimed {
+					entry := audit.WithRequestMetadata(audit.Failure(route.RepoID, key, command, fingerprint, "write_conflict", s.now().UTC()), mergePRClaimMetadata)
+					_ = s.store.RecordAuditEvent(ctx, entry)
 				}
-				entry := audit.WithRequestMetadata(audit.Failure(route.RepoID, key, command, fingerprint, "write_conflict", s.now().UTC()), metadata)
-				_ = s.store.RecordAuditEvent(ctx, entry)
 				return WriteCommandResult{}, ErrWriteFailure{Code: "write_conflict", RepoID: route.RepoID, RemoteID: strconv.Itoa(req.Number), IdempotencyKey: key, Cause: err}
 			}
-			if len(mergePRClaimMetadata) == 0 {
+			if !mergePRClaimed {
 				// Provider preflight failed before this caller acquired the
 				// generation-aware claim. It does not own the audit row and must
 				// not overwrite a concurrent claimant's in-progress fence.

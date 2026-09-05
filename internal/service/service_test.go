@@ -2465,13 +2465,14 @@ func TestIssue104MergePRPreflightFailureCannotOverwriteConcurrentClaim(t *testin
 		t.Fatal(err)
 	}
 	preimage := gitcode.PullRequest{ID: "9001", Number: 103, Title: "Release batch", State: "open", HeadSHA: "head-sha", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-	client := &claimedMergeWithConcurrentPreflightFailureClient{
-		fakeGitCodeClient: &fakeGitCodeClient{},
-		preimage:          preimage,
-		ready:             [2]chan struct{}{make(chan struct{}), make(chan struct{})},
-		allow:             [2]chan struct{}{make(chan struct{}), make(chan struct{})},
-		claimed:           make(chan struct{}),
-		release:           make(chan struct{}),
+	client := &claimedMergeConcurrentCallerClient{
+		fakeGitCodeClient:  &fakeGitCodeClient{},
+		preimage:           preimage,
+		secondPreflightErr: gitcode.ErrNetworkUnavailable{Endpoint: "/pulls/103", Attempts: 1, Cause: errors.New("preflight read failed")},
+		ready:              [2]chan struct{}{make(chan struct{}), make(chan struct{})},
+		allow:              [2]chan struct{}{make(chan struct{}), make(chan struct{})},
+		claimed:            make(chan struct{}),
+		release:            make(chan struct{}),
 	}
 	svc := NewWithClient(store, client)
 	svc.providerMode = gitcode.ProviderModeLive
@@ -2503,6 +2504,92 @@ func TestIssue104MergePRPreflightFailureCannotOverwriteConcurrentClaim(t *testin
 	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", req.IdempotencyKey)
 	if err != nil || entry == nil || entry.Status != audit.StatusInProgress {
 		t.Fatalf("active claim overwritten: audit=%#v err=%v", entry, err)
+	}
+
+	_, err = svc.MergePR(ctx, req)
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_idempotency_in_progress" {
+		t.Fatalf("third caller error=%#v", err)
+	}
+	if calls, mutations, readbacks := client.counts(); calls != 2 || mutations != 0 || readbacks != 1 {
+		t.Fatalf("before owner release: calls=%d mutations=%d readbacks=%d", calls, mutations, readbacks)
+	}
+
+	close(client.release)
+	if err := <-firstErr; err != nil {
+		t.Fatalf("claim owner merge: %v", err)
+	}
+	if result := <-firstResult; result.Status != "succeeded" {
+		t.Fatalf("claim owner result=%#v", result)
+	}
+	if calls, mutations, _ := client.counts(); calls != 2 || mutations != 1 {
+		t.Fatalf("final calls=%d mutations=%d", calls, mutations)
+	}
+}
+
+func TestIssue104MergePRCallbackConflictCannotOverwriteConcurrentClaim(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	preimage := gitcode.PullRequest{ID: "9001", Number: 103, Title: "Release batch", State: "open", HeadSHA: "head-sha", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	req := WriteCommandRequest{RepoID: "fixture-a", Repo: "fixture-a", Mode: WriteModeLive, Number: 103, Sha: "head-sha", Strategy: "squash", IdempotencyKey: "issue-104-callback-conflict-does-not-own-claim"}
+	key, fingerprint := writeIdempotency("merge-pr", req)
+	metadata := mergePRPreimageMetadata(preimage)
+	metadata["method"] = "PUT"
+	metadata["idempotency_key"] = key
+	metadata["remote_number"] = "103"
+	metadata["remote_type"] = "pull_request"
+	metadata["provider"] = "gitcode-http"
+	metadata["provider_mode"] = string(gitcode.ProviderModeLive)
+	metadata["source_fingerprint"] = fingerprint
+	metadata["write_phase"] = "failed_before_or_rejected_put"
+	failed := audit.WithRequestMetadata(audit.Failure("fixture-a", key, "merge-pr", fingerprint, "write_network_unavailable", time.Now().UTC()), metadata)
+	if err := store.RecordAuditEvent(ctx, failed); err != nil {
+		t.Fatal(err)
+	}
+	client := &claimedMergeConcurrentCallerClient{
+		fakeGitCodeClient: &fakeGitCodeClient{},
+		preimage:          preimage,
+		secondHeadSHA:     "changed-head-sha",
+		ready:             [2]chan struct{}{make(chan struct{}), make(chan struct{})},
+		allow:             [2]chan struct{}{make(chan struct{}), make(chan struct{})},
+		claimed:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	svc := NewWithClient(store, client)
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.writeCredentialPresent = true
+
+	firstResult := make(chan WriteCommandResult, 1)
+	firstErr := make(chan error, 1)
+	go func() {
+		result, err := svc.MergePR(ctx, req)
+		firstResult <- result
+		firstErr <- err
+	}()
+	<-client.ready[0]
+	secondErr := make(chan error, 1)
+	go func() {
+		_, err := svc.MergePR(ctx, req)
+		secondErr <- err
+	}()
+	<-client.ready[1]
+
+	close(client.allow[0])
+	<-client.claimed
+	close(client.allow[1])
+	var writeErr ErrWriteFailure
+	if err := <-secondErr; !errors.As(err, &writeErr) || writeErr.Code != "write_conflict" {
+		t.Fatalf("callback conflict=%#v", err)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", req.IdempotencyKey)
+	if err != nil || entry == nil || entry.Status != audit.StatusInProgress || entry.RequestMetadata["write_phase"] != "preimage_captured" {
+		t.Fatalf("active retry claim overwritten: audit=%#v err=%v", entry, err)
 	}
 
 	_, err = svc.MergePR(ctx, req)
@@ -5275,20 +5362,22 @@ func (c *staggeredSafeFailureMergePRClient) mutationCount() int {
 	return c.mutations
 }
 
-type claimedMergeWithConcurrentPreflightFailureClient struct {
+type claimedMergeConcurrentCallerClient struct {
 	*fakeGitCodeClient
-	preimage  gitcode.PullRequest
-	ready     [2]chan struct{}
-	allow     [2]chan struct{}
-	claimed   chan struct{}
-	release   chan struct{}
-	mu        sync.Mutex
-	calls     int
-	mutations int
-	readbacks int
+	preimage           gitcode.PullRequest
+	secondPreflightErr error
+	secondHeadSHA      string
+	ready              [2]chan struct{}
+	allow              [2]chan struct{}
+	claimed            chan struct{}
+	release            chan struct{}
+	mu                 sync.Mutex
+	calls              int
+	mutations          int
+	readbacks          int
 }
 
-func (c *claimedMergeWithConcurrentPreflightFailureClient) MergePR(_ context.Context, _ gitcode.MergePRRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PullRequest], error) {
+func (c *claimedMergeConcurrentCallerClient) MergePR(_ context.Context, _ gitcode.MergePRRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PullRequest], error) {
 	c.mu.Lock()
 	call := c.calls
 	c.calls++
@@ -5297,11 +5386,15 @@ func (c *claimedMergeWithConcurrentPreflightFailureClient) MergePR(_ context.Con
 		close(c.ready[call])
 		<-c.allow[call]
 	}
-	if call == 1 {
-		return gitcode.WriteResult[gitcode.PullRequest]{}, gitcode.ErrNetworkUnavailable{Endpoint: "/pulls/103", Attempts: 1, Cause: errors.New("preflight read failed")}
+	if call == 1 && c.secondPreflightErr != nil {
+		return gitcode.WriteResult[gitcode.PullRequest]{}, c.secondPreflightErr
+	}
+	preimage := c.preimage
+	if call == 1 && c.secondHeadSHA != "" {
+		preimage.HeadSHA = c.secondHeadSHA
 	}
 	if opts.BeforeMergePRMutation != nil {
-		if err := opts.BeforeMergePRMutation(c.preimage); err != nil {
+		if err := opts.BeforeMergePRMutation(preimage); err != nil {
 			return gitcode.WriteResult[gitcode.PullRequest]{}, err
 		}
 	}
@@ -5317,14 +5410,14 @@ func (c *claimedMergeWithConcurrentPreflightFailureClient) MergePR(_ context.Con
 	return gitcode.WriteResult[gitcode.PullRequest]{Record: merged, Confirmed: true, Operation: "MergePR", ProviderStatus: "200", RemoteID: merged.ID, RemoteNumber: merged.Number, RemoteRevision: "merge-sha", IdempotencyKey: opts.IdempotencyKey, ConfirmedAt: time.Now().UTC()}, nil
 }
 
-func (c *claimedMergeWithConcurrentPreflightFailureClient) GetPR(context.Context, gitcode.PRRequest) (gitcode.PullRequest, error) {
+func (c *claimedMergeConcurrentCallerClient) GetPR(context.Context, gitcode.PRRequest) (gitcode.PullRequest, error) {
 	c.mu.Lock()
 	c.readbacks++
 	c.mu.Unlock()
 	return c.preimage, nil
 }
 
-func (c *claimedMergeWithConcurrentPreflightFailureClient) counts() (calls, mutations, readbacks int) {
+func (c *claimedMergeConcurrentCallerClient) counts() (calls, mutations, readbacks int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.calls, c.mutations, c.readbacks
