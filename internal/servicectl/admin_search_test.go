@@ -3,6 +3,7 @@ package servicectl
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,7 +133,7 @@ func TestRPCRepositoryDocsRegistrationAllowsFullTextWithoutEmbeddingProvider(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo", Aliases: []string{"legacy/repo"}}); err != nil {
 		t.Fatal(err)
 	}
 	store.Close()
@@ -159,12 +160,108 @@ func TestRPCRepositoryDocsRegistrationAllowsFullTextWithoutEmbeddingProvider(t *
 	if err != nil || registered.RepositoryDocs == nil {
 		t.Fatalf("registered=%+v err=%v", registered, err)
 	}
-	result, err := server.repositoryDocsSearch(ctx, RepositoryDocsQueryRequest{RepositoryDocsSourceSelector: RepositoryDocsSourceSelector{RegistrationID: entry.RegistrationID, SourceRegistrationID: registered.RepositoryDocs.SourceRegistrationID, SourceRegistrationGeneration: registered.RepositoryDocs.SourceRegistrationGeneration}, RepoID: "owner/repo", Query: "without embeddings", Mode: repositorydocs.SearchModeFullText})
+	result, err := server.repositoryDocsSearch(ctx, RepositoryDocsQueryRequest{RepoID: "legacy/repo", CachePath: cachePath, Query: "without embeddings", Mode: repositorydocs.SearchModeFullText})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.EffectiveMode != repositorydocs.SearchModeFullText || len(result.Hits) != 1 {
+	if result.RepoID != "owner/repo" || result.EffectiveMode != repositorydocs.SearchModeFullText || len(result.Hits) != 1 {
 		t.Fatalf("fulltext result=%+v", result)
+	}
+
+	repositoryPathB := createRepositoryDocsRegistrationRepo(t, filepath.Join(dir, "repo-b"), "second authority")
+	second, ok, err := maintenance.RegisterRepositoryDocsSource(ctx, entry.CacheUUID, entry.RepoID, repositoryPathB, "")
+	if err != nil || !ok || second.RepositoryDocs == nil {
+		t.Fatalf("second registration=%+v ok=%v err=%v", second, ok, err)
+	}
+	_, err = server.repositoryDocsSearch(ctx, RepositoryDocsQueryRequest{RepoID: "owner/repo", CachePath: cachePath, Query: "authority", Mode: repositorydocs.SearchModeFullText})
+	var ambiguous RepositoryDocsSourceAmbiguousError
+	if !errors.As(err, &ambiguous) {
+		t.Fatalf("ambiguous error=%T %v", err, err)
+	}
+	_, err = server.repositoryDocsSearch(ctx, RepositoryDocsQueryRequest{
+		RepositoryDocsSourceSelector: RepositoryDocsSourceSelector{
+			RegistrationID: entry.RegistrationID, SourceRegistrationID: registered.RepositoryDocs.SourceRegistrationID,
+			SourceRegistrationGeneration: registered.RepositoryDocs.SourceRegistrationGeneration + 1,
+		},
+		RepoID: "owner/repo", CachePath: cachePath, Query: "authority", Mode: repositorydocs.SearchModeFullText,
+	})
+	var stale RepositoryDocsSourceGenerationConflictError
+	if !errors.As(err, &stale) {
+		t.Fatalf("stale selector error=%T %v", err, err)
+	}
+}
+
+func TestRPCRepositoryDocsRepoOnlyResolutionReportsMissingRegistration(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	cfg := config.Default()
+	cfg.CachePath = cachePath
+	server := RPCServer{Manager: Manager{EffectiveConfig: &cfg}, Maintenance: NewMaintenanceManager(Manager{EffectiveConfig: &cfg}, NewJobManager(""), "")}
+	_, err = server.repositoryDocsSourceForRequest(ctx, "owner/repo", cachePath, RepositoryDocsSourceSelector{})
+	var unavailable RepositoryDocsSourceUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.DiagnosticCode() != "repository_docs_registration_not_found" {
+		t.Fatalf("missing registration error=%T %v", err, err)
+	}
+}
+
+func TestRPCRepositoryDocsRepoOnlyResolutionStaysInsideSelectedCache(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.RAG.DefaultProfile = ""
+	cfg.RAG.Indexing.Profile = ""
+	cfg.RAG.Profiles = nil
+	cfg.RAG.Providers = nil
+	manager := Manager{EffectiveConfig: &cfg}
+	maintenance := NewMaintenanceManager(manager, NewJobManager(""), filepath.Join(dir, "managed-caches.json"))
+	server := RPCServer{Manager: manager, Maintenance: maintenance}
+
+	register := func(name, content string) string {
+		t.Helper()
+		cachePath := filepath.Join(dir, name+".db")
+		store, err := cache.NewSQLiteStore(ctx, cachePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+			t.Fatal(err)
+		}
+		store.Close()
+		localCfg := cfg
+		localCfg.CachePath = cachePath
+		localCfg.LockPath = cachePath + ".lock"
+		enroll := testMaintenanceEnrollRequest(cachePath, "selected-cache-"+name, MaintenancePolicy{SyncMode: "off"})
+		enroll.ConfigSnapshot = localCfg
+		enroll.ConfigHash = maintenanceHash(localCfg)
+		entry, err := maintenance.Enroll(ctx, enroll)
+		if err != nil {
+			t.Fatal(err)
+		}
+		repositoryPath := createRepositoryDocsRegistrationRepo(t, filepath.Join(dir, "repo-"+name), content)
+		registered, ok, err := maintenance.RegisterRepositoryDocsSource(ctx, entry.CacheUUID, entry.RepoID, repositoryPath, "")
+		if err != nil || !ok || registered.RepositoryDocs == nil {
+			t.Fatalf("register %s=%+v ok=%v err=%v", name, registered, ok, err)
+		}
+		return cachePath
+	}
+
+	firstCache := register("first", "first-cache-only-token")
+	_ = register("second", "second-cache-only-token")
+	result, err := server.repositoryDocsSearch(ctx, RepositoryDocsQueryRequest{RepoID: "owner/repo", CachePath: firstCache, Query: "first-cache-only-token", Mode: repositorydocs.SearchModeFullText})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Hits) != 1 || !strings.Contains(result.Hits[0].Snippet, "first-cache-only-token") {
+		t.Fatalf("selected-cache search=%+v", result)
 	}
 }
 

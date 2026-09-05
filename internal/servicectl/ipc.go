@@ -216,16 +216,13 @@ func (s RPCServer) dispatch(ctx context.Context, method string, params json.RawM
 		if s.Maintenance == nil {
 			return nil, RepositoryDocsSourceUnavailableError{code: "repository_docs_registration_unavailable"}
 		}
-		if strings.TrimSpace(req.RegistrationID) != "" && strings.TrimSpace(req.RepositoryPath) == "" {
-			source, err := s.Maintenance.repositoryDocsSourceForSelector(RepositoryDocsSourceSelector{
+		if strings.TrimSpace(req.RepositoryPath) == "" {
+			source, err := s.repositoryDocsSourceForRequest(ctx, req.RepoID, req.CachePath, RepositoryDocsSourceSelector{
 				RegistrationID: req.RegistrationID, SourceRegistrationID: req.SourceRegistrationID,
 				SourceRegistrationGeneration: req.SourceRegistrationGeneration,
 			})
 			if err != nil {
 				return nil, err
-			}
-			if !repositoryDocsSourceMatchesRepo(ctx, source, req.RepoID) {
-				return nil, RepositoryDocsSourceUnavailableError{code: "repository_docs_source_repo_conflict"}
 			}
 			req.RepoID, req.RepositoryPath, req.Profile = source.RepoID, source.RepositoryPath, source.Profile
 			req.CachePath, req.CacheUUID = source.CachePath, source.CacheUUID

@@ -146,11 +146,15 @@ is created. Full-text search remains available without an embedding provider.
 
 MCP exposes `repository_docs_policy`, `repository_docs_plan`, `repository_docs_status`,
 `repository_docs_search`, and the asynchronous `repository_docs_index` job
-submission tool. Every call requires the same opaque registration, source, and
-generation selector used by the CLI when more than one authority is registered;
-the selector may be omitted only for an unambiguous sole authority. The daemon
-alone resolves it to private Git authority. Generic service-job list/status,
-attach, and cancel tools expose bounded public job lifecycle state.
+submission tool. A caller may start with only `repo_id`: the daemon resolves
+the canonical binding inside the MCP process's selected cache and selects the
+sole enabled registration and sole Git authority. When more than one authority
+is registered, call `maintenance_status` and retry with the complete opaque
+registration, source, and generation selector. Supplying only part of that
+selector is rejected, and a stale generation fails closed with an actionable
+typed diagnostic. The selected cache path and private Git authority remain on
+the local IPC boundary. Generic service-job list/status, attach, and cancel
+tools expose bounded public job lifecycle state.
 
 Admin UI repository details include a **Documentation** tab with policy,
 revision-set identity, coverage, commit/overlay authority, namespace, and

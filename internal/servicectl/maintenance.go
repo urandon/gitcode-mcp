@@ -280,9 +280,9 @@ type RepositoryDocsSourceRebindRequest struct {
 }
 
 type RepositoryDocsSourceSelector struct {
-	RegistrationID               string `json:"registration_id"`
-	SourceRegistrationID         string `json:"source_registration_id"`
-	SourceRegistrationGeneration int64  `json:"source_registration_generation"`
+	RegistrationID               string `json:"registration_id,omitempty"`
+	SourceRegistrationID         string `json:"source_registration_id,omitempty"`
+	SourceRegistrationGeneration int64  `json:"source_registration_generation,omitempty"`
 }
 
 type RepositoryDocsSourceConflictError struct{}
@@ -2168,6 +2168,22 @@ func (m *MaintenanceManager) repositoryDocsSourceForAdmin(registrationID string)
 	return m.repositoryDocsSourceForSelector(RepositoryDocsSourceSelector{RegistrationID: registrationID})
 }
 
+func (m *MaintenanceManager) repositoryDocsSourceForCacheRepo(cacheUUID, repoID string) (repositoryDocsAdminSource, error) {
+	cacheUUID = strings.TrimSpace(cacheUUID)
+	repoID = strings.TrimSpace(repoID)
+	m.mu.Lock()
+	entry := m.maintenanceEntryForCacheRepoLocked(cacheUUID, repoID)
+	registrationID := ""
+	if entry != nil {
+		registrationID = entry.RegistrationID
+	}
+	m.mu.Unlock()
+	if registrationID == "" {
+		return repositoryDocsAdminSource{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_registration_not_found"}
+	}
+	return m.repositoryDocsSourceForSelector(RepositoryDocsSourceSelector{RegistrationID: registrationID})
+}
+
 func (m *MaintenanceManager) repositoryDocsSourceForSelector(selector RepositoryDocsSourceSelector) (repositoryDocsAdminSource, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -2176,17 +2192,17 @@ func (m *MaintenanceManager) repositoryDocsSourceForSelector(selector Repository
 	if selector.RegistrationID == "" {
 		return repositoryDocsAdminSource{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_source_selector_required"}
 	}
-	if (selector.SourceRegistrationID != "") != (selector.SourceRegistrationGeneration > 0) {
+	if selector.SourceRegistrationGeneration < 0 || (selector.SourceRegistrationID != "") != (selector.SourceRegistrationGeneration > 0) {
 		return repositoryDocsAdminSource{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_source_selector_required"}
 	}
 	selector.RegistrationID = m.resolveRegistrationIDLocked(selector.RegistrationID)
 	selector.SourceRegistrationID = m.resolveSourceRegistrationIDLocked(selector.SourceRegistrationID)
 	entry := m.entries[selector.RegistrationID]
 	if entry == nil {
-		return repositoryDocsAdminSource{}, errors.New("maintenance: registration not found")
+		return repositoryDocsAdminSource{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_registration_not_found"}
 	}
 	if !entry.Enabled {
-		return repositoryDocsAdminSource{}, errors.New("maintenance: registration is disabled")
+		return repositoryDocsAdminSource{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_registration_disabled"}
 	}
 	registered := m.sources[selector.RegistrationID]
 	var source *repositoryDocsRegisteredSource
