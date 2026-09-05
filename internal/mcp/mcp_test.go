@@ -54,7 +54,7 @@ func TestIssueUpdateStateSchemaUsesPublicValues(t *testing.T) {
 }
 
 func TestRepositoryDocsSchemasAllowRepoOnlyAuthorityResolution(t *testing.T) {
-	for _, name := range []string{"repository_docs_policy", "repository_docs_plan", "repository_docs_status", "repository_docs_search", "repository_docs_index"} {
+	for _, name := range []string{"repository_docs_sources", "repository_docs_policy", "repository_docs_plan", "repository_docs_status", "repository_docs_search", "repository_docs_index"} {
 		schema := toolDefinitionByName(name).InputSchema
 		if !containsString(schema.Required, "repo_id") {
 			t.Fatalf("%s required=%v, want repo_id", name, schema.Required)
@@ -444,14 +444,20 @@ func TestMCPRepositoryDocumentationRejectsPartialAuthoritySelector(t *testing.T)
 	store := populatedStore(t)
 	defer store.Close()
 	handler := NewRPCHandler(service.New(store))
-	id := json.RawMessage(`1`)
-	params := json.RawMessage(`{"name":"repository_docs_status","arguments":{"repo_id":"fixture-a","source_registration_id":"source-a"}}`)
-	resp, ok := handler.Handle(context.Background(), request{JSONRPC: "2.0", ID: &id, Method: "tools/call", Params: &params})
-	if !ok || resp == nil || resp.Error == nil || resp.Error.Data == nil {
-		t.Fatalf("response=%#v", resp)
-	}
-	if resp.Error.Data.Code != "repository_docs_source_selector_required" || !strings.Contains(resp.Error.Data.Remediation, "maintenance_status") {
-		t.Fatalf("error=%+v", resp.Error.Data)
+	for _, arguments := range []string{
+		`{"repo_id":"fixture-a","registration_id":"reg-a"}`,
+		`{"repo_id":"fixture-a","source_registration_id":"source-a"}`,
+		`{"repo_id":"fixture-a","registration_id":"reg-a","source_registration_id":"source-a"}`,
+	} {
+		id := json.RawMessage(`1`)
+		params := json.RawMessage(fmt.Sprintf(`{"name":"repository_docs_status","arguments":%s}`, arguments))
+		resp, ok := handler.Handle(context.Background(), request{JSONRPC: "2.0", ID: &id, Method: "tools/call", Params: &params})
+		if !ok || resp == nil || resp.Error == nil || resp.Error.Data == nil {
+			t.Fatalf("arguments=%s response=%#v", arguments, resp)
+		}
+		if resp.Error.Data.Code != "repository_docs_source_selector_required" || !strings.Contains(resp.Error.Data.Remediation, "repository_docs_sources") {
+			t.Fatalf("arguments=%s error=%+v", arguments, resp.Error.Data)
+		}
 	}
 }
 
@@ -461,7 +467,7 @@ func TestRepositoryDocsRPCDiagnosticsAreActionable(t *testing.T) {
 		want string
 	}{
 		{code: "repository_docs_registration_not_found", want: "repo-docs register"},
-		{code: "repository_docs_source_ambiguous", want: "maintenance_status"},
+		{code: "repository_docs_source_ambiguous", want: "repository_docs_sources"},
 		{code: "repository_docs_source_generation_conflict", want: "current opaque source selector"},
 	}
 	for _, tt := range tests {

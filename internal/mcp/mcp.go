@@ -695,6 +695,13 @@ var toolDefs = []toolDefinition{
 		},
 	},
 	{
+		Name:        "repository_docs_sources",
+		Description: "Discover public-safe opaque repository-document authority selectors for repo_id inside the selected cache. No filesystem path, provider call, fetch, or GitCode call is exposed.",
+		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
+			"repo_id": {Type: "string", Description: "Configured repository id or alias in the selected cache.", MinLength: 1},
+		}, Required: []string{"repo_id"}},
+	},
+	{
 		Name:        "repository_docs_policy",
 		Description: "Resolve the versioned repository-document policy at one local Git revision. The sole authority in the selected cache is resolved from repo_id when the opaque selector is omitted. No fetch or GitCode call is performed.",
 		InputSchema: inputSchema{Type: "object", Properties: map[string]schemaProp{
@@ -1020,6 +1027,8 @@ func (s *Server) ragToolHandler(cap capability.Capability) toolHandler {
 		return s.callRAGStatus
 	case "rag_search":
 		return s.callRAGSearch
+	case "repository_docs_sources":
+		return s.callRepositoryDocsSources
 	case "repository_docs_policy":
 		return s.callRepositoryDocsPolicy
 	case "repository_docs_plan":
@@ -1876,6 +1885,26 @@ func (s *Server) callRAGSearch(ctx context.Context, id *json.RawMessage, args js
 	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
 }
 
+func (s *Server) callRepositoryDocsSources(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	var a repositoryDocsArgs
+	if err := json.Unmarshal(args, &a); err != nil || strings.TrimSpace(a.RepoID) == "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "repo_required", Message: "repo_id is required"})
+		return
+	}
+	client, err := s.localServiceClient()
+	if err != nil {
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "repository_docs_sources", RepoID: a.RepoID, Subsystem: "service"})
+		return
+	}
+	var result servicectl.RepositoryDocsSourceListResult
+	if err := client.Call(ctx, "RepositoryDocs.Sources", servicectl.RepositoryDocsSourceListRequest{RepoID: a.RepoID, CachePath: s.runtimeContext.EffectiveCachePath}, &result); err != nil {
+		s.writeOperationalError(id, err, domainErrorContext{Operation: "repository_docs_sources", RepoID: a.RepoID, Subsystem: "service"})
+		return
+	}
+	text := fmt.Sprintf("repository_docs_sources repo=%s registration=%s enabled=%t sources=%d", result.RepoID, result.RegistrationID, result.Enabled, len(result.Sources))
+	s.writeToolResult(id, toolCallResult{Content: []toolContentItem{{Type: "text", Text: text}}, StructuredContent: result})
+}
+
 func (s *Server) callRepositoryDocsPolicy(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
 	var a repositoryDocsArgs
 	if err := json.Unmarshal(args, &a); err != nil {
@@ -2018,11 +2047,13 @@ func validateRepositoryDocsSelector(a repositoryDocsArgs) *errorData {
 	hasRegistration := strings.TrimSpace(a.RegistrationID) != ""
 	hasID := strings.TrimSpace(a.SourceRegistrationID) != ""
 	hasGeneration := a.SourceRegistrationGeneration > 0
-	if a.SourceRegistrationGeneration < 0 || hasID != hasGeneration || (!hasRegistration && (hasID || hasGeneration)) {
+	allOmitted := !hasRegistration && !hasID && a.SourceRegistrationGeneration == 0
+	complete := hasRegistration && hasID && hasGeneration
+	if !allOmitted && !complete {
 		return &errorData{
 			Code:        "repository_docs_source_selector_required",
 			Message:     "omit the authority selector for automatic sole-authority resolution, or supply registration_id with source_registration_id and source_registration_generation together",
-			Remediation: "omit all three selector fields; if multiple authorities are reported, call maintenance_status and retry with one complete opaque selector",
+			Remediation: "omit all three selector fields; if multiple authorities are reported, call repository_docs_sources and retry with one complete opaque selector",
 		}
 	}
 	return nil
@@ -2652,13 +2683,13 @@ func repositoryDocsDiagnostic(code, repoID string) (string, string, bool) {
 			remediationForRepo("register the local Git authority, then retry", repoID, "gitcode-mcp repo-docs register --repository-path PATH"), true
 	case "repository_docs_source_ambiguous":
 		return "multiple repository-document authorities are registered for this cache and repository",
-			"call maintenance_status, select one repository_docs_sources entry, and retry with its registration_id, source_registration_id, and source_registration_generation", true
+			"call repository_docs_sources with the same repo_id, select one source, and retry with the returned registration_id, source_registration_id, and source_registration_generation", true
 	case "repository_docs_source_generation_conflict":
 		return "the selected repository-document authority generation is stale",
-			"call maintenance_status and retry with the current opaque source selector", true
+			"call repository_docs_sources with the same repo_id and retry with the current opaque source selector", true
 	case "repository_docs_source_selector_required":
 		return "the repository-document authority selector is incomplete",
-			"omit all selector fields for automatic sole-authority resolution, or call maintenance_status and supply all three opaque selector fields", true
+			"omit all selector fields for automatic sole-authority resolution, or call repository_docs_sources and supply all three opaque selector fields", true
 	case "repository_docs_binding_unavailable":
 		return "the repository is not bound in the selected cache",
 			remediationForRepo("call repo_status and configure the repository binding", repoID, "gitcode-mcp doctor --format json"), true

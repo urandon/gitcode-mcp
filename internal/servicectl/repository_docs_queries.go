@@ -2,6 +2,7 @@ package servicectl
 
 import (
 	"context"
+	"sort"
 	"strings"
 
 	"gitcode-mcp/internal/cache"
@@ -25,6 +26,18 @@ type RegisterRepositoryDocsSourceRequest struct {
 	RepositoryPath string `json:"repository_path"`
 	Profile        string `json:"profile,omitempty"`
 	CachePath      string `json:"cache_path,omitempty"`
+}
+
+type RepositoryDocsSourceListRequest struct {
+	RepoID    string `json:"repo_id"`
+	CachePath string `json:"cache_path,omitempty"`
+}
+
+type RepositoryDocsSourceListResult struct {
+	RepoID         string                           `json:"repo_id"`
+	RegistrationID string                           `json:"registration_id"`
+	Enabled        bool                             `json:"enabled"`
+	Sources        []RepositoryDocsMaintenanceState `json:"sources"`
 }
 
 func (s RPCServer) repositoryDocsPolicy(ctx context.Context, req RepositoryDocsQueryRequest) (repositorydocs.PolicyResult, error) {
@@ -109,7 +122,15 @@ func (s RPCServer) repositoryDocsSourceForRequest(ctx context.Context, repoID, c
 	if s.Maintenance == nil {
 		return repositoryDocsAdminSource{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_registration_unavailable"}
 	}
-	if strings.TrimSpace(selector.RegistrationID) != "" {
+	hasRegistration := strings.TrimSpace(selector.RegistrationID) != ""
+	hasSource := strings.TrimSpace(selector.SourceRegistrationID) != ""
+	hasGeneration := selector.SourceRegistrationGeneration > 0
+	allOmitted := !hasRegistration && !hasSource && selector.SourceRegistrationGeneration == 0
+	complete := hasRegistration && hasSource && hasGeneration
+	if !allOmitted && !complete {
+		return repositoryDocsAdminSource{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_source_selector_required"}
+	}
+	if complete {
 		source, err := s.Maintenance.repositoryDocsSourceForSelector(selector)
 		if err != nil {
 			return repositoryDocsAdminSource{}, err
@@ -119,27 +140,57 @@ func (s RPCServer) repositoryDocsSourceForRequest(ctx context.Context, repoID, c
 		}
 		return source, nil
 	}
-	if strings.TrimSpace(selector.SourceRegistrationID) != "" || selector.SourceRegistrationGeneration != 0 {
-		return repositoryDocsAdminSource{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_source_selector_required"}
+	cacheUUID, canonicalRepoID, err := s.repositoryDocsCacheBinding(ctx, repoID, cachePath)
+	if err != nil {
+		return repositoryDocsAdminSource{}, err
 	}
+	return s.Maintenance.repositoryDocsSourceForCacheRepo(cacheUUID, canonicalRepoID)
+}
+
+func (s RPCServer) repositoryDocsSources(ctx context.Context, req RepositoryDocsSourceListRequest) (RepositoryDocsSourceListResult, error) {
+	if s.Maintenance == nil {
+		return RepositoryDocsSourceListResult{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_registration_unavailable"}
+	}
+	cacheUUID, canonicalRepoID, err := s.repositoryDocsCacheBinding(ctx, req.RepoID, req.CachePath)
+	if err != nil {
+		return RepositoryDocsSourceListResult{}, err
+	}
+	return s.Maintenance.repositoryDocsSourcesForCacheRepo(cacheUUID, canonicalRepoID)
+}
+
+func (s RPCServer) repositoryDocsCacheBinding(ctx context.Context, repoID, cachePath string) (string, string, error) {
 	eff, err := effectiveJobConfig(s.Manager, cachePath)
 	if err != nil {
-		return repositoryDocsAdminSource{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_configuration_unavailable"}
+		return "", "", RepositoryDocsSourceUnavailableError{code: "repository_docs_configuration_unavailable"}
 	}
 	store, err := cache.NewSQLiteReadOnlyStore(ctx, eff.Config.CachePath)
 	if err != nil {
-		return repositoryDocsAdminSource{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_cache_unavailable"}
+		return "", "", RepositoryDocsSourceUnavailableError{code: "repository_docs_cache_unavailable"}
 	}
 	binding, bindingErr := store.ResolveRepositoryBinding(ctx, strings.TrimSpace(repoID))
 	identity, identityErr := store.CacheIdentity(ctx)
 	store.Close()
 	if bindingErr != nil {
-		return repositoryDocsAdminSource{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_binding_unavailable"}
+		return "", "", RepositoryDocsSourceUnavailableError{code: "repository_docs_binding_unavailable"}
 	}
 	if identityErr != nil {
-		return repositoryDocsAdminSource{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_cache_unavailable"}
+		return "", "", RepositoryDocsSourceUnavailableError{code: "repository_docs_cache_unavailable"}
 	}
-	return s.Maintenance.repositoryDocsSourceForCacheRepo(identity.UUID, binding.RepoID)
+	return identity.UUID, binding.RepoID, nil
+}
+
+func (m *MaintenanceManager) repositoryDocsSourcesForCacheRepo(cacheUUID, repoID string) (RepositoryDocsSourceListResult, error) {
+	m.mu.Lock()
+	entry := m.maintenanceEntryForCacheRepoLocked(strings.TrimSpace(cacheUUID), strings.TrimSpace(repoID))
+	if entry == nil {
+		m.mu.Unlock()
+		return RepositoryDocsSourceListResult{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_registration_not_found"}
+	}
+	publicEntry := cloneMaintenanceEntry(entry)
+	m.mu.Unlock()
+	sources := append([]RepositoryDocsMaintenanceState(nil), publicEntry.RepositoryDocsSources...)
+	sort.Slice(sources, func(i, j int) bool { return sources[i].SourceRegistrationID < sources[j].SourceRegistrationID })
+	return RepositoryDocsSourceListResult{RepoID: publicEntry.RepoID, RegistrationID: publicEntry.RegistrationID, Enabled: publicEntry.Enabled, Sources: sources}, nil
 }
 
 func repositoryDocsSourceMatchesRepo(ctx context.Context, source repositoryDocsAdminSource, requested string) bool {
