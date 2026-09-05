@@ -11,25 +11,31 @@ import (
 // the event so callers can distinguish active backoff from historical context.
 func jobRetryDeadline(job Job, collection string) (time.Time, bool) {
 	collection = strings.TrimSpace(collection)
-	var deadline time.Time
-	observe := func(candidate time.Time) {
-		if !candidate.IsZero() && candidate.After(deadline) {
-			deadline = candidate.UTC()
+	var exactDeadline time.Time
+	observeExact := func(candidate time.Time) {
+		if !candidate.IsZero() && candidate.After(exactDeadline) {
+			exactDeadline = candidate.UTC()
 		}
 	}
 
 	if job.SyncStage != nil && (collection == "" || job.SyncStage.Collection == collection) {
-		observe(job.SyncStage.RetryAfter)
+		observeExact(job.SyncStage.RetryAfter)
 	}
 	for _, state := range job.SyncCollections {
 		if collection != "" && state.Collection != collection {
 			continue
 		}
 		if state.RetryAfter != nil {
-			observe(*state.RetryAfter)
+			observeExact(*state.RetryAfter)
 		}
 	}
 
+	var legacyDeadline time.Time
+	observeLegacy := func(candidate time.Time) {
+		if !candidate.IsZero() && candidate.After(legacyDeadline) {
+			legacyDeadline = candidate.UTC()
+		}
+	}
 	anchor := job.UpdatedAt
 	if anchor.IsZero() {
 		anchor = job.CreatedAt
@@ -43,12 +49,15 @@ func jobRetryDeadline(job Job, collection string) (time.Time, bool) {
 			continue
 		}
 		if exact, err := time.Parse(time.RFC3339, value); err == nil {
-			observe(exact)
+			observeExact(exact)
 			continue
 		}
 		if delay, err := time.ParseDuration(value); err == nil && !anchor.IsZero() {
-			observe(anchor.Add(delay))
+			observeLegacy(anchor.Add(delay))
 		}
 	}
-	return deadline, !deadline.IsZero()
+	if !exactDeadline.IsZero() {
+		return exactDeadline, true
+	}
+	return legacyDeadline, !legacyDeadline.IsZero()
 }

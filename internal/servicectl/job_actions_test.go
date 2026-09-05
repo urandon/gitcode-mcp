@@ -233,6 +233,22 @@ func TestJobRetryDeadlineAnchorsLegacyDurationToJobUpdate(t *testing.T) {
 	}
 }
 
+func TestJobRetryDeadlinePrefersExactEvidenceOverLegacyDuration(t *testing.T) {
+	updated := time.Date(2030, 1, 2, 4, 0, 0, 0, time.UTC)
+	exact := updated.Add(-time.Hour)
+	job := Job{
+		UpdatedAt:       updated,
+		SyncCollections: []SyncCollectionView{{Collection: "wiki", Outcome: SyncCollectionPartial, RetryAfter: &exact, UpdatedAt: updated}},
+		Progress:        []service.ProgressEvent{{Collection: "wiki", RetryAfter: "30m"}},
+	}
+	for _, collection := range []string{"", "wiki"} {
+		deadline, ok := jobRetryDeadline(job, collection)
+		if !ok || !deadline.Equal(exact) {
+			t.Fatalf("collection=%q deadline=%s ok=%t", collection, deadline, ok)
+		}
+	}
+}
+
 func TestJobActionRetryUsesAdmissionDispositionAfterConcurrentCoalescing(t *testing.T) {
 	jobs := NewJobManager("")
 	now := time.Now().UTC()
