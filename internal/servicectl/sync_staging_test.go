@@ -391,12 +391,16 @@ func TestAdminJobSyncStageProjectionIsSemanticAndPublicSafe(t *testing.T) {
 	created.State = state
 	public := created.PublicView()
 	job := Job{ID: "job-1", Type: SyncJobType, CacheUUID: created.CacheUUID, RepoID: created.RepoID, Status: JobStatusRunning, CreatedAt: created.CreatedAt, UpdatedAt: state.UpdatedAt, SyncStage: &public}
-	data, err := json.Marshal(adminJobObservation(job))
+	view := adminJobObservation(job)
+	if view.SyncStage == nil || view.SyncStage.Collection != created.Collection || !view.SyncStage.UpdatedAt.Equal(state.UpdatedAt) {
+		t.Fatalf("nested sync stage projection = %+v", view.SyncStage)
+	}
+	data, err := json.Marshal(view)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
 	contract := string(data)
-	for _, want := range []string{`"sync_stage":{`, `"collection":"issues"`, `"phase":"waiting_commit"`, `"fetched":2`, `"staged":2`, `"attempt":1`, `"retry_budget":6`, `"blocker_class":"cache_busy"`, `"updated_at":`} {
+	for _, want := range []string{`"sync_stage":{`, `"collection":"issues"`, `"phase":"waiting_commit"`, `"fetched":2`, `"staged":2`, `"attempt":1`, `"retry_budget":6`, `"blocker_class":"cache_busy"`} {
 		if !strings.Contains(contract, want) {
 			t.Fatalf("contract missing %q: %s", want, contract)
 		}
