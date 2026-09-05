@@ -22,9 +22,26 @@ import (
 )
 
 const (
-	legacyMaintenanceRegistrySchema = "gitcode-mcp.managed-caches.v1"
-	maintenanceRegistrySchema       = "gitcode-mcp.managed-caches.v2"
+	legacyMaintenanceRegistrySchema  = "gitcode-mcp.managed-caches.v1"
+	maintenanceRegistrySchema        = "gitcode-mcp.managed-caches.v2"
+	defaultMaintenanceInspectTimeout = time.Second
 )
+
+var errMaintenanceCacheInspectionTimeout = errors.New("maintenance: cache inspection timed out")
+
+type maintenanceCacheInspection struct {
+	identity cache.CacheIdentity
+	binding  cache.RepositoryBinding
+	err      error
+}
+
+type maintenanceCacheInspectionRequest struct {
+	id     string
+	path   string
+	repoID string
+}
+
+type maintenanceCacheInspector func(context.Context, string, string) (cache.CacheIdentity, cache.RepositoryBinding, error)
 
 type MaintenancePolicy struct {
 	SyncEnabled         bool   `json:"sync_enabled"`
@@ -405,10 +422,20 @@ type MaintenanceManager struct {
 	retiredClonePaths  map[string]map[string]bool
 	now                func() time.Time
 	writeFile          func(string, []byte, os.FileMode) error
+	inspectCache       maintenanceCacheInspector
+	inspectTimeout     time.Duration
 }
 
 func NewMaintenanceManager(manager Manager, jobs *JobManager, path string) *MaintenanceManager {
-	maintenance := &MaintenanceManager{manager: manager, jobs: jobs, path: path, entries: map[string]*MaintenanceEntry{}, receipts: map[string]maintenanceReceipt{}, admissions: map[string]repositoryDocsAdmissionIntent{}, sources: map[string]map[string]*repositoryDocsRegisteredSource{}, redirects: map[string]string{}, sourceRedirects: map[string]string{}, conflictCandidates: map[string][]maintenanceIdentityConflictCandidate{}, resolutionReceipts: map[string]maintenanceConflictResolutionReceipt{}, retiredClonePaths: map[string]map[string]bool{}, now: func() time.Time { return time.Now().UTC() }, writeFile: durableAtomicWriteFile}
+	inspector := manager.maintenanceCacheInspector
+	if inspector == nil {
+		inspector = inspectMaintenanceCache
+	}
+	timeout := manager.maintenanceCacheInspectTimeout
+	if timeout <= 0 {
+		timeout = defaultMaintenanceInspectTimeout
+	}
+	maintenance := &MaintenanceManager{manager: manager, jobs: jobs, path: path, entries: map[string]*MaintenanceEntry{}, receipts: map[string]maintenanceReceipt{}, admissions: map[string]repositoryDocsAdmissionIntent{}, sources: map[string]map[string]*repositoryDocsRegisteredSource{}, redirects: map[string]string{}, sourceRedirects: map[string]string{}, conflictCandidates: map[string][]maintenanceIdentityConflictCandidate{}, resolutionReceipts: map[string]maintenanceConflictResolutionReceipt{}, retiredClonePaths: map[string]map[string]bool{}, now: func() time.Time { return time.Now().UTC() }, writeFile: durableAtomicWriteFile, inspectCache: inspector, inspectTimeout: timeout}
 	if jobs != nil {
 		jobs.onRepositoryDocsCancelled = maintenance.cancelRepositoryDocsAdmission
 		jobs.repositoryDocsCancellationCommitted = maintenance.repositoryDocsCancellationCommitted
@@ -561,10 +588,81 @@ type maintenanceCanonicalCandidate struct {
 	pathKey string
 }
 
+func inspectMaintenanceCache(ctx context.Context, path, repoID string) (cache.CacheIdentity, cache.RepositoryBinding, error) {
+	store, err := cache.NewSQLiteReadOnlyStore(ctx, path)
+	if err != nil {
+		return cache.CacheIdentity{}, cache.RepositoryBinding{}, err
+	}
+	defer store.Close()
+	identity, err := store.CacheIdentity(ctx)
+	if err != nil {
+		return cache.CacheIdentity{}, cache.RepositoryBinding{}, err
+	}
+	binding, err := store.ResolveRepositoryBinding(ctx, repoID)
+	if err != nil {
+		return cache.CacheIdentity{}, cache.RepositoryBinding{}, err
+	}
+	return identity, binding, nil
+}
+
+func (m *MaintenanceManager) inspectLoadedEntriesBounded(ctx context.Context, ids []string) map[string]maintenanceCacheInspection {
+	requests := make([]maintenanceCacheInspectionRequest, 0, len(ids))
+	for _, id := range ids {
+		entry := m.entries[id]
+		if entry == nil || entry.IdentityConflict != nil {
+			continue
+		}
+		requests = append(requests, maintenanceCacheInspectionRequest{id: id, path: entry.cachePath, repoID: entry.RepoID})
+	}
+	return m.inspectRequestsBounded(ctx, requests)
+}
+
+func (m *MaintenanceManager) inspectRequestsBounded(ctx context.Context, requests []maintenanceCacheInspectionRequest) map[string]maintenanceCacheInspection {
+	results := make(chan struct {
+		id         string
+		inspection maintenanceCacheInspection
+	}, len(requests))
+	for _, request := range requests {
+		go func(request maintenanceCacheInspectionRequest) {
+			results <- struct {
+				id         string
+				inspection maintenanceCacheInspection
+			}{id: request.id, inspection: m.inspectCacheBounded(ctx, request.path, request.repoID)}
+		}(request)
+	}
+	inspections := make(map[string]maintenanceCacheInspection, len(requests))
+	for range len(requests) {
+		result := <-results
+		inspections[result.id] = result.inspection
+	}
+	return inspections
+}
+
+func (m *MaintenanceManager) inspectCacheBounded(ctx context.Context, path, repoID string) maintenanceCacheInspection {
+	inspectCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	result := make(chan maintenanceCacheInspection, 1)
+	go func() {
+		identity, binding, err := m.inspectCache(inspectCtx, path, repoID)
+		result <- maintenanceCacheInspection{identity: identity, binding: binding, err: err}
+	}()
+	timer := time.NewTimer(m.inspectTimeout)
+	defer timer.Stop()
+	select {
+	case inspected := <-result:
+		return inspected
+	case <-ctx.Done():
+		return maintenanceCacheInspection{err: ctx.Err()}
+	case <-timer.C:
+		return maintenanceCacheInspection{err: errMaintenanceCacheInspectionTimeout}
+	}
+}
+
 func (m *MaintenanceManager) canonicalizeLoadedEntriesLocked(ctx context.Context) bool {
 	changed := m.expandRecoveredUnresolvedCandidatesLocked(ctx)
 	groups := map[string][]maintenanceCanonicalCandidate{}
 	unresolved := map[string][]maintenanceCanonicalCandidate{}
+	unresolvedClasses := map[string]string{}
 	uuidPaths := map[string]map[string]bool{}
 	uuidCandidates := map[string][]maintenanceCanonicalCandidate{}
 	ids := make([]string, 0, len(m.entries))
@@ -580,6 +678,7 @@ func (m *MaintenanceManager) canonicalizeLoadedEntriesLocked(ctx context.Context
 		uuidPaths[entry.CacheUUID][pathKey] = true
 	}
 	sort.Strings(ids)
+	inspections := m.inspectLoadedEntriesBounded(ctx, ids)
 	for _, id := range ids {
 		entry := m.entries[id]
 		// A collapsed cohort must remain blocked until the dedicated resolution
@@ -591,16 +690,17 @@ func (m *MaintenanceManager) canonicalizeLoadedEntriesLocked(ctx context.Context
 		}
 		pathKey := maintenanceCanonicalPathKey(entry.cachePath)
 		item := maintenanceCanonicalCandidate{id: id, entry: entry, repoID: entry.RepoID, pathKey: pathKey}
-		store, err := cache.NewSQLiteReadOnlyStore(ctx, entry.cachePath)
-		if err != nil {
+		inspection := inspections[id]
+		if inspection.err != nil {
 			unresolved[entry.CacheUUID+"\x00"+pathKey] = append(unresolved[entry.CacheUUID+"\x00"+pathKey], item)
 			uuidCandidates[entry.CacheUUID] = append(uuidCandidates[entry.CacheUUID], item)
+			if errors.Is(inspection.err, errMaintenanceCacheInspectionTimeout) {
+				unresolvedClasses[id] = "cache_inspection_timeout"
+			}
 			continue
 		}
-		identity, identityErr := store.CacheIdentity(ctx)
-		binding, bindingErr := store.ResolveRepositoryBinding(ctx, entry.RepoID)
-		_ = store.Close()
-		if identityErr != nil || bindingErr != nil || identity.UUID != entry.CacheUUID {
+		identity, binding := inspection.identity, inspection.binding
+		if identity.UUID != entry.CacheUUID {
 			unresolved[entry.CacheUUID+"\x00"+pathKey] = append(unresolved[entry.CacheUUID+"\x00"+pathKey], item)
 			uuidCandidates[entry.CacheUUID] = append(uuidCandidates[entry.CacheUUID], item)
 			continue
@@ -628,7 +728,7 @@ func (m *MaintenanceManager) canonicalizeLoadedEntriesLocked(ctx context.Context
 			entry.PathFingerprint = fingerprint
 			changed = true
 		}
-		if entry.State == "identity_unresolved" || entry.State == "config_snapshot_invalid" {
+		if entry.State == "identity_unresolved" || entry.State == "config_snapshot_invalid" || entry.State == "cache_inspection_timeout" {
 			entry.Enabled = entry.identityBlockedWasEnabled
 			entry.identityBlockedWasEnabled = false
 			entry.State, entry.LastErrorClass, entry.LastError = "enrolled", "", ""
@@ -675,7 +775,11 @@ func (m *MaintenanceManager) canonicalizeLoadedEntriesLocked(ctx context.Context
 		}
 		sort.Slice(candidates, func(i, j int) bool { return candidates[i].id < candidates[j].id })
 		if len(candidates) == 1 {
-			changed = blockMaintenanceIdentity(candidates[0].entry, "identity_unresolved") || changed
+			class := unresolvedClasses[candidates[0].id]
+			if class == "" {
+				class = "identity_unresolved"
+			}
+			changed = blockMaintenanceIdentity(candidates[0].entry, class) || changed
 			continue
 		}
 		registrationID := maintenanceUnresolvedRegistrationID(candidates[0].entry.CacheUUID, candidates[0].pathKey)
@@ -1006,16 +1110,24 @@ func legacyAmbiguousReceiptAuthority(receipt maintenanceReceipt) string {
 
 func (m *MaintenanceManager) expandRecoveredUnresolvedCandidatesLocked(ctx context.Context) bool {
 	changed := false
+	requests := make([]maintenanceCacheInspectionRequest, 0)
+	registrationIDs := make([]string, 0)
 	for registrationID, entry := range m.entries {
 		candidates := m.conflictCandidates[registrationID]
 		if entry == nil || entry.State != "identity_unresolved" || len(candidates) == 0 {
 			continue
 		}
-		store, err := cache.NewSQLiteReadOnlyStore(ctx, candidates[0].CachePath)
-		if err != nil {
+		registrationIDs = append(registrationIDs, registrationID)
+		requests = append(requests, maintenanceCacheInspectionRequest{id: registrationID, path: candidates[0].CachePath, repoID: candidates[0].Entry.RepoID})
+	}
+	sort.Strings(registrationIDs)
+	inspections := m.inspectRequestsBounded(ctx, requests)
+	for _, registrationID := range registrationIDs {
+		entry := m.entries[registrationID]
+		candidates := m.conflictCandidates[registrationID]
+		if entry == nil || len(candidates) == 0 || inspections[registrationID].err != nil {
 			continue
 		}
-		_ = store.Close()
 		delete(m.entries, registrationID)
 		delete(m.sources, registrationID)
 		delete(m.conflictCandidates, registrationID)
@@ -3227,6 +3339,8 @@ func publicMaintenanceError(class string) string {
 		return "managed cache configuration does not match its cache authority"
 	case "cache_unreadable":
 		return "managed cache is unavailable"
+	case "cache_inspection_timeout":
+		return "managed cache inspection timed out; allow the installed service to access the cache location or use foreground service mode"
 	case "cache_schema_blocked":
 		return "managed cache schema requires a compatible service binary"
 	case "cache_replaced":

@@ -118,6 +118,11 @@ type Manager struct {
 	OutputRunner    CommandOutputRunner
 	StartupTimeout  time.Duration
 	StartupInterval time.Duration
+	// maintenanceCacheInspector and its timeout are package-private startup
+	// seams. Production uses the canonical read-only cache inspection; tests can
+	// deterministically model an OS-level open that ignores cancellation.
+	maintenanceCacheInspector      maintenanceCacheInspector
+	maintenanceCacheInspectTimeout time.Duration
 }
 
 type CommandRunner func(context.Context, string, ...string) error

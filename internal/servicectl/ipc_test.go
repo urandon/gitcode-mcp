@@ -88,6 +88,147 @@ func TestRPCServiceStatusAndFakeJobLifecycle(t *testing.T) {
 	}
 }
 
+func TestIssue141BlockedCacheInspectionDoesNotBlockControlPlane(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	blockedPath := filepath.Join(root, "blocked.db")
+	healthyPath := filepath.Join(root, "healthy.db")
+	identities := map[string]cache.CacheIdentity{}
+	for _, path := range []string{blockedPath, healthyPath} {
+		store, err := cache.NewSQLiteStore(ctx, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+			store.Close()
+			t.Fatal(err)
+		}
+		identity, err := store.CacheIdentity(ctx)
+		if err != nil {
+			store.Close()
+			t.Fatal(err)
+		}
+		identities[path] = identity
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	manager := newTestManager(t, "darwin")
+	src := manager.Source.(testSource)
+	src.env = map[string]string{"GITCODE_MCP_SERVICE_NETWORK": "mem", "GITCODE_MCP_SERVICE_ADDRESS": "issue-141-bounded-startup-" + filepath.Base(root)}
+	manager.Source = src
+	paths, err := manager.ResolvePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.RegistryPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	disk := maintenanceRegistryFile{SchemaVersion: maintenanceRegistrySchema, Generation: 1}
+	for _, path := range []string{blockedPath, healthyPath} {
+		cfg := config.Default()
+		cfg.CachePath = path
+		disk.Entries = append(disk.Entries, maintenanceDiskEntry{
+			MaintenanceEntry: MaintenanceEntry{
+				RegistrationID: maintenanceRegistrationID(identities[path].UUID, "owner/repo"),
+				CacheUUID:      identities[path].UUID,
+				RepoID:         "owner/repo",
+				Policy:         MaintenancePolicy{},
+				ConfigHash:     maintenanceHash(cfg),
+				Enabled:        true,
+				State:          "ready",
+				Generation:     1,
+			},
+			CachePath:      path,
+			ConfigSnapshot: cfg,
+		})
+	}
+	registryJSON, err := json.Marshal(disk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.RegistryPath, registryJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	releaseBlockedOpen := make(chan struct{})
+	manager.maintenanceCacheInspectTimeout = 25 * time.Millisecond
+	manager.maintenanceCacheInspector = func(inspectCtx context.Context, path, repoID string) (cache.CacheIdentity, cache.RepositoryBinding, error) {
+		if path == blockedPath {
+			<-releaseBlockedOpen
+		}
+		if identity, ok := identities[path]; ok {
+			return identity, cache.RepositoryBinding{RepoID: repoID, Owner: "owner", Name: "repo"}, nil
+		}
+		return inspectMaintenanceCache(inspectCtx, path, repoID)
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	startedAt := time.Now()
+	go func() { errCh <- manager.Run(runCtx) }()
+	client := waitForTestClient(t, manager, errCh)
+	if elapsed := time.Since(startedAt); elapsed > 500*time.Millisecond {
+		cancel()
+		close(releaseBlockedOpen)
+		t.Fatalf("control plane publication took %s", elapsed)
+	}
+
+	var list MaintenanceListResult
+	if err := client.Call(ctx, "Maintenance.List", nil, &list); err != nil {
+		cancel()
+		close(releaseBlockedOpen)
+		t.Fatal(err)
+	}
+	if len(list.Entries) != 2 {
+		t.Fatalf("maintenance entries=%+v", list.Entries)
+	}
+	states := map[string]MaintenanceEntry{}
+	for _, entry := range list.Entries {
+		states[entry.CacheUUID] = entry
+	}
+	blocked := states[identities[blockedPath].UUID]
+	if blocked.Enabled || blocked.State != "cache_inspection_timeout" || blocked.LastErrorClass != "cache_inspection_timeout" || !strings.Contains(blocked.LastError, "foreground service mode") {
+		t.Fatalf("blocked registration=%+v", blocked)
+	}
+	healthy := states[identities[healthyPath].UUID]
+	if !healthy.Enabled || healthy.LastErrorClass != "" {
+		t.Fatalf("healthy registration=%+v", healthy)
+	}
+	publicJSON, err := json.Marshal(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(publicJSON), blockedPath) || strings.Contains(string(publicJSON), healthyPath) {
+		t.Fatalf("maintenance list leaked a cache path: %s", publicJSON)
+	}
+
+	cancel()
+	close(releaseBlockedOpen)
+	if err := <-errCh; err != nil && err != context.Canceled {
+		t.Fatalf("service run returned %v", err)
+	}
+	recovered := NewMaintenanceManager(managerWithoutInspectionSeam(manager), NewJobManager(""), paths.RegistryPath)
+	if err := recovered.Load(); err != nil {
+		t.Fatal(err)
+	}
+	recoveredList, err := recovered.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range recoveredList.Entries {
+		if entry.CacheUUID == identities[blockedPath].UUID && (!entry.Enabled || entry.State != "enrolled" || entry.LastErrorClass != "") {
+			t.Fatalf("recovered registration=%+v", entry)
+		}
+	}
+}
+
+func managerWithoutInspectionSeam(manager Manager) Manager {
+	manager.maintenanceCacheInspector = nil
+	manager.maintenanceCacheInspectTimeout = 0
+	return manager
+}
+
 func TestRPCStatusHealthAndJobsExposeCacheSchemaBlocks(t *testing.T) {
 	manager := newTestManager(t, "darwin")
 	manager.Commit = "daemon-commit"

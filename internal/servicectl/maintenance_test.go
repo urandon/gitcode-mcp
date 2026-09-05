@@ -3342,6 +3342,40 @@ func TestMaintenancePeriodicallyVerifiesReadyRAGNamespace(t *testing.T) {
 	}
 }
 
+func TestIssue141RecoveredConflictInspectionIsBounded(t *testing.T) {
+	release := make(chan struct{})
+	manager := newTestManager(t, "darwin")
+	manager.maintenanceCacheInspectTimeout = 25 * time.Millisecond
+	manager.maintenanceCacheInspector = func(context.Context, string, string) (cache.CacheIdentity, cache.RepositoryBinding, error) {
+		<-release
+		return cache.CacheIdentity{}, cache.RepositoryBinding{}, errors.New("synthetic unavailable cache")
+	}
+	maintenance := NewMaintenanceManager(manager, NewJobManager(""), "")
+	maintenance.entries["unresolved"] = &MaintenanceEntry{
+		RegistrationID: "unresolved", CacheUUID: "cache-fixture", RepoID: "owner/repo",
+		State: "identity_unresolved", Enabled: false,
+		IdentityConflict: &MaintenanceIdentityConflict{Kind: "identity_unresolved"},
+	}
+	maintenance.conflictCandidates["unresolved"] = []maintenanceIdentityConflictCandidate{{
+		Entry:     MaintenanceEntry{RegistrationID: "legacy", CacheUUID: "cache-fixture", RepoID: "owner/repo", Enabled: true},
+		CachePath: "private-cache-fixture",
+	}}
+	startedAt := time.Now()
+	maintenance.mu.Lock()
+	_ = maintenance.canonicalizeLoadedEntriesLocked(context.Background())
+	maintenance.mu.Unlock()
+	if elapsed := time.Since(startedAt); elapsed > 250*time.Millisecond {
+		close(release)
+		t.Fatalf("recovered conflict inspection took %s", elapsed)
+	}
+	entry := maintenance.entries["unresolved"]
+	if entry == nil || entry.State != "identity_unresolved" || len(maintenance.conflictCandidates["unresolved"]) != 1 {
+		close(release)
+		t.Fatalf("timed-out conflict state changed: entry=%+v candidates=%+v", entry, maintenance.conflictCandidates["unresolved"])
+	}
+	close(release)
+}
+
 func testMaintenanceEnrollRequest(cachePath, key string, policy MaintenancePolicy) MaintenanceEnrollRequest {
 	cfg := config.Default()
 	cfg.CachePath = cachePath
