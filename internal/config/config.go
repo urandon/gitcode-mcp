@@ -338,6 +338,7 @@ func mergeFeedbackFile(cfg Config, file *feedbackFileConfig) (Config, error) {
 	}
 	if file.Sink != nil {
 		cfg.Feedback.Sink = strings.TrimSpace(*file.Sink)
+		cfg.Feedback.SinkExplicit = true
 	}
 	if file.RepoID != nil {
 		cfg.Feedback.RepoID = strings.TrimSpace(*file.RepoID)

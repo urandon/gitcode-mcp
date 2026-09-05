@@ -80,6 +80,11 @@ func (s *Service) ConfigureFeedback(cfg feedback.Config) {
 	s.feedbackConfig = normalizeFeedbackConfig(cfg)
 }
 
+func (s *Service) ConfigureFeedbackReadiness(credentialPresent, providerAvailable bool) {
+	s.writeCredentialPresent = credentialPresent
+	s.feedbackProviderAvailable = providerAvailable
+}
+
 func (s *Service) PrepareFeedback(ctx context.Context, draft feedback.Draft) (feedback.PreparedReport, error) {
 	if err := ctx.Err(); err != nil {
 		return feedback.PreparedReport{}, err
@@ -98,11 +103,6 @@ func (s *Service) PrepareFeedback(ctx context.Context, draft feedback.Draft) (fe
 		return feedback.PreparedReport{}, err
 	}
 	prepared.Readiness = readiness
-	if !readiness.SubmitAvailable {
-		prepared.Status = "configuration_required"
-		prepared.Configured = false
-		prepared.Remediation = readiness.Remediation
-	}
 	return prepared, nil
 }
 
@@ -119,12 +119,11 @@ func (s *Service) FeedbackReadiness(ctx context.Context) (feedback.Readiness, er
 			return feedback.Readiness{}, normalizeError(err, "feedback readiness", repoID)
 		}
 	}
-	mode := s.ProviderMode()
 	return feedback.EvaluateReadiness(feedback.ReadinessInput{
 		Config:            s.feedbackConfig,
 		RepositoryBound:   repositoryBound,
 		CredentialPresent: s.writeCredentialPresent,
-		ProviderAvailable: mode == gitcode.ProviderModeLive || mode == gitcode.ProviderMode("custom"),
+		ProviderAvailable: s.feedbackProviderAvailable || s.ProviderMode() == gitcode.ProviderModeLive || s.ProviderMode() == gitcode.ProviderMode("custom"),
 	}), nil
 }
 
@@ -141,9 +140,6 @@ func (s *Service) SubmitFeedback(ctx context.Context, req SubmitFeedbackRequest)
 		return feedback.SubmissionResult{}, err
 	}
 	base := feedback.SubmissionResult{Status: prepared.Status, Sink: prepared.Sink, RepoID: prepared.RepoID, Fingerprint: prepared.Fingerprint, DedupeDecision: prepared.DedupeDecision, Candidates: prepared.Candidates, IdempotencyKey: key, Remediation: prepared.Remediation, GeneratedAt: s.now().UTC(), Readiness: prepared.Readiness}
-	if !prepared.Readiness.SubmitAvailable {
-		return base, nil
-	}
 	if prepared.Status == "duplicate" && len(prepared.Candidates) > 0 {
 		candidate := prepared.Candidates[0]
 		base.Status = "duplicate"
@@ -159,6 +155,11 @@ func (s *Service) SubmitFeedback(ctx context.Context, req SubmitFeedbackRequest)
 	}
 	if prepared.Status == "duplicate_candidates" {
 		base.Evidence = "likely duplicates found in the configured feedback cache; no write performed"
+		return base, nil
+	}
+	if !prepared.Readiness.SubmitAvailable {
+		base.Status = "submission_unavailable"
+		base.Remediation = prepared.Readiness.Remediation
 		return base, nil
 	}
 	sink, err := s.feedbackSink()

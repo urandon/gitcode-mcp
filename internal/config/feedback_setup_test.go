@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,8 +57,12 @@ func TestFeedbackSetupPlanApplyPreservesUnrelatedYAMLAndReplays(t *testing.T) {
 		t.Fatalf("replay plan=%#v", replayPlan)
 	}
 	replay, err := ApplyFeedbackSetup(replayPlan, "setup-example-feedback", time.Now())
-	if err != nil || replay.Status != "already_configured" {
+	if err != nil || replay.Status != "configured" || !replay.Replayed || replay.PlanID != result.PlanID {
 		t.Fatalf("replay=%#v err=%v", replay, err)
+	}
+	journal, err := os.ReadFile(path + ".feedback-setup-receipts.json")
+	if err != nil || bytes.Contains(journal, []byte("setup-example-feedback")) {
+		t.Fatalf("journal missing or exposed raw idempotency key: %s err=%v", journal, err)
 	}
 }
 
@@ -70,6 +75,9 @@ func TestFeedbackSetupRejectsStalePlanAndInvalidTarget(t *testing.T) {
 	t.Setenv(EnvMCPConfigPath, path)
 	if _, err := PlanFeedbackSetup(OSSource{}, "not-a-repository"); err == nil {
 		t.Fatal("invalid repository id accepted")
+	}
+	if _, err := PlanFeedbackSetup(OSSource{}, "example/repo;command"); err == nil {
+		t.Fatal("shell-unsafe repository id accepted")
 	}
 	plan, err := PlanFeedbackSetup(OSSource{}, "example/feedback")
 	if err != nil {
@@ -144,4 +152,57 @@ func TestFeedbackSetupLockDoesNotLeaveProcessCrashSentinel(t *testing.T) {
 		t.Fatalf("persistent lock file blocked a new owner: %v", err)
 	}
 	releaseAgain()
+}
+
+func TestFeedbackSetupRejectsSameKeyForDifferentIntent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("format: text\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvMCPConfigPath, path)
+	first, err := PlanFeedbackSetup(OSSource{}, "example/first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyFeedbackSetup(first, "stable-setup-key", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	second, err := PlanFeedbackSetup(OSSource{}, "example/second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyFeedbackSetup(second, "stable-setup-key", time.Now()); err == nil || !strings.Contains(err.Error(), "different setup intent") {
+		t.Fatalf("err=%v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(after), "repo_id: example/first") || strings.Contains(string(after), "repo_id: example/second") {
+		t.Fatalf("config retargeted: %s err=%v", after, err)
+	}
+}
+
+func TestFeedbackSetupRecoversPendingReceiptFromConfigDigest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("format: text\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvMCPConfigPath, path)
+	plan, err := PlanFeedbackSetup(OSSource{}, "example/feedback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "recover-setup-key"
+	generated := time.Date(2026, 9, 5, 6, 0, 0, 0, time.UTC)
+	journal := feedbackSetupJournal{Schema: feedbackSetupSchema, Claims: map[string]feedbackSetupClaim{
+		digestBytes([]byte(key)): {PlanID: plan.PlanID, IntentDigest: plan.intentDigest, BeforeDigest: plan.beforeDigest, AfterDigest: plan.afterDigest, Status: "pending", ResultStatus: "configured", GeneratedAt: generated},
+	}}
+	if err := writeFeedbackSetupJournal(path+".feedback-setup-receipts.json", journal); err != nil {
+		t.Fatal(err)
+	}
+	if err := durableWriteFeedbackConfig(path, plan.next); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ApplyFeedbackSetup(plan, key, time.Now())
+	if err != nil || !result.Replayed || result.Status != "configured" || !result.GeneratedAt.Equal(generated) {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
 }

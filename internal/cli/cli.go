@@ -522,6 +522,12 @@ func buildStartupPlan(ctx context.Context, command string, opts options, deps lo
 	plan.RAGConfig = eff.Config
 	plan.MCPToolAccess = eff.Config.MCPToolAccess
 	plan.ServiceConfig = service.ServiceConfig{LockPath: eff.Config.LockPath, Feedback: eff.Config.Feedback}
+	if command == "prepare-feedback" {
+		status := deps.CredentialReporter.Status(ctx, eff)
+		plan.CredentialStatus = status
+		plan.ServiceConfig.WriteCredentialPresent = status.Present
+		plan.ServiceConfig.FeedbackProviderAvailable = !explicitOffline
+	}
 	if command == "submit-feedback" {
 		plan.RepoID = eff.Config.Feedback.RepoID
 	}
@@ -610,6 +616,9 @@ func serviceFromStartupPlan(ctx context.Context, plan startupPlan, factory servi
 		if err == nil {
 			if configurable, ok := svc.(interface{ ConfigureFeedback(feedback.Config) }); ok {
 				configurable.ConfigureFeedback(plan.ServiceConfig.Feedback)
+			}
+			if configurable, ok := svc.(interface{ ConfigureFeedbackReadiness(bool, bool) }); ok {
+				configurable.ConfigureFeedbackReadiness(plan.ServiceConfig.WriteCredentialPresent, plan.ServiceConfig.FeedbackProviderAvailable)
 			}
 			if configureRAG {
 				if configurable, ok := svc.(interface{ ConfigureRAGSearch(config.Config) }); ok {
@@ -2896,6 +2905,9 @@ func localFeedbackReadiness(ctx context.Context, eff config.EffectiveConfig, cre
 }
 
 func requireFeedbackRepositoryBinding(ctx context.Context, cachePath, repoID string) error {
+	if !feedback.ValidRepositoryID(repoID) {
+		return service.ErrInvalidQuery{Field: "repo", Message: "feedback setup requires a safe exact owner/repository id"}
+	}
 	store, err := cache.NewSQLiteReadOnlyStore(ctx, cachePath)
 	if err == nil {
 		defer store.Close()

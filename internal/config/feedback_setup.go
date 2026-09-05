@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -17,7 +18,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const feedbackSetupSchema = "gitcode-mcp.feedback-setup.v1"
+const (
+	feedbackSetupSchema       = "gitcode-mcp.feedback-setup.v1"
+	feedbackSetupJournalLimit = 256
+)
 
 type FeedbackSetupEffect struct {
 	ID                   string `json:"id"`
@@ -37,6 +41,8 @@ type FeedbackSetupPlan struct {
 	ConfirmationRequired bool                  `json:"confirmation_required"`
 	path                 string
 	beforeDigest         string
+	afterDigest          string
+	intentDigest         string
 	next                 []byte
 }
 
@@ -50,6 +56,22 @@ type FeedbackSetupResult struct {
 	IdempotencyKey  string    `json:"idempotency_key"`
 	Evidence        string    `json:"evidence"`
 	GeneratedAt     time.Time `json:"generated_at"`
+	Replayed        bool      `json:"replayed"`
+}
+
+type feedbackSetupJournal struct {
+	Schema string                        `json:"schema"`
+	Claims map[string]feedbackSetupClaim `json:"claims"`
+}
+
+type feedbackSetupClaim struct {
+	PlanID       string    `json:"plan_id"`
+	IntentDigest string    `json:"intent_digest"`
+	BeforeDigest string    `json:"before_digest"`
+	AfterDigest  string    `json:"after_digest"`
+	Status       string    `json:"status"`
+	ResultStatus string    `json:"result_status"`
+	GeneratedAt  time.Time `json:"generated_at"`
 }
 
 func PlanFeedbackSetup(src Source, repoID string) (FeedbackSetupPlan, error) {
@@ -57,8 +79,7 @@ func PlanFeedbackSetup(src Source, repoID string) (FeedbackSetupPlan, error) {
 		src = OSSource{}
 	}
 	repoID = strings.TrimSpace(repoID)
-	parts := strings.Split(repoID, "/")
-	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" || strings.ContainsAny(repoID, "\r\n\t ") {
+	if !feedback.ValidRepositoryID(repoID) {
 		return FeedbackSetupPlan{}, fmt.Errorf("feedback setup: repo must be an exact owner/repository id")
 	}
 	location := Locate(src)
@@ -74,8 +95,10 @@ func PlanFeedbackSetup(src Source, repoID string) (FeedbackSetupPlan, error) {
 		return FeedbackSetupPlan{}, err
 	}
 	beforeDigest := digestBytes(current)
-	intent := strings.Join([]string{feedbackSetupSchema, beforeDigest, repoID, feedback.SinkGitCodeIssues, strings.Join(labels, "|"), policy}, "\x00")
-	planID := "feedback-plan-" + digestBytes([]byte(intent))[:24]
+	afterDigest := digestBytes(next)
+	desiredIntent := strings.Join([]string{feedbackSetupSchema, repoID, feedback.SinkGitCodeIssues, strings.Join(labels, "|"), policy}, "\x00")
+	intentDigest := digestBytes([]byte(desiredIntent))
+	planID := "feedback-plan-" + digestBytes([]byte(strings.Join([]string{beforeDigest, intentDigest}, "\x00")))[:24]
 	status := "confirmation_required"
 	effects := []FeedbackSetupEffect{{ID: "configure-feedback-sink", Class: "trusted_local_config_write", Summary: "enable the configured GitCode issue feedback sink", ConfirmationRequired: true}}
 	confirmation := true
@@ -83,11 +106,12 @@ func PlanFeedbackSetup(src Source, repoID string) (FeedbackSetupPlan, error) {
 		status = "already_configured"
 		confirmation = false
 		effects[0].ConfirmationRequired = false
+		afterDigest = beforeDigest
 	}
 	return FeedbackSetupPlan{
 		Status: status, PlanID: planID, RepoID: repoID, Sink: feedback.SinkGitCodeIssues,
 		Labels: labels, DuplicatePolicy: policy, Effects: effects, ConfirmationRequired: confirmation,
-		path: location.Path, beforeDigest: beforeDigest, next: next,
+		path: location.Path, beforeDigest: beforeDigest, afterDigest: afterDigest, intentDigest: intentDigest, next: next,
 	}, nil
 }
 
@@ -97,12 +121,7 @@ func ApplyFeedbackSetup(plan FeedbackSetupPlan, idempotencyKey string, now time.
 		return FeedbackSetupResult{}, fmt.Errorf("feedback setup: idempotency key is required")
 	}
 	base := FeedbackSetupResult{PlanID: plan.PlanID, RepoID: plan.RepoID, Sink: plan.Sink, Labels: append([]string(nil), plan.Labels...), DuplicatePolicy: plan.DuplicatePolicy, IdempotencyKey: key, GeneratedAt: now.UTC()}
-	if plan.Status == "already_configured" {
-		base.Status = "already_configured"
-		base.Evidence = "trusted feedback configuration already matched the rendered plan; no write performed"
-		return base, nil
-	}
-	if plan.Status != "confirmation_required" || plan.path == "" || len(plan.next) == 0 {
+	if (plan.Status != "confirmation_required" && plan.Status != "already_configured") || plan.path == "" || len(plan.next) == 0 || plan.intentDigest == "" || plan.afterDigest == "" {
 		return FeedbackSetupResult{}, fmt.Errorf("feedback setup: invalid or incomplete plan")
 	}
 	release, err := acquireFeedbackSetupLock(plan.path)
@@ -118,15 +137,139 @@ func ApplyFeedbackSetup(plan FeedbackSetupPlan, idempotencyKey string, now time.
 	if err != nil {
 		return FeedbackSetupResult{}, fmt.Errorf("feedback setup: trusted configuration cannot be read")
 	}
-	if digestBytes(current) != plan.beforeDigest {
+	currentDigest := digestBytes(current)
+	journalPath := plan.path + ".feedback-setup-receipts.json"
+	journal, err := readFeedbackSetupJournal(journalPath)
+	if err != nil {
+		return FeedbackSetupResult{}, err
+	}
+	journalChanged, err := reconcileFeedbackSetupJournal(&journal, currentDigest)
+	if err != nil {
+		return FeedbackSetupResult{}, err
+	}
+	if journalChanged {
+		if err := writeFeedbackSetupJournal(journalPath, journal); err != nil {
+			return FeedbackSetupResult{}, err
+		}
+	}
+	keyDigest := digestBytes([]byte(key))
+	if claim, exists := journal.Claims[keyDigest]; exists {
+		if claim.IntentDigest != plan.intentDigest {
+			return FeedbackSetupResult{}, fmt.Errorf("feedback setup: idempotency key is already claimed for a different setup intent")
+		}
+		if claim.Status == "succeeded" {
+			base.PlanID = claim.PlanID
+			base.Status = claim.ResultStatus
+			base.GeneratedAt = claim.GeneratedAt
+			base.Replayed = true
+			base.Evidence = "durable idempotency receipt matched the setup intent; no write performed"
+			return base, nil
+		}
+	}
+	if currentDigest != plan.beforeDigest {
 		return FeedbackSetupResult{}, fmt.Errorf("feedback setup: configuration changed after planning; render a new plan")
 	}
-	if err := durableWriteFeedbackConfig(plan.path, plan.next); err != nil {
-		return FeedbackSetupResult{}, fmt.Errorf("feedback setup: trusted configuration update failed")
+	if _, exists := journal.Claims[keyDigest]; !exists && len(journal.Claims) >= feedbackSetupJournalLimit {
+		return FeedbackSetupResult{}, fmt.Errorf("feedback setup: idempotency journal is full; operator maintenance is required")
 	}
-	base.Status = "configured"
-	base.Evidence = "atomically applied trusted feedback configuration; no credential was written"
+	resultStatus := "configured"
+	if plan.Status == "already_configured" {
+		resultStatus = "already_configured"
+	}
+	claim := feedbackSetupClaim{PlanID: plan.PlanID, IntentDigest: plan.intentDigest, BeforeDigest: plan.beforeDigest, AfterDigest: plan.afterDigest, Status: "pending", ResultStatus: resultStatus, GeneratedAt: now.UTC()}
+	journal.Claims[keyDigest] = claim
+	if err := writeFeedbackSetupJournal(journalPath, journal); err != nil {
+		return FeedbackSetupResult{}, err
+	}
+	if plan.Status == "confirmation_required" {
+		if err := durableWriteFeedbackConfig(plan.path, plan.next); err != nil {
+			return FeedbackSetupResult{}, fmt.Errorf("feedback setup: trusted configuration update failed")
+		}
+	}
+	claim.Status = "succeeded"
+	journal.Claims[keyDigest] = claim
+	if err := writeFeedbackSetupJournal(journalPath, journal); err != nil {
+		return FeedbackSetupResult{}, fmt.Errorf("feedback setup: configuration state is ambiguous; retry with the same idempotency key")
+	}
+	base.Status = resultStatus
+	if resultStatus == "already_configured" {
+		base.Evidence = "trusted feedback configuration already matched the rendered plan; durable no-op receipt recorded"
+		return base, nil
+	}
+	base.Evidence = "atomically applied trusted feedback configuration with a durable idempotency receipt; no credential was written"
 	return base, nil
+}
+
+func readFeedbackSetupJournal(path string) (feedbackSetupJournal, error) {
+	journal := feedbackSetupJournal{Schema: feedbackSetupSchema, Claims: map[string]feedbackSetupClaim{}}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return journal, nil
+	}
+	if err != nil {
+		return feedbackSetupJournal{}, fmt.Errorf("feedback setup: idempotency journal cannot be read")
+	}
+	if err := json.Unmarshal(data, &journal); err != nil || journal.Schema != feedbackSetupSchema || journal.Claims == nil {
+		return feedbackSetupJournal{}, fmt.Errorf("feedback setup: idempotency journal is invalid")
+	}
+	if len(journal.Claims) > feedbackSetupJournalLimit {
+		return feedbackSetupJournal{}, fmt.Errorf("feedback setup: idempotency journal exceeds its bounded capacity")
+	}
+	for key, claim := range journal.Claims {
+		if !isFeedbackSetupPlanID(claim.PlanID) || !isFeedbackSetupDigest(key) || !isFeedbackSetupDigest(claim.IntentDigest) || !isFeedbackSetupDigest(claim.BeforeDigest) || !isFeedbackSetupDigest(claim.AfterDigest) || (claim.Status != "pending" && claim.Status != "succeeded" && claim.Status != "abandoned") || (claim.ResultStatus != "configured" && claim.ResultStatus != "already_configured") || claim.GeneratedAt.IsZero() {
+			return feedbackSetupJournal{}, fmt.Errorf("feedback setup: idempotency journal is invalid")
+		}
+	}
+	return journal, nil
+}
+
+func isFeedbackSetupPlanID(value string) bool {
+	const prefix = "feedback-plan-"
+	return strings.HasPrefix(value, prefix) && len(value) == len(prefix)+24 && isFeedbackSetupHex(value[len(prefix):])
+}
+
+func isFeedbackSetupDigest(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	return isFeedbackSetupHex(value)
+}
+
+func isFeedbackSetupHex(value string) bool {
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func writeFeedbackSetupJournal(path string, journal feedbackSetupJournal) error {
+	data, err := json.MarshalIndent(journal, "", "  ")
+	if err != nil {
+		return fmt.Errorf("feedback setup: idempotency journal cannot be rendered")
+	}
+	data = append(data, '\n')
+	if err := durableWriteFeedbackConfig(path, data); err != nil {
+		return fmt.Errorf("feedback setup: idempotency journal update failed")
+	}
+	return nil
+}
+
+func reconcileFeedbackSetupJournal(journal *feedbackSetupJournal, currentDigest string) (bool, error) {
+	changed := false
+	for key, claim := range journal.Claims {
+		if claim.Status != "pending" {
+			continue
+		}
+		switch currentDigest {
+		case claim.AfterDigest:
+			claim.Status = "succeeded"
+		case claim.BeforeDigest:
+			claim.Status = "abandoned"
+		default:
+			return false, fmt.Errorf("feedback setup: prior configuration state is ambiguous; retry the original operation or inspect local diagnostics")
+		}
+		journal.Claims[key] = claim
+		changed = true
+	}
+	return changed, nil
 }
 
 func readFeedbackSetupConfig(src Source, location ConfigLocation) ([]byte, error) {

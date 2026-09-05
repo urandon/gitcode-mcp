@@ -41,7 +41,7 @@ func TestResolveServiceKeepsFeedbackConfigOffline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prepared.Configured || prepared.Status != "configuration_required" || prepared.RepoID != "example/feedback" || prepared.Readiness.State != feedback.ReadinessProviderUnavailable {
+	if !prepared.Configured || prepared.Status != "prepared" || prepared.RepoID != "example/feedback" || prepared.Readiness.State != feedback.ReadinessProviderUnavailable {
 		t.Fatalf("prepared=%#v", prepared)
 	}
 }

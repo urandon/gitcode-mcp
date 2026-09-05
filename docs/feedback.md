@@ -32,10 +32,12 @@ gitcode-mcp feedback setup \
 ```
 
 The first command does not mutate configuration. The second requires the exact
-current plan id, updates only the global YAML feedback section through an
+current plan id, claims a bounded durable idempotency receipt using only a hash
+of the caller key, updates only the global YAML feedback section through an
 atomic private-permission replacement, preserves unrelated YAML and comments,
 and verifies the effective policy. It never writes a credential or accepts an
-endpoint. A safe replay reports `already_configured`.
+endpoint. Reusing a key for a different sink intent is rejected; retrying the
+same intent returns the original receipt without another config write.
 
 The same configuration can also be supplied by a trusted installer or bundle:
 
@@ -82,10 +84,14 @@ also read-only and remains available in every state:
 
 Preparation validates the shape, redacts secrets, replaces URLs outside approved public GitCode/GitHub hosts, strips URL credentials/query/fragment components and private paths, records sanitized runtime context, renders deterministic Markdown, computes a fingerprint, and checks cached open feedback issues. The result includes the same readiness DTO and returns one of:
 
-- `prepared`: ready to submit;
-- `configuration_required`: useful draft, but one or more submission prerequisites are unavailable;
+- `prepared`: a new report is prepared; inspect its independent readiness DTO before submission;
+- `configuration_required`: useful draft, but the trusted sink policy is disabled or incomplete;
 - `duplicate`: exact fingerprint match, so no new issue is needed;
 - `duplicate_candidates`: likely matches require review.
+
+`configured` describes the trusted sink policy only; it is not cleared merely
+because a credential or live provider is currently unavailable. Duplicate
+classification is likewise preserved while submission is unavailable.
 
 After external issue creation is authorized, call `submit_feedback` with the same fields plus:
 
@@ -97,6 +103,11 @@ After external issue creation is authorized, call `submit_feedback` with the sam
 ```
 
 The submission re-prepares the report, resolves only the configured sink, creates the issue through the normal audited write lifecycle, performs sanitized cache readback, and returns the issue receipt. Replaying the same idempotency key does not repeat the provider write even when the generated observation timestamp changes. With the default `duplicate_policy: suggest`, pass `duplicate_override: "create"` only after reviewing likely candidates and confirming the report is distinct. `return_existing` instead returns the strongest likely match without writing. An exact fingerprint match is never duplicated.
+
+If a non-duplicate report is prepared while runtime submission is unavailable,
+the submit call returns `status=submission_unavailable` plus the readiness
+remediation and performs no provider write. Cached duplicate receipts remain
+available even in that state.
 
 ## CLI workflow
 

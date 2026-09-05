@@ -75,8 +75,43 @@ func TestSubmitFeedbackRequiresExplicitLiveModeAndConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "configuration_required" || result.Remediation == "" {
+	if result.Status != "submission_unavailable" || result.Readiness.State != feedback.ReadinessDisabled || result.Remediation == "" {
 		t.Fatalf("result=%#v", result)
+	}
+}
+
+func TestPrepareFeedbackKeepsConfigurationAndDuplicateSemanticsSeparateFromReadiness(t *testing.T) {
+	client := &fakeGitCodeClient{onCreateIssue: func(gitcode.CreateIssueRequest, gitcode.WriteOptions) { t.Fatal("provider must not be called") }}
+	svc, store := feedbackService(t, client)
+	svc.ConfigureFeedbackReadiness(false, true)
+	prepared, err := svc.PrepareFeedback(context.Background(), feedbackDraft())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !prepared.Configured || prepared.Status != "prepared" || prepared.Readiness.State != feedback.ReadinessCredentialMissing {
+		t.Fatalf("prepared=%#v", prepared)
+	}
+	if err := store.UpsertSourceGraph(context.Background(), cache.SourceGraph{Source: cache.Source{RepoID: "feedback-repo", ID: "ISSUE-93", Kind: "issue", Path: "issues/93.md", Title: prepared.Title, Body: prepared.Body, Status: "open", ContentHash: "feedback-93", Provenance: cache.ProvenanceLive}}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.SubmitFeedback(context.Background(), SubmitFeedbackRequest{Draft: feedbackDraft(), Mode: WriteModeLive, IdempotencyKey: "duplicate-without-credential"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "duplicate" || result.TicketNumber != 93 || result.Readiness.State != feedback.ReadinessCredentialMissing || client.createIssueCalls != 0 {
+		t.Fatalf("result=%#v calls=%d", result, client.createIssueCalls)
+	}
+}
+
+func TestFeedbackReadinessReportsExplicitMissingSinkAndSafeHandoff(t *testing.T) {
+	svc, _ := feedbackService(t, &fakeGitCodeClient{})
+	svc.ConfigureFeedback(feedback.Config{Enabled: true, SinkExplicit: true, RepoID: "example/repo;unsafe"})
+	result, err := svc.FeedbackReadiness(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State != feedback.ReadinessSinkMissing || strings.Contains(result.Handoff, ";") || result.Handoff != "gitcode-mcp feedback setup --repo OWNER/REPO" {
+		t.Fatalf("readiness=%#v", result)
 	}
 }
 

@@ -253,7 +253,9 @@ The feedback sink is disabled by default. Configure it only in a trusted global 
 `gitcode-mcp feedback setup --repo OWNER/REPO` renders a path-free plan for an
 already bound repository. Applying it requires `--yes`, the exact `--plan-id`,
 and an idempotency key. The atomic update preserves unrelated YAML and comments,
-uses private file permissions, and never stores a credential. Generic binaries
+uses private file permissions, and records a bounded durable receipt keyed by a
+SHA-256 digest rather than the raw idempotency key. It never stores a credential
+or accepts an endpoint. Generic binaries
 remain destination-neutral; trusted bundles may use this same global contract
 to supply their feedback repository.
 

@@ -451,8 +451,14 @@ func TestFeedbackStatusAndTrustedSetupFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code := executeWithFactoryAndDeps([]string{"feedback", "setup", "--repo", "example/feedback", "--yes", "--plan-id", replayPlan.PlanID, "--idempotency-key", "feedback-setup-example", "--format", "json"}, &stdout, &stderr, nil, deps); code != 0 || !strings.Contains(stdout.String(), `"status": "already_configured"`) {
+	if code := executeWithFactoryAndDeps([]string{"feedback", "setup", "--repo", "example/feedback", "--yes", "--plan-id", replayPlan.PlanID, "--idempotency-key", "feedback-setup-example", "--format", "json"}, &stdout, &stderr, nil, deps); code != 0 || !strings.Contains(stdout.String(), `"status": "configured"`) || !strings.Contains(stdout.String(), `"replayed": true`) {
 		t.Fatalf("replay code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	prepareArgs := []string{"feedback", "prepare", "--title", "Readiness remains consistent", "--category", "ux_friction", "--surface", "cli", "--reporter-type", "agent", "--observed", "status and prepare disagreed", "--expected", "one readiness state", "--impact", "agent selected the wrong handoff", "--format", "json"}
+	if code := executeWithFactoryAndDeps(prepareArgs, &stdout, &stderr, nil, deps); code != 0 || !strings.Contains(stdout.String(), `"status": "prepared"`) || !strings.Contains(stdout.String(), `"configured": true`) || !strings.Contains(stdout.String(), `"state": "ready"`) {
+		t.Fatalf("prepare readiness code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	stdout.Reset()
 	stderr.Reset()

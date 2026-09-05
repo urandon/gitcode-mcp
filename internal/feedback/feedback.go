@@ -44,6 +44,7 @@ type Config struct {
 	RepoID          string   `json:"repo_id"`
 	Labels          []string `json:"labels,omitempty"`
 	DuplicatePolicy string   `json:"duplicate_policy"`
+	SinkExplicit    bool     `json:"-"`
 }
 
 type ReadinessCheck struct {
@@ -116,10 +117,29 @@ func EvaluateReadiness(input ReadinessInput) Readiness {
 }
 
 func feedbackSetupHandoff(repoID string) string {
-	if strings.TrimSpace(repoID) == "" {
+	if !ValidRepositoryID(repoID) {
 		return "gitcode-mcp feedback setup --repo OWNER/REPO"
 	}
 	return "gitcode-mcp feedback setup --repo " + strings.TrimSpace(repoID)
+}
+
+func ValidRepositoryID(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 255 || strings.Count(value, "/") != 1 {
+		return false
+	}
+	for _, part := range strings.Split(value, "/") {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+		for index, char := range part {
+			if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '_' || char == '-' || (char == '.' && index > 0) {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
 
 func checkStatus(ok bool) string {
@@ -233,10 +253,11 @@ func (e ValidationError) Error() string          { return "feedback: " + e.Field
 func (e ValidationError) DiagnosticCode() string { return "invalid_feedback" }
 
 func NormalizeConfig(cfg Config) (Config, error) {
-	if strings.TrimSpace(cfg.Sink) == "" {
+	cfg.Sink = strings.TrimSpace(cfg.Sink)
+	if cfg.Sink == "" && !cfg.SinkExplicit {
 		cfg.Sink = SinkGitCodeIssues
 	}
-	if cfg.Sink != SinkGitCodeIssues {
+	if cfg.Sink != "" && cfg.Sink != SinkGitCodeIssues {
 		return Config{}, fmt.Errorf("feedback: unsupported sink %q", cfg.Sink)
 	}
 	if strings.TrimSpace(cfg.DuplicatePolicy) == "" {
@@ -274,7 +295,7 @@ func Prepare(draft Draft, context RuntimeContext, cfg Config, existing []Existin
 	title := renderTitle(normalized)
 	body := renderBody(normalized, context, fingerprint)
 	candidates, decision := findCandidates(fingerprint, normalized, existing)
-	configured := cfg.Enabled && cfg.RepoID != ""
+	configured := cfg.Enabled && cfg.Sink == SinkGitCodeIssues && cfg.RepoID != ""
 	status := "prepared"
 	remediation := ""
 	if !configured {
