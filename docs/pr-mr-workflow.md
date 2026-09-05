@@ -53,7 +53,11 @@ gitcode-mcp merge-pr \
   --idempotency-key ik-pr-merge-001
 ```
 
-`merge-pr` accepts `merge`, `squash`, or `rebase`; `merge-mr` is an equivalent alias. The optional `--sha` guard rejects a stale head before mutation. A successful provider response is followed by a PR readback that must report `state=merged`; rerunning against an already merged PR produces an audited idempotent success.
+`merge-pr` accepts `merge`, `squash`, or `rebase`; `merge-mr` is an equivalent alias. The optional `--sha` guard rejects a stale head before mutation. After reading that canonical preimage, the service atomically claims the idempotency key and sends at most one merge PUT. A successful provider response is followed by a PR readback that must report `state=merged`; rerunning against an already merged PR produces an audited idempotent success.
+
+Transport, 5xx, rate-limit, redirect, and readback ambiguity never cause another merge PUT. For this request the adapter disables both its own retry loop and Go's transparent request-body replay, including body-preserving 307/308 redirects. Ambiguous outcomes retain an in-progress fence. Replaying the same key performs only canonical GET recovery and succeeds when the merged PR still has the head SHA captured by the claim; otherwise it returns `write_ambiguous_remote` for operator investigation.
+
+After a canonical merged-state readback, including the no-PUT case where the PR was already merged, the service claims the canonical preimage and the audit first records `remote_confirmed_cache_refresh_pending`, then refreshes the cache, and only then records terminal success. A restart or cache failure in either recovery boundary therefore resumes through GET-only readback and cache repair; it never sends a second PUT.
 
 Use the MCP write lifecycle for agent workflows:
 

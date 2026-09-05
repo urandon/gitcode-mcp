@@ -965,6 +965,7 @@ type WriteCommandRequest struct {
 	idempotencyFingerprint    string
 	parentSourceID            string
 	beforeIssueUpdateMutation func(gitcode.Issue) error
+	beforeMergePRMutation     func(gitcode.PullRequest) error
 }
 
 type WriteCommandResult struct {

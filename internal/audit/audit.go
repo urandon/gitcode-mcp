@@ -10,12 +10,13 @@ import (
 )
 
 const (
-	StatusSucceeded                         = "succeeded"
-	StatusFailed                            = "failed"
-	StatusInProgress                        = "in_progress"
-	StatusRemoteConfirmedCacheRefreshFailed = "remote_confirmed_cache_refresh_failed"
-	StatusRemoteConfirmedAuditFailed        = "remote_confirmed_audit_failed"
-	StatusRemoteConfirmedUnsafe             = "remote_confirmed_unsafe"
+	StatusSucceeded                          = "succeeded"
+	StatusFailed                             = "failed"
+	StatusInProgress                         = "in_progress"
+	StatusRemoteConfirmedCacheRefreshPending = "remote_confirmed_cache_refresh_pending"
+	StatusRemoteConfirmedCacheRefreshFailed  = "remote_confirmed_cache_refresh_failed"
+	StatusRemoteConfirmedAuditFailed         = "remote_confirmed_audit_failed"
+	StatusRemoteConfirmedUnsafe              = "remote_confirmed_unsafe"
 )
 
 var ErrInvalidConfirmation = errors.New("audit: invalid live confirmation")
@@ -70,7 +71,7 @@ func LookupIdempotency(ctx context.Context, store Store, repoID, key, payloadHas
 	switch entry.Status {
 	case StatusSucceeded:
 		lookup.Replay = true
-	case StatusRemoteConfirmedCacheRefreshFailed:
+	case StatusRemoteConfirmedCacheRefreshPending, StatusRemoteConfirmedCacheRefreshFailed:
 		lookup.Partial = true
 	case StatusFailed:
 		lookup.Retry = true
@@ -118,6 +119,10 @@ func RemoteConfirmedCacheRefreshFailed(repoID, key, operation, recordID, remoteT
 	return entry(repoID, key, operation, recordID, remoteType, remoteID, StatusRemoteConfirmedCacheRefreshFailed, message, payloadHash, createdAt)
 }
 
+func RemoteConfirmedCacheRefreshPending(repoID, key, operation, recordID, remoteType, remoteID, payloadHash, message string, createdAt time.Time) cache.AuditTrailEntry {
+	return entry(repoID, key, operation, recordID, remoteType, remoteID, StatusRemoteConfirmedCacheRefreshPending, message, payloadHash, createdAt)
+}
+
 func RemoteConfirmedAuditFailed(repoID, key, operation, recordID, remoteType, remoteID, payloadHash, message string, createdAt time.Time) cache.AuditTrailEntry {
 	return entry(repoID, key, operation, recordID, remoteType, remoteID, StatusRemoteConfirmedAuditFailed, message, payloadHash, createdAt)
 }
@@ -162,6 +167,8 @@ func sanitizedMetadata(metadata map[string]string) map[string]string {
 		"issue_preimage_state_hash":     true,
 		"issue_preimage_labels_hash":    true,
 		"issue_preimage_milestone_hash": true,
+		"merge_preimage_head_sha_hash":  true,
+		"merge_preimage_state_hash":     true,
 		"write_phase":                   true,
 	}
 	out := map[string]string{}
