@@ -1812,17 +1812,34 @@ func TestScenario016PRLifecycleWrites(t *testing.T) {
 
 	t.Run("update-pr", func(t *testing.T) {
 		var seenBody string
+		patches := 0
+		gets := 0
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPatch || r.URL.Path != getPREndpoint("example-owner", "example-repo", 7) {
+			if r.URL.Path != getPREndpoint("example-owner", "example-repo", 7) {
 				t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 			}
-			body, err := io.ReadAll(r.Body)
-			if err != nil {
-				t.Fatalf("read request body: %v", err)
+			switch r.Method {
+			case http.MethodGet:
+				gets++
+				title, body := "original pr", "old body"
+				if gets > 1 {
+					title, body = "updated pr", "new body"
+				}
+				fmt.Fprintf(w, `{"id":9001,"number":7,"title":%q,"body":%q,"state":"open"}`, title, body)
+			case http.MethodPatch:
+				patches++
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Fatalf("read request body: %v", err)
+				}
+				seenBody = string(body)
+				w.WriteHeader(http.StatusOK)
+				// This is the documented GitCode update acknowledgement shape:
+				// mutable fields and timestamps, but no canonical id or number.
+				fmt.Fprint(w, `{"title":"updated pr","body":"new body","state":"open","updated_at":"2026-09-05T20:00:00Z"}`)
+			default:
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 			}
-			seenBody = string(body)
-			w.WriteHeader(http.StatusOK)
-			fmt.Fprint(w, `{"id":9001,"number":7,"title":"updated pr","body":"new body","state":"open"}`)
 		}))
 		defer server.Close()
 
@@ -1838,6 +1855,9 @@ func TestScenario016PRLifecycleWrites(t *testing.T) {
 		if !result.Confirmed || result.Operation != "UpdatePR" || result.RemoteID != "9001" || result.RemoteNumber != 7 || result.Record.Title != "updated pr" {
 			t.Fatalf("unexpected PR update result: %+v", result)
 		}
+		if patches != 1 || gets != 2 || result.ProviderStatus != "2xx-readback" {
+			t.Fatalf("patches=%d gets=%d result=%+v", patches, gets, result)
+		}
 	})
 
 	t.Run("update-pr-empty-body-readback", func(t *testing.T) {
@@ -1851,7 +1871,11 @@ func TestScenario016PRLifecycleWrites(t *testing.T) {
 			case r.Method == http.MethodGet && r.URL.Path == getPREndpoint("example-owner", "example-repo", 7):
 				gets++
 				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprint(w, `{"id":9001,"number":7,"title":"readback pr","body":"linked","state":"open"}`)
+				body := "before"
+				if gets > 1 {
+					body = "linked"
+				}
+				fmt.Fprintf(w, `{"id":9001,"number":7,"title":"readback pr","body":%q,"state":"open"}`, body)
 			default:
 				t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 			}
@@ -1862,11 +1886,71 @@ func TestScenario016PRLifecycleWrites(t *testing.T) {
 		if err != nil {
 			t.Fatalf("UpdatePR read-back returned error: %v", err)
 		}
-		if patches != 1 || gets != 1 {
+		if patches != 1 || gets != 2 {
 			t.Fatalf("patches=%d gets=%d", patches, gets)
 		}
 		if !result.Confirmed || result.ProviderStatus != "2xx-readback" || result.RemoteID != "9001" || result.RemoteNumber != 7 || result.Record.Body != "linked" {
 			t.Fatalf("unexpected PR read-back result: %+v", result)
+		}
+	})
+
+	t.Run("update-pr-readback-mismatch-is-ambiguous", func(t *testing.T) {
+		patches := 0
+		gets := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				gets++
+				fmt.Fprint(w, `{"id":9001,"number":7,"title":"pr","body":"before","state":"open"}`)
+			case http.MethodPatch:
+				patches++
+				fmt.Fprint(w, `{"title":"pr","body":"requested","state":"open"}`)
+			default:
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+		}))
+		defer server.Close()
+
+		_, err := newTestClient(t, server.URL, Config{MaxRetries: 3}).UpdatePR(context.Background(), UpdatePRRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, Body: "requested"}, WriteOptions{IdempotencyKey: "update-pr-mismatch"})
+		var phase ErrWriteMutationPhase
+		var incomplete ErrWriteConfirmationIncomplete
+		if !errors.As(err, &phase) || phase.Phase != "readback" || !phase.MutationAttempted || !errors.As(err, &incomplete) {
+			t.Fatalf("error=%T %v, want attempted readback ambiguity", err, err)
+		}
+		if patches != 1 || gets != 2 {
+			t.Fatalf("patches=%d gets=%d, want one-shot PATCH and two reads", patches, gets)
+		}
+	})
+
+	t.Run("update-pr-readback-failure-is-ambiguous", func(t *testing.T) {
+		patches := 0
+		gets := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				gets++
+				if gets > 1 {
+					http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				fmt.Fprint(w, `{"id":9001,"number":7,"title":"pr","body":"before","state":"open"}`)
+			case http.MethodPatch:
+				patches++
+				fmt.Fprint(w, `{"title":"pr","body":"requested","state":"open"}`)
+			default:
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+		}))
+		defer server.Close()
+
+		_, err := newTestClient(t, server.URL, Config{MaxRetries: 0}).UpdatePR(context.Background(), UpdatePRRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, Body: "requested"}, WriteOptions{IdempotencyKey: "update-pr-readback-failure"})
+		var phase ErrWriteMutationPhase
+		var incomplete ErrWriteConfirmationIncomplete
+		if !errors.As(err, &phase) || phase.Phase != "readback" || !phase.MutationAttempted || !errors.As(err, &incomplete) {
+			t.Fatalf("error=%T %v, want attempted readback ambiguity", err, err)
+		}
+		if patches != 1 || gets != 2 {
+			t.Fatalf("patches=%d gets=%d", patches, gets)
 		}
 	})
 

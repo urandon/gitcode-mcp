@@ -1619,6 +1619,158 @@ func TestIssue133AmbiguousUpdateMismatchStaysFenced(t *testing.T) {
 	}
 }
 
+func TestIssue146AmbiguousPRUpdateRecoversByReadbackWithoutSecondMutation(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	preimage := gitcode.PullRequest{ID: "9001", Number: 7, Title: "PR", Body: "before", State: "open", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	client := &fakeGitCodeClient{
+		updatePRResult: gitcode.WriteResult[gitcode.PullRequest]{Record: preimage},
+		errors:         []error{gitcode.ErrWriteMutationPhase{Endpoint: "/pulls/7", Phase: "readback", MutationAttempted: true, Cause: gitcode.ErrWriteConfirmationIncomplete{Endpoint: "/pulls/7", Message: "readback unavailable"}}},
+	}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 7, Body: "after", IdempotencyKey: "issue-146-ambiguous-recovery"}
+	_, err = svc.UpdatePR(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_ambiguous_remote" {
+		t.Fatalf("first error=%T %v", err, err)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", req.IdempotencyKey)
+	if err != nil || entry == nil || entry.Status != audit.StatusInProgress || entry.RequestMetadata["write_phase"] != "readback_ambiguous" || entry.RequestMetadata["pr_update_preimage_fingerprint"] == "" {
+		t.Fatalf("ambiguous audit=%#v err=%v", entry, err)
+	}
+	updated := preimage
+	updated.Body = "after"
+	updated.UpdatedAt = updated.UpdatedAt.Add(time.Second)
+	client.prsByNumber = map[int]gitcode.PullRequest{7: updated}
+	recovered, err := svc.UpdatePR(ctx, req)
+	if err != nil {
+		t.Fatalf("recovery: %v", err)
+	}
+	if recovered.Status != "recovered_after_ambiguous_write" || !recovered.Replayed || client.updatePRCalls != 1 || client.prCalls != 1 {
+		t.Fatalf("recovered=%#v update_calls=%d readbacks=%d", recovered, client.updatePRCalls, client.prCalls)
+	}
+	entry, err = store.GetAuditEventByKey(ctx, "fixture-a", req.IdempotencyKey)
+	if err != nil || entry == nil || entry.Status != audit.StatusSucceeded || entry.RequestMetadata["write_phase"] != "recovered_by_canonical_readback" {
+		t.Fatalf("recovered audit=%#v err=%v", entry, err)
+	}
+	source, err := store.GetSourceScoped(ctx, "fixture-a", "PR-7")
+	if err != nil || source.Body != "after" {
+		t.Fatalf("cached source=%#v err=%v", source, err)
+	}
+	replayed, err := svc.UpdatePR(ctx, req)
+	if err != nil || !replayed.Replayed || client.updatePRCalls != 1 || client.prCalls != 1 {
+		t.Fatalf("replay=%#v err=%v update_calls=%d readbacks=%d", replayed, err, client.updatePRCalls, client.prCalls)
+	}
+}
+
+func TestIssue146ConcurrentPRUpdateClaimsBeforeSinglePatch(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	preimage := gitcode.PullRequest{ID: "9001", Number: 7, Title: "PR", Body: "before", State: "open", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	client := &blockingPRUpdateClient{
+		fakeGitCodeClient: &fakeGitCodeClient{prsByNumber: map[int]gitcode.PullRequest{7: preimage}},
+		preimage:          preimage,
+		claimed:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 7, Body: "after", IdempotencyKey: "issue-146-concurrent"}
+
+	firstResult := make(chan WriteCommandResult, 1)
+	firstErr := make(chan error, 1)
+	go func() {
+		result, err := svc.UpdatePR(ctx, req)
+		firstResult <- result
+		firstErr <- err
+	}()
+	<-client.claimed
+	_, err = svc.UpdatePR(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_ambiguous_remote" {
+		t.Fatalf("concurrent error=%T %v", err, err)
+	}
+	if got := client.mutationCount(); got != 1 {
+		t.Fatalf("mutations before release=%d, want one", got)
+	}
+	close(client.release)
+	if err := <-firstErr; err != nil {
+		t.Fatalf("first update: %v", err)
+	}
+	if result := <-firstResult; result.Status != "succeeded" {
+		t.Fatalf("first result=%#v", result)
+	}
+	if got := client.mutationCount(); got != 1 {
+		t.Fatalf("mutations=%d, want exactly one", got)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", req.IdempotencyKey)
+	if err != nil || entry == nil || entry.Status != audit.StatusSucceeded || entry.RequestMetadata["write_phase"] != "canonical_readback_confirmed" || entry.RequestMetadata["pr_update_preimage_fingerprint"] == "" {
+		t.Fatalf("audit=%#v err=%v", entry, err)
+	}
+}
+
+func TestIssue146LateAmbiguousOwnerCannotDowngradeRecoveredSuccess(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	preimage := gitcode.PullRequest{ID: "9001", Number: 7, Title: "PR", Body: "before", State: "open", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	client := &lateAmbiguousPRUpdateClient{
+		fakeGitCodeClient: &fakeGitCodeClient{},
+		current:           preimage,
+		applied:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	svc := NewWithClient(store, client)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 7, Body: "after", IdempotencyKey: "issue-146-late-owner"}
+
+	firstResult := make(chan WriteCommandResult, 1)
+	firstErr := make(chan error, 1)
+	go func() {
+		result, err := svc.UpdatePR(ctx, req)
+		firstResult <- result
+		firstErr <- err
+	}()
+	<-client.applied
+
+	recovered, err := svc.UpdatePR(ctx, req)
+	if err != nil {
+		t.Fatalf("recovery: %v", err)
+	}
+	if recovered.Status != "recovered_after_ambiguous_write" || !recovered.Replayed {
+		t.Fatalf("recovered=%#v", recovered)
+	}
+	close(client.release)
+	if err := <-firstErr; err != nil {
+		t.Fatalf("late owner: %v", err)
+	}
+	if result := <-firstResult; !result.Replayed {
+		t.Fatalf("late owner result=%#v", result)
+	}
+	if got := client.mutationCount(); got != 1 {
+		t.Fatalf("mutations=%d, want exactly one", got)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", req.IdempotencyKey)
+	if err != nil || entry == nil || entry.Status != audit.StatusSucceeded || entry.RequestMetadata["write_phase"] != "recovered_by_canonical_readback" {
+		t.Fatalf("audit=%#v err=%v", entry, err)
+	}
+}
+
 func TestIssue133AmbiguousUpdateRecoverySurvivesStoreRestart(t *testing.T) {
 	ctx := context.Background()
 	cachePath := filepath.Join(t.TempDir(), "cache.db")
@@ -5409,7 +5561,84 @@ type blockingIssueUpdateClient struct {
 	*fakeGitCodeClient
 	claimed   chan struct{}
 	release   chan struct{}
+	mu        sync.Mutex
 	mutations int
+}
+
+type blockingPRUpdateClient struct {
+	*fakeGitCodeClient
+	preimage  gitcode.PullRequest
+	claimed   chan struct{}
+	release   chan struct{}
+	mu        sync.Mutex
+	mutations int
+}
+
+type lateAmbiguousPRUpdateClient struct {
+	*fakeGitCodeClient
+	current   gitcode.PullRequest
+	applied   chan struct{}
+	release   chan struct{}
+	applyOnce sync.Once
+	mu        sync.Mutex
+	mutations int
+}
+
+func (c *lateAmbiguousPRUpdateClient) GetPR(_ context.Context, req gitcode.PRRequest) (gitcode.PullRequest, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if req.Number != c.current.Number {
+		return gitcode.PullRequest{}, errors.New("pull request not found")
+	}
+	return c.current, nil
+}
+
+func (c *lateAmbiguousPRUpdateClient) UpdatePR(_ context.Context, req gitcode.UpdatePRRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PullRequest], error) {
+	c.mu.Lock()
+	preimage := c.current
+	c.mu.Unlock()
+	if opts.BeforePRUpdateMutation != nil {
+		if err := opts.BeforePRUpdateMutation(preimage); err != nil {
+			return gitcode.WriteResult[gitcode.PullRequest]{}, err
+		}
+	}
+	c.mu.Lock()
+	c.mutations++
+	c.current.Body = req.Body
+	c.current.UpdatedAt = c.current.UpdatedAt.Add(time.Second)
+	c.mu.Unlock()
+	c.applyOnce.Do(func() { close(c.applied) })
+	<-c.release
+	return gitcode.WriteResult[gitcode.PullRequest]{}, gitcode.ErrWriteMutationPhase{Endpoint: "/pulls/7", Phase: "readback", MutationAttempted: true, Cause: gitcode.ErrWriteConfirmationIncomplete{Endpoint: "/pulls/7", Message: "delayed readback failed"}}
+}
+
+func (c *lateAmbiguousPRUpdateClient) mutationCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.mutations
+}
+
+func (c *blockingPRUpdateClient) UpdatePR(_ context.Context, req gitcode.UpdatePRRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PullRequest], error) {
+	if opts.BeforePRUpdateMutation != nil {
+		if err := opts.BeforePRUpdateMutation(c.preimage); err != nil {
+			return gitcode.WriteResult[gitcode.PullRequest]{}, err
+		}
+	}
+	c.mu.Lock()
+	c.mutations++
+	c.mu.Unlock()
+	close(c.claimed)
+	<-c.release
+	updated := c.preimage
+	updated.Body = req.Body
+	updated.UpdatedAt = updated.UpdatedAt.Add(time.Second)
+	return gitcode.WriteResult[gitcode.PullRequest]{Record: updated, Confirmed: true, Operation: "UpdatePR", ProviderStatus: "2xx-readback", RemoteID: updated.ID, RemoteNumber: updated.Number, RemoteRevision: updated.UpdatedAt.Format(time.RFC3339Nano), IdempotencyKey: opts.IdempotencyKey, ConfirmedAt: time.Now().UTC()}, nil
+}
+
+func (c *blockingPRUpdateClient) mutationCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.mutations
 }
 
 type preTransportFailureIssueClient struct {
@@ -5861,6 +6090,11 @@ func (f *fakeGitCodeClient) UpdatePR(_ context.Context, req gitcode.UpdatePRRequ
 	f.updatePRCalls++
 	f.lastUpdatePRRequest = req
 	f.lastWriteOptions = opts
+	if opts.BeforePRUpdateMutation != nil {
+		if err := opts.BeforePRUpdateMutation(f.updatePRResult.Record); err != nil {
+			return gitcode.WriteResult[gitcode.PullRequest]{}, err
+		}
+	}
 	if err := f.nextError(); err != nil {
 		return gitcode.WriteResult[gitcode.PullRequest]{}, err
 	}

@@ -89,17 +89,19 @@ func TestScenario009LiveCreateIssueConfirmationSanitizesMetadata(t *testing.T) {
 		PayloadHash: "payload-hash",
 		Message:     "created",
 		RequestMetadata: map[string]string{
-			"method":              "POST",
-			"remote_alias":        "100",
-			"source_fingerprint":  "payload-hash",
-			"milestone_id":        "MILESTONE-1",
-			"milestone_remote_id": "1",
-			"milestone_title":     "Release 1",
-			"authorization":       "Bearer secret",
-			"token":               "secret",
-			"cookie":              "session=secret",
-			"raw_body":            "{secret}",
-			"endpoint_url":        "https://private.example/api",
+			"method":                         "POST",
+			"remote_alias":                   "100",
+			"source_fingerprint":             "payload-hash",
+			"milestone_id":                   "MILESTONE-1",
+			"milestone_remote_id":            "1",
+			"milestone_title":                "Release 1",
+			"pr_update_preimage_fingerprint": "pr-preimage-hash",
+			"pr_update_preimage_body_hash":   "pr-body-hash",
+			"authorization":                  "Bearer secret",
+			"token":                          "secret",
+			"cookie":                         "session=secret",
+			"raw_body":                       "{secret}",
+			"endpoint_url":                   "https://private.example/api",
 		},
 		CreatedAt: now,
 	})
@@ -116,6 +118,9 @@ func TestScenario009LiveCreateIssueConfirmationSanitizesMetadata(t *testing.T) {
 	}
 	if entry.RequestMetadata["milestone_id"] != "MILESTONE-1" || entry.RequestMetadata["milestone_remote_id"] != "1" || entry.RequestMetadata["milestone_title"] != "Release 1" {
 		t.Fatalf("milestone metadata=%#v", entry.RequestMetadata)
+	}
+	if entry.RequestMetadata["pr_update_preimage_fingerprint"] != "pr-preimage-hash" || entry.RequestMetadata["pr_update_preimage_body_hash"] != "pr-body-hash" {
+		t.Fatalf("PR update preimage metadata=%#v", entry.RequestMetadata)
 	}
 }
 

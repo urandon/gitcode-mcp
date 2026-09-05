@@ -808,6 +808,11 @@ type WriteOptions struct {
 	// uses this hook to durably claim and fence the mutation.
 	BeforeIssueUpdateMutation func(Issue) error
 
+	// BeforePRUpdateMutation runs after the canonical pull request preimage has
+	// been read and immediately before the PATCH is attempted. The service
+	// uses this hook to durably claim and fence the mutation.
+	BeforePRUpdateMutation func(PullRequest) error
+
 	// BeforeMergePRMutation runs after the canonical pull request preimage and
 	// optional head-SHA guard have been checked. It runs before either returning
 	// an already-merged confirmation or attempting the merge PUT. The service
