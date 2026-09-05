@@ -95,13 +95,16 @@ var memoryRPC = struct {
 	servers map[string]RPCServer
 }{servers: map[string]RPCServer{}}
 
-func serveMemoryRPC(ctx context.Context, address string, server RPCServer) error {
+func serveMemoryRPC(ctx context.Context, address string, server RPCServer, published func()) error {
 	if address == "" {
 		return errors.New("memory service address is required")
 	}
 	memoryRPC.Lock()
 	memoryRPC.servers[address] = server
 	memoryRPC.Unlock()
+	if published != nil {
+		published()
+	}
 	<-ctx.Done()
 	memoryRPC.Lock()
 	delete(memoryRPC.servers, address)

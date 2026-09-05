@@ -1821,6 +1821,36 @@ func (m *JobManager) failInterruptedSyncRetry(jobID, reason string) error {
 	})
 }
 
+func (m *JobManager) failInterruptedSyncRecoveries(reason string) {
+	for _, job := range m.List() {
+		if job.Type == SyncJobType && job.Status == JobStatusInterrupted {
+			_ = m.failInterruptedSyncRetry(job.ID, reason)
+		}
+	}
+}
+
+func (m *JobManager) beginInterruptedSyncRecoveryFences() func() {
+	m.mu.Lock()
+	fenced := map[string]bool{}
+	for _, job := range m.jobs {
+		if job.Type == SyncJobType && job.Status == JobStatusInterrupted && strings.TrimSpace(job.CacheUUID) != "" {
+			m.syncRecoveryFences[job.CacheUUID] = true
+			fenced[job.CacheUUID] = true
+		}
+	}
+	m.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.mu.Lock()
+			for cacheUUID := range fenced {
+				delete(m.syncRecoveryFences, cacheUUID)
+			}
+			m.mu.Unlock()
+		})
+	}
+}
+
 func laterSyncWorkflowStage(candidate, current SyncStageEnvelope) bool {
 	candidateIndex, currentIndex := -1, -1
 	if candidate.Workflow != nil {

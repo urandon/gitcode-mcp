@@ -81,6 +81,7 @@ type JobManager struct {
 	onRepositoryDocsCancelled           func(Job) error
 	repositoryDocsCancellationCommitted func(Job) bool
 	cacheMutationFences                 map[string]bool
+	syncRecoveryFences                  map[string]bool
 	inflightWorkers                     map[string]bool
 	directCacheWriters                  map[string]string
 	syncCommitQueues                    map[string][]syncCommitWaiter
@@ -184,6 +185,7 @@ func NewJobManagerWithRetention(snapshotPath string, retention config.ServiceJob
 		sourceRegistrationRedirects: map[string]string{},
 		canonicalRepoByRegistration: map[string]string{},
 		cacheMutationFences:         map[string]bool{},
+		syncRecoveryFences:          map[string]bool{},
 		inflightWorkers:             map[string]bool{},
 		directCacheWriters:          map[string]string{},
 		syncCommitQueues:            map[string][]syncCommitWaiter{},
@@ -257,7 +259,7 @@ func (m *JobManager) BeginCacheMutationFence(cacheUUID string) (func(), []string
 		return func() {}, []string{"unknown-cache-authority"}
 	}
 	m.mu.Lock()
-	if m.cacheMutationFences[cacheUUID] {
+	if m.cacheMutationFences[cacheUUID] || m.syncRecoveryFences[cacheUUID] {
 		m.mu.Unlock()
 		return func() {}, []string{"concurrent-conflict-resolution"}
 	}
@@ -292,7 +294,7 @@ func (m *JobManager) BeginDirectCacheWriter(cacheUUID, writerID string) (func(),
 		return func() {}, CacheWriterIdentityError{code: "cache_authority_unavailable"}
 	}
 	m.mu.Lock()
-	if m.cacheMutationFences[cacheUUID] {
+	if m.cacheMutationFences[cacheUUID] || m.syncRecoveryFences[cacheUUID] {
 		m.mu.Unlock()
 		return func() {}, CacheMutationFenceError{}
 	}
@@ -791,7 +793,7 @@ type JobRecoveryIntent struct {
 func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID string, steps int, workKey, cacheUUID, registrationID, namespaceID string, intent JobRecoveryIntent, cancel context.CancelFunc) (Job, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if cacheUUID = strings.TrimSpace(cacheUUID); cacheUUID != "" && m.cacheMutationFences[cacheUUID] {
+	if cacheUUID = strings.TrimSpace(cacheUUID); cacheUUID != "" && (m.cacheMutationFences[cacheUUID] || m.syncRecoveryFences[cacheUUID]) {
 		return Job{}, false, CacheMutationFenceError{}
 	}
 	for _, job := range m.jobs {

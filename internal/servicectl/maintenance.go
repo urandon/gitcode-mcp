@@ -30,15 +30,19 @@ const (
 var errMaintenanceCacheInspectionTimeout = errors.New("maintenance: cache inspection timed out")
 
 type maintenanceCacheInspection struct {
-	identity cache.CacheIdentity
-	binding  cache.RepositoryBinding
-	err      error
+	identity     cache.CacheIdentity
+	binding      cache.RepositoryBinding
+	pathKey      string
+	snapshotPath string
+	snapshotErr  error
+	err          error
 }
 
 type maintenanceCacheInspectionRequest struct {
-	id     string
-	path   string
-	repoID string
+	id           string
+	path         string
+	snapshotPath string
+	repoID       string
 }
 
 type maintenanceCacheInspector func(context.Context, string, string) (cache.CacheIdentity, cache.RepositoryBinding, error)
@@ -423,6 +427,7 @@ type MaintenanceManager struct {
 	now                func() time.Time
 	writeFile          func(string, []byte, os.FileMode) error
 	inspectCache       maintenanceCacheInspector
+	canonicalizePath   func(string) (string, error)
 	inspectTimeout     time.Duration
 }
 
@@ -431,11 +436,15 @@ func NewMaintenanceManager(manager Manager, jobs *JobManager, path string) *Main
 	if inspector == nil {
 		inspector = inspectMaintenanceCache
 	}
+	canonicalizer := manager.maintenanceCacheCanonicalizer
+	if canonicalizer == nil {
+		canonicalizer = canonicalCachePath
+	}
 	timeout := manager.maintenanceCacheInspectTimeout
 	if timeout <= 0 {
 		timeout = defaultMaintenanceInspectTimeout
 	}
-	maintenance := &MaintenanceManager{manager: manager, jobs: jobs, path: path, entries: map[string]*MaintenanceEntry{}, receipts: map[string]maintenanceReceipt{}, admissions: map[string]repositoryDocsAdmissionIntent{}, sources: map[string]map[string]*repositoryDocsRegisteredSource{}, redirects: map[string]string{}, sourceRedirects: map[string]string{}, conflictCandidates: map[string][]maintenanceIdentityConflictCandidate{}, resolutionReceipts: map[string]maintenanceConflictResolutionReceipt{}, retiredClonePaths: map[string]map[string]bool{}, now: func() time.Time { return time.Now().UTC() }, writeFile: durableAtomicWriteFile, inspectCache: inspector, inspectTimeout: timeout}
+	maintenance := &MaintenanceManager{manager: manager, jobs: jobs, path: path, entries: map[string]*MaintenanceEntry{}, receipts: map[string]maintenanceReceipt{}, admissions: map[string]repositoryDocsAdmissionIntent{}, sources: map[string]map[string]*repositoryDocsRegisteredSource{}, redirects: map[string]string{}, sourceRedirects: map[string]string{}, conflictCandidates: map[string][]maintenanceIdentityConflictCandidate{}, resolutionReceipts: map[string]maintenanceConflictResolutionReceipt{}, retiredClonePaths: map[string]map[string]bool{}, now: func() time.Time { return time.Now().UTC() }, writeFile: durableAtomicWriteFile, inspectCache: inspector, canonicalizePath: canonicalizer, inspectTimeout: timeout}
 	if jobs != nil {
 		jobs.onRepositoryDocsCancelled = maintenance.cancelRepositoryDocsAdmission
 		jobs.repositoryDocsCancellationCommitted = maintenance.repositoryDocsCancellationCommitted
@@ -612,7 +621,7 @@ func (m *MaintenanceManager) inspectLoadedEntriesBounded(ctx context.Context, id
 		if entry == nil || entry.IdentityConflict != nil {
 			continue
 		}
-		requests = append(requests, maintenanceCacheInspectionRequest{id: id, path: entry.cachePath, repoID: entry.RepoID})
+		requests = append(requests, maintenanceCacheInspectionRequest{id: id, path: entry.cachePath, snapshotPath: entry.configSnapshot.CachePath, repoID: entry.RepoID})
 	}
 	return m.inspectRequestsBounded(ctx, requests)
 }
@@ -627,7 +636,7 @@ func (m *MaintenanceManager) inspectRequestsBounded(ctx context.Context, request
 			results <- struct {
 				id         string
 				inspection maintenanceCacheInspection
-			}{id: request.id, inspection: m.inspectCacheBounded(ctx, request.path, request.repoID)}
+			}{id: request.id, inspection: m.inspectCacheBounded(ctx, request.path, request.snapshotPath, request.repoID)}
 		}(request)
 	}
 	inspections := make(map[string]maintenanceCacheInspection, len(requests))
@@ -638,13 +647,19 @@ func (m *MaintenanceManager) inspectRequestsBounded(ctx context.Context, request
 	return inspections
 }
 
-func (m *MaintenanceManager) inspectCacheBounded(ctx context.Context, path, repoID string) maintenanceCacheInspection {
+func (m *MaintenanceManager) inspectCacheBounded(ctx context.Context, path, snapshotPath, repoID string) maintenanceCacheInspection {
 	inspectCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	result := make(chan maintenanceCacheInspection, 1)
 	go func() {
-		identity, binding, err := m.inspectCache(inspectCtx, path, repoID)
-		result <- maintenanceCacheInspection{identity: identity, binding: binding, err: err}
+		canonicalPath, err := m.canonicalizePath(path)
+		if err != nil {
+			result <- maintenanceCacheInspection{err: err}
+			return
+		}
+		canonicalSnapshotPath, snapshotErr := m.canonicalizePath(snapshotPath)
+		identity, binding, inspectErr := m.inspectCache(inspectCtx, canonicalPath, repoID)
+		result <- maintenanceCacheInspection{identity: identity, binding: binding, pathKey: canonicalPath, snapshotPath: canonicalSnapshotPath, snapshotErr: snapshotErr, err: inspectErr}
 	}()
 	timer := time.NewTimer(m.inspectTimeout)
 	defer timer.Stop()
@@ -671,11 +686,6 @@ func (m *MaintenanceManager) canonicalizeLoadedEntriesLocked(ctx context.Context
 		if entry.IdentityConflict != nil {
 			continue
 		}
-		pathKey := maintenanceCanonicalPathKey(entry.cachePath)
-		if uuidPaths[entry.CacheUUID] == nil {
-			uuidPaths[entry.CacheUUID] = map[string]bool{}
-		}
-		uuidPaths[entry.CacheUUID][pathKey] = true
 	}
 	sort.Strings(ids)
 	inspections := m.inspectLoadedEntriesBounded(ctx, ids)
@@ -688,9 +698,16 @@ func (m *MaintenanceManager) canonicalizeLoadedEntriesLocked(ctx context.Context
 		if entry.IdentityConflict != nil {
 			continue
 		}
-		pathKey := maintenanceCanonicalPathKey(entry.cachePath)
-		item := maintenanceCanonicalCandidate{id: id, entry: entry, repoID: entry.RepoID, pathKey: pathKey}
 		inspection := inspections[id]
+		pathKey := inspection.pathKey
+		if pathKey == "" {
+			pathKey = maintenanceCanonicalPathKey(entry.cachePath)
+		}
+		if uuidPaths[entry.CacheUUID] == nil {
+			uuidPaths[entry.CacheUUID] = map[string]bool{}
+		}
+		uuidPaths[entry.CacheUUID][pathKey] = true
+		item := maintenanceCanonicalCandidate{id: id, entry: entry, repoID: entry.RepoID, pathKey: pathKey}
 		if inspection.err != nil {
 			unresolved[entry.CacheUUID+"\x00"+pathKey] = append(unresolved[entry.CacheUUID+"\x00"+pathKey], item)
 			uuidCandidates[entry.CacheUUID] = append(uuidCandidates[entry.CacheUUID], item)
@@ -707,8 +724,11 @@ func (m *MaintenanceManager) canonicalizeLoadedEntriesLocked(ctx context.Context
 		}
 		item.repoID = binding.RepoID
 		item.aliases = append([]string(nil), binding.Aliases...)
-		snapshotPath, snapshotErr := canonicalCachePath(entry.configSnapshot.CachePath)
-		if entry.ConfigHash == "" || entry.ConfigHash != maintenanceHash(entry.configSnapshot) || snapshotErr != nil || snapshotPath != maintenanceCanonicalPathKey(entry.cachePath) {
+		if entry.cachePath != pathKey {
+			entry.cachePath = pathKey
+			changed = true
+		}
+		if entry.ConfigHash == "" || entry.ConfigHash != maintenanceHash(entry.configSnapshot) || inspection.snapshotErr != nil || inspection.snapshotPath != pathKey {
 			changed = blockMaintenanceIdentity(entry, "config_snapshot_invalid") || changed
 			// The snapshot cannot authorize work, but the physical cache still
 			// belongs to this UUID cohort. Preserve it as private conflict
@@ -1118,7 +1138,7 @@ func (m *MaintenanceManager) expandRecoveredUnresolvedCandidatesLocked(ctx conte
 			continue
 		}
 		registrationIDs = append(registrationIDs, registrationID)
-		requests = append(requests, maintenanceCacheInspectionRequest{id: registrationID, path: candidates[0].CachePath, repoID: candidates[0].Entry.RepoID})
+		requests = append(requests, maintenanceCacheInspectionRequest{id: registrationID, path: candidates[0].CachePath, snapshotPath: candidates[0].ConfigSnapshot.CachePath, repoID: candidates[0].Entry.RepoID})
 	}
 	sort.Strings(registrationIDs)
 	inspections := m.inspectRequestsBounded(ctx, requests)
@@ -1245,11 +1265,10 @@ func (m *MaintenanceManager) mergeMaintenanceSourcesLocked(canonicalID string, c
 }
 
 func maintenanceCanonicalPathKey(path string) string {
-	if resolved, err := filepath.EvalSymlinks(strings.TrimSpace(path)); err == nil {
-		if absolute, absErr := filepath.Abs(resolved); absErr == nil {
-			return filepath.Clean(absolute)
-		}
-	}
+	// Registry writes persist canonical paths. Startup fallbacks deliberately do
+	// only lexical normalization here: filesystem metadata access belongs inside
+	// the bounded inspection worker so a host-policy denial cannot block the
+	// control plane before its listener is published.
 	if absolute, err := filepath.Abs(strings.TrimSpace(path)); err == nil {
 		return filepath.Clean(absolute)
 	}
