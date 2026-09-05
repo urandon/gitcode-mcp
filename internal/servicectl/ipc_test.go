@@ -3,10 +3,12 @@ package servicectl
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -86,6 +88,287 @@ func TestRPCServiceStatusAndFakeJobLifecycle(t *testing.T) {
 	if err := <-errCh; err != nil && err != context.Canceled {
 		t.Fatalf("service run returned %v", err)
 	}
+}
+
+func TestIssue141BlockedCacheInspectionDoesNotBlockControlPlane(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	blockedPath := filepath.Join(root, "blocked.db")
+	metadataBlockedPath := filepath.Join(root, "metadata-blocked.db")
+	healthyPath := filepath.Join(root, "healthy.db")
+	identities := map[string]cache.CacheIdentity{}
+	canonicalPaths := map[string]string{}
+	canonicalIdentities := map[string]cache.CacheIdentity{}
+	schemas := map[string]int{}
+	for _, path := range []string{blockedPath, metadataBlockedPath, healthyPath} {
+		store, err := cache.NewSQLiteStore(ctx, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}); err != nil {
+			store.Close()
+			t.Fatal(err)
+		}
+		identity, err := store.CacheIdentity(ctx)
+		if err != nil {
+			store.Close()
+			t.Fatal(err)
+		}
+		identities[path] = identity
+		canonicalPath, err := canonicalCachePath(path)
+		if err != nil {
+			store.Close()
+			t.Fatal(err)
+		}
+		canonicalPaths[path] = canonicalPath
+		canonicalIdentities[canonicalPath] = identity
+		schema, err := store.SchemaVersion(ctx)
+		if err != nil {
+			store.Close()
+			t.Fatal(err)
+		}
+		schemas[path] = schema
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	manager := newTestManager(t, "darwin")
+	src := manager.Source.(testSource)
+	src.env = map[string]string{"GITCODE_MCP_SERVICE_NETWORK": "mem", "GITCODE_MCP_SERVICE_ADDRESS": "issue-141-bounded-startup-" + filepath.Base(root)}
+	manager.Source = src
+	paths, err := manager.ResolvePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.RegistryPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	disk := maintenanceRegistryFile{SchemaVersion: maintenanceRegistrySchema, Generation: 1}
+	for _, path := range []string{blockedPath, metadataBlockedPath, healthyPath} {
+		cfg := config.Default()
+		cfg.CachePath = path
+		disk.Entries = append(disk.Entries, maintenanceDiskEntry{
+			MaintenanceEntry: MaintenanceEntry{
+				RegistrationID: maintenanceRegistrationID(identities[path].UUID, "owner/repo"),
+				CacheUUID:      identities[path].UUID,
+				RepoID:         "owner/repo",
+				Policy:         MaintenancePolicy{},
+				ConfigHash:     maintenanceHash(cfg),
+				Enabled:        true,
+				State:          "ready",
+				Generation:     1,
+			},
+			CachePath:      path,
+			ConfigSnapshot: cfg,
+		})
+	}
+	registryJSON, err := json.Marshal(disk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.RegistryPath, registryJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jobID := "job-000001"
+	repositoryDocsJobID := "job-000002"
+	repositoryDocsWorkKey := "issue-141-repository-docs-work"
+	registrationID := maintenanceRegistrationID(identities[healthyPath].UUID, "owner/repo")
+	seedJobs := NewJobManager(paths.JobsPath)
+	seedJobs.jobs[jobID] = &Job{
+		ID: jobID, Type: SyncJobType, RepoID: "owner/repo", CacheUUID: identities[healthyPath].UUID,
+		RegistrationID: registrationID, Status: JobStatusRunning, CreatedAt: time.Now().Add(-time.Minute).UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	seedJobs.jobs[repositoryDocsJobID] = &Job{
+		ID: repositoryDocsJobID, Type: RepositoryDocsIndexJobType, RepoID: "owner/repo", CacheUUID: identities[healthyPath].UUID,
+		RegistrationID: registrationID, SourceRegistrationID: "source-1", SourceRegistrationGeneration: 1,
+		ExpectedRevisionSetID: "set-1", WorkRef: publicWorkRef(repositoryDocsWorkKey),
+		Status: JobStatusRunning, CreatedAt: time.Now().Add(-time.Minute).UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	seedJobs.nextID = 2
+	if err := seedJobs.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewSyncStageJournal(paths.RuntimeDir, SyncStageLimits{}).Create(SyncStageEnvelope{
+		JobID: jobID, CacheUUID: identities[healthyPath].UUID, CacheSchema: schemas[healthyPath], CachePath: healthyPath,
+		RegistrationID: registrationID, RepoID: "owner/repo",
+		BindingFingerprint: syncRepositoryBindingFingerprint(cache.RepositoryBinding{RepoID: "owner/repo", Owner: "owner", Name: "repo"}),
+		Collection:         "issues", IdempotencyKey: "issue-141-durable-recovery", Payload: json.RawMessage(`{}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	releaseBlockedOpen := make(chan struct{})
+	releaseBlockedMetadata := make(chan struct{})
+	releaseBlockedRecovery := make(chan struct{})
+	recoveryStarted := make(chan struct{})
+	defer close(releaseBlockedOpen)
+	defer close(releaseBlockedMetadata)
+	defer close(releaseBlockedRecovery)
+	manager.maintenanceCacheInspectTimeout = 25 * time.Millisecond
+	manager.maintenanceCacheCanonicalizer = func(path string) (string, error) {
+		if path == metadataBlockedPath {
+			<-releaseBlockedMetadata
+		}
+		return canonicalCachePath(path)
+	}
+	manager.maintenanceCacheInspector = func(inspectCtx context.Context, path, repoID string) (cache.CacheIdentity, cache.RepositoryBinding, error) {
+		if path == canonicalPaths[blockedPath] {
+			<-releaseBlockedOpen
+		}
+		if identity, ok := canonicalIdentities[path]; ok {
+			return identity, cache.RepositoryBinding{RepoID: repoID, Owner: "owner", Name: "repo"}, nil
+		}
+		return inspectMaintenanceCache(inspectCtx, path, repoID)
+	}
+	manager.syncStageRecovery = func(_ context.Context, jobs *JobManager, _ Manager) error {
+		stages, _, err := NewSyncStageJournal(paths.RuntimeDir, SyncStageLimits{}).ListForRecovery()
+		if err != nil {
+			return err
+		}
+		job, ok := jobs.Get(jobID)
+		if len(stages) != 1 || !ok || job.Status != JobStatusInterrupted {
+			return fmt.Errorf("durable recovery fixture missing: stages=%d job=%+v found=%t", len(stages), job, ok)
+		}
+		releaseWriter, writerErr := jobs.BeginDirectCacheWriter(identities[healthyPath].UUID, "issue-141-probe")
+		if writerErr == nil {
+			releaseWriter()
+			return errors.New("durable recovery cache authority was not writer-fenced")
+		}
+		var fenceErr CacheRecoveryFenceError
+		if !errors.As(writerErr, &fenceErr) {
+			return fmt.Errorf("durable recovery writer fence error=%T %v", writerErr, writerErr)
+		}
+		_, resumed, resumeErr := jobs.ResumeRepositoryDocsAdmission(repositoryDocsJobID, registrationID, "source-1", 1, "set-1", repositoryDocsWorkKey, "", func() {})
+		if resumed || !errors.As(resumeErr, &fenceErr) {
+			return fmt.Errorf("repository-docs recovery bypassed sync fence: resumed=%t err=%T %v", resumed, resumeErr, resumeErr)
+		}
+		close(recoveryStarted)
+		<-releaseBlockedRecovery
+		return nil
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	startedAt := time.Now()
+	go func() { errCh <- manager.Run(runCtx) }()
+	client := waitForTestClient(t, manager, errCh)
+	if elapsed := time.Since(startedAt); elapsed > 500*time.Millisecond {
+		cancel()
+		t.Fatalf("control plane publication took %s", elapsed)
+	}
+	select {
+	case <-recoveryStarted:
+	case <-time.After(500 * time.Millisecond):
+		cancel()
+		t.Fatal("durable sync-stage recovery did not start after control-plane publication")
+	}
+
+	var list MaintenanceListResult
+	if err := client.Call(ctx, "Maintenance.List", nil, &list); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	if len(list.Entries) != 3 {
+		t.Fatalf("maintenance entries=%+v", list.Entries)
+	}
+	states := map[string]MaintenanceEntry{}
+	for _, entry := range list.Entries {
+		states[entry.CacheUUID] = entry
+	}
+	blocked := states[identities[blockedPath].UUID]
+	if blocked.Enabled || blocked.State != "cache_inspection_timeout" || blocked.LastErrorClass != "cache_inspection_timeout" || !strings.Contains(blocked.LastError, "foreground service mode") {
+		t.Fatalf("blocked registration=%+v", blocked)
+	}
+	metadataBlocked := states[identities[metadataBlockedPath].UUID]
+	if metadataBlocked.Enabled || metadataBlocked.State != "cache_inspection_timeout" || metadataBlocked.LastErrorClass != "cache_inspection_timeout" {
+		t.Fatalf("metadata-blocked registration=%+v", metadataBlocked)
+	}
+	healthy := states[identities[healthyPath].UUID]
+	if !healthy.Enabled || healthy.LastErrorClass != "" {
+		t.Fatalf("healthy registration=%+v", healthy)
+	}
+	publicJSON, err := json.Marshal(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(publicJSON), blockedPath) || strings.Contains(string(publicJSON), metadataBlockedPath) || strings.Contains(string(publicJSON), healthyPath) {
+		t.Fatalf("maintenance list leaked a cache path: %s", publicJSON)
+	}
+	var jobsList JobListResult
+	if err := client.Call(ctx, "Jobs.List", nil, &jobsList); err != nil {
+		t.Fatal(err)
+	}
+	if len(jobsList.Jobs) != 2 || jobsList.Jobs[0].Status != JobStatusInterrupted || jobsList.Jobs[1].Status != JobStatusInterrupted {
+		t.Fatalf("durable recovery did not remain observable while blocked: %+v", jobsList.Jobs)
+	}
+	var reconciled MaintenanceReconcileResult
+	if err := client.Call(ctx, "Maintenance.ReconcileRegistration", MaintenanceRegistrationRequest{RegistrationID: registrationID}, &reconciled); err != nil {
+		t.Fatal(err)
+	}
+	if len(reconciled.Entries) != 1 || !reconciled.Entries[0].Enabled || reconciled.Entries[0].LastErrorClass != "" || len(reconciled.JobsStarted) != 0 {
+		t.Fatalf("recovery-fenced reconciliation changed healthy state: %+v", reconciled)
+	}
+
+	cancel()
+	if err := <-errCh; err != nil && err != context.Canceled {
+		t.Fatalf("service run returned %v", err)
+	}
+	recovered := NewMaintenanceManager(managerWithoutInspectionSeam(manager), NewJobManager(""), paths.RegistryPath)
+	if err := recovered.Load(); err != nil {
+		t.Fatal(err)
+	}
+	recoveredList, err := recovered.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range recoveredList.Entries {
+		wasBlocked := entry.CacheUUID == identities[blockedPath].UUID || entry.CacheUUID == identities[metadataBlockedPath].UUID
+		if wasBlocked && (!entry.Enabled || entry.State != "enrolled" || entry.LastErrorClass != "") {
+			t.Fatalf("recovered registration=%+v", entry)
+		}
+	}
+}
+
+func TestSyncStageRecoveryRetainsFenceWhenFailureCannotBePersisted(t *testing.T) {
+	jobs := NewJobManager(filepath.Join(t.TempDir(), "jobs.json"))
+	cacheUUID := "cache-uuid"
+	jobs.jobs["job-000001"] = &Job{ID: "job-000001", Type: SyncJobType, CacheUUID: cacheUUID, Status: JobStatusInterrupted, CreatedAt: time.Now().Add(-time.Minute).UTC(), UpdatedAt: time.Now().UTC()}
+	if err := jobs.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	releaseFences := jobs.beginInterruptedSyncRecoveryFences()
+	defer releaseFences()
+	persistAttempted := make(chan struct{})
+	var once sync.Once
+	jobs.writeFile = func(string, []byte, os.FileMode) error {
+		once.Do(func() { close(persistAttempted) })
+		return errors.New("snapshot unavailable")
+	}
+	manager := newTestManager(t, "darwin")
+	manager.syncStageRecovery = func(context.Context, *JobManager, Manager) error {
+		return errors.New("recovery unavailable")
+	}
+	manager.startSyncStageRecovery(context.Background(), jobs, releaseFences)
+	select {
+	case <-persistAttempted:
+	case <-time.After(time.Second):
+		t.Fatal("recovery failure was not projected onto interrupted jobs")
+	}
+	if !jobs.CacheRecoveryPending(cacheUUID) {
+		t.Fatal("cache recovery fence was released after terminal-state persistence failed")
+	}
+	job, ok := jobs.Get("job-000001")
+	if !ok || job.Status != JobStatusInterrupted {
+		t.Fatalf("interrupted job changed despite persistence failure: %+v found=%t", job, ok)
+	}
+}
+
+func managerWithoutInspectionSeam(manager Manager) Manager {
+	manager.maintenanceCacheInspector = nil
+	manager.maintenanceCacheCanonicalizer = nil
+	manager.maintenanceCacheInspectTimeout = 0
+	manager.syncStageRecovery = nil
+	return manager
 }
 
 func TestRPCStatusHealthAndJobsExposeCacheSchemaBlocks(t *testing.T) {

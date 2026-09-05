@@ -86,6 +86,46 @@ func TestMaintenanceReconcilePublishesSchemaBlockedAndClearsTerminalActiveJobs(t
 	}
 }
 
+func TestMaintenanceStartupInspectionUsesBoundedWorkerPoolAndGlobalDeadline(t *testing.T) {
+	manager := newTestManager(t, "darwin")
+	manager.maintenanceCacheInspectTimeout = 25 * time.Millisecond
+	release := make(chan struct{})
+	defer close(release)
+	var mu sync.Mutex
+	started := 0
+	manager.maintenanceCacheCanonicalizer = func(path string) (string, error) {
+		mu.Lock()
+		started++
+		mu.Unlock()
+		<-release
+		return path, nil
+	}
+	maintenance := NewMaintenanceManager(manager, NewJobManager(""), "")
+	requests := make([]maintenanceCacheInspectionRequest, 100)
+	for index := range requests {
+		requests[index] = maintenanceCacheInspectionRequest{id: fmt.Sprintf("cache-%03d", index), path: fmt.Sprintf("cache-%03d.db", index), repoID: "owner/repo"}
+	}
+	startedAt := time.Now()
+	inspections := maintenance.inspectRequestsBounded(context.Background(), requests)
+	if elapsed := time.Since(startedAt); elapsed > 250*time.Millisecond {
+		t.Fatalf("bounded registry inspection took %s", elapsed)
+	}
+	if len(inspections) != len(requests) {
+		t.Fatalf("inspection results=%d want=%d", len(inspections), len(requests))
+	}
+	for id, inspection := range inspections {
+		if !errors.Is(inspection.err, errMaintenanceCacheInspectionTimeout) {
+			t.Fatalf("inspection %s error=%v", id, inspection.err)
+		}
+	}
+	mu.Lock()
+	gotStarted := started
+	mu.Unlock()
+	if gotStarted == 0 || gotStarted > maxMaintenanceInspectWorkers {
+		t.Fatalf("blocked inspections started=%d want=1..%d", gotStarted, maxMaintenanceInspectWorkers)
+	}
+}
+
 func TestMaintenanceRetryCorrelatesExactActiveCurrentWork(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -3340,6 +3380,40 @@ func TestMaintenancePeriodicallyVerifiesReadyRAGNamespace(t *testing.T) {
 	if maintenanceRAGVerificationDue("namespace", "ready", now.Add(-14*time.Minute), 15*time.Minute, now) {
 		t.Fatal("recently verified namespace became due early")
 	}
+}
+
+func TestIssue141RecoveredConflictInspectionIsBounded(t *testing.T) {
+	release := make(chan struct{})
+	manager := newTestManager(t, "darwin")
+	manager.maintenanceCacheInspectTimeout = 25 * time.Millisecond
+	manager.maintenanceCacheInspector = func(context.Context, string, string) (cache.CacheIdentity, cache.RepositoryBinding, error) {
+		<-release
+		return cache.CacheIdentity{}, cache.RepositoryBinding{}, errors.New("synthetic unavailable cache")
+	}
+	maintenance := NewMaintenanceManager(manager, NewJobManager(""), "")
+	maintenance.entries["unresolved"] = &MaintenanceEntry{
+		RegistrationID: "unresolved", CacheUUID: "cache-fixture", RepoID: "owner/repo",
+		State: "identity_unresolved", Enabled: false,
+		IdentityConflict: &MaintenanceIdentityConflict{Kind: "identity_unresolved"},
+	}
+	maintenance.conflictCandidates["unresolved"] = []maintenanceIdentityConflictCandidate{{
+		Entry:     MaintenanceEntry{RegistrationID: "legacy", CacheUUID: "cache-fixture", RepoID: "owner/repo", Enabled: true},
+		CachePath: "private-cache-fixture",
+	}}
+	startedAt := time.Now()
+	maintenance.mu.Lock()
+	_ = maintenance.canonicalizeLoadedEntriesLocked(context.Background())
+	maintenance.mu.Unlock()
+	if elapsed := time.Since(startedAt); elapsed > 250*time.Millisecond {
+		close(release)
+		t.Fatalf("recovered conflict inspection took %s", elapsed)
+	}
+	entry := maintenance.entries["unresolved"]
+	if entry == nil || entry.State != "identity_unresolved" || len(maintenance.conflictCandidates["unresolved"]) != 1 {
+		close(release)
+		t.Fatalf("timed-out conflict state changed: entry=%+v candidates=%+v", entry, maintenance.conflictCandidates["unresolved"])
+	}
+	close(release)
 }
 
 func testMaintenanceEnrollRequest(cachePath, key string, policy MaintenancePolicy) MaintenanceEnrollRequest {

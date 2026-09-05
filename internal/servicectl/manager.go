@@ -118,6 +118,13 @@ type Manager struct {
 	OutputRunner    CommandOutputRunner
 	StartupTimeout  time.Duration
 	StartupInterval time.Duration
+	// maintenanceCacheInspector and its timeout are package-private startup
+	// seams. Production uses the canonical read-only cache inspection; tests can
+	// deterministically model an OS-level open that ignores cancellation.
+	maintenanceCacheInspector      maintenanceCacheInspector
+	maintenanceCacheCanonicalizer  func(string) (string, error)
+	maintenanceCacheInspectTimeout time.Duration
+	syncStageRecovery              func(context.Context, *JobManager, Manager) error
 }
 
 type CommandRunner func(context.Context, string, ...string) error
@@ -487,9 +494,13 @@ func (m Manager) Run(ctx context.Context) error {
 	if err := jobs.LoadAndMarkInterrupted(); err != nil {
 		return err
 	}
-	if err := jobs.RecoverSyncStages(ctx, m); err != nil {
-		return err
-	}
+	releaseSyncRecoveryFences := jobs.beginInterruptedSyncRecoveryFences()
+	recoveryDispatched := false
+	defer func() {
+		if !recoveryDispatched {
+			releaseSyncRecoveryFences()
+		}
+	}()
 	jobActions := NewJobActionManager(paths.JobsPath+".actions", jobs, maintenance)
 	if err := jobActions.Load(); err != nil {
 		return err
@@ -537,7 +548,10 @@ func (m Manager) Run(ctx context.Context) error {
 	server := RPCServer{Manager: m, Jobs: jobs, Maintenance: maintenance, Admin: admin}
 	go maintenance.Run(ctx)
 	if paths.Network == "mem" {
-		return serveMemoryRPC(ctx, paths.Address, server)
+		return serveMemoryRPC(ctx, paths.Address, server, func() {
+			recoveryDispatched = true
+			m.startSyncStageRecovery(ctx, jobs, releaseSyncRecoveryFences)
+		})
 	}
 	if paths.Network == "unix" {
 		_ = os.Remove(paths.SocketPath)
@@ -547,6 +561,8 @@ func (m Manager) Run(ctx context.Context) error {
 		return err
 	}
 	defer listener.Close()
+	recoveryDispatched = true
+	m.startSyncStageRecovery(ctx, jobs, releaseSyncRecoveryFences)
 	if paths.Network == "unix" {
 		defer os.Remove(paths.SocketPath)
 	}
@@ -554,6 +570,33 @@ func (m Manager) Run(ctx context.Context) error {
 		return err
 	}
 	return ctx.Err()
+}
+
+// startSyncStageRecovery runs only after the control endpoint is published.
+// Recovery may need to inspect cache files whose host filesystem access can
+// block below Go's context boundary; such work must never gate daemon
+// readiness. Any ordinary recovery error is projected onto the still-
+// interrupted sync jobs instead of terminating an otherwise usable daemon.
+func (m Manager) startSyncStageRecovery(ctx context.Context, jobs *JobManager, releaseFences func()) {
+	recoverStages := m.syncStageRecovery
+	if recoverStages == nil {
+		recoverStages = func(ctx context.Context, jobs *JobManager, manager Manager) error {
+			return jobs.RecoverSyncStages(ctx, manager)
+		}
+	}
+	go func() {
+		err := recoverStages(ctx, jobs, m)
+		if err == nil {
+			releaseFences()
+			return
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
+		if err := jobs.failInterruptedSyncRecoveries("sync_recovery_failed"); err == nil {
+			releaseFences()
+		}
+	}()
 }
 
 func (m Manager) adminReadiness(ctx context.Context) adminhttp.Readiness {
