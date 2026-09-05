@@ -2670,6 +2670,59 @@ func TestIssue104MergePRLateOwnerOutcomeCannotDowngradeRecoveredSuccess(t *testi
 	}
 }
 
+func TestIssue104MergePRLateOwnerSuccessCompletesFailedRecoverySettlement(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "fixture-a", Owner: "owner-a", Name: "repo-a", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	preimage := gitcode.PullRequest{ID: "9001", Number: 103, Title: "Release batch", State: "open", HeadSHA: "head-sha", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	client := &lateMergeOutcomeClient{fakeGitCodeClient: &fakeGitCodeClient{}, preimage: preimage, applied: make(chan struct{}), release: make(chan struct{})}
+	wrapper := &writeRefreshFailStore{Store: store}
+	svc := NewWithClient(wrapper, client)
+	svc.providerMode = gitcode.ProviderModeLive
+	svc.writeCredentialPresent = true
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 103, Sha: "head-sha", Strategy: "squash", IdempotencyKey: "issue-104-late-owner-success"}
+
+	ownerResult := make(chan WriteCommandResult, 1)
+	ownerErr := make(chan error, 1)
+	go func() {
+		result, err := svc.MergePR(ctx, req)
+		ownerResult <- result
+		ownerErr <- err
+	}()
+	<-client.applied
+	wrapper.failNextRefresh = true
+	_, err = svc.MergePR(ctx, req)
+	var writeErr ErrWriteFailure
+	if !errors.As(err, &writeErr) || writeErr.Code != "write_partial_cache_refresh_failed" {
+		t.Fatalf("recovery cache failure=%#v", err)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", req.IdempotencyKey)
+	if err != nil || entry == nil || entry.Status != audit.StatusRemoteConfirmedCacheRefreshFailed {
+		t.Fatalf("partial recovery audit=%#v err=%v", entry, err)
+	}
+
+	close(client.release)
+	if err := <-ownerErr; err != nil {
+		t.Fatalf("late owner success error=%v", err)
+	}
+	if result := <-ownerResult; result.Status != "succeeded" {
+		t.Fatalf("late owner result=%#v", result)
+	}
+	entry, err = store.GetAuditEventByKey(ctx, "fixture-a", req.IdempotencyKey)
+	if err != nil || entry == nil || entry.Status != audit.StatusSucceeded {
+		t.Fatalf("final audit=%#v err=%v", entry, err)
+	}
+	if mutations, readbacks := client.counts(); mutations != 1 || readbacks != 1 {
+		t.Fatalf("mutations=%d readbacks=%d", mutations, readbacks)
+	}
+}
+
 func TestIssue104MergePRCacheRefreshCrashWindowsRecoverWithoutSecondPUT(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)
@@ -5503,6 +5556,11 @@ func (c *lateMergeOutcomeClient) MergePR(_ context.Context, _ gitcode.MergePRReq
 	c.mu.Unlock()
 	close(c.applied)
 	<-c.release
+	if c.outcome == nil {
+		merged := c.preimage
+		merged.State = "merged"
+		return gitcode.WriteResult[gitcode.PullRequest]{Record: merged, Confirmed: true, Operation: "MergePR", ProviderStatus: "200", RemoteID: merged.ID, RemoteNumber: merged.Number, RemoteRevision: "merge-sha", IdempotencyKey: opts.IdempotencyKey, ConfirmedAt: time.Now().UTC()}, nil
+	}
 	return gitcode.WriteResult[gitcode.PullRequest]{}, c.outcome
 }
 
