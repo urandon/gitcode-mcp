@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cliHandoff, humanize, isSnapshotStale, laneSummary, statusTone } from './admin';
+import { cliHandoff, humanize, isSnapshotStale, laneSummary, relativeAge, statusTone } from './admin';
 
 describe('admin presentation helpers', () => {
   it('keeps bounded tail language explicitly partial', () => {
@@ -15,6 +15,14 @@ describe('admin presentation helpers', () => {
     expect(humanize('retry_scheduled')).toBe('Retry Scheduled');
     expect(humanize('partial/retrying')).toBe('Partial / Retrying');
     expect(isSnapshotStale('2026-08-25T10:00:00Z', Date.parse('2026-08-25T10:06:00Z'))).toBe(true);
+  });
+
+  it('renders deterministic relative age without discarding exact timestamps', () => {
+    const now = Date.parse('2030-01-02T02:04:05Z');
+    expect(relativeAge('2030-01-02T01:04:05Z', now)).toBe('1 hour ago');
+    expect(relativeAge('2030-01-01T02:04:05Z', now)).toBe('1 day ago');
+    expect(relativeAge('2030-01-02T02:34:05Z', now)).toBe('in 30 minutes');
+    expect(relativeAge('invalid', now)).toBe('not recorded');
   });
 
   it('builds only fixed public-safe CLI handoffs', () => {

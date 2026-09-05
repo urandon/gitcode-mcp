@@ -378,14 +378,32 @@ func TestAdminMaintenanceObservationExposesCanonicalAliasesAndSanitizedConflict(
 
 func TestAdminJobObservationDropsRawProgressMessagesAndEndpoints(t *testing.T) {
 	now := time.Now().UTC()
-	job := Job{ID: "job-000001", Type: "sync", RegistrationID: "reg-1", Status: JobStatusFailed, Error: "/private/cache.db failed", ErrorClass: "cache_busy", SyncHealth: SyncHealthPartial, SyncCollections: []SyncCollectionView{{Collection: "issues", Outcome: SyncCollectionSuccess, FrontierRef: "frontier-public", Committed: 12, LastSuccessAt: &now, UpdatedAt: now}, {Collection: "wiki", Outcome: SyncCollectionPermanentFailure, ErrorClass: "permission_denied", Attempt: 1, RetryBudget: 4, UpdatedAt: now}}}
+	lastSuccess := now.Add(-time.Hour)
+	retryAfter := now.Add(30 * time.Minute)
+	job := Job{ID: "job-000001", Type: "sync", RegistrationID: "reg-1", Status: JobStatusFailed, Error: "/private/cache.db failed", ErrorClass: "cache_busy", SyncHealth: SyncHealthPartial, SyncCollections: []SyncCollectionView{{Collection: "issues", Outcome: SyncCollectionSuccess, FrontierRef: "frontier-public-issues", RecordsListed: 12, Committed: 12, LastSuccessAt: &lastSuccess, UpdatedAt: now}, {Collection: "wiki", Outcome: SyncCollectionPartial, FrontierRef: "frontier-public-wiki", RecordsListed: 7, Committed: 2, Failed: 1, ErrorClass: "network_timeout", Attempt: 2, RetryBudget: 4, RetryAfter: &retryAfter, LastSuccessAt: &lastSuccess, UpdatedAt: now}}}
 	job.Progress = append(job.Progress, service.ProgressEvent{Type: "page", Endpoint: "/private/api", Message: "raw log"}, service.ProgressEvent{Type: "failed", Collection: "wiki", RecordsFailed: 1, RetryAfter: "30s"})
 	view := adminJobObservation(job)
 	if strings.Contains(view.FailureMessage, "/private/") || len(view.Progress) != 2 || view.FailureCollection != "wiki" || view.RetryAfter != "30s" || view.InspectCommand != "gitcode-mcp service job job-000001 --format json" || view.RemediationCommand != "gitcode-mcp service maintenance --format json" {
 		t.Fatalf("sanitized job=%+v", view)
 	}
-	if view.SyncHealth != "partial" || len(view.SyncCollections) != 2 || view.SyncCollections[0].Retryable || !view.SyncCollections[1].Retryable || view.SyncCollections[1].ErrorClass != "permission_denied" {
+	if view.SyncHealth != "partial" || len(view.SyncCollections) != 2 || view.SyncCollections[0].Retryable || !view.SyncCollections[1].Retryable || view.SyncCollections[1].ErrorClass != "network_timeout" {
 		t.Fatalf("collection health=%+v", view)
+	}
+	issue, wiki := view.SyncCollections[0], view.SyncCollections[1]
+	if issue.FrontierRef != "frontier-public-issues" || issue.RecordsListed != 12 || issue.Committed != 12 || issue.LastSuccessAt == nil || !issue.LastSuccessAt.Equal(lastSuccess) {
+		t.Fatalf("successful collection projection=%+v", issue)
+	}
+	if wiki.FrontierRef != "frontier-public-wiki" || wiki.RecordsListed != 7 || wiki.Committed != 2 || wiki.Failed != 1 || wiki.Attempt != 2 || wiki.RetryBudget != 4 || wiki.RetryAfter == nil || !wiki.RetryAfter.Equal(retryAfter) || wiki.LastSuccessAt == nil || !wiki.LastSuccessAt.Equal(lastSuccess) {
+		t.Fatalf("recovered collection projection=%+v", wiki)
+	}
+	encoded, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, private := range []string{"/private/", "private_frontier", "provider_endpoint", "next_page", "cursor"} {
+		if strings.Contains(string(encoded), private) {
+			t.Fatalf("private collection state leaked %q: %s", private, encoded)
+		}
 	}
 }
 

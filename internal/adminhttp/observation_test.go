@@ -17,6 +17,8 @@ import (
 
 func TestObservationSnapshotContractAndResourceBoundaries(t *testing.T) {
 	fixed := time.Date(2026, 8, 25, 10, 30, 0, 0, time.UTC)
+	lastSuccess := fixed.Add(-time.Hour)
+	retryAfter := fixed.Add(15 * time.Minute)
 	provider := func(context.Context) (ObservationSnapshot, error) {
 		return FinalizeSnapshot(ObservationSnapshot{
 			Service: ServiceObservation{Version: "v2.0.0", Protocol: "admin.v1", Running: true, AdminSecure: true},
@@ -24,7 +26,11 @@ func TestObservationSnapshotContractAndResourceBoundaries(t *testing.T) {
 				{CacheRef: "cache-b", Readiness: "ready"},
 				{CacheRef: "cache-a", Readiness: "ready", Repositories: []RepositoryObservation{{RepoID: "owner/repo", BindingState: "bound"}}},
 			},
-			Jobs: []JobObservation{{ID: "job-000002", Type: "rag", Status: "running", CreatedAt: fixed, UpdatedAt: fixed}, {ID: "job-000001", Type: "sync", Status: "succeeded", FailureClass: "provider_unavailable", CreatedAt: fixed, UpdatedAt: fixed}},
+			Jobs: []JobObservation{
+				{ID: "job-000002", Type: "rag", Status: "running", CreatedAt: fixed, UpdatedAt: fixed},
+				{ID: "job-000001", Type: "sync", Status: "succeeded", FailureClass: "provider_unavailable", CreatedAt: fixed, UpdatedAt: fixed},
+				{ID: "job-000003", Type: "sync", Status: "succeeded", SyncHealth: "partial", CreatedAt: fixed, UpdatedAt: fixed, SyncCollections: []SyncCollectionObservation{{Collection: "issues", Outcome: "success", FrontierRef: "frontier-recovered-issues", RecordsListed: 8, Committed: 8, LastSuccessAt: &lastSuccess, UpdatedAt: fixed}, {Collection: "wiki", Outcome: "permanent_failure", FrontierRef: "frontier-recovered-wiki", RecordsListed: 3, Committed: 1, Failed: 1, ErrorClass: "retry_budget_exhausted", Attempt: 4, RetryBudget: 4, RetryAfter: &retryAfter, LastSuccessAt: &lastSuccess, UpdatedAt: fixed, Retryable: true}}},
+			},
 		}, fixed), nil
 	}
 	c := New(Config{Assets: fstest.MapFS{"index.html": {Data: []byte("index")}}, Snapshot: provider})
@@ -47,6 +53,25 @@ func TestObservationSnapshotContractAndResourceBoundaries(t *testing.T) {
 	}
 	if snapshot.Caches[0].CacheRef != "cache-a" || snapshot.Jobs[0].ID != "job-000001" {
 		t.Fatalf("snapshot ordering caches=%+v jobs=%+v", snapshot.Caches, snapshot.Jobs)
+	}
+	var recovered *JobObservation
+	for i := range snapshot.Jobs {
+		if snapshot.Jobs[i].ID == "job-000003" {
+			recovered = &snapshot.Jobs[i]
+			break
+		}
+	}
+	if recovered == nil || recovered.SyncHealth != "partial" || len(recovered.SyncCollections) != 2 {
+		t.Fatalf("recovered collection job=%+v", recovered)
+	}
+	wiki := recovered.SyncCollections[1]
+	if wiki.Collection != "wiki" || wiki.Outcome != "permanent_failure" || wiki.FrontierRef != "frontier-recovered-wiki" || wiki.RecordsListed != 3 || wiki.Committed != 1 || wiki.Failed != 1 || wiki.ErrorClass != "retry_budget_exhausted" || wiki.Attempt != 4 || wiki.RetryBudget != 4 || wiki.RetryAfter == nil || !wiki.RetryAfter.Equal(retryAfter) || wiki.LastSuccessAt == nil || !wiki.LastSuccessAt.Equal(lastSuccess) || !wiki.Retryable {
+		t.Fatalf("recovered wiki contract=%+v", wiki)
+	}
+	for _, private := range []string{"cache_path", "provider_endpoint", "private_frontier", "next_page", "cursor", "/private/"} {
+		if strings.Contains(snapshotResponse.Body.String(), private) {
+			t.Fatalf("snapshot leaked private collection field %q: %s", private, snapshotResponse.Body.String())
+		}
 	}
 
 	cacheResponse := authorizedRequest(t, handler, cookie, "/api/admin/v1/caches/cache-a")
