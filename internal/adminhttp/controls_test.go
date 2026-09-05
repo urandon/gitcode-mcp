@@ -22,6 +22,8 @@ func TestAdminControlsRequireSessionOriginCSRFAndStrictIntent(t *testing.T) {
 	repairApplyCalls := 0
 	conflictPlanCalls := 0
 	conflictApplyCalls := 0
+	feedbackPlanCalls := 0
+	feedbackApplyCalls := 0
 	c := New(Config{
 		Assets: fstest.MapFS{"index.html": {Data: []byte("index")}},
 		PlanMaintenance: func(_ context.Context, req MaintenanceControlRequest) (any, error) {
@@ -31,6 +33,14 @@ func TestAdminControlsRequireSessionOriginCSRFAndStrictIntent(t *testing.T) {
 		ApplyBinding: func(_ context.Context, req BindingControlRequest) (any, error) {
 			bindingCalls++
 			return map[string]any{"outcome": "added", "repo_id": req.RepoID}, nil
+		},
+		PlanFeedbackSetup: func(_ context.Context, req FeedbackSetupRequest) (any, error) {
+			feedbackPlanCalls++
+			return map[string]any{"plan_id": "feedback-plan-1", "repo_id": req.RepoID}, nil
+		},
+		ApplyFeedbackSetup: func(_ context.Context, req FeedbackSetupRequest) (any, error) {
+			feedbackApplyCalls++
+			return map[string]any{"status": "configured", "repo_id": req.RepoID, "plan_id": req.PlanID}, nil
 		},
 		CompareSearch: func(_ context.Context, req SearchCompareRequest) (any, error) {
 			searchCalls++
@@ -118,6 +128,18 @@ func TestAdminControlsRequireSessionOriginCSRFAndStrictIntent(t *testing.T) {
 	if got := call("/api/admin/v1/bindings/apply", `{"cache_ref":"cache-a","repo_id":"owner/repo","plan_id":"plan-1","idempotency_key":"key-1"}`, true, validHeaders); got.Code != http.StatusOK {
 		t.Fatalf("apply status=%d body=%s", got.Code, got.Body.String())
 	}
+	if got := call("/api/admin/v1/feedback/setup/plan", `{"repo_id":"owner/repo","credential":"secret"}`, true, validHeaders); got.Code != http.StatusBadRequest {
+		t.Fatalf("feedback plan accepted credential status=%d body=%s", got.Code, got.Body.String())
+	}
+	if got := call("/api/admin/v1/feedback/setup/plan", `{"repo_id":"owner/repo"}`, true, validHeaders); got.Code != http.StatusOK {
+		t.Fatalf("feedback plan status=%d body=%s", got.Code, got.Body.String())
+	}
+	if got := call("/api/admin/v1/feedback/setup/apply", `{"repo_id":"owner/repo","plan_id":"feedback-plan-1"}`, true, validHeaders); got.Code != http.StatusBadRequest {
+		t.Fatalf("feedback apply missing key status=%d body=%s", got.Code, got.Body.String())
+	}
+	if got := call("/api/admin/v1/feedback/setup/apply", `{"repo_id":"owner/repo","plan_id":"feedback-plan-1","idempotency_key":"feedback-key-1"}`, true, validHeaders); got.Code != http.StatusOK {
+		t.Fatalf("feedback apply status=%d body=%s", got.Code, got.Body.String())
+	}
 	if got := call("/api/admin/v1/search/compare", `{"cache_ref":"cache-a","repo_id":"owner/repo","query":"cache lifecycle","cache_path":"/private/cache.db"}`, true, validHeaders); got.Code != http.StatusBadRequest {
 		t.Fatalf("search accepted private path status=%d body=%s", got.Code, got.Body.String())
 	}
@@ -151,7 +173,7 @@ func TestAdminControlsRequireSessionOriginCSRFAndStrictIntent(t *testing.T) {
 	if got := call("/api/admin/v1/rag/repair/apply", `{"cache_ref":"cache-a","repo_id":"owner/repo","plan_id":"rag-plan-1","max_chunks":64,"idempotency_key":"repair-key-1"}`, true, validHeaders); got.Code != http.StatusOK {
 		t.Fatalf("repair apply status=%d body=%s", got.Code, got.Body.String())
 	}
-	if maintenanceCalls != 1 || bindingCalls != 1 || searchCalls != 1 || repositoryDocsSearchCalls != 1 || repositoryDocsPlanCalls != 1 || repositoryDocsIndexCalls != 1 || smokeCalls != 1 || repairPlanCalls != 1 || repairApplyCalls != 1 || conflictPlanCalls != 1 || conflictApplyCalls != 1 {
+	if maintenanceCalls != 1 || bindingCalls != 1 || feedbackPlanCalls != 1 || feedbackApplyCalls != 1 || searchCalls != 1 || repositoryDocsSearchCalls != 1 || repositoryDocsPlanCalls != 1 || repositoryDocsIndexCalls != 1 || smokeCalls != 1 || repairPlanCalls != 1 || repairApplyCalls != 1 || conflictPlanCalls != 1 || conflictApplyCalls != 1 {
 		t.Fatalf("provider calls maintenance=%d binding=%d search=%d repository_docs_search=%d repository_docs_index=%d smoke=%d repair_plan=%d repair_apply=%d", maintenanceCalls, bindingCalls, searchCalls, repositoryDocsSearchCalls, repositoryDocsIndexCalls, smokeCalls, repairPlanCalls, repairApplyCalls)
 	}
 }

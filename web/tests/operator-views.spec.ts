@@ -36,6 +36,7 @@ const snapshot = {
     { id: 'job-000005', type: 'sync', cache_ref: 'cache-111111112222', repo_id: 'example/repo', registration_id: 'reg-1', status: 'running', created_at: new Date(Date.now() - 45_000).toISOString(), started_at: new Date(Date.now() - 40_000).toISOString(), updated_at: new Date().toISOString(), steps: 12, completed: 12, work_ref: 'durable-sync-public-work', cancellable: true, retryable: false, progress_retained: 3, progress_limit: 256, sync_stage: { stage_ref: 'stage-public-safe', collection: 'issues', phase: 'waiting_commit', fetched: 12, staged: 12, committed: 0, staged_bytes: 8192, attempt: 2, retry_budget: 6, retry_after: new Date(Date.now() + 60_000).toISOString(), blocker_class: 'cache_busy', blocking_operation: 'rag-index', blocking_job_ref: 'job-000001', fetched_at: new Date(Date.now() - 35_000).toISOString(), staged_at: new Date(Date.now() - 34_000).toISOString() }, progress: [{ type: 'phase', phase: 'fetching', collection: 'issues', records_fetched: 12 }, { type: 'phase', phase: 'staged', collection: 'issues', records_fetched: 12 }, { type: 'phase', phase: 'waiting_commit', collection: 'issues', retry_after: new Date(Date.now() + 60_000).toISOString(), attempt: 2 }] }
   ],
   maintenance: [{ registration_id: 'reg-1', cache_ref: 'cache-111111112222', repo_id: 'example/repo', enabled: true, state: 'retry_scheduled', generation: 4, policy: { sync_enabled: true, sync_mode: 'head-and-backfill', rag_enabled: true, collections: ['issues', 'wiki'], head_max_pages: 3, tail_slice_pages: 10, profile: 'easy-rag' } }],
+  feedback: { state: 'ready', prepare_available: true, submit_available: true, sink: 'gitcode_issues', repo_id: 'example/repo', checks: [{ id: 'enabled', status: 'passed' }, { id: 'sink', status: 'passed' }, { id: 'repository_binding', status: 'passed' }, { id: 'credential', status: 'passed' }, { id: 'provider', status: 'passed' }], setup_repositories: ['example/repo'], setup_available: true },
   diagnostics: [
     { id: 'diag-current', severity: 'warning', entity_type: 'maintenance', entity_id: 'reg-1', failure_class: 'cache_busy', message: 'A cache writer is active.', retryable: true, current: true, remediation: 'Wait for the scheduled retry.' },
     { id: 'diag-recovered', severity: 'warning', entity_type: 'cache', entity_id: 'cache-111111112222', failure_class: 'provider_unavailable', message: 'The provider recovered.', retryable: true, current: false }
@@ -45,6 +46,7 @@ const snapshot = {
     { id: 'admin_maintenance_plan_apply', category: 'admin', safety_class: 'background_job', description: 'Plan and apply maintenance.', ui_enabled: true, cli_name: 'maintenance', cli_enabled: true, mcp_enabled: false },
     { id: 'admin_maintenance_conflict_resolution', category: 'admin', safety_class: 'audited_write', description: 'Resolve maintenance identity conflicts.', ui_enabled: true, cli_enabled: false, mcp_enabled: false },
     { id: 'admin_binding_plan_apply', category: 'admin', safety_class: 'audited_write', description: 'Plan and apply bindings.', ui_enabled: true, cli_name: 'repo', cli_enabled: true, mcp_enabled: false },
+    { id: 'admin_feedback_setup', category: 'admin', safety_class: 'audited_write', description: 'Plan and apply trusted feedback setup.', ui_enabled: true, cli_name: 'feedback setup', cli_enabled: true, mcp_enabled: false },
     { id: 'admin_registration_controls', category: 'admin', safety_class: 'background_job', description: 'Reconcile and disable registrations.', ui_enabled: true, cli_name: 'maintenance', cli_enabled: true, mcp_enabled: false },
     { id: 'admin_search_compare', category: 'admin', safety_class: 'read_only', description: 'Compare search modes.', ui_enabled: true, cli_name: 'search_sources', cli_enabled: true, mcp_enabled: false },
     { id: 'admin_provider_smoke', category: 'admin', safety_class: 'read_only', description: 'Smoke provider.', ui_enabled: true, cli_name: 'rag', cli_enabled: true, mcp_enabled: false },
@@ -216,6 +218,107 @@ async function mockAdmin(page: Page, value = snapshot, snapshotChanged?: Promise
 		await route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': ready\n\n' });
 	});
 }
+
+test('feedback delivery renders every readiness state without exposing private coordinates', async ({ page }) => {
+  const view: any = structuredClone(snapshot);
+  await mockAdmin(page, view);
+  const states = ['disabled', 'sink_missing', 'repository_unbound', 'credential_missing', 'provider_unavailable', 'ready'] as const;
+  for (const state of states) {
+    view.feedback = {
+      state, prepare_available: true, submit_available: state === 'ready',
+      sink: state === 'disabled' ? '' : 'gitcode_issues', repo_id: state === 'repository_unbound' ? 'example/missing' : 'example/repo',
+      checks: [{ id: 'enabled', status: state === 'disabled' ? 'blocked' : 'passed' }, { id: 'sink', status: state === 'sink_missing' ? 'blocked' : 'passed' }, { id: 'repository_binding', status: state === 'repository_unbound' ? 'blocked' : 'passed' }, { id: 'credential', status: state === 'credential_missing' ? 'blocked' : 'passed' }, { id: 'provider', status: state === 'provider_unavailable' ? 'blocked' : 'passed' }],
+      remediation: state === 'ready' ? '' : `Resolve ${state}.`, handoff: state === 'ready' ? '' : 'gitcode-mcp feedback status',
+      setup_repositories: ['example/repo'], setup_available: true
+    };
+    await page.goto('/?view=Maintenance');
+    const workbench = page.locator('section[aria-labelledby="feedback-delivery-title"]');
+    await expect(workbench.getByRole('heading', { name: 'Feedback delivery' })).toBeVisible();
+    await expect(workbench.locator('.control-heading .status-chip')).toHaveText(state.replaceAll('_', ' '));
+    await expect(workbench).toContainText('Report preparationAvailable');
+    await expect(workbench).toContainText(`Issue submission${state === 'ready' ? 'Available' : 'Unavailable'}`);
+    await expect(workbench.getByLabel('Feedback readiness checks').locator('article')).toHaveCount(5);
+    await expect(workbench.getByLabel('Feedback readiness checks').locator('.status-chip.good')).toHaveCount(state === 'ready' ? 5 : 4);
+    await expect(workbench.getByLabel('Feedback readiness checks').locator('.status-chip.bad')).toHaveCount(state === 'ready' ? 0 : 1);
+    await expect(workbench).not.toContainText('/Users/');
+    await expect(workbench).not.toContainText('Authorization:');
+    await expect(workbench).not.toContainText('api.gitcode.com');
+  }
+});
+
+test('feedback setup plans a bound target and safely replays ambiguous apply', async ({ page }) => {
+  const view: any = structuredClone(snapshot);
+  view.feedback = { state: 'disabled', prepare_available: true, submit_available: false, checks: [{ id: 'enabled', status: 'blocked' }], remediation: 'Enable a trusted feedback sink.', handoff: 'gitcode-mcp feedback setup --repo OWNER/REPO', setup_repositories: ['example/repo'], setup_available: true };
+  let emitSnapshotChanged!: () => void;
+  const snapshotChanged = new Promise<void>((resolve) => { emitSnapshotChanged = resolve; });
+  await mockAdmin(page, view, snapshotChanged);
+  let planBody: Record<string, unknown> = {};
+  await page.route('**/api/admin/v1/feedback/setup/plan', async (route) => {
+    planBody = route.request().postDataJSON();
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { status: 'confirmation_required', plan_id: 'feedback-plan-0123456789abcdef01234567', repo_id: 'example/repo', sink: 'gitcode_issues', labels: ['agent-feedback'], duplicate_policy: 'suggest', effects: [{ id: 'configure-feedback-sink', class: 'trusted_local_config_write', summary: 'enable the configured GitCode issue feedback sink', confirmation_required: true }], confirmation_required: true } }) });
+  });
+  const applyBodies: Array<Record<string, unknown>> = [];
+  await page.route('**/api/admin/v1/feedback/setup/apply', async (route) => {
+    applyBodies.push(route.request().postDataJSON());
+    if (applyBodies.length === 1) {
+      await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'temporarily_unavailable', message: 'Receipt delivery was interrupted.', remediation: 'Retry this confirmation.' } }) });
+      return;
+    }
+    view.feedback = { state: 'ready', prepare_available: true, submit_available: true, sink: 'gitcode_issues', repo_id: 'example/repo', checks: [{ id: 'enabled', status: 'passed' }], setup_repositories: ['example/repo'], setup_available: true };
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { status: 'configured', plan_id: 'feedback-plan-0123456789abcdef01234567', repo_id: 'example/repo', sink: 'gitcode_issues', labels: ['agent-feedback'], duplicate_policy: 'suggest', idempotency_key: applyBodies[0].idempotency_key, evidence: 'trusted configuration applied; no credential was written', generated_at: new Date().toISOString(), replayed: true, feedback: view.feedback } }) });
+  });
+  await page.goto('/?view=Maintenance');
+  const workbench = page.locator('section[aria-labelledby="feedback-delivery-title"]');
+  await expect(workbench.getByLabel('Trusted feedback repository')).toHaveValue('example/repo');
+  await workbench.getByRole('button', { name: 'Render feedback setup plan' }).click();
+  expect(planBody).toEqual({ repo_id: 'example/repo' });
+  await expect(workbench).toContainText('feedback-plan-0123456789abcdef01234567');
+  await expect(workbench).toContainText('No issue is submitted and no credential, endpoint, or cache path is exposed.');
+  await workbench.getByRole('button', { name: 'Review feedback setup' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByRole('heading', { name: 'Enable feedback issue delivery?' })).toBeVisible();
+  await expect(dialog).toContainText('It will not submit an issue or write credentials.');
+  await dialog.getByRole('button', { name: 'Confirm feedback setup' }).click();
+  await expect(dialog.getByRole('alert')).toContainText('Retry this confirmation.');
+  const refreshed = page.waitForResponse((response) => response.url().endsWith('/api/admin/v1/snapshot') && response.status() === 200);
+  view.revision = 'snapshot-after-ambiguous-feedback-apply';
+  emitSnapshotChanged();
+  await refreshed;
+  await expect(dialog.getByRole('alert')).toContainText('Retry this confirmation.');
+  await dialog.getByRole('button', { name: 'Confirm feedback setup' }).click();
+  await expect(dialog).not.toBeVisible();
+  expect(applyBodies).toHaveLength(2);
+  expect(applyBodies[1]).toEqual(applyBodies[0]);
+  expect(applyBodies[0]).toMatchObject({ repo_id: 'example/repo', plan_id: 'feedback-plan-0123456789abcdef01234567' });
+  expect(String(applyBodies[0].idempotency_key)).toMatch(/^admin-feedback_setup_apply-/);
+  await expect(workbench).toContainText('Issue submissionAvailable');
+  await expect(workbench).toContainText('replayed safely');
+});
+
+test('snapshot changes invalidate an unconfirmed feedback setup plan', async ({ page }) => {
+  const view: any = structuredClone(snapshot);
+  view.feedback = { state: 'disabled', prepare_available: true, submit_available: false, checks: [{ id: 'enabled', status: 'blocked' }], remediation: 'Enable a trusted feedback sink.', setup_repositories: ['example/repo'], setup_available: true };
+  let emitSnapshotChanged!: () => void;
+  const snapshotChanged = new Promise<void>((resolve) => { emitSnapshotChanged = resolve; });
+  await mockAdmin(page, view, snapshotChanged);
+  await page.route('**/api/admin/v1/feedback/setup/plan', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: { status: 'confirmation_required', plan_id: 'feedback-plan-stale-snapshot', repo_id: 'example/repo', sink: 'gitcode_issues', labels: ['agent-feedback'], duplicate_policy: 'suggest', effects: [{ id: 'configure-feedback-sink', class: 'trusted_local_config_write', summary: 'enable the configured GitCode issue feedback sink', confirmation_required: true }], confirmation_required: true } }) }));
+  await page.goto('/?view=Maintenance');
+  const workbench = page.locator('section[aria-labelledby="feedback-delivery-title"]');
+  await workbench.getByRole('button', { name: 'Render feedback setup plan' }).click();
+  await workbench.getByRole('button', { name: 'Review feedback setup' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+
+  const refreshed = page.waitForResponse((response) => response.url().endsWith('/api/admin/v1/snapshot') && response.status() === 200);
+  view.revision = 'snapshot-feedback-plan-invalidated';
+  view.feedback.state = 'sink_missing';
+  emitSnapshotChanged();
+  await refreshed;
+
+  await expect(dialog).not.toBeVisible();
+  await expect(workbench).not.toContainText('feedback-plan-stale-snapshot');
+  await expect(workbench.getByRole('button', { name: 'Render feedback setup plan' })).toBeVisible();
+});
 
 test('schema-blocked cache exposes a path-free confirmed CLI handoff', async ({ page }) => {
   const blocked: any = structuredClone(snapshot);

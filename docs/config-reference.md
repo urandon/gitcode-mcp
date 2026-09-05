@@ -261,6 +261,12 @@ only after pending claims have been reconciled from config digests. Generic bina
 remain destination-neutral; trusted bundles may use this same global contract
 to supply their feedback repository.
 
+The Admin Maintenance view projects the same six readiness states and offers a
+CSRF-bound plan/confirm/apply setup control. Its target selector is derived only
+from repositories already bound in the effective cache. The browser cannot
+provide a repository override, credential, endpoint, or filesystem path, and
+setup never submits an issue.
+
 ## Runtime audit
 
 ```sh

@@ -2,8 +2,11 @@ package servicectl
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +16,93 @@ import (
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/service"
 )
+
+func TestAdminFeedbackSetupPlanApplyAndReplay(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	cachePath := filepath.Join(root, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertRepo(ctx, cache.RepositoryBinding{RepoID: "owner/feedback", Owner: "owner", Name: "feedback", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(fmt.Sprintf("cache_path: %s\nfeedback:\n  enabled: false\n  sink: gitcode_issues\n", filepath.Join(root, "configured-but-not-active.db"))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvMCPConfigPath, configPath)
+	t.Setenv(config.EnvToken, "test-feedback-credential")
+	manager := newTestManager(t, "darwin")
+	manager.Source = config.OSSource{}
+	manager.AdminCachePath = cachePath
+	controls := NewAdminControlManager(manager, NewMaintenanceManager(manager, NewJobManager(""), ""), NewJobManager(""), NewAdminControlReceiptManager(filepath.Join(root, "controls.json")))
+
+	before := manager.adminFeedbackObservation(ctx)
+	if before.State != "disabled" || !before.SetupAvailable || strings.Join(before.SetupRepositories, ",") != "owner/feedback" {
+		t.Fatalf("before=%+v", before)
+	}
+	planned, err := controls.PlanFeedbackSetup(ctx, adminhttp.FeedbackSetupRequest{RepoID: "owner/feedback"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, ok := planned.(config.FeedbackSetupPlan)
+	if !ok || plan.Status != "confirmation_required" || plan.PlanID == "" || !plan.ConfirmationRequired {
+		t.Fatalf("plan=%#v", planned)
+	}
+	req := adminhttp.FeedbackSetupRequest{RepoID: "owner/feedback", PlanID: plan.PlanID, IdempotencyKey: "admin-feedback-setup-1"}
+	appliedAny, err := controls.ApplyFeedbackSetup(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied := appliedAny.(AdminFeedbackSetupResult)
+	if applied.Status != "configured" || applied.Replayed || applied.Feedback.State != "ready" || !applied.Feedback.SubmitAvailable {
+		t.Fatalf("applied=%+v", applied)
+	}
+	replayAny, err := controls.ApplyFeedbackSetup(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay := replayAny.(AdminFeedbackSetupResult)
+	if !replay.Replayed || replay.Status != "configured" || replay.PlanID != applied.PlanID {
+		t.Fatalf("replay=%+v", replay)
+	}
+	configured, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, append(configured, []byte("format: markdown\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staleReq := req
+	staleReq.IdempotencyKey = "admin-feedback-setup-stale"
+	_, err = controls.ApplyFeedbackSetup(ctx, staleReq)
+	var stale adminhttp.ControlError
+	if !errors.As(err, &stale) || stale.Status != http.StatusConflict || stale.Code != "stale_plan" {
+		t.Fatalf("stale feedback setup err=%T %[1]v", err)
+	}
+	encodedBytes, err := json.Marshal([]any{plan, applied})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := string(encodedBytes)
+	if strings.Contains(encoded, root) {
+		t.Fatal("feedback setup exposed a private filesystem path")
+	}
+	if strings.Contains(encoded, "test-feedback-credential") {
+		t.Fatal("feedback setup exposed a credential")
+	}
+	if strings.Contains(encoded, "api.gitcode.com") {
+		t.Fatal("feedback setup exposed a provider endpoint")
+	}
+	if _, err := controls.PlanFeedbackSetup(ctx, adminhttp.FeedbackSetupRequest{RepoID: "owner/unbound"}); err == nil || !strings.Contains(fmt.Sprintf("%v", err), "repository_unbound") {
+		t.Fatalf("unbound err=%v", err)
+	}
+}
 
 func TestMaintenanceReconcileOutcomeReportsCoalescedWork(t *testing.T) {
 	result := MaintenanceReconcileResult{JobsCoalesced: []string{"job-000001"}}

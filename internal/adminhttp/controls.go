@@ -53,6 +53,12 @@ type BindingControlRequest struct {
 	IdempotencyKey string   `json:"idempotency_key,omitempty"`
 }
 
+type FeedbackSetupRequest struct {
+	RepoID         string `json:"repo_id"`
+	PlanID         string `json:"plan_id,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+}
+
 type SearchCompareRequest struct {
 	CacheRef   string `json:"cache_ref"`
 	RepoID     string `json:"repo_id"`
@@ -103,6 +109,7 @@ type MaintenanceControlProvider func(context.Context, MaintenanceControlRequest)
 type RegistrationControlProvider func(context.Context, RegistrationControlRequest) (any, error)
 type MaintenanceConflictResolutionProvider func(context.Context, MaintenanceConflictResolutionRequest) (any, error)
 type BindingControlProvider func(context.Context, BindingControlRequest) (any, error)
+type FeedbackSetupProvider func(context.Context, FeedbackSetupRequest) (any, error)
 type SearchCompareProvider func(context.Context, SearchCompareRequest) (any, error)
 type RepositoryDocsSearchProvider func(context.Context, RepositoryDocsSearchRequest) (any, error)
 type RepositoryDocsPlanProvider func(context.Context, RepositoryDocsPlanRequest) (any, error)
@@ -155,6 +162,14 @@ func (c *Controller) planBinding(w http.ResponseWriter, r *http.Request) {
 
 func (c *Controller) applyBinding(w http.ResponseWriter, r *http.Request) {
 	applyControl(c, w, r, c.cfg.ApplyBinding, BindingControlRequest{}, true)
+}
+
+func (c *Controller) planFeedbackSetup(w http.ResponseWriter, r *http.Request) {
+	applyControl(c, w, r, c.cfg.PlanFeedbackSetup, FeedbackSetupRequest{}, false)
+}
+
+func (c *Controller) applyFeedbackSetup(w http.ResponseWriter, r *http.Request) {
+	applyControl(c, w, r, c.cfg.ApplyFeedbackSetup, FeedbackSetupRequest{}, true)
 }
 
 func (c *Controller) compareSearch(w http.ResponseWriter, r *http.Request) {
@@ -255,6 +270,8 @@ func controlIdempotencyKey(value any) string {
 	case MaintenanceConflictResolutionRequest:
 		return strings.TrimSpace(req.IdempotencyKey)
 	case BindingControlRequest:
+		return strings.TrimSpace(req.IdempotencyKey)
+	case FeedbackSetupRequest:
 		return strings.TrimSpace(req.IdempotencyKey)
 	case RAGRepairRequest:
 		return strings.TrimSpace(req.IdempotencyKey)

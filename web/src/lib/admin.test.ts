@@ -12,6 +12,9 @@ describe('admin presentation helpers', () => {
     expect(statusTone('partial/retrying')).toBe('warn');
     expect(statusTone('cancelling')).toBe('warn');
     expect(statusTone('cache_schema_blocked')).toBe('bad');
+    expect(statusTone('passed')).toBe('good');
+    expect(statusTone('credential_missing')).toBe('warn');
+    expect(statusTone('provider_unavailable')).toBe('warn');
     expect(humanize('retry_scheduled')).toBe('Retry Scheduled');
     expect(humanize('partial/retrying')).toBe('Partial / Retrying');
     expect(isSnapshotStale('2026-08-25T10:00:00Z', Date.parse('2026-08-25T10:06:00Z'))).toBe(true);

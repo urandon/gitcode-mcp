@@ -1,6 +1,6 @@
 {
   "api_version": "1",
-  "revision": "snapshot-5f2bb333e0434a6c",
+  "revision": "snapshot-4ca22ffd46e99488",
   "generated_at": "2026-08-25T10:30:00Z",
   "service": {
     "version": "v2.0.0",
@@ -86,5 +86,37 @@
   },
   "maintenance": [],
   "diagnostics": [],
-  "capabilities": []
+  "capabilities": [],
+  "feedback": {
+    "state": "disabled",
+    "prepare_available": true,
+    "submit_available": false,
+    "sink": "gitcode_issues",
+    "checks": [
+      {
+        "id": "enabled",
+        "status": "blocked"
+      },
+      {
+        "id": "sink",
+        "status": "passed"
+      },
+      {
+        "id": "repository_binding",
+        "status": "blocked"
+      },
+      {
+        "id": "credential",
+        "status": "blocked"
+      },
+      {
+        "id": "provider",
+        "status": "blocked"
+      }
+    ],
+    "remediation": "enable a trusted feedback sink before submission",
+    "handoff": "gitcode-mcp feedback setup --repo OWNER/REPO",
+    "setup_repositories": [],
+    "setup_available": false
+  }
 }

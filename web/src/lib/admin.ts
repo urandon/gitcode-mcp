@@ -521,6 +521,46 @@ export type RAGRepairPlan = {
   blockers?: string[];
 };
 
+export type FeedbackReadinessState = 'disabled' | 'sink_missing' | 'repository_unbound' | 'credential_missing' | 'provider_unavailable' | 'ready';
+
+export type FeedbackObservation = {
+  state: FeedbackReadinessState;
+  prepare_available: boolean;
+  submit_available: boolean;
+  sink?: string;
+  repo_id?: string;
+  checks: Array<{ id: string; status: string; message?: string }>;
+  remediation?: string;
+  handoff?: string;
+  setup_repositories: string[];
+  setup_available: boolean;
+};
+
+export type FeedbackSetupPlan = {
+  status: string;
+  plan_id: string;
+  repo_id: string;
+  sink: string;
+  labels: string[];
+  duplicate_policy: string;
+  effects: Array<{ id: string; class: string; summary: string; confirmation_required: boolean }>;
+  confirmation_required: boolean;
+};
+
+export type FeedbackSetupReceipt = {
+  status: string;
+  plan_id: string;
+  repo_id: string;
+  sink: string;
+  labels: string[];
+  duplicate_policy: string;
+  idempotency_key: string;
+  evidence: string;
+  generated_at: string;
+  replayed: boolean;
+  feedback: FeedbackObservation;
+};
+
 export type ObservationSnapshot = {
   api_version: string;
   revision: string;
@@ -548,6 +588,7 @@ export type ObservationSnapshot = {
   maintenance: Maintenance[];
   diagnostics: Diagnostic[];
   capabilities: Capability[];
+  feedback: FeedbackObservation;
 };
 
 export type AdminView = 'Overview' | 'Caches' | 'Jobs' | 'Maintenance' | 'Diagnostics';
@@ -564,7 +605,11 @@ export const emptySnapshot: ObservationSnapshot = {
   job_retention: { success_ttl_seconds: 0, diagnostic_ttl_seconds: 0, max_terminal_jobs: 0, max_diagnostic_jobs: 0, max_progress_events: 0, active: 0, terminal: 0, retained_by_status: [], expired_total: 0, truncated_total: 0, last_expired: 0, last_truncated: 0 },
   maintenance: [],
   diagnostics: [],
-  capabilities: []
+  capabilities: [],
+  feedback: {
+    state: 'disabled', prepare_available: true, submit_available: false,
+    checks: [], setup_repositories: [], setup_available: false
+  }
 };
 
 export function humanize(value: string | undefined): string {
@@ -582,6 +627,7 @@ export function statusTone(value: string | undefined): 'good' | 'warn' | 'bad' |
     case 'succeeded':
     case 'secure':
     case 'bound':
+    case 'passed':
       return 'good';
     case 'failed':
     case 'error':
@@ -589,6 +635,11 @@ export function statusTone(value: string | undefined): 'good' | 'warn' | 'bad' |
     case 'cache_schema_blocked':
     case 'unavailable':
       return 'bad';
+    case 'disabled':
+    case 'sink_missing':
+    case 'repository_unbound':
+    case 'credential_missing':
+    case 'provider_unavailable':
     case 'partial':
     case 'partial/retrying':
     case 'degraded':

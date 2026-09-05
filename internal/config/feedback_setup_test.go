@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -87,7 +88,7 @@ func TestFeedbackSetupRejectsStalePlanAndInvalidTarget(t *testing.T) {
 	if err := os.WriteFile(path, []byte("format: markdown\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ApplyFeedbackSetup(plan, "stale-plan", time.Now()); err == nil || !strings.Contains(err.Error(), "changed after planning") {
+	if _, err := ApplyFeedbackSetup(plan, "stale-plan", time.Now()); err == nil || !errors.Is(err, ErrFeedbackSetupStalePlan) || !strings.Contains(err.Error(), "changed after planning") {
 		t.Fatalf("err=%v", err)
 	}
 }
@@ -287,5 +288,39 @@ func TestFeedbackSetupReceiptRetentionNeverPrunesPendingClaims(t *testing.T) {
 	}
 	if _, exists := journal.Claims["abandoned"]; exists {
 		t.Fatal("expired abandoned claim was retained")
+	}
+}
+
+func TestFeedbackSetupExpectedPlanAllowsOnlyRetainedReplay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("format: text\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvMCPConfigPath, path)
+	original, err := PlanFeedbackSetup(OSSource{}, "example/feedback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyFeedbackSetup(original, "retained-admin-key", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	current, err := PlanFeedbackSetup(OSSource{}, "example/feedback")
+	if err != nil || current.PlanID == original.PlanID {
+		t.Fatalf("current=%#v err=%v", current, err)
+	}
+	configBefore, _ := os.ReadFile(path)
+	journalPath := path + ".feedback-setup-receipts.json"
+	journalBefore, _ := os.ReadFile(journalPath)
+	if _, err := ApplyFeedbackSetupWithExpectedPlan(current, original.PlanID, "new-stale-key", time.Now()); err == nil || !errors.Is(err, ErrFeedbackSetupStalePlan) || !strings.Contains(err.Error(), "plan id") {
+		t.Fatalf("stale new key err=%v", err)
+	}
+	configAfter, _ := os.ReadFile(path)
+	journalAfter, _ := os.ReadFile(journalPath)
+	if !bytes.Equal(configBefore, configAfter) || !bytes.Equal(journalBefore, journalAfter) {
+		t.Fatal("stale plan with a new key mutated config or receipts")
+	}
+	replay, err := ApplyFeedbackSetupWithExpectedPlan(current, original.PlanID, "retained-admin-key", time.Now())
+	if err != nil || !replay.Replayed || replay.PlanID != original.PlanID || replay.Status != "configured" {
+		t.Fatalf("replay=%#v err=%v", replay, err)
 	}
 }

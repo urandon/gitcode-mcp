@@ -45,6 +45,14 @@ current config digest before retention runs and are never discarded blindly.
 After a terminal receipt leaves that bounded window, its caller key may be used
 as a new operation key, so automation should retry promptly with the same key.
 
+The embedded Admin UI exposes the same readiness contract in **Maintenance →
+Feedback delivery**. It can render and confirm the setup plan only for a
+repository already bound in the effective cache. This is a trusted local
+configuration write, not a feedback submission: it never creates an issue,
+accepts an arbitrary destination, or exposes a credential, provider endpoint,
+or cache path. If receipt delivery is interrupted, retry the still-open
+confirmation to reuse the exact plan and idempotency key.
+
 The same configuration can also be supplied by a trusted installer or bundle:
 
 Add this to the global config:

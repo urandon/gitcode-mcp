@@ -3,7 +3,7 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import { Activity, AlertTriangle, ArrowLeft, Blocks, CheckCircle2, ChevronRight, CircleGauge, Clipboard, Clock3, Database, FileCheck2, FileText, FolderCog, Gauge, GitFork, HeartPulse, History, Layers3, Monitor, Moon, Power, RefreshCw, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Sun, Wrench, XCircle, Zap } from '@lucide/svelte';
   import { applyTheme, normalizeTheme, themeStorageKey, type Theme } from '$lib/theme';
-  import { adminApiVersion, cliHandoff, emptySnapshot, humanize, isSnapshotStale, jobNextAction, laneSummary, relativeAge, type AdminView, type BindingIntent, type BindingPlan, type CacheObservation, type ControlFailure, type ControlReceipt, type Diagnostic, type Job, type JobAction, type JobActionReceipt, type Maintenance, type MaintenanceConflictResolutionPlan, type MaintenanceIntent, type MaintenancePlan, type ObservationSnapshot, type ProviderSmoke, type RAGRepairPlan, type Repository, type RepositoryDocsPlan, type RepositoryDocsSearchResult, type RepositoryTab, type SearchComparison } from '$lib/admin';
+  import { adminApiVersion, cliHandoff, emptySnapshot, humanize, isSnapshotStale, jobNextAction, laneSummary, relativeAge, type AdminView, type BindingIntent, type BindingPlan, type CacheObservation, type ControlFailure, type ControlReceipt, type Diagnostic, type FeedbackSetupPlan, type FeedbackSetupReceipt, type Job, type JobAction, type JobActionReceipt, type Maintenance, type MaintenanceConflictResolutionPlan, type MaintenanceIntent, type MaintenancePlan, type ObservationSnapshot, type ProviderSmoke, type RAGRepairPlan, type Repository, type RepositoryDocsPlan, type RepositoryDocsSearchResult, type RepositoryTab, type SearchComparison } from '$lib/admin';
   import CoverageLaneCard from '$lib/CoverageLaneCard.svelte';
   import StatusChip from '$lib/StatusChip.svelte';
 
@@ -71,8 +71,14 @@
   let bindingPlan: BindingPlan | undefined;
   let bindingReceipt: ControlReceipt | undefined;
   let bindingError = '';
+  let feedbackRepoID = '';
+  let feedbackPlan: FeedbackSetupPlan | undefined;
+  let feedbackReceipt: FeedbackSetupReceipt | undefined;
+  let feedbackError = '';
+  let feedbackFailure: ControlFailure | undefined;
+  let feedbackHandoffCopied = false;
   let controlRunning = false;
-  let pendingControl: 'maintenance_apply' | 'binding_apply' | 'rag_repair_apply' | 'conflict_resolution_apply' | 'disable' | 'reconcile' | 'repository_docs_index' | '' = '';
+  let pendingControl: 'maintenance_apply' | 'binding_apply' | 'feedback_setup_apply' | 'rag_repair_apply' | 'conflict_resolution_apply' | 'disable' | 'reconcile' | 'repository_docs_index' | '' = '';
   let pendingControlKey = '';
   let controlDialog: HTMLDialogElement | undefined;
   let controlConfirmButton: HTMLButtonElement | undefined;
@@ -85,6 +91,7 @@
   let providerSmokeEnabled = false;
   let ragRepairEnabled = false;
   let conflictResolutionEnabled = false;
+  let feedbackSetupEnabled = false;
   let selectedConflictCandidateRef = '';
   let conflictResolutionPlan: MaintenanceConflictResolutionPlan | undefined;
   let conflictResolutionReceipt: ControlReceipt | undefined;
@@ -137,6 +144,7 @@
   $: providerSmokeEnabled = snapshot.capabilities.some((item) => item.id === 'admin_provider_smoke' && item.ui_enabled);
   $: ragRepairEnabled = snapshot.capabilities.some((item) => item.id === 'admin_rag_bounded_repair' && item.ui_enabled);
   $: conflictResolutionEnabled = snapshot.capabilities.some((item) => item.id === 'admin_maintenance_conflict_resolution' && item.ui_enabled);
+  $: feedbackSetupEnabled = snapshot.capabilities.some((item) => item.id === 'admin_feedback_setup' && item.ui_enabled);
   $: repositoryDocsSearchEnabled = snapshot.capabilities.some((item) => item.id === 'repository_docs_search' && item.ui_enabled) && Boolean(selectedRepo?.documentation.search_available);
   $: repositoryDocsSources = selectedRepo?.documentation.sources || [];
   $: if (!repositoryDocsSources.some((source) => source.source_registration_id === repositoryDocsSourceID)) repositoryDocsSourceID = repositoryDocsSources[0]?.source_registration_id || '';
@@ -145,6 +153,7 @@
 
   function normalizeSnapshot(value: ObservationSnapshot): ObservationSnapshot {
     value.attention ||= []; value.caches ||= []; value.jobs ||= []; value.maintenance ||= []; value.diagnostics ||= []; value.capabilities ||= [];
+    value.feedback ||= structuredClone(emptySnapshot.feedback); value.feedback.checks ||= []; value.feedback.setup_repositories ||= [];
     value.job_retention ||= structuredClone(emptySnapshot.job_retention); value.job_retention.retained_by_status ||= [];
     for (const cache of value.caches) for (const repo of (cache.repositories ||= [])) {
       repo.collections ||= []; repo.recent_sync_events ||= []; repo.execution ||= {}; repo.counts.by_kind ||= [];
@@ -220,7 +229,10 @@
     try {
       const response = await fetch('/api/admin/v1/snapshot');
       if (!response.ok) throw new Error(response.status === 401 ? 'Admin session required. Run admin open again.' : 'Observation is unavailable.');
-      snapshot = normalizeSnapshot(await response.json());
+      const previousRevision = snapshot.revision;
+      const nextSnapshot = normalizeSnapshot(await response.json());
+      snapshot = nextSnapshot;
+      await invalidateFeedbackPlanForSnapshotChange(previousRevision, nextSnapshot.revision);
       if (selectedCacheRef && selectedRepoID) maintenanceTargetKey = `${selectedCacheRef}\u0000${selectedRepoID}`;
       ensureControlSelections();
       canonicalizeRegistrationDeepLink();
@@ -420,6 +432,12 @@
       if (target) loadMaintenanceTarget(target.key, false);
     }
     if (!bindingIntent.cache_ref && snapshot.caches[0]) bindingIntent = { ...bindingIntent, cache_ref: snapshot.caches[0].cache_ref };
+    if (!snapshot.feedback.setup_repositories.includes(feedbackRepoID)) {
+      feedbackRepoID = snapshot.feedback.repo_id && snapshot.feedback.setup_repositories.includes(snapshot.feedback.repo_id)
+        ? snapshot.feedback.repo_id
+        : snapshot.feedback.setup_repositories[0] || '';
+      invalidateFeedbackPlan();
+    }
   }
 
   function canonicalizeRegistrationDeepLink(): void {
@@ -472,6 +490,23 @@
     bindingPlan = undefined; bindingReceipt = undefined; bindingError = '';
   }
 
+  function invalidateFeedbackPlan(): void {
+    feedbackPlan = undefined; feedbackReceipt = undefined; feedbackError = ''; feedbackFailure = undefined;
+  }
+
+  async function invalidateFeedbackPlanForSnapshotChange(previousRevision: string, nextRevision: string): Promise<void> {
+    if (!feedbackPlan || !previousRevision || previousRevision === nextRevision) return;
+    // A write may have committed even when its response was lost. Preserve the
+    // exact reviewed plan and key while that request is in flight, and after an
+    // ambiguous response, so the only available retry remains idempotent.
+    if (pendingControl === 'feedback_setup_apply' && (controlRunning || feedbackError)) return;
+    const closeConfirmation = pendingControl === 'feedback_setup_apply';
+    invalidateFeedbackPlan();
+    if (!closeConfirmation) return;
+    controlDialog?.close(); pendingControl = ''; pendingControlKey = '';
+    await tick(); controlTriggerButton?.focus();
+  }
+
   function loadBinding(cache: CacheObservation, repo?: Repository): void {
     const [owner = '', name = ''] = (repo?.repo_id || '').split('/');
     bindingIntent = { cache_ref: cache.cache_ref, repo_id: repo?.repo_id || '', owner, name, api_base_url: '', scopes: [...(repo?.scopes || ['issues'])], aliases: [...(repo?.aliases || [])], display_name: repo?.display_name || '' };
@@ -519,6 +554,35 @@
     finally { controlRunning = false; }
   }
 
+  async function renderFeedbackPlan(): Promise<void> {
+    if (!csrfToken || !feedbackSetupEnabled || !feedbackRepoID) return;
+    controlRunning = true; feedbackError = ''; feedbackFailure = undefined; feedbackReceipt = undefined;
+    const plannedRevision = snapshot.revision;
+    try {
+      const rendered = await controlPost<FeedbackSetupPlan>('/api/admin/v1/feedback/setup/plan', { repo_id: feedbackRepoID });
+      if (snapshot.revision !== plannedRevision) {
+        feedbackPlan = undefined;
+        feedbackError = 'Feedback readiness changed while the plan was rendered. Review the current state and render a new plan.';
+      } else {
+        feedbackPlan = rendered;
+      }
+    }
+    catch (value) {
+      feedbackPlan = undefined;
+      feedbackFailure = value instanceof Error && 'failure' in value ? (value as Error & { failure: ControlFailure }).failure : undefined;
+      feedbackError = feedbackFailure?.message || (value instanceof Error ? value.message : 'Feedback setup planning failed.');
+    } finally { controlRunning = false; }
+  }
+
+  async function copyFeedbackHandoff(): Promise<void> {
+    if (!snapshot.feedback.handoff) return;
+    try {
+      await navigator.clipboard.writeText(snapshot.feedback.handoff);
+      feedbackHandoffCopied = true;
+      window.setTimeout(() => (feedbackHandoffCopied = false), 1800);
+    } catch { feedbackHandoffCopied = false; }
+  }
+
   async function runSearchComparison(): Promise<void> {
     if (!csrfToken || !searchCompareEnabled || !selectedCache || !selectedRepo || !searchQuery.trim()) return;
     searchRunning = true; searchError = ''; searchComparison = undefined; providerSmoke = undefined; repairPlan = undefined; repairReceipt = undefined;
@@ -560,7 +624,7 @@
 
   async function confirmControl(kind: typeof pendingControl, trigger: HTMLButtonElement): Promise<void> {
     controlTriggerButton = trigger; pendingControl = kind; pendingControlKey = `admin-${kind}-${crypto.randomUUID()}`;
-    maintenanceError = ''; maintenanceFailure = undefined; bindingError = ''; await tick(); controlDialog?.showModal(); controlConfirmButton?.focus();
+    maintenanceError = ''; maintenanceFailure = undefined; bindingError = ''; feedbackError = ''; feedbackFailure = undefined; await tick(); controlDialog?.showModal(); controlConfirmButton?.focus();
   }
 
   async function cancelControlConfirmation(): Promise<void> {
@@ -572,11 +636,15 @@
     controlRunning = true;
 	if (pendingControl === 'conflict_resolution_apply') conflictResolutionError = '';
 	let retainedConflictReceipt: ControlReceipt | undefined;
+    let retainedFeedbackReceipt: FeedbackSetupReceipt | undefined;
     try {
       if (pendingControl === 'maintenance_apply' && maintenancePlan) {
         maintenanceReceipt = await controlPost<ControlReceipt>('/api/admin/v1/maintenance/apply', { ...maintenanceIntent, plan_id: maintenancePlan.plan_id, idempotency_key: pendingControlKey });
       } else if (pendingControl === 'binding_apply' && bindingPlan) {
         bindingReceipt = await controlPost<ControlReceipt>('/api/admin/v1/bindings/apply', { ...bindingIntent, plan_id: bindingPlan.plan_id, idempotency_key: pendingControlKey });
+      } else if (pendingControl === 'feedback_setup_apply' && feedbackPlan) {
+        feedbackReceipt = await controlPost<FeedbackSetupReceipt>('/api/admin/v1/feedback/setup/apply', { repo_id: feedbackPlan.repo_id, plan_id: feedbackPlan.plan_id, idempotency_key: pendingControlKey });
+        retainedFeedbackReceipt = feedbackReceipt;
       } else if (pendingControl === 'rag_repair_apply' && repairPlan && selectedCache && selectedRepo) {
         repairReceipt = await controlPost<ControlReceipt>('/api/admin/v1/rag/repair/apply', { cache_ref: selectedCache.cache_ref, repo_id: selectedRepo.repo_id, profile: repairProfile, max_chunks: repairMaxChunks, plan_id: repairPlan.plan_id, idempotency_key: pendingControlKey });
 	  } else if (pendingControl === 'conflict_resolution_apply' && conflictResolutionPlan) {
@@ -592,12 +660,21 @@
       }
       controlDialog?.close(); pendingControl = ''; pendingControlKey = ''; await refresh();
 	  if (retainedConflictReceipt) conflictResolutionReceipt = retainedConflictReceipt;
+	  if (retainedFeedbackReceipt) feedbackReceipt = retainedFeedbackReceipt;
 	  await tick(); controlTriggerButton?.focus();
     } catch (value) {
       const message = value instanceof Error ? value.message : 'The confirmed control failed.';
       const failure = value instanceof Error && 'failure' in value ? (value as Error & { failure: ControlFailure }).failure : undefined;
-      if (pendingControl !== 'binding_apply' && pendingControl !== 'rag_repair_apply' && pendingControl !== 'conflict_resolution_apply') maintenanceFailure = failure;
-      if (pendingControl === 'binding_apply') bindingError = message; else if (pendingControl === 'rag_repair_apply') searchError = message; else if (pendingControl === 'conflict_resolution_apply') {
+      if (pendingControl !== 'binding_apply' && pendingControl !== 'feedback_setup_apply' && pendingControl !== 'rag_repair_apply' && pendingControl !== 'conflict_resolution_apply') maintenanceFailure = failure;
+      if (pendingControl === 'binding_apply') bindingError = message; else if (pendingControl === 'feedback_setup_apply') {
+        feedbackFailure = failure; feedbackError = message;
+        if (failure?.code === 'stale_plan') {
+          controlDialog?.close(); pendingControl = ''; pendingControlKey = ''; feedbackPlan = undefined;
+          await refresh(); await tick(); controlTriggerButton?.focus();
+        } else {
+          await tick(); controlConfirmButton?.focus();
+        }
+      } else if (pendingControl === 'rag_repair_apply') searchError = message; else if (pendingControl === 'conflict_resolution_apply') {
         conflictResolutionError = message;
         if (failure?.code === 'stale_plan' || failure?.code === 'conflict_generation_stale' || failure?.code === 'conflict_candidate_identity_changed') {
 		  controlDialog?.close(); pendingControl = ''; pendingControlKey = '';
@@ -880,6 +957,22 @@
             </section>
           {/if}
 
+          <section class="control-workbench feedback-workbench" aria-labelledby="feedback-delivery-title">
+            <div class="control-heading"><div><span class="large-icon"><FileText size={22} /></span><div><p class="section-kicker">AGENT FEEDBACK</p><h2 id="feedback-delivery-title">Feedback delivery</h2><p>Prepare a sanitized report in every state. Submission is available only when the trusted issue sink, cache binding, credential, and live provider are ready.</p></div></div><StatusChip value={snapshot.feedback.state} /></div>
+            <dl class="feedback-summary"><div><dt>Report preparation</dt><dd>{snapshot.feedback.prepare_available ? 'Available' : 'Unavailable'}</dd></div><div><dt>Issue submission</dt><dd>{snapshot.feedback.submit_available ? 'Available' : 'Unavailable'}</dd></div><div><dt>Configured sink</dt><dd>{snapshot.feedback.sink ? humanize(snapshot.feedback.sink) : 'Not configured'}</dd></div><div><dt>Feedback repository</dt><dd>{snapshot.feedback.repo_id || 'Not configured'}</dd></div></dl>
+            <div class="feedback-checks" aria-label="Feedback readiness checks">{#each snapshot.feedback.checks as check}<article><div><strong>{humanize(check.id)}</strong>{#if check.message}<small>{check.message}</small>{/if}</div><StatusChip value={check.status} /></article>{/each}</div>
+            {#if snapshot.feedback.remediation || snapshot.feedback.handoff}<div class="state-panel warning-panel feedback-remediation"><AlertTriangle size={20} /><div><strong>Submission setup required</strong>{#if snapshot.feedback.remediation}<p>{snapshot.feedback.remediation}</p>{/if}{#if snapshot.feedback.handoff}<div class="command-row"><code>{snapshot.feedback.handoff}</code><button onclick={() => void copyFeedbackHandoff()} aria-label="Copy feedback CLI handoff"><Clipboard size={15} />{feedbackHandoffCopied ? 'Copied' : 'Copy CLI'}</button></div>{/if}</div></div>{/if}
+            {#if snapshot.feedback.setup_available}
+              <form class="control-form feedback-setup-form" onsubmit={(event) => { event.preventDefault(); void renderFeedbackPlan(); }}>
+                <label class="span-two"><span>Trusted feedback repository</span><select value={feedbackRepoID} onchange={(event) => { feedbackRepoID = event.currentTarget.value; invalidateFeedbackPlan(); }}>{#each snapshot.feedback.setup_repositories as repoID}<option value={repoID}>{repoID}</option>{/each}</select><small>Only repository identities already bound in the effective cache are eligible. The browser cannot enter an arbitrary destination.</small></label>
+                <div class="form-actions span-two"><span>{feedbackSetupEnabled ? 'The plan changes trusted local configuration only; it does not submit an issue.' : 'Capability registry does not expose feedback setup.'}</span><button class="primary-action" type="submit" disabled={!csrfToken || !feedbackSetupEnabled || !feedbackRepoID || controlRunning}><FileCheck2 size={16} />{controlRunning ? 'Planning…' : 'Render feedback setup plan'}</button></div>
+              </form>
+            {:else}<div class="empty-state feedback-empty"><GitFork size={23} /><h3>No eligible feedback repository</h3><p>Bind a trusted repository in the effective cache before enabling issue delivery.</p></div>{/if}
+            {#if feedbackError}<div class="action-result error" role="alert"><AlertTriangle size={17} /><div><strong>Feedback setup failed{feedbackFailure?.field ? ` · ${humanize(feedbackFailure.field)}` : ''}</strong><span>{feedbackError}</span>{#if feedbackFailure?.remediation}<span>{feedbackFailure.remediation}</span>{/if}{#if feedbackFailure?.cli_handoff}<code>{feedbackFailure.cli_handoff}</code>{/if}</div></div>{/if}
+            {#if feedbackPlan}<div class="plan-panel"><div class="plan-summary"><div><p class="section-kicker">TRUSTED LOCAL CONFIG</p><h3>{feedbackPlan.repo_id}</h3><code>{feedbackPlan.plan_id}</code></div><StatusChip value={feedbackPlan.status} /></div><dl class="binding-preview"><div><dt>Sink</dt><dd>{humanize(feedbackPlan.sink)}</dd></div><div><dt>Labels</dt><dd>{feedbackPlan.labels.join(', ') || 'None'}</dd></div><div><dt>Duplicates</dt><dd>{humanize(feedbackPlan.duplicate_policy)}</dd></div></dl><div class="effect-ledger">{#each feedbackPlan.effects as effect}<article><span class="effect-icon"><Zap size={15} /></span><div><strong>{effect.summary}</strong><small>{humanize(effect.class)}</small></div><StatusChip value={effect.confirmation_required ? 'planned' : 'complete'} /></article>{/each}</div><div class="plan-footer"><div><strong>Remote boundary</strong><span>No issue is submitted and no credential, endpoint, or cache path is exposed.</span></div><button class="primary-action" disabled={!feedbackPlan.confirmation_required || controlRunning} onclick={(event) => void confirmControl('feedback_setup_apply', event.currentTarget)}><Power size={16} />{feedbackPlan.confirmation_required ? 'Review feedback setup' : 'Already configured'}</button></div></div>{/if}
+            {#if feedbackReceipt}<div class="action-result" role="status"><CheckCircle2 size={17} /><div><strong>{humanize(feedbackReceipt.status)}</strong><span>{feedbackReceipt.evidence}{feedbackReceipt.replayed ? ' · replayed safely' : ''}</span></div></div>{/if}
+          </section>
+
           <section class="control-workbench" aria-labelledby="policy-editor-title">
             <div class="control-heading"><div><span class="large-icon"><SlidersHorizontal size={22} /></span><div><p class="section-kicker">PLAN → CONFIRM → APPLY</p><h2 id="policy-editor-title">Maintenance policy</h2><p>Change a managed repository policy, review the effect ledger, then confirm the exact plan id.</p></div></div><StatusChip value={maintenancePlan?.status || selectedMaintenance?.state || 'not_planned'} label={maintenancePlan ? humanize(maintenancePlan.status) : selectedMaintenance ? humanize(selectedMaintenance.state) : 'Not planned'} /></div>
             {#if repoTargets.length === 0}<div class="empty-state"><Database size={23} /><h3>No bound repositories</h3><p>Add a repository binding below before planning maintenance.</p></div>{:else}
@@ -925,7 +1018,7 @@
             {#if bindingReceipt}<div class="action-result" role="status"><CheckCircle2 size={17} /><div><strong>{humanize(bindingReceipt.outcome)}</strong><span>Receipt {bindingReceipt.receipt_id}{bindingReceipt.replayed ? ' · replayed safely' : ''}</span></div></div>{/if}
           </section>
 
-          {#if pendingControl}<dialog bind:this={controlDialog} class="confirmation-dialog control-confirmation" aria-labelledby="confirm-control-title" oncancel={(event) => { event.preventDefault(); void cancelControlConfirmation(); }}><span class:danger={pendingControl === 'disable'} class="dialog-icon">{#if pendingControl === 'binding_apply' || pendingControl === 'conflict_resolution_apply'}<GitFork size={21} />{:else if pendingControl === 'reconcile'}<RotateCcw size={21} />{:else}<Power size={21} />{/if}</span><div><p class="section-kicker">CONFIRM LOCAL CONTROL</p><h2 id="confirm-control-title">{pendingControl === 'conflict_resolution_apply' ? 'Resolve this identity conflict?' : pendingControl === 'maintenance_apply' ? 'Apply this maintenance plan?' : pendingControl === 'binding_apply' ? 'Write this repository binding?' : pendingControl === 'disable' ? 'Disable this registration?' : 'Reconcile this registration now?'}</h2><p>The daemon will validate current state again. A stale plan is rejected; an interrupted retry reuses the same durable idempotency key.</p><dl><div><dt>Target</dt><dd>{pendingControl === 'conflict_resolution_apply' ? (conflictResolutionPlan?.selected.cohort_repo_ids?.join(', ') || conflictResolutionPlan?.selected.repo_id) : pendingControl === 'binding_apply' ? bindingIntent.repo_id : maintenanceIntent.repo_id}</dd></div><div><dt>Cache</dt><dd>{pendingControl === 'binding_apply' ? bindingIntent.cache_ref : maintenanceIntent.cache_ref}</dd></div><div><dt>Plan</dt><dd>{pendingControl === 'conflict_resolution_apply' ? conflictResolutionPlan?.plan_id : pendingControl === 'binding_apply' ? bindingPlan?.plan_id : pendingControl === 'maintenance_apply' ? maintenancePlan?.plan_id : selectedMaintenance?.registration_id}</dd></div></dl>{#if pendingControl === 'conflict_resolution_apply' && conflictResolutionError}<div class="action-result error" role="alert"><AlertTriangle size={17} /><div><strong>Result delivery was not confirmed</strong><span>{conflictResolutionError}</span><span>Retry below to reuse this exact plan and durable key.</span></div></div>{/if}<div class="dialog-actions"><button onclick={() => void cancelControlConfirmation()} disabled={controlRunning}>Keep current state</button><button bind:this={controlConfirmButton} class:danger-action={pendingControl === 'disable'} class="primary-action" onclick={() => void executeControl()} disabled={controlRunning}>{controlRunning ? 'Submitting…' : pendingControl === 'conflict_resolution_apply' ? 'Confirm selected candidate' : 'Confirm action'}</button></div></div></dialog>{/if}
+          {#if pendingControl}<dialog bind:this={controlDialog} class="confirmation-dialog control-confirmation" aria-labelledby="confirm-control-title" oncancel={(event) => { event.preventDefault(); void cancelControlConfirmation(); }}><span class:danger={pendingControl === 'disable'} class="dialog-icon">{#if pendingControl === 'binding_apply' || pendingControl === 'conflict_resolution_apply'}<GitFork size={21} />{:else if pendingControl === 'feedback_setup_apply'}<FileText size={21} />{:else if pendingControl === 'reconcile'}<RotateCcw size={21} />{:else}<Power size={21} />{/if}</span><div><p class="section-kicker">CONFIRM LOCAL CONTROL</p><h2 id="confirm-control-title">{pendingControl === 'conflict_resolution_apply' ? 'Resolve this identity conflict?' : pendingControl === 'feedback_setup_apply' ? 'Enable feedback issue delivery?' : pendingControl === 'maintenance_apply' ? 'Apply this maintenance plan?' : pendingControl === 'binding_apply' ? 'Write this repository binding?' : pendingControl === 'disable' ? 'Disable this registration?' : 'Reconcile this registration now?'}</h2><p>{pendingControl === 'feedback_setup_apply' ? 'The daemon will atomically update trusted local feedback configuration. It will not submit an issue or write credentials.' : 'The daemon will validate current state again. A stale plan is rejected; an interrupted retry reuses the same durable idempotency key.'}</p><dl><div><dt>Target</dt><dd>{pendingControl === 'conflict_resolution_apply' ? (conflictResolutionPlan?.selected.cohort_repo_ids?.join(', ') || conflictResolutionPlan?.selected.repo_id) : pendingControl === 'feedback_setup_apply' ? feedbackPlan?.repo_id : pendingControl === 'binding_apply' ? bindingIntent.repo_id : maintenanceIntent.repo_id}</dd></div>{#if pendingControl !== 'feedback_setup_apply'}<div><dt>Cache</dt><dd>{pendingControl === 'binding_apply' ? bindingIntent.cache_ref : maintenanceIntent.cache_ref}</dd></div>{/if}<div><dt>Plan</dt><dd>{pendingControl === 'conflict_resolution_apply' ? conflictResolutionPlan?.plan_id : pendingControl === 'feedback_setup_apply' ? feedbackPlan?.plan_id : pendingControl === 'binding_apply' ? bindingPlan?.plan_id : pendingControl === 'maintenance_apply' ? maintenancePlan?.plan_id : selectedMaintenance?.registration_id}</dd></div></dl>{#if pendingControl === 'conflict_resolution_apply' && conflictResolutionError}<div class="action-result error" role="alert"><AlertTriangle size={17} /><div><strong>Result delivery was not confirmed</strong><span>{conflictResolutionError}</span><span>Retry below to reuse this exact plan and durable key.</span></div></div>{/if}{#if pendingControl === 'feedback_setup_apply' && feedbackError}<div class="action-result error" role="alert"><AlertTriangle size={17} /><div><strong>Result delivery was not confirmed</strong><span>{feedbackError}</span><span>Retry below to reuse this exact plan and durable key.</span></div></div>{/if}<div class="dialog-actions"><button onclick={() => void cancelControlConfirmation()} disabled={controlRunning}>Keep current state</button><button bind:this={controlConfirmButton} class:danger-action={pendingControl === 'disable'} class="primary-action" onclick={() => void executeControl()} disabled={controlRunning}>{controlRunning ? 'Submitting…' : pendingControl === 'conflict_resolution_apply' ? 'Confirm selected candidate' : pendingControl === 'feedback_setup_apply' ? 'Confirm feedback setup' : 'Confirm action'}</button></div></div></dialog>{/if}
 
         {:else}
           <div class="intro section-intro"><p class="eyebrow">GOVERNANCE & RECOVERY</p><h1>Diagnostics</h1><p>Typed failures, recovered state, exact remediation, and capability boundaries.</p></div>
