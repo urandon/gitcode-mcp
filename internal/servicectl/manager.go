@@ -585,9 +585,16 @@ func (m Manager) startSyncStageRecovery(ctx context.Context, jobs *JobManager, r
 		}
 	}
 	go func() {
-		defer releaseFences()
-		if err := recoverStages(ctx, jobs, m); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-			jobs.failInterruptedSyncRecoveries("sync_recovery_failed")
+		err := recoverStages(ctx, jobs, m)
+		if err == nil {
+			releaseFences()
+			return
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
+		if err := jobs.failInterruptedSyncRecoveries("sync_recovery_failed"); err == nil {
+			releaseFences()
 		}
 	}()
 }

@@ -1821,12 +1821,16 @@ func (m *JobManager) failInterruptedSyncRetry(jobID, reason string) error {
 	})
 }
 
-func (m *JobManager) failInterruptedSyncRecoveries(reason string) {
+func (m *JobManager) failInterruptedSyncRecoveries(reason string) error {
+	var persistErrors []error
 	for _, job := range m.List() {
 		if job.Type == SyncJobType && job.Status == JobStatusInterrupted {
-			_ = m.failInterruptedSyncRetry(job.ID, reason)
+			if err := m.failInterruptedSyncRetry(job.ID, reason); err != nil {
+				persistErrors = append(persistErrors, err)
+			}
 		}
 	}
+	return errors.Join(persistErrors...)
 }
 
 func (m *JobManager) beginInterruptedSyncRecoveryFences() func() {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -96,6 +97,8 @@ func TestIssue141BlockedCacheInspectionDoesNotBlockControlPlane(t *testing.T) {
 	metadataBlockedPath := filepath.Join(root, "metadata-blocked.db")
 	healthyPath := filepath.Join(root, "healthy.db")
 	identities := map[string]cache.CacheIdentity{}
+	canonicalPaths := map[string]string{}
+	canonicalIdentities := map[string]cache.CacheIdentity{}
 	schemas := map[string]int{}
 	for _, path := range []string{blockedPath, metadataBlockedPath, healthyPath} {
 		store, err := cache.NewSQLiteStore(ctx, path)
@@ -112,6 +115,13 @@ func TestIssue141BlockedCacheInspectionDoesNotBlockControlPlane(t *testing.T) {
 			t.Fatal(err)
 		}
 		identities[path] = identity
+		canonicalPath, err := canonicalCachePath(path)
+		if err != nil {
+			store.Close()
+			t.Fatal(err)
+		}
+		canonicalPaths[path] = canonicalPath
+		canonicalIdentities[canonicalPath] = identity
 		schema, err := store.SchemaVersion(ctx)
 		if err != nil {
 			store.Close()
@@ -203,10 +213,10 @@ func TestIssue141BlockedCacheInspectionDoesNotBlockControlPlane(t *testing.T) {
 		return canonicalCachePath(path)
 	}
 	manager.maintenanceCacheInspector = func(inspectCtx context.Context, path, repoID string) (cache.CacheIdentity, cache.RepositoryBinding, error) {
-		if path == blockedPath {
+		if path == canonicalPaths[blockedPath] {
 			<-releaseBlockedOpen
 		}
-		if identity, ok := identities[path]; ok {
+		if identity, ok := canonicalIdentities[path]; ok {
 			return identity, cache.RepositoryBinding{RepoID: repoID, Owner: "owner", Name: "repo"}, nil
 		}
 		return inspectMaintenanceCache(inspectCtx, path, repoID)
@@ -316,6 +326,40 @@ func TestIssue141BlockedCacheInspectionDoesNotBlockControlPlane(t *testing.T) {
 		if wasBlocked && (!entry.Enabled || entry.State != "enrolled" || entry.LastErrorClass != "") {
 			t.Fatalf("recovered registration=%+v", entry)
 		}
+	}
+}
+
+func TestSyncStageRecoveryRetainsFenceWhenFailureCannotBePersisted(t *testing.T) {
+	jobs := NewJobManager(filepath.Join(t.TempDir(), "jobs.json"))
+	cacheUUID := "cache-uuid"
+	jobs.jobs["job-000001"] = &Job{ID: "job-000001", Type: SyncJobType, CacheUUID: cacheUUID, Status: JobStatusInterrupted, CreatedAt: time.Now().Add(-time.Minute).UTC(), UpdatedAt: time.Now().UTC()}
+	if err := jobs.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	releaseFences := jobs.beginInterruptedSyncRecoveryFences()
+	defer releaseFences()
+	persistAttempted := make(chan struct{})
+	var once sync.Once
+	jobs.writeFile = func(string, []byte, os.FileMode) error {
+		once.Do(func() { close(persistAttempted) })
+		return errors.New("snapshot unavailable")
+	}
+	manager := newTestManager(t, "darwin")
+	manager.syncStageRecovery = func(context.Context, *JobManager, Manager) error {
+		return errors.New("recovery unavailable")
+	}
+	manager.startSyncStageRecovery(context.Background(), jobs, releaseFences)
+	select {
+	case <-persistAttempted:
+	case <-time.After(time.Second):
+		t.Fatal("recovery failure was not projected onto interrupted jobs")
+	}
+	if !jobs.CacheRecoveryPending(cacheUUID) {
+		t.Fatal("cache recovery fence was released after terminal-state persistence failed")
+	}
+	job, ok := jobs.Get("job-000001")
+	if !ok || job.Status != JobStatusInterrupted {
+		t.Fatalf("interrupted job changed despite persistence failure: %+v found=%t", job, ok)
 	}
 }
 

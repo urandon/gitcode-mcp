@@ -25,6 +25,7 @@ const (
 	legacyMaintenanceRegistrySchema  = "gitcode-mcp.managed-caches.v1"
 	maintenanceRegistrySchema        = "gitcode-mcp.managed-caches.v2"
 	defaultMaintenanceInspectTimeout = time.Second
+	maxMaintenanceInspectWorkers     = 4
 )
 
 var errMaintenanceCacheInspectionTimeout = errors.New("maintenance: cache inspection timed out")
@@ -43,6 +44,11 @@ type maintenanceCacheInspectionRequest struct {
 	path         string
 	snapshotPath string
 	repoID       string
+}
+
+type maintenanceCacheInspectionResult struct {
+	id         string
+	inspection maintenanceCacheInspection
 }
 
 type maintenanceCacheInspector func(context.Context, string, string) (cache.CacheIdentity, cache.RepositoryBinding, error)
@@ -627,27 +633,60 @@ func (m *MaintenanceManager) inspectLoadedEntriesBounded(ctx context.Context, id
 }
 
 func (m *MaintenanceManager) inspectRequestsBounded(ctx context.Context, requests []maintenanceCacheInspectionRequest) map[string]maintenanceCacheInspection {
-	results := make(chan struct {
-		id         string
-		inspection maintenanceCacheInspection
-	}, len(requests))
-	for _, request := range requests {
-		go func(request maintenanceCacheInspectionRequest) {
-			results <- struct {
-				id         string
-				inspection maintenanceCacheInspection
-			}{id: request.id, inspection: m.inspectCacheBounded(ctx, request.path, request.snapshotPath, request.repoID)}
-		}(request)
-	}
 	inspections := make(map[string]maintenanceCacheInspection, len(requests))
-	for range len(requests) {
-		result := <-results
-		inspections[result.id] = result.inspection
+	if len(requests) == 0 {
+		return inspections
 	}
+	batchCtx, cancel := context.WithTimeout(ctx, m.inspectTimeout)
+	defer cancel()
+	workerCount := min(maxMaintenanceInspectWorkers, len(requests))
+	work := make(chan maintenanceCacheInspectionRequest)
+	results := make(chan maintenanceCacheInspectionResult, workerCount)
+	for range workerCount {
+		go func() {
+			for request := range work {
+				results <- maintenanceCacheInspectionResult{id: request.id, inspection: m.inspectCacheBounded(batchCtx, request.path, request.snapshotPath, request.repoID)}
+			}
+		}()
+	}
+	next, completed := 0, 0
+	for completed < len(requests) {
+		if batchErr := batchCtx.Err(); batchErr != nil {
+			close(work)
+			inspectionErr := maintenanceInspectionContextError(batchErr)
+			for _, request := range requests[next:] {
+				inspections[request.id] = maintenanceCacheInspection{err: inspectionErr}
+			}
+			for completed < next {
+				result := <-results
+				inspections[result.id] = result.inspection
+				completed++
+			}
+			return inspections
+		}
+		var outbound chan<- maintenanceCacheInspectionRequest
+		var request maintenanceCacheInspectionRequest
+		if next < len(requests) {
+			outbound = work
+			request = requests[next]
+		}
+		select {
+		case outbound <- request:
+			next++
+		case result := <-results:
+			inspections[result.id] = result.inspection
+			completed++
+		case <-batchCtx.Done():
+		}
+	}
+	close(work)
 	return inspections
 }
 
 func (m *MaintenanceManager) inspectCacheBounded(ctx context.Context, path, snapshotPath, repoID string) maintenanceCacheInspection {
+	if err := ctx.Err(); err != nil {
+		return maintenanceCacheInspection{err: maintenanceInspectionContextError(err)}
+	}
 	inspectCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	result := make(chan maintenanceCacheInspection, 1)
@@ -661,16 +700,19 @@ func (m *MaintenanceManager) inspectCacheBounded(ctx context.Context, path, snap
 		identity, binding, inspectErr := m.inspectCache(inspectCtx, canonicalPath, repoID)
 		result <- maintenanceCacheInspection{identity: identity, binding: binding, pathKey: canonicalPath, snapshotPath: canonicalSnapshotPath, snapshotErr: snapshotErr, err: inspectErr}
 	}()
-	timer := time.NewTimer(m.inspectTimeout)
-	defer timer.Stop()
 	select {
 	case inspected := <-result:
 		return inspected
 	case <-ctx.Done():
-		return maintenanceCacheInspection{err: ctx.Err()}
-	case <-timer.C:
-		return maintenanceCacheInspection{err: errMaintenanceCacheInspectionTimeout}
+		return maintenanceCacheInspection{err: maintenanceInspectionContextError(ctx.Err())}
 	}
+}
+
+func maintenanceInspectionContextError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errMaintenanceCacheInspectionTimeout
+	}
+	return err
 }
 
 func (m *MaintenanceManager) canonicalizeLoadedEntriesLocked(ctx context.Context) bool {
@@ -701,7 +743,7 @@ func (m *MaintenanceManager) canonicalizeLoadedEntriesLocked(ctx context.Context
 		inspection := inspections[id]
 		pathKey := inspection.pathKey
 		if pathKey == "" {
-			pathKey = maintenanceCanonicalPathKey(entry.cachePath)
+			pathKey = maintenanceStoredPathKey(entry.cachePath)
 		}
 		if uuidPaths[entry.CacheUUID] == nil {
 			uuidPaths[entry.CacheUUID] = map[string]bool{}
@@ -898,7 +940,7 @@ func (m *MaintenanceManager) canonicalizeLoadedEntriesLocked(ctx context.Context
 					if receipt.IntentHash != "" && receipt.IntentHash != maintenanceEnrollmentIntentHash(candidate.Entry.RegistrationID, candidate.Entry.Policy, candidate.Entry.ConfigHash) {
 						continue
 					}
-					paths[pathFingerprint(maintenanceCanonicalPathKey(candidate.CachePath))] = true
+					paths[pathFingerprint(maintenanceStoredPathKey(candidate.CachePath))] = true
 				}
 			}
 			switch len(paths) {
@@ -967,7 +1009,7 @@ func (m *MaintenanceManager) installMaintenanceConflictLocked(registrationID str
 		candidateIDs = append(candidateIDs, item.entry.RegistrationID)
 		policyHashes = append(policyHashes, maintenanceHash(item.entry.Policy))
 		configHashes = append(configHashes, item.entry.ConfigHash)
-		pathFingerprints = append(pathFingerprints, pathFingerprint(maintenanceCanonicalPathKey(item.entry.cachePath)))
+		pathFingerprints = append(pathFingerprints, pathFingerprint(maintenanceStoredPathKey(item.entry.cachePath)))
 		legacyIDs := append([]string{item.entry.RegistrationID}, item.entry.LegacyRegistrationIDs...)
 		for _, legacyID := range legacyIDs {
 			legacyID = strings.TrimSpace(legacyID)
@@ -1019,7 +1061,7 @@ func publicMaintenanceConflictCandidate(private maintenanceIdentityConflictCandi
 	for _, source := range private.RepositorySources {
 		refs = append(refs, source.State.SourceRegistrationID)
 	}
-	return MaintenanceIdentityCandidate{CandidateRef: private.CandidateRef, RegistrationID: private.Entry.RegistrationID, RepoID: private.Entry.RepoID, Policy: private.Entry.Policy, PolicyHash: maintenanceHash(private.Entry.Policy), ConfigHash: private.Entry.ConfigHash, PathFingerprint: pathFingerprint(maintenanceCanonicalPathKey(private.CachePath)), SourceAuthorityHash: maintenanceDiskSourceAuthorityHash(private.RepositorySources), SourceRefs: sortedUniqueStrings(refs), WasEnabled: private.WasEnabled}
+	return MaintenanceIdentityCandidate{CandidateRef: private.CandidateRef, RegistrationID: private.Entry.RegistrationID, RepoID: private.Entry.RepoID, Policy: private.Entry.Policy, PolicyHash: maintenanceHash(private.Entry.Policy), ConfigHash: private.Entry.ConfigHash, PathFingerprint: pathFingerprint(maintenanceStoredPathKey(private.CachePath)), SourceAuthorityHash: maintenanceDiskSourceAuthorityHash(private.RepositorySources), SourceRefs: sortedUniqueStrings(refs), WasEnabled: private.WasEnabled}
 }
 
 func maintenanceConflictCandidateRef(private maintenanceIdentityConflictCandidate) string {
@@ -1031,7 +1073,7 @@ func maintenanceConflictCandidateRef(private maintenanceIdentityConflictCandidat
 		ConfigHash          string `json:"config_hash"`
 		SourceAuthorityHash string `json:"source_authority_hash"`
 		ConfigSnapshotHash  string `json:"config_snapshot_hash"`
-	}{private.Entry.RegistrationID, private.Entry.RepoID, pathFingerprint(maintenanceCanonicalPathKey(private.CachePath)), maintenanceHash(private.Entry.Policy), private.Entry.ConfigHash, maintenanceDiskSourceAuthorityHash(private.RepositorySources), maintenanceHash(private.ConfigSnapshot)}
+	}{private.Entry.RegistrationID, private.Entry.RepoID, pathFingerprint(maintenanceStoredPathKey(private.CachePath)), maintenanceHash(private.Entry.Policy), private.Entry.ConfigHash, maintenanceDiskSourceAuthorityHash(private.RepositorySources), maintenanceHash(private.ConfigSnapshot)}
 	hash := strings.TrimPrefix(maintenanceHash(payload), "sha256:")
 	return "conflict-candidate-" + hash[:16]
 }
@@ -1040,7 +1082,7 @@ func maintenanceDuplicateLoadID(registrationID, cachePath string) string {
 	hash := strings.TrimPrefix(maintenanceHash(struct {
 		RegistrationID  string `json:"registration_id"`
 		PathFingerprint string `json:"path_fingerprint"`
-	}{registrationID, pathFingerprint(maintenanceCanonicalPathKey(cachePath))}), "sha256:")
+	}{registrationID, pathFingerprint(maintenanceStoredPathKey(cachePath))}), "sha256:")
 	return "maintenance-load-candidate-" + hash[:16]
 }
 
@@ -1073,7 +1115,7 @@ func (m *MaintenanceManager) remapRepositoryDocsAdmissionsLocked() bool {
 					}
 					for _, source := range candidate.RepositorySources {
 						if m.resolveSourceRegistrationIDLocked(source.State.SourceRegistrationID) == intent.SourceRegistrationID {
-							paths[pathFingerprint(maintenanceCanonicalPathKey(candidate.CachePath))] = true
+							paths[pathFingerprint(maintenanceStoredPathKey(candidate.CachePath))] = true
 						}
 					}
 				}
@@ -1215,7 +1257,7 @@ func maintenanceDiskSourceAuthorityHash(sources []repositoryDocsDiskSource) stri
 	}
 	values := make([]authority, 0, len(sources))
 	for _, source := range sources {
-		values = append(values, authority{source.State.GitStoreRef, source.State.WorktreeRef, source.Profile, pathFingerprint(maintenanceCanonicalPathKey(source.RepositoryPath))})
+		values = append(values, authority{source.State.GitStoreRef, source.State.WorktreeRef, source.Profile, pathFingerprint(maintenanceStoredPathKey(source.RepositoryPath))})
 	}
 	sort.Slice(values, func(i, j int) bool { return maintenanceHash(values[i]) < maintenanceHash(values[j]) })
 	return maintenanceHash(values)
@@ -1265,10 +1307,18 @@ func (m *MaintenanceManager) mergeMaintenanceSourcesLocked(canonicalID string, c
 }
 
 func maintenanceCanonicalPathKey(path string) string {
-	// Registry writes persist canonical paths. Startup fallbacks deliberately do
-	// only lexical normalization here: filesystem metadata access belongs inside
-	// the bounded inspection worker so a host-policy denial cannot block the
-	// control plane before its listener is published.
+	if resolved, err := filepath.EvalSymlinks(strings.TrimSpace(path)); err == nil {
+		if absolute, absErr := filepath.Abs(resolved); absErr == nil {
+			return filepath.Clean(absolute)
+		}
+	}
+	return maintenanceStoredPathKey(path)
+}
+
+// maintenanceStoredPathKey is the startup-safe fallback for registry paths.
+// Current registry writes persist canonical paths; legacy or inaccessible
+// paths are normalized lexically without touching their filesystem metadata.
+func maintenanceStoredPathKey(path string) string {
 	if absolute, err := filepath.Abs(strings.TrimSpace(path)); err == nil {
 		return filepath.Clean(absolute)
 	}

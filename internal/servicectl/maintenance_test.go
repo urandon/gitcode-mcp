@@ -86,6 +86,46 @@ func TestMaintenanceReconcilePublishesSchemaBlockedAndClearsTerminalActiveJobs(t
 	}
 }
 
+func TestMaintenanceStartupInspectionUsesBoundedWorkerPoolAndGlobalDeadline(t *testing.T) {
+	manager := newTestManager(t, "darwin")
+	manager.maintenanceCacheInspectTimeout = 25 * time.Millisecond
+	release := make(chan struct{})
+	defer close(release)
+	var mu sync.Mutex
+	started := 0
+	manager.maintenanceCacheCanonicalizer = func(path string) (string, error) {
+		mu.Lock()
+		started++
+		mu.Unlock()
+		<-release
+		return path, nil
+	}
+	maintenance := NewMaintenanceManager(manager, NewJobManager(""), "")
+	requests := make([]maintenanceCacheInspectionRequest, 100)
+	for index := range requests {
+		requests[index] = maintenanceCacheInspectionRequest{id: fmt.Sprintf("cache-%03d", index), path: fmt.Sprintf("cache-%03d.db", index), repoID: "owner/repo"}
+	}
+	startedAt := time.Now()
+	inspections := maintenance.inspectRequestsBounded(context.Background(), requests)
+	if elapsed := time.Since(startedAt); elapsed > 250*time.Millisecond {
+		t.Fatalf("bounded registry inspection took %s", elapsed)
+	}
+	if len(inspections) != len(requests) {
+		t.Fatalf("inspection results=%d want=%d", len(inspections), len(requests))
+	}
+	for id, inspection := range inspections {
+		if !errors.Is(inspection.err, errMaintenanceCacheInspectionTimeout) {
+			t.Fatalf("inspection %s error=%v", id, inspection.err)
+		}
+	}
+	mu.Lock()
+	gotStarted := started
+	mu.Unlock()
+	if gotStarted == 0 || gotStarted > maxMaintenanceInspectWorkers {
+		t.Fatalf("blocked inspections started=%d want=1..%d", gotStarted, maxMaintenanceInspectWorkers)
+	}
+}
+
 func TestMaintenanceRetryCorrelatesExactActiveCurrentWork(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
