@@ -251,6 +251,9 @@ send the body again. The audit persists only the head/state hashes plus
 public-safe identifiers. Claiming a retry uses compare-and-swap against the
 exact failed generation observed before provider preflight; a delayed
 concurrent caller cannot consume a newer failure and issue another PUT.
+Likewise, a caller whose preflight GET or head guard fails before the claim
+does not own and cannot update the audit row, so it cannot clear another
+caller's active fence.
 Transport errors, 5xx, 429, and canonical-readback failures remain
 `in_progress`; a same-key replay performs GET-only recovery and finalizes only
 when `state=merged` and the claimed head hash still matches. A concurrent

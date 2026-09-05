@@ -87,7 +87,9 @@ the canonical merged PR still matches that head hash. This is a local duplicate
 mutation fence, not a claim of provider-level compare-and-swap. Retry claims
 compare-and-swap the exact failed audit generation observed before the
 preimage request, which prevents a delayed concurrent caller from reclaiming a
-failure it did not observe. Once readback confirms the merge, the audit records
+failure it did not observe. Preflight failures before that claim do not mutate
+the audit row and therefore cannot overwrite another caller's active fence.
+Once readback confirms the merge, the audit records
 a cache-refresh-pending state before any cache write and records `succeeded`
 only after cache confirmation; restart recovery repeats GET and cache repair,
 never PUT. An already-merged preimage invokes the same local claim callback
