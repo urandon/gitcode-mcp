@@ -66,6 +66,9 @@ func TestRepositoryDocsSchemasAllowRepoOnlyAuthorityResolution(t *testing.T) {
 	if !containsString(toolDefinitionByName("repository_docs_search").InputSchema.Required, "query") {
 		t.Fatal("repository_docs_search must still require query")
 	}
+	if registered, ok := (&Server{}).toolRegistry()["repository_docs_sources"]; !ok || registered.handler == nil || registered.definition.Name != "repository_docs_sources" {
+		t.Fatalf("repository_docs_sources is not callable through the MCP registry: registered=%+v ok=%t", registered.definition, ok)
+	}
 }
 
 func TestIssueWriteSchemasDistinguishNumberFromStableID(t *testing.T) {
@@ -467,6 +470,7 @@ func TestRepositoryDocsRPCDiagnosticsAreActionable(t *testing.T) {
 		want string
 	}{
 		{code: "repository_docs_registration_not_found", want: "repo-docs register"},
+		{code: "repository_docs_registration_disabled", want: "enable_cache_maintenance"},
 		{code: "repository_docs_source_ambiguous", want: "repository_docs_sources"},
 		{code: "repository_docs_source_generation_conflict", want: "current opaque source selector"},
 	}

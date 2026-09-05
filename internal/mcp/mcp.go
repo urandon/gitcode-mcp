@@ -2678,9 +2678,12 @@ func classifyDomainError(err error, ctx domainErrorContext) *errorData {
 
 func repositoryDocsDiagnostic(code, repoID string) (string, string, bool) {
 	switch strings.TrimSpace(code) {
-	case "repository_docs_registration_not_found", "repository_docs_registration_unavailable", "repository_docs_registration_disabled", "repository_docs_source_not_registered":
+	case "repository_docs_registration_not_found", "repository_docs_registration_unavailable", "repository_docs_source_not_registered":
 		return "no enabled repository-document authority is registered for the selected cache and repository",
 			remediationForRepo("register the local Git authority, then retry", repoID, "gitcode-mcp repo-docs register --repository-path PATH"), true
+	case "repository_docs_registration_disabled":
+		return "repository-document authority belongs to a disabled maintenance registration",
+			remediationForRepo("call maintenance_plan, then apply the reviewed plan with enable_cache_maintenance", repoID, "gitcode-mcp maintenance enable"), true
 	case "repository_docs_source_ambiguous":
 		return "multiple repository-document authorities are registered for this cache and repository",
 			"call repository_docs_sources with the same repo_id, select one source, and retry with the returned registration_id, source_registration_id, and source_registration_generation", true
