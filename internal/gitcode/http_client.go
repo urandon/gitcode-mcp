@@ -260,39 +260,99 @@ func (c *HTTPClient) UpdatePR(ctx context.Context, req UpdatePRRequest, opts Wri
 	if err := validateUpdatePR(req); err != nil {
 		return WriteResult[PullRequest]{}, err
 	}
+	preimage, err := c.GetPR(ctx, PRRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
+	if err != nil {
+		return WriteResult[PullRequest]{}, err
+	}
+	if strings.TrimSpace(preimage.ID) == "" || preimage.Number != req.Number {
+		return WriteResult[PullRequest]{}, ErrValidationFailed{Field: "response", Message: "pull request update preimage requires id and matching number"}
+	}
+	if opts.BeforePRUpdateMutation != nil {
+		if err := opts.BeforePRUpdateMutation(preimage); err != nil {
+			return WriteResult[PullRequest]{}, err
+		}
+	}
 	target := req.Owner + "/" + req.Repo + "/pulls/" + strconv.Itoa(req.Number)
 	key := opts.IdempotencyKey
 	if key == "" {
 		key = GenerateIdempotencyKey("UpdatePR", target, req, opts)
 		opts.IdempotencyKey = key
 	}
-	result, err := writeConfirmedJSON[PullRequest](ctx, c, http.MethodPatch, getPREndpoint(req.Owner, req.Repo, req.Number), "UpdatePR", target, req, opts, func(result WriteResult[PullRequest]) (WriteResult[PullRequest], error) {
-		pr := result.Record
-		if strings.TrimSpace(pr.ID) == "" || pr.Number != req.Number {
-			return WriteResult[PullRequest]{}, ErrValidationFailed{Field: "response", Message: "pull request update confirmation requires id and matching number"}
-		}
-		result.RemoteID = pr.ID
-		result.RemoteNumber = pr.Number
+	endpoint := getPREndpoint(req.Owner, req.Repo, req.Number)
+	mutationAttempted := false
+	opts.singleTransportAttempt = true
+	opts.beforeTransportAttempt = func() { mutationAttempted = true }
+	ack, patchErr := writeConfirmedJSON[json.RawMessage](ctx, c, http.MethodPatch, endpoint, "UpdatePR", target, req, opts, func(result WriteResult[json.RawMessage]) (WriteResult[json.RawMessage], error) {
 		return result, nil
 	})
-	if err == nil {
-		return result, nil
+	if patchErr != nil && !isWriteAcknowledgementDecodeError(patchErr) {
+		return WriteResult[PullRequest]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "patch", MutationAttempted: mutationAttempted, Cause: patchErr}
 	}
+	readback, readbackErr := c.GetPR(ctx, PRRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
+	if readbackErr != nil {
+		return WriteResult[PullRequest]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "pull request update requires canonical readback", Cause: readbackErr}}
+	}
+	if strings.TrimSpace(readback.ID) == "" || readback.Number != req.Number {
+		return WriteResult[PullRequest]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "pull request update readback requires id and matching number"}}
+	}
+	if err := confirmPullRequestUpdate(endpoint, req, preimage, readback); err != nil {
+		return WriteResult[PullRequest]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: err}
+	}
+	result := WriteResult[PullRequest]{
+		Record: readback, Confirmed: true, Operation: "UpdatePR", Target: target,
+		ProviderStatus: "2xx-readback", IdempotencyKey: key, RemoteID: readback.ID,
+		RemoteNumber: readback.Number, ConfirmedAt: time.Now().UTC(),
+	}
+	if patchErr == nil {
+		result.ResponseHash = ack.ResponseHash
+		result.ProviderPayloadFingerprint = ack.ProviderPayloadFingerprint
+		result.ConfirmedAt = ack.ConfirmedAt
+	} else {
+		body, _ := json.Marshal(readback)
+		hash := sha256.Sum256(body)
+		fingerprint := sha256.Sum256(RedactJSONBody(body, target))
+		result.ResponseHash = hex.EncodeToString(hash[:])
+		result.ProviderPayloadFingerprint = hex.EncodeToString(fingerprint[:])
+	}
+	if !readback.UpdatedAt.IsZero() {
+		result.RemoteRevision = readback.UpdatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	return result, nil
+}
+
+func isWriteAcknowledgementDecodeError(err error) bool {
 	var partial ErrPartialResponse
-	if !errors.As(err, &partial) {
-		return WriteResult[PullRequest]{}, err
+	if errors.As(err, &partial) {
+		return true
 	}
-	pr, getErr := c.GetPR(ctx, PRRequest{Owner: req.Owner, Repo: req.Repo, Number: req.Number})
-	if getErr != nil {
-		return WriteResult[PullRequest]{}, err
+	var malformed ErrMalformedJSON
+	if errors.As(err, &malformed) {
+		return true
 	}
-	if strings.TrimSpace(pr.ID) == "" || pr.Number != req.Number {
-		return WriteResult[PullRequest]{}, ErrValidationFailed{Field: "response", Message: "pull request update read-back requires id and matching number"}
+	var schema *ErrSchemaDecode
+	return errors.As(err, &schema)
+}
+
+func confirmPullRequestUpdate(endpoint string, req UpdatePRRequest, preimage, readback PullRequest) error {
+	checks := []struct {
+		field     string
+		requested string
+		before    string
+		after     string
+	}{
+		{field: "title", requested: req.Title, before: preimage.Title, after: readback.Title},
+		{field: "body", requested: req.Body, before: preimage.Body, after: readback.Body},
+		{field: "state", requested: strings.TrimSpace(req.State), before: strings.TrimSpace(preimage.State), after: strings.TrimSpace(readback.State)},
 	}
-	body, _ := json.Marshal(pr)
-	hash := sha256.Sum256(body)
-	fingerprint := sha256.Sum256(RedactJSONBody(body, target))
-	return WriteResult[PullRequest]{Record: pr, Confirmed: true, Operation: "UpdatePR", Target: target, ProviderStatus: "2xx-readback", IdempotencyKey: key, ResponseHash: hex.EncodeToString(hash[:]), ProviderPayloadFingerprint: hex.EncodeToString(fingerprint[:]), RemoteID: pr.ID, RemoteNumber: pr.Number, ConfirmedAt: time.Now().UTC()}, nil
+	for _, check := range checks {
+		if check.requested != "" && check.after != check.requested {
+			return ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "pull request update readback does not match requested " + check.field}
+		}
+		if check.requested == "" && check.after != check.before {
+			return ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "pull request update did not preserve omitted " + check.field}
+		}
+	}
+	return nil
 }
 
 func (c *HTTPClient) MergePR(ctx context.Context, req MergePRRequest, opts WriteOptions) (WriteResult[PullRequest], error) {

@@ -58,6 +58,37 @@ can recover an ambiguous completed write through GET-only canonical readback.
 It still cannot eliminate the provider's residual GET-to-PATCH race; only a
 future GitCode conditional-write primitive could provide that guarantee.
 
+## Pull Request Update Acknowledgement And Readback
+
+GitCode pull request metadata updates use:
+
+```http
+PATCH /api/v5/repos/{owner}/{repo}/pulls/{number}
+Authorization: Bearer $GITCODE_TOKEN
+Content-Type: application/json
+
+{"body":"updated description"}
+```
+
+The [official v5 endpoint documentation](https://docs.gitcode.com/docs/apis/patch-api-v-5-repos-owner-repo-pulls-number/)
+shows a successful response containing mutable fields and timestamps but no
+canonical `id` or `number`. That response is an acknowledgement, not a complete
+pull request representation. Decoding it through the normal `PullRequest`
+schema therefore produces a false `schema_decode` even though the PATCH was
+applied.
+
+The adapter reads the canonical PR before mutation, invokes the service's
+durable idempotency claim, sends exactly one PATCH attempt, and then confirms
+the result through `GET /pulls/{number}`. Success requires the exact requested
+title, body, and state plus preservation of every omitted mutable field. Only
+hashed preimage invariants enter the audit record.
+
+An identity-less, empty, or otherwise non-canonical 2xx acknowledgement may
+proceed to canonical readback. A failed or mismatching readback is an ambiguous
+external write: the audit claim remains in progress and a same-key replay uses
+GET-only recovery. It never sends a second blind PATCH. Provider rejections
+that prove the mutation was not accepted remain normal typed failures.
+
 ## Pull Request Merge Write Boundary
 
 GitCode pull request merge uses the v5 route:
