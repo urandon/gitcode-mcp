@@ -706,6 +706,8 @@ test('retry delivery replay preserves one key and exposes restart-safe coalescin
 
 test('collection health is URL-filterable and retries only the selected failed collection', async ({ page }) => {
   const collectionSnapshot: any = structuredClone(snapshot);
+  const collectionNow = '2030-01-02T02:04:05.000Z';
+  const collectionLastSuccessAt = '2030-01-02T01:04:05.000Z';
   const collectionRetryAt = '2030-01-02T03:04:05.000Z';
   collectionSnapshot.jobs.push({
     ...structuredClone(collectionSnapshot.jobs[1]), id: 'job-000006', status: 'running', finished_at: undefined,
@@ -721,7 +723,7 @@ test('collection health is URL-filterable and retries only the selected failed c
     sync_health: 'partial', sync_collections: [
       { collection: 'issues', outcome: 'success', frontier_ref: 'frontier-public-issues', records_listed: 3, committed: 3, attempt: 1, retry_budget: 4, retryable: false, last_success_at: new Date().toISOString(), updated_at: new Date().toISOString() },
       { collection: 'pulls', outcome: 'success', frontier_ref: 'frontier-public-pulls', records_listed: 5, committed: 5, attempt: 1, retry_budget: 4, retryable: false, last_success_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-      { collection: 'wiki', outcome: 'permanent_failure', frontier_ref: 'frontier-public-wiki', records_listed: 2, committed: 0, failed: 1, error_class: 'retry_budget_exhausted', attempt: 4, retry_budget: 4, retryable: true, last_success_at: new Date(Date.now() - 3_600_000).toISOString(), updated_at: new Date().toISOString() }
+      { collection: 'wiki', outcome: 'permanent_failure', frontier_ref: 'frontier-public-wiki', records_listed: 2, committed: 0, failed: 1, error_class: 'retry_budget_exhausted', attempt: 4, retry_budget: 4, retryable: true, last_success_at: collectionLastSuccessAt, updated_at: new Date().toISOString() }
     ]
   });
   await mockAdmin(page, collectionSnapshot);
@@ -730,6 +732,7 @@ test('collection health is URL-filterable and retries only the selected failed c
     actionBody = route.request().postDataJSON();
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', action: 'retry', receipt: { receipt_id: 'receipt-collection-retry', action: 'retry', target_job_id: 'job-000007', result_job_id: 'job-000006', outcome: 'created', job_status: 'queued', replayed: false, created_at: new Date().toISOString() } }) });
   });
+  await page.clock.setFixedTime(new Date(collectionNow));
   await page.goto('/?view=Jobs');
   await page.getByLabel('Sync health').selectOption('partial/retrying');
   await page.getByLabel('Collection').selectOption('wiki');
@@ -761,6 +764,11 @@ test('collection health is URL-filterable and retries only the selected failed c
   await expect(collections).toContainText('Wiki');
   await expect(collections).toContainText('Retry Budget Exhausted');
   await expect(collections).toContainText('attempt 4/4');
+  const lastSuccess = collections.locator('article').filter({ hasText: 'Wiki' }).locator('time');
+  await expect(lastSuccess).toHaveText('1 hour ago');
+  await expect(lastSuccess).toHaveAttribute('datetime', collectionLastSuccessAt);
+  await expect(lastSuccess).toHaveAttribute('title', new Date(collectionLastSuccessAt).toLocaleString());
+  await expect(lastSuccess).toHaveAttribute('aria-label', /Last successful refresh 1 hour ago; exact time/);
   await collections.getByRole('button', { name: 'Retry Wiki' }).click();
   const dialog = page.getByRole('dialog');
   await expect(dialog.getByRole('heading', { name: 'Retry Wiki only?' })).toBeVisible();

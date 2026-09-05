@@ -626,6 +626,20 @@ export function isSnapshotStale(generatedAt: string, now = Date.now()): boolean 
   return Number.isFinite(generated) && now-generated > 5 * 60 * 1000;
 }
 
+export function relativeAge(value: string, now = Date.now()): string {
+  const observed = Date.parse(value);
+  if (!Number.isFinite(observed)) return 'not recorded';
+  const elapsedSeconds = Math.trunc((now - observed) / 1000);
+  const future = elapsedSeconds < 0;
+  const absoluteSeconds = Math.abs(elapsedSeconds);
+  if (absoluteSeconds < 60) return future ? 'in less than a minute' : 'less than a minute ago';
+  const units: Array<[number, string]> = [[86400, 'day'], [3600, 'hour'], [60, 'minute']];
+  const [unitSeconds, unit] = units.find(([seconds]) => absoluteSeconds >= seconds) || units[2];
+  const count = Math.floor(absoluteSeconds / unitSeconds);
+  const duration = `${count} ${unit}${count === 1 ? '' : 's'}`;
+  return future ? `in ${duration}` : `${duration} ago`;
+}
+
 export function cliHandoff(diagnostic: Diagnostic): string {
 	if (diagnostic.entity_type === 'cache') return `gitcode-mcp service doctor`;
 	if (diagnostic.entity_type === 'maintenance') return `gitcode-mcp service maintenance --format json`;

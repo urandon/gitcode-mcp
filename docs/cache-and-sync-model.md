@@ -110,8 +110,9 @@ successful cache transactions. Authentication, permission, query, schema, and
 data-validation failures are terminal for the affected collection. Public job
 state exposes a content-free aggregate health plus per-collection outcome,
 opaque frontier reference, counts, retry budget, next attempt, and last success
-time. The private service journal persists only retry authority and request
-selectors—never fetched response bodies—and lets a restarted daemon resume the
+time. The admin view renders that success as a glanceable relative age backed
+by an exact machine-readable timestamp. The private service journal persists
+only retry authority and request selectors—never fetched response bodies—and lets a restarted daemon resume the
 pending collection without replaying successful siblings. CLI, MCP, and the
 admin Jobs view project the same state. The admin UI additionally supports a
 URL-backed aggregate-health filter and an explicit action that retries one
