@@ -2723,6 +2723,27 @@ func TestIssue104MergePRLateOwnerSuccessCompletesFailedRecoverySettlement(t *tes
 	}
 }
 
+func TestIssue104AuditGenerationSucceededRequiresExactGenerationAndStatus(t *testing.T) {
+	generation := time.Date(2026, 9, 5, 6, 0, 0, 0, time.UTC)
+	succeeded := &cache.AuditTrailEntry{Status: audit.StatusSucceeded, PayloadHash: "payload-hash", CreatedAt: generation}
+	if !auditGenerationSucceeded(succeeded, generation, "payload-hash") {
+		t.Fatal("exact succeeded generation was rejected")
+	}
+	newer := *succeeded
+	newer.CreatedAt = generation.Add(time.Second)
+	if auditGenerationSucceeded(&newer, generation, "payload-hash") {
+		t.Fatal("newer succeeded generation was accepted by stale caller")
+	}
+	unsupported := *succeeded
+	unsupported.Status = audit.StatusRemoteConfirmedCacheRefreshFailed
+	if auditGenerationSucceeded(&unsupported, generation, "payload-hash") {
+		t.Fatal("unsupported partial status was accepted as succeeded")
+	}
+	if auditGenerationSucceeded(succeeded, generation, "different-payload") {
+		t.Fatal("different payload was accepted as succeeded")
+	}
+}
+
 func TestIssue104MergePRCacheRefreshCrashWindowsRecoverWithoutSecondPUT(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)

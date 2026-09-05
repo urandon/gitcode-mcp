@@ -5810,7 +5810,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 		var current *cache.AuditTrailEntry
 		settled, current, initialAuditErr = s.transitionAuditGeneration(ctx, mergePRAuditStore, initialAuditEntry, mergePRClaimCreatedAt, audit.StatusInProgress, audit.StatusRemoteConfirmedCacheRefreshFailed)
 		if initialAuditErr == nil && !settled {
-			if current != nil && current.Status == audit.StatusSucceeded && current.PayloadHash == fingerprint {
+			if auditGenerationSucceeded(current, mergePRClaimCreatedAt, fingerprint) {
 				return replayWriteResult(command, req, *current, fingerprint, s.now().UTC()), nil
 			}
 			initialAuditErr = errors.New("merge audit generation advanced by another caller")
@@ -5835,7 +5835,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 		}
 		if command == "merge-pr" {
 			_, current, _ := s.transitionAuditGeneration(ctx, mergePRAuditStore, partial, mergePRClaimCreatedAt, audit.StatusRemoteConfirmedCacheRefreshPending)
-			if current != nil && current.Status == audit.StatusSucceeded && current.PayloadHash == fingerprint {
+			if auditGenerationSucceeded(current, mergePRClaimCreatedAt, fingerprint) {
 				return replayWriteResult(command, req, *current, fingerprint, s.now().UTC()), nil
 			}
 		} else {
@@ -5850,7 +5850,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 		}
 		if command == "merge-pr" {
 			_, current, _ := s.transitionAuditGeneration(ctx, mergePRAuditStore, partial, mergePRClaimCreatedAt, audit.StatusRemoteConfirmedCacheRefreshPending)
-			if current != nil && current.Status == audit.StatusSucceeded && current.PayloadHash == fingerprint {
+			if auditGenerationSucceeded(current, mergePRClaimCreatedAt, fingerprint) {
 				return replayWriteResult(command, req, *current, fingerprint, s.now().UTC()), nil
 			}
 		} else {
@@ -5865,7 +5865,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 		}
 		if command == "merge-pr" {
 			_, current, _ := s.transitionAuditGeneration(ctx, mergePRAuditStore, partial, mergePRClaimCreatedAt, audit.StatusRemoteConfirmedCacheRefreshPending)
-			if current != nil && current.Status == audit.StatusSucceeded && current.PayloadHash == fingerprint {
+			if auditGenerationSucceeded(current, mergePRClaimCreatedAt, fingerprint) {
 				return replayWriteResult(command, req, *current, fingerprint, s.now().UTC()), nil
 			}
 		} else {
@@ -6656,6 +6656,10 @@ func (s *Service) transitionAuditGeneration(ctx context.Context, transitioner au
 	return false, current, nil
 }
 
+func auditGenerationSucceeded(current *cache.AuditTrailEntry, generation time.Time, payloadHash string) bool {
+	return current != nil && current.CreatedAt.Equal(generation) && current.PayloadHash == payloadHash && current.Status == audit.StatusSucceeded
+}
+
 func mergePRPreimageMetadata(pr gitcode.PullRequest) map[string]string {
 	return map[string]string{
 		"merge_preimage_head_sha_hash": hashWriteInvariant(strings.ToLower(strings.TrimSpace(pr.HeadSHA))),
@@ -6700,7 +6704,7 @@ func (s *Service) recoverAmbiguousMergePR(ctx context.Context, route RepositoryR
 		return WriteCommandResult{}, false, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: confirmation.remoteID, IdempotencyKey: prior.IdempotencyKey, Cause: err}
 	}
 	if !settling {
-		if current != nil && current.Status == audit.StatusSucceeded && current.PayloadHash == fingerprint {
+		if auditGenerationSucceeded(current, prior.CreatedAt, fingerprint) {
 			return replayWriteResult("merge-pr", req, *current, fingerprint, now), true, nil
 		}
 		return WriteCommandResult{}, false, ErrWriteFailure{Code: "write_idempotency_in_progress", RepoID: route.RepoID, RemoteID: confirmation.remoteID, IdempotencyKey: prior.IdempotencyKey}
@@ -6708,7 +6712,7 @@ func (s *Service) recoverAmbiguousMergePR(ctx context.Context, route RepositoryR
 	if err := s.store.UpsertRecordGraph(ctx, graph); err != nil {
 		partial := audit.WithRequestMetadata(audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, prior.IdempotencyKey, "merge-pr", graph.Record.ID, graph.Record.RemoteType, confirmation.remoteID, fingerprint, err.Error(), now), metadata)
 		_, current, _ := s.transitionAuditGeneration(ctx, transitioner, partial, prior.CreatedAt, audit.StatusRemoteConfirmedCacheRefreshPending)
-		if current != nil && current.Status == audit.StatusSucceeded && current.PayloadHash == fingerprint {
+		if auditGenerationSucceeded(current, prior.CreatedAt, fingerprint) {
 			return replayWriteResult("merge-pr", req, *current, fingerprint, now), true, nil
 		}
 		return WriteCommandResult{}, false, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: confirmation.remoteID, IdempotencyKey: prior.IdempotencyKey, Cause: err}
@@ -6716,7 +6720,7 @@ func (s *Service) recoverAmbiguousMergePR(ctx context.Context, route RepositoryR
 	if err := s.recordCacheConfirmation(ctx, "merge-pr", route.RepoID, prior.IdempotencyKey, fingerprint, graph, confirmation.remoteID, "succeeded", now); err != nil {
 		partial := audit.WithRequestMetadata(audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, prior.IdempotencyKey, "merge-pr", graph.Record.ID, graph.Record.RemoteType, confirmation.remoteID, fingerprint, err.Error(), now), metadata)
 		_, current, _ := s.transitionAuditGeneration(ctx, transitioner, partial, prior.CreatedAt, audit.StatusRemoteConfirmedCacheRefreshPending)
-		if current != nil && current.Status == audit.StatusSucceeded && current.PayloadHash == fingerprint {
+		if auditGenerationSucceeded(current, prior.CreatedAt, fingerprint) {
 			return replayWriteResult("merge-pr", req, *current, fingerprint, now), true, nil
 		}
 		return WriteCommandResult{}, false, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: route.RepoID, RemoteID: confirmation.remoteID, IdempotencyKey: prior.IdempotencyKey, Cause: err}
