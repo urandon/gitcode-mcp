@@ -396,7 +396,7 @@ func TestAdminJobSyncStageProjectionIsSemanticAndPublicSafe(t *testing.T) {
 		t.Fatalf("Marshal: %v", err)
 	}
 	contract := string(data)
-	for _, want := range []string{`"sync_stage":{`, `"phase":"waiting_commit"`, `"fetched":2`, `"staged":2`, `"attempt":1`, `"retry_budget":6`, `"blocker_class":"cache_busy"`} {
+	for _, want := range []string{`"sync_stage":{`, `"collection":"issues"`, `"phase":"waiting_commit"`, `"fetched":2`, `"staged":2`, `"attempt":1`, `"retry_budget":6`, `"blocker_class":"cache_busy"`, `"updated_at":`} {
 		if !strings.Contains(contract, want) {
 			t.Fatalf("contract missing %q: %s", want, contract)
 		}

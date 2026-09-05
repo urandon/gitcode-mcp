@@ -339,6 +339,7 @@ type SyncCollectionObservation struct {
 
 type SyncStageObservation struct {
 	StageRef       string    `json:"stage_ref"`
+	Collection     string    `json:"collection"`
 	Phase          string    `json:"phase"`
 	Fetched        int       `json:"fetched"`
 	Staged         int       `json:"staged"`
@@ -353,6 +354,7 @@ type SyncStageObservation struct {
 	FetchedAt      time.Time `json:"fetched_at,omitempty"`
 	StagedAt       time.Time `json:"staged_at,omitempty"`
 	CommittedAt    time.Time `json:"committed_at,omitempty"`
+	UpdatedAt      time.Time `json:"updated_at,omitempty"`
 	TerminalCause  string    `json:"terminal_reason,omitempty"`
 }
 

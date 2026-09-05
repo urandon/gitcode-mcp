@@ -180,7 +180,7 @@ export type Job = {
   }>;
   sync_stage?: {
     stage_ref: string;
-    collection?: string;
+    collection: string;
     phase: string;
     fetched: number;
     staged: number;
@@ -195,6 +195,7 @@ export type Job = {
     fetched_at?: string;
     staged_at?: string;
     committed_at?: string;
+    updated_at?: string;
     terminal_reason?: string;
   };
   progress?: Array<{ type?: string; phase?: string; collection?: string; page?: number; records_listed?: number; records_fetched?: number; records_inserted?: number; records_updated?: number; records_skipped?: number; records_deferred?: number; records_failed?: number; retry_after?: string; attempt?: number; rate_limit_state?: string }>;
