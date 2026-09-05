@@ -640,6 +640,20 @@ export function relativeAge(value: string, now = Date.now()): string {
   return future ? `in ${duration}` : `${duration} ago`;
 }
 
+export function jobNextAction(job: Pick<Job, 'status' | 'retryable' | 'retry_after' | 'failure_class' | 'failure_collection' | 'inspect_command'>, now = Date.now()): string {
+  const retryAt = Date.parse(job.retry_after || '');
+  if (!job.retryable && Number.isFinite(retryAt) && retryAt > now) {
+    return `Wait for scheduled retry ${relativeAge(job.retry_after || '', now)}`;
+  }
+  if (job.failure_class) {
+    if (job.retryable) return job.failure_collection ? `Review ${humanize(job.failure_collection)} and retry` : 'Review failure and retry';
+    return job.inspect_command ? 'Inspect retained failure' : 'Inspect diagnostics';
+  }
+  if (job.retryable) return 'Review outcome and retry';
+  if (job.status === 'queued' || job.status === 'running') return 'Monitor progress';
+  return 'View outcome';
+}
+
 export function cliHandoff(diagnostic: Diagnostic): string {
 	if (diagnostic.entity_type === 'cache') return `gitcode-mcp service doctor`;
 	if (diagnostic.entity_type === 'maintenance') return `gitcode-mcp service maintenance --format json`;

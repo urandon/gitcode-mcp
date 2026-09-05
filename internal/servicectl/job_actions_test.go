@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/adminhttp"
+	"gitcode-mcp/internal/service"
 )
 
 func TestJobActionCancelPersistsAndReplaysReceipt(t *testing.T) {
@@ -182,6 +183,53 @@ func TestJobActionRetryCreatesCurrentMaintenanceWork(t *testing.T) {
 	receipt, err := actions.Retry(context.Background(), adminhttp.JobActionRequest{JobID: "job-000001", Collection: "wiki", IdempotencyKey: "retry-new"})
 	if err != nil || receipt.Outcome != "created" || receipt.ResultJob != "job-000002" || receipt.JobStatus != JobStatusQueued {
 		t.Fatalf("receipt=%+v err=%v", receipt, err)
+	}
+}
+
+func TestJobActionRetryHonorsActiveBackoffBeforeMutation(t *testing.T) {
+	now := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	retryAt := now.Add(time.Hour)
+	for _, collection := range []string{"", "wiki"} {
+		name := "whole"
+		if collection != "" {
+			name = "collection"
+		}
+		t.Run(name, func(t *testing.T) {
+			jobs := NewJobManager("")
+			jobs.jobs["job-000001"] = &Job{
+				ID: "job-000001", Type: SyncJobType, RepoID: "owner/repo", CacheUUID: "cache-1", RegistrationID: "reg-1",
+				Status: JobStatusFailed, CreatedAt: now.Add(-time.Minute), UpdatedAt: now, FinishedAt: &now,
+				SyncCollections: []SyncCollectionView{{Collection: "wiki", Outcome: SyncCollectionPartial, RetryAfter: &retryAt, UpdatedAt: now}},
+			}
+			actions := NewJobActionManager("", jobs, nil)
+			actions.now = func() time.Time { return now }
+			reconciled := false
+			actions.reconcile = func(context.Context, string, string, string) (MaintenanceReconcileResult, error) {
+				reconciled = true
+				return MaintenanceReconcileResult{}, nil
+			}
+			req := adminhttp.JobActionRequest{JobID: "job-000001", Collection: collection, IdempotencyKey: "backoff-" + collection}
+			_, err := actions.Retry(context.Background(), req)
+			var typed adminhttp.JobActionError
+			if !errors.As(err, &typed) || typed.Code != "retry_backoff_active" || reconciled || len(actions.receipts) != 0 {
+				t.Fatalf("active backoff err=%v reconciled=%t receipts=%d", err, reconciled, len(actions.receipts))
+			}
+
+			actions.now = func() time.Time { return retryAt }
+			receipt, err := actions.Retry(context.Background(), req)
+			if err != nil || !reconciled || receipt.Outcome != "no_work_needed" {
+				t.Fatalf("released backoff receipt=%+v reconciled=%t err=%v", receipt, reconciled, err)
+			}
+		})
+	}
+}
+
+func TestJobRetryDeadlineAnchorsLegacyDurationToJobUpdate(t *testing.T) {
+	updated := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	job := Job{UpdatedAt: updated, Progress: []service.ProgressEvent{{Collection: "wiki", RetryAfter: "30s"}}}
+	deadline, ok := jobRetryDeadline(job, "wiki")
+	if !ok || !deadline.Equal(updated.Add(30*time.Second)) {
+		t.Fatalf("deadline=%s ok=%t", deadline, ok)
 	}
 }
 

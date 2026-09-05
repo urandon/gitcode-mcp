@@ -718,6 +718,7 @@ func executionFromEntry(entry MaintenanceEntry, jobs []Job) adminhttp.ExecutionO
 }
 
 func adminJobObservation(job Job) adminhttp.JobObservation {
+	now := time.Now().UTC()
 	view := adminhttp.JobObservation{
 		ID: job.ID, Type: job.Type, CacheRef: publicCacheRef(job.CacheUUID, ""), RepoID: job.RepoID,
 		ProfileID: job.ProfileID, NamespaceID: job.NamespaceID, RegistrationID: job.RegistrationID,
@@ -729,18 +730,31 @@ func adminJobObservation(job Job) adminhttp.JobObservation {
 	active := job.Status == JobStatusQueued || job.Status == JobStatusRunning
 	terminal := jobTerminalStatus(job.Status)
 	for _, collection := range job.SyncCollections {
+		collectionRetryable := terminal && job.RegistrationID != "" && (collection.Outcome == SyncCollectionPartial || collection.Outcome == SyncCollectionPermanentFailure)
+		if retryAt, ok := jobRetryDeadline(job, collection.Collection); ok && now.Before(retryAt) {
+			collectionRetryable = false
+		}
 		view.SyncCollections = append(view.SyncCollections, adminhttp.SyncCollectionObservation{
 			Collection: collection.Collection, Outcome: string(collection.Outcome), FrontierRef: collection.FrontierRef,
 			RecordsListed: collection.RecordsListed, Committed: collection.Committed, Failed: collection.Failed,
 			ErrorClass: collection.ErrorClass, Attempt: collection.Attempt, RetryBudget: collection.RetryBudget,
 			RetryAfter: collection.RetryAfter, LastSuccessAt: collection.LastSuccessAt, UpdatedAt: collection.UpdatedAt,
-			Retryable: terminal && job.RegistrationID != "" && (collection.Outcome == SyncCollectionPartial || collection.Outcome == SyncCollectionPermanentFailure),
+			Retryable: collectionRetryable,
 		})
 	}
 	view.Cancellable = active && (job.Type == SyncJobType || job.Type == RAGIndexJobType || job.Type == RepositoryDocsIndexJobType)
 	view.Retryable = terminal && job.RegistrationID != "" && (job.Type == SyncJobType || job.Type == RAGIndexJobType)
+	if retryAt, ok := jobRetryDeadline(job, ""); ok {
+		view.RetryAfter = retryAt.Format(time.RFC3339)
+		if now.Before(retryAt) {
+			view.Retryable = false
+			view.ActionReason = "Automatic retry is scheduled for " + retryAt.Format(time.RFC3339) + "; equivalent active work remains coalesced."
+		}
+	}
 	if !view.Cancellable && !view.Retryable {
-		view.ActionReason = "No safe admin action is available for the current job type and state."
+		if view.ActionReason == "" {
+			view.ActionReason = "No safe admin action is available for the current job type and state."
+		}
 	}
 	if job.StartedAt != nil && job.Completed > 0 {
 		elapsed := job.UpdatedAt.Sub(*job.StartedAt).Seconds()
@@ -768,16 +782,10 @@ func adminJobObservation(job Job) adminhttp.JobObservation {
 			FetchedAt: stage.FetchedAt, StagedAt: stage.StagedAt,
 			CommittedAt: stage.CommittedAt, TerminalCause: stage.TerminalCause,
 		}
-		if !stage.RetryAfter.IsZero() {
-			view.RetryAfter = stage.RetryAfter.Format(time.RFC3339)
-		}
 	}
 	for _, event := range job.Progress {
 		if event.Collection != "" && event.Collection != SyncJobType && event.RecordsFailed > 0 {
 			view.FailureCollection = event.Collection
-		}
-		if event.RetryAfter != "" {
-			view.RetryAfter = event.RetryAfter
 		}
 		view.Progress = append(view.Progress, adminhttp.ProgressObservation{
 			Type: event.Type, Phase: event.Phase, Collection: event.Collection, Page: event.Page,

@@ -340,6 +340,11 @@ func (m *JobActionManager) apply(ctx context.Context, action string, req adminht
 		if preparedReceipt == nil && req.Collection != "" && (job.Type != SyncJobType || !retryableSyncCollection(job, req.Collection)) {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "collection_retry_unavailable", "The selected collection is not a failed terminal collection on this sync job.", "Refresh the job and choose a partial or permanently failed collection.")
 		}
+		if preparedReceipt == nil {
+			if retryAt, ok := jobRetryDeadline(job, req.Collection); ok && m.now().Before(retryAt) {
+				return adminhttp.JobActionReceipt{}, jobActionError(http.StatusConflict, "retry_backoff_active", "Automatic retry backoff is still active until "+retryAt.Format(time.RFC3339)+".", "Wait for the scheduled retry; equivalent active work remains coalesced.")
+			}
+		}
 		if m.reconcile == nil {
 			return adminhttp.JobActionReceipt{}, jobActionError(http.StatusNotImplemented, "capability_unavailable", "Retry is not available in the running daemon.", "Use the maintenance CLI for this registration.")
 		}
