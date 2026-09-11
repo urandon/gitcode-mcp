@@ -1,5 +1,7 @@
 # gitcode-mcp
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/urandon/gitcode-mcp)
+
 **A local, durable working set for GitCode — built for agents, operators, and
 unreliable networks.**
 
