@@ -457,6 +457,40 @@ func TestWriteDryRunNoMutation(t *testing.T) {
 	}
 }
 
+func TestCommentDryRunDeclaresExplicitTargetAndBrowserURL(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	svc := NewWithClient(store, &fakeGitCodeClient{})
+
+	issue, err := svc.AddComment(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeDryRun, Number: 42, Body: "issue body"})
+	if err != nil {
+		t.Fatalf("AddComment dry-run: %v", err)
+	}
+	if issue.TargetKind != "issue" || issue.IssueNumber != 42 || issue.BrowserURL != "https://example.invalid/owner-a/repo-a/issues/42" {
+		t.Fatalf("issue receipt=%#v", issue)
+	}
+
+	pull, err := svc.AddPRComment(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeDryRun, Number: 17, Body: "pull body"})
+	if err != nil {
+		t.Fatalf("AddPRComment dry-run: %v", err)
+	}
+	if pull.TargetKind != "pull_request" || pull.RemoteNumber != 17 || pull.BrowserURL != "https://example.invalid/owner-a/repo-a/pull/17" {
+		t.Fatalf("pull receipt=%#v", pull)
+	}
+}
+
+func TestWriteTargetBrowserURLSanitizesCredentialsAndAPIPath(t *testing.T) {
+	route := RepositoryRoute{Owner: "owner", Name: "repo", APIBaseURL: "https://user:secret@api.gitcode.com/api/v5?token=hidden#fragment"}
+	if got, want := writeTargetBrowserURL(route, "issues", 9), "https://gitcode.com/owner/repo/issues/9"; got != want {
+		t.Fatalf("browser URL=%q want %q", got, want)
+	}
+}
+
 func TestScenario007WriteLiveCreateAuditCacheConfirmation(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)
@@ -2169,8 +2203,15 @@ func TestScenario016MCPWriteLifecycleCreatePRAndComment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddPRComment live returned error: %v", err)
 	}
-	if comment.Status != "succeeded" || comment.ID != "PRCOMMENT-7-301" || comment.RemoteID != "301" || client.createPRCommentCalls != 1 {
+	if comment.Status != "succeeded" || comment.ID != "PRCOMMENT-7-301" || comment.RemoteID != "301" || comment.TargetKind != "pull_request" || comment.RemoteNumber != 7 || comment.BrowserURL != "https://gitcode.com/owner-a/repo-a/pull/7" || client.createPRCommentCalls != 1 {
 		t.Fatalf("unexpected PR comment result=%+v calls=%d", comment, client.createPRCommentCalls)
+	}
+	replayedComment, err := svc.AddPRComment(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 7, Body: "tested", IdempotencyKey: "pr-comment-key"})
+	if err != nil {
+		t.Fatalf("AddPRComment replay returned error: %v", err)
+	}
+	if replayedComment.Status != "already_applied" || !replayedComment.Replayed || replayedComment.TargetKind != "pull_request" || replayedComment.RemoteNumber != 7 || replayedComment.BrowserURL != "https://gitcode.com/owner-a/repo-a/pull/7" || client.createPRCommentCalls != 1 {
+		t.Fatalf("unexpected PR comment replay=%+v calls=%d", replayedComment, client.createPRCommentCalls)
 	}
 	commentRecord, err := store.GetRecord(ctx, "fixture-a", "PRCOMMENT-7-301")
 	if err != nil {

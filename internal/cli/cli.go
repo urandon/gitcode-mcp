@@ -74,6 +74,8 @@ var commands = []string{
 	"create-page",
 	"update-page",
 	"delete-page",
+	"add-issue-comment",
+	"add-pr-comment",
 	"add-comment",
 	"add-pr-review-comment",
 	"reply-pr-review-comment",
@@ -146,6 +148,7 @@ type queryService interface {
 	UpdatePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	DeletePage(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	AddComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
+	AddPRComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	AddPRReviewComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	ReplyPRReviewComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdateComment(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
@@ -416,6 +419,12 @@ func executeWithFactoryAndDepsContext(ctx context.Context, args []string, stdout
 		printCommandHelp(command, stdout)
 		return 0
 	}
+	if command == "add-comment" {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{
+			Field:   "comment_target",
+			Message: "add-comment is ambiguous and never writes; use add-issue-comment for an issue or add-pr-comment for a pull request",
+		})
+	}
 	opts, err = resolveMarkdownBodyInput(command, opts, deps.Stdin)
 	if err != nil {
 		return writeError(stderr, opts.format, err)
@@ -577,7 +586,7 @@ func resolveLiveCredential(ctx context.Context, eff config.EffectiveConfig, deps
 
 func isLiveStartupCommand(command string) bool {
 	switch command {
-	case "sync", "submit-feedback", "create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "merge-pr", "merge-mr", "milestones", "list-push-mirrors", "push-mirrors", "trigger-push-mirror", "wait-push-mirror", "create-milestone", "update-milestone", "set-issue-milestone", "clear-issue-milestone", "create-page", "update-page", "delete-page", "add-comment", "add-pr-review-comment", "reply-pr-review-comment", "update-comment", "add-label", "publish-release", "doctor":
+	case "sync", "submit-feedback", "create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "merge-pr", "merge-mr", "milestones", "list-push-mirrors", "push-mirrors", "trigger-push-mirror", "wait-push-mirror", "create-milestone", "update-milestone", "set-issue-milestone", "clear-issue-milestone", "create-page", "update-page", "delete-page", "add-issue-comment", "add-pr-comment", "add-pr-review-comment", "reply-pr-review-comment", "update-comment", "add-label", "publish-release", "doctor":
 		return true
 	default:
 		return false
@@ -2781,8 +2790,10 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 		return dispatchWrite(ctx, svc.UpdatePage, command, opts, stdout, stderr, plan)
 	case "delete-page":
 		return dispatchWrite(ctx, svc.DeletePage, command, opts, stdout, stderr, plan)
-	case "add-comment":
+	case "add-issue-comment":
 		return dispatchWrite(ctx, svc.AddComment, command, opts, stdout, stderr, plan)
+	case "add-pr-comment":
+		return dispatchWrite(ctx, svc.AddPRComment, command, opts, stdout, stderr, plan)
 	case "add-pr-review-comment":
 		return dispatchWrite(ctx, svc.AddPRReviewComment, command, opts, stdout, stderr, plan)
 	case "reply-pr-review-comment":
@@ -3069,10 +3080,10 @@ func dispatchWrite(ctx context.Context, handler func(context.Context, service.Wr
 }
 
 func resolveMarkdownBodyInput(command string, opts options, stdin io.Reader) (options, error) {
-	supported := command == "create-issue" || command == "update-issue" || command == "add-comment" || command == "update-comment"
+	supported := command == "create-issue" || command == "update-issue" || command == "add-issue-comment" || command == "add-pr-comment" || command == "update-comment"
 	if !supported {
 		if opts.bodyFileSet || opts.allowLiteralBackslashN {
-			return opts, service.ErrInvalidQuery{Field: "body_input", Message: "--body-file and --allow-literal-backslash-n are supported by create-issue, update-issue, add-comment, and update-comment"}
+			return opts, service.ErrInvalidQuery{Field: "body_input", Message: "--body-file and --allow-literal-backslash-n are supported by create-issue, update-issue, add-issue-comment, add-pr-comment, and update-comment"}
 		}
 		return opts, nil
 	}
@@ -4207,6 +4218,13 @@ func renderDiffText(w io.Writer, result service.DiffSnapshotResult) {
 
 func renderWriteText(w io.Writer, result service.WriteCommandResult) {
 	fmt.Fprintf(w, "%s: %s id=%s idempotency_key=%s evidence=%s\n", result.Command, result.Status, result.ID, result.IdempotencyKey, result.Evidence)
+	if result.TargetKind != "" {
+		targetNumber := result.IssueNumber
+		if targetNumber == 0 {
+			targetNumber = result.RemoteNumber
+		}
+		fmt.Fprintf(w, "target: kind=%s number=%d\n", result.TargetKind, targetNumber)
+	}
 	if result.BodyInput != nil {
 		fmt.Fprintf(
 			w,
@@ -5811,6 +5829,10 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "add-comment":
+		fmt.Fprintln(w, "Usage: gitcode-mcp add-comment")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Deprecated ambiguous command: it never writes. Use add-issue-comment or add-pr-comment explicitly.")
+	case "add-issue-comment":
 		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO (--number N | --issue-id ISSUE_OR_ALIAS) (--body BODY | --body-file PATH|-) [--idempotency-key KEY]\n\n", command)
 		fmt.Fprintln(w, "Add a comment to an issue. Executes live by default; use --dry-run for no-mutation validation.")
 		fmt.Fprintln(w, "Use --body-file for multiline Markdown; CRLF/CR are normalized to LF and trailing newlines are preserved.")
@@ -5818,6 +5840,21 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --number N          repository-local issue number; not a provider id")
 		fmt.Fprintln(w, "  --issue-id VALUE    stable source id or known cached issue alias")
+		fmt.Fprintln(w, "  --body BODY         comment body (required)")
+		fmt.Fprintln(w, "  --body-file PATH|-  UTF-8 comment body file, or stdin with -")
+		fmt.Fprintln(w, "  --allow-literal-backslash-n  allow intentional inline literal \\n sequences")
+		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
+		fmt.Fprintln(w, "  --dry-run           validate without mutation")
+		fmt.Fprintln(w, "  --live              compatibility alias for live write")
+		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
+		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "add-pr-comment":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --number N (--body BODY | --body-file PATH|-) [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintln(w, "Add a comment to a pull request. Executes live by default; use --dry-run for no-mutation validation.")
+		fmt.Fprintln(w, "Use --body-file for multiline Markdown; CRLF/CR are normalized to LF and trailing newlines are preserved.")
+		fmt.Fprintln(w, "Flags:")
+		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
+		fmt.Fprintln(w, "  --number N          pull request number (required)")
 		fmt.Fprintln(w, "  --body BODY         comment body (required)")
 		fmt.Fprintln(w, "  --body-file PATH|-  UTF-8 comment body file, or stdin with -")
 		fmt.Fprintln(w, "  --allow-literal-backslash-n  allow intentional inline literal \\n sequences")

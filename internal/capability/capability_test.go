@@ -98,6 +98,17 @@ func TestCreateIssueIsSharedWriteCapability(t *testing.T) {
 	}
 }
 
+func TestCommentCapabilitiesUseExplicitCLITargets(t *testing.T) {
+	issue, ok := LookupByMCPName("add_issue_comment")
+	if !ok || !issue.CLI.Enabled || issue.CLIName != "add-issue-comment" || issue.ServiceCommand != "add-comment" {
+		t.Fatalf("issue comment capability=%#v ok=%t", issue, ok)
+	}
+	pull, ok := LookupByMCPName("add_pr_comment")
+	if !ok || !pull.CLI.Enabled || pull.CLIName != "add-pr-comment" || pull.ServiceCommand != "add-pr-comment" {
+		t.Fatalf("pull request comment capability=%#v ok=%t", pull, ok)
+	}
+}
+
 func TestFeedbackCapabilitiesSeparatePreparationFromSubmission(t *testing.T) {
 	prepare, ok := LookupByMCPName("prepare_feedback")
 	if !ok || prepare.Safety != SafetyReadOnly || !prepare.MCP.Enabled || !prepare.CLI.Enabled {

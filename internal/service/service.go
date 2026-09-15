@@ -5443,6 +5443,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	key, fingerprint := writeIdempotency(command, req)
 	base := WriteCommandResult{Command: command, RepoID: route.RepoID, Status: "dry_run_valid", ID: writeTargetID(req), IdempotencyKey: key, SourceFingerprint: fingerprint, Evidence: "validated write command", GeneratedAt: s.now().UTC()}
 	applyWriteIssueIdentity(&base, command, req, req.IssueID, 0)
+	applyWriteCommentTarget(&base, command, req, route)
 	if req.Mode == WriteModeDryRun {
 		return base, nil
 	}
@@ -5476,7 +5477,9 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 			return WriteCommandResult{}, ErrWriteFailure{Code: "write_idempotency_conflict", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
 		}
 		if lookup.Replay {
-			return replayWriteResult(command, req, prior, fingerprint, s.now().UTC()), nil
+			result := replayWriteResult(command, req, prior, fingerprint, s.now().UTC())
+			applyWriteCommentTarget(&result, command, req, route)
+			return result, nil
 		}
 		if lookup.Partial {
 			if command == "merge-pr" {
@@ -5507,6 +5510,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 				return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key, Cause: err}
 			}
 			result := replayWriteResult(command, req, completed, fingerprint, s.now().UTC())
+			applyWriteCommentTarget(&result, command, req, route)
 			result.Status = "succeeded"
 			return result, nil
 		}
@@ -6043,7 +6047,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	base.RemoteRevision = confirmed.remoteRevision
 	base.APIPath = confirmed.apiPath
 	base.CachePath = confirmed.cachePath
-	base.BrowserURL = confirmed.browserURL
+	base.BrowserURL = firstNonEmptyString(confirmed.browserURL, base.BrowserURL)
 	base.Milestone = confirmed.milestone
 	base.PushMirror = confirmed.pushMirror
 	base.Evidence = "adapter-confirmed write with audit and cache refresh"
@@ -6117,7 +6121,7 @@ func writeAuditMetadata(command, key, fingerprint, remoteType string, confirmed 
 }
 
 func withWriteAuditMetadata(entry cache.AuditTrailEntry, command, key, fingerprint, remoteType string, confirmed writeConfirmation) cache.AuditTrailEntry {
-	if command != "create-issue" && command != "merge-pr" && command != "reply-pr-review-comment" && confirmed.milestone == nil && confirmed.pushMirror == nil {
+	if command != "create-issue" && command != "merge-pr" && command != "add-comment" && command != "add-pr-comment" && command != "reply-pr-review-comment" && confirmed.milestone == nil && confirmed.pushMirror == nil {
 		return entry
 	}
 	return audit.WithRequestMetadata(entry, writeAuditMetadata(command, key, fingerprint, remoteType, confirmed))
@@ -7664,6 +7668,58 @@ func applyWriteIssueIdentity(result *WriteCommandResult, command string, req Wri
 		result.StableSourceID = req.IssueID
 		result.IssueNumber = req.IssueNumber
 	}
+}
+
+func applyWriteCommentTarget(result *WriteCommandResult, command string, req WriteCommandRequest, route RepositoryRoute) {
+	if result == nil {
+		return
+	}
+	segment := ""
+	switch command {
+	case "add-comment":
+		result.TargetKind = "issue"
+		result.IssueNumber = firstNonZeroInt(result.IssueNumber, req.Number)
+		segment = "issues"
+	case "add-pr-comment":
+		result.TargetKind = "pull_request"
+		result.RemoteNumber = firstNonZeroInt(result.RemoteNumber, req.Number)
+		segment = "pull"
+	default:
+		return
+	}
+	if result.BrowserURL == "" {
+		result.BrowserURL = writeTargetBrowserURL(route, segment, req.Number)
+	}
+}
+
+func writeTargetBrowserURL(route RepositoryRoute, segment string, number int) string {
+	if number <= 0 || strings.TrimSpace(route.Owner) == "" || strings.TrimSpace(route.Name) == "" {
+		return ""
+	}
+	rawBaseURL := strings.TrimSpace(route.APIBaseURL)
+	if rawBaseURL == "" {
+		rawBaseURL = "https://api.gitcode.com/api/v5"
+	}
+	u, err := url.Parse(rawBaseURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.RawPath = ""
+	if strings.EqualFold(u.Hostname(), "api.gitcode.com") {
+		u.Host = "gitcode.com"
+	}
+	basePath := strings.TrimSuffix(u.Path, "/")
+	for _, suffix := range []string{"/api/v5", "/api/v4", "/api"} {
+		if strings.HasSuffix(basePath, suffix) {
+			basePath = strings.TrimSuffix(basePath, suffix)
+			break
+		}
+	}
+	u.Path = path.Join(basePath, route.Owner, route.Name, segment, strconv.Itoa(number))
+	return u.String()
 }
 
 func milestoneReceiptFromAudit(entry cache.AuditTrailEntry) *WriteMilestoneReceipt {

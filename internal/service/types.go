@@ -976,6 +976,7 @@ type WriteCommandResult struct {
 	Status            string                  `json:"status"`
 	RepoID            string                  `json:"repo_id,omitempty"`
 	ID                string                  `json:"id,omitempty"`
+	TargetKind        string                  `json:"target_kind,omitempty"`
 	StableSourceID    string                  `json:"stable_source_id,omitempty"`
 	IssueNumber       int                     `json:"issue_number,omitempty"`
 	RemoteID          string                  `json:"remote_id,omitempty"`
