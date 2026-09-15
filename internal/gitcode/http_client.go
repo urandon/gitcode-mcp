@@ -716,6 +716,7 @@ func (c *HTTPClient) CreateIssueComment(ctx context.Context, req CreateIssueComm
 	if err := validateCreateIssueComment(req); err != nil {
 		return WriteResult[Comment]{}, err
 	}
+	opts.singleTransportAttempt = true
 	target := req.Owner + "/" + req.Repo + "/" + strconv.Itoa(req.Number)
 	return writeConfirmedSchemaJSON[Comment](ctx, c, http.MethodPost, createIssueCommentEndpoint(req.Owner, req.Repo, req.Number), "CreateIssueComment", target, req, opts, func(result WriteResult[Comment]) (WriteResult[Comment], error) {
 		comment := result.Record
@@ -789,6 +790,7 @@ func (c *HTTPClient) CreatePRComment(ctx context.Context, req CreatePRCommentReq
 	if err := validateCreatePRComment(req); err != nil {
 		return WriteResult[PRComment]{}, err
 	}
+	opts.singleTransportAttempt = true
 	target := req.Owner + "/" + req.Repo + "/pulls/" + strconv.Itoa(req.Number)
 	return writeConfirmedSchemaJSON[PRComment](ctx, c, http.MethodPost, createPRCommentEndpoint(req.Owner, req.Repo, req.Number), "CreatePRComment", target, req, opts, func(result WriteResult[PRComment]) (WriteResult[PRComment], error) {
 		comment := result.Record
