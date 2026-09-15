@@ -5563,6 +5563,9 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	mergePRClaimed := false
 	var mergePRClaimCreatedAt time.Time
 	var mergePRAuditStore auditGenerationClaimStore
+	var topLevelCommentClaimMetadata map[string]string
+	var topLevelCommentClaimRecordID string
+	var topLevelCommentClaimRemoteType string
 	if command == "update-issue" {
 		req.beforeIssueUpdateMutation = func(preimage gitcode.Issue) error {
 			metadata := issueUpdatePreimageMetadata(preimage)
@@ -5680,25 +5683,43 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 			return nil
 		}
 	}
-	if command == "create-issue" || command == "add-pr-review-comment" {
+	if command == "create-issue" || command == "add-comment" || command == "add-pr-comment" || command == "add-pr-review-comment" {
 		remoteType := "issue"
 		recordID := fallbackSourceID("issue", fingerprint)
 		message := "remote issue creation pending confirmation"
-		if command == "add-pr-review-comment" {
+		switch command {
+		case "add-comment":
+			remoteType = "issue_comment"
+			recordID = fallbackSourceID("issue_comment", fingerprint)
+			message = "remote issue comment pending confirmation"
+		case "add-pr-comment":
+			remoteType = "pr_comment"
+			recordID = fallbackSourceID("pr_comment", fingerprint)
+			message = "remote pull request comment pending confirmation"
+		case "add-pr-review-comment":
 			remoteType = "pr_comment"
 			recordID = fallbackSourceID("pr_comment", fingerprint)
 			message = "remote inline review comment pending confirmation"
 		}
+		metadata := map[string]string{
+			"method":             "POST",
+			"idempotency_key":    key,
+			"remote_type":        remoteType,
+			"provider":           "gitcode-http",
+			"provider_mode":      string(gitcode.ProviderModeLive),
+			"source_fingerprint": fingerprint,
+		}
+		if req.Number > 0 {
+			metadata["remote_number"] = strconv.Itoa(req.Number)
+		}
+		if isTopLevelCommentCommand(command) {
+			topLevelCommentClaimMetadata = cloneStringMap(metadata)
+			topLevelCommentClaimRecordID = recordID
+			topLevelCommentClaimRemoteType = remoteType
+		}
 		entry := audit.WithRequestMetadata(
 			audit.InProgress(route.RepoID, key, command, recordID, remoteType, "", fingerprint, message, s.now().UTC()),
-			map[string]string{
-				"method":             "POST",
-				"idempotency_key":    key,
-				"remote_type":        remoteType,
-				"provider":           "gitcode-http",
-				"provider_mode":      string(gitcode.ProviderModeLive),
-				"source_fingerprint": fingerprint,
-			},
+			metadata,
 		)
 		if claimer, ok := s.store.(auditClaimStore); ok {
 			claimed, err := claimer.ClaimAuditEvent(ctx, entry)
@@ -5708,6 +5729,8 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 			if !claimed {
 				return WriteCommandResult{}, ErrWriteFailure{Code: "write_idempotency_in_progress", RepoID: route.RepoID, IdempotencyKey: key}
 			}
+		} else if command == "add-comment" || command == "add-pr-comment" {
+			return WriteCommandResult{}, ErrWriteFailure{Code: "write_audit_start_failed", RepoID: route.RepoID, IdempotencyKey: key, Cause: errors.New("atomic audit claim support is unavailable")}
 		} else if err := s.store.RecordAuditEvent(ctx, entry); err != nil {
 			return WriteCommandResult{}, ErrWriteFailure{Code: "write_audit_start_failed", RepoID: route.RepoID, IdempotencyKey: key, Cause: err}
 		}
@@ -5741,6 +5764,13 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	if err != nil {
 		code := s.writeAdapterErrorCode(req.Mode, err)
 		remoteID := remoteWriteID(err)
+		if isTopLevelCommentCommand(command) && remoteID == "" && !safeTopLevelCommentFailure(err) {
+			metadata := cloneStringMap(topLevelCommentClaimMetadata)
+			metadata["write_phase"] = "post_ambiguous"
+			entry := audit.WithRequestMetadata(audit.InProgress(route.RepoID, key, command, topLevelCommentClaimRecordID, topLevelCommentClaimRemoteType, "", fingerprint, "write_ambiguous_remote", s.now().UTC()), metadata)
+			_ = s.store.RecordAuditEvent(ctx, entry)
+			return WriteCommandResult{}, ErrWriteFailure{Code: "write_ambiguous_remote", RepoID: route.RepoID, IdempotencyKey: key, PayloadSource: failureSource(err), Cause: err}
+		}
 		if command == "update-issue" {
 			var claimFailure ErrWriteFailure
 			if errors.As(err, &claimFailure) && claimFailure.Code == "write_idempotency_in_progress" {
@@ -5863,6 +5893,13 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 		return WriteCommandResult{}, ErrWriteFailure{Code: code, RepoID: route.RepoID, IdempotencyKey: key, PayloadSource: failureSource(err), Cause: writeFailureCause(code, err)}
 	}
 	if !confirmed.confirmed || confirmed.remoteID == "" {
+		if isTopLevelCommentCommand(command) {
+			metadata := cloneStringMap(topLevelCommentClaimMetadata)
+			metadata["write_phase"] = "confirmation_ambiguous"
+			entry := audit.WithRequestMetadata(audit.InProgress(route.RepoID, key, command, topLevelCommentClaimRecordID, topLevelCommentClaimRemoteType, confirmed.remoteID, fingerprint, "write_ambiguous_remote", s.now().UTC()), metadata)
+			_ = s.store.RecordAuditEvent(ctx, entry)
+			return WriteCommandResult{}, ErrWriteFailure{Code: "write_ambiguous_remote", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key}
+		}
 		if command == "update-issue" && len(issueUpdateClaimMetadata) > 0 {
 			metadata := cloneStringMap(issueUpdateClaimMetadata)
 			metadata["write_phase"] = "patch_unconfirmed"
@@ -7683,7 +7720,7 @@ func applyWriteCommentTarget(result *WriteCommandResult, command string, req Wri
 	case "add-pr-comment":
 		result.TargetKind = "pull_request"
 		result.RemoteNumber = firstNonZeroInt(result.RemoteNumber, req.Number)
-		segment = "pull"
+		segment = "merge_requests"
 	default:
 		return
 	}
@@ -7766,6 +7803,31 @@ func writeMutationPhase(err error) (string, bool) {
 		return "", false
 	}
 	return firstNonEmptyString(phase.Phase, "mutation"), true
+}
+
+func isTopLevelCommentCommand(command string) bool {
+	return command == "add-comment" || command == "add-pr-comment"
+}
+
+func safeTopLevelCommentFailure(err error) bool {
+	var auth gitcode.ErrAuthExpired
+	if errors.As(err, &auth) {
+		return true
+	}
+	var forbidden gitcode.ErrForbidden
+	if errors.As(err, &forbidden) {
+		return true
+	}
+	var conflict gitcode.ErrConflict
+	if errors.As(err, &conflict) {
+		return true
+	}
+	var validation gitcode.ErrAPIValidation
+	if errors.As(err, &validation) {
+		return true
+	}
+	var limited gitcode.ErrRateLimited
+	return errors.As(err, &limited)
 }
 
 func safeMergePRMutationFailure(phase string, err error) bool {
