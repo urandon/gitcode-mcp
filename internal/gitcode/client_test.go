@@ -1490,6 +1490,53 @@ func TestListPullRequestsRecentUpdateOrderingParams(t *testing.T) {
 	}
 }
 
+func TestIssue147TopLevelCommentPostUsesOneTransportAttempt(t *testing.T) {
+	tests := []struct {
+		name   string
+		path   string
+		invoke func(*HTTPClient) error
+	}{
+		{
+			name: "issue comment",
+			path: createIssueCommentEndpoint("example-owner", "example-repo", 42),
+			invoke: func(client *HTTPClient) error {
+				_, err := client.CreateIssueComment(context.Background(), CreateIssueCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 42, Body: "comment"}, WriteOptions{IdempotencyKey: "issue-147-issue-comment"})
+				return err
+			},
+		},
+		{
+			name: "pull request comment",
+			path: createPRCommentEndpoint("example-owner", "example-repo", 7),
+			invoke: func(client *HTTPClient) error {
+				_, err := client.CreatePRComment(context.Background(), CreatePRCommentRequest{Owner: "example-owner", Repo: "example-repo", Number: 7, Body: "comment"}, WriteOptions{IdempotencyKey: "issue-147-pr-comment"})
+				return err
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			postCalls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != tc.path {
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+				postCalls++
+				http.Error(w, `{"message":"ambiguous upstream failure"}`, http.StatusInternalServerError)
+			}))
+			defer server.Close()
+
+			err := tc.invoke(newTestClient(t, server.URL, Config{MaxRetries: 2}))
+			var unavailable ErrNetworkUnavailable
+			if !errors.As(err, &unavailable) || unavailable.Attempts != 1 {
+				t.Fatalf("error=%T %v", err, err)
+			}
+			if postCalls != 1 {
+				t.Fatalf("POST calls=%d want 1 with MaxRetries=2", postCalls)
+			}
+		})
+	}
+}
+
 func TestScenario018PRCommentWrite(t *testing.T) {
 	var seenBody string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -457,6 +457,172 @@ func TestWriteDryRunNoMutation(t *testing.T) {
 	}
 }
 
+func TestCommentDryRunDeclaresExplicitTargetAndBrowserURL(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	svc := NewWithClient(store, &fakeGitCodeClient{})
+
+	issue, err := svc.AddComment(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeDryRun, Number: 42, Body: "issue body"})
+	if err != nil {
+		t.Fatalf("AddComment dry-run: %v", err)
+	}
+	if issue.TargetKind != "issue" || issue.IssueNumber != 42 || issue.BrowserURL != "https://example.invalid/owner-a/repo-a/issues/42" {
+		t.Fatalf("issue receipt=%#v", issue)
+	}
+
+	pull, err := svc.AddPRComment(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeDryRun, Number: 17, Body: "pull body"})
+	if err != nil {
+		t.Fatalf("AddPRComment dry-run: %v", err)
+	}
+	if pull.TargetKind != "pull_request" || pull.RemoteNumber != 17 || pull.BrowserURL != "https://example.invalid/owner-a/repo-a/merge_requests/17" {
+		t.Fatalf("pull receipt=%#v", pull)
+	}
+}
+
+func TestConcurrentTopLevelCommentsClaimIdempotencyBeforeProviderPOST(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		kind   string
+		number int
+	}{
+		{name: "issue", kind: "issue", number: 42},
+		{name: "pull request", kind: "pull_request", number: 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := cache.NewInMemorySQLiteStore(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			seedStore(t, ctx, store)
+			now := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+			client := &blockingTopLevelCommentClient{
+				fakeGitCodeClient: &fakeGitCodeClient{
+					createIssueCommentResult: gitcode.WriteResult[gitcode.Comment]{Record: gitcode.Comment{ID: "2002", Body: "comment", CreatedAt: now}, Confirmed: true, Operation: "CreateIssueComment", RemoteID: "2002", ParentIssueNumber: 42, ConfirmedAt: now},
+					createPRResult:           gitcode.WriteResult[gitcode.PullRequest]{Record: gitcode.PullRequest{ID: "9001", Number: 7, Title: "PR", State: "open", Base: "main", Head: "topic", CreatedAt: now, UpdatedAt: now}, Confirmed: true, Operation: "CreatePR", RemoteID: "9001", RemoteNumber: 7, ConfirmedAt: now},
+					createPRCommentResult:    gitcode.WriteResult[gitcode.PRComment]{Record: gitcode.PRComment{ID: "301", Body: "comment", CreatedAt: now}, Confirmed: true, Operation: "CreatePRComment", RemoteID: "301", ParentIssueNumber: 7, ConfirmedAt: now},
+				},
+				kind:    tc.kind,
+				started: make(chan struct{}),
+				release: make(chan struct{}),
+			}
+			svc := NewWithClient(store, client)
+			svc.providerMode = gitcode.ProviderModeLive
+			svc.writeCredentialPresent = true
+			if tc.kind == "pull_request" {
+				if _, err := svc.CreatePR(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "PR", Head: "topic", Base: "main", IdempotencyKey: "seed-pr"}); err != nil {
+					t.Fatalf("seed PR: %v", err)
+				}
+			}
+			req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: tc.number, Body: "comment", IdempotencyKey: "concurrent-" + strings.ReplaceAll(tc.kind, "_", "-")}
+			call := func(callCtx context.Context) (WriteCommandResult, error) {
+				if tc.kind == "issue" {
+					return svc.AddComment(callCtx, req)
+				}
+				return svc.AddPRComment(callCtx, req)
+			}
+
+			firstResult := make(chan WriteCommandResult, 1)
+			firstErr := make(chan error, 1)
+			go func() {
+				result, err := call(ctx)
+				firstResult <- result
+				firstErr <- err
+			}()
+			<-client.started
+
+			secondCtx, cancel := context.WithTimeout(ctx, time.Second)
+			defer cancel()
+			_, err = call(secondCtx)
+			var writeErr ErrWriteFailure
+			if !errors.As(err, &writeErr) || writeErr.Code != "write_idempotency_in_progress" {
+				t.Fatalf("concurrent error=%T %v", err, err)
+			}
+			if got := client.mutationCount(); got != 1 {
+				t.Fatalf("provider POSTs before release=%d want 1", got)
+			}
+
+			close(client.release)
+			if err := <-firstErr; err != nil {
+				t.Fatalf("first comment: %v", err)
+			}
+			if result := <-firstResult; result.Status != "succeeded" || result.TargetKind != tc.kind {
+				t.Fatalf("first result=%#v", result)
+			}
+			if got := client.mutationCount(); got != 1 {
+				t.Fatalf("provider POSTs=%d want exactly 1", got)
+			}
+			entry, err := store.GetAuditEventByKey(ctx, "fixture-a", req.IdempotencyKey)
+			if err != nil || entry == nil || entry.Status != audit.StatusSucceeded {
+				t.Fatalf("audit=%#v err=%v", entry, err)
+			}
+		})
+	}
+}
+
+func TestAmbiguousTopLevelCommentFailureKeepsIdempotencyFence(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		kind   string
+		number int
+	}{
+		{name: "issue", kind: "issue", number: 42},
+		{name: "pull request", kind: "pull_request", number: 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := cache.NewInMemorySQLiteStore(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			seedStore(t, ctx, store)
+			client := &fakeGitCodeClient{errors: []error{gitcode.ErrNetworkUnavailable{Endpoint: "/comments", Attempts: 1}}}
+			svc := NewWithClient(store, client)
+			svc.providerMode = gitcode.ProviderModeLive
+			svc.writeCredentialPresent = true
+			req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: tc.number, Body: "comment", IdempotencyKey: "ambiguous-" + strings.ReplaceAll(tc.kind, "_", "-")}
+			call := func() (WriteCommandResult, error) {
+				if tc.kind == "issue" {
+					return svc.AddComment(ctx, req)
+				}
+				return svc.AddPRComment(ctx, req)
+			}
+
+			_, err = call()
+			var first ErrWriteFailure
+			if !errors.As(err, &first) || first.Code != "write_ambiguous_remote" {
+				t.Fatalf("first error=%T %v", err, err)
+			}
+			_, err = call()
+			var replay ErrWriteFailure
+			if !errors.As(err, &replay) || replay.Code != "write_idempotency_in_progress" {
+				t.Fatalf("replay error=%T %v", err, err)
+			}
+			if got := client.createIssueCommentCalls + client.createPRCommentCalls; got != 1 {
+				t.Fatalf("provider POSTs=%d want 1", got)
+			}
+			entry, err := store.GetAuditEventByKey(ctx, "fixture-a", req.IdempotencyKey)
+			if err != nil || entry == nil || entry.Status != audit.StatusInProgress || entry.RequestMetadata["write_phase"] != "post_ambiguous" {
+				t.Fatalf("audit=%#v err=%v", entry, err)
+			}
+		})
+	}
+}
+
+func TestWriteTargetBrowserURLSanitizesCredentialsAndAPIPath(t *testing.T) {
+	route := RepositoryRoute{Owner: "owner", Name: "repo", APIBaseURL: "https://user:secret@api.gitcode.com/api/v5?token=hidden#fragment"}
+	if got, want := writeTargetBrowserURL(route, "issues", 9), "https://gitcode.com/owner/repo/issues/9"; got != want {
+		t.Fatalf("browser URL=%q want %q", got, want)
+	}
+}
+
 func TestScenario007WriteLiveCreateAuditCacheConfirmation(t *testing.T) {
 	ctx := context.Background()
 	store, err := cache.NewInMemorySQLiteStore(ctx)
@@ -2169,8 +2335,15 @@ func TestScenario016MCPWriteLifecycleCreatePRAndComment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddPRComment live returned error: %v", err)
 	}
-	if comment.Status != "succeeded" || comment.ID != "PRCOMMENT-7-301" || comment.RemoteID != "301" || client.createPRCommentCalls != 1 {
+	if comment.Status != "succeeded" || comment.ID != "PRCOMMENT-7-301" || comment.RemoteID != "301" || comment.TargetKind != "pull_request" || comment.RemoteNumber != 7 || comment.BrowserURL != "https://gitcode.com/owner-a/repo-a/merge_requests/7" || client.createPRCommentCalls != 1 {
 		t.Fatalf("unexpected PR comment result=%+v calls=%d", comment, client.createPRCommentCalls)
+	}
+	replayedComment, err := svc.AddPRComment(ctx, WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Number: 7, Body: "tested", IdempotencyKey: "pr-comment-key"})
+	if err != nil {
+		t.Fatalf("AddPRComment replay returned error: %v", err)
+	}
+	if replayedComment.Status != "already_applied" || !replayedComment.Replayed || replayedComment.TargetKind != "pull_request" || replayedComment.RemoteNumber != 7 || replayedComment.BrowserURL != "https://gitcode.com/owner-a/repo-a/merge_requests/7" || client.createPRCommentCalls != 1 {
+		t.Fatalf("unexpected PR comment replay=%+v calls=%d", replayedComment, client.createPRCommentCalls)
 	}
 	commentRecord, err := store.GetRecord(ctx, "fixture-a", "PRCOMMENT-7-301")
 	if err != nil {
@@ -5622,6 +5795,55 @@ type fakeGitCodeClient struct {
 	onCreatePRReviewComment      func(gitcode.CreatePRReviewCommentRequest, gitcode.WriteOptions)
 }
 
+type blockingTopLevelCommentClient struct {
+	*fakeGitCodeClient
+	kind        string
+	started     chan struct{}
+	release     chan struct{}
+	startedOnce sync.Once
+	mu          sync.Mutex
+	mutations   int
+}
+
+func (c *blockingTopLevelCommentClient) waitForRelease(ctx context.Context) error {
+	c.mu.Lock()
+	c.mutations++
+	c.mu.Unlock()
+	c.startedOnce.Do(func() { close(c.started) })
+	select {
+	case <-c.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *blockingTopLevelCommentClient) CreateIssueComment(ctx context.Context, req gitcode.CreateIssueCommentRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.Comment], error) {
+	if c.kind != "issue" {
+		return c.fakeGitCodeClient.CreateIssueComment(ctx, req, opts)
+	}
+	if err := c.waitForRelease(ctx); err != nil {
+		return gitcode.WriteResult[gitcode.Comment]{}, err
+	}
+	return c.createIssueCommentResult, nil
+}
+
+func (c *blockingTopLevelCommentClient) CreatePRComment(ctx context.Context, req gitcode.CreatePRCommentRequest, opts gitcode.WriteOptions) (gitcode.WriteResult[gitcode.PRComment], error) {
+	if c.kind != "pull_request" {
+		return c.fakeGitCodeClient.CreatePRComment(ctx, req, opts)
+	}
+	if err := c.waitForRelease(ctx); err != nil {
+		return gitcode.WriteResult[gitcode.PRComment]{}, err
+	}
+	return c.createPRCommentResult, nil
+}
+
+func (c *blockingTopLevelCommentClient) mutationCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.mutations
+}
+
 type blockingIssueUpdateClient struct {
 	*fakeGitCodeClient
 	claimed   chan struct{}
@@ -6383,6 +6605,16 @@ func (s *writeRefreshFailStore) UpsertRecordGraph(ctx context.Context, graph cac
 		return errors.New("injected cache refresh failure")
 	}
 	return s.Store.UpsertRecordGraph(ctx, graph)
+}
+
+func (s *writeRefreshFailStore) ClaimAuditEvent(ctx context.Context, entry cache.AuditTrailEntry) (bool, error) {
+	claimer, ok := s.Store.(interface {
+		ClaimAuditEvent(context.Context, cache.AuditTrailEntry) (bool, error)
+	})
+	if !ok {
+		return false, errors.New("atomic claim unavailable")
+	}
+	return claimer.ClaimAuditEvent(ctx, entry)
 }
 
 func (s *writeRefreshFailStore) ClaimAuditEventGeneration(ctx context.Context, entry cache.AuditTrailEntry, expectedFailedAt *time.Time) (bool, error) {

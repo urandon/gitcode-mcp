@@ -5,7 +5,7 @@
 Issue write commands accept either `--number`, meaning the repository-local GitCode issue number, or `--issue-id`, meaning a stable source id or known cached alias:
 
 ```sh
-gitcode-mcp add-comment \
+gitcode-mcp add-issue-comment \
   --repo example-owner/example-repo \
   --issue-id ISSUE-76 \
   --body "Design reviewed" \
@@ -24,12 +24,14 @@ This walkthrough covers the explicit, gated write path for GitCode operations.
 - No write can succeed without reaching the remote adapter.
 - Idempotency keys prevent duplicate writes.
 
+The legacy `add-comment` command is a fail-closed migration guard: it never writes and tells the caller to choose `add-issue-comment` or `add-pr-comment`. This prevents an issue/PR number collision from silently selecting the wrong target.
+
 ## Multiline Markdown bodies
 
 For multiline issue and issue-comment Markdown, use a UTF-8 file or stdin instead of shell-escaped inline text:
 
 ```sh
-gitcode-mcp add-comment \
+gitcode-mcp add-issue-comment \
   --repo example-owner/example-repo \
   --number 42 \
   --body-file ./comment.md \
@@ -42,7 +44,7 @@ gitcode-mcp update-comment \
   --idempotency-key comment-2002-update < ./comment.md
 ```
 
-`create-issue`, `update-issue`, `add-comment`, and `update-comment` accept at most one of `--body` or `--body-file`; comment writes still require a non-empty body, while issue writes may omit it. `--body-file -` reads stdin. File/stdin inputs are bounded to 10 MiB and must be non-empty valid UTF-8. CRLF and lone CR line endings normalize to LF; all trailing newlines are otherwise preserved. The CLI never unescapes backslashes.
+`create-issue`, `update-issue`, `add-issue-comment`, `add-pr-comment`, and `update-comment` accept at most one of `--body` or `--body-file`; comment writes still require a non-empty body, while issue writes may omit it. `--body-file -` reads stdin. File/stdin inputs are bounded to 10 MiB and must be non-empty valid UTF-8. CRLF and lone CR line endings normalize to LF; all trailing newlines are otherwise preserved. The CLI never unescapes backslashes.
 
 An inline body containing two or more literal `\n` sequences and no real newline fails before service startup or an external write. Use `--body-file` for intended Markdown, or `--allow-literal-backslash-n` when those literal characters are intentional. Dry-run output exposes only safe input metadata—source, byte count, real-newline count, literal-`\n` count, and normalization flags—not the body itself.
 
@@ -144,18 +146,29 @@ gitcode-mcp create-page \
 
 Expected: reports what would be created.
 
-### Add comment (dry-run)
+### Add issue comment (dry-run)
 
 ```sh
-gitcode-mcp add-comment \
+gitcode-mcp add-issue-comment \
   --repo example-owner/example-repo \
-  --kind issue \
   --number 42 \
   --body "This is a test comment." \
   --dry-run
 ```
 
 Expected: reports what would be added.
+
+### Add pull request comment (dry-run)
+
+```sh
+gitcode-mcp add-pr-comment \
+  --repo example-owner/example-repo \
+  --number 17 \
+  --body-file ./pr-comment.md \
+  --dry-run
+```
+
+Expected: reports `target_kind: pull_request`, target number `17`, and a credential-free browser URL without making a mutation. Issue-comment dry-runs analogously report `target_kind: issue`.
 
 ### Update comment (dry-run)
 
@@ -231,17 +244,28 @@ gitcode-mcp create-page \
 
 Expected: wiki page created on remote, audit row recorded, cache refreshed.
 
-### Add comment (live)
+### Add issue comment (live)
 
 ```sh
-gitcode-mcp add-comment \
+gitcode-mcp add-issue-comment \
   --repo example-owner/example-repo \
-  --kind issue \
   --number 42 \
   --body "Comment text."
 ```
 
 Expected: comment added on remote, audit row recorded, cache refreshed.
+
+### Add pull request comment (live)
+
+```sh
+gitcode-mcp add-pr-comment \
+  --repo example-owner/example-repo \
+  --number 17 \
+  --body "PR comment text." \
+  --idempotency-key pr-17-comment
+```
+
+Expected: comment added to pull request 17 on remote, audit row recorded, cache refreshed, and the receipt identifies `target_kind: pull_request`.
 
 ### Update comment (live)
 

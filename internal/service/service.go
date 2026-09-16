@@ -5443,6 +5443,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	key, fingerprint := writeIdempotency(command, req)
 	base := WriteCommandResult{Command: command, RepoID: route.RepoID, Status: "dry_run_valid", ID: writeTargetID(req), IdempotencyKey: key, SourceFingerprint: fingerprint, Evidence: "validated write command", GeneratedAt: s.now().UTC()}
 	applyWriteIssueIdentity(&base, command, req, req.IssueID, 0)
+	applyWriteCommentTarget(&base, command, req, route)
 	if req.Mode == WriteModeDryRun {
 		return base, nil
 	}
@@ -5476,7 +5477,9 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 			return WriteCommandResult{}, ErrWriteFailure{Code: "write_idempotency_conflict", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key}
 		}
 		if lookup.Replay {
-			return replayWriteResult(command, req, prior, fingerprint, s.now().UTC()), nil
+			result := replayWriteResult(command, req, prior, fingerprint, s.now().UTC())
+			applyWriteCommentTarget(&result, command, req, route)
+			return result, nil
 		}
 		if lookup.Partial {
 			if command == "merge-pr" {
@@ -5507,6 +5510,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 				return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: prior.RemoteID, IdempotencyKey: key, Cause: err}
 			}
 			result := replayWriteResult(command, req, completed, fingerprint, s.now().UTC())
+			applyWriteCommentTarget(&result, command, req, route)
 			result.Status = "succeeded"
 			return result, nil
 		}
@@ -5559,6 +5563,9 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	mergePRClaimed := false
 	var mergePRClaimCreatedAt time.Time
 	var mergePRAuditStore auditGenerationClaimStore
+	var topLevelCommentClaimMetadata map[string]string
+	var topLevelCommentClaimRecordID string
+	var topLevelCommentClaimRemoteType string
 	if command == "update-issue" {
 		req.beforeIssueUpdateMutation = func(preimage gitcode.Issue) error {
 			metadata := issueUpdatePreimageMetadata(preimage)
@@ -5676,25 +5683,43 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 			return nil
 		}
 	}
-	if command == "create-issue" || command == "add-pr-review-comment" {
+	if command == "create-issue" || command == "add-comment" || command == "add-pr-comment" || command == "add-pr-review-comment" {
 		remoteType := "issue"
 		recordID := fallbackSourceID("issue", fingerprint)
 		message := "remote issue creation pending confirmation"
-		if command == "add-pr-review-comment" {
+		switch command {
+		case "add-comment":
+			remoteType = "issue_comment"
+			recordID = fallbackSourceID("issue_comment", fingerprint)
+			message = "remote issue comment pending confirmation"
+		case "add-pr-comment":
+			remoteType = "pr_comment"
+			recordID = fallbackSourceID("pr_comment", fingerprint)
+			message = "remote pull request comment pending confirmation"
+		case "add-pr-review-comment":
 			remoteType = "pr_comment"
 			recordID = fallbackSourceID("pr_comment", fingerprint)
 			message = "remote inline review comment pending confirmation"
 		}
+		metadata := map[string]string{
+			"method":             "POST",
+			"idempotency_key":    key,
+			"remote_type":        remoteType,
+			"provider":           "gitcode-http",
+			"provider_mode":      string(gitcode.ProviderModeLive),
+			"source_fingerprint": fingerprint,
+		}
+		if req.Number > 0 {
+			metadata["remote_number"] = strconv.Itoa(req.Number)
+		}
+		if isTopLevelCommentCommand(command) {
+			topLevelCommentClaimMetadata = cloneStringMap(metadata)
+			topLevelCommentClaimRecordID = recordID
+			topLevelCommentClaimRemoteType = remoteType
+		}
 		entry := audit.WithRequestMetadata(
 			audit.InProgress(route.RepoID, key, command, recordID, remoteType, "", fingerprint, message, s.now().UTC()),
-			map[string]string{
-				"method":             "POST",
-				"idempotency_key":    key,
-				"remote_type":        remoteType,
-				"provider":           "gitcode-http",
-				"provider_mode":      string(gitcode.ProviderModeLive),
-				"source_fingerprint": fingerprint,
-			},
+			metadata,
 		)
 		if claimer, ok := s.store.(auditClaimStore); ok {
 			claimed, err := claimer.ClaimAuditEvent(ctx, entry)
@@ -5704,6 +5729,8 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 			if !claimed {
 				return WriteCommandResult{}, ErrWriteFailure{Code: "write_idempotency_in_progress", RepoID: route.RepoID, IdempotencyKey: key}
 			}
+		} else if command == "add-comment" || command == "add-pr-comment" {
+			return WriteCommandResult{}, ErrWriteFailure{Code: "write_audit_start_failed", RepoID: route.RepoID, IdempotencyKey: key, Cause: errors.New("atomic audit claim support is unavailable")}
 		} else if err := s.store.RecordAuditEvent(ctx, entry); err != nil {
 			return WriteCommandResult{}, ErrWriteFailure{Code: "write_audit_start_failed", RepoID: route.RepoID, IdempotencyKey: key, Cause: err}
 		}
@@ -5737,6 +5764,13 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	if err != nil {
 		code := s.writeAdapterErrorCode(req.Mode, err)
 		remoteID := remoteWriteID(err)
+		if isTopLevelCommentCommand(command) && remoteID == "" && !safeTopLevelCommentFailure(err) {
+			metadata := cloneStringMap(topLevelCommentClaimMetadata)
+			metadata["write_phase"] = "post_ambiguous"
+			entry := audit.WithRequestMetadata(audit.InProgress(route.RepoID, key, command, topLevelCommentClaimRecordID, topLevelCommentClaimRemoteType, "", fingerprint, "write_ambiguous_remote", s.now().UTC()), metadata)
+			_ = s.store.RecordAuditEvent(ctx, entry)
+			return WriteCommandResult{}, ErrWriteFailure{Code: "write_ambiguous_remote", RepoID: route.RepoID, IdempotencyKey: key, PayloadSource: failureSource(err), Cause: err}
+		}
 		if command == "update-issue" {
 			var claimFailure ErrWriteFailure
 			if errors.As(err, &claimFailure) && claimFailure.Code == "write_idempotency_in_progress" {
@@ -5859,6 +5893,13 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 		return WriteCommandResult{}, ErrWriteFailure{Code: code, RepoID: route.RepoID, IdempotencyKey: key, PayloadSource: failureSource(err), Cause: writeFailureCause(code, err)}
 	}
 	if !confirmed.confirmed || confirmed.remoteID == "" {
+		if isTopLevelCommentCommand(command) {
+			metadata := cloneStringMap(topLevelCommentClaimMetadata)
+			metadata["write_phase"] = "confirmation_ambiguous"
+			entry := audit.WithRequestMetadata(audit.InProgress(route.RepoID, key, command, topLevelCommentClaimRecordID, topLevelCommentClaimRemoteType, confirmed.remoteID, fingerprint, "write_ambiguous_remote", s.now().UTC()), metadata)
+			_ = s.store.RecordAuditEvent(ctx, entry)
+			return WriteCommandResult{}, ErrWriteFailure{Code: "write_ambiguous_remote", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key}
+		}
 		if command == "update-issue" && len(issueUpdateClaimMetadata) > 0 {
 			metadata := cloneStringMap(issueUpdateClaimMetadata)
 			metadata["write_phase"] = "patch_unconfirmed"
@@ -6043,7 +6084,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	base.RemoteRevision = confirmed.remoteRevision
 	base.APIPath = confirmed.apiPath
 	base.CachePath = confirmed.cachePath
-	base.BrowserURL = confirmed.browserURL
+	base.BrowserURL = firstNonEmptyString(confirmed.browserURL, base.BrowserURL)
 	base.Milestone = confirmed.milestone
 	base.PushMirror = confirmed.pushMirror
 	base.Evidence = "adapter-confirmed write with audit and cache refresh"
@@ -6117,7 +6158,7 @@ func writeAuditMetadata(command, key, fingerprint, remoteType string, confirmed 
 }
 
 func withWriteAuditMetadata(entry cache.AuditTrailEntry, command, key, fingerprint, remoteType string, confirmed writeConfirmation) cache.AuditTrailEntry {
-	if command != "create-issue" && command != "merge-pr" && command != "reply-pr-review-comment" && confirmed.milestone == nil && confirmed.pushMirror == nil {
+	if command != "create-issue" && command != "merge-pr" && command != "add-comment" && command != "add-pr-comment" && command != "reply-pr-review-comment" && confirmed.milestone == nil && confirmed.pushMirror == nil {
 		return entry
 	}
 	return audit.WithRequestMetadata(entry, writeAuditMetadata(command, key, fingerprint, remoteType, confirmed))
@@ -7666,6 +7707,58 @@ func applyWriteIssueIdentity(result *WriteCommandResult, command string, req Wri
 	}
 }
 
+func applyWriteCommentTarget(result *WriteCommandResult, command string, req WriteCommandRequest, route RepositoryRoute) {
+	if result == nil {
+		return
+	}
+	segment := ""
+	switch command {
+	case "add-comment":
+		result.TargetKind = "issue"
+		result.IssueNumber = firstNonZeroInt(result.IssueNumber, req.Number)
+		segment = "issues"
+	case "add-pr-comment":
+		result.TargetKind = "pull_request"
+		result.RemoteNumber = firstNonZeroInt(result.RemoteNumber, req.Number)
+		segment = "merge_requests"
+	default:
+		return
+	}
+	if result.BrowserURL == "" {
+		result.BrowserURL = writeTargetBrowserURL(route, segment, req.Number)
+	}
+}
+
+func writeTargetBrowserURL(route RepositoryRoute, segment string, number int) string {
+	if number <= 0 || strings.TrimSpace(route.Owner) == "" || strings.TrimSpace(route.Name) == "" {
+		return ""
+	}
+	rawBaseURL := strings.TrimSpace(route.APIBaseURL)
+	if rawBaseURL == "" {
+		rawBaseURL = "https://api.gitcode.com/api/v5"
+	}
+	u, err := url.Parse(rawBaseURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.RawPath = ""
+	if strings.EqualFold(u.Hostname(), "api.gitcode.com") {
+		u.Host = "gitcode.com"
+	}
+	basePath := strings.TrimSuffix(u.Path, "/")
+	for _, suffix := range []string{"/api/v5", "/api/v4", "/api"} {
+		if strings.HasSuffix(basePath, suffix) {
+			basePath = strings.TrimSuffix(basePath, suffix)
+			break
+		}
+	}
+	u.Path = path.Join(basePath, route.Owner, route.Name, segment, strconv.Itoa(number))
+	return u.String()
+}
+
 func milestoneReceiptFromAudit(entry cache.AuditTrailEntry) *WriteMilestoneReceipt {
 	metadata := entry.RequestMetadata
 	if len(metadata) == 0 {
@@ -7710,6 +7803,31 @@ func writeMutationPhase(err error) (string, bool) {
 		return "", false
 	}
 	return firstNonEmptyString(phase.Phase, "mutation"), true
+}
+
+func isTopLevelCommentCommand(command string) bool {
+	return command == "add-comment" || command == "add-pr-comment"
+}
+
+func safeTopLevelCommentFailure(err error) bool {
+	var auth gitcode.ErrAuthExpired
+	if errors.As(err, &auth) {
+		return true
+	}
+	var forbidden gitcode.ErrForbidden
+	if errors.As(err, &forbidden) {
+		return true
+	}
+	var conflict gitcode.ErrConflict
+	if errors.As(err, &conflict) {
+		return true
+	}
+	var validation gitcode.ErrAPIValidation
+	if errors.As(err, &validation) {
+		return true
+	}
+	var limited gitcode.ErrRateLimited
+	return errors.As(err, &limited)
 }
 
 func safeMergePRMutationFailure(phase string, err error) bool {
