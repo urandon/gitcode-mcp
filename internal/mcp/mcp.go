@@ -310,6 +310,7 @@ type schemaProp struct {
 	Maximum     *float64    `json:"maximum,omitempty"`
 	Default     any         `json:"default,omitempty"`
 	MinLength   int         `json:"minLength,omitempty"`
+	MinItems    int         `json:"minItems,omitempty"`
 	Items       *schemaProp `json:"items,omitempty"`
 }
 

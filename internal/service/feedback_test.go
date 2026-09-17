@@ -95,6 +95,39 @@ func TestSubmitFeedbackNeedsContextNeverCallsProvider(t *testing.T) {
 	}
 }
 
+func TestSubmitFeedbackUnsafeOrPlaceholderContextNeverCallsProvider(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(*feedback.Draft)
+		wantError  bool
+		wantStatus string
+	}{
+		{name: "raw transcript in goal", mutate: func(draft *feedback.Draft) { draft.Goal = "full transcript follows" }, wantError: true},
+		{name: "raw payload in circumstances", mutate: func(draft *feedback.Draft) { draft.Circumstances = "raw api response body follows" }, wantError: true},
+		{name: "environment dump reproduction", mutate: func(draft *feedback.Draft) { draft.ReproductionSteps = []string{"attach environment dump"} }, wantError: true},
+		{name: "none narrative and reproduction", mutate: func(draft *feedback.Draft) { draft.Goal = "none"; draft.ReproductionSteps = []string{"none"} }, wantStatus: "needs_context"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &fakeGitCodeClient{onCreateIssue: func(gitcode.CreateIssueRequest, gitcode.WriteOptions) { t.Fatal("provider must not be called") }}
+			svc, _ := feedbackService(t, client)
+			draft := feedbackDraft()
+			tt.mutate(&draft)
+			result, err := svc.SubmitFeedback(context.Background(), SubmitFeedbackRequest{Draft: draft, Mode: WriteModeLive, IdempotencyKey: "unsafe-or-placeholder"})
+			if tt.wantError {
+				if !feedback.IsValidationError(err) {
+					t.Fatalf("result=%#v err=%v, want validation error", result, err)
+				}
+			} else if err != nil || result.Status != tt.wantStatus {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+			if client.createIssueCalls != 0 {
+				t.Fatalf("provider calls=%d", client.createIssueCalls)
+			}
+		})
+	}
+}
+
 func TestPrepareFeedbackKeepsConfigurationAndDuplicateSemanticsSeparateFromReadiness(t *testing.T) {
 	client := &fakeGitCodeClient{onCreateIssue: func(gitcode.CreateIssueRequest, gitcode.WriteOptions) { t.Fatal("provider must not be called") }}
 	svc, store := feedbackService(t, client)

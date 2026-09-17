@@ -358,30 +358,31 @@ func normalizeDraft(draft Draft) (Draft, int, error) {
 	}
 	redactions := 0
 	fields := []struct {
-		name     string
-		value    *string
-		required bool
-		max      int
+		name             string
+		value            *string
+		required         bool
+		max              int
+		forbidRawContent bool
 	}{
-		{"summary", &draft.Summary, true, 180},
-		{"goal", &draft.Goal, false, 2000},
-		{"circumstances", &draft.Circumstances, false, 4000},
-		{"observed", &draft.Observed, true, 4000},
-		{"expected", &draft.Expected, true, 4000},
-		{"impact", &draft.Impact, true, 4000},
-		{"fallback_used", &draft.FallbackUsed, false, 1000},
-		{"workaround", &draft.Workaround, false, 2000},
-		{"related_task", &draft.RelatedTask, false, 1000},
-		{"acceptance_signal", &draft.AcceptanceSignal, false, 2000},
-		{"proposal", &draft.Proposal, false, 3000},
-		{"tool_name", &draft.ToolName, false, 200},
-		{"error_code", &draft.ErrorCode, false, 200},
-		{"failure_class", &draft.FailureClass, false, 200},
-		{"correlation_id", &draft.CorrelationID, false, 200},
-		{"job_id", &draft.JobID, false, 200},
+		{"summary", &draft.Summary, true, 180, true},
+		{"goal", &draft.Goal, false, 2000, true},
+		{"circumstances", &draft.Circumstances, false, 4000, true},
+		{"observed", &draft.Observed, true, 4000, true},
+		{"expected", &draft.Expected, true, 4000, true},
+		{"impact", &draft.Impact, true, 4000, true},
+		{"fallback_used", &draft.FallbackUsed, false, 1000, true},
+		{"workaround", &draft.Workaround, false, 2000, true},
+		{"related_task", &draft.RelatedTask, false, 1000, true},
+		{"acceptance_signal", &draft.AcceptanceSignal, false, 2000, true},
+		{"proposal", &draft.Proposal, false, 3000, true},
+		{"tool_name", &draft.ToolName, false, 200, false},
+		{"error_code", &draft.ErrorCode, false, 200, false},
+		{"failure_class", &draft.FailureClass, false, 200, false},
+		{"correlation_id", &draft.CorrelationID, false, 200, false},
+		{"job_id", &draft.JobID, false, 200, false},
 	}
 	for _, field := range fields {
-		clean, count, err := sanitizeText(field.name, *field.value, field.max, false)
+		clean, count, err := sanitizeText(field.name, *field.value, field.max, field.forbidRawContent)
 		if err != nil {
 			return Draft{}, 0, err
 		}
@@ -392,7 +393,7 @@ func normalizeDraft(draft Draft) (Draft, int, error) {
 		}
 	}
 	for i, step := range draft.ReproductionSteps {
-		clean, count, err := sanitizeText("reproduction_steps", step, 2000, false)
+		clean, count, err := sanitizeText("reproduction_steps", step, 2000, true)
 		if err != nil {
 			return Draft{}, 0, err
 		}
@@ -422,9 +423,10 @@ func normalizeDraft(draft Draft) (Draft, int, error) {
 
 func missingContext(draft Draft) ([]string, []string) {
 	type requirement struct {
-		field    string
-		value    string
-		question string
+		field             string
+		value             string
+		allowExplicitNone bool
+		question          string
 	}
 	requirements := []requirement{
 		{field: "summary", value: draft.Summary, question: "What concise, searchable symptom or product friction occurred?"},
@@ -433,20 +435,20 @@ func missingContext(draft Draft) ([]string, []string) {
 		{field: "observed", value: draft.Observed, question: "What exactly happened, including the stable error or state transition when available?"},
 		{field: "expected", value: draft.Expected, question: "What observable behavior was expected instead?"},
 		{field: "impact", value: draft.Impact, question: "What work was blocked, delayed, repeated, or handed to a human?"},
-		{field: "fallback_used", value: draft.FallbackUsed, question: "Which fallback was used? If none was available, say so explicitly."},
+		{field: "fallback_used", value: draft.FallbackUsed, allowExplicitNone: true, question: "Which fallback was used? If none was available, say so explicitly."},
 		{field: "acceptance_signal", value: draft.AcceptanceSignal, question: "What specific observable result would prove this feedback is addressed?"},
 	}
 	missing := make([]string, 0, len(requirements)+1)
 	questions := make([]string, 0, len(requirements)+1)
 	for _, requirement := range requirements {
-		if lowInformation(requirement.value) {
+		if lowInformation(requirement.value, requirement.allowExplicitNone) {
 			missing = append(missing, requirement.field)
 			questions = append(questions, requirement.question)
 		}
 	}
 	usefulStep := false
 	for _, step := range draft.ReproductionSteps {
-		if !lowInformation(step) {
+		if !lowInformation(step, false) {
 			usefulStep = true
 			break
 		}
@@ -458,13 +460,16 @@ func missingContext(draft Draft) ([]string, []string) {
 	return missing, questions
 }
 
-func lowInformation(value string) bool {
+func lowInformation(value string, allowExplicitNone bool) bool {
 	normalized := strings.Trim(strings.ToLower(strings.Join(strings.Fields(value), " ")), " .!?:;-")
 	if normalized == "" {
 		return true
 	}
 	switch normalized {
-	case "failed", "failure", "broken", "does not work", "doesn't work", "not working", "same", "same as above", "unknown", "n/a", "na", "tbd", "todo":
+	case "none", "no", "failed", "failure", "broken", "does not work", "doesn't work", "not working", "same", "same as above", "unknown", "n/a", "na", "tbd", "todo":
+		if allowExplicitNone && (normalized == "none" || normalized == "no") {
+			return false
+		}
 		return true
 	default:
 		return false

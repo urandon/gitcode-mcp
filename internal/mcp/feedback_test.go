@@ -91,6 +91,14 @@ func TestFeedbackToolsExposeSafePolicyAndDelegate(t *testing.T) {
 			t.Fatalf("submit required=%v, want %s", submitSchema.Required, field)
 		}
 	}
+	steps := submitSchema.Properties["reproduction_steps"]
+	if steps.MinItems != 1 || steps.Items == nil || steps.Items.Type != "string" || steps.Items.MinLength != 1 {
+		t.Fatalf("reproduction_steps schema=%#v", steps)
+	}
+	evidence := submitSchema.Properties["evidence"]
+	if evidence.Items == nil || evidence.Items.Type != "string" || evidence.Items.MinLength != 1 {
+		t.Fatalf("evidence schema=%#v", evidence)
+	}
 
 	spy := &feedbackSpyService{}
 	srv, r, w, stderr := newPipeServerWithToolAccess(spy, ToolAccessWrite)

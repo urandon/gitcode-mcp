@@ -90,6 +90,47 @@ func TestPrepareReturnsTargetedQuestionsForIncompleteContext(t *testing.T) {
 	}
 }
 
+func TestPrepareRejectsForbiddenRawContentInEveryNarrativeShape(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Draft)
+	}{
+		{name: "goal transcript", mutate: func(draft *Draft) { draft.Goal = "full transcript follows" }},
+		{name: "circumstances payload", mutate: func(draft *Draft) { draft.Circumstances = "raw api response body follows" }},
+		{name: "reproduction environment", mutate: func(draft *Draft) { draft.ReproductionSteps = []string{"capture an environment dump"} }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			draft := validDraft()
+			tt.mutate(&draft)
+			if prepared, err := Prepare(draft, testContext(), Config{Enabled: true, RepoID: "example/tool"}, nil); !IsValidationError(err) {
+				t.Fatalf("prepared=%#v err=%v, want validation error", prepared, err)
+			}
+		})
+	}
+}
+
+func TestPrepareAllowsExplicitNoFallbackButRejectsNoneElsewhere(t *testing.T) {
+	draft := validDraft()
+	draft.FallbackUsed = "none"
+	prepared, err := Prepare(draft, testContext(), Config{Enabled: true, RepoID: "example/tool"}, nil)
+	if err != nil || prepared.Status != "prepared" {
+		t.Fatalf("explicit no fallback prepared=%#v err=%v", prepared, err)
+	}
+
+	draft.Goal = "none"
+	draft.ReproductionSteps = []string{"none"}
+	prepared, err = Prepare(draft, testContext(), Config{Enabled: true, RepoID: "example/tool"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"goal", "reproduction_steps"} {
+		if !contains(prepared.MissingFields, field) {
+			t.Fatalf("missing fields %v do not contain %q", prepared.MissingFields, field)
+		}
+	}
+}
+
 func contains(values []string, wanted string) bool {
 	for _, value := range values {
 		if value == wanted {

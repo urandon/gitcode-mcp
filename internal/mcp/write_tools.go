@@ -139,13 +139,13 @@ func feedbackInputSchema(submit bool) inputSchema {
 		"observed":           {Type: "string", Description: "What reproducibly happened, including a stable error or state transition when available; concise facts only.", MinLength: 1},
 		"expected":           {Type: "string", Description: "What should have happened.", MinLength: 1},
 		"impact":             {Type: "string", Description: "User or agent workflow impact.", MinLength: 1},
-		"reproduction_steps": {Type: "array", Description: "Bounded reproduction steps without secrets or raw payloads."},
+		"reproduction_steps": {Type: "array", Description: "Bounded reproduction steps without secrets or raw payloads.", Items: &schemaProp{Type: "string", MinLength: 1}},
 		"fallback_used":      {Type: "string", Description: "CLI, browser, live API, or human fallback used; explicitly state when no fallback was available."},
 		"workaround":         {Type: "string", Description: "Optional safe workaround."},
 		"related_task":       {Type: "string", Description: "Optional public-safe task/PR reference."},
 		"acceptance_signal":  {Type: "string", Description: "Specific observable result that would prove the feedback is addressed."},
 		"proposal":           {Type: "string", Description: "Optional implementation-neutral proposal."},
-		"evidence":           {Type: "array", Description: "Sanitized bounded facts only; raw prompts, transcripts, environment dumps, private paths, credentials, cookies, and API bodies are rejected or redacted."},
+		"evidence":           {Type: "array", Description: "Sanitized bounded facts only; raw prompts, transcripts, environment dumps, private paths, credentials, cookies, and API bodies are rejected or redacted.", Items: &schemaProp{Type: "string", MinLength: 1}},
 		"tool_name":          {Type: "string", Description: "Affected MCP tool or CLI command."},
 		"error_code":         {Type: "string", Description: "Structured error code when available."},
 		"failure_class":      {Type: "string", Description: "Structured failure class when available."},
@@ -155,6 +155,9 @@ func feedbackInputSchema(submit bool) inputSchema {
 	}
 	required := []string{"summary", "category", "surface", "reporter_type", "observed", "expected", "impact"}
 	if submit {
+		reproduction := props["reproduction_steps"]
+		reproduction.MinItems = 1
+		props["reproduction_steps"] = reproduction
 		props["write_mode"] = schemaProp{Type: "string", Description: "Required live external-write intent.", Enum: []string{"live"}}
 		props["idempotency_key"] = schemaProp{Type: "string", Description: "Caller-provided idempotency key.", MinLength: 1}
 		required = append(required, "goal", "circumstances", "reproduction_steps", "fallback_used", "acceptance_signal", "write_mode", "idempotency_key")
