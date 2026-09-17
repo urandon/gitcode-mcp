@@ -139,7 +139,11 @@ func (s *Service) SubmitFeedback(ctx context.Context, req SubmitFeedbackRequest)
 	if err != nil {
 		return feedback.SubmissionResult{}, err
 	}
-	base := feedback.SubmissionResult{Status: prepared.Status, Sink: prepared.Sink, RepoID: prepared.RepoID, Fingerprint: prepared.Fingerprint, DedupeDecision: prepared.DedupeDecision, Candidates: prepared.Candidates, IdempotencyKey: key, Remediation: prepared.Remediation, GeneratedAt: s.now().UTC(), Readiness: prepared.Readiness}
+	base := feedback.SubmissionResult{Status: prepared.Status, Sink: prepared.Sink, RepoID: prepared.RepoID, Fingerprint: prepared.Fingerprint, DedupeDecision: prepared.DedupeDecision, Candidates: prepared.Candidates, IdempotencyKey: key, MissingFields: prepared.MissingFields, FollowUpQuestions: prepared.FollowUpQuestions, Remediation: prepared.Remediation, GeneratedAt: s.now().UTC(), Readiness: prepared.Readiness}
+	if prepared.Status == "needs_context" {
+		base.Evidence = "feedback context is incomplete; no provider write was attempted"
+		return base, nil
+	}
 	if prepared.Status == "duplicate" && len(prepared.Candidates) > 0 {
 		candidate := prepared.Candidates[0]
 		base.Status = "duplicate"

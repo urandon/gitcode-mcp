@@ -37,7 +37,7 @@ func TestResolveServiceKeepsFeedbackConfigOffline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := svc.PrepareFeedback(ctx, feedback.Draft{Summary: "MCP fallback required", Category: "ux_friction", Surface: "mcp", ReporterType: "agent", Observed: "tool unavailable", Expected: "tool available", Impact: "CLI fallback"})
+	prepared, err := svc.PrepareFeedback(ctx, feedback.Draft{Summary: "MCP fallback required", Category: "ux_friction", Surface: "mcp", ReporterType: "agent", Goal: "Complete the workflow through MCP", Circumstances: "During an offline session after MCP tool discovery", Observed: "tool unavailable", Expected: "tool available", Impact: "CLI fallback", ReproductionSteps: []string{"Discover the MCP tools", "Call the expected tool"}, FallbackUsed: "CLI", AcceptanceSignal: "The MCP tool is available and completes the workflow"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -296,6 +296,8 @@ type options struct {
 	category                     string
 	surface                      string
 	reporterType                 string
+	goal                         string
+	circumstances                string
 	observed                     string
 	expected                     string
 	impact                       string
@@ -816,6 +818,8 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.StringVar(&opts.category, "category", "", "feedback category")
 	flags.StringVar(&opts.surface, "surface", "", "feedback surface")
 	flags.StringVar(&opts.reporterType, "reporter-type", "", "feedback reporter type")
+	flags.StringVar(&opts.goal, "goal", "", "user or agent goal")
+	flags.StringVar(&opts.circumstances, "circumstances", "", "workflow circumstances and trigger")
 	flags.StringVar(&opts.observed, "observed", "", "observed behavior")
 	flags.StringVar(&opts.expected, "expected", "", "expected behavior")
 	flags.StringVar(&opts.impact, "impact", "", "feedback impact")
@@ -2991,6 +2995,8 @@ func feedbackDraftFromOptions(opts options) (feedback.Draft, error) {
 	setIfNotEmpty(opts.category, &draft.Category)
 	setIfNotEmpty(opts.surface, &draft.Surface)
 	setIfNotEmpty(opts.reporterType, &draft.ReporterType)
+	setIfNotEmpty(opts.goal, &draft.Goal)
+	setIfNotEmpty(opts.circumstances, &draft.Circumstances)
 	setIfNotEmpty(opts.observed, &draft.Observed)
 	setIfNotEmpty(opts.expected, &draft.Expected)
 	setIfNotEmpty(opts.impact, &draft.Impact)
@@ -3024,6 +3030,12 @@ func renderFeedbackPreparedText(w io.Writer, result feedback.PreparedReport) {
 	if result.Remediation != "" {
 		fmt.Fprintf(w, "remediation: %s\n", result.Remediation)
 	}
+	if len(result.MissingFields) > 0 {
+		fmt.Fprintf(w, "missing_fields: %s\n", strings.Join(result.MissingFields, ","))
+		for _, question := range result.FollowUpQuestions {
+			fmt.Fprintf(w, "follow_up: %s\n", question)
+		}
+	}
 	if len(result.Candidates) > 0 {
 		fmt.Fprintln(w, "candidates:")
 		for _, candidate := range result.Candidates {
@@ -3047,6 +3059,12 @@ func renderFeedbackSubmissionText(w io.Writer, result feedback.SubmissionResult)
 	}
 	if result.Remediation != "" {
 		fmt.Fprintf(w, "remediation: %s\n", result.Remediation)
+	}
+	if len(result.MissingFields) > 0 {
+		fmt.Fprintf(w, "missing_fields: %s\n", strings.Join(result.MissingFields, ","))
+		for _, question := range result.FollowUpQuestions {
+			fmt.Fprintf(w, "follow_up: %s\n", question)
+		}
 	}
 }
 

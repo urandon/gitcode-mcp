@@ -130,20 +130,22 @@ func issueIDSchemaProp() schemaProp {
 
 func feedbackInputSchema(submit bool) inputSchema {
 	props := map[string]schemaProp{
-		"summary":            {Type: "string", Description: "Concise observed product friction; do not include a prompt or transcript.", MinLength: 1},
+		"summary":            {Type: "string", Description: "Concise, searchable product friction; do not write only 'failed' or 'does not work', and do not include a prompt or transcript.", MinLength: 1},
 		"category":           {Type: "string", Description: "Feedback category.", Enum: []string{"bug", "feature_gap", "ux_friction", "diagnostics", "docs", "performance", "other"}},
 		"surface":            {Type: "string", Description: "Affected product surface.", Enum: []string{"mcp", "cli", "daemon", "cache", "sync", "rag", "gitcode_adapter", "setup", "other"}},
 		"reporter_type":      {Type: "string", Description: "Reporter type.", Enum: []string{"agent", "human", "mixed"}},
-		"observed":           {Type: "string", Description: "What reproducibly happened; concise facts only.", MinLength: 1},
+		"goal":               {Type: "string", Description: "The user or agent goal that the affected workflow was meant to accomplish. Preparation asks a targeted follow-up when omitted.", MinLength: 1},
+		"circumstances":      {Type: "string", Description: "Concrete circumstances: workflow stage, operating mode, relevant prior state, and trigger. Do not infer facts that were not observed.", MinLength: 1},
+		"observed":           {Type: "string", Description: "What reproducibly happened, including a stable error or state transition when available; concise facts only.", MinLength: 1},
 		"expected":           {Type: "string", Description: "What should have happened.", MinLength: 1},
 		"impact":             {Type: "string", Description: "User or agent workflow impact.", MinLength: 1},
-		"reproduction_steps": {Type: "array", Description: "Bounded reproduction steps without secrets or raw payloads."},
-		"fallback_used":      {Type: "string", Description: "CLI, browser, live API, or human fallback used."},
+		"reproduction_steps": {Type: "array", Description: "Bounded reproduction steps without secrets or raw payloads.", Items: &schemaProp{Type: "string", MinLength: 1}},
+		"fallback_used":      {Type: "string", Description: "CLI, browser, live API, or human fallback used; explicitly state when no fallback was available."},
 		"workaround":         {Type: "string", Description: "Optional safe workaround."},
 		"related_task":       {Type: "string", Description: "Optional public-safe task/PR reference."},
-		"acceptance_signal":  {Type: "string", Description: "What would make this workflow better."},
+		"acceptance_signal":  {Type: "string", Description: "Specific observable result that would prove the feedback is addressed."},
 		"proposal":           {Type: "string", Description: "Optional implementation-neutral proposal."},
-		"evidence":           {Type: "array", Description: "Sanitized bounded facts only; raw prompts, transcripts, environment dumps, private paths, credentials, cookies, and API bodies are rejected or redacted."},
+		"evidence":           {Type: "array", Description: "Sanitized bounded facts only; raw prompts, transcripts, environment dumps, private paths, credentials, cookies, and API bodies are rejected or redacted.", Items: &schemaProp{Type: "string", MinLength: 1}},
 		"tool_name":          {Type: "string", Description: "Affected MCP tool or CLI command."},
 		"error_code":         {Type: "string", Description: "Structured error code when available."},
 		"failure_class":      {Type: "string", Description: "Structured failure class when available."},
@@ -153,9 +155,12 @@ func feedbackInputSchema(submit bool) inputSchema {
 	}
 	required := []string{"summary", "category", "surface", "reporter_type", "observed", "expected", "impact"}
 	if submit {
+		reproduction := props["reproduction_steps"]
+		reproduction.MinItems = 1
+		props["reproduction_steps"] = reproduction
 		props["write_mode"] = schemaProp{Type: "string", Description: "Required live external-write intent.", Enum: []string{"live"}}
 		props["idempotency_key"] = schemaProp{Type: "string", Description: "Caller-provided idempotency key.", MinLength: 1}
-		required = append(required, "write_mode", "idempotency_key")
+		required = append(required, "goal", "circumstances", "reproduction_steps", "fallback_used", "acceptance_signal", "write_mode", "idempotency_key")
 	}
 	return inputSchema{Type: "object", Properties: props, Required: required}
 }

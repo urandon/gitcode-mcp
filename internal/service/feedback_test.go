@@ -14,7 +14,7 @@ import (
 )
 
 func feedbackDraft() feedback.Draft {
-	return feedback.Draft{Summary: "Exact issue sync required after bulk failure", Category: "bug", Surface: "sync", ReporterType: "agent", Observed: "bulk sync returned malformed JSON", Expected: "bulk sync completes", Impact: "agent used a narrower fallback", ToolName: "sync_live", FailureClass: "partial_response"}
+	return feedback.Draft{Summary: "Exact issue sync required after bulk failure", Category: "bug", Surface: "sync", ReporterType: "agent", Goal: "Refresh cached issues before autonomous triage", Circumstances: "During a live bulk sync after the cached collection became stale", Observed: "bulk sync returned malformed JSON", Expected: "bulk sync completes", Impact: "agent used a narrower fallback", ReproductionSteps: []string{"Call sync_live for issues", "Observe partial_response"}, FallbackUsed: "An exact issue sync was used", AcceptanceSignal: "Bulk sync returns a complete result or a typed bounded partial result", ToolName: "sync_live", FailureClass: "partial_response"}
 }
 
 func feedbackService(t *testing.T, client gitcode.Client) (*Service, *cache.SQLiteStore) {
@@ -77,6 +77,54 @@ func TestSubmitFeedbackRequiresExplicitLiveModeAndConfiguration(t *testing.T) {
 	}
 	if result.Status != "submission_unavailable" || result.Readiness.State != feedback.ReadinessDisabled || result.Remediation == "" {
 		t.Fatalf("result=%#v", result)
+	}
+}
+
+func TestSubmitFeedbackNeedsContextNeverCallsProvider(t *testing.T) {
+	client := &fakeGitCodeClient{onCreateIssue: func(gitcode.CreateIssueRequest, gitcode.WriteOptions) { t.Fatal("provider must not be called") }}
+	svc, _ := feedbackService(t, client)
+	draft := feedbackDraft()
+	draft.Circumstances = ""
+	draft.ReproductionSteps = nil
+	result, err := svc.SubmitFeedback(context.Background(), SubmitFeedbackRequest{Draft: draft, Mode: WriteModeLive, IdempotencyKey: "missing-context"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "needs_context" || len(result.MissingFields) != 2 || client.createIssueCalls != 0 || result.Evidence == "" {
+		t.Fatalf("result=%#v calls=%d", result, client.createIssueCalls)
+	}
+}
+
+func TestSubmitFeedbackUnsafeOrPlaceholderContextNeverCallsProvider(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(*feedback.Draft)
+		wantError  bool
+		wantStatus string
+	}{
+		{name: "raw transcript in goal", mutate: func(draft *feedback.Draft) { draft.Goal = "full transcript follows" }, wantError: true},
+		{name: "raw payload in circumstances", mutate: func(draft *feedback.Draft) { draft.Circumstances = "raw api response body follows" }, wantError: true},
+		{name: "environment dump reproduction", mutate: func(draft *feedback.Draft) { draft.ReproductionSteps = []string{"attach environment dump"} }, wantError: true},
+		{name: "none narrative and reproduction", mutate: func(draft *feedback.Draft) { draft.Goal = "none"; draft.ReproductionSteps = []string{"none"} }, wantStatus: "needs_context"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &fakeGitCodeClient{onCreateIssue: func(gitcode.CreateIssueRequest, gitcode.WriteOptions) { t.Fatal("provider must not be called") }}
+			svc, _ := feedbackService(t, client)
+			draft := feedbackDraft()
+			tt.mutate(&draft)
+			result, err := svc.SubmitFeedback(context.Background(), SubmitFeedbackRequest{Draft: draft, Mode: WriteModeLive, IdempotencyKey: "unsafe-or-placeholder"})
+			if tt.wantError {
+				if !feedback.IsValidationError(err) {
+					t.Fatalf("result=%#v err=%v, want validation error", result, err)
+				}
+			} else if err != nil || result.Status != tt.wantStatus {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+			if client.createIssueCalls != 0 {
+				t.Fatalf("provider calls=%d", client.createIssueCalls)
+			}
+		})
 	}
 }
 

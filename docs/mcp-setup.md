@@ -242,8 +242,8 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 | `repository_docs_index` | Submit daemon-owned indexing; `repo_id` auto-selects a sole authority, while ambiguous cases require an exact opaque selector; document text is never persisted |
 | `sync_live` | Synchronize selected issue, issue-comment, pull-request, pull-request-comment, or wiki collections into the cache |
 | `feedback_status` | Report side-effect-free preparation/submission readiness and the trusted CLI setup handoff |
-| `prepare_feedback` | Prepare and deduplicate a structured public-safe dogfood report without creating an issue |
-| `submit_feedback` | Submit a prepared report to the configured sink through the audited write lifecycle |
+| `prepare_feedback` | Prepare and deduplicate a context-rich public-safe dogfood report; incomplete context returns targeted questions without creating an issue |
+| `submit_feedback` | Submit a complete prepared report through the audited write lifecycle; missing context is a hard no-write boundary |
 | `create_issue` | Create a live issue through the audited write lifecycle |
 | `add_issue_comment` | Add a live issue comment through the audited write lifecycle |
 | `update_issue_comment` | Update a live issue comment through the audited write lifecycle |
