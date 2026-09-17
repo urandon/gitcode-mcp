@@ -158,6 +158,8 @@ type Draft struct {
 	Category          string   `json:"category"`
 	Surface           string   `json:"surface"`
 	ReporterType      string   `json:"reporter_type"`
+	Goal              string   `json:"goal,omitempty"`
+	Circumstances     string   `json:"circumstances,omitempty"`
 	Observed          string   `json:"observed"`
 	Expected          string   `json:"expected"`
 	Impact            string   `json:"impact"`
@@ -222,26 +224,30 @@ type PreparedReport struct {
 	Candidates        []Candidate    `json:"candidates,omitempty"`
 	Context           RuntimeContext `json:"context"`
 	RedactionsApplied int            `json:"redactions_applied,omitempty"`
+	MissingFields     []string       `json:"missing_fields,omitempty"`
+	FollowUpQuestions []string       `json:"follow_up_questions,omitempty"`
 	Remediation       string         `json:"remediation,omitempty"`
 	Readiness         Readiness      `json:"readiness"`
 }
 
 type SubmissionResult struct {
-	Status         string      `json:"status"`
-	Sink           string      `json:"sink,omitempty"`
-	RepoID         string      `json:"repo_id,omitempty"`
-	TicketID       string      `json:"ticket_id,omitempty"`
-	TicketNumber   int         `json:"ticket_number,omitempty"`
-	TicketURL      string      `json:"ticket_url,omitempty"`
-	Fingerprint    string      `json:"fingerprint"`
-	DedupeDecision string      `json:"dedupe_decision"`
-	Candidates     []Candidate `json:"candidates,omitempty"`
-	IdempotencyKey string      `json:"idempotency_key,omitempty"`
-	Replayed       bool        `json:"replayed,omitempty"`
-	Evidence       string      `json:"evidence,omitempty"`
-	Remediation    string      `json:"remediation,omitempty"`
-	GeneratedAt    time.Time   `json:"generated_at"`
-	Readiness      Readiness   `json:"readiness"`
+	Status            string      `json:"status"`
+	Sink              string      `json:"sink,omitempty"`
+	RepoID            string      `json:"repo_id,omitempty"`
+	TicketID          string      `json:"ticket_id,omitempty"`
+	TicketNumber      int         `json:"ticket_number,omitempty"`
+	TicketURL         string      `json:"ticket_url,omitempty"`
+	Fingerprint       string      `json:"fingerprint"`
+	DedupeDecision    string      `json:"dedupe_decision"`
+	Candidates        []Candidate `json:"candidates,omitempty"`
+	IdempotencyKey    string      `json:"idempotency_key,omitempty"`
+	Replayed          bool        `json:"replayed,omitempty"`
+	Evidence          string      `json:"evidence,omitempty"`
+	MissingFields     []string    `json:"missing_fields,omitempty"`
+	FollowUpQuestions []string    `json:"follow_up_questions,omitempty"`
+	Remediation       string      `json:"remediation,omitempty"`
+	GeneratedAt       time.Time   `json:"generated_at"`
+	Readiness         Readiness   `json:"readiness"`
 }
 
 type ValidationError struct {
@@ -295,10 +301,14 @@ func Prepare(draft Draft, context RuntimeContext, cfg Config, existing []Existin
 	title := renderTitle(normalized)
 	body := renderBody(normalized, context, fingerprint)
 	candidates, decision := findCandidates(fingerprint, normalized, existing)
+	missingFields, followUpQuestions := missingContext(normalized)
 	configured := cfg.Enabled && cfg.Sink == SinkGitCodeIssues && cfg.RepoID != ""
 	status := "prepared"
 	remediation := ""
-	if !configured {
+	if len(missingFields) > 0 {
+		status = "needs_context"
+		remediation = "answer the targeted follow-up questions, then prepare the report again; do not infer or invent missing circumstances"
+	} else if !configured {
 		status = "configuration_required"
 		remediation = "configure feedback.enabled=true and feedback.repo_id in the trusted gitcode-mcp config"
 	} else if decision == "likely_match" && normalized.DuplicateOverride != DuplicateOverrideCreate {
@@ -312,7 +322,7 @@ func Prepare(draft Draft, context RuntimeContext, cfg Config, existing []Existin
 	} else if decision == "exact_match" {
 		status = "duplicate"
 	}
-	return PreparedReport{Status: status, Configured: configured, Sink: cfg.Sink, RepoID: cfg.RepoID, Title: title, Body: body, Fingerprint: fingerprint, DedupeDecision: decision, Candidates: candidates, Context: context, RedactionsApplied: redactions, Remediation: remediation}, nil
+	return PreparedReport{Status: status, Configured: configured, Sink: cfg.Sink, RepoID: cfg.RepoID, Title: title, Body: body, Fingerprint: fingerprint, DedupeDecision: decision, Candidates: candidates, Context: context, RedactionsApplied: redactions, MissingFields: missingFields, FollowUpQuestions: followUpQuestions, Remediation: remediation}, nil
 }
 
 func FingerprintMarker(value string) string {
@@ -354,6 +364,8 @@ func normalizeDraft(draft Draft) (Draft, int, error) {
 		max      int
 	}{
 		{"summary", &draft.Summary, true, 180},
+		{"goal", &draft.Goal, false, 2000},
+		{"circumstances", &draft.Circumstances, false, 4000},
 		{"observed", &draft.Observed, true, 4000},
 		{"expected", &draft.Expected, true, 4000},
 		{"impact", &draft.Impact, true, 4000},
@@ -406,6 +418,57 @@ func normalizeDraft(draft Draft) (Draft, int, error) {
 		return Draft{}, 0, ValidationError{Field: "evidence", Message: "must contain at most 20 bounded facts"}
 	}
 	return draft, redactions, nil
+}
+
+func missingContext(draft Draft) ([]string, []string) {
+	type requirement struct {
+		field    string
+		value    string
+		question string
+	}
+	requirements := []requirement{
+		{field: "summary", value: draft.Summary, question: "What concise, searchable symptom or product friction occurred?"},
+		{field: "goal", value: draft.Goal, question: "What was the user or agent trying to accomplish when this happened?"},
+		{field: "circumstances", value: draft.Circumstances, question: "Under what concrete conditions did this occur (workflow stage, mode, relevant state, and trigger)?"},
+		{field: "observed", value: draft.Observed, question: "What exactly happened, including the stable error or state transition when available?"},
+		{field: "expected", value: draft.Expected, question: "What observable behavior was expected instead?"},
+		{field: "impact", value: draft.Impact, question: "What work was blocked, delayed, repeated, or handed to a human?"},
+		{field: "fallback_used", value: draft.FallbackUsed, question: "Which fallback was used? If none was available, say so explicitly."},
+		{field: "acceptance_signal", value: draft.AcceptanceSignal, question: "What specific observable result would prove this feedback is addressed?"},
+	}
+	missing := make([]string, 0, len(requirements)+1)
+	questions := make([]string, 0, len(requirements)+1)
+	for _, requirement := range requirements {
+		if lowInformation(requirement.value) {
+			missing = append(missing, requirement.field)
+			questions = append(questions, requirement.question)
+		}
+	}
+	usefulStep := false
+	for _, step := range draft.ReproductionSteps {
+		if !lowInformation(step) {
+			usefulStep = true
+			break
+		}
+	}
+	if !usefulStep {
+		missing = append(missing, "reproduction_steps")
+		questions = append(questions, "What is the shortest deterministic sequence that reproduces the behavior?")
+	}
+	return missing, questions
+}
+
+func lowInformation(value string) bool {
+	normalized := strings.Trim(strings.ToLower(strings.Join(strings.Fields(value), " ")), " .!?:;-")
+	if normalized == "" {
+		return true
+	}
+	switch normalized {
+	case "failed", "failure", "broken", "does not work", "doesn't work", "not working", "same", "same as above", "unknown", "n/a", "na", "tbd", "todo":
+		return true
+	default:
+		return false
+	}
 }
 
 func sanitizeText(field, value string, max int, strictEvidence bool) (string, int, error) {
@@ -490,6 +553,8 @@ func renderBody(draft Draft, context RuntimeContext, fingerprint string) string 
 	if draft.FailureClass != "" {
 		fmt.Fprintf(&b, "- Failure class: `%s`\n", draft.FailureClass)
 	}
+	b.WriteString("\n## Goal\n\n" + valueOrNotProvided(draft.Goal))
+	b.WriteString("\n\n## Circumstances\n\n" + valueOrNotProvided(draft.Circumstances))
 	b.WriteString("\n## Observed behavior\n\n" + draft.Observed)
 	b.WriteString("\n\n## Expected behavior\n\n" + draft.Expected)
 	b.WriteString("\n\n## Impact\n\n" + draft.Impact)
@@ -503,7 +568,7 @@ func renderBody(draft Draft, context RuntimeContext, fingerprint string) string 
 	}
 	b.WriteString("\n## Workaround or fallback\n\n")
 	if draft.FallbackUsed == "" && draft.Workaround == "" {
-		b.WriteString("None reported.")
+		b.WriteString("Not provided.")
 	} else {
 		if draft.FallbackUsed != "" {
 			b.WriteString("Fallback used: " + draft.FallbackUsed + "\n")
@@ -530,11 +595,7 @@ func renderBody(draft Draft, context RuntimeContext, fingerprint string) string 
 		b.WriteString(draft.RelatedTask)
 	}
 	b.WriteString("\n\n## Acceptance signal\n\n")
-	if draft.AcceptanceSignal == "" {
-		b.WriteString("The reported workflow completes without the observed friction or fallback.")
-	} else {
-		b.WriteString(draft.AcceptanceSignal)
-	}
+	b.WriteString(valueOrNotProvided(draft.AcceptanceSignal))
 	if draft.Proposal != "" {
 		b.WriteString("\n\n## Proposal\n\n" + draft.Proposal)
 	}
@@ -586,6 +647,13 @@ func normalizeFingerprintText(value string) string {
 func valueOrUnknown(value string) string {
 	if strings.TrimSpace(value) == "" {
 		return "unknown"
+	}
+	return value
+}
+
+func valueOrNotProvided(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "Not provided."
 	}
 	return value
 }

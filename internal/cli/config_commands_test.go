@@ -456,7 +456,7 @@ func TestFeedbackStatusAndTrustedSetupFlow(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	prepareArgs := []string{"feedback", "prepare", "--title", "Readiness remains consistent", "--category", "ux_friction", "--surface", "cli", "--reporter-type", "agent", "--observed", "status and prepare disagreed", "--expected", "one readiness state", "--impact", "agent selected the wrong handoff", "--format", "json"}
+	prepareArgs := []string{"feedback", "prepare", "--title", "Readiness remains consistent", "--category", "ux_friction", "--surface", "cli", "--reporter-type", "agent", "--goal", "Choose a safe feedback submission handoff", "--circumstances", "After applying feedback setup and checking readiness through the CLI", "--observed", "status and prepare disagreed", "--expected", "one readiness state", "--impact", "agent selected the wrong handoff", "--step", "Apply the trusted feedback setup plan", "--step", "Run feedback prepare", "--fallback-used", "The agent compared both JSON responses manually", "--acceptance-signal", "Status and preparation expose the same readiness state", "--format", "json"}
 	if code := executeWithFactoryAndDeps(prepareArgs, &stdout, &stderr, nil, deps); code != 0 || !strings.Contains(stdout.String(), `"status": "prepared"`) || !strings.Contains(stdout.String(), `"configured": true`) || !strings.Contains(stdout.String(), `"state": "ready"`) {
 		t.Fatalf("prepare readiness code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}

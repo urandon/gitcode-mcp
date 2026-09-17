@@ -8,15 +8,20 @@ import (
 
 func validDraft() Draft {
 	return Draft{
-		Summary:      "Bulk issue sync returns malformed JSON",
-		Category:     "bug",
-		Surface:      "sync",
-		ReporterType: "agent",
-		Observed:     "sync_live failed with partial_response",
-		Expected:     "The issue collection sync completes",
-		Impact:       "The agent had to fall back to an exact issue sync",
-		ToolName:     "sync_live",
-		FailureClass: "partial_response",
+		Summary:           "Bulk issue sync returns malformed JSON",
+		Category:          "bug",
+		Surface:           "sync",
+		ReporterType:      "agent",
+		Goal:              "Refresh the cached issue collection before autonomous triage",
+		Circumstances:     "During an MCP live sync against a bound repository after the cached head became stale",
+		Observed:          "sync_live failed with partial_response",
+		Expected:          "The issue collection sync completes",
+		Impact:            "The agent had to fall back to an exact issue sync",
+		ToolName:          "sync_live",
+		FailureClass:      "partial_response",
+		ReproductionSteps: []string{"Call sync_live for the issue collection", "Observe partial_response before a usable result"},
+		FallbackUsed:      "An exact issue sync was used instead",
+		AcceptanceSignal:  "The bounded collection sync returns a complete result or typed partial result",
 	}
 }
 
@@ -54,7 +59,7 @@ func TestPrepareRendersDeterministicPublicSafeReport(t *testing.T) {
 	if !strings.Contains(first.Body, "[REDACTED_URL]") || !strings.Contains(first.Body, "https://gitcode.com/example/tool/issues/42") {
 		t.Fatalf("URL policy not reflected in body: %s", first.Body)
 	}
-	for _, section := range []string{"## Observed behavior", "## Expected behavior", "## Impact", FingerprintMarker(first.Fingerprint)} {
+	for _, section := range []string{"## Goal", "## Circumstances", "## Observed behavior", "## Expected behavior", "## Impact", FingerprintMarker(first.Fingerprint)} {
 		if !strings.Contains(first.Body, section) {
 			t.Fatalf("body missing %q", section)
 		}
@@ -62,6 +67,36 @@ func TestPrepareRendersDeterministicPublicSafeReport(t *testing.T) {
 	if first.RedactionsApplied == 0 {
 		t.Fatal("expected redactions to be reported")
 	}
+}
+
+func TestPrepareReturnsTargetedQuestionsForIncompleteContext(t *testing.T) {
+	draft := validDraft()
+	draft.Goal = ""
+	draft.Circumstances = "does not work"
+	draft.ReproductionSteps = nil
+	draft.FallbackUsed = "unknown"
+	draft.AcceptanceSignal = "TBD"
+	prepared, err := Prepare(draft, testContext(), Config{Enabled: true, RepoID: "example/tool"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Status != "needs_context" || len(prepared.MissingFields) != 5 || len(prepared.FollowUpQuestions) != 5 {
+		t.Fatalf("prepared=%#v", prepared)
+	}
+	for _, field := range []string{"goal", "circumstances", "reproduction_steps", "fallback_used", "acceptance_signal"} {
+		if !contains(prepared.MissingFields, field) {
+			t.Fatalf("missing fields %v do not contain %q", prepared.MissingFields, field)
+		}
+	}
+}
+
+func contains(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func TestPrepareDedupeContract(t *testing.T) {

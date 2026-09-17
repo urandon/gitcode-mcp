@@ -85,6 +85,12 @@ func TestFeedbackToolsExposeSafePolicyAndDelegate(t *testing.T) {
 	if !containsString(prepareSchema.Required, "impact") {
 		t.Fatalf("required=%v", prepareSchema.Required)
 	}
+	submitSchema := writeToolInputSchema("submit_feedback")
+	for _, field := range []string{"goal", "circumstances", "reproduction_steps", "fallback_used", "acceptance_signal"} {
+		if !containsString(submitSchema.Required, field) {
+			t.Fatalf("submit required=%v, want %s", submitSchema.Required, field)
+		}
+	}
 
 	spy := &feedbackSpyService{}
 	srv, r, w, stderr := newPipeServerWithToolAccess(spy, ToolAccessWrite)
@@ -101,7 +107,7 @@ func TestFeedbackToolsExposeSafePolicyAndDelegate(t *testing.T) {
 		}
 		return decodeToolCallResult(t, line)
 	}
-	args := map[string]any{"summary": "fallback required", "category": "ux_friction", "surface": "mcp", "reporter_type": "agent", "observed": "MCP failed", "expected": "MCP succeeds", "impact": "CLI fallback was required", "fallback_used": "CLI"}
+	args := map[string]any{"summary": "fallback required", "category": "ux_friction", "surface": "mcp", "reporter_type": "agent", "goal": "Complete an issue workflow through MCP", "circumstances": "While using a write-enabled MCP session after discovery", "observed": "MCP failed", "expected": "MCP succeeds", "impact": "CLI fallback was required", "reproduction_steps": []string{"Call the MCP tool", "Observe the typed failure"}, "fallback_used": "CLI", "acceptance_signal": "The MCP action completes without a transport fallback"}
 	status := call("status", "feedback_status", map[string]any{})
 	var statusResult feedback.Readiness
 	decodeStructured(t, status, &statusResult)

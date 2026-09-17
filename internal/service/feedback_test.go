@@ -14,7 +14,7 @@ import (
 )
 
 func feedbackDraft() feedback.Draft {
-	return feedback.Draft{Summary: "Exact issue sync required after bulk failure", Category: "bug", Surface: "sync", ReporterType: "agent", Observed: "bulk sync returned malformed JSON", Expected: "bulk sync completes", Impact: "agent used a narrower fallback", ToolName: "sync_live", FailureClass: "partial_response"}
+	return feedback.Draft{Summary: "Exact issue sync required after bulk failure", Category: "bug", Surface: "sync", ReporterType: "agent", Goal: "Refresh cached issues before autonomous triage", Circumstances: "During a live bulk sync after the cached collection became stale", Observed: "bulk sync returned malformed JSON", Expected: "bulk sync completes", Impact: "agent used a narrower fallback", ReproductionSteps: []string{"Call sync_live for issues", "Observe partial_response"}, FallbackUsed: "An exact issue sync was used", AcceptanceSignal: "Bulk sync returns a complete result or a typed bounded partial result", ToolName: "sync_live", FailureClass: "partial_response"}
 }
 
 func feedbackService(t *testing.T, client gitcode.Client) (*Service, *cache.SQLiteStore) {
@@ -77,6 +77,21 @@ func TestSubmitFeedbackRequiresExplicitLiveModeAndConfiguration(t *testing.T) {
 	}
 	if result.Status != "submission_unavailable" || result.Readiness.State != feedback.ReadinessDisabled || result.Remediation == "" {
 		t.Fatalf("result=%#v", result)
+	}
+}
+
+func TestSubmitFeedbackNeedsContextNeverCallsProvider(t *testing.T) {
+	client := &fakeGitCodeClient{onCreateIssue: func(gitcode.CreateIssueRequest, gitcode.WriteOptions) { t.Fatal("provider must not be called") }}
+	svc, _ := feedbackService(t, client)
+	draft := feedbackDraft()
+	draft.Circumstances = ""
+	draft.ReproductionSteps = nil
+	result, err := svc.SubmitFeedback(context.Background(), SubmitFeedbackRequest{Draft: draft, Mode: WriteModeLive, IdempotencyKey: "missing-context"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "needs_context" || len(result.MissingFields) != 2 || client.createIssueCalls != 0 || result.Evidence == "" {
+		t.Fatalf("result=%#v calls=%d", result, client.createIssueCalls)
 	}
 }
 
