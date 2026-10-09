@@ -123,6 +123,18 @@ The observation UI is organized around product state rather than CLI command gro
 
 Local deep links use URL search parameters: `view`, opaque `cache`, public repository id `repo`, canonical or legacy `registration`, repository `tab`, diagnostic state, public `job`, job state/type/cache/repository/failure filters, and Search Lab `q`, `kind`, `provenance`, and `limit`. A legacy registration deep link is replaced with its canonical public id and an in-page redirect explanation. No cache path, credential, provider endpoint, raw source body, or session material is included. Browser reload and back/forward navigation preserve this state. The UI explicitly renders loading, empty, partial/degraded, stale, recovered, interrupted, waiting, and API-version-mismatch states; status meaning is always present as text rather than color alone.
 
+Maintenance selection and submitted intent share one opaque cache/repository
+identity across Caches navigation, registration links, reload and history. The
+target remains URL-addressable before enrollment too. A same-target snapshot
+refresh preserves unsaved policy edits; changing target clears its old plan,
+receipt and target-bound confirmation. A replaced or unavailable registration ID
+also invalidates its pending confirmation, even within the same cache/repository.
+Late planning or control responses cannot
+replace the current target or edited policy's state. An explicit unavailable
+repository, cache or registration remains unavailable until the operator selects
+a current target; it never silently falls back to another repository. Immutable
+conflict-resolution plans retain their durable key for lost-response replay.
+
 ## Themes
 
 The visible selector has exactly three choices: **Light**, **Dark**, and **System**. **System is the default** when no preference is saved or an invalid value is found. It follows `prefers-color-scheme`; explicit Light and Dark choices are stored only in browser-local storage. A small external head script applies the choice before the application starts, avoiding a first-paint theme flash while keeping the CSP free of inline script allowances.

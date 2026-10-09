@@ -66,6 +66,7 @@
   let stale = false;
   let maintenanceTargetKey = '';
   let maintenanceIntent: MaintenanceIntent = { cache_ref: '', repo_id: '', sync_mode: 'head-and-backfill', collections: ['issues', 'wiki'], rag_mode: 'off' };
+  let maintenanceIntentGeneration = 0;
   let maintenancePlan: MaintenancePlan | undefined;
   let maintenanceReceipt: ControlReceipt | undefined;
   let maintenanceError = '';
@@ -78,6 +79,7 @@
   let controlRunning = false;
   let pendingControl: 'maintenance_apply' | 'binding_apply' | 'rag_repair_apply' | 'conflict_resolution_apply' | 'disable' | 'reconcile' | 'repository_docs_index' | '' = '';
   let pendingControlKey = '';
+  let pendingControlRegistrationID = '';
   let controlDialog: HTMLDialogElement | undefined;
   let controlConfirmButton: HTMLButtonElement | undefined;
   let controlTriggerButton: HTMLButtonElement | undefined;
@@ -146,6 +148,7 @@
   $: if (!repositoryDocsSources.some((source) => source.source_registration_id === repositoryDocsSourceID)) repositoryDocsSourceID = repositoryDocsSources[0]?.source_registration_id || '';
   $: selectedRepositoryDocsSource = repositoryDocsSources.find((source) => source.source_registration_id === repositoryDocsSourceID);
   $: repoTargets = snapshot.caches.flatMap((cache) => cache.repositories.map((repo) => ({ key: `${cache.cache_ref}\u0000${repo.repo_id}`, cache, repo })));
+  $: maintenanceTargetAvailable = repoTargets.some((target) => target.key === maintenanceTargetKey) && (!requestedRegistrationID || snapshot.maintenance.some((item) => item.registration_id === requestedRegistrationID || item.legacy_registration_ids?.includes(requestedRegistrationID)));
 
   function normalizeSnapshot(value: ObservationSnapshot): ObservationSnapshot {
     value.attention ||= []; value.caches ||= []; value.jobs ||= []; value.maintenance ||= []; value.diagnostics ||= []; value.capabilities ||= [];
@@ -227,7 +230,7 @@
       if (!response.ok) throw new Error(response.status === 401 ? 'Admin session required. Run admin open again.' : 'Observation is unavailable.');
       const nextSnapshot = normalizeSnapshot(await response.json());
       snapshot = nextSnapshot;
-      if (selectedCacheRef && selectedRepoID) maintenanceTargetKey = `${selectedCacheRef}\u0000${selectedRepoID}`;
+      if (selectedCacheRef && selectedRepoID) synchronizeMaintenanceTarget(`${selectedCacheRef}\u0000${selectedRepoID}`);
       ensureControlSelections();
       canonicalizeRegistrationDeepLink();
     } catch (value) { error = value instanceof Error ? value.message : 'Observation is unavailable.'; }
@@ -289,12 +292,15 @@
 
   function selectView(view: AdminView): void {
     active = view;
-    if (view !== 'Caches') { selectedCacheRef = ''; selectedRepoID = ''; }
+    if (view === 'Maintenance') {
+      selectedCacheRef = maintenanceIntent.cache_ref; selectedRepoID = maintenanceIntent.repo_id;
+      requestedRegistrationID = snapshot.maintenance.find((item) => item.cache_ref === selectedCacheRef && item.repo_id === selectedRepoID)?.registration_id || '';
+    } else if (view !== 'Caches') { selectedCacheRef = ''; selectedRepoID = ''; }
     if (view !== 'Jobs') selectedJobID = '';
     if (view !== 'Maintenance') { requestedRegistrationID = ''; registrationRedirectNotice = ''; }
     updateLocation();
   }
-  function openRepository(cache: CacheObservation, repo: Repository): void { active = 'Caches'; selectedCacheRef = cache.cache_ref; selectedRepoID = repo.repo_id; maintenanceTargetKey = `${cache.cache_ref}\u0000${repo.repo_id}`; repoTab = 'coverage'; searchComparison = undefined; searchError = ''; providerSmoke = undefined; repairPlan = undefined; repairReceipt = undefined; repositoryDocsResult = undefined; repositoryDocsPlan = undefined; repositoryDocsError = ''; updateLocation(); }
+  function openRepository(cache: CacheObservation, repo: Repository): void { active = 'Caches'; selectedCacheRef = cache.cache_ref; selectedRepoID = repo.repo_id; synchronizeMaintenanceTarget(`${cache.cache_ref}\u0000${repo.repo_id}`); repoTab = 'coverage'; searchComparison = undefined; searchError = ''; providerSmoke = undefined; repairPlan = undefined; repairReceipt = undefined; repositoryDocsResult = undefined; repositoryDocsPlan = undefined; repositoryDocsError = ''; updateLocation(); }
   function closeRepository(): void { selectedRepoID = ''; repoTab = 'coverage'; updateLocation(); }
   function selectRepositoryTab(value: RepositoryTab): void { repoTab = value; updateLocation(); }
   function selectDiagnosticFilter(value: 'current' | 'recovered' | 'all'): void { diagnosticsFilter = value; updateLocation(); }
@@ -422,10 +428,20 @@
 
   function ensureControlSelections(): void {
     const targets = snapshot.caches.flatMap((cache) => cache.repositories.map((repo) => ({ key: `${cache.cache_ref}\u0000${repo.repo_id}`, cache, repo })));
-    if (!targets.some((target) => target.key === maintenanceTargetKey)) {
+    let target = targets.find((target) => target.key === maintenanceTargetKey);
+    if (!target && !maintenanceTargetKey && !requestedRegistrationID) {
       const registration = snapshot.maintenance[0];
-      const target = registration ? targets.find((item) => item.cache.cache_ref === registration.cache_ref && item.repo.repo_id === registration.repo_id) : targets[0];
-      if (target) loadMaintenanceTarget(target.key, false);
+      target = registration ? targets.find((item) => item.cache.cache_ref === registration.cache_ref && item.repo.repo_id === registration.repo_id) : targets[0];
+    }
+    const registrationAvailable = !requestedRegistrationID || snapshot.maintenance.some((item) => item.registration_id === requestedRegistrationID || item.legacy_registration_ids?.includes(requestedRegistrationID));
+    const currentRegistration = snapshot.maintenance.find((item) => `${item.cache_ref}\u0000${item.repo_id}` === maintenanceTargetKey);
+    const confirmationReplaced = isTargetBoundControl(pendingControl) && pendingControlRegistrationID !== (currentRegistration?.registration_id || '');
+    if (target) synchronizeMaintenanceTarget(target.key);
+    if (!target || !registrationAvailable || confirmationReplaced) {
+      // An explicit target can disappear during refresh. Keep its identity,
+      // but discard reviewed work instead of selecting a different repository.
+      cancelTargetConfirmation();
+      invalidateMaintenancePlan();
     }
     if (!bindingIntent.cache_ref && snapshot.caches[0]) bindingIntent = { ...bindingIntent, cache_ref: snapshot.caches[0].cache_ref };
   }
@@ -439,15 +455,27 @@
     const nextTargetKey = `${registration.cache_ref}\u0000${registration.repo_id}`;
     requestedRegistrationID = registration.registration_id;
     registrationRedirectNotice = previous === registration.registration_id ? '' : `Redirected legacy registration ${previous} to canonical ${registration.registration_id}.`;
-    if (maintenanceTargetKey !== nextTargetKey) loadMaintenanceTarget(nextTargetKey, false);
+    synchronizeMaintenanceTarget(nextTargetKey);
     if (previous !== requestedRegistrationID) updateLocation(true);
   }
 
+  function maintenanceIntentMatches(key: string): boolean {
+    return `${maintenanceIntent.cache_ref}\u0000${maintenanceIntent.repo_id}` === key;
+  }
+
+  function synchronizeMaintenanceTarget(key: string): void {
+    // Selection and submitted identity move together. A same-target refresh
+    // must not overwrite the operator's unsaved policy edits or reviewed plan.
+    if (maintenanceTargetKey !== key || !maintenanceIntentMatches(key)) loadMaintenanceTarget(key, false);
+  }
+
   function loadMaintenanceTarget(key: string, updateDeepLink = true): void {
+    cancelTargetConfirmation();
     maintenanceTargetKey = key;
     const [cacheRef, repoID] = key.split('\u0000');
     const registration = snapshot.maintenance.find((item) => item.cache_ref === cacheRef && item.repo_id === repoID);
     const repo = snapshot.caches.find((item) => item.cache_ref === cacheRef)?.repositories.find((item) => item.repo_id === repoID);
+    if (active === 'Maintenance') { selectedCacheRef = cacheRef; selectedRepoID = repoID; }
     maintenanceIntent = {
       cache_ref: cacheRef, repo_id: repoID,
       sync_mode: registration?.policy.sync_enabled === false ? 'off' : registration?.policy.sync_mode || 'head-and-backfill',
@@ -456,10 +484,10 @@
       head_interval_seconds: registration?.policy.head_interval_seconds || 0, rag_interval_seconds: registration?.policy.rag_interval_seconds || 0,
       head_max_pages: registration?.policy.head_max_pages || 0, tail_slice_pages: registration?.policy.tail_slice_pages || 0, per_page: registration?.policy.per_page || 0
     };
-    maintenancePlan = undefined; maintenanceReceipt = undefined; maintenanceError = ''; maintenanceFailure = undefined;
+    invalidateMaintenancePlan();
     selectedConflictCandidateRef = ''; conflictResolutionPlan = undefined; conflictResolutionReceipt = undefined; conflictResolutionError = '';
-    if (updateDeepLink && registration) {
-      requestedRegistrationID = registration.registration_id;
+    if (updateDeepLink) {
+      requestedRegistrationID = registration?.registration_id || '';
       registrationRedirectNotice = '';
       updateLocation();
     }
@@ -473,7 +501,19 @@
   }
 
   function invalidateMaintenancePlan(): void {
+    maintenanceIntentGeneration++;
     maintenancePlan = undefined; maintenanceReceipt = undefined; maintenanceError = ''; maintenanceFailure = undefined;
+  }
+
+  function isTargetBoundControl(kind: typeof pendingControl): boolean {
+    return kind === 'maintenance_apply' || kind === 'disable' || kind === 'reconcile' || kind === 'repository_docs_index' || kind === 'rag_repair_apply';
+  }
+
+  function cancelTargetConfirmation(): void {
+    // Conflict resolution already uses its immutable reviewed registration and
+    // must retain a lost-response retry key even when SSE replaces that row.
+    if (!isTargetBoundControl(pendingControl)) return;
+    controlDialog?.close(); pendingControl = ''; pendingControlKey = ''; pendingControlRegistrationID = '';
   }
 
   function invalidateBindingPlan(): void {
@@ -499,9 +539,18 @@
 
   async function renderMaintenancePlan(): Promise<void> {
     if (!csrfToken || !maintenanceControlsEnabled) return;
+    if (!maintenanceIntentMatches(maintenanceTargetKey) || !maintenanceTargetAvailable) {
+      maintenanceError = 'Select a current repository in the managed cache.';
+      return;
+    }
+    const generation = maintenanceIntentGeneration;
     controlRunning = true; maintenanceError = ''; maintenanceFailure = undefined; maintenanceReceipt = undefined;
-    try { maintenancePlan = await controlPost<MaintenancePlan>('/api/admin/v1/maintenance/plan', maintenanceIntent); }
+    try {
+      const plan = await controlPost<MaintenancePlan>('/api/admin/v1/maintenance/plan', maintenanceIntent);
+      if (generation === maintenanceIntentGeneration) maintenancePlan = plan;
+    }
     catch (value) {
+      if (generation !== maintenanceIntentGeneration) return;
       maintenancePlan = undefined;
       maintenanceFailure = value instanceof Error && 'failure' in value ? (value as Error & { failure: ControlFailure }).failure : undefined;
       maintenanceError = maintenanceFailure?.message || (value instanceof Error ? value.message : 'Maintenance planning failed.');
@@ -576,26 +625,37 @@
   }
 
   async function confirmControl(kind: typeof pendingControl, trigger: HTMLButtonElement): Promise<void> {
+    if (isTargetBoundControl(kind) && !maintenanceTargetAvailable) return;
     controlTriggerButton = trigger; pendingControl = kind; pendingControlKey = `admin-${kind}-${crypto.randomUUID()}`;
+    pendingControlRegistrationID = isTargetBoundControl(kind) ? selectedMaintenance?.registration_id || '' : '';
     maintenanceError = ''; maintenanceFailure = undefined; bindingError = ''; await tick(); controlDialog?.showModal(); controlConfirmButton?.focus();
   }
 
   async function cancelControlConfirmation(): Promise<void> {
-    controlDialog?.close(); pendingControl = ''; pendingControlKey = ''; await tick(); controlTriggerButton?.focus();
+    controlDialog?.close(); pendingControl = ''; pendingControlKey = ''; pendingControlRegistrationID = ''; await tick(); controlTriggerButton?.focus();
   }
 
   async function executeControl(): Promise<void> {
     if (!pendingControl || !csrfToken) return;
+    if (isTargetBoundControl(pendingControl) && (!maintenanceTargetAvailable || pendingControlRegistrationID !== (selectedMaintenance?.registration_id || ''))) {
+      cancelTargetConfirmation(); invalidateMaintenancePlan(); return;
+    }
+    const kind = pendingControl;
+    const generation = maintenanceIntentGeneration;
     controlRunning = true;
 	if (pendingControl === 'conflict_resolution_apply') conflictResolutionError = '';
 	let retainedConflictReceipt: ControlReceipt | undefined;
     try {
       if (pendingControl === 'maintenance_apply' && maintenancePlan) {
-        maintenanceReceipt = await controlPost<ControlReceipt>('/api/admin/v1/maintenance/apply', { ...maintenanceIntent, plan_id: maintenancePlan.plan_id, idempotency_key: pendingControlKey });
+        const receipt = await controlPost<ControlReceipt>('/api/admin/v1/maintenance/apply', { ...maintenanceIntent, plan_id: maintenancePlan.plan_id, idempotency_key: pendingControlKey });
+        if (generation !== maintenanceIntentGeneration) return;
+        maintenanceReceipt = receipt;
       } else if (pendingControl === 'binding_apply' && bindingPlan) {
         bindingReceipt = await controlPost<ControlReceipt>('/api/admin/v1/bindings/apply', { ...bindingIntent, plan_id: bindingPlan.plan_id, idempotency_key: pendingControlKey });
       } else if (pendingControl === 'rag_repair_apply' && repairPlan && selectedCache && selectedRepo) {
-        repairReceipt = await controlPost<ControlReceipt>('/api/admin/v1/rag/repair/apply', { cache_ref: selectedCache.cache_ref, repo_id: selectedRepo.repo_id, profile: repairProfile, max_chunks: repairMaxChunks, plan_id: repairPlan.plan_id, idempotency_key: pendingControlKey });
+        const receipt = await controlPost<ControlReceipt>('/api/admin/v1/rag/repair/apply', { cache_ref: selectedCache.cache_ref, repo_id: selectedRepo.repo_id, profile: repairProfile, max_chunks: repairMaxChunks, plan_id: repairPlan.plan_id, idempotency_key: pendingControlKey });
+        if (generation !== maintenanceIntentGeneration) return;
+        repairReceipt = receipt;
 	  } else if (pendingControl === 'conflict_resolution_apply' && conflictResolutionPlan) {
 		// The reviewed registration is part of the durable intent. A clone
 		// resolution can replace the selected row through SSE before a lost
@@ -603,14 +663,19 @@
 		conflictResolutionReceipt = await controlPost<ControlReceipt>(`/api/admin/v1/maintenance/${encodeURIComponent(conflictResolutionPlan.registration_id)}/conflict-resolution/apply`, { candidate_ref: conflictResolutionPlan.selected.candidate_ref, expected_generation: conflictResolutionPlan.expected_generation, plan_id: conflictResolutionPlan.plan_id, idempotency_key: pendingControlKey });
 		retainedConflictReceipt = conflictResolutionReceipt;
       } else if ((pendingControl === 'disable' || pendingControl === 'reconcile') && selectedMaintenance) {
-        maintenanceReceipt = await controlPost<ControlReceipt>(`/api/admin/v1/maintenance/${encodeURIComponent(selectedMaintenance.registration_id)}/${pendingControl}`, { idempotency_key: pendingControlKey });
+        const receipt = await controlPost<ControlReceipt>(`/api/admin/v1/maintenance/${encodeURIComponent(selectedMaintenance.registration_id)}/${pendingControl}`, { idempotency_key: pendingControlKey });
+        if (generation !== maintenanceIntentGeneration) return;
+        maintenanceReceipt = receipt;
       } else if (pendingControl === 'repository_docs_index' && selectedMaintenance) {
-        maintenanceReceipt = await controlPost<ControlReceipt>(`/api/admin/v1/repository-docs/${encodeURIComponent(selectedMaintenance.registration_id)}/index`, { idempotency_key: pendingControlKey, ...repositoryDocsSelector() });
+        const receipt = await controlPost<ControlReceipt>(`/api/admin/v1/repository-docs/${encodeURIComponent(selectedMaintenance.registration_id)}/index`, { idempotency_key: pendingControlKey, ...repositoryDocsSelector() });
+        if (generation !== maintenanceIntentGeneration) return;
+        maintenanceReceipt = receipt;
       }
       controlDialog?.close(); pendingControl = ''; pendingControlKey = ''; await refresh();
 	  if (retainedConflictReceipt) conflictResolutionReceipt = retainedConflictReceipt;
 	  await tick(); controlTriggerButton?.focus();
     } catch (value) {
+      if (isTargetBoundControl(kind) && generation !== maintenanceIntentGeneration) return;
       const message = value instanceof Error ? value.message : 'The confirmed control failed.';
       const failure = value instanceof Error && 'failure' in value ? (value as Error & { failure: ControlFailure }).failure : undefined;
       if (pendingControl !== 'binding_apply' && pendingControl !== 'rag_repair_apply' && pendingControl !== 'conflict_resolution_apply') maintenanceFailure = failure;
@@ -631,7 +696,12 @@
     } finally { controlRunning = false; }
   }
   function selectTheme(value: Theme): void { theme = value; applyTheme(value); }
-  function onPopState(): void { hydrateLocation(); }
+  function onPopState(): void {
+    hydrateLocation();
+    if (selectedCacheRef && selectedRepoID) synchronizeMaintenanceTarget(`${selectedCacheRef}\u0000${selectedRepoID}`);
+    ensureControlSelections();
+    canonicalizeRegistrationDeepLink();
+  }
 
   onMount(async () => {
     theme = normalizeTheme(localStorage.getItem(themeStorageKey)); applyTheme(theme); hydrateLocation(); window.addEventListener('popstate', onPopState);
@@ -911,7 +981,8 @@
             <div class="control-heading"><div><span class="large-icon"><SlidersHorizontal size={22} /></span><div><p class="section-kicker">PLAN → CONFIRM → APPLY</p><h2 id="policy-editor-title">Maintenance policy</h2><p>Change a managed repository policy, review the effect ledger, then confirm the exact plan id.</p></div></div><StatusChip value={maintenancePlan?.status || selectedMaintenance?.state || 'not_planned'} label={maintenancePlan ? humanize(maintenancePlan.status) : selectedMaintenance ? humanize(selectedMaintenance.state) : 'Not planned'} /></div>
             {#if repoTargets.length === 0}<div class="empty-state"><Database size={23} /><h3>No bound repositories</h3><p>Add a repository binding below before planning maintenance.</p></div>{:else}
               <form class="control-form" oninput={invalidateMaintenancePlan} onsubmit={(event) => { event.preventDefault(); void renderMaintenancePlan(); }}>
-                <label class="span-two"><span>Managed target</span><select value={maintenanceTargetKey} onchange={(event) => loadMaintenanceTarget(event.currentTarget.value)}>{#each repoTargets as target}<option value={target.key}>{target.repo.repo_id} · {target.cache.cache_ref}</option>{/each}</select><small>Opaque cache identity only; no filesystem path crosses the browser boundary.</small></label>
+                <label class="span-two"><span>Managed target</span><select value={maintenanceTargetKey} onchange={(event) => loadMaintenanceTarget(event.currentTarget.value)}>{#if !maintenanceTargetAvailable}<option value={maintenanceTargetKey} disabled>{maintenanceIntent.repo_id || requestedRegistrationID || 'No target selected'} · unavailable</option>{/if}{#each repoTargets as target}<option value={target.key}>{target.repo.repo_id} · {target.cache.cache_ref}</option>{/each}</select><small>Opaque cache identity only; no filesystem path crosses the browser boundary.</small></label>
+                {#if !maintenanceTargetAvailable}<div class="span-two" role="alert">Selected maintenance target is unavailable. Select a current repository in the managed cache.</div>{/if}
                 <label><span>Sync mode</span><select bind:value={maintenanceIntent.sync_mode}><option value="off">Off</option><option value="head">Head only</option><option value="head-and-backfill">Head + bounded backfill</option></select></label>
                 <label><span>RAG mode</span><select bind:value={maintenanceIntent.rag_mode}><option value="off">Off</option><option value="maintain">Maintain index</option></select></label>
                 <fieldset class="span-two collection-field"><legend>Collections</legend>{#each ['issues', 'issue-comments', 'wiki', 'pulls', 'pr-comments'] as collection}<label><input type="checkbox" checked={maintenanceIntent.collections.includes(collection)} onchange={(event) => toggleCollection(collection, event.currentTarget.checked)} />{humanize(collection)}</label>{/each}</fieldset>
@@ -921,14 +992,14 @@
                 <label><span>Head pages</span><input type="number" min="0" max="1000" bind:value={maintenanceIntent.head_max_pages} /></label>
                 <label><span>Tail slice</span><input type="number" min="0" max="1000" bind:value={maintenanceIntent.tail_slice_pages} /></label>
                 <label><span>Per page</span><input type="number" min="0" max="100" bind:value={maintenanceIntent.per_page} /></label>
-                <div class="form-actions span-two"><span>{maintenanceControlsEnabled ? 'Capability available in this daemon.' : 'Capability registry does not expose maintenance controls.'}</span><button class="primary-action" type="submit" disabled={!csrfToken || !maintenanceControlsEnabled || !!selectedMaintenance?.identity_conflict || controlRunning}><FileCheck2 size={16} />{controlRunning ? 'Planning…' : 'Render plan'}</button></div>
+                <div class="form-actions span-two"><span>{maintenanceControlsEnabled ? 'Capability available in this daemon.' : 'Capability registry does not expose maintenance controls.'}</span><button class="primary-action" type="submit" disabled={!csrfToken || !maintenanceControlsEnabled || !maintenanceTargetAvailable || !!selectedMaintenance?.identity_conflict || controlRunning}><FileCheck2 size={16} />{controlRunning ? 'Planning…' : 'Render plan'}</button></div>
               </form>
             {/if}
 
             {#if maintenanceError}<div class="action-result error" role="alert"><AlertTriangle size={17} /><div><strong>Maintenance control failed{maintenanceFailure?.field ? ` · ${humanize(maintenanceFailure.field)}` : ''}</strong><span>{maintenanceError}</span>{#if maintenanceFailure?.remediation}<span>{maintenanceFailure.remediation}</span>{/if}{#if maintenanceFailure?.blockers?.length}<ul class="blocker-list">{#each maintenanceFailure.blockers as blocker}<li>{blocker}</li>{/each}</ul>{/if}{#if maintenanceFailure?.cli_handoff}<code>{maintenanceFailure.cli_handoff}</code>{/if}</div></div>{/if}
             {#if maintenancePlan}<div class="plan-panel"><div class="plan-summary"><div><p class="section-kicker">REVIEWED INTENT</p><h3>{maintenancePlan.repo_id}</h3><code>{maintenancePlan.plan_id}</code></div><StatusChip value={maintenancePlan.status} /></div>{#if maintenancePlan.blockers?.length}<ul class="blocker-list">{#each maintenancePlan.blockers as blocker}<li><AlertTriangle size={15} />{blocker}</li>{/each}</ul>{/if}<div class="effect-ledger">{#each maintenancePlan.actions as effect}<article><span class="effect-icon"><Zap size={15} /></span><div><strong>{effect.summary}</strong><small>{humanize(effect.class)}{effect.data_boundary ? ` · ${humanize(effect.data_boundary)}` : ''}</small>{#if effect.handoff}<code>{effect.handoff}</code>{/if}</div><StatusChip value={effect.status} /></article>{/each}</div><div class="plan-footer"><div><strong>Next safe action</strong><span>{maintenancePlan.next_action || 'Confirm this exact plan.'}</span></div><button class="primary-action" disabled={maintenancePlan.status === 'blocked' || controlRunning} onclick={(event) => void confirmControl('maintenance_apply', event.currentTarget)}><Power size={16} />Confirm & apply</button></div></div>{/if}
             {#if maintenanceReceipt}<div class="action-result" role="status"><CheckCircle2 size={17} /><div><strong>{humanize(maintenanceReceipt.outcome || maintenanceReceipt.status || 'applied')}</strong><span>{maintenanceReceipt.receipt_id ? `Receipt ${maintenanceReceipt.receipt_id}` : maintenanceReceipt.audit_receipt ? `Audit ${maintenanceReceipt.audit_receipt}` : 'The confirmed plan was accepted.'}{maintenanceReceipt.replayed ? ' · replayed safely' : ''}{maintenanceReceipt.jobs_started?.length ? ` · jobs ${maintenanceReceipt.jobs_started.join(', ')}` : ''}</span></div></div>{/if}
-            {#if selectedMaintenance}<div class="registration-actions"><div><strong>Registration {selectedMaintenance.registration_id}</strong><span>Generation {selectedMaintenance.generation} · {selectedMaintenance.enabled ? 'enabled' : 'disabled'} · {registrationControlsEnabled ? 'reconcile is coalesced with active work.' : 'registration controls are unavailable in this daemon.'}</span></div><button disabled={!csrfToken || !registrationControlsEnabled || !!selectedMaintenance.identity_conflict || controlRunning} onclick={(event) => void confirmControl('reconcile', event.currentTarget)}><RotateCcw size={15} />Reconcile now</button><button class="danger-action" disabled={!csrfToken || !registrationControlsEnabled || !selectedMaintenance.enabled || !!selectedMaintenance.identity_conflict || controlRunning} onclick={(event) => void confirmControl('disable', event.currentTarget)}><Power size={15} />Disable</button></div>{/if}
+            {#if selectedMaintenance}<div class="registration-actions"><div><strong>Registration {selectedMaintenance.registration_id}</strong><span>Generation {selectedMaintenance.generation} · {selectedMaintenance.enabled ? 'enabled' : 'disabled'} · {registrationControlsEnabled ? 'reconcile is coalesced with active work.' : 'registration controls are unavailable in this daemon.'}</span></div><button disabled={!csrfToken || !registrationControlsEnabled || !maintenanceTargetAvailable || !!selectedMaintenance.identity_conflict || controlRunning} onclick={(event) => void confirmControl('reconcile', event.currentTarget)}><RotateCcw size={15} />Reconcile now</button><button class="danger-action" disabled={!csrfToken || !registrationControlsEnabled || !maintenanceTargetAvailable || !selectedMaintenance.enabled || !!selectedMaintenance.identity_conflict || controlRunning} onclick={(event) => void confirmControl('disable', event.currentTarget)}><Power size={15} />Disable</button></div>{/if}
           </section>
 
           <section class="control-workbench" aria-labelledby="binding-editor-title">
