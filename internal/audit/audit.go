@@ -147,6 +147,8 @@ func sanitizedMetadata(metadata map[string]string) map[string]string {
 		"idempotency_key":                true,
 		"remote_alias":                   true,
 		"remote_number":                  true,
+		"provider_id":                    true,
+		"primary_snapshot_hash":          true,
 		"remote_type":                    true,
 		"provider":                       true,
 		"provider_mode":                  true,

@@ -31,6 +31,14 @@ func (s *SQLiteStore) upsertRecordGraphTx(ctx context.Context, tx *sql.Tx, graph
 	if err = upsertRecordTx(ctx, tx, graph.Record); err != nil {
 		return err
 	}
+	for _, confirmation := range graph.CacheConfirmations {
+		if confirmation.RepoID != graph.Record.RepoID || confirmation.RecordID != graph.Record.ID {
+			return notFoundErr("cache_confirmation_target", "")
+		}
+		if err = recordCacheConfirmation(ctx, tx, confirmation); err != nil {
+			return err
+		}
+	}
 	for _, record := range graph.RelatedRecords {
 		if err = upsertSourceTx(ctx, tx, sourceFromRecordOrigin(record, graph.SourceProvenance)); err != nil {
 			return err
@@ -565,6 +573,12 @@ func (s *SQLiteStore) GetAuditEventByKey(ctx context.Context, repoID, key string
 }
 
 func (s *SQLiteStore) RecordCacheConfirmation(ctx context.Context, confirmation CacheConfirmationRecord) error {
+	return recordCacheConfirmation(ctx, s.db, confirmation)
+}
+
+func recordCacheConfirmation(ctx context.Context, executor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, confirmation CacheConfirmationRecord) error {
 	if err := validateCacheConfirmation(confirmation); err != nil {
 		return err
 	}
@@ -574,7 +588,7 @@ func (s *SQLiteStore) RecordCacheConfirmation(ctx context.Context, confirmation 
 	if confirmation.CreatedAt.IsZero() {
 		confirmation.CreatedAt = time.Unix(0, 0).UTC()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO cache_confirmations (repo_id, id, command, record_id, record_type, remote_type, remote_id, idempotency_key, status, source_fingerprint, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, idempotency_key) DO UPDATE SET id = excluded.id, command = excluded.command, record_id = excluded.record_id, record_type = excluded.record_type, remote_type = excluded.remote_type, remote_id = excluded.remote_id, status = excluded.status, source_fingerprint = excluded.source_fingerprint, created_at = excluded.created_at`, confirmation.RepoID, confirmation.ID, confirmation.Command, confirmation.RecordID, confirmation.RecordType, confirmation.RemoteType, confirmation.RemoteID, confirmation.IdempotencyKey, confirmation.Status, confirmation.SourceFingerprint, confirmation.CreatedAt.Format(time.RFC3339Nano))
+	_, err := executor.ExecContext(ctx, `INSERT INTO cache_confirmations (repo_id, id, command, record_id, record_type, remote_type, remote_id, idempotency_key, status, source_fingerprint, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(repo_id, idempotency_key) DO UPDATE SET id = excluded.id, command = excluded.command, record_id = excluded.record_id, record_type = excluded.record_type, remote_type = excluded.remote_type, remote_id = excluded.remote_id, status = excluded.status, source_fingerprint = excluded.source_fingerprint, created_at = excluded.created_at`, confirmation.RepoID, confirmation.ID, confirmation.Command, confirmation.RecordID, confirmation.RecordType, confirmation.RemoteType, confirmation.RemoteID, confirmation.IdempotencyKey, confirmation.Status, confirmation.SourceFingerprint, confirmation.CreatedAt.Format(time.RFC3339Nano))
 	return err
 }
 

@@ -53,6 +53,11 @@ Creation receipts remain `remote_confirmed_cache_refresh_pending` until cache
 publication and its confirmation succeed. A cache failure is not terminal
 write success; same-key recovery reads the canonical primary by the receipt's
 repository-local number, repairs the cache, and never repeats creation.
+The confirmed provider id is retained separately and must match recovery GET;
+legacy partial receipts without that evidence fail closed. Publication fences
+the exact observed receipt and atomically commits graph, source/search origin,
+cache confirmation, and success. A delayed caller cannot overwrite or downgrade
+a newer successful recovery, including when the delayed publication fails.
 
 ## Concurrent Cache Access
 

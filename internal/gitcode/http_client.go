@@ -246,6 +246,7 @@ func (c *HTTPClient) CreatePR(ctx context.Context, req CreatePRRequest, opts Wri
 	}
 	target := req.Owner + "/" + req.Repo
 	mutationAttempted := false
+	phase := "post"
 	opts.singleTransportAttempt = true
 	opts.beforeTransportAttempt = func() { mutationAttempted = true }
 	result, err := writeConfirmedJSON[PullRequest](ctx, c, http.MethodPost, listPREndpoint(req.Owner, req.Repo), "CreatePR", target, req, opts, func(result WriteResult[PullRequest]) (WriteResult[PullRequest], error) {
@@ -255,6 +256,7 @@ func (c *HTTPClient) CreatePR(ctx context.Context, req CreatePRRequest, opts Wri
 		}
 		result.RemoteID = pr.ID
 		result.RemoteNumber = pr.Number
+		phase = "readback"
 		canonical, err := c.GetPR(ctx, PRRequest{Owner: req.Owner, Repo: req.Repo, Number: pr.Number})
 		if err != nil {
 			return WriteResult[PullRequest]{}, ErrWriteConfirmationIncomplete{Endpoint: getPREndpoint(req.Owner, req.Repo, pr.Number), RemoteID: strconv.Itoa(pr.Number), Message: "created pull request canonical readback failed", Cause: err}
@@ -267,7 +269,7 @@ func (c *HTTPClient) CreatePR(ctx context.Context, req CreatePRRequest, opts Wri
 		return result, nil
 	})
 	if err != nil {
-		return WriteResult[PullRequest]{}, ErrWriteMutationPhase{Endpoint: listPREndpoint(req.Owner, req.Repo), Phase: "post", MutationAttempted: mutationAttempted, Cause: err}
+		return WriteResult[PullRequest]{}, ErrWriteMutationPhase{Endpoint: listPREndpoint(req.Owner, req.Repo), Phase: phase, MutationAttempted: mutationAttempted, Cause: err}
 	}
 	return result, nil
 }

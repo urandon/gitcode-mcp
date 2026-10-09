@@ -91,6 +91,8 @@ func TestScenario009LiveCreateIssueConfirmationSanitizesMetadata(t *testing.T) {
 		RequestMetadata: map[string]string{
 			"method":                         "POST",
 			"remote_alias":                   "100",
+			"provider_id":                    "9001",
+			"primary_snapshot_hash":          "primary-hash",
 			"source_fingerprint":             "payload-hash",
 			"milestone_id":                   "MILESTONE-1",
 			"milestone_remote_id":            "1",
@@ -121,6 +123,9 @@ func TestScenario009LiveCreateIssueConfirmationSanitizesMetadata(t *testing.T) {
 	}
 	if entry.RequestMetadata["pr_update_preimage_fingerprint"] != "pr-preimage-hash" || entry.RequestMetadata["pr_update_preimage_body_hash"] != "pr-body-hash" {
 		t.Fatalf("PR update preimage metadata=%#v", entry.RequestMetadata)
+	}
+	if entry.RequestMetadata["provider_id"] != "9001" || entry.RequestMetadata["primary_snapshot_hash"] != "primary-hash" {
+		t.Fatal("primary identity and snapshot evidence was dropped")
 	}
 }
 

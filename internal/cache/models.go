@@ -442,6 +442,7 @@ type RecordGraph struct {
 	SyncEvents          []SyncEvent
 	AuditTrail          []AuditTrailEntry
 	Snapshots           []Snapshot
+	CacheConfirmations  []CacheConfirmationRecord
 }
 
 type SyncGraph struct {

@@ -6616,6 +6616,18 @@ func (s *writeRefreshFailStore) UpsertRecordGraph(ctx context.Context, graph cac
 	return s.Store.UpsertRecordGraph(ctx, graph)
 }
 
+func (s *writeRefreshFailStore) StageWriteGraphGeneration(ctx context.Context, pending, observed cache.AuditTrailEntry, generation time.Time) (bool, error) {
+	return s.Store.(wikiWriteSettlementStore).StageWriteGraphGeneration(ctx, pending, observed, generation)
+}
+
+func (s *writeRefreshFailStore) SettleWriteGraphGeneration(ctx context.Context, graph cache.RecordGraph, complete, pending cache.AuditTrailEntry, generation time.Time) (bool, error) {
+	if s.failNextRefresh {
+		s.failNextRefresh = false
+		return false, errors.New("injected cache refresh failure")
+	}
+	return s.Store.(wikiWriteSettlementStore).SettleWriteGraphGeneration(ctx, graph, complete, pending, generation)
+}
+
 func (s *writeRefreshFailStore) ClaimAuditEvent(ctx context.Context, entry cache.AuditTrailEntry) (bool, error) {
 	claimer, ok := s.Store.(interface {
 		ClaimAuditEvent(context.Context, cache.AuditTrailEntry) (bool, error)
