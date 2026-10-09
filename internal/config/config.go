@@ -144,30 +144,30 @@ func RedactDiagnostic(message string, src Source) string {
 }
 
 type fileConfig struct {
-	CachePath       *string             `json:"cache_path"`
-	LockPath        *string             `json:"lock_path"`
-	CacheMode       *string             `json:"cache_mode"`
-	GitCodeBaseURL  *string             `json:"gitcode_base_url"`
-	DefaultTimeout  *string             `json:"default_timeout"`
-	MaxResponseSize *int64              `json:"max_response_size"`
-	MaxRetries      *int                `json:"max_retries"`
-	RateLimitRPS    *float64            `json:"rate_limit_rps"`
-	RateLimitBurst  *int                `json:"rate_limit_burst"`
-	Format          *string             `json:"format"`
-	MCPToolAccess   *string             `json:"mcp_tool_access"`
-	MCP             *MCPConfig          `json:"mcp"`
-	Credential      *CredentialConfig   `json:"credential"`
-	Service         *serviceFileConfig  `json:"service"`
-	RAG             *ragFileConfig      `json:"rag"`
-	Feedback        *feedbackFileConfig `json:"feedback"`
+	CachePath       *string             `json:"cache_path" yaml:"cache_path"`
+	LockPath        *string             `json:"lock_path" yaml:"lock_path"`
+	CacheMode       *string             `json:"cache_mode" yaml:"cache_mode"`
+	GitCodeBaseURL  *string             `json:"gitcode_base_url" yaml:"gitcode_base_url"`
+	DefaultTimeout  *string             `json:"default_timeout" yaml:"default_timeout"`
+	MaxResponseSize *int64              `json:"max_response_size" yaml:"max_response_size"`
+	MaxRetries      *int                `json:"max_retries" yaml:"max_retries"`
+	RateLimitRPS    *float64            `json:"rate_limit_rps" yaml:"rate_limit_rps"`
+	RateLimitBurst  *int                `json:"rate_limit_burst" yaml:"rate_limit_burst"`
+	Format          *string             `json:"format" yaml:"format"`
+	MCPToolAccess   *string             `json:"mcp_tool_access" yaml:"mcp_tool_access"`
+	MCP             *MCPConfig          `json:"mcp" yaml:"mcp"`
+	Credential      *CredentialConfig   `json:"credential" yaml:"credential"`
+	Service         *serviceFileConfig  `json:"service" yaml:"service"`
+	RAG             *ragFileConfig      `json:"rag" yaml:"rag"`
+	Feedback        *feedbackFileConfig `json:"feedback" yaml:"feedback"`
 }
 
 type feedbackFileConfig struct {
-	Enabled         *bool    `json:"enabled"`
-	Sink            *string  `json:"sink"`
-	RepoID          *string  `json:"repo_id"`
-	Labels          []string `json:"labels"`
-	DuplicatePolicy *string  `json:"duplicate_policy"`
+	Enabled         *bool          `json:"enabled" yaml:"enabled"`
+	Sink            *string        `json:"sink" yaml:"sink"`
+	RepoID          *string        `json:"repo_id" yaml:"repo_id"`
+	Labels          yamlStringList `json:"labels" yaml:"labels"`
+	DuplicatePolicy *string        `json:"duplicate_policy" yaml:"duplicate_policy"`
 }
 
 func defaultWithSource(src Source) Config {

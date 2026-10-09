@@ -1,15 +1,19 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
-	"strconv"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -35,17 +39,17 @@ type ConfigLocation struct {
 }
 
 type CredentialConfig struct {
-	Store          string `json:"store"`
-	KeyringService string `json:"keyring_service,omitempty"`
-	KeyringAccount string `json:"keyring_account,omitempty"`
+	Store          string `json:"store" yaml:"store"`
+	KeyringService string `json:"keyring_service,omitempty" yaml:"keyring_service"`
+	KeyringAccount string `json:"keyring_account,omitempty" yaml:"keyring_account"`
 }
 
 type MCPToolsConfig struct {
-	Access string `json:"access"`
+	Access string `json:"access" yaml:"access"`
 }
 
 type MCPConfig struct {
-	Tools MCPToolsConfig `json:"tools"`
+	Tools MCPToolsConfig `json:"tools" yaml:"tools"`
 }
 
 type EffectiveConfig struct {
@@ -506,345 +510,76 @@ func readLocatedConfig(src Source, loc ConfigLocation) (fileConfig, CredentialCo
 	return parseYAMLConfig(data, loc.Path)
 }
 
-type yamlSection struct {
-	indent int
-	name   string
+// yamlFileConfig shares the JSON merge schema and keeps cache.mode as a legacy
+// alias. repository_docs is intentionally owned by its dedicated policy parser.
+type yamlFileConfig struct {
+	File  fileConfig `yaml:",inline"`
+	Cache *struct {
+		Mode *string `yaml:"mode"`
+	} `yaml:"cache"`
 }
 
 func parseYAMLConfig(data []byte, path string) (fileConfig, CredentialConfig, error) {
-	var cfg fileConfig
+	invalid := func() (fileConfig, CredentialConfig, error) {
+		// Decoder errors can echo scalar bytes; never publish those diagnostics.
+		return fileConfig{}, CredentialConfig{}, fmt.Errorf("config: malformed config file %s (invalid YAML or field type)", path)
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	var document yaml.Node
+	if err := decoder.Decode(&document); err != nil {
+		if errors.Is(err, io.EOF) {
+			return fileConfig{}, CredentialConfig{}, nil
+		}
+		return invalid()
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return invalid() // A config is one document, never a silently ignored suffix.
+	}
+	if len(document.Content) == 1 && document.Content[0].Kind == yaml.ScalarNode && document.Content[0].Tag == "!!null" && document.Content[0].Value == "" {
+		return fileConfig{}, CredentialConfig{}, nil // An explicitly empty document.
+	}
+	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return invalid()
+	}
+	var decoded yamlFileConfig
+	budget := 16384
+	root, err := legacyYAMLScalars(document.Content[0], reflect.TypeOf(decoded), 0, &budget)
+	if err != nil {
+		return invalid()
+	}
+	if err := root.Decode(&decoded); err != nil {
+		return invalid()
+	}
+	cfg := decoded.File
+	if decoded.Cache != nil && decoded.Cache.Mode != nil {
+		cfg.CacheMode = decoded.Cache.Mode
+	}
 	var cred CredentialConfig
-	var stack []yamlSection
-	for _, raw := range strings.Split(string(data), "\n") {
-		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		indent := len(raw) - len(strings.TrimLeft(raw, " "))
-		for len(stack) > 0 && indent <= stack[len(stack)-1].indent {
-			stack = stack[:len(stack)-1]
-		}
-		if strings.HasSuffix(line, ":") {
-			stack = append(stack, yamlSection{indent: indent, name: strings.TrimSpace(strings.TrimSuffix(line, ":"))})
-			continue
-		}
-		parts := strings.SplitN(line, ":", 2)
-		if len(parts) != 2 {
-			return fileConfig{}, CredentialConfig{}, fmt.Errorf("config: malformed config file %s", path)
-		}
-		key := strings.TrimSpace(parts[0])
-		value := strings.Trim(strings.TrimSpace(parts[1]), "\"")
-		section := yamlSectionPath(stack)
-		if section == "mcp.tools" && key == "access" {
-			cfg.MCPToolAccess = &value
-			continue
-		}
-		if section == "cache" && key == "mode" {
-			cfg.CacheMode = &value
-			continue
-		}
-		if section == "credential" && key == "store" {
-			cred.Store = value
-			continue
-		}
-		if section == "credential" && key == "keyring_service" {
-			cred.KeyringService = value
-			continue
-		}
-		if section == "credential" && key == "keyring_account" {
-			cred.KeyringAccount = value
-			continue
-		}
-		if section == "feedback" {
-			if cfg.Feedback == nil {
-				cfg.Feedback = &feedbackFileConfig{}
-			}
-			switch key {
-			case "enabled":
-				v, err := parseBoolYAML(section, key, value)
-				if err != nil {
-					return fileConfig{}, CredentialConfig{}, err
-				}
-				cfg.Feedback.Enabled = &v
-			case "sink":
-				cfg.Feedback.Sink = &value
-			case "repo_id":
-				cfg.Feedback.RepoID = &value
-			case "labels":
-				cfg.Feedback.Labels = splitYAMLList(value)
-			case "duplicate_policy":
-				cfg.Feedback.DuplicatePolicy = &value
-			}
-			continue
-		}
-		if err := setYAMLRAGValue(&cfg, section, key, value); err != nil {
-			return fileConfig{}, CredentialConfig{}, err
-		}
-		if isRAGYAMLSection(section) || section == "service" {
-			continue
-		}
-		if section != "" {
-			continue
-		}
-		switch key {
-		case "cache_path":
-			cfg.CachePath = &value
-		case "lock_path":
-			cfg.LockPath = &value
-		case "cache_mode":
-			cfg.CacheMode = &value
-		case "gitcode_base_url":
-			cfg.GitCodeBaseURL = &value
-		case "default_timeout":
-			cfg.DefaultTimeout = &value
-		case "max_response_size":
-			n, err := strconv.ParseInt(value, 10, 64)
-			if err != nil {
-				return fileConfig{}, CredentialConfig{}, fmt.Errorf("config: invalid max_response_size %q: %w", value, err)
-			}
-			cfg.MaxResponseSize = &n
-		case "max_retries":
-			n, err := strconv.Atoi(value)
-			if err != nil {
-				return fileConfig{}, CredentialConfig{}, fmt.Errorf("config: invalid max_retries %q: %w", value, err)
-			}
-			cfg.MaxRetries = &n
-		case "rate_limit_rps":
-			n, err := strconv.ParseFloat(value, 64)
-			if err != nil {
-				return fileConfig{}, CredentialConfig{}, fmt.Errorf("config: invalid rate_limit_rps %q: %w", value, err)
-			}
-			cfg.RateLimitRPS = &n
-		case "rate_limit_burst":
-			n, err := strconv.Atoi(value)
-			if err != nil {
-				return fileConfig{}, CredentialConfig{}, fmt.Errorf("config: invalid rate_limit_burst %q: %w", value, err)
-			}
-			cfg.RateLimitBurst = &n
-		case "format":
-			cfg.Format = &value
-		}
+	if cfg.Credential != nil {
+		cred = *cfg.Credential
 	}
 	return cfg, cred, nil
 }
 
-func yamlSectionPath(stack []yamlSection) string {
-	names := make([]string, 0, len(stack))
-	for _, section := range stack {
-		names = append(names, section.name)
-	}
-	return strings.Join(names, ".")
-}
+// yamlStringList accepts standard block/flow sequences and the historical
+// pipe/semicolon scalar notation. JSON decoding remains an ordinary string list.
+type yamlStringList []string
 
-func setYAMLRAGValue(cfg *fileConfig, section, key, value string) error {
-	switch {
-	case section == "service":
-		if cfg.Service == nil {
-			cfg.Service = &serviceFileConfig{}
-		}
-		if key == "runtime_dir" {
-			cfg.Service.RuntimeDir = &value
-		}
-	case section == "service.job_retention":
-		if cfg.Service == nil {
-			cfg.Service = &serviceFileConfig{}
-		}
-		if cfg.Service.JobRetention == nil {
-			cfg.Service.JobRetention = &serviceJobRetentionFileConfig{}
-		}
-		retention := cfg.Service.JobRetention
-		switch key {
-		case "success_ttl":
-			retention.SuccessTTL = &value
-		case "diagnostic_ttl":
-			retention.DiagnosticTTL = &value
-		case "max_terminal_jobs", "max_diagnostic_jobs", "max_progress_events":
-			n, err := strconv.Atoi(value)
-			if err != nil {
-				return fmt.Errorf("config: invalid %s.%s %q: %w", section, key, value, err)
-			}
-			switch key {
-			case "max_terminal_jobs":
-				retention.MaxTerminalJobs = &n
-			case "max_diagnostic_jobs":
-				retention.MaxDiagnosticJobs = &n
-			case "max_progress_events":
-				retention.MaxProgressEvents = &n
-			}
-		}
-	case section == "rag":
-		rag := ensureRAGFile(cfg)
-		switch key {
-		case "model_store_path":
-			rag.ModelStorePath = &value
-		case "default_profile":
-			rag.DefaultProfile = &value
-		}
-	case section == "rag.indexing":
-		rag := ensureRAGFile(cfg)
-		if rag.Indexing == nil {
-			rag.Indexing = &ragIndexingFileConfig{}
-		}
-		n, err := parseOptionalIntYAML(section, key, value)
-		if err != nil {
-			return err
-		}
-		switch key {
-		case "profile":
-			rag.Indexing.Profile = &value
-		case "chunk_tokens":
-			rag.Indexing.ChunkTokens = n
-		case "overlap":
-			rag.Indexing.Overlap = n
-		case "batch_size":
-			rag.Indexing.BatchSize = n
-		}
-	case section == "rag.search":
-		rag := ensureRAGFile(cfg)
-		if rag.Search == nil {
-			rag.Search = &ragSearchFileConfig{}
-		}
-		switch key {
-		case "profile":
-			rag.Search.Profile = &value
-		case "top_k":
-			n, err := parseOptionalIntYAML(section, key, value)
-			if err != nil {
-				return err
-			}
-			rag.Search.TopK = n
-		case "hybrid":
-			v, err := parseBoolYAML(section, key, value)
-			if err != nil {
-				return err
-			}
-			rag.Search.Hybrid = &v
-		}
-	case strings.HasPrefix(section, "rag.providers."):
-		return setYAMLRAGProviderValue(cfg, section, key, value)
-	case strings.HasPrefix(section, "rag.profiles."):
-		return setYAMLRAGProfileValue(cfg, section, key, value)
-	}
-	return nil
-}
-
-func setYAMLRAGProviderValue(cfg *fileConfig, section, key, value string) error {
-	parts := strings.Split(section, ".")
-	if len(parts) < 3 {
+func (values *yamlStringList) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind == yaml.ScalarNode && node.Tag == "!!str" {
+		*values = splitYAMLList(node.Value)
 		return nil
 	}
-	rag := ensureRAGFile(cfg)
-	if rag.Providers == nil {
-		rag.Providers = map[string]ragProviderFileConfig{}
+	if node.Kind != yaml.SequenceNode {
+		return fmt.Errorf("expected a string list")
 	}
-	name := parts[2]
-	provider := rag.Providers[name]
-	if len(parts) == 3 {
-		switch key {
-		case "type":
-			provider.Type = &value
-		case "data_boundary":
-			provider.DataBoundary = &value
-		case "endpoint":
-			provider.Endpoint = &value
-		case "executable":
-			provider.Executable = &value
-		case "startup":
-			provider.Startup = &value
-		case "autostart":
-			v, err := parseBoolYAML(section, key, value)
-			if err != nil {
-				return err
-			}
-			provider.Autostart = &v
-		case "install_hints":
-			provider.InstallHints = splitYAMLList(value)
-		case "timeout":
-			provider.Timeout = &value
-		}
-	} else if len(parts) == 4 && parts[3] == "env" {
-		if provider.Env == nil {
-			provider.Env = map[string]string{}
-		}
-		provider.Env[key] = value
-	} else if len(parts) == 4 && parts[3] == "model_storage" {
-		if provider.ModelStorage == nil {
-			provider.ModelStorage = &ragModelStorageFileConfig{}
-		}
-		switch key {
-		case "mode":
-			provider.ModelStorage.Mode = &value
-		case "path":
-			provider.ModelStorage.Path = &value
-		case "env":
-			provider.ModelStorage.Env = &value
-		}
+	var decoded []string
+	if err := node.Decode(&decoded); err != nil {
+		return fmt.Errorf("expected a string list")
 	}
-	rag.Providers[name] = provider
+	*values = decoded
 	return nil
-}
-
-func setYAMLRAGProfileValue(cfg *fileConfig, section, key, value string) error {
-	parts := strings.Split(section, ".")
-	if len(parts) != 3 {
-		return nil
-	}
-	rag := ensureRAGFile(cfg)
-	if rag.Profiles == nil {
-		rag.Profiles = map[string]ragProfileFileConfig{}
-	}
-	name := parts[2]
-	profile := rag.Profiles[name]
-	n, err := parseOptionalIntYAML(section, key, value)
-	if err != nil {
-		return err
-	}
-	switch key {
-	case "provider":
-		profile.Provider = &value
-	case "model":
-		profile.Model = &value
-	case "dimensions":
-		profile.Dimensions = n
-	case "max_input_tokens":
-		profile.MaxInputTokens = n
-	case "batch_size":
-		profile.BatchSize = n
-	}
-	rag.Profiles[name] = profile
-	return nil
-}
-
-func ensureRAGFile(cfg *fileConfig) *ragFileConfig {
-	if cfg.RAG == nil {
-		cfg.RAG = &ragFileConfig{}
-	}
-	return cfg.RAG
-}
-
-func isRAGYAMLSection(section string) bool {
-	return section == "rag" || strings.HasPrefix(section, "rag.")
-}
-
-func parseOptionalIntYAML(section, key, value string) (*int, error) {
-	switch key {
-	case "chunk_tokens", "overlap", "batch_size", "top_k", "dimensions", "max_input_tokens":
-		n, err := strconv.Atoi(value)
-		if err != nil {
-			return nil, fmt.Errorf("config: invalid %s.%s %q: %w", section, key, value, err)
-		}
-		return &n, nil
-	default:
-		return nil, nil
-	}
-}
-
-func parseBoolYAML(section, key, value string) (bool, error) {
-	v, err := strconv.ParseBool(value)
-	if err != nil {
-		return false, fmt.Errorf("config: invalid %s.%s %q: %w", section, key, value, err)
-	}
-	return v, nil
 }
 
 func splitYAMLList(value string) []string {

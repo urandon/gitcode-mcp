@@ -291,6 +291,40 @@ func TestEntrypointDiscoversRepoLocalCache(t *testing.T) {
 	}
 }
 
+func TestEntrypointFormattedRepositoryConfigSupportsCLIAndMCP(t *testing.T) {
+	for _, content := range []string{
+		"cache_mode: repo-local\nrepository_docs:\n  include:\n    - README.md\n",
+		"cache_mode: repo-local\nrepository_docs: {include: [README.md]}\n",
+	} {
+		src := newTestSource(t)
+		root := filepath.Join(t.TempDir(), "example-worktree")
+		configureRepoLocalSource(src, root, filepath.Join(root, "nested"))
+		src.files[filepath.Join(root, ".gitcode", "gitcode-mcp.yaml")] = []byte(content)
+		global := filepath.Join(src.configDir, "isolated.yaml")
+		src.env[config.EnvMCPConfigPath] = global
+		src.files[global] = []byte("credential: {store: env}\n")
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"config", "show", "--redacted", "--format", "json"}, strings.NewReader(""), &stdout, &stderr, src); code != 0 {
+			t.Fatalf("formatted config show failed: code=%d stderr=%q", code, stderr.String())
+		}
+		var shown struct {
+			Effective config.EffectiveConfig `json:"effective"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &shown); err != nil || shown.Effective.Config.CacheMode != config.CacheModeRepoLocal || shown.Effective.RepoRoot != root {
+			t.Fatalf("config show lost repository intent: %v", err)
+		}
+		stdout.Reset()
+		stderr.Reset()
+		stdin := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}` + "\n")
+		if code := run([]string{"--mcp", "--offline"}, stdin, &stdout, &stderr, src); code != 0 {
+			t.Fatalf("formatted MCP startup failed: code=%d stderr=%q", code, stderr.String())
+		}
+		if !entrypointMCPToolNames(t, strings.TrimSpace(stdout.String()))["search_sources"] {
+			t.Fatal("formatted repo config degraded MCP to recovery-only tools")
+		}
+	}
+}
+
 func TestEntrypointRepoLocalCacheDirectoryHandling(t *testing.T) {
 	src := newTestSource(t)
 	root := filepath.Join(src.homeDir, "workspace", "repo")

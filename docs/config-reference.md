@@ -28,6 +28,17 @@ export GITCODE_MCP_CONFIG=/path/to/custom/config.yaml
 
 ## Config file format (YAML)
 
+Configuration uses standard YAML mappings, quoted scalars, comments, and
+block/flow sequences. Formatting a repository config does not change its
+effective settings. Known fields are type-checked; malformed YAML, duplicate
+keys, and multiple documents are rejected without echoing scalar content.
+The `repository_docs` section is interpreted by the documentation policy
+parser, not by the runtime settings loader. Legacy pipe/semicolon scalar lists
+remain accepted for feedback labels and provider install hints; standard YAML
+sequences are also accepted.
+Legacy quoted numeric/boolean settings remain accepted; string fields retain
+their literal content even when an anchor is shared with a typed setting.
+
 ```yaml
 cache_path: /path/to/cache/gitcode-mcp/cache.db
 lock_path: /path/to/cache/gitcode-mcp/cache.db.lock
