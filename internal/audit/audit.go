@@ -174,6 +174,10 @@ func sanitizedMetadata(metadata map[string]string) map[string]string {
 		"merge_preimage_head_sha_hash":   true,
 		"merge_preimage_state_hash":      true,
 		"write_phase":                    true,
+		"mutation_attempted":             true,
+		"wiki_path":                      true,
+		"wiki_body_hash":                 true,
+		"wiki_revision":                  true,
 	}
 	out := map[string]string{}
 	for key, value := range metadata {

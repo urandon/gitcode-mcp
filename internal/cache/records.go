@@ -15,6 +15,13 @@ func (s *SQLiteStore) UpsertRecordGraph(ctx context.Context, graph RecordGraph) 
 		return err
 	}
 	defer txRollbackOnError(tx, &err)
+	if err = s.upsertRecordGraphTx(ctx, tx, graph); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *SQLiteStore) upsertRecordGraphTx(ctx context.Context, tx *sql.Tx, graph RecordGraph) (err error) {
 	if err = upsertSourceTx(ctx, tx, sourceFromRecord(graph.Record)); err != nil {
 		return err
 	}
@@ -145,7 +152,7 @@ func (s *SQLiteStore) UpsertRecordGraph(ctx context.Context, graph RecordGraph) 
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (s *SQLiteStore) UpsertSyncGraph(ctx context.Context, graph SyncGraph) (err error) {

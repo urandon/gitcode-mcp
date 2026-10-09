@@ -1001,7 +1001,7 @@ func confirmedExistingPRReviewReply(comment PRComment, target, key string) Write
 
 func (c *HTTPClient) CreateWikiPage(ctx context.Context, req CreateWikiPageRequest, opts WriteOptions) (WriteResult[WikiPage], error) {
 	if err := validateCreateWikiPage(req); err != nil {
-		return WriteResult[WikiPage]{}, err
+		return WriteResult[WikiPage]{}, ErrWriteMutationPhase{Phase: "validation", Cause: err}
 	}
 	wikiPath := wikiWritePath(req.Path, req.Slug)
 	payload := WikiContentWriteRequest{Content: base64.StdEncoding.EncodeToString([]byte(req.Body)), Message: wikiWriteMessage(req.Message, "create wiki page")}
@@ -1011,16 +1011,19 @@ func (c *HTTPClient) CreateWikiPage(ctx context.Context, req CreateWikiPageReque
 
 func (c *HTTPClient) UpdateWikiPage(ctx context.Context, req UpdateWikiPageRequest, opts WriteOptions) (WriteResult[WikiPage], error) {
 	if err := validateUpdateWikiPage(req); err != nil {
-		return WriteResult[WikiPage]{}, err
+		return WriteResult[WikiPage]{}, ErrWriteMutationPhase{Phase: "validation", Cause: err}
 	}
 	wikiPath := wikiWritePath(req.Path, req.Slug)
 	sha := strings.TrimSpace(req.Sha)
 	if sha == "" {
 		meta, err := c.getWikiMetadata(ctx, req.Owner, req.Repo, wikiPath)
 		if err != nil {
-			return WriteResult[WikiPage]{}, err
+			return WriteResult[WikiPage]{}, ErrWriteMutationPhase{Phase: "preflight", Cause: err}
 		}
 		sha = meta.Sha
+		if strings.TrimSpace(sha) == "" {
+			return WriteResult[WikiPage]{}, ErrWriteMutationPhase{Phase: "preflight", Cause: ErrWriteConfirmationIncomplete{Message: "wiki preflight metadata has no revision"}}
+		}
 	}
 	payload := WikiContentWriteRequest{Content: base64.StdEncoding.EncodeToString([]byte(req.Body)), Message: wikiWriteMessage(req.Message, "update wiki page"), Sha: sha}
 	target := req.Owner + "/" + req.Repo + "/" + wikiPath
@@ -1267,6 +1270,8 @@ func (c *HTTPClient) listWikiEntries(ctx context.Context, owner, repo, dir strin
 		// returns valid content (just no pages in this directory).
 	} else if isWikiEmptyResponse(resp.StatusCode, body) {
 		return nil, ErrEmptyWiki{Owner: owner, Repo: repo}
+	} else if wikiErr := wikiAvailabilityError(resp.StatusCode, body); wikiErr != nil {
+		return nil, wikiErr
 	} else {
 		// Fall through to normal error handling via the existing statusError path.
 		return nil, c.statusError(resp.StatusCode, endpoint, body, requestOptions{})
@@ -1299,6 +1304,23 @@ func isWikiEmptyResponse(statusCode int, body []byte) bool {
 		}
 	}
 	return false
+}
+
+func wikiAvailabilityError(status int, body []byte) error {
+	if status == http.StatusMethodNotAllowed || status == http.StatusNotImplemented {
+		return ErrWikiUnavailable{Reason: "wiki_route_unsupported"}
+	}
+	if status != http.StatusBadRequest && status != http.StatusNotFound && status != http.StatusForbidden {
+		return nil
+	}
+	lower := strings.ToLower(string(body))
+	if strings.Contains(lower, "wiki is disabled") || strings.Contains(lower, "wiki disabled") {
+		return ErrWikiUnavailable{Reason: "wiki_disabled"}
+	}
+	if status == http.StatusNotFound {
+		return ErrWikiUnavailable{Reason: "wiki_unavailable"}
+	}
+	return nil
 }
 
 func (c *HTTPClient) getWikiPageByPath(ctx context.Context, owner, repo, wikiPath string) (WikiPage, error) {
@@ -1334,30 +1356,32 @@ func (c *HTTPClient) getWikiMetadata(ctx context.Context, owner, repo, wikiPath 
 
 func (c *HTTPClient) writeWikiContent(ctx context.Context, method, endpoint, operation, target string, payload WikiContentWriteRequest, opts WriteOptions, owner, repo, wikiPath, body string) (WriteResult[WikiPage], error) {
 	requestPath := normalizeWikiPath(wikiPath)
-	result, err := writeConfirmedJSON[WikiContentsFile](ctx, c, method, endpoint, operation, target, payload, opts, func(result WriteResult[WikiContentsFile]) (WriteResult[WikiContentsFile], error) {
-		if normalizeWikiPath(result.Record.Path) == "" || strings.TrimSpace(result.Record.Sha) == "" {
-			meta, err := c.confirmWikiWrite(ctx, owner, repo, requestPath, body)
-			if err != nil {
-				return WriteResult[WikiContentsFile]{}, err
-			}
-			result.Record = meta
-		}
-		confirmedPath := normalizeWikiPath(result.Record.Path)
-		if confirmedPath == "" || strings.TrimSpace(result.Record.Sha) == "" {
-			return WriteResult[WikiContentsFile]{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki write confirmation requires path and sha"}
-		}
-		if confirmedPath != requestPath {
-			return WriteResult[WikiContentsFile]{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki write confirmation path mismatch"}
-		}
-		result.RemoteID = confirmedPath
-		result.RemoteSlug = result.RemoteID
-		result.RemoteRevision = result.Record.Sha
-		c.setWikiWriteLocations(&result, endpoint, owner, repo, confirmedPath)
-		return result, nil
-	})
+	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return WriteResult[WikiPage]{}, err
 	}
+	key := opts.IdempotencyKey
+	if key == "" {
+		key = GenerateIdempotencyKey(operation, target, payload, opts)
+	}
+	attempted := false
+	response, headers, err := c.bytesWithOptions(ctx, method, endpoint, nil, encoded, requestOptions{
+		idempotencyKey: key, localPayload: encoded, noRetry: true,
+		beforeAttempt: func() { attempted = true },
+	})
+	if err != nil {
+		return WriteResult[WikiPage]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: strings.ToLower(method), MutationAttempted: attempted, Cause: err}
+	}
+	// Write responses may contain a nested content object, not the GET file
+	// model. Never loosen the read decoder or trust the mutation response alone.
+	meta, err := c.confirmWikiWrite(ctx, owner, repo, requestPath, body)
+	if err != nil {
+		return WriteResult[WikiPage]{}, ErrWriteMutationPhase{Endpoint: endpoint, Phase: "readback", MutationAttempted: true, Cause: err}
+	}
+	hash := sha256.Sum256(response)
+	fingerprint := sha256.Sum256(RedactJSONBody(response, target))
+	result := WriteResult[WikiContentsFile]{Record: meta, Confirmed: true, Operation: operation, Target: target, ProviderStatus: headers.Get("Status") + "-readback", IdempotencyKey: key, ResponseHash: hex.EncodeToString(hash[:]), ProviderPayloadFingerprint: hex.EncodeToString(fingerprint[:]), ConfirmedAt: c.nowUTC(), RemoteID: requestPath, RemoteSlug: requestPath, RemoteRevision: meta.Sha}
+	c.setWikiWriteLocations(&result, endpoint, owner, repo, requestPath)
 	page := wikiPageFromMetadata(result.Record, body, c.nowUTC())
 	return WriteResult[WikiPage]{Record: page, Confirmed: result.Confirmed, Operation: result.Operation, Target: result.Target, ProviderStatus: result.ProviderStatus, RemoteID: result.RemoteID, RemoteSlug: result.RemoteSlug, RemoteRevision: result.RemoteRevision, APIPath: result.APIPath, CachePath: result.CachePath, BrowserURL: result.BrowserURL, IdempotencyKey: result.IdempotencyKey, ResponseHash: result.ResponseHash, ConfirmedAt: result.ConfirmedAt, ProviderPayloadFingerprint: result.ProviderPayloadFingerprint}, nil
 }
@@ -1390,6 +1414,23 @@ func (c *HTTPClient) deleteWikiContent(ctx context.Context, endpoint, operation,
 	return WriteResult[WikiPage]{Record: page, Confirmed: result.Confirmed, Operation: result.Operation, Target: result.Target, ProviderStatus: result.ProviderStatus, RemoteID: result.RemoteID, RemoteSlug: result.RemoteSlug, RemoteRevision: result.RemoteRevision, APIPath: result.APIPath, CachePath: result.CachePath, BrowserURL: result.BrowserURL, IdempotencyKey: result.IdempotencyKey, ResponseHash: result.ResponseHash, ConfirmedAt: result.ConfirmedAt, ProviderPayloadFingerprint: result.ProviderPayloadFingerprint}, nil
 }
 
+// ConfirmWikiPage is a GET-only exact-body reconciliation boundary. It shares
+// initial write confirmation, rather than trusting a general raw-page read.
+func (c *HTTPClient) ConfirmWikiPage(ctx context.Context, req WikiPageRequest, body string) (WikiPage, error) {
+	if err := validateReadRepo(req.Owner, req.Repo); err != nil {
+		return WikiPage{}, err
+	}
+	wikiPath := wikiWritePath(req.Path, req.Slug)
+	if wikiPath == "" {
+		return WikiPage{}, ErrWriteConfirmationIncomplete{Message: "wiki confirmation requires a path"}
+	}
+	meta, err := c.confirmWikiWrite(ctx, req.Owner, req.Repo, wikiPath, body)
+	if err != nil {
+		return WikiPage{}, err
+	}
+	return wikiPageFromMetadata(meta, body, c.nowUTC()), nil
+}
+
 func (c *HTTPClient) confirmWikiWrite(ctx context.Context, owner, repo, wikiPath, body string) (WikiContentsFile, error) {
 	endpoint := wikiContentsPathEndpoint(owner, repo, wikiPath)
 	meta, err := c.getWikiMetadata(ctx, owner, repo, wikiPath)
@@ -1403,14 +1444,31 @@ func (c *HTTPClient) confirmWikiWrite(ctx context.Context, owner, repo, wikiPath
 	if strings.TrimSpace(meta.Sha) == "" {
 		return WikiContentsFile{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki confirmation missing sha"}
 	}
+	var decoded []byte
 	if strings.TrimSpace(meta.Content) != "" {
-		decoded, err := decodeWikiContent(meta, endpoint)
-		if err != nil {
-			return WikiContentsFile{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki confirmation content decode failed", Cause: err}
+		decoded, err = decodeWikiContent(meta, endpoint)
+	} else {
+		decoded, _, err = c.getBytes(ctx, wikiRawPathEndpoint(owner, repo, wikiPath), nil)
+		if err == nil {
+			var current WikiContentsFile
+			current, err = c.getWikiMetadata(ctx, owner, repo, wikiPath)
+			if err == nil && (normalizeWikiPath(current.Path) != wikiPath || current.Sha != meta.Sha) {
+				return WikiContentsFile{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki revision changed during raw body confirmation"}
+			}
+			if err == nil && current.Content != "" {
+				var currentBody []byte
+				currentBody, err = decodeWikiContent(current, endpoint)
+				if err == nil && string(currentBody) != string(decoded) {
+					return WikiContentsFile{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki raw body contradicts confirmation metadata"}
+				}
+			}
 		}
-		if string(decoded) != body {
-			return WikiContentsFile{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki confirmation content mismatch"}
-		}
+	}
+	if err != nil {
+		return WikiContentsFile{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki confirmation body read failed", Cause: err}
+	}
+	if string(decoded) != body {
+		return WikiContentsFile{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki confirmation content mismatch"}
 	}
 	return meta, nil
 }
@@ -2082,6 +2140,10 @@ func wikiWritePath(pathValue, slug string) string {
 	return ensureWikiMarkdownPath(wikiRequestPath(pathValue, slug))
 }
 
+// WikiWritePath is the canonical exact-path selector used by writes and their
+// read-only recovery. It appends a Markdown extension at most once.
+func WikiWritePath(pathValue, slug string) string { return wikiWritePath(pathValue, slug) }
+
 func ensureWikiMarkdownPath(wikiPath string) string {
 	if wikiPath == "" || strings.EqualFold(path.Ext(wikiPath), ".md") {
 		return wikiPath
@@ -2278,15 +2340,22 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 				continue
 			}
 			return nil, nil, ErrRateLimited{RetryAfter: lastRetryAfter, RawRetryAfter: rawRetryAfter, Endpoint: endpoint, Attempts: attempt}
+		case strings.Contains(endpoint, ".wiki/") && resp.StatusCode == http.StatusNotImplemented:
+			return nil, nil, ErrWikiUnavailable{Reason: "wiki_route_unsupported"}
 		case resp.StatusCode >= 500 && resp.StatusCode <= 599:
 			if attempt < attempts {
 				continue
 			}
 			return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Status: resp.StatusCode, Attempts: attempt}
-		case isWikiEmptyResponse(resp.StatusCode, body):
+		case strings.Contains(endpoint, ".wiki/") && isWikiEmptyResponse(resp.StatusCode, body):
 			owner, repo := parseWikiEndpointOwnerRepo(endpoint)
 			return nil, nil, ErrEmptyWiki{Owner: owner, Repo: repo}
 		default:
+			if strings.Contains(endpoint, ".wiki/") {
+				if wikiErr := wikiAvailabilityError(resp.StatusCode, body); wikiErr != nil && (resp.StatusCode != http.StatusNotFound || strings.HasSuffix(endpoint, ".wiki/contents")) {
+					return nil, nil, wikiErr
+				}
+			}
 			return nil, nil, c.statusError(resp.StatusCode, endpoint, body, opts)
 		}
 	}

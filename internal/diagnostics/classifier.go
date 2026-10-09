@@ -401,7 +401,7 @@ func messageFor(code Code, err error) string {
 	case CodeParentPRNotCached:
 		base += ": inline review write requires its parent pull request in the selected cache"
 	case CodeWriteAmbiguousRemote:
-		base += ": issue update outcome is ambiguous; retry the same idempotency key for GET-only recovery"
+		base += ": remote write outcome is ambiguous; retry the same idempotency key for GET-only recovery"
 	case CodeWriteAmbiguousReadback:
 		base += ": canonical GET-only recovery could not complete"
 	case CodeWriteConflict:

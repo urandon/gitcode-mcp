@@ -1123,10 +1123,11 @@ func TestConfirmedWriteOperations(t *testing.T) {
 			},
 		},
 		{
-			name:   "write-confirm-create-wiki",
-			method: http.MethodPost,
-			path:   updateWikiPageEndpoint("example-owner", "example-repo", "Home.md"),
-			body:   `{"path":"Home.md","type":"file","sha":"rev1"}`,
+			name:             "write-confirm-create-wiki",
+			expectedProvider: "201-readback",
+			method:           http.MethodPost,
+			path:             updateWikiPageEndpoint("example-owner", "example-repo", "Home.md"),
+			body:             `{"path":"Home.md","type":"file","sha":"rev1"}`,
 			invoke: func(client *HTTPClient) (WriteResult[any], error) {
 				result, err := client.CreateWikiPage(context.Background(), CreateWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "Home.md", Title: "Home", Body: "body"}, WriteOptions{IdempotencyKey: "key-create-wiki"})
 				return anyWriteResult(result), err
@@ -1138,10 +1139,11 @@ func TestConfirmedWriteOperations(t *testing.T) {
 			},
 		},
 		{
-			name:   "write-confirm-update-wiki",
-			method: http.MethodPut,
-			path:   updateWikiPageEndpoint("example-owner", "example-repo", "Home.md"),
-			body:   `{"path":"Home.md","type":"file","sha":"rev2"}`,
+			name:             "write-confirm-update-wiki",
+			expectedProvider: "201-readback",
+			method:           http.MethodPut,
+			path:             updateWikiPageEndpoint("example-owner", "example-repo", "Home.md"),
+			body:             `{"path":"Home.md","type":"file","sha":"rev2"}`,
 			invoke: func(client *HTTPClient) (WriteResult[any], error) {
 				result, err := client.UpdateWikiPage(context.Background(), UpdateWikiPageRequest{Owner: "example-owner", Repo: "example-repo", Path: "Home.md", Body: "body", Sha: "rev1"}, WriteOptions{IdempotencyKey: "key-update-wiki"})
 				return anyWriteResult(result), err
@@ -1156,6 +1158,15 @@ func TestConfirmedWriteOperations(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(tt.name, "-wiki") && r.Method == http.MethodGet && r.URL.Path == tt.path {
+					var metadata WikiContentsFile
+					if err := json.Unmarshal([]byte(tt.body), &metadata); err != nil {
+						t.Fatal(err)
+					}
+					metadata.Content, metadata.Encoding = base64.StdEncoding.EncodeToString([]byte("body")), "base64"
+					_ = json.NewEncoder(w).Encode(metadata)
+					return
+				}
 				if tt.name == "write-confirm-update-issue" && r.Method == http.MethodGet && r.URL.Path == tt.path {
 					fmt.Fprint(w, tt.body)
 					return
@@ -1217,7 +1228,7 @@ func TestScenario015WikiCreatePageFollowupConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateWikiPage returned error: %v", err)
 	}
-	if !result.Confirmed || result.RemoteID != "Home.md" || result.RemoteSlug != "Home.md" || result.RemoteRevision != "rev-confirmed" || result.Record.Revision != "rev-confirmed" || result.Record.Body != "body" || result.ProviderStatus != "201" {
+	if !result.Confirmed || result.RemoteID != "Home.md" || result.RemoteSlug != "Home.md" || result.RemoteRevision != "rev-confirmed" || result.Record.Revision != "rev-confirmed" || result.Record.Body != "body" || result.ProviderStatus != "201-readback" {
 		t.Fatalf("unexpected confirmed result: %+v", result)
 	}
 	want := []string{"POST /api/v5/repos/example-owner/example-repo.wiki/contents/Home.md", "GET /api/v5/repos/example-owner/example-repo.wiki/contents/Home.md"}
@@ -2597,6 +2608,10 @@ func TestScenario006WikiCreateBase64NoSha(t *testing.T) {
 	var sawBody string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/NewPage.md" {
+			if sawBody != "" {
+				fmt.Fprintf(w, `{"path":"NewPage.md","type":"file","sha":"rev-new","content":%q,"encoding":"base64"}`, sawBody)
+				return
+			}
 			w.WriteHeader(http.StatusNotFound)
 			fmt.Fprint(w, `{"message":"not found"}`)
 			return
@@ -2637,6 +2652,10 @@ func TestScenario006WikiCreateNormalizesMarkdownPathAndBrowserURL(t *testing.T) 
 	var sawPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawPath = r.URL.Path
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/Evidence/Dogfood/Report.md" {
+			fmt.Fprint(w, `{"path":"Evidence/Dogfood/Report.md","type":"file","sha":"rev-report","content":"Ym9keQ==","encoding":"base64"}`)
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/api/v5/repos/example-owner/example-repo.wiki/contents/Evidence/Dogfood/Report.md" {
 			t.Fatalf("unexpected create request %s %s", r.Method, r.URL.Path)
 		}
@@ -2667,6 +2686,10 @@ func TestScenario007WikiUpdateShaAutoresolve(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/Existing.md":
+			if sawMethod == http.MethodPut {
+				fmt.Fprintf(w, `{"path":"Existing.md","type":"file","sha":"new-sha-456","content":%q,"encoding":"base64"}`, base64.StdEncoding.EncodeToString([]byte("updated body")))
+				return
+			}
 			fmt.Fprint(w, `{"path":"Existing.md","type":"file","sha":"current-sha-123"}`)
 		case r.Method == http.MethodPut && r.URL.Path == "/api/v5/repos/example-owner/example-repo.wiki/contents/Existing.md":
 			sawMethod = r.Method
@@ -2699,7 +2722,11 @@ func TestScenario008WikiUpdateExplicitSha(t *testing.T) {
 	var sawSha string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
-			t.Fatalf("GET must not be called when sha is explicit")
+			if sawSha == "" || r.URL.Path != "/api/v5/repos/example-owner/example-repo.wiki/contents/Explicit.md" {
+				t.Fatalf("explicit sha must skip preflight GET; got %s", r.URL.Path)
+			}
+			fmt.Fprintf(w, `{"path":"Explicit.md","type":"file","sha":"explicit-result","content":%q,"encoding":"base64"}`, base64.StdEncoding.EncodeToString([]byte("updated body")))
+			return
 		}
 		if r.Method != http.MethodPut || r.URL.Path != "/api/v5/repos/example-owner/example-repo.wiki/contents/Explicit.md" {
 			t.Fatalf("unexpected update request %s %s", r.Method, r.URL.Path)
