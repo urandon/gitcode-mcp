@@ -52,6 +52,7 @@ type wikiFaultStore struct {
 	*cache.SQLiteStore
 	claimErr, graphErr error
 	onSettlement       func()
+	onStage            func(cache.AuditTrailEntry, cache.AuditTrailEntry)
 }
 
 func (s *wikiFaultStore) ClaimAuditEventGeneration(ctx context.Context, e cache.AuditTrailEntry, previous *time.Time) (bool, error) {
@@ -75,6 +76,13 @@ func (s *wikiFaultStore) SettleWriteGraphGeneration(ctx context.Context, g cache
 		return false, s.graphErr
 	}
 	return s.SQLiteStore.SettleWriteGraphGeneration(ctx, g, complete, pending, generation)
+}
+
+func (s *wikiFaultStore) StageWriteGraphGeneration(ctx context.Context, pending, observed cache.AuditTrailEntry, generation time.Time) (bool, error) {
+	if s.onStage != nil {
+		s.onStage(pending, observed)
+	}
+	return s.SQLiteStore.StageWriteGraphGeneration(ctx, pending, observed, generation)
 }
 
 func TestWikiWriteDurableClaimAndReadOnlyRecovery(t *testing.T) {
@@ -328,5 +336,45 @@ func TestWikiWriteHTTPRecoveryUsesStrictMetadataConfirmation(t *testing.T) {
 	_, replayErr := svc.UpdatePage(ctx, req)
 	if firstErr == nil || replayErr == nil || writes != 1 || rawReads != 0 {
 		t.Fatalf("weak recovery accepted contradictory raw content: first=%v replay=%v writes=%d raw=%d", firstErr, replayErr, writes, rawReads)
+	}
+}
+
+func TestWikiWriteDelayedStagingCannotReplaceNewerPendingReadback(t *testing.T) {
+	ctx := context.Background()
+	store, err := cache.NewInMemorySQLiteStore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seedStore(t, ctx, store)
+	t.Setenv("GITCODE_TOKEN", "test-token")
+	client := &wikiConfirmationClient{fakeGitCodeClient: &fakeGitCodeClient{}, page: gitcode.WikiPage{Slug: "Home.md", Body: "wanted", Revision: "rev-old"}}
+	fault := &wikiFaultStore{SQLiteStore: store, graphErr: errors.New("initial cache unavailable")}
+	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Path: "Home.md", Body: "wanted", IdempotencyKey: "wiki-key"}
+	_, err = NewWithClient(fault, client).CreatePage(ctx, req)
+	if err == nil {
+		t.Fatal("initial cache failure absent")
+	}
+	fault.graphErr = nil
+	client.writes = 0
+	fault.onStage = func(pending, observed cache.AuditTrailEntry) {
+		fault.onStage = nil
+		newer := pending
+		newer.RequestMetadata = cloneStringMap(pending.RequestMetadata)
+		newer.RequestMetadata["wiki_revision"] = "rev-newer"
+		staged, err := store.StageWriteGraphGeneration(ctx, newer, observed, observed.CreatedAt)
+		if err != nil || !staged {
+			t.Fatalf("newer stage failed: %t %v", staged, err)
+		}
+	}
+	_, err = NewWithClient(fault, client).CreatePage(ctx, req)
+	entry, auditErr := store.GetAuditEventByKey(ctx, "fixture-a", "wiki-key")
+	if err == nil || auditErr != nil || entry == nil || entry.RequestMetadata["wiki_revision"] != "rev-newer" || entry.Status != audit.StatusRemoteConfirmedCacheRefreshPending || client.writes != 0 {
+		t.Fatalf("old readback replaced newer stage: %v %+v", err, entry)
+	}
+	client.page.Revision = "rev-newer"
+	result, err := NewWithClient(fault, client).CreatePage(ctx, req)
+	if err != nil || result.RemoteRevision != "rev-newer" || client.writes != 0 {
+		t.Fatalf("newer recovery failed: %+v %v", result, err)
 	}
 }

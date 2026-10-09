@@ -12,6 +12,7 @@ import (
 )
 
 type wikiWriteSettlementStore interface {
+	StageWriteGraphGeneration(context.Context, cache.AuditTrailEntry, cache.AuditTrailEntry, time.Time) (bool, error)
 	SettleWriteGraphGeneration(context.Context, cache.RecordGraph, cache.AuditTrailEntry, cache.AuditTrailEntry, time.Time) (bool, error)
 }
 
@@ -118,8 +119,9 @@ func (s *Service) executeWikiContentWrite(ctx context.Context, command string, r
 	}
 	metadata["wiki_revision"] = confirmation.remoteRevision
 	pending := audit.WithRequestMetadata(audit.RemoteConfirmedCacheRefreshPending(route.RepoID, key, command, graph.Record.ID, "wiki", wikiPath, fingerprint, "wiki exact path and body confirmed; cache refresh pending", s.now().UTC()), metadata)
-	settling, current, err := s.transitionAuditGeneration(ctx, transitioner, pending, claim.CreatedAt, claim.Status, audit.StatusRemoteConfirmedCacheRefreshFailed)
+	settling, err := settler.StageWriteGraphGeneration(ctx, pending, claim, claim.CreatedAt)
 	if err != nil || !settling {
+		current, _ := s.store.GetAuditEventByKey(ctx, route.RepoID, key)
 		if auditGenerationSucceeded(current, claim.CreatedAt, fingerprint) {
 			return replayWikiWriteResult(command, req, *current, fingerprint, s.now().UTC()), nil
 		}
@@ -133,7 +135,7 @@ func (s *Service) executeWikiContentWrite(ctx context.Context, command string, r
 		return WriteCommandResult{}, wikiSettlementFailure(claim, recovered, wikiPath, "write_partial_cache_refresh_failed", "cache_refresh")
 	}
 	if !settled {
-		current, err = s.store.GetAuditEventByKey(ctx, route.RepoID, key)
+		current, _ := s.store.GetAuditEventByKey(ctx, route.RepoID, key)
 		if auditGenerationSucceeded(current, claim.CreatedAt, fingerprint) {
 			return replayWikiWriteResult(command, req, *current, fingerprint, s.now().UTC()), nil
 		}

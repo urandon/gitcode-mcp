@@ -54,3 +54,28 @@ func TestWriteGraphSettlementFencesReceiptAndRollsBack(t *testing.T) {
 		})
 	}
 }
+
+func TestWriteGraphStagingFencesObservedReceipt(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t, ctx)
+	defer store.Close()
+	now := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	observed := AuditTrailEntry{RepoID: "fixture-a", ID: "write-key", IdempotencyKey: "key", PayloadHash: "intent", Status: "remote_confirmed_cache_refresh_pending", RequestMetadata: map[string]string{"wiki_revision": "old"}, CreatedAt: now}
+	if err := store.RecordAuditEvent(ctx, observed); err != nil {
+		t.Fatal(err)
+	}
+	newer := observed
+	newer.RequestMetadata = map[string]string{"wiki_revision": "newer"}
+	staged, err := store.StageWriteGraphGeneration(ctx, newer, observed, now)
+	if err != nil || !staged {
+		t.Fatalf("new staging failed: %t %v", staged, err)
+	}
+	staged, err = store.StageWriteGraphGeneration(ctx, observed, observed, now)
+	if err != nil || staged {
+		t.Fatalf("stale same-generation staging accepted: %t %v", staged, err)
+	}
+	entry, err := store.GetAuditEventByKey(ctx, "fixture-a", "key")
+	if err != nil || entry == nil || entry.RequestMetadata["wiki_revision"] != "newer" {
+		t.Fatalf("new stage was overwritten: %+v %v", entry, err)
+	}
+}
