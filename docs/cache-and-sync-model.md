@@ -37,6 +37,13 @@ Candidate tables:
 - Remote ids are aliases. Legacy ids remain stable migration keys.
 - Failed writes stay visible until retried or deliberately dismissed.
 
+Live exact refresh rejects explicit fixture-provider context or fixture graph
+provenance, not fixture-looking stable IDs. A real repository-local issue 42
+normally has `ISSUE-42` as its stable identity; matching that string, a legacy
+alias, a parent reference, or text is not evidence of fixture origin. Provider
+identities remain mandatory and comments must reconcile to their fetched
+parent before publication. Explicit offline fixture sync remains unchanged.
+
 ## Concurrent Cache Access
 
 The cache is optimized for agent-side fan-out reads. Routine read operations such as `list`, `get`, `search`, status, export, diff, and MCP read tools must not require the process-wide writer lock when the SQLite schema is already current.

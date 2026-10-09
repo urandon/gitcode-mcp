@@ -5109,23 +5109,11 @@ func (s *Service) validateLiveSourceGraph(graph cache.SourceGraph) error {
 	if gitcode.IsFixtureBoundary(s.client) {
 		return s.liveGraphError("fixture provider is forbidden in live graph")
 	}
-	for _, marker := range gitcode.FixtureMarkerIDs() {
-		if graph.Source.ID == marker {
-			return s.liveGraphError("fixture marker " + marker + " is forbidden in live graph")
-		}
-		if graph.SyncStatus != nil && graph.SyncStatus.RemoteID == marker {
-			return s.liveGraphError("fixture remote marker " + marker + " is forbidden in live graph")
-		}
-		for _, identity := range graph.Identities {
-			if identity.SourceID == marker || identity.Alias == marker || identity.Remote.ID == marker {
-				return s.liveGraphError("fixture identity marker " + marker + " is forbidden in live graph")
-			}
-		}
-		for _, comment := range graph.Comments {
-			if comment.RecordID == marker || comment.CommentID == marker {
-				return s.liveGraphError("fixture comment marker " + marker + " is forbidden in live graph")
-			}
-		}
+	// Stable IDs and aliases are not provenance: ISSUE-42 is also the normal
+	// identity of a real repository-local issue 42. Reject explicit fixture
+	// origin, never a coincidentally matching source/parent/alias string.
+	if graph.Source.Provenance == cache.ProvenanceFixture {
+		return s.liveGraphError("fixture provenance is forbidden in live graph")
 	}
 	if graph.Source.ID == "" {
 		return s.liveGraphError("source id is required")
