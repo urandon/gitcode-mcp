@@ -148,6 +148,19 @@ func TestRPCRepositoryDocsRegistrationAllowsFullTextWithoutEmbeddingProvider(t *
 	manager := Manager{EffectiveConfig: &cfg}
 	jobs := NewJobManager("")
 	maintenance := NewMaintenanceManager(manager, jobs, filepath.Join(dir, "managed-caches.json"))
+	server := RPCServer{Manager: manager, Jobs: jobs, Maintenance: maintenance}
+	request := RegisterRepositoryDocsSourceRequest{RepoID: "legacy/repo", RepositoryPath: repositoryPath, CachePath: cachePath}
+	params, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := server.handleRequest(ctx, RPCRequest{JSONRPC: jsonrpcVersion, ID: 1, Method: "RepositoryDocs.RegisterSource", Params: params})
+	if response.Error == nil || response.Error.DiagnosticCode != "repository_docs_maintenance_registration_required" || response.Result != nil {
+		t.Fatal("missing enrollment must return a typed RPC error, never a success entry")
+	}
+	if len(maintenance.entries) != 0 || len(maintenance.sources) != 0 || len(jobs.List()) != 0 {
+		t.Fatal("failed registration must not enroll, retain an authority, or enqueue work")
+	}
 	enroll := testMaintenanceEnrollRequest(cachePath, "fulltext-no-provider", MaintenancePolicy{SyncMode: "off"})
 	enroll.ConfigSnapshot = cfg
 	enroll.ConfigHash = maintenanceHash(cfg)
@@ -155,10 +168,26 @@ func TestRPCRepositoryDocsRegistrationAllowsFullTextWithoutEmbeddingProvider(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := RPCServer{Manager: manager, Jobs: jobs, Maintenance: maintenance}
-	registered, err := server.registerRepositoryDocsSource(ctx, RegisterRepositoryDocsSourceRequest{RepoID: "owner/repo", RepositoryPath: repositoryPath, CachePath: cachePath})
+	registered, err := server.registerRepositoryDocsSource(ctx, request)
 	if err != nil || registered.RepositoryDocs == nil {
 		t.Fatalf("registered=%+v err=%v", registered, err)
+	}
+	if registered.RegistrationID != entry.RegistrationID || registered.RepoID != "owner/repo" || registered.CacheUUID == "" || registered.Generation <= 0 || registered.RepositoryDocs.SourceRegistrationID == "" || registered.RepositoryDocs.SourceRegistrationGeneration <= 0 {
+		t.Fatal("successful registration must return canonical nonempty authority identities")
+	}
+	reloaded := NewMaintenanceManager(manager, jobs, filepath.Join(dir, "managed-caches.json"))
+	if err := reloaded.Load(); err != nil {
+		t.Fatal(err)
+	}
+	for _, current := range []*MaintenanceManager{maintenance, reloaded} {
+		discovery := RPCServer{Manager: manager, Jobs: jobs, Maintenance: current}
+		listed, err := discovery.repositoryDocsSources(ctx, RepositoryDocsSourceListRequest{RepoID: "legacy/repo", CachePath: cachePath})
+		if err != nil || listed.RegistrationID != registered.RegistrationID || listed.RepoID != registered.RepoID || len(listed.Sources) != 1 || listed.Sources[0].SourceRegistrationID != registered.RepositoryDocs.SourceRegistrationID || listed.Sources[0].SourceRegistrationGeneration != registered.RepositoryDocs.SourceRegistrationGeneration {
+			t.Fatal("source discovery must resolve the saved identity immediately and after reload")
+		}
+	}
+	if len(jobs.List()) != 0 {
+		t.Fatal("local-only source registration must not enqueue work")
 	}
 	result, err := server.repositoryDocsSearch(ctx, RepositoryDocsQueryRequest{RepoID: "legacy/repo", CachePath: cachePath, Query: "without embeddings", Mode: repositorydocs.SearchModeFullText})
 	if err != nil {

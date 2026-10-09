@@ -1376,9 +1376,7 @@ func executeRepositoryDocsCommand(ctx context.Context, args []string, opts optio
 		if err := client.Call(ctx, "RepositoryDocs.RegisterSource", servicectl.RegisterRepositoryDocsSourceRequest{RepoID: opts.repo, RepositoryPath: opts.repositoryPath, Profile: opts.profile, CachePath: eff.Config.CachePath}, &entry); err != nil {
 			return writeError(stderr, opts.format, err)
 		}
-		return render(stdout, opts.format, entry, func(w io.Writer, value servicectl.MaintenanceEntry) {
-			fmt.Fprintf(w, "registration_id: %s\nrepo_id: %s\nsource_registration_id: %s\nsource_registration_generation: %d\n", value.RegistrationID, value.RepoID, value.RepositoryDocs.SourceRegistrationID, value.RepositoryDocs.SourceRegistrationGeneration)
-		})
+		return renderRepositoryDocsRegistration(stdout, stderr, opts.format, entry)
 	}
 	if sub == "rebind" {
 		if strings.TrimSpace(opts.registrationID) == "" || opts.sourceRegistrationGeneration <= 0 || strings.TrimSpace(opts.repositoryPath) == "" {
@@ -1391,9 +1389,7 @@ func executeRepositoryDocsCommand(ctx context.Context, args []string, opts optio
 		}, &entry); err != nil {
 			return writeError(stderr, opts.format, err)
 		}
-		return render(stdout, opts.format, entry, func(w io.Writer, value servicectl.MaintenanceEntry) {
-			fmt.Fprintf(w, "registration_id: %s\nrepo_id: %s\nsource_registration_id: %s\nsource_registration_generation: %d\n", value.RegistrationID, value.RepoID, value.RepositoryDocs.SourceRegistrationID, value.RepositoryDocs.SourceRegistrationGeneration)
-		})
+		return renderRepositoryDocsRegistration(stdout, stderr, opts.format, entry)
 	}
 	selector := servicectl.RepositoryDocsSourceSelector{RegistrationID: opts.registrationID, SourceRegistrationID: opts.sourceRegistrationID, SourceRegistrationGeneration: opts.sourceRegistrationGeneration}
 	if selector.RegistrationID == "" || (selector.SourceRegistrationID == "") != (selector.SourceRegistrationGeneration <= 0) {
@@ -1466,6 +1462,15 @@ func executeRepositoryDocsCommand(ctx context.Context, args []string, opts optio
 	default:
 		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "repo-docs", Message: "unknown subcommand"})
 	}
+}
+
+func renderRepositoryDocsRegistration(stdout, stderr io.Writer, format string, entry servicectl.MaintenanceEntry) int {
+	if err := servicectl.ValidateRepositoryDocsRegistration(entry); err != nil {
+		return writeError(stderr, format, err)
+	}
+	return render(stdout, format, entry, func(w io.Writer, value servicectl.MaintenanceEntry) {
+		fmt.Fprintf(w, "registration_id: %s\nrepo_id: %s\nsource_registration_id: %s\nsource_registration_generation: %d\n", value.RegistrationID, value.RepoID, value.RepositoryDocs.SourceRegistrationID, value.RepositoryDocs.SourceRegistrationGeneration)
+	})
 }
 
 func executeRAGSearchCommand(ctx context.Context, args []string, opts options, stdout io.Writer, stderr io.Writer, deps localCommandDeps) int {

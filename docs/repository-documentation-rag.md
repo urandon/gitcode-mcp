@@ -63,12 +63,21 @@ identity is written.
 
 ## Commands
 
-Register the private local Git authority once. The absolute path is retained
+First enroll the bound repository in the selected cache using an explicit
+maintenance plan. For local document reads, `--sync off --rag off` is sufficient;
+this does not require an embedding provider or GitCode synchronization. MCP
+callers can use `maintenance_plan` and `enable_cache_maintenance` with the same
+off/off policy. Then register the private local Git authority once. A missing
+enrollment returns `repository_docs_maintenance_registration_required`, not an
+empty successful identity. Registration neither enrolls nor starts indexing.
+
+The absolute path is retained
 only in the daemon's mode-`0600` registry; subsequent commands use the three
 opaque values returned by `register`. No command fetches Git objects or
 contacts GitCode:
 
 ```sh
+gitcode-mcp maintenance enable --repo owner/repo --sync off --rag off --yes --idempotency-key docs-enroll-1
 gitcode-mcp repo-docs register --repo owner/repo --repository-path /path/to/worktree
 
 SOURCE_FLAGS="--registration-id REG --source-registration-id SOURCE --source-registration-generation 1"

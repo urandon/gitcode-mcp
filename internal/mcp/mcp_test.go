@@ -469,6 +469,7 @@ func TestRepositoryDocsRPCDiagnosticsAreActionable(t *testing.T) {
 		code string
 		want string
 	}{
+		{code: "repository_docs_maintenance_registration_required", want: "sync=off and rag=off"},
 		{code: "repository_docs_registration_not_found", want: "repo-docs register"},
 		{code: "repository_docs_registration_disabled", want: "enable_cache_maintenance"},
 		{code: "repository_docs_source_ambiguous", want: "repository_docs_sources"},

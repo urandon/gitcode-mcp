@@ -1959,6 +1959,48 @@ func TestRAGIndexCLIStartsDaemonJobOverIPC(t *testing.T) {
 	}
 }
 
+func TestRepositoryDocsRegistrationRenderingRejectsIncompleteDaemonSuccess(t *testing.T) {
+	valid := servicectl.MaintenanceEntry{
+		RegistrationID: "reg-a", CacheUUID: "cache-a", RepoID: "owner/repo", Generation: 1,
+		RepositoryDocs: &servicectl.RepositoryDocsMaintenanceState{SourceRegistrationID: "source-a", SourceRegistrationGeneration: 1},
+	}
+	for _, format := range []string{"json", "text"} {
+		for _, missing := range []string{"all", "registration", "cache", "repo", "generation", "source", "source-id", "source-generation"} {
+			t.Run(format+"/"+missing, func(t *testing.T) {
+				entry := valid
+				source := *valid.RepositoryDocs
+				entry.RepositoryDocs = &source
+				switch missing {
+				case "all":
+					entry = servicectl.MaintenanceEntry{}
+				case "registration":
+					entry.RegistrationID = ""
+				case "cache":
+					entry.CacheUUID = ""
+				case "repo":
+					entry.RepoID = ""
+				case "generation":
+					entry.Generation = 0
+				case "source":
+					entry.RepositoryDocs = nil
+				case "source-id":
+					entry.RepositoryDocs.SourceRegistrationID = ""
+				case "source-generation":
+					entry.RepositoryDocs.SourceRegistrationGeneration = 0
+				}
+				var out, errOut bytes.Buffer
+				if code := renderRepositoryDocsRegistration(&out, &errOut, format, entry); code == 0 || out.Len() != 0 || !strings.Contains(errOut.String(), "repository_docs_registration_unavailable") {
+					t.Fatal("incomplete daemon success must fail safely without rendering an entry")
+				}
+			})
+		}
+		var out, errOut bytes.Buffer
+		if code := renderRepositoryDocsRegistration(&out, &errOut, format, valid); code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), "source-a") {
+			t.Fatal("complete authority must remain renderable")
+		}
+	}
+}
+
 func TestRepositoryDocsIndexCLIHonorsConfiguredServiceRuntime(t *testing.T) {
 	root, err := shortCLITestRoot(t, "cli-repo-docs-")
 	if err != nil {
@@ -2047,7 +2089,13 @@ func TestRepositoryDocsIndexCLIHonorsConfiguredServiceRuntime(t *testing.T) {
 	var runErr bytes.Buffer
 	go func() {
 		runCode <- executeWithFactoryAndDepsContext(ctx, []string{"service", "run"}, &runOut, &runErr, nil, localCommandDeps{Source: src})
+		close(runCode)
 	}()
+	t.Cleanup(func() {
+		cancel()
+		for range runCode {
+		}
+	})
 	manager := servicectl.Manager{Source: src, RuntimeDir: runtimeDir}
 	client, err := manager.Client()
 	if err != nil {
@@ -2060,7 +2108,7 @@ func TestRepositoryDocsIndexCLIHonorsConfiguredServiceRuntime(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("configured service runtime did not become ready: stdout=%q stderr=%q", runOut.String(), runErr.String())
+			t.Fatal("configured service runtime did not become ready")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -2073,6 +2121,15 @@ func TestRepositoryDocsIndexCLIHonorsConfiguredServiceRuntime(t *testing.T) {
 		CachePath: cachePath, ConfigSnapshot: effective.Config,
 	}, &resolvedConfig); err != nil {
 		t.Fatal(err)
+	}
+	for _, format := range []string{"json", "text"} {
+		var out, errOut bytes.Buffer
+		code := executeWithFactoryAndDeps([]string{"repo-docs", "register", "--repo", "fixture-alias", "--repository-path", root, "--format", format}, &out, &errOut, nil, localCommandDeps{Source: src})
+		if code == 0 || out.Len() != 0 || !strings.Contains(errOut.String(), "repository_docs_maintenance_registration_required") || strings.Contains(errOut.String(), root) || strings.Contains(errOut.String(), cachePath) {
+			cancel()
+			<-runCode
+			t.Fatal("registration without enrollment must fail safely in JSON and text, with no success payload")
+		}
 	}
 	var registration servicectl.MaintenanceEntry
 	if err := client.Call(context.Background(), "Maintenance.Enroll", servicectl.MaintenanceEnrollRequest{
