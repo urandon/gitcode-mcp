@@ -229,7 +229,7 @@ func (m Manager) Install(overwrite bool) (Status, error) {
 		return Status{}, err
 	}
 	content := installFileContent(paths.InstallKind, binary, paths)
-	if err := writeInstallDefinition(paths.InstallPath, []byte(content)); err != nil {
+	if err := writePrivateFile(paths.InstallPath, []byte(content)); err != nil {
 		return Status{}, err
 	}
 	return m.Status()
@@ -676,7 +676,10 @@ WantedBy=default.target
 	}
 }
 
-func writeInstallDefinition(path string, content []byte) error {
+// writePrivateFile publishes a complete private document by same-directory
+// replacement. Readers that already opened the prior document retain its bytes;
+// new readers never observe an intermediate truncate or partial write.
+func writePrivateFile(path string, content []byte) error {
 	temp, err := os.CreateTemp(filepath.Dir(path), ".gitcode-mcp-service-*")
 	if err != nil {
 		return err
@@ -880,10 +883,12 @@ func writeState(paths Paths, state State) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(paths.StatePath, append(data, '\n'), 0o600); err != nil {
+	if err := writePrivateFile(paths.StatePath, append(data, '\n')); err != nil {
 		return err
 	}
-	return os.WriteFile(paths.PIDPath, []byte(fmt.Sprintf("%d\n", state.PID)), 0o600)
+	// StatePath is authoritative; PIDPath is a compatibility projection. Each
+	// file is atomic, but the pair is not a cross-file transaction.
+	return writePrivateFile(paths.PIDPath, []byte(fmt.Sprintf("%d\n", state.PID)))
 }
 
 func (m Manager) runStartCommand(ctx context.Context, paths Paths) error {
