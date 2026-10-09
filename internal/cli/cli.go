@@ -4289,7 +4289,7 @@ func renderWriteText(w io.Writer, result service.WriteCommandResult) {
 func renderMilestonesText(w io.Writer, result service.MilestoneListResult) {
 	fmt.Fprintf(w, "milestones: repo_id=%s count=%d evidence=%s\n", result.RepoID, result.Count, result.Evidence)
 	for _, milestone := range result.Milestones {
-		fmt.Fprintf(w, "%s %s state=%s due_on=%s title=%s\n", milestone.ID, milestone.RemoteID, milestone.State, milestone.DueOn, milestone.Title)
+		fmt.Fprintf(w, "%s %s state=%s due_on=%s title=%s iid=%s browser_url=%s\n", milestone.ID, milestone.RemoteID, milestone.State, milestone.DueOn, milestone.Title, milestone.IID, milestone.BrowserURL)
 	}
 }
 

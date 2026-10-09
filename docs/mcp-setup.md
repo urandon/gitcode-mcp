@@ -284,6 +284,13 @@ states.
 
 ### Operational error contract
 
+Milestone list records expose `remote_id` (provider identity), optional `iid`
+(repository-local browser identity), and canonical `browser_url` using the
+provider-ID path plus verified `?iid=`. Stable `MILESTONE-<remote_id>` remains
+authoritative for API selectors; iid is not an API mutation ID. Create/update
+and settled same-key replays follow the same URL policy. Explicit listing
+refreshes old cached locator aliases; routine cached reads do not contact GitCode.
+
 Milestone writes reject oversized descriptions before HTTP with field-specific
 guidance: the maximum is 2000 UTF-16 code units, not bytes/runes. Creation is
 open-only (state may be omitted). `update_milestone` requires `title` and `due_on`

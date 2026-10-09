@@ -179,6 +179,7 @@ func sanitizedMetadata(metadata map[string]string) map[string]string {
 		"wiki_body_hash":                 true,
 		"wiki_revision":                  true,
 		"milestone_revision":             true,
+		"milestone_browser_url":          true,
 	}
 	out := map[string]string{}
 	for key, value := range metadata {

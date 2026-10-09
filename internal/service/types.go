@@ -1025,6 +1025,7 @@ type WritePushMirrorReceipt struct {
 type MilestoneRecord struct {
 	ID          string    `json:"id"`
 	RemoteID    string    `json:"remote_id"`
+	IID         string    `json:"iid,omitempty"`
 	Title       string    `json:"title"`
 	Description string    `json:"description,omitempty"`
 	State       string    `json:"state"`
