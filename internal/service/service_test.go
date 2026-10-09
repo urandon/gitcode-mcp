@@ -4308,14 +4308,19 @@ func TestScenario006LiveGraphInvalidRejectedBeforeCommit(t *testing.T) {
 		name     string
 		issue    gitcode.Issue
 		comments []gitcode.Comment
+		fixture  bool
 	}{
 		{name: "missing-comment-id", issue: gitcode.Issue{ID: "MOCK-ISSUE-100", Number: 100, Title: "Mock Issue", Body: "body", State: "open", CreatedAt: base, UpdatedAt: base}, comments: []gitcode.Comment{{IssueID: "MOCK-ISSUE-100", Body: "comment", CreatedAt: base, UpdatedAt: base}}},
 		{name: "unreconciled-parent", issue: gitcode.Issue{ID: "MOCK-ISSUE-100", Number: 100, Title: "Mock Issue", Body: "body", State: "open", CreatedAt: base, UpdatedAt: base}, comments: []gitcode.Comment{{ID: "MOCK-COMMENT-1", IssueID: "OTHER-ISSUE", Body: "comment", CreatedAt: base, UpdatedAt: base}}},
-		{name: "fixture-marker", issue: gitcode.Issue{ID: "42", Number: 42, Title: "Fixture Issue", Body: "body", State: "open", CreatedAt: base, UpdatedAt: base}, comments: []gitcode.Comment{{ID: "MOCK-COMMENT-1", IssueID: "42", Body: "comment", CreatedAt: base, UpdatedAt: base}}},
+		{name: "fixture-provider", fixture: true, issue: gitcode.Issue{ID: "42", Number: 42, Title: "Fixture Issue", Body: "body", State: "open", CreatedAt: base, UpdatedAt: base}, comments: []gitcode.Comment{{ID: "MOCK-COMMENT-1", IssueID: "42", Body: "comment", CreatedAt: base, UpdatedAt: base}}},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			svc := NewWithClient(store, &fakeGitCodeClient{issue: tt.issue, comments: tt.comments})
+			client := gitcode.Client(&fakeGitCodeClient{issue: tt.issue, comments: tt.comments})
+			if tt.fixture {
+				client = explicitFixtureGraphClient{client}
+			}
+			svc := NewWithClient(store, client)
 			svc.providerMode = gitcode.ProviderModeLive
 			svc.lockPath = filepath.Join(t.TempDir(), "sync.lock")
 			_, err := svc.SyncToCache(ctx, SyncRequest{RepoID: "live-invalid", RemoteAlias: fmt.Sprintf("issue:%d", tt.issue.Number), IdempotencyKey: "sc-006-" + tt.name})
