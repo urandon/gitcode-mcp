@@ -191,6 +191,35 @@ Sanitized live discovery on `2026-07-13` confirmed that issue read states and wr
 
 The CLI, MCP, service, and adapter request contract therefore remains `open|closed`. The HTTP adapter translates those values to `reopen|close` only at the wire boundary and requires a separate issue readback with the requested canonical state before confirming the write.
 
+## Milestone Write Fields (2026-10-09)
+
+Bounded PAT-authenticated v5 probes on the public testing polygon isolated the
+constraints behind opaque HTTP 400 responses. Description length is at most
+2000 UTF-16 code units: 2000 ASCII/BMP characters and 1000 supplementary emoji
+were accepted; 2001 ASCII characters and 1001 supplementary emoji were rejected.
+This is not a UTF-8 byte or rune-count limit. Validation preserves content and
+never truncates a description.
+
+Both title and due_on are required for PATCH as well as POST. Independently
+omitting either update field was rejected; supplying both accepted short and
+boundary-length descriptions and state=closed. Public update contracts now
+require these fields. To preserve them, explicitly supply current values from
+the live milestone list rather than relying on a hidden read-modify-write.
+
+The [official create contract](https://docs.gitcode.com/docs/apis/post-api-v-5-repos-owner-repo-milestones/)
+lists title, description and due_on, not state. A short state=open create was
+accepted; state=closed was silently ignored and read back open. Creation therefore
+accepts omitted/open state only and omits state on the wire. Closing is a separate
+explicit update, never an automatic second mutation.
+
+Create/update use one transport attempt and verify requested fields through a
+canonical item GET. The shared service claims the key before mutation and
+atomically settles cache plus audit only after confirmation. Same-key recovery
+with a known provider identity is GET-only. An ambiguous create without an
+identity remains fenced for manual list reconciliation; title matching alone
+does not prove identity or authorize another POST. No description/message bytes
+are duplicated into audit metadata and raw error bodies are not projected.
+
 ## Issue List Milestone Identity And Response Diagnostics
 
 Sanitized live inspection on `2026-08-17` confirmed that the issue collection endpoint can return a nested milestone with its positive identity in `number` and no `id` field. The milestone collection used the same `number` identity shape. The adapter accepts `id` for backward compatibility and falls back to `number` only when `id` is absent; all existing positive-integer and title/date validation still applies.

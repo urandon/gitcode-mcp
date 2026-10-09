@@ -284,6 +284,15 @@ states.
 
 ### Operational error contract
 
+Milestone writes reject oversized descriptions before HTTP with field-specific
+guidance: the maximum is 2000 UTF-16 code units, not bytes/runes. Creation is
+open-only (state may be omitted). `update_milestone` requires `title` and `due_on`
+for every update; obtain unchanged values explicitly from `list_milestones`
+when preserving them. Omitted/empty description preserves it. Both commands use
+canonical requested-field readback and durable claims; same-key reconciliation
+of a known identity is GET-only. An ambiguous create without a confirmed
+identity stays fenced for manual list reconciliation rather than blind retry.
+
 Domain and local-operational failures use JSON-RPC code `-32000`, with a
 stable category in the top-level message and a machine-readable `error.data`
 object. Agents should branch on `error.data.code` or `failure_class`, not parse

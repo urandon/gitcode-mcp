@@ -4060,11 +4060,8 @@ func pushMirrorWaitResult(repoID string, mirror PushMirrorRecord, after, now tim
 }
 
 func (s *Service) CreateMilestone(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
-	if strings.TrimSpace(req.Title) == "" {
-		return WriteCommandResult{}, ErrInvalidQuery{Field: "milestone.title", Message: "title is required"}
-	}
-	if strings.TrimSpace(req.DueOn) == "" {
-		return WriteCommandResult{}, ErrInvalidQuery{Field: "milestone.due_on", Message: "due_on is required"}
+	if err := validateMilestoneCommandFields(req, true); err != nil {
+		return WriteCommandResult{}, err
 	}
 	return s.executeWrite(ctx, "create-milestone", req, RepositoryScopeIssues)
 }
@@ -4073,7 +4070,19 @@ func (s *Service) UpdateMilestone(ctx context.Context, req WriteCommandRequest) 
 	if strings.TrimSpace(firstNonEmptyString(req.Milestone, req.ID)) == "" {
 		return WriteCommandResult{}, ErrInvalidQuery{Field: "milestone", Message: "milestone id or title is required"}
 	}
+	if err := validateMilestoneCommandFields(req, false); err != nil {
+		return WriteCommandResult{}, err
+	}
 	return s.executeWrite(ctx, "update-milestone", req, RepositoryScopeIssues)
+}
+
+func validateMilestoneCommandFields(req WriteCommandRequest, create bool) error {
+	err := gitcode.ValidateMilestoneWriteFields(gitcode.MilestoneWriteRequest{Title: req.Title, Description: req.Description, DueOn: req.DueOn, State: req.State}, create)
+	var validation gitcode.ErrValidationFailed
+	if errors.As(err, &validation) {
+		return ErrInvalidQuery{Field: validation.Field, Message: validation.Message}
+	}
+	return err
 }
 
 func (s *Service) SetIssueMilestone(ctx context.Context, req WriteCommandRequest) (WriteCommandResult, error) {
@@ -5467,6 +5476,9 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	}
 	if command == "create-page" || command == "update-page" {
 		return s.executeWikiContentWrite(ctx, command, route, req, base)
+	}
+	if command == "create-milestone" || command == "update-milestone" {
+		return s.executeMilestoneWrite(ctx, command, route, req, base)
 	}
 	lookup, err := audit.LookupIdempotency(ctx, s.store, route.RepoID, key, fingerprint)
 	if err != nil {
