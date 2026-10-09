@@ -44,6 +44,16 @@ alias, a parent reference, or text is not evidence of fixture origin. Provider
 identities remain mandatory and comments must reconcile to their fetched
 parent before publication. Explicit offline fixture sync remains unchanged.
 
+Audited issue and pull-request graphs distinguish the normalized record's
+storage role (`remote`) from the source/search origin (`live` or `fixture`).
+A provider-confirmed live write publishes live primary sources and related
+records atomically; fixture-mode graphs remain fixture. An empty graph origin
+keeps the legacy projection behavior. This does not require a schema migration.
+Creation receipts remain `remote_confirmed_cache_refresh_pending` until cache
+publication and its confirmation succeed. A cache failure is not terminal
+write success; same-key recovery reads the canonical primary by the receipt's
+repository-local number, repairs the cache, and never repeats creation.
+
 ## Concurrent Cache Access
 
 The cache is optimized for agent-side fan-out reads. Routine read operations such as `list`, `get`, `search`, status, export, diff, and MCP read tools must not require the process-wide writer lock when the SQLite schema is already current.

@@ -58,6 +58,19 @@ can recover an ambiguous completed write through GET-only canonical readback.
 It still cannot eliminate the provider's residual GET-to-PATCH race; only a
 future GitCode conditional-write primitive could provide that guarantee.
 
+## Pull Request Creation Acknowledgement And Readback
+
+Public dogfood reports observed a successful v5 PR creation POST that returned
+the PR identity but omitted its description and used `opened` for state. The
+exact `GET /api/v5/repos/{owner}/{repo}/pulls/{number}` returned the canonical
+description and `open` state. Treat the POST as an identity acknowledgement,
+not the cache representation. A single-attempt POST is followed by bounded
+canonical GET; success requires matching provider id, repository-local number,
+requested title/body/head/base, and open state. Failed or mismatched readback is
+typed `write_confirmation_incomplete` and never permits another blind POST.
+Offline HTTP regressions cover sparse acknowledgement, every field mismatch,
+readback rejection, malformed acknowledgement, 5xx, and body-preserving redirect.
+
 ## Pull Request Update Acknowledgement And Readback
 
 GitCode pull request metadata updates use:

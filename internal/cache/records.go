@@ -22,20 +22,20 @@ func (s *SQLiteStore) UpsertRecordGraph(ctx context.Context, graph RecordGraph) 
 }
 
 func (s *SQLiteStore) upsertRecordGraphTx(ctx context.Context, tx *sql.Tx, graph RecordGraph) (err error) {
-	if err = upsertSourceTx(ctx, tx, sourceFromRecord(graph.Record)); err != nil {
+	if err = upsertSourceTx(ctx, tx, sourceFromRecordOrigin(graph.Record, graph.SourceProvenance)); err != nil {
 		return err
 	}
-	if err = upsertSearchProjectionTx(ctx, tx, sourceFromRecord(graph.Record), s.useFTS); err != nil {
+	if err = upsertSearchProjectionTx(ctx, tx, sourceFromRecordOrigin(graph.Record, graph.SourceProvenance), s.useFTS); err != nil {
 		return err
 	}
 	if err = upsertRecordTx(ctx, tx, graph.Record); err != nil {
 		return err
 	}
 	for _, record := range graph.RelatedRecords {
-		if err = upsertSourceTx(ctx, tx, sourceFromRecord(record)); err != nil {
+		if err = upsertSourceTx(ctx, tx, sourceFromRecordOrigin(record, graph.SourceProvenance)); err != nil {
 			return err
 		}
-		if err = upsertSearchProjectionTx(ctx, tx, sourceFromRecord(record), s.useFTS); err != nil {
+		if err = upsertSearchProjectionTx(ctx, tx, sourceFromRecordOrigin(record, graph.SourceProvenance), s.useFTS); err != nil {
 			return err
 		}
 		if err = upsertRecordTx(ctx, tx, record); err != nil {
@@ -365,6 +365,13 @@ func requireRepoTx(ctx context.Context, tx *sql.Tx, repoID string) error {
 		return err
 	}
 	return nil
+}
+
+func sourceFromRecordOrigin(record Record, origin Provenance) Source {
+	if origin != "" {
+		record.Provenance = origin
+	}
+	return sourceFromRecord(record)
 }
 
 func sourceFromRecord(record Record) Source {

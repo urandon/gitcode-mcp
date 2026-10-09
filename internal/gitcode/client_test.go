@@ -1840,7 +1840,13 @@ func TestPRReviewReplyReadbackFailureCarriesRemoteID(t *testing.T) {
 func TestScenario016PRLifecycleWrites(t *testing.T) {
 	t.Run("create-pr", func(t *testing.T) {
 		var seenBody string
+		gets := 0
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet && r.URL.Path == getPREndpoint("example-owner", "example-repo", 7) {
+				gets++
+				fmt.Fprint(w, `{"id":9001,"number":7,"title":"new pr","body":"body","state":"open","base":{"ref":"main"},"head":{"ref":"topic"}}`)
+				return
+			}
 			if r.Method != http.MethodPost || r.URL.Path != listPREndpoint("example-owner", "example-repo") {
 				t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 			}
@@ -1863,7 +1869,7 @@ func TestScenario016PRLifecycleWrites(t *testing.T) {
 				t.Fatalf("request body %s missing %s", seenBody, want)
 			}
 		}
-		if !result.Confirmed || result.Operation != "CreatePR" || result.RemoteID != "9001" || result.RemoteNumber != 7 || result.Record.Number != 7 || result.Record.Base != "main" || result.Record.Head != "topic" {
+		if !result.Confirmed || result.Operation != "CreatePR" || result.RemoteID != "9001" || result.RemoteNumber != 7 || result.Record.Number != 7 || result.Record.Base != "main" || result.Record.Head != "topic" || gets != 1 {
 			t.Fatalf("unexpected PR create result: %+v", result)
 		}
 	})

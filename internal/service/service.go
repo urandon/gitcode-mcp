@@ -5688,11 +5688,15 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 			return nil
 		}
 	}
-	if command == "create-issue" || command == "add-comment" || command == "add-pr-comment" || command == "add-pr-review-comment" {
+	if command == "create-issue" || command == "create-pr" || command == "add-comment" || command == "add-pr-comment" || command == "add-pr-review-comment" {
 		remoteType := "issue"
 		recordID := fallbackSourceID("issue", fingerprint)
 		message := "remote issue creation pending confirmation"
 		switch command {
+		case "create-pr":
+			remoteType = "pull_request"
+			recordID = fallbackSourceID("pull_request", fingerprint)
+			message = "remote pull request creation pending confirmation"
 		case "add-comment":
 			remoteType = "issue_comment"
 			recordID = fallbackSourceID("issue_comment", fingerprint)
@@ -5734,7 +5738,7 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 			if !claimed {
 				return WriteCommandResult{}, ErrWriteFailure{Code: "write_idempotency_in_progress", RepoID: route.RepoID, IdempotencyKey: key}
 			}
-		} else if command == "add-comment" || command == "add-pr-comment" {
+		} else if command == "create-pr" || command == "add-comment" || command == "add-pr-comment" {
 			return WriteCommandResult{}, ErrWriteFailure{Code: "write_audit_start_failed", RepoID: route.RepoID, IdempotencyKey: key, Cause: errors.New("atomic audit claim support is unavailable")}
 		} else if err := s.store.RecordAuditEvent(ctx, entry); err != nil {
 			return WriteCommandResult{}, ErrWriteFailure{Code: "write_audit_start_failed", RepoID: route.RepoID, IdempotencyKey: key, Cause: err}
@@ -5769,6 +5773,14 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	if err != nil {
 		code := s.writeAdapterErrorCode(req.Mode, err)
 		remoteID := remoteWriteID(err)
+		if command == "create-pr" && remoteID == "" {
+			phase, attempted := writeMutationPhase(err)
+			if attempted && !safeMergePRMutationFailure(phase, err) {
+				// An identity-less POST outcome cannot be reconciled safely.
+				// Keep the pre-POST claim instead of enabling a blind creation.
+				return WriteCommandResult{}, ErrWriteFailure{Code: "write_ambiguous_remote", RepoID: route.RepoID, IdempotencyKey: key, Cause: err}
+			}
+		}
 		if isTopLevelCommentCommand(command) && remoteID == "" && !safeTopLevelCommentFailure(err) {
 			metadata := cloneStringMap(topLevelCommentClaimMetadata)
 			metadata["write_phase"] = "post_ambiguous"
@@ -5956,6 +5968,9 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 		auditEntry = audit.WithRequestMetadata(auditEntry, metadata)
 	}
 	initialAuditEntry := auditEntry
+	if command == "create-issue" || command == "create-pr" {
+		initialAuditEntry = audit.WithRequestMetadata(audit.RemoteConfirmedCacheRefreshPending(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, "remote creation confirmed; cache refresh pending", confirmed.completedAt), auditEntry.RequestMetadata)
+	}
 	if command == "update-pr" {
 		initialAuditEntry = audit.WithRequestMetadata(audit.RemoteConfirmedCacheRefreshPending(route.RepoID, key, command, graph.Record.ID, graph.Record.RemoteType, confirmed.remoteID, fingerprint, "remote pull request update confirmed; cache refresh pending", confirmed.completedAt), auditEntry.RequestMetadata)
 	}
@@ -6080,6 +6095,11 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 			return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
 		}
 	}
+	if command == "create-issue" || command == "create-pr" {
+		if err := s.store.RecordAuditEvent(ctx, auditEntry); err != nil {
+			return WriteCommandResult{}, ErrWriteFailure{Code: "write_partial_remote_confirmed_audit_failed", RepoID: route.RepoID, RemoteID: confirmed.remoteID, IdempotencyKey: key, Cause: err}
+		}
+	}
 	base.Status = "succeeded"
 	base.ID = graph.Record.ID
 	applyWriteIssueIdentity(&base, command, req, graph.Record.ID, confirmed.remoteNumber)
@@ -6163,7 +6183,7 @@ func writeAuditMetadata(command, key, fingerprint, remoteType string, confirmed 
 }
 
 func withWriteAuditMetadata(entry cache.AuditTrailEntry, command, key, fingerprint, remoteType string, confirmed writeConfirmation) cache.AuditTrailEntry {
-	if command != "create-issue" && command != "merge-pr" && command != "add-comment" && command != "add-pr-comment" && command != "reply-pr-review-comment" && confirmed.milestone == nil && confirmed.pushMirror == nil {
+	if command != "create-issue" && command != "create-pr" && command != "merge-pr" && command != "add-comment" && command != "add-pr-comment" && command != "reply-pr-review-comment" && confirmed.milestone == nil && confirmed.pushMirror == nil {
 		return entry
 	}
 	return audit.WithRequestMetadata(entry, writeAuditMetadata(command, key, fingerprint, remoteType, confirmed))
@@ -6680,12 +6700,18 @@ func (s *Service) issueSourceForNumber(ctx context.Context, repoID string, numbe
 func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID string, req WriteCommandRequest, prior cache.AuditTrailEntry) (cache.RecordGraph, error) {
 	now := s.now().UTC()
 	switch command {
-	case "update-issue":
+	case "create-issue", "update-issue":
 		route, err := s.BuildAdapterRoute(ctx, repoID, RepositoryScopeIssues)
 		if err != nil {
 			return cache.RecordGraph{}, err
 		}
 		number := req.Number
+		if command == "create-issue" {
+			number, _ = strconv.Atoi(prior.RequestMetadata["remote_number"])
+			if number <= 0 {
+				return cache.RecordGraph{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: repoID, RemoteID: prior.RemoteID, IdempotencyKey: prior.IdempotencyKey, Cause: errors.New("creation receipt has no confirmed repository-local issue number")}
+			}
+		}
 		if number == 0 {
 			number, _ = strconv.Atoi(prior.RemoteID)
 		}
@@ -6693,11 +6719,14 @@ func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID s
 		if err != nil {
 			return cache.RecordGraph{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: repoID, RemoteID: prior.RemoteID, IdempotencyKey: prior.IdempotencyKey, Cause: err}
 		}
+		if command == "create-issue" && (issue.Number != number || strings.TrimSpace(issue.ID) == "") {
+			return cache.RecordGraph{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: repoID, RemoteID: prior.RemoteID, IdempotencyKey: prior.IdempotencyKey, Cause: errors.New("created issue readback identity mismatch")}
+		}
 		remoteID := firstNonEmptyString(issue.ID, prior.RemoteID, strconv.Itoa(issue.Number))
 		result := gitcode.WriteResult[gitcode.Issue]{Record: issue, Confirmed: true, Operation: "UpdateIssuePartialReplayReadback", RemoteID: remoteID, RemoteNumber: issue.Number, ConfirmedAt: now}
 		_, graph := s.issueWriteGraph(repoID, issue, result, now)
 		return graph, nil
-	case "create-issue", "add-label", "set-issue-milestone", "clear-issue-milestone":
+	case "add-label", "set-issue-milestone", "clear-issue-milestone":
 		number, _ := strconv.Atoi(prior.RemoteID)
 		issue := gitcode.Issue{ID: prior.RemoteID, Number: number, Title: strings.TrimSpace(req.Title), Body: req.Body, State: firstNonEmptyString(req.State, "open"), CreatedAt: now, UpdatedAt: now}
 		if receipt := milestoneReceiptFromAudit(prior); receipt != nil && !receipt.Cleared {
@@ -6720,18 +6749,27 @@ func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID s
 		result := gitcode.WriteResult[gitcode.Milestone]{Record: milestone, Confirmed: true, RemoteID: prior.RemoteID, RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
 		_, graph := s.milestoneWriteGraph(repoID, milestone, result, now)
 		return graph, nil
-	case "update-pr":
+	case "create-pr", "update-pr":
 		route, err := s.BuildAdapterRoute(ctx, repoID, RepositoryScopeIssues)
 		if err != nil {
 			return cache.RecordGraph{}, err
 		}
 		number := req.Number
+		if command == "create-pr" {
+			number, _ = strconv.Atoi(prior.RequestMetadata["remote_number"])
+			if number <= 0 {
+				return cache.RecordGraph{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: repoID, RemoteID: prior.RemoteID, IdempotencyKey: prior.IdempotencyKey, Cause: errors.New("creation receipt has no confirmed repository-local pull request number")}
+			}
+		}
 		if number == 0 {
 			number, _ = strconv.Atoi(prior.RemoteID)
 		}
 		pr, err := s.client.GetPR(ctx, gitcode.PRRequest{Owner: route.Owner, Repo: route.Name, Number: number})
 		if err != nil {
 			return cache.RecordGraph{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: repoID, RemoteID: prior.RemoteID, IdempotencyKey: prior.IdempotencyKey, Cause: err}
+		}
+		if command == "create-pr" && (pr.Number != number || strings.TrimSpace(pr.ID) == "") {
+			return cache.RecordGraph{}, ErrWriteFailure{Code: "write_partial_cache_refresh_failed", RepoID: repoID, RemoteID: prior.RemoteID, IdempotencyKey: prior.IdempotencyKey, Cause: errors.New("created pull request readback identity mismatch")}
 		}
 		result := gitcode.WriteResult[gitcode.PullRequest]{Record: pr, Confirmed: true, Operation: "UpdatePRPartialReplayReadback", RemoteID: pr.ID, RemoteNumber: pr.Number, ConfirmedAt: now}
 		_, graph, err := s.pullRequestWriteGraph(ctx, repoID, pr, result, now)
@@ -6761,7 +6799,7 @@ func (s *Service) replayWriteGraph(ctx context.Context, command string, repoID s
 		result := gitcode.WriteResult[gitcode.Comment]{Record: comment, Confirmed: true, RemoteID: commentID, ParentIssueNumber: number, RemoteRevision: firstNonEmptyString(prior.Message, prior.PayloadHash), ConfirmedAt: now}
 		_, graph, err := s.commentWriteGraph(ctx, repoID, number, req.IssueID, comment, result, now)
 		return graph, err
-	case "create-pr", "merge-pr", "link-pr-issue":
+	case "merge-pr", "link-pr-issue":
 		number := req.Number
 		if number == 0 {
 			number, _ = strconv.Atoi(prior.RemoteID)
@@ -7182,7 +7220,7 @@ func (s *Service) issueWriteGraph(repoID string, issue gitcode.Issue, result git
 	}
 	revision := firstNonEmptyString(result.RemoteRevision, result.ResponseHash, hash)
 	record := cache.Record{RepoID: repoID, ID: stableID, Type: "issue", Path: "issues/" + remoteAlias + ".md", Title: issue.Title, Body: issue.Body, Status: status, Labels: issue.Labels, ContentHash: hash, Provenance: cache.ProvenanceRemote, RemoteType: "issue", RemoteID: remoteAlias, RemoteRevision: revision, CreatedAt: created, UpdatedAt: updated}
-	graph := cache.RecordGraph{Record: record, Identities: []cache.Identity{{RepoID: repoID, SourceID: stableID, AliasType: "issue", Alias: remoteAlias, Remote: cache.RemoteAlias{Type: "issue", ID: remoteAlias}}}, ReplaceLinkKinds: []string{"milestone"}, RemoteRevisions: []cache.RemoteRevision{{RepoID: repoID, RecordID: stableID, RemoteType: "issue", RemoteID: remoteAlias, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}}
+	graph := cache.RecordGraph{Record: record, SourceProvenance: s.syncOriginProvenance(), Identities: []cache.Identity{{RepoID: repoID, SourceID: stableID, AliasType: "issue", Alias: remoteAlias, Remote: cache.RemoteAlias{Type: "issue", ID: remoteAlias}}}, ReplaceLinkKinds: []string{"milestone"}, RemoteRevisions: []cache.RemoteRevision{{RepoID: repoID, RecordID: stableID, RemoteType: "issue", RemoteID: remoteAlias, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}}
 	if remoteID != remoteAlias {
 		graph.Identities = append(graph.Identities, cache.Identity{RepoID: repoID, SourceID: stableID, AliasType: "gitcode_issue_id", Alias: remoteID, Remote: cache.RemoteAlias{Type: "gitcode_issue_id", ID: remoteID}})
 	}
@@ -7447,6 +7485,7 @@ func (s *Service) pullRequestWriteGraph(ctx context.Context, repoID string, pr g
 		return writeConfirmation{}, cache.RecordGraph{}, err
 	}
 	graph := recordGraphFromSourceGraph(sourceGraph)
+	graph.SourceProvenance = s.syncOriginProvenance()
 	revision := firstNonEmptyString(result.RemoteRevision, sourceGraph.SyncStatus.RemoteRevision, result.ResponseHash)
 	if len(graph.RemoteRevisions) > 0 {
 		graph.RemoteRevisions[0].RemoteRevision = revision
@@ -7706,6 +7745,8 @@ func applyWriteIssueIdentity(result *WriteCommandResult, command string, req Wri
 		return
 	}
 	switch command {
+	case "create-pr":
+		result.RemoteNumber = remoteNumber
 	case "create-issue", "update-issue", "add-label", "set-issue-milestone", "clear-issue-milestone":
 		result.StableSourceID = firstNonEmptyString(req.IssueID, recordID)
 		result.IssueNumber = firstNonZeroInt(req.Number, remoteNumber)
