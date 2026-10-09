@@ -1015,7 +1015,7 @@ func (m *Milestone) UnmarshalJSON(data []byte) error {
 	}
 	m.SourceID = "MILESTONE-" + m.RemoteID
 	m.Title = raw.Title
-	if strings.TrimSpace(raw.Description) != "" {
+	if raw.Description != "" {
 		m.Body = raw.Description
 	} else {
 		m.Body = raw.Body

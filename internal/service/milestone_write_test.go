@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -146,6 +147,35 @@ func TestMilestoneUnknownCreateIdentityRemainsFenced(t *testing.T) {
 	}
 	if client.writes != 1 || client.reads != 0 {
 		t.Fatal("unknown create retried or guessed identity")
+	}
+}
+
+func TestMilestoneWhitespaceDescriptionRecovery(t *testing.T) {
+	for _, command := range []string{"create-milestone", "update-milestone"} {
+		t.Run(command, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := cache.NewInMemorySQLiteStore(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			seedStore(t, ctx, store)
+			t.Setenv("GITCODE_TOKEN", "test-token")
+			var m gitcode.Milestone
+			if err := json.Unmarshal([]byte(`{"id":7,"title":"Fixture","description":" \n\t ","body":"wrong fallback","due_on":"2026-12-31","state":"open"}`), &m); err != nil {
+				t.Fatal(err)
+			}
+			client := &milestoneConfirmationClient{fakeGitCodeClient: &fakeGitCodeClient{}, m: m, err: gitcode.ErrMilestoneWrite{RemoteID: "7", Cause: gitcode.ErrWriteMutationPhase{Phase: "readback", MutationAttempted: true, Cause: errors.New("timeout")}}}
+			req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Milestone: "7", Title: "Fixture", Description: " \n\t ", DueOn: "2026-12-31", IdempotencyKey: "whitespace-recovery"}
+			if _, err := milestoneCall(NewWithClient(store, client), ctx, command, req); err == nil {
+				t.Fatal("initial ambiguous write unexpectedly succeeded")
+			}
+			readsBeforeRecovery := client.reads
+			result, err := milestoneCall(NewWithClient(store, client), ctx, command, req)
+			if err != nil || result.Status != "recovered_after_ambiguous_write" || client.writes != 1 || client.reads-readsBeforeRecovery != 1 {
+				t.Fatalf("whitespace GET-only recovery failed: status=%s writes=%d reads=%d err=%v", result.Status, client.writes, client.reads, err)
+			}
+		})
 	}
 }
 

@@ -139,3 +139,40 @@ func TestMilestoneCanonicalConfirmationAndSingleAttempt(t *testing.T) {
 		}
 	}
 }
+
+func TestMilestoneWhitespaceDescriptionCanonicalConfirmation(t *testing.T) {
+	for _, create := range []bool{true, false} {
+		t.Run(fmt.Sprintf("create=%t", create), func(t *testing.T) {
+			const description = " \n\t "
+			mutations, reads := 0, 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					reads++
+				} else {
+					mutations++
+					var body map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+					}
+					if body["description"] != description {
+						t.Error("whitespace description changed on wire")
+					}
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"id": 7, "title": "Fixture", "description": description, "body": "wrong fallback", "due_on": "2026-12-31", "state": "open"})
+			}))
+			defer server.Close()
+			client := newTestClient(t, server.URL, Config{})
+			req := MilestoneWriteRequest{Owner: "example-owner", Repo: "example-repo", ID: 7, Title: "Fixture", Description: description, DueOn: "2026-12-31"}
+			var result WriteResult[Milestone]
+			var err error
+			if create {
+				result, err = client.CreateMilestone(context.Background(), req, WriteOptions{IdempotencyKey: "whitespace"})
+			} else {
+				result, err = client.UpdateMilestone(context.Background(), req, WriteOptions{IdempotencyKey: "whitespace"})
+			}
+			if err != nil || !result.Confirmed || result.Record.Body != description || mutations != 1 || reads != 1 {
+				t.Fatalf("whitespace confirmation failed: confirmed=%t mutations=%d reads=%d err=%v", result.Confirmed, mutations, reads, err)
+			}
+		})
+	}
+}
