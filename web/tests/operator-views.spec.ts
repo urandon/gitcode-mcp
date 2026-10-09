@@ -1204,6 +1204,27 @@ test('existing maintenance comment collections round-trip into a valid plan requ
   await expect(page.getByText('maintenance-plan-all-collections')).toBeVisible();
 });
 
+test('live provider executable mismatch gives configuration guidance, not installation', async ({ page }) => {
+  await mockAdmin(page);
+  const blocker = 'embedding provider endpoint is running, but its configured executable is unavailable to the service';
+  const handoff = 'configure rag.providers.<provider>.executable with an absolute executable path visible to the service, then repair/restart the service';
+  await page.route('**/api/admin/v1/maintenance/plan', async (route) => {
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: {
+      schema_version: 'gitcode-mcp.maintenance-plan.v1', plan_id: 'maintenance-plan-executable-mismatch', status: 'blocked', repo_id: 'example/repo',
+      provider: { installed: false, running: true, model_available: true, embedding_smoke_status: 'skipped' },
+      actions: [{ id: 'configure-provider-executable', class: 'inspect', status: 'blocked', summary: 'configure the provider executable for the service environment', handoff }],
+      blockers: [blocker], next_action: blocker
+    } }) });
+  });
+  await page.goto('/?view=Maintenance');
+  await page.getByRole('button', { name: 'Render plan', exact: true }).click();
+  await expect(page.getByText('maintenance-plan-executable-mismatch')).toBeVisible();
+  await expect(page.getByText('configure the provider executable for the service environment', { exact: true })).toBeVisible();
+  await expect(page.getByText(handoff, { exact: true })).toBeVisible();
+  await expect(page.getByText('embedding provider is not installed', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Confirm & apply', exact: true })).toBeDisabled();
+});
+
 test('maintenance plan/apply renders every effect and safely retries one confirmed intent', async ({ page }) => {
   await mockAdmin(page);
   let plannedBody: Record<string, unknown> = {};

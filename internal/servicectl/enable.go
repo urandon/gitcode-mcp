@@ -377,6 +377,11 @@ func (s MaintenanceSetup) providerPlan(ctx context.Context, req MaintenanceSetup
 	result := MaintenanceProviderPlan{Profile: setup.Profile, Provider: setup.Provider, ProviderType: setup.ProviderType, Model: setup.Model, ModelRevision: modelRevision, ConfigurationHash: configurationHash, DataBoundary: boundary, Installed: setup.ProviderInstalled, Running: setup.ProviderLive, ModelAvailable: setup.ModelAvailable, EmbeddingSmokeStatus: setup.EmbeddingSmoke}
 	actions := []MaintenancePlanAction{}
 	blockers := []string{}
+	if setup.Status == "provider_executable_unavailable" {
+		actions = append(actions, MaintenancePlanAction{ID: "configure-provider-executable", Class: "inspect", Status: "blocked", Summary: "configure the provider executable for the service environment", Handoff: firstString(setup.Actions)})
+		blockers = append(blockers, maintenanceProviderFailureMessage(setup.Status))
+		return result, actions, blockers, nil
+	}
 	if !setup.ProviderInstalled {
 		actions = append(actions, MaintenancePlanAction{ID: "install-provider", Class: "local_service_change", Status: "blocked", Summary: "install the configured embedding provider", ConfirmationRequired: true, DataBoundary: boundary, Handoff: firstString(setup.InstallInstructions)})
 		blockers = append(blockers, "embedding provider is not installed")
@@ -671,6 +676,8 @@ func firstString(values []string) string {
 
 func maintenanceProviderFailureMessage(status string) string {
 	switch status {
+	case "provider_executable_unavailable":
+		return "embedding provider endpoint is running, but its configured executable is unavailable to the service"
 	case "missing_provider":
 		return "embedding provider is not installed"
 	case "provider_not_running":

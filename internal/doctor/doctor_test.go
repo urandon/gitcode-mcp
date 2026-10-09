@@ -3,6 +3,7 @@ package doctor
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,8 +11,44 @@ import (
 
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/rag"
 	"gitcode-mcp/internal/service"
 )
+
+type providerReadinessRuntime struct {
+	rag.OSRuntime
+	resolved bool
+}
+
+func (r providerReadinessRuntime) LookPath(string) (string, error) {
+	if r.resolved {
+		return "/example/provider/ollama", nil
+	}
+	return "", exec.ErrNotFound
+}
+func (providerReadinessRuntime) IsLive(context.Context, string, time.Duration) (bool, string) {
+	return true, ""
+}
+func (providerReadinessRuntime) ListModels(context.Context, string, time.Duration) ([]string, error) {
+	return []string{config.Default().RAG.Profiles[config.DefaultRAGProfile].Model}, nil
+}
+
+func TestDoctorProviderReadinessDistinguishesLiveEndpointFromExecutable(t *testing.T) {
+	for _, resolved := range []bool{false, true} {
+		var report Report
+		applyRAG(context.Background(), &report, config.Default(), providerReadinessRuntime{resolved: resolved})
+		want := "provider_executable_unavailable"
+		if resolved {
+			want = "ready"
+		}
+		if report.RAG.Status != want || report.RAG.ProviderInstalled != resolved || !report.RAG.ProviderLive || !report.RAG.ModelAvailable {
+			t.Fatal("doctor does not agree with shared setup endpoint/executable readiness")
+		}
+		if !resolved && len(report.RAG.InstallInstructions) != 0 {
+			t.Fatal("live endpoint must not receive install guidance")
+		}
+	}
+}
 
 type fakeSource struct {
 	env      map[string]string
