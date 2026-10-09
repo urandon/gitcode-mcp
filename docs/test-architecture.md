@@ -81,6 +81,13 @@ fixture, check that it is:
 - free of raw tokens, cookies, private repository names, internal URLs, and
   machine-local paths.
 
+In-process daemon fixtures must distinguish listener readiness from startup
+filesystem work. The empty CLI maintenance fixture waits for its complete initial
+job snapshot before exposing the client, and registers an idempotent cancel/join
+cleanup before readiness assertions. Fast rejection tests must not race startup
+persistence against `t.TempDir()` removal. This is a test-harness barrier, not a
+new production readiness condition.
+
 Captured research, migration notes, dogfood reports, and generated design
 packages belong in wiki pages or issue/PR comments when they are still useful.
 

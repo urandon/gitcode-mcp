@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -1734,19 +1735,38 @@ func runningMaintenanceCLIFixture(t *testing.T) (*repoInitLocalSource, string, *
 	}
 	manager := servicectl.Manager{Source: src, BinaryPath: os.Args[0], Version: "test"}
 	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() { errCh <- manager.Run(ctx) }()
+	done := make(chan struct{})
+	var runErr error
+	go func() {
+		runErr = manager.Run(ctx)
+		close(done)
+	}()
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() {
+			cancel()
+			<-done
+			if runErr != nil && !errors.Is(runErr, context.Canceled) {
+				t.Errorf("fixture service stop failed (%T)", runErr)
+			}
+		})
+	}
+	// Register before readiness checks so an assertion failure cannot leak the
+	// coordinator. Callers may also stop explicitly; the join is idempotent.
+	t.Cleanup(stop)
 	waitForServiceSocket(t, src)
-	client, err := manager.Client()
+	paths, err := manager.ResolvePaths()
 	if err != nil {
-		cancel()
 		t.Fatal(err)
 	}
-	stop := func() {
-		cancel()
-		if err := <-errCh; err != nil && err != context.Canceled {
-			t.Errorf("service stop: %v", err)
-		}
+	readyCtx, readyCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer readyCancel()
+	if err := waitMaintenanceFixtureSnapshot(readyCtx, paths.JobsPath, done); err != nil {
+		t.Fatal(err)
+	}
+	client, err := manager.Client()
+	if err != nil {
+		t.Fatal(err)
 	}
 	return src, cachePath, client, stop
 }
