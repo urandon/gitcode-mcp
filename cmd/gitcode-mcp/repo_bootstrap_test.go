@@ -165,6 +165,35 @@ func TestEntrypointRepoInitLocalPreservesExistingConfig(t *testing.T) {
 	}
 }
 
+func TestEntrypointRepoInitLocalRejectsOverrideEqualToInheritedCache(t *testing.T) {
+	for _, selection := range []string{"default", "environment", "config"} {
+		for _, form := range []string{"global", "global-equals"} {
+			t.Run(selection+"/"+form, func(t *testing.T) {
+				src, root := bootstrapSource(t, selection)
+				eff, err := config.LoadEffective(src, config.Overrides{})
+				if err != nil {
+					t.Fatal("cannot load isolated inherited cache config")
+				}
+				args := bootstrapArgs()
+				if form == "global" {
+					args = append([]string{"--cache-path", eff.Config.CachePath}, args...)
+				} else {
+					args = append([]string{"--cache-path=" + eff.Config.CachePath}, args...)
+				}
+				var out, diag bytes.Buffer
+				if run(args, strings.NewReader(""), &out, &diag, src) == 0 || !strings.Contains(diag.String(), "omit --cache-path") {
+					t.Fatal("equal-to-inherited explicit override was not rejected")
+				}
+				for _, p := range []string{eff.Config.CachePath, filepath.Join(root, ".gitcode"), filepath.Join(root, ".gitignore")} {
+					if _, err := os.Stat(p); !os.IsNotExist(err) {
+						t.Fatal("rejected equal-to-inherited override produced effects")
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestEntrypointRepositoryCommandsRetainInheritedCache(t *testing.T) {
 	for _, selection := range []string{"default", "environment", "config"} {
 		t.Run(selection, func(t *testing.T) {

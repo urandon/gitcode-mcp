@@ -32,6 +32,7 @@ type StartupDeps struct {
 	GitCode            GitCodeStartup
 	Source             config.Source
 	CachePathSource    string
+	CachePathOverride  string
 	ConfigReference    string
 	CredentialResolver *auth.CredentialResolver
 	Stdin              io.Reader
@@ -147,6 +148,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, src
 	deps.GitCode.Offline = opts.offline
 	deps.Source = src
 	deps.CachePathSource = eff.CachePathSource
+	deps.CachePathOverride = opts.overrides.CachePath
 	if strings.TrimSpace(eff.RepoLocalConfigPath) != "" {
 		deps.ConfigReference = eff.RepoLocalConfigPath
 	} else if eff.Location.Exists || eff.Location.Explicit {
@@ -456,8 +458,12 @@ func runCLICompatibility(ctx context.Context, args []string, stdout io.Writer, s
 	// Repository commands resolve inherited cache configuration themselves.
 	// Only a real global CLI override should become an explicit path argument:
 	// init-local deliberately rejects that argument and selects its worktree cache.
-	if len(cliArgs) > 0 && (cliArgs[0] != "repo" || deps.CachePathSource == "command") && deps.Config.CachePath != "" && !hasCLIFlag(cliArgs[1:], "--cache-path") {
-		cliArgs = append(cliArgs, "--cache-path", deps.Config.CachePath)
+	cachePath := deps.Config.CachePath
+	if len(cliArgs) > 0 && cliArgs[0] == "repo" {
+		cachePath = deps.CachePathOverride
+	}
+	if len(cliArgs) > 0 && cachePath != "" && !hasCLIFlag(cliArgs[1:], "--cache-path") {
+		cliArgs = append(cliArgs, "--cache-path", cachePath)
 	}
 	if len(cliArgs) > 0 && deps.Config.Format != "" && !hasCLIFlag(cliArgs[1:], "--format") {
 		cliArgs = append(cliArgs, "--format", deps.Config.Format)
