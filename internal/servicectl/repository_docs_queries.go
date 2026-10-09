@@ -243,6 +243,15 @@ func (s RPCServer) registerRepositoryDocsSource(ctx context.Context, req Registe
 	if err != nil {
 		return MaintenanceEntry{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_cache_unavailable"}
 	}
-	entry, _, err := s.Maintenance.RegisterRepositoryDocsSource(ctx, identity.UUID, binding.RepoID, req.RepositoryPath, effectiveProfile)
-	return entry, err
+	entry, registered, err := s.Maintenance.RegisterRepositoryDocsSource(ctx, identity.UUID, binding.RepoID, req.RepositoryPath, effectiveProfile)
+	if err != nil {
+		return MaintenanceEntry{}, err
+	}
+	if !registered {
+		return MaintenanceEntry{}, RepositoryDocsSourceUnavailableError{code: "repository_docs_registration_unavailable"}
+	}
+	if err := ValidateRepositoryDocsRegistration(entry); err != nil {
+		return MaintenanceEntry{}, err
+	}
+	return entry, nil
 }

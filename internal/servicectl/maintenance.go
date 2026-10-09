@@ -347,6 +347,9 @@ type RepositoryDocsSourceUnavailableError struct {
 }
 
 func (e RepositoryDocsSourceUnavailableError) Error() string {
+	if e.code == "repository_docs_maintenance_registration_required" {
+		return "repository docs: enroll the selected cache and repository with maintenance enable --sync off --rag off, then retry repo-docs register"
+	}
 	return "repository docs: private source registration is unavailable"
 }
 
@@ -355,6 +358,15 @@ func (e RepositoryDocsSourceUnavailableError) DiagnosticCode() string {
 		return e.code
 	}
 	return "repository_docs_source_unavailable"
+}
+
+// ValidateRepositoryDocsRegistration rejects incomplete success responses,
+// including responses from older daemons that silently skipped registration.
+func ValidateRepositoryDocsRegistration(entry MaintenanceEntry) error {
+	if strings.TrimSpace(entry.RegistrationID) == "" || strings.TrimSpace(entry.CacheUUID) == "" || strings.TrimSpace(entry.RepoID) == "" || entry.Generation <= 0 || entry.RepositoryDocs == nil || strings.TrimSpace(entry.RepositoryDocs.SourceRegistrationID) == "" || entry.RepositoryDocs.SourceRegistrationGeneration <= 0 {
+		return RepositoryDocsSourceUnavailableError{code: "repository_docs_registration_unavailable"}
+	}
+	return nil
 }
 
 type MaintenanceIdempotencyConflictError struct{}
@@ -1960,7 +1972,7 @@ func (m *MaintenanceManager) registerResolvedRepositoryDocsSource(cacheUUID, rep
 	defer m.mu.Unlock()
 	entry := m.maintenanceEntryForCacheRepoLocked(cacheUUID, repoID)
 	if entry == nil {
-		return MaintenanceEntry{}, false, nil
+		return MaintenanceEntry{}, false, RepositoryDocsSourceUnavailableError{code: "repository_docs_maintenance_registration_required"}
 	}
 	previousEntry := cloneMaintenanceEntryPrivate(entry)
 	previousSources := cloneRepositoryDocsSources(m.sources[entry.RegistrationID])

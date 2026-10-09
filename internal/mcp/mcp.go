@@ -2679,9 +2679,12 @@ func classifyDomainError(err error, ctx domainErrorContext) *errorData {
 
 func repositoryDocsDiagnostic(code, repoID string) (string, string, bool) {
 	switch strings.TrimSpace(code) {
+	case "repository_docs_maintenance_registration_required":
+		return "the selected cache and repository must be enrolled before registering a local Git authority",
+			remediationForRepo("call maintenance_plan with sync=off and rag=off, then apply the reviewed plan with enable_cache_maintenance and register the local Git authority", repoID, "gitcode-mcp maintenance enable --sync off --rag off"), true
 	case "repository_docs_registration_not_found", "repository_docs_registration_unavailable", "repository_docs_source_not_registered":
 		return "no enabled repository-document authority is registered for the selected cache and repository",
-			remediationForRepo("register the local Git authority, then retry", repoID, "gitcode-mcp repo-docs register --repository-path PATH"), true
+			remediationForRepo("ensure the selected cache and repository are enrolled via maintenance_plan and enable_cache_maintenance (sync=off and rag=off are sufficient), then register the local Git authority and retry", repoID, "gitcode-mcp repo-docs register --repository-path PATH"), true
 	case "repository_docs_registration_disabled":
 		return "repository-document authority belongs to a disabled maintenance registration",
 			remediationForRepo("call maintenance_plan, then apply the reviewed plan with enable_cache_maintenance", repoID, "gitcode-mcp maintenance enable"), true
@@ -2716,7 +2719,7 @@ func domainErrorTitle(code string) string {
 		return "Invalid request"
 	case "not_found":
 		return "Resource not found"
-	case "repository_docs_registration_not_found", "repository_docs_registration_unavailable", "repository_docs_registration_disabled", "repository_docs_source_not_registered", "repository_docs_source_ambiguous", "repository_docs_source_generation_conflict", "repository_docs_source_selector_required", "repository_docs_binding_unavailable":
+	case "repository_docs_maintenance_registration_required", "repository_docs_registration_not_found", "repository_docs_registration_unavailable", "repository_docs_registration_disabled", "repository_docs_source_not_registered", "repository_docs_source_ambiguous", "repository_docs_source_generation_conflict", "repository_docs_source_selector_required", "repository_docs_binding_unavailable":
 		return "Repository documentation authority unavailable"
 	default:
 		return "Operation failed"
