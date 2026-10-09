@@ -14,6 +14,41 @@ import (
 	"gitcode-mcp/internal/config"
 )
 
+type maintenanceUnavailableExecutableRuntime struct{ maintenanceTestRAGRuntime }
+
+func (maintenanceUnavailableExecutableRuntime) LookPath(string) (string, error) {
+	return "", errors.New("unavailable")
+}
+
+func TestMaintenanceLiveProviderExecutableRemediationIsPathSafe(t *testing.T) {
+	cfg := config.Default()
+	provider := cfg.RAG.Providers["ollama"]
+	provider.Executable = "/private-example/provider/bin/ollama"
+	cfg.RAG.Providers["ollama"] = provider
+	setup := MaintenanceSetup{Config: cfg, RAGRuntime: maintenanceUnavailableExecutableRuntime{}}
+	result, actions, blockers, err := setup.providerPlan(context.Background(), MaintenanceSetupRequest{RAGMode: "maintain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Installed || !result.Running || !result.ModelAvailable || len(actions) != 1 || actions[0].ID != "configure-provider-executable" || len(blockers) != 1 {
+		t.Fatal("live endpoint executable mismatch was not separately classified")
+	}
+	data, err := json.Marshal(struct {
+		Provider MaintenanceProviderPlan
+		Actions  []MaintenancePlanAction
+		Blockers []string
+	}{result, actions, blockers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), provider.Executable) || strings.Contains(string(data), "not installed") || strings.Contains(string(data), "install-provider") {
+		t.Fatal("maintenance output leaked a path or suggested installation for a live endpoint")
+	}
+	if actions[0].Class != "inspect" || actions[0].Status != "blocked" || actions[0].ConfirmationRequired {
+		t.Fatal("executable remediation must remain an observation-only handoff")
+	}
+}
+
 type maintenanceTestRAGRuntime struct {
 	smokeErr error
 }

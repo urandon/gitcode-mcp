@@ -102,6 +102,21 @@ gitcode-mcp rag setup --yes
 
 `--dry-run` reports missing actions without pulling a model. `--yes` is allowed to pull the configured model and run a small embedding smoke test.
 
+On macOS, executable discovery first honors the configured value and current
+`PATH`. Only the bare name `ollama` falls back to the standard Homebrew locations
+`/opt/homebrew/bin/ollama` and `/usr/local/bin/ollama`, in that order. This makes
+foreground setup and a LaunchAgent with a restricted `PATH` agree without
+rewriting configuration or installing anything. Explicit paths and custom
+executable names never use that fallback. A confirmed managed start uses the
+resolved executable, not a second relative-name lookup.
+
+Endpoint readiness is checked separately. If the endpoint is running but the
+configured executable is unavailable, setup reports
+`provider_executable_unavailable`; maintenance gives a configuration handoff
+instead of installation guidance. Set the provider's machine-level `executable`
+to an absolute usable path, then repair/restart the service. Admin never receives
+that path or changes machine-level provider configuration.
+
 In text mode, a confirmed model download prints an immediate progress handoff before it starts. Model pulls use a long-running download timeout rather than the short provider-probe timeout. If the pull transport is interrupted, setup checks provider state again before reporting a failure because Ollama may finish the download after the initiating request disconnects.
 
 When setup is ready, continue with an explicit repository id:
@@ -247,6 +262,7 @@ Common invalidation examples:
 | Symptom | What to check |
 |---|---|
 | `missing_provider` | Install Ollama or update `rag.providers.ollama.executable`. |
+| `provider_executable_unavailable` | The configured endpoint is live, but this process cannot resolve its configured executable. Configure an absolute machine-level executable, then repair/restart the service; do not reinstall solely because the LaunchAgent PATH is restricted. |
 | `provider_not_running` | Run `ollama serve`, then `gitcode-mcp rag setup --dry-run`. |
 | `missing_model` | Run `gitcode-mcp rag setup --yes` or `ollama pull qwen3-embedding:0.6b`. |
 | `smoke_failed` | Check endpoint, model name, dimensions, and provider logs. |

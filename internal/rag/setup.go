@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"time"
 
@@ -112,20 +114,37 @@ func Setup(ctx context.Context, req SetupRequest) (SetupResult, error) {
 		InstallInstructions: append([]string(nil), provider.InstallHints...),
 	}
 	executable := strings.TrimSpace(provider.Executable)
+	executableUnavailable := false
 	if executable != "" {
 		path, err := runtime.LookPath(executable)
 		if err == nil && strings.TrimSpace(path) != "" {
 			result.ProviderInstalled = true
 			result.ExecutablePath = path
 		} else {
-			result.Diagnostics = append(result.Diagnostics, "provider executable not found: "+executable)
-			result.Actions = append(result.Actions, "install provider runtime")
-			result.Status = "missing_provider"
-			return result, nil
+			executableUnavailable = true
 		}
 	}
 	live, liveMessage := runtime.IsLive(ctx, provider.Endpoint, timeout)
 	result.ProviderLive = live
+	if executableUnavailable {
+		result.Diagnostics = append(result.Diagnostics, "configured provider executable is unavailable to this process")
+		if live {
+			// A running endpoint is not evidence that this process can execute
+			// the configured binary. Keep both facts visible without installing
+			// or starting anything, or bypassing explicit executable authority.
+			models, err := runtime.ListModels(ctx, provider.Endpoint, timeout)
+			if err == nil {
+				result.ModelAvailable = containsModel(models, profile.Model)
+			}
+			result.Status = "provider_executable_unavailable"
+			result.InstallInstructions = nil
+			result.Actions = []string{"configure rag.providers.<provider>.executable with an absolute executable path visible to the service, then repair/restart the service"}
+		} else {
+			result.Status = "missing_provider"
+			result.Actions = []string{"install provider runtime"}
+		}
+		return result, nil
+	}
 	if !live {
 		if liveMessage != "" {
 			result.Diagnostics = append(result.Diagnostics, liveMessage)
@@ -136,7 +155,11 @@ func Setup(ctx context.Context, req SetupRequest) (SetupResult, error) {
 				result.Status = "provider_not_running"
 				return result, nil
 			}
-			startMessage, err := runtime.Start(ctx, provider)
+			startProvider := provider
+			if result.ExecutablePath != "" {
+				startProvider.Executable = result.ExecutablePath
+			}
+			startMessage, err := runtime.Start(ctx, startProvider)
 			if err != nil {
 				result.Diagnostics = append(result.Diagnostics, "provider autostart failed: "+err.Error())
 				result.Actions = append(result.Actions, "start provider runtime")
@@ -243,7 +266,25 @@ func emitSetupProgress(progress func(SetupProgress), event SetupProgress) {
 }
 
 func (OSRuntime) LookPath(executable string) (string, error) {
-	return exec.LookPath(executable)
+	return resolveProviderExecutable(executable, goruntime.GOOS, exec.LookPath)
+}
+
+// Only the supported bare Ollama name has a macOS installation fallback.
+// Absolute paths, custom names and PATH successes retain configuration authority.
+func resolveProviderExecutable(executable, goos string, lookPath func(string) (string, error)) (string, error) {
+	path, err := lookPath(executable)
+	if err == nil {
+		return filepath.Abs(path)
+	}
+	if goos != "darwin" || executable != "ollama" || !errors.Is(err, exec.ErrNotFound) {
+		return "", err
+	}
+	for _, candidate := range []string{"/opt/homebrew/bin/ollama", "/usr/local/bin/ollama"} {
+		if path, candidateErr := lookPath(candidate); candidateErr == nil {
+			return path, nil
+		}
+	}
+	return "", err
 }
 
 func (OSRuntime) IsLive(ctx context.Context, endpoint string, timeout time.Duration) (bool, string) {

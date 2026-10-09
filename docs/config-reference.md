@@ -128,7 +128,7 @@ rag:
 | `rag.model_store_path` | string | `<cache-dir>/gitcode-mcp/models` | Global gitcode-mcp RAG model storage root. This is machine-level state and cannot be set from repo-local config. |
 | `rag.default_profile` | string | `qwen3-ollama-0_6b-1024` | Default embedding/search profile. |
 | `rag.providers.<name>.endpoint` | string | `http://127.0.0.1:11434` for `ollama` | Provider API endpoint. |
-| `rag.providers.<name>.executable` | string | `ollama` for `ollama` | Provider executable used by managed startup. |
+| `rag.providers.<name>.executable` | string | `ollama` for `ollama` | Provider executable used by managed startup. Explicit paths/custom names are authoritative. On macOS only the bare `ollama` name falls back, after PATH lookup, to the standard Homebrew locations; see [RAG readiness](rag.md). |
 | `rag.providers.<name>.startup` | string | `managed` | Provider startup mode. Empty and `managed` allow `rag setup` to autostart the provider when `autostart` is true. |
 | `rag.providers.<name>.autostart` | bool | `true` for `ollama` | Whether setup may start the provider runtime. |
 | `rag.providers.<name>.env` | map | empty | Environment variables passed to managed provider startup, such as `OLLAMA_MODELS`. |
