@@ -4405,6 +4405,11 @@ func writeCommandError(stderr io.Writer, format string, plan startupPlan, err er
 	}
 	if format == "json" {
 		payload := map[string]any{"error": message, "exit_code": code, "failure_class": failureClass}
+		var writeErr service.ErrWriteFailure
+		if errors.As(err, &writeErr) && writeErr.WritePhase != "" {
+			payload["idempotency_key"], payload["remote_path"], payload["write_phase"] = writeErr.IdempotencyKey, writeErr.RemoteID, writeErr.WritePhase
+			payload["mutation_attempted"], payload["provider_failure_class"], payload["reconciliation"] = writeErr.MutationAttempted, writeErr.ProviderFailureClass, writeErr.Reconciliation
+		}
 		addLockContentionFields(payload, err)
 		if diagnostic.Code != "" {
 			payload["http_attempted"] = diagnostic.HTTPAttempted
@@ -4417,6 +4422,14 @@ func writeCommandError(stderr io.Writer, format string, plan startupPlan, err er
 		return code
 	}
 	fmt.Fprintln(stderr, message)
+	var writeErr service.ErrWriteFailure
+	if errors.As(err, &writeErr) && writeErr.WritePhase != "" {
+		fmt.Fprintf(stderr, "idempotency_key: %s\nremote_path: %s\nwrite_phase: %s\n", writeErr.IdempotencyKey, writeErr.RemoteID, writeErr.WritePhase)
+		if writeErr.MutationAttempted != nil {
+			fmt.Fprintf(stderr, "mutation_attempted: %t\n", *writeErr.MutationAttempted)
+		}
+		fmt.Fprintf(stderr, "provider_failure_class: %s\nreconciliation: %s\n", writeErr.ProviderFailureClass, writeErr.Reconciliation)
+	}
 	if failureClass != "" {
 		fmt.Fprintf(stderr, "failure_class: %s\n", failureClass)
 	}

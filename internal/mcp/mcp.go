@@ -277,16 +277,21 @@ type rpcError struct {
 }
 
 type errorData struct {
-	Code         string `json:"code"`
-	Message      string `json:"message"`
-	FailureClass string `json:"failure_class,omitempty"`
-	Operation    string `json:"operation,omitempty"`
-	RepoID       string `json:"repo_id,omitempty"`
-	StartedAt    string `json:"started_at,omitempty"`
-	PID          int    `json:"pid,omitempty"`
-	CacheRef     string `json:"cache_ref,omitempty"`
-	AccessMode   string `json:"access_mode,omitempty"`
-	Remediation  string `json:"remediation,omitempty"`
+	Code                 string `json:"code"`
+	Message              string `json:"message"`
+	FailureClass         string `json:"failure_class,omitempty"`
+	Operation            string `json:"operation,omitempty"`
+	RepoID               string `json:"repo_id,omitempty"`
+	StartedAt            string `json:"started_at,omitempty"`
+	PID                  int    `json:"pid,omitempty"`
+	CacheRef             string `json:"cache_ref,omitempty"`
+	AccessMode           string `json:"access_mode,omitempty"`
+	Remediation          string `json:"remediation,omitempty"`
+	IdempotencyKey       string `json:"idempotency_key,omitempty"`
+	RemotePath           string `json:"remote_path,omitempty"`
+	WritePhase           string `json:"write_phase,omitempty"`
+	MutationAttempted    *bool  `json:"mutation_attempted,omitempty"`
+	ProviderFailureClass string `json:"provider_failure_class,omitempty"`
 }
 
 type toolDefinition struct {
@@ -2548,6 +2553,12 @@ func (s *Server) writeDomainError(id *json.RawMessage, err error) {
 
 func (s *Server) writeOperationalError(id *json.RawMessage, err error, ctx domainErrorContext) {
 	data := classifyDomainError(err, ctx)
+	var writeErr service.ErrWriteFailure
+	if errors.As(err, &writeErr) && writeErr.WritePhase != "" {
+		data.IdempotencyKey, data.RemotePath, data.WritePhase = writeErr.IdempotencyKey, writeErr.RemoteID, writeErr.WritePhase
+		data.MutationAttempted, data.ProviderFailureClass = writeErr.MutationAttempted, writeErr.ProviderFailureClass
+		data.Remediation = writeErr.Reconciliation
+	}
 	diagnostic, hasDiagnostic := mcpDiagnostic(err)
 	if hasDiagnostic {
 		data.FailureClass = string(diagnostic.Code)

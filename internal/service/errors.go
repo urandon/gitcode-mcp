@@ -256,12 +256,16 @@ func (e ErrLinkCheckFailed) Error() string {
 }
 
 type ErrWriteFailure struct {
-	Code           string
-	RepoID         string
-	RemoteID       string
-	IdempotencyKey string
-	PayloadSource  string
-	Cause          error
+	Code                 string
+	RepoID               string
+	RemoteID             string
+	IdempotencyKey       string
+	PayloadSource        string
+	Cause                error
+	WritePhase           string
+	MutationAttempted    *bool
+	Reconciliation       string
+	ProviderFailureClass string
 }
 
 func (e ErrWriteFailure) Error() string {
@@ -275,7 +279,9 @@ func (e ErrWriteFailure) Error() string {
 	if e.IdempotencyKey != "" {
 		msg += " idempotency_key=" + e.IdempotencyKey
 	}
-	if e.Cause != nil {
+	if e.WritePhase != "" {
+		msg += " write_phase=" + e.WritePhase + "; " + e.Reconciliation
+	} else if e.Cause != nil {
 		msg += ": " + e.Cause.Error()
 	}
 	return msg

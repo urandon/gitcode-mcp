@@ -5465,6 +5465,9 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	if !s.hasWriteCredential() {
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_missing_credential", RepoID: route.RepoID, IdempotencyKey: key}
 	}
+	if command == "create-page" || command == "update-page" {
+		return s.executeWikiContentWrite(ctx, command, route, req, base)
+	}
 	lookup, err := audit.LookupIdempotency(ctx, s.store, route.RepoID, key, fingerprint)
 	if err != nil {
 		return WriteCommandResult{}, err
@@ -6112,7 +6115,7 @@ func writeAuditMetadata(command, key, fingerprint, remoteType string, confirmed 
 	switch command {
 	case "update-issue", "update-pr", "set-issue-milestone", "clear-issue-milestone":
 		method = "PATCH"
-	case "merge-pr":
+	case "merge-pr", "update-page":
 		method = "PUT"
 	}
 	metadata := map[string]string{
@@ -7899,6 +7902,18 @@ func safePRUpdateMutationFailure(phase string, err error) bool {
 }
 
 func writeErrorCode(err error) string {
+	var validation gitcode.ErrAPIValidation
+	if errors.As(err, &validation) {
+		return "api_validation"
+	}
+	var emptyWiki gitcode.ErrEmptyWiki
+	if errors.As(err, &emptyWiki) {
+		return "empty_wiki"
+	}
+	var unavailableWiki gitcode.ErrWikiUnavailable
+	if errors.As(err, &unavailableWiki) {
+		return unavailableWiki.DiagnosticCode()
+	}
 	var precondition gitcode.ErrWritePreconditionConflict
 	if errors.As(err, &precondition) {
 		return "write_conflict"

@@ -3496,7 +3496,7 @@ func TestS018LiveWriteConfirmedRefreshesCommentAndWiki(t *testing.T) {
 	seedStore(t, ctx, store)
 	client := &fakeGitCodeClient{
 		createIssueCommentResult: gitcode.WriteResult[gitcode.Comment]{Record: gitcode.Comment{ID: "comment-9", IssueID: "42", Body: "confirmed comment"}, Confirmed: true, Operation: "CreateIssueComment", RemoteID: "comment-9", ParentIssueNumber: 42, ParentIssueID: "42", ConfirmedAt: time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)},
-		createWikiPageResult:     gitcode.WriteResult[gitcode.WikiPage]{Record: gitcode.WikiPage{ID: "wiki-9", Slug: "Home", Title: "Home", Body: "confirmed wiki", Revision: "rev-9"}, Confirmed: true, Operation: "CreateWikiPage", RemoteID: "wiki-9", RemoteSlug: "Home", RemoteRevision: "rev-9", ConfirmedAt: time.Date(2026, 6, 20, 12, 1, 0, 0, time.UTC)},
+		createWikiPageResult:     gitcode.WriteResult[gitcode.WikiPage]{Record: gitcode.WikiPage{ID: "Home.md", Slug: "Home.md", Title: "Home", Body: "confirmed wiki", Revision: "rev-9"}, Confirmed: true, Operation: "CreateWikiPage", RemoteID: "Home.md", RemoteSlug: "Home.md", RemoteRevision: "rev-9", ConfirmedAt: time.Date(2026, 6, 20, 12, 1, 0, 0, time.UTC)},
 	}
 	svc := NewWithClient(store, client)
 	t.Setenv("GITCODE_TOKEN", "test-token")

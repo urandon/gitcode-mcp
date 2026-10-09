@@ -270,6 +270,12 @@ GitCode wiki UI links use the singular browser route:
 
 The browser slug must keep nested wiki paths inside one route segment, so path separators inside the page slug are URL-encoded. For example, `Evidence/Dogfood/Report.md` becomes `/wiki/Evidence%2FDogfood%2FReport.md`. Wiki create, update, and delete commands normalize missing extensions to `.md` before calling the provider. Write output reports the API path, cache path, remote slug, and normalized browser URL so an operator can compare the live page route with the cached record without relying on ambiguous `/wikis/...` SPA routes.
 
+Create/update responses are not the GET file model: a successful mutation can contain an object-valued `content`. The adapter treats this bounded response as opaque, sends at most one POST/PUT, and confirms the exact normalized `.md` path with GET metadata plus the complete decoded content (or raw body). Both path and revision must be present and the body must match the intended bytes. A metadata-only response never proves success.
+
+The service persists a claim before transport. An interrupted or failed confirmation keeps the same idempotency key; replay, including a legacy failed receipt, performs GET-only reconciliation rather than repeating POST/PUT. CLI and MCP errors expose `write_phase`, `mutation_attempted`, `remote_path`, `idempotency_key`, and a sanitized `provider_failure_class`. Raw provider errors are not included in these receipts.
+
+Wiki root availability is separate from write confirmation. Explicit empty/uninitialized provider messages yield `empty_wiki`; explicit disabled messages yield `wiki_disabled`; HTTP 405/501 yields `wiki_route_unsupported`. A bare root 404 yields `wiki_unavailable` and does not establish initialization, permissions, or route compatibility. Path-validation HTTP 400 remains `api_validation`. None of these diagnostics automatically initializes a wiki or invents a `wiki init` CLI command.
+
 Delete confirmation is inverted from create/update confirmation. After a successful provider DELETE, the confirmation GET for the exact normalized wiki path should return a typed not-found response. That not-found proves the deleted page is absent. A successful GET for the same path means deletion is not confirmed, while auth, route, conflict, rate-limit, and transient provider errors remain write failures.
 
 ## Pull Request Review Discussions

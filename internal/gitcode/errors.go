@@ -192,10 +192,25 @@ type ErrEmptyWiki struct {
 }
 
 func (e ErrEmptyWiki) Error() string {
-	return fmt.Sprintf("gitcode: wiki is empty or uninitialized for %s/%s; run `gitcode-mcp wiki init --repo %s/%s` or create a page via the GitCode UI", e.Owner, e.Repo, e.Owner, e.Repo)
+	return fmt.Sprintf("gitcode: provider reports wiki empty or uninitialized for %s/%s; verify wiki settings in GitCode and reconcile the exact .md page path before retrying a write", e.Owner, e.Repo)
 }
 
 func (e ErrEmptyWiki) DiagnosticCode() string { return "empty_wiki" }
+
+type ErrWikiUnavailable struct{ Reason string }
+
+func (e ErrWikiUnavailable) DiagnosticCode() string { return e.Reason }
+
+func (e ErrWikiUnavailable) Error() string {
+	switch e.Reason {
+	case "wiki_disabled":
+		return "gitcode: provider reports wiki disabled; verify repository wiki settings before publishing"
+	case "wiki_route_unsupported":
+		return "gitcode: wiki contents route is unsupported; verify provider API compatibility before publishing"
+	default:
+		return "gitcode: wiki route returned not found; initialization, permissions, and route availability are not established; reconcile the exact .md page path and verify wiki settings before publishing"
+	}
+}
 
 type ErrWriteConfirmationIncomplete struct {
 	Endpoint string

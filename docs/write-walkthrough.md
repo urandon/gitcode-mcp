@@ -244,6 +244,15 @@ gitcode-mcp create-page \
 
 Expected: wiki page created on remote, audit row recorded, cache refreshed.
 
+Create/update succeeds only after exact normalized `.md` path and complete body
+readback. If the response reports an ambiguous write, preserve the original body,
+path, and idempotency key. Repeat that same request to reconcile by GET only; do
+not use a new key to blindly repeat the mutation. The error receipt distinguishes
+preflight, mutation, readback, and cache-refresh failures with `write_phase` and
+`mutation_attempted`, and includes sanitized reconciliation guidance. A root 404
+alone does not prove that the wiki is uninitialized; verify repository settings
+and the exact page path before publishing.
+
 ### Add issue comment (live)
 
 ```sh
