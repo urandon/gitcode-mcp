@@ -2,26 +2,33 @@ package cache
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
 type SQLiteStore struct {
-	db            *sql.DB
-	useFTS        bool
-	forceNoFTS    bool
-	cachePath     string
-	lockPath      string
-	cacheRef      string
-	ephemeralLock bool
+	db               *sql.DB
+	useFTS           bool
+	forceNoFTS       bool
+	cachePath        string
+	lockPath         string
+	cacheRef         string
+	ephemeralLock    bool
+	memoryAnchorDB   *sql.DB
+	memoryAnchorConn *sql.Conn
+	closeOnce        sync.Once
+	closeErr         error
 }
 
 type LockHandle struct {
@@ -55,39 +62,59 @@ func NewSQLiteStore(ctx context.Context, dataSourceName string) (*SQLiteStore, e
 }
 
 func newSQLiteStore(ctx context.Context, dataSourceName string, forceNoFTS bool) (*SQLiteStore, error) {
-	db, err := sql.Open("sqlite", dataSourceName)
+	poolDataSource := dataSourceName
+	if dataSourceName == ":memory:" {
+		var identity [16]byte
+		if _, err := rand.Read(identity[:]); err != nil {
+			return nil, err
+		}
+		// A cancelled transaction can discard its worker connection. Retain a
+		// private named database through a separate anchor, and initialize these
+		// pragmas on every replacement worker, not just the first connection.
+		poolDataSource = fmt.Sprintf("file:gitcode-mcp-memory-%x?mode=memory&cache=shared&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)", identity)
+	}
+	db, err := sql.Open("sqlite", poolDataSource)
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(8)
 	db.SetMaxIdleConns(4)
 	if dataSourceName == ":memory:" {
-		// Each SQLite :memory: connection owns a different database. Restrict the
-		// pool to one connection so concurrent callers cannot observe a fresh,
-		// unmigrated schema selected nondeterministically by database/sql.
+		// Serialize worker access as before; the anchor is never used for work.
 		db.SetMaxOpenConns(1)
 		db.SetMaxIdleConns(1)
 	}
 	cachePath := cachePathForDataSource(dataSourceName)
 	lockPath := writerLockPath(cachePath)
 	store := &SQLiteStore{db: db, forceNoFTS: forceNoFTS, cachePath: cachePath, lockPath: lockPath}
+	initialized := false
+	defer func() {
+		if !initialized {
+			_ = store.Close()
+		}
+	}()
 	if dataSourceName == ":memory:" {
 		// Independent in-memory stores do not share state and therefore must not
 		// contend on the process-global fallback lock used for legacy callers.
 		store.lockPath = filepath.Join(os.TempDir(), fmt.Sprintf("gitcode-mcp-memory-writer-%p.lock", store))
 		store.ephemeralLock = true
+		store.memoryAnchorDB, err = sql.Open("sqlite", poolDataSource)
+		if err != nil {
+			return nil, err
+		}
+		store.memoryAnchorConn, err = store.memoryAnchorDB.Conn(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
-		_ = db.Close()
 		return nil, err
 	}
 	if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout = 5000"); err != nil {
-		_ = db.Close()
 		return nil, err
 	}
 	if dataSourceName != ":memory:" {
 		if _, err := db.ExecContext(ctx, "PRAGMA journal_mode = WAL"); err != nil {
-			_ = db.Close()
 			return nil, err
 		}
 	}
@@ -95,40 +122,37 @@ func newSQLiteStore(ctx context.Context, dataSourceName string, forceNoFTS bool)
 	store.useFTS = useFTS
 	if dataSourceName == ":memory:" {
 		if err := runMigrations(ctx, db, useFTS); err != nil {
-			_ = db.Close()
 			return nil, err
 		}
 		store.loadCacheRef(ctx)
+		initialized = true
 		return store, nil
 	}
 	compat, err := CheckVersionCompatibility(ctx, db)
 	if err != nil {
-		_ = db.Close()
 		return nil, err
 	}
 	if !compat.PermitWrites {
-		_ = db.Close()
 		return nil, &SchemaVersionError{Compat: compat}
 	}
 	if compat.DetectedVersion == compat.ExpectedVersion {
 		store.loadCacheRef(ctx)
+		initialized = true
 		return store, nil
 	}
 	lease, err := store.AcquireWriter(ctx, WriterRequest{Operation: "migration"})
 	if err != nil {
-		_ = db.Close()
 		return nil, err
 	}
 	if err := runMigrations(ctx, db, useFTS); err != nil {
 		_ = store.ReleaseWriter(context.Background(), lease)
-		_ = db.Close()
 		return nil, err
 	}
 	if err := store.ReleaseWriter(context.Background(), lease); err != nil {
-		_ = db.Close()
 		return nil, err
 	}
 	store.loadCacheRef(ctx)
+	initialized = true
 	return store, nil
 }
 
@@ -228,11 +252,19 @@ func (s *SQLiteStore) loadCacheRef(ctx context.Context) {
 }
 
 func (s *SQLiteStore) Close() error {
-	err := s.db.Close()
-	if s.ephemeralLock {
-		_ = os.Remove(s.lockPath)
-	}
-	return err
+	s.closeOnce.Do(func() {
+		s.closeErr = s.db.Close()
+		if s.memoryAnchorConn != nil {
+			s.closeErr = errors.Join(s.closeErr, s.memoryAnchorConn.Close())
+		}
+		if s.memoryAnchorDB != nil {
+			s.closeErr = errors.Join(s.closeErr, s.memoryAnchorDB.Close())
+		}
+		if s.ephemeralLock {
+			_ = os.Remove(s.lockPath)
+		}
+	})
+	return s.closeErr
 }
 
 func marshalJSON(v any) (string, error) {
