@@ -16,6 +16,11 @@ BINARY_VERSION="${VERSION#v}"
 COMMIT="${RELEASE_COMMIT:-$(git rev-parse HEAD)}"
 DATE="${RELEASE_DATE:-$(git show -s --format=%cI "$COMMIT")}"
 DIST_DIR="${DIST_DIR:-$ROOT/dist}"
+FEEDBACK_REPOSITORY="${RELEASE_FEEDBACK_REPOSITORY:-urandon/gitcode-mcp}"
+if [[ ! "$FEEDBACK_REPOSITORY" =~ ^[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_-][A-Za-z0-9_.-]*$ ]] || [[ ${#FEEDBACK_REPOSITORY} -gt 255 ]]; then
+  echo "Invalid build-owned feedback repository identity" >&2
+  exit 1
+fi
 CHECKSUMS="$DIST_DIR/checksums.txt"
 TARGETS="${RELEASE_TARGETS:-darwin/arm64 linux/amd64 linux/arm64 windows/amd64}"
 if [[ -n "${GOOS:-}" && -n "${GOARCH:-}" && -z "${RELEASE_TARGETS:-}" ]]; then
@@ -43,12 +48,13 @@ for target in $TARGETS; do
 
   CGO_ENABLED=0 GOOS="$TARGET_OS" GOARCH="$TARGET_ARCH" go build \
     -trimpath \
-    -ldflags "-s -w -X gitcode-mcp/internal/buildinfo.Version=$BINARY_VERSION -X gitcode-mcp/internal/buildinfo.Commit=$COMMIT -X gitcode-mcp/internal/buildinfo.Date=$DATE" \
+    -ldflags "-s -w -X gitcode-mcp/internal/buildinfo.Version=$BINARY_VERSION -X gitcode-mcp/internal/buildinfo.Commit=$COMMIT -X gitcode-mcp/internal/buildinfo.Date=$DATE -X gitcode-mcp/internal/buildinfo.FeedbackRepository=$FEEDBACK_REPOSITORY" \
     -o "$PACKAGE_DIR/$BINARY" \
     ./cmd/gitcode-mcp
 
   cat > "$PACKAGE_DIR/README.txt" <<README
 gitcode-mcp $VERSION
+Build-owned feedback repository: $FEEDBACK_REPOSITORY
 
 Install:
   macOS/Linux: install -m 0755 gitcode-mcp /usr/local/bin/gitcode-mcp

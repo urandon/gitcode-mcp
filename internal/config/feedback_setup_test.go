@@ -20,7 +20,7 @@ func TestFeedbackSetupPlanApplyPreservesUnrelatedYAMLAndReplays(t *testing.T) {
 	}
 	t.Setenv(EnvMCPConfigPath, path)
 	src := OSSource{}
-	plan, err := PlanFeedbackSetup(src, "example/feedback")
+	plan, err := PlanFeedbackSetup(src, "urandon/gitcode-mcp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,16 +42,21 @@ func TestFeedbackSetupPlanApplyPreservesUnrelatedYAMLAndReplays(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"# operator comment", "format: json", "top_k: 11", "enabled: true", "sink: gitcode_issues", "repo_id: example/feedback", "labels: feedback|dogfood"} {
+	for _, want := range []string{"# operator comment", "format: json", "top_k: 11", "enabled: true", "duplicate_policy: suggest"} {
 		if !strings.Contains(string(after), want) {
 			t.Fatalf("updated config missing %q:\n%s", want, after)
+		}
+	}
+	for _, forbidden := range []string{"repo_id:", "sink:", "labels:"} {
+		if strings.Contains(string(after), forbidden) {
+			t.Fatalf("setup persisted runtime destination policy: %s", after)
 		}
 	}
 	info, err := os.Stat(path)
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode=%v err=%v", info.Mode().Perm(), err)
 	}
-	replayPlan, err := PlanFeedbackSetup(src, "example/feedback")
+	replayPlan, err := PlanFeedbackSetup(src, "urandon/gitcode-mcp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +86,7 @@ func TestFeedbackSetupRejectsStalePlanAndInvalidTarget(t *testing.T) {
 	if _, err := PlanFeedbackSetup(OSSource{}, "example/repo;command"); err == nil {
 		t.Fatal("shell-unsafe repository id accepted")
 	}
-	plan, err := PlanFeedbackSetup(OSSource{}, "example/feedback")
+	plan, err := PlanFeedbackSetup(OSSource{}, "urandon/gitcode-mcp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,19 +98,50 @@ func TestFeedbackSetupRejectsStalePlanAndInvalidTarget(t *testing.T) {
 	}
 }
 
-func TestFeedbackSetupPreservesExplicitDuplicatePolicyAndLabels(t *testing.T) {
+func TestFeedbackSetupRejectsConflictingLegacyPolicyWithoutMutation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	content := "feedback:\n  enabled: false\n  sink: gitcode_issues\n  repo_id: old/repo\n  labels: ux|agent\n  duplicate_policy: return_existing\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv(EnvMCPConfigPath, path)
-	plan, err := PlanFeedbackSetup(OSSource{}, "example/feedback")
-	if err != nil {
-		t.Fatal(err)
+	if _, err := PlanFeedbackSetup(OSSource{}, "urandon/gitcode-mcp"); err == nil || !strings.Contains(err.Error(), "configuration_conflict") {
+		t.Fatalf("conflict err=%v", err)
 	}
-	if strings.Join(plan.Labels, ",") != "ux,agent" || plan.DuplicatePolicy != "return_existing" {
-		t.Fatalf("plan=%#v", plan)
+	if after, err := os.ReadFile(path); err != nil || string(after) != content {
+		t.Fatalf("conflicting config was changed: %q err=%v", after, err)
+	}
+}
+
+func TestFeedbackSetupValidatesSelectedDefaultYAMLNotLegacyJSON(t *testing.T) {
+	for _, conflict := range []bool{false, true} {
+		t.Run(fmt.Sprintf("conflict-%t", conflict), func(t *testing.T) {
+			src := newMemorySource(t) // No config or MCP environment overrides.
+			path := filepath.Join(src.configDir, "gitcode-mcp", "config.yaml")
+			legacy := "urandon/gitcode-mcp"
+			if conflict {
+				legacy = "example/legacy"
+			}
+			content := []byte("feedback:\n  enabled: false\n  repo_id: " + legacy + "\n")
+			src.files[path] = content
+			// A different legacy JSON must not determine the selected YAML intent.
+			jsonRepo := "example/json-legacy"
+			if conflict {
+				jsonRepo = "urandon/gitcode-mcp"
+			}
+			src.files[src.defaultConfigPath()] = []byte(fmt.Sprintf(`{"feedback":{"enabled":false,"repo_id":%q}}`, jsonRepo))
+			plan, err := PlanFeedbackSetup(src, "")
+			if conflict {
+				if err == nil || !strings.Contains(err.Error(), "configuration_conflict") {
+					t.Fatalf("plan=%+v err=%v", plan, err)
+				}
+			} else if err != nil || plan.RepoID != "urandon/gitcode-mcp" {
+				t.Fatalf("plan=%+v err=%v", plan, err)
+			}
+			if !bytes.Equal(src.files[path], content) {
+				t.Fatal("planning changed selected YAML")
+			}
+		})
 	}
 }
 
@@ -117,7 +153,7 @@ func TestFeedbackSetupRejectsNonMappingYAMLWithoutMutation(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv(EnvMCPConfigPath, path)
-			if _, err := PlanFeedbackSetup(OSSource{}, "example/feedback"); err == nil || !strings.Contains(err.Error(), "must be a mapping") {
+			if _, err := PlanFeedbackSetup(OSSource{}, "urandon/gitcode-mcp"); err == nil || !strings.Contains(err.Error(), "must be a mapping") {
 				t.Fatalf("err=%v", err)
 			}
 			after, err := os.ReadFile(path)
@@ -134,7 +170,7 @@ func TestFeedbackSetupDoesNotTreatUnreadableConfigAsMissing(t *testing.T) {
 	src.env[EnvMCPConfigPath] = path
 	src.files[path] = []byte("format: json\n")
 	src.readErr[path] = os.ErrPermission
-	if _, err := PlanFeedbackSetup(src, "example/feedback"); err == nil || !strings.Contains(err.Error(), "cannot be read") || strings.Contains(err.Error(), path) {
+	if _, err := PlanFeedbackSetup(src, "urandon/gitcode-mcp"); err == nil || !strings.Contains(err.Error(), "cannot be read") || strings.Contains(err.Error(), path) {
 		t.Fatalf("err=%v", err)
 	}
 }
@@ -162,14 +198,17 @@ func TestFeedbackSetupRejectsSameKeyForDifferentIntent(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(EnvMCPConfigPath, path)
-	first, err := PlanFeedbackSetup(OSSource{}, "example/first")
+	first, err := PlanFeedbackSetup(OSSource{}, "urandon/gitcode-mcp")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ApplyFeedbackSetup(first, "stable-setup-key", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	second, err := PlanFeedbackSetup(OSSource{}, "example/second")
+	if err := os.WriteFile(path, []byte("feedback:\n  enabled: true\n  duplicate_policy: return_existing\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := PlanFeedbackSetup(OSSource{}, "urandon/gitcode-mcp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,8 +216,8 @@ func TestFeedbackSetupRejectsSameKeyForDifferentIntent(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 	after, err := os.ReadFile(path)
-	if err != nil || !strings.Contains(string(after), "repo_id: example/first") || strings.Contains(string(after), "repo_id: example/second") {
-		t.Fatalf("config retargeted: %s err=%v", after, err)
+	if err != nil || strings.Contains(string(after), "repo_id:") || !strings.Contains(string(after), "duplicate_policy: return_existing") {
+		t.Fatalf("config unexpectedly rewritten: %s err=%v", after, err)
 	}
 }
 
@@ -188,7 +227,7 @@ func TestFeedbackSetupRecoversPendingReceiptFromConfigDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(EnvMCPConfigPath, path)
-	plan, err := PlanFeedbackSetup(OSSource{}, "example/feedback")
+	plan, err := PlanFeedbackSetup(OSSource{}, "urandon/gitcode-mcp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,12 +250,12 @@ func TestFeedbackSetupRecoversPendingReceiptFromConfigDigest(t *testing.T) {
 
 func TestFeedbackSetupCompactsOldestTerminalReceiptAtCapacity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	content := "feedback:\n  enabled: true\n  sink: gitcode_issues\n  repo_id: example/feedback\n  labels: feedback|dogfood\n  duplicate_policy: suggest\n"
+	content := "feedback:\n  enabled: true\n  sink: gitcode_issues\n  repo_id: urandon/gitcode-mcp\n  labels: feedback|dogfood\n  duplicate_policy: suggest\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv(EnvMCPConfigPath, path)
-	plan, err := PlanFeedbackSetup(OSSource{}, "example/feedback")
+	plan, err := PlanFeedbackSetup(OSSource{}, "urandon/gitcode-mcp")
 	if err != nil || plan.Status != "already_configured" {
 		t.Fatalf("plan=%#v err=%v", plan, err)
 	}
@@ -256,7 +295,10 @@ func TestFeedbackSetupCompactsOldestTerminalReceiptAtCapacity(t *testing.T) {
 	if err != nil || !replay.Replayed || replay.PlanID != plan.PlanID {
 		t.Fatalf("retained replay=%#v err=%v", replay, err)
 	}
-	different, err := PlanFeedbackSetup(OSSource{}, "example/different")
+	if err := os.WriteFile(path, []byte(strings.ReplaceAll(content, "duplicate_policy: suggest", "duplicate_policy: return_existing")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	different, err := PlanFeedbackSetup(OSSource{}, "urandon/gitcode-mcp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,14 +339,14 @@ func TestFeedbackSetupExpectedPlanAllowsOnlyRetainedReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(EnvMCPConfigPath, path)
-	original, err := PlanFeedbackSetup(OSSource{}, "example/feedback")
+	original, err := PlanFeedbackSetup(OSSource{}, "urandon/gitcode-mcp")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ApplyFeedbackSetup(original, "retained-admin-key", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	current, err := PlanFeedbackSetup(OSSource{}, "example/feedback")
+	current, err := PlanFeedbackSetup(OSSource{}, "urandon/gitcode-mcp")
 	if err != nil || current.PlanID == original.PlanID {
 		t.Fatalf("current=%#v err=%v", current, err)
 	}

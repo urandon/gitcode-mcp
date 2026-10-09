@@ -2870,7 +2870,10 @@ func executeFeedbackControlCommand(ctx context.Context, sub string, opts options
 		return render(stdout, opts.format, result, renderFeedbackReadinessText)
 	}
 	if strings.TrimSpace(opts.repo) == "" {
-		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "repo", Message: "feedback setup requires --repo OWNER/REPO"})
+		opts.repo = feedback.DefaultConfig().RepoID
+	}
+	if opts.repo != feedback.DefaultConfig().RepoID {
+		return writeError(stderr, opts.format, service.ErrInvalidQuery{Field: "repo", Message: "feedback destination is build-owned; runtime retargeting is not supported"})
 	}
 	if err := requireFeedbackRepositoryBinding(ctx, eff.Config.CachePath, opts.repo); err != nil {
 		return writeError(stderr, opts.format, err)
@@ -5443,7 +5446,7 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --format FORMAT   output format (text, json)")
 	case "feedback":
 		fmt.Fprintln(w, "Usage: gitcode-mcp feedback status [--format FORMAT]")
-		fmt.Fprintln(w, "       gitcode-mcp feedback setup --repo OWNER/REPO [--yes --plan-id PLAN --idempotency-key KEY] [--format FORMAT]")
+		fmt.Fprintln(w, "       gitcode-mcp feedback setup [--repo BUILD_OWNED_REPO] [--yes --plan-id PLAN --idempotency-key KEY] [--format FORMAT]")
 		fmt.Fprintln(w, "       gitcode-mcp feedback prepare [--input PATH | structured flags] [--format FORMAT]")
 		fmt.Fprintln(w, "       gitcode-mcp feedback submit [--input PATH | structured flags] --live --idempotency-key KEY [--format FORMAT]")
 		fmt.Fprintln(w)
@@ -6138,7 +6141,7 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Report side-effect-free feedback preparation and submission readiness.")
 	case "feedback setup":
-		fmt.Fprintln(w, "Usage: gitcode-mcp feedback setup --repo OWNER/REPO [--yes --plan-id PLAN --idempotency-key KEY] [--cache-path PATH] [--format FORMAT]")
+		fmt.Fprintln(w, "Usage: gitcode-mcp feedback setup [--repo BUILD_OWNED_REPO] [--yes --plan-id PLAN --idempotency-key KEY] [--cache-path PATH] [--format FORMAT]")
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Render a trusted global feedback-sink plan; --yes applies the exact rendered state atomically.")
 		fmt.Fprintln(w, "The repository must already be bound. No credential or arbitrary endpoint is written.")

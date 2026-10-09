@@ -76,6 +76,12 @@ func TestRAGCapabilitiesDeclareSafeSurfacePolicy(t *testing.T) {
 
 func TestAdminCapabilitiesDeclareBrowserAndFallbackSurfaces(t *testing.T) {
 	for _, cap := range AdminCapabilities() {
+		if cap.ID == "admin_feedback_setup" {
+			if cap.UI.Enabled || !cap.CLI.Enabled || cap.MCP.Enabled || cap.UI.DisabledReason == "" {
+				t.Fatalf("feedback destination selector advertised: %+v", cap)
+			}
+			continue
+		}
 		if cap.Category != CategoryAdmin || !cap.UI.Enabled || cap.MCP.Enabled {
 			t.Fatalf("admin capability has unsafe surfaces: %#v", cap)
 		}

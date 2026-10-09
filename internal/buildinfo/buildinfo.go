@@ -11,13 +11,17 @@ var (
 	Version = defaultVersion
 	Commit  = ""
 	Date    = ""
+	// FeedbackRepository is distribution identity, not runtime configuration.
+	// Downstream builds may override it with -ldflags -X.
+	FeedbackRepository = "urandon/gitcode-mcp"
 )
 
 type Info struct {
-	Version string
-	Commit  string
-	Date    string
-	Source  string
+	Version            string
+	Commit             string
+	Date               string
+	Source             string
+	FeedbackRepository string
 }
 
 func Current() Info {
@@ -27,10 +31,11 @@ func Current() Info {
 
 func resolve(version, commit, date string, build *debug.BuildInfo) Info {
 	info := Info{
-		Version: strings.TrimPrefix(strings.TrimSpace(version), "v"),
-		Commit:  strings.TrimSpace(commit),
-		Date:    strings.TrimSpace(date),
-		Source:  "linker",
+		Version:            strings.TrimPrefix(strings.TrimSpace(version), "v"),
+		Commit:             strings.TrimSpace(commit),
+		Date:               strings.TrimSpace(date),
+		Source:             "linker",
+		FeedbackRepository: strings.TrimSpace(FeedbackRepository),
 	}
 	linkerMetadata := info.Version != "" && (info.Version != defaultVersion || info.Commit != "" || info.Date != "")
 	if linkerMetadata {

@@ -522,7 +522,7 @@ export type RAGRepairPlan = {
   blockers?: string[];
 };
 
-export type FeedbackReadinessState = 'disabled' | 'sink_missing' | 'repository_unbound' | 'credential_missing' | 'provider_unavailable' | 'ready';
+export type FeedbackReadinessState = 'configuration_conflict' | 'disabled' | 'sink_missing' | 'repository_unbound' | 'credential_missing' | 'provider_unavailable' | 'ready';
 
 export type FeedbackObservation = {
   state: FeedbackReadinessState;
@@ -633,6 +633,7 @@ export function statusTone(value: string | undefined): 'good' | 'warn' | 'bad' |
     case 'failed':
     case 'error':
     case 'blocked':
+    case 'configuration_conflict':
     case 'cache_schema_blocked':
     case 'unavailable':
       return 'bad';

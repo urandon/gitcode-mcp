@@ -12,69 +12,53 @@ returns `status=needs_context`, stable `missing_fields`, and targeted
 `follow_up_questions`. `submit_feedback` treats that state as a hard no-write
 boundary.
 
-## Configure the trusted sink
+## Build-owned destination
 
-Inspect readiness before preparing a report:
+Official builds send feedback to `urandon/gitcode-mcp`. This repository is
+product identity, not an operator-selected destination. Downstream distributions
+can override `gitcode-mcp/internal/buildinfo.FeedbackRepository` with Go linker
+metadata (`-ldflags '-X gitcode-mcp/internal/buildinfo.FeedbackRepository=example/distribution'`).
+The release builder accepts `RELEASE_FEEDBACK_REPOSITORY` and includes the selected
+identity in the archive README. No runtime environment variable retargets feedback.
 
-```sh
-gitcode-mcp feedback status --format json
-```
-
-The stable states, in blocking precedence order, are `disabled`,
-`sink_missing`, `repository_unbound`, `credential_missing`,
-`provider_unavailable`, and `ready`. Status is cache-first and side-effect-free:
-it does not probe GitCode, start a provider, or write configuration.
-
-For a repository already bound in the selected cache, render and apply the
-trusted global setup plan:
-
-```sh
-gitcode-mcp feedback setup --repo example-owner/feedback-repo --format json
-
-gitcode-mcp feedback setup \
-  --repo example-owner/feedback-repo \
-  --yes \
-  --plan-id feedback-plan-EXACT_PLAN_ID \
-  --idempotency-key feedback-setup-example \
-  --format json
-```
-
-The first command does not mutate configuration. The second requires the exact
-current plan id, claims a bounded durable idempotency receipt using only a hash
-of the caller key, updates only the global YAML feedback section through an
-atomic private-permission replacement, preserves unrelated YAML and comments,
-and verifies the effective policy. It never writes a credential or accepts an
-endpoint. Reusing a key for a different sink intent is rejected; retrying the
-same intent returns the original receipt without another config write while
-that receipt is retained. Terminal receipts have a 90-day retention window and
-the journal holds at most 256 total claims. At capacity the oldest terminal
-receipt is compacted; pending crash-recovery claims are reconciled against the
-current config digest before retention runs and are never discarded blindly.
-After a terminal receipt leaves that bounded window, its caller key may be used
-as a new operation key, so automation should retry promptly with the same key.
-
-The embedded Admin UI exposes the same readiness contract in **Maintenance →
-Feedback delivery**. It can render and confirm the setup plan only for a
-repository already bound in the effective cache. This is a trusted local
-configuration write, not a feedback submission: it never creates an issue,
-accepts an arbitrary destination, or exposes a credential, provider endpoint,
-or cache path. If receipt delivery is interrupted, retry the still-open
-confirmation to reuse the exact plan and idempotency key.
-
-The same configuration can also be supplied by a trusted installer or bundle:
-
-Add this to the global config:
+Only enablement and duplicate handling are runtime policy:
 
 ```yaml
 feedback:
   enabled: true
-  sink: gitcode_issues
-  repo_id: example-owner/feedback-repo
-  labels: feedback|dogfood
   duplicate_policy: suggest
 ```
 
-The sink repository is configuration-owned. `prepare_feedback`, `submit_feedback`, and the CLI do not accept a destination URL or repository override. The token still comes from the normal environment/keyring credential flow.
+Submission is opt-in (disabled by default); enabling it never submits automatically.
+The bound repository, credential, explicit live intent, idempotency, redaction,
+audit, provider confirmation and sanitized readback gates still apply.
+
+Inspect side-effect-free readiness with `gitcode-mcp feedback status --format json`.
+Blocking precedence is `configuration_conflict`, `disabled`,
+`repository_unbound`, `credential_missing`, `provider_unavailable`, then
+`ready`. The legacy `sink_missing` state remains readable for older snapshots.
+Preparation is available in every state; no status call probes GitCode or writes config.
+
+Absent legacy fields use the build identity. Matching legacy `repo_id`,
+`sink: gitcode_issues` and `labels: feedback|dogfood` are accepted.
+Conflicting values (including an explicitly empty sink) block submission with
+`configuration_conflict`; their raw values are not returned in readiness.
+Review the old intent and remove conflicting legacy fields explicitly before
+enabling submission. An upgrade never silently redirects a write.
+
+For compatibility, `gitcode-mcp feedback setup` renders an enablement plan for
+the already-bound build destination. Applying it still requires `--yes`, the
+exact `--plan-id` and `--idempotency-key`. The optional legacy `--repo`
+can only match the build destination. Conflicting configs are rejected without
+mutation. New setup writes only enablement and duplicate policy, preserves
+unrelated YAML, uses private atomic replacement and bounded durable receipts
+(90 days, at most 256 claims). Retained receipts replay without another write;
+pending crash claims are reconciled before compaction.
+
+Admin **Maintenance → Feedback delivery** shows the destination and readiness
+read-only, with prerequisite handoffs. It has no destination selector, setup
+plan, confirmation or report submission control. Deprecated setup backend
+calls remain guarded against runtime retargeting for older clients.
 
 ## MCP workflow
 

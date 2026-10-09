@@ -25,12 +25,12 @@ func feedbackService(t *testing.T, client gitcode.Client) (*Service, *cache.SQLi
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "feedback-repo", Owner: "example", Name: "feedback", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "urandon/gitcode-mcp", Owner: "urandon", Name: "gitcode-mcp", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("GITCODE_TOKEN", "test-token")
 	svc := NewWithClient(store, client)
-	svc.ConfigureFeedback(feedback.Config{Enabled: true, Sink: feedback.SinkGitCodeIssues, RepoID: "feedback-repo", Labels: []string{"feedback", "dogfood"}})
+	svc.ConfigureFeedback(feedback.Config{Enabled: true, Sink: feedback.SinkGitCodeIssues, RepoID: "urandon/gitcode-mcp", Labels: []string{"feedback", "dogfood"}})
 	return svc, store
 }
 
@@ -45,13 +45,13 @@ func TestSubmitFeedbackUsesAuditedIssueWriteAndReplays(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "submitted" || result.TicketID != "ISSUE-91" || result.TicketNumber != 91 || result.TicketURL != "https://gitcode.com/feedback-repo/issues/91" || client.createIssueCalls != 1 || !strings.Contains(client.lastCreateIssueRequest.Body, "gitcode-mcp-feedback:") {
+	if result.Status != "submitted" || result.TicketID != "ISSUE-91" || result.TicketNumber != 91 || result.TicketURL != "https://gitcode.com/urandon/gitcode-mcp/issues/91" || client.createIssueCalls != 1 || !strings.Contains(client.lastCreateIssueRequest.Body, "gitcode-mcp-feedback:") {
 		t.Fatalf("result=%#v calls=%d body=%q", result, client.createIssueCalls, client.lastCreateIssueRequest.Body)
 	}
 	if string(client.lastCreateIssueRequest.Labels) != `"feedback,dogfood"` || client.lastWriteOptions.IdempotencyKey != "feedback-submit-1" {
 		t.Fatalf("request=%#v options=%#v", client.lastCreateIssueRequest, client.lastWriteOptions)
 	}
-	entry, err := store.GetAuditEventByKey(context.Background(), "feedback-repo", "feedback-submit-1")
+	entry, err := store.GetAuditEventByKey(context.Background(), "urandon/gitcode-mcp", "feedback-submit-1")
 	if err != nil || entry == nil || entry.Status != "succeeded" {
 		t.Fatalf("audit entry=%#v err=%v", entry, err)
 	}
@@ -77,6 +77,22 @@ func TestSubmitFeedbackRequiresExplicitLiveModeAndConfiguration(t *testing.T) {
 	}
 	if result.Status != "submission_unavailable" || result.Readiness.State != feedback.ReadinessDisabled || result.Remediation == "" {
 		t.Fatalf("result=%#v", result)
+	}
+}
+
+func TestConflictingLegacyFeedbackDestinationNeverWrites(t *testing.T) {
+	client := &fakeGitCodeClient{onCreateIssue: func(gitcode.CreateIssueRequest, gitcode.WriteOptions) {
+		t.Fatal("conflicting configuration must never write")
+	}}
+	svc, _ := feedbackService(t, client)
+	svc.ConfigureFeedback(feedback.Config{Enabled: true, RepoID: "example/legacy"})
+	prepared, err := svc.PrepareFeedback(context.Background(), feedbackDraft())
+	if err != nil || prepared.Configured || !prepared.Readiness.PrepareAvailable || prepared.Readiness.State != feedback.ReadinessConfigurationConflict {
+		t.Fatalf("prepared=%+v err=%v", prepared, err)
+	}
+	result, err := svc.SubmitFeedback(context.Background(), SubmitFeedbackRequest{Draft: feedbackDraft(), Mode: WriteModeLive, IdempotencyKey: "conflicting-legacy"})
+	if err != nil || result.Status != "submission_unavailable" || result.Readiness.State != feedback.ReadinessConfigurationConflict || client.createIssueCalls != 0 {
+		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }
 
@@ -139,7 +155,7 @@ func TestPrepareFeedbackKeepsConfigurationAndDuplicateSemanticsSeparateFromReadi
 	if !prepared.Configured || prepared.Status != "prepared" || prepared.Readiness.State != feedback.ReadinessCredentialMissing {
 		t.Fatalf("prepared=%#v", prepared)
 	}
-	if err := store.UpsertSourceGraph(context.Background(), cache.SourceGraph{Source: cache.Source{RepoID: "feedback-repo", ID: "ISSUE-93", Kind: "issue", Path: "issues/93.md", Title: prepared.Title, Body: prepared.Body, Status: "open", ContentHash: "feedback-93", Provenance: cache.ProvenanceLive}}); err != nil {
+	if err := store.UpsertSourceGraph(context.Background(), cache.SourceGraph{Source: cache.Source{RepoID: "urandon/gitcode-mcp", ID: "ISSUE-93", Kind: "issue", Path: "issues/93.md", Title: prepared.Title, Body: prepared.Body, Status: "open", ContentHash: "feedback-93", Provenance: cache.ProvenanceLive}}); err != nil {
 		t.Fatal(err)
 	}
 	result, err := svc.SubmitFeedback(context.Background(), SubmitFeedbackRequest{Draft: feedbackDraft(), Mode: WriteModeLive, IdempotencyKey: "duplicate-without-credential"})
@@ -158,7 +174,7 @@ func TestFeedbackReadinessReportsExplicitMissingSinkAndSafeHandoff(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.State != feedback.ReadinessSinkMissing || strings.Contains(result.Handoff, ";") || result.Handoff != "gitcode-mcp feedback setup --repo OWNER/REPO" {
+	if result.State != feedback.ReadinessConfigurationConflict || strings.Contains(result.Handoff, ";") || result.Handoff != "gitcode-mcp config show --format json" {
 		t.Fatalf("readiness=%#v", result)
 	}
 }
@@ -166,10 +182,10 @@ func TestFeedbackReadinessReportsExplicitMissingSinkAndSafeHandoff(t *testing.T)
 func TestSubmitFeedbackReturnExistingPolicyDoesNotWriteLikelyDuplicate(t *testing.T) {
 	client := &fakeGitCodeClient{onCreateIssue: func(gitcode.CreateIssueRequest, gitcode.WriteOptions) { t.Fatal("provider must not be called") }}
 	svc, store := feedbackService(t, client)
-	if err := store.UpsertSourceGraph(context.Background(), cache.SourceGraph{Source: cache.Source{RepoID: "feedback-repo", ID: "ISSUE-42", Kind: "issue", Path: "issues/42.md", Title: "[Feedback/bug][sync] Exact issue sync required after bulk provider failure", Body: "manual feedback", Status: "open", ContentHash: "feedback-42", Provenance: cache.ProvenanceLive}}); err != nil {
+	if err := store.UpsertSourceGraph(context.Background(), cache.SourceGraph{Source: cache.Source{RepoID: "urandon/gitcode-mcp", ID: "ISSUE-42", Kind: "issue", Path: "issues/42.md", Title: "[Feedback/bug][sync] Exact issue sync required after bulk provider failure", Body: "manual feedback", Status: "open", ContentHash: "feedback-42", Provenance: cache.ProvenanceLive}}); err != nil {
 		t.Fatal(err)
 	}
-	svc.ConfigureFeedback(feedback.Config{Enabled: true, Sink: feedback.SinkGitCodeIssues, RepoID: "feedback-repo", DuplicatePolicy: feedback.DuplicatePolicyReturn})
+	svc.ConfigureFeedback(feedback.Config{Enabled: true, Sink: feedback.SinkGitCodeIssues, RepoID: "urandon/gitcode-mcp", DuplicatePolicy: feedback.DuplicatePolicyReturn})
 	result, err := svc.SubmitFeedback(context.Background(), SubmitFeedbackRequest{Draft: feedbackDraft(), Mode: WriteModeLive, IdempotencyKey: "return-existing"})
 	if err != nil {
 		t.Fatal(err)
@@ -191,7 +207,7 @@ func TestCreateIssueClaimsIdempotencyBeforeProviderCall(t *testing.T) {
 		<-release
 	}
 	svc, _ := feedbackService(t, client)
-	req := WriteCommandRequest{RepoID: "feedback-repo", Mode: WriteModeLive, Title: "Concurrent", Body: "body", IdempotencyKey: "concurrent-create"}
+	req := WriteCommandRequest{RepoID: "urandon/gitcode-mcp", Mode: WriteModeLive, Title: "Concurrent", Body: "body", IdempotencyKey: "concurrent-create"}
 	firstDone := make(chan error, 1)
 	go func() {
 		_, err := svc.CreateIssue(context.Background(), req)

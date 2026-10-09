@@ -61,7 +61,7 @@ var writeCapabilities = []Capability{
 		CLIName:        "feedback",
 		MCPName:        "feedback_status",
 		ServiceCommand: "feedback-status",
-		Description:    "Report side-effect-free feedback preparation and submission readiness, including the exact trusted setup handoff when submission is unavailable.",
+		Description:    "Report side-effect-free feedback preparation and submission readiness and the immutable build-owned destination (urandon/gitcode-mcp in official builds). Callers cannot select a destination. Includes prerequisite handoffs when submission is unavailable.",
 		UI:             enabled("Visible in the loopback Admin feedback delivery workbench."),
 		CLI:            enabled("Available as the grouped CLI command `feedback status`."),
 		MCP:            enabled(),
@@ -84,7 +84,7 @@ var writeCapabilities = []Capability{
 		CLIName:        "feedback",
 		MCPName:        "submit_feedback",
 		ServiceCommand: "submit-feedback",
-		Description:    "Submit complete evidence-backed product feedback through the audited write lifecycle. Use after prepare_feedback when every targeted context question is answered and external issue creation is authorized. Submission is blocked before any provider write when the goal, circumstances, reproduction, fallback, or acceptance signal is missing or low-information. Do not include prompts, transcripts, credentials, cookies, private repository content, raw API payloads, or speculative evidence; likely duplicates are returned for explicit review.",
+		Description:    "Submit complete evidence-backed product feedback to the immutable build-owned GitCode issue destination through the audited write lifecycle. Use after prepare_feedback when every targeted context question is answered and external issue creation is authorized. Submission is blocked before any provider write when the goal, circumstances, reproduction, fallback, or acceptance signal is missing or low-information. Do not include prompts, transcripts, credentials, cookies, private repository content, raw API payloads, or speculative evidence; likely duplicates are returned for explicit review.",
 		CLI:            enabled("Available as the grouped CLI command `feedback submit`."),
 		MCP:            enabled(),
 	},
@@ -463,8 +463,8 @@ var adminCapabilities = []Capability{
 	{
 		ID: "admin_feedback_setup", Category: CategoryAdmin, Safety: SafetyAuditedWrite,
 		CLIName: "feedback", ServiceCommand: "feedback-setup",
-		Description: "Plan and atomically configure a trusted feedback sink using only a repository already bound in the effective cache.",
-		UI:          enabled("Available in the loopback Admin feedback delivery workbench."), CLI: enabled("Available as `feedback setup`."), MCP: disabled("Trusted global setup is a local CLI or loopback Admin operation."),
+		Description: "Compatibility enablement of the immutable build-owned feedback destination, with reviewed local configuration and durable receipts.",
+		UI:          disabled("Feedback destination is read-only build identity."), CLI: enabled("Compatibility command `feedback setup`; cannot retarget the destination."), MCP: disabled("Feedback enablement is a trusted local CLI operation."),
 	},
 	{
 		ID: "admin_maintenance_conflict_resolution", Category: CategoryAdmin, Safety: SafetyAuditedWrite,

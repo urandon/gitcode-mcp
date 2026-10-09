@@ -111,27 +111,18 @@ func (m Manager) adminFeedbackObservation(ctx context.Context) adminhttp.Feedbac
 		return adminhttp.FeedbackObservation{Readiness: feedback.EvaluateReadiness(feedback.ReadinessInput{Config: feedback.DefaultConfig()}), SetupRepositories: []string{}}
 	}
 	bound := false
-	repositories := []string{}
 	cachePath := effective.Config.CachePath
 	if strings.TrimSpace(m.AdminCachePath) != "" {
 		cachePath = m.AdminCachePath
 	}
 	if store, openErr := cache.NewSQLiteReadOnlyStore(ctx, cachePath); openErr == nil {
 		defer store.Close()
-		if bindings, listErr := store.ListRepositories(ctx); listErr == nil {
-			for _, binding := range bindings {
-				if feedback.ValidRepositoryID(binding.RepoID) {
-					repositories = append(repositories, binding.RepoID)
-				}
-			}
-		}
 		repoID := strings.TrimSpace(effective.Config.Feedback.RepoID)
 		if effective.Config.Feedback.Enabled && repoID != "" {
 			_, getErr := store.GetRepository(ctx, repoID)
 			bound = getErr == nil
 		}
 	}
-	sort.Strings(repositories)
 	credentialPresent := false
 	feedbackConfig := effective.Config.Feedback
 	if feedbackConfig.Enabled && strings.TrimSpace(feedbackConfig.Sink) == feedback.SinkGitCodeIssues && strings.TrimSpace(feedbackConfig.RepoID) != "" && bound {
@@ -146,8 +137,8 @@ func (m Manager) adminFeedbackObservation(ctx context.Context) adminhttp.Feedbac
 			Config: feedbackConfig, RepositoryBound: bound,
 			CredentialPresent: credentialPresent, ProviderAvailable: !m.Offline,
 		}),
-		SetupRepositories: repositories,
-		SetupAvailable:    len(repositories) > 0,
+		SetupRepositories: []string{}, // Deprecated compatibility fields; no destination selector.
+		SetupAvailable:    false,
 	}
 }
 

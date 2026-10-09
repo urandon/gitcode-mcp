@@ -73,7 +73,9 @@ func normalizeFeedbackConfig(cfg feedback.Config) feedback.Config {
 	if normalized, err := feedback.NormalizeConfig(cfg); err == nil {
 		return normalized
 	}
-	return feedback.DefaultConfig()
+	fallback := feedback.DefaultConfig()
+	fallback.ConfigurationConflict = true
+	return fallback
 }
 
 func (s *Service) ConfigureFeedback(cfg feedback.Config) {

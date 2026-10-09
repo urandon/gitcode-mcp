@@ -413,7 +413,7 @@ func TestFeedbackStatusAndTrustedSetupFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "example/feedback", Owner: "example", Name: "feedback", APIBaseURL: "https://api.gitcode.com/api/v5", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "urandon/gitcode-mcp", Owner: "urandon", Name: "gitcode-mcp", APIBaseURL: "https://api.gitcode.com/api/v5", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
 		t.Fatal(err)
 	}
 	_ = store.Close()
@@ -425,7 +425,7 @@ func TestFeedbackStatusAndTrustedSetupFlow(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := executeWithFactoryAndDeps([]string{"feedback", "setup", "--repo", "example/feedback", "--format", "json"}, &stdout, &stderr, nil, deps); code != 0 || !strings.Contains(stdout.String(), `"status": "confirmation_required"`) {
+	if code := executeWithFactoryAndDeps([]string{"feedback", "setup", "--format", "json"}, &stdout, &stderr, nil, deps); code != 0 || !strings.Contains(stdout.String(), `"status": "confirmation_required"`) {
 		t.Fatalf("plan code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	var renderedPlan config.FeedbackSetupPlan
@@ -438,20 +438,20 @@ func TestFeedbackStatusAndTrustedSetupFlow(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := executeWithFactoryAndDeps([]string{"feedback", "setup", "--repo", "example/feedback", "--yes", "--plan-id", renderedPlan.PlanID, "--idempotency-key", "feedback-setup-example", "--format", "json"}, &stdout, &stderr, nil, deps); code != 0 || !strings.Contains(stdout.String(), `"status": "configured"`) || !strings.Contains(stdout.String(), `"state": "ready"`) {
+	if code := executeWithFactoryAndDeps([]string{"feedback", "setup", "--repo", "urandon/gitcode-mcp", "--yes", "--plan-id", renderedPlan.PlanID, "--idempotency-key", "feedback-setup-example", "--format", "json"}, &stdout, &stderr, nil, deps); code != 0 || !strings.Contains(stdout.String(), `"status": "configured"`) || !strings.Contains(stdout.String(), `"state": "ready"`) {
 		t.Fatalf("apply code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	after, err := os.ReadFile(configPath)
-	if err != nil || !strings.Contains(string(after), "# retained operator note") || !strings.Contains(string(after), "repo_id: example/feedback") {
+	if err != nil || !strings.Contains(string(after), "# retained operator note") || !strings.Contains(string(after), "enabled: true") || strings.Contains(string(after), "repo_id:") {
 		t.Fatalf("config=%s err=%v", after, err)
 	}
 	stdout.Reset()
 	stderr.Reset()
-	replayPlan, err := config.PlanFeedbackSetup(src, "example/feedback")
+	replayPlan, err := config.PlanFeedbackSetup(src, "urandon/gitcode-mcp")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code := executeWithFactoryAndDeps([]string{"feedback", "setup", "--repo", "example/feedback", "--yes", "--plan-id", replayPlan.PlanID, "--idempotency-key", "feedback-setup-example", "--format", "json"}, &stdout, &stderr, nil, deps); code != 0 || !strings.Contains(stdout.String(), `"status": "configured"`) || !strings.Contains(stdout.String(), `"replayed": true`) {
+	if code := executeWithFactoryAndDeps([]string{"feedback", "setup", "--repo", "urandon/gitcode-mcp", "--yes", "--plan-id", replayPlan.PlanID, "--idempotency-key", "feedback-setup-example", "--format", "json"}, &stdout, &stderr, nil, deps); code != 0 || !strings.Contains(stdout.String(), `"status": "configured"`) || !strings.Contains(stdout.String(), `"replayed": true`) {
 		t.Fatalf("replay code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	stdout.Reset()
@@ -493,14 +493,14 @@ func TestFeedbackSetupRejectsUnboundTargetAndWrongConfirmationWithoutMutation(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "example/bound", Owner: "example", Name: "bound"}); err != nil {
+	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "urandon/gitcode-mcp", Owner: "urandon", Name: "gitcode-mcp"}); err != nil {
 		t.Fatal(err)
 	}
 	_ = store.Close()
 	deps := localCommandDeps{Source: src, CredentialReporter: statusReporter{status: config.CredentialStatus{Present: true}}}
 	for _, args := range [][]string{
 		{"feedback", "setup", "--repo", "example/unbound", "--format", "json"},
-		{"feedback", "setup", "--repo", "example/bound", "--yes", "--plan-id", "wrong-plan", "--idempotency-key", "setup-bound", "--format", "json"},
+		{"feedback", "setup", "--repo", "urandon/gitcode-mcp", "--yes", "--plan-id", "wrong-plan", "--idempotency-key", "setup-bound", "--format", "json"},
 	} {
 		var stdout, stderr bytes.Buffer
 		if code := executeWithFactoryAndDeps(args, &stdout, &stderr, nil, deps); code == 0 {
