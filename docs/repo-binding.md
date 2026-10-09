@@ -43,6 +43,14 @@ gitcode-mcp repo add \
 
 `repo init-local` accepts the same repository identity flags. Its `--scopes` default is `issues,wiki,pulls,comments`, and `--overwrite` replaces an existing `.gitcode/gitcode-mcp.yaml` when it already declares a different `cache_mode`.
 
+`repo init-local` always bootstraps the worktree cache, even when defaults,
+environment variables, or global configuration select another cache for routine
+commands. Omit `--cache-path`; an explicitly supplied nonempty path (including
+a global flag before `repo`) is rejected before bootstrap writes. The legacy
+empty `--cache-path ''` workaround after the command remains accepted but is
+unnecessary. After bootstrap, normal cache-selection precedence still applies
+to other commands.
+
 For a GitCode-compatible deployment at another endpoint, set `gitcode_base_url` in configuration or pass an explicit override:
 
 ```sh
