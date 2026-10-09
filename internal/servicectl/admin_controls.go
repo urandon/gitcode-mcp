@@ -118,6 +118,9 @@ func (m *AdminControlManager) ApplyFeedbackSetup(ctx context.Context, req adminh
 }
 
 func (m *AdminControlManager) feedbackSetupEffective(ctx context.Context, repoID string) (config.EffectiveConfig, error) {
+	if repoID != feedback.DefaultConfig().RepoID {
+		return config.EffectiveConfig{}, adminhttp.ControlError{Status: http.StatusConflict, Code: "feedback_destination_immutable", Field: "repo_id", Message: "Feedback destination is owned by this build.", Remediation: "Use feedback status to inspect the build-owned destination."}
+	}
 	if !feedback.ValidRepositoryID(repoID) {
 		return config.EffectiveConfig{}, adminhttp.ControlError{Status: http.StatusBadRequest, Code: "invalid_request", Field: "repo_id", Message: "repo_id must be an exact owner/repository identity.", Remediation: "Select a repository already bound in the effective cache."}
 	}

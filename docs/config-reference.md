@@ -42,9 +42,6 @@ mcp:
     access: write
 feedback:
   enabled: false
-  sink: gitcode_issues
-  repo_id: example-owner/feedback-repo
-  labels: feedback|dogfood
   duplicate_policy: suggest
 credential:
   store: auto
@@ -105,14 +102,14 @@ rag:
 | `format` | string | `text` | Default output format (`text` or `json`) |
 | `mcp.tools.access` | string | `write` | MCP discovery policy. `write` exposes read and write tools; `read` explicitly selects the read/status-only surface. Write calls still require `write_mode: "live"` and the normal readiness/audit gates. |
 | `feedback.enabled` | bool | `false` | Enables submission to the trusted feedback sink. Preparation and `feedback status` remain available while disabled. |
-| `feedback.sink` | string | `gitcode_issues` | Feedback destination adapter. The first supported sink is GitCode issues. |
+| `feedback.sink` | legacy string | `gitcode_issues` | Matching legacy value accepted; conflicting values block submission. |
 | `service.job_retention.success_ttl` | duration | `48h` | TTL for succeeded and superseded jobs; bounded to 1 minute–90 days. |
 | `service.job_retention.diagnostic_ttl` | duration | `336h` | TTL for failed, interrupted, and cancelled jobs; must be at least the success TTL and at most 365 days. |
 | `service.job_retention.max_terminal_jobs` | int | `128` | Absolute terminal-history cap (1–4096); active jobs are never pruned. |
 | `service.job_retention.max_diagnostic_jobs` | int | `32` | Separate hard bound for latest-failure-per-registration/work-stream preservation. |
 | `service.job_retention.max_progress_events` | int | `256` | Per-job progress-event cap (1–4096). |
-| `feedback.repo_id` | string | empty | Preconfigured repository binding used by the sink. Callers cannot override this destination. Required when feedback is enabled. |
-| `feedback.labels` | pipe-separated string | empty | Labels attached to newly submitted reports, for example `feedback\|dogfood`. |
+| `feedback.repo_id` | legacy string | build-owned | Official identity is `urandon/gitcode-mcp`. Absent/matching values accepted; conflicts block submission. |
+| `feedback.labels` | legacy pipe-separated string | `feedback dogfood` | Fixed product labels; matching legacy values accepted, conflicts block submission. |
 | `feedback.duplicate_policy` | string | `suggest` | Duplicate handling policy. `suggest` blocks on likely candidates for explicit review; `return_existing` selects the strongest likely match without writing. Exact fingerprint matches never create another issue. |
 | `credential.store` | string | `auto` | Credential lookup mode: `auto` checks `GITCODE_TOKEN` then the system keyring, `env` checks only `GITCODE_TOKEN`, and `keyring` checks the system keyring after env fallback. `keychain` is accepted as a legacy alias for `keyring`. |
 | `credential.keyring_service` | string | `gitcode-mcp` | System keyring service name used when `credential.store` is `auto` or `keyring`. Override it to isolate credentials for different agents or profiles. |
@@ -248,24 +245,18 @@ Each provider should declare `data_boundary` as `local_process`, `local_network`
 
 ## Structured feedback
 
-The feedback sink is disabled by default. Configure it only in a trusted global configuration because it authorizes where `submit_feedback` may create issues. Neither MCP nor CLI accepts an arbitrary destination repository. See [Structured Feedback](feedback.md) for preparation, redaction, duplicate handling, and submission examples.
+The build owns the feedback destination (official default `urandon/gitcode-mcp`).
+Runtime policy is only `feedback.enabled` (false by default) and
+`feedback.duplicate_policy`. Legacy destination, sink and label fields are
+accepted only when matching; conflicts produce `configuration_conflict` and
+block submission without silently redirecting it. Downstream destinations require
+build-time linker metadata, never runtime configuration.
 
-`gitcode-mcp feedback setup --repo OWNER/REPO` renders a path-free plan for an
-already bound repository. Applying it requires `--yes`, the exact `--plan-id`,
-and an idempotency key. The atomic update preserves unrelated YAML and comments,
-uses private file permissions, and records a bounded durable receipt keyed by a
-SHA-256 digest rather than the raw idempotency key. It never stores a credential
-or accepts an endpoint. Terminal receipts are retained for 90 days subject to a
-256-claim journal bound; capacity compaction removes the oldest terminal receipt
-only after pending claims have been reconciled from config digests. Generic binaries
-remain destination-neutral; trusted bundles may use this same global contract
-to supply their feedback repository.
-
-The Admin Maintenance view projects the same six readiness states and offers a
-CSRF-bound plan/confirm/apply setup control. Its target selector is derived only
-from repositories already bound in the effective cache. The browser cannot
-provide a repository override, credential, endpoint, or filesystem path, and
-setup never submits an issue.
+Admin displays destination and readiness read-only. The compatibility CLI
+`feedback setup` can enable only the build-owned, already-bound repository,
+with exact plan confirmation and durable idempotency receipts. There is no
+Admin destination selector or setup confirmation. See [Structured Feedback](feedback.md)
+for migration, readiness, build overrides and unchanged write/privacy gates.
 
 ## Runtime audit
 

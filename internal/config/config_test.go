@@ -116,23 +116,24 @@ func TestConfigLoading(t *testing.T) {
 		src := newMemorySource(t)
 		configPath := filepath.Join(t.TempDir(), "startup.yaml")
 		src.env[EnvMCPConfigPath] = configPath
-		src.files[configPath] = []byte("feedback:\n  enabled: true\n  sink: gitcode_issues\n  repo_id: example/feedback\n  labels: feedback|dogfood\n  duplicate_policy: suggest\n")
+		src.files[configPath] = []byte("feedback:\n  enabled: true\n  sink: gitcode_issues\n  repo_id: urandon/gitcode-mcp\n  labels: feedback|dogfood\n  duplicate_policy: suggest\n")
 		cfg, err := Load(src, Overrides{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !cfg.Feedback.Enabled || cfg.Feedback.RepoID != "example/feedback" || strings.Join(cfg.Feedback.Labels, ",") != "feedback,dogfood" || cfg.Feedback.DuplicatePolicy != "suggest" {
+		if !cfg.Feedback.Enabled || cfg.Feedback.RepoID != "urandon/gitcode-mcp" || strings.Join(cfg.Feedback.Labels, ",") != "feedback,dogfood" || cfg.Feedback.DuplicatePolicy != "suggest" {
 			t.Fatalf("feedback config=%#v", cfg.Feedback)
 		}
 	})
 
-	t.Run("SCN-CONFIG-FEEDBACK-ENABLED-REQUIRES-REPO", func(t *testing.T) {
+	t.Run("SCN-CONFIG-FEEDBACK-ENABLED-USES-BUILD-REPO", func(t *testing.T) {
 		src := newMemorySource(t)
 		configPath := filepath.Join(t.TempDir(), "startup.json")
 		src.env[EnvConfigPath] = configPath
 		src.files[configPath] = []byte(`{"feedback":{"enabled":true}}`)
-		if _, err := Load(src, Overrides{}); err == nil || !strings.Contains(err.Error(), "repo_id") {
-			t.Fatalf("err=%v, want feedback repo validation", err)
+		cfg, err := Load(src, Overrides{})
+		if err != nil || cfg.Feedback.RepoID != "urandon/gitcode-mcp" || cfg.Feedback.ConfigurationConflict {
+			t.Fatalf("cfg=%#v err=%v, want build-owned destination", cfg.Feedback, err)
 		}
 	})
 
@@ -140,12 +141,12 @@ func TestConfigLoading(t *testing.T) {
 		src := newMemorySource(t)
 		configPath := filepath.Join(t.TempDir(), "startup.yaml")
 		src.env[EnvMCPConfigPath] = configPath
-		src.files[configPath] = []byte("feedback:\n  enabled: true\n  sink: \"\"\n  repo_id: example/feedback\n")
+		src.files[configPath] = []byte("feedback:\n  enabled: true\n  sink: \"\"\n  repo_id: urandon/gitcode-mcp\n")
 		cfg, err := Load(src, Overrides{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if cfg.Feedback.Sink != "" || !cfg.Feedback.SinkExplicit {
+		if !cfg.Feedback.ConfigurationConflict {
 			t.Fatalf("explicit empty sink was hidden: %#v", cfg.Feedback)
 		}
 	})

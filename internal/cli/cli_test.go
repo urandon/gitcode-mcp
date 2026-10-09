@@ -1421,8 +1421,8 @@ func TestServiceCachePathOverrideControlsAdminFeedbackBindings(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(snapshot.Feedback.SetupRepositories, ","); got != "owner/active" {
-		t.Fatalf("feedback setup repositories=%q, want active override only", got)
+	if snapshot.Feedback.SetupAvailable || len(snapshot.Feedback.SetupRepositories) != 0 || snapshot.Feedback.RepoID != "urandon/gitcode-mcp" {
+		t.Fatalf("feedback destination must be read-only build identity: %+v", snapshot.Feedback)
 	}
 
 	cancel()

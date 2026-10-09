@@ -148,11 +148,11 @@ func TestObservationSnapshotPreservesEveryFeedbackReadinessState(t *testing.T) {
 		state string
 	}{
 		{name: "disabled", input: feedback.ReadinessInput{Config: feedback.DefaultConfig(), RepositoryBound: true, CredentialPresent: true, ProviderAvailable: true}, state: feedback.ReadinessDisabled},
-		{name: "sink missing", input: feedback.ReadinessInput{Config: feedback.Config{Enabled: true, SinkExplicit: true, RepoID: "owner/repo"}, RepositoryBound: true, CredentialPresent: true, ProviderAvailable: true}, state: feedback.ReadinessSinkMissing},
-		{name: "repository unbound", input: feedback.ReadinessInput{Config: feedback.Config{Enabled: true, Sink: feedback.SinkGitCodeIssues, RepoID: "owner/repo"}, CredentialPresent: true, ProviderAvailable: true}, state: feedback.ReadinessRepositoryUnbound},
-		{name: "credential missing", input: feedback.ReadinessInput{Config: feedback.Config{Enabled: true, Sink: feedback.SinkGitCodeIssues, RepoID: "owner/repo"}, RepositoryBound: true, ProviderAvailable: true}, state: feedback.ReadinessCredentialMissing},
-		{name: "provider unavailable", input: feedback.ReadinessInput{Config: feedback.Config{Enabled: true, Sink: feedback.SinkGitCodeIssues, RepoID: "owner/repo"}, RepositoryBound: true, CredentialPresent: true}, state: feedback.ReadinessProviderUnavailable},
-		{name: "ready", input: feedback.ReadinessInput{Config: feedback.Config{Enabled: true, Sink: feedback.SinkGitCodeIssues, RepoID: "owner/repo"}, RepositoryBound: true, CredentialPresent: true, ProviderAvailable: true}, state: feedback.ReadinessReady},
+		{name: "sink missing", input: feedback.ReadinessInput{Config: feedback.Config{Enabled: true, SinkExplicit: true, RepoID: "urandon/gitcode-mcp"}, RepositoryBound: true, CredentialPresent: true, ProviderAvailable: true}, state: feedback.ReadinessConfigurationConflict},
+		{name: "repository unbound", input: feedback.ReadinessInput{Config: feedback.Config{Enabled: true, Sink: feedback.SinkGitCodeIssues, RepoID: "urandon/gitcode-mcp"}, CredentialPresent: true, ProviderAvailable: true}, state: feedback.ReadinessRepositoryUnbound},
+		{name: "credential missing", input: feedback.ReadinessInput{Config: feedback.Config{Enabled: true, Sink: feedback.SinkGitCodeIssues, RepoID: "urandon/gitcode-mcp"}, RepositoryBound: true, ProviderAvailable: true}, state: feedback.ReadinessCredentialMissing},
+		{name: "provider unavailable", input: feedback.ReadinessInput{Config: feedback.Config{Enabled: true, Sink: feedback.SinkGitCodeIssues, RepoID: "urandon/gitcode-mcp"}, RepositoryBound: true, CredentialPresent: true}, state: feedback.ReadinessProviderUnavailable},
+		{name: "ready", input: feedback.ReadinessInput{Config: feedback.Config{Enabled: true, Sink: feedback.SinkGitCodeIssues, RepoID: "urandon/gitcode-mcp"}, RepositoryBound: true, CredentialPresent: true, ProviderAvailable: true}, state: feedback.ReadinessReady},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

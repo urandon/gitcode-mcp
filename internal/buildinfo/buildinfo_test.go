@@ -37,3 +37,9 @@ func TestResolveKeepsDefaultForDevelopmentBuild(t *testing.T) {
 		t.Fatalf("resolve development build = %#v", got)
 	}
 }
+
+func TestBuildMetadataExposesFeedbackIdentity(t *testing.T) {
+	if Current().FeedbackRepository != "urandon/gitcode-mcp" {
+		t.Fatalf("build identity=%+v", Current())
+	}
+}

@@ -87,6 +87,13 @@ func PlanFeedbackSetup(src Source, repoID string) (FeedbackSetupPlan, error) {
 		src = OSSource{}
 	}
 	repoID = strings.TrimSpace(repoID)
+	owned := feedback.DefaultConfig().RepoID
+	if repoID == "" {
+		repoID = owned
+	}
+	if repoID != owned {
+		return FeedbackSetupPlan{}, fmt.Errorf("feedback setup: destination is build-owned; runtime retargeting is not supported")
+	}
 	if !feedback.ValidRepositoryID(repoID) {
 		return FeedbackSetupPlan{}, fmt.Errorf("feedback setup: repo must be an exact owner/repository id")
 	}
@@ -101,6 +108,13 @@ func PlanFeedbackSetup(src Source, repoID string) (FeedbackSetupPlan, error) {
 	next, already, labels, policy, err := renderFeedbackSetupYAML(current, repoID)
 	if err != nil {
 		return FeedbackSetupPlan{}, err
+	}
+	loaded, err := Load(src, Overrides{})
+	if err != nil {
+		return FeedbackSetupPlan{}, fmt.Errorf("feedback setup: trusted configuration is invalid")
+	}
+	if loaded.Feedback.ConfigurationConflict {
+		return FeedbackSetupPlan{}, fmt.Errorf("feedback setup: configuration_conflict; review conflicting legacy feedback fields before enabling submission")
 	}
 	beforeDigest := digestBytes(current)
 	afterDigest := digestBytes(next)
@@ -364,19 +378,23 @@ func renderFeedbackSetupYAML(data []byte, repoID string) ([]byte, bool, []string
 	if err != nil {
 		return nil, false, nil, "", err
 	}
-	labels := yamlScalar(section, "labels")
-	if strings.TrimSpace(labels) == "" {
-		labels = "feedback|dogfood"
-	}
+	labels := "feedback|dogfood"
 	policy := yamlScalar(section, "duplicate_policy")
 	if policy != feedback.DuplicatePolicyReturn {
 		policy = feedback.DuplicatePolicySuggest
 	}
-	already := yamlScalar(section, "enabled") == "true" && yamlScalar(section, "sink") == feedback.SinkGitCodeIssues && yamlScalar(section, "repo_id") == repoID && yamlScalar(section, "labels") == labels && yamlScalar(section, "duplicate_policy") == policy
+	already := yamlScalar(section, "enabled") == "true" && (yamlScalar(section, "duplicate_policy") == "" || yamlScalar(section, "duplicate_policy") == policy)
 	setYAMLScalar(section, "enabled", "true", "!!bool")
-	setYAMLScalar(section, "sink", feedback.SinkGitCodeIssues, "!!str")
-	setYAMLScalar(section, "repo_id", repoID, "!!str")
-	setYAMLScalar(section, "labels", labels, "!!str")
+	// New runtime configuration contains no destination or label policy. Matching
+	// legacy values are accepted on load; conflicts are rejected before apply.
+	for i := 0; i+1 < len(section.Content); {
+		key := section.Content[i].Value
+		if key == "sink" || key == "repo_id" || key == "labels" {
+			section.Content = append(section.Content[:i], section.Content[i+2:]...)
+		} else {
+			i += 2
+		}
+	}
 	setYAMLScalar(section, "duplicate_policy", policy, "!!str")
 	var out bytes.Buffer
 	encoder := yaml.NewEncoder(&out)

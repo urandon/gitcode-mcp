@@ -25,7 +25,7 @@ func TestAdminFeedbackSetupPlanApplyAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertRepo(ctx, cache.RepositoryBinding{RepoID: "owner/feedback", Owner: "owner", Name: "feedback", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+	if err := store.UpsertRepo(ctx, cache.RepositoryBinding{RepoID: "urandon/gitcode-mcp", Owner: "urandon", Name: "gitcode-mcp", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -43,10 +43,10 @@ func TestAdminFeedbackSetupPlanApplyAndReplay(t *testing.T) {
 	controls := NewAdminControlManager(manager, NewMaintenanceManager(manager, NewJobManager(""), ""), NewJobManager(""), NewAdminControlReceiptManager(filepath.Join(root, "controls.json")))
 
 	before := manager.adminFeedbackObservation(ctx)
-	if before.State != "disabled" || !before.SetupAvailable || strings.Join(before.SetupRepositories, ",") != "owner/feedback" {
+	if before.State != "disabled" || before.SetupAvailable || len(before.SetupRepositories) != 0 || before.RepoID != "urandon/gitcode-mcp" {
 		t.Fatalf("before=%+v", before)
 	}
-	planned, err := controls.PlanFeedbackSetup(ctx, adminhttp.FeedbackSetupRequest{RepoID: "owner/feedback"})
+	planned, err := controls.PlanFeedbackSetup(ctx, adminhttp.FeedbackSetupRequest{RepoID: "urandon/gitcode-mcp"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestAdminFeedbackSetupPlanApplyAndReplay(t *testing.T) {
 	if !ok || plan.Status != "confirmation_required" || plan.PlanID == "" || !plan.ConfirmationRequired {
 		t.Fatalf("plan=%#v", planned)
 	}
-	req := adminhttp.FeedbackSetupRequest{RepoID: "owner/feedback", PlanID: plan.PlanID, IdempotencyKey: "admin-feedback-setup-1"}
+	req := adminhttp.FeedbackSetupRequest{RepoID: "urandon/gitcode-mcp", PlanID: plan.PlanID, IdempotencyKey: "admin-feedback-setup-1"}
 	appliedAny, err := controls.ApplyFeedbackSetup(ctx, req)
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +99,7 @@ func TestAdminFeedbackSetupPlanApplyAndReplay(t *testing.T) {
 	if strings.Contains(encoded, "api.gitcode.com") {
 		t.Fatal("feedback setup exposed a provider endpoint")
 	}
-	if _, err := controls.PlanFeedbackSetup(ctx, adminhttp.FeedbackSetupRequest{RepoID: "owner/unbound"}); err == nil || !strings.Contains(fmt.Sprintf("%v", err), "repository_unbound") {
+	if _, err := controls.PlanFeedbackSetup(ctx, adminhttp.FeedbackSetupRequest{RepoID: "owner/unbound"}); err == nil || !strings.Contains(fmt.Sprintf("%v", err), "feedback_destination_immutable") {
 		t.Fatalf("unbound err=%v", err)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"gitcode-mcp/internal/buildinfo"
 	"gitcode-mcp/internal/diagnostics"
 )
 
@@ -23,12 +24,13 @@ const (
 	DuplicatePolicyReturn   = "return_existing"
 	DuplicateOverrideCreate = "create"
 
-	ReadinessDisabled            = "disabled"
-	ReadinessSinkMissing         = "sink_missing"
-	ReadinessRepositoryUnbound   = "repository_unbound"
-	ReadinessCredentialMissing   = "credential_missing"
-	ReadinessProviderUnavailable = "provider_unavailable"
-	ReadinessReady               = "ready"
+	ReadinessDisabled              = "disabled"
+	ReadinessSinkMissing           = "sink_missing"
+	ReadinessRepositoryUnbound     = "repository_unbound"
+	ReadinessCredentialMissing     = "credential_missing"
+	ReadinessProviderUnavailable   = "provider_unavailable"
+	ReadinessReady                 = "ready"
+	ReadinessConfigurationConflict = "configuration_conflict"
 )
 
 var (
@@ -39,12 +41,13 @@ var (
 )
 
 type Config struct {
-	Enabled         bool     `json:"enabled"`
-	Sink            string   `json:"sink"`
-	RepoID          string   `json:"repo_id"`
-	Labels          []string `json:"labels,omitempty"`
-	DuplicatePolicy string   `json:"duplicate_policy"`
-	SinkExplicit    bool     `json:"-"`
+	Enabled               bool     `json:"enabled"`
+	Sink                  string   `json:"sink"`
+	RepoID                string   `json:"repo_id"`
+	Labels                []string `json:"labels,omitempty"`
+	DuplicatePolicy       string   `json:"duplicate_policy"`
+	SinkExplicit          bool     `json:"-"`
+	ConfigurationConflict bool     `json:"configuration_conflict,omitempty"`
 }
 
 type ReadinessCheck struct {
@@ -75,32 +78,39 @@ type ReadinessInput struct {
 }
 
 func EvaluateReadiness(input ReadinessInput) Readiness {
-	cfg := input.Config
+	cfg, err := NormalizeConfig(input.Config)
+	if err != nil {
+		cfg.ConfigurationConflict = true
+	}
 	result := Readiness{
 		PrepareAvailable: true,
 		Sink:             strings.TrimSpace(cfg.Sink),
 		RepoID:           strings.TrimSpace(cfg.RepoID),
 		Checks: []ReadinessCheck{
 			{ID: "enabled", Status: checkStatus(cfg.Enabled)},
-			{ID: "sink", Status: checkStatus(strings.TrimSpace(cfg.Sink) == SinkGitCodeIssues)},
+			{ID: "sink", Status: checkStatus(!cfg.ConfigurationConflict && strings.TrimSpace(cfg.Sink) == SinkGitCodeIssues)},
 			{ID: "repository_binding", Status: checkStatus(input.RepositoryBound)},
 			{ID: "credential", Status: checkStatus(input.CredentialPresent)},
 			{ID: "provider", Status: checkStatus(input.ProviderAvailable)},
 		},
 	}
 	switch {
+	case cfg.ConfigurationConflict:
+		result.State = ReadinessConfigurationConflict
+		result.Remediation = "legacy feedback configuration conflicts with the build-owned destination or policy; review and remove conflicting legacy fields before submission"
+		result.Handoff = "gitcode-mcp config show --format json"
 	case !cfg.Enabled:
 		result.State = ReadinessDisabled
-		result.Remediation = "enable a trusted feedback sink before submission"
-		result.Handoff = "gitcode-mcp feedback setup --repo OWNER/REPO"
+		result.Remediation = "set feedback.enabled=true in trusted global configuration; the destination is owned by this build"
+		result.Handoff = "gitcode-mcp feedback setup"
 	case strings.TrimSpace(cfg.Sink) != SinkGitCodeIssues:
 		result.State = ReadinessSinkMissing
 		result.Remediation = "select the supported gitcode_issues sink in trusted global configuration"
 		result.Handoff = feedbackSetupHandoff(result.RepoID)
 	case result.RepoID == "" || !input.RepositoryBound:
 		result.State = ReadinessRepositoryUnbound
-		result.Remediation = "configure and bind the trusted feedback repository before submission"
-		result.Handoff = feedbackSetupHandoff(result.RepoID)
+		result.Remediation = "bind the build-owned feedback repository in the effective cache before submission"
+		result.Handoff = feedbackBindingHandoff(result.RepoID)
 	case !input.CredentialPresent:
 		result.State = ReadinessCredentialMissing
 		result.Remediation = "configure a GitCode credential, then re-check feedback readiness"
@@ -117,10 +127,15 @@ func EvaluateReadiness(input ReadinessInput) Readiness {
 }
 
 func feedbackSetupHandoff(repoID string) string {
+	return "gitcode-mcp feedback setup"
+}
+
+func feedbackBindingHandoff(repoID string) string {
 	if !ValidRepositoryID(repoID) {
-		return "gitcode-mcp feedback setup --repo OWNER/REPO"
+		return "gitcode-mcp feedback status"
 	}
-	return "gitcode-mcp feedback setup --repo " + strings.TrimSpace(repoID)
+	parts := strings.SplitN(repoID, "/", 2)
+	return "gitcode-mcp repo add --repo " + repoID + " --owner " + parts[0] + " --name " + parts[1]
 }
 
 func ValidRepositoryID(value string) bool {
@@ -150,7 +165,7 @@ func checkStatus(ok bool) string {
 }
 
 func DefaultConfig() Config {
-	return Config{Sink: SinkGitCodeIssues, DuplicatePolicy: DuplicatePolicySuggest}
+	return Config{Sink: SinkGitCodeIssues, RepoID: strings.TrimSpace(buildinfo.FeedbackRepository), Labels: []string{"feedback", "dogfood"}, DuplicatePolicy: DuplicatePolicySuggest}
 }
 
 type Draft struct {
@@ -259,23 +274,26 @@ func (e ValidationError) Error() string          { return "feedback: " + e.Field
 func (e ValidationError) DiagnosticCode() string { return "invalid_feedback" }
 
 func NormalizeConfig(cfg Config) (Config, error) {
-	cfg.Sink = strings.TrimSpace(cfg.Sink)
-	if cfg.Sink == "" && !cfg.SinkExplicit {
-		cfg.Sink = SinkGitCodeIssues
+	owned := DefaultConfig()
+	legacyRepo := strings.TrimSpace(cfg.RepoID)
+	legacySink := strings.TrimSpace(cfg.Sink)
+	legacyLabels := uniqueStrings(cfg.Labels)
+	if !ValidRepositoryID(owned.RepoID) || (legacyRepo != "" && legacyRepo != owned.RepoID) ||
+		(legacySink != "" && legacySink != owned.Sink) || (cfg.SinkExplicit && legacySink == "") ||
+		(len(legacyLabels) > 0 && strings.Join(legacyLabels, "|") != strings.Join(owned.Labels, "|")) {
+		cfg.ConfigurationConflict = true
 	}
-	if cfg.Sink != "" && cfg.Sink != SinkGitCodeIssues {
-		return Config{}, fmt.Errorf("feedback: unsupported sink %q", cfg.Sink)
+	cfg.RepoID, cfg.Sink, cfg.Labels = owned.RepoID, owned.Sink, owned.Labels
+	if !ValidRepositoryID(cfg.RepoID) {
+		cfg.RepoID = ""
 	}
+	// Explicit empty legacy sink is retained as a conflict marker across normalization.
+	cfg.SinkExplicit = false
 	if strings.TrimSpace(cfg.DuplicatePolicy) == "" {
 		cfg.DuplicatePolicy = DuplicatePolicySuggest
 	}
 	if cfg.DuplicatePolicy != DuplicatePolicySuggest && cfg.DuplicatePolicy != DuplicatePolicyReturn {
 		return Config{}, fmt.Errorf("feedback: duplicate_policy must be suggest or return_existing")
-	}
-	cfg.RepoID = strings.TrimSpace(cfg.RepoID)
-	cfg.Labels = uniqueStrings(cfg.Labels)
-	if cfg.Enabled && cfg.RepoID == "" {
-		return Config{}, fmt.Errorf("feedback: repo_id is required when feedback is enabled")
 	}
 	return cfg, nil
 }
@@ -302,7 +320,7 @@ func Prepare(draft Draft, context RuntimeContext, cfg Config, existing []Existin
 	body := renderBody(normalized, context, fingerprint)
 	candidates, decision := findCandidates(fingerprint, normalized, existing)
 	missingFields, followUpQuestions := missingContext(normalized)
-	configured := cfg.Enabled && cfg.Sink == SinkGitCodeIssues && cfg.RepoID != ""
+	configured := cfg.Enabled && !cfg.ConfigurationConflict && cfg.Sink == SinkGitCodeIssues && cfg.RepoID != ""
 	status := "prepared"
 	remediation := ""
 	if len(missingFields) > 0 {
@@ -310,7 +328,7 @@ func Prepare(draft Draft, context RuntimeContext, cfg Config, existing []Existin
 		remediation = "answer the targeted follow-up questions, then prepare the report again; do not infer or invent missing circumstances"
 	} else if !configured {
 		status = "configuration_required"
-		remediation = "configure feedback.enabled=true and feedback.repo_id in the trusted gitcode-mcp config"
+		remediation = EvaluateReadiness(ReadinessInput{Config: cfg}).Remediation
 	} else if decision == "likely_match" && normalized.DuplicateOverride != DuplicateOverrideCreate {
 		if cfg.DuplicatePolicy == DuplicatePolicyReturn {
 			status = "duplicate"

@@ -1,6 +1,7 @@
 package feedback
 
 import (
+	"gitcode-mcp/internal/buildinfo"
 	"strings"
 	"testing"
 	"time"
@@ -29,13 +30,50 @@ func testContext() RuntimeContext {
 	return RuntimeContext{Version: "v1.2.3", Commit: "abc123", ProviderMode: "live", CacheSchemaVersion: 7, ExpectedSchema: 7, SchemaCompatible: true, SinkBindingState: "configured", OSFamily: "darwin", ObservedAt: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)}
 }
 
+func TestBuildOwnedDestinationAndLegacyMigration(t *testing.T) {
+	for _, legacy := range []string{"", "urandon/gitcode-mcp", "example/other", "https://user:secret@example.invalid/?token=secret"} {
+		cfg, err := NormalizeConfig(Config{Enabled: true, RepoID: legacy})
+		if err != nil {
+			t.Fatal(err)
+		}
+		conflict := legacy != "" && legacy != "urandon/gitcode-mcp"
+		if cfg.RepoID != "urandon/gitcode-mcp" || cfg.ConfigurationConflict != conflict {
+			t.Fatalf("config=%+v", cfg)
+		}
+		again, err := NormalizeConfig(cfg)
+		if err != nil || again.ConfigurationConflict != conflict {
+			t.Fatalf("conflict lost: %+v err=%v", again, err)
+		}
+		ready := EvaluateReadiness(ReadinessInput{Config: again, RepositoryBound: true, CredentialPresent: true, ProviderAvailable: true})
+		if ready.SubmitAvailable == conflict || !ready.PrepareAvailable || strings.Contains(ready.Remediation, "secret") {
+			t.Fatalf("readiness=%+v", ready)
+		}
+	}
+	previous := buildinfo.FeedbackRepository
+	t.Cleanup(func() { buildinfo.FeedbackRepository = previous })
+	buildinfo.FeedbackRepository = "example/distribution"
+	cfg, err := NormalizeConfig(Config{Enabled: true})
+	if err != nil || cfg.RepoID != "example/distribution" || cfg.ConfigurationConflict {
+		t.Fatalf("downstream=%+v err=%v", cfg, err)
+	}
+	cfg, err = NormalizeConfig(Config{Enabled: true, RepoID: "urandon/gitcode-mcp"})
+	if err != nil || !cfg.ConfigurationConflict {
+		t.Fatalf("downstream legacy conflict=%+v err=%v", cfg, err)
+	}
+	buildinfo.FeedbackRepository = "https://user:secret@example.invalid"
+	ready := EvaluateReadiness(ReadinessInput{Config: Config{Enabled: true}, RepositoryBound: true, CredentialPresent: true, ProviderAvailable: true})
+	if ready.State != ReadinessConfigurationConflict || ready.RepoID != "" || ready.SubmitAvailable {
+		t.Fatalf("invalid build identity=%+v", ready)
+	}
+}
+
 func TestPrepareRendersDeterministicPublicSafeReport(t *testing.T) {
-	cfg := Config{Enabled: true, RepoID: "example/tool", Labels: []string{"feedback", "feedback"}}
+	cfg := Config{Enabled: true, RepoID: "urandon/gitcode-mcp", Labels: []string{"feedback", "dogfood", "feedback"}}
 	draft := validDraft()
 	draft.Evidence = []string{
 		"request https://user:pass@example.test/api?access_token=secret#fragment failed",
 		"internal tracker https://tracker.corp.local/private-owner/private-repo",
-		"public ticket https://gitcode.com/example/tool/issues/42?token=secret#note",
+		"public ticket https://gitcode.com/urandon/gitcode-mcp/issues/42?token=secret#note",
 		"cache /Users/alice/private/cache.db was used",
 		"Authorization: Bearer super-secret-token",
 	}
@@ -56,7 +94,7 @@ func TestPrepareRendersDeterministicPublicSafeReport(t *testing.T) {
 			t.Fatalf("body leaked %q: %s", secret, first.Body)
 		}
 	}
-	if !strings.Contains(first.Body, "[REDACTED_URL]") || !strings.Contains(first.Body, "https://gitcode.com/example/tool/issues/42") {
+	if !strings.Contains(first.Body, "[REDACTED_URL]") || !strings.Contains(first.Body, "https://gitcode.com/urandon/gitcode-mcp/issues/42") {
 		t.Fatalf("URL policy not reflected in body: %s", first.Body)
 	}
 	for _, section := range []string{"## Goal", "## Circumstances", "## Observed behavior", "## Expected behavior", "## Impact", FingerprintMarker(first.Fingerprint)} {
@@ -76,7 +114,7 @@ func TestPrepareReturnsTargetedQuestionsForIncompleteContext(t *testing.T) {
 	draft.ReproductionSteps = nil
 	draft.FallbackUsed = "unknown"
 	draft.AcceptanceSignal = "TBD"
-	prepared, err := Prepare(draft, testContext(), Config{Enabled: true, RepoID: "example/tool"}, nil)
+	prepared, err := Prepare(draft, testContext(), Config{Enabled: true, RepoID: "urandon/gitcode-mcp"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +141,7 @@ func TestPrepareRejectsForbiddenRawContentInEveryNarrativeShape(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			draft := validDraft()
 			tt.mutate(&draft)
-			if prepared, err := Prepare(draft, testContext(), Config{Enabled: true, RepoID: "example/tool"}, nil); !IsValidationError(err) {
+			if prepared, err := Prepare(draft, testContext(), Config{Enabled: true, RepoID: "urandon/gitcode-mcp"}, nil); !IsValidationError(err) {
 				t.Fatalf("prepared=%#v err=%v, want validation error", prepared, err)
 			}
 		})
@@ -113,14 +151,14 @@ func TestPrepareRejectsForbiddenRawContentInEveryNarrativeShape(t *testing.T) {
 func TestPrepareAllowsExplicitNoFallbackButRejectsNoneElsewhere(t *testing.T) {
 	draft := validDraft()
 	draft.FallbackUsed = "none"
-	prepared, err := Prepare(draft, testContext(), Config{Enabled: true, RepoID: "example/tool"}, nil)
+	prepared, err := Prepare(draft, testContext(), Config{Enabled: true, RepoID: "urandon/gitcode-mcp"}, nil)
 	if err != nil || prepared.Status != "prepared" {
 		t.Fatalf("explicit no fallback prepared=%#v err=%v", prepared, err)
 	}
 
 	draft.Goal = "none"
 	draft.ReproductionSteps = []string{"none"}
-	prepared, err = Prepare(draft, testContext(), Config{Enabled: true, RepoID: "example/tool"}, nil)
+	prepared, err = Prepare(draft, testContext(), Config{Enabled: true, RepoID: "urandon/gitcode-mcp"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,13 +179,13 @@ func contains(values []string, wanted string) bool {
 }
 
 func TestPrepareDedupeContract(t *testing.T) {
-	cfg := Config{Enabled: true, RepoID: "example/tool"}
+	cfg := Config{Enabled: true, RepoID: "urandon/gitcode-mcp"}
 	draft := validDraft()
 	base, err := Prepare(draft, testContext(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	existing := []ExistingIssue{{ID: "ISSUE-42", Number: 42, Status: "open", Title: base.Title, Body: FingerprintMarker(base.Fingerprint), URL: "https://gitcode.com/example/tool/issues/42"}}
+	existing := []ExistingIssue{{ID: "ISSUE-42", Number: 42, Status: "open", Title: base.Title, Body: FingerprintMarker(base.Fingerprint), URL: "https://gitcode.com/urandon/gitcode-mcp/issues/42"}}
 	exact, err := Prepare(draft, testContext(), cfg, existing)
 	if err != nil {
 		t.Fatal(err)
@@ -218,14 +256,14 @@ func TestPrepareRejectsUnsafeEvidenceAndExplainsMissingSetup(t *testing.T) {
 }
 
 func TestEvaluateReadinessPrecedence(t *testing.T) {
-	readyConfig := Config{Enabled: true, Sink: SinkGitCodeIssues, RepoID: "example/feedback"}
+	readyConfig := Config{Enabled: true, Sink: SinkGitCodeIssues, RepoID: "urandon/gitcode-mcp"}
 	tests := []struct {
 		name  string
 		input ReadinessInput
 		want  string
 	}{
 		{name: "disabled", input: ReadinessInput{Config: DefaultConfig()}, want: ReadinessDisabled},
-		{name: "sink missing", input: ReadinessInput{Config: Config{Enabled: true, RepoID: "example/feedback"}, RepositoryBound: true, CredentialPresent: true, ProviderAvailable: true}, want: ReadinessSinkMissing},
+		{name: "configuration conflict", input: ReadinessInput{Config: Config{Enabled: true, RepoID: "example/other"}, RepositoryBound: true, CredentialPresent: true, ProviderAvailable: true}, want: ReadinessConfigurationConflict},
 		{name: "repository unbound", input: ReadinessInput{Config: readyConfig, CredentialPresent: true, ProviderAvailable: true}, want: ReadinessRepositoryUnbound},
 		{name: "credential missing", input: ReadinessInput{Config: readyConfig, RepositoryBound: true, ProviderAvailable: true}, want: ReadinessCredentialMissing},
 		{name: "provider unavailable", input: ReadinessInput{Config: readyConfig, RepositoryBound: true, CredentialPresent: true}, want: ReadinessProviderUnavailable},
@@ -245,27 +283,27 @@ func TestEvaluateReadinessPrecedence(t *testing.T) {
 }
 
 func TestExplicitEmptySinkRemainsVisibleToReadiness(t *testing.T) {
-	cfg, err := NormalizeConfig(Config{Enabled: true, SinkExplicit: true, RepoID: "example/feedback"})
+	cfg, err := NormalizeConfig(Config{Enabled: true, SinkExplicit: true, RepoID: "urandon/gitcode-mcp"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Sink != "" {
-		t.Fatalf("explicit empty sink normalized to %q", cfg.Sink)
+	if !cfg.ConfigurationConflict {
+		t.Fatal("explicit empty legacy sink must be diagnosed")
 	}
 	result := EvaluateReadiness(ReadinessInput{Config: cfg, RepositoryBound: true, CredentialPresent: true, ProviderAvailable: true})
-	if result.State != ReadinessSinkMissing {
+	if result.State != ReadinessConfigurationConflict {
 		t.Fatalf("readiness=%#v", result)
 	}
 }
 
 func TestFeedbackSetupHandoffRejectsShellMetacharacters(t *testing.T) {
 	for _, repoID := range []string{"example/repo;command", "example/repo`command`", "example/repo$(command)", "example/.hidden", "example/repo"} {
-		handoff := feedbackSetupHandoff(repoID)
+		handoff := feedbackBindingHandoff(repoID)
 		valid := repoID == "example/repo"
-		if valid && handoff != "gitcode-mcp feedback setup --repo example/repo" {
+		if valid && handoff != "gitcode-mcp repo add --repo example/repo --owner example --name repo" {
 			t.Fatalf("valid handoff=%q", handoff)
 		}
-		if !valid && handoff != "gitcode-mcp feedback setup --repo OWNER/REPO" {
+		if !valid && handoff != "gitcode-mcp feedback status" {
 			t.Fatalf("unsafe handoff for %q: %q", repoID, handoff)
 		}
 	}

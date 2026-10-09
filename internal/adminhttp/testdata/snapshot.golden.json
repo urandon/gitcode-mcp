@@ -1,6 +1,6 @@
 {
   "api_version": "1",
-  "revision": "snapshot-4ca22ffd46e99488",
+  "revision": "snapshot-943cc34a1a29bcdd",
   "generated_at": "2026-08-25T10:30:00Z",
   "service": {
     "version": "v2.0.0",
@@ -92,6 +92,7 @@
     "prepare_available": true,
     "submit_available": false,
     "sink": "gitcode_issues",
+    "repo_id": "urandon/gitcode-mcp",
     "checks": [
       {
         "id": "enabled",
@@ -114,8 +115,8 @@
         "status": "blocked"
       }
     ],
-    "remediation": "enable a trusted feedback sink before submission",
-    "handoff": "gitcode-mcp feedback setup --repo OWNER/REPO",
+    "remediation": "set feedback.enabled=true in trusted global configuration; the destination is owned by this build",
+    "handoff": "gitcode-mcp feedback setup",
     "setup_repositories": [],
     "setup_available": false
   }
