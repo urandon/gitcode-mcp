@@ -127,7 +127,9 @@ Maintenance selection and submitted intent share one opaque cache/repository
 identity across Caches navigation, registration links, reload and history. The
 target remains URL-addressable before enrollment too. A same-target snapshot
 refresh preserves unsaved policy edits; changing target clears its old plan,
-receipt and target-bound confirmation. Late planning or control responses cannot
+receipt and target-bound confirmation. A replaced or unavailable registration ID
+also invalidates its pending confirmation, even within the same cache/repository.
+Late planning or control responses cannot
 replace the current target or edited policy's state. An explicit unavailable
 repository, cache or registration remains unavailable until the operator selects
 a current target; it never silently falls back to another repository. Immutable

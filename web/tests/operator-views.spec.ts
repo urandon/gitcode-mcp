@@ -1007,6 +1007,33 @@ for (const action of ['Disable', 'Reconcile now']) {
   });
 }
 
+for (const explicitRegistration of [true, false]) {
+  test(`maintenance registration replacement cancels confirmation with explicit registration ${explicitRegistration}`, async ({ page }) => {
+    const state = maintenanceNavigationSnapshot();
+    let emitSnapshotChanged!: () => void;
+    const snapshotChanged = new Promise<void>((resolve) => { emitSnapshotChanged = resolve; });
+    await mockAdmin(page, state, snapshotChanged);
+    const writes: string[] = [];
+    await page.route('**/api/admin/v1/maintenance/*/disable', async (route) => { writes.push(route.request().url()); await route.abort(); });
+    await page.goto(explicitRegistration ? '/?view=Maintenance&registration=reg-1' : '/?view=Maintenance');
+    await page.getByRole('button', { name: 'Disable', exact: true }).click();
+    await expect(page.getByRole('dialog')).toContainText('reg-1');
+    state.maintenance[0].registration_id = 'reg-replacement';
+    const refreshed = page.waitForResponse('**/api/admin/v1/snapshot');
+    emitSnapshotChanged();
+    await refreshed;
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    expect(writes).toEqual([]);
+    if (explicitRegistration) {
+      await expect(page.getByText('Selected maintenance target is unavailable.')).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Disable', exact: true })).toBeDisabled();
+      await expect(page.getByRole('button', { name: 'Reconcile now', exact: true })).toBeDisabled();
+      await page.getByLabel('Managed target').selectOption('cache-111111112222\u0000example/other');
+      await expect(page.getByRole('button', { name: 'Disable', exact: true })).toBeEnabled();
+    }
+  });
+}
+
 for (const outcome of ['success', 'failure']) {
   test(`maintenance ignores a late control ${outcome} after history changes target`, async ({ page }) => {
     await mockAdmin(page, maintenanceNavigationSnapshot());

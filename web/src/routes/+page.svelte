@@ -79,6 +79,7 @@
   let controlRunning = false;
   let pendingControl: 'maintenance_apply' | 'binding_apply' | 'rag_repair_apply' | 'conflict_resolution_apply' | 'disable' | 'reconcile' | 'repository_docs_index' | '' = '';
   let pendingControlKey = '';
+  let pendingControlRegistrationID = '';
   let controlDialog: HTMLDialogElement | undefined;
   let controlConfirmButton: HTMLButtonElement | undefined;
   let controlTriggerButton: HTMLButtonElement | undefined;
@@ -432,8 +433,11 @@
       const registration = snapshot.maintenance[0];
       target = registration ? targets.find((item) => item.cache.cache_ref === registration.cache_ref && item.repo.repo_id === registration.repo_id) : targets[0];
     }
+    const registrationAvailable = !requestedRegistrationID || snapshot.maintenance.some((item) => item.registration_id === requestedRegistrationID || item.legacy_registration_ids?.includes(requestedRegistrationID));
+    const currentRegistration = snapshot.maintenance.find((item) => `${item.cache_ref}\u0000${item.repo_id}` === maintenanceTargetKey);
+    const confirmationReplaced = isTargetBoundControl(pendingControl) && pendingControlRegistrationID !== (currentRegistration?.registration_id || '');
     if (target) synchronizeMaintenanceTarget(target.key);
-    else {
+    if (!target || !registrationAvailable || confirmationReplaced) {
       // An explicit target can disappear during refresh. Keep its identity,
       // but discard reviewed work instead of selecting a different repository.
       cancelTargetConfirmation();
@@ -509,7 +513,7 @@
     // Conflict resolution already uses its immutable reviewed registration and
     // must retain a lost-response retry key even when SSE replaces that row.
     if (!isTargetBoundControl(pendingControl)) return;
-    controlDialog?.close(); pendingControl = ''; pendingControlKey = '';
+    controlDialog?.close(); pendingControl = ''; pendingControlKey = ''; pendingControlRegistrationID = '';
   }
 
   function invalidateBindingPlan(): void {
@@ -621,16 +625,21 @@
   }
 
   async function confirmControl(kind: typeof pendingControl, trigger: HTMLButtonElement): Promise<void> {
+    if (isTargetBoundControl(kind) && !maintenanceTargetAvailable) return;
     controlTriggerButton = trigger; pendingControl = kind; pendingControlKey = `admin-${kind}-${crypto.randomUUID()}`;
+    pendingControlRegistrationID = isTargetBoundControl(kind) ? selectedMaintenance?.registration_id || '' : '';
     maintenanceError = ''; maintenanceFailure = undefined; bindingError = ''; await tick(); controlDialog?.showModal(); controlConfirmButton?.focus();
   }
 
   async function cancelControlConfirmation(): Promise<void> {
-    controlDialog?.close(); pendingControl = ''; pendingControlKey = ''; await tick(); controlTriggerButton?.focus();
+    controlDialog?.close(); pendingControl = ''; pendingControlKey = ''; pendingControlRegistrationID = ''; await tick(); controlTriggerButton?.focus();
   }
 
   async function executeControl(): Promise<void> {
     if (!pendingControl || !csrfToken) return;
+    if (isTargetBoundControl(pendingControl) && (!maintenanceTargetAvailable || pendingControlRegistrationID !== (selectedMaintenance?.registration_id || ''))) {
+      cancelTargetConfirmation(); invalidateMaintenancePlan(); return;
+    }
     const kind = pendingControl;
     const generation = maintenanceIntentGeneration;
     controlRunning = true;
@@ -990,7 +999,7 @@
             {#if maintenanceError}<div class="action-result error" role="alert"><AlertTriangle size={17} /><div><strong>Maintenance control failed{maintenanceFailure?.field ? ` · ${humanize(maintenanceFailure.field)}` : ''}</strong><span>{maintenanceError}</span>{#if maintenanceFailure?.remediation}<span>{maintenanceFailure.remediation}</span>{/if}{#if maintenanceFailure?.blockers?.length}<ul class="blocker-list">{#each maintenanceFailure.blockers as blocker}<li>{blocker}</li>{/each}</ul>{/if}{#if maintenanceFailure?.cli_handoff}<code>{maintenanceFailure.cli_handoff}</code>{/if}</div></div>{/if}
             {#if maintenancePlan}<div class="plan-panel"><div class="plan-summary"><div><p class="section-kicker">REVIEWED INTENT</p><h3>{maintenancePlan.repo_id}</h3><code>{maintenancePlan.plan_id}</code></div><StatusChip value={maintenancePlan.status} /></div>{#if maintenancePlan.blockers?.length}<ul class="blocker-list">{#each maintenancePlan.blockers as blocker}<li><AlertTriangle size={15} />{blocker}</li>{/each}</ul>{/if}<div class="effect-ledger">{#each maintenancePlan.actions as effect}<article><span class="effect-icon"><Zap size={15} /></span><div><strong>{effect.summary}</strong><small>{humanize(effect.class)}{effect.data_boundary ? ` · ${humanize(effect.data_boundary)}` : ''}</small>{#if effect.handoff}<code>{effect.handoff}</code>{/if}</div><StatusChip value={effect.status} /></article>{/each}</div><div class="plan-footer"><div><strong>Next safe action</strong><span>{maintenancePlan.next_action || 'Confirm this exact plan.'}</span></div><button class="primary-action" disabled={maintenancePlan.status === 'blocked' || controlRunning} onclick={(event) => void confirmControl('maintenance_apply', event.currentTarget)}><Power size={16} />Confirm & apply</button></div></div>{/if}
             {#if maintenanceReceipt}<div class="action-result" role="status"><CheckCircle2 size={17} /><div><strong>{humanize(maintenanceReceipt.outcome || maintenanceReceipt.status || 'applied')}</strong><span>{maintenanceReceipt.receipt_id ? `Receipt ${maintenanceReceipt.receipt_id}` : maintenanceReceipt.audit_receipt ? `Audit ${maintenanceReceipt.audit_receipt}` : 'The confirmed plan was accepted.'}{maintenanceReceipt.replayed ? ' · replayed safely' : ''}{maintenanceReceipt.jobs_started?.length ? ` · jobs ${maintenanceReceipt.jobs_started.join(', ')}` : ''}</span></div></div>{/if}
-            {#if selectedMaintenance}<div class="registration-actions"><div><strong>Registration {selectedMaintenance.registration_id}</strong><span>Generation {selectedMaintenance.generation} · {selectedMaintenance.enabled ? 'enabled' : 'disabled'} · {registrationControlsEnabled ? 'reconcile is coalesced with active work.' : 'registration controls are unavailable in this daemon.'}</span></div><button disabled={!csrfToken || !registrationControlsEnabled || !!selectedMaintenance.identity_conflict || controlRunning} onclick={(event) => void confirmControl('reconcile', event.currentTarget)}><RotateCcw size={15} />Reconcile now</button><button class="danger-action" disabled={!csrfToken || !registrationControlsEnabled || !selectedMaintenance.enabled || !!selectedMaintenance.identity_conflict || controlRunning} onclick={(event) => void confirmControl('disable', event.currentTarget)}><Power size={15} />Disable</button></div>{/if}
+            {#if selectedMaintenance}<div class="registration-actions"><div><strong>Registration {selectedMaintenance.registration_id}</strong><span>Generation {selectedMaintenance.generation} · {selectedMaintenance.enabled ? 'enabled' : 'disabled'} · {registrationControlsEnabled ? 'reconcile is coalesced with active work.' : 'registration controls are unavailable in this daemon.'}</span></div><button disabled={!csrfToken || !registrationControlsEnabled || !maintenanceTargetAvailable || !!selectedMaintenance.identity_conflict || controlRunning} onclick={(event) => void confirmControl('reconcile', event.currentTarget)}><RotateCcw size={15} />Reconcile now</button><button class="danger-action" disabled={!csrfToken || !registrationControlsEnabled || !maintenanceTargetAvailable || !selectedMaintenance.enabled || !!selectedMaintenance.identity_conflict || controlRunning} onclick={(event) => void confirmControl('disable', event.currentTarget)}><Power size={15} />Disable</button></div>{/if}
           </section>
 
           <section class="control-workbench" aria-labelledby="binding-editor-title">
