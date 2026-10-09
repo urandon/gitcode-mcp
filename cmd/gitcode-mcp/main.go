@@ -453,7 +453,10 @@ func resolveService(store cache.Store, deps StartupDeps) (*service.Service, erro
 
 func runCLICompatibility(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps StartupDeps) int {
 	cliArgs := append([]string(nil), args...)
-	if len(cliArgs) > 0 && deps.Config.CachePath != "" && !hasCLIFlag(cliArgs[1:], "--cache-path") {
+	// Repository commands resolve inherited cache configuration themselves.
+	// Only a real global CLI override should become an explicit path argument:
+	// init-local deliberately rejects that argument and selects its worktree cache.
+	if len(cliArgs) > 0 && (cliArgs[0] != "repo" || deps.CachePathSource == "command") && deps.Config.CachePath != "" && !hasCLIFlag(cliArgs[1:], "--cache-path") {
 		cliArgs = append(cliArgs, "--cache-path", deps.Config.CachePath)
 	}
 	if len(cliArgs) > 0 && deps.Config.Format != "" && !hasCLIFlag(cliArgs[1:], "--format") {
