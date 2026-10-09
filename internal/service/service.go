@@ -3884,7 +3884,9 @@ func (s *Service) ListMilestones(ctx context.Context, req MilestoneListRequest) 
 	milestones := make([]MilestoneRecord, 0, len(page.Items))
 	for _, milestone := range page.Items {
 		_, graph := s.milestoneWriteGraph(route.RepoID, milestone, gitcode.WriteResult[gitcode.Milestone]{Record: milestone, Confirmed: true, Operation: "ListMilestones", RemoteID: milestone.RemoteID, RemoteRevision: milestone.UpdatedAt, BrowserURL: milestone.HTMLURL, ConfirmedAt: now}, now)
-		_ = s.store.UpsertRecordGraph(ctx, graph)
+		if err := s.store.UpsertRecordGraph(ctx, graph); err != nil {
+			return MilestoneListResult{}, err
+		}
 		milestones = append(milestones, milestoneRecord(milestone))
 	}
 	return MilestoneListResult{RepoID: route.RepoID, Milestones: milestones, Page: page.Page, PerPage: page.PerPage, Count: len(milestones), Evidence: "adapter-confirmed read with cache refresh", GeneratedAt: now}, nil
@@ -7222,12 +7224,18 @@ func (s *Service) milestoneWriteGraph(repoID string, milestone gitcode.Milestone
 	revision := firstNonEmptyString(result.RemoteRevision, milestone.UpdatedAt, result.ResponseHash, contentHash(milestone.Title, milestone.Body, status, milestone.DueOn))
 	record := cache.Record{RepoID: repoID, ID: stableID, Type: "milestone", Path: "milestones/" + remoteID + ".md", Title: milestone.Title, Body: milestone.Body, Status: status, ContentHash: contentHash(milestone.Title, milestone.Body, status, milestone.DueOn), Provenance: cache.ProvenanceRemote, RemoteType: "milestone", RemoteID: remoteID, RemoteRevision: revision, CreatedAt: created, UpdatedAt: updated}
 	graph := cache.RecordGraph{Record: record, Identities: []cache.Identity{{RepoID: repoID, SourceID: stableID, AliasType: "milestone", Alias: remoteID, Remote: cache.RemoteAlias{Type: "milestone", ID: remoteID}}}, RemoteRevisions: []cache.RemoteRevision{{RepoID: repoID, RecordID: stableID, RemoteType: "milestone", RemoteID: remoteID, RemoteRevision: revision, Status: "fresh", LastFetchedAt: now}}}
+	if milestone.IID != "" {
+		graph.Identities = append(graph.Identities, cache.Identity{RepoID: repoID, SourceID: stableID, AliasType: "milestone_iid", Alias: "milestone_iid:" + milestone.IID, Remote: cache.RemoteAlias{Type: "milestone", ID: remoteID}})
+	}
+	if milestone.HTMLURL != "" {
+		graph.Identities = append(graph.Identities, cache.Identity{RepoID: repoID, SourceID: stableID, AliasType: "url", Alias: milestone.HTMLURL, Remote: cache.RemoteAlias{Type: "milestone", ID: remoteID}})
+	}
 	remoteNumber, _ := strconv.Atoi(remoteID)
-	return writeConfirmation{confirmed: result.Confirmed, remoteID: remoteID, remoteNumber: remoteNumber, remoteRevision: revision, browserURL: result.BrowserURL, message: result.Operation, completedAt: firstNonZeroTime(result.ConfirmedAt, now)}, graph
+	return writeConfirmation{confirmed: result.Confirmed, remoteID: remoteID, remoteNumber: remoteNumber, remoteRevision: revision, browserURL: firstNonEmptyString(milestone.HTMLURL, result.BrowserURL), message: result.Operation, completedAt: firstNonZeroTime(result.ConfirmedAt, now)}, graph
 }
 
 func milestoneRecord(m gitcode.Milestone) MilestoneRecord {
-	return MilestoneRecord{ID: firstNonEmptyString(m.SourceID, fallbackSourceID("milestone", m.RemoteID)), RemoteID: m.RemoteID, Title: m.Title, Description: m.Body, State: firstNonEmptyString(m.Status, "open"), DueOn: m.DueOn, BrowserURL: m.HTMLURL, CreatedAt: parseMilestoneTime(m.CreatedAt), UpdatedAt: parseMilestoneTime(m.UpdatedAt)}
+	return MilestoneRecord{ID: firstNonEmptyString(m.SourceID, fallbackSourceID("milestone", m.RemoteID)), RemoteID: m.RemoteID, IID: m.IID, Title: m.Title, Description: m.Body, State: firstNonEmptyString(m.Status, "open"), DueOn: m.DueOn, BrowserURL: m.HTMLURL, CreatedAt: parseMilestoneTime(m.CreatedAt), UpdatedAt: parseMilestoneTime(m.UpdatedAt)}
 }
 
 func parseMilestoneTime(raw string) time.Time {

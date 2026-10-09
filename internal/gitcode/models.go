@@ -967,6 +967,7 @@ type MilestoneWriteRequest struct {
 
 type Milestone struct {
 	RemoteID  string `json:"-"`
+	IID       string `json:"-"`
 	SourceID  string `json:"-"`
 	Title     string `json:"-"`
 	Body      string `json:"-"`
@@ -981,6 +982,7 @@ func (m *Milestone) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		ID          any    `json:"id"`
 		Number      any    `json:"number"`
+		IID         any    `json:"iid"`
 		Title       string `json:"title"`
 		Name        string `json:"name"`
 		Description string `json:"description"`
@@ -1056,8 +1058,8 @@ func (m *Milestone) UnmarshalJSON(data []byte) error {
 		}
 		m.UpdatedAt = raw.UpdatedAt
 	}
-	m.HTMLURL = firstNonEmpty(raw.HTMLURL, raw.URL)
-	return nil
+	m.IID, m.HTMLURL, err = normalizeMilestoneBrowserIdentity(m.RemoteID, raw.IID, firstNonEmpty(raw.HTMLURL, raw.URL))
+	return err
 }
 
 func milestoneIdentityMissing(value any) bool {

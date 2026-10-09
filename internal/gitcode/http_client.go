@@ -1065,6 +1065,9 @@ func (c *HTTPClient) ListMilestones(ctx context.Context, req MilestoneListReques
 	if err != nil {
 		return Page[Milestone]{}, err
 	}
+	for i := range items {
+		items[i].HTMLURL = c.milestoneBrowserURL(req.Owner, req.Repo, items[i])
+	}
 	return Page[Milestone]{Items: items, Page: page.Page, PerPage: page.PerPage}, nil
 }
 
@@ -1083,6 +1086,7 @@ func (c *HTTPClient) GetMilestone(ctx context.Context, req MilestoneRequest) (Mi
 	if strconv.Itoa(req.ID) != milestone.RemoteID {
 		return Milestone{}, &ErrSchemaDecode{Field: "milestone.id", Expected: strconv.Itoa(req.ID), Received: milestone.RemoteID, Message: "milestone response id does not match route id"}
 	}
+	milestone.HTMLURL = c.milestoneBrowserURL(req.Owner, req.Repo, milestone)
 	return milestone, nil
 }
 

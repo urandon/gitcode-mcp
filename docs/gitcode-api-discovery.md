@@ -220,6 +220,33 @@ identity remains fenced for manual list reconciliation; title matching alone
 does not prove identity or authorize another POST. No description/message bytes
 are duplicated into audit metadata and raw error bodies are not projected.
 
+## Milestone Browser Identity (2026-10-09)
+
+Bounded v5 reads on the public testing polygon returned `number` as the provider
+ID, with no `id` or explicit `iid`. Their `url` used a different repository-local
+milestone suffix. The working detail-route contract reported in #159 is
+`/{owner}/{repo}/milestones/{provider-id}?iid={local-iid}`; a successful SPA HTTP
+response alone does not prove that its detail view loaded.
+
+The adapter preserves provider identity as `MILESTONE-{provider-id}` and keeps
+the positive local `iid` separately. It recognizes the captured legacy URL
+suffix and already canonical iid queries, requires available iid hints to
+agree, and never assumes a provider-ID-only suffix establishes a local iid.
+Missing optional iid remains unavailable rather than being invented. Canonical
+URL projection removes user-info, fragments and all query parameters except
+the validated numeric iid. Invalid or conflicting iid hints are typed schema
+errors without raw locator values.
+
+List, item GET, nested issue milestones and canonical write readback share the
+decoder policy. Missing locators use the configured browser base and repository
+route without inventing iid. Cache identities persist a namespaced
+`milestone_iid:{iid}` alias and canonical URL mapped to the same provider/stable
+identity; no schema migration is needed. Settled writes retain the sanitized
+canonical URL in their receipt so same-key replay is local and returns the same
+locator, with a cache-only fallback for older receipts. Existing caches acquire
+the corrected mapping through explicit milestone listing or canonical writes;
+routine reads never repair it through hidden network access.
+
 ## Issue List Milestone Identity And Response Diagnostics
 
 Sanitized live inspection on `2026-08-17` confirmed that the issue collection endpoint can return a nested milestone with its positive identity in `number` and no `id` field. The milestone collection used the same `number` identity shape. The adapter accepts `id` for backward compatibility and falls back to `number` only when `id` is absent; all existing positive-integer and title/date validation still applies.

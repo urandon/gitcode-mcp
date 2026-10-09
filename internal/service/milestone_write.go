@@ -27,9 +27,20 @@ func milestoneWriteFailure(claim cache.AuditTrailEntry, code, phase string, caus
 	return f
 }
 
-func replayMilestoneWrite(command string, req WriteCommandRequest, e cache.AuditTrailEntry, fingerprint string, now time.Time) WriteCommandResult {
+func (s *Service) replayMilestoneWrite(ctx context.Context, command string, req WriteCommandRequest, e cache.AuditTrailEntry, fingerprint string, now time.Time) WriteCommandResult {
 	r := replayWriteResult(command, req, e, fingerprint, now)
 	r.RemoteRevision = e.RequestMetadata["milestone_revision"]
+	r.BrowserURL = gitcode.SanitizeMilestoneBrowserURL(e.RemoteID, e.RequestMetadata["milestone_browser_url"])
+	if r.BrowserURL != "" {
+		return r
+	}
+	if source, err := s.store.GetSourceScoped(ctx, e.RepoID, e.RecordID); err == nil {
+		for _, identity := range source.Aliases {
+			if identity.AliasType == "url" && identity.Remote.Type == "milestone" && identity.Remote.ID == e.RemoteID {
+				r.BrowserURL = gitcode.SanitizeMilestoneBrowserURL(e.RemoteID, identity.Alias)
+			}
+		}
+	}
 	return r
 }
 
@@ -45,7 +56,7 @@ func (s *Service) executeMilestoneWrite(ctx context.Context, command string, rou
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_idempotency_conflict", RepoID: route.RepoID, IdempotencyKey: key}
 	}
 	if lookup.Replay {
-		return replayMilestoneWrite(command, req, *lookup.Entry, fingerprint, s.now().UTC()), nil
+		return s.replayMilestoneWrite(ctx, command, req, *lookup.Entry, fingerprint, s.now().UTC()), nil
 	}
 	claimer, ok := s.store.(auditGenerationClaimStore)
 	if !ok {
@@ -112,7 +123,7 @@ func (s *Service) executeMilestoneWrite(ctx context.Context, command string, rou
 			uncertain.RequestMetadata["mutation_attempted"] = strconv.FormatBool(attempted)
 			_, current, transitionErr := s.transitionAuditGeneration(ctx, claimer, uncertain, claim.CreatedAt, audit.StatusInProgress)
 			if auditGenerationSucceeded(current, claim.CreatedAt, fingerprint) {
-				return replayMilestoneWrite(command, req, *current, fingerprint, s.now().UTC()), nil
+				return s.replayMilestoneWrite(ctx, command, req, *current, fingerprint, s.now().UTC()), nil
 			}
 			if transitionErr != nil {
 				return WriteCommandResult{}, milestoneWriteFailure(uncertain, "write_audit_start_failed", "audit", transitionErr)
@@ -122,6 +133,7 @@ func (s *Service) executeMilestoneWrite(ctx context.Context, command string, rou
 	}
 	metadata := cloneStringMap(claim.RequestMetadata)
 	metadata["write_phase"], metadata["milestone_revision"] = "canonical_readback_confirmed", confirmed.remoteRevision
+	metadata["milestone_browser_url"] = gitcode.SanitizeMilestoneBrowserURL(confirmed.remoteID, confirmed.browserURL)
 	if !recovered {
 		metadata["mutation_attempted"] = "true"
 	}
@@ -130,7 +142,7 @@ func (s *Service) executeMilestoneWrite(ctx context.Context, command string, rou
 	if err != nil || !staged {
 		current, _ := s.store.GetAuditEventByKey(ctx, route.RepoID, key)
 		if auditGenerationSucceeded(current, claim.CreatedAt, fingerprint) {
-			return replayMilestoneWrite(command, req, *current, fingerprint, s.now().UTC()), nil
+			return s.replayMilestoneWrite(ctx, command, req, *current, fingerprint, s.now().UTC()), nil
 		}
 		return WriteCommandResult{}, milestoneWriteFailure(claim, "write_partial_remote_confirmed_audit_failed", "audit", nil)
 	}
@@ -139,7 +151,7 @@ func (s *Service) executeMilestoneWrite(ctx context.Context, command string, rou
 	if err != nil || !settled {
 		current, _ := s.store.GetAuditEventByKey(ctx, route.RepoID, key)
 		if auditGenerationSucceeded(current, claim.CreatedAt, fingerprint) {
-			return replayMilestoneWrite(command, req, *current, fingerprint, s.now().UTC()), nil
+			return s.replayMilestoneWrite(ctx, command, req, *current, fingerprint, s.now().UTC()), nil
 		}
 		return WriteCommandResult{}, milestoneWriteFailure(pending, "write_partial_cache_refresh_failed", "cache_refresh", nil)
 	}
