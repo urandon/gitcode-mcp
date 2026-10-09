@@ -66,6 +66,7 @@
   let stale = false;
   let maintenanceTargetKey = '';
   let maintenanceIntent: MaintenanceIntent = { cache_ref: '', repo_id: '', sync_mode: 'head-and-backfill', collections: ['issues', 'wiki'], rag_mode: 'off' };
+  let maintenanceIntentGeneration = 0;
   let maintenancePlan: MaintenancePlan | undefined;
   let maintenanceReceipt: ControlReceipt | undefined;
   let maintenanceError = '';
@@ -227,7 +228,7 @@
       if (!response.ok) throw new Error(response.status === 401 ? 'Admin session required. Run admin open again.' : 'Observation is unavailable.');
       const nextSnapshot = normalizeSnapshot(await response.json());
       snapshot = nextSnapshot;
-      if (selectedCacheRef && selectedRepoID) maintenanceTargetKey = `${selectedCacheRef}\u0000${selectedRepoID}`;
+      if (selectedCacheRef && selectedRepoID) synchronizeMaintenanceTarget(`${selectedCacheRef}\u0000${selectedRepoID}`);
       ensureControlSelections();
       canonicalizeRegistrationDeepLink();
     } catch (value) { error = value instanceof Error ? value.message : 'Observation is unavailable.'; }
@@ -289,12 +290,15 @@
 
   function selectView(view: AdminView): void {
     active = view;
-    if (view !== 'Caches') { selectedCacheRef = ''; selectedRepoID = ''; }
+    if (view === 'Maintenance') {
+      selectedCacheRef = maintenanceIntent.cache_ref; selectedRepoID = maintenanceIntent.repo_id;
+      requestedRegistrationID = snapshot.maintenance.find((item) => item.cache_ref === selectedCacheRef && item.repo_id === selectedRepoID)?.registration_id || '';
+    } else if (view !== 'Caches') { selectedCacheRef = ''; selectedRepoID = ''; }
     if (view !== 'Jobs') selectedJobID = '';
     if (view !== 'Maintenance') { requestedRegistrationID = ''; registrationRedirectNotice = ''; }
     updateLocation();
   }
-  function openRepository(cache: CacheObservation, repo: Repository): void { active = 'Caches'; selectedCacheRef = cache.cache_ref; selectedRepoID = repo.repo_id; maintenanceTargetKey = `${cache.cache_ref}\u0000${repo.repo_id}`; repoTab = 'coverage'; searchComparison = undefined; searchError = ''; providerSmoke = undefined; repairPlan = undefined; repairReceipt = undefined; repositoryDocsResult = undefined; repositoryDocsPlan = undefined; repositoryDocsError = ''; updateLocation(); }
+  function openRepository(cache: CacheObservation, repo: Repository): void { active = 'Caches'; selectedCacheRef = cache.cache_ref; selectedRepoID = repo.repo_id; synchronizeMaintenanceTarget(`${cache.cache_ref}\u0000${repo.repo_id}`); repoTab = 'coverage'; searchComparison = undefined; searchError = ''; providerSmoke = undefined; repairPlan = undefined; repairReceipt = undefined; repositoryDocsResult = undefined; repositoryDocsPlan = undefined; repositoryDocsError = ''; updateLocation(); }
   function closeRepository(): void { selectedRepoID = ''; repoTab = 'coverage'; updateLocation(); }
   function selectRepositoryTab(value: RepositoryTab): void { repoTab = value; updateLocation(); }
   function selectDiagnosticFilter(value: 'current' | 'recovered' | 'all'): void { diagnosticsFilter = value; updateLocation(); }
@@ -422,11 +426,12 @@
 
   function ensureControlSelections(): void {
     const targets = snapshot.caches.flatMap((cache) => cache.repositories.map((repo) => ({ key: `${cache.cache_ref}\u0000${repo.repo_id}`, cache, repo })));
-    if (!targets.some((target) => target.key === maintenanceTargetKey)) {
+    let target = targets.find((target) => target.key === maintenanceTargetKey);
+    if (!target) {
       const registration = snapshot.maintenance[0];
-      const target = registration ? targets.find((item) => item.cache.cache_ref === registration.cache_ref && item.repo.repo_id === registration.repo_id) : targets[0];
-      if (target) loadMaintenanceTarget(target.key, false);
+      target = registration ? targets.find((item) => item.cache.cache_ref === registration.cache_ref && item.repo.repo_id === registration.repo_id) : targets[0];
     }
+    if (target) synchronizeMaintenanceTarget(target.key);
     if (!bindingIntent.cache_ref && snapshot.caches[0]) bindingIntent = { ...bindingIntent, cache_ref: snapshot.caches[0].cache_ref };
   }
 
@@ -439,8 +444,18 @@
     const nextTargetKey = `${registration.cache_ref}\u0000${registration.repo_id}`;
     requestedRegistrationID = registration.registration_id;
     registrationRedirectNotice = previous === registration.registration_id ? '' : `Redirected legacy registration ${previous} to canonical ${registration.registration_id}.`;
-    if (maintenanceTargetKey !== nextTargetKey) loadMaintenanceTarget(nextTargetKey, false);
+    synchronizeMaintenanceTarget(nextTargetKey);
     if (previous !== requestedRegistrationID) updateLocation(true);
+  }
+
+  function maintenanceIntentMatches(key: string): boolean {
+    return `${maintenanceIntent.cache_ref}\u0000${maintenanceIntent.repo_id}` === key;
+  }
+
+  function synchronizeMaintenanceTarget(key: string): void {
+    // Selection and submitted identity move together. A same-target refresh
+    // must not overwrite the operator's unsaved policy edits or reviewed plan.
+    if (maintenanceTargetKey !== key || !maintenanceIntentMatches(key)) loadMaintenanceTarget(key, false);
   }
 
   function loadMaintenanceTarget(key: string, updateDeepLink = true): void {
@@ -448,6 +463,7 @@
     const [cacheRef, repoID] = key.split('\u0000');
     const registration = snapshot.maintenance.find((item) => item.cache_ref === cacheRef && item.repo_id === repoID);
     const repo = snapshot.caches.find((item) => item.cache_ref === cacheRef)?.repositories.find((item) => item.repo_id === repoID);
+    if (active === 'Maintenance') { selectedCacheRef = cacheRef; selectedRepoID = repoID; }
     maintenanceIntent = {
       cache_ref: cacheRef, repo_id: repoID,
       sync_mode: registration?.policy.sync_enabled === false ? 'off' : registration?.policy.sync_mode || 'head-and-backfill',
@@ -456,10 +472,10 @@
       head_interval_seconds: registration?.policy.head_interval_seconds || 0, rag_interval_seconds: registration?.policy.rag_interval_seconds || 0,
       head_max_pages: registration?.policy.head_max_pages || 0, tail_slice_pages: registration?.policy.tail_slice_pages || 0, per_page: registration?.policy.per_page || 0
     };
-    maintenancePlan = undefined; maintenanceReceipt = undefined; maintenanceError = ''; maintenanceFailure = undefined;
+    invalidateMaintenancePlan();
     selectedConflictCandidateRef = ''; conflictResolutionPlan = undefined; conflictResolutionReceipt = undefined; conflictResolutionError = '';
-    if (updateDeepLink && registration) {
-      requestedRegistrationID = registration.registration_id;
+    if (updateDeepLink) {
+      requestedRegistrationID = registration?.registration_id || '';
       registrationRedirectNotice = '';
       updateLocation();
     }
@@ -473,6 +489,7 @@
   }
 
   function invalidateMaintenancePlan(): void {
+    maintenanceIntentGeneration++;
     maintenancePlan = undefined; maintenanceReceipt = undefined; maintenanceError = ''; maintenanceFailure = undefined;
   }
 
@@ -499,9 +516,18 @@
 
   async function renderMaintenancePlan(): Promise<void> {
     if (!csrfToken || !maintenanceControlsEnabled) return;
+    if (!maintenanceIntentMatches(maintenanceTargetKey) || !repoTargets.some((target) => target.key === maintenanceTargetKey)) {
+      maintenanceError = 'Select a current repository in the managed cache.';
+      return;
+    }
+    const generation = maintenanceIntentGeneration;
     controlRunning = true; maintenanceError = ''; maintenanceFailure = undefined; maintenanceReceipt = undefined;
-    try { maintenancePlan = await controlPost<MaintenancePlan>('/api/admin/v1/maintenance/plan', maintenanceIntent); }
+    try {
+      const plan = await controlPost<MaintenancePlan>('/api/admin/v1/maintenance/plan', maintenanceIntent);
+      if (generation === maintenanceIntentGeneration) maintenancePlan = plan;
+    }
     catch (value) {
+      if (generation !== maintenanceIntentGeneration) return;
       maintenancePlan = undefined;
       maintenanceFailure = value instanceof Error && 'failure' in value ? (value as Error & { failure: ControlFailure }).failure : undefined;
       maintenanceError = maintenanceFailure?.message || (value instanceof Error ? value.message : 'Maintenance planning failed.');
@@ -631,7 +657,12 @@
     } finally { controlRunning = false; }
   }
   function selectTheme(value: Theme): void { theme = value; applyTheme(value); }
-  function onPopState(): void { hydrateLocation(); }
+  function onPopState(): void {
+    hydrateLocation();
+    if (selectedCacheRef && selectedRepoID) synchronizeMaintenanceTarget(`${selectedCacheRef}\u0000${selectedRepoID}`);
+    ensureControlSelections();
+    canonicalizeRegistrationDeepLink();
+  }
 
   onMount(async () => {
     theme = normalizeTheme(localStorage.getItem(themeStorageKey)); applyTheme(theme); hydrateLocation(); window.addEventListener('popstate', onPopState);

@@ -909,6 +909,136 @@ test('active retry backoff is explicit and blocks whole and collection retry', a
   await expect(page.getByRole('button', { name: 'Retry Issues' })).toHaveCount(0);
 });
 
+function maintenanceNavigationSnapshot(): any {
+  const state: any = structuredClone(snapshot);
+  const secondRepo = structuredClone(state.caches[0].repositories[0]);
+  Object.assign(secondRepo, { repo_id: 'example/other', display_name: 'Other repository' });
+  state.caches[0].repositories.push(secondRepo);
+  const secondRegistration = structuredClone(state.maintenance[0]);
+  Object.assign(secondRegistration, { registration_id: 'reg-other', repo_id: 'example/other' });
+  secondRegistration.policy.profile = 'other-profile';
+  state.maintenance.push(secondRegistration);
+  const otherCache = structuredClone(snapshot.caches[0]);
+  otherCache.cache_ref = 'cache-other';
+  otherCache.repositories[0].display_name = 'Other cache repository';
+  state.caches.push(otherCache);
+  const otherCacheRegistration = structuredClone(snapshot.maintenance[0]);
+  Object.assign(otherCacheRegistration, { registration_id: 'reg-other-cache', cache_ref: 'cache-other' });
+  otherCacheRegistration.policy.profile = 'other-cache-profile';
+  state.maintenance.push(otherCacheRegistration);
+  return state;
+}
+
+for (const entry of ['repository-list', 'repository-deep-link', 'maintenance-deep-link', 'same-repository-other-cache', 'unenrolled-repository']) {
+  test(`maintenance target identity matches the submitted intent after ${entry} navigation`, async ({ page }) => {
+    const state = maintenanceNavigationSnapshot();
+    const expected = entry === 'same-repository-other-cache'
+      ? { cache_ref: 'cache-other', repo_id: 'example/repo', profile: 'other-cache-profile' }
+      : { cache_ref: 'cache-111111112222', repo_id: 'example/other', profile: entry === 'unenrolled-repository' ? '' : 'other-profile' };
+    if (entry === 'unenrolled-repository') state.maintenance = state.maintenance.filter((item: any) => item.repo_id !== 'example/other');
+    await mockAdmin(page, state);
+    let plannedBody: Record<string, unknown> | undefined;
+    await page.route('**/api/admin/v1/maintenance/plan', async (route) => {
+      plannedBody = route.request().postDataJSON();
+      await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: {
+        schema_version: 'gitcode-mcp.maintenance-plan.v1', plan_id: 'maintenance-plan-selected-target', status: 'blocked',
+        repo_id: expected.repo_id, cache: { cache_ref: expected.cache_ref }, actions: [], blockers: ['Fixture inspection only.']
+      } }) });
+    });
+    if (entry === 'repository-list') {
+      await page.goto('/?view=Caches');
+      await page.getByRole('button', { name: /Other repository/ }).click();
+    } else if (entry === 'maintenance-deep-link') {
+      await page.goto('/?view=Maintenance&registration=reg-other');
+    } else {
+      await page.goto(`/?view=Caches&cache=${expected.cache_ref}&repo=${encodeURIComponent(expected.repo_id)}`);
+    }
+    await page.getByRole('button', { name: 'Maintenance', exact: true }).click();
+    await expect(page.getByLabel('Managed target')).toHaveValue(`${expected.cache_ref}\u0000${expected.repo_id}`);
+    await page.reload();
+    await expect(page.getByLabel('Managed target')).toHaveValue(`${expected.cache_ref}\u0000${expected.repo_id}`);
+    await page.getByRole('button', { name: 'Render plan', exact: true }).click();
+    await expect.poll(() => plannedBody).toMatchObject(expected);
+  });
+}
+
+test('maintenance target history restores identity and invalidates the previous plan', async ({ page }) => {
+  await mockAdmin(page, maintenanceNavigationSnapshot());
+  let plannedBody: Record<string, unknown> | undefined;
+  await page.route('**/api/admin/v1/maintenance/plan', async (route) => {
+    plannedBody = route.request().postDataJSON();
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: {
+      plan_id: 'maintenance-plan-history', status: 'blocked', actions: [], blockers: [], repo_id: plannedBody!.repo_id
+    } }) });
+  });
+  await page.goto('/?view=Maintenance&registration=reg-1');
+  const target = page.getByLabel('Managed target');
+  await expect(target).toHaveValue('cache-111111112222\u0000example/repo');
+  await target.selectOption('cache-111111112222\u0000example/other');
+  await page.goBack();
+  await expect(target).toHaveValue('cache-111111112222\u0000example/repo');
+  await expect(page.getByLabel('RAG profile')).toHaveValue('easy-rag');
+  await page.goForward();
+  await expect(target).toHaveValue('cache-111111112222\u0000example/other');
+  await page.getByRole('button', { name: 'Render plan', exact: true }).click();
+  await expect.poll(() => plannedBody).toMatchObject({ cache_ref: 'cache-111111112222', repo_id: 'example/other', profile: 'other-profile' });
+  await expect(page.getByText('maintenance-plan-history')).toBeVisible();
+  await page.goBack();
+  await expect(target).toHaveValue('cache-111111112222\u0000example/repo');
+  await expect(page.getByText('maintenance-plan-history')).toHaveCount(0);
+});
+
+test('maintenance same-target refresh preserves unsaved policy edits', async ({ page }) => {
+  await mockAdmin(page, maintenanceNavigationSnapshot());
+  let plannedBody: Record<string, unknown> | undefined;
+  await page.route('**/api/admin/v1/maintenance/plan', async (route) => {
+    plannedBody = route.request().postDataJSON();
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ api_version: '1', result: {
+      plan_id: 'maintenance-plan-edited', status: 'blocked', actions: [], blockers: []
+    } }) });
+  });
+  await page.goto('/?view=Maintenance&registration=reg-other');
+  await page.getByLabel('RAG profile').fill('draft-profile');
+  await page.getByLabel('Head pages').fill('7');
+  await page.getByRole('button', { name: 'Overview', exact: true }).click();
+  const refreshed = page.waitForResponse('**/api/admin/v1/snapshot');
+  await page.getByRole('button', { name: 'Refresh snapshot', exact: true }).first().click();
+  await refreshed;
+  await page.getByRole('button', { name: 'Maintenance', exact: true }).click();
+  await expect(page.getByLabel('Managed target')).toHaveValue('cache-111111112222\u0000example/other');
+  await expect(page.getByLabel('RAG profile')).toHaveValue('draft-profile');
+  await expect(page.getByLabel('Head pages')).toHaveValue('7');
+  await page.getByRole('button', { name: 'Render plan', exact: true }).click();
+  await expect.poll(() => plannedBody).toMatchObject({ cache_ref: 'cache-111111112222', repo_id: 'example/other', profile: 'draft-profile', head_max_pages: 7 });
+});
+
+for (const outcome of ['success', 'failure']) {
+  for (const change of ['target', 'policy']) {
+    test(`maintenance ignores a late ${outcome} after ${change} changes`, async ({ page }) => {
+      await mockAdmin(page, maintenanceNavigationSnapshot());
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      await page.route('**/api/admin/v1/maintenance/plan', async (route) => {
+        await gate;
+        await route.fulfill({ status: outcome === 'failure' ? 422 : 200, contentType: 'application/json', body: JSON.stringify(outcome === 'failure'
+          ? { error: { code: 'invalid_policy', message: 'Obsolete target error.' } }
+          : { api_version: '1', result: { plan_id: 'maintenance-plan-obsolete', status: 'blocked', actions: [], blockers: [] } }) });
+      });
+      await page.goto('/?view=Maintenance');
+      const submitted = page.waitForRequest('**/api/admin/v1/maintenance/plan');
+      await page.getByRole('button', { name: 'Render plan', exact: true }).click();
+      await submitted;
+      if (change === 'target') await page.getByLabel('Managed target').selectOption('cache-111111112222\u0000example/other');
+      else await page.getByLabel('RAG profile').fill('edited-while-planning');
+      release();
+      await expect(page.getByRole('button', { name: 'Render plan', exact: true })).toBeEnabled();
+      await expect(page.getByText('maintenance-plan-obsolete')).toHaveCount(0);
+      await expect(page.getByText('Obsolete target error.')).toHaveCount(0);
+      await expect(page.getByLabel('RAG profile')).toHaveValue(change === 'target' ? 'other-profile' : 'edited-while-planning');
+    });
+  }
+}
+
 test('maintenance scope validation identifies collections and omits an unavailable CLI handoff', async ({ page }) => {
   await mockAdmin(page);
   await page.route('**/api/admin/v1/maintenance/plan', async (route) => {
