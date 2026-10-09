@@ -9,7 +9,35 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gitcode-mcp/internal/feedback"
 )
+
+func TestGeneratedFeedbackPolicyContainsOnlyRuntimeControls(t *testing.T) {
+	content := defaultYAMLConfig()
+	start := strings.Index(content, "feedback:\n")
+	if start < 0 {
+		t.Fatal("missing generated feedback section")
+	}
+	end := strings.Index(content[start:], "\nservice:")
+	if end < 0 {
+		t.Fatal("missing generated feedback section")
+	}
+	section := content[start : start+end]
+	for _, forbidden := range []string{"sink:", "repo_id:", "labels:", "owner/feedback-repo"} {
+		if strings.Contains(section, forbidden) {
+			t.Fatalf("generated feedback policy suggests legacy destination control %q", forbidden)
+		}
+	}
+	file, _, err := parseYAMLConfig([]byte(content), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := mergeFeedbackFile(Config{Feedback: feedback.DefaultConfig()}, file.Feedback)
+	if err != nil || cfg.Feedback.Enabled || cfg.Feedback.ConfigurationConflict || cfg.Feedback.RepoID != "urandon/gitcode-mcp" {
+		t.Fatalf("generated policy is not inert build-owned feedback: config=%+v err=%v", cfg.Feedback, err)
+	}
+}
 
 func TestFeedbackSetupPlanApplyPreservesUnrelatedYAMLAndReplays(t *testing.T) {
 	root := t.TempDir()
