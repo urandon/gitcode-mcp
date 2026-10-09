@@ -109,9 +109,15 @@ func PlanFeedbackSetup(src Source, repoID string) (FeedbackSetupPlan, error) {
 	if err != nil {
 		return FeedbackSetupPlan{}, err
 	}
-	loaded, err := Load(src, Overrides{})
+	// Validate the exact selected bytes. Load's legacy JSON discovery can select
+	// a different file when no explicit environment override is present.
+	file, _, err := parseYAMLConfig(current, "")
 	if err != nil {
 		return FeedbackSetupPlan{}, fmt.Errorf("feedback setup: trusted configuration is invalid")
+	}
+	loaded, err := mergeFeedbackFile(Config{Feedback: feedback.DefaultConfig()}, file.Feedback)
+	if err != nil {
+		return FeedbackSetupPlan{}, fmt.Errorf("feedback setup: trusted feedback policy is invalid")
 	}
 	if loaded.Feedback.ConfigurationConflict {
 		return FeedbackSetupPlan{}, fmt.Errorf("feedback setup: configuration_conflict; review conflicting legacy feedback fields before enabling submission")

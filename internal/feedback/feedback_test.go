@@ -31,6 +31,13 @@ func testContext() RuntimeContext {
 }
 
 func TestBuildOwnedDestinationAndLegacyMigration(t *testing.T) {
+	for _, labels := range [][]string{{"feedback", "dogfood"}, {"dogfood", "feedback"}, {"dogfood", "feedback", "dogfood"}, {"feedback", "other"}} {
+		cfg, err := NormalizeConfig(Config{Enabled: true, Labels: labels})
+		conflict := contains(labels, "other")
+		if err != nil || cfg.ConfigurationConflict != conflict || strings.Join(cfg.Labels, "|") != "feedback|dogfood" {
+			t.Fatalf("labels=%v config=%+v err=%v", labels, cfg, err)
+		}
+	}
 	for _, legacy := range []string{"", "urandon/gitcode-mcp", "example/other", "https://user:secret@example.invalid/?token=secret"} {
 		cfg, err := NormalizeConfig(Config{Enabled: true, RepoID: legacy})
 		if err != nil {

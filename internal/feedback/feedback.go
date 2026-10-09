@@ -278,9 +278,13 @@ func NormalizeConfig(cfg Config) (Config, error) {
 	legacyRepo := strings.TrimSpace(cfg.RepoID)
 	legacySink := strings.TrimSpace(cfg.Sink)
 	legacyLabels := uniqueStrings(cfg.Labels)
+	// Provider labels are a set, not an ordered delivery policy.
+	sort.Strings(legacyLabels)
+	ownedLabels := append([]string(nil), owned.Labels...)
+	sort.Strings(ownedLabels)
 	if !ValidRepositoryID(owned.RepoID) || (legacyRepo != "" && legacyRepo != owned.RepoID) ||
 		(legacySink != "" && legacySink != owned.Sink) || (cfg.SinkExplicit && legacySink == "") ||
-		(len(legacyLabels) > 0 && strings.Join(legacyLabels, "|") != strings.Join(owned.Labels, "|")) {
+		(len(legacyLabels) > 0 && strings.Join(legacyLabels, "|") != strings.Join(ownedLabels, "|")) {
 		cfg.ConfigurationConflict = true
 	}
 	cfg.RepoID, cfg.Sink, cfg.Labels = owned.RepoID, owned.Sink, owned.Labels

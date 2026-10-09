@@ -113,6 +113,38 @@ func TestFeedbackSetupRejectsConflictingLegacyPolicyWithoutMutation(t *testing.T
 	}
 }
 
+func TestFeedbackSetupValidatesSelectedDefaultYAMLNotLegacyJSON(t *testing.T) {
+	for _, conflict := range []bool{false, true} {
+		t.Run(fmt.Sprintf("conflict-%t", conflict), func(t *testing.T) {
+			src := newMemorySource(t) // No config or MCP environment overrides.
+			path := filepath.Join(src.configDir, "gitcode-mcp", "config.yaml")
+			legacy := "urandon/gitcode-mcp"
+			if conflict {
+				legacy = "example/legacy"
+			}
+			content := []byte("feedback:\n  enabled: false\n  repo_id: " + legacy + "\n")
+			src.files[path] = content
+			// A different legacy JSON must not determine the selected YAML intent.
+			jsonRepo := "example/json-legacy"
+			if conflict {
+				jsonRepo = "urandon/gitcode-mcp"
+			}
+			src.files[src.defaultConfigPath()] = []byte(fmt.Sprintf(`{"feedback":{"enabled":false,"repo_id":%q}}`, jsonRepo))
+			plan, err := PlanFeedbackSetup(src, "")
+			if conflict {
+				if err == nil || !strings.Contains(err.Error(), "configuration_conflict") {
+					t.Fatalf("plan=%+v err=%v", plan, err)
+				}
+			} else if err != nil || plan.RepoID != "urandon/gitcode-mcp" {
+				t.Fatalf("plan=%+v err=%v", plan, err)
+			}
+			if !bytes.Equal(src.files[path], content) {
+				t.Fatal("planning changed selected YAML")
+			}
+		})
+	}
+}
+
 func TestFeedbackSetupRejectsNonMappingYAMLWithoutMutation(t *testing.T) {
 	for _, content := range []string{"- list\n- root\n", "feedback: enabled\n"} {
 		t.Run(strings.ReplaceAll(strings.TrimSpace(content), "\n", "_"), func(t *testing.T) {
