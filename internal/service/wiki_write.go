@@ -11,6 +11,14 @@ import (
 	"gitcode-mcp/internal/gitcode"
 )
 
+type wikiWriteSettlementStore interface {
+	SettleWriteGraphGeneration(context.Context, cache.RecordGraph, cache.AuditTrailEntry, cache.AuditTrailEntry, time.Time) (bool, error)
+}
+
+type wikiExactReadbackClient interface {
+	ConfirmWikiPage(context.Context, gitcode.WikiPageRequest, string) (gitcode.WikiPage, error)
+}
+
 // Wiki writes have a durable single-mutation claim. Any attempted or unknown
 // outcome is reconciled by exact-path GET on replay, never another POST/PUT.
 func (s *Service) executeWikiContentWrite(ctx context.Context, command string, route RepositoryRoute, req WriteCommandRequest, base WriteCommandResult) (WriteCommandResult, error) {
@@ -33,6 +41,10 @@ func (s *Service) executeWikiContentWrite(ctx context.Context, command string, r
 	if !ok {
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_audit_start_failed", RepoID: route.RepoID, IdempotencyKey: key}
 	}
+	settler, ok := s.store.(wikiWriteSettlementStore)
+	if !ok {
+		return WriteCommandResult{}, ErrWriteFailure{Code: "write_audit_start_failed", RepoID: route.RepoID, IdempotencyKey: key}
+	}
 	var claim cache.AuditTrailEntry
 	var confirmation writeConfirmation
 	var graph cache.RecordGraph
@@ -41,7 +53,14 @@ func (s *Service) executeWikiContentWrite(ctx context.Context, command string, r
 		claim = *lookup.Entry
 		// Even legacy failed receipts may follow an applied write with a decode
 		// error. Preserve the key and reconcile rather than assume rejection.
-		page, readErr := s.client.GetWikiPage(ctx, gitcode.WikiPageRequest{Owner: route.Owner, Repo: route.Name, Slug: wikiPath})
+		readRequest := gitcode.WikiPageRequest{Owner: route.Owner, Repo: route.Name, Slug: wikiPath}
+		var page gitcode.WikiPage
+		var readErr error
+		if reader, ok := s.client.(wikiExactReadbackClient); ok {
+			page, readErr = reader.ConfirmWikiPage(ctx, readRequest, req.Body)
+		} else {
+			page, readErr = s.client.GetWikiPage(ctx, readRequest)
+		}
 		if readErr != nil {
 			return WriteCommandResult{}, wikiRecoveredFailure(claim, wikiPath, "write_ambiguous_readback_failed", "readback", readErr)
 		}
@@ -78,7 +97,7 @@ func (s *Service) executeWikiContentWrite(ctx context.Context, command string, r
 			uncertain := audit.WithRequestMetadata(audit.InProgress(route.RepoID, key, command, claim.RecordID, "wiki", wikiPath, fingerprint, code, s.now().UTC()), metadata)
 			_, current, transitionErr := s.transitionAuditGeneration(ctx, transitioner, uncertain, claim.CreatedAt, audit.StatusInProgress)
 			if auditGenerationSucceeded(current, claim.CreatedAt, fingerprint) {
-				return replayWriteResult(command, req, *current, fingerprint, s.now().UTC()), nil
+				return replayWikiWriteResult(command, req, *current, fingerprint, s.now().UTC()), nil
 			}
 			if transitionErr != nil {
 				return WriteCommandResult{}, wikiReconciliationFailure(route.RepoID, wikiPath, key, "write_audit_start_failed", phase, attempted, nil)
@@ -102,22 +121,23 @@ func (s *Service) executeWikiContentWrite(ctx context.Context, command string, r
 	settling, current, err := s.transitionAuditGeneration(ctx, transitioner, pending, claim.CreatedAt, claim.Status, audit.StatusRemoteConfirmedCacheRefreshFailed)
 	if err != nil || !settling {
 		if auditGenerationSucceeded(current, claim.CreatedAt, fingerprint) {
-			return replayWriteResult(command, req, *current, fingerprint, s.now().UTC()), nil
+			return replayWikiWriteResult(command, req, *current, fingerprint, s.now().UTC()), nil
 		}
-		return WriteCommandResult{}, wikiReconciliationFailure(route.RepoID, wikiPath, key, "write_partial_remote_confirmed_audit_failed", "audit", true, nil)
-	}
-	if err := s.store.UpsertRecordGraph(ctx, graph); err != nil {
-		partial := audit.WithRequestMetadata(audit.RemoteConfirmedCacheRefreshFailed(route.RepoID, key, command, graph.Record.ID, "wiki", wikiPath, fingerprint, "wiki cache refresh failed", s.now().UTC()), metadata)
-		_, _, _ = s.transitionAuditGeneration(ctx, transitioner, partial, claim.CreatedAt, audit.StatusRemoteConfirmedCacheRefreshPending)
-		return WriteCommandResult{}, wikiReconciliationFailure(route.RepoID, wikiPath, key, "write_partial_cache_refresh_failed", "cache_refresh", true, nil)
+		return WriteCommandResult{}, wikiSettlementFailure(claim, recovered, wikiPath, "write_partial_remote_confirmed_audit_failed", "audit")
 	}
 	complete := audit.WithRequestMetadata(audit.Success(route.RepoID, key, command, graph.Record.ID, "wiki", wikiPath, fingerprint, "canonical wiki readback confirmed", s.now().UTC()), metadata)
-	settled, current, err := s.transitionAuditGeneration(ctx, transitioner, complete, claim.CreatedAt, audit.StatusRemoteConfirmedCacheRefreshPending)
-	if err != nil || !settled {
+	settled, err := settler.SettleWriteGraphGeneration(ctx, graph, complete, pending, claim.CreatedAt)
+	if err != nil {
+		// The atomic publication rolled back. Keep its pending receipt intact:
+		// an unfenced late error must not downgrade a newer recovery receipt.
+		return WriteCommandResult{}, wikiSettlementFailure(claim, recovered, wikiPath, "write_partial_cache_refresh_failed", "cache_refresh")
+	}
+	if !settled {
+		current, err = s.store.GetAuditEventByKey(ctx, route.RepoID, key)
 		if auditGenerationSucceeded(current, claim.CreatedAt, fingerprint) {
-			return replayWriteResult(command, req, *current, fingerprint, s.now().UTC()), nil
+			return replayWikiWriteResult(command, req, *current, fingerprint, s.now().UTC()), nil
 		}
-		return WriteCommandResult{}, wikiReconciliationFailure(route.RepoID, wikiPath, key, "write_partial_remote_confirmed_audit_failed", "audit", true, nil)
+		return WriteCommandResult{}, wikiSettlementFailure(claim, recovered, wikiPath, "write_partial_remote_confirmed_audit_failed", "audit")
 	}
 	base.Status, base.ID, base.RemoteID, base.RemoteSlug, base.RemoteRevision = "succeeded", graph.Record.ID, wikiPath, wikiPath, confirmation.remoteRevision
 	base.APIPath, base.CachePath, base.BrowserURL = confirmation.apiPath, confirmation.cachePath, confirmation.browserURL
@@ -161,4 +181,11 @@ func wikiRecoveredFailure(claim cache.AuditTrailEntry, wikiPath, code, phase str
 		failure.MutationAttempted = nil
 	}
 	return failure
+}
+
+func wikiSettlementFailure(claim cache.AuditTrailEntry, recovered bool, wikiPath, code, phase string) ErrWriteFailure {
+	if recovered {
+		return wikiRecoveredFailure(claim, wikiPath, code, phase, nil)
+	}
+	return wikiReconciliationFailure(claim.RepoID, wikiPath, claim.IdempotencyKey, code, phase, true, nil)
 }

@@ -115,3 +115,31 @@ func TestWikiWriteReadbackFailurePreservesMutationPhase(t *testing.T) {
 		})
 	}
 }
+
+func TestWikiCanonicalRawConfirmationRequiresStableRevision(t *testing.T) {
+	for _, behavior := range []string{"stable", "revision-changed", "contradictory-content"} {
+		t.Run(behavior, func(t *testing.T) {
+			metadataReads := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.Contains(r.URL.Path, "/raw/") {
+					fmt.Fprint(w, "wanted")
+					return
+				}
+				metadataReads++
+				meta := WikiContentsFile{Path: "Home.md", Sha: "old"}
+				if metadataReads > 1 && behavior == "revision-changed" {
+					meta.Sha = "new"
+				}
+				if metadataReads > 1 && behavior == "contradictory-content" {
+					meta.Content, meta.Encoding = base64.StdEncoding.EncodeToString([]byte("different")), "base64"
+				}
+				_ = json.NewEncoder(w).Encode(meta)
+			}))
+			defer server.Close()
+			page, err := newTestClient(t, server.URL, Config{}).ConfirmWikiPage(context.Background(), WikiPageRequest{Owner: "example-owner", Repo: "example-repo", Slug: "Home.md"}, "wanted")
+			if metadataReads != 2 || (behavior == "stable" && (err != nil || page.Revision != "old" || page.Body != "wanted")) || (behavior != "stable" && err == nil) {
+				t.Fatalf("raw confirmation ignored revision/content race: reads=%d page=%+v err=%v", metadataReads, page, err)
+			}
+		})
+	}
+}

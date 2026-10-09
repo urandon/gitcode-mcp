@@ -1414,6 +1414,23 @@ func (c *HTTPClient) deleteWikiContent(ctx context.Context, endpoint, operation,
 	return WriteResult[WikiPage]{Record: page, Confirmed: result.Confirmed, Operation: result.Operation, Target: result.Target, ProviderStatus: result.ProviderStatus, RemoteID: result.RemoteID, RemoteSlug: result.RemoteSlug, RemoteRevision: result.RemoteRevision, APIPath: result.APIPath, CachePath: result.CachePath, BrowserURL: result.BrowserURL, IdempotencyKey: result.IdempotencyKey, ResponseHash: result.ResponseHash, ConfirmedAt: result.ConfirmedAt, ProviderPayloadFingerprint: result.ProviderPayloadFingerprint}, nil
 }
 
+// ConfirmWikiPage is a GET-only exact-body reconciliation boundary. It shares
+// initial write confirmation, rather than trusting a general raw-page read.
+func (c *HTTPClient) ConfirmWikiPage(ctx context.Context, req WikiPageRequest, body string) (WikiPage, error) {
+	if err := validateReadRepo(req.Owner, req.Repo); err != nil {
+		return WikiPage{}, err
+	}
+	wikiPath := wikiWritePath(req.Path, req.Slug)
+	if wikiPath == "" {
+		return WikiPage{}, ErrWriteConfirmationIncomplete{Message: "wiki confirmation requires a path"}
+	}
+	meta, err := c.confirmWikiWrite(ctx, req.Owner, req.Repo, wikiPath, body)
+	if err != nil {
+		return WikiPage{}, err
+	}
+	return wikiPageFromMetadata(meta, body, c.nowUTC()), nil
+}
+
 func (c *HTTPClient) confirmWikiWrite(ctx context.Context, owner, repo, wikiPath, body string) (WikiContentsFile, error) {
 	endpoint := wikiContentsPathEndpoint(owner, repo, wikiPath)
 	meta, err := c.getWikiMetadata(ctx, owner, repo, wikiPath)
@@ -1432,6 +1449,20 @@ func (c *HTTPClient) confirmWikiWrite(ctx context.Context, owner, repo, wikiPath
 		decoded, err = decodeWikiContent(meta, endpoint)
 	} else {
 		decoded, _, err = c.getBytes(ctx, wikiRawPathEndpoint(owner, repo, wikiPath), nil)
+		if err == nil {
+			var current WikiContentsFile
+			current, err = c.getWikiMetadata(ctx, owner, repo, wikiPath)
+			if err == nil && (normalizeWikiPath(current.Path) != wikiPath || current.Sha != meta.Sha) {
+				return WikiContentsFile{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki revision changed during raw body confirmation"}
+			}
+			if err == nil && current.Content != "" {
+				var currentBody []byte
+				currentBody, err = decodeWikiContent(current, endpoint)
+				if err == nil && string(currentBody) != string(decoded) {
+					return WikiContentsFile{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki raw body contradicts confirmation metadata"}
+				}
+			}
+		}
 	}
 	if err != nil {
 		return WikiContentsFile{}, ErrWriteConfirmationIncomplete{Endpoint: endpoint, Message: "wiki confirmation body read failed", Cause: err}
