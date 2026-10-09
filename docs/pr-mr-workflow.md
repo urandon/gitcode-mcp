@@ -14,19 +14,25 @@ Include the issue number when the branch exists to close or narrow a tracked tas
 
 ## Creating Pull Requests
 
-Use the CLI write lifecycle for shell workflows:
+Use the CLI write lifecycle for shell workflows. Prepare the multiline Markdown
+description in `pr.md`, then pass the file rather than shell-escaping its text:
 
 ```sh
 gitcode-mcp create-pr \
   --repo YOUR_REPO \
   --title "Implement issue relation API" \
-  --body "Summary and tests." \
+  --body-file ./pr.md \
   --head codex/issue-4-explicit-pr-issue-relation \
   --base main \
   --idempotency-key ik-pr-001
 ```
 
 `create-pr` runs live by default when credentials and repository binding are available. `--live` remains accepted as a compatibility alias. `create-mr` is an equivalent alias for GitCode UI terminology. Both commands use the same audited service write path and report `command=create-pr`.
+
+Both creation aliases accept either `--body` or `--body-file PATH|-`; `-` reads
+stdin. File/stdin input is non-empty UTF-8, bounded to 10 MiB. CRLF/CR becomes LF;
+backslashes and trailing newlines are otherwise preserved. Dry-run reports safe
+input metadata, not the body or file path. See the [Markdown input contract](write-walkthrough.md#multiline-markdown-bodies).
 
 Update pull request metadata through the same write lifecycle:
 
