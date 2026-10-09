@@ -89,65 +89,65 @@ type RAGSearchConfig struct {
 }
 
 type serviceFileConfig struct {
-	RuntimeDir   *string                        `json:"runtime_dir"`
-	JobRetention *serviceJobRetentionFileConfig `json:"job_retention"`
+	RuntimeDir   *string                        `json:"runtime_dir" yaml:"runtime_dir"`
+	JobRetention *serviceJobRetentionFileConfig `json:"job_retention" yaml:"job_retention"`
 }
 
 type serviceJobRetentionFileConfig struct {
-	SuccessTTL        *string `json:"success_ttl"`
-	DiagnosticTTL     *string `json:"diagnostic_ttl"`
-	MaxTerminalJobs   *int    `json:"max_terminal_jobs"`
-	MaxDiagnosticJobs *int    `json:"max_diagnostic_jobs"`
-	MaxProgressEvents *int    `json:"max_progress_events"`
+	SuccessTTL        *string `json:"success_ttl" yaml:"success_ttl"`
+	DiagnosticTTL     *string `json:"diagnostic_ttl" yaml:"diagnostic_ttl"`
+	MaxTerminalJobs   *int    `json:"max_terminal_jobs" yaml:"max_terminal_jobs"`
+	MaxDiagnosticJobs *int    `json:"max_diagnostic_jobs" yaml:"max_diagnostic_jobs"`
+	MaxProgressEvents *int    `json:"max_progress_events" yaml:"max_progress_events"`
 }
 
 type ragFileConfig struct {
-	ModelStorePath *string                          `json:"model_store_path"`
-	DefaultProfile *string                          `json:"default_profile"`
-	Providers      map[string]ragProviderFileConfig `json:"providers"`
-	Profiles       map[string]ragProfileFileConfig  `json:"profiles"`
-	Indexing       *ragIndexingFileConfig           `json:"indexing"`
-	Search         *ragSearchFileConfig             `json:"search"`
+	ModelStorePath *string                          `json:"model_store_path" yaml:"model_store_path"`
+	DefaultProfile *string                          `json:"default_profile" yaml:"default_profile"`
+	Providers      map[string]ragProviderFileConfig `json:"providers" yaml:"providers"`
+	Profiles       map[string]ragProfileFileConfig  `json:"profiles" yaml:"profiles"`
+	Indexing       *ragIndexingFileConfig           `json:"indexing" yaml:"indexing"`
+	Search         *ragSearchFileConfig             `json:"search" yaml:"search"`
 }
 
 type ragProviderFileConfig struct {
-	Type         *string                    `json:"type"`
-	DataBoundary *string                    `json:"data_boundary"`
-	Endpoint     *string                    `json:"endpoint"`
-	Executable   *string                    `json:"executable"`
-	Startup      *string                    `json:"startup"`
-	Autostart    *bool                      `json:"autostart"`
-	Env          map[string]string          `json:"env"`
-	InstallHints []string                   `json:"install_hints"`
-	Timeout      *string                    `json:"timeout"`
-	ModelStorage *ragModelStorageFileConfig `json:"model_storage"`
+	Type         *string                    `json:"type" yaml:"type"`
+	DataBoundary *string                    `json:"data_boundary" yaml:"data_boundary"`
+	Endpoint     *string                    `json:"endpoint" yaml:"endpoint"`
+	Executable   *string                    `json:"executable" yaml:"executable"`
+	Startup      *string                    `json:"startup" yaml:"startup"`
+	Autostart    *bool                      `json:"autostart" yaml:"autostart"`
+	Env          map[string]string          `json:"env" yaml:"env"`
+	InstallHints yamlStringList             `json:"install_hints" yaml:"install_hints"`
+	Timeout      *string                    `json:"timeout" yaml:"timeout"`
+	ModelStorage *ragModelStorageFileConfig `json:"model_storage" yaml:"model_storage"`
 }
 
 type ragModelStorageFileConfig struct {
-	Mode *string `json:"mode"`
-	Path *string `json:"path"`
-	Env  *string `json:"env"`
+	Mode *string `json:"mode" yaml:"mode"`
+	Path *string `json:"path" yaml:"path"`
+	Env  *string `json:"env" yaml:"env"`
 }
 
 type ragProfileFileConfig struct {
-	Provider       *string `json:"provider"`
-	Model          *string `json:"model"`
-	Dimensions     *int    `json:"dimensions"`
-	MaxInputTokens *int    `json:"max_input_tokens"`
-	BatchSize      *int    `json:"batch_size"`
+	Provider       *string `json:"provider" yaml:"provider"`
+	Model          *string `json:"model" yaml:"model"`
+	Dimensions     *int    `json:"dimensions" yaml:"dimensions"`
+	MaxInputTokens *int    `json:"max_input_tokens" yaml:"max_input_tokens"`
+	BatchSize      *int    `json:"batch_size" yaml:"batch_size"`
 }
 
 type ragIndexingFileConfig struct {
-	Profile     *string `json:"profile"`
-	ChunkTokens *int    `json:"chunk_tokens"`
-	Overlap     *int    `json:"overlap"`
-	BatchSize   *int    `json:"batch_size"`
+	Profile     *string `json:"profile" yaml:"profile"`
+	ChunkTokens *int    `json:"chunk_tokens" yaml:"chunk_tokens"`
+	Overlap     *int    `json:"overlap" yaml:"overlap"`
+	BatchSize   *int    `json:"batch_size" yaml:"batch_size"`
 }
 
 type ragSearchFileConfig struct {
-	Profile *string `json:"profile"`
-	TopK    *int    `json:"top_k"`
-	Hybrid  *bool   `json:"hybrid"`
+	Profile *string `json:"profile" yaml:"profile"`
+	TopK    *int    `json:"top_k" yaml:"top_k"`
+	Hybrid  *bool   `json:"hybrid" yaml:"hybrid"`
 }
 
 func defaultServiceConfig(cacheBaseDir string) ServiceConfig {

@@ -113,6 +113,23 @@ func TestParsePolicySupportsStandardYAMLForms(t *testing.T) {
 	}
 }
 
+func TestMinimalFormattedIncludeUsesSameDocumentationPolicy(t *testing.T) {
+	var policyHash string
+	for _, content := range []string{
+		"repository_docs:\n  include:\n    - README.md\n",
+		"repository_docs: {include: [README.md]}\n",
+	} {
+		result, err := ParsePolicy([]byte(content), PolicySourceCommitted)
+		if err != nil || result.Status != PolicyStatusReady || !result.Policy.Matches("README.md") {
+			t.Fatalf("valid include policy failed: %v", err)
+		}
+		if policyHash != "" && policyHash != result.PolicyHash {
+			t.Fatal("formatting changed documentation policy identity")
+		}
+		policyHash = result.PolicyHash
+	}
+}
+
 func TestDisabledPolicy(t *testing.T) {
 	result, err := ParsePolicy([]byte("repository_docs:\n  enabled: false\n"), PolicySourceCommitted)
 	if err != nil {
