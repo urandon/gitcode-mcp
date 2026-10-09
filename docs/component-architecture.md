@@ -137,6 +137,11 @@ flowchart TD
 ## Boundary Rules
 
 - CLI and MCP are transports. Shared behavior belongs in `internal/service/`.
+- The daemon publishes its private runtime identity and compatibility PID file
+  through same-directory atomic replacement. A reader sees a complete old or
+  new document, never a truncate-in-place intermediate. Runtime state remains
+  authoritative; the two files are not a cross-file transaction. Malformed
+  persistent state is still an error, not silently retried or treated as healthy.
 - Live API quirks belong in `internal/gitcode/`, guarded by tests and route-schema evidence.
 - Cache migrations must be explicit and versioned. Routine reads should not take the writer lock when the schema is current.
 - Writes are never implicit background side effects of reads.
