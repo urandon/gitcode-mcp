@@ -108,6 +108,32 @@ gitcode-mcp create-milestone \
 
 Expected: validates milestone creation without mutation. GitCode requires `--due-on` for milestone creation.
 
+Milestone descriptions must be valid UTF-8 and no longer than 2000 UTF-16 code
+units (supplementary characters count as two). Dry-run and live enforce the same
+field contract without truncation. Creation allows omitted/open state only;
+GitCode ignores closed state on create. Close with an explicit update after
+creation.
+
+Every update requires title and due date, including a description-only or state
+change. Read current values with `milestones` / MCP `list_milestones` and supply
+them explicitly when preserving them:
+
+```sh
+gitcode-mcp update-milestone \
+  --repo example-owner/example-repo \
+  --milestone MILESTONE-1 \
+  --title "RAG indexer MVP" \
+  --due-on 2026-07-15 \
+  --state closed \
+  --idempotency-key milestone-1-close
+```
+
+Omitted/empty description means preserve; this interface does not clear a
+description. Canonical readback must confirm requested fields before success.
+If confirmation is ambiguous, preserve the key: known identities reconcile by
+GET only, while an unknown create identity requires manual list reconciliation.
+Do not use a new key to repeat an uncertain POST/PATCH.
+
 ```sh
 gitcode-mcp set-issue-milestone \
   --repo example-owner/example-repo \

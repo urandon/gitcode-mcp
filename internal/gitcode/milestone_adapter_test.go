@@ -80,10 +80,11 @@ func TestMilestone002GetRouteContract(t *testing.T) {
 func TestMilestone002CreateRequiresDueOnAndPostsPayload(t *testing.T) {
 	var payload map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Fatalf("method=%s, want POST", r.Method)
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v5/repos/test-owner/test-repo/milestones/2" {
+			fmt.Fprint(w, `{"id":2,"title":"RAG indexer MVP","description":"Design","state":"open","due_on":"2026-07-15"}`)
+			return
 		}
-		if r.URL.Path != "/api/v5/repos/test-owner/test-repo/milestones" {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v5/repos/test-owner/test-repo/milestones" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -101,7 +102,7 @@ func TestMilestone002CreateRequiresDueOnAndPostsPayload(t *testing.T) {
 	if result.RemoteID != "2" || result.Record.Title != "RAG indexer MVP" {
 		t.Fatalf("result=%#v", result)
 	}
-	if payload["title"] != "RAG indexer MVP" || payload["description"] != "Design" || payload["due_on"] != "2026-07-15" || payload["state"] != "open" {
+	if payload["title"] != "RAG indexer MVP" || payload["description"] != "Design" || payload["due_on"] != "2026-07-15" || payload["state"] != nil {
 		t.Fatalf("payload=%#v", payload)
 	}
 	if _, err := client.CreateMilestone(context.Background(), MilestoneWriteRequest{Owner: "test-owner", Repo: "test-repo", Title: "missing due"}, WriteOptions{IdempotencyKey: "missing-due"}); err == nil {
