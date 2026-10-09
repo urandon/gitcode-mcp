@@ -1,5 +1,6 @@
 # gitcode-mcp
 
+[![CI](https://github.com/urandon/gitcode-mcp/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/urandon/gitcode-mcp/actions/workflows/ci.yml?query=branch%3Amain)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/urandon/gitcode-mcp)
 
 **A local, durable working set for GitCode — built for agents, operators, and
