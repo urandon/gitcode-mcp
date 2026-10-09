@@ -988,6 +988,82 @@ test('maintenance target history restores identity and invalidates the previous 
   await expect(page.getByText('maintenance-plan-history')).toHaveCount(0);
 });
 
+for (const action of ['Disable', 'Reconcile now']) {
+  test(`maintenance target history cancels a pending ${action} confirmation`, async ({ page }) => {
+    await mockAdmin(page, maintenanceNavigationSnapshot());
+    const writes: string[] = [];
+    await page.route('**/api/admin/v1/maintenance/*/disable', async (route) => { writes.push(route.request().url()); await route.abort(); });
+    await page.route('**/api/admin/v1/maintenance/*/reconcile', async (route) => { writes.push(route.request().url()); await route.abort(); });
+    await page.goto('/?view=Maintenance&registration=reg-1');
+    await page.getByLabel('Managed target').selectOption('cache-111111112222\u0000example/other');
+    await page.getByRole('button', { name: action, exact: true }).click();
+    await expect(page.getByRole('dialog')).toContainText('example/other');
+    await page.goBack();
+    await expect(page.getByLabel('Managed target')).toHaveValue('cache-111111112222\u0000example/repo');
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await page.goForward();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    expect(writes).toEqual([]);
+  });
+}
+
+for (const outcome of ['success', 'failure']) {
+  test(`maintenance ignores a late control ${outcome} after history changes target`, async ({ page }) => {
+    await mockAdmin(page, maintenanceNavigationSnapshot());
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const requests: string[] = [];
+    await page.route('**/api/admin/v1/maintenance/*/reconcile', async (route) => {
+      requests.push(route.request().url());
+      await gate;
+      await route.fulfill({ status: outcome === 'success' ? 200 : 422, contentType: 'application/json', body: JSON.stringify(outcome === 'success'
+        ? { api_version: '1', result: { outcome: 'reconciled', receipt_id: 'obsolete-control-receipt' } }
+        : { error: { code: 'stale_registration', message: 'Obsolete control failure.' } }) });
+    });
+    await page.goto('/?view=Maintenance&registration=reg-1');
+    await page.getByLabel('Managed target').selectOption('cache-111111112222\u0000example/other');
+    await page.getByRole('button', { name: 'Reconcile now', exact: true }).click();
+    const submitted = page.waitForRequest('**/api/admin/v1/maintenance/*/reconcile');
+    await page.getByRole('button', { name: 'Confirm action', exact: true }).click();
+    await submitted;
+    await page.goBack();
+    await expect(page.getByLabel('Managed target')).toHaveValue('cache-111111112222\u0000example/repo');
+    const response = page.waitForResponse('**/api/admin/v1/maintenance/*/reconcile');
+    release();
+    await response;
+    await expect(page.getByRole('button', { name: 'Render plan', exact: true })).toBeEnabled();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(page.getByText(/obsolete-control-receipt|Obsolete control failure/)).toHaveCount(0);
+    expect(requests).toEqual(['http://127.0.0.1:4173/api/admin/v1/maintenance/reg-other/reconcile']);
+  });
+}
+
+for (const missing of ['repository', 'cache', 'registration', 'removed-repository']) {
+  test(`maintenance preserves a missing explicit ${missing} instead of retargeting`, async ({ page }) => {
+    const state = maintenanceNavigationSnapshot();
+    await mockAdmin(page, state);
+    const requests: unknown[] = [];
+    await page.route('**/api/admin/v1/maintenance/plan', async (route) => { requests.push(route.request().postDataJSON()); await route.abort(); });
+    const key = missing === 'cache' ? 'cache-missing\u0000example/repo' : missing === 'registration' ? '' : `cache-111111112222\u0000example/${missing === 'removed-repository' ? 'other' : 'missing'}`;
+    await page.goto(missing === 'registration' ? '/?view=Maintenance&registration=reg-missing' : `/?view=Maintenance&cache=${key.split('\u0000')[0]}&repo=${encodeURIComponent(key.split('\u0000')[1])}`);
+    if (missing === 'removed-repository') {
+      await expect(page.getByLabel('Managed target')).toHaveValue(key);
+      state.caches[0].repositories = state.caches[0].repositories.filter((repo: any) => repo.repo_id !== 'example/other');
+      state.maintenance = state.maintenance.filter((item: any) => item.registration_id !== 'reg-other');
+      const refreshed = page.waitForResponse('**/api/admin/v1/snapshot');
+      await page.getByRole('button', { name: 'Refresh snapshot', exact: true }).first().click();
+      await refreshed;
+    }
+    await expect(page.getByLabel('Managed target')).toHaveValue(key);
+    await expect(page.getByText('Selected maintenance target is unavailable.')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Render plan', exact: true })).toBeDisabled();
+    expect(requests).toEqual([]);
+    await page.getByLabel('Managed target').selectOption('cache-111111112222\u0000example/repo');
+    await expect(page.getByRole('button', { name: 'Render plan', exact: true })).toBeEnabled();
+    await expect(page.getByText('Selected maintenance target is unavailable.')).toHaveCount(0);
+  });
+}
+
 test('maintenance same-target refresh preserves unsaved policy edits', async ({ page }) => {
   await mockAdmin(page, maintenanceNavigationSnapshot());
   let plannedBody: Record<string, unknown> | undefined;
