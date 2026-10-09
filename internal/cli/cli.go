@@ -3101,10 +3101,10 @@ func dispatchWrite(ctx context.Context, handler func(context.Context, service.Wr
 }
 
 func resolveMarkdownBodyInput(command string, opts options, stdin io.Reader) (options, error) {
-	supported := command == "create-issue" || command == "update-issue" || command == "add-issue-comment" || command == "add-pr-comment" || command == "update-comment"
+	supported := command == "create-issue" || command == "update-issue" || command == "create-pr" || command == "create-mr" || command == "add-issue-comment" || command == "add-pr-comment" || command == "update-comment"
 	if !supported {
 		if opts.bodyFileSet || opts.allowLiteralBackslashN {
-			return opts, service.ErrInvalidQuery{Field: "body_input", Message: "--body-file and --allow-literal-backslash-n are supported by create-issue, update-issue, add-issue-comment, add-pr-comment, and update-comment"}
+			return opts, service.ErrInvalidQuery{Field: "body_input", Message: "--body-file and --allow-literal-backslash-n are supported by create-issue, update-issue, create-pr, create-mr, add-issue-comment, add-pr-comment, and update-comment"}
 		}
 		return opts, nil
 	}
@@ -3133,7 +3133,7 @@ func resolveMarkdownBodyInput(command string, opts options, stdin io.Reader) (op
 		} else {
 			file, err := os.Open(opts.bodyFile)
 			if err != nil {
-				return opts, service.ErrInvalidQuery{Field: "body_file", Message: fmt.Sprintf("cannot read body file: %v", err)}
+				return opts, service.ErrInvalidQuery{Field: "body_file", Message: "cannot read body file; check that it exists and is readable"}
 			}
 			reader = file
 			closeReader = file.Close
@@ -3146,7 +3146,7 @@ func resolveMarkdownBodyInput(command string, opts options, stdin io.Reader) (op
 			}
 		}
 		if err != nil {
-			return opts, service.ErrInvalidQuery{Field: "body_file", Message: fmt.Sprintf("cannot read body input: %v", err)}
+			return opts, service.ErrInvalidQuery{Field: "body_file", Message: "cannot read body input"}
 		}
 		if int64(len(data)) > maxMarkdownBodyBytes {
 			return opts, service.ErrInvalidQuery{Field: "body_file", Message: fmt.Sprintf("body input exceeds %d bytes", maxMarkdownBodyBytes)}
@@ -5416,7 +5416,7 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  --number N --slug SLUG")
 	fmt.Fprintln(w, "  record IDs are positional for get, backlinks, and snippet commands")
 	fmt.Fprintln(w, "  --title TITLE --body BODY --body-file PATH|- --label LABEL --labels A,B --tag TAG")
-	fmt.Fprintln(w, "  --body-file is scoped to issue and issue-comment Markdown writes")
+	fmt.Fprintln(w, "  --body-file is scoped to issue, PR/MR creation, and comment Markdown writes")
 	fmt.Fprintln(w, "  --idempotency-key KEY")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Global options:")
@@ -5782,14 +5782,17 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "create-pr", "create-mr":
-		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --title TITLE --head BRANCH --base BRANCH [--body BODY] [--idempotency-key KEY]\n\n", command)
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO --title TITLE --head BRANCH --base BRANCH [--body BODY | --body-file PATH|-] [--idempotency-key KEY]\n\n", command)
 		fmt.Fprintln(w, "Create a new pull request / merge request. Executes live by default; use --dry-run for no-mutation validation.")
+		fmt.Fprintln(w, "Use --body-file for multiline Markdown; CRLF/CR are normalized to LF and trailing newlines are preserved.")
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --repo REPO         repository id (required)")
 		fmt.Fprintln(w, "  --title TITLE       pull request title (required)")
 		fmt.Fprintln(w, "  --head BRANCH       source branch (required)")
 		fmt.Fprintln(w, "  --base BRANCH       target branch (required)")
 		fmt.Fprintln(w, "  --body BODY         pull request body")
+		fmt.Fprintln(w, "  --body-file PATH|-  UTF-8 pull request body file, or stdin with -")
+		fmt.Fprintln(w, "  --allow-literal-backslash-n  allow intentional inline literal \\n sequences")
 		fmt.Fprintln(w, "  --idempotency-key KEY  idempotency key")
 		fmt.Fprintln(w, "  --dry-run           validate without mutation")
 		fmt.Fprintln(w, "  --live              compatibility alias for live write")

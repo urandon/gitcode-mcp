@@ -130,7 +130,7 @@ Create a pull request through the same audited CLI write lifecycle:
 gitcode-mcp create-pr --repo "YOUR_REPO" --idempotency-key "ik-pr-001" --title "Test PR" --head "feature-branch" --base "main" --body "Body"
 ```
 
-`create-pr --help` documents `--live`, `--dry-run`, `--idempotency-key`, `--title`, `--body`, `--head`, and `--base`. `create-mr` is an alias for GitCode UI terminology and uses the same service write path.
+`create-pr --help` documents `--live`, `--dry-run`, `--idempotency-key`, `--title`, `--body`, `--body-file PATH|-`, `--allow-literal-backslash-n`, `--head`, and `--base`. `create-mr` is an alias for GitCode UI terminology and uses the same Markdown input contract and service write path. Prefer file/stdin input for multiline Markdown; `--body` and `--body-file` are mutually exclusive.
 
 The MCP server exposes the same audited live-write lifecycle for agent workflows that previously needed shell or direct REST fallback:
 

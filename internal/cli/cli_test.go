@@ -3280,6 +3280,8 @@ func TestMarkdownBodyFileCommandsNormalizeAndReportSafeMetadata(t *testing.T) {
 	}{
 		{command: "create-issue", args: []string{"--title", "title"}, method: "CreateIssue"},
 		{command: "update-issue", args: []string{"--issue-id", "ISSUE-1"}, method: "UpdateIssue"},
+		{command: "create-pr", args: []string{"--title", "title", "--head", "topic", "--base", "main"}, method: "CreatePR"},
+		{command: "create-mr", args: []string{"--title", "title", "--head", "topic", "--base", "main"}, method: "CreatePR"},
 		{command: "add-issue-comment", args: []string{"--number", "1"}, method: "AddComment"},
 		{command: "add-pr-comment", args: []string{"--number", "1"}, method: "AddPRComment"},
 		{command: "update-comment", args: []string{"--comment-id", "comment-1"}, method: "UpdateComment"},
@@ -3355,7 +3357,7 @@ func TestMarkdownBodyInputRejectsAmbiguousAndUnsafeFormsBeforeWrite(t *testing.T
 		{name: "suspicious literal escapes", args: []string{"add-issue-comment", "--repo", "fixture-a", "--number", "1", "--body", `one\n\ntwo`, "--dry-run"}, want: "multiple literal \\n sequences"},
 		{name: "double escaped remains suspicious", args: []string{"add-issue-comment", "--repo", "fixture-a", "--number", "1", "--body", `one\\n\\ntwo`, "--dry-run"}, want: "multiple literal \\n sequences"},
 		{name: "empty stdin", args: []string{"add-issue-comment", "--repo", "fixture-a", "--number", "1", "--body-file", "-", "--dry-run"}, stdin: strings.NewReader(""), want: "body input is empty"},
-		{name: "body file unsupported", args: []string{"create-pr", "--repo", "fixture-a", "--title", "t", "--head", "h", "--base", "b", "--body-file", "-", "--dry-run"}, stdin: strings.NewReader("x"), want: "supported by create-issue"},
+		{name: "body file unsupported", args: []string{"update-pr", "--repo", "fixture-a", "--number", "1", "--body-file", "-", "--dry-run"}, stdin: strings.NewReader("x"), want: "supported by create-issue"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -4085,7 +4087,7 @@ func TestCommandHelpExitsZero(t *testing.T) {
 }
 
 func TestMarkdownWriteHelpRecommendsFileOrStdin(t *testing.T) {
-	for _, command := range []string{"create-issue", "update-issue", "add-issue-comment", "add-pr-comment", "update-comment"} {
+	for _, command := range []string{"create-issue", "update-issue", "create-pr", "create-mr", "add-issue-comment", "add-pr-comment", "update-comment"} {
 		t.Run(command, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			if code := Execute([]string{command, "--help"}, &stdout, &stderr); code != 0 {

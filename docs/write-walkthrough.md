@@ -28,7 +28,7 @@ The legacy `add-comment` command is a fail-closed migration guard: it never writ
 
 ## Multiline Markdown bodies
 
-For multiline issue and issue-comment Markdown, use a UTF-8 file or stdin instead of shell-escaped inline text:
+For multiline issue, PR/MR creation and comment Markdown, use a UTF-8 file or stdin instead of shell-escaped inline text:
 
 ```sh
 gitcode-mcp add-issue-comment \
@@ -44,7 +44,7 @@ gitcode-mcp update-comment \
   --idempotency-key comment-2002-update < ./comment.md
 ```
 
-`create-issue`, `update-issue`, `add-issue-comment`, `add-pr-comment`, and `update-comment` accept at most one of `--body` or `--body-file`; comment writes still require a non-empty body, while issue writes may omit it. `--body-file -` reads stdin. File/stdin inputs are bounded to 10 MiB and must be non-empty valid UTF-8. CRLF and lone CR line endings normalize to LF; all trailing newlines are otherwise preserved. The CLI never unescapes backslashes.
+`create-issue`, `update-issue`, `create-pr`, `create-mr`, `add-issue-comment`, `add-pr-comment`, and `update-comment` accept at most one of `--body` or `--body-file`; comment writes still require a non-empty body, while issue and PR/MR creation writes may omit it. `--body-file -` reads stdin. File/stdin inputs are bounded to 10 MiB and must be non-empty valid UTF-8. CRLF and lone CR line endings normalize to LF; all trailing newlines are otherwise preserved. The CLI never unescapes backslashes. Read failures are typed and omit local paths and raw reader errors.
 
 An inline body containing two or more literal `\n` sequences and no real newline fails before service startup or an external write. Use `--body-file` for intended Markdown, or `--allow-literal-backslash-n` when those literal characters are intentional. Dry-run output exposes only safe input metadata—source, byte count, real-newline count, literal-`\n` count, and normalization flags—not the body itself.
 
