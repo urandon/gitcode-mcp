@@ -218,6 +218,17 @@ active turn itself. A busy JobManager gives null probe values. This remains
 distinct from writer-contention attempt instrumentation and durable incident
 health; observing a queue does not repair or admit work.
 
+Collection `retry_admissions` increments on entry into a real re-attempt, not
+when its checkpoint is saved, loaded or waiting for a future window. A resumed
+retry which actually executes counts in the new boot; receipt-only recovery
+does not. Cancellation before admission and failed checkpoint persistence do
+not invent retries. Typed writer denials are counted at daemon admission,
+sync-commit reservation and execution-result boundaries, after releasing job
+locks and commit turns. Normal FIFO queueing, coalescing, identity/recovery
+fences and raw error messages are not writer contention. Internal adapter
+errors are not also counted at the cache layer. Direct local writers use the
+finite `other` work kind, never their operation/id as a label.
+
 Daemon-owned execution carries the concrete metric sink in a private context
 value without changing cancellation or deadlines. GitCode provider attempts
 are one actual policy-loop HTTP Client.Do invocation plus its bounded response

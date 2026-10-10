@@ -2,8 +2,10 @@ package servicectl
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/observability"
 )
 
@@ -37,7 +39,38 @@ func (m *JobManager) SetMetrics(metrics *observability.Metrics) {
 		return
 	}
 	metrics.AttachOrigin("jobs")
+	metrics.AttachOrigin("writer")
 	m.metrics.Store(&jobMetrics{metrics: metrics})
+}
+
+// Only typed writer denial is evidence; a queue, fence, coalesced job or raw
+// error string is not a contention attempt. Callers record after unlocking and
+// releasing their commit turn, never from the cache adapter as well.
+func (m *JobManager) observeWriterContention(kind string, err error) {
+	var busy ErrCacheWriterBusy
+	var lease cache.ErrLockContention
+	if !errors.As(err, &busy) && !errors.As(err, &lease) {
+		return
+	}
+	if sink := m.metrics.Load(); sink != nil {
+		sink.metrics.Add("writer_contention", map[string]string{"kind": metricWorkKind(kind)}, 1)
+	}
+}
+
+func observeCollectionRetry(ctx context.Context, collection string, attempt int) {
+	if attempt <= 1 || ctx.Err() != nil {
+		return
+	}
+	metrics := observability.MetricsFromContext(ctx)
+	if metrics == nil {
+		return
+	}
+	switch collection {
+	case "issues", "issue_comments", "wiki", "pulls", "pr_comments":
+	default:
+		collection = "other"
+	}
+	metrics.Add("retry_admissions", map[string]string{"collection": collection}, 1)
 }
 
 func metricWorkKind(kind string) string {

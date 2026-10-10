@@ -169,7 +169,7 @@ func TestDaemonRestartResumesOnlyPendingCollectionRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	restarted := NewJobManager(jobsPath)
+	restarted, metrics := testJobMetrics(t, jobsPath)
 	if err := restarted.LoadAndMarkInterrupted(); err != nil {
 		t.Fatal(err)
 	}
@@ -179,6 +179,8 @@ func TestDaemonRestartResumesOnlyPendingCollectionRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	job := waitForManagerJobTerminal(t, restarted, jobID)
+	requireJobCounter(t, metrics, "retry_admissions", map[string]string{"collection": "wiki"}, 1)
+	requireJobCounter(t, metrics, "retry_admissions", map[string]string{"collection": "issues"}, 0)
 	if job.Status != JobStatusSucceeded || job.SyncHealth != SyncHealthSucceeded {
 		t.Fatalf("recovered retry job=%+v", job)
 	}
@@ -261,7 +263,7 @@ func TestDaemonRestartReconcilesCommittedRetryStageBeforeProviderReplay(t *testi
 		t.Fatal(err)
 	}
 
-	restarted := NewJobManager(jobsPath)
+	restarted, metrics := testJobMetrics(t, jobsPath)
 	if err := restarted.LoadAndMarkInterrupted(); err != nil {
 		t.Fatal(err)
 	}
@@ -271,6 +273,12 @@ func TestDaemonRestartReconcilesCommittedRetryStageBeforeProviderReplay(t *testi
 		t.Fatal(err)
 	}
 	job, _ := restarted.Get(jobID)
+	for _, collection := range []string{"issues", "wiki"} {
+		value := jobMetric(t, metrics, "retry_admissions", map[string]string{"collection": collection}).Value
+		if value != nil && *value != 0 {
+			t.Fatal("receipt projection invented a collection retry")
+		}
+	}
 	if job.Status != JobStatusSucceeded || job.SyncHealth != SyncHealthPartial || job.Steps != 10 || job.Completed != 8 || job.ErrorClass != "forbidden" {
 		t.Fatalf("reconciled committed retry job=%+v", job)
 	}
@@ -713,7 +721,7 @@ func TestDirectCacheWriterBlocksConflictFenceButAllowsDurableFetchAdmission(t *t
 	}
 	identity, _ := store.CacheIdentity(ctx)
 	_ = store.Close()
-	jobs := NewJobManager("")
+	jobs, metrics := testJobMetrics(t, "")
 	releaseWriter, err := jobs.BeginDirectCacheWriter(identity.UUID, "admin-binding-test")
 	if err != nil {
 		t.Fatal(err)
@@ -748,6 +756,10 @@ func TestDirectCacheWriterBlocksConflictFenceButAllowsDurableFetchAdmission(t *t
 	}
 	if observed.SyncStage == nil || observed.SyncStage.Phase != SyncStageWaitingCommit || observed.SyncStage.BlockingOp != "direct_cache_write" {
 		t.Fatalf("durable sync did not stage behind direct writer: %+v", observed)
+	}
+	value := jobMetric(t, metrics, "writer_contention", map[string]string{"kind": "sync"}).Value
+	if value == nil || *value < 1 {
+		t.Fatal("denied daemon writer reservation was not observed")
 	}
 	releaseWriter()
 	releasedWriter = true
@@ -900,7 +912,7 @@ func TestIssueOnlyDaemonSyncWaitsForWriterAndCommitsRetainedStage(t *testing.T) 
 	cfg := config.Default()
 	cfg.LockPath = lockPath
 	manager.EffectiveConfig = &cfg
-	jobs := NewJobManager(filepath.Join(root, "jobs.json"))
+	jobs, metrics := testJobMetrics(t, filepath.Join(root, "jobs.json"))
 	job, err := jobs.StartSync(ctx, manager, StartSyncJobRequest{RepoID: "owner/repo", CachePath: cachePath, CacheUUID: identity.UUID, Issues: true, ProviderMode: "fixture", MaxPages: 1, PerPage: 100})
 	if err != nil {
 		t.Fatalf("StartSync: %v", err)
@@ -916,6 +928,10 @@ func TestIssueOnlyDaemonSyncWaitsForWriterAndCommitsRetainedStage(t *testing.T) 
 	}
 	if waiting.SyncStage == nil || waiting.SyncStage.Phase != SyncStageWaitingCommit || waiting.Status != JobStatusRunning || waiting.SyncStage.BlockerClass != "cache_busy" || waiting.SyncStage.BlockingOp != "rag-index" {
 		t.Fatalf("waiting job = %+v", waiting)
+	}
+	value := jobMetric(t, metrics, "writer_contention", map[string]string{"kind": "sync"}).Value
+	if value == nil || *value < 1 {
+		t.Fatal("typed SQLite writer contention was not observed")
 	}
 	if err := store.ReleaseWriter(ctx, held); err != nil {
 		t.Fatal(err)

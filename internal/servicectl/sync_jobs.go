@@ -1085,6 +1085,7 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 		}
 		if !reserved {
 			releaseTurn()
+			m.observeWriterContention(SyncJobType, ErrCacheWriterBusy{})
 			state, retry := nextSyncCommitRetry(stage.StageID, stage.State, time.Now().UTC())
 			state.BlockingOp, state.BlockingJobRef = blockingOp, blockingRef
 			stage, err = journal.UpdateState(stage.StageID, state)
@@ -1144,6 +1145,7 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 			collection := syncCollectionResult{RemoteType: work.remoteType, Result: result, Err: commitErr}
 			return result, collection, commitErr
 		}
+		m.observeWriterContention(SyncJobType, commitErr)
 		state, retry := nextSyncCommitRetry(stage.StageID, stage.State, time.Now().UTC())
 		state.BlockingOp = contention.PublicOperation()
 		state.BlockingJobRef = m.blockingCacheWriterRef(jobID, stage.CacheUUID)
@@ -2143,6 +2145,7 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 		}
 		if !reserved {
 			releaseTurn()
+			m.observeWriterContention(SyncJobType, ErrCacheWriterBusy{})
 			state, retry := nextSyncCommitRetry(stage.StageID, stage.State, time.Now().UTC())
 			state.BlockingOp, state.BlockingJobRef = blockingOp, blockingRef
 			stage, err = journal.UpdateState(stage.StageID, state)
@@ -2187,6 +2190,7 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 			stage, _ = journal.UpdateState(stage.StageID, state)
 			return result, stage, commitErr
 		}
+		m.observeWriterContention(SyncJobType, commitErr)
 		state, retry := nextSyncCommitRetry(stage.StageID, stage.State, time.Now().UTC())
 		state.BlockingOp = contention.PublicOperation()
 		state.BlockingJobRef = m.blockingCacheWriterRef(stage.JobID, stage.CacheUUID)

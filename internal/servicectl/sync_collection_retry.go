@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/gitcode"
+	"gitcode-mcp/internal/observability"
 	"gitcode-mcp/internal/service"
 )
 
@@ -134,6 +135,9 @@ func runSyncCollectionSchedule(
 	now func() time.Time,
 	hooks *syncCollectionRetryHooks,
 ) []syncCollectionExecution {
+	if metrics := observability.MetricsFromContext(ctx); metrics != nil {
+		metrics.AttachOrigin("maintenance")
+	}
 	if budget <= 0 {
 		budget = defaultSyncCollectionRetryBudget
 	}
@@ -189,6 +193,7 @@ func runSyncCollectionSchedule(
 			}
 		}
 		item.attempt++
+		observeCollectionRetry(ctx, item.task.Collection, item.attempt)
 		result, collectionResult, err := item.task.Attempt(item.attempt)
 		if result != nil {
 			// Attempts describe the same frontier. Keep the newest observation

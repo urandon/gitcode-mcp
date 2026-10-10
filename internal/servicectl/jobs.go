@@ -323,10 +323,12 @@ func (m *JobManager) BeginDirectCacheWriter(cacheUUID, writerID string) (func(),
 	// directCacheWriters and waits at the real writer boundary.
 	if active, ok := m.activeReservedWriterLocked(cacheUUID); ok {
 		m.mu.Unlock()
+		m.observeWriterContention("", ErrCacheWriterBusy{})
 		return func() {}, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
 	}
 	if activeID := m.directCacheWriters[cacheUUID]; activeID != "" {
 		m.mu.Unlock()
+		m.observeWriterContention("", ErrCacheWriterBusy{})
 		return func() {}, ErrCacheWriterBusy{ActiveJobID: activeID, ActiveType: "direct_cache_write"}
 	}
 	m.directCacheWriters[cacheUUID] = writerID
@@ -601,8 +603,14 @@ func (m *JobManager) LatestRepositoryDocsSource(cacheUUID, repoID, sourceRegistr
 // matching fences unrelated or stale work from being revived; callers remain
 // responsible for enforcing the durable retry window before invoking it.
 func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, sourceRegistrationID string, generation int64, expectedSetID, workKey, actionIntentRef string, cancel context.CancelFunc) (Job, bool, error) {
+	var contention bool
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		if contention {
+			m.observeWriterContention(RepositoryDocsIndexJobType, ErrCacheWriterBusy{})
+		}
+	}()
 	if m.closing {
 		return Job{}, false, errors.New("service is stopping")
 	}
@@ -619,9 +627,11 @@ func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, source
 		return Job{}, false, CacheMutationFenceError{}
 	}
 	if activeID := m.directCacheWriters[strings.TrimSpace(job.CacheUUID)]; activeID != "" {
+		contention = true
 		return Job{}, false, ErrCacheWriterBusy{ActiveJobID: activeID, ActiveType: "direct_cache_write"}
 	}
 	if active, ok := m.activeReservedWriterLocked(job.CacheUUID); ok {
+		contention = true
 		return Job{}, false, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
 	}
 	previous := cloneJob(job)
@@ -827,12 +837,15 @@ type JobRecoveryIntent struct {
 }
 
 func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID string, steps int, workKey, cacheUUID, registrationID, namespaceID string, intent JobRecoveryIntent, cancel context.CancelFunc) (Job, bool, error) {
-	var admitted bool
+	var admitted, contention bool
 	m.mu.Lock()
 	defer func() {
 		m.mu.Unlock()
 		if admitted {
 			m.observeJobAdmission(jobType)
+		}
+		if contention {
+			m.observeWriterContention(jobType, ErrCacheWriterBusy{})
 		}
 	}()
 	if m.closing {
@@ -866,9 +879,11 @@ func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID str
 	// per-cache FIFO instead of failing the whole sync before a stage exists.
 	if cacheWriter && jobType != SyncJobType {
 		if activeID := m.directCacheWriters[cacheUUID]; activeID != "" {
+			contention = true
 			return Job{}, false, ErrCacheWriterBusy{ActiveJobID: activeID, ActiveType: "direct_cache_write"}
 		}
 		if active, ok := m.activeReservedWriterLocked(cacheUUID); ok {
+			contention = true
 			return Job{}, false, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
 		}
 	}

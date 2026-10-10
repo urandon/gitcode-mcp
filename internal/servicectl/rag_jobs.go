@@ -87,6 +87,7 @@ func (m *JobManager) runRAGIndexJob(ctx context.Context, manager Manager, jobID 
 		}
 	}()
 	result, err := runRAGIndex(ctx, manager, req, progressCh)
+	m.observeWriterContention(RAGIndexJobType, err)
 	close(progressCh)
 	<-done
 	if err != nil {
