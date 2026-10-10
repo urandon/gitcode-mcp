@@ -2620,6 +2620,9 @@ func classifyDomainError(err error, ctx domainErrorContext) *errorData {
 		data.Message = err.Error()
 	case errors.As(err, &lockErr):
 		data = cacheLockErrorData(lockErr, lockErr.Error())
+		if lockErr.WaitExhausted {
+			data.Remediation = "retry the same sync_live pr_comments request after the current writer completes; do not repeat the preceding comment mutation"
+		}
 		if data.Remediation == "" {
 			data.Remediation = "retry after the current cache writer completes; CLI fallback: gitcode-mcp doctor --format json"
 		}

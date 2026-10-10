@@ -336,6 +336,15 @@ Before `add_pr_review_comment` performs a POST, it requires the parent `PR-<numb
 
 For bounded discussion refresh, call `sync_live` with `pr_comments: true` and `remote_alias: "pr:N"`. The PR must already be cached; the operation calls the per-PR comments adapter once and does not enumerate other cached pull requests. Exact selectors cannot be combined with collection bounds or daemon mode.
 
+Exact PR-comment refresh validates its cached parent before waiting up to five
+seconds for a shared-cache writer (a caller deadline or cancellation ends it
+earlier). Only local admission is retried, before any provider read. Exhaustion
+retains typed, sanitized `cache_owned`/`cache_busy` evidence and safe recovery
+guidance: retry the same read after the writer completes, not the preceding
+comment mutation. Collection sync remains fail-fast at admission. Successful
+live general/inline comments and confirmed thread replies carry `live` origin
+immediately in cached reads; no follow-up sync is needed to correct provenance.
+
 `list_push_remote_mirrors` is also read-only and requires only `repo_id`. It
 removes destination URL user-info, query strings, and fragments before returning
 or caching mirror records. `trigger_push_remote_mirror` requires
