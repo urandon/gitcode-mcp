@@ -90,6 +90,29 @@ Use the MCP write lifecycle for agent workflows:
 
 Both lifecycles record idempotency, provider confirmation, audit rows, and cache refresh evidence. Direct REST calls are a fallback only when CLI and MCP tools are not available in the current client session.
 
+For an authorized merge, call MCP `merge_pr` after independent review and CI are
+green for the exact source SHA:
+
+```json
+{
+  "repo_id": "YOUR_REPO",
+  "number": 42,
+  "sha": "0123456789abcdef0123456789abcdef01234567",
+  "strategy": "merge",
+  "write_mode": "live",
+  "idempotency_key": "ik-pr-42-merge-reviewed-head"
+}
+```
+
+MCP requires the full expected head SHA and caller key even though CLI keeps
+its optional `--sha` compatibility. Strategies and provider protections are
+unchanged; no force or skip-check option exists. This tool does not attest to
+CI/review readiness. It returns the shared audited write receipt only after
+canonical merged-state readback and cache settlement. `get_source(PR-42)` is
+then cache-first and shows that merged state. Preserve the key for GET-only
+recovery after an ambiguous result. Read-only sessions hide and block the tool;
+the local Admin console intentionally has no remote merge action.
+
 ## Reading Review Discussions
 
 Sync pull requests and their comments before asking for review discussion state:
