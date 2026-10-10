@@ -391,6 +391,9 @@ test('operator views keep coverage truth, deep links, and recovery states', asyn
   }
 });
 
+test.describe('date-collision regression', () => {
+  test.use({ timezoneId: 'UTC', locale: 'en-US' });
+
 test('repository documentation cohort exposes versioned authority, coverage, and safe handoffs', async ({ page }) => {
   // October 10 dates share the coverage value's text prefix. Keep this
   // collision deterministic instead of depending on the runner's calendar.
@@ -489,6 +492,7 @@ test('repository documentation cohort exposes versioned authority, coverage, and
   await expect(page).toHaveURL(/tab=documentation/);
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
 });
 
 const repositoryDocsStateMatrix = [
