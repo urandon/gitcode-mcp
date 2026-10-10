@@ -71,6 +71,7 @@ func (c *Collector) Query(f Filter, token string, limit int) (Page, error) {
 		return Page{}, QueryError{Code: "invalid_query", Reason: "unsupported_filter_or_limit"}
 	}
 	c.mu.Lock()
+	c.absorbLossLocked()
 	events := c.events
 	generation := c.generation
 	coverage := c.coverage

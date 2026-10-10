@@ -151,6 +151,19 @@ flowchart TD
 
 ## Related Docs
 
+### Event admission isolation
+
+Validated catalog events enter the bounded queue through `TryLock` admission.
+An observation reader or writer holding the collector mutex cannot delay an
+execution producer: rejected admission increments one atomic pending-loss scalar
+without retaining the rejected event. Observation snapshots and asynchronous
+checkpoints fold that scalar into dropped-event coverage and the cursor loss
+epoch. A previously issued cursor therefore requires a new snapshot after loss;
+checkpointed loss survives restart. Production instrumentation never retries
+rejected events, and invalid codes or untrusted references do not manufacture
+an execution-loss boundary. This best-effort evidence is not execution authority
+and does not promise crash durability before its asynchronous checkpoint.
+
 ### Metric evidence foundation
 
 The metric catalog is machine-readable and closed: there is no arbitrary

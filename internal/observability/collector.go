@@ -47,6 +47,7 @@ type Collector struct {
 	events             []Event
 	historyBytes       int
 	coverage           Coverage
+	pendingLoss        atomic.Uint64
 	config             Config
 	// A deterministic private storage seam for fault tests, not a public hook.
 	open func(string) (*storage, []Event, bool, error)
@@ -82,7 +83,7 @@ func newCollector(cfg Config, open func(string) (*storage, []Event, bool, error)
 	return c
 }
 
-// Emit never waits for disk or execution locks. Rejected codes and references
+// Emit never waits for disk, execution locks or observation readers. Rejected codes and references
 // never enter the queue. Diagnostic loss must not become a job failure.
 func (c *Collector) Emit(code Code, refs Context) bool {
 	t, ok := catalog[code]
@@ -95,8 +96,12 @@ func (c *Collector) Emit(code Code, refs Context) bool {
 	if err != nil {
 		return false
 	}
-	c.mu.Lock()
+	if !c.mu.TryLock() {
+		c.pendingLoss.Add(1)
+		return false
+	}
 	defer c.mu.Unlock()
+	c.absorbLossLocked()
 	if c.closing {
 		return false
 	}
@@ -115,9 +120,26 @@ func (c *Collector) loseLocked(reason string) {
 	c.coverage.Reason = reason
 	c.coverage.LossEpoch++
 }
-func (c *Collector) Coverage() Coverage { c.mu.Lock(); defer c.mu.Unlock(); return c.coverage }
+
+// A fixed scalar accounts for contention without retaining rejected events.
+// Readers and the asynchronous writer fold it into the durable loss boundary;
+// no producer waits for that work or retries the rejected event.
+func (c *Collector) absorbLossLocked() {
+	if lost := c.pendingLoss.Swap(0); lost != 0 {
+		c.coverage.Dropped += lost
+		c.coverage.LossEpoch += lost
+		c.coverage.State, c.coverage.Reason = "partial", "observation_contention"
+	}
+}
+func (c *Collector) Coverage() Coverage {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.absorbLossLocked()
+	return c.coverage
+}
 func (c *Collector) Close(ctx context.Context, workersUnwound bool) bool {
 	c.mu.Lock()
+	c.absorbLossLocked()
 	if !c.closing {
 		c.closing = true
 		c.cleanRequested = workersUnwound
@@ -193,6 +215,7 @@ func (c *Collector) run() {
 	} else {
 		c.coverage.ObservedBoots = 1
 	}
+	c.absorbLossLocked()
 	c.mu.Unlock()
 	if s != nil {
 		defer s.close()
@@ -284,6 +307,7 @@ func (c *Collector) run() {
 					c.mu.Unlock()
 				}
 				c.mu.Lock()
+				c.absorbLossLocked()
 				s.state.Dropped = c.coverage.Dropped
 				s.state.LossEpoch = c.coverage.LossEpoch
 				s.state.Partial = c.coverage.State != "ready"
@@ -327,6 +351,7 @@ func (c *Collector) write(s *storage, p pending) {
 	var evicted uint64
 	if err == nil && s != nil {
 		c.mu.Lock()
+		c.absorbLossLocked()
 		s.state.Dropped = c.coverage.Dropped
 		s.state.LossEpoch = c.coverage.LossEpoch
 		s.state.Partial = c.coverage.State != "ready"

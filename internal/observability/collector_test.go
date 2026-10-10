@@ -37,6 +37,13 @@ func ready(t *testing.T, c *Collector) {
 	t.Helper()
 	await(t, func() bool { return c.Coverage().State != "initializing" })
 }
+
+// Fixtures that inspect a specific retained event may retry bounded admission.
+// Production instrumentation is deliberately best effort and never does so.
+func admitFixture(t *testing.T, c *Collector, code Code, refs Context) {
+	t.Helper()
+	await(t, func() bool { return c.Emit(code, refs) })
+}
 func flush(t *testing.T, c *Collector, clean bool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -86,9 +93,7 @@ func TestCatalogRejectsRawTextAndUncheckedRefs(t *testing.T) {
 	if c.Emit(Code(sentinel), Context{}) || c.Emit(RecoveryFailed, Context{Repo: Ref{sentinel}}) {
 		t.Fatal("unchecked content accepted")
 	}
-	if !c.Emit(RecoveryFailed, Context{Repo: KnownRef("repo", sentinel), Job: KnownRef("job", sentinel)}) {
-		t.Fatal("resolved opaque references rejected")
-	}
+	admitFixture(t, c, RecoveryFailed, Context{Repo: KnownRef("repo", sentinel), Job: KnownRef("job", sentinel)})
 	flush(t, c, true)
 	p, err := c.Query(Filter{}, "", 200)
 	if err != nil {
@@ -223,9 +228,7 @@ func TestENOSPCNeverStopsAdmissionAndSurvivesRestart(t *testing.T) {
 	})
 	ready(t, c)
 	for i := 0; i < 20; i++ {
-		if !c.Emit(RecoveryFinished, Context{}) {
-			t.Fatal("disk failure blocked bounded admission")
-		}
+		admitFixture(t, c, RecoveryFinished, Context{})
 	}
 	flush(t, c, true)
 	if c.Coverage().State != "partial" {
