@@ -91,6 +91,7 @@ flowchart TD
 | Repository documentation RAG | `internal/repositorydocs/`, metadata tables in `internal/cache/` | Resolves committed corpus policy, reads exact local Git objects, chunks in memory, publishes immutable revision sets/vectors, and hydrates verified citations. | Git is the only document-byte authority; aliases canonicalize before writes; no fetch and no persistent source/chunk text. |
 | Maintenance identity resolution | `internal/servicectl/maintenance.go`, `maintenance_conflicts.go`, Admin controls | Canonicalizes aliases, preserves lossless conflict candidates, renders a generation-fenced selection plan, then atomically promotes one repository authority or one complete physical clone-path cohort behind a cache-writer admission fence. | Distinct repositories never merge across a clone; public surfaces receive paired hashes/fingerprints only; cache paths, repository paths, and config snapshots remain daemon-private. |
 | Maintenance coordinator | `internal/servicectl/` | Owns the per-user managed-cache registry, identity validation, head/tail scheduling, job coalescing, and sanitized lifecycle status. | Raw cache paths stay daemon-local; scheduling keys include durable cache UUID and repository. |
+| Bounded observation foundations | `internal/observability/` | Keeps catalog-only events and volatile fixed-cardinality metric samples separate from execution authority. | Recording never waits for disk, network, a probe or a telemetry reader; loss and unavailable probes remain explicit. Full transport/UI rollout is a separate cohort. |
 | Indexer | `internal/index/` | Parses markdown, headings, stable ids, links, anchors, chunks, and freshness state. | Indexed chunks carry provenance and citations needed by CLI/MCP reads and snapshots. |
 | GitCode provider boundary | `internal/gitcode/` | Defines provider interfaces, fixture behavior, live HTTP adapter, API models, route matrix, pagination, and write confirmation. | Live API shape decisions stay behind this adapter. Fixture mode remains deterministic and network-free. |
 | Route schema matrix | `internal/gitcode/route_schema_matrix.go` | Declares supported, deferred, and unsupported route families by product area. | Unsupported or deferred capabilities return explicit diagnostics instead of empty success. |
@@ -149,6 +150,49 @@ flowchart TD
 - Historical design-package evidence belongs in git history or wiki summaries, not in main.
 
 ## Related Docs
+
+### Metric evidence foundation
+
+The metric catalog is machine-readable and closed: there is no arbitrary
+registration or label API. Dimensions are finite product enums for work kind,
+collection, outcome and Admin route class; job, request, cache and repository
+identities belong in typed event correlation, never in metric labels.
+The foundation does not itself expose new CLI/MCP/Admin endpoints or claim that
+the complete observability cohort is ready. Execution hooks, incident projection
+and the shared transport/UI rollout have independent integration gates.
+
+Gauges have a 15-second sampling window. Runtime probes report uptime in seconds,
+heap allocation in bytes, goroutines as a count and the last observed GC pause
+in seconds; no GC observation is unavailable, not a zero pause. Execution probes
+supply queued/active jobs, writer waiters, scheduled retries and SSE connections.
+Absent, invalid or failed probes produce `value: null` and a fixed reason.
+Counters and duration histograms reset at boot and remain unavailable until
+their trusted origin is attached. Snapshot `boot_id` and `reset_at` identify
+that boundary. Histogram boundaries are 0.01, 0.05, 0.1, 0.5, 1, 5, 15, 60, 300
+and 1800 seconds, plus one overflow cell. Distribution cells are non-cumulative;
+`count` and `sum` describe the per-boot duration distribution, not proof of work.
+
+History is a fixed ring of 60 UTC one-minute buckets, sampled in distinct UTC
+15-second slots. Gauge/counter count, sum and extrema summarize sampled values.
+Counter delta sums valid adjacent-sample increments; rate is the latest valid
+adjacent-sample increment per second, not a cross-boot or whole-minute rate.
+Histogram history aggregates observed duration count/sum/extrema between
+adjacent samples, assigned to the ending sample's UTC bucket. A sampling gap
+does not attribute an arbitrarily long duration interval to the newest minute.
+Current per-boot totals remain available separately. Missing buckets,
+pre-boot history, unavailable probes and baseline/reset boundaries remain
+explicit, without invented zeros. A complete bucket requires all four distinct
+slots and no missing baseline/probe/loss evidence. The current in-progress
+bucket may be incomplete without being an execution failure.
+
+Instrumentation uses bounded `TryLock` recording and never invokes a supplied
+callback. Telemetry contention or invalid input increments a loss counter and
+makes the snapshot partial; it cannot change execution results. Sampling probes
+run only on a separate cancellation-aware worker. A stalled probe does not block
+recording or snapshot reads, and shutdown cannot certify that worker as joined
+until it actually exits. Returned catalog, labels, buckets and distribution
+arrays are independent copies, not mutable references to the live registry.
+
 
 - [Architecture](architecture.md)
 - [Cache And Sync Model](cache-and-sync-model.md)
