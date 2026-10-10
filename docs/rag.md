@@ -137,7 +137,8 @@ gitcode-mcp service upgrade-observation --format json
 gitcode-mcp service upgrade-observation --yes --plan-id PLAN_ID --format json
 ```
 
-Confirmation requires a successful platform stop and proves its PID/socket are
+Confirmation requires a successful platform stop (or positively identified
+already-unloaded launchd owner on an interrupted retry) and proves its PID/socket are
 gone, revalidates the definition, target executable digest and fixed legacy
 identities, removes only `service.out.log` / `service.err.log`, replaces the
 definition and restarts. Cleanup removes those files and is not recoverable;
@@ -151,6 +152,10 @@ an inspection error is never proof that the old owner has stopped. Definition
 replacement syncs a single fixed, private staging leaf before atomic rename;
 a failed write preserves the previous definition. An interrupted staging write
 is overwritten only by a later explicitly confirmed replacement.
+Managed output requires both the bounded definition and its marker in the
+running process environment; rewriting a disk definition does not prove which
+output routing the platform manager actually loaded. A staging contender whose
+descriptor was already renamed into committed state is rejected before writing.
 
 ## Install Provider
 

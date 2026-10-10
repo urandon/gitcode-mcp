@@ -482,8 +482,11 @@ func (m Manager) Run(ctx context.Context) error {
 	}
 	// No observation storage operation is on the execution startup path. The
 	// collector owns its writer, and unavailable diagnostics remain partial.
+	// Freeze the receiver before New starts its asynchronous probe. Copying m
+	// inside that probe would race assignment of m.observation below.
+	observationOwner := m
 	m.observation = observability.New(observability.Config{Directory: filepath.Join(paths.LogDir, "observation"), LegacyDirectory: paths.LogDir,
-		ManagedOutputProbe: func() bool { return boundedDefinition(paths.InstallKind, paths.InstallPath) }})
+		ManagedOutputProbe: func() bool { return observationOwner.managedObservationOutput(paths) }})
 	var jobsForShutdown *JobManager
 	var maintenanceForShutdown *MaintenanceManager
 	var maintenanceDone, recoveryDone <-chan struct{}

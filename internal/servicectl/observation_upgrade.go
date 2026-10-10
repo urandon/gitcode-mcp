@@ -7,10 +7,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 
+	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/observability"
 )
 
@@ -101,6 +105,32 @@ func boundedDefinition(kind, path string) bool {
 		return out.XMLName.Local == "string" && stderr.XMLName.Local == "string" && marker.XMLName.Local == "string" && out.Text == "/dev/null" && stderr.Text == "/dev/null" && marker.Text == "bounded-v1"
 	}
 	return false
+}
+
+func (m Manager) managedObservationOutput(paths Paths) bool {
+	src := m.Source
+	if src == nil {
+		src = config.OSSource{}
+	}
+	// A disk definition can differ from the one launchd/systemd loaded.
+	return src.Env("GITCODE_MCP_OBSERVATION_OUTPUT") == "bounded-v1" && boundedDefinition(paths.InstallKind, paths.InstallPath)
+}
+
+func (m Manager) stopObservationOwner(ctx context.Context, paths Paths) error {
+	if err := m.runStopCommand(ctx, paths); err == nil {
+		return nil
+	}
+	if paths.InstallKind == "launchagent" {
+		target := fmt.Sprintf("gui/%d/com.gitcode.gitcode-mcp", os.Getuid())
+		output, err := m.runCommandOutput(ctx, "launchctl", "print", target)
+		var exited *exec.ExitError
+		// Captured local launchctl compatibility: specific service absence has
+		// exit113 AND the fixed service-name diagnostic. Generic errors are unknown.
+		if len(output) <= 4096 && errors.As(err, &exited) && exited.ExitCode() == 113 && strings.Contains(output, `Could not find service "com.gitcode.gitcode-mcp"`) {
+			return nil
+		}
+	}
+	return observationUpgradeError("quiesce_failed")
 }
 
 type observationPlistNode struct {
@@ -242,9 +272,9 @@ func (m Manager) ApplyObservationUpgrade(ctx context.Context, planID string) (Ob
 		return plan, observationUpgradeError("stale_plan")
 	}
 	paths, _ := m.ResolvePaths()
-	// A failed inspection is unknown, not proof of absence. Require the
-	// platform stop command itself to succeed before any legacy cleanup.
-	if err := m.runStopCommand(ctx, paths); err != nil {
+	// Generic inspection failure is unknown. Require a successful stop or
+	// positively classified already-unloaded owner before legacy cleanup.
+	if err := m.stopObservationOwner(ctx, paths); err != nil {
 		return plan, observationUpgradeError("quiesce_failed")
 	}
 	if _, err := m.waitForStopped(ctx, paths); err != nil {

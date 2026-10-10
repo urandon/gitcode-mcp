@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestCorruptTailPreservesEventsAcrossLaterRestarts(t *testing.T) {
@@ -45,6 +47,34 @@ func TestCorruptTailPreservesEventsAcrossLaterRestarts(t *testing.T) {
 		t.Fatal("post-corruption evidence lost on later restart")
 	}
 	inventory(t, path)
+}
+
+func TestStaleStagingDescriptorCannotMutateCommittedBytes(t *testing.T) {
+	path := testDirectory(t)
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal("fixture directory")
+	}
+	dir, err := openDirectory(path, false)
+	if err != nil {
+		t.Fatal("fixture handle")
+	}
+	defer dir.Close()
+	const pendingName = ".gitcode-mcp-definition.pending"
+	stale, err := openPrivate(dir, pendingName, unix.O_RDWR|unix.O_CREAT)
+	if err != nil {
+		t.Fatal("open contender staging")
+	}
+	defer stale.Close()
+	if err := WriteDefinition(filepath.Join(path, "definition"), []byte("committed\n")); err != nil {
+		t.Fatal("publish first writer")
+	}
+	if err := publishReplacement(dir, "definition", pendingName, stale, []byte("contender\n"), 1<<20); err == nil {
+		t.Fatal("stale descriptor accepted")
+	}
+	b, err := readPrivate(dir, "definition", 1<<20)
+	if err != nil || string(b) != "committed\n" {
+		t.Fatal("failed contender modified committed bytes")
+	}
 }
 
 func TestRestartResumesNewestManagedStream(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -67,6 +68,89 @@ func TestObservationUpgradePlanIsReadOnlyAndPublicSafe(t *testing.T) {
 		})
 	}
 }
+func TestManagedOutputRequiresRunningProcessMarker(t *testing.T) {
+	m := newTestManager(t, "linux")
+	if _, err := m.Install(false); err != nil {
+		t.Fatal("fixture install")
+	}
+	paths, err := m.ResolvePaths()
+	if err != nil {
+		t.Fatal("fixture paths")
+	}
+	if m.managedObservationOutput(paths) {
+		t.Fatal("on-disk definition proved loaded output")
+	}
+	source := m.Source.(testSource)
+	source.env["GITCODE_MCP_OBSERVATION_OUTPUT"] = "bounded-v1"
+	if !m.managedObservationOutput(paths) {
+		t.Fatal("verified definition and marker unavailable")
+	}
+	if err := writePrivateFile(paths.InstallPath, []byte(legacyInstallFileContent(paths.InstallKind, m.BinaryPath, paths))); err != nil {
+		t.Fatal("legacy fixture definition")
+	}
+	if m.managedObservationOutput(paths) {
+		t.Fatal("marker alone proved bounded definition")
+	}
+}
+
+func TestConfirmedUpgradeCanResumeAfterLaunchdOwnerAbsent(t *testing.T) {
+	m, paths := legacyService(t, "darwin")
+	absentExit := exec.Command("/bin/sh", "-c", "exit 113").Run()
+	if absentExit == nil {
+		t.Fatal("absence exit fixture")
+	}
+	stopped := false
+	m.Runner = func(_ context.Context, _ string, args ...string) error {
+		command := strings.Join(args, " ")
+		if strings.Contains(command, "bootout") {
+			if stopped {
+				return absentExit
+			}
+			stopped = true
+			return os.WriteFile(filepath.Join(paths.LogDir, "service.err.log"), []byte("shutdown fixture\n"), 0600)
+		}
+		if strings.Contains(command, "kickstart") {
+			if err := writeState(paths, State{PID: os.Getpid()}); err != nil {
+				return err
+			}
+			startTestUnixListener(t, paths.SocketPath)
+		}
+		return nil
+	}
+	m.OutputRunner = func(context.Context, string, ...string) (string, error) {
+		return `Could not find service "com.gitcode.gitcode-mcp"`, absentExit
+	}
+	first, err := m.PlanObservationUpgrade()
+	if err != nil {
+		t.Fatal("initial plan")
+	}
+	_, err = m.ApplyObservationUpgrade(context.Background(), first.PlanID)
+	var coded RPCDomainError
+	if !errors.As(err, &coded) || coded.Code != "observation_stale_plan" {
+		t.Fatal("shutdown changed inventory without stale-plan rejection")
+	}
+	fresh, err := m.PlanObservationUpgrade()
+	if err != nil {
+		t.Fatal("fresh plan")
+	}
+	result, err := m.ApplyObservationUpgrade(context.Background(), fresh.PlanID)
+	if err != nil || result.State != "applied" {
+		t.Fatal("fresh confirmed upgrade could not resume unloaded owner")
+	}
+}
+
+func TestLaunchdGenericAbsenceDoesNotProveQuiescence(t *testing.T) {
+	m, paths := legacyService(t, "darwin")
+	absentExit := exec.Command("/bin/sh", "-c", "exit 113").Run()
+	m.Runner = func(context.Context, string, ...string) error { return errors.New("platform unavailable") }
+	for _, output := range []string{"", "Could not find domain", "Could not find service"} {
+		m.OutputRunner = func(context.Context, string, ...string) (string, error) { return output, absentExit }
+		if err := m.stopObservationOwner(context.Background(), paths); err == nil {
+			t.Fatal("generic failure accepted as specific absence")
+		}
+	}
+}
+
 func TestObservationUpgradeRefusesActiveOwner(t *testing.T) {
 	m, paths := legacyService(t, "darwin")
 	m.StartupTimeout = 15 * time.Millisecond

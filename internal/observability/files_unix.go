@@ -145,8 +145,21 @@ func replaceAtomic(dir *os.File, name, staging string, data []byte, cap int) err
 		return err
 	}
 	defer f.Close()
+	return publishReplacement(dir, name, staging, f, data, cap)
+}
+
+func publishReplacement(dir *os.File, name, staging string, f *os.File, data []byte, cap int) error {
+	if len(data) > cap {
+		return errors.New("replacement exceeds bound")
+	}
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		return errors.New("replacement writer active")
+	}
+	// A contender can acquire a descriptor before staging was renamed into
+	// committed state, then lock it after publication. Never truncate it.
+	var held, named unix.Stat_t
+	if unix.Fstat(int(f.Fd()), &held) != nil || unix.Fstatat(int(dir.Fd()), staging, &named, unix.AT_SYMLINK_NOFOLLOW) != nil || held.Dev != named.Dev || held.Ino != named.Ino || named.Mode&unix.S_IFMT != unix.S_IFREG || held.Nlink != 1 {
+		return errors.New("replacement staging identity changed")
 	}
 	if info, err := f.Stat(); err != nil || info.Size() > int64(cap) {
 		return errors.New("unsafe replacement staging file")
