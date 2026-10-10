@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gitcode-mcp/internal/config"
@@ -60,6 +61,7 @@ type Job struct {
 }
 
 type JobManager struct {
+	metrics                             atomic.Pointer[jobMetrics]
 	mu                                  sync.Mutex
 	syncRetryMu                         sync.Mutex
 	jobs                                map[string]*Job
@@ -825,8 +827,14 @@ type JobRecoveryIntent struct {
 }
 
 func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID string, steps int, workKey, cacheUUID, registrationID, namespaceID string, intent JobRecoveryIntent, cancel context.CancelFunc) (Job, bool, error) {
+	var admitted bool
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		if admitted {
+			m.observeJobAdmission(jobType)
+		}
+	}()
 	if m.closing {
 		return Job{}, false, errors.New("service is stopping")
 	}
@@ -892,6 +900,7 @@ func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID str
 		m.nextID--
 		return Job{}, false, JobAdmissionPersistenceError{}
 	}
+	admitted = true
 	return cloneJob(job), true, nil
 }
 
@@ -1041,6 +1050,7 @@ func (m *JobManager) Cancel(id string) (Job, bool, error) {
 	delete(m.cancelResolution, id)
 	close(resolution.done)
 	m.mu.Unlock()
+	m.observeJobTerminal(JobStatusCancelling, metricState(currentJob), saveErr == nil)
 	return resolution.job, resolution.found, resolution.err
 }
 
@@ -1080,10 +1090,13 @@ func (m *JobManager) updateRepositoryDocsTerminalJob(id string, fn func(*Job, ti
 			continue
 		}
 		now := m.now()
+		previousStatus := job.Status
 		fn(job, now)
 		trimJobProgress(job, m.retention.MaxProgressEvents)
-		_ = m.saveLocked()
+		err := m.saveLocked()
+		state := metricState(*job)
 		m.mu.Unlock()
+		m.observeJobTerminal(previousStatus, state, err == nil)
 		return
 	}
 }
@@ -1101,6 +1114,7 @@ func (m *JobManager) FenceRepositoryDocsSourceGeneration(registrationID, sourceR
 	m.mu.Lock()
 	now := m.now()
 	var cancels []context.CancelFunc
+	var terminal []jobMetricState
 	for id, job := range m.jobs {
 		if job == nil || job.Type != RepositoryDocsIndexJobType || job.RegistrationID != registrationID ||
 			job.SourceRegistrationID != sourceRegistrationID || job.SourceRegistrationGeneration != generation ||
@@ -1117,9 +1131,13 @@ func (m *JobManager) FenceRepositoryDocsSourceGeneration(registrationID, sourceR
 			cancels = append(cancels, cancel)
 		}
 		delete(m.cancel, id)
+		terminal = append(terminal, metricState(*job))
 	}
-	_ = m.saveLocked()
+	err := m.saveLocked()
 	m.mu.Unlock()
+	for _, state := range terminal {
+		m.observeJobTerminal(JobStatusRunning, state, err == nil)
+	}
 	for _, cancel := range cancels {
 		cancel()
 	}
@@ -1146,8 +1164,14 @@ func (m *JobManager) beginRepositoryDocsJob(id string) bool {
 }
 
 func (m *JobManager) createJob(jobType string, steps int, cancel context.CancelFunc) Job {
+	var admitted bool
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		if admitted {
+			m.observeJobAdmission(jobType)
+		}
+	}()
 	if m.closing {
 		return Job{}
 	}
@@ -1158,7 +1182,7 @@ func (m *JobManager) createJob(jobType string, steps int, cancel context.CancelF
 	m.jobs[id] = job
 	m.cancel[id] = cancel
 	m.inflightWorkers[id] = true
-	_ = m.saveLocked()
+	admitted = m.saveLocked() == nil
 	return cloneJob(job)
 }
 
@@ -1214,34 +1238,51 @@ func (m *JobManager) finishJob(id, status, message string) {
 }
 
 func (m *JobManager) updateJob(id string, fn func(*Job, time.Time)) {
+	var previousStatus string
+	var state jobMetricState
+	var persisted bool
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		m.observeJobTerminal(previousStatus, state, persisted)
+	}()
 	job := m.jobs[id]
 	if job == nil {
 		return
 	}
+	previousStatus = job.Status
 	fn(job, m.now())
 	trimJobProgress(job, m.retention.MaxProgressEvents)
-	_ = m.saveLocked()
+	persisted = m.saveLocked() == nil
+	state = metricState(*job)
 }
 
 // updateJobPersisted reports whether the mutated snapshot reached durable
 // storage. Callers that are about to discard independent recovery evidence
 // must only do so after this method succeeds.
 func (m *JobManager) updateJobPersisted(id string, fn func(*Job, time.Time)) error {
+	var previousStatus string
+	var state jobMetricState
+	var persisted bool
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		m.observeJobTerminal(previousStatus, state, persisted)
+	}()
 	job := m.jobs[id]
 	if job == nil {
 		return nil
 	}
 	previous := cloneJob(job)
+	previousStatus = job.Status
 	fn(job, m.now())
 	trimJobProgress(job, m.retention.MaxProgressEvents)
+	state = metricState(*job)
 	if err := m.saveLocked(); err != nil {
 		*job = previous
 		return err
 	}
+	persisted = true
 	return nil
 }
 

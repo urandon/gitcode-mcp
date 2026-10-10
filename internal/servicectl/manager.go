@@ -89,6 +89,7 @@ type Status struct {
 
 type Manager struct {
 	observation        *observability.Collector
+	metrics            *observability.Metrics
 	observationUpgrade bool
 	Source             config.Source
 	CredentialReporter config.CredentialStatusReporter
@@ -488,6 +489,7 @@ func (m Manager) Run(ctx context.Context) error {
 	m.observation = observability.New(observability.Config{Directory: filepath.Join(paths.LogDir, "observation"), LegacyDirectory: paths.LogDir,
 		ManagedOutputProbe: func() bool { return observationOwner.managedObservationOutput(paths) }})
 	var jobsForShutdown *JobManager
+	var metricSampler *observability.MetricSampler
 	var maintenanceForShutdown *MaintenanceManager
 	var maintenanceDone, recoveryDone <-chan struct{}
 	var adminForShutdown *adminhttp.Controller
@@ -522,6 +524,9 @@ func (m Manager) Run(ctx context.Context) error {
 		if rpcHandlers.Load() > 0 {
 			clean = false
 		}
+		if metricSampler != nil && !metricSampler.Wait(shutdownCtx) {
+			clean = false
+		}
 		// A separate bounded flush budget still permits a durable incomplete
 		// marker when worker teardown consumed its own budget.
 		flushCtx, stop := context.WithTimeout(context.Background(), time.Second)
@@ -544,6 +549,8 @@ func (m Manager) Run(ctx context.Context) error {
 		retention = *m.JobRetention
 	}
 	jobs := NewJobManagerWithRetention(paths.JobsPath, retention)
+	m.metrics = observability.NewMetrics(m.observation.BootID(), now)
+	jobs.SetMetrics(m.metrics)
 	jobsForShutdown = jobs
 	maintenance := NewMaintenanceManager(m, jobs, paths.RegistryPath)
 	maintenanceForShutdown = maintenance
@@ -556,6 +563,9 @@ func (m Manager) Run(ctx context.Context) error {
 	if err := jobs.LoadAndMarkInterrupted(); err != nil {
 		return err
 	}
+	metricSampler = observability.StartMetricSampler(ctx, m.metrics, func(context.Context) map[string]observability.ProbeValue {
+		return jobs.MetricProbes()
+	})
 	releaseSyncRecoveryFences := jobs.beginInterruptedSyncRecoveryFences()
 	recoveryDispatched := false
 	defer func() {

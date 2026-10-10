@@ -68,6 +68,10 @@ func randomID() string {
 	return hex.EncodeToString(b[:])
 }
 func New(cfg Config) *Collector { return newCollector(cfg, openStorage) }
+
+// BootID is immutable process-local correlation, not a disk/read operation.
+func (c *Collector) BootID() string { return c.boot }
+
 func newCollector(cfg Config, open func(string) (*storage, []Event, bool, error)) *Collector {
 	c := &Collector{queue: make(chan pending, MaxEvents), stop: make(chan struct{}), done: make(chan struct{}), boot: randomID(), config: cfg, open: open,
 		coverage: Coverage{State: "initializing", OutputState: "migration_required"}}

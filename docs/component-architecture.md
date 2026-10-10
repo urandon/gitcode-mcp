@@ -193,6 +193,31 @@ recording or snapshot reads, and shutdown cannot certify that worker as joined
 until it actually exits. Returned catalog, labels, buckets and distribution
 arrays are independent copies, not mutable references to the live registry.
 
+The daemon constructs metrics with the collector's immutable boot identity,
+attaches the concrete JobManager sink before loading durable jobs, then starts
+the sampler after snapshot recovery and before publishing work. Teardown must
+join the sampler before the collector can record a clean shutdown. Early
+startup failure cannot claim a clean observed boot.
+
+Job admission counts only a newly created, successfully persisted admission;
+coalesced requests and reused recovery identities are not new admissions.
+Terminal counters count successfully persisted active-to-terminal transitions,
+not each progress update or the number of retained terminal jobs. Snapshot
+loading and interrupted-to-terminal recovery projections are not execution
+outcomes. A failed terminal persistence boundary marks observation loss without
+changing the existing job error/rollback behavior. Recording follows execution
+lock release and uses only finite work-kind/outcome enums. Sync/RAG duration
+histograms are attached with the job origin independently of the confirmed
+record/chunk throughput origins. No-start cancellations have an outcome but no
+fabricated execution duration.
+
+Job gauges use a non-waiting authority probe: queued jobs are counted separately
+from running/cancelling jobs. `writer_waiters` counts only entries behind the
+current owner in daemon sync-commit FIFOs, not external OS/SQLite waiters or the
+active turn itself. A busy JobManager gives null probe values. This remains
+distinct from writer-contention attempt instrumentation and durable incident
+health; observing a queue does not repair or admit work.
+
 
 - [Architecture](architecture.md)
 - [Cache And Sync Model](cache-and-sync-model.md)

@@ -46,7 +46,7 @@ func metricDefinitions() []MetricDefinition {
 		c("event_drops", "events", "collector", map[string][]string{}),
 		c("sync_committed", "records", "sync", map[string][]string{"collection": collections}),
 		c("rag_embedded", "chunks", "rag", map[string][]string{}),
-		h("sync_duration", "sync", map[string][]string{"outcome": outcomes}), h("rag_duration", "rag", map[string][]string{"outcome": outcomes}),
+		h("sync_duration", "jobs", map[string][]string{"outcome": outcomes}), h("rag_duration", "jobs", map[string][]string{"outcome": outcomes}),
 		h("provider_duration", "provider", map[string][]string{"outcome": providerOutcomes}), h("admin_duration", "admin", map[string][]string{"route": adminRoutes}),
 	}
 }

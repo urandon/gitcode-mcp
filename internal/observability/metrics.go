@@ -158,6 +158,11 @@ func metricKey(d MetricDefinition, labels map[string]string) (string, bool) {
 }
 func finiteMetric(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 && v <= 1e15 }
 func (m *Metrics) loss()          { m.dropped.Add(1) }
+
+// LostObservation marks an outcome whose persistence/observation boundary was
+// unavailable. It accepts no reason text and cannot affect execution results.
+func (m *Metrics) LostObservation() { m.loss() }
+
 func (m *Metrics) AttachOrigin(origin string) bool {
 	if !m.mu.TryLock() {
 		m.loss()
