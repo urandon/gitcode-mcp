@@ -49,6 +49,18 @@ func (m *JobManager) SetMetrics(metrics *observability.Metrics) {
 // error string is not a contention attempt. Callers record after unlocking and
 // releasing their commit turn, never from the cache adapter as well.
 func (m *JobManager) observeWriterContention(kind string, err error) {
+	m.observeWriterContentionAt(context.Background(), kind, err, jobObservationIdentity{})
+}
+
+func (m *JobManager) observeWriterContentionInContext(ctx context.Context, kind string, err error) {
+	m.observeWriterContentionAt(ctx, kind, err, jobObservationIdentity{})
+}
+
+func (m *JobManager) observeWriterContentionForIdentity(kind string, err error, identity jobObservationIdentity) {
+	m.observeWriterContentionAt(context.Background(), kind, err, identity)
+}
+
+func (m *JobManager) observeWriterContentionAt(ctx context.Context, kind string, err error, identity jobObservationIdentity) {
 	var busy ErrCacheWriterBusy
 	var lease cache.ErrLockContention
 	if !errors.As(err, &busy) && !errors.As(err, &lease) {
@@ -56,6 +68,23 @@ func (m *JobManager) observeWriterContention(kind string, err error) {
 	}
 	if sink := m.metrics.Load(); sink != nil {
 		sink.metrics.Add("writer_contention", map[string]string{"kind": metricWorkKind(kind)}, 1)
+	}
+	details := observability.ExecutionDetails{Phase: "writer", Outcome: "denied", FailureClass: "writer_busy", WorkKind: metricWorkKind(kind)}
+	if observability.HasObservation(ctx) {
+		// Loss is recorded by the existing binding. Never retry a rejected event
+		// through the manager or turn a worker boundary into another scope.
+		observability.EmitFromContext(ctx, observability.WriterContended, details)
+		return
+	}
+	if collector := m.observation.Load(); collector != nil {
+		refs := identity.refs(collector)
+		if identity.job == "" {
+			// Pre-admission/direct writes have no job. This is a fixed boot/work-
+			// kind scope, not a synthetic request identity or storage lookup.
+			refs.Correlation = observability.KnownRef("correlation", collector.BootID()+"\x00writer\x00"+details.WorkKind)
+		}
+		refs.ExecutionDetails = details
+		collector.Emit(observability.WriterContended, refs)
 	}
 }
 

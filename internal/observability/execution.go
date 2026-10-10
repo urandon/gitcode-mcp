@@ -7,6 +7,7 @@ package observability
 type ExecutionDetails struct {
 	Phase        string `json:"phase,omitempty"`
 	Collection   string `json:"collection,omitempty"`
+	WorkKind     string `json:"work_kind,omitempty"`
 	Outcome      string `json:"outcome,omitempty"`
 	FailureClass string `json:"failure_class,omitempty"`
 	Attempt      uint32 `json:"attempt,omitempty"`
@@ -16,7 +17,7 @@ const MaxExecutionAttempt = 1024
 
 func executionCode(code Code) bool {
 	switch code {
-	case JobAdmitted, JobTerminal, ProviderAttempt, SyncCommitted, RetryAdmitted:
+	case JobAdmitted, JobTerminal, ProviderAttempt, SyncCommitted, RetryAdmitted, WriterContended:
 		return true
 	default:
 		return false
@@ -51,7 +52,16 @@ func (e Event) validExecution() bool {
 	if e.Legacy || e.CorrelationRef == "" || d.Attempt > MaxExecutionAttempt {
 		return false
 	}
+	if e.Code != WriterContended && d.WorkKind != "" {
+		return false
+	}
 	switch e.Code {
+	case WriterContended:
+		switch d.WorkKind {
+		case "sync", "rag", "repository_docs", "other":
+			return d.Phase == "writer" && d.Outcome == "denied" && d.FailureClass == "writer_busy" && d.Collection == "" && d.Attempt == 0
+		}
+		return false
 	case JobAdmitted:
 		return e.JobRef != "" && d.Phase == "admission" && d.Outcome == "queued" && d.Collection == "" && d.FailureClass == "" && d.Attempt == 0
 	case JobTerminal:

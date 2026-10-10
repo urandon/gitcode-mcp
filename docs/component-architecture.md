@@ -168,7 +168,7 @@ best-effort evidence is not execution authority
 and does not promise crash durability before its asynchronous checkpoint.
 
 Execution events use additive schema-1 `phase`, `collection`, `outcome`,
-`failure_class`, and optional `attempt` fields. Their closed, code-specific
+`failure_class`, optional `attempt`, and writer-only `work_kind` fields. Their closed, code-specific
 compatibility table is checked before admission and again during replay. Job
 admission/terminal, provider-attempt, sync-commit, and retry-admission codes
 require resolved opaque correlation; job, commit, and retry codes also require
@@ -303,6 +303,18 @@ locks and commit turns. Normal FIFO queueing, coalescing, identity/recovery
 fences and raw error messages are not writer contention. Internal adapter
 errors are not also counted at the cache layer. Direct local writers use the
 finite `other` work kind, never their operation/id as a label.
+
+Those same typed-denial owners emit `writer_contended` with `phase: writer`,
+`outcome: denied`, `failure_class: writer_busy` and one of `sync`, `rag`,
+`repository_docs`, or `other`. Worker events inherit their private job context;
+resumed admission copies its validated retained identity under the existing job
+lock. Pre-admission/direct denials have no fabricated job ref: they use only
+already resolved cache/repository refs and a fixed boot/work-kind correlation
+scope, not a request identity. Recording happens outside job locks, commit turns
+and cache leases, without new authority lookups. Metrics are optional and loss
+is not retried through another collector binding. The closed dimensions are
+validated again on replay; typed error bodies and blocker ids never cross this
+boundary.
 
 The same actual retry-entry boundary emits `retry_admitted` with `phase: retry`,
 `outcome: admitted`, a known collection and bounded ordinal from 2 through 1024.

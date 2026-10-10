@@ -39,6 +39,7 @@ const (
 	ProviderAttempt    Code = "provider_attempt"
 	SyncCommitted      Code = "sync_committed"
 	RetryAdmitted      Code = "retry_admitted"
+	WriterContended    Code = "writer_contended"
 )
 
 type template struct{ stream, severity, component, message string }
@@ -57,6 +58,7 @@ var catalog = map[Code]template{
 	ProviderAttempt:    {"stdout", "info", "provider", "An actual bounded provider attempt finished."},
 	SyncCommitted:      {"stdout", "info", "sync", "Fetched source graphs reached a confirmed cache commit."},
 	RetryAdmitted:      {"stdout", "info", "sync", "A collection entered an actual retry attempt."},
+	WriterContended:    {"stderr", "warning", "writer", "An actual cache writer attempt was denied."},
 }
 
 // Ref is opaque and cannot be constructed by assigning an unchecked string.

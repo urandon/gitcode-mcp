@@ -36,6 +36,10 @@ func TestExecutionCatalogFiniteCompatibility(t *testing.T) {
 		{SyncCommitted, ExecutionDetails{Phase: "commit", Collection: "issues", Outcome: "succeeded"}},
 		{RetryAdmitted, ExecutionDetails{Phase: "retry", Collection: "wiki", Outcome: "admitted", Attempt: 2}},
 		{RetryAdmitted, ExecutionDetails{Phase: "retry", Collection: "issues", Outcome: "admitted", Attempt: MaxExecutionAttempt}},
+		{WriterContended, ExecutionDetails{Phase: "writer", WorkKind: "sync", Outcome: "denied", FailureClass: "writer_busy"}},
+		{WriterContended, ExecutionDetails{Phase: "writer", WorkKind: "rag", Outcome: "denied", FailureClass: "writer_busy"}},
+		{WriterContended, ExecutionDetails{Phase: "writer", WorkKind: "repository_docs", Outcome: "denied", FailureClass: "writer_busy"}},
+		{WriterContended, ExecutionDetails{Phase: "writer", WorkKind: "other", Outcome: "denied", FailureClass: "writer_busy"}},
 	}
 	for _, outcome := range []string{"cancelled", "timeout", "rate_limited", "forbidden", "invalid"} {
 		cases = append(cases, struct {
@@ -52,6 +56,9 @@ func TestExecutionCatalogFiniteCompatibility(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(string(tc.code)+"/"+tc.details.Phase+"/"+tc.details.Outcome, func(t *testing.T) {
 			e := executionFixtureEvent(tc.code, tc.details)
+			if tc.code == WriterContended && tc.details.WorkKind == "other" {
+				e.JobRef = "" // direct/pre-admission denial must not invent a job
+			}
 			b, err := marshalEvent(e)
 			var decoded Event
 			if err != nil || decodeStrict(b, &decoded) != nil || !decoded.valid() || decoded != e {
@@ -60,6 +67,7 @@ func TestExecutionCatalogFiniteCompatibility(t *testing.T) {
 			for _, mutate := range []func(*Event){
 				func(e *Event) { e.Phase = "synthetic-secret" },
 				func(e *Event) { e.Collection = "synthetic-secret" },
+				func(e *Event) { e.WorkKind = "synthetic-secret" },
 				func(e *Event) { e.Outcome = "synthetic-secret" },
 				func(e *Event) { e.FailureClass = "synthetic-secret" },
 				func(e *Event) { e.Attempt = MaxExecutionAttempt + 1 },
@@ -97,6 +105,14 @@ func TestExecutionCatalogRejectsCrossCodeCombinations(t *testing.T) {
 		executionFixtureEvent(RetryAdmitted, ExecutionDetails{Phase: "retry", Collection: "wiki", Outcome: "succeeded", Attempt: 2}),
 		executionFixtureEvent(RetryAdmitted, ExecutionDetails{Phase: "fetch", Collection: "wiki", Outcome: "admitted", Attempt: 2}),
 		executionFixtureEvent(RetryAdmitted, ExecutionDetails{Phase: "retry", Outcome: "admitted", Attempt: 2}),
+		executionFixtureEvent(WriterContended, ExecutionDetails{Phase: "writer", Outcome: "denied", FailureClass: "writer_busy"}),
+		executionFixtureEvent(WriterContended, ExecutionDetails{Phase: "writer", WorkKind: "sync", Outcome: "denied", FailureClass: "writer_busy", Attempt: 1}),
+		executionFixtureEvent(WriterContended, ExecutionDetails{Phase: "writer", WorkKind: "sync", Outcome: "denied", FailureClass: "writer_busy", Collection: "issues"}),
+		executionFixtureEvent(WriterContended, ExecutionDetails{Phase: "writer", WorkKind: "sync", Outcome: "failed", FailureClass: "writer_busy"}),
+		executionFixtureEvent(WriterContended, ExecutionDetails{Phase: "writer", WorkKind: "sync", Outcome: "denied", FailureClass: "operation_failed"}),
+		executionFixtureEvent(WriterContended, ExecutionDetails{Phase: "writer", WorkKind: "sync", Outcome: "denied", FailureClass: "writer_busy", Attempt: MaxExecutionAttempt}),
+		executionFixtureEvent(JobAdmitted, ExecutionDetails{Phase: "admission", WorkKind: "sync", Outcome: "queued"}),
+		executionFixtureEvent(Boot, ExecutionDetails{WorkKind: "sync"}),
 		executionFixtureEvent(Boot, ExecutionDetails{Phase: "fetch", Outcome: "succeeded"}),
 	}
 	retry := executionFixtureEvent(RetryAdmitted, ExecutionDetails{Phase: "retry", Collection: "wiki", Outcome: "admitted", Attempt: 2})
@@ -200,6 +216,9 @@ func TestExecutionLedgerRestartPrivacyAndLegacyBoundary(t *testing.T) {
 		t.Fatal("raw execution details admitted")
 	}
 	admitFixture(t, c, ProviderAttempt, refs)
+	writer := refs
+	writer.ExecutionDetails = ExecutionDetails{Phase: "writer", WorkKind: "repository_docs", Outcome: "denied", FailureClass: "writer_busy"}
+	admitFixture(t, c, WriterContended, writer)
 	admitFixture(t, c, RecoveryFinished, Context{})
 	flush(t, c, true)
 	restarted := New(Config{Directory: path, ManagedOutput: true})
@@ -213,7 +232,10 @@ func TestExecutionLedgerRestartPrivacyAndLegacyBoundary(t *testing.T) {
 	if lifecycle, err := restarted.Query(Filter{Code: RecoveryFinished}, "", 10); err != nil || len(lifecycle.Events) != 1 {
 		t.Fatal("old lifecycle record did not survive restart")
 	}
-	for _, component := range []string{"jobs", "provider", "sync"} {
+	if denial, err := restarted.Query(Filter{Component: "writer", Code: WriterContended}, "", 10); err != nil || len(denial.Events) != 1 || denial.Events[0].ExecutionDetails != writer.ExecutionDetails || denial.Events[0].CorrelationRef != writer.Correlation.value {
+		t.Fatal("writer event dimensions did not survive clean restart")
+	}
+	for _, component := range []string{"jobs", "provider", "sync", "writer"} {
 		if _, _, err := normalizeFilter(Filter{Component: component}); err != nil {
 			t.Fatal("catalog component rejected by query")
 		}
@@ -242,5 +264,31 @@ func TestExecutionLedgerRestartPrivacyAndLegacyBoundary(t *testing.T) {
 	legacy, err := ReadLegacy(legacyRoot, "stdout")
 	if err != nil || !legacy.Partial || len(legacy.Codes) != 1 || legacy.Codes[0] != LegacyOmitted {
 		t.Fatal("legacy text manufactured typed execution evidence")
+	}
+}
+
+func TestWriterExecutionContextRejectsWithoutWaitingForCollector(t *testing.T) {
+	c := New(Config{Directory: testDirectory(t), ManagedOutput: true})
+	ready(t, c)
+	t.Cleanup(func() { flush(t, c, true) })
+	ctx := WithObservation(context.Background(), c, Context{Cache: KnownRef("cache", "fixture-cache"), Correlation: KnownRef("correlation", "fixture-writer-scope")})
+	before := c.Coverage()
+	c.mu.Lock()
+	done := make(chan bool, 1)
+	go func() {
+		done <- EmitFromContext(ctx, WriterContended, ExecutionDetails{Phase: "writer", WorkKind: "other", Outcome: "denied", FailureClass: "writer_busy"})
+	}()
+	select {
+	case admitted := <-done:
+		c.mu.Unlock()
+		if admitted {
+			t.Fatal("held collector admitted writer evidence")
+		}
+	case <-time.After(time.Second):
+		c.mu.Unlock()
+		t.Fatal("writer evidence waited for a collector reader")
+	}
+	if got := c.Coverage(); got.Dropped != before.Dropped+1 || got.LossEpoch != before.LossEpoch+1 || got.State != "partial" {
+		t.Fatal("writer evidence rejection lost its exact loss boundary")
 	}
 }

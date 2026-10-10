@@ -325,12 +325,12 @@ func (m *JobManager) BeginDirectCacheWriter(cacheUUID, writerID string) (func(),
 	// directCacheWriters and waits at the real writer boundary.
 	if active, ok := m.activeReservedWriterLocked(cacheUUID); ok {
 		m.mu.Unlock()
-		m.observeWriterContention("", ErrCacheWriterBusy{})
+		m.observeWriterContentionForIdentity("", ErrCacheWriterBusy{}, jobObservationIdentity{cache: cacheUUID})
 		return func() {}, ErrCacheWriterBusy{ActiveJobID: active.ID, ActiveType: active.Type}
 	}
 	if activeID := m.directCacheWriters[cacheUUID]; activeID != "" {
 		m.mu.Unlock()
-		m.observeWriterContention("", ErrCacheWriterBusy{})
+		m.observeWriterContentionForIdentity("", ErrCacheWriterBusy{}, jobObservationIdentity{cache: cacheUUID})
 		return func() {}, ErrCacheWriterBusy{ActiveJobID: activeID, ActiveType: "direct_cache_write"}
 	}
 	m.directCacheWriters[cacheUUID] = writerID
@@ -606,11 +606,12 @@ func (m *JobManager) LatestRepositoryDocsSource(cacheUUID, repoID, sourceRegistr
 // responsible for enforcing the durable retry window before invoking it.
 func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, sourceRegistrationID string, generation int64, expectedSetID, workKey, actionIntentRef string, cancel context.CancelFunc) (Job, bool, error) {
 	var contention bool
+	var identity jobObservationIdentity
 	m.mu.Lock()
 	defer func() {
 		m.mu.Unlock()
 		if contention {
-			m.observeWriterContention(RepositoryDocsIndexJobType, ErrCacheWriterBusy{})
+			m.observeWriterContentionForIdentity(RepositoryDocsIndexJobType, ErrCacheWriterBusy{}, identity)
 		}
 	}()
 	if m.closing {
@@ -622,6 +623,7 @@ func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, source
 		job.SourceRegistrationGeneration != generation || job.ExpectedRevisionSetID != strings.TrimSpace(expectedSetID) || job.WorkRef != publicWorkRef(workKey) {
 		return Job{}, false, nil
 	}
+	identity = observationIdentity(*job)
 	if m.syncRecoveryFences[strings.TrimSpace(job.CacheUUID)] {
 		return Job{}, false, CacheRecoveryFenceError{}
 	}
@@ -848,7 +850,7 @@ func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID str
 			m.observeJobAdmission(admittedState)
 		}
 		if contention {
-			m.observeWriterContention(jobType, ErrCacheWriterBusy{})
+			m.observeWriterContentionForIdentity(jobType, ErrCacheWriterBusy{}, jobObservationIdentity{cache: cacheUUID, repo: repoID, registration: registrationID})
 		}
 	}()
 	if m.closing {

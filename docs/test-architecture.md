@@ -110,6 +110,13 @@ generation/path replacement cannot publish a stale observation. Retry event
 fixtures exercise the actual scheduler with resume, cancelled waits, failed
 checkpoint writes and no metric sink; neither waiting nor replay alone counts
 as an actual retry admission.
+Writer-event fixtures exercise actual pre-admission, direct and retained resume
+denials, a staged commit's typed lease failure and cancellation of its retry
+wait. They assert opaque worker correlation versus fixed pre-job scopes,
+optional metrics, no observation lookup of held job authority, wrapped typed
+errors versus raw strings/fences, closed work-kind replay and content privacy.
+Every actual boundary is retained or explicitly counted as lost; telemetry
+rejection cannot retry or revive execution.
 Maintenance identity tests also enroll canonical and alias repository ids
 concurrently, migrate compatible and conflicting version-1 registry entries,
 project legacy registration/job references to the canonical identity, preserve

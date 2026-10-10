@@ -241,7 +241,7 @@ func (m *JobManager) runRepositoryDocsIndexJob(ctx context.Context, manager Mana
 		})
 	})
 	if err != nil {
-		m.observeWriterContention(RepositoryDocsIndexJobType, err)
+		m.observeWriterContentionInContext(ctx, RepositoryDocsIndexJobType, err)
 		status, class := repositoryDocsIndexErrorStatus(err)
 		m.updateRepositoryDocsTerminalJob(jobID, func(job *Job, now time.Time) {
 			if repositoryDocsJobSourceFenced(job) {
