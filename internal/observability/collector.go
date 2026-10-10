@@ -99,7 +99,8 @@ func (c *Collector) Emit(code Code, refs Context) bool {
 		return false
 	}
 	e := Event{Schema: 1, EventID: c.boot, OccurredAt: time.Now().UTC(), BootID: c.boot, Sequence: 1, Stream: t.stream, Severity: t.severity, Component: t.component, Code: code, Message: t.message,
-		JobRef: refs.Job.value, RegistrationRef: refs.Registration.value, CacheRef: refs.Cache.value, RepoRef: refs.Repo.value, CorrelationRef: refs.Correlation.value}
+		ExecutionDetails: refs.ExecutionDetails,
+		JobRef:           refs.Job.value, RegistrationRef: refs.Registration.value, CacheRef: refs.Cache.value, RepoRef: refs.Repo.value, CorrelationRef: refs.Correlation.value}
 	b, err := marshalEvent(e)
 	if err != nil {
 		return false
@@ -354,7 +355,8 @@ func (c *Collector) write(s *storage, p pending) {
 	sequence := c.sequence
 	c.mu.Unlock()
 	e := Event{Schema: 1, EventID: randomID(), OccurredAt: p.at, BootID: c.boot, Sequence: sequence, Stream: t.stream, Severity: t.severity, Component: t.component, Code: p.code, Message: t.message,
-		Legacy: p.legacy, ObservedBytes: p.observedBytes,
+		ExecutionDetails: p.refs.ExecutionDetails,
+		Legacy:           p.legacy, ObservedBytes: p.observedBytes,
 		JobRef: p.refs.Job.value, RegistrationRef: p.refs.Registration.value, CacheRef: p.refs.Cache.value, RepoRef: p.refs.Repo.value, CorrelationRef: p.refs.Correlation.value}
 	if p.legacy {
 		e.Stream = p.legacyStream

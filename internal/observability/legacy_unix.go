@@ -132,6 +132,11 @@ func ReadLegacyFrom(path, stream string, position LegacyCursor) (LegacySample, e
 			code := LegacyOmitted
 			if err == nil {
 				for candidate, t := range catalog {
+					// Execution evidence requires typed dimensions and resolved
+					// correlation, neither of which a legacy text line proves.
+					if executionCode(candidate) {
+						continue
+					}
 					if string(line) == t.message+"\n" {
 						code = candidate
 						break
@@ -139,6 +144,9 @@ func ReadLegacyFrom(path, stream string, position LegacyCursor) (LegacySample, e
 				}
 			}
 			sample.Codes = append(sample.Codes, code)
+			if code == LegacyOmitted {
+				sample.Partial = true
+			}
 		}
 		if err == nil {
 			sample.Cursor.SkipPartial = false

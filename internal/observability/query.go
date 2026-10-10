@@ -50,8 +50,14 @@ func normalizeFilter(f Filter) (Filter, string, error) {
 	if f.Severity != "" && f.Severity != "info" && f.Severity != "warning" && f.Severity != "error" {
 		return f, "", errors.New("invalid filter")
 	}
-	if f.Component != "" && f.Component != "daemon" && f.Component != "recovery" && f.Component != "legacy" {
-		return f, "", errors.New("invalid filter")
+	if f.Component != "" {
+		known := false
+		for _, t := range catalog {
+			known = known || f.Component == t.component
+		}
+		if !known {
+			return f, "", errors.New("invalid filter")
+		}
 	}
 	if f.Code != "" {
 		if _, ok := catalog[f.Code]; !ok {

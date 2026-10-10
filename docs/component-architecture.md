@@ -167,6 +167,20 @@ that seal cannot alter published coverage or invalidate clean cursors. This
 best-effort evidence is not execution authority
 and does not promise crash durability before its asynchronous checkpoint.
 
+Execution events use additive schema-1 `phase`, `collection`, `outcome`,
+`failure_class`, and optional `attempt` fields. Their closed, code-specific
+compatibility table is checked before admission and again during replay. Job
+admission/terminal, provider-attempt, and sync-commit codes require resolved
+opaque correlation; job and commit codes also require an opaque job ref.
+Attempt ordinals are bounded to 1024; absent means unknown, not an invented
+first attempt. Existing lifecycle records remain valid without these fields,
+but cannot carry execution dimensions. Legacy text cannot establish an
+execution event. A private context carrier copies resolved refs and a concrete
+collector without changing deadlines or cancellation; event details are supplied
+at the actual boundary. This internal foundation does not itself install
+execution hooks or expose new transport/UI controls; the full cohort remains
+gated by those implementation and qualification tasks.
+
 ### Metric evidence foundation
 
 The metric catalog is machine-readable and closed: there is no arbitrary
