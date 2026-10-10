@@ -265,6 +265,11 @@ failure. Retained degraded frontiers contribute their current failure as well
 as their preceding success, even when the relevant job has expired. Automatic
 configuration/identity blocking remains a fault when it disables admission;
 explicit user-disable is not a fault. Missing fault timestamps remain unknown.
+Whole-job failure deduplication requires a matching terminal signal, fixed
+reason, exact nonempty authority error class and timestamp in the collection
+evidence; an older collection problem cannot represent a later checkpoint
+rejection. Automatic cache
+inspection timeouts and clone conflicts also remain visible admission faults.
 
 Daemon-owned execution carries the concrete metric sink in a private context
 value without changing cancellation or deadlines. GitCode provider attempts

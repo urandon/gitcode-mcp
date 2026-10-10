@@ -249,7 +249,7 @@ func TestExecutionHealthRetainedFrontierFailureSurvivesJobPruning(t *testing.T) 
 
 func TestExecutionHealthAutoDisabledFaultDiffersFromExplicitDisable(t *testing.T) {
 	at := time.Unix(1700000000, 0).UTC()
-	for _, state := range []string{"config_snapshot_invalid", "identity_conflict", "identity_unresolved", "cache_schema_blocked"} {
+	for _, state := range []string{"config_snapshot_invalid", "identity_conflict", "identity_unresolved", "cache_schema_blocked", "cache_inspection_timeout", "cache_clone_conflict"} {
 		jobs := NewJobManager("")
 		m := NewMaintenanceManager(Manager{}, jobs, "")
 		entry := &MaintenanceEntry{RegistrationID: "reg", CacheUUID: "cache", RepoID: "fixture/repository", Enabled: true, LastReconciledAt: at}
@@ -266,5 +266,41 @@ func TestExecutionHealthAutoDisabledFaultDiffersFromExplicitDisable(t *testing.T
 		if got := m.ExecutionHealth(at); got.State != "healthy" || got.Active != 0 {
 			t.Fatal("explicit disable became an authority failure")
 		}
+	}
+}
+
+func TestExecutionHealthLaterCheckpointFaultCannotRecoverFromEarlierFrontier(t *testing.T) {
+	at := time.Unix(1700000000, 0).UTC()
+	jobs := NewJobManager("")
+	jobs.now = func() time.Time { return at.Add(2 * time.Second) }
+	m := NewMaintenanceManager(Manager{}, jobs, "")
+	jobs.jobs["job"] = &Job{ID: "job", Type: SyncJobType, Status: JobStatusInterrupted, UpdatedAt: at, CacheUUID: "cache", RepoID: "fixture/repository", RegistrationID: "reg",
+		SyncCollections: []SyncCollectionView{{Collection: "wiki", Outcome: SyncCollectionPermanentFailure, ErrorClass: "network_timeout", UpdatedAt: at}}}
+	m.entries["reg"] = &MaintenanceEntry{RegistrationID: "reg", CacheUUID: "cache", RepoID: "fixture/repository", Enabled: true, State: "ready",
+		Frontiers: []cache.MaintenanceFrontier{{RemoteType: "wiki", Lane: "head", Status: "complete", LastSuccessAt: at.Add(time.Second), UpdatedAt: at.Add(time.Second)}}}
+	if err := jobs.failInterruptedSyncRetry("job", "retry_checkpoint_invalid"); err != nil {
+		t.Fatal("fixture terminal persistence failed")
+	}
+	got := m.ExecutionHealth(at.Add(2 * time.Second))
+	if jobs.jobs["job"].Status != JobStatusFailed || got.State != "degraded" || got.Active != 1 || got.Recovered != 1 || got.Incidents[0].Collection != "other" || !got.Incidents[0].LastObservedAt.Equal(at.Add(2*time.Second)) {
+		t.Fatal("earlier collection/frontier evidence erased later whole-job checkpoint fault")
+	}
+}
+
+func TestExecutionHealthDistinctClassesCannotDeduplicateTerminalFault(t *testing.T) {
+	at := time.Unix(1700000000, 0).UTC()
+	jobs := NewJobManager("")
+	m := NewMaintenanceManager(Manager{}, jobs, "")
+	jobs.jobs["job"] = &Job{ID: "job", Type: SyncJobType, Status: JobStatusFailed, UpdatedAt: at, CacheUUID: "cache", RepoID: "fixture/repository", RegistrationID: "reg", ErrorClass: "synthetic_checkpoint_fault",
+		SyncCollections: []SyncCollectionView{{Collection: "wiki", Outcome: SyncCollectionPermanentFailure, ErrorClass: "synthetic_collection_fault", UpdatedAt: at}}}
+	m.entries["reg"] = &MaintenanceEntry{RegistrationID: "reg", CacheUUID: "cache", RepoID: "fixture/repository", Enabled: true,
+		Frontiers: []cache.MaintenanceFrontier{{RemoteType: "wiki", Status: "complete", LastSuccessAt: at.Add(time.Second), UpdatedAt: at.Add(time.Second)}}}
+	got := m.ExecutionHealth(at.Add(time.Second))
+	if got.State != "degraded" || got.Active != 1 || got.Incidents[0].Collection != "other" {
+		t.Fatal("distinct authority classes collapsed through the public reason fallback")
+	}
+	data, _ := json.Marshal(got)
+	if strings.Contains(string(data), "synthetic_") {
+		t.Fatal("private authority class escaped in health")
 	}
 }

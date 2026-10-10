@@ -33,8 +33,10 @@ func healthFailureReason(class string) string {
 		return "provider_invalid"
 	case "cache_authority_unavailable", "cache_uuid_mismatch", "cache_schema_blocked":
 		return "cache_authority"
-	case "config_snapshot_invalid", "configuration_error", "identity_conflict", "identity_unresolved":
+	case "config_snapshot_invalid", "configuration_error", "identity_conflict", "identity_unresolved", "cache_clone_conflict":
 		return "configuration_invalid"
+	case "cache_inspection_timeout":
+		return "cache_authority"
 	case "rag_failed", "embedding_failed":
 		return "embedding_failed"
 	default:
@@ -120,7 +122,18 @@ func (m *MaintenanceManager) ExecutionHealth(at time.Time) observability.Executi
 		if base.at.IsZero() {
 			base.at = job.CreatedAt
 		}
-		collectionProblem := false
+		switch job.Status {
+		case JobStatusFailed:
+			base.signal = "failed"
+		case JobStatusInterrupted:
+			base.signal, base.reason = "interrupted", "interrupted"
+		case JobStatusSucceeded:
+			base.signal, base.reason = "succeeded", "succeeded"
+			if job.Type == SyncJobType && (job.SyncHealth == SyncHealthPartial || job.SyncHealth == SyncHealthFailed) {
+				base.signal, base.reason = "failed", healthFailureReason(job.ErrorClass)
+			}
+		}
+		terminalRepresented := false
 		if job.Type == SyncJobType && len(job.SyncCollections) > 0 {
 			for _, collection := range job.SyncCollections {
 				if !visit() {
@@ -155,28 +168,18 @@ func (m *MaintenanceManager) ExecutionHealth(at time.Time) observability.Executi
 					continue
 				}
 				add(r)
-				collectionProblem = collectionProblem || r.signal != "succeeded"
+				terminalRepresented = terminalRepresented || (r.signal == base.signal && r.reason == base.reason && r.at.Equal(base.at) && job.ErrorClass != "" && collection.ErrorClass == job.ErrorClass)
 			}
 		}
 		// Collection snapshots are not the entire execution authority. A
 		// later stage rejection can fail an otherwise successful partial run.
-		switch job.Status {
-		case JobStatusFailed:
-			base.signal = "failed"
-		case JobStatusInterrupted:
-			base.signal, base.reason = "interrupted", "interrupted"
-		case JobStatusSucceeded:
-			base.signal, base.reason = "succeeded", "succeeded"
-			if job.Type == SyncJobType && (job.SyncHealth == SyncHealthPartial || job.SyncHealth == SyncHealthFailed) {
-				base.signal, base.reason = "failed", healthFailureReason(job.ErrorClass)
-			}
-		}
 		if stage := job.SyncStage; job.Type == SyncJobType && job.Status == JobStatusFailed && stage != nil && stage.Phase == SyncStageRejected {
 			base.collection = healthCollection(stage.Collection)
 			add(base)
-		} else if base.signal != "" && (base.signal == "succeeded" || !collectionProblem) {
+		} else if base.signal != "" && (base.signal == "succeeded" || !terminalRepresented) {
 			// Whole-job success also recovers preceding whole-job faults;
-			// do not duplicate a failure already represented per collection.
+			// only identical terminal evidence deduplicates a failure. An
+			// older collection problem cannot stand for a later job fault.
 			add(base)
 		}
 		if stage := job.SyncStage; jobActiveStatus(job.Status) && stage != nil && stage.Phase == SyncStageWaitingCommit {
@@ -222,7 +225,7 @@ func (m *MaintenanceManager) ExecutionHealth(at time.Time) observability.Executi
 		// Automatic authority blocking disables admission, not the fault.
 		// Explicit user-disable uses state "disabled" and adds no failure.
 		switch entry.State {
-		case "cache_schema_blocked", "config_snapshot_invalid", "identity_conflict", "identity_unresolved", "degraded":
+		case "cache_schema_blocked", "config_snapshot_invalid", "identity_conflict", "identity_unresolved", "cache_inspection_timeout", "cache_clone_conflict", "degraded":
 			r := base
 			r.kind = "maintenance"
 			r.at = entry.LastReconciledAt
