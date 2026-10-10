@@ -250,6 +250,7 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 | `update_issue` | Update live issue metadata through the audited write lifecycle |
 | `create_pr` | Create a live pull request through the audited write lifecycle |
 | `update_pr` | Update live pull request metadata through the audited write lifecycle |
+| `merge_pr` | Merge an authorized reviewed PR at a required expected head SHA through the existing audited lifecycle |
 | `list_milestones` | List live repository milestones and refresh cached milestone records |
 | `list_push_remote_mirrors` | List live repository push mirrors and refresh credential-redacted cached records |
 | `trigger_push_remote_mirror` | Trigger one configured push mirror through the audited write lifecycle |
@@ -281,6 +282,27 @@ PATCH/readback outcomes remain fenced; same-key recovery is GET-only and
 reports `recovered_after_ambiguous_write`, `write_ambiguous_remote`,
 `write_ambiguous_readback_failed`, or `write_conflict` as machine-readable
 states.
+
+`merge_pr` requires `repo_id`, positive repository-local `number`,
+`write_mode: "live"`, a caller-provided `idempotency_key`, and full expected
+source head `sha` (40 or 64 hexadecimal characters). Optional `strategy` is
+`merge` (default), `squash`, or `rebase`. Unlike the CLI's optional guard, MCP
+does not allow an unguarded merge. Check independent review and CI for that
+exact SHA before calling; the tool does not certify them or bypass provider
+protections. It accepts no destination URL, force, or skip-check input.
+The SHA guard checks canonical preflight, not a demonstrated provider-side
+conditional write; an external head change between GET and PUT remains a
+provider race. Do not infer server-side compare-and-swap from this guard.
+
+This is the same shared service and adapter used by `merge-pr`: one claimed
+PUT, canonical merged-state readback, durable cache settlement, and GET-only
+recovery after ambiguity. Preserve the same key and arguments when recovering;
+never switch keys to blindly repeat a merge. A confirmed receipt includes PR
+identity, revision when supplied by the provider, and audit/cache evidence.
+`get_source` for `PR-N` immediately returns the confirmed merged graph.
+Read-only MCP sessions hide this capability and reject direct calls before
+validation or service access. Admin stays a local operator console, not a
+remote PR merge UI. See [PR/MR workflow](pr-mr-workflow.md).
 
 ### Operational error contract
 

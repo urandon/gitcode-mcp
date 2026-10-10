@@ -146,6 +146,7 @@ The MCP server exposes the same audited live-write lifecycle for agent workflows
 | `update_issue` | Update issue title, body, state, labels, or set/clear its milestone |
 | `create_pr` | Create a pull request with title, body, head, and base |
 | `update_pr` | Update pull request title, body, or state |
+| `merge_pr` | Merge an authorized reviewed PR at a required full expected `sha`, with `write_mode=live`, caller idempotency key and canonical readback; provider protections remain authoritative |
 | `list_milestones` | List repository milestones and refresh cached milestone records |
 | `create_milestone` | Create a milestone; GitCode requires `due_on` |
 | `update_milestone` | Update milestone title, description, due date, or state |

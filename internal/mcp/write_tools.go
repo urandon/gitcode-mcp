@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -83,6 +84,13 @@ func writeToolInputSchema(id string) inputSchema {
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"title": {Type: "string", Description: "Pull request title.", MinLength: 1}, "body": {Type: "string", Description: "Pull request body."}, "head": {Type: "string", Description: "Source branch.", MinLength: 1}, "base": {Type: "string", Description: "Target branch.", MinLength: 1}}), Required: []string{"repo_id", "write_mode", "title", "head", "base"}}
 	case "update_pr":
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"number": {Type: "integer", Description: "Pull request number.", Minimum: float64Ptr(1)}, "title": {Type: "string", Description: "Pull request title."}, "body": {Type: "string", Description: "Pull request body."}, "state": {Type: "string", Description: "Pull request state."}}), Required: []string{"repo_id", "write_mode", "number"}}
+	case "merge_pr":
+		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{
+			"number":          {Type: "integer", Description: "Repository-local pull request number, not provider id.", Minimum: float64Ptr(1)},
+			"sha":             {Type: "string", Description: "Required full expected source head SHA (40 or 64 hexadecimal characters), not a branch or short SHA.", MinLength: 40},
+			"strategy":        {Type: "string", Description: "Merge strategy; provider protections remain authoritative.", Enum: []string{"merge", "squash", "rebase"}, Default: "merge"},
+			"idempotency_key": {Type: "string", Description: "Required caller key; preserve the same key and arguments for GET-only recovery after ambiguity.", MinLength: 1},
+		}), Required: []string{"repo_id", "write_mode", "number", "sha", "idempotency_key"}}
 	case "list_milestones":
 		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"state": {Type: "string", Description: "Milestone state filter.", Enum: []string{"open", "closed"}}, "per_page": {Type: "integer", Description: "Records per page.", Minimum: float64Ptr(1), Maximum: float64Ptr(100)}}), Required: []string{"repo_id"}}
 	case "list_push_remote_mirrors":
@@ -185,6 +193,8 @@ func (s *Server) writeToolHandler(cap capability.Capability) toolHandler {
 		return s.callCreatePR
 	case "update_pr":
 		return s.callUpdatePR
+	case "merge_pr":
+		return s.callMergePR
 	case "list_milestones":
 		return s.callListMilestones
 	case "list_push_remote_mirrors":
@@ -346,6 +356,50 @@ func (s *Server) callUpdatePR(ctx context.Context, id *json.RawMessage, args jso
 		req.Body = a.Body
 		req.State = a.State
 		return req
+	})
+}
+
+func (s *Server) callMergePR(ctx context.Context, id *json.RawMessage, args json.RawMessage) {
+	// No URL, force, skip-check or unrelated write fields belong to this contract.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(args, &fields); err != nil {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
+		return
+	}
+	for field := range fields {
+		switch field {
+		case "repo_id", "write_mode", "number", "sha", "strategy", "idempotency_key":
+		default:
+			s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "merge_pr accepts only repo_id, write_mode, number, sha, strategy and idempotency_key"})
+			return
+		}
+	}
+	s.callValidatedWriteTool(ctx, id, args, s.svc.MergePR, func(a writeToolArgs) service.WriteCommandRequest {
+		req := writeRequestFromArgs(a)
+		req.Number = a.Number
+		req.Sha = strings.ToLower(strings.TrimSpace(a.Sha))
+		req.Strategy = strings.TrimSpace(a.Strategy)
+		return req
+	}, func(a writeToolArgs) string {
+		if a.Number < 1 {
+			return "number must be a positive repository-local pull request number"
+		}
+		if strings.TrimSpace(a.IdempotencyKey) == "" {
+			return "idempotency_key is required; reuse the same key after an ambiguous outcome"
+		}
+		sha := strings.TrimSpace(a.Sha)
+		if len(sha) != 40 && len(sha) != 64 {
+			return "sha must be the full expected source head SHA (40 or 64 hexadecimal characters)"
+		}
+		if _, err := hex.DecodeString(sha); err != nil {
+			return "sha must be the full expected source head SHA (40 or 64 hexadecimal characters)"
+		}
+		switch strings.TrimSpace(a.Strategy) {
+		case "", "merge", "squash", "rebase":
+			return ""
+		default:
+			return "strategy must be merge, squash, or rebase"
+		}
 	})
 }
 
@@ -557,6 +611,16 @@ func (s *Server) callAddLabel(ctx context.Context, id *json.RawMessage, args jso
 }
 
 func (s *Server) callWriteTool(ctx context.Context, id *json.RawMessage, args json.RawMessage, handler func(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error), build func(writeToolArgs) service.WriteCommandRequest) {
+	s.callValidatedWriteTool(ctx, id, args, handler, build, func(a writeToolArgs) string {
+		strategy := strings.TrimSpace(a.Strategy)
+		if strategy != "" && strategy != "auto" && strategy != "description_fallback" {
+			return "strategy must be auto or description_fallback"
+		}
+		return ""
+	})
+}
+
+func (s *Server) callValidatedWriteTool(ctx context.Context, id *json.RawMessage, args json.RawMessage, handler func(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error), build func(writeToolArgs) service.WriteCommandRequest, validate func(writeToolArgs) string) {
 	var a writeToolArgs
 	if err := json.Unmarshal(args, &a); err != nil {
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "arguments must be a valid object"})
@@ -570,9 +634,8 @@ func (s *Server) callWriteTool(ctx context.Context, id *json.RawMessage, args js
 		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "write_mode must be live"})
 		return
 	}
-	strategy := strings.TrimSpace(a.Strategy)
-	if strategy != "" && strategy != "auto" && strategy != "description_fallback" {
-		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: "strategy must be auto or description_fallback"})
+	if message := validate(a); message != "" {
+		s.writeError(id, -32602, "Invalid params", &errorData{Code: "invalid_arguments", Message: message})
 		return
 	}
 	result, err := handler(ctx, build(a))
