@@ -63,15 +63,15 @@ func NewSQLiteStore(ctx context.Context, dataSourceName string) (*SQLiteStore, e
 
 func newSQLiteStore(ctx context.Context, dataSourceName string, forceNoFTS bool) (*SQLiteStore, error) {
 	poolDataSource := dataSourceName
+	var memoryIdentity [16]byte
 	if dataSourceName == ":memory:" {
-		var identity [16]byte
-		if _, err := rand.Read(identity[:]); err != nil {
+		if _, err := rand.Read(memoryIdentity[:]); err != nil {
 			return nil, err
 		}
 		// A cancelled transaction can discard its worker connection. Retain a
 		// private named database through a separate anchor, and initialize these
 		// pragmas on every replacement worker, not just the first connection.
-		poolDataSource = fmt.Sprintf("file:gitcode-mcp-memory-%x?mode=memory&cache=shared&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)", identity)
+		poolDataSource = fmt.Sprintf("file:gitcode-mcp-memory-%x?mode=memory&cache=shared&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)", memoryIdentity)
 	}
 	db, err := sql.Open("sqlite", poolDataSource)
 	if err != nil {
@@ -96,7 +96,7 @@ func newSQLiteStore(ctx context.Context, dataSourceName string, forceNoFTS bool)
 	if dataSourceName == ":memory:" {
 		// Independent in-memory stores do not share state and therefore must not
 		// contend on the process-global fallback lock used for legacy callers.
-		store.lockPath = filepath.Join(os.TempDir(), fmt.Sprintf("gitcode-mcp-memory-writer-%p.lock", store))
+		store.lockPath = filepath.Join(os.TempDir(), fmt.Sprintf("gitcode-mcp-memory-writer-%x.lock", memoryIdentity))
 		store.ephemeralLock = true
 		store.memoryAnchorDB, err = sql.Open("sqlite", poolDataSource)
 		if err != nil {
