@@ -76,12 +76,86 @@ Useful service commands:
 | Command | Purpose |
 |---|---|
 | `gitcode-mcp service install` | Resolves and validates the current executable, then atomically writes an absolute platform user-service definition for `gitcode-mcp service run`. `--overwrite` replaces the file but deliberately does not claim to reload an already-loaded service. |
-| `gitcode-mcp service repair` | Validates the current executable, unloads an already-loaded definition, rewrites it, restarts it, and waits for PID plus Unix-socket readiness. Use this one-command recovery for a broken definition. |
+| `gitcode-mcp service repair` | Repairs an already bounded definition and waits for readiness. A legacy output definition requires the separate confirmed observation upgrade below. |
+| `gitcode-mcp service upgrade-observation` | Renders a read-only effect ledger; `--yes --plan-id ID` explicitly confirms a quiesced output upgrade and cleanup of the two fixed legacy files. |
 | `gitcode-mcp service start` | Loads or kickstarts the user service and waits for PID plus control-socket readiness; startup failures include a bounded manager-state diagnosis. |
 | `gitcode-mcp service status` | Shows whether the local service is installed and running. |
 | `gitcode-mcp service doctor` | Uses the same state model as status, validates the installed executable, and reports `gitcode-mcp service repair` as the supported recovery for a broken definition. |
 | `gitcode-mcp service run` | Runs the service in the foreground for debugging. |
 | `gitcode-mcp service uninstall` | Removes the user-service definition. |
+
+### Bounded daemon observation backend
+
+The backend for [#101](https://gitcode.com/urandon/gitcode-mcp/issues/101) records
+catalog-only startup, recovery, and teardown evidence. It is diagnostic evidence,
+not proof that a job or external write succeeded. Shared query APIs, metrics and
+the Admin Service view are separate rollout tasks in
+[#173](https://gitcode.com/urandon/gitcode-mcp/issues/173); this backend does not
+advertise those surfaces as complete.
+
+The asynchronous queue is limited to 1,024 events / 4 MiB, each event to 8 KiB,
+and each read page to 200 events / 64 KiB. Four 1 MiB ledger slots and two 1 MiB
+slots per managed stream retain at most 8 MiB combined, plus two fixed 4 KiB
+metadata slots and an empty ownership lock. A product-owned writer closes and
+reopens each slot itself; renaming an external process's open stdout file is
+not the retention mechanism. Reads use immutable RAM snapshots, not execution
+locks or disk I/O. Cursor integrity binds position, generation, loss epoch and
+normalized filters; empty sparse scans still advance their scan position.
+
+Only fixed templates and opaque, authority-resolved references enter these
+files. Errors, source bodies, repository coordinates, endpoints, credentials
+and local paths are not diagnostic messages. Unknown legacy lines become
+content-free omission evidence. Legacy reads are capped at 64 KiB per pass and
+8 KiB per line, with explicit offset, partial-line, rotation and truncation
+state. Missing legacy output (including systemd without product files) is
+unsupported evidence, not a healthy empty log.
+
+New launchd/systemd definitions discard unmanaged process stdout/stderr. The
+product writer records typed lifecycle events separately. Pre-collector failure
+and abrupt crash output are not captured or represented as complete evidence.
+Queue overflow, disk failure, corrupt/truncated recovery and incomplete worker
+teardown remain partial; they do not fail cached reads or jobs. Sequence ranges
+are durably reserved in bounded batches; crash gaps invalidate scan assumptions.
+A clean shutdown syncs managed bytes before publishing its marker. Observed boot
+counts describe this collector, not OS restart counts.
+
+Recovery trims corrupt suffixes to validated catalog prefixes before reopening
+the writer. Managed streams resume by sequence, not by file size. Each admitted
+event makes at most one storage attempt; a transient failure does not disable
+the remaining boot, and restored recording does not erase historical loss.
+Clean metadata includes a bounded segment manifest so missing/truncated streams
+cannot masquerade as healthy empty evidence. A clean restart of already known
+partial history preserves its cursor unless new loss is observed. Metadata is
+published by syncing the inactive 4 KiB slot and atomically renaming it over
+the current slot, retaining the two-slot bound even during publication.
+
+Existing installations are not silently upgraded by `install --overwrite` or
+`repair`. Render the exact local plan first:
+
+```sh
+gitcode-mcp service upgrade-observation --format json
+gitcode-mcp service upgrade-observation --yes --plan-id PLAN_ID --format json
+```
+
+Confirmation requires a successful platform stop (or positively identified
+already-unloaded launchd owner on an interrupted retry) and proves its PID/socket are
+gone, revalidates the definition, target executable digest and fixed legacy
+identities, removes only `service.out.log` / `service.err.log`, replaces the
+definition and restarts. Cleanup removes those files and is not recoverable;
+preserve any needed local legacy evidence before confirming. No arbitrary path
+or destination is accepted. A stale plan or active owner is refused. Interrupted
+cleanup, replacement or restart requires a fresh plan for remaining effects and
+keeps readiness at `migration_required`. Schema migration replaces a compatible
+binary while preserving known legacy output routing; it is not confirmation of
+an observation upgrade. Unknown platform state fails closed before cleanup;
+an inspection error is never proof that the old owner has stopped. Definition
+replacement syncs a single fixed, private staging leaf before atomic rename;
+a failed write preserves the previous definition. An interrupted staging write
+is overwritten only by a later explicitly confirmed replacement.
+Managed output requires both the bounded definition and its marker in the
+running process environment; rewriting a disk definition does not prove which
+output routing the platform manager actually loaded. A staging contender whose
+descriptor was already renamed into committed state is rejected before writing.
 
 ## Install Provider
 

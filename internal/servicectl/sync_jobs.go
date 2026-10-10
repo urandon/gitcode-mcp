@@ -1799,6 +1799,9 @@ func selectSyncRetryCollection(req *StartSyncJobRequest, collection string, sele
 func (m *JobManager) resumeInterruptedSyncRetry(jobID string, cancel context.CancelFunc) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closing {
+		return errors.New("service is stopping")
+	}
 	job := m.jobs[jobID]
 	if job == nil || job.Status != JobStatusInterrupted {
 		return nil
@@ -1949,6 +1952,9 @@ func (m *JobManager) rejectInterruptedSyncStageByRef(stageRef, reason string) {
 func (m *JobManager) resumeInterruptedSyncStage(stage SyncStageEnvelope, cancel context.CancelFunc) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closing {
+		return errors.New("service is stopping")
+	}
 	job := m.jobs[stage.JobID]
 	now := m.now().UTC()
 	view := stage.PublicView()

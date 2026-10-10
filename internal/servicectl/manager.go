@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"gitcode-mcp/internal/adminui"
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/observability"
 	"gitcode-mcp/internal/rag"
 )
 
@@ -86,6 +88,8 @@ type Status struct {
 }
 
 type Manager struct {
+	observation        *observability.Collector
+	observationUpgrade bool
 	Source             config.Source
 	CredentialReporter config.CredentialStatusReporter
 	BinaryPath         string
@@ -229,6 +233,9 @@ func (m Manager) Install(overwrite bool) (Status, error) {
 		return Status{}, err
 	}
 	content := installFileContent(paths.InstallKind, binary, paths)
+	if fileExists(paths.InstallPath) && !m.observationUpgrade && !boundedDefinition(paths.InstallKind, paths.InstallPath) {
+		return Status{}, observationUpgradeError("migration_required")
+	}
 	if err := writePrivateFile(paths.InstallPath, []byte(content)); err != nil {
 		return Status{}, err
 	}
@@ -368,6 +375,9 @@ func (m Manager) Repair(ctx context.Context) (Status, error) {
 	if _, err := resolveInstallExecutable(m.BinaryPath); err != nil {
 		return Status{}, fmt.Errorf("service: repair cannot use the current executable: %w", err)
 	}
+	if fileExists(paths.InstallPath) && !boundedDefinition(paths.InstallKind, paths.InstallPath) {
+		return Status{}, observationUpgradeError("migration_required")
+	}
 	if err := m.unloadForRepair(ctx, paths); err != nil {
 		return Status{}, err
 	}
@@ -461,6 +471,8 @@ func (m Manager) waitForStopped(ctx context.Context, paths Paths) (Status, error
 }
 
 func (m Manager) Run(ctx context.Context) error {
+	ctx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
 	paths, err := m.ResolvePaths()
 	if err != nil {
 		return err
@@ -468,6 +480,54 @@ func (m Manager) Run(ctx context.Context) error {
 	if err := ensurePathDirs(paths); err != nil {
 		return err
 	}
+	// No observation storage operation is on the execution startup path. The
+	// collector owns its writer, and unavailable diagnostics remain partial.
+	// Freeze the receiver before New starts its asynchronous probe. Copying m
+	// inside that probe would race assignment of m.observation below.
+	observationOwner := m
+	m.observation = observability.New(observability.Config{Directory: filepath.Join(paths.LogDir, "observation"), LegacyDirectory: paths.LogDir,
+		ManagedOutputProbe: func() bool { return observationOwner.managedObservationOutput(paths) }})
+	var jobsForShutdown *JobManager
+	var maintenanceForShutdown *MaintenanceManager
+	var maintenanceDone, recoveryDone <-chan struct{}
+	var adminForShutdown *adminhttp.Controller
+	var rpcHandlers atomic.Int64
+	executionPublished := false
+	defer func() {
+		cancelRun()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		clean := jobsForShutdown != nil && jobsForShutdown.shutdown(shutdownCtx)
+		if !executionPublished {
+			clean = false
+		}
+		for _, done := range []<-chan struct{}{maintenanceDone, recoveryDone} {
+			if done != nil {
+				select {
+				case <-done:
+				case <-shutdownCtx.Done():
+					clean = false
+				}
+			}
+		}
+		if maintenanceForShutdown != nil && maintenanceForShutdown.observationInspectWorkers.Load() != 0 {
+			clean = false
+		}
+		if adminForShutdown != nil && !adminForShutdown.WaitStopped(shutdownCtx) {
+			clean = false
+		}
+		for rpcHandlers.Load() > 0 && shutdownCtx.Err() == nil {
+			time.Sleep(time.Millisecond)
+		}
+		if rpcHandlers.Load() > 0 {
+			clean = false
+		}
+		// A separate bounded flush budget still permits a durable incomplete
+		// marker when worker teardown consumed its own budget.
+		flushCtx, stop := context.WithTimeout(context.Background(), time.Second)
+		defer stop()
+		m.observation.Close(flushCtx, clean)
+	}()
 	if paths.Network == "unix" {
 		// Remove a socket left by a prior process before publishing this PID. A
 		// new live PID plus an old socket inode must never look ready.
@@ -484,7 +544,9 @@ func (m Manager) Run(ctx context.Context) error {
 		retention = *m.JobRetention
 	}
 	jobs := NewJobManagerWithRetention(paths.JobsPath, retention)
+	jobsForShutdown = jobs
 	maintenance := NewMaintenanceManager(m, jobs, paths.RegistryPath)
+	maintenanceForShutdown = maintenance
 	if err := maintenance.Load(); err != nil {
 		return err
 	}
@@ -540,17 +602,21 @@ func (m Manager) Run(ctx context.Context) error {
 		PlanRAGRepair:                      adminControls.PlanRAGRepair,
 		ApplyRAGRepair:                     adminControls.ApplyRAGRepair,
 	})
+	adminForShutdown = admin
 	if m.AdminAutoStart {
 		if _, err := admin.Start(ctx); err != nil {
 			return err
 		}
 	}
-	server := RPCServer{Manager: m, Jobs: jobs, Maintenance: maintenance, Admin: admin}
-	go maintenance.Run(ctx)
+	server := RPCServer{Manager: m, Jobs: jobs, Maintenance: maintenance, Admin: admin, observationHandlers: &rpcHandlers, runtimeContext: ctx}
+	maintenanceFinished := make(chan struct{})
+	maintenanceDone = maintenanceFinished
+	go func() { defer close(maintenanceFinished); maintenance.Run(ctx) }()
 	if paths.Network == "mem" {
 		return serveMemoryRPC(ctx, paths.Address, server, func() {
+			executionPublished = true
 			recoveryDispatched = true
-			m.startSyncStageRecovery(ctx, jobs, releaseSyncRecoveryFences)
+			recoveryDone = m.startSyncStageRecovery(ctx, jobs, releaseSyncRecoveryFences)
 		})
 	}
 	if paths.Network == "unix" {
@@ -561,8 +627,9 @@ func (m Manager) Run(ctx context.Context) error {
 		return err
 	}
 	defer listener.Close()
+	executionPublished = true
 	recoveryDispatched = true
-	m.startSyncStageRecovery(ctx, jobs, releaseSyncRecoveryFences)
+	recoveryDone = m.startSyncStageRecovery(ctx, jobs, releaseSyncRecoveryFences)
 	if paths.Network == "unix" {
 		defer os.Remove(paths.SocketPath)
 	}
@@ -577,7 +644,8 @@ func (m Manager) Run(ctx context.Context) error {
 // block below Go's context boundary; such work must never gate daemon
 // readiness. Any ordinary recovery error is projected onto the still-
 // interrupted sync jobs instead of terminating an otherwise usable daemon.
-func (m Manager) startSyncStageRecovery(ctx context.Context, jobs *JobManager, releaseFences func()) {
+func (m Manager) startSyncStageRecovery(ctx context.Context, jobs *JobManager, releaseFences func()) <-chan struct{} {
+	done := make(chan struct{})
 	recoverStages := m.syncStageRecovery
 	if recoverStages == nil {
 		recoverStages = func(ctx context.Context, jobs *JobManager, manager Manager) error {
@@ -585,8 +653,15 @@ func (m Manager) startSyncStageRecovery(ctx context.Context, jobs *JobManager, r
 		}
 	}
 	go func() {
+		defer close(done)
+		if m.observation != nil {
+			m.observation.Emit(observability.RecoveryStarted, observability.Context{})
+		}
 		err := recoverStages(ctx, jobs, m)
 		if err == nil {
+			if m.observation != nil {
+				m.observation.Emit(observability.RecoveryFinished, observability.Context{})
+			}
 			releaseFences()
 			return
 		}
@@ -596,7 +671,11 @@ func (m Manager) startSyncStageRecovery(ctx context.Context, jobs *JobManager, r
 		if err := jobs.failInterruptedSyncRecoveries("sync_recovery_failed"); err == nil {
 			releaseFences()
 		}
+		if m.observation != nil {
+			m.observation.Emit(observability.RecoveryFailed, observability.Context{})
+		}
 	}()
+	return done
 }
 
 func (m Manager) adminReadiness(ctx context.Context) adminhttp.Readiness {
@@ -651,12 +730,12 @@ func installFileContent(kind, binary string, paths Paths) string {
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>EnvironmentVariables</key>
-  <dict><key>GITCODE_MCP_SERVICE_RUNTIME_DIR</key><string>%s</string></dict>
-  <key>StandardOutPath</key><string>%s</string>
-  <key>StandardErrorPath</key><string>%s</string>
+  <dict><key>GITCODE_MCP_SERVICE_RUNTIME_DIR</key><string>%s</string><key>GITCODE_MCP_OBSERVATION_OUTPUT</key><string>bounded-v1</string></dict>
+  <key>StandardOutPath</key><string>/dev/null</string>
+  <key>StandardErrorPath</key><string>/dev/null</string>
 </dict>
 </plist>
-`, escapeXMLText(binary), escapeXMLText(paths.RuntimeDir), escapeXMLText(filepath.Join(paths.LogDir, "service.out.log")), escapeXMLText(filepath.Join(paths.LogDir, "service.err.log")))
+`, escapeXMLText(binary), escapeXMLText(paths.RuntimeDir))
 	case "systemd-user":
 		return fmt.Sprintf(`[Unit]
 Description=gitcode-mcp local service
@@ -664,7 +743,10 @@ Description=gitcode-mcp local service
 [Service]
 ExecStart=%s service run
 Environment=%s
+Environment="GITCODE_MCP_OBSERVATION_OUTPUT=bounded-v1"
 Restart=on-failure
+StandardOutput=null
+StandardError=null
 RuntimeDirectory=gitcode-mcp
 
 [Install]

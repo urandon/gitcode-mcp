@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gitcode-mcp/internal/cache"
@@ -427,26 +428,27 @@ func maintenanceCapabilities(version string) MaintenanceCapabilities {
 }
 
 type MaintenanceManager struct {
-	mu                 sync.Mutex
-	reconcileMu        sync.Mutex
-	manager            Manager
-	jobs               *JobManager
-	path               string
-	generation         int64
-	entries            map[string]*MaintenanceEntry
-	receipts           map[string]maintenanceReceipt
-	admissions         map[string]repositoryDocsAdmissionIntent
-	sources            map[string]map[string]*repositoryDocsRegisteredSource
-	redirects          map[string]string
-	sourceRedirects    map[string]string
-	conflictCandidates map[string][]maintenanceIdentityConflictCandidate
-	resolutionReceipts map[string]maintenanceConflictResolutionReceipt
-	retiredClonePaths  map[string]map[string]bool
-	now                func() time.Time
-	writeFile          func(string, []byte, os.FileMode) error
-	inspectCache       maintenanceCacheInspector
-	canonicalizePath   func(string) (string, error)
-	inspectTimeout     time.Duration
+	observationInspectWorkers atomic.Int64
+	mu                        sync.Mutex
+	reconcileMu               sync.Mutex
+	manager                   Manager
+	jobs                      *JobManager
+	path                      string
+	generation                int64
+	entries                   map[string]*MaintenanceEntry
+	receipts                  map[string]maintenanceReceipt
+	admissions                map[string]repositoryDocsAdmissionIntent
+	sources                   map[string]map[string]*repositoryDocsRegisteredSource
+	redirects                 map[string]string
+	sourceRedirects           map[string]string
+	conflictCandidates        map[string][]maintenanceIdentityConflictCandidate
+	resolutionReceipts        map[string]maintenanceConflictResolutionReceipt
+	retiredClonePaths         map[string]map[string]bool
+	now                       func() time.Time
+	writeFile                 func(string, []byte, os.FileMode) error
+	inspectCache              maintenanceCacheInspector
+	canonicalizePath          func(string) (string, error)
+	inspectTimeout            time.Duration
 }
 
 func NewMaintenanceManager(manager Manager, jobs *JobManager, path string) *MaintenanceManager {
@@ -702,7 +704,9 @@ func (m *MaintenanceManager) inspectCacheBounded(ctx context.Context, path, snap
 	inspectCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	result := make(chan maintenanceCacheInspection, 1)
+	m.observationInspectWorkers.Add(1)
 	go func() {
+		defer m.observationInspectWorkers.Add(-1)
 		canonicalPath, err := m.canonicalizePath(path)
 		if err != nil {
 			result <- maintenanceCacheInspection{err: err}

@@ -77,10 +77,12 @@ type ServiceHealth struct {
 }
 
 type RPCServer struct {
-	Manager     Manager
-	Jobs        *JobManager
-	Maintenance *MaintenanceManager
-	Admin       *adminhttp.Controller
+	runtimeContext      context.Context
+	observationHandlers *atomic.Int64
+	Manager             Manager
+	Jobs                *JobManager
+	Maintenance         *MaintenanceManager
+	Admin               *adminhttp.Controller
 }
 
 type RPCClient struct {
@@ -137,6 +139,8 @@ func (s RPCServer) Serve(ctx context.Context, listener net.Listener) error {
 }
 
 func (s RPCServer) handleConn(ctx context.Context, conn net.Conn) {
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 	defer conn.Close()
 	dec := json.NewDecoder(conn)
 	enc := json.NewEncoder(conn)
@@ -153,7 +157,15 @@ func (s RPCServer) handleConn(ctx context.Context, conn net.Conn) {
 }
 
 func (s RPCServer) handleRequest(ctx context.Context, req RPCRequest) RPCResponse {
+	if s.observationHandlers != nil {
+		s.observationHandlers.Add(1)
+		defer s.observationHandlers.Add(-1)
+	}
 	resp := RPCResponse{JSONRPC: jsonrpcVersion, ID: req.ID}
+	if ctx.Err() != nil || s.runtimeContext != nil && s.runtimeContext.Err() != nil {
+		resp.Error = &RPCError{Code: -32000, Message: "service is stopping", DiagnosticCode: "service_stopping"}
+		return resp
+	}
 	if req.JSONRPC != jsonrpcVersion {
 		resp.Error = &RPCError{Code: -32600, Message: "invalid jsonrpc version"}
 		return resp

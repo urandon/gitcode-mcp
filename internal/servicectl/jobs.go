@@ -83,6 +83,7 @@ type JobManager struct {
 	cacheMutationFences                 map[string]bool
 	syncRecoveryFences                  map[string]bool
 	inflightWorkers                     map[string]bool
+	closing                             bool
 	directCacheWriters                  map[string]string
 	syncCommitQueues                    map[string][]syncCommitWaiter
 }
@@ -303,6 +304,10 @@ func (m *JobManager) BeginDirectCacheWriter(cacheUUID, writerID string) (func(),
 		return func() {}, CacheWriterIdentityError{code: "cache_authority_unavailable"}
 	}
 	m.mu.Lock()
+	if m.closing {
+		m.mu.Unlock()
+		return func() {}, errors.New("service is stopping")
+	}
 	if m.syncRecoveryFences[cacheUUID] {
 		m.mu.Unlock()
 		return func() {}, CacheRecoveryFenceError{}
@@ -430,6 +435,10 @@ func (m *JobManager) StartFake(ctx context.Context, req StartFakeJobRequest) (Jo
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	job := m.createJob("fake", steps, cancel)
+	if job.ID == "" {
+		cancel()
+		return Job{}, errors.New("service is stopping")
+	}
 	go m.runFakeJob(ctx, job.ID, steps, interval)
 	return job, nil
 }
@@ -592,6 +601,9 @@ func (m *JobManager) LatestRepositoryDocsSource(cacheUUID, repoID, sourceRegistr
 func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, sourceRegistrationID string, generation int64, expectedSetID, workKey, actionIntentRef string, cancel context.CancelFunc) (Job, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closing {
+		return Job{}, false, errors.New("service is stopping")
+	}
 	job := m.jobs[strings.TrimSpace(jobID)]
 	if job == nil || job.Type != RepositoryDocsIndexJobType || !repositoryDocsAdmissionRecoverable(job.Status) ||
 		job.RegistrationID != strings.TrimSpace(registrationID) || job.SourceRegistrationID != strings.TrimSpace(sourceRegistrationID) ||
@@ -815,6 +827,9 @@ type JobRecoveryIntent struct {
 func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID string, steps int, workKey, cacheUUID, registrationID, namespaceID string, intent JobRecoveryIntent, cancel context.CancelFunc) (Job, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closing {
+		return Job{}, false, errors.New("service is stopping")
+	}
 	if cacheUUID = strings.TrimSpace(cacheUUID); cacheUUID != "" && m.syncRecoveryFences[cacheUUID] {
 		return Job{}, false, CacheRecoveryFenceError{}
 	}
@@ -1133,12 +1148,16 @@ func (m *JobManager) beginRepositoryDocsJob(id string) bool {
 func (m *JobManager) createJob(jobType string, steps int, cancel context.CancelFunc) Job {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closing {
+		return Job{}
+	}
 	m.nextID++
 	now := m.now()
 	id := fmt.Sprintf("job-%06d", m.nextID)
 	job := &Job{ID: id, Type: jobType, Status: JobStatusQueued, CreatedAt: now, UpdatedAt: now, Steps: steps}
 	m.jobs[id] = job
 	m.cancel[id] = cancel
+	m.inflightWorkers[id] = true
 	_ = m.saveLocked()
 	return cloneJob(job)
 }
@@ -1154,6 +1173,7 @@ func (m *JobManager) createJobWithMetadata(jobType, repoID, profileID string, st
 }
 
 func (m *JobManager) runFakeJob(ctx context.Context, id string, steps int, interval time.Duration) {
+	defer m.markWorkerFinished(id)
 	m.updateJob(id, func(job *Job, now time.Time) {
 		job.Status = JobStatusRunning
 		job.StartedAt = &now

@@ -932,7 +932,7 @@ func executeLocalCommand(ctx context.Context, args []string, stdout io.Writer, s
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "repo init-local":
 				printLocalSubcommandHelp(command, sub, stdout)
-			case "service run", "service install", "service repair", "service uninstall", "service start", "service stop", "service status", "service doctor", "service maintenance", "service reconcile", "service fake-job", "service jobs", "service job", "service attach", "service cancel":
+			case "service run", "service install", "service repair", "service upgrade-observation", "service uninstall", "service start", "service stop", "service status", "service doctor", "service maintenance", "service reconcile", "service fake-job", "service jobs", "service job", "service attach", "service cancel":
 				printLocalSubcommandHelp(command, sub, stdout)
 			case "admin open", "admin status":
 				printLocalSubcommandHelp(command, sub, stdout)
@@ -1734,6 +1734,23 @@ func executeServiceCommand(ctx context.Context, args []string, opts options, std
 	switch sub {
 	case "install":
 		status, err = manager.Install(opts.overwrite)
+	case "upgrade-observation":
+		var plan servicectl.ObservationUpgradePlan
+		if opts.yes {
+			plan, err = manager.ApplyObservationUpgrade(ctx, opts.planID)
+		} else {
+			plan, err = manager.PlanObservationUpgrade()
+		}
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, plan, func(w io.Writer, p servicectl.ObservationUpgradePlan) {
+			fmt.Fprintf(w, "%s: %s\n", p.PlanID, p.State)
+			for _, effect := range p.Effects {
+				fmt.Fprintln(w, effect)
+			}
+			fmt.Fprintln(w, p.Recovery)
+		})
 	case "repair":
 		status, err = manager.Repair(ctx)
 	case "uninstall":
@@ -5278,7 +5295,13 @@ func executeMigrateCacheCommand(ctx context.Context, opts options, stdout io.Wri
 	if opts.confirm && recoveryPending {
 		var compatibleService servicectl.Status
 		if recovery.ServiceInstalled {
-			if _, err := migrationService.Install(true); err != nil {
+			install := func() (servicectl.Status, error) { return migrationService.Install(true) }
+			if compatible, ok := migrationService.(interface {
+				InstallForCacheMigration() (servicectl.Status, error)
+			}); ok {
+				install = compatible.InstallForCacheMigration
+			}
+			if _, err := install(); err != nil {
 				mr.RecoveryState = "migration_complete_service_install_failed"
 				recovery.Phase = mr.RecoveryState
 				_ = writeCacheMigrationRecovery(cachePath, recovery)
@@ -6053,6 +6076,7 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "Subcommands:")
 		fmt.Fprintln(w, "  install     write the user service definition")
 		fmt.Fprintln(w, "  repair      replace the definition, reload it, and verify readiness")
+		fmt.Fprintln(w, "  upgrade-observation  plan and explicitly confirm bounded output migration")
 		fmt.Fprintln(w, "  uninstall   remove the user service definition")
 		fmt.Fprintln(w, "  start       start the installed service and wait for bounded readiness")
 		fmt.Fprintln(w, "  stop        report how to stop the installed service")
@@ -6326,8 +6350,12 @@ func printLocalSubcommandHelp(command, sub string, w io.Writer) {
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "service uninstall":
 		fmt.Fprintln(w, "Usage: gitcode-mcp service uninstall [--format FORMAT]")
-		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Remove the platform user-service definition.")
+	case "service upgrade-observation":
+		fmt.Fprintln(w, "Usage: gitcode-mcp service upgrade-observation [--yes --plan-id ID] [--format FORMAT]")
+		fmt.Fprintln(w, "Default: render a read-only local plan. Confirmation stops the installed owner, removes only the two validated legacy log files, replaces output routing, then restarts.")
+		fmt.Fprintln(w, "--yes --plan-id ID explicitly confirms cleanup; stale plans and active owners are refused. No GitCode or embedding-provider requests.")
+		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Flags:")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
 	case "service start":
