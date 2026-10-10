@@ -5,6 +5,26 @@ import "gitcode-mcp/internal/observability"
 // retryCohort is private comparison identity, not a metric label or public DTO.
 type retryCohort struct{ cache, repo, kind, source string }
 
+func scheduledStageRetry(stage MaintenanceStageState) bool {
+	return !stage.RetryAfter.IsZero() && stage.Status != JobStatusCancelled && stage.Status != JobStatusSuperseded
+}
+
+// entries and sources are canonical authority maps. Direct bounded lookups
+// preserve the current-path/legacy tombstone precedence used by reconciliation
+// without an unbounded redirect traversal inside this observation probe.
+func (m *MaintenanceManager) retrySourceCancelledLocked(registration string, entry *MaintenanceEntry, source string) (bool, bool) {
+	if len(registration)+len(source)+len(entry.PathFingerprint)+2 > 4096 {
+		return false, false
+	}
+	if admission, ok := m.admissions[repositoryDocsAdmissionKey(registration, source, entry.PathFingerprint)]; ok {
+		return admission.Disposition == repositoryDocsAdmissionCancelled, true
+	}
+	if admission, ok := m.admissions[repositoryDocsAdmissionKey(registration, source)]; ok {
+		return admission.Disposition == repositoryDocsAdmissionCancelled, true
+	}
+	return false, true
+}
+
 // ScheduledRetryProbe observes one coherent in-memory projection of durable
 // jobs and registry state. Both locks are try-only; it performs no I/O, timer
 // wait, callback, admission or recovery. Due windows remain scheduled until
@@ -62,11 +82,11 @@ func (m *MaintenanceManager) ScheduledRetryProbe() observability.ProbeValue {
 		}
 		cohort := retryCohort{cache: entry.CacheUUID, repo: entry.RepoID}
 		cohort.kind = SyncJobType
-		if entry.Policy.SyncEnabled && !entry.SyncStage.RetryAfter.IsZero() && !active[cohort] {
+		if entry.Policy.SyncEnabled && scheduledStageRetry(entry.SyncStage) && !active[cohort] {
 			scheduled++
 		}
 		cohort.kind = RAGIndexJobType
-		if entry.Policy.RAGEnabled && !entry.RAGStage.RetryAfter.IsZero() && !active[cohort] {
+		if entry.Policy.RAGEnabled && scheduledStageRetry(entry.RAGStage) && !active[cohort] {
 			scheduled++
 		}
 		cohort.kind = RepositoryDocsIndexJobType
@@ -84,7 +104,11 @@ func (m *MaintenanceManager) ScheduledRetryProbe() observability.ProbeValue {
 				if len(cohort.source) > 4096 {
 					return observability.Unavailable()
 				}
-				if !source.State.Stage.RetryAfter.IsZero() && !active[cohort] {
+				cancelled, available := m.retrySourceCancelledLocked(registration, entry, cohort.source)
+				if !available {
+					return observability.Unavailable()
+				}
+				if scheduledStageRetry(source.State.Stage) && !cancelled && !active[cohort] {
 					scheduled++
 				}
 			}
@@ -93,7 +117,11 @@ func (m *MaintenanceManager) ScheduledRetryProbe() observability.ProbeValue {
 			if len(cohort.source) > 4096 {
 				return observability.Unavailable()
 			}
-			if !source.Stage.RetryAfter.IsZero() && !active[cohort] {
+			cancelled, available := m.retrySourceCancelledLocked(registration, entry, cohort.source)
+			if !available {
+				return observability.Unavailable()
+			}
+			if scheduledStageRetry(source.Stage) && !cancelled && !active[cohort] {
 				scheduled++
 			}
 		}

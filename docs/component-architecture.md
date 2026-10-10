@@ -238,6 +238,10 @@ single-source summary. Terminal job snapshots, disabled stages/registrations
 and ordinary periodic polls are not scheduled retries. The registry/job probe
 uses try-only locks over both authorities and returns null if either is busy;
 it never starts work, reads disk or infers retry state from event counts.
+Cancelled/superseded maintenance stages and current-authority source admission
+tombstones suppress backoff, including the legacy source projection. A current
+physical-authority admission takes precedence over a legacy tombstone; another
+physical authority's cancellation does not apply.
 
 Execution health is a separate read-only projection of retained durable jobs,
 collection outcomes, maintenance/frontier state and canonical source stages.
@@ -256,6 +260,11 @@ health, not healthy empty history. Authority inspection itself uses that same
 hold execution locks through an unbounded scan. Grouping/ref construction follows try-only
 authority snapshot release. Telemetry/storage readiness remains separate from
 execution health; unavailable observation cannot change a durable job outcome.
+Collection snapshots cannot hide a later rejected commit stage or whole-job
+failure. Retained degraded frontiers contribute their current failure as well
+as their preceding success, even when the relevant job has expired. Automatic
+configuration/identity blocking remains a fault when it disables admission;
+explicit user-disable is not a fault. Missing fault timestamps remain unknown.
 
 Daemon-owned execution carries the concrete metric sink in a private context
 value without changing cancellation or deadlines. GitCode provider attempts

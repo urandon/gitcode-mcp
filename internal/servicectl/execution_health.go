@@ -33,7 +33,7 @@ func healthFailureReason(class string) string {
 		return "provider_invalid"
 	case "cache_authority_unavailable", "cache_uuid_mismatch", "cache_schema_blocked":
 		return "cache_authority"
-	case "config_snapshot_invalid", "configuration_error", "identity_conflict":
+	case "config_snapshot_invalid", "configuration_error", "identity_conflict", "identity_unresolved":
 		return "configuration_invalid"
 	case "rag_failed", "embedding_failed":
 		return "embedding_failed"
@@ -120,6 +120,7 @@ func (m *MaintenanceManager) ExecutionHealth(at time.Time) observability.Executi
 		if base.at.IsZero() {
 			base.at = job.CreatedAt
 		}
+		collectionProblem := false
 		if job.Type == SyncJobType && len(job.SyncCollections) > 0 {
 			for _, collection := range job.SyncCollections {
 				if !visit() {
@@ -154,22 +155,29 @@ func (m *MaintenanceManager) ExecutionHealth(at time.Time) observability.Executi
 					continue
 				}
 				add(r)
+				collectionProblem = collectionProblem || r.signal != "succeeded"
 			}
-		} else {
-			switch job.Status {
-			case JobStatusFailed:
-				base.signal = "failed"
-			case JobStatusInterrupted:
-				base.signal, base.reason = "interrupted", "interrupted"
-			case JobStatusSucceeded:
-				base.signal, base.reason = "succeeded", "succeeded"
-				if job.Type == SyncJobType && (job.SyncHealth == SyncHealthPartial || job.SyncHealth == SyncHealthFailed) {
-					base.signal, base.reason = "failed", healthFailureReason(job.ErrorClass)
-				}
+		}
+		// Collection snapshots are not the entire execution authority. A
+		// later stage rejection can fail an otherwise successful partial run.
+		switch job.Status {
+		case JobStatusFailed:
+			base.signal = "failed"
+		case JobStatusInterrupted:
+			base.signal, base.reason = "interrupted", "interrupted"
+		case JobStatusSucceeded:
+			base.signal, base.reason = "succeeded", "succeeded"
+			if job.Type == SyncJobType && (job.SyncHealth == SyncHealthPartial || job.SyncHealth == SyncHealthFailed) {
+				base.signal, base.reason = "failed", healthFailureReason(job.ErrorClass)
 			}
-			if base.signal != "" {
-				add(base)
-			}
+		}
+		if stage := job.SyncStage; job.Type == SyncJobType && job.Status == JobStatusFailed && stage != nil && stage.Phase == SyncStageRejected {
+			base.collection = healthCollection(stage.Collection)
+			add(base)
+		} else if base.signal != "" && (base.signal == "succeeded" || !collectionProblem) {
+			// Whole-job success also recovers preceding whole-job faults;
+			// do not duplicate a failure already represented per collection.
+			add(base)
 		}
 		if stage := job.SyncStage; jobActiveStatus(job.Status) && stage != nil && stage.Phase == SyncStageWaitingCommit {
 			r := base
@@ -192,19 +200,34 @@ func (m *MaintenanceManager) ExecutionHealth(at time.Time) observability.Executi
 			if !visit() {
 				break
 			}
+			r := base
+			r.collection = healthRemoteCollection(frontier.RemoteType)
 			success := frontier.LastSuccessAt
 			// Legacy complete, error-free frontier metadata is a confirmed
 			// success. A mere queued/pending timestamp is not proof of work.
 			if success.IsZero() && frontier.Status == "complete" && frontier.LastErrorClass == "" {
 				success = frontier.UpdatedAt
 			}
-			if success.IsZero() {
-				continue
+			if !success.IsZero() {
+				r.at = success
+				r.signal, r.reason = "succeeded", "succeeded"
+				add(r)
 			}
+			if frontier.Status == "degraded" || frontier.LastErrorClass != "" {
+				r.at, r.lastSuccess = frontier.UpdatedAt, success
+				r.signal, r.reason = "failed", healthFailureReason(frontier.LastErrorClass)
+				add(r)
+			}
+		}
+		// Automatic authority blocking disables admission, not the fault.
+		// Explicit user-disable uses state "disabled" and adds no failure.
+		switch entry.State {
+		case "cache_schema_blocked", "config_snapshot_invalid", "identity_conflict", "identity_unresolved", "degraded":
 			r := base
-			r.collection = healthRemoteCollection(frontier.RemoteType)
-			r.at = success
-			r.signal, r.reason = "succeeded", "succeeded"
+			r.kind = "maintenance"
+			r.at = entry.LastReconciledAt
+			r.signal = "failed"
+			r.reason = healthFailureReason(entry.LastErrorClass)
 			add(r)
 		}
 		if !entry.Enabled {
@@ -250,20 +273,23 @@ func (m *MaintenanceManager) ExecutionHealth(at time.Time) observability.Executi
 					break
 				}
 				if source != nil {
-					stageRecord(source.State.Stage, "repository_docs", RepositoryDocsIndexJobType, source.State.SourceRegistrationID)
+					cancelled, available := m.retrySourceCancelledLocked(registration, entry, source.State.SourceRegistrationID)
+					if !available {
+						limited = true
+						break
+					}
+					if !cancelled {
+						stageRecord(source.State.Stage, "repository_docs", RepositoryDocsIndexJobType, source.State.SourceRegistrationID)
+					}
 				}
 			}
 		} else if source := entry.RepositoryDocs; source != nil {
-			stageRecord(source.Stage, "repository_docs", RepositoryDocsIndexJobType, source.SourceRegistrationID)
-		}
-		switch entry.State {
-		case "cache_schema_blocked", "config_snapshot_invalid", "identity_conflict", "degraded":
-			r := base
-			r.kind = "maintenance"
-			r.at = entry.LastReconciledAt
-			r.signal = "failed"
-			r.reason = healthFailureReason(entry.LastErrorClass)
-			add(r)
+			cancelled, available := m.retrySourceCancelledLocked(registration, entry, source.SourceRegistrationID)
+			if !available {
+				limited = true
+			} else if !cancelled {
+				stageRecord(source.Stage, "repository_docs", RepositoryDocsIndexJobType, source.SourceRegistrationID)
+			}
 		}
 	}
 	m.jobs.mu.Unlock()

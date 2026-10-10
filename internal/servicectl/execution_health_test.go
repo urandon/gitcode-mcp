@@ -192,3 +192,79 @@ func TestExecutionHealthBusyMissingAndInvalidCannotBecomeHealthy(t *testing.T) {
 		t.Fatal("missing authority timestamps fabricated health")
 	}
 }
+
+func TestExecutionHealthStageRejectionSurvivesEarlierCollectionSuccess(t *testing.T) {
+	at := time.Unix(1700000000, 0).UTC()
+	jobs := NewJobManager("")
+	jobs.now = func() time.Time { return at.Add(time.Second) }
+	m := NewMaintenanceManager(Manager{}, jobs, "")
+	jobs.jobs["job"] = &Job{ID: "job", Type: SyncJobType, Status: JobStatusInterrupted, UpdatedAt: at, CacheUUID: "cache", RepoID: "fixture/repository", RegistrationID: "reg",
+		SyncCollections: []SyncCollectionView{{Collection: "issues", Outcome: SyncCollectionSuccess, UpdatedAt: at}},
+		SyncStage:       &SyncStageView{StageRef: "stage-ref", Collection: "wiki", Phase: SyncStageWaitingCommit, UpdatedAt: at}}
+	jobs.rejectInterruptedSyncStageByRef("stage-ref", "stage_identity_mismatch")
+	got := m.ExecutionHealth(at.Add(time.Second))
+	if jobs.jobs["job"].Status != JobStatusFailed || got.State != "degraded" || got.Active != 1 || got.Incidents[0].Collection != "wiki" || !got.Incidents[0].LastObservedAt.Equal(at.Add(time.Second)) {
+		t.Fatal("terminal stage rejection disappeared behind successful collection")
+	}
+	jobs.jobs["success"] = &Job{ID: "success", Type: SyncJobType, Status: JobStatusSucceeded, UpdatedAt: at.Add(2 * time.Second), CacheUUID: "cache", RepoID: "fixture/repository", RegistrationID: "reg",
+		SyncCollections: []SyncCollectionView{{Collection: "wiki", Outcome: SyncCollectionSuccess, UpdatedAt: at.Add(2 * time.Second)}}}
+	if recovered := m.ExecutionHealth(at.Add(2 * time.Second)); recovered.State != "healthy" || recovered.Recovered != 1 {
+		t.Fatal("later confirmed collection success did not recover stage rejection")
+	}
+}
+
+func TestExecutionHealthWholeJobFailureAndRecoveryAlongsideCollections(t *testing.T) {
+	at := time.Unix(1700000000, 0).UTC()
+	jobs := NewJobManager("")
+	m := NewMaintenanceManager(Manager{}, jobs, "")
+	jobs.jobs["failed"] = &Job{ID: "failed", Type: SyncJobType, Status: JobStatusFailed, UpdatedAt: at, CacheUUID: "cache", RepoID: "fixture/repository", RegistrationID: "reg",
+		SyncCollections: []SyncCollectionView{{Collection: "issues", Outcome: SyncCollectionSuccess, UpdatedAt: at.Add(-time.Second)}}}
+	if got := m.ExecutionHealth(at); got.State != "degraded" || got.Active != 1 || got.Incidents[0].Collection != "other" {
+		t.Fatal("unattributed whole-job failure disappeared behind collection snapshots")
+	}
+	jobs.jobs["succeeded"] = &Job{ID: "succeeded", Type: SyncJobType, Status: JobStatusSucceeded, UpdatedAt: at.Add(time.Second), CacheUUID: "cache", RepoID: "fixture/repository", RegistrationID: "reg",
+		SyncCollections: []SyncCollectionView{{Collection: "issues", Outcome: SyncCollectionSuccess, UpdatedAt: at.Add(time.Second)}}}
+	if got := m.ExecutionHealth(at.Add(time.Second)); got.State != "healthy" || got.Recovered != 1 {
+		t.Fatal("whole-job success was not retained alongside collection success")
+	}
+}
+
+func TestExecutionHealthRetainedFrontierFailureSurvivesJobPruning(t *testing.T) {
+	at := time.Unix(1700000000, 0).UTC()
+	for _, priorSuccess := range []time.Time{{}, at.Add(-time.Hour)} {
+		jobs := NewJobManager("")
+		m := NewMaintenanceManager(Manager{}, jobs, "")
+		entry := &MaintenanceEntry{RegistrationID: "reg", CacheUUID: "cache", RepoID: "fixture/repository", Enabled: true, State: "ready", Policy: MaintenancePolicy{SyncEnabled: true, Wiki: true},
+			Frontiers: []cache.MaintenanceFrontier{{RemoteType: "wiki", Lane: "head", Status: "degraded", LastErrorClass: "network_timeout", LastSuccessAt: priorSuccess, UpdatedAt: at}}}
+		m.entries["reg"] = entry
+		got := m.ExecutionHealth(at)
+		if got.State != "degraded" || got.Active != 1 || got.Incidents[0].Reason != "provider_timeout" {
+			t.Fatal("current retained frontier failure disappeared after job pruning")
+		}
+		if !priorSuccess.IsZero() && (got.Incidents[0].LastSuccessAt == nil || !got.Incidents[0].LastSuccessAt.Equal(priorSuccess)) {
+			t.Fatal("preceding frontier success lost")
+		}
+	}
+}
+
+func TestExecutionHealthAutoDisabledFaultDiffersFromExplicitDisable(t *testing.T) {
+	at := time.Unix(1700000000, 0).UTC()
+	for _, state := range []string{"config_snapshot_invalid", "identity_conflict", "identity_unresolved", "cache_schema_blocked"} {
+		jobs := NewJobManager("")
+		m := NewMaintenanceManager(Manager{}, jobs, "")
+		entry := &MaintenanceEntry{RegistrationID: "reg", CacheUUID: "cache", RepoID: "fixture/repository", Enabled: true, LastReconciledAt: at}
+		m.entries["reg"] = entry
+		blockMaintenanceIdentity(entry, state)
+		if got := m.ExecutionHealth(at); entry.Enabled || got.State != "degraded" || got.Active != 1 || got.Incidents[0].Origin != "maintenance" {
+			t.Fatal("automatic authority block became healthy because admission was disabled")
+		}
+		entry.LastReconciledAt = time.Time{}
+		if got := m.ExecutionHealth(at); got.State != "unknown" || got.Coverage != "partial" {
+			t.Fatal("missing blocked-authority time fabricated healthy state")
+		}
+		entry.State = "disabled"
+		if got := m.ExecutionHealth(at); got.State != "healthy" || got.Active != 0 {
+			t.Fatal("explicit disable became an authority failure")
+		}
+	}
+}
