@@ -367,7 +367,12 @@ func (j *SyncStageJournal) updateStateObserved(ctx context.Context, stageID stri
 }
 
 func observeConfirmedSyncStage(ctx context.Context, stage SyncStageEnvelope) {
+	identity := observability.Context{
+		Job: observability.KnownRef("job", stage.JobID), Cache: observability.KnownRef("cache", stage.CacheUUID),
+		Registration: observability.KnownRef("registration", stage.RegistrationID), Repo: observability.KnownRef("repo", stage.RepoID), Stage: observability.KnownRef("stage", stage.StageID),
+	}
 	if stage.State.Attempt < 0 || stage.State.Attempt > observability.MaxExecutionAttempt {
+		observability.OmitSyncStage(ctx, identity)
 		return // never alter execution to fit a diagnostic ordinal
 	}
 	details := observability.ExecutionDetails{Phase: "staging", Collection: stage.Collection, Outcome: string(stage.State.Phase), Attempt: uint32(stage.State.Attempt)}
@@ -388,10 +393,7 @@ func observeConfirmedSyncStage(ctx context.Context, stage SyncStageEnvelope) {
 			details.FailureClass = jobObservationFailure(stage.State.TerminalReason)
 		}
 	}
-	observability.ConfirmSyncStage(ctx, observability.Context{
-		Job: observability.KnownRef("job", stage.JobID), Cache: observability.KnownRef("cache", stage.CacheUUID),
-		Registration: observability.KnownRef("registration", stage.RegistrationID), Repo: observability.KnownRef("repo", stage.RepoID), Stage: observability.KnownRef("stage", stage.StageID),
-	}, details)
+	observability.ConfirmSyncStage(ctx, identity, details)
 }
 
 func (j *SyncStageJournal) List() ([]SyncStageEnvelope, error) {

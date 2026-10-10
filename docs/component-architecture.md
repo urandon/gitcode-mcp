@@ -224,6 +224,11 @@ payload, blocker, checkpoint, path or terminal-reason bytes. Actual recovered
 commit attempts use the same owners. Receipt-only stage reconstruction remains
 unobserved and never invents a fresh provider attempt or cache commit. Recovery
 admission/reconciliation and maintenance event owners retain separate O2 gates.
+An accepted journal attempt outside the diagnostic catalog range is never
+clamped or rejected by instrumentation. Its confirmed boundary instead records
+scope-matched loss and partial coverage; during a commit turn that omission uses
+the same one-slot buffer and becomes visible only after release. Loss survives
+diagnostic restart without manufacturing a stage event or execution receipt.
 
 ### Metric evidence foundation
 

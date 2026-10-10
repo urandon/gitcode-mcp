@@ -108,6 +108,13 @@ func TestCloseSealsBoundaryLossBeforeShutdownPersistence(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("shutdown persistence barrier unavailable")
 	}
+	// The append barrier may catch a queued event before Close acquires the
+	// mutex. Observe the actual seal before injecting a post-seal increment.
+	await(t, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.closing && c.pendingBoundaryLoss.Load()&admissionClosed != 0
+	})
 	baseline := c.Coverage()
 	if baseline.Dropped != prior.Dropped+1 || baseline.LossEpoch != prior.LossEpoch+1 {
 		t.Fatal("pre-seal boundary loss was not folded exactly once")

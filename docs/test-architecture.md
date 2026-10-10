@@ -125,6 +125,11 @@ One-turn tests hold the observation reader mutex, race Flush with late marks,
 and prove a rejected confirmation is counted once without retry. Confirmation
 never publishes while the coordinator owns its turn; private envelope bytes
 and raw error sentinels must be absent from all retained event JSON.
+Actual recovered SQLite commits also cover negative and over-catalog durable
+attempts: execution and the original ordinal remain unchanged, no fabricated
+stage event is emitted, and each omitted confirmed transition is counted as
+partial coverage. Buffered-omission tests reject mismatched scopes, defer loss
+until release, race duplicate/late flushes, and verify restart persistence.
 Maintenance identity tests also enroll canonical and alias repository ids
 concurrently, migrate compatible and conflicting version-1 registry entries,
 project legacy registration/job references to the canonical identity, preserve

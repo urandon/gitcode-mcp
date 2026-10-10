@@ -6,7 +6,10 @@ import (
 )
 
 type syncStageContextKey struct{}
-type syncStageMark struct{ refs Context }
+type syncStageMark struct {
+	refs    Context
+	omitted bool
+}
 
 var sealedSyncStage = &syncStageMark{}
 
@@ -52,12 +55,44 @@ func ConfirmSyncStage(ctx context.Context, identity Context, details ExecutionDe
 	binding.collector.Emit(SyncStageChanged, refs)
 }
 
+// OmitSyncStage records a confirmed journal boundary that cannot be represented
+// in the closed catalog. It never changes execution authority or fabricates an
+// event. During a commit turn the loss is buffered just like a valid event.
+func OmitSyncStage(ctx context.Context, identity Context) {
+	binding, ok := ctx.Value(observationContextKey{}).(observationBinding)
+	if !ok || identity.Job != binding.refs.Job || identity.Cache != binding.refs.Cache || identity.Registration != binding.refs.Registration || identity.Repo != binding.refs.Repo {
+		return
+	}
+	// Validate scope independently of the unrepresentable ordinal. No raw
+	// journal state is retained and malformed scope cannot poison coverage.
+	refs := binding.refs
+	for _, ref := range [...]struct{ value, kind string }{
+		{refs.Job.value, "job"}, {refs.Cache.value, "cache"}, {refs.Registration.value, "registration"},
+		{refs.Repo.value, "repo"}, {refs.Correlation.value, "correlation"}, {identity.Stage.value, "stage"},
+	} {
+		if ref.value == "" || !validRef(ref.value, ref.kind) {
+			return
+		}
+	}
+	if buffer, deferred := ctx.Value(syncStageContextKey{}).(*SyncStageBuffer); deferred {
+		if buffer.binding == binding {
+			buffer.mark.CompareAndSwap(nil, &syncStageMark{omitted: true})
+		}
+		return
+	}
+	binding.collector.UnconfirmedExecution()
+}
+
 func (b *SyncStageBuffer) Flush() {
 	if b == nil {
 		return
 	}
 	mark := b.mark.Swap(sealedSyncStage)
 	if mark == nil || mark == sealedSyncStage {
+		return
+	}
+	if mark.omitted {
+		b.binding.collector.UnconfirmedExecution()
 		return
 	}
 	b.binding.collector.Emit(SyncStageChanged, mark.refs)

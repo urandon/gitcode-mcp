@@ -134,3 +134,54 @@ func TestSyncStageBufferRaceAndContentionNeverRetry(t *testing.T) {
 		t.Fatal("stage rejection fabricated retained evidence")
 	}
 }
+
+func TestSyncStageOmissionScopeTurnSealAndRestart(t *testing.T) {
+	dir := testDirectory(t)
+	c := New(Config{Directory: dir, ManagedOutput: true})
+	defer flush(t, c, true)
+	ready(t, c)
+	baseline := c.Coverage()
+	refs := stageObservationRefs()
+	ctx, buffer := DeferSyncStage(WithObservation(context.Background(), c, refs))
+	for _, mutate := range []func(*Context){
+		func(r *Context) { r.Job = KnownRef("job", "other") }, func(r *Context) { r.Cache = KnownRef("cache", "other") },
+		func(r *Context) { r.Registration = KnownRef("registration", "other") }, func(r *Context) { r.Repo = KnownRef("repo", "other") },
+		func(r *Context) { r.Stage = Ref{} },
+	} {
+		wrong := refs
+		mutate(&wrong)
+		OmitSyncStage(ctx, wrong)
+		OmitSyncStage(WithObservation(context.Background(), c, refs), wrong)
+	}
+	OmitSyncStage(context.Background(), refs)
+	OmitSyncStage(WithObservation(ctx, c, Context{}), refs)
+	if buffer.mark.Load() != nil || c.pendingBoundaryLoss.Load() != 0 {
+		t.Fatal("unbound or mismatched omission poisoned coverage")
+	}
+	OmitSyncStage(ctx, refs)
+	OmitSyncStage(ctx, refs)
+	if c.pendingBoundaryLoss.Load() != 0 || c.queued != 0 {
+		t.Fatal("omission escaped before coordinator release")
+	}
+	c.mu.Lock()
+	var workers sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		workers.Add(1)
+		go func() { defer workers.Done(); buffer.Flush(); OmitSyncStage(ctx, refs) }()
+	}
+	workers.Wait() // an omission never waits for collector readers
+	c.mu.Unlock()
+	buffer.Flush()
+	ConfirmSyncStage(ctx, refs, ExecutionDetails{Phase: "staging", Collection: "issues", Outcome: "committed"})
+	if c.admissionDrops.Load() != 0 || c.queued != 0 {
+		t.Fatal("omission invented an admitted or rejected event")
+	}
+	flush(t, c, true)
+	restarted := New(Config{Directory: dir, ManagedOutput: true})
+	ready(t, restarted)
+	flush(t, restarted, true)
+	page, err := restarted.Query(Filter{Code: SyncStageChanged}, "", 20)
+	if err != nil || len(page.Events) != 0 || page.Coverage.State != "partial" || page.Coverage.Dropped != baseline.Dropped+1 || page.Coverage.LossEpoch != baseline.LossEpoch+1 {
+		t.Fatalf("omitted boundary restart: query_failed=%t events=%d state=%s dropped=%d epoch=%d", err != nil, len(page.Events), page.Coverage.State, page.Coverage.Dropped, page.Coverage.LossEpoch)
+	}
+}

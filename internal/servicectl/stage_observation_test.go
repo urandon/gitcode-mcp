@@ -199,45 +199,86 @@ func TestStageObservationUnboundOrMismatchedOwnerStillPersists(t *testing.T) {
 }
 
 func TestStageObservationActualRecoveredCacheCommit(t *testing.T) {
-	root := t.TempDir()
-	cachePath := filepath.Join(root, "cache.db")
-	store, err := cache.NewSQLiteStore(context.Background(), cachePath)
-	if err != nil {
-		t.Fatal("recovered cache fixture failed")
+	for _, tc := range []struct {
+		name    string
+		attempt int
+	}{
+		{"representable", 0}, {"negative", -1}, {"above_catalog", observability.MaxExecutionAttempt + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			cachePath := filepath.Join(root, "cache.db")
+			store, err := cache.NewSQLiteStore(context.Background(), cachePath)
+			if err != nil {
+				t.Fatal("recovered cache fixture failed")
+			}
+			binding := cache.RepositoryBinding{RepoID: "fixture/repository", Owner: "fixture", Name: "repository", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}
+			if store.AddRepository(context.Background(), binding) != nil {
+				t.Fatal("recovered binding fixture failed")
+			}
+			identity, _ := store.CacheIdentity(context.Background())
+			schema, _ := store.SchemaVersion(context.Background())
+			if store.Close() != nil {
+				t.Fatal("recovered cache close failed")
+			}
+			jobs := NewJobManager(filepath.Join(root, "jobs.json"))
+			job, _, err := jobs.createCoalescedJob(SyncJobType, binding.RepoID, "", 0, "recovered-stage-work", identity.UUID, maintenanceRegistrationID(identity.UUID, binding.RepoID), "", func() {})
+			if err != nil {
+				t.Fatal("recovered job fixture failed")
+			}
+			batch := service.DurableIssueSyncBatch{Version: service.DurableSyncBatchVersion, RepoID: binding.RepoID, Collection: "issues", IdempotencyKey: "recovered-stage-fixture", FetchedAt: time.Now().UTC(), RecordsListed: 1, Items: []service.DurableIssueItem{{Number: 1, Title: "Fixture", Body: "synthetic-private-recovered-body", State: "open"}}}
+			payload, err := json.Marshal(batch)
+			if err != nil {
+				t.Fatal("recovered batch fixture failed")
+			}
+			journal := NewSyncStageJournal(root, SyncStageLimits{})
+			stage, err := journal.Create(SyncStageEnvelope{JobID: job.ID, CacheUUID: job.CacheUUID, RegistrationID: job.RegistrationID, RepoID: job.RepoID, CacheSchema: schema, CachePath: cachePath, BindingFingerprint: syncRepositoryBindingFingerprint(binding), Collection: "issues", IdempotencyKey: batch.IdempotencyKey, RecordCount: 1, Payload: payload})
+			if err != nil {
+				t.Fatal("recovered stage retention failed")
+			}
+			state := stage.State
+			state.Attempt = tc.attempt
+			if _, err := journal.UpdateState(stage.StageID, state); err != nil {
+				t.Fatal("durable ordinal fixture failed")
+			}
+			stage, err = journal.Load(stage.StageID)
+			if err != nil || stage.State.Attempt != tc.attempt {
+				t.Fatal("diagnostic range changed journal authority")
+			}
+			c := jobObservationFixture(t)
+			jobs.SetObservation(c)
+			manager := newTestManager(t, "darwin")
+			manager.RuntimeDir = root
+			cfg := config.Default()
+			manager.EffectiveConfig = &cfg
+			result, stage, err := jobs.commitRecoveredSyncStage(context.Background(), manager, journal, stage)
+			if err != nil || result == nil || result.SuccessCount != 1 || stage.State.Phase != SyncStageCommitted {
+				t.Fatal("actual recovered shared cache commit failed")
+			}
+			if stage.State.Attempt != tc.attempt {
+				t.Fatal("observation clamped the durable attempt")
+			}
+			if tc.attempt == 0 {
+				assertJobObservations(t, c, job, map[observability.Code]int{observability.SyncStageChanged: 2, observability.SyncCommitted: 1})
+				return
+			}
+			sealJobObservation(t, c)
+			page, err := c.Query(observability.Filter{}, "", 20)
+			if err != nil || page.HasMore {
+				t.Fatal("unrepresentable stage query failed")
+			}
+			commits := 0
+			for _, e := range page.Events {
+				if e.Code == observability.SyncStageChanged {
+					t.Fatal("unrepresentable ordinal fabricated a stage event")
+				}
+				if e.Code == observability.SyncCommitted {
+					commits++
+				}
+			}
+			if page.Coverage.State != "partial" || page.Coverage.Dropped < 2 || uint64(commits)+page.Coverage.Dropped != 3 {
+				t.Fatal("actual successful commit hid omitted journal boundaries")
+			}
+		})
 	}
-	binding := cache.RepositoryBinding{RepoID: "fixture/repository", Owner: "fixture", Name: "repository", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}
-	if store.AddRepository(context.Background(), binding) != nil {
-		t.Fatal("recovered binding fixture failed")
-	}
-	identity, _ := store.CacheIdentity(context.Background())
-	schema, _ := store.SchemaVersion(context.Background())
-	if store.Close() != nil {
-		t.Fatal("recovered cache close failed")
-	}
-	jobs := NewJobManager(filepath.Join(root, "jobs.json"))
-	job, _, err := jobs.createCoalescedJob(SyncJobType, binding.RepoID, "", 0, "recovered-stage-work", identity.UUID, maintenanceRegistrationID(identity.UUID, binding.RepoID), "", func() {})
-	if err != nil {
-		t.Fatal("recovered job fixture failed")
-	}
-	batch := service.DurableIssueSyncBatch{Version: service.DurableSyncBatchVersion, RepoID: binding.RepoID, Collection: "issues", IdempotencyKey: "recovered-stage-fixture", FetchedAt: time.Now().UTC(), RecordsListed: 1, Items: []service.DurableIssueItem{{Number: 1, Title: "Fixture", Body: "synthetic-private-recovered-body", State: "open"}}}
-	payload, err := json.Marshal(batch)
-	if err != nil {
-		t.Fatal("recovered batch fixture failed")
-	}
-	journal := NewSyncStageJournal(root, SyncStageLimits{})
-	stage, err := journal.Create(SyncStageEnvelope{JobID: job.ID, CacheUUID: job.CacheUUID, RegistrationID: job.RegistrationID, RepoID: job.RepoID, CacheSchema: schema, CachePath: cachePath, BindingFingerprint: syncRepositoryBindingFingerprint(binding), Collection: "issues", IdempotencyKey: batch.IdempotencyKey, RecordCount: 1, Payload: payload})
-	if err != nil {
-		t.Fatal("recovered stage retention failed")
-	}
-	c := jobObservationFixture(t)
-	jobs.SetObservation(c)
-	manager := newTestManager(t, "darwin")
-	manager.RuntimeDir = root
-	cfg := config.Default()
-	manager.EffectiveConfig = &cfg
-	result, stage, err := jobs.commitRecoveredSyncStage(context.Background(), manager, journal, stage)
-	if err != nil || result == nil || result.SuccessCount != 1 || stage.State.Phase != SyncStageCommitted {
-		t.Fatal("actual recovered shared cache commit failed")
-	}
-	assertJobObservations(t, c, job, map[observability.Code]int{observability.SyncStageChanged: 2, observability.SyncCommitted: 1})
 }
