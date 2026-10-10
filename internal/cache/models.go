@@ -426,7 +426,10 @@ type RecordFilter struct {
 }
 
 type RecordGraph struct {
-	Record              Record
+	Record Record
+	// SourceProvenance is provider origin, independent of the record storage
+	// role (remote/projection). Empty preserves legacy source projection.
+	SourceProvenance    Provenance
 	RelatedRecords      []Record
 	Comments            []RecordComment
 	PRReviewComments    []PRReviewComment
@@ -439,6 +442,7 @@ type RecordGraph struct {
 	SyncEvents          []SyncEvent
 	AuditTrail          []AuditTrailEntry
 	Snapshots           []Snapshot
+	CacheConfirmations  []CacheConfirmationRecord
 }
 
 type SyncGraph struct {

@@ -34,6 +34,15 @@ stdin. File/stdin input is non-empty UTF-8, bounded to 10 MiB. CRLF/CR becomes L
 backslashes and trailing newlines are otherwise preserved. Dry-run reports safe
 input metadata, not the body or file path. See the [Markdown input contract](write-walkthrough.md#multiline-markdown-bodies).
 
+PR creation sends at most one POST under a durable idempotency claim. GitCode
+may return a sparse creation response, so the adapter reads the exact canonical
+PR before success, verifies its identity, title, body, head, base, and open state,
+then publishes the cache with live provenance. Immediate `get_source` or CLI
+`get` therefore needs no extra sync. If cache publication fails after provider
+confirmation, retrying the same key performs GET-only cache repair. Ambiguous
+POST or unconfirmed readback remains fenced; investigate the remote result
+instead of switching keys and creating a duplicate.
+
 Update pull request metadata through the same write lifecycle:
 
 ```sh

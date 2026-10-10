@@ -920,6 +920,7 @@ func TestWritePartialCacheRefreshRetryUsesAuditWithoutSecondAdapterCall(t *testi
 	seedStore(t, ctx, store)
 	wrapped := &writeRefreshFailStore{Store: store, failNextRefresh: true}
 	client := &fakeGitCodeClient{createIssueResult: gitcode.WriteResult[gitcode.Issue]{Record: gitcode.Issue{ID: "remote-45", Number: 45, Title: "T", Body: "B", State: "open"}, Confirmed: true, Operation: "CreateIssue", RemoteID: "45", RemoteNumber: 45, RemoteRevision: "rev-45", ConfirmedAt: time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)}}
+	client.issue = client.createIssueResult.Record
 	svc := NewWithClient(wrapped, client)
 	t.Setenv("GITCODE_TOKEN", "test-token")
 	req := WriteCommandRequest{RepoID: "fixture-a", Mode: WriteModeLive, Title: "T", Body: "B", IdempotencyKey: "partial-cache"}
@@ -934,6 +935,9 @@ func TestWritePartialCacheRefreshRetryUsesAuditWithoutSecondAdapterCall(t *testi
 	}
 	if result.Status != "succeeded" || !result.Replayed || client.createIssueCalls != 1 {
 		t.Fatalf("retry result=%#v calls=%d want replay success without adapter", result, client.createIssueCalls)
+	}
+	if client.issueCalls != 1 {
+		t.Fatalf("partial creation must repair from canonical GET, reads=%d", client.issueCalls)
 	}
 	if _, err := store.GetRecord(ctx, "fixture-a", "ISSUE-45"); err != nil {
 		t.Fatalf("retry did not refresh record: %v", err)
@@ -6610,6 +6614,18 @@ func (s *writeRefreshFailStore) UpsertRecordGraph(ctx context.Context, graph cac
 		return errors.New("injected cache refresh failure")
 	}
 	return s.Store.UpsertRecordGraph(ctx, graph)
+}
+
+func (s *writeRefreshFailStore) StageWriteGraphGeneration(ctx context.Context, pending, observed cache.AuditTrailEntry, generation time.Time) (bool, error) {
+	return s.Store.(wikiWriteSettlementStore).StageWriteGraphGeneration(ctx, pending, observed, generation)
+}
+
+func (s *writeRefreshFailStore) SettleWriteGraphGeneration(ctx context.Context, graph cache.RecordGraph, complete, pending cache.AuditTrailEntry, generation time.Time) (bool, error) {
+	if s.failNextRefresh {
+		s.failNextRefresh = false
+		return false, errors.New("injected cache refresh failure")
+	}
+	return s.Store.(wikiWriteSettlementStore).SettleWriteGraphGeneration(ctx, graph, complete, pending, generation)
 }
 
 func (s *writeRefreshFailStore) ClaimAuditEvent(ctx context.Context, entry cache.AuditTrailEntry) (bool, error) {
