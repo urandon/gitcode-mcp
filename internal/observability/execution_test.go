@@ -65,6 +65,7 @@ func TestExecutionCatalogFiniteCompatibility(t *testing.T) {
 				t.Fatal("finite execution event did not round-trip")
 			}
 			for _, mutate := range []func(*Event){
+				func(e *Event) { e.AdminRoute = "read" },
 				func(e *Event) { e.Phase = "synthetic-secret" },
 				func(e *Event) { e.Collection = "synthetic-secret" },
 				func(e *Event) { e.WorkKind = "synthetic-secret" },

@@ -487,6 +487,19 @@ Queries, request bodies, cookies, raw paths, target identities and error text
 are not metric dimensions. Explicit handler work inherits the concrete daemon
 metric sink without starting additional provider or maintenance work.
 
+The same completion owner emits `admin_request_completed` independently of
+metrics. Its closed schema carries only `phase=admin`, finite `admin_route` and
+outcome plus opaque correlation. No entity, raw status, error, route, request id,
+cookie, body or header is accepted. The concrete collector owns an atomic
+boot/request sequence shared across HTTP controllers; browser request ids never
+participate. Completion runs after handler/session/control locks unwind and
+keeps response, panic, flush and cancellation semantics unchanged. A dropped
+event is explicit partial evidence and is never retried. The three registered
+observability GET patterns are excluded from event emission, preventing
+telemetry polling from appending its own timeline; arbitrary prefix-matching
+user paths are not excluded. O3 must retain this exclusion when exposing those
+endpoints, and O4/O5 remain the UI/integrated rollout gates.
+
 The SSE connection gauge counts only authenticated, cursor-valid handlers with
 actual streaming support. Atomic admission and deferred release cover every
 exit, including cancellation and replay recovery. Its request duration is the

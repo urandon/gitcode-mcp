@@ -17,7 +17,8 @@ func adminMetricRoute(pattern string, r *http.Request) string {
 		return "session"
 	case "GET /api/admin/v1/readiness", "GET /api/admin/v1/snapshot", "GET /api/admin/v1/caches", "GET /api/admin/v1/caches/{cache_ref}",
 		"GET /api/admin/v1/caches/{cache_ref}/repositories/{repo_id...}", "GET /api/admin/v1/jobs", "GET /api/admin/v1/jobs/{job_id}",
-		"GET /api/admin/v1/maintenance", "GET /api/admin/v1/diagnostics", "GET /api/admin/v1/capabilities":
+		"GET /api/admin/v1/maintenance", "GET /api/admin/v1/diagnostics", "GET /api/admin/v1/capabilities",
+		"GET /api/admin/v1/observability", "GET /api/admin/v1/observability/metrics", "GET /api/admin/v1/observability/events":
 		return "read"
 	case "POST /api/admin/v1/search/compare", "POST /api/admin/v1/repository-docs/{registration_id}/search":
 		return "search"
@@ -39,7 +40,20 @@ func adminMetricRoute(pattern string, r *http.Request) string {
 }
 
 type adminRouteKey struct{}
-type adminRouteObservation struct{ class string }
+type adminRouteObservation struct {
+	class           string
+	observationRead bool
+}
+
+// Only registered observation GET patterns are excluded. A user-entered path
+// with this prefix is not a telemetry read until the mux actually registers it.
+func adminObservationRead(pattern string) bool {
+	switch pattern {
+	case "GET /api/admin/v1/observability", "GET /api/admin/v1/observability/metrics", "GET /api/admin/v1/observability/events":
+		return true
+	}
+	return false
+}
 
 func observeAdminRoute(mux *http.ServeMux, r *http.Request) {
 	if state, ok := r.Context().Value(adminRouteKey{}).(*adminRouteObservation); ok {
@@ -48,6 +62,7 @@ func observeAdminRoute(mux *http.ServeMux, r *http.Request) {
 		// PathValue assignment still belong to the unchanged ServeHTTP call.
 		_, pattern := mux.Handler(r)
 		state.class = adminMetricRoute(pattern, r)
+		state.observationRead = adminObservationRead(pattern)
 	}
 }
 
@@ -96,11 +111,16 @@ func (w *metricFlusher) FlushError() error {
 
 func (c *Controller) observeRequests(next http.Handler) http.Handler {
 	metrics := c.cfg.Metrics
-	if metrics == nil {
+	collector := c.cfg.Observation
+	if metrics == nil && collector == nil {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
+		var correlation observability.Ref
+		if collector != nil {
+			correlation = collector.AdminRequestCorrelation()
+		}
 		routeState := &adminRouteObservation{class: "unknown"}
 		ctx := observability.WithMetrics(r.Context(), metrics)
 		r = r.WithContext(context.WithValue(ctx, adminRouteKey{}, routeState))
@@ -121,8 +141,14 @@ func (c *Controller) observeRequests(next http.Handler) http.Handler {
 				outcome = "rejected"
 			}
 			route := routeState.class
-			metrics.Add("admin_requests", map[string]string{"route": route, "outcome": outcome}, 1)
-			metrics.Observe("admin_duration", map[string]string{"route": route}, time.Since(started).Seconds())
+			if metrics != nil {
+				metrics.Add("admin_requests", map[string]string{"route": route, "outcome": outcome}, 1)
+				metrics.Observe("admin_duration", map[string]string{"route": route}, time.Since(started).Seconds())
+			}
+			if collector != nil && !routeState.observationRead {
+				collector.Emit(observability.AdminRequestCompleted, observability.Context{Correlation: correlation,
+					ExecutionDetails: observability.ExecutionDetails{Phase: "admin", AdminRoute: route, Outcome: outcome}})
+			}
 		}()
 		next.ServeHTTP(writer, r)
 		returned = true

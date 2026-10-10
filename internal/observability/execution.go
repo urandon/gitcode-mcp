@@ -11,13 +11,14 @@ type ExecutionDetails struct {
 	Outcome      string `json:"outcome,omitempty"`
 	FailureClass string `json:"failure_class,omitempty"`
 	Attempt      uint32 `json:"attempt,omitempty"`
+	AdminRoute   string `json:"admin_route,omitempty"`
 }
 
 const MaxExecutionAttempt = 1024
 
 func executionCode(code Code) bool {
 	switch code {
-	case JobAdmitted, JobTerminal, JobRecovered, ProviderAttempt, SyncCommitted, RetryAdmitted, WriterContended, SyncStageChanged:
+	case JobAdmitted, JobTerminal, JobRecovered, ProviderAttempt, SyncCommitted, RetryAdmitted, WriterContended, SyncStageChanged, AdminRequestCompleted:
 		return true
 	default:
 		return false
@@ -44,6 +45,9 @@ func executionFailure(value string) bool {
 
 func (e Event) validExecution() bool {
 	d := e.ExecutionDetails
+	if e.Code != AdminRequestCompleted && d.AdminRoute != "" {
+		return false
+	}
 	if e.Code != SyncStageChanged && e.StageRef != "" {
 		return false
 	}
@@ -59,6 +63,16 @@ func (e Event) validExecution() bool {
 		return false
 	}
 	switch e.Code {
+	case AdminRequestCompleted:
+		if e.JobRef != "" || e.CacheRef != "" || e.RegistrationRef != "" || e.RepoRef != "" || d.Phase != "admin" || d.Collection != "" || d.Attempt != 0 || d.FailureClass != "" {
+			return false
+		}
+		switch d.AdminRoute {
+		case "session", "read", "control", "search", "events", "assets", "unknown":
+		default:
+			return false
+		}
+		return d.Outcome == "succeeded" || d.Outcome == "failed" || d.Outcome == "rejected" || d.Outcome == "cancelled"
 	case JobRecovered:
 		if e.JobRef == "" || d.Phase != "recovery" || d.Collection != "" || d.Attempt != 0 {
 			return false

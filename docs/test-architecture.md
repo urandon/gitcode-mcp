@@ -140,6 +140,17 @@ conserving retained plus lost boundaries without fabricating admission,
 terminal execution, provider or commit counters. Closed replay, reader-lock
 contention, count-only metric loss and durable loss-restart tests enforce the
 same nonblocking/public-safe contracts independently of optional metrics.
+Admin request fixtures use actual mux/authenticated control and SSE paths, with
+collector-only and combined metric modes. They conserve retained plus lost
+completions, preserve panic/write/short-write/flush/cancellation outcomes and
+streaming support, and wait for an active handler to unwind before recording
+completion. Strict replay rejects Admin dimensions on other events and every
+entity/private field on HTTP completions. Concurrent request correlation is
+collector-owned across controllers and never waits for a reader; restart
+preserves original events without replaying job/provider/commit throughput.
+Registered observability polling emits no self-events; unsupported/user-prefix
+paths remain observable ordinary requests. Synthetic control, cookie, body,
+header, request-id and URL sentinels must be absent from retained evidence.
 Maintenance identity tests also enroll canonical and alias repository ids
 concurrently, migrate compatible and conflicting version-1 registry entries,
 project legacy registration/job references to the canonical identity, preserve

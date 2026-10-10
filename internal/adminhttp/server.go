@@ -80,6 +80,7 @@ type Config struct {
 	PlanRAGRepair                      RAGRepairProvider
 	ApplyRAGRepair                     RAGRepairProvider
 	Metrics                            *observability.Metrics
+	Observation                        *observability.Collector
 }
 
 type Controller struct {

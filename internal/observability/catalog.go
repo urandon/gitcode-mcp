@@ -26,43 +26,45 @@ const (
 type Code string
 
 const (
-	Boot               Code = "daemon_boot"
-	RecoveryStarted    Code = "recovery_started"
-	RecoveryFinished   Code = "recovery_finished"
-	RecoveryFailed     Code = "recovery_failed"
-	Shutdown           Code = "daemon_shutdown"
-	ShutdownIncomplete Code = "shutdown_incomplete"
-	PriorBootUnclean   Code = "prior_boot_unclean"
-	LegacyOmitted      Code = "legacy_text_omitted"
-	JobAdmitted        Code = "job_admitted"
-	JobTerminal        Code = "job_terminal"
-	JobRecovered       Code = "job_recovered"
-	ProviderAttempt    Code = "provider_attempt"
-	SyncCommitted      Code = "sync_committed"
-	RetryAdmitted      Code = "retry_admitted"
-	WriterContended    Code = "writer_contended"
-	SyncStageChanged   Code = "sync_stage_changed"
+	Boot                  Code = "daemon_boot"
+	RecoveryStarted       Code = "recovery_started"
+	RecoveryFinished      Code = "recovery_finished"
+	RecoveryFailed        Code = "recovery_failed"
+	Shutdown              Code = "daemon_shutdown"
+	ShutdownIncomplete    Code = "shutdown_incomplete"
+	PriorBootUnclean      Code = "prior_boot_unclean"
+	LegacyOmitted         Code = "legacy_text_omitted"
+	JobAdmitted           Code = "job_admitted"
+	JobTerminal           Code = "job_terminal"
+	JobRecovered          Code = "job_recovered"
+	ProviderAttempt       Code = "provider_attempt"
+	SyncCommitted         Code = "sync_committed"
+	RetryAdmitted         Code = "retry_admitted"
+	WriterContended       Code = "writer_contended"
+	SyncStageChanged      Code = "sync_stage_changed"
+	AdminRequestCompleted Code = "admin_request_completed"
 )
 
 type template struct{ stream, severity, component, message string }
 
 var catalog = map[Code]template{
-	Boot:               {"stdout", "info", "daemon", "Daemon observation started."},
-	RecoveryStarted:    {"stdout", "info", "recovery", "Recovery inspection started."},
-	RecoveryFinished:   {"stdout", "info", "recovery", "Recovery inspection finished."},
-	RecoveryFailed:     {"stderr", "error", "recovery", "Recovery inspection failed."},
-	Shutdown:           {"stdout", "info", "daemon", "Daemon workers unwound before observation stopped."},
-	ShutdownIncomplete: {"stderr", "warning", "daemon", "Daemon teardown was incomplete."},
-	PriorBootUnclean:   {"stderr", "warning", "daemon", "The preceding observed boot has no clean shutdown marker."},
-	LegacyOmitted:      {"stderr", "warning", "legacy", "Unrecognized legacy output was omitted."},
-	JobAdmitted:        {"stdout", "info", "jobs", "A new job was durably admitted."},
-	JobTerminal:        {"stdout", "info", "jobs", "A job reached a confirmed terminal state."},
-	JobRecovered:       {"stdout", "info", "recovery", "An actual job recovery reached a confirmed state."},
-	ProviderAttempt:    {"stdout", "info", "provider", "An actual bounded provider attempt finished."},
-	SyncCommitted:      {"stdout", "info", "sync", "Fetched source graphs reached a confirmed cache commit."},
-	RetryAdmitted:      {"stdout", "info", "sync", "A collection entered an actual retry attempt."},
-	WriterContended:    {"stderr", "warning", "writer", "An actual cache writer attempt was denied."},
-	SyncStageChanged:   {"stdout", "info", "sync", "A sync stage reached a confirmed journal state."},
+	Boot:                  {"stdout", "info", "daemon", "Daemon observation started."},
+	RecoveryStarted:       {"stdout", "info", "recovery", "Recovery inspection started."},
+	RecoveryFinished:      {"stdout", "info", "recovery", "Recovery inspection finished."},
+	RecoveryFailed:        {"stderr", "error", "recovery", "Recovery inspection failed."},
+	Shutdown:              {"stdout", "info", "daemon", "Daemon workers unwound before observation stopped."},
+	ShutdownIncomplete:    {"stderr", "warning", "daemon", "Daemon teardown was incomplete."},
+	PriorBootUnclean:      {"stderr", "warning", "daemon", "The preceding observed boot has no clean shutdown marker."},
+	LegacyOmitted:         {"stderr", "warning", "legacy", "Unrecognized legacy output was omitted."},
+	JobAdmitted:           {"stdout", "info", "jobs", "A new job was durably admitted."},
+	JobTerminal:           {"stdout", "info", "jobs", "A job reached a confirmed terminal state."},
+	JobRecovered:          {"stdout", "info", "recovery", "An actual job recovery reached a confirmed state."},
+	ProviderAttempt:       {"stdout", "info", "provider", "An actual bounded provider attempt finished."},
+	SyncCommitted:         {"stdout", "info", "sync", "Fetched source graphs reached a confirmed cache commit."},
+	RetryAdmitted:         {"stdout", "info", "sync", "A collection entered an actual retry attempt."},
+	WriterContended:       {"stderr", "warning", "writer", "An actual cache writer attempt was denied."},
+	SyncStageChanged:      {"stdout", "info", "sync", "A sync stage reached a confirmed journal state."},
+	AdminRequestCompleted: {"stdout", "info", "admin", "An Admin HTTP request completed."},
 }
 
 // Ref is opaque and cannot be constructed by assigning an unchecked string.

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,6 +51,7 @@ type Collector struct {
 	pendingLoss         atomic.Uint64
 	pendingBoundaryLoss atomic.Uint64
 	admissionDrops      atomic.Uint64
+	adminRequests       atomic.Uint64
 	config              Config
 	// A deterministic private storage seam for fault tests, not a public hook.
 	open func(string) (*storage, []Event, bool, error)
@@ -78,6 +80,13 @@ func New(cfg Config) *Collector { return newCollector(cfg, openStorage) }
 
 // BootID is immutable process-local correlation, not a disk/read operation.
 func (c *Collector) BootID() string { return c.boot }
+
+// AdminRequestCorrelation is local request identity, never a browser-supplied
+// request id. Sharing the counter across controllers prevents same-boot reuse.
+// Allocation is atomic and performs no I/O or execution/observation lock wait.
+func (c *Collector) AdminRequestCorrelation() Ref {
+	return KnownRef("correlation", c.boot+"\x00admin\x00"+strconv.FormatUint(c.adminRequests.Add(1), 10))
+}
 
 func newCollector(cfg Config, open func(string) (*storage, []Event, bool, error)) *Collector {
 	c := &Collector{queue: make(chan pending, MaxEvents), stop: make(chan struct{}), done: make(chan struct{}), boot: randomID(), config: cfg, open: open,

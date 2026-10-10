@@ -587,7 +587,7 @@ func (m Manager) Run(ctx context.Context) error {
 	}
 	admin := adminhttp.New(adminhttp.Config{
 		Bind: m.AdminBind, AllowNonLoopback: m.AdminAllowNonLoopback, SessionTTL: m.AdminSessionTTL,
-		Assets: assets, Readiness: m.adminReadiness, Metrics: m.metrics,
+		Assets: assets, Readiness: m.adminReadiness, Metrics: m.metrics, Observation: m.observation,
 		Snapshot: func(snapshotContext context.Context) (adminhttp.ObservationSnapshot, error) {
 			return m.adminObservation(snapshotContext, jobs, maintenance, now)
 		},
