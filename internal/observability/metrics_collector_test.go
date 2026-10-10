@@ -106,8 +106,15 @@ func TestCollectorMetricActualLossClosedBoundaryAndRestart(t *testing.T) {
 func TestCollectorMetricMissingForeignOriginAndSampledRate(t *testing.T) {
 	c, m := collectorMetricFixture(t)
 	unattached := NewMetrics(c.BootID(), metricsTime())
-	if unattached.AttachCollector(nil) || metricSeries(t, unattached.Snapshot(), "event_drops", nil).Value != nil {
+	if unattached.AttachCollector(nil) || unattached.AttachOrigin("collector") || unattached.Add("event_drops", nil, 9) || metricSeries(t, unattached.Snapshot(), "event_drops", nil).Value != nil {
 		t.Fatal("missing collector fabricated a zero origin")
+	}
+	if !unattached.SampleAt(metricsTime(), nil) {
+		t.Fatal("unattached counter sample unavailable")
+	}
+	missing := metricSeries(t, unattached.Snapshot(), "event_drops", nil)
+	if missing.Reason != "origin_unavailable" || missing.History[MetricHistoryMinutes-1].Samples != 0 || missing.History[MetricHistoryMinutes-1].Rate != nil {
+		t.Fatal("missing concrete origin manufactured sampled history")
 	}
 	foreign := NewMetrics("", metricsTime())
 	if foreign.AttachCollector(c) || metricSeries(t, foreign.Snapshot(), "event_drops", nil).Value != nil {

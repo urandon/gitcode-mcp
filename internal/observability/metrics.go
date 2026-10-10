@@ -165,6 +165,11 @@ func (m *Metrics) loss()          { m.dropped.Add(1) }
 func (m *Metrics) LostObservation() { m.loss() }
 
 func (m *Metrics) AttachOrigin(origin string) bool {
+	// Collector availability requires its actual boot-matched atomic total.
+	// Generic attachment must not manufacture an available zero counter.
+	if origin == "collector" {
+		return false
+	}
 	if !m.mu.TryLock() {
 		m.loss()
 		return false
@@ -215,9 +220,9 @@ func (m *Metrics) record(name string, labels map[string]string, value float64, h
 		return false
 	}
 	c := m.cells[key]
-	if name == "event_drops" && m.collector != nil {
-		// The attached collector owns this total; additive callers cannot
-		// overwrite it or make the next scalar refresh move backward.
+	if name == "event_drops" {
+		// Only a concrete collector owns this total. Generic/additive callers
+		// cannot invent its availability or overwrite the atomic source.
 		m.loss()
 		return false
 	}

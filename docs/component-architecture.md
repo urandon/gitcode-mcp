@@ -202,6 +202,8 @@ replayed prior-boot durable losses are excluded. A storage failure that retains
 an event in memory is partial persistence coverage, not an invented admission
 drop. Missing attachment stays unavailable. There is no per-entity series or
 caller callback, and additive recording cannot overwrite this attached total.
+Generic origin registration also cannot make this collector-owned series
+available; only the concrete boot-matched attachment supplies its current total.
 
 History is a fixed ring of 60 UTC one-minute buckets, sampled in distinct UTC
 15-second slots. Gauge/counter count, sum and extrema summarize sampled values.

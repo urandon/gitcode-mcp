@@ -44,10 +44,13 @@ func TestMetricCatalogCardinalityAndIsolation(t *testing.T) {
 			values[0] = "private-sentinel"
 		}
 	}
-	for _, origin := range []string{"jobs", "provider", "sync", "rag", "writer", "admin", "collector", "maintenance"} {
+	for _, origin := range []string{"jobs", "provider", "sync", "rag", "writer", "admin", "maintenance"} {
 		if !m.AttachOrigin(origin) {
 			t.Fatal(origin)
 		}
+	}
+	if m.AttachOrigin("collector") || m.Add("event_drops", nil, 1) || metricSeries(t, m.Snapshot(), "event_drops", nil).Value != nil {
+		t.Fatal("generic origin invented concrete collector availability")
 	}
 	if m.Add("jobs_admitted", map[string]string{"kind": "private-sentinel"}, 1) || m.Add("jobs_admitted", map[string]string{"repo_id": "private-sentinel"}, 1) || m.Add("private-sentinel", nil, 1) || m.Observe("provider_duration", map[string]string{"outcome": "succeeded"}, math.Inf(1)) {
 		t.Fatal("invalid dimensions accepted")
