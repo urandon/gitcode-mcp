@@ -61,6 +61,7 @@ func ragIndexWorkKey(req StartRAGIndexJobRequest) string {
 }
 
 func (m *JobManager) runRAGIndexJob(ctx context.Context, manager Manager, jobID string, req StartRAGIndexJobRequest) {
+	ctx = m.withJobMetrics(ctx)
 	defer m.markWorkerFinished(jobID)
 	m.updateJob(jobID, func(job *Job, now time.Time) {
 		job.Status = JobStatusRunning

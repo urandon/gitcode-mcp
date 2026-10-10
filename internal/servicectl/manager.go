@@ -655,6 +655,7 @@ func (m Manager) Run(ctx context.Context) error {
 // readiness. Any ordinary recovery error is projected onto the still-
 // interrupted sync jobs instead of terminating an otherwise usable daemon.
 func (m Manager) startSyncStageRecovery(ctx context.Context, jobs *JobManager, releaseFences func()) <-chan struct{} {
+	ctx = jobs.withJobMetrics(ctx)
 	done := make(chan struct{})
 	recoverStages := m.syncStageRecovery
 	if recoverStages == nil {

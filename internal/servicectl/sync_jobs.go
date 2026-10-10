@@ -218,6 +218,7 @@ func normalizeSyncAdmissionRequest(req StartSyncJobRequest) (StartSyncJobRequest
 }
 
 func (m *JobManager) runSyncJob(ctx context.Context, manager Manager, jobID string, req StartSyncJobRequest) {
+	ctx = m.withJobMetrics(ctx)
 	defer m.markWorkerFinished(jobID)
 	m.updateJob(jobID, func(job *Job, now time.Time) {
 		job.Status = JobStatusRunning

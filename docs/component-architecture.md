@@ -218,6 +218,22 @@ active turn itself. A busy JobManager gives null probe values. This remains
 distinct from writer-contention attempt instrumentation and durable incident
 health; observing a queue does not repair or admit work.
 
+Daemon-owned execution carries the concrete metric sink in a private context
+value without changing cancellation or deadlines. GitCode provider attempts
+are one actual policy-loop HTTP Client.Do invocation plus its bounded response
+transfer, excluding rate-limit waiting, pre-transport validation and sleep
+between retries. Each retry is observed separately, including the direct wiki
+tree path; a guarded single-attempt request remains single-attempt. This is not
+a TCP packet/socket count, redirect-hop count or confirmation of a remote
+mutation. Domain JSON decoding after a completed transfer is a separate
+execution result. Outcomes use fixed status/typed-error classes: succeeded,
+forbidden (including authentication rejection), rate_limited, timeout,
+cancelled, invalid transfer/validation or failed. Only the class and duration
+cross the observation boundary, never raw request/response data.
+Foreground clients without a daemon sink remain unobserved. Embedding
+transport, confirmed throughput, incidents and the remaining execution
+boundaries retain their own integration gates.
+
 
 - [Architecture](architecture.md)
 - [Cache And Sync Model](cache-and-sync-model.md)

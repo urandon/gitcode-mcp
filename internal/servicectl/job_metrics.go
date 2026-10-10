@@ -1,6 +1,7 @@
 package servicectl
 
 import (
+	"context"
 	"time"
 
 	"gitcode-mcp/internal/observability"
@@ -56,6 +57,13 @@ func (m *JobManager) observeJobAdmission(kind string) {
 	if sink := m.metrics.Load(); sink != nil {
 		sink.metrics.Add("jobs_admitted", map[string]string{"kind": metricWorkKind(kind)}, 1)
 	}
+}
+
+func (m *JobManager) withJobMetrics(ctx context.Context) context.Context {
+	if sink := m.metrics.Load(); sink != nil {
+		return observability.WithMetrics(ctx, sink.metrics)
+	}
+	return ctx
 }
 
 func (m *JobManager) observeJobTerminal(previousStatus string, state jobMetricState, persisted bool) {

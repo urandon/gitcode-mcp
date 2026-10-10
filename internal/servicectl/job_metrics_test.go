@@ -1,6 +1,7 @@
 package servicectl
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -208,5 +209,23 @@ func TestJobMetricsConcurrentTerminalizationCountsOnce(t *testing.T) {
 	requireJobCounter(t, metrics, "jobs_terminal", map[string]string{"kind": "rag", "outcome": "succeeded"}, 1)
 	if jobMetric(t, metrics, "rag_duration", map[string]string{"outcome": "succeeded"}).Count != 1 {
 		t.Fatal("concurrent terminal updates counted duplicate duration")
+	}
+}
+
+func TestJobMetricsExecutionSinkIsExplicitAndPreservesContext(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	unobserved := NewJobManager("")
+	if unobserved.withJobMetrics(parent) != parent {
+		t.Fatal("unobserved manager changed execution context")
+	}
+	manager, metrics := testJobMetrics(t, "")
+	ctx := manager.withJobMetrics(parent)
+	if observability.MetricsFromContext(ctx) != metrics {
+		t.Fatal("daemon execution lost its concrete metric sink")
+	}
+	cancel()
+	if ctx.Err() != context.Canceled {
+		t.Fatal("metric decoration detached execution cancellation")
 	}
 }

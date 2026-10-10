@@ -1258,13 +1258,16 @@ func (c *HTTPClient) listWikiEntries(ctx context.Context, owner, repo, dir strin
 		endpoint = wikiContentsPathEndpoint(owner, repo, dir)
 	}
 
-	resp, err := c.do(ctx, http.MethodGet, endpoint, nil, nil, requestOptions{})
+	observation := newProviderMetricAttempt(ctx)
+	resp, err := c.do(ctx, http.MethodGet, endpoint, nil, nil, requestOptions{metricAttempt: observation})
 	if err != nil {
+		observation.finish(0, err)
 		return nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: 1, Cause: err}
 	}
 	defer resp.Body.Close()
 
 	body, readErr := c.readBounded(resp, endpoint)
+	observation.finish(resp.StatusCode, readErr)
 	if readErr != nil {
 		return nil, readErr
 	}
@@ -1502,6 +1505,7 @@ func isNotFoundError(err error) bool {
 }
 
 type requestOptions struct {
+	metricAttempt    *providerMetricAttempt
 	contentType      string
 	knownRemoteAlias bool
 	remoteAlias      string
@@ -2285,11 +2289,15 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 		if err := c.waitForRateLimit(ctx, method, endpoint, attempt); err != nil {
 			return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempt - 1, Cause: err}
 		}
+		observation := newProviderMetricAttempt(ctx)
+		opts.metricAttempt = observation
 		resp, err := c.do(ctx, method, endpoint, values, bytes.NewReader(requestBody), opts)
 		if err != nil {
 			if ctx.Err() != nil {
+				observation.finish(0, ctx.Err())
 				return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempt, Cause: ctx.Err()}
 			}
+			observation.finish(0, err)
 			if isRetryableTransport(err) && attempt < attempts {
 				continue
 			}
@@ -2297,11 +2305,13 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 		}
 		if resp.StatusCode == http.StatusRequestEntityTooLarge {
 			resp.Body.Close()
+			observation.finish(resp.StatusCode, nil)
 			return nil, nil, ErrPayloadTooLarge{Endpoint: endpoint, Limit: c.maxResponseSize, Size: resp.ContentLength, Source: "remote_status"}
 		}
 		body, readErr := c.readBounded(resp, endpoint)
 		headers := resp.Header.Clone()
 		resp.Body.Close()
+		observation.finish(resp.StatusCode, readErr)
 		if readErr != nil {
 			readErr = withResponseContentType(withResponseAttempt(readErr, attempt), headers.Get("Content-Type"))
 			if retryableResponseDecode(readErr) && attempt < attempts {
@@ -2441,6 +2451,7 @@ func (c *HTTPClient) do(ctx context.Context, method, endpoint string, values url
 	if opts.beforeAttempt != nil {
 		opts.beforeAttempt()
 	}
+	opts.metricAttempt.start()
 	return c.client.Do(req)
 }
 
