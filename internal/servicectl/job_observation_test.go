@@ -225,3 +225,58 @@ func TestJobObservationCopiedIdentityNeverReadsHeldAuthority(t *testing.T) {
 	jobs.mu.Unlock()
 	assertJobObservations(t, collector, job, map[observability.Code]int{observability.JobTerminal: 1})
 }
+
+func TestJobObservationUnconfirmedTerminalSnapshotLoss(t *testing.T) {
+	for _, unrelated := range []bool{false, true} {
+		name := "repeated_completion"
+		if unrelated {
+			name = "unrelated_snapshot"
+		}
+		t.Run(name, func(t *testing.T) {
+			collector := jobObservationFixture(t)
+			path := filepath.Join(t.TempDir(), "jobs.json")
+			jobs := NewJobManager(path)
+			jobs.SetObservation(collector)
+			job, created, err := jobs.createCoalescedJob(SyncJobType, "fixture/repository", "", 0, "fixture-work", "fixture-cache", "fixture-reg", "", func() {})
+			if err != nil || !created {
+				t.Fatal("fixture admission failed")
+			}
+			jobs.writeFile = func(string, []byte, os.FileMode) error { return errors.New("synthetic storage failure") }
+			jobs.finishJob(job.ID, JobStatusSucceeded, "")
+			jobs.writeFile = durableAtomicWriteFile
+			if unrelated {
+				other := jobs.createJob("fixture", 0, func() {})
+				if other.ID == "" {
+					t.Fatal("unrelated snapshot fixture failed")
+				}
+			} else {
+				jobs.finishJob(job.ID, JobStatusSucceeded, "")
+			}
+			loaded := NewJobManager(path)
+			if loaded.LoadAndMarkInterrupted() != nil {
+				t.Fatal("confirmed snapshot reload failed")
+			}
+			persisted, ok := loaded.Get(job.ID)
+			if !ok || persisted.Status != JobStatusSucceeded {
+				t.Fatal("terminal snapshot not durable")
+			}
+			// A retained failed-save mutation may subsequently become durable,
+			// but its unconfirmed observation boundary must remain explicit loss.
+			sealJobObservation(t, collector)
+			page, err := collector.Query(observability.Filter{}, "", 100)
+			if err != nil || page.Coverage.State != "partial" || page.Coverage.Dropped == 0 {
+				t.Fatal("unconfirmed terminal boundary silently omitted")
+			}
+			for _, event := range page.Events {
+				if event.Code == observability.JobTerminal {
+					t.Fatal("unconfirmed terminal emitted confirmed evidence")
+				}
+			}
+			admissions := 1
+			if unrelated {
+				admissions++
+			}
+			assertJobObservations(t, collector, Job{}, map[observability.Code]int{observability.JobAdmitted: admissions, observability.JobTerminal: 1})
+		})
+	}
+}

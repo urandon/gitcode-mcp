@@ -110,6 +110,9 @@ func (m *JobManager) observeJobTerminal(previousStatus string, state jobMetricSt
 	}
 	sink := m.metrics.Load()
 	if !persisted {
+		if collector := m.observation.Load(); collector != nil {
+			collector.UnconfirmedExecution()
+		}
 		if sink != nil {
 			sink.metrics.LostObservation()
 		}

@@ -187,6 +187,12 @@ unlocking. Newly dispatched and resumed workers inherit boot/job correlation
 from the returned authority value, without another instrumentation job read.
 Coalesced admission, failed persistence, repeated terminal updates and snapshot
 projection are not new execution events.
+If a failed snapshot retains a terminal mutation in memory, its unconfirmed
+boundary records ledger loss with `execution_boundary_unconfirmed`; a later
+repeat or unrelated snapshot does not invent a confirmed event. A rolled-back
+terminal attempt records no ledger loss and a confirmed retry emits normally.
+This bounded atomic loss participates in the ledger seal/checkpoint, restart
+and cursor-loss boundary, but not the admission-rejection `event_drops` metric.
 
 Actual GitCode and embedding HTTP attempts inherit that context and record one
 finite transport outcome after bounded response transfer/body release. This is

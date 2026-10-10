@@ -1288,6 +1288,16 @@ func (m *JobManager) updateJobPersisted(id string, fn func(*Job, time.Time)) err
 	m.mu.Lock()
 	defer func() {
 		m.mu.Unlock()
+		if !persisted {
+			// This path rolls the mutation back. It has not retained a terminal
+			// transition that an unrelated snapshot can subsequently persist.
+			if jobActiveStatus(previousStatus) && jobTerminalStatus(state.status) {
+				if sink := m.metrics.Load(); sink != nil {
+					sink.metrics.LostObservation()
+				}
+			}
+			return
+		}
 		m.observeJobTerminal(previousStatus, state, persisted)
 	}()
 	job := m.jobs[id]

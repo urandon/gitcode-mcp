@@ -34,22 +34,23 @@ type Coverage struct {
 	ObservedBoots uint64 `json:"observed_boots"`
 }
 type Collector struct {
-	mu                 sync.Mutex
-	queue              chan pending
-	stop, done         chan struct{}
-	closing            bool
-	queued, queueBytes int
-	cleanRequested     bool
-	storageFailed      bool
-	generation, boot   string
-	cursorKey          string
-	sequence           uint64
-	events             []Event
-	historyBytes       int
-	coverage           Coverage
-	pendingLoss        atomic.Uint64
-	admissionDrops     atomic.Uint64
-	config             Config
+	mu                  sync.Mutex
+	queue               chan pending
+	stop, done          chan struct{}
+	closing             bool
+	queued, queueBytes  int
+	cleanRequested      bool
+	storageFailed       bool
+	generation, boot    string
+	cursorKey           string
+	sequence            uint64
+	events              []Event
+	historyBytes        int
+	coverage            Coverage
+	pendingLoss         atomic.Uint64
+	pendingBoundaryLoss atomic.Uint64
+	admissionDrops      atomic.Uint64
+	config              Config
 	// A deterministic private storage seam for fault tests, not a public hook.
 	open func(string) (*storage, []Event, bool, error)
 }
@@ -133,12 +134,29 @@ func (c *Collector) loseLocked(reason string) {
 	c.coverage.LossEpoch++
 }
 
+// UnconfirmedExecution records an omitted execution observation whose durable
+// boundary was unavailable. No event was admitted or rejected, so this does
+// not increment event_drops. It never waits for a lock, storage or a retry.
+func (c *Collector) UnconfirmedExecution() {
+	if c.pendingBoundaryLoss.Load()&admissionClosed == 0 {
+		c.pendingBoundaryLoss.Add(1)
+	}
+}
+
 // A fixed scalar accounts for contention without retaining rejected events.
 // Readers and the asynchronous writer fold it into the durable loss boundary;
 // no producer waits for that work or retries the rejected event.
 func (c *Collector) absorbLossLocked() {
 	if !c.closing {
 		c.foldLossLocked(c.pendingLoss.Swap(0))
+		c.foldBoundaryLossLocked(c.pendingBoundaryLoss.Swap(0))
+	}
+}
+func (c *Collector) foldBoundaryLossLocked(lost uint64) {
+	if lost != 0 {
+		c.coverage.Dropped += lost
+		c.coverage.LossEpoch += lost
+		c.coverage.State, c.coverage.Reason = "partial", "execution_boundary_unconfirmed"
 	}
 }
 func (c *Collector) foldLossLocked(lost uint64) {
@@ -161,6 +179,7 @@ func (c *Collector) Close(ctx context.Context, workersUnwound bool) bool {
 		// Swap is the loss linearization boundary. A preempted producer that
 		// increments afterward cannot change coverage or a sealed checkpoint.
 		c.foldLossLocked(c.pendingLoss.Swap(admissionClosed))
+		c.foldBoundaryLossLocked(c.pendingBoundaryLoss.Swap(admissionClosed))
 		c.cleanRequested = workersUnwound
 		close(c.stop)
 	}
