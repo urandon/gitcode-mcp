@@ -1,6 +1,7 @@
 package servicectl
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/cache"
+	"gitcode-mcp/internal/observability"
 )
 
 const (
@@ -226,8 +228,18 @@ func NewSyncStageJournal(runtimeDir string, limits SyncStageLimits) *SyncStageJo
 }
 
 func (j *SyncStageJournal) Create(envelope SyncStageEnvelope) (SyncStageEnvelope, error) {
+	return j.createObserved(context.Background(), envelope)
+}
+
+func (j *SyncStageJournal) createObserved(ctx context.Context, envelope SyncStageEnvelope) (retained SyncStageEnvelope, err error) {
 	syncStageCapacityMu.Lock()
-	defer syncStageCapacityMu.Unlock()
+	fresh := false
+	defer func() {
+		syncStageCapacityMu.Unlock()
+		if fresh {
+			observeConfirmedSyncStage(ctx, retained)
+		}
+	}()
 	now := j.now().UTC()
 	envelope.Version = syncStageEnvelopeVersion
 	envelope.JobID = strings.TrimSpace(envelope.JobID)
@@ -293,6 +305,7 @@ func (j *SyncStageJournal) Create(envelope SyncStageEnvelope) (SyncStageEnvelope
 	if err := j.persist(envelope); err != nil {
 		return SyncStageEnvelope{}, err
 	}
+	fresh = true
 	return envelope, nil
 }
 
@@ -333,16 +346,52 @@ func (j *SyncStageJournal) Load(stageID string) (SyncStageEnvelope, error) {
 }
 
 func (j *SyncStageJournal) UpdateState(stageID string, state SyncStageState) (SyncStageEnvelope, error) {
+	return j.updateStateObserved(context.Background(), stageID, state)
+}
+
+func (j *SyncStageJournal) updateStateObserved(ctx context.Context, stageID string, state SyncStageState) (SyncStageEnvelope, error) {
 	envelope, err := j.Load(stageID)
 	if err != nil {
 		return SyncStageEnvelope{}, err
 	}
+	previous := envelope.State
 	state.UpdatedAt = j.now().UTC()
 	envelope.State = state
 	if err := j.persist(envelope); err != nil {
 		return SyncStageEnvelope{}, err
 	}
+	if previous.Phase != state.Phase || previous.Attempt != state.Attempt {
+		observeConfirmedSyncStage(ctx, envelope)
+	}
 	return envelope, nil
+}
+
+func observeConfirmedSyncStage(ctx context.Context, stage SyncStageEnvelope) {
+	if stage.State.Attempt < 0 || stage.State.Attempt > observability.MaxExecutionAttempt {
+		return // never alter execution to fit a diagnostic ordinal
+	}
+	details := observability.ExecutionDetails{Phase: "staging", Collection: stage.Collection, Outcome: string(stage.State.Phase), Attempt: uint32(stage.State.Attempt)}
+	switch stage.State.Phase {
+	case SyncStageWaitingCommit:
+		details.FailureClass = "writer_busy"
+	case SyncStageSuperseded:
+		details.FailureClass = "superseded"
+	case SyncStageRejected:
+		switch stage.State.TerminalReason {
+		case "cancelled":
+			details.FailureClass = "cancelled"
+		case "cache_identity_or_schema_changed", "cache_identity_schema_or_binding_changed":
+			details.FailureClass = "invalid"
+		case "commit_retry_budget_exhausted":
+			details.FailureClass = "writer_busy"
+		default:
+			details.FailureClass = jobObservationFailure(stage.State.TerminalReason)
+		}
+	}
+	observability.ConfirmSyncStage(ctx, observability.Context{
+		Job: observability.KnownRef("job", stage.JobID), Cache: observability.KnownRef("cache", stage.CacheUUID),
+		Registration: observability.KnownRef("registration", stage.RegistrationID), Repo: observability.KnownRef("repo", stage.RepoID), Stage: observability.KnownRef("stage", stage.StageID),
+	}, details)
 }
 
 func (j *SyncStageJournal) List() ([]SyncStageEnvelope, error) {

@@ -1036,7 +1036,7 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 	if fetchErr != nil {
 		collectionError = maintenanceJobErrorClass(fetchErr, "provider_fetch_failed")
 	}
-	stage, err := journal.Create(SyncStageEnvelope{
+	stage, err := journal.createObserved(ctx, SyncStageEnvelope{
 		JobID: jobID, CacheUUID: req.CacheUUID, CacheSchema: schema, CachePath: req.CachePath, RegistrationID: req.RegistrationID,
 		RepoID: req.RepoID, BindingFingerprint: bindingFingerprint, Collection: work.collection, Checkpoint: batch.checkpoint,
 		ProviderRevision: batch.providerRevision,
@@ -1056,7 +1056,7 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 
 	for {
 		if err := ctx.Err(); err != nil {
-			stage = rejectCancelledSyncStage(journal, stage)
+			stage = rejectCancelledSyncStageObserved(ctx, journal, stage)
 			m.setJobSyncStage(jobID, stage, "staged batch cancelled")
 			collection := syncCollectionResult{RemoteType: work.remoteType, Err: err}
 			return nil, collection, err
@@ -1065,7 +1065,7 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 			state := stage.State
 			state.Phase = SyncStageRejected
 			state.TerminalReason = "cache_identity_or_schema_changed"
-			stage, _ = journal.UpdateState(stage.StageID, state)
+			stage, _ = journal.updateStateObserved(ctx, stage.StageID, state)
 			m.setJobSyncStage(jobID, stage, "staged batch rejected")
 			collection := syncCollectionResult{RemoteType: work.remoteType, Err: targetErr}
 			return nil, collection, targetErr
@@ -1090,7 +1090,7 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 			m.observeWriterContentionInContext(ctx, SyncJobType, ErrCacheWriterBusy{})
 			state, retry := nextSyncCommitRetry(stage.StageID, stage.State, time.Now().UTC())
 			state.BlockingOp, state.BlockingJobRef = blockingOp, blockingRef
-			stage, err = journal.UpdateState(stage.StageID, state)
+			stage, err = journal.updateStateObserved(ctx, stage.StageID, state)
 			if err != nil || !retry {
 				if err == nil {
 					err = ErrCacheWriterBusy{ActiveJobID: blockingRef, ActiveType: blockingOp}
@@ -1100,14 +1100,15 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 			}
 			m.setJobSyncStage(jobID, stage, "waiting for admitted cache writer")
 			if err := waitForSyncRetry(ctx, stage.State.RetryAfter); err != nil {
-				stage = rejectCancelledSyncStage(journal, stage)
+				stage = rejectCancelledSyncStageObserved(ctx, journal, stage)
 				m.setJobSyncStage(jobID, stage, "staged batch cancelled")
 				collection := syncCollectionResult{RemoteType: work.remoteType, Err: err}
 				return nil, collection, err
 			}
 			continue
 		}
-		stage, err = journal.UpdateState(stage.StageID, state)
+		stageCtx, stageObservation := observability.DeferSyncStage(ctx)
+		stage, err = journal.updateStateObserved(stageCtx, stage.StageID, state)
 		if err != nil {
 			m.rollbackSyncCommitReservation(jobID, reservation)
 			releaseTurn()
@@ -1118,13 +1119,14 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 		commitCtx, observation := observability.DeferSyncCommit(ctx)
 		result, commitErr := work.commit(commitCtx, stage)
 		releaseTurn()
+		stageObservation.Flush()
 		observation.Flush()
 		if commitErr == nil {
 			state = stage.State
 			state.Phase = SyncStageCommitted
 			state.CommittedAt = time.Now().UTC()
 			state.BlockerClass, state.BlockingOp, state.BlockingJobRef = "", "", ""
-			stage, err = journal.UpdateState(stage.StageID, state)
+			stage, err = journal.updateStateObserved(ctx, stage.StageID, state)
 			if err != nil {
 				if committed, receiptErr := syncStageReceiptExists(context.Background(), stage); receiptErr == nil && committed {
 					stage.State = state
@@ -1144,7 +1146,7 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 		if !errors.As(commitErr, &contention) {
 			state = stage.State
 			state.Phase, state.TerminalReason = SyncStageRejected, maintenanceJobErrorClass(commitErr, "sync_commit_failed")
-			stage, _ = journal.UpdateState(stage.StageID, state)
+			stage, _ = journal.updateStateObserved(ctx, stage.StageID, state)
 			m.setJobSyncStage(jobID, stage, "staged batch commit rejected")
 			collection := syncCollectionResult{RemoteType: work.remoteType, Result: result, Err: commitErr}
 			return result, collection, commitErr
@@ -1153,7 +1155,7 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 		state, retry := nextSyncCommitRetry(stage.StageID, stage.State, time.Now().UTC())
 		state.BlockingOp = contention.PublicOperation()
 		state.BlockingJobRef = m.blockingCacheWriterRef(jobID, stage.CacheUUID)
-		stage, err = journal.UpdateState(stage.StageID, state)
+		stage, err = journal.updateStateObserved(ctx, stage.StageID, state)
 		if err != nil {
 			collection := syncCollectionResult{RemoteType: work.remoteType, Result: result, Err: err}
 			return result, collection, err
@@ -1173,7 +1175,7 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 			if !timer.Stop() {
 				<-timer.C
 			}
-			stage = rejectCancelledSyncStage(journal, stage)
+			stage = rejectCancelledSyncStageObserved(ctx, journal, stage)
 			m.setJobSyncStage(jobID, stage, "staged batch cancelled")
 			collection := syncCollectionResult{RemoteType: work.remoteType, Result: result, Err: ctx.Err()}
 			return result, collection, ctx.Err()
@@ -1226,11 +1228,15 @@ func validateSyncStageTargetReadOnly(ctx context.Context, stage SyncStageEnvelop
 }
 
 func rejectCancelledSyncStage(journal *SyncStageJournal, stage SyncStageEnvelope) SyncStageEnvelope {
+	return rejectCancelledSyncStageObserved(context.Background(), journal, stage)
+}
+
+func rejectCancelledSyncStageObserved(ctx context.Context, journal *SyncStageJournal, stage SyncStageEnvelope) SyncStageEnvelope {
 	state := stage.State
 	state.Phase = SyncStageRejected
 	state.RetryAfter = time.Time{}
 	state.TerminalReason = "cancelled"
-	updated, err := journal.UpdateState(stage.StageID, state)
+	updated, err := journal.updateStateObserved(ctx, stage.StageID, state)
 	if err == nil {
 		return updated
 	}
@@ -2068,7 +2074,7 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 	if err := validateSyncStageTargetReadOnly(ctx, stage); err != nil {
 		state := stage.State
 		state.Phase, state.TerminalReason = SyncStageRejected, "cache_identity_schema_or_binding_changed"
-		updated, updateErr := journal.UpdateState(stage.StageID, state)
+		updated, updateErr := journal.updateStateObserved(ctx, stage.StageID, state)
 		if updateErr == nil {
 			stage = updated
 			m.setJobSyncStage(stage.JobID, stage, "recovered staged batch rejected before writable open")
@@ -2124,7 +2130,7 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 	}
 	for {
 		if err := ctx.Err(); err != nil {
-			stage = rejectCancelledSyncStage(journal, stage)
+			stage = rejectCancelledSyncStageObserved(ctx, journal, stage)
 			m.setJobSyncStage(stage.JobID, stage, "recovered staged batch cancelled")
 			return nil, stage, err
 		}
@@ -2133,7 +2139,7 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 		if identityErr != nil || schemaErr != nil || identity.UUID != stage.CacheUUID || currentSchema != stage.CacheSchema {
 			state := stage.State
 			state.Phase, state.TerminalReason = SyncStageRejected, "cache_identity_or_schema_changed"
-			stage, _ = journal.UpdateState(stage.StageID, state)
+			stage, _ = journal.updateStateObserved(ctx, stage.StageID, state)
 			m.setJobSyncStage(stage.JobID, stage, "recovered staged batch rejected")
 			return nil, stage, CacheWriterIdentityError{code: "cache_uuid_mismatch"}
 		}
@@ -2155,7 +2161,7 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 			m.observeWriterContentionInContext(ctx, SyncJobType, ErrCacheWriterBusy{})
 			state, retry := nextSyncCommitRetry(stage.StageID, stage.State, time.Now().UTC())
 			state.BlockingOp, state.BlockingJobRef = blockingOp, blockingRef
-			stage, err = journal.UpdateState(stage.StageID, state)
+			stage, err = journal.updateStateObserved(ctx, stage.StageID, state)
 			if err != nil {
 				return nil, stage, err
 			}
@@ -2168,7 +2174,8 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 			}
 			continue
 		}
-		stage, err = journal.UpdateState(stage.StageID, state)
+		stageCtx, stageObservation := observability.DeferSyncStage(ctx)
+		stage, err = journal.updateStateObserved(stageCtx, stage.StageID, state)
 		if err != nil {
 			m.rollbackSyncCommitReservation(stage.JobID, reservation)
 			releaseTurn()
@@ -2178,12 +2185,13 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 		commitCtx, observation := observability.DeferSyncCommit(ctx)
 		result, commitErr := commit(commitCtx)
 		releaseTurn()
+		stageObservation.Flush()
 		observation.Flush()
 		if commitErr == nil {
 			state = stage.State
 			state.Phase, state.CommittedAt = SyncStageCommitted, time.Now().UTC()
 			state.BlockerClass, state.BlockingOp, state.BlockingJobRef, state.RetryAfter = "", "", "", time.Time{}
-			stage, err = journal.UpdateState(stage.StageID, state)
+			stage, err = journal.updateStateObserved(ctx, stage.StageID, state)
 			if err == nil {
 				m.setJobSyncStage(stage.JobID, stage, "recovered staged batch committed")
 			} else if committed, receiptErr := syncStageReceiptExists(context.Background(), stage); receiptErr == nil && committed {
@@ -2196,14 +2204,14 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 		if !errors.As(commitErr, &contention) {
 			state = stage.State
 			state.Phase, state.TerminalReason = SyncStageRejected, maintenanceJobErrorClass(commitErr, "sync_commit_failed")
-			stage, _ = journal.UpdateState(stage.StageID, state)
+			stage, _ = journal.updateStateObserved(ctx, stage.StageID, state)
 			return result, stage, commitErr
 		}
 		m.observeWriterContentionInContext(ctx, SyncJobType, commitErr)
 		state, retry := nextSyncCommitRetry(stage.StageID, stage.State, time.Now().UTC())
 		state.BlockingOp = contention.PublicOperation()
 		state.BlockingJobRef = m.blockingCacheWriterRef(stage.JobID, stage.CacheUUID)
-		stage, err = journal.UpdateState(stage.StageID, state)
+		stage, err = journal.updateStateObserved(ctx, stage.StageID, state)
 		if err != nil || !retry {
 			if err != nil {
 				return result, stage, err

@@ -73,7 +73,7 @@ func TestWriterObservationActualPreAdmissionAndDirectDenial(t *testing.T) {
 	}
 }
 
-func writerObservationPage(t *testing.T, c *observability.Collector, boundaries int) []observability.Event {
+func writerObservationPage(t *testing.T, c *observability.Collector, boundaries int, stageBoundaries ...int) []observability.Event {
 	t.Helper()
 	sealJobObservation(t, c)
 	page, err := c.Query(observability.Filter{}, "", 100)
@@ -81,12 +81,19 @@ func writerObservationPage(t *testing.T, c *observability.Collector, boundaries 
 		t.Fatal("writer observation query failed")
 	}
 	var events []observability.Event
+	stages, expectedStages := 0, 0
+	for _, n := range stageBoundaries {
+		expectedStages += n
+	}
 	for _, event := range page.Events {
+		if event.Code == observability.SyncStageChanged {
+			stages++
+		}
 		if event.Code == observability.WriterContended {
 			events = append(events, event)
 		}
 	}
-	if uint64(len(events))+page.Coverage.Dropped != uint64(boundaries) {
+	if len(events) > boundaries || stages > expectedStages || uint64(len(events)+stages)+page.Coverage.Dropped != uint64(boundaries+expectedStages) {
 		t.Fatal("writer boundary retention/loss was not conserved")
 	}
 	if page.Coverage.Dropped > 0 && page.Coverage.State != "partial" {
@@ -216,7 +223,7 @@ func TestWriterObservationActualDurableCommitDenial(t *testing.T) {
 	if !errors.Is(err, context.Canceled) || calls != 1 {
 		t.Fatalf("writer observation changed bounded commit/retry behavior: calls=%d error_type=%T class=%s", calls, err, jobObservationFailure(maintenanceJobErrorClass(err, "operation_failed")))
 	}
-	for _, event := range writerObservationPage(t, c, 1) {
+	for _, event := range writerObservationPage(t, c, 1, 4) {
 		if event.Code != observability.WriterContended || event.WorkKind != "sync" || event.JobRef != expectedObservationRef("job", job.ID) || event.CorrelationRef != expectedObservationRef("correlation", c.BootID()+"\x00"+job.ID) {
 			t.Fatal("actual durable commit writer denial lost worker context")
 		}

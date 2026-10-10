@@ -66,7 +66,7 @@ func assertJobObservations(t *testing.T, c *observability.Collector, job Job, wa
 	retained := 0
 	for _, e := range page.Events {
 		switch e.Code {
-		case observability.JobAdmitted, observability.JobTerminal, observability.ProviderAttempt, observability.SyncCommitted:
+		case observability.JobAdmitted, observability.JobTerminal, observability.ProviderAttempt, observability.SyncCommitted, observability.SyncStageChanged:
 		default:
 			continue
 		}
@@ -145,7 +145,7 @@ func TestIntegrationExecutionCorrelationActualProviderAndCommit(t *testing.T) {
 	}
 	jobs.finishJob(job.ID, JobStatusSucceeded, "")
 	jobs.finishJob(job.ID, JobStatusSucceeded, "")
-	events := assertJobObservations(t, collector, job, map[observability.Code]int{observability.JobAdmitted: 1, observability.ProviderAttempt: 1, observability.SyncCommitted: 1, observability.JobTerminal: 1})
+	events := assertJobObservations(t, collector, job, map[observability.Code]int{observability.JobAdmitted: 1, observability.ProviderAttempt: 1, observability.SyncCommitted: 1, observability.JobTerminal: 1, observability.SyncStageChanged: 3})
 	for _, e := range events {
 		if e.Code == observability.ProviderAttempt && (e.Phase != "fetch" || e.Outcome != "succeeded" || e.Attempt != 1) {
 			t.Fatal("actual provider outcome changed")

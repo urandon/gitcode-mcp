@@ -209,6 +209,22 @@ counted as partial coverage and is never retried. These hooks expose no new
 transport/UI controls; the full cohort remains gated by remaining O2 hooks,
 health qualification and O3-O5 implementation.
 
+`sync_stage_changed` records only new retained batches and confirmed changes of
+phase or the actual commit-retry attempt. Its additive opaque `stage_ref` is
+valid only on this code; the closed `staging` outcome is staged, waiting_commit,
+committing, committed, rejected or superseded. Validated journal identity must
+match the existing job/cache/repository/registration context. Idempotent Create,
+timestamp-only writes, failed journal writes and read/UI projections emit no
+transition. Create records its fresh-retention decision inside the existing
+capacity lock and emits after unlocking. A separate one-slot buffer is installed
+before the committing journal write and flushed only after the coordinator turn
+and service lease are released; failed writes have no confirmed mark to flush.
+The buffer retains only opaque refs and finite fields, never an envelope,
+payload, blocker, checkpoint, path or terminal-reason bytes. Actual recovered
+commit attempts use the same owners. Receipt-only stage reconstruction remains
+unobserved and never invents a fresh provider attempt or cache commit. Recovery
+admission/reconciliation and maintenance event owners retain separate O2 gates.
+
 ### Metric evidence foundation
 
 The metric catalog is machine-readable and closed: there is no arbitrary

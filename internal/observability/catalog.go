@@ -40,6 +40,7 @@ const (
 	SyncCommitted      Code = "sync_committed"
 	RetryAdmitted      Code = "retry_admitted"
 	WriterContended    Code = "writer_contended"
+	SyncStageChanged   Code = "sync_stage_changed"
 )
 
 type template struct{ stream, severity, component, message string }
@@ -59,6 +60,7 @@ var catalog = map[Code]template{
 	SyncCommitted:      {"stdout", "info", "sync", "Fetched source graphs reached a confirmed cache commit."},
 	RetryAdmitted:      {"stdout", "info", "sync", "A collection entered an actual retry attempt."},
 	WriterContended:    {"stderr", "warning", "writer", "An actual cache writer attempt was denied."},
+	SyncStageChanged:   {"stdout", "info", "sync", "A sync stage reached a confirmed journal state."},
 }
 
 // Ref is opaque and cannot be constructed by assigning an unchecked string.
@@ -71,7 +73,7 @@ func KnownRef(kind, authorityID string) Ref {
 		return Ref{}
 	}
 	switch kind {
-	case "job", "registration", "cache", "repo", "correlation":
+	case "job", "registration", "cache", "repo", "correlation", "stage":
 	default:
 		return Ref{}
 	}
@@ -81,6 +83,7 @@ func KnownRef(kind, authorityID string) Ref {
 
 type Context struct {
 	Job, Registration, Cache, Repo, Correlation Ref
+	Stage                                       Ref
 	ExecutionDetails
 }
 type Event struct {
@@ -102,6 +105,7 @@ type Event struct {
 	CacheRef        string    `json:"cache_ref,omitempty"`
 	RepoRef         string    `json:"repo_ref,omitempty"`
 	CorrelationRef  string    `json:"correlation_ref,omitempty"`
+	StageRef        string    `json:"stage_ref,omitempty"`
 }
 
 var hexID = regexp.MustCompile(`^[a-f0-9]{32}$`)
@@ -117,7 +121,7 @@ func (e Event) valid() bool {
 	}
 	return ok && e.validExecution() && e.ObservedBytes >= 0 && e.ObservedBytes <= MaxPageBytes && (e.Legacy || e.ObservedBytes == 0) && e.Schema == 1 && e.Sequence > 0 && hexID.MatchString(e.BootID) && hexID.MatchString(e.EventID) &&
 		!e.OccurredAt.IsZero() && streamOK && e.Severity == t.severity && e.Component == t.component && e.Message == t.message &&
-		validRef(e.JobRef, "job") && validRef(e.RegistrationRef, "registration") && validRef(e.CacheRef, "cache") && validRef(e.RepoRef, "repo") && validRef(e.CorrelationRef, "correlation")
+		validRef(e.JobRef, "job") && validRef(e.RegistrationRef, "registration") && validRef(e.CacheRef, "cache") && validRef(e.RepoRef, "repo") && validRef(e.CorrelationRef, "correlation") && validRef(e.StageRef, "stage")
 }
 func marshalEvent(e Event) ([]byte, error) {
 	if !e.valid() {

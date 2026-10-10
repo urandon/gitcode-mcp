@@ -117,6 +117,14 @@ optional metrics, no observation lookup of held job authority, wrapped typed
 errors versus raw strings/fences, closed work-kind replay and content privacy.
 Every actual boundary is retained or explicitly counted as lost; telemetry
 rejection cannot retry or revive execution.
+Stage-event fixtures exercise actual durable collection transitions and typed
+writer denial/cancellation, idempotent retention across journal restart,
+timestamp-only updates, failed create/state writes and scope mismatch. Strict
+catalog/replay tests enforce stage-only opaque identity and finite outcomes.
+One-turn tests hold the observation reader mutex, race Flush with late marks,
+and prove a rejected confirmation is counted once without retry. Confirmation
+never publishes while the coordinator owns its turn; private envelope bytes
+and raw error sentinels must be absent from all retained event JSON.
 Maintenance identity tests also enroll canonical and alias repository ids
 concurrently, migrate compatible and conflicting version-1 registry entries,
 project legacy registration/job references to the canonical identity, preserve

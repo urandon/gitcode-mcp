@@ -1342,6 +1342,8 @@ func TestRecoveredStageRejectsMissingCacheBeforeWritableOpen(t *testing.T) {
 	cfg := config.Default()
 	manager.EffectiveConfig = &cfg
 	jobs := NewJobManager("")
+	collector := jobObservationFixture(t)
+	jobs.SetObservation(collector)
 	_, rejected, err := jobs.commitRecoveredSyncStage(ctx, manager, journal, stage)
 	if err == nil || rejected.State.Phase != SyncStageRejected {
 		t.Fatalf("recovery result stage=%+v err=%v", rejected, err)
@@ -1349,6 +1351,7 @@ func TestRecoveredStageRejectsMissingCacheBeforeWritableOpen(t *testing.T) {
 	if _, statErr := os.Stat(missing); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("recovery created or mutated removed cache: %v", statErr)
 	}
+	assertJobObservations(t, collector, Job{ID: stage.JobID, CacheUUID: stage.CacheUUID, RegistrationID: stage.RegistrationID, RepoID: stage.RepoID}, map[observability.Code]int{observability.SyncStageChanged: 1})
 }
 
 func TestSyncStageTargetRejectsReplacementSchemaBindingAndRegistration(t *testing.T) {

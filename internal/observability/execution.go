@@ -17,7 +17,7 @@ const MaxExecutionAttempt = 1024
 
 func executionCode(code Code) bool {
 	switch code {
-	case JobAdmitted, JobTerminal, ProviderAttempt, SyncCommitted, RetryAdmitted, WriterContended:
+	case JobAdmitted, JobTerminal, ProviderAttempt, SyncCommitted, RetryAdmitted, WriterContended, SyncStageChanged:
 		return true
 	default:
 		return false
@@ -44,6 +44,9 @@ func executionFailure(value string) bool {
 
 func (e Event) validExecution() bool {
 	d := e.ExecutionDetails
+	if e.Code != SyncStageChanged && e.StageRef != "" {
+		return false
+	}
 	if !executionCode(e.Code) {
 		// Old schema-1 lifecycle events remain valid with absent fields. Adding
 		// arbitrary execution dimensions to one must not bypass the catalog.
@@ -56,6 +59,21 @@ func (e Event) validExecution() bool {
 		return false
 	}
 	switch e.Code {
+	case SyncStageChanged:
+		if e.JobRef == "" || e.StageRef == "" || e.CacheRef == "" || e.RegistrationRef == "" || e.RepoRef == "" || d.Phase != "staging" || !executionCollection(d.Collection) {
+			return false
+		}
+		switch d.Outcome {
+		case "staged", "committing", "committed":
+			return d.FailureClass == ""
+		case "waiting_commit":
+			return d.FailureClass == "writer_busy"
+		case "superseded":
+			return d.FailureClass == "superseded"
+		case "rejected":
+			return executionFailure(d.FailureClass) || d.FailureClass == "writer_busy"
+		}
+		return false
 	case WriterContended:
 		switch d.WorkKind {
 		case "sync", "rag", "repository_docs", "other":
