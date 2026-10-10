@@ -231,8 +231,30 @@ forbidden (including authentication rejection), rate_limited, timeout,
 cancelled, invalid transfer/validation or failed. Only the class and duration
 cross the observation boundary, never raw request/response data.
 Foreground clients without a daemon sink remain unobserved. Embedding
-transport, confirmed throughput, incidents and the remaining execution
-boundaries retain their own integration gates.
+transport, incidents and the remaining execution boundaries retain their own
+integration gates.
+
+Confirmed sync throughput is recorded at the shared atomic commit boundary,
+not inferred from a job, a fetched/staged count or a recovery projection.
+`sync_committed` counts successfully committed source graphs by fixed collection:
+issue/PR/wiki sources or individual comment sources. Completing one issue-comment
+parent queue item with two comments therefore counts two records, not one group
+or three staged work units. Queue/frontier-only updates count zero. Rewriting an
+unchanged graph in a new actual commit still represents committed processing;
+the counter does not claim newly inserted records or changed content. Writer
+contention, rejected/cancelled transactions and rollback count zero. A newly
+committed recovery batch counts in the current boot; reading an existing commit
+receipt without another transaction does not. Recording follows cache writer
+lease release; no telemetry-driven cache reads or deduplication store are added.
+
+`rag_embedded` counts only successful vector upserts for missing/stale chunks.
+It excludes provider calls, fresh-vector reuse and failed writes. A local scalar
+accumulator is flushed after writer lease release on every exit, including
+cancellation, a later run/coverage persistence failure or superseded coverage.
+Resuming skips already persisted vectors rather than inflating throughput.
+These counters remain volatile per-boot evidence; durable receipts and coverage
+remain the execution authority. Their availability is attached when the actual
+commit/index hook is entered, independently of job admission/duration.
 
 
 - [Architecture](architecture.md)

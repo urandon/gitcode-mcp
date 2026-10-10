@@ -41,7 +41,7 @@ func TestDurableOfflineFixtureIssueBatchCommits(t *testing.T) {
 }
 
 func TestDurableIssueBatchFetchDoesNotHoldTargetWriterAndCommitDoesNotRefetch(t *testing.T) {
-	ctx := context.Background()
+	ctx, metrics := syncMetricContext()
 	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
 	client := &fakeGitCodeClient{listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{{
 		Items: []gitcode.IssueSummary{{ID: "provider-42", Number: 42, Title: "Fetched once", Body: "durable body", State: "open", CreatedAt: base, UpdatedAt: base}},
@@ -86,6 +86,7 @@ func TestDurableIssueBatchFetchDoesNotHoldTargetWriterAndCommitDoesNotRefetch(t 
 	if len(client.listIssueRequests) != 1 {
 		t.Fatalf("contended commit refetched provider: calls=%d", len(client.listIssueRequests))
 	}
+	requireSyncCounter(t, metrics, "issues", 0)
 	if err := store.ReleaseWriter(ctx, held); err != nil {
 		t.Fatalf("ReleaseWriter: %v", err)
 	}
@@ -96,6 +97,7 @@ func TestDurableIssueBatchFetchDoesNotHoldTargetWriterAndCommitDoesNotRefetch(t 
 	if result.SuccessCount != 1 || len(client.listIssueRequests) != 1 {
 		t.Fatalf("result=%+v provider calls=%d", result, len(client.listIssueRequests))
 	}
+	requireSyncCounter(t, metrics, "issues", 1)
 	stored, err := store.GetSourceScoped(ctx, "durable-issues", "ISSUE-42")
 	if err != nil {
 		t.Fatalf("GetSourceScoped: %v", err)
@@ -110,7 +112,7 @@ func TestDurableIssueBatchFetchDoesNotHoldTargetWriterAndCommitDoesNotRefetch(t 
 }
 
 func TestDurableIssueBatchValidatesWholeBatchBeforePublishing(t *testing.T) {
-	ctx := context.Background()
+	ctx, metrics := syncMetricContext()
 	store, err := cache.NewInMemorySQLiteStore(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -129,10 +131,11 @@ func TestDurableIssueBatchValidatesWholeBatchBeforePublishing(t *testing.T) {
 	if _, ok, err := store.GetSyncFrontier(ctx, batch.RepoID, "issue", syncOrderingUpdatedAtDesc, syncFilterStateAll); err != nil || ok {
 		t.Fatalf("frontier ok=%v err=%v after rejected batch", ok, err)
 	}
+	requireSyncCounter(t, metrics, "issues", 0)
 }
 
 func TestDurablePullAndWikiBatchesCommitWithoutProviderReplay(t *testing.T) {
-	ctx := context.Background()
+	ctx, metrics := syncMetricContext()
 	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
 	client := &fakeGitCodeClient{
 		listPRPages:   []gitcode.Page[gitcode.PullRequest]{{Items: []gitcode.PullRequest{{ID: "pr-7", Number: 7, Title: "Durable PR", Body: "pull body", State: "open", CreatedAt: base, UpdatedAt: base}}, Page: 1, PerPage: 100}},
@@ -177,6 +180,8 @@ func TestDurablePullAndWikiBatchesCommitWithoutProviderReplay(t *testing.T) {
 	if client.listPRCalls != 1 || client.listWikiPagesCallCount != 1 {
 		t.Fatalf("provider calls after contention: pulls=%d wiki=%d", client.listPRCalls, client.listWikiPagesCallCount)
 	}
+	requireSyncCounter(t, metrics, "pulls", 0)
+	requireSyncCounter(t, metrics, "wiki", 0)
 	if err := store.ReleaseWriter(ctx, held); err != nil {
 		t.Fatal(err)
 	}
@@ -189,13 +194,15 @@ func TestDurablePullAndWikiBatchesCommitWithoutProviderReplay(t *testing.T) {
 	if client.listPRCalls != 1 || client.listWikiPagesCallCount != 1 || client.wikiCalls != 0 {
 		t.Fatalf("commit replay called provider: pulls=%d wiki-list=%d wiki-detail=%d", client.listPRCalls, client.listWikiPagesCallCount, client.wikiCalls)
 	}
+	requireSyncCounter(t, metrics, "pulls", 1)
+	requireSyncCounter(t, metrics, "wiki", 1)
 }
 
 func TestDurableCommentBatchesCommitWithoutProviderReplay(t *testing.T) {
-	ctx := context.Background()
+	ctx, metrics := syncMetricContext()
 	base := time.Date(2026, 9, 1, 11, 0, 0, 0, time.UTC)
 	client := &fakeGitCodeClient{
-		commentsByIssue: map[int][]gitcode.Comment{7: {{ID: "ic-1", IssueID: "provider-7", IssueNumber: 7, Author: "alice", Body: "issue comment", CreatedAt: base, UpdatedAt: base}}},
+		commentsByIssue: map[int][]gitcode.Comment{7: {{ID: "ic-1", IssueID: "provider-7", IssueNumber: 7, Author: "alice", Body: "issue comment", CreatedAt: base, UpdatedAt: base}, {ID: "ic-2", IssueID: "provider-7", IssueNumber: 7, Author: "bob", Body: "second fixture comment", CreatedAt: base, UpdatedAt: base}}},
 		prCommentsByPR:  map[int][]gitcode.PRComment{9: {{ID: "pc-1", Author: "bob", Body: "PR comment", CreatedAt: base, UpdatedAt: base}}},
 	}
 	store, err := cache.NewInMemorySQLiteStore(ctx)
@@ -233,7 +240,7 @@ func TestDurableCommentBatchesCommitWithoutProviderReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchPRCommentSyncBatch: %v", err)
 	}
-	if issueBatch.RecordCount() != 2 || prBatch.RecordCount() != 1 || client.commentCalls != 3 || client.prCommentCalls != 1 {
+	if issueBatch.RecordCount() != 3 || prBatch.RecordCount() != 1 || client.commentCalls != 3 || client.prCommentCalls != 1 {
 		t.Fatalf("batches issue=%+v pr=%+v calls issue=%d pr=%d", issueBatch, prBatch, client.commentCalls, client.prCommentCalls)
 	}
 	if result, err := svc.CommitIssueCommentSyncBatch(ctx, issueBatch, nil); err != nil || result.SuccessCount != 1 {
@@ -245,6 +252,9 @@ func TestDurableCommentBatchesCommitWithoutProviderReplay(t *testing.T) {
 	if client.commentCalls != 3 || client.prCommentCalls != 1 {
 		t.Fatalf("comment commit refetched provider: issue=%d pr=%d", client.commentCalls, client.prCommentCalls)
 	}
+	// Two comment graphs, not the one completed parent group, contribute.
+	requireSyncCounter(t, metrics, "issue_comments", 2)
+	requireSyncCounter(t, metrics, "pr_comments", 1)
 	if _, err := store.GetSourceScoped(ctx, repoID, issueCommentStableID(7, "ic-1")); err != nil {
 		t.Fatalf("issue comment projection: %v", err)
 	}

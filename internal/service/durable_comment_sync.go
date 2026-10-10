@@ -136,6 +136,8 @@ func (s *Service) FetchIssueCommentSyncBatch(ctx context.Context, req BulkSyncRe
 }
 
 func (s *Service) CommitIssueCommentSyncBatch(ctx context.Context, batch DurableIssueCommentSyncBatch, progress chan<- ProgressEvent) (*SyncResourcesResult, error) {
+	observation := newConfirmedSyncObservation(ctx, "issue_comments")
+	defer observation.finish()
 	if err := validateDurableIssueCommentBatch(batch); err != nil {
 		return nil, err
 	}
@@ -216,6 +218,7 @@ func (s *Service) CommitIssueCommentSyncBatch(ctx context.Context, batch Durable
 		return bulkSyncFailureResult(err, "issue_comment:*", "issue_comments")
 	}
 	result.SuccessCount = len(result.Results)
+	observation.confirm(len(commit.Graphs))
 	emitProgress(progress, ProgressEvent{Collection: "issue_comments", Phase: "committing", RecordsListed: batch.RecordsListed, RecordsFetched: result.SuccessCount})
 	_ = s.attachIssueCommentQueueSummary(ctx, result, repoID, "drain")
 	return result, nil
@@ -371,6 +374,8 @@ func (s *Service) FetchPRCommentSyncBatch(ctx context.Context, req BulkSyncReque
 }
 
 func (s *Service) CommitPRCommentSyncBatch(ctx context.Context, batch DurablePRCommentSyncBatch, progress chan<- ProgressEvent) (*SyncResourcesResult, error) {
+	observation := newConfirmedSyncObservation(ctx, "pr_comments")
+	defer observation.finish()
 	if err := validateDurablePRCommentBatch(batch); err != nil {
 		return nil, err
 	}
@@ -423,6 +428,7 @@ func (s *Service) CommitPRCommentSyncBatch(ctx context.Context, batch DurablePRC
 		return bulkSyncFailureResult(err, "pr_comment:*", "pr_comments")
 	}
 	result.Results = durableResults(plans)
+	observation.confirm(len(graphs))
 	result.SuccessCount = len(result.Results)
 	emitProgress(progress, ProgressEvent{Collection: "pr_comments", Phase: "committing", RecordsListed: batch.RecordsListed, RecordsFetched: result.SuccessCount})
 	return result, nil

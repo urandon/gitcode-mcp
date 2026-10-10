@@ -998,6 +998,7 @@ func stagedMaintenanceFrontier(ctx context.Context, req StartSyncJobRequest, rem
 }
 
 func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, jobID string, req StartSyncJobRequest, schema int, bindingFingerprint string, work durableCollectionWork, workflow *SyncStageWorkflow, collectionAttempt int) (*service.SyncResourcesResult, syncCollectionResult, error) {
+	ctx = m.withJobMetrics(ctx)
 	m.updateJob(jobID, func(job *Job, now time.Time) {
 		job.SyncStage = &SyncStageView{RepoID: req.RepoID, Collection: work.collection, Phase: SyncStageFetching, UpdatedAt: now}
 		job.Progress = append(job.Progress, service.ProgressEvent{Type: "phase", Phase: string(SyncStageFetching), Collection: work.collection, Message: "collection fetch started"})
@@ -2050,6 +2051,7 @@ func (m *JobManager) runRecoveredSyncWorkflow(ctx context.Context, manager Manag
 }
 
 func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manager, journal *SyncStageJournal, stage SyncStageEnvelope) (*service.SyncResourcesResult, SyncStageEnvelope, error) {
+	ctx = m.withJobMetrics(ctx)
 	eff, err := effectiveJobConfig(manager, stage.CachePath)
 	if err != nil {
 		return nil, stage, err

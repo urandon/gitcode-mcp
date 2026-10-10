@@ -14,6 +14,7 @@ import (
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/gitcode"
+	"gitcode-mcp/internal/observability"
 	"gitcode-mcp/internal/service"
 )
 
@@ -610,6 +611,8 @@ func TestDurableCollectionPersistsPartialFetchOutcomeBeforeCommit(t *testing.T) 
 
 	jobID := "job-000001"
 	jobs := NewJobManager(filepath.Join(root, "jobs.json"))
+	metrics := observability.NewMetrics(strings.Repeat("a", 32), time.Now().UTC())
+	jobs.SetMetrics(metrics)
 	now := time.Now().UTC()
 	jobs.jobs[jobID] = &Job{ID: jobID, Type: SyncJobType, RepoID: binding.RepoID, CacheUUID: identity.UUID, Status: JobStatusRunning, CreatedAt: now, UpdatedAt: now}
 	jobs.nextID = 1
@@ -634,6 +637,10 @@ func TestDurableCollectionPersistsPartialFetchOutcomeBeforeCommit(t *testing.T) 
 	}, workflow, 1)
 	if !errors.Is(err, fetchErr) || result == nil || result.SuccessCount != 2 {
 		t.Fatalf("durable partial result=%+v err=%v", result, err)
+	}
+	// A result/projection alone is not proof that the shared commit ran.
+	if jobMetric(t, metrics, "sync_committed", map[string]string{"collection": "issues"}).Value != nil {
+		t.Fatal("result summary fabricated confirmed throughput")
 	}
 	stages, err := NewSyncStageJournal(root, SyncStageLimits{}).List()
 	if err != nil || len(stages) != 1 || stages[0].Workflow == nil || stages[0].Workflow.Outcome == nil {
@@ -988,6 +995,8 @@ func TestDaemonRestartRecoversStagedBatchWithoutProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	restarted := NewJobManager(jobsPath)
+	metrics := observability.NewMetrics(strings.Repeat("a", 32), time.Now().UTC())
+	restarted.SetMetrics(metrics)
 	if err := restarted.LoadAndMarkInterrupted(); err != nil {
 		t.Fatal(err)
 	}
@@ -1027,6 +1036,11 @@ func TestDaemonRestartRecoversStagedBatchWithoutProvider(t *testing.T) {
 	if _, err := store.GetSourceScoped(ctx, "owner/repo", "ISSUE-42"); err != nil {
 		t.Fatalf("recovered commit missing source: %v", err)
 	}
+	requireJobCounter(t, metrics, "sync_committed", map[string]string{"collection": "issues"}, float64(batch.RecordCount()))
+	if err := restarted.RecoverSyncStages(ctx, manager); err != nil {
+		t.Fatal("repeat recovery failed")
+	}
+	requireJobCounter(t, metrics, "sync_committed", map[string]string{"collection": "issues"}, float64(batch.RecordCount()))
 }
 
 func TestDaemonRestartUsesAtomicReceiptWhenJournalMissedCommitTerminal(t *testing.T) {
@@ -1085,6 +1099,10 @@ func TestDaemonRestartUsesAtomicReceiptWhenJournalMissedCommitTerminal(t *testin
 		t.Fatal(err)
 	}
 	restarted := NewJobManager(jobsPath)
+	metrics := observability.NewMetrics(strings.Repeat("a", 32), time.Now().UTC())
+	restarted.SetMetrics(metrics)
+	// The hook is available, but this boot must count no previous-boot commit.
+	metrics.AttachOrigin("sync")
 	if err := restarted.LoadAndMarkInterrupted(); err != nil {
 		t.Fatal(err)
 	}
@@ -1103,6 +1121,7 @@ func TestDaemonRestartUsesAtomicReceiptWhenJournalMissedCommitTerminal(t *testin
 	if stages, err := journal.List(); err != nil || len(stages) != 0 {
 		t.Fatalf("receipt-confirmed terminal stage retained: %+v err=%v", stages, err)
 	}
+	requireJobCounter(t, metrics, "sync_committed", map[string]string{"collection": "issues"}, 0)
 }
 
 func TestDaemonRestartContinuesMixedWorkflowAfterCommittedCollection(t *testing.T) {
