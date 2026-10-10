@@ -62,7 +62,7 @@ func TestSourceInspectionActualFailureRecoveryAndRestart(t *testing.T) {
 		t.Helper()
 		snapshot := cloneMaintenanceEntryPrivate(m.entries[reg])
 		m.reconcileRepositoryDocsState(ctx, store, &snapshot, at)
-		m.finishReconcileEntry(reg, snapshot, 0, 0, "", "", nil, Job{}, Job{}, Job{}, at)
+		m.finishReconcileEntry(context.Background(), reg, snapshot, 0, 0, "", "", nil, Job{}, Job{}, Job{}, at)
 		return m.sources[reg][sourceID].State
 	}
 	// Missing Git store fails before an indexing job can exist.

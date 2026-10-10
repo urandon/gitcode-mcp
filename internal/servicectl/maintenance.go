@@ -1551,6 +1551,8 @@ func (m *MaintenanceManager) Run(ctx context.Context) {
 }
 
 func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRequest) (MaintenanceEntry, error) {
+	ctx, flushObservation := beginMaintenanceObservation(ctx, m.jobs)
+	defer flushObservation()
 	if strings.TrimSpace(req.CachePath) == "" || strings.TrimSpace(req.RepoID) == "" || strings.TrimSpace(req.IdempotencyKey) == "" {
 		return MaintenanceEntry{}, errors.New("maintenance: cache_path, repo_id, and idempotency_key are required")
 	}
@@ -1655,6 +1657,7 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 			return cloneMaintenanceEntry(existing), nil
 		}
 		previous := *existing
+		beforeObservation := maintenanceObservedState(existing)
 		profileChanged := existing.Policy.Profile != policy.Profile || existing.Policy.RAGEnabled != policy.RAGEnabled
 		syncChanged := maintenanceSyncPolicyChanged(existing.Policy, policy)
 		existing.Policy = policy
@@ -1680,6 +1683,7 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 			m.generation--
 			return MaintenanceEntry{}, err
 		}
+		captureMaintenanceObservation(ctx, beforeObservation, existing, true)
 		return cloneMaintenanceEntry(existing), nil
 	}
 	entry := &MaintenanceEntry{RegistrationID: registrationID, CacheUUID: identity.UUID, PathFingerprint: pathFingerprint(path), RepoID: req.RepoID, Aliases: append([]string(nil), binding.Aliases...), Policy: policy, ConfigHash: strings.TrimSpace(req.ConfigHash), Enabled: true, Generation: 1, State: "enrolled", LastSeenAt: now, cachePath: path, configReference: strings.TrimSpace(req.ConfigReference), configSnapshot: req.ConfigSnapshot}
@@ -1692,6 +1696,7 @@ func (m *MaintenanceManager) Enroll(ctx context.Context, req MaintenanceEnrollRe
 		m.generation--
 		return MaintenanceEntry{}, err
 	}
+	captureMaintenanceObservation(ctx, maintenanceObservedState(nil), entry, true)
 	return cloneMaintenanceEntry(entry), nil
 }
 
@@ -1722,24 +1727,30 @@ func (m *MaintenanceManager) List(ctx context.Context) (MaintenanceListResult, e
 }
 
 func (m *MaintenanceManager) Disable(ctx context.Context, registrationID string) (MaintenanceEntry, error) {
-	_ = ctx
+	ctx, flushObservation := beginMaintenanceObservation(ctx, m.jobs)
+	defer flushObservation()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entry := m.entries[m.resolveRegistrationIDLocked(registrationID)]
 	if entry == nil {
 		return MaintenanceEntry{}, errors.New("maintenance: registration not found")
 	}
+	beforeObservation := maintenanceObservedState(entry)
 	entry.Enabled = false
 	entry.Generation++
 	entry.State = "disabled"
 	m.generation++
 	if err := m.saveLocked(); err != nil {
+		captureMaintenanceObservation(ctx, beforeObservation, entry, false)
 		return MaintenanceEntry{}, err
 	}
+	captureMaintenanceObservation(ctx, beforeObservation, entry, true)
 	return cloneMaintenanceEntry(entry), nil
 }
 
 func (m *MaintenanceManager) Reconcile(ctx context.Context) (MaintenanceReconcileResult, error) {
+	ctx, flushObservation := beginMaintenanceObservation(ctx, m.jobs)
+	defer flushObservation()
 	m.reconcileMu.Lock()
 	defer m.reconcileMu.Unlock()
 	if err := m.jobs.Prune(); err != nil {
@@ -1792,6 +1803,8 @@ func maintenanceReconcileOrder(entries []MaintenanceEntry, jobs []Job) []Mainten
 }
 
 func (m *MaintenanceManager) ReconcileRegistration(ctx context.Context, registrationID string) (MaintenanceReconcileResult, error) {
+	ctx, flushObservation := beginMaintenanceObservation(ctx, m.jobs)
+	defer flushObservation()
 	m.reconcileMu.Lock()
 	defer m.reconcileMu.Unlock()
 	registrationID = strings.TrimSpace(registrationID)
@@ -2526,9 +2539,9 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 		recordJobActionIntentError(ctx, err)
 		var schemaErr *cache.SchemaVersionError
 		if errors.As(err, &schemaErr) {
-			return m.updateEntrySchemaBlocked(registrationID, schemaErr.Compat, activeSync, activeRAG, activeRepositoryDocs), nil
+			return m.updateEntrySchemaBlocked(ctx, registrationID, schemaErr.Compat, activeSync, activeRAG, activeRepositoryDocs), nil
 		}
-		return m.updateEntryFailureWithJobs(registrationID, "cache_unreadable", err, activeSync, activeRAG, activeRepositoryDocs), nil
+		return m.updateEntryFailureWithJobs(ctx, registrationID, "cache_unreadable", err, activeSync, activeRAG, activeRepositoryDocs), nil
 	}
 	identity, err := store.CacheIdentity(ctx)
 	if err != nil || identity.UUID != snapshot.CacheUUID {
@@ -2537,25 +2550,25 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 			err = errors.New("cache identity changed")
 		}
 		recordJobActionIntentError(ctx, err)
-		return m.updateEntryFailureWithJobs(registrationID, "cache_replaced", err, activeSync, activeRAG, activeRepositoryDocs), nil
+		return m.updateEntryFailureWithJobs(ctx, registrationID, "cache_replaced", err, activeSync, activeRAG, activeRepositoryDocs), nil
 	}
 	contentState, err := store.GetRepoContentState(ctx, snapshot.RepoID)
 	if err != nil {
 		store.Close()
 		recordJobActionIntentError(ctx, err)
-		return m.updateEntryFailureWithJobs(registrationID, "content_state_failed", err, activeSync, activeRAG, activeRepositoryDocs), nil
+		return m.updateEntryFailureWithJobs(ctx, registrationID, "content_state_failed", err, activeSync, activeRAG, activeRepositoryDocs), nil
 	}
 	frontiers, err := store.ListMaintenanceFrontiers(ctx, snapshot.RepoID)
 	if err != nil {
 		store.Close()
 		recordJobActionIntentError(ctx, err)
-		return m.updateEntryFailureWithJobs(registrationID, "maintenance_frontiers_read_failed", err, activeSync, activeRAG, activeRepositoryDocs), nil
+		return m.updateEntryFailureWithJobs(ctx, registrationID, "maintenance_frontiers_read_failed", err, activeSync, activeRAG, activeRepositoryDocs), nil
 	}
 	namespaces, err := store.ListEmbeddingNamespaces(ctx, snapshot.RepoID)
 	if err != nil {
 		store.Close()
 		recordJobActionIntentError(ctx, err)
-		return m.updateEntryFailureWithJobs(registrationID, "embedding_namespaces_read_failed", err, activeSync, activeRAG, activeRepositoryDocs), nil
+		return m.updateEntryFailureWithJobs(ctx, registrationID, "embedding_namespaces_read_failed", err, activeSync, activeRAG, activeRepositoryDocs), nil
 	}
 	latestSync, _ := m.jobs.LatestCacheRepo(SyncJobType, snapshot.CacheUUID, snapshot.RepoID)
 	latestRAG, _ := m.jobs.LatestCacheRepo(RAGIndexJobType, snapshot.CacheUUID, snapshot.RepoID)
@@ -2593,7 +2606,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 		if coverageErr != nil {
 			store.Close()
 			recordJobActionIntentError(ctx, coverageErr)
-			return m.updateEntryFailureWithJobs(registrationID, "rag_coverage_read_failed", coverageErr, activeSync, activeRAG, activeRepositoryDocs), nil
+			return m.updateEntryFailureWithJobs(ctx, registrationID, "rag_coverage_read_failed", coverageErr, activeSync, activeRAG, activeRepositoryDocs), nil
 		}
 		if ok {
 			covered = state.CoveredGeneration
@@ -2653,7 +2666,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 			correlated, attached, err := m.jobs.AttachActionIntent(candidate.ID, actionIntentRef, "coalesced")
 			if err != nil {
 				recordJobActionIntentError(ctx, err)
-				return m.updateEntryFailure(registrationID, "retry_correlation_persist_failed", err), nil
+				return m.updateEntryFailure(ctx, registrationID, "retry_correlation_persist_failed", err), nil
 			}
 			if attached {
 				switch correlated.Type {
@@ -2664,7 +2677,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 				case RepositoryDocsIndexJobType:
 					activeRepositoryDocs = correlated
 				}
-				return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), nil
+				return m.finishReconcileEntry(ctx, registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), nil
 			}
 			activeSync, activeRAG, activeRepositoryDocs = m.activeJobsForSnapshot(snapshot)
 			activeWriter, _ = m.jobs.ActiveCacheWriter(snapshot.CacheUUID)
@@ -2681,7 +2694,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 			}
 		}
 		recordJobActionIntentError(ctx, ErrCacheWriterBusy{ActiveJobID: blocker.ID, ActiveType: blocker.Type})
-		return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), nil
+		return m.finishReconcileEntry(ctx, registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), nil
 	}
 	if activeSync.ID == "" && activeRAG.ID == "" && activeRepositoryDocs.ID == "" && activeWriter.ID == "" {
 		lane, page, maxPages := nextMaintenanceSyncLane(snapshot, frontiers, now)
@@ -2711,10 +2724,10 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 			if jobErr != nil {
 				if transientCacheWriterAdmission(jobErr) {
 					recordJobActionIntentError(ctx, jobErr)
-					return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), nil
+					return m.finishReconcileEntry(ctx, registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), nil
 				}
 				recordJobActionIntentError(ctx, jobErr)
-				return m.updateEntryFailure(registrationID, "sync_schedule_failed", jobErr), nil
+				return m.updateEntryFailure(ctx, registrationID, "sync_schedule_failed", jobErr), nil
 			}
 			started = append(started, job.ID)
 			activeSync = job
@@ -2723,10 +2736,10 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 			if jobErr != nil {
 				if transientCacheWriterAdmission(jobErr) {
 					recordJobActionIntentError(ctx, jobErr)
-					return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), started
+					return m.finishReconcileEntry(ctx, registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), started
 				}
 				recordJobActionIntentError(ctx, jobErr)
-				return m.updateEntryFailure(registrationID, "rag_schedule_failed", jobErr), started
+				return m.updateEntryFailure(ctx, registrationID, "rag_schedule_failed", jobErr), started
 			}
 			started = append(started, job.ID)
 			activeRAG = job
@@ -2769,7 +2782,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 				}
 				if transientCacheWriterAdmission(jobErr) {
 					recordJobActionIntentError(ctx, jobErr)
-					return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), started
+					return m.finishReconcileEntry(ctx, registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), started
 				}
 				recordJobActionIntentError(ctx, jobErr)
 				class := "repository_docs_schedule_failed"
@@ -2787,7 +2800,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 			activeRepositoryDocs = job
 		}
 	}
-	return m.finishReconcileEntry(registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), started
+	return m.finishReconcileEntry(ctx, registrationID, snapshot, contentState.ContentGeneration, covered, ragStatus, namespaceID, frontiers, activeSync, activeRAG, activeRepositoryDocs, now), started
 }
 
 func transientCacheWriterAdmission(err error) bool {
@@ -2801,9 +2814,10 @@ func repositoryDocsRetryReady(state *RepositoryDocsMaintenanceState, now time.Ti
 	return state == nil || state.Stage.RetryAfter.IsZero() || !now.Before(state.Stage.RetryAfter)
 }
 
-func (m *MaintenanceManager) finishReconcileEntry(registrationID string, snapshot MaintenanceEntry, contentGeneration, covered int64, ragStatus, namespaceID string, frontiers []cache.MaintenanceFrontier, activeSync, activeRAG, activeRepositoryDocs Job, now time.Time) MaintenanceEntry {
+func (m *MaintenanceManager) finishReconcileEntry(ctx context.Context, registrationID string, snapshot MaintenanceEntry, contentGeneration, covered int64, ragStatus, namespaceID string, frontiers []cache.MaintenanceFrontier, activeSync, activeRAG, activeRepositoryDocs Job, now time.Time) MaintenanceEntry {
 	m.mu.Lock()
 	entry := m.entries[registrationID]
+	beforeObservation := maintenanceObservedState(entry)
 	entry.ContentGeneration = contentGeneration
 	entry.CoveredGeneration = covered
 	entry.RAGStatus = ragStatus
@@ -2846,7 +2860,8 @@ func (m *MaintenanceManager) finishReconcileEntry(registrationID string, snapsho
 	}
 	entry.LastReconciledAt = now
 	entry.NextReconcileAt = now.Add(time.Minute)
-	_ = m.saveLocked()
+	persisted := m.saveLocked() == nil
+	captureMaintenanceObservation(ctx, beforeObservation, entry, persisted)
 	updated := cloneMaintenanceEntry(entry)
 	m.mu.Unlock()
 	return updated
@@ -3255,34 +3270,37 @@ func publicMaintenanceJobError(jobType, class string) string {
 	return "remote cache maintenance failed"
 }
 
-func (m *MaintenanceManager) updateEntryFailure(id, class string, _ error) MaintenanceEntry {
-	return m.updateEntryFailureWithJobs(id, class, nil)
+func (m *MaintenanceManager) updateEntryFailure(ctx context.Context, id, class string, _ error) MaintenanceEntry {
+	return m.updateEntryFailureWithJobs(ctx, id, class, nil)
 }
 
-func (m *MaintenanceManager) updateEntryFailureWithJobs(id, class string, _ error, jobs ...Job) MaintenanceEntry {
+func (m *MaintenanceManager) updateEntryFailureWithJobs(ctx context.Context, id, class string, _ error, jobs ...Job) MaintenanceEntry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entry := m.entries[id]
 	if entry == nil {
 		return MaintenanceEntry{}
 	}
+	beforeObservation := maintenanceObservedState(entry)
 	entry.State = "degraded"
 	entry.LastErrorClass = class
 	entry.LastError = publicMaintenanceError(class)
 	entry.ActiveJobs = activeMaintenanceJobIDs(jobs...)
 	entry.LastReconciledAt = m.now()
 	entry.NextReconcileAt = entry.LastReconciledAt.Add(time.Minute)
-	_ = m.saveLocked()
+	persisted := m.saveLocked() == nil
+	captureMaintenanceObservation(ctx, beforeObservation, entry, persisted)
 	return cloneMaintenanceEntry(entry)
 }
 
-func (m *MaintenanceManager) updateEntrySchemaBlocked(id string, compat cache.VersionCompatibility, jobs ...Job) MaintenanceEntry {
+func (m *MaintenanceManager) updateEntrySchemaBlocked(ctx context.Context, id string, compat cache.VersionCompatibility, jobs ...Job) MaintenanceEntry {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entry := m.entries[id]
 	if entry == nil {
 		return MaintenanceEntry{}
 	}
+	beforeObservation := maintenanceObservedState(entry)
 	entry.State = "cache_schema_blocked"
 	entry.LastErrorClass = "cache_schema_blocked"
 	entry.LastError = publicMaintenanceError("cache_schema_blocked")
@@ -3294,7 +3312,8 @@ func (m *MaintenanceManager) updateEntrySchemaBlocked(id string, compat cache.Ve
 	entry.ActiveJobs = activeMaintenanceJobIDs(jobs...)
 	entry.LastReconciledAt = m.now()
 	entry.NextReconcileAt = entry.LastReconciledAt.Add(time.Minute)
-	_ = m.saveLocked()
+	persisted := m.saveLocked() == nil
+	captureMaintenanceObservation(ctx, beforeObservation, entry, persisted)
 	return cloneMaintenanceEntry(entry)
 }
 

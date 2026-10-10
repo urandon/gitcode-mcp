@@ -58,7 +58,7 @@ func TestSourceInspectionFailedPersistenceCannotClaimRetainedRecovery(t *testing
 	run := func() {
 		snapshot := cloneMaintenanceEntryPrivate(m.entries[reg])
 		m.reconcileRepositoryDocsState(context.Background(), store, &snapshot, at)
-		m.finishReconcileEntry(reg, snapshot, 0, 0, "", "", nil, Job{}, Job{}, Job{}, at)
+		m.finishReconcileEntry(context.Background(), reg, snapshot, 0, 0, "", "", nil, Job{}, Job{}, Job{}, at)
 	}
 	run()
 	if m.sources[reg][source].State.Inspection.Result != "failed" {
@@ -123,7 +123,7 @@ func TestSourceInspectionRetainRejectsChangedAuthority(t *testing.T) {
 			if writes != 0 || m.sources[reg][source].State != before || !snapshot.RepositoryDocs.Inspection.RetentionIncomplete {
 				t.Fatal("obsolete inspection mutated current source authority")
 			}
-			m.finishReconcileEntry(reg, snapshot, 0, 0, "", "", nil, Job{}, Job{}, Job{}, time.Unix(1700000000, 0).UTC())
+			m.finishReconcileEntry(context.Background(), reg, snapshot, 0, 0, "", "", nil, Job{}, Job{}, Job{}, time.Unix(1700000000, 0).UTC())
 			if m.sources[reg][source].State != before {
 				t.Fatal("late finish republished obsolete source inspection")
 			}

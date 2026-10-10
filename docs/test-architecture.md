@@ -140,6 +140,16 @@ conserving retained plus lost boundaries without fabricating admission,
 terminal execution, provider or commit counters. Closed replay, reader-lock
 contention, count-only metric loss and durable loss-restart tests enforce the
 same nonblocking/public-safe contracts independently of optional metrics.
+Maintenance registration fixtures use real cache bindings, registry saves and
+Admin receipt-wrapped disable, covering new/replayed enrollment, unchanged
+reconcile/timestamp projections, schema block/recovery, retained failed save
+versus rollback, and rename-success/readback confirmation. A blocked actual
+save and nested outer-lock boundary prove no early event. Fixed 128-item capture
+conserves overflow using bounded cursor continuation instead of enlarged page
+limits; metrics-only mode reports unconfirmed persistence without inventing
+disabled event-queue loss. Strict replay rejects raw states/classes and other
+execution dimensions; primitive identity, config/key/error sentinels stay out
+of diagnostics, and registry restart emits no fresh transition.
 Admin request fixtures use actual mux/authenticated control and SSE paths, with
 collector-only and combined metric modes. They conserve retained plus lost
 completions, preserve panic/write/short-write/flush/cancellation outcomes and

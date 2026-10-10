@@ -5,20 +5,23 @@ package observability
 // attempt ordinal only when it is known from the actual execution policy loop.
 // Zero means unspecified, never a fabricated first attempt.
 type ExecutionDetails struct {
-	Phase        string `json:"phase,omitempty"`
-	Collection   string `json:"collection,omitempty"`
-	WorkKind     string `json:"work_kind,omitempty"`
-	Outcome      string `json:"outcome,omitempty"`
-	FailureClass string `json:"failure_class,omitempty"`
-	Attempt      uint32 `json:"attempt,omitempty"`
-	AdminRoute   string `json:"admin_route,omitempty"`
+	Phase                string `json:"phase,omitempty"`
+	Collection           string `json:"collection,omitempty"`
+	WorkKind             string `json:"work_kind,omitempty"`
+	Outcome              string `json:"outcome,omitempty"`
+	FailureClass         string `json:"failure_class,omitempty"`
+	Attempt              uint32 `json:"attempt,omitempty"`
+	AdminRoute           string `json:"admin_route,omitempty"`
+	MaintenanceScope     string `json:"maintenance_scope,omitempty"`
+	PreviousState        string `json:"previous_state,omitempty"`
+	PreviousFailureClass string `json:"previous_failure_class,omitempty"`
 }
 
 const MaxExecutionAttempt = 1024
 
 func executionCode(code Code) bool {
 	switch code {
-	case JobAdmitted, JobTerminal, JobRecovered, ProviderAttempt, SyncCommitted, RetryAdmitted, WriterContended, SyncStageChanged, AdminRequestCompleted:
+	case JobAdmitted, JobTerminal, JobRecovered, ProviderAttempt, SyncCommitted, RetryAdmitted, WriterContended, SyncStageChanged, AdminRequestCompleted, MaintenanceStateChanged:
 		return true
 	default:
 		return false
@@ -45,6 +48,9 @@ func executionFailure(value string) bool {
 
 func (e Event) validExecution() bool {
 	d := e.ExecutionDetails
+	if e.Code != MaintenanceStateChanged && (d.MaintenanceScope != "" || d.PreviousState != "" || d.PreviousFailureClass != "") {
+		return false
+	}
 	if e.Code != AdminRequestCompleted && d.AdminRoute != "" {
 		return false
 	}
@@ -63,6 +69,11 @@ func (e Event) validExecution() bool {
 		return false
 	}
 	switch e.Code {
+	case MaintenanceStateChanged:
+		if e.JobRef != "" || e.RegistrationRef == "" || e.CacheRef == "" || e.RepoRef == "" || d.Phase != "maintenance" || d.Collection != "" || d.Attempt != 0 || d.MaintenanceScope != "registration" {
+			return false
+		}
+		return maintenanceState(d.Outcome) && (maintenanceState(d.PreviousState) || d.PreviousState == "absent" || d.PreviousState == "unknown") && maintenanceFailure(d.FailureClass) && maintenanceFailure(d.PreviousFailureClass) && (d.Outcome != d.PreviousState || d.FailureClass != d.PreviousFailureClass) && (d.PreviousState != "absent" || d.PreviousFailureClass == "")
 	case AdminRequestCompleted:
 		if e.JobRef != "" || e.CacheRef != "" || e.RegistrationRef != "" || e.RepoRef != "" || d.Phase != "admin" || d.Collection != "" || d.Attempt != 0 || d.FailureClass != "" {
 			return false
@@ -135,6 +146,22 @@ func (e Event) validExecution() bool {
 		return e.JobRef != "" && d.Phase == "commit" && d.Outcome == "succeeded" && executionCollection(d.Collection) && d.FailureClass == "" && d.Attempt == 0
 	case RetryAdmitted:
 		return e.JobRef != "" && d.Phase == "retry" && d.Outcome == "admitted" && executionCollection(d.Collection) && d.FailureClass == "" && d.Attempt >= 2
+	}
+	return false
+}
+
+func maintenanceState(value string) bool {
+	switch value {
+	case "enrolled", "disabled", "ready", "degraded", "backfilling", "indexing", "refreshing", "cache_schema_blocked":
+		return true
+	}
+	return false
+}
+
+func maintenanceFailure(value string) bool {
+	switch value {
+	case "", "cache", "identity", "content", "frontier", "embedding", "retry", "sync_schedule", "rag_schedule", "repository_docs", "cache_schema_blocked", "operation_failed":
+		return true
 	}
 	return false
 }

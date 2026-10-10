@@ -244,7 +244,24 @@ then publishes outside it after the single save. Uncaptured overflow and
 retained failed-save boundaries use count-only atomic loss accounting, never an
 unbounded diagnostic slice, per-job diagnostic save, extra authority lookup or
 retry. These backend hooks remain subject to the O3/O4/O5 rollout gates;
-maintenance and Admin event ownership remain separate O2 work.
+source/conflict maintenance event ownership remains separate O2 work.
+
+`maintenance_state_changed` records a confirmed registration state/class pair
+change at enrollment, disable or reconcile persistence owners, not at List,
+load, stage projection or timestamp updates. It uses closed before/after enums,
+opaque cache/registration/repository refs and collector-owned atomic transition
+correlation; it carries no job/stage, attempt, collection, generation, config,
+path or error bytes. An operation-local 128-item context buffer captures only
+primitive identity and finite fields under the existing registry lock. Nested
+owners share it; the outer scheduler/IPC, Admin control receipt or job-action
+receipt boundary flushes after all its authority locks unwind. No asynchronous
+job retains the buffer. Overflow and retained failed saves record count-only
+loss, while rollback and unchanged later replay emit nothing. Existing exact
+payload readback confirms an ambiguous atomic write without extra telemetry
+I/O. Metrics-only operation counts unconfirmed persistence independently but
+does not fabricate overflow for a disabled event sink. Source-specific and
+identity-conflict owner hooks and final O2 qualification remain pending; these
+registration hooks do not complete the observability feature or its O3-O5 gates.
 
 ### Metric evidence foundation
 

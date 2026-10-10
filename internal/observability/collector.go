@@ -35,24 +35,25 @@ type Coverage struct {
 	ObservedBoots uint64 `json:"observed_boots"`
 }
 type Collector struct {
-	mu                  sync.Mutex
-	queue               chan pending
-	stop, done          chan struct{}
-	closing             bool
-	queued, queueBytes  int
-	cleanRequested      bool
-	storageFailed       bool
-	generation, boot    string
-	cursorKey           string
-	sequence            uint64
-	events              []Event
-	historyBytes        int
-	coverage            Coverage
-	pendingLoss         atomic.Uint64
-	pendingBoundaryLoss atomic.Uint64
-	admissionDrops      atomic.Uint64
-	adminRequests       atomic.Uint64
-	config              Config
+	mu                     sync.Mutex
+	queue                  chan pending
+	stop, done             chan struct{}
+	closing                bool
+	queued, queueBytes     int
+	cleanRequested         bool
+	storageFailed          bool
+	generation, boot       string
+	cursorKey              string
+	sequence               uint64
+	events                 []Event
+	historyBytes           int
+	coverage               Coverage
+	pendingLoss            atomic.Uint64
+	pendingBoundaryLoss    atomic.Uint64
+	admissionDrops         atomic.Uint64
+	adminRequests          atomic.Uint64
+	maintenanceTransitions atomic.Uint64
+	config                 Config
 	// A deterministic private storage seam for fault tests, not a public hook.
 	open func(string) (*storage, []Event, bool, error)
 }
@@ -86,6 +87,12 @@ func (c *Collector) BootID() string { return c.boot }
 // Allocation is atomic and performs no I/O or execution/observation lock wait.
 func (c *Collector) AdminRequestCorrelation() Ref {
 	return KnownRef("correlation", c.boot+"\x00admin\x00"+strconv.FormatUint(c.adminRequests.Add(1), 10))
+}
+
+// MaintenanceTransitionCorrelation identifies a fresh owner-confirmed boundary,
+// not a request id, generation or timestamp read from execution authority.
+func (c *Collector) MaintenanceTransitionCorrelation() Ref {
+	return KnownRef("correlation", c.boot+"\x00maintenance\x00"+strconv.FormatUint(c.maintenanceTransitions.Add(1), 10))
 }
 
 func newCollector(cfg Config, open func(string) (*storage, []Event, bool, error)) *Collector {
