@@ -10,10 +10,11 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"gitcode-mcp/internal/audit"
@@ -70,7 +71,7 @@ type auditGenerationClaimStore interface {
 func New(store cache.Store) *Service {
 	svc, err := NewWithMode(store, gitcode.ProviderModeFixture, "", ServiceConfig{})
 	if err != nil {
-		return &Service{store: store, client: sanitizedFixtureClient{}, now: func() time.Time { return time.Now().UTC() }, lockPath: filepath.Join(os.TempDir(), "gitcode-mcp-sync.lock"), providerMode: gitcode.ProviderModeFixture}
+		return &Service{store: store, client: sanitizedFixtureClient{}, now: func() time.Time { return time.Now().UTC() }, providerMode: gitcode.ProviderModeFixture}
 	}
 	return svc
 }
@@ -161,30 +162,38 @@ func NewWithMode(store cache.Store, mode gitcode.ProviderMode, token string, cfg
 }
 
 func serviceLockPath(lockPath string) string {
-	lockPath = strings.TrimSpace(lockPath)
-	if lockPath != "" {
-		return lockPath
-	}
-	return filepath.Join(os.TempDir(), "gitcode-mcp-sync.lock")
+	// Empty means the store's own writer authority, not a process-global
+	// fallback. Explicit overrides still intentionally share their lock.
+	return strings.TrimSpace(lockPath)
 }
 
 type bulkWriterAdmissionKey struct{}
 
 type bulkWriterAdmission struct {
+	service  *Service
 	lockPath string
 	repoID   string
+	active   *atomic.Bool
 }
 
 func (s *Service) acquireBulkWriter(ctx context.Context, repoID, operation string) (context.Context, func(), error) {
-	if held, ok := ctx.Value(bulkWriterAdmissionKey{}).(bulkWriterAdmission); ok && held.lockPath == s.lockPath && held.repoID == repoID {
+	if held, ok := ctx.Value(bulkWriterAdmissionKey{}).(bulkWriterAdmission); ok && held.service == s && held.lockPath == s.lockPath && held.repoID == repoID && held.active != nil && held.active.Load() {
 		return ctx, func() {}, nil
 	}
 	lease, err := s.store.AcquireWriter(ctx, cache.WriterRequest{Operation: operation, RepoID: repoID, LockPath: s.lockPath})
 	if err != nil {
 		return ctx, nil, err
 	}
-	admitted := context.WithValue(ctx, bulkWriterAdmissionKey{}, bulkWriterAdmission{lockPath: s.lockPath, repoID: repoID})
-	return admitted, func() { _ = s.store.ReleaseWriter(context.Background(), lease) }, nil
+	active := &atomic.Bool{}
+	active.Store(true)
+	admitted := context.WithValue(ctx, bulkWriterAdmissionKey{}, bulkWriterAdmission{service: s, lockPath: s.lockPath, repoID: repoID, active: active})
+	var once sync.Once
+	return admitted, func() {
+		once.Do(func() {
+			active.Store(false)
+			_ = s.store.ReleaseWriter(context.Background(), lease)
+		})
+	}, nil
 }
 
 type sanitizedFixtureClient struct{}

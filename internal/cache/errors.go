@@ -5,11 +5,36 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
 
 var ErrNotFound = errors.New("cache: not found")
+
+// ErrWriterAuthorityResolution reports an unusable cache authority without
+// exposing filesystem coordinates. Its cause is a portable sentinel only,
+// never a pathname-bearing error from a filesystem operation.
+type ErrWriterAuthorityResolution struct {
+	cause error
+}
+
+func (e ErrWriterAuthorityResolution) Error() string {
+	return "cache: writer authority could not be resolved"
+}
+
+func (e ErrWriterAuthorityResolution) Unwrap() error { return e.cause }
+
+func writerAuthorityResolutionError(err error) error {
+	var cause error
+	for _, kind := range []error{os.ErrNotExist, os.ErrPermission, os.ErrInvalid} {
+		if errors.Is(err, kind) {
+			cause = kind
+			break
+		}
+	}
+	return ErrWriterAuthorityResolution{cause: cause}
+}
 
 type ErrUnscopedAliasResolution struct {
 	Alias string

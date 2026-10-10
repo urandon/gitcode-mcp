@@ -59,7 +59,11 @@ func MigrateCacheWithConfirm(ctx context.Context, dataSourceName string, forceNo
 		return nil, fmt.Errorf("cache: cannot access cache file: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dataSourceName)
+	cachePath, err := cachePathForDataSource(dataSourceName)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", cachePath)
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +76,7 @@ func MigrateCacheWithConfirm(ctx context.Context, dataSourceName string, forceNo
 		return nil, err
 	}
 
-	store := &SQLiteStore{db: db, forceNoFTS: forceNoFTS, cachePath: dataSourceName, lockPath: writerLockPath(dataSourceName)}
+	store := &SQLiteStore{db: db, forceNoFTS: forceNoFTS, cachePath: cachePath, lockPath: writerLockPath(cachePath)}
 
 	lease, err := store.AcquireWriter(ctx, WriterRequest{Operation: "migration"})
 	if err != nil {
@@ -108,7 +112,7 @@ func MigrateCacheWithConfirm(ctx context.Context, dataSourceName string, forceNo
 		return nil, fmt.Errorf("cache: failed to checkpoint WAL before migration: %w", err)
 	}
 
-	backupPath, err := backupCache(dataSourceName)
+	backupPath, err := backupCache(cachePath)
 	if err != nil {
 		return nil, fmt.Errorf("cache: failed to create backup before migration: %w", err)
 	}

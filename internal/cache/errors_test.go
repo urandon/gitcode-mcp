@@ -1,10 +1,28 @@
 package cache
 
 import (
+	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestWriterAuthorityResolutionPreservesOnlySafeSentinels(t *testing.T) {
+	for _, kind := range []error{os.ErrNotExist, os.ErrPermission, os.ErrInvalid, errors.New("opaque filesystem failure")} {
+		original := &os.PathError{Op: "resolve", Path: "private-fixture-coordinate", Err: kind}
+		err := writerAuthorityResolutionError(original)
+		var typed ErrWriterAuthorityResolution
+		var pathError *os.PathError
+		if !errors.As(err, &typed) || errors.As(err, &pathError) || strings.Contains(err.Error(), original.Path) {
+			t.Fatal("authority error retained a pathname-bearing cause")
+		}
+		want := kind == os.ErrNotExist || kind == os.ErrPermission || kind == os.ErrInvalid
+		if errors.Is(err, kind) != want {
+			t.Fatal("authority error has incorrect portable classification")
+		}
+	}
+}
 
 func TestLockContentionPublicProjectionNeverFormatsPathsOrHints(t *testing.T) {
 	secretPath := "/Users/private-user/workspace/cache.db.lock"
