@@ -55,6 +55,24 @@ func disabled(reason string) Surface {
 
 var writeCapabilities = []Capability{
 	{
+		ID: "get_repo_metadata", Category: CategoryWrite, Safety: SafetyReadOnly,
+		CLIName: "repo-metadata", MCPName: "get_repo_metadata", ServiceCommand: "repo-metadata",
+		Description: "Explicit bounded live repository identity/visibility read: provider_id, owner, full_name, private and default_branch. Not cache-only repo_status; does not modify a binding or grant later write authority.",
+		UI:          disabled("Admin manages local bindings; live remote bootstrap verification is explicit CLI/MCP only."), CLI: enabled(), MCP: enabled(),
+	},
+	{
+		ID: "list_repo_labels", Category: CategoryWrite, Safety: SafetyReadOnly,
+		CLIName: "list-repo-labels", MCPName: "list_repo_labels", ServiceCommand: "list-repo-labels",
+		Description: "Explicit live complete bounded list of standalone repository labels, including read-only descriptions, with cache refresh. Does not assign labels to issues. Pagination/schema/identity failures fail closed.",
+		UI:          disabled("Cached labels use generic source observation; no remote editor in the local operator console."), CLI: enabled(), MCP: enabled(),
+	},
+	{
+		ID: "create_repo_label", Category: CategoryWrite, Safety: SafetyAuditedWrite,
+		CLIName: "create-repo-label", MCPName: "create_repo_label", ServiceCommand: "create-repo-label",
+		Description: "Create an unused standalone repository label by name and color, never by assigning an issue. Requires live intent and caller key. Name conflicts do not recolor. Description writes are unsupported. Canonical readback and durable audit/cache publication; preserve the same key after ambiguity for GET-only recovery, never a duplicate POST.",
+		UI:          disabled("Admin is a local operator console, not a remote label editor."), CLI: enabled(), MCP: enabled(),
+	},
+	{
 		ID:             "feedback_status",
 		Category:       CategoryWrite,
 		Safety:         SafetyReadOnly,

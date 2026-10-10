@@ -959,6 +959,7 @@ type WriteCommandRequest struct {
 	Base           string    `json:"base,omitempty"`
 	State          string    `json:"state,omitempty"`
 	Label          string    `json:"label,omitempty"`
+	Color          string    `json:"color,omitempty"`
 	Labels         []string  `json:"labels,omitempty"`
 	Strategy       string    `json:"strategy,omitempty"`
 	IdempotencyKey string    `json:"idempotency_key,omitempty"`

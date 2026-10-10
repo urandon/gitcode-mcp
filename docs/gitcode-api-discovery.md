@@ -31,6 +31,37 @@ Discovery status for metadata-first sync:
 | Milestones | Adapter model includes `UpdatedAt`, but list behavior and persistence are not verified for collection sync. | Not yet a first-class bulk collection surface; do not report `skipped_by_revision`. |
 | Push remote mirrors | The v5 list exposes stable `id`, `project_id`, destination `url`, force/private flags, update status, failure count/message, and update timestamps. The v5 item POST accepts `{"force":true}` for a manual trigger. | Implemented as explicit list, audited trigger, and bounded wait surfaces with sanitized cache projection. It is not a bulk frontier collection. |
 
+## Repository Bootstrap Identity And Labels
+
+The explicit bootstrap read uses `GET /api/v5/repos/{owner}/{repo}` and requires
+a positive numeric provider id, matching `owner.login`, `name`, `full_name`, an
+explicit boolean `private`, and nonempty `default_branch`. Local bindings do
+not supply missing remote evidence. Missing/null visibility fails closed.
+
+The [label list](https://docs.gitcode.com/docs/apis/get-api-v-5-repos-owner-repo-labels/)
+returns an array with numeric `id`/`repository_id`, `name`, `color`, and
+readable `description`. Bounded owner-authorized compatibility reads confirmed
+`page`/`per_page` affect response size. The adapter requests 100/page until an
+empty terminal page, capped at 20 pages; a short nonempty page alone is not
+completeness evidence. Duplicates, malformed/null pages, foreign repository
+identity and exhausted bounds fail closed. The cap is not a partial-success
+mode and no creation proceeds from an incomplete absence check.
+
+The [label creation route](https://docs.gitcode.com/docs/apis/post-api-v-5-repos-owner-repo-labels/)
+is `POST /api/v5/repos/{owner}/{repo}/labels`, using PAT Bearer authentication and
+`application/x-www-form-urlencoded` fields `name` and `color` (including `#`).
+Only one transport attempt is permitted, including redirect/transport recovery.
+The returned id is an acknowledgement, not success: canonical complete list
+readback must confirm exact ID/name/color/repository. The durable service claim
+prevents a same-key duplicate POST; uncertain outcomes recover by GET/list only.
+Server-side idempotency enforcement is not demonstrated.
+
+Discovery corrections establish that API v5 PATCH can return 200 while leaving
+description unchanged. This release reads descriptions but rejects description
+writes; UI-observed web-api/token routes are not a qualified PAT transport.
+No cookies, token exchange, rename, delete or replace-all operation is used.
+Metadata is point-in-time evidence, not a provider compare-and-swap guarantee.
+
 ## Issue Update Patch Compatibility
 
 A live compatibility observation on 2026-08-30 showed that the v5 issue update

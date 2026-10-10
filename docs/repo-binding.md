@@ -78,6 +78,31 @@ gitcode-mcp repo status --repo example-owner/example-repo
 
 Shows status for a specific repository, including scopes, aliases, and metadata.
 
+## Explicit live bootstrap verification
+
+`repo status` is cache-only binding/runtime status, not proof of provider
+identity or private visibility. When authorized to verify the destination:
+
+```sh
+gitcode-mcp repo-metadata --repo example-owner/example-repo --format json
+gitcode-mcp list-repo-labels --repo example-owner/example-repo --format json
+gitcode-mcp create-repo-label --repo example-owner/example-repo \
+  --name 'state:ready' --color '#0f766e' --live \
+  --idempotency-key bootstrap-label-ready --format json
+```
+
+Metadata reports canonical `provider_id`, `owner`, `name`, `full_name`, `private`
+and `default_branch`, with an observation timestamp. No binding is changed and
+visibility is not a lease authorizing subsequent writes. Label listing is
+explicitly live and complete within bounded pagination; failure cannot establish
+absence. Standalone creation requires `--live` or non-mutating `--dry-run` and a
+caller key. It never assigns issues, recolors existing names, replaces all
+labels, or writes descriptions. Keep the same key after ambiguity or cache
+publication failure: reconciliation uses canonical GET only, never another POST.
+Descriptions returned by GitCode are readable but their write transport is not
+qualified. Cached `LABEL-<provider-id>` records can be read offline like other
+sources. Remote editing is intentionally absent from the local Admin console.
+
 ## Scope resolution
 
 Issues and wiki pages are resolved within repository scope:

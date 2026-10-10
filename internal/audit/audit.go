@@ -182,6 +182,8 @@ func sanitizedMetadata(metadata map[string]string) map[string]string {
 		"wiki_revision":                  true,
 		"milestone_revision":             true,
 		"milestone_browser_url":          true,
+		"label_repository_id":            true,
+		"label_revision":                 true,
 	}
 	out := map[string]string{}
 	for key, value := range metadata {

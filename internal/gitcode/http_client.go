@@ -1502,6 +1502,7 @@ func isNotFoundError(err error) bool {
 }
 
 type requestOptions struct {
+	contentType      string
 	knownRemoteAlias bool
 	remoteAlias      string
 	idempotencyKey   string
@@ -2427,7 +2428,11 @@ func (c *HTTPClient) do(ctx context.Context, method, endpoint string, values url
 	}
 	req.Header.Set("Accept", "application/json")
 	if body != nil && method != http.MethodGet {
-		req.Header.Set("Content-Type", "application/json")
+		contentType := opts.contentType
+		if contentType == "" {
+			contentType = "application/json"
+		}
+		req.Header.Set("Content-Type", contentType)
 	}
 	if opts.idempotencyKey != "" {
 		req.Header.Set("Idempotency-Key", opts.idempotencyKey)

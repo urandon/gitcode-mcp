@@ -231,6 +231,9 @@ Tools are available in both transport modes. Read-only mode lists the cache/read
 | `export_snapshot` | Export a deterministic snapshot |
 | `diff_snapshot` | Diff two snapshots |
 | `repo_status` | Report repository binding plus binary identity, cache schema compatibility, issue/comment counts, and issue-comment queue state |
+| `get_repo_metadata` | Explicit bounded live repository provider identity, owner, visibility and default branch; not cache binding status |
+| `list_repo_labels` | Explicit complete bounded live standalone-label list with cache refresh, including read-only descriptions |
+| `create_repo_label` | Audited standalone label definition by name/color; never assigns an issue; caller key and live intent required |
 | `maintenance_status` | Report sanitized daemon-managed cache, backfill frontier, content generation, and RAG coverage state |
 | `maintenance_plan` | Build a deterministic, path-free plan for the selected MCP cache and requested refresh/RAG policy |
 | `enable_cache_maintenance` | Apply an already rendered plan with `write_mode=live` and an idempotency key; machine-level installs/downloads return a CLI handoff |
@@ -282,6 +285,33 @@ PATCH/readback outcomes remain fenced; same-key recovery is GET-only and
 reports `recovered_after_ambiguous_write`, `write_ambiguous_remote`,
 `write_ambiguous_readback_failed`, or `write_conflict` as machine-readable
 states.
+
+For authorized repository bootstrap, `get_repo_metadata` and `list_repo_labels`
+are explicit live reads requiring `repo_id`, available under read-only policy.
+They do not substitute `repo_status` binding coordinates for provider evidence.
+Metadata returns `provider_id`, `owner`, `name`, `full_name`, explicit `private`,
+and `default_branch`. Missing or mismatched identity/visibility data fails
+closed. It is an observation, not a lease or permission for a later write.
+
+`list_repo_labels` fetches bounded pages until an explicit empty terminal page
+(requesting 100/page, at most 20 pages) before
+publishing a complete list. Malformed, repeated, foreign-repository, duplicate
+or bound-exhausted data is an error, never evidence that a label is absent.
+Descriptions are read-only. Cached `LABEL-<provider-id>` sources remain readable
+through `get_source` without GitCode access; labels are not assigned to issues.
+
+```json
+{"repo_id":"example-owner/example-repo","name":"state:ready","color":"#0f766e","write_mode":"live","idempotency_key":"bootstrap-label-ready"}
+```
+
+Pass that object to `create_repo_label`. It requires all five fields and accepts
+no description, issue number, arbitrary destination or replacement-label set.
+An existing name is a conflict, not an implicit recolor. The service durably
+claims the key before one form-urlencoded POST, then requires canonical exact
+ID/name/color/repository readback and atomic audit/cache publication. Preserve
+the same key and arguments after ambiguity or publication failure: recovery is
+GET-only and cannot issue another POST. Server-side key enforcement is not
+assumed. The Admin remains a local operator console, not a remote-label editor.
 
 `merge_pr` requires `repo_id`, positive repository-local `number`,
 `write_mode: "live"`, a caller-provided `idempotency_key`, and full expected
