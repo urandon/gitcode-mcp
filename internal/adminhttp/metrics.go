@@ -77,14 +77,12 @@ func (w *metricResponse) Write(body []byte) (int, error) {
 // Unwrap chain also preserves ResponseController operations on the writer.
 type metricFlusher struct {
 	*metricResponse
-	flusher http.Flusher
 }
 
 func (w *metricFlusher) Flush() {
-	if w.status == 0 {
-		w.status = http.StatusOK
-	}
-	w.flusher.Flush()
+	// The void Flusher contract still discards its return value, but retain
+	// any error for the completed handler outcome before cancellation wins.
+	_ = w.FlushError()
 }
 
 func (w *metricFlusher) FlushError() error {
@@ -108,8 +106,8 @@ func (c *Controller) observeRequests(next http.Handler) http.Handler {
 		r = r.WithContext(context.WithValue(ctx, adminRouteKey{}, routeState))
 		observed := &metricResponse{ResponseWriter: w}
 		var writer http.ResponseWriter = observed
-		if flusher, ok := w.(http.Flusher); ok {
-			writer = &metricFlusher{metricResponse: observed, flusher: flusher}
+		if _, ok := w.(http.Flusher); ok {
+			writer = &metricFlusher{metricResponse: observed}
 		}
 		returned := false
 		defer func() {

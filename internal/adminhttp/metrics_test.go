@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/observability"
+	"gitcode-mcp/internal/testnet"
 )
 
 func adminMetric(t *testing.T, metrics *observability.Metrics, name, route, outcome string) observability.MetricSeries {
@@ -169,6 +170,47 @@ func TestAdminMetricWrapperPreservesResponseControllerFlushError(t *testing.T) {
 		}
 	})).ServeHTTP(writer, httptest.NewRequest("GET", "http://127.0.0.1/", nil))
 	requireAdminCount(t, metrics, "unknown", "failed", 1)
+}
+
+func TestSSEActualNetworkFlushFailurePrecedesCancellation(t *testing.T) {
+	metrics := observability.NewMetrics("", time.Now())
+	c := New(Config{Metrics: metrics})
+	cookie := authorizeObservationController(c, time.Now().Add(time.Minute))
+	completed := make(chan bool, 1)
+	handler := c.handler()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		control := http.NewResponseController(w)
+		if err := control.SetWriteDeadline(time.Unix(1, 0)); err != nil {
+			completed <- false
+			return
+		}
+		handler.ServeHTTP(w, r)
+		completed <- control.Flush() != nil
+	}))
+	defer server.Close()
+	req, err := http.NewRequest("GET", server.URL+"/api/admin/v1/events?after="+encodeEventCursor(999), nil)
+	if err != nil {
+		t.Fatal("construct synthetic local request")
+	}
+	req.AddCookie(cookie)
+	client := testnet.NoExternalNetwork(t)
+	client.Timeout = 2 * time.Second
+	response, _ := client.Do(req)
+	if response != nil {
+		response.Body.Close()
+	}
+	select {
+	case failed := <-completed:
+		if !failed {
+			t.Fatal("fixture did not establish an actual response flush failure")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("synthetic local stream did not unwind")
+	}
+	requireSSECount(t, c, 0)
+	requireAdminCount(t, metrics, "events", "failed", 1)
+	requireAdminCount(t, metrics, "events", "succeeded", 0)
+	requireAdminCount(t, metrics, "events", "cancelled", 0)
 }
 
 func requireSSECount(t *testing.T, c *Controller, want float64) {
