@@ -564,7 +564,9 @@ func (m Manager) Run(ctx context.Context) error {
 		return err
 	}
 	metricSampler = observability.StartMetricSampler(ctx, m.metrics, func(context.Context) map[string]observability.ProbeValue {
-		return jobs.MetricProbes()
+		values := jobs.MetricProbes()
+		values["retry_scheduled"] = maintenance.ScheduledRetryProbe()
+		return values
 	})
 	releaseSyncRecoveryFences := jobs.beginInterruptedSyncRecoveryFences()
 	recoveryDispatched := false

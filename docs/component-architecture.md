@@ -229,6 +229,34 @@ fences and raw error messages are not writer contention. Internal adapter
 errors are not also counted at the cache layer. Direct local writers use the
 finite `other` work kind, never their operation/id as a label.
 
+`retry_scheduled` samples durable pending collection/commit waits and enabled
+maintenance backoff windows, including due windows not yet admitted. Active
+work suppresses its registry's previous backoff projection; a collection and
+commit-stage projection for the same waiting collection count once. Canonical
+repository-document source windows replace, rather than add to, their legacy
+single-source summary. Terminal job snapshots, disabled stages/registrations
+and ordinary periodic polls are not scheduled retries. The registry/job probe
+uses try-only locks over both authorities and returns null if either is busy;
+it never starts work, reads disk or infers retry state from event counts.
+
+Execution health is a separate read-only projection of retained durable jobs,
+collection outcomes, maintenance/frontier state and canonical source stages.
+It accepts only fixed signal/reason enums and internally resolved opaque refs;
+no raw error, progress text, provider payload or counter is evidence of success.
+Up to 128 incident cohorts are returned, active first then newest; omitted
+cohorts are counted and history becomes partial without hiding the overall
+active-failure count. First/last observations, last success and retry deadlines
+use authority timestamps, not polling time. A strictly later confirmed success
+recovers an incident; equal timestamps do not prove recovery order. Restart and
+repeated reads reconstruct the same retained evidence, not new execution.
+History explicitly covers retained authority, not pruned jobs or unobserved
+work. Busy/missing authority and the 32768-input projection cap produce unknown
+health, not healthy empty history. Authority inspection itself uses that same
+32768-item work budget, including inactive/empty rows; oversized sources cannot
+hold execution locks through an unbounded scan. Grouping/ref construction follows try-only
+authority snapshot release. Telemetry/storage readiness remains separate from
+execution health; unavailable observation cannot change a durable job outcome.
+
 Daemon-owned execution carries the concrete metric sink in a private context
 value without changing cancellation or deadlines. GitCode provider attempts
 are one actual policy-loop HTTP Client.Do invocation plus its bounded response
