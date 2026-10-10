@@ -161,7 +161,10 @@ checkpoints fold that scalar into dropped-event coverage and the cursor loss
 epoch. A previously issued cursor therefore requires a new snapshot after loss;
 checkpointed loss survives restart. Production instrumentation never retries
 rejected events, and invalid codes or untrusted references do not manufacture
-an execution-loss boundary. This best-effort evidence is not execution authority
+an execution-loss boundary. Close atomically seals and folds pending losses
+before shutdown persistence; rejections and delayed producer increments after
+that seal cannot alter published coverage or invalidate clean cursors. This
+best-effort evidence is not execution authority
 and does not promise crash durability before its asynchronous checkpoint.
 
 ### Metric evidence foundation

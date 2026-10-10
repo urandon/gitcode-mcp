@@ -55,6 +55,10 @@ type Collector struct {
 
 var entropyFallback atomic.Uint64
 
+// The upper bit seals admission loss at Close. Lower bits are pending losses,
+// not retained events. A racing post-seal Add is deliberately never published.
+const admissionClosed = uint64(1) << 63
+
 func randomID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -86,6 +90,9 @@ func newCollector(cfg Config, open func(string) (*storage, []Event, bool, error)
 // Emit never waits for disk, execution locks or observation readers. Rejected codes and references
 // never enter the queue. Diagnostic loss must not become a job failure.
 func (c *Collector) Emit(code Code, refs Context) bool {
+	if c.pendingLoss.Load()&admissionClosed != 0 {
+		return false
+	}
 	t, ok := catalog[code]
 	if !ok {
 		return false
@@ -125,7 +132,12 @@ func (c *Collector) loseLocked(reason string) {
 // Readers and the asynchronous writer fold it into the durable loss boundary;
 // no producer waits for that work or retries the rejected event.
 func (c *Collector) absorbLossLocked() {
-	if lost := c.pendingLoss.Swap(0); lost != 0 {
+	if !c.closing {
+		c.foldLossLocked(c.pendingLoss.Swap(0))
+	}
+}
+func (c *Collector) foldLossLocked(lost uint64) {
+	if lost != 0 {
 		c.coverage.Dropped += lost
 		c.coverage.LossEpoch += lost
 		c.coverage.State, c.coverage.Reason = "partial", "observation_contention"
@@ -139,9 +151,11 @@ func (c *Collector) Coverage() Coverage {
 }
 func (c *Collector) Close(ctx context.Context, workersUnwound bool) bool {
 	c.mu.Lock()
-	c.absorbLossLocked()
 	if !c.closing {
 		c.closing = true
+		// Swap is the loss linearization boundary. A preempted producer that
+		// increments afterward cannot change coverage or a sealed checkpoint.
+		c.foldLossLocked(c.pendingLoss.Swap(admissionClosed))
 		c.cleanRequested = workersUnwound
 		close(c.stop)
 	}

@@ -3,6 +3,7 @@
 package observability
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -127,5 +128,104 @@ func TestConcurrentEmissionReadersAndCheckpointAccountEveryAttempt(t *testing.T)
 	}
 	if count != accepted.Load() {
 		t.Fatal("admitted events were lost while readers contended")
+	}
+}
+
+func TestClosedCollectorRejectsContentionWithoutChangingLossBoundary(t *testing.T) {
+	path := testDirectory(t)
+	c := New(Config{Directory: path, ManagedOutput: true})
+	defer flush(t, c, true)
+	ready(t, c)
+	flush(t, c, true)
+	baseline, err := c.Query(Filter{}, "", 200)
+	if err != nil {
+		t.Fatal("closed baseline unavailable")
+	}
+	c.mu.Lock()
+	for i := 0; i < 100; i++ {
+		if c.Emit(RecoveryFinished, Context{}) {
+			c.mu.Unlock()
+			t.Fatal("closed collector admitted execution evidence")
+		}
+	}
+	c.mu.Unlock()
+	// Model an already validated failed-TryLock producer preempted just
+	// before its Add: a late Add after the seal is not published as loss.
+	c.pendingLoss.Add(1)
+	if c.Coverage() != baseline.Coverage {
+		t.Fatal("closed rejection changed published loss coverage")
+	}
+	if _, err := c.Query(Filter{}, baseline.Cursor, 200); err != nil {
+		t.Fatal("closed rejection invalidated a clean cursor")
+	}
+	restarted := New(Config{Directory: path, ManagedOutput: true})
+	defer flush(t, restarted, true)
+	ready(t, restarted)
+	flush(t, restarted, true)
+	if restarted.Coverage().Dropped != baseline.Coverage.Dropped || restarted.Coverage().LossEpoch != baseline.Coverage.LossEpoch {
+		t.Fatal("restart changed the sealed loss boundary")
+	}
+}
+
+func TestCloseSealsLossBeforeShutdownPersistence(t *testing.T) {
+	path := testDirectory(t)
+	var pause atomic.Bool
+	entered, release := make(chan struct{}), make(chan struct{})
+	var enteredOnce, releaseOnce sync.Once
+	c := newCollector(Config{Directory: path, ManagedOutput: true}, func(path string) (*storage, []Event, bool, error) {
+		s, events, unclean, err := openStorage(path)
+		if err == nil {
+			s.appendFault = func() error {
+				if pause.Load() {
+					enteredOnce.Do(func() { close(entered) })
+					<-release
+				}
+				return nil
+			}
+		}
+		return s, events, unclean, err
+	})
+	defer flush(t, c, true)
+	defer releaseOnce.Do(func() { close(release) })
+	ready(t, c)
+	await(t, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return len(c.events) > 0
+	})
+	// A validated loss before sealing must be preserved, unlike late Add.
+	prior := c.Coverage()
+	c.pendingLoss.Add(7)
+	pause.Store(true)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() { done <- c.Close(ctx, true) }()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("shutdown persistence barrier unavailable")
+	}
+	baseline := c.Coverage()
+	if baseline.Dropped != prior.Dropped+7 || baseline.LossEpoch != prior.LossEpoch+7 {
+		t.Fatal("pre-seal loss was not folded exactly once")
+	}
+	c.mu.Lock()
+	accepted := c.Emit(RecoveryFinished, Context{})
+	c.mu.Unlock()
+	c.pendingLoss.Add(3)
+	if accepted || c.Coverage() != baseline {
+		t.Fatal("shutdown rejection changed the sealed loss boundary")
+	}
+	releaseOnce.Do(func() { close(release) })
+	if !<-done {
+		t.Fatal("shutdown did not finish after releasing persistence")
+	}
+	restarted := New(Config{Directory: path, ManagedOutput: true})
+	defer flush(t, restarted, true)
+	ready(t, restarted)
+	flush(t, restarted, true)
+	if restarted.Coverage().Dropped != baseline.Dropped || restarted.Coverage().LossEpoch != baseline.LossEpoch {
+		t.Fatal("final checkpoint lost or recounted sealed losses")
 	}
 }
