@@ -242,7 +242,9 @@ func (m Manager) ApplyObservationUpgrade(ctx context.Context, planID string) (Ob
 		return plan, observationUpgradeError("stale_plan")
 	}
 	paths, _ := m.ResolvePaths()
-	if err := m.unloadForRepair(ctx, paths); err != nil {
+	// A failed inspection is unknown, not proof of absence. Require the
+	// platform stop command itself to succeed before any legacy cleanup.
+	if err := m.runStopCommand(ctx, paths); err != nil {
 		return plan, observationUpgradeError("quiesce_failed")
 	}
 	if _, err := m.waitForStopped(ctx, paths); err != nil {

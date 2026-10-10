@@ -121,10 +121,67 @@ func WriteDefinition(path string, data []byte) error {
 		return errors.New("unsafe service definition directory")
 	}
 	defer dir.Close()
-	if err := replacePrivate(dir, filepath.Base(path), data); err != nil {
+	if err := replaceAtomic(dir, filepath.Base(path), ".gitcode-mcp-definition.pending", data, 1<<20); err != nil {
 		return errors.New("service definition replacement incomplete")
 	}
 	return dir.Sync()
+}
+
+// The fixed staging leaf is also the writer lock. A failed/short write never
+// truncates the current leaf, and a crash leaves only one bounded staging leaf.
+func replaceAtomic(dir *os.File, name, staging string, data []byte, cap int) error {
+	if len(data) > cap {
+		return errors.New("replacement exceeds bound")
+	}
+	old, err := openPrivate(dir, name, unix.O_RDONLY)
+	if err != nil && !missing(err) {
+		return err
+	}
+	if old != nil {
+		old.Close()
+	}
+	f, err := openPrivate(dir, staging, unix.O_RDWR|unix.O_CREAT)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		return errors.New("replacement writer active")
+	}
+	if info, err := f.Stat(); err != nil || info.Size() > int64(cap) {
+		return errors.New("unsafe replacement staging file")
+	}
+	if err := f.Truncate(0); err != nil {
+		return err
+	}
+	if n, err := f.WriteAt(data, 0); err != nil {
+		return err
+	} else if n != len(data) {
+		return io.ErrShortWrite
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := unix.Renameat(int(dir.Fd()), staging, int(dir.Fd()), name); err != nil {
+		return err
+	}
+	return dir.Sync()
+}
+
+func trimPrivate(dir *os.File, name string, bytes int) error {
+	f, err := openPrivate(dir, name, unix.O_WRONLY)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || bytes < 0 || info.Size() < int64(bytes) || info.Size() > SegmentBytes {
+		return errors.New("invalid observation prefix")
+	}
+	if err := f.Truncate(int64(bytes)); err != nil {
+		return err
+	}
+	return f.Sync()
 }
 func readPrivate(dir *os.File, name string, cap int64) ([]byte, error) {
 	f, err := openPrivate(dir, name, unix.O_RDONLY)
@@ -153,17 +210,27 @@ func replacePrivate(dir *os.File, name string, data []byte) error {
 	}
 	return f.Sync()
 }
-func appendPrivate(dir *os.File, name string, data []byte) error {
+func appendPrivate(dir *os.File, name string, data []byte, expected int) error {
 	f, err := openPrivate(dir, name, unix.O_WRONLY|unix.O_APPEND|unix.O_CREAT)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if info, err := f.Stat(); err != nil || info.Size()+int64(len(data)) > SegmentBytes {
+	info, err := f.Stat()
+	if err != nil || info.Size() < int64(expected) || info.Size() > SegmentBytes || expected+len(data) > SegmentBytes {
 		return errors.New("observation segment exceeds bound")
 	}
-	if _, err := f.Write(data); err != nil {
+	// A failed append may leave a short suffix. Trim only bytes beyond the
+	// last successful write before a later bounded attempt; do not replay it.
+	if info.Size() != int64(expected) {
+		if err := f.Truncate(int64(expected)); err != nil {
+			return err
+		}
+	}
+	if n, err := f.Write(data); err != nil {
 		return err
+	} else if n != len(data) {
+		return io.ErrShortWrite
 	}
 	// Crash loss is generation-fenced. Clean shutdown syncs all streams.
 	return nil

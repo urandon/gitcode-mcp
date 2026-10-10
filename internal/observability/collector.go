@@ -18,6 +18,7 @@ type Config struct {
 }
 type pending struct {
 	legacy        bool
+	legacyStream  string
 	observedBytes int
 	code          Code
 	refs          Context
@@ -155,6 +156,8 @@ func (c *Collector) run() {
 	}
 	if legacyState != "" {
 		c.coverage.OutputState = legacyState
+		c.coverage.State = "partial"
+		c.coverage.Reason = legacyState
 	}
 	if err != nil {
 		c.generation = randomID()
@@ -175,7 +178,8 @@ func (c *Collector) run() {
 			c.coverage.State = "ready"
 		}
 		if s.state.Partial {
-			c.loseLocked("recovered_partial")
+			c.coverage.State = "partial"
+			c.coverage.Reason = "recovered_partial"
 		}
 	}
 	// A durable bounded counter is not an OS restart count, and does not
@@ -211,7 +215,12 @@ func (c *Collector) run() {
 				if i == 0 {
 					observed = sample.Bytes
 				}
-				c.write(s, pending{code: code, at: time.Now().UTC(), legacy: true, observedBytes: observed})
+				c.write(s, pending{code: code, at: time.Now().UTC(), legacy: true, legacyStream: stream, observedBytes: observed})
+			}
+			if sample.Partial {
+				c.mu.Lock()
+				c.loseLocked("legacy_partial")
+				c.mu.Unlock()
 			}
 			if s != nil {
 				s.state.LegacyCursors[index] = sample.Cursor
@@ -252,9 +261,18 @@ func (c *Collector) run() {
 			code := Shutdown
 			if !clean {
 				code = ShutdownIncomplete
+				c.mu.Lock()
+				c.loseLocked("shutdown_incomplete")
+				c.mu.Unlock()
 			}
 			c.write(s, pending{code: code, at: time.Now().UTC()})
 			if s != nil {
+				if err := s.sealManifest(); err != nil {
+					c.mu.Lock()
+					c.storageFailed = true
+					c.loseLocked("storage_failed")
+					c.mu.Unlock()
+				}
 				if err := s.syncFiles(); err != nil {
 					c.mu.Lock()
 					c.storageFailed = true
@@ -292,6 +310,9 @@ func (c *Collector) write(s *storage, p pending) {
 	e := Event{Schema: 1, EventID: randomID(), OccurredAt: p.at, BootID: c.boot, Sequence: sequence, Stream: t.stream, Severity: t.severity, Component: t.component, Code: p.code, Message: t.message,
 		Legacy: p.legacy, ObservedBytes: p.observedBytes,
 		JobRef: p.refs.Job.value, RegistrationRef: p.refs.Registration.value, CacheRef: p.refs.Cache.value, RepoRef: p.refs.Repo.value, CorrelationRef: p.refs.Correlation.value}
+	if p.legacy {
+		e.Stream = p.legacyStream
+	}
 	b, err := marshalEvent(e)
 	if err != nil {
 		c.mu.Lock()
@@ -300,7 +321,7 @@ func (c *Collector) write(s *storage, p pending) {
 		return
 	}
 	var evicted uint64
-	if err == nil && s != nil && !c.storageFailed {
+	if err == nil && s != nil {
 		c.mu.Lock()
 		s.state.Dropped = c.coverage.Dropped
 		s.state.LossEpoch = c.coverage.LossEpoch
@@ -313,6 +334,11 @@ func (c *Collector) write(s *storage, p pending) {
 	if err != nil {
 		c.storageFailed = true
 		c.loseLocked("storage_failed")
+	} else if s != nil && c.storageFailed {
+		// One attempt per admitted event, no retry loop or execution wait.
+		// Restored persistence does not erase the already observed loss epoch.
+		c.storageFailed = false
+		c.coverage.Reason = "storage_recovered"
 	}
 	// Copy-on-write bounded snapshots; readers never wait for disk and cannot
 	// mutate retained events. Eviction also invalidates old scan positions.

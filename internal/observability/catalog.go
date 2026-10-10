@@ -95,8 +95,12 @@ func validRef(value, kind string) bool {
 }
 func (e Event) valid() bool {
 	t, ok := catalog[e.Code]
+	streamOK := e.Stream == t.stream
+	if e.Legacy {
+		streamOK = e.Stream == "stdout" || e.Stream == "stderr"
+	}
 	return ok && e.ObservedBytes >= 0 && e.ObservedBytes <= MaxPageBytes && (e.Legacy || e.ObservedBytes == 0) && e.Schema == 1 && e.Sequence > 0 && hexID.MatchString(e.BootID) && hexID.MatchString(e.EventID) &&
-		!e.OccurredAt.IsZero() && e.Stream == t.stream && e.Severity == t.severity && e.Component == t.component && e.Message == t.message &&
+		!e.OccurredAt.IsZero() && streamOK && e.Severity == t.severity && e.Component == t.component && e.Message == t.message &&
 		validRef(e.JobRef, "job") && validRef(e.RegistrationRef, "registration") && validRef(e.CacheRef, "cache") && validRef(e.RepoRef, "repo") && validRef(e.CorrelationRef, "correlation")
 }
 func marshalEvent(e Event) ([]byte, error) {

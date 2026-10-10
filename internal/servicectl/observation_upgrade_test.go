@@ -225,3 +225,30 @@ func TestObservationUpgradePinsTargetExecutableBytes(t *testing.T) {
 		t.Fatal("stale executable plan stopped owner")
 	}
 }
+
+func TestUnknownPlatformStateDoesNotDeleteLegacy(t *testing.T) {
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			m, paths := legacyService(t, goos)
+			m.OutputRunner = func(context.Context, string, ...string) (string, error) {
+				return "", errors.New("platform unavailable")
+			}
+			m.Runner = func(context.Context, string, ...string) error { return errors.New("platform unavailable") }
+			p, err := m.PlanObservationUpgrade()
+			if err != nil {
+				t.Fatal("fixture plan")
+			}
+			_, err = m.ApplyObservationUpgrade(context.Background(), p.PlanID)
+			var coded RPCDomainError
+			if !errors.As(err, &coded) || coded.Code != "observation_quiesce_failed" {
+				t.Fatal("unknown platform state was not refused")
+			}
+			if _, err := os.Stat(filepath.Join(paths.LogDir, "service.out.log")); err != nil {
+				t.Fatal("legacy output deleted without successful stop")
+			}
+			if boundedDefinition(paths.InstallKind, paths.InstallPath) {
+				t.Fatal("legacy definition changed without successful stop")
+			}
+		})
+	}
+}

@@ -119,6 +119,16 @@ are durably reserved in bounded batches; crash gaps invalidate scan assumptions.
 A clean shutdown syncs managed bytes before publishing its marker. Observed boot
 counts describe this collector, not OS restart counts.
 
+Recovery trims corrupt suffixes to validated catalog prefixes before reopening
+the writer. Managed streams resume by sequence, not by file size. Each admitted
+event makes at most one storage attempt; a transient failure does not disable
+the remaining boot, and restored recording does not erase historical loss.
+Clean metadata includes a bounded segment manifest so missing/truncated streams
+cannot masquerade as healthy empty evidence. A clean restart of already known
+partial history preserves its cursor unless new loss is observed. Metadata is
+published by syncing the inactive 4 KiB slot and atomically renaming it over
+the current slot, retaining the two-slot bound even during publication.
+
 Existing installations are not silently upgraded by `install --overwrite` or
 `repair`. Render the exact local plan first:
 
@@ -127,7 +137,7 @@ gitcode-mcp service upgrade-observation --format json
 gitcode-mcp service upgrade-observation --yes --plan-id PLAN_ID --format json
 ```
 
-Confirmation stops the installed platform owner and proves its PID/socket are
+Confirmation requires a successful platform stop and proves its PID/socket are
 gone, revalidates the definition, target executable digest and fixed legacy
 identities, removes only `service.out.log` / `service.err.log`, replaces the
 definition and restarts. Cleanup removes those files and is not recoverable;
@@ -136,7 +146,11 @@ or destination is accepted. A stale plan or active owner is refused. Interrupted
 cleanup, replacement or restart requires a fresh plan for remaining effects and
 keeps readiness at `migration_required`. Schema migration replaces a compatible
 binary while preserving known legacy output routing; it is not confirmation of
-an observation upgrade.
+an observation upgrade. Unknown platform state fails closed before cleanup;
+an inspection error is never proof that the old owner has stopped. Definition
+replacement syncs a single fixed, private staging leaf before atomic rename;
+a failed write preserves the previous definition. An interrupted staging write
+is overwritten only by a later explicitly confirmed replacement.
 
 ## Install Provider
 
