@@ -400,13 +400,28 @@ func (p *OllamaProvider) doJSONOnce(ctx context.Context, method, path string, bo
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
+	// Pre-cancelled work sends no transport attempt. Keep the existing typed
+	// cancellation result, but do not fabricate provider traffic in telemetry.
+	if err := ctx.Err(); err != nil {
 		return classifyProviderError("embedding provider request failed", err)
 	}
+	attempt := startEmbeddingMetricAttempt(ctx)
+	status := 0
+	var transferErr error
+	var transferCompleted time.Time
+	defer func() { attempt.finish(status, transferErr, transferCompleted) }()
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		transferErr = err
+		transferCompleted = time.Now()
+		return classifyProviderError("embedding provider request failed", err)
+	}
+	status = resp.StatusCode
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
+	transferCompleted = time.Now()
 	if err != nil {
+		transferErr = err
 		return classifyProviderError("embedding provider response read failed", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

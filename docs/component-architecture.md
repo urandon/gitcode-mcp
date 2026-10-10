@@ -230,9 +230,18 @@ execution result. Outcomes use fixed status/typed-error classes: succeeded,
 forbidden (including authentication rejection), rate_limited, timeout,
 cancelled, invalid transfer/validation or failed. Only the class and duration
 cross the observation boundary, never raw request/response data.
-Foreground clients without a daemon sink remain unobserved. Embedding
-transport, incidents and the remaining execution boundaries retain their own
-integration gates.
+Foreground clients without a daemon sink remain unobserved. Incidents and the
+remaining execution boundaries retain their own integration gates.
+
+Ollama HTTP attempts use the same finite transport outcome classes and per-boot
+provider series. Model listing, native embedding calls, each actual retry and
+each one-input legacy fallback request count separately. A fake provider,
+empty input, encoding/request-construction failure or pre-cancelled work does
+not invent HTTP traffic. Duration ends when transport/response reading completes,
+excluding subsequent JSON/vector validation; recording occurs after response
+body release. An HTTP-successful response can therefore still yield an invalid
+JSON, missing-model or dimension error at the embedding-operation layer. No
+input, endpoint, model, credentials or provider error text enters these metrics.
 
 Confirmed sync throughput is recorded at the shared atomic commit boundary,
 not inferred from a job, a fetched/staged count or a recovery projection.
