@@ -130,8 +130,10 @@ func (m *JobManager) observeJobTerminal(previousStatus string, state jobMetricSt
 	}
 }
 
-// MetricProbes never waits for the execution lock. A busy authority is an
-// unavailable observation, not a fabricated zero or an execution delay.
+const maxJobMetricRows = 32768
+
+// MetricProbes never waits for the execution lock. A busy or oversized authority
+// is unavailable, not a partial total, fabricated zero or unbounded lock hold.
 func (m *JobManager) MetricProbes() map[string]observability.ProbeValue {
 	values := map[string]observability.ProbeValue{
 		"jobs_queued":    observability.Unavailable(),
@@ -139,6 +141,13 @@ func (m *JobManager) MetricProbes() map[string]observability.ProbeValue {
 		"writer_waiters": observability.Unavailable(),
 	}
 	if !m.mu.TryLock() {
+		return values
+	}
+	// Map lengths are O(1). Count all rows, including nil and terminal jobs;
+	// only queue headers are visited because each queue length is also O(1).
+	// Subtraction avoids overflow from summing arbitrary authority sizes.
+	if len(m.jobs) > maxJobMetricRows || len(m.syncCommitQueues) > maxJobMetricRows-len(m.jobs) {
+		m.mu.Unlock()
 		return values
 	}
 	var queued, active, waiters int

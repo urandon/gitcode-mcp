@@ -185,6 +185,12 @@ that boundary. Histogram boundaries are 0.01, 0.05, 0.1, 0.5, 1, 5, 15, 60, 300
 and 1800 seconds, plus one overflow cell. Distribution cells are non-cumulative;
 `count` and `sum` describe the per-boot duration distribution, not proof of work.
 
+Job gauges inspect at most 32,768 authority rows and commit-queue headers under
+a successfully acquired execution `TryLock`. Nil and terminal rows count toward
+that bound; queue membership is not scanned to obtain its length. Larger job
+authorities make all three job gauges unavailable rather than returning partial
+counts, pruning execution state or holding the mutex for an unbounded traversal.
+
 History is a fixed ring of 60 UTC one-minute buckets, sampled in distinct UTC
 15-second slots. Gauge/counter count, sum and extrema summarize sampled values.
 Counter delta sums valid adjacent-sample increments; rate is the latest valid
