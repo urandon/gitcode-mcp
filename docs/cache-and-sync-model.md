@@ -84,6 +84,8 @@ Foreground bulk sync takes one logical writer lease for the selected cache and c
 
 An omitted service lock override delegates to the store's writer authority. Ordinary file-backed caches share a per-file lease across handles and processes; file and directory symlink aliases resolve to the same physical authority, including the canonical parent before a new cache exists. Migration uses the same canonical authority. Distinct files remain independent. Private in-memory stores use random per-database lock identities, not process-global fallbacks or pointer-address names. Explicit shared lock overrides still intentionally contend, even across different stores. This default is shared by CLI, MCP and Admin service paths and does not add provider retries or change typed contention diagnostics.
 
+Unresolvable file authority fails closed with an opaque typed error. Portable missing-file, permission and invalid-argument classifications remain available without wrapping pathname-bearing filesystem errors or exposing symlink targets through transport diagnostics.
+
 Foreground exact PR-comment readback (`--pr-comments --input pr:N`) resolves the
 cached canonical parent before bounded writer admission. It waits at most five
 seconds, respecting caller cancellation/deadline, with capped local backoff.

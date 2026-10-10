@@ -149,3 +149,32 @@ func TestCanonicalCacheOpenSurvivesAliasRetarget(t *testing.T) {
 		t.Fatal("replacement connection escaped the canonical writer authority")
 	}
 }
+
+func TestWriterAuthorityResolutionErrorsAreOpaque(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("filesystem symlink creation requires privileges on Windows")
+	}
+	root := t.TempDir()
+	targetParent := filepath.Join(root, "private-target-missing")
+	alias := filepath.Join(root, "alias.db")
+	if err := os.Symlink(filepath.Join(targetParent, "cache.db"), alias); err != nil {
+		t.Fatal("fixture symlink creation failed")
+	}
+	for _, open := range []func() error{
+		func() error { _, err := NewSQLiteStore(context.Background(), alias); return err },
+		func() error {
+			_, err := cachePathForDataSource(alias)
+			return err
+		},
+	} {
+		err := open()
+		var authority ErrWriterAuthorityResolution
+		var pathError *os.PathError
+		if !errors.As(err, &authority) || !errors.Is(err, os.ErrNotExist) || errors.As(err, &pathError) {
+			t.Fatal("authority error lost its safe classification or retained a pathname-bearing cause")
+		}
+		if strings.Contains(err.Error(), root) || strings.Contains(err.Error(), "private-target-missing") {
+			t.Fatal("writer authority error disclosed a filesystem coordinate")
+		}
+	}
+}

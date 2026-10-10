@@ -237,7 +237,7 @@ func cachePathForDataSource(dataSourceName string) (string, error) {
 	}
 	abs, err := filepath.Abs(dataSourceName)
 	if err != nil {
-		return "", fmt.Errorf("cache: resolve writer authority: %w", err)
+		return "", writerAuthorityResolutionError(err)
 	}
 	for depth := 0; depth < 32; depth++ {
 		physical, err := filepath.EvalSymlinks(abs)
@@ -245,7 +245,7 @@ func cachePathForDataSource(dataSourceName string) (string, error) {
 			return physical, nil
 		}
 		if !os.IsNotExist(err) {
-			return "", fmt.Errorf("cache: resolve writer authority: %w", err)
+			return "", writerAuthorityResolutionError(err)
 		}
 		// A dangling final symlink can still be used by SQLite to create its
 		// target. Follow it before selecting the not-yet-created file's lease.
@@ -253,7 +253,7 @@ func cachePathForDataSource(dataSourceName string) (string, error) {
 		if statErr == nil && info.Mode()&os.ModeSymlink != 0 {
 			target, err := os.Readlink(abs)
 			if err != nil {
-				return "", fmt.Errorf("cache: resolve writer symlink: %w", err)
+				return "", writerAuthorityResolutionError(err)
 			}
 			if !filepath.IsAbs(target) {
 				target = filepath.Join(filepath.Dir(abs), target)
@@ -262,15 +262,15 @@ func cachePathForDataSource(dataSourceName string) (string, error) {
 			continue
 		}
 		if statErr != nil && !os.IsNotExist(statErr) {
-			return "", fmt.Errorf("cache: resolve writer authority: %w", statErr)
+			return "", writerAuthorityResolutionError(statErr)
 		}
 		parent, err := filepath.EvalSymlinks(filepath.Dir(abs))
 		if err != nil {
-			return "", fmt.Errorf("cache: resolve writer directory: %w", err)
+			return "", writerAuthorityResolutionError(err)
 		}
 		return filepath.Join(parent, filepath.Base(abs)), nil
 	}
-	return "", fmt.Errorf("cache: writer authority symlink depth exceeded")
+	return "", writerAuthorityResolutionError(nil)
 }
 
 func writerLockPath(cachePath string) string {
