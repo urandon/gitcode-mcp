@@ -61,7 +61,7 @@ func (e Event) validExecution() bool {
 		switch d.Outcome {
 		case "succeeded":
 			return d.FailureClass == ""
-		case "cancelled", "interrupted":
+		case "cancelled", "interrupted", "superseded":
 			return d.FailureClass == d.Outcome
 		case "failed":
 			return executionFailure(d.FailureClass) && d.FailureClass != "cancelled" && d.FailureClass != "interrupted"

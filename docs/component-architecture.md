@@ -172,6 +172,9 @@ Execution events use additive schema-1 `phase`, `collection`, `outcome`,
 compatibility table is checked before admission and again during replay. Job
 admission/terminal, provider-attempt, and sync-commit codes require resolved
 opaque correlation; job and commit codes also require an opaque job ref.
+Terminal outcomes include succeeded, failed, cancelled, interrupted, and
+superseded; cancellation, interruption, and supersession carry the matching
+finite class rather than an arbitrary owner error string.
 Attempt ordinals are bounded to 1024; absent means unknown, not an invented
 first attempt. Existing lifecycle records remain valid without these fields,
 but cannot carry execution dimensions. Legacy text cannot establish an

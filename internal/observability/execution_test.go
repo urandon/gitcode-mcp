@@ -29,6 +29,7 @@ func TestExecutionCatalogFiniteCompatibility(t *testing.T) {
 		{JobTerminal, ExecutionDetails{Phase: "completion", Outcome: "failed", FailureClass: "operation_failed"}},
 		{JobTerminal, ExecutionDetails{Phase: "completion", Outcome: "cancelled", FailureClass: "cancelled"}},
 		{JobTerminal, ExecutionDetails{Phase: "completion", Outcome: "interrupted", FailureClass: "interrupted"}},
+		{JobTerminal, ExecutionDetails{Phase: "completion", Outcome: "superseded", FailureClass: "superseded"}},
 		{ProviderAttempt, ExecutionDetails{Phase: "fetch", Outcome: "succeeded"}},
 		{ProviderAttempt, ExecutionDetails{Phase: "embedding", Outcome: "succeeded", Attempt: MaxExecutionAttempt}},
 		{ProviderAttempt, ExecutionDetails{Phase: "fetch", Collection: "wiki", Outcome: "failed", FailureClass: "provider_failed", Attempt: 2}},
@@ -39,6 +40,12 @@ func TestExecutionCatalogFiniteCompatibility(t *testing.T) {
 			code    Code
 			details ExecutionDetails
 		}{ProviderAttempt, ExecutionDetails{Phase: "fetch", Outcome: outcome, FailureClass: outcome}})
+	}
+	for _, failure := range []string{"timeout", "rate_limited", "forbidden", "invalid", "provider_failed"} {
+		cases = append(cases, struct {
+			code    Code
+			details ExecutionDetails
+		}{JobTerminal, ExecutionDetails{Phase: "completion", Outcome: "failed", FailureClass: failure}})
 	}
 	for _, tc := range cases {
 		t.Run(string(tc.code)+"/"+tc.details.Phase+"/"+tc.details.Outcome, func(t *testing.T) {
@@ -76,6 +83,8 @@ func TestExecutionCatalogRejectsCrossCodeCombinations(t *testing.T) {
 		executionFixtureEvent(JobTerminal, ExecutionDetails{Phase: "completion", Outcome: "succeeded", FailureClass: "operation_failed"}),
 		executionFixtureEvent(JobTerminal, ExecutionDetails{Phase: "completion", Outcome: "cancelled", FailureClass: "timeout"}),
 		executionFixtureEvent(JobTerminal, ExecutionDetails{Phase: "completion", Outcome: "failed", FailureClass: "interrupted"}),
+		executionFixtureEvent(JobTerminal, ExecutionDetails{Phase: "completion", Outcome: "failed", FailureClass: "superseded"}),
+		executionFixtureEvent(JobTerminal, ExecutionDetails{Phase: "completion", Outcome: "superseded", FailureClass: "interrupted"}),
 		executionFixtureEvent(ProviderAttempt, ExecutionDetails{Phase: "completion", Outcome: "succeeded"}),
 		executionFixtureEvent(ProviderAttempt, ExecutionDetails{Phase: "embedding", Collection: "issues", Outcome: "succeeded"}),
 		executionFixtureEvent(ProviderAttempt, ExecutionDetails{Phase: "fetch", Outcome: "timeout", FailureClass: "provider_failed"}),
