@@ -563,11 +563,6 @@ func (m Manager) Run(ctx context.Context) error {
 	if err := jobs.LoadAndMarkInterrupted(); err != nil {
 		return err
 	}
-	metricSampler = observability.StartMetricSampler(ctx, m.metrics, func(context.Context) map[string]observability.ProbeValue {
-		values := jobs.MetricProbes()
-		values["retry_scheduled"] = maintenance.ScheduledRetryProbe()
-		return values
-	})
 	releaseSyncRecoveryFences := jobs.beginInterruptedSyncRecoveryFences()
 	recoveryDispatched := false
 	defer func() {
@@ -590,7 +585,7 @@ func (m Manager) Run(ctx context.Context) error {
 	}
 	admin := adminhttp.New(adminhttp.Config{
 		Bind: m.AdminBind, AllowNonLoopback: m.AdminAllowNonLoopback, SessionTTL: m.AdminSessionTTL,
-		Assets: assets, Readiness: m.adminReadiness,
+		Assets: assets, Readiness: m.adminReadiness, Metrics: m.metrics,
 		Snapshot: func(snapshotContext context.Context) (adminhttp.ObservationSnapshot, error) {
 			return m.adminObservation(snapshotContext, jobs, maintenance, now)
 		},
@@ -615,6 +610,12 @@ func (m Manager) Run(ctx context.Context) error {
 		ApplyRAGRepair:                     adminControls.ApplyRAGRepair,
 	})
 	adminForShutdown = admin
+	metricSampler = observability.StartMetricSampler(ctx, m.metrics, func(context.Context) map[string]observability.ProbeValue {
+		values := jobs.MetricProbes()
+		values["retry_scheduled"] = maintenance.ScheduledRetryProbe()
+		values["sse_connections"] = admin.SSEConnectionsProbe()
+		return values
+	})
 	if m.AdminAutoStart {
 		if _, err := admin.Start(ctx); err != nil {
 			return err

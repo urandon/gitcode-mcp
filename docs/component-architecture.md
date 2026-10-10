@@ -318,6 +318,24 @@ These counters remain volatile per-boot evidence; durable receipts and coverage
 remain the execution authority. Their availability is attached when the actual
 commit/index hook is entered, independently of job admission/duration.
 
+Admin HTTP hooks classify only registered router patterns into the fixed
+`session`, `read`, `control`, `search`, `events`, `assets` and `unknown` classes.
+Completed handlers record one request outcome and duration outside handler
+execution and session locks. A final 4xx is rejected, a 5xx, panic or response
+write failure is failed, and a cancelled request is cancelled unless an observed
+failure already takes precedence. Metric loss never changes response behavior.
+Queries, request bodies, cookies, raw paths, target identities and error text
+are not metric dimensions. Explicit handler work inherits the concrete daemon
+metric sink without starting additional provider or maintenance work.
+
+The SSE connection gauge counts only authenticated, cursor-valid handlers with
+actual streaming support. Atomic admission and deferred release cover every
+exit, including cancellation and replay recovery. Its request duration is the
+stream lifetime, not handshake latency; an open stream has not yet contributed
+a completed request. Sampling this gauge invokes no snapshot or provider and
+takes no execution/session/event locks. HTTP streaming support and
+ResponseController error behavior remain unchanged by the optional wrapper.
+
 
 - [Architecture](architecture.md)
 - [Cache And Sync Model](cache-and-sync-model.md)
