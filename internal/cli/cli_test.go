@@ -1486,7 +1486,7 @@ func TestServiceHelpShowsLifecycleSubcommands(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
-	for _, want := range []string{"install", "repair", "uninstall", "start", "stop", "status", "doctor", "run"} {
+	for _, want := range []string{"install", "repair", "upgrade-observation", "uninstall", "start", "stop", "status", "doctor", "run"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("service help missing %q in %q", want, stdout.String())
 		}

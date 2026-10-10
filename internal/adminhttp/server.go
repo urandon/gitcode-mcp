@@ -79,14 +79,15 @@ type Config struct {
 }
 
 type Controller struct {
-	cfg      Config
-	mu       sync.Mutex
-	listener net.Listener
-	server   *http.Server
-	status   Status
-	launch   map[[32]byte]time.Time
-	sessions map[[32]byte]session
-	events   *eventLog
+	shutdownDone chan struct{}
+	cfg          Config
+	mu           sync.Mutex
+	listener     net.Listener
+	server       *http.Server
+	status       Status
+	launch       map[[32]byte]time.Time
+	sessions     map[[32]byte]session
+	events       *eventLog
 }
 
 type session struct {
@@ -104,7 +105,7 @@ func New(cfg Config) *Controller {
 	if cfg.EventPollInterval <= 0 {
 		cfg.EventPollInterval = time.Second
 	}
-	return &Controller{cfg: cfg, launch: map[[32]byte]time.Time{}, sessions: map[[32]byte]session{}, events: newEventLog(cfg.EventCapacity)}
+	return &Controller{cfg: cfg, shutdownDone: make(chan struct{}), launch: map[[32]byte]time.Time{}, sessions: map[[32]byte]session{}, events: newEventLog(cfg.EventCapacity)}
 }
 
 func (c *Controller) Start(ctx context.Context) (Status, error) {
@@ -123,18 +124,42 @@ func (c *Controller) Start(ctx context.Context) (Status, error) {
 	baseURL := "http://" + ln.Addr().String()
 	c.listener = ln
 	c.status = Status{Running: true, URL: baseURL, Bind: ln.Addr().String(), StartedAt: time.Now().UTC()}
-	c.server = &http.Server{Handler: c.handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
+	c.server = &http.Server{Handler: c.handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, BaseContext: func(net.Listener) context.Context { return ctx }}
+	pollDone := make(chan struct{})
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		_ = c.server.Shutdown(shutdownCtx)
+		if err := c.server.Shutdown(shutdownCtx); err == nil {
+			<-pollDone
+			close(c.shutdownDone)
+		}
 	}()
 	go func() { _ = c.server.Serve(ln) }()
 	if c.cfg.Snapshot != nil {
-		go c.pollObservation(ctx)
+		go func() { defer close(pollDone); c.pollObservation(ctx) }()
+	} else {
+		close(pollDone)
 	}
 	return c.status, nil
+}
+
+// WaitStopped proves both HTTP handlers and the observation poller unwound.
+// It never turns an incomplete/blocked shutdown into a clean daemon marker.
+func (c *Controller) WaitStopped(ctx context.Context) bool {
+	c.mu.Lock()
+	started := c.listener != nil
+	done := c.shutdownDone
+	c.mu.Unlock()
+	if !started {
+		return true
+	}
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (c *Controller) Status() Status {
