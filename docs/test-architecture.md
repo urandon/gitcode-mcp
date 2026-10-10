@@ -130,6 +130,16 @@ attempts: execution and the original ordinal remain unchanged, no fabricated
 stage event is emitted, and each omitted confirmed transition is counted as
 partial coverage. Buffered-omission tests reject mismatched scopes, defer loss
 until release, race duplicate/late flushes, and verify restart persistence.
+Recovery-event fixtures reload real job snapshots and exercise actual sync and
+repository-documentation resume, receipt/checkpoint terminal reconciliation and
+group rejection. Repeated/missing/stale/fenced decisions and generic projections
+emit no new boundary. Failed retained resume records loss while rolled-back
+resume/rejection emits nothing. Fixed-cap group capture is qualified using a
+supported retention policy larger than 128 jobs and paginated event reads,
+conserving retained plus lost boundaries without fabricating admission,
+terminal execution, provider or commit counters. Closed replay, reader-lock
+contention, count-only metric loss and durable loss-restart tests enforce the
+same nonblocking/public-safe contracts independently of optional metrics.
 Maintenance identity tests also enroll canonical and alias repository ids
 concurrently, migrate compatible and conflicting version-1 registry entries,
 project legacy registration/job references to the canonical identity, preserve

@@ -29,9 +29,8 @@ func TestUnconfirmedExecutionLossSealRestartAndCursor(t *testing.T) {
 	c.mu.Lock()
 	done := make(chan struct{})
 	go func() {
-		for i := 0; i < 7; i++ {
-			c.UnconfirmedExecution()
-		}
+		c.UnconfirmedExecutions(0)
+		c.UnconfirmedExecutions(7)
 		close(done)
 	}()
 	select {

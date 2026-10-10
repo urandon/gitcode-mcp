@@ -1771,7 +1771,7 @@ func (m *JobManager) reconcileSyncRetryStage(ctx context.Context, manager Manage
 }
 
 func (m *JobManager) completeInterruptedSyncRetry(jobID string) error {
-	return m.updateJobPersisted(jobID, func(job *Job, now time.Time) {
+	return m.updateRecoveredJobPersisted(jobID, jobRecoveryReconciled, func(job *Job, now time.Time) {
 		health := aggregateSyncCollectionOutcome(job.SyncCollections)
 		job.Status, job.SyncHealth = JobStatusSucceeded, health
 		if health == SyncHealthFailed {
@@ -1812,8 +1812,15 @@ func selectSyncRetryCollection(req *StartSyncJobRequest, collection string, sele
 }
 
 func (m *JobManager) resumeInterruptedSyncRetry(jobID string, cancel context.CancelFunc) error {
+	var identity jobObservationIdentity
+	var changed, persisted bool
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		if changed {
+			m.observeJobRecovery(identity, jobRecoveryResumed, "", persisted)
+		}
+	}()
 	if m.closing {
 		return errors.New("service is stopping")
 	}
@@ -1821,17 +1828,20 @@ func (m *JobManager) resumeInterruptedSyncRetry(jobID string, cancel context.Can
 	if job == nil || job.Status != JobStatusInterrupted {
 		return nil
 	}
+	identity, changed = observationIdentity(*job), true
 	now := m.now().UTC()
 	job.Status, job.Error, job.ErrorClass = JobStatusRunning, "", ""
 	job.FinishedAt, job.UpdatedAt = nil, now
 	job.Progress = append(job.Progress, service.ProgressEvent{Type: "recovered", Phase: JobStatusRunning, Collection: SyncJobType, Message: "pending collection retries recovered after service restart"})
 	m.cancel[jobID] = cancel
 	m.inflightWorkers[jobID] = true
-	return m.saveLocked()
+	err := m.saveLocked()
+	persisted = err == nil
+	return err
 }
 
 func (m *JobManager) failInterruptedSyncRetry(jobID, reason string) error {
-	return m.updateJobPersisted(jobID, func(job *Job, now time.Time) {
+	return m.updateRecoveredJobPersisted(jobID, jobRecoveryRejected, func(job *Job, now time.Time) {
 		job.Status, job.SyncHealth = JobStatusFailed, SyncHealthFailed
 		job.ErrorClass = sanitizeMaintenanceErrorClass(reason, "retry_checkpoint_invalid")
 		job.Error = publicMaintenanceJobError(SyncJobType, job.ErrorClass)
@@ -1911,7 +1921,7 @@ func (m *JobManager) completeInterruptedSyncStageFromReceipt(stage SyncStageEnve
 		return err
 	}
 	view := stage.PublicView()
-	return m.updateJobPersisted(stage.JobID, func(job *Job, now time.Time) {
+	return m.updateRecoveredJobPersisted(stage.JobID, jobRecoveryReconciled, func(job *Job, now time.Time) {
 		if job.Type != SyncJobType {
 			return
 		}
@@ -1948,12 +1958,31 @@ func (m *JobManager) rejectInterruptedSyncStage(stage SyncStageEnvelope, reason 
 }
 
 func (m *JobManager) rejectInterruptedSyncStageByRef(stageRef, reason string) {
+	var identities [maxRecoveryObservationIdentities]jobObservationIdentity
+	var captured int
+	var changed uint64
+	var persisted bool
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		if !persisted {
+			m.loseRecoveryObservations(changed)
+			return
+		}
+		for _, identity := range identities[:captured] {
+			m.observeJobRecovery(identity, jobRecoveryRejected, reason, true)
+		}
+		m.loseRecoveryObservations(changed - uint64(captured))
+	}()
 	now := m.now().UTC()
 	for _, job := range m.jobs {
 		if job.Status != JobStatusInterrupted || job.SyncStage == nil || job.SyncStage.StageRef != stageRef {
 			continue
+		}
+		changed++
+		if captured < len(identities) {
+			identities[captured] = observationIdentity(*job)
+			captured++
 		}
 		job.Status, job.ErrorClass = JobStatusFailed, reason
 		job.Error = publicMaintenanceJobError(SyncJobType, reason)
@@ -1961,16 +1990,26 @@ func (m *JobManager) rejectInterruptedSyncStageByRef(stageRef, reason string) {
 		job.SyncStage.Phase, job.SyncStage.TerminalCause, job.SyncStage.RetryAfter = SyncStageRejected, reason, time.Time{}
 		job.Progress = append(job.Progress, service.ProgressEvent{Type: JobStatusFailed, Phase: string(SyncStageRejected), Collection: job.SyncStage.Collection, Message: "staged batch rejected during restart recovery"})
 	}
-	_ = m.saveLocked()
+	persisted = m.saveLocked() == nil
 }
 
 func (m *JobManager) resumeInterruptedSyncStage(stage SyncStageEnvelope, cancel context.CancelFunc) error {
+	var identity jobObservationIdentity
+	var changed, persisted bool
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		if changed {
+			m.observeJobRecovery(identity, jobRecoveryResumed, "", persisted)
+		}
+	}()
 	if m.closing {
 		return errors.New("service is stopping")
 	}
 	job := m.jobs[stage.JobID]
+	if job != nil && job.Status == JobStatusInterrupted && syncStageMatchesJob(stage, *job) {
+		identity, changed = observationIdentity(*job), true
+	}
 	now := m.now().UTC()
 	view := stage.PublicView()
 	job.Status, job.Error, job.ErrorClass = JobStatusRunning, "", ""
@@ -1980,7 +2019,9 @@ func (m *JobManager) resumeInterruptedSyncStage(stage SyncStageEnvelope, cancel 
 	job.Progress = append(job.Progress, service.ProgressEvent{Type: "recovered", Phase: string(stage.State.Phase), Collection: stage.Collection, RecordsListed: stage.RecordCount, RecordsFetched: stage.RecordCount, Message: "staged batch recovered after service restart"})
 	m.cancel[job.ID] = cancel
 	m.inflightWorkers[job.ID] = true
-	return m.saveLocked()
+	err := m.saveLocked()
+	persisted = err == nil
+	return err
 }
 
 func (m *JobManager) runRecoveredSyncStage(ctx context.Context, manager Manager, journal *SyncStageJournal, stage SyncStageEnvelope) {

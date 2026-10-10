@@ -36,6 +36,7 @@ const (
 	LegacyOmitted      Code = "legacy_text_omitted"
 	JobAdmitted        Code = "job_admitted"
 	JobTerminal        Code = "job_terminal"
+	JobRecovered       Code = "job_recovered"
 	ProviderAttempt    Code = "provider_attempt"
 	SyncCommitted      Code = "sync_committed"
 	RetryAdmitted      Code = "retry_admitted"
@@ -56,6 +57,7 @@ var catalog = map[Code]template{
 	LegacyOmitted:      {"stderr", "warning", "legacy", "Unrecognized legacy output was omitted."},
 	JobAdmitted:        {"stdout", "info", "jobs", "A new job was durably admitted."},
 	JobTerminal:        {"stdout", "info", "jobs", "A job reached a confirmed terminal state."},
+	JobRecovered:       {"stdout", "info", "recovery", "An actual job recovery reached a confirmed state."},
 	ProviderAttempt:    {"stdout", "info", "provider", "An actual bounded provider attempt finished."},
 	SyncCommitted:      {"stdout", "info", "sync", "Fetched source graphs reached a confirmed cache commit."},
 	RetryAdmitted:      {"stdout", "info", "sync", "A collection entered an actual retry attempt."},

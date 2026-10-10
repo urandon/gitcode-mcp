@@ -17,7 +17,7 @@ const MaxExecutionAttempt = 1024
 
 func executionCode(code Code) bool {
 	switch code {
-	case JobAdmitted, JobTerminal, ProviderAttempt, SyncCommitted, RetryAdmitted, WriterContended, SyncStageChanged:
+	case JobAdmitted, JobTerminal, JobRecovered, ProviderAttempt, SyncCommitted, RetryAdmitted, WriterContended, SyncStageChanged:
 		return true
 	default:
 		return false
@@ -59,6 +59,17 @@ func (e Event) validExecution() bool {
 		return false
 	}
 	switch e.Code {
+	case JobRecovered:
+		if e.JobRef == "" || d.Phase != "recovery" || d.Collection != "" || d.Attempt != 0 {
+			return false
+		}
+		switch d.Outcome {
+		case "resumed", "reconciled":
+			return d.FailureClass == ""
+		case "rejected":
+			return executionFailure(d.FailureClass)
+		}
+		return false
 	case SyncStageChanged:
 		if e.JobRef == "" || e.StageRef == "" || e.CacheRef == "" || e.RegistrationRef == "" || e.RepoRef == "" || d.Phase != "staging" || !executionCollection(d.Collection) {
 			return false

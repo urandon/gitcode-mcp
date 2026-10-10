@@ -606,12 +606,16 @@ func (m *JobManager) LatestRepositoryDocsSource(cacheUUID, repoID, sourceRegistr
 // responsible for enforcing the durable retry window before invoking it.
 func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, sourceRegistrationID string, generation int64, expectedSetID, workKey, actionIntentRef string, cancel context.CancelFunc) (Job, bool, error) {
 	var contention bool
+	var resumed bool
 	var identity jobObservationIdentity
 	m.mu.Lock()
 	defer func() {
 		m.mu.Unlock()
 		if contention {
 			m.observeWriterContentionForIdentity(RepositoryDocsIndexJobType, ErrCacheWriterBusy{}, identity)
+		}
+		if resumed {
+			m.observeJobRecovery(identity, jobRecoveryResumed, "", true)
 		}
 	}()
 	if m.closing {
@@ -658,6 +662,7 @@ func (m *JobManager) ResumeRepositoryDocsAdmission(jobID, registrationID, source
 		delete(m.inflightWorkers, job.ID)
 		return Job{}, false, JobAdmissionPersistenceError{}
 	}
+	resumed = true
 	return cloneJob(job), true, nil
 }
 
@@ -1284,6 +1289,16 @@ func (m *JobManager) updateJob(id string, fn func(*Job, time.Time)) {
 // storage. Callers that are about to discard independent recovery evidence
 // must only do so after this method succeeds.
 func (m *JobManager) updateJobPersisted(id string, fn func(*Job, time.Time)) error {
+	return m.updateJobPersistedObserved(id, jobRecoveryNone, fn)
+}
+
+// Only actual recovery owners select a recovery outcome. Generic progress and
+// terminal projections must not infer new evidence from an interrupted job.
+func (m *JobManager) updateRecoveredJobPersisted(id string, outcome jobRecoveryOutcome, fn func(*Job, time.Time)) error {
+	return m.updateJobPersistedObserved(id, outcome, fn)
+}
+
+func (m *JobManager) updateJobPersistedObserved(id string, recovery jobRecoveryOutcome, fn func(*Job, time.Time)) error {
 	var previousStatus string
 	var state jobMetricState
 	var persisted bool
@@ -1301,6 +1316,9 @@ func (m *JobManager) updateJobPersisted(id string, fn func(*Job, time.Time)) err
 			return
 		}
 		m.observeJobTerminal(previousStatus, state, persisted)
+		if previousStatus == JobStatusInterrupted && jobTerminalStatus(state.status) {
+			m.observeJobRecovery(state.identity, recovery, state.errorClass, true)
+		}
 	}()
 	job := m.jobs[id]
 	if job == nil {

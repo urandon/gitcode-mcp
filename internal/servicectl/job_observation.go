@@ -10,6 +10,55 @@ import (
 // and correlation are derived after unlocking; no source/error bytes are read.
 type jobObservationIdentity struct{ job, cache, registration, repo string }
 
+type jobRecoveryOutcome uint8
+
+const (
+	jobRecoveryNone jobRecoveryOutcome = iota
+	jobRecoveryResumed
+	jobRecoveryReconciled
+	jobRecoveryRejected
+)
+
+const maxRecoveryObservationIdentities = 128
+
+func (m *JobManager) observeJobRecovery(identity jobObservationIdentity, outcome jobRecoveryOutcome, failureClass string, persisted bool) {
+	if identity.job == "" {
+		return
+	}
+	details := observability.ExecutionDetails{Phase: "recovery"}
+	switch outcome {
+	case jobRecoveryResumed:
+		details.Outcome = "resumed"
+	case jobRecoveryReconciled:
+		details.Outcome = "reconciled"
+	case jobRecoveryRejected:
+		details.Outcome = "rejected"
+		details.FailureClass = jobObservationFailure(failureClass)
+		if failureClass == "cancelled" || failureClass == "interrupted" {
+			details.FailureClass = failureClass
+		}
+	default:
+		return
+	}
+	if !persisted {
+		m.loseRecoveryObservations(1)
+		return
+	}
+	m.emitJobObservation(identity, observability.JobRecovered, details)
+}
+
+func (m *JobManager) loseRecoveryObservations(count uint64) {
+	if count == 0 {
+		return
+	}
+	if collector := m.observation.Load(); collector != nil {
+		collector.UnconfirmedExecutions(count)
+	}
+	if sink := m.metrics.Load(); sink != nil {
+		sink.metrics.LostObservations(count)
+	}
+}
+
 func observationIdentity(job Job) jobObservationIdentity {
 	return jobObservationIdentity{job.ID, job.CacheUUID, job.RegistrationID, job.RepoID}
 }

@@ -164,6 +164,10 @@ func (m *Metrics) loss()          { m.dropped.Add(1) }
 // unavailable. It accepts no reason text and cannot affect execution results.
 func (m *Metrics) LostObservation() { m.loss() }
 
+// LostObservations counts omitted actual boundaries without per-job metric
+// labels, callback invocation, locking or a loop over uncaptured identities.
+func (m *Metrics) LostObservations(count uint64) { m.dropped.Add(count) }
+
 func (m *Metrics) AttachOrigin(origin string) bool {
 	// Collector availability requires its actual boot-matched atomic total.
 	// Generic attachment must not manufacture an available zero counter.

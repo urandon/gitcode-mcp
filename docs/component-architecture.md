@@ -222,13 +222,29 @@ and service lease are released; failed writes have no confirmed mark to flush.
 The buffer retains only opaque refs and finite fields, never an envelope,
 payload, blocker, checkpoint, path or terminal-reason bytes. Actual recovered
 commit attempts use the same owners. Receipt-only stage reconstruction remains
-unobserved and never invents a fresh provider attempt or cache commit. Recovery
-admission/reconciliation and maintenance event owners retain separate O2 gates.
+unobserved at the journal-transition boundary and never invents a fresh provider
+attempt or cache commit. Job recovery owners are distinct, as described below.
 An accepted journal attempt outside the diagnostic catalog range is never
 clamped or rejected by instrumentation. Its confirmed boundary instead records
 scope-matched loss and partial coverage; during a commit turn that omission uses
 the same one-slot buffer and becomes visible only after release. Loss survives
 diagnostic restart without manufacturing a stage event or execution receipt.
+
+`job_recovered` records a confirmed recovery-owner decision: resumed, reconciled
+or rejected, with job/boot correlation and a closed rejection class. It carries
+no collection, stage ref or fabricated attempt and is not a new admission,
+provider attempt, terminal execution outcome or cache commit. Actual resume
+owners capture identity/status inside their existing lock and emit after a
+confirmed save and unlock. A failed save that retains the memory mutation
+records loss, not confirmation; rollback paths emit nothing. Receipt/checkpoint
+terminal reconciliation uses a private owner-marked persisted-update path;
+generic job projections and repeated recovery never invent this event. Group
+rejection captures at most 128 identities under its existing authority lock,
+then publishes outside it after the single save. Uncaptured overflow and
+retained failed-save boundaries use count-only atomic loss accounting, never an
+unbounded diagnostic slice, per-job diagnostic save, extra authority lookup or
+retry. These backend hooks remain subject to the O3/O4/O5 rollout gates;
+maintenance and Admin event ownership remain separate O2 work.
 
 ### Metric evidence foundation
 

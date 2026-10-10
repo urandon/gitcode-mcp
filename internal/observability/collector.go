@@ -138,8 +138,18 @@ func (c *Collector) loseLocked(reason string) {
 // boundary was unavailable. No event was admitted or rejected, so this does
 // not increment event_drops. It never waits for a lock, storage or a retry.
 func (c *Collector) UnconfirmedExecution() {
+	c.UnconfirmedExecutions(1)
+}
+
+// UnconfirmedExecutions accounts for actual owner boundaries omitted by one
+// bounded capture or retained failed save. Count-only evidence never retains
+// identities, invokes callbacks or loops once per omitted job.
+func (c *Collector) UnconfirmedExecutions(count uint64) {
+	if count == 0 {
+		return
+	}
 	if c.pendingBoundaryLoss.Load()&admissionClosed == 0 {
-		c.pendingBoundaryLoss.Add(1)
+		c.pendingBoundaryLoss.Add(count)
 	}
 }
 

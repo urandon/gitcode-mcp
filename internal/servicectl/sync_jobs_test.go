@@ -1134,13 +1134,16 @@ func TestDaemonRestartUsesAtomicReceiptWhenJournalMissedCommitTerminal(t *testin
 	}
 	job, ok := restarted.Get(stage.JobID)
 	if !ok || job.Status != JobStatusSucceeded || job.SyncStage == nil || job.SyncStage.Phase != SyncStageCommitted {
-		t.Fatalf("receipt recovery job=%+v ok=%t", job, ok)
+		t.Fatal("receipt recovery did not confirm the terminal projection")
 	}
 	if stages, err := journal.List(); err != nil || len(stages) != 0 {
-		t.Fatalf("receipt-confirmed terminal stage retained: %+v err=%v", stages, err)
+		t.Fatal("receipt-confirmed stage was not removed")
+	}
+	if err := restarted.RecoverSyncStages(ctx, manager); err != nil {
+		t.Fatal("repeated receipt recovery failed")
 	}
 	requireJobCounter(t, metrics, "sync_committed", map[string]string{"collection": "issues"}, 0)
-	assertJobObservations(t, collector, job, map[observability.Code]int{})
+	assertJobObservations(t, collector, job, map[observability.Code]int{observability.JobRecovered: 1})
 }
 
 func TestDaemonRestartContinuesMixedWorkflowAfterCommittedCollection(t *testing.T) {

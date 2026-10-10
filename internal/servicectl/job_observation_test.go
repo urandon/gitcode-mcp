@@ -66,7 +66,7 @@ func assertJobObservations(t *testing.T, c *observability.Collector, job Job, wa
 	retained := 0
 	for _, e := range page.Events {
 		switch e.Code {
-		case observability.JobAdmitted, observability.JobTerminal, observability.ProviderAttempt, observability.SyncCommitted, observability.SyncStageChanged:
+		case observability.JobAdmitted, observability.JobTerminal, observability.JobRecovered, observability.ProviderAttempt, observability.SyncCommitted, observability.SyncStageChanged:
 		default:
 			continue
 		}
