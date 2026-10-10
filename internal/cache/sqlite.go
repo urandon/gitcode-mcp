@@ -62,7 +62,13 @@ func NewSQLiteStore(ctx context.Context, dataSourceName string) (*SQLiteStore, e
 }
 
 func newSQLiteStore(ctx context.Context, dataSourceName string, forceNoFTS bool) (*SQLiteStore, error) {
-	poolDataSource := dataSourceName
+	cachePath, err := cachePathForDataSource(dataSourceName)
+	if err != nil {
+		return nil, err
+	}
+	// Open the same physical path used by the lease, rather than resolving an
+	// alias again after authority selection. URI/memory forms remain unchanged.
+	poolDataSource := cachePath
 	var memoryIdentity [16]byte
 	if dataSourceName == ":memory:" {
 		if _, err := rand.Read(memoryIdentity[:]); err != nil {
@@ -84,7 +90,6 @@ func newSQLiteStore(ctx context.Context, dataSourceName string, forceNoFTS bool)
 		db.SetMaxOpenConns(1)
 		db.SetMaxIdleConns(1)
 	}
-	cachePath := cachePathForDataSource(dataSourceName)
 	lockPath := writerLockPath(cachePath)
 	store := &SQLiteStore{db: db, forceNoFTS: forceNoFTS, cachePath: cachePath, lockPath: lockPath}
 	initialized := false
@@ -226,14 +231,46 @@ func NewInMemorySQLiteStore(ctx context.Context) (*SQLiteStore, error) {
 	return NewSQLiteStore(ctx, ":memory:")
 }
 
-func cachePathForDataSource(dataSourceName string) string {
+func cachePathForDataSource(dataSourceName string) (string, error) {
 	if dataSourceName == ":memory:" || strings.HasPrefix(dataSourceName, "file:") {
-		return dataSourceName
+		return dataSourceName, nil
 	}
-	if abs, err := filepath.Abs(dataSourceName); err == nil {
-		return abs
+	abs, err := filepath.Abs(dataSourceName)
+	if err != nil {
+		return "", fmt.Errorf("cache: resolve writer authority: %w", err)
 	}
-	return dataSourceName
+	for depth := 0; depth < 32; depth++ {
+		physical, err := filepath.EvalSymlinks(abs)
+		if err == nil {
+			return physical, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("cache: resolve writer authority: %w", err)
+		}
+		// A dangling final symlink can still be used by SQLite to create its
+		// target. Follow it before selecting the not-yet-created file's lease.
+		info, statErr := os.Lstat(abs)
+		if statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(abs)
+			if err != nil {
+				return "", fmt.Errorf("cache: resolve writer symlink: %w", err)
+			}
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(filepath.Dir(abs), target)
+			}
+			abs = filepath.Clean(target)
+			continue
+		}
+		if statErr != nil && !os.IsNotExist(statErr) {
+			return "", fmt.Errorf("cache: resolve writer authority: %w", statErr)
+		}
+		parent, err := filepath.EvalSymlinks(filepath.Dir(abs))
+		if err != nil {
+			return "", fmt.Errorf("cache: resolve writer directory: %w", err)
+		}
+		return filepath.Join(parent, filepath.Base(abs)), nil
+	}
+	return "", fmt.Errorf("cache: writer authority symlink depth exceeded")
 }
 
 func writerLockPath(cachePath string) string {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -98,6 +99,72 @@ func TestDefaultWriterSameCacheStillContends(t *testing.T) {
 			_, otherRelease, err := b.acquireBulkWriter(ctx, "writer-fixture", "fixture-contender")
 			if otherRelease != nil {
 				otherRelease()
+			}
+			requireWriterContention(t, err)
+		})
+	}
+}
+
+func TestDefaultWriterSamePhysicalCacheAliases(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("filesystem symlink creation requires privileges on Windows")
+	}
+	for _, mode := range []string{"file", "file-new", "directory-existing", "directory-new"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			realDir := filepath.Join(root, "real")
+			if err := os.Mkdir(realDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			realPath := filepath.Join(realDir, "cache.db")
+			aliasPath := filepath.Join(root, "alias.db")
+			var a *Service
+			if mode == "file" || mode == "file-new" {
+				if mode == "file" {
+					a = writerFixtureService(t, realPath, ServiceConfig{})
+				}
+				if err := os.Symlink(realPath, aliasPath); err != nil {
+					t.Fatal("file symlink creation failed")
+				}
+				if mode == "file-new" {
+					a = writerFixtureService(t, aliasPath, ServiceConfig{})
+					aliasPath = realPath
+				}
+			} else {
+				aliasDir := filepath.Join(root, "alias-dir")
+				if err := os.Symlink(realDir, aliasDir); err != nil {
+					t.Fatal("directory symlink creation failed")
+				}
+				aliasPath = filepath.Join(aliasDir, "cache.db")
+				firstPath := realPath
+				if mode == "directory-new" {
+					// Derive the first authority before the database file exists.
+					firstPath, aliasPath = aliasPath, realPath
+				}
+				a = writerFixtureService(t, firstPath, ServiceConfig{})
+			}
+			b := writerFixtureService(t, aliasPath, ServiceConfig{})
+			ctx := context.Background()
+			firstIdentity, err := a.store.(*cache.SQLiteStore).CacheIdentity(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			secondIdentity, err := b.store.(*cache.SQLiteStore).CacheIdentity(ctx)
+			if err != nil || firstIdentity.UUID != secondIdentity.UUID {
+				t.Fatal("fixture paths did not identify the same physical cache")
+			}
+			batch, err := b.FetchIssueSyncBatch(ctx, BulkSyncRequest{RepoID: "writer-fixture", PerPage: 100, Bounds: &SyncBounds{MaxPages: 1}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, release, err := a.acquireBulkWriter(ctx, "writer-fixture", "physical-cache-holder")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			result, err := b.CommitIssueSyncBatch(ctx, batch, nil)
+			if err == nil {
+				t.Fatalf("physical cache alias bypassed writer admission; committed=%d", result.SuccessCount)
 			}
 			requireWriterContention(t, err)
 		})
