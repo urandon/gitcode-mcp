@@ -446,3 +446,74 @@ Example JSON-RPC request (HTTP/SSE):
 - Sync, index, and write operations are explicit MCP tool calls or CLI commands; routine reads never trigger them automatically.
 - Multiple MCP clients can read concurrently from the shared cache.
 - Writer operations are serialized and require explicit live intent.
+
+## GitHub CI through a separate MCP connection
+
+For a GitCode repository mirrored to GitHub Actions, use the client's existing
+GitHub MCP connection for CI. These are **external connector capabilities**, not
+tools served by `gitcode-mcp`, and they require their own repository access.
+Discover the actual tool schemas first; names and availability vary by client.
+Do not install a GitHub CLI, request browser cookies, or add a GitHub token to
+the GitCode configuration just to inspect CI.
+
+The qualified connector exposes `github_fetch` for run metadata,
+`github_fetch_workflow_run_jobs`, `github_fetch_workflow_job_steps`, and
+`github_fetch_workflow_job_logs`. It also advertises
+`github_rerun_failed_workflow_run_jobs` and `github_rerun_workflow_job`.
+Log access needs a linked connection with access to the repository; advertised
+rerun tools additionally require repository **Actions write** permission.
+Discovery alone does not prove that a call is authorized.
+
+### Inspect an exact run
+
+1. Record the intended repository and full commit SHA. List runs through
+   `github_fetch` using the repository `/actions/runs?head_sha=FULL_SHA` resource,
+   selecting the intended workflow, branch and event. A PR-only helper cannot
+   establish push, merged-main or tag CI. Follow pagination within a declared
+   budget (for example, three pages of 100); exhaustion means incomplete evidence,
+   not absence or success.
+2. Read the selected `/actions/runs/RUN_ID` and verify `id`, `head_sha`, workflow
+   `path`, `event`, `head_branch`, `run_attempt`, `status` and `conclusion`.
+   Inspect failed jobs and steps from that attempt. Convenience job-list tools
+   can return only the first page: use paginated GET metadata if needed, or
+   report incomplete coverage.
+3. Fetch only a selected failed job's log, with at most two log calls per
+   diagnosis. The connector can return the whole job log, not a server-side
+   bounded excerpt. Do not claim a transport byte cap that its schema lacks.
+   Keep raw logs out of tracked files, caches, issues and reports; publish only
+   an allowlisted diagnosis (test identifier, failure class, safe counts and
+   run/job link), at most 20 lines / 4 KiB. Omit arbitrary messages, paths,
+   payloads and unknown text rather than relying on secret-pattern redaction.
+
+### Request one explicit rerun
+
+Rerun is a remote write, not part of watching or reading CI. Obtain task/owner
+authorization for the exact target. Inspect the workflow at its SHA, including
+dependent jobs and called workflows, for publishing/deployment side effects and
+concurrency cancellation; do not use such workflows as permission probes.
+Immediately re-read the run: it must still match the full SHA and observed
+attempt and be terminal with a failed job. Check for conflicting active work.
+
+Record a sanitized intent in the owning GitCode issue **before** one connector
+call: repository, full SHA, run/job id, observed attempt, reason and authorized
+scope. Prefer failed-job rerun over rerunning successful jobs; a job rerun may
+also run dependent jobs. Record the response and GET readback afterwards.
+Require the same run/SHA and an increased attempt, then poll that attempt to a
+terminal conclusion (for example, every 30 seconds for at most 10 minutes).
+Report its actual conclusion; a failed rerun is diagnostic evidence, not green
+CI. Pending/unknown evidence blocks merge and release.
+
+These connector operations have no `gitcode-mcp` idempotency key, durable write
+claim, or atomic expected-SHA/attempt guard. An issue comment is an audit record,
+**not an exactly-once fence**. Use one owner per target; do not concurrently
+rerun it. After a timeout, interruption or ambiguous response, use GET-only
+reconciliation and escalate if the outcome remains unknown; never blindly
+repeat the write. After a definite 403, stop and report the connection's missing
+permission. An owner may adjust the integration outside this workflow; do not
+silently change credentials or switch to another mutation tool.
+
+Qualification in issue #142 recovered the original failed-test log through
+MCP. One test-only rerun was rejected with `FORBIDDEN` / HTTP 403 and readback
+remained on the old attempt. Log inspection is verified; successful rerun
+acceptance remains permission-blocked, not certified by this documentation.
+See [GitHub's run/rerun API contract](https://docs.github.com/en/rest/actions/workflow-runs).

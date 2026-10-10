@@ -205,4 +205,8 @@ Use `strategy: "description_fallback"` when the caller intentionally wants the b
 
 ## Merge And Close Caveats
 
+For GitHub mirror CI, use the [separate GitHub MCP workflow](mcp-setup.md#github-ci-through-a-separate-mcp-connection)
+to inspect the exact source or merge SHA. CI reads never imply permission to
+rerun a workflow; missing logs, permissions or terminal evidence remain blockers.
+
 The explicit relation API links the PR/MR and issue, but issue close behavior still depends on GitCode server-side semantics and repository settings. The fallback marker uses `Fixes #N`, which may trigger close-on-merge behavior where GitCode supports it. Agents should mention in PR reports whether the explicit relation API or description fallback was used.
