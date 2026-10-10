@@ -180,9 +180,27 @@ first attempt. Existing lifecycle records remain valid without these fields,
 but cannot carry execution dimensions. Legacy text cannot establish an
 execution event. A private context carrier copies resolved refs and a concrete
 collector without changing deadlines or cancellation; event details are supplied
-at the actual boundary. This internal foundation does not itself install
-execution hooks or expose new transport/UI controls; the full cohort remains
-gated by those implementation and qualification tasks.
+at the actual boundary. Daemon construction attaches the collector to the job
+owner. Confirmed admission and active-to-terminal transitions copy primitive
+identity under the existing job lock; opaque hashing and admission run after
+unlocking. Newly dispatched and resumed workers inherit boot/job correlation
+from the returned authority value, without another instrumentation job read.
+Coalesced admission, failed persistence, repeated terminal updates and snapshot
+projection are not new execution events.
+
+Actual GitCode and embedding HTTP attempts inherit that context and record one
+finite transport outcome after bounded response transfer/body release. This is
+not proof of successful JSON decoding or embedding. Pre-transport rejection
+records no attempt; ordinals are supplied only by a known policy loop.
+Confirmed graph commits mark a concrete one-slot process-local buffer while the
+coordinator owns its turn. The service first releases its cache lease; the
+coordinator then releases its turn and flushes the buffer exactly once. A scope
+mismatch or late confirmation cannot attach to another job or duplicate the
+event. Receipt-only recovery emits no new commit. None of this evidence is a
+durable execution receipt or a reason to retry work. Observation rejection is
+counted as partial coverage and is never retried. These hooks expose no new
+transport/UI controls; the full cohort remains gated by remaining O2 hooks,
+health qualification and O3-O5 implementation.
 
 ### Metric evidence foundation
 

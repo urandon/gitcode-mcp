@@ -1118,6 +1118,8 @@ func TestDaemonRestartUsesAtomicReceiptWhenJournalMissedCommitTerminal(t *testin
 	metrics := observability.NewMetrics(strings.Repeat("a", 32), time.Now().UTC())
 	restarted.SetMetrics(metrics)
 	// The hook is available, but this boot must count no previous-boot commit.
+	collector := jobObservationFixture(t)
+	restarted.SetObservation(collector)
 	metrics.AttachOrigin("sync")
 	if err := restarted.LoadAndMarkInterrupted(); err != nil {
 		t.Fatal(err)
@@ -1138,6 +1140,7 @@ func TestDaemonRestartUsesAtomicReceiptWhenJournalMissedCommitTerminal(t *testin
 		t.Fatalf("receipt-confirmed terminal stage retained: %+v err=%v", stages, err)
 	}
 	requireJobCounter(t, metrics, "sync_committed", map[string]string{"collection": "issues"}, 0)
+	assertJobObservations(t, collector, job, map[observability.Code]int{})
 }
 
 func TestDaemonRestartContinuesMixedWorkflowAfterCommittedCollection(t *testing.T) {

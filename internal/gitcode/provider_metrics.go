@@ -14,32 +14,45 @@ import (
 // bounded response transfer. It is not a TCP packet count or durable receipt.
 // No endpoint, header, coordinate, body, or error string crosses this boundary.
 type providerMetricAttempt struct {
+	ctx      context.Context
+	ordinal  uint32
 	metrics  *observability.Metrics
 	started  time.Time
 	finished bool
 }
 
 func newProviderMetricAttempt(ctx context.Context) *providerMetricAttempt {
-	return &providerMetricAttempt{metrics: observability.MetricsFromContext(ctx)}
+	return &providerMetricAttempt{ctx: ctx, metrics: observability.MetricsFromContext(ctx)}
 }
 
 func (a *providerMetricAttempt) start() {
-	if a == nil || a.metrics == nil {
+	if a == nil || (a.metrics == nil && !observability.HasObservation(a.ctx)) {
 		return
 	}
 	a.started = time.Now()
-	a.metrics.AttachOrigin("provider")
+	if a.metrics != nil {
+		a.metrics.AttachOrigin("provider")
+	}
 }
 
 func (a *providerMetricAttempt) finish(status int, err error) {
-	if a == nil || a.metrics == nil || a.started.IsZero() || a.finished {
+	if a == nil || a.started.IsZero() || a.finished {
 		return
 	}
 	a.finished = true
 	outcome := providerMetricOutcome(status, err)
-	labels := map[string]string{"outcome": outcome}
-	a.metrics.Add("provider_outcomes", labels, 1)
-	a.metrics.Observe("provider_duration", labels, time.Since(a.started).Seconds())
+	if a.metrics != nil {
+		labels := map[string]string{"outcome": outcome}
+		a.metrics.Add("provider_outcomes", labels, 1)
+		a.metrics.Observe("provider_duration", labels, time.Since(a.started).Seconds())
+	}
+	details := observability.ExecutionDetails{Phase: "fetch", Outcome: outcome, Attempt: a.ordinal}
+	if outcome == "failed" {
+		details.FailureClass = "provider_failed"
+	} else if outcome != "succeeded" {
+		details.FailureClass = outcome
+	}
+	observability.EmitFromContext(a.ctx, observability.ProviderAttempt, details)
 }
 
 func providerMetricOutcome(status int, err error) string {

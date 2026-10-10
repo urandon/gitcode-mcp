@@ -189,6 +189,7 @@ func (m *JobManager) startPreparedRepositoryDocsIndex(ctx context.Context, manag
 			return Job{}, err
 		}
 		if resumed {
+			jobCtx = m.withJobObservation(jobCtx, job)
 			go m.runRepositoryDocsIndexJob(jobCtx, manager, job.ID, req)
 			return job, nil
 		}
@@ -206,6 +207,7 @@ func (m *JobManager) startPreparedRepositoryDocsIndex(ctx context.Context, manag
 		cancel()
 		return job, nil
 	}
+	jobCtx = m.withJobObservation(jobCtx, job)
 	go m.runRepositoryDocsIndexJob(jobCtx, manager, job.ID, req)
 	return job, nil
 }

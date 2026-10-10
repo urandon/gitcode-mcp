@@ -17,10 +17,12 @@ type jobMetrics struct{ metrics *observability.Metrics }
 type jobMetricState struct {
 	kind, status      string
 	started, finished time.Time
+	identity          jobObservationIdentity
+	errorClass        string
 }
 
 func metricState(job Job) jobMetricState {
-	state := jobMetricState{kind: job.Type, status: job.Status}
+	state := jobMetricState{kind: job.Type, status: job.Status, identity: observationIdentity(job), errorClass: job.ErrorClass}
 	if job.StartedAt != nil {
 		state.started = *job.StartedAt
 	}
@@ -86,10 +88,11 @@ func metricWorkKind(kind string) string {
 	}
 }
 
-func (m *JobManager) observeJobAdmission(kind string) {
+func (m *JobManager) observeJobAdmission(state jobMetricState) {
 	if sink := m.metrics.Load(); sink != nil {
-		sink.metrics.Add("jobs_admitted", map[string]string{"kind": metricWorkKind(kind)}, 1)
+		sink.metrics.Add("jobs_admitted", map[string]string{"kind": metricWorkKind(state.kind)}, 1)
 	}
+	m.emitJobObservation(state.identity, observability.JobAdmitted, observability.ExecutionDetails{Phase: "admission", Outcome: "queued"})
 }
 
 func (m *JobManager) withJobMetrics(ctx context.Context) context.Context {
@@ -106,11 +109,21 @@ func (m *JobManager) observeJobTerminal(previousStatus string, state jobMetricSt
 		return
 	}
 	sink := m.metrics.Load()
-	if sink == nil {
+	if !persisted {
+		if sink != nil {
+			sink.metrics.LostObservation()
+		}
 		return
 	}
-	if !persisted {
-		sink.metrics.LostObservation()
+	details := observability.ExecutionDetails{Phase: "completion", Outcome: state.status}
+	switch state.status {
+	case JobStatusCancelled, JobStatusInterrupted, JobStatusSuperseded:
+		details.FailureClass = state.status
+	case JobStatusFailed:
+		details.FailureClass = jobObservationFailure(state.errorClass)
+	}
+	m.emitJobObservation(state.identity, observability.JobTerminal, details)
+	if sink == nil {
 		return
 	}
 	kind := metricWorkKind(state.kind)

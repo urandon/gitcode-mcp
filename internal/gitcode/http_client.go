@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/diagnostics"
+	"gitcode-mcp/internal/observability"
 )
 
 const defaultMaxResponseSize int64 = 10 << 20
@@ -1259,14 +1260,15 @@ func (c *HTTPClient) listWikiEntries(ctx context.Context, owner, repo, dir strin
 	}
 
 	observation := newProviderMetricAttempt(ctx)
+	observation.ordinal = 1
 	resp, err := c.do(ctx, http.MethodGet, endpoint, nil, nil, requestOptions{metricAttempt: observation})
 	if err != nil {
 		observation.finish(0, err)
 		return nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: 1, Cause: err}
 	}
-	defer resp.Body.Close()
 
 	body, readErr := c.readBounded(resp, endpoint)
+	resp.Body.Close()
 	observation.finish(resp.StatusCode, readErr)
 	if readErr != nil {
 		return nil, readErr
@@ -2290,6 +2292,9 @@ func (c *HTTPClient) bytesWithOptions(ctx context.Context, method, endpoint stri
 			return nil, nil, ErrNetworkUnavailable{Endpoint: endpoint, Attempts: attempt - 1, Cause: err}
 		}
 		observation := newProviderMetricAttempt(ctx)
+		if attempt <= observability.MaxExecutionAttempt {
+			observation.ordinal = uint32(attempt)
+		}
 		opts.metricAttempt = observation
 		resp, err := c.do(ctx, method, endpoint, values, bytes.NewReader(requestBody), opts)
 		if err != nil {

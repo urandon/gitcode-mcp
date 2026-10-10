@@ -33,6 +33,12 @@ func EmitFromContext(ctx context.Context, code Code, details ExecutionDetails) b
 	return binding.collector.Emit(code, refs)
 }
 
+// HasObservation checks only the private process-local carrier, never storage.
+func HasObservation(ctx context.Context) bool {
+	_, ok := ctx.Value(observationContextKey{}).(observationBinding)
+	return ok
+}
+
 // WithMetrics carries a trusted concrete sink through daemon-owned execution.
 // It does not install an arbitrary callback or alter cancellation/deadlines.
 // Foreground callers without this private process-local value are unobserved.

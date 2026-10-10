@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"gitcode-mcp/internal/config"
+	"gitcode-mcp/internal/observability"
 	"gitcode-mcp/internal/service"
 )
 
@@ -61,6 +62,7 @@ type Job struct {
 }
 
 type JobManager struct {
+	observation                         atomic.Pointer[observability.Collector]
 	metrics                             atomic.Pointer[jobMetrics]
 	mu                                  sync.Mutex
 	syncRetryMu                         sync.Mutex
@@ -838,11 +840,12 @@ type JobRecoveryIntent struct {
 
 func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID string, steps int, workKey, cacheUUID, registrationID, namespaceID string, intent JobRecoveryIntent, cancel context.CancelFunc) (Job, bool, error) {
 	var admitted, contention bool
+	var admittedState jobMetricState
 	m.mu.Lock()
 	defer func() {
 		m.mu.Unlock()
 		if admitted {
-			m.observeJobAdmission(jobType)
+			m.observeJobAdmission(admittedState)
 		}
 		if contention {
 			m.observeWriterContention(jobType, ErrCacheWriterBusy{})
@@ -916,6 +919,7 @@ func (m *JobManager) createCoalescedJobWithIntent(jobType, repoID, profileID str
 		return Job{}, false, JobAdmissionPersistenceError{}
 	}
 	admitted = true
+	admittedState = metricState(*job)
 	return cloneJob(job), true, nil
 }
 
@@ -1180,11 +1184,12 @@ func (m *JobManager) beginRepositoryDocsJob(id string) bool {
 
 func (m *JobManager) createJob(jobType string, steps int, cancel context.CancelFunc) Job {
 	var admitted bool
+	var admittedState jobMetricState
 	m.mu.Lock()
 	defer func() {
 		m.mu.Unlock()
 		if admitted {
-			m.observeJobAdmission(jobType)
+			m.observeJobAdmission(admittedState)
 		}
 	}()
 	if m.closing {
@@ -1198,6 +1203,7 @@ func (m *JobManager) createJob(jobType string, steps int, cancel context.CancelF
 	m.cancel[id] = cancel
 	m.inflightWorkers[id] = true
 	admitted = m.saveLocked() == nil
+	admittedState = metricState(*job)
 	return cloneJob(job)
 }
 

@@ -14,6 +14,7 @@ import (
 // Capture no input, endpoint, model, header, response or error text. The owner
 // finishes exactly once per actual Client.Do invocation, after body release.
 type embeddingMetricAttempt struct {
+	ctx      context.Context
 	metrics  *observability.Metrics
 	started  time.Time
 	finished bool
@@ -21,11 +22,13 @@ type embeddingMetricAttempt struct {
 
 func startEmbeddingMetricAttempt(ctx context.Context) *embeddingMetricAttempt {
 	metrics := observability.MetricsFromContext(ctx)
-	if metrics == nil {
+	if metrics == nil && !observability.HasObservation(ctx) {
 		return nil
 	}
-	metrics.AttachOrigin("provider")
-	return &embeddingMetricAttempt{metrics: metrics, started: time.Now()}
+	if metrics != nil {
+		metrics.AttachOrigin("provider")
+	}
+	return &embeddingMetricAttempt{ctx: ctx, metrics: metrics, started: time.Now()}
 }
 
 func (a *embeddingMetricAttempt) finish(status int, err error, completed time.Time) {
@@ -51,7 +54,16 @@ func (a *embeddingMetricAttempt) finish(status int, err error, completed time.Ti
 	case err != nil:
 		outcome = "invalid"
 	}
-	labels := map[string]string{"outcome": outcome}
-	a.metrics.Add("provider_outcomes", labels, 1)
-	a.metrics.Observe("provider_duration", labels, completed.Sub(a.started).Seconds())
+	if a.metrics != nil {
+		labels := map[string]string{"outcome": outcome}
+		a.metrics.Add("provider_outcomes", labels, 1)
+		a.metrics.Observe("provider_duration", labels, completed.Sub(a.started).Seconds())
+	}
+	details := observability.ExecutionDetails{Phase: "embedding", Outcome: outcome}
+	if outcome == "failed" {
+		details.FailureClass = "provider_failed"
+	} else if outcome != "succeeded" {
+		details.FailureClass = outcome
+	}
+	observability.EmitFromContext(a.ctx, observability.ProviderAttempt, details)
 }

@@ -48,6 +48,7 @@ func (m *JobManager) StartRAGIndex(ctx context.Context, manager Manager, req Sta
 		cancel()
 		return job, nil
 	}
+	ctx = m.withJobObservation(ctx, job)
 	go m.runRAGIndexJob(ctx, manager, job.ID, req)
 	return job, nil
 }

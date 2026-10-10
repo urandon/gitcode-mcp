@@ -16,6 +16,7 @@ import (
 	"gitcode-mcp/internal/cache"
 	"gitcode-mcp/internal/config"
 	"gitcode-mcp/internal/gitcode"
+	"gitcode-mcp/internal/observability"
 	"gitcode-mcp/internal/service"
 )
 
@@ -150,6 +151,7 @@ func (m *JobManager) startSync(ctx context.Context, manager Manager, req StartSy
 		// non-empty request identity instead of accepting an ambiguous stage.
 		req.IdempotencyKey = "service-sync-" + job.ID
 	}
+	ctx = m.withJobObservation(ctx, job)
 	go m.runSyncJob(ctx, manager, job.ID, req)
 	return job, true, nil
 }
@@ -1113,8 +1115,10 @@ func (m *JobManager) runDurableCollection(ctx context.Context, manager Manager, 
 			return nil, collection, err
 		}
 		m.setJobSyncStage(jobID, stage, "staged batch commit started")
-		result, commitErr := work.commit(ctx, stage)
+		commitCtx, observation := observability.DeferSyncCommit(ctx)
+		result, commitErr := work.commit(commitCtx, stage)
 		releaseTurn()
+		observation.Flush()
 		if commitErr == nil {
 			state = stage.State
 			state.Phase = SyncStageCommitted
@@ -1551,6 +1555,7 @@ func (m *JobManager) recoverSyncCollectionRetries(ctx context.Context, manager M
 			cancel()
 			return err
 		}
+		workerCtx = m.withJobObservation(workerCtx, job)
 		go m.runSyncJob(workerCtx, manager, jobID, req)
 	}
 	return nil
@@ -1977,6 +1982,7 @@ func (m *JobManager) runRecoveredSyncStage(ctx context.Context, manager Manager,
 }
 
 func (m *JobManager) runRecoveredSyncWorkflow(ctx context.Context, manager Manager, journal *SyncStageJournal, stage SyncStageEnvelope, commitCurrent bool) {
+	ctx = m.withJobObservation(ctx, Job{ID: stage.JobID, CacheUUID: stage.CacheUUID, RegistrationID: stage.RegistrationID, RepoID: stage.RepoID})
 	defer func() { _, _ = journal.GC() }()
 	defer m.markWorkerFinished(stage.JobID)
 	result, prefixErr, collections := recoveredSyncWorkflowOutcome(stage)
@@ -2054,6 +2060,7 @@ func (m *JobManager) runRecoveredSyncWorkflow(ctx context.Context, manager Manag
 
 func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manager, journal *SyncStageJournal, stage SyncStageEnvelope) (*service.SyncResourcesResult, SyncStageEnvelope, error) {
 	ctx = m.withJobMetrics(ctx)
+	ctx = m.withJobObservation(ctx, Job{ID: stage.JobID, CacheUUID: stage.CacheUUID, RegistrationID: stage.RegistrationID, RepoID: stage.RepoID})
 	eff, err := effectiveJobConfig(manager, stage.CachePath)
 	if err != nil {
 		return nil, stage, err
@@ -2074,7 +2081,7 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 	}
 	defer store.Close()
 	svc := service.NewWithClientConfig(store, nil, service.ServiceConfig{LockPath: eff.Config.LockPath})
-	commit := func() (*service.SyncResourcesResult, error) {
+	commit := func(commitCtx context.Context) (*service.SyncResourcesResult, error) {
 		switch stage.Collection {
 		case "issues":
 			var batch service.DurableIssueSyncBatch
@@ -2082,35 +2089,35 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 				return nil, err
 			}
 			batch.MaintenanceFrontier, batch.CommitReceipt = stage.MaintenanceFrontier, syncStageCommitReceipt(stage)
-			return svc.CommitIssueSyncBatch(ctx, batch, nil)
+			return svc.CommitIssueSyncBatch(commitCtx, batch, nil)
 		case "wiki":
 			var batch service.DurableWikiSyncBatch
 			if err := json.Unmarshal(stage.Payload, &batch); err != nil {
 				return nil, err
 			}
 			batch.MaintenanceFrontier, batch.CommitReceipt = stage.MaintenanceFrontier, syncStageCommitReceipt(stage)
-			return svc.CommitWikiSyncBatch(ctx, batch, nil)
+			return svc.CommitWikiSyncBatch(commitCtx, batch, nil)
 		case "pulls":
 			var batch service.DurablePullSyncBatch
 			if err := json.Unmarshal(stage.Payload, &batch); err != nil {
 				return nil, err
 			}
 			batch.MaintenanceFrontier, batch.CommitReceipt = stage.MaintenanceFrontier, syncStageCommitReceipt(stage)
-			return svc.CommitPullSyncBatch(ctx, batch, nil)
+			return svc.CommitPullSyncBatch(commitCtx, batch, nil)
 		case "issue_comments":
 			var batch service.DurableIssueCommentSyncBatch
 			if err := json.Unmarshal(stage.Payload, &batch); err != nil {
 				return nil, err
 			}
 			batch.MaintenanceFrontier, batch.CommitReceipt = stage.MaintenanceFrontier, syncStageCommitReceipt(stage)
-			return svc.CommitIssueCommentSyncBatch(ctx, batch, nil)
+			return svc.CommitIssueCommentSyncBatch(commitCtx, batch, nil)
 		case "pr_comments":
 			var batch service.DurablePRCommentSyncBatch
 			if err := json.Unmarshal(stage.Payload, &batch); err != nil {
 				return nil, err
 			}
 			batch.MaintenanceFrontier, batch.CommitReceipt = stage.MaintenanceFrontier, syncStageCommitReceipt(stage)
-			return svc.CommitPRCommentSyncBatch(ctx, batch, nil)
+			return svc.CommitPRCommentSyncBatch(commitCtx, batch, nil)
 		default:
 			return nil, ErrSyncStageCorrupt
 		}
@@ -2168,8 +2175,10 @@ func (m *JobManager) commitRecoveredSyncStage(ctx context.Context, manager Manag
 			return nil, stage, err
 		}
 		m.setJobSyncStage(stage.JobID, stage, "recovered staged batch commit started")
-		result, commitErr := commit()
+		commitCtx, observation := observability.DeferSyncCommit(ctx)
+		result, commitErr := commit(commitCtx)
 		releaseTurn()
+		observation.Flush()
 		if commitErr == nil {
 			state = stage.State
 			state.Phase, state.CommittedAt = SyncStageCommitted, time.Now().UTC()
