@@ -103,6 +103,13 @@ pressure, and prove that membership, chunks, and vectors have no orphans after
 GC. Maintenance tests register a private worktree, poll exact HEAD/policy
 identity, enqueue only on change, recover the registration after daemon
 restart, and assert that public JSON never contains the filesystem path.
+Inspection-health fixtures also force registry write failure, an unrelated
+later save/restart and independent provider-boundary admission rejection.
+They prove that only confirmed inspection recovers its source cohort and that
+generation/path replacement cannot publish a stale observation. Retry event
+fixtures exercise the actual scheduler with resume, cancelled waits, failed
+checkpoint writes and no metric sink; neither waiting nor replay alone counts
+as an actual retry admission.
 Maintenance identity tests also enroll canonical and alias repository ids
 concurrently, migrate compatible and conflicting version-1 registry entries,
 project legacy registration/job references to the canonical identity, preserve

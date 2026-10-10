@@ -64,15 +64,21 @@ func observeCollectionRetry(ctx context.Context, collection string, attempt int)
 		return
 	}
 	metrics := observability.MetricsFromContext(ctx)
-	if metrics == nil {
-		return
-	}
+	knownCollection := true
 	switch collection {
 	case "issues", "issue_comments", "wiki", "pulls", "pr_comments":
 	default:
+		knownCollection = false
 		collection = "other"
 	}
-	metrics.Add("retry_admissions", map[string]string{"collection": collection}, 1)
+	if metrics != nil {
+		metrics.Add("retry_admissions", map[string]string{"collection": collection}, 1)
+	}
+	// A retry is actual scheduler entry, not a timer or durable checkpoint.
+	// Its diagnostic event is independent of optional metric attachment.
+	if knownCollection && attempt <= observability.MaxExecutionAttempt {
+		observability.EmitFromContext(ctx, observability.RetryAdmitted, observability.ExecutionDetails{Phase: "retry", Collection: collection, Outcome: "admitted", Attempt: uint32(attempt)})
+	}
 }
 
 func metricWorkKind(kind string) string {

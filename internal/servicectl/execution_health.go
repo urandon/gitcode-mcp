@@ -285,9 +285,22 @@ func (m *MaintenanceManager) ExecutionHealth(at time.Time) observability.Executi
 				return
 			}
 			stageRecord(source.Stage, "repository_docs", RepositoryDocsIndexJobType, source.SourceRegistrationID)
+			// Admission failures are indexing faults, not inspection failures.
+			// Their aggregate wrapper must not suppress the actual source fault.
+			if source.State == "degraded" && source.LastErrorClass != "" && legacyInspectionFailure(source.LastErrorClass) == "" {
+				r := base
+				r.kind, r.source, r.phase = "repository_docs", source.SourceRegistrationID, "indexing"
+				r.at, r.signal, r.reason = source.UpdatedAt, "failed", healthFailureReason(source.LastErrorClass)
+				add(r)
+			}
 			r := base
 			r.kind, r.source, r.phase = "repository_docs", source.SourceRegistrationID, "inspection"
 			s := source.Inspection
+			if s.RetentionIncomplete {
+				missing := r
+				missing.signal, missing.reason = "unknown", "source_inspection_unobserved"
+				add(missing)
+			}
 			if s.Result == "" {
 				r.coverage = "partial"
 				if class := legacyInspectionFailure(source.LastErrorClass); source.State == "degraded" && class != "" {

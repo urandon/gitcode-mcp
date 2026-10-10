@@ -34,6 +34,8 @@ func TestExecutionCatalogFiniteCompatibility(t *testing.T) {
 		{ProviderAttempt, ExecutionDetails{Phase: "embedding", Outcome: "succeeded", Attempt: MaxExecutionAttempt}},
 		{ProviderAttempt, ExecutionDetails{Phase: "fetch", Collection: "wiki", Outcome: "failed", FailureClass: "provider_failed", Attempt: 2}},
 		{SyncCommitted, ExecutionDetails{Phase: "commit", Collection: "issues", Outcome: "succeeded"}},
+		{RetryAdmitted, ExecutionDetails{Phase: "retry", Collection: "wiki", Outcome: "admitted", Attempt: 2}},
+		{RetryAdmitted, ExecutionDetails{Phase: "retry", Collection: "issues", Outcome: "admitted", Attempt: MaxExecutionAttempt}},
 	}
 	for _, outcome := range []string{"cancelled", "timeout", "rate_limited", "forbidden", "invalid"} {
 		cases = append(cases, struct {
@@ -90,7 +92,17 @@ func TestExecutionCatalogRejectsCrossCodeCombinations(t *testing.T) {
 		executionFixtureEvent(ProviderAttempt, ExecutionDetails{Phase: "fetch", Outcome: "timeout", FailureClass: "provider_failed"}),
 		executionFixtureEvent(SyncCommitted, ExecutionDetails{Phase: "commit", Outcome: "succeeded"}),
 		executionFixtureEvent(SyncCommitted, ExecutionDetails{Phase: "commit", Collection: "wiki", Outcome: "succeeded", Attempt: 1}),
+		executionFixtureEvent(RetryAdmitted, ExecutionDetails{Phase: "retry", Collection: "wiki", Outcome: "admitted", Attempt: 1}),
+		executionFixtureEvent(RetryAdmitted, ExecutionDetails{Phase: "retry", Collection: "wiki", Outcome: "admitted"}),
+		executionFixtureEvent(RetryAdmitted, ExecutionDetails{Phase: "retry", Collection: "wiki", Outcome: "succeeded", Attempt: 2}),
+		executionFixtureEvent(RetryAdmitted, ExecutionDetails{Phase: "fetch", Collection: "wiki", Outcome: "admitted", Attempt: 2}),
+		executionFixtureEvent(RetryAdmitted, ExecutionDetails{Phase: "retry", Outcome: "admitted", Attempt: 2}),
 		executionFixtureEvent(Boot, ExecutionDetails{Phase: "fetch", Outcome: "succeeded"}),
+	}
+	retry := executionFixtureEvent(RetryAdmitted, ExecutionDetails{Phase: "retry", Collection: "wiki", Outcome: "admitted", Attempt: 2})
+	retry.JobRef = ""
+	if retry.valid() {
+		t.Fatal("retry event accepted without resolved job")
 	}
 	for _, e := range invalid {
 		if e.valid() {

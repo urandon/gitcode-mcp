@@ -2809,8 +2809,12 @@ func (m *MaintenanceManager) finishReconcileEntry(registrationID string, snapsho
 	entry.RAGStatus = ragStatus
 	entry.SyncStage = snapshot.SyncStage
 	entry.RAGStage = snapshot.RAGStage
-	if source := m.sources[registrationID][snapshot.repositorySourceID]; source != nil && snapshot.RepositoryDocs != nil {
+	if _, source, current := m.inspectionAuthorityLocked(&snapshot); current {
+		// Inspection is separately confirmed at its actual completion. A later
+		// stale finish must not overwrite that transaction or bypass its failure.
+		inspection := source.State.Inspection
 		source.State = *snapshot.RepositoryDocs
+		source.State.Inspection = inspection
 	}
 	m.refreshLegacyRepositoryDocsLocked(entry)
 	entry.NamespaceID = namespaceID
@@ -2863,6 +2867,7 @@ func (m *MaintenanceManager) reconcileRepositoryDocsState(ctx context.Context, s
 		completedAt := m.now()
 		// Observation metadata must not change the existing polling schedule.
 		state.Inspection = state.Inspection.completed(result, failure, completedAt)
+		m.retainRepositoryDocsInspection(entry)
 	}()
 	repo, err := repositorydocs.OpenRepository(ctx, entry.repositoryPath)
 	if err != nil {

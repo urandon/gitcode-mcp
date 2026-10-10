@@ -170,8 +170,9 @@ and does not promise crash durability before its asynchronous checkpoint.
 Execution events use additive schema-1 `phase`, `collection`, `outcome`,
 `failure_class`, and optional `attempt` fields. Their closed, code-specific
 compatibility table is checked before admission and again during replay. Job
-admission/terminal, provider-attempt, and sync-commit codes require resolved
-opaque correlation; job and commit codes also require an opaque job ref.
+admission/terminal, provider-attempt, sync-commit, and retry-admission codes
+require resolved opaque correlation; job, commit, and retry codes also require
+an opaque job ref.
 Terminal outcomes include succeeded, failed, cancelled, interrupted, and
 superseded; cancellation, interruption, and supersession carry the matching
 finite class rather than an arbitrary owner error string.
@@ -303,6 +304,14 @@ fences and raw error messages are not writer contention. Internal adapter
 errors are not also counted at the cache layer. Direct local writers use the
 finite `other` work kind, never their operation/id as a label.
 
+The same actual retry-entry boundary emits `retry_admitted` with `phase: retry`,
+`outcome: admitted`, a known collection and bounded ordinal from 2 through 1024.
+It inherits the job's opaque boot correlation even without a metrics sink.
+Timers, checkpoint writes, cancelled waits and the first attempt emit no retry
+admission. Unknown collections/ordinals cannot become event dimensions; the
+existing counter's fixed `other` bucket remains separate diagnostic evidence.
+Lossy event admission never retries or changes the actual scheduler operation.
+
 `retry_scheduled` samples durable pending collection/commit waits and enabled
 maintenance backoff windows, including due windows not yet admitted. Active
 work suppresses its registry's previous backoff projection; a collection and
@@ -350,7 +359,14 @@ cohort; indexing jobs/stages have `indexing` phase and cannot recover that
 cohort at any timestamp. The existing source registration retains one
 fixed-size inspection episode: last result/attempt/success, first/last failure
 and a closed Git-store/policy/revision-set category. The real reconcile owner
-records its completion clock and the existing registry write persists it.
+records its completion clock and confirms a registry transaction before
+downstream admission/indexing. A failed metadata write preserves the last
+confirmed episode with `retention_incomplete`; it does not invent recovery or
+change scheduling. Later finish snapshots cannot republish discarded evidence,
+and a new confirmed inspection clears incomplete coverage. Registration/source
+generation and physical authority must still match at publication. A later
+admission error cannot discard an independently confirmed inspection; its
+indexing fault remains visible instead of being erased as an aggregate duplicate.
 No observation reader performs Git/cache I/O or updates this authority.
 Successful inspection is not index readiness or embedding success. Only a
 strictly later inspection success recovers the retained episode; a new failure

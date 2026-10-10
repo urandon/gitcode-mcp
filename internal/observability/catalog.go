@@ -38,6 +38,7 @@ const (
 	JobTerminal        Code = "job_terminal"
 	ProviderAttempt    Code = "provider_attempt"
 	SyncCommitted      Code = "sync_committed"
+	RetryAdmitted      Code = "retry_admitted"
 )
 
 type template struct{ stream, severity, component, message string }
@@ -55,6 +56,7 @@ var catalog = map[Code]template{
 	JobTerminal:        {"stdout", "info", "jobs", "A job reached a confirmed terminal state."},
 	ProviderAttempt:    {"stdout", "info", "provider", "An actual bounded provider attempt finished."},
 	SyncCommitted:      {"stdout", "info", "sync", "Fetched source graphs reached a confirmed cache commit."},
+	RetryAdmitted:      {"stdout", "info", "sync", "A collection entered an actual retry attempt."},
 }
 
 // Ref is opaque and cannot be constructed by assigning an unchecked string.
