@@ -85,6 +85,7 @@ type Metrics struct {
 	cells              map[string]*metricCell
 	keys               []string
 	origins            map[string]bool
+	collector          *Collector // immutable boot-matched scalar origin, not a callback
 	dropped            atomic.Uint64
 	partial            bool
 }
@@ -214,6 +215,12 @@ func (m *Metrics) record(name string, labels map[string]string, value float64, h
 		return false
 	}
 	c := m.cells[key]
+	if name == "event_drops" && m.collector != nil {
+		// The attached collector owns this total; additive callers cannot
+		// overwrite it or make the next scalar refresh move backward.
+		m.loss()
+		return false
+	}
 	if !m.origins[d.Origin] {
 		m.loss()
 		return false
@@ -276,6 +283,7 @@ func (m *Metrics) SampleAt(at time.Time, probes map[string]ProbeValue) bool {
 		m.partial = true
 	}
 	minute := at.Unix() / 60
+	m.refreshCollectorCounterLocked()
 	index := int(minute % MetricHistoryMinutes)
 	for _, key := range m.keys {
 		c := m.cells[key]
@@ -388,6 +396,7 @@ func metricHistoryIndex(minute int64) int {
 func (m *Metrics) Snapshot() MetricsSnapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.refreshCollectorCounterLocked()
 	out := MetricsSnapshot{BootID: m.boot, ResetAt: m.resetAt, SampledAt: m.sampledAt, State: "ready", Dropped: m.dropped.Load(), Catalog: MetricCatalog(), Series: make([]MetricSeries, 0, len(m.keys))}
 	if m.sampledAt.IsZero() {
 		out.State = "initializing"

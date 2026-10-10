@@ -550,6 +550,7 @@ func (m Manager) Run(ctx context.Context) error {
 	}
 	jobs := NewJobManagerWithRetention(paths.JobsPath, retention)
 	m.metrics = observability.NewMetrics(m.observation.BootID(), now)
+	m.metrics.AttachCollector(m.observation)
 	jobs.SetMetrics(m.metrics)
 	jobsForShutdown = jobs
 	maintenance := NewMaintenanceManager(m, jobs, paths.RegistryPath)

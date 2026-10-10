@@ -194,6 +194,15 @@ that bound; queue membership is not scanned to obtain its length. Larger job
 authorities make all three job gauges unavailable rather than returning partial
 counts, pruning execution state or holding the mutex for an unbounded traversal.
 
+The collector attaches a concrete boot-matched atomic origin for `event_drops`.
+Current metric snapshots and sampler history read only that scalar, never the
+collector mutex or storage. It counts validated admissions rejected by queue
+bounds or observation contention; invalid input, post-Close rejection and
+replayed prior-boot durable losses are excluded. A storage failure that retains
+an event in memory is partial persistence coverage, not an invented admission
+drop. Missing attachment stays unavailable. There is no per-entity series or
+caller callback, and additive recording cannot overwrite this attached total.
+
 History is a fixed ring of 60 UTC one-minute buckets, sampled in distinct UTC
 15-second slots. Gauge/counter count, sum and extrema summarize sampled values.
 Counter delta sums valid adjacent-sample increments; rate is the latest valid

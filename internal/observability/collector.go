@@ -48,6 +48,7 @@ type Collector struct {
 	historyBytes       int
 	coverage           Coverage
 	pendingLoss        atomic.Uint64
+	admissionDrops     atomic.Uint64
 	config             Config
 	// A deterministic private storage seam for fault tests, not a public hook.
 	open func(string) (*storage, []Event, bool, error)
@@ -104,7 +105,9 @@ func (c *Collector) Emit(code Code, refs Context) bool {
 		return false
 	}
 	if !c.mu.TryLock() {
-		c.pendingLoss.Add(1)
+		if c.pendingLoss.Add(1)&admissionClosed == 0 {
+			c.admissionDrops.Add(1)
+		}
 		return false
 	}
 	defer c.mu.Unlock()
@@ -115,6 +118,7 @@ func (c *Collector) Emit(code Code, refs Context) bool {
 	if c.queued >= MaxEvents || c.queueBytes+len(b) > MaxQueueBytes {
 		c.loseLocked("queue_overflow")
 		c.coverage.Dropped++
+		c.admissionDrops.Add(1)
 		return false
 	}
 	c.queued++
