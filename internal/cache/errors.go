@@ -43,10 +43,15 @@ type ErrLockContention struct {
 	PID        int
 	CacheRef   string
 	CachePath  string
+	// WaitExhausted describes bounded foreground admission, never owner data.
+	WaitExhausted bool
 }
 
 func (e ErrLockContention) Error() string {
 	details := make([]string, 0, 5)
+	if e.WaitExhausted {
+		details = append(details, "bounded writer wait exhausted; retry the same targeted sync after the writer completes, not the preceding comment write")
+	}
 	if ref := e.PublicCacheRef(); ref != "" {
 		details = append(details, "cache_ref="+ref)
 	}

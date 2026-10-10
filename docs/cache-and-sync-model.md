@@ -82,6 +82,16 @@ When a real writer conflict remains, the caller should receive a typed cache-bus
 
 Foreground bulk sync takes one logical writer lease for the selected cache and collection before making provider requests. Admission failure is operation-level: it returns one typed contention error with no provider traversal, cache mutation, or per-record partial-failure flood. Composite all-sync reuses its outer lease for nested collection work. The lease marker is private and scoped to the exact cache lock path plus repository id; a different cache path has an independent writer lease and can synchronize concurrently.
 
+Foreground exact PR-comment readback (`--pr-comments --input pr:N`) resolves the
+cached canonical parent before bounded writer admission. It waits at most five
+seconds, respecting caller cancellation/deadline, with capped local backoff.
+The admitted lease covers the single adapter call and publication; no fetched
+content is discarded or refetched due to writer contention. Collection sync and
+daemon staging retain their existing policies. A busy timeout tells callers to
+retry the same read, never repeat a preceding remote mutation. Live comment
+write graphs preserve `live` source origin separately from `remote` storage role,
+including related confirmed thread records; fixture graphs remain `fixture`.
+
 ## Live Sync Semantics
 
 `gitcode-mcp sync` uses the live GitCode provider by default for a configured repository and uses the current cache as the durable local source for later reads. `gitcode-mcp sync --offline` or `gitcode-mcp sync --fixture` selects the deterministic fixture/offline provider for docs smoke and tests.

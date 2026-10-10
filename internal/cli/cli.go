@@ -4403,6 +4403,11 @@ func writeCommandError(stderr io.Writer, format string, plan startupPlan, err er
 		failureClass = string(diagnostic.Code)
 		message = diagnostic.Message
 	}
+	if lockErr.WaitExhausted && plan.ProviderMode == "live-http" {
+		// The generic live diagnostic intentionally hides raw errors; retain
+		// this fixed, safe read-only recovery guidance in both output formats.
+		message += "; bounded writer wait exhausted; retry the same targeted sync after the writer completes, not the preceding comment write"
+	}
 	if format == "json" {
 		payload := map[string]any{"error": message, "exit_code": code, "failure_class": failureClass}
 		var writeErr service.ErrWriteFailure
@@ -4411,6 +4416,10 @@ func writeCommandError(stderr io.Writer, format string, plan startupPlan, err er
 			payload["mutation_attempted"], payload["provider_failure_class"], payload["reconciliation"] = writeErr.MutationAttempted, writeErr.ProviderFailureClass, writeErr.Reconciliation
 		}
 		addLockContentionFields(payload, err)
+		if lockErr.WaitExhausted {
+			payload["writer_wait_exhausted"] = true
+			payload["remediation"] = "retry the same targeted sync after the current writer completes; do not repeat the preceding comment mutation"
+		}
 		if diagnostic.Code != "" {
 			payload["http_attempted"] = diagnostic.HTTPAttempted
 			payload["retryable"] = diagnostic.Retryable

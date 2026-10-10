@@ -3051,11 +3051,14 @@ func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (
 		return nil, err
 	}
 	req.RepoID = repoID
-	ctx, releaseWriter, err := s.acquireBulkWriter(ctx, repoID, "bulk-sync-pr-comments")
-	if err != nil {
-		return nil, err
+	if targetedPRNumber == 0 {
+		var releaseWriter func()
+		ctx, releaseWriter, err = s.acquireBulkWriter(ctx, repoID, "bulk-sync-pr-comments")
+		if err != nil {
+			return nil, err
+		}
+		defer releaseWriter()
 	}
-	defer releaseWriter()
 	s.ensureBulkIdempotencyKey(&req, "pr_comments")
 	if err := s.validateRepoScope(ctx, repoID, "pull_request"); err != nil {
 		return nil, err
@@ -3092,6 +3095,14 @@ func (s *Service) BulkSyncPRComments(ctx context.Context, req BulkSyncRequest) (
 			}
 			return nil, normalizeError(err, "sources", repoID)
 		}
+	}
+	if targetedPRNumber > 0 {
+		var releaseWriter func()
+		ctx, releaseWriter, err = s.acquireTargetedPRCommentWriter(ctx, repoID, targetedPRCommentWriterWait)
+		if err != nil {
+			return nil, err
+		}
+		defer releaseWriter()
 	}
 	sort.SliceStable(prSources, func(i, j int) bool { return prSources[i].ID < prSources[j].ID })
 	start := 0
@@ -7528,6 +7539,7 @@ func (s *Service) prCommentWriteGraphWithParent(ctx context.Context, repoID stri
 		return writeConfirmation{}, cache.RecordGraph{}, err
 	}
 	graph := recordGraphFromSourceGraph(sourceGraph)
+	graph.SourceProvenance = s.syncOriginProvenance()
 	revision := firstNonEmptyString(result.RemoteRevision, sourceGraph.SyncStatus.RemoteRevision, result.ResponseHash)
 	if len(graph.RemoteRevisions) > 0 {
 		graph.RemoteRevisions[0].RemoteRevision = revision

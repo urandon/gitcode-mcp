@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gitcode-mcp/internal/cache"
@@ -67,5 +68,71 @@ func TestCLIImmediateCreatedPrimaryReadback(t *testing.T) {
 				t.Fatalf("unexpected read traffic=%d", api.Reads.Load())
 			}
 		})
+	}
+}
+
+func TestCLIImmediateLivePRCommentReadback(t *testing.T) {
+	ctx := context.Background()
+	body := "## Comment\n\nExact Markdown.\n"
+	api := testnet.NewPRCommentAPI(t, body)
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache.db")
+	store, err := cache.NewSQLiteStore(ctx, cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AddRepository(ctx, cache.RepositoryBinding{RepoID: "comment-origin", Owner: "owner", Name: "repo", APIBaseURL: api.URL, Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
+		t.Fatal(err)
+	}
+	testnet.SeedPRCommentParent(t, store, "comment-origin")
+	src := &repoInitLocalSource{env: map[string]string{"GITCODE_TOKEN": "offline-test-token"}, cwd: dir, homeDir: dir, configDir: filepath.Join(dir, "config"), cacheDir: filepath.Join(dir, "cache")}
+	args := []string{"add-pr-comment", "--cache-path", cachePath, "--repo", "comment-origin", "--number", "7", "--body", body, "--idempotency-key", "one-comment", "--format", "json"}
+	var out, stderr bytes.Buffer
+	for attempt := 0; attempt < 2; attempt++ {
+		out.Reset()
+		stderr.Reset()
+		if code := ExecuteWithSourceContext(ctx, args, &out, &stderr, src); code != 0 {
+			t.Fatalf("write code=%d error=%s", code, stderr.String())
+		}
+		var result service.WriteCommandResult
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if attempt == 1 && result.Status != "already_applied" {
+			t.Fatalf("replay status=%s", result.Status)
+		}
+	}
+	delete(src.env, "GITCODE_TOKEN")
+	out.Reset()
+	stderr.Reset()
+	if code := ExecuteWithSourceContext(ctx, []string{"get", "PRCOMMENT-7-301", "--cache-path", cachePath, "--repo", "comment-origin", "--format", "json"}, &out, &stderr, src); code != 0 {
+		t.Fatalf("read code=%d error=%s", code, stderr.String())
+	}
+	var cached service.SourceRecord
+	if err := json.Unmarshal(out.Bytes(), &cached); err != nil {
+		t.Fatal(err)
+	}
+	if cached.Provenance != "live" || cached.Body != body || api.Posts.Load() != 1 {
+		t.Fatalf("origin=%s body_match=%v posts=%d", cached.Provenance, cached.Body == body, api.Posts.Load())
+	}
+}
+
+func TestCLIExhaustedTargetedWriterWaitIsActionable(t *testing.T) {
+	for _, format := range []string{"json", "text"} {
+		var out bytes.Buffer
+		code := writeCommandError(&out, format, startupPlan{ProviderMode: "live-http"}, cache.ErrLockContention{Operation: "sync", RepoID: "other", Path: "/private/cache.lock", WaitExhausted: true})
+		if code != 1 || !strings.Contains(out.String(), "bounded writer wait exhausted") || !strings.Contains(out.String(), "not the preceding comment write") || strings.Contains(out.String(), "/private/") {
+			t.Fatalf("wait diagnostic code=%d output=%s", code, out.String())
+		}
+		if format == "json" {
+			var payload map[string]any
+			if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["writer_wait_exhausted"] != true || payload["failure_class"] != "cache_busy" || payload["http_attempted"] != false {
+				t.Fatalf("diagnostic=%+v", payload)
+			}
+		}
 	}
 }
