@@ -392,7 +392,14 @@ test('operator views keep coverage truth, deep links, and recovery states', asyn
 });
 
 test('repository documentation cohort exposes versioned authority, coverage, and safe handoffs', async ({ page }) => {
+  // October 10 dates share the coverage value's text prefix. Keep this
+  // collision deterministic instead of depending on the runner's calendar.
+  const fixtureNow = new Date('2026-10-10T12:00:00Z');
+  await page.clock.install({ time: fixtureNow });
   const docsSnapshot = structuredClone(snapshot);
+  docsSnapshot.generated_at = fixtureNow.toISOString();
+  docsSnapshot.caches[0].repositories[0].documentation.updated_at = fixtureNow.toISOString();
+  docsSnapshot.caches[0].repositories[0].documentation.next_poll_at = new Date(fixtureNow.getTime() + 60_000).toISOString();
   const docsJob = docsSnapshot.jobs.find((job) => job.id === 'job-000004')!;
   docsJob.status = 'running'; docsJob.cancellable = true; docsJob.finished_at = undefined;
   docsSnapshot.jobs.push({ ...docsJob, id: 'job-000099', repo_id: 'other/repository', work_ref: 'wrong-repository-work', updated_at: new Date(Date.now() + 60_000).toISOString() });
@@ -432,7 +439,11 @@ test('repository documentation cohort exposes versioned authority, coverage, and
   await page.goto('/?view=Caches&cache=cache-111111112222&repo=example%2Frepo&tab=documentation');
   await expect(page.getByRole('heading', { name: 'Repository documentation RAG' })).toBeVisible();
   await expect(page.getByText('Committed Git')).toBeVisible();
-  await expect(page.getByText('10/10')).toBeVisible();
+  const documentation = page.getByRole('region', { name: 'Repository documentation RAG' });
+  const coverage = documentation.getByRole('article').filter({ has: page.getByText('Coverage', { exact: true }) });
+  await expect(coverage).toHaveCount(1);
+  await expect(coverage.getByText('10/10', { exact: true })).toBeVisible();
+  await expect(documentation.getByText('10/10/2026', { exact: true })).toBeVisible();
   await expect(page.getByText('repo-doc-set-public')).toBeVisible();
   await expect(page.getByText('Automatic reconciliation')).toBeVisible();
   await expect(page.getByText('Source generation')).toBeVisible();
