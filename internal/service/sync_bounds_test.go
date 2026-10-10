@@ -12,8 +12,58 @@ import (
 	"gitcode-mcp/internal/gitcode"
 )
 
+// delayedProgressClient makes a slow observer deterministic: page 4 is already
+// in flight, but its prepared response cannot return until cancellation. The
+// service, not the fixture, still decides which records may be staged.
+type delayedProgressClient struct {
+	*fakeGitCodeClient
+	page4Entered chan struct{}
+}
+
+func (c *delayedProgressClient) ListIssues(ctx context.Context, req gitcode.IssueListRequest) (gitcode.Page[gitcode.IssueSummary], error) {
+	page, err := c.fakeGitCodeClient.ListIssues(ctx, req)
+	if req.Page == 4 {
+		close(c.page4Entered)
+		<-ctx.Done()
+	}
+	return page, err
+}
+
+func cancelAfterDelayedPage3Progress(ctx context.Context, cancel context.CancelFunc, page4Entered <-chan struct{}, progress <-chan ProgressEvent) <-chan bool {
+	done := make(chan bool, 1)
+	go func() {
+		// Do not drain the buffered notifications until the next page is in
+		// flight. This exercises delayed observer scheduling on every run.
+		select {
+		case <-page4Entered:
+		case <-ctx.Done():
+			done <- false
+			return
+		}
+		for {
+			select {
+			case ev, ok := <-progress:
+				if !ok {
+					done <- false
+					return
+				}
+				if ev.Page == 3 {
+					cancel()
+					done <- true
+					return
+				}
+			case <-ctx.Done():
+				done <- false
+				return
+			}
+		}
+	}()
+	return done
+}
+
 func TestBulkSyncIssuesBoundedCancelMidway_CancelAfterPage3Progress(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	base := time.Date(2026, 6, 22, 14, 0, 0, 0, time.UTC)
 	client := &fakeGitCodeClient{
 		listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{
@@ -33,16 +83,11 @@ func TestBulkSyncIssuesBoundedCancelMidway_CancelAfterPage3Progress(t *testing.T
 	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "bounded-cancel", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
 		t.Fatal(err)
 	}
-	svc := NewWithClient(store, client)
+	delayed := &delayedProgressClient{fakeGitCodeClient: client, page4Entered: make(chan struct{})}
+	svc := NewWithClient(store, delayed)
 
 	progressChan := make(chan ProgressEvent, 20)
-	go func() {
-		for ev := range progressChan {
-			if ev.Page == 3 {
-				cancel()
-			}
-		}
-	}()
+	observerDone := cancelAfterDelayedPage3Progress(ctx, cancel, delayed.page4Entered, progressChan)
 
 	result, err := svc.BulkSyncIssues(ctx, BulkSyncRequest{
 		RepoID:  "bounded-cancel",
@@ -51,6 +96,13 @@ func TestBulkSyncIssuesBoundedCancelMidway_CancelAfterPage3Progress(t *testing.T
 		Bounds:  &SyncBounds{MaxRecords: 50, ProgressChan: progressChan},
 	})
 	close(progressChan)
+	cancel()
+	if !<-observerDone {
+		t.Fatal("delayed observer did not acknowledge page-3 cancellation")
+	}
+	if len(client.listIssueRequests) != 4 || client.listIssueRequests[3].Page != 4 {
+		t.Fatal("cancellation fixture did not stop at the in-flight page boundary")
+	}
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -81,7 +133,8 @@ func TestBulkSyncIssuesBoundedCancelMidway_CancelAfterPage3Progress(t *testing.T
 }
 
 func TestBulkSyncIssuesBoundedCancelMidway(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	base := time.Date(2026, 6, 22, 14, 0, 0, 0, time.UTC)
 	client := &fakeGitCodeClient{
 		listIssuesPages: []gitcode.Page[gitcode.IssueSummary]{
@@ -101,16 +154,11 @@ func TestBulkSyncIssuesBoundedCancelMidway(t *testing.T) {
 	if err := store.AddRepository(context.Background(), cache.RepositoryBinding{RepoID: "bounded-cancel-mid", Owner: "owner", Name: "repo", APIBaseURL: "https://example.invalid/api", Scopes: []cache.RepositoryScope{cache.RepositoryScopeIssues}}); err != nil {
 		t.Fatal(err)
 	}
-	svc := NewWithClient(store, client)
+	delayed := &delayedProgressClient{fakeGitCodeClient: client, page4Entered: make(chan struct{})}
+	svc := NewWithClient(store, delayed)
 
 	progressChan := make(chan ProgressEvent, 20)
-	go func() {
-		for ev := range progressChan {
-			if ev.Page == 3 {
-				cancel()
-			}
-		}
-	}()
+	observerDone := cancelAfterDelayedPage3Progress(ctx, cancel, delayed.page4Entered, progressChan)
 
 	_, err = svc.BulkSyncIssues(ctx, BulkSyncRequest{
 		RepoID:  "bounded-cancel-mid",
@@ -119,6 +167,13 @@ func TestBulkSyncIssuesBoundedCancelMidway(t *testing.T) {
 		Bounds:  &SyncBounds{MaxRecords: 50, ProgressChan: progressChan},
 	})
 	close(progressChan)
+	cancel()
+	if !<-observerDone {
+		t.Fatal("delayed observer did not acknowledge page-3 cancellation")
+	}
+	if len(client.listIssueRequests) != 4 || client.listIssueRequests[3].Page != 4 {
+		t.Fatal("cancellation fixture did not stop at the in-flight page boundary")
+	}
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
