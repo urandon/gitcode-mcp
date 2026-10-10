@@ -5484,6 +5484,9 @@ func (s *Service) executeWrite(ctx context.Context, command string, req WriteCom
 	if !s.hasWriteCredential() {
 		return WriteCommandResult{}, ErrWriteFailure{Code: "write_missing_credential", RepoID: route.RepoID, IdempotencyKey: key}
 	}
+	if command == "create-repo-label" {
+		return s.executeRepositoryLabelWrite(ctx, route, req, base)
+	}
 	if command == "create-page" || command == "update-page" {
 		return s.executeWikiContentWrite(ctx, command, route, req, base)
 	}

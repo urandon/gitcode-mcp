@@ -52,6 +52,8 @@ type writeToolArgs struct {
 	State          string   `json:"state,omitempty"`
 	PerPage        int      `json:"per_page,omitempty"`
 	Label          string   `json:"label,omitempty"`
+	Name           string   `json:"name,omitempty"`
+	Color          string   `json:"color,omitempty"`
 	Labels         []string `json:"labels,omitempty"`
 	Strategy       string   `json:"strategy,omitempty"`
 }
@@ -66,6 +68,10 @@ func writeToolDefinition(cap capability.Capability) toolDefinition {
 
 func writeToolInputSchema(id string) inputSchema {
 	switch id {
+	case "get_repo_metadata", "list_repo_labels":
+		return inputSchema{Type: "object", Properties: map[string]schemaProp{"repo_id": {Type: "string", MinLength: 1, Description: "Configured repository identity; this is an explicit live read."}}, Required: []string{"repo_id"}}
+	case "create_repo_label":
+		return inputSchema{Type: "object", Properties: writeSchemaProps(map[string]schemaProp{"name": {Type: "string", MinLength: 1, Description: "Exact standalone label name, no issue assignment."}, "color": {Type: "string", Description: "#RRGGBB color."}, "idempotency_key": {Type: "string", MinLength: 1, Description: "Required caller key; preserve it for GET-only recovery."}}), Required: []string{"repo_id", "write_mode", "name", "color", "idempotency_key"}}
 	case "feedback_status":
 		return inputSchema{Type: "object", Properties: map[string]schemaProp{}}
 	case "prepare_feedback":
@@ -175,6 +181,12 @@ func feedbackInputSchema(submit bool) inputSchema {
 
 func (s *Server) writeToolHandler(cap capability.Capability) toolHandler {
 	switch cap.ID {
+	case "get_repo_metadata":
+		return s.callGetRepositoryMetadata
+	case "list_repo_labels":
+		return s.callListRepositoryLabels
+	case "create_repo_label":
+		return s.callCreateRepositoryLabel
 	case "feedback_status":
 		return s.callFeedbackStatus
 	case "prepare_feedback":

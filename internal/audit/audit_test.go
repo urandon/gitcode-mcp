@@ -92,6 +92,8 @@ func TestScenario009LiveCreateIssueConfirmationSanitizesMetadata(t *testing.T) {
 			"method":                         "POST",
 			"remote_alias":                   "100",
 			"provider_id":                    "9001",
+			"label_repository_id":            "17",
+			"label_revision":                 "label-digest",
 			"primary_snapshot_hash":          "primary-hash",
 			"source_fingerprint":             "payload-hash",
 			"milestone_id":                   "MILESTONE-1",
@@ -126,6 +128,9 @@ func TestScenario009LiveCreateIssueConfirmationSanitizesMetadata(t *testing.T) {
 	}
 	if entry.RequestMetadata["provider_id"] != "9001" || entry.RequestMetadata["primary_snapshot_hash"] != "primary-hash" {
 		t.Fatal("primary identity and snapshot evidence was dropped")
+	}
+	if entry.RequestMetadata["label_repository_id"] != "17" || entry.RequestMetadata["label_revision"] != "label-digest" {
+		t.Fatal("safe label reconciliation evidence was dropped")
 	}
 }
 

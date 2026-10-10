@@ -64,6 +64,7 @@ var commands = []string{
 	"update-pr",
 	"merge-pr", "merge-mr",
 	"milestones",
+	"repo-metadata", "list-repo-labels", "create-repo-label",
 	"list-push-mirrors", "push-mirrors",
 	"trigger-push-mirror",
 	"wait-push-mirror",
@@ -131,6 +132,9 @@ type queryService interface {
 	DiffSnapshot(context.Context, service.DiffSnapshotRequest) (service.DiffSnapshotResult, error)
 	AddRepository(context.Context, service.AddRepositoryRequest) (service.RepositoryBinding, error)
 	RepositoryStatus(context.Context, service.RepositoryStatusRequest) (service.RepositoryStatus, error)
+	GetRepositoryMetadata(context.Context, string) (service.RepositoryMetadataResult, error)
+	ListRepositoryLabels(context.Context, string) (service.RepositoryLabelsResult, error)
+	CreateRepositoryLabel(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	CreateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	UpdateIssue(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
 	CreatePR(context.Context, service.WriteCommandRequest) (service.WriteCommandResult, error)
@@ -262,6 +266,7 @@ type options struct {
 	clearMilestone               bool
 	state                        string
 	label                        string
+	color                        string
 	labels                       string
 	tag                          string
 	ref                          string
@@ -588,6 +593,8 @@ func resolveLiveCredential(ctx context.Context, eff config.EffectiveConfig, deps
 
 func isLiveStartupCommand(command string) bool {
 	switch command {
+	case "repo-metadata", "list-repo-labels", "create-repo-label":
+		return true
 	case "sync", "submit-feedback", "create-issue", "update-issue", "create-pr", "create-mr", "update-pr", "merge-pr", "merge-mr", "milestones", "list-push-mirrors", "push-mirrors", "trigger-push-mirror", "wait-push-mirror", "create-milestone", "update-milestone", "set-issue-milestone", "clear-issue-milestone", "create-page", "update-page", "delete-page", "add-issue-comment", "add-pr-comment", "add-pr-review-comment", "reply-pr-review-comment", "update-comment", "add-label", "publish-release", "doctor":
 		return true
 	default:
@@ -782,6 +789,7 @@ func parseOptions(command string, args []string) (options, []string, error) {
 	flags.BoolVar(&opts.clearMilestone, "clear-milestone", false, "clear issue milestone")
 	flags.StringVar(&opts.state, "state", "", "state")
 	flags.StringVar(&opts.label, "label", "", "label")
+	flags.StringVar(&opts.color, "color", "", "standalone repository label #RRGGBB color")
 	flags.StringVar(&opts.labels, "labels", "", "comma-separated labels")
 	flags.StringVar(&opts.tag, "tag", "", "release tag")
 	flags.StringVar(&opts.ref, "ref", "", "release ref")
@@ -2766,6 +2774,26 @@ func dispatch(ctx context.Context, svc queryService, command string, args []stri
 			return writeError(stderr, opts.format, err)
 		}
 		return render(stdout, opts.format, result, renderMilestonesText)
+	case "repo-metadata":
+		result, err := svc.GetRepositoryMetadata(ctx, opts.repo)
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, func(w io.Writer, r service.RepositoryMetadataResult) {
+			fmt.Fprintf(w, "repo_id=%s provider_id=%s private=%t default_branch=%s\n", r.RepoID, r.ProviderID, r.Private, r.DefaultBranch)
+		})
+	case "list-repo-labels":
+		result, err := svc.ListRepositoryLabels(ctx, opts.repo)
+		if err != nil {
+			return writeError(stderr, opts.format, err)
+		}
+		return render(stdout, opts.format, result, func(w io.Writer, r service.RepositoryLabelsResult) {
+			fmt.Fprintf(w, "repo_id=%s labels=%d\n", r.RepoID, len(r.Labels))
+		})
+	case "create-repo-label":
+		opts.label = opts.name
+		opts.name = ""
+		return dispatchWrite(ctx, svc.CreateRepositoryLabel, command, opts, stdout, stderr, plan)
 	case "list-push-mirrors", "push-mirrors":
 		result, err := svc.ListPushRemoteMirrors(ctx, service.PushMirrorListRequest{RepoID: opts.repo, Repo: opts.repo})
 		if err != nil {
@@ -3205,6 +3233,9 @@ func validateWriteOptions(command string, opts options) error {
 	}
 	if command == "trigger-push-mirror" && !opts.live && !opts.dryRun {
 		return service.ErrInvalidQuery{Field: "write_mode", Message: "trigger-push-mirror requires --live or --dry-run"}
+	}
+	if command == "create-repo-label" && !opts.live && !opts.dryRun {
+		return service.ErrInvalidQuery{Field: "write_mode", Message: "create-repo-label requires --live or --dry-run"}
 	}
 	if (opts.offline || opts.fixture) && !opts.dryRun {
 		return service.ErrInvalidQuery{Field: "write_mode", Message: "offline write commands require --dry-run"}
@@ -4002,7 +4033,7 @@ func writeRequest(opts options) service.WriteCommandRequest {
 	if !opts.dryRun {
 		mode = service.WriteModeLive
 	}
-	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, IssueID: opts.issueID, Number: opts.number, CommentID: opts.commentID, DiscussionID: opts.discussionID, ParentID: opts.parentID, Slug: opts.slug, Path: opts.path, Line: opts.line, StartLine: opts.startLine, EndLine: opts.endLine, Position: opts.position, Sha: opts.sha, Title: opts.title, Body: opts.body, Description: opts.description, DueOn: opts.dueOn, Milestone: opts.milestone, ClearMilestone: opts.clearMilestone, Head: opts.head, Base: opts.base, State: opts.state, Label: opts.label, Labels: labels, Strategy: opts.strategy, IdempotencyKey: opts.idempotencyKey}
+	return service.WriteCommandRequest{RepoID: opts.repo, Repo: opts.repo, Mode: mode, ID: opts.id, IssueID: opts.issueID, Number: opts.number, CommentID: opts.commentID, DiscussionID: opts.discussionID, ParentID: opts.parentID, Slug: opts.slug, Path: opts.path, Line: opts.line, StartLine: opts.startLine, EndLine: opts.endLine, Position: opts.position, Sha: opts.sha, Title: opts.title, Body: opts.body, Description: opts.description, DueOn: opts.dueOn, Milestone: opts.milestone, ClearMilestone: opts.clearMilestone, Head: opts.head, Base: opts.base, State: opts.state, Label: opts.label, Color: opts.color, Labels: labels, Strategy: opts.strategy, IdempotencyKey: opts.idempotencyKey}
 }
 
 func publishReleaseRequest(opts options) (service.PublishReleaseRequest, error) {
@@ -5719,6 +5750,11 @@ func printCommandHelp(command string, w io.Writer) {
 		fmt.Fprintln(w, "  --per-page N        records per page")
 		fmt.Fprintln(w, "  --cache-path PATH   cache database path")
 		fmt.Fprintln(w, "  --format FORMAT     output format (text, json)")
+	case "repo-metadata", "list-repo-labels":
+		fmt.Fprintf(w, "Usage: gitcode-mcp %s --repo REPO [--format json]\n\nExplicit bounded live read, distinct from local repo status.\n", command)
+	case "create-repo-label":
+		fmt.Fprintln(w, "Usage: gitcode-mcp create-repo-label --repo REPO --name NAME --color '#RRGGBB' --live --idempotency-key KEY")
+		fmt.Fprintln(w, "Create an unused standalone definition, without issue assignment. --dry-run is non-mutating; preserve the key for GET-only recovery. Description writes are unsupported.")
 	case "list-push-mirrors", "push-mirrors":
 		fmt.Fprintln(w, "Usage: gitcode-mcp list-push-mirrors --repo REPO")
 		fmt.Fprintln(w)
