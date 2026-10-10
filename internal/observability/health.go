@@ -12,16 +12,17 @@ const MaxHealthEvidence = 32768
 // No log, counter, provider body or error string is an input. At and success
 // are authority timestamps, not the time a polling reader happened to arrive.
 type HealthEvidence struct {
-	Cohort                             Ref
-	Origin, Collection, Signal, Reason string
-	Refs                               Context
-	At, LastSuccess, RetryAfter        time.Time
+	Cohort                                              Ref
+	Origin, Collection, Phase, Signal, Reason, Coverage string
+	Refs                                                Context
+	At, LastSuccess, RetryAfter                         time.Time
 }
 
 type Incident struct {
 	IncidentRef     string     `json:"incident_ref"`
 	Origin          string     `json:"origin"`
 	Collection      string     `json:"collection"`
+	Phase           string     `json:"phase,omitempty"`
 	State           string     `json:"state"`
 	Reason          string     `json:"reason"`
 	FirstObservedAt time.Time  `json:"first_observed_at"`
@@ -77,6 +78,15 @@ func ProjectExecutionHealth(at time.Time, evidence []HealthEvidence) ExecutionHe
 			out.Coverage, out.Reason = "partial", "invalid_authority_evidence"
 			continue
 		}
+		if e.Coverage == "partial" || e.Signal == "unknown" {
+			out.Coverage = "partial"
+			if out.Reason != "invalid_authority_evidence" {
+				out.Reason = "source_inspection_history_unavailable"
+			}
+		}
+		if e.Signal == "unknown" {
+			continue
+		}
 		key := e.Cohort.value
 		c := cohorts[key]
 		if c == nil {
@@ -105,8 +115,11 @@ func ProjectExecutionHealth(at time.Time, evidence []HealthEvidence) ExecutionHe
 			continue
 		}
 		e := c.problem
-		i := Incident{IncidentRef: key, Origin: e.Origin, Collection: e.Collection, State: "active", Reason: e.Reason, FirstObservedAt: c.first, LastObservedAt: c.last,
+		i := Incident{IncidentRef: key, Origin: e.Origin, Collection: e.Collection, Phase: e.Phase, State: "active", Reason: e.Reason, FirstObservedAt: c.first, LastObservedAt: c.last,
 			JobRef: e.Refs.Job.value, RegistrationRef: e.Refs.Registration.value, CacheRef: e.Refs.Cache.value, RepoRef: e.Refs.Repo.value, Coverage: "retained"}
+		if e.Coverage == "partial" {
+			i.Coverage = "partial"
+		}
 		if !c.success.IsZero() {
 			success := c.success
 			i.LastSuccessAt = &success
@@ -174,7 +187,30 @@ func healthSignalRank(signal string) int {
 	return 0
 }
 func validHealthEvidence(e HealthEvidence) bool {
-	if e.Cohort.value == "" || !validRef(e.Cohort.value, "correlation") || e.At.IsZero() {
+	if e.Cohort.value == "" || !validRef(e.Cohort.value, "correlation") || e.At.IsZero() && e.Signal != "unknown" {
+		return false
+	}
+	if e.Phase != "" && e.Origin != "repository_docs" {
+		return false
+	}
+	inspection := e.Origin == "repository_docs" && e.Phase == "inspection"
+	if e.Coverage == "partial" && !inspection {
+		return false
+	}
+	switch e.Reason {
+	case "source_unavailable", "source_policy_invalid", "source_state_unavailable", "source_inspection_unobserved":
+		if !inspection {
+			return false
+		}
+	}
+	switch e.Phase {
+	case "", "inspection", "indexing":
+	default:
+		return false
+	}
+	switch e.Coverage {
+	case "", "retained", "partial":
+	default:
 		return false
 	}
 	switch e.Origin {
@@ -189,11 +225,15 @@ func validHealthEvidence(e HealthEvidence) bool {
 	}
 	switch e.Signal {
 	case "succeeded", "failed", "interrupted", "waiting_writer", "retrying":
+	case "unknown":
+		if e.Origin != "repository_docs" || e.Phase != "inspection" || e.Reason != "source_inspection_unobserved" {
+			return false
+		}
 	default:
 		return false
 	}
 	switch e.Reason {
-	case "operation_failed", "provider_timeout", "provider_unavailable", "provider_forbidden", "provider_rate_limited", "provider_invalid", "cache_authority", "configuration_invalid", "embedding_failed", "interrupted", "writer_wait", "retry_wait", "succeeded":
+	case "operation_failed", "provider_timeout", "provider_unavailable", "provider_forbidden", "provider_rate_limited", "provider_invalid", "cache_authority", "configuration_invalid", "embedding_failed", "interrupted", "writer_wait", "retry_wait", "succeeded", "source_unavailable", "source_policy_invalid", "source_state_unavailable", "source_inspection_unobserved":
 	default:
 		return false
 	}

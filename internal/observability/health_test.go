@@ -75,3 +75,22 @@ func TestHealthProjectionEqualTimestampCannotProveRecovery(t *testing.T) {
 		t.Fatal("equal timestamps invented ordered recovery")
 	}
 }
+
+func TestHealthProjectionInspectionPhaseAndCoverageAreClosed(t *testing.T) {
+	at := time.Unix(1700000000, 0).UTC()
+	unknown := healthFixture("unknown", "unknown", time.Time{})
+	unknown.Origin, unknown.Phase, unknown.Reason = "repository_docs", "inspection", "source_inspection_unobserved"
+	invalid := healthFixture("invalid", "failed", at)
+	invalid.Phase = "synthetic-private-phase"
+	for _, evidence := range [][]HealthEvidence{{unknown, invalid}, {invalid, unknown}} {
+		got := ProjectExecutionHealth(at, evidence)
+		if got.State != "unknown" || got.Coverage != "partial" || got.Reason != "invalid_authority_evidence" || len(got.Incidents) != 0 {
+			t.Fatal("mixed invalid/missing inspection evidence became complete or nondeterministic")
+		}
+	}
+	wrongOrigin := unknown
+	wrongOrigin.Origin = "sync"
+	if got := ProjectExecutionHealth(at, []HealthEvidence{wrongOrigin}); got.Reason != "invalid_authority_evidence" {
+		t.Fatal("inspection phase accepted an unrelated execution origin")
+	}
+}

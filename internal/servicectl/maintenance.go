@@ -157,19 +157,20 @@ type MaintenanceRegistrationRedirect struct {
 }
 
 type RepositoryDocsMaintenanceState struct {
-	SourceRegistrationID         string                `json:"source_registration_id,omitempty"`
-	SourceRegistrationGeneration int64                 `json:"source_registration_generation,omitempty"`
-	GitStoreRef                  string                `json:"git_store_ref"`
-	WorktreeRef                  string                `json:"worktree_ref,omitempty"`
-	CommitOID                    string                `json:"commit_oid,omitempty"`
-	PolicyHash                   string                `json:"policy_hash,omitempty"`
-	RevisionSetID                string                `json:"revision_set_id,omitempty"`
-	State                        string                `json:"state"`
-	LastErrorClass               string                `json:"last_error_class,omitempty"`
-	LastError                    string                `json:"last_error,omitempty"`
-	Stage                        MaintenanceStageState `json:"stage,omitempty"`
-	UpdatedAt                    time.Time             `json:"updated_at,omitempty"`
-	NextPollAt                   time.Time             `json:"next_poll_at,omitempty"`
+	SourceRegistrationID         string                        `json:"source_registration_id,omitempty"`
+	SourceRegistrationGeneration int64                         `json:"source_registration_generation,omitempty"`
+	GitStoreRef                  string                        `json:"git_store_ref"`
+	WorktreeRef                  string                        `json:"worktree_ref,omitempty"`
+	CommitOID                    string                        `json:"commit_oid,omitempty"`
+	PolicyHash                   string                        `json:"policy_hash,omitempty"`
+	RevisionSetID                string                        `json:"revision_set_id,omitempty"`
+	State                        string                        `json:"state"`
+	LastErrorClass               string                        `json:"last_error_class,omitempty"`
+	LastError                    string                        `json:"last_error,omitempty"`
+	Stage                        MaintenanceStageState         `json:"stage,omitempty"`
+	Inspection                   RepositoryDocsInspectionState `json:"inspection,omitempty"`
+	UpdatedAt                    time.Time                     `json:"updated_at,omitempty"`
+	NextPollAt                   time.Time                     `json:"next_poll_at,omitempty"`
 }
 
 type maintenanceDiskEntry struct {
@@ -2573,7 +2574,7 @@ func (m *MaintenanceManager) reconcileEntry(ctx context.Context, registrationID 
 	repositoryDocsNeedsIndex := false
 	if snapshot.RepositoryDocs != nil && snapshot.repositoryPath != "" {
 		snapshot.RepositoryDocs.Stage = observeMaintenanceStage(snapshot.RepositoryDocs.Stage, latestRepositoryDocs, now)
-		repositoryDocsNeedsIndex = reconcileRepositoryDocsState(ctx, store, &snapshot, now)
+		repositoryDocsNeedsIndex = m.reconcileRepositoryDocsState(ctx, store, &snapshot, now)
 	}
 	if (latestRAG.Status == JobStatusSucceeded || latestRAG.Status == JobStatusSuperseded) && latestRAG.NamespaceID != "" {
 		snapshot.NamespaceID = latestRAG.NamespaceID
@@ -2847,13 +2848,22 @@ func (m *MaintenanceManager) finishReconcileEntry(registrationID string, snapsho
 	return updated
 }
 
-func reconcileRepositoryDocsState(ctx context.Context, store *cache.SQLiteStore, entry *MaintenanceEntry, now time.Time) bool {
+func (m *MaintenanceManager) reconcileRepositoryDocsState(ctx context.Context, store *cache.SQLiteStore, entry *MaintenanceEntry, now time.Time) bool {
 	state := entry.RepositoryDocs
 	if state == nil || entry.repositoryPath == "" {
 		return false
 	}
 	state.UpdatedAt = now
 	state.NextPollAt = now.Add(time.Minute)
+	// Inspection is distinct from indexing/admission. Retain only fixed-size
+	// primitive evidence in the existing authority, using the owner's actual
+	// completion clock, never a later observation reader's timestamp.
+	result, failure := "failed", "git_store"
+	defer func() {
+		completedAt := m.now()
+		// Observation metadata must not change the existing polling schedule.
+		state.Inspection = state.Inspection.completed(result, failure, completedAt)
+	}()
 	repo, err := repositorydocs.OpenRepository(ctx, entry.repositoryPath)
 	if err != nil {
 		state.State = "degraded"
@@ -2863,6 +2873,7 @@ func reconcileRepositoryDocsState(ctx context.Context, store *cache.SQLiteStore,
 	}
 	policy, err := repositorydocs.InspectPolicy(ctx, repo, repositorydocs.PolicyRequest{RepoID: entry.RepoID})
 	if err != nil {
+		failure = "policy"
 		state.State = "degraded"
 		state.LastErrorClass = maintenanceJobErrorClass(err, "repository_docs_policy_invalid")
 		state.LastError = "repository documentation policy cannot be resolved"
@@ -2875,6 +2886,7 @@ func reconcileRepositoryDocsState(ctx context.Context, store *cache.SQLiteStore,
 	state.LastErrorClass = state.Stage.LastErrorClass
 	state.LastError = state.Stage.LastError
 	if !policy.Policy.Policy.Enabled {
+		result, failure = "disabled", ""
 		state.State = "disabled"
 		state.RevisionSetID = ""
 		return false
@@ -2886,11 +2898,13 @@ func reconcileRepositoryDocsState(ctx context.Context, store *cache.SQLiteStore,
 		ChunkPolicyID: repositorydocs.DefaultChunkPolicyID, Limit: 20,
 	})
 	if err != nil {
+		failure = "revision_set"
 		state.State = "degraded"
 		state.LastErrorClass = "repository_docs_status_failed"
 		state.LastError = "repository documentation index state is unavailable"
 		return false
 	}
+	result, failure = "succeeded", ""
 	for _, set := range sets {
 		if set.State == cache.RepoDocSetReady {
 			state.State = "ready"
@@ -3577,8 +3591,12 @@ func cloneMaintenanceEntry(entry *MaintenanceEntry) MaintenanceEntry {
 	copy.Frontiers = append([]cache.MaintenanceFrontier(nil), entry.Frontiers...)
 	copy.ActiveJobs = append([]string(nil), entry.ActiveJobs...)
 	copy.RepositoryDocsSources = append([]RepositoryDocsMaintenanceState(nil), entry.RepositoryDocsSources...)
+	for i := range copy.RepositoryDocsSources {
+		copy.RepositoryDocsSources[i].Inspection = copy.RepositoryDocsSources[i].Inspection.public()
+	}
 	if entry.RepositoryDocs != nil {
 		repositoryDocs := *entry.RepositoryDocs
+		repositoryDocs.Inspection = repositoryDocs.Inspection.public()
 		copy.RepositoryDocs = &repositoryDocs
 	}
 	copy.cachePath = ""
@@ -3595,6 +3613,7 @@ func cloneMaintenanceEntryForSource(entry *MaintenanceEntry, source *repositoryD
 		return copy
 	}
 	state := source.State
+	state.Inspection = state.Inspection.public()
 	copy.RepositoryDocs = &state
 	return copy
 }

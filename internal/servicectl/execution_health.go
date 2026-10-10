@@ -11,8 +11,8 @@ import (
 // locks are held. Ref hashing, grouping and public projection happen afterwards.
 // Neither private Error nor progress/source text is copied.
 type healthAuthorityRecord struct {
-	cache, repo, registration, source, job, kind, collection, signal, reason string
-	at, lastSuccess, retry                                                   time.Time
+	cache, repo, registration, source, job, kind, collection, phase, signal, reason, coverage string
+	at, lastSuccess, retry                                                                    time.Time
 }
 
 func boundedHealthIdentity(r healthAuthorityRecord) bool {
@@ -110,6 +110,9 @@ func (m *MaintenanceManager) ExecutionHealth(at time.Time) observability.Executi
 			continue
 		}
 		base := healthAuthorityRecord{cache: job.CacheUUID, repo: job.RepoID, registration: job.RegistrationID, source: job.SourceRegistrationID, job: job.ID, kind: metricWorkKind(job.Type), collection: "other", at: job.UpdatedAt, reason: healthFailureReason(job.ErrorClass)}
+		if job.Type == RepositoryDocsIndexJobType {
+			base.phase = "indexing"
+		}
 		if jobActiveStatus(job.Status) && boundedHealthIdentity(base) {
 			active[retryCohort{job.CacheUUID, job.RepoID, job.Type, job.SourceRegistrationID}] = true
 		}
@@ -224,8 +227,15 @@ func (m *MaintenanceManager) ExecutionHealth(at time.Time) observability.Executi
 		}
 		// Automatic authority blocking disables admission, not the fault.
 		// Explicit user-disable uses state "disabled" and adds no failure.
+		// A classless aggregate degraded state can be derived solely from a
+		// source. Defer that generic record until the source owner is visited.
+		aggregateSourceFault := entry.State == "degraded" && entry.LastErrorClass == "" && entry.Enabled
+		hasDegradedSource := false
 		switch entry.State {
 		case "cache_schema_blocked", "config_snapshot_invalid", "identity_conflict", "identity_unresolved", "cache_inspection_timeout", "cache_clone_conflict", "degraded":
+			if aggregateSourceFault {
+				break
+			}
 			r := base
 			r.kind = "maintenance"
 			r.at = entry.LastReconciledAt
@@ -245,6 +255,9 @@ func (m *MaintenanceManager) ExecutionHealth(at time.Time) observability.Executi
 			running := boundedHealthIdentity(identity) && active[retryCohort{entry.CacheUUID, entry.RepoID, jobType, source}]
 			r := base
 			r.kind, r.source, r.job, r.at = kind, source, stage.LastJobID, stage.UpdatedAt
+			if kind == "repository_docs" {
+				r.phase = "indexing"
+			}
 			r.reason = healthFailureReason(stage.LastErrorClass)
 			if stage.Status == JobStatusSucceeded && stage.ConsecutiveFailures == 0 {
 				r.signal, r.reason = "succeeded", "succeeded"
@@ -264,6 +277,48 @@ func (m *MaintenanceManager) ExecutionHealth(at time.Time) observability.Executi
 				add(r)
 			}
 		}
+		sourceRecord := func(source RepositoryDocsMaintenanceState) {
+			// User-disabled corpus policy and current cancellation tombstones
+			// suppress inactive work, but a stale indexing success never
+			// establishes source availability or inspection recovery.
+			if source.State == "disabled" || source.Inspection.Result == "disabled" && source.Inspection.valid() {
+				return
+			}
+			stageRecord(source.Stage, "repository_docs", RepositoryDocsIndexJobType, source.SourceRegistrationID)
+			r := base
+			r.kind, r.source, r.phase = "repository_docs", source.SourceRegistrationID, "inspection"
+			s := source.Inspection
+			if s.Result == "" {
+				r.coverage = "partial"
+				if class := legacyInspectionFailure(source.LastErrorClass); source.State == "degraded" && class != "" {
+					r.at, r.signal, r.reason = source.UpdatedAt, "failed", inspectionHealthReason(class)
+				} else {
+					r.signal, r.reason = "unknown", "source_inspection_unobserved"
+				}
+				add(r)
+				return
+			}
+			if !s.valid() {
+				// Malformed retained authority is explicitly incomplete, not a
+				// future/fabricated successful timestamp or healthy empty.
+				r.signal, r.reason = "unknown", "source_inspection_unobserved"
+				add(r)
+				return
+			}
+			if !s.LastFailureAt.IsZero() {
+				r.signal, r.reason, r.at = "failed", inspectionHealthReason(s.LastFailureClass), s.FirstFailureAt
+				r.lastSuccess = s.LastSuccessAt
+				add(r)
+				if !s.LastFailureAt.Equal(s.FirstFailureAt) {
+					r.at = s.LastFailureAt
+					add(r)
+				}
+			}
+			if !s.LastSuccessAt.IsZero() {
+				r.at, r.signal, r.reason = s.LastSuccessAt, "succeeded", "succeeded"
+				add(r)
+			}
+		}
 		if entry.Policy.SyncEnabled {
 			stageRecord(entry.SyncStage, "sync", SyncJobType, "")
 		}
@@ -276,23 +331,31 @@ func (m *MaintenanceManager) ExecutionHealth(at time.Time) observability.Executi
 					break
 				}
 				if source != nil {
+					hasDegradedSource = hasDegradedSource || source.State.State == "degraded"
 					cancelled, available := m.retrySourceCancelledLocked(registration, entry, source.State.SourceRegistrationID)
 					if !available {
 						limited = true
 						break
 					}
 					if !cancelled {
-						stageRecord(source.State.Stage, "repository_docs", RepositoryDocsIndexJobType, source.State.SourceRegistrationID)
+						sourceRecord(source.State)
 					}
 				}
 			}
 		} else if source := entry.RepositoryDocs; source != nil {
+			hasDegradedSource = source.State == "degraded"
 			cancelled, available := m.retrySourceCancelledLocked(registration, entry, source.SourceRegistrationID)
 			if !available {
 				limited = true
 			} else if !cancelled {
-				stageRecord(source.Stage, "repository_docs", RepositoryDocsIndexJobType, source.SourceRegistrationID)
+				sourceRecord(*source)
 			}
+		}
+		if aggregateSourceFault && !hasDegradedSource {
+			r := base
+			r.kind, r.at = "maintenance", entry.LastReconciledAt
+			r.signal, r.reason = "failed", healthFailureReason(entry.LastErrorClass)
+			add(r)
 		}
 	}
 	m.jobs.mu.Unlock()
@@ -305,9 +368,12 @@ func (m *MaintenanceManager) ExecutionHealth(at time.Time) observability.Executi
 		var cohort observability.Ref
 		if boundedHealthIdentity(r) {
 			key := strings.Join([]string{r.kind, r.cache, r.repo, r.registration, r.source, r.collection}, "\x00")
+			if r.phase == "inspection" {
+				key += "\x00inspection"
+			}
 			cohort = observability.KnownRef("correlation", key)
 		}
-		evidence = append(evidence, observability.HealthEvidence{Cohort: cohort, Origin: r.kind, Collection: r.collection, Signal: r.signal, Reason: r.reason, At: r.at, LastSuccess: r.lastSuccess, RetryAfter: r.retry,
+		evidence = append(evidence, observability.HealthEvidence{Cohort: cohort, Origin: r.kind, Collection: r.collection, Phase: r.phase, Signal: r.signal, Reason: r.reason, Coverage: r.coverage, At: r.at, LastSuccess: r.lastSuccess, RetryAfter: r.retry,
 			Refs: observability.Context{Job: observability.KnownRef("job", r.job), Registration: observability.KnownRef("registration", r.registration), Cache: observability.KnownRef("cache", r.cache), Repo: observability.KnownRef("repo", r.repo)}})
 	}
 	return observability.ProjectExecutionHealth(at, evidence)

@@ -345,6 +345,26 @@ evidence; an older collection problem cannot represent a later checkpoint
 rejection. Automatic cache
 inspection timeouts and clone conflicts also remain visible admission faults.
 
+Repository-document source inspection has an independent `inspection` health
+cohort; indexing jobs/stages have `indexing` phase and cannot recover that
+cohort at any timestamp. The existing source registration retains one
+fixed-size inspection episode: last result/attempt/success, first/last failure
+and a closed Git-store/policy/revision-set category. The real reconcile owner
+records its completion clock and the existing registry write persists it.
+No observation reader performs Git/cache I/O or updates this authority.
+Successful inspection is not index readiness or embedding success. Only a
+strictly later inspection success recovers the retained episode; a new failure
+after recovery begins a new episode, not an unbounded history of all failures.
+Legacy/unobserved or inconsistent summary state is explicitly partial/unknown;
+recognized current legacy inspection faults remain active with partial history.
+An older/equal/newer indexing success cannot hide them. Canonical source maps
+replace the singleton projection. Current physical-authority cancellation
+tombstones and explicit registration/corpus disable suppress intentionally
+inactive work; an old cancelled indexing stage alone is not a cancellation of
+a new inspection. Source records share the evidence budget and active-first
+128-cohort bound. O3 transport selectors and O4 Admin must expose these phases
+before the complete observability cohort is released.
+
 Daemon-owned execution carries the concrete metric sink in a private context
 value without changing cancellation or deadlines. GitCode provider attempts
 are one actual policy-loop HTTP Client.Do invocation plus its bounded response
